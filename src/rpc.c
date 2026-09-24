@@ -1049,12 +1049,15 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 {
 	int ret;
 
+	ret = tr_rpc_endpoint_get(endpoint);
+	if (ret != TR_OK)
+		return ret;
+
 	call->task_refs++;
-	endpoint->executor_task_refs++;
 	ret = tr_rpc_executor_push(endpoint, task);
 	if (ret != TR_OK) {
 		call->task_refs--;
-		endpoint->executor_task_refs--;
+		tr_rpc_endpoint_put(endpoint);
 	}
 	return ret;
 }
@@ -1069,14 +1072,13 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 		    call->generation == handle.generation) {
 			if (call->task_refs != 0)
 				call->task_refs--;
-			if (endpoint->executor_task_refs != 0)
-				endpoint->executor_task_refs--;
-			if (endpoint->executor_task_refs == 0)
-				pthread_cond_broadcast(&endpoint->task_cond);
 			tr_rpc_maybe_free_call_locked(call);
 		}
 	}
 	pthread_mutex_unlock(&endpoint->lock);
+
+	/* Every successfully queued task owns one endpoint reference. */
+	tr_rpc_endpoint_put(endpoint);
 }
 
 static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
