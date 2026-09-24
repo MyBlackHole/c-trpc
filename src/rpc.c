@@ -197,6 +197,7 @@ struct tr_rpc_endpoint {
 	 TR_RPC_METADATA_RESERVED_TIMEOUT_LEN + 8U)
 
 static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status);
+static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint);
 static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint);
@@ -1958,7 +1959,7 @@ static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint)
 		(void)tr_maintenance_arm(endpoint->deadline_maintenance,
 					 earliest);
 	} else if (endpoint->deadline_started) {
-		tr_rpc_deadline_changed_locked(endpoint);
+		pthread_cond_signal(&endpoint->deadline_cond);
 	}
 }
 
