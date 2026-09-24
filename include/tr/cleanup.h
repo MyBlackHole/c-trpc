@@ -1,6 +1,8 @@
 #ifndef TR_CLEANUP_H
 #define TR_CLEANUP_H
 
+#include <stddef.h>
+
 /*
  * c-trpc uses ISO C11 as its language baseline. Scope cleanup is the one
  * intentionally required compiler extension: GCC and Clang both support the
