@@ -37,8 +37,8 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 void tr_buffer_release(struct tr_buffer *buffer);
 
 /*
- * Scope-owned buffers are automatically returned to their pool. Use
- * tr_buffer_take() only when ownership is explicitly transferred outward.
+ * scope-owned buffer 离开作用域时会自动归还所属 pool。
+ * 只有明确需要把 ownership 转移到当前作用域之外时，才调用 tr_buffer_take()。
  */
 TR_DEFINE_PTR_OWNERSHIP(tr_buffer, struct tr_buffer, tr_buffer_release)
 
