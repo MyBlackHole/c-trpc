@@ -13,6 +13,7 @@
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"
+#include "rpc_internal.h"
 
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
@@ -39,6 +40,7 @@ struct tr_server {
 	struct tr_server_config config;
 
 	struct tr_reactor *reactor;
+	struct tr_rpc_executor_group *rpc_executor_group;
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
 	int rpc_pool_ready;
@@ -328,7 +330,9 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	rpc_config.executor_queue_capacity =
 		server->config.limits.executor_queue_capacity;
 
-	ret = tr_rpc_endpoint_create(peer->channel, &rpc_config, &peer->rpc);
+	ret = tr_rpc_endpoint_create_with_executor_group(
+		peer->channel, &rpc_config, server->rpc_executor_group,
+		&peer->rpc);
 	if (ret != TR_OK)
 		goto fail_channel;
 
@@ -474,6 +478,12 @@ int tr_server_create(const struct tr_server_config *config,
 		goto fail;
 	server->reassembly_pool_ready = 1;
 
+	ret = tr_rpc_executor_group_create(
+		effective.max_peers, effective.limits.max_calls,
+		effective.limits.executor_threads, &server->rpc_executor_group);
+	if (ret != TR_OK)
+		goto fail;
+
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = effective.max_peers + 4U;
 	reactor_config.command_capacity = effective.limits.command_capacity;
@@ -502,6 +512,8 @@ int tr_server_create(const struct tr_server_config *config,
 fail:
 	if (server->reactor)
 		tr_reactor_destroy(server->reactor);
+	if (server->rpc_executor_group)
+		tr_rpc_executor_group_destroy(server->rpc_executor_group);
 	if (server->reassembly_pool_ready)
 		tr_buffer_pool_destroy(&server->reassembly_pool);
 	if (server->rpc_pool_ready)
@@ -741,6 +753,8 @@ void tr_server_destroy(struct tr_server *server)
 
 	if (server->reactor)
 		tr_reactor_destroy(server->reactor);
+	if (server->rpc_executor_group)
+		tr_rpc_executor_group_destroy(server->rpc_executor_group);
 	if (server->reassembly_pool_ready)
 		tr_buffer_pool_destroy(&server->reassembly_pool);
 	if (server->rpc_pool_ready)
