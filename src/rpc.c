@@ -1511,7 +1511,8 @@ static void tr_rpc_executor_cleanup(struct tr_rpc_executor *executor)
 }
 
 static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
-				uint32_t capacity)
+				uint32_t capacity,
+				struct tr_rpc_executor_group *group)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
 	uint32_t thread_count;
@@ -1540,16 +1541,18 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		return TR_ERR_INVALID;
 	}
 
-	executor->threads =
-		(pthread_t *)calloc(thread_count, sizeof(*executor->threads));
+	executor->group = group;
+	if (!group)
+		executor->threads =
+			(pthread_t *)calloc(thread_count, sizeof(*executor->threads));
 	executor->nodes = (struct tr_rpc_executor_node *)calloc(
 		capacity, sizeof(*executor->nodes));
 	executor->callq = (struct tr_rpc_executor_callq *)calloc(
 		endpoint->config.max_calls, sizeof(*executor->callq));
 	executor->ready_calls = (uint32_t *)calloc(
 		endpoint->config.max_calls, sizeof(*executor->ready_calls));
-	if (!executor->threads || !executor->nodes || !executor->callq ||
-	    !executor->ready_calls) {
+	if ((!group && !executor->threads) || !executor->nodes ||
+	    !executor->callq || !executor->ready_calls) {
 		tr_rpc_executor_cleanup(executor);
 		pthread_cond_destroy(&executor->cond);
 		pthread_mutex_destroy(&executor->lock);
@@ -1557,7 +1560,7 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 	}
 
 	executor->capacity = capacity;
-	executor->thread_count = thread_count;
+	executor->thread_count = group ? group->thread_count : thread_count;
 	executor->ready_capacity = endpoint->config.max_calls;
 	executor->free_head = capacity ? 0U : TR_RPC_EXEC_NONE;
 
@@ -1568,6 +1571,9 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		executor->callq[i].head = TR_RPC_EXEC_NONE;
 		executor->callq[i].tail = TR_RPC_EXEC_NONE;
 	}
+
+	if (group)
+		return TR_OK;
 
 	for (i = 0; i < thread_count; ++i) {
 		if (pthread_create(&executor->threads[i], NULL,
@@ -1591,26 +1597,138 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
+static void tr_rpc_executor_wait_idle(struct tr_rpc_endpoint *endpoint)
+{
+	pthread_mutex_lock(&endpoint->lock);
+	while (endpoint->executor_task_refs != 0)
+		pthread_cond_wait(&endpoint->task_cond, &endpoint->lock);
+	pthread_mutex_unlock(&endpoint->lock);
+}
+
 static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
 	uint32_t i;
 
-	if (executor->started_threads == 0)
-		return;
+	if (!executor->group) {
+		pthread_mutex_lock(&executor->lock);
+		executor->stopping = 1;
+		pthread_cond_broadcast(&executor->cond);
+		pthread_mutex_unlock(&executor->lock);
 
-	pthread_mutex_lock(&executor->lock);
-	executor->stopping = 1;
-	pthread_cond_broadcast(&executor->cond);
-	pthread_mutex_unlock(&executor->lock);
-
-	for (i = 0; i < executor->started_threads; ++i)
-		(void)pthread_join(executor->threads[i], NULL);
-	executor->started_threads = 0;
+		for (i = 0; i < executor->started_threads; ++i)
+			(void)pthread_join(executor->threads[i], NULL);
+		executor->started_threads = 0;
+	} else {
+		pthread_mutex_lock(&executor->lock);
+		executor->stopping = 1;
+		pthread_mutex_unlock(&executor->lock);
+	}
 
 	tr_rpc_executor_cleanup(executor);
 	pthread_cond_destroy(&executor->cond);
 	pthread_mutex_destroy(&executor->lock);
+}
+
+int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
+				 uint32_t max_calls_per_endpoint,
+				 uint32_t thread_count,
+				 struct tr_rpc_executor_group **out)
+{
+	struct tr_rpc_executor_group *group;
+	uint64_t total_calls;
+	uint32_t i;
+
+	if (!out || endpoint_capacity == 0 || max_calls_per_endpoint == 0)
+		return TR_ERR_INVALID;
+	*out = NULL;
+
+	total_calls = (uint64_t)endpoint_capacity * max_calls_per_endpoint;
+	if (total_calls == 0)
+		return TR_ERR_INVALID;
+
+	if (thread_count == 0)
+		thread_count = total_calls < 4U ? (uint32_t)total_calls : 4U;
+	if ((uint64_t)thread_count > total_calls)
+		thread_count = (uint32_t)total_calls;
+	if (thread_count == 0)
+		thread_count = 1U;
+
+	group = (struct tr_rpc_executor_group *)calloc(1, sizeof(*group));
+	if (!group)
+		return TR_ERR_NOMEM;
+
+	if (pthread_mutex_init(&group->lock, NULL) != 0) {
+		free(group);
+		return TR_ERR_INVALID;
+	}
+	if (pthread_cond_init(&group->cond, NULL) != 0) {
+		pthread_mutex_destroy(&group->lock);
+		free(group);
+		return TR_ERR_INVALID;
+	}
+
+	group->threads =
+		(pthread_t *)calloc(thread_count, sizeof(*group->threads));
+	group->ready_endpoints = (struct tr_rpc_endpoint **)calloc(
+		endpoint_capacity, sizeof(*group->ready_endpoints));
+	if (!group->threads || !group->ready_endpoints) {
+		free(group->ready_endpoints);
+		free(group->threads);
+		pthread_cond_destroy(&group->cond);
+		pthread_mutex_destroy(&group->lock);
+		free(group);
+		return TR_ERR_NOMEM;
+	}
+
+	group->capacity = endpoint_capacity;
+	group->thread_count = thread_count;
+
+	for (i = 0; i < thread_count; ++i) {
+		if (pthread_create(&group->threads[i], NULL,
+				   tr_rpc_executor_group_main, group) != 0) {
+			uint32_t j;
+
+			pthread_mutex_lock(&group->lock);
+			group->stopping = 1;
+			pthread_cond_broadcast(&group->cond);
+			pthread_mutex_unlock(&group->lock);
+			for (j = 0; j < group->started_threads; ++j)
+				(void)pthread_join(group->threads[j], NULL);
+			free(group->ready_endpoints);
+			free(group->threads);
+			pthread_cond_destroy(&group->cond);
+			pthread_mutex_destroy(&group->lock);
+			free(group);
+			return TR_ERR_SYS;
+		}
+		group->started_threads++;
+	}
+
+	*out = group;
+	return TR_OK;
+}
+
+void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
+{
+	uint32_t i;
+
+	if (!group)
+		return;
+
+	pthread_mutex_lock(&group->lock);
+	group->stopping = 1;
+	pthread_cond_broadcast(&group->cond);
+	pthread_mutex_unlock(&group->lock);
+
+	for (i = 0; i < group->started_threads; ++i)
+		(void)pthread_join(group->threads[i], NULL);
+
+	free(group->ready_endpoints);
+	free(group->threads);
+	pthread_cond_destroy(&group->cond);
+	pthread_mutex_destroy(&group->lock);
+	free(group);
 }
 
 static int tr_rpc_queue_client_event_locked(struct tr_rpc_endpoint *endpoint,
