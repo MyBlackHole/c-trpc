@@ -242,6 +242,18 @@ static void tr_client_reset_session(struct tr_client *client)
 	client->connected = 0;
 }
 
+struct tr_client_session_guard {
+	struct tr_client *client;
+	int armed;
+};
+
+static void
+tr_client_session_guard_cleanup(struct tr_client_session_guard *guard)
+{
+	if (guard && guard->armed && guard->client)
+		tr_client_reset_session(guard->client);
+}
+
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port)
 {
@@ -249,6 +261,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_channel_keepalive_config keepalive_config;
+	struct tr_client_session_guard session
+		TR_AUTO(tr_client_session_guard_cleanup) = { client, 0 };
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
 
@@ -266,6 +280,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	if (ret != TR_OK)
 		return ret;
 	(void)tr_fd_take(&fd);
+	session.armed = 1;
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
@@ -283,7 +298,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 				client->connection, NULL, NULL, NULL, NULL,
 				&client->channel);
 	if (ret != TR_OK)
-		goto fail_session;
+		return ret;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_CLIENT;
@@ -297,7 +312,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	ret = tr_rpc_endpoint_create(client->channel, &rpc_config,
 				     &client->rpc);
 	if (ret != TR_OK)
-		goto fail_session;
+		return ret;
 
 	/*
 	 * Complete the initial HELLO handshake before starting maintenance
@@ -306,7 +321,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	 */
 	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
 	if (ret != TR_OK)
-		goto fail_session;
+		return ret;
 
 	if (client->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -316,7 +331,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_keepalive(client->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			goto fail_session;
+			return ret;
 	}
 
 	if (client->config.enable_reconnect) {
@@ -333,15 +348,12 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_client_reconnect(client->channel,
 							 &reconnect_config);
 		if (ret != TR_OK)
-			goto fail_session;
+			return ret;
 	}
 
 	client->connected = 1;
+	session.armed = 0;
 	return TR_OK;
-
-fail_session:
-	tr_client_reset_session(client);
-	return ret;
 }
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
