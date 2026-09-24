@@ -8,6 +8,7 @@
 #include "tr/status.h"
 #include "tr/wire.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -26,6 +27,24 @@
 #define TR_COMMAND_BATCH 64U
 #define TR_TX_READY_BATCH 64U
 #define TR_WAKE_TOKEN UINT64_MAX
+
+/*
+ * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
+ * 外部线程不会写该 TLS，因此 owner 校验不需要 mutex/atomic。
+ */
+static _Thread_local struct tr_reactor *tr_current_reactor_owner;
+
+static int tr_reactor_is_owner_thread(const struct tr_reactor *reactor)
+{
+	return reactor && tr_current_reactor_owner == reactor;
+}
+
+#ifndef NDEBUG
+#define TR_ASSERT_REACTOR_OWNER(reactor) \
+	assert(tr_reactor_is_owner_thread((reactor)))
+#else
+#define TR_ASSERT_REACTOR_OWNER(reactor) ((void)(reactor))
+#endif
 
 struct tr_tx_pool;
 
@@ -449,6 +468,8 @@ static int tr_connection_update_interest(struct tr_reactor *reactor,
 					 struct tr_connection *connection)
 {
 	struct epoll_event event;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
 	uint32_t events;
 
 	events = tr_connection_interest(connection);
@@ -564,6 +585,8 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 					 enum tr_connection_event event,
 					 int status)
 {
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
 	if (!connection || connection->state != TR_CONN_ACTIVE)
 		return;
 
@@ -592,6 +615,8 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 			       uint32_t generation, int fd)
 {
 	struct tr_connection *connection;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
 	struct epoll_event event;
 	struct tr_wire_limits limits;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
@@ -914,6 +939,8 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 			      struct tr_frame *frame)
 {
 	enum tr_frame_disposition disposition = TR_FRAME_RELEASE;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
 	struct tr_conn_handle handle;
 
 	handle.reactor = reactor;
@@ -1199,6 +1226,8 @@ static void tr_process_commands(struct tr_reactor *reactor)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
 
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
 	for (;;) {
 		size_t count;
 		size_t i;
@@ -1297,6 +1326,9 @@ static void *tr_reactor_thread_main(void *arg)
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
 
+	assert(tr_current_reactor_owner == NULL);
+	tr_current_reactor_owner = reactor;
+
 	while (!reactor->stopping) {
 		int timeout = reactor->tx_ready_head ? 0 : -1;
 		int count;
@@ -1334,6 +1366,7 @@ static void *tr_reactor_thread_main(void *arg)
 	}
 
 	tr_cleanup_connections(reactor);
+	tr_current_reactor_owner = NULL;
 	return NULL;
 }
 
@@ -1737,7 +1770,7 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 	 * 已经位于 Reactor owner thread 时直接修改 connection 状态，
 	 * 避免同步 command 对自己形成自等待。
 	 */
-	if (reactor->started && pthread_equal(pthread_self(), reactor->thread)) {
+	if (tr_reactor_is_owner_thread(reactor)) {
 		struct tr_connection *conn =
 			tr_lookup_connection(reactor, connection.slot,
 					     connection.generation);
@@ -1823,7 +1856,7 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 		pthread_mutex_destroy(&sync.lock);
 		return TR_OK;
 	}
-	if (pthread_equal(pthread_self(), reactor->thread)) {
+	if (tr_reactor_is_owner_thread(reactor)) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		pthread_cond_destroy(&sync.cond);
 		pthread_mutex_destroy(&sync.lock);
