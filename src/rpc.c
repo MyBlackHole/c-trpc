@@ -2467,9 +2467,9 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 	pthread_mutex_unlock(&endpoint->lock);
 }
 
-int tr_rpc_endpoint_create(struct tr_channel *channel,
-			   const struct tr_rpc_endpoint_config *config,
-			   struct tr_rpc_endpoint **out)
+int tr_rpc_endpoint_create_with_executor_group(
+	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
+	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out)
 {
 	struct tr_rpc_endpoint *endpoint;
 	int ret;
@@ -2488,6 +2488,11 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 		free(endpoint);
 		return TR_ERR_INVALID;
 	}
+	if (pthread_cond_init(&endpoint->task_cond, NULL) != 0) {
+		pthread_mutex_destroy(&endpoint->lock);
+		free(endpoint);
+		return TR_ERR_INVALID;
+	}
 
 	endpoint->methods = (struct tr_rpc_method_entry *)calloc(
 		config->max_methods, sizeof(*endpoint->methods));
@@ -2496,6 +2501,7 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 	if (!endpoint->methods || !endpoint->calls) {
 		free(endpoint->calls);
 		free(endpoint->methods);
+		pthread_cond_destroy(&endpoint->task_cond);
 		pthread_mutex_destroy(&endpoint->lock);
 		free(endpoint);
 		return TR_ERR_NOMEM;
@@ -2508,7 +2514,8 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 	if (ret != TR_OK)
 		goto fail;
 
-	ret = tr_rpc_executor_init(endpoint, config->executor_queue_capacity);
+	ret = tr_rpc_executor_init(endpoint, config->executor_queue_capacity,
+				   group);
 	if (ret != TR_OK) {
 		tr_rpc_deadline_destroy(endpoint);
 		goto fail;
@@ -2529,9 +2536,18 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 fail:
 	free(endpoint->calls);
 	free(endpoint->methods);
+	pthread_cond_destroy(&endpoint->task_cond);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
 	return ret;
+}
+
+int tr_rpc_endpoint_create(struct tr_channel *channel,
+			   const struct tr_rpc_endpoint_config *config,
+			   struct tr_rpc_endpoint **out)
+{
+	return tr_rpc_endpoint_create_with_executor_group(channel, config, NULL,
+							 out);
 }
 
 void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
@@ -2549,6 +2565,13 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 	 */
 	(void)tr_channel_quiesce(endpoint->channel);
 	tr_rpc_deadline_destroy(endpoint);
+
+	/*
+	 * Shared executor workers outlive individual server peers. task_refs keep
+	 * the endpoint alive while queued/running callbacks still reference it.
+	 */
+	if (endpoint->executor.group)
+		tr_rpc_executor_wait_idle(endpoint);
 	tr_rpc_executor_destroy(endpoint);
 
 	pthread_mutex_lock(&endpoint->lock);
@@ -2558,6 +2581,7 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 
 	free(endpoint->calls);
 	free(endpoint->methods);
+	pthread_cond_destroy(&endpoint->task_cond);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
 }
