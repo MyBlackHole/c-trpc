@@ -231,6 +231,27 @@ fail:
 	return ret;
 }
 
+static void tr_client_reset_session(struct tr_client *client)
+{
+	if (!client)
+		return;
+
+	if (client->connection.reactor)
+		(void)tr_reactor_close(client->connection);
+
+	if (client->rpc) {
+		tr_rpc_endpoint_destroy(client->rpc);
+		client->rpc = NULL;
+	}
+	if (client->channel) {
+		tr_channel_destroy(client->channel);
+		client->channel = NULL;
+	}
+
+	memset(&client->connection, 0, sizeof(client->connection));
+	client->connected = 0;
+}
+
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port)
 {
@@ -273,7 +294,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 				client->connection, NULL, NULL, NULL, NULL,
 				&client->channel);
 	if (ret != TR_OK)
-		goto fail_connection;
+		goto fail_session;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_CLIENT;
@@ -286,10 +307,17 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 
 	ret = tr_rpc_endpoint_create(client->channel, &rpc_config,
 				     &client->rpc);
-	if (ret != TR_OK) {
-		(void)tr_reactor_close(client->connection);
-		return ret;
-	}
+	if (ret != TR_OK)
+		goto fail_session;
+
+	/*
+	 * Complete the initial HELLO handshake before starting maintenance
+	 * threads. This keeps failed connect attempts rollback-safe: the original
+	 * connection cannot be replaced by reconnect while teardown is running.
+	 */
+	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
+	if (ret != TR_OK)
+		goto fail_session;
 
 	if (client->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -299,7 +327,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_keepalive(client->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			return ret;
+			goto fail_session;
 	}
 
 	if (client->config.enable_reconnect) {
@@ -316,19 +344,14 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_client_reconnect(client->channel,
 							 &reconnect_config);
 		if (ret != TR_OK)
-			return ret;
+			goto fail_session;
 	}
-
-	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
-	if (ret != TR_OK)
-		return ret;
 
 	client->connected = 1;
 	return TR_OK;
 
-fail_connection:
-	(void)tr_reactor_close(client->connection);
-	memset(&client->connection, 0, sizeof(client->connection));
+fail_session:
+	tr_client_reset_session(client);
 	return ret;
 }
 

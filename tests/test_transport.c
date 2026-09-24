@@ -3787,7 +3787,7 @@ static void test_client_server_facade_unary(void)
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
 
 	tr_server_config_init(&server_config);
-	server_config.max_peers = 4U;
+	server_config.max_peers = 1U;
 	server_config.keepalive_interval_ms = 0U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
@@ -3816,6 +3816,7 @@ static void test_client_server_facade_unary(void)
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 100U;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
@@ -3843,6 +3844,45 @@ static void test_client_server_facade_unary(void)
 	assert(memcmp(ctx.request, "facade-ping", 11U) == 0);
 	assert(ctx.response_len == 11U);
 	assert(memcmp(ctx.response, "facade-pong", 11U) == 0);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/*
+	 * max_peers=1 verifies that a disconnected peer is reclaimed at runtime.
+	 * Reuse one client object across transient connect rejection as well: a
+	 * failed connect attempt must roll all session state back to INIT.
+	 */
+	tr_client_destroy(client);
+	client = NULL;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	{
+		unsigned attempt;
+		for (attempt = 0; attempt < 100U; ++attempt) {
+			ret = tr_client_connect(client, "127.0.0.1", port);
+			if (ret == TR_OK)
+				break;
+			assert(ret != TR_ERR_STATE);
+			{
+				struct timespec pause_time;
+				pause_time.tv_sec = 0;
+				pause_time.tv_nsec = 10000000L;
+				nanosleep(&pause_time, NULL);
+			}
+		}
+		assert(ret == TR_OK);
+	}
+	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_unary_call(client, 77U, 1U, &request,
+				    facade_test_result, &ctx, &call) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	ret = 0;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.client_results < 2U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ctx.server_calls == 2U);
+	assert(ctx.client_results == 2U);
+	assert(ctx.client_status == TR_RPC_STATUS_OK);
 	pthread_mutex_unlock(&ctx.lock);
 
 	{

@@ -15,10 +15,12 @@ enum tr_command_type {
 	TR_CMD_RESUME_RX,
 	TR_CMD_CLOSE,
 	TR_CMD_ABORT,
+	TR_CMD_QUIESCE,
 	TR_CMD_STOP
 };
 
 struct tr_tx_item;
+struct tr_reactor_sync;
 
 struct tr_command {
 	uint16_t type;
@@ -38,6 +40,10 @@ struct tr_command {
 		struct {
 			int status;
 		} abort;
+
+		struct {
+			struct tr_reactor_sync *sync;
+		} quiesce;
 	} u;
 };
 

@@ -92,6 +92,12 @@ struct tr_slot {
 	void *callback_arg;
 };
 
+struct tr_reactor_sync {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int done;
+};
+
 struct tr_reactor {
 	struct tr_reactor_config config;
 
@@ -1054,6 +1060,19 @@ static void tr_process_abort(struct tr_reactor *reactor,
 					     command->u.abort.status);
 }
 
+static void tr_process_quiesce(const struct tr_command *command)
+{
+	struct tr_reactor_sync *sync = command->u.quiesce.sync;
+
+	if (!sync)
+		return;
+
+	pthread_mutex_lock(&sync->lock);
+	sync->done = 1;
+	pthread_cond_signal(&sync->cond);
+	pthread_mutex_unlock(&sync->lock);
+}
+
 static void tr_process_commands(struct tr_reactor *reactor)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
@@ -1088,6 +1107,9 @@ static void tr_process_commands(struct tr_reactor *reactor)
 				break;
 			case TR_CMD_ABORT:
 				tr_process_abort(reactor, command);
+				break;
+			case TR_CMD_QUIESCE:
+				tr_process_quiesce(command);
 				break;
 			case TR_CMD_STOP:
 				reactor->stopping = 1;
@@ -1596,6 +1618,73 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 	reactor->slots[connection.slot].callback_arg = callback_arg;
 	pthread_mutex_unlock(&reactor->slot_lock);
 	return TR_OK;
+}
+
+int tr_reactor_quiesce(struct tr_reactor *reactor)
+{
+	struct tr_reactor_sync sync;
+	struct tr_command command;
+	int ret;
+
+	if (!reactor)
+		return TR_ERR_INVALID;
+
+	memset(&sync, 0, sizeof(sync));
+	if (pthread_mutex_init(&sync.lock, NULL) != 0)
+		return TR_ERR_SYS;
+	if (pthread_cond_init(&sync.cond, NULL) != 0) {
+		pthread_mutex_destroy(&sync.lock);
+		return TR_ERR_SYS;
+	}
+
+	memset(&command, 0, sizeof(command));
+	command.type = TR_CMD_QUIESCE;
+	command.u.quiesce.sync = &sync;
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		pthread_cond_destroy(&sync.cond);
+		pthread_mutex_destroy(&sync.lock);
+		return TR_OK;
+	}
+	if (pthread_equal(pthread_self(), reactor->thread)) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		pthread_cond_destroy(&sync.cond);
+		pthread_mutex_destroy(&sync.lock);
+		return TR_ERR_STATE;
+	}
+	if (!reactor->accepting) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		pthread_cond_destroy(&sync.cond);
+		pthread_mutex_destroy(&sync.lock);
+		return TR_ERR_CLOSED;
+	}
+
+	do {
+		ret = tr_reactor_push_locked(reactor, &command);
+		if (ret == TR_AGAIN) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			sched_yield();
+			pthread_mutex_lock(&reactor->ctl_lock);
+			if (!reactor->started || !reactor->accepting) {
+				ret = TR_ERR_CLOSED;
+				break;
+			}
+		}
+	} while (ret == TR_AGAIN);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	if (ret == TR_OK) {
+		pthread_mutex_lock(&sync.lock);
+		while (!sync.done)
+			pthread_cond_wait(&sync.cond, &sync.lock);
+		pthread_mutex_unlock(&sync.lock);
+	}
+
+	pthread_cond_destroy(&sync.cond);
+	pthread_mutex_destroy(&sync.lock);
+	return ret;
 }
 
 int tr_reactor_get_limits(struct tr_reactor *reactor,

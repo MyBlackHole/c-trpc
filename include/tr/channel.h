@@ -164,6 +164,13 @@ int tr_channel_set_handler(struct tr_channel *channel,
 			   void *callback_arg);
 
 /*
+ * Wait until reactor callbacks that may have observed a previous Channel
+ * handler have completed. Call after replacing/clearing an upper-layer
+ * handler and before freeing the old callback owner.
+ */
+int tr_channel_quiesce(struct tr_channel *channel);
+
+/*
  * Replaces a failed physical connection while keeping the logical Channel.
  * Existing Streams on the failed lane never survive replacement; callers must
  * open new Streams/Calls. In shared mode replacing either lane replaces both.

@@ -2235,6 +2235,12 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 		return;
 
 	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
+	/*
+	 * A Channel callback may already have copied endpoint as callback_arg.
+	 * Wait for the reactor thread to cross a lifecycle barrier before freeing
+	 * endpoint-owned state.
+	 */
+	(void)tr_channel_quiesce(endpoint->channel);
 	tr_rpc_deadline_destroy(endpoint);
 	tr_rpc_executor_destroy(endpoint);
 
