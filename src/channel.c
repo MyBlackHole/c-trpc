@@ -1,4 +1,5 @@
 #include "tr/channel.h"
+#include "channel_internal.h"
 
 #include "tr/status.h"
 #include "tr/wire.h"
@@ -61,6 +62,7 @@ struct tr_channel {
 	int bulk_alive;
 	int control_ready;
 	int bulk_ready;
+	int handshake_started;
 	int local_draining;
 	int control_peer_draining;
 	int bulk_peer_draining;
@@ -173,8 +175,8 @@ static uint32_t tr_lane_flag(enum tr_lane lane)
 }
 
 static uint32_t
-tr_channel_connection_lane_mask(const struct tr_channel *channel,
-				struct tr_conn_handle connection)
+tr_channel_connection_lane_mask_locked(const struct tr_channel *channel,
+				       struct tr_conn_handle connection)
 {
 	uint32_t mask = 0;
 
@@ -438,9 +440,9 @@ static int tr_channel_decode_hello_ack(const uint8_t *data, uint32_t len,
 	return TR_OK;
 }
 
-static int tr_channel_local_capabilities(const struct tr_channel *channel,
-					 struct tr_conn_handle connection,
-					 struct tr_channel_capabilities *caps)
+static int tr_channel_local_capabilities(struct tr_channel *channel,
+			      struct tr_conn_handle connection,
+			      struct tr_channel_capabilities *caps)
 {
 	struct tr_reactor_limits limits;
 	int ret;
@@ -451,7 +453,10 @@ static int tr_channel_local_capabilities(const struct tr_channel *channel,
 
 	memset(caps, 0, sizeof(*caps));
 	caps->protocol_version = channel->config.max_protocol_version;
-	caps->lane_mask = tr_channel_connection_lane_mask(channel, connection);
+	pthread_mutex_lock(&channel->lock);
+	caps->lane_mask =
+		tr_channel_connection_lane_mask_locked(channel, connection);
+	pthread_mutex_unlock(&channel->lock);
 	caps->max_frame_payload_bytes = limits.max_payload_len;
 	caps->max_message_bytes =
 		tr_channel_local_max_message(channel, limits.max_payload_len);
@@ -487,6 +492,38 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 	if (ret == TR_OK)
 		(void)tr_buffer_take(&buffer);
 	return ret;
+}
+
+static int
+tr_channel_normalize_create_hello_error(struct tr_channel *channel,
+					 struct tr_conn_handle connection,
+					 int ret)
+{
+	uint32_t mask;
+	int still_alive = 0;
+
+	if (ret == TR_OK)
+		return TR_OK;
+	if (ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
+		return ret;
+
+	/*
+	 * handler 已经安装后，peer 可能在 Channel create 返回前完成协议判定
+	 * 并关闭 connection。create 的既有契约是“构造成功，随后通过 lane DOWN
+	 * 表达协商失败”。先跨过 Reactor quiescence barrier，确保可能的 close
+	 * callback 已完成，再根据 Channel 自身状态判断是否属于该异步关闭。
+	 */
+	(void)tr_reactor_quiesce(channel->reactor);
+
+	pthread_mutex_lock(&channel->lock);
+	mask = tr_channel_connection_lane_mask_locked(channel, connection);
+	if ((mask & TR_CHANNEL_LANE_MASK_CONTROL) && channel->control_alive)
+		still_alive = 1;
+	if ((mask & TR_CHANNEL_LANE_MASK_BULK) && channel->bulk_alive)
+		still_alive = 1;
+	pthread_mutex_unlock(&channel->lock);
+
+	return still_alive ? ret : TR_OK;
 }
 
 static int tr_channel_send_hello_ack(struct tr_channel *channel,
@@ -550,7 +587,7 @@ tr_channel_lane_max_message_locked(const struct tr_channel *channel,
 static int tr_channel_connection_ready_locked(const struct tr_channel *channel,
 					      struct tr_conn_handle connection)
 {
-	uint32_t mask = tr_channel_connection_lane_mask(channel, connection);
+	uint32_t mask = tr_channel_connection_lane_mask_locked(channel, connection);
 
 	if (mask == 0)
 		return 0;
@@ -1080,7 +1117,7 @@ static int tr_channel_handle_goaway(struct tr_channel *channel,
 						 TR_ERR_STATE);
 
 	pthread_mutex_lock(&channel->lock);
-	mask = tr_channel_connection_lane_mask(channel, connection);
+	mask = tr_channel_connection_lane_mask_locked(channel, connection);
 	if ((mask & TR_CHANNEL_LANE_MASK_CONTROL) &&
 	    !channel->control_peer_draining) {
 		channel->control_peer_draining = 1;
@@ -1756,6 +1793,46 @@ static void tr_channel_default_config(struct tr_channel_config *config)
 			config->reassembly_pool->buffer_size;
 }
 
+
+int tr_channel_start(struct tr_channel *channel)
+{
+	struct tr_conn_handle control_connection;
+	struct tr_conn_handle bulk_connection;
+	int split;
+	int ret;
+
+	if (!channel)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->handshake_started) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+
+	channel->handshake_started = 1;
+	control_connection = channel->control_connection;
+	bulk_connection = channel->bulk_connection;
+	split = !tr_conn_equal(control_connection, bulk_connection);
+	pthread_mutex_unlock(&channel->lock);
+
+	ret = tr_channel_send_hello(channel, control_connection);
+	ret = tr_channel_normalize_create_hello_error(
+		channel, control_connection, ret);
+	if (ret != TR_OK)
+		return ret;
+
+	if (split) {
+		ret = tr_channel_send_hello(channel, bulk_connection);
+		ret = tr_channel_normalize_create_hello_error(
+			channel, bulk_connection, ret);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	return TR_OK;
+}
+
 struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
@@ -1807,12 +1884,14 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	build->channel = NULL;
 }
 
-int tr_channel_create(const struct tr_channel_config *config,
+static int tr_channel_create_common(
+		      const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
 		      struct tr_conn_handle bulk_connection,
 		      tr_stream_data_cb data_cb,
 		      tr_stream_event_cb stream_event_cb,
 		      tr_channel_event_cb channel_event_cb, void *callback_arg,
+		      int start_handshake,
 		      struct tr_channel **out)
 {
 	struct tr_channel_build build TR_AUTO(tr_channel_build_cleanup) = { 0 };
@@ -1909,12 +1988,8 @@ int tr_channel_create(const struct tr_channel_config *config,
 		build.bulk_handler_installed = 1;
 	}
 
-	ret = tr_channel_send_hello(channel, control_connection);
-	if (ret != TR_OK)
-		return ret;
-
-	if (!tr_conn_equal(control_connection, bulk_connection)) {
-		ret = tr_channel_send_hello(channel, bulk_connection);
+	if (start_handshake) {
+		ret = tr_channel_start(channel);
 		if (ret != TR_OK)
 			return ret;
 	}
@@ -1922,6 +1997,34 @@ int tr_channel_create(const struct tr_channel_config *config,
 	*out = channel;
 	build.channel = NULL;
 	return TR_OK;
+}
+
+int tr_channel_create(const struct tr_channel_config *config,
+		      struct tr_conn_handle control_connection,
+		      struct tr_conn_handle bulk_connection,
+		      tr_stream_data_cb data_cb,
+		      tr_stream_event_cb stream_event_cb,
+		      tr_channel_event_cb channel_event_cb, void *callback_arg,
+		      struct tr_channel **out)
+{
+	return tr_channel_create_common(config, control_connection,
+					bulk_connection, data_cb, stream_event_cb,
+					channel_event_cb, callback_arg, 1, out);
+}
+
+int tr_channel_create_deferred(
+	const struct tr_channel_config *config,
+	struct tr_conn_handle control_connection,
+	struct tr_conn_handle bulk_connection,
+	tr_stream_data_cb data_cb,
+	tr_stream_event_cb stream_event_cb,
+	tr_channel_event_cb channel_event_cb,
+	void *callback_arg,
+	struct tr_channel **out)
+{
+	return tr_channel_create_common(config, control_connection,
+					bulk_connection, data_cb, stream_event_cb,
+					channel_event_cb, callback_arg, 0, out);
 }
 
 void tr_channel_destroy(struct tr_channel *channel)

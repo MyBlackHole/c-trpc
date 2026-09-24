@@ -118,8 +118,11 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 
 /*
  * 替换一个存活 connection 的回调，主要供 Channel 等上层使用。
- * 传入 NULL 可禁用对应回调。callback_arg 与回调指针在 Reactor slot lock
- * 保护下作为同一组状态更新，避免观察到不一致组合。
+ * 传入 NULL 可禁用对应回调。
+ *
+ * 外部线程调用时，本函数同步提交 SET_HANDLER command，并等待 Reactor owner
+ * thread 应用 frame_cb/event_cb/callback_arg 这一组状态后再返回。
+ * 如果已经位于 Reactor owner thread，则直接修改当前 connection。
  */
 int tr_reactor_set_handler(struct tr_conn_handle connection,
 			   tr_reactor_frame_cb frame_cb,

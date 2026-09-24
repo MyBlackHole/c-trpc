@@ -9,6 +9,7 @@
 
 #include "tr/buffer.h"
 #include "tr/channel.h"
+#include "channel_internal.h"
 #include "tr/reactor.h"
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
@@ -353,9 +354,14 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		server->config.limits.max_message_bytes;
 	channel_config.reassembly_pool = &server->reassembly_pool;
 
-	ret = tr_channel_create(&channel_config, peer->connection,
-				peer->connection, NULL, NULL, NULL, NULL,
-				&peer->channel);
+	/*
+	 * Server 必须先完成 RPC Endpoint/Method 安装，再启动 HELLO。
+	 * 否则 Client 可能先观察到 Channel UP，并在 Server service ready 前
+	 * 发送首条 RPC，导致消息被尚未安装上层 handler 的 Channel 消费。
+	 */
+	ret = tr_channel_create_deferred(&channel_config, peer->connection,
+					 peer->connection, NULL, NULL, NULL, NULL,
+					 &peer->channel);
 	if (ret != TR_OK)
 		return ret;
 
@@ -375,6 +381,10 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		return ret;
 
 	ret = tr_server_register_methods_on_peer(server, peer);
+	if (ret != TR_OK)
+		return ret;
+
+	ret = tr_channel_start(peer->channel);
 	if (ret != TR_OK)
 		return ret;
 

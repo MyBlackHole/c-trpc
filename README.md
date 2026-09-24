@@ -175,7 +175,8 @@ Two real-process examples are built by default:
 ### Runtime
 
 - Linux epoll level-triggered reactor
-- reactor-thread ownership of mutable connection state
+- Reactor thread 独占 mutable connection state；event-loop handler/connection 热路径不依赖 slot mutex
+- slot generation/state 使用 C11 atomic capability metadata，跨线程 handler 更新通过同步 command 提交
 - bounded mutex-protected MPSC command ring
 - eventfd wakeup coalescing
 - generation-based connection handles and stale event rejection

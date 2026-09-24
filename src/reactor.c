@@ -8,9 +8,11 @@
 #include "tr/status.h"
 #include "tr/wire.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +27,24 @@
 #define TR_COMMAND_BATCH 64U
 #define TR_TX_READY_BATCH 64U
 #define TR_WAKE_TOKEN UINT64_MAX
+
+/*
+ * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
+ * 外部线程不会写该 TLS，因此 owner 校验不需要 mutex/atomic。
+ */
+static _Thread_local struct tr_reactor *tr_current_reactor_owner;
+
+static int tr_reactor_is_owner_thread(const struct tr_reactor *reactor)
+{
+	return reactor && tr_current_reactor_owner == reactor;
+}
+
+#ifndef NDEBUG
+#define TR_ASSERT_REACTOR_OWNER(reactor) \
+	assert(tr_reactor_is_owner_thread((reactor)))
+#else
+#define TR_ASSERT_REACTOR_OWNER(reactor) ((void)(reactor))
+#endif
 
 struct tr_tx_pool;
 
@@ -62,6 +82,14 @@ struct tr_connection {
 	uint32_t generation;
 	enum tr_connection_state state;
 
+	/*
+	 * 以下 handler 只允许 Reactor owner thread 修改和读取。
+	 * 外部线程必须通过 TR_CMD_SET_HANDLER 提交变更。
+	 */
+	tr_reactor_frame_cb frame_cb;
+	tr_reactor_event_cb event_cb;
+	void *callback_arg;
+
 	struct tr_parser parser;
 
 	struct tr_tx_item *tx_head;
@@ -87,18 +115,25 @@ struct tr_connection {
 };
 
 struct tr_slot {
-	uint32_t generation;
-	enum tr_connection_state state;
-
-	tr_reactor_frame_cb frame_cb;
-	tr_reactor_event_cb event_cb;
-	void *callback_arg;
+	/*
+	 * capability metadata 允许跨线程读取/预留，但必须通过 C11 atomic
+	 * 一次性更新 generation + state，避免复用 slot 时出现撕裂状态。
+	 */
+	_Atomic uint64_t meta;
 };
 
 struct tr_reactor_sync {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int done;
+	int status;
+};
+
+struct tr_reactor_handler_request {
+	tr_reactor_frame_cb frame_cb;
+	tr_reactor_event_cb event_cb;
+	void *callback_arg;
+	struct tr_reactor_sync sync;
 };
 
 struct tr_reactor {
@@ -109,7 +144,6 @@ struct tr_reactor {
 	pthread_t thread;
 
 	pthread_mutex_t ctl_lock;
-	pthread_mutex_t slot_lock;
 	int started;
 	int accepting;
 	int stopping;
@@ -253,6 +287,58 @@ static int tr_reactor_signal(struct tr_reactor *reactor)
 	return TR_ERR_SYS;
 }
 
+
+static int tr_reactor_sync_init(struct tr_reactor_sync *sync)
+{
+	if (!sync)
+		return TR_ERR_INVALID;
+
+	memset(sync, 0, sizeof(*sync));
+	if (pthread_mutex_init(&sync->lock, NULL) != 0)
+		return TR_ERR_SYS;
+	if (pthread_cond_init(&sync->cond, NULL) != 0) {
+		pthread_mutex_destroy(&sync->lock);
+		return TR_ERR_SYS;
+	}
+	sync->status = TR_OK;
+	return TR_OK;
+}
+
+static void tr_reactor_sync_destroy(struct tr_reactor_sync *sync)
+{
+	if (!sync)
+		return;
+	pthread_cond_destroy(&sync->cond);
+	pthread_mutex_destroy(&sync->lock);
+}
+
+static void tr_reactor_sync_complete(struct tr_reactor_sync *sync, int status)
+{
+	if (!sync)
+		return;
+
+	pthread_mutex_lock(&sync->lock);
+	sync->status = status;
+	sync->done = 1;
+	pthread_cond_signal(&sync->cond);
+	pthread_mutex_unlock(&sync->lock);
+}
+
+static int tr_reactor_sync_wait(struct tr_reactor_sync *sync)
+{
+	int status;
+
+	if (!sync)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&sync->lock);
+	while (!sync->done)
+		pthread_cond_wait(&sync->cond, &sync->lock);
+	status = sync->status;
+	pthread_mutex_unlock(&sync->lock);
+	return status;
+}
+
 static int tr_reactor_push_locked(struct tr_reactor *reactor,
 				  const struct tr_command *command)
 {
@@ -276,33 +362,94 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 	return TR_OK;
 }
 
+static uint64_t tr_slot_meta_make(uint32_t generation,
+				       enum tr_connection_state state)
+{
+	return ((uint64_t)generation << 32) | (uint32_t)state;
+}
+
+static uint32_t tr_slot_meta_generation(uint64_t meta)
+{
+	return (uint32_t)(meta >> 32);
+}
+
+static enum tr_connection_state tr_slot_meta_state(uint64_t meta)
+{
+	return (enum tr_connection_state)(uint32_t)meta;
+}
+
 static int tr_slot_live(struct tr_reactor *reactor, uint32_t slot,
 			uint32_t generation)
 {
-	int live = 0;
+	uint64_t meta;
+	enum tr_connection_state state;
 
 	if (slot >= reactor->config.max_connections)
 		return 0;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[slot].generation == generation &&
-	    (reactor->slots[slot].state == TR_CONN_RESERVED ||
-	     reactor->slots[slot].state == TR_CONN_ACTIVE))
-		live = 1;
-	pthread_mutex_unlock(&reactor->slot_lock);
+	meta = atomic_load_explicit(&reactor->slots[slot].meta,
+				    memory_order_acquire);
+	if (tr_slot_meta_generation(meta) != generation)
+		return 0;
 
-	return live;
+	state = tr_slot_meta_state(meta);
+	return state == TR_CONN_RESERVED || state == TR_CONN_ACTIVE;
 }
 
-static void tr_slot_set_state(struct tr_reactor *reactor, uint32_t slot,
-			      uint32_t generation,
-			      enum tr_connection_state state)
+static int tr_slot_set_state(struct tr_reactor *reactor, uint32_t slot,
+			     uint32_t generation,
+			     enum tr_connection_state state)
 {
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (slot < reactor->config.max_connections &&
-	    reactor->slots[slot].generation == generation)
-		reactor->slots[slot].state = state;
-	pthread_mutex_unlock(&reactor->slot_lock);
+	uint64_t old;
+	uint64_t desired;
+
+	if (slot >= reactor->config.max_connections)
+		return TR_ERR_STALE;
+
+	old = atomic_load_explicit(&reactor->slots[slot].meta,
+				   memory_order_acquire);
+	for (;;) {
+		if (tr_slot_meta_generation(old) != generation)
+			return TR_ERR_STALE;
+
+		desired = tr_slot_meta_make(generation, state);
+		if (atomic_compare_exchange_weak_explicit(
+			    &reactor->slots[slot].meta, &old, desired,
+			    memory_order_acq_rel, memory_order_acquire))
+			return TR_OK;
+	}
+}
+
+static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
+			   uint32_t *generation_out)
+{
+	uint32_t slot;
+
+	for (slot = 0; slot < reactor->config.max_connections; ++slot) {
+		uint64_t old = atomic_load_explicit(&reactor->slots[slot].meta,
+						   memory_order_acquire);
+		uint32_t generation;
+		uint64_t desired;
+
+		if (tr_slot_meta_state(old) != TR_CONN_FREE)
+			continue;
+
+		generation = tr_slot_meta_generation(old) + 1U;
+		if (generation == 0)
+			generation = 1U;
+		desired = tr_slot_meta_make(generation, TR_CONN_RESERVED);
+
+		if (!atomic_compare_exchange_strong_explicit(
+			    &reactor->slots[slot].meta, &old, desired,
+			    memory_order_acq_rel, memory_order_acquire))
+			continue;
+
+		*slot_out = slot;
+		*generation_out = generation;
+		return TR_OK;
+	}
+
+	return TR_AGAIN;
 }
 
 static uint32_t tr_connection_interest(const struct tr_connection *connection)
@@ -321,6 +468,8 @@ static int tr_connection_update_interest(struct tr_reactor *reactor,
 					 struct tr_connection *connection)
 {
 	struct epoll_event event;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
 	uint32_t events;
 
 	events = tr_connection_interest(connection);
@@ -420,26 +569,15 @@ static void tr_connection_notify(struct tr_reactor *reactor,
 				 enum tr_connection_event event, int status)
 {
 	struct tr_conn_handle handle;
-	tr_reactor_event_cb event_cb = NULL;
-	void *callback_arg = NULL;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (connection->slot < reactor->config.max_connections &&
-	    reactor->slots[connection->slot].generation ==
-		    connection->generation) {
-		event_cb = reactor->slots[connection->slot].event_cb;
-		callback_arg = reactor->slots[connection->slot].callback_arg;
-	}
-	pthread_mutex_unlock(&reactor->slot_lock);
-
-	if (!event_cb)
+	if (!connection->event_cb)
 		return;
 
 	handle.reactor = reactor;
 	handle.slot = connection->slot;
 	handle.generation = connection->generation;
 
-	event_cb(handle, event, status, callback_arg);
+	connection->event_cb(handle, event, status, connection->callback_arg);
 }
 
 static void tr_connection_close_internal(struct tr_reactor *reactor,
@@ -447,6 +585,8 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 					 enum tr_connection_event event,
 					 int status)
 {
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
 	if (!connection || connection->state != TR_CONN_ACTIVE)
 		return;
 
@@ -475,6 +615,8 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 			       uint32_t generation, int fd)
 {
 	struct tr_connection *connection;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
 	struct epoll_event event;
 	struct tr_wire_limits limits;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
@@ -489,6 +631,9 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	connection->slot = slot;
 	connection->generation = generation;
 	connection->state = TR_CONN_ACTIVE;
+	connection->frame_cb = reactor->frame_cb;
+	connection->event_cb = reactor->event_cb;
+	connection->callback_arg = reactor->callback_arg;
 	__atomic_store_n(&connection->last_rx_activity_ns, tr_reactor_now_ns(),
 			 __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->last_tx_activity_ns, tr_reactor_now_ns(),
@@ -794,18 +939,9 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 			      struct tr_frame *frame)
 {
 	enum tr_frame_disposition disposition = TR_FRAME_RELEASE;
-	struct tr_conn_handle handle;
-	tr_reactor_frame_cb frame_cb = NULL;
-	void *callback_arg = NULL;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (connection->slot < reactor->config.max_connections &&
-	    reactor->slots[connection->slot].generation ==
-		    connection->generation) {
-		frame_cb = reactor->slots[connection->slot].frame_cb;
-		callback_arg = reactor->slots[connection->slot].callback_arg;
-	}
-	pthread_mutex_unlock(&reactor->slot_lock);
+	TR_ASSERT_REACTOR_OWNER(reactor);
+	struct tr_conn_handle handle;
 
 	handle.reactor = reactor;
 	handle.slot = connection->slot;
@@ -814,8 +950,9 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 	(void)__atomic_fetch_add(&connection->rx_frames, UINT64_C(1),
 				 __ATOMIC_RELAXED);
 
-	if (frame_cb)
-		disposition = frame_cb(handle, frame, callback_arg);
+	if (connection->frame_cb)
+		disposition = connection->frame_cb(handle, frame,
+						   connection->callback_arg);
 
 	if (disposition != TR_FRAME_TAKE_OWNERSHIP)
 		tr_frame_release(frame);
@@ -1058,22 +1195,38 @@ static void tr_process_abort(struct tr_reactor *reactor,
 					     command->u.abort.status);
 }
 
-static void tr_process_quiesce(const struct tr_command *command)
+static void tr_process_set_handler(struct tr_reactor *reactor,
+					   const struct tr_command *command)
 {
-	struct tr_reactor_sync *sync = command->u.quiesce.sync;
+	struct tr_reactor_handler_request *request = command->u.handler.request;
+	struct tr_connection *connection;
+	int status = TR_ERR_STALE;
 
-	if (!sync)
+	if (!request)
 		return;
 
-	pthread_mutex_lock(&sync->lock);
-	sync->done = 1;
-	pthread_cond_signal(&sync->cond);
-	pthread_mutex_unlock(&sync->lock);
+	connection = tr_lookup_connection(reactor, command->slot,
+					  command->generation);
+	if (connection) {
+		connection->frame_cb = request->frame_cb;
+		connection->event_cb = request->event_cb;
+		connection->callback_arg = request->callback_arg;
+		status = TR_OK;
+	}
+
+	tr_reactor_sync_complete(&request->sync, status);
+}
+
+static void tr_process_quiesce(const struct tr_command *command)
+{
+	tr_reactor_sync_complete(command->u.quiesce.sync, TR_OK);
 }
 
 static void tr_process_commands(struct tr_reactor *reactor)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
 
 	for (;;) {
 		size_t count;
@@ -1105,6 +1258,9 @@ static void tr_process_commands(struct tr_reactor *reactor)
 				break;
 			case TR_CMD_ABORT:
 				tr_process_abort(reactor, command);
+				break;
+			case TR_CMD_SET_HANDLER:
+				tr_process_set_handler(reactor, command);
 				break;
 			case TR_CMD_QUIESCE:
 				tr_process_quiesce(command);
@@ -1170,6 +1326,9 @@ static void *tr_reactor_thread_main(void *arg)
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
 
+	assert(tr_current_reactor_owner == NULL);
+	tr_current_reactor_owner = reactor;
+
 	while (!reactor->stopping) {
 		int timeout = reactor->tx_ready_head ? 0 : -1;
 		int count;
@@ -1207,6 +1366,7 @@ static void *tr_reactor_thread_main(void *arg)
 	}
 
 	tr_cleanup_connections(reactor);
+	tr_current_reactor_owner = NULL;
 	return NULL;
 }
 
@@ -1231,7 +1391,6 @@ static void tr_default_config(struct tr_reactor_config *config)
 struct tr_reactor_build {
 	struct tr_reactor *reactor;
 	int ctl_lock_ready;
-	int slot_lock_ready;
 	int commands_ready;
 	int tx_pool_ready;
 	int control_tx_pool_ready;
@@ -1263,8 +1422,6 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 	free(reactor->connections);
 	free(reactor->slots);
 
-	if (build->slot_lock_ready)
-		pthread_mutex_destroy(&reactor->slot_lock);
 	if (build->ctl_lock_ready)
 		pthread_mutex_destroy(&reactor->ctl_lock);
 	free(reactor);
@@ -1307,9 +1464,6 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	if (pthread_mutex_init(&reactor->ctl_lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.ctl_lock_ready = 1;
-	if (pthread_mutex_init(&reactor->slot_lock, NULL) != 0)
-		return TR_ERR_INVALID;
-	build.slot_lock_ready = 1;
 
 	reactor->slots = (struct tr_slot *)calloc(
 		reactor->config.max_connections, sizeof(*reactor->slots));
@@ -1319,7 +1473,8 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		return TR_ERR_NOMEM;
 
 	for (i = 0; i < reactor->config.max_connections; ++i) {
-		reactor->slots[i].state = TR_CONN_FREE;
+		atomic_init(&reactor->slots[i].meta,
+			    tr_slot_meta_make(0U, TR_CONN_FREE));
 		reactor->connections[i].fd = -1;
 		reactor->connections[i].state = TR_CONN_FREE;
 	}
@@ -1400,8 +1555,8 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 {
 	struct tr_command command;
 	uint32_t slot;
-	uint32_t generation = 0;
-	int ret = TR_AGAIN;
+	uint32_t generation;
+	int ret;
 
 	if (!reactor || fd < 0 || !out)
 		return TR_ERR_INVALID;
@@ -1412,24 +1567,11 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 		return TR_ERR_CLOSED;
 	}
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	for (slot = 0; slot < reactor->config.max_connections; ++slot) {
-		if (reactor->slots[slot].state == TR_CONN_FREE) {
-			generation = reactor->slots[slot].generation + 1U;
-			if (generation == 0)
-				generation = 1;
-			reactor->slots[slot].generation = generation;
-			reactor->slots[slot].state = TR_CONN_RESERVED;
-			reactor->slots[slot].frame_cb = reactor->frame_cb;
-			reactor->slots[slot].event_cb = reactor->event_cb;
-			reactor->slots[slot].callback_arg =
-				reactor->callback_arg;
-			ret = TR_OK;
-			break;
-		}
-	}
-	pthread_mutex_unlock(&reactor->slot_lock);
-
+	/*
+	 * ctl_lock 只串行化 producer 控制面；slot capability 本身使用 atomic
+	 * generation+state 发布，Reactor event loop 不需要参与这把锁。
+	 */
+	ret = tr_slot_reserve(reactor, &slot, &generation);
 	if (ret != TR_OK) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return ret;
@@ -1443,7 +1585,7 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 
 	ret = tr_reactor_push_locked(reactor, &command);
 	if (ret != TR_OK) {
-		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
+		(void)tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return ret;
 	}
@@ -1617,24 +1759,73 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 			   tr_reactor_event_cb event_cb, void *callback_arg)
 {
 	struct tr_reactor *reactor = connection.reactor;
+	struct tr_reactor_handler_request request;
+	struct tr_command command;
+	int ret;
 
 	if (!reactor || connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[connection.slot].generation !=
-		    connection.generation ||
-	    (reactor->slots[connection.slot].state != TR_CONN_RESERVED &&
-	     reactor->slots[connection.slot].state != TR_CONN_ACTIVE)) {
-		pthread_mutex_unlock(&reactor->slot_lock);
+	/*
+	 * 已经位于 Reactor owner thread 时直接修改 connection 状态，
+	 * 避免同步 command 对自己形成自等待。
+	 */
+	if (tr_reactor_is_owner_thread(reactor)) {
+		struct tr_connection *conn =
+			tr_lookup_connection(reactor, connection.slot,
+					     connection.generation);
+		if (!conn)
+			return TR_ERR_STALE;
+		conn->frame_cb = frame_cb;
+		conn->event_cb = event_cb;
+		conn->callback_arg = callback_arg;
+		return TR_OK;
+	}
+
+	memset(&request, 0, sizeof(request));
+	ret = tr_reactor_sync_init(&request.sync);
+	if (ret != TR_OK)
+		return ret;
+	request.frame_cb = frame_cb;
+	request.event_cb = event_cb;
+	request.callback_arg = callback_arg;
+
+	memset(&command, 0, sizeof(command));
+	command.type = TR_CMD_SET_HANDLER;
+	command.slot = connection.slot;
+	command.generation = connection.generation;
+	command.u.handler.request = &request;
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started || !reactor->accepting) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		tr_reactor_sync_destroy(&request.sync);
+		return TR_ERR_CLOSED;
+	}
+	if (!tr_slot_live(reactor, connection.slot, connection.generation)) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		tr_reactor_sync_destroy(&request.sync);
 		return TR_ERR_STALE;
 	}
 
-	reactor->slots[connection.slot].frame_cb = frame_cb;
-	reactor->slots[connection.slot].event_cb = event_cb;
-	reactor->slots[connection.slot].callback_arg = callback_arg;
-	pthread_mutex_unlock(&reactor->slot_lock);
-	return TR_OK;
+	do {
+		ret = tr_reactor_push_locked(reactor, &command);
+		if (ret == TR_AGAIN) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			sched_yield();
+			pthread_mutex_lock(&reactor->ctl_lock);
+			if (!reactor->started || !reactor->accepting) {
+				ret = TR_ERR_CLOSED;
+				break;
+			}
+		}
+	} while (ret == TR_AGAIN);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	if (ret == TR_OK)
+		ret = tr_reactor_sync_wait(&request.sync);
+	tr_reactor_sync_destroy(&request.sync);
+	return ret;
 }
 
 int tr_reactor_quiesce(struct tr_reactor *reactor)
@@ -1665,7 +1856,7 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 		pthread_mutex_destroy(&sync.lock);
 		return TR_OK;
 	}
-	if (pthread_equal(pthread_self(), reactor->thread)) {
+	if (tr_reactor_is_owner_thread(reactor)) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		pthread_cond_destroy(&sync.cond);
 		pthread_mutex_destroy(&sync.lock);
@@ -1718,19 +1909,18 @@ int tr_reactor_get_connection_state(struct tr_conn_handle connection,
 				    enum tr_connection_state *out)
 {
 	struct tr_reactor *reactor = connection.reactor;
+	uint64_t meta;
 
 	if (!reactor || !out ||
 	    connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[connection.slot].generation !=
-	    connection.generation) {
-		pthread_mutex_unlock(&reactor->slot_lock);
+	meta = atomic_load_explicit(&reactor->slots[connection.slot].meta,
+				    memory_order_acquire);
+	if (tr_slot_meta_generation(meta) != connection.generation)
 		return TR_ERR_STALE;
-	}
-	*out = reactor->slots[connection.slot].state;
-	pthread_mutex_unlock(&reactor->slot_lock);
+
+	*out = tr_slot_meta_state(meta);
 	return TR_OK;
 }
 
@@ -1739,44 +1929,63 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 {
 	struct tr_reactor *reactor = connection.reactor;
 	struct tr_connection *conn;
-	enum tr_connection_state state;
+	uint64_t before;
+	uint64_t after;
 
 	if (!reactor || !out ||
 	    connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[connection.slot].generation !=
-	    connection.generation) {
-		pthread_mutex_unlock(&reactor->slot_lock);
-		return TR_ERR_STALE;
-	}
-	state = reactor->slots[connection.slot].state;
-	pthread_mutex_unlock(&reactor->slot_lock);
-
 	conn = &reactor->connections[connection.slot];
-	memset(out, 0, sizeof(*out));
-	out->state = state;
-	out->rx_bytes = __atomic_load_n(&conn->rx_bytes, __ATOMIC_RELAXED);
-	out->tx_bytes = __atomic_load_n(&conn->tx_bytes, __ATOMIC_RELAXED);
-	out->rx_frames = __atomic_load_n(&conn->rx_frames, __ATOMIC_RELAXED);
-	out->tx_frames = __atomic_load_n(&conn->tx_frames, __ATOMIC_RELAXED);
-	out->recv_eagain =
-		__atomic_load_n(&conn->recv_eagain, __ATOMIC_RELAXED);
-	out->send_eagain =
-		__atomic_load_n(&conn->send_eagain, __ATOMIC_RELAXED);
-	out->rx_pauses =
-		__atomic_load_n(&conn->rx_pauses_count, __ATOMIC_RELAXED);
-	out->last_rx_activity_ns =
-		__atomic_load_n(&conn->last_rx_activity_ns, __ATOMIC_RELAXED);
-	out->last_tx_activity_ns =
-		__atomic_load_n(&conn->last_tx_activity_ns, __ATOMIC_RELAXED);
-	out->tx_queued_items =
-		__atomic_load_n(&conn->tx_queued_items, __ATOMIC_RELAXED);
-	out->rx_paused = __atomic_load_n(&conn->rx_paused, __ATOMIC_RELAXED);
-	out->tx_wait_writable =
-		__atomic_load_n(&conn->tx_wait_writable, __ATOMIC_RELAXED);
-	return TR_OK;
+
+	for (;;) {
+		before = atomic_load_explicit(&reactor->slots[connection.slot].meta,
+					      memory_order_acquire);
+		if (tr_slot_meta_generation(before) != connection.generation)
+			return TR_ERR_STALE;
+
+		memset(out, 0, sizeof(*out));
+		out->state = tr_slot_meta_state(before);
+		out->rx_bytes = __atomic_load_n(&conn->rx_bytes, __ATOMIC_RELAXED);
+		out->tx_bytes = __atomic_load_n(&conn->tx_bytes, __ATOMIC_RELAXED);
+		out->rx_frames =
+			__atomic_load_n(&conn->rx_frames, __ATOMIC_RELAXED);
+		out->tx_frames =
+			__atomic_load_n(&conn->tx_frames, __ATOMIC_RELAXED);
+		out->recv_eagain =
+			__atomic_load_n(&conn->recv_eagain, __ATOMIC_RELAXED);
+		out->send_eagain =
+			__atomic_load_n(&conn->send_eagain, __ATOMIC_RELAXED);
+		out->rx_pauses =
+			__atomic_load_n(&conn->rx_pauses_count,
+					__ATOMIC_RELAXED);
+		out->last_rx_activity_ns =
+			__atomic_load_n(&conn->last_rx_activity_ns,
+					__ATOMIC_RELAXED);
+		out->last_tx_activity_ns =
+			__atomic_load_n(&conn->last_tx_activity_ns,
+					__ATOMIC_RELAXED);
+		out->tx_queued_items =
+			__atomic_load_n(&conn->tx_queued_items,
+					__ATOMIC_RELAXED);
+		out->rx_paused =
+			__atomic_load_n(&conn->rx_paused, __ATOMIC_RELAXED);
+		out->tx_wait_writable =
+			__atomic_load_n(&conn->tx_wait_writable,
+					__ATOMIC_RELAXED);
+
+		/*
+		 * slot 在读取统计期间发生 close/reuse 时重新读取。
+		 * 如果 generation 已变化，则旧 handle 已 stale；如果只是同一
+		 * generation 的 state 转换，则重试得到同一个生命周期阶段的快照。
+		 */
+		after = atomic_load_explicit(&reactor->slots[connection.slot].meta,
+					     memory_order_acquire);
+		if (before == after)
+			return TR_OK;
+		if (tr_slot_meta_generation(after) != connection.generation)
+			return TR_ERR_STALE;
+	}
 }
 
 int tr_reactor_resume_rx(struct tr_conn_handle connection)
@@ -1879,7 +2088,6 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	free(reactor->connections);
 	free(reactor->slots);
 
-	pthread_mutex_destroy(&reactor->slot_lock);
 	pthread_mutex_destroy(&reactor->ctl_lock);
 	free(reactor);
 }
