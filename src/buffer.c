@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+TR_DEFINE_PTR_OWNERSHIP(tr_buffer_array, struct tr_buffer, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_buffer_storage, uint8_t, free)
+
 int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 			uint32_t buffer_size)
 {
