@@ -947,6 +947,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		callq->generation = task->call.generation;
 		callq->head = TR_RPC_EXEC_NONE;
 		callq->tail = TR_RPC_EXEC_NONE;
+		callq->queued_count = 0;
 	}
 
 	node_index = executor->free_head;
@@ -1639,7 +1640,8 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	uint64_t total_calls;
 	uint32_t i;
 
-	if (!out || endpoint_capacity == 0 || max_calls_per_endpoint == 0)
+	if (!out || endpoint_capacity == 0 || max_calls_per_endpoint == 0 ||
+	    endpoint_capacity == UINT32_MAX)
 		return TR_ERR_INVALID;
 	*out = NULL;
 
@@ -1670,8 +1672,13 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 
 	group->threads =
 		(pthread_t *)calloc(thread_count, sizeof(*group->threads));
+	/*
+	 * The server reaper removes one peer slot before destroying that old
+	 * endpoint, so one retiring endpoint may briefly overlap max_peers live
+	 * endpoints. Keep one extra wake slot for that bounded overlap.
+	 */
 	group->ready_endpoints = (struct tr_rpc_endpoint **)calloc(
-		endpoint_capacity, sizeof(*group->ready_endpoints));
+		endpoint_capacity + 1U, sizeof(*group->ready_endpoints));
 	if (!group->threads || !group->ready_endpoints) {
 		free(group->ready_endpoints);
 		free(group->threads);
@@ -1681,7 +1688,7 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 		return TR_ERR_NOMEM;
 	}
 
-	group->capacity = endpoint_capacity;
+	group->capacity = endpoint_capacity + 1U;
 	group->thread_count = thread_count;
 
 	for (i = 0; i < thread_count; ++i) {
