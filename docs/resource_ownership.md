@@ -145,6 +145,62 @@ protected by one of:
 
 Never publish a pointer to another thread and add its reference afterward.
 
+### Strong references
+
+`struct tr_refcount` is the common C11 strong-reference primitive.
+
+Rules:
+
+1. the owner normally creates the object with reference count 1;
+2. an asynchronous task must acquire its reference **before** it is published;
+3. every successful get has exactly one matching put;
+4. zero is terminal and cannot be resurrected;
+5. underflow and saturation are rejected rather than wrapped;
+6. the object is released only by the final `put()`.
+
+`tr_refcount_get_unless_zero()` exists for cases where a weak/capability lookup
+must attempt to acquire a strong reference. Code that already owns a valid
+strong reference should use `tr_refcount_get()`.
+
+Do not add refcounts to single-owner objects merely because the primitive
+exists. Prefer unique ownership or quiescence when those models are sufficient.
+
+### RPC Endpoint lifetime
+
+RPC Endpoint is the first shared-object migration:
+
+```text
+peer/client owner ref = 1
+        |
+queue executor task
+        | get
+        v
+owner + task ref
+        |
+task completes
+        | put
+        v
+owner-only ref
+        |
+destroy:
+  clear handler
+  quiesce Channel callbacks
+  stop deadline source
+  stop new executor tasks
+  wait until refs == 1
+        |
+owner put
+        v
+refs == 0 -> release
+```
+
+The destructor intentionally remains synchronous because Endpoint borrows its
+Channel. The Channel may be destroyed immediately after Endpoint destruction,
+so all asynchronous Endpoint references must have drained first.
+
+Call-level `task_refs` remain separate: they protect Call-slot reuse, while
+`tr_refcount` protects the Endpoint object's lifetime.
+
 ## Reactor ownership
 
 Mutable Reactor/Connection transport state is owned by the Reactor thread.
