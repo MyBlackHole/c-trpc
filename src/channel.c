@@ -333,6 +333,48 @@ static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 	pthread_mutex_unlock(&channel->lock);
 }
 
+static uint32_t
+tr_channel_keepalive_tick_ms_locked(const struct tr_channel *channel)
+{
+	uint32_t tick_ms = channel->keepalive_interval_ms / 4U;
+
+	if (channel->keepalive_timeout_ms / 4U < tick_ms)
+		tick_ms = channel->keepalive_timeout_ms / 4U;
+	if (tick_ms < 10U)
+		tick_ms = 10U;
+	if (tick_ms > 1000U)
+		tick_ms = 1000U;
+	return tick_ms;
+}
+
+static uint64_t
+tr_channel_keepalive_maintenance_main(void *arg, uint64_t now_ns)
+{
+	struct tr_channel *channel = (struct tr_channel *)arg;
+	uint32_t tick_ms;
+	int enabled;
+
+	pthread_mutex_lock(&channel->lock);
+	enabled = channel->keepalive_enabled;
+	pthread_mutex_unlock(&channel->lock);
+	if (!enabled)
+		return 0;
+
+	tr_channel_keepalive_check_lane(channel, TR_LANE_CONTROL);
+	tr_channel_keepalive_check_lane(channel, TR_LANE_BULK);
+
+	pthread_mutex_lock(&channel->lock);
+	enabled = channel->keepalive_enabled;
+	tick_ms = enabled ? tr_channel_keepalive_tick_ms_locked(channel) : 0U;
+	pthread_mutex_unlock(&channel->lock);
+
+	if (!enabled)
+		return 0;
+	if (now_ns == 0)
+		now_ns = tr_maintenance_now_ns();
+	return now_ns + (uint64_t)tick_ms * UINT64_C(1000000);
+}
+
 static void *tr_channel_keepalive_thread_main(void *arg)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
@@ -346,13 +388,7 @@ static void *tr_channel_keepalive_thread_main(void *arg)
 			pthread_mutex_unlock(&channel->lock);
 			break;
 		}
-		tick_ms = channel->keepalive_interval_ms / 4U;
-		if (channel->keepalive_timeout_ms / 4U < tick_ms)
-			tick_ms = channel->keepalive_timeout_ms / 4U;
-		if (tick_ms < 10U)
-			tick_ms = 10U;
-		if (tick_ms > 1000U)
-			tick_ms = 1000U;
+		tick_ms = tr_channel_keepalive_tick_ms_locked(channel);
 		pthread_mutex_unlock(&channel->lock);
 
 		tr_channel_keepalive_check_lane(channel, TR_LANE_CONTROL);
