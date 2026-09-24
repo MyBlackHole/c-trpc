@@ -173,8 +173,8 @@ static uint32_t tr_lane_flag(enum tr_lane lane)
 }
 
 static uint32_t
-tr_channel_connection_lane_mask(const struct tr_channel *channel,
-				struct tr_conn_handle connection)
+tr_channel_connection_lane_mask_locked(const struct tr_channel *channel,
+				       struct tr_conn_handle connection)
 {
 	uint32_t mask = 0;
 
@@ -438,9 +438,9 @@ static int tr_channel_decode_hello_ack(const uint8_t *data, uint32_t len,
 	return TR_OK;
 }
 
-static int tr_channel_local_capabilities(const struct tr_channel *channel,
-					 struct tr_conn_handle connection,
-					 struct tr_channel_capabilities *caps)
+static int tr_channel_local_capabilities(struct tr_channel *channel,
+			      struct tr_conn_handle connection,
+			      struct tr_channel_capabilities *caps)
 {
 	struct tr_reactor_limits limits;
 	int ret;
@@ -451,7 +451,10 @@ static int tr_channel_local_capabilities(const struct tr_channel *channel,
 
 	memset(caps, 0, sizeof(*caps));
 	caps->protocol_version = channel->config.max_protocol_version;
-	caps->lane_mask = tr_channel_connection_lane_mask(channel, connection);
+	pthread_mutex_lock(&channel->lock);
+	caps->lane_mask =
+		tr_channel_connection_lane_mask_locked(channel, connection);
+	pthread_mutex_unlock(&channel->lock);
 	caps->max_frame_payload_bytes = limits.max_payload_len;
 	caps->max_message_bytes =
 		tr_channel_local_max_message(channel, limits.max_payload_len);
@@ -550,7 +553,7 @@ tr_channel_lane_max_message_locked(const struct tr_channel *channel,
 static int tr_channel_connection_ready_locked(const struct tr_channel *channel,
 					      struct tr_conn_handle connection)
 {
-	uint32_t mask = tr_channel_connection_lane_mask(channel, connection);
+	uint32_t mask = tr_channel_connection_lane_mask_locked(channel, connection);
 
 	if (mask == 0)
 		return 0;
@@ -1080,7 +1083,7 @@ static int tr_channel_handle_goaway(struct tr_channel *channel,
 						 TR_ERR_STATE);
 
 	pthread_mutex_lock(&channel->lock);
-	mask = tr_channel_connection_lane_mask(channel, connection);
+	mask = tr_channel_connection_lane_mask_locked(channel, connection);
 	if ((mask & TR_CHANNEL_LANE_MASK_CONTROL) &&
 	    !channel->control_peer_draining) {
 		channel->control_peer_draining = 1;
