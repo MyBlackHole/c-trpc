@@ -566,7 +566,7 @@ static int tr_tx_prepare_frame(struct tr_reactor *reactor,
 	else
 		frame_len = (uint32_t)remaining;
 
-	/* Zero-length non-DATA control messages are still one complete frame. */
+	/* 长度为 0 的非 DATA control message 仍然构成一个完整 frame。 */
 	if (item->type != TR_FRAME_DATA && item->message_pos != 0)
 		return TR_ERR_STATE;
 
