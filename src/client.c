@@ -30,6 +30,8 @@ struct tr_client {
 	int connected;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_destroy)
+
 static uint64_t tr_client_now_ms(void)
 {
 	struct timespec ts;
@@ -153,7 +155,7 @@ int tr_client_create(const struct tr_client_config *config,
 {
 	struct tr_client_config effective;
 	struct tr_reactor_config reactor_config;
-	struct tr_client *client;
+	struct tr_client *client TR_AUTO(tr_client_owner_cleanup) = NULL;
 	int ret;
 
 	if (!out)
@@ -180,14 +182,14 @@ int tr_client_create(const struct tr_client_config *config,
 				  effective.limits.rpc_message_pool_count,
 				  effective.limits.rpc_message_buffer_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	client->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&client->reassembly_pool,
 				  effective.limits.reassembly_pool_count,
 				  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	client->reassembly_pool_ready = 1;
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
@@ -210,23 +212,13 @@ int tr_client_create(const struct tr_client_config *config,
 	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 				&client->reactor);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	ret = tr_reactor_start(client->reactor);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
-	*out = client;
+	*out = tr_client_owner_take(&client);
 	return TR_OK;
-
-fail:
-	if (client->reactor)
-		tr_reactor_destroy(client->reactor);
-	if (client->reassembly_pool_ready)
-		tr_buffer_pool_destroy(&client->reassembly_pool);
-	if (client->rpc_pool_ready)
-		tr_buffer_pool_destroy(&client->rpc_message_pool);
-	free(client);
-	return ret;
 }
 
 static void tr_client_reset_session(struct tr_client *client)
