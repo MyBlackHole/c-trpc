@@ -1104,6 +1104,9 @@ static void wait_channel_counter(struct channel_test_ctx *ctx, unsigned *value,
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static void wait_channel_lane_down(struct tr_channel *channel,
+				   enum tr_lane lane);
+
 static void wait_channel_lane_up(struct tr_channel *channel, enum tr_lane lane)
 {
 	enum tr_channel_lane_state state = TR_CHANNEL_LANE_DOWN;
@@ -1471,6 +1474,8 @@ static void test_channel_split_lane_isolation(void)
 	/* Losing BULK must not make the CONTROL lane unusable. */
 	assert(tr_reactor_close(client_bulk) == TR_OK);
 	wait_channel_counter(&client_ctx, &client_ctx.channel_events, 1);
+	wait_channel_lane_down(client_channel, TR_LANE_BULK);
+	wait_channel_lane_down(server_channel, TR_LANE_BULK);
 
 	assert(tr_buffer_pool_init(&tx_pool, 1, 128) == TR_OK);
 	assert(tr_buffer_acquire(&tx_pool, 32, &control_payload) == TR_OK);
