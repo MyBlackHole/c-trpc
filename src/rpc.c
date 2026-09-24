@@ -2454,10 +2454,52 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 	pthread_mutex_unlock(&endpoint->lock);
 }
 
+struct tr_rpc_endpoint_build {
+	struct tr_rpc_endpoint *endpoint;
+	int lock_ready;
+	int task_cond_ready;
+	int deadline_ready;
+	int executor_ready;
+	int handler_installed;
+};
+
+static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
+{
+	struct tr_rpc_endpoint *endpoint;
+
+	if (!build || !build->endpoint)
+		return;
+	endpoint = build->endpoint;
+
+	if (build->handler_installed) {
+		(void)tr_channel_set_handler(endpoint->channel, NULL, NULL,
+					     NULL, NULL);
+		(void)tr_channel_quiesce(endpoint->channel);
+	}
+	if (build->deadline_ready)
+		tr_rpc_deadline_destroy(endpoint);
+	if (build->executor_ready) {
+		if (endpoint->executor.group)
+			tr_rpc_executor_wait_idle(endpoint);
+		tr_rpc_executor_destroy(endpoint);
+	}
+
+	free(endpoint->calls);
+	free(endpoint->methods);
+	if (build->task_cond_ready)
+		pthread_cond_destroy(&endpoint->task_cond);
+	if (build->lock_ready)
+		pthread_mutex_destroy(&endpoint->lock);
+	free(endpoint);
+	build->endpoint = NULL;
+}
+
 int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
 	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out)
 {
+	struct tr_rpc_endpoint_build build
+		TR_AUTO(tr_rpc_endpoint_build_cleanup) = { 0 };
 	struct tr_rpc_endpoint *endpoint;
 	int ret;
 
@@ -2470,63 +2512,46 @@ int tr_rpc_endpoint_create_with_executor_group(
 	endpoint = (struct tr_rpc_endpoint *)calloc(1, sizeof(*endpoint));
 	if (!endpoint)
 		return TR_ERR_NOMEM;
+	build.endpoint = endpoint;
 
-	if (pthread_mutex_init(&endpoint->lock, NULL) != 0) {
-		free(endpoint);
+	if (pthread_mutex_init(&endpoint->lock, NULL) != 0)
 		return TR_ERR_INVALID;
-	}
-	if (pthread_cond_init(&endpoint->task_cond, NULL) != 0) {
-		pthread_mutex_destroy(&endpoint->lock);
-		free(endpoint);
+	build.lock_ready = 1;
+	if (pthread_cond_init(&endpoint->task_cond, NULL) != 0)
 		return TR_ERR_INVALID;
-	}
+	build.task_cond_ready = 1;
 
 	endpoint->methods = (struct tr_rpc_method_entry *)calloc(
 		config->max_methods, sizeof(*endpoint->methods));
 	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
 		config->max_calls, sizeof(*endpoint->calls));
-	if (!endpoint->methods || !endpoint->calls) {
-		free(endpoint->calls);
-		free(endpoint->methods);
-		pthread_cond_destroy(&endpoint->task_cond);
-		pthread_mutex_destroy(&endpoint->lock);
-		free(endpoint);
+	if (!endpoint->methods || !endpoint->calls)
 		return TR_ERR_NOMEM;
-	}
 
 	endpoint->channel = channel;
 	endpoint->config = *config;
 
 	ret = tr_rpc_deadline_init(endpoint);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
+	build.deadline_ready = 1;
 
 	ret = tr_rpc_executor_init(endpoint, config->executor_queue_capacity,
 				   group);
-	if (ret != TR_OK) {
-		tr_rpc_deadline_destroy(endpoint);
-		goto fail;
-	}
+	if (ret != TR_OK)
+		return ret;
+	build.executor_ready = 1;
 
 	ret = tr_channel_set_handler(channel, tr_rpc_on_data,
 				     tr_rpc_on_stream_event,
 				     tr_rpc_on_channel_event, endpoint);
-	if (ret != TR_OK) {
-		tr_rpc_executor_destroy(endpoint);
-		tr_rpc_deadline_destroy(endpoint);
-		goto fail;
-	}
+	if (ret != TR_OK)
+		return ret;
+	build.handler_installed = 1;
 
 	*out = endpoint;
+	build.endpoint = NULL;
 	return TR_OK;
-
-fail:
-	free(endpoint->calls);
-	free(endpoint->methods);
-	pthread_cond_destroy(&endpoint->task_cond);
-	pthread_mutex_destroy(&endpoint->lock);
-	free(endpoint);
-	return ret;
 }
 
 int tr_rpc_endpoint_create(struct tr_channel *channel,
