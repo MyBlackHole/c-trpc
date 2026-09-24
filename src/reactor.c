@@ -291,33 +291,94 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 	return TR_OK;
 }
 
+static uint64_t tr_slot_meta_make(uint32_t generation,
+				       enum tr_connection_state state)
+{
+	return ((uint64_t)generation << 32) | (uint32_t)state;
+}
+
+static uint32_t tr_slot_meta_generation(uint64_t meta)
+{
+	return (uint32_t)(meta >> 32);
+}
+
+static enum tr_connection_state tr_slot_meta_state(uint64_t meta)
+{
+	return (enum tr_connection_state)(uint32_t)meta;
+}
+
 static int tr_slot_live(struct tr_reactor *reactor, uint32_t slot,
 			uint32_t generation)
 {
-	int live = 0;
+	uint64_t meta;
+	enum tr_connection_state state;
 
 	if (slot >= reactor->config.max_connections)
 		return 0;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[slot].generation == generation &&
-	    (reactor->slots[slot].state == TR_CONN_RESERVED ||
-	     reactor->slots[slot].state == TR_CONN_ACTIVE))
-		live = 1;
-	pthread_mutex_unlock(&reactor->slot_lock);
+	meta = atomic_load_explicit(&reactor->slots[slot].meta,
+				    memory_order_acquire);
+	if (tr_slot_meta_generation(meta) != generation)
+		return 0;
 
-	return live;
+	state = tr_slot_meta_state(meta);
+	return state == TR_CONN_RESERVED || state == TR_CONN_ACTIVE;
 }
 
-static void tr_slot_set_state(struct tr_reactor *reactor, uint32_t slot,
-			      uint32_t generation,
-			      enum tr_connection_state state)
+static int tr_slot_set_state(struct tr_reactor *reactor, uint32_t slot,
+			     uint32_t generation,
+			     enum tr_connection_state state)
 {
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (slot < reactor->config.max_connections &&
-	    reactor->slots[slot].generation == generation)
-		reactor->slots[slot].state = state;
-	pthread_mutex_unlock(&reactor->slot_lock);
+	uint64_t old;
+	uint64_t desired;
+
+	if (slot >= reactor->config.max_connections)
+		return TR_ERR_STALE;
+
+	old = atomic_load_explicit(&reactor->slots[slot].meta,
+				   memory_order_acquire);
+	for (;;) {
+		if (tr_slot_meta_generation(old) != generation)
+			return TR_ERR_STALE;
+
+		desired = tr_slot_meta_make(generation, state);
+		if (atomic_compare_exchange_weak_explicit(
+			    &reactor->slots[slot].meta, &old, desired,
+			    memory_order_acq_rel, memory_order_acquire))
+			return TR_OK;
+	}
+}
+
+static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
+			   uint32_t *generation_out)
+{
+	uint32_t slot;
+
+	for (slot = 0; slot < reactor->config.max_connections; ++slot) {
+		uint64_t old = atomic_load_explicit(&reactor->slots[slot].meta,
+						   memory_order_acquire);
+		uint32_t generation;
+		uint64_t desired;
+
+		if (tr_slot_meta_state(old) != TR_CONN_FREE)
+			continue;
+
+		generation = tr_slot_meta_generation(old) + 1U;
+		if (generation == 0)
+			generation = 1U;
+		desired = tr_slot_meta_make(generation, TR_CONN_RESERVED);
+
+		if (!atomic_compare_exchange_strong_explicit(
+			    &reactor->slots[slot].meta, &old, desired,
+			    memory_order_acq_rel, memory_order_acquire))
+			continue;
+
+		*slot_out = slot;
+		*generation_out = generation;
+		return TR_OK;
+	}
+
+	return TR_AGAIN;
 }
 
 static uint32_t tr_connection_interest(const struct tr_connection *connection)
