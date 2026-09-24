@@ -31,8 +31,8 @@ int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 		return TR_ERR_NOMEM;
 
 	/*
-	 * Initialize the mutex only after every fallible allocation. From this
-	 * point onward construction cannot fail, so pool owns all resources.
+	 * 所有可能失败的 allocation 完成后再初始化 mutex。
+	 * 从这里开始构造过程不会再失败，因此 pool 正式接管全部资源 ownership。
 	 */
 	if (pthread_mutex_init(&pool->lock, NULL) != 0)
 		return TR_ERR_INVALID;

@@ -315,9 +315,9 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		return ret;
 
 	/*
-	 * Complete the initial HELLO handshake before starting maintenance
-	 * threads. This keeps failed connect attempts rollback-safe: the original
-	 * connection cannot be replaced by reconnect while teardown is running.
+	 * maintenance thread 启动前先完成初始 HELLO handshake。
+	 * 这样 connect 失败时 rollback 才是安全的：teardown 进行期间，
+	 * reconnect 不会把原始 connection 替换掉。
 	 */
 	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
 	if (ret != TR_OK)

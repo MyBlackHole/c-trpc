@@ -61,13 +61,13 @@ int tr_command_queue_init(struct tr_command_queue *queue, uint32_t capacity);
 void tr_command_queue_destroy(struct tr_command_queue *queue);
 
 /*
- * need_wake is set when the caller should signal the reactor eventfd.
- * TR_AGAIN means the bounded queue is full and ownership did not transfer.
+ * 当调用方需要唤醒 Reactor eventfd 时设置 need_wake。
+ * TR_AGAIN 表示有界 queue 已满，此时 command ownership 没有发生转移。
  */
 int tr_command_queue_push(struct tr_command_queue *queue,
 			  const struct tr_command *command, int *need_wake);
 
-/* Returns the number of commands copied to out. */
+/* 返回实际复制到 out 的 command 数量。 */
 size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 				  struct tr_command *out, size_t max_commands);
 

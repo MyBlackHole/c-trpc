@@ -16,7 +16,7 @@
 #define TR_RPC_WIRE_OFF_STATUS 24U
 #define TR_RPC_WIRE_OFF_PAYLOAD_LEN 28U
 
-/* Metadata is a bounded TLV block prefixed by a little-endian u16 length. */
+/* Metadata 是有界 TLV block，前缀为 little-endian u16 长度。 */
 #define TR_RPC_WIRE_F_METADATA (1U << 0)
 #define TR_RPC_WIRE_VALID_FLAGS TR_RPC_WIRE_F_METADATA
 #define TR_RPC_WIRE_METADATA_PREFIX_SIZE 2U
@@ -37,19 +37,19 @@ struct tr_rpc_wire_header {
 	uint32_t codec_id;
 	uint32_t flags;
 	int32_t status;
-	/* Application payload length; metadata is not included in this value. */
+	/* application payload 长度；该值不包含 metadata。 */
 	uint32_t payload_len;
 };
 
 int tr_rpc_wire_encode(uint8_t out[TR_RPC_WIRE_HEADER_SIZE],
 		       const struct tr_rpc_wire_header *header);
 
-/* Compatibility decoder. Metadata, if present, is validated and skipped. */
+/* 兼容 decoder；存在 metadata 时先校验，再跳过 metadata。 */
 int tr_rpc_wire_decode(const uint8_t *data, uint32_t len,
 		       struct tr_rpc_wire_header *header,
 		       const uint8_t **payload);
 
-/* Returns validated metadata and application payload views inside data. */
+/* 返回 data 内部已经校验过的 metadata 和 application payload view。 */
 int tr_rpc_wire_decode_ex(const uint8_t *data, uint32_t len,
 			  struct tr_rpc_wire_header *header,
 			  const uint8_t **metadata, uint16_t *metadata_len,

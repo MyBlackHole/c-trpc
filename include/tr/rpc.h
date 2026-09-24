@@ -24,10 +24,10 @@ struct tr_rpc_metadata {
 };
 
 struct tr_rpc_call_options {
-	/* Relative deadline from call creation; 0 disables the deadline. */
+	/* 从 Call 创建时刻开始计算的相对 deadline；0 表示禁用 deadline。 */
 	uint32_t timeout_ms;
 
-	/* Initial metadata attached to the first outbound RPC message. */
+	/* 仅附加到首个 outbound RPC message 的初始 metadata。 */
 	const struct tr_rpc_metadata *metadata;
 	uint16_t metadata_count;
 };
@@ -73,7 +73,7 @@ struct tr_rpc_method_desc {
 
 	enum tr_lane lane;
 
-	/* Per-message limits, not whole-stream limits. */
+	/* 这是单条 message 上限，不是整个 Stream 的累计上限。 */
 	uint32_t max_request_bytes;
 	uint32_t max_response_bytes;
 };
@@ -94,9 +94,9 @@ typedef void (*tr_rpc_unary_result_cb)(struct tr_rpc_call_handle call,
 				       void *arg);
 
 /*
- * Streaming receive message. bytes is a view inside storage. If a callback
- * returns TAKE_OWNERSHIP it must copy this small descriptor and later call
- * tr_rpc_message_release().
+ * Streaming 接收消息。bytes 只是 storage 内部的一段视图。
+ * callback 如果返回 TAKE_OWNERSHIP，必须保存这个小型 descriptor，
+ * 并在使用结束后调用 tr_rpc_message_release() 归还资源。
  */
 struct tr_rpc_message {
 	struct tr_rpc_bytes bytes;
@@ -160,19 +160,19 @@ struct tr_rpc_endpoint_config {
 	uint32_t max_methods;
 	uint32_t max_calls;
 
-	/* Pool used for copied RPC envelopes and small fast-path headers. */
+	/* 用于复制 RPC envelope 和小型快路径 header 的 buffer pool。 */
 	struct tr_buffer_pool *message_pool;
 
 	/*
-     * Bounded RPC executor task capacity. 0 selects a default based on
-     * max_calls. Capacity is shared by all executor workers.
+     * RPC executor 的有界 task 容量。0 表示根据 max_calls 选择默认值。
+     * 该容量由该 executor 的所有 worker 共享。
      */
 	uint32_t executor_queue_capacity;
 
 	/*
-     * Executor worker count. 0 selects a small default capped by max_calls.
-     * Different Calls may execute in parallel, while callbacks belonging to
-     * one Call are always executed serially and in enqueue order.
+     * executor worker 数量。0 表示选择一个不超过 max_calls 的小型默认值。
+     * 不同 Call 可以并行执行；同一个 Call 的 callback 必须严格串行，
+     * 并保持 enqueue 顺序。
      */
 	uint32_t executor_threads;
 };
@@ -200,32 +200,32 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   struct tr_rpc_endpoint **out);
 
 /*
- * Call only after external users have stopped creating new work.
- * Destruction is synchronous: Channel callbacks are quiesced and executor
- * task references are drained before this function returns, so the borrowed
- * Channel may be destroyed immediately afterward.
+ * 仅当外部用户已经停止创建新工作后调用。
+ * 销毁是同步的：函数返回前会完成 Channel callback quiescence，并等待
+ * executor task 的强引用全部排空。因此 Endpoint 借用的 Channel 可以在
+ * 本函数返回后立即销毁。
  */
 void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
 
 /*
- * Registers a descriptor. On a client unary_handler must be NULL and any
- * NONE/ONE/MANY shape is accepted. On a server a non-NULL unary handler is
- * valid only for ONE -> ONE methods. TR_RPC_NONE is reserved for a future
- * method-open envelope; V1 executable methods use ONE or MANY in both
- * directions.
+ * 注册 Method Descriptor。
+ * Client 侧 unary_handler 必须为 NULL，可注册 NONE/ONE/MANY 形状；
+ * Server 侧非 NULL unary_handler 仅允许 ONE -> ONE。
+ * TR_RPC_NONE 预留给未来的 method-open envelope；V1 可执行方法的双向
+ * cardinality 只使用 ONE 或 MANY。
  */
 int tr_rpc_register_method(struct tr_rpc_endpoint *endpoint,
 			   const struct tr_rpc_method_desc *method,
 			   tr_rpc_unary_handler unary_handler,
 			   void *handler_arg);
 
-/* Registers a non-Unary server method. Callbacks execute on the RPC executor. */
+/* 注册非 Unary 的 Server 方法；callback 在线程池 RPC executor 中执行。 */
 int tr_rpc_register_stream_method(struct tr_rpc_endpoint *endpoint,
 				  const struct tr_rpc_method_desc *method,
 				  const struct tr_rpc_stream_handlers *handlers,
 				  void *handler_arg);
 
-/* Backward-compatible ONE -> ONE convenience API. */
+/* 兼容现有 ONE -> ONE 使用方式的便利接口。 */
 int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 			 uint32_t method_id, const struct tr_rpc_bytes *request,
 			 const struct tr_rpc_call_options *options,
@@ -237,7 +237,7 @@ int tr_rpc_unary_call(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		      tr_rpc_unary_result_cb result_cb, void *result_arg,
 		      struct tr_rpc_call_handle *out);
 
-/* Starts a client Call for ONE/MANY streaming shapes. */
+/* 为 ONE/MANY streaming 形状启动一个 Client Call。 */
 int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 			 uint32_t method_id,
 			 const struct tr_rpc_call_options *options,
@@ -249,55 +249,54 @@ int tr_rpc_call_start(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		      const struct tr_rpc_call_callbacks *callbacks,
 		      struct tr_rpc_call_handle *out);
 
-/* Copies a small message into the endpoint pool. No caller ownership changes. */
+/* 把小消息复制进 Endpoint pool；调用方输入的 ownership 不发生变化。 */
 int tr_rpc_call_send(struct tr_rpc_call_handle call,
 		     const struct tr_rpc_bytes *message);
 
 /*
- * RAW bulk fast path. Only a 32-byte RPC envelope is copied; payload is passed
- * to Transport as a second slice. On TR_OK payload ownership transfers to the
- * transport; on failure the caller retains payload.
+ * RAW bulk 快路径：只复制 32-byte RPC envelope，payload 作为第二个 slice
+ * 直接交给 Transport。
+ * 所有权：TR_OK 时 payload ownership 转移给 Transport；失败时仍归调用方。
  */
 int tr_rpc_call_send_buffer(struct tr_rpc_call_handle call,
 			    struct tr_buffer *payload);
 
-/* Half-closes the local message direction. */
+/* half-close 本地发送方向。 */
 int tr_rpc_call_close_send(struct tr_rpc_call_handle call);
 
-/* Server final status: sends a STATUS envelope then half-closes local output. */
+/* Server 发送最终 STATUS envelope，然后 half-close 本地输出方向。 */
 int tr_rpc_call_finish(struct tr_rpc_call_handle call, int status);
 
 /*
- * Cooperative cancellation. The local Call completes immediately with
- * CANCELLED while a best-effort CANCEL control envelope is propagated to the
- * peer when that peer has already observed the Call. Cancellation never
- * implies rollback of application side effects.
+ * cooperative cancellation：本地 Call 立即以 CANCELLED 结束；
+ * 如果 peer 已经观察到该 Call，则尽力发送 CANCEL control envelope。
+ * cancellation 只终止协议/回调生命周期，不代表回滚已经发生的业务副作用。
  */
 int tr_rpc_call_cancel(struct tr_rpc_call_handle call);
 
 /*
- * Query cancellation/deadline state from application callbacks. Returns 1 if
- * cancelled, 0 if still active, or a negative tr_status on stale/invalid input.
+ * 供应用 callback 查询 cancellation/deadline 状态：
+ * 已取消返回 1，仍 active 返回 0，handle stale/参数非法返回负的 tr_status。
  */
 int tr_rpc_call_is_cancelled(struct tr_rpc_call_handle call, int *status_out);
 
 /*
- * Initial metadata is bounded and sent only with the first outbound RPC
- * message in each direction. Keys are lowercase ASCII [a-z0-9_.-].
- * Metadata may be set only before that first message is encoded.
+ * initial metadata 有大小上限，并且每个方向只随第一条 outbound RPC message
+ * 发送。key 仅允许小写 ASCII [a-z0-9_.-]。
+ * metadata 只能在该方向首条消息完成编码之前设置。
  */
 int tr_rpc_call_set_metadata(struct tr_rpc_call_handle call, const char *key,
 			     const void *value, uint16_t value_len);
 
-/* Copies one peer metadata value. *value_len is input capacity/output size. */
+/* 复制一个 peer metadata 值；*value_len 输入时是容量，返回时是实际长度。 */
 int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle call,
 				  const char *key, void *value,
 				  uint16_t *value_len);
 
-/* Release a message retained by TR_RPC_MESSAGE_TAKE_OWNERSHIP. */
+/* 释放通过 TR_RPC_MESSAGE_TAKE_OWNERSHIP 保留下来的 message。 */
 int tr_rpc_message_release(struct tr_rpc_message *message);
 
-/* Retry pending Unary responses / final local close and Transport control work. */
+/* 重试 pending Unary response、最终本地 close 以及 Transport control 工作。 */
 int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint);
 
 int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,

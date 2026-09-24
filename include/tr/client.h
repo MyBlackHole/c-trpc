@@ -17,11 +17,11 @@ struct tr_client_config {
 
 	uint32_t connect_timeout_ms;
 
-	/* 0 disables Transport keepalive. */
+	/* 0 表示禁用 Transport keepalive。 */
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
-	/* Optional connection-level reconnect. In-flight Calls are never replayed. */
+	/* 可选的 connection-level reconnect；in-flight Call 永远不会透明 replay。 */
 	int enable_reconnect;
 	uint32_t reconnect_initial_delay_ms;
 	uint32_t reconnect_max_delay_ms;
@@ -32,7 +32,7 @@ void tr_client_config_init(struct tr_client_config *config);
 int tr_client_create(const struct tr_client_config *config,
 		     struct tr_client **out);
 
-/* V1 facade accepts a numeric IPv4 address. */
+/* V1 facade 仅接受数字 IPv4 address。 */
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port);
 
