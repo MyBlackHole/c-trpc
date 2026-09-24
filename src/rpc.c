@@ -1953,6 +1953,9 @@ tr_rpc_deadline_earliest_locked(const struct tr_rpc_endpoint *endpoint,
  */
 static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint)
 {
+	if (endpoint->deadline_stopping)
+		return;
+
 	if (endpoint->deadline_maintenance_registered) {
 		uint64_t earliest =
 			tr_rpc_deadline_earliest_locked(endpoint, 0, NULL);
@@ -2087,14 +2090,21 @@ tr_rpc_deadline_init(struct tr_rpc_endpoint *endpoint,
 static void tr_rpc_deadline_destroy(struct tr_rpc_endpoint *endpoint)
 {
 	if (endpoint->deadline_maintenance_registered) {
+		struct tr_maintenance_handle handle;
+
 		pthread_mutex_lock(&endpoint->lock);
 		endpoint->deadline_stopping = 1;
-		pthread_mutex_unlock(&endpoint->lock);
-		(void)tr_maintenance_unregister(
-			endpoint->deadline_maintenance);
+		handle = endpoint->deadline_maintenance;
+		endpoint->deadline_maintenance_registered = 0;
 		memset(&endpoint->deadline_maintenance, 0,
 		       sizeof(endpoint->deadline_maintenance));
-		endpoint->deadline_maintenance_registered = 0;
+		pthread_mutex_unlock(&endpoint->lock);
+
+		/*
+		 * 先在 Endpoint 内部禁止 re-arm，再等待 scheduler callback
+		 * 退出，避免 teardown 与仍在运行的 executor task 互相重新激活。
+		 */
+		(void)tr_maintenance_unregister(handle);
 		return;
 	}
 
