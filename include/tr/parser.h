@@ -38,18 +38,18 @@ int tr_parser_init(struct tr_parser *parser, struct tr_buffer_pool *pool,
 void tr_parser_reset(struct tr_parser *parser);
 
 /*
- * Ensures the parser has all resources needed for the next receive.
- * Returns TR_AGAIN when the payload buffer pool is temporarily exhausted.
+ * 确保 parser 已准备好下一次 receive 所需的全部资源。
+ * payload buffer pool 暂时耗尽时返回 TR_AGAIN。
  */
 int tr_parser_prepare(struct tr_parser *parser);
 
-/* Direct-receive API: recv() may write straight into this span. */
+/* direct-receive API：recv() 可以直接写入该 span。 */
 void *tr_parser_write_ptr(struct tr_parser *parser);
 size_t tr_parser_write_len(const struct tr_parser *parser);
 
 /*
- * Reports bytes written into the span returned by tr_parser_write_ptr().
- * TR_FRAME_READY transfers payload ownership to out_frame.
+ * 上报写入 tr_parser_write_ptr() 返回 span 的字节数。
+ * 返回 TR_FRAME_READY 时 payload ownership 转移给 out_frame。
  */
 int tr_parser_produce(struct tr_parser *parser, size_t produced,
 		      struct tr_frame *out_frame);
