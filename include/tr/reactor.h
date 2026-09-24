@@ -125,6 +125,15 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 			   tr_reactor_frame_cb frame_cb,
 			   tr_reactor_event_cb event_cb, void *callback_arg);
 
+/*
+ * Wait until the reactor thread has completed every callback and command that
+ * was already in flight before this call. This is a lifecycle barrier used
+ * after disabling callbacks and before freeing callback-owned state.
+ *
+ * Must not be called from the reactor thread itself.
+ */
+int tr_reactor_quiesce(struct tr_reactor *reactor);
+
 /* Snapshot current slot state for replacement/diagnostics. */
 int tr_reactor_get_connection_state(struct tr_conn_handle connection,
 				    enum tr_connection_state *out);
