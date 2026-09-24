@@ -1058,7 +1058,11 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 	ret = tr_rpc_executor_push(endpoint, task);
 	if (ret != TR_OK) {
 		call->task_refs--;
-		tr_rpc_endpoint_put(endpoint);
+		/*
+		 * endpoint->lock is held and the owner reference is still live,
+		 * so this rollback cannot be the final put.
+		 */
+		(void)tr_refcount_put(&endpoint->refs);
 	}
 	return ret;
 }
@@ -1066,6 +1070,8 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			     struct tr_rpc_call_handle handle)
 {
+	int last;
+
 	pthread_mutex_lock(&endpoint->lock);
 	if (handle.slot < endpoint->config.max_calls) {
 		struct tr_rpc_call_slot *call = &endpoint->calls[handle.slot];
@@ -1076,10 +1082,19 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			tr_rpc_maybe_free_call_locked(call);
 		}
 	}
+
+	/*
+	 * Drop the task's endpoint reference while holding endpoint->lock.
+	 * Destroy waits on this same lock/condition before dropping the owner
+	 * reference, so it cannot free the endpoint before this signal completes.
+	 */
+	last = tr_refcount_put(&endpoint->refs);
+	if (last == 0 && tr_refcount_read(&endpoint->refs) == 1U)
+		pthread_cond_broadcast(&endpoint->ref_cond);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	/* Every successfully queued task owns one endpoint reference. */
-	tr_rpc_endpoint_put(endpoint);
+	if (last == 1)
+		tr_rpc_endpoint_release(endpoint);
 }
 
 static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
