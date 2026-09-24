@@ -1,4 +1,5 @@
 #include "tr/channel.h"
+#include "channel_internal.h"
 
 #include "tr/status.h"
 #include "tr/wire.h"
@@ -61,6 +62,7 @@ struct tr_channel {
 	int bulk_alive;
 	int control_ready;
 	int bulk_ready;
+	int handshake_started;
 	int local_draining;
 	int control_peer_draining;
 	int bulk_peer_draining;
@@ -1791,6 +1793,46 @@ static void tr_channel_default_config(struct tr_channel_config *config)
 			config->reassembly_pool->buffer_size;
 }
 
+
+int tr_channel_start(struct tr_channel *channel)
+{
+	struct tr_conn_handle control_connection;
+	struct tr_conn_handle bulk_connection;
+	int split;
+	int ret;
+
+	if (!channel)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->handshake_started) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+
+	channel->handshake_started = 1;
+	control_connection = channel->control_connection;
+	bulk_connection = channel->bulk_connection;
+	split = !tr_conn_equal(control_connection, bulk_connection);
+	pthread_mutex_unlock(&channel->lock);
+
+	ret = tr_channel_send_hello(channel, control_connection);
+	ret = tr_channel_normalize_create_hello_error(
+		channel, control_connection, ret);
+	if (ret != TR_OK)
+		return ret;
+
+	if (split) {
+		ret = tr_channel_send_hello(channel, bulk_connection);
+		ret = tr_channel_normalize_create_hello_error(
+			channel, bulk_connection, ret);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	return TR_OK;
+}
+
 struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
@@ -1842,12 +1884,14 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	build->channel = NULL;
 }
 
-int tr_channel_create(const struct tr_channel_config *config,
+static int tr_channel_create_common(
+		      const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
 		      struct tr_conn_handle bulk_connection,
 		      tr_stream_data_cb data_cb,
 		      tr_stream_event_cb stream_event_cb,
 		      tr_channel_event_cb channel_event_cb, void *callback_arg,
+		      int start_handshake,
 		      struct tr_channel **out)
 {
 	struct tr_channel_build build TR_AUTO(tr_channel_build_cleanup) = { 0 };
@@ -1944,16 +1988,8 @@ int tr_channel_create(const struct tr_channel_config *config,
 		build.bulk_handler_installed = 1;
 	}
 
-	ret = tr_channel_send_hello(channel, control_connection);
-	ret = tr_channel_normalize_create_hello_error(
-		channel, control_connection, ret);
-	if (ret != TR_OK)
-		return ret;
-
-	if (!tr_conn_equal(control_connection, bulk_connection)) {
-		ret = tr_channel_send_hello(channel, bulk_connection);
-		ret = tr_channel_normalize_create_hello_error(
-			channel, bulk_connection, ret);
+	if (start_handshake) {
+		ret = tr_channel_start(channel);
 		if (ret != TR_OK)
 			return ret;
 	}
@@ -1961,6 +1997,34 @@ int tr_channel_create(const struct tr_channel_config *config,
 	*out = channel;
 	build.channel = NULL;
 	return TR_OK;
+}
+
+int tr_channel_create(const struct tr_channel_config *config,
+		      struct tr_conn_handle control_connection,
+		      struct tr_conn_handle bulk_connection,
+		      tr_stream_data_cb data_cb,
+		      tr_stream_event_cb stream_event_cb,
+		      tr_channel_event_cb channel_event_cb, void *callback_arg,
+		      struct tr_channel **out)
+{
+	return tr_channel_create_common(config, control_connection,
+					bulk_connection, data_cb, stream_event_cb,
+					channel_event_cb, callback_arg, 1, out);
+}
+
+int tr_channel_create_deferred(
+	const struct tr_channel_config *config,
+	struct tr_conn_handle control_connection,
+	struct tr_conn_handle bulk_connection,
+	tr_stream_data_cb data_cb,
+	tr_stream_event_cb stream_event_cb,
+	tr_channel_event_cb channel_event_cb,
+	void *callback_arg,
+	struct tr_channel **out)
+{
+	return tr_channel_create_common(config, control_connection,
+					bulk_connection, data_cb, stream_event_cb,
+					channel_event_cb, callback_arg, 0, out);
 }
 
 void tr_channel_destroy(struct tr_channel *channel)
