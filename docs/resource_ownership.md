@@ -191,11 +191,36 @@ Call 自己的 `task_refs` 职责不同：
 
 ## 10. Reactor ownership
 
-Reactor/Connection 的可变 Transport 状态原则上属于 Reactor owner thread。
+Reactor/Connection 的可变 Transport 状态属于 Reactor owner thread。
 
-其他线程应通过 command queue 提交操作，而不是直接取得可变状态 ownership。
+当前边界：
+
+- connection handler / callback_arg 只存放在 `tr_connection`，只由 Reactor owner thread 修改；
+- 外部 `tr_reactor_set_handler()` 通过同步 `TR_CMD_SET_HANDLER` 提交修改；
+- frame/event callback dispatch 直接读取 owner-owned connection state，不获取 mutex；
+- slot 只保留 generation + state capability metadata，并通过一个 C11 atomic 值一次性发布；
+- 外部状态查询读取 atomic slot snapshot，不进入 event-loop mutex；
+- producer 侧 `ctl_lock` 和 command queue mutex 只负责跨线程控制面交接，不属于 Reactor event-loop 热路径。
+
+```text
+producer / RPC / Channel thread
+        |
+        | command + eventfd
+        v
+---------------- cross-thread boundary ----------------
+        |
+        v
+Reactor owner thread
+  connection handler
+  parser
+  TX/RX queue
+  epoll interest
+  connection mutable state
+```
 
 不要用 mutex 去弥补不清楚的 owner 关系。能通过 single-owner 解决的状态，应优先通过 owner model 解决。
+
+Debug build 会通过 owner-thread invariant 检查关键 Reactor mutation，避免未来重新引入跨线程直接写状态。
 
 ## 11. Lock ownership
 
