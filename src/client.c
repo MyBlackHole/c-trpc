@@ -112,12 +112,16 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 				uint32_t timeout_ms, int *out_fd)
 {
 	struct pollfd pfd;
-	int fd = -1;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
+
+	if (!out_fd)
+		return TR_ERR_INVALID;
+	*out_fd = -1;
 
 	ret = tr_tcp_connect_ipv4(address, port, &fd);
 	if (ret == TR_OK) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_OK;
 	}
 	if (ret != TR_IN_PROGRESS)
@@ -131,22 +135,16 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 		ret = poll(&pfd, 1, (int)timeout_ms);
 	} while (ret < 0 && errno == EINTR);
 
-	if (ret == 0) {
-		tr_socket_close(&fd);
+	if (ret == 0)
 		return TR_ERR_TIMEOUT;
-	}
-	if (ret < 0) {
-		tr_socket_close(&fd);
+	if (ret < 0)
 		return TR_ERR_SYS;
-	}
 
 	ret = tr_tcp_finish_connect(fd);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	if (ret != TR_OK)
 		return ret;
-	}
 
-	*out_fd = fd;
+	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
 }
 
@@ -259,7 +257,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_channel_keepalive_config keepalive_config;
-	int fd = -1;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
 
 	if (!client || !ipv4_address || port == 0)
@@ -273,10 +271,9 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		return ret;
 
 	ret = tr_reactor_adopt_fd(client->reactor, fd, &client->connection);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	if (ret != TR_OK)
 		return ret;
-	}
+	(void)tr_fd_take(&fd);
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
