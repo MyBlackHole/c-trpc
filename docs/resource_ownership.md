@@ -77,6 +77,53 @@ The child is released before the parent.
 
 Do not reorder cleanup-managed declarations without checking dependency order.
 
+## Construction and transaction guards
+
+Automatic cleanup has two forms in c-trpc.
+
+### Simple lexical owner
+
+Use a typed cleanup directly for one independent resource:
+
+```c
+int fd TR_AUTO(tr_fd_cleanup) = -1;
+struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+```
+
+### Complex build guard
+
+Objects whose destructor is only valid after several subresources are
+initialized use a small build guard. The guard records which initialization
+steps succeeded and unwinds only those resources.
+
+This is the required pattern for constructors such as Reactor, Channel and RPC
+Endpoint. It prevents two common bugs:
+
+- calling a full destructor on a partially initialized object;
+- forgetting to extend every `goto fail_*` chain when a new resource is added.
+
+A build guard is disarmed only after the fully initialized object is handed to
+its owner.
+
+### Transaction rollback guard
+
+Operations that mutate an existing owner across several steps use an armed
+rollback guard. Examples are Client connect and Server peer adoption.
+
+```text
+begin transaction
+    |
+acquire/transfer resources
+    |
+failure ---------> scope cleanup rolls back
+    |
+success
+    |
+disarm guard
+```
+
+This makes a newly added early return rollback-safe by default.
+
 ## Explicit ownership transfer
 
 Ownership transfer must be visible in code through a typed `*_take()` helper
