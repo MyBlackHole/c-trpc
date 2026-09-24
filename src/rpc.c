@@ -830,7 +830,7 @@ static int tr_rpc_encode_control_locked(struct tr_rpc_endpoint *endpoint,
 					   status, 0, out);
 }
 
-/* endpoint lock must be held */
+/* 调用方必须已经持有 endpoint->lock。 */
 static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 					struct tr_rpc_call_slot *call)
 {
@@ -1043,7 +1043,7 @@ out:
 	return ret;
 }
 
-/* endpoint lock must be held */
+/* 调用方必须已经持有 endpoint->lock。 */
 static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 				    struct tr_rpc_call_slot *call,
 				    const struct tr_rpc_task *task)
@@ -1059,8 +1059,8 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 	if (ret != TR_OK) {
 		call->task_refs--;
 		/*
-		 * endpoint->lock is held and the owner reference is still live,
-		 * so this rollback cannot be the final put.
+		 * 当前仍持有 endpoint->lock，且 owner reference 仍然存活，
+		 * 因此这里的 rollback put 不可能成为最后一次 put。
 		 */
 		(void)tr_refcount_put(&endpoint->refs);
 	}
@@ -1084,9 +1084,9 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 	}
 
 	/*
-	 * Drop the task's endpoint reference while holding endpoint->lock.
-	 * Destroy waits on this same lock/condition before dropping the owner
-	 * reference, so it cannot free the endpoint before this signal completes.
+	 * 在持有 endpoint->lock 时释放 task 持有的 Endpoint 强引用。
+	 * destroy 会在同一把锁/条件变量上等待，再释放 owner reference，
+	 * 因此这里完成 signal 之前 Endpoint 不可能被提前 free。
 	 */
 	last = tr_refcount_put(&endpoint->refs);
 	if (last == 0 && tr_refcount_read(&endpoint->refs) == 1U)
@@ -1395,10 +1395,9 @@ static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 	executor->running_count++;
 
 	/*
-	 * A shared worker consumed this endpoint's wake token. If other Calls on
-	 * the endpoint are already ready, publish one replacement token before
-	 * releasing the endpoint executor lock so another shared worker may run
-	 * them concurrently.
+	 * shared worker 已消费该 Endpoint 的 wake token。
+	 * 如果该 Endpoint 上还有其他 ready Call，则在释放 executor lock 之前
+	 * 再发布一个 replacement token，让其他 shared worker 可以并行处理。
 	 */
 	if (executor->group && executor->ready_count != 0 &&
 	    !executor->group_enqueued) {
@@ -1630,9 +1629,10 @@ static void tr_rpc_executor_shutdown(struct tr_rpc_endpoint *endpoint)
 	pthread_mutex_unlock(&executor->lock);
 
 	/*
-	 * Standalone endpoints own their workers and must join them before the
-	 * owner's final put. Shared server workers are owned by the group and
-	 * drain existing task references asynchronously.
+	 * standalone Endpoint 自己拥有 worker，因此 owner 最后一次 put 之前
+	 * 必须先 join 全部 worker。
+	 * Server 的 shared worker 由 executor group 拥有，只需要异步排空
+	 * 已经存在的 task reference。
 	 */
 	if (!executor->group) {
 		for (i = 0; i < executor->started_threads; ++i)
@@ -1694,9 +1694,9 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 
 	threads = (pthread_t *)calloc(thread_count, sizeof(*threads));
 	/*
-	 * The server reaper removes one peer slot before destroying that old
-	 * endpoint, so one retiring endpoint may briefly overlap max_peers live
-	 * endpoints. Keep one extra wake slot for that bounded overlap.
+	 * Server reaper 会先从 peer table 移除旧 peer，再销毁旧 Endpoint。
+	 * 因此 retiring Endpoint 可能和 max_peers 个 live Endpoint 短暂重叠。
+	 * ready queue 额外保留一个 slot，用来容纳这个有界重叠窗口。
 	 */
 	ready_endpoints = (struct tr_rpc_endpoint **)calloc(
 		endpoint_capacity + 1U, sizeof(*ready_endpoints));
@@ -1819,7 +1819,7 @@ static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
 	return ret;
 }
 
-/* endpoint lock must be held */
+/* 调用方必须已经持有 endpoint->lock。 */
 static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 					 struct tr_rpc_call_slot *call)
 {
@@ -2641,10 +2641,9 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 		return;
 
 	/*
-	 * Stop every source that can create new endpoint users, then wait for
-	 * existing task references to drain. Endpoint borrows Channel, so this
-	 * destructor remains synchronous: callers may safely destroy Channel
-	 * immediately after it returns.
+	 * 先关闭所有可能产生新 Endpoint user 的来源，再等待已有 task reference
+	 * 全部排空。Endpoint 只是借用 Channel，因此 destructor 必须保持同步：
+	 * 本函数返回后调用方可以立即安全销毁 Channel。
 	 */
 	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
 	(void)tr_channel_quiesce(endpoint->channel);
@@ -2652,7 +2651,7 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_executor_shutdown(endpoint);
 	tr_rpc_endpoint_wait_owner_only(endpoint);
 
-	/* Drop the owner's initial strong reference; this is the final put. */
+	/* 释放 owner 创建时持有的初始强引用；此处必须是最后一次 put。 */
 	tr_rpc_endpoint_put(endpoint);
 }
 
