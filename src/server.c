@@ -186,6 +186,10 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 		int reap = 0;
 
 		pthread_mutex_lock(&server->lock);
+		if (!server->peers[i].used) {
+			pthread_mutex_unlock(&server->lock);
+			continue;
+		}
 		snapshot = server->peers[i];
 		pthread_mutex_unlock(&server->lock);
 
