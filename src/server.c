@@ -289,8 +289,9 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 		(void)tr_reactor_close(peer->connection);
 
 	/*
-	 * Once Channel/RPC state exists, Reactor callbacks may have observed it.
-	 * Publish the partial peer and let the reaper quiesce/destroy it.
+	 * 一旦 Channel/RPC 状态已经建立，Reactor callback 就可能观察过它们。
+	 * 此时失败不能直接 free；必须先发布 partial peer，
+	 * 再由 reaper 完成 quiescence 和 destroy。
 	 */
 	if (peer->channel || peer->rpc) {
 		pthread_mutex_lock(&guard->server->lock);
@@ -430,7 +431,7 @@ static void *tr_server_accept_main(void *arg)
 			if (ret != TR_OK)
 				break;
 
-			/* tr_server_adopt_peer() always consumes the accepted fd. */
+			/* tr_server_adopt_peer() 无论成功失败都会消费 accepted fd 的 ownership。 */
 			(void)tr_server_adopt_peer(server, fd);
 		}
 	}
