@@ -124,12 +124,12 @@ so the server can prove which independently accepted CONTROL and BULK sockets
 belong to the same logical Channel; that pairing protocol is intentionally not
 guessed or inferred from accept order.
 
-The server facade retains accepted peer objects until server shutdown. This
-avoids freeing Channel/RPC objects while Reactor callbacks may still be in
-flight. Safe runtime peer reclamation will require an explicit callback
-quiescence primitive and is a future production-hardening item. Therefore
-`max_peers` in this V1 facade is a bound on accepted peer objects over the
-server lifetime, not only the instantaneous live-client count.
+The server facade reclaims disconnected peer objects at runtime. Reactor
+callback teardown uses an explicit quiescence barrier: callbacks are disabled
+first, then the owning thread waits until the Reactor has crossed the barrier
+before RPC/Channel storage is released. Therefore `max_peers` is a bound on
+concurrently retained peer objects rather than cumulative accepts over the
+server lifetime.
 
 Two real-process examples are built by default:
 
@@ -631,6 +631,9 @@ RPC:
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
 - high-level `tr_server` + `tr_client` facade performs a real TCP Unary RPC end-to-end
 - standalone `examples/echo_server` and `examples/echo_client` run as separate processes
+- Reactor callback quiescence during RPC/Channel teardown
+- server facade peer reclamation with `max_peers=1` across sequential clients
+- failed high-level Client connect attempts roll back and can be retried on the same Client object
 
 Current build validation passes:
 
@@ -652,7 +655,6 @@ Current build validation passes:
 - TLS/mTLS transport provider integration
 - backup semantics / durable commit / backup resume / storage / filesystem I/O
 - hardware-accelerated CRC32C dispatch
-- safe runtime server-peer reclamation with callback quiescence
 - split-connection Client/Server facade pairing/binding protocol
 - lock-free command queue / io_uring / kernel zerocopy optimizations
 
@@ -664,13 +666,12 @@ Current build validation passes:
 - TX logical-message size is bounded by the current 32-bit message/reassembly sizing policy and configured flow-control limits
 - executor workers run different Calls in parallel, but one Call is intentionally serialized and can therefore be delayed by its own slow handler
 - generic Streaming writes do not internally queue arbitrary application messages: `TR_AGAIN` is intentional backpressure and the caller retries after `TR_RPC_CALL_EVENT_WRITABLE` / server `on_writable`
-- direct destruction still assumes callbacks are quiesced; normal shutdown should first use `tr_channel_begin_drain()` / `tr_channel_wait_drained()` and then stop Reactor ownership
+- direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - V1 automatic client reconnect uses one low-rate maintenance thread per enabled Channel; it is not on the DATA hot path
 - server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
 - the V1 deadline scheduler uses one monotonic timer thread per RPC endpoint and scans the bounded Call table
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
-- server facade peer objects are retained until server shutdown, so `max_peers` bounds accepted peer objects over the server lifetime in V1
 
 ## Build
 
@@ -681,16 +682,16 @@ make test
 ## Next milestone
 
 The high-level Client/Server facade, capability negotiation, graceful drain,
-keepalive/liveness, and diagnostics are implemented. The next production work
-should focus on:
+keepalive/liveness, diagnostics, callback quiescence, and runtime peer
+reclamation are implemented. The next production work should focus on:
 
-1. callback-quiescence support so disconnected server peers can be reclaimed safely at runtime.
+1. shared RPC executor and timer/maintenance scheduling so thread count does not scale with peer count.
 2. split CONTROL/BULK facade binding identity so independently accepted sockets can be paired securely.
-3. typed codec registry (for example Protobuf) while retaining RAW bulk slices.
-4. TLS/mTLS provider integration before a connection enters Channel HELLO.
-5. explicit RPC/service Health service, separate from Transport keepalive.
-6. generic RPC retry policy only for methods marked retryable/idempotent.
-7. fuzz/soak/benchmark suites and shared-connection CONTROL fairness instrumentation.
-8. optional RX vectored messages and hardware CRC dispatch only if profiling justifies them.
+3. strict CONTROL priority at DATA-frame boundaries in shared-connection mode.
+4. typed codec registry (for example Protobuf) while retaining RAW bulk slices.
+5. TLS/mTLS provider integration before a connection enters Channel HELLO.
+6. explicit RPC/service Health service, separate from Transport keepalive.
+7. generic RPC retry policy only for methods marked retryable/idempotent.
+8. fuzz/soak/benchmark suites, then optional RX vectored messages and hardware CRC dispatch when profiling justifies them.
 
 Backup remains an application layer above this generic RPC/Transport library.
