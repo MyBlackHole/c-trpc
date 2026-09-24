@@ -4237,6 +4237,66 @@ static int test_connect_ipv4_port(uint16_t port, int *out_fd)
 	return TR_OK;
 }
 
+static void test_client_shared_maintenance_threads(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	uint16_t port = 0;
+	unsigned before;
+	unsigned after;
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.executor_threads = 1U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.limits.rpc_message_buffer_bytes = 4096U;
+	server_config.limits.rpc_message_pool_count = 32U;
+	server_config.limits.reassembly_pool_count = 4U;
+	server_config.limits.rx_buffer_count = 32U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 20U;
+	client_config.keepalive_timeout_ms = 200U;
+	client_config.enable_reconnect = 0;
+	client_config.limits.executor_threads = 1U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	client_config.limits.rpc_message_buffer_bytes = 4096U;
+	client_config.limits.rpc_message_pool_count = 32U;
+	client_config.limits.reassembly_pool_count = 4U;
+	client_config.limits.rx_buffer_count = 32U;
+
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+
+	/*
+	 * Client create 已经启动 Reactor + shared maintenance。
+	 * connect 之后只允许新增一个 RPC executor worker；
+	 * deadline 与 keepalive 不能再各自创建 thread。
+	 */
+	before = test_linux_thread_count();
+	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+
+	{
+		struct timespec pause_time;
+		pause_time.tv_sec = 0;
+		pause_time.tv_nsec = 100000000L;
+		nanosleep(&pause_time, NULL);
+	}
+
+	after = test_linux_thread_count();
+	assert(after <= before + 1U);
+
+	tr_client_destroy(client);
+	tr_server_destroy(server);
+}
+
 static void test_server_shared_maintenance_threads(void)
 {
 	struct tr_server_config server_config;
@@ -4775,6 +4835,7 @@ int main(void)
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
 	test_shared_maintenance_scheduler();
+	test_client_shared_maintenance_threads();
 	test_server_shared_maintenance_threads();
 	test_server_shared_rpc_executor();
 	test_server_peer_refcount_drain();
