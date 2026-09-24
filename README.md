@@ -504,7 +504,8 @@ first response is encoded.
 - one task is taken per ready-Call scheduling turn, providing fairness without letting thread count scale with accepted peers
 - incoming RPC payload ownership is held until executor processing completes
 - this naturally delays Stream receive-credit return while application processing is outstanding
-- Call `task_refs` keep an endpoint alive while shared workers still have queued/running callbacks
+- each queued executor task holds a C11 strong reference on its RPC Endpoint
+- Call `task_refs` remain only for Call-slot reuse; Endpoint lifetime uses `tr_refcount`
 
 The executor implementation therefore separates network progress from application latency without sacrificing in-Call message ordering. Server worker count is now O(1) with respect to peer count; endpoint task queues remain independently bounded.
 
@@ -577,6 +578,7 @@ The detailed C11 ownership/automatic-cleanup rules are documented in
 - lexical owners should use typed `TR_AUTO(...)` cleanup where practical
 - explicit `*_take()` helpers disarm automatic cleanup when ownership moves
 - cleanup runs in reverse declaration order, so declaration order is a lifetime dependency
+- asynchronous shared users acquire a strong reference before publication and release it with a matching put
 - `tr_reactor_adopt_fd()` returning `TR_OK` transfers fd ownership to Reactor.
 - `tr_reactor_send()` returning `TR_OK` transfers its payload buffer.
 - `tr_reactor_sendv()` returning `TR_OK` transfers every supplied payload buffer.
@@ -643,6 +645,8 @@ RPC:
 - Reactor callback quiescence during RPC/Channel teardown
 - server facade peer reclamation with `max_peers=1` across sequential clients
 - failed high-level Client connect attempts roll back and can be retried on the same Client object
+- C11 refcount invariants: no resurrection, no underflow, no saturation overflow
+- server peer retirement while a shared RPC handler is still running; Endpoint/Channel lifetime remains valid until the task reference drains
 
 Current build validation passes:
 
