@@ -1155,7 +1155,7 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 		struct tr_rpc_message message;
 		struct tr_rpc_wire_header wire;
 		struct tr_rpc_unary_response response;
-		struct tr_buffer *response_buffer = NULL;
+		struct tr_buffer *response_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 		tr_rpc_unary_handler handler = method ? method->unary_handler :
 							NULL;
 		int ret;
@@ -1200,8 +1200,7 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 						&response_buffer);
 					if (ret == TR_OK) {
 						call->pending_tx =
-							response_buffer;
-						response_buffer = NULL;
+							tr_buffer_take(&response_buffer);
 						(void)tr_rpc_try_unary_send_locked(
 							endpoint, call);
 					}
@@ -1210,8 +1209,6 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 			pthread_mutex_unlock(&endpoint->lock);
 		}
 
-		if (response_buffer)
-			tr_buffer_release(response_buffer);
 		break;
 	}
 
@@ -1837,7 +1834,7 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 {
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
-	struct tr_buffer *control = NULL;
+	struct tr_buffer *control TR_AUTO(tr_buffer_cleanup) = NULL;
 	int peer_visible;
 	int ret = TR_OK;
 
@@ -1882,10 +1879,8 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 	if (peer_visible && !call->local_closed && call->method) {
 		ret = tr_rpc_encode_control_locked(
 			endpoint, call, TR_RPC_WIRE_CANCEL, status, &control);
-		if (ret == TR_OK) {
-			call->pending_control = control;
-			control = NULL;
-		}
+		if (ret == TR_OK)
+			call->pending_control = tr_buffer_take(&control);
 	}
 
 	call->need_local_close = 1;
@@ -1894,8 +1889,6 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 	pthread_cond_signal(&endpoint->deadline_cond);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	if (control)
-		tr_buffer_release(control);
 	return TR_OK;
 }
 
@@ -2698,7 +2691,7 @@ int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 	struct tr_rpc_method_entry *method;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_call_handle handle;
-	struct tr_buffer *request_buffer = NULL;
+	struct tr_buffer *request_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	uint32_t slot;
 	int ret;
 
@@ -2745,8 +2738,7 @@ int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
-	call->pending_tx = request_buffer;
-	request_buffer = NULL;
+	call->pending_tx = tr_buffer_take(&request_buffer);
 	handle = tr_rpc_make_call_handle(endpoint, slot, call);
 
 	ret = tr_stream_open(endpoint->channel, method->desc.lane,
@@ -2878,7 +2870,7 @@ int tr_rpc_call_send(struct tr_rpc_call_handle handle,
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_method_desc method;
-	struct tr_buffer *encoded = NULL;
+	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
 	uint16_t wire_type;
 	uint32_t codec_id;
 	uint32_t limit;
@@ -2905,14 +2897,12 @@ int tr_rpc_call_send(struct tr_rpc_call_handle handle,
 	if (ret == TR_OK) {
 		ret = tr_stream_send(call->stream, encoded);
 		if (ret == TR_OK) {
-			encoded = NULL;
+			(void)tr_buffer_take(&encoded);
 			call->tx_count++;
 		}
 	}
 	pthread_mutex_unlock(&endpoint->lock);
 
-	if (encoded)
-		tr_buffer_release(encoded);
 	return ret;
 }
 
@@ -2922,7 +2912,7 @@ int tr_rpc_call_send_buffer(struct tr_rpc_call_handle handle,
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_method_desc method;
-	struct tr_buffer *header = NULL;
+	struct tr_buffer *header TR_AUTO(tr_buffer_cleanup) = NULL;
 	struct tr_buffer *parts[2];
 	uint16_t wire_type;
 	uint32_t codec_id;
@@ -2953,14 +2943,12 @@ int tr_rpc_call_send_buffer(struct tr_rpc_call_handle handle,
 		parts[1] = payload;
 		ret = tr_stream_sendv(call->stream, parts, 2);
 		if (ret == TR_OK) {
-			header = NULL;
+			(void)tr_buffer_take(&header);
 			call->tx_count++;
 		}
 	}
 	pthread_mutex_unlock(&endpoint->lock);
 
-	if (header)
-		tr_buffer_release(header);
 	return ret;
 }
 
@@ -3010,7 +2998,7 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle handle, int status)
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_method_desc method;
-	struct tr_buffer *buffer = NULL;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	struct tr_rpc_bytes empty;
 	enum tr_rpc_cardinality cardinality;
 	int ret;
@@ -3047,7 +3035,7 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle handle, int status)
 	if (ret == TR_OK) {
 		ret = tr_stream_send(call->stream, buffer);
 		if (ret == TR_OK) {
-			buffer = NULL;
+			(void)tr_buffer_take(&buffer);
 			call->final_status_sent = 1;
 			call->final_status = status;
 			call->deadline_ns = 0;
@@ -3073,8 +3061,6 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle handle, int status)
 	}
 	pthread_mutex_unlock(&endpoint->lock);
 
-	if (buffer)
-		tr_buffer_release(buffer);
 	return ret;
 }
 
