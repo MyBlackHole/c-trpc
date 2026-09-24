@@ -5,6 +5,7 @@
 #include "tr/status.h"
 #include "tr/endian.h"
 #include "tr/guard.h"
+#include "tr/refcount.h"
 #include "rpc_internal.h"
 
 #include <pthread.h>
@@ -165,7 +166,6 @@ TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 struct tr_rpc_endpoint {
 	pthread_mutex_t lock;
 	pthread_cond_t deadline_cond;
-	pthread_cond_t task_cond;
 	pthread_t deadline_thread;
 	int deadline_started;
 	int deadline_stopping;
@@ -177,7 +177,7 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_call_slot *calls;
 
 	struct tr_rpc_executor executor;
-	uint32_t executor_task_refs;
+	struct tr_refcount refs;
 
 	uint64_t stat_calls_started;
 	uint64_t stat_calls_completed;
@@ -193,6 +193,9 @@ struct tr_rpc_endpoint {
 	 TR_RPC_METADATA_RESERVED_TIMEOUT_LEN + 8U)
 
 static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status);
+static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint);
+static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint);
+static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint);
 
 static uint64_t tr_rpc_now_ns(void)
 {
