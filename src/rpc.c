@@ -1326,7 +1326,7 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 }
 
 static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
-				struct tr_rpc_task *task)
+				struct tr_rpc_task *task, int wait)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
 	struct tr_rpc_executor_callq *callq;
@@ -1335,12 +1335,16 @@ static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 	uint32_t node_index;
 
 	pthread_mutex_lock(&executor->lock);
-	while (executor->ready_count == 0 && !executor->stopping)
+	if (executor->group && !wait)
+		executor->group_enqueued = 0;
+
+	while (wait && executor->ready_count == 0 && !executor->stopping)
 		pthread_cond_wait(&executor->cond, &executor->lock);
 
-	if (executor->ready_count == 0 && executor->stopping) {
+	if (executor->ready_count == 0) {
+		int ret = executor->stopping ? 0 : -1;
 		pthread_mutex_unlock(&executor->lock);
-		return 0;
+		return ret;
 	}
 
 	slot = executor->ready_calls[executor->ready_head];
@@ -1364,9 +1368,25 @@ static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 
 	node->next = executor->free_head;
 	executor->free_head = node_index;
-	executor->queued_count--;
+	if (callq->queued_count != 0)
+		callq->queued_count--;
+	if (executor->queued_count != 0)
+		executor->queued_count--;
 	callq->running = 1;
 	executor->running_count++;
+
+	/*
+	 * A shared worker consumed this endpoint's wake token. If other Calls on
+	 * the endpoint are already ready, publish one replacement token before
+	 * releasing the endpoint executor lock so another shared worker may run
+	 * them concurrently.
+	 */
+	if (executor->group && executor->ready_count != 0 &&
+	    !executor->group_enqueued) {
+		if (tr_rpc_executor_group_enqueue(executor->group, endpoint) ==
+		    TR_OK)
+			executor->group_enqueued = 1;
+	}
 
 	pthread_mutex_unlock(&executor->lock);
 	return 1;
@@ -1391,7 +1411,15 @@ static void tr_rpc_executor_complete_task(struct tr_rpc_endpoint *endpoint,
 				if (tr_rpc_executor_ready_push_locked(
 					    executor, handle.slot) == TR_OK) {
 					callq->ready = 1;
-					pthread_cond_signal(&executor->cond);
+					if (executor->group) {
+						if (!executor->group_enqueued &&
+						    tr_rpc_executor_group_enqueue(
+							    executor->group,
+							    endpoint) == TR_OK)
+							executor->group_enqueued = 1;
+					} else {
+						pthread_cond_signal(&executor->cond);
+					}
 				}
 			}
 		}
@@ -1405,11 +1433,58 @@ static void *tr_rpc_executor_main(void *arg)
 
 	for (;;) {
 		struct tr_rpc_task task;
-		int ret = tr_rpc_executor_take(endpoint, &task);
+		int ret = tr_rpc_executor_take(endpoint, &task, 1);
 
 		if (ret == 0)
 			break;
 		if (ret < 0)
+			continue;
+
+		tr_rpc_executor_run_task(endpoint, &task);
+		tr_rpc_executor_complete_task(endpoint, task.call);
+		tr_rpc_task_done(endpoint, task.call);
+	}
+
+	return NULL;
+}
+
+static struct tr_rpc_endpoint *
+tr_rpc_executor_group_take(struct tr_rpc_executor_group *group)
+{
+	struct tr_rpc_endpoint *endpoint;
+
+	pthread_mutex_lock(&group->lock);
+	while (group->count == 0 && !group->stopping)
+		pthread_cond_wait(&group->cond, &group->lock);
+	if (group->count == 0 && group->stopping) {
+		pthread_mutex_unlock(&group->lock);
+		return NULL;
+	}
+
+	endpoint = group->ready_endpoints[group->head];
+	group->ready_endpoints[group->head] = NULL;
+	group->head = (group->head + 1U) % group->capacity;
+	group->count--;
+	pthread_mutex_unlock(&group->lock);
+	return endpoint;
+}
+
+static void *tr_rpc_executor_group_main(void *arg)
+{
+	struct tr_rpc_executor_group *group =
+		(struct tr_rpc_executor_group *)arg;
+
+	for (;;) {
+		struct tr_rpc_endpoint *endpoint =
+			tr_rpc_executor_group_take(group);
+		struct tr_rpc_task task;
+		int ret;
+
+		if (!endpoint)
+			break;
+
+		ret = tr_rpc_executor_take(endpoint, &task, 0);
+		if (ret <= 0)
 			continue;
 
 		tr_rpc_executor_run_task(endpoint, &task);
