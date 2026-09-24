@@ -2623,7 +2623,9 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 
 int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
-	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out)
+	struct tr_rpc_executor_group *group,
+	struct tr_maintenance_scheduler *maintenance,
+	struct tr_rpc_endpoint **out)
 {
 	struct tr_rpc_endpoint_build build
 		TR_AUTO(tr_rpc_endpoint_build_cleanup) = { 0 };
@@ -2660,7 +2662,7 @@ int tr_rpc_endpoint_create_with_executor_group(
 	endpoint->channel = channel;
 	endpoint->config = *config;
 
-	ret = tr_rpc_deadline_init(endpoint);
+	ret = tr_rpc_deadline_init(endpoint, maintenance);
 	if (ret != TR_OK)
 		return ret;
 	build.deadline_ready = 1;
@@ -2687,8 +2689,8 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
 			   struct tr_rpc_endpoint **out)
 {
-	return tr_rpc_endpoint_create_with_executor_group(channel, config, NULL,
-							 out);
+	return tr_rpc_endpoint_create_with_executor_group(
+		channel, config, NULL, NULL, out);
 }
 
 static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint)
