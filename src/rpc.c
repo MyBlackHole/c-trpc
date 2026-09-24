@@ -4,6 +4,7 @@
 #include "tr/rpc_wire.h"
 #include "tr/status.h"
 #include "tr/endian.h"
+#include "rpc_internal.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -105,9 +106,12 @@ struct tr_rpc_executor_callq {
 	uint32_t generation;
 	uint32_t head;
 	uint32_t tail;
+	uint32_t queued_count;
 	int ready;
 	int running;
 };
+
+struct tr_rpc_executor_group;
 
 struct tr_rpc_executor {
 	pthread_mutex_t lock;
@@ -129,13 +133,31 @@ struct tr_rpc_executor {
 	uint32_t ready_tail;
 	uint32_t ready_count;
 
+	struct tr_rpc_executor_group *group;
 	int stopping;
 	uint32_t started_threads;
+};
+
+struct tr_rpc_executor_group {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	pthread_t *threads;
+	struct tr_rpc_endpoint **ready_endpoints;
+
+	uint32_t capacity;
+	uint32_t head;
+	uint32_t tail;
+	uint32_t count;
+
+	uint32_t thread_count;
+	uint32_t started_threads;
+	int stopping;
 };
 
 struct tr_rpc_endpoint {
 	pthread_mutex_t lock;
 	pthread_cond_t deadline_cond;
+	pthread_cond_t task_cond;
 	pthread_t deadline_thread;
 	int deadline_started;
 	int deadline_stopping;
@@ -147,6 +169,7 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_call_slot *calls;
 
 	struct tr_rpc_executor executor;
+	uint32_t executor_task_refs;
 
 	uint64_t stat_calls_started;
 	uint64_t stat_calls_completed;
