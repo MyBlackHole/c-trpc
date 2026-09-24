@@ -15,9 +15,10 @@ struct tr_rpc_bytes {
 };
 
 /*
- * RAW is the V1 baseline codec. The copied control-path helper below remains
- * useful for small messages. Bulk RPC can instead use tr_rpc_call_send_buffer(),
- * which emits a small RPC envelope plus the original payload as Transport slices.
+ * RAW 是 V1 baseline codec。
+ * 下面的 copied control-path helper 适合小消息；
+ * Bulk RPC 可以改用 tr_rpc_call_send_buffer()，把小型 RPC envelope
+ * 和原始 payload 作为多个 Transport slice 发送，避免额外大块复制。
  */
 int tr_rpc_raw_encode(const struct tr_rpc_bytes *input, uint8_t *dst,
 		      uint32_t capacity, uint32_t *written);
