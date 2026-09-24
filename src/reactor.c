@@ -1876,19 +1876,18 @@ int tr_reactor_get_connection_state(struct tr_conn_handle connection,
 				    enum tr_connection_state *out)
 {
 	struct tr_reactor *reactor = connection.reactor;
+	uint64_t meta;
 
 	if (!reactor || !out ||
 	    connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[connection.slot].generation !=
-	    connection.generation) {
-		pthread_mutex_unlock(&reactor->slot_lock);
+	meta = atomic_load_explicit(&reactor->slots[connection.slot].meta,
+				    memory_order_acquire);
+	if (tr_slot_meta_generation(meta) != connection.generation)
 		return TR_ERR_STALE;
-	}
-	*out = reactor->slots[connection.slot].state;
-	pthread_mutex_unlock(&reactor->slot_lock);
+
+	*out = tr_slot_meta_state(meta);
 	return TR_OK;
 }
 
@@ -1897,44 +1896,63 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 {
 	struct tr_reactor *reactor = connection.reactor;
 	struct tr_connection *conn;
-	enum tr_connection_state state;
+	uint64_t before;
+	uint64_t after;
 
 	if (!reactor || !out ||
 	    connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[connection.slot].generation !=
-	    connection.generation) {
-		pthread_mutex_unlock(&reactor->slot_lock);
-		return TR_ERR_STALE;
-	}
-	state = reactor->slots[connection.slot].state;
-	pthread_mutex_unlock(&reactor->slot_lock);
-
 	conn = &reactor->connections[connection.slot];
-	memset(out, 0, sizeof(*out));
-	out->state = state;
-	out->rx_bytes = __atomic_load_n(&conn->rx_bytes, __ATOMIC_RELAXED);
-	out->tx_bytes = __atomic_load_n(&conn->tx_bytes, __ATOMIC_RELAXED);
-	out->rx_frames = __atomic_load_n(&conn->rx_frames, __ATOMIC_RELAXED);
-	out->tx_frames = __atomic_load_n(&conn->tx_frames, __ATOMIC_RELAXED);
-	out->recv_eagain =
-		__atomic_load_n(&conn->recv_eagain, __ATOMIC_RELAXED);
-	out->send_eagain =
-		__atomic_load_n(&conn->send_eagain, __ATOMIC_RELAXED);
-	out->rx_pauses =
-		__atomic_load_n(&conn->rx_pauses_count, __ATOMIC_RELAXED);
-	out->last_rx_activity_ns =
-		__atomic_load_n(&conn->last_rx_activity_ns, __ATOMIC_RELAXED);
-	out->last_tx_activity_ns =
-		__atomic_load_n(&conn->last_tx_activity_ns, __ATOMIC_RELAXED);
-	out->tx_queued_items =
-		__atomic_load_n(&conn->tx_queued_items, __ATOMIC_RELAXED);
-	out->rx_paused = __atomic_load_n(&conn->rx_paused, __ATOMIC_RELAXED);
-	out->tx_wait_writable =
-		__atomic_load_n(&conn->tx_wait_writable, __ATOMIC_RELAXED);
-	return TR_OK;
+
+	for (;;) {
+		before = atomic_load_explicit(&reactor->slots[connection.slot].meta,
+					      memory_order_acquire);
+		if (tr_slot_meta_generation(before) != connection.generation)
+			return TR_ERR_STALE;
+
+		memset(out, 0, sizeof(*out));
+		out->state = tr_slot_meta_state(before);
+		out->rx_bytes = __atomic_load_n(&conn->rx_bytes, __ATOMIC_RELAXED);
+		out->tx_bytes = __atomic_load_n(&conn->tx_bytes, __ATOMIC_RELAXED);
+		out->rx_frames =
+			__atomic_load_n(&conn->rx_frames, __ATOMIC_RELAXED);
+		out->tx_frames =
+			__atomic_load_n(&conn->tx_frames, __ATOMIC_RELAXED);
+		out->recv_eagain =
+			__atomic_load_n(&conn->recv_eagain, __ATOMIC_RELAXED);
+		out->send_eagain =
+			__atomic_load_n(&conn->send_eagain, __ATOMIC_RELAXED);
+		out->rx_pauses =
+			__atomic_load_n(&conn->rx_pauses_count,
+					__ATOMIC_RELAXED);
+		out->last_rx_activity_ns =
+			__atomic_load_n(&conn->last_rx_activity_ns,
+					__ATOMIC_RELAXED);
+		out->last_tx_activity_ns =
+			__atomic_load_n(&conn->last_tx_activity_ns,
+					__ATOMIC_RELAXED);
+		out->tx_queued_items =
+			__atomic_load_n(&conn->tx_queued_items,
+					__ATOMIC_RELAXED);
+		out->rx_paused =
+			__atomic_load_n(&conn->rx_paused, __ATOMIC_RELAXED);
+		out->tx_wait_writable =
+			__atomic_load_n(&conn->tx_wait_writable,
+					__ATOMIC_RELAXED);
+
+		/*
+		 * slot 在读取统计期间发生 close/reuse 时重新读取。
+		 * 如果 generation 已变化，则旧 handle 已 stale；如果只是同一
+		 * generation 的 state 转换，则重试得到同一个生命周期阶段的快照。
+		 */
+		after = atomic_load_explicit(&reactor->slots[connection.slot].meta,
+					     memory_order_acquire);
+		if (before == after)
+			return TR_OK;
+		if (tr_slot_meta_generation(after) != connection.generation)
+			return TR_ERR_STALE;
+	}
 }
 
 int tr_reactor_resume_rx(struct tr_conn_handle connection)
