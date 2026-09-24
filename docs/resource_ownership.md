@@ -154,6 +154,30 @@ state.
 Synchronization should protect genuinely shared state; it must not compensate
 for unclear ownership.
 
+## Lock ownership
+
+A held mutex is a scope-owned resource when code may leave through multiple
+return paths.
+
+Use `struct tr_mutex_guard` with `TR_AUTO(tr_mutex_guard_cleanup)` for
+genuinely shared state:
+
+```c
+struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
+
+if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
+    return TR_ERR_SYS;
+
+/* every return from this scope unlocks */
+```
+
+This rule does **not** justify adding locks to owner-thread state. Reactor event
+processing should remain single-owner; mutex guards are for state that is
+actually shared across threads.
+
+If an early unlock is required, use `tr_mutex_guard_unlock()`; it disarms the
+scope cleanup before unlocking so scope exit cannot unlock twice.
+
 ## Error paths
 
 Automatic cleanup is preferred for local resources because new early returns
