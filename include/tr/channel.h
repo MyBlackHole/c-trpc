@@ -24,7 +24,7 @@ struct tr_channel_capabilities {
 	uint64_t feature_bits;
 };
 
-/* Logical traffic class. Physical connection mapping is a Channel policy. */
+/* 逻辑 traffic class；映射到哪条物理 connection 由 Channel policy 决定。 */
 enum tr_lane { TR_LANE_CONTROL = 0, TR_LANE_BULK = 1 };
 
 enum tr_channel_role { TR_CHANNEL_CLIENT = 1, TR_CHANNEL_SERVER = 2 };
@@ -57,11 +57,11 @@ enum tr_channel_lane_state {
 };
 
 struct tr_channel_reconnect_config {
-	/* V1 reconnect supports numeric IPv4 endpoints. The address is copied. */
+	/* V1 reconnect 仅支持数字 IPv4 endpoint；address 会复制到 Channel 内部。 */
 	const char *ipv4_address;
 
 	uint16_t control_port;
-	/* 0 means control_port. Ignored in shared-connection mode. */
+	/* 0 表示复用 control_port；shared-connection 模式下忽略该字段。 */
 	uint16_t bulk_port;
 
 	uint32_t initial_delay_ms;
@@ -99,23 +99,23 @@ struct tr_channel_config {
 
 	uint32_t max_streams;
 
-	/* Initial receive capacity granted to the peer for each Stream. */
+	/* 每个 Stream 初始授予 peer 的接收容量。 */
 	uint64_t initial_window_bytes;
 
-	/* Absolute WINDOW_UPDATE is emitted after at least this much credit frees. */
+	/* 至少释放这么多 credit 后才发送新的绝对 WINDOW_UPDATE。 */
 	uint64_t window_update_threshold_bytes;
 
 	/*
-     * Optional receive-side message reassembly. A logical Stream message may
-     * span multiple transport DATA frames. If reassembly_pool is NULL,
-     * fragmented receive is rejected and callers must keep each message within
-     * one transport frame. When enabled, max_message_bytes must fit in one
-     * buffer from reassembly_pool.
+     * 可选的接收侧 message reassembly。
+     * 一个逻辑 Stream message 可以跨多个 Transport DATA frame。
+     * reassembly_pool 为 NULL 时拒绝 fragmented receive，调用方必须保证
+     * 一条 message 能放进一个 Transport frame。
+     * 启用后 max_message_bytes 必须能放进 reassembly_pool 的单个 buffer。
      */
 	uint32_t max_message_bytes;
 	struct tr_buffer_pool *reassembly_pool;
 
-	/* Channel protocol capabilities. Zero versions default to V1 only. */
+	/* Channel protocol capabilities；version 为 0 时默认只支持 V1。 */
 	uint16_t min_protocol_version;
 	uint16_t max_protocol_version;
 	uint64_t feature_bits;
@@ -134,13 +134,13 @@ typedef void (*tr_channel_event_cb)(struct tr_channel *channel,
 				    void *arg);
 
 /*
- * The two connection handles must belong to the same reactor. In shared mode
- * bulk_connection may be equal to control_connection; in split mode they must
- * be different live handles.
+ * 两个 connection handle 必须属于同一个 Reactor。
+ * shared 模式允许 bulk_connection == control_connection；
+ * split 模式要求两者是不同且存活的 handle。
  *
- * The Channel installs per-connection reactor handlers. Destroy the Channel
- * only after the caller has stopped using it and no callback is concurrently
- * executing (normally after the owning reactor is stopped).
+ * Channel 会为 connection 安装 Reactor handler。销毁前必须先停止外部使用，
+ * 并确保不存在并发 callback；tr_channel_destroy() 内部会清理 handler 并等待
+ * callback quiescence。
  */
 int tr_channel_create(const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
@@ -153,9 +153,8 @@ int tr_channel_create(const struct tr_channel_config *config,
 void tr_channel_destroy(struct tr_channel *channel);
 
 /*
- * Replaces upper-layer callbacks. Intended for layering RPC above an existing
- * Channel. Do not destroy the previous callback owner until in-flight callbacks
- * have quiesced.
+ * 替换上层 callback，主要用于在已有 Channel 上叠加 RPC。
+ * 旧 callback owner 在 in-flight callback 完成 quiescence 之前不能释放。
  */
 int tr_channel_set_handler(struct tr_channel *channel,
 			   tr_stream_data_cb data_cb,
@@ -164,27 +163,26 @@ int tr_channel_set_handler(struct tr_channel *channel,
 			   void *callback_arg);
 
 /*
- * Wait until reactor callbacks that may have observed a previous Channel
- * handler have completed. Call after replacing/clearing an upper-layer
- * handler and before freeing the old callback owner.
+ * 等待可能已经观察到旧 Channel handler 的 Reactor callback 全部结束。
+ * 应在替换/清空上层 handler 之后、释放旧 callback owner 之前调用。
  */
 int tr_channel_quiesce(struct tr_channel *channel);
 
 /*
- * Replaces a failed physical connection while keeping the logical Channel.
- * Existing Streams on the failed lane never survive replacement; callers must
- * open new Streams/Calls. In shared mode replacing either lane replaces both.
- * The new handle must belong to the Channel reactor and must already be owned
- * by that reactor (RESERVED or ACTIVE).
+ * 在保留逻辑 Channel 的情况下替换失败的物理 connection。
+ * 失败 lane 上的旧 Stream 不会跨 replacement 存活，调用方必须重新创建
+ * Stream/Call。shared 模式替换任一 lane 等价于同时替换 CONTROL/BULK。
+ * 新 handle 必须属于该 Channel 的 Reactor，且已经由 Reactor 接管
+ * （状态为 RESERVED 或 ACTIVE）。
  */
 int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 				  struct tr_conn_handle connection);
 
 /*
- * Enables V1 client-side automatic reconnect. A small Channel maintenance
- * thread performs connect/backoff work; socket I/O after adoption remains on
- * the owner reactor. In-flight Streams fail immediately on disconnect and are
- * not replayed.
+ * 启用 V1 Client 自动 reconnect。
+ * 一个轻量 Channel maintenance thread 负责 connect/backoff；socket 被
+ * Reactor 接管后，正常 I/O 仍全部由 owner Reactor 执行。
+ * disconnect 时 in-flight Stream 立即失败，不做透明 replay。
  */
 int tr_channel_enable_client_reconnect(
 	struct tr_channel *channel,
@@ -201,19 +199,18 @@ int tr_channel_get_lane_state(struct tr_channel *channel, enum tr_lane lane,
 			      enum tr_channel_lane_state *out);
 
 /*
- * Returns the outbound limits negotiated for the selected lane after it reaches
- * UP. max_frame_payload_bytes/max_message_bytes describe what the peer has
- * advertised it can receive; local receive bounds remain in Channel/Reactor
- * configuration.
+ * 选定 lane 进入 UP 后，返回协商得到的 outbound limits。
+ * max_frame_payload_bytes/max_message_bytes 表示 peer 声明的接收能力；
+ * 本地接收上限仍由 Channel/Reactor 配置决定。
  */
 int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 				struct tr_channel_capabilities *out);
 
 /*
- * Graceful shutdown: blocks creation of new local Streams and sends GOAWAY on
- * ready lanes. Existing Streams continue until naturally closed/cancelled.
- * The operation is idempotent; TR_AGAIN means a GOAWAY control frame could not
- * yet be queued and the caller may retry while the Channel remains draining.
+ * graceful shutdown：禁止创建新的本地 Stream，并在 ready lane 上发送
+ * GOAWAY。已有 Stream 继续运行，直到自然 close/cancel。
+ * 本操作幂等；TR_AGAIN 表示 GOAWAY control frame 暂时无法入队，
+ * Channel 仍保持 draining，调用方可以重试。
  */
 int tr_channel_begin_drain(struct tr_channel *channel);
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
@@ -221,40 +218,40 @@ int tr_channel_get_state(struct tr_channel *channel,
 			 enum tr_channel_state *out);
 uint32_t tr_channel_active_streams(struct tr_channel *channel);
 
-/* Opens a logical byte-stream. Completion is reported by OPENED. */
+/* 打开一个逻辑 byte-stream；完成状态通过 OPENED event 上报。 */
 int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 		   struct tr_stream_handle *out);
 
 /*
- * One write is one logical Stream message. Transport fragments it into DATA
- * frames when it exceeds the reactor frame-payload limit. On TR_OK payload
- * ownership transfers to the reactor until every fragment has been sent.
- * Otherwise the caller retains ownership. TR_AGAIN means flow-control or
- * reactor backpressure.
+ * 一次 write 对应一条逻辑 Stream message。
+ * 超过 Reactor frame-payload 上限时由 Transport 自动切成多个 DATA frame。
+ * 所有权：TR_OK 后 payload ownership 转移给 Reactor，直到全部 fragment
+ * 发送完成；其他返回值下仍归调用方。
+ * TR_AGAIN 表示 flow-control 或 Reactor backpressure。
  */
 int tr_stream_send(struct tr_stream_handle stream, struct tr_buffer *payload);
 
 /*
- * Scatter/gather Stream write. Flow control accounts for the sum of buffer
- * lengths. On TR_OK ownership of every buffer transfers to Transport.
+ * scatter/gather Stream write。flow control 按所有 buffer 长度之和计费。
+ * TR_OK 时每个 buffer 的 ownership 都转移给 Transport。
  */
 int tr_stream_sendv(struct tr_stream_handle stream,
 		    struct tr_buffer *const *payloads, uint32_t payload_count);
 
-/* Half-closes the local sending direction. */
+/* half-close 本地发送方向。 */
 int tr_stream_close(struct tr_stream_handle stream);
 
 /*
- * Releases a payload previously taken by TR_STREAM_DATA_TAKE_OWNERSHIP and
- * returns its bytes to the Stream receive window.
+ * 释放之前通过 TR_STREAM_DATA_TAKE_OWNERSHIP 保留的 payload，
+ * 并把对应字节 credit 归还给 Stream receive window。
  */
 int tr_stream_release_payload(struct tr_stream_handle stream,
 			      struct tr_buffer *payload);
 
-/* Retries pending absolute WINDOW_UPDATE control frames. */
+/* 重试 pending 的绝对 WINDOW_UPDATE control frame。 */
 int tr_channel_flush(struct tr_channel *channel);
 
-/* Snapshot of byte-based flow-control state for diagnostics/tests. */
+/* 获取 byte-based flow-control 状态快照，用于诊断和测试。 */
 struct tr_stream_flow_state {
 	uint64_t tx_sent_bytes;
 	uint64_t tx_send_limit;
