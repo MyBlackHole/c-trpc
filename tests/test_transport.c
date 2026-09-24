@@ -3,6 +3,7 @@
 #include "tr/command_queue.h"
 #include "tr/endian.h"
 #include "tr/frame.h"
+#include "tr/guard.h"
 #include "tr/parser.h"
 #include "tr/reactor.h"
 #include "tr/rpc.h"
@@ -4133,6 +4134,15 @@ static int cleanup_fd_transfer(void)
 	return tr_fd_take(&fd);
 }
 
+static int cleanup_mutex_early_return(pthread_mutex_t *mutex)
+{
+	struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
+
+	if (tr_mutex_guard_acquire(&guard, mutex) != 0)
+		return TR_ERR_SYS;
+	return TR_OK;
+}
+
 static void test_scope_cleanup_ownership(void)
 {
 	struct tr_buffer_pool pool;
@@ -4184,6 +4194,15 @@ static void test_scope_cleanup_ownership(void)
 	assert(order[0] == 3U);
 	assert(order[1] == 2U);
 	assert(order[2] == 1U);
+
+	{
+		pthread_mutex_t mutex;
+		assert(pthread_mutex_init(&mutex, NULL) == 0);
+		assert(cleanup_mutex_early_return(&mutex) == TR_OK);
+		assert(pthread_mutex_trylock(&mutex) == 0);
+		assert(pthread_mutex_unlock(&mutex) == 0);
+		pthread_mutex_destroy(&mutex);
+	}
 }
 
 int main(void)
