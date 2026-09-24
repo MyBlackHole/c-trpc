@@ -1262,9 +1262,9 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 	}
 
 	/*
-     * A single-frame message stays zero-copy. Fragmented messages are copied
-     * exactly once into a bounded Channel reassembly buffer; transport frame
-     * buffers can then return to the Reactor RX pool immediately.
+     * 单 frame message 保持 zero-copy。
+     * fragmented message 只复制一次到有界的 Channel reassembly buffer，
+     * 之后 Transport frame buffer 可以立即归还 Reactor RX pool。
      */
 	if (!fragmented) {
 		if (stream->rx_reassembly ||
@@ -1940,8 +1940,9 @@ void tr_channel_destroy(struct tr_channel *channel)
 					     NULL, NULL);
 
 	/*
-	 * Stop new reactor callbacks from acquiring this Channel, then wait for
-	 * any callback that already copied callback_arg to return.
+	 * 先阻止新的 Reactor callback 再次取得该 Channel，
+	 * 再等待已经复制了 callback_arg 的 in-flight callback 返回。
+	 * 这是释放 Channel 前必须完成的 quiescence 边界。
 	 */
 	(void)tr_reactor_quiesce(channel->reactor);
 
@@ -2161,7 +2162,7 @@ int tr_channel_disable_client_reconnect(struct tr_channel *channel)
 	if (channel->reconnect_thread_started) {
 		thread = channel->reconnect_thread;
 		if (pthread_equal(pthread_self(), thread)) {
-			/* The maintenance thread will observe reconnect_stop and exit. */
+			/* maintenance thread 会观察 reconnect_stop，并自行退出。 */
 			pthread_mutex_unlock(&channel->lock);
 			return TR_OK;
 		}
