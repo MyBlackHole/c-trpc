@@ -18,6 +18,7 @@
 #include "tr/wire.h"
 
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -4127,6 +4128,139 @@ static void shared_executor_test_result(struct tr_rpc_call_handle call,
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static unsigned test_linux_thread_count(void)
+{
+	DIR *dir;
+	struct dirent *entry;
+	unsigned count = 0;
+
+	dir = opendir("/proc/self/task");
+	assert(dir != NULL);
+	while ((entry = readdir(dir)) != NULL) {
+		if (entry->d_name[0] >= '0' && entry->d_name[0] <= '9')
+			count++;
+	}
+	assert(closedir(dir) == 0);
+	return count;
+}
+
+static int test_connect_ipv4_port(uint16_t port, int *out_fd)
+{
+	struct pollfd pfd;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
+	int ret;
+
+	ret = tr_tcp_connect_ipv4("127.0.0.1", port, &fd);
+	if (ret == TR_OK) {
+		*out_fd = tr_fd_take(&fd);
+		return TR_OK;
+	}
+	if (ret != TR_IN_PROGRESS)
+		return ret;
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = fd;
+	pfd.events = POLLOUT;
+	do {
+		ret = poll(&pfd, 1, 5000);
+	} while (ret < 0 && errno == EINTR);
+	if (ret <= 0)
+		return ret == 0 ? TR_ERR_TIMEOUT : TR_ERR_SYS;
+
+	ret = tr_tcp_finish_connect(fd);
+	if (ret != TR_OK)
+		return ret;
+
+	*out_fd = tr_fd_take(&fd);
+	return TR_OK;
+}
+
+static void test_server_shared_maintenance_threads(void)
+{
+	struct tr_server_config server_config;
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_server *server = NULL;
+	struct tr_reactor *client_reactor = NULL;
+	struct tr_channel *channels[4] = { NULL, NULL, NULL, NULL };
+	struct tr_conn_handle connections[4];
+	uint16_t port = 0;
+	unsigned before;
+	unsigned after;
+	unsigned i;
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 4U;
+	server_config.keepalive_interval_ms = 20U;
+	server_config.keepalive_timeout_ms = 200U;
+	server_config.limits.executor_threads = 2U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.limits.rpc_message_buffer_bytes = 4096U;
+	server_config.limits.rpc_message_pool_count = 64U;
+	server_config.limits.reassembly_pool_count = 8U;
+	server_config.limits.rx_buffer_count = 64U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 8U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 32U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 32U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	reactor_config.rx_budget_bytes = 64U * 1024U;
+	reactor_config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
+				 &client_reactor) == TR_OK);
+	assert(tr_reactor_start(client_reactor) == TR_OK);
+
+	/*
+	 * baseline 已包含 Server Reactor/accept/reaper/shared executor/
+	 * shared maintenance 和 Client Reactor。后续只增加 peer/Channel，
+	 * 不应再按 peer 数量创建 deadline/keepalive thread。
+	 */
+	before = test_linux_thread_count();
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 8U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+
+	for (i = 0; i < 4U; ++i) {
+		int fd = -1;
+
+		assert(test_connect_ipv4_port(port, &fd) == TR_OK);
+		assert(tr_reactor_adopt_fd(client_reactor, fd,
+					   &connections[i]) == TR_OK);
+		assert(tr_channel_create(&channel_config, connections[i],
+					 connections[i], NULL, NULL, NULL, NULL,
+					 &channels[i]) == TR_OK);
+		wait_channel_lane_up(channels[i], TR_LANE_CONTROL);
+	}
+
+	{
+		struct timespec pause_time;
+		pause_time.tv_sec = 0;
+		pause_time.tv_nsec = 300000000L;
+		nanosleep(&pause_time, NULL);
+	}
+
+	after = test_linux_thread_count();
+	assert(after <= before + 1U);
+
+	assert(tr_reactor_stop(client_reactor) == TR_OK);
+	for (i = 0; i < 4U; ++i)
+		tr_channel_destroy(channels[i]);
+	tr_reactor_destroy(client_reactor);
+	tr_server_destroy(server);
+}
+
 static void test_server_shared_rpc_executor(void)
 {
 	struct tr_server_config server_config;
@@ -4578,6 +4712,7 @@ int main(void)
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
+	test_server_shared_maintenance_threads();
 	test_server_shared_rpc_executor();
 	test_server_peer_refcount_drain();
 
