@@ -5,6 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tr/cleanup.h"
+
 struct tr_buffer {
 	uint8_t *data;
 	uint32_t capacity;
@@ -33,6 +35,12 @@ void tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
 int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 		      struct tr_buffer **out);
 void tr_buffer_release(struct tr_buffer *buffer);
+
+/*
+ * Scope-owned buffers are automatically returned to their pool. Use
+ * tr_buffer_take() only when ownership is explicitly transferred outward.
+ */
+TR_DEFINE_PTR_OWNERSHIP(tr_buffer, struct tr_buffer, tr_buffer_release)
 
 uint32_t tr_buffer_pool_free_count(struct tr_buffer_pool *pool);
 
