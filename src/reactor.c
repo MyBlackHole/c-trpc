@@ -264,12 +264,11 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 		return ret;
 
 	/*
-     * Once the bounded queue accepted the command, ownership has already
-     * transferred. A wake failure must never be reported as a failed push,
-     * otherwise the producer could free resources still referenced by the
-     * queue. EAGAIN is already treated as success by tr_reactor_signal();
-     * other failures indicate a broken runtime, but the queued command still
-     * belongs to the reactor.
+     * command 一旦进入有界队列，ownership 就已经转移给 Reactor。
+     * 后续 eventfd wake 失败不能再把这次 push 报告成失败，否则 producer
+     * 可能释放仍被 queue 引用的资源，造成 UAF。
+     * tr_reactor_signal() 已把 EAGAIN 视为成功；其他 wake 失败表示 runtime
+     * 已异常，但已经入队的 command 仍然归 Reactor 所有。
      */
 	if (need_wake)
 		(void)tr_reactor_signal(reactor);
