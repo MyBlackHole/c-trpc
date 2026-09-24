@@ -3902,6 +3902,184 @@ static void test_client_server_facade_unary(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct shared_executor_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned entered;
+	unsigned active;
+	unsigned max_active;
+	unsigned results;
+	int release;
+};
+
+static int shared_executor_test_handler(struct tr_rpc_call_handle call,
+					const struct tr_rpc_bytes *request,
+					struct tr_rpc_unary_response *response,
+					void *arg)
+{
+	struct shared_executor_test_ctx *ctx =
+		(struct shared_executor_test_ctx *)arg;
+	static const uint8_t reply[] = "shared-ok";
+	(void)call;
+	(void)request;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->entered++;
+	ctx->active++;
+	if (ctx->active > ctx->max_active)
+		ctx->max_active = ctx->active;
+	pthread_cond_broadcast(&ctx->cond);
+	while (!ctx->release)
+		pthread_cond_wait(&ctx->cond, &ctx->lock);
+	ctx->active--;
+	pthread_mutex_unlock(&ctx->lock);
+
+	response->status = TR_RPC_STATUS_OK;
+	response->message.data = reply;
+	response->message.len = (uint32_t)(sizeof(reply) - 1U);
+	return TR_OK;
+}
+
+static void shared_executor_test_result(struct tr_rpc_call_handle call,
+				       int status,
+				       const struct tr_rpc_bytes *response,
+				       void *arg)
+{
+	struct shared_executor_test_ctx *ctx =
+		(struct shared_executor_test_ctx *)arg;
+	(void)call;
+	assert(status == TR_RPC_STATUS_OK);
+	assert(response != NULL);
+	assert(response->len == 9U);
+	assert(memcmp(response->data, "shared-ok", 9U) == 0);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->results++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void test_server_shared_rpc_executor(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *clients[4] = { NULL, NULL, NULL, NULL };
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_call_handle calls[4];
+	struct shared_executor_test_ctx ctx;
+	struct timespec deadline;
+	uint16_t port = 0;
+	unsigned i;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 4U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.executor_threads = 2U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.limits.rpc_message_buffer_bytes = 4096U;
+	server_config.limits.rpc_message_pool_count = 64U;
+	server_config.limits.reassembly_pool_count = 8U;
+	server_config.limits.rx_buffer_count = 64U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 88U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1024U;
+	method.max_response_bytes = 1024U;
+	assert(tr_server_register_method(server, &method,
+					 shared_executor_test_handler,
+					 &ctx) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 5000U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	client_config.limits.rpc_message_buffer_bytes = 4096U;
+	client_config.limits.rpc_message_pool_count = 32U;
+	client_config.limits.reassembly_pool_count = 4U;
+	client_config.limits.rx_buffer_count = 32U;
+
+	for (i = 0; i < 4U; ++i) {
+		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
+		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
+		assert(tr_client_register_method(clients[i], &method) == TR_OK);
+	}
+
+	request.data = (const uint8_t *)"work";
+	request.len = 4U;
+	for (i = 0; i < 4U; ++i)
+		assert(tr_client_unary_call(clients[i], 88U, 1U, &request,
+					    shared_executor_test_result, &ctx,
+					    &calls[i]) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.entered < 2U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.entered == 2U);
+	assert(ctx.active == 2U);
+	assert(ctx.max_active == 2U);
+
+	/*
+	 * Both shared workers are blocked above. No third handler may start until
+	 * one of those two workers is released.
+	 */
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 1;
+	ret = 0;
+	while (ctx.entered < 3U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ctx.entered == 2U);
+
+	ctx.release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	ret = 0;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.results < 4U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.results == 4U);
+	assert(ctx.max_active <= 2U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	for (i = 0; i < 4U; ++i) {
+		int drain_ret = tr_client_begin_drain(clients[i]);
+		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
+		assert(tr_client_wait_drained(clients[i], 5000U) == TR_OK);
+	}
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	for (i = 0; i < 4U; ++i)
+		tr_client_destroy(clients[i]);
+	tr_server_destroy(server);
+
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 int main(void)
 {
 	test_endian();
@@ -3933,6 +4111,7 @@ int main(void)
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
+	test_server_shared_rpc_executor();
 
 	puts("all transport/RPC core tests passed");
 	return 0;
