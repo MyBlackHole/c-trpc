@@ -1,1 +1,8 @@
 build
+
+# 构建产物
+*.o
+*.a
+tests/test_transport
+examples/echo_client
+examples/echo_server
