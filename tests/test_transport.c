@@ -17,6 +17,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -4080,8 +4081,114 @@ static void test_server_shared_rpc_executor(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct cleanup_order_probe {
+	unsigned id;
+	unsigned *order;
+	unsigned *count;
+};
+
+static void cleanup_order_probe_run(struct cleanup_order_probe *probe)
+{
+	probe->order[(*probe->count)++] = probe->id;
+}
+
+static int cleanup_buffer_early_return(struct tr_buffer_pool *pool)
+{
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+	int ret;
+
+	ret = tr_buffer_acquire(pool, 1U, &buffer);
+	if (ret != TR_OK)
+		return ret;
+	buffer->len = 1U;
+	return TR_OK;
+}
+
+static struct tr_buffer *
+cleanup_buffer_transfer(struct tr_buffer_pool *pool)
+{
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+
+	if (tr_buffer_acquire(pool, 1U, &buffer) != TR_OK)
+		return NULL;
+	return tr_buffer_take(&buffer);
+}
+
+static int cleanup_fd_early_return(int *observed_fd)
+{
+	int fd TR_AUTO(tr_fd_cleanup) = dup(STDOUT_FILENO);
+
+	if (fd < 0)
+		return TR_ERR_SYS;
+	*observed_fd = fd;
+	return TR_OK;
+}
+
+static int cleanup_fd_transfer(void)
+{
+	int fd TR_AUTO(tr_fd_cleanup) = dup(STDOUT_FILENO);
+
+	if (fd < 0)
+		return -1;
+	return tr_fd_take(&fd);
+}
+
+static void test_scope_cleanup_ownership(void)
+{
+	struct tr_buffer_pool pool;
+	struct tr_buffer *buffer;
+	unsigned order[3] = { 0U, 0U, 0U };
+	unsigned count = 0U;
+	int observed_fd = -1;
+	int owned_fd;
+
+	assert(tr_buffer_pool_init(&pool, 2U, 64U) == TR_OK);
+	assert(tr_buffer_pool_free_count(&pool) == 2U);
+	assert(cleanup_buffer_early_return(&pool) == TR_OK);
+	assert(tr_buffer_pool_free_count(&pool) == 2U);
+
+	buffer = cleanup_buffer_transfer(&pool);
+	assert(buffer != NULL);
+	assert(tr_buffer_pool_free_count(&pool) == 1U);
+	tr_buffer_release(buffer);
+	assert(tr_buffer_pool_free_count(&pool) == 2U);
+	tr_buffer_pool_destroy(&pool);
+
+	assert(cleanup_fd_early_return(&observed_fd) == TR_OK);
+	errno = 0;
+	assert(fcntl(observed_fd, F_GETFD) == -1);
+	assert(errno == EBADF);
+
+	owned_fd = cleanup_fd_transfer();
+	assert(owned_fd >= 0);
+	assert(fcntl(owned_fd, F_GETFD) >= 0);
+	tr_socket_close(&owned_fd);
+	assert(owned_fd == -1);
+
+	/*
+	 * Scope cleanup is LIFO. Resource declarations must therefore follow
+	 * dependency order: dependencies first, dependents later.
+	 */
+	{
+		struct cleanup_order_probe first
+			TR_AUTO(cleanup_order_probe_run) = { 1U, order, &count };
+		struct cleanup_order_probe second
+			TR_AUTO(cleanup_order_probe_run) = { 2U, order, &count };
+		struct cleanup_order_probe third
+			TR_AUTO(cleanup_order_probe_run) = { 3U, order, &count };
+		(void)first;
+		(void)second;
+		(void)third;
+	}
+	assert(count == 3U);
+	assert(order[0] == 3U);
+	assert(order[1] == 2U);
+	assert(order[2] == 1U);
+}
+
 int main(void)
 {
+	test_scope_cleanup_ownership();
 	test_endian();
 	test_crc32c();
 	test_wire_roundtrip();
