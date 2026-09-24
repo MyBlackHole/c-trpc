@@ -65,6 +65,8 @@ struct tr_server {
 	uint16_t bound_port;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
+
 static uint64_t tr_server_now_ms(void)
 {
 	struct timespec ts;
@@ -422,7 +424,7 @@ int tr_server_create(const struct tr_server_config *config,
 {
 	struct tr_server_config effective;
 	struct tr_reactor_config reactor_config;
-	struct tr_server *server;
+	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
 	int ret;
 
 	if (!out)
@@ -449,7 +451,7 @@ int tr_server_create(const struct tr_server_config *config,
 	server->listen_fd = -1;
 
 	if (pthread_mutex_init(&server->lock, NULL) != 0) {
-		free(server);
+		free(tr_server_owner_take(&server));
 		return TR_ERR_INVALID;
 	}
 
@@ -459,28 +461,28 @@ int tr_server_create(const struct tr_server_config *config,
 							sizeof(*server->peers));
 	if (!server->methods || !server->peers) {
 		ret = TR_ERR_NOMEM;
-		goto fail;
+		return ret;
 	}
 
 	ret = tr_buffer_pool_init(&server->rpc_message_pool,
 				  effective.limits.rpc_message_pool_count,
 				  effective.limits.rpc_message_buffer_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	server->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&server->reassembly_pool,
 				  effective.limits.reassembly_pool_count,
 				  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	server->reassembly_pool_ready = 1;
 
 	ret = tr_rpc_executor_group_create(
 		effective.max_peers, effective.limits.max_calls,
 		effective.limits.executor_threads, &server->rpc_executor_group);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = effective.max_peers + 4U;
@@ -502,25 +504,10 @@ int tr_server_create(const struct tr_server_config *config,
 	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 				&server->reactor);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
-	*out = server;
+	*out = tr_server_owner_take(&server);
 	return TR_OK;
-
-fail:
-	if (server->reactor)
-		tr_reactor_destroy(server->reactor);
-	if (server->rpc_executor_group)
-		tr_rpc_executor_group_destroy(server->rpc_executor_group);
-	if (server->reassembly_pool_ready)
-		tr_buffer_pool_destroy(&server->reassembly_pool);
-	if (server->rpc_pool_ready)
-		tr_buffer_pool_destroy(&server->rpc_message_pool);
-	free(server->peers);
-	free(server->methods);
-	pthread_mutex_destroy(&server->lock);
-	free(server);
-	return ret;
 }
 
 static int tr_server_validate_method(const struct tr_rpc_method_desc *method,
@@ -742,11 +729,13 @@ void tr_server_destroy(struct tr_server *server)
 	if (server->reactor && server->started)
 		(void)tr_reactor_stop(server->reactor);
 
-	for (i = 0; i < server->config.max_peers; ++i) {
-		struct tr_server_peer *peer = &server->peers[i];
-		if (!peer->used && !peer->channel && !peer->rpc)
-			continue;
-		tr_server_destroy_peer(peer);
+	if (server->peers) {
+		for (i = 0; i < server->config.max_peers; ++i) {
+			struct tr_server_peer *peer = &server->peers[i];
+			if (!peer->used && !peer->channel && !peer->rpc)
+				continue;
+			tr_server_destroy_peer(peer);
+		}
 	}
 
 	if (server->reactor)
