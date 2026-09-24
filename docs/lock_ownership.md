@@ -229,12 +229,13 @@ producer returns
 
 ## 9. 本轮实际减少的同步开销
 
-本轮 shared maintenance 改造后，Server 不再为每个 peer 创建：
+本轮 shared maintenance 改造后：
 
-- 1 个 RPC deadline thread；
-- 1 个 Channel keepalive thread（启用 keepalive 时）。
+- 高层 Server 不再为每个 peer 创建 RPC deadline thread；
+- 高层 Server 不再为每个启用 keepalive 的 peer 创建 Channel keepalive thread；
+- 高层 Client 的 RPC deadline + Channel keepalive 也共用一个 runtime scheduler。
 
-替换为：
+Server 结构：
 
 ```text
 Server
@@ -248,7 +249,19 @@ Server
        ...
 ```
 
-因此 peer 数量增加时，timer thread 数量保持 O(1)。
+Client 结构：
+
+```text
+Client
+  |
+  +-- one shared maintenance scheduler thread
+       |
+       +-- Endpoint deadline entry
+       +-- Channel keepalive entry
+```
+
+因此 Server peer 数量增加时 timer thread 数量保持 O(1)，高层 Client 也不再
+分别创建 deadline/keepalive timer thread。
 
 Client reconnect thread 暂时保留，因为 reconnect 包含 connect/poll/backoff，
 可能长时间阻塞，不应该在共享 timer scheduler 上执行。
