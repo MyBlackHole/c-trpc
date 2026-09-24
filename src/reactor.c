@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,6 +63,14 @@ struct tr_connection {
 	uint32_t generation;
 	enum tr_connection_state state;
 
+	/*
+	 * 以下 handler 只允许 Reactor owner thread 修改和读取。
+	 * 外部线程必须通过 TR_CMD_SET_HANDLER 提交变更。
+	 */
+	tr_reactor_frame_cb frame_cb;
+	tr_reactor_event_cb event_cb;
+	void *callback_arg;
+
 	struct tr_parser parser;
 
 	struct tr_tx_item *tx_head;
@@ -87,18 +96,25 @@ struct tr_connection {
 };
 
 struct tr_slot {
-	uint32_t generation;
-	enum tr_connection_state state;
-
-	tr_reactor_frame_cb frame_cb;
-	tr_reactor_event_cb event_cb;
-	void *callback_arg;
+	/*
+	 * capability metadata 允许跨线程读取/预留，但必须通过 C11 atomic
+	 * 一次性更新 generation + state，避免复用 slot 时出现撕裂状态。
+	 */
+	_Atomic uint64_t meta;
 };
 
 struct tr_reactor_sync {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int done;
+	int status;
+};
+
+struct tr_reactor_handler_request {
+	tr_reactor_frame_cb frame_cb;
+	tr_reactor_event_cb event_cb;
+	void *callback_arg;
+	struct tr_reactor_sync sync;
 };
 
 struct tr_reactor {
@@ -109,7 +125,6 @@ struct tr_reactor {
 	pthread_t thread;
 
 	pthread_mutex_t ctl_lock;
-	pthread_mutex_t slot_lock;
 	int started;
 	int accepting;
 	int stopping;
