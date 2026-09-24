@@ -846,12 +846,16 @@ static int tr_channel_connect_ipv4_timeout(const char *address, uint16_t port,
 					   uint32_t timeout_ms, int *out_fd)
 {
 	struct pollfd pfd;
-	int fd = -1;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
+
+	if (!out_fd)
+		return TR_ERR_INVALID;
+	*out_fd = -1;
 
 	ret = tr_tcp_connect_ipv4(address, port, &fd);
 	if (ret == TR_OK) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_OK;
 	}
 	if (ret != TR_IN_PROGRESS)
@@ -865,18 +869,14 @@ static int tr_channel_connect_ipv4_timeout(const char *address, uint16_t port,
 		ret = poll(&pfd, 1, (int)timeout_ms);
 	} while (ret < 0 && errno == EINTR);
 
-	if (ret <= 0) {
-		tr_socket_close(&fd);
+	if (ret <= 0)
 		return ret == 0 ? TR_AGAIN : TR_ERR_SYS;
-	}
 
 	ret = tr_tcp_finish_connect(fd);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	if (ret != TR_OK)
 		return ret;
-	}
 
-	*out_fd = fd;
+	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
 }
 
