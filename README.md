@@ -575,6 +575,12 @@ Absolute limits avoid duplicate-credit bugs if updates are retried or coalesced.
 The detailed C11 ownership/automatic-cleanup rules are documented in
 [`docs/resource_ownership.md`](docs/resource_ownership.md).
 
+Code comments and API contract descriptions use Chinese as the primary
+explanatory language. Identifiers and technical terms such as ownership,
+refcount, quiescence, Reactor, Channel, RPC, Call and Stream remain in English
+when that maps more directly to the implementation. See
+[`docs/code_comments.md`](docs/code_comments.md).
+
 - lexical owners should use typed `TR_AUTO(...)` cleanup where practical
 - explicit `*_take()` helpers disarm automatic cleanup when ownership moves
 - cleanup runs in reverse declaration order, so declaration order is a lifetime dependency
