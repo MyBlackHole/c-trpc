@@ -3816,7 +3816,7 @@ static void test_client_server_facade_unary(void)
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
-	client_config.connect_timeout_ms = 100U;
+	client_config.connect_timeout_ms = 1000U;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
@@ -3833,10 +3833,12 @@ static void test_client_server_facade_unary(void)
 				    facade_test_result, &ctx, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
-	deadline.tv_sec += 5;
+	deadline.tv_sec += 15;
 	pthread_mutex_lock(&ctx.lock);
-	while (ctx.client_results < 1U && ret == 0)
+	while ((ctx.server_calls < 1U || ctx.client_results < 1U) &&
+	       ret == 0)
 		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
 	assert(ctx.server_calls == 1U);
 	assert(ctx.client_results == 1U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
@@ -3875,11 +3877,13 @@ static void test_client_server_facade_unary(void)
 				    facade_test_result, &ctx, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
-	deadline.tv_sec += 5;
+	deadline.tv_sec += 15;
 	ret = 0;
 	pthread_mutex_lock(&ctx.lock);
-	while (ctx.client_results < 2U && ret == 0)
+	while ((ctx.server_calls < 2U || ctx.client_results < 2U) &&
+	       ret == 0)
 		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
 	assert(ctx.server_calls == 2U);
 	assert(ctx.client_results == 2U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
