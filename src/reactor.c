@@ -53,6 +53,8 @@ struct tr_tx_pool {
 	uint32_t free_count;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_tx_item_array, struct tr_tx_item, free)
+
 struct tr_connection {
 	int fd;
 	uint32_t slot;
@@ -156,22 +158,21 @@ static void tr_conn_token_decode(uint64_t token, uint32_t *slot,
 
 static int tr_tx_pool_init(struct tr_tx_pool *pool, uint32_t capacity)
 {
+	struct tr_tx_item *items TR_AUTO(tr_tx_item_array_cleanup) = NULL;
 	uint32_t i;
 
 	if (!pool || capacity == 0)
 		return TR_ERR_INVALID;
 
 	memset(pool, 0, sizeof(*pool));
+	items = (struct tr_tx_item *)calloc(capacity, sizeof(*items));
+	if (!items)
+		return TR_ERR_NOMEM;
+
 	if (pthread_mutex_init(&pool->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 
-	pool->items =
-		(struct tr_tx_item *)calloc(capacity, sizeof(*pool->items));
-	if (!pool->items) {
-		pthread_mutex_destroy(&pool->lock);
-		return TR_ERR_NOMEM;
-	}
-
+	pool->items = tr_tx_item_array_take(&items);
 	pool->capacity = capacity;
 	pool->free_count = capacity;
 
