@@ -466,7 +466,7 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 				 struct tr_conn_handle connection)
 {
 	struct tr_channel_capabilities local;
-	struct tr_buffer *buffer = NULL;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	int ret;
 
 	ret = tr_channel_local_capabilities(channel, connection, &local);
@@ -484,8 +484,8 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 				local.max_message_bytes, local.feature_bits);
 	buffer->len = TR_CHANNEL_HELLO_WIRE_SIZE;
 	ret = tr_reactor_send(connection, TR_FRAME_HELLO, 0, 0, 0, buffer);
-	if (ret != TR_OK)
-		tr_buffer_release(buffer);
+	if (ret == TR_OK)
+		(void)tr_buffer_take(&buffer);
 	return ret;
 }
 
@@ -493,7 +493,7 @@ static int tr_channel_send_hello_ack(struct tr_channel *channel,
 				     struct tr_conn_handle connection,
 				     const struct tr_channel_capabilities *caps)
 {
-	struct tr_buffer *buffer = NULL;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	int ret;
 
 	ret = tr_buffer_acquire(&channel->protocol_pool,
@@ -504,8 +504,8 @@ static int tr_channel_send_hello_ack(struct tr_channel *channel,
 	tr_channel_encode_hello_ack(buffer->data, caps);
 	buffer->len = TR_CHANNEL_HELLO_WIRE_SIZE;
 	ret = tr_reactor_send(connection, TR_FRAME_HELLO_ACK, 0, 0, 0, buffer);
-	if (ret != TR_OK)
-		tr_buffer_release(buffer);
+	if (ret == TR_OK)
+		(void)tr_buffer_take(&buffer);
 	return ret;
 }
 
@@ -1657,7 +1657,7 @@ static void *tr_channel_reconnect_thread_main(void *arg)
 		uint32_t attempt = 0;
 		uint32_t delay_ms;
 		struct timespec deadline;
-		int fd = -1;
+		int fd TR_AUTO(tr_fd_cleanup) = -1;
 		int ret;
 		struct tr_conn_handle connection;
 
@@ -1725,16 +1725,13 @@ static void *tr_channel_reconnect_thread_main(void *arg)
 			ret = tr_reactor_adopt_fd(channel->reactor, fd,
 						  &connection);
 			if (ret == TR_OK) {
-				fd = -1; /* ownership transferred */
+				(void)tr_fd_take(&fd);
 				ret = tr_channel_replace_connection(
 					channel, lane, connection);
 				if (ret != TR_OK)
 					(void)tr_reactor_close(connection);
 			}
 		}
-		if (fd >= 0)
-			tr_socket_close(&fd);
-
 		tr_channel_reconnect_finish_attempt(channel, lane,
 						    ret == TR_OK);
 	}
