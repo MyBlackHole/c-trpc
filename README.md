@@ -571,6 +571,12 @@ Absolute limits avoid duplicate-credit bugs if updates are retried or coalesced.
 
 ## Important ownership rules
 
+The detailed C11 ownership/automatic-cleanup rules are documented in
+[`docs/resource_ownership.md`](docs/resource_ownership.md).
+
+- lexical owners should use typed `TR_AUTO(...)` cleanup where practical
+- explicit `*_take()` helpers disarm automatic cleanup when ownership moves
+- cleanup runs in reverse declaration order, so declaration order is a lifetime dependency
 - `tr_reactor_adopt_fd()` returning `TR_OK` transfers fd ownership to Reactor.
 - `tr_reactor_send()` returning `TR_OK` transfers its payload buffer.
 - `tr_reactor_sendv()` returning `TR_OK` transfers every supplied payload buffer.
@@ -677,6 +683,9 @@ Current build validation passes:
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
 
 ## Build
+
+The project language baseline is ISO C11. GCC/Clang's cleanup attribute is used
+only through the typed `TR_AUTO()` ownership helper.
 
 ```sh
 make test

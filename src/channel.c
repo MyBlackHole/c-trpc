@@ -466,7 +466,7 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 				 struct tr_conn_handle connection)
 {
 	struct tr_channel_capabilities local;
-	struct tr_buffer *buffer = NULL;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	int ret;
 
 	ret = tr_channel_local_capabilities(channel, connection, &local);
@@ -484,8 +484,8 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 				local.max_message_bytes, local.feature_bits);
 	buffer->len = TR_CHANNEL_HELLO_WIRE_SIZE;
 	ret = tr_reactor_send(connection, TR_FRAME_HELLO, 0, 0, 0, buffer);
-	if (ret != TR_OK)
-		tr_buffer_release(buffer);
+	if (ret == TR_OK)
+		(void)tr_buffer_take(&buffer);
 	return ret;
 }
 
@@ -493,7 +493,7 @@ static int tr_channel_send_hello_ack(struct tr_channel *channel,
 				     struct tr_conn_handle connection,
 				     const struct tr_channel_capabilities *caps)
 {
-	struct tr_buffer *buffer = NULL;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	int ret;
 
 	ret = tr_buffer_acquire(&channel->protocol_pool,
@@ -504,8 +504,8 @@ static int tr_channel_send_hello_ack(struct tr_channel *channel,
 	tr_channel_encode_hello_ack(buffer->data, caps);
 	buffer->len = TR_CHANNEL_HELLO_WIRE_SIZE;
 	ret = tr_reactor_send(connection, TR_FRAME_HELLO_ACK, 0, 0, 0, buffer);
-	if (ret != TR_OK)
-		tr_buffer_release(buffer);
+	if (ret == TR_OK)
+		(void)tr_buffer_take(&buffer);
 	return ret;
 }
 
@@ -695,10 +695,8 @@ static void tr_stream_reset_slot(struct tr_stream_slot *stream)
 		return;
 
 	generation = stream->generation;
-	if (stream->rx_reassembly) {
-		tr_buffer_release(stream->rx_reassembly);
-		stream->rx_reassembly = NULL;
-	}
+	if (stream->rx_reassembly)
+		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
 	memset(stream, 0, sizeof(*stream));
 	stream->generation = generation;
 }
@@ -846,12 +844,16 @@ static int tr_channel_connect_ipv4_timeout(const char *address, uint16_t port,
 					   uint32_t timeout_ms, int *out_fd)
 {
 	struct pollfd pfd;
-	int fd = -1;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
+
+	if (!out_fd)
+		return TR_ERR_INVALID;
+	*out_fd = -1;
 
 	ret = tr_tcp_connect_ipv4(address, port, &fd);
 	if (ret == TR_OK) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_OK;
 	}
 	if (ret != TR_IN_PROGRESS)
@@ -865,18 +867,14 @@ static int tr_channel_connect_ipv4_timeout(const char *address, uint16_t port,
 		ret = poll(&pfd, 1, (int)timeout_ms);
 	} while (ret < 0 && errno == EINTR);
 
-	if (ret <= 0) {
-		tr_socket_close(&fd);
+	if (ret <= 0)
 		return ret == 0 ? TR_AGAIN : TR_ERR_SYS;
-	}
 
 	ret = tr_tcp_finish_connect(fd);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	if (ret != TR_OK)
 		return ret;
-	}
 
-	*out_fd = fd;
+	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
 }
 
@@ -1341,9 +1339,8 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 							 TR_ERR_STATE);
 		}
 
-		deliver = stream->rx_reassembly;
+		deliver = tr_buffer_take(&stream->rx_reassembly);
 		logical_len = deliver->len;
-		stream->rx_reassembly = NULL;
 		stream->rx_reassembly_message_id = 0;
 		stream->next_rx_message_id++;
 	} else if (fragmented) {
@@ -1365,7 +1362,7 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 
 	if (disposition == TR_STREAM_DATA_TAKE_OWNERSHIP) {
 		if (!fragmented)
-			frame->payload = NULL;
+			(void)tr_buffer_take(&frame->payload);
 		return TR_OK;
 	}
 
@@ -1657,7 +1654,7 @@ static void *tr_channel_reconnect_thread_main(void *arg)
 		uint32_t attempt = 0;
 		uint32_t delay_ms;
 		struct timespec deadline;
-		int fd = -1;
+		int fd TR_AUTO(tr_fd_cleanup) = -1;
 		int ret;
 		struct tr_conn_handle connection;
 
@@ -1725,16 +1722,13 @@ static void *tr_channel_reconnect_thread_main(void *arg)
 			ret = tr_reactor_adopt_fd(channel->reactor, fd,
 						  &connection);
 			if (ret == TR_OK) {
-				fd = -1; /* ownership transferred */
+				(void)tr_fd_take(&fd);
 				ret = tr_channel_replace_connection(
 					channel, lane, connection);
 				if (ret != TR_OK)
 					(void)tr_reactor_close(connection);
 			}
 		}
-		if (fd >= 0)
-			tr_socket_close(&fd);
-
 		tr_channel_reconnect_finish_attempt(channel, lane,
 						    ret == TR_OK);
 	}
@@ -1762,6 +1756,57 @@ static void tr_channel_default_config(struct tr_channel_config *config)
 			config->reassembly_pool->buffer_size;
 }
 
+struct tr_channel_build {
+	struct tr_channel *channel;
+	int lock_ready;
+	int reconnect_cond_ready;
+	int keepalive_cond_ready;
+	int protocol_pool_ready;
+	int control_handler_installed;
+	int bulk_handler_installed;
+};
+
+static void tr_channel_build_cleanup(struct tr_channel_build *build)
+{
+	struct tr_channel *channel;
+	int handlers_removed = 0;
+
+	if (!build || !build->channel)
+		return;
+	channel = build->channel;
+
+	if (build->control_handler_installed) {
+		(void)tr_reactor_set_handler(channel->control_connection, NULL,
+					     NULL, NULL);
+		handlers_removed = 1;
+	}
+	if (build->bulk_handler_installed) {
+		(void)tr_reactor_set_handler(channel->bulk_connection, NULL,
+					     NULL, NULL);
+		handlers_removed = 1;
+	}
+	if (handlers_removed && channel->reactor)
+		(void)tr_reactor_quiesce(channel->reactor);
+
+	if (channel->streams) {
+		uint32_t i;
+		for (i = 0; i < channel->config.max_streams; ++i)
+			if (channel->streams[i].rx_reassembly)
+				tr_buffer_release(channel->streams[i].rx_reassembly);
+	}
+	if (build->protocol_pool_ready)
+		tr_buffer_pool_destroy(&channel->protocol_pool);
+	free(channel->streams);
+	if (build->keepalive_cond_ready)
+		pthread_cond_destroy(&channel->keepalive_cond);
+	if (build->reconnect_cond_ready)
+		pthread_cond_destroy(&channel->reconnect_cond);
+	if (build->lock_ready)
+		pthread_mutex_destroy(&channel->lock);
+	free(channel);
+	build->channel = NULL;
+}
+
 int tr_channel_create(const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
 		      struct tr_conn_handle bulk_connection,
@@ -1770,8 +1815,8 @@ int tr_channel_create(const struct tr_channel_config *config,
 		      tr_channel_event_cb channel_event_cb, void *callback_arg,
 		      struct tr_channel **out)
 {
+	struct tr_channel_build build TR_AUTO(tr_channel_build_cleanup) = { 0 };
 	struct tr_channel *channel;
-	int protocol_pool_ready = 0;
 	int ret;
 
 	if (!out || !control_connection.reactor ||
@@ -1782,6 +1827,7 @@ int tr_channel_create(const struct tr_channel_config *config,
 	channel = (struct tr_channel *)calloc(1, sizeof(*channel));
 	if (!channel)
 		return TR_ERR_NOMEM;
+	build.channel = channel;
 
 	if (config)
 		channel->config = *config;
@@ -1794,71 +1840,48 @@ int tr_channel_create(const struct tr_channel_config *config,
 	    channel->config.min_protocol_version == 0 ||
 	    channel->config.max_protocol_version == 0 ||
 	    channel->config.min_protocol_version >
-		    channel->config.max_protocol_version) {
-		free(channel);
+		    channel->config.max_protocol_version)
 		return TR_ERR_INVALID;
-	}
 
 	if (channel->config.reassembly_pool &&
 	    (channel->config.max_message_bytes == 0 ||
 	     channel->config.max_message_bytes >
-		     channel->config.reassembly_pool->buffer_size)) {
-		free(channel);
+		     channel->config.reassembly_pool->buffer_size))
 		return TR_ERR_INVALID;
-	}
 
 	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
-		if (!tr_conn_equal(control_connection, bulk_connection)) {
-			free(channel);
+		if (!tr_conn_equal(control_connection, bulk_connection))
 			return TR_ERR_INVALID;
-		}
 	} else if (tr_conn_equal(control_connection, bulk_connection)) {
-		free(channel);
 		return TR_ERR_INVALID;
 	}
-
-	if (pthread_mutex_init(&channel->lock, NULL) != 0) {
-		free(channel);
-		return TR_ERR_INVALID;
-	}
-	if (pthread_cond_init(&channel->reconnect_cond, NULL) != 0) {
-		pthread_mutex_destroy(&channel->lock);
-		free(channel);
-		return TR_ERR_INVALID;
-	}
-	if (pthread_cond_init(&channel->keepalive_cond, NULL) != 0) {
-		pthread_cond_destroy(&channel->reconnect_cond);
-		pthread_mutex_destroy(&channel->lock);
-		free(channel);
-		return TR_ERR_INVALID;
-	}
-
-	channel->streams = (struct tr_stream_slot *)calloc(
-		channel->config.max_streams, sizeof(*channel->streams));
-	if (!channel->streams) {
-		pthread_cond_destroy(&channel->keepalive_cond);
-		pthread_cond_destroy(&channel->reconnect_cond);
-		pthread_mutex_destroy(&channel->lock);
-		free(channel);
-		return TR_ERR_NOMEM;
-	}
-
-	ret = tr_buffer_pool_init(&channel->protocol_pool,
-				  TR_CHANNEL_PROTOCOL_BUFFER_COUNT,
-				  TR_CHANNEL_PROTOCOL_BUFFER_SIZE);
-	if (ret != TR_OK) {
-		free(channel->streams);
-		pthread_cond_destroy(&channel->keepalive_cond);
-		pthread_cond_destroy(&channel->reconnect_cond);
-		pthread_mutex_destroy(&channel->lock);
-		free(channel);
-		return ret;
-	}
-	protocol_pool_ready = 1;
 
 	channel->reactor = control_connection.reactor;
 	channel->control_connection = control_connection;
 	channel->bulk_connection = bulk_connection;
+
+	if (pthread_mutex_init(&channel->lock, NULL) != 0)
+		return TR_ERR_INVALID;
+	build.lock_ready = 1;
+	if (pthread_cond_init(&channel->reconnect_cond, NULL) != 0)
+		return TR_ERR_INVALID;
+	build.reconnect_cond_ready = 1;
+	if (pthread_cond_init(&channel->keepalive_cond, NULL) != 0)
+		return TR_ERR_INVALID;
+	build.keepalive_cond_ready = 1;
+
+	channel->streams = (struct tr_stream_slot *)calloc(
+		channel->config.max_streams, sizeof(*channel->streams));
+	if (!channel->streams)
+		return TR_ERR_NOMEM;
+
+	ret = tr_buffer_pool_init(&channel->protocol_pool,
+				  TR_CHANNEL_PROTOCOL_BUFFER_COUNT,
+				  TR_CHANNEL_PROTOCOL_BUFFER_SIZE);
+	if (ret != TR_OK)
+		return ret;
+	build.protocol_pool_ready = 1;
+
 	channel->control_alive = 1;
 	channel->bulk_alive = 1;
 	channel->control_ready = 0;
@@ -1873,52 +1896,32 @@ int tr_channel_create(const struct tr_channel_config *config,
 	ret = tr_reactor_set_handler(control_connection, tr_channel_on_frame,
 				     tr_channel_on_connection_event, channel);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
+	build.control_handler_installed = 1;
 
 	if (!tr_conn_equal(control_connection, bulk_connection)) {
 		ret = tr_reactor_set_handler(bulk_connection,
 					     tr_channel_on_frame,
 					     tr_channel_on_connection_event,
 					     channel);
-		if (ret != TR_OK) {
-			(void)tr_reactor_set_handler(control_connection, NULL,
-						     NULL, NULL);
-			goto fail;
-		}
+		if (ret != TR_OK)
+			return ret;
+		build.bulk_handler_installed = 1;
 	}
 
 	ret = tr_channel_send_hello(channel, control_connection);
-	if (ret != TR_OK) {
-		(void)tr_reactor_set_handler(control_connection, NULL, NULL,
-					     NULL);
-		if (!tr_conn_equal(control_connection, bulk_connection))
-			(void)tr_reactor_set_handler(bulk_connection, NULL,
-						     NULL, NULL);
-		goto fail;
-	}
+	if (ret != TR_OK)
+		return ret;
+
 	if (!tr_conn_equal(control_connection, bulk_connection)) {
 		ret = tr_channel_send_hello(channel, bulk_connection);
-		if (ret != TR_OK) {
-			(void)tr_reactor_set_handler(control_connection, NULL,
-						     NULL, NULL);
-			(void)tr_reactor_set_handler(bulk_connection, NULL,
-						     NULL, NULL);
-			goto fail;
-		}
+		if (ret != TR_OK)
+			return ret;
 	}
 
 	*out = channel;
+	build.channel = NULL;
 	return TR_OK;
-
-fail:
-	if (protocol_pool_ready)
-		tr_buffer_pool_destroy(&channel->protocol_pool);
-	free(channel->streams);
-	pthread_cond_destroy(&channel->keepalive_cond);
-	pthread_cond_destroy(&channel->reconnect_cond);
-	pthread_mutex_destroy(&channel->lock);
-	free(channel);
-	return ret;
 }
 
 void tr_channel_destroy(struct tr_channel *channel)

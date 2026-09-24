@@ -4,28 +4,41 @@
 #include <stdlib.h>
 #include <string.h>
 
+TR_DEFINE_PTR_OWNERSHIP(tr_buffer_array, struct tr_buffer, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_buffer_storage, uint8_t, free)
+
 int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 			uint32_t buffer_size)
 {
+	struct tr_buffer *buffers TR_AUTO(tr_buffer_array_cleanup) = NULL;
+	uint8_t *storage TR_AUTO(tr_buffer_storage_cleanup) = NULL;
 	uint32_t i;
 
 	if (!pool || buffer_count == 0 || buffer_size == 0)
 		return TR_ERR_INVALID;
+	if ((size_t)buffer_count > SIZE_MAX / (size_t)buffer_size)
+		return TR_ERR_BAD_LENGTH;
 
 	memset(pool, 0, sizeof(*pool));
 
+	buffers =
+		(struct tr_buffer *)calloc(buffer_count, sizeof(*buffers));
+	if (!buffers)
+		return TR_ERR_NOMEM;
+
+	storage = (uint8_t *)malloc((size_t)buffer_count * buffer_size);
+	if (!storage)
+		return TR_ERR_NOMEM;
+
+	/*
+	 * Initialize the mutex only after every fallible allocation. From this
+	 * point onward construction cannot fail, so pool owns all resources.
+	 */
 	if (pthread_mutex_init(&pool->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 
-	pool->buffers = (struct tr_buffer *)calloc(buffer_count,
-						   sizeof(*pool->buffers));
-	if (!pool->buffers)
-		goto fail_lock;
-
-	pool->storage = (uint8_t *)malloc((size_t)buffer_count * buffer_size);
-	if (!pool->storage)
-		goto fail_buffers;
-
+	pool->buffers = tr_buffer_array_take(&buffers);
+	pool->storage = tr_buffer_storage_take(&storage);
 	pool->buffer_count = buffer_count;
 	pool->buffer_size = buffer_size;
 	pool->free_count = buffer_count;
@@ -41,13 +54,6 @@ int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 	}
 
 	return TR_OK;
-
-fail_buffers:
-	free(pool->buffers);
-	pool->buffers = NULL;
-fail_lock:
-	pthread_mutex_destroy(&pool->lock);
-	return TR_ERR_NOMEM;
 }
 
 void tr_buffer_pool_destroy(struct tr_buffer_pool *pool)

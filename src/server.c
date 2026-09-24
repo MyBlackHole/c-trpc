@@ -65,6 +65,9 @@ struct tr_server {
 	uint16_t bound_port;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
+
 static uint64_t tr_server_now_ms(void)
 {
 	struct timespec ts;
@@ -268,19 +271,52 @@ static void tr_server_stop_reaper(struct tr_server *server)
 	}
 }
 
+struct tr_server_peer_guard {
+	struct tr_server *server;
+	struct tr_server_peer *peer;
+	int armed;
+};
+
+static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
+{
+	struct tr_server_peer *peer;
+
+	if (!guard || !guard->armed || !guard->server || !guard->peer)
+		return;
+	peer = guard->peer;
+
+	if (peer->connection.reactor)
+		(void)tr_reactor_close(peer->connection);
+
+	/*
+	 * Once Channel/RPC state exists, Reactor callbacks may have observed it.
+	 * Publish the partial peer and let the reaper quiesce/destroy it.
+	 */
+	if (peer->channel || peer->rpc) {
+		pthread_mutex_lock(&guard->server->lock);
+		peer->used = 1;
+		guard->server->peer_count++;
+		pthread_mutex_unlock(&guard->server->lock);
+	} else {
+		memset(&peer->connection, 0, sizeof(peer->connection));
+	}
+}
+
 static int tr_server_adopt_peer(struct tr_server *server, int fd)
 {
 	struct tr_channel_config channel_config;
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_server_peer *peer;
+	struct tr_server_peer_guard peer_guard
+		TR_AUTO(tr_server_peer_guard_cleanup) = { server, NULL, 0 };
 	uint32_t slot;
+	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
 	pthread_mutex_lock(&server->lock);
 	if (server->peer_count >= server->config.max_peers) {
 		pthread_mutex_unlock(&server->lock);
-		tr_socket_close(&fd);
 		return TR_AGAIN;
 	}
 
@@ -289,19 +325,20 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 			break;
 	if (slot == server->config.max_peers) {
 		pthread_mutex_unlock(&server->lock);
-		tr_socket_close(&fd);
 		return TR_AGAIN;
 	}
 
 	peer = &server->peers[slot];
 	memset(peer, 0, sizeof(*peer));
+	peer_guard.peer = peer;
 	pthread_mutex_unlock(&server->lock);
 
-	ret = tr_reactor_adopt_fd(server->reactor, fd, &peer->connection);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	ret = tr_reactor_adopt_fd(server->reactor, owned_fd,
+				  &peer->connection);
+	if (ret != TR_OK)
 		return ret;
-	}
+	(void)tr_fd_take(&owned_fd);
+	peer_guard.armed = 1;
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_SERVER;
@@ -319,7 +356,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 				peer->connection, NULL, NULL, NULL, NULL,
 				&peer->channel);
 	if (ret != TR_OK)
-		goto fail_connection;
+		return ret;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_SERVER;
@@ -334,11 +371,11 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		peer->channel, &rpc_config, server->rpc_executor_group,
 		&peer->rpc);
 	if (ret != TR_OK)
-		goto fail_channel;
+		return ret;
 
 	ret = tr_server_register_methods_on_peer(server, peer);
 	if (ret != TR_OK)
-		goto fail_rpc;
+		return ret;
 
 	if (server->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -348,33 +385,15 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		ret = tr_channel_enable_keepalive(peer->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			goto fail_rpc;
+			return ret;
 	}
 
 	pthread_mutex_lock(&server->lock);
 	peer->used = 1;
 	server->peer_count++;
 	pthread_mutex_unlock(&server->lock);
+	peer_guard.armed = 0;
 	return TR_OK;
-
-fail_rpc:
-fail_channel:
-	/*
-     * Do not free Channel/RPC objects while Reactor callbacks may still hold
-     * them. Retain the failed peer until server destruction, after Reactor
-     * ownership has stopped.
-     */
-	(void)tr_reactor_close(peer->connection);
-	pthread_mutex_lock(&server->lock);
-	peer->used = 1;
-	server->peer_count++;
-	pthread_mutex_unlock(&server->lock);
-	return ret;
-
-fail_connection:
-	(void)tr_reactor_close(peer->connection);
-	memset(&peer->connection, 0, sizeof(peer->connection));
-	return ret;
 }
 
 static void *tr_server_accept_main(void *arg)
@@ -424,7 +443,8 @@ int tr_server_create(const struct tr_server_config *config,
 {
 	struct tr_server_config effective;
 	struct tr_reactor_config reactor_config;
-	struct tr_server *server;
+	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
+	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
 	int ret;
 
 	if (!out)
@@ -444,16 +464,15 @@ int tr_server_create(const struct tr_server_config *config,
 	    effective.max_peers == 0)
 		return TR_ERR_INVALID;
 
-	server = (struct tr_server *)calloc(1, sizeof(*server));
-	if (!server)
+	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
+	if (!server_mem)
 		return TR_ERR_NOMEM;
-	server->config = effective;
-	server->listen_fd = -1;
+	server_mem->config = effective;
+	server_mem->listen_fd = -1;
 
-	if (pthread_mutex_init(&server->lock, NULL) != 0) {
-		free(server);
+	if (pthread_mutex_init(&server_mem->lock, NULL) != 0)
 		return TR_ERR_INVALID;
-	}
+	server = tr_server_mem_take(&server_mem);
 
 	server->methods = (struct tr_server_method *)calloc(
 		effective.limits.max_methods, sizeof(*server->methods));
@@ -461,28 +480,28 @@ int tr_server_create(const struct tr_server_config *config,
 							sizeof(*server->peers));
 	if (!server->methods || !server->peers) {
 		ret = TR_ERR_NOMEM;
-		goto fail;
+		return ret;
 	}
 
 	ret = tr_buffer_pool_init(&server->rpc_message_pool,
 				  effective.limits.rpc_message_pool_count,
 				  effective.limits.rpc_message_buffer_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	server->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&server->reassembly_pool,
 				  effective.limits.reassembly_pool_count,
 				  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	server->reassembly_pool_ready = 1;
 
 	ret = tr_rpc_executor_group_create(
 		effective.max_peers, effective.limits.max_calls,
 		effective.limits.executor_threads, &server->rpc_executor_group);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = effective.max_peers + 4U;
@@ -504,25 +523,10 @@ int tr_server_create(const struct tr_server_config *config,
 	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 				&server->reactor);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
-	*out = server;
+	*out = tr_server_owner_take(&server);
 	return TR_OK;
-
-fail:
-	if (server->reactor)
-		tr_reactor_destroy(server->reactor);
-	if (server->rpc_executor_group)
-		tr_rpc_executor_group_destroy(server->rpc_executor_group);
-	if (server->reassembly_pool_ready)
-		tr_buffer_pool_destroy(&server->reassembly_pool);
-	if (server->rpc_pool_ready)
-		tr_buffer_pool_destroy(&server->rpc_message_pool);
-	free(server->peers);
-	free(server->methods);
-	pthread_mutex_destroy(&server->lock);
-	free(server);
-	return ret;
 }
 
 static int tr_server_validate_method(const struct tr_rpc_method_desc *method,
@@ -744,11 +748,13 @@ void tr_server_destroy(struct tr_server *server)
 	if (server->reactor && server->started)
 		(void)tr_reactor_stop(server->reactor);
 
-	for (i = 0; i < server->config.max_peers; ++i) {
-		struct tr_server_peer *peer = &server->peers[i];
-		if (!peer->used && !peer->channel && !peer->rpc)
-			continue;
-		tr_server_destroy_peer(peer);
+	if (server->peers) {
+		for (i = 0; i < server->config.max_peers; ++i) {
+			struct tr_server_peer *peer = &server->peers[i];
+			if (!peer->used && !peer->channel && !peer->rpc)
+				continue;
+			tr_server_destroy_peer(peer);
+		}
 	}
 
 	if (server->reactor)

@@ -30,6 +30,8 @@ struct tr_client {
 	int connected;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_destroy)
+
 static uint64_t tr_client_now_ms(void)
 {
 	struct timespec ts;
@@ -112,12 +114,16 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 				uint32_t timeout_ms, int *out_fd)
 {
 	struct pollfd pfd;
-	int fd = -1;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
+
+	if (!out_fd)
+		return TR_ERR_INVALID;
+	*out_fd = -1;
 
 	ret = tr_tcp_connect_ipv4(address, port, &fd);
 	if (ret == TR_OK) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_OK;
 	}
 	if (ret != TR_IN_PROGRESS)
@@ -131,22 +137,16 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 		ret = poll(&pfd, 1, (int)timeout_ms);
 	} while (ret < 0 && errno == EINTR);
 
-	if (ret == 0) {
-		tr_socket_close(&fd);
+	if (ret == 0)
 		return TR_ERR_TIMEOUT;
-	}
-	if (ret < 0) {
-		tr_socket_close(&fd);
+	if (ret < 0)
 		return TR_ERR_SYS;
-	}
 
 	ret = tr_tcp_finish_connect(fd);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	if (ret != TR_OK)
 		return ret;
-	}
 
-	*out_fd = fd;
+	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
 }
 
@@ -155,7 +155,7 @@ int tr_client_create(const struct tr_client_config *config,
 {
 	struct tr_client_config effective;
 	struct tr_reactor_config reactor_config;
-	struct tr_client *client;
+	struct tr_client *client TR_AUTO(tr_client_owner_cleanup) = NULL;
 	int ret;
 
 	if (!out)
@@ -182,14 +182,14 @@ int tr_client_create(const struct tr_client_config *config,
 				  effective.limits.rpc_message_pool_count,
 				  effective.limits.rpc_message_buffer_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	client->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&client->reassembly_pool,
 				  effective.limits.reassembly_pool_count,
 				  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	client->reassembly_pool_ready = 1;
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
@@ -212,23 +212,13 @@ int tr_client_create(const struct tr_client_config *config,
 	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 				&client->reactor);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 	ret = tr_reactor_start(client->reactor);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
-	*out = client;
+	*out = tr_client_owner_take(&client);
 	return TR_OK;
-
-fail:
-	if (client->reactor)
-		tr_reactor_destroy(client->reactor);
-	if (client->reassembly_pool_ready)
-		tr_buffer_pool_destroy(&client->reassembly_pool);
-	if (client->rpc_pool_ready)
-		tr_buffer_pool_destroy(&client->rpc_message_pool);
-	free(client);
-	return ret;
 }
 
 static void tr_client_reset_session(struct tr_client *client)
@@ -252,6 +242,18 @@ static void tr_client_reset_session(struct tr_client *client)
 	client->connected = 0;
 }
 
+struct tr_client_session_guard {
+	struct tr_client *client;
+	int armed;
+};
+
+static void
+tr_client_session_guard_cleanup(struct tr_client_session_guard *guard)
+{
+	if (guard && guard->armed && guard->client)
+		tr_client_reset_session(guard->client);
+}
+
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port)
 {
@@ -259,7 +261,9 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_channel_keepalive_config keepalive_config;
-	int fd = -1;
+	struct tr_client_session_guard session
+		TR_AUTO(tr_client_session_guard_cleanup) = { client, 0 };
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
 
 	if (!client || !ipv4_address || port == 0)
@@ -273,10 +277,10 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		return ret;
 
 	ret = tr_reactor_adopt_fd(client->reactor, fd, &client->connection);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	if (ret != TR_OK)
 		return ret;
-	}
+	(void)tr_fd_take(&fd);
+	session.armed = 1;
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
@@ -294,7 +298,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 				client->connection, NULL, NULL, NULL, NULL,
 				&client->channel);
 	if (ret != TR_OK)
-		goto fail_session;
+		return ret;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_CLIENT;
@@ -308,7 +312,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	ret = tr_rpc_endpoint_create(client->channel, &rpc_config,
 				     &client->rpc);
 	if (ret != TR_OK)
-		goto fail_session;
+		return ret;
 
 	/*
 	 * Complete the initial HELLO handshake before starting maintenance
@@ -317,7 +321,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	 */
 	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
 	if (ret != TR_OK)
-		goto fail_session;
+		return ret;
 
 	if (client->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -327,7 +331,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_keepalive(client->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			goto fail_session;
+			return ret;
 	}
 
 	if (client->config.enable_reconnect) {
@@ -344,15 +348,12 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_client_reconnect(client->channel,
 							 &reconnect_config);
 		if (ret != TR_OK)
-			goto fail_session;
+			return ret;
 	}
 
 	client->connected = 1;
+	session.armed = 0;
 	return TR_OK;
-
-fail_session:
-	tr_client_reset_session(client);
-	return ret;
 }
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)

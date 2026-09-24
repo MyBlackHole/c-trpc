@@ -1,26 +1,29 @@
 #include "tr/command_queue.h"
 #include "tr/status.h"
+#include "tr/cleanup.h"
 
 #include <stdlib.h>
 #include <string.h>
 
+TR_DEFINE_PTR_OWNERSHIP(tr_command_array, struct tr_command, free)
+
 int tr_command_queue_init(struct tr_command_queue *queue, uint32_t capacity)
 {
+	struct tr_command *items TR_AUTO(tr_command_array_cleanup) = NULL;
+
 	if (!queue || capacity == 0)
 		return TR_ERR_INVALID;
 
 	memset(queue, 0, sizeof(*queue));
 
+	items = (struct tr_command *)calloc(capacity, sizeof(*items));
+	if (!items)
+		return TR_ERR_NOMEM;
+
 	if (pthread_mutex_init(&queue->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 
-	queue->items =
-		(struct tr_command *)calloc(capacity, sizeof(*queue->items));
-	if (!queue->items) {
-		pthread_mutex_destroy(&queue->lock);
-		return TR_ERR_NOMEM;
-	}
-
+	queue->items = tr_command_array_take(&items);
 	queue->capacity = capacity;
 	return TR_OK;
 }

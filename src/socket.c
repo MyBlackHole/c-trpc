@@ -32,17 +32,15 @@ static int tr_set_nonblock_cloexec(int fd)
 
 static int tr_socket_ipv4(void)
 {
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
+	int fd TR_AUTO(tr_fd_cleanup) = socket(AF_INET, SOCK_STREAM, 0);
 
 	if (fd < 0)
 		return -1;
 
-	if (tr_set_nonblock_cloexec(fd) != TR_OK) {
-		close(fd);
+	if (tr_set_nonblock_cloexec(fd) != TR_OK)
 		return -1;
-	}
 
-	return fd;
+	return tr_fd_take(&fd);
 }
 
 int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
@@ -50,7 +48,7 @@ int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
 {
 	struct sockaddr_in addr;
 	socklen_t addr_len;
-	int fd;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int one = 1;
 
 	if (!address || !out_fd || backlog <= 0)
@@ -67,38 +65,30 @@ int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(port);
 
-	if (inet_pton(AF_INET, address, &addr.sin_addr) != 1) {
-		close(fd);
+	if (inet_pton(AF_INET, address, &addr.sin_addr) != 1)
 		return TR_ERR_INVALID;
-	}
 
-	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		close(fd);
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
 		return TR_ERR_SYS;
-	}
 
-	if (listen(fd, backlog) < 0) {
-		close(fd);
+	if (listen(fd, backlog) < 0)
 		return TR_ERR_SYS;
-	}
 
 	if (out_bound_port) {
 		addr_len = sizeof(addr);
-		if (getsockname(fd, (struct sockaddr *)&addr, &addr_len) < 0) {
-			close(fd);
+		if (getsockname(fd, (struct sockaddr *)&addr, &addr_len) < 0)
 			return TR_ERR_SYS;
-		}
 		*out_bound_port = ntohs(addr.sin_port);
 	}
 
-	*out_fd = fd;
+	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
 }
 
 int tr_tcp_connect_ipv4(const char *address, uint16_t port, int *out_fd)
 {
 	struct sockaddr_in addr;
-	int fd;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 
 	if (!address || !out_fd)
 		return TR_ERR_INVALID;
@@ -112,22 +102,19 @@ int tr_tcp_connect_ipv4(const char *address, uint16_t port, int *out_fd)
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(port);
 
-	if (inet_pton(AF_INET, address, &addr.sin_addr) != 1) {
-		close(fd);
+	if (inet_pton(AF_INET, address, &addr.sin_addr) != 1)
 		return TR_ERR_INVALID;
-	}
 
 	if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_OK;
 	}
 
 	if (errno == EINPROGRESS) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_IN_PROGRESS;
 	}
 
-	close(fd);
 	return TR_ERR_SYS;
 }
 
@@ -152,7 +139,7 @@ int tr_tcp_finish_connect(int fd)
 
 int tr_tcp_accept(int listen_fd, int *out_fd)
 {
-	int fd;
+	int fd TR_AUTO(tr_fd_cleanup) = -1;
 
 	if (listen_fd < 0 || !out_fd)
 		return TR_ERR_INVALID;
@@ -162,7 +149,7 @@ int tr_tcp_accept(int listen_fd, int *out_fd)
 #ifdef SOCK_NONBLOCK
 	fd = accept4(listen_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
 	if (fd >= 0) {
-		*out_fd = fd;
+		*out_fd = tr_fd_take(&fd);
 		return TR_OK;
 	}
 
@@ -182,12 +169,10 @@ int tr_tcp_accept(int listen_fd, int *out_fd)
 		return TR_ERR_SYS;
 	}
 
-	if (tr_set_nonblock_cloexec(fd) != TR_OK) {
-		close(fd);
+	if (tr_set_nonblock_cloexec(fd) != TR_OK)
 		return TR_ERR_SYS;
-	}
 
-	*out_fd = fd;
+	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
 }
 
