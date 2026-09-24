@@ -477,16 +477,15 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	struct tr_connection *connection;
 	struct epoll_event event;
 	struct tr_wire_limits limits;
+	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
-	if (slot >= reactor->config.max_connections) {
-		close(fd);
+	if (slot >= reactor->config.max_connections)
 		return TR_ERR_STALE;
-	}
 
 	connection = &reactor->connections[slot];
 	memset(connection, 0, sizeof(*connection));
-	connection->fd = fd;
+	connection->fd = -1;
 	connection->slot = slot;
 	connection->generation = generation;
 	connection->state = TR_CONN_ACTIVE;
@@ -498,7 +497,6 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	limits.max_payload_len = reactor->config.max_payload_len;
 	ret = tr_parser_init(&connection->parser, &reactor->rx_pool, &limits);
 	if (ret != TR_OK) {
-		close(fd);
 		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return ret;
 	}
@@ -508,15 +506,14 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	event.events = connection->epoll_events;
 	event.data.u64 = tr_conn_token(slot, generation);
 
-	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
+	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, owned_fd, &event) < 0) {
 		tr_parser_reset(&connection->parser);
-		close(fd);
-		connection->fd = -1;
 		connection->state = TR_CONN_ERROR;
 		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return TR_ERR_SYS;
 	}
 
+	connection->fd = tr_fd_take(&owned_fd);
 	tr_slot_set_state(reactor, slot, generation, TR_CONN_ACTIVE);
 	return TR_OK;
 }
