@@ -65,6 +65,7 @@ struct tr_server {
 	uint16_t bound_port;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
 
 static uint64_t tr_server_now_ms(void)
@@ -442,6 +443,7 @@ int tr_server_create(const struct tr_server_config *config,
 {
 	struct tr_server_config effective;
 	struct tr_reactor_config reactor_config;
+	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
 	int ret;
 
@@ -462,16 +464,15 @@ int tr_server_create(const struct tr_server_config *config,
 	    effective.max_peers == 0)
 		return TR_ERR_INVALID;
 
-	server = (struct tr_server *)calloc(1, sizeof(*server));
-	if (!server)
+	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
+	if (!server_mem)
 		return TR_ERR_NOMEM;
-	server->config = effective;
-	server->listen_fd = -1;
+	server_mem->config = effective;
+	server_mem->listen_fd = -1;
 
-	if (pthread_mutex_init(&server->lock, NULL) != 0) {
-		free(tr_server_owner_take(&server));
+	if (pthread_mutex_init(&server_mem->lock, NULL) != 0)
 		return TR_ERR_INVALID;
-	}
+	server = tr_server_mem_take(&server_mem);
 
 	server->methods = (struct tr_server_method *)calloc(
 		effective.limits.max_methods, sizeof(*server->methods));
