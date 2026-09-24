@@ -877,6 +877,47 @@ static int tr_rpc_executor_ready_push_locked(struct tr_rpc_executor *executor,
 	return TR_OK;
 }
 
+static void
+tr_rpc_executor_ready_undo_push_locked(struct tr_rpc_executor *executor,
+				       uint32_t slot)
+{
+	uint32_t tail;
+
+	if (executor->ready_count == 0 || executor->ready_capacity == 0)
+		return;
+
+	tail = (executor->ready_tail + executor->ready_capacity - 1U) %
+	       executor->ready_capacity;
+	if (executor->ready_calls[tail] != slot)
+		return;
+
+	executor->ready_tail = tail;
+	executor->ready_count--;
+}
+
+static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
+					 struct tr_rpc_endpoint *endpoint)
+{
+	int ret = TR_OK;
+
+	if (!group || !endpoint)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&group->lock);
+	if (group->stopping)
+		ret = TR_ERR_CLOSED;
+	else if (group->count == group->capacity)
+		ret = TR_ERR_STATE;
+	else {
+		group->ready_endpoints[group->tail] = endpoint;
+		group->tail = (group->tail + 1U) % group->capacity;
+		group->count++;
+		pthread_cond_signal(&group->cond);
+	}
+	pthread_mutex_unlock(&group->lock);
+	return ret;
+}
+
 static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 				const struct tr_rpc_task *task)
 {
@@ -918,6 +959,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	else
 		callq->head = node_index;
 	callq->tail = node_index;
+	callq->queued_count++;
 	executor->queued_count++;
 
 	if (!callq->running && !callq->ready) {
@@ -941,11 +983,49 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 			}
 			node->next = executor->free_head;
 			executor->free_head = node_index;
+			if (callq->queued_count != 0)
+				callq->queued_count--;
 			executor->queued_count--;
 			goto out;
 		}
 		callq->ready = 1;
-		pthread_cond_signal(&executor->cond);
+		if (executor->group) {
+			ret = tr_rpc_executor_group_enqueue(executor->group,
+							 endpoint);
+			if (ret != TR_OK) {
+				callq->ready = 0;
+				tr_rpc_executor_ready_undo_push_locked(
+					executor, task->call.slot);
+				{
+					uint32_t cur = callq->head;
+					uint32_t prev = TR_RPC_EXEC_NONE;
+
+					while (cur != TR_RPC_EXEC_NONE &&
+					       cur != node_index) {
+						prev = cur;
+						cur = executor->nodes[cur].next;
+					}
+					if (cur == node_index) {
+						if (prev != TR_RPC_EXEC_NONE)
+							executor->nodes[prev].next =
+								TR_RPC_EXEC_NONE;
+						else
+							callq->head =
+								TR_RPC_EXEC_NONE;
+						callq->tail = prev;
+					}
+				}
+				node->next = executor->free_head;
+				executor->free_head = node_index;
+				if (callq->queued_count != 0)
+					callq->queued_count--;
+				if (executor->queued_count != 0)
+					executor->queued_count--;
+				goto out;
+			}
+		} else {
+			pthread_cond_signal(&executor->cond);
+		}
 	}
 
 out:
@@ -961,9 +1041,12 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 	int ret;
 
 	call->task_refs++;
+	endpoint->executor_task_refs++;
 	ret = tr_rpc_executor_push(endpoint, task);
-	if (ret != TR_OK)
+	if (ret != TR_OK) {
 		call->task_refs--;
+		endpoint->executor_task_refs--;
+	}
 	return ret;
 }
 
@@ -977,6 +1060,10 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 		    call->generation == handle.generation) {
 			if (call->task_refs != 0)
 				call->task_refs--;
+			if (endpoint->executor_task_refs != 0)
+				endpoint->executor_task_refs--;
+			if (endpoint->executor_task_refs == 0)
+				pthread_cond_broadcast(&endpoint->task_cond);
 			tr_rpc_maybe_free_call_locked(call);
 		}
 	}
