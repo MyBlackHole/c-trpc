@@ -4083,6 +4083,146 @@ static void test_server_shared_rpc_executor(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_server_peer_refcount_drain(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_call_handle call;
+	struct shared_executor_test_ctx ctx;
+	struct timespec deadline;
+	uint16_t port = 0;
+	unsigned attempt;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.executor_threads = 1U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.limits.rpc_message_buffer_bytes = 4096U;
+	server_config.limits.rpc_message_pool_count = 32U;
+	server_config.limits.reassembly_pool_count = 4U;
+	server_config.limits.rx_buffer_count = 32U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 89U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1024U;
+	method.max_response_bytes = 1024U;
+	assert(tr_server_register_method(server, &method,
+					 shared_executor_test_handler,
+					 &ctx) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 500U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	client_config.limits.rpc_message_buffer_bytes = 4096U;
+	client_config.limits.rpc_message_pool_count = 32U;
+	client_config.limits.reassembly_pool_count = 4U;
+	client_config.limits.rx_buffer_count = 32U;
+
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_client_register_method(client, &method) == TR_OK);
+
+	request.data = (const uint8_t *)"hold";
+	request.len = 4U;
+	assert(tr_client_unary_call(client, 89U, 1U, &request, NULL, NULL,
+				    &call) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.entered < 1U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.active == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/*
+	 * Close the first peer while its server callback still owns an endpoint
+	 * task reference. The reaper may retire/reuse the peer slot, but it must
+	 * not free Endpoint/Channel state until this task releases its ref.
+	 */
+	tr_client_destroy(client);
+	client = NULL;
+
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	for (attempt = 0; attempt < 100U; ++attempt) {
+		ret = tr_client_connect(client, "127.0.0.1", port);
+		if (ret == TR_OK)
+			break;
+		assert(ret != TR_ERR_STATE);
+		{
+			struct timespec pause_time;
+			pause_time.tv_sec = 0;
+			pause_time.tv_nsec = 10000000L;
+			nanosleep(&pause_time, NULL);
+		}
+	}
+	assert(ret == TR_OK);
+	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_unary_call(client, 89U, 1U, &request,
+				    shared_executor_test_result, &ctx,
+				    &call) == TR_OK);
+
+	/* The only shared worker is still occupied by the retired peer task. */
+	{
+		struct timespec pause_time;
+		pause_time.tv_sec = 0;
+		pause_time.tv_nsec = 100000000L;
+		nanosleep(&pause_time, NULL);
+	}
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.entered == 1U);
+	ctx.release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	ret = 0;
+	pthread_mutex_lock(&ctx.lock);
+	while ((ctx.entered < 2U || ctx.results < 1U) && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.entered == 2U);
+	assert(ctx.results == 1U);
+	assert(ctx.max_active == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	{
+		int drain_ret = tr_client_begin_drain(client);
+		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
+	}
+	assert(tr_client_wait_drained(client, 5000U) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	tr_client_destroy(client);
+	tr_server_destroy(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 struct cleanup_order_probe {
 	unsigned id;
 	unsigned *order;
@@ -4273,6 +4413,7 @@ int main(void)
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
 	test_server_shared_rpc_executor();
+	test_server_peer_refcount_drain();
 
 	puts("all transport/RPC core tests passed");
 	return 0;
