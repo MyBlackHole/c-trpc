@@ -1231,11 +1231,55 @@ static void tr_default_config(struct tr_reactor_config *config)
 		tr_nonzero(config->tx_budget_bytes, 4U * 1024U * 1024U);
 }
 
+struct tr_reactor_build {
+	struct tr_reactor *reactor;
+	int ctl_lock_ready;
+	int slot_lock_ready;
+	int commands_ready;
+	int tx_pool_ready;
+	int control_tx_pool_ready;
+	int rx_pool_ready;
+};
+
+static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
+{
+	struct tr_reactor *reactor;
+
+	if (!build || !build->reactor)
+		return;
+	reactor = build->reactor;
+
+	if (reactor->wake_fd >= 0)
+		close(reactor->wake_fd);
+	if (reactor->epoll_fd >= 0)
+		close(reactor->epoll_fd);
+
+	if (build->rx_pool_ready)
+		tr_buffer_pool_destroy(&reactor->rx_pool);
+	if (build->control_tx_pool_ready)
+		tr_tx_pool_destroy(&reactor->control_tx_pool);
+	if (build->tx_pool_ready)
+		tr_tx_pool_destroy(&reactor->tx_pool);
+	if (build->commands_ready)
+		tr_command_queue_destroy(&reactor->commands);
+
+	free(reactor->connections);
+	free(reactor->slots);
+
+	if (build->slot_lock_ready)
+		pthread_mutex_destroy(&reactor->slot_lock);
+	if (build->ctl_lock_ready)
+		pthread_mutex_destroy(&reactor->ctl_lock);
+	free(reactor);
+	build->reactor = NULL;
+}
+
 int tr_reactor_create(const struct tr_reactor_config *config,
 		      tr_reactor_frame_cb frame_cb,
 		      tr_reactor_event_cb event_cb, void *callback_arg,
 		      struct tr_reactor **out)
 {
+	struct tr_reactor_build build TR_AUTO(tr_reactor_build_cleanup) = { 0 };
 	struct tr_reactor *reactor;
 	struct epoll_event wake_event;
 	uint32_t i;
@@ -1248,36 +1292,34 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	reactor = (struct tr_reactor *)calloc(1, sizeof(*reactor));
 	if (!reactor)
 		return TR_ERR_NOMEM;
+	build.reactor = reactor;
+	reactor->epoll_fd = -1;
+	reactor->wake_fd = -1;
 
 	if (config)
 		reactor->config = *config;
 	tr_default_config(&reactor->config);
 
-	if (reactor->config.max_payload_len > reactor->config.rx_buffer_size) {
-		free(reactor);
+	if (reactor->config.max_payload_len > reactor->config.rx_buffer_size)
 		return TR_ERR_BAD_LENGTH;
-	}
 
-	reactor->epoll_fd = -1;
-	reactor->wake_fd = -1;
 	reactor->frame_cb = frame_cb;
 	reactor->event_cb = event_cb;
 	reactor->callback_arg = callback_arg;
 
-	if (pthread_mutex_init(&reactor->ctl_lock, NULL) != 0 ||
-	    pthread_mutex_init(&reactor->slot_lock, NULL) != 0) {
-		free(reactor);
+	if (pthread_mutex_init(&reactor->ctl_lock, NULL) != 0)
 		return TR_ERR_INVALID;
-	}
+	build.ctl_lock_ready = 1;
+	if (pthread_mutex_init(&reactor->slot_lock, NULL) != 0)
+		return TR_ERR_INVALID;
+	build.slot_lock_ready = 1;
 
 	reactor->slots = (struct tr_slot *)calloc(
 		reactor->config.max_connections, sizeof(*reactor->slots));
 	reactor->connections = (struct tr_connection *)calloc(
 		reactor->config.max_connections, sizeof(*reactor->connections));
-	if (!reactor->slots || !reactor->connections) {
-		ret = TR_ERR_NOMEM;
-		goto fail;
-	}
+	if (!reactor->slots || !reactor->connections)
+		return TR_ERR_NOMEM;
 
 	for (i = 0; i < reactor->config.max_connections; ++i) {
 		reactor->slots[i].state = TR_CONN_FREE;
@@ -1288,70 +1330,47 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	ret = tr_command_queue_init(&reactor->commands,
 				    reactor->config.command_capacity);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
+	build.commands_ready = 1;
 
 	ret = tr_tx_pool_init(&reactor->tx_pool,
 			      reactor->config.tx_item_capacity);
 	if (ret != TR_OK)
-		goto fail_commands;
+		return ret;
+	build.tx_pool_ready = 1;
 
 	ret = tr_tx_pool_init(&reactor->control_tx_pool,
 			      reactor->config.control_tx_item_capacity);
 	if (ret != TR_OK)
-		goto fail_tx;
+		return ret;
+	build.control_tx_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&reactor->rx_pool,
 				  reactor->config.rx_buffer_count,
 				  reactor->config.rx_buffer_size);
 	if (ret != TR_OK)
-		goto fail_control_tx;
+		return ret;
+	build.rx_pool_ready = 1;
 
 	reactor->epoll_fd = epoll_create1(EPOLL_CLOEXEC);
-	if (reactor->epoll_fd < 0) {
-		ret = TR_ERR_SYS;
-		goto fail_rx;
-	}
+	if (reactor->epoll_fd < 0)
+		return TR_ERR_SYS;
 
 	reactor->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-	if (reactor->wake_fd < 0) {
-		ret = TR_ERR_SYS;
-		goto fail_epoll;
-	}
+	if (reactor->wake_fd < 0)
+		return TR_ERR_SYS;
 
 	memset(&wake_event, 0, sizeof(wake_event));
 	wake_event.events = EPOLLIN;
 	wake_event.data.u64 = TR_WAKE_TOKEN;
 	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, reactor->wake_fd,
-		      &wake_event) < 0) {
-		ret = TR_ERR_SYS;
-		goto fail_wake;
-	}
+		      &wake_event) < 0)
+		return TR_ERR_SYS;
 
 	reactor->accepting = 1;
 	*out = reactor;
+	build.reactor = NULL;
 	return TR_OK;
-
-fail_wake:
-	close(reactor->wake_fd);
-	reactor->wake_fd = -1;
-fail_epoll:
-	close(reactor->epoll_fd);
-	reactor->epoll_fd = -1;
-fail_rx:
-	tr_buffer_pool_destroy(&reactor->rx_pool);
-fail_control_tx:
-	tr_tx_pool_destroy(&reactor->control_tx_pool);
-fail_tx:
-	tr_tx_pool_destroy(&reactor->tx_pool);
-fail_commands:
-	tr_command_queue_destroy(&reactor->commands);
-fail:
-	free(reactor->connections);
-	free(reactor->slots);
-	pthread_mutex_destroy(&reactor->slot_lock);
-	pthread_mutex_destroy(&reactor->ctl_lock);
-	free(reactor);
-	return ret;
 }
 
 int tr_reactor_start(struct tr_reactor *reactor)
