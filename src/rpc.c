@@ -2468,7 +2468,6 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 struct tr_rpc_endpoint_build {
 	struct tr_rpc_endpoint *endpoint;
 	int lock_ready;
-	int task_cond_ready;
 	int deadline_ready;
 	int executor_ready;
 	int handler_installed;
@@ -2489,16 +2488,11 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 	}
 	if (build->deadline_ready)
 		tr_rpc_deadline_destroy(endpoint);
-	if (build->executor_ready) {
-		if (endpoint->executor.group)
-			tr_rpc_executor_wait_idle(endpoint);
+	if (build->executor_ready)
 		tr_rpc_executor_destroy(endpoint);
-	}
 
 	free(endpoint->calls);
 	free(endpoint->methods);
-	if (build->task_cond_ready)
-		pthread_cond_destroy(&endpoint->task_cond);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
@@ -2528,9 +2522,8 @@ int tr_rpc_endpoint_create_with_executor_group(
 	if (pthread_mutex_init(&endpoint->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.lock_ready = 1;
-	if (pthread_cond_init(&endpoint->task_cond, NULL) != 0)
-		return TR_ERR_INVALID;
-	build.task_cond_ready = 1;
+	if (tr_refcount_init(&endpoint->refs, 1U) != TR_OK)
+		return TR_ERR_STATE;
 
 	endpoint->methods = (struct tr_rpc_method_entry *)calloc(
 		config->max_methods, sizeof(*endpoint->methods));
@@ -2573,40 +2566,65 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 							 out);
 }
 
-void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
+static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint)
+{
+	if (!endpoint)
+		return TR_ERR_INVALID;
+	return tr_refcount_get(&endpoint->refs);
+}
+
+static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 {
 	uint32_t i;
 
 	if (!endpoint)
 		return;
 
-	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
-	/*
-	 * A Channel callback may already have copied endpoint as callback_arg.
-	 * Wait for the reactor thread to cross a lifecycle barrier before freeing
-	 * endpoint-owned state.
-	 */
-	(void)tr_channel_quiesce(endpoint->channel);
-	tr_rpc_deadline_destroy(endpoint);
-
-	/*
-	 * Shared executor workers outlive individual server peers. task_refs keep
-	 * the endpoint alive while queued/running callbacks still reference it.
-	 */
-	if (endpoint->executor.group)
-		tr_rpc_executor_wait_idle(endpoint);
-	tr_rpc_executor_destroy(endpoint);
-
 	pthread_mutex_lock(&endpoint->lock);
 	for (i = 0; i < endpoint->config.max_calls; ++i)
 		tr_rpc_free_call_locked(&endpoint->calls[i]);
 	pthread_mutex_unlock(&endpoint->lock);
 
+	tr_rpc_executor_release(endpoint);
 	free(endpoint->calls);
 	free(endpoint->methods);
-	pthread_cond_destroy(&endpoint->task_cond);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
+}
+
+static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
+{
+	int last;
+
+	if (!endpoint)
+		return;
+
+	last = tr_refcount_put(&endpoint->refs);
+	if (last == 1)
+		tr_rpc_endpoint_release(endpoint);
+}
+
+void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
+{
+	if (!endpoint)
+		return;
+
+	/*
+	 * Stop all sources that can create new endpoint users before dropping
+	 * the owner reference. Existing queued/running executor tasks each hold
+	 * their own strong reference and may drain after this function returns.
+	 */
+	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
+	(void)tr_channel_quiesce(endpoint->channel);
+	tr_rpc_deadline_destroy(endpoint);
+	tr_rpc_executor_shutdown(endpoint);
+
+	/*
+	 * Standalone executors were joined by shutdown(), so this is normally the
+	 * final put. Shared server executors may keep the endpoint alive until
+	 * their last queued/running task completes.
+	 */
+	tr_rpc_endpoint_put(endpoint);
 }
 
 static int tr_rpc_validate_method(const struct tr_rpc_method_desc *method)
