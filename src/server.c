@@ -270,12 +270,45 @@ static void tr_server_stop_reaper(struct tr_server *server)
 	}
 }
 
+struct tr_server_peer_guard {
+	struct tr_server *server;
+	struct tr_server_peer *peer;
+	int armed;
+};
+
+static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
+{
+	struct tr_server_peer *peer;
+
+	if (!guard || !guard->armed || !guard->server || !guard->peer)
+		return;
+	peer = guard->peer;
+
+	if (peer->connection.reactor)
+		(void)tr_reactor_close(peer->connection);
+
+	/*
+	 * Once Channel/RPC state exists, Reactor callbacks may have observed it.
+	 * Publish the partial peer and let the reaper quiesce/destroy it.
+	 */
+	if (peer->channel || peer->rpc) {
+		pthread_mutex_lock(&guard->server->lock);
+		peer->used = 1;
+		guard->server->peer_count++;
+		pthread_mutex_unlock(&guard->server->lock);
+	} else {
+		memset(&peer->connection, 0, sizeof(peer->connection));
+	}
+}
+
 static int tr_server_adopt_peer(struct tr_server *server, int fd)
 {
 	struct tr_channel_config channel_config;
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_server_peer *peer;
+	struct tr_server_peer_guard peer_guard
+		TR_AUTO(tr_server_peer_guard_cleanup) = { server, NULL, 0 };
 	uint32_t slot;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
@@ -296,6 +329,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	peer = &server->peers[slot];
 	memset(peer, 0, sizeof(*peer));
+	peer_guard.peer = peer;
 	pthread_mutex_unlock(&server->lock);
 
 	ret = tr_reactor_adopt_fd(server->reactor, owned_fd,
@@ -303,6 +337,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	if (ret != TR_OK)
 		return ret;
 	(void)tr_fd_take(&owned_fd);
+	peer_guard.armed = 1;
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_SERVER;
@@ -320,7 +355,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 				peer->connection, NULL, NULL, NULL, NULL,
 				&peer->channel);
 	if (ret != TR_OK)
-		goto fail_connection;
+		return ret;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_SERVER;
@@ -335,11 +370,11 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		peer->channel, &rpc_config, server->rpc_executor_group,
 		&peer->rpc);
 	if (ret != TR_OK)
-		goto fail_channel;
+		return ret;
 
 	ret = tr_server_register_methods_on_peer(server, peer);
 	if (ret != TR_OK)
-		goto fail_rpc;
+		return ret;
 
 	if (server->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -349,32 +384,15 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		ret = tr_channel_enable_keepalive(peer->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			goto fail_rpc;
+			return ret;
 	}
 
 	pthread_mutex_lock(&server->lock);
 	peer->used = 1;
 	server->peer_count++;
 	pthread_mutex_unlock(&server->lock);
+	peer_guard.armed = 0;
 	return TR_OK;
-
-fail_rpc:
-fail_channel:
-	/*
-	 * Reactor owns the fd after adopt. Publish the partially constructed peer
-	 * so the runtime reaper can quiesce and release Channel/RPC state safely.
-	 */
-	(void)tr_reactor_close(peer->connection);
-	pthread_mutex_lock(&server->lock);
-	peer->used = 1;
-	server->peer_count++;
-	pthread_mutex_unlock(&server->lock);
-	return ret;
-
-fail_connection:
-	(void)tr_reactor_close(peer->connection);
-	memset(&peer->connection, 0, sizeof(peer->connection));
-	return ret;
 }
 
 static void *tr_server_accept_main(void *arg)
