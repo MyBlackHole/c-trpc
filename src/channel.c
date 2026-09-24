@@ -1936,6 +1936,12 @@ void tr_channel_destroy(struct tr_channel *channel)
 		(void)tr_reactor_set_handler(channel->bulk_connection, NULL,
 					     NULL, NULL);
 
+	/*
+	 * Stop new reactor callbacks from acquiring this Channel, then wait for
+	 * any callback that already copied callback_arg to return.
+	 */
+	(void)tr_reactor_quiesce(channel->reactor);
+
 	if (channel->streams) {
 		uint32_t i;
 		for (i = 0; i < channel->config.max_streams; ++i)
@@ -1967,6 +1973,13 @@ int tr_channel_set_handler(struct tr_channel *channel,
 	channel->callback_arg = callback_arg;
 	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
+}
+
+int tr_channel_quiesce(struct tr_channel *channel)
+{
+	if (!channel)
+		return TR_ERR_INVALID;
+	return tr_reactor_quiesce(channel->reactor);
 }
 
 int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
