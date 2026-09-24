@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "tr/cleanup.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -16,6 +18,23 @@ int tr_tcp_connect_ipv4(const char *address, uint16_t port, int *out_fd);
 int tr_tcp_finish_connect(int fd);
 int tr_tcp_accept(int listen_fd, int *out_fd);
 void tr_socket_close(int *fd);
+
+/* Scope-owned fd. -1 is the disarmed/non-owning state. */
+static inline void tr_fd_cleanup(int *fd)
+{
+	tr_socket_close(fd);
+}
+
+static inline int tr_fd_take(int *fd)
+{
+	int value = -1;
+
+	if (fd) {
+		value = *fd;
+		*fd = -1;
+	}
+	return value;
+}
 
 #ifdef __cplusplus
 }
