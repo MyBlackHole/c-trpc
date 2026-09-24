@@ -155,6 +155,12 @@ struct tr_rpc_executor_group {
 	int stopping;
 };
 
+TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_rpc_thread_array, pthread_t, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_rpc_endpoint_array, struct tr_rpc_endpoint *, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
+			tr_rpc_executor_group_destroy)
+
 struct tr_rpc_endpoint {
 	pthread_mutex_t lock;
 	pthread_cond_t deadline_cond;
@@ -1627,7 +1633,13 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t thread_count,
 				 struct tr_rpc_executor_group **out)
 {
-	struct tr_rpc_executor_group *group;
+	struct tr_rpc_executor_group *group_mem
+		TR_AUTO(tr_rpc_group_mem_cleanup) = NULL;
+	struct tr_rpc_executor_group *group
+		TR_AUTO(tr_rpc_group_owner_cleanup) = NULL;
+	pthread_t *threads TR_AUTO(tr_rpc_thread_array_cleanup) = NULL;
+	struct tr_rpc_endpoint **ready_endpoints
+		TR_AUTO(tr_rpc_endpoint_array_cleanup) = NULL;
 	uint64_t total_calls;
 	uint32_t i;
 
@@ -1647,63 +1659,44 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	if (thread_count == 0)
 		thread_count = 1U;
 
-	group = (struct tr_rpc_executor_group *)calloc(1, sizeof(*group));
-	if (!group)
+	group_mem =
+		(struct tr_rpc_executor_group *)calloc(1, sizeof(*group_mem));
+	if (!group_mem)
 		return TR_ERR_NOMEM;
 
-	if (pthread_mutex_init(&group->lock, NULL) != 0) {
-		free(group);
-		return TR_ERR_INVALID;
-	}
-	if (pthread_cond_init(&group->cond, NULL) != 0) {
-		pthread_mutex_destroy(&group->lock);
-		free(group);
-		return TR_ERR_INVALID;
-	}
-
-	group->threads =
-		(pthread_t *)calloc(thread_count, sizeof(*group->threads));
+	threads = (pthread_t *)calloc(thread_count, sizeof(*threads));
 	/*
 	 * The server reaper removes one peer slot before destroying that old
 	 * endpoint, so one retiring endpoint may briefly overlap max_peers live
 	 * endpoints. Keep one extra wake slot for that bounded overlap.
 	 */
-	group->ready_endpoints = (struct tr_rpc_endpoint **)calloc(
-		endpoint_capacity + 1U, sizeof(*group->ready_endpoints));
-	if (!group->threads || !group->ready_endpoints) {
-		free(group->ready_endpoints);
-		free(group->threads);
-		pthread_cond_destroy(&group->cond);
-		pthread_mutex_destroy(&group->lock);
-		free(group);
+	ready_endpoints = (struct tr_rpc_endpoint **)calloc(
+		endpoint_capacity + 1U, sizeof(*ready_endpoints));
+	if (!threads || !ready_endpoints)
 		return TR_ERR_NOMEM;
+
+	if (pthread_mutex_init(&group_mem->lock, NULL) != 0)
+		return TR_ERR_INVALID;
+	if (pthread_cond_init(&group_mem->cond, NULL) != 0) {
+		pthread_mutex_destroy(&group_mem->lock);
+		return TR_ERR_INVALID;
 	}
 
-	group->capacity = endpoint_capacity + 1U;
-	group->thread_count = thread_count;
+	group_mem->threads = tr_rpc_thread_array_take(&threads);
+	group_mem->ready_endpoints =
+		tr_rpc_endpoint_array_take(&ready_endpoints);
+	group_mem->capacity = endpoint_capacity + 1U;
+	group_mem->thread_count = thread_count;
+	group = tr_rpc_group_mem_take(&group_mem);
 
 	for (i = 0; i < thread_count; ++i) {
 		if (pthread_create(&group->threads[i], NULL,
-				   tr_rpc_executor_group_main, group) != 0) {
-			uint32_t j;
-
-			pthread_mutex_lock(&group->lock);
-			group->stopping = 1;
-			pthread_cond_broadcast(&group->cond);
-			pthread_mutex_unlock(&group->lock);
-			for (j = 0; j < group->started_threads; ++j)
-				(void)pthread_join(group->threads[j], NULL);
-			free(group->ready_endpoints);
-			free(group->threads);
-			pthread_cond_destroy(&group->cond);
-			pthread_mutex_destroy(&group->lock);
-			free(group);
+				   tr_rpc_executor_group_main, group) != 0)
 			return TR_ERR_SYS;
-		}
 		group->started_threads++;
 	}
 
-	*out = group;
+	*out = tr_rpc_group_owner_take(&group);
 	return TR_OK;
 }
 
