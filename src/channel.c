@@ -1,5 +1,6 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
+#include "maintenance.h"
 
 #include "tr/status.h"
 #include "tr/wire.h"
@@ -102,6 +103,9 @@ struct tr_channel {
 	int keepalive_thread_started;
 	int keepalive_enabled;
 	int keepalive_stop;
+	struct tr_maintenance_scheduler *maintenance;
+	struct tr_maintenance_handle keepalive_maintenance;
+	int keepalive_maintenance_registered;
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 	uint64_t keepalive_next_ping_id;
