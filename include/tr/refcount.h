@@ -42,7 +42,7 @@ static inline int tr_refcount_get(struct tr_refcount *ref)
 
 	old = atomic_load_explicit(&ref->value, memory_order_relaxed);
 	for (;;) {
-		if (old == 0 || old == UINT32_MAX)
+		if (old == 0 || old >= UINT32_MAX - 1U)
 			return TR_ERR_STATE;
 		if (atomic_compare_exchange_weak_explicit(
 			    &ref->value, &old, old + 1U,
@@ -66,7 +66,7 @@ static inline int tr_refcount_get_unless_zero(struct tr_refcount *ref)
 	for (;;) {
 		if (old == 0)
 			return 0;
-		if (old == UINT32_MAX)
+		if (old >= UINT32_MAX - 1U)
 			return TR_ERR_STATE;
 		if (atomic_compare_exchange_weak_explicit(
 			    &ref->value, &old, old + 1U,
