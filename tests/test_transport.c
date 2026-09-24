@@ -6,6 +6,7 @@
 #include "tr/guard.h"
 #include "tr/parser.h"
 #include "tr/reactor.h"
+#include "tr/refcount.h"
 #include "tr/rpc.h"
 #include "tr/rpc_codec.h"
 #include "tr/rpc_wire.h"
@@ -4143,6 +4144,39 @@ static int cleanup_mutex_early_return(pthread_mutex_t *mutex)
 	return TR_OK;
 }
 
+static void test_refcount_semantics(void)
+{
+	struct tr_refcount ref;
+
+	assert(tr_refcount_init(&ref, 1U) == TR_OK);
+	assert(tr_refcount_read(&ref) == 1U);
+
+	assert(tr_refcount_get(&ref) == TR_OK);
+	assert(tr_refcount_read(&ref) == 2U);
+	assert(tr_refcount_get_unless_zero(&ref) == 1);
+	assert(tr_refcount_read(&ref) == 3U);
+
+	assert(tr_refcount_put(&ref) == 0);
+	assert(tr_refcount_read(&ref) == 2U);
+	assert(tr_refcount_put(&ref) == 0);
+	assert(tr_refcount_read(&ref) == 1U);
+	assert(tr_refcount_put(&ref) == 1);
+	assert(tr_refcount_read(&ref) == 0U);
+
+	/* Dead objects cannot be resurrected or decremented below zero. */
+	assert(tr_refcount_get(&ref) == TR_ERR_STATE);
+	assert(tr_refcount_get_unless_zero(&ref) == 0);
+	assert(tr_refcount_put(&ref) == TR_ERR_STATE);
+
+	/* Invalid and saturation-adjacent initial states are explicit. */
+	assert(tr_refcount_init(&ref, 0U) == TR_ERR_INVALID);
+	assert(tr_refcount_init(&ref, UINT32_MAX) == TR_ERR_INVALID);
+	assert(tr_refcount_init(&ref, UINT32_MAX - 1U) == TR_OK);
+	assert(tr_refcount_get(&ref) == TR_ERR_STATE);
+	assert(tr_refcount_get_unless_zero(&ref) == TR_ERR_STATE);
+	assert(tr_refcount_put(&ref) == 0);
+}
+
 static void test_scope_cleanup_ownership(void)
 {
 	struct tr_buffer_pool pool;
@@ -4207,6 +4241,7 @@ static void test_scope_cleanup_ownership(void)
 
 int main(void)
 {
+	test_refcount_semantics();
 	test_scope_cleanup_ownership();
 	test_endian();
 	test_crc32c();
