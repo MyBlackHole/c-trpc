@@ -1601,37 +1601,43 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
-static void tr_rpc_executor_wait_idle(struct tr_rpc_endpoint *endpoint)
-{
-	pthread_mutex_lock(&endpoint->lock);
-	while (endpoint->executor_task_refs != 0)
-		pthread_cond_wait(&endpoint->task_cond, &endpoint->lock);
-	pthread_mutex_unlock(&endpoint->lock);
-}
-
-static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint)
+static void tr_rpc_executor_shutdown(struct tr_rpc_endpoint *endpoint)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
 	uint32_t i;
 
-	if (!executor->group) {
-		pthread_mutex_lock(&executor->lock);
+	pthread_mutex_lock(&executor->lock);
+	if (!executor->stopping) {
 		executor->stopping = 1;
 		pthread_cond_broadcast(&executor->cond);
-		pthread_mutex_unlock(&executor->lock);
+	}
+	pthread_mutex_unlock(&executor->lock);
 
+	/*
+	 * Standalone endpoints own their workers and must join them before the
+	 * owner's final put. Shared server workers are owned by the group and
+	 * drain existing task references asynchronously.
+	 */
+	if (!executor->group) {
 		for (i = 0; i < executor->started_threads; ++i)
 			(void)pthread_join(executor->threads[i], NULL);
 		executor->started_threads = 0;
-	} else {
-		pthread_mutex_lock(&executor->lock);
-		executor->stopping = 1;
-		pthread_mutex_unlock(&executor->lock);
 	}
+}
+
+static void tr_rpc_executor_release(struct tr_rpc_endpoint *endpoint)
+{
+	struct tr_rpc_executor *executor = &endpoint->executor;
 
 	tr_rpc_executor_cleanup(executor);
 	pthread_cond_destroy(&executor->cond);
 	pthread_mutex_destroy(&executor->lock);
+}
+
+static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint)
+{
+	tr_rpc_executor_shutdown(endpoint);
+	tr_rpc_executor_release(endpoint);
 }
 
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
