@@ -134,6 +134,7 @@ struct tr_rpc_executor {
 	uint32_t ready_count;
 
 	struct tr_rpc_executor_group *group;
+	int group_enqueued;
 	int stopping;
 	uint32_t started_threads;
 };
@@ -990,38 +991,41 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		}
 		callq->ready = 1;
 		if (executor->group) {
-			ret = tr_rpc_executor_group_enqueue(executor->group,
-							 endpoint);
-			if (ret != TR_OK) {
-				callq->ready = 0;
-				tr_rpc_executor_ready_undo_push_locked(
-					executor, task->call.slot);
-				{
-					uint32_t cur = callq->head;
-					uint32_t prev = TR_RPC_EXEC_NONE;
+			if (!executor->group_enqueued) {
+				ret = tr_rpc_executor_group_enqueue(
+					executor->group, endpoint);
+				if (ret != TR_OK) {
+					callq->ready = 0;
+					tr_rpc_executor_ready_undo_push_locked(
+						executor, task->call.slot);
+					{
+						uint32_t cur = callq->head;
+						uint32_t prev = TR_RPC_EXEC_NONE;
 
-					while (cur != TR_RPC_EXEC_NONE &&
-					       cur != node_index) {
-						prev = cur;
-						cur = executor->nodes[cur].next;
+						while (cur != TR_RPC_EXEC_NONE &&
+						       cur != node_index) {
+							prev = cur;
+							cur = executor->nodes[cur].next;
+						}
+						if (cur == node_index) {
+							if (prev != TR_RPC_EXEC_NONE)
+								executor->nodes[prev].next =
+									TR_RPC_EXEC_NONE;
+							else
+								callq->head =
+									TR_RPC_EXEC_NONE;
+							callq->tail = prev;
+						}
 					}
-					if (cur == node_index) {
-						if (prev != TR_RPC_EXEC_NONE)
-							executor->nodes[prev].next =
-								TR_RPC_EXEC_NONE;
-						else
-							callq->head =
-								TR_RPC_EXEC_NONE;
-						callq->tail = prev;
-					}
+					node->next = executor->free_head;
+					executor->free_head = node_index;
+					if (callq->queued_count != 0)
+						callq->queued_count--;
+					if (executor->queued_count != 0)
+						executor->queued_count--;
+					goto out;
 				}
-				node->next = executor->free_head;
-				executor->free_head = node_index;
-				if (callq->queued_count != 0)
-					callq->queued_count--;
-				if (executor->queued_count != 0)
-					executor->queued_count--;
-				goto out;
+				executor->group_enqueued = 1;
 			}
 		} else {
 			pthread_cond_signal(&executor->cond);
