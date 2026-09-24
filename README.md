@@ -494,17 +494,19 @@ first response is encoded.
 ### RPC executor boundary
 
 - application RPC callbacks never execute on the network Reactor thread
-- bounded fixed-capacity executor task-node pool
-- configurable multi-worker executor (`executor_threads`), with a small bounded default
-- one FIFO task queue per Call plus a global ready-Call queue
+- bounded fixed-capacity executor task-node pool per RPC endpoint
+- low-level standalone RPC endpoints retain their own configurable worker pool
+- the high-level Server facade creates one `executor_threads` worker pool shared by all peer RPC endpoints
+- one FIFO task queue per Call plus an endpoint-local ready-Call queue
+- the shared Server executor schedules ready endpoints while preserving endpoint-local Call ordering
 - at most one executor task for a Call runs at a time, so callbacks for one Call remain strictly serialized and ordered
-- different Calls may run concurrently on different workers
-- one task is taken per ready-Call scheduling turn, providing simple fairness between busy Calls
+- different Calls, including Calls from different peers, may run concurrently on shared workers
+- one task is taken per ready-Call scheduling turn, providing fairness without letting thread count scale with accepted peers
 - incoming RPC payload ownership is held until executor processing completes
 - this naturally delays Stream receive-credit return while application processing is outstanding
-- Call `task_refs` prevent Call slot reuse while executor work is still queued/running
+- Call `task_refs` keep an endpoint alive while shared workers still have queued/running callbacks
 
-The executor implementation therefore separates network progress from application latency without sacrificing in-Call message ordering.
+The executor implementation therefore separates network progress from application latency without sacrificing in-Call message ordering. Server worker count is now O(1) with respect to peer count; endpoint task queues remain independently bounded.
 
 ### RAW codec and bulk fast path
 
@@ -626,6 +628,7 @@ RPC:
 - short client deadline producing `DEADLINE_EXCEEDED` locally and remotely
 - service-side completion when the peer was already half-closed
 - multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
+- high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
@@ -685,7 +688,7 @@ The high-level Client/Server facade, capability negotiation, graceful drain,
 keepalive/liveness, diagnostics, callback quiescence, and runtime peer
 reclamation are implemented. The next production work should focus on:
 
-1. shared RPC executor and timer/maintenance scheduling so thread count does not scale with peer count.
+1. shared timer/maintenance scheduling so deadline/keepalive thread count does not scale with peer count.
 2. split CONTROL/BULK facade binding identity so independently accepted sockets can be paired securely.
 3. strict CONTROL priority at DATA-frame boundaries in shared-connection mode.
 4. typed codec registry (for example Protobuf) while retaining RAW bulk slices.

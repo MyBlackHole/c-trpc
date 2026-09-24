@@ -34,7 +34,12 @@ struct tr_facade_limits {
 	uint32_t rpc_message_buffer_bytes;
 	uint32_t reassembly_pool_count;
 
+	/*
+	 * Client: workers owned by the client RPC endpoint.
+	 * Server: one worker pool shared by all accepted peer RPC endpoints.
+	 */
 	uint32_t executor_threads;
+	/* Per-endpoint bounded task capacity. */
 	uint32_t executor_queue_capacity;
 };
 
