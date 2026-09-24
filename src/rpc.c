@@ -7,6 +7,7 @@
 #include "tr/guard.h"
 #include "tr/refcount.h"
 #include "rpc_internal.h"
+#include "maintenance.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -170,6 +171,8 @@ struct tr_rpc_endpoint {
 	pthread_t deadline_thread;
 	int deadline_started;
 	int deadline_stopping;
+	struct tr_maintenance_handle deadline_maintenance;
+	int deadline_maintenance_registered;
 
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint_config config;
