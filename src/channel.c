@@ -492,6 +492,38 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 	return ret;
 }
 
+static int
+tr_channel_normalize_create_hello_error(struct tr_channel *channel,
+					 struct tr_conn_handle connection,
+					 int ret)
+{
+	uint32_t mask;
+	int still_alive = 0;
+
+	if (ret == TR_OK)
+		return TR_OK;
+	if (ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
+		return ret;
+
+	/*
+	 * handler 已经安装后，peer 可能在 Channel create 返回前完成协议判定
+	 * 并关闭 connection。create 的既有契约是“构造成功，随后通过 lane DOWN
+	 * 表达协商失败”。先跨过 Reactor quiescence barrier，确保可能的 close
+	 * callback 已完成，再根据 Channel 自身状态判断是否属于该异步关闭。
+	 */
+	(void)tr_reactor_quiesce(channel->reactor);
+
+	pthread_mutex_lock(&channel->lock);
+	mask = tr_channel_connection_lane_mask_locked(channel, connection);
+	if ((mask & TR_CHANNEL_LANE_MASK_CONTROL) && channel->control_alive)
+		still_alive = 1;
+	if ((mask & TR_CHANNEL_LANE_MASK_BULK) && channel->bulk_alive)
+		still_alive = 1;
+	pthread_mutex_unlock(&channel->lock);
+
+	return still_alive ? ret : TR_OK;
+}
+
 static int tr_channel_send_hello_ack(struct tr_channel *channel,
 				     struct tr_conn_handle connection,
 				     const struct tr_channel_capabilities *caps)
@@ -1913,11 +1945,15 @@ int tr_channel_create(const struct tr_channel_config *config,
 	}
 
 	ret = tr_channel_send_hello(channel, control_connection);
+	ret = tr_channel_normalize_create_hello_error(
+		channel, control_connection, ret);
 	if (ret != TR_OK)
 		return ret;
 
 	if (!tr_conn_equal(control_connection, bulk_connection)) {
 		ret = tr_channel_send_hello(channel, bulk_connection);
+		ret = tr_channel_normalize_create_hello_error(
+			channel, bulk_connection, ret);
 		if (ret != TR_OK)
 			return ret;
 	}
