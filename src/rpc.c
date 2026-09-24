@@ -4,6 +4,7 @@
 #include "tr/rpc_wire.h"
 #include "tr/status.h"
 #include "tr/endian.h"
+#include "tr/guard.h"
 #include "rpc_internal.h"
 
 #include <pthread.h>
@@ -3090,22 +3091,21 @@ int tr_rpc_call_is_cancelled(struct tr_rpc_call_handle handle, int *status_out)
 {
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
+	struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
 	int cancelled;
 
 	if (!endpoint)
 		return TR_ERR_INVALID;
+	if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
+		return TR_ERR_SYS;
 
-	pthread_mutex_lock(&endpoint->lock);
 	call = tr_rpc_lookup_call_handle_locked(handle);
-	if (!call) {
-		pthread_mutex_unlock(&endpoint->lock);
+	if (!call)
 		return TR_ERR_STALE;
-	}
 	cancelled = call->cancelled;
 	if (status_out)
 		*status_out = cancelled ? call->cancel_status :
 					  TR_RPC_STATUS_OK;
-	pthread_mutex_unlock(&endpoint->lock);
 	return cancelled ? 1 : 0;
 }
 
@@ -3114,43 +3114,34 @@ int tr_rpc_call_set_metadata(struct tr_rpc_call_handle handle, const char *key,
 {
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
+	struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
 	size_t key_len;
-	int ret;
 
 	if (!endpoint || !tr_rpc_metadata_key_valid(key, &key_len) ||
 	    (value_len != 0 && !value))
 		return TR_ERR_INVALID;
+	if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
+		return TR_ERR_SYS;
 
-	pthread_mutex_lock(&endpoint->lock);
 	call = tr_rpc_lookup_call_handle_locked(handle);
-	if (!call) {
-		pthread_mutex_unlock(&endpoint->lock);
+	if (!call)
 		return TR_ERR_STALE;
-	}
-	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL) {
-		pthread_mutex_unlock(&endpoint->lock);
+	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL)
 		return TR_ERR_CLOSED;
-	}
 	if (call->tx_count != 0 || call->pending_tx != NULL ||
-	    call->pending_control != NULL) {
-		pthread_mutex_unlock(&endpoint->lock);
+	    call->pending_control != NULL)
 		return TR_ERR_STATE;
-	}
 
 	if (call->deadline_ns != 0 &&
 	    (uint32_t)call->local_metadata_len +
 			    TR_RPC_METADATA_TLV_HEADER_SIZE + key_len +
 			    value_len + TR_RPC_DEADLINE_METADATA_BYTES >
-		    TR_RPC_METADATA_MAX_BYTES) {
-		pthread_mutex_unlock(&endpoint->lock);
+		    TR_RPC_METADATA_MAX_BYTES)
 		return TR_ERR_BAD_LENGTH;
-	}
 
-	ret = tr_rpc_metadata_add_raw(call->local_metadata,
-				      &call->local_metadata_len, key, key_len,
-				      value, value_len, 0);
-	pthread_mutex_unlock(&endpoint->lock);
-	return ret;
+	return tr_rpc_metadata_add_raw(call->local_metadata,
+				       &call->local_metadata_len, key, key_len,
+				       value, value_len, 0);
 }
 
 int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
@@ -3159,6 +3150,7 @@ int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
 {
 	struct tr_rpc_endpoint *endpoint = handle.endpoint;
 	struct tr_rpc_call_slot *call;
+	struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
 	const uint8_t *found = NULL;
 	uint16_t found_len = 0;
 	size_t key_len;
@@ -3167,13 +3159,12 @@ int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
 	if (!endpoint || !value_len ||
 	    !tr_rpc_metadata_key_valid(key, &key_len))
 		return TR_ERR_INVALID;
+	if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
+		return TR_ERR_SYS;
 
-	pthread_mutex_lock(&endpoint->lock);
 	call = tr_rpc_lookup_call_handle_locked(handle);
-	if (!call) {
-		pthread_mutex_unlock(&endpoint->lock);
+	if (!call)
 		return TR_ERR_STALE;
-	}
 
 	ret = tr_rpc_metadata_find_raw(call->peer_metadata,
 				       call->peer_metadata_len, key, key_len,
@@ -3190,7 +3181,6 @@ int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
 			*value_len = found_len;
 		}
 	}
-	pthread_mutex_unlock(&endpoint->lock);
 	return ret;
 }
 
