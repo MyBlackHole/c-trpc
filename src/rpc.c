@@ -166,6 +166,7 @@ TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 struct tr_rpc_endpoint {
 	pthread_mutex_t lock;
 	pthread_cond_t deadline_cond;
+	pthread_cond_t ref_cond;
 	pthread_t deadline_thread;
 	int deadline_started;
 	int deadline_stopping;
@@ -2468,6 +2469,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 struct tr_rpc_endpoint_build {
 	struct tr_rpc_endpoint *endpoint;
 	int lock_ready;
+	int ref_cond_ready;
 	int deadline_ready;
 	int executor_ready;
 	int handler_installed;
@@ -2493,6 +2495,8 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 
 	free(endpoint->calls);
 	free(endpoint->methods);
+	if (build->ref_cond_ready)
+		pthread_cond_destroy(&endpoint->ref_cond);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
@@ -2522,6 +2526,9 @@ int tr_rpc_endpoint_create_with_executor_group(
 	if (pthread_mutex_init(&endpoint->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.lock_ready = 1;
+	if (pthread_cond_init(&endpoint->ref_cond, NULL) != 0)
+		return TR_ERR_INVALID;
+	build.ref_cond_ready = 1;
 	if (tr_refcount_init(&endpoint->refs, 1U) != TR_OK)
 		return TR_ERR_STATE;
 
@@ -2573,6 +2580,14 @@ static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint)
 	return tr_refcount_get(&endpoint->refs);
 }
 
+static void tr_rpc_endpoint_wait_owner_only(struct tr_rpc_endpoint *endpoint)
+{
+	pthread_mutex_lock(&endpoint->lock);
+	while (tr_refcount_read(&endpoint->refs) != 1U)
+		pthread_cond_wait(&endpoint->ref_cond, &endpoint->lock);
+	pthread_mutex_unlock(&endpoint->lock);
+}
+
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 {
 	uint32_t i;
@@ -2588,6 +2603,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_executor_release(endpoint);
 	free(endpoint->calls);
 	free(endpoint->methods);
+	pthread_cond_destroy(&endpoint->ref_cond);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
 }
@@ -2610,20 +2626,18 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 		return;
 
 	/*
-	 * Stop all sources that can create new endpoint users before dropping
-	 * the owner reference. Existing queued/running executor tasks each hold
-	 * their own strong reference and may drain after this function returns.
+	 * Stop every source that can create new endpoint users, then wait for
+	 * existing task references to drain. Endpoint borrows Channel, so this
+	 * destructor remains synchronous: callers may safely destroy Channel
+	 * immediately after it returns.
 	 */
 	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
 	(void)tr_channel_quiesce(endpoint->channel);
 	tr_rpc_deadline_destroy(endpoint);
 	tr_rpc_executor_shutdown(endpoint);
+	tr_rpc_endpoint_wait_owner_only(endpoint);
 
-	/*
-	 * Standalone executors were joined by shutdown(), so this is normally the
-	 * final put. Shared server executors may keep the endpoint alive until
-	 * their last queued/running task completes.
-	 */
+	/* Drop the owner's initial strong reference; this is the final put. */
 	tr_rpc_endpoint_put(endpoint);
 }
 
