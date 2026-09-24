@@ -16,6 +16,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "tr/wire.h"
+#include "../src/maintenance.h"
 
 #include <assert.h>
 #include <dirent.h>
@@ -4128,6 +4129,62 @@ static void shared_executor_test_result(struct tr_rpc_call_handle call,
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+struct maintenance_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned calls;
+};
+
+static uint64_t maintenance_test_callback(void *arg, uint64_t now_ns)
+{
+	struct maintenance_test_ctx *ctx = (struct maintenance_test_ctx *)arg;
+	unsigned calls;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->calls++;
+	calls = ctx->calls;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+
+	return calls < 2U ? now_ns + UINT64_C(10000000) : 0;
+}
+
+static void test_shared_maintenance_scheduler(void)
+{
+	struct tr_maintenance_scheduler *scheduler = NULL;
+	struct tr_maintenance_handle handle;
+	struct maintenance_test_ctx ctx;
+	struct timespec deadline;
+	uint64_t now_ns;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(tr_maintenance_scheduler_create(2U, &scheduler) == TR_OK);
+	assert(tr_maintenance_register(scheduler, maintenance_test_callback,
+				       &ctx, &handle) == TR_OK);
+
+	now_ns = tr_maintenance_now_ns();
+	assert(now_ns != 0);
+	assert(tr_maintenance_arm(handle,
+				  now_ns + UINT64_C(10000000)) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.calls < 2U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.calls == 2U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_maintenance_unregister(handle) == TR_OK);
+	tr_maintenance_scheduler_destroy(scheduler);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static unsigned test_linux_thread_count(void)
 {
 	DIR *dir;
@@ -4712,6 +4769,7 @@ int main(void)
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
+	test_shared_maintenance_scheduler();
 	test_server_shared_maintenance_threads();
 	test_server_shared_rpc_executor();
 	test_server_peer_refcount_drain();
