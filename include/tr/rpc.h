@@ -199,7 +199,12 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
 			   struct tr_rpc_endpoint **out);
 
-/* Call only after external users have stopped creating new work. */
+/*
+ * Call only after external users have stopped creating new work.
+ * Destruction is synchronous: Channel callbacks are quiesced and executor
+ * task references are drained before this function returns, so the borrowed
+ * Channel may be destroyed immediately afterward.
+ */
 void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
 
 /*
