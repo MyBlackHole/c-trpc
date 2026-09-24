@@ -260,7 +260,7 @@ static int tr_rpc_metadata_add_raw(uint8_t *dst, uint16_t *len_io,
 	if (!allow_reserved && key[0] == ':')
 		return TR_ERR_INVALID;
 
-	/* Reject duplicate keys to keep lookup semantics deterministic. */
+	/* 拒绝重复 key，保证 metadata lookup 语义确定且唯一。 */
 	off = 0;
 	while (off < *len_io) {
 		uint8_t old_key_len;
@@ -1891,8 +1891,8 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 					    status);
 
 	/*
-     * A client peer cannot know a streaming Call until the first REQUEST has
-     * been sent. A server Call, by definition, already came from a REQUEST.
+     * Client peer 在第一条 REQUEST 真正发送前并不知道该 streaming Call。
+     * Server Call 按定义一定来自已经收到的 REQUEST，因此天然对 peer 可见。
      */
 	peer_visible = endpoint->config.role == TR_RPC_SERVER ||
 		       call->tx_count != 0;
@@ -3128,7 +3128,7 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle handle, int status)
 				}
 				ret = TR_OK;
 			} else if (ret == TR_AGAIN) {
-				/* STATUS is already committed to Transport; close is internal retry work. */
+				/* STATUS 已经提交给 Transport；后续 close 只属于内部 retry 工作。 */
 				call->need_local_close = 1;
 				ret = TR_OK;
 			}
