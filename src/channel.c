@@ -695,10 +695,8 @@ static void tr_stream_reset_slot(struct tr_stream_slot *stream)
 		return;
 
 	generation = stream->generation;
-	if (stream->rx_reassembly) {
-		tr_buffer_release(stream->rx_reassembly);
-		stream->rx_reassembly = NULL;
-	}
+	if (stream->rx_reassembly)
+		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
 	memset(stream, 0, sizeof(*stream));
 	stream->generation = generation;
 }
@@ -1341,9 +1339,8 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 							 TR_ERR_STATE);
 		}
 
-		deliver = stream->rx_reassembly;
+		deliver = tr_buffer_take(&stream->rx_reassembly);
 		logical_len = deliver->len;
-		stream->rx_reassembly = NULL;
 		stream->rx_reassembly_message_id = 0;
 		stream->next_rx_message_id++;
 	} else if (fragmented) {
@@ -1365,7 +1362,7 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 
 	if (disposition == TR_STREAM_DATA_TAKE_OWNERSHIP) {
 		if (!fragmented)
-			frame->payload = NULL;
+			(void)tr_buffer_take(&frame->payload);
 		return TR_OK;
 	}
 
