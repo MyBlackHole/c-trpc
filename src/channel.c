@@ -260,10 +260,10 @@ static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 
 	if (outstanding) {
 		/*
-         * Any post-probe peer traffic is sufficient proof of liveness. Keep
-         * the probe outstanding until its timeout boundary so an explicit
-         * PONG can still contribute an RTT sample; if only other traffic was
-         * observed, simply retire the probe without failing the connection.
+         * probe 发出后的任意 peer traffic 都足以证明 connection 仍存活。
+         * 在 timeout 边界前继续保留 outstanding probe，使显式 PONG 仍可提供
+         * RTT sample；如果只观察到其他 traffic，则正常结束 probe，
+         * 不把 connection 判定为失败。
          */
 		if (stats.last_rx_activity_ns > sent_ns) {
 			if (now - sent_ns >= timeout_ns) {
@@ -982,7 +982,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	memset(&negotiated, 0, sizeof(negotiated));
 	negotiated.protocol_version = high;
 	negotiated.lane_mask = expected_lane_mask;
-	/* Peer HELLO advertises what that peer can receive: our TX limits. */
+	/* Peer HELLO 声明的是 peer 的接收能力，也就是我们的 TX limits。 */
 	negotiated.max_frame_payload_bytes =
 		peer_max_frame < local.max_frame_payload_bytes ?
 			peer_max_frame :
@@ -995,7 +995,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_UNSUPPORTED);
 
-	/* ACK advertises our receive limits back to the peer. */
+	/* ACK 把本地 receive limits 返回给 peer。 */
 	ack_caps = local;
 	ack_caps.protocol_version = high;
 	ack_caps.feature_bits = negotiated.feature_bits;
@@ -1540,7 +1540,7 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 		pthread_cond_broadcast(&channel->reconnect_cond);
 	pthread_mutex_unlock(&channel->lock);
 
-	/* A transport replacement never preserves stream byte state. */
+	/* Transport connection replacement 不保留旧 Stream 的 byte state。 */
 	if (control_down)
 		tr_channel_fail_lane_streams(channel, TR_LANE_CONTROL,
 					     stream_status);
