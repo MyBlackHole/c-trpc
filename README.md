@@ -293,10 +293,10 @@ the physical connection with `TR_ERR_TIMEOUT`. Existing connection-loss and
 reconnect handling then runs normally.
 
 Shared-connection mode emits one probe for the shared TCP connection; split
-mode tracks CONTROL and BULK independently. Low-level/Client Channel may keep
-its own small maintenance thread, while the high-level Server facade registers
-all peer keepalive work on one shared maintenance scheduler. Actual socket I/O
-remains Reactor owned.
+mode tracks CONTROL and BULK independently. Low-level standalone Channel keeps
+the compatible private maintenance-thread behavior. High-level Client/Server
+facades instead register keepalive work on their runtime-owned shared
+maintenance scheduler. Actual socket I/O remains Reactor owned.
 
 ### Metrics / diagnostics
 
@@ -456,9 +456,9 @@ tr_rpc_call_is_cancelled(call, &status);
 
 RPC deadlines use `CLOCK_MONOTONIC` and scan the bounded Call table.
 Low-level standalone RPC Endpoint keeps the original private deadline thread for
-backward compatibility. The high-level Server facade instead registers every
-peer Endpoint on one shared maintenance scheduler, so deadline thread count no
-longer grows with peer count.
+backward compatibility. High-level Client/Server facades register Endpoint
+deadlines on their runtime-owned shared maintenance scheduler; Server deadline
+thread count therefore no longer grows with peer count.
 
 Initial metadata is a bounded TLV side channel:
 
@@ -647,6 +647,7 @@ RPC:
 - multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
 - high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
 - shared maintenance scheduler callback re-arm/unregister semantics
+- high-level Client deadline + keepalive share one runtime maintenance thread
 - four Server peers with deadline + keepalive maintenance do not create per-peer timer threads
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
@@ -694,7 +695,7 @@ Current build validation passes:
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed on the shared timer scheduler
 - server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
-- standalone RPC Endpoint may use one private deadline thread; high-level Server peers share one monotonic maintenance scheduler for deadline and keepalive work
+- standalone low-level Channel/RPC Endpoint may use private timer threads; high-level Client/Server facades share one monotonic maintenance scheduler per runtime for deadline and keepalive work
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
 
 ## Build
