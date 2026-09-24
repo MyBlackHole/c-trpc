@@ -716,6 +716,171 @@ static void test_reactor_tcp_roundtrip(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct reactor_handler_swap_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned old_calls;
+	unsigned new_calls;
+	int old_entered;
+	int old_release;
+	int setter_done;
+	int setter_ret;
+};
+
+struct reactor_handler_set_arg {
+	struct tr_conn_handle connection;
+	struct reactor_handler_swap_ctx *ctx;
+};
+
+static enum tr_frame_disposition
+reactor_handler_old_cb(struct tr_conn_handle connection, struct tr_frame *frame,
+		       void *arg)
+{
+	struct reactor_handler_swap_ctx *ctx =
+		(struct reactor_handler_swap_ctx *)arg;
+	(void)connection;
+	(void)frame;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->old_calls++;
+	ctx->old_entered = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	while (!ctx->old_release)
+		pthread_cond_wait(&ctx->cond, &ctx->lock);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_FRAME_RELEASE;
+}
+
+static enum tr_frame_disposition
+reactor_handler_new_cb(struct tr_conn_handle connection, struct tr_frame *frame,
+		       void *arg)
+{
+	struct reactor_handler_swap_ctx *ctx =
+		(struct reactor_handler_swap_ctx *)arg;
+	(void)connection;
+	(void)frame;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->new_calls++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_FRAME_RELEASE;
+}
+
+static void *reactor_handler_set_thread(void *arg)
+{
+	struct reactor_handler_set_arg *set_arg =
+		(struct reactor_handler_set_arg *)arg;
+	struct reactor_handler_swap_ctx *ctx = set_arg->ctx;
+	int ret;
+
+	ret = tr_reactor_set_handler(set_arg->connection,
+				     reactor_handler_new_cb, NULL, ctx);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->setter_ret = ret;
+	ctx->setter_done = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return NULL;
+}
+
+static void test_reactor_handler_update_is_owner_serialized(void)
+{
+	struct tr_reactor_config config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_conn_handle client_handle;
+	struct tr_conn_handle server_handle;
+	struct reactor_handler_swap_ctx ctx;
+	struct reactor_handler_set_arg set_arg;
+	struct timespec deadline;
+	struct timespec pause_time;
+	pthread_t setter;
+	int client_fd;
+	int server_fd;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&config, 0, sizeof(config));
+	config.max_connections = 4U;
+	config.command_capacity = 32U;
+	config.tx_item_capacity = 8U;
+	config.control_tx_item_capacity = 8U;
+	config.rx_buffer_count = 4U;
+	config.rx_buffer_size = 4096U;
+	config.max_payload_len = 4096U;
+	config.rx_budget_bytes = 64U * 1024U;
+	config.tx_budget_bytes = 64U * 1024U;
+
+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_handle) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_handle) == TR_OK);
+	assert(tr_reactor_set_handler(server_handle, reactor_handler_old_cb,
+				      NULL, &ctx) == TR_OK);
+
+	assert(tr_reactor_send(client_handle, TR_FRAME_PING, 0, 0, 1,
+			       NULL) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx.lock);
+	while (!ctx.old_entered && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.old_calls == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	memset(&set_arg, 0, sizeof(set_arg));
+	set_arg.connection = server_handle;
+	set_arg.ctx = &ctx;
+	assert(pthread_create(&setter, NULL, reactor_handler_set_thread,
+			      &set_arg) == 0);
+
+	/*
+	 * 旧 callback 尚未返回时，SET_HANDLER command 只能排队，
+	 * 不能从 producer thread 直接修改 handler。
+	 */
+	pause_time.tv_sec = 0;
+	pause_time.tv_nsec = 100000000L;
+	nanosleep(&pause_time, NULL);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.setter_done == 0);
+	ctx.old_release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(pthread_join(setter, NULL) == 0);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.setter_done == 1);
+	assert(ctx.setter_ret == TR_OK);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_reactor_send(client_handle, TR_FRAME_PING, 0, 0, 2,
+			       NULL) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	ret = 0;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.new_calls < 1U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.old_calls == 1U);
+	assert(ctx.new_calls == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 struct backpressure_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
@@ -4395,6 +4560,7 @@ int main(void)
 	test_invalid_flags_and_reserved();
 	test_command_queue_bounded();
 	test_reactor_tcp_roundtrip();
+	test_reactor_handler_update_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
 	test_channel_stream_flow_control();
 	test_channel_message_fragmentation_reassembly();
