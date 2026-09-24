@@ -1,7 +1,7 @@
 CC ?= cc
 AR ?= ar
 CFLAGS ?= -O2 -g
-CFLAGS += -std=c99 -Wall -Wextra -Werror -pedantic -Iinclude -pthread
+CFLAGS += -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -pthread
 LDFLAGS += -pthread
 
 SRC := \
