@@ -1507,11 +1507,27 @@ static void tr_rpc_executor_cleanup(struct tr_rpc_executor *executor)
 	executor->threads = NULL;
 }
 
+static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint);
+
+struct tr_rpc_executor_init_guard {
+	struct tr_rpc_endpoint *endpoint;
+	int armed;
+};
+
+static void
+tr_rpc_executor_init_guard_cleanup(struct tr_rpc_executor_init_guard *guard)
+{
+	if (guard && guard->armed && guard->endpoint)
+		tr_rpc_executor_destroy(guard->endpoint);
+}
+
 static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 				uint32_t capacity,
 				struct tr_rpc_executor_group *group)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
+	struct tr_rpc_executor_init_guard guard
+		TR_AUTO(tr_rpc_executor_init_guard_cleanup) = { endpoint, 0 };
 	uint32_t thread_count;
 	uint32_t i;
 
@@ -1537,6 +1553,7 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		pthread_mutex_destroy(&executor->lock);
 		return TR_ERR_INVALID;
 	}
+	guard.armed = 1;
 
 	executor->group = group;
 	if (!group)
@@ -1549,12 +1566,8 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 	executor->ready_calls = (uint32_t *)calloc(
 		endpoint->config.max_calls, sizeof(*executor->ready_calls));
 	if ((!group && !executor->threads) || !executor->nodes ||
-	    !executor->callq || !executor->ready_calls) {
-		tr_rpc_executor_cleanup(executor);
-		pthread_cond_destroy(&executor->cond);
-		pthread_mutex_destroy(&executor->lock);
+	    !executor->callq || !executor->ready_calls)
 		return TR_ERR_NOMEM;
-	}
 
 	executor->capacity = capacity;
 	executor->thread_count = group ? group->thread_count : thread_count;
@@ -1569,28 +1582,16 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		executor->callq[i].tail = TR_RPC_EXEC_NONE;
 	}
 
-	if (group)
-		return TR_OK;
-
-	for (i = 0; i < thread_count; ++i) {
-		if (pthread_create(&executor->threads[i], NULL,
-				   tr_rpc_executor_main, endpoint) != 0) {
-			uint32_t j;
-
-			pthread_mutex_lock(&executor->lock);
-			executor->stopping = 1;
-			pthread_cond_broadcast(&executor->cond);
-			pthread_mutex_unlock(&executor->lock);
-			for (j = 0; j < executor->started_threads; ++j)
-				(void)pthread_join(executor->threads[j], NULL);
-			tr_rpc_executor_cleanup(executor);
-			pthread_cond_destroy(&executor->cond);
-			pthread_mutex_destroy(&executor->lock);
-			return TR_ERR_SYS;
+	if (!group) {
+		for (i = 0; i < thread_count; ++i) {
+			if (pthread_create(&executor->threads[i], NULL,
+					   tr_rpc_executor_main, endpoint) != 0)
+				return TR_ERR_SYS;
+			executor->started_threads++;
 		}
-		executor->started_threads++;
 	}
 
+	guard.armed = 0;
 	return TR_OK;
 }
 
