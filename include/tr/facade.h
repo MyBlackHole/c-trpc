@@ -8,11 +8,11 @@ extern "C" {
 #endif
 
 /*
- * Shared high-level runtime limits used by the Client/Server facades.
- * Zero-valued fields are filled by tr_facade_limits_init().
+ * Client/Server facade 共用的高层 runtime limits。
+ * 值为 0 的字段由 tr_facade_limits_init() 填入默认值。
  *
- * V1 facade intentionally exposes only the shared-connection mode. The lower
- * level Channel API still supports split CONTROL/BULK connections.
+ * V1 facade 有意只暴露 shared-connection 模式；
+ * 更底层的 Channel API 仍支持 split CONTROL/BULK connection。
  */
 struct tr_facade_limits {
 	uint32_t max_streams;
@@ -35,11 +35,11 @@ struct tr_facade_limits {
 	uint32_t reassembly_pool_count;
 
 	/*
-	 * Client: workers owned by the client RPC endpoint.
-	 * Server: one worker pool shared by all accepted peer RPC endpoints.
+	 * Client：worker 由 Client RPC Endpoint 自己拥有。
+	 * Server：所有已接收 peer 的 RPC Endpoint 共用一个 worker pool。
 	 */
 	uint32_t executor_threads;
-	/* Per-endpoint bounded task capacity. */
+	/* 每个 Endpoint 独立的有界 task 容量。 */
 	uint32_t executor_queue_capacity;
 };
 
