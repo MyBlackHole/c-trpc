@@ -678,7 +678,7 @@ static int tr_rpc_encode_message(struct tr_rpc_endpoint *endpoint,
 				 struct tr_buffer **out)
 {
 	struct tr_rpc_wire_header header;
-	struct tr_buffer *buffer;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 	uint16_t metadata_len = 0;
 	uint32_t encoded = 0;
@@ -721,7 +721,7 @@ static int tr_rpc_encode_message(struct tr_rpc_endpoint *endpoint,
 
 	ret = tr_rpc_wire_encode(buffer->data, &header);
 	if (ret != TR_OK)
-		goto fail;
+		return ret;
 
 	payload_off = TR_RPC_WIRE_HEADER_SIZE;
 	if (metadata_len) {
@@ -737,16 +737,12 @@ static int tr_rpc_encode_message(struct tr_rpc_endpoint *endpoint,
 	if (ret != TR_OK || encoded != message->len) {
 		if (ret == TR_OK)
 			ret = TR_ERR_STATE;
-		goto fail;
+		return ret;
 	}
 
 	buffer->len = total;
-	*out = buffer;
+	*out = tr_buffer_take(&buffer);
 	return TR_OK;
-
-fail:
-	tr_buffer_release(buffer);
-	return ret;
 }
 
 static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
@@ -758,7 +754,7 @@ static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
 				       struct tr_buffer **out)
 {
 	struct tr_rpc_wire_header header;
-	struct tr_buffer *buffer;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 	uint16_t metadata_len = 0;
 	uint32_t metadata_wire_len = 0;
@@ -793,10 +789,8 @@ static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
 	header.payload_len = payload_len;
 
 	ret = tr_rpc_wire_encode(buffer->data, &header);
-	if (ret != TR_OK) {
-		tr_buffer_release(buffer);
+	if (ret != TR_OK)
 		return ret;
-	}
 
 	if (metadata_len) {
 		tr_put_le16(buffer->data + TR_RPC_WIRE_HEADER_SIZE,
@@ -807,7 +801,7 @@ static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
 	}
 
 	buffer->len = total;
-	*out = buffer;
+	*out = tr_buffer_take(&buffer);
 	return TR_OK;
 }
 
