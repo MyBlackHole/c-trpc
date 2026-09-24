@@ -2319,6 +2319,30 @@ int tr_channel_disable_client_reconnect(struct tr_channel *channel)
 	return TR_OK;
 }
 
+int tr_channel_set_maintenance_scheduler(
+	struct tr_channel *channel,
+	struct tr_maintenance_scheduler *maintenance)
+{
+	if (!channel || !maintenance)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->keepalive_enabled || channel->keepalive_thread_started ||
+	    channel->keepalive_maintenance_registered ||
+	    channel->maintenance) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STATE;
+	}
+
+	/*
+	 * scheduler 由更高层 runtime（当前为 Server）拥有，
+	 * 生命周期必须覆盖 Channel；Channel 只保存 borrowed pointer。
+	 */
+	channel->maintenance = maintenance;
+	pthread_mutex_unlock(&channel->lock);
+	return TR_OK;
+}
+
 int tr_channel_enable_keepalive(struct tr_channel *channel,
 				const struct tr_channel_keepalive_config *config)
 {
@@ -2329,7 +2353,8 @@ int tr_channel_enable_keepalive(struct tr_channel *channel,
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->keepalive_thread_started || channel->keepalive_enabled) {
+	if (channel->keepalive_thread_started || channel->keepalive_enabled ||
+	    channel->keepalive_maintenance_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
@@ -2340,6 +2365,44 @@ int tr_channel_enable_keepalive(struct tr_channel *channel,
 	channel->keepalive_enabled = 1;
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
+
+	if (channel->maintenance) {
+		struct tr_maintenance_handle handle;
+		uint64_t now_ns = tr_maintenance_now_ns();
+		int ret;
+
+		if (now_ns == 0) {
+			channel->keepalive_enabled = 0;
+			pthread_mutex_unlock(&channel->lock);
+			return TR_ERR_SYS;
+		}
+
+		ret = tr_maintenance_register(
+			channel->maintenance,
+			tr_channel_keepalive_maintenance_main,
+			channel, &handle);
+		if (ret != TR_OK) {
+			channel->keepalive_enabled = 0;
+			pthread_mutex_unlock(&channel->lock);
+			return ret;
+		}
+
+		channel->keepalive_maintenance = handle;
+		channel->keepalive_maintenance_registered = 1;
+		ret = tr_maintenance_arm(handle, now_ns);
+		if (ret != TR_OK) {
+			channel->keepalive_maintenance_registered = 0;
+			memset(&channel->keepalive_maintenance, 0,
+			       sizeof(channel->keepalive_maintenance));
+			channel->keepalive_enabled = 0;
+			pthread_mutex_unlock(&channel->lock);
+			(void)tr_maintenance_unregister(handle);
+			return ret;
+		}
+
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
 
 	error = pthread_create(&channel->keepalive_thread, NULL,
 			       tr_channel_keepalive_thread_main, channel);
@@ -2356,29 +2419,48 @@ int tr_channel_enable_keepalive(struct tr_channel *channel,
 
 int tr_channel_disable_keepalive(struct tr_channel *channel)
 {
+	struct tr_maintenance_handle maintenance_handle;
 	pthread_t thread;
+	int unregister_maintenance = 0;
 	int join_thread = 0;
 
 	if (!channel)
 		return TR_ERR_INVALID;
 
+	memset(&maintenance_handle, 0, sizeof(maintenance_handle));
+
 	pthread_mutex_lock(&channel->lock);
 	channel->keepalive_enabled = 0;
 	channel->keepalive_stop = 1;
-	pthread_cond_broadcast(&channel->keepalive_cond);
-	if (channel->keepalive_thread_started) {
-		thread = channel->keepalive_thread;
-		if (pthread_equal(pthread_self(), thread)) {
-			pthread_mutex_unlock(&channel->lock);
-			return TR_OK;
+
+	if (channel->keepalive_maintenance_registered) {
+		maintenance_handle = channel->keepalive_maintenance;
+		memset(&channel->keepalive_maintenance, 0,
+		       sizeof(channel->keepalive_maintenance));
+		channel->keepalive_maintenance_registered = 0;
+		unregister_maintenance = 1;
+	} else {
+		pthread_cond_broadcast(&channel->keepalive_cond);
+		if (channel->keepalive_thread_started) {
+			thread = channel->keepalive_thread;
+			if (pthread_equal(pthread_self(), thread)) {
+				pthread_mutex_unlock(&channel->lock);
+				return TR_OK;
+			}
+			channel->keepalive_thread_started = 0;
+			join_thread = 1;
 		}
-		channel->keepalive_thread_started = 0;
-		join_thread = 1;
 	}
+
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
 	pthread_mutex_unlock(&channel->lock);
 
+	if (unregister_maintenance) {
+		int ret = tr_maintenance_unregister(maintenance_handle);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+	}
 	if (join_thread && pthread_join(thread, NULL) != 0)
 		return TR_ERR_SYS;
 	return TR_OK;
