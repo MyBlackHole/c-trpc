@@ -275,12 +275,12 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_server_peer *peer;
 	uint32_t slot;
+	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
 	pthread_mutex_lock(&server->lock);
 	if (server->peer_count >= server->config.max_peers) {
 		pthread_mutex_unlock(&server->lock);
-		tr_socket_close(&fd);
 		return TR_AGAIN;
 	}
 
@@ -289,7 +289,6 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 			break;
 	if (slot == server->config.max_peers) {
 		pthread_mutex_unlock(&server->lock);
-		tr_socket_close(&fd);
 		return TR_AGAIN;
 	}
 
@@ -297,11 +296,11 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	memset(peer, 0, sizeof(*peer));
 	pthread_mutex_unlock(&server->lock);
 
-	ret = tr_reactor_adopt_fd(server->reactor, fd, &peer->connection);
-	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+	ret = tr_reactor_adopt_fd(server->reactor, owned_fd,
+				  &peer->connection);
+	if (ret != TR_OK)
 		return ret;
-	}
+	(void)tr_fd_take(&owned_fd);
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_SERVER;
@@ -360,10 +359,9 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 fail_rpc:
 fail_channel:
 	/*
-     * Do not free Channel/RPC objects while Reactor callbacks may still hold
-     * them. Retain the failed peer until server destruction, after Reactor
-     * ownership has stopped.
-     */
+	 * Reactor owns the fd after adopt. Publish the partially constructed peer
+	 * so the runtime reaper can quiesce and release Channel/RPC state safely.
+	 */
 	(void)tr_reactor_close(peer->connection);
 	pthread_mutex_lock(&server->lock);
 	peer->used = 1;
