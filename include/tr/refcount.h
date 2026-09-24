@@ -11,10 +11,10 @@ struct tr_refcount {
 };
 
 /*
- * Refcounts are strong references:
- * - zero is dead and must never be resurrected;
- * - UINT32_MAX is reserved so increment cannot wrap;
- * - put() returns 1 only for the transition 1 -> 0.
+ * refcount 表示强引用（strong reference）：
+ * - 0 表示对象已经死亡，禁止从 0 恢复引用；
+ * - 接近 UINT32_MAX 时拒绝继续增长，避免计数回绕；
+ * - 只有 1 -> 0 的最后一次 put() 返回 1。
  */
 static inline int tr_refcount_init(struct tr_refcount *ref, uint32_t initial)
 {
@@ -52,8 +52,8 @@ static inline int tr_refcount_get(struct tr_refcount *ref)
 }
 
 /*
- * Returns 1 when a reference was acquired, 0 when the object is already dead,
- * or a negative tr_status on invalid/overflow state.
+ * 成功获得强引用时返回 1；对象已经死亡（ref == 0）时返回 0；
+ * 参数非法或引用计数接近溢出时返回负的 tr_status。
  */
 static inline int tr_refcount_get_unless_zero(struct tr_refcount *ref)
 {
@@ -76,8 +76,8 @@ static inline int tr_refcount_get_unless_zero(struct tr_refcount *ref)
 }
 
 /*
- * Returns 1 when this was the final reference, 0 when references remain,
- * or a negative tr_status on underflow/invalid state.
+ * 如果释放的是最后一个强引用则返回 1；仍有其他引用时返回 0；
+ * underflow 或参数非法时返回负的 tr_status。
  */
 static inline int tr_refcount_put(struct tr_refcount *ref)
 {
