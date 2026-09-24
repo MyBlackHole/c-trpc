@@ -1358,7 +1358,6 @@ static void tr_default_config(struct tr_reactor_config *config)
 struct tr_reactor_build {
 	struct tr_reactor *reactor;
 	int ctl_lock_ready;
-	int slot_lock_ready;
 	int commands_ready;
 	int tx_pool_ready;
 	int control_tx_pool_ready;
@@ -1390,8 +1389,6 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 	free(reactor->connections);
 	free(reactor->slots);
 
-	if (build->slot_lock_ready)
-		pthread_mutex_destroy(&reactor->slot_lock);
 	if (build->ctl_lock_ready)
 		pthread_mutex_destroy(&reactor->ctl_lock);
 	free(reactor);
@@ -1434,9 +1431,6 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	if (pthread_mutex_init(&reactor->ctl_lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.ctl_lock_ready = 1;
-	if (pthread_mutex_init(&reactor->slot_lock, NULL) != 0)
-		return TR_ERR_INVALID;
-	build.slot_lock_ready = 1;
 
 	reactor->slots = (struct tr_slot *)calloc(
 		reactor->config.max_connections, sizeof(*reactor->slots));
@@ -1446,7 +1440,8 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		return TR_ERR_NOMEM;
 
 	for (i = 0; i < reactor->config.max_connections; ++i) {
-		reactor->slots[i].state = TR_CONN_FREE;
+		atomic_init(&reactor->slots[i].meta,
+			    tr_slot_meta_make(0U, TR_CONN_FREE));
 		reactor->connections[i].fd = -1;
 		reactor->connections[i].state = TR_CONN_FREE;
 	}
@@ -1527,8 +1522,8 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 {
 	struct tr_command command;
 	uint32_t slot;
-	uint32_t generation = 0;
-	int ret = TR_AGAIN;
+	uint32_t generation;
+	int ret;
 
 	if (!reactor || fd < 0 || !out)
 		return TR_ERR_INVALID;
@@ -1539,24 +1534,11 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 		return TR_ERR_CLOSED;
 	}
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	for (slot = 0; slot < reactor->config.max_connections; ++slot) {
-		if (reactor->slots[slot].state == TR_CONN_FREE) {
-			generation = reactor->slots[slot].generation + 1U;
-			if (generation == 0)
-				generation = 1;
-			reactor->slots[slot].generation = generation;
-			reactor->slots[slot].state = TR_CONN_RESERVED;
-			reactor->slots[slot].frame_cb = reactor->frame_cb;
-			reactor->slots[slot].event_cb = reactor->event_cb;
-			reactor->slots[slot].callback_arg =
-				reactor->callback_arg;
-			ret = TR_OK;
-			break;
-		}
-	}
-	pthread_mutex_unlock(&reactor->slot_lock);
-
+	/*
+	 * ctl_lock 只串行化 producer 控制面；slot capability 本身使用 atomic
+	 * generation+state 发布，Reactor event loop 不需要参与这把锁。
+	 */
+	ret = tr_slot_reserve(reactor, &slot, &generation);
 	if (ret != TR_OK) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return ret;
@@ -1570,7 +1552,7 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 
 	ret = tr_reactor_push_locked(reactor, &command);
 	if (ret != TR_OK) {
-		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
+		(void)tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return ret;
 	}
@@ -1744,24 +1726,73 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 			   tr_reactor_event_cb event_cb, void *callback_arg)
 {
 	struct tr_reactor *reactor = connection.reactor;
+	struct tr_reactor_handler_request request;
+	struct tr_command command;
+	int ret;
 
 	if (!reactor || connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (reactor->slots[connection.slot].generation !=
-		    connection.generation ||
-	    (reactor->slots[connection.slot].state != TR_CONN_RESERVED &&
-	     reactor->slots[connection.slot].state != TR_CONN_ACTIVE)) {
-		pthread_mutex_unlock(&reactor->slot_lock);
+	/*
+	 * 已经位于 Reactor owner thread 时直接修改 connection 状态，
+	 * 避免同步 command 对自己形成自等待。
+	 */
+	if (reactor->started && pthread_equal(pthread_self(), reactor->thread)) {
+		struct tr_connection *conn =
+			tr_lookup_connection(reactor, connection.slot,
+					     connection.generation);
+		if (!conn)
+			return TR_ERR_STALE;
+		conn->frame_cb = frame_cb;
+		conn->event_cb = event_cb;
+		conn->callback_arg = callback_arg;
+		return TR_OK;
+	}
+
+	memset(&request, 0, sizeof(request));
+	ret = tr_reactor_sync_init(&request.sync);
+	if (ret != TR_OK)
+		return ret;
+	request.frame_cb = frame_cb;
+	request.event_cb = event_cb;
+	request.callback_arg = callback_arg;
+
+	memset(&command, 0, sizeof(command));
+	command.type = TR_CMD_SET_HANDLER;
+	command.slot = connection.slot;
+	command.generation = connection.generation;
+	command.u.handler.request = &request;
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started || !reactor->accepting) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		tr_reactor_sync_destroy(&request.sync);
+		return TR_ERR_CLOSED;
+	}
+	if (!tr_slot_live(reactor, connection.slot, connection.generation)) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		tr_reactor_sync_destroy(&request.sync);
 		return TR_ERR_STALE;
 	}
 
-	reactor->slots[connection.slot].frame_cb = frame_cb;
-	reactor->slots[connection.slot].event_cb = event_cb;
-	reactor->slots[connection.slot].callback_arg = callback_arg;
-	pthread_mutex_unlock(&reactor->slot_lock);
-	return TR_OK;
+	do {
+		ret = tr_reactor_push_locked(reactor, &command);
+		if (ret == TR_AGAIN) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			sched_yield();
+			pthread_mutex_lock(&reactor->ctl_lock);
+			if (!reactor->started || !reactor->accepting) {
+				ret = TR_ERR_CLOSED;
+				break;
+			}
+		}
+	} while (ret == TR_AGAIN);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	if (ret == TR_OK)
+		ret = tr_reactor_sync_wait(&request.sync);
+	tr_reactor_sync_destroy(&request.sync);
+	return ret;
 }
 
 int tr_reactor_quiesce(struct tr_reactor *reactor)
@@ -2006,7 +2037,6 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	free(reactor->connections);
 	free(reactor->slots);
 
-	pthread_mutex_destroy(&reactor->slot_lock);
 	pthread_mutex_destroy(&reactor->ctl_lock);
 	free(reactor);
 }
