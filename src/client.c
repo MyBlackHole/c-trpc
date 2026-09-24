@@ -13,11 +13,15 @@
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"
+#include "channel_internal.h"
+#include "rpc_internal.h"
+#include "maintenance.h"
 
 struct tr_client {
 	struct tr_client_config config;
 
 	struct tr_reactor *reactor;
+	struct tr_maintenance_scheduler *maintenance;
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
 	struct tr_conn_handle connection;
@@ -192,6 +196,10 @@ int tr_client_create(const struct tr_client_config *config,
 		return ret;
 	client->reassembly_pool_ready = 1;
 
+	ret = tr_maintenance_scheduler_create(4U, &client->maintenance);
+	if (ret != TR_OK)
+		return ret;
+
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
 	reactor_config.command_capacity = effective.limits.command_capacity;
@@ -300,6 +308,11 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	if (ret != TR_OK)
 		return ret;
 
+	ret = tr_channel_set_maintenance_scheduler(client->channel,
+						   client->maintenance);
+	if (ret != TR_OK)
+		return ret;
+
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_CLIENT;
 	rpc_config.max_methods = client->config.limits.max_methods;
@@ -309,8 +322,9 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	rpc_config.executor_queue_capacity =
 		client->config.limits.executor_queue_capacity;
 
-	ret = tr_rpc_endpoint_create(client->channel, &rpc_config,
-				     &client->rpc);
+	ret = tr_rpc_endpoint_create_with_executor_group(
+		client->channel, &rpc_config, NULL, client->maintenance,
+		&client->rpc);
 	if (ret != TR_OK)
 		return ret;
 
@@ -478,6 +492,8 @@ void tr_client_destroy(struct tr_client *client)
 		tr_channel_destroy(client->channel);
 	if (client->reactor)
 		tr_reactor_destroy(client->reactor);
+	if (client->maintenance)
+		tr_maintenance_scheduler_destroy(client->maintenance);
 
 	if (client->reassembly_pool_ready)
 		tr_buffer_pool_destroy(&client->reassembly_pool);
