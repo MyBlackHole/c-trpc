@@ -4,6 +4,7 @@
 #include "tr/command_queue.h"
 #include "tr/crc32c.h"
 #include "tr/parser.h"
+#include "tr/socket.h"
 #include "tr/status.h"
 #include "tr/wire.h"
 
