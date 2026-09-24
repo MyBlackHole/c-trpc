@@ -836,7 +836,7 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 	if (call->pending_tx) {
 		ret = tr_stream_send(call->stream, call->pending_tx);
 		if (ret == TR_OK) {
-			call->pending_tx = NULL;
+			(void)tr_buffer_take(&call->pending_tx);
 			call->tx_count++;
 			call->need_local_close = 1;
 			call->state = TR_RPC_CALL_ACTIVE;
@@ -1243,7 +1243,7 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 						 TR_RPC_STATUS_INTERNAL);
 
 		if (disposition == TR_RPC_MESSAGE_TAKE_OWNERSHIP)
-			task->payload = NULL;
+			(void)tr_buffer_take(&task->payload);
 		break;
 	}
 
@@ -1299,7 +1299,7 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 					task->call, &message, callbacks.arg);
 		}
 		if (disposition == TR_RPC_MESSAGE_TAKE_OWNERSHIP)
-			task->payload = NULL;
+			(void)tr_buffer_take(&task->payload);
 		break;
 	}
 
@@ -1315,11 +1315,10 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 
 	if (task->payload) {
 		if (snapshot.stream.channel)
-			(void)tr_stream_release_payload(snapshot.stream,
-							task->payload);
+			(void)tr_stream_release_payload(
+				snapshot.stream, tr_buffer_take(&task->payload));
 		else
-			tr_buffer_release(task->payload);
-		task->payload = NULL;
+			tr_buffer_release(tr_buffer_take(&task->payload));
 	}
 }
 
@@ -1801,11 +1800,10 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 	if (call->pending_control) {
 		ret = tr_stream_send(call->stream, call->pending_control);
 		if (ret == TR_OK) {
-			call->pending_control = NULL;
+			(void)tr_buffer_take(&call->pending_control);
 			call->need_local_close = 1;
 		} else if (ret != TR_AGAIN) {
-			tr_buffer_release(call->pending_control);
-			call->pending_control = NULL;
+			tr_buffer_release(tr_buffer_take(&call->pending_control));
 			call->need_local_close = 1;
 		} else {
 			return ret;
