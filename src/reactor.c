@@ -268,6 +268,58 @@ static int tr_reactor_signal(struct tr_reactor *reactor)
 	return TR_ERR_SYS;
 }
 
+
+static int tr_reactor_sync_init(struct tr_reactor_sync *sync)
+{
+	if (!sync)
+		return TR_ERR_INVALID;
+
+	memset(sync, 0, sizeof(*sync));
+	if (pthread_mutex_init(&sync->lock, NULL) != 0)
+		return TR_ERR_SYS;
+	if (pthread_cond_init(&sync->cond, NULL) != 0) {
+		pthread_mutex_destroy(&sync->lock);
+		return TR_ERR_SYS;
+	}
+	sync->status = TR_OK;
+	return TR_OK;
+}
+
+static void tr_reactor_sync_destroy(struct tr_reactor_sync *sync)
+{
+	if (!sync)
+		return;
+	pthread_cond_destroy(&sync->cond);
+	pthread_mutex_destroy(&sync->lock);
+}
+
+static void tr_reactor_sync_complete(struct tr_reactor_sync *sync, int status)
+{
+	if (!sync)
+		return;
+
+	pthread_mutex_lock(&sync->lock);
+	sync->status = status;
+	sync->done = 1;
+	pthread_cond_signal(&sync->cond);
+	pthread_mutex_unlock(&sync->lock);
+}
+
+static int tr_reactor_sync_wait(struct tr_reactor_sync *sync)
+{
+	int status;
+
+	if (!sync)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&sync->lock);
+	while (!sync->done)
+		pthread_cond_wait(&sync->cond, &sync->lock);
+	status = sync->status;
+	pthread_mutex_unlock(&sync->lock);
+	return status;
+}
+
 static int tr_reactor_push_locked(struct tr_reactor *reactor,
 				  const struct tr_command *command)
 {
@@ -1116,17 +1168,31 @@ static void tr_process_abort(struct tr_reactor *reactor,
 					     command->u.abort.status);
 }
 
-static void tr_process_quiesce(const struct tr_command *command)
+static void tr_process_set_handler(struct tr_reactor *reactor,
+					   const struct tr_command *command)
 {
-	struct tr_reactor_sync *sync = command->u.quiesce.sync;
+	struct tr_reactor_handler_request *request = command->u.handler.request;
+	struct tr_connection *connection;
+	int status = TR_ERR_STALE;
 
-	if (!sync)
+	if (!request)
 		return;
 
-	pthread_mutex_lock(&sync->lock);
-	sync->done = 1;
-	pthread_cond_signal(&sync->cond);
-	pthread_mutex_unlock(&sync->lock);
+	connection = tr_lookup_connection(reactor, command->slot,
+					  command->generation);
+	if (connection) {
+		connection->frame_cb = request->frame_cb;
+		connection->event_cb = request->event_cb;
+		connection->callback_arg = request->callback_arg;
+		status = TR_OK;
+	}
+
+	tr_reactor_sync_complete(&request->sync, status);
+}
+
+static void tr_process_quiesce(const struct tr_command *command)
+{
+	tr_reactor_sync_complete(command->u.quiesce.sync, TR_OK);
 }
 
 static void tr_process_commands(struct tr_reactor *reactor)
@@ -1163,6 +1229,9 @@ static void tr_process_commands(struct tr_reactor *reactor)
 				break;
 			case TR_CMD_ABORT:
 				tr_process_abort(reactor, command);
+				break;
+			case TR_CMD_SET_HANDLER:
+				tr_process_set_handler(reactor, command);
 				break;
 			case TR_CMD_QUIESCE:
 				tr_process_quiesce(command);
