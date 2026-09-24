@@ -82,31 +82,32 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      struct tr_reactor **out);
 int tr_reactor_start(struct tr_reactor *reactor);
 
-/* On TR_OK the reactor owns fd. */
+/* 所有权：返回 TR_OK 后 fd 由 Reactor 接管；失败时仍由调用方拥有。 */
 int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 			struct tr_conn_handle *out);
 
 /*
- * On TR_OK payload ownership transfers to the reactor. On any other return
- * value ownership remains with the caller. A NULL payload is valid.
+ * 所有权：
+ * - TR_OK：payload ownership 转移给 Reactor；
+ * - 其他返回值：payload 仍由调用方拥有。
+ * payload 可以为 NULL。
  */
 int tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 		    uint32_t flags, uint32_t stream_id, uint64_t message_id,
 		    struct tr_buffer *payload);
 
 /*
- * Scatter/gather variant used by upper-layer zero/copy-minimal fast paths.
- * On TR_OK ownership of every buffer transfers to the reactor. On failure the
- * caller retains all buffers. The same buffer pointer must not appear twice.
+ * scatter/gather 发送接口，用于上层 zero-copy / copy-minimal 快路径。
+ * TR_OK 时所有 buffer 的 ownership 都转移给 Reactor；失败时全部仍归调用方。
+ * 同一个 buffer 指针禁止在 payloads 中重复出现。
  */
 int tr_reactor_sendv(struct tr_conn_handle connection, uint16_t type,
 		     uint32_t flags, uint32_t stream_id, uint64_t message_id,
 		     struct tr_buffer *const *payloads, uint32_t payload_count);
 
 /*
- * Variant with an explicit per-message DATA frame payload ceiling. This is
- * used after Channel capability negotiation. max_frame_payload_len must be
- * nonzero and no larger than the owning reactor's configured limit.
+ * 带单条消息 DATA frame payload 上限的发送接口，供 Channel 完成能力协商后使用。
+ * max_frame_payload_len 必须非 0，且不能超过所属 Reactor 的配置上限。
  */
 int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 			     uint32_t flags, uint32_t stream_id,
@@ -116,39 +117,38 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 			     uint32_t max_frame_payload_len);
 
 /*
- * Replaces the callbacks used for one live connection. This is intended for
- * higher layers such as Channel. Passing NULL callbacks disables that
- * callback for the connection. The callback argument is copied atomically
- * with the callback pointers under the reactor slot lock.
+ * 替换一个存活 connection 的回调，主要供 Channel 等上层使用。
+ * 传入 NULL 可禁用对应回调。callback_arg 与回调指针在 Reactor slot lock
+ * 保护下作为同一组状态更新，避免观察到不一致组合。
  */
 int tr_reactor_set_handler(struct tr_conn_handle connection,
 			   tr_reactor_frame_cb frame_cb,
 			   tr_reactor_event_cb event_cb, void *callback_arg);
 
 /*
- * Wait until the reactor thread has completed every callback and command that
- * was already in flight before this call. This is a lifecycle barrier used
- * after disabling callbacks and before freeing callback-owned state.
+ * 等待 Reactor thread 完成调用前已经进入执行阶段的 callback 和 command。
+ * 这是生命周期屏障（quiescence barrier）：通常先禁用 callback，再调用本函数，
+ * 最后才允许释放 callback owner 的状态。
  *
- * Must not be called from the reactor thread itself.
+ * 禁止从 Reactor thread 自身调用，否则会形成自等待。
  */
 int tr_reactor_quiesce(struct tr_reactor *reactor);
 
-/* Snapshot current slot state for replacement/diagnostics. */
+/* 获取当前 slot state 快照，用于 connection replacement 和诊断。 */
 int tr_reactor_get_connection_state(struct tr_conn_handle connection,
 				    enum tr_connection_state *out);
 
-/* Lock-free snapshot of hot-path connection counters for diagnostics. */
+/* 无锁读取 connection 热路径计数器快照，仅用于诊断/监控。 */
 int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 				    struct tr_connection_stats *out);
 
-/* Snapshot immutable reactor wire limits for upper-layer negotiation. */
+/* 获取 Reactor 不可变 wire limits 快照，供上层能力协商使用。 */
 int tr_reactor_get_limits(struct tr_reactor *reactor,
 			  struct tr_reactor_limits *out);
 
 int tr_reactor_resume_rx(struct tr_conn_handle connection);
 int tr_reactor_close(struct tr_conn_handle connection);
-/* Fails a live connection and reports status through the connection callback. */
+/* 主动使存活 connection 失败，并通过 connection callback 上报 status。 */
 int tr_reactor_abort(struct tr_conn_handle connection, int status);
 
 int tr_reactor_stop(struct tr_reactor *reactor);
