@@ -1,28 +1,24 @@
-# Resource Ownership
+# 资源所有权规范
 
-c-trpc uses ISO C11 as its language baseline. GCC/Clang's `cleanup`
-attribute is the only compiler extension required for scope-owned resources.
+c-trpc 以 ISO C11 为语言基线。作用域自动清理使用 GCC/Clang 的 `cleanup` attribute，
+但所有项目代码仍按 C11 语义组织，不启用 GNU statement expression、nested function 等额外语言特性。
 
-The resource model is based on explicit ownership rather than implicit lifetime.
+本项目的资源模型以**显式 ownership**为核心，而不是依赖隐式生命周期。
 
-## Ownership states
+## 1. 资源状态
 
-Every resource must be in one of these states:
+每个资源在任意时刻必须明确属于以下状态之一：
 
-- **owned**: exactly one owner is responsible for release.
-- **borrowed**: temporary access; no release responsibility is transferred.
-- **shared reference**: an explicit reference keeps an asynchronous object alive.
-- **transferred**: ownership moves from one owner to another at a documented API
-  boundary.
+- **owned**：当前存在唯一 owner，由它负责最终 release；
+- **borrowed**：临时借用，不获得 release 责任；
+- **shared reference**：通过 refcount 显式持有异步共享生命周期；
+- **transferred**：ownership 从一个 owner 明确转移到另一个 owner。
 
-Handles such as `tr_conn_handle` are capabilities, not ownership.
+`tr_conn_handle`、`tr_stream_handle` 等 handle 是 capability，**不是 ownership**。
 
-## Success-only transfer
+## 2. 成功才转移 ownership
 
-Unless an API explicitly documents otherwise, ownership transfers only when the
-operation returns `TR_OK`.
-
-Example:
+除非 API 文档明确说明，否则 ownership 只在返回 `TR_OK` 时发生转移。
 
 ```c
 struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
@@ -39,135 +35,123 @@ if (ret != TR_OK)
 return TR_OK;
 ```
 
-If send fails, scope cleanup releases the buffer. If send succeeds,
-`tr_buffer_take()` clears the cleanup-managed variable because ownership now
-belongs to Reactor.
+send 失败时 buffer 仍属于当前作用域，离开作用域会自动 cleanup。
+send 成功后 Reactor 接管 buffer，`tr_buffer_take()` 清空本地 cleanup-managed 变量，避免 double free。
 
-## Scope cleanup
+## 3. 作用域自动清理
 
-Resources with lexical ownership should use `TR_AUTO(cleanup_fn)` by default.
+具有 lexical ownership 的局部资源，原则上优先使用 `TR_AUTO(cleanup_fn)`。
 
-Current typed ownership helpers include:
+当前主要 typed ownership helper：
 
 - `tr_fd_cleanup()` / `tr_fd_take()`
 - `tr_buffer_cleanup()` / `tr_buffer_take()`
 
-New resource types should provide typed cleanup/take helpers rather than generic
-casts.
+新增资源类型时应提供 typed cleanup/take helper，不要依赖通用 `void *` cast 隐藏类型。
 
-Cleanup functions must:
+cleanup 函数必须满足：
 
-1. tolerate the disarmed/empty state;
-2. release exactly one owned resource;
-3. leave the variable in its empty state when practical;
-4. never acquire ownership of another resource.
+1. 能处理 disarmed/empty 状态；
+2. 一次只释放一个明确 owned 的资源；
+3. 可行时把变量恢复为空状态；
+4. cleanup 自身不能偷偷取得新的 ownership。
 
-## Cleanup order
+## 4. cleanup 顺序
 
-Cleanup variables are destroyed in reverse declaration order.
+cleanup variable 按声明顺序的**逆序**执行。
 
-Declare dependencies first and dependents later:
+如果 child 依赖 parent，应先声明 parent，再声明 child：
 
 ```c
 struct parent *parent TR_AUTO(parent_cleanup) = NULL;
 struct child *child TR_AUTO(child_cleanup) = NULL;
 ```
 
-The child is released before the parent.
+离开作用域时先 cleanup child，再 cleanup parent。
 
-Do not reorder cleanup-managed declarations without checking dependency order.
+因此重排 cleanup-managed 变量声明时，必须同时检查生命周期依赖关系。
 
-## Construction and transaction guards
+## 5. 构造与事务 guard
 
-Automatic cleanup has two forms in c-trpc.
+自动清理分为三种主要模式。
 
-### Simple lexical owner
+### 5.1 简单 lexical owner
 
-Use a typed cleanup directly for one independent resource:
+适用于单一独立资源，例如 fd、buffer、heap allocation。
+
+### 5.2 complex build guard
+
+如果对象只有完成多个初始化步骤后才能调用完整 destructor，则使用 build guard 记录哪些步骤已经成功。
+
+典型对象包括 Reactor、Channel、RPC Endpoint、executor group。
+
+build guard 主要解决两个问题：
+
+- partial object 错误调用完整 destructor；
+- 新增初始化步骤后忘记修改某个 `goto fail_*` 路径。
+
+成功构造完成后，必须显式 disarm build guard，把完整对象交给新的 owner。
+
+### 5.3 transaction rollback guard
+
+对于在已有 owner 上执行多步状态修改的操作，使用 armed rollback guard。
+
+典型场景：Client connect、Server peer adoption。
+
+失败时 scope cleanup 自动 rollback；成功后必须显式 disarm guard。
+
+## 6. 显式 ownership transfer
+
+ownership transfer 必须能从代码中直接看出来。
+
+推荐：
 
 ```c
-int fd TR_AUTO(tr_fd_cleanup) = -1;
-struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+dst = tr_buffer_take(&src);
 ```
 
-### Complex build guard
+不推荐：
 
-Objects whose destructor is only valid after several subresources are
-initialized use a small build guard. The guard records which initialization
-steps succeeded and unwinds only those resources.
-
-This is the required pattern for constructors such as Reactor, Channel and RPC
-Endpoint. It prevents two common bugs:
-
-- calling a full destructor on a partially initialized object;
-- forgetting to extend every `goto fail_*` chain when a new resource is added.
-
-A build guard is disarmed only after the fully initialized object is handed to
-its owner.
-
-### Transaction rollback guard
-
-Operations that mutate an existing owner across several steps use an armed
-rollback guard. Examples are Client connect and Server peer adoption.
-
-```text
-begin transaction
-    |
-acquire/transfer resources
-    |
-failure ---------> scope cleanup rolls back
-    |
-success
-    |
-disarm guard
+```c
+dst = src;
+src = NULL;   /* 难以判断这是普通赋值还是 ownership transfer */
 ```
 
-This makes a newly added early return rollback-safe by default.
+因此 bare `ptr = NULL` 不应作为正常的 ownership move 语法。
 
-## Explicit ownership transfer
+## 7. 异步生命周期
 
-Ownership transfer must be visible in code through a typed `*_take()` helper
-or an API whose documented success contract performs the transfer.
+scope cleanup 只能解决当前 lexical scope，不能解决跨线程、queue、callback 的异步生命周期。
 
-Do not use a bare assignment followed by an unexplained `ptr = NULL` as the
-normal ownership-transfer idiom.
+一个指针跨异步边界前，必须满足以下机制之一：
 
-## Async lifetime
+- single-owner 保证；
+- 显式 quiescence；
+- 强引用 refcount。
 
-Scope cleanup does not solve asynchronous lifetime.
+禁止先把 pointer 发布给其他线程，再补 `get()`。
 
-Before a pointer crosses a thread/queue/callback boundary, its lifetime must be
-protected by one of:
+## 8. 强引用 refcount
 
-- a single-owner guarantee;
-- explicit quiescence;
-- an explicit shared reference.
+`struct tr_refcount` 是项目统一的 C11 strong-reference primitive。
 
-Never publish a pointer to another thread and add its reference afterward.
+规则：
 
-### Strong references
+1. owner 通常以 ref=1 创建对象；
+2. async task 在发布之前必须先 get；
+3. 每次成功 get 必须有且只有一次 put；
+4. ref=0 是终态，禁止 resurrection；
+5. underflow 和 saturation 必须报错，禁止静默 wrap；
+6. 只有最后一次 put 才允许真正 release 对象。
 
-`struct tr_refcount` is the common C11 strong-reference primitive.
+`tr_refcount_get_unless_zero()` 只用于 weak/capability lookup 尝试获得 strong reference。
+已经持有合法 strong reference 的代码应使用 `tr_refcount_get()`。
 
-Rules:
+不要因为存在 refcount primitive 就给所有对象加 refcount。能用 unique ownership 或 quiescence 解决时，应优先使用更简单的模型。
 
-1. the owner normally creates the object with reference count 1;
-2. an asynchronous task must acquire its reference **before** it is published;
-3. every successful get has exactly one matching put;
-4. zero is terminal and cannot be resurrected;
-5. underflow and saturation are rejected rather than wrapped;
-6. the object is released only by the final `put()`.
+## 9. RPC Endpoint 生命周期
 
-`tr_refcount_get_unless_zero()` exists for cases where a weak/capability lookup
-must attempt to acquire a strong reference. Code that already owns a valid
-strong reference should use `tr_refcount_get()`.
-
-Do not add refcounts to single-owner objects merely because the primitive
-exists. Prefer unique ownership or quiescence when those models are sufficient.
-
-### RPC Endpoint lifetime
-
-RPC Endpoint is the first shared-object migration:
+RPC Endpoint 是当前第一个迁移到 shared ownership 的核心对象。
 
 ```text
 peer/client owner ref = 1
@@ -175,7 +159,7 @@ peer/client owner ref = 1
 queue executor task
         | get
         v
-owner + task ref
+owner ref + task ref
         |
 task completes
         | put
@@ -187,36 +171,37 @@ destroy:
   quiesce Channel callbacks
   stop deadline source
   stop new executor tasks
-  wait until refs == 1
+  wait refs == 1
         |
 owner put
         v
-refs == 0 -> release
+refs == 0
+        |
+release Endpoint
 ```
 
-The destructor intentionally remains synchronous because Endpoint borrows its
-Channel. The Channel may be destroyed immediately after Endpoint destruction,
-so all asynchronous Endpoint references must have drained first.
+`tr_rpc_endpoint_destroy()` 保持同步语义，因为 Endpoint 只是 borrowed Channel。
 
-Call-level `task_refs` remain separate: they protect Call-slot reuse, while
-`tr_refcount` protects the Endpoint object's lifetime.
+Endpoint destroy 返回后调用方可以立即 destroy Channel，所以所有异步 Endpoint reference 必须在返回前排空。
 
-## Reactor ownership
+Call 自己的 `task_refs` 职责不同：
 
-Mutable Reactor/Connection transport state is owned by the Reactor thread.
-Other threads submit commands rather than taking ownership of that mutable
-state.
+- `tr_refcount`：保护 Endpoint 对象生命周期；
+- Call `task_refs`：阻止 Call slot 在 task 尚未结束时被复用。
 
-Synchronization should protect genuinely shared state; it must not compensate
-for unclear ownership.
+## 10. Reactor ownership
 
-## Lock ownership
+Reactor/Connection 的可变 Transport 状态原则上属于 Reactor owner thread。
 
-A held mutex is a scope-owned resource when code may leave through multiple
-return paths.
+其他线程应通过 command queue 提交操作，而不是直接取得可变状态 ownership。
 
-Use `struct tr_mutex_guard` with `TR_AUTO(tr_mutex_guard_cleanup)` for
-genuinely shared state:
+不要用 mutex 去弥补不清楚的 owner 关系。能通过 single-owner 解决的状态，应优先通过 owner model 解决。
+
+## 11. Lock ownership
+
+真正共享的状态仍然需要锁。持有 mutex 本身也是一种 scope-owned resource。
+
+多 early-return 路径时推荐：
 
 ```c
 struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
@@ -224,33 +209,59 @@ struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
 if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
     return TR_ERR_SYS;
 
-/* every return from this scope unlocks */
+/* 任意 return 都会自动 unlock */
 ```
 
-This rule does **not** justify adding locks to owner-thread state. Reactor event
-processing should remain single-owner; mutex guards are for state that is
-actually shared across threads.
+需要提前 unlock 时调用 `tr_mutex_guard_unlock()`；它会先 disarm guard，再执行 unlock，避免重复 unlock。
 
-If an early unlock is required, use `tr_mutex_guard_unlock()`; it disarms the
-scope cleanup before unlocking so scope exit cannot unlock twice.
+mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Reactor owner-thread hot path 增加锁。
 
-## Error paths
+## 12. 错误路径
 
-Automatic cleanup is preferred for local resources because new early returns
-cannot silently skip release.
+局部 owned 资源优先自动 cleanup，因为新增 early return 时不会静默漏 release。
 
-Traditional downward `goto` unwind remains valid for objects whose partial
-construction cannot be expressed as independent scope-owned resources. Do not
-mix two competing cleanup mechanisms for the same resource.
+传统 downward `goto` unwind 仍允许用于无法合理拆成独立 scope resource 的复杂 partial object。
 
-## Compiler policy
+但同一个资源不能同时被两套 cleanup 机制管理。
 
-The project is compiled as:
+错误路径设计目标：ownership 唯一、release 顺序明确、新增失败分支默认安全、不产生 double free / leak / UAF。
 
+## 13. 公共 API 的 ownership 说明
+
+资源相关公共 API 应明确写出：
+
+- 输入参数是 borrowed 还是 owned；
+- 输出对象由谁拥有；
+- `TR_OK` 时 ownership 是否 transfer；
+- 失败时 ownership 是否保持不变；
+- destroy 是同步还是异步；
+- 是否需要 quiescence；
+- 是否允许从 callback/worker 中调用。
+
+示例：
+
+```c
+/*
+ * 所有权：
+ * - TR_OK：Reactor 接管 fd；
+ * - 其他返回值：fd 仍由调用方拥有。
+ */
 ```
+
+## 14. 编译器策略
+
+项目继续使用：
+
+```text
 -std=c11 -Wall -Wextra -Werror -pedantic
 ```
 
-The language remains C11. `TR_AUTO()` intentionally wraps the GCC/Clang
-`cleanup` attribute; broader GNU language constructs are not implied or
-enabled.
+`TR_AUTO()` 只封装 GCC/Clang 的 `cleanup` attribute。
+
+这不代表项目切换为 GNU C，也不意味着允许任意 GNU extension。
+
+## 15. 注释语言
+
+代码说明以中文为主，具体规范见 `docs/code_comments.md`。
+
+ownership、refcount、quiescence、Reactor、Channel、RPC 等术语保留英文，以便与 API 和实现结构直接对应。
