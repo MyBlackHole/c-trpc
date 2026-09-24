@@ -496,26 +496,15 @@ static void tr_connection_notify(struct tr_reactor *reactor,
 				 enum tr_connection_event event, int status)
 {
 	struct tr_conn_handle handle;
-	tr_reactor_event_cb event_cb = NULL;
-	void *callback_arg = NULL;
 
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (connection->slot < reactor->config.max_connections &&
-	    reactor->slots[connection->slot].generation ==
-		    connection->generation) {
-		event_cb = reactor->slots[connection->slot].event_cb;
-		callback_arg = reactor->slots[connection->slot].callback_arg;
-	}
-	pthread_mutex_unlock(&reactor->slot_lock);
-
-	if (!event_cb)
+	if (!connection->event_cb)
 		return;
 
 	handle.reactor = reactor;
 	handle.slot = connection->slot;
 	handle.generation = connection->generation;
 
-	event_cb(handle, event, status, callback_arg);
+	connection->event_cb(handle, event, status, connection->callback_arg);
 }
 
 static void tr_connection_close_internal(struct tr_reactor *reactor,
@@ -565,6 +554,9 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	connection->slot = slot;
 	connection->generation = generation;
 	connection->state = TR_CONN_ACTIVE;
+	connection->frame_cb = reactor->frame_cb;
+	connection->event_cb = reactor->event_cb;
+	connection->callback_arg = reactor->callback_arg;
 	__atomic_store_n(&connection->last_rx_activity_ns, tr_reactor_now_ns(),
 			 __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->last_tx_activity_ns, tr_reactor_now_ns(),
@@ -871,17 +863,6 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 {
 	enum tr_frame_disposition disposition = TR_FRAME_RELEASE;
 	struct tr_conn_handle handle;
-	tr_reactor_frame_cb frame_cb = NULL;
-	void *callback_arg = NULL;
-
-	pthread_mutex_lock(&reactor->slot_lock);
-	if (connection->slot < reactor->config.max_connections &&
-	    reactor->slots[connection->slot].generation ==
-		    connection->generation) {
-		frame_cb = reactor->slots[connection->slot].frame_cb;
-		callback_arg = reactor->slots[connection->slot].callback_arg;
-	}
-	pthread_mutex_unlock(&reactor->slot_lock);
 
 	handle.reactor = reactor;
 	handle.slot = connection->slot;
@@ -890,8 +871,9 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 	(void)__atomic_fetch_add(&connection->rx_frames, UINT64_C(1),
 				 __ATOMIC_RELAXED);
 
-	if (frame_cb)
-		disposition = frame_cb(handle, frame, callback_arg);
+	if (connection->frame_cb)
+		disposition = connection->frame_cb(handle, frame,
+						   connection->callback_arg);
 
 	if (disposition != TR_FRAME_TAKE_OWNERSHIP)
 		tr_frame_release(frame);
