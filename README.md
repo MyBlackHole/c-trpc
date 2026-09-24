@@ -293,9 +293,10 @@ the physical connection with `TR_ERR_TIMEOUT`. Existing connection-loss and
 reconnect handling then runs normally.
 
 Shared-connection mode emits one probe for the shared TCP connection; split
-mode tracks CONTROL and BULK independently. Keepalive uses a small maintenance
-thread only for timers/probe submission; actual socket I/O remains Reactor
-owned.
+mode tracks CONTROL and BULK independently. Low-level standalone Channel keeps
+the compatible private maintenance-thread behavior. High-level Client/Server
+facades instead register keepalive work on their runtime-owned shared
+maintenance scheduler. Actual socket I/O remains Reactor owned.
 
 ### Metrics / diagnostics
 
@@ -453,10 +454,11 @@ side effects. A running handler can query:
 tr_rpc_call_is_cancelled(call, &status);
 ```
 
-The V1 deadline scheduler is one small timer thread per RPC endpoint using
-`CLOCK_MONOTONIC`. It scans the bounded Call table, so the implementation stays
-simple and predictable for the current `max_calls` design. A later timer wheel
-can replace this internally without changing the public Call API.
+RPC deadlines use `CLOCK_MONOTONIC` and scan the bounded Call table.
+Low-level standalone RPC Endpoint keeps the original private deadline thread for
+backward compatibility. High-level Client/Server facades register Endpoint
+deadlines on their runtime-owned shared maintenance scheduler; Server deadline
+thread count therefore no longer grows with peer count.
 
 Initial metadata is a bounded TLV side channel:
 
@@ -574,7 +576,9 @@ Absolute limits avoid duplicate-credit bugs if updates are retried or coalesced.
 ## Important ownership rules
 
 The detailed C11 ownership/automatic-cleanup rules are documented in
-[`docs/resource_ownership.md`](docs/resource_ownership.md).
+[`docs/resource_ownership.md`](docs/resource_ownership.md). Current mutex
+ownership and the lock-removal audit are documented in
+[`docs/lock_ownership.md`](docs/lock_ownership.md).
 
 代码注释和 API 契约说明以中文为主。ownership、refcount、quiescence、
 Reactor、Channel、RPC、Call、Stream 等与实现结构直接对应的术语保留英文。
@@ -642,6 +646,9 @@ RPC:
 - service-side completion when the peer was already half-closed
 - multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
 - high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
+- shared maintenance scheduler callback re-arm/unregister semantics
+- high-level Client deadline + keepalive share one runtime maintenance thread
+- four Server peers with deadline + keepalive maintenance do not create per-peer timer threads
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
@@ -686,9 +693,9 @@ Current build validation passes:
 - generic Streaming writes do not internally queue arbitrary application messages: `TR_AGAIN` is intentional backpressure and the caller retries after `TR_RPC_CALL_EVENT_WRITABLE` / server `on_writable`
 - direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
-- V1 automatic client reconnect uses one low-rate maintenance thread per enabled Channel; it is not on the DATA hot path
+- V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed on the shared timer scheduler
 - server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
-- the V1 deadline scheduler uses one monotonic timer thread per RPC endpoint and scans the bounded Call table
+- standalone low-level Channel/RPC Endpoint may use private timer threads; high-level Client/Server facades share one monotonic maintenance scheduler per runtime for deadline and keepalive work
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
 
 ## Build
@@ -706,13 +713,12 @@ The high-level Client/Server facade, capability negotiation, graceful drain,
 keepalive/liveness, diagnostics, callback quiescence, and runtime peer
 reclamation are implemented. The next production work should focus on:
 
-1. shared timer/maintenance scheduling so deadline/keepalive thread count does not scale with peer count.
-2. split CONTROL/BULK facade binding identity so independently accepted sockets can be paired securely.
-3. strict CONTROL priority at DATA-frame boundaries in shared-connection mode.
-4. typed codec registry (for example Protobuf) while retaining RAW bulk slices.
-5. TLS/mTLS provider integration before a connection enters Channel HELLO.
-6. explicit RPC/service Health service, separate from Transport keepalive.
-7. generic RPC retry policy only for methods marked retryable/idempotent.
-8. fuzz/soak/benchmark suites, then optional RX vectored messages and hardware CRC dispatch when profiling justifies them.
+1. split CONTROL/BULK facade binding identity so independently accepted sockets can be paired securely.
+2. strict CONTROL priority at DATA-frame boundaries in shared-connection mode.
+3. typed codec registry (for example Protobuf) while retaining RAW bulk slices.
+4. TLS/mTLS provider integration before a connection enters Channel HELLO.
+5. explicit RPC/service Health service, separate from Transport keepalive.
+6. generic RPC retry policy only for methods marked retryable/idempotent.
+7. fuzz/soak/benchmark suites, then optional RX vectored messages and hardware CRC dispatch when profiling justifies them.
 
 Backup remains an application layer above this generic RPC/Transport library.

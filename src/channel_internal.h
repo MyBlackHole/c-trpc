@@ -3,6 +3,8 @@
 
 #include "tr/channel.h"
 
+struct tr_maintenance_scheduler;
+
 /*
  * Server facade 使用 deferred create，先完成 RPC Endpoint/Method 安装，
  * 再启动 HELLO handshake，避免 peer 在服务层 ready 前发送 RPC 数据。
@@ -18,5 +20,9 @@ int tr_channel_create_deferred(
 	struct tr_channel **out);
 
 int tr_channel_start(struct tr_channel *channel);
+
+int tr_channel_set_maintenance_scheduler(
+	struct tr_channel *channel,
+	struct tr_maintenance_scheduler *maintenance);
 
 #endif

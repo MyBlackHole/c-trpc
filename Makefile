@@ -12,6 +12,7 @@ SRC := \
 	src/frame.c \
 	src/parser.c \
 	src/command_queue.c \
+	src/maintenance.c \
 	src/socket.c \
 	src/reactor.c \
 	src/channel.c \
