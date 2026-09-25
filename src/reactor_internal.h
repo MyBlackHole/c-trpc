@@ -22,4 +22,23 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
+typedef uint64_t (*tr_reactor_timer_cb)(void *arg, uint64_t now_ns);
+
+struct tr_reactor_timer_handle {
+	struct tr_reactor *reactor;
+	uint32_t slot;
+	uint32_t generation;
+};
+
+/*
+ * Reactor-local timer capability. register/arm/unregister 都串行化到 owner；
+ * callback 在 Reactor thread 上执行，必须短小且非阻塞。
+ */
+int tr_reactor_timer_register(struct tr_reactor *reactor,
+			      tr_reactor_timer_cb callback, void *arg,
+			      struct tr_reactor_timer_handle *out);
+int tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
+			 uint64_t deadline_ns);
+int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle);
+
 #endif
