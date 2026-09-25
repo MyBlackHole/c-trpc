@@ -185,7 +185,7 @@ jobs:
           trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
           port=
           for attempt in $(seq 1 100); do
-            port=$(sed -n 's/^echo server listening on 127\.0\.0\.1:\([0-9][0-9]*\)$/\1/p' "$server_log")
+            port=$(sed -n 's/^echo server listening on 0\.0\.0\.0:\([0-9][0-9]*\)$/\1/p' "$server_log")
             if [ -n "$port" ]; then break; fi
             if ! kill -0 "$server_pid" 2>/dev/null; then cat "$server_log"; exit 1; fi
             sleep 0.1
