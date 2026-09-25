@@ -140,7 +140,16 @@ Client library 必须保持嵌入友好：
 
 ## 6. Timer
 
-CURRENT 使用 shared maintenance scheduler。
+CURRENT 的 RPC deadline / keepalive 仍由 shared maintenance scheduler 承载。
+
+Reactor-local timer 基础设施已经进入实现阶段：
+
+- 每 Reactor 一个 bounded timer queue；
+- generation handle 防止 stale timer 操作；
+- min-heap 维护最近 absolute `CLOCK_MONOTONIC` deadline；
+- 最近 deadline 直接驱动 `epoll_wait(timeout)`；
+- 单轮 timer callback 有固定 budget，避免 timer storm 长时间饿死 I/O；
+- callback 只允许执行短小、非阻塞的 owner-side 状态推进。
 
 TARGET：
 
@@ -148,11 +157,12 @@ TARGET：
 Reactor shard
   ├─ RPC deadline
   ├─ keepalive
+  ├─ reconnect/backoff
   ├─ Pipeline timeout
   ├─ ACK batch timeout
   └─ checkpoint timer
 ```
 
-统一进入 Reactor-local timer queue，使用最近 deadline 驱动 `epoll_wait(timeout)`。
-
-这是目标状态；迁移期间 shared maintenance 继续保留。
+迁移按 consumer 分步进行。在 RPC deadline、keepalive 和 reconnect 全部迁移前，
+shared maintenance / legacy timer thread 仍作为兼容路径保留；不允许为了迁移一次性
+同时改动 Multi-Reactor 和 Channel connection-group 语义。

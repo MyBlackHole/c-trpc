@@ -3,6 +3,7 @@
 
 #include "reactor_internal.h"
 #include "completion_queue.h"
+#include "timer_queue.h"
 #include "tr/command_queue.h"
 #include "tr/crc32c.h"
 #include "tr/parser.h"
@@ -12,6 +13,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -28,6 +30,7 @@
 #define TR_REACTOR_EVENT_BATCH 64U
 #define TR_COMMAND_BATCH 64U
 #define TR_COMPLETION_BATCH 64U
+#define TR_TIMER_BATCH 64U
 #define TR_TX_READY_BATCH 64U
 #define TR_WAKE_TOKEN UINT64_MAX
 
@@ -153,6 +156,7 @@ struct tr_reactor {
 
 	struct tr_command_queue commands;
 	struct tr_completion_queue completions;
+	struct tr_timer_queue timers;
 	struct tr_tx_pool tx_pool;
 	struct tr_tx_pool control_tx_pool;
 	struct tr_buffer_pool rx_pool;
@@ -1363,6 +1367,43 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 	}
 }
 
+static int tr_process_timers(struct tr_reactor *reactor)
+{
+	uint64_t now_ns;
+	int has_more_due = 0;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
+	now_ns = tr_reactor_now_ns();
+	if (now_ns == 0)
+		return 0;
+
+	(void)tr_timer_queue_run_due(&reactor->timers, now_ns,
+				     TR_TIMER_BATCH, &has_more_due);
+	return has_more_due;
+}
+
+static int tr_reactor_timer_timeout_ms(struct tr_reactor *reactor)
+{
+	uint64_t deadline_ns;
+	uint64_t now_ns;
+	uint64_t delta_ns;
+	uint64_t timeout_ms;
+
+	deadline_ns = tr_timer_queue_next_deadline(&reactor->timers);
+	if (deadline_ns == 0)
+		return -1;
+
+	now_ns = tr_reactor_now_ns();
+	if (now_ns == 0 || deadline_ns <= now_ns)
+		return 0;
+
+	delta_ns = deadline_ns - now_ns;
+	timeout_ms = (delta_ns + UINT64_C(999999)) / UINT64_C(1000000);
+	if (timeout_ms > (uint64_t)INT_MAX)
+		return INT_MAX;
+	return (int)timeout_ms;
+}
+
 static void tr_cleanup_connections(struct tr_reactor *reactor)
 {
 	uint32_t i;
@@ -1381,6 +1422,7 @@ static void *tr_reactor_thread_main(void *arg)
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
 	int completions_pending = 0;
+	int timers_pending = 0;
 
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
@@ -1395,7 +1437,7 @@ static void *tr_reactor_thread_main(void *arg)
 			/*
 			 * stop() 先在 ctl_lock 下关闭 accepting，再入队 STOP。
 			 * 因此此刻 completion queue 中的项全部是在 STOP 前已接受，
-			 * 必须 drain 完再退出，保持原先单 command FIFO 的语义。
+			 * 必须 drain 完再退出。Timer 不在 stop 时补跑业务 callback。
 			 */
 			do {
 				completions_pending =
@@ -1405,9 +1447,15 @@ static void *tr_reactor_thread_main(void *arg)
 		}
 
 		completions_pending = tr_process_completions(reactor);
+		timers_pending = tr_process_timers(reactor);
 		tr_run_tx_ready(reactor);
 
-		timeout = (reactor->tx_ready_head || completions_pending) ? 0 : -1;
+		if (reactor->tx_ready_head || completions_pending ||
+		    timers_pending)
+			timeout = 0;
+		else
+			timeout = tr_reactor_timer_timeout_ms(reactor);
+
 		count = epoll_wait(reactor->epoll_fd, events,
 				   (int)TR_REACTOR_EVENT_BATCH, timeout);
 		if (count < 0) {
@@ -1441,6 +1489,8 @@ static void *tr_reactor_thread_main(void *arg)
 			break;
 		}
 
+		/* I/O callback 期间也可能跨过 timer deadline。 */
+		timers_pending = tr_process_timers(reactor);
 		tr_run_tx_ready(reactor);
 	}
 
@@ -1471,6 +1521,7 @@ struct tr_reactor_build {
 	int ctl_lock_ready;
 	int commands_ready;
 	int completions_ready;
+	int timers_ready;
 	int tx_pool_ready;
 	int control_tx_pool_ready;
 	int rx_pool_ready;
@@ -1495,6 +1546,8 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 		tr_tx_pool_destroy(&reactor->control_tx_pool);
 	if (build->tx_pool_ready)
 		tr_tx_pool_destroy(&reactor->tx_pool);
+	if (build->timers_ready)
+		tr_timer_queue_destroy(&reactor->timers);
 	if (build->completions_ready)
 		tr_completion_queue_destroy(&reactor->completions);
 	if (build->commands_ready)
@@ -1576,6 +1629,19 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	if (ret != TR_OK)
 		return ret;
 	build.completions_ready = 1;
+
+	{
+		uint64_t timer_capacity =
+			(uint64_t)reactor->config.max_connections * 4U + 16U;
+
+		if (timer_capacity > UINT32_MAX)
+			return TR_ERR_BAD_LENGTH;
+		ret = tr_timer_queue_init(&reactor->timers,
+					  (uint32_t)timer_capacity);
+		if (ret != TR_OK)
+			return ret;
+		build.timers_ready = 1;
+	}
 
 	ret = tr_tx_pool_init(&reactor->tx_pool,
 			      reactor->config.tx_item_capacity);
@@ -2225,6 +2291,172 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 	return ret;
 }
 
+struct tr_reactor_timer_register_request {
+	struct tr_reactor *reactor;
+	tr_reactor_timer_cb callback;
+	void *arg;
+	struct tr_reactor_timer_handle *out;
+};
+
+static int tr_reactor_timer_register_on_owner(void *arg)
+{
+	struct tr_reactor_timer_register_request *request =
+		(struct tr_reactor_timer_register_request *)arg;
+	struct tr_timer_token token;
+	int ret;
+
+	ret = tr_timer_queue_register(&request->reactor->timers,
+				      request->callback, request->arg, &token);
+	if (ret == TR_OK) {
+		request->out->reactor = request->reactor;
+		request->out->slot = token.slot;
+		request->out->generation = token.generation;
+	}
+	return ret;
+}
+
+int tr_reactor_timer_register(struct tr_reactor *reactor,
+			      tr_reactor_timer_cb callback, void *arg,
+			      struct tr_reactor_timer_handle *out)
+{
+	struct tr_reactor_timer_register_request request;
+	struct tr_timer_token token;
+	int started;
+	int ret;
+
+	if (!reactor || !callback || !out)
+		return TR_ERR_INVALID;
+	memset(out, 0, sizeof(*out));
+
+	if (tr_reactor_is_owner_thread(reactor)) {
+		request.reactor = reactor;
+		request.callback = callback;
+		request.arg = arg;
+		request.out = out;
+		return tr_reactor_timer_register_on_owner(&request);
+	}
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		ret = tr_timer_queue_register(&reactor->timers, callback, arg,
+					      &token);
+		if (ret == TR_OK) {
+			out->reactor = reactor;
+			out->slot = token.slot;
+			out->generation = token.generation;
+		}
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.reactor = reactor;
+	request.callback = callback;
+	request.arg = arg;
+	request.out = out;
+	return tr_reactor_call(reactor, tr_reactor_timer_register_on_owner,
+			       &request);
+}
+
+struct tr_reactor_timer_arm_request {
+	struct tr_reactor_timer_handle handle;
+	uint64_t deadline_ns;
+};
+
+static int tr_reactor_timer_arm_on_owner(void *arg)
+{
+	struct tr_reactor_timer_arm_request *request =
+		(struct tr_reactor_timer_arm_request *)arg;
+	struct tr_timer_token token;
+
+	token.slot = request->handle.slot;
+	token.generation = request->handle.generation;
+	return tr_timer_queue_arm(&request->handle.reactor->timers, token,
+				  request->deadline_ns);
+}
+
+int tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
+			 uint64_t deadline_ns)
+{
+	struct tr_reactor_timer_arm_request request;
+	struct tr_timer_token token;
+	struct tr_reactor *reactor = handle.reactor;
+	int started;
+	int ret;
+
+	if (!reactor)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor)) {
+		request.handle = handle;
+		request.deadline_ns = deadline_ns;
+		return tr_reactor_timer_arm_on_owner(&request);
+	}
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		token.slot = handle.slot;
+		token.generation = handle.generation;
+		ret = tr_timer_queue_arm(&reactor->timers, token, deadline_ns);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.handle = handle;
+	request.deadline_ns = deadline_ns;
+	return tr_reactor_call(reactor, tr_reactor_timer_arm_on_owner,
+			       &request);
+}
+
+struct tr_reactor_timer_unregister_request {
+	struct tr_reactor_timer_handle handle;
+};
+
+static int tr_reactor_timer_unregister_on_owner(void *arg)
+{
+	struct tr_reactor_timer_unregister_request *request =
+		(struct tr_reactor_timer_unregister_request *)arg;
+	struct tr_timer_token token;
+
+	token.slot = request->handle.slot;
+	token.generation = request->handle.generation;
+	return tr_timer_queue_unregister(&request->handle.reactor->timers,
+					 token);
+}
+
+int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle)
+{
+	struct tr_reactor_timer_unregister_request request;
+	struct tr_timer_token token;
+	struct tr_reactor *reactor = handle.reactor;
+	int started;
+	int ret;
+
+	if (!reactor)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor)) {
+		request.handle = handle;
+		return tr_reactor_timer_unregister_on_owner(&request);
+	}
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		token.slot = handle.slot;
+		token.generation = handle.generation;
+		ret = tr_timer_queue_unregister(&reactor->timers, token);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.handle = handle;
+	return tr_reactor_call(reactor, tr_reactor_timer_unregister_on_owner,
+			       &request);
+}
+
 int tr_reactor_stop(struct tr_reactor *reactor)
 {
 	struct tr_command command;
@@ -2281,6 +2513,7 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	tr_buffer_pool_destroy(&reactor->rx_pool);
 	tr_tx_pool_destroy(&reactor->control_tx_pool);
 	tr_tx_pool_destroy(&reactor->tx_pool);
+	tr_timer_queue_destroy(&reactor->timers);
 	tr_completion_queue_destroy(&reactor->completions);
 	tr_command_queue_destroy(&reactor->commands);
 
