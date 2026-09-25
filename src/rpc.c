@@ -121,6 +121,11 @@ struct tr_rpc_unary_completion {
 	uint8_t response[];
 };
 
+struct tr_rpc_task_completion {
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_call_handle call;
+};
+
 #define TR_RPC_EXEC_NONE UINT32_MAX
 
 struct tr_rpc_executor_node {
@@ -1163,6 +1168,54 @@ static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
 	return TR_OK;
 }
 
+static void tr_rpc_finish_task_on_owner(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle call)
+{
+	tr_rpc_executor_complete_task(endpoint, call);
+	tr_rpc_task_done(endpoint, call);
+}
+
+static void tr_rpc_apply_task_completion(void *arg)
+{
+	struct tr_rpc_task_completion *completion =
+		(struct tr_rpc_task_completion *)arg;
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_call_handle call;
+
+	if (!completion)
+		return;
+
+	endpoint = completion->endpoint;
+	call = completion->call;
+	free(completion);
+	tr_rpc_finish_task_on_owner(endpoint, call);
+}
+
+static int tr_rpc_defer_task_completion(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle call)
+{
+	struct tr_rpc_task_completion *completion;
+	struct tr_reactor *reactor;
+	int ret;
+
+	if (!endpoint)
+		return TR_ERR_INVALID;
+
+	completion =
+		(struct tr_rpc_task_completion *)malloc(sizeof(*completion));
+	if (!completion)
+		return TR_ERR_NOMEM;
+	completion->endpoint = endpoint;
+	completion->call = call;
+
+	reactor = tr_channel_reactor(endpoint->channel);
+	ret = tr_reactor_post(reactor, tr_rpc_apply_task_completion,
+			      completion);
+	if (ret != TR_OK)
+		free(completion);
+	return ret;
+}
+
 static void tr_rpc_apply_unary_completion(void *arg)
 {
 	struct tr_rpc_unary_completion *completion =
@@ -1212,8 +1265,7 @@ static void tr_rpc_apply_unary_completion(void *arg)
 		 * per-call executor serialization 必须覆盖 completion apply；
 		 * 只有 owner 已应用本次结果后，才允许同一 Call 的下一项任务运行。
 		 */
-		tr_rpc_executor_complete_task(endpoint, call_handle);
-		tr_rpc_task_done(endpoint, call_handle);
+		tr_rpc_finish_task_on_owner(endpoint, call_handle);
 	}
 }
 
@@ -1604,7 +1656,14 @@ static void *tr_rpc_executor_main(void *arg)
 		{
 			int task_done_deferred =
 				tr_rpc_executor_run_task(endpoint, &task);
-			if (!task_done_deferred) {
+			if (!task_done_deferred &&
+			    tr_rpc_defer_task_completion(endpoint, task.call) !=
+				    TR_OK) {
+				/*
+				 * Reactor 已停止、queue 满或 OOM 时必须在 worker
+				 * 侧完成 rollback/finalize，不能泄漏 task strong-ref。
+				 * 正常运行路径统一由 Reactor owner 完成。
+				 */
 				tr_rpc_executor_complete_task(endpoint, task.call);
 				tr_rpc_task_done(endpoint, task.call);
 			}
@@ -1656,7 +1715,14 @@ static void *tr_rpc_executor_group_main(void *arg)
 		{
 			int task_done_deferred =
 				tr_rpc_executor_run_task(endpoint, &task);
-			if (!task_done_deferred) {
+			if (!task_done_deferred &&
+			    tr_rpc_defer_task_completion(endpoint, task.call) !=
+				    TR_OK) {
+				/*
+				 * Reactor 已停止、queue 满或 OOM 时必须在 worker
+				 * 侧完成 rollback/finalize，不能泄漏 task strong-ref。
+				 * 正常运行路径统一由 Reactor owner 完成。
+				 */
 				tr_rpc_executor_complete_task(endpoint, task.call);
 				tr_rpc_task_done(endpoint, task.call);
 			}
