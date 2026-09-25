@@ -1229,10 +1229,12 @@ static int tr_rpc_post_unary_completion(
 	if (!endpoint || !task || !response ||
 	    (response->len != 0 && !response->data))
 		return TR_ERR_INVALID;
-	if (response->len > SIZE_MAX - sizeof(*completion))
+#if SIZE_MAX <= UINT32_MAX
+	if (response->len > (uint32_t)(SIZE_MAX - sizeof(*completion)))
 		return TR_ERR_BAD_LENGTH;
+#endif
 
-	size = sizeof(*completion) + response->len;
+	size = sizeof(*completion) + (size_t)response->len;
 	completion = (struct tr_rpc_unary_completion *)malloc(size);
 	if (!completion)
 		return TR_ERR_NOMEM;
