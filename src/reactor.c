@@ -2145,7 +2145,24 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_CLOSED;
 	}
-	ret = tr_reactor_push_completion_locked(reactor, &completion);
+
+	/*
+	 * Completion 是 worker 已经完成的状态转移，不能因为 ring 暂时满就
+	 * 回退到 worker 直接修改协议状态。队列容量保持有界，用 producer
+	 * 等待形成背压。
+	 */
+	do {
+		ret = tr_reactor_push_completion_locked(reactor, &completion);
+		if (ret == TR_AGAIN) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			sched_yield();
+			pthread_mutex_lock(&reactor->ctl_lock);
+			if (!reactor->started || !reactor->accepting) {
+				ret = TR_ERR_CLOSED;
+				break;
+			}
+		}
+	} while (ret == TR_AGAIN);
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return ret;
 }
