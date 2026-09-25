@@ -1,6 +1,6 @@
 # RPC 执行模型
 
-**状态：TARGET V1，下一阶段优先实现**
+**状态：TARGET V1，Task snapshot 已落地；owner-command 仍在迁移**
 
 ## 1. 目标
 
@@ -50,6 +50,14 @@ struct tr_rpc_endpoint *
 struct tr_rpc_call *
 struct tr_channel *
 ```
+
+当前实现已经在 task enqueue 时复制 Stream handle、Method Descriptor、
+server handlers、client callbacks 和 handler/callback arg；executor worker
+本身不再通过 `endpoint->lock` 回读 live Call。
+
+Task 仍保留 `tr_rpc_call_handle` 作为 callback 身份/capability。业务 callback
+主动调用 `tr_rpc_call_send()/finish()/metadata/is_cancelled()` 时，当前公开 API
+仍会进入 Endpoint 同步路径；把这些修改型 API 改成 owner command 是下一阶段。
 
 如果 handler 需要 metadata，应在 dispatch 时构造只读 snapshot 或独立 owned object。
 
@@ -180,13 +188,22 @@ error
 ## 8. 不允许的路径
 
 ```text
-Worker
+Worker executor internals
   -> pthread_mutex_lock(endpoint->lock)
-  -> mutate call->state
-  -> send response
+  -> read/mutate live Call
 ```
 
-这类路径应逐步消失。
+这条隐式路径已经从 executor task dispatch 中移除。
+
+仍需继续迁移的是业务 callback 主动调用的修改型公开 API：
+
+```text
+worker callback
+  -> tr_rpc_call_send()/finish()/...
+  -> Endpoint mutable state
+```
+
+目标是把这类操作编码为 owner command，再由 Reactor apply。
 
 ## 9. 验收
 

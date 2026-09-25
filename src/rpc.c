@@ -99,13 +99,28 @@ struct tr_rpc_task {
 	struct tr_rpc_call_handle call;
 	struct tr_buffer *payload;
 
+	/*
+	 * Worker execution snapshot.  Mutable Call/Endpoint state stays owned by
+	 * the Reactor; workers only consume these copied capabilities.
+	 */
+	struct tr_stream_handle stream;
 	union {
 		struct {
 			tr_rpc_unary_handler handler;
 			void *handler_arg;
 			struct tr_rpc_method_desc method;
-			struct tr_stream_handle stream;
 		} server_unary;
+		struct {
+			struct tr_rpc_stream_handlers handlers;
+			void *handler_arg;
+		} server_stream;
+		struct {
+			tr_rpc_unary_result_cb result_cb;
+			void *result_arg;
+		} client_unary;
+		struct {
+			struct tr_rpc_call_callbacks callbacks;
+		} client_stream;
 	} u;
 };
 
@@ -140,6 +155,7 @@ struct tr_rpc_executor_callq {
 	uint32_t queued_count;
 	int ready;
 	int running;
+	int cancelled;
 };
 
 struct tr_rpc_executor_group;
@@ -987,6 +1003,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		callq->head = TR_RPC_EXEC_NONE;
 		callq->tail = TR_RPC_EXEC_NONE;
 		callq->queued_count = 0;
+		callq->cancelled = 0;
 	}
 
 	node_index = executor->free_head;
@@ -1077,19 +1094,79 @@ out:
 	return ret;
 }
 
+/*
+ * endpoint->lock 必须已经持有。
+ *
+ * Task 在入队前复制 worker 所需的全部 callback/handler/stream capability。
+ * 入队之后 worker 不再回读 mutable Call/Endpoint protocol state。
+ */
+static int tr_rpc_prepare_task_snapshot_locked(
+	struct tr_rpc_call_slot *call, struct tr_rpc_task *task)
+{
+	if (!call || !task)
+		return TR_ERR_INVALID;
+
+	task->stream = call->stream;
+
+	switch (task->type) {
+	case TR_RPC_TASK_SERVER_UNARY:
+		if (!call->method ||
+		    call->method->handler_kind != TR_RPC_HANDLER_UNARY)
+			return TR_ERR_STATE;
+		task->u.server_unary.handler = call->method->unary_handler;
+		task->u.server_unary.handler_arg = call->method->handler_arg;
+		task->u.server_unary.method = call->method->desc;
+		break;
+
+	case TR_RPC_TASK_SERVER_STREAM_MESSAGE:
+	case TR_RPC_TASK_SERVER_HALF_CLOSE:
+	case TR_RPC_TASK_SERVER_WRITABLE:
+	case TR_RPC_TASK_SERVER_CLOSE:
+		if (!call->method ||
+		    call->method->handler_kind != TR_RPC_HANDLER_STREAM)
+			return TR_ERR_STATE;
+		task->u.server_stream.handlers = call->method->stream_handlers;
+		task->u.server_stream.handler_arg = call->method->handler_arg;
+		break;
+
+	case TR_RPC_TASK_CLIENT_UNARY_RESULT:
+		task->u.client_unary.result_cb = call->result_cb;
+		task->u.client_unary.result_arg = call->result_arg;
+		break;
+
+	case TR_RPC_TASK_CLIENT_MESSAGE:
+	case TR_RPC_TASK_CLIENT_EVENT:
+		task->u.client_stream.callbacks = call->callbacks;
+		break;
+
+	default:
+		return TR_ERR_INVALID;
+	}
+
+	return TR_OK;
+}
+
 /* 调用方必须已经持有 endpoint->lock。 */
 static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 				    struct tr_rpc_call_slot *call,
 				    const struct tr_rpc_task *task)
 {
+	struct tr_rpc_task snapshot;
 	int ret;
+
+	if (!task)
+		return TR_ERR_INVALID;
+	snapshot = *task;
+	ret = tr_rpc_prepare_task_snapshot_locked(call, &snapshot);
+	if (ret != TR_OK)
+		return ret;
 
 	ret = tr_rpc_endpoint_get(endpoint);
 	if (ret != TR_OK)
 		return ret;
 
 	call->task_refs++;
-	ret = tr_rpc_executor_push(endpoint, task);
+	ret = tr_rpc_executor_push(endpoint, &snapshot);
 	if (ret != TR_OK) {
 		call->task_refs--;
 		/*
@@ -1133,10 +1210,14 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 
 static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
 {
-	if (task->payload) {
-		tr_buffer_release(task->payload);
-		task->payload = NULL;
-	}
+	if (!task || !task->payload)
+		return;
+
+	if (task->stream.channel)
+		(void)tr_stream_release_payload(task->stream,
+					tr_buffer_take(&task->payload));
+	else
+		tr_buffer_release(tr_buffer_take(&task->payload));
 }
 
 static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
@@ -1329,11 +1410,11 @@ static int tr_rpc_executor_run_server_unary(
 	int deferred = 0;
 
 	if (!handler || tr_rpc_decode_task_message(task, &message, &wire) != TR_OK) {
-		(void)tr_stream_close(task->u.server_unary.stream);
+		(void)tr_stream_close(task->stream);
 		goto out;
 	}
 
-	message.stream = task->u.server_unary.stream;
+	message.stream = task->stream;
 	memset(&response, 0, sizeof(response));
 	response.status = TR_RPC_STATUS_INTERNAL;
 
@@ -1364,9 +1445,9 @@ out:
 	 * teardown 随后越过仍在归还 RX buffer 的 worker。
 	 */
 	if (task->payload) {
-		if (task->u.server_unary.stream.channel)
+		if (task->stream.channel)
 			(void)tr_stream_release_payload(
-				task->u.server_unary.stream,
+				task->stream,
 				tr_buffer_take(&task->payload));
 		else
 			tr_buffer_release(tr_buffer_take(&task->payload));
@@ -1380,55 +1461,58 @@ out:
 		} else {
 			free(completion);
 			completion = NULL;
-			(void)tr_stream_close(task->u.server_unary.stream);
+			(void)tr_stream_close(task->stream);
 		}
 	}
 	return deferred;
 }
 
+static void tr_rpc_executor_mark_cancelled(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle)
+{
+	struct tr_rpc_executor *executor;
+
+	if (!endpoint || handle.slot >= endpoint->config.max_calls)
+		return;
+
+	executor = &endpoint->executor;
+	pthread_mutex_lock(&executor->lock);
+	if (executor->callq[handle.slot].generation == handle.generation)
+		executor->callq[handle.slot].cancelled = 1;
+	pthread_mutex_unlock(&executor->lock);
+}
+
+static int tr_rpc_executor_task_cancelled(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle)
+{
+	struct tr_rpc_executor *executor;
+	int cancelled = 0;
+
+	if (!endpoint || handle.slot >= endpoint->config.max_calls)
+		return 1;
+
+	executor = &endpoint->executor;
+	pthread_mutex_lock(&executor->lock);
+	if (executor->callq[handle.slot].generation == handle.generation)
+		cancelled = executor->callq[handle.slot].cancelled;
+	pthread_mutex_unlock(&executor->lock);
+	return cancelled;
+}
+
 static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 				    struct tr_rpc_task *task)
 {
-	struct tr_rpc_call_slot snapshot;
-	struct tr_rpc_method_entry *method = NULL;
-	struct tr_rpc_call_callbacks callbacks;
-	struct tr_rpc_stream_handlers handlers;
-	void *handler_arg = NULL;
-	int have_call = 0;
-
 	if (task->type == TR_RPC_TASK_SERVER_UNARY)
 		return tr_rpc_executor_run_server_unary(endpoint, task);
 
-	memset(&snapshot, 0, sizeof(snapshot));
-	memset(&callbacks, 0, sizeof(callbacks));
-	memset(&handlers, 0, sizeof(handlers));
-
-	pthread_mutex_lock(&endpoint->lock);
-	if (task->call.slot < endpoint->config.max_calls) {
-		struct tr_rpc_call_slot *call =
-			&endpoint->calls[task->call.slot];
-		if (call->state != TR_RPC_CALL_FREE &&
-		    call->generation == task->call.generation) {
-			snapshot = *call;
-			method = call->method;
-			callbacks = call->callbacks;
-			if (method) {
-				handlers = method->stream_handlers;
-				handler_arg = method->handler_arg;
-			}
-			have_call = 1;
-		}
-	}
-	pthread_mutex_unlock(&endpoint->lock);
-
-	if (!have_call) {
-		tr_rpc_release_task_payload(task);
-		return 0;
-	}
-
-	if (snapshot.cancelled && task->type != TR_RPC_TASK_SERVER_CLOSE &&
+	/*
+	 * Cancellation is executor scheduling metadata, not a worker read of
+	 * mutable RPC Call state.  Close/result/event notifications must still run.
+	 */
+	if (task->type != TR_RPC_TASK_SERVER_CLOSE &&
 	    task->type != TR_RPC_TASK_CLIENT_UNARY_RESULT &&
-	    task->type != TR_RPC_TASK_CLIENT_EVENT) {
+	    task->type != TR_RPC_TASK_CLIENT_EVENT &&
+	    tr_rpc_executor_task_cancelled(endpoint, task->call)) {
 		tr_rpc_release_task_payload(task);
 		return 0;
 	}
@@ -1437,6 +1521,9 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 	case TR_RPC_TASK_SERVER_STREAM_MESSAGE: {
 		struct tr_rpc_message message;
 		struct tr_rpc_wire_header wire;
+		const struct tr_rpc_stream_handlers *handlers =
+			&task->u.server_stream.handlers;
+		void *handler_arg = task->u.server_stream.handler_arg;
 		enum tr_rpc_message_disposition disposition =
 			TR_RPC_MESSAGE_RELEASE;
 		int ret = TR_OK;
@@ -1447,13 +1534,13 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 						 TR_RPC_STATUS_INTERNAL);
 			break;
 		}
-		message.stream = snapshot.stream;
+		message.stream = task->stream;
 
-		if (task->first_message && handlers.on_open)
-			ret = handlers.on_open(task->call, handler_arg);
-		if (ret == TR_OK && handlers.on_message)
-			disposition = handlers.on_message(task->call, &message,
-							  handler_arg);
+		if (task->first_message && handlers->on_open)
+			ret = handlers->on_open(task->call, handler_arg);
+		if (ret == TR_OK && handlers->on_message)
+			disposition = handlers->on_message(task->call, &message,
+							    handler_arg);
 		if (ret != TR_OK)
 			(void)tr_rpc_call_finish(task->call,
 						 TR_RPC_STATUS_INTERNAL);
@@ -1464,19 +1551,22 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 	}
 
 	case TR_RPC_TASK_SERVER_HALF_CLOSE:
-		if (handlers.on_half_close)
-			handlers.on_half_close(task->call, handler_arg);
+		if (task->u.server_stream.handlers.on_half_close)
+			task->u.server_stream.handlers.on_half_close(
+				task->call, task->u.server_stream.handler_arg);
 		break;
 
 	case TR_RPC_TASK_SERVER_WRITABLE:
-		if (handlers.on_writable)
-			handlers.on_writable(task->call, handler_arg);
+		if (task->u.server_stream.handlers.on_writable)
+			task->u.server_stream.handlers.on_writable(
+				task->call, task->u.server_stream.handler_arg);
 		break;
 
 	case TR_RPC_TASK_SERVER_CLOSE:
-		if (handlers.on_close)
-			handlers.on_close(task->call, task->status,
-					  handler_arg);
+		if (task->u.server_stream.handlers.on_close)
+			task->u.server_stream.handlers.on_close(
+				task->call, task->status,
+				task->u.server_stream.handler_arg);
 		break;
 
 	case TR_RPC_TASK_CLIENT_UNARY_RESULT: {
@@ -1488,31 +1578,34 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 		if (task->payload) {
 			if (tr_rpc_decode_task_message(task, &message, &wire) ==
 			    TR_OK) {
-				message.stream = snapshot.stream;
+				message.stream = task->stream;
 				bytes = &message.bytes;
 				status = wire.status;
 			} else {
 				status = TR_RPC_STATUS_INTERNAL;
 			}
 		}
-		if (snapshot.result_cb)
-			snapshot.result_cb(task->call, status, bytes,
-					   snapshot.result_arg);
+		if (task->u.client_unary.result_cb)
+			task->u.client_unary.result_cb(
+				task->call, status, bytes,
+				task->u.client_unary.result_arg);
 		break;
 	}
 
 	case TR_RPC_TASK_CLIENT_MESSAGE: {
 		struct tr_rpc_message message;
 		struct tr_rpc_wire_header wire;
+		const struct tr_rpc_call_callbacks *callbacks =
+			&task->u.client_stream.callbacks;
 		enum tr_rpc_message_disposition disposition =
 			TR_RPC_MESSAGE_RELEASE;
 
 		if (tr_rpc_decode_task_message(task, &message, &wire) ==
 		    TR_OK) {
-			message.stream = snapshot.stream;
-			if (callbacks.on_message)
-				disposition = callbacks.on_message(
-					task->call, &message, callbacks.arg);
+			message.stream = task->stream;
+			if (callbacks->on_message)
+				disposition = callbacks->on_message(
+					task->call, &message, callbacks->arg);
 		}
 		if (disposition == TR_RPC_MESSAGE_TAKE_OWNERSHIP)
 			(void)tr_buffer_take(&task->payload);
@@ -1520,22 +1613,17 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 	}
 
 	case TR_RPC_TASK_CLIENT_EVENT:
-		if (callbacks.on_event)
-			callbacks.on_event(task->call, task->event,
-					   task->status, callbacks.arg);
+		if (task->u.client_stream.callbacks.on_event)
+			task->u.client_stream.callbacks.on_event(
+				task->call, task->event, task->status,
+				task->u.client_stream.callbacks.arg);
 		break;
 
 	default:
 		break;
 	}
 
-	if (task->payload) {
-		if (snapshot.stream.channel)
-			(void)tr_stream_release_payload(
-				snapshot.stream, tr_buffer_take(&task->payload));
-		else
-			tr_buffer_release(tr_buffer_take(&task->payload));
-	}
+	tr_rpc_release_task_payload(task);
 	return 0;
 }
 
@@ -2098,6 +2186,7 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 
 	call->cancelled = 1;
 	call->cancel_status = status;
+	tr_rpc_executor_mark_cancelled(endpoint, handle);
 	if (status == TR_RPC_STATUS_DEADLINE_EXCEEDED)
 		endpoint->stat_calls_deadline_exceeded++;
 	else
@@ -2439,12 +2528,6 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		task.first_message = (uint16_t)first_message;
 		task.type = call->is_unary ? TR_RPC_TASK_SERVER_UNARY :
 					     TR_RPC_TASK_SERVER_STREAM_MESSAGE;
-		if (call->is_unary) {
-			task.u.server_unary.handler = method->unary_handler;
-			task.u.server_unary.handler_arg = method->handler_arg;
-			task.u.server_unary.method = method->desc;
-			task.u.server_unary.stream = stream;
-		}
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
 		pthread_mutex_unlock(&endpoint->lock);
 		if (ret != TR_OK) {
@@ -2588,6 +2671,9 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		if (!call->cancelled) {
 			call->cancelled = 1;
 			call->cancel_status = cancel_status;
+			tr_rpc_executor_mark_cancelled(
+				endpoint,
+				tr_rpc_make_call_handle(endpoint, slot, call));
 			call->deadline_ns = 0;
 			call->final_status_seen = 1;
 			call->final_status = cancel_status;
