@@ -20,14 +20,17 @@ for _, kind in ipairs({"cflags", "ldflags"}) do
     option_end()
 end
 
-local make_cflags = get_config("make_cflags")
-if make_cflags and make_cflags:find("%S") then
-    add_cflags(os.argv(make_cflags), {force = true})
-end
-local make_ldflags = get_config("make_ldflags")
-if make_ldflags and make_ldflags:find("%S") then
-    add_ldflags(os.argv(make_ldflags), {force = true})
-end
+-- os.argv belongs to the script scope. expand=false keeps the parsed argv
+-- as one raw flag group, including paths with spaces and repeated switches.
+on_load(function (target)
+    import("core.project.config")
+    for _, kind in ipairs({"cflags", "ldflags"}) do
+        local flags = os.argv(config.get("make_" .. kind) or "")
+        if #flags > 0 then
+            target:add(kind, flags, {force = true, expand = false})
+        end
+    end
+end)
 
 -- Preserve the Make build's -O2 -g and enabled assertions in release mode.
 -- In particular, assert() contains test operations, not just result checks.
