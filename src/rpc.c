@@ -2376,7 +2376,7 @@ tr_rpc_deadline_earliest_locked(const struct tr_rpc_endpoint *endpoint,
 /*
  * endpoint->lock 必须已经持有，并且调用方必须处于 Endpoint 所属 Reactor
  * owner thread。Call deadline 的所有正常变更路径已经 owner 化，因此这里可
- * 直接更新 Reactor-local timer，不再经过 shared maintenance/thread。
+ * 直接更新 Reactor-local timer，不再经过第二套 scheduler/thread。
  */
 static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint)
 {
