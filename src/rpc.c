@@ -224,6 +224,8 @@ static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint);
 static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint);
+static void tr_rpc_executor_complete_task(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle);
 
 static uint64_t tr_rpc_now_ns(void)
 {
@@ -1204,7 +1206,13 @@ static void tr_rpc_apply_unary_completion(void *arg)
 	 */
 	{
 		struct tr_rpc_call_handle call_handle = completion->call;
+
 		free(completion);
+		/*
+		 * per-call executor serialization 必须覆盖 completion apply；
+		 * 只有 owner 已应用本次结果后，才允许同一 Call 的下一项任务运行。
+		 */
+		tr_rpc_executor_complete_task(endpoint, call_handle);
 		tr_rpc_task_done(endpoint, call_handle);
 	}
 }
@@ -1567,9 +1575,10 @@ static void *tr_rpc_executor_main(void *arg)
 		{
 			int task_done_deferred =
 				tr_rpc_executor_run_task(endpoint, &task);
-			tr_rpc_executor_complete_task(endpoint, task.call);
-			if (!task_done_deferred)
+			if (!task_done_deferred) {
+				tr_rpc_executor_complete_task(endpoint, task.call);
 				tr_rpc_task_done(endpoint, task.call);
+			}
 		}
 	}
 
@@ -1618,9 +1627,10 @@ static void *tr_rpc_executor_group_main(void *arg)
 		{
 			int task_done_deferred =
 				tr_rpc_executor_run_task(endpoint, &task);
-			tr_rpc_executor_complete_task(endpoint, task.call);
-			if (!task_done_deferred)
+			if (!task_done_deferred) {
+				tr_rpc_executor_complete_task(endpoint, task.call);
 				tr_rpc_task_done(endpoint, task.call);
+			}
 		}
 	}
 
