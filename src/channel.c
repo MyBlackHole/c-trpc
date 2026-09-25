@@ -99,7 +99,6 @@ struct tr_channel {
 	int bulk_reconnecting;
 
 	int keepalive_enabled;
-	struct tr_maintenance_scheduler *maintenance;
 	struct tr_reactor_timer_handle keepalive_timer;
 	int keepalive_timer_registered;
 	uint32_t keepalive_interval_ms;
@@ -2318,7 +2317,7 @@ int tr_channel_disable_client_reconnect(struct tr_channel *channel)
 	if (channel->reconnect_thread_started) {
 		thread = channel->reconnect_thread;
 		if (pthread_equal(pthread_self(), thread)) {
-			/* maintenance thread 会观察 reconnect_stop，并自行退出。 */
+			/* reconnect thread 会观察 reconnect_stop，并自行退出。 */
 			pthread_mutex_unlock(&channel->lock);
 			return TR_OK;
 		}
@@ -2329,29 +2328,6 @@ int tr_channel_disable_client_reconnect(struct tr_channel *channel)
 
 	if (join_thread && pthread_join(thread, NULL) != 0)
 		return TR_ERR_SYS;
-	return TR_OK;
-}
-
-int tr_channel_set_maintenance_scheduler(
-	struct tr_channel *channel,
-	struct tr_maintenance_scheduler *maintenance)
-{
-	if (!channel || !maintenance)
-		return TR_ERR_INVALID;
-
-	pthread_mutex_lock(&channel->lock);
-	if (channel->keepalive_enabled || channel->maintenance) {
-		pthread_mutex_unlock(&channel->lock);
-		return TR_ERR_STATE;
-	}
-
-	/*
-	 * Compatibility hook retained while other maintenance consumers are
-	 * migrated. Keepalive itself is Reactor-local and does not consume this
-	 * scheduler.
-	 */
-	channel->maintenance = maintenance;
-	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
 }
 
