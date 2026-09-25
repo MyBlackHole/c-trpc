@@ -1229,6 +1229,15 @@ static void tr_process_defer(const struct tr_command *command)
 		command->u.defer.fn(command->u.defer.arg);
 }
 
+static void tr_process_call(const struct tr_command *command)
+{
+	int status = TR_ERR_INVALID;
+
+	if (command->u.call.fn)
+		status = command->u.call.fn(command->u.call.arg);
+	tr_reactor_sync_complete(command->u.call.sync, status);
+}
+
 static void tr_process_commands(struct tr_reactor *reactor)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
@@ -1274,6 +1283,9 @@ static void tr_process_commands(struct tr_reactor *reactor)
 				break;
 			case TR_CMD_DEFER:
 				tr_process_defer(command);
+				break;
+			case TR_CMD_CALL:
+				tr_process_call(command);
 				break;
 			case TR_CMD_STOP:
 				reactor->stopping = 1;
@@ -2068,6 +2080,64 @@ int tr_reactor_post(struct tr_reactor *reactor, void (*fn)(void *arg),
 
 	ret = tr_reactor_push_locked(reactor, &command);
 	pthread_mutex_unlock(&reactor->ctl_lock);
+	return ret;
+}
+
+int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
+		    void *arg)
+{
+	struct tr_reactor_sync sync;
+	struct tr_command command;
+	int ret;
+
+	if (!reactor || !fn)
+		return TR_ERR_INVALID;
+
+	/*
+	 * Reactor callback/command 内部再次调用 owner API 时必须直接执行，
+	 * 否则同步等待自己会死锁。
+	 */
+	if (tr_reactor_is_owner_thread(reactor))
+		return fn(arg);
+
+	ret = tr_reactor_sync_init(&sync);
+	if (ret != TR_OK)
+		return ret;
+
+	memset(&command, 0, sizeof(command));
+	command.type = TR_CMD_CALL;
+	command.u.call.fn = fn;
+	command.u.call.arg = arg;
+	command.u.call.sync = &sync;
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started || !reactor->accepting) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		tr_reactor_sync_destroy(&sync);
+		return TR_ERR_CLOSED;
+	}
+
+	/*
+	 * 同步 owner call 保留现有 RPC API 的同步语义：有界 command ring
+	 * 短暂满时等待容量，而不是把 queue 满误报成业务操作失败。
+	 */
+	do {
+		ret = tr_reactor_push_locked(reactor, &command);
+		if (ret == TR_AGAIN) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			sched_yield();
+			pthread_mutex_lock(&reactor->ctl_lock);
+			if (!reactor->started || !reactor->accepting) {
+				ret = TR_ERR_CLOSED;
+				break;
+			}
+		}
+	} while (ret == TR_AGAIN);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	if (ret == TR_OK)
+		ret = tr_reactor_sync_wait(&sync);
+	tr_reactor_sync_destroy(&sync);
 	return ret;
 }
 
