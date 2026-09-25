@@ -293,10 +293,10 @@ the physical connection with `TR_ERR_TIMEOUT`. Existing connection-loss and
 reconnect handling then runs normally.
 
 Shared-connection mode emits one probe for the shared TCP connection; split
-mode tracks CONTROL and BULK independently. Low-level standalone Channel keeps
-the compatible private maintenance-thread behavior. High-level Client/Server
-facades instead register keepalive work on their runtime-owned shared
-maintenance scheduler. Actual socket I/O remains Reactor owned.
+mode tracks CONTROL and BULK independently. Every Channel registers one
+initially-disarmed keepalive timer in its owning Reactor; standalone and
+high-level Client/Server Channels use the same owner-local path. Keepalive no
+longer creates a private thread or consumes the shared maintenance scheduler.
 
 ### Metrics / diagnostics
 
@@ -655,7 +655,7 @@ RPC:
 - high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
 - shared maintenance scheduler callback re-arm/unregister semantics
 - RPC Endpoint deadlines run on Reactor-local timers without per-Endpoint timer threads
-- high-level Client/Server deadline handling no longer consumes shared maintenance scheduler entries
+- Channel keepalive runs on Reactor-local timers without private/shared maintenance timer work
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
@@ -702,7 +702,7 @@ Current build validation passes:
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed on the shared timer scheduler
 - server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
-- RPC Endpoint deadlines are Reactor-local; standalone Channel keepalive and high-level Channel maintenance still use transitional private/shared maintenance paths until their owner-timer migration
+- RPC Endpoint deadlines and Channel keepalive are Reactor-local; automatic reconnect still uses its transitional low-rate reconnect thread
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
 
 ## Build
