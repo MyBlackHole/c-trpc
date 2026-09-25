@@ -1,5 +1,6 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
+#include "reactor_internal.h"
 #include "maintenance.h"
 
 #include "tr/status.h"
@@ -2134,16 +2135,38 @@ int tr_channel_quiesce(struct tr_channel *channel)
 	return tr_reactor_quiesce(channel->reactor);
 }
 
-int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
-				  struct tr_conn_handle connection)
+struct tr_channel_replace_request {
+	struct tr_channel *channel;
+	enum tr_lane lane;
+	struct tr_conn_handle connection;
+};
+
+/*
+ * Replacement attachment must be atomic with respect to Reactor I/O callbacks.
+ *
+ * If the handler becomes visible before Channel records the new lane mapping,
+ * an already-readable peer HELLO can run immediately and observe lane_mask == 0,
+ * incorrectly turning a healthy replacement connection into a protocol error.
+ *
+ * Run validation, handler installation and lane publication in one owner
+ * operation so no connection callback can interleave with the transition.
+ */
+static int tr_channel_replace_connection_on_owner(void *arg)
 {
+	struct tr_channel_replace_request *request =
+		(struct tr_channel_replace_request *)arg;
+	struct tr_channel *channel = request->channel;
+	struct tr_conn_handle connection = request->connection;
+	enum tr_lane lane = request->lane;
 	enum tr_connection_state connection_state;
 	int ret;
 
-	if (!channel || !connection.reactor ||
-	    connection.reactor != channel->reactor ||
-	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
-		return TR_ERR_INVALID;
+	ret = tr_reactor_get_connection_state(connection, &connection_state);
+	if (ret != TR_OK)
+		return ret;
+	if (connection_state != TR_CONN_RESERVED &&
+	    connection_state != TR_CONN_ACTIVE)
+		return TR_ERR_CLOSED;
 
 	pthread_mutex_lock(&channel->lock);
 	if (channel->local_draining ||
@@ -2152,21 +2175,39 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
-	pthread_mutex_unlock(&channel->lock);
 
-	ret = tr_reactor_set_handler(connection, tr_channel_on_frame,
-				     tr_channel_on_connection_event, channel);
-	if (ret != TR_OK)
-		return ret;
-
-	pthread_mutex_lock(&channel->lock);
 	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
 		if (channel->control_alive || channel->bulk_alive) {
 			pthread_mutex_unlock(&channel->lock);
-			(void)tr_reactor_set_handler(connection, NULL, NULL,
-						     NULL);
 			return TR_ERR_STATE;
 		}
+	} else if (lane == TR_LANE_BULK) {
+		if (channel->bulk_alive ||
+		    tr_conn_equal(connection, channel->control_connection)) {
+			pthread_mutex_unlock(&channel->lock);
+			return TR_ERR_STATE;
+		}
+	} else {
+		if (channel->control_alive ||
+		    tr_conn_equal(connection, channel->bulk_connection)) {
+			pthread_mutex_unlock(&channel->lock);
+			return TR_ERR_STATE;
+		}
+	}
+
+	/*
+	 * tr_reactor_call() guarantees owner context here; set_handler therefore
+	 * updates the connection directly and cannot dispatch an I/O callback in
+	 * the middle of this transition.
+	 */
+	ret = tr_reactor_set_handler(connection, tr_channel_on_frame,
+				     tr_channel_on_connection_event, channel);
+	if (ret != TR_OK) {
+		pthread_mutex_unlock(&channel->lock);
+		return ret;
+	}
+
+	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
 		channel->control_connection = connection;
 		channel->bulk_connection = connection;
 		channel->control_alive = 1;
@@ -2181,13 +2222,6 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 		channel->control_reconnect_attempt = 0;
 		channel->bulk_reconnect_attempt = 0;
 	} else if (lane == TR_LANE_BULK) {
-		if (channel->bulk_alive ||
-		    tr_conn_equal(connection, channel->control_connection)) {
-			pthread_mutex_unlock(&channel->lock);
-			(void)tr_reactor_set_handler(connection, NULL, NULL,
-						     NULL);
-			return TR_ERR_STATE;
-		}
 		channel->bulk_connection = connection;
 		channel->bulk_alive = 1;
 		channel->bulk_ready = 0;
@@ -2195,13 +2229,6 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 		channel->bulk_reconnecting = 0;
 		channel->bulk_reconnect_attempt = 0;
 	} else {
-		if (channel->control_alive ||
-		    tr_conn_equal(connection, channel->bulk_connection)) {
-			pthread_mutex_unlock(&channel->lock);
-			(void)tr_reactor_set_handler(connection, NULL, NULL,
-						     NULL);
-			return TR_ERR_STATE;
-		}
 		channel->control_connection = connection;
 		channel->control_alive = 1;
 		channel->control_ready = 0;
@@ -2212,14 +2239,27 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 	}
 	pthread_cond_broadcast(&channel->reconnect_cond);
 	pthread_mutex_unlock(&channel->lock);
+	return TR_OK;
+}
 
-	ret = tr_reactor_get_connection_state(connection, &connection_state);
-	if (ret != TR_OK || (connection_state != TR_CONN_RESERVED &&
-			     connection_state != TR_CONN_ACTIVE)) {
-		tr_channel_on_connection_event(connection, TR_CONN_EVENT_ERROR,
-					       TR_ERR_CLOSED, channel);
-		return ret == TR_OK ? TR_ERR_CLOSED : ret;
-	}
+int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
+				  struct tr_conn_handle connection)
+{
+	struct tr_channel_replace_request request;
+	int ret;
+
+	if (!channel || !connection.reactor ||
+	    connection.reactor != channel->reactor ||
+	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
+		return TR_ERR_INVALID;
+
+	request.channel = channel;
+	request.lane = lane;
+	request.connection = connection;
+	ret = tr_reactor_call(channel->reactor,
+			      tr_channel_replace_connection_on_owner, &request);
+	if (ret != TR_OK)
+		return ret;
 
 	ret = tr_channel_send_hello(channel, connection);
 	if (ret != TR_OK) {
