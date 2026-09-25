@@ -4,13 +4,14 @@
 #include "tr/reactor.h"
 
 /*
- * 仅供 c-trpc 内部模块把一小段状态提交回 Reactor owner thread。
+ * 提交一个 worker completion 回 Reactor owner。
  *
  * fn 必须是非阻塞的短任务，禁止在回调里执行磁盘、网络、KMS 等阻塞工作。
- * TR_OK 表示 arg 的生命周期责任已经转移给 fn；提交失败时仍由调用方负责。
+ * TR_OK 表示 arg 的生命周期责任已经转移给 bounded completion queue；
+ * 提交失败时仍由调用方负责。
  */
-int tr_reactor_post(struct tr_reactor *reactor, void (*fn)(void *arg),
-		    void *arg);
+int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
+			void *arg);
 
 /*
  * 在 Reactor owner thread 执行一个短小、非阻塞的同步操作，并把 fn 的

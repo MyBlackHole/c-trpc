@@ -4,7 +4,7 @@
 
 不一次性同时引入 multi-Reactor、multi-socket、Pipeline recovery 和新的 RPC execution model。
 
-## Phase 0 - CURRENT
+## Phase 0 - CURRENT BASELINE
 
 ```text
 Server:
@@ -18,7 +18,9 @@ Channel:
   CONTROL + one BULK
 
 RPC:
-  worker 与 Endpoint/Call 仍存在共享协议状态
+  immutable Task
+  worker callback state changes -> Reactor owner command
+  dedicated per-Reactor Completion Queue
 ```
 
 ## Phase 1 - RPC Completion Ownership
@@ -33,19 +35,27 @@ Reactor
  -> original Reactor
 ```
 
-目标：worker 不直接修改 Call/Endpoint protocol state。
+目标：worker 不直接修改 Call/Endpoint/Stream protocol state。
 
-之后迁移 Streaming send/finish/cancel 为 owner command。
+Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询，
+以及 worker RX-credit/close 路径均已回到 Reactor owner。
 
 ## Phase 2 - Completion Queue + Scheduler
 
-引入：
+**状态：IN PROGRESS**
 
-- per-Reactor completion queue；
-- wake coalescing；
-- batch drain；
+已完成：
+
+- per-Reactor bounded completion queue；
+- 独立于 command queue 的 wake coalescing；
+- completion batch drain；
+- completion backlog 下的 nonblocking event-loop continuation；
+- STOP 前已接受 completion 的 drain barrier。
+
+仍待：
+
 - CONTROL priority；
-- bounded event-loop work budget。
+- command/TX/completion 更统一的 event-loop work budget 与可观测指标。
 
 ## Phase 3 - Runtime Shard Abstraction
 

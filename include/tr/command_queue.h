@@ -17,7 +17,6 @@ enum tr_command_type {
 	TR_CMD_ABORT,
 	TR_CMD_SET_HANDLER,
 	TR_CMD_QUIESCE,
-	TR_CMD_DEFER,
 	TR_CMD_CALL,
 	TR_CMD_STOP
 };
@@ -53,10 +52,6 @@ struct tr_command {
 			struct tr_reactor_sync *sync;
 		} quiesce;
 
-		struct {
-			void (*fn)(void *arg);
-			void *arg;
-		} defer;
 
 		struct {
 			int (*fn)(void *arg);
