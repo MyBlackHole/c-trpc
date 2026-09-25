@@ -2,6 +2,7 @@
 #include "tr/reactor.h"
 
 #include "reactor_internal.h"
+#include "completion_queue.h"
 #include "tr/command_queue.h"
 #include "tr/crc32c.h"
 #include "tr/parser.h"
@@ -26,6 +27,7 @@
 
 #define TR_REACTOR_EVENT_BATCH 64U
 #define TR_COMMAND_BATCH 64U
+#define TR_COMPLETION_BATCH 64U
 #define TR_TX_READY_BATCH 64U
 #define TR_WAKE_TOKEN UINT64_MAX
 
@@ -150,6 +152,7 @@ struct tr_reactor {
 	int stopping;
 
 	struct tr_command_queue commands;
+	struct tr_completion_queue completions;
 	struct tr_tx_pool tx_pool;
 	struct tr_tx_pool control_tx_pool;
 	struct tr_buffer_pool rx_pool;
@@ -360,6 +363,26 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 	if (need_wake)
 		(void)tr_reactor_signal(reactor);
 
+	return TR_OK;
+}
+
+static int tr_reactor_push_completion_locked(
+	struct tr_reactor *reactor, const struct tr_completion *completion)
+{
+	int need_wake = 0;
+	int ret;
+
+	ret = tr_completion_queue_push(&reactor->completions, completion,
+				       &need_wake);
+	if (ret != TR_OK)
+		return ret;
+
+	/*
+	 * 与 command 相同：queue 已接受后 ownership 已转移，eventfd 的异常
+	 * 不能把提交结果翻转成失败。
+	 */
+	if (need_wake)
+		(void)tr_reactor_signal(reactor);
 	return TR_OK;
 }
 
@@ -1223,10 +1246,23 @@ static void tr_process_quiesce(const struct tr_command *command)
 	tr_reactor_sync_complete(command->u.quiesce.sync, TR_OK);
 }
 
-static void tr_process_defer(const struct tr_command *command)
+static int tr_process_completions(struct tr_reactor *reactor)
 {
-	if (command->u.defer.fn)
-		command->u.defer.fn(command->u.defer.arg);
+	struct tr_completion completions[TR_COMPLETION_BATCH];
+	size_t count;
+	size_t i;
+	int has_more = 0;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
+	count = tr_completion_queue_pop_batch(
+		&reactor->completions, completions, TR_COMPLETION_BATCH,
+		&has_more);
+	for (i = 0; i < count; ++i)
+		if (completions[i].fn)
+			completions[i].fn(completions[i].arg);
+
+	return has_more;
 }
 
 static void tr_process_call(const struct tr_command *command)
@@ -1280,9 +1316,6 @@ static void tr_process_commands(struct tr_reactor *reactor)
 				break;
 			case TR_CMD_QUIESCE:
 				tr_process_quiesce(command);
-				break;
-			case TR_CMD_DEFER:
-				tr_process_defer(command);
 				break;
 			case TR_CMD_CALL:
 				tr_process_call(command);
@@ -1347,21 +1380,34 @@ static void *tr_reactor_thread_main(void *arg)
 {
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
+	int completions_pending = 0;
 
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
 
 	while (!reactor->stopping) {
-		int timeout = reactor->tx_ready_head ? 0 : -1;
+		int timeout;
 		int count;
 		int i;
 
 		tr_process_commands(reactor);
-		tr_run_tx_ready(reactor);
-		if (reactor->stopping)
+		if (reactor->stopping) {
+			/*
+			 * stop() 先在 ctl_lock 下关闭 accepting，再入队 STOP。
+			 * 因此此刻 completion queue 中的项全部是在 STOP 前已接受，
+			 * 必须 drain 完再退出，保持原先单 command FIFO 的语义。
+			 */
+			do {
+				completions_pending =
+					tr_process_completions(reactor);
+			} while (completions_pending);
 			break;
+		}
 
-		timeout = reactor->tx_ready_head ? 0 : -1;
+		completions_pending = tr_process_completions(reactor);
+		tr_run_tx_ready(reactor);
+
+		timeout = (reactor->tx_ready_head || completions_pending) ? 0 : -1;
 		count = epoll_wait(reactor->epoll_fd, events,
 				   (int)TR_REACTOR_EVENT_BATCH, timeout);
 		if (count < 0) {
@@ -1374,6 +1420,9 @@ static void *tr_reactor_thread_main(void *arg)
 			if (events[i].data.u64 == TR_WAKE_TOKEN) {
 				tr_reactor_drain_wake(reactor);
 				tr_process_commands(reactor);
+				if (!reactor->stopping)
+					completions_pending =
+						tr_process_completions(reactor);
 			} else {
 				tr_handle_connection_event(reactor,
 							   events[i].data.u64,
@@ -1384,6 +1433,14 @@ static void *tr_reactor_thread_main(void *arg)
 				break;
 		}
 
+		if (reactor->stopping) {
+			do {
+				completions_pending =
+					tr_process_completions(reactor);
+			} while (completions_pending);
+			break;
+		}
+
 		tr_run_tx_ready(reactor);
 	}
 
@@ -1391,7 +1448,6 @@ static void *tr_reactor_thread_main(void *arg)
 	tr_current_reactor_owner = NULL;
 	return NULL;
 }
-
 static void tr_default_config(struct tr_reactor_config *config)
 {
 	config->max_connections = tr_nonzero(config->max_connections, 128U);
@@ -1414,6 +1470,7 @@ struct tr_reactor_build {
 	struct tr_reactor *reactor;
 	int ctl_lock_ready;
 	int commands_ready;
+	int completions_ready;
 	int tx_pool_ready;
 	int control_tx_pool_ready;
 	int rx_pool_ready;
@@ -1438,6 +1495,8 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 		tr_tx_pool_destroy(&reactor->control_tx_pool);
 	if (build->tx_pool_ready)
 		tr_tx_pool_destroy(&reactor->tx_pool);
+	if (build->completions_ready)
+		tr_completion_queue_destroy(&reactor->completions);
 	if (build->commands_ready)
 		tr_command_queue_destroy(&reactor->commands);
 
@@ -1506,6 +1565,17 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	if (ret != TR_OK)
 		return ret;
 	build.commands_ready = 1;
+
+	/*
+	 * V1 completion capacity inherits command_capacity.  The queues are
+	 * physically independent; a later public tuning knob can split capacities
+	 * without changing completion ownership semantics.
+	 */
+	ret = tr_completion_queue_init(&reactor->completions,
+				       reactor->config.command_capacity);
+	if (ret != TR_OK)
+		return ret;
+	build.completions_ready = 1;
 
 	ret = tr_tx_pool_init(&reactor->tx_pool,
 			      reactor->config.tx_item_capacity);
@@ -2049,36 +2119,33 @@ int tr_reactor_abort(struct tr_conn_handle connection, int status)
 	return ret;
 }
 
-int tr_reactor_post(struct tr_reactor *reactor, void (*fn)(void *arg),
-		    void *arg)
+int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
+			void *arg)
 {
-	struct tr_command command;
+	struct tr_completion completion;
 	int ret;
 
 	if (!reactor || !fn)
 		return TR_ERR_INVALID;
 
 	/*
-	 * owner thread 内提交时直接执行，避免自唤醒并保持 owner-local 操作
-	 * 不经过共享 command queue。
+	 * owner 内提交 completion 时直接应用；跨线程才进入独立 completion
+	 * queue，避免 completion 再占用控制 command 容量。
 	 */
 	if (tr_reactor_is_owner_thread(reactor)) {
 		fn(arg);
 		return TR_OK;
 	}
 
-	memset(&command, 0, sizeof(command));
-	command.type = TR_CMD_DEFER;
-	command.u.defer.fn = fn;
-	command.u.defer.arg = arg;
+	completion.fn = fn;
+	completion.arg = arg;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started || !reactor->accepting) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_CLOSED;
 	}
-
-	ret = tr_reactor_push_locked(reactor, &command);
+	ret = tr_reactor_push_completion_locked(reactor, &completion);
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return ret;
 }
@@ -2197,6 +2264,7 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	tr_buffer_pool_destroy(&reactor->rx_pool);
 	tr_tx_pool_destroy(&reactor->control_tx_pool);
 	tr_tx_pool_destroy(&reactor->tx_pool);
+	tr_completion_queue_destroy(&reactor->completions);
 	tr_command_queue_destroy(&reactor->commands);
 
 	free(reactor->connections);
