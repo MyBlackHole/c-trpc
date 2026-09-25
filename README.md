@@ -573,6 +573,13 @@ when upper layer consumes bytes:
 
 Absolute limits avoid duplicate-credit bugs if updates are retried or coalesced.
 
+## Architecture documents
+
+架构设计按“总览、Runtime、Ownership、RPC 执行、Backup Pipeline、Durability/Recovery、演进路线、ADR”拆分，入口见
+[`docs/architecture/README.md`](docs/architecture/README.md)。
+
+这些文档区分 CURRENT、TARGET V1 与 FUTURE，避免把规划能力误认为当前已经实现。
+
 ## Important ownership rules
 
 The detailed C11 ownership/automatic-cleanup rules are documented in
