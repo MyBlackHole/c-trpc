@@ -54,7 +54,7 @@ flowchart TB
 | RPC Call | Reactor shard | completion | hot state 无锁 |
 | Backup Pipeline | Reactor shard | command | hot state 无锁 |
 | Task | Worker | ownership transfer | 无共享修改 |
-| Completion | producer → Reactor | MPSC queue | queue synchronization |
+| Completion | producer → Reactor | bounded per-Reactor MPSC queue | queue synchronization + wake coalescing |
 | Worker Queue | executor | submit/pop | mutex + cond 可接受 |
 | Generic Buffer Pool | shared | acquire/release | mutex 可接受 |
 | Shard-local buffer cache | Reactor shard | return via owner | TARGET 无锁 |
@@ -110,5 +110,5 @@ error
 - Reactor command；
 - cross-shard fd handoff；
 - RPC task；
-- RPC completion；
+- RPC completion（当前使用独立 bounded queue，不再复用 Command Queue）；
 - Pipeline work item。
