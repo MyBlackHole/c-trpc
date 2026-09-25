@@ -1,6 +1,6 @@
 # RPC 执行模型
 
-**状态：TARGET V1，Task snapshot 已落地；owner-command 仍在迁移**
+**状态：TARGET V1，Task snapshot + worker owner-command 已落地**
 
 ## 1. 目标
 
@@ -56,8 +56,12 @@ server handlers、client callbacks 和 handler/callback arg；executor worker
 本身不再通过 `endpoint->lock` 回读 live Call。
 
 Task 仍保留 `tr_rpc_call_handle` 作为 callback 身份/capability。业务 callback
-主动调用 `tr_rpc_call_send()/finish()/metadata/is_cancelled()` 时，当前公开 API
-仍会进入 Endpoint 同步路径；把这些修改型 API 改成 owner command 是下一阶段。
+主动调用 `tr_rpc_call_send()/send_buffer()/close_send()/finish()/cancel()`，
+以及 metadata/cancellation 查询时，会通过同步 Reactor owner-call 执行；
+worker 不再直接取得 Endpoint/Call mutable-state lock。
+
+RX payload credit return、retained message release 和 worker 错误 close 也回到
+Reactor owner，因此 executor worker 不再直接修改 Stream protocol state。
 
 如果 handler 需要 metadata，应在 dispatch 时构造只读 snapshot 或独立 owned object。
 
@@ -195,15 +199,19 @@ Worker executor internals
 
 这条隐式路径已经从 executor task dispatch 中移除。
 
-仍需继续迁移的是业务 callback 主动调用的修改型公开 API：
+worker callback 的修改型公开 API 已经通过 owner-call 回到 Reactor：
 
 ```text
 worker callback
-  -> tr_rpc_call_send()/finish()/...
-  -> Endpoint mutable state
+  -> bounded Reactor command
+  -> Reactor owner
+  -> validate generation
+  -> mutate Call / Stream
+  -> synchronous status back to worker
 ```
 
-目标是把这类操作编码为 owner command，再由 Reactor apply。
+`endpoint->lock` 当前仍作为 application 控制面尚未完全 owner 化之前的过渡锁。
+后续应迁移 Call 创建/注册/flush/stats 等剩余控制面，然后再缩小或删除这把锁。
 
 ## 9. 验收
 

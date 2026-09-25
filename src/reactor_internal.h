@@ -12,4 +12,13 @@
 int tr_reactor_post(struct tr_reactor *reactor, void (*fn)(void *arg),
 		    void *arg);
 
+/*
+ * 在 Reactor owner thread 执行一个短小、非阻塞的同步操作，并把 fn 的
+ * 返回值传回调用方。owner thread 内调用时直接执行，避免自等待。
+ *
+ * arg 只在本函数返回前被访问，因此调用方可以安全传递栈上 request。
+ */
+int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
+		    void *arg);
+
 #endif
