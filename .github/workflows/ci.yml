@@ -82,6 +82,11 @@ jobs:
           xmake-version: ${{ env.XMAKE_VERSION }}
       - name: Compatibility entry points and compiler switch
         run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/make-compat.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 40 "$log_file" | cut -c1-1000 >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
           make all CC=gcc
           make test CC=gcc
           make test-timer CC=gcc
@@ -90,6 +95,10 @@ jobs:
       - name: Quoted flags, tool path and literal ORIGIN
         run: |
           set -euo pipefail
+          log_file="$RUNNER_TEMP/quoted-build.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 60 "$log_file" | cut -c1-1000 >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
           xmake f -c -y -m release --toolchain=gcc
           probe_dir="$RUNNER_TEMP/flags probe's directory"
           mkdir -p "$probe_dir"
