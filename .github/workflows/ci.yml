@@ -121,6 +121,10 @@ jobs:
       - name: Install, check public headers and run an external Reactor
         run: |
           set -euo pipefail
+          log_file="$RUNNER_TEMP/sdk-install.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 60 "$log_file" | cut -c1-1000 >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
           xmake f -c -y -m release --toolchain=gcc
           xmake build trcore
           prefix="$RUNNER_TEMP/trpc sdk"
@@ -197,5 +201,8 @@ jobs:
           path: |
             ${{ runner.temp }}/make-compat.log
             ${{ runner.temp }}/quoted-build.log
+            ${{ runner.temp }}/sdk-install.log
+            ${{ runner.temp }}/echo-client.log
+            ${{ runner.temp }}/echo-server.log
           if-no-files-found: ignore
           retention-days: 7
