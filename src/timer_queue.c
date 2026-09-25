@@ -123,7 +123,8 @@ int tr_timer_queue_init(struct tr_timer_queue *queue, uint32_t capacity)
 		return TR_ERR_NOMEM;
 
 	for (i = 0; i < capacity; ++i)
-		entries[i].heap_pos = TR_TIMER_HEAP_NONE;
+		entries[i].next_free = i + 1U < capacity ? i + 1U :
+				      TR_TIMER_HEAP_NONE;
 
 	queue->entries = tr_timer_entry_array_take(&entries);
 	queue->heap = tr_timer_heap_array_take(&heap);
@@ -144,35 +145,32 @@ int tr_timer_queue_register(struct tr_timer_queue *queue,
 			    tr_timer_callback callback, void *arg,
 			    struct tr_timer_token *out)
 {
-	uint32_t i;
+	struct tr_timer_entry *entry;
+	uint32_t slot;
+	uint32_t generation;
 
 	if (!queue || !callback || !out)
 		return TR_ERR_INVALID;
+	if (queue->capacity == 0 || queue->free_head == TR_TIMER_HEAP_NONE)
+		return TR_AGAIN;
 
-	for (i = 0; i < queue->capacity; ++i) {
-		struct tr_timer_entry *entry = &queue->entries[i];
-		uint32_t generation;
+	slot = queue->free_head;
+	entry = &queue->entries[slot];
+	queue->free_head = entry->next_free;
+	generation = entry->generation + 1U;
+	if (generation == 0)
+		generation = 1U;
+	memset(entry, 0, sizeof(*entry));
+	entry->generation = generation;
+	entry->heap_pos = TR_TIMER_HEAP_NONE;
+	entry->version = 1U;
+	entry->callback = callback;
+	entry->arg = arg;
+	entry->used = 1;
 
-		if (entry->used)
-			continue;
-
-		generation = entry->generation + 1U;
-		if (generation == 0)
-			generation = 1U;
-		memset(entry, 0, sizeof(*entry));
-		entry->generation = generation;
-		entry->heap_pos = TR_TIMER_HEAP_NONE;
-		entry->version = 1U;
-		entry->callback = callback;
-		entry->arg = arg;
-		entry->used = 1;
-
-		out->slot = i;
-		out->generation = generation;
-		return TR_OK;
-	}
-
-	return TR_AGAIN;
+	out->slot = slot;
+	out->generation = generation;
+	return TR_OK;
 }
 
 int tr_timer_queue_arm(struct tr_timer_queue *queue,
@@ -231,6 +229,9 @@ int tr_timer_queue_unregister(struct tr_timer_queue *queue,
 	entry->running = 0;
 	entry->callback = NULL;
 	entry->arg = NULL;
+	/* Generation survives reuse; stale tokens cannot release this slot twice. */
+	entry->next_free = queue->free_head;
+	queue->free_head = token.slot;
 	return TR_OK;
 }
 
@@ -247,7 +248,9 @@ size_t tr_timer_queue_run_due(struct tr_timer_queue *queue, uint64_t now_ns,
 	size_t count = 0;
 	int more = 0;
 
-	if (!queue || max_callbacks == 0)
+	if (has_more_due)
+		*has_more_due = 0;
+	if (!queue)
 		return 0;
 
 	while (count < max_callbacks && queue->size != 0) {
