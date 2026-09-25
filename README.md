@@ -131,11 +131,11 @@ before RPC/Channel storage is released. Therefore `max_peers` is a bound on
 concurrently retained peer objects rather than cumulative accepts over the
 server lifetime.
 
-Two real-process examples are built by default:
+Two real-process examples are built by default. Run them in separate terminals:
 
 ```sh
-./examples/echo_server 9000
-./examples/echo_client 127.0.0.1 9000 hello
+xmake run echo_server 9000
+xmake run echo_client 127.0.0.1 9000 hello
 ```
 
 ## Implemented
@@ -667,11 +667,13 @@ RPC:
 - C11 refcount invariants: no resurrection, no underflow, no saturation overflow
 - server peer retirement while a shared RPC handler is still running; Endpoint/Channel lifetime remains valid until the task reference drains
 
-Current build validation passes:
+The Xmake CI matrix checks:
 
-- normal build/tests
+- GCC and Clang builds/tests in both debug and release modes
 - AddressSanitizer + UndefinedBehaviorSanitizer
 - ThreadSanitizer
+- Make compatibility entry points, compiler switching, installed SDK consumption,
+  and the Echo client/server as separate processes
 
 ## Deliberately not implemented yet
 
@@ -707,12 +709,29 @@ Current build validation passes:
 
 ## Build
 
-The project language baseline is ISO C11. GCC/Clang's cleanup attribute is used
-only through the typed `TR_AUTO()` ownership helper.
+Requires Linux, GCC or Clang, and **Xmake 3.1.1 or newer**. The project language
+baseline is ISO C11. GCC/Clang's cleanup attribute is used only through the
+typed `TR_AUTO()` ownership helper.
 
 ```sh
-make test
+xmake f -m release --toolchain=gcc
+xmake                         # library and Echo examples
+xmake test -v -j1              # builds and runs both test executables
+
+# Run only the timer queue tests:
+xmake test -v -j1 'test_timer_queue/*'
 ```
+
+`xmake.lua` is the only build definition. Artifacts live under
+`build/<platform>/<architecture>/<mode>/`, not in `src/`, `tests/` or `examples/`.
+The modes are `debug`, `release` (default), `asan` (ASan + UBSan), and `tsan`.
+Release preserves the original `-O2 -g` build and enabled assertions; tests
+explicitly undefine `NDEBUG` so their assertion-contained operations still run.
+
+`make`, `make test`, `make test-timer`, and `make clean` remain thin forwarding
+entry points and also require Xmake; there is no second Make build graph.
+See the [build and test guide](docs/build.md) for compiler switching, sanitizer
+commands, SDK installation, and compatibility options.
 
 ## Next milestone
 
