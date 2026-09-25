@@ -1366,6 +1366,17 @@ static void tr_rpc_apply_task_completion(void *arg)
 	tr_rpc_finish_task_on_owner(endpoint, call);
 }
 
+static int tr_rpc_apply_task_completion_sync(void *arg)
+{
+	struct tr_rpc_task_completion *completion =
+		(struct tr_rpc_task_completion *)arg;
+
+	if (!completion || !completion->endpoint)
+		return TR_ERR_INVALID;
+	tr_rpc_finish_task_on_owner(completion->endpoint, completion->call);
+	return TR_OK;
+}
+
 static int tr_rpc_defer_task_completion(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle call)
 {
@@ -1378,12 +1389,23 @@ static int tr_rpc_defer_task_completion(
 
 	completion =
 		(struct tr_rpc_task_completion *)malloc(sizeof(*completion));
-	if (!completion)
-		return TR_ERR_NOMEM;
+	reactor = tr_channel_reactor(endpoint->channel);
+	if (!completion) {
+		/*
+		 * OOM 不能迫使 worker 回退修改 Call。同步 owner-call 使用栈上
+		 * request，不需要额外分配，并保持同一生命周期规则。
+		 */
+		struct tr_rpc_task_completion sync_completion;
+
+		sync_completion.endpoint = endpoint;
+		sync_completion.call = call;
+		return tr_reactor_call(reactor,
+				       tr_rpc_apply_task_completion_sync,
+				       &sync_completion);
+	}
 	completion->endpoint = endpoint;
 	completion->call = call;
 
-	reactor = tr_channel_reactor(endpoint->channel);
 	ret = tr_reactor_complete(reactor, tr_rpc_apply_task_completion,
 			      completion);
 	if (ret != TR_OK)
