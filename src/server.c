@@ -15,7 +15,6 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "rpc_internal.h"
-#include "maintenance.h"
 
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
@@ -43,7 +42,6 @@ struct tr_server {
 
 	struct tr_reactor *reactor;
 	struct tr_rpc_executor_group *rpc_executor_group;
-	struct tr_maintenance_scheduler *maintenance;
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
 	int rpc_pool_ready;
@@ -367,11 +365,6 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_channel_set_maintenance_scheduler(peer->channel,
-						   server->maintenance);
-	if (ret != TR_OK)
-		return ret;
-
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_SERVER;
 	rpc_config.max_methods = server->config.limits.max_methods;
@@ -383,7 +376,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		peer->channel, &rpc_config, server->rpc_executor_group,
-		server->maintenance, &peer->rpc);
+		&peer->rpc);
 	if (ret != TR_OK)
 		return ret;
 
@@ -515,11 +508,6 @@ int tr_server_create(const struct tr_server_config *config,
 	if (ret != TR_OK)
 		return ret;
 	server->reassembly_pool_ready = 1;
-
-	ret = tr_maintenance_scheduler_create(
-		effective.max_peers * 2U + 4U, &server->maintenance);
-	if (ret != TR_OK)
-		return ret;
 
 	ret = tr_rpc_executor_group_create(
 		effective.max_peers, effective.limits.max_calls,
@@ -783,8 +771,6 @@ void tr_server_destroy(struct tr_server *server)
 
 	if (server->reactor)
 		tr_reactor_destroy(server->reactor);
-	if (server->maintenance)
-		tr_maintenance_scheduler_destroy(server->maintenance);
 	if (server->rpc_executor_group)
 		tr_rpc_executor_group_destroy(server->rpc_executor_group);
 	if (server->reassembly_pool_ready)
