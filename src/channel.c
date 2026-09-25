@@ -1,7 +1,6 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
 #include "reactor_internal.h"
-#include "maintenance.h"
 
 #include "tr/status.h"
 #include "tr/wire.h"
@@ -99,14 +98,10 @@ struct tr_channel {
 	int control_reconnecting;
 	int bulk_reconnecting;
 
-	pthread_cond_t keepalive_cond;
-	pthread_t keepalive_thread;
-	int keepalive_thread_started;
 	int keepalive_enabled;
-	int keepalive_stop;
 	struct tr_maintenance_scheduler *maintenance;
-	struct tr_maintenance_handle keepalive_maintenance;
-	int keepalive_maintenance_registered;
+	struct tr_reactor_timer_handle keepalive_timer;
+	int keepalive_timer_registered;
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 	uint64_t keepalive_next_ping_id;
@@ -213,18 +208,6 @@ static void tr_channel_keepalive_reset_locked(struct tr_channel *channel,
 	channel->keepalive_ping_sent_ns[idx] = 0;
 }
 
-static void tr_channel_timespec_after_ms(struct timespec *ts, uint32_t ms)
-{
-	uint64_t nsec;
-
-	(void)clock_gettime(CLOCK_REALTIME, ts);
-	nsec = (uint64_t)ts->tv_nsec +
-	       (uint64_t)(ms % 1000U) * UINT64_C(1000000);
-	ts->tv_sec +=
-		(time_t)(ms / 1000U + (uint32_t)(nsec / UINT64_C(1000000000)));
-	ts->tv_nsec = (long)(nsec % UINT64_C(1000000000));
-}
-
 static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 					    enum tr_lane lane)
 {
@@ -241,7 +224,7 @@ static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 	int ret;
 
 	pthread_mutex_lock(&channel->lock);
-	if (!channel->keepalive_enabled || channel->keepalive_stop ||
+	if (!channel->keepalive_enabled ||
 	    (lane == TR_LANE_BULK && tr_conn_equal(channel->control_connection,
 						   channel->bulk_connection))) {
 		pthread_mutex_unlock(&channel->lock);
@@ -349,12 +332,16 @@ tr_channel_keepalive_tick_ms_locked(const struct tr_channel *channel)
 }
 
 static uint64_t
-tr_channel_keepalive_maintenance_main(void *arg, uint64_t now_ns)
+tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	uint32_t tick_ms;
 	int enabled;
 
+	/*
+	 * Reactor-local callback: all network actions stay on the owning event loop.
+	 * Channel lock is retained as a transition lock for public snapshot APIs.
+	 */
 	pthread_mutex_lock(&channel->lock);
 	enabled = channel->keepalive_enabled;
 	pthread_mutex_unlock(&channel->lock);
@@ -372,38 +359,11 @@ tr_channel_keepalive_maintenance_main(void *arg, uint64_t now_ns)
 	if (!enabled)
 		return 0;
 	if (now_ns == 0)
-		now_ns = tr_maintenance_now_ns();
-	return now_ns + (uint64_t)tick_ms * UINT64_C(1000000);
-}
-
-static void *tr_channel_keepalive_thread_main(void *arg)
-{
-	struct tr_channel *channel = (struct tr_channel *)arg;
-
-	for (;;) {
-		uint32_t tick_ms;
-		struct timespec deadline;
-
-		pthread_mutex_lock(&channel->lock);
-		if (channel->keepalive_stop) {
-			pthread_mutex_unlock(&channel->lock);
-			break;
-		}
-		tick_ms = tr_channel_keepalive_tick_ms_locked(channel);
-		pthread_mutex_unlock(&channel->lock);
-
-		tr_channel_keepalive_check_lane(channel, TR_LANE_CONTROL);
-		tr_channel_keepalive_check_lane(channel, TR_LANE_BULK);
-
-		pthread_mutex_lock(&channel->lock);
-		if (!channel->keepalive_stop) {
-			tr_channel_timespec_after_ms(&deadline, tick_ms);
-			(void)pthread_cond_timedwait(&channel->keepalive_cond,
-						     &channel->lock, &deadline);
-		}
-		pthread_mutex_unlock(&channel->lock);
-	}
-	return NULL;
+		now_ns = tr_channel_now_ns();
+	if (now_ns == 0)
+		return 0;
+	return tr_add_sat_u64(
+		now_ns, (uint64_t)tick_ms * UINT64_C(1000000));
 }
 
 static uint32_t tr_channel_local_max_message(const struct tr_channel *channel,
@@ -1878,7 +1838,7 @@ struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
 	int reconnect_cond_ready;
-	int keepalive_cond_ready;
+	int keepalive_timer_ready;
 	int protocol_pool_ready;
 	int control_handler_installed;
 	int bulk_handler_installed;
@@ -1915,8 +1875,8 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	if (build->protocol_pool_ready)
 		tr_buffer_pool_destroy(&channel->protocol_pool);
 	free(channel->streams);
-	if (build->keepalive_cond_ready)
-		pthread_cond_destroy(&channel->keepalive_cond);
+	if (build->keepalive_timer_ready)
+		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
 	if (build->reconnect_cond_ready)
 		pthread_cond_destroy(&channel->reconnect_cond);
 	if (build->lock_ready)
@@ -1991,9 +1951,14 @@ static int tr_channel_create_common(
 	if (pthread_cond_init(&channel->reconnect_cond, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.reconnect_cond_ready = 1;
-	if (pthread_cond_init(&channel->keepalive_cond, NULL) != 0)
-		return TR_ERR_INVALID;
-	build.keepalive_cond_ready = 1;
+
+	ret = tr_reactor_timer_register(channel->reactor,
+					tr_channel_keepalive_timer_main,
+					channel, &channel->keepalive_timer);
+	if (ret != TR_OK)
+		return ret;
+	channel->keepalive_timer_registered = 1;
+	build.keepalive_timer_ready = 1;
 
 	channel->streams = (struct tr_stream_slot *)calloc(
 		channel->config.max_streams, sizeof(*channel->streams));
@@ -2104,7 +2069,10 @@ void tr_channel_destroy(struct tr_channel *channel)
 	}
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
-	pthread_cond_destroy(&channel->keepalive_cond);
+	if (channel->keepalive_timer_registered) {
+		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
+		channel->keepalive_timer_registered = 0;
+	}
 	pthread_cond_destroy(&channel->reconnect_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
@@ -2372,16 +2340,15 @@ int tr_channel_set_maintenance_scheduler(
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->keepalive_enabled || channel->keepalive_thread_started ||
-	    channel->keepalive_maintenance_registered ||
-	    channel->maintenance) {
+	if (channel->keepalive_enabled || channel->maintenance) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
 
 	/*
-	 * scheduler 由更高层 runtime（当前为 Server）拥有，
-	 * 生命周期必须覆盖 Channel；Channel 只保存 borrowed pointer。
+	 * Compatibility hook retained while other maintenance consumers are
+	 * migrated. Keepalive itself is Reactor-local and does not consume this
+	 * scheduler.
 	 */
 	channel->maintenance = maintenance;
 	pthread_mutex_unlock(&channel->lock);
@@ -2391,124 +2358,74 @@ int tr_channel_set_maintenance_scheduler(
 int tr_channel_enable_keepalive(struct tr_channel *channel,
 				const struct tr_channel_keepalive_config *config)
 {
-	int error;
+	struct tr_reactor_timer_handle timer;
+	uint64_t now_ns;
+	int ret;
 
 	if (!channel || !config || config->interval_ms == 0 ||
 	    config->timeout_ms == 0)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->keepalive_thread_started || channel->keepalive_enabled ||
-	    channel->keepalive_maintenance_registered) {
+	if (channel->keepalive_enabled ||
+	    !channel->keepalive_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
 
 	channel->keepalive_interval_ms = config->interval_ms;
 	channel->keepalive_timeout_ms = config->timeout_ms;
-	channel->keepalive_stop = 0;
 	channel->keepalive_enabled = 1;
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
-
-	if (channel->maintenance) {
-		struct tr_maintenance_handle handle;
-		uint64_t now_ns = tr_maintenance_now_ns();
-		int ret;
-
-		if (now_ns == 0) {
-			channel->keepalive_enabled = 0;
-			pthread_mutex_unlock(&channel->lock);
-			return TR_ERR_SYS;
-		}
-
-		ret = tr_maintenance_register(
-			channel->maintenance,
-			tr_channel_keepalive_maintenance_main,
-			channel, &handle);
-		if (ret != TR_OK) {
-			channel->keepalive_enabled = 0;
-			pthread_mutex_unlock(&channel->lock);
-			return ret;
-		}
-
-		channel->keepalive_maintenance = handle;
-		channel->keepalive_maintenance_registered = 1;
-		ret = tr_maintenance_arm(handle, now_ns);
-		if (ret != TR_OK) {
-			channel->keepalive_maintenance_registered = 0;
-			memset(&channel->keepalive_maintenance, 0,
-			       sizeof(channel->keepalive_maintenance));
-			channel->keepalive_enabled = 0;
-			pthread_mutex_unlock(&channel->lock);
-			(void)tr_maintenance_unregister(handle);
-			return ret;
-		}
-
-		pthread_mutex_unlock(&channel->lock);
-		return TR_OK;
-	}
-
-	error = pthread_create(&channel->keepalive_thread, NULL,
-			       tr_channel_keepalive_thread_main, channel);
-	if (error != 0) {
-		channel->keepalive_enabled = 0;
-		pthread_mutex_unlock(&channel->lock);
-		return TR_ERR_SYS;
-	}
-	channel->keepalive_thread_started = 1;
-	pthread_cond_broadcast(&channel->keepalive_cond);
+	timer = channel->keepalive_timer;
 	pthread_mutex_unlock(&channel->lock);
-	return TR_OK;
+
+	now_ns = tr_channel_now_ns();
+	if (now_ns == 0)
+		ret = TR_ERR_SYS;
+	else
+		ret = tr_reactor_timer_arm(timer, now_ns);
+	if (ret == TR_OK)
+		return TR_OK;
+
+	pthread_mutex_lock(&channel->lock);
+	channel->keepalive_enabled = 0;
+	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
+	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
+	pthread_mutex_unlock(&channel->lock);
+	return ret;
 }
 
 int tr_channel_disable_keepalive(struct tr_channel *channel)
 {
-	struct tr_maintenance_handle maintenance_handle;
-	pthread_t thread;
-	int unregister_maintenance = 0;
-	int join_thread = 0;
+	struct tr_reactor_timer_handle timer;
+	int registered;
+	int ret;
 
 	if (!channel)
 		return TR_ERR_INVALID;
 
-	memset(&maintenance_handle, 0, sizeof(maintenance_handle));
-
 	pthread_mutex_lock(&channel->lock);
 	channel->keepalive_enabled = 0;
-	channel->keepalive_stop = 1;
-
-	if (channel->keepalive_maintenance_registered) {
-		maintenance_handle = channel->keepalive_maintenance;
-		memset(&channel->keepalive_maintenance, 0,
-		       sizeof(channel->keepalive_maintenance));
-		channel->keepalive_maintenance_registered = 0;
-		unregister_maintenance = 1;
-	} else {
-		pthread_cond_broadcast(&channel->keepalive_cond);
-		if (channel->keepalive_thread_started) {
-			thread = channel->keepalive_thread;
-			if (pthread_equal(pthread_self(), thread)) {
-				pthread_mutex_unlock(&channel->lock);
-				return TR_OK;
-			}
-			channel->keepalive_thread_started = 0;
-			join_thread = 1;
-		}
-	}
-
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
+	registered = channel->keepalive_timer_registered;
+	timer = channel->keepalive_timer;
 	pthread_mutex_unlock(&channel->lock);
 
-	if (unregister_maintenance) {
-		int ret = tr_maintenance_unregister(maintenance_handle);
-		if (ret != TR_OK && ret != TR_ERR_STALE)
-			return ret;
-	}
-	if (join_thread && pthread_join(thread, NULL) != 0)
-		return TR_ERR_SYS;
-	return TR_OK;
+	if (!registered)
+		return TR_OK;
+
+	/*
+	 * Never wait for the Reactor while holding channel->lock. arm(0) is also a
+	 * synchronization barrier while running; after Reactor stop it directly
+	 * disarms the owner queue under ctl_lock.
+	 */
+	ret = tr_reactor_timer_arm(timer, 0);
+	if (ret == TR_ERR_CLOSED)
+		return TR_OK;
+	return ret;
 }
 
 int tr_channel_get_lane_state(struct tr_channel *channel, enum tr_lane lane,
