@@ -1924,6 +1924,11 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	build->channel = NULL;
 }
 
+struct tr_reactor *tr_channel_reactor(struct tr_channel *channel)
+{
+	return channel ? channel->reactor : NULL;
+}
+
 static int tr_channel_create_common(
 		      const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
