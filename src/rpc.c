@@ -7,6 +7,8 @@
 #include "tr/guard.h"
 #include "tr/refcount.h"
 #include "rpc_internal.h"
+#include "channel_internal.h"
+#include "reactor_internal.h"
 #include "maintenance.h"
 
 #include <pthread.h>
@@ -96,6 +98,27 @@ struct tr_rpc_task {
 	enum tr_rpc_call_event event;
 	struct tr_rpc_call_handle call;
 	struct tr_buffer *payload;
+
+	union {
+		struct {
+			tr_rpc_unary_handler handler;
+			void *handler_arg;
+			struct tr_rpc_method_desc method;
+			struct tr_stream_handle stream;
+		} server_unary;
+	} u;
+};
+
+/*
+ * Unary worker 只产生业务结果；wire metadata、Call 状态和发送动作必须回到
+ * Reactor owner thread 后再处理。
+ */
+struct tr_rpc_unary_completion {
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_call_handle call;
+	int status;
+	uint32_t response_len;
+	uint8_t response[];
 };
 
 #define TR_RPC_EXEC_NONE UINT32_MAX
@@ -1138,8 +1161,144 @@ static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
 	return TR_OK;
 }
 
-static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
-				     struct tr_rpc_task *task)
+static void tr_rpc_apply_unary_completion(void *arg)
+{
+	struct tr_rpc_unary_completion *completion =
+		(struct tr_rpc_unary_completion *)arg;
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_call_slot *call;
+	struct tr_buffer *response_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_rpc_bytes response;
+	int ret = TR_OK;
+
+	if (!completion)
+		return;
+
+	endpoint = completion->endpoint;
+	response.data = completion->response_len ? completion->response : NULL;
+	response.len = completion->response_len;
+
+	/*
+	 * 这里由 Reactor owner thread 执行。endpoint->lock 暂时保留用于兼容
+	 * 仍可从 application/maintenance 线程进入的旧 API；后续 ownership
+	 * 收敛后再缩减这把锁，而不是在本阶段直接替换成 atomic。
+	 */
+	pthread_mutex_lock(&endpoint->lock);
+	call = tr_rpc_lookup_call_handle_locked(completion->call);
+	if (call && call->method && call->is_unary && !call->cancelled &&
+	    !call->pending_tx) {
+		ret = tr_rpc_encode_message(
+			endpoint, call, TR_RPC_WIRE_RESPONSE,
+			&call->method->desc, call->method->desc.response_codec_id,
+			completion->status, &response, &response_buffer);
+		if (ret == TR_OK) {
+			call->pending_tx = tr_buffer_take(&response_buffer);
+			(void)tr_rpc_try_unary_send_locked(endpoint, call);
+		}
+	}
+	pthread_mutex_unlock(&endpoint->lock);
+
+	/*
+	 * completion 接管了原 task 的 Endpoint 强引用和 task_refs；
+	 * 必须在 owner thread 最后归还，避免 Call 在 completion 应用前复用。
+	 */
+	{
+		struct tr_rpc_call_handle call_handle = completion->call;
+		free(completion);
+		tr_rpc_task_done(endpoint, call_handle);
+	}
+}
+
+static int tr_rpc_post_unary_completion(
+	struct tr_rpc_endpoint *endpoint, const struct tr_rpc_task *task,
+	int status, const struct tr_rpc_bytes *response)
+{
+	struct tr_rpc_unary_completion *completion;
+	struct tr_reactor *reactor;
+	size_t size;
+	int ret;
+
+	if (!endpoint || !task || !response ||
+	    (response->len != 0 && !response->data))
+		return TR_ERR_INVALID;
+	if (response->len > SIZE_MAX - sizeof(*completion))
+		return TR_ERR_BAD_LENGTH;
+
+	size = sizeof(*completion) + response->len;
+	completion = (struct tr_rpc_unary_completion *)malloc(size);
+	if (!completion)
+		return TR_ERR_NOMEM;
+
+	completion->endpoint = endpoint;
+	completion->call = task->call;
+	completion->status = status;
+	completion->response_len = response->len;
+	if (response->len)
+		memcpy(completion->response, response->data, response->len);
+
+	reactor = tr_channel_reactor(endpoint->channel);
+	ret = tr_reactor_post(reactor, tr_rpc_apply_unary_completion,
+			      completion);
+	if (ret != TR_OK)
+		free(completion);
+	return ret;
+}
+
+static int tr_rpc_executor_run_server_unary(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_task *task)
+{
+	struct tr_rpc_message message;
+	struct tr_rpc_wire_header wire;
+	struct tr_rpc_unary_response response;
+	struct tr_rpc_bytes completion_response;
+	tr_rpc_unary_handler handler = task->u.server_unary.handler;
+	int ret;
+	int deferred = 0;
+
+	if (!handler || tr_rpc_decode_task_message(task, &message, &wire) != TR_OK) {
+		(void)tr_stream_close(task->u.server_unary.stream);
+		goto out;
+	}
+
+	message.stream = task->u.server_unary.stream;
+	memset(&response, 0, sizeof(response));
+	response.status = TR_RPC_STATUS_INTERNAL;
+
+	ret = handler(task->call, &message.bytes, &response,
+		      task->u.server_unary.handler_arg);
+	if (ret != TR_OK)
+		response.status = TR_RPC_STATUS_INTERNAL;
+
+	if (response.message.len >
+		    task->u.server_unary.method.max_response_bytes ||
+	    (response.message.len != 0 && !response.message.data)) {
+		response.status = TR_RPC_STATUS_INTERNAL;
+		response.message.data = NULL;
+		response.message.len = 0;
+	}
+
+	completion_response = response.message;
+	ret = tr_rpc_post_unary_completion(endpoint, task, response.status,
+					   &completion_response);
+	if (ret == TR_OK)
+		deferred = 1;
+	else
+		(void)tr_stream_close(task->u.server_unary.stream);
+
+out:
+	if (task->payload) {
+		if (task->u.server_unary.stream.channel)
+			(void)tr_stream_release_payload(
+				task->u.server_unary.stream,
+				tr_buffer_take(&task->payload));
+		else
+			tr_buffer_release(tr_buffer_take(&task->payload));
+	}
+	return deferred;
+}
+
+static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
+				    struct tr_rpc_task *task)
 {
 	struct tr_rpc_call_slot snapshot;
 	struct tr_rpc_method_entry *method = NULL;
@@ -1147,6 +1306,9 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 	struct tr_rpc_stream_handlers handlers;
 	void *handler_arg = NULL;
 	int have_call = 0;
+
+	if (task->type == TR_RPC_TASK_SERVER_UNARY)
+		return tr_rpc_executor_run_server_unary(endpoint, task);
 
 	memset(&snapshot, 0, sizeof(snapshot));
 	memset(&callbacks, 0, sizeof(callbacks));
@@ -1172,78 +1334,17 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 
 	if (!have_call) {
 		tr_rpc_release_task_payload(task);
-		return;
+		return 0;
 	}
 
 	if (snapshot.cancelled && task->type != TR_RPC_TASK_SERVER_CLOSE &&
 	    task->type != TR_RPC_TASK_CLIENT_UNARY_RESULT &&
 	    task->type != TR_RPC_TASK_CLIENT_EVENT) {
 		tr_rpc_release_task_payload(task);
-		return;
+		return 0;
 	}
 
 	switch (task->type) {
-	case TR_RPC_TASK_SERVER_UNARY: {
-		struct tr_rpc_message message;
-		struct tr_rpc_wire_header wire;
-		struct tr_rpc_unary_response response;
-		struct tr_buffer *response_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
-		tr_rpc_unary_handler handler = method ? method->unary_handler :
-							NULL;
-		int ret;
-
-		if (!handler || tr_rpc_decode_task_message(task, &message,
-							   &wire) != TR_OK) {
-			(void)tr_stream_close(snapshot.stream);
-			break;
-		}
-
-		message.stream = snapshot.stream;
-		memset(&response, 0, sizeof(response));
-		response.status = TR_RPC_STATUS_INTERNAL;
-		ret = handler(task->call, &message.bytes, &response,
-			      handler_arg);
-		if (ret != TR_OK)
-			response.status = TR_RPC_STATUS_INTERNAL;
-
-		if (!method ||
-		    response.message.len > method->desc.max_response_bytes ||
-		    (response.message.len != 0 && !response.message.data)) {
-			response.status = TR_RPC_STATUS_INTERNAL;
-			response.message.data = NULL;
-			response.message.len = 0;
-		}
-
-		if (method) {
-			pthread_mutex_lock(&endpoint->lock);
-			{
-				struct tr_rpc_call_slot *call =
-					tr_rpc_lookup_call_handle_locked(
-						task->call);
-				if (call && !call->cancelled &&
-				    !call->pending_tx) {
-					ret = tr_rpc_encode_message(
-						endpoint, call,
-						TR_RPC_WIRE_RESPONSE,
-						&method->desc,
-						method->desc.response_codec_id,
-						response.status,
-						&response.message,
-						&response_buffer);
-					if (ret == TR_OK) {
-						call->pending_tx =
-							tr_buffer_take(&response_buffer);
-						(void)tr_rpc_try_unary_send_locked(
-							endpoint, call);
-					}
-				}
-			}
-			pthread_mutex_unlock(&endpoint->lock);
-		}
-
-		break;
-	}
-
 	case TR_RPC_TASK_SERVER_STREAM_MESSAGE: {
 		struct tr_rpc_message message;
 		struct tr_rpc_wire_header wire;
@@ -1346,6 +1447,7 @@ static void tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 		else
 			tr_buffer_release(tr_buffer_take(&task->payload));
 	}
+	return 0;
 }
 
 static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
@@ -1462,9 +1564,13 @@ static void *tr_rpc_executor_main(void *arg)
 		if (ret < 0)
 			continue;
 
-		tr_rpc_executor_run_task(endpoint, &task);
-		tr_rpc_executor_complete_task(endpoint, task.call);
-		tr_rpc_task_done(endpoint, task.call);
+		{
+			int task_done_deferred =
+				tr_rpc_executor_run_task(endpoint, &task);
+			tr_rpc_executor_complete_task(endpoint, task.call);
+			if (!task_done_deferred)
+				tr_rpc_task_done(endpoint, task.call);
+		}
 	}
 
 	return NULL;
@@ -1509,9 +1615,13 @@ static void *tr_rpc_executor_group_main(void *arg)
 		if (ret <= 0)
 			continue;
 
-		tr_rpc_executor_run_task(endpoint, &task);
-		tr_rpc_executor_complete_task(endpoint, task.call);
-		tr_rpc_task_done(endpoint, task.call);
+		{
+			int task_done_deferred =
+				tr_rpc_executor_run_task(endpoint, &task);
+			tr_rpc_executor_complete_task(endpoint, task.call);
+			if (!task_done_deferred)
+				tr_rpc_task_done(endpoint, task.call);
+		}
 	}
 
 	return NULL;
@@ -2224,6 +2334,12 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		task.first_message = (uint16_t)first_message;
 		task.type = call->is_unary ? TR_RPC_TASK_SERVER_UNARY :
 					     TR_RPC_TASK_SERVER_STREAM_MESSAGE;
+		if (call->is_unary) {
+			task.u.server_unary.handler = method->unary_handler;
+			task.u.server_unary.handler_arg = method->handler_arg;
+			task.u.server_unary.method = method->desc;
+			task.u.server_unary.stream = stream;
+		}
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
 		pthread_mutex_unlock(&endpoint->lock);
 		if (ret != TR_OK) {
