@@ -4,5 +4,6 @@ build
 *.o
 *.a
 tests/test_transport
+tests/test_timer_queue
 examples/echo_client
 examples/echo_server
