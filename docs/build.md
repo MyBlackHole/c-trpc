@@ -102,8 +102,11 @@ xmake install -o /tmp/c-trpc-sdk trcore
 
 安装后保留 `include/tr/*.h` 的路径，静态库位于 `lib/libtrcore.a`。
 外部 C 程序使用 `-I/tmp/c-trpc-sdk/include -L/tmp/c-trpc-sdk/lib -ltrcore`
-并在编译/链接时加 `-pthread`。CI 实际安装 SDK 并编译、运行一个外部
-C11 消费程序，另外启动独立 Echo 服务端/客户端验证请求响应。
+并在编译/链接时加 `-pthread`。CI 将 SDK 安装到带空格的路径，使用 GCC
+和 Clang 分别单独编译每个已安装公开头文件，并链接、运行外部 C11 程序，
+实际执行 Reactor 的 create / start / quiesce / stop / destroy 生命周期。
+消费程序只使用安装后的 include/lib 路径，运行超时 10 秒；另有独立
+Echo 服务端/客户端验证请求响应，不以仅调用 status helper 代替运行时验证。
 
 ## Make 兼容入口
 
@@ -117,7 +120,23 @@ make clean                    # xmake clean --all
 `CC`、`AR` 只有被显式提供时才转发，避免 GNU Make 默认的 `CC=cc` 覆盖
 Xmake 工具链。`CPPFLAGS` / `CFLAGS` 合并为额外 C flags，`LDFLAGS` 作为
 额外链接 flags；还可通过 `XMAKE_CONFIG` 添加 Xmake 配置选项。
-`XMAKE` 可指定 Xmake 可执行文件，`MODE` 默认 `release`。
+`XMAKE` 指定单个 Xmake 可执行文件路径（可以含空格或引号），不是带参数
+的命令片段；`MODE` 默认 `release`。工具路径和 flags 值在 Make recipe
+中作为单个 shell 参数传递，flags 内部的引号交给 Xmake 解析，不由 shell
+提前拆分或展开。`XMAKE_CONFIG` 则仍是多个配置选项组成的 shell 片段，
+由调用者自行引用其中的路径。
+
+例如，包含空格的 include 路径与相对运行时搜索路径：
+
+```sh
+make all CC=gcc CFLAGS='-I"/opt/vendor sdk/include"' \
+    LDFLAGS='-Wl,-rpath,$$ORIGIN/../lib'
+```
+
+通过 GNU Make 传递字面量 `$` 时写成 `$$`，并使用 shell 单引号保护命令行
+值。这里的 `$$ORIGIN` 经 Make 后变成 `$ORIGIN`，不会被 recipe shell
+作为环境变量提前展开。直接调用 `xmake f` 时没有 Make 这一层，不要照搬
+双 `$` 写法。
 
 这些入口都要求已安装 Xmake。旧的单个 `.o` / `libtrcore.a` Make 目标
 不再提供，应使用 `xmake build <target>`；没有无 Xmake 的备用 Make 构建。
@@ -128,4 +147,7 @@ Xmake 工具链。`CPPFLAGS` / `CFLAGS` 合并为额外 C flags，`LDFLAGS` 作�
 五项检查为 GCC（debug + release）、Clang（debug + release）、ASan + UBSan、
 TSan，以及 Make 兼容/编译器切换/SDK 安装/独立进程示例。
 前四项均构建全部目标并通过 `xmake test` 执行两个测试程序。
+Make 兼容检查还使用带空格/单引号的工具与强制包含头文件路径、带引号的
+字符串宏，实际构建全部目标并运行测试；通过 `readelf` 验证最终 ELF
+保留字面量 `$ORIGIN`，不只检查配置命令的显示文本。
 构建产物和缓存被 `.gitignore` 排除，安装检查还核对工作树没有新增文件。

@@ -3,29 +3,34 @@ XMAKE ?= xmake
 MODE ?= release
 XMAKE_CONFIG ?=
 
+# Preserve each value as one shell argument, including quotes and literal '$'.
+# Xmake, not the recipe shell, parses compiler/linker flag strings.
+sh_quote = '$(subst ','"'"',$(1))'
+
 # Do not let GNU Make's built-in CC=cc / AR=ar override an Xmake toolchain.
 ifneq ($(filter-out default undefined,$(origin CC)),)
-XMAKE_TOOLS += --cc="$(CC)" --ld="$(CC)"
+XMAKE_TOOLS += --cc=$(call sh_quote,$(CC)) --ld=$(call sh_quote,$(CC))
 endif
 ifneq ($(filter-out default undefined,$(origin AR)),)
-XMAKE_TOOLS += --ar="$(AR)"
+XMAKE_TOOLS += --ar=$(call sh_quote,$(AR))
 endif
 
 .PHONY: all configure test test-timer clean
 .NOTPARALLEL:
 
 all: configure
-	$(XMAKE) build --all
+	$(call sh_quote,$(XMAKE)) build --all
 
 configure:
-	$(XMAKE) f -y -m "$(MODE)" $(XMAKE_TOOLS) \
-		--cflags="$(CPPFLAGS) $(CFLAGS)" --ldflags="$(LDFLAGS)" $(XMAKE_CONFIG)
+	$(call sh_quote,$(XMAKE)) f -y -m $(call sh_quote,$(MODE)) $(XMAKE_TOOLS) \
+		--cflags=$(call sh_quote,$(CPPFLAGS) $(CFLAGS)) \
+		--ldflags=$(call sh_quote,$(LDFLAGS)) $(XMAKE_CONFIG)
 
 test: configure
-	$(XMAKE) test -v -j1
+	$(call sh_quote,$(XMAKE)) test -v -j1
 
 test-timer: configure
-	$(XMAKE) test -v -j1 'test_timer_queue/*'
+	$(call sh_quote,$(XMAKE)) test -v -j1 'test_timer_queue/*'
 
 clean:
-	$(XMAKE) clean --all
+	$(call sh_quote,$(XMAKE)) clean --all

@@ -87,21 +87,79 @@ jobs:
           make test-timer CC=gcc
           make clean
           make test CC=clang MODE=debug
-      - name: Install and link an external C11 consumer
+      - name: Quoted flags, tool path and literal ORIGIN
         run: |
+          set -euo pipefail
+          xmake f -c -y -m release --toolchain=gcc
+          probe_dir="$RUNNER_TEMP/flags probe's directory"
+          mkdir -p "$probe_dir"
+          probe_header="$probe_dir/config.h"
+          cat > "$probe_header" <<'C'
+          #ifndef TR_BUILD_LABEL
+          #error "CPPFLAGS was not forwarded"
+          #endif
+          _Static_assert(sizeof(TR_BUILD_LABEL) == sizeof("two words"),
+                         "quoted CPPFLAGS was split");
+          C
+          # Also exercise XMAKE as an executable path containing spaces/quotes.
+          printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v xmake)" > "$probe_dir/xmake"
+          chmod +x "$probe_dir/xmake"
+          make all test CC=gcc XMAKE="$probe_dir/xmake" \
+            CPPFLAGS="-DTR_BUILD_LABEL='\"two words\"'" \
+            CFLAGS="-include \"$probe_header\"" \
+            LDFLAGS='-Wl,-rpath,$$ORIGIN/compat-sdk'
+          readelf -d build/linux/x86_64/release/test_transport | grep -F '$ORIGIN/compat-sdk'
+      - name: Install, check public headers and run an external Reactor
+        run: |
+          set -euo pipefail
           xmake f -c -y -m release --toolchain=gcc
           xmake build trcore
-          prefix="$RUNNER_TEMP/trpc-sdk"
+          prefix="$RUNNER_TEMP/trpc sdk"
           xmake install -o "$prefix" trcore
           cat > "$RUNNER_TEMP/consumer.c" <<'C'
+          #include <tr/reactor.h>
           #include <tr/status.h>
           #include <string.h>
-          int main(void) { return strcmp(tr_status_str(TR_OK), "ok") != 0; }
+          int main(void)
+          {
+              struct tr_reactor_config config = {
+                  .max_connections = 2, .command_capacity = 32,
+                  .tx_item_capacity = 8, .control_tx_item_capacity = 4,
+                  .rx_buffer_count = 4, .rx_buffer_size = 4096,
+                  .max_payload_len = 4096,
+                  .rx_budget_bytes = 65536, .tx_budget_bytes = 65536
+              };
+              struct tr_reactor *reactor = NULL;
+              int ret;
+              if (strcmp(tr_status_str(TR_OK), "ok") != 0)
+                  return 1;
+              ret = tr_reactor_create(&config, NULL, NULL, NULL, &reactor);
+              if (ret != TR_OK)
+                  return 1;
+              ret = tr_reactor_start(reactor);
+              if (ret == TR_OK) {
+                  int stop_ret;
+                  ret = tr_reactor_quiesce(reactor);
+                  stop_ret = tr_reactor_stop(reactor);
+                  if (ret == TR_OK)
+                      ret = stop_ret;
+              }
+              tr_reactor_destroy(reactor);
+              return ret != TR_OK;
+          }
           C
-          gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
-            -I"$prefix/include" "$RUNNER_TEMP/consumer.c" \
-            -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer"
-          "$RUNNER_TEMP/consumer"
+          for cc in gcc clang; do
+            for header in "$prefix"/include/tr/*.h; do
+              printf '#include <tr/%s>\n' "$(basename "$header")" | \
+                "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+                -I"$prefix/include" -x c -fsyntax-only -
+            done
+            "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+              -I"$prefix/include" "$RUNNER_TEMP/consumer.c" \
+              -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer-$cc"
+            timeout 10s "$RUNNER_TEMP/consumer-$cc"
+            echo "$cc: installed headers and Reactor consumer passed"
+          done
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Echo examples as separate processes
         run: |
