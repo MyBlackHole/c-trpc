@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "tr/reactor.h"
 
+#include "reactor_internal.h"
 #include "tr/command_queue.h"
 #include "tr/crc32c.h"
 #include "tr/parser.h"
@@ -1222,6 +1223,12 @@ static void tr_process_quiesce(const struct tr_command *command)
 	tr_reactor_sync_complete(command->u.quiesce.sync, TR_OK);
 }
 
+static void tr_process_defer(const struct tr_command *command)
+{
+	if (command->u.defer.fn)
+		command->u.defer.fn(command->u.defer.arg);
+}
+
 static void tr_process_commands(struct tr_reactor *reactor)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
@@ -1264,6 +1271,9 @@ static void tr_process_commands(struct tr_reactor *reactor)
 				break;
 			case TR_CMD_QUIESCE:
 				tr_process_quiesce(command);
+				break;
+			case TR_CMD_DEFER:
+				tr_process_defer(command);
 				break;
 			case TR_CMD_STOP:
 				reactor->stopping = 1;
@@ -2022,6 +2032,40 @@ int tr_reactor_abort(struct tr_conn_handle connection, int status)
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_STALE;
 	}
+	ret = tr_reactor_push_locked(reactor, &command);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+	return ret;
+}
+
+int tr_reactor_post(struct tr_reactor *reactor, void (*fn)(void *arg),
+		    void *arg)
+{
+	struct tr_command command;
+	int ret;
+
+	if (!reactor || !fn)
+		return TR_ERR_INVALID;
+
+	/*
+	 * owner thread 内提交时直接执行，避免自唤醒并保持 owner-local 操作
+	 * 不经过共享 command queue。
+	 */
+	if (tr_reactor_is_owner_thread(reactor)) {
+		fn(arg);
+		return TR_OK;
+	}
+
+	memset(&command, 0, sizeof(command));
+	command.type = TR_CMD_DEFER;
+	command.u.defer.fn = fn;
+	command.u.defer.arg = arg;
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started || !reactor->accepting) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return TR_ERR_CLOSED;
+	}
+
 	ret = tr_reactor_push_locked(reactor, &command);
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return ret;
