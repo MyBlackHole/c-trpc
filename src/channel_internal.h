@@ -5,6 +5,9 @@
 
 struct tr_maintenance_scheduler;
 
+/* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
+struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
+
 /*
  * Server facade 使用 deferred create，先完成 RPC Endpoint/Method 安装，
  * 再启动 HELLO handshake，避免 peer 在服务层 ready 前发送 RPC 数据。
