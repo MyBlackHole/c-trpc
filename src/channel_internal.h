@@ -3,8 +3,6 @@
 
 #include "tr/channel.h"
 
-struct tr_maintenance_scheduler;
-
 /* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
 
@@ -23,9 +21,5 @@ int tr_channel_create_deferred(
 	struct tr_channel **out);
 
 int tr_channel_start(struct tr_channel *channel);
-
-int tr_channel_set_maintenance_scheduler(
-	struct tr_channel *channel,
-	struct tr_maintenance_scheduler *maintenance);
 
 #endif
