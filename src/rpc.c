@@ -9,7 +9,6 @@
 #include "rpc_internal.h"
 #include "channel_internal.h"
 #include "reactor_internal.h"
-#include "maintenance.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -210,13 +209,10 @@ TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 
 struct tr_rpc_endpoint {
 	pthread_mutex_t lock;
-	pthread_cond_t deadline_cond;
 	pthread_cond_t ref_cond;
-	pthread_t deadline_thread;
-	int deadline_started;
 	int deadline_stopping;
-	struct tr_maintenance_handle deadline_maintenance;
-	int deadline_maintenance_registered;
+	struct tr_reactor_timer_handle deadline_timer;
+	int deadline_timer_registered;
 
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint_config config;
@@ -2378,31 +2374,29 @@ tr_rpc_deadline_earliest_locked(const struct tr_rpc_endpoint *endpoint,
 }
 
 /*
- * endpoint->lock 必须已经持有。
- * Server Endpoint 使用 shared maintenance scheduler 时直接更新绝对 deadline；
- * standalone Endpoint 继续唤醒自己的 deadline thread。
+ * endpoint->lock 必须已经持有，并且调用方必须处于 Endpoint 所属 Reactor
+ * owner thread。Call deadline 的所有正常变更路径已经 owner 化，因此这里可
+ * 直接更新 Reactor-local timer，不再经过 shared maintenance/thread。
  */
 static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint)
 {
-	if (endpoint->deadline_stopping)
+	uint64_t earliest;
+
+	if (endpoint->deadline_stopping ||
+	    !endpoint->deadline_timer_registered)
 		return;
 
-	if (endpoint->deadline_maintenance_registered) {
-		uint64_t earliest =
-			tr_rpc_deadline_earliest_locked(endpoint, 0, NULL);
-		(void)tr_maintenance_arm(endpoint->deadline_maintenance,
-					 earliest);
-	} else if (endpoint->deadline_started) {
-		pthread_cond_signal(&endpoint->deadline_cond);
-	}
+	earliest = tr_rpc_deadline_earliest_locked(endpoint, 0, NULL);
+	(void)tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
 }
 
-static uint64_t tr_rpc_deadline_maintenance_main(void *arg, uint64_t now_ns)
+static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 	uint32_t expired_slot = UINT32_MAX;
 	uint64_t earliest;
 	struct tr_rpc_call_handle handle;
+	struct tr_rpc_cancel_request request;
 
 	if (now_ns == 0)
 		now_ns = tr_rpc_now_ns();
@@ -2422,133 +2416,73 @@ static uint64_t tr_rpc_deadline_maintenance_main(void *arg, uint64_t now_ns)
 
 	{
 		struct tr_rpc_call_slot *call = &endpoint->calls[expired_slot];
+
 		handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
+		/*
+		 * 先从 deadline scan 中移除，避免 cancellation 失败时同一
+		 * owner turn 反复命中。cancel_on_owner() 会重新计算下一条。
+		 */
 		call->deadline_ns = 0;
 	}
 	pthread_mutex_unlock(&endpoint->lock);
 
 	/*
-	 * cancel_internal() 会重新计算并 arm 下一条 deadline。
-	 * scheduler entry 正在 running 时，arm() 通过 version 防止 callback
-	 * 返回值覆盖并发更新后的 deadline。
+	 * Timer callback 本身就在 Reactor owner thread，直接调用 owner
+	 * implementation，避免再走同步 owner-call。cancel_on_owner() 内部的
+	 * deadline_changed_locked() 会显式 re-arm；timer queue 的 version
+	 * 规则保证该显式 arm 不会被本 callback 的返回值覆盖。
 	 */
-	(void)tr_rpc_cancel_internal(handle,
-				    TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	request.handle = handle;
+	request.status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
+	(void)tr_rpc_cancel_on_owner(&request);
 	return 0;
-}
-
-static void *tr_rpc_deadline_main(void *arg)
-{
-	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
-
-	pthread_mutex_lock(&endpoint->lock);
-	while (!endpoint->deadline_stopping) {
-		uint64_t now = tr_rpc_now_ns();
-		uint64_t earliest;
-		uint32_t expired_slot = UINT32_MAX;
-
-		earliest = tr_rpc_deadline_earliest_locked(endpoint, now,
-							   &expired_slot);
-		if (expired_slot != UINT32_MAX) {
-			struct tr_rpc_call_slot *call =
-				&endpoint->calls[expired_slot];
-			struct tr_rpc_call_handle handle =
-				tr_rpc_make_call_handle(endpoint, expired_slot,
-							call);
-			call->deadline_ns = 0;
-			pthread_mutex_unlock(&endpoint->lock);
-			(void)tr_rpc_cancel_internal(
-				handle, TR_RPC_STATUS_DEADLINE_EXCEEDED);
-			pthread_mutex_lock(&endpoint->lock);
-			continue;
-		}
-
-		if (earliest == 0) {
-			pthread_cond_wait(&endpoint->deadline_cond,
-					  &endpoint->lock);
-		} else {
-			struct timespec ts;
-			ts.tv_sec = (time_t)(earliest / UINT64_C(1000000000));
-			ts.tv_nsec = (long)(earliest % UINT64_C(1000000000));
-			(void)pthread_cond_timedwait(&endpoint->deadline_cond,
-						     &endpoint->lock, &ts);
-		}
-	}
-	pthread_mutex_unlock(&endpoint->lock);
-	return NULL;
 }
 
 static int
 tr_rpc_deadline_init(struct tr_rpc_endpoint *endpoint,
 		     struct tr_maintenance_scheduler *maintenance)
 {
-	pthread_condattr_t attr;
+	struct tr_reactor *reactor;
 	int ret;
 
+	/*
+	 * maintenance 参数暂时保留在 internal create API 中，Channel
+	 * keepalive/reconnect 仍在分阶段迁移；RPC deadline 已不再使用它。
+	 */
+	(void)maintenance;
+
+	reactor = tr_channel_reactor(endpoint->channel);
+	if (!reactor)
+		return TR_ERR_STATE;
+
 	endpoint->deadline_stopping = 0;
-	if (maintenance) {
-		ret = tr_maintenance_register(
-			maintenance, tr_rpc_deadline_maintenance_main,
-			endpoint, &endpoint->deadline_maintenance);
-		if (ret != TR_OK)
-			return ret;
-		endpoint->deadline_maintenance_registered = 1;
-		return TR_OK;
-	}
-
-	if (pthread_condattr_init(&attr) != 0)
-		return TR_ERR_SYS;
-	ret = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
-	if (ret != 0) {
-		pthread_condattr_destroy(&attr);
-		return TR_ERR_SYS;
-	}
-	if (pthread_cond_init(&endpoint->deadline_cond, &attr) != 0) {
-		pthread_condattr_destroy(&attr);
-		return TR_ERR_SYS;
-	}
-	pthread_condattr_destroy(&attr);
-
-	if (pthread_create(&endpoint->deadline_thread, NULL,
-			   tr_rpc_deadline_main, endpoint) != 0) {
-		pthread_cond_destroy(&endpoint->deadline_cond);
-		return TR_ERR_SYS;
-	}
-	endpoint->deadline_started = 1;
+	ret = tr_reactor_timer_register(reactor, tr_rpc_deadline_timer_main,
+					 endpoint, &endpoint->deadline_timer);
+	if (ret != TR_OK)
+		return ret;
+	endpoint->deadline_timer_registered = 1;
 	return TR_OK;
 }
 
 static void tr_rpc_deadline_destroy(struct tr_rpc_endpoint *endpoint)
 {
-	if (endpoint->deadline_maintenance_registered) {
-		struct tr_maintenance_handle handle;
+	struct tr_reactor_timer_handle timer;
 
-		pthread_mutex_lock(&endpoint->lock);
-		endpoint->deadline_stopping = 1;
-		handle = endpoint->deadline_maintenance;
-		endpoint->deadline_maintenance_registered = 0;
-		memset(&endpoint->deadline_maintenance, 0,
-		       sizeof(endpoint->deadline_maintenance));
-		pthread_mutex_unlock(&endpoint->lock);
-
-		/*
-		 * 先在 Endpoint 内部禁止 re-arm，再等待 scheduler callback
-		 * 退出，避免 teardown 与仍在运行的 executor task 互相重新激活。
-		 */
-		(void)tr_maintenance_unregister(handle);
-		return;
-	}
-
-	if (!endpoint->deadline_started)
+	if (!endpoint->deadline_timer_registered)
 		return;
 
 	pthread_mutex_lock(&endpoint->lock);
 	endpoint->deadline_stopping = 1;
-	pthread_cond_broadcast(&endpoint->deadline_cond);
+	timer = endpoint->deadline_timer;
+	endpoint->deadline_timer_registered = 0;
+	memset(&endpoint->deadline_timer, 0, sizeof(endpoint->deadline_timer));
 	pthread_mutex_unlock(&endpoint->lock);
-	(void)pthread_join(endpoint->deadline_thread, NULL);
-	endpoint->deadline_started = 0;
-	pthread_cond_destroy(&endpoint->deadline_cond);
+
+	/*
+	 * unregister 是 owner-serialized 的同步 barrier：返回后 timer callback
+	 * 不会再取得 Endpoint，从而允许后续 executor/ref teardown 安全释放。
+	 */
+	(void)tr_reactor_timer_unregister(timer);
 }
 
 static enum tr_stream_data_disposition
@@ -4043,13 +3977,11 @@ int tr_rpc_message_release(struct tr_rpc_message *message)
 	return ret;
 }
 
-int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint)
+static int tr_rpc_endpoint_flush_on_owner(void *arg)
 {
+	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 	uint32_t i;
 	int result;
-
-	if (!endpoint)
-		return TR_ERR_INVALID;
 
 	result = tr_channel_flush(endpoint->channel);
 
@@ -4080,6 +4012,14 @@ int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint)
 	}
 	pthread_mutex_unlock(&endpoint->lock);
 	return result;
+}
+
+int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint)
+{
+	if (!endpoint)
+		return TR_ERR_INVALID;
+	return tr_rpc_owner_call(endpoint, tr_rpc_endpoint_flush_on_owner,
+				 endpoint);
 }
 
 int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,

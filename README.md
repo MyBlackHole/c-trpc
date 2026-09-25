@@ -455,10 +455,10 @@ tr_rpc_call_is_cancelled(call, &status);
 ```
 
 RPC deadlines use `CLOCK_MONOTONIC` and scan the bounded Call table.
-Low-level standalone RPC Endpoint keeps the original private deadline thread for
-backward compatibility. High-level Client/Server facades register Endpoint
-deadlines on their runtime-owned shared maintenance scheduler; Server deadline
-thread count therefore no longer grows with peer count.
+Each RPC Endpoint registers one timer in its owning Reactor; standalone and
+high-level Client/Server endpoints use the same owner-local deadline path.
+There is no per-Endpoint deadline thread and RPC deadlines no longer use the
+shared maintenance scheduler.
 
 Initial metadata is a bounded TLV side channel:
 
@@ -654,8 +654,8 @@ RPC:
 - multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
 - high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
 - shared maintenance scheduler callback re-arm/unregister semantics
-- high-level Client deadline + keepalive share one runtime maintenance thread
-- four Server peers with deadline + keepalive maintenance do not create per-peer timer threads
+- RPC Endpoint deadlines run on Reactor-local timers without per-Endpoint timer threads
+- high-level Client/Server deadline handling no longer consumes shared maintenance scheduler entries
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
@@ -702,7 +702,7 @@ Current build validation passes:
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed on the shared timer scheduler
 - server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
-- standalone low-level Channel/RPC Endpoint may use private timer threads; high-level Client/Server facades share one monotonic maintenance scheduler per runtime for deadline and keepalive work
+- RPC Endpoint deadlines are Reactor-local; standalone Channel keepalive and high-level Channel maintenance still use transitional private/shared maintenance paths until their owner-timer migration
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
 
 ## Build

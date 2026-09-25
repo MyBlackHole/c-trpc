@@ -140,9 +140,10 @@ Client library 必须保持嵌入友好：
 
 ## 6. Timer
 
-CURRENT 的 RPC deadline / keepalive 仍由 shared maintenance scheduler 承载。
+CURRENT：RPC deadline 已迁移到 Reactor-local timer；Channel keepalive 与
+reconnect/backoff 仍处于 shared/private maintenance 过渡实现。
 
-Reactor-local timer 基础设施已经进入实现阶段：
+Reactor-local timer 基础设施已经落地：
 
 - 每 Reactor 一个 bounded timer queue；
 - generation handle 防止 stale timer 操作；
@@ -163,6 +164,7 @@ Reactor shard
   └─ checkpoint timer
 ```
 
-迁移按 consumer 分步进行。在 RPC deadline、keepalive 和 reconnect 全部迁移前，
-shared maintenance / legacy timer thread 仍作为兼容路径保留；不允许为了迁移一次性
-同时改动 Multi-Reactor 和 Channel connection-group 语义。
+迁移按 consumer 分步进行。RPC Endpoint 每个只占用一个 Reactor-local timer，
+内部扫描 bounded Call table，不按 Call 创建 timer。keepalive 和 reconnect 尚未
+迁移，因此 shared maintenance / legacy reconnect thread 暂时保留；不允许为了迁移
+一次性同时改动 Multi-Reactor 和 Channel connection-group 语义。
