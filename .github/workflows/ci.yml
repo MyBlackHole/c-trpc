@@ -11,48 +11,95 @@ on:
 permissions:
   contents: read
 
+env:
+  XMAKE_VERSION: '3.1.1'
+
 jobs:
   build-test:
     name: build-test (${{ matrix.cc }})
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test debug + release
         run: |
-          make clean
-          make test CC=${{ matrix.cc }}
+          for mode in debug release; do
+            xmake f -c -y -m "$mode" --toolchain=${{ matrix.cc }}
+            xmake build --all -v
+            xmake test -v -j1
+          done
 
   asan-ubsan:
     name: ASan + UBSan
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
-          make clean
-          make test \
-            CC=gcc \
-            CFLAGS="-O1 -g -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -pthread -fsanitize=address,undefined -fno-omit-frame-pointer" \
-            LDFLAGS="-pthread -fsanitize=address,undefined"
+          xmake f -c -y -m asan --toolchain=gcc
+          xmake build --all -v
+          xmake test -v -j1
 
   tsan:
     name: ThreadSanitizer
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: |
+          xmake f -c -y -m tsan --toolchain=gcc
+          xmake build --all -v
+          xmake test -v -j1
+
+  build-smoke:
+    name: Make compatibility + install
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Compatibility entry points and compiler switch
+        run: |
+          make all CC=gcc
+          make test CC=gcc
+          make test-timer CC=gcc
           make clean
-          make test \
-            CC=gcc \
-            CFLAGS="-O1 -g -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -pthread -fsanitize=thread -fno-omit-frame-pointer" \
-            LDFLAGS="-pthread -fsanitize=thread"
+          make test CC=clang MODE=debug
+      - name: Install and link an external C11 consumer
+        run: |
+          xmake f -c -y -m release --toolchain=gcc
+          xmake build trcore
+          prefix="$RUNNER_TEMP/trpc-sdk"
+          xmake install -o "$prefix" trcore
+          cat > "$RUNNER_TEMP/consumer.c" <<'C'
+          #include <tr/status.h>
+          #include <string.h>
+          int main(void) { return strcmp(tr_status_str(TR_OK), "ok") != 0; }
+          C
+          gcc -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+            -I"$prefix/include" "$RUNNER_TEMP/consumer.c" \
+            -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer"
+          "$RUNNER_TEMP/consumer"
+          test -z "$(git status --porcelain --untracked-files=all)"
