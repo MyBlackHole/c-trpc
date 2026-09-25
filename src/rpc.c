@@ -1217,18 +1217,18 @@ static void tr_rpc_apply_unary_completion(void *arg)
 	}
 }
 
-static int tr_rpc_post_unary_completion(
+static int tr_rpc_prepare_unary_completion(
 	struct tr_rpc_endpoint *endpoint, const struct tr_rpc_task *task,
-	int status, const struct tr_rpc_bytes *response)
+	int status, const struct tr_rpc_bytes *response,
+	struct tr_rpc_unary_completion **out)
 {
 	struct tr_rpc_unary_completion *completion;
-	struct tr_reactor *reactor;
 	size_t size;
-	int ret;
 
-	if (!endpoint || !task || !response ||
+	if (!endpoint || !task || !response || !out ||
 	    (response->len != 0 && !response->data))
 		return TR_ERR_INVALID;
+	*out = NULL;
 #if SIZE_MAX <= UINT32_MAX
 	if (response->len > (uint32_t)(SIZE_MAX - sizeof(*completion)))
 		return TR_ERR_BAD_LENGTH;
@@ -1246,12 +1246,22 @@ static int tr_rpc_post_unary_completion(
 	if (response->len)
 		memcpy(completion->response, response->data, response->len);
 
+	*out = completion;
+	return TR_OK;
+}
+
+static int tr_rpc_submit_unary_completion(
+	struct tr_rpc_endpoint *endpoint,
+	struct tr_rpc_unary_completion *completion)
+{
+	struct tr_reactor *reactor;
+
+	if (!endpoint || !completion)
+		return TR_ERR_INVALID;
+
 	reactor = tr_channel_reactor(endpoint->channel);
-	ret = tr_reactor_post(reactor, tr_rpc_apply_unary_completion,
-			      completion);
-	if (ret != TR_OK)
-		free(completion);
-	return ret;
+	return tr_reactor_post(reactor, tr_rpc_apply_unary_completion,
+			       completion);
 }
 
 static int tr_rpc_executor_run_server_unary(
@@ -1261,6 +1271,7 @@ static int tr_rpc_executor_run_server_unary(
 	struct tr_rpc_wire_header wire;
 	struct tr_rpc_unary_response response;
 	struct tr_rpc_bytes completion_response;
+	struct tr_rpc_unary_completion *completion = NULL;
 	tr_rpc_unary_handler handler = task->u.server_unary.handler;
 	int ret;
 	int deferred = 0;
@@ -1288,14 +1299,18 @@ static int tr_rpc_executor_run_server_unary(
 	}
 
 	completion_response = response.message;
-	ret = tr_rpc_post_unary_completion(endpoint, task, response.status,
-					   &completion_response);
-	if (ret == TR_OK)
-		deferred = 1;
-	else
-		(void)tr_stream_close(task->u.server_unary.stream);
+	ret = tr_rpc_prepare_unary_completion(
+		endpoint, task, response.status, &completion_response,
+		&completion);
+	if (ret != TR_OK)
+		goto out;
 
 out:
+	/*
+	 * 先结束 worker 对 request payload 的所有访问，再提交会释放 task
+	 * strong-ref 的 completion。否则 Reactor 可能先执行 completion，
+	 * teardown 随后越过仍在归还 RX buffer 的 worker。
+	 */
 	if (task->payload) {
 		if (task->u.server_unary.stream.channel)
 			(void)tr_stream_release_payload(
@@ -1303,6 +1318,18 @@ out:
 				tr_buffer_take(&task->payload));
 		else
 			tr_buffer_release(tr_buffer_take(&task->payload));
+	}
+
+	if (completion) {
+		ret = tr_rpc_submit_unary_completion(endpoint, completion);
+		if (ret == TR_OK) {
+			deferred = 1;
+			completion = NULL;
+		} else {
+			free(completion);
+			completion = NULL;
+			(void)tr_stream_close(task->u.server_unary.stream);
+		}
 	}
 	return deferred;
 }
