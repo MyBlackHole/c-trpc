@@ -428,7 +428,8 @@ static int tr_rpc_metadata_validate_raw(const uint8_t *data, uint16_t len)
 static int
 tr_rpc_apply_options_locked(struct tr_rpc_endpoint *endpoint,
 			    struct tr_rpc_call_slot *call,
-			    const struct tr_rpc_call_options *options)
+			    const struct tr_rpc_call_options *options,
+			    uint64_t deadline_ns)
 {
 	uint16_t i;
 	int ret;
@@ -455,8 +456,7 @@ tr_rpc_apply_options_locked(struct tr_rpc_endpoint *endpoint,
 			    TR_RPC_DEADLINE_METADATA_BYTES >
 		    TR_RPC_METADATA_MAX_BYTES)
 			return TR_ERR_BAD_LENGTH;
-		call->deadline_ns =
-			tr_rpc_timeout_deadline_ns(options->timeout_ms);
+		call->deadline_ns = deadline_ns;
 		if (call->deadline_ns == 0)
 			return TR_ERR_SYS;
 		tr_rpc_deadline_changed_locked(endpoint);
@@ -3306,30 +3306,39 @@ int tr_rpc_register_stream_method(struct tr_rpc_endpoint *endpoint,
 					       handlers, handler_arg);
 }
 
-int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
-			 uint32_t method_id, const struct tr_rpc_bytes *request,
-			 const struct tr_rpc_call_options *options,
-			 tr_rpc_unary_result_cb result_cb, void *result_arg,
-			 struct tr_rpc_call_handle *out)
+struct tr_rpc_unary_call_owner_request {
+	struct tr_rpc_endpoint *endpoint;
+	uint32_t service_id;
+	uint32_t method_id;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_call_options options;
+	int has_options;
+	uint64_t deadline_ns;
+	tr_rpc_unary_result_cb result_cb;
+	void *result_arg;
+	struct tr_rpc_call_handle *out;
+};
+
+static int tr_rpc_unary_call_on_owner(void *arg)
 {
+	struct tr_rpc_unary_call_owner_request *request =
+		(struct tr_rpc_unary_call_owner_request *)arg;
+	struct tr_rpc_endpoint *endpoint = request->endpoint;
 	struct tr_rpc_method_entry *method;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_call_handle handle;
 	struct tr_buffer *request_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+	const struct tr_rpc_call_options *options =
+		request->has_options ? &request->options : NULL;
 	uint32_t slot;
 	int ret;
 
-	if (!endpoint || !request || !out ||
-	    endpoint->config.role != TR_RPC_CLIENT ||
-	    (request->len != 0 && !request->data) ||
-	    (options && options->metadata_count != 0 && !options->metadata))
-		return TR_ERR_INVALID;
-
 	pthread_mutex_lock(&endpoint->lock);
-	method = tr_rpc_find_method_locked(endpoint, service_id, method_id);
+	method = tr_rpc_find_method_locked(endpoint, request->service_id,
+					   request->method_id);
 	if (!method || method->desc.request_cardinality != TR_RPC_ONE ||
 	    method->desc.response_cardinality != TR_RPC_ONE ||
-	    request->len > method->desc.max_request_bytes) {
+	    request->request.len > method->desc.max_request_bytes) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_ERR_INVALID;
 	}
@@ -3343,10 +3352,11 @@ int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 	call->state = TR_RPC_CALL_OPENING;
 	call->method = method;
 	call->is_unary = 1;
-	call->result_cb = result_cb;
-	call->result_arg = result_arg;
+	call->result_cb = request->result_cb;
+	call->result_arg = request->result_arg;
 
-	ret = tr_rpc_apply_options_locked(endpoint, call, options);
+	ret = tr_rpc_apply_options_locked(endpoint, call, options,
+					  request->deadline_ns);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(call);
 		pthread_mutex_unlock(&endpoint->lock);
@@ -3356,7 +3366,8 @@ int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_REQUEST,
 				    &method->desc,
 				    method->desc.request_codec_id,
-				    TR_RPC_STATUS_OK, request, &request_buffer);
+				    TR_RPC_STATUS_OK, &request->request,
+				    &request_buffer);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(call);
 		pthread_mutex_unlock(&endpoint->lock);
@@ -3373,9 +3384,43 @@ int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		return ret;
 	}
 
-	*out = handle;
+	*request->out = handle;
 	pthread_mutex_unlock(&endpoint->lock);
 	return TR_OK;
+}
+
+int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
+			 uint32_t method_id, const struct tr_rpc_bytes *request,
+			 const struct tr_rpc_call_options *options,
+			 tr_rpc_unary_result_cb result_cb, void *result_arg,
+			 struct tr_rpc_call_handle *out)
+{
+	struct tr_rpc_unary_call_owner_request owner_request;
+
+	if (!endpoint || !request || !out ||
+	    endpoint->config.role != TR_RPC_CLIENT ||
+	    (request->len != 0 && !request->data) ||
+	    (options && options->metadata_count != 0 && !options->metadata))
+		return TR_ERR_INVALID;
+
+	memset(&owner_request, 0, sizeof(owner_request));
+	owner_request.endpoint = endpoint;
+	owner_request.service_id = service_id;
+	owner_request.method_id = method_id;
+	owner_request.request = *request;
+	owner_request.result_cb = result_cb;
+	owner_request.result_arg = result_arg;
+	owner_request.out = out;
+	if (options) {
+		owner_request.options = *options;
+		owner_request.has_options = 1;
+		if (options->timeout_ms)
+			owner_request.deadline_ns =
+				tr_rpc_timeout_deadline_ns(options->timeout_ms);
+	}
+
+	return tr_rpc_owner_call(endpoint, tr_rpc_unary_call_on_owner,
+				 &owner_request);
 }
 
 int tr_rpc_unary_call(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
@@ -3387,24 +3432,34 @@ int tr_rpc_unary_call(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 				    NULL, result_cb, result_arg, out);
 }
 
-int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
-			 uint32_t method_id,
-			 const struct tr_rpc_call_options *options,
-			 const struct tr_rpc_call_callbacks *callbacks,
-			 struct tr_rpc_call_handle *out)
+struct tr_rpc_call_start_owner_request {
+	struct tr_rpc_endpoint *endpoint;
+	uint32_t service_id;
+	uint32_t method_id;
+	struct tr_rpc_call_options options;
+	int has_options;
+	uint64_t deadline_ns;
+	struct tr_rpc_call_callbacks callbacks;
+	int has_callbacks;
+	struct tr_rpc_call_handle *out;
+};
+
+static int tr_rpc_call_start_on_owner(void *arg)
 {
+	struct tr_rpc_call_start_owner_request *request =
+		(struct tr_rpc_call_start_owner_request *)arg;
+	struct tr_rpc_endpoint *endpoint = request->endpoint;
 	struct tr_rpc_method_entry *method;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_call_handle handle;
+	const struct tr_rpc_call_options *options =
+		request->has_options ? &request->options : NULL;
 	uint32_t slot;
 	int ret;
 
-	if (!endpoint || !out || endpoint->config.role != TR_RPC_CLIENT ||
-	    (options && options->metadata_count != 0 && !options->metadata))
-		return TR_ERR_INVALID;
-
 	pthread_mutex_lock(&endpoint->lock);
-	method = tr_rpc_find_method_locked(endpoint, service_id, method_id);
+	method = tr_rpc_find_method_locked(endpoint, request->service_id,
+					   request->method_id);
 	if (!method) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_ERR_INVALID;
@@ -3419,10 +3474,11 @@ int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 	call->state = TR_RPC_CALL_OPENING;
 	call->method = method;
 	call->is_unary = 0;
-	if (callbacks)
-		call->callbacks = *callbacks;
+	if (request->has_callbacks)
+		call->callbacks = request->callbacks;
 
-	ret = tr_rpc_apply_options_locked(endpoint, call, options);
+	ret = tr_rpc_apply_options_locked(endpoint, call, options,
+					  request->deadline_ns);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(call);
 		pthread_mutex_unlock(&endpoint->lock);
@@ -3438,9 +3494,42 @@ int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		return ret;
 	}
 
-	*out = handle;
+	*request->out = handle;
 	pthread_mutex_unlock(&endpoint->lock);
 	return TR_OK;
+}
+
+int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
+			 uint32_t method_id,
+			 const struct tr_rpc_call_options *options,
+			 const struct tr_rpc_call_callbacks *callbacks,
+			 struct tr_rpc_call_handle *out)
+{
+	struct tr_rpc_call_start_owner_request owner_request;
+
+	if (!endpoint || !out || endpoint->config.role != TR_RPC_CLIENT ||
+	    (options && options->metadata_count != 0 && !options->metadata))
+		return TR_ERR_INVALID;
+
+	memset(&owner_request, 0, sizeof(owner_request));
+	owner_request.endpoint = endpoint;
+	owner_request.service_id = service_id;
+	owner_request.method_id = method_id;
+	owner_request.out = out;
+	if (options) {
+		owner_request.options = *options;
+		owner_request.has_options = 1;
+		if (options->timeout_ms)
+			owner_request.deadline_ns =
+				tr_rpc_timeout_deadline_ns(options->timeout_ms);
+	}
+	if (callbacks) {
+		owner_request.callbacks = *callbacks;
+		owner_request.has_callbacks = 1;
+	}
+
+	return tr_rpc_owner_call(endpoint, tr_rpc_call_start_on_owner,
+				 &owner_request);
 }
 
 int tr_rpc_call_start(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
