@@ -17,6 +17,8 @@
 #include "tr/status.h"
 #include "tr/wire.h"
 #include "../src/maintenance.h"
+#include "../src/reactor_internal.h"
+#include "../src/timer_queue.h"
 
 #include <assert.h>
 #include <dirent.h>
@@ -445,6 +447,158 @@ static void test_command_queue_bounded(void)
 	assert(tr_command_queue_pop_batch(&queue, out, 2) == 1);
 
 	tr_command_queue_destroy(&queue);
+}
+
+
+struct timer_queue_test_ctx {
+	unsigned fired;
+	uint64_t next_deadline_ns;
+};
+
+static uint64_t timer_queue_test_cb(void *arg, uint64_t now_ns)
+{
+	struct timer_queue_test_ctx *ctx =
+		(struct timer_queue_test_ctx *)arg;
+
+	(void)now_ns;
+	ctx->fired++;
+	return ctx->next_deadline_ns;
+}
+
+static void test_timer_queue_min_heap(void)
+{
+	struct tr_timer_queue queue;
+	struct tr_timer_token first;
+	struct tr_timer_token second;
+	struct tr_timer_token recycled;
+	struct tr_timer_token extra;
+	struct timer_queue_test_ctx first_ctx;
+	struct timer_queue_test_ctx second_ctx;
+	int has_more = -1;
+
+	memset(&queue, 0, sizeof(queue));
+	memset(&first_ctx, 0, sizeof(first_ctx));
+	memset(&second_ctx, 0, sizeof(second_ctx));
+
+	assert(tr_timer_queue_init(&queue, 2U) == TR_OK);
+	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
+				       &first_ctx, &first) == TR_OK);
+	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
+				       &second_ctx, &second) == TR_OK);
+	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
+				       &second_ctx, &extra) == TR_AGAIN);
+
+	first_ctx.next_deadline_ns = 300U;
+	assert(tr_timer_queue_arm(&queue, first, 200U) == TR_OK);
+	assert(tr_timer_queue_arm(&queue, second, 100U) == TR_OK);
+	assert(tr_timer_queue_next_deadline(&queue) == 100U);
+
+	assert(tr_timer_queue_run_due(&queue, 99U, 1U, &has_more) == 0U);
+	assert(has_more == 0);
+	assert(first_ctx.fired == 0U);
+	assert(second_ctx.fired == 0U);
+
+	assert(tr_timer_queue_run_due(&queue, 100U, 1U, &has_more) == 1U);
+	assert(has_more == 0);
+	assert(second_ctx.fired == 1U);
+	assert(tr_timer_queue_next_deadline(&queue) == 200U);
+
+	assert(tr_timer_queue_run_due(&queue, 200U, 1U, &has_more) == 1U);
+	assert(has_more == 0);
+	assert(first_ctx.fired == 1U);
+	assert(tr_timer_queue_next_deadline(&queue) == 300U);
+
+	assert(tr_timer_queue_arm(&queue, first, 0U) == TR_OK);
+	assert(tr_timer_queue_next_deadline(&queue) == 0U);
+
+	assert(tr_timer_queue_unregister(&queue, first) == TR_OK);
+	assert(tr_timer_queue_arm(&queue, first, 400U) == TR_ERR_STALE);
+	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
+				       &first_ctx, &recycled) == TR_OK);
+	assert(recycled.slot == first.slot);
+	assert(recycled.generation != first.generation);
+
+	assert(tr_timer_queue_unregister(&queue, second) == TR_OK);
+	assert(tr_timer_queue_unregister(&queue, recycled) == TR_OK);
+	tr_timer_queue_destroy(&queue);
+}
+
+struct reactor_timer_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned fired;
+};
+
+static uint64_t reactor_timer_test_cb(void *arg, uint64_t now_ns)
+{
+	struct reactor_timer_test_ctx *ctx =
+		(struct reactor_timer_test_ctx *)arg;
+
+	(void)now_ns;
+	pthread_mutex_lock(&ctx->lock);
+	ctx->fired++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return 0;
+}
+
+static uint64_t test_monotonic_now_ns(void)
+{
+	struct timespec now;
+
+	assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+	return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)now.tv_nsec;
+}
+
+static void test_reactor_local_timer_loop(void)
+{
+	struct tr_reactor_config config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_reactor_timer_handle timer;
+	struct reactor_timer_test_ctx ctx;
+	struct timespec wait_deadline;
+	int ret = 0;
+
+	memset(&config, 0, sizeof(config));
+	config.max_connections = 2U;
+	config.command_capacity = 32U;
+	config.tx_item_capacity = 8U;
+	config.control_tx_item_capacity = 4U;
+	config.rx_buffer_count = 4U;
+	config.rx_buffer_size = 4096U;
+	config.max_payload_len = 4096U;
+	config.rx_budget_bytes = 64U * 1024U;
+	config.tx_budget_bytes = 64U * 1024U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_timer_register(reactor, reactor_timer_test_cb,
+					 &ctx, &timer) == TR_OK);
+	assert(tr_reactor_timer_arm(
+		       timer,
+		       test_monotonic_now_ns() + UINT64_C(20000000)) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &wait_deadline) == 0);
+	wait_deadline.tv_sec += 2;
+
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.fired == 0U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock,
+					     &wait_deadline);
+	assert(ret == 0);
+	assert(ctx.fired == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_reactor_timer_unregister(timer) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
 }
 
 static void make_tcp_pair(int *client_fd, int *server_fd)
@@ -4815,6 +4969,8 @@ int main(void)
 	test_zero_payload_control_frame();
 	test_invalid_flags_and_reserved();
 	test_command_queue_bounded();
+	test_timer_queue_min_heap();
+	test_reactor_local_timer_loop();
 	test_reactor_tcp_roundtrip();
 	test_reactor_handler_update_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
