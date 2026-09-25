@@ -189,3 +189,13 @@ jobs:
           if [ -z "$port" ]; then cat "$server_log"; exit 1; fi
           timeout 20s xmake run echo_client 127.0.0.1 "$port" xmake-smoke | tee "$RUNNER_TEMP/echo-client.log"
           grep -Fx 'response: xmake-smoke' "$RUNNER_TEMP/echo-client.log"
+      - name: Preserve smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-smoke-logs
+          path: |
+            ${{ runner.temp }}/make-compat.log
+            ${{ runner.temp }}/quoted-build.log
+          if-no-files-found: ignore
+          retention-days: 7
