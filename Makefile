@@ -4,7 +4,7 @@ MODE ?= release
 XMAKE_CONFIG ?=
 
 # Preserve each value as one shell argument, including quotes and literal '$'.
-# Xmake, not the recipe shell, parses compiler/linker flag strings.
+# xmake.lua parses compiler/linker flags once into an atomic argument group.
 sh_quote = '$(subst ','"'"',$(1))'
 
 # Do not let GNU Make's built-in CC=cc / AR=ar override an Xmake toolchain.
@@ -23,8 +23,9 @@ all: configure
 
 configure:
 	$(call sh_quote,$(XMAKE)) f -y -m $(call sh_quote,$(MODE)) $(XMAKE_TOOLS) \
-		--cflags=$(call sh_quote,$(CPPFLAGS) $(CFLAGS)) \
-		--ldflags=$(call sh_quote,$(LDFLAGS)) $(XMAKE_CONFIG)
+		--cflags= --ldflags= \
+		--make_cflags=$(call sh_quote,$(CPPFLAGS) $(CFLAGS)) \
+		--make_ldflags=$(call sh_quote,$(LDFLAGS)) $(XMAKE_CONFIG)
 
 test: configure
 	$(call sh_quote,$(XMAKE)) test -v -j1

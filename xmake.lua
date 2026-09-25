@@ -10,6 +10,24 @@ set_symbols("debug")
 add_cflags("-pedantic", "-pthread", {force = true})
 add_ldflags("-pthread", {force = true})
 
+-- Private Make bridge: parse quoted flags once and preserve them as a group.
+-- Xmake 3.1.1 reparses native --cflags/--ldflags entries containing spaces.
+for _, kind in ipairs({"cflags", "ldflags"}) do
+    option("make_" .. kind)
+        set_default("")
+        set_showmenu(false)
+    option_end()
+end
+
+local make_cflags = get_config("make_cflags")
+if make_cflags and #make_cflags > 0 then
+    add_cflags(os.argv(make_cflags), {force = true})
+end
+local make_ldflags = get_config("make_ldflags")
+if make_ldflags and #make_ldflags > 0 then
+    add_ldflags(os.argv(make_ldflags), {force = true})
+end
+
 -- Preserve the Make build's -O2 -g and enabled assertions in release mode.
 -- In particular, assert() contains test operations, not just result checks.
 if is_mode("debug") then
