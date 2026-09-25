@@ -296,7 +296,7 @@ Shared-connection mode emits one probe for the shared TCP connection; split
 mode tracks CONTROL and BULK independently. Every Channel registers one
 initially-disarmed keepalive timer in its owning Reactor; standalone and
 high-level Client/Server Channels use the same owner-local path. Keepalive no
-longer creates a private thread or consumes the shared maintenance scheduler.
+longer creates a private timer thread; scheduling stays inside the Reactor.
 
 ### Metrics / diagnostics
 
@@ -343,7 +343,7 @@ TCP connection #1
        v
 Channel remains alive
        |
-       +--> client: optional connect/backoff maintenance thread
+       +--> client: optional connect/backoff reconnect thread
        |       or
        +--> server: application accepts a replacement socket
        |
@@ -379,7 +379,7 @@ struct tr_channel_reconnect_config cfg = {
 tr_channel_enable_client_reconnect(channel, &cfg);
 ```
 
-The V1 maintenance thread performs only low-rate connect/backoff work. Once a
+The V1 reconnect thread performs only low-rate connect/poll/backoff work. Once a
 socket is adopted, normal RX/TX remains owned by the epoll Reactor. Shared mode
 reconnects one physical connection for both lanes; split mode reconnects each
 failed lane independently.
@@ -457,8 +457,7 @@ tr_rpc_call_is_cancelled(call, &status);
 RPC deadlines use `CLOCK_MONOTONIC` and scan the bounded Call table.
 Each RPC Endpoint registers one timer in its owning Reactor; standalone and
 high-level Client/Server endpoints use the same owner-local deadline path.
-There is no per-Endpoint deadline thread and RPC deadlines no longer use the
-shared maintenance scheduler.
+There is no per-Endpoint deadline thread; scheduling is entirely Reactor-local.
 
 Initial metadata is a bounded TLV side channel:
 
@@ -653,9 +652,8 @@ RPC:
 - service-side completion when the peer was already half-closed
 - multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
 - high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
-- shared maintenance scheduler callback re-arm/unregister semantics
 - RPC Endpoint deadlines run on Reactor-local timers without per-Endpoint timer threads
-- Channel keepalive runs on Reactor-local timers without private/shared maintenance timer work
+- Channel keepalive runs on Reactor-local timers without a private timer thread
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
