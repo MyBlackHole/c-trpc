@@ -1384,7 +1384,7 @@ static int tr_rpc_defer_task_completion(
 	completion->call = call;
 
 	reactor = tr_channel_reactor(endpoint->channel);
-	ret = tr_reactor_post(reactor, tr_rpc_apply_task_completion,
+	ret = tr_reactor_complete(reactor, tr_rpc_apply_task_completion,
 			      completion);
 	if (ret != TR_OK)
 		free(completion);
@@ -1487,7 +1487,7 @@ static int tr_rpc_submit_unary_completion(
 		return TR_ERR_INVALID;
 
 	reactor = tr_channel_reactor(endpoint->channel);
-	return tr_reactor_post(reactor, tr_rpc_apply_unary_completion,
+	return tr_reactor_complete(reactor, tr_rpc_apply_unary_completion,
 			       completion);
 }
 
