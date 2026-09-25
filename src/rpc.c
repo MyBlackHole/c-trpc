@@ -1227,16 +1227,91 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 		tr_rpc_endpoint_release(endpoint);
 }
 
+struct tr_rpc_stream_payload_release {
+	struct tr_stream_handle stream;
+	struct tr_buffer *payload;
+	int executed;
+};
+
+static int tr_rpc_stream_release_payload_on_owner(void *arg)
+{
+	struct tr_rpc_stream_payload_release *request =
+		(struct tr_rpc_stream_payload_release *)arg;
+
+	request->executed = 1;
+	return tr_stream_release_payload(request->stream, request->payload);
+}
+
+/*
+ * RX credit belongs to Stream protocol state, so worker threads return payload
+ * ownership to the Reactor owner instead of mutating Stream under channel->lock.
+ * If the Reactor can no longer accept commands, it cannot consume the payload;
+ * release the buffer locally so shutdown cannot leak memory.
+ */
+static int tr_rpc_release_stream_payload(struct tr_stream_handle stream,
+					 struct tr_buffer *payload)
+{
+	struct tr_rpc_stream_payload_release request;
+	struct tr_reactor *reactor;
+	int ret;
+
+	if (!payload)
+		return TR_ERR_INVALID;
+	if (!stream.channel) {
+		tr_buffer_release(payload);
+		return TR_ERR_STALE;
+	}
+
+	reactor = tr_channel_reactor(stream.channel);
+	if (!reactor) {
+		tr_buffer_release(payload);
+		return TR_ERR_STATE;
+	}
+
+	request.stream = stream;
+	request.payload = payload;
+	request.executed = 0;
+	ret = tr_reactor_call(reactor, tr_rpc_stream_release_payload_on_owner,
+			      &request);
+	if (!request.executed)
+		tr_buffer_release(payload);
+	return ret;
+}
+
+struct tr_rpc_stream_close_request {
+	struct tr_stream_handle stream;
+};
+
+static int tr_rpc_stream_close_on_owner(void *arg)
+{
+	struct tr_rpc_stream_close_request *request =
+		(struct tr_rpc_stream_close_request *)arg;
+
+	return tr_stream_close(request->stream);
+}
+
+static int tr_rpc_close_stream(struct tr_stream_handle stream)
+{
+	struct tr_rpc_stream_close_request request;
+	struct tr_reactor *reactor;
+
+	if (!stream.channel)
+		return TR_ERR_STALE;
+	reactor = tr_channel_reactor(stream.channel);
+	if (!reactor)
+		return TR_ERR_STATE;
+
+	request.stream = stream;
+	return tr_reactor_call(reactor, tr_rpc_stream_close_on_owner, &request);
+}
+
 static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
 {
 	if (!task || !task->payload)
 		return;
 
-	if (task->stream.channel)
-		(void)tr_stream_release_payload(task->stream,
-					tr_buffer_take(&task->payload));
-	else
-		tr_buffer_release(tr_buffer_take(&task->payload));
+	(void)tr_rpc_release_stream_payload(task->stream,
+					    tr_buffer_take(&task->payload));
 }
 
 static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
@@ -1429,7 +1504,7 @@ static int tr_rpc_executor_run_server_unary(
 	int deferred = 0;
 
 	if (!handler || tr_rpc_decode_task_message(task, &message, &wire) != TR_OK) {
-		(void)tr_stream_close(task->stream);
+		(void)tr_rpc_close_stream(task->stream);
 		goto out;
 	}
 
@@ -1463,14 +1538,7 @@ out:
 	 * strong-ref 的 completion。否则 Reactor 可能先执行 completion，
 	 * teardown 随后越过仍在归还 RX buffer 的 worker。
 	 */
-	if (task->payload) {
-		if (task->stream.channel)
-			(void)tr_stream_release_payload(
-				task->stream,
-				tr_buffer_take(&task->payload));
-		else
-			tr_buffer_release(tr_buffer_take(&task->payload));
-	}
+	tr_rpc_release_task_payload(task);
 
 	if (completion) {
 		ret = tr_rpc_submit_unary_completion(endpoint, completion);
@@ -1480,7 +1548,7 @@ out:
 		} else {
 			free(completion);
 			completion = NULL;
-			(void)tr_stream_close(task->stream);
+			(void)tr_rpc_close_stream(task->stream);
 		}
 	}
 	return deferred;
@@ -3851,19 +3919,15 @@ int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
 
 int tr_rpc_message_release(struct tr_rpc_message *message)
 {
+	struct tr_buffer *storage;
 	int ret;
 
 	if (!message || !message->storage)
 		return TR_ERR_INVALID;
 
-	if (message->stream.channel)
-		ret = tr_stream_release_payload(message->stream,
-						message->storage);
-	else {
-		tr_buffer_release(message->storage);
-		ret = TR_OK;
-	}
-
+	storage = message->storage;
+	message->storage = NULL;
+	ret = tr_rpc_release_stream_payload(message->stream, storage);
 	memset(message, 0, sizeof(*message));
 	return ret;
 }
