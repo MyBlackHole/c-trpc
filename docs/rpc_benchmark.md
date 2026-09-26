@@ -135,14 +135,29 @@ python3 bench/run_rpc_capacity.py \
   --output /tmp/rpc-bench/open-loop-custom.jsonl
 ```
 
-当前 Server executor 队列耗尽时，RPC 接收路径的 enqueue 返回 `TR_AGAIN` 并关闭
-对应 Stream，因此 Client 一侧通常观察为 `UNAVAILABLE`。容量工具会单独统计
-`unavailable`，但不会把它重新命名成 `RESOURCE_EXHAUSTED`；这是现有协议语义的
-观测结果，不是新的 backpressure API。
+Server Unary executor 队列耗尽时，RPC 接收路径会在 handler **尚未执行**的
+前提下直接返回空 payload 的 `RESOURCE_EXHAUSTED` Unary response，并正常关闭
+该 Call 的 Stream；物理 TCP/Channel 保持可用，后续 Call 可以继续服务。真正的
+connection/transport failure 仍使用 `UNAVAILABLE`。Streaming executor 饱和语义
+本轮不改变，仍属于后续单独设计范围。
+
+容量工具分别统计 `resource_exhausted` 与 `unavailable`，两者都必须是
+`rpc_errors` 的子集，不能相互冒充。
 
 CI 对 open-loop 只检查计数守恒、payload 正确性、固定到达时间窗和最终 drain，
 不要求某个 QPS/P99，也不要求共享 runner 必须在某一 rate 点出现饱和。GCC release
 额外保存一轮 5 点容量曲线作为诊断 artifact；它仍不是发布 SLA。
+
+### 2026-09-27 executor 饱和诊断
+
+在改成显式 `RESOURCE_EXHAUSTED` 之前，PR #29 的 GitHub shared runner（GCC
+release、2 workers、10 ms handler、executor queue=16、128 offered arrivals）已经
+确认了瓶颈位置：50/100/200 rps 全部成功；400 rps 为 80 OK + 48 UNAVAILABLE；
+800 rps 为 48 OK + 80 UNAVAILABLE。400/800 rps 的成功吞吐都约 196.6 RPC/s，
+而负载发生器 `scheduler_dropped=0`、P99 scheduler lateness 约 80/105 微秒。
+这些数字只用于证明 executor saturation 是真实瓶颈并校验新状态语义，不作为
+跨机器性能结论。新实现应在同类过载点把“handler 未执行的容量拒绝”报告为
+`RESOURCE_EXHAUSTED`，而不是把它伪装成连接不可用。
 
 ## 校验与 CI
 

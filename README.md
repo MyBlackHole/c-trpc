@@ -511,6 +511,8 @@ first response is encoded.
 - at most one executor task for a Call runs at a time, so callbacks for one Call remain strictly serialized and ordered
 - different Calls, including Calls from different peers, may run concurrently on shared workers
 - one task is taken per ready-Call scheduling turn, providing fairness without letting thread count scale with accepted peers
+- if a Server Unary request reaches a full executor queue, its handler is not invoked; the Call completes with `RESOURCE_EXHAUSTED` while the Channel remains usable
+- `UNAVAILABLE` remains reserved for connection/transport loss rather than local executor admission failure
 - incoming RPC payload ownership is held until executor processing completes
 - this naturally delays Stream receive-credit return while application processing is outstanding
 - each queued executor task holds a C11 strong reference on its RPC Endpoint

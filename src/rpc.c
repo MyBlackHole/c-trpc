@@ -935,6 +935,43 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 	return ret;
 }
 
+/*
+ * Server Unary overload is a protocol-level rejection, not a connection
+ * failure. The request handler has not run when executor enqueue returns
+ * TR_AGAIN, so it is safe to return RESOURCE_EXHAUSTED immediately.
+ *
+ * endpoint->lock must already be held by the Reactor owner thread.
+ */
+static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
+				      struct tr_rpc_call_slot *call,
+				      int status)
+{
+	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_rpc_bytes empty = { NULL, 0 };
+	int ret;
+
+	if (!endpoint || !call || !call->method || !call->is_unary ||
+	    endpoint->config.role != TR_RPC_SERVER)
+		return TR_ERR_INVALID;
+
+	ret = tr_rpc_encode_message(
+		endpoint, call, TR_RPC_WIRE_RESPONSE, &call->method->desc,
+		call->method->desc.response_codec_id, status, &empty, &encoded);
+	if (ret != TR_OK)
+		return ret;
+
+	call->pending_tx = tr_buffer_take(&encoded);
+	call->deadline_ns = 0;
+	tr_rpc_deadline_changed_locked(endpoint);
+
+	ret = tr_rpc_try_unary_send_locked(endpoint, call);
+	/*
+	 * TR_AGAIN means pending_tx is retained for the existing WRITABLE/flush
+	 * retry path. The overload decision itself has already been accepted.
+	 */
+	return ret == TR_AGAIN ? TR_OK : ret;
+}
+
 static int tr_rpc_executor_ready_push_locked(struct tr_rpc_executor *executor,
 					     uint32_t slot)
 {
@@ -2582,6 +2619,19 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		task.type = call->is_unary ? TR_RPC_TASK_SERVER_UNARY :
 					     TR_RPC_TASK_SERVER_STREAM_MESSAGE;
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+		if (ret == TR_AGAIN && call->is_unary) {
+			/*
+			 * Bounded executor saturation is not transport failure. The
+			 * handler has not run, so reject this Unary explicitly while
+			 * keeping the physical connection usable for later Calls.
+			 */
+			ret = tr_rpc_reject_unary_locked(
+				endpoint, call, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+			pthread_mutex_unlock(&endpoint->lock);
+			if (ret != TR_OK)
+				(void)tr_stream_close(stream);
+			return TR_STREAM_DATA_RELEASE;
+		}
 		pthread_mutex_unlock(&endpoint->lock);
 		if (ret != TR_OK) {
 			(void)tr_stream_close(stream);
