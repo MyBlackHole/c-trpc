@@ -144,7 +144,7 @@ xmake run echo_client 127.0.0.1 9000 hello
 
 - explicit little-endian wire codec; packed C structs are not used as wire ABI
 - 40-byte transport frame header
-- CRC32C for header and payload
+- CRC32C for header and payload: portable table fallback and runtime-selected x86-64 SSE4.2 backend
 - frame type / flag / length validation
 - bounded maximum payload per transport frame
 - logical DATA messages larger than one frame are fragmented transparently using `FIRST/LAST` with one stable `message_id`
@@ -687,7 +687,6 @@ The Xmake CI matrix checks:
 - multi-data-connection pool
 - TLS/mTLS transport provider integration
 - backup semantics / durable commit / backup resume / storage / filesystem I/O
-- hardware-accelerated CRC32C dispatch
 - split-connection Client/Server facade pairing/binding protocol
 - lock-free command queue / io_uring / kernel zerocopy optimizations
 
@@ -715,7 +714,7 @@ typed `TR_AUTO()` ownership helper.
 ```sh
 xmake f -m release --toolchain=gcc
 xmake                         # library and Echo examples
-xmake test -v -j1              # builds and runs all three test executables
+xmake test -v -j1              # builds and runs all test executables
 
 # Run only the timer queue tests:
 xmake test -v -j1 'test_timer_queue/*'
@@ -744,6 +743,6 @@ reclamation are implemented. The next production work should focus on:
 4. TLS/mTLS provider integration before a connection enters Channel HELLO.
 5. explicit RPC/service Health service, separate from Transport keepalive.
 6. generic RPC retry policy only for methods marked retryable/idempotent.
-7. fuzz/soak/benchmark suites, then optional RX vectored messages and hardware CRC dispatch when profiling justifies them.
+7. fuzz/soak/benchmark suites and real RPC/BULK profiling; CRC32C has portable/runtime-selected acceleration (see [CRC32C backends](docs/crc32c.md)), while optional RX vectored messages remain profile-driven.
 
 Backup remains an application layer above this generic RPC/Transport library.
