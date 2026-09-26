@@ -12,7 +12,7 @@ Server:
   accept thread
   reaper thread
   shared executor
-  shared maintenance
+  Reactor-local timers
 
 Channel:
   CONTROL + one BULK

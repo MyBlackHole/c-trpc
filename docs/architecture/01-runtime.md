@@ -140,9 +140,9 @@ Client library 必须保持嵌入友好：
 
 ## 6. Timer
 
-CURRENT：RPC deadline 与 Channel keepalive 已迁移到 Reactor-local timer；
-reconnect/backoff 仍保留独立 maintenance thread，因为 connect/poll/backoff
-不能直接塞进 Reactor timer callback。
+CURRENT：RPC deadline 与 Channel keepalive 已迁移到 Reactor-local timer，
+旧的 shared maintenance scheduler 已删除。reconnect/backoff 仍保留独立
+reconnect thread，因为 connect/poll/backoff 不能直接塞进 Reactor timer callback。
 
 Reactor-local timer 基础设施已经落地：
 
@@ -169,3 +169,25 @@ Reactor shard
 内部扫描 bounded Call table，不按 Call 创建 timer；每个 Channel 也只注册一个
 默认 disarm 的 keepalive timer。reconnect 尚未迁移，legacy reconnect thread 暂时
 保留；不允许为了迁移一次性同时改动 Multi-Reactor 和 Channel connection-group 语义。
+
+## 7. CURRENT 创建阶段线程预算与回收
+
+以下是库自身的线程增量，不包含应用、测试工具或 sanitizer 的后台线程：
+
+| 操作 | 新增线程 |
+|---|---|
+| `tr_client_create()` | 1 个 Reactor；尚未创建 RPC worker |
+| `tr_server_create()` | 配置的 `executor_threads` 个共享 worker |
+| `tr_server_listen()` | 0 |
+| `tr_server_start()` | 3 个：Reactor、reaper、accept |
+
+Client connect 才创建 RPC Endpoint worker；启用自动重连时仍可能增加
+reconnect thread。deadline / keepalive 不再产生独立线程，也不存在每个
+Client/Server 实例额外持有的闲置 maintenance scheduler。
+
+`tests/test_runtime_threads.c` 使用测试目标独有的 pthread create/join 包装，
+检查创建前后的精确增量、正常销毁、未 start 的 Server 销毁和部分启动失败回收。
+它补充原有连接后线程上限测试，避免把 create 阶段的额外线程计入 baseline
+后漏检。故障注入覆盖 Client Reactor、三个共享 worker，以及 Server 的
+Reactor/reaper/accept 共七个启动点；每个成功创建的线程必须成功 join，
+失败回滚不允许遗留线程或重复 join。

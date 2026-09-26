@@ -1428,7 +1428,7 @@ static void tr_rpc_apply_unary_completion(void *arg)
 
 	/*
 	 * 这里由 Reactor owner thread 执行。endpoint->lock 暂时保留用于兼容
-	 * 仍可从 application/maintenance 线程进入的旧 API；后续 ownership
+	 * 仍可从 application 线程进入的旧 API；后续 ownership
 	 * 收敛后再缩减这把锁，而不是在本阶段直接替换成 atomic。
 	 */
 	pthread_mutex_lock(&endpoint->lock);
@@ -2376,7 +2376,7 @@ tr_rpc_deadline_earliest_locked(const struct tr_rpc_endpoint *endpoint,
 /*
  * endpoint->lock 必须已经持有，并且调用方必须处于 Endpoint 所属 Reactor
  * owner thread。Call deadline 的所有正常变更路径已经 owner 化，因此这里可
- * 直接更新 Reactor-local timer，不再经过 shared maintenance/thread。
+ * 直接更新 Reactor-local timer，不再经过第二套 scheduler/thread。
  */
 static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint)
 {
@@ -2438,18 +2438,10 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 	return 0;
 }
 
-static int
-tr_rpc_deadline_init(struct tr_rpc_endpoint *endpoint,
-		     struct tr_maintenance_scheduler *maintenance)
+static int tr_rpc_deadline_init(struct tr_rpc_endpoint *endpoint)
 {
 	struct tr_reactor *reactor;
 	int ret;
-
-	/*
-	 * maintenance 参数暂时保留在 internal create API 中，Channel
-	 * keepalive/reconnect 仍在分阶段迁移；RPC deadline 已不再使用它。
-	 */
-	(void)maintenance;
 
 	reactor = tr_channel_reactor(endpoint->channel);
 	if (!reactor)
@@ -3001,9 +2993,7 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 
 int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
-	struct tr_rpc_executor_group *group,
-	struct tr_maintenance_scheduler *maintenance,
-	struct tr_rpc_endpoint **out)
+	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out)
 {
 	struct tr_rpc_endpoint_build build
 		TR_AUTO(tr_rpc_endpoint_build_cleanup) = { 0 };
@@ -3040,7 +3030,7 @@ int tr_rpc_endpoint_create_with_executor_group(
 	endpoint->channel = channel;
 	endpoint->config = *config;
 
-	ret = tr_rpc_deadline_init(endpoint, maintenance);
+	ret = tr_rpc_deadline_init(endpoint);
 	if (ret != TR_OK)
 		return ret;
 	build.deadline_ready = 1;
@@ -3068,7 +3058,7 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   struct tr_rpc_endpoint **out)
 {
 	return tr_rpc_endpoint_create_with_executor_group(
-		channel, config, NULL, NULL, out);
+		channel, config, NULL, out);
 }
 
 static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint)
