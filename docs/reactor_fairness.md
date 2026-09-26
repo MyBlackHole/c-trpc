@@ -1,14 +1,16 @@
 # Reactor 命令调度公平性
 
-## 本轮边界
+## 命令阶段边界
 
 正常事件循环每轮只处理一个 `TR_COMMAND_BATCH`，目前最多 64 条已入队命令。
-命令只在循环开头消费；wake 事件只清理通知，不再额外执行一批命令。
-同一轮随后继续运行既有 Completion、Timer、TX 与 epoll I/O 阶段。
+命令只在循环开头消费；wake 事件不再额外执行一批命令。
+同一轮随后继续运行 Completion、Timer、RX/TX 与 epoll I/O 阶段。
 
 这限制的是命令数量，不是执行时间：不能抢占正在执行的 owner callback，
 也不限制 callback 内嵌套的直接 owner 调用。生产 callback 仍必须短小、非阻塞。
-本轮没有引入公开预算参数，没有完成其他阶段的全局预算统一或 CONTROL 优先级。
+命令阶段没有新增公开预算参数。后续已完成其他阶段的整轮预算统一与最小诊断，
+配置语义和统计口径见 [Reactor 整轮预算与调度诊断](reactor_budget.md)。
+CONTROL 优先级仍留待独立改造。
 
 ## 为什么不能只删掉 drain 循环
 

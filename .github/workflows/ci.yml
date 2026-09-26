@@ -50,9 +50,28 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/asan-ubsan.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 120 "$log_file" >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
+          git rev-parse HEAD
           xmake f -c -y -m asan --toolchain=gcc
           xmake build --all -v
           xmake test -v -j1
+      - name: Archive failed sanitizer source
+        if: failure()
+        run: git archive --format=tar -o "$RUNNER_TEMP/sanitizer-source.tar" HEAD
+      - name: Preserve sanitizer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-ubsan-logs
+          path: |
+            ${{ runner.temp }}/asan-ubsan.log
+            ${{ runner.temp }}/sanitizer-source.tar
+          if-no-files-found: ignore
+          retention-days: 7
 
   tsan:
     name: ThreadSanitizer
@@ -67,9 +86,28 @@ jobs:
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/tsan.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 120 "$log_file" >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
+          git rev-parse HEAD
           xmake f -c -y -m tsan --toolchain=gcc
           xmake build --all -v
           xmake test -v -j1
+      - name: Archive failed sanitizer source
+        if: failure()
+        run: git archive --format=tar -o "$RUNNER_TEMP/sanitizer-source.tar" HEAD
+      - name: Preserve sanitizer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-logs
+          path: |
+            ${{ runner.temp }}/tsan.log
+            ${{ runner.temp }}/sanitizer-source.tar
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-smoke:
     name: Make compatibility + install

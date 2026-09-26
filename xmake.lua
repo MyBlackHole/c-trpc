@@ -83,7 +83,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness"}) do
+for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -97,6 +97,11 @@ for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threa
             -- Observe real queue operations and poll boundaries without production hooks.
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
                         "-Wl,--wrap=tr_command_queue_pop_batch",
+                        "-Wl,--wrap=epoll_wait", {force = true})
+        elseif name == "test_reactor_budget" then
+            add_ldflags("-Wl,--wrap=tr_command_queue_pop_batch",
+                        "-Wl,--wrap=sendmsg", "-Wl,--wrap=recv",
+                        "-Wl,--wrap=tr_parser_produce",
                         "-Wl,--wrap=epoll_wait", {force = true})
         end
         add_tests("default", {run_timeout = 120000, realtime_output = true})
