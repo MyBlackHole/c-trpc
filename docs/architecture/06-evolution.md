@@ -50,12 +50,16 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - 独立于 command queue 的 wake coalescing；
 - completion batch drain；
 - completion backlog 下的 nonblocking event-loop continuation；
-- STOP 前已接受 completion 的 drain barrier。
+- STOP 前已接受 completion 的 drain barrier；
+- 每轮一个 command batch，wake 路径不重复消费命令预算；
+- command backlog 的保守非阻塞续处理与公平性/退出回归测试。
+
+命令预算与唤醒推导见 [Reactor 命令调度公平性](../reactor_fairness.md)。
 
 仍待：
 
 - CONTROL priority；
-- command/TX/completion 更统一的 event-loop work budget 与可观测指标。
+- RX/TX/completion/timer 更统一的 event-loop work budget 与可观测指标。
 
 ## Phase 3 - Runtime Shard Abstraction
 

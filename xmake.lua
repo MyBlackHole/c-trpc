@@ -83,7 +83,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads"}) do
+for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -93,6 +93,11 @@ for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threa
         if name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
+        elseif name == "test_reactor_fairness" then
+            -- Observe real queue operations and poll boundaries without production hooks.
+            add_ldflags("-Wl,--wrap=tr_command_queue_push",
+                        "-Wl,--wrap=tr_command_queue_pop_batch",
+                        "-Wl,--wrap=epoll_wait", {force = true})
         end
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()

@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #define TR_REACTOR_EVENT_BATCH 64U
+/* One command batch per event-loop turn, not drain-until-empty. */
 #define TR_COMMAND_BATCH 64U
 #define TR_COMPLETION_BATCH 64U
 #define TR_TIMER_BATCH 64U
@@ -1278,63 +1279,63 @@ static void tr_process_call(const struct tr_command *command)
 	tr_reactor_sync_complete(command->u.call.sync, status);
 }
 
-static void tr_process_commands(struct tr_reactor *reactor)
+static int tr_process_commands(struct tr_reactor *reactor)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
+	size_t count;
+	size_t i;
 
 	TR_ASSERT_REACTOR_OWNER(reactor);
 
-	for (;;) {
-		size_t count;
-		size_t i;
+	count = tr_command_queue_pop_batch(&reactor->commands, commands,
+					   TR_COMMAND_BATCH);
+	for (i = 0; i < count; ++i) {
+		const struct tr_command *command = &commands[i];
 
-		count = tr_command_queue_pop_batch(&reactor->commands, commands,
-						   TR_COMMAND_BATCH);
-		if (count == 0)
-			return;
-
-		for (i = 0; i < count; ++i) {
-			const struct tr_command *command = &commands[i];
-
-			switch (command->type) {
-			case TR_CMD_ADOPT_FD:
-				(void)tr_connection_adopt(reactor,
-							  command->slot,
-							  command->generation,
-							  command->u.adopt.fd);
-				break;
-			case TR_CMD_SEND:
-				tr_process_send(reactor, command);
-				break;
-			case TR_CMD_RESUME_RX:
-				tr_process_resume_rx(reactor, command);
-				break;
-			case TR_CMD_CLOSE:
-				tr_process_close(reactor, command);
-				break;
-			case TR_CMD_ABORT:
-				tr_process_abort(reactor, command);
-				break;
-			case TR_CMD_SET_HANDLER:
-				tr_process_set_handler(reactor, command);
-				break;
-			case TR_CMD_QUIESCE:
-				tr_process_quiesce(command);
-				break;
-			case TR_CMD_CALL:
-				tr_process_call(command);
-				break;
-			case TR_CMD_STOP:
-				reactor->stopping = 1;
-				break;
-			default:
-				break;
-			}
+		switch (command->type) {
+		case TR_CMD_ADOPT_FD:
+			(void)tr_connection_adopt(reactor,
+						  command->slot,
+						  command->generation,
+						  command->u.adopt.fd);
+			break;
+		case TR_CMD_SEND:
+			tr_process_send(reactor, command);
+			break;
+		case TR_CMD_RESUME_RX:
+			tr_process_resume_rx(reactor, command);
+			break;
+		case TR_CMD_CLOSE:
+			tr_process_close(reactor, command);
+			break;
+		case TR_CMD_ABORT:
+			tr_process_abort(reactor, command);
+			break;
+		case TR_CMD_SET_HANDLER:
+			tr_process_set_handler(reactor, command);
+			break;
+		case TR_CMD_QUIESCE:
+			tr_process_quiesce(command);
+			break;
+		case TR_CMD_CALL:
+			tr_process_call(command);
+			break;
+		case TR_CMD_STOP:
+			reactor->stopping = 1;
+			break;
+		default:
+			break;
 		}
-
-		if (reactor->stopping)
-			return;
 	}
+
+	/*
+	 * A full batch may leave work whose wake has already been consumed.
+	 * Conservatively poll once more without blocking, even if this batch
+	 * exactly emptied the ring. A short batch emptied it under queue->lock;
+	 * any later producer then sets wake_pending and signals the eventfd.
+	 * No unsynchronized queue count snapshot or extra queue API is needed.
+	 */
+	return count == TR_COMMAND_BATCH;
 }
 
 static void tr_handle_connection_event(struct tr_reactor *reactor,
@@ -1421,6 +1422,7 @@ static void *tr_reactor_thread_main(void *arg)
 {
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
+	int commands_pending = 0;
 	int completions_pending = 0;
 	int timers_pending = 0;
 
@@ -1432,7 +1434,7 @@ static void *tr_reactor_thread_main(void *arg)
 		int count;
 		int i;
 
-		tr_process_commands(reactor);
+		commands_pending = tr_process_commands(reactor);
 		if (reactor->stopping) {
 			/*
 			 * stop() 先在 ctl_lock 下关闭 accepting，再入队 STOP。
@@ -1450,8 +1452,8 @@ static void *tr_reactor_thread_main(void *arg)
 		timers_pending = tr_process_timers(reactor);
 		tr_run_tx_ready(reactor);
 
-		if (reactor->tx_ready_head || completions_pending ||
-		    timers_pending)
+		if (reactor->tx_ready_head || commands_pending ||
+		    completions_pending || timers_pending)
 			timeout = 0;
 		else
 			timeout = tr_reactor_timer_timeout_ms(reactor);
@@ -1467,7 +1469,7 @@ static void *tr_reactor_thread_main(void *arg)
 		for (i = 0; i < count; ++i) {
 			if (events[i].data.u64 == TR_WAKE_TOKEN) {
 				tr_reactor_drain_wake(reactor);
-				tr_process_commands(reactor);
+				/* Commands run only at the next turn's budget boundary. */
 				if (!reactor->stopping)
 					completions_pending =
 						tr_process_completions(reactor);
