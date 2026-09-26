@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CALLBACKS 200U
@@ -137,13 +138,26 @@ int __wrap_epoll_wait(int fd, struct epoll_event *events, int max, int timeout)
 	return __real_epoll_wait(fd, events, max, timeout);
 }
 
-static void wait_for(struct test_ctx *ctx, const int *predicate)
+static void wait_for_condition(struct test_ctx *ctx, const int *predicate,
+			       const char *name)
 {
+	struct timespec deadline;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10; /* Hang guard, not a latency acceptance threshold. */
 	assert(pthread_mutex_lock(&ctx->lock) == 0);
-	while (!*predicate)
-		assert(pthread_cond_wait(&ctx->cond, &ctx->lock) == 0);
+	while (!*predicate) {
+		int ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+
+		if (ret != 0)
+			fprintf(stderr, "waiting for %s: %s\n", name, strerror(ret));
+		assert(ret == 0);
+	}
 	assert(pthread_mutex_unlock(&ctx->lock) == 0);
 }
+
+#define wait_for(ctx, predicate) \
+	wait_for_condition((ctx), (predicate), #predicate)
 
 static void maybe_done(struct test_ctx *ctx)
 {
@@ -550,6 +564,7 @@ static void test_completion_zero_budget(void)
 
 int main(void)
 {
+	assert(setvbuf(stdout, NULL, _IONBF, 0) == 0);
 	alarm(60U); /* Hang protection, not a latency or throughput threshold. */
 	test_mixed_budget(1U);
 	test_mixed_budget(17U);
