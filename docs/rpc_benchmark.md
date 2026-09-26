@@ -94,8 +94,55 @@ Server 使用 2 个共享业务 worker；每个 Client 使用 4 个 callback wor
 
 pressure 故意让 deadline 小于受控 handler 延迟，覆盖失败后继续服务的路径；
 recovery 不启用 reconnect、不重建 Client/Server、也不先睡眠清空压力。它不是
-CPU/内存/FD 耗尽、随机网络故障、队列容量拐点或长稳测试。没有证据时不把它
-称为“已证明所有过载都能恢复”。后续应独立增加 open-loop 负载和故障矩阵。
+CPU/内存/FD 耗尽、随机网络故障或长稳测试。没有证据时不把它称为“已证明所有
+过载都能恢复”。故障矩阵和长稳仍需后续独立补充。
+
+## Open-loop 到达率与 executor 容量曲线
+
+`run_rpc_capacity.py` 使用独立于 callback 完成速度的固定到达时间表。它不是
+“收到一个响应再发下一个”的 closed-loop window；每个预定 arrival 都必须落入
+以下三类之一：
+
+1. 本地 in-flight slot 已满，记为 `scheduler_dropped`；
+2. 实际调用提交 API，但被同步拒绝，分别记为 `submit_again` / `submit_errors`；
+3. 提交成功，最终必须收到 callback，按 OK / deadline / RPC error / 数据损坏分类。
+
+因此 offered load 不会因响应变慢而自动下降。latency 仍从**实际 submit** 到 callback，
+而预定时刻到实际 submit 的偏差独立记录为 `scheduler_late_*`，避免把负载发生器
+自己跟不上误解释成服务端性能。每轮结束后还记录 `drain_tail_ms`，用于观察 arrival
+停止后积压还需要多久才能排空。
+
+默认容量实验使用 2 个 Server worker、10 ms 受控 handler delay、16 个
+`executor_queue_capacity`、128 个本地 in-flight slots。默认 rate 点来自
+`workers × 1000 / slow_ms` 的 0.25×/0.5×/1×/2×/4×；这个算式只是选择测试点的
+**handler-only 理论上限**，忽略 Transport、RPC、调度和共享运行环境成本，不是实际
+系统容量，也不能当作通过门槛。
+
+```sh
+xmake f -c -y -m release --toolchain=gcc
+xmake build bench_rpc
+python3 bench/run_rpc_capacity.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --trials 3 --requests 256 \
+  --workers 2 --slow-ms 10 --executor-queue 16 \
+  --window 128 --capacity 128 --timeout-ms 1000 \
+  --output /tmp/rpc-bench/open-loop.jsonl
+
+# 自定义 offered-rate 曲线
+python3 bench/run_rpc_capacity.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --rates 50,100,200,400,800 \
+  --output /tmp/rpc-bench/open-loop-custom.jsonl
+```
+
+当前 Server executor 队列耗尽时，RPC 接收路径的 enqueue 返回 `TR_AGAIN` 并关闭
+对应 Stream，因此 Client 一侧通常观察为 `UNAVAILABLE`。容量工具会单独统计
+`unavailable`，但不会把它重新命名成 `RESOURCE_EXHAUSTED`；这是现有协议语义的
+观测结果，不是新的 backpressure API。
+
+CI 对 open-loop 只检查计数守恒、payload 正确性、固定到达时间窗和最终 drain，
+不要求某个 QPS/P99，也不要求共享 runner 必须在某一 rate 点出现饱和。GCC release
+额外保存一轮 5 点容量曲线作为诊断 artifact；它仍不是发布 SLA。
 
 ## 校验与 CI
 

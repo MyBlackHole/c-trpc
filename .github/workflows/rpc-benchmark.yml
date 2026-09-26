@@ -57,7 +57,7 @@ jobs:
           exec >"$results/build-and-test.log" 2>&1
           git rev-parse HEAD > "$results/source-commit.txt"
           git archive --format=tar -o "$results/source.tar" HEAD
-          python3 -m unittest discover -s bench -p test_rpc_bench.py -v
+          python3 -m unittest discover -s bench -p 'test_rpc_*.py' -v
           for portable in n y; do
             xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable="$portable"
             xmake build -v bench_rpc
@@ -65,7 +65,18 @@ jobs:
               --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
               --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}-portable=$portable" \
               --output "$results/$portable.jsonl"
+            python3 bench/run_rpc_capacity.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}-portable=$portable" \
+              --output "$results/$portable-open.jsonl"
           done
+          if [ "${{ matrix.cc }}" = gcc ] && [ "${{ matrix.mode }}" = release ]; then
+            python3 bench/run_rpc_capacity.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --trials 1 --requests 128 \
+              --label "gcc-release-capacity-curve" \
+              --output "$results/capacity-curve.jsonl"
+          fi
       - name: Preserve exact source and benchmark diagnostics
         if: always()
         uses: actions/upload-artifact@v4
