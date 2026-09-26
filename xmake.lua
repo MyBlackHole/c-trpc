@@ -127,3 +127,11 @@ target("bench_crc32c")
     add_files("bench/bench_crc32c.c")
     add_deps("trcore")
 target_end()
+
+-- Explicit opt-in diagnostic: separate-process TCP/RPC workloads (docs/rpc_benchmark.md).
+target("bench_rpc")
+    set_kind("binary")
+    set_default(false)
+    add_files("bench/bench_rpc.c")
+    add_deps("trcore")
+target_end()

@@ -1,0 +1,76 @@
+name: RPC benchmark smoke
+
+on:
+  pull_request:
+    paths:
+      - 'bench/**'
+      - 'src/**'
+      - 'include/**'
+      - 'xmake.lua'
+      - '.github/workflows/rpc-benchmark.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bench/**'
+      - 'src/**'
+      - 'include/**'
+      - 'xmake.lua'
+      - '.github/workflows/rpc-benchmark.yml'
+
+permissions:
+  contents: read
+
+env:
+  XMAKE_VERSION: '3.1.1'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  rpc-smoke:
+    name: rpc-smoke (${{ matrix.cc }}, ${{ matrix.mode }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {cc: gcc, mode: debug}
+          - {cc: gcc, mode: release}
+          - {cc: clang, mode: release}
+          - {cc: gcc, mode: asan}
+          - {cc: gcc, mode: tsan}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Validate accounting and run real RPC scenarios
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/rpc-bench"
+          mkdir -p "$results"
+          exec 3>&1
+          trap 'status=$?; tail -n 100 "$results/build-and-test.log" >&3; exit "$status"' EXIT
+          exec >"$results/build-and-test.log" 2>&1
+          git rev-parse HEAD > "$results/source-commit.txt"
+          git archive --format=tar -o "$results/source.tar" HEAD
+          python3 -m unittest discover -s bench -p test_rpc_bench.py -v
+          for portable in n y; do
+            xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable="$portable"
+            xmake build -v bench_rpc
+            python3 bench/run_rpc_bench.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}-portable=$portable" \
+              --output "$results/$portable.jsonl"
+          done
+      - name: Preserve exact source and benchmark diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpc-bench-${{ matrix.cc }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/rpc-bench
+          if-no-files-found: ignore
+          retention-days: 7
