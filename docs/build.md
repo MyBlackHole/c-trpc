@@ -16,9 +16,10 @@ CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/gu
 ```sh
 xmake f -m release --toolchain=gcc
 xmake                         # 默认构建静态库和两个示例
-xmake build --all             # 同时构建两个测试程序
+xmake build --all             # 同时构建三个测试程序
 xmake test -v -j1             # 自动构建并执行全部测试
 xmake test -v -j1 'test_timer_queue/*'
+xmake test -v -j1 'test_runtime_threads/*'
 ```
 
 | 目标 | 类型 | 默认构建 |
@@ -27,10 +28,16 @@ xmake test -v -j1 'test_timer_queue/*'
 | `echo_server` / `echo_client` | 独立可执行程序 | 是 |
 | `test_transport` | Transport/RPC 集成测试 | 否，由 `xmake test` 或 `build --all` 构建 |
 | `test_timer_queue` | 定时器生命周期与模型测试 | 否，由 `xmake test` 或 `build --all` 构建 |
+| `test_runtime_threads` | Facade 线程预算与启动失败回收测试 | 否，由 `xmake test` 或 `build --all` 构建 |
 
 每个测试目标注册一个 `default` 测试。通配选择器使用引号，避免由 shell
-展开。`-j1` 串行执行这两个测试程序，不改变它们内部的并发测试行为。
+展开。`-j1` 串行执行这三个测试程序，不改变它们内部的并发测试行为。
 测试实时输出，每个测试程序的执行超时为 120 秒；失败直接返回非零状态。
+
+`test_runtime_threads` 仅在自身链接时包装 `pthread_create` / `pthread_join`，
+记录库的线程增量并定点返回 `EAGAIN`，验证正常销毁和七个启动失败点。
+不使用进程线程总数或睡眠采样，不给 `trcore`、示例或安装后的 SDK 添加
+测试钩子；GNU ld / 兼容链接器的 `--wrap` 支持仅由该测试目标使用。
 
 输出目录为 `build/<platform>/<architecture>/<mode>/`，例如
 `build/linux/x86_64/release/`。`.xmake/` 保存本地配置/缓存。
@@ -153,7 +160,7 @@ make all CC=gcc CFLAGS='-I"/opt/vendor sdk/include"' \
 
 五项检查为 GCC（debug + release）、Clang（debug + release）、ASan + UBSan、
 TSan，以及 Make 兼容/编译器切换/SDK 安装/独立进程示例。
-前四项均构建全部目标并通过 `xmake test` 执行两个测试程序。
+前四项均构建全部目标并通过 `xmake test` 执行三个测试程序。
 Make 兼容检查还使用带空格/单引号的工具与强制包含头文件路径、带引号的
 字符串宏，实际构建全部目标并运行测试；通过 `readelf` 验证最终 ELF
 保留字面量 `$ORIGIN`，不只检查配置命令的显示文本。
