@@ -8,6 +8,17 @@ extern "C" {
 #endif
 
 /*
+ * High-level TCP send policy. DEFAULT deliberately resolves to ENABLED so
+ * zero-initialized facade configs retain the low-latency RPC default.
+ * DISABLED leaves Linux TCP's Nagle policy unchanged.
+ */
+enum tr_tcp_nodelay_policy {
+	TR_TCP_NODELAY_DEFAULT = 0,
+	TR_TCP_NODELAY_ENABLED = 1,
+	TR_TCP_NODELAY_DISABLED = 2
+};
+
+/*
  * Client/Server facade 共用的高层 runtime limits。
  * 值为 0 的字段由 tr_facade_limits_init() 填入默认值。
  *

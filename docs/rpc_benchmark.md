@@ -2,9 +2,11 @@
 
 ## 本轮边界
 
-这是 opt-in 的诊断工具，不改变 `src/`、公开头文件、socket 选项、RPC/wire 协议
-或运行时线程模型。默认构建不生成 `bench_rpc`。原有 CRC、调度、生命周期和
-Transport/RPC 单元测试继续保留；本工具不替代它们。
+这是 opt-in 的诊断工具，本身不绕过或私自覆盖生产 socket 策略。当前高层
+Client/Server facade 默认对已连接 TCP socket 启用 `TCP_NODELAY`，显式
+`TR_TCP_NODELAY_DISABLED` 可保留 Linux 默认 Nagle 行为；自动 reconnect
+继承 Client 的同一策略。默认构建不生成 `bench_rpc`。原有 CRC、调度、生命周期
+和 Transport/RPC 单元测试继续保留；本工具不替代它们。
 
 真实路径为：独立 Client 进程 → IPv4 TCP → Channel → RPC worker → Unary
 response → Client result callback。方法 1 是 CONTROL lane 的小 Unary echo，
@@ -140,19 +142,25 @@ AMD EPYC 9V74，CPU 时间配额为 4 核等价，无绑核。每 case 预热 10
 DEADLINE_EXCEEDED 结束；后续 64 个恢复请求均成功。结果证明了这些有限场景，
 不证明不存在其他取消/恢复竞态。Sanitizer 数据只验证正确性，不混入性能表。
 
-### 新发现：TCP 小包发送策略应优先做独立验证
+### 历史发现与生产落地：TCP_NODELAY
 
-主线 `src/socket.c` 没有设置 TCP_NODELAY。仅在未提交的临时对照构建中，给
+PR #26 测量时的主线 `src/socket.c` 没有设置 TCP_NODELAY。当时仅在未提交的临时对照构建中，给
 创建及 accept 成功的 TCP socket 设置并检查 TCP_NODELAY，其余代码/参数相同。
 三轮 mixed 单客户端 small P99 中位数从约 88 ms 变为约 0.616 ms；成功速率中位数
 从约 208 变为约 14092 RPC/s。两客户端实验也观察到明显变化，详见 CSV 中
 `nodelay-experiment`，**该实验不是提交版本的默认行为或性能**。
 
 这个 A/B 结果支持优先审查 Nagle/ACK 与小包发送的交互，而不是继续优化 CRC 或
-直接增加 Reactor。没有 packet trace，不能声称已经证明每一次延迟的具体来源。
+直接增加 Reactor。没有 packet trace，仍不能声称已经证明每一次延迟的具体来源。
 RFC 9293 Appendix A.3 讨论了 Nagle + delayed ACK 对 request/response 的影响；
-Linux TCP_NODELAY 的含义见 TCP 手册。正式修改仍需独立的 socket 类型适用范围、
-错误路径、RPC/Transport 回归、消息大小和物理网络对比，不能直接照搬实验改动。
+Linux TCP_NODELAY 的含义见 TCP 手册。
+
+后续生产实现把策略收敛到高层 facade 边界：Client 首次连接、Server 已接受 peer、
+以及 Client 自动 reconnect 都在 Reactor 接管 fd **之前**应用同一策略；低层
+`tr_tcp_*` helper 不被全局强制修改。策略可显式禁用。测试通过链接期
+`setsockopt` observer 验证默认双向设置、显式禁用和 reconnect 继承，不以
+loopback 延迟数字作为 CI 通过门槛。上面的 2026-09-26 性能表仍是修改前历史基线，
+不能当作当前默认 socket 策略的测量结果。
 
 参考：
 - https://www.rfc-editor.org/rfc/rfc9293.html#appendix-A.3

@@ -1,11 +1,13 @@
 #define _GNU_SOURCE
 #include "tr/socket.h"
 #include "tr/status.h"
+#include "socket_internal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -41,6 +43,19 @@ static int tr_socket_ipv4(void)
 		return -1;
 
 	return tr_fd_take(&fd);
+}
+
+int tr_tcp_set_nodelay(int fd, int enabled)
+{
+	int value;
+
+	if (fd < 0 || (enabled != 0 && enabled != 1))
+		return TR_ERR_INVALID;
+
+	value = enabled;
+	if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value)) < 0)
+		return TR_ERR_SYS;
+	return TR_OK;
 }
 
 int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,

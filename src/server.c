@@ -15,6 +15,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "rpc_internal.h"
+#include "socket_internal.h"
 
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
@@ -126,6 +127,7 @@ void tr_server_config_init(struct tr_server_config *config)
 	tr_facade_limits_init(&config->limits);
 	config->max_peers = 64U;
 	config->listen_backlog = 128;
+	config->tcp_nodelay = TR_TCP_NODELAY_DEFAULT;
 	config->keepalive_interval_ms = 30000U;
 	config->keepalive_timeout_ms = 10000U;
 }
@@ -335,6 +337,12 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	peer_guard.peer = peer;
 	pthread_mutex_unlock(&server->lock);
 
+	if (tr_tcp_nodelay_policy_enabled(server->config.tcp_nodelay)) {
+		ret = tr_tcp_set_nodelay(owned_fd, 1);
+		if (ret != TR_OK)
+			return ret;
+	}
+
 	ret = tr_reactor_adopt_fd(server->reactor, owned_fd,
 				  &peer->connection);
 	if (ret != TR_OK)
@@ -468,7 +476,8 @@ int tr_server_create(const struct tr_server_config *config,
 		tr_server_config_init(&effective);
 	tr_server_normalize_config(&effective);
 
-	if (effective.limits.max_message_bytes <
+	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
+	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes <
 		    TR_RPC_WIRE_HEADER_SIZE ||

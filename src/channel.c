@@ -1,5 +1,6 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
+#include "socket_internal.h"
 #include "reactor_internal.h"
 
 #include "tr/status.h"
@@ -93,6 +94,7 @@ struct tr_channel {
 	uint32_t reconnect_initial_delay_ms;
 	uint32_t reconnect_max_delay_ms;
 	uint32_t reconnect_connect_timeout_ms;
+	int reconnect_tcp_nodelay;
 	uint32_t control_reconnect_attempt;
 	uint32_t bulk_reconnect_attempt;
 	int control_reconnecting;
@@ -1755,6 +1757,8 @@ static void *tr_channel_reconnect_thread_main(void *arg)
 		ret = tr_channel_connect_ipv4_timeout(
 			channel->reconnect_address, port,
 			channel->reconnect_connect_timeout_ms, &fd);
+		if (ret == TR_OK && channel->reconnect_tcp_nodelay)
+			ret = tr_tcp_set_nodelay(fd, 1);
 		if (ret == TR_OK) {
 			ret = tr_reactor_adopt_fd(channel->reactor, fd,
 						  &connection);
@@ -2233,6 +2237,22 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 		(void)tr_reactor_close(connection);
 		return ret;
 	}
+	return TR_OK;
+}
+
+int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
+					    int enabled)
+{
+	if (!channel || (enabled != 0 && enabled != 1))
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->reconnect_thread_started || channel->reconnect_enabled) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STATE;
+	}
+	channel->reconnect_tcp_nodelay = enabled;
+	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
 }
 

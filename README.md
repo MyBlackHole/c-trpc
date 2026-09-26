@@ -117,8 +117,15 @@ without exposing Reactor/Connection internals. Call-level send/cancel/metadata
 operations continue to use the existing `tr_rpc_call_*()` APIs on the returned
 Call handle.
 
-The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. The lower-level
-Channel API still supports split CONTROL/BULK connections. A production
+The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
+Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
+latency coupling for small request/response traffic. The policy is explicit:
+`TR_TCP_NODELAY_DEFAULT` and `TR_TCP_NODELAY_ENABLED` enable it, while
+`TR_TCP_NODELAY_DISABLED` leaves the Linux default unchanged. Client automatic
+reconnect inherits the same setting before Reactor adoption. Raw `tr_tcp_*`
+helpers and low-level Channel connections do not force this facade policy.
+
+The lower-level Channel API still supports split CONTROL/BULK connections. A production
 multi-client split facade needs a connection-binding identity in the handshake
 so the server can prove which independently accepted CONTROL and BULK sockets
 belong to the same logical Channel; that pairing protocol is intentionally not
