@@ -102,13 +102,24 @@ xmake test -v -j1 'test_reactor_budget/*'
 xmake test -v -j1
 ```
 
-`test_reactor_budget` 仅在测试链接时包装 queue pop、recv、sendmsg 和 epoll_wait，
-观察真实 Reactor 的轮次和系统调用；生产库没有测试钩子。覆盖 1、17、4096 字节
-额度，双连接双向 wire 校验，四 buffer 的 scatter/gather 与自动分帧，200 个
-Completion 与 200 次立即到期 Timer，EAGAIN 后等待并恢复，RX 待续处理时关闭并
-同槽位复用，以及零预算 Completion 标志。各运行场景同时核对运行中 owner/外部
-快照、停止后快照、精确字节累计、单轮峰值和预算耗尽计数。
+`test_reactor_budget` 仅在测试链接时包装 queue pop、recv、sendmsg、
+`tr_parser_produce` 和 epoll_wait；生产库没有测试钩子。RX 的实际字节数及
+首字节暂停门槛在解析器入口观察：当前 Reactor 将每次正数 recv 返回值原样
+传入该入口，避免把 libc 符号包装是否生效作为测试继续执行的前提。
+不会绕过 sanitizer 的系统调用拦截器。观察到的 RX/TX 总字节还必须与 owner
+快照一致，防止钩子漏执行时用零计数误报通过。
 
-条件变量、执行计数和系统调用边界决定测试时序；超时仅检测挂死，不把毫秒级
-耗时作为性能门槛。原有 fairness/退出、runtime threads、timer 与 Transport/RPC
-测试继续纳入完整 CI，覆盖同步调用、STOP drain、RX pause/resume 等原有行为。
+覆盖 1、17、4096 字节额度，双连接双向 wire 校验，四 buffer 的 scatter/gather
+与自动分帧，200 个 Completion 与 200 次立即到期 Timer，EAGAIN 后等待并恢复，
+RX 待续处理时关闭并同槽位复用，以及零预算 Completion 标志。另有 70 连接、
+每轮 1 字节的场景，超过一次 epoll 的 64 事件批次：每个连接的首帧必须在任何
+连接第二帧完成前被接收，不能只靠最终收齐数据证明轮转公平性。测试为所有
+连接提供足够 RX buffer，避免把内存池背压混入调度顺序验证。
+
+各运行场景同时核对运行中 owner/外部快照、停止后快照、精确字节累计、
+单轮峰值和预算耗尽计数。条件变量、执行计数和实际字节边界决定测试时序；
+10 秒具名条件等待和 60 秒进程 alarm 仅检测挂死，不把毫秒级耗时作为性能门槛。
+标准输出即时刷新，失败会报告具体等待条件。原有 fairness/退出、runtime threads、
+timer 与 Transport/RPC 测试继续纳入完整 CI，覆盖同步调用、STOP drain、
+RX pause/resume 等原有行为。Sanitizer CI 保留失败退出码，同时上传完整诊断日志；
+失败时附上精确 Git 源码快照，便于复现，不启用自动重试或错误抑制。

@@ -101,6 +101,7 @@ for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threa
         elseif name == "test_reactor_budget" then
             add_ldflags("-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=sendmsg", "-Wl,--wrap=recv",
+                        "-Wl,--wrap=tr_parser_produce",
                         "-Wl,--wrap=epoll_wait", {force = true})
         end
         add_tests("default", {run_timeout = 120000, realtime_output = true})
