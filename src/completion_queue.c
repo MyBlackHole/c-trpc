@@ -82,7 +82,9 @@ size_t tr_completion_queue_pop_batch(struct tr_completion_queue *queue,
 	size_t count = 0;
 	int more = 0;
 
-	if (!queue || !out || max_completions == 0)
+	if (has_more)
+		*has_more = 0;
+	if (!queue || !out)
 		return 0;
 
 	pthread_mutex_lock(&queue->lock);

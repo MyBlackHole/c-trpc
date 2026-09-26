@@ -33,6 +33,8 @@
 #define TR_COMPLETION_BATCH 64U
 #define TR_TIMER_BATCH 64U
 #define TR_TX_READY_BATCH 64U
+#define TR_RX_READY_BATCH 64U
+#define TR_IO_QUANTUM (64U * 1024U)
 #define TR_WAKE_TOKEN UINT64_MAX
 
 /*
@@ -52,6 +54,14 @@ static int tr_reactor_is_owner_thread(const struct tr_reactor *reactor)
 #else
 #define TR_ASSERT_REACTOR_OWNER(reactor) ((void)(reactor))
 #endif
+
+/* One instance per outer loop, shared by every dispatch entry point. */
+struct tr_reactor_turn {
+	struct tr_reactor_work left;
+	uint64_t timer_lateness_ns;
+	int poll_timeout;
+	int polled;
+};
 
 struct tr_tx_pool;
 
@@ -106,8 +116,11 @@ struct tr_connection {
 	int tx_wait_writable;
 	int tx_scheduled;
 	int rx_paused;
+	int rx_scheduled;
+	int rx_error_pending;
 
 	struct tr_connection *tx_ready_next;
+	struct tr_connection *rx_ready_next;
 
 	uint64_t rx_bytes;
 	uint64_t tx_bytes;
@@ -167,6 +180,11 @@ struct tr_reactor {
 
 	struct tr_connection *tx_ready_head;
 	struct tr_connection *tx_ready_tail;
+	struct tr_connection *rx_ready_head;
+	struct tr_connection *rx_ready_tail;
+
+	/* Owner-written; external snapshots are serialized through owner call. */
+	struct tr_reactor_stats stats;
 
 	tr_reactor_frame_cb frame_cb;
 	tr_reactor_event_cb event_cb;
@@ -569,6 +587,57 @@ static void tr_unschedule_tx(struct tr_reactor *reactor,
 	connection->tx_ready_next = NULL;
 }
 
+static void tr_schedule_rx(struct tr_reactor *reactor,
+			   struct tr_connection *connection)
+{
+	if (!connection || connection->state != TR_CONN_ACTIVE ||
+	    __atomic_load_n(&connection->rx_paused, __ATOMIC_RELAXED) ||
+	    connection->rx_scheduled)
+		return;
+
+	connection->rx_scheduled = 1;
+	connection->rx_ready_next = NULL;
+
+	if (reactor->rx_ready_tail)
+		reactor->rx_ready_tail->rx_ready_next = connection;
+	else
+		reactor->rx_ready_head = connection;
+
+	reactor->rx_ready_tail = connection;
+}
+
+static void tr_unschedule_rx(struct tr_reactor *reactor,
+			     struct tr_connection *connection)
+{
+	struct tr_connection *prev = NULL;
+	struct tr_connection *cur = reactor->rx_ready_head;
+
+	if (!connection->rx_scheduled)
+		return;
+
+	while (cur) {
+		if (cur == connection) {
+			if (prev)
+				prev->rx_ready_next = cur->rx_ready_next;
+			else
+				reactor->rx_ready_head = cur->rx_ready_next;
+
+			if (reactor->rx_ready_tail == cur)
+				reactor->rx_ready_tail = prev;
+
+			cur->rx_ready_next = NULL;
+			cur->rx_scheduled = 0;
+			return;
+		}
+
+		prev = cur;
+		cur = cur->rx_ready_next;
+	}
+
+	connection->rx_scheduled = 0;
+	connection->rx_ready_next = NULL;
+}
+
 static void tr_release_tx_queue(struct tr_reactor *reactor,
 				struct tr_connection *connection)
 {
@@ -628,6 +697,8 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	connection->fd = -1;
 
 	tr_unschedule_tx(reactor, connection);
+	tr_unschedule_rx(reactor, connection);
+	connection->rx_error_pending = 0;
 	tr_parser_reset(&connection->parser);
 	tr_release_tx_queue(reactor, connection);
 
@@ -850,9 +921,11 @@ static void tr_connection_complete_tx(struct tr_reactor *reactor,
 }
 
 static void tr_connection_flush_tx(struct tr_reactor *reactor,
-				   struct tr_connection *connection)
+				   struct tr_connection *connection,
+				   struct tr_reactor_turn *turn)
 {
-	size_t budget = reactor->config.tx_budget_bytes;
+	size_t budget = turn->left.tx_bytes < TR_IO_QUANTUM ?
+		(size_t)turn->left.tx_bytes : TR_IO_QUANTUM;
 
 	connection->tx_scheduled = 0;
 	connection->tx_ready_next = NULL;
@@ -873,6 +946,20 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 			return;
 		}
 
+		/* Limit the syscall itself, including header and scatter/gather slices. */
+		{
+			size_t remaining = budget;
+			int i;
+
+			for (i = 0; i < iov_count; ++i) {
+				if (iov[i].iov_len >= remaining) {
+					iov[i].iov_len = remaining;
+					iov_count = i + 1;
+					break;
+				}
+				remaining -= iov[i].iov_len;
+			}
+		}
 		memset(&message, 0, sizeof(message));
 		message.msg_iov = iov;
 		message.msg_iovlen = (size_t)iov_count;
@@ -884,10 +971,8 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 			__atomic_store_n(&connection->last_tx_activity_ns,
 					 tr_reactor_now_ns(), __ATOMIC_RELAXED);
 			item->wire_pos += (uint64_t)n;
-			if ((size_t)n >= budget)
-				budget = 0;
-			else
-				budget -= (size_t)n;
+			budget -= (size_t)n;
+			turn->left.tx_bytes -= (uint64_t)n;
 
 			if (item->wire_pos == item->wire_len) {
 				(void)__atomic_fetch_add(&connection->tx_frames,
@@ -946,11 +1031,11 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		tr_schedule_tx(reactor, connection);
 }
 
-static void tr_run_tx_ready(struct tr_reactor *reactor)
+static void tr_run_tx_ready(struct tr_reactor *reactor,
+			    struct tr_reactor_turn *turn)
 {
-	uint32_t count = 0;
-
-	while (reactor->tx_ready_head && count < TR_TX_READY_BATCH) {
+	while (reactor->tx_ready_head && turn->left.tx_dispatches != 0 &&
+	       turn->left.tx_bytes != 0) {
 		struct tr_connection *connection = reactor->tx_ready_head;
 
 		reactor->tx_ready_head = connection->tx_ready_next;
@@ -958,8 +1043,8 @@ static void tr_run_tx_ready(struct tr_reactor *reactor)
 			reactor->tx_ready_tail = NULL;
 
 		connection->tx_ready_next = NULL;
-		tr_connection_flush_tx(reactor, connection);
-		count++;
+		turn->left.tx_dispatches--;
+		tr_connection_flush_tx(reactor, connection, turn);
 	}
 }
 
@@ -988,9 +1073,11 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 }
 
 static void tr_connection_on_readable(struct tr_reactor *reactor,
-				      struct tr_connection *connection)
+				      struct tr_connection *connection,
+				      struct tr_reactor_turn *turn)
 {
-	size_t budget = reactor->config.rx_budget_bytes;
+	size_t budget = turn->left.rx_bytes < TR_IO_QUANTUM ?
+		(size_t)turn->left.rx_bytes : TR_IO_QUANTUM;
 
 	while (budget != 0 && connection->state == TR_CONN_ACTIVE) {
 		struct tr_frame frame;
@@ -1038,6 +1125,7 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 					 tr_reactor_now_ns(), __ATOMIC_RELAXED);
 			tr_frame_init(&frame);
 			budget -= (size_t)n;
+			turn->left.rx_bytes -= (uint64_t)n;
 
 			ret = tr_parser_produce(&connection->parser, (size_t)n,
 						&frame);
@@ -1088,6 +1176,31 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 					     TR_CONN_EVENT_ERROR, TR_ERR_SYS);
 		return;
 	}
+
+	/* Quantum/turn exhaustion is runnable work, unlike EAGAIN or RX pause. */
+	tr_schedule_rx(reactor, connection);
+}
+
+static void tr_run_rx_ready(struct tr_reactor *reactor,
+			    struct tr_reactor_turn *turn)
+{
+	while (reactor->rx_ready_head && turn->left.rx_dispatches != 0 &&
+	       turn->left.rx_bytes != 0) {
+		struct tr_connection *connection = reactor->rx_ready_head;
+		int error_pending = connection->rx_error_pending;
+
+		reactor->rx_ready_head = connection->rx_ready_next;
+		if (!reactor->rx_ready_head)
+			reactor->rx_ready_tail = NULL;
+		connection->rx_scheduled = 0;
+		connection->rx_ready_next = NULL;
+		connection->rx_error_pending = 0;
+		turn->left.rx_dispatches--;
+		tr_connection_on_readable(reactor, connection, turn);
+		if (error_pending)
+			tr_connection_close_internal(reactor, connection,
+						     TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+	}
 }
 
 static void tr_connection_on_writable(struct tr_reactor *reactor,
@@ -1114,8 +1227,9 @@ static void tr_reactor_drain_wake(struct tr_reactor *reactor)
 	for (;;) {
 		ssize_t n = read(reactor->wake_fd, &value, sizeof(value));
 
+		/* A non-semaphore eventfd read consumes the accumulated counter. */
 		if (n == (ssize_t)sizeof(value))
-			continue;
+			return;
 		if (n < 0 && errno == EINTR)
 			continue;
 		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
@@ -1251,7 +1365,8 @@ static void tr_process_quiesce(const struct tr_command *command)
 	tr_reactor_sync_complete(command->u.quiesce.sync, TR_OK);
 }
 
-static int tr_process_completions(struct tr_reactor *reactor)
+static int tr_process_completions(struct tr_reactor *reactor,
+				  uint64_t *remaining)
 {
 	struct tr_completion completions[TR_COMPLETION_BATCH];
 	size_t count;
@@ -1261,8 +1376,9 @@ static int tr_process_completions(struct tr_reactor *reactor)
 	TR_ASSERT_REACTOR_OWNER(reactor);
 
 	count = tr_completion_queue_pop_batch(
-		&reactor->completions, completions, TR_COMPLETION_BATCH,
+		&reactor->completions, completions, (size_t)*remaining,
 		&has_more);
+	*remaining -= count;
 	for (i = 0; i < count; ++i)
 		if (completions[i].fn)
 			completions[i].fn(completions[i].arg);
@@ -1279,7 +1395,8 @@ static void tr_process_call(const struct tr_command *command)
 	tr_reactor_sync_complete(command->u.call.sync, status);
 }
 
-static int tr_process_commands(struct tr_reactor *reactor)
+static int tr_process_commands(struct tr_reactor *reactor,
+			       struct tr_reactor_turn *turn)
 {
 	struct tr_command commands[TR_COMMAND_BATCH];
 	size_t count;
@@ -1288,7 +1405,8 @@ static int tr_process_commands(struct tr_reactor *reactor)
 	TR_ASSERT_REACTOR_OWNER(reactor);
 
 	count = tr_command_queue_pop_batch(&reactor->commands, commands,
-					   TR_COMMAND_BATCH);
+					   (size_t)turn->left.commands);
+	turn->left.commands -= count;
 	for (i = 0; i < count; ++i) {
 		const struct tr_command *command = &commands[i];
 
@@ -1335,7 +1453,7 @@ static int tr_process_commands(struct tr_reactor *reactor)
 	 * any later producer then sets wake_pending and signals the eventfd.
 	 * No unsynchronized queue count snapshot or extra queue API is needed.
 	 */
-	return count == TR_COMMAND_BATCH;
+	return turn->left.commands == 0;
 }
 
 static void tr_handle_connection_event(struct tr_reactor *reactor,
@@ -1351,7 +1469,7 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 		return;
 
 	if (events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP))
-		tr_connection_on_readable(reactor, connection);
+		tr_schedule_rx(reactor, connection);
 
 	if (connection->state != TR_CONN_ACTIVE)
 		return;
@@ -1363,14 +1481,21 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 		return;
 
 	if (events & EPOLLERR) {
-		tr_connection_close_internal(reactor, connection,
-					     TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+		/* Preserve readable-before-error handling when RX is deferred. */
+		if (connection->rx_scheduled)
+			connection->rx_error_pending = 1;
+		else
+			tr_connection_close_internal(reactor, connection,
+						     TR_CONN_EVENT_ERROR, TR_ERR_SYS);
 	}
 }
 
-static int tr_process_timers(struct tr_reactor *reactor)
+static int tr_process_timers(struct tr_reactor *reactor,
+			     struct tr_reactor_turn *turn)
 {
 	uint64_t now_ns;
+	uint64_t deadline_ns;
+	size_t count;
 	int has_more_due = 0;
 
 	TR_ASSERT_REACTOR_OWNER(reactor);
@@ -1378,8 +1503,15 @@ static int tr_process_timers(struct tr_reactor *reactor)
 	if (now_ns == 0)
 		return 0;
 
-	(void)tr_timer_queue_run_due(&reactor->timers, now_ns,
-				     TR_TIMER_BATCH, &has_more_due);
+	deadline_ns = tr_timer_queue_next_deadline(&reactor->timers);
+	if (turn->left.timer_callbacks != 0 && deadline_ns != 0 &&
+	    deadline_ns <= now_ns &&
+	    now_ns - deadline_ns > turn->timer_lateness_ns)
+		turn->timer_lateness_ns = now_ns - deadline_ns;
+	count = tr_timer_queue_run_due(&reactor->timers, now_ns,
+				       (size_t)turn->left.timer_callbacks,
+				       &has_more_due);
+	turn->left.timer_callbacks -= count;
 	return has_more_due;
 }
 
@@ -1418,50 +1550,94 @@ static void tr_cleanup_connections(struct tr_reactor *reactor)
 	}
 }
 
+static void tr_record_turn(struct tr_reactor *reactor,
+			   const struct tr_reactor_turn *turn)
+{
+	struct tr_reactor_stats *stats = &reactor->stats;
+
+	stats->turns++;
+#define TR_RECORD_WORK(field) do { \
+	uint64_t used = stats->limits.field - turn->left.field; \
+	stats->total.field += used; \
+	if (used > stats->max_per_turn.field) \
+		stats->max_per_turn.field = used; \
+	if (turn->left.field == 0) \
+		stats->budget_hits.field++; \
+} while (0)
+	TR_RECORD_WORK(commands);
+	TR_RECORD_WORK(completions);
+	TR_RECORD_WORK(timer_callbacks);
+	TR_RECORD_WORK(rx_bytes);
+	TR_RECORD_WORK(tx_bytes);
+	TR_RECORD_WORK(rx_dispatches);
+	TR_RECORD_WORK(tx_dispatches);
+#undef TR_RECORD_WORK
+	if (turn->timer_lateness_ns > stats->timer_lateness_ns_max)
+		stats->timer_lateness_ns_max = turn->timer_lateness_ns;
+	if (turn->polled) {
+		if (turn->poll_timeout == 0)
+			stats->epoll_polls++;
+		else
+			stats->epoll_waits++;
+	}
+}
+
+static void tr_drain_completions(struct tr_reactor *reactor)
+{
+	int more;
+
+	/* accepting is closed before STOP: all remaining entries must be applied. */
+	do {
+		uint64_t remaining = TR_COMPLETION_BATCH;
+
+		more = tr_process_completions(reactor, &remaining);
+		reactor->stats.shutdown_completions += TR_COMPLETION_BATCH - remaining;
+	} while (more);
+}
+
 static void *tr_reactor_thread_main(void *arg)
 {
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
-	int commands_pending = 0;
-	int completions_pending = 0;
-	int timers_pending = 0;
 
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
 
 	while (!reactor->stopping) {
-		int timeout;
+		struct tr_reactor_turn turn = { .left = reactor->stats.limits };
+		int commands_pending;
+		int completions_pending;
+		int timers_pending;
 		int count;
 		int i;
 
-		commands_pending = tr_process_commands(reactor);
+		commands_pending = tr_process_commands(reactor, &turn);
 		if (reactor->stopping) {
-			/*
-			 * stop() 先在 ctl_lock 下关闭 accepting，再入队 STOP。
-			 * 因此此刻 completion queue 中的项全部是在 STOP 前已接受，
-			 * 必须 drain 完再退出。Timer 不在 stop 时补跑业务 callback。
-			 */
-			do {
-				completions_pending =
-					tr_process_completions(reactor);
-			} while (completions_pending);
+			tr_record_turn(reactor, &turn);
+			tr_drain_completions(reactor);
 			break;
 		}
 
-		completions_pending = tr_process_completions(reactor);
-		timers_pending = tr_process_timers(reactor);
-		tr_run_tx_ready(reactor);
+		completions_pending = tr_process_completions(reactor,
+							     &turn.left.completions);
+		timers_pending = tr_process_timers(reactor, &turn);
+		tr_run_rx_ready(reactor, &turn);
+		tr_run_tx_ready(reactor, &turn);
 
-		if (reactor->tx_ready_head || commands_pending ||
-		    completions_pending || timers_pending)
-			timeout = 0;
+		if (reactor->rx_ready_head || reactor->tx_ready_head ||
+		    commands_pending || completions_pending || timers_pending)
+			turn.poll_timeout = 0;
 		else
-			timeout = tr_reactor_timer_timeout_ms(reactor);
+			turn.poll_timeout = tr_reactor_timer_timeout_ms(reactor);
 
+		turn.polled = 1;
 		count = epoll_wait(reactor->epoll_fd, events,
-				   (int)TR_REACTOR_EVENT_BATCH, timeout);
+				   (int)TR_REACTOR_EVENT_BATCH, turn.poll_timeout);
 		if (count < 0) {
-			if (errno == EINTR)
+			int interrupted = errno == EINTR;
+
+			tr_record_turn(reactor, &turn);
+			if (interrupted)
 				continue;
 			break;
 		}
@@ -1469,37 +1645,27 @@ static void *tr_reactor_thread_main(void *arg)
 		for (i = 0; i < count; ++i) {
 			if (events[i].data.u64 == TR_WAKE_TOKEN) {
 				tr_reactor_drain_wake(reactor);
-				/* Commands run only at the next turn's budget boundary. */
-				if (!reactor->stopping)
-					completions_pending =
-						tr_process_completions(reactor);
+				(void)tr_process_completions(reactor,
+							     &turn.left.completions);
 			} else {
 				tr_handle_connection_event(reactor,
 							   events[i].data.u64,
 							   events[i].events);
 			}
-
-			if (reactor->stopping)
-				break;
 		}
 
-		if (reactor->stopping) {
-			do {
-				completions_pending =
-					tr_process_completions(reactor);
-			} while (completions_pending);
-			break;
-		}
-
-		/* I/O callback 期间也可能跨过 timer deadline。 */
-		timers_pending = tr_process_timers(reactor);
-		tr_run_tx_ready(reactor);
+		tr_run_rx_ready(reactor, &turn);
+		/* I/O may cross a deadline, but does not replenish timer/TX budgets. */
+		(void)tr_process_timers(reactor, &turn);
+		tr_run_tx_ready(reactor, &turn);
+		tr_record_turn(reactor, &turn);
 	}
 
 	tr_cleanup_connections(reactor);
 	tr_current_reactor_owner = NULL;
 	return NULL;
 }
+
 static void tr_default_config(struct tr_reactor_config *config)
 {
 	config->max_connections = tr_nonzero(config->max_connections, 128U);
@@ -1589,6 +1755,15 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	if (config)
 		reactor->config = *config;
 	tr_default_config(&reactor->config);
+	reactor->stats.limits = (struct tr_reactor_work) {
+		.commands = TR_COMMAND_BATCH,
+		.completions = TR_COMPLETION_BATCH,
+		.timer_callbacks = TR_TIMER_BATCH,
+		.rx_bytes = reactor->config.rx_budget_bytes,
+		.tx_bytes = reactor->config.tx_budget_bytes,
+		.rx_dispatches = TR_RX_READY_BATCH,
+		.tx_dispatches = TR_TX_READY_BATCH
+	};
 
 	if (reactor->config.max_payload_len > reactor->config.rx_buffer_size)
 		return TR_ERR_BAD_LENGTH;
@@ -2291,6 +2466,38 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		ret = tr_reactor_sync_wait(&sync);
 	tr_reactor_sync_destroy(&sync);
 	return ret;
+}
+
+struct tr_reactor_stats_request {
+	struct tr_reactor *reactor;
+	struct tr_reactor_stats *out;
+};
+
+static int tr_reactor_stats_on_owner(void *arg)
+{
+	struct tr_reactor_stats_request *request = arg;
+
+	*request->out = request->reactor->stats;
+	return TR_OK;
+}
+
+int tr_reactor_get_stats(struct tr_reactor *reactor, struct tr_reactor_stats *out)
+{
+	struct tr_reactor_stats_request request = { reactor, out };
+
+	if (!reactor || !out)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor))
+		return tr_reactor_stats_on_owner(&request);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started) {
+		*out = reactor->stats;
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return TR_OK;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+	return tr_reactor_call(reactor, tr_reactor_stats_on_owner, &request);
 }
 
 struct tr_reactor_timer_register_request {

@@ -51,6 +51,33 @@ struct tr_connection_stats {
 	int tx_wait_writable;
 };
 
+/* Work units: dequeued entries, timer callbacks, wire bytes and ready visits. */
+struct tr_reactor_work {
+	uint64_t commands;
+	uint64_t completions;
+	uint64_t timer_callbacks;
+	uint64_t rx_bytes;
+	uint64_t tx_bytes;
+	uint64_t rx_dispatches;
+	uint64_t tx_dispatches;
+};
+
+struct tr_reactor_stats {
+	uint64_t turns;
+	struct tr_reactor_work limits;
+	struct tr_reactor_work total;
+	struct tr_reactor_work max_per_turn;
+	/* Turns reaching a limit, not proof that more work remained. */
+	struct tr_reactor_work budget_hits;
+	/* epoll calls with zero / nonzero timeout, not measured sleep time. */
+	uint64_t epoll_polls;
+	uint64_t epoll_waits;
+	/* Oldest due timer's lateness sampled at timer batch dispatch. */
+	uint64_t timer_lateness_ns_max;
+	/* STOP drain is outside normal turn limits and total.completions. */
+	uint64_t shutdown_completions;
+};
+
 enum tr_frame_disposition { TR_FRAME_RELEASE = 0, TR_FRAME_TAKE_OWNERSHIP = 1 };
 
 enum tr_connection_event { TR_CONN_EVENT_CLOSED = 1, TR_CONN_EVENT_ERROR = 2 };
@@ -72,6 +99,7 @@ struct tr_reactor_config {
 	uint32_t rx_buffer_size;
 	uint32_t max_payload_len;
 
+	/* Aggregate wire-byte limits per Reactor turn, shared by all connections. */
 	uint32_t rx_budget_bytes;
 	uint32_t tx_budget_bytes;
 };
@@ -144,6 +172,15 @@ int tr_reactor_get_connection_state(struct tr_conn_handle connection,
 /* 无锁读取 connection 热路径计数器快照，仅用于诊断/监控。 */
 int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 				    struct tr_connection_stats *out);
+
+/*
+ * Coherent snapshot of completed turns since creation, excluding the current
+ * turn and nested direct owner calls. Running reactors serialize the read via
+ * synchronous owner call; owner callbacks read directly. Also valid before
+ * start and after stop has joined. A race with stop may return TR_ERR_CLOSED;
+ * failures leave *out unchanged. The caller must keep reactor alive.
+ */
+int tr_reactor_get_stats(struct tr_reactor *reactor, struct tr_reactor_stats *out);
 
 /* 获取 Reactor 不可变 wire limits 快照，供上层能力协商使用。 */
 int tr_reactor_get_limits(struct tr_reactor *reactor,

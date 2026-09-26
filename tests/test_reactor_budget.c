@@ -26,6 +26,7 @@ struct test_ctx {
 	pthread_cond_t cond;
 	struct tr_reactor *reactor;
 	struct tr_reactor_timer_handle timer;
+	struct tr_reactor_stats stats;
 	uint32_t byte_budget;
 	unsigned timer_goal;
 	unsigned completion_goal;
@@ -42,11 +43,15 @@ struct test_ctx {
 	int monitor;
 	int send_eagain;
 	int watch_idle; /* Immutable while the Reactor is running. */
+	int gate_first_recv;
+	int first_recv_seen;
 	/* Gate and progress predicates are protected by lock. */
 	int entered;
 	int release;
 	int done;
 	int idle;
+	int rx_entered;
+	int rx_release;
 };
 
 /* Installed before pthread_create and cleared after stop/join. */
@@ -109,6 +114,15 @@ ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
 	n = __real_recv(fd, buffer, len, flags);
 	if (active && active->monitor && n > 0)
 		active->turn_rx += (size_t)n;
+	if (active && n > 0 && active->gate_first_recv && !active->first_recv_seen) {
+		active->first_recv_seen = 1;
+		assert(pthread_mutex_lock(&active->lock) == 0);
+		active->rx_entered = 1;
+		assert(pthread_cond_broadcast(&active->cond) == 0);
+		while (!active->rx_release)
+			assert(pthread_cond_wait(&active->cond, &active->lock) == 0);
+		assert(pthread_mutex_unlock(&active->lock) == 0);
+	}
 	return n;
 }
 
@@ -213,24 +227,56 @@ static void release_gate(struct test_ctx *ctx, pthread_t thread)
 	assert(pthread_join(thread, NULL) == 0);
 }
 
+static void check_stats(const struct tr_reactor_stats *stats, uint32_t budget)
+{
+	assert(stats->limits.commands == 64U);
+	assert(stats->limits.completions == 64U);
+	assert(stats->limits.timer_callbacks == 64U);
+	assert(stats->limits.rx_dispatches == 64U);
+	assert(stats->limits.tx_dispatches == 64U);
+	assert(stats->limits.rx_bytes == budget && stats->limits.tx_bytes == budget);
+#define CHECK_WORK(field) do { \
+	assert(stats->max_per_turn.field <= stats->limits.field); \
+	assert(stats->total.field >= stats->max_per_turn.field); \
+	assert(stats->budget_hits.field <= stats->turns); \
+} while (0)
+	CHECK_WORK(commands);
+	CHECK_WORK(completions);
+	CHECK_WORK(timer_callbacks);
+	CHECK_WORK(rx_bytes);
+	CHECK_WORK(tx_bytes);
+	CHECK_WORK(rx_dispatches);
+	CHECK_WORK(tx_dispatches);
+#undef CHECK_WORK
+	assert(stats->epoll_polls + stats->epoll_waits <= stats->turns);
+}
+
 static int finish_on_owner(void *arg)
 {
 	struct test_ctx *ctx = arg;
+	struct tr_reactor_stats again;
 
+	/* Two direct owner snapshots cannot observe a partly recorded turn. */
+	assert(tr_reactor_get_stats(ctx->reactor, &ctx->stats) == TR_OK);
+	assert(tr_reactor_get_stats(ctx->reactor, &again) == TR_OK);
+	assert(memcmp(&again, &ctx->stats, sizeof(again)) == 0);
+	check_stats(&again, ctx->byte_budget);
 	check_turn(ctx);
 	ctx->monitor = 0;
 	assert(ctx->checked_turns != 0);
 	return TR_OK;
 }
 
-static void create_ctx(struct test_ctx *ctx, uint32_t budget)
+static void create_ctx(struct test_ctx *ctx, uint32_t budget, uint32_t connections)
 {
 	struct tr_reactor_config config = {
-		.max_connections = 4U, .command_capacity = 512U,
+		.max_connections = connections, .command_capacity = 512U,
 		.rx_buffer_count = 8U, .rx_buffer_size = PAYLOAD_SIZE,
 		.max_payload_len = PAYLOAD_SIZE,
 		.rx_budget_bytes = budget, .tx_budget_bytes = budget
 	};
+
+	struct tr_reactor_stats unchanged;
 
 	memset(ctx, 0, sizeof(*ctx));
 	ctx->byte_budget = budget;
@@ -238,13 +284,28 @@ static void create_ctx(struct test_ctx *ctx, uint32_t budget)
 	assert(pthread_cond_init(&ctx->cond, NULL) == 0);
 	assert(tr_reactor_create(&config, frame_cb, NULL, ctx, &ctx->reactor) == TR_OK);
 	assert(tr_reactor_timer_register(ctx->reactor, timer, ctx, &ctx->timer) == TR_OK);
+	assert(tr_reactor_get_stats(ctx->reactor, &ctx->stats) == TR_OK);
+	check_stats(&ctx->stats, budget);
+	assert(ctx->stats.turns == 0 && ctx->stats.total.commands == 0);
+	unchanged = ctx->stats;
+	assert(tr_reactor_get_stats(NULL, &ctx->stats) == TR_ERR_INVALID);
+	assert(memcmp(&unchanged, &ctx->stats, sizeof(unchanged)) == 0);
+	assert(tr_reactor_get_stats(ctx->reactor, NULL) == TR_ERR_INVALID);
 	active = ctx;
 }
 
 static void destroy_ctx(struct test_ctx *ctx)
 {
+	struct tr_reactor_stats running;
+
+	assert(tr_reactor_get_stats(ctx->reactor, &running) == TR_OK);
+	check_stats(&running, ctx->byte_budget);
 	assert(tr_reactor_call(ctx->reactor, finish_on_owner, ctx) == TR_OK);
+	assert(ctx->stats.turns >= running.turns);
 	assert(tr_reactor_stop(ctx->reactor) == TR_OK);
+	assert(tr_reactor_get_stats(ctx->reactor, &ctx->stats) == TR_OK);
+	check_stats(&ctx->stats, ctx->byte_budget);
+	assert(ctx->stats.turns > running.turns);
 	active = NULL;
 	tr_reactor_destroy(ctx->reactor);
 	assert(pthread_cond_destroy(&ctx->cond) == 0);
@@ -302,7 +363,7 @@ static void test_mixed_budget(uint32_t budget)
 	int sockets[2][2];
 	unsigned i;
 
-	create_ctx(&ctx, budget);
+	create_ctx(&ctx, budget, 4U);
 	ctx.timer_goal = CALLBACKS;
 	ctx.completion_goal = CALLBACKS;
 	ctx.frame_goal = 4U;
@@ -338,6 +399,22 @@ static void test_mixed_budget(uint32_t budget)
 	}
 	wait_for(&ctx, &ctx.done);
 	destroy_ctx(&ctx);
+	assert(ctx.stats.total.completions == CALLBACKS);
+	assert(ctx.stats.total.timer_callbacks == CALLBACKS);
+	assert(ctx.stats.total.rx_bytes == 2U * WIRE_SIZE);
+	assert(ctx.stats.total.tx_bytes == 2U * WIRE_SIZE);
+	assert(ctx.stats.max_per_turn.completions == 64U);
+	assert(ctx.stats.max_per_turn.timer_callbacks == 64U);
+	assert(ctx.stats.budget_hits.completions == CALLBACKS / 64U);
+	assert(ctx.stats.budget_hits.timer_callbacks == CALLBACKS / 64U);
+	assert(ctx.stats.timer_lateness_ns_max != 0);
+	assert(ctx.stats.shutdown_completions == 0);
+	if (budget < WIRE_SIZE) {
+		assert(ctx.stats.max_per_turn.rx_bytes == budget);
+		assert(ctx.stats.max_per_turn.tx_bytes == budget);
+		assert(ctx.stats.budget_hits.rx_bytes != 0);
+		assert(ctx.stats.budget_hits.tx_bytes != 0);
+	}
 	for (i = 0; i < 2U; ++i)
 		assert(close(sockets[i][1]) == 0);
 	assert(tr_buffer_pool_free_count(&pool) == 8U);
@@ -360,7 +437,7 @@ static void test_eagain_wait(void)
 	int sockets[2];
 	int size = 4096;
 
-	create_ctx(&ctx, 17U);
+	create_ctx(&ctx, 17U, 4U);
 	ctx.watch_idle = 1;
 	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
 	assert(setsockopt(sockets[0], SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) == 0);
@@ -389,8 +466,59 @@ static void test_eagain_wait(void)
 	assert(memcmp(received + filled, expected, sizeof(expected)) == 0);
 	free(received);
 	destroy_ctx(&ctx);
+	assert(ctx.stats.total.tx_bytes == TR_WIRE_HEADER_SIZE);
+	assert(ctx.stats.total.rx_bytes == 0);
+	assert(ctx.stats.epoll_waits != 0);
 	assert(close(sockets[1]) == 0);
 	puts("TX/EAGAIN/wait/resume: ok");
+}
+
+static void test_rx_ready_close_reuse(void)
+{
+	struct test_ctx ctx;
+	struct tr_conn_handle old_handle;
+	struct tr_conn_handle new_handle;
+	struct tr_reactor_stats stats;
+	unsigned char wire[WIRE_SIZE];
+	pthread_t thread;
+	int old_sockets[2];
+	int new_sockets[2];
+
+	create_ctx(&ctx, 1U, 1U);
+	ctx.gate_first_recv = 1;
+	ctx.frame_goal = 2U;
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, old_sockets) == 0);
+	assert(tr_reactor_start(ctx.reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(ctx.reactor, old_sockets[0], &old_handle) == TR_OK);
+	assert(tr_reactor_quiesce(ctx.reactor) == TR_OK);
+	assert(pthread_create(&thread, NULL, gate_thread, &ctx) == 0);
+	wait_for(&ctx, &ctx.entered);
+	encode_data(wire);
+	assert(write(old_sockets[1], wire, sizeof(wire)) == (ssize_t)sizeof(wire));
+	release_gate(&ctx, thread);
+	wait_for(&ctx, &ctx.rx_entered);
+	/* The first byte uses the turn quota; close must remove its RX continuation. */
+	assert(tr_reactor_close(old_handle) == TR_OK);
+	assert(pthread_mutex_lock(&ctx.lock) == 0);
+	ctx.rx_release = 1;
+	assert(pthread_cond_broadcast(&ctx.cond) == 0);
+	assert(pthread_mutex_unlock(&ctx.lock) == 0);
+	assert(tr_reactor_quiesce(ctx.reactor) == TR_OK);
+	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
+	assert(stats.total.rx_bytes == 1U);
+	assert(close(old_sockets[1]) == 0);
+
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, new_sockets) == 0);
+	assert(tr_reactor_adopt_fd(ctx.reactor, new_sockets[0], &new_handle) == TR_OK);
+	assert(new_handle.slot == old_handle.slot);
+	assert(new_handle.generation != old_handle.generation);
+	assert(tr_reactor_close(old_handle) == TR_ERR_STALE);
+	assert(write(new_sockets[1], wire, sizeof(wire)) == (ssize_t)sizeof(wire));
+	wait_for(&ctx, &ctx.done);
+	destroy_ctx(&ctx);
+	assert(ctx.stats.total.rx_bytes == 1U + WIRE_SIZE);
+	assert(close(new_sockets[1]) == 0);
+	puts("RX/queued-close/same-slot-reuse: ok");
 }
 
 static void noop(void *arg)
@@ -427,6 +555,7 @@ int main(void)
 	test_mixed_budget(17U);
 	test_mixed_budget(4096U);
 	test_eagain_wait();
+	test_rx_ready_close_reuse();
 	test_completion_zero_budget();
 	alarm(0U);
 	return 0;
