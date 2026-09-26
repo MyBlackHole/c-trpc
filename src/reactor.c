@@ -35,6 +35,8 @@
 #define TR_TX_READY_BATCH 64U
 #define TR_RX_READY_BATCH 64U
 #define TR_IO_QUANTUM (64U * 1024U)
+/* Bound priority overtakes of the oldest DATA frame, across loop turns. */
+#define TR_CONTROL_BURST 8U
 #define TR_WAKE_TOKEN UINT64_MAX
 
 /*
@@ -67,6 +69,9 @@ struct tr_tx_pool;
 
 struct tr_tx_item {
 	struct tr_tx_item *next;
+	struct tr_tx_item *prev;
+	/* FIFO of every non-DATA item, including ordering barriers. */
+	struct tr_tx_item *control_next;
 	struct tr_tx_pool *owner_pool;
 	uint8_t header[TR_WIRE_HEADER_SIZE];
 	struct tr_buffer *payloads[TR_REACTOR_MAX_TX_SLICES];
@@ -111,6 +116,10 @@ struct tr_connection {
 
 	struct tr_tx_item *tx_head;
 	struct tr_tx_item *tx_tail;
+	struct tr_tx_item *tx_control_head;
+	struct tr_tx_item *tx_control_tail;
+	struct tr_tx_item *tx_active;
+	uint32_t tx_control_streak;
 
 	uint32_t epoll_events;
 	int tx_wait_writable;
@@ -659,6 +668,10 @@ static void tr_release_tx_queue(struct tr_reactor *reactor,
 
 	connection->tx_head = NULL;
 	connection->tx_tail = NULL;
+	connection->tx_control_head = NULL;
+	connection->tx_control_tail = NULL;
+	connection->tx_active = NULL;
+	connection->tx_control_streak = 0;
 	__atomic_store_n(&connection->tx_queued_items, 0U, __ATOMIC_RELAXED);
 }
 
@@ -895,19 +908,54 @@ static int tr_tx_build_iov(struct tr_tx_item *item,
 	return count;
 }
 
-static void tr_connection_complete_tx(struct tr_reactor *reactor,
-				      struct tr_connection *connection)
+/* Only these header-only frames may cross DATA, never another control item. */
+static int tr_tx_can_bypass_data(const struct tr_tx_item *item)
 {
-	struct tr_tx_item *item = connection->tx_head;
+	if (item->message_len != 0 || item->base_flags != 0)
+		return 0;
+	if (item->type == TR_FRAME_WINDOW_UPDATE)
+		return item->stream_id != 0;
+	return (item->type == TR_FRAME_PING || item->type == TR_FRAME_PONG) &&
+	       item->stream_id == 0;
+}
 
-	(void)reactor;
+static struct tr_tx_item *tr_connection_next_tx(struct tr_connection *connection)
+{
+	struct tr_tx_item *item = connection->tx_active;
+	struct tr_tx_item *control = connection->tx_control_head;
 
-	if (!item)
-		return;
+	/* A partially submitted frame must survive both quota yield and EAGAIN. */
+	if (item && item->wire_pos != 0)
+		return item;
 
-	connection->tx_head = item->next;
-	if (!connection->tx_head)
-		connection->tx_tail = NULL;
+	item = connection->tx_head;
+	if (item && item->type == TR_FRAME_DATA && control &&
+	    connection->tx_control_streak < TR_CONTROL_BURST &&
+	    tr_tx_can_bypass_data(control))
+		item = control;
+	connection->tx_active = item;
+	return item;
+}
+
+static void tr_connection_complete_tx(struct tr_connection *connection,
+				      struct tr_tx_item *item)
+{
+	/* The selected control may be inside the FIFO: remove it in O(1). */
+	if (item->prev)
+		item->prev->next = item->next;
+	else
+		connection->tx_head = item->next;
+	if (item->next)
+		item->next->prev = item->prev;
+	else
+		connection->tx_tail = item->prev;
+
+	if (item->type != TR_FRAME_DATA) {
+		assert(connection->tx_control_head == item);
+		connection->tx_control_head = item->control_next;
+		if (!connection->tx_control_head)
+			connection->tx_control_tail = NULL;
+	}
 	(void)__atomic_fetch_sub(&connection->tx_queued_items, 1U,
 				 __ATOMIC_RELAXED);
 
@@ -932,12 +980,22 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 
 	while (budget != 0 && connection->state == TR_CONN_ACTIVE &&
 	       connection->tx_head) {
-		struct tr_tx_item *item = connection->tx_head;
+		struct tr_tx_item *item = tr_connection_next_tx(connection);
 		struct iovec iov[1U + TR_REACTOR_MAX_TX_SLICES];
 		struct msghdr message;
 		ssize_t n;
 		int iov_count;
 
+		/* Prepare a continuation only when selected, not ahead of CONTROL. */
+		if (item->wire_len == 0) {
+			int ret = tr_tx_prepare_frame(reactor, item);
+
+			if (ret != TR_OK) {
+				tr_connection_close_internal(reactor, connection,
+						     TR_CONN_EVENT_ERROR, ret);
+				return;
+			}
+		}
 		iov_count = tr_tx_build_iov(item, iov);
 		if (iov_count <= 0) {
 			tr_connection_close_internal(reactor, connection,
@@ -978,28 +1036,21 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 				(void)__atomic_fetch_add(&connection->tx_frames,
 							 UINT64_C(1),
 							 __ATOMIC_RELAXED);
+				connection->tx_active = NULL;
 				if (item->type == TR_FRAME_DATA) {
-					item->message_pos +=
-						item->frame_payload_len;
-					if (item->message_pos <
-					    item->message_len) {
-						int ret = tr_tx_prepare_frame(
-							reactor, item);
-						if (ret != TR_OK) {
-							tr_connection_close_internal(
-								reactor,
-								connection,
-								TR_CONN_EVENT_ERROR,
-								ret);
-							return;
-						}
+					connection->tx_control_streak = 0;
+					item->message_pos += item->frame_payload_len;
+					if (item->message_pos < item->message_len) {
+						item->wire_pos = 0;
+						item->wire_len = 0;
 					} else {
-						tr_connection_complete_tx(
-							reactor, connection);
+						tr_connection_complete_tx(connection, item);
 					}
 				} else {
-					tr_connection_complete_tx(reactor,
-								  connection);
+					if (tr_tx_can_bypass_data(item) &&
+					    connection->tx_control_streak < TR_CONTROL_BURST)
+						connection->tx_control_streak++;
+					tr_connection_complete_tx(connection, item);
 				}
 			}
 			continue;
@@ -1275,11 +1326,20 @@ static void tr_process_send(struct tr_reactor *reactor,
 	}
 
 	item->next = NULL;
+	item->prev = connection->tx_tail;
+	item->control_next = NULL;
 	if (connection->tx_tail)
 		connection->tx_tail->next = item;
 	else
 		connection->tx_head = item;
 	connection->tx_tail = item;
+	if (item->type != TR_FRAME_DATA) {
+		if (connection->tx_control_tail)
+			connection->tx_control_tail->control_next = item;
+		else
+			connection->tx_control_head = item;
+		connection->tx_control_tail = item;
+	}
 	(void)__atomic_fetch_add(&connection->tx_queued_items, 1U,
 				 __ATOMIC_RELAXED);
 

@@ -83,7 +83,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget"}) do
+for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -98,6 +98,8 @@ for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threa
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
                         "-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=epoll_wait", {force = true})
+        elseif name == "test_tx_priority" then
+            add_ldflags("-Wl,--wrap=sendmsg", {force = true})
         elseif name == "test_reactor_budget" then
             add_ldflags("-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=sendmsg", "-Wl,--wrap=recv",
@@ -107,3 +109,11 @@ for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threa
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()
 end
+
+-- Opt-in microbenchmark; never a CI timing gate or a default build target.
+target("bench_crc32c")
+    set_kind("binary")
+    set_default(false)
+    add_files("bench/bench_crc32c.c")
+    add_deps("trcore")
+target_end()

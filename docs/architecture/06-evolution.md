@@ -55,16 +55,21 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - command backlog 的保守非阻塞续处理与公平性/退出回归测试；
 - Command / Completion / Timer / RX / TX 共享整轮额度；
 - RX/TX ready 轮转、单连接 quantum 与严格 wire 字节预算；
-- owner 一致快照的累计工作、单轮峰值、额度耗尽、epoll 等待和 Timer 迟到采样。
+- owner 一致快照的累计工作、单轮峰值、额度耗尽、epoll 等待和 Timer 迟到采样；
+- header-only PING/PONG/WINDOW_UPDATE 的有界帧边界优先级、控制顺序屏障
+  与跨轮 DATA 防饥饿，见 [控制帧调度](../tx_priority.md)。
 
 命令预算与唤醒推导见 [Reactor 命令调度公平性](../reactor_fairness.md)。
 整轮限额、配置语义与统计口径见 [Reactor 整轮预算与调度诊断](../reactor_budget.md)。
 
 仍待：
 
-- CONTROL priority；
+- 逻辑 CONTROL lane 业务 DATA 的独立优先策略（仍按 DATA FIFO）；
 - 根据真实 profile 决定队列高水位、排队延迟与直方图等进一步指标，
   不把最小调度统计误认为完整性能观测体系。
+
+已提供 CRC32C 组件微基准；它不是端到端 RPC/BULK 性能证明。
+生产化与后续测量门槛见 [性能与生产化评估](../performance_readiness.md)。
 
 ## Phase 3 - Runtime Shard Abstraction
 
