@@ -15,7 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* Standalone diagnostic, not a production server or an open-loop load source. */
+/* Standalone diagnostic; open-loop mode is bounded by explicit in-flight slots. */
 #define SERVICE 1U
 #define METHOD_SMALL 1U
 #define METHOD_BULK 2U
@@ -29,12 +29,13 @@ struct options {
 	const char *scenario;
 	uint32_t port, requests, window, warmup, small_bytes, bulk_bytes;
 	uint32_t bulk_every, timeout_ms, slow_ms, workers, capacity, start_gate;
+	uint32_t rate_rps, executor_queue;
 };
 
 struct sample {
-	uint64_t start_ns, end_ns;
+	uint64_t scheduled_ns, start_ns, end_ns;
 	uint32_t bytes, method;
-	int submit_status, rpc_status, valid;
+	int submit_status, rpc_status, valid, scheduler_dropped;
 };
 
 struct client_run;
@@ -74,6 +75,21 @@ static uint64_t now_ns(void)
 	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
 }
 
+static void sleep_until_ns(uint64_t target_ns)
+{
+	struct timespec target = {
+		(time_t)(target_ns / UINT64_C(1000000000)),
+		(long)(target_ns % UINT64_C(1000000000))
+	};
+	int ret;
+
+	do {
+		ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &target, NULL);
+	} while (ret == EINTR);
+	if (ret != 0)
+		fatal("clock_nanosleep", ret);
+}
+
 static double cpu_seconds(const struct rusage *usage)
 {
 	return (double)usage->ru_utime.tv_sec + (double)usage->ru_stime.tv_sec +
@@ -97,11 +113,13 @@ static void usage(const char *program)
 {
 	fprintf(stderr,
 		"Usage: %s server|client [--host IPv4] [--port N]\n"
-		"  --scenario small|bulk|mixed|pressure --requests N --window N\n"
+		"  --scenario small|bulk|mixed|pressure|open --requests N --window N\n"
 		"  --warmup N --small-bytes N --bulk-bytes N --bulk-every N\n"
 		"  --timeout-ms N --slow-ms N --workers N --capacity N --start-gate 0|1\n"
+		"  --rate-rps N --executor-queue N (0 keeps the benchmark default)\n"
 		"Server binds loopback by default, prints readiness JSON, and exits on stdin EOF.\n"
-		"pressure uses the delayed method, then measures recovery on the SAME client.\n",
+		"pressure uses the delayed method, then measures recovery on the SAME client.\n"
+		"open schedules METHOD_SLOW arrivals independently of callback completion.\n",
 		program);
 }
 
@@ -111,7 +129,8 @@ static struct options parse_options(int argc, char **argv)
 		.host = "127.0.0.1", .scenario = "small", .port = 0,
 		.requests = 2000, .window = 8, .warmup = 100,
 		.small_bytes = 32, .bulk_bytes = 65536, .bulk_every = 4,
-		.timeout_ms = 5000, .slow_ms = 25, .workers = 4, .capacity = 64
+		.timeout_ms = 5000, .slow_ms = 25, .workers = 4, .capacity = 64,
+		.rate_rps = 200, .executor_queue = 0
 	};
 	struct in_addr address;
 	int i;
@@ -140,6 +159,8 @@ static struct options parse_options(int argc, char **argv)
 		ARG("--workers", workers)
 		ARG("--capacity", capacity)
 		ARG("--start-gate", start_gate)
+		ARG("--rate-rps", rate_rps)
+		ARG("--executor-queue", executor_queue)
 #undef ARG
 		usage(argv[0]);
 		fatal("unknown argument", 0);
@@ -147,19 +168,23 @@ static struct options parse_options(int argc, char **argv)
 	if (inet_pton(AF_INET, o.host, &address) != 1 || o.port > 65535U ||
 	    (!strcmp(o.role, "client") && o.port == 0) ||
 	    o.requests == 0 || o.requests > 1000000U || o.warmup > 100000U ||
-	    o.window == 0 || o.window > 64U || o.capacity < o.window || o.capacity > 256U ||
+	    o.window == 0 || o.window > 256U || o.capacity < o.window || o.capacity > 256U ||
+	    o.rate_rps == 0 || o.rate_rps > 1000000U ||
+	    (o.executor_queue != 0 && (o.executor_queue < 16U || o.executor_queue > 65536U)) ||
 	    o.workers == 0 || o.workers > 32U || o.small_bytes < 8U ||
 	    o.bulk_bytes < o.small_bytes || o.bulk_bytes > MAX_PAYLOAD ||
 	    o.bulk_every == 0 || o.timeout_ms == 0 || o.timeout_ms > 30000U ||
 	    o.slow_ms > 1000U || o.start_gate > 1U ||
 	    (uint64_t)o.capacity * (o.bulk_bytes + 512U) > UINT64_C(67108864) ||
 	    (strcmp(o.scenario, "small") && strcmp(o.scenario, "bulk") &&
-	     strcmp(o.scenario, "mixed") && strcmp(o.scenario, "pressure")))
+	     strcmp(o.scenario, "mixed") && strcmp(o.scenario, "pressure") &&
+	     strcmp(o.scenario, "open")))
 		fatal("invalid configuration or memory limit", 0);
 	return o;
 }
 
-static void configure_limits(struct tr_facade_limits *limits, const struct options *o)
+static void configure_limits(struct tr_facade_limits *limits, const struct options *o,
+			     int server)
 {
 	tr_facade_limits_init(limits);
 	limits->max_streams = 2U * o->capacity;
@@ -176,7 +201,8 @@ static void configure_limits(struct tr_facade_limits *limits, const struct optio
 	limits->initial_window_bytes = (uint64_t)limits->max_message_bytes * 4U;
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
 	limits->executor_threads = o->workers;
-	limits->executor_queue_capacity = 4U * o->capacity;
+	limits->executor_queue_capacity =
+		server && o->executor_queue ? o->executor_queue : 4U * o->capacity;
 }
 
 static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
@@ -219,7 +245,7 @@ static int run_server(const struct options *o)
 	uint32_t id;
 	int status;
 	tr_server_config_init(&config);
-	configure_limits(&config.limits, o);
+	configure_limits(&config.limits, o, 1);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
 	check(tr_server_create(&config, &server), "server create");
@@ -229,8 +255,11 @@ static int run_server(const struct options *o)
 	}
 	check(tr_server_listen(server, o->host, (uint16_t)o->port, &port), "listen");
 	check(tr_server_start(server), "server start");
-	printf("{\"type\":\"ready\",\"port\":%u,\"pid\":%ld,\"workers\":%u,\"capacity\":%u,\"slow_ms\":%u}\n",
-	       port, (long)getpid(), o->workers, o->capacity, o->slow_ms);
+	printf("{\"type\":\"ready\",\"port\":%u,\"pid\":%ld,\"workers\":%u,"
+	       "\"capacity\":%u,\"executor_queue\":%u,\"slow_ms\":%u}\n",
+	       port, (long)getpid(), o->workers, o->capacity,
+	       o->executor_queue ? o->executor_queue : 4U * o->capacity,
+	       o->slow_ms);
 	fflush(stdout);
 	/* No global signal policy: the harness closes this process's stdin. */
 	while (getchar() != EOF)
@@ -426,6 +455,219 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 	return failed ? -1 : 0;
 }
 
+
+static void report_open_phase(const struct sample *samples, uint32_t count,
+			      uint32_t rate_rps, uint64_t begin,
+			      uint64_t horizon, uint64_t end,
+			      double client_cpu_s, long peak_rss_kib,
+			      uint32_t window)
+{
+	uint64_t *ok_lat = malloc((size_t)count * sizeof(*ok_lat));
+	uint64_t *all_lat = malloc((size_t)count * sizeof(*all_lat));
+	uint64_t *lag = malloc((size_t)count * sizeof(*lag));
+	uint64_t bytes = 0;
+	uint32_t i, attempted = 0, accepted = 0, ok = 0, deadlines = 0;
+	uint32_t rpc_errors = 0, unavailable = 0, again = 0, submit_errors = 0;
+	uint32_t invalid = 0, dropped = 0;
+	double arrival_window;
+	double drain_elapsed;
+	double drain_tail_ms;
+
+	if (!ok_lat || !all_lat || !lag)
+		fatal("open-loop report allocation", errno);
+
+	for (i = 0; i < count; ++i) {
+		const struct sample *s = &samples[i];
+		lag[i] = s->start_ns > s->scheduled_ns ?
+			 s->start_ns - s->scheduled_ns : 0;
+		if (s->scheduler_dropped) {
+			dropped++;
+			continue;
+		}
+		attempted++;
+		if (s->submit_status != TR_OK) {
+			if (s->submit_status == TR_AGAIN)
+				again++;
+			else
+				submit_errors++;
+			continue;
+		}
+		all_lat[accepted++] = s->end_ns - s->start_ns;
+		if (!s->valid) {
+			invalid++;
+		} else if (s->rpc_status == TR_RPC_STATUS_OK) {
+			ok_lat[ok++] = s->end_ns - s->start_ns;
+			bytes += 2U * (uint64_t)s->bytes;
+		} else if (s->rpc_status == TR_RPC_STATUS_DEADLINE_EXCEEDED) {
+			deadlines++;
+		} else {
+			rpc_errors++;
+			if (s->rpc_status == TR_RPC_STATUS_UNAVAILABLE)
+				unavailable++;
+		}
+	}
+
+	qsort(ok_lat, ok, sizeof(*ok_lat), compare_u64);
+	qsort(all_lat, accepted, sizeof(*all_lat), compare_u64);
+	qsort(lag, count, sizeof(*lag), compare_u64);
+	arrival_window = (double)(horizon - begin) / 1e9;
+	drain_elapsed = (double)(end - begin) / 1e9;
+	drain_tail_ms = end > horizon ? (double)(end - horizon) / 1e6 : 0.0;
+
+	printf("{\"type\":\"open_phase\",\"schema\":1,\"phase\":\"measure\","
+	       "\"scenario\":\"open\",\"pid\":%ld,\"window\":%u,"
+	       "\"rate_rps\":%u,\"start_ns\":%" PRIu64 ",\"schedule_horizon_ns\":%" PRIu64 ","
+	       "\"end_ns\":%" PRIu64 ",\"arrival_window_s\":%.9f,\"drain_elapsed_s\":%.9f,"
+	       "\"drain_tail_ms\":%.6f,\"client_cpu_s\":%.9f,\"client_peak_rss_kib\":%ld,"
+	       "\"offered\":%u,\"scheduler_dropped\":%u,\"attempted\":%u,"
+	       "\"accepted\":%u,\"completed\":%u,\"ok\":%u,\"submit_again\":%u,"
+	       "\"submit_errors\":%u,\"deadlines\":%u,\"rpc_errors\":%u,"
+	       "\"unavailable\":%u,\"invalid_responses\":%u,\"ok_ratio\":%.9f,"
+	       "\"ok_rps\":%.3f,\"payload_MiB_s\":%.6f,"
+	       "\"ok_p50_us\":%.3f,\"ok_p99_us\":%.3f,\"accepted_p99_us\":%.3f,"
+	       "\"scheduler_late_p50_us\":%.3f,\"scheduler_late_p99_us\":%.3f,"
+	       "\"scheduler_late_max_us\":%.3f}\n",
+	       (long)getpid(), window, rate_rps, begin, horizon, end,
+	       arrival_window, drain_elapsed, drain_tail_ms, client_cpu_s, peak_rss_kib,
+	       count, dropped, attempted, accepted, accepted, ok, again, submit_errors,
+	       deadlines, rpc_errors, unavailable, invalid, (double)ok / (double)count,
+	       ok / drain_elapsed, (double)bytes / (1048576.0 * drain_elapsed),
+	       percentile(ok_lat, ok, 50U), percentile(ok_lat, ok, 99U),
+	       percentile(all_lat, accepted, 99U), percentile(lag, count, 50U),
+	       percentile(lag, count, 99U), (double)lag[count - 1U] / 1000.0);
+	free(lag);
+	free(all_lat);
+	free(ok_lat);
+}
+
+static int open_phase(struct client_run *run, const struct options *o)
+{
+	struct sample *samples = calloc(o->requests, sizeof(*samples));
+	struct rusage before, after;
+	uint64_t begin, horizon, guard, end;
+	uint32_t i;
+	int failed = 0;
+
+	if (!samples)
+		fatal("open-loop sample allocation", errno);
+	check(getrusage(RUSAGE_SELF, &before), "client getrusage");
+	begin = now_ns();
+	horizon = begin + ((uint64_t)o->requests * UINT64_C(1000000000)) /
+			     o->rate_rps;
+	guard = horizon > UINT64_MAX - PHASE_GUARD_NS ?
+		UINT64_MAX : horizon + PHASE_GUARD_NS;
+
+	for (i = 0; i < o->requests && !failed; ++i) {
+		struct sample *s = &samples[i];
+		struct slot *slot = NULL;
+		struct tr_rpc_call_options call_options = {
+			.timeout_ms = o->timeout_ms
+		};
+		struct tr_rpc_call_handle handle;
+		struct tr_rpc_bytes request;
+		uint64_t sequence = i;
+		uint32_t j;
+		int ret;
+
+		s->method = METHOD_SLOW;
+		s->bytes = o->small_bytes;
+		s->scheduled_ns = begin +
+			((uint64_t)i * UINT64_C(1000000000)) / o->rate_rps;
+		sleep_until_ns(s->scheduled_ns);
+		s->start_ns = now_ns();
+
+		check(pthread_mutex_lock(&run->lock), "open lock");
+		for (j = 0; j < run->window; ++j) {
+			if (run->slots[j].busy && run->slots[j].done)
+				run->slots[j].busy = 0;
+			if (!slot && !run->slots[j].busy)
+				slot = &run->slots[j];
+		}
+		if (run->bad_callback) {
+			failed = 1;
+			check(pthread_mutex_unlock(&run->lock), "open unlock");
+			break;
+		}
+		if (!slot) {
+			s->scheduler_dropped = 1;
+			s->end_ns = s->start_ns;
+			s->valid = 1;
+			check(pthread_mutex_unlock(&run->lock), "open drop unlock");
+			continue;
+		}
+
+		memset(slot->payload, 0x3c, s->bytes);
+		for (j = 0; j < 8U; ++j)
+			slot->payload[j] = (unsigned char)(sequence >> (8U * j));
+		slot->sample = s;
+		slot->busy = 1;
+		slot->done = 0;
+		s->valid = 1;
+		request.data = slot->payload;
+		request.len = s->bytes;
+		check(pthread_mutex_unlock(&run->lock), "open submit unlock");
+
+		ret = tr_client_unary_call_ex(run->client, SERVICE, METHOD_SLOW,
+			&request, &call_options, result, slot, &handle);
+
+		check(pthread_mutex_lock(&run->lock), "open submit lock");
+		s->submit_status = ret;
+		if (ret != TR_OK) {
+			if (slot->done)
+				run->bad_callback = 1;
+			s->end_ns = now_ns();
+			slot->done = 1;
+		}
+		check(pthread_mutex_unlock(&run->lock), "open submit done unlock");
+	}
+
+	check(pthread_mutex_lock(&run->lock), "open drain lock");
+	while (!failed) {
+		uint32_t busy = 0;
+
+		for (i = 0; i < run->window; ++i) {
+			if (run->slots[i].busy && run->slots[i].done)
+				run->slots[i].busy = 0;
+			if (run->slots[i].busy)
+				busy++;
+		}
+		if (busy == 0)
+			break;
+		if (run->bad_callback || now_ns() >= guard) {
+			failed = 1;
+			break;
+		}
+		{
+			struct timespec until = {
+				(time_t)(guard / UINT64_C(1000000000)),
+				(long)(guard % UINT64_C(1000000000))
+			};
+			int wait_ret =
+				pthread_cond_timedwait(&run->cond, &run->lock, &until);
+			if (wait_ret != 0 && wait_ret != EINTR)
+				failed = 1;
+		}
+	}
+	check(pthread_mutex_unlock(&run->lock), "open drain unlock");
+	end = now_ns();
+	check(getrusage(RUSAGE_SELF, &after), "client getrusage");
+
+	if (failed || run->bad_callback) {
+		fputs("open phase: incomplete or duplicate callback\n", stderr);
+		tr_client_destroy(run->client);
+		run->client = NULL;
+		free(samples);
+		return -1;
+	}
+
+	report_open_phase(samples, o->requests, o->rate_rps, begin, horizon, end,
+			  cpu_seconds(&after) - cpu_seconds(&before),
+			  after.ru_maxrss, run->window);
+	fflush(stdout);
+	free(samples);
+	return 0;
+}
+
 static int run_client(const struct options *o)
 {
 	struct tr_client_config config;
@@ -434,7 +676,7 @@ static int run_client(const struct options *o)
 	uint32_t i;
 	int status = EXIT_SUCCESS;
 	tr_client_config_init(&config);
-	configure_limits(&config.limits, o);
+	configure_limits(&config.limits, o, 0);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
 	check(pthread_mutex_init(&run.lock, NULL), "mutex init");
@@ -467,11 +709,17 @@ static int run_client(const struct options *o)
 			status = EXIT_FAILURE;
 		}
 	}
-	if (status == EXIT_SUCCESS &&
-	    (phase(&run, o, "measure", o->scenario, o->requests, o->timeout_ms, 1) ||
-	     (!strcmp(o->scenario, "pressure") &&
-	      phase(&run, o, "recovery", "small", 64U, 5000U, 1))))
-		status = EXIT_FAILURE;
+	if (status == EXIT_SUCCESS) {
+		if (!strcmp(o->scenario, "open")) {
+			if (open_phase(&run, o))
+				status = EXIT_FAILURE;
+		} else if (phase(&run, o, "measure", o->scenario, o->requests,
+				 o->timeout_ms, 1) ||
+			   (!strcmp(o->scenario, "pressure") &&
+			    phase(&run, o, "recovery", "small", 64U, 5000U, 1))) {
+			status = EXIT_FAILURE;
+		}
+	}
 	/* No reconnect/recreate between pressure and recovery. Teardown joins callbacks. */
 	tr_client_destroy(run.client);
 	for (i = 0; i < run.window; ++i) free(run.slots[i].payload);
