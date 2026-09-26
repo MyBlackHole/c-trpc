@@ -4,6 +4,16 @@ set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
 set_defaultmode("release")
 
+option("crc32c_portable")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Use only the portable CRC32C backend (no CPU dispatch)")
+option_end()
+
+if has_config("crc32c_portable") then
+    add_defines("TR_CRC32C_FORCE_PORTABLE")
+end
+
 set_languages("c11")
 set_warnings("all", "extra", "error")
 set_symbols("debug")
@@ -83,7 +93,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority"}) do
+for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority", "test_crc32c"}) do
     target(name)
         set_kind("binary")
         set_default(false)

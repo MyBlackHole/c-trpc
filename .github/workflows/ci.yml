@@ -30,10 +30,12 @@ jobs:
           xmake-version: ${{ env.XMAKE_VERSION }}
       - name: Build all targets and test debug + release
         run: |
-          for mode in debug release; do
-            xmake f -c -y -m "$mode" --toolchain=${{ matrix.cc }}
-            xmake build --all -v
-            xmake test -v -j1
+          for portable in n y; do
+            for mode in debug release; do
+              xmake f -c -y -m "$mode" --toolchain=${{ matrix.cc }} --crc32c_portable="$portable"
+              xmake build --all -v
+              xmake test -v -j1
+            done
           done
 
   asan-ubsan:
@@ -56,9 +58,11 @@ jobs:
           trap 'status=$?; tail -n 120 "$log_file" >&3; exit "$status"' EXIT
           exec >"$log_file" 2>&1
           git rev-parse HEAD
-          xmake f -c -y -m asan --toolchain=gcc
-          xmake build --all -v
-          xmake test -v -j1
+          for portable in n y; do
+            xmake f -c -y -m asan --toolchain=gcc --crc32c_portable="$portable"
+            xmake build --all -v
+            xmake test -v -j1
+          done
       - name: Archive failed sanitizer source
         if: failure()
         run: git archive --format=tar -o "$RUNNER_TEMP/sanitizer-source.tar" HEAD
@@ -92,9 +96,11 @@ jobs:
           trap 'status=$?; tail -n 120 "$log_file" >&3; exit "$status"' EXIT
           exec >"$log_file" 2>&1
           git rev-parse HEAD
-          xmake f -c -y -m tsan --toolchain=gcc
-          xmake build --all -v
-          xmake test -v -j1
+          for portable in n y; do
+            xmake f -c -y -m tsan --toolchain=gcc --crc32c_portable="$portable"
+            xmake build --all -v
+            xmake test -v -j1
+          done
       - name: Archive failed sanitizer source
         if: failure()
         run: git archive --format=tar -o "$RUNNER_TEMP/sanitizer-source.tar" HEAD
@@ -244,3 +250,20 @@ jobs:
             ${{ runner.temp }}/echo-server.log
           if-no-files-found: ignore
           retention-days: 7
+
+  crc32c-cpu-fallback:
+    name: CRC32C without SSE4.2
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Install user-mode CPU emulator
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - name: Run automatic dispatch with SSE4.2 hidden
+        run: |
+          xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
+          xmake build test_crc32c
+          qemu-x86_64 -cpu max,-sse4.2 build/linux/x86_64/release/test_crc32c --expect-portable
