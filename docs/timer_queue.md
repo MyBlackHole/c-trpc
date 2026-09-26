@@ -48,11 +48,15 @@ free slot --register--> registered, disarmed --arm(t)--> armed
 ## 验证入口
 
 ```sh
-make test-timer CC=gcc
-make clean
-make test-timer CC=clang
-make test
+xmake f -c -y -m release --toolchain=gcc
+xmake test -v -j1 'test_timer_queue/*'
+xmake f -c -y -m release --toolchain=clang
+xmake test -v -j1 'test_timer_queue/*'
+xmake test -v -j1
 ```
+
+`make test-timer` 保留为 Xmake 的兼容入口。模式、sanitizer 和编译器
+配置见 [构建与测试指南](build.md)。
 
 独立测试包含容量耗尽、disarm 保留槽位、失效 token、回调显式修改与
 自注销复用、相同 deadline 的预算边界，以及固定种子的模型测试。
@@ -60,5 +64,5 @@ make test
 已注册集合、堆成员集合、堆顺序、最近 deadline 和模型状态。
 另有 10,000 次高占用槽位复用检查；测试不使用墙钟耗时作为性能门槛。
 
-`make test` 同时执行原有 Transport/RPC 集成测试和新的定时器测试，
-因此现有 GCC、Clang、ASan/UBSan 与 TSan CI 矩阵都会覆盖新测试。
+`xmake test` 同时执行原有 Transport/RPC 集成测试和新的定时器测试，
+因此 GCC、Clang、ASan/UBSan 与 TSan CI 矩阵都会覆盖新测试。

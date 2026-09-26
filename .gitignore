@@ -1,6 +1,8 @@
-build
+/build/
+/.xmake/
+/compile_commands.json
 
-# 构建产物
+# Legacy Make build artifacts (never consumed by Xmake).
 *.o
 *.a
 tests/test_transport
