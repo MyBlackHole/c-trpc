@@ -15,6 +15,7 @@
 #include "tr/status.h"
 #include "channel_internal.h"
 #include "rpc_internal.h"
+#include "socket_internal.h"
 
 struct tr_client {
 	struct tr_client_config config;
@@ -105,6 +106,7 @@ void tr_client_config_init(struct tr_client_config *config)
 	memset(config, 0, sizeof(*config));
 	tr_facade_limits_init(&config->limits);
 	config->connect_timeout_ms = 5000U;
+	config->tcp_nodelay = TR_TCP_NODELAY_DEFAULT;
 	config->keepalive_interval_ms = 30000U;
 	config->keepalive_timeout_ms = 10000U;
 	config->enable_reconnect = 0;
@@ -170,7 +172,8 @@ int tr_client_create(const struct tr_client_config *config,
 		tr_client_config_init(&effective);
 	tr_client_normalize_config(&effective);
 
-	if (effective.limits.max_message_bytes <
+	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
+	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes < TR_RPC_WIRE_HEADER_SIZE)
 		return TR_ERR_INVALID;
@@ -278,6 +281,12 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	if (ret != TR_OK)
 		return ret;
 
+	if (tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay)) {
+		ret = tr_tcp_set_nodelay(fd, 1);
+		if (ret != TR_OK)
+			return ret;
+	}
+
 	ret = tr_reactor_adopt_fd(client->reactor, fd, &client->connection);
 	if (ret != TR_OK)
 		return ret;
@@ -336,6 +345,12 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	}
 
 	if (client->config.enable_reconnect) {
+		ret = tr_channel_set_reconnect_tcp_nodelay(
+			client->channel,
+			tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay));
+		if (ret != TR_OK)
+			return ret;
+
 		memset(&reconnect_config, 0, sizeof(reconnect_config));
 		reconnect_config.ipv4_address = ipv4_address;
 		reconnect_config.control_port = port;

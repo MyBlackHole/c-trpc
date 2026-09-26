@@ -100,7 +100,10 @@ for _, name in ipairs({"test_transport", "test_timer_queue", "test_runtime_threa
         add_files("tests/" .. name .. ".c")
         add_deps("trcore")
         add_undefines("NDEBUG")
-        if name == "test_runtime_threads" then
+        if name == "test_transport" then
+            -- Observe facade/reconnect TCP_NODELAY policy without production hooks.
+            add_ldflags("-Wl,--wrap=setsockopt", {force = true})
+        elseif name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
         elseif name == "test_reactor_fairness" then

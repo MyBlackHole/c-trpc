@@ -20,6 +20,13 @@ int tr_channel_create_deferred(
 	void *callback_arg,
 	struct tr_channel **out);
 
+/*
+ * Facade-only socket policy injection. Must be set before automatic reconnect
+ * starts; low-level Channel reconnect otherwise preserves the kernel default.
+ */
+int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
+					    int enabled);
+
 int tr_channel_start(struct tr_channel *channel);
 
 #endif

@@ -16,6 +16,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "tr/wire.h"
+#include "../src/channel_internal.h"
 #include "../src/reactor_internal.h"
 #include "../src/timer_queue.h"
 
@@ -23,6 +24,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -34,6 +37,41 @@
 
 #define TEST_POOL_COUNT 4U
 #define TEST_BUF_SIZE (1024U * 1024U)
+
+static pthread_mutex_t tcp_nodelay_probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned tcp_nodelay_probe_count;
+
+int __real_setsockopt(int fd, int level, int option_name,
+		      const void *option_value, socklen_t option_len);
+
+int __wrap_setsockopt(int fd, int level, int option_name,
+		      const void *option_value, socklen_t option_len)
+{
+	int ret = __real_setsockopt(fd, level, option_name, option_value,
+				    option_len);
+
+	if (ret == 0 && level == IPPROTO_TCP && option_name == TCP_NODELAY &&
+	    option_value && option_len == (socklen_t)sizeof(int)) {
+		int value;
+		memcpy(&value, option_value, sizeof(value));
+		if (value == 1) {
+			pthread_mutex_lock(&tcp_nodelay_probe_lock);
+			tcp_nodelay_probe_count++;
+			pthread_mutex_unlock(&tcp_nodelay_probe_lock);
+		}
+	}
+	return ret;
+}
+
+static unsigned tcp_nodelay_probe_read(void)
+{
+	unsigned count;
+
+	pthread_mutex_lock(&tcp_nodelay_probe_lock);
+	count = tcp_nodelay_probe_count;
+	pthread_mutex_unlock(&tcp_nodelay_probe_lock);
+	return count;
+}
 
 static void build_wire_frame(uint8_t **wire, size_t *wire_len, uint16_t type,
 			     uint32_t flags, uint32_t stream_id,
@@ -1877,6 +1915,7 @@ static void test_channel_automatic_reconnect_shared(void)
 	int server_fd = -1;
 	int new_server_fd = -1;
 	unsigned i;
+	unsigned nodelay_before;
 
 	init_channel_test_ctx(&client_ctx);
 	init_channel_test_ctx(&server_ctx);
@@ -1928,8 +1967,10 @@ static void test_channel_automatic_reconnect_shared(void)
 	reconnect_config.initial_delay_ms = 10;
 	reconnect_config.max_delay_ms = 40;
 	reconnect_config.connect_timeout_ms = 500;
+	assert(tr_channel_set_reconnect_tcp_nodelay(client_channel, 1) == TR_OK);
 	assert(tr_channel_enable_client_reconnect(client_channel,
 						  &reconnect_config) == TR_OK);
+	nodelay_before = tcp_nodelay_probe_read();
 
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &old_stream) ==
 	       TR_OK);
@@ -1962,6 +2003,7 @@ static void test_channel_automatic_reconnect_shared(void)
 					     server_new_conn) == TR_OK);
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	assert(tcp_nodelay_probe_read() == nodelay_before + 1U);
 
 	wait_channel_counter(&client_ctx, &client_ctx.channel_up, 2);
 	wait_channel_counter(&server_ctx, &server_ctx.channel_up, 2);
@@ -4108,6 +4150,7 @@ static void test_client_server_facade_unary(void)
 	struct facade_test_ctx ctx;
 	struct timespec deadline;
 	uint16_t port = 0;
+	unsigned nodelay_before;
 	int ret = 0;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -4152,7 +4195,9 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.reassembly_pool_count = 4U;
 	client_config.limits.rx_buffer_count = 32U;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
+	nodelay_before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tcp_nodelay_probe_read() == nodelay_before + 2U);
 	assert(tr_client_register_method(client, &method) == TR_OK);
 
 	request.data = (const uint8_t *)"facade-ping";
@@ -4228,6 +4273,62 @@ static void test_client_server_facade_unary(void)
 	tr_server_destroy(server);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
+}
+
+
+static void test_client_server_facade_nodelay_policy(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	uint16_t port = 0;
+	unsigned before;
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.limits.rpc_message_buffer_bytes = 4096U;
+	server_config.limits.rpc_message_pool_count = 32U;
+	server_config.limits.reassembly_pool_count = 4U;
+	server_config.limits.rx_buffer_count = 32U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 1000U;
+	client_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	client_config.limits.rpc_message_buffer_bytes = 4096U;
+	client_config.limits.rpc_message_pool_count = 32U;
+	client_config.limits.reassembly_pool_count = 4U;
+	client_config.limits.rx_buffer_count = 32U;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+
+	before = tcp_nodelay_probe_read();
+	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tcp_nodelay_probe_read() == before);
+
+	tr_client_destroy(client);
+	client = NULL;
+	tr_server_destroy(server);
+	server = NULL;
+
+	tr_client_config_init(&client_config);
+	client_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
+	assert(tr_client_create(&client_config, &client) == TR_ERR_INVALID);
+	assert(client == NULL);
+
+	tr_server_config_init(&server_config);
+	server_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
+	assert(tr_server_create(&server_config, &server) == TR_ERR_INVALID);
+	assert(server == NULL);
 }
 
 struct shared_executor_test_ctx {
@@ -4933,6 +5034,7 @@ int main(void)
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
+	test_client_server_facade_nodelay_policy();
 	test_client_runtime_thread_bound();
 	test_server_runtime_thread_bound();
 	test_server_shared_rpc_executor();

@@ -19,6 +19,12 @@ struct tr_server_config {
 	uint32_t max_peers;
 	int listen_backlog;
 
+	/*
+	 * DEFAULT/ENABLED 对每个已接受的 facade TCP peer 启用 TCP_NODELAY；
+	 * DISABLED 保留内核默认 Nagle 行为。
+	 */
+	enum tr_tcp_nodelay_policy tcp_nodelay;
+
 	/* 0 表示禁用 Transport keepalive。 */
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;

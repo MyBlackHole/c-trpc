@@ -17,6 +17,12 @@ struct tr_client_config {
 
 	uint32_t connect_timeout_ms;
 
+	/*
+	 * DEFAULT/ENABLED 在首次连接及自动 reconnect 的 TCP socket 上启用
+	 * TCP_NODELAY；DISABLED 保留内核默认 Nagle 行为。
+	 */
+	enum tr_tcp_nodelay_policy tcp_nodelay;
+
 	/* 0 表示禁用 Transport keepalive。 */
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
