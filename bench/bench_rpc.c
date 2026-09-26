@@ -699,8 +699,20 @@ static int run_client(const struct options *o)
 		struct tr_rpc_method_desc m = method(i, o->bulk_bytes);
 		check(tr_client_register_method(run.client, &m), "client method");
 	}
-	if (o->warmup && phase(&run, o, "warmup", "small", o->warmup, 5000U, 0))
-		status = EXIT_FAILURE;
+	if (o->warmup) {
+		uint32_t measure_window = run.window;
+
+		/*
+		 * Open-loop capacity experiments intentionally shrink the Server
+		 * executor queue. Warmup must not burst at the measurement window and
+		 * accidentally become the saturation test itself.
+		 */
+		if (!strcmp(o->scenario, "open"))
+			run.window = 1U;
+		if (phase(&run, o, "warmup", "small", o->warmup, 5000U, 0))
+			status = EXIT_FAILURE;
+		run.window = measure_window;
+	}
 	if (status == EXIT_SUCCESS && o->start_gate) {
 		printf("{\"type\":\"client_ready\",\"pid\":%ld}\n", (long)getpid());
 		fflush(stdout);
