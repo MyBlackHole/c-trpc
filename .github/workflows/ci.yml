@@ -11,48 +11,198 @@ on:
 permissions:
   contents: read
 
+env:
+  XMAKE_VERSION: '3.1.1'
+
 jobs:
   build-test:
     name: build-test (${{ matrix.cc }})
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         cc: [gcc, clang]
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test debug + release
         run: |
-          make clean
-          make test CC=${{ matrix.cc }}
+          for mode in debug release; do
+            xmake f -c -y -m "$mode" --toolchain=${{ matrix.cc }}
+            xmake build --all -v
+            xmake test -v -j1
+          done
 
   asan-ubsan:
     name: ASan + UBSan
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
-          make clean
-          make test \
-            CC=gcc \
-            CFLAGS="-O1 -g -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -pthread -fsanitize=address,undefined -fno-omit-frame-pointer" \
-            LDFLAGS="-pthread -fsanitize=address,undefined"
+          xmake f -c -y -m asan --toolchain=gcc
+          xmake build --all -v
+          xmake test -v -j1
 
   tsan:
     name: ThreadSanitizer
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Build and test
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: |
+          xmake f -c -y -m tsan --toolchain=gcc
+          xmake build --all -v
+          xmake test -v -j1
+
+  build-smoke:
+    name: Make compatibility + install
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Compatibility entry points and compiler switch
+        run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/make-compat.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 40 "$log_file" | cut -c1-1000 >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
+          make all CC=gcc
+          make test CC=gcc
+          make test-timer CC=gcc
           make clean
-          make test \
-            CC=gcc \
-            CFLAGS="-O1 -g -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude -pthread -fsanitize=thread -fno-omit-frame-pointer" \
-            LDFLAGS="-pthread -fsanitize=thread"
+          make test CC=clang MODE=debug
+      - name: Quoted flags, tool path and literal ORIGIN
+        run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/quoted-build.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 60 "$log_file" | cut -c1-1000 >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
+          xmake f -c -y -m release --toolchain=gcc
+          probe_dir="$RUNNER_TEMP/flags probe's directory"
+          mkdir -p "$probe_dir"
+          probe_header="$probe_dir/config.h"
+          cat > "$probe_header" <<'C'
+          #ifndef TR_BUILD_LABEL
+          #error "CPPFLAGS was not forwarded"
+          #endif
+          _Static_assert(sizeof(TR_BUILD_LABEL) == sizeof("two words"),
+                         "quoted CPPFLAGS was split");
+          C
+          # Also exercise XMAKE as an executable path containing spaces/quotes.
+          printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v xmake)" > "$probe_dir/xmake"
+          chmod +x "$probe_dir/xmake"
+          make all test CC=gcc XMAKE="$probe_dir/xmake" \
+            CPPFLAGS="-DTR_BUILD_LABEL='\"two words\"'" \
+            CFLAGS="-include \"$probe_header\"" \
+            LDFLAGS='-Wl,-rpath,$$ORIGIN/compat-sdk'
+          readelf -d build/linux/x86_64/release/test_transport | grep -F '$ORIGIN/compat-sdk'
+      - name: Install, check public headers and run an external Reactor
+        run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/sdk-install.log"
+          exec 3>&1
+          trap 'status=$?; tail -n 60 "$log_file" | cut -c1-1000 >&3; exit "$status"' EXIT
+          exec >"$log_file" 2>&1
+          xmake f -c -y -m release --toolchain=gcc
+          xmake build trcore
+          prefix="$RUNNER_TEMP/trpc sdk"
+          xmake install -o "$prefix" trcore
+          cat > "$RUNNER_TEMP/consumer.c" <<'C'
+          #include <tr/reactor.h>
+          #include <tr/status.h>
+          #include <string.h>
+          int main(void)
+          {
+              struct tr_reactor_config config = {
+                  .max_connections = 2, .command_capacity = 32,
+                  .tx_item_capacity = 8, .control_tx_item_capacity = 4,
+                  .rx_buffer_count = 4, .rx_buffer_size = 4096,
+                  .max_payload_len = 4096,
+                  .rx_budget_bytes = 65536, .tx_budget_bytes = 65536
+              };
+              struct tr_reactor *reactor = NULL;
+              int ret;
+              if (strcmp(tr_status_str(TR_OK), "ok") != 0)
+                  return 1;
+              ret = tr_reactor_create(&config, NULL, NULL, NULL, &reactor);
+              if (ret != TR_OK)
+                  return 1;
+              ret = tr_reactor_start(reactor);
+              if (ret == TR_OK) {
+                  int stop_ret;
+                  ret = tr_reactor_quiesce(reactor);
+                  stop_ret = tr_reactor_stop(reactor);
+                  if (ret == TR_OK)
+                      ret = stop_ret;
+              }
+              tr_reactor_destroy(reactor);
+              return ret != TR_OK;
+          }
+          C
+          for cc in gcc clang; do
+            for header in "$prefix"/include/tr/*.h; do
+              printf '#include <tr/%s>\n' "$(basename "$header")" | \
+                "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+                -I"$prefix/include" -x c -fsyntax-only -
+            done
+            "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -pthread \
+              -I"$prefix/include" "$RUNNER_TEMP/consumer.c" \
+              -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer-$cc"
+            timeout 10s "$RUNNER_TEMP/consumer-$cc"
+            echo "$cc: installed headers and Reactor consumer passed"
+          done
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Echo examples as separate processes
+        run: |
+          set -euo pipefail
+          xmake build echo_server
+          xmake build echo_client
+          server_log="$RUNNER_TEMP/echo-server.log"
+          stdbuf -oL build/linux/x86_64/release/echo_server 0 >"$server_log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true' EXIT
+          port=
+          for attempt in $(seq 1 100); do
+            port=$(sed -n 's/^echo server listening on 0\.0\.0\.0:\([0-9][0-9]*\)$/\1/p' "$server_log")
+            if [ -n "$port" ]; then break; fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then cat "$server_log"; exit 1; fi
+            sleep 0.1
+          done
+          if [ -z "$port" ]; then cat "$server_log"; exit 1; fi
+          timeout 20s xmake run echo_client 127.0.0.1 "$port" xmake-smoke | tee "$RUNNER_TEMP/echo-client.log"
+          grep -Fx 'response: xmake-smoke' "$RUNNER_TEMP/echo-client.log"
+      - name: Preserve smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-smoke-logs
+          path: |
+            ${{ runner.temp }}/make-compat.log
+            ${{ runner.temp }}/quoted-build.log
+            ${{ runner.temp }}/sdk-install.log
+            ${{ runner.temp }}/echo-client.log
+            ${{ runner.temp }}/echo-server.log
+          if-no-files-found: ignore
+          retention-days: 7

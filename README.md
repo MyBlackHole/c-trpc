@@ -131,11 +131,11 @@ before RPC/Channel storage is released. Therefore `max_peers` is a bound on
 concurrently retained peer objects rather than cumulative accepts over the
 server lifetime.
 
-Two real-process examples are built by default:
+Two real-process examples are built by default. Run them in separate terminals:
 
 ```sh
-./examples/echo_server 9000
-./examples/echo_client 127.0.0.1 9000 hello
+xmake run echo_server 9000
+xmake run echo_client 127.0.0.1 9000 hello
 ```
 
 ## Implemented
@@ -296,7 +296,7 @@ Shared-connection mode emits one probe for the shared TCP connection; split
 mode tracks CONTROL and BULK independently. Every Channel registers one
 initially-disarmed keepalive timer in its owning Reactor; standalone and
 high-level Client/Server Channels use the same owner-local path. Keepalive no
-longer creates a private timer thread; scheduling stays inside the Reactor.
+longer creates a private thread or consumes the shared maintenance scheduler.
 
 ### Metrics / diagnostics
 
@@ -343,7 +343,7 @@ TCP connection #1
        v
 Channel remains alive
        |
-       +--> client: optional connect/backoff reconnect thread
+       +--> client: optional connect/backoff maintenance thread
        |       or
        +--> server: application accepts a replacement socket
        |
@@ -379,7 +379,7 @@ struct tr_channel_reconnect_config cfg = {
 tr_channel_enable_client_reconnect(channel, &cfg);
 ```
 
-The V1 reconnect thread performs only low-rate connect/poll/backoff work. Once a
+The V1 maintenance thread performs only low-rate connect/backoff work. Once a
 socket is adopted, normal RX/TX remains owned by the epoll Reactor. Shared mode
 reconnects one physical connection for both lanes; split mode reconnects each
 failed lane independently.
@@ -457,7 +457,8 @@ tr_rpc_call_is_cancelled(call, &status);
 RPC deadlines use `CLOCK_MONOTONIC` and scan the bounded Call table.
 Each RPC Endpoint registers one timer in its owning Reactor; standalone and
 high-level Client/Server endpoints use the same owner-local deadline path.
-There is no per-Endpoint deadline thread; scheduling is entirely Reactor-local.
+There is no per-Endpoint deadline thread and RPC deadlines no longer use the
+shared maintenance scheduler.
 
 Initial metadata is a bounded TLV side channel:
 
@@ -652,8 +653,9 @@ RPC:
 - service-side completion when the peer was already half-closed
 - multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
 - high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
+- shared maintenance scheduler callback re-arm/unregister semantics
 - RPC Endpoint deadlines run on Reactor-local timers without per-Endpoint timer threads
-- Channel keepalive runs on Reactor-local timers without a private timer thread
+- Channel keepalive runs on Reactor-local timers without private/shared maintenance timer work
 - large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
 - in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
 - a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
@@ -665,11 +667,13 @@ RPC:
 - C11 refcount invariants: no resurrection, no underflow, no saturation overflow
 - server peer retirement while a shared RPC handler is still running; Endpoint/Channel lifetime remains valid until the task reference drains
 
-Current build validation passes:
+The Xmake CI matrix checks:
 
-- normal build/tests
+- GCC and Clang builds/tests in both debug and release modes
 - AddressSanitizer + UndefinedBehaviorSanitizer
 - ThreadSanitizer
+- Make compatibility entry points, compiler switching, installed SDK consumption,
+  and the Echo client/server as separate processes
 
 ## Deliberately not implemented yet
 
@@ -705,12 +709,29 @@ Current build validation passes:
 
 ## Build
 
-The project language baseline is ISO C11. GCC/Clang's cleanup attribute is used
-only through the typed `TR_AUTO()` ownership helper.
+Requires Linux, GCC or Clang, and **Xmake 3.1.1 or newer**. The project language
+baseline is ISO C11. GCC/Clang's cleanup attribute is used only through the
+typed `TR_AUTO()` ownership helper.
 
 ```sh
-make test
+xmake f -m release --toolchain=gcc
+xmake                         # library and Echo examples
+xmake test -v -j1              # builds and runs both test executables
+
+# Run only the timer queue tests:
+xmake test -v -j1 'test_timer_queue/*'
 ```
+
+`xmake.lua` is the only build definition. Artifacts live under
+`build/<platform>/<architecture>/<mode>/`, not in `src/`, `tests/` or `examples/`.
+The modes are `debug`, `release` (default), `asan` (ASan + UBSan), and `tsan`.
+Release preserves the original `-O2 -g` build and enabled assertions; tests
+explicitly undefine `NDEBUG` so their assertion-contained operations still run.
+
+`make`, `make test`, `make test-timer`, and `make clean` remain thin forwarding
+entry points and also require Xmake; there is no second Make build graph.
+See the [build and test guide](docs/build.md) for compiler switching, sanitizer
+commands, SDK installation, and compatibility options.
 
 ## Next milestone
 
