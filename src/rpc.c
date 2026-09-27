@@ -715,6 +715,13 @@ tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 	call->pending_executor_task_valid = 0;
 }
 
+static int
+tr_rpc_pending_is_server_close_locked(const struct tr_rpc_call_slot *call)
+{
+	return call && call->pending_executor_task_valid &&
+	       call->pending_executor_task.type == TR_RPC_TASK_SERVER_CLOSE;
+}
+
 static void tr_rpc_free_call_locked(struct tr_rpc_call_slot *call)
 {
 	uint32_t generation;
@@ -2657,7 +2664,8 @@ static int tr_rpc_cancel_on_owner(void *arg)
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_OK;
 	}
-	if (call->state == TR_RPC_CALL_TERMINAL) {
+	if (call->state == TR_RPC_CALL_TERMINAL ||
+	    call->executor_overloaded) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_ERR_CLOSED;
 	}
@@ -2882,7 +2890,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 	if (call &&
 	    (call->admission_rejected || call->executor_overloaded) &&
-	    wire.type == TR_RPC_WIRE_REQUEST) {
+	    (wire.type == TR_RPC_WIRE_REQUEST ||
+	     (call->executor_overloaded && wire.type == TR_RPC_WIRE_CANCEL))) {
 		/*
 		 * The rejection path owns final STATUS + local half-close ordering.
 		 * A peer may race additional request data before observing STATUS;
@@ -3294,7 +3303,9 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 						       TR_RPC_STATUS_UNAVAILABLE);
 
 		call->deadline_ns = 0;
-		tr_rpc_drop_pending_executor_task_locked(call);
+		if (!(call->executor_overloaded &&
+		      tr_rpc_pending_is_server_close_locked(call)))
+			tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
 			if (call->pending_control) {
 				tr_buffer_release(call->pending_control);
@@ -3377,7 +3388,9 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 			continue;
 
 		call->deadline_ns = 0;
-		tr_rpc_drop_pending_executor_task_locked(call);
+		if (!(call->executor_overloaded &&
+		      tr_rpc_pending_is_server_close_locked(call)))
+			tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
 		call->local_closed = 1;
