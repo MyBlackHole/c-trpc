@@ -2640,7 +2640,7 @@ int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 			      tr_lane_flag(lane), stream_id,
 			      stream->rx_advertised_limit, NULL);
 	if (ret != TR_OK) {
-		tr_stream_free_locked(channel, slot);
+		tr_stream_free_locked(channel, handle.slot);
 		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
