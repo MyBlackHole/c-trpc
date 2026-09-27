@@ -247,17 +247,28 @@ When a scalability point first hits a bounded pool, `run_rpc_headroom.py`
 separates a configuration wall from a deeper runtime wall by rerunning the same
 offered rates with one controlled resource change.
 
-The default experiment follows the first multi-source result:
+The default experiment follows the first multi-source result as a staged
+single-variable chain:
 
 ```text
 workers:              8
 handler:              0 ms
 rates:                10k / 20k / 40k RPS
-baseline RX buffers:  benchmark-derived (272 at capacity=128)
-headroom RX buffers:  1024
-executor queue:       unchanged at 64
-RPC message pool:     unchanged
-reassembly pool:      unchanged
+
+baseline:
+  RX buffers:         benchmark-derived (272 at capacity=128)
+  executor queue:     64
+
+rx_headroom:
+  RX buffers:         1024
+  executor queue:     64
+
+rx_executor_headroom:
+  RX buffers:         1024
+  executor queue:     256
+
+RPC message pool:     unchanged in all stages
+reassembly pool:      unchanged in all stages
 ```
 
 ```sh
@@ -266,6 +277,7 @@ python3 bench/run_rpc_headroom.py \
   --rates 10000,20000,40000 \
   --workers 8 --handler-ms 0 \
   --headroom-rx-buffers 1024 \
+  --headroom-executor-queue 256 \
   --output /tmp/rpc-bench/resource-headroom.jsonl
 ```
 
@@ -274,12 +286,16 @@ The benchmark binary exposes Server-only overrides for
 override keeps the existing derived benchmark default. These flags do not change
 library/facade defaults and are not passed to benchmark Clients.
 
-The A/B output records the actual observed pool capacities and reports:
+The output records the actual observed pool capacities/executor queue size and
+emits two pairwise comparisons:
 
-- the first exact Server pressure rate in each profile;
-- rates where baseline RX exhaustion disappears with added RX headroom;
-- rates where RX exhaustion persists;
-- the exact Server wall-signal set before and after the resource change.
+1. `baseline -> rx_headroom`, identifying rates where RX exhaustion disappears
+   or persists;
+2. `rx_headroom -> rx_executor_headroom`, identifying rates where executor
+   hard-full disappears or persists.
+
+Both comparisons retain the first exact Server pressure rate and the wall-signal
+set before/after the resource change.
 
 This is an isolation experiment, not an argument to increase production pool
 defaults. If RX exhaustion disappears and another bounded resource becomes the
