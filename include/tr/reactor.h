@@ -5,6 +5,7 @@
 
 #include "tr/buffer.h"
 #include "tr/frame.h"
+#include "tr/observability.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,6 +77,16 @@ struct tr_reactor_stats {
 	uint64_t timer_lateness_ns_max;
 	/* STOP drain is outside normal turn limits and total.completions. */
 	uint64_t shutdown_completions;
+
+	/* Bounded queue pressure snapshots; full_events are producer failures. */
+	struct tr_queue_observation command_queue;
+	struct tr_queue_observation completion_queue;
+
+	/* Populated only when TR_OBSERVABILITY_TIMING is enabled. */
+	uint32_t observability_flags;
+	uint64_t busy_ns;
+	uint64_t poll_ns;
+	struct tr_latency_histogram turn_busy_ns;
 };
 
 enum tr_frame_disposition { TR_FRAME_RELEASE = 0, TR_FRAME_TAKE_OWNERSHIP = 1 };
@@ -102,6 +113,9 @@ struct tr_reactor_config {
 	/* Aggregate wire-byte limits per Reactor turn, shared by all connections. */
 	uint32_t rx_budget_bytes;
 	uint32_t tx_budget_bytes;
+
+	/* TR_OBSERVABILITY_* flags; timing is opt-in to protect the hot path. */
+	uint32_t observability_flags;
 };
 
 int tr_reactor_create(const struct tr_reactor_config *config,
