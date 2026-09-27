@@ -213,6 +213,8 @@ int tr_client_create(const struct tr_client_config *config,
 			UINT32_MAX :
 			effective.limits.max_frame_payload_bytes * 4U;
 	reactor_config.tx_budget_bytes = reactor_config.rx_budget_bytes;
+	reactor_config.observability_flags =
+		effective.limits.observability_flags;
 
 	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 				&client->reactor);
@@ -319,6 +321,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	rpc_config.executor_threads = client->config.limits.executor_threads;
 	rpc_config.executor_queue_capacity =
 		client->config.limits.executor_queue_capacity;
+	rpc_config.observability_flags =
+		client->config.limits.observability_flags;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		client->channel, &rpc_config, NULL, &client->rpc);
