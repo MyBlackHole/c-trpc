@@ -52,6 +52,7 @@ struct client_run {
 	pthread_cond_t cond;
 	struct slot *slots;
 	uint32_t window;
+	uint64_t scheduled_begin_ns;
 	int bad_callback;
 };
 
@@ -639,7 +640,7 @@ static int open_phase(struct client_run *run, const struct options *o)
 	if (!samples)
 		fatal("open-loop sample allocation", errno);
 	check(getrusage(RUSAGE_SELF, &before), "client getrusage");
-	begin = now_ns();
+	begin = run->scheduled_begin_ns ? run->scheduled_begin_ns : now_ns();
 	horizon = begin + ((uint64_t)o->requests * UINT64_C(1000000000)) /
 			     o->rate_rps;
 	guard = horizon > UINT64_MAX - PHASE_GUARD_NS ?
@@ -802,10 +803,30 @@ static int run_client(const struct options *o)
 		run.window = measure_window;
 	}
 	if (status == EXIT_SUCCESS && o->start_gate) {
+		char gate[96];
+
 		printf("{\"type\":\"client_ready\",\"pid\":%ld}\n", (long)getpid());
 		fflush(stdout);
-		if (getchar() != 'g') {
+		if (!fgets(gate, sizeof(gate), stdin)) {
 			fputs("client start gate was not released\n", stderr);
+			status = EXIT_FAILURE;
+		} else if (gate[0] == 'g') {
+			run.scheduled_begin_ns = 0;
+		} else if (gate[0] == 't' && gate[1] == ':') {
+			char *end = NULL;
+			unsigned long long value;
+
+			errno = 0;
+			value = strtoull(gate + 2, &end, 10);
+			if (errno || end == gate + 2 ||
+			    (*end != '\n' && *end != '\0') || value == 0) {
+				fputs("client start gate timestamp was invalid\n", stderr);
+				status = EXIT_FAILURE;
+			} else {
+				run.scheduled_begin_ns = (uint64_t)value;
+			}
+		} else {
+			fputs("client start gate was invalid\n", stderr);
 			status = EXIT_FAILURE;
 		}
 	}
