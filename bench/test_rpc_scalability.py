@@ -2,8 +2,12 @@
 import unittest
 
 from run_rpc_scalability import (
+    aggregate_client_rows,
     exact_wall_signals,
+    generator_count_for,
     rates_for,
+    split_rates,
+    split_weighted_total,
     summarize_group,
 )
 
@@ -44,6 +48,41 @@ class ScalabilityAttributionTests(unittest.TestCase):
         self.assertEqual(
             rates_for(2, 10, [1000], [0.5, 1.0, 2.0, 4.0]),
             [100, 200, 400, 800])
+
+    def test_generator_fanout_and_rate_partition(self):
+        self.assertEqual(generator_count_for(3999, 16, 4000), 1)
+        self.assertEqual(generator_count_for(4001, 16, 4000), 2)
+        self.assertEqual(generator_count_for(100000, 16, 4000), 16)
+        rates = split_rates(10001, 3)
+        self.assertEqual(sum(rates), 10001)
+        self.assertLessEqual(max(rates) - min(rates), 1)
+
+    def test_weighted_request_partition_preserves_total(self):
+        counts = split_weighted_total(257, [3, 3, 4])
+        self.assertEqual(sum(counts), 257)
+        self.assertTrue(all(count > 0 for count in counts))
+
+    def test_aggregate_client_rows_preserves_accounting(self):
+        rows = []
+        for index, rate in enumerate((2000, 3000)):
+            rows.append(dict(
+                start_ns=1_000_000_000 + index * 100,
+                end_ns=2_000_000_000 + index * 100,
+                offered=100, scheduler_dropped=0, attempted=100,
+                accepted=100, completed=100, ok=100,
+                submit_again=0, submit_errors=0, deadlines=0,
+                rpc_errors=0, unavailable=0, resource_exhausted=0,
+                invalid_responses=0, scheduler_late_p50_us=10.0,
+                scheduler_late_p99_us=20.0 + index,
+                scheduler_late_max_us=30.0 + index,
+                client_cpu_s=0.1, client_peak_rss_kib=1000))
+        aggregate = aggregate_client_rows(rows, [2000, 3000])
+        self.assertEqual(aggregate["generator_count"], 2)
+        self.assertEqual(aggregate["offered"], 200)
+        self.assertEqual(aggregate["ok"], 200)
+        self.assertEqual(aggregate["generator_rates_rps"], [2000, 3000])
+        self.assertAlmostEqual(aggregate["scheduler_interval_us"], 1000000.0 / 3000)
+        self.assertEqual(aggregate["scheduler_late_p99_us"], 21.0)
 
     def test_rates_for_zero_handler_are_explicit(self):
         self.assertEqual(
