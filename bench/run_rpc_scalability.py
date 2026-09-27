@@ -60,6 +60,12 @@ def rates_for(workers: int, handler_ms: int, zero_rates: list[int],
     return sorted({max(1, round(nominal * ratio)) for ratio in ratios})
 
 
+def scheduler_late_one_interval(result: dict[str, Any]) -> bool:
+    rate = result["case"]["rate_rps"]
+    interval_us = 1_000_000.0 / rate
+    return result["client"]["scheduler_late_p99_us"] > interval_us
+
+
 def exact_wall_signals(result: dict[str, Any]) -> list[str]:
     client = result["client"]
     server = result["server_exit"]
@@ -67,6 +73,8 @@ def exact_wall_signals(result: dict[str, Any]) -> list[str]:
 
     if client["scheduler_dropped"]:
         signals.append("load_generator_drop")
+    if scheduler_late_one_interval(result):
+        signals.append("load_generator_late")
     if client["submit_again"]:
         signals.append("client_submit_again")
     if client["submit_errors"]:
@@ -90,6 +98,8 @@ def clean_result(result: dict[str, Any]) -> bool:
             "scheduler_dropped", "submit_again", "submit_errors", "deadlines",
             "rpc_errors", "invalid_responses")):
         return False
+    if scheduler_late_one_interval(result):
+        return False
     return not any(server[key] for key in SERVER_PRESSURE_FIELDS.values())
 
 
@@ -107,6 +117,9 @@ def summarize_group(results: list[dict[str, Any]]) -> dict[str, Any]:
     generator_drop = [
         r["case"]["rate_rps"] for r in ordered if r["client"]["scheduler_dropped"]
     ]
+    generator_late = [
+        r["case"]["rate_rps"] for r in ordered if scheduler_late_one_interval(r)
+    ]
     observed_signals = sorted({
         signal for result in ordered for signal in exact_wall_signals(result)
     })
@@ -122,14 +135,19 @@ def summarize_group(results: list[dict[str, Any]]) -> dict[str, Any]:
         "executor_queue": first["executor_queue"],
         "window": first["window"],
         "nominal_handler_capacity_rps": nominal,
-        "max_clean_offered_rps": max_clean,
+        "max_clean_scheduled_rps": max_clean,
         "max_clean_vs_nominal":
             (max_clean / nominal if max_clean is not None and nominal else None),
         "first_server_pressure_rps":
             min(server_pressure) if server_pressure else None,
         "first_load_generator_drop_rps":
             min(generator_drop) if generator_drop else None,
+        "first_load_generator_late_rps":
+            min(generator_late) if generator_late else None,
         "max_observed_ok_rps": max(r["client"]["ok_rps"] for r in ordered),
+        "max_executor_queue_utilization":
+            max(r["server_exit"]["rpc_queue_peak_per_peer"] /
+                r["case"]["executor_queue"] for r in ordered),
         "max_reactor_busy_ratio":
             max(r["server_exit"]["reactor_busy_ratio"] for r in ordered),
         "max_rpc_queue_wait_p99_us":
@@ -154,9 +172,16 @@ def metadata(binary: Path, label: str, workers: list[int],
     row["zero_handler_rates_rps"] = zero_rates
     row["executor_queue"] = executor_queue
     row["window"] = window
+    row["load_model"] = (
+        "fixed-rate scheduled arrivals; bounded in-flight slots; scheduler "
+        "drops and scheduler lateness are reported separately")
+    row["latency"] = (
+        "actual submission to result callback; schedule-to-submit lateness is "
+        "kept separate from RPC latency")
     row["attribution"] = (
-        "exact queue/pool/executor exhaustion events are wall signals; "
-        "reactor busy ratio and latency histograms remain evidence, not gates")
+        "queue/pool/executor exhaustion events are server wall signals; "
+        "P99 schedule lateness above one arrival interval marks generator "
+        "backlog; reactor busy ratio and latency histograms remain evidence")
     return row
 
 
@@ -271,8 +296,9 @@ def main() -> int:
                     output.flush()
                     print(
                         f"summary handler={handler_ms}ms workers={workers} "
-                        f"clean={summary['max_clean_offered_rps']} "
+                        f"clean_schedule={summary['max_clean_scheduled_rps']} "
                         f"server_pressure={summary['first_server_pressure_rps']} "
+                        f"generator_late={summary['first_load_generator_late_rps']} "
                         f"generator_drop={summary['first_load_generator_drop_rps']}",
                         flush=True)
     return 0

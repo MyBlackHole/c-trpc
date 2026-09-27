@@ -82,7 +82,7 @@ jobs:
               --output "$results/capacity-curve.jsonl"
             python3 bench/run_rpc_scalability.py \
               --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --trials 1 --requests 128 \
+              --trials 1 --requests 256 \
               --label "gcc-release-scalability-matrix" \
               --output "$results/scalability-matrix.jsonl"
           fi
