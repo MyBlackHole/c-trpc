@@ -888,6 +888,68 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	return final;
 }
 
+int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
+{
+	struct tr_server_stats stats;
+	uint32_t i;
+	int ret;
+
+	if (!server || !out)
+		return TR_ERR_INVALID;
+
+	memset(&stats, 0, sizeof(stats));
+	ret = tr_reactor_get_stats(server->reactor, &stats.reactor);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_buffer_pool_get_stats(&server->rpc_message_pool,
+				       &stats.rpc_message_pool);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_buffer_pool_get_stats(&server->reassembly_pool,
+				       &stats.reassembly_pool);
+	if (ret != TR_OK)
+		return ret;
+
+	pthread_mutex_lock(&server->lock);
+	stats.max_peers = server->config.max_peers;
+	stats.peers_current = server->peer_count;
+	stats.peers_peak = server->peer_count_peak;
+	stats.peers_reaping_current = server->peer_reaping_count;
+	stats.peers_ready_total = server->stat_peers_ready;
+	stats.peers_reaped_total = server->stat_peers_reaped;
+	stats.peer_capacity_rejections =
+		server->stat_peer_capacity_rejections;
+	stats.channel = server->retired_channel_stats;
+	stats.rpc = server->retired_rpc_stats;
+	if (stats.rpc.executor_threads == 0)
+		stats.rpc.executor_threads =
+			server->config.limits.executor_threads;
+
+	for (i = 0; i < server->config.max_peers; ++i) {
+		struct tr_server_peer *peer = &server->peers[i];
+		struct tr_rpc_endpoint_stats rpc_stats;
+		struct tr_channel_stats channel_stats;
+
+		if (!peer->used)
+			continue;
+
+		if (peer->rpc && peer->channel)
+			stats.peers_ready_current++;
+
+		if (peer->rpc &&
+		    tr_rpc_endpoint_get_stats(peer->rpc, &rpc_stats) == TR_OK)
+			tr_server_merge_rpc_stats(&stats.rpc, &rpc_stats, 1);
+		if (peer->channel &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			tr_server_merge_channel_stats(&stats.channel,
+						      &channel_stats, 1);
+	}
+	pthread_mutex_unlock(&server->lock);
+
+	*out = stats;
+	return TR_OK;
+}
+
 void tr_server_destroy(struct tr_server *server)
 {
 	uint32_t i;
