@@ -20,7 +20,8 @@ COUNTS = ("attempted", "accepted", "completed", "ok", "submit_again",
           "submit_errors", "deadlines", "rpc_errors", "invalid_responses")
 
 SERVER_OBS_INT = (
-    "reactor_busy_ns", "reactor_poll_ns", "command_queue_peak",
+    "reactor_busy_ns", "reactor_poll_ns", "command_queue_capacity",
+    "command_queue_peak",
     "completion_queue_peak", "command_queue_full_events",
     "completion_queue_full_events", "rx_pool_capacity", "rx_pool_peak",
     "tx_pool_capacity", "tx_pool_peak",

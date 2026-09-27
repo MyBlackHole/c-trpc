@@ -20,6 +20,7 @@ PRESSURE_KEYS = (
 
 def result(rate, rx_capacity, rx_exhausted=0, hard_full=0,
            control_capacity=128, control_exhausted=0,
+           command_capacity=1024, command_full=0,
            executor_queue=64, signals=None):
     server = {key: 0 for key in PRESSURE_KEYS}
     server.update(
@@ -28,6 +29,8 @@ def result(rate, rx_capacity, rx_exhausted=0, hard_full=0,
         rpc_hard_full_events=hard_full,
         control_tx_pool_capacity=control_capacity,
         control_tx_pool_exhausted_events=control_exhausted,
+        command_queue_capacity=command_capacity,
+        command_queue_full_events=command_full,
     )
     return {
         "case": {"rate_rps": rate},
@@ -44,13 +47,15 @@ class HeadroomTests(unittest.TestCase):
             "rpc_message_pool_count": 512,
             "reassembly_pool_count": 256,
             "control_tx_item_count": 512,
+            "command_capacity": 4096,
         }
         self.assertEqual(
             server_resource_args(case),
             ["--rx-buffers", "1024",
              "--rpc-message-pool", "512",
              "--reassembly-pool", "256",
-             "--control-tx-items", "512"])
+             "--control-tx-items", "512",
+             "--command-capacity", "4096"])
 
     def test_ready_override_validation(self):
         case = {
@@ -58,12 +63,14 @@ class HeadroomTests(unittest.TestCase):
             "rpc_message_pool_count": 0,
             "reassembly_pool_count": 0,
             "control_tx_item_count": 512,
+            "command_capacity": 4096,
         }
         ready = {
             "rx_buffers": 1024,
             "rpc_message_pool": 272,
             "reassembly_pool": 136,
             "control_tx_items": 512,
+            "command_capacity": 4096,
         }
         validate_server_ready_resources(ready, case)
         ready["rx_buffers"] = 272
@@ -136,6 +143,24 @@ class HeadroomTests(unittest.TestCase):
             comparison["control_tx_exhaustion_removed_rates"], [40000])
         self.assertEqual(
             comparison["control_tx_exhaustion_persisted_rates"], [])
+
+    def test_compare_reports_removed_command_queue_full(self):
+        before = [
+            result(20000, 8192, command_capacity=1024),
+            result(40000, 8192, command_capacity=1024,
+                   command_full=17,
+                   signals=["reactor_command_queue_full"]),
+        ]
+        after = [
+            result(20000, 8192, command_capacity=4096),
+            result(40000, 8192, command_capacity=4096),
+        ]
+        comparison = compare_profiles(
+            before, after, "rx_ceiling_headroom", "command_headroom")
+        self.assertEqual(comparison["before_command_capacity"], 1024)
+        self.assertEqual(comparison["after_command_capacity"], 4096)
+        self.assertEqual(comparison["command_full_removed_rates"], [40000])
+        self.assertEqual(comparison["command_full_persisted_rates"], [])
 
     def test_compare_requires_matching_rates(self):
         with self.assertRaises(ValueError):

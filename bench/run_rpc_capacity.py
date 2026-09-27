@@ -97,6 +97,7 @@ SERVER_RESOURCE_OVERRIDES = (
     ("rpc_message_pool_count", "--rpc-message-pool", "rpc_message_pool"),
     ("reassembly_pool_count", "--reassembly-pool", "reassembly_pool"),
     ("control_tx_item_count", "--control-tx-items", "control_tx_items"),
+    ("command_capacity", "--command-capacity", "command_capacity"),
 )
 
 
