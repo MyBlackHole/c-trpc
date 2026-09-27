@@ -148,6 +148,8 @@ def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
         "executor_queue": args.executor_queue,
         "window": args.window,
         "capacity": args.capacity,
+        "generator_window": args.generator_window,
+        "generator_capacity": args.generator_capacity,
         "baseline": {
             "rx_buffer_count": 0,
             "executor_queue": args.executor_queue,
@@ -206,6 +208,8 @@ def validate_args(parser: argparse.ArgumentParser,
         parser.error("executor-queue must be in 16..65536")
     if not 1 <= args.window <= args.capacity <= 256:
         parser.error("require 1 <= window <= capacity <= 256")
+    if not 1 <= args.generator_window <= args.generator_capacity <= 256:
+        parser.error("require 1 <= generator-window <= generator-capacity <= 256")
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
     if not 1 <= args.max_generators <= 32:
@@ -250,15 +254,17 @@ def main() -> int:
     parser.add_argument("--executor-queue", type=int, default=64)
     parser.add_argument("--window", type=int, default=128)
     parser.add_argument("--capacity", type=int, default=128)
+    parser.add_argument("--generator-window", type=int, default=256)
+    parser.add_argument("--generator-capacity", type=int, default=256)
     parser.add_argument("--timeout-ms", type=int, default=3000)
     parser.add_argument("--max-generators", type=int, default=32)
     parser.add_argument("--target-rate-per-generator", type=int, default=1250)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
     parser.add_argument("--generator-workers", type=int, default=1)
     parser.add_argument("--headroom-rx-buffers", type=int, default=1024)
-    parser.add_argument("--full-headroom-rx-buffers", type=int, default=2048)
+    parser.add_argument("--full-headroom-rx-buffers", type=int, default=4096)
     parser.add_argument("--headroom-executor-queue", type=int, default=256)
-    parser.add_argument("--headroom-control-tx-items", type=int, default=512)
+    parser.add_argument("--headroom-control-tx-items", type=int, default=2048)
     parser.add_argument("--headroom-rpc-message-pool", type=int, default=0)
     parser.add_argument("--headroom-reassembly-pool", type=int, default=0)
     parser.add_argument("--smoke", action="store_true")
@@ -273,6 +279,8 @@ def main() -> int:
         args.min_arrival_ms = 20
         args.generator_workers = 1
         args.headroom_rx_buffers = 512
+        args.generator_window = 64
+        args.generator_capacity = 64
         args.full_headroom_rx_buffers = 1024
         args.headroom_executor_queue = 128
         args.headroom_control_tx_items = 256
@@ -319,6 +327,8 @@ def main() -> int:
                     "executor_queue": executor_queue,
                     "window": args.window,
                     "capacity": args.capacity,
+                    "generator_window": args.generator_window,
+                    "generator_capacity": args.generator_capacity,
                     "timeout_ms": args.timeout_ms,
                     "generators": generators,
                     "generator_workers": args.generator_workers,
