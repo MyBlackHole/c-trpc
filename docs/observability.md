@@ -47,6 +47,25 @@ A high busy ratio together with low RPC queue wait points toward the Reactor as
 the limiting execution resource. Queue high-water and budget-hit counters show
 whether the pressure is command/completion scheduling or RX/TX work.
 
+## Reactor command attribution
+
+The Reactor snapshot also exposes the existing per-turn command fairness data:
+
+- `limits.commands`: command budget per event-loop turn;
+- `total.commands`: commands processed;
+- `max_per_turn.commands`: largest observed turn;
+- `budget_hits.commands`: turns that consumed the full command budget.
+
+Producer-side command queue pressure is split into `SEND`, `RESUME_RX`,
+`CALL`, and other commands, each with accepted enqueue and queue-full counts.
+These counters are updated under the command queue's existing mutex and add no
+new allocation, clock read, or metrics lock.
+
+This distinction matters when the queue is full while Reactor busy time is low:
+a high command-budget-hit rate points toward bounded per-turn fairness or burst
+drain behavior, while one producer category dominating queue-full events points
+toward a specific upstream pressure source.
+
 ## RPC executor attribution
 
 `tr_rpc_endpoint_get_stats()` reports:
