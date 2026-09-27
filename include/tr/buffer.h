@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "tr/cleanup.h"
+#include "tr/observability.h"
 
 struct tr_buffer {
 	uint8_t *data;
@@ -26,6 +27,8 @@ struct tr_buffer_pool {
 	uint32_t buffer_count;
 	uint32_t buffer_size;
 	uint32_t free_count;
+	uint32_t peak_in_use;
+	uint64_t exhausted_events;
 };
 
 int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
@@ -43,5 +46,7 @@ void tr_buffer_release(struct tr_buffer *buffer);
 TR_DEFINE_PTR_OWNERSHIP(tr_buffer, struct tr_buffer, tr_buffer_release)
 
 uint32_t tr_buffer_pool_free_count(struct tr_buffer_pool *pool);
+int tr_buffer_pool_get_stats(struct tr_buffer_pool *pool,
+			     struct tr_pool_observation *out);
 
 #endif
