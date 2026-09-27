@@ -113,9 +113,9 @@ def validate_args(parser: argparse.ArgumentParser,
     if not 1 <= args.rate <= 1_000_000:
         parser.error("rate must be in 1..1000000")
     if (not args.fanouts or len(set(args.fanouts)) != len(args.fanouts) or
-            any(value < 1 or value > 32 or value > args.rate
+            any(value < 2 or value > 32 or value > args.rate
                 for value in args.fanouts)):
-        parser.error("fanouts must be unique values in 1..min(32, rate)")
+        parser.error("fanouts must be unique values in 2..min(32, rate)")
     if not 1 <= args.workers <= 32:
         parser.error("workers must be in 1..32")
     if not 1 <= args.requests <= 10_000_000:
