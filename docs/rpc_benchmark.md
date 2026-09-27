@@ -143,9 +143,29 @@ Server executor 队列耗尽时，只要请求仍处于**首个业务 task 尚�
   `STATUS=RESOURCE_EXHAUSTED`；
 - 物理 TCP/Channel 保持可用，后续 Call 可以继续服务。
 
-真正的 connection/transport failure 仍使用 `UNAVAILABLE`。已经执行过 Streaming
-业务 callback 后发生的**中途** executor saturation 不在 admission 语义内，仍保留
-现有行为，后续需要单独决定是终止 Call、应用级背压还是其他策略。
+真正的 connection/transport failure 仍使用 `UNAVAILABLE`。
+
+已经执行过 Streaming 业务 callback 后发生的 **mid-stream executor saturation**
+采用有界背压而不是立即关闭 Stream：
+
+- 每个已开始的 Server Streaming Call 最多保留 1 个尚未进入 executor 的 task；
+- pending message 保持 RX buffer ownership，因此在真正进入 worker 前不归还该
+  message 的 Stream flow-control credit；
+- executor worker 从 queue 取走 task、实际释放 node capacity 后，会向 Reactor
+  owner 合并投递 retry；owner 再把 pending task 按 Call 顺序放回 executor；
+- peer half-close 若恰好发生在 pending message 期间，也会排在该 message 之后，
+  不允许 `on_half_close` 越过 `on_message`；
+- 如果同一个 Call 在已有 1 个 pending task 时又产生第二个无法接纳的 continuation，
+  bounded pending 已耗尽，此时只终止这个 Call 并返回最终
+  `RESOURCE_EXHAUSTED`，TCP/Channel 继续可用；
+- 该 Call 在终止前可能已经执行过早先 callback，因此这个
+  `RESOURCE_EXHAUSTED` **不是**“业务从未执行”的 admission rejection。
+
+确定性 `test_rpc_stream_backpressure` 使用 1 worker + 16 queue：先让两个
+Streaming Call 真正进入业务层，再用独立 filler Calls 填满 executor；验证 A 的
+continuation 被保留且 RX credit 暂不归还，释放 worker 后 A 按序恢复并继续成功；
+B 的第二个 pending continuation 超过每 Call 上限后得到
+`RESOURCE_EXHAUSTED`，但同一 Channel/Connection 上新的恢复 Call 仍成功。
 
 容量工具分别统计 `resource_exhausted` 与 `unavailable`，两者都必须是
 `rpc_errors` 的子集，不能相互冒充。

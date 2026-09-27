@@ -50,47 +50,6 @@ struct tr_rpc_method_entry {
 	void *handler_arg;
 };
 
-struct tr_rpc_call_slot {
-	uint32_t generation;
-	enum tr_rpc_call_state state;
-
-	struct tr_stream_handle stream;
-	struct tr_rpc_method_entry *method;
-
-	uint32_t tx_count;
-	uint32_t rx_count;
-	uint32_t task_refs;
-
-	int is_unary;
-	int local_closed;
-	int remote_closed;
-	int final_status_seen;
-	int final_status_sent;
-	int final_status;
-	int admission_rejected;
-
-	int cancelled;
-	int cancel_status;
-	int terminal_notified;
-	uint64_t deadline_ns;
-
-	uint8_t local_metadata[TR_RPC_METADATA_MAX_BYTES];
-	uint16_t local_metadata_len;
-	uint8_t peer_metadata[TR_RPC_METADATA_MAX_BYTES];
-	uint16_t peer_metadata_len;
-
-	struct tr_buffer *pending_tx;
-	struct tr_buffer *pending_control;
-	int need_local_close;
-	int response_received;
-	int result_delivered;
-
-	tr_rpc_unary_result_cb result_cb;
-	void *result_arg;
-
-	struct tr_rpc_call_callbacks callbacks;
-};
-
 struct tr_rpc_task {
 	uint16_t type;
 	uint16_t first_message;
@@ -123,6 +82,60 @@ struct tr_rpc_task {
 		} client_stream;
 	} u;
 };
+
+struct tr_rpc_call_slot {
+	uint32_t generation;
+	enum tr_rpc_call_state state;
+
+	struct tr_stream_handle stream;
+	struct tr_rpc_method_entry *method;
+
+	uint32_t tx_count;
+	uint32_t rx_count;
+	uint32_t task_refs;
+
+	int is_unary;
+	int local_closed;
+	int remote_closed;
+	int final_status_seen;
+	int final_status_sent;
+	int final_status;
+	int admission_rejected;
+	int executor_overloaded;
+	int pending_control_is_final_status;
+	int pending_remote_half_close;
+
+	int cancelled;
+	int cancel_status;
+	int terminal_notified;
+	uint64_t deadline_ns;
+
+	uint8_t local_metadata[TR_RPC_METADATA_MAX_BYTES];
+	uint16_t local_metadata_len;
+	uint8_t peer_metadata[TR_RPC_METADATA_MAX_BYTES];
+	uint16_t peer_metadata_len;
+
+	struct tr_buffer *pending_tx;
+	struct tr_buffer *pending_control;
+	int need_local_close;
+	int response_received;
+	int result_delivered;
+
+	tr_rpc_unary_result_cb result_cb;
+	void *result_arg;
+
+	struct tr_rpc_call_callbacks callbacks;
+
+	/*
+	 * At most one Server executor task may wait outside the executor queue.
+	 * This keeps overload backpressure bounded by max_calls without allocating
+	 * an unbounded side queue.
+	 */
+	struct tr_rpc_task pending_executor_task;
+	int pending_executor_task_valid;
+};
+
+
 
 /*
  * Unary worker 只产生业务结果；wire metadata、Call 状态和发送动作必须回到
@@ -224,6 +237,11 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
 
+	/* Owner-visible coalescing state for retrying bounded pending tasks. */
+	int pending_executor_work;
+	int pending_retry_scheduled;
+	uint32_t pending_retry_cursor;
+
 	uint64_t stat_calls_started;
 	uint64_t stat_calls_completed;
 	uint64_t stat_calls_cancelled;
@@ -243,6 +261,8 @@ static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_executor_complete_task(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle);
+static void tr_rpc_executor_mark_cancelled(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle);
 
 static uint64_t tr_rpc_now_ns(void)
@@ -679,6 +699,19 @@ static int tr_rpc_allocate_call_locked(struct tr_rpc_endpoint *endpoint,
 	return TR_AGAIN;
 }
 
+static void
+tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
+{
+	if (!call || !call->pending_executor_task_valid)
+		return;
+
+	if (call->pending_executor_task.payload)
+		tr_buffer_release(call->pending_executor_task.payload);
+	memset(&call->pending_executor_task, 0,
+	       sizeof(call->pending_executor_task));
+	call->pending_executor_task_valid = 0;
+}
+
 static void tr_rpc_free_call_locked(struct tr_rpc_call_slot *call)
 {
 	uint32_t generation;
@@ -691,6 +724,7 @@ static void tr_rpc_free_call_locked(struct tr_rpc_call_slot *call)
 		tr_buffer_release(call->pending_tx);
 	if (call->pending_control)
 		tr_buffer_release(call->pending_control);
+	tr_rpc_drop_pending_executor_task_locked(call);
 	memset(call, 0, sizeof(*call));
 	call->generation = generation;
 }
@@ -699,7 +733,7 @@ static void tr_rpc_maybe_free_call_locked(struct tr_rpc_call_slot *call)
 {
 	if (call && call->state == TR_RPC_CALL_TERMINAL &&
 	    call->task_refs == 0 && !call->pending_control &&
-	    !call->need_local_close)
+	    !call->need_local_close && !call->pending_executor_task_valid)
 		tr_rpc_free_call_locked(call);
 }
 
@@ -1025,6 +1059,69 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 		}
 	} else if (ret == TR_AGAIN) {
 		call->pending_control = tr_buffer_take(&encoded);
+		call->pending_control_is_final_status = 1;
+		ret = TR_OK;
+	}
+	return ret;
+}
+
+/*
+ * Once application callbacks may already have run, overload is not an
+ * admission rejection.  Stop admitting further callbacks for this Call,
+ * return a final RESOURCE_EXHAUSTED status, and keep the physical connection
+ * alive.  Any one pending RX task is dropped without returning Stream credit:
+ * the Stream is being terminated, so its flow-control state will be retired.
+ */
+static int
+tr_rpc_fail_stream_midstream_overload_locked(
+	struct tr_rpc_endpoint *endpoint, uint32_t slot,
+	struct tr_rpc_call_slot *call, int status)
+{
+	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_rpc_bytes empty = { NULL, 0 };
+	struct tr_rpc_call_handle handle;
+	struct tr_rpc_method_desc method;
+	int ret;
+
+	if (!endpoint || !call || !call->method || call->is_unary ||
+	    endpoint->config.role != TR_RPC_SERVER ||
+	    call->admission_rejected || call->executor_overloaded ||
+	    call->final_status_sent || call->pending_control)
+		return TR_ERR_STATE;
+
+	call->executor_overloaded = 1;
+	call->pending_remote_half_close = 0;
+	tr_rpc_drop_pending_executor_task_locked(call);
+	handle = tr_rpc_make_call_handle(endpoint, slot, call);
+	tr_rpc_executor_mark_cancelled(endpoint, handle);
+
+	method = call->method->desc;
+	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
+				    method.response_codec_id, status, &empty,
+				    &encoded);
+	if (ret != TR_OK)
+		return ret;
+
+	call->final_status = status;
+	call->deadline_ns = 0;
+	tr_rpc_deadline_changed_locked(endpoint);
+
+	ret = tr_stream_send(call->stream, encoded);
+	if (ret == TR_OK) {
+		(void)tr_buffer_take(&encoded);
+		call->final_status_sent = 1;
+		ret = tr_stream_close(call->stream);
+		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
+			call->local_closed = 1;
+			call->need_local_close = 0;
+			ret = TR_OK;
+		} else if (ret == TR_AGAIN) {
+			call->need_local_close = 1;
+			ret = TR_OK;
+		}
+	} else if (ret == TR_AGAIN) {
+		call->pending_control = tr_buffer_take(&encoded);
+		call->pending_control_is_final_status = 1;
 		ret = TR_OK;
 	}
 	return ret;
@@ -1288,6 +1385,35 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 	return ret;
 }
 
+/*
+ * Store exactly one task per Call outside the bounded executor.  The task
+ * snapshot owns any RX payload until it is admitted or the Call terminates.
+ * endpoint->lock must already be held.
+ */
+static int
+tr_rpc_store_pending_executor_task_locked(struct tr_rpc_endpoint *endpoint,
+					  struct tr_rpc_call_slot *call,
+					  const struct tr_rpc_task *task)
+{
+	struct tr_rpc_task snapshot;
+	int ret;
+
+	if (!endpoint || !call || !task)
+		return TR_ERR_INVALID;
+	if (call->pending_executor_task_valid)
+		return TR_AGAIN;
+
+	snapshot = *task;
+	ret = tr_rpc_prepare_task_snapshot_locked(call, &snapshot);
+	if (ret != TR_OK)
+		return ret;
+
+	call->pending_executor_task = snapshot;
+	call->pending_executor_task_valid = 1;
+	endpoint->pending_executor_work = 1;
+	return TR_OK;
+}
+
 static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			     struct tr_rpc_call_handle handle)
 {
@@ -1502,6 +1628,130 @@ static int tr_rpc_defer_task_completion(
 	if (ret != TR_OK)
 		free(completion);
 	return ret;
+}
+
+/*
+ * Executor node capacity becomes available when a worker takes a queued task,
+ * not when that task later finishes.  Workers therefore coalesce one owner
+ * completion after take(); the owner retries pending per-Call tasks without
+ * inverting the endpoint->lock -> executor->lock order.
+ */
+static void tr_rpc_retry_pending_executor_on_owner(void *arg)
+{
+	struct tr_rpc_endpoint *endpoint = arg;
+	uint32_t max_calls;
+	uint32_t n;
+
+	if (!endpoint)
+		return;
+
+	pthread_mutex_lock(&endpoint->lock);
+	endpoint->pending_retry_scheduled = 0;
+	endpoint->pending_executor_work = 0;
+	max_calls = endpoint->config.max_calls;
+
+	for (n = 0; n < max_calls; ++n) {
+		uint32_t slot =
+			(endpoint->pending_retry_cursor + n) % max_calls;
+		struct tr_rpc_call_slot *call = &endpoint->calls[slot];
+		struct tr_rpc_task task;
+		int ret;
+
+		if (!call->pending_executor_task_valid)
+			continue;
+
+		task = call->pending_executor_task;
+		if (call->state == TR_RPC_CALL_FREE ||
+		    task.call.generation != call->generation ||
+		    call->cancelled || call->admission_rejected ||
+		    (call->executor_overloaded &&
+		     task.type != TR_RPC_TASK_SERVER_CLOSE)) {
+			tr_rpc_drop_pending_executor_task_locked(call);
+			continue;
+		}
+
+		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+		if (ret == TR_OK) {
+			int queue_half_close = call->pending_remote_half_close &&
+				task.type == TR_RPC_TASK_SERVER_STREAM_MESSAGE;
+
+			memset(&call->pending_executor_task, 0,
+			       sizeof(call->pending_executor_task));
+			call->pending_executor_task_valid = 0;
+			endpoint->pending_retry_cursor =
+				(slot + 1U) % max_calls;
+
+			/*
+			 * A remote half-close observed while this message was pending
+			 * must remain ordered after the message for the same Call.
+			 */
+			if (queue_half_close) {
+				struct tr_rpc_task half_close;
+
+				memset(&half_close, 0, sizeof(half_close));
+				half_close.type = TR_RPC_TASK_SERVER_HALF_CLOSE;
+				half_close.call =
+					tr_rpc_make_call_handle(endpoint, slot, call);
+				call->pending_remote_half_close = 0;
+				ret = tr_rpc_queue_task_locked(
+					endpoint, call, &half_close);
+				if (ret == TR_AGAIN)
+					ret = tr_rpc_store_pending_executor_task_locked(
+						endpoint, call, &half_close);
+				if (ret != TR_OK)
+					call->pending_remote_half_close = 0;
+			}
+			continue;
+		}
+		if (ret == TR_AGAIN) {
+			endpoint->pending_executor_work = 1;
+			endpoint->pending_retry_cursor = slot;
+			break;
+		}
+
+		/* Teardown/stale paths must never strand owned RX storage. */
+		tr_rpc_drop_pending_executor_task_locked(call);
+	}
+
+	/*
+	 * A break above is the normal full-queue case. If the complete scan
+	 * admitted/dropped everything, pending_executor_work stays clear.
+	 */
+	pthread_mutex_unlock(&endpoint->lock);
+	tr_rpc_endpoint_put(endpoint);
+}
+
+static void
+tr_rpc_schedule_pending_executor_retry(struct tr_rpc_endpoint *endpoint)
+{
+	struct tr_reactor *reactor;
+	int submit = 0;
+	int ret;
+
+	if (!endpoint)
+		return;
+
+	pthread_mutex_lock(&endpoint->lock);
+	if (endpoint->pending_executor_work &&
+	    !endpoint->pending_retry_scheduled &&
+	    tr_rpc_endpoint_get(endpoint) == TR_OK) {
+		endpoint->pending_retry_scheduled = 1;
+		submit = 1;
+	}
+	pthread_mutex_unlock(&endpoint->lock);
+	if (!submit)
+		return;
+
+	reactor = tr_channel_reactor(endpoint->channel);
+	ret = tr_reactor_complete(reactor,
+				  tr_rpc_retry_pending_executor_on_owner,
+				  endpoint);
+	if (ret != TR_OK) {
+		pthread_mutex_lock(&endpoint->lock);
+		endpoint->pending_retry_scheduled = 0;
+		pthread_mutex_unlock(&endpoint->lock);
+		tr_rpc_endpoint_put(endpoint);
+	}
 }
 
 static void tr_rpc_apply_unary_completion(void *arg)
@@ -1890,6 +2140,7 @@ static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 	}
 
 	pthread_mutex_unlock(&executor->lock);
+	tr_rpc_schedule_pending_executor_retry(endpoint);
 	return 1;
 }
 
@@ -2317,6 +2568,9 @@ static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
 		task.call = tr_rpc_make_call_handle(endpoint, slot, call);
 		task.status = status;
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+		if (ret == TR_AGAIN && call->executor_overloaded)
+			ret = tr_rpc_store_pending_executor_task_locked(
+				endpoint, call, &task);
 	}
 
 	if (ret == TR_OK) {
@@ -2337,11 +2591,14 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 		ret = tr_stream_send(call->stream, call->pending_control);
 		if (ret == TR_OK) {
 			(void)tr_buffer_take(&call->pending_control);
-			if (call->admission_rejected)
+			if (call->pending_control_is_final_status) {
 				call->final_status_sent = 1;
+				call->pending_control_is_final_status = 0;
+			}
 			call->need_local_close = 1;
 		} else if (ret != TR_AGAIN) {
 			tr_buffer_release(tr_buffer_take(&call->pending_control));
+			call->pending_control_is_final_status = 0;
 			call->need_local_close = 1;
 		} else {
 			return ret;
@@ -2395,6 +2652,7 @@ static int tr_rpc_cancel_on_owner(void *arg)
 
 	call->cancelled = 1;
 	call->cancel_status = status;
+	tr_rpc_drop_pending_executor_task_locked(call);
 	tr_rpc_executor_mark_cancelled(endpoint, handle);
 	if (status == TR_RPC_STATUS_DEADLINE_EXCEEDED)
 		endpoint->stat_calls_deadline_exceeded++;
@@ -2610,7 +2868,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	pthread_mutex_lock(&endpoint->lock);
 	call = tr_rpc_find_call_by_stream_locked(endpoint, stream, &slot);
 
-	if (call && call->admission_rejected &&
+	if (call &&
+	    (call->admission_rejected || call->executor_overloaded) &&
 	    wire.type == TR_RPC_WIRE_REQUEST) {
 		/*
 		 * The rejection path owns final STATUS + local half-close ordering.
@@ -2679,6 +2938,17 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			}
 		}
 
+		if (!first_message && !call->is_unary &&
+		    call->pending_executor_task_valid) {
+			ret = tr_rpc_fail_stream_midstream_overload_locked(
+				endpoint, slot, call,
+				TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+			pthread_mutex_unlock(&endpoint->lock);
+			if (ret != TR_OK)
+				(void)tr_stream_close(stream);
+			return TR_STREAM_DATA_RELEASE;
+		}
+
 		cardinality = method->desc.request_cardinality;
 		if (tr_rpc_validate_cardinality(cardinality, call->rx_count) !=
 		    TR_OK) {
@@ -2710,6 +2980,15 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			pthread_mutex_unlock(&endpoint->lock);
 			if (ret != TR_OK)
 				(void)tr_stream_close(stream);
+			return TR_STREAM_DATA_RELEASE;
+		}
+		if (ret == TR_AGAIN && !first_message && !call->is_unary) {
+			ret = tr_rpc_store_pending_executor_task_locked(
+				endpoint, call, &task);
+			pthread_mutex_unlock(&endpoint->lock);
+			if (ret == TR_OK)
+				return TR_STREAM_DATA_TAKE_OWNERSHIP;
+			(void)tr_stream_close(stream);
 			return TR_STREAM_DATA_RELEASE;
 		}
 		pthread_mutex_unlock(&endpoint->lock);
@@ -2854,6 +3133,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		if (!call->cancelled) {
 			call->cancelled = 1;
 			call->cancel_status = cancel_status;
+			tr_rpc_drop_pending_executor_task_locked(call);
 			tr_rpc_executor_mark_cancelled(
 				endpoint,
 				tr_rpc_make_call_handle(endpoint, slot, call));
@@ -2917,6 +3197,13 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 	if (event == TR_STREAM_EVENT_WRITABLE) {
 		if (call->cancelled || call->pending_control) {
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
+			if (call->executor_overloaded && call->local_closed &&
+			    call->remote_closed &&
+			    call->state != TR_RPC_CALL_TERMINAL) {
+				call->state = TR_RPC_CALL_TERMINAL;
+				(void)tr_rpc_notify_terminal_locked(
+					endpoint, slot, call, call->final_status);
+			}
 			tr_rpc_maybe_free_call_locked(call);
 		} else if (call->is_unary)
 			ret = tr_rpc_try_unary_send_locked(endpoint, call);
@@ -2951,11 +3238,30 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
+		if (call->executor_overloaded) {
+			if (call->local_closed && !call->pending_control &&
+			    !call->need_local_close) {
+				call->state = TR_RPC_CALL_TERMINAL;
+				(void)tr_rpc_notify_terminal_locked(
+					endpoint, slot, call, call->final_status);
+				tr_rpc_maybe_free_call_locked(call);
+			}
+			pthread_mutex_unlock(&endpoint->lock);
+			return;
+		}
 		if (!call->is_unary && endpoint->config.role == TR_RPC_SERVER) {
+			if (call->pending_executor_task_valid) {
+				call->pending_remote_half_close = 1;
+				pthread_mutex_unlock(&endpoint->lock);
+				return;
+			}
 			task.type = TR_RPC_TASK_SERVER_HALF_CLOSE;
 			task.call =
 				tr_rpc_make_call_handle(endpoint, slot, call);
 			ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+			if (ret == TR_AGAIN)
+				ret = tr_rpc_store_pending_executor_task_locked(
+					endpoint, call, &task);
 		} else if (!call->is_unary &&
 			   endpoint->config.role == TR_RPC_CLIENT) {
 			ret = tr_rpc_queue_client_event_locked(
@@ -2969,11 +3275,14 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 	}
 
 	if (event == TR_STREAM_EVENT_ERROR || event == TR_STREAM_EVENT_CLOSED) {
-		int terminal_status = status == TR_OK ?
-					      TR_RPC_STATUS_OK :
-					      TR_RPC_STATUS_UNAVAILABLE;
+		int terminal_status = call->executor_overloaded ?
+					      call->final_status :
+					      (status == TR_OK ?
+						       TR_RPC_STATUS_OK :
+						       TR_RPC_STATUS_UNAVAILABLE);
 
 		call->deadline_ns = 0;
+		tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
 			if (call->pending_control) {
 				tr_buffer_release(call->pending_control);
@@ -3012,8 +3321,11 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			task.call =
 				tr_rpc_make_call_handle(endpoint, slot, call);
 			task.status = terminal_status;
-			if (tr_rpc_queue_task_locked(endpoint, call, &task) ==
-			    TR_OK)
+			ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+			if (ret == TR_AGAIN && call->executor_overloaded)
+				ret = tr_rpc_store_pending_executor_task_locked(
+					endpoint, call, &task);
+			if (ret == TR_OK)
 				call->terminal_notified = 1;
 		}
 
@@ -3053,6 +3365,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 			continue;
 
 		call->deadline_ns = 0;
+		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
 		call->local_closed = 1;
@@ -3621,7 +3934,8 @@ static int tr_rpc_prepare_send_locked(struct tr_rpc_call_handle handle,
 	call = tr_rpc_lookup_call_handle_locked(handle);
 	if (!call || !call->method || call->is_unary)
 		return TR_ERR_STALE;
-	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL ||
+	if (call->cancelled || call->executor_overloaded ||
+	    call->state == TR_RPC_CALL_TERMINAL ||
 	    call->final_status_seen || call->final_status_sent ||
 	    call->local_closed)
 		return TR_ERR_CLOSED;
@@ -3841,7 +4155,8 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		ret = TR_ERR_STALE;
 		goto out;
 	}
-	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL) {
+	if (call->cancelled || call->executor_overloaded ||
+	    call->state == TR_RPC_CALL_TERMINAL) {
 		ret = TR_ERR_CLOSED;
 		goto out;
 	}
@@ -4128,6 +4443,13 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 			ret = tr_rpc_try_unary_send_locked(endpoint, call);
 		else if (!call->is_unary && call->pending_control) {
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
+			if (call->executor_overloaded && call->local_closed &&
+			    call->remote_closed &&
+			    call->state != TR_RPC_CALL_TERMINAL) {
+				call->state = TR_RPC_CALL_TERMINAL;
+				(void)tr_rpc_notify_terminal_locked(
+					endpoint, i, call, call->final_status);
+			}
 			tr_rpc_maybe_free_call_locked(call);
 		} else if (!call->is_unary && call->need_local_close) {
 			ret = tr_stream_close(call->stream);
@@ -4137,6 +4459,13 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 				if (call->admission_rejected &&
 				    call->remote_closed)
 					call->state = TR_RPC_CALL_TERMINAL;
+				else if (call->executor_overloaded &&
+					 call->remote_closed) {
+					call->state = TR_RPC_CALL_TERMINAL;
+					(void)tr_rpc_notify_terminal_locked(
+						endpoint, i, call,
+						call->final_status);
+				}
 				tr_rpc_maybe_free_call_locked(call);
 				ret = TR_OK;
 			}
