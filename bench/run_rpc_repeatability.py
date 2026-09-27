@@ -15,6 +15,7 @@ from typing import Any
 from run_rpc_bench import metadata as base_metadata
 from run_rpc_headroom import run_profile_case, server_pressure
 from run_rpc_scalability import (
+    SERVER_PRESSURE_FIELDS,
     clean_result,
     exact_wall_signals,
     generator_count_for,
@@ -54,9 +55,30 @@ def summarize(profile: str, results: list[dict[str, Any]]) -> dict[str, Any]:
         raise ValueError("repeatability summary requires results")
 
     signal_counts: dict[str, int] = {}
+    server_signal_counts: dict[str, int] = {}
     for result in results:
         for signal in exact_wall_signals(result):
             signal_counts[signal] = signal_counts.get(signal, 0) + 1
+        server = result["server_exit"]
+        for signal, key in SERVER_PRESSURE_FIELDS.items():
+            if server[key]:
+                server_signal_counts[signal] = (
+                    server_signal_counts.get(signal, 0) + 1)
+
+    trials = len(results)
+    reproducible_server_signals = sorted(
+        signal for signal, count in server_signal_counts.items()
+        if count == trials)
+    sporadic_server_signals = sorted(
+        signal for signal, count in server_signal_counts.items()
+        if count < trials)
+    pressure_trials = sum(server_pressure(result) for result in results)
+    if reproducible_server_signals:
+        classification = "reproducible_server_wall"
+    elif pressure_trials:
+        classification = "non_reproducible_server_wall"
+    else:
+        classification = "no_server_wall"
 
     ok_rps = [result["client"]["ok_rps"] for result in results]
     busy = [result["server_exit"]["reactor_busy_ratio"] for result in results]
@@ -69,10 +91,14 @@ def summarize(profile: str, results: list[dict[str, Any]]) -> dict[str, Any]:
         "type": "repeatability_summary",
         "schema": 1,
         "profile": profile,
-        "trials": len(results),
+        "trials": trials,
         "clean_trials": sum(clean_result(result) for result in results),
-        "server_pressure_trials": sum(server_pressure(result) for result in results),
+        "server_pressure_trials": pressure_trials,
+        "classification": classification,
         "signal_counts": dict(sorted(signal_counts.items())),
+        "server_signal_counts": dict(sorted(server_signal_counts.items())),
+        "reproducible_server_signals": reproducible_server_signals,
+        "sporadic_server_signals": sporadic_server_signals,
         "ok_rps_min": min(ok_rps),
         "ok_rps_median": statistics.median(ok_rps),
         "ok_rps_max": max(ok_rps),

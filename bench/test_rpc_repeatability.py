@@ -71,6 +71,13 @@ class RepeatabilityTests(unittest.TestCase):
         self.assertEqual(summary["trials"], 3)
         self.assertEqual(summary["clean_trials"], 2)
         self.assertEqual(summary["server_pressure_trials"], 1)
+        self.assertEqual(summary["classification"],
+                         "non_reproducible_server_wall")
+        self.assertEqual(summary["reproducible_server_signals"], [])
+        self.assertEqual(summary["sporadic_server_signals"],
+                         ["reactor_command_queue_full"])
+        self.assertEqual(summary["server_signal_counts"],
+                         {"reactor_command_queue_full": 1})
         self.assertEqual(
             summary["signal_counts"]["reactor_command_queue_full"], 1)
         self.assertEqual(
@@ -84,7 +91,30 @@ class RepeatabilityTests(unittest.TestCase):
         summary = summarize("ceiling_headroom", rows)
         self.assertEqual(summary["clean_trials"], 3)
         self.assertEqual(summary["server_pressure_trials"], 0)
+        self.assertEqual(summary["classification"], "no_server_wall")
+        self.assertEqual(summary["server_signal_counts"], {})
+        self.assertEqual(summary["reproducible_server_signals"], [])
+        self.assertEqual(summary["sporadic_server_signals"], [])
         self.assertEqual(summary["signal_counts"], {})
+
+    def test_summary_marks_same_server_wall_as_reproducible(self):
+        rows = [
+            result(2500.0, 0.16, ["reactor_command_queue_full"],
+                   command_hits=40, command_peak=4096),
+            result(2600.0, 0.17, ["reactor_command_queue_full"],
+                   command_hits=45, command_peak=4096),
+            result(2400.0, 0.15, ["reactor_command_queue_full"],
+                   command_hits=50, command_peak=4096),
+        ]
+        summary = summarize("command_headroom", rows)
+        self.assertEqual(summary["server_pressure_trials"], 3)
+        self.assertEqual(summary["classification"],
+                         "reproducible_server_wall")
+        self.assertEqual(summary["server_signal_counts"],
+                         {"reactor_command_queue_full": 3})
+        self.assertEqual(summary["reproducible_server_signals"],
+                         ["reactor_command_queue_full"])
+        self.assertEqual(summary["sporadic_server_signals"], [])
 
 
 if __name__ == "__main__":
