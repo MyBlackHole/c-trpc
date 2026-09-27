@@ -29,6 +29,8 @@ def result(ok_rps=39000.0, busy=0.3, signals=None,
         submit_errors=0,
         deadlines=0,
         rpc_errors=0,
+        unavailable=0,
+        resource_exhausted=0,
         invalid_responses=0,
         ok_rps=ok_rps,
     )
