@@ -40,6 +40,12 @@ PROFILE_SPECS = {
         "control_tx_item_count": 8192,
         "command_capacity": 4096,
     },
+    "command_ceiling_headroom": {
+        "rx_buffer_count": 8192,
+        "executor_queue": 1024,
+        "control_tx_item_count": 8192,
+        "command_capacity": 16384,
+    },
 }
 
 
