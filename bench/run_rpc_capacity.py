@@ -86,6 +86,12 @@ def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
         raise ValueError("inconsistent drain interval")
 
 
+def nominal_handler_capacity_rps(workers: int, slow_ms: int) -> float | None:
+    if slow_ms == 0:
+        return None
+    return workers * 1000.0 / slow_ms
+
+
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
@@ -146,7 +152,7 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
 
         return {"type": "capacity_case", "case": case,
                 "nominal_handler_capacity_rps":
-                    case["workers"] * 1000.0 / case["slow_ms"],
+                    nominal_handler_capacity_rps(case["workers"], case["slow_ms"]),
                 "server_command": server_cmd, "client_command": client_cmd,
                 "server": ready, "server_exit": exit_row, "client": row,
                 "runner_elapsed_s": time.monotonic() - started}
@@ -174,7 +180,7 @@ def metadata(binary: Path, label: str, workers: int, slow_ms: int,
     row["slow_ms"] = slow_ms
     row["executor_queue"] = executor_queue
     row["window"] = window
-    row["nominal_handler_capacity_rps"] = workers * 1000.0 / slow_ms
+    row["nominal_handler_capacity_rps"] = nominal_handler_capacity_rps(workers, slow_ms)
     row["nominal_capacity_note"] = (
         "worker-count / handler-delay arithmetic only; not a measured system capacity")
     return row
