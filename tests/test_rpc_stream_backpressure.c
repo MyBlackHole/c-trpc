@@ -35,6 +35,7 @@ struct backpressure_ctx {
 	unsigned recovery_messages;
 	unsigned server_closed;
 	unsigned server_resource_closed;
+	int last_server_close_status;
 	int blocker_waiting;
 	int release_blocker;
 	int opened[CALL_COUNT];
@@ -266,6 +267,7 @@ static void server_close(struct tr_rpc_call_handle call, int status, void *arg)
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->server_closed++;
+	ctx->last_server_close_status = status;
 	if (status == TR_RPC_STATUS_RESOURCE_EXHAUSTED)
 		ctx->server_resource_closed++;
 	pthread_cond_broadcast(&ctx->cond);
@@ -517,8 +519,24 @@ int main(void)
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_rpc_call_close_send(calls[RECOVERY_CALL]) == TR_OK);
 
-	wait_counter(&ctx, &ctx.server_resource_closed, 1U,
-		     "server overloaded close callback");
+	{
+		struct timespec deadline;
+		int ret = 0;
+
+		assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+		deadline.tv_sec += 10;
+		pthread_mutex_lock(&ctx.lock);
+		while (ctx.server_resource_closed < 1U && ret == 0)
+			ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock,
+						     &deadline);
+		if (ctx.server_resource_closed < 1U)
+			fprintf(stderr,
+				"overloaded close missing: closed=%u resource=%u last_status=%d ret=%d\n",
+				ctx.server_closed, ctx.server_resource_closed,
+				ctx.last_server_close_status, ret);
+		assert(ctx.server_resource_closed >= 1U);
+		pthread_mutex_unlock(&ctx.lock);
+	}
 	wait_executor(server_rpc, 0U, 0U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
