@@ -9,12 +9,19 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any
+import time
+from typing import Any, TextIO
 
-from run_rpc_bench import metadata as base_metadata
+from run_rpc_bench import (
+    metadata as base_metadata,
+    read_ready,
+    stop_owned,
+    validate_server_exit,
+)
 from run_rpc_capacity import (
     nominal_handler_capacity_rps,
     run_case as run_capacity_case,
+    validate_open_phase,
 )
 
 
@@ -60,9 +67,194 @@ def rates_for(workers: int, handler_ms: int, zero_rates: list[int],
     return sorted({max(1, round(nominal * ratio)) for ratio in ratios})
 
 
+def generator_count_for(rate_rps: int, max_generators: int,
+                        target_rate_per_generator: int) -> int:
+    needed = max(1, math.ceil(rate_rps / target_rate_per_generator))
+    return min(max_generators, needed)
+
+
+def split_rates(total_rate: int, generators: int) -> list[int]:
+    if generators < 1 or total_rate < generators:
+        raise ValueError("cannot split offered rate across generators")
+    base, remainder = divmod(total_rate, generators)
+    return [base + (1 if i < remainder else 0) for i in range(generators)]
+
+
+def split_weighted_total(total: int, weights: list[int]) -> list[int]:
+    weight_sum = sum(weights)
+    raw = [total * weight / weight_sum for weight in weights]
+    values = [math.floor(value) for value in raw]
+    remainder = total - sum(values)
+    order = sorted(range(len(weights)),
+                   key=lambda i: raw[i] - values[i], reverse=True)
+    for i in order[:remainder]:
+        values[i] += 1
+    if any(value <= 0 for value in values):
+        raise ValueError("request budget too small for generator count")
+    return values
+
+
+def aggregate_client_rows(rows: list[dict[str, Any]],
+                          rates: list[int]) -> dict[str, Any]:
+    if not rows or len(rows) != len(rates):
+        raise ValueError("missing generator results")
+    start_ns = min(row["start_ns"] for row in rows)
+    end_ns = max(row["end_ns"] for row in rows)
+    elapsed = (end_ns - start_ns) / 1e9
+    summed = {}
+    for key in (
+            "offered", "scheduler_dropped", "attempted", "accepted",
+            "completed", "ok", "submit_again", "submit_errors",
+            "deadlines", "rpc_errors", "unavailable", "resource_exhausted",
+            "invalid_responses"):
+        summed[key] = sum(row[key] for row in rows)
+    summed.update({
+        "generator_count": len(rows),
+        "generator_rates_rps": rates,
+        "start_ns": start_ns,
+        "end_ns": end_ns,
+        "drain_elapsed_s": elapsed,
+        "ok_rps": summed["ok"] / elapsed if elapsed > 0 else 0.0,
+        "scheduler_interval_us": min(1_000_000.0 / rate for rate in rates),
+        "scheduler_late_p50_us":
+            max(row["scheduler_late_p50_us"] for row in rows),
+        "scheduler_late_p99_us":
+            max(row["scheduler_late_p99_us"] for row in rows),
+        "scheduler_late_max_us":
+            max(row["scheduler_late_max_us"] for row in rows),
+        "client_cpu_s": sum(row["client_cpu_s"] for row in rows),
+        "client_peak_rss_kib": sum(row["client_peak_rss_kib"] for row in rows),
+    })
+    return summed
+
+
+def run_multisource_case(binary: Path, case: dict[str, Any],
+                         output_dir: Path) -> dict[str, Any]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
+    server_cmd = [
+        str(binary), "server", *common,
+        "--workers", str(case["workers"]),
+        "--slow-ms", str(case["slow_ms"]),
+        "--executor-queue", str(case["executor_queue"]),
+    ]
+    generator_rates = split_rates(case["rate_rps"], case["generators"])
+    request_counts = split_weighted_total(
+        case["requests"], generator_rates)
+    warmups = split_weighted_total(
+        max(case["generators"], case["warmup"]), generator_rates)
+    children: list[subprocess.Popen[str]] = []
+    logs: list[TextIO] = []
+    client_cmds: list[list[str]] = []
+    started = time.monotonic()
+
+    try:
+        server_err = (output_dir / "server.stderr").open("w", encoding="utf-8")
+        logs.append(server_err)
+        server = subprocess.Popen(
+            server_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=server_err, text=True)
+        children.append(server)
+        ready = read_ready(server, "ready")
+        if (ready.get("workers") != case["workers"] or
+                ready.get("executor_queue") != case["executor_queue"] or
+                ready.get("slow_ms") != case["slow_ms"]):
+            raise ValueError("server did not apply requested capacity controls")
+
+        clients: list[subprocess.Popen[str]] = []
+        for index, (rate, requests, warmup) in enumerate(
+                zip(generator_rates, request_counts, warmups)):
+            cmd = [
+                str(binary), "client", *common,
+                "--port", str(ready["port"]),
+                "--window", str(case["window"]),
+                "--scenario", "open",
+                "--requests", str(requests),
+                "--warmup", str(warmup),
+                "--timeout-ms", str(case["timeout_ms"]),
+                "--rate-rps", str(rate),
+                "--start-gate", "1",
+            ]
+            err = (output_dir / f"client-{index}.stderr").open(
+                "w", encoding="utf-8")
+            logs.append(err)
+            client = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=err, text=True)
+            children.append(client)
+            clients.append(client)
+            client_cmds.append(cmd)
+
+        for client in clients:
+            read_ready(client, "client_ready", timeout=30)
+
+        common_start_ns = time.monotonic_ns() + 500_000_000
+        global_interval_ns = max(1, 1_000_000_000 // case["rate_rps"])
+        for index, client in enumerate(clients):
+            assert client.stdin is not None
+            phase_ns = common_start_ns + index * global_interval_ns
+            client.stdin.write(f"t:{phase_ns}\n")
+            client.stdin.flush()
+
+        client_rows: list[dict[str, Any]] = []
+        for index, (client, requests, rate) in enumerate(
+                zip(clients, request_counts, generator_rates)):
+            stdout, _ = client.communicate(timeout=180)
+            (output_dir / f"client-{index}.jsonl").write_text(
+                stdout, encoding="utf-8")
+            if client.returncode:
+                raise RuntimeError(
+                    f"client {index} exited {client.returncode}; see {output_dir}")
+            rows = [json.loads(line) for line in stdout.splitlines() if line]
+            if len(rows) != 1:
+                raise ValueError("missing or extra generator phase output")
+            row = rows[0]
+            if row.get("pid") != client.pid:
+                raise ValueError("wrong generator identity")
+            validate_open_phase(row, requests, rate, case["window"])
+            client_rows.append(row)
+
+        server_stdout, _ = server.communicate(timeout=30)
+        (output_dir / "server.jsonl").write_text(
+            json.dumps(ready) + "\n" + server_stdout, encoding="utf-8")
+        if server.returncode:
+            raise RuntimeError(
+                f"server exited {server.returncode}; see {output_dir}")
+        exit_row = json.loads(server_stdout)
+        validate_server_exit(exit_row)
+        if exit_row["peers_ready_total"] < case["generators"]:
+            raise ValueError("server peer accounting lost a load generator")
+
+        aggregate = aggregate_client_rows(client_rows, generator_rates)
+        return {
+            "type": "scalability_case",
+            "schema": 1,
+            "case": case,
+            "nominal_handler_capacity_rps":
+                nominal_handler_capacity_rps(
+                    case["workers"], case["slow_ms"]),
+            "server_command": server_cmd,
+            "client_commands": client_cmds,
+            "server": ready,
+            "server_exit": exit_row,
+            "client": aggregate,
+            "generators": client_rows,
+            "runner_elapsed_s": time.monotonic() - started,
+        }
+    finally:
+        for child in reversed(children):
+            stop_owned(child)
+            for pipe in (child.stdin, child.stdout):
+                if pipe is not None:
+                    pipe.close()
+        for log in logs:
+            log.close()
+
+
 def scheduler_late_one_interval(result: dict[str, Any]) -> bool:
     rate = result["case"]["rate_rps"]
-    interval_us = 1_000_000.0 / rate
+    interval_us = result["client"].get(
+        "scheduler_interval_us", 1_000_000.0 / rate)
     return result["client"]["scheduler_late_p99_us"] > interval_us
 
 
