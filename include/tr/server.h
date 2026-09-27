@@ -120,8 +120,10 @@ int tr_server_start(struct tr_server *server);
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
 
 /*
- * Coherent facade snapshot. Lifetime RPC/Channel counters include peers already
- * reclaimed by the reaper; current fields cover peers retained at snapshot time.
+ * Structured facade snapshot. Individual component snapshots are coherent, but
+ * counters may advance while the cross-component snapshot is being collected.
+ * Lifetime RPC/Channel counters include peers already reclaimed by the reaper;
+ * current fields cover peers retained at snapshot time.
  */
 int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out);
 
