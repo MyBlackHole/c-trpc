@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""A/B bounded-resource headroom diagnostic for RPC scalability."""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+
+from run_rpc_bench import metadata as base_metadata
+from run_rpc_capacity import run_case as run_capacity_case
+from run_rpc_scalability import (
+    SERVER_PRESSURE_FIELDS,
+    exact_wall_signals,
+    generator_count_for,
+    parse_int_list,
+    run_multisource_case,
+    summarize_group,
+)
+
+
+def run_profile_case(binary: Path, case: dict[str, Any],
+                     output_dir: Path) -> dict[str, Any]:
+    result = (
+        run_capacity_case(binary, case, output_dir)
+        if case["generators"] == 1
+        else run_multisource_case(binary, case, output_dir)
+    )
+    result["type"] = "headroom_case"
+    result["schema"] = 1
+    result["resource_profile"] = case["resource_profile"]
+    result["wall_signals"] = exact_wall_signals(result)
+    return result
+
+
+def server_pressure(result: dict[str, Any]) -> bool:
+    server = result["server_exit"]
+    return any(server[key] for key in SERVER_PRESSURE_FIELDS.values())
+
+
+def compare_profiles(baseline: list[dict[str, Any]],
+                     headroom: list[dict[str, Any]]) -> dict[str, Any]:
+    if not baseline or len(baseline) != len(headroom):
+        raise ValueError("profile comparison requires matching non-empty cases")
+
+    baseline_by_rate = {r["case"]["rate_rps"]: r for r in baseline}
+    headroom_by_rate = {r["case"]["rate_rps"]: r for r in headroom}
+    if baseline_by_rate.keys() != headroom_by_rate.keys():
+        raise ValueError("profile rates do not match")
+
+    rates = sorted(baseline_by_rate)
+    removed_rx: list[int] = []
+    persisted_rx: list[int] = []
+    pressure_changed: dict[str, dict[str, list[str]]] = {}
+
+    for rate in rates:
+        before = baseline_by_rate[rate]
+        after = headroom_by_rate[rate]
+        before_rx = before["server_exit"]["rx_pool_exhausted_events"] > 0
+        after_rx = after["server_exit"]["rx_pool_exhausted_events"] > 0
+        if before_rx and not after_rx:
+            removed_rx.append(rate)
+        if before_rx and after_rx:
+            persisted_rx.append(rate)
+
+        before_signals = sorted(
+            signal for signal in before["wall_signals"]
+            if signal not in ("load_generator_late", "load_generator_drop"))
+        after_signals = sorted(
+            signal for signal in after["wall_signals"]
+            if signal not in ("load_generator_late", "load_generator_drop"))
+        if before_signals != after_signals:
+            pressure_changed[str(rate)] = {
+                "baseline": before_signals,
+                "headroom": after_signals,
+            }
+
+    baseline_pressure = [
+        r["case"]["rate_rps"] for r in baseline if server_pressure(r)]
+    headroom_pressure = [
+        r["case"]["rate_rps"] for r in headroom if server_pressure(r)]
+
+    return {
+        "type": "headroom_comparison",
+        "schema": 1,
+        "rates_rps": rates,
+        "baseline_rx_capacity":
+            baseline[0]["server_exit"]["rx_pool_capacity"],
+        "headroom_rx_capacity":
+            headroom[0]["server_exit"]["rx_pool_capacity"],
+        "baseline_first_server_pressure_rps":
+            min(baseline_pressure) if baseline_pressure else None,
+        "headroom_first_server_pressure_rps":
+            min(headroom_pressure) if headroom_pressure else None,
+        "rx_exhaustion_removed_rates": removed_rx,
+        "rx_exhaustion_persisted_rates": persisted_rx,
+        "server_signal_changes": pressure_changed,
+    }
+
+
+def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
+    row = base_metadata(binary, args.label)
+    row.update({
+        "type": "headroom_metadata",
+        "schema": 1,
+        "workers": args.workers,
+        "handler_ms": args.handler_ms,
+        "rates_rps": args.rates,
+        "executor_queue": args.executor_queue,
+        "window": args.window,
+        "capacity": args.capacity,
+        "baseline": {
+            "rx_buffer_count": 0,
+            "rpc_message_pool_count": 0,
+            "reassembly_pool_count": 0,
+        },
+        "headroom": {
+            "rx_buffer_count": args.headroom_rx_buffers,
+            "rpc_message_pool_count": args.headroom_rpc_message_pool,
+            "reassembly_pool_count": args.headroom_reassembly_pool,
+        },
+        "max_generators": args.max_generators,
+        "target_rate_per_generator": args.target_rate_per_generator,
+        "min_arrival_ms": args.min_arrival_ms,
+        "note": (
+            "0 resource value means keep the benchmark-derived baseline; "
+            "profiles differ only by explicit headroom overrides"),
+    })
+    return row
+
+
+def validate_args(parser: argparse.ArgumentParser,
+                  args: argparse.Namespace) -> None:
+    if not os.access(args.binary, os.X_OK):
+        parser.error("binary is not executable")
+    if not args.rates or any(rate < 1 or rate > 1_000_000 for rate in args.rates):
+        parser.error("rates must be in 1..1000000")
+    if not 1 <= args.workers <= 32 or not 0 <= args.handler_ms <= 1000:
+        parser.error("invalid workers or handler-ms")
+    if not 16 <= args.executor_queue <= 65536:
+        parser.error("executor-queue must be in 16..65536")
+    if not 1 <= args.window <= args.capacity <= 256:
+        parser.error("require 1 <= window <= capacity <= 256")
+    if not 1 <= args.timeout_ms <= 30000:
+        parser.error("invalid timeout")
+    if not 1 <= args.max_generators <= 16:
+        parser.error("max-generators must be in 1..16")
+    if not 100 <= args.target_rate_per_generator <= 1_000_000:
+        parser.error("invalid target-rate-per-generator")
+    if not 10 <= args.min_arrival_ms <= 10000:
+        parser.error("min-arrival-ms must be in 10..10000")
+    for value in (args.headroom_rx_buffers,
+                  args.headroom_rpc_message_pool,
+                  args.headroom_reassembly_pool):
+        if not 0 <= value <= 8192:
+            parser.error("headroom pool overrides must be in 0..8192")
+    if args.headroom_rx_buffers == 0 and             args.headroom_rpc_message_pool == 0 and             args.headroom_reassembly_pool == 0:
+        parser.error("headroom profile must change at least one pool")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--label", default="resource-headroom-ab")
+    parser.add_argument("--rates", type=parse_int_list,
+                        default=parse_int_list("10000,20000,40000"))
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--handler-ms", type=int, default=0)
+    parser.add_argument("--requests", type=int, default=256)
+    parser.add_argument("--executor-queue", type=int, default=64)
+    parser.add_argument("--window", type=int, default=128)
+    parser.add_argument("--capacity", type=int, default=128)
+    parser.add_argument("--timeout-ms", type=int, default=3000)
+    parser.add_argument("--max-generators", type=int, default=16)
+    parser.add_argument("--target-rate-per-generator", type=int, default=4000)
+    parser.add_argument("--min-arrival-ms", type=int, default=250)
+    parser.add_argument("--headroom-rx-buffers", type=int, default=1024)
+    parser.add_argument("--headroom-rpc-message-pool", type=int, default=0)
+    parser.add_argument("--headroom-reassembly-pool", type=int, default=0)
+    parser.add_argument("--smoke", action="store_true")
+    args = parser.parse_args()
+    args.binary = args.binary.resolve(strict=True)
+
+    if args.smoke:
+        args.rates = [1000, 5000]
+        args.requests = 32
+        args.max_generators = 2
+        args.target_rate_per_generator = 2500
+        args.min_arrival_ms = 20
+        args.headroom_rx_buffers = 512
+    validate_args(parser, args)
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    profiles = (
+        ("baseline", 0, 0, 0),
+        ("rx_headroom", args.headroom_rx_buffers,
+         args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
+    )
+    profile_results: dict[str, list[dict[str, Any]]] = {}
+
+    with args.output.open("w", encoding="utf-8") as output:
+        output.write(json.dumps(metadata(args.binary, args), allow_nan=False) + "\n")
+        output.flush()
+
+        for profile, rx_count, rpc_count, reassembly_count in profiles:
+            results: list[dict[str, Any]] = []
+            for index, rate in enumerate(sorted(set(args.rates))):
+                generators = generator_count_for(
+                    rate, args.max_generators,
+                    args.target_rate_per_generator)
+                requests = max(
+                    args.requests,
+                    math.ceil(rate * args.min_arrival_ms / 1000.0))
+                case = {
+                    "trial": 1,
+                    "rate_rps": rate,
+                    "requests": requests,
+                    "warmup": 8 if args.smoke else 32,
+                    "workers": args.workers,
+                    "slow_ms": args.handler_ms,
+                    "executor_queue": args.executor_queue,
+                    "window": args.window,
+                    "capacity": args.capacity,
+                    "timeout_ms": args.timeout_ms,
+                    "generators": generators,
+                    "resource_profile": profile,
+                    "rx_buffer_count": rx_count,
+                    "rpc_message_pool_count": rpc_count,
+                    "reassembly_pool_count": reassembly_count,
+                }
+                case_dir = (
+                    args.output.parent / (args.output.stem + "-logs") /
+                    f"{profile}-{index}-{rate}rps")
+                try:
+                    result = run_profile_case(args.binary, case, case_dir)
+                except Exception as error:
+                    output.write(json.dumps({
+                        "type": "failure", "resource_profile": profile,
+                        "case": case, "error": str(error),
+                        "logs": str(case_dir),
+                    }) + "\n")
+                    output.flush()
+                    raise
+                results.append(result)
+                output.write(json.dumps(result, allow_nan=False) + "\n")
+                output.flush()
+                print(
+                    f"profile={profile} rate={rate}rps generators={generators} "
+                    f"rx={result['server_exit']['rx_pool_peak']}/"
+                    f"{result['server_exit']['rx_pool_capacity']} "
+                    f"signals={','.join(result['wall_signals']) or 'none'}",
+                    flush=True)
+
+            summary = summarize_group(results)
+            summary["type"] = "headroom_profile_summary"
+            summary["resource_profile"] = profile
+            summary["rx_pool_capacity"] = results[0]["server_exit"]["rx_pool_capacity"]
+            output.write(json.dumps(summary, allow_nan=False) + "\n")
+            output.flush()
+            profile_results[profile] = results
+
+        comparison = compare_profiles(
+            profile_results["baseline"], profile_results["rx_headroom"])
+        output.write(json.dumps(comparison, allow_nan=False) + "\n")
+        output.flush()
+        print(
+            "comparison "
+            f"baseline_pressure={comparison['baseline_first_server_pressure_rps']} "
+            f"headroom_pressure={comparison['headroom_first_server_pressure_rps']} "
+            f"rx_removed={comparison['rx_exhaustion_removed_rates']}",
+            flush=True)
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError, TimeoutError,
+            subprocess.TimeoutExpired) as error:
+        print(f"headroom benchmark failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
