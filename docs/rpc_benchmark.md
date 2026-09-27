@@ -388,12 +388,39 @@ The GCC release CI job runs three trials for:
 Each trial retains the full Server/Client diagnostics. The summary reports
 clean-trial count, exact-Server-pressure-trial count, per-signal occurrence
 counts, min/median/max successful RPC/s, Reactor busy range, command-budget-hit
-range, and command queue peak. There is still no throughput or latency CI gate.
+range, and command queue peak. It also emits a machine-readable classification:
+
+- `no_server_wall`: none of the repeated trials has an exact Server pressure signal;
+- `non_reproducible_server_wall`: Server pressure appears, but no exact Server
+  signal is present in every trial;
+- `reproducible_server_wall`: at least one exact Server signal is present in
+  every trial.
+
+The summary separately exposes `reproducible_server_signals` and
+`sporadic_server_signals`. Client/load-generator signals remain in the general
+`signal_counts` but cannot by themselves classify a Server resource wall. There
+is still no throughput or latency CI gate.
 
 A wall observed in only one of three shared-runner trials is treated as
 non-reproducible evidence, not as a reason to change the production
 architecture. A repeatedly reproduced exact wall can then receive a targeted
 A/B experiment.
+
+#### PR #44 repeatability result
+
+The GCC release repeatability artifact for PR #44 ran all three profiles three
+times at 40k scheduled RPC/s. All 9 cases reported zero exact Server pressure,
+zero command-budget hits and zero command-queue-full events. Command queue peak
+was only 35--44 entries even for the 4096-capacity profiles; successful rate was
+about 39.26k--39.58k RPC/s and Reactor busy ratio was about 0.267--0.289. The
+separate staged headroom run also completed its 40k points without an exact
+Server wall.
+
+Therefore the earlier single shared-runner sample that filled the 4096 command
+queue is classified as non-reproducible evidence. It is not a basis for raising
+production command capacity or `TR_COMMAND_BATCH`; the latter remains a Reactor
+fairness policy and should only change after a stable repeated bottleneck is
+shown.
 
 ### Streaming continuation reserve
 
