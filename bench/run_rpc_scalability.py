@@ -171,6 +171,7 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
             cmd = [
                 str(binary), "client", *common,
                 "--port", str(ready["port"]),
+                "--workers", str(case.get("generator_workers", 1)),
                 "--window", str(case["window"]),
                 "--scenario", "open",
                 "--requests", str(requests),
@@ -366,7 +367,7 @@ def metadata(binary: Path, label: str, workers: list[int],
              zero_rates: list[int], executor_queue: int,
              window: int, max_generators: int,
              target_rate_per_generator: int,
-             min_arrival_ms: int) -> dict[str, Any]:
+             min_arrival_ms: int, generator_workers: int) -> dict[str, Any]:
     row = base_metadata(binary, label)
     row["type"] = "scalability_metadata"
     row["schema"] = 1
@@ -379,6 +380,7 @@ def metadata(binary: Path, label: str, workers: list[int],
     row["max_generators"] = max_generators
     row["target_rate_per_generator"] = target_rate_per_generator
     row["min_arrival_ms"] = min_arrival_ms
+    row["generator_workers"] = generator_workers
     row["load_model"] = (
         "fixed-rate scheduled arrivals; bounded in-flight slots; scheduler "
         "drops and scheduler lateness are reported separately")
@@ -409,12 +411,14 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("require 1 <= window <= capacity <= 256")
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
-    if not 1 <= args.max_generators <= 16:
-        parser.error("max-generators must be in 1..16")
+    if not 1 <= args.max_generators <= 32:
+        parser.error("max-generators must be in 1..32")
     if not 100 <= args.target_rate_per_generator <= 1_000_000:
         parser.error("invalid target-rate-per-generator")
     if not 10 <= args.min_arrival_ms <= 10_000:
         parser.error("min-arrival-ms must be in 10..10000")
+    if not 1 <= args.generator_workers <= 8:
+        parser.error("generator-workers must be in 1..8")
 
 
 def main() -> int:
@@ -434,9 +438,10 @@ def main() -> int:
     parser.add_argument("--window", type=int, default=128)
     parser.add_argument("--capacity", type=int, default=128)
     parser.add_argument("--timeout-ms", type=int, default=3000)
-    parser.add_argument("--max-generators", type=int, default=16)
-    parser.add_argument("--target-rate-per-generator", type=int, default=4000)
+    parser.add_argument("--max-generators", type=int, default=32)
+    parser.add_argument("--target-rate-per-generator", type=int, default=1250)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
+    parser.add_argument("--generator-workers", type=int, default=1)
     parser.add_argument("--smoke", action="store_true",
                         help="small matrix for runner correctness, not scaling conclusions")
     args = parser.parse_args()
@@ -452,6 +457,7 @@ def main() -> int:
         args.max_generators = 2
         args.target_rate_per_generator = 2500
         args.min_arrival_ms = 20
+        args.generator_workers = 1
     validate_args(parser, args)
 
     warmup = 8 if args.smoke else 32
@@ -463,7 +469,8 @@ def main() -> int:
             args.ratios, args.zero_rates, args.executor_queue,
             args.window, args.max_generators,
             args.target_rate_per_generator,
-            args.min_arrival_ms), allow_nan=False) + "\n")
+            args.min_arrival_ms, args.generator_workers),
+            allow_nan=False) + "\n")
         output.flush()
 
         for trial in range(1, args.trials + 1):
@@ -491,6 +498,7 @@ def main() -> int:
                             "capacity": args.capacity,
                             "timeout_ms": args.timeout_ms,
                             "generators": generators,
+                            "generator_workers": args.generator_workers,
                         }
                         case_dir = (
                             args.output.parent / (args.output.stem + "-logs") /
