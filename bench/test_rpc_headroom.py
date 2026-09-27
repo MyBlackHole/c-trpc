@@ -18,14 +18,17 @@ PRESSURE_KEYS = (
 )
 
 
-def result(rate, rx_capacity, rx_exhausted=0, signals=None):
+def result(rate, rx_capacity, rx_exhausted=0, hard_full=0,
+           executor_queue=64, signals=None):
     server = {key: 0 for key in PRESSURE_KEYS}
     server.update(
         rx_pool_capacity=rx_capacity,
         rx_pool_exhausted_events=rx_exhausted,
+        rpc_hard_full_events=hard_full,
     )
     return {
         "case": {"rate_rps": rate},
+        "server": {"executor_queue": executor_queue},
         "server_exit": server,
         "wall_signals": list(signals or []),
     }
@@ -71,20 +74,44 @@ class HeadroomTests(unittest.TestCase):
             result(20000, 1024),
             result(40000, 1024, 2, ["rx_pool_exhausted"]),
         ]
-        comparison = compare_profiles(baseline, headroom)
-        self.assertEqual(comparison["baseline_rx_capacity"], 272)
-        self.assertEqual(comparison["headroom_rx_capacity"], 1024)
-        self.assertEqual(comparison["baseline_first_server_pressure_rps"], 20000)
-        self.assertEqual(comparison["headroom_first_server_pressure_rps"], 40000)
+        comparison = compare_profiles(
+            baseline, headroom, "baseline", "rx_headroom")
+        self.assertEqual(comparison["before_rx_capacity"], 272)
+        self.assertEqual(comparison["after_rx_capacity"], 1024)
+        self.assertEqual(comparison["before_executor_queue"], 64)
+        self.assertEqual(comparison["after_executor_queue"], 64)
+        self.assertEqual(comparison["before_first_server_pressure_rps"], 20000)
+        self.assertEqual(comparison["after_first_server_pressure_rps"], 40000)
         self.assertEqual(comparison["rx_exhaustion_removed_rates"], [20000])
         self.assertEqual(comparison["rx_exhaustion_persisted_rates"], [40000])
         self.assertIn("20000", comparison["server_signal_changes"])
+
+    def test_compare_reports_removed_executor_hard_full(self):
+        before = [
+            result(10000, 1024),
+            result(20000, 1024, hard_full=12,
+                   executor_queue=64,
+                   signals=["executor_hard_full"]),
+        ]
+        after = [
+            result(10000, 1024, executor_queue=256),
+            result(20000, 1024, executor_queue=256),
+        ]
+        comparison = compare_profiles(
+            before, after, "rx_headroom", "rx_executor_headroom")
+        self.assertEqual(comparison["before_executor_queue"], 64)
+        self.assertEqual(comparison["after_executor_queue"], 256)
+        self.assertEqual(
+            comparison["executor_hard_full_removed_rates"], [20000])
+        self.assertEqual(
+            comparison["executor_hard_full_persisted_rates"], [])
 
     def test_compare_requires_matching_rates(self):
         with self.assertRaises(ValueError):
             compare_profiles(
                 [result(10000, 272)],
-                [result(20000, 1024)])
+                [result(20000, 1024)],
+                "before", "after")
 
 
 if __name__ == "__main__":
