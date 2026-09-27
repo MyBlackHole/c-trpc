@@ -1,5 +1,6 @@
 #include "tr/buffer.h"
 #include "tr/status.h"
+#include "observability_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +70,8 @@ void tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 	pool->buffer_count = 0;
 	pool->buffer_size = 0;
 	pool->free_count = 0;
+	pool->peak_in_use = 0;
+	pool->exhausted_events = 0;
 	pthread_mutex_destroy(&pool->lock);
 }
 
@@ -89,12 +92,15 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 
 	buf = pool->free_list;
 	if (!buf) {
+		pool->exhausted_events++;
 		pthread_mutex_unlock(&pool->lock);
 		return TR_AGAIN;
 	}
 
 	pool->free_list = buf->next;
 	pool->free_count--;
+	tr_observe_high_water_u32(&pool->peak_in_use,
+				  pool->buffer_count - pool->free_count);
 
 	buf->next = NULL;
 	buf->len = 0;
@@ -136,4 +142,19 @@ uint32_t tr_buffer_pool_free_count(struct tr_buffer_pool *pool)
 	pthread_mutex_unlock(&pool->lock);
 
 	return count;
+}
+
+int tr_buffer_pool_get_stats(struct tr_buffer_pool *pool,
+			     struct tr_pool_observation *out)
+{
+	if (!pool || !out)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&pool->lock);
+	out->capacity = pool->buffer_count;
+	out->current = pool->buffer_count - pool->free_count;
+	out->peak = pool->peak_in_use;
+	out->exhausted_events = pool->exhausted_events;
+	pthread_mutex_unlock(&pool->lock);
+	return TR_OK;
 }

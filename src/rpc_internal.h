@@ -16,4 +16,11 @@ int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
 	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out);
 
+/*
+ * Server reaping path: synchronously quiesce/drain the Endpoint, snapshot its
+ * final counters, then release it. stats may be NULL.
+ */
+void tr_rpc_endpoint_destroy_with_stats(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
+
 #endif

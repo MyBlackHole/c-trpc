@@ -96,6 +96,29 @@ static double cpu_seconds(const struct rusage *usage)
 	       ((double)usage->ru_utime.tv_usec + (double)usage->ru_stime.tv_usec) / 1e6;
 }
 
+static uint64_t histogram_percentile_upper_ns(
+	const struct tr_latency_histogram *histogram, uint32_t percentile)
+{
+	uint64_t target;
+	uint64_t seen = 0;
+	uint32_t i;
+
+	if (!histogram || histogram->samples == 0 || percentile == 0 ||
+	    percentile > 100)
+		return 0;
+
+	target = (histogram->samples * percentile + 99U) / 100U;
+	for (i = 0; i < TR_LATENCY_HISTOGRAM_BUCKETS; ++i) {
+		seen += histogram->buckets[i];
+		if (seen < target)
+			continue;
+		if (i == TR_LATENCY_HISTOGRAM_BUCKETS - 1U)
+			return histogram->max_ns;
+		return (UINT64_C(1) << (i + 1U)) - 1U;
+	}
+	return histogram->max_ns;
+}
+
 static uint32_t number(const char *text)
 {
 	char *end;
@@ -203,6 +226,8 @@ static void configure_limits(struct tr_facade_limits *limits, const struct optio
 	limits->executor_threads = o->workers;
 	limits->executor_queue_capacity =
 		server && o->executor_queue ? o->executor_queue : 4U * o->capacity;
+	if (server)
+		limits->observability_flags = TR_OBSERVABILITY_TIMING;
 }
 
 static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
@@ -239,6 +264,7 @@ static int run_server(const struct options *o)
 {
 	struct tr_server_config config;
 	struct tr_server *server = NULL;
+	struct tr_server_stats stats;
 	struct rusage usage_after;
 	uint32_t delays[] = {0U, 0U, o->slow_ms};
 	uint16_t port;
@@ -265,10 +291,54 @@ static int run_server(const struct options *o)
 	while (getchar() != EOF)
 		;
 	status = tr_server_drain(server, 5000U);
-	tr_server_destroy(server);
+	check(tr_server_get_stats(server, &stats), "server stats");
 	check(getrusage(RUSAGE_SELF, &usage_after), "server getrusage");
-	printf("{\"type\":\"server_exit\",\"drain_status\":%d,\"cpu_s\":%.9f,\"peak_rss_kib\":%ld}\n",
-	       status, cpu_seconds(&usage_after), usage_after.ru_maxrss);
+	{
+		uint64_t reactor_total_ns = stats.reactor.busy_ns +
+					   stats.reactor.poll_ns;
+		double reactor_busy_ratio = reactor_total_ns ?
+			(double)stats.reactor.busy_ns / (double)reactor_total_ns :
+			0.0;
+		double queue_wait_p99_us =
+			(double)histogram_percentile_upper_ns(
+				&stats.rpc.executor_queue_wait_ns, 99U) / 1000.0;
+		double handler_p99_us =
+			(double)histogram_percentile_upper_ns(
+				&stats.rpc.executor_handler_ns, 99U) / 1000.0;
+
+		printf("{\"type\":\"server_exit\",\"drain_status\":%d,"
+		       "\"cpu_s\":%.9f,\"peak_rss_kib\":%ld,"
+		       "\"reactor_busy_ratio\":%.9f,"
+		       "\"reactor_busy_ns\":%" PRIu64 ",\"reactor_poll_ns\":%" PRIu64 ","
+		       "\"command_queue_peak\":%u,\"completion_queue_peak\":%u,"
+		       "\"rx_pool_peak\":%u,\"tx_pool_peak\":%u,"
+		       "\"control_tx_pool_peak\":%u,"
+		       "\"rpc_queue_peak_per_peer\":%u,"
+		       "\"rpc_admission_limit_hits\":%" PRIu64 ","
+		       "\"rpc_hard_full_events\":%" PRIu64 ","
+		       "\"rpc_queue_wait_p99_us\":%.3f,"
+		       "\"rpc_handler_p99_us\":%.3f,"
+		       "\"rpc_message_pool_peak\":%u,"
+		       "\"reassembly_pool_peak\":%u,"
+		       "\"peers_ready_total\":%" PRIu64 ","
+		       "\"peers_reaped_total\":%" PRIu64 "}\n",
+		       status, cpu_seconds(&usage_after), usage_after.ru_maxrss,
+		       reactor_busy_ratio, stats.reactor.busy_ns,
+		       stats.reactor.poll_ns,
+		       stats.reactor.command_queue.peak,
+		       stats.reactor.completion_queue.peak,
+		       stats.reactor.rx_buffer_pool.peak,
+		       stats.reactor.tx_item_pool.peak,
+		       stats.reactor.control_tx_item_pool.peak,
+		       stats.rpc.executor_queue_peak_max_per_endpoint,
+		       stats.rpc.executor_admission_limit_hits,
+		       stats.rpc.executor_hard_full_events,
+		       queue_wait_p99_us, handler_p99_us,
+		       stats.rpc_message_pool.peak,
+		       stats.reassembly_pool.peak,
+		       stats.peers_ready_total, stats.peers_reaped_total);
+	}
+	tr_server_destroy(server);
 	return status == TR_OK ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 

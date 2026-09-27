@@ -38,6 +38,14 @@ struct tr_queue_observation {
 	uint64_t full_events;
 };
 
+/* Common bounded-pool snapshot semantics. */
+struct tr_pool_observation {
+	uint32_t capacity;
+	uint32_t current;
+	uint32_t peak;
+	uint64_t exhausted_events;
+};
+
 #ifdef __cplusplus
 }
 #endif

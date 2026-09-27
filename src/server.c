@@ -16,6 +16,7 @@
 #include "tr/status.h"
 #include "rpc_internal.h"
 #include "socket_internal.h"
+#include "observability_internal.h"
 
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
@@ -53,6 +54,14 @@ struct tr_server {
 
 	struct tr_server_peer *peers;
 	uint32_t peer_count;
+	uint32_t peer_count_peak;
+	uint32_t peer_reaping_count;
+
+	uint64_t stat_peers_ready;
+	uint64_t stat_peers_reaped;
+	uint64_t stat_peer_capacity_rejections;
+	struct tr_server_channel_stats retired_channel_stats;
+	struct tr_server_rpc_stats retired_rpc_stats;
 
 	pthread_mutex_t lock;
 	pthread_t accept_thread;
@@ -78,6 +87,76 @@ static uint64_t tr_server_now_ms(void)
 		return 0;
 	return (uint64_t)ts.tv_sec * UINT64_C(1000) +
 	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
+}
+
+static void tr_server_merge_channel_stats(
+	struct tr_server_channel_stats *dst,
+	const struct tr_channel_stats *src, int current)
+{
+	if (!dst || !src)
+		return;
+
+	if (current)
+		dst->active_streams_current += src->active_streams;
+	dst->streams_opened += src->streams_opened;
+	dst->streams_closed += src->streams_closed;
+	dst->stream_errors += src->stream_errors;
+	dst->messages_tx += src->messages_tx;
+	dst->messages_rx += src->messages_rx;
+	dst->bytes_tx += src->bytes_tx;
+	dst->bytes_rx += src->bytes_rx;
+	dst->window_updates_tx += src->window_updates_tx;
+	dst->window_updates_rx += src->window_updates_rx;
+	dst->reconnect_attempts += src->reconnect_attempts;
+	dst->reconnect_successes += src->reconnect_successes;
+	dst->keepalive_pings_sent += src->keepalive_pings_sent;
+	dst->keepalive_pongs_received += src->keepalive_pongs_received;
+	dst->keepalive_timeouts += src->keepalive_timeouts;
+}
+
+static void tr_server_merge_rpc_stats(
+	struct tr_server_rpc_stats *dst,
+	const struct tr_rpc_endpoint_stats *src, int current)
+{
+	if (!dst || !src)
+		return;
+
+	if (src->executor_threads > dst->executor_threads)
+		dst->executor_threads = src->executor_threads;
+	if (current) {
+		dst->endpoints_current++;
+		dst->opening_calls_current += src->opening_calls;
+		dst->active_calls_current += src->active_calls;
+		dst->terminal_calls_current += src->terminal_calls;
+		dst->executor_queued_tasks_current += src->executor_queued_tasks;
+		dst->executor_running_tasks_current += src->executor_running_tasks;
+		dst->executor_queue_capacity_current +=
+			src->executor_queue_capacity;
+		dst->executor_ready_calls_current += src->executor_ready_calls;
+	}
+	if (src->executor_queue.peak >
+	    dst->executor_queue_peak_max_per_endpoint)
+		dst->executor_queue_peak_max_per_endpoint =
+			src->executor_queue.peak;
+	if (src->executor_ready_calls_peak >
+	    dst->executor_ready_calls_peak_max_per_endpoint)
+		dst->executor_ready_calls_peak_max_per_endpoint =
+			src->executor_ready_calls_peak;
+
+	dst->executor_enqueued_tasks += src->executor_enqueued_tasks;
+	dst->executor_taken_tasks += src->executor_taken_tasks;
+	dst->executor_admission_limit_hits +=
+		src->executor_admission_limit_hits;
+	dst->executor_hard_full_events += src->executor_hard_full_events;
+	tr_merge_latency_histogram(&dst->executor_queue_wait_ns,
+				   &src->executor_queue_wait_ns);
+	tr_merge_latency_histogram(&dst->executor_handler_ns,
+				   &src->executor_handler_ns);
+
+	dst->calls_started += src->calls_started;
+	dst->calls_completed += src->calls_completed;
+	dst->calls_cancelled += src->calls_cancelled;
+	dst->calls_deadline_exceeded += src->calls_deadline_exceeded;
 }
 
 static void tr_server_normalize_config(struct tr_server_config *config)
@@ -184,6 +263,12 @@ static int tr_server_peer_disconnected(struct tr_server_peer *peer)
 	       state == TR_CONN_ERROR;
 }
 
+static void tr_server_note_peer_added_locked(struct tr_server *server)
+{
+	server->peer_count++;
+	tr_observe_high_water_u32(&server->peer_count_peak, server->peer_count);
+}
+
 static int tr_server_take_reapable_peer(struct tr_server *server,
 				       struct tr_server_peer *out)
 {
@@ -211,6 +296,7 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 			memset(&server->peers[i], 0, sizeof(server->peers[i]));
 			if (server->peer_count != 0)
 				server->peer_count--;
+			server->peer_reaping_count++;
 			reap = 1;
 		}
 		pthread_mutex_unlock(&server->lock);
@@ -222,12 +308,46 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 	return 0;
 }
 
-static void tr_server_destroy_peer(struct tr_server_peer *peer)
+static void tr_server_destroy_peer(struct tr_server *server,
+				   struct tr_server_peer *peer, int retire_stats)
 {
-	if (peer->rpc)
-		tr_rpc_endpoint_destroy(peer->rpc);
-	if (peer->channel)
+	struct tr_rpc_endpoint_stats rpc_stats;
+	struct tr_channel_stats channel_stats;
+	int have_rpc_stats = 0;
+	int have_channel_stats = 0;
+
+	memset(&rpc_stats, 0, sizeof(rpc_stats));
+	memset(&channel_stats, 0, sizeof(channel_stats));
+
+	if (peer->rpc) {
+		tr_rpc_endpoint_destroy_with_stats(peer->rpc,
+						   retire_stats ? &rpc_stats : NULL);
+		peer->rpc = NULL;
+		have_rpc_stats = retire_stats;
+	}
+	if (peer->channel) {
+		if (retire_stats &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			have_channel_stats = 1;
 		tr_channel_destroy(peer->channel);
+		peer->channel = NULL;
+	}
+
+	if (retire_stats) {
+		pthread_mutex_lock(&server->lock);
+		if (have_rpc_stats)
+			tr_server_merge_rpc_stats(&server->retired_rpc_stats,
+						  &rpc_stats, 0);
+		if (have_channel_stats)
+			tr_server_merge_channel_stats(
+				&server->retired_channel_stats,
+				&channel_stats, 0);
+		if (server->peer_reaping_count != 0)
+			server->peer_reaping_count--;
+		server->stat_peers_reaped++;
+		pthread_mutex_unlock(&server->lock);
+	}
+
 	memset(peer, 0, sizeof(*peer));
 }
 
@@ -248,7 +368,7 @@ static void *tr_server_reap_main(void *arg)
 
 		memset(&peer, 0, sizeof(peer));
 		if (tr_server_take_reapable_peer(server, &peer)) {
-			tr_server_destroy_peer(&peer);
+			tr_server_destroy_peer(server, &peer, 1);
 			continue;
 		}
 
@@ -299,7 +419,7 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 	if (peer->channel || peer->rpc) {
 		pthread_mutex_lock(&guard->server->lock);
 		peer->used = 1;
-		guard->server->peer_count++;
+		tr_server_note_peer_added_locked(guard->server);
 		pthread_mutex_unlock(&guard->server->lock);
 	} else {
 		memset(&peer->connection, 0, sizeof(peer->connection));
@@ -320,6 +440,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	pthread_mutex_lock(&server->lock);
 	if (server->peer_count >= server->config.max_peers) {
+		server->stat_peer_capacity_rejections++;
 		pthread_mutex_unlock(&server->lock);
 		return TR_AGAIN;
 	}
@@ -328,6 +449,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		if (!server->peers[slot].used)
 			break;
 	if (slot == server->config.max_peers) {
+		server->stat_peer_capacity_rejections++;
 		pthread_mutex_unlock(&server->lock);
 		return TR_AGAIN;
 	}
@@ -413,7 +535,8 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	pthread_mutex_lock(&server->lock);
 	peer->used = 1;
-	server->peer_count++;
+	tr_server_note_peer_added_locked(server);
+	server->stat_peers_ready++;
 	pthread_mutex_unlock(&server->lock);
 	peer_guard.armed = 0;
 	return TR_OK;
@@ -765,6 +888,68 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	return final;
 }
 
+int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
+{
+	struct tr_server_stats stats;
+	uint32_t i;
+	int ret;
+
+	if (!server || !out)
+		return TR_ERR_INVALID;
+
+	memset(&stats, 0, sizeof(stats));
+	ret = tr_reactor_get_stats(server->reactor, &stats.reactor);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_buffer_pool_get_stats(&server->rpc_message_pool,
+				       &stats.rpc_message_pool);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_buffer_pool_get_stats(&server->reassembly_pool,
+				       &stats.reassembly_pool);
+	if (ret != TR_OK)
+		return ret;
+
+	pthread_mutex_lock(&server->lock);
+	stats.max_peers = server->config.max_peers;
+	stats.peers_current = server->peer_count;
+	stats.peers_peak = server->peer_count_peak;
+	stats.peers_reaping_current = server->peer_reaping_count;
+	stats.peers_ready_total = server->stat_peers_ready;
+	stats.peers_reaped_total = server->stat_peers_reaped;
+	stats.peer_capacity_rejections =
+		server->stat_peer_capacity_rejections;
+	stats.channel = server->retired_channel_stats;
+	stats.rpc = server->retired_rpc_stats;
+	if (stats.rpc.executor_threads == 0)
+		stats.rpc.executor_threads =
+			server->config.limits.executor_threads;
+
+	for (i = 0; i < server->config.max_peers; ++i) {
+		struct tr_server_peer *peer = &server->peers[i];
+		struct tr_rpc_endpoint_stats rpc_stats;
+		struct tr_channel_stats channel_stats;
+
+		if (!peer->used)
+			continue;
+
+		if (peer->rpc && peer->channel)
+			stats.peers_ready_current++;
+
+		if (peer->rpc &&
+		    tr_rpc_endpoint_get_stats(peer->rpc, &rpc_stats) == TR_OK)
+			tr_server_merge_rpc_stats(&stats.rpc, &rpc_stats, 1);
+		if (peer->channel &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			tr_server_merge_channel_stats(&stats.channel,
+						      &channel_stats, 1);
+	}
+	pthread_mutex_unlock(&server->lock);
+
+	*out = stats;
+	return TR_OK;
+}
+
 void tr_server_destroy(struct tr_server *server)
 {
 	uint32_t i;
@@ -785,7 +970,7 @@ void tr_server_destroy(struct tr_server *server)
 			struct tr_server_peer *peer = &server->peers[i];
 			if (!peer->used && !peer->channel && !peer->rpc)
 				continue;
-			tr_server_destroy_peer(peer);
+			tr_server_destroy_peer(server, peer, 0);
 		}
 	}
 

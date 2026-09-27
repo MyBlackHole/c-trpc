@@ -82,6 +82,11 @@ struct tr_reactor_stats {
 	struct tr_queue_observation command_queue;
 	struct tr_queue_observation completion_queue;
 
+	/* Bounded transport pools. */
+	struct tr_pool_observation rx_buffer_pool;
+	struct tr_pool_observation tx_item_pool;
+	struct tr_pool_observation control_tx_item_pool;
+
 	/* Populated only when TR_OBSERVABILITY_TIMING is enabled. */
 	uint32_t observability_flags;
 	uint64_t busy_ns;

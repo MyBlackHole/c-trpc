@@ -98,6 +98,8 @@ struct tr_tx_pool {
 	struct tr_tx_item *free_list;
 	uint32_t capacity;
 	uint32_t free_count;
+	uint32_t peak_in_use;
+	uint64_t exhausted_events;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_tx_item_array, struct tr_tx_item, free)
@@ -269,6 +271,8 @@ static void tr_tx_pool_destroy(struct tr_tx_pool *pool)
 	pool->free_list = NULL;
 	pool->capacity = 0;
 	pool->free_count = 0;
+	pool->peak_in_use = 0;
+	pool->exhausted_events = 0;
 	pthread_mutex_destroy(&pool->lock);
 }
 
@@ -281,6 +285,10 @@ static struct tr_tx_item *tr_tx_pool_acquire(struct tr_tx_pool *pool)
 	if (item) {
 		pool->free_list = item->next;
 		pool->free_count--;
+		tr_observe_high_water_u32(&pool->peak_in_use,
+					  pool->capacity - pool->free_count);
+	} else {
+		pool->exhausted_events++;
 	}
 	pthread_mutex_unlock(&pool->lock);
 
@@ -2570,8 +2578,19 @@ struct tr_reactor_stats_request {
 	struct tr_reactor_stats *out;
 };
 
-static void tr_reactor_snapshot_queues(struct tr_reactor *reactor,
-				       struct tr_reactor_stats *out)
+static void tr_reactor_snapshot_tx_pool(struct tr_tx_pool *pool,
+					 struct tr_pool_observation *out)
+{
+	pthread_mutex_lock(&pool->lock);
+	out->capacity = pool->capacity;
+	out->current = pool->capacity - pool->free_count;
+	out->peak = pool->peak_in_use;
+	out->exhausted_events = pool->exhausted_events;
+	pthread_mutex_unlock(&pool->lock);
+}
+
+static void tr_reactor_snapshot_resources(struct tr_reactor *reactor,
+					   struct tr_reactor_stats *out)
 {
 	pthread_mutex_lock(&reactor->commands.lock);
 	out->command_queue.capacity = reactor->commands.capacity;
@@ -2586,6 +2605,12 @@ static void tr_reactor_snapshot_queues(struct tr_reactor *reactor,
 	out->completion_queue.peak = reactor->completions.peak_count;
 	out->completion_queue.full_events = reactor->completions.full_events;
 	pthread_mutex_unlock(&reactor->completions.lock);
+
+	(void)tr_buffer_pool_get_stats(&reactor->rx_pool,
+				       &out->rx_buffer_pool);
+	tr_reactor_snapshot_tx_pool(&reactor->tx_pool, &out->tx_item_pool);
+	tr_reactor_snapshot_tx_pool(&reactor->control_tx_pool,
+				    &out->control_tx_item_pool);
 }
 
 static int tr_reactor_stats_on_owner(void *arg)
@@ -2593,7 +2618,7 @@ static int tr_reactor_stats_on_owner(void *arg)
 	struct tr_reactor_stats_request *request = arg;
 
 	*request->out = request->reactor->stats;
-	tr_reactor_snapshot_queues(request->reactor, request->out);
+	tr_reactor_snapshot_resources(request->reactor, request->out);
 	return TR_OK;
 }
 
@@ -2609,7 +2634,7 @@ int tr_reactor_get_stats(struct tr_reactor *reactor, struct tr_reactor_stats *ou
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started) {
 		*out = reactor->stats;
-		tr_reactor_snapshot_queues(reactor, out);
+		tr_reactor_snapshot_resources(reactor, out);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_OK;
 	}

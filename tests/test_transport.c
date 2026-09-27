@@ -4147,6 +4147,7 @@ static void test_client_server_facade_unary(void)
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
+	struct tr_server_stats server_stats;
 	struct facade_test_ctx ctx;
 	struct timespec deadline;
 	uint16_t port = 0;
@@ -4166,6 +4167,7 @@ static void test_client_server_facade_unary(void)
 	server_config.limits.rpc_message_pool_count = 32U;
 	server_config.limits.reassembly_pool_count = 4U;
 	server_config.limits.rx_buffer_count = 32U;
+	server_config.limits.observability_flags = TR_OBSERVABILITY_TIMING;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
@@ -4268,6 +4270,32 @@ static void test_client_server_facade_unary(void)
 	}
 	assert(tr_client_wait_drained(client, 2000U) == TR_OK);
 	assert(tr_server_drain(server, 2000U) == TR_OK);
+
+	assert(tr_server_get_stats(server, &server_stats) == TR_OK);
+	assert(server_stats.max_peers == 1U);
+	assert(server_stats.peers_peak == 1U);
+	assert(server_stats.peers_current == 1U);
+	assert(server_stats.peers_ready_current == 1U);
+	assert(server_stats.peers_reaping_current == 0U);
+	assert(server_stats.peers_ready_total == 2U);
+	assert(server_stats.peers_reaped_total == 1U);
+	assert(server_stats.rpc.calls_started == 2U);
+	assert(server_stats.rpc.executor_enqueued_tasks >= 2U);
+	assert(server_stats.rpc.executor_taken_tasks <=
+	       server_stats.rpc.executor_enqueued_tasks);
+	assert(server_stats.rpc.executor_queue_wait_ns.samples ==
+	       server_stats.rpc.executor_taken_tasks);
+	assert(server_stats.rpc.executor_handler_ns.samples <=
+	       server_stats.rpc.executor_taken_tasks);
+	assert(server_stats.rpc.executor_handler_ns.samples >= 2U);
+	assert(server_stats.channel.streams_opened >= 2U);
+	assert(server_stats.rpc_message_pool.peak != 0U);
+	assert(server_stats.reactor.rx_buffer_pool.peak != 0U);
+	assert(server_stats.reactor.tx_item_pool.peak != 0U ||
+	       server_stats.reactor.control_tx_item_pool.peak != 0U);
+	assert(server_stats.reactor.observability_flags ==
+	       TR_OBSERVABILITY_TIMING);
+	assert(server_stats.reactor.turn_busy_ns.samples != 0U);
 
 	tr_client_destroy(client);
 	tr_server_destroy(server);
