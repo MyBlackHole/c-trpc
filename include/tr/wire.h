@@ -34,7 +34,8 @@ enum tr_frame_type {
 	TR_FRAME_ERROR = 7,
 	TR_FRAME_HELLO = 8,
 	TR_FRAME_HELLO_ACK = 9,
-	TR_FRAME_GOAWAY = 10
+	TR_FRAME_GOAWAY = 10,
+	TR_FRAME_BIND = 11
 };
 
 struct tr_frame_header {
