@@ -135,11 +135,17 @@ python3 bench/run_rpc_capacity.py \
   --output /tmp/rpc-bench/open-loop-custom.jsonl
 ```
 
-Server Unary executor 队列耗尽时，RPC 接收路径会在 handler **尚未执行**的
-前提下直接返回空 payload 的 `RESOURCE_EXHAUSTED` Unary response，并正常关闭
-该 Call 的 Stream；物理 TCP/Channel 保持可用，后续 Call 可以继续服务。真正的
-connection/transport failure 仍使用 `UNAVAILABLE`。Streaming executor 饱和语义
-本轮不改变，仍属于后续单独设计范围。
+Server executor 队列耗尽时，只要请求仍处于**首个业务 task 尚未进入 executor**
+的 admission 阶段，就会显式返回容量拒绝而不是伪装成连接故障：
+
+- Unary 返回空 payload 的 `RESOURCE_EXHAUSTED` response；
+- Streaming 首条 REQUEST 若尚未执行 `on_open/on_message`，返回最终
+  `STATUS=RESOURCE_EXHAUSTED`；
+- 物理 TCP/Channel 保持可用，后续 Call 可以继续服务。
+
+真正的 connection/transport failure 仍使用 `UNAVAILABLE`。已经执行过 Streaming
+业务 callback 后发生的**中途** executor saturation 不在 admission 语义内，仍保留
+现有行为，后续需要单独决定是终止 Call、应用级背压还是其他策略。
 
 容量工具分别统计 `resource_exhausted` 与 `unavailable`，两者都必须是
 `rpc_errors` 的子集，不能相互冒充。
