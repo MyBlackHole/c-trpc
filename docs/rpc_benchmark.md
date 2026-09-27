@@ -239,6 +239,52 @@ The GCC release CI job records one full matrix with normal runtime CRC dispatch
 as a diagnostic artifact. It has no throughput, scaling-efficiency, P99, or
 busy-ratio pass/fail threshold.
 
+### Bounded-resource headroom A/B
+
+When a scalability point first hits a bounded pool, `run_rpc_headroom.py`
+separates a configuration wall from a deeper runtime wall by rerunning the same
+offered rates with one controlled resource change.
+
+The default experiment follows the first multi-source result:
+
+```text
+workers:              8
+handler:              0 ms
+rates:                10k / 20k / 40k RPS
+baseline RX buffers:  benchmark-derived (272 at capacity=128)
+headroom RX buffers:  1024
+executor queue:       unchanged at 64
+RPC message pool:     unchanged
+reassembly pool:      unchanged
+```
+
+```sh
+python3 bench/run_rpc_headroom.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --rates 10000,20000,40000 \
+  --workers 8 --handler-ms 0 \
+  --headroom-rx-buffers 1024 \
+  --output /tmp/rpc-bench/resource-headroom.jsonl
+```
+
+The benchmark binary exposes Server-only overrides for
+`--rx-buffers`, `--rpc-message-pool`, and `--reassembly-pool`. A zero
+override keeps the existing derived benchmark default. These flags do not change
+library/facade defaults and are not passed to benchmark Clients.
+
+The A/B output records the actual observed pool capacities and reports:
+
+- the first exact Server pressure rate in each profile;
+- rates where baseline RX exhaustion disappears with added RX headroom;
+- rates where RX exhaustion persists;
+- the exact Server wall-signal set before and after the resource change.
+
+This is an isolation experiment, not an argument to increase production pool
+defaults. If RX exhaustion disappears and another bounded resource becomes the
+first wall, that new signal is investigated next. If Reactor busy time becomes
+the limiting evidence only after bounded resources have headroom, then a
+Reactor architecture change has a measurement basis.
+
 ### Streaming continuation reserve
 
 Server RPC Endpoint 额外提供 opt-in 的
