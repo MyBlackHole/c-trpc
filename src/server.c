@@ -16,6 +16,7 @@
 #include "tr/status.h"
 #include "rpc_internal.h"
 #include "socket_internal.h"
+#include "observability_internal.h"
 
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
@@ -53,6 +54,14 @@ struct tr_server {
 
 	struct tr_server_peer *peers;
 	uint32_t peer_count;
+	uint32_t peer_count_peak;
+	uint32_t peer_reaping_count;
+
+	uint64_t stat_peers_ready;
+	uint64_t stat_peers_reaped;
+	uint64_t stat_peer_capacity_rejections;
+	struct tr_server_channel_stats retired_channel_stats;
+	struct tr_server_rpc_stats retired_rpc_stats;
 
 	pthread_mutex_t lock;
 	pthread_t accept_thread;
@@ -78,6 +87,76 @@ static uint64_t tr_server_now_ms(void)
 		return 0;
 	return (uint64_t)ts.tv_sec * UINT64_C(1000) +
 	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
+}
+
+static void tr_server_merge_channel_stats(
+	struct tr_server_channel_stats *dst,
+	const struct tr_channel_stats *src, int current)
+{
+	if (!dst || !src)
+		return;
+
+	if (current)
+		dst->active_streams_current += src->active_streams;
+	dst->streams_opened += src->streams_opened;
+	dst->streams_closed += src->streams_closed;
+	dst->stream_errors += src->stream_errors;
+	dst->messages_tx += src->messages_tx;
+	dst->messages_rx += src->messages_rx;
+	dst->bytes_tx += src->bytes_tx;
+	dst->bytes_rx += src->bytes_rx;
+	dst->window_updates_tx += src->window_updates_tx;
+	dst->window_updates_rx += src->window_updates_rx;
+	dst->reconnect_attempts += src->reconnect_attempts;
+	dst->reconnect_successes += src->reconnect_successes;
+	dst->keepalive_pings_sent += src->keepalive_pings_sent;
+	dst->keepalive_pongs_received += src->keepalive_pongs_received;
+	dst->keepalive_timeouts += src->keepalive_timeouts;
+}
+
+static void tr_server_merge_rpc_stats(
+	struct tr_server_rpc_stats *dst,
+	const struct tr_rpc_endpoint_stats *src, int current)
+{
+	if (!dst || !src)
+		return;
+
+	if (src->executor_threads > dst->executor_threads)
+		dst->executor_threads = src->executor_threads;
+	if (current) {
+		dst->endpoints_current++;
+		dst->opening_calls_current += src->opening_calls;
+		dst->active_calls_current += src->active_calls;
+		dst->terminal_calls_current += src->terminal_calls;
+		dst->executor_queued_tasks_current += src->executor_queued_tasks;
+		dst->executor_running_tasks_current += src->executor_running_tasks;
+		dst->executor_queue_capacity_current +=
+			src->executor_queue_capacity;
+		dst->executor_ready_calls_current += src->executor_ready_calls;
+	}
+	if (src->executor_queue.peak >
+	    dst->executor_queue_peak_max_per_endpoint)
+		dst->executor_queue_peak_max_per_endpoint =
+			src->executor_queue.peak;
+	if (src->executor_ready_calls_peak >
+	    dst->executor_ready_calls_peak_max_per_endpoint)
+		dst->executor_ready_calls_peak_max_per_endpoint =
+			src->executor_ready_calls_peak;
+
+	dst->executor_enqueued_tasks += src->executor_enqueued_tasks;
+	dst->executor_taken_tasks += src->executor_taken_tasks;
+	dst->executor_admission_limit_hits +=
+		src->executor_admission_limit_hits;
+	dst->executor_hard_full_events += src->executor_hard_full_events;
+	tr_merge_latency_histogram(&dst->executor_queue_wait_ns,
+				   &src->executor_queue_wait_ns);
+	tr_merge_latency_histogram(&dst->executor_handler_ns,
+				   &src->executor_handler_ns);
+
+	dst->calls_started += src->calls_started;
+	dst->calls_completed += src->calls_completed;
+	dst->calls_cancelled += src->calls_cancelled;
+	dst->calls_deadline_exceeded += src->calls_deadline_exceeded;
 }
 
 static void tr_server_normalize_config(struct tr_server_config *config)
