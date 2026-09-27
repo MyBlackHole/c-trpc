@@ -370,6 +370,31 @@ first wall, that new signal is investigated next. If Reactor busy time becomes
 the limiting evidence only after bounded resources have headroom, then a
 Reactor architecture change has a measurement basis.
 
+### Shared-runner wall repeatability
+
+Single high-rate runs on GitHub shared runners are diagnostic samples, not
+stable machine-capacity measurements. If two runs disagree about the first
+bounded wall, `run_rpc_repeatability.py` repeats the exact 40k schedule before
+any further architecture or capacity change is considered.
+
+The GCC release CI job runs three trials for:
+
+- `baseline`: benchmark-derived bounded resources;
+- `command_headroom`: RX=8192, executor=256, CONTROL TX=2048,
+  command capacity=4096;
+- `ceiling_headroom`: RX=8192, executor=1024, CONTROL TX=8192,
+  command capacity=4096.
+
+Each trial retains the full Server/Client diagnostics. The summary reports
+clean-trial count, exact-Server-pressure-trial count, per-signal occurrence
+counts, min/median/max successful RPC/s, Reactor busy range, command-budget-hit
+range, and command queue peak. There is still no throughput or latency CI gate.
+
+A wall observed in only one of three shared-runner trials is treated as
+non-reproducible evidence, not as a reason to change the production
+architecture. A repeatedly reproduced exact wall can then receive a targeted
+A/B experiment.
+
 ### Streaming continuation reserve
 
 Server RPC Endpoint 额外提供 opt-in 的
