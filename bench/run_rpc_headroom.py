@@ -133,6 +133,7 @@ def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
         "capacity": args.capacity,
         "baseline": {
             "rx_buffer_count": 0,
+            "executor_queue": args.executor_queue,
             "rpc_message_pool_count": 0,
             "reassembly_pool_count": 0,
         },
