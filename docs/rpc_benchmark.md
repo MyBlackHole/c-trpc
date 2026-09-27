@@ -170,6 +170,30 @@ B 的第二个 pending continuation 超过每 Call 上限后得到
 容量工具分别统计 `resource_exhausted` 与 `unavailable`，两者都必须是
 `rpc_errors` 的子集，不能相互冒充。
 
+### Streaming continuation reserve
+
+Server RPC Endpoint 额外提供 opt-in 的
+`executor_continuation_reserve`（facade 对应
+`limits.executor_continuation_reserve`）。默认值为 0，因此现有容量曲线和部署行为
+不变。
+
+启用 reserve 后仍只有一套有界 executor node pool：
+
+- 新 Unary 和 Streaming 首个业务 task 属于 admission work，只能使用
+  `executor_queue_capacity - reserve` 个 node；
+- 已经接受的 Streaming Call 的后续 message、half-close、writable、close task
+  可以继续使用全部 node；
+- admission 在 reserve 边界命中 `TR_AGAIN` 后，沿已有逻辑返回
+  `RESOURCE_EXHAUSTED`，不会把保留容量消耗掉；
+- reserve 不改变 worker 数、ready-Call 调度或同一 Call 的串行规则；
+- reserve 必须严格小于最终 executor queue capacity；0 表示关闭。
+
+这一策略的目标是避免大量新 Call 把所有 task node 占满，使已接受 Streaming Call
+连 continuation/lifecycle 工作都无法进入 executor。它不是吞吐量保证，也不是
+per-service QoS；默认 benchmark 暂时保持 reserve=0。后续应增加独立 Streaming
+fixed-rate 曲线，对比 reserve=0 与 reserve>0 下的 admission reject、continuation
+进展和尾延迟，再决定是否推荐 facade 默认值。
+
 CI 对 open-loop 只检查计数守恒、payload 正确性、固定到达时间窗和最终 drain，
 不要求某个 QPS/P99，也不要求共享 runner 必须在某一 rate 点出现饱和。GCC release
 额外保存一轮 5 点容量曲线作为诊断 artifact；它仍不是发布 SLA。

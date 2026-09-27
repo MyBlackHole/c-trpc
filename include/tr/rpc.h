@@ -175,6 +175,16 @@ struct tr_rpc_endpoint_config {
      * 并保持 enqueue 顺序。
      */
 	uint32_t executor_threads;
+
+	/*
+	 * Server-only admission reserve。0 表示禁用。
+	 *
+	 * 非 0 时，新的 Unary/Streaming 首 task 只能使用
+	 * executor_queue_capacity - reserve 个 node；Streaming continuation、
+	 * half-close/writable/close 等已接受 Call 的后续 task 可以使用全部
+	 * executor node。reserve 必须严格小于最终 queue capacity。
+	 */
+	uint32_t executor_continuation_reserve;
 };
 
 struct tr_rpc_endpoint_stats {
@@ -188,6 +198,8 @@ struct tr_rpc_endpoint_stats {
 	uint32_t executor_threads;
 	uint32_t executor_queued_tasks;
 	uint32_t executor_running_tasks;
+	uint32_t executor_queue_capacity;
+	uint32_t executor_continuation_reserve;
 
 	uint64_t calls_started;
 	uint64_t calls_completed;

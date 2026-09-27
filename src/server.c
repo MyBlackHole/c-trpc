@@ -381,6 +381,8 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	rpc_config.executor_threads = server->config.limits.executor_threads;
 	rpc_config.executor_queue_capacity =
 		server->config.limits.executor_queue_capacity;
+	rpc_config.executor_continuation_reserve =
+		server->config.limits.executor_continuation_reserve;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		peer->channel, &rpc_config, server->rpc_executor_group,
@@ -481,6 +483,11 @@ int tr_server_create(const struct tr_server_config *config,
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes <
 		    TR_RPC_WIRE_HEADER_SIZE ||
+	    (effective.limits.executor_continuation_reserve != 0 &&
+	     effective.limits.executor_continuation_reserve >=
+		     (effective.limits.executor_queue_capacity < 16U ?
+			      16U :
+			      effective.limits.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U)
 		return TR_ERR_INVALID;
