@@ -507,11 +507,66 @@ cannot be attributed to process fanout because total Client concurrency grew by
 8x at the same time. The result is retained as evidence that generator-side
 capacity matters, not as evidence that 32 processes are intrinsically better.
 
-The corrected constant-slot sweep is the experiment that can isolate process
-fanout. Its purpose is benchmark fidelity, not selecting a production queue
-size. Architecture or production-default changes should only use Server
-bottlenecks that remain stable after generator scheduling pressure and
-generator in-flight capacity have both been controlled.
+#### PR #49 constant-slot fanout result
+
+PR #49 fixed aggregate generator capacity at 1024 slots and changed only the
+4/8/16/32 process fanout. All eight cases again reported zero exact Server
+pressure. The generator-side result showed two different failure modes:
+
+- 4 generators (256 slots each) accepted every scheduled arrival, but median
+  scheduler P99 lateness was about 393 ms. The 10k-RPS local scheduler could not
+  preserve the intended arrival times and effectively stretched the load.
+- 8 generators (128 slots each) reduced median P99 lateness to about 60 ms, but
+  accepted only about 49% of arrivals.
+- 16 generators (64 slots each) reduced median P99 lateness to about 5.7 ms,
+  while accepting about 41%.
+- 32 generators (32 slots each) reduced median P99 lateness further to about
+  2.6 ms, while accepting about 38%.
+
+The 32-generator result has the best scheduling fidelity of this set, but 1024
+aggregate slots are too small to absorb the backlog while the shared-runner
+Server drains only about 13--15k successful RPC/s. Thus process fanout and
+aggregate backlog capacity must be tuned as separate generator dimensions.
+
+### Generator slot sensitivity
+
+`run_rpc_generator_slots.py` keeps the 32-generator schedule fixed and changes
+only aggregate generator in-flight capacity:
+
+```text
+total offered rate:        40000 RPC/s
+generators:                32
+per-generator rate:        1250 RPC/s
+aggregate generator slots: 1024 / 2048 / 4096 / 8192
+per-generator slots:       32 / 64 / 128 / 256
+generator workers:         1
+RX buffers:                8192
+executor queue:            1024
+CONTROL TX items:          8192
+command queue:             16384
+```
+
+Two trials run slot capacities in opposite orders. Total offered rate, process
+fanout and Server headroom stay fixed, so this isolates how much generator-side
+backlog capacity is required before scheduler drops disappear.
+
+```sh
+python3 bench/run_rpc_generator_slots.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --trials 2 --rate 40000 --generators 32 \
+  --aggregate-generator-slots 1024,2048,4096,8192 \
+  --output /tmp/rpc-bench/generator-slots-40k.jsonl
+```
+
+This diagnostic does not justify increasing any production Client/Server
+capacity. It measures the load generator's ability to preserve the requested
+open-loop schedule. If the existing 8192-slot maximum still drops arrivals, the
+next step is to improve the benchmark generator's own capacity model rather
+than interpret the resulting curve as a Server ceiling.
+
+Architecture or production-default changes should only use Server bottlenecks
+that remain stable after generator scheduling pressure and generator in-flight
+capacity have both been controlled.
 
 ### Streaming continuation reserve
 
