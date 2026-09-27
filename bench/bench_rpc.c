@@ -344,6 +344,20 @@ static int run_server(const struct options *o)
 		       "\"cpu_s\":%.9f,\"peak_rss_kib\":%ld,"
 		       "\"reactor_busy_ratio\":%.9f,"
 		       "\"reactor_busy_ns\":%" PRIu64 ",\"reactor_poll_ns\":%" PRIu64 ","
+		       "\"reactor_turns\":%" PRIu64 ","
+		       "\"command_budget_limit\":%" PRIu64 ","
+		       "\"command_processed_total\":%" PRIu64 ","
+		       "\"command_max_per_turn\":%" PRIu64 ","
+		       "\"command_budget_hits\":%" PRIu64 ","
+		       "\"epoll_polls\":%" PRIu64 ",\"epoll_waits\":%" PRIu64 ","
+		       "\"command_send_enqueued\":%" PRIu64 ","
+		       "\"command_send_full\":%" PRIu64 ","
+		       "\"command_resume_rx_enqueued\":%" PRIu64 ","
+		       "\"command_resume_rx_full\":%" PRIu64 ","
+		       "\"command_call_enqueued\":%" PRIu64 ","
+		       "\"command_call_full\":%" PRIu64 ","
+		       "\"command_other_enqueued\":%" PRIu64 ","
+		       "\"command_other_full\":%" PRIu64 ","
 		       "\"command_queue_capacity\":%u,"
 		       "\"command_queue_peak\":%u,\"completion_queue_peak\":%u,"
 		       "\"command_queue_full_events\":%" PRIu64 ","
@@ -371,6 +385,21 @@ static int run_server(const struct options *o)
 		       status, cpu_seconds(&usage_after), usage_after.ru_maxrss,
 		       reactor_busy_ratio, stats.reactor.busy_ns,
 		       stats.reactor.poll_ns,
+		       stats.reactor.turns,
+		       stats.reactor.limits.commands,
+		       stats.reactor.total.commands,
+		       stats.reactor.max_per_turn.commands,
+		       stats.reactor.budget_hits.commands,
+		       stats.reactor.epoll_polls,
+		       stats.reactor.epoll_waits,
+		       stats.reactor.command_send.enqueued,
+		       stats.reactor.command_send.full_events,
+		       stats.reactor.command_resume_rx.enqueued,
+		       stats.reactor.command_resume_rx.full_events,
+		       stats.reactor.command_call.enqueued,
+		       stats.reactor.command_call.full_events,
+		       stats.reactor.command_other.enqueued,
+		       stats.reactor.command_other.full_events,
 		       stats.reactor.command_queue.capacity,
 		       stats.reactor.command_queue.peak,
 		       stats.reactor.completion_queue.peak,
