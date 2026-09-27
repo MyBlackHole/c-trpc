@@ -162,6 +162,48 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(comparison["command_full_removed_rates"], [40000])
         self.assertEqual(comparison["command_full_persisted_rates"], [])
 
+    def test_compare_reports_removed_control_ceiling_exhaustion(self):
+        before = [
+            result(20000, 8192, control_capacity=2048),
+            result(40000, 8192, control_capacity=2048,
+                   control_exhausted=21,
+                   executor_queue=256,
+                   signals=["control_tx_pool_exhausted"]),
+        ]
+        after = [
+            result(20000, 8192, control_capacity=8192),
+            result(40000, 8192, control_capacity=8192,
+                   executor_queue=256),
+        ]
+        comparison = compare_profiles(
+            before, after, "command_headroom", "control_ceiling_headroom")
+        self.assertEqual(comparison["before_control_tx_capacity"], 2048)
+        self.assertEqual(comparison["after_control_tx_capacity"], 8192)
+        self.assertEqual(
+            comparison["control_tx_exhaustion_removed_rates"], [40000])
+
+    def test_compare_reports_removed_executor_ceiling_full(self):
+        before = [
+            result(20000, 8192, control_capacity=8192,
+                   executor_queue=256),
+            result(40000, 8192, hard_full=33,
+                   control_capacity=8192, executor_queue=256,
+                   signals=["executor_hard_full"]),
+        ]
+        after = [
+            result(20000, 8192, control_capacity=8192,
+                   executor_queue=1024),
+            result(40000, 8192, control_capacity=8192,
+                   executor_queue=1024),
+        ]
+        comparison = compare_profiles(
+            before, after,
+            "control_ceiling_headroom", "executor_ceiling_headroom")
+        self.assertEqual(comparison["before_executor_queue"], 256)
+        self.assertEqual(comparison["after_executor_queue"], 1024)
+        self.assertEqual(
+            comparison["executor_hard_full_removed_rates"], [40000])
+
     def test_compare_requires_matching_rates(self):
         with self.assertRaises(ValueError):
             compare_profiles(
