@@ -94,6 +94,11 @@ jobs:
               --trials 3 --rate 40000 \
               --label "gcc-release-40k-repeatability" \
               --output "$results/repeatability-40k.jsonl"
+            python3 bench/run_rpc_fanout.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --trials 2 --rate 40000 --fanouts 4,8,16,32 \
+              --label "gcc-release-40k-generator-fanout" \
+              --output "$results/generator-fanout-40k.jsonl"
           fi
       - name: Preserve exact source and benchmark diagnostics
         if: always()

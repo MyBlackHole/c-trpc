@@ -438,6 +438,56 @@ production command capacity or `TR_COMMAND_BATCH`; the latter remains a Reactor
 fairness policy and should only change after a stable repeated bottleneck is
 shown.
 
+### Generator fanout sensitivity
+
+The fixed-rate scalability tools can distribute one total offered rate across
+multiple independent Client processes. More generators reduce each Client's
+local scheduling rate, but every extra process also consumes scheduler time,
+memory and CPU on the same shared runner as the Server. Therefore "more
+generators" is not monotonically better.
+
+`run_rpc_fanout.py` holds the Server resource profile fixed with diagnostic
+headroom and changes only generator process count. The default 40k sweep is:
+
+```text
+total offered rate:   40000 RPC/s
+fanout:               4 / 8 / 16 / 32 Clients
+per-generator rate:   10000 / 5000 / 2500 / 1250 RPC/s
+generator workers:    1
+generator window:     256
+RX buffers:           8192
+executor queue:       1024
+CONTROL TX items:     8192
+command queue:        16384
+```
+
+Two trials run the fanouts in opposite orders. This reduces fixed-order bias
+from runner warmup, throttling or transient host contention.
+
+```sh
+python3 bench/run_rpc_fanout.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --trials 2 --rate 40000 --fanouts 4,8,16,32 \
+  --output /tmp/rpc-bench/generator-fanout-40k.jsonl
+```
+
+Each fanout summary keeps generator pressure separate from Server pressure and
+reports:
+
+- clean, generator-drop, generator-late and exact-Server-pressure trial counts;
+- accepted/offered fraction and successful RPC/s range;
+- scheduler P99 lateness and dropped-arrival counts;
+- aggregate Client CPU time and peak RSS;
+- Reactor busy ratio;
+- command queue and CONTROL TX peak occupancy.
+
+The purpose is benchmark fidelity, not selecting a production queue size. A
+fanout that lowers local scheduler lateness but materially increases aggregate
+Client CPU/RSS or reduces Server CPU availability can make a shared-runner
+capacity result less trustworthy. Architecture or production-default changes
+should only use Server bottlenecks that remain stable after generator pressure
+has been separated.
+
 ### Streaming continuation reserve
 
 Server RPC Endpoint 额外提供 opt-in 的
