@@ -264,6 +264,9 @@ static void tr_rpc_executor_complete_task(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle);
 static void tr_rpc_executor_mark_cancelled(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle);
+static int tr_rpc_notify_terminal_locked(
+	struct tr_rpc_endpoint *endpoint, uint32_t slot,
+	struct tr_rpc_call_slot *call, int status);
 
 static uint64_t tr_rpc_now_ns(void)
 {
@@ -1105,6 +1108,15 @@ tr_rpc_fail_stream_midstream_overload_locked(
 	call->final_status = status;
 	call->deadline_ns = 0;
 	tr_rpc_deadline_changed_locked(endpoint);
+
+	/*
+	 * The application Call is terminal as soon as bounded continuation
+	 * admission is exhausted. Queue on_close behind any already-admitted
+	 * tasks now, rather than depending on which TCP half-close arrives last.
+	 * Keep the protocol Call slot alive until the Stream itself becomes
+	 * terminal so raced peer data is still recognized as overload fallout.
+	 */
+	(void)tr_rpc_notify_terminal_locked(endpoint, slot, call, status);
 
 	ret = tr_stream_send(call->stream, encoded);
 	if (ret == TR_OK) {
