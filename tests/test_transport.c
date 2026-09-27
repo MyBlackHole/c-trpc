@@ -1331,6 +1331,120 @@ static void destroy_channel_test_ctx(struct channel_test_ctx *ctx)
 	pthread_mutex_destroy(&ctx->lock);
 }
 
+static void wait_channel_active_streams(struct tr_channel *channel,
+					uint32_t target)
+{
+	unsigned i;
+
+	for (i = 0; i < 5000U; ++i) {
+		if (tr_channel_active_streams(channel) == target)
+			return;
+		{
+			struct timespec pause_time = { 0, 1000000L };
+			nanosleep(&pause_time, NULL);
+		}
+	}
+	assert(tr_channel_active_streams(channel) == target);
+}
+
+static void test_channel_stream_slot_reuse(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	struct tr_stream_handle first;
+	struct tr_stream_handle second;
+	struct tr_stream_handle server_stream;
+	struct tr_stream_handle server_second;
+	struct tr_stream_flow_state flow;
+	struct channel_test_ctx client_ctx;
+	struct channel_test_ctx server_ctx;
+	int client_fd;
+	int server_fd;
+
+	init_channel_test_ctx(&client_ctx);
+	init_channel_test_ctx(&server_ctx);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 1U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &client_ctx,
+				 &client_channel) == TR_OK);
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &server_ctx,
+				 &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &first) == TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.opened, 1U);
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 1U);
+	assert(tr_channel_active_streams(client_channel) == 1U);
+	assert(tr_channel_active_streams(server_channel) == 1U);
+
+	/* The single free-list entry is exhausted until this Stream is retired. */
+	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &second) ==
+	       TR_AGAIN);
+
+	pthread_mutex_lock(&server_ctx.lock);
+	server_stream = server_ctx.last_stream;
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_stream_close(first) == TR_OK);
+	assert(tr_stream_close(server_stream) == TR_OK);
+	wait_channel_active_streams(client_channel, 0U);
+	wait_channel_active_streams(server_channel, 0U);
+
+	assert(tr_stream_get_flow_state(first, &flow) == TR_ERR_STALE);
+	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &second) == TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.opened, 2U);
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 2U);
+	assert(second.slot == first.slot);
+	assert(second.generation != first.generation);
+	assert(tr_stream_get_flow_state(first, &flow) == TR_ERR_STALE);
+
+	pthread_mutex_lock(&server_ctx.lock);
+	server_second = server_ctx.last_stream;
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_stream_close(second) == TR_OK);
+	assert(tr_stream_close(server_second) == TR_OK);
+	wait_channel_active_streams(client_channel, 0U);
+	wait_channel_active_streams(server_channel, 0U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_channel_destroy(client_channel);
+	tr_channel_destroy(server_channel);
+	tr_reactor_destroy(reactor);
+	destroy_channel_test_ctx(&server_ctx);
+	destroy_channel_test_ctx(&client_ctx);
+}
+
 static void test_channel_stream_flow_control(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -5046,6 +5160,7 @@ int main(void)
 	test_reactor_tcp_roundtrip();
 	test_reactor_handler_update_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
+	test_channel_stream_slot_reuse();
 	test_channel_stream_flow_control();
 	test_channel_message_fragmentation_reassembly();
 	test_channel_split_lane_isolation();
