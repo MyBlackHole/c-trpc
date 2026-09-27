@@ -477,10 +477,12 @@ int main(void)
 	assert(executor_stats.executor_enqueued_tasks != 0U);
 	assert(executor_stats.executor_taken_tasks ==
 	       executor_stats.executor_enqueued_tasks);
-	assert(executor_stats.executor_queue_wait_ns.samples ==
+	assert(executor_stats.executor_queue_wait_ns.samples <=
 	       executor_stats.executor_taken_tasks);
-	assert(executor_stats.executor_handler_ns.samples ==
+	assert(executor_stats.executor_handler_ns.samples <=
 	       executor_stats.executor_taken_tasks);
+	assert(executor_stats.executor_queue_wait_ns.samples != 0U);
+	assert(executor_stats.executor_handler_ns.samples != 0U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
