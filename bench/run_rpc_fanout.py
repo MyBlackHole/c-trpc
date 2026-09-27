@@ -29,6 +29,17 @@ def trial_order(fanouts: list[int], trial: int) -> list[int]:
     return ordered if trial % 2 else list(reversed(ordered))
 
 
+def slots_per_generator(aggregate_slots: int, generators: int) -> int:
+    if aggregate_slots < 1 or generators < 1:
+        raise ValueError("aggregate slots and generators must be positive")
+    if aggregate_slots % generators:
+        raise ValueError("aggregate generator slots must divide every fanout")
+    slots = aggregate_slots // generators
+    if not 1 <= slots <= 256:
+        raise ValueError("per-generator slots must be in 1..256")
+    return slots
+
+
 def summarize_fanout(generators: int,
                      results: list[dict[str, Any]]) -> dict[str, Any]:
     if not results:
@@ -39,6 +50,13 @@ def summarize_fanout(generators: int,
     rate_rps = results[0]["case"]["rate_rps"]
     if any(result["case"]["rate_rps"] != rate_rps for result in results):
         raise ValueError("fanout summary mixed offered rates")
+
+    per_generator_slots = results[0]["case"]["generator_capacity"]
+    if any(result["case"]["generator_capacity"] != per_generator_slots or
+           result["case"]["generator_window"] != per_generator_slots
+           for result in results):
+        raise ValueError("fanout summary mixed generator slot controls")
+    aggregate_generator_slots = per_generator_slots * generators
 
     signal_counts: dict[str, int] = {}
     server_signal_counts: dict[str, int] = {}
@@ -71,11 +89,13 @@ def summarize_fanout(generators: int,
 
     return {
         "type": "fanout_summary",
-        "schema": 1,
+        "schema": 2,
         "generators": generators,
         "trials": len(results),
         "rate_rps": rate_rps,
         "per_generator_rates_rps": split_rates(rate_rps, generators),
+        "per_generator_slots": per_generator_slots,
+        "aggregate_generator_slots": aggregate_generator_slots,
         "clean_trials": sum(clean_result(result) for result in results),
         "generator_drop_trials": sum(
             result["client"]["scheduler_dropped"] > 0 for result in results),
@@ -124,8 +144,13 @@ def validate_args(parser: argparse.ArgumentParser,
         parser.error("min-arrival-ms must be in 10..10000")
     if not 1 <= args.generator_workers <= 8:
         parser.error("generator-workers must be in 1..8")
-    if not 1 <= args.generator_window <= args.generator_capacity <= 256:
-        parser.error("invalid generator window/capacity")
+    if not 1 <= args.aggregate_generator_slots <= 8192:
+        parser.error("aggregate-generator-slots must be in 1..8192")
+    try:
+        for generators in args.fanouts:
+            slots_per_generator(args.aggregate_generator_slots, generators)
+    except ValueError as error:
+        parser.error(str(error))
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
     if not 16 <= args.executor_queue <= 65536:
@@ -150,8 +175,7 @@ def main() -> int:
     parser.add_argument("--requests", type=int, default=256)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
     parser.add_argument("--generator-workers", type=int, default=1)
-    parser.add_argument("--generator-window", type=int, default=256)
-    parser.add_argument("--generator-capacity", type=int, default=256)
+    parser.add_argument("--aggregate-generator-slots", type=int, default=1024)
     parser.add_argument("--timeout-ms", type=int, default=3000)
     parser.add_argument("--rx-buffers", type=int, default=8192)
     parser.add_argument("--executor-queue", type=int, default=1024)
@@ -168,15 +192,19 @@ def main() -> int:
     metadata = base_metadata(args.binary, args.label)
     metadata.update({
         "type": "fanout_metadata",
-        "schema": 1,
+        "schema": 2,
         "trials": args.trials,
         "rate_rps": args.rate,
         "fanouts": args.fanouts,
         "requests": requests,
         "workers": args.workers,
         "generator_workers": args.generator_workers,
-        "generator_window": args.generator_window,
-        "generator_capacity": args.generator_capacity,
+        "aggregate_generator_slots": args.aggregate_generator_slots,
+        "per_fanout_generator_slots": {
+            str(generators):
+                slots_per_generator(args.aggregate_generator_slots, generators)
+            for generators in args.fanouts
+        },
         "server_headroom": {
             "rx_buffer_count": args.rx_buffers,
             "executor_queue": args.executor_queue,
@@ -184,8 +212,10 @@ def main() -> int:
             "command_capacity": args.command_capacity,
         },
         "note": (
-            "Fanout order alternates by trial. Server bounded resources remain "
-            "fixed with diagnostic headroom; no production defaults change."),
+            "Fanout order alternates by trial. Aggregate generator in-flight "
+            "slots and Server bounded resources remain fixed, so process fanout "
+            "is isolated from total Client concurrency. No production defaults "
+            "change."),
     })
 
     results_by_fanout: dict[int, list[dict[str, Any]]] = {
@@ -197,6 +227,8 @@ def main() -> int:
 
         for trial in range(1, args.trials + 1):
             for generators in trial_order(args.fanouts, trial):
+                generator_slots = slots_per_generator(
+                    args.aggregate_generator_slots, generators)
                 case = {
                     "trial": trial,
                     "rate_rps": args.rate,
@@ -207,8 +239,8 @@ def main() -> int:
                     "executor_queue": args.executor_queue,
                     "window": 128,
                     "capacity": 128,
-                    "generator_window": args.generator_window,
-                    "generator_capacity": args.generator_capacity,
+                    "generator_window": generator_slots,
+                    "generator_capacity": generator_slots,
                     "timeout_ms": args.timeout_ms,
                     "generators": generators,
                     "generator_workers": args.generator_workers,
@@ -237,13 +269,14 @@ def main() -> int:
                     raise
 
                 result["type"] = "fanout_case"
-                result["schema"] = 1
+                result["schema"] = 2
                 result["wall_signals"] = exact_wall_signals(result)
                 results_by_fanout[generators].append(result)
                 output.write(json.dumps(result, allow_nan=False) + "\n")
                 output.flush()
                 print(
                     f"trial={trial} generators={generators} "
+                    f"slots={generator_slots}x{generators} "
                     f"accepted={result['client']['accepted']}/"
                     f"{result['client']['offered']} "
                     f"ok_rps={result['client']['ok_rps']:.1f} "
