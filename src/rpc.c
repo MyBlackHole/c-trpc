@@ -1655,6 +1655,7 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 {
 	struct tr_rpc_endpoint *endpoint = arg;
 	uint32_t max_calls;
+	uint32_t scan_start;
 	uint32_t n;
 
 	if (!endpoint)
@@ -1664,10 +1665,15 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 	endpoint->pending_retry_scheduled = 0;
 	endpoint->pending_executor_work = 0;
 	max_calls = endpoint->config.max_calls;
+	scan_start = endpoint->pending_retry_cursor;
 
+	/*
+	 * Freeze this pass's start position. Successful admission updates the
+	 * cursor for the NEXT pass only; using the mutable cursor in this loop
+	 * would skip the slot immediately after every successful retry.
+	 */
 	for (n = 0; n < max_calls; ++n) {
-		uint32_t slot =
-			(endpoint->pending_retry_cursor + n) % max_calls;
+		uint32_t slot = (scan_start + n) % max_calls;
 		struct tr_rpc_call_slot *call = &endpoint->calls[slot];
 		int ret = TR_OK;
 
