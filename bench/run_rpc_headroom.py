@@ -58,6 +58,8 @@ def compare_profiles(before_results: list[dict[str, Any]],
     persisted_rx: list[int] = []
     removed_executor_full: list[int] = []
     persisted_executor_full: list[int] = []
+    removed_control_tx: list[int] = []
+    persisted_control_tx: list[int] = []
     pressure_changed: dict[str, dict[str, list[str]]] = {}
 
     for rate in rates:
@@ -76,6 +78,15 @@ def compare_profiles(before_results: list[dict[str, Any]],
             removed_executor_full.append(rate)
         if before_executor and after_executor:
             persisted_executor_full.append(rate)
+
+        before_control = (
+            before["server_exit"]["control_tx_pool_exhausted_events"] > 0)
+        after_control = (
+            after["server_exit"]["control_tx_pool_exhausted_events"] > 0)
+        if before_control and not after_control:
+            removed_control_tx.append(rate)
+        if before_control and after_control:
+            persisted_control_tx.append(rate)
 
         before_signals = sorted(
             signal for signal in before["wall_signals"]
@@ -108,6 +119,10 @@ def compare_profiles(before_results: list[dict[str, Any]],
             before_results[0]["server"]["executor_queue"],
         "after_executor_queue":
             after_results[0]["server"]["executor_queue"],
+        "before_control_tx_capacity":
+            before_results[0]["server_exit"]["control_tx_pool_capacity"],
+        "after_control_tx_capacity":
+            after_results[0]["server_exit"]["control_tx_pool_capacity"],
         "before_first_server_pressure_rps":
             min(before_pressure) if before_pressure else None,
         "after_first_server_pressure_rps":
@@ -116,6 +131,8 @@ def compare_profiles(before_results: list[dict[str, Any]],
         "rx_exhaustion_persisted_rates": persisted_rx,
         "executor_hard_full_removed_rates": removed_executor_full,
         "executor_hard_full_persisted_rates": persisted_executor_full,
+        "control_tx_exhaustion_removed_rates": removed_control_tx,
+        "control_tx_exhaustion_persisted_rates": persisted_control_tx,
         "server_signal_changes": pressure_changed,
     }
 
@@ -146,12 +163,28 @@ def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
         "rx_executor_headroom": {
             "rx_buffer_count": args.headroom_rx_buffers,
             "executor_queue": args.headroom_executor_queue,
+            "control_tx_item_count": 0,
+            "rpc_message_pool_count": args.headroom_rpc_message_pool,
+            "reassembly_pool_count": args.headroom_reassembly_pool,
+        },
+        "rx_executor_control_headroom": {
+            "rx_buffer_count": args.headroom_rx_buffers,
+            "executor_queue": args.headroom_executor_queue,
+            "control_tx_item_count": args.headroom_control_tx_items,
+            "rpc_message_pool_count": args.headroom_rpc_message_pool,
+            "reassembly_pool_count": args.headroom_reassembly_pool,
+        },
+        "full_headroom": {
+            "rx_buffer_count": args.full_headroom_rx_buffers,
+            "executor_queue": args.headroom_executor_queue,
+            "control_tx_item_count": args.headroom_control_tx_items,
             "rpc_message_pool_count": args.headroom_rpc_message_pool,
             "reassembly_pool_count": args.headroom_reassembly_pool,
         },
         "max_generators": args.max_generators,
         "target_rate_per_generator": args.target_rate_per_generator,
         "min_arrival_ms": args.min_arrival_ms,
+        "generator_workers": args.generator_workers,
         "note": (
             "0 resource value means keep the benchmark-derived baseline; "
             "profiles differ only by explicit headroom overrides"),
@@ -173,19 +206,27 @@ def validate_args(parser: argparse.ArgumentParser,
         parser.error("require 1 <= window <= capacity <= 256")
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
-    if not 1 <= args.max_generators <= 16:
-        parser.error("max-generators must be in 1..16")
+    if not 1 <= args.max_generators <= 32:
+        parser.error("max-generators must be in 1..32")
     if not 100 <= args.target_rate_per_generator <= 1_000_000:
         parser.error("invalid target-rate-per-generator")
     if not 10 <= args.min_arrival_ms <= 10000:
         parser.error("min-arrival-ms must be in 10..10000")
+    if not 1 <= args.generator_workers <= 8:
+        parser.error("generator-workers must be in 1..8")
     for value in (args.headroom_rx_buffers,
+                  args.full_headroom_rx_buffers,
+                  args.headroom_control_tx_items,
                   args.headroom_rpc_message_pool,
                   args.headroom_reassembly_pool):
         if not 0 <= value <= 8192:
             parser.error("headroom pool overrides must be in 0..8192")
     if not 16 <= args.headroom_executor_queue <= 65536:
         parser.error("headroom-executor-queue must be in 16..65536")
+    if args.headroom_control_tx_items == 0:
+        parser.error("headroom-control-tx-items must be nonzero")
+    if args.full_headroom_rx_buffers < args.headroom_rx_buffers:
+        parser.error("full-headroom-rx-buffers must be >= headroom-rx-buffers")
     if (args.headroom_rx_buffers == 0 and
             args.headroom_rpc_message_pool == 0 and
             args.headroom_reassembly_pool == 0 and
@@ -207,11 +248,14 @@ def main() -> int:
     parser.add_argument("--window", type=int, default=128)
     parser.add_argument("--capacity", type=int, default=128)
     parser.add_argument("--timeout-ms", type=int, default=3000)
-    parser.add_argument("--max-generators", type=int, default=16)
-    parser.add_argument("--target-rate-per-generator", type=int, default=4000)
+    parser.add_argument("--max-generators", type=int, default=32)
+    parser.add_argument("--target-rate-per-generator", type=int, default=1250)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
+    parser.add_argument("--generator-workers", type=int, default=1)
     parser.add_argument("--headroom-rx-buffers", type=int, default=1024)
+    parser.add_argument("--full-headroom-rx-buffers", type=int, default=2048)
     parser.add_argument("--headroom-executor-queue", type=int, default=256)
+    parser.add_argument("--headroom-control-tx-items", type=int, default=512)
     parser.add_argument("--headroom-rpc-message-pool", type=int, default=0)
     parser.add_argument("--headroom-reassembly-pool", type=int, default=0)
     parser.add_argument("--smoke", action="store_true")
@@ -224,18 +268,27 @@ def main() -> int:
         args.max_generators = 2
         args.target_rate_per_generator = 2500
         args.min_arrival_ms = 20
+        args.generator_workers = 1
         args.headroom_rx_buffers = 512
+        args.full_headroom_rx_buffers = 1024
         args.headroom_executor_queue = 128
+        args.headroom_control_tx_items = 256
     validate_args(parser, args)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     profiles = (
-        ("baseline", 0, args.executor_queue, 0, 0),
-        ("rx_headroom", args.headroom_rx_buffers, args.executor_queue,
+        ("baseline", 0, args.executor_queue, 0, 0, 0),
+        ("rx_headroom", args.headroom_rx_buffers, args.executor_queue, 0,
          args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
         ("rx_executor_headroom", args.headroom_rx_buffers,
-         args.headroom_executor_queue, args.headroom_rpc_message_pool,
-         args.headroom_reassembly_pool),
+         args.headroom_executor_queue, 0,
+         args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
+        ("rx_executor_control_headroom", args.headroom_rx_buffers,
+         args.headroom_executor_queue, args.headroom_control_tx_items,
+         args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
+        ("full_headroom", args.full_headroom_rx_buffers,
+         args.headroom_executor_queue, args.headroom_control_tx_items,
+         args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
     )
     profile_results: dict[str, list[dict[str, Any]]] = {}
 
@@ -243,7 +296,8 @@ def main() -> int:
         output.write(json.dumps(metadata(args.binary, args), allow_nan=False) + "\n")
         output.flush()
 
-        for profile, rx_count, executor_queue, rpc_count, reassembly_count in profiles:
+        for (profile, rx_count, executor_queue, control_count,
+             rpc_count, reassembly_count) in profiles:
             results: list[dict[str, Any]] = []
             for index, rate in enumerate(sorted(set(args.rates))):
                 generators = generator_count_for(
@@ -264,8 +318,10 @@ def main() -> int:
                     "capacity": args.capacity,
                     "timeout_ms": args.timeout_ms,
                     "generators": generators,
+                    "generator_workers": args.generator_workers,
                     "resource_profile": profile,
                     "rx_buffer_count": rx_count,
+                    "control_tx_item_count": control_count,
                     "rpc_message_pool_count": rpc_count,
                     "reassembly_pool_count": reassembly_count,
                 }
@@ -296,6 +352,8 @@ def main() -> int:
             summary["type"] = "headroom_profile_summary"
             summary["resource_profile"] = profile
             summary["rx_pool_capacity"] = results[0]["server_exit"]["rx_pool_capacity"]
+            summary["control_tx_pool_capacity"] = (
+                results[0]["server_exit"]["control_tx_pool_capacity"])
             output.write(json.dumps(summary, allow_nan=False) + "\n")
             output.flush()
             profile_results[profile] = results
@@ -309,6 +367,14 @@ def main() -> int:
                 profile_results["rx_headroom"],
                 profile_results["rx_executor_headroom"],
                 "rx_headroom", "rx_executor_headroom"),
+            compare_profiles(
+                profile_results["rx_executor_headroom"],
+                profile_results["rx_executor_control_headroom"],
+                "rx_executor_headroom", "rx_executor_control_headroom"),
+            compare_profiles(
+                profile_results["rx_executor_control_headroom"],
+                profile_results["full_headroom"],
+                "rx_executor_control_headroom", "full_headroom"),
         )
         for comparison in comparisons:
             output.write(json.dumps(comparison, allow_nan=False) + "\n")
@@ -320,7 +386,9 @@ def main() -> int:
                 f"{comparison['after_first_server_pressure_rps']} "
                 f"rx_removed={comparison['rx_exhaustion_removed_rates']} "
                 f"executor_removed="
-                f"{comparison['executor_hard_full_removed_rates']}",
+                f"{comparison['executor_hard_full_removed_rates']} "
+                f"control_removed="
+                f"{comparison['control_tx_exhaustion_removed_rates']}",
                 flush=True)
 
     return 0
