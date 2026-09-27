@@ -10,6 +10,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "tr/wire.h"
+#include "observability_internal.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -61,6 +62,9 @@ static int tr_reactor_is_owner_thread(const struct tr_reactor *reactor)
 struct tr_reactor_turn {
 	struct tr_reactor_work left;
 	uint64_t timer_lateness_ns;
+	uint64_t start_ns;
+	uint64_t poll_start_ns;
+	uint64_t poll_end_ns;
 	int poll_timeout;
 	int polled;
 };
@@ -1640,6 +1644,29 @@ static void tr_record_turn(struct tr_reactor *reactor,
 		else
 			stats->epoll_waits++;
 	}
+
+	if ((reactor->config.observability_flags & TR_OBSERVABILITY_TIMING) &&
+	    turn->start_ns != 0) {
+		uint64_t end_ns = tr_reactor_now_ns();
+		uint64_t busy_ns = 0;
+		uint64_t poll_ns = 0;
+
+		if (end_ns >= turn->start_ns) {
+			if (turn->polled && turn->poll_start_ns >= turn->start_ns &&
+			    turn->poll_end_ns >= turn->poll_start_ns &&
+			    end_ns >= turn->poll_end_ns) {
+				poll_ns = turn->poll_end_ns - turn->poll_start_ns;
+				busy_ns = (turn->poll_start_ns - turn->start_ns) +
+					  (end_ns - turn->poll_end_ns);
+			} else {
+				busy_ns = end_ns - turn->start_ns;
+			}
+
+			stats->busy_ns += busy_ns;
+			stats->poll_ns += poll_ns;
+			tr_observe_latency_ns(&stats->turn_busy_ns, busy_ns);
+		}
+	}
 }
 
 static void tr_drain_completions(struct tr_reactor *reactor)
@@ -1666,6 +1693,9 @@ static void *tr_reactor_thread_main(void *arg)
 	while (!reactor->stopping) {
 		struct tr_reactor_turn turn = { .left = reactor->stats.limits };
 		int commands_pending;
+
+		if (reactor->config.observability_flags & TR_OBSERVABILITY_TIMING)
+			turn.start_ns = tr_reactor_now_ns();
 		int completions_pending;
 		int timers_pending;
 		int count;
@@ -1691,8 +1721,12 @@ static void *tr_reactor_thread_main(void *arg)
 			turn.poll_timeout = tr_reactor_timer_timeout_ms(reactor);
 
 		turn.polled = 1;
+		if (reactor->config.observability_flags & TR_OBSERVABILITY_TIMING)
+			turn.poll_start_ns = tr_reactor_now_ns();
 		count = epoll_wait(reactor->epoll_fd, events,
 				   (int)TR_REACTOR_EVENT_BATCH, turn.poll_timeout);
+		if (reactor->config.observability_flags & TR_OBSERVABILITY_TIMING)
+			turn.poll_end_ns = tr_reactor_now_ns();
 		if (count < 0) {
 			int interrupted = errno == EINTR;
 
@@ -1815,6 +1849,9 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	if (config)
 		reactor->config = *config;
 	tr_default_config(&reactor->config);
+	if (reactor->config.observability_flags & ~TR_OBSERVABILITY_VALID_FLAGS)
+		return TR_ERR_INVALID;
+	reactor->stats.observability_flags = reactor->config.observability_flags;
 	reactor->stats.limits = (struct tr_reactor_work) {
 		.commands = TR_COMMAND_BATCH,
 		.completions = TR_COMPLETION_BATCH,
@@ -2533,11 +2570,30 @@ struct tr_reactor_stats_request {
 	struct tr_reactor_stats *out;
 };
 
+static void tr_reactor_snapshot_queues(struct tr_reactor *reactor,
+				       struct tr_reactor_stats *out)
+{
+	pthread_mutex_lock(&reactor->commands.lock);
+	out->command_queue.capacity = reactor->commands.capacity;
+	out->command_queue.current = reactor->commands.count;
+	out->command_queue.peak = reactor->commands.peak_count;
+	out->command_queue.full_events = reactor->commands.full_events;
+	pthread_mutex_unlock(&reactor->commands.lock);
+
+	pthread_mutex_lock(&reactor->completions.lock);
+	out->completion_queue.capacity = reactor->completions.capacity;
+	out->completion_queue.current = reactor->completions.count;
+	out->completion_queue.peak = reactor->completions.peak_count;
+	out->completion_queue.full_events = reactor->completions.full_events;
+	pthread_mutex_unlock(&reactor->completions.lock);
+}
+
 static int tr_reactor_stats_on_owner(void *arg)
 {
 	struct tr_reactor_stats_request *request = arg;
 
 	*request->out = request->reactor->stats;
+	tr_reactor_snapshot_queues(request->reactor, request->out);
 	return TR_OK;
 }
 
@@ -2553,6 +2609,7 @@ int tr_reactor_get_stats(struct tr_reactor *reactor, struct tr_reactor_stats *ou
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started) {
 		*out = reactor->stats;
+		tr_reactor_snapshot_queues(reactor, out);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_OK;
 	}
