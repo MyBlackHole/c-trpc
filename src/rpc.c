@@ -104,6 +104,8 @@ struct tr_rpc_call_slot {
 	int executor_overloaded;
 	int pending_control_is_final_status;
 	int pending_remote_half_close;
+	int close_notify_pending;
+	int close_notify_status;
 
 	int cancelled;
 	int cancel_status;
@@ -715,13 +717,6 @@ tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 	call->pending_executor_task_valid = 0;
 }
 
-static int
-tr_rpc_pending_is_server_close_locked(const struct tr_rpc_call_slot *call)
-{
-	return call && call->pending_executor_task_valid &&
-	       call->pending_executor_task.type == TR_RPC_TASK_SERVER_CLOSE;
-}
-
 static void tr_rpc_free_call_locked(struct tr_rpc_call_slot *call)
 {
 	uint32_t generation;
@@ -743,7 +738,8 @@ static void tr_rpc_maybe_free_call_locked(struct tr_rpc_call_slot *call)
 {
 	if (call && call->state == TR_RPC_CALL_TERMINAL &&
 	    call->task_refs == 0 && !call->pending_control &&
-	    !call->need_local_close && !call->pending_executor_task_valid)
+	    !call->need_local_close && !call->pending_executor_task_valid &&
+	    !call->close_notify_pending)
 		tr_rpc_free_call_locked(call);
 }
 
@@ -1673,69 +1669,104 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 		uint32_t slot =
 			(endpoint->pending_retry_cursor + n) % max_calls;
 		struct tr_rpc_call_slot *call = &endpoint->calls[slot];
-		struct tr_rpc_task task;
-		int ret;
+		int ret = TR_OK;
 
-		if (!call->pending_executor_task_valid)
-			continue;
+		/*
+		 * Per-Call RX/half-close work keeps precedence over the terminal
+		 * callback obligation. This preserves callback ordering.
+		 */
+		if (call->pending_executor_task_valid) {
+			struct tr_rpc_task task = call->pending_executor_task;
 
-		task = call->pending_executor_task;
-		if (call->state == TR_RPC_CALL_FREE ||
-		    task.call.generation != call->generation ||
-		    call->cancelled || call->admission_rejected ||
-		    (call->executor_overloaded &&
-		     task.type != TR_RPC_TASK_SERVER_CLOSE)) {
-			tr_rpc_drop_pending_executor_task_locked(call);
-			continue;
-		}
+			if (call->state == TR_RPC_CALL_FREE ||
+			    task.call.generation != call->generation ||
+			    call->cancelled || call->admission_rejected ||
+			    call->executor_overloaded) {
+				tr_rpc_drop_pending_executor_task_locked(call);
+			} else {
+				ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+				if (ret == TR_OK) {
+					int queue_half_close =
+						call->pending_remote_half_close &&
+						task.type ==
+							TR_RPC_TASK_SERVER_STREAM_MESSAGE;
 
-		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
-		if (ret == TR_OK) {
-			int queue_half_close = call->pending_remote_half_close &&
-				task.type == TR_RPC_TASK_SERVER_STREAM_MESSAGE;
+					memset(&call->pending_executor_task, 0,
+					       sizeof(call->pending_executor_task));
+					call->pending_executor_task_valid = 0;
+					endpoint->pending_retry_cursor =
+						(slot + 1U) % max_calls;
 
-			memset(&call->pending_executor_task, 0,
-			       sizeof(call->pending_executor_task));
-			call->pending_executor_task_valid = 0;
-			endpoint->pending_retry_cursor =
-				(slot + 1U) % max_calls;
+					if (queue_half_close) {
+						struct tr_rpc_task half_close;
 
-			/*
-			 * A remote half-close observed while this message was pending
-			 * must remain ordered after the message for the same Call.
-			 */
-			if (queue_half_close) {
-				struct tr_rpc_task half_close;
-
-				memset(&half_close, 0, sizeof(half_close));
-				half_close.type = TR_RPC_TASK_SERVER_HALF_CLOSE;
-				half_close.call =
-					tr_rpc_make_call_handle(endpoint, slot, call);
-				call->pending_remote_half_close = 0;
-				ret = tr_rpc_queue_task_locked(
-					endpoint, call, &half_close);
-				if (ret == TR_AGAIN)
-					ret = tr_rpc_store_pending_executor_task_locked(
-						endpoint, call, &half_close);
-				if (ret != TR_OK)
-					call->pending_remote_half_close = 0;
+						memset(&half_close, 0,
+						       sizeof(half_close));
+						half_close.type =
+							TR_RPC_TASK_SERVER_HALF_CLOSE;
+						half_close.call =
+							tr_rpc_make_call_handle(
+								endpoint, slot,
+								call);
+						call->pending_remote_half_close = 0;
+						ret = tr_rpc_queue_task_locked(
+							endpoint, call,
+							&half_close);
+						if (ret == TR_AGAIN)
+							ret =
+								tr_rpc_store_pending_executor_task_locked(
+									endpoint,
+									call,
+									&half_close);
+					}
+				} else if (ret != TR_AGAIN) {
+					tr_rpc_drop_pending_executor_task_locked(call);
+				}
 			}
-			continue;
-		}
-		if (ret == TR_AGAIN) {
-			endpoint->pending_executor_work = 1;
-			endpoint->pending_retry_cursor = slot;
-			break;
+
+			if (ret == TR_AGAIN) {
+				endpoint->pending_executor_work = 1;
+				endpoint->pending_retry_cursor = slot;
+				break;
+			}
 		}
 
-		/* Teardown/stale paths must never strand owned RX storage. */
-		tr_rpc_drop_pending_executor_task_locked(call);
+		if (!call->pending_executor_task_valid &&
+		    call->close_notify_pending) {
+			struct tr_rpc_task close_task;
+
+			if (call->state == TR_RPC_CALL_FREE || !call->method ||
+			    call->method->handler_kind !=
+				    TR_RPC_HANDLER_STREAM) {
+				call->close_notify_pending = 0;
+				continue;
+			}
+
+			memset(&close_task, 0, sizeof(close_task));
+			close_task.type = TR_RPC_TASK_SERVER_CLOSE;
+			close_task.call =
+				tr_rpc_make_call_handle(endpoint, slot, call);
+			close_task.status = call->close_notify_status;
+			ret = tr_rpc_queue_task_locked(endpoint, call,
+						       &close_task);
+			if (ret == TR_OK) {
+				call->close_notify_pending = 0;
+				endpoint->pending_retry_cursor =
+					(slot + 1U) % max_calls;
+			} else if (ret == TR_AGAIN) {
+				endpoint->pending_executor_work = 1;
+				endpoint->pending_retry_cursor = slot;
+				break;
+			} else {
+				/*
+				 * Executor teardown cannot deliver application
+				 * callbacks; do not keep a Call permanently pinned.
+				 */
+				call->close_notify_pending = 0;
+			}
+		}
 	}
 
-	/*
-	 * A break above is the normal full-queue case. If the complete scan
-	 * admitted/dropped everything, pending_executor_work stays clear.
-	 */
 	pthread_mutex_unlock(&endpoint->lock);
 	tr_rpc_endpoint_put(endpoint);
 }
@@ -2587,9 +2618,12 @@ static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
 		task.call = tr_rpc_make_call_handle(endpoint, slot, call);
 		task.status = status;
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
-		if (ret == TR_AGAIN && call->executor_overloaded)
-			ret = tr_rpc_store_pending_executor_task_locked(
-				endpoint, call, &task);
+		if (ret == TR_AGAIN && call->executor_overloaded) {
+			call->close_notify_pending = 1;
+			call->close_notify_status = status;
+			endpoint->pending_executor_work = 1;
+			ret = TR_OK;
+		}
 	}
 
 	if (ret == TR_OK) {
@@ -3303,9 +3337,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 						       TR_RPC_STATUS_UNAVAILABLE);
 
 		call->deadline_ns = 0;
-		if (!(call->executor_overloaded &&
-		      tr_rpc_pending_is_server_close_locked(call)))
-			tr_rpc_drop_pending_executor_task_locked(call);
+		tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
 			if (call->pending_control) {
 				tr_buffer_release(call->pending_control);
@@ -3339,7 +3371,8 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			   call->method->handler_kind ==
 				   TR_RPC_HANDLER_STREAM &&
 			   !call->terminal_notified &&
-			   !call->admission_rejected) {
+			   !call->admission_rejected &&
+			   !call->executor_overloaded) {
 			task.type = TR_RPC_TASK_SERVER_CLOSE;
 			task.call =
 				tr_rpc_make_call_handle(endpoint, slot, call);
@@ -3388,9 +3421,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 			continue;
 
 		call->deadline_ns = 0;
-		if (!(call->executor_overloaded &&
-		      tr_rpc_pending_is_server_close_locked(call)))
-			tr_rpc_drop_pending_executor_task_locked(call);
+		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
 		call->local_closed = 1;
