@@ -20,7 +20,15 @@ COUNTS = ("attempted", "accepted", "completed", "ok", "submit_again",
           "submit_errors", "deadlines", "rpc_errors", "invalid_responses")
 
 SERVER_OBS_INT = (
-    "reactor_busy_ns", "reactor_poll_ns", "command_queue_capacity",
+    "reactor_busy_ns", "reactor_poll_ns", "reactor_turns",
+    "command_budget_limit", "command_processed_total",
+    "command_max_per_turn", "command_budget_hits",
+    "epoll_polls", "epoll_waits",
+    "command_send_enqueued", "command_send_full",
+    "command_resume_rx_enqueued", "command_resume_rx_full",
+    "command_call_enqueued", "command_call_full",
+    "command_other_enqueued", "command_other_full",
+    "command_queue_capacity",
     "command_queue_peak",
     "completion_queue_peak", "command_queue_full_events",
     "completion_queue_full_events", "rx_pool_capacity", "rx_pool_peak",
@@ -56,6 +64,14 @@ def validate_server_exit(row: dict[str, Any]) -> None:
         raise ValueError("server reactor_busy_ratio is outside 0..1")
     if row["reactor_busy_ns"] + row["reactor_poll_ns"] == 0:
         raise ValueError("server timing observability was not populated")
+    if row["command_budget_limit"] == 0:
+        raise ValueError("server command budget is zero")
+    if row["command_max_per_turn"] > row["command_budget_limit"]:
+        raise ValueError("server command max exceeds configured turn budget")
+    if (row["command_send_full"] + row["command_resume_rx_full"] +
+            row["command_call_full"] + row["command_other_full"] !=
+            row["command_queue_full_events"]):
+        raise ValueError("server command full attribution mismatch")
     if row["peers_ready_total"] == 0:
         raise ValueError("server observed no ready peer")
 
