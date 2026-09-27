@@ -63,6 +63,11 @@ struct tr_reactor_work {
 	uint64_t tx_dispatches;
 };
 
+struct tr_reactor_command_observation {
+	uint64_t enqueued;
+	uint64_t full_events;
+};
+
 struct tr_reactor_stats {
 	uint64_t turns;
 	struct tr_reactor_work limits;
@@ -81,6 +86,12 @@ struct tr_reactor_stats {
 	/* Bounded queue pressure snapshots; full_events are producer failures. */
 	struct tr_queue_observation command_queue;
 	struct tr_queue_observation completion_queue;
+
+	/* Producer-side attribution for command queue pressure. */
+	struct tr_reactor_command_observation command_send;
+	struct tr_reactor_command_observation command_resume_rx;
+	struct tr_reactor_command_observation command_call;
+	struct tr_reactor_command_observation command_other;
 
 	/* Bounded transport pools. */
 	struct tr_pool_observation rx_buffer_pool;

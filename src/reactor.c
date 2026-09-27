@@ -2597,6 +2597,14 @@ static void tr_reactor_snapshot_resources(struct tr_reactor *reactor,
 	out->command_queue.current = reactor->commands.count;
 	out->command_queue.peak = reactor->commands.peak_count;
 	out->command_queue.full_events = reactor->commands.full_events;
+	out->command_send.enqueued = reactor->commands.pushed_send;
+	out->command_send.full_events = reactor->commands.full_send;
+	out->command_resume_rx.enqueued = reactor->commands.pushed_resume_rx;
+	out->command_resume_rx.full_events = reactor->commands.full_resume_rx;
+	out->command_call.enqueued = reactor->commands.pushed_call;
+	out->command_call.full_events = reactor->commands.full_call;
+	out->command_other.enqueued = reactor->commands.pushed_other;
+	out->command_other.full_events = reactor->commands.full_other;
 	pthread_mutex_unlock(&reactor->commands.lock);
 
 	pthread_mutex_lock(&reactor->completions.lock);

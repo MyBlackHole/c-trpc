@@ -70,6 +70,17 @@ struct tr_command_queue {
 	uint32_t count;
 	uint32_t peak_count;
 	uint64_t full_events;
+
+	/* Producer-side attribution, updated under the existing queue lock. */
+	uint64_t pushed_send;
+	uint64_t full_send;
+	uint64_t pushed_resume_rx;
+	uint64_t full_resume_rx;
+	uint64_t pushed_call;
+	uint64_t full_call;
+	uint64_t pushed_other;
+	uint64_t full_other;
+
 	int wake_pending;
 };
 

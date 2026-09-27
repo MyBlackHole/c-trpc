@@ -93,7 +93,14 @@ class AccountingTests(unittest.TestCase):
         server = dict(
             type="server_exit", drain_status=0, cpu_s=0.1,
             peak_rss_kib=1024, reactor_busy_ratio=0.5,
-            reactor_busy_ns=100, reactor_poll_ns=100,
+            reactor_busy_ns=100, reactor_poll_ns=100, reactor_turns=10,
+            command_budget_limit=64, command_processed_total=20,
+            command_max_per_turn=4, command_budget_hits=0,
+            epoll_polls=2, epoll_waits=8,
+            command_send_enqueued=10, command_send_full=0,
+            command_resume_rx_enqueued=5, command_resume_rx_full=0,
+            command_call_enqueued=3, command_call_full=0,
+            command_other_enqueued=2, command_other_full=0,
             command_queue_capacity=8, command_queue_peak=2,
             completion_queue_peak=3,
             command_queue_full_events=0, completion_queue_full_events=0,
@@ -116,6 +123,14 @@ class AccountingTests(unittest.TestCase):
             validate_server_exit(broken)
         broken = copy.deepcopy(server)
         broken["rpc_queue_wait_p99_us"] = float("nan")
+        with self.assertRaises(ValueError):
+            validate_server_exit(broken)
+        broken = copy.deepcopy(server)
+        broken["command_max_per_turn"] = 65
+        with self.assertRaises(ValueError):
+            validate_server_exit(broken)
+        broken = copy.deepcopy(server)
+        broken["command_send_full"] = 1
         with self.assertRaises(ValueError):
             validate_server_exit(broken)
         broken = copy.deepcopy(server)

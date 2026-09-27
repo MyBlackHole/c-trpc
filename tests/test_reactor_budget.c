@@ -293,6 +293,11 @@ static void check_stats(const struct tr_reactor_stats *stats, uint32_t budget)
 	assert(stats->command_queue.capacity == 512U);
 	assert(stats->command_queue.current <= stats->command_queue.capacity);
 	assert(stats->command_queue.peak <= stats->command_queue.capacity);
+	assert(stats->command_send.full_events +
+	       stats->command_resume_rx.full_events +
+	       stats->command_call.full_events +
+	       stats->command_other.full_events ==
+	       stats->command_queue.full_events);
 	assert(stats->completion_queue.capacity == 512U);
 	assert(stats->completion_queue.current <= stats->completion_queue.capacity);
 	assert(stats->completion_queue.peak <= stats->completion_queue.capacity);
