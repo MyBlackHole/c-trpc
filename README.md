@@ -54,6 +54,14 @@ A Channel can run in:
 The transport/RPC core performs no normal filesystem I/O and contains no backup-specific commit/storage semantics.
 
 
+## Runtime observability
+
+The core exposes allocation-free structured runtime snapshots for bottleneck
+attribution. Queue counters/high-water marks are always collected; monotonic
+timing histograms are opt-in with `TR_OBSERVABILITY_TIMING` so production
+defaults do not add timing reads to scheduling hot paths. See
+[`docs/observability.md`](docs/observability.md).
+
 ## High-level Client / Server facade
 
 The library now includes a first high-level facade for applications that do not
