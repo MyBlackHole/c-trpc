@@ -383,6 +383,8 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		server->config.limits.executor_queue_capacity;
 	rpc_config.executor_continuation_reserve =
 		server->config.limits.executor_continuation_reserve;
+	rpc_config.observability_flags =
+		server->config.limits.observability_flags;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		peer->channel, &rpc_config, server->rpc_executor_group,
@@ -547,6 +549,8 @@ int tr_server_create(const struct tr_server_config *config,
 			UINT32_MAX :
 			effective.limits.max_frame_payload_bytes * 4U;
 	reactor_config.tx_budget_bytes = reactor_config.rx_budget_bytes;
+	reactor_config.observability_flags =
+		effective.limits.observability_flags;
 
 	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 				&server->reactor);
