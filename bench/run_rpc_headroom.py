@@ -239,6 +239,14 @@ def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
             "rpc_message_pool_count": args.headroom_rpc_message_pool,
             "reassembly_pool_count": args.headroom_reassembly_pool,
         },
+        "command_ceiling_headroom": {
+            "rx_buffer_count": args.ceiling_rx_buffers,
+            "executor_queue": args.ceiling_executor_queue,
+            "control_tx_item_count": args.ceiling_control_tx_items,
+            "command_capacity": args.ceiling_command_capacity,
+            "rpc_message_pool_count": args.headroom_rpc_message_pool,
+            "reassembly_pool_count": args.headroom_reassembly_pool,
+        },
         "max_generators": args.max_generators,
         "target_rate_per_generator": args.target_rate_per_generator,
         "min_arrival_ms": args.min_arrival_ms,
@@ -296,6 +304,8 @@ def validate_args(parser: argparse.ArgumentParser,
         parser.error("ceiling-rx-buffers must be >= full-headroom-rx-buffers")
     if not 1 <= args.headroom_command_capacity <= 65536:
         parser.error("headroom-command-capacity must be in 1..65536")
+    if not args.headroom_command_capacity <= args.ceiling_command_capacity <= 65536:
+        parser.error("ceiling-command-capacity must be >= headroom command capacity")
     if (args.headroom_rx_buffers == 0 and
             args.headroom_control_tx_items == 0 and
             args.headroom_rpc_message_pool == 0 and
@@ -332,6 +342,7 @@ def main() -> int:
     parser.add_argument("--headroom-control-tx-items", type=int, default=2048)
     parser.add_argument("--ceiling-control-tx-items", type=int, default=8192)
     parser.add_argument("--headroom-command-capacity", type=int, default=4096)
+    parser.add_argument("--ceiling-command-capacity", type=int, default=16384)
     parser.add_argument("--headroom-rpc-message-pool", type=int, default=0)
     parser.add_argument("--headroom-reassembly-pool", type=int, default=0)
     parser.add_argument("--smoke", action="store_true")
@@ -355,6 +366,7 @@ def main() -> int:
         args.headroom_control_tx_items = 256
         args.ceiling_control_tx_items = 512
         args.headroom_command_capacity = 2048
+        args.ceiling_command_capacity = 4096
     validate_args(parser, args)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -385,6 +397,10 @@ def main() -> int:
         ("executor_ceiling_headroom", args.ceiling_rx_buffers,
          args.ceiling_executor_queue, args.ceiling_control_tx_items,
          args.headroom_command_capacity,
+         args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
+        ("command_ceiling_headroom", args.ceiling_rx_buffers,
+         args.ceiling_executor_queue, args.ceiling_control_tx_items,
+         args.ceiling_command_capacity,
          args.headroom_rpc_message_pool, args.headroom_reassembly_pool),
     )
     profile_results: dict[str, list[dict[str, Any]]] = {}
@@ -493,6 +509,10 @@ def main() -> int:
                 profile_results["control_ceiling_headroom"],
                 profile_results["executor_ceiling_headroom"],
                 "control_ceiling_headroom", "executor_ceiling_headroom"),
+            compare_profiles(
+                profile_results["executor_ceiling_headroom"],
+                profile_results["command_ceiling_headroom"],
+                "executor_ceiling_headroom", "command_ceiling_headroom"),
         )
         for comparison in comparisons:
             output.write(json.dumps(comparison, allow_nan=False) + "\n")

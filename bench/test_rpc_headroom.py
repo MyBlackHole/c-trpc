@@ -204,6 +204,29 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(
             comparison["executor_hard_full_removed_rates"], [40000])
 
+    def test_compare_reports_removed_command_ceiling_full(self):
+        before = [
+            result(20000, 8192, control_capacity=8192,
+                   command_capacity=4096, executor_queue=1024),
+            result(40000, 8192, control_capacity=8192,
+                   command_capacity=4096, command_full=41,
+                   executor_queue=1024,
+                   signals=["reactor_command_queue_full"]),
+        ]
+        after = [
+            result(20000, 8192, control_capacity=8192,
+                   command_capacity=16384, executor_queue=1024),
+            result(40000, 8192, control_capacity=8192,
+                   command_capacity=16384, executor_queue=1024),
+        ]
+        comparison = compare_profiles(
+            before, after,
+            "executor_ceiling_headroom", "command_ceiling_headroom")
+        self.assertEqual(comparison["before_command_capacity"], 4096)
+        self.assertEqual(comparison["after_command_capacity"], 16384)
+        self.assertEqual(comparison["command_full_removed_rates"], [40000])
+        self.assertEqual(comparison["command_full_persisted_rates"], [])
+
     def test_compare_requires_matching_rates(self):
         with self.assertRaises(ValueError):
             compare_profiles(

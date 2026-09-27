@@ -1,7 +1,7 @@
 """Tests for repeated high-rate wall classification."""
 import unittest
 
-from run_rpc_repeatability import summarize
+from run_rpc_repeatability import PROFILE_SPECS, summarize
 
 
 def result(ok_rps=39000.0, busy=0.3, signals=None,
@@ -49,6 +49,16 @@ def result(ok_rps=39000.0, busy=0.3, signals=None,
 
 
 class RepeatabilityTests(unittest.TestCase):
+    def test_command_ceiling_profile_changes_only_command_capacity(self):
+        base = PROFILE_SPECS["ceiling_headroom"]
+        ceiling = PROFILE_SPECS["command_ceiling_headroom"]
+        self.assertEqual(ceiling["rx_buffer_count"], base["rx_buffer_count"])
+        self.assertEqual(ceiling["executor_queue"], base["executor_queue"])
+        self.assertEqual(
+            ceiling["control_tx_item_count"], base["control_tx_item_count"])
+        self.assertEqual(base["command_capacity"], 4096)
+        self.assertEqual(ceiling["command_capacity"], 16384)
+
     def test_summary_counts_recurrent_and_transient_walls(self):
         rows = [
             result(39500.0, 0.29),
