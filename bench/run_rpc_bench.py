@@ -21,10 +21,13 @@ COUNTS = ("attempted", "accepted", "completed", "ok", "submit_again",
 
 SERVER_OBS_INT = (
     "reactor_busy_ns", "reactor_poll_ns", "command_queue_peak",
-    "completion_queue_peak", "rx_pool_peak", "tx_pool_peak",
-    "control_tx_pool_peak", "rpc_queue_peak_per_peer",
-    "rpc_admission_limit_hits", "rpc_hard_full_events",
-    "rpc_message_pool_peak", "reassembly_pool_peak",
+    "completion_queue_peak", "command_queue_full_events",
+    "completion_queue_full_events", "rx_pool_peak", "tx_pool_peak",
+    "control_tx_pool_peak", "rx_pool_exhausted_events",
+    "tx_pool_exhausted_events", "control_tx_pool_exhausted_events",
+    "rpc_queue_peak_per_peer", "rpc_admission_limit_hits",
+    "rpc_hard_full_events", "rpc_message_pool_peak", "reassembly_pool_peak",
+    "rpc_message_pool_exhausted_events", "reassembly_pool_exhausted_events",
     "peers_ready_total", "peers_reaped_total",
 )
 SERVER_OBS_FLOAT = (

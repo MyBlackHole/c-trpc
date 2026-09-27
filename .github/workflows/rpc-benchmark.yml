@@ -71,11 +71,20 @@ jobs:
               --output "$results/$portable-open.jsonl"
           done
           if [ "${{ matrix.cc }}" = gcc ] && [ "${{ matrix.mode }}" = release ]; then
+            # Architecture diagnostics use the normal runtime CRC dispatch build,
+            # not a sanitizer or forced-portable binary.
+            xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable=n
+            xmake build -v bench_rpc
             python3 bench/run_rpc_capacity.py \
               --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
               --trials 1 --requests 128 \
               --label "gcc-release-capacity-curve" \
               --output "$results/capacity-curve.jsonl"
+            python3 bench/run_rpc_scalability.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --trials 1 --requests 128 \
+              --label "gcc-release-scalability-matrix" \
+              --output "$results/scalability-matrix.jsonl"
           fi
       - name: Preserve exact source and benchmark diagnostics
         if: always()

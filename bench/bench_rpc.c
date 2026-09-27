@@ -311,8 +311,13 @@ static int run_server(const struct options *o)
 		       "\"reactor_busy_ratio\":%.9f,"
 		       "\"reactor_busy_ns\":%" PRIu64 ",\"reactor_poll_ns\":%" PRIu64 ","
 		       "\"command_queue_peak\":%u,\"completion_queue_peak\":%u,"
+		       "\"command_queue_full_events\":%" PRIu64 ","
+		       "\"completion_queue_full_events\":%" PRIu64 ","
 		       "\"rx_pool_peak\":%u,\"tx_pool_peak\":%u,"
 		       "\"control_tx_pool_peak\":%u,"
+		       "\"rx_pool_exhausted_events\":%" PRIu64 ","
+		       "\"tx_pool_exhausted_events\":%" PRIu64 ","
+		       "\"control_tx_pool_exhausted_events\":%" PRIu64 ","
 		       "\"rpc_queue_peak_per_peer\":%u,"
 		       "\"rpc_admission_limit_hits\":%" PRIu64 ","
 		       "\"rpc_hard_full_events\":%" PRIu64 ","
@@ -320,6 +325,8 @@ static int run_server(const struct options *o)
 		       "\"rpc_handler_p99_us\":%.3f,"
 		       "\"rpc_message_pool_peak\":%u,"
 		       "\"reassembly_pool_peak\":%u,"
+		       "\"rpc_message_pool_exhausted_events\":%" PRIu64 ","
+		       "\"reassembly_pool_exhausted_events\":%" PRIu64 ","
 		       "\"peers_ready_total\":%" PRIu64 ","
 		       "\"peers_reaped_total\":%" PRIu64 "}\n",
 		       status, cpu_seconds(&usage_after), usage_after.ru_maxrss,
@@ -327,15 +334,22 @@ static int run_server(const struct options *o)
 		       stats.reactor.poll_ns,
 		       stats.reactor.command_queue.peak,
 		       stats.reactor.completion_queue.peak,
+		       stats.reactor.command_queue.full_events,
+		       stats.reactor.completion_queue.full_events,
 		       stats.reactor.rx_buffer_pool.peak,
 		       stats.reactor.tx_item_pool.peak,
 		       stats.reactor.control_tx_item_pool.peak,
+		       stats.reactor.rx_buffer_pool.exhausted_events,
+		       stats.reactor.tx_item_pool.exhausted_events,
+		       stats.reactor.control_tx_item_pool.exhausted_events,
 		       stats.rpc.executor_queue_peak_max_per_endpoint,
 		       stats.rpc.executor_admission_limit_hits,
 		       stats.rpc.executor_hard_full_events,
 		       queue_wait_p99_us, handler_p99_us,
 		       stats.rpc_message_pool.peak,
 		       stats.reassembly_pool.peak,
+		       stats.rpc_message_pool.exhausted_events,
+		       stats.reassembly_pool.exhausted_events,
 		       stats.peers_ready_total, stats.peers_reaped_total);
 	}
 	tr_server_destroy(server);
