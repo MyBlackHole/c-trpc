@@ -443,23 +443,31 @@ shown.
 The fixed-rate scalability tools can distribute one total offered rate across
 multiple independent Client processes. More generators reduce each Client's
 local scheduling rate, but every extra process also consumes scheduler time,
-memory and CPU on the same shared runner as the Server. Therefore "more
-generators" is not monotonically better.
+memory and CPU on the same shared runner as the Server.
 
-`run_rpc_fanout.py` holds the Server resource profile fixed with diagnostic
-headroom and changes only generator process count. The default 40k sweep is:
+A fanout experiment must also keep **aggregate Client in-flight capacity**
+constant. Otherwise changing process count changes two variables at once:
+process fanout and total available Client slots.
+
+`run_rpc_fanout.py` therefore fixes total generator window/capacity at 1024
+slots by default and divides those slots across the selected fanout:
 
 ```text
-total offered rate:   40000 RPC/s
-fanout:               4 / 8 / 16 / 32 Clients
-per-generator rate:   10000 / 5000 / 2500 / 1250 RPC/s
-generator workers:    1
-generator window:     256
-RX buffers:           8192
-executor queue:       1024
-CONTROL TX items:     8192
-command queue:        16384
+total offered rate:        40000 RPC/s
+fanout:                    4 / 8 / 16 / 32 Clients
+per-generator rate:        10000 / 5000 / 2500 / 1250 RPC/s
+aggregate generator slots: 1024 in every case
+per-generator slots:       256 / 128 / 64 / 32
+generator workers:         1
+RX buffers:                8192
+executor queue:            1024
+CONTROL TX items:          8192
+command queue:             16384
 ```
+
+Both generator window and generator capacity use the same per-generator slot
+count. The aggregate slot count must divide every requested fanout exactly and
+each Client must stay within the benchmark's 1..256 slot bound.
 
 Two trials run the fanouts in opposite orders. This reduces fixed-order bias
 from runner warmup, throttling or transient host contention.
@@ -468,12 +476,14 @@ from runner warmup, throttling or transient host contention.
 python3 bench/run_rpc_fanout.py \
   --binary build/linux/x86_64/release/bench_rpc \
   --trials 2 --rate 40000 --fanouts 4,8,16,32 \
+  --aggregate-generator-slots 1024 \
   --output /tmp/rpc-bench/generator-fanout-40k.jsonl
 ```
 
 Each fanout summary keeps generator pressure separate from Server pressure and
 reports:
 
+- per-generator and aggregate slot controls used by the case;
 - clean, generator-drop, generator-late and exact-Server-pressure trial counts;
 - accepted/offered fraction and successful RPC/s range;
 - scheduler P99 lateness and dropped-arrival counts;
@@ -481,12 +491,27 @@ reports:
 - Reactor busy ratio;
 - command queue and CONTROL TX peak occupancy.
 
-The purpose is benchmark fidelity, not selecting a production queue size. A
-fanout that lowers local scheduler lateness but materially increases aggregate
-Client CPU/RSS or reduces Server CPU availability can make a shared-runner
-capacity result less trustworthy. Architecture or production-default changes
-should only use Server bottlenecks that remain stable after generator pressure
-has been separated.
+#### PR #48 initial sweep and confound
+
+The first fanout sweep in PR #48 held **per-Client** window/capacity at 256.
+That meant aggregate Client slots grew with fanout:
+
+- 4 generators: 1024 slots;
+- 8 generators: 2048 slots;
+- 16 generators: 4096 slots;
+- 32 generators: 8192 slots.
+
+All eight cases had zero exact Server pressure, while median accepted/offered
+fraction rose from about 0.60 at fanout 4 to about 0.91 at fanout 32. That trend
+cannot be attributed to process fanout because total Client concurrency grew by
+8x at the same time. The result is retained as evidence that generator-side
+capacity matters, not as evidence that 32 processes are intrinsically better.
+
+The corrected constant-slot sweep is the experiment that can isolate process
+fanout. Its purpose is benchmark fidelity, not selecting a production queue
+size. Architecture or production-default changes should only use Server
+bottlenecks that remain stable after generator scheduling pressure and
+generator in-flight capacity have both been controlled.
 
 ### Streaming continuation reserve
 
