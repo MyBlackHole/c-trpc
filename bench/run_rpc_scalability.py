@@ -133,9 +133,12 @@ def aggregate_client_rows(rows: list[dict[str, Any]],
 def run_multisource_case(binary: Path, case: dict[str, Any],
                          output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
+    server_common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
+    generator_capacity = case.get("generator_capacity", case["capacity"])
+    generator_window = case.get("generator_window", case["window"])
+    client_common = ["--capacity", str(generator_capacity), "--bulk-bytes", "65536"]
     server_cmd = [
-        str(binary), "server", *common,
+        str(binary), "server", *server_common,
         "--workers", str(case["workers"]),
         "--slow-ms", str(case["slow_ms"]),
         "--executor-queue", str(case["executor_queue"]),
@@ -169,10 +172,10 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
         for index, (rate, requests, warmup) in enumerate(
                 zip(generator_rates, request_counts, warmups)):
             cmd = [
-                str(binary), "client", *common,
+                str(binary), "client", *client_common,
                 "--port", str(ready["port"]),
                 "--workers", str(case.get("generator_workers", 1)),
-                "--window", str(case["window"]),
+                "--window", str(generator_window),
                 "--scenario", "open",
                 "--requests", str(requests),
                 "--warmup", str(warmup),
@@ -220,7 +223,7 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
             row = rows[0]
             if row.get("pid") != client.pid:
                 raise ValueError("wrong generator identity")
-            validate_open_phase(row, requests, rate, case["window"])
+            validate_open_phase(row, requests, rate, generator_window)
             client_rows.append(row)
 
         server_stdout, _ = server.communicate(timeout=30)
