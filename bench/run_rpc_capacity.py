@@ -13,7 +13,7 @@ import time
 from typing import Any, TextIO
 
 from run_rpc_bench import metadata as closed_loop_metadata
-from run_rpc_bench import read_ready, stop_owned
+from run_rpc_bench import read_ready, stop_owned, validate_server_exit
 
 
 OPEN_COUNTS = ("offered", "scheduler_dropped", "attempted", "accepted",
@@ -142,8 +142,7 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
         if server.returncode:
             raise RuntimeError(f"server exited {server.returncode}; see {output_dir}")
         exit_row = json.loads(server_stdout)
-        if exit_row.get("type") != "server_exit" or exit_row.get("drain_status") != 0:
-            raise ValueError("server did not drain normally")
+        validate_server_exit(exit_row)
 
         return {"type": "capacity_case", "case": case,
                 "nominal_handler_capacity_rps":
