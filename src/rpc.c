@@ -3722,7 +3722,8 @@ static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
 		tr_rpc_endpoint_release(endpoint);
 }
 
-void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
+void tr_rpc_endpoint_destroy_with_stats(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
 {
 	if (!endpoint)
 		return;
@@ -3738,8 +3739,20 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_executor_shutdown(endpoint);
 	tr_rpc_endpoint_wait_owner_only(endpoint);
 
+	/*
+	 * All task references are gone, so this captures final executor counters
+	 * and histograms rather than a pre-drain approximation.
+	 */
+	if (stats)
+		(void)tr_rpc_endpoint_get_stats(endpoint, stats);
+
 	/* 释放 owner 创建时持有的初始强引用；此处必须是最后一次 put。 */
 	tr_rpc_endpoint_put(endpoint);
+}
+
+void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
+{
+	tr_rpc_endpoint_destroy_with_stats(endpoint, NULL);
 }
 
 static int tr_rpc_validate_method(const struct tr_rpc_method_desc *method)
