@@ -803,27 +803,37 @@ static int run_client(const struct options *o)
 		run.window = measure_window;
 	}
 	if (status == EXIT_SUCCESS && o->start_gate) {
-		char gate[96];
+		int gate_kind;
 
 		printf("{\"type\":\"client_ready\",\"pid\":%ld}\n", (long)getpid());
 		fflush(stdout);
-		if (!fgets(gate, sizeof(gate), stdin)) {
+		gate_kind = getchar();
+		if (gate_kind == EOF) {
 			fputs("client start gate was not released\n", stderr);
 			status = EXIT_FAILURE;
-		} else if (gate[0] == 'g') {
+		} else if (gate_kind == 'g') {
 			run.scheduled_begin_ns = 0;
-		} else if (gate[0] == 't' && gate[1] == ':') {
+		} else if (gate_kind == 't') {
+			char timestamp[94];
 			char *end = NULL;
 			unsigned long long value;
 
-			errno = 0;
-			value = strtoull(gate + 2, &end, 10);
-			if (errno || end == gate + 2 ||
-			    (*end != '\n' && *end != '\0') || value == 0) {
-				fputs("client start gate timestamp was invalid\n", stderr);
+			if (getchar() != ':' ||
+			    !fgets(timestamp, sizeof(timestamp), stdin)) {
+				fputs("client start gate timestamp was incomplete\n",
+				      stderr);
 				status = EXIT_FAILURE;
 			} else {
-				run.scheduled_begin_ns = (uint64_t)value;
+				errno = 0;
+				value = strtoull(timestamp, &end, 10);
+				if (errno || end == timestamp ||
+				    (*end != '\n' && *end != '\0') || value == 0) {
+					fputs("client start gate timestamp was invalid\n",
+					      stderr);
+					status = EXIT_FAILURE;
+				} else {
+					run.scheduled_begin_ns = (uint64_t)value;
+				}
 			}
 		} else {
 			fputs("client start gate was invalid\n", stderr);
