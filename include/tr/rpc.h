@@ -6,6 +6,7 @@
 
 #include "tr/buffer.h"
 #include "tr/channel.h"
+#include "tr/observability.h"
 #include "tr/rpc_codec.h"
 
 #ifdef __cplusplus
@@ -185,6 +186,9 @@ struct tr_rpc_endpoint_config {
 	 * executor node。reserve 必须严格小于最终 queue capacity。
 	 */
 	uint32_t executor_continuation_reserve;
+
+	/* TR_OBSERVABILITY_* flags; timing is opt-in to protect worker hot paths. */
+	uint32_t observability_flags;
 };
 
 struct tr_rpc_endpoint_stats {
@@ -200,6 +204,19 @@ struct tr_rpc_endpoint_stats {
 	uint32_t executor_running_tasks;
 	uint32_t executor_queue_capacity;
 	uint32_t executor_continuation_reserve;
+
+	/* Same capacity/current/peak/full semantics as Reactor bounded queues. */
+	struct tr_queue_observation executor_queue;
+	uint32_t executor_ready_calls;
+	uint32_t executor_ready_calls_peak;
+	uint32_t observability_flags;
+
+	uint64_t executor_enqueued_tasks;
+	uint64_t executor_taken_tasks;
+	uint64_t executor_admission_limit_hits;
+	uint64_t executor_hard_full_events;
+	struct tr_latency_histogram executor_queue_wait_ns;
+	struct tr_latency_histogram executor_handler_ns;
 
 	uint64_t calls_started;
 	uint64_t calls_completed;
