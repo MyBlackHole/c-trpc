@@ -189,7 +189,11 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
             clients.append(client)
             client_cmds.append(cmd)
 
-        for client in clients:
+            # Warmup is not part of the offered-load experiment. Let each
+            # generator finish its window=1 warmup before starting the next,
+            # otherwise generator fanout can turn warmup itself into a
+            # saturation workload. Measurement still starts synchronously
+            # below, after every Client has reached the start gate.
             read_ready(client, "client_ready", timeout=30)
 
         common_start_ns = time.monotonic_ns() + 500_000_000
