@@ -66,13 +66,16 @@ class HeadroomTests(unittest.TestCase):
     def test_compare_reports_removed_rx_exhaustion(self):
         baseline = [
             result(10000, 272),
-            result(20000, 272, 3, ["rx_pool_exhausted"]),
-            result(40000, 272, 8, ["rx_pool_exhausted"]),
+            result(20000, 272, rx_exhausted=3,
+                   signals=["rx_pool_exhausted"]),
+            result(40000, 272, rx_exhausted=8,
+                   signals=["rx_pool_exhausted"]),
         ]
         headroom = [
             result(10000, 1024),
             result(20000, 1024),
-            result(40000, 1024, 2, ["rx_pool_exhausted"]),
+            result(40000, 1024, rx_exhausted=2,
+                   signals=["rx_pool_exhausted"]),
         ]
         comparison = compare_profiles(
             baseline, headroom, "baseline", "rx_headroom")
