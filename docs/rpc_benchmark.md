@@ -170,6 +170,50 @@ B 的第二个 pending continuation 超过每 Call 上限后得到
 容量工具分别统计 `resource_exhausted` 与 `unavailable`，两者都必须是
 `rpc_errors` 的子集，不能相互冒充。
 
+### Worker / handler scalability attribution matrix
+
+`run_rpc_scalability.py` reuses the same fixed-rate arrival accounting but
+varies Server worker count and controlled handler cost. Its default matrix is:
+
+```text
+workers:    1, 2, 4, 8
+handler_ms: 0, 1, 10
+executor:   64 nodes
+window:     128
+```
+
+For nonzero handler delays, offered rates are generated from the handler-only
+arithmetic `workers * 1000 / handler_ms` at 0.5x/1x/2x/4x. For the 0 ms
+handler there is no meaningful handler-only capacity formula, so the default
+offered rates are explicit: 1000/5000/10000/20000 RPS.
+
+```sh
+python3 bench/run_rpc_scalability.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --trials 1 --requests 256 \
+  --workers 1,2,4,8 --handler-ms 0,1,10 \
+  --executor-queue 64 --window 128 --capacity 128 \
+  --output /tmp/rpc-bench/scalability.jsonl
+```
+
+Every rate point retains the full Client and Server diagnostic records. Each
+`(workers, handler_ms)` group also emits a `scalability_summary` with the
+highest offered rate that completed without submission/RPC/resource-exhaustion
+evidence, the first rate with an exact Server pressure event, the first
+load-generator drop rate, and maxima for Reactor busy ratio and executor
+queue-wait/handler P99.
+
+The tool intentionally does **not** turn a Reactor-busy percentage or a latency
+value into an automatic architecture verdict. Exact wall signals come from
+observable events: executor admission/hard-full, Reactor command/completion
+queue full, or RX/TX/RPC-message/reassembly pool exhaustion. Scheduler drops
+are reported separately so a Python load generator ceiling cannot be mistaken
+for a Server ceiling.
+
+The GCC release CI job records one full matrix with normal runtime CRC dispatch
+as a diagnostic artifact. It has no throughput, scaling-efficiency, P99, or
+busy-ratio pass/fail threshold.
+
 ### Streaming continuation reserve
 
 Server RPC Endpoint 额外提供 opt-in 的
