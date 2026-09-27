@@ -1,7 +1,11 @@
 """Tests for generator fanout sensitivity summaries."""
 import unittest
 
-from run_rpc_fanout import summarize_fanout, trial_order
+from run_rpc_fanout import (
+    slots_per_generator,
+    summarize_fanout,
+    trial_order,
+)
 
 
 PRESSURE_KEYS = (
@@ -53,6 +57,8 @@ def result(generators=8, offered=10000, accepted=10000,
             "rate_rps": 40000,
             "generators": generators,
             "executor_queue": 1024,
+            "generator_window": 1024 // generators,
+            "generator_capacity": 1024 // generators,
         },
         "server_exit": server,
         "client": client,
@@ -61,6 +67,16 @@ def result(generators=8, offered=10000, accepted=10000,
 
 
 class FanoutTests(unittest.TestCase):
+    def test_slots_per_generator_keeps_total_constant(self):
+        self.assertEqual(slots_per_generator(1024, 4), 256)
+        self.assertEqual(slots_per_generator(1024, 8), 128)
+        self.assertEqual(slots_per_generator(1024, 16), 64)
+        self.assertEqual(slots_per_generator(1024, 32), 32)
+        with self.assertRaises(ValueError):
+            slots_per_generator(1000, 32)
+        with self.assertRaises(ValueError):
+            slots_per_generator(1024, 2)
+
     def test_trial_order_alternates_to_reduce_order_bias(self):
         fanouts = [32, 4, 16, 8]
         self.assertEqual(trial_order(fanouts, 1), [4, 8, 16, 32])
@@ -76,6 +92,8 @@ class FanoutTests(unittest.TestCase):
         ]
         summary = summarize_fanout(16, rows)
         self.assertEqual(summary["trials"], 2)
+        self.assertEqual(summary["per_generator_slots"], 64)
+        self.assertEqual(summary["aggregate_generator_slots"], 1024)
         self.assertEqual(summary["generator_drop_trials"], 1)
         self.assertEqual(summary["generator_late_trials"], 1)
         self.assertEqual(summary["server_pressure_trials"], 0)
@@ -100,6 +118,12 @@ class FanoutTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize_fanout(
                 8, [result(generators=8), result(generators=16)])
+
+    def test_summary_rejects_mixed_slot_controls(self):
+        rows = [result(generators=8), result(generators=8)]
+        rows[1]["case"]["generator_capacity"] = 64
+        with self.assertRaises(ValueError):
+            summarize_fanout(8, rows)
 
 
 if __name__ == "__main__":
