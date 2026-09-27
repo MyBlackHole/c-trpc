@@ -100,6 +100,12 @@ jobs:
               --aggregate-generator-slots 1024 \
               --label "gcc-release-40k-generator-fanout" \
               --output "$results/generator-fanout-40k.jsonl"
+            python3 bench/run_rpc_generator_slots.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --trials 2 --rate 40000 --generators 32 \
+              --aggregate-generator-slots 1024,2048,4096,8192 \
+              --label "gcc-release-40k-generator-slots" \
+              --output "$results/generator-slots-40k.jsonl"
           fi
       - name: Preserve exact source and benchmark diagnostics
         if: always()
