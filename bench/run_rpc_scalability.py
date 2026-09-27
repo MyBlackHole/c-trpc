@@ -326,6 +326,8 @@ def summarize_group(results: list[dict[str, Any]]) -> dict[str, Any]:
         "handler_ms": first["slow_ms"],
         "executor_queue": first["executor_queue"],
         "window": first["window"],
+        "max_generators_used": max(r["case"].get("generators", 1)
+                                   for r in ordered),
         "nominal_handler_capacity_rps": nominal,
         "max_clean_scheduled_rps": max_clean,
         "max_clean_vs_nominal":
