@@ -279,6 +279,19 @@ full_headroom:
   RX buffers:         4096
   executor queue:     256
   CONTROL TX items:   2048
+  command queue:      benchmark default (1024)
+
+rx_ceiling_headroom:
+  RX buffers:         8192
+  executor queue:     256
+  CONTROL TX items:   2048
+  command queue:      benchmark default (1024)
+
+command_headroom:
+  RX buffers:         8192
+  executor queue:     256
+  CONTROL TX items:   2048
+  command queue:      4096
 
 RPC message pool:     unchanged in all stages
 reassembly pool:      unchanged in all stages
@@ -291,8 +304,10 @@ python3 bench/run_rpc_headroom.py \
   --workers 8 --handler-ms 0 \
   --headroom-rx-buffers 1024 \
   --full-headroom-rx-buffers 4096 \
+  --ceiling-rx-buffers 8192 \
   --headroom-executor-queue 256 \
   --headroom-control-tx-items 2048 \
+  --headroom-command-capacity 4096 \
   --generator-window 256 --generator-capacity 256 \
   --max-generators 32 --target-rate-per-generator 1250 \
   --generator-workers 1 \
@@ -306,9 +321,9 @@ Client slot window from being mislabeled as a Server resource wall without
 silently changing the Server's per-peer limits.
 
 The benchmark binary exposes Server-only overrides for
-`--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`, and
-`--control-tx-items`. A zero override keeps the existing derived benchmark
-default. These flags do not change
+`--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`,
+`--control-tx-items`, and `--command-capacity`. A zero override keeps the
+existing derived benchmark default. These flags do not change
 library/facade defaults and are not passed to benchmark Clients.
 
 The output records the actual observed pool capacities/executor queue size and
@@ -319,7 +334,12 @@ emits staged pairwise comparisons:
 3. `rx_executor_headroom -> rx_executor_control_headroom`, isolating
    CONTROL TX item exhaustion;
 4. `rx_executor_control_headroom -> full_headroom`, increasing RX from 1024
-   to 2048 after CONTROL TX has headroom, so the next bounded wall can surface.
+   to 4096 after CONTROL TX has headroom;
+5. `full_headroom -> rx_ceiling_headroom`, increasing RX from 4096 to 8192
+   while leaving command capacity at its default;
+6. `rx_ceiling_headroom -> command_headroom`, increasing only Reactor command
+   capacity from 1024 to 4096, isolating command-queue saturation from Reactor
+   CPU saturation.
 
 Both comparisons retain the first exact Server pressure rate and the wall-signal
 set before/after the resource change.
