@@ -341,8 +341,8 @@ emits staged pairwise comparisons:
    capacity from 1024 to 4096, isolating command-queue saturation from Reactor
    CPU saturation.
 
-Both comparisons retain the first exact Server pressure rate and the wall-signal
-set before/after the resource change.
+All staged comparisons retain the first exact Server pressure rate and the
+wall-signal set before/after the resource change.
 
 This is an isolation experiment, not an argument to increase production pool
 defaults. If RX exhaustion disappears and another bounded resource becomes the
