@@ -96,6 +96,7 @@ SERVER_RESOURCE_OVERRIDES = (
     ("rx_buffer_count", "--rx-buffers", "rx_buffers"),
     ("rpc_message_pool_count", "--rpc-message-pool", "rpc_message_pool"),
     ("reassembly_pool_count", "--reassembly-pool", "reassembly_pool"),
+    ("control_tx_item_count", "--control-tx-items", "control_tx_items"),
 )
 
 
@@ -143,6 +144,7 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
         validate_server_ready_resources(ready, case)
 
         client_cmd = [str(binary), "client", *common, "--port", str(ready["port"]),
+                      "--workers", str(case.get("generator_workers", 4)),
                       "--window", str(case["window"]), "--scenario", "open",
                       "--requests", str(case["requests"]),
                       "--warmup", str(case["warmup"]),
