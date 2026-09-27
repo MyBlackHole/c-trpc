@@ -273,12 +273,12 @@ rx_executor_headroom:
 rx_executor_control_headroom:
   RX buffers:         1024
   executor queue:     256
-  CONTROL TX items:   512
+  CONTROL TX items:   2048
 
 full_headroom:
-  RX buffers:         2048
+  RX buffers:         4096
   executor queue:     256
-  CONTROL TX items:   512
+  CONTROL TX items:   2048
 
 RPC message pool:     unchanged in all stages
 reassembly pool:      unchanged in all stages
@@ -290,13 +290,20 @@ python3 bench/run_rpc_headroom.py \
   --rates 10000,20000,40000 \
   --workers 8 --handler-ms 0 \
   --headroom-rx-buffers 1024 \
-  --full-headroom-rx-buffers 2048 \
+  --full-headroom-rx-buffers 4096 \
   --headroom-executor-queue 256 \
-  --headroom-control-tx-items 512 \
+  --headroom-control-tx-items 2048 \
+  --generator-window 256 --generator-capacity 256 \
   --max-generators 32 --target-rate-per-generator 1250 \
   --generator-workers 1 \
   --output /tmp/rpc-bench/resource-headroom.jsonl
 ```
+
+The A/B runner also separates generator in-flight headroom from Server capacity.
+The Server keeps `capacity=128` by default, while high-rate Clients use
+`generator-window=256` and `generator-capacity=256`. This prevents a full
+Client slot window from being mislabeled as a Server resource wall without
+silently changing the Server's per-peer limits.
 
 The benchmark binary exposes Server-only overrides for
 `--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`, and
