@@ -13,6 +13,7 @@ def result(rate=100, workers=1, handler_ms=10):
         scheduler_dropped=0, submit_again=0, submit_errors=0,
         deadlines=0, rpc_errors=0, unavailable=0,
         resource_exhausted=0, invalid_responses=0,
+        scheduler_late_p99_us=10.0,
         ok=32, ok_rps=float(rate),
     )
     server = dict(
@@ -72,7 +73,7 @@ class ScalabilityAttributionTests(unittest.TestCase):
         pressure["server_exit"]["rpc_queue_wait_p99_us"] = 134000.0
 
         summary = summarize_group([pressure, clean, queued])
-        self.assertEqual(summary["max_clean_offered_rps"], 200)
+        self.assertEqual(summary["max_clean_scheduled_rps"], 200)
         self.assertEqual(summary["first_server_pressure_rps"], 400)
         self.assertIsNone(summary["first_load_generator_drop_rps"])
         self.assertEqual(summary["nominal_handler_capacity_rps"], 100.0)
@@ -80,12 +81,21 @@ class ScalabilityAttributionTests(unittest.TestCase):
         self.assertIn("executor_hard_full", summary["wall_signals"])
         self.assertIn("rpc_resource_exhausted", summary["wall_signals"])
 
+    def test_generator_lateness_is_not_server_pressure(self):
+        r = result(10000, workers=4, handler_ms=0)
+        r["client"]["scheduler_late_p99_us"] = 500.0
+        summary = summarize_group([r])
+        self.assertIn("load_generator_late", summary["wall_signals"])
+        self.assertEqual(summary["first_load_generator_late_rps"], 10000)
+        self.assertIsNone(summary["first_server_pressure_rps"])
+        self.assertIsNone(summary["max_clean_scheduled_rps"])
+
     def test_zero_delay_summary_has_no_nominal_capacity(self):
         r = result(5000, workers=4, handler_ms=0)
         summary = summarize_group([r])
         self.assertIsNone(summary["nominal_handler_capacity_rps"])
         self.assertIsNone(summary["max_clean_vs_nominal"])
-        self.assertEqual(summary["max_clean_offered_rps"], 5000)
+        self.assertEqual(summary["max_clean_scheduled_rps"], 5000)
 
 
 if __name__ == "__main__":
