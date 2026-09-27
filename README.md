@@ -57,9 +57,11 @@ The transport/RPC core performs no normal filesystem I/O and contains no backup-
 ## Runtime observability
 
 The core exposes allocation-free structured runtime snapshots for bottleneck
-attribution. Queue counters/high-water marks are always collected; monotonic
-timing histograms are opt-in with `TR_OBSERVABILITY_TIMING` so production
-defaults do not add timing reads to scheduling hot paths. See
+attribution. Queue/pool counters and high-water marks are always collected;
+monotonic timing histograms are opt-in with `TR_OBSERVABILITY_TIMING` so
+production defaults do not add timing reads to scheduling hot paths.
+`tr_server_get_stats()` aggregates live and already-reaped peer evidence for
+end-of-run/runtime attribution. See
 [`docs/observability.md`](docs/observability.md).
 
 ## High-level Client / Server facade
