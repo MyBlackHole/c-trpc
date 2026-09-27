@@ -20,6 +20,7 @@ def result(rate=100, workers=1, handler_ms=10):
         reactor_busy_ratio=0.1,
         rpc_queue_wait_p99_us=10.0,
         rpc_handler_p99_us=10000.0,
+        rpc_queue_peak_per_peer=1,
         rpc_admission_limit_hits=0,
         rpc_hard_full_events=0,
         command_queue_full_events=0,
