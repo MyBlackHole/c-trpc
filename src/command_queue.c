@@ -42,6 +42,14 @@ void tr_command_queue_destroy(struct tr_command_queue *queue)
 	queue->count = 0;
 	queue->peak_count = 0;
 	queue->full_events = 0;
+	queue->pushed_send = 0;
+	queue->full_send = 0;
+	queue->pushed_resume_rx = 0;
+	queue->full_resume_rx = 0;
+	queue->pushed_call = 0;
+	queue->full_call = 0;
+	queue->pushed_other = 0;
+	queue->full_other = 0;
 	queue->wake_pending = 0;
 	pthread_mutex_destroy(&queue->lock);
 }
@@ -58,8 +66,37 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 
 	if (queue->count == queue->capacity) {
 		queue->full_events++;
+		switch (command->type) {
+		case TR_CMD_SEND:
+			queue->full_send++;
+			break;
+		case TR_CMD_RESUME_RX:
+			queue->full_resume_rx++;
+			break;
+		case TR_CMD_CALL:
+			queue->full_call++;
+			break;
+		default:
+			queue->full_other++;
+			break;
+		}
 		pthread_mutex_unlock(&queue->lock);
 		return TR_AGAIN;
+	}
+
+	switch (command->type) {
+	case TR_CMD_SEND:
+		queue->pushed_send++;
+		break;
+	case TR_CMD_RESUME_RX:
+		queue->pushed_resume_rx++;
+		break;
+	case TR_CMD_CALL:
+		queue->pushed_call++;
+		break;
+	default:
+		queue->pushed_other++;
+		break;
 	}
 
 	queue->items[queue->tail] = *command;
