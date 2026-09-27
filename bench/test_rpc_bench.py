@@ -2,7 +2,7 @@
 import copy
 import unittest
 
-from run_rpc_bench import validate_phase
+from run_rpc_bench import validate_phase, validate_server_exit
 
 
 def group(n=0):
@@ -88,6 +88,33 @@ class AccountingTests(unittest.TestCase):
         r["scenario"] = "mixed"
         with self.assertRaises(ValueError):
             validate_phase(r, 10, "mixed", clean=True)
+
+    def test_server_observability(self):
+        server = dict(
+            type="server_exit", drain_status=0, cpu_s=0.1,
+            peak_rss_kib=1024, reactor_busy_ratio=0.5,
+            reactor_busy_ns=100, reactor_poll_ns=100,
+            command_queue_peak=2, completion_queue_peak=3,
+            rx_pool_peak=4, tx_pool_peak=5, control_tx_pool_peak=6,
+            rpc_queue_peak_per_peer=7, rpc_admission_limit_hits=0,
+            rpc_hard_full_events=0, rpc_queue_wait_p99_us=10.0,
+            rpc_handler_p99_us=20.0, rpc_message_pool_peak=8,
+            reassembly_pool_peak=1, peers_ready_total=1,
+            peers_reaped_total=1)
+        validate_server_exit(server)
+        broken = copy.deepcopy(server)
+        broken["reactor_busy_ratio"] = 1.1
+        with self.assertRaises(ValueError):
+            validate_server_exit(broken)
+        broken = copy.deepcopy(server)
+        broken["rpc_queue_wait_p99_us"] = float("nan")
+        with self.assertRaises(ValueError):
+            validate_server_exit(broken)
+        broken = copy.deepcopy(server)
+        broken["reactor_busy_ns"] = 0
+        broken["reactor_poll_ns"] = 0
+        with self.assertRaises(ValueError):
+            validate_server_exit(broken)
 
 
 if __name__ == "__main__":
