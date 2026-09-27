@@ -151,12 +151,14 @@ def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
         "baseline": {
             "rx_buffer_count": 0,
             "executor_queue": args.executor_queue,
+            "control_tx_item_count": 0,
             "rpc_message_pool_count": 0,
             "reassembly_pool_count": 0,
         },
         "rx_headroom": {
             "rx_buffer_count": args.headroom_rx_buffers,
             "executor_queue": args.executor_queue,
+            "control_tx_item_count": 0,
             "rpc_message_pool_count": args.headroom_rpc_message_pool,
             "reassembly_pool_count": args.headroom_reassembly_pool,
         },
@@ -228,6 +230,7 @@ def validate_args(parser: argparse.ArgumentParser,
     if args.full_headroom_rx_buffers < args.headroom_rx_buffers:
         parser.error("full-headroom-rx-buffers must be >= headroom-rx-buffers")
     if (args.headroom_rx_buffers == 0 and
+            args.headroom_control_tx_items == 0 and
             args.headroom_rpc_message_pool == 0 and
             args.headroom_reassembly_pool == 0 and
             args.headroom_executor_queue == args.executor_queue):
