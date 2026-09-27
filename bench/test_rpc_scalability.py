@@ -53,6 +53,7 @@ class ScalabilityAttributionTests(unittest.TestCase):
         self.assertEqual(generator_count_for(3999, 16, 4000), 1)
         self.assertEqual(generator_count_for(4001, 16, 4000), 2)
         self.assertEqual(generator_count_for(100000, 16, 4000), 16)
+        self.assertEqual(generator_count_for(40000, 32, 1250), 32)
         rates = split_rates(10001, 3)
         self.assertEqual(sum(rates), 10001)
         self.assertLessEqual(max(rates) - min(rates), 1)

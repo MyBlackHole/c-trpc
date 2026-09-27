@@ -96,6 +96,7 @@ SERVER_RESOURCE_OVERRIDES = (
     ("rx_buffer_count", "--rx-buffers", "rx_buffers"),
     ("rpc_message_pool_count", "--rpc-message-pool", "rpc_message_pool"),
     ("reassembly_pool_count", "--reassembly-pool", "reassembly_pool"),
+    ("control_tx_item_count", "--control-tx-items", "control_tx_items"),
 )
 
 
@@ -118,8 +119,11 @@ def validate_server_ready_resources(ready: dict[str, Any],
 
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
-    server_cmd = [str(binary), "server", *common,
+    server_common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
+    generator_capacity = case.get("generator_capacity", case["capacity"])
+    generator_window = case.get("generator_window", case["window"])
+    client_common = ["--capacity", str(generator_capacity), "--bulk-bytes", "65536"]
+    server_cmd = [str(binary), "server", *server_common,
                   "--workers", str(case["workers"]),
                   "--slow-ms", str(case["slow_ms"]),
                   "--executor-queue", str(case["executor_queue"]),
@@ -142,8 +146,9 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
             raise ValueError("server did not apply requested capacity controls")
         validate_server_ready_resources(ready, case)
 
-        client_cmd = [str(binary), "client", *common, "--port", str(ready["port"]),
-                      "--window", str(case["window"]), "--scenario", "open",
+        client_cmd = [str(binary), "client", *client_common, "--port", str(ready["port"]),
+                      "--workers", str(case.get("generator_workers", 4)),
+                      "--window", str(generator_window), "--scenario", "open",
                       "--requests", str(case["requests"]),
                       "--warmup", str(case["warmup"]),
                       "--timeout-ms", str(case["timeout_ms"]),
@@ -168,7 +173,8 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
         row = rows[0]
         if row.get("pid") != client.pid:
             raise ValueError("wrong client identity")
-        validate_open_phase(row, case["requests"], case["rate_rps"], case["window"])
+        validate_open_phase(row, case["requests"], case["rate_rps"],
+                            generator_window)
 
         server_stdout, _ = server.communicate(timeout=30)
         (output_dir / "server.jsonl").write_text(

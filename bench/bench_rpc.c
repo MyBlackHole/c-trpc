@@ -31,6 +31,7 @@ struct options {
 	uint32_t bulk_every, timeout_ms, slow_ms, workers, capacity, start_gate;
 	uint32_t rate_rps, executor_queue;
 	uint32_t rx_buffers, rpc_message_pool, reassembly_pool;
+	uint32_t control_tx_items;
 };
 
 struct sample {
@@ -143,6 +144,7 @@ static void usage(const char *program)
 		"  --timeout-ms N --slow-ms N --workers N --capacity N --start-gate 0|1\n"
 		"  --rate-rps N --executor-queue N (0 keeps the benchmark default)\n"
 		"  --rx-buffers N --rpc-message-pool N --reassembly-pool N\n"
+		"  --control-tx-items N\n"
 		"    (Server-only benchmark overrides; 0 keeps the derived defaults)\n"
 		"Server binds loopback by default, prints readiness JSON, and exits on stdin EOF.\n"
 		"pressure uses the delayed method, then measures recovery on the SAME client.\n"
@@ -158,7 +160,8 @@ static struct options parse_options(int argc, char **argv)
 		.small_bytes = 32, .bulk_bytes = 65536, .bulk_every = 4,
 		.timeout_ms = 5000, .slow_ms = 25, .workers = 4, .capacity = 64,
 		.rate_rps = 200, .executor_queue = 0,
-		.rx_buffers = 0, .rpc_message_pool = 0, .reassembly_pool = 0
+		.rx_buffers = 0, .rpc_message_pool = 0, .reassembly_pool = 0,
+		.control_tx_items = 0
 	};
 	struct in_addr address;
 	int i;
@@ -192,6 +195,7 @@ static struct options parse_options(int argc, char **argv)
 		ARG("--rx-buffers", rx_buffers)
 		ARG("--rpc-message-pool", rpc_message_pool)
 		ARG("--reassembly-pool", reassembly_pool)
+		ARG("--control-tx-items", control_tx_items)
 #undef ARG
 		usage(argv[0]);
 		fatal("unknown argument", 0);
@@ -203,7 +207,7 @@ static struct options parse_options(int argc, char **argv)
 	    o.rate_rps == 0 || o.rate_rps > 1000000U ||
 	    (o.executor_queue != 0 && (o.executor_queue < 16U || o.executor_queue > 65536U)) ||
 	    o.rx_buffers > 8192U || o.rpc_message_pool > 8192U ||
-	    o.reassembly_pool > 8192U ||
+	    o.reassembly_pool > 8192U || o.control_tx_items > 8192U ||
 	    o.workers == 0 || o.workers > 32U || o.small_bytes < 8U ||
 	    o.bulk_bytes < o.small_bytes || o.bulk_bytes > MAX_PAYLOAD ||
 	    o.bulk_every == 0 || o.timeout_ms == 0 || o.timeout_ms > 30000U ||
@@ -237,6 +241,8 @@ static void configure_limits(struct tr_facade_limits *limits, const struct optio
 	limits->rx_buffer_count =
 		server && o->rx_buffers ?
 			o->rx_buffers : 2U * o->capacity + 16U;
+	if (server && o->control_tx_items)
+		limits->control_tx_item_capacity = o->control_tx_items;
 	limits->initial_window_bytes = (uint64_t)limits->max_message_bytes * 4U;
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
 	limits->executor_threads = o->workers;
@@ -300,13 +306,14 @@ static int run_server(const struct options *o)
 	printf("{\"type\":\"ready\",\"port\":%u,\"pid\":%ld,\"workers\":%u,"
 	       "\"capacity\":%u,\"executor_queue\":%u,\"slow_ms\":%u,"
 	       "\"rx_buffers\":%u,\"rpc_message_pool\":%u,"
-	       "\"reassembly_pool\":%u}\n",
+	       "\"reassembly_pool\":%u,\"control_tx_items\":%u}\n",
 	       port, (long)getpid(), o->workers, o->capacity,
 	       o->executor_queue ? o->executor_queue : 4U * o->capacity,
 	       o->slow_ms,
 	       config.limits.rx_buffer_count,
 	       config.limits.rpc_message_pool_count,
-	       config.limits.reassembly_pool_count);
+	       config.limits.reassembly_pool_count,
+	       config.limits.control_tx_item_capacity);
 	fflush(stdout);
 	/* No global signal policy: the harness closes this process's stdin. */
 	while (getchar() != EOF)
@@ -336,6 +343,7 @@ static int run_server(const struct options *o)
 		       "\"completion_queue_full_events\":%" PRIu64 ","
 		       "\"rx_pool_capacity\":%u,\"rx_pool_peak\":%u,"
 		       "\"tx_pool_capacity\":%u,\"tx_pool_peak\":%u,"
+		       "\"control_tx_pool_capacity\":%u,"
 		       "\"control_tx_pool_peak\":%u,"
 		       "\"rx_pool_exhausted_events\":%" PRIu64 ","
 		       "\"tx_pool_exhausted_events\":%" PRIu64 ","
@@ -364,6 +372,7 @@ static int run_server(const struct options *o)
 		       stats.reactor.rx_buffer_pool.peak,
 		       stats.reactor.tx_item_pool.capacity,
 		       stats.reactor.tx_item_pool.peak,
+		       stats.reactor.control_tx_item_pool.capacity,
 		       stats.reactor.control_tx_item_pool.peak,
 		       stats.reactor.rx_buffer_pool.exhausted_events,
 		       stats.reactor.tx_item_pool.exhausted_events,
