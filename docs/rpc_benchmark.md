@@ -305,6 +305,12 @@ executor_ceiling_headroom:
   CONTROL TX items:   8192
   command queue:      4096
 
+command_ceiling_headroom:
+  RX buffers:         8192
+  executor queue:     1024
+  CONTROL TX items:   8192
+  command queue:      16384
+
 RPC message pool:     unchanged in all stages
 reassembly pool:      unchanged in all stages
 ```
@@ -322,6 +328,7 @@ python3 bench/run_rpc_headroom.py \
   --headroom-control-tx-items 2048 \
   --ceiling-control-tx-items 8192 \
   --headroom-command-capacity 4096 \
+  --ceiling-command-capacity 16384 \
   --generator-window 256 --generator-capacity 256 \
   --max-generators 32 --target-rate-per-generator 1250 \
   --generator-workers 1 \
@@ -356,10 +363,17 @@ emits staged pairwise comparisons:
 7. `command_headroom -> control_ceiling_headroom`, increasing only CONTROL TX
    item capacity from 2048 to 8192;
 8. `control_ceiling_headroom -> executor_ceiling_headroom`, increasing only
-   per-Endpoint executor queue capacity from 256 to 1024.
+   per-Endpoint executor queue capacity from 256 to 1024;
+9. `executor_ceiling_headroom -> command_ceiling_headroom`, increasing only
+   Reactor command queue capacity from 4096 to 16384.
 
-These last stages are deliberately ordered so a 40k CONTROL TX wall cannot hide
-an executor wall, and neither can be mistaken for Reactor CPU saturation.
+These final stages are deliberately ordered so CONTROL TX and executor pressure
+cannot hide the command-queue wall. The 4096 -> 16384 transition is the last
+pure capacity A/B before changing the existing per-turn command fairness budget:
+if the queue-full signal disappears, the previous 4096 wall was bounded burst
+headroom; if it persists while Reactor busy remains low and command-budget hits
+are recurrent, the next experiment should isolate command drain/fairness rather
+than jump directly to Multi-Reactor.
 
 All staged comparisons retain the first exact Server pressure rate and the
 wall-signal set before/after the resource change.
@@ -383,7 +397,9 @@ The GCC release CI job runs three trials for:
 - `command_headroom`: RX=8192, executor=256, CONTROL TX=2048,
   command capacity=4096;
 - `ceiling_headroom`: RX=8192, executor=1024, CONTROL TX=8192,
-  command capacity=4096.
+  command capacity=4096;
+- `command_ceiling_headroom`: identical to `ceiling_headroom` except
+  command capacity=16384.
 
 Each trial retains the full Server/Client diagnostics. The summary reports
 clean-trial count, exact-Server-pressure-trial count, per-signal occurrence
