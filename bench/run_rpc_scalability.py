@@ -21,7 +21,9 @@ from run_rpc_bench import (
 from run_rpc_capacity import (
     nominal_handler_capacity_rps,
     run_case as run_capacity_case,
+    server_resource_args,
     validate_open_phase,
+    validate_server_ready_resources,
 )
 
 
@@ -137,6 +139,7 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
         "--workers", str(case["workers"]),
         "--slow-ms", str(case["slow_ms"]),
         "--executor-queue", str(case["executor_queue"]),
+        *server_resource_args(case),
     ]
     generator_rates = split_rates(case["rate_rps"], case["generators"])
     request_counts = split_weighted_total(
@@ -160,6 +163,7 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
                 ready.get("executor_queue") != case["executor_queue"] or
                 ready.get("slow_ms") != case["slow_ms"]):
             raise ValueError("server did not apply requested capacity controls")
+        validate_server_ready_resources(ready, case)
 
         clients: list[subprocess.Popen[str]] = []
         for index, (rate, requests, warmup) in enumerate(
@@ -185,7 +189,11 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
             clients.append(client)
             client_cmds.append(cmd)
 
-        for client in clients:
+            # Warmup is not part of the offered-load experiment. Let each
+            # generator finish its window=1 warmup before starting the next,
+            # otherwise generator fanout can turn warmup itself into a
+            # saturation workload. Measurement still starts synchronously
+            # below, after every Client has reached the start gate.
             read_ready(client, "client_ready", timeout=30)
 
         common_start_ns = time.monotonic_ns() + 500_000_000

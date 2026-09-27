@@ -92,13 +92,38 @@ def nominal_handler_capacity_rps(workers: int, slow_ms: int) -> float | None:
     return workers * 1000.0 / slow_ms
 
 
+SERVER_RESOURCE_OVERRIDES = (
+    ("rx_buffer_count", "--rx-buffers", "rx_buffers"),
+    ("rpc_message_pool_count", "--rpc-message-pool", "rpc_message_pool"),
+    ("reassembly_pool_count", "--reassembly-pool", "reassembly_pool"),
+)
+
+
+def server_resource_args(case: dict[str, Any]) -> list[str]:
+    args: list[str] = []
+    for case_key, cli_flag, _ready_key in SERVER_RESOURCE_OVERRIDES:
+        value = int(case.get(case_key, 0) or 0)
+        if value:
+            args.extend([cli_flag, str(value)])
+    return args
+
+
+def validate_server_ready_resources(ready: dict[str, Any],
+                                    case: dict[str, Any]) -> None:
+    for case_key, _cli_flag, ready_key in SERVER_RESOURCE_OVERRIDES:
+        value = int(case.get(case_key, 0) or 0)
+        if value and ready.get(ready_key) != value:
+            raise ValueError(f"server did not apply {case_key}={value}")
+
+
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
     server_cmd = [str(binary), "server", *common,
                   "--workers", str(case["workers"]),
                   "--slow-ms", str(case["slow_ms"]),
-                  "--executor-queue", str(case["executor_queue"])]
+                  "--executor-queue", str(case["executor_queue"]),
+                  *server_resource_args(case)]
     client_cmd: list[str] = []
     children: list[subprocess.Popen[str]] = []
     logs: list[TextIO] = []
@@ -111,8 +136,11 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
                                   stderr=server_err, text=True)
         children.append(server)
         ready = read_ready(server, "ready")
-        if ready.get("workers") != case["workers"] or                 ready.get("executor_queue") != case["executor_queue"] or                 ready.get("slow_ms") != case["slow_ms"]:
+        if (ready.get("workers") != case["workers"] or
+                ready.get("executor_queue") != case["executor_queue"] or
+                ready.get("slow_ms") != case["slow_ms"]):
             raise ValueError("server did not apply requested capacity controls")
+        validate_server_ready_resources(ready, case)
 
         client_cmd = [str(binary), "client", *common, "--port", str(ready["port"]),
                       "--window", str(case["window"]), "--scenario", "open",

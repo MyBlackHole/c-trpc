@@ -189,10 +189,12 @@ offered rates are explicit: 5000/10000/20000/40000 RPS.
 
 The matrix is multi-source when needed. A rate at or below the configured
 per-generator target uses one Client; higher rates are partitioned across up to
-16 independent `bench_rpc client` processes. All generators finish warmup
-first, then receive absolute `CLOCK_MONOTONIC` start timestamps with small
-phase offsets so their local fixed-rate schedules interleave instead of starting
-as an accidental burst. Each process keeps its own scheduler lateness/drop
+16 independent `bench_rpc client` processes. Generators complete their
+window=1 warmup **sequentially**, so fanout cannot turn warmup itself into an
+unmeasured saturation workload. After every Client has reached the start gate,
+the runner sends absolute `CLOCK_MONOTONIC` start timestamps with small phase
+offsets so their local fixed-rate schedules interleave instead of starting as
+an accidental burst. Each process keeps its own scheduler lateness/drop
 accounting; the runner sums exact counts and keeps the worst generator lateness
 for load-fidelity attribution.
 
@@ -238,6 +240,68 @@ reported separately as well. Neither condition is attributed to the Server.
 The GCC release CI job records one full matrix with normal runtime CRC dispatch
 as a diagnostic artifact. It has no throughput, scaling-efficiency, P99, or
 busy-ratio pass/fail threshold.
+
+### Bounded-resource headroom A/B
+
+When a scalability point first hits a bounded pool, `run_rpc_headroom.py`
+separates a configuration wall from a deeper runtime wall by rerunning the same
+offered rates with one controlled resource change.
+
+The default experiment follows the first multi-source result as a staged
+single-variable chain:
+
+```text
+workers:              8
+handler:              0 ms
+rates:                10k / 20k / 40k RPS
+
+baseline:
+  RX buffers:         benchmark-derived (272 at capacity=128)
+  executor queue:     64
+
+rx_headroom:
+  RX buffers:         1024
+  executor queue:     64
+
+rx_executor_headroom:
+  RX buffers:         1024
+  executor queue:     256
+
+RPC message pool:     unchanged in all stages
+reassembly pool:      unchanged in all stages
+```
+
+```sh
+python3 bench/run_rpc_headroom.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --rates 10000,20000,40000 \
+  --workers 8 --handler-ms 0 \
+  --headroom-rx-buffers 1024 \
+  --headroom-executor-queue 256 \
+  --output /tmp/rpc-bench/resource-headroom.jsonl
+```
+
+The benchmark binary exposes Server-only overrides for
+`--rx-buffers`, `--rpc-message-pool`, and `--reassembly-pool`. A zero
+override keeps the existing derived benchmark default. These flags do not change
+library/facade defaults and are not passed to benchmark Clients.
+
+The output records the actual observed pool capacities/executor queue size and
+emits two pairwise comparisons:
+
+1. `baseline -> rx_headroom`, identifying rates where RX exhaustion disappears
+   or persists;
+2. `rx_headroom -> rx_executor_headroom`, identifying rates where executor
+   hard-full disappears or persists.
+
+Both comparisons retain the first exact Server pressure rate and the wall-signal
+set before/after the resource change.
+
+This is an isolation experiment, not an argument to increase production pool
+defaults. If RX exhaustion disappears and another bounded resource becomes the
+first wall, that new signal is investigated next. If Reactor busy time becomes
+the limiting evidence only after bounded resources have headroom, then a
+Reactor architecture change has a measurement basis.
 
 ### Streaming continuation reserve
 
