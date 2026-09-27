@@ -57,6 +57,29 @@ The admission-limit and hard-full counters are intentionally separate. A
 reserve hit means the runtime protected capacity for already accepted Streaming
 Calls; it does not mean the executor node pool was physically exhausted.
 
+## Server facade aggregation
+
+`tr_server_get_stats()` provides one facade-level view suitable for benchmark
+and production exporters. It includes:
+
+- the Server-owned Reactor snapshot, including RX/TX/control TX pool pressure;
+- RPC message and reassembly pool `capacity/current/peak/exhausted_events`;
+- current peer/Call/Stream counts;
+- lifetime RPC and Channel counters across both live peers and peers already
+  reclaimed by the reaper;
+- merged executor queue-wait and handler histograms across peer Endpoints;
+- the largest per-Endpoint executor queue/ready-Call high-water marks.
+
+A reaped peer is synchronously quiesced and its RPC executor is fully drained
+before its final statistics are merged into the Server retirement totals. This
+prevents disconnect/reaping from truncating the last worker completions.
+
+The cross-component Server snapshot is structured rather than globally atomic:
+individual component snapshots are coherent, but counters can advance while the
+snapshot is collected. After `tr_server_drain()` has stopped accept/reap and
+drained active work, the snapshot is stable enough for end-of-run benchmark
+attribution.
+
 ## Interpretation
 
 Typical patterns:
