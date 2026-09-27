@@ -18,7 +18,8 @@ from run_rpc_bench import read_ready, stop_owned
 
 OPEN_COUNTS = ("offered", "scheduler_dropped", "attempted", "accepted",
                "completed", "ok", "submit_again", "submit_errors",
-               "deadlines", "rpc_errors", "unavailable", "invalid_responses")
+               "deadlines", "rpc_errors", "unavailable",
+               "resource_exhausted", "invalid_responses")
 
 
 def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
@@ -46,6 +47,10 @@ def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
         raise ValueError("unaccounted completions")
     if row["unavailable"] > row["rpc_errors"]:
         raise ValueError("UNAVAILABLE is not a subset of RPC errors")
+    if row["resource_exhausted"] > row["rpc_errors"]:
+        raise ValueError("RESOURCE_EXHAUSTED is not a subset of RPC errors")
+    if row["unavailable"] + row["resource_exhausted"] > row["rpc_errors"]:
+        raise ValueError("RPC error subsets overlap or exceed total")
     if row["invalid_responses"]:
         raise ValueError("payload validation failed")
 
@@ -263,6 +268,7 @@ def main() -> int:
                 output.flush()
                 client = result["client"]
                 print(f"trial={trial} rate={rate}rps ok={client['ok']} "
+                      f"resource_exhausted={client['resource_exhausted']} "
                       f"unavailable={client['unavailable']} "
                       f"dropped={client['scheduler_dropped']}: passed",
                       flush=True)

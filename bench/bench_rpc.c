@@ -467,8 +467,8 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	uint64_t *lag = malloc((size_t)count * sizeof(*lag));
 	uint64_t bytes = 0;
 	uint32_t i, attempted = 0, accepted = 0, ok = 0, deadlines = 0;
-	uint32_t rpc_errors = 0, unavailable = 0, again = 0, submit_errors = 0;
-	uint32_t invalid = 0, dropped = 0;
+	uint32_t rpc_errors = 0, unavailable = 0, resource_exhausted = 0;
+	uint32_t again = 0, submit_errors = 0, invalid = 0, dropped = 0;
 	double arrival_window;
 	double drain_elapsed;
 	double drain_tail_ms;
@@ -504,6 +504,8 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 			rpc_errors++;
 			if (s->rpc_status == TR_RPC_STATUS_UNAVAILABLE)
 				unavailable++;
+			else if (s->rpc_status == TR_RPC_STATUS_RESOURCE_EXHAUSTED)
+				resource_exhausted++;
 		}
 	}
 
@@ -522,7 +524,8 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	       "\"offered\":%u,\"scheduler_dropped\":%u,\"attempted\":%u,"
 	       "\"accepted\":%u,\"completed\":%u,\"ok\":%u,\"submit_again\":%u,"
 	       "\"submit_errors\":%u,\"deadlines\":%u,\"rpc_errors\":%u,"
-	       "\"unavailable\":%u,\"invalid_responses\":%u,\"ok_ratio\":%.9f,"
+	       "\"unavailable\":%u,\"resource_exhausted\":%u,"
+	       "\"invalid_responses\":%u,\"ok_ratio\":%.9f,"
 	       "\"ok_rps\":%.3f,\"payload_MiB_s\":%.6f,"
 	       "\"ok_p50_us\":%.3f,\"ok_p99_us\":%.3f,\"accepted_p99_us\":%.3f,"
 	       "\"scheduler_late_p50_us\":%.3f,\"scheduler_late_p99_us\":%.3f,"
@@ -530,7 +533,8 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	       (long)getpid(), window, rate_rps, begin, horizon, end,
 	       arrival_window, drain_elapsed, drain_tail_ms, client_cpu_s, peak_rss_kib,
 	       count, dropped, attempted, accepted, accepted, ok, again, submit_errors,
-	       deadlines, rpc_errors, unavailable, invalid, (double)ok / (double)count,
+	       deadlines, rpc_errors, unavailable, resource_exhausted, invalid,
+	       (double)ok / (double)count,
 	       ok / drain_elapsed, (double)bytes / (1048576.0 * drain_elapsed),
 	       percentile(ok_lat, ok, 50U), percentile(ok_lat, ok, 99U),
 	       percentile(all_lat, accepted, 99U), percentile(lag, count, 50U),

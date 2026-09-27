@@ -14,7 +14,8 @@ def row():
         client_cpu_s=0.1, client_peak_rss_kib=1024,
         offered=10, scheduler_dropped=0, attempted=10, accepted=10,
         completed=10, ok=10, submit_again=0, submit_errors=0,
-        deadlines=0, rpc_errors=0, unavailable=0, invalid_responses=0,
+        deadlines=0, rpc_errors=0, unavailable=0, resource_exhausted=0,
+        invalid_responses=0,
         ok_ratio=1.0, ok_rps=9.09, payload_MiB_s=0.001,
         ok_p50_us=100.0, ok_p99_us=200.0, accepted_p99_us=200.0,
         scheduler_late_p50_us=5.0, scheduler_late_p99_us=10.0,
@@ -56,6 +57,20 @@ class OpenLoopAccountingTests(unittest.TestCase):
     def test_unavailable_must_be_rpc_error(self):
         r = row()
         r["unavailable"] = 1
+        with self.assertRaises(ValueError):
+            validate_open_phase(r, 10, 10, 8)
+
+    def test_resource_exhausted_must_be_rpc_error(self):
+        r = row()
+        r["resource_exhausted"] = 1
+        with self.assertRaises(ValueError):
+            validate_open_phase(r, 10, 10, 8)
+
+    def test_rpc_error_subsets_cannot_overlap_total(self):
+        r = row()
+        r["rpc_errors"] = 1
+        r["unavailable"] = 1
+        r["resource_exhausted"] = 1
         with self.assertRaises(ValueError):
             validate_open_phase(r, 10, 10, 8)
 
