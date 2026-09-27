@@ -293,6 +293,18 @@ command_headroom:
   CONTROL TX items:   2048
   command queue:      4096
 
+control_ceiling_headroom:
+  RX buffers:         8192
+  executor queue:     256
+  CONTROL TX items:   8192
+  command queue:      4096
+
+executor_ceiling_headroom:
+  RX buffers:         8192
+  executor queue:     1024
+  CONTROL TX items:   8192
+  command queue:      4096
+
 RPC message pool:     unchanged in all stages
 reassembly pool:      unchanged in all stages
 ```
@@ -306,7 +318,9 @@ python3 bench/run_rpc_headroom.py \
   --full-headroom-rx-buffers 4096 \
   --ceiling-rx-buffers 8192 \
   --headroom-executor-queue 256 \
+  --ceiling-executor-queue 1024 \
   --headroom-control-tx-items 2048 \
+  --ceiling-control-tx-items 8192 \
   --headroom-command-capacity 4096 \
   --generator-window 256 --generator-capacity 256 \
   --max-generators 32 --target-rate-per-generator 1250 \
@@ -338,8 +352,14 @@ emits staged pairwise comparisons:
 5. `full_headroom -> rx_ceiling_headroom`, increasing RX from 4096 to 8192
    while leaving command capacity at its default;
 6. `rx_ceiling_headroom -> command_headroom`, increasing only Reactor command
-   capacity from 1024 to 4096, isolating command-queue saturation from Reactor
-   CPU saturation.
+   capacity from 1024 to 4096;
+7. `command_headroom -> control_ceiling_headroom`, increasing only CONTROL TX
+   item capacity from 2048 to 8192;
+8. `control_ceiling_headroom -> executor_ceiling_headroom`, increasing only
+   per-Endpoint executor queue capacity from 256 to 1024.
+
+These last stages are deliberately ordered so a 40k CONTROL TX wall cannot hide
+an executor wall, and neither can be mistaken for Reactor CPU saturation.
 
 All staged comparisons retain the first exact Server pressure rate and the
 wall-signal set before/after the resource change.
