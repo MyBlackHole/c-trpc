@@ -18,6 +18,12 @@ The same flag exists on the low-level `tr_reactor_config` and
 `tr_rpc_endpoint_config`. With timing disabled, the scheduling hot paths do
 not perform the extra monotonic-clock reads used by latency histograms.
 
+Timing histograms are diagnostic samples, not transactional accounting
+counters. A timing sample is recorded only when the relevant monotonic-clock
+reads succeed, so `samples` may be lower than the corresponding task/turn
+counter. The non-timing counters remain the source of truth for exact work
+accounting.
+
 `tr_latency_histogram` is a fixed 64-bucket log2 nanosecond histogram. It does
 not allocate and snapshots can be aggregated by summing corresponding buckets,
 sample counts, and totals and taking the maximum of `max_ns`.
