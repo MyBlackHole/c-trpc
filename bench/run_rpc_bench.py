@@ -19,6 +19,39 @@ from typing import Any, TextIO
 COUNTS = ("attempted", "accepted", "completed", "ok", "submit_again",
           "submit_errors", "deadlines", "rpc_errors", "invalid_responses")
 
+SERVER_OBS_INT = (
+    "reactor_busy_ns", "reactor_poll_ns", "command_queue_peak",
+    "completion_queue_peak", "rx_pool_peak", "tx_pool_peak",
+    "control_tx_pool_peak", "rpc_queue_peak_per_peer",
+    "rpc_admission_limit_hits", "rpc_hard_full_events",
+    "rpc_message_pool_peak", "reassembly_pool_peak",
+    "peers_ready_total", "peers_reaped_total",
+)
+SERVER_OBS_FLOAT = (
+    "cpu_s", "peak_rss_kib", "reactor_busy_ratio",
+    "rpc_queue_wait_p99_us", "rpc_handler_p99_us",
+)
+
+
+def validate_server_exit(row: dict[str, Any]) -> None:
+    if row.get("type") != "server_exit" or row.get("drain_status") != 0:
+        raise ValueError("server did not drain normally")
+    for key in SERVER_OBS_INT:
+        if type(row.get(key)) is not int or row[key] < 0:
+            raise ValueError(f"server {key}: invalid counter")
+    for key in SERVER_OBS_FLOAT:
+        value = row.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"server {key}: invalid measurement type")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"server {key}: invalid measurement")
+    if row["reactor_busy_ratio"] > 1:
+        raise ValueError("server reactor_busy_ratio is outside 0..1")
+    if row["reactor_busy_ns"] + row["reactor_poll_ns"] == 0:
+        raise ValueError("server timing observability was not populated")
+    if row["peers_ready_total"] == 0:
+        raise ValueError("server observed no ready peer")
+
 
 def validate_phase(row: dict[str, Any], expected: int, scenario: str,
                    *, clean: bool) -> None:
@@ -160,8 +193,9 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
         if server.returncode:
             raise RuntimeError(f"server exited {server.returncode}; see {output_dir}")
         exit_row = json.loads(stdout)
-        if exit_row.get("type") != "server_exit" or exit_row.get("drain_status") != 0:
-            raise ValueError("server did not drain normally")
+        validate_server_exit(exit_row)
+        if exit_row["peers_ready_total"] < case["clients"]:
+            raise ValueError("server peer accounting lost a benchmark client")
         return {"type": "case", "case": case, "server_command": server_cmd,
                 "client_commands": commands, "server": ready, "server_exit": exit_row,
                 "clients": results, "runner_elapsed_s": time.monotonic() - start}
