@@ -150,7 +150,7 @@ static void wait_executor(struct tr_rpc_endpoint *endpoint,
 
 static struct tr_stream_flow_state wait_flow_balanced(struct tr_stream_handle stream)
 {
-	struct tr_stream_flow_state flow;
+	struct tr_stream_flow_state flow = {0};
 	unsigned i;
 
 	for (i = 0; i < 10000U; ++i) {
@@ -166,7 +166,7 @@ static struct tr_stream_flow_state wait_flow_balanced(struct tr_stream_handle st
 static void wait_flow_backpressured(struct tr_stream_handle stream,
 				    const struct tr_stream_flow_state *before)
 {
-	struct tr_stream_flow_state flow;
+	struct tr_stream_flow_state flow = {0};
 	unsigned i;
 
 	for (i = 0; i < 10000U; ++i) {
@@ -182,7 +182,7 @@ static void wait_flow_backpressured(struct tr_stream_handle stream,
 static void wait_flow_consumed_after(struct tr_stream_handle stream,
 				     const struct tr_stream_flow_state *before)
 {
-	struct tr_stream_flow_state flow;
+	struct tr_stream_flow_state flow = {0};
 	unsigned i;
 
 	for (i = 0; i < 10000U; ++i) {
