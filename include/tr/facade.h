@@ -52,6 +52,12 @@ struct tr_facade_limits {
 	uint32_t executor_threads;
 	/* 每个 Endpoint 独立的有界 task 容量。 */
 	uint32_t executor_queue_capacity;
+	/*
+	 * Server-only opt-in：为已经接受的 Streaming Call continuation /
+	 * lifecycle task 保留的 executor node 数。0 表示禁用 reserve。
+	 * 必须小于 executor_queue_capacity。
+	 */
+	uint32_t executor_continuation_reserve;
 };
 
 void tr_facade_limits_init(struct tr_facade_limits *limits);

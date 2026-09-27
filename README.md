@@ -504,6 +504,7 @@ first response is encoded.
 
 - application RPC callbacks never execute on the network Reactor thread
 - bounded fixed-capacity executor task-node pool per RPC endpoint
+- optional Server continuation reserve partitions admission logically inside that same node pool: new Unary / first Streaming tasks stop at `capacity - reserve`, while already-accepted Streaming message/half-close/writable/close tasks may use the full capacity; it is not a second queue and does not change worker scheduling
 - low-level standalone RPC endpoints retain their own configurable worker pool
 - the high-level Server facade creates one `executor_threads` worker pool shared by all peer RPC endpoints
 - one FIFO task queue per Call plus an endpoint-local ready-Call queue
@@ -708,6 +709,7 @@ The Xmake CI matrix checks:
 - executor workers run different Calls in parallel, but one Call is intentionally serialized and can therefore be delayed by its own slow handler
 - generic Streaming writes do not internally queue arbitrary application messages: `TR_AGAIN` is intentional backpressure and the caller retries after `TR_RPC_CALL_EVENT_WRITABLE` / server `on_writable`
 - Server executor saturation before the first Streaming handler callback is an admission rejection and returns final `RESOURCE_EXHAUSTED`; after callbacks have begun, one continuation task per Call may wait outside the executor while retaining its RX payload/credit, and a second not-yet-admitted task on that Call terminates only that Call with final `RESOURCE_EXHAUSTED` (earlier callbacks may already have produced side effects)
+- optional Server `executor_continuation_reserve` can keep a bounded number of executor nodes unavailable to new Unary/Streaming first-task admission while still allowing already-accepted Streaming continuation/lifecycle tasks to use them; the default is 0 (disabled), so enabling it is an explicit capacity policy
 - direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed in Reactor timer callbacks

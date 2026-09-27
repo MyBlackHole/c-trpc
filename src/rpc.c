@@ -186,6 +186,7 @@ struct tr_rpc_executor {
 	uint32_t *ready_calls;
 
 	uint32_t capacity;
+	uint32_t continuation_reserve;
 	uint32_t free_head;
 	uint32_t queued_count;
 	uint32_t running_count;
@@ -1196,6 +1197,19 @@ static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
 	return ret;
 }
 
+static int
+tr_rpc_executor_task_is_admission(const struct tr_rpc_endpoint *endpoint,
+				  const struct tr_rpc_task *task)
+{
+	if (!endpoint || !task || endpoint->config.role != TR_RPC_SERVER)
+		return 0;
+
+	if (task->type == TR_RPC_TASK_SERVER_UNARY)
+		return 1;
+	return task->type == TR_RPC_TASK_SERVER_STREAM_MESSAGE &&
+	       task->first_message != 0;
+}
+
 static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 				const struct tr_rpc_task *task)
 {
@@ -1203,14 +1217,31 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	struct tr_rpc_executor_callq *callq;
 	struct tr_rpc_executor_node *node;
 	uint32_t node_index;
+	int admission;
 	int ret = TR_OK;
 
 	if (!task || task->call.slot >= endpoint->config.max_calls)
 		return TR_ERR_INVALID;
+	admission = tr_rpc_executor_task_is_admission(endpoint, task);
 
 	pthread_mutex_lock(&executor->lock);
-	if (executor->stopping || executor->free_head == TR_RPC_EXEC_NONE) {
-		ret = executor->stopping ? TR_ERR_CLOSED : TR_AGAIN;
+	if (executor->stopping) {
+		ret = TR_ERR_CLOSED;
+		goto out;
+	}
+	if (admission && executor->continuation_reserve != 0 &&
+	    executor->queued_count >=
+		    executor->capacity - executor->continuation_reserve) {
+		/*
+		 * Keep the last reserve nodes available for work belonging to Calls
+		 * that have already crossed admission. Existing first-task rejection
+		 * paths translate this TR_AGAIN into RESOURCE_EXHAUSTED.
+		 */
+		ret = TR_AGAIN;
+		goto out;
+	}
+	if (executor->free_head == TR_RPC_EXEC_NONE) {
+		ret = TR_AGAIN;
 		goto out;
 	}
 
@@ -2358,6 +2389,7 @@ tr_rpc_executor_init_guard_cleanup(struct tr_rpc_executor_init_guard *guard)
 
 static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 				uint32_t capacity,
+				uint32_t continuation_reserve,
 				struct tr_rpc_executor_group *group)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
@@ -2371,6 +2403,10 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		capacity = endpoint->config.max_calls * 4U + 16U;
 	if (capacity < 16U)
 		capacity = 16U;
+	if (endpoint->config.role == TR_RPC_SERVER &&
+	    continuation_reserve != 0 &&
+	    continuation_reserve >= capacity)
+		return TR_ERR_INVALID;
 
 	thread_count = endpoint->config.executor_threads;
 	if (thread_count == 0)
@@ -2405,6 +2441,9 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		return TR_ERR_NOMEM;
 
 	executor->capacity = capacity;
+	executor->continuation_reserve =
+		endpoint->config.role == TR_RPC_SERVER ?
+			continuation_reserve : 0U;
 	executor->thread_count = group ? group->thread_count : thread_count;
 	executor->ready_capacity = endpoint->config.max_calls;
 	executor->free_head = capacity ? 0U : TR_RPC_EXEC_NONE;
@@ -3550,8 +3589,9 @@ int tr_rpc_endpoint_create_with_executor_group(
 		return ret;
 	build.deadline_ready = 1;
 
-	ret = tr_rpc_executor_init(endpoint, config->executor_queue_capacity,
-				   group);
+	ret = tr_rpc_executor_init(
+		endpoint, config->executor_queue_capacity,
+		config->executor_continuation_reserve, group);
 	if (ret != TR_OK)
 		return ret;
 	build.executor_ready = 1;
@@ -4593,6 +4633,9 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 	out->executor_threads = endpoint->executor.thread_count;
 	out->executor_queued_tasks = endpoint->executor.queued_count;
 	out->executor_running_tasks = endpoint->executor.running_count;
+	out->executor_queue_capacity = endpoint->executor.capacity;
+	out->executor_continuation_reserve =
+		endpoint->executor.continuation_reserve;
 	pthread_mutex_unlock(&endpoint->executor.lock);
 
 	return TR_OK;
