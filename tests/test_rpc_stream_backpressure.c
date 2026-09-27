@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -88,7 +89,7 @@ static void wait_lane_up(struct tr_channel *channel)
 }
 
 static void wait_counter(struct backpressure_ctx *ctx, unsigned *value,
-			 unsigned target)
+			 unsigned target, const char *name)
 {
 	struct timespec deadline;
 	int ret = 0;
@@ -98,6 +99,9 @@ static void wait_counter(struct backpressure_ctx *ctx, unsigned *value,
 	pthread_mutex_lock(&ctx->lock);
 	while (*value < target && ret == 0)
 		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	if (*value < target)
+		fprintf(stderr, "wait %s timed out: got=%u target=%u ret=%d\n",
+			name, *value, target, ret);
 	assert(*value >= target);
 	pthread_mutex_unlock(&ctx->lock);
 }
@@ -427,21 +431,22 @@ int main(void)
 	/* Two Calls enter application callbacks before overload begins. */
 	start_call(client_rpc, 1U, &args[CALL_A], &calls[CALL_A]);
 	start_call(client_rpc, 1U, &args[CALL_B], &calls[CALL_B]);
-	wait_counter(&ctx, &ctx.client_opened, 2U);
+	wait_counter(&ctx, &ctx.client_opened, 2U, "initial client opens");
 
 	send_tag(calls[CALL_A], 'A', '1');
-	wait_counter(&ctx, &ctx.a_messages, 1U);
+	wait_counter(&ctx, &ctx.a_messages, 1U, "A1 callback");
 	a_before = wait_flow_balanced(ctx.a_stream);
 
 	send_tag(calls[CALL_B], 'B', '1');
-	wait_counter(&ctx, &ctx.b_messages, 1U);
+	wait_counter(&ctx, &ctx.b_messages, 1U, "B1 callback");
 	b_before = wait_flow_balanced(ctx.b_stream);
 
 	/* One filler runs and blocks; the remaining 16 fill every executor node. */
 	for (i = 0; i < FILLER_COUNT; ++i)
 		start_call(client_rpc, 2U, &args[FILLER_BASE + i],
 			   &calls[FILLER_BASE + i]);
-	wait_counter(&ctx, &ctx.client_opened, FILLER_BASE + FILLER_COUNT);
+	wait_counter(&ctx, &ctx.client_opened, FILLER_BASE + FILLER_COUNT,
+		     "filler client opens");
 
 	send_tag(calls[FILLER_BASE], 'F', '0');
 	wait_flag(&ctx, &ctx.blocker_waiting);
@@ -478,7 +483,7 @@ int main(void)
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
 
-	wait_counter(&ctx, &ctx.a_messages, 2U);
+	wait_counter(&ctx, &ctx.a_messages, 2U, "A2 retry callback");
 	wait_flow_consumed_after(ctx.a_stream, &a_before);
 
 	/* Call A remains usable after backpressure and completes normally. */
@@ -503,7 +508,7 @@ int main(void)
 
 	/* A fresh Call on the same Channel/Connection succeeds after overload. */
 	start_call(client_rpc, 1U, &args[RECOVERY_CALL], &calls[RECOVERY_CALL]);
-	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT);
+	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT, "recovery client open");
 	send_tag(calls[RECOVERY_CALL], 'R', '1');
 	wait_finished(&ctx, RECOVERY_CALL);
 	pthread_mutex_lock(&ctx.lock);
@@ -512,7 +517,8 @@ int main(void)
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_rpc_call_close_send(calls[RECOVERY_CALL]) == TR_OK);
 
-	wait_counter(&ctx, &ctx.server_resource_closed, 1U);
+	wait_counter(&ctx, &ctx.server_resource_closed, 1U,
+		     "server overloaded close callback");
 	wait_executor(server_rpc, 0U, 0U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
