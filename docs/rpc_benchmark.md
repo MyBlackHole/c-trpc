@@ -189,7 +189,9 @@ offered rates are explicit: 5000/10000/20000/40000 RPS.
 
 The matrix is multi-source when needed. A rate at or below the configured
 per-generator target uses one Client; higher rates are partitioned across up to
-16 independent `bench_rpc client` processes. Generators complete their
+32 independent `bench_rpc client` processes. High-rate generators default to
+one RPC worker each so the load generator does not spend shared-runner CPU on
+idle Client worker pools. Generators complete their
 window=1 warmup **sequentially**, so fanout cannot turn warmup itself into an
 unmeasured saturation workload. After every Client has reached the start gate,
 the runner sends absolute `CLOCK_MONOTONIC` start timestamps with small phase
@@ -204,8 +206,8 @@ python3 bench/run_rpc_scalability.py \
   --trials 1 --requests 256 \
   --workers 1,2,4,8 --handler-ms 0,1,10 \
   --executor-queue 64 --window 128 --capacity 128 \
-  --max-generators 16 --target-rate-per-generator 4000 \
-  --min-arrival-ms 250 \
+  --max-generators 32 --target-rate-per-generator 1250 \
+  --generator-workers 1 --min-arrival-ms 250 \
   --output /tmp/rpc-bench/scalability.jsonl
 ```
 
@@ -266,6 +268,17 @@ rx_headroom:
 rx_executor_headroom:
   RX buffers:         1024
   executor queue:     256
+  CONTROL TX items:   benchmark default (128)
+
+rx_executor_control_headroom:
+  RX buffers:         1024
+  executor queue:     256
+  CONTROL TX items:   512
+
+full_headroom:
+  RX buffers:         2048
+  executor queue:     256
+  CONTROL TX items:   512
 
 RPC message pool:     unchanged in all stages
 reassembly pool:      unchanged in all stages
@@ -277,22 +290,29 @@ python3 bench/run_rpc_headroom.py \
   --rates 10000,20000,40000 \
   --workers 8 --handler-ms 0 \
   --headroom-rx-buffers 1024 \
+  --full-headroom-rx-buffers 2048 \
   --headroom-executor-queue 256 \
+  --headroom-control-tx-items 512 \
+  --max-generators 32 --target-rate-per-generator 1250 \
+  --generator-workers 1 \
   --output /tmp/rpc-bench/resource-headroom.jsonl
 ```
 
 The benchmark binary exposes Server-only overrides for
-`--rx-buffers`, `--rpc-message-pool`, and `--reassembly-pool`. A zero
-override keeps the existing derived benchmark default. These flags do not change
+`--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`, and
+`--control-tx-items`. A zero override keeps the existing derived benchmark
+default. These flags do not change
 library/facade defaults and are not passed to benchmark Clients.
 
 The output records the actual observed pool capacities/executor queue size and
-emits two pairwise comparisons:
+emits staged pairwise comparisons:
 
-1. `baseline -> rx_headroom`, identifying rates where RX exhaustion disappears
-   or persists;
-2. `rx_headroom -> rx_executor_headroom`, identifying rates where executor
-   hard-full disappears or persists.
+1. `baseline -> rx_headroom`, isolating RX buffer pressure;
+2. `rx_headroom -> rx_executor_headroom`, isolating executor hard-full;
+3. `rx_executor_headroom -> rx_executor_control_headroom`, isolating
+   CONTROL TX item exhaustion;
+4. `rx_executor_control_headroom -> full_headroom`, increasing RX from 1024
+   to 2048 after CONTROL TX has headroom, so the next bounded wall can surface.
 
 Both comparisons retain the first exact Server pressure rate and the wall-signal
 set before/after the resource change.
