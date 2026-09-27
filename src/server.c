@@ -263,6 +263,12 @@ static int tr_server_peer_disconnected(struct tr_server_peer *peer)
 	       state == TR_CONN_ERROR;
 }
 
+static void tr_server_note_peer_added_locked(struct tr_server *server)
+{
+	server->peer_count++;
+	tr_observe_high_water_u32(&server->peer_count_peak, server->peer_count);
+}
+
 static int tr_server_take_reapable_peer(struct tr_server *server,
 				       struct tr_server_peer *out)
 {
@@ -290,6 +296,7 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 			memset(&server->peers[i], 0, sizeof(server->peers[i]));
 			if (server->peer_count != 0)
 				server->peer_count--;
+			server->peer_reaping_count++;
 			reap = 1;
 		}
 		pthread_mutex_unlock(&server->lock);
@@ -301,12 +308,46 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 	return 0;
 }
 
-static void tr_server_destroy_peer(struct tr_server_peer *peer)
+static void tr_server_destroy_peer(struct tr_server *server,
+				   struct tr_server_peer *peer, int retire_stats)
 {
-	if (peer->rpc)
-		tr_rpc_endpoint_destroy(peer->rpc);
-	if (peer->channel)
+	struct tr_rpc_endpoint_stats rpc_stats;
+	struct tr_channel_stats channel_stats;
+	int have_rpc_stats = 0;
+	int have_channel_stats = 0;
+
+	memset(&rpc_stats, 0, sizeof(rpc_stats));
+	memset(&channel_stats, 0, sizeof(channel_stats));
+
+	if (peer->rpc) {
+		tr_rpc_endpoint_destroy_with_stats(peer->rpc,
+						   retire_stats ? &rpc_stats : NULL);
+		peer->rpc = NULL;
+		have_rpc_stats = retire_stats;
+	}
+	if (peer->channel) {
+		if (retire_stats &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			have_channel_stats = 1;
 		tr_channel_destroy(peer->channel);
+		peer->channel = NULL;
+	}
+
+	if (retire_stats) {
+		pthread_mutex_lock(&server->lock);
+		if (have_rpc_stats)
+			tr_server_merge_rpc_stats(&server->retired_rpc_stats,
+						  &rpc_stats, 0);
+		if (have_channel_stats)
+			tr_server_merge_channel_stats(
+				&server->retired_channel_stats,
+				&channel_stats, 0);
+		if (server->peer_reaping_count != 0)
+			server->peer_reaping_count--;
+		server->stat_peers_reaped++;
+		pthread_mutex_unlock(&server->lock);
+	}
+
 	memset(peer, 0, sizeof(*peer));
 }
 
@@ -327,7 +368,7 @@ static void *tr_server_reap_main(void *arg)
 
 		memset(&peer, 0, sizeof(peer));
 		if (tr_server_take_reapable_peer(server, &peer)) {
-			tr_server_destroy_peer(&peer);
+			tr_server_destroy_peer(server, &peer, 1);
 			continue;
 		}
 
@@ -378,7 +419,7 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 	if (peer->channel || peer->rpc) {
 		pthread_mutex_lock(&guard->server->lock);
 		peer->used = 1;
-		guard->server->peer_count++;
+		tr_server_note_peer_added_locked(guard->server);
 		pthread_mutex_unlock(&guard->server->lock);
 	} else {
 		memset(&peer->connection, 0, sizeof(peer->connection));
@@ -399,6 +440,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	pthread_mutex_lock(&server->lock);
 	if (server->peer_count >= server->config.max_peers) {
+		server->stat_peer_capacity_rejections++;
 		pthread_mutex_unlock(&server->lock);
 		return TR_AGAIN;
 	}
@@ -407,6 +449,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		if (!server->peers[slot].used)
 			break;
 	if (slot == server->config.max_peers) {
+		server->stat_peer_capacity_rejections++;
 		pthread_mutex_unlock(&server->lock);
 		return TR_AGAIN;
 	}
@@ -492,7 +535,8 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	pthread_mutex_lock(&server->lock);
 	peer->used = 1;
-	server->peer_count++;
+	tr_server_note_peer_added_locked(server);
+	server->stat_peers_ready++;
 	pthread_mutex_unlock(&server->lock);
 	peer_guard.armed = 0;
 	return TR_OK;
@@ -864,7 +908,7 @@ void tr_server_destroy(struct tr_server *server)
 			struct tr_server_peer *peer = &server->peers[i];
 			if (!peer->used && !peer->channel && !peer->rpc)
 				continue;
-			tr_server_destroy_peer(peer);
+			tr_server_destroy_peer(server, peer, 0);
 		}
 	}
 
