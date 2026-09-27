@@ -22,6 +22,7 @@ int tr_frame_type_valid(uint16_t type)
 	case TR_FRAME_HELLO_ACK:
 	case TR_FRAME_GOAWAY:
 	case TR_FRAME_BIND:
+	case TR_FRAME_BIND_ACK:
 		return 1;
 	default:
 		return 0;

@@ -112,6 +112,7 @@ static void test_random_identity(void)
 static void test_bind_frame_type(void)
 {
 	assert(tr_frame_type_valid(TR_FRAME_BIND));
+	assert(tr_frame_type_valid(TR_FRAME_BIND_ACK));
 }
 
 int main(void)
