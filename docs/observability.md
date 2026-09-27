@@ -61,6 +61,12 @@ Producer-side command queue pressure is split into `SEND`, `RESUME_RX`,
 These counters are updated under the command queue's existing mutex and add no
 new allocation, clock read, or metrics lock.
 
+A SEND issued while already executing on the owning Reactor is attached directly
+to that connection's TX queue and does not enter the command queue. Such
+owner-local sends therefore do not increment `command_send.enqueued`; the
+counter intentionally measures cross-thread/queued SEND pressure rather than
+total frames transmitted.
+
 This distinction matters when the queue is full while Reactor busy time is low:
 a high command-budget-hit rate points toward bounded per-turn fairness or burst
 drain behavior, while one producer category dominating queue-full events points

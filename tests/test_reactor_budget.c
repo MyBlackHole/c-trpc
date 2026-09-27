@@ -59,6 +59,8 @@ struct test_ctx {
 	int idle;
 	int rx_entered;
 	int rx_release;
+	int owner_send_reply;
+	int owner_reply_done;
 };
 
 /* Installed before pthread_create and cleared after stop/join. */
@@ -217,7 +219,21 @@ static enum tr_frame_disposition frame_cb(struct tr_conn_handle handle,
 	struct test_ctx *ctx = arg;
 	uint32_t i;
 
-	(void)handle;
+	if (ctx->owner_send_reply) {
+		assert(frame->header.type == TR_FRAME_PING);
+		assert(frame->header.flags == 0U);
+		assert(frame->header.stream_id == 0U);
+		assert(frame->header.payload_len == 0U);
+		assert(frame->payload == NULL);
+		assert(tr_reactor_send(handle, TR_FRAME_PONG, 0U, 0U,
+				       frame->header.message_id, NULL) == TR_OK);
+		assert(pthread_mutex_lock(&ctx->lock) == 0);
+		ctx->owner_reply_done = 1;
+		assert(pthread_cond_broadcast(&ctx->cond) == 0);
+		assert(pthread_mutex_unlock(&ctx->lock) == 0);
+		return TR_FRAME_RELEASE;
+	}
+
 	assert(frame->header.type == TR_FRAME_DATA);
 	assert(frame->header.message_id == 77U);
 	assert(frame->payload && frame->payload->len == PAYLOAD_SIZE);
@@ -397,6 +413,18 @@ static void read_exact(int fd, void *buffer, size_t len)
 	}
 }
 
+static void encode_control(unsigned char wire[TR_WIRE_HEADER_SIZE],
+			   uint16_t type, uint64_t message_id)
+{
+	struct tr_frame_header header = {
+		.version = TR_WIRE_ENV_VERSION,
+		.type = type,
+		.message_id = message_id
+	};
+
+	assert(tr_wire_header_encode(wire, &header) == TR_OK);
+}
+
 static void encode_data(unsigned char wire[WIRE_SIZE])
 {
 	unsigned i;
@@ -489,6 +517,48 @@ static void test_mixed_budget(uint32_t budget, unsigned connections)
 	tr_buffer_pool_destroy(&pool);
 	printf("mixed/completion/timer/RX/TX budget=%u connections=%u: ok\n",
 	       budget, connections);
+}
+
+static void test_owner_send_fast_path(void)
+{
+	struct test_ctx ctx;
+	struct tr_conn_handle handle;
+	struct tr_reactor_stats stats;
+	unsigned char ping[TR_WIRE_HEADER_SIZE];
+	unsigned char pong[TR_WIRE_HEADER_SIZE];
+	unsigned char received[TR_WIRE_HEADER_SIZE];
+	int sockets[2];
+
+	create_ctx(&ctx, 4096U, 4U);
+	ctx.owner_send_reply = 1;
+	ctx.monitor = 1;
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
+	assert(tr_reactor_start(ctx.reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(ctx.reactor, sockets[0], &handle) == TR_OK);
+	assert(tr_reactor_quiesce(ctx.reactor) == TR_OK);
+
+	encode_control(ping, TR_FRAME_PING, 123U);
+	encode_control(pong, TR_FRAME_PONG, 123U);
+	assert(write(sockets[1], ping, sizeof(ping)) == (ssize_t)sizeof(ping));
+	wait_for(&ctx, &ctx.owner_reply_done);
+	read_exact(sockets[1], received, sizeof(received));
+	assert(memcmp(received, pong, sizeof(pong)) == 0);
+
+	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
+	assert(stats.command_send.enqueued == 0U);
+	assert(stats.command_send.full_events == 0U);
+
+	encode_control(ping, TR_FRAME_PING, 456U);
+	assert(tr_reactor_send(handle, TR_FRAME_PING, 0U, 0U, 456U, NULL) == TR_OK);
+	read_exact(sockets[1], received, sizeof(received));
+	assert(memcmp(received, ping, sizeof(ping)) == 0);
+	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
+	assert(stats.command_send.enqueued == 1U);
+	assert(stats.command_send.full_events == 0U);
+
+	destroy_ctx(&ctx);
+	assert(close(sockets[1]) == 0);
+	puts("owner SEND/direct/external queued: ok");
 }
 
 static void test_eagain_wait(void)
@@ -625,6 +695,7 @@ int main(void)
 	test_mixed_budget(17U, 2U);
 	test_mixed_budget(4096U, 2U);
 	test_mixed_budget(1U, MAX_TEST_CONNECTIONS);
+	test_owner_send_fast_path();
 	test_eagain_wait();
 	test_rx_ready_close_reuse();
 	test_completion_zero_budget();

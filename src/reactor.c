@@ -180,7 +180,7 @@ struct tr_reactor {
 
 	pthread_mutex_t ctl_lock;
 	int started;
-	int accepting;
+	_Atomic int accepting;
 	int stopping;
 
 	struct tr_command_queue commands;
@@ -1318,24 +1318,13 @@ static struct tr_connection *tr_lookup_connection(struct tr_reactor *reactor,
 	return connection;
 }
 
-static void tr_process_send(struct tr_reactor *reactor,
-			    const struct tr_command *command)
+static void tr_enqueue_tx_item_owner(struct tr_reactor *reactor,
+				     struct tr_connection *connection,
+				     struct tr_tx_item *item)
 {
-	struct tr_connection *connection;
-	struct tr_tx_item *item = command->u.send.item;
-
-	connection = tr_lookup_connection(reactor, command->slot,
-					  command->generation);
-	if (!connection) {
-		{
-			uint32_t i;
-			for (i = 0; i < item->payload_count; ++i)
-				if (item->payloads[i])
-					tr_buffer_release(item->payloads[i]);
-		}
-		tr_tx_pool_release(item->owner_pool, item);
-		return;
-	}
+	TR_ASSERT_REACTOR_OWNER(reactor);
+	assert(connection && connection->state == TR_CONN_ACTIVE);
+	assert(item);
 
 	item->next = NULL;
 	item->prev = connection->tx_tail;
@@ -1356,6 +1345,44 @@ static void tr_process_send(struct tr_reactor *reactor,
 				 __ATOMIC_RELAXED);
 
 	tr_schedule_tx(reactor, connection);
+}
+
+static int tr_send_item_owner(struct tr_reactor *reactor,
+			      struct tr_conn_handle handle,
+			      struct tr_tx_item *item)
+{
+	struct tr_connection *connection;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
+	connection = tr_lookup_connection(reactor, handle.slot,
+					  handle.generation);
+	if (!connection)
+		return TR_ERR_STALE;
+
+	tr_enqueue_tx_item_owner(reactor, connection, item);
+	return TR_OK;
+}
+
+static void tr_process_send(struct tr_reactor *reactor,
+			    const struct tr_command *command)
+{
+	struct tr_connection *connection;
+	struct tr_tx_item *item = command->u.send.item;
+
+	connection = tr_lookup_connection(reactor, command->slot,
+					  command->generation);
+	if (!connection) {
+		{
+			uint32_t i;
+			for (i = 0; i < item->payload_count; ++i)
+				if (item->payloads[i])
+					tr_buffer_release(item->payloads[i]);
+		}
+		tr_tx_pool_release(item->owner_pool, item);
+		return;
+	}
+
+	tr_enqueue_tx_item_owner(reactor, connection, item);
 }
 
 static void tr_process_resume_rx(struct tr_reactor *reactor,
@@ -1959,7 +1986,7 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      &wake_event) < 0)
 		return TR_ERR_SYS;
 
-	reactor->accepting = 1;
+	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
 	*out = reactor;
 	build.reactor = NULL;
 	return TR_OK;
@@ -2097,6 +2124,30 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 		memset(item->payloads, 0, sizeof(item->payloads));
 		item->payload_count = 0;
 		tr_tx_pool_release(item->owner_pool, item);
+		return ret;
+	}
+
+	/*
+	 * Channel/RPC owner callbacks already execute on this Reactor. Re-enqueueing
+	 * SEND in that case takes ctl_lock + command queue lock and defers the frame
+	 * to a later loop turn even though the connection state is owner-local.
+	 *
+	 * accepting is atomic so stop() remains the linearization gate without
+	 * making the owner take ctl_lock. On direct failure payload ownership stays
+	 * with the caller exactly like the queued producer path.
+	 */
+	if (tr_reactor_is_owner_thread(reactor)) {
+		if (!atomic_load_explicit(&reactor->accepting,
+					 memory_order_acquire)) {
+			ret = TR_ERR_CLOSED;
+		} else {
+			ret = tr_send_item_owner(reactor, connection, item);
+		}
+		if (ret != TR_OK) {
+			memset(item->payloads, 0, sizeof(item->payloads));
+			item->payload_count = 0;
+			tr_tx_pool_release(item->owner_pool, item);
+		}
 		return ret;
 	}
 
@@ -2830,7 +2881,7 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 		return TR_OK;
 	}
 
-	reactor->accepting = 0;
+	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	memset(&command, 0, sizeof(command));
 	command.type = TR_CMD_STOP;
 
