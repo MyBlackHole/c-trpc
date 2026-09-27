@@ -68,6 +68,8 @@ struct tr_command_queue {
 	uint32_t head;
 	uint32_t tail;
 	uint32_t count;
+	uint32_t peak_count;
+	uint64_t full_events;
 	int wake_pending;
 };
 

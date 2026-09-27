@@ -290,6 +290,18 @@ static void check_stats(const struct tr_reactor_stats *stats, uint32_t budget)
 	CHECK_WORK(tx_dispatches);
 #undef CHECK_WORK
 	assert(stats->epoll_polls + stats->epoll_waits <= stats->turns);
+	assert(stats->command_queue.capacity == 512U);
+	assert(stats->command_queue.current <= stats->command_queue.capacity);
+	assert(stats->command_queue.peak <= stats->command_queue.capacity);
+	assert(stats->completion_queue.capacity == 512U);
+	assert(stats->completion_queue.current <= stats->completion_queue.capacity);
+	assert(stats->completion_queue.peak <= stats->completion_queue.capacity);
+	assert(stats->observability_flags == TR_OBSERVABILITY_TIMING);
+	if (stats->turns != 0) {
+		assert(stats->turn_busy_ns.samples != 0);
+		assert(stats->turn_busy_ns.samples <= stats->turns);
+		assert(stats->busy_ns + stats->poll_ns != 0);
+	}
 }
 
 static int finish_on_owner(void *arg)
@@ -318,7 +330,8 @@ static void create_ctx(struct test_ctx *ctx, uint32_t budget, uint32_t connectio
 		.rx_buffer_count = connections > 4U ? 2U * connections : 8U,
 		.rx_buffer_size = PAYLOAD_SIZE,
 		.max_payload_len = PAYLOAD_SIZE,
-		.rx_budget_bytes = budget, .tx_budget_bytes = budget
+		.rx_budget_bytes = budget, .tx_budget_bytes = budget,
+		.observability_flags = TR_OBSERVABILITY_TIMING
 	};
 
 	struct tr_reactor_stats unchanged;
@@ -457,6 +470,8 @@ static void test_mixed_budget(uint32_t budget, unsigned connections)
 	assert(ctx.stats.budget_hits.timer_callbacks == CALLBACKS / 64U);
 	assert(ctx.stats.timer_lateness_ns_max != 0);
 	assert(ctx.stats.shutdown_completions == 0);
+	assert(ctx.stats.command_queue.peak != 0);
+	assert(ctx.stats.completion_queue.peak >= CALLBACKS);
 	if (budget < WIRE_SIZE) {
 		assert(ctx.stats.max_per_turn.rx_bytes == budget);
 		assert(ctx.stats.max_per_turn.tx_bytes == budget);

@@ -283,6 +283,7 @@ int main(void)
 	struct tr_rpc_endpoint *client_rpc = NULL;
 	struct tr_rpc_endpoint *server_rpc = NULL;
 	struct tr_rpc_endpoint *invalid_rpc = NULL;
+	struct tr_rpc_endpoint_stats executor_stats;
 	struct tr_conn_handle client_conn;
 	struct tr_conn_handle server_conn;
 	struct tr_buffer_pool rpc_pool;
@@ -350,6 +351,7 @@ int main(void)
 	assert(invalid_rpc == NULL);
 
 	rpc_config.executor_continuation_reserve = CONTINUATION_RESERVE;
+	rpc_config.observability_flags = TR_OBSERVABILITY_TIMING;
 	assert(tr_rpc_endpoint_create(server_channel, &rpc_config, &server_rpc) ==
 	       TR_OK);
 
@@ -461,6 +463,24 @@ int main(void)
 
 	wait_executor(server_rpc, 0U, 0U);
 	wait_pool_full(&rpc_pool, 256U);
+
+	assert(tr_rpc_endpoint_get_stats(server_rpc, &executor_stats) == TR_OK);
+	assert(executor_stats.observability_flags == TR_OBSERVABILITY_TIMING);
+	assert(executor_stats.executor_queue.capacity == QUEUE_CAPACITY);
+	assert(executor_stats.executor_queue.current == 0U);
+	assert(executor_stats.executor_queue.peak == QUEUE_CAPACITY);
+	assert(executor_stats.executor_queue.full_events == 0U);
+	assert(executor_stats.executor_admission_limit_hits == 1U);
+	assert(executor_stats.executor_hard_full_events == 0U);
+	assert(executor_stats.executor_ready_calls == 0U);
+	assert(executor_stats.executor_ready_calls_peak != 0U);
+	assert(executor_stats.executor_enqueued_tasks != 0U);
+	assert(executor_stats.executor_taken_tasks ==
+	       executor_stats.executor_enqueued_tasks);
+	assert(executor_stats.executor_queue_wait_ns.samples ==
+	       executor_stats.executor_taken_tasks);
+	assert(executor_stats.executor_handler_ns.samples ==
+	       executor_stats.executor_taken_tasks);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);

@@ -9,6 +9,7 @@
 #include "rpc_internal.h"
 #include "channel_internal.h"
 #include "reactor_internal.h"
+#include "observability_internal.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -160,6 +161,7 @@ struct tr_rpc_task_completion {
 
 struct tr_rpc_executor_node {
 	struct tr_rpc_task task;
+	uint64_t enqueued_ns;
 	uint32_t next;
 };
 
@@ -189,12 +191,21 @@ struct tr_rpc_executor {
 	uint32_t continuation_reserve;
 	uint32_t free_head;
 	uint32_t queued_count;
+	uint32_t queued_peak;
 	uint32_t running_count;
+
+	uint64_t enqueued_tasks;
+	uint64_t taken_tasks;
+	uint64_t admission_limit_hits;
+	uint64_t hard_full_events;
+	struct tr_latency_histogram queue_wait_ns;
+	struct tr_latency_histogram handler_ns;
 
 	uint32_t ready_capacity;
 	uint32_t ready_head;
 	uint32_t ready_tail;
 	uint32_t ready_count;
+	uint32_t ready_peak;
 
 	struct tr_rpc_executor_group *group;
 	int group_enqueued;
@@ -1153,6 +1164,7 @@ static int tr_rpc_executor_ready_push_locked(struct tr_rpc_executor *executor,
 	executor->ready_tail =
 		(executor->ready_tail + 1U) % executor->ready_capacity;
 	executor->ready_count++;
+	tr_observe_high_water_u32(&executor->ready_peak, executor->ready_count);
 	return TR_OK;
 }
 
@@ -1237,10 +1249,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		 * that have already crossed admission. Existing first-task rejection
 		 * paths translate this TR_AGAIN into RESOURCE_EXHAUSTED.
 		 */
+		executor->admission_limit_hits++;
 		ret = TR_AGAIN;
 		goto out;
 	}
 	if (executor->free_head == TR_RPC_EXEC_NONE) {
+		executor->hard_full_events++;
 		ret = TR_AGAIN;
 		goto out;
 	}
@@ -1263,6 +1277,9 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	node = &executor->nodes[node_index];
 	executor->free_head = node->next;
 	node->task = *task;
+	node->enqueued_ns =
+		(endpoint->config.observability_flags & TR_OBSERVABILITY_TIMING) ?
+			tr_rpc_now_ns() : 0;
 	node->next = TR_RPC_EXEC_NONE;
 
 	if (callq->tail != TR_RPC_EXEC_NONE)
@@ -1340,6 +1357,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		} else {
 			pthread_cond_signal(&executor->cond);
 		}
+	}
+
+	if (ret == TR_OK) {
+		executor->enqueued_tasks++;
+		tr_observe_high_water_u32(&executor->queued_peak,
+					  executor->queued_count);
 	}
 
 out:
@@ -2164,6 +2187,32 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 	return 0;
 }
 
+static int tr_rpc_executor_run_observed_task(struct tr_rpc_endpoint *endpoint,
+					      struct tr_rpc_task *task)
+{
+	uint64_t start_ns = 0;
+	uint64_t end_ns;
+	int ret;
+
+	if (endpoint->config.observability_flags & TR_OBSERVABILITY_TIMING)
+		start_ns = tr_rpc_now_ns();
+
+	ret = tr_rpc_executor_run_task(endpoint, task);
+
+	if (start_ns != 0) {
+		end_ns = tr_rpc_now_ns();
+		if (end_ns >= start_ns) {
+			struct tr_rpc_executor *executor = &endpoint->executor;
+
+			pthread_mutex_lock(&executor->lock);
+			tr_observe_latency_ns(&executor->handler_ns,
+					      end_ns - start_ns);
+			pthread_mutex_unlock(&executor->lock);
+		}
+	}
+	return ret;
+}
+
 static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 				struct tr_rpc_task *task, int wait)
 {
@@ -2201,6 +2250,15 @@ static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 
 	node = &executor->nodes[node_index];
 	*task = node->task;
+	if (node->enqueued_ns != 0) {
+		uint64_t now_ns = tr_rpc_now_ns();
+
+		if (now_ns >= node->enqueued_ns)
+			tr_observe_latency_ns(&executor->queue_wait_ns,
+					      now_ns - node->enqueued_ns);
+	}
+	node->enqueued_ns = 0;
+	executor->taken_tasks++;
 	callq->head = node->next;
 	if (callq->head == TR_RPC_EXEC_NONE)
 		callq->tail = TR_RPC_EXEC_NONE;
@@ -2281,7 +2339,7 @@ static void *tr_rpc_executor_main(void *arg)
 
 		{
 			int task_done_deferred =
-				tr_rpc_executor_run_task(endpoint, &task);
+				tr_rpc_executor_run_observed_task(endpoint, &task);
 			if (!task_done_deferred &&
 			    tr_rpc_defer_task_completion(endpoint, task.call) !=
 				    TR_OK) {
@@ -2340,7 +2398,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 
 		{
 			int task_done_deferred =
-				tr_rpc_executor_run_task(endpoint, &task);
+				tr_rpc_executor_run_observed_task(endpoint, &task);
 			if (!task_done_deferred &&
 			    tr_rpc_defer_task_completion(endpoint, task.call) !=
 				    TR_OK) {
@@ -3556,7 +3614,8 @@ int tr_rpc_endpoint_create_with_executor_group(
 
 	if (!channel || !config || !out || !config->message_pool ||
 	    (config->role != TR_RPC_CLIENT && config->role != TR_RPC_SERVER) ||
-	    config->max_methods == 0 || config->max_calls == 0)
+	    config->max_methods == 0 || config->max_calls == 0 ||
+	    (config->observability_flags & ~TR_OBSERVABILITY_VALID_FLAGS))
 		return TR_ERR_INVALID;
 
 	*out = NULL;
@@ -4636,6 +4695,20 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 	out->executor_queue_capacity = endpoint->executor.capacity;
 	out->executor_continuation_reserve =
 		endpoint->executor.continuation_reserve;
+	out->executor_queue.capacity = endpoint->executor.capacity;
+	out->executor_queue.current = endpoint->executor.queued_count;
+	out->executor_queue.peak = endpoint->executor.queued_peak;
+	out->executor_queue.full_events = endpoint->executor.hard_full_events;
+	out->executor_ready_calls = endpoint->executor.ready_count;
+	out->executor_ready_calls_peak = endpoint->executor.ready_peak;
+	out->observability_flags = endpoint->config.observability_flags;
+	out->executor_enqueued_tasks = endpoint->executor.enqueued_tasks;
+	out->executor_taken_tasks = endpoint->executor.taken_tasks;
+	out->executor_admission_limit_hits =
+		endpoint->executor.admission_limit_hits;
+	out->executor_hard_full_events = endpoint->executor.hard_full_events;
+	out->executor_queue_wait_ns = endpoint->executor.queue_wait_ns;
+	out->executor_handler_ns = endpoint->executor.handler_ns;
 	pthread_mutex_unlock(&endpoint->executor.lock);
 
 	return TR_OK;

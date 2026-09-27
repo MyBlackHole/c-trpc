@@ -1,6 +1,7 @@
 #include "tr/command_queue.h"
 #include "tr/status.h"
 #include "tr/cleanup.h"
+#include "observability_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,8 @@ void tr_command_queue_destroy(struct tr_command_queue *queue)
 	queue->head = 0;
 	queue->tail = 0;
 	queue->count = 0;
+	queue->peak_count = 0;
+	queue->full_events = 0;
 	queue->wake_pending = 0;
 	pthread_mutex_destroy(&queue->lock);
 }
@@ -54,6 +57,7 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 	pthread_mutex_lock(&queue->lock);
 
 	if (queue->count == queue->capacity) {
+		queue->full_events++;
 		pthread_mutex_unlock(&queue->lock);
 		return TR_AGAIN;
 	}
@@ -61,6 +65,7 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 	queue->items[queue->tail] = *command;
 	queue->tail = (queue->tail + 1U) % queue->capacity;
 	queue->count++;
+	tr_observe_high_water_u32(&queue->peak_count, queue->count);
 
 	if (!queue->wake_pending) {
 		queue->wake_pending = 1;
