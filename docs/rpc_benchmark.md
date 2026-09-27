@@ -198,17 +198,25 @@ python3 bench/run_rpc_scalability.py \
 
 Every rate point retains the full Client and Server diagnostic records. Each
 `(workers, handler_ms)` group also emits a `scalability_summary` with the
-highest offered rate that completed without submission/RPC/resource-exhaustion
-evidence, the first rate with an exact Server pressure event, the first
-load-generator drop rate, and maxima for Reactor busy ratio and executor
-queue-wait/handler P99.
+highest **clean scheduled rate**, the first exact Server pressure rate, the first
+load-generator lateness/drop rate, and maxima for Reactor busy ratio and
+executor queue-wait/handler P99.
 
-The tool intentionally does **not** turn a Reactor-busy percentage or a latency
-value into an automatic architecture verdict. Exact wall signals come from
-observable events: executor admission/hard-full, Reactor command/completion
-queue full, or RX/TX/RPC-message/reassembly pool exhaustion. Scheduler drops
-are reported separately so a Python load generator ceiling cannot be mistaken
-for a Server ceiling.
+“Clean scheduled rate” is deliberately stricter than “all requests eventually
+succeeded”: besides zero submit/RPC/resource-exhaustion errors, P99
+schedule-to-submit lateness must stay within one arrival interval. If a 10 kRPS
+schedule (100 us spacing) is being submitted several milliseconds late, the
+tool marks `load_generator_late` instead of claiming that the Server sustained
+10 kRPS. This boundary is about fidelity of the offered schedule, not a Server
+latency SLA.
+
+The tool intentionally does **not** turn a Reactor-busy percentage or an RPC
+latency value into an automatic architecture verdict. Server wall signals come
+from observable events: executor admission/hard-full, Reactor
+command/completion queue full, or RX/TX/RPC-message/reassembly pool exhaustion.
+Load-generator backlog is a separate signal derived from P99 submission
+lateness crossing one scheduled arrival interval; explicit scheduler drops are
+reported separately as well. Neither condition is attributed to the Server.
 
 The GCC release CI job records one full matrix with normal runtime CRC dispatch
 as a diagnostic artifact. It has no throughput, scaling-efficiency, P99, or
