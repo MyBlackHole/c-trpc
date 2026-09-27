@@ -707,6 +707,7 @@ The Xmake CI matrix checks:
 - TX logical-message size is bounded by the current 32-bit message/reassembly sizing policy and configured flow-control limits
 - executor workers run different Calls in parallel, but one Call is intentionally serialized and can therefore be delayed by its own slow handler
 - generic Streaming writes do not internally queue arbitrary application messages: `TR_AGAIN` is intentional backpressure and the caller retries after `TR_RPC_CALL_EVENT_WRITABLE` / server `on_writable`
+- Server executor saturation before the first Streaming handler callback is an admission rejection and returns final `RESOURCE_EXHAUSTED`; saturation after a Streaming Call has already entered application callbacks remains a separate mid-stream policy boundary
 - direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed in Reactor timer callbacks

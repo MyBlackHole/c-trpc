@@ -67,6 +67,7 @@ struct tr_rpc_call_slot {
 	int final_status_seen;
 	int final_status_sent;
 	int final_status;
+	int admission_rejected;
 
 	int cancelled;
 	int cancel_status;
@@ -970,6 +971,63 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 	 * retry path. The overload decision itself has already been accepted.
 	 */
 	return ret == TR_AGAIN ? TR_OK : ret;
+}
+
+/*
+ * A first streaming message that cannot enter the bounded Server executor is
+ * still an admission failure: no application callback has run yet. Preserve
+ * that distinction by returning final RESOURCE_EXHAUSTED instead of turning
+ * executor pressure into a transport/connection failure.
+ *
+ * endpoint->lock must already be held by the Reactor owner.
+ */
+static int
+tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
+				      struct tr_rpc_call_slot *call,
+				      int status)
+{
+	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_rpc_bytes empty = { NULL, 0 };
+	struct tr_rpc_method_desc method;
+	int ret;
+
+	if (!endpoint || !call || !call->method || call->is_unary ||
+	    endpoint->config.role != TR_RPC_SERVER || call->rx_count != 1U ||
+	    call->task_refs != 0U || call->tx_count != 0U ||
+	    call->admission_rejected || call->final_status_sent)
+		return TR_ERR_STATE;
+
+	method = call->method->desc;
+	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
+				    method.response_codec_id, status, &empty,
+				    &encoded);
+	if (ret != TR_OK)
+		return ret;
+
+	call->admission_rejected = 1;
+	call->final_status = status;
+	call->deadline_ns = 0;
+	tr_rpc_deadline_changed_locked(endpoint);
+	endpoint->stat_calls_completed++;
+
+	ret = tr_stream_send(call->stream, encoded);
+	if (ret == TR_OK) {
+		(void)tr_buffer_take(&encoded);
+		call->final_status_sent = 1;
+		ret = tr_stream_close(call->stream);
+		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
+			call->local_closed = 1;
+			call->need_local_close = 0;
+			ret = TR_OK;
+		} else if (ret == TR_AGAIN) {
+			call->need_local_close = 1;
+			ret = TR_OK;
+		}
+	} else if (ret == TR_AGAIN) {
+		call->pending_control = tr_buffer_take(&encoded);
+		ret = TR_OK;
+	}
+	return ret;
 }
 
 static int tr_rpc_executor_ready_push_locked(struct tr_rpc_executor *executor,
@@ -2279,6 +2337,8 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 		ret = tr_stream_send(call->stream, call->pending_control);
 		if (ret == TR_OK) {
 			(void)tr_buffer_take(&call->pending_control);
+			if (call->admission_rejected)
+				call->final_status_sent = 1;
 			call->need_local_close = 1;
 		} else if (ret != TR_AGAIN) {
 			tr_buffer_release(tr_buffer_take(&call->pending_control));
@@ -2293,6 +2353,8 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 			call->need_local_close = 0;
 			call->local_closed = 1;
+			if (call->admission_rejected && call->remote_closed)
+				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
 		}
 	}
@@ -2548,6 +2610,18 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	pthread_mutex_lock(&endpoint->lock);
 	call = tr_rpc_find_call_by_stream_locked(endpoint, stream, &slot);
 
+	if (call && call->admission_rejected &&
+	    wire.type == TR_RPC_WIRE_REQUEST) {
+		/*
+		 * The rejection path owns final STATUS + local half-close ordering.
+		 * A peer may race additional request data before observing STATUS;
+		 * discard it without inserting an early close ahead of the pending
+		 * rejection frame.
+		 */
+		pthread_mutex_unlock(&endpoint->lock);
+		return TR_STREAM_DATA_RELEASE;
+	}
+
 	if (wire.type == TR_RPC_WIRE_REQUEST) {
 		enum tr_rpc_cardinality cardinality;
 
@@ -2619,14 +2693,20 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		task.type = call->is_unary ? TR_RPC_TASK_SERVER_UNARY :
 					     TR_RPC_TASK_SERVER_STREAM_MESSAGE;
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
-		if (ret == TR_AGAIN && call->is_unary) {
+		if (ret == TR_AGAIN && first_message) {
 			/*
-			 * Bounded executor saturation is not transport failure. The
-			 * handler has not run, so reject this Unary explicitly while
-			 * keeping the physical connection usable for later Calls.
+			 * Before the first executor task is admitted, no Server handler
+			 * has run. Report bounded admission pressure explicitly for both
+			 * Unary and Streaming Calls without poisoning the connection.
 			 */
-			ret = tr_rpc_reject_unary_locked(
-				endpoint, call, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+			if (call->is_unary)
+				ret = tr_rpc_reject_unary_locked(
+					endpoint, call,
+					TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+			else
+				ret = tr_rpc_reject_stream_admission_locked(
+					endpoint, call,
+					TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 			pthread_mutex_unlock(&endpoint->lock);
 			if (ret != TR_OK)
 				(void)tr_stream_close(stream);
@@ -2858,6 +2938,14 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 	if (event == TR_STREAM_EVENT_REMOTE_CLOSED) {
 		call->remote_closed = 1;
+		if (call->admission_rejected) {
+			if (call->local_closed && !call->pending_control &&
+			    !call->need_local_close)
+				call->state = TR_RPC_CALL_TERMINAL;
+			tr_rpc_maybe_free_call_locked(call);
+			pthread_mutex_unlock(&endpoint->lock);
+			return;
+		}
 		if (call->cancelled) {
 			tr_rpc_maybe_free_call_locked(call);
 			pthread_mutex_unlock(&endpoint->lock);
@@ -2918,7 +3006,8 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			   call->method &&
 			   call->method->handler_kind ==
 				   TR_RPC_HANDLER_STREAM &&
-			   !call->terminal_notified) {
+			   !call->terminal_notified &&
+			   !call->admission_rejected) {
 			task.type = TR_RPC_TASK_SERVER_CLOSE;
 			task.call =
 				tr_rpc_make_call_handle(endpoint, slot, call);
@@ -2988,7 +3077,8 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		} else if (!call->is_unary &&
 			   call->method->handler_kind ==
 				   TR_RPC_HANDLER_STREAM &&
-			   !call->terminal_notified) {
+			   !call->terminal_notified &&
+			   !call->admission_rejected) {
 			memset(&task, 0, sizeof(task));
 			task.type = TR_RPC_TASK_SERVER_CLOSE;
 			task.call = tr_rpc_make_call_handle(endpoint, i, call);
@@ -4036,11 +4126,18 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 		if (call->is_unary &&
 		    (call->pending_tx || call->need_local_close))
 			ret = tr_rpc_try_unary_send_locked(endpoint, call);
-		else if (!call->is_unary && call->need_local_close) {
+		else if (!call->is_unary && call->pending_control) {
+			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
+			tr_rpc_maybe_free_call_locked(call);
+		} else if (!call->is_unary && call->need_local_close) {
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				call->need_local_close = 0;
 				call->local_closed = 1;
+				if (call->admission_rejected &&
+				    call->remote_closed)
+					call->state = TR_RPC_CALL_TERMINAL;
+				tr_rpc_maybe_free_call_locked(call);
 				ret = TR_OK;
 			}
 		}
