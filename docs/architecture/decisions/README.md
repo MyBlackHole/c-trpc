@@ -7,6 +7,7 @@ ADR 只记录“为什么做这个选择”，不重复实现细节。
 - [ADR-003：每 Reactor 使用独立 SO_REUSEPORT listener](ADR-003-reuseport-listener.md)
 - [ADR-004：RPC worker 通过 completion 回 owner](ADR-004-worker-completion.md)
 - [ADR-005：Pipeline V1 固定一个 Reactor owner](ADR-005-pipeline-affinity.md)
+- [ADR-006：Split facade connection-group binding identity](ADR-006-split-facade-binding.md)
 
 状态约定：
 
