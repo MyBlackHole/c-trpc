@@ -20,6 +20,7 @@
 #define TR_CHANNEL_HELLO_WIRE_SIZE 32U
 #define TR_CHANNEL_PROTOCOL_BUFFER_COUNT 8U
 #define TR_CHANNEL_PROTOCOL_BUFFER_SIZE 64U
+#define TR_STREAM_FREE_NONE UINT32_MAX
 
 enum tr_stream_slot_state {
 	TR_STREAM_SLOT_FREE = 0,
@@ -29,6 +30,7 @@ enum tr_stream_slot_state {
 
 struct tr_stream_slot {
 	uint32_t generation;
+	uint32_t free_next;
 	enum tr_stream_slot_state state;
 	enum tr_lane lane;
 	uint32_t stream_id;
@@ -75,6 +77,8 @@ struct tr_channel {
 	struct tr_buffer_pool protocol_pool;
 
 	uint32_t next_local_stream_id;
+	uint32_t free_stream_head;
+	uint32_t active_streams;
 	struct tr_stream_slot *streams;
 
 	tr_stream_data_cb data_cb;
@@ -603,13 +607,7 @@ static int tr_channel_connection_ready_locked(const struct tr_channel *channel,
 static uint32_t
 tr_channel_active_streams_locked(const struct tr_channel *channel)
 {
-	uint32_t i;
-	uint32_t count = 0;
-
-	for (i = 0; i < channel->config.max_streams; ++i)
-		if (channel->streams[i].state != TR_STREAM_SLOT_FREE)
-			count++;
-	return count;
+	return channel->active_streams;
 }
 
 static int tr_channel_send_pending_goaway(struct tr_channel *channel)
@@ -726,11 +724,15 @@ tr_stream_make_handle(struct tr_channel *channel, uint32_t slot,
 	return handle;
 }
 
-static void tr_stream_reset_slot(struct tr_stream_slot *stream)
+static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 {
+	struct tr_stream_slot *stream;
 	uint32_t generation;
 
-	if (!stream)
+	if (!channel || slot >= channel->config.max_streams)
+		return;
+	stream = &channel->streams[slot];
+	if (stream->state == TR_STREAM_SLOT_FREE)
 		return;
 
 	generation = stream->generation;
@@ -738,6 +740,10 @@ static void tr_stream_reset_slot(struct tr_stream_slot *stream)
 		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
 	memset(stream, 0, sizeof(*stream));
 	stream->generation = generation;
+	stream->free_next = channel->free_stream_head;
+	channel->free_stream_head = slot;
+	if (channel->active_streams != 0)
+		channel->active_streams--;
 }
 
 static int tr_stream_connection_matches(const struct tr_channel *channel,
@@ -843,7 +849,7 @@ static void tr_channel_fail_lane_streams(struct tr_channel *channel,
 		    channel->streams[i].lane == lane) {
 			handle = tr_stream_make_handle(channel, i,
 						       &channel->streams[i]);
-			tr_stream_reset_slot(&channel->streams[i]);
+			tr_stream_free_locked(channel, i);
 			channel->stat_stream_errors++;
 			notify = 1;
 		}
@@ -922,38 +928,37 @@ static int tr_stream_allocate_locked(struct tr_channel *channel,
 				     enum tr_stream_slot_state state,
 				     struct tr_stream_handle *out)
 {
-	uint32_t i;
+	struct tr_stream_slot *stream;
+	uint32_t generation;
+	uint32_t slot = channel->free_stream_head;
 
-	for (i = 0; i < channel->config.max_streams; ++i) {
-		struct tr_stream_slot *stream = &channel->streams[i];
-		uint32_t generation;
+	if (slot == TR_STREAM_FREE_NONE)
+		return TR_AGAIN;
 
-		if (stream->state != TR_STREAM_SLOT_FREE)
-			continue;
+	stream = &channel->streams[slot];
+	channel->free_stream_head = stream->free_next;
+	generation = stream->generation + 1U;
+	if (generation == 0)
+		generation = 1U;
 
-		generation = stream->generation + 1U;
-		if (generation == 0)
-			generation = 1U;
+	memset(stream, 0, sizeof(*stream));
+	stream->generation = generation;
+	stream->free_next = TR_STREAM_FREE_NONE;
+	stream->state = state;
+	stream->lane = lane;
+	stream->stream_id = stream_id;
+	stream->local_open = 1;
+	stream->remote_open = 1;
+	stream->next_tx_message_id = 1;
+	stream->next_rx_message_id = 1;
+	stream->rx_advertised_limit =
+		channel->config.initial_window_bytes;
 
-		memset(stream, 0, sizeof(*stream));
-		stream->generation = generation;
-		stream->state = state;
-		stream->lane = lane;
-		stream->stream_id = stream_id;
-		stream->local_open = 1;
-		stream->remote_open = 1;
-		stream->next_tx_message_id = 1;
-		stream->next_rx_message_id = 1;
-		stream->rx_advertised_limit =
-			channel->config.initial_window_bytes;
-
-		if (out)
-			*out = tr_stream_make_handle(channel, i, stream);
-		channel->stat_streams_opened++;
-		return TR_OK;
-	}
-
-	return TR_AGAIN;
+	if (out)
+		*out = tr_stream_make_handle(channel, slot, stream);
+	channel->active_streams++;
+	channel->stat_streams_opened++;
+	return TR_OK;
 }
 
 static int tr_channel_protocol_error(struct tr_channel *channel,
@@ -1186,7 +1191,7 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 			      TR_FRAME_WINDOW_UPDATE, 0, stream->stream_id,
 			      stream->rx_advertised_limit, NULL);
 	if (ret != TR_OK) {
-		tr_stream_reset_slot(stream);
+		tr_stream_free_locked(channel, slot);
 		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
@@ -1457,7 +1462,7 @@ static int tr_channel_handle_stream_close(struct tr_channel *channel,
 		stream = &channel->streams[slot];
 		if (stream->generation == generation && !stream->local_open &&
 		    !stream->remote_open) {
-			tr_stream_reset_slot(stream);
+			tr_stream_free_locked(channel, slot);
 			channel->stat_streams_closed++;
 		}
 		pthread_mutex_unlock(&channel->lock);
@@ -1967,6 +1972,15 @@ static int tr_channel_create_common(
 		channel->config.max_streams, sizeof(*channel->streams));
 	if (!channel->streams)
 		return TR_ERR_NOMEM;
+	{
+		uint32_t i;
+
+		channel->free_stream_head = 0U;
+		for (i = 0; i < channel->config.max_streams; ++i)
+			channel->streams[i].free_next =
+				(i + 1U < channel->config.max_streams) ?
+					i + 1U : TR_STREAM_FREE_NONE;
+	}
 
 	ret = tr_buffer_pool_init(&channel->protocol_pool,
 				  TR_CHANNEL_PROTOCOL_BUFFER_COUNT,
@@ -2626,7 +2640,7 @@ int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 			      tr_lane_flag(lane), stream_id,
 			      stream->rx_advertised_limit, NULL);
 	if (ret != TR_OK) {
-		tr_stream_reset_slot(stream);
+		tr_stream_free_locked(channel, slot);
 		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
@@ -2761,7 +2775,7 @@ int tr_stream_close(struct tr_stream_handle handle)
 		stream = &channel->streams[slot];
 		if (stream->generation == generation && !stream->local_open &&
 		    !stream->remote_open) {
-			tr_stream_reset_slot(stream);
+			tr_stream_free_locked(channel, slot);
 			channel->stat_streams_closed++;
 		}
 		pthread_mutex_unlock(&channel->lock);
