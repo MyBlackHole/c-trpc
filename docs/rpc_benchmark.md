@@ -189,10 +189,12 @@ offered rates are explicit: 5000/10000/20000/40000 RPS.
 
 The matrix is multi-source when needed. A rate at or below the configured
 per-generator target uses one Client; higher rates are partitioned across up to
-16 independent `bench_rpc client` processes. All generators finish warmup
-first, then receive absolute `CLOCK_MONOTONIC` start timestamps with small
-phase offsets so their local fixed-rate schedules interleave instead of starting
-as an accidental burst. Each process keeps its own scheduler lateness/drop
+16 independent `bench_rpc client` processes. Generators complete their
+window=1 warmup **sequentially**, so fanout cannot turn warmup itself into an
+unmeasured saturation workload. After every Client has reached the start gate,
+the runner sends absolute `CLOCK_MONOTONIC` start timestamps with small phase
+offsets so their local fixed-rate schedules interleave instead of starting as
+an accidental burst. Each process keeps its own scheduler lateness/drop
 accounting; the runner sums exact counts and keeps the worst generator lateness
 for load-fidelity attribution.
 
