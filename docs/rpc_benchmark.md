@@ -185,7 +185,16 @@ window:     128
 For nonzero handler delays, offered rates are generated from the handler-only
 arithmetic `workers * 1000 / handler_ms` at 0.5x/1x/2x/4x. For the 0 ms
 handler there is no meaningful handler-only capacity formula, so the default
-offered rates are explicit: 1000/5000/10000/20000 RPS.
+offered rates are explicit: 5000/10000/20000/40000 RPS.
+
+The matrix is multi-source when needed. A rate at or below the configured
+per-generator target uses one Client; higher rates are partitioned across up to
+16 independent `bench_rpc client` processes. All generators finish warmup
+first, then receive absolute `CLOCK_MONOTONIC` start timestamps with small
+phase offsets so their local fixed-rate schedules interleave instead of starting
+as an accidental burst. Each process keeps its own scheduler lateness/drop
+accounting; the runner sums exact counts and keeps the worst generator lateness
+for load-fidelity attribution.
 
 ```sh
 python3 bench/run_rpc_scalability.py \
@@ -193,6 +202,8 @@ python3 bench/run_rpc_scalability.py \
   --trials 1 --requests 256 \
   --workers 1,2,4,8 --handler-ms 0,1,10 \
   --executor-queue 64 --window 128 --capacity 128 \
+  --max-generators 16 --target-rate-per-generator 4000 \
+  --min-arrival-ms 250 \
   --output /tmp/rpc-bench/scalability.jsonl
 ```
 
@@ -201,6 +212,12 @@ Every rate point retains the full Client and Server diagnostic records. Each
 highest **clean scheduled rate**, the first exact Server pressure rate, the first
 load-generator lateness/drop rate, and maxima for Reactor busy ratio and
 executor queue-wait/handler P99.
+
+High-rate rows also lengthen the measurement automatically. The runner treats
+`--requests` as a floor and raises the request count as needed to keep the
+scheduled arrival window at least `--min-arrival-ms`. This prevents a short
+high-QPS burst from fitting entirely inside the bounded executor queue and being
+misreported as sustained capacity.
 
 “Clean scheduled rate” is deliberately stricter than “all requests eventually
 succeeded”: besides zero submit/RPC/resource-exhaustion errors, P99
