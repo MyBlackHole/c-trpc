@@ -706,18 +706,6 @@ static int tr_stream_id_is_local(const struct tr_channel *channel,
 	return (stream_id & 1U) == 0;
 }
 
-static uint32_t tr_stream_index_hash(uint32_t stream_id)
-{
-	uint32_t value = stream_id;
-
-	value ^= value >> 16;
-	value *= UINT32_C(0x7feb352d);
-	value ^= value >> 15;
-	value *= UINT32_C(0x846ca68b);
-	value ^= value >> 16;
-	return value;
-}
-
 static size_t tr_stream_index_capacity_for(uint32_t max_streams)
 {
 	size_t capacity = 1U;
@@ -737,7 +725,7 @@ static size_t tr_stream_index_capacity_for(uint32_t max_streams)
 static size_t
 tr_stream_index_home(const struct tr_channel *channel, uint32_t stream_id)
 {
-	return (size_t)tr_stream_index_hash(stream_id) &
+	return (size_t)tr_channel_stream_id_hash(stream_id) &
 	       (channel->stream_index_capacity - 1U);
 }
 
