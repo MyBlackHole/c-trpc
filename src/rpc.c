@@ -745,6 +745,20 @@ static int tr_rpc_bind_call_stream_locked(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
+static void tr_rpc_unbind_call_stream_locked(struct tr_rpc_endpoint *endpoint,
+					      uint32_t call_slot,
+					      struct tr_rpc_call_slot *call)
+{
+	if (!endpoint || !call || call_slot >= endpoint->config.max_calls)
+		return;
+	if (call->stream.channel != endpoint->channel ||
+	    call->stream.slot >= endpoint->stream_slot_capacity)
+		return;
+	if (endpoint->call_by_stream_slot[call->stream.slot] == call_slot)
+		endpoint->call_by_stream_slot[call->stream.slot] =
+			TR_RPC_STREAM_CALL_NONE;
+}
+
 static void
 tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 {
@@ -769,11 +783,7 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 
 	slot = (uint32_t)(call - endpoint->calls);
 	generation = call->generation;
-	if (call->stream.channel == endpoint->channel &&
-	    call->stream.slot < endpoint->stream_slot_capacity &&
-	    endpoint->call_by_stream_slot[call->stream.slot] == slot)
-		endpoint->call_by_stream_slot[call->stream.slot] =
-			TR_RPC_STREAM_CALL_NONE;
+	tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
 	if (call->pending_tx)
 		tr_buffer_release(call->pending_tx);
 	if (call->pending_control)
@@ -3486,6 +3496,13 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 						       TR_RPC_STATUS_OK :
 						       TR_RPC_STATUS_UNAVAILABLE);
 
+		/*
+		 * Stream lifetime ends here even when Call lifetime continues while
+		 * executor callbacks/task_refs drain. Release the Stream-slot index
+		 * immediately so Channel may recycle that slot for a new generation.
+		 */
+		tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
+
 		call->deadline_ns = 0;
 		tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
@@ -3570,6 +3587,11 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		    call->method->desc.lane != failed_lane)
 			continue;
 
+		/*
+		 * The failed Channel lane no longer has a live Stream event source.
+		 * Detach the slot index before terminal Call callbacks drain.
+		 */
+		tr_rpc_unbind_call_stream_locked(endpoint, i, call);
 		call->deadline_ns = 0;
 		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
