@@ -5166,6 +5166,44 @@ static void test_server_peer_refcount_drain(void)
 	pthread_mutex_lock(&ctx.lock);
 	while ((ctx.entered < 2U || ctx.results < 1U) && ret == 0)
 		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	if (ret != 0) {
+		struct tr_server_stats server_stats;
+		struct tr_channel_stats client_channel_stats;
+		struct tr_rpc_endpoint_stats client_rpc_stats;
+		unsigned entered = ctx.entered;
+		unsigned results = ctx.results;
+		unsigned active = ctx.active;
+
+		pthread_mutex_unlock(&ctx.lock);
+		memset(&server_stats, 0, sizeof(server_stats));
+		memset(&client_channel_stats, 0, sizeof(client_channel_stats));
+		memset(&client_rpc_stats, 0, sizeof(client_rpc_stats));
+		(void)tr_server_get_stats(server, &server_stats);
+		(void)tr_client_get_channel_stats(client, &client_channel_stats);
+		(void)tr_client_get_rpc_stats(client, &client_rpc_stats);
+		fprintf(stderr,
+			"peer-refcount timeout: entered=%u results=%u active=%u "
+			"peers=%u ready=%u reaping=%u reaped=%llu "
+			"server_calls=%llu/%llu server_exec=%u/%u/%u "
+			"client_streams=%u client_calls=%u/%u/%u started=%llu completed=%llu\n",
+			entered, results, active,
+			server_stats.peers_current,
+			server_stats.peers_ready_current,
+			server_stats.peers_reaping_current,
+			(unsigned long long)server_stats.peers_reaped_total,
+			(unsigned long long)server_stats.rpc.calls_started,
+			(unsigned long long)server_stats.rpc.calls_completed,
+			server_stats.rpc.executor_queued_tasks_current,
+			server_stats.rpc.executor_running_tasks_current,
+			server_stats.rpc.executor_ready_calls_current,
+			client_channel_stats.active_streams,
+			client_rpc_stats.opening_calls,
+			client_rpc_stats.active_calls,
+			client_rpc_stats.terminal_calls,
+			(unsigned long long)client_rpc_stats.calls_started,
+			(unsigned long long)client_rpc_stats.calls_completed);
+		pthread_mutex_lock(&ctx.lock);
+	}
 	assert(ret == 0);
 	assert(ctx.entered == 2U);
 	assert(ctx.results == 1U);
