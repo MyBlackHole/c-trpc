@@ -3106,6 +3106,13 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			call->method = method;
 			call->is_unary = method->handler_kind ==
 					 TR_RPC_HANDLER_UNARY;
+			ret = tr_rpc_bind_call_stream_locked(endpoint, slot, stream);
+			if (ret != TR_OK) {
+				tr_rpc_free_call_locked(endpoint, call);
+				pthread_mutex_unlock(&endpoint->lock);
+				(void)tr_stream_close(stream);
+				return TR_STREAM_DATA_RELEASE;
+			}
 			first_message = 1;
 		} else {
 			method = call->method;
@@ -3993,6 +4000,15 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
+	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
+	if (ret != TR_OK) {
+		struct tr_stream_handle stream = call->stream;
+
+		tr_rpc_free_call_locked(endpoint, call);
+		pthread_mutex_unlock(&endpoint->lock);
+		(void)tr_stream_close(stream);
+		return ret;
+	}
 
 	*request->out = handle;
 	pthread_mutex_unlock(&endpoint->lock);
@@ -4101,6 +4117,15 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
+		return ret;
+	}
+	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
+	if (ret != TR_OK) {
+		struct tr_stream_handle stream = call->stream;
+
+		tr_rpc_free_call_locked(endpoint, call);
+		pthread_mutex_unlock(&endpoint->lock);
+		(void)tr_stream_close(stream);
 		return ret;
 	}
 
