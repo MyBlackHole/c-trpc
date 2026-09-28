@@ -6,6 +6,19 @@
 /* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
 
+/* Stream wire-id hash shared by the bounded Channel index and its tests. */
+static inline uint32_t tr_channel_stream_id_hash(uint32_t stream_id)
+{
+	uint32_t value = stream_id;
+
+	value ^= value >> 16;
+	value *= UINT32_C(0x7feb352d);
+	value ^= value >> 15;
+	value *= UINT32_C(0x846ca68b);
+	value ^= value >> 16;
+	return value;
+}
+
 /* 创建后固定的 Stream slot 数，仅供内部预分配索引使用。 */
 uint32_t tr_channel_max_streams(struct tr_channel *channel);
 

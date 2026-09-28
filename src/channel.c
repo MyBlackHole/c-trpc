@@ -34,6 +34,11 @@ struct tr_channel_pending_hello {
 	uint8_t payload[TR_CHANNEL_HELLO_WIRE_SIZE];
 };
 
+struct tr_stream_index_entry {
+	uint32_t stream_id;
+	uint32_t slot;
+};
+
 struct tr_stream_slot {
 	uint32_t generation;
 	uint32_t free_next;
@@ -87,6 +92,8 @@ struct tr_channel {
 	uint32_t free_stream_head;
 	uint32_t active_streams;
 	struct tr_stream_slot *streams;
+	struct tr_stream_index_entry *stream_index;
+	size_t stream_index_capacity;
 
 	tr_stream_data_cb data_cb;
 	tr_stream_event_cb stream_event_cb;
@@ -699,20 +706,143 @@ static int tr_stream_id_is_local(const struct tr_channel *channel,
 	return (stream_id & 1U) == 0;
 }
 
+static size_t tr_stream_index_capacity_for(uint32_t max_streams)
+{
+	size_t capacity = 1U;
+	size_t target;
+
+	if (max_streams == 0U)
+		return 0U;
+#if SIZE_MAX <= UINT32_MAX
+	if (max_streams > (uint32_t)(SIZE_MAX / 2U))
+		return 0U;
+#endif
+	target = (size_t)max_streams * 2U;
+	while (capacity < target) {
+		if (capacity > SIZE_MAX / 2U)
+			return 0U;
+		capacity <<= 1U;
+	}
+	return capacity;
+}
+
+static size_t
+tr_stream_index_home(const struct tr_channel *channel, uint32_t stream_id)
+{
+	return (size_t)tr_channel_stream_id_hash(stream_id) &
+	       (channel->stream_index_capacity - 1U);
+}
+
+static int tr_stream_index_insert_locked(struct tr_channel *channel,
+					 uint32_t stream_id, uint32_t slot)
+{
+	size_t mask;
+	size_t pos;
+	size_t probes;
+
+	if (!channel || !channel->stream_index || stream_id == 0U ||
+	    slot >= channel->config.max_streams ||
+	    channel->stream_index_capacity == 0U)
+		return TR_ERR_INVALID;
+
+	mask = channel->stream_index_capacity - 1U;
+	pos = tr_stream_index_home(channel, stream_id);
+	for (probes = 0; probes < channel->stream_index_capacity; ++probes) {
+		struct tr_stream_index_entry *entry =
+			&channel->stream_index[pos];
+
+		if (entry->stream_id == 0U) {
+			entry->stream_id = stream_id;
+			entry->slot = slot;
+			return TR_OK;
+		}
+		if (entry->stream_id == stream_id)
+			return TR_ERR_STATE;
+		pos = (pos + 1U) & mask;
+	}
+
+	return TR_AGAIN;
+}
+
+static int tr_stream_index_remove_locked(struct tr_channel *channel,
+					 uint32_t stream_id)
+{
+	size_t mask;
+	size_t hole;
+	size_t scan;
+	size_t probes;
+
+	if (!channel || !channel->stream_index || stream_id == 0U ||
+	    channel->stream_index_capacity == 0U)
+		return TR_ERR_INVALID;
+
+	mask = channel->stream_index_capacity - 1U;
+	hole = tr_stream_index_home(channel, stream_id);
+	for (probes = 0; probes < channel->stream_index_capacity; ++probes) {
+		if (channel->stream_index[hole].stream_id == 0U)
+			return TR_ERR_STALE;
+		if (channel->stream_index[hole].stream_id == stream_id)
+			break;
+		hole = (hole + 1U) & mask;
+	}
+	if (probes == channel->stream_index_capacity)
+		return TR_ERR_STALE;
+
+	scan = (hole + 1U) & mask;
+	while (channel->stream_index[scan].stream_id != 0U) {
+		size_t home = tr_stream_index_home(
+			channel, channel->stream_index[scan].stream_id);
+		size_t scan_distance = (scan - home) & mask;
+		size_t hole_distance = (hole - home) & mask;
+
+		if (hole_distance < scan_distance) {
+			channel->stream_index[hole] =
+				channel->stream_index[scan];
+			hole = scan;
+		}
+		scan = (scan + 1U) & mask;
+	}
+
+	memset(&channel->stream_index[hole], 0,
+	       sizeof(channel->stream_index[hole]));
+	return TR_OK;
+}
+
 static struct tr_stream_slot *tr_stream_lookup_id(struct tr_channel *channel,
 						  uint32_t stream_id,
 						  uint32_t *slot_out)
 {
-	uint32_t i;
+	size_t mask;
+	size_t pos;
+	size_t probes;
 
-	for (i = 0; i < channel->config.max_streams; ++i) {
-		struct tr_stream_slot *stream = &channel->streams[i];
-		if (stream->state != TR_STREAM_SLOT_FREE &&
-		    stream->stream_id == stream_id) {
-			if (slot_out)
-				*slot_out = i;
-			return stream;
+	if (!channel || !channel->stream_index || stream_id == 0U ||
+	    channel->stream_index_capacity == 0U)
+		return NULL;
+
+	mask = channel->stream_index_capacity - 1U;
+	pos = tr_stream_index_home(channel, stream_id);
+	for (probes = 0; probes < channel->stream_index_capacity; ++probes) {
+		struct tr_stream_index_entry *entry =
+			&channel->stream_index[pos];
+		struct tr_stream_slot *stream;
+
+		if (entry->stream_id == 0U)
+			return NULL;
+		if (entry->stream_id != stream_id) {
+			pos = (pos + 1U) & mask;
+			continue;
 		}
+		if (entry->slot >= channel->config.max_streams)
+			return NULL;
+
+		stream = &channel->streams[entry->slot];
+		if (stream->state == TR_STREAM_SLOT_FREE ||
+		    stream->stream_id != stream_id)
+			return NULL;
+		if (slot_out)
+			*slot_out = entry->slot;
+		return stream;
 	}
 	return NULL;
 }
@@ -756,6 +886,7 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 		return;
 
 	generation = stream->generation;
+	(void)tr_stream_index_remove_locked(channel, stream->stream_id);
 	if (stream->rx_reassembly)
 		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
 	memset(stream, 0, sizeof(*stream));
@@ -973,6 +1104,18 @@ static int tr_stream_allocate_locked(struct tr_channel *channel,
 	stream->next_rx_message_id = 1;
 	stream->rx_advertised_limit =
 		channel->config.initial_window_bytes;
+
+	{
+		int ret = tr_stream_index_insert_locked(channel, stream_id, slot);
+
+		if (ret != TR_OK) {
+			memset(stream, 0, sizeof(*stream));
+			stream->generation = generation;
+			stream->free_next = channel->free_stream_head;
+			channel->free_stream_head = slot;
+			return ret;
+		}
+	}
 
 	if (out)
 		*out = tr_stream_make_handle(channel, slot, stream);
@@ -2030,6 +2173,7 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	}
 	if (build->protocol_pool_ready)
 		tr_buffer_pool_destroy(&channel->protocol_pool);
+	free(channel->stream_index);
 	free(channel->streams);
 	if (build->keepalive_timer_ready)
 		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
@@ -2123,7 +2267,13 @@ static int tr_channel_create_common(
 
 	channel->streams = (struct tr_stream_slot *)calloc(
 		channel->config.max_streams, sizeof(*channel->streams));
-	if (!channel->streams)
+	channel->stream_index_capacity =
+		tr_stream_index_capacity_for(channel->config.max_streams);
+	if (channel->stream_index_capacity == 0U)
+		return TR_ERR_INVALID;
+	channel->stream_index = (struct tr_stream_index_entry *)calloc(
+		channel->stream_index_capacity, sizeof(*channel->stream_index));
+	if (!channel->streams || !channel->stream_index)
 		return TR_ERR_NOMEM;
 	{
 		uint32_t i;
@@ -2237,6 +2387,7 @@ void tr_channel_destroy(struct tr_channel *channel)
 				tr_buffer_release(
 					channel->streams[i].rx_reassembly);
 	}
+	free(channel->stream_index);
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
 	if (channel->keepalive_timer_registered) {
