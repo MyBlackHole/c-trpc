@@ -24,6 +24,8 @@ enum tr_rpc_call_state {
 	TR_RPC_CALL_TERMINAL
 };
 
+#define TR_RPC_CALL_FREE_NONE UINT32_MAX
+
 enum tr_rpc_handler_kind {
 	TR_RPC_HANDLER_NONE = 0,
 	TR_RPC_HANDLER_UNARY,
@@ -86,6 +88,7 @@ struct tr_rpc_task {
 
 struct tr_rpc_call_slot {
 	uint32_t generation;
+	uint32_t free_next;
 	enum tr_rpc_call_state state;
 
 	struct tr_stream_handle stream;
@@ -247,6 +250,7 @@ struct tr_rpc_endpoint {
 
 	struct tr_rpc_method_entry *methods;
 	struct tr_rpc_call_slot *calls;
+	uint32_t free_call_head;
 
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
@@ -691,29 +695,28 @@ static int tr_rpc_allocate_call_locked(struct tr_rpc_endpoint *endpoint,
 				       struct tr_rpc_call_slot **out,
 				       uint32_t *slot_out)
 {
-	uint32_t i;
+	struct tr_rpc_call_slot *call;
+	uint32_t generation;
+	uint32_t slot = endpoint->free_call_head;
 
-	for (i = 0; i < endpoint->config.max_calls; ++i) {
-		struct tr_rpc_call_slot *call = &endpoint->calls[i];
-		uint32_t generation;
+	if (slot == TR_RPC_CALL_FREE_NONE)
+		return TR_AGAIN;
 
-		if (call->state != TR_RPC_CALL_FREE)
-			continue;
+	call = &endpoint->calls[slot];
+	endpoint->free_call_head = call->free_next;
+	generation = call->generation + 1U;
+	if (generation == 0)
+		generation = 1U;
 
-		generation = call->generation + 1U;
-		if (generation == 0)
-			generation = 1U;
-
-		memset(call, 0, sizeof(*call));
-		call->generation = generation;
-		endpoint->stat_calls_started++;
-		if (out)
-			*out = call;
-		if (slot_out)
-			*slot_out = i;
-		return TR_OK;
-	}
-	return TR_AGAIN;
+	memset(call, 0, sizeof(*call));
+	call->generation = generation;
+	call->free_next = TR_RPC_CALL_FREE_NONE;
+	endpoint->stat_calls_started++;
+	if (out)
+		*out = call;
+	if (slot_out)
+		*slot_out = slot;
+	return TR_OK;
 }
 
 static void
@@ -729,13 +732,16 @@ tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 	call->pending_executor_task_valid = 0;
 }
 
-static void tr_rpc_free_call_locked(struct tr_rpc_call_slot *call)
+static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
+				    struct tr_rpc_call_slot *call)
 {
 	uint32_t generation;
+	uint32_t slot;
 
-	if (!call)
+	if (!endpoint || !call || call->state == TR_RPC_CALL_FREE)
 		return;
 
+	slot = (uint32_t)(call - endpoint->calls);
 	generation = call->generation;
 	if (call->pending_tx)
 		tr_buffer_release(call->pending_tx);
@@ -744,15 +750,18 @@ static void tr_rpc_free_call_locked(struct tr_rpc_call_slot *call)
 	tr_rpc_drop_pending_executor_task_locked(call);
 	memset(call, 0, sizeof(*call));
 	call->generation = generation;
+	call->free_next = endpoint->free_call_head;
+	endpoint->free_call_head = slot;
 }
 
-static void tr_rpc_maybe_free_call_locked(struct tr_rpc_call_slot *call)
+static void tr_rpc_maybe_free_call_locked(struct tr_rpc_endpoint *endpoint,
+					  struct tr_rpc_call_slot *call)
 {
 	if (call && call->state == TR_RPC_CALL_TERMINAL &&
 	    call->task_refs == 0 && !call->pending_control &&
 	    !call->need_local_close && !call->pending_executor_task_valid &&
 	    !call->close_notify_pending)
-		tr_rpc_free_call_locked(call);
+		tr_rpc_free_call_locked(endpoint, call);
 }
 
 static enum tr_rpc_cardinality
@@ -980,7 +989,7 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 				call->state = TR_RPC_CALL_TERMINAL;
 				call->deadline_ns = 0;
 				tr_rpc_deadline_changed_locked(endpoint);
-				tr_rpc_maybe_free_call_locked(call);
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 			}
 			return TR_OK;
 		}
@@ -1495,7 +1504,7 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 		    call->generation == handle.generation) {
 			if (call->task_refs != 0)
 				call->task_refs--;
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 		}
 	}
 
@@ -2837,7 +2846,7 @@ static int tr_rpc_cancel_on_owner(void *arg)
 
 	call->need_local_close = 1;
 	(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-	tr_rpc_maybe_free_call_locked(call);
+	tr_rpc_maybe_free_call_locked(endpoint, call);
 	tr_rpc_deadline_changed_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 
@@ -3089,7 +3098,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 								 metadata,
 								 metadata_len);
 			if (ret != TR_OK) {
-				tr_rpc_free_call_locked(call);
+				tr_rpc_free_call_locked(endpoint, call);
 				pthread_mutex_unlock(&endpoint->lock);
 				(void)tr_stream_close(stream);
 				return TR_STREAM_DATA_RELEASE;
@@ -3304,7 +3313,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		}
 		call->need_local_close = 1;
 		(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-		tr_rpc_maybe_free_call_locked(call);
+		tr_rpc_maybe_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_STREAM_DATA_RELEASE;
 	}
@@ -3336,7 +3345,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 	if (event == TR_STREAM_EVENT_OPENED) {
 		if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL) {
 			(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
@@ -3362,7 +3371,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				(void)tr_rpc_notify_terminal_locked(
 					endpoint, slot, call, call->final_status);
 			}
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 		} else if (call->is_unary)
 			ret = tr_rpc_try_unary_send_locked(endpoint, call);
 		else if (endpoint->config.role == TR_RPC_CLIENT)
@@ -3387,12 +3396,12 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			if (call->local_closed && !call->pending_control &&
 			    !call->need_local_close)
 				call->state = TR_RPC_CALL_TERMINAL;
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
 		if (call->cancelled) {
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
@@ -3402,7 +3411,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				call->state = TR_RPC_CALL_TERMINAL;
 				(void)tr_rpc_notify_terminal_locked(
 					endpoint, slot, call, call->final_status);
-				tr_rpc_maybe_free_call_locked(call);
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 			}
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
@@ -3449,7 +3458,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			call->need_local_close = 0;
 			call->local_closed = 1;
 			call->state = TR_RPC_CALL_TERMINAL;
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
@@ -3489,7 +3498,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 		}
 
 		call->state = TR_RPC_CALL_TERMINAL;
-		tr_rpc_maybe_free_call_locked(call);
+		tr_rpc_maybe_free_call_locked(endpoint, call);
 		tr_rpc_deadline_changed_locked(endpoint);
 		pthread_mutex_unlock(&endpoint->lock);
 		return;
@@ -3560,7 +3569,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 				call->terminal_notified = 1;
 		}
 
-		tr_rpc_maybe_free_call_locked(call);
+		tr_rpc_maybe_free_call_locked(endpoint, call);
 	}
 	tr_rpc_deadline_changed_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
@@ -3639,6 +3648,15 @@ int tr_rpc_endpoint_create_with_executor_group(
 		config->max_calls, sizeof(*endpoint->calls));
 	if (!endpoint->methods || !endpoint->calls)
 		return TR_ERR_NOMEM;
+	{
+		uint32_t i;
+
+		endpoint->free_call_head = 0U;
+		for (i = 0; i < config->max_calls; ++i)
+			endpoint->calls[i].free_next =
+				(i + 1U < config->max_calls) ?
+					i + 1U : TR_RPC_CALL_FREE_NONE;
+	}
 
 	endpoint->channel = channel;
 	endpoint->config = *config;
@@ -3699,7 +3717,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 
 	pthread_mutex_lock(&endpoint->lock);
 	for (i = 0; i < endpoint->config.max_calls; ++i)
-		tr_rpc_free_call_locked(&endpoint->calls[i]);
+		tr_rpc_free_call_locked(endpoint, &endpoint->calls[i]);
 	pthread_mutex_unlock(&endpoint->lock);
 
 	tr_rpc_executor_release(endpoint);
@@ -3909,7 +3927,7 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 	ret = tr_rpc_apply_options_locked(endpoint, call, options,
 					  request->deadline_ns);
 	if (ret != TR_OK) {
-		tr_rpc_free_call_locked(call);
+		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
@@ -3920,7 +3938,7 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 				    TR_RPC_STATUS_OK, &request->request,
 				    &request_buffer);
 	if (ret != TR_OK) {
-		tr_rpc_free_call_locked(call);
+		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
@@ -3930,7 +3948,7 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 	ret = tr_stream_open(endpoint->channel, method->desc.lane,
 			     &call->stream);
 	if (ret != TR_OK) {
-		tr_rpc_free_call_locked(call);
+		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
@@ -4031,7 +4049,7 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	ret = tr_rpc_apply_options_locked(endpoint, call, options,
 					  request->deadline_ns);
 	if (ret != TR_OK) {
-		tr_rpc_free_call_locked(call);
+		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
@@ -4040,7 +4058,7 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	ret = tr_stream_open(endpoint->channel, method->desc.lane,
 			     &call->stream);
 	if (ret != TR_OK) {
-		tr_rpc_free_call_locked(call);
+		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
@@ -4363,7 +4381,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 					(void)tr_rpc_notify_terminal_locked(
 						endpoint, handle.slot, call,
 						status);
-					tr_rpc_maybe_free_call_locked(call);
+					tr_rpc_maybe_free_call_locked(endpoint, call);
 				}
 				ret = TR_OK;
 			} else if (ret == TR_AGAIN) {
@@ -4624,7 +4642,7 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 				(void)tr_rpc_notify_terminal_locked(
 					endpoint, i, call, call->final_status);
 			}
-			tr_rpc_maybe_free_call_locked(call);
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 		} else if (!call->is_unary && call->need_local_close) {
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
@@ -4640,7 +4658,7 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 						endpoint, i, call,
 						call->final_status);
 				}
-				tr_rpc_maybe_free_call_locked(call);
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 				ret = TR_OK;
 			}
 		}
