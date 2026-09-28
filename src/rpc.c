@@ -767,7 +767,7 @@ static void tr_rpc_mark_local_closed_locked(
 	if (!endpoint || !call)
 		return;
 
-	tr_rpc_mark_local_closed_locked(endpoint, call);
+	call->local_closed = 1;
 	if (!call->remote_closed)
 		return;
 
