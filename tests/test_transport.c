@@ -2460,6 +2460,124 @@ static void test_rpc_method_index_collisions(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_rpc_deadline_heap_order(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_rpc_method_desc method;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_rpc_endpoint *client_rpc = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	struct tr_buffer_pool rpc_pool;
+	struct tr_rpc_call_handle long_call;
+	struct tr_rpc_call_handle short_call;
+	struct tr_rpc_call_handle root;
+	struct tr_rpc_call_options options;
+	uint64_t long_deadline;
+	uint64_t root_deadline;
+	uint32_t heap_count;
+	int client_fd;
+	int server_fd;
+
+	make_tcp_pair(&client_fd, &server_fd);
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+				 NULL, NULL, NULL, NULL,
+				 &client_channel) == TR_OK);
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+				 NULL, NULL, NULL, NULL,
+				 &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	assert(tr_buffer_pool_init(&rpc_pool, 8U, 4096U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 1U;
+	rpc_config.max_calls = 4U;
+	rpc_config.message_pool = &rpc_pool;
+	assert(tr_rpc_endpoint_create(client_channel, &rpc_config, &client_rpc) ==
+	       TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 92U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_MANY;
+	method.response_cardinality = TR_RPC_MANY;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 64U;
+	method.max_response_bytes = 64U;
+	assert(tr_rpc_register_method(client_rpc, &method, NULL, NULL) == TR_OK);
+
+	memset(&options, 0, sizeof(options));
+	options.timeout_ms = 5000U;
+	assert(tr_rpc_call_start_ex(client_rpc, 92U, 1U, &options, NULL,
+				    &long_call) == TR_OK);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 1U);
+	assert(root.slot == long_call.slot);
+	assert(root.generation == long_call.generation);
+	long_deadline = root_deadline;
+
+	options.timeout_ms = 3000U;
+	assert(tr_rpc_call_start_ex(client_rpc, 92U, 1U, &options, NULL,
+				    &short_call) == TR_OK);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 2U);
+	assert(root.slot == short_call.slot);
+	assert(root.generation == short_call.generation);
+	assert(root_deadline < long_deadline);
+
+	assert(tr_rpc_call_cancel(short_call) == TR_OK);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 1U);
+	assert(root.slot == long_call.slot);
+	assert(root.generation == long_call.generation);
+	assert(root_deadline == long_deadline);
+
+	assert(tr_rpc_call_cancel(long_call) == TR_OK);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 0U);
+	assert(root.endpoint == NULL);
+	assert(root_deadline == 0U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_rpc_endpoint_destroy(client_rpc);
+	tr_channel_destroy(client_channel);
+	tr_channel_destroy(server_channel);
+	tr_reactor_destroy(reactor);
+	tr_buffer_pool_destroy(&rpc_pool);
+}
+
 struct rpc_slot_reuse_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
@@ -2554,6 +2672,7 @@ static void test_rpc_call_slot_reuse(void)
 	struct tr_rpc_call_handle second;
 	struct tr_rpc_call_handle rejected;
 	struct tr_rpc_bytes request;
+	struct tr_rpc_call_options call_options;
 	struct rpc_slot_reuse_ctx ctx;
 	int client_fd;
 	int server_fd;
@@ -2620,15 +2739,19 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_rpc_register_method(server_rpc, &method,
 				      rpc_slot_reuse_handler, &ctx) == TR_OK);
 
+	memset(&call_options, 0, sizeof(call_options));
+	call_options.timeout_ms = 30000U;
 	request.data = (const uint8_t *)"one";
 	request.len = 3U;
-	assert(tr_rpc_unary_call(client_rpc, 91U, 1U, &request,
-				rpc_slot_reuse_result, &ctx, &first) == TR_OK);
+	assert(tr_rpc_unary_call_ex(client_rpc, 91U, 1U, &request,
+				   &call_options, rpc_slot_reuse_result,
+				   &ctx, &first) == TR_OK);
 	wait_rpc_slot_counter(&ctx, &ctx.entered, 1U);
 
 	/* max_calls=1: the free-call list is empty while the first Call is live. */
-	assert(tr_rpc_unary_call(client_rpc, 91U, 1U, &request,
-				rpc_slot_reuse_result, &ctx, &rejected) == TR_AGAIN);
+	assert(tr_rpc_unary_call_ex(client_rpc, 91U, 1U, &request,
+				   &call_options, rpc_slot_reuse_result,
+				   &ctx, &rejected) == TR_AGAIN);
 
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release = 1;
@@ -2638,8 +2761,9 @@ static void test_rpc_call_slot_reuse(void)
 	wait_rpc_handle_stale(first);
 
 	request.data = (const uint8_t *)"two";
-	assert(tr_rpc_unary_call(client_rpc, 91U, 1U, &request,
-				rpc_slot_reuse_result, &ctx, &second) == TR_OK);
+	assert(tr_rpc_unary_call_ex(client_rpc, 91U, 1U, &request,
+				   &call_options, rpc_slot_reuse_result,
+				   &ctx, &second) == TR_OK);
 	wait_rpc_slot_counter(&ctx, &ctx.results, 2U);
 	wait_rpc_handle_stale(second);
 	assert(second.slot == first.slot);
@@ -5866,6 +5990,7 @@ int main(void)
 	test_channel_version_negotiation_failure();
 	test_rpc_wire_and_raw_codec();
 	test_rpc_method_index_collisions();
+	test_rpc_deadline_heap_order();
 	test_rpc_call_slot_reuse();
 	test_rpc_unary_raw_roundtrip();
 	test_rpc_connection_replacement_semantics();
