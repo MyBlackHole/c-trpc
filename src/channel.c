@@ -711,8 +711,12 @@ static size_t tr_stream_index_capacity_for(uint32_t max_streams)
 	size_t capacity = 1U;
 	size_t target;
 
-	if (max_streams == 0U || (size_t)max_streams > SIZE_MAX / 2U)
+	if (max_streams == 0U)
 		return 0U;
+#if SIZE_MAX <= UINT32_MAX
+	if (max_streams > (uint32_t)(SIZE_MAX / 2U))
+		return 0U;
+#endif
 	target = (size_t)max_streams * 2U;
 	while (capacity < target) {
 		if (capacity > SIZE_MAX / 2U)
