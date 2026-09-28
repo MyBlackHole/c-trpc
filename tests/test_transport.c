@@ -5300,7 +5300,7 @@ static void test_server_peer_refcount_drain(void)
 		fprintf(stderr,
 			"peer-refcount timeout: entered=%u results=%u active=%u "
 			"peers=%u ready=%u reaping=%u reaped=%llu "
-			"server_calls=%llu/%llu server_exec=%u/%u/%u "
+			"server_calls=%llu/%llu server_exec=%llu/%llu/%llu "
 			"client_streams=%u client_calls=%u/%u/%u started=%llu completed=%llu\n",
 			entered, results, active,
 			server_stats.peers_current,
@@ -5309,9 +5309,12 @@ static void test_server_peer_refcount_drain(void)
 			(unsigned long long)server_stats.peers_reaped_total,
 			(unsigned long long)server_stats.rpc.calls_started,
 			(unsigned long long)server_stats.rpc.calls_completed,
-			server_stats.rpc.executor_queued_tasks_current,
-			server_stats.rpc.executor_running_tasks_current,
-			server_stats.rpc.executor_ready_calls_current,
+			(unsigned long long)
+				server_stats.rpc.executor_queued_tasks_current,
+			(unsigned long long)
+				server_stats.rpc.executor_running_tasks_current,
+			(unsigned long long)
+				server_stats.rpc.executor_ready_calls_current,
 			client_channel_stats.active_streams,
 			client_rpc_stats.opening_calls,
 			client_rpc_stats.active_calls,
