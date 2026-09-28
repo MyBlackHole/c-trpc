@@ -25,6 +25,7 @@ enum tr_rpc_call_state {
 };
 
 #define TR_RPC_CALL_FREE_NONE UINT32_MAX
+#define TR_RPC_STREAM_CALL_NONE UINT32_MAX
 
 enum tr_rpc_handler_kind {
 	TR_RPC_HANDLER_NONE = 0,
@@ -251,6 +252,8 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_method_entry *methods;
 	struct tr_rpc_call_slot *calls;
 	uint32_t free_call_head;
+	uint32_t *call_by_stream_slot;
+	uint32_t stream_slot_capacity;
 
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
@@ -661,18 +664,25 @@ tr_rpc_find_call_by_stream_locked(struct tr_rpc_endpoint *endpoint,
 				  struct tr_stream_handle stream,
 				  uint32_t *slot_out)
 {
-	uint32_t i;
+	struct tr_rpc_call_slot *call;
+	uint32_t slot;
 
-	for (i = 0; i < endpoint->config.max_calls; ++i) {
-		struct tr_rpc_call_slot *call = &endpoint->calls[i];
-		if (call->state != TR_RPC_CALL_FREE &&
-		    tr_rpc_stream_equal(call->stream, stream)) {
-			if (slot_out)
-				*slot_out = i;
-			return call;
-		}
-	}
-	return NULL;
+	if (!endpoint || stream.channel != endpoint->channel ||
+	    stream.slot >= endpoint->stream_slot_capacity)
+		return NULL;
+
+	slot = endpoint->call_by_stream_slot[stream.slot];
+	if (slot == TR_RPC_STREAM_CALL_NONE || slot >= endpoint->config.max_calls)
+		return NULL;
+
+	call = &endpoint->calls[slot];
+	if (call->state == TR_RPC_CALL_FREE ||
+	    !tr_rpc_stream_equal(call->stream, stream))
+		return NULL;
+
+	if (slot_out)
+		*slot_out = slot;
+	return call;
 }
 
 static struct tr_rpc_call_slot *
@@ -719,6 +729,22 @@ static int tr_rpc_allocate_call_locked(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
+static int tr_rpc_bind_call_stream_locked(struct tr_rpc_endpoint *endpoint,
+					  uint32_t call_slot,
+					  struct tr_stream_handle stream)
+{
+	if (!endpoint || call_slot >= endpoint->config.max_calls ||
+	    stream.channel != endpoint->channel ||
+	    stream.slot >= endpoint->stream_slot_capacity)
+		return TR_ERR_INVALID;
+	if (endpoint->call_by_stream_slot[stream.slot] !=
+	    TR_RPC_STREAM_CALL_NONE)
+		return TR_ERR_STATE;
+
+	endpoint->call_by_stream_slot[stream.slot] = call_slot;
+	return TR_OK;
+}
+
 static void
 tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 {
@@ -743,6 +769,11 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 
 	slot = (uint32_t)(call - endpoint->calls);
 	generation = call->generation;
+	if (call->stream.channel == endpoint->channel &&
+	    call->stream.slot < endpoint->stream_slot_capacity &&
+	    endpoint->call_by_stream_slot[call->stream.slot] == slot)
+		endpoint->call_by_stream_slot[call->stream.slot] =
+			TR_RPC_STREAM_CALL_NONE;
 	if (call->pending_tx)
 		tr_buffer_release(call->pending_tx);
 	if (call->pending_control)
@@ -3602,6 +3633,7 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 	if (build->executor_ready)
 		tr_rpc_executor_destroy(endpoint);
 
+	free(endpoint->call_by_stream_slot);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	if (build->ref_cond_ready)
@@ -3646,7 +3678,12 @@ int tr_rpc_endpoint_create_with_executor_group(
 		config->max_methods, sizeof(*endpoint->methods));
 	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
 		config->max_calls, sizeof(*endpoint->calls));
-	if (!endpoint->methods || !endpoint->calls)
+	endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
+	endpoint->call_by_stream_slot = (uint32_t *)calloc(
+		endpoint->stream_slot_capacity,
+		sizeof(*endpoint->call_by_stream_slot));
+	if (!endpoint->methods || !endpoint->calls ||
+	    !endpoint->call_by_stream_slot || endpoint->stream_slot_capacity == 0U)
 		return TR_ERR_NOMEM;
 	{
 		uint32_t i;
@@ -3656,6 +3693,9 @@ int tr_rpc_endpoint_create_with_executor_group(
 			endpoint->calls[i].free_next =
 				(i + 1U < config->max_calls) ?
 					i + 1U : TR_RPC_CALL_FREE_NONE;
+		for (i = 0; i < endpoint->stream_slot_capacity; ++i)
+			endpoint->call_by_stream_slot[i] =
+				TR_RPC_STREAM_CALL_NONE;
 	}
 
 	endpoint->channel = channel;
@@ -3721,6 +3761,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	pthread_mutex_unlock(&endpoint->lock);
 
 	tr_rpc_executor_release(endpoint);
+	free(endpoint->call_by_stream_slot);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	pthread_cond_destroy(&endpoint->ref_cond);
