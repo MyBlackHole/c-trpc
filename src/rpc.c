@@ -1077,6 +1077,7 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 	memset(call, 0, sizeof(*call));
 	call->generation = generation;
 	call->free_next = endpoint->free_call_head;
+	call->deadline_heap_pos = TR_RPC_DEADLINE_HEAP_NONE;
 	endpoint->free_call_head = slot;
 }
 
