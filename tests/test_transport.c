@@ -1467,6 +1467,120 @@ static void test_channel_deferred_hello_gate(void)
 	destroy_channel_test_ctx(&server_ctx);
 }
 
+static void test_channel_stream_id_index_collision_delete(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle server_conn;
+	struct tr_stream_handle handles[3];
+	struct channel_test_ctx server_ctx;
+	uint8_t hello_payload[32] = { 0 };
+	uint8_t data_payload[4] = { 'h', 'a', 's', 'h' };
+	const uint32_t stream_ids[3] = { 1U, 21U, 43U };
+	uint8_t *wire = NULL;
+	size_t wire_len = 0;
+	unsigned i;
+	int client_fd;
+	int server_fd;
+
+	/*
+	 * max_streams=3 creates an 8-entry index. These three valid Client Stream
+	 * ids intentionally share one initial bucket, forcing a linear-probe
+	 * cluster and exercising backward-shift deletion.
+	 */
+	assert((tr_channel_stream_id_hash(stream_ids[0]) & 7U) ==
+	       (tr_channel_stream_id_hash(stream_ids[1]) & 7U));
+	assert((tr_channel_stream_id_hash(stream_ids[1]) & 7U) ==
+	       (tr_channel_stream_id_hash(stream_ids[2]) & 7U));
+
+	init_channel_test_ctx(&server_ctx);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 3U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &server_ctx,
+				 &server_channel) == TR_OK);
+
+	tr_put_le16(hello_payload + 0, TR_CHANNEL_PROTOCOL_VERSION);
+	tr_put_le16(hello_payload + 2, TR_CHANNEL_PROTOCOL_VERSION);
+	tr_put_le32(hello_payload + 4,
+		    TR_CHANNEL_LANE_MASK_CONTROL | TR_CHANNEL_LANE_MASK_BULK);
+	tr_put_le32(hello_payload + 8, 4096U);
+	tr_put_le32(hello_payload + 12, 4096U);
+	tr_put_le64(hello_payload + 16, 0U);
+	build_wire_frame(&wire, &wire_len, TR_FRAME_HELLO, 0U, 0U, 0U,
+			 hello_payload, sizeof(hello_payload));
+	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+	free(wire);
+	wire = NULL;
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	for (i = 0; i < 3U; ++i) {
+		build_wire_frame(&wire, &wire_len, TR_FRAME_STREAM_OPEN, 0U,
+				 stream_ids[i], 4096U, NULL, 0U);
+		assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+		free(wire);
+		wire = NULL;
+		wait_channel_counter(&server_ctx, &server_ctx.opened, i + 1U);
+		pthread_mutex_lock(&server_ctx.lock);
+		handles[i] = server_ctx.last_stream;
+		pthread_mutex_unlock(&server_ctx.lock);
+	}
+	assert(tr_channel_active_streams(server_channel) == 3U);
+
+	/*
+	 * Close local half first, then peer half. The middle hash entry disappears
+	 * while stream_id=43 remains farther down the same probe cluster.
+	 */
+	assert(tr_stream_close(handles[1]) == TR_OK);
+	build_wire_frame(&wire, &wire_len, TR_FRAME_STREAM_CLOSE, 0U,
+			 stream_ids[1], 0U, NULL, 0U);
+	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+	free(wire);
+	wire = NULL;
+	wait_channel_active_streams(server_channel, 2U);
+
+	build_wire_frame(&wire, &wire_len, TR_FRAME_DATA,
+			 TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
+			 stream_ids[2], 1U, data_payload, sizeof(data_payload));
+	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+	free(wire);
+	wire = NULL;
+	wait_channel_counter(&server_ctx, &server_ctx.received, 1U);
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.last_stream.slot == handles[2].slot);
+	assert(server_ctx.last_stream.generation == handles[2].generation);
+	assert(server_ctx.last_message_id == 1U);
+	pthread_mutex_unlock(&server_ctx.lock);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_channel_destroy(server_channel);
+	tr_reactor_destroy(reactor);
+	assert(close(client_fd) == 0);
+	destroy_channel_test_ctx(&server_ctx);
+}
+
 static void test_channel_stream_slot_reuse(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -5519,6 +5633,7 @@ int main(void)
 	test_reactor_handler_update_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
 	test_channel_deferred_hello_gate();
+	test_channel_stream_id_index_collision_delete();
 	test_channel_stream_slot_reuse();
 	test_channel_stream_flow_control();
 	test_channel_message_fragmentation_reassembly();
