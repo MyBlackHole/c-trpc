@@ -117,6 +117,19 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 	return TR_OK;
 }
 
+int tr_command_queue_is_empty(struct tr_command_queue *queue)
+{
+	int empty;
+
+	if (!queue)
+		return 0;
+
+	pthread_mutex_lock(&queue->lock);
+	empty = queue->count == 0;
+	pthread_mutex_unlock(&queue->lock);
+	return empty;
+}
+
 size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 				  struct tr_command *out, size_t max_commands)
 {
