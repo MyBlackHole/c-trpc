@@ -1922,25 +1922,56 @@ static void tr_channel_default_config(struct tr_channel_config *config)
 
 int tr_channel_start(struct tr_channel *channel)
 {
+	struct tr_channel_pending_hello_request pending[2];
 	struct tr_conn_handle control_connection;
 	struct tr_conn_handle bulk_connection;
 	int split;
+	int i;
 	int ret;
 
 	if (!channel)
 		return TR_ERR_INVALID;
 
+	memset(pending, 0, sizeof(pending));
 	pthread_mutex_lock(&channel->lock);
 	if (channel->handshake_started) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_OK;
 	}
 
+	/*
+	 * Upper-layer handlers are installed before deferred users call start().
+	 * Publish that readiness under the same lock used by RX deferral, and move
+	 * any already-received HELLO into stack-owned replay requests.
+	 */
 	channel->handshake_started = 1;
+	for (i = 0; i < 2; ++i) {
+		if (!channel->pending_hello[i].valid)
+			continue;
+		pending[i].channel = channel;
+		pending[i].hello = channel->pending_hello[i];
+		memset(&channel->pending_hello[i], 0,
+		       sizeof(channel->pending_hello[i]));
+	}
 	control_connection = channel->control_connection;
 	bulk_connection = channel->bulk_connection;
 	split = !tr_conn_equal(control_connection, bulk_connection);
 	pthread_mutex_unlock(&channel->lock);
+
+	/*
+	 * Replay early peer HELLO on the Reactor owner. Only after this point can
+	 * ACK/lane-UP let the peer proceed to STREAM_OPEN/DATA, and the upper layer
+	 * is already bound.
+	 */
+	for (i = 0; i < 2; ++i) {
+		if (!pending[i].hello.valid)
+			continue;
+		ret = tr_reactor_call(channel->reactor,
+				      tr_channel_process_pending_hello_on_owner,
+				      &pending[i]);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	ret = tr_channel_send_hello(channel, control_connection);
 	ret = tr_channel_normalize_create_hello_error(
