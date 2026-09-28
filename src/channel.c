@@ -28,6 +28,12 @@ enum tr_stream_slot_state {
 	TR_STREAM_SLOT_OPEN
 };
 
+struct tr_channel_pending_hello {
+	int valid;
+	struct tr_conn_handle connection;
+	uint8_t payload[TR_CHANNEL_HELLO_WIRE_SIZE];
+};
+
 struct tr_stream_slot {
 	uint32_t generation;
 	uint32_t free_next;
@@ -67,6 +73,7 @@ struct tr_channel {
 	int control_ready;
 	int bulk_ready;
 	int handshake_started;
+	struct tr_channel_pending_hello pending_hello[2];
 	int local_draining;
 	int control_peer_draining;
 	int bulk_peer_draining;
@@ -201,6 +208,19 @@ tr_channel_keepalive_index_for_connection(const struct tr_channel *channel,
 	if (tr_conn_equal(channel->bulk_connection, connection))
 		return 1;
 	return -1;
+}
+
+static int
+tr_channel_connection_alive_locked(const struct tr_channel *channel,
+				   struct tr_conn_handle connection)
+{
+	if (tr_conn_equal(channel->control_connection, connection) &&
+	    channel->control_alive)
+		return 1;
+	if (tr_conn_equal(channel->bulk_connection, connection) &&
+	    channel->bulk_alive)
+		return 1;
+	return 0;
 }
 
 static void tr_channel_keepalive_reset_locked(struct tr_channel *channel,
