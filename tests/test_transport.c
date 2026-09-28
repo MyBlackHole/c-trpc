@@ -18,6 +18,7 @@
 #include "tr/wire.h"
 #include "../src/channel_internal.h"
 #include "../src/reactor_internal.h"
+#include "../src/rpc_internal.h"
 #include "../src/timer_queue.h"
 
 #include <assert.h>
@@ -2235,6 +2236,228 @@ static void wait_rpc_counter(struct rpc_test_ctx *ctx, unsigned *value,
 		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
 	assert(*value >= target);
 	pthread_mutex_unlock(&ctx->lock);
+}
+
+struct rpc_method_index_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned handler_calls[3];
+	unsigned client_results;
+};
+
+struct rpc_method_index_handler_arg {
+	struct rpc_method_index_ctx *ctx;
+	unsigned index;
+	uint8_t reply;
+};
+
+struct rpc_method_index_result_arg {
+	struct rpc_method_index_ctx *ctx;
+	uint8_t expected_reply;
+};
+
+static int rpc_method_index_handler(struct tr_rpc_call_handle call,
+				    const struct tr_rpc_bytes *request,
+				    struct tr_rpc_unary_response *response,
+				    void *arg)
+{
+	struct rpc_method_index_handler_arg *handler_arg =
+		(struct rpc_method_index_handler_arg *)arg;
+	struct rpc_method_index_ctx *ctx = handler_arg->ctx;
+	(void)call;
+
+	assert(request && request->len == 1U);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->handler_calls[handler_arg->index]++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+
+	response->status = TR_RPC_STATUS_OK;
+	response->message.data = &handler_arg->reply;
+	response->message.len = 1U;
+	return TR_OK;
+}
+
+static void rpc_method_index_result(struct tr_rpc_call_handle call, int status,
+				    const struct tr_rpc_bytes *response,
+				    void *arg)
+{
+	struct rpc_method_index_result_arg *result_arg =
+		(struct rpc_method_index_result_arg *)arg;
+	struct rpc_method_index_ctx *ctx = result_arg->ctx;
+	(void)call;
+
+	assert(status == TR_RPC_STATUS_OK);
+	assert(response && response->len == 1U);
+	assert(response->data[0] == result_arg->expected_reply);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->client_results++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void wait_rpc_method_index(struct rpc_method_index_ctx *ctx,
+				  unsigned index, unsigned results)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx->lock);
+	while ((ctx->handler_calls[index] == 0U ||
+		ctx->client_results < results) &&
+	       ret == 0)
+		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	assert(ctx->handler_calls[index] != 0U);
+	assert(ctx->client_results >= results);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void test_rpc_method_index_collisions(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_rpc_method_desc methods[3];
+	struct tr_rpc_method_desc extra;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_rpc_endpoint *client_rpc = NULL;
+	struct tr_rpc_endpoint *server_rpc = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	struct tr_buffer_pool rpc_pool;
+	struct tr_rpc_call_handle call;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_endpoint_stats stats;
+	struct rpc_method_index_ctx ctx;
+	struct rpc_method_index_handler_arg handler_args[3];
+	struct rpc_method_index_result_arg result_args[3];
+	const uint32_t method_ids[3] = { 1U, 9U, 15U };
+	uint8_t request_byte = 0x5aU;
+	unsigned i;
+	int client_fd;
+	int server_fd;
+
+	/* max_methods=3 -> 8 buckets; force one linear-probe cluster. */
+	assert((tr_rpc_method_hash(1U, method_ids[0]) & 7U) ==
+	       (tr_rpc_method_hash(1U, method_ids[1]) & 7U));
+	assert((tr_rpc_method_hash(1U, method_ids[1]) & 7U) ==
+	       (tr_rpc_method_hash(1U, method_ids[2]) & 7U));
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 32U;
+	reactor_config.control_tx_item_capacity = 32U;
+	reactor_config.rx_buffer_count = 16U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 8U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+				 NULL, NULL, NULL, NULL,
+				 &client_channel) == TR_OK);
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+				 NULL, NULL, NULL, NULL,
+				 &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	assert(tr_buffer_pool_init(&rpc_pool, 16U, 4096U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 3U;
+	rpc_config.max_calls = 8U;
+	rpc_config.message_pool = &rpc_pool;
+	assert(tr_rpc_endpoint_create(client_channel, &rpc_config,
+				      &client_rpc) == TR_OK);
+	rpc_config.role = TR_RPC_SERVER;
+	assert(tr_rpc_endpoint_create(server_channel, &rpc_config,
+				      &server_rpc) == TR_OK);
+
+	for (i = 0; i < 3U; ++i) {
+		memset(&methods[i], 0, sizeof(methods[i]));
+		methods[i].service_id = 1U;
+		methods[i].method_id = method_ids[i];
+		methods[i].request_cardinality = TR_RPC_ONE;
+		methods[i].response_cardinality = TR_RPC_ONE;
+		methods[i].request_codec_id = TR_RPC_CODEC_RAW;
+		methods[i].response_codec_id = TR_RPC_CODEC_RAW;
+		methods[i].lane = TR_LANE_CONTROL;
+		methods[i].max_request_bytes = 64U;
+		methods[i].max_response_bytes = 64U;
+
+		handler_args[i].ctx = &ctx;
+		handler_args[i].index = i;
+		handler_args[i].reply = (uint8_t)(0x61U + i);
+		result_args[i].ctx = &ctx;
+		result_args[i].expected_reply = handler_args[i].reply;
+
+		assert(tr_rpc_register_method(client_rpc, &methods[i],
+					      NULL, NULL) == TR_OK);
+		assert(tr_rpc_register_method(server_rpc, &methods[i],
+					      rpc_method_index_handler,
+					      &handler_args[i]) == TR_OK);
+	}
+
+	/* Duplicate detection still wins even when the table is at method limit. */
+	assert(tr_rpc_register_method(client_rpc, &methods[1], NULL, NULL) ==
+	       TR_ERR_STATE);
+	assert(tr_rpc_register_method(server_rpc, &methods[1],
+				      rpc_method_index_handler,
+				      &handler_args[1]) == TR_ERR_STATE);
+
+	extra = methods[0];
+	extra.method_id = 99U;
+	assert(tr_rpc_register_method(client_rpc, &extra, NULL, NULL) ==
+	       TR_AGAIN);
+	assert(tr_rpc_register_method(server_rpc, &extra,
+				      rpc_method_index_handler,
+				      &handler_args[0]) == TR_AGAIN);
+
+	assert(tr_rpc_endpoint_get_stats(client_rpc, &stats) == TR_OK);
+	assert(stats.registered_methods == 3U);
+	assert(tr_rpc_endpoint_get_stats(server_rpc, &stats) == TR_OK);
+	assert(stats.registered_methods == 3U);
+
+	request.data = &request_byte;
+	request.len = 1U;
+	for (i = 0; i < 3U; ++i) {
+		assert(tr_rpc_unary_call(client_rpc, 1U, method_ids[i],
+					&request, rpc_method_index_result,
+					&result_args[i], &call) == TR_OK);
+		wait_rpc_method_index(&ctx, i, i + 1U);
+	}
+
+	wait_for_pool_full(&rpc_pool, 16U);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_rpc_endpoint_destroy(client_rpc);
+	tr_rpc_endpoint_destroy(server_rpc);
+	tr_channel_destroy(client_channel);
+	tr_channel_destroy(server_channel);
+	tr_reactor_destroy(reactor);
+	tr_buffer_pool_destroy(&rpc_pool);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
 }
 
 struct rpc_slot_reuse_ctx {
@@ -5642,6 +5865,7 @@ int main(void)
 	test_channel_automatic_reconnect_shared();
 	test_channel_version_negotiation_failure();
 	test_rpc_wire_and_raw_codec();
+	test_rpc_method_index_collisions();
 	test_rpc_call_slot_reuse();
 	test_rpc_unary_raw_roundtrip();
 	test_rpc_connection_replacement_semantics();
