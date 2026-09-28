@@ -450,13 +450,16 @@ static void test_command_queue_bounded(void)
 	struct tr_command out[2];
 	int need_wake;
 
+	assert(tr_command_queue_is_empty(NULL) == 0);
 	assert(tr_command_queue_init(&queue, 2) == TR_OK);
+	assert(tr_command_queue_is_empty(&queue) == 1);
 
 	memset(&in, 0, sizeof(in));
 	in.type = TR_CMD_CLOSE;
 	in.slot = 1;
 	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
 	assert(need_wake == 1);
+	assert(tr_command_queue_is_empty(&queue) == 0);
 
 	in.slot = 2;
 	need_wake = -1;
@@ -482,6 +485,7 @@ static void test_command_queue_bounded(void)
 	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
 	assert(need_wake == 1);
 	assert(tr_command_queue_pop_batch(&queue, out, 2) == 1);
+	assert(tr_command_queue_is_empty(&queue) == 1);
 
 	tr_command_queue_destroy(&queue);
 }
