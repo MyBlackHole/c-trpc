@@ -2046,6 +2046,11 @@ struct tr_reactor *tr_channel_reactor(struct tr_channel *channel)
 	return channel ? channel->reactor : NULL;
 }
 
+uint32_t tr_channel_max_streams(struct tr_channel *channel)
+{
+	return channel ? channel->config.max_streams : 0U;
+}
+
 static int tr_channel_create_common(
 		      const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
