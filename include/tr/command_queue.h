@@ -94,6 +94,12 @@ void tr_command_queue_destroy(struct tr_command_queue *queue);
 int tr_command_queue_push(struct tr_command_queue *queue,
 			  const struct tr_command *command, int *need_wake);
 
+/*
+ * 锁内判断 ring 是否为空。返回 1 表示当前无 pending command；
+ * NULL 返回 0，让调用方保守地走排队路径。
+ */
+int tr_command_queue_is_empty(struct tr_command_queue *queue);
+
 /* 返回实际复制到 out 的 command 数量。 */
 size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 				  struct tr_command *out, size_t max_commands);
