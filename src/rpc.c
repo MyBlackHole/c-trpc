@@ -512,10 +512,11 @@ tr_rpc_apply_options_locked(struct tr_rpc_endpoint *endpoint,
 			    TR_RPC_DEADLINE_METADATA_BYTES >
 		    TR_RPC_METADATA_MAX_BYTES)
 			return TR_ERR_BAD_LENGTH;
-		call->deadline_ns = deadline_ns;
-		if (call->deadline_ns == 0)
+		if (deadline_ns == 0U)
 			return TR_ERR_SYS;
-		tr_rpc_deadline_changed_locked(endpoint);
+		ret = tr_rpc_deadline_set_locked(endpoint, call, deadline_ns);
+		if (ret != TR_OK)
+			return ret;
 	}
 	return TR_OK;
 }
@@ -601,20 +602,24 @@ static int tr_rpc_import_peer_metadata_locked(struct tr_rpc_endpoint *endpoint,
 			{
 				uint64_t timeout_ms = tr_get_le64(value);
 				uint64_t now = tr_rpc_now_ns();
+				uint64_t deadline_ns;
 				uint64_t delta;
 
 				if (timeout_ms == 0 || now == 0)
 					return TR_ERR_BAD_LENGTH;
 				if (timeout_ms > UINT64_MAX / UINT64_C(1000000))
-					call->deadline_ns = UINT64_MAX;
+					deadline_ns = UINT64_MAX;
 				else {
 					delta = timeout_ms * UINT64_C(1000000);
-					call->deadline_ns =
+					deadline_ns =
 						UINT64_MAX - now < delta ?
 							UINT64_MAX :
 							now + delta;
 				}
-				tr_rpc_deadline_changed_locked(endpoint);
+				ret = tr_rpc_deadline_set_locked(
+					endpoint, call, deadline_ns);
+				if (ret != TR_OK)
+					return ret;
 			}
 		} else {
 			uint16_t new_len = call->peer_metadata_len;
@@ -1294,7 +1299,8 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 			call->need_local_close = 1;
 			call->state = TR_RPC_CALL_ACTIVE;
 			if (endpoint->config.role == TR_RPC_SERVER)
-				call->deadline_ns = 0;
+				(void)tr_rpc_deadline_set_locked(endpoint, call,
+							      0U);
 		} else {
 			return ret;
 		}
@@ -1308,8 +1314,8 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 			if (endpoint->config.role == TR_RPC_SERVER &&
 			    call->remote_closed) {
 				call->state = TR_RPC_CALL_TERMINAL;
-				call->deadline_ns = 0;
-				tr_rpc_deadline_changed_locked(endpoint);
+				(void)tr_rpc_deadline_set_locked(endpoint, call,
+							      0U);
 				tr_rpc_maybe_free_call_locked(endpoint, call);
 			}
 			return TR_OK;
@@ -1344,8 +1350,7 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 		return ret;
 
 	call->pending_tx = tr_buffer_take(&encoded);
-	call->deadline_ns = 0;
-	tr_rpc_deadline_changed_locked(endpoint);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
 	/*
@@ -3144,7 +3149,7 @@ static int tr_rpc_cancel_on_owner(void *arg)
 		endpoint->stat_calls_deadline_exceeded++;
 	else
 		endpoint->stat_calls_cancelled++;
-	call->deadline_ns = 0;
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 	call->final_status_seen = 1;
 	call->final_status = status;
 	call->state = TR_RPC_CALL_TERMINAL;
@@ -3167,7 +3172,6 @@ static int tr_rpc_cancel_on_owner(void *arg)
 	call->need_local_close = 1;
 	(void)tr_rpc_try_cancel_send_locked(endpoint, call);
 	tr_rpc_maybe_free_call_locked(endpoint, call);
-	tr_rpc_deadline_changed_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 
 	return TR_OK;
@@ -3215,10 +3219,11 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 
 		handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
 		/*
-		 * 先从 deadline scan 中移除，避免 cancellation 失败时同一
-		 * owner turn 反复命中。cancel_on_owner() 会重新计算下一条。
+		 * 先从 deadline heap 中移除并发布下一条 timer，避免 cancellation
+		 * 失败时同一 owner turn 反复命中当前 Call。
 		 */
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
+		tr_rpc_deadline_rearm_locked(endpoint);
 	}
 	pthread_mutex_unlock(&endpoint->lock);
 
@@ -3500,7 +3505,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			}
 			call->response_received = 1;
 			call->result_delivered = 1;
-			call->deadline_ns = 0;
+			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			task.type = TR_RPC_TASK_CLIENT_UNARY_RESULT;
 		} else {
 			if (wire.status != TR_RPC_STATUS_OK) {
@@ -3551,7 +3556,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 		call->final_status_seen = 1;
 		call->final_status = wire.status;
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 		ret = tr_rpc_queue_client_event_locked(
 			endpoint, slot, call, TR_RPC_CALL_EVENT_FINISHED,
 			wire.status);
@@ -3584,7 +3589,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			tr_rpc_executor_mark_cancelled(
 				endpoint,
 				tr_rpc_make_call_handle(endpoint, slot, call));
-			call->deadline_ns = 0;
+			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			call->final_status_seen = 1;
 			call->final_status = cancel_status;
 			call->state = TR_RPC_CALL_TERMINAL;
@@ -3735,7 +3740,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 		 */
 		tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
 
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 		tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
 			if (call->pending_control) {
@@ -3824,7 +3829,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		 * Detach the slot index before terminal Call callbacks drain.
 		 */
 		tr_rpc_unbind_call_stream_locked(endpoint, i, call);
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
 		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
@@ -3863,7 +3868,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 
 		tr_rpc_maybe_free_call_locked(endpoint, call);
 	}
-	tr_rpc_deadline_changed_locked(endpoint);
+	tr_rpc_deadline_rearm_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 }
 
@@ -4715,8 +4720,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 			(void)tr_buffer_take(&buffer);
 			call->final_status_sent = 1;
 			call->final_status = status;
-			call->deadline_ns = 0;
-			tr_rpc_deadline_changed_locked(endpoint);
+			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				tr_rpc_mark_local_closed_locked(endpoint, call);
