@@ -450,13 +450,16 @@ static void test_command_queue_bounded(void)
 	struct tr_command out[2];
 	int need_wake;
 
+	assert(tr_command_queue_is_empty(NULL) == 0);
 	assert(tr_command_queue_init(&queue, 2) == TR_OK);
+	assert(tr_command_queue_is_empty(&queue) == 1);
 
 	memset(&in, 0, sizeof(in));
 	in.type = TR_CMD_CLOSE;
 	in.slot = 1;
 	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
 	assert(need_wake == 1);
+	assert(tr_command_queue_is_empty(&queue) == 0);
 
 	in.slot = 2;
 	need_wake = -1;
@@ -482,6 +485,7 @@ static void test_command_queue_bounded(void)
 	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
 	assert(need_wake == 1);
 	assert(tr_command_queue_pop_batch(&queue, out, 2) == 1);
+	assert(tr_command_queue_is_empty(&queue) == 1);
 
 	tr_command_queue_destroy(&queue);
 }
@@ -1345,6 +1349,122 @@ static void wait_channel_active_streams(struct tr_channel *channel,
 		}
 	}
 	assert(tr_channel_active_streams(channel) == target);
+}
+
+static void wait_connection_rx_frames(struct tr_conn_handle connection,
+				      uint64_t target)
+{
+	unsigned i;
+
+	for (i = 0; i < 5000U; ++i) {
+		struct tr_connection_stats stats;
+		assert(tr_reactor_get_connection_stats(connection, &stats) == TR_OK);
+		if (stats.rx_frames >= target)
+			return;
+		{
+			struct timespec pause_time = { 0, 1000000L };
+			nanosleep(&pause_time, NULL);
+		}
+	}
+	assert(!"connection did not receive expected frame");
+}
+
+static void test_channel_deferred_hello_gate(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle server_conn;
+	struct channel_test_ctx server_ctx;
+	enum tr_channel_lane_state lane_state;
+	uint8_t hello_payload[32] = { 0 };
+	uint8_t data_payload[4] = { 'p', 'i', 'n', 'g' };
+	uint8_t *wire = NULL;
+	size_t wire_len = 0;
+	int client_fd;
+	int server_fd;
+
+	init_channel_test_ctx(&server_ctx);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, server_conn, server_conn,
+		       NULL, NULL, NULL, NULL, &server_channel) == TR_OK);
+
+	/* Peer races HELLO ahead of Server RPC/service binding. */
+	tr_put_le16(hello_payload + 0, TR_CHANNEL_PROTOCOL_VERSION);
+	tr_put_le16(hello_payload + 2, TR_CHANNEL_PROTOCOL_VERSION);
+	tr_put_le32(hello_payload + 4,
+		    TR_CHANNEL_LANE_MASK_CONTROL | TR_CHANNEL_LANE_MASK_BULK);
+	tr_put_le32(hello_payload + 8, 4096U);
+	tr_put_le32(hello_payload + 12, 4096U);
+	tr_put_le64(hello_payload + 16, 0U);
+	build_wire_frame(&wire, &wire_len, TR_FRAME_HELLO, 0U, 0U, 0U,
+			 hello_payload, sizeof(hello_payload));
+	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+	free(wire);
+	wire = NULL;
+	wait_connection_rx_frames(server_conn, 1U);
+
+	/*
+	 * Receiving peer HELLO is not service readiness. Before start(), the
+	 * deferred Channel must not ACK it or publish lane UP.
+	 */
+	assert(tr_channel_get_lane_state(server_channel, TR_LANE_CONTROL,
+					 &lane_state) == TR_OK);
+	assert(lane_state != TR_CHANNEL_LANE_UP);
+	assert(tr_channel_get_lane_state(server_channel, TR_LANE_BULK,
+					 &lane_state) == TR_OK);
+	assert(lane_state != TR_CHANNEL_LANE_UP);
+
+	assert(tr_channel_set_handler(server_channel, channel_test_on_data,
+				      channel_test_on_stream_event,
+				      channel_test_on_channel_event,
+				      &server_ctx) == TR_OK);
+	assert(tr_channel_start(server_channel) == TR_OK);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_BULK);
+
+	/* Once service-ready, the same connection may proceed to Stream DATA. */
+	build_wire_frame(&wire, &wire_len, TR_FRAME_STREAM_OPEN, 0U, 1U,
+			 4096U, NULL, 0U);
+	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+	free(wire);
+	wire = NULL;
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 1U);
+
+	build_wire_frame(&wire, &wire_len, TR_FRAME_DATA,
+			 TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
+			 1U, 1U, data_payload, sizeof(data_payload));
+	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
+	free(wire);
+	wire = NULL;
+	wait_channel_counter(&server_ctx, &server_ctx.received, 1U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_channel_destroy(server_channel);
+	tr_reactor_destroy(reactor);
+	assert(close(client_fd) == 0);
+	destroy_channel_test_ctx(&server_ctx);
 }
 
 static void test_channel_stream_slot_reuse(void)
@@ -5162,6 +5282,47 @@ static void test_server_peer_refcount_drain(void)
 	pthread_mutex_lock(&ctx.lock);
 	while ((ctx.entered < 2U || ctx.results < 1U) && ret == 0)
 		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	if (ret != 0) {
+		struct tr_server_stats server_stats;
+		struct tr_channel_stats client_channel_stats;
+		struct tr_rpc_endpoint_stats client_rpc_stats;
+		unsigned entered = ctx.entered;
+		unsigned results = ctx.results;
+		unsigned active = ctx.active;
+
+		pthread_mutex_unlock(&ctx.lock);
+		memset(&server_stats, 0, sizeof(server_stats));
+		memset(&client_channel_stats, 0, sizeof(client_channel_stats));
+		memset(&client_rpc_stats, 0, sizeof(client_rpc_stats));
+		(void)tr_server_get_stats(server, &server_stats);
+		(void)tr_client_get_channel_stats(client, &client_channel_stats);
+		(void)tr_client_get_rpc_stats(client, &client_rpc_stats);
+		fprintf(stderr,
+			"peer-refcount timeout: entered=%u results=%u active=%u "
+			"peers=%u ready=%u reaping=%u reaped=%llu "
+			"server_calls=%llu/%llu server_exec=%llu/%llu/%llu "
+			"client_streams=%u client_calls=%u/%u/%u started=%llu completed=%llu\n",
+			entered, results, active,
+			server_stats.peers_current,
+			server_stats.peers_ready_current,
+			server_stats.peers_reaping_current,
+			(unsigned long long)server_stats.peers_reaped_total,
+			(unsigned long long)server_stats.rpc.calls_started,
+			(unsigned long long)server_stats.rpc.calls_completed,
+			(unsigned long long)
+				server_stats.rpc.executor_queued_tasks_current,
+			(unsigned long long)
+				server_stats.rpc.executor_running_tasks_current,
+			(unsigned long long)
+				server_stats.rpc.executor_ready_calls_current,
+			client_channel_stats.active_streams,
+			client_rpc_stats.opening_calls,
+			client_rpc_stats.active_calls,
+			client_rpc_stats.terminal_calls,
+			(unsigned long long)client_rpc_stats.calls_started,
+			(unsigned long long)client_rpc_stats.calls_completed);
+		pthread_mutex_lock(&ctx.lock);
+	}
 	assert(ret == 0);
 	assert(ctx.entered == 2U);
 	assert(ctx.results == 1U);
@@ -5357,6 +5518,7 @@ int main(void)
 	test_reactor_tcp_roundtrip();
 	test_reactor_handler_update_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
+	test_channel_deferred_hello_gate();
 	test_channel_stream_slot_reuse();
 	test_channel_stream_flow_control();
 	test_channel_message_fragmentation_reassembly();

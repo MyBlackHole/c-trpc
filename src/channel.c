@@ -28,6 +28,12 @@ enum tr_stream_slot_state {
 	TR_STREAM_SLOT_OPEN
 };
 
+struct tr_channel_pending_hello {
+	int valid;
+	struct tr_conn_handle connection;
+	uint8_t payload[TR_CHANNEL_HELLO_WIRE_SIZE];
+};
+
 struct tr_stream_slot {
 	uint32_t generation;
 	uint32_t free_next;
@@ -67,6 +73,7 @@ struct tr_channel {
 	int control_ready;
 	int bulk_ready;
 	int handshake_started;
+	struct tr_channel_pending_hello pending_hello[2];
 	int local_draining;
 	int control_peer_draining;
 	int bulk_peer_draining;
@@ -201,6 +208,19 @@ tr_channel_keepalive_index_for_connection(const struct tr_channel *channel,
 	if (tr_conn_equal(channel->bulk_connection, connection))
 		return 1;
 	return -1;
+}
+
+static int
+tr_channel_connection_alive_locked(const struct tr_channel *channel,
+				   struct tr_conn_handle connection)
+{
+	if (tr_conn_equal(channel->control_connection, connection) &&
+	    channel->control_alive)
+		return 1;
+	if (tr_conn_equal(channel->bulk_connection, connection) &&
+	    channel->bulk_alive)
+		return 1;
+	return 0;
 }
 
 static void tr_channel_keepalive_reset_locked(struct tr_channel *channel,
@@ -1060,6 +1080,86 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	return TR_OK;
 }
 
+struct tr_channel_pending_hello_request {
+	struct tr_channel *channel;
+	struct tr_channel_pending_hello hello;
+};
+
+static int
+tr_channel_process_pending_hello_on_owner(void *arg)
+{
+	struct tr_channel_pending_hello_request *request =
+		(struct tr_channel_pending_hello_request *)arg;
+	struct tr_buffer payload;
+	struct tr_frame frame;
+	int alive;
+
+	if (!request || !request->channel || !request->hello.valid)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&request->channel->lock);
+	alive = tr_channel_connection_alive_locked(
+		request->channel, request->hello.connection);
+	pthread_mutex_unlock(&request->channel->lock);
+	if (!alive)
+		return TR_OK;
+
+	memset(&payload, 0, sizeof(payload));
+	payload.data = request->hello.payload;
+	payload.capacity = TR_CHANNEL_HELLO_WIRE_SIZE;
+	payload.len = TR_CHANNEL_HELLO_WIRE_SIZE;
+
+	memset(&frame, 0, sizeof(frame));
+	frame.header.version = TR_WIRE_ENV_VERSION;
+	frame.header.type = TR_FRAME_HELLO;
+	frame.header.payload_len = TR_CHANNEL_HELLO_WIRE_SIZE;
+	frame.payload = &payload;
+
+	/*
+	 * Protocol errors already close the connection. Deferred replay mirrors
+	 * normal Reactor frame dispatch, where the handler result is not surfaced
+	 * synchronously to the Channel creator.
+	 */
+	(void)tr_channel_handle_hello(request->channel,
+				      request->hello.connection, &frame);
+	return TR_OK;
+}
+
+static int
+tr_channel_defer_hello_before_start(struct tr_channel *channel,
+				    struct tr_conn_handle connection,
+				    const struct tr_frame *frame)
+{
+	int idx;
+
+	if (!channel || !frame)
+		return 0;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->handshake_started) {
+		pthread_mutex_unlock(&channel->lock);
+		return 0;
+	}
+
+	idx = tr_channel_keepalive_index_for_connection(channel, connection);
+	if (idx < 0 || !frame->payload ||
+	    frame->header.stream_id != 0 || frame->header.message_id != 0 ||
+	    frame->header.flags != 0 ||
+	    frame->payload->len != TR_CHANNEL_HELLO_WIRE_SIZE) {
+		pthread_mutex_unlock(&channel->lock);
+		(void)tr_channel_protocol_error(channel, connection,
+						TR_ERR_STATE);
+		return 1;
+	}
+
+	channel->pending_hello[idx].valid = 1;
+	channel->pending_hello[idx].connection = connection;
+	memcpy(channel->pending_hello[idx].payload, frame->payload->data,
+	       TR_CHANNEL_HELLO_WIRE_SIZE);
+	pthread_mutex_unlock(&channel->lock);
+	return 1;
+}
+
 static int tr_channel_handle_hello_ack(struct tr_channel *channel,
 				       struct tr_conn_handle connection,
 				       const struct tr_frame *frame)
@@ -1477,6 +1577,15 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret = TR_OK;
 
+	/*
+	 * Deferred Channel creation installs the transport handler before upper
+	 * layers are ready. An early peer HELLO must not ACK or publish lane UP,
+	 * otherwise the peer can send application DATA into an unbound Channel.
+	 */
+	if (frame->header.type == TR_FRAME_HELLO &&
+	    tr_channel_defer_hello_before_start(channel, connection, frame))
+		return TR_FRAME_RELEASE;
+
 	if (frame->header.type != TR_FRAME_HELLO &&
 	    frame->header.type != TR_FRAME_HELLO_ACK) {
 		int ready;
@@ -1580,8 +1689,16 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 		tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
 		bulk_down = 1;
 	}
-	if (control_down || bulk_down)
+	if (control_down || bulk_down) {
+		int i;
+		for (i = 0; i < 2; ++i)
+			if (channel->pending_hello[i].valid &&
+			    tr_conn_equal(channel->pending_hello[i].connection,
+					  connection))
+				memset(&channel->pending_hello[i], 0,
+				       sizeof(channel->pending_hello[i]));
 		pthread_cond_broadcast(&channel->reconnect_cond);
+	}
 	pthread_mutex_unlock(&channel->lock);
 
 	/* Transport connection replacement 不保留旧 Stream 的 byte state。 */
@@ -1805,25 +1922,56 @@ static void tr_channel_default_config(struct tr_channel_config *config)
 
 int tr_channel_start(struct tr_channel *channel)
 {
+	struct tr_channel_pending_hello_request pending[2];
 	struct tr_conn_handle control_connection;
 	struct tr_conn_handle bulk_connection;
 	int split;
+	int i;
 	int ret;
 
 	if (!channel)
 		return TR_ERR_INVALID;
 
+	memset(pending, 0, sizeof(pending));
 	pthread_mutex_lock(&channel->lock);
 	if (channel->handshake_started) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_OK;
 	}
 
+	/*
+	 * Upper-layer handlers are installed before deferred users call start().
+	 * Publish that readiness under the same lock used by RX deferral, and move
+	 * any already-received HELLO into stack-owned replay requests.
+	 */
 	channel->handshake_started = 1;
+	for (i = 0; i < 2; ++i) {
+		if (!channel->pending_hello[i].valid)
+			continue;
+		pending[i].channel = channel;
+		pending[i].hello = channel->pending_hello[i];
+		memset(&channel->pending_hello[i], 0,
+		       sizeof(channel->pending_hello[i]));
+	}
 	control_connection = channel->control_connection;
 	bulk_connection = channel->bulk_connection;
 	split = !tr_conn_equal(control_connection, bulk_connection);
 	pthread_mutex_unlock(&channel->lock);
+
+	/*
+	 * Replay early peer HELLO on the Reactor owner. Only after this point can
+	 * ACK/lane-UP let the peer proceed to STREAM_OPEN/DATA, and the upper layer
+	 * is already bound.
+	 */
+	for (i = 0; i < 2; ++i) {
+		if (!pending[i].hello.valid)
+			continue;
+		ret = tr_reactor_call(channel->reactor,
+				      tr_channel_process_pending_hello_on_owner,
+				      &pending[i]);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	ret = tr_channel_send_hello(channel, control_connection);
 	ret = tr_channel_normalize_create_hello_error(
