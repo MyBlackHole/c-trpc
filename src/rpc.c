@@ -3896,6 +3896,7 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 
 	free(endpoint->call_by_stream_slot);
 	free(endpoint->method_index);
+	free(endpoint->deadline_heap);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	if (build->ref_cond_ready)
@@ -3946,21 +3947,27 @@ int tr_rpc_endpoint_create_with_executor_group(
 		endpoint->method_index_capacity, sizeof(*endpoint->method_index));
 	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
 		config->max_calls, sizeof(*endpoint->calls));
+	endpoint->deadline_heap = (uint32_t *)calloc(
+		config->max_calls, sizeof(*endpoint->deadline_heap));
 	endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
 	endpoint->call_by_stream_slot = (uint32_t *)calloc(
 		endpoint->stream_slot_capacity,
 		sizeof(*endpoint->call_by_stream_slot));
 	if (!endpoint->methods || !endpoint->method_index || !endpoint->calls ||
-	    !endpoint->call_by_stream_slot || endpoint->stream_slot_capacity == 0U)
+	    !endpoint->deadline_heap || !endpoint->call_by_stream_slot ||
+	    endpoint->stream_slot_capacity == 0U)
 		return TR_ERR_NOMEM;
 	{
 		uint32_t i;
 
 		endpoint->free_call_head = 0U;
-		for (i = 0; i < config->max_calls; ++i)
+		for (i = 0; i < config->max_calls; ++i) {
 			endpoint->calls[i].free_next =
 				(i + 1U < config->max_calls) ?
 					i + 1U : TR_RPC_CALL_FREE_NONE;
+			endpoint->calls[i].deadline_heap_pos =
+				TR_RPC_DEADLINE_HEAP_NONE;
+		}
 		for (i = 0; i < endpoint->stream_slot_capacity; ++i)
 			endpoint->call_by_stream_slot[i] =
 				TR_RPC_STREAM_CALL_NONE;
@@ -4031,6 +4038,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_executor_release(endpoint);
 	free(endpoint->call_by_stream_slot);
 	free(endpoint->method_index);
+	free(endpoint->deadline_heap);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	pthread_cond_destroy(&endpoint->ref_cond);
