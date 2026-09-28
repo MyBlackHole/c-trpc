@@ -825,6 +825,43 @@ static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
 	return ret;
 }
 
+int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
+				  uint32_t *count,
+				  struct tr_rpc_call_handle *root,
+				  uint64_t *root_deadline_ns)
+{
+	if (!endpoint || !count)
+		return TR_ERR_INVALID;
+
+	if (root)
+		memset(root, 0, sizeof(*root));
+	if (root_deadline_ns)
+		*root_deadline_ns = 0U;
+
+	pthread_mutex_lock(&endpoint->lock);
+	*count = endpoint->deadline_heap_count;
+	if (endpoint->deadline_heap_count != 0U) {
+		uint32_t slot = endpoint->deadline_heap[0];
+		struct tr_rpc_call_slot *call;
+
+		if (slot >= endpoint->config.max_calls) {
+			pthread_mutex_unlock(&endpoint->lock);
+			return TR_ERR_STATE;
+		}
+		call = &endpoint->calls[slot];
+		if (call->deadline_heap_pos != 0U || call->deadline_ns == 0U) {
+			pthread_mutex_unlock(&endpoint->lock);
+			return TR_ERR_STATE;
+		}
+		if (root)
+			*root = tr_rpc_make_call_handle(endpoint, slot, call);
+		if (root_deadline_ns)
+			*root_deadline_ns = call->deadline_ns;
+	}
+	pthread_mutex_unlock(&endpoint->lock);
+	return TR_OK;
+}
+
 static size_t tr_rpc_method_index_capacity_for(uint32_t max_methods)
 {
 	size_t capacity = 1U;
