@@ -61,6 +61,9 @@ struct test_ctx {
 	int rx_release;
 	int owner_send_reply;
 	int owner_reply_done;
+	int owner_reply_gate;
+	int owner_reply_entered;
+	int owner_reply_release;
 };
 
 /* Installed before pthread_create and cleared after stop/join. */
@@ -225,6 +228,15 @@ static enum tr_frame_disposition frame_cb(struct tr_conn_handle handle,
 		assert(frame->header.stream_id == 0U);
 		assert(frame->header.payload_len == 0U);
 		assert(frame->payload == NULL);
+		if (ctx->owner_reply_gate) {
+			assert(pthread_mutex_lock(&ctx->lock) == 0);
+			ctx->owner_reply_entered = 1;
+			assert(pthread_cond_broadcast(&ctx->cond) == 0);
+			while (!ctx->owner_reply_release)
+				assert(pthread_cond_wait(&ctx->cond,
+							 &ctx->lock) == 0);
+			assert(pthread_mutex_unlock(&ctx->lock) == 0);
+		}
 		assert(tr_reactor_send(handle, TR_FRAME_PONG, 0U, 0U,
 				       frame->header.message_id, NULL) == TR_OK);
 		assert(pthread_mutex_lock(&ctx->lock) == 0);
@@ -563,13 +575,36 @@ static void test_owner_send_fast_path(void)
 	assert(stats.command_send.enqueued == 0U);
 	assert(stats.command_send.full_events == 0U);
 
+	/*
+	 * Block this test callback before its reply, enqueue an external SEND, then
+	 * resume the owner. The owner-generated PONG must remain behind the already
+	 * pending PING in command FIFO order.
+	 */
+	ctx.owner_reply_done = 0;
+	ctx.owner_reply_gate = 1;
+	ctx.owner_reply_entered = 0;
+	ctx.owner_reply_release = 0;
+	encode_control(ping, TR_FRAME_PING, 321U);
+	assert(write(sockets[1], ping, sizeof(ping)) == (ssize_t)sizeof(ping));
+	wait_for(&ctx, &ctx.owner_reply_entered);
+
 	encode_control(ping, TR_FRAME_PING, 456U);
 	assert(tr_reactor_send(handle, TR_FRAME_PING, 0U, 0U, 456U, NULL) == TR_OK);
+	assert(pthread_mutex_lock(&ctx.lock) == 0);
+	ctx.owner_reply_release = 1;
+	assert(pthread_cond_broadcast(&ctx.cond) == 0);
+	assert(pthread_mutex_unlock(&ctx.lock) == 0);
+
 	read_exact(sockets[1], received, sizeof(received));
 	assert(memcmp(received, ping, sizeof(ping)) == 0);
+	encode_control(pong, TR_FRAME_PONG, 321U);
+	read_exact(sockets[1], received, sizeof(received));
+	assert(memcmp(received, pong, sizeof(pong)) == 0);
+	wait_for(&ctx, &ctx.owner_reply_done);
 	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
-	assert(stats.command_send.enqueued == 1U);
+	assert(stats.command_send.enqueued == 2U);
 	assert(stats.command_send.full_events == 0U);
+	ctx.owner_reply_gate = 0;
 
 	/*
 	 * A SEND issued from inside TR_CMD_CALL must not bypass commands already
@@ -582,7 +617,7 @@ static void test_owner_send_fast_path(void)
 	read_exact(sockets[1], received, sizeof(received));
 	assert(memcmp(received, ping, sizeof(ping)) == 0);
 	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
-	assert(stats.command_send.enqueued == 2U);
+	assert(stats.command_send.enqueued == 3U);
 	assert(stats.command_send.full_events == 0U);
 
 	destroy_ctx(&ctx);
