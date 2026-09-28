@@ -5,6 +5,20 @@
 
 #include "tr/rpc.h"
 
+/* Stable Endpoint-lifetime Method hash shared with collision tests. */
+static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
+					  uint32_t method_id)
+{
+	uint64_t value = ((uint64_t)service_id << 32) | (uint64_t)method_id;
+
+	value ^= value >> 30;
+	value *= UINT64_C(0xbf58476d1ce4e5b9);
+	value ^= value >> 27;
+	value *= UINT64_C(0x94d049bb133111eb);
+	value ^= value >> 31;
+	return value;
+}
+
 struct tr_rpc_executor_group;
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
