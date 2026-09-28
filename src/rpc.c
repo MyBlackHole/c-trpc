@@ -44,6 +44,12 @@ enum tr_rpc_task_type {
 	TR_RPC_TASK_CLIENT_EVENT
 };
 
+struct tr_rpc_method_index_entry {
+	uint32_t service_id;
+	uint32_t method_id;
+	uint32_t slot;
+};
+
 struct tr_rpc_method_entry {
 	int used;
 	enum tr_rpc_handler_kind handler_kind;
@@ -250,6 +256,9 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_endpoint_config config;
 
 	struct tr_rpc_method_entry *methods;
+	struct tr_rpc_method_index_entry *method_index;
+	size_t method_index_capacity;
+	uint32_t method_count;
 	struct tr_rpc_call_slot *calls;
 	uint32_t free_call_head;
 	uint32_t *call_by_stream_slot;
@@ -644,17 +653,103 @@ tr_rpc_make_call_handle(struct tr_rpc_endpoint *endpoint, uint32_t slot,
 	return handle;
 }
 
+static size_t tr_rpc_method_index_capacity_for(uint32_t max_methods)
+{
+	size_t capacity = 1U;
+	size_t target;
+
+	if (max_methods == 0U)
+		return 0U;
+#if SIZE_MAX <= UINT32_MAX
+	if (max_methods > (uint32_t)(SIZE_MAX / 2U))
+		return 0U;
+#endif
+	target = (size_t)max_methods * 2U;
+	while (capacity < target) {
+		if (capacity > SIZE_MAX / 2U)
+			return 0U;
+		capacity <<= 1U;
+	}
+	return capacity;
+}
+
+static size_t
+tr_rpc_method_index_home(const struct tr_rpc_endpoint *endpoint,
+			 uint32_t service_id, uint32_t method_id)
+{
+	return (size_t)tr_rpc_method_hash(service_id, method_id) &
+	       (endpoint->method_index_capacity - 1U);
+}
+
+static int tr_rpc_method_index_insert_locked(struct tr_rpc_endpoint *endpoint,
+					      uint32_t service_id,
+					      uint32_t method_id,
+					      uint32_t slot)
+{
+	size_t mask;
+	size_t pos;
+	size_t probes;
+
+	if (!endpoint || !endpoint->method_index || service_id == 0U ||
+	    method_id == 0U || slot >= endpoint->config.max_methods ||
+	    endpoint->method_index_capacity == 0U)
+		return TR_ERR_INVALID;
+
+	mask = endpoint->method_index_capacity - 1U;
+	pos = tr_rpc_method_index_home(endpoint, service_id, method_id);
+	for (probes = 0; probes < endpoint->method_index_capacity; ++probes) {
+		struct tr_rpc_method_index_entry *entry =
+			&endpoint->method_index[pos];
+
+		if (entry->service_id == 0U) {
+			entry->service_id = service_id;
+			entry->method_id = method_id;
+			entry->slot = slot;
+			return TR_OK;
+		}
+		if (entry->service_id == service_id &&
+		    entry->method_id == method_id)
+			return TR_ERR_STATE;
+		pos = (pos + 1U) & mask;
+	}
+	return TR_AGAIN;
+}
+
 static struct tr_rpc_method_entry *
 tr_rpc_find_method_locked(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 			  uint32_t method_id)
 {
-	uint32_t i;
+	size_t mask;
+	size_t pos;
+	size_t probes;
 
-	for (i = 0; i < endpoint->config.max_methods; ++i) {
-		struct tr_rpc_method_entry *entry = &endpoint->methods[i];
-		if (entry->used && entry->desc.service_id == service_id &&
-		    entry->desc.method_id == method_id)
-			return entry;
+	if (!endpoint || !endpoint->method_index || service_id == 0U ||
+	    method_id == 0U || endpoint->method_index_capacity == 0U)
+		return NULL;
+
+	mask = endpoint->method_index_capacity - 1U;
+	pos = tr_rpc_method_index_home(endpoint, service_id, method_id);
+	for (probes = 0; probes < endpoint->method_index_capacity; ++probes) {
+		struct tr_rpc_method_index_entry *index =
+			&endpoint->method_index[pos];
+		struct tr_rpc_method_entry *entry;
+
+		if (index->service_id == 0U)
+			return NULL;
+		if (index->service_id != service_id ||
+		    index->method_id != method_id) {
+			pos = (pos + 1U) & mask;
+			continue;
+		}
+		if (index->slot >= endpoint->method_count ||
+		    index->slot >= endpoint->config.max_methods)
+			return NULL;
+
+		entry = &endpoint->methods[index->slot];
+		if (!entry->used || entry->desc.service_id != service_id ||
+		    entry->desc.method_id != method_id)
+			return NULL;
+		return entry;
 	}
 	return NULL;
 }
@@ -3678,6 +3773,7 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 		tr_rpc_executor_destroy(endpoint);
 
 	free(endpoint->call_by_stream_slot);
+	free(endpoint->method_index);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	if (build->ref_cond_ready)
@@ -3720,13 +3816,19 @@ int tr_rpc_endpoint_create_with_executor_group(
 
 	endpoint->methods = (struct tr_rpc_method_entry *)calloc(
 		config->max_methods, sizeof(*endpoint->methods));
+	endpoint->method_index_capacity =
+		tr_rpc_method_index_capacity_for(config->max_methods);
+	if (endpoint->method_index_capacity == 0U)
+		return TR_ERR_INVALID;
+	endpoint->method_index = (struct tr_rpc_method_index_entry *)calloc(
+		endpoint->method_index_capacity, sizeof(*endpoint->method_index));
 	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
 		config->max_calls, sizeof(*endpoint->calls));
 	endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
 	endpoint->call_by_stream_slot = (uint32_t *)calloc(
 		endpoint->stream_slot_capacity,
 		sizeof(*endpoint->call_by_stream_slot));
-	if (!endpoint->methods || !endpoint->calls ||
+	if (!endpoint->methods || !endpoint->method_index || !endpoint->calls ||
 	    !endpoint->call_by_stream_slot || endpoint->stream_slot_capacity == 0U)
 		return TR_ERR_NOMEM;
 	{
@@ -3806,6 +3908,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 
 	tr_rpc_executor_release(endpoint);
 	free(endpoint->call_by_stream_slot);
+	free(endpoint->method_index);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	pthread_cond_destroy(&endpoint->ref_cond);
@@ -3882,7 +3985,8 @@ static int tr_rpc_register_method_internal(
 	tr_rpc_unary_handler unary_handler,
 	const struct tr_rpc_stream_handlers *stream_handlers, void *handler_arg)
 {
-	uint32_t i;
+	struct tr_rpc_method_entry *entry;
+	uint32_t slot;
 	int ret;
 
 	if (!endpoint)
@@ -3905,24 +4009,32 @@ static int tr_rpc_register_method_internal(
 		return TR_ERR_STATE;
 	}
 
-	for (i = 0; i < endpoint->config.max_methods; ++i) {
-		struct tr_rpc_method_entry *entry = &endpoint->methods[i];
-		if (entry->used)
-			continue;
-
-		entry->used = 1;
-		entry->handler_kind = kind;
-		entry->desc = *method;
-		entry->unary_handler = unary_handler;
-		if (stream_handlers)
-			entry->stream_handlers = *stream_handlers;
-		entry->handler_arg = handler_arg;
+	if (endpoint->method_count == endpoint->config.max_methods) {
 		pthread_mutex_unlock(&endpoint->lock);
-		return TR_OK;
+		return TR_AGAIN;
 	}
 
+	slot = endpoint->method_count;
+	entry = &endpoint->methods[slot];
+	entry->used = 1;
+	entry->handler_kind = kind;
+	entry->desc = *method;
+	entry->unary_handler = unary_handler;
+	if (stream_handlers)
+		entry->stream_handlers = *stream_handlers;
+	entry->handler_arg = handler_arg;
+
+	ret = tr_rpc_method_index_insert_locked(
+		endpoint, method->service_id, method->method_id, slot);
+	if (ret != TR_OK) {
+		memset(entry, 0, sizeof(*entry));
+		pthread_mutex_unlock(&endpoint->lock);
+		return ret;
+	}
+
+	endpoint->method_count++;
 	pthread_mutex_unlock(&endpoint->lock);
-	return TR_AGAIN;
+	return TR_OK;
 }
 
 int tr_rpc_register_method(struct tr_rpc_endpoint *endpoint,
@@ -4801,9 +4913,7 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 	out->calls_cancelled = endpoint->stat_calls_cancelled;
 	out->calls_deadline_exceeded = endpoint->stat_calls_deadline_exceeded;
 
-	for (i = 0; i < endpoint->config.max_methods; ++i)
-		if (endpoint->methods[i].used)
-			out->registered_methods++;
+	out->registered_methods = endpoint->method_count;
 
 	for (i = 0; i < endpoint->config.max_calls; ++i) {
 		switch (endpoint->calls[i].state) {
