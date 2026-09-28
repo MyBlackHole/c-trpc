@@ -1577,6 +1577,15 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret = TR_OK;
 
+	/*
+	 * Deferred Channel creation installs the transport handler before upper
+	 * layers are ready. An early peer HELLO must not ACK or publish lane UP,
+	 * otherwise the peer can send application DATA into an unbound Channel.
+	 */
+	if (frame->header.type == TR_FRAME_HELLO &&
+	    tr_channel_defer_hello_before_start(channel, connection, frame))
+		return TR_FRAME_RELEASE;
+
 	if (frame->header.type != TR_FRAME_HELLO &&
 	    frame->header.type != TR_FRAME_HELLO_ACK) {
 		int ready;
@@ -1680,8 +1689,16 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 		tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
 		bulk_down = 1;
 	}
-	if (control_down || bulk_down)
+	if (control_down || bulk_down) {
+		int i;
+		for (i = 0; i < 2; ++i)
+			if (channel->pending_hello[i].valid &&
+			    tr_conn_equal(channel->pending_hello[i].connection,
+					  connection))
+				memset(&channel->pending_hello[i], 0,
+				       sizeof(channel->pending_hello[i]));
 		pthread_cond_broadcast(&channel->reconnect_cond);
+	}
 	pthread_mutex_unlock(&channel->lock);
 
 	/* Transport connection replacement 不保留旧 Stream 的 byte state。 */
