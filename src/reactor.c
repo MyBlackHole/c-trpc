@@ -182,6 +182,8 @@ struct tr_reactor {
 	int started;
 	_Atomic int accepting;
 	int stopping;
+	/* Owner-only: a popped command batch still has FIFO predecessors. */
+	int command_dispatching;
 
 	struct tr_command_queue commands;
 	struct tr_completion_queue completions;
@@ -1506,6 +1508,13 @@ static int tr_process_commands(struct tr_reactor *reactor,
 	count = tr_command_queue_pop_batch(&reactor->commands, commands,
 					   (size_t)turn->left.commands);
 	turn->left.commands -= count;
+	/*
+	 * Commands copied into this local batch are no longer visible in ring
+	 * count, but later entries are still FIFO predecessors of work generated
+	 * while dispatching an earlier entry.
+	 */
+	assert(!reactor->command_dispatching);
+	reactor->command_dispatching = count != 0;
 	for (i = 0; i < count; ++i) {
 		const struct tr_command *command = &commands[i];
 
@@ -1544,6 +1553,7 @@ static int tr_process_commands(struct tr_reactor *reactor,
 			break;
 		}
 	}
+	reactor->command_dispatching = 0;
 
 	/*
 	 * A full batch may leave work whose wake has already been consumed.
@@ -2128,15 +2138,18 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 	}
 
 	/*
-	 * Channel/RPC owner callbacks already execute on this Reactor. Re-enqueueing
-	 * SEND in that case takes ctl_lock + command queue lock and defers the frame
-	 * to a later loop turn even though the connection state is owner-local.
+	 * Channel/RPC owner callbacks can attach TX directly only when doing so
+	 * cannot overtake command work. The synchronized empty check linearizes
+	 * against concurrent producers. command_dispatching additionally covers
+	 * commands already popped into the current local batch: those entries are
+	 * no longer in ring count but must remain FIFO predecessors.
 	 *
-	 * accepting is atomic so stop() remains the linearization gate without
-	 * making the owner take ctl_lock. On direct failure payload ownership stays
-	 * with the caller exactly like the queued producer path.
+	 * If either kind of predecessor exists, fall through to the normal bounded
+	 * command path. accepting remains the shutdown linearization gate.
 	 */
-	if (tr_reactor_is_owner_thread(reactor)) {
+	if (tr_reactor_is_owner_thread(reactor) &&
+	    !reactor->command_dispatching &&
+	    tr_command_queue_is_empty(&reactor->commands)) {
 		if (!atomic_load_explicit(&reactor->accepting,
 					 memory_order_acquire)) {
 			ret = TR_ERR_CLOSED;
