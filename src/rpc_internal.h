@@ -37,4 +37,10 @@ int tr_rpc_endpoint_create_with_executor_group(
 void tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
+/* Internal deterministic diagnostics for the bounded Call deadline heap. */
+int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
+				  uint32_t *count,
+				  struct tr_rpc_call_handle *root,
+				  uint64_t *root_deadline_ns);
+
 #endif
