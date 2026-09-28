@@ -25,6 +25,7 @@ enum tr_rpc_call_state {
 };
 
 #define TR_RPC_CALL_FREE_NONE UINT32_MAX
+#define TR_RPC_STREAM_CALL_NONE UINT32_MAX
 
 enum tr_rpc_handler_kind {
 	TR_RPC_HANDLER_NONE = 0,
@@ -251,6 +252,8 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_method_entry *methods;
 	struct tr_rpc_call_slot *calls;
 	uint32_t free_call_head;
+	uint32_t *call_by_stream_slot;
+	uint32_t stream_slot_capacity;
 
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
@@ -661,18 +664,25 @@ tr_rpc_find_call_by_stream_locked(struct tr_rpc_endpoint *endpoint,
 				  struct tr_stream_handle stream,
 				  uint32_t *slot_out)
 {
-	uint32_t i;
+	struct tr_rpc_call_slot *call;
+	uint32_t slot;
 
-	for (i = 0; i < endpoint->config.max_calls; ++i) {
-		struct tr_rpc_call_slot *call = &endpoint->calls[i];
-		if (call->state != TR_RPC_CALL_FREE &&
-		    tr_rpc_stream_equal(call->stream, stream)) {
-			if (slot_out)
-				*slot_out = i;
-			return call;
-		}
-	}
-	return NULL;
+	if (!endpoint || stream.channel != endpoint->channel ||
+	    stream.slot >= endpoint->stream_slot_capacity)
+		return NULL;
+
+	slot = endpoint->call_by_stream_slot[stream.slot];
+	if (slot == TR_RPC_STREAM_CALL_NONE || slot >= endpoint->config.max_calls)
+		return NULL;
+
+	call = &endpoint->calls[slot];
+	if (call->state == TR_RPC_CALL_FREE ||
+	    !tr_rpc_stream_equal(call->stream, stream))
+		return NULL;
+
+	if (slot_out)
+		*slot_out = slot;
+	return call;
 }
 
 static struct tr_rpc_call_slot *
@@ -719,6 +729,52 @@ static int tr_rpc_allocate_call_locked(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
+static int tr_rpc_bind_call_stream_locked(struct tr_rpc_endpoint *endpoint,
+					  uint32_t call_slot,
+					  struct tr_stream_handle stream)
+{
+	if (!endpoint || call_slot >= endpoint->config.max_calls ||
+	    stream.channel != endpoint->channel ||
+	    stream.slot >= endpoint->stream_slot_capacity)
+		return TR_ERR_INVALID;
+	if (endpoint->call_by_stream_slot[stream.slot] !=
+	    TR_RPC_STREAM_CALL_NONE)
+		return TR_ERR_STATE;
+
+	endpoint->call_by_stream_slot[stream.slot] = call_slot;
+	return TR_OK;
+}
+
+static void tr_rpc_unbind_call_stream_locked(struct tr_rpc_endpoint *endpoint,
+					      uint32_t call_slot,
+					      struct tr_rpc_call_slot *call)
+{
+	if (!endpoint || !call || call_slot >= endpoint->config.max_calls)
+		return;
+	if (call->stream.channel != endpoint->channel ||
+	    call->stream.slot >= endpoint->stream_slot_capacity)
+		return;
+	if (endpoint->call_by_stream_slot[call->stream.slot] == call_slot)
+		endpoint->call_by_stream_slot[call->stream.slot] =
+			TR_RPC_STREAM_CALL_NONE;
+}
+
+static void tr_rpc_mark_local_closed_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call)
+{
+	uint32_t slot;
+
+	if (!endpoint || !call)
+		return;
+
+	call->local_closed = 1;
+	if (!call->remote_closed)
+		return;
+
+	slot = (uint32_t)(call - endpoint->calls);
+	tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
+}
+
 static void
 tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 {
@@ -743,6 +799,7 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 
 	slot = (uint32_t)(call - endpoint->calls);
 	generation = call->generation;
+	tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
 	if (call->pending_tx)
 		tr_buffer_release(call->pending_tx);
 	if (call->pending_control)
@@ -983,7 +1040,7 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 			call->need_local_close = 0;
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			if (endpoint->config.role == TR_RPC_SERVER &&
 			    call->remote_closed) {
 				call->state = TR_RPC_CALL_TERMINAL;
@@ -1077,7 +1134,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 		call->final_status_sent = 1;
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			call->need_local_close = 0;
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
@@ -1148,7 +1205,7 @@ tr_rpc_fail_stream_midstream_overload_locked(
 		call->final_status_sent = 1;
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			call->need_local_close = 0;
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
@@ -2751,7 +2808,6 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 {
 	int ret = TR_OK;
 
-	(void)endpoint;
 	if (call->pending_control) {
 		ret = tr_stream_send(call->stream, call->pending_control);
 		if (ret == TR_OK) {
@@ -2774,7 +2830,7 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 			call->need_local_close = 0;
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			if (call->admission_rejected && call->remote_closed)
 				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
@@ -3075,6 +3131,13 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			call->method = method;
 			call->is_unary = method->handler_kind ==
 					 TR_RPC_HANDLER_UNARY;
+			ret = tr_rpc_bind_call_stream_locked(endpoint, slot, stream);
+			if (ret != TR_OK) {
+				tr_rpc_free_call_locked(endpoint, call);
+				pthread_mutex_unlock(&endpoint->lock);
+				(void)tr_stream_close(stream);
+				return TR_STREAM_DATA_RELEASE;
+			}
 			first_message = 1;
 		} else {
 			method = call->method;
@@ -3448,6 +3511,13 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 						       TR_RPC_STATUS_OK :
 						       TR_RPC_STATUS_UNAVAILABLE);
 
+		/*
+		 * Stream lifetime ends here even when Call lifetime continues while
+		 * executor callbacks/task_refs drain. Release the Stream-slot index
+		 * immediately so Channel may recycle that slot for a new generation.
+		 */
+		tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
+
 		call->deadline_ns = 0;
 		tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
@@ -3456,7 +3526,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				call->pending_control = NULL;
 			}
 			call->need_local_close = 0;
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			call->state = TR_RPC_CALL_TERMINAL;
 			tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
@@ -3532,11 +3602,16 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		    call->method->desc.lane != failed_lane)
 			continue;
 
+		/*
+		 * The failed Channel lane no longer has a live Stream event source.
+		 * Detach the slot index before terminal Call callbacks drain.
+		 */
+		tr_rpc_unbind_call_stream_locked(endpoint, i, call);
 		call->deadline_ns = 0;
 		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
-		call->local_closed = 1;
+		tr_rpc_mark_local_closed_locked(endpoint, call);
 		if (call->pending_control) {
 			tr_buffer_release(call->pending_control);
 			call->pending_control = NULL;
@@ -3602,6 +3677,7 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 	if (build->executor_ready)
 		tr_rpc_executor_destroy(endpoint);
 
+	free(endpoint->call_by_stream_slot);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	if (build->ref_cond_ready)
@@ -3646,7 +3722,12 @@ int tr_rpc_endpoint_create_with_executor_group(
 		config->max_methods, sizeof(*endpoint->methods));
 	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
 		config->max_calls, sizeof(*endpoint->calls));
-	if (!endpoint->methods || !endpoint->calls)
+	endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
+	endpoint->call_by_stream_slot = (uint32_t *)calloc(
+		endpoint->stream_slot_capacity,
+		sizeof(*endpoint->call_by_stream_slot));
+	if (!endpoint->methods || !endpoint->calls ||
+	    !endpoint->call_by_stream_slot || endpoint->stream_slot_capacity == 0U)
 		return TR_ERR_NOMEM;
 	{
 		uint32_t i;
@@ -3656,6 +3737,9 @@ int tr_rpc_endpoint_create_with_executor_group(
 			endpoint->calls[i].free_next =
 				(i + 1U < config->max_calls) ?
 					i + 1U : TR_RPC_CALL_FREE_NONE;
+		for (i = 0; i < endpoint->stream_slot_capacity; ++i)
+			endpoint->call_by_stream_slot[i] =
+				TR_RPC_STREAM_CALL_NONE;
 	}
 
 	endpoint->channel = channel;
@@ -3721,6 +3805,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	pthread_mutex_unlock(&endpoint->lock);
 
 	tr_rpc_executor_release(endpoint);
+	free(endpoint->call_by_stream_slot);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	pthread_cond_destroy(&endpoint->ref_cond);
@@ -3952,6 +4037,15 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
+	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
+	if (ret != TR_OK) {
+		struct tr_stream_handle stream = call->stream;
+
+		tr_rpc_free_call_locked(endpoint, call);
+		pthread_mutex_unlock(&endpoint->lock);
+		(void)tr_stream_close(stream);
+		return ret;
+	}
 
 	*request->out = handle;
 	pthread_mutex_unlock(&endpoint->lock);
@@ -4060,6 +4154,15 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
+		return ret;
+	}
+	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
+	if (ret != TR_OK) {
+		struct tr_stream_handle stream = call->stream;
+
+		tr_rpc_free_call_locked(endpoint, call);
+		pthread_mutex_unlock(&endpoint->lock);
+		(void)tr_stream_close(stream);
 		return ret;
 	}
 
@@ -4298,7 +4401,7 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 
 	ret = tr_stream_close(call->stream);
 	if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-		call->local_closed = 1;
+		tr_rpc_mark_local_closed_locked(endpoint, call);
 		ret = TR_OK;
 	}
 
@@ -4374,7 +4477,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 			tr_rpc_deadline_changed_locked(endpoint);
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-				call->local_closed = 1;
+				tr_rpc_mark_local_closed_locked(endpoint, call);
 				call->need_local_close = 0;
 				if (call->remote_closed) {
 					call->state = TR_RPC_CALL_TERMINAL;
@@ -4647,7 +4750,7 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				call->need_local_close = 0;
-				call->local_closed = 1;
+				tr_rpc_mark_local_closed_locked(endpoint, call);
 				if (call->admission_rejected &&
 				    call->remote_closed)
 					call->state = TR_RPC_CALL_TERMINAL;
