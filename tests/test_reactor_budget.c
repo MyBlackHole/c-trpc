@@ -519,11 +519,26 @@ static void test_mixed_budget(uint32_t budget, unsigned connections)
 	       budget, connections);
 }
 
+struct owner_call_send_request {
+	struct tr_conn_handle handle;
+	uint64_t message_id;
+};
+
+static int owner_call_send(void *arg)
+{
+	struct owner_call_send_request *request =
+		(struct owner_call_send_request *)arg;
+
+	return tr_reactor_send(request->handle, TR_FRAME_PING, 0U, 0U,
+			       request->message_id, NULL);
+}
+
 static void test_owner_send_fast_path(void)
 {
 	struct test_ctx ctx;
 	struct tr_conn_handle handle;
 	struct tr_reactor_stats stats;
+	struct owner_call_send_request owner_call;
 	unsigned char ping[TR_WIRE_HEADER_SIZE];
 	unsigned char pong[TR_WIRE_HEADER_SIZE];
 	unsigned char received[TR_WIRE_HEADER_SIZE];
@@ -554,6 +569,20 @@ static void test_owner_send_fast_path(void)
 	assert(memcmp(received, ping, sizeof(ping)) == 0);
 	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
 	assert(stats.command_send.enqueued == 1U);
+	assert(stats.command_send.full_events == 0U);
+
+	/*
+	 * A SEND issued from inside TR_CMD_CALL must not bypass commands already
+	 * popped into the same local batch. It therefore re-enters the ring.
+	 */
+	owner_call.handle = handle;
+	owner_call.message_id = 789U;
+	encode_control(ping, TR_FRAME_PING, owner_call.message_id);
+	assert(tr_reactor_call(ctx.reactor, owner_call_send, &owner_call) == TR_OK);
+	read_exact(sockets[1], received, sizeof(received));
+	assert(memcmp(received, ping, sizeof(ping)) == 0);
+	assert(tr_reactor_get_stats(ctx.reactor, &stats) == TR_OK);
+	assert(stats.command_send.enqueued == 2U);
 	assert(stats.command_send.full_events == 0U);
 
 	destroy_ctx(&ctx);
