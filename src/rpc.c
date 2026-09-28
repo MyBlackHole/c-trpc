@@ -759,6 +759,22 @@ static void tr_rpc_unbind_call_stream_locked(struct tr_rpc_endpoint *endpoint,
 			TR_RPC_STREAM_CALL_NONE;
 }
 
+static void tr_rpc_mark_local_closed_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call)
+{
+	uint32_t slot;
+
+	if (!endpoint || !call)
+		return;
+
+	tr_rpc_mark_local_closed_locked(endpoint, call);
+	if (!call->remote_closed)
+		return;
+
+	slot = (uint32_t)(call - endpoint->calls);
+	tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
+}
+
 static void
 tr_rpc_drop_pending_executor_task_locked(struct tr_rpc_call_slot *call)
 {
@@ -1024,7 +1040,7 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 			call->need_local_close = 0;
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			if (endpoint->config.role == TR_RPC_SERVER &&
 			    call->remote_closed) {
 				call->state = TR_RPC_CALL_TERMINAL;
@@ -1118,7 +1134,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 		call->final_status_sent = 1;
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			call->need_local_close = 0;
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
@@ -1189,7 +1205,7 @@ tr_rpc_fail_stream_midstream_overload_locked(
 		call->final_status_sent = 1;
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			call->need_local_close = 0;
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
@@ -2792,7 +2808,6 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 {
 	int ret = TR_OK;
 
-	(void)endpoint;
 	if (call->pending_control) {
 		ret = tr_stream_send(call->stream, call->pending_control);
 		if (ret == TR_OK) {
@@ -2815,7 +2830,7 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 		ret = tr_stream_close(call->stream);
 		if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 			call->need_local_close = 0;
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			if (call->admission_rejected && call->remote_closed)
 				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
@@ -3511,7 +3526,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				call->pending_control = NULL;
 			}
 			call->need_local_close = 0;
-			call->local_closed = 1;
+			tr_rpc_mark_local_closed_locked(endpoint, call);
 			call->state = TR_RPC_CALL_TERMINAL;
 			tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
@@ -3596,7 +3611,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
-		call->local_closed = 1;
+		tr_rpc_mark_local_closed_locked(endpoint, call);
 		if (call->pending_control) {
 			tr_buffer_release(call->pending_control);
 			call->pending_control = NULL;
@@ -4386,7 +4401,7 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 
 	ret = tr_stream_close(call->stream);
 	if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-		call->local_closed = 1;
+		tr_rpc_mark_local_closed_locked(endpoint, call);
 		ret = TR_OK;
 	}
 
@@ -4462,7 +4477,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 			tr_rpc_deadline_changed_locked(endpoint);
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-				call->local_closed = 1;
+				tr_rpc_mark_local_closed_locked(endpoint, call);
 				call->need_local_close = 0;
 				if (call->remote_closed) {
 					call->state = TR_RPC_CALL_TERMINAL;
@@ -4735,7 +4750,7 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				call->need_local_close = 0;
-				call->local_closed = 1;
+				tr_rpc_mark_local_closed_locked(endpoint, call);
 				if (call->admission_rejected &&
 				    call->remote_closed)
 					call->state = TR_RPC_CALL_TERMINAL;
