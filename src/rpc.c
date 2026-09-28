@@ -1393,8 +1393,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 
 	call->admission_rejected = 1;
 	call->final_status = status;
-	call->deadline_ns = 0;
-	tr_rpc_deadline_changed_locked(endpoint);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 	endpoint->stat_calls_completed++;
 
 	ret = tr_stream_send(call->stream, encoded);
@@ -1456,8 +1455,7 @@ tr_rpc_fail_stream_midstream_overload_locked(
 		return ret;
 
 	call->final_status = status;
-	call->deadline_ns = 0;
-	tr_rpc_deadline_changed_locked(endpoint);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 
 	/*
 	 * The application Call is terminal as soon as bounded continuation
@@ -3193,46 +3191,48 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
-	uint32_t expired_slot = UINT32_MAX;
-	uint64_t earliest;
+	struct tr_rpc_call_slot *call;
 	struct tr_rpc_call_handle handle;
 	struct tr_rpc_cancel_request request;
+	uint32_t expired_slot;
+	uint64_t earliest;
 
 	if (now_ns == 0)
 		now_ns = tr_rpc_now_ns();
 
 	pthread_mutex_lock(&endpoint->lock);
-	if (endpoint->deadline_stopping) {
+	if (endpoint->deadline_stopping ||
+	    endpoint->deadline_heap_count == 0U) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return 0;
 	}
 
-	earliest = tr_rpc_deadline_earliest_locked(endpoint, now_ns,
-						   &expired_slot);
-	if (expired_slot == UINT32_MAX) {
+	expired_slot = endpoint->deadline_heap[0];
+	if (expired_slot >= endpoint->config.max_calls) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return 0;
+	}
+	call = &endpoint->calls[expired_slot];
+	earliest = call->deadline_ns;
+	if (call->deadline_heap_pos != 0U || earliest == 0U) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return 0;
+	}
+	if (earliest > now_ns) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return earliest;
 	}
 
-	{
-		struct tr_rpc_call_slot *call = &endpoint->calls[expired_slot];
-
-		handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
-		/*
-		 * 先从 deadline heap 中移除并发布下一条 timer，避免 cancellation
-		 * 失败时同一 owner turn 反复命中当前 Call。
-		 */
-		(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
-		tr_rpc_deadline_rearm_locked(endpoint);
-	}
+	handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
+	/*
+	 * Remove the expired root before cancellation so any failure/terminal
+	 * path cannot rediscover the same deadline. Explicit re-arm uses the
+	 * timer queue version rule, so returning zero below cannot overwrite it.
+	 */
+	(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
+	tr_rpc_deadline_rearm_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	/*
-	 * Timer callback 本身就在 Reactor owner thread，直接调用 owner
-	 * implementation，避免再走同步 owner-call。cancel_on_owner() 内部的
-	 * deadline_changed_locked() 会显式 re-arm；timer queue 的 version
-	 * 规则保证该显式 arm 不会被本 callback 的返回值覆盖。
-	 */
 	request.handle = handle;
 	request.status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
 	(void)tr_rpc_cancel_on_owner(&request);
@@ -3791,7 +3791,6 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 		call->state = TR_RPC_CALL_TERMINAL;
 		tr_rpc_maybe_free_call_locked(endpoint, call);
-		tr_rpc_deadline_changed_locked(endpoint);
 		pthread_mutex_unlock(&endpoint->lock);
 		return;
 	}
