@@ -26,6 +26,7 @@ enum tr_rpc_call_state {
 
 #define TR_RPC_CALL_FREE_NONE UINT32_MAX
 #define TR_RPC_STREAM_CALL_NONE UINT32_MAX
+#define TR_RPC_DEADLINE_HEAP_NONE UINT32_MAX
 
 enum tr_rpc_handler_kind {
 	TR_RPC_HANDLER_NONE = 0,
@@ -122,6 +123,7 @@ struct tr_rpc_call_slot {
 	int cancel_status;
 	int terminal_notified;
 	uint64_t deadline_ns;
+	uint32_t deadline_heap_pos;
 
 	uint8_t local_metadata[TR_RPC_METADATA_MAX_BYTES];
 	uint16_t local_metadata_len;
@@ -251,6 +253,8 @@ struct tr_rpc_endpoint {
 	int deadline_stopping;
 	struct tr_reactor_timer_handle deadline_timer;
 	int deadline_timer_registered;
+	uint32_t *deadline_heap;
+	uint32_t deadline_heap_count;
 
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint_config config;
@@ -286,7 +290,9 @@ struct tr_rpc_endpoint {
 	 TR_RPC_METADATA_RESERVED_TIMEOUT_LEN + 8U)
 
 static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status);
-static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint);
+static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
+				      struct tr_rpc_call_slot *call,
+				      uint64_t deadline_ns);
 static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint);
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint);
@@ -506,10 +512,11 @@ tr_rpc_apply_options_locked(struct tr_rpc_endpoint *endpoint,
 			    TR_RPC_DEADLINE_METADATA_BYTES >
 		    TR_RPC_METADATA_MAX_BYTES)
 			return TR_ERR_BAD_LENGTH;
-		call->deadline_ns = deadline_ns;
-		if (call->deadline_ns == 0)
+		if (deadline_ns == 0U)
 			return TR_ERR_SYS;
-		tr_rpc_deadline_changed_locked(endpoint);
+		ret = tr_rpc_deadline_set_locked(endpoint, call, deadline_ns);
+		if (ret != TR_OK)
+			return ret;
 	}
 	return TR_OK;
 }
@@ -595,20 +602,24 @@ static int tr_rpc_import_peer_metadata_locked(struct tr_rpc_endpoint *endpoint,
 			{
 				uint64_t timeout_ms = tr_get_le64(value);
 				uint64_t now = tr_rpc_now_ns();
+				uint64_t deadline_ns;
 				uint64_t delta;
 
 				if (timeout_ms == 0 || now == 0)
 					return TR_ERR_BAD_LENGTH;
 				if (timeout_ms > UINT64_MAX / UINT64_C(1000000))
-					call->deadline_ns = UINT64_MAX;
+					deadline_ns = UINT64_MAX;
 				else {
 					delta = timeout_ms * UINT64_C(1000000);
-					call->deadline_ns =
+					deadline_ns =
 						UINT64_MAX - now < delta ?
 							UINT64_MAX :
 							now + delta;
 				}
-				tr_rpc_deadline_changed_locked(endpoint);
+				ret = tr_rpc_deadline_set_locked(
+					endpoint, call, deadline_ns);
+				if (ret != TR_OK)
+					return ret;
 			}
 		} else {
 			uint16_t new_len = call->peer_metadata_len;
@@ -651,6 +662,204 @@ tr_rpc_make_call_handle(struct tr_rpc_endpoint *endpoint, uint32_t slot,
 	handle.slot = slot;
 	handle.generation = call->generation;
 	return handle;
+}
+
+static int tr_rpc_deadline_less_locked(const struct tr_rpc_endpoint *endpoint,
+				       uint32_t left_slot,
+				       uint32_t right_slot)
+{
+	const struct tr_rpc_call_slot *left = &endpoint->calls[left_slot];
+	const struct tr_rpc_call_slot *right = &endpoint->calls[right_slot];
+
+	if (left->deadline_ns != right->deadline_ns)
+		return left->deadline_ns < right->deadline_ns;
+	return left_slot < right_slot;
+}
+
+static void tr_rpc_deadline_heap_swap_locked(struct tr_rpc_endpoint *endpoint,
+					      uint32_t left,
+					      uint32_t right)
+{
+	uint32_t left_slot = endpoint->deadline_heap[left];
+	uint32_t right_slot = endpoint->deadline_heap[right];
+
+	endpoint->deadline_heap[left] = right_slot;
+	endpoint->deadline_heap[right] = left_slot;
+	endpoint->calls[right_slot].deadline_heap_pos = left;
+	endpoint->calls[left_slot].deadline_heap_pos = right;
+}
+
+static void tr_rpc_deadline_sift_up_locked(struct tr_rpc_endpoint *endpoint,
+					   uint32_t pos)
+{
+	while (pos != 0U) {
+		uint32_t parent = (pos - 1U) / 2U;
+
+		if (!tr_rpc_deadline_less_locked(
+			    endpoint, endpoint->deadline_heap[pos],
+			    endpoint->deadline_heap[parent]))
+			break;
+		tr_rpc_deadline_heap_swap_locked(endpoint, pos, parent);
+		pos = parent;
+	}
+}
+
+static void tr_rpc_deadline_sift_down_locked(struct tr_rpc_endpoint *endpoint,
+					     uint32_t pos)
+{
+	for (;;) {
+		uint32_t left = pos * 2U + 1U;
+		uint32_t right;
+		uint32_t best;
+
+		if (left >= endpoint->deadline_heap_count)
+			break;
+		right = left + 1U;
+		best = left;
+		if (right < endpoint->deadline_heap_count &&
+		    tr_rpc_deadline_less_locked(
+			    endpoint, endpoint->deadline_heap[right],
+			    endpoint->deadline_heap[left]))
+			best = right;
+		if (!tr_rpc_deadline_less_locked(
+			    endpoint, endpoint->deadline_heap[best],
+			    endpoint->deadline_heap[pos]))
+			break;
+		tr_rpc_deadline_heap_swap_locked(endpoint, pos, best);
+		pos = best;
+	}
+}
+
+static int tr_rpc_deadline_update_locked(struct tr_rpc_endpoint *endpoint,
+					 struct tr_rpc_call_slot *call,
+					 uint64_t deadline_ns)
+{
+	uint32_t slot;
+	uint32_t pos;
+	uint64_t old_deadline;
+
+	if (!endpoint || !call)
+		return TR_ERR_INVALID;
+	slot = (uint32_t)(call - endpoint->calls);
+	if (slot >= endpoint->config.max_calls)
+		return TR_ERR_INVALID;
+
+	pos = call->deadline_heap_pos;
+	old_deadline = call->deadline_ns;
+	if (deadline_ns == 0U) {
+		if (pos != TR_RPC_DEADLINE_HEAP_NONE) {
+			uint32_t last_pos;
+			uint32_t moved_slot;
+
+			if (pos >= endpoint->deadline_heap_count)
+				return TR_ERR_STATE;
+			last_pos = --endpoint->deadline_heap_count;
+			if (pos != last_pos) {
+				moved_slot = endpoint->deadline_heap[last_pos];
+				endpoint->deadline_heap[pos] = moved_slot;
+				endpoint->calls[moved_slot].deadline_heap_pos = pos;
+			}
+			call->deadline_heap_pos = TR_RPC_DEADLINE_HEAP_NONE;
+			call->deadline_ns = 0U;
+			if (pos != last_pos) {
+				if (pos != 0U &&
+				    tr_rpc_deadline_less_locked(
+					    endpoint,
+					    endpoint->deadline_heap[pos],
+					    endpoint->deadline_heap[
+						    (pos - 1U) / 2U]))
+					tr_rpc_deadline_sift_up_locked(endpoint,
+								      pos);
+				else
+					tr_rpc_deadline_sift_down_locked(endpoint,
+									pos);
+			}
+			return TR_OK;
+		}
+		call->deadline_ns = 0U;
+		return TR_OK;
+	}
+
+	if (pos == TR_RPC_DEADLINE_HEAP_NONE) {
+		if (endpoint->deadline_heap_count >= endpoint->config.max_calls)
+			return TR_ERR_STATE;
+		pos = endpoint->deadline_heap_count++;
+		endpoint->deadline_heap[pos] = slot;
+		call->deadline_heap_pos = pos;
+		call->deadline_ns = deadline_ns;
+		tr_rpc_deadline_sift_up_locked(endpoint, pos);
+		return TR_OK;
+	}
+	if (pos >= endpoint->deadline_heap_count ||
+	    endpoint->deadline_heap[pos] != slot)
+		return TR_ERR_STATE;
+
+	call->deadline_ns = deadline_ns;
+	if (deadline_ns < old_deadline)
+		tr_rpc_deadline_sift_up_locked(endpoint, pos);
+	else if (deadline_ns > old_deadline)
+		tr_rpc_deadline_sift_down_locked(endpoint, pos);
+	return TR_OK;
+}
+
+static void tr_rpc_deadline_rearm_locked(struct tr_rpc_endpoint *endpoint)
+{
+	uint64_t earliest = 0U;
+
+	if (endpoint->deadline_stopping ||
+	    !endpoint->deadline_timer_registered)
+		return;
+	if (endpoint->deadline_heap_count != 0U)
+		earliest = endpoint->calls[endpoint->deadline_heap[0]].deadline_ns;
+	(void)tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
+}
+
+static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
+				      struct tr_rpc_call_slot *call,
+				      uint64_t deadline_ns)
+{
+	int ret = tr_rpc_deadline_update_locked(endpoint, call, deadline_ns);
+
+	if (ret == TR_OK)
+		tr_rpc_deadline_rearm_locked(endpoint);
+	return ret;
+}
+
+int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
+				  uint32_t *count,
+				  struct tr_rpc_call_handle *root,
+				  uint64_t *root_deadline_ns)
+{
+	if (!endpoint || !count)
+		return TR_ERR_INVALID;
+
+	if (root)
+		memset(root, 0, sizeof(*root));
+	if (root_deadline_ns)
+		*root_deadline_ns = 0U;
+
+	pthread_mutex_lock(&endpoint->lock);
+	*count = endpoint->deadline_heap_count;
+	if (endpoint->deadline_heap_count != 0U) {
+		uint32_t slot = endpoint->deadline_heap[0];
+		struct tr_rpc_call_slot *call;
+
+		if (slot >= endpoint->config.max_calls) {
+			pthread_mutex_unlock(&endpoint->lock);
+			return TR_ERR_STATE;
+		}
+		call = &endpoint->calls[slot];
+		if (call->deadline_heap_pos != 0U || call->deadline_ns == 0U) {
+			pthread_mutex_unlock(&endpoint->lock);
+			return TR_ERR_STATE;
+		}
+		if (root)
+			*root = tr_rpc_make_call_handle(endpoint, slot, call);
+		if (root_deadline_ns)
+			*root_deadline_ns = call->deadline_ns;
+	}
+	pthread_mutex_unlock(&endpoint->lock);
+	return TR_OK;
 }
 
 static size_t tr_rpc_method_index_capacity_for(uint32_t max_methods)
@@ -816,6 +1025,7 @@ static int tr_rpc_allocate_call_locked(struct tr_rpc_endpoint *endpoint,
 	memset(call, 0, sizeof(*call));
 	call->generation = generation;
 	call->free_next = TR_RPC_CALL_FREE_NONE;
+	call->deadline_heap_pos = TR_RPC_DEADLINE_HEAP_NONE;
 	endpoint->stat_calls_started++;
 	if (out)
 		*out = call;
@@ -894,6 +1104,7 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 
 	slot = (uint32_t)(call - endpoint->calls);
 	generation = call->generation;
+	(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
 	tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
 	if (call->pending_tx)
 		tr_buffer_release(call->pending_tx);
@@ -903,6 +1114,7 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 	memset(call, 0, sizeof(*call));
 	call->generation = generation;
 	call->free_next = endpoint->free_call_head;
+	call->deadline_heap_pos = TR_RPC_DEADLINE_HEAP_NONE;
 	endpoint->free_call_head = slot;
 }
 
@@ -1125,7 +1337,8 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 			call->need_local_close = 1;
 			call->state = TR_RPC_CALL_ACTIVE;
 			if (endpoint->config.role == TR_RPC_SERVER)
-				call->deadline_ns = 0;
+				(void)tr_rpc_deadline_set_locked(endpoint, call,
+							      0U);
 		} else {
 			return ret;
 		}
@@ -1139,8 +1352,8 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 			if (endpoint->config.role == TR_RPC_SERVER &&
 			    call->remote_closed) {
 				call->state = TR_RPC_CALL_TERMINAL;
-				call->deadline_ns = 0;
-				tr_rpc_deadline_changed_locked(endpoint);
+				(void)tr_rpc_deadline_set_locked(endpoint, call,
+							      0U);
 				tr_rpc_maybe_free_call_locked(endpoint, call);
 			}
 			return TR_OK;
@@ -1175,8 +1388,7 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 		return ret;
 
 	call->pending_tx = tr_buffer_take(&encoded);
-	call->deadline_ns = 0;
-	tr_rpc_deadline_changed_locked(endpoint);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
 	/*
@@ -1219,8 +1431,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 
 	call->admission_rejected = 1;
 	call->final_status = status;
-	call->deadline_ns = 0;
-	tr_rpc_deadline_changed_locked(endpoint);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 	endpoint->stat_calls_completed++;
 
 	ret = tr_stream_send(call->stream, encoded);
@@ -1282,8 +1493,7 @@ tr_rpc_fail_stream_midstream_overload_locked(
 		return ret;
 
 	call->final_status = status;
-	call->deadline_ns = 0;
-	tr_rpc_deadline_changed_locked(endpoint);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 
 	/*
 	 * The application Call is terminal as soon as bounded continuation
@@ -2975,7 +3185,7 @@ static int tr_rpc_cancel_on_owner(void *arg)
 		endpoint->stat_calls_deadline_exceeded++;
 	else
 		endpoint->stat_calls_cancelled++;
-	call->deadline_ns = 0;
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 	call->final_status_seen = 1;
 	call->final_status = status;
 	call->state = TR_RPC_CALL_TERMINAL;
@@ -2998,7 +3208,6 @@ static int tr_rpc_cancel_on_owner(void *arg)
 	call->need_local_close = 1;
 	(void)tr_rpc_try_cancel_send_locked(endpoint, call);
 	tr_rpc_maybe_free_call_locked(endpoint, call);
-	tr_rpc_deadline_changed_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 
 	return TR_OK;
@@ -3017,95 +3226,51 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 	request.status = status;
 	return tr_rpc_owner_call(endpoint, tr_rpc_cancel_on_owner, &request);
 }
-static uint64_t
-tr_rpc_deadline_earliest_locked(const struct tr_rpc_endpoint *endpoint,
-				uint64_t now_ns, uint32_t *expired_slot)
-{
-	uint64_t earliest = 0;
-	uint32_t i;
-
-	if (expired_slot)
-		*expired_slot = UINT32_MAX;
-
-	for (i = 0; i < endpoint->config.max_calls; ++i) {
-		const struct tr_rpc_call_slot *call = &endpoint->calls[i];
-
-		if (call->state == TR_RPC_CALL_FREE ||
-		    call->state == TR_RPC_CALL_TERMINAL ||
-		    call->deadline_ns == 0)
-			continue;
-
-		if (now_ns != 0 && call->deadline_ns <= now_ns) {
-			if (expired_slot)
-				*expired_slot = i;
-			return call->deadline_ns;
-		}
-		if (earliest == 0 || call->deadline_ns < earliest)
-			earliest = call->deadline_ns;
-	}
-
-	return earliest;
-}
-
-/*
- * endpoint->lock 必须已经持有，并且调用方必须处于 Endpoint 所属 Reactor
- * owner thread。Call deadline 的所有正常变更路径已经 owner 化，因此这里可
- * 直接更新 Reactor-local timer，不再经过第二套 scheduler/thread。
- */
-static void tr_rpc_deadline_changed_locked(struct tr_rpc_endpoint *endpoint)
-{
-	uint64_t earliest;
-
-	if (endpoint->deadline_stopping ||
-	    !endpoint->deadline_timer_registered)
-		return;
-
-	earliest = tr_rpc_deadline_earliest_locked(endpoint, 0, NULL);
-	(void)tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
-}
-
 static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
-	uint32_t expired_slot = UINT32_MAX;
-	uint64_t earliest;
+	struct tr_rpc_call_slot *call;
 	struct tr_rpc_call_handle handle;
 	struct tr_rpc_cancel_request request;
+	uint32_t expired_slot;
+	uint64_t earliest;
 
 	if (now_ns == 0)
 		now_ns = tr_rpc_now_ns();
 
 	pthread_mutex_lock(&endpoint->lock);
-	if (endpoint->deadline_stopping) {
+	if (endpoint->deadline_stopping ||
+	    endpoint->deadline_heap_count == 0U) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return 0;
 	}
 
-	earliest = tr_rpc_deadline_earliest_locked(endpoint, now_ns,
-						   &expired_slot);
-	if (expired_slot == UINT32_MAX) {
+	expired_slot = endpoint->deadline_heap[0];
+	if (expired_slot >= endpoint->config.max_calls) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return 0;
+	}
+	call = &endpoint->calls[expired_slot];
+	earliest = call->deadline_ns;
+	if (call->deadline_heap_pos != 0U || earliest == 0U) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return 0;
+	}
+	if (earliest > now_ns) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return earliest;
 	}
 
-	{
-		struct tr_rpc_call_slot *call = &endpoint->calls[expired_slot];
-
-		handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
-		/*
-		 * 先从 deadline scan 中移除，避免 cancellation 失败时同一
-		 * owner turn 反复命中。cancel_on_owner() 会重新计算下一条。
-		 */
-		call->deadline_ns = 0;
-	}
+	handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
+	/*
+	 * Remove the expired root before cancellation so any failure/terminal
+	 * path cannot rediscover the same deadline. Explicit re-arm uses the
+	 * timer queue version rule, so returning zero below cannot overwrite it.
+	 */
+	(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
+	tr_rpc_deadline_rearm_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	/*
-	 * Timer callback 本身就在 Reactor owner thread，直接调用 owner
-	 * implementation，避免再走同步 owner-call。cancel_on_owner() 内部的
-	 * deadline_changed_locked() 会显式 re-arm；timer queue 的 version
-	 * 规则保证该显式 arm 不会被本 callback 的返回值覆盖。
-	 */
 	request.handle = handle;
 	request.status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
 	(void)tr_rpc_cancel_on_owner(&request);
@@ -3378,7 +3543,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			}
 			call->response_received = 1;
 			call->result_delivered = 1;
-			call->deadline_ns = 0;
+			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			task.type = TR_RPC_TASK_CLIENT_UNARY_RESULT;
 		} else {
 			if (wire.status != TR_RPC_STATUS_OK) {
@@ -3429,7 +3594,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 		call->final_status_seen = 1;
 		call->final_status = wire.status;
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 		ret = tr_rpc_queue_client_event_locked(
 			endpoint, slot, call, TR_RPC_CALL_EVENT_FINISHED,
 			wire.status);
@@ -3462,7 +3627,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			tr_rpc_executor_mark_cancelled(
 				endpoint,
 				tr_rpc_make_call_handle(endpoint, slot, call));
-			call->deadline_ns = 0;
+			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			call->final_status_seen = 1;
 			call->final_status = cancel_status;
 			call->state = TR_RPC_CALL_TERMINAL;
@@ -3613,7 +3778,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 		 */
 		tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
 
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 		tr_rpc_drop_pending_executor_task_locked(call);
 		if (call->cancelled) {
 			if (call->pending_control) {
@@ -3664,7 +3829,6 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 		call->state = TR_RPC_CALL_TERMINAL;
 		tr_rpc_maybe_free_call_locked(endpoint, call);
-		tr_rpc_deadline_changed_locked(endpoint);
 		pthread_mutex_unlock(&endpoint->lock);
 		return;
 	}
@@ -3702,7 +3866,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		 * Detach the slot index before terminal Call callbacks drain.
 		 */
 		tr_rpc_unbind_call_stream_locked(endpoint, i, call);
-		call->deadline_ns = 0;
+		(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
 		tr_rpc_drop_pending_executor_task_locked(call);
 		call->state = TR_RPC_CALL_TERMINAL;
 		call->need_local_close = 0;
@@ -3741,7 +3905,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 
 		tr_rpc_maybe_free_call_locked(endpoint, call);
 	}
-	tr_rpc_deadline_changed_locked(endpoint);
+	tr_rpc_deadline_rearm_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 }
 
@@ -3774,6 +3938,7 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 
 	free(endpoint->call_by_stream_slot);
 	free(endpoint->method_index);
+	free(endpoint->deadline_heap);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	if (build->ref_cond_ready)
@@ -3824,21 +3989,27 @@ int tr_rpc_endpoint_create_with_executor_group(
 		endpoint->method_index_capacity, sizeof(*endpoint->method_index));
 	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
 		config->max_calls, sizeof(*endpoint->calls));
+	endpoint->deadline_heap = (uint32_t *)calloc(
+		config->max_calls, sizeof(*endpoint->deadline_heap));
 	endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
 	endpoint->call_by_stream_slot = (uint32_t *)calloc(
 		endpoint->stream_slot_capacity,
 		sizeof(*endpoint->call_by_stream_slot));
 	if (!endpoint->methods || !endpoint->method_index || !endpoint->calls ||
-	    !endpoint->call_by_stream_slot || endpoint->stream_slot_capacity == 0U)
+	    !endpoint->deadline_heap || !endpoint->call_by_stream_slot ||
+	    endpoint->stream_slot_capacity == 0U)
 		return TR_ERR_NOMEM;
 	{
 		uint32_t i;
 
 		endpoint->free_call_head = 0U;
-		for (i = 0; i < config->max_calls; ++i)
+		for (i = 0; i < config->max_calls; ++i) {
 			endpoint->calls[i].free_next =
 				(i + 1U < config->max_calls) ?
 					i + 1U : TR_RPC_CALL_FREE_NONE;
+			endpoint->calls[i].deadline_heap_pos =
+				TR_RPC_DEADLINE_HEAP_NONE;
+		}
 		for (i = 0; i < endpoint->stream_slot_capacity; ++i)
 			endpoint->call_by_stream_slot[i] =
 				TR_RPC_STREAM_CALL_NONE;
@@ -3909,6 +4080,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_executor_release(endpoint);
 	free(endpoint->call_by_stream_slot);
 	free(endpoint->method_index);
+	free(endpoint->deadline_heap);
 	free(endpoint->calls);
 	free(endpoint->methods);
 	pthread_cond_destroy(&endpoint->ref_cond);
@@ -4585,8 +4757,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 			(void)tr_buffer_take(&buffer);
 			call->final_status_sent = 1;
 			call->final_status = status;
-			call->deadline_ns = 0;
-			tr_rpc_deadline_changed_locked(endpoint);
+			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				tr_rpc_mark_local_closed_locked(endpoint, call);
