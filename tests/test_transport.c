@@ -2475,6 +2475,7 @@ static void test_rpc_deadline_heap_order(void)
 	struct tr_buffer_pool rpc_pool;
 	struct tr_rpc_call_handle long_call;
 	struct tr_rpc_call_handle short_call;
+	struct tr_rpc_call_handle middle_call;
 	struct tr_rpc_call_handle root;
 	struct tr_rpc_call_options options;
 	uint64_t long_deadline;
@@ -2555,15 +2556,34 @@ static void test_rpc_deadline_heap_order(void)
 	assert(root.generation == short_call.generation);
 	assert(root_deadline < long_deadline);
 
+	options.timeout_ms = 4000U;
+	assert(tr_rpc_call_start_ex(client_rpc, 92U, 1U, &options, NULL,
+				    &middle_call) == TR_OK);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 3U);
+	assert(root.slot == short_call.slot);
+	assert(root.generation == short_call.generation);
+
+	/*
+	 * The long Call is a non-root, non-last heap entry. Removing it forces
+	 * the last entry into the hole and exercises the local heap repair path.
+	 */
+	assert(tr_rpc_call_cancel(long_call) == TR_OK);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 2U);
+	assert(root.slot == short_call.slot);
+	assert(root.generation == short_call.generation);
+
 	assert(tr_rpc_call_cancel(short_call) == TR_OK);
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 1U);
-	assert(root.slot == long_call.slot);
-	assert(root.generation == long_call.generation);
-	assert(root_deadline == long_deadline);
+	assert(root.slot == middle_call.slot);
+	assert(root.generation == middle_call.generation);
 
-	assert(tr_rpc_call_cancel(long_call) == TR_OK);
+	assert(tr_rpc_call_cancel(middle_call) == TR_OK);
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 0U);
@@ -2671,9 +2691,12 @@ static void test_rpc_call_slot_reuse(void)
 	struct tr_rpc_call_handle first;
 	struct tr_rpc_call_handle second;
 	struct tr_rpc_call_handle rejected;
+	struct tr_rpc_call_handle root;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_options call_options;
 	struct rpc_slot_reuse_ctx ctx;
+	uint64_t root_deadline;
+	uint32_t heap_count;
 	int client_fd;
 	int server_fd;
 
@@ -2747,6 +2770,12 @@ static void test_rpc_call_slot_reuse(void)
 				   &call_options, rpc_slot_reuse_result,
 				   &ctx, &first) == TR_OK);
 	wait_rpc_slot_counter(&ctx, &ctx.entered, 1U);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 1U);
+	assert(root.slot == first.slot);
+	assert(root.generation == first.generation);
+	assert(root_deadline != 0U);
 
 	/* max_calls=1: the free-call list is empty while the first Call is live. */
 	assert(tr_rpc_unary_call_ex(client_rpc, 91U, 1U, &request,
@@ -2759,13 +2788,37 @@ static void test_rpc_call_slot_reuse(void)
 	pthread_mutex_unlock(&ctx.lock);
 	wait_rpc_slot_counter(&ctx, &ctx.results, 1U);
 	wait_rpc_handle_stale(first);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 0U);
+	assert(root.endpoint == NULL);
+	assert(root_deadline == 0U);
+
+	pthread_mutex_lock(&ctx.lock);
+	ctx.release = 0;
+	pthread_mutex_unlock(&ctx.lock);
 
 	request.data = (const uint8_t *)"two";
 	assert(tr_rpc_unary_call_ex(client_rpc, 91U, 1U, &request,
 				   &call_options, rpc_slot_reuse_result,
 				   &ctx, &second) == TR_OK);
+	wait_rpc_slot_counter(&ctx, &ctx.entered, 2U);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 1U);
+	assert(root.slot == second.slot);
+	assert(root.generation == second.generation);
+	assert(root_deadline != 0U);
+
+	pthread_mutex_lock(&ctx.lock);
+	ctx.release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
 	wait_rpc_slot_counter(&ctx, &ctx.results, 2U);
 	wait_rpc_handle_stale(second);
+	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
+					     &root_deadline) == TR_OK);
+	assert(heap_count == 0U);
 	assert(second.slot == first.slot);
 	assert(second.generation != first.generation);
 	assert(tr_rpc_call_is_cancelled(first, NULL) == TR_ERR_STALE);
