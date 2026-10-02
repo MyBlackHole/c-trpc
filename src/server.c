@@ -20,6 +20,8 @@
 #include "socket_internal.h"
 #include "observability_internal.h"
 
+#define TR_SERVER_ACCEPT_BATCH 16U
+
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
 	TR_SERVER_METHOD_STREAM = 2
@@ -600,11 +602,12 @@ static void tr_server_on_listener_ready(int listener, uint32_t events,
 					void *arg)
 {
 	struct tr_server *server = (struct tr_server *)arg;
+	uint32_t accepted = 0U;
 
 	if (!server || !(events & EPOLLIN))
 		return;
 
-	for (;;) {
+	while (accepted < TR_SERVER_ACCEPT_BATCH) {
 		int fd = -1;
 		int ret = tr_tcp_accept(listener, &fd);
 
@@ -616,8 +619,13 @@ static void tr_server_on_listener_ready(int listener, uint32_t events,
 		/*
 		 * Runs on the Reactor owner. adopt_fd takes the owner fast path so
 		 * Channel/RPC setup sees an ACTIVE connection immediately.
+		 *
+		 * Bound each listener callback so an accept flood cannot monopolize
+		 * one Reactor turn. Level-triggered epoll will report the listener
+		 * again while backlog remains.
 		 */
 		(void)tr_server_adopt_peer(server, fd);
+		accepted++;
 	}
 }
 
