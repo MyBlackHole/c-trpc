@@ -123,9 +123,6 @@ void tr_pipeline_registry_destroy(struct tr_pipeline_registry *registry)
 struct tr_pipeline_registry_pipeline_request {
 	struct tr_pipeline_registry *registry;
 	struct tr_pipeline *pipeline;
-	struct tr_pipeline **out;
-	uint64_t pipeline_id;
-	uint64_t epoch;
 };
 
 static int tr_pipeline_registry_register_on_owner(void *arg)
@@ -206,49 +203,10 @@ int tr_pipeline_registry_unregister(struct tr_pipeline_registry *registry,
 			       tr_pipeline_registry_unregister_on_owner, &request);
 }
 
-static int tr_pipeline_registry_lookup_on_owner(void *arg)
-{
-	struct tr_pipeline_registry_pipeline_request *request =
-		(struct tr_pipeline_registry_pipeline_request *)arg;
-	struct tr_pipeline_registry *registry = request->registry;
-	struct tr_pipeline *pipeline;
-	uint32_t found = UINT32_MAX;
-
-	if (!tr_pipeline_registry_find(registry, request->pipeline_id,
-				       &found, NULL))
-		return TR_ERR_STALE;
-
-	pipeline = registry->entries[found].pipeline;
-	if (!pipeline || tr_pipeline_epoch(pipeline) != request->epoch)
-		return TR_ERR_STALE;
-
-	*request->out = pipeline;
-	return TR_OK;
-}
-
-int tr_pipeline_registry_lookup(struct tr_pipeline_registry *registry,
-				uint64_t pipeline_id, uint64_t epoch,
-				struct tr_pipeline **out)
-{
-	struct tr_pipeline_registry_pipeline_request request;
-
-	if (!registry || !out || pipeline_id == 0U || epoch == 0U)
-		return TR_ERR_INVALID;
-	*out = NULL;
-	memset(&request, 0, sizeof(request));
-	request.registry = registry;
-	request.pipeline_id = pipeline_id;
-	request.epoch = epoch;
-	request.out = out;
-	return tr_reactor_call(registry->owner,
-			       tr_pipeline_registry_lookup_on_owner, &request);
-}
-
 struct tr_pipeline_registry_attach_request {
 	struct tr_pipeline_registry *registry;
 	struct tr_pipeline_route_preface preface;
 	struct tr_conn_handle connection;
-	struct tr_pipeline **pipeline_out;
 	struct tr_pipeline_data_ref *data_out;
 };
 
@@ -291,8 +249,6 @@ static int tr_pipeline_registry_attach_data_route_on_owner(void *arg)
 	if (ret != TR_OK)
 		return ret;
 
-	if (request->pipeline_out)
-		*request->pipeline_out = pipeline;
 	if (request->data_out)
 		*request->data_out = data;
 	return TR_OK;
@@ -302,15 +258,12 @@ int tr_pipeline_registry_attach_data_route(
 	struct tr_pipeline_registry *registry,
 	const struct tr_pipeline_route_preface *preface,
 	struct tr_conn_handle connection,
-	struct tr_pipeline **pipeline_out,
 	struct tr_pipeline_data_ref *data_out)
 {
 	struct tr_pipeline_registry_attach_request request;
 
 	if (!registry || !preface)
 		return TR_ERR_INVALID;
-	if (pipeline_out)
-		*pipeline_out = NULL;
 	if (data_out)
 		memset(data_out, 0, sizeof(*data_out));
 
@@ -318,7 +271,6 @@ int tr_pipeline_registry_attach_data_route(
 	request.registry = registry;
 	request.preface = *preface;
 	request.connection = connection;
-	request.pipeline_out = pipeline_out;
 	request.data_out = data_out;
 	return tr_reactor_call(
 		registry->owner,
