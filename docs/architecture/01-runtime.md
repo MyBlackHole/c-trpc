@@ -234,6 +234,6 @@ Client/Server 实例额外持有的闲置 maintenance scheduler。
 `tests/test_runtime_threads.c` 使用测试目标独有的 pthread create/join 包装，
 检查创建前后的精确增量、正常销毁、未 start 的 Server 销毁和部分启动失败回收。
 它补充原有连接后线程上限测试，避免把 create 阶段的额外线程计入 baseline
-后漏检。故障注入覆盖 Client Reactor、三个共享 worker，以及 Server 的
+后漏检。故障注入覆盖 Client Reactor、三个 shard-local worker，以及 Server 的
 Reactor/reaper/accept 共七个启动点；每个成功创建的线程必须成功 join，
 失败回滚不允许遗留线程或重复 join。
