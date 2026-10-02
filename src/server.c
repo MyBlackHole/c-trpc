@@ -15,6 +15,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "rpc_internal.h"
+#include "runtime_internal.h"
 #include "socket_internal.h"
 #include "observability_internal.h"
 
@@ -42,7 +43,8 @@ struct tr_server_peer {
 struct tr_server {
 	struct tr_server_config config;
 
-	struct tr_reactor *reactor;
+	struct tr_runtime *runtime;
+	struct tr_runtime_shard *shard;
 	struct tr_rpc_executor_group *rpc_executor_group;
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
@@ -78,6 +80,11 @@ struct tr_server {
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
+
+static struct tr_reactor *tr_server_reactor(struct tr_server *server)
+{
+	return server ? tr_runtime_shard_reactor(server->shard) : NULL;
+}
 
 static uint64_t tr_server_now_ms(void)
 {
@@ -465,7 +472,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 			return ret;
 	}
 
-	ret = tr_reactor_adopt_fd(server->reactor, owned_fd,
+	ret = tr_reactor_adopt_fd(tr_server_reactor(server), owned_fd,
 				  &peer->connection);
 	if (ret != TR_OK)
 		return ret;
@@ -588,7 +595,8 @@ int tr_server_create(const struct tr_server_config *config,
 		     struct tr_server **out)
 {
 	struct tr_server_config effective;
-	struct tr_reactor_config reactor_config;
+	struct tr_runtime_config runtime_config;
+	struct tr_reactor_config *reactor_config;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
 	int ret;
@@ -656,29 +664,33 @@ int tr_server_create(const struct tr_server_config *config,
 	if (ret != TR_OK)
 		return ret;
 
-	memset(&reactor_config, 0, sizeof(reactor_config));
-	reactor_config.max_connections = effective.max_peers + 4U;
-	reactor_config.command_capacity = effective.limits.command_capacity;
-	reactor_config.tx_item_capacity = effective.limits.tx_item_capacity;
-	reactor_config.control_tx_item_capacity =
+	memset(&runtime_config, 0, sizeof(runtime_config));
+	runtime_config.shard_count = 1U;
+	reactor_config = &runtime_config.reactor;
+	reactor_config->max_connections = effective.max_peers + 4U;
+	reactor_config->command_capacity = effective.limits.command_capacity;
+	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
+	reactor_config->control_tx_item_capacity =
 		effective.limits.control_tx_item_capacity;
-	reactor_config.rx_buffer_count = effective.limits.rx_buffer_count;
-	reactor_config.rx_buffer_size =
+	reactor_config->rx_buffer_count = effective.limits.rx_buffer_count;
+	reactor_config->rx_buffer_size =
 		effective.limits.max_frame_payload_bytes;
-	reactor_config.max_payload_len =
+	reactor_config->max_payload_len =
 		effective.limits.max_frame_payload_bytes;
-	reactor_config.rx_budget_bytes =
+	reactor_config->rx_budget_bytes =
 		effective.limits.max_frame_payload_bytes > UINT32_MAX / 4U ?
 			UINT32_MAX :
 			effective.limits.max_frame_payload_bytes * 4U;
-	reactor_config.tx_budget_bytes = reactor_config.rx_budget_bytes;
-	reactor_config.observability_flags =
+	reactor_config->tx_budget_bytes = reactor_config->rx_budget_bytes;
+	reactor_config->observability_flags =
 		effective.limits.observability_flags;
 
-	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
-				&server->reactor);
+	ret = tr_runtime_create(&runtime_config, &server->runtime);
 	if (ret != TR_OK)
 		return ret;
+	server->shard = tr_runtime_shard_at(server->runtime, 0U);
+	if (!server->shard)
+		return TR_ERR_STATE;
 
 	*out = tr_server_owner_take(&server);
 	return TR_OK;
@@ -804,7 +816,7 @@ int tr_server_start(struct tr_server *server)
 	if (server->started)
 		return TR_ERR_STATE;
 
-	ret = tr_reactor_start(server->reactor);
+	ret = tr_runtime_start(server->runtime);
 	if (ret != TR_OK)
 		return ret;
 
@@ -815,7 +827,7 @@ int tr_server_start(struct tr_server *server)
 
 	if (pthread_create(&server->reap_thread, NULL, tr_server_reap_main,
 			   server) != 0) {
-		(void)tr_reactor_stop(server->reactor);
+		(void)tr_runtime_stop(server->runtime);
 		return TR_ERR_SYS;
 	}
 	server->reap_thread_started = 1;
@@ -823,7 +835,7 @@ int tr_server_start(struct tr_server *server)
 	if (pthread_create(&server->accept_thread, NULL, tr_server_accept_main,
 			   server) != 0) {
 		tr_server_stop_reaper(server);
-		(void)tr_reactor_stop(server->reactor);
+		(void)tr_runtime_stop(server->runtime);
 		return TR_ERR_SYS;
 	}
 
@@ -898,7 +910,7 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 		return TR_ERR_INVALID;
 
 	memset(&stats, 0, sizeof(stats));
-	ret = tr_reactor_get_stats(server->reactor, &stats.reactor);
+	ret = tr_reactor_get_stats(tr_server_reactor(server), &stats.reactor);
 	if (ret != TR_OK)
 		return ret;
 	ret = tr_buffer_pool_get_stats(&server->rpc_message_pool,
@@ -962,8 +974,8 @@ void tr_server_destroy(struct tr_server *server)
 	if (server->reap_thread_started)
 		tr_server_stop_reaper(server);
 
-	if (server->reactor && server->started)
-		(void)tr_reactor_stop(server->reactor);
+	if (server->runtime && server->started)
+		(void)tr_runtime_stop(server->runtime);
 
 	if (server->peers) {
 		for (i = 0; i < server->config.max_peers; ++i) {
@@ -974,8 +986,8 @@ void tr_server_destroy(struct tr_server *server)
 		}
 	}
 
-	if (server->reactor)
-		tr_reactor_destroy(server->reactor);
+	if (server->runtime)
+		tr_runtime_destroy(server->runtime);
 	if (server->rpc_executor_group)
 		tr_rpc_executor_group_destroy(server->rpc_executor_group);
 	if (server->reassembly_pool_ready)
