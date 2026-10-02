@@ -1125,9 +1125,13 @@ int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 	return TR_OK;
 
 rollback:
-	while (i != 0U) {
-		--i;
-		tr_runtime_shard_close_listener(server->shards[i].runtime);
+	{
+		uint32_t j;
+
+		for (j = 0; j < server->shard_count; ++j)
+			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0)
+				tr_runtime_shard_close_listener(
+					server->shards[j].runtime);
 	}
 	return ret;
 }
