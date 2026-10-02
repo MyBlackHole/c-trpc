@@ -111,6 +111,7 @@ int tr_pipeline_control_reserve_data(
 	if (!control || !control->pipeline || !out)
 		return TR_ERR_INVALID;
 
+	memset(out, 0, sizeof(*out));
 	memset(&data, 0, sizeof(data));
 	ret = tr_pipeline_reserve_data(control->pipeline, &data);
 	if (ret != TR_OK)
