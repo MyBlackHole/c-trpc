@@ -111,7 +111,6 @@ static void test_runtime_reuseport_listener_group(void)
 	shard1 = tr_runtime_shard_at(runtime, 1U);
 	assert(shard0 != NULL && shard1 != NULL);
 
-#ifdef SO_REUSEPORT
 	assert(tr_runtime_shard_listen_ipv4_ex(
 		       shard0, "127.0.0.1", 0U, 8, 1, &port0) == TR_OK);
 	assert(port0 != 0U);
@@ -120,11 +119,6 @@ static void test_runtime_reuseport_listener_group(void)
 	assert(port1 == port0);
 	assert(tr_runtime_shard_listener_fd(shard0) >= 0);
 	assert(tr_runtime_shard_listener_fd(shard1) >= 0);
-#else
-	assert(tr_runtime_shard_listen_ipv4_ex(
-		       shard0, "127.0.0.1", 0U, 8, 1, &port0) ==
-	       TR_ERR_UNSUPPORTED);
-#endif
 
 	tr_runtime_destroy(runtime);
 }
