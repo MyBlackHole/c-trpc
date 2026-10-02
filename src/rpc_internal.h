@@ -55,9 +55,10 @@ typedef void (*tr_rpc_endpoint_detached_finalizer)(
  * The callback runs after Endpoint memory has been released; it must not touch
  * the Endpoint and may run on either a worker or Reactor owner context.
  */
-int tr_rpc_endpoint_finalize_detached_async(
+int tr_rpc_endpoint_arm_detached_finalizer(
 	struct tr_rpc_endpoint *endpoint,
 	tr_rpc_endpoint_detached_finalizer finalizer, void *arg);
+void tr_rpc_endpoint_release_detached_owner(struct tr_rpc_endpoint *endpoint);
 
 /* Internal deterministic diagnostics for the bounded Call deadline heap. */
 int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
