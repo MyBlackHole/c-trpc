@@ -24,6 +24,7 @@ static void test_runtime_single_shard_identity(void)
 	assert(shard != NULL);
 	assert(tr_runtime_shard_id(shard) == 0U);
 	assert(tr_runtime_shard_reactor(shard) != NULL);
+	assert(tr_runtime_shard_rpc_executor(shard) == NULL);
 	assert(tr_runtime_shard_at(runtime, 1U) == NULL);
 
 	tr_runtime_destroy(runtime);
