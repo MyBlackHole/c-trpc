@@ -188,13 +188,24 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - route attach 再校验 role/shard/pipeline_id/epoch/index/generation/owner Reactor；
 - routing mismatch 不消耗 reservation；
 - exact attach 才把 RESERVED 转为 ATTACHED；
-- registry 不拥有 Pipeline lifetime，destroy 前要求显式 unregister；
+- registry 不拥有 Pipeline lifetime；unregister 前强制 CONTROL/DATA/reservation/affinity 全部 quiesce；
 - registry 不向 owner domain 外返回裸 Pipeline pointer，按 ID 操作必须 owner 内 lookup+action。
+
+已完成 accepted DATA ingress foundation：
+
+- Reactor connection 支持 opt-in fixed-size preface gate；
+- gate 在 TRP1 parser 前读取且只读取精确 preface 长度，不 over-read 后续 frame；
+- Pipeline ingress 使用真实 accepted fd 执行 TRR1 parse + registry reservation attach；
+- routing mismatch connection-fatal，但不消耗 reservation；
+- exact retry capability 可以随后成功 attach；
+- attach 后安装正常 TRP1 downstream handler；
+- routed DATA connection CLOSED/ERROR 自动 exact detach membership；
+- 普通 RPC adopt path 不启用 gate，现有协议行为不变。
 
 下一步：
 
-- accepted connection routing preface 接入；
 - CONTROL 建立/确认 DATA membership；
+- 将 Pipeline registry/ingress 接入 Server shard 的正式 Pipeline listener/control plane；
 - `TRANSFER_READY(stream_id, data_index)` barrier；
 - 将 Channel/RPC/Backup facade 接到 Pipeline membership；
 - 只有协议确实要求时才引入显式 cross-shard fd ownership transfer。

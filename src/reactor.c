@@ -36,6 +36,7 @@
 #define TR_TX_READY_BATCH 64U
 #define TR_RX_READY_BATCH 64U
 #define TR_IO_QUANTUM (64U * 1024U)
+#define TR_REACTOR_MAX_PREFACE_BYTES 256U
 /* Bound priority overtakes of the oldest DATA frame, across loop turns. */
 #define TR_CONTROL_BURST 8U
 #define TR_WAKE_TOKEN UINT64_MAX
@@ -119,6 +120,11 @@ struct tr_connection {
 	tr_reactor_frame_cb frame_cb;
 	tr_reactor_event_cb event_cb;
 	void *callback_arg;
+
+	uint32_t preface_remaining;
+	tr_reactor_preface_feed_cb preface_feed;
+	tr_reactor_preface_release_cb preface_release;
+	void *preface_arg;
 
 	struct tr_parser parser;
 
@@ -734,6 +740,17 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_unschedule_tx(reactor, connection);
 	tr_unschedule_rx(reactor, connection);
 	connection->rx_error_pending = 0;
+	if (connection->preface_release) {
+		tr_reactor_preface_release_cb release =
+			connection->preface_release;
+		void *release_arg = connection->preface_arg;
+
+		connection->preface_remaining = 0U;
+		connection->preface_feed = NULL;
+		connection->preface_release = NULL;
+		connection->preface_arg = NULL;
+		release(release_arg);
+	}
 	tr_parser_reset(&connection->parser);
 	tr_release_tx_queue(reactor, connection);
 
@@ -746,8 +763,9 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_connection_notify(reactor, connection, event, status);
 }
 
-static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
-			       uint32_t generation, int fd)
+static int tr_connection_adopt(
+	struct tr_reactor *reactor, uint32_t slot, uint32_t generation, int fd,
+	const struct tr_reactor_preface_handler *preface)
 {
 	struct tr_connection *connection;
 
@@ -768,6 +786,19 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	connection->frame_cb = reactor->frame_cb;
 	connection->event_cb = reactor->event_cb;
 	connection->callback_arg = reactor->callback_arg;
+	if (preface) {
+		if (preface->byte_count == 0U ||
+		    preface->byte_count > TR_REACTOR_MAX_PREFACE_BYTES ||
+		    !preface->feed) {
+			tr_slot_set_state(reactor, slot, generation,
+					  TR_CONN_FREE);
+			return TR_ERR_INVALID;
+		}
+		connection->preface_remaining = preface->byte_count;
+		connection->preface_feed = preface->feed;
+		connection->preface_release = preface->release;
+		connection->preface_arg = preface->arg;
+	}
 	__atomic_store_n(&connection->last_rx_activity_ns, tr_reactor_now_ns(),
 			 __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->last_tx_activity_ns, tr_reactor_now_ns(),
@@ -1144,6 +1175,76 @@ static void tr_dispatch_frame(struct tr_reactor *reactor,
 		tr_frame_release(frame);
 }
 
+static int tr_connection_read_preface(
+	struct tr_reactor *reactor, struct tr_connection *connection,
+	struct tr_reactor_turn *turn, size_t *budget)
+{
+	uint8_t raw[TR_REACTOR_MAX_PREFACE_BYTES];
+	struct tr_conn_handle handle;
+	size_t want;
+	ssize_t n;
+	int done = 0;
+	int ret;
+
+	if (!connection->preface_remaining || !connection->preface_feed)
+		return TR_ERR_STATE;
+
+	want = connection->preface_remaining;
+	if (want > *budget)
+		want = *budget;
+	if (want > sizeof(raw))
+		want = sizeof(raw);
+
+	n = recv(connection->fd, raw, want, 0);
+	if (n > 0) {
+		(void)__atomic_fetch_add(&connection->rx_bytes,
+					 (uint64_t)n, __ATOMIC_RELAXED);
+		__atomic_store_n(&connection->last_rx_activity_ns,
+				 tr_reactor_now_ns(), __ATOMIC_RELAXED);
+		*budget -= (size_t)n;
+		turn->left.rx_bytes -= (uint64_t)n;
+		connection->preface_remaining -= (uint32_t)n;
+
+		handle.reactor = reactor;
+		handle.slot = connection->slot;
+		handle.generation = connection->generation;
+		ret = connection->preface_feed(
+			handle, raw, (size_t)n, &done, connection->preface_arg);
+		if (ret != TR_OK)
+			return ret;
+
+		if (connection->preface_remaining == 0U) {
+			tr_reactor_preface_release_cb release;
+			void *release_arg;
+
+			if (!done)
+				return TR_ERR_STATE;
+
+			release = connection->preface_release;
+			release_arg = connection->preface_arg;
+			connection->preface_feed = NULL;
+			connection->preface_release = NULL;
+			connection->preface_arg = NULL;
+			if (release)
+				release(release_arg);
+		} else if (done) {
+			return TR_ERR_STATE;
+		}
+		return TR_OK;
+	}
+
+	if (n == 0)
+		return TR_ERR_CLOSED;
+	if (errno == EINTR)
+		return TR_AGAIN;
+	if (errno == EAGAIN || errno == EWOULDBLOCK) {
+		(void)__atomic_fetch_add(&connection->recv_eagain,
+					 UINT64_C(1), __ATOMIC_RELAXED);
+		return TR_AGAIN;
+	}
+	return TR_ERR_SYS;
+}
+
 static void tr_connection_on_readable(struct tr_reactor *reactor,
 				      struct tr_connection *connection,
 				      struct tr_reactor_turn *turn)
@@ -1153,6 +1254,27 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 
 	while (budget != 0 && connection->state == TR_CONN_ACTIVE) {
 		struct tr_frame frame;
+
+		if (connection->preface_remaining != 0U) {
+			int preface_ret = tr_connection_read_preface(
+				reactor, connection, turn, &budget);
+
+			if (preface_ret == TR_AGAIN)
+				return;
+			if (preface_ret == TR_ERR_CLOSED) {
+				tr_connection_close_internal(
+					reactor, connection,
+					TR_CONN_EVENT_CLOSED, TR_OK);
+				return;
+			}
+			if (preface_ret != TR_OK) {
+				tr_connection_close_internal(
+					reactor, connection,
+					TR_CONN_EVENT_ERROR, preface_ret);
+				return;
+			}
+			continue;
+		}
 		size_t writable;
 		void *dst;
 		ssize_t n;
@@ -1530,7 +1652,7 @@ static int tr_process_commands(struct tr_reactor *reactor,
 			if (tr_connection_adopt(reactor,
 						command->slot,
 						command->generation,
-						command->u.adopt.fd) != TR_OK)
+						command->u.adopt.fd, NULL) != TR_OK)
 				close(command->u.adopt.fd);
 			break;
 		case TR_CMD_SEND:
@@ -2298,6 +2420,38 @@ int tr_reactor_start(struct tr_reactor *reactor)
 	return TR_OK;
 }
 
+int tr_reactor_adopt_fd_prefaced_on_owner(
+	struct tr_reactor *reactor, int fd,
+	const struct tr_reactor_preface_handler *preface,
+	struct tr_conn_handle *out)
+{
+	uint32_t slot;
+	uint32_t generation;
+	int ret;
+
+	if (!reactor || fd < 0 || !preface || !out)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return TR_ERR_CLOSED;
+
+	ret = tr_slot_reserve(reactor, &slot, &generation);
+	if (ret != TR_OK)
+		return ret;
+
+	ret = tr_connection_adopt(reactor, slot, generation, fd, preface);
+	if (ret != TR_OK) {
+		(void)tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
+		return ret;
+	}
+
+	out->reactor = reactor;
+	out->slot = slot;
+	out->generation = generation;
+	return TR_OK;
+}
+
 int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 			struct tr_conn_handle *out)
 {
@@ -2318,7 +2472,7 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 		if (ret != TR_OK)
 			return ret;
 
-		ret = tr_connection_adopt(reactor, slot, generation, fd);
+		ret = tr_connection_adopt(reactor, slot, generation, fd, NULL);
 		if (ret != TR_OK) {
 			(void)tr_slot_set_state(reactor, slot, generation,
 						TR_CONN_FREE);

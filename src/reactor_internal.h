@@ -1,6 +1,7 @@
 #ifndef TR_REACTOR_INTERNAL_H
 #define TR_REACTOR_INTERNAL_H
 
+#include <stddef.h>
 #include "tr/reactor.h"
 
 /*
@@ -21,6 +22,32 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
  */
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
+
+/*
+ * Optional raw connection preface gate. The Reactor reads exactly byte_count
+ * bytes before allowing normal TRP1 parser input, so bytes following the
+ * preface remain in the socket receive queue and are never over-read.
+ *
+ * feed runs on the owner Reactor and must be short/non-blocking. On the final
+ * fragment it must set *done = 1 after completing any routing/handler setup.
+ * release is called exactly once on success or connection close/error.
+ */
+typedef int (*tr_reactor_preface_feed_cb)(
+	struct tr_conn_handle connection, const uint8_t *data, size_t len,
+	int *done, void *arg);
+typedef void (*tr_reactor_preface_release_cb)(void *arg);
+
+struct tr_reactor_preface_handler {
+	uint32_t byte_count;
+	tr_reactor_preface_feed_cb feed;
+	tr_reactor_preface_release_cb release;
+	void *arg;
+};
+
+int tr_reactor_adopt_fd_prefaced_on_owner(
+	struct tr_reactor *reactor, int fd,
+	const struct tr_reactor_preface_handler *preface,
+	struct tr_conn_handle *out);
 
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);

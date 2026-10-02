@@ -191,6 +191,11 @@ static void test_registry_and_data_route_attach(void)
 	assert(registry_stats.capacity == 2U);
 	assert(registry_stats.count == 1U);
 
+	/* Active CONTROL/DATA membership fences registry lifetime. */
+	assert(tr_pipeline_registry_unregister(registry, pipeline) ==
+	       TR_ERR_STATE);
+	assert(tr_pipeline_remove_data(pipeline, attached_data) == TR_OK);
+	assert(tr_pipeline_clear_control(pipeline, control_connection) == TR_OK);
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_OK);
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_ERR_STALE);
 	/* New epoch may claim the same pipeline_id only after old unregister. */
@@ -198,7 +203,6 @@ static void test_registry_and_data_route_attach(void)
 	assert(tr_pipeline_registry_unregister(
 		       registry, same_id_new_epoch) == TR_OK);
 
-	assert(tr_pipeline_remove_data(pipeline, attached_data) == TR_OK);
 	tr_pipeline_registry_destroy(registry);
 	tr_pipeline_destroy(wrong_shard);
 	tr_pipeline_destroy(same_id_new_epoch);
