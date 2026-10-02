@@ -152,6 +152,11 @@ FREE
 reservation 占用 DATA capacity，但不会参与 round-robin、stream affinity 或 payload
 routing。Cancel 只接受完全匹配的 RESERVED generation。
 
+DATA capability 只能由 active CONTROL 生命周期签发和消费：没有 CONTROL 时
+reserve/attach 都返回 state error；CONTROL clear 会立即取消所有仍为 RESERVED 的
+capability。已经 ATTACHED 的 DATA connection 不在 clear_control() 中隐式销毁，
+由上层 Pipeline teardown 明确处理。
+
 DATA routing attach 顺序：
 
 ```text
