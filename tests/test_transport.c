@@ -5751,9 +5751,10 @@ static void test_server_peer_refcount_drain(void)
 	pthread_mutex_unlock(&ctx.lock);
 
 	/*
-	 * Close the first peer while its server callback still owns an endpoint
-	 * task reference. The reaper may retire/reuse the peer slot, but it must
-	 * not free Endpoint/Channel state until this task releases its ref.
+	 * Close the first peer while its server callback still owns an Endpoint
+	 * task reference. Reactor owner detach may immediately retire/reuse the
+	 * peer slot, but last-ref finalization must keep detached Endpoint/Channel
+	 * state alive until this task releases its strong ref.
 	 */
 	tr_client_destroy(client);
 	client = NULL;
