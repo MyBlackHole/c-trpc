@@ -170,6 +170,47 @@ static void test_server_create_start_destroy_threads(void)
 	}
 }
 
+static void test_server_multi_shard_threads(void)
+{
+	struct tr_server_config config;
+	struct tr_server *server = NULL;
+
+	server_config_init(&config, 4U);
+	config.shard_count = 2U;
+	config.max_peers = 4U;
+
+	reset_probe(0U);
+	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(server != NULL);
+
+	/* Four total workers are split across two shard-local executors. */
+	expect_threads(4U, 0U);
+	listen_loopback(server);
+	expect_threads(4U, 0U);
+
+	/* Server start adds exactly one Reactor per shard. */
+	assert(tr_server_start(server) == TR_OK);
+	expect_threads(6U, 0U);
+
+	tr_server_destroy(server);
+	expect_threads(6U, 6U);
+}
+
+static void test_server_multi_shard_rejects_undersized_budget(void)
+{
+	struct tr_server_config config;
+	struct tr_server *server = NULL;
+
+	server_config_init(&config, 1U);
+	config.shard_count = 2U;
+	config.max_peers = 2U;
+
+	reset_probe(0U);
+	assert(tr_server_create(&config, &server) == TR_ERR_INVALID);
+	assert(server == NULL);
+	expect_threads(0U, 0U);
+}
+
 static void runtime_multi_shard_config_init(
 	struct tr_runtime_config *config,
 	struct tr_runtime_shard_config shards[3])
@@ -296,6 +337,8 @@ int main(void)
 {
 	RUN_TEST(test_client_create_destroy_threads);
 	RUN_TEST(test_server_create_start_destroy_threads);
+	RUN_TEST(test_server_multi_shard_threads);
+	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
 	RUN_TEST(test_runtime_multi_shard_threads);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_client_thread_start_failure);
