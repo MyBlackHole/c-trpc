@@ -122,28 +122,21 @@ retired stats/shutdown 控制面，不在 hot path。Phase 3 ownership seam 至�
 
 ## Phase 4 - Multi-Reactor Listener
 
-**状态：IN PROGRESS**
+**状态：COMPLETE**
 
-已完成 Runtime foundation：
+已完成：
 
-- `tr_runtime` 不再限制 `shard_count == 1`；
-- Runtime config 使用 per-shard config array，不隐式复制资源预算；
-- 每个 shard 独立创建 Reactor、peer storage/event source、RPC executor；
-- multi-shard start 失败按已启动 shard 反向 rollback；
-- 测试验证 3 shards 的 executor worker 总数与 Reactor 总数精确匹配配置；
-- Server/Client facade 仍显式创建 1 shard，因此 public 行为未改变；
-- Server 已引入 per-shard resource context，RPC message/reassembly pool 与
-  executor binding 不再是 Server-global hot resource；
-- start/drain/destroy 已按 server shard context 遍历，为 N-shard facade 做好
-  生命周期准备。
-
-下一步才在 Server 打开：
-
-```text
-shard_count = N
-per-shard budget split
-SO_REUSEPORT listeners
-```
+- `tr_runtime` 支持 N shards 与 per-shard config；
+- Server public config 暴露 `shard_count`，默认 1；
+- Server-wide peer/worker/queue/buffer/listen backlog 保持 total-budget 语义；
+- total budget 通过 deterministic base+remainder 拆到各 shard；
+- 每个 shard 独立拥有 Reactor、peer table/event source、RPC executor、
+  RPC message pool 与 reassembly pool；
+- `tr_server_listen()` 创建同地址同端口的 N 个 `SO_REUSEPORT` listener；
+- 每个 listener 只由所属 Reactor accept，不做跨 shard fd transfer；
+- start/drain/destroy 遍历全部 shard；
+- Server stats 聚合全部 Reactor、pool、peer、Channel 与 RPC 数据；
+- dedicated accept/reaper thread 和 Server-global hot-path lock 均不存在。
 
 每 Reactor：
 
