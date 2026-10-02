@@ -122,6 +122,7 @@ struct tr_channel {
 	int bulk_reconnecting;
 
 	int keepalive_enabled;
+	int teardown_detached;
 	struct tr_reactor_timer_handle keepalive_timer;
 	int keepalive_timer_registered;
 	uint32_t keepalive_interval_ms;
@@ -2365,6 +2366,94 @@ int tr_channel_create_deferred(
 	return tr_channel_create_common(config, control_connection,
 					bulk_connection, data_cb, stream_event_cb,
 					channel_event_cb, callback_arg, 0, out);
+}
+
+static int tr_channel_detach_on_owner(void *arg)
+{
+	struct tr_channel *channel = (struct tr_channel *)arg;
+	struct tr_conn_handle control;
+	struct tr_conn_handle bulk;
+	struct tr_reactor_timer_handle timer;
+	int timer_registered;
+	int split;
+
+	if (!channel)
+		return TR_ERR_INVALID;
+	if (channel->config.role != TR_CHANNEL_SERVER)
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->teardown_detached) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+
+	channel->teardown_detached = 1;
+	channel->local_draining = 1;
+	channel->keepalive_enabled = 0;
+	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
+	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
+	channel->data_cb = NULL;
+	channel->stream_event_cb = NULL;
+	channel->channel_event_cb = NULL;
+	channel->callback_arg = NULL;
+	channel->lifecycle_event_cb = NULL;
+	channel->lifecycle_callback_arg = NULL;
+
+	control = channel->control_connection;
+	bulk = channel->bulk_connection;
+	split = !tr_conn_equal(control, bulk);
+	timer_registered = channel->keepalive_timer_registered;
+	timer = channel->keepalive_timer;
+	channel->keepalive_timer_registered = 0;
+	memset(&channel->keepalive_timer, 0, sizeof(channel->keepalive_timer));
+	pthread_mutex_unlock(&channel->lock);
+
+	/*
+	 * Owner context makes these operations non-waiting. Closed/stale
+	 * connections already have no future callback source, so their status is
+	 * intentionally ignored.
+	 */
+	(void)tr_reactor_set_handler(control, NULL, NULL, NULL);
+	if (split)
+		(void)tr_reactor_set_handler(bulk, NULL, NULL, NULL);
+	if (timer_registered)
+		(void)tr_reactor_timer_unregister(timer);
+	return TR_OK;
+}
+
+int tr_channel_detach_for_finalize(struct tr_channel *channel)
+{
+	if (!channel)
+		return TR_ERR_INVALID;
+	return tr_reactor_call(channel->reactor, tr_channel_detach_on_owner,
+			       channel);
+}
+
+void tr_channel_finalize_detached(struct tr_channel *channel)
+{
+	if (!channel)
+		return;
+
+#ifndef NDEBUG
+	assert(channel->teardown_detached);
+	assert(!channel->keepalive_timer_registered);
+#endif
+
+	if (channel->streams) {
+		uint32_t i;
+
+		for (i = 0; i < channel->config.max_streams; ++i)
+			if (channel->streams[i].rx_reassembly)
+				tr_buffer_release(
+					channel->streams[i].rx_reassembly);
+	}
+	free(channel->stream_index);
+	free(channel->streams);
+	tr_buffer_pool_destroy(&channel->protocol_pool);
+	pthread_cond_destroy(&channel->reconnect_cond);
+	pthread_mutex_destroy(&channel->lock);
+	free(channel);
 }
 
 void tr_channel_destroy(struct tr_channel *channel)
