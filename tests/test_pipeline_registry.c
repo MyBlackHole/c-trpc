@@ -171,12 +171,13 @@ static void test_registry_and_data_route_attach(void)
 	assert(observed.generation == data_connection.generation);
 
 	/* Reservation was consumed exactly once. */
-	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &preface, data_connection, NULL, NULL) ==
-	       TR_ERR_STATE ||
-	       tr_pipeline_registry_attach_data_route(
-		       registry, &preface, data_connection, NULL, NULL) ==
-	       TR_ERR_STALE);
+	{
+		int duplicate_ret = tr_pipeline_registry_attach_data_route(
+			registry, &preface, data_connection, NULL, NULL);
+
+		assert(duplicate_ret == TR_ERR_STATE ||
+		       duplicate_ret == TR_ERR_STALE);
+	}
 
 	memset(&pipeline_stats, 0, sizeof(pipeline_stats));
 	assert(tr_pipeline_get_stats(pipeline, &pipeline_stats) == TR_OK);
