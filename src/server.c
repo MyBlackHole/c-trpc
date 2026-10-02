@@ -75,12 +75,6 @@ struct tr_server {
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
 
-static struct tr_server_shard *
-tr_server_primary_shard(struct tr_server *server)
-{
-	return server && server->shard_count != 0U ? &server->shards[0] : NULL;
-}
-
 static struct tr_reactor *
 tr_server_shard_reactor(struct tr_server_shard *shard)
 {
