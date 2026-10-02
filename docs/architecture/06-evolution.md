@@ -202,11 +202,23 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - routed DATA connection CLOSED/ERROR 自动 exact detach membership；
 - 普通 RPC adopt path 不启用 gate，现有协议行为不变。
 
+已完成 internal CONTROL-plane foundation：
+
+- `tr_pipeline_control` 负责 create/bind/register Pipeline 生命周期；
+- CONTROL reserve DATA 时生成可直接编码为 TRR1 的 DATA offer；
+- reservation 本身不构成 READY；
+- `prepare_transfer(stream_id)` 只从 ATTACHED DATA 中选择，跳过 RESERVED；
+- DATA selection + Stream affinity 在同一个 owner operation 内原子完成；
+- 成功返回内部 TRANSFER_READY token `(stream_id, data_index, generation)`；
+- duplicate Stream prepare 被拒绝，Stream 生命周期保持单 DATA affinity；
+- CONTROL close 在 attached DATA/Stream 未 quiesce 时拒绝；
+- close 会自动撤销仍未 attach 的 RESERVED capability，再 unregister/destroy Pipeline。
+
 下一步：
 
-- CONTROL 建立/确认 DATA membership；
+- 将 CONTROL session 接入正式 Pipeline control wire/facade；
 - 将 Pipeline registry/ingress 接入 Server shard 的正式 Pipeline listener/control plane；
-- `TRANSFER_READY(stream_id, data_index)` barrier；
+- 将内部 TRANSFER_READY token 编码成 CONTROL wire message；
 - 将 Channel/RPC/Backup facade 接到 Pipeline membership；
 - 只有协议确实要求时才引入显式 cross-shard fd ownership transfer。
 
