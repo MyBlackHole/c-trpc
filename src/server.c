@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sys/epoll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -50,12 +51,9 @@ struct tr_server {
 	struct tr_server_rpc_stats retired_rpc_stats;
 
 	pthread_mutex_t lock;
-	pthread_t accept_thread;
 	pthread_t reap_thread;
-	int accept_thread_started;
 	int reap_thread_started;
 	int started;
-	int stop_accept;
 	int stop_reap;
 };
 
@@ -598,46 +596,29 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	return TR_OK;
 }
 
-static void *tr_server_accept_main(void *arg)
+static void tr_server_on_listener_ready(int listener, uint32_t events,
+					void *arg)
 {
 	struct tr_server *server = (struct tr_server *)arg;
 
-	for (;;) {
-		struct pollfd pfd;
-		int stop;
-		int listener;
-		int ret;
+	if (!server || !(events & EPOLLIN))
+		return;
 
-		pthread_mutex_lock(&server->lock);
-		stop = server->stop_accept;
-		pthread_mutex_unlock(&server->lock);
-		listener = tr_server_listener_fd(server);
-		if (stop)
+	for (;;) {
+		int fd = -1;
+		int ret = tr_tcp_accept(listener, &fd);
+
+		if (ret == TR_AGAIN)
+			break;
+		if (ret != TR_OK)
 			break;
 
-		memset(&pfd, 0, sizeof(pfd));
-		pfd.fd = listener;
-		pfd.events = POLLIN;
-		do {
-			ret = poll(&pfd, 1, 50);
-		} while (ret < 0 && errno == EINTR);
-		if (ret <= 0)
-			continue;
-
-		for (;;) {
-			int fd = -1;
-			ret = tr_tcp_accept(listener, &fd);
-			if (ret == TR_AGAIN)
-				break;
-			if (ret != TR_OK)
-				break;
-
-			/* tr_server_adopt_peer() 无论成功失败都会消费 accepted fd 的 ownership。 */
-			(void)tr_server_adopt_peer(server, fd);
-		}
+		/*
+		 * Runs on the Reactor owner. adopt_fd takes the owner fast path so
+		 * Channel/RPC setup sees an ACTIVE connection immediately.
+		 */
+		(void)tr_server_adopt_peer(server, fd);
 	}
-
-	return NULL;
 }
 
 int tr_server_create(const struct tr_server_config *config,
@@ -856,7 +837,6 @@ int tr_server_start(struct tr_server *server)
 		return ret;
 
 	pthread_mutex_lock(&server->lock);
-	server->stop_accept = 0;
 	server->stop_reap = 0;
 	pthread_mutex_unlock(&server->lock);
 
@@ -867,29 +847,21 @@ int tr_server_start(struct tr_server *server)
 	}
 	server->reap_thread_started = 1;
 
-	if (pthread_create(&server->accept_thread, NULL, tr_server_accept_main,
-			   server) != 0) {
+	ret = tr_runtime_shard_enable_listener_events(
+		server->shard, tr_server_on_listener_ready, server);
+	if (ret != TR_OK) {
 		tr_server_stop_reaper(server);
 		(void)tr_runtime_stop(server->runtime);
-		return TR_ERR_SYS;
+		return ret;
 	}
 
-	server->accept_thread_started = 1;
 	server->started = 1;
 	return TR_OK;
 }
 
 static void tr_server_stop_accepting(struct tr_server *server)
 {
-	pthread_mutex_lock(&server->lock);
-	server->stop_accept = 1;
-	pthread_mutex_unlock(&server->lock);
-
-	if (server->accept_thread_started) {
-		pthread_join(server->accept_thread, NULL);
-		server->accept_thread_started = 0;
-	}
-
+	(void)tr_runtime_shard_disable_listener_events(server->shard);
 	tr_runtime_shard_close_listener(server->shard);
 }
 
@@ -1011,7 +983,7 @@ void tr_server_destroy(struct tr_server *server)
 	if (!server)
 		return;
 
-	if (server->accept_thread_started || tr_server_listener_fd(server) >= 0)
+	if (tr_server_listener_fd(server) >= 0)
 		tr_server_stop_accepting(server);
 	if (server->reap_thread_started)
 		tr_server_stop_reaper(server);
