@@ -151,13 +151,29 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 
 ## Phase 5 - Pipeline / Connection Group
 
-增加：
+**状态：IN PROGRESS**
 
-- Pipeline object；
-- CONTROL + DATA[N]；
-- stream affinity；
-- routing preface；
-- cross-shard fd ownership transfer。
+已完成 connection-group foundation：
+
+- 内部 bounded `tr_pipeline` soft-state object；
+- 一个 Pipeline 固定一个 Reactor owner；
+- CONTROL 与 DATA connection membership owner 校验；
+- CONTROL/DATA physical connection membership 唯一；
+- DATA slot generation 防 ABA；
+- bounded DATA round-robin selection；
+- bounded Stream -> DATA affinity；
+- DATA removal 自动 invalidates 对应 generation 的 Stream affinity；
+- 所有 mutable membership/affinity mutation 通过 owner Reactor 串行化。
+
+下一步：
+
+- routing preface / Pipeline identity wire format；
+- CONTROL 建立/确认 DATA membership；
+- `TRANSFER_READY(stream_id, data_index)` barrier；
+- 将 Channel/RPC/Backup facade 接到 Pipeline membership；
+- 只有协议确实要求时才引入显式 cross-shard fd ownership transfer。
+
+当前仍不做单 Pipeline 跨 Reactor shared mutable state。
 
 ## Phase 6 - Backup Correctness
 
