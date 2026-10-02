@@ -54,9 +54,11 @@ RPC
 ```
 
 Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` 拥有唯一
-`tr_runtime_shard[0]`。Server shard 当前已经拥有 Reactor、listener 和 RPC
-executor 的生命周期。中央 accept thread 仍然存在，但只借用 shard-owned
-listener fd；reaper 与 peer table 尚未 shard 化。
+`tr_runtime_shard[0]`。Server shard 当前已经拥有 Reactor、listener、RPC executor、peer slots/counters
+以及 peer lifecycle eventfd。中央 accept thread 仍然存在，但只借用 shard-owned
+listener fd。reaper thread 也仍保留，但不再每 10ms 轮询：Channel DOWN、partial
+peer rollback 和 peer publish 通过 shard-local eventfd 唤醒它，再执行安全的
+quiesce/destroy。peer Channel/RPC lifecycle 尚未完全 owner 化。
 
 当前仍固定 `shard_count = 1`。
 
