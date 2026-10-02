@@ -4,7 +4,9 @@
 
 ## 1. Server Runtime
 
-CURRENT 已建立 Phase-3 的内部 Runtime ownership seam，但仍固定单 shard：
+CURRENT 的 Server facade 仍固定使用 shard[0]，但内部 Runtime 已进入 Phase 4：
+`tr_runtime` 本身可以创建 N 个独立 shard。Server 尚未打开公开 multi-shard
+配置与 SO_REUSEPORT listener。
 
 ```text
 tr_server
@@ -39,7 +41,18 @@ last-ref finalizer：已有 worker task 继续持 strong-ref；最后一个 ref 
 而不是占用中的 slot。Server destroy 只需等待 `reaping_current == 0`，不需要
 join reaper thread。
 
-当前内部配置仍显式要求 `shard_count == 1`。
+Runtime config 已改为显式 per-shard config array：
+
+```c
+struct tr_runtime_config {
+    uint32_t shard_count;
+    const struct tr_runtime_shard_config *shards;
+};
+```
+
+每个 entry 独立描述 Reactor、peer capacity 和 RPC executor。Runtime 不再把一份
+资源配置机械复制 N 次；未来 Server 可以先把总预算确定性拆分，再交给 Runtime。
+当前 Server/Client facade 仍只传入一个 shard config，因此 public 行为不变。
 
 TARGET V1 使用单进程多 Reactor：
 
@@ -51,19 +64,21 @@ flowchart TB
         R0["Reactor 0\nlisten_fd 0"]
         R1["Reactor 1\nlisten_fd 1"]
         R2["Reactor 2\nlisten_fd 2"]
-        W["Blocking Worker Pool"]
+        W0["Worker Pool 0"]
+        W1["Worker Pool 1"]
+        W2["Worker Pool 2"]
     end
 
     NET --> R0
     NET --> R1
     NET --> R2
 
-    R0 --> W
-    R1 --> W
-    R2 --> W
-    W --> R0
-    W --> R1
-    W --> R2
+    R0 --> W0
+    R1 --> W1
+    R2 --> W2
+    W0 --> R0
+    W1 --> R1
+    W2 --> R2
 ```
 
 ### TARGET V1 不再需要
@@ -105,7 +120,7 @@ CURRENT 已落地最小内部形状：
 
 ```c
 struct tr_runtime {
-    uint32_t shard_count;          /* CURRENT: exactly 1 */
+    uint32_t shard_count;          /* Runtime: N; Server facade CURRENT: 1 */
     struct tr_runtime_shard *shards;
 };
 
@@ -124,9 +139,9 @@ struct tr_runtime_shard {
 };
 ```
 
-Client/Server 都通过 `shard[0]` 取得 Reactor。Server 的 RPC worker group
-也已从 `tr_server` 下沉为 shard-owned resource；每个 Server Endpoint 只绑定
-所属 shard 的 executor。当前仍是单 shard，因此线程数量与原行为不变。
+Client/Server facade 当前仍通过 `shard[0]` 取得 Reactor。内部 Runtime 已可
+拥有多个 shard，且每个 shard 都独立创建 Reactor、peer resources、peer eventfd
+和可选 RPC executor。Server facade 尚未开始创建 shard[1..N]。
 
 Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。

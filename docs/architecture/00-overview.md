@@ -87,7 +87,9 @@ slot 已经可以服务下一条连接。最后一个 worker/completion ref 释�
 finalization。若没有 worker ref，owner ref transfer 可立即完成 owner-free
 finalization。
 
-当前仍固定 `shard_count = 1`。
+当前 Server/Client facade 仍固定使用 `shard_count = 1`；内部 Runtime 已支持
+N shards，并使用显式 per-shard resource config。SO_REUSEPORT 与 Server
+multi-shard routing 尚未打开。
 
 Reactor connection slot 已采用严格 single-owner 方向；slot generation/state 使用原子 capability metadata，外部控制通过 command 进入 Reactor。
 

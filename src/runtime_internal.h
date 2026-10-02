@@ -30,11 +30,9 @@ struct tr_runtime_peer_stats {
 };
 
 /*
- * Phase-3 runtime ownership seam.
- *
- * The first implementation deliberately accepts only shard_count == 1.
- * Keeping the count explicit makes the ownership boundary real without
- * prematurely introducing multi-Reactor listener/routing semantics.
+ * Runtime owns one independent resource domain per shard. Configuration is
+ * explicit per shard so enabling N shards never multiplies a Server-wide
+ * budget implicitly.
  */
 struct tr_runtime_rpc_executor_config {
 	uint32_t endpoint_capacity;
@@ -42,11 +40,15 @@ struct tr_runtime_rpc_executor_config {
 	uint32_t thread_count;
 };
 
+struct tr_runtime_shard_config {
+	struct tr_reactor_config reactor;
+	uint32_t peer_capacity;
+	struct tr_runtime_rpc_executor_config rpc_executor;
+};
+
 struct tr_runtime_config {
 	uint32_t shard_count;
-	uint32_t peer_capacity;
-	struct tr_reactor_config reactor;
-	struct tr_runtime_rpc_executor_config rpc_executor;
+	const struct tr_runtime_shard_config *shards;
 };
 
 int tr_runtime_create(const struct tr_runtime_config *config,
@@ -67,12 +69,9 @@ struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
 
 /*
- * Phase-3 listener ownership: the shard owns the listening fd even while the
- * legacy central accept thread still borrows it to accept connections.
- *
- * A borrower must be quiesced/joined before close. close_listener() is a
- * lifetime operation, not a concurrent cancellation primitive; closing while
- * another thread still uses the numeric fd could race with fd reuse.
+ * Listener lifetime is shard-owned. The listener event source is registered
+ * with that shard's Reactor; close first unregisters the owner event source,
+ * then closes the fd.
  */
 int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 				 const char *address, uint16_t port,

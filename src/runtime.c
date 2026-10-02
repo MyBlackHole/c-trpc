@@ -12,8 +12,6 @@
 #include "reactor_internal.h"
 #include "rpc_internal.h"
 
-#define TR_RUNTIME_PHASE3_SHARDS 1U
-
 struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
@@ -66,16 +64,23 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	shard->peer_capacity = 0U;
 }
 
-static int
-tr_runtime_rpc_executor_config_valid(const struct tr_runtime_config *config)
+static int tr_runtime_rpc_executor_config_valid(
+	const struct tr_runtime_rpc_executor_config *executor)
 {
-	const struct tr_runtime_rpc_executor_config *executor =
-		&config->rpc_executor;
-
+	if (!executor)
+		return 0;
 	if (executor->endpoint_capacity == 0U)
 		return executor->max_calls_per_endpoint == 0U &&
 		       executor->thread_count == 0U;
 	return executor->max_calls_per_endpoint != 0U;
+}
+
+static int
+tr_runtime_shard_config_valid(const struct tr_runtime_shard_config *config)
+{
+	if (!config)
+		return 0;
+	return tr_runtime_rpc_executor_config_valid(&config->rpc_executor);
 }
 
 int tr_runtime_create(const struct tr_runtime_config *config,
@@ -87,9 +92,11 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	if (!config || config->shard_count != TR_RUNTIME_PHASE3_SHARDS ||
-	    !tr_runtime_rpc_executor_config_valid(config))
+	if (!config || config->shard_count == 0U || !config->shards)
 		return TR_ERR_INVALID;
+	for (i = 0; i < config->shard_count; ++i)
+		if (!tr_runtime_shard_config_valid(&config->shards[i]))
+			return TR_ERR_INVALID;
 
 	runtime = (struct tr_runtime *)calloc(1, sizeof(*runtime));
 	if (!runtime)
@@ -104,13 +111,15 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	runtime->shard_count = config->shard_count;
 
 	for (i = 0; i < runtime->shard_count; ++i) {
+		const struct tr_runtime_shard_config *shard_config =
+			&config->shards[i];
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 		int ret;
 
 		shard->shard_id = i;
 		shard->listen_fd = -1;
 		shard->peer_event_fd = -1;
-		shard->peer_capacity = config->peer_capacity;
+		shard->peer_capacity = shard_config->peer_capacity;
 		if (shard->peer_capacity != 0U) {
 			shard->peers = (struct tr_runtime_peer *)calloc(
 				shard->peer_capacity, sizeof(*shard->peers));
@@ -126,13 +135,14 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 			ret = TR_OK;
 		}
 		if (ret == TR_OK)
-			ret = tr_reactor_create(&config->reactor, NULL, NULL, NULL,
-						&shard->reactor);
-		if (ret == TR_OK && config->rpc_executor.endpoint_capacity != 0U)
+			ret = tr_reactor_create(&shard_config->reactor, NULL, NULL,
+						NULL, &shard->reactor);
+		if (ret == TR_OK &&
+		    shard_config->rpc_executor.endpoint_capacity != 0U)
 			ret = tr_rpc_executor_group_create(
-				config->rpc_executor.endpoint_capacity,
-				config->rpc_executor.max_calls_per_endpoint,
-				config->rpc_executor.thread_count,
+				shard_config->rpc_executor.endpoint_capacity,
+				shard_config->rpc_executor.max_calls_per_endpoint,
+				shard_config->rpc_executor.thread_count,
 				&shard->rpc_executor);
 		if (ret != TR_OK) {
 			tr_runtime_shard_release(shard);

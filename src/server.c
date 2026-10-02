@@ -674,6 +674,7 @@ int tr_server_create(const struct tr_server_config *config,
 {
 	struct tr_server_config effective;
 	struct tr_runtime_config runtime_config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_reactor_config *reactor_config;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
@@ -737,14 +738,16 @@ int tr_server_create(const struct tr_server_config *config,
 	server->reassembly_pool_ready = 1;
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
+	memset(&shard_config, 0, sizeof(shard_config));
 	runtime_config.shard_count = 1U;
-	runtime_config.peer_capacity = effective.max_peers;
-	runtime_config.rpc_executor.endpoint_capacity = effective.max_peers;
-	runtime_config.rpc_executor.max_calls_per_endpoint =
+	runtime_config.shards = &shard_config;
+	shard_config.peer_capacity = effective.max_peers;
+	shard_config.rpc_executor.endpoint_capacity = effective.max_peers;
+	shard_config.rpc_executor.max_calls_per_endpoint =
 		effective.limits.max_calls;
-	runtime_config.rpc_executor.thread_count =
+	shard_config.rpc_executor.thread_count =
 		effective.limits.executor_threads;
-	reactor_config = &runtime_config.reactor;
+	reactor_config = &shard_config.reactor;
 	reactor_config->max_connections = effective.max_peers + 4U;
 	reactor_config->command_capacity = effective.limits.command_capacity;
 	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;

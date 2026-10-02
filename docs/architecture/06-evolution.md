@@ -74,16 +74,16 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 
 ## Phase 3 - Runtime Shard Abstraction
 
-**状态：IN PROGRESS**
+**状态：COMPLETE**
 
 已完成第一阶段：
 
 - 引入内部 `tr_runtime` / `tr_runtime_shard`；
 - Client/Server 不再直接拥有 Reactor lifecycle；
 - Runtime 统一负责 Reactor create/start/stop/destroy；
-- 显式 `shard_id = 0` 与 `shard_count = 1`；
+- 建立稳定 shard identity；Phase 3 facade 使用 `shard_id = 0`；
 - public API、wire、线程数量与启动时机保持不变；
-- 独立测试验证 single-shard identity、拒绝提前启用 multi-shard，以及生命周期语义；
+- 独立测试验证 single-shard identity 与完整生命周期语义；
 - Server RPC executor group 已从 Server 全局 owner 下沉到 shard[0]；
 - Server Endpoint 只进入所属 shard 的 worker pool，不再依赖 Server-global executor owner；
 - Server listener fd / bound port 已从 Server 下沉到 shard[0] ownership；
@@ -103,31 +103,42 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
   fence，不需要 cleanup thread 阻塞等待；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
 
-当前仍：
+Phase 3 结束时 Server facade 仍是：
 
 ```text
 shard_count = 1
 accept is Reactor-owned
 peer lifecycle is Reactor-event driven
-no dedicated reaper/finalizer thread
-listener is shard-owned
-peer resources are shard-owned
-peer Channel/RPC lifecycle remains Server-driven
+no dedicated accept/reaper/finalizer thread
+listener/executor/peer resources are shard-owned
+peer table is Reactor single-owner
 ```
 
 completion event publication、listener ownership、peer resource ownership、
 accept execution、peer lifecycle event、owner detach、last-ref finalization 以及
 peer table mutation/snapshot 均已 shard owner 化，dedicated accept/reaper thread
 和 Server-global peer transition lock 都已删除。剩余 `finalizer_lock` 仅属于
-retired stats/shutdown 控制面，不在 hot path。仍保持 `shard_count = 1`，下一步
-可以开始 Phase 4 的 N shards 准备。
+retired stats/shutdown 控制面，不在 hot path。Phase 3 ownership seam 至此收口。
 
 ## Phase 4 - Multi-Reactor Listener
 
-打开：
+**状态：IN PROGRESS**
+
+已完成 Runtime foundation：
+
+- `tr_runtime` 不再限制 `shard_count == 1`；
+- Runtime config 使用 per-shard config array，不隐式复制资源预算；
+- 每个 shard 独立创建 Reactor、peer storage/event source、RPC executor；
+- multi-shard start 失败按已启动 shard 反向 rollback；
+- 测试验证 3 shards 的 executor worker 总数与 Reactor 总数精确匹配配置；
+- Server/Client facade 仍显式创建 1 shard，因此 public 行为未改变。
+
+下一步才在 Server 打开：
 
 ```text
 shard_count = N
+per-shard budget split
+SO_REUSEPORT listeners
 ```
 
 每 Reactor：
