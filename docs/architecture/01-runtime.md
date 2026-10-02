@@ -30,12 +30,14 @@ owner turn 执行，不需要额外线程。
 
 Peer 仍在 shard table 时，Reactor owner 执行 detach：移除 RPC/Channel callback、
 deadline/keepalive timer source，并关闭 Server Endpoint executor admission。
-然后 slot 进入 `finalizing`，在 finalization 完成前禁止复用。
+随后 Channel ownership 和 Server 回收信息转移到预分配的 detached-finalizer
+context，peer slot 立即清空并允许下一条连接复用。Endpoint owner ref 再转交给
+last-ref finalizer：已有 worker task 继续持 strong-ref；最后一个 ref 释放时自动
+采集最终 Endpoint/Channel stats 并 free detached context。
 
-Endpoint owner ref 转交给 last-ref finalizer：已有 worker task 继续持 strong-ref；
-最后一个 ref 释放时自动采集最终 Endpoint/Channel stats、free，并把 slot 从
-finalizing 变回 free。Server destroy 只需等待 shard 的
-`reaping_current == 0`，不需要 join reaper thread。
+`reaping_current` 统计的是已经脱离 peer table、仍在等待 strong-ref 的旧 peer，
+而不是占用中的 slot。Server destroy 只需等待 `reaping_current == 0`，不需要
+join reaper thread。
 
 当前内部配置仍显式要求 `shard_count == 1`。
 
