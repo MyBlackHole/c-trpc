@@ -1046,8 +1046,9 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 
 	request.server = server;
 	request.stats = &stats;
-	ret = tr_reactor_call(tr_server_reactor(server),
-			      tr_server_collect_peer_stats_on_owner, &request);
+	ret = tr_runtime_shard_call(server->shard,
+				    tr_server_collect_peer_stats_on_owner,
+				    &request);
 	if (ret != TR_OK)
 		return ret;
 
