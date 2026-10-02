@@ -35,8 +35,8 @@ Server
   │         ├─ 1 Reactor
   │         ├─ listener
   │         ├─ RPC executor
-  │         └─ peer slots / peer counters
-  ├─ accept thread
+  │         ├─ peer slots / peer counters
+  │         └─ peer lifecycle eventfd
   └─ Reactor-local timers
 
 Client
@@ -58,6 +58,10 @@ Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` �
 readiness 由 Reactor owner 处理，不再存在独立 accept thread。每个 listener
 event 最多处理固定批次的新连接，剩余 backlog 由 level-triggered epoll 在后续
 turn 继续驱动。
+
+Peer table 的 reserve/publish/remove/live snapshot 已全部成为 Reactor
+single-owner 操作，不再经过 Server-global peer mutex。跨线程 last-ref finalizer
+只通过一个独立的 finalizer lock 合并 retired stats，并不接触 live peer table。
 
 Peer teardown 不再需要 dedicated reaper thread。Channel DOWN、partial peer
 rollback 和 peer publish 只 signal shard-local eventfd；该 eventfd 已注册到同一
