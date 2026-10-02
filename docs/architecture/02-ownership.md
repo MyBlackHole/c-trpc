@@ -105,7 +105,11 @@ Cross-thread completion returns as an event to owner.
 通知，Reactor callback 不再为了唤醒 reaper 获取 Server-global lock。Peer 的
 Channel/RPC callback/timer detach 已回到 Reactor owner；dedicated reaper 已删除。
 Detached Endpoint 的 owner ref 交给 last-ref finalizer，已有 worker ref 自然提供
-lifetime fencing。Peer publish/snapshot 的 `server->lock` 同步仍是过渡状态；
+lifetime fencing。Peer reserve/publish/remove/live snapshot 现在全部由 Reactor
+owner 串行执行，不再存在 Server-global peer transition lock。
+
+仍保留的 `finalizer_lock` 只保护跨线程 retired stats aggregate 和 shutdown
+condition，不参与 peer hot state。
 后续 connection table / buffer budget 继续按同一规则迁移。
 只有确实无法独立的资源才允许跨 shard 共享，并且必须单独说明同步与容量边界。
 

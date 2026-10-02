@@ -56,7 +56,7 @@ struct tr_server {
 	struct tr_server_channel_stats retired_channel_stats;
 	struct tr_server_rpc_stats retired_rpc_stats;
 
-	pthread_mutex_t lock;
+	pthread_mutex_t finalizer_lock;
 	pthread_cond_t finalizer_cond;
 	int finalizer_cond_ready;
 	int started;
@@ -277,47 +277,23 @@ static int tr_server_peer_disconnected(struct tr_runtime_peer *peer)
 	       state == TR_CONN_ERROR;
 }
 
-static void tr_server_note_peer_added_locked(struct tr_server *server)
+static void tr_server_note_peer_added_owner(struct tr_server *server)
 {
 	tr_runtime_shard_peer_note_added(server->shard);
 }
 
-static void tr_server_destroy_peer(struct tr_server *server,
-				   struct tr_runtime_peer *peer, int retire_stats)
+static void tr_server_destroy_peer(struct tr_runtime_peer *peer)
 {
-	struct tr_rpc_endpoint_stats rpc_stats;
-	struct tr_channel_stats channel_stats;
-	int have_rpc_stats = 0;
-	int have_channel_stats = 0;
-
-	memset(&rpc_stats, 0, sizeof(rpc_stats));
-	memset(&channel_stats, 0, sizeof(channel_stats));
+	if (!peer)
+		return;
 
 	if (peer->rpc) {
-		tr_rpc_endpoint_destroy_with_stats(peer->rpc,
-					   retire_stats ? &rpc_stats : NULL);
+		tr_rpc_endpoint_destroy(peer->rpc);
 		peer->rpc = NULL;
-		have_rpc_stats = retire_stats;
 	}
 	if (peer->channel) {
-		if (retire_stats &&
-		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
-			have_channel_stats = 1;
 		tr_channel_destroy(peer->channel);
 		peer->channel = NULL;
-	}
-
-	if (retire_stats) {
-		pthread_mutex_lock(&server->lock);
-		if (have_rpc_stats)
-			tr_server_merge_rpc_stats(&server->retired_rpc_stats,
-						  &rpc_stats, 0);
-		if (have_channel_stats)
-			tr_server_merge_channel_stats(
-				&server->retired_channel_stats,
-				&channel_stats, 0);
-		tr_runtime_shard_peer_note_reaped(server->shard);
-		pthread_mutex_unlock(&server->lock);
 	}
 
 	free(peer->finalize_ctx);
@@ -349,7 +325,7 @@ static void tr_server_finish_detached_peer(
 		detached->channel = NULL;
 	}
 
-	pthread_mutex_lock(&server->lock);
+	pthread_mutex_lock(&server->finalizer_lock);
 	if (rpc_stats)
 		tr_server_merge_rpc_stats(&server->retired_rpc_stats,
 					  rpc_stats, 0);
@@ -358,7 +334,7 @@ static void tr_server_finish_detached_peer(
 					      &channel_stats, 0);
 	tr_runtime_shard_peer_note_reaped(server->shard);
 	pthread_cond_broadcast(&server->finalizer_cond);
-	pthread_mutex_unlock(&server->lock);
+	pthread_mutex_unlock(&server->finalizer_lock);
 
 	free(detached);
 }
@@ -384,13 +360,9 @@ static void tr_server_detach_disconnected_peers_on_owner(
 		if (!peer)
 			continue;
 
-		pthread_mutex_lock(&server->lock);
-		if (!peer->used) {
-			pthread_mutex_unlock(&server->lock);
+		if (!peer->used)
 			continue;
-		}
 		snapshot = *peer;
-		pthread_mutex_unlock(&server->lock);
 
 		if (!tr_server_peer_disconnected(&snapshot))
 			continue;
@@ -415,24 +387,19 @@ static void tr_server_detach_disconnected_peers_on_owner(
 				continue;
 		}
 
-		pthread_mutex_lock(&server->lock);
 		if (!peer->used ||
 		    !tr_server_peer_handle_equal(peer, &snapshot) ||
 		    peer->channel != snapshot.channel ||
 		    peer->rpc != snapshot.rpc ||
-		    peer->finalize_ctx != snapshot.finalize_ctx) {
-			pthread_mutex_unlock(&server->lock);
+		    peer->finalize_ctx != snapshot.finalize_ctx)
 			continue;
-		}
 
 		if (snapshot.rpc) {
 			ret = tr_rpc_endpoint_arm_detached_finalizer(
 				snapshot.rpc, tr_server_on_endpoint_finalized,
 				detached);
-			if (ret != TR_OK) {
-				pthread_mutex_unlock(&server->lock);
+			if (ret != TR_OK)
 				continue;
-			}
 		}
 
 		detached->server = server;
@@ -445,7 +412,6 @@ static void tr_server_detach_disconnected_peers_on_owner(
 		 */
 		memset(peer, 0, sizeof(*peer));
 		tr_runtime_shard_peer_note_removed_for_reap(server->shard);
-		pthread_mutex_unlock(&server->lock);
 
 		if (snapshot.rpc)
 			tr_rpc_endpoint_release_detached_owner(snapshot.rpc);
@@ -471,14 +437,14 @@ static void tr_server_wait_peer_finalizers(struct tr_server *server)
 {
 	struct tr_runtime_peer_stats stats;
 
-	pthread_mutex_lock(&server->lock);
+	pthread_mutex_lock(&server->finalizer_lock);
 	for (;;) {
 		tr_runtime_shard_peer_stats(server->shard, &stats);
 		if (stats.reaping_current == 0U)
 			break;
-		pthread_cond_wait(&server->finalizer_cond, &server->lock);
+		pthread_cond_wait(&server->finalizer_cond, &server->finalizer_lock);
 	}
-	pthread_mutex_unlock(&server->lock);
+	pthread_mutex_unlock(&server->finalizer_lock);
 }
 
 static void tr_server_disable_peer_events(struct tr_server *server)
@@ -532,10 +498,8 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 	 * shard peer event 延后到当前 owner callback 返回后执行 detach。
 	 */
 	if (peer->channel || peer->rpc) {
-		pthread_mutex_lock(&guard->server->lock);
 		peer->used = 1;
-		tr_server_note_peer_added_locked(guard->server);
-		pthread_mutex_unlock(&guard->server->lock);
+		tr_server_note_peer_added_owner(guard->server);
 		tr_server_signal_peer_cleanup(guard->server);
 	} else {
 		free(peer->finalize_ctx);
@@ -555,14 +519,12 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
-	pthread_mutex_lock(&server->lock);
 	{
 		struct tr_runtime_peer_stats peer_stats;
 
 		tr_runtime_shard_peer_stats(server->shard, &peer_stats);
 		if (peer_stats.current >= peer_stats.capacity) {
 			tr_runtime_shard_peer_note_capacity_rejection(server->shard);
-			pthread_mutex_unlock(&server->lock);
 			return TR_AGAIN;
 		}
 	}
@@ -574,20 +536,16 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	}
 	if (slot == tr_server_peer_capacity(server)) {
 		tr_runtime_shard_peer_note_capacity_rejection(server->shard);
-		pthread_mutex_unlock(&server->lock);
 		return TR_AGAIN;
 	}
 
 	peer = tr_server_peer_at(server, slot);
 	memset(peer, 0, sizeof(*peer));
 	peer->finalize_ctx = calloc(1, sizeof(struct tr_server_detached_peer));
-	if (!peer->finalize_ctx) {
-		pthread_mutex_unlock(&server->lock);
+	if (!peer->finalize_ctx)
 		return TR_ERR_NOMEM;
-	}
 	((struct tr_server_detached_peer *)peer->finalize_ctx)->server = server;
 	peer_guard.peer = peer;
-	pthread_mutex_unlock(&server->lock);
 
 	if (tr_tcp_nodelay_policy_enabled(server->config.tcp_nodelay)) {
 		ret = tr_tcp_set_nodelay(owned_fd, 1);
@@ -668,14 +626,12 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 			return ret;
 	}
 
-	pthread_mutex_lock(&server->lock);
 	peer->used = 1;
-	tr_server_note_peer_added_locked(server);
+	tr_server_note_peer_added_owner(server);
 	tr_runtime_shard_peer_note_ready(server->shard);
-	pthread_mutex_unlock(&server->lock);
 	/*
 	 * Cover the race where the connection went DOWN before this peer became
-	 * visible to the reaper. The signal is coalesced by the shard eventfd.
+	 * visible in the owner table. The shard eventfd coalesces the retry.
 	 */
 	tr_server_signal_peer_cleanup(server);
 	peer_guard.armed = 0;
@@ -752,7 +708,7 @@ int tr_server_create(const struct tr_server_config *config,
 		return TR_ERR_NOMEM;
 	server_mem->config = effective;
 
-	if (pthread_mutex_init(&server_mem->lock, NULL) != 0)
+	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	server = tr_server_mem_take(&server_mem);
 	if (pthread_cond_init(&server->finalizer_cond, NULL) != 0)
@@ -1002,10 +958,74 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	return final;
 }
 
+struct tr_server_stats_owner_request {
+	struct tr_server *server;
+	struct tr_server_stats *stats;
+};
+
+static int tr_server_collect_peer_stats_on_owner(void *arg)
+{
+	struct tr_server_stats_owner_request *request =
+		(struct tr_server_stats_owner_request *)arg;
+	struct tr_server *server = request->server;
+	struct tr_server_stats *stats = request->stats;
+	struct tr_runtime_peer_stats peer_stats;
+	uint32_t i;
+
+	/*
+	 * Peer slots and owner-side counters are single-writer Reactor state.
+	 * External stats callers reach this function through tr_reactor_call().
+	 */
+	tr_runtime_shard_peer_stats(server->shard, &peer_stats);
+	stats->max_peers = peer_stats.capacity;
+	stats->peers_current = peer_stats.current;
+	stats->peers_peak = peer_stats.peak;
+	stats->peers_reaping_current = peer_stats.reaping_current;
+	stats->peers_ready_total = peer_stats.ready_total;
+	stats->peers_reaped_total = peer_stats.reaped_total;
+	stats->peer_capacity_rejections = peer_stats.capacity_rejections;
+
+	/*
+	 * Detached last-ref finalizers may merge retired stats on worker or owner
+	 * context. This lock protects only that cross-thread aggregate; it never
+	 * protects the peer table.
+	 */
+	pthread_mutex_lock(&server->finalizer_lock);
+	stats->channel = server->retired_channel_stats;
+	stats->rpc = server->retired_rpc_stats;
+	pthread_mutex_unlock(&server->finalizer_lock);
+
+	if (stats->rpc.executor_threads == 0)
+		stats->rpc.executor_threads =
+			server->config.limits.executor_threads;
+
+	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
+		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
+		struct tr_rpc_endpoint_stats rpc_stats;
+		struct tr_channel_stats channel_stats;
+
+		if (!peer || !peer->used)
+			continue;
+
+		if (peer->rpc && peer->channel)
+			stats->peers_ready_current++;
+
+		if (peer->rpc &&
+		    tr_rpc_endpoint_get_stats(peer->rpc, &rpc_stats) == TR_OK)
+			tr_server_merge_rpc_stats(&stats->rpc, &rpc_stats, 1);
+		if (peer->channel &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			tr_server_merge_channel_stats(&stats->channel,
+						      &channel_stats, 1);
+	}
+
+	return TR_OK;
+}
+
 int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 {
+	struct tr_server_stats_owner_request request;
 	struct tr_server_stats stats;
-	uint32_t i;
 	int ret;
 
 	if (!server || !out)
@@ -1024,45 +1044,13 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	if (ret != TR_OK)
 		return ret;
 
-	pthread_mutex_lock(&server->lock);
-	{
-		struct tr_runtime_peer_stats peer_stats;
-
-		tr_runtime_shard_peer_stats(server->shard, &peer_stats);
-		stats.max_peers = peer_stats.capacity;
-		stats.peers_current = peer_stats.current;
-		stats.peers_peak = peer_stats.peak;
-		stats.peers_reaping_current = peer_stats.reaping_current;
-		stats.peers_ready_total = peer_stats.ready_total;
-		stats.peers_reaped_total = peer_stats.reaped_total;
-		stats.peer_capacity_rejections = peer_stats.capacity_rejections;
-	}
-	stats.channel = server->retired_channel_stats;
-	stats.rpc = server->retired_rpc_stats;
-	if (stats.rpc.executor_threads == 0)
-		stats.rpc.executor_threads =
-			server->config.limits.executor_threads;
-
-	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
-		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
-		struct tr_rpc_endpoint_stats rpc_stats;
-		struct tr_channel_stats channel_stats;
-
-		if (!peer->used)
-			continue;
-
-		if (peer->rpc && peer->channel)
-			stats.peers_ready_current++;
-
-		if (peer->rpc &&
-		    tr_rpc_endpoint_get_stats(peer->rpc, &rpc_stats) == TR_OK)
-			tr_server_merge_rpc_stats(&stats.rpc, &rpc_stats, 1);
-		if (peer->channel &&
-		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
-			tr_server_merge_channel_stats(&stats.channel,
-						      &channel_stats, 1);
-	}
-	pthread_mutex_unlock(&server->lock);
+	request.server = server;
+	request.stats = &stats;
+	ret = tr_runtime_shard_call(server->shard,
+				    tr_server_collect_peer_stats_on_owner,
+				    &request);
+	if (ret != TR_OK)
+		return ret;
 
 	*out = stats;
 	return TR_OK;
@@ -1087,7 +1075,7 @@ void tr_server_destroy(struct tr_server *server)
 
 		if (!peer || (!peer->used && !peer->channel && !peer->rpc))
 			continue;
-		tr_server_destroy_peer(server, peer, 0);
+		tr_server_destroy_peer(peer);
 	}
 
 	tr_server_wait_peer_finalizers(server);
@@ -1102,6 +1090,6 @@ void tr_server_destroy(struct tr_server *server)
 	free(server->methods);
 	if (server->finalizer_cond_ready)
 		pthread_cond_destroy(&server->finalizer_cond);
-	pthread_mutex_destroy(&server->lock);
+	pthread_mutex_destroy(&server->finalizer_lock);
 	free(server);
 }

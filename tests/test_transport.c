@@ -29,6 +29,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5314,6 +5315,37 @@ struct shared_executor_test_ctx {
 	int release;
 };
 
+struct server_stats_poll_ctx {
+	struct tr_server *server;
+	_Atomic int stop;
+	_Atomic unsigned samples;
+	_Atomic unsigned failures;
+};
+
+static void *server_stats_poll_main(void *arg)
+{
+	struct server_stats_poll_ctx *ctx =
+		(struct server_stats_poll_ctx *)arg;
+
+	while (!atomic_load_explicit(&ctx->stop, memory_order_acquire)) {
+		struct tr_server_stats stats;
+		struct timespec pause_time;
+
+		memset(&stats, 0, sizeof(stats));
+		if (tr_server_get_stats(ctx->server, &stats) == TR_OK)
+			(void)atomic_fetch_add_explicit(
+				&ctx->samples, 1U, memory_order_relaxed);
+		else
+			(void)atomic_fetch_add_explicit(
+				&ctx->failures, 1U, memory_order_relaxed);
+
+		pause_time.tv_sec = 0;
+		pause_time.tv_nsec = 1000000L;
+		nanosleep(&pause_time, NULL);
+	}
+	return NULL;
+}
+
 static int shared_executor_test_handler(struct tr_rpc_call_handle call,
 					const struct tr_rpc_bytes *request,
 					struct tr_rpc_unary_response *response,
@@ -5685,12 +5717,15 @@ static void test_server_peer_refcount_drain(void)
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
 	struct shared_executor_test_ctx ctx;
+	struct server_stats_poll_ctx stats_poll;
+	pthread_t stats_thread;
 	struct timespec deadline;
 	uint16_t port = 0;
 	unsigned attempt;
 	int ret = 0;
 
 	memset(&ctx, 0, sizeof(ctx));
+	memset(&stats_poll, 0, sizeof(stats_poll));
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
 
@@ -5721,6 +5756,12 @@ static void test_server_peer_refcount_drain(void)
 					 &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
+	stats_poll.server = server;
+	atomic_init(&stats_poll.stop, 0);
+	atomic_init(&stats_poll.samples, 0U);
+	atomic_init(&stats_poll.failures, 0U);
+	assert(pthread_create(&stats_thread, NULL, server_stats_poll_main,
+			      &stats_poll) == 0);
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
@@ -5850,6 +5891,13 @@ static void test_server_peer_refcount_drain(void)
 	}
 	assert(tr_client_wait_drained(client, 5000U) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	atomic_store_explicit(&stats_poll.stop, 1, memory_order_release);
+	assert(pthread_join(stats_thread, NULL) == 0);
+	assert(atomic_load_explicit(&stats_poll.samples,
+				    memory_order_relaxed) != 0U);
+	assert(atomic_load_explicit(&stats_poll.failures,
+				    memory_order_relaxed) == 0U);
 
 	tr_client_destroy(client);
 	tr_server_destroy(server);

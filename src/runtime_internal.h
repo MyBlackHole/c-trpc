@@ -61,6 +61,8 @@ struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,
 uint32_t tr_runtime_shard_id(const struct tr_runtime_shard *shard);
 struct tr_reactor *
 tr_runtime_shard_reactor(const struct tr_runtime_shard *shard);
+int tr_runtime_shard_call(struct tr_runtime_shard *shard,
+			  int (*fn)(void *arg), void *arg);
 struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
 
@@ -86,9 +88,9 @@ int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard);
 void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
 
 /*
- * Peer storage is shard-owned. Accept and lifecycle detach run on the Reactor
- * owner; server->lock is still a temporary cross-thread snapshot/finalizer
- * transition lock. Runtime owns storage/counters only.
+ * Peer storage is shard-owned. Accept, publish, lifecycle detach and live
+ * snapshot all run on the Reactor owner. Runtime owns storage/counters; only
+ * detached-finalizer retirement counters may be updated off-owner.
  */
 uint32_t tr_runtime_shard_peer_capacity(const struct tr_runtime_shard *shard);
 struct tr_runtime_peer *

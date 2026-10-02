@@ -133,8 +133,10 @@ Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，
 
 listener 与 peer resource ownership 已下沉；accept execution 已进入 Reactor；
 peer lifecycle event source 与 detach/finalize 已完全事件化；dedicated finalizer
-thread 已移除。剩余工作是移除 `server->lock` 的 publish/snapshot 过渡同步，
-然后再继续 Pipeline 与 routing。
+thread 已移除。Peer reserve/publish/remove/live snapshot 也已全部串行化到 Reactor
+owner，不再依赖 Server-global peer mutex。Server 仅保留一个小型
+`finalizer_lock`，用于 detached finalizer 的 retired stats merge 与 shutdown
+condition；它不保护 peer table。后续可继续进入 Pipeline 与 routing。
 
 目标逻辑结构：
 
