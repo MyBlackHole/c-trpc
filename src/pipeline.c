@@ -699,6 +699,82 @@ static int tr_pipeline_bind_stream_on_owner(void *arg)
 	return TR_OK;
 }
 
+struct tr_pipeline_prepare_transfer_request {
+	struct tr_pipeline *pipeline;
+	uint32_t stream_id;
+	struct tr_pipeline_transfer_ready *out;
+};
+
+static int tr_pipeline_prepare_transfer_on_owner(void *arg)
+{
+	struct tr_pipeline_prepare_transfer_request *request =
+		(struct tr_pipeline_prepare_transfer_request *)arg;
+	struct tr_pipeline *pipeline = request->pipeline;
+	struct tr_pipeline_affinity_entry *entry;
+	struct tr_pipeline_data_slot *slot = NULL;
+	uint32_t existing = UINT32_MAX;
+	uint32_t insert = UINT32_MAX;
+	uint32_t selected = UINT32_MAX;
+	uint32_t offset;
+
+	if (request->stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!pipeline->control_bound)
+		return TR_ERR_STATE;
+
+	if (tr_pipeline_affinity_find(pipeline, request->stream_id,
+				      &existing, &insert))
+		return TR_ERR_STATE;
+	if (insert == UINT32_MAX)
+		return TR_AGAIN;
+	if (pipeline->data_count == 0U)
+		return TR_AGAIN;
+
+	for (offset = 0; offset < pipeline->data_capacity; ++offset) {
+		uint32_t index =
+			(pipeline->next_data_index + offset) %
+			pipeline->data_capacity;
+
+		if (pipeline->data_slots[index].state !=
+		    TR_PIPELINE_DATA_ATTACHED)
+			continue;
+		selected = index;
+		slot = &pipeline->data_slots[index];
+		break;
+	}
+	if (!slot)
+		return TR_AGAIN;
+
+	entry = &pipeline->affinities[insert];
+	entry->stream_id = request->stream_id;
+	entry->data.index = selected;
+	entry->data.generation = slot->generation;
+	entry->state = TR_PIPELINE_AFFINITY_USED;
+	pipeline->affinity_count++;
+	pipeline->next_data_index =
+		(selected + 1U) % pipeline->data_capacity;
+
+	request->out->stream_id = request->stream_id;
+	request->out->data = entry->data;
+	return TR_OK;
+}
+
+int tr_pipeline_prepare_transfer(
+	struct tr_pipeline *pipeline, uint32_t stream_id,
+	struct tr_pipeline_transfer_ready *out)
+{
+	struct tr_pipeline_prepare_transfer_request request;
+
+	if (!pipeline || !out)
+		return TR_ERR_INVALID;
+	memset(out, 0, sizeof(*out));
+	request.pipeline = pipeline;
+	request.stream_id = stream_id;
+	request.out = out;
+	return tr_reactor_call(pipeline->owner,
+			       tr_pipeline_prepare_transfer_on_owner, &request);
+}
+
 int tr_pipeline_bind_stream(struct tr_pipeline *pipeline, uint32_t stream_id,
 			    struct tr_pipeline_data_ref data)
 {
