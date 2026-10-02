@@ -1,7 +1,10 @@
 #include "runtime_internal.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
 #include "tr/socket.h"
 #include "tr/status.h"
@@ -22,6 +25,7 @@ struct tr_runtime_shard {
 	uint64_t peers_ready_total;
 	uint64_t peers_reaped_total;
 	uint64_t peer_capacity_rejections;
+	int peer_event_fd;
 
 	int listen_fd;
 	uint16_t bound_port;
@@ -40,6 +44,10 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		return;
 
 	tr_runtime_shard_close_listener(shard);
+	if (shard->peer_event_fd >= 0) {
+		close(shard->peer_event_fd);
+		shard->peer_event_fd = -1;
+	}
 	if (shard->rpc_executor) {
 		tr_rpc_executor_group_destroy(shard->rpc_executor);
 		shard->rpc_executor = NULL;
@@ -96,14 +104,19 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 
 		shard->shard_id = i;
 		shard->listen_fd = -1;
+		shard->peer_event_fd = -1;
 		shard->peer_capacity = config->peer_capacity;
 		if (shard->peer_capacity != 0U) {
 			shard->peers = (struct tr_runtime_peer *)calloc(
 				shard->peer_capacity, sizeof(*shard->peers));
-			if (!shard->peers)
+			if (!shard->peers) {
 				ret = TR_ERR_NOMEM;
-			else
-				ret = TR_OK;
+			} else {
+				shard->peer_event_fd =
+					eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+				ret = shard->peer_event_fd < 0 ?
+					      TR_ERR_SYS : TR_OK;
+			}
 		} else {
 			ret = TR_OK;
 		}
@@ -359,4 +372,47 @@ void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 	out->ready_total = shard->peers_ready_total;
 	out->reaped_total = shard->peers_reaped_total;
 	out->capacity_rejections = shard->peer_capacity_rejections;
+}
+
+int tr_runtime_shard_peer_event_fd(const struct tr_runtime_shard *shard)
+{
+	return shard ? shard->peer_event_fd : -1;
+}
+
+void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard)
+{
+	uint64_t one = 1U;
+	ssize_t written;
+
+	if (!shard || shard->peer_event_fd < 0)
+		return;
+
+	do {
+		written = write(shard->peer_event_fd, &one, sizeof(one));
+	} while (written < 0 && errno == EINTR);
+
+	/*
+	 * EAGAIN means the eventfd counter is already saturated; a wake is
+	 * necessarily pending, so no additional action is required.
+	 */
+}
+
+void tr_runtime_shard_drain_peer_event(struct tr_runtime_shard *shard)
+{
+	uint64_t value;
+	ssize_t n;
+
+	if (!shard || shard->peer_event_fd < 0)
+		return;
+
+	for (;;) {
+		do {
+			n = read(shard->peer_event_fd, &value, sizeof(value));
+		} while (n < 0 && errno == EINTR);
+		if (n == (ssize_t)sizeof(value))
+			continue;
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			break;
+		break;
+	}
 }
