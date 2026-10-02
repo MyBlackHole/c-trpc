@@ -8,6 +8,25 @@
 struct tr_runtime;
 struct tr_runtime_shard;
 struct tr_rpc_executor_group;
+struct tr_channel;
+struct tr_rpc_endpoint;
+
+struct tr_runtime_peer {
+	int used;
+	struct tr_conn_handle connection;
+	struct tr_channel *channel;
+	struct tr_rpc_endpoint *rpc;
+};
+
+struct tr_runtime_peer_stats {
+	uint32_t capacity;
+	uint32_t current;
+	uint32_t peak;
+	uint32_t reaping_current;
+	uint64_t ready_total;
+	uint64_t reaped_total;
+	uint64_t capacity_rejections;
+};
 
 /*
  * Phase-3 runtime ownership seam.
@@ -24,6 +43,7 @@ struct tr_runtime_rpc_executor_config {
 
 struct tr_runtime_config {
 	uint32_t shard_count;
+	uint32_t peer_capacity;
 	struct tr_reactor_config reactor;
 	struct tr_runtime_rpc_executor_config rpc_executor;
 };
@@ -57,5 +77,22 @@ int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 int tr_runtime_shard_listener_fd(const struct tr_runtime_shard *shard);
 uint16_t tr_runtime_shard_bound_port(const struct tr_runtime_shard *shard);
 void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
+
+/*
+ * Peer storage is shard-owned. During the Phase-3 bridge the legacy Server
+ * accept/reaper threads still serialize these APIs with server->lock.
+ * Runtime owns storage/counters only; Server still owns Channel/RPC teardown.
+ */
+uint32_t tr_runtime_shard_peer_capacity(const struct tr_runtime_shard *shard);
+struct tr_runtime_peer *
+tr_runtime_shard_peer_at(struct tr_runtime_shard *shard, uint32_t slot);
+void tr_runtime_shard_peer_note_added(struct tr_runtime_shard *shard);
+void tr_runtime_shard_peer_note_ready(struct tr_runtime_shard *shard);
+void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard);
+void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard);
+void tr_runtime_shard_peer_note_capacity_rejection(
+	struct tr_runtime_shard *shard);
+void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
+				 struct tr_runtime_peer_stats *out);
 
 #endif
