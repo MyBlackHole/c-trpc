@@ -30,11 +30,9 @@ struct tr_runtime_peer_stats {
 };
 
 /*
- * Phase-3 runtime ownership seam.
- *
- * The first implementation deliberately accepts only shard_count == 1.
- * Keeping the count explicit makes the ownership boundary real without
- * prematurely introducing multi-Reactor listener/routing semantics.
+ * Runtime owns one independent resource domain per shard. Configuration is
+ * explicit per shard so enabling N shards never multiplies a Server-wide
+ * budget implicitly.
  */
 struct tr_runtime_rpc_executor_config {
 	uint32_t endpoint_capacity;
@@ -42,11 +40,15 @@ struct tr_runtime_rpc_executor_config {
 	uint32_t thread_count;
 };
 
+struct tr_runtime_shard_config {
+	struct tr_reactor_config reactor;
+	uint32_t peer_capacity;
+	struct tr_runtime_rpc_executor_config rpc_executor;
+};
+
 struct tr_runtime_config {
 	uint32_t shard_count;
-	uint32_t peer_capacity;
-	struct tr_reactor_config reactor;
-	struct tr_runtime_rpc_executor_config rpc_executor;
+	const struct tr_runtime_shard_config *shards;
 };
 
 int tr_runtime_create(const struct tr_runtime_config *config,
