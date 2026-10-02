@@ -209,6 +209,7 @@ static void test_pipeline_ingress_routing(void)
 	struct tr_pipeline_stats pipeline_stats;
 	struct tr_pipeline_route_preface route;
 	struct tr_pipeline_route_preface wrong;
+	struct tr_conn_handle control;
 	struct ingress_test_ctx ctx;
 	uint8_t route_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint8_t ping[TR_WIRE_HEADER_SIZE];
