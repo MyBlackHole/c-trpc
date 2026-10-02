@@ -982,10 +982,74 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	return final;
 }
 
+struct tr_server_stats_owner_request {
+	struct tr_server *server;
+	struct tr_server_stats *stats;
+};
+
+static int tr_server_collect_peer_stats_on_owner(void *arg)
+{
+	struct tr_server_stats_owner_request *request =
+		(struct tr_server_stats_owner_request *)arg;
+	struct tr_server *server = request->server;
+	struct tr_server_stats *stats = request->stats;
+	struct tr_runtime_peer_stats peer_stats;
+	uint32_t i;
+
+	/*
+	 * Peer slots and owner-side counters are single-writer Reactor state.
+	 * External stats callers reach this function through tr_reactor_call().
+	 */
+	tr_runtime_shard_peer_stats(server->shard, &peer_stats);
+	stats->max_peers = peer_stats.capacity;
+	stats->peers_current = peer_stats.current;
+	stats->peers_peak = peer_stats.peak;
+	stats->peers_reaping_current = peer_stats.reaping_current;
+	stats->peers_ready_total = peer_stats.ready_total;
+	stats->peers_reaped_total = peer_stats.reaped_total;
+	stats->peer_capacity_rejections = peer_stats.capacity_rejections;
+
+	/*
+	 * Detached last-ref finalizers may merge retired stats on worker or owner
+	 * context. This lock protects only that cross-thread aggregate; it never
+	 * protects the peer table.
+	 */
+	pthread_mutex_lock(&server->finalizer_lock);
+	stats->channel = server->retired_channel_stats;
+	stats->rpc = server->retired_rpc_stats;
+	pthread_mutex_unlock(&server->finalizer_lock);
+
+	if (stats->rpc.executor_threads == 0)
+		stats->rpc.executor_threads =
+			server->config.limits.executor_threads;
+
+	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
+		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
+		struct tr_rpc_endpoint_stats rpc_stats;
+		struct tr_channel_stats channel_stats;
+
+		if (!peer || !peer->used)
+			continue;
+
+		if (peer->rpc && peer->channel)
+			stats->peers_ready_current++;
+
+		if (peer->rpc &&
+		    tr_rpc_endpoint_get_stats(peer->rpc, &rpc_stats) == TR_OK)
+			tr_server_merge_rpc_stats(&stats->rpc, &rpc_stats, 1);
+		if (peer->channel &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			tr_server_merge_channel_stats(&stats->channel,
+						      &channel_stats, 1);
+	}
+
+	return TR_OK;
+}
+
 int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 {
+	struct tr_server_stats_owner_request request;
 	struct tr_server_stats stats;
-	uint32_t i;
 	int ret;
 
 	if (!server || !out)
@@ -1004,45 +1068,12 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	if (ret != TR_OK)
 		return ret;
 
-	pthread_mutex_lock(&server->finalizer_lock);
-	{
-		struct tr_runtime_peer_stats peer_stats;
-
-		tr_runtime_shard_peer_stats(server->shard, &peer_stats);
-		stats.max_peers = peer_stats.capacity;
-		stats.peers_current = peer_stats.current;
-		stats.peers_peak = peer_stats.peak;
-		stats.peers_reaping_current = peer_stats.reaping_current;
-		stats.peers_ready_total = peer_stats.ready_total;
-		stats.peers_reaped_total = peer_stats.reaped_total;
-		stats.peer_capacity_rejections = peer_stats.capacity_rejections;
-	}
-	stats.channel = server->retired_channel_stats;
-	stats.rpc = server->retired_rpc_stats;
-	if (stats.rpc.executor_threads == 0)
-		stats.rpc.executor_threads =
-			server->config.limits.executor_threads;
-
-	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
-		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
-		struct tr_rpc_endpoint_stats rpc_stats;
-		struct tr_channel_stats channel_stats;
-
-		if (!peer->used)
-			continue;
-
-		if (peer->rpc && peer->channel)
-			stats.peers_ready_current++;
-
-		if (peer->rpc &&
-		    tr_rpc_endpoint_get_stats(peer->rpc, &rpc_stats) == TR_OK)
-			tr_server_merge_rpc_stats(&stats.rpc, &rpc_stats, 1);
-		if (peer->channel &&
-		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
-			tr_server_merge_channel_stats(&stats.channel,
-						      &channel_stats, 1);
-	}
-	pthread_mutex_unlock(&server->finalizer_lock);
+	request.server = server;
+	request.stats = &stats;
+	ret = tr_reactor_call(tr_server_reactor(server),
+			      tr_server_collect_peer_stats_on_owner, &request);
+	if (ret != TR_OK)
+		return ret;
 
 	*out = stats;
 	return TR_OK;
