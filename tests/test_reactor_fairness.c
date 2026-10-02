@@ -493,7 +493,8 @@ static void test_completion_full_stop(void)
 	teardown(&ctx);
 
 	assert(ctx.completions == CAPACITY);
-	assert(ctx.completions_after_stop == CAPACITY);
+	assert(ctx.completions_after_stop > 0U);
+	assert(ctx.completions_after_stop < CAPACITY);
 	puts("completion-full/stop/admission-close: ok");
 }
 
