@@ -1,12 +1,14 @@
 #include "tr/client.h"
 #include "tr/server.h"
 #include "tr/status.h"
+#include "../src/runtime_internal.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <string.h>
 
 /*
  * 仅此测试通过链接器 --wrap 观察库对 pthread 的调用。计数不包含宿主或
@@ -168,6 +170,76 @@ static void test_server_create_start_destroy_threads(void)
 	}
 }
 
+static void runtime_multi_shard_config_init(
+	struct tr_runtime_config *config,
+	struct tr_runtime_shard_config shards[3])
+{
+	uint32_t i;
+	static const uint32_t worker_counts[3] = { 1U, 2U, 1U };
+
+	memset(config, 0, sizeof(*config));
+	memset(shards, 0, sizeof(*shards) * 3U);
+	config->shard_count = 3U;
+	config->shards = shards;
+
+	for (i = 0; i < 3U; ++i) {
+		shards[i].peer_capacity = 2U;
+		shards[i].rpc_executor.endpoint_capacity = 2U;
+		shards[i].rpc_executor.max_calls_per_endpoint = 2U;
+		shards[i].rpc_executor.thread_count = worker_counts[i];
+	}
+}
+
+static void test_runtime_multi_shard_threads(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shards[3];
+	struct tr_runtime *runtime = NULL;
+
+	runtime_multi_shard_config_init(&config, shards);
+	reset_probe(0U);
+
+	/* Per-shard executor budgets sum to four workers; they are not multiplied. */
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(runtime != NULL);
+	expect_threads(4U, 0U);
+
+	/* Runtime start adds exactly one Reactor owner per shard. */
+	assert(tr_runtime_start(runtime) == TR_OK);
+	expect_threads(7U, 0U);
+
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	expect_threads(7U, 3U);
+	tr_runtime_destroy(runtime);
+	expect_threads(7U, 7U);
+}
+
+static void test_runtime_multi_shard_start_rollback(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shards[3];
+	struct tr_runtime *runtime = NULL;
+
+	runtime_multi_shard_config_init(&config, shards);
+
+	/*
+	 * Attempts 1..4 are shard-local executor workers. Attempt 5 starts
+	 * Reactor 0; attempt 6 fails Reactor 1. Runtime must join Reactor 0 while
+	 * leaving the four executor workers owned by the still-live Runtime.
+	 */
+	reset_probe(6U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(runtime != NULL);
+	expect_threads(4U, 0U);
+
+	assert(tr_runtime_start(runtime) == TR_ERR_SYS);
+	assert(atomic_load(&create_attempts) == 6U);
+	expect_threads(5U, 1U);
+
+	tr_runtime_destroy(runtime);
+	expect_threads(5U, 5U);
+}
+
 static void test_client_thread_start_failure(void)
 {
 	struct tr_client_config config;
@@ -224,6 +296,8 @@ int main(void)
 {
 	RUN_TEST(test_client_create_destroy_threads);
 	RUN_TEST(test_server_create_start_destroy_threads);
+	RUN_TEST(test_runtime_multi_shard_threads);
+	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);
 	RUN_TEST(test_server_runtime_start_failures);
