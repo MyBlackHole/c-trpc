@@ -121,9 +121,11 @@ Registry(shard S)
   -> pipeline_id -> Pipeline*
 ```
 
-Registry mutation/lookup 与 Pipeline mutation一样，通过该 shard Reactor owner
+Registry mutation/route attach 与 Pipeline mutation一样，通过该 shard Reactor owner
 串行化；没有 Server-global registry mutex。Registry 不拥有 Pipeline lifetime，
-Pipeline destroy 前必须先 unregister。
+Pipeline destroy 前必须先 unregister。Registry API 不把裸 `Pipeline*` 返回到
+owner domain 之外；后续按 ID 的 CONTROL-plane 操作应在 registry owner 内完成
+lookup+action，而不是让指针跨 owner call 生命周期逃逸。
 
 `pipeline_id` 在一个 shard registry 内是唯一 key。旧 epoch 仍注册时，新 epoch
 不能以同一 pipeline_id 并存：
