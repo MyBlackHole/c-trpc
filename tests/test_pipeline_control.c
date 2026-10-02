@@ -101,34 +101,38 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_control_cancel_data(control, &stale) ==
 	       TR_ERR_STALE);
 
-	data0 = fake_connection(owner, 20U, 1U);
-	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &offer0.route, data0, NULL) == TR_OK);
-
-	memset(&ready0, 0, sizeof(ready0));
-	assert(tr_pipeline_control_prepare_transfer(
-		       control, 1001U, &ready0) == TR_OK);
-	assert(ready0.stream_id == 1001U);
-	assert(ready0.data.index == offer0.data.index);
-	assert(ready0.data.generation == offer0.data.generation);
-
-	/* Stream affinity is established exactly once. */
-	assert(tr_pipeline_control_prepare_transfer(
-		       control, 1001U, &ready1) == TR_ERR_STATE);
-
-	/* Add a second attached DATA membership; next stream round-robins to it. */
+	/*
+	 * Keep offer0 RESERVED while offer1 becomes ATTACHED. TRANSFER_READY must
+	 * skip the reservation even if round-robin encounters that slot first.
+	 */
 	memset(&offer1, 0, sizeof(offer1));
 	assert(tr_pipeline_control_reserve_data(control, &offer1) == TR_OK);
 	data1 = fake_connection(owner, 21U, 1U);
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &offer1.route, data1, NULL) == TR_OK);
 
+	memset(&ready0, 0, sizeof(ready0));
+	assert(tr_pipeline_control_prepare_transfer(
+		       control, 1001U, &ready0) == TR_OK);
+	assert(ready0.stream_id == 1001U);
+	assert(ready0.data.index == offer1.data.index);
+	assert(ready0.data.generation == offer1.data.generation);
+
+	/* Stream affinity is established exactly once. */
+	assert(tr_pipeline_control_prepare_transfer(
+		       control, 1001U, &ready1) == TR_ERR_STATE);
+
+	/* Attach the previously RESERVED offer0; next stream can now use it. */
+	data0 = fake_connection(owner, 20U, 1U);
+	assert(tr_pipeline_registry_attach_data_route(
+		       registry, &offer0.route, data0, NULL) == TR_OK);
+
 	memset(&ready1, 0, sizeof(ready1));
 	assert(tr_pipeline_control_prepare_transfer(
 		       control, 1002U, &ready1) == TR_OK);
 	assert(ready1.stream_id == 1002U);
-	assert(ready1.data.index == offer1.data.index);
-	assert(ready1.data.generation == offer1.data.generation);
+	assert(ready1.data.index == offer0.data.index);
+	assert(ready1.data.generation == offer0.data.generation);
 
 	/* CONTROL cannot disappear while attached DATA/Stream lifetime remains. */
 	assert(tr_pipeline_control_close(control, control_connection) ==
