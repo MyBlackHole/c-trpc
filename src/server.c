@@ -732,8 +732,7 @@ int tr_server_create(const struct tr_server_config *config,
 {
 	struct tr_server_config effective;
 	struct tr_runtime_config runtime_config;
-	struct tr_runtime_shard_config shard_config;
-	struct tr_reactor_config *reactor_config;
+	struct tr_runtime_shard_config *shard_configs = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
 	int ret;
@@ -759,7 +758,8 @@ int tr_server_create(const struct tr_server_config *config,
 			      16U :
 			      effective.limits.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
-	    effective.max_peers > (UINT32_MAX - 4U) / 2U)
+	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
+	    !tr_server_budget_supports_shards(&effective))
 		return TR_ERR_INVALID;
 
 	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
@@ -782,35 +782,72 @@ int tr_server_create(const struct tr_server_config *config,
 	}
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
-	memset(&shard_config, 0, sizeof(shard_config));
-	runtime_config.shard_count = 1U;
-	runtime_config.shards = &shard_config;
-	shard_config.peer_capacity = effective.max_peers;
-	shard_config.rpc_executor.endpoint_capacity = effective.max_peers;
-	shard_config.rpc_executor.max_calls_per_endpoint =
-		effective.limits.max_calls;
-	shard_config.rpc_executor.thread_count =
-		effective.limits.executor_threads;
-	reactor_config = &shard_config.reactor;
-	reactor_config->max_connections = effective.max_peers + 4U;
-	reactor_config->command_capacity = effective.limits.command_capacity;
-	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
-	reactor_config->control_tx_item_capacity =
-		effective.limits.control_tx_item_capacity;
-	reactor_config->rx_buffer_count = effective.limits.rx_buffer_count;
-	reactor_config->rx_buffer_size =
-		effective.limits.max_frame_payload_bytes;
-	reactor_config->max_payload_len =
-		effective.limits.max_frame_payload_bytes;
-	reactor_config->rx_budget_bytes =
-		effective.limits.max_frame_payload_bytes > UINT32_MAX / 4U ?
-			UINT32_MAX :
-			effective.limits.max_frame_payload_bytes * 4U;
-	reactor_config->tx_budget_bytes = reactor_config->rx_budget_bytes;
-	reactor_config->observability_flags =
-		effective.limits.observability_flags;
+	shard_configs = (struct tr_runtime_shard_config *)calloc(
+		effective.shard_count, sizeof(*shard_configs));
+	if (!shard_configs)
+		return TR_ERR_NOMEM;
+
+	runtime_config.shard_count = effective.shard_count;
+	runtime_config.shards = shard_configs;
+
+	{
+		uint32_t i;
+
+		for (i = 0; i < effective.shard_count; ++i) {
+			struct tr_runtime_shard_config *shard_config =
+				&shard_configs[i];
+			struct tr_reactor_config *reactor_config =
+				&shard_config->reactor;
+			uint32_t peer_capacity = tr_server_budget_share(
+				effective.max_peers, effective.shard_count, i);
+
+			shard_config->peer_capacity = peer_capacity;
+			shard_config->rpc_executor.endpoint_capacity =
+				peer_capacity;
+			shard_config->rpc_executor.max_calls_per_endpoint =
+				effective.limits.max_calls;
+			shard_config->rpc_executor.thread_count =
+				tr_server_budget_share(
+					effective.limits.executor_threads,
+					effective.shard_count, i);
+
+			reactor_config->max_connections = peer_capacity + 4U;
+			reactor_config->command_capacity =
+				tr_server_budget_share(
+					effective.limits.command_capacity,
+					effective.shard_count, i);
+			reactor_config->tx_item_capacity =
+				tr_server_budget_share(
+					effective.limits.tx_item_capacity,
+					effective.shard_count, i);
+			reactor_config->control_tx_item_capacity =
+				tr_server_budget_share(
+					effective.limits.control_tx_item_capacity,
+					effective.shard_count, i);
+			reactor_config->rx_buffer_count =
+				tr_server_budget_share(
+					effective.limits.rx_buffer_count,
+					effective.shard_count, i);
+			reactor_config->rx_buffer_size =
+				effective.limits.max_frame_payload_bytes;
+			reactor_config->max_payload_len =
+				effective.limits.max_frame_payload_bytes;
+			reactor_config->rx_budget_bytes =
+				effective.limits.max_frame_payload_bytes >
+						UINT32_MAX / 4U ?
+					UINT32_MAX :
+					effective.limits.max_frame_payload_bytes *
+						4U;
+			reactor_config->tx_budget_bytes =
+				reactor_config->rx_budget_bytes;
+			reactor_config->observability_flags =
+				effective.limits.observability_flags;
+		}
+	}
 
 	ret = tr_runtime_create(&runtime_config, &server->runtime);
+	free(shard_configs);
+	shard_configs = NULL;
 	if (ret != TR_OK)
 		return ret;
 
@@ -831,13 +868,17 @@ int tr_server_create(const struct tr_server_config *config,
 			server_shard->runtime =
 				tr_runtime_shard_at(server->runtime, i);
 			server_shard->executor_threads =
-				effective.limits.executor_threads;
+				tr_server_budget_share(
+					effective.limits.executor_threads,
+					effective.shard_count, i);
 			if (!server_shard->runtime)
 				return TR_ERR_STATE;
 
 			ret = tr_buffer_pool_init(
 				&server_shard->rpc_message_pool,
-				effective.limits.rpc_message_pool_count,
+				tr_server_budget_share(
+					effective.limits.rpc_message_pool_count,
+					effective.shard_count, i),
 				effective.limits.rpc_message_buffer_bytes);
 			if (ret != TR_OK)
 				return ret;
@@ -845,7 +886,9 @@ int tr_server_create(const struct tr_server_config *config,
 
 			ret = tr_buffer_pool_init(
 				&server_shard->reassembly_pool,
-				effective.limits.reassembly_pool_count,
+				tr_server_budget_share(
+					effective.limits.reassembly_pool_count,
+					effective.shard_count, i),
 				effective.limits.max_message_bytes);
 			if (ret != TR_OK)
 				return ret;
