@@ -77,6 +77,7 @@ static void test_registry_and_data_route_attach(void)
 	struct tr_pipeline_stats pipeline_stats;
 	struct tr_pipeline_route_preface preface;
 	struct tr_pipeline_route_preface wrong;
+	struct tr_conn_handle control_connection;
 	struct tr_conn_handle data_connection;
 	struct tr_conn_handle other_connection;
 	struct tr_conn_handle observed;
@@ -105,6 +106,9 @@ static void test_registry_and_data_route_attach(void)
 	       TR_ERR_STATE);
 	assert(tr_pipeline_registry_register(registry, wrong_shard) ==
 	       TR_ERR_INVALID);
+
+	control_connection = fake_connection(owner, 10U, 1U);
+	assert(tr_pipeline_set_control(pipeline, control_connection) == TR_OK);
 
 	assert(tr_pipeline_registry_lookup(
 		       registry, UINT64_C(0x1001), UINT64_C(9), &found) == TR_OK);
