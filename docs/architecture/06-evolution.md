@@ -183,6 +183,7 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - Pipeline identity 增加 owner_shard_id + epoch；
 - DATA slot 状态拆成 FREE / RESERVED / ATTACHED；
 - CONTROL-plane 可先 reserve `(data_index, generation)`；
+- reserve/attach 都要求 active CONTROL；CONTROL clear 会撤销所有未 attach reservation；
 - reservation 占容量但不参与 DATA selection/Stream affinity；
 - route attach 再校验 role/shard/pipeline_id/epoch/index/generation/owner Reactor；
 - routing mismatch 不消耗 reservation；
