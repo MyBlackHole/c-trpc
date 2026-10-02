@@ -278,15 +278,16 @@ static void tr_server_note_peer_added_locked(struct tr_server *server)
 	tr_runtime_shard_peer_note_added(server->shard);
 }
 
-static int tr_server_take_reapable_peer(struct tr_server *server,
-				       struct tr_runtime_peer *out)
+static int tr_server_detach_reapable_peer(struct tr_server *server,
+					 struct tr_runtime_peer *out)
 {
 	uint32_t i;
 
 	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
 		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
 		struct tr_runtime_peer snapshot;
-		int reap = 0;
+		int detached = 0;
+		int ret;
 
 		if (!peer)
 			continue;
@@ -302,21 +303,85 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 		if (!tr_server_peer_disconnected(&snapshot))
 			continue;
 
+		/*
+		 * Phase 1: detach every owner-visible callback/timer source while the
+		 * peer is still present in the shard table. These calls serialize
+		 * through the Reactor owner and must complete before ownership can
+		 * leave the shard.
+		 */
+		if (snapshot.rpc) {
+			ret = tr_rpc_endpoint_detach_for_finalize(snapshot.rpc);
+			if (ret != TR_OK)
+				continue;
+		}
+		if (snapshot.channel) {
+			ret = tr_channel_detach_for_finalize(snapshot.channel);
+			if (ret != TR_OK)
+				continue;
+		}
+
+		/*
+		 * Phase 2 ownership transfer: after owner detach returned, the table
+		 * slot can be cleared and the detached peer moves to the finalizer.
+		 */
 		pthread_mutex_lock(&server->lock);
 		if (peer->used &&
-		    tr_server_peer_handle_equal(peer, &snapshot)) {
+		    tr_server_peer_handle_equal(peer, &snapshot) &&
+		    peer->channel == snapshot.channel &&
+		    peer->rpc == snapshot.rpc) {
 			*out = *peer;
 			memset(peer, 0, sizeof(*peer));
 			tr_runtime_shard_peer_note_removed_for_reap(server->shard);
-			reap = 1;
+			detached = 1;
 		}
 		pthread_mutex_unlock(&server->lock);
 
-		if (reap)
+		if (detached)
 			return 1;
 	}
 
 	return 0;
+}
+
+static void tr_server_finalize_detached_peer(
+	struct tr_server *server, struct tr_runtime_peer *peer, int retire_stats)
+{
+	struct tr_rpc_endpoint_stats rpc_stats;
+	struct tr_channel_stats channel_stats;
+	int have_rpc_stats = 0;
+	int have_channel_stats = 0;
+
+	memset(&rpc_stats, 0, sizeof(rpc_stats));
+	memset(&channel_stats, 0, sizeof(channel_stats));
+
+	if (peer->rpc) {
+		tr_rpc_endpoint_finalize_detached_with_stats(
+			peer->rpc, retire_stats ? &rpc_stats : NULL);
+		peer->rpc = NULL;
+		have_rpc_stats = retire_stats;
+	}
+	if (peer->channel) {
+		if (retire_stats &&
+		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
+			have_channel_stats = 1;
+		tr_channel_finalize_detached(peer->channel);
+		peer->channel = NULL;
+	}
+
+	if (retire_stats) {
+		pthread_mutex_lock(&server->lock);
+		if (have_rpc_stats)
+			tr_server_merge_rpc_stats(&server->retired_rpc_stats,
+						  &rpc_stats, 0);
+		if (have_channel_stats)
+			tr_server_merge_channel_stats(
+				&server->retired_channel_stats,
+				&channel_stats, 0);
+		tr_runtime_shard_peer_note_reaped(server->shard);
+		pthread_mutex_unlock(&server->lock);
+	}
+
+	memset(peer, 0, sizeof(*peer));
 }
 
 static void tr_server_destroy_peer(struct tr_server *server,
@@ -391,9 +456,9 @@ static void *tr_server_reap_main(void *arg)
 			struct tr_runtime_peer peer;
 
 			memset(&peer, 0, sizeof(peer));
-			if (!tr_server_take_reapable_peer(server, &peer))
+			if (!tr_server_detach_reapable_peer(server, &peer))
 				break;
-			tr_server_destroy_peer(server, &peer, 1);
+			tr_server_finalize_detached_peer(server, &peer, 1);
 		}
 	}
 
