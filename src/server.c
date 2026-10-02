@@ -965,12 +965,15 @@ int tr_server_start(struct tr_server *server)
 	return TR_OK;
 
 rollback_events:
-	while (i != 0U) {
-		--i;
-		if (tr_server_shard_listener_fd(&server->shards[i]) >= 0)
-			(void)tr_runtime_shard_disable_listener_events(
-				server->shards[i].runtime);
-		tr_server_disable_peer_events(&server->shards[i]);
+	{
+		uint32_t j;
+
+		for (j = 0; j < server->shard_count; ++j) {
+			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0)
+				(void)tr_runtime_shard_disable_listener_events(
+					server->shards[j].runtime);
+			tr_server_disable_peer_events(&server->shards[j]);
+		}
 	}
 	(void)tr_runtime_stop(server->runtime);
 	return ret;
@@ -995,43 +998,58 @@ static void tr_server_stop_accepting(struct tr_server *server)
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 {
 	uint64_t start;
-	uint32_t i;
+	uint32_t shard_index;
 	int final = TR_OK;
 
 	if (!server || !server->started)
 		return TR_ERR_STATE;
 
 	tr_server_stop_accepting(server);
-	tr_server_disable_peer_events(server);
+	for (shard_index = 0; shard_index < server->shard_count; ++shard_index)
+		tr_server_disable_peer_events(&server->shards[shard_index]);
 
-	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
-		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
+	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
+		struct tr_server_shard *shard = &server->shards[shard_index];
+		uint32_t i;
 
-		if (peer && peer->used) {
-			int ret = tr_channel_begin_drain(peer->channel);
+		for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+			struct tr_runtime_peer *peer =
+				tr_server_shard_peer_at(shard, i);
 
-			if (ret != TR_OK && ret != TR_AGAIN && final == TR_OK)
-				final = ret;
+			if (peer && peer->used) {
+				int ret = tr_channel_begin_drain(peer->channel);
+
+				if (ret != TR_OK && ret != TR_AGAIN &&
+				    final == TR_OK)
+					final = ret;
+			}
 		}
 	}
 
 	start = tr_server_now_ms();
-	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
-		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
-		uint32_t remaining = timeout_ms;
-		int ret;
+	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
+		struct tr_server_shard *shard = &server->shards[shard_index];
+		uint32_t i;
 
-		if (!peer || !peer->used)
-			continue;
-		if (timeout_ms != 0) {
-			uint64_t elapsed = tr_server_now_ms() - start;
-			if (elapsed >= timeout_ms)
-				return TR_ERR_TIMEOUT;
-			remaining = (uint32_t)(timeout_ms - elapsed);
+		for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+			struct tr_runtime_peer *peer =
+				tr_server_shard_peer_at(shard, i);
+			uint32_t remaining = timeout_ms;
+			int ret;
+
+			if (!peer || !peer->used)
+				continue;
+			if (timeout_ms != 0U) {
+				uint64_t elapsed = tr_server_now_ms() - start;
+
+				if (elapsed >= timeout_ms)
+					return TR_ERR_TIMEOUT;
+				remaining = (uint32_t)(timeout_ms - elapsed);
+			}
+			ret = tr_channel_wait_drained(peer->channel, remaining);
+			if (ret != TR_OK && final == TR_OK)
+				final = ret;
 		}
-		ret = tr_channel_wait_drained(peer->channel, remaining);
-		if (ret != TR_OK && final == TR_OK)
-			final = ret;
 	}
 
 	return final;
