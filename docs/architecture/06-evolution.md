@@ -91,7 +91,10 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - listener 已注册进 shard[0] Reactor epoll，独立 accept thread 已删除；
 - accept callback 有固定批次上限，listener backlog 由后续 Reactor turn 继续处理；
 - peer slot storage/capacity/high-water/reaping/ready/rejection counters 已下沉到 shard[0]；
-- Server 仍负责 peer Channel/RPC 构造销毁，Reactor accept 与 reaper publish/detach 仍通过过渡锁串行化；
+- Server 仍负责 peer Channel/RPC 构造；disconnect teardown 已拆为 Reactor-owner detach + external finalize；
+- owner detach 移除 Channel/RPC callback、deadline/keepalive timer source，并关闭 executor admission；
+- 只有 owner detach 成功后 peer 才离开 shard table；reaper 只等待 worker refs、采集统计和 free；
+- Reactor accept 与 peer publish/table detach 仍通过过渡锁串行化；
 - shard[0] 已拥有 peer lifecycle eventfd；Channel DOWN/rollback/publish 只发事件，
   reaper 不再执行固定 10ms polling；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
@@ -109,10 +112,11 @@ peer Channel/RPC lifecycle remains Server-driven
 ```
 
 completion event publication、listener ownership、peer resource ownership、
-accept execution 以及 reaper wake event source 均已下沉。下一阶段继续收敛
-reaper cleanup execution 与 peer lifecycle，使 `server->lock` 不再承担 shard
-peer publish/detach 的中心同步角色；仍保持 `shard_count = 1`。完成单 shard
-资源域后再打开 Phase 4 的 N shards。
+accept execution、reaper wake event source 与 peer owner-detach 均已下沉。
+下一阶段可以删除 external reaper finalizer thread：把 detached peer finalization
+作为 shard-local cleanup work 执行，并继续移除 `server->lock` 的
+publish/table-detach 中心同步角色。仍保持 `shard_count = 1`，完成后再打开
+Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 
