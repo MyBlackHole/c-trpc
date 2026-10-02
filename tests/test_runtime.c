@@ -1,11 +1,15 @@
 #include "../src/runtime_internal.h"
 
 #include "tr/status.h"
+#include "tr/socket.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -113,6 +117,99 @@ static void test_runtime_shard_listener_ownership(void)
 	errno = 0;
 	assert(fcntl(listener, F_GETFD) == -1);
 	assert(errno == EBADF);
+}
+
+struct runtime_listener_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned accepted;
+};
+
+static void runtime_listener_test_cb(int listener, uint32_t events, void *arg)
+{
+	struct runtime_listener_test_ctx *ctx =
+		(struct runtime_listener_test_ctx *)arg;
+
+	if (!(events & EPOLLIN))
+		return;
+
+	for (;;) {
+		int fd = -1;
+		int ret = tr_tcp_accept(listener, &fd);
+
+		if (ret == TR_AGAIN)
+			break;
+		if (ret != TR_OK)
+			break;
+
+		tr_socket_close(&fd);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->accepted++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+	}
+}
+
+static void test_runtime_shard_listener_events(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	struct runtime_listener_test_ctx ctx;
+	struct timespec deadline;
+	struct pollfd pfd;
+	uint16_t bound = 0;
+	int client_fd = -1;
+	int ret;
+
+	memset(&config, 0, sizeof(config));
+	memset(&ctx, 0, sizeof(ctx));
+	config.shard_count = 1U;
+
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	assert(tr_runtime_shard_listen_ipv4(
+		       shard, "127.0.0.1", 0U, 8, &bound) == TR_OK);
+	assert(bound != 0U);
+	assert(tr_runtime_start(runtime) == TR_OK);
+	assert(tr_runtime_shard_enable_listener_events(
+		       shard, runtime_listener_test_cb, &ctx) == TR_OK);
+
+	ret = tr_tcp_connect_ipv4("127.0.0.1", bound, &client_fd);
+	assert(ret == TR_OK || ret == TR_IN_PROGRESS);
+	if (ret == TR_IN_PROGRESS) {
+		memset(&pfd, 0, sizeof(pfd));
+		pfd.fd = client_fd;
+		pfd.events = POLLOUT;
+		do {
+			ret = poll(&pfd, 1U, 10000);
+		} while (ret < 0 && errno == EINTR);
+		assert(ret == 1);
+		assert(tr_tcp_finish_connect(client_fd) == TR_OK);
+	}
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.accepted == 0U)
+		assert(pthread_cond_timedwait(&ctx.cond, &ctx.lock,
+					     &deadline) == 0);
+	assert(ctx.accepted == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/*
+	 * unregister is synchronous with the owner callback; once it returns the
+	 * callback cannot still be using the shard listener.
+	 */
+	assert(tr_runtime_shard_disable_listener_events(shard) == TR_OK);
+	tr_socket_close(&client_fd);
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	tr_runtime_destroy(runtime);
+	assert(pthread_cond_destroy(&ctx.cond) == 0);
+	assert(pthread_mutex_destroy(&ctx.lock) == 0);
 }
 
 static void test_runtime_shard_peer_resources(void)
@@ -246,6 +343,7 @@ int main(void)
 	RUN_TEST(test_runtime_rejects_multi_shard_before_phase4);
 	RUN_TEST(test_runtime_shard_rpc_executor_ownership);
 	RUN_TEST(test_runtime_shard_listener_ownership);
+	RUN_TEST(test_runtime_shard_listener_events);
 	RUN_TEST(test_runtime_shard_peer_resources);
 	RUN_TEST(test_runtime_shard_peer_event_source);
 	RUN_TEST(test_runtime_lifecycle);
