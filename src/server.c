@@ -368,7 +368,6 @@ static void tr_server_on_endpoint_finalized(
 static void tr_server_detach_disconnected_peers_on_owner(
 	struct tr_server_shard *shard)
 {
-	struct tr_server *server = shard->server;
 	uint32_t i;
 
 	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
@@ -422,7 +421,7 @@ static void tr_server_detach_disconnected_peers_on_owner(
 				continue;
 		}
 
-		detached->server = server;
+		detached->shard = shard;
 		detached->channel = snapshot.channel;
 
 		/*
