@@ -284,25 +284,29 @@ static int tr_server_take_reapable_peer(struct tr_server *server,
 	uint32_t i;
 
 	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
+		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
 		struct tr_runtime_peer snapshot;
 		int reap = 0;
 
+		if (!peer)
+			continue;
+
 		pthread_mutex_lock(&server->lock);
-		if (!*tr_server_peer_at(server, i).used) {
+		if (!peer->used) {
 			pthread_mutex_unlock(&server->lock);
 			continue;
 		}
-		snapshot = *tr_server_peer_at(server, i);
+		snapshot = *peer;
 		pthread_mutex_unlock(&server->lock);
 
 		if (!tr_server_peer_disconnected(&snapshot))
 			continue;
 
 		pthread_mutex_lock(&server->lock);
-		if (*tr_server_peer_at(server, i).used &&
-		    tr_server_peer_handle_equal(&*tr_server_peer_at(server, i), &snapshot)) {
-			*out = *tr_server_peer_at(server, i);
-			memset(&*tr_server_peer_at(server, i), 0, sizeof(*tr_server_peer_at(server, i)));
+		if (peer->used &&
+		    tr_server_peer_handle_equal(peer, &snapshot)) {
+			*out = *peer;
+			memset(peer, 0, sizeof(*peer));
 			tr_runtime_shard_peer_note_removed_for_reap(server->shard);
 			reap = 1;
 		}
@@ -399,13 +403,13 @@ static void tr_server_stop_reaper(struct tr_server *server)
 	}
 }
 
-struct tr_runtime_peer_guard {
+struct tr_server_peer_guard {
 	struct tr_server *server;
 	struct tr_runtime_peer *peer;
 	int armed;
 };
 
-static void tr_server_peer_guard_cleanup(struct tr_runtime_peer_guard *guard)
+static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 {
 	struct tr_runtime_peer *peer;
 
@@ -437,7 +441,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_runtime_peer *peer;
-	struct tr_runtime_peer_guard peer_guard
+	struct tr_server_peer_guard peer_guard
 		TR_AUTO(tr_server_peer_guard_cleanup) = { server, NULL, 0 };
 	uint32_t slot;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
@@ -455,9 +459,11 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		}
 	}
 
-	for (slot = 0; slot < tr_server_peer_capacity(server); ++slot)
-		if (!*tr_server_peer_at(server, slot).used)
+	for (slot = 0; slot < tr_server_peer_capacity(server); ++slot) {
+		peer = tr_server_peer_at(server, slot);
+		if (peer && !peer->used)
 			break;
+	}
 	if (slot == tr_server_peer_capacity(server)) {
 		tr_runtime_shard_peer_note_capacity_rejection(server->shard);
 		pthread_mutex_unlock(&server->lock);
@@ -859,20 +865,24 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	tr_server_stop_accepting(server);
 	tr_server_stop_reaper(server);
 
-	for (i = 0; i < tr_server_peer_capacity(server); ++i)
-		if (*tr_server_peer_at(server, i).used) {
-			int ret = tr_channel_begin_drain(
-				*tr_server_peer_at(server, i).channel);
+	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
+		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
+
+		if (peer && peer->used) {
+			int ret = tr_channel_begin_drain(peer->channel);
+
 			if (ret != TR_OK && ret != TR_AGAIN && final == TR_OK)
 				final = ret;
 		}
+	}
 
 	start = tr_server_now_ms();
 	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
+		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
 		uint32_t remaining = timeout_ms;
 		int ret;
 
-		if (!*tr_server_peer_at(server, i).used)
+		if (!peer || !peer->used)
 			continue;
 		if (timeout_ms != 0) {
 			uint64_t elapsed = tr_server_now_ms() - start;
@@ -880,8 +890,7 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 				return TR_ERR_TIMEOUT;
 			remaining = (uint32_t)(timeout_ms - elapsed);
 		}
-		ret = tr_channel_wait_drained(*tr_server_peer_at(server, i).channel,
-					      remaining);
+		ret = tr_channel_wait_drained(peer->channel, remaining);
 		if (ret != TR_OK && final == TR_OK)
 			final = ret;
 	}
@@ -931,7 +940,7 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 			server->config.limits.executor_threads;
 
 	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
-		struct tr_runtime_peer *peer = &*tr_server_peer_at(server, i);
+		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
 		struct tr_rpc_endpoint_stats rpc_stats;
 		struct tr_channel_stats channel_stats;
 
