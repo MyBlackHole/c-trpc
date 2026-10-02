@@ -39,6 +39,7 @@
 /* Bound priority overtakes of the oldest DATA frame, across loop turns. */
 #define TR_CONTROL_BURST 8U
 #define TR_WAKE_TOKEN UINT64_MAX
+#define TR_LISTENER_TOKEN (UINT64_MAX - UINT64_C(1))
 
 /*
  * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
@@ -176,6 +177,9 @@ struct tr_reactor {
 
 	int epoll_fd;
 	int wake_fd;
+	int listener_fd;
+	tr_reactor_listener_cb listener_cb;
+	void *listener_arg;
 	pthread_t thread;
 
 	pthread_mutex_t ctl_lock;
@@ -1786,6 +1790,12 @@ static void *tr_reactor_thread_main(void *arg)
 				tr_reactor_drain_wake(reactor);
 				(void)tr_process_completions(reactor,
 							     &turn.left.completions);
+			} else if (events[i].data.u64 == TR_LISTENER_TOKEN) {
+				if (reactor->listener_cb && reactor->listener_fd >= 0)
+					reactor->listener_cb(
+						reactor->listener_fd,
+						events[i].events,
+						reactor->listener_arg);
 			} else {
 				tr_handle_connection_event(reactor,
 							   events[i].data.u64,
@@ -1890,6 +1900,7 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	build.reactor = reactor;
 	reactor->epoll_fd = -1;
 	reactor->wake_fd = -1;
+	reactor->listener_fd = -1;
 
 	if (config)
 		reactor->config = *config;
