@@ -109,8 +109,75 @@ parser 只消费 48-byte preface；同一次 read 中剩余的 Transport bytes �
 frame parser。完整 preface 一旦 CRC/语义失败就是 connection-fatal，不尝试从任意
 字节重新同步。
 
-当前还没有把 preface parser 接入 listener/accepted-fd path；这是下一层 routing
-integration 的工作。
+当前已经增加 shard-local bounded Pipeline registry 与 DATA reservation/attach
+capability，但还没有把 preface parser 接入 listener/accepted-fd path。
+
+### Registry / Reservation
+
+每个 owner shard 可以维护一个 bounded Pipeline registry：
+
+```text
+Registry(shard S)
+  -> pipeline_id -> Pipeline*
+```
+
+Registry mutation/route attach 与 Pipeline mutation一样，通过该 shard Reactor owner
+串行化；没有 Server-global registry mutex。Registry 不拥有 Pipeline lifetime，
+Pipeline destroy 前必须先 unregister。Registry API 不把裸 `Pipeline*` 返回到
+owner domain 之外；后续按 ID 的 CONTROL-plane 操作应在 registry owner 内完成
+lookup+action，而不是让指针跨 owner call 生命周期逃逸。
+
+`pipeline_id` 在一个 shard registry 内是唯一 key。旧 epoch 仍注册时，新 epoch
+不能以同一 pipeline_id 并存：
+
+```text
+register pipeline_id=P epoch=9  -> OK
+register pipeline_id=P epoch=10 -> reject
+unregister epoch=9
+register epoch=10               -> OK
+```
+
+这让 epoch fencing 不会退化成“同 ID 多版本都可被 route”。
+
+DATA membership 已从一次性 add 拆成：
+
+```text
+FREE
+  -> reserve
+RESERVED(index,generation)
+  -> attach exact capability
+ATTACHED(connection)
+  -> remove
+FREE
+```
+
+reservation 占用 DATA capacity，但不会参与 round-robin、stream affinity 或 payload
+routing。Cancel 只接受完全匹配的 RESERVED generation。
+
+DATA capability 只能由 active CONTROL 生命周期签发和消费：没有 CONTROL 时
+reserve/attach 都返回 state error；CONTROL clear 会立即取消所有仍为 RESERVED 的
+capability。已经 ATTACHED 的 DATA connection 不在 clear_control() 中隐式销毁，
+由上层 Pipeline teardown 明确处理。
+
+DATA routing attach 顺序：
+
+```text
+validated TRR1 fields
+  -> owner_shard == registry shard
+  -> lookup pipeline_id
+  -> epoch matches registered Pipeline
+  -> connection belongs to registry Reactor
+  -> (member_index, member_generation) matches RESERVED slot
+  -> attach DATA connection
+```
+
+错误 shard / epoch / generation / role / owner Reactor 都不能消耗 reservation。
+只有 exact capability attach 成功后，RESERVED 才变为 ATTACHED。
+
+preface 的 raw magic/CRC 由 routing parser 负责；registry attach 再次验证字段语义
+与 server-side registry/reservation state。二者职责不混用。
+
+下一步仍是把该 parser + registry attach 接入 accepted connection routing path。
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。

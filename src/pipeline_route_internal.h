@@ -54,6 +54,8 @@ int tr_pipeline_route_preface_encode(
 int tr_pipeline_route_preface_decode(
 	const uint8_t in[TR_PIPELINE_ROUTE_PREFACE_SIZE],
 	struct tr_pipeline_route_preface *preface);
+int tr_pipeline_route_preface_validate_fields(
+	const struct tr_pipeline_route_preface *preface);
 int tr_pipeline_route_preface_validate(
 	const uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE],
 	const struct tr_pipeline_route_preface *preface);

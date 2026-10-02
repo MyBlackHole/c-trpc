@@ -78,20 +78,11 @@ int tr_pipeline_route_preface_decode(
 	return TR_OK;
 }
 
-int tr_pipeline_route_preface_validate(
-	const uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE],
+int tr_pipeline_route_preface_validate_fields(
 	const struct tr_pipeline_route_preface *preface)
 {
-	if (!raw || !preface)
+	if (!preface)
 		return TR_ERR_INVALID;
-
-	if (memcmp(raw + TR_PIPELINE_ROUTE_OFF_MAGIC,
-		   tr_pipeline_route_magic,
-		   sizeof(tr_pipeline_route_magic)) != 0)
-		return TR_ERR_BAD_MAGIC;
-
-	if (tr_pipeline_route_header_crc(raw) != preface->header_crc32c)
-		return TR_ERR_HEADER_CRC;
 
 	if (preface->version != TR_PIPELINE_ROUTE_VERSION)
 		return TR_ERR_BAD_VERSION;
@@ -120,6 +111,24 @@ int tr_pipeline_route_preface_validate(
 	}
 
 	return TR_OK;
+}
+
+int tr_pipeline_route_preface_validate(
+	const uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE],
+	const struct tr_pipeline_route_preface *preface)
+{
+	if (!raw || !preface)
+		return TR_ERR_INVALID;
+
+	if (memcmp(raw + TR_PIPELINE_ROUTE_OFF_MAGIC,
+		   tr_pipeline_route_magic,
+		   sizeof(tr_pipeline_route_magic)) != 0)
+		return TR_ERR_BAD_MAGIC;
+
+	if (tr_pipeline_route_header_crc(raw) != preface->header_crc32c)
+		return TR_ERR_HEADER_CRC;
+
+	return tr_pipeline_route_preface_validate_fields(preface);
 }
 
 void tr_pipeline_route_parser_init(struct tr_pipeline_route_parser *parser)

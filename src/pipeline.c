@@ -12,10 +12,16 @@ enum tr_pipeline_affinity_state {
 	TR_PIPELINE_AFFINITY_TOMBSTONE = 2
 };
 
+enum tr_pipeline_data_state {
+	TR_PIPELINE_DATA_FREE = 0,
+	TR_PIPELINE_DATA_RESERVED = 1,
+	TR_PIPELINE_DATA_ATTACHED = 2
+};
+
 struct tr_pipeline_data_slot {
 	struct tr_conn_handle connection;
 	uint32_t generation;
-	int used;
+	enum tr_pipeline_data_state state;
 };
 
 struct tr_pipeline_affinity_entry {
@@ -26,13 +32,16 @@ struct tr_pipeline_affinity_entry {
 
 struct tr_pipeline {
 	struct tr_reactor *owner;
+	uint32_t owner_shard_id;
 	uint64_t pipeline_id;
+	uint64_t epoch;
 
 	int control_bound;
 	struct tr_conn_handle control;
 
 	struct tr_pipeline_data_slot *data_slots;
 	uint32_t data_capacity;
+	uint32_t data_reserved_count;
 	uint32_t data_count;
 	uint32_t next_data_index;
 
@@ -60,7 +69,7 @@ static int tr_pipeline_connection_is_data(const struct tr_pipeline *pipeline,
 	uint32_t i;
 
 	for (i = 0; i < pipeline->data_capacity; ++i)
-		if (pipeline->data_slots[i].used &&
+		if (pipeline->data_slots[i].state == TR_PIPELINE_DATA_ATTACHED &&
 		    tr_pipeline_conn_equal(pipeline->data_slots[i].connection,
 					   connection))
 			return 1;
@@ -79,8 +88,9 @@ static uint32_t tr_pipeline_stream_hash(uint32_t stream_id)
 	return value;
 }
 
-static int tr_pipeline_data_ref_valid(const struct tr_pipeline *pipeline,
-				      struct tr_pipeline_data_ref data)
+static int tr_pipeline_data_ref_matches(
+	const struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data,
+	enum tr_pipeline_data_state state)
 {
 	const struct tr_pipeline_data_slot *slot;
 
@@ -89,7 +99,14 @@ static int tr_pipeline_data_ref_valid(const struct tr_pipeline *pipeline,
 		return 0;
 
 	slot = &pipeline->data_slots[data.index];
-	return slot->used && slot->generation == data.generation;
+	return slot->state == state && slot->generation == data.generation;
+}
+
+static int tr_pipeline_data_ref_valid(const struct tr_pipeline *pipeline,
+				      struct tr_pipeline_data_ref data)
+{
+	return tr_pipeline_data_ref_matches(
+		pipeline, data, TR_PIPELINE_DATA_ATTACHED);
 }
 
 static uint32_t tr_pipeline_next_generation(uint32_t generation)
@@ -109,7 +126,9 @@ int tr_pipeline_create(const struct tr_pipeline_config *config,
 		return TR_ERR_INVALID;
 	*out = NULL;
 
-	if (!config || !config->owner || config->pipeline_id == 0U ||
+	if (!config || !config->owner ||
+	    config->owner_shard_id == UINT32_MAX ||
+	    config->pipeline_id == 0U || config->epoch == 0U ||
 	    config->data_capacity == 0U ||
 	    config->stream_affinity_capacity == 0U)
 		return TR_ERR_INVALID;
@@ -130,7 +149,9 @@ int tr_pipeline_create(const struct tr_pipeline_config *config,
 	}
 
 	pipeline->owner = config->owner;
+	pipeline->owner_shard_id = config->owner_shard_id;
 	pipeline->pipeline_id = config->pipeline_id;
+	pipeline->epoch = config->epoch;
 	pipeline->data_capacity = config->data_capacity;
 	pipeline->affinity_capacity = config->stream_affinity_capacity;
 	*out = pipeline;
@@ -152,9 +173,19 @@ struct tr_reactor *tr_pipeline_owner(const struct tr_pipeline *pipeline)
 	return pipeline ? pipeline->owner : NULL;
 }
 
+uint32_t tr_pipeline_owner_shard_id(const struct tr_pipeline *pipeline)
+{
+	return pipeline ? pipeline->owner_shard_id : UINT32_MAX;
+}
+
 uint64_t tr_pipeline_id(const struct tr_pipeline *pipeline)
 {
 	return pipeline ? pipeline->pipeline_id : 0U;
+}
+
+uint64_t tr_pipeline_epoch(const struct tr_pipeline *pipeline)
+{
+	return pipeline ? pipeline->epoch : 0U;
 }
 
 struct tr_pipeline_control_request {
@@ -204,6 +235,26 @@ static int tr_pipeline_clear_control_on_owner(void *arg)
 
 	memset(&pipeline->control, 0, sizeof(pipeline->control));
 	pipeline->control_bound = 0;
+
+	/*
+	 * CONTROL owns issuance of DATA capabilities. Once CONTROL leaves, any
+	 * not-yet-attached capability must become unusable immediately.
+	 */
+	if (pipeline->data_reserved_count != 0U) {
+		uint32_t i;
+
+		for (i = 0; i < pipeline->data_capacity; ++i) {
+			struct tr_pipeline_data_slot *slot =
+				&pipeline->data_slots[i];
+
+			if (slot->state != TR_PIPELINE_DATA_RESERVED)
+				continue;
+			slot->state = TR_PIPELINE_DATA_FREE;
+			memset(&slot->connection, 0,
+			       sizeof(slot->connection));
+		}
+		pipeline->data_reserved_count = 0U;
+	}
 	return TR_OK;
 }
 
@@ -249,6 +300,141 @@ int tr_pipeline_control(struct tr_pipeline *pipeline,
 			       tr_pipeline_control_on_owner, &request);
 }
 
+struct tr_pipeline_data_reserve_request {
+	struct tr_pipeline *pipeline;
+	struct tr_pipeline_data_ref *out;
+};
+
+static int tr_pipeline_reserve_data_on_owner(void *arg)
+{
+	struct tr_pipeline_data_reserve_request *request =
+		(struct tr_pipeline_data_reserve_request *)arg;
+	struct tr_pipeline *pipeline = request->pipeline;
+	uint32_t i;
+
+	if (!pipeline->control_bound)
+		return TR_ERR_STATE;
+	if (pipeline->data_count + pipeline->data_reserved_count >=
+	    pipeline->data_capacity)
+		return TR_AGAIN;
+
+	for (i = 0; i < pipeline->data_capacity; ++i) {
+		struct tr_pipeline_data_slot *slot = &pipeline->data_slots[i];
+
+		if (slot->state != TR_PIPELINE_DATA_FREE)
+			continue;
+
+		slot->generation =
+			tr_pipeline_next_generation(slot->generation);
+		memset(&slot->connection, 0, sizeof(slot->connection));
+		slot->state = TR_PIPELINE_DATA_RESERVED;
+		pipeline->data_reserved_count++;
+		request->out->index = i;
+		request->out->generation = slot->generation;
+		return TR_OK;
+	}
+
+	return TR_AGAIN;
+}
+
+int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
+			     struct tr_pipeline_data_ref *out)
+{
+	struct tr_pipeline_data_reserve_request request;
+
+	if (!pipeline || !out)
+		return TR_ERR_INVALID;
+	request.pipeline = pipeline;
+	request.out = out;
+	return tr_reactor_call(pipeline->owner,
+			       tr_pipeline_reserve_data_on_owner, &request);
+}
+
+struct tr_pipeline_data_attach_request {
+	struct tr_pipeline *pipeline;
+	struct tr_pipeline_data_ref data;
+	struct tr_conn_handle connection;
+};
+
+static int tr_pipeline_attach_data_on_owner(void *arg)
+{
+	struct tr_pipeline_data_attach_request *request =
+		(struct tr_pipeline_data_attach_request *)arg;
+	struct tr_pipeline *pipeline = request->pipeline;
+	struct tr_pipeline_data_slot *slot;
+
+	if (!pipeline->control_bound)
+		return TR_ERR_STATE;
+	if (!tr_pipeline_connection_valid(pipeline, request->connection))
+		return TR_ERR_INVALID;
+	if ((pipeline->control_bound &&
+	     tr_pipeline_conn_equal(pipeline->control, request->connection)) ||
+	    tr_pipeline_connection_is_data(pipeline, request->connection))
+		return TR_ERR_STATE;
+	if (!tr_pipeline_data_ref_matches(
+		    pipeline, request->data, TR_PIPELINE_DATA_RESERVED))
+		return TR_ERR_STALE;
+
+	slot = &pipeline->data_slots[request->data.index];
+	slot->connection = request->connection;
+	slot->state = TR_PIPELINE_DATA_ATTACHED;
+	pipeline->data_reserved_count--;
+	pipeline->data_count++;
+	return TR_OK;
+}
+
+int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
+			    struct tr_pipeline_data_ref data,
+			    struct tr_conn_handle connection)
+{
+	struct tr_pipeline_data_attach_request request;
+
+	if (!pipeline)
+		return TR_ERR_INVALID;
+	request.pipeline = pipeline;
+	request.data = data;
+	request.connection = connection;
+	return tr_reactor_call(pipeline->owner,
+			       tr_pipeline_attach_data_on_owner, &request);
+}
+
+struct tr_pipeline_data_cancel_request {
+	struct tr_pipeline *pipeline;
+	struct tr_pipeline_data_ref data;
+};
+
+static int tr_pipeline_cancel_data_reservation_on_owner(void *arg)
+{
+	struct tr_pipeline_data_cancel_request *request =
+		(struct tr_pipeline_data_cancel_request *)arg;
+	struct tr_pipeline *pipeline = request->pipeline;
+	struct tr_pipeline_data_slot *slot;
+
+	if (!tr_pipeline_data_ref_matches(
+		    pipeline, request->data, TR_PIPELINE_DATA_RESERVED))
+		return TR_ERR_STALE;
+
+	slot = &pipeline->data_slots[request->data.index];
+	slot->state = TR_PIPELINE_DATA_FREE;
+	memset(&slot->connection, 0, sizeof(slot->connection));
+	pipeline->data_reserved_count--;
+	return TR_OK;
+}
+
+int tr_pipeline_cancel_data_reservation(
+	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data)
+{
+	struct tr_pipeline_data_cancel_request request;
+
+	if (!pipeline)
+		return TR_ERR_INVALID;
+	request.pipeline = pipeline;
+	request.data = data;
+	return tr_reactor_call(
+		pipeline->owner, tr_pipeline_cancel_data_reservation_on_owner,
+		&request);
+}
+
 struct tr_pipeline_data_add_request {
 	struct tr_pipeline *pipeline;
 	struct tr_conn_handle connection;
@@ -259,34 +445,38 @@ static int tr_pipeline_add_data_on_owner(void *arg)
 {
 	struct tr_pipeline_data_add_request *request =
 		(struct tr_pipeline_data_add_request *)arg;
-	struct tr_pipeline *pipeline = request->pipeline;
-	uint32_t i;
+	struct tr_pipeline_data_reserve_request reserve;
+	struct tr_pipeline_data_attach_request attach;
+	int ret;
 
-	if (!tr_pipeline_connection_valid(pipeline, request->connection))
+	if (!tr_pipeline_connection_valid(request->pipeline,
+					  request->connection))
 		return TR_ERR_INVALID;
-	if ((pipeline->control_bound &&
-	     tr_pipeline_conn_equal(pipeline->control, request->connection)) ||
-	    tr_pipeline_connection_is_data(pipeline, request->connection))
+	if ((request->pipeline->control_bound &&
+	     tr_pipeline_conn_equal(request->pipeline->control,
+				    request->connection)) ||
+	    tr_pipeline_connection_is_data(request->pipeline,
+					   request->connection))
 		return TR_ERR_STATE;
-	if (pipeline->data_count == pipeline->data_capacity)
-		return TR_AGAIN;
 
-	for (i = 0; i < pipeline->data_capacity; ++i) {
-		struct tr_pipeline_data_slot *slot = &pipeline->data_slots[i];
+	reserve.pipeline = request->pipeline;
+	reserve.out = request->out;
+	ret = tr_pipeline_reserve_data_on_owner(&reserve);
+	if (ret != TR_OK)
+		return ret;
 
-		if (slot->used)
-			continue;
-		slot->generation =
-			tr_pipeline_next_generation(slot->generation);
-		slot->connection = request->connection;
-		slot->used = 1;
-		pipeline->data_count++;
-		request->out->index = i;
-		request->out->generation = slot->generation;
-		return TR_OK;
+	attach.pipeline = request->pipeline;
+	attach.data = *request->out;
+	attach.connection = request->connection;
+	ret = tr_pipeline_attach_data_on_owner(&attach);
+	if (ret != TR_OK) {
+		struct tr_pipeline_data_cancel_request cancel;
+
+		cancel.pipeline = request->pipeline;
+		cancel.data = *request->out;
+		(void)tr_pipeline_cancel_data_reservation_on_owner(&cancel);
 	}
-
-	return TR_AGAIN;
+	return ret;
 }
 
 int tr_pipeline_add_data(struct tr_pipeline *pipeline,
@@ -322,7 +512,7 @@ static int tr_pipeline_remove_data_on_owner(void *arg)
 		return TR_ERR_STALE;
 
 	slot = &pipeline->data_slots[request->data.index];
-	slot->used = 0;
+	slot->state = TR_PIPELINE_DATA_FREE;
 	memset(&slot->connection, 0, sizeof(slot->connection));
 	pipeline->data_count--;
 
@@ -409,7 +599,7 @@ static int tr_pipeline_select_data_on_owner(void *arg)
 		struct tr_pipeline_data_slot *slot =
 			&pipeline->data_slots[index];
 
-		if (!slot->used)
+		if (slot->state != TR_PIPELINE_DATA_ATTACHED)
 			continue;
 		request->out->index = index;
 		request->out->generation = slot->generation;
@@ -614,8 +804,11 @@ static int tr_pipeline_get_stats_on_owner(void *arg)
 	struct tr_pipeline *pipeline = request->pipeline;
 
 	memset(request->out, 0, sizeof(*request->out));
+	request->out->owner_shard_id = pipeline->owner_shard_id;
 	request->out->pipeline_id = pipeline->pipeline_id;
+	request->out->epoch = pipeline->epoch;
 	request->out->data_capacity = pipeline->data_capacity;
+	request->out->data_reserved_count = pipeline->data_reserved_count;
 	request->out->data_count = pipeline->data_count;
 	request->out->stream_affinity_capacity = pipeline->affinity_capacity;
 	request->out->stream_affinity_count = pipeline->affinity_count;

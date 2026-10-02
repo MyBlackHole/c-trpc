@@ -9,7 +9,9 @@ struct tr_pipeline;
 
 struct tr_pipeline_config {
 	struct tr_reactor *owner;
+	uint32_t owner_shard_id;
 	uint64_t pipeline_id;
+	uint64_t epoch;
 	uint32_t data_capacity;
 	uint32_t stream_affinity_capacity;
 };
@@ -20,8 +22,11 @@ struct tr_pipeline_data_ref {
 };
 
 struct tr_pipeline_stats {
+	uint32_t owner_shard_id;
 	uint64_t pipeline_id;
+	uint64_t epoch;
 	uint32_t data_capacity;
+	uint32_t data_reserved_count;
 	uint32_t data_count;
 	uint32_t stream_affinity_capacity;
 	uint32_t stream_affinity_count;
@@ -39,7 +44,9 @@ int tr_pipeline_create(const struct tr_pipeline_config *config,
 void tr_pipeline_destroy(struct tr_pipeline *pipeline);
 
 struct tr_reactor *tr_pipeline_owner(const struct tr_pipeline *pipeline);
+uint32_t tr_pipeline_owner_shard_id(const struct tr_pipeline *pipeline);
 uint64_t tr_pipeline_id(const struct tr_pipeline *pipeline);
+uint64_t tr_pipeline_epoch(const struct tr_pipeline *pipeline);
 
 int tr_pipeline_set_control(struct tr_pipeline *pipeline,
 			    struct tr_conn_handle connection);
@@ -48,6 +55,20 @@ int tr_pipeline_clear_control(struct tr_pipeline *pipeline,
 int tr_pipeline_control(struct tr_pipeline *pipeline,
 			struct tr_conn_handle *out);
 
+/*
+ * CONTROL-plane membership capability:
+ * reserve returns an index/generation before a DATA socket exists.
+ * attach consumes only the exact RESERVED capability.
+ */
+int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
+			     struct tr_pipeline_data_ref *out);
+int tr_pipeline_cancel_data_reservation(
+	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
+int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
+			    struct tr_pipeline_data_ref data,
+			    struct tr_conn_handle connection);
+
+/* Compatibility helper: atomically reserve + attach one DATA membership. */
 int tr_pipeline_add_data(struct tr_pipeline *pipeline,
 			 struct tr_conn_handle connection,
 			 struct tr_pipeline_data_ref *out);
