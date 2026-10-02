@@ -11,6 +11,7 @@
 #include "reactor_internal.h"
 #include "observability_internal.h"
 
+#include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
