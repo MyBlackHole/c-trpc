@@ -9,7 +9,7 @@
 ```text
 Server:
   1 Reactor
-  accept thread
+  Reactor-owned accept
   reaper thread
   shard-local executor
   Reactor-local timers
@@ -88,9 +88,10 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - Server RPC executor group 已从 Server 全局 owner 下沉到 shard[0]；
 - Server Endpoint 只进入所属 shard 的 worker pool，不再依赖 Server-global executor owner；
 - Server listener fd / bound port 已从 Server 下沉到 shard[0] ownership；
-- 中央 accept thread 暂时只借用 shard-owned listener，不拥有其生命周期；
+- listener 已注册进 shard[0] Reactor epoll，独立 accept thread 已删除；
+- accept callback 有固定批次上限，listener backlog 由后续 Reactor turn 继续处理；
 - peer slot storage/capacity/high-water/reaping/ready/rejection counters 已下沉到 shard[0]；
-- Server 仍负责 peer Channel/RPC 构造销毁，accept/reaper publish/detach 仍通过过渡锁串行化；
+- Server 仍负责 peer Channel/RPC 构造销毁，Reactor accept 与 reaper publish/detach 仍通过过渡锁串行化；
 - shard[0] 已拥有 peer lifecycle eventfd；Channel DOWN/rollback/publish 只发事件，
   reaper 不再执行固定 10ms polling；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
@@ -99,18 +100,19 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 
 ```text
 shard_count = 1
-Server accept/reaper remain central
+accept is Reactor-owned
+Server reaper remains external
 reaper wake is event-driven via shard eventfd
 listener is shard-owned
 peer resources are shard-owned
 peer Channel/RPC lifecycle remains Server-driven
 ```
 
-completion event publication、listener ownership、peer resource ownership
-以及 reaper wake event source 均已下沉。下一阶段继续收敛 accept/reaper
-cleanup execution 与 peer lifecycle，使 `server->lock` 不再承担 shard peer
-publish/detach 的中心同步角色；仍保持 `shard_count = 1`。完成单 shard资源域
-后再打开 Phase 4 的 N shards。
+completion event publication、listener ownership、peer resource ownership、
+accept execution 以及 reaper wake event source 均已下沉。下一阶段继续收敛
+reaper cleanup execution 与 peer lifecycle，使 `server->lock` 不再承担 shard
+peer publish/detach 的中心同步角色；仍保持 `shard_count = 1`。完成单 shard
+资源域后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 
@@ -128,7 +130,7 @@ own connection table
 own peer state
 ```
 
-逐步删除中央 accept/reaper 模型。
+中央 accept 已删除；后续继续删除外部 reaper cleanup 模型。
 
 ## Phase 5 - Pipeline / Connection Group
 
