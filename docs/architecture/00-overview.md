@@ -68,7 +68,8 @@ callback 内重入。
 Reactor owner detach
   -> remove RPC/Channel callback + timer sources
   -> close RPC executor admission
-  -> mark peer slot finalizing
+  -> move Channel/finalizer context out of peer slot
+  -> clear peer slot for immediate reuse
   -> transfer Endpoint owner ref
 
 last Endpoint strong-ref
@@ -77,9 +78,10 @@ last Endpoint strong-ref
   -> retire peer slot
 ```
 
-如果仍有 worker task，strong-ref 保证对象存活；最后一个 worker/completion ref
-释放时自动 finalization。若没有 worker ref，owner ref transfer 可立即完成
-owner-free finalization。
+如果仍有 worker task，strong-ref 保证旧 Endpoint/Channel context 存活；peer
+slot 已经可以服务下一条连接。最后一个 worker/completion ref 释放时自动
+finalization。若没有 worker ref，owner ref transfer 可立即完成 owner-free
+finalization。
 
 当前仍固定 `shard_count = 1`。
 
