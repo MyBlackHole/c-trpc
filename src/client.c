@@ -166,6 +166,7 @@ int tr_client_create(const struct tr_client_config *config,
 {
 	struct tr_client_config effective;
 	struct tr_runtime_config runtime_config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_reactor_config *reactor_config;
 	struct tr_client *client TR_AUTO(tr_client_owner_cleanup) = NULL;
 	int ret;
@@ -206,8 +207,10 @@ int tr_client_create(const struct tr_client_config *config,
 	client->reassembly_pool_ready = 1;
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
+	memset(&shard_config, 0, sizeof(shard_config));
 	runtime_config.shard_count = 1U;
-	reactor_config = &runtime_config.reactor;
+	runtime_config.shards = &shard_config;
+	reactor_config = &shard_config.reactor;
 	reactor_config->max_connections = 4U;
 	reactor_config->command_capacity = effective.limits.command_capacity;
 	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
