@@ -17,6 +17,7 @@
 #include "rpc_internal.h"
 #include "runtime_internal.h"
 #include "socket_internal.h"
+#include "observability_internal.h"
 
 enum tr_server_method_kind {
 	TR_SERVER_METHOD_UNARY = 1,
