@@ -4,6 +4,7 @@
 #include "tr/status.h"
 #include "tr/wire.h"
 #include "../src/reactor_internal.h"
+#include "../src/completion_queue.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -24,10 +25,19 @@ size_t __real_tr_command_queue_pop_batch(struct tr_command_queue *queue,
 	struct tr_command *out, size_t max_commands);
 int __real_tr_command_queue_push(struct tr_command_queue *queue,
 	const struct tr_command *command, int *need_wake);
+int __real_tr_completion_queue_push(struct tr_completion_queue *queue,
+	const struct tr_completion *completion, int *need_wake);
 int __real_epoll_wait(int fd, struct epoll_event *events, int maxevents,
 	int timeout);
 
-enum scenario { BACKLOG, REFILL, FULL_WAITERS, STOP_DRAIN, FULL_STOP };
+enum scenario {
+	BACKLOG,
+	REFILL,
+	FULL_WAITERS,
+	STOP_DRAIN,
+	FULL_STOP,
+	COMPLETION_FULL_STOP
+};
 
 struct test_ctx {
 	pthread_mutex_t lock;
@@ -46,6 +56,7 @@ struct test_ctx {
 	int stop_full;
 	int stop_accepted;
 	int stop_popped;
+	int completion_full;
 	int timer_seen;
 	int frame_seen;
 	unsigned resumes;
@@ -92,6 +103,24 @@ int __wrap_tr_command_queue_push(struct tr_command_queue *queue,
 			if (ret == TR_OK)
 				ctx->stop_accepted = 1;
 		}
+		pthread_cond_broadcast(&ctx->cond);
+	}
+	pthread_mutex_unlock(&ctx->lock);
+	return ret;
+}
+
+int __wrap_tr_completion_queue_push(struct tr_completion_queue *queue,
+	const struct tr_completion *completion, int *need_wake)
+{
+	int ret = __real_tr_completion_queue_push(queue, completion, need_wake);
+	struct test_ctx *ctx = active;
+
+	if (!ctx)
+		return ret;
+	pthread_mutex_lock(&ctx->lock);
+	if (ctx->scenario == COMPLETION_FULL_STOP &&
+	    ctx->gate_entered && !ctx->gate_release && ret == TR_AGAIN) {
+		ctx->completion_full = 1;
 		pthread_cond_broadcast(&ctx->cond);
 	}
 	pthread_mutex_unlock(&ctx->lock);
@@ -265,6 +294,15 @@ static void *stop_thread(void *arg)
 	return NULL;
 }
 
+static void *completion_submit_thread(void *arg)
+{
+	struct test_ctx *ctx = arg;
+
+	assert(tr_reactor_complete(ctx->reactor, completion_callback, ctx) ==
+	       TR_ERR_CLOSED);
+	return NULL;
+}
+
 static void setup(struct test_ctx *ctx, enum scenario scenario)
 {
 	struct tr_reactor_config config = {0};
@@ -420,6 +458,45 @@ static void test_stop_drain(void)
 	puts("stop/fifo/completion-drain: ok");
 }
 
+static void test_completion_full_stop(void)
+{
+	struct test_ctx ctx;
+	pthread_t gate;
+	pthread_t producer;
+	pthread_t stopper;
+	unsigned i;
+
+	setup(&ctx, COMPLETION_FULL_STOP);
+	assert(pthread_create(&gate, NULL, gate_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.gate_entered);
+
+	for (i = 0; i < CAPACITY; ++i)
+		assert(tr_reactor_complete(ctx.reactor, completion_callback, &ctx) ==
+		       TR_OK);
+
+	assert(pthread_create(&producer, NULL, completion_submit_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.completion_full);
+
+	assert(pthread_create(&stopper, NULL, stop_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.stop_accepted);
+
+	/*
+	 * The producer must observe queue-local admission close even while the
+	 * owner is still blocked. This proves stop does not rely on ctl_lock
+	 * handoff from the completion producer.
+	 */
+	assert(pthread_join(producer, NULL) == 0);
+
+	release_gate(&ctx);
+	assert(pthread_join(gate, NULL) == 0);
+	assert(pthread_join(stopper, NULL) == 0);
+	teardown(&ctx);
+
+	assert(ctx.completions == CAPACITY);
+	assert(ctx.completions_after_stop == CAPACITY);
+	puts("completion-full/stop/admission-close: ok");
+}
+
 int main(void)
 {
 	alarm(60); /* Covers joins too; failure never leaves CI blocked forever. */
@@ -428,6 +505,7 @@ int main(void)
 	test_full_queue_waiters(0);
 	test_full_queue_waiters(1);
 	test_stop_drain();
+	test_completion_full_stop();
 	alarm(0);
 	return 0;
 }
