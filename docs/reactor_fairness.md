@@ -57,6 +57,10 @@ xmake test -v -j1 'test_reactor_fairness/*'
 3. 队列满：同步 call 与 quiesce 确实遇到满队列，释放 gate 后保持 FIFO 与返回值。
 4. 队列满时停止：STOP 也经历满队列，未被接受的同步等待者返回关闭错误。
 5. STOP 清理：验证此前接受的 200 个 Completion 全部完成，且部分在 STOP 出队后完成。
+6. Completion 满队列 + STOP：owner 被 gate 阻塞时填满 completion ring，
+   额外 producer 进入 backpressure；STOP 关闭 queue-local admission 后，该
+   producer 必须在 owner 恢复前返回 `TR_ERR_CLOSED`，而此前已接受的
+   completion 全部由 shutdown drain 执行。
 
 使用计数器、条件变量和实际执行顺序断言，不使用短时延性能门槛。
 10 秒条件等待与 60 秒进程 alarm 只用于检测挂死。新目标自动进入现有
