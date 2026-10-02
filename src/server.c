@@ -748,20 +748,6 @@ int tr_server_create(const struct tr_server_config *config,
 		return ret;
 	}
 
-	ret = tr_buffer_pool_init(&server->rpc_message_pool,
-				  effective.limits.rpc_message_pool_count,
-				  effective.limits.rpc_message_buffer_bytes);
-	if (ret != TR_OK)
-		return ret;
-	server->rpc_pool_ready = 1;
-
-	ret = tr_buffer_pool_init(&server->reassembly_pool,
-				  effective.limits.reassembly_pool_count,
-				  effective.limits.max_message_bytes);
-	if (ret != TR_OK)
-		return ret;
-	server->reassembly_pool_ready = 1;
-
 	memset(&runtime_config, 0, sizeof(runtime_config));
 	memset(&shard_config, 0, sizeof(shard_config));
 	runtime_config.shard_count = 1U;
@@ -794,9 +780,45 @@ int tr_server_create(const struct tr_server_config *config,
 	ret = tr_runtime_create(&runtime_config, &server->runtime);
 	if (ret != TR_OK)
 		return ret;
-	server->shard = tr_runtime_shard_at(server->runtime, 0U);
-	if (!server->shard)
-		return TR_ERR_STATE;
+
+	server->shard_count = tr_runtime_shard_count(server->runtime);
+	server->shards = (struct tr_server_shard *)calloc(
+		server->shard_count, sizeof(*server->shards));
+	if (!server->shards)
+		return TR_ERR_NOMEM;
+
+	{
+		uint32_t i;
+
+		for (i = 0; i < server->shard_count; ++i) {
+			struct tr_server_shard *server_shard =
+				&server->shards[i];
+
+			server_shard->server = server;
+			server_shard->runtime =
+				tr_runtime_shard_at(server->runtime, i);
+			server_shard->executor_threads =
+				effective.limits.executor_threads;
+			if (!server_shard->runtime)
+				return TR_ERR_STATE;
+
+			ret = tr_buffer_pool_init(
+				&server_shard->rpc_message_pool,
+				effective.limits.rpc_message_pool_count,
+				effective.limits.rpc_message_buffer_bytes);
+			if (ret != TR_OK)
+				return ret;
+			server_shard->rpc_pool_ready = 1;
+
+			ret = tr_buffer_pool_init(
+				&server_shard->reassembly_pool,
+				effective.limits.reassembly_pool_count,
+				effective.limits.max_message_bytes);
+			if (ret != TR_OK)
+				return ret;
+			server_shard->reassembly_pool_ready = 1;
+		}
+	}
 
 	*out = tr_server_owner_take(&server);
 	return TR_OK;
