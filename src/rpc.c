@@ -4162,7 +4162,7 @@ int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint)
 				 endpoint);
 }
 
-int tr_rpc_endpoint_finalize_detached_async(
+int tr_rpc_endpoint_arm_detached_finalizer(
 	struct tr_rpc_endpoint *endpoint,
 	tr_rpc_endpoint_detached_finalizer finalizer, void *arg)
 {
@@ -4177,14 +4177,22 @@ int tr_rpc_endpoint_finalize_detached_async(
 	endpoint->detached_finalizer = finalizer;
 	endpoint->detached_finalizer_arg = arg;
 	pthread_mutex_unlock(&endpoint->lock);
-
-	/*
-	 * Transfer the owner's initial strong ref. If worker refs remain, the last
-	 * worker/completion put performs release later. If none remain, release
-	 * (and the finalizer callback) runs synchronously here.
-	 */
-	tr_rpc_endpoint_put(endpoint);
 	return TR_OK;
+}
+
+void tr_rpc_endpoint_release_detached_owner(struct tr_rpc_endpoint *endpoint)
+{
+	if (!endpoint)
+		return;
+
+#ifndef NDEBUG
+	pthread_mutex_lock(&endpoint->lock);
+	assert(endpoint->teardown_detached);
+	assert(endpoint->detached_finalizer != NULL);
+	pthread_mutex_unlock(&endpoint->lock);
+#endif
+
+	tr_rpc_endpoint_put(endpoint);
 }
 
 void tr_rpc_endpoint_finalize_detached_with_stats(
