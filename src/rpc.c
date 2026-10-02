@@ -272,6 +272,8 @@ struct tr_rpc_endpoint {
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
 	int teardown_detached;
+	tr_rpc_endpoint_detached_finalizer detached_finalizer;
+	void *detached_finalizer_arg;
 
 	/* Owner-visible coalescing state for retrying bounded pending tasks. */
 	int pending_executor_work;
@@ -4069,10 +4071,21 @@ static void tr_rpc_endpoint_wait_owner_only(struct tr_rpc_endpoint *endpoint)
 
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 {
+	tr_rpc_endpoint_detached_finalizer finalizer;
+	void *finalizer_arg;
+	struct tr_rpc_endpoint_stats final_stats;
+	int have_finalizer;
 	uint32_t i;
 
 	if (!endpoint)
 		return;
+
+	finalizer = endpoint->detached_finalizer;
+	finalizer_arg = endpoint->detached_finalizer_arg;
+	have_finalizer = finalizer != NULL;
+	memset(&final_stats, 0, sizeof(final_stats));
+	if (have_finalizer)
+		(void)tr_rpc_endpoint_get_stats(endpoint, &final_stats);
 
 	pthread_mutex_lock(&endpoint->lock);
 	for (i = 0; i < endpoint->config.max_calls; ++i)
@@ -4088,6 +4101,9 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	pthread_cond_destroy(&endpoint->ref_cond);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
+
+	if (have_finalizer)
+		finalizer(&final_stats, finalizer_arg);
 }
 
 static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
@@ -4144,6 +4160,31 @@ int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint)
 		return TR_ERR_STATE;
 	return tr_rpc_owner_call(endpoint, tr_rpc_endpoint_detach_on_owner,
 				 endpoint);
+}
+
+int tr_rpc_endpoint_finalize_detached_async(
+	struct tr_rpc_endpoint *endpoint,
+	tr_rpc_endpoint_detached_finalizer finalizer, void *arg)
+{
+	if (!endpoint || !finalizer)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&endpoint->lock);
+	if (!endpoint->teardown_detached || endpoint->detached_finalizer) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return TR_ERR_STATE;
+	}
+	endpoint->detached_finalizer = finalizer;
+	endpoint->detached_finalizer_arg = arg;
+	pthread_mutex_unlock(&endpoint->lock);
+
+	/*
+	 * Transfer the owner's initial strong ref. If worker refs remain, the last
+	 * worker/completion put performs release later. If none remain, release
+	 * (and the finalizer callback) runs synchronously here.
+	 */
+	tr_rpc_endpoint_put(endpoint);
+	return TR_OK;
 }
 
 void tr_rpc_endpoint_finalize_detached_with_stats(
