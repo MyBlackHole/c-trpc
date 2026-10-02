@@ -196,6 +196,8 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	const struct tr_facade_limits *d;
 
 	tr_server_config_init(&defaults);
+	if (config->shard_count == 0)
+		config->shard_count = defaults.shard_count;
 	if (config->max_peers == 0)
 		config->max_peers = defaults.max_peers;
 	if (config->listen_backlog <= 0)
@@ -234,11 +236,42 @@ void tr_server_config_init(struct tr_server_config *config)
 
 	memset(config, 0, sizeof(*config));
 	tr_facade_limits_init(&config->limits);
+	config->shard_count = 1U;
 	config->max_peers = 64U;
 	config->listen_backlog = 128;
 	config->tcp_nodelay = TR_TCP_NODELAY_DEFAULT;
 	config->keepalive_interval_ms = 30000U;
 	config->keepalive_timeout_ms = 10000U;
+}
+
+static uint32_t tr_server_budget_share(uint32_t total,
+				      uint32_t shard_count,
+				      uint32_t shard_index)
+{
+	uint32_t base = total / shard_count;
+	uint32_t remainder = total % shard_count;
+
+	return base + (shard_index < remainder ? 1U : 0U);
+}
+
+static int tr_server_budget_supports_shards(
+	const struct tr_server_config *config)
+{
+	uint32_t shards;
+
+	if (!config || config->shard_count == 0U)
+		return 0;
+	shards = config->shard_count;
+
+	return config->max_peers >= shards &&
+	       config->listen_backlog >= (int)shards &&
+	       config->limits.executor_threads >= shards &&
+	       config->limits.command_capacity >= shards &&
+	       config->limits.tx_item_capacity >= shards &&
+	       config->limits.control_tx_item_capacity >= shards &&
+	       config->limits.rx_buffer_count >= shards &&
+	       config->limits.rpc_message_pool_count >= shards &&
+	       config->limits.reassembly_pool_count >= shards;
 }
 
 static int tr_server_register_methods_on_peer(struct tr_server *server,
