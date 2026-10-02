@@ -185,7 +185,9 @@ static int tr_pipeline_registry_unregister_on_owner(void *arg)
 	struct tr_pipeline_registry_pipeline_request *request =
 		(struct tr_pipeline_registry_pipeline_request *)arg;
 	struct tr_pipeline_registry *registry = request->registry;
+	struct tr_pipeline_stats stats;
 	uint32_t found = UINT32_MAX;
+	int ret;
 
 	if (!tr_pipeline_registry_find(registry,
 				       tr_pipeline_id(request->pipeline),
@@ -193,6 +195,14 @@ static int tr_pipeline_registry_unregister_on_owner(void *arg)
 		return TR_ERR_STALE;
 	if (registry->entries[found].pipeline != request->pipeline)
 		return TR_ERR_STALE;
+
+	memset(&stats, 0, sizeof(stats));
+	ret = tr_pipeline_get_stats(request->pipeline, &stats);
+	if (ret != TR_OK)
+		return ret;
+	if (stats.control_bound || stats.data_reserved_count != 0U ||
+	    stats.data_count != 0U || stats.stream_affinity_count != 0U)
+		return TR_ERR_STATE;
 
 	registry->entries[found].pipeline = NULL;
 	registry->entries[found].pipeline_id = 0U;
