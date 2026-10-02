@@ -35,7 +35,7 @@ Server
   │         └─ 1 Reactor
   ├─ accept thread
   ├─ reaper thread
-  ├─ shared RPC executor
+  ├─ shard[0]-local RPC executor
   └─ Reactor-local timers
 
 Client
@@ -74,19 +74,21 @@ flowchart TB
             RN["Reactor N\nlistener N"]
         end
 
-        W["Shared Blocking Worker Pool"]
+        W0["Worker Pool 0"]
+        W1["Worker Pool 1"]
+        WN["Worker Pool N"]
 
         L --> R0
         L --> R1
         L --> RN
 
-        R0 -->|"Task"| W
-        R1 -->|"Task"| W
-        RN -->|"Task"| W
+        R0 -->|"Task"| W0
+        R1 -->|"Task"| W1
+        RN -->|"Task"| WN
 
-        W -->|"Completion"| R0
-        W -->|"Completion"| R1
-        W -->|"Completion"| RN
+        W0 -->|"Completion"| R0
+        W1 -->|"Completion"| R1
+        WN -->|"Completion"| RN
     end
 
     NET --> L
@@ -101,6 +103,7 @@ flowchart TB
 - RPC Endpoint/Call protocol state；
 - Backup Pipeline；
 - timer；
+- shard-local RPC executor / worker queue；
 - shard-local metrics。
 
 Blocking worker 只拥有 task、临时工作状态和 result。

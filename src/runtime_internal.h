@@ -7,6 +7,7 @@
 
 struct tr_runtime;
 struct tr_runtime_shard;
+struct tr_rpc_executor_group;
 
 /*
  * Phase-3 runtime ownership seam.
@@ -15,9 +16,16 @@ struct tr_runtime_shard;
  * Keeping the count explicit makes the ownership boundary real without
  * prematurely introducing multi-Reactor listener/routing semantics.
  */
+struct tr_runtime_rpc_executor_config {
+	uint32_t endpoint_capacity;
+	uint32_t max_calls_per_endpoint;
+	uint32_t thread_count;
+};
+
 struct tr_runtime_config {
 	uint32_t shard_count;
 	struct tr_reactor_config reactor;
+	struct tr_runtime_rpc_executor_config rpc_executor;
 };
 
 int tr_runtime_create(const struct tr_runtime_config *config,
@@ -32,5 +40,7 @@ struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,
 uint32_t tr_runtime_shard_id(const struct tr_runtime_shard *shard);
 struct tr_reactor *
 tr_runtime_shard_reactor(const struct tr_runtime_shard *shard);
+struct tr_rpc_executor_group *
+tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
 
 #endif

@@ -11,7 +11,7 @@ Server:
   1 Reactor
   accept thread
   reaper thread
-  shared executor
+  shard-local executor
   Reactor-local timers
 
 Channel:
@@ -82,7 +82,10 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - Runtime 统一负责 Reactor create/start/stop/destroy；
 - 显式 `shard_id = 0` 与 `shard_count = 1`；
 - public API、wire、listener、peer table、线程数量与启动时机保持不变；
-- 独立测试验证 single-shard identity、拒绝提前启用 multi-shard，以及生命周期语义。
+- 独立测试验证 single-shard identity、拒绝提前启用 multi-shard，以及生命周期语义；
+- Server RPC executor group 已从 Server 全局 owner 下沉到 shard[0]；
+- Server Endpoint 只进入所属 shard 的 worker pool，不再依赖 Server-global executor owner；
+- worker 数量、RPC 调度算法和 public/wire 行为保持不变。
 
 当前仍：
 
@@ -92,8 +95,9 @@ Server accept/reaper remain central
 listener and peer table remain Server-owned
 ```
 
-下一阶段先把 listener ownership 下沉到 shard，但继续保持
-`shard_count = 1`；完成这一层后再打开 Phase 4 的 N shards。
+接下来先继续收敛 completion 的 event publication / hot-path lifecycle lock，
+然后把 listener ownership 下沉到 shard；两步都继续保持
+`shard_count = 1`。完成单 shard 资源域后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 

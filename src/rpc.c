@@ -2644,9 +2644,9 @@ static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 	executor->running_count++;
 
 	/*
-	 * shared worker 已消费该 Endpoint 的 wake token。
+	 * executor-group worker 已消费该 Endpoint 的 wake token。
 	 * 如果该 Endpoint 上还有其他 ready Call，则在释放 executor lock 之前
-	 * 再发布一个 replacement token，让其他 shared worker 可以并行处理。
+	 * 再发布一个 replacement token，让同 shard 的其他 worker 可以并行处理。
 	 */
 	if (executor->group && executor->ready_count != 0 &&
 	    !executor->group_enqueued) {
@@ -2913,7 +2913,7 @@ static void tr_rpc_executor_shutdown(struct tr_rpc_endpoint *endpoint)
 	/*
 	 * standalone Endpoint 自己拥有 worker，因此 owner 最后一次 put 之前
 	 * 必须先 join 全部 worker。
-	 * Server 的 shared worker 由 executor group 拥有，只需要异步排空
+	 * Server 的 shard-local worker 由 executor group 拥有，只需要异步排空
 	 * 已经存在的 task reference。
 	 */
 	if (!executor->group) {

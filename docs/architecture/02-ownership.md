@@ -42,6 +42,8 @@ flowchart TB
 | I10 | 所有 durable backup mutation 都受 epoch fencing 保护。 |
 | I11 | soft state 可以丢失而不破坏业务正确性。 |
 | I12 | CONTROL 可以优先于 DATA，但只能在 frame boundary 调度。 |
+| I13 | 可独立归属的运行时资源跟随 shard，不建立跨 shard hot-path 共享池。 |
+| I14 | Worker 完成工作后通过 completion/event 返回 owner，不直接修改 Reactor-owned 状态。 |
 
 ## 3. Ownership & Synchronization Matrix
 
@@ -55,7 +57,7 @@ flowchart TB
 | Backup Pipeline | Reactor shard | command | hot state 无锁 |
 | Task | Worker | ownership transfer | 无共享修改 |
 | Completion | producer → Reactor | bounded per-Reactor MPSC queue | queue synchronization + wake coalescing |
-| Worker Queue | executor | submit/pop | mutex + cond 可接受 |
+| RPC Executor / Worker Queue | Reactor shard | owner submit / local worker pop | shard-local mutex + cond 可接受 |
 | Generic Buffer Pool | shared | acquire/release | mutex 可接受 |
 | Shard-local buffer cache | Reactor shard | return via owner | TARGET 无锁 |
 | Runtime lifecycle | runtime owner | lifecycle API | 显式同步 |
@@ -80,11 +82,26 @@ flowchart TB
 
 因此：
 
-- command queue、worker queue、shared allocator 的锁可以长期保留；
+- shard 内 command queue、worker queue、shared allocator 的局部锁可以长期保留；
+- 不允许为了资源复用重新引入跨 shard hot-path executor lock；
 - `channel->lock`、`endpoint->lock` 的目标是随着 ownership 收敛逐步缩小；
 - 不用大量 atomic 重新制造“隐式 shared state”。
 
-## 5. Resource Transfer
+## 5. Shard Resource Rule
+
+运行时采用：
+
+```text
+Mutable state follows owner.
+Resources follow shard.
+Cross-thread completion returns as an event to owner.
+```
+
+因此 Server RPC executor、worker queue、后续 listener/connection table/buffer
+budget 都优先成为 shard-local。只有确实无法独立的资源才允许跨 shard 共享，
+并且必须单独说明同步与容量边界。
+
+## 6. Resource Transfer
 
 继续遵循项目已有资源规则：
 

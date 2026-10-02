@@ -13,7 +13,7 @@ tr_server
   │         └─ Reactor
   ├─ accept thread
   ├─ reaper thread
-  └─ shared RPC executor
+  └─ shard[0]-local RPC executor
 ```
 
 `tr_runtime` 现在负责 Reactor 的 create/start/stop/destroy；Server 不再直接
@@ -93,12 +93,19 @@ struct tr_runtime {
 struct tr_runtime_shard {
     uint32_t shard_id;
     struct tr_reactor *reactor;
+    struct tr_rpc_executor_group *rpc_executor;
 };
 ```
 
-Client/Server 都通过 `shard[0]` 取得 Reactor。第一阶段只建立 lifecycle 和
-identity ownership，不把 listener、peer table、Pipeline 或 routing 提前塞入
-Runtime；这些对象应在后续 PR 按 ownership 迁移。
+Client/Server 都通过 `shard[0]` 取得 Reactor。Server 的 RPC worker group
+也已从 `tr_server` 下沉为 shard-owned resource；每个 Server Endpoint 只绑定
+所属 shard 的 executor。当前仍是单 shard，因此线程数量与原行为不变。
+
+Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
+生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
+
+listener、peer table、Pipeline 与 routing 仍未下沉，应在后续 PR 按 ownership
+继续迁移。
 
 目标逻辑结构：
 
@@ -111,6 +118,7 @@ struct tr_runtime_shard {
 
     struct tr_command_queue commands;
     struct tr_completion_queue completions;
+    struct tr_rpc_executor_group rpc_executor;
 
     struct tr_connection_table connections;
     struct tr_pipeline_table pipelines;
@@ -215,7 +223,7 @@ Reactor shard
 | 操作 | 新增线程 |
 |---|---|
 | `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
-| `tr_server_create()` | 创建 single-shard Runtime（Reactor 尚未启动）+ 配置的 `executor_threads` 个共享 worker |
+| `tr_server_create()` | 创建 single-shard Runtime（Reactor 尚未启动）+ shard[0] 的 `executor_threads` 个 RPC worker |
 | `tr_server_listen()` | 0 |
 | `tr_server_start()` | 3 个：Reactor、reaper、accept |
 

@@ -3,12 +3,14 @@
 #include <stdlib.h>
 
 #include "tr/status.h"
+#include "rpc_internal.h"
 
 #define TR_RUNTIME_PHASE3_SHARDS 1U
 
 struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
+	struct tr_rpc_executor_group *rpc_executor;
 	int started;
 };
 
@@ -17,6 +19,33 @@ struct tr_runtime {
 	struct tr_runtime_shard *shards;
 	int started;
 };
+
+static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
+{
+	if (!shard)
+		return;
+
+	if (shard->rpc_executor) {
+		tr_rpc_executor_group_destroy(shard->rpc_executor);
+		shard->rpc_executor = NULL;
+	}
+	if (shard->reactor) {
+		tr_reactor_destroy(shard->reactor);
+		shard->reactor = NULL;
+	}
+}
+
+static int
+tr_runtime_rpc_executor_config_valid(const struct tr_runtime_config *config)
+{
+	const struct tr_runtime_rpc_executor_config *executor =
+		&config->rpc_executor;
+
+	if (executor->endpoint_capacity == 0U)
+		return executor->max_calls_per_endpoint == 0U &&
+		       executor->thread_count == 0U;
+	return executor->max_calls_per_endpoint != 0U;
+}
 
 int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out)
@@ -27,7 +56,8 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	if (!config || config->shard_count != TR_RUNTIME_PHASE3_SHARDS)
+	if (!config || config->shard_count != TR_RUNTIME_PHASE3_SHARDS ||
+	    !tr_runtime_rpc_executor_config_valid(config))
 		return TR_ERR_INVALID;
 
 	runtime = (struct tr_runtime *)calloc(1, sizeof(*runtime));
@@ -49,10 +79,17 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		shard->shard_id = i;
 		ret = tr_reactor_create(&config->reactor, NULL, NULL, NULL,
 					&shard->reactor);
+		if (ret == TR_OK && config->rpc_executor.endpoint_capacity != 0U)
+			ret = tr_rpc_executor_group_create(
+				config->rpc_executor.endpoint_capacity,
+				config->rpc_executor.max_calls_per_endpoint,
+				config->rpc_executor.thread_count,
+				&shard->rpc_executor);
 		if (ret != TR_OK) {
+			tr_runtime_shard_release(shard);
 			while (i != 0U) {
 				--i;
-				tr_reactor_destroy(runtime->shards[i].reactor);
+				tr_runtime_shard_release(&runtime->shards[i]);
 			}
 			free(runtime->shards);
 			free(runtime);
@@ -140,7 +177,7 @@ void tr_runtime_destroy(struct tr_runtime *runtime)
 
 	(void)tr_runtime_stop(runtime);
 	for (i = 0; i < runtime->shard_count; ++i)
-		tr_reactor_destroy(runtime->shards[i].reactor);
+		tr_runtime_shard_release(&runtime->shards[i]);
 	free(runtime->shards);
 	free(runtime);
 }
@@ -167,4 +204,10 @@ struct tr_reactor *
 tr_runtime_shard_reactor(const struct tr_runtime_shard *shard)
 {
 	return shard ? shard->reactor : NULL;
+}
+
+struct tr_rpc_executor_group *
+tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
+{
+	return shard ? shard->rpc_executor : NULL;
 }
