@@ -10,7 +10,6 @@
 Server:
   1 Reactor
   Reactor-owned accept
-  reaper thread
   shard-local executor
   Reactor-local timers
 
@@ -95,8 +94,10 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - owner detach 移除 Channel/RPC callback、deadline/keepalive timer source，并关闭 executor admission；
 - 只有 owner detach 成功后 peer 才离开 shard table；reaper 只等待 worker refs、采集统计和 free；
 - Reactor accept 与 peer publish/table detach 仍通过过渡锁串行化；
-- shard[0] 已拥有 peer lifecycle eventfd；Channel DOWN/rollback/publish 只发事件，
-  reaper 不再执行固定 10ms polling；
+- shard[0] peer lifecycle eventfd 已注册进 Reactor epoll；Channel DOWN/rollback/
+  publish 只发 deferred owner event；
+- dedicated reaper thread 已删除；Endpoint owner ref 转交 last-ref finalizer，
+  finalizing peer slot 在实际 free 前禁止复用；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
 
 当前仍：
@@ -104,19 +105,18 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 ```text
 shard_count = 1
 accept is Reactor-owned
-Server reaper remains external
-reaper wake is event-driven via shard eventfd
+peer lifecycle is Reactor-event driven
+no dedicated reaper/finalizer thread
 listener is shard-owned
 peer resources are shard-owned
 peer Channel/RPC lifecycle remains Server-driven
 ```
 
 completion event publication、listener ownership、peer resource ownership、
-accept execution、reaper wake event source 与 peer owner-detach 均已下沉。
-下一阶段可以删除 external reaper finalizer thread：把 detached peer finalization
-作为 shard-local cleanup work 执行，并继续移除 `server->lock` 的
-publish/table-detach 中心同步角色。仍保持 `shard_count = 1`，完成后再打开
-Phase 4 的 N shards。
+accept execution、peer lifecycle event、owner detach 和 last-ref finalization
+均已 shard 化，dedicated accept/reaper thread 都已删除。下一阶段继续移除
+`server->lock` 的 peer publish/snapshot 中心同步角色；仍保持
+`shard_count = 1`，完成后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 
@@ -134,7 +134,7 @@ own connection table
 own peer state
 ```
 
-中央 accept 已删除；后续继续删除外部 reaper cleanup 模型。
+中央 accept/reaper 都已删除；Phase 4 前继续收敛剩余 Server transition lock。
 
 ## Phase 5 - Pipeline / Connection Group
 
