@@ -362,11 +362,23 @@ static void tr_server_destroy_peer(struct tr_server *server,
 static void *tr_server_reap_main(void *arg)
 {
 	struct tr_server *server = (struct tr_server *)arg;
+	struct pollfd pfd;
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = tr_runtime_shard_peer_event_fd(server->shard);
+	pfd.events = POLLIN;
 
 	for (;;) {
-		struct tr_runtime_peer peer;
-		struct timespec pause_time;
 		int stop;
+		int ret;
+
+		do {
+			ret = poll(&pfd, 1, -1);
+		} while (ret < 0 && errno == EINTR);
+		if (ret < 0)
+			continue;
+
+		tr_runtime_shard_drain_peer_event(server->shard);
 
 		pthread_mutex_lock(&server->lock);
 		stop = server->stop_reap;
@@ -374,17 +386,14 @@ static void *tr_server_reap_main(void *arg)
 		if (stop)
 			break;
 
-		memset(&peer, 0, sizeof(peer));
-		if (tr_server_take_reapable_peer(server, &peer)) {
-			tr_server_destroy_peer(server, &peer, 1);
-			continue;
-		}
+		for (;;) {
+			struct tr_runtime_peer peer;
 
-		pause_time.tv_sec = 0;
-		pause_time.tv_nsec = 10000000L;
-		while (nanosleep(&pause_time, &pause_time) != 0 &&
-		       errno == EINTR)
-			;
+			memset(&peer, 0, sizeof(peer));
+			if (!tr_server_take_reapable_peer(server, &peer))
+				break;
+			tr_server_destroy_peer(server, &peer, 1);
+		}
 	}
 
 	return NULL;
@@ -395,11 +404,31 @@ static void tr_server_stop_reaper(struct tr_server *server)
 	pthread_mutex_lock(&server->lock);
 	server->stop_reap = 1;
 	pthread_mutex_unlock(&server->lock);
+	tr_runtime_shard_signal_peer_event(server->shard);
 
 	if (server->reap_thread_started) {
 		(void)pthread_join(server->reap_thread, NULL);
 		server->reap_thread_started = 0;
 	}
+}
+
+static void tr_server_signal_peer_reap(struct tr_server *server)
+{
+	if (server)
+		tr_runtime_shard_signal_peer_event(server->shard);
+}
+
+static void tr_server_on_channel_lifecycle(struct tr_channel *channel,
+					   enum tr_channel_event event,
+					   int status, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+
+	(void)channel;
+	(void)status;
+	if (event == TR_CHANNEL_EVENT_CONTROL_DOWN ||
+	    event == TR_CHANNEL_EVENT_BULK_DOWN)
+		tr_server_signal_peer_reap(server);
 }
 
 struct tr_server_peer_guard {
@@ -429,6 +458,7 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 		peer->used = 1;
 		tr_server_note_peer_added_locked(guard->server);
 		pthread_mutex_unlock(&guard->server->lock);
+		tr_server_signal_peer_reap(guard->server);
 	} else {
 		memset(&peer->connection, 0, sizeof(peer->connection));
 	}
@@ -510,6 +540,11 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	if (ret != TR_OK)
 		return ret;
 
+	ret = tr_channel_set_lifecycle_observer(
+		peer->channel, tr_server_on_channel_lifecycle, server);
+	if (ret != TR_OK)
+		return ret;
+
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_SERVER;
 	rpc_config.max_methods = server->config.limits.max_methods;
@@ -553,6 +588,11 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	tr_server_note_peer_added_locked(server);
 	tr_runtime_shard_peer_note_ready(server->shard);
 	pthread_mutex_unlock(&server->lock);
+	/*
+	 * Cover the race where the connection went DOWN before this peer became
+	 * visible to the reaper. The signal is coalesced by the shard eventfd.
+	 */
+	tr_server_signal_peer_reap(server);
 	peer_guard.armed = 0;
 	return TR_OK;
 }
