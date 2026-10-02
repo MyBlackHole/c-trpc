@@ -1,6 +1,7 @@
 #include "runtime_internal.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "tr/socket.h"
 #include "tr/status.h"
