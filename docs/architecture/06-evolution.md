@@ -90,7 +90,9 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - Server listener fd / bound port 已从 Server 下沉到 shard[0] ownership；
 - 中央 accept thread 暂时只借用 shard-owned listener，不拥有其生命周期；
 - peer slot storage/capacity/high-water/reaping/ready/rejection counters 已下沉到 shard[0]；
-- Server 仍负责 peer Channel/RPC 构造销毁，accept/reaper 仍通过过渡锁串行化；
+- Server 仍负责 peer Channel/RPC 构造销毁，accept/reaper publish/detach 仍通过过渡锁串行化；
+- shard[0] 已拥有 peer lifecycle eventfd；Channel DOWN/rollback/publish 只发事件，
+  reaper 不再执行固定 10ms polling；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
 
 当前仍：
@@ -98,15 +100,17 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 ```text
 shard_count = 1
 Server accept/reaper remain central
+reaper wake is event-driven via shard eventfd
 listener is shard-owned
 peer resources are shard-owned
 peer Channel/RPC lifecycle remains Server-driven
 ```
 
-completion event publication、listener ownership 与 peer resource ownership
-均已下沉。下一阶段继续收敛 accept/reaper execution 与 peer lifecycle，使
-`server->lock` 不再承担 shard peer 热路径的中心同步角色；仍保持
-`shard_count = 1`。完成单 shard 资源域后再打开 Phase 4 的 N shards。
+completion event publication、listener ownership、peer resource ownership
+以及 reaper wake event source 均已下沉。下一阶段继续收敛 accept/reaper
+cleanup execution 与 peer lifecycle，使 `server->lock` 不再承担 shard peer
+publish/detach 的中心同步角色；仍保持 `shard_count = 1`。完成单 shard资源域
+后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 
