@@ -40,6 +40,7 @@
 #define TR_CONTROL_BURST 8U
 #define TR_WAKE_TOKEN UINT64_MAX
 #define TR_LISTENER_TOKEN (UINT64_MAX - UINT64_C(1))
+#define TR_PEER_EVENT_TOKEN (UINT64_MAX - UINT64_C(2))
 
 /*
  * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
@@ -180,6 +181,9 @@ struct tr_reactor {
 	int listener_fd;
 	tr_reactor_listener_cb listener_cb;
 	void *listener_arg;
+	int peer_event_fd;
+	tr_reactor_peer_event_cb peer_event_cb;
+	void *peer_event_arg;
 	pthread_t thread;
 
 	pthread_mutex_t ctl_lock;
@@ -1796,6 +1800,13 @@ static void *tr_reactor_thread_main(void *arg)
 						reactor->listener_fd,
 						events[i].events,
 						reactor->listener_arg);
+			} else if (events[i].data.u64 == TR_PEER_EVENT_TOKEN) {
+				if (reactor->peer_event_cb &&
+				    reactor->peer_event_fd >= 0)
+					reactor->peer_event_cb(
+						reactor->peer_event_fd,
+						events[i].events,
+						reactor->peer_event_arg);
 			} else {
 				tr_handle_connection_event(reactor,
 							   events[i].data.u64,
@@ -1901,6 +1912,7 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	reactor->epoll_fd = -1;
 	reactor->wake_fd = -1;
 	reactor->listener_fd = -1;
+	reactor->peer_event_fd = -1;
 
 	if (config)
 		reactor->config = *config;
@@ -2131,6 +2143,127 @@ int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd)
 	request.callback = NULL;
 	request.arg = NULL;
 	return tr_reactor_call(reactor, tr_reactor_listener_unregister_on_owner,
+			       &request);
+}
+
+struct tr_reactor_peer_event_request {
+	struct tr_reactor *reactor;
+	int fd;
+	tr_reactor_peer_event_cb callback;
+	void *arg;
+};
+
+static int tr_reactor_peer_event_register_now(
+	struct tr_reactor *reactor, int fd, tr_reactor_peer_event_cb callback,
+	void *arg)
+{
+	struct epoll_event event;
+
+	if (reactor->peer_event_fd >= 0)
+		return TR_ERR_STATE;
+
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	event.data.u64 = TR_PEER_EVENT_TOKEN;
+	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0)
+		return TR_ERR_SYS;
+
+	reactor->peer_event_fd = fd;
+	reactor->peer_event_cb = callback;
+	reactor->peer_event_arg = arg;
+	return TR_OK;
+}
+
+static int tr_reactor_peer_event_unregister_now(
+	struct tr_reactor *reactor, int fd)
+{
+	if (reactor->peer_event_fd < 0)
+		return TR_OK;
+	if (reactor->peer_event_fd != fd)
+		return TR_ERR_STALE;
+
+	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	reactor->peer_event_fd = -1;
+	reactor->peer_event_cb = NULL;
+	reactor->peer_event_arg = NULL;
+	return TR_OK;
+}
+
+static int tr_reactor_peer_event_register_on_owner(void *arg)
+{
+	struct tr_reactor_peer_event_request *request =
+		(struct tr_reactor_peer_event_request *)arg;
+
+	return tr_reactor_peer_event_register_now(
+		request->reactor, request->fd, request->callback, request->arg);
+}
+
+static int tr_reactor_peer_event_unregister_on_owner(void *arg)
+{
+	struct tr_reactor_peer_event_request *request =
+		(struct tr_reactor_peer_event_request *)arg;
+
+	return tr_reactor_peer_event_unregister_now(request->reactor,
+						    request->fd);
+}
+
+int tr_reactor_peer_event_register(struct tr_reactor *reactor, int fd,
+				   tr_reactor_peer_event_cb callback, void *arg)
+{
+	struct tr_reactor_peer_event_request request;
+	int started;
+	int ret;
+
+	if (!reactor || fd < 0 || !callback)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor))
+		return tr_reactor_peer_event_register_now(reactor, fd, callback,
+							  arg);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		ret = tr_reactor_peer_event_register_now(reactor, fd, callback,
+							 arg);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.reactor = reactor;
+	request.fd = fd;
+	request.callback = callback;
+	request.arg = arg;
+	return tr_reactor_call(reactor, tr_reactor_peer_event_register_on_owner,
+			       &request);
+}
+
+int tr_reactor_peer_event_unregister(struct tr_reactor *reactor, int fd)
+{
+	struct tr_reactor_peer_event_request request;
+	int started;
+	int ret;
+
+	if (!reactor || fd < 0)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor))
+		return tr_reactor_peer_event_unregister_now(reactor, fd);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		ret = tr_reactor_peer_event_unregister_now(reactor, fd);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.reactor = reactor;
+	request.fd = fd;
+	request.callback = NULL;
+	request.arg = NULL;
+	return tr_reactor_call(reactor,
+			       tr_reactor_peer_event_unregister_on_owner,
 			       &request);
 }
 
