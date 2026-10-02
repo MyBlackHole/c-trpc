@@ -50,6 +50,12 @@ Channel
 
 RPC
   └─ Task -> Worker -> Completion -> original Reactor owner
+
+Pipeline foundation
+  └─ one Reactor owner
+       ├─ CONTROL membership
+       ├─ bounded DATA[N] membership
+       └─ Stream -> DATA generation affinity
 ```
 
 Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` 拥有唯一
