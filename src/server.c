@@ -357,7 +357,7 @@ static int tr_server_budget_supports_shards(
 	shards = config->shard_count;
 
 	return config->max_peers >= shards &&
-	       config->listen_backlog >= (int)shards &&
+	       (uint32_t)config->listen_backlog >= shards &&
 	       config->limits.executor_threads >= shards &&
 	       config->limits.command_capacity >= shards &&
 	       config->limits.tx_item_capacity >= shards &&
