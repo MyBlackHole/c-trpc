@@ -233,6 +233,11 @@ static void test_pipeline_ingress_routing(void)
 	registry_config.capacity = 2U;
 	assert(tr_pipeline_registry_create(&registry_config, &registry) == TR_OK);
 	assert(tr_pipeline_registry_register(registry, pipeline) == TR_OK);
+	memset(&control, 0, sizeof(control));
+	control.reactor = reactor;
+	control.slot = 9U;
+	control.generation = 1U;
+	assert(tr_pipeline_set_control(pipeline, control) == TR_OK);
 	assert(tr_pipeline_reserve_data(pipeline, &reserved) == TR_OK);
 
 	ctx.ingress.registry = registry;
@@ -302,6 +307,7 @@ static void test_pipeline_ingress_routing(void)
 	assert(tr_reactor_listener_unregister(reactor, listener) == TR_OK);
 	tr_socket_close(&listener);
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_OK);
+	assert(tr_pipeline_clear_control(pipeline, control) == TR_OK);
 	tr_pipeline_registry_destroy(registry);
 	tr_pipeline_destroy(pipeline);
 
