@@ -4,8 +4,8 @@
 
 ## 0. CURRENT Foundation
 
-Phase 5 第一层已经落地内部 `tr_pipeline` soft-state object，但尚未接入 public
-facade 或 wire routing。
+Phase 5 已落地内部 `tr_pipeline` soft-state、TRR1 routing、shard-local registry、
+accepted DATA ingress 与 internal CONTROL session；尚未接入 public Backup facade。
 
 当前对象固定：
 
@@ -31,13 +31,13 @@ one Pipeline
 
 所有 mutable operation 都通过 Pipeline owner Reactor 串行化。
 
-当前已实现 routing preface / wire identity 的固定格式与 incremental parser，但尚未
-接到 Server accept path / Pipeline registry。
+当前 routing preface / registry / DATA reserve-attach / accepted ingress 已实现；
+internal CONTROL session 也已能签发 DATA offer，并以原子 Stream affinity 建立
+`TRANSFER_READY` barrier。
 
 当前尚未实现：
 
-- CONTROL 建立 DATA membership 的 reserve/attach 协议消息；
-- `TRANSFER_READY` barrier；
+- CONTROL wire message 编码与 public control facade；
 - facade/Backup API；
 - cross-shard fd transfer；
 - durable backup identity / epoch fencing。
@@ -109,8 +109,8 @@ parser 只消费 48-byte preface；同一次 read 中剩余的 Transport bytes �
 frame parser。完整 preface 一旦 CRC/语义失败就是 connection-fatal，不尝试从任意
 字节重新同步。
 
-当前已经增加 shard-local bounded Pipeline registry 与 DATA reservation/attach
-capability，但还没有把 preface parser 接入 listener/accepted-fd path。
+当前已经增加 shard-local bounded Pipeline registry、DATA reservation/attach
+capability，以及 owner-local accepted DATA preface gate/ingress path。
 
 ### Registry / Reservation
 
