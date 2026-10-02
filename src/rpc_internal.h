@@ -47,6 +47,18 @@ int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint);
 void tr_rpc_endpoint_finalize_detached_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
+typedef void (*tr_rpc_endpoint_detached_finalizer)(
+	const struct tr_rpc_endpoint_stats *stats, void *arg);
+
+/*
+ * Transfer the detached Endpoint owner reference to a last-ref finalizer.
+ * The callback runs after Endpoint memory has been released; it must not touch
+ * the Endpoint and may run on either a worker or Reactor owner context.
+ */
+int tr_rpc_endpoint_finalize_detached_async(
+	struct tr_rpc_endpoint *endpoint,
+	tr_rpc_endpoint_detached_finalizer finalizer, void *arg);
+
 /* Internal deterministic diagnostics for the bounded Call deadline heap. */
 int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
 				  uint32_t *count,
