@@ -50,7 +50,7 @@ flowchart TB
 | Object | Owner | 非 owner 如何访问 | 目标同步方式 |
 |---|---|---|---|
 | Listener fd | Reactor shard | Reactor epoll event | shard owns listen/close; Reactor owns accept readiness |
-| Peer slot storage / counters | Reactor shard | Reactor accept + lifecycle event | finalizing slot remains reserved until last-ref free |
+| Peer slot storage / counters | Reactor shard | Reactor accept + lifecycle event | slot clears after owner detach and is immediately reusable |
 | Peer lifecycle eventfd | Reactor shard | Channel DOWN / rollback / publish signal | same-Reactor deferred lifecycle event |
 | Connection | Reactor shard | command | hot state 无锁 |
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
@@ -121,10 +121,10 @@ no registered Channel keepalive timer
 no new RPC executor admission
 ```
 
-只有这些 owner-visible source 都 detach 后，peer slot 才进入 `finalizing`。
-slot 在 Endpoint/Channel 真正释放前不能复用。Finalizer 由最后一个 Endpoint
-strong-ref 触发，只允许读取最终统计和释放内存，不允许重新进入 Reactor
-protocol mutation。
+只有这些 owner-visible source 都 detach 后，Channel ownership 才能转移到
+detached-finalizer context，随后 peer slot 立即清空复用。旧 Endpoint 的 strong-ref
+负责真正的 lifetime fencing；最后一个 ref 触发 finalizer，只允许读取最终统计和
+释放 detached Endpoint/Channel，不允许重新进入 Reactor protocol mutation。
 
 ## 6. Resource Transfer
 
