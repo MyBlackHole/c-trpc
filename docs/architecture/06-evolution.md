@@ -73,15 +73,27 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 
 ## Phase 3 - Runtime Shard Abstraction
 
-引入 `tr_runtime` / `tr_runtime_shard`。
+**状态：IN PROGRESS**
 
-第一阶段仍：
+已完成第一阶段：
+
+- 引入内部 `tr_runtime` / `tr_runtime_shard`；
+- Client/Server 不再直接拥有 Reactor lifecycle；
+- Runtime 统一负责 Reactor create/start/stop/destroy；
+- 显式 `shard_id = 0` 与 `shard_count = 1`；
+- public API、wire、listener、peer table、线程数量与启动时机保持不变；
+- 独立测试验证 single-shard identity、拒绝提前启用 multi-shard，以及生命周期语义。
+
+当前仍：
 
 ```text
 shard_count = 1
+Server accept/reaper remain central
+listener and peer table remain Server-owned
 ```
 
-保证外部行为不变。
+下一阶段先把 listener ownership 下沉到 shard，但继续保持
+`shard_count = 1`；完成这一层后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 

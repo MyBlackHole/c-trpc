@@ -30,19 +30,30 @@ flowchart LR
 
 ```text
 Server
-  ├─ 1 Reactor
+  ├─ 1 internal Runtime
+  │    └─ shard[0]
+  │         └─ 1 Reactor
   ├─ accept thread
   ├─ reaper thread
   ├─ shared RPC executor
-  └─ shared maintenance scheduler
+  └─ Reactor-local timers
+
+Client
+  └─ 1 internal Runtime
+       └─ shard[0]
+            └─ 1 Reactor
 
 Channel
   ├─ control_connection
   └─ bulk_connection
 
-RPC worker
-  └─ 仍会通过 Endpoint/Call 同步进入部分协议状态
+RPC
+  └─ Task -> Worker -> Completion -> original Reactor owner
 ```
+
+Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` 拥有唯一
+`tr_runtime_shard[0]`，该 shard 拥有 Reactor 的 create/start/stop/destroy。
+当前仍固定 `shard_count = 1`，accept/reaper 和 peer table 尚未 shard 化。
 
 Reactor connection slot 已采用严格 single-owner 方向；slot generation/state 使用原子 capability metadata，外部控制通过 command 进入 Reactor。
 

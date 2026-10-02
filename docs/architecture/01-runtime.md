@@ -4,6 +4,22 @@
 
 ## 1. Server Runtime
 
+CURRENT 已建立 Phase-3 的内部 Runtime ownership seam，但仍固定单 shard：
+
+```text
+tr_server
+  ├─ tr_runtime
+  │    └─ shard[0]
+  │         └─ Reactor
+  ├─ accept thread
+  ├─ reaper thread
+  └─ shared RPC executor
+```
+
+`tr_runtime` 现在负责 Reactor 的 create/start/stop/destroy；Server 不再直接
+拥有 Reactor。该变化不增加线程、不改变 listener/peer ownership，也不开放
+multi-shard 配置。当前内部配置显式要求 `shard_count == 1`。
+
 TARGET V1 使用单进程多 Reactor：
 
 ```mermaid
@@ -66,6 +82,24 @@ initial protocol owner
 
 ## 3. Reactor Shard
 
+CURRENT 已落地最小内部形状：
+
+```c
+struct tr_runtime {
+    uint32_t shard_count;          /* CURRENT: exactly 1 */
+    struct tr_runtime_shard *shards;
+};
+
+struct tr_runtime_shard {
+    uint32_t shard_id;
+    struct tr_reactor *reactor;
+};
+```
+
+Client/Server 都通过 `shard[0]` 取得 Reactor。第一阶段只建立 lifecycle 和
+identity ownership，不把 listener、peer table、Pipeline 或 routing 提前塞入
+Runtime；这些对象应在后续 PR 按 ownership 迁移。
+
 目标逻辑结构：
 
 ```c
@@ -120,13 +154,17 @@ R7 accept(fd)
 
 ## 5. Client Runtime
 
-Client 默认：
+Client CURRENT：
 
 ```text
 application process
-  └─ c-trpc client runtime
-       └─ 1 Reactor
+  └─ c-trpc client
+       └─ internal tr_runtime
+            └─ shard[0]
+                 └─ 1 Reactor
 ```
+
+Client 的外部 API 和线程行为未改变；Runtime 目前是内部 ownership layer。
 
 FUTURE 才允许配置 N Reactor。
 
@@ -176,8 +214,8 @@ Reactor shard
 
 | 操作 | 新增线程 |
 |---|---|
-| `tr_client_create()` | 1 个 Reactor；尚未创建 RPC worker |
-| `tr_server_create()` | 配置的 `executor_threads` 个共享 worker |
+| `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
+| `tr_server_create()` | 创建 single-shard Runtime（Reactor 尚未启动）+ 配置的 `executor_threads` 个共享 worker |
 | `tr_server_listen()` | 0 |
 | `tr_server_start()` | 3 个：Reactor、reaper、accept |
 

@@ -15,12 +15,14 @@
 #include "tr/status.h"
 #include "channel_internal.h"
 #include "rpc_internal.h"
+#include "runtime_internal.h"
 #include "socket_internal.h"
 
 struct tr_client {
 	struct tr_client_config config;
 
-	struct tr_reactor *reactor;
+	struct tr_runtime *runtime;
+	struct tr_runtime_shard *shard;
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
 	struct tr_conn_handle connection;
@@ -34,6 +36,11 @@ struct tr_client {
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_destroy)
+
+static struct tr_reactor *tr_client_reactor(struct tr_client *client)
+{
+	return client ? tr_runtime_shard_reactor(client->shard) : NULL;
+}
 
 static uint64_t tr_client_now_ms(void)
 {
@@ -158,7 +165,8 @@ int tr_client_create(const struct tr_client_config *config,
 		     struct tr_client **out)
 {
 	struct tr_client_config effective;
-	struct tr_reactor_config reactor_config;
+	struct tr_runtime_config runtime_config;
+	struct tr_reactor_config *reactor_config;
 	struct tr_client *client TR_AUTO(tr_client_owner_cleanup) = NULL;
 	int ret;
 
@@ -197,30 +205,34 @@ int tr_client_create(const struct tr_client_config *config,
 		return ret;
 	client->reassembly_pool_ready = 1;
 
-	memset(&reactor_config, 0, sizeof(reactor_config));
-	reactor_config.max_connections = 4U;
-	reactor_config.command_capacity = effective.limits.command_capacity;
-	reactor_config.tx_item_capacity = effective.limits.tx_item_capacity;
-	reactor_config.control_tx_item_capacity =
+	memset(&runtime_config, 0, sizeof(runtime_config));
+	runtime_config.shard_count = 1U;
+	reactor_config = &runtime_config.reactor;
+	reactor_config->max_connections = 4U;
+	reactor_config->command_capacity = effective.limits.command_capacity;
+	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
+	reactor_config->control_tx_item_capacity =
 		effective.limits.control_tx_item_capacity;
-	reactor_config.rx_buffer_count = effective.limits.rx_buffer_count;
-	reactor_config.rx_buffer_size =
+	reactor_config->rx_buffer_count = effective.limits.rx_buffer_count;
+	reactor_config->rx_buffer_size =
 		effective.limits.max_frame_payload_bytes;
-	reactor_config.max_payload_len =
+	reactor_config->max_payload_len =
 		effective.limits.max_frame_payload_bytes;
-	reactor_config.rx_budget_bytes =
+	reactor_config->rx_budget_bytes =
 		effective.limits.max_frame_payload_bytes > UINT32_MAX / 4U ?
 			UINT32_MAX :
 			effective.limits.max_frame_payload_bytes * 4U;
-	reactor_config.tx_budget_bytes = reactor_config.rx_budget_bytes;
-	reactor_config.observability_flags =
+	reactor_config->tx_budget_bytes = reactor_config->rx_budget_bytes;
+	reactor_config->observability_flags =
 		effective.limits.observability_flags;
 
-	ret = tr_reactor_create(&reactor_config, NULL, NULL, NULL,
-				&client->reactor);
+	ret = tr_runtime_create(&runtime_config, &client->runtime);
 	if (ret != TR_OK)
 		return ret;
-	ret = tr_reactor_start(client->reactor);
+	client->shard = tr_runtime_shard_at(client->runtime, 0U);
+	if (!client->shard)
+		return TR_ERR_STATE;
+	ret = tr_runtime_start(client->runtime);
 	if (ret != TR_OK)
 		return ret;
 
@@ -289,7 +301,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 			return ret;
 	}
 
-	ret = tr_reactor_adopt_fd(client->reactor, fd, &client->connection);
+	ret = tr_reactor_adopt_fd(tr_client_reactor(client), fd, &client->connection);
 	if (ret != TR_OK)
 		return ret;
 	(void)tr_fd_take(&fd);
@@ -489,15 +501,15 @@ void tr_client_destroy(struct tr_client *client)
 		(void)tr_channel_wait_drained(client->channel, 1000U);
 	}
 
-	if (client->reactor)
-		(void)tr_reactor_stop(client->reactor);
+	if (client->runtime)
+		(void)tr_runtime_stop(client->runtime);
 
 	if (client->rpc)
 		tr_rpc_endpoint_destroy(client->rpc);
 	if (client->channel)
 		tr_channel_destroy(client->channel);
-	if (client->reactor)
-		tr_reactor_destroy(client->reactor);
+	if (client->runtime)
+		tr_runtime_destroy(client->runtime);
 	if (client->reassembly_pool_ready)
 		tr_buffer_pool_destroy(&client->reassembly_pool);
 	if (client->rpc_pool_ready)
