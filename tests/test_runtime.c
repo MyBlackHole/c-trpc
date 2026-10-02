@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sys/epoll.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -92,6 +93,40 @@ static void test_runtime_rejects_invalid_shard_config(void)
 	runtime = (struct tr_runtime *)(uintptr_t)1U;
 	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
 	assert(runtime == NULL);
+}
+
+static void test_runtime_reuseport_listener_group(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shards[2];
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard0;
+	struct tr_runtime_shard *shard1;
+	uint16_t port0 = 0U;
+	uint16_t port1 = 0U;
+
+	runtime_test_config_init(&config, shards, 2U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard0 = tr_runtime_shard_at(runtime, 0U);
+	shard1 = tr_runtime_shard_at(runtime, 1U);
+	assert(shard0 != NULL && shard1 != NULL);
+
+#ifdef SO_REUSEPORT
+	assert(tr_runtime_shard_listen_ipv4_ex(
+		       shard0, "127.0.0.1", 0U, 8, 1, &port0) == TR_OK);
+	assert(port0 != 0U);
+	assert(tr_runtime_shard_listen_ipv4_ex(
+		       shard1, "127.0.0.1", port0, 8, 1, &port1) == TR_OK);
+	assert(port1 == port0);
+	assert(tr_runtime_shard_listener_fd(shard0) >= 0);
+	assert(tr_runtime_shard_listener_fd(shard1) >= 0);
+#else
+	assert(tr_runtime_shard_listen_ipv4_ex(
+		       shard0, "127.0.0.1", 0U, 8, 1, &port0) ==
+	       TR_ERR_UNSUPPORTED);
+#endif
+
+	tr_runtime_destroy(runtime);
 }
 
 static void test_runtime_shard_rpc_executor_ownership(void)
@@ -450,6 +485,7 @@ int main(void)
 	RUN_TEST(test_runtime_single_shard_identity);
 	RUN_TEST(test_runtime_multi_shard_identity);
 	RUN_TEST(test_runtime_rejects_invalid_shard_config);
+	RUN_TEST(test_runtime_reuseport_listener_group);
 	RUN_TEST(test_runtime_shard_rpc_executor_ownership);
 	RUN_TEST(test_runtime_shard_listener_ownership);
 	RUN_TEST(test_runtime_shard_listener_events);
