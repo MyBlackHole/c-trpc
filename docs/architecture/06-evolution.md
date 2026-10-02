@@ -165,9 +165,21 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - DATA removal 自动 invalidates 对应 generation 的 Stream affinity；
 - 所有 mutable membership/affinity mutation 通过 owner Reactor 串行化。
 
+已完成 routing identity foundation：
+
+- 固定 48-byte `TRR1` routing preface；
+- little-endian + CRC32C；
+- pipeline_id / epoch / owner_shard / role / member index / member generation；
+- CONTROL 与 DATA 的 member-index 语义校验；
+- incremental parser 支持任意 TCP fragmentation；
+- parser 精确停止在 preface 边界，保留同 read 的后续 TRP1 bytes；
+- invalid complete preface terminal，禁止任意字节 resync；
+- member_generation 明确定义为 Pipeline membership generation，不复用 Reactor slot generation。
+
 下一步：
 
-- routing preface / Pipeline identity wire format；
+- Pipeline registry 与 DATA slot reserve/attach；
+- accepted connection routing preface 接入；
 - CONTROL 建立/确认 DATA membership；
 - `TRANSFER_READY(stream_id, data_index)` barrier；
 - 将 Channel/RPC/Backup facade 接到 Pipeline membership；
