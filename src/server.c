@@ -35,8 +35,21 @@ struct tr_server_method {
 	void *handler_arg;
 };
 
-struct tr_server_detached_peer {
+struct tr_server;
+
+struct tr_server_shard {
 	struct tr_server *server;
+	struct tr_runtime_shard *runtime;
+	struct tr_buffer_pool rpc_message_pool;
+	struct tr_buffer_pool reassembly_pool;
+	uint32_t executor_threads;
+	int rpc_pool_ready;
+	int reassembly_pool_ready;
+	int peer_events_enabled;
+};
+
+struct tr_server_detached_peer {
+	struct tr_server_shard *shard;
 	struct tr_channel *channel;
 };
 
@@ -44,11 +57,8 @@ struct tr_server {
 	struct tr_server_config config;
 
 	struct tr_runtime *runtime;
-	struct tr_runtime_shard *shard;
-	struct tr_buffer_pool rpc_message_pool;
-	struct tr_buffer_pool reassembly_pool;
-	int rpc_pool_ready;
-	int reassembly_pool_ready;
+	struct tr_server_shard *shards;
+	uint32_t shard_count;
 
 	struct tr_server_method *methods;
 	uint32_t method_count;
@@ -60,37 +70,43 @@ struct tr_server {
 	pthread_cond_t finalizer_cond;
 	int finalizer_cond_ready;
 	int started;
-	int peer_events_enabled;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
 
-static struct tr_reactor *tr_server_reactor(struct tr_server *server)
+static struct tr_server_shard *
+tr_server_primary_shard(struct tr_server *server)
 {
-	return server ? tr_runtime_shard_reactor(server->shard) : NULL;
+	return server && server->shard_count != 0U ? &server->shards[0] : NULL;
+}
+
+static struct tr_reactor *
+tr_server_shard_reactor(struct tr_server_shard *shard)
+{
+	return shard ? tr_runtime_shard_reactor(shard->runtime) : NULL;
 }
 
 static struct tr_rpc_executor_group *
-tr_server_rpc_executor(struct tr_server *server)
+tr_server_shard_rpc_executor(struct tr_server_shard *shard)
 {
-	return server ? tr_runtime_shard_rpc_executor(server->shard) : NULL;
+	return shard ? tr_runtime_shard_rpc_executor(shard->runtime) : NULL;
 }
 
-static int tr_server_listener_fd(struct tr_server *server)
+static int tr_server_shard_listener_fd(struct tr_server_shard *shard)
 {
-	return server ? tr_runtime_shard_listener_fd(server->shard) : -1;
+	return shard ? tr_runtime_shard_listener_fd(shard->runtime) : -1;
 }
 
-static uint32_t tr_server_peer_capacity(struct tr_server *server)
+static uint32_t tr_server_shard_peer_capacity(struct tr_server_shard *shard)
 {
-	return server ? tr_runtime_shard_peer_capacity(server->shard) : 0U;
+	return shard ? tr_runtime_shard_peer_capacity(shard->runtime) : 0U;
 }
 
 static struct tr_runtime_peer *
-tr_server_peer_at(struct tr_server *server, uint32_t slot)
+tr_server_shard_peer_at(struct tr_server_shard *shard, uint32_t slot)
 {
-	return server ? tr_runtime_shard_peer_at(server->shard, slot) : NULL;
+	return shard ? tr_runtime_shard_peer_at(shard->runtime, slot) : NULL;
 }
 
 static uint64_t tr_server_now_ms(void)
