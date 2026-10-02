@@ -45,7 +45,6 @@ struct tr_server {
 
 	struct tr_runtime *runtime;
 	struct tr_runtime_shard *shard;
-	struct tr_rpc_executor_group *rpc_executor_group;
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
 	int rpc_pool_ready;
@@ -84,6 +83,12 @@ TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
 static struct tr_reactor *tr_server_reactor(struct tr_server *server)
 {
 	return server ? tr_runtime_shard_reactor(server->shard) : NULL;
+}
+
+static struct tr_rpc_executor_group *
+tr_server_rpc_executor(struct tr_server *server)
+{
+	return server ? tr_runtime_shard_rpc_executor(server->shard) : NULL;
 }
 
 static uint64_t tr_server_now_ms(void)
@@ -516,7 +521,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		server->config.limits.observability_flags;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
-		peer->channel, &rpc_config, server->rpc_executor_group,
+		peer->channel, &rpc_config, tr_server_rpc_executor(server),
 		&peer->rpc);
 	if (ret != TR_OK)
 		return ret;
@@ -658,14 +663,13 @@ int tr_server_create(const struct tr_server_config *config,
 		return ret;
 	server->reassembly_pool_ready = 1;
 
-	ret = tr_rpc_executor_group_create(
-		effective.max_peers, effective.limits.max_calls,
-		effective.limits.executor_threads, &server->rpc_executor_group);
-	if (ret != TR_OK)
-		return ret;
-
 	memset(&runtime_config, 0, sizeof(runtime_config));
 	runtime_config.shard_count = 1U;
+	runtime_config.rpc_executor.endpoint_capacity = effective.max_peers;
+	runtime_config.rpc_executor.max_calls_per_endpoint =
+		effective.limits.max_calls;
+	runtime_config.rpc_executor.thread_count =
+		effective.limits.executor_threads;
 	reactor_config = &runtime_config.reactor;
 	reactor_config->max_connections = effective.max_peers + 4U;
 	reactor_config->command_capacity = effective.limits.command_capacity;
@@ -988,8 +992,6 @@ void tr_server_destroy(struct tr_server *server)
 
 	if (server->runtime)
 		tr_runtime_destroy(server->runtime);
-	if (server->rpc_executor_group)
-		tr_rpc_executor_group_destroy(server->rpc_executor_group);
 	if (server->reassembly_pool_ready)
 		tr_buffer_pool_destroy(&server->reassembly_pool);
 	if (server->rpc_pool_ready)
