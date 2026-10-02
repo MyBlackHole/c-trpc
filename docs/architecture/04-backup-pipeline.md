@@ -31,10 +31,12 @@ one Pipeline
 
 所有 mutable operation 都通过 Pipeline owner Reactor 串行化。
 
+当前已实现 routing preface / wire identity 的固定格式与 incremental parser，但尚未
+接到 Server accept path / Pipeline registry。
+
 当前尚未实现：
 
-- routing preface / wire identity；
-- CONTROL 建立 DATA membership 的协议消息；
+- CONTROL 建立 DATA membership 的 reserve/attach 协议消息；
 - `TRANSFER_READY` barrier；
 - facade/Backup API；
 - cross-shard fd transfer；
@@ -43,6 +45,72 @@ one Pipeline
 因此当前 `tr_pipeline` 是后续协议层的 ownership/membership substrate，不是完整
 Backup Pipeline protocol。
 
+## 0.1 Routing Preface
+
+新物理 connection 在进入普通 `TRP1` Transport framing 前，先发送固定 48-byte
+Pipeline routing preface：
+
+```text
+offset  size  field
+0       4     magic = "TRR1"
+4       2     route_version
+6       2     role = CONTROL | DATA
+8       4     flags
+12      4     owner_shard_id
+16      8     pipeline_id
+24      8     epoch
+32      4     member_index
+36      4     member_generation
+40      4     header_crc32c
+44      4     reserved
+```
+
+全部整数使用 little-endian，与现有 Transport wire encoding 一致；CRC 使用 CRC32C。
+
+语义：
+
+```text
+CONTROL:
+    member_index = UINT32_MAX
+    member_generation != 0
+
+DATA:
+    member_index = reserved DATA index
+    member_generation = CONTROL-plane issued membership generation
+```
+
+`member_generation` 是 Pipeline membership capability generation，不是 Reactor
+connection slot generation。协议层禁止暴露 Reactor slot/generation 作为远端
+routing identity。
+
+`owner_shard_id` 同样是 CONTROL-plane 发出的 routing target，不是客户端自证。
+未来 attach 必须同时验证：
+
+```text
+pipeline_id
+epoch
+owner_shard_id
+role
+member_index
+member_generation
+```
+
+和 server-side Pipeline registry / reservation state 完全匹配后才能加入 group。
+
+当前 parser 支持 TCP 任意碎片与 coalescing：
+
+```text
+recv:
+    [partial preface]
+    [remaining preface + TRP1 HELLO bytes]
+```
+
+parser 只消费 48-byte preface；同一次 read 中剩余的 Transport bytes 原样留给普通
+frame parser。完整 preface 一旦 CRC/语义失败就是 connection-fatal，不尝试从任意
+字节重新同步。
+
+当前还没有把 preface parser 接入 listener/accepted-fd path；这是下一层 routing
+integration 的工作。
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。
