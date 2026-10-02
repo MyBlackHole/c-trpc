@@ -14,14 +14,24 @@
 #include <stdio.h>
 #include <string.h>
 
+static void runtime_test_config_init(
+	struct tr_runtime_config *config,
+	struct tr_runtime_shard_config *shards, uint32_t shard_count)
+{
+	memset(config, 0, sizeof(*config));
+	memset(shards, 0, sizeof(*shards) * shard_count);
+	config->shard_count = shard_count;
+	config->shards = shards;
+}
+
 static void test_runtime_single_shard_identity(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
+	runtime_test_config_init(&config, &shard_config, 1U);
 
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
@@ -37,14 +47,49 @@ static void test_runtime_single_shard_identity(void)
 	tr_runtime_destroy(runtime);
 }
 
-static void test_runtime_rejects_multi_shard_before_phase4(void)
+static void test_runtime_multi_shard_identity(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shards[3];
+	struct tr_runtime *runtime = NULL;
+	uint32_t i;
+
+	runtime_test_config_init(&config, shards, 3U);
+	shards[0].peer_capacity = 2U;
+	shards[1].peer_capacity = 3U;
+	shards[2].peer_capacity = 4U;
+
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(runtime != NULL);
+	assert(tr_runtime_shard_count(runtime) == 3U);
+
+	for (i = 0; i < 3U; ++i) {
+		struct tr_runtime_shard *shard =
+			tr_runtime_shard_at(runtime, i);
+
+		assert(shard != NULL);
+		assert(tr_runtime_shard_id(shard) == i);
+		assert(tr_runtime_shard_reactor(shard) != NULL);
+		assert(tr_runtime_shard_peer_capacity(shard) == i + 2U);
+	}
+	assert(tr_runtime_shard_at(runtime, 3U) == NULL);
+
+	tr_runtime_destroy(runtime);
+}
+
+static void test_runtime_rejects_invalid_shard_config(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard;
 	struct tr_runtime *runtime = (struct tr_runtime *)(uintptr_t)1U;
 
 	memset(&config, 0, sizeof(config));
-	config.shard_count = 2U;
+	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
+	assert(runtime == NULL);
 
+	runtime_test_config_init(&config, &shard, 1U);
+	config.shards = NULL;
+	runtime = (struct tr_runtime *)(uintptr_t)1U;
 	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
 	assert(runtime == NULL);
 }
@@ -52,14 +97,14 @@ static void test_runtime_rejects_multi_shard_before_phase4(void)
 static void test_runtime_shard_rpc_executor_ownership(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
-	config.rpc_executor.endpoint_capacity = 4U;
-	config.rpc_executor.max_calls_per_endpoint = 8U;
-	config.rpc_executor.thread_count = 2U;
+	runtime_test_config_init(&config, &shard_config, 1U);
+	shard_config.rpc_executor.endpoint_capacity = 4U;
+	shard_config.rpc_executor.max_calls_per_endpoint = 8U;
+	shard_config.rpc_executor.thread_count = 2U;
 
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	shard = tr_runtime_shard_at(runtime, 0U);
@@ -67,9 +112,8 @@ static void test_runtime_shard_rpc_executor_ownership(void)
 	assert(tr_runtime_shard_rpc_executor(shard) != NULL);
 	tr_runtime_destroy(runtime);
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
-	config.rpc_executor.thread_count = 1U;
+	runtime_test_config_init(&config, &shard_config, 1U);
+	shard_config.rpc_executor.thread_count = 1U;
 	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
 	assert(runtime == NULL);
 }
@@ -77,13 +121,13 @@ static void test_runtime_shard_rpc_executor_ownership(void)
 static void test_runtime_shard_listener_ownership(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 	uint16_t bound = 0;
 	int listener;
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
+	runtime_test_config_init(&config, &shard_config, 1U);
 
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	shard = tr_runtime_shard_at(runtime, 0U);
@@ -153,6 +197,7 @@ static void runtime_listener_test_cb(int listener, uint32_t events, void *arg)
 static void test_runtime_shard_listener_events(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 	struct runtime_listener_test_ctx ctx;
@@ -215,15 +260,15 @@ static void test_runtime_shard_listener_events(void)
 static void test_runtime_shard_peer_resources(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 	struct tr_runtime_peer *peer0;
 	struct tr_runtime_peer *peer1;
 	struct tr_runtime_peer_stats stats;
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
-	config.peer_capacity = 3U;
+	runtime_test_config_init(&config, &shard_config, 1U);
+	shard_config.peer_capacity = 3U;
 
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	shard = tr_runtime_shard_at(runtime, 0U);
@@ -281,14 +326,14 @@ static void test_runtime_shard_peer_resources(void)
 static void test_runtime_shard_peer_event_source(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 	struct pollfd pfd;
 	int event_fd;
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
-	config.peer_capacity = 2U;
+	runtime_test_config_init(&config, &shard_config, 1U);
+	shard_config.peer_capacity = 2U;
 
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	shard = tr_runtime_shard_at(runtime, 0U);
@@ -344,6 +389,7 @@ static void runtime_peer_event_dispatch_cb(int fd, uint32_t events, void *arg)
 static void test_runtime_shard_peer_event_dispatch(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
 	struct runtime_peer_event_dispatch_ctx ctx;
@@ -352,7 +398,7 @@ static void test_runtime_shard_peer_event_dispatch(void)
 	memset(&config, 0, sizeof(config));
 	memset(&ctx, 0, sizeof(ctx));
 	config.shard_count = 1U;
-	config.peer_capacity = 1U;
+	shard_config.peer_capacity = 1U;
 
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
@@ -385,10 +431,10 @@ static void test_runtime_shard_peer_event_dispatch(void)
 static void test_runtime_lifecycle(void)
 {
 	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 
-	memset(&config, 0, sizeof(config));
-	config.shard_count = 1U;
+	runtime_test_config_init(&config, &shard_config, 1U);
 
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(tr_runtime_stop(runtime) == TR_OK);
@@ -404,7 +450,8 @@ static void test_runtime_lifecycle(void)
 int main(void)
 {
 	RUN_TEST(test_runtime_single_shard_identity);
-	RUN_TEST(test_runtime_rejects_multi_shard_before_phase4);
+	RUN_TEST(test_runtime_multi_shard_identity);
+	RUN_TEST(test_runtime_rejects_invalid_shard_config);
 	RUN_TEST(test_runtime_shard_rpc_executor_ownership);
 	RUN_TEST(test_runtime_shard_listener_ownership);
 	RUN_TEST(test_runtime_shard_listener_events);
