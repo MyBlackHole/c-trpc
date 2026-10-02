@@ -95,4 +95,13 @@ void tr_runtime_shard_peer_note_capacity_rejection(
 void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 				 struct tr_runtime_peer_stats *out);
 
+/*
+ * Shard-local peer lifecycle event source. Producers may signal from Reactor
+ * callbacks without taking the legacy Server transition lock. The eventfd is
+ * coalescing; consumers drain it before scanning shard-owned peer resources.
+ */
+int tr_runtime_shard_peer_event_fd(const struct tr_runtime_shard *shard);
+void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard);
+void tr_runtime_shard_drain_peer_event(struct tr_runtime_shard *shard);
+
 #endif
