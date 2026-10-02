@@ -282,42 +282,18 @@ static void tr_server_note_peer_added_owner(struct tr_server *server)
 	tr_runtime_shard_peer_note_added(server->shard);
 }
 
-static void tr_server_destroy_peer(struct tr_server *server,
-				   struct tr_runtime_peer *peer, int retire_stats)
+static void tr_server_destroy_peer(struct tr_runtime_peer *peer)
 {
-	struct tr_rpc_endpoint_stats rpc_stats;
-	struct tr_channel_stats channel_stats;
-	int have_rpc_stats = 0;
-	int have_channel_stats = 0;
-
-	memset(&rpc_stats, 0, sizeof(rpc_stats));
-	memset(&channel_stats, 0, sizeof(channel_stats));
+	if (!peer)
+		return;
 
 	if (peer->rpc) {
-		tr_rpc_endpoint_destroy_with_stats(peer->rpc,
-					   retire_stats ? &rpc_stats : NULL);
+		tr_rpc_endpoint_destroy(peer->rpc);
 		peer->rpc = NULL;
-		have_rpc_stats = retire_stats;
 	}
 	if (peer->channel) {
-		if (retire_stats &&
-		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
-			have_channel_stats = 1;
 		tr_channel_destroy(peer->channel);
 		peer->channel = NULL;
-	}
-
-	if (retire_stats) {
-		pthread_mutex_lock(&server->finalizer_lock);
-		if (have_rpc_stats)
-			tr_server_merge_rpc_stats(&server->retired_rpc_stats,
-						  &rpc_stats, 0);
-		if (have_channel_stats)
-			tr_server_merge_channel_stats(
-				&server->retired_channel_stats,
-				&channel_stats, 0);
-		tr_runtime_shard_peer_note_reaped(server->shard);
-		pthread_mutex_unlock(&server->finalizer_lock);
 	}
 
 	free(peer->finalize_ctx);
@@ -1098,7 +1074,7 @@ void tr_server_destroy(struct tr_server *server)
 
 		if (!peer || (!peer->used && !peer->channel && !peer->rpc))
 			continue;
-		tr_server_destroy_peer(server, peer, 0);
+		tr_server_destroy_peer(peer);
 	}
 
 	tr_server_wait_peer_finalizers(server);
