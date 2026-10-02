@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -180,6 +181,46 @@ static void test_runtime_shard_peer_resources(void)
 	tr_runtime_destroy(runtime);
 }
 
+static void test_runtime_shard_peer_event_source(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	struct pollfd pfd;
+	int event_fd;
+
+	memset(&config, 0, sizeof(config));
+	config.shard_count = 1U;
+	config.peer_capacity = 2U;
+
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	event_fd = tr_runtime_shard_peer_event_fd(shard);
+	assert(event_fd >= 0);
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = event_fd;
+	pfd.events = POLLIN;
+	assert(poll(&pfd, 1U, 0) == 0);
+
+	tr_runtime_shard_signal_peer_event(shard);
+	tr_runtime_shard_signal_peer_event(shard);
+	assert(poll(&pfd, 1U, 0) == 1);
+	assert(pfd.revents & POLLIN);
+
+	/* Multiple producers coalesce into one readable lifecycle event source. */
+	tr_runtime_shard_drain_peer_event(shard);
+	pfd.revents = 0;
+	assert(poll(&pfd, 1U, 0) == 0);
+
+	tr_runtime_destroy(runtime);
+
+	errno = 0;
+	assert(fcntl(event_fd, F_GETFD) == -1);
+	assert(errno == EBADF);
+}
+
 static void test_runtime_lifecycle(void)
 {
 	struct tr_runtime_config config;
@@ -206,6 +247,7 @@ int main(void)
 	RUN_TEST(test_runtime_shard_rpc_executor_ownership);
 	RUN_TEST(test_runtime_shard_listener_ownership);
 	RUN_TEST(test_runtime_shard_peer_resources);
+	RUN_TEST(test_runtime_shard_peer_event_source);
 	RUN_TEST(test_runtime_lifecycle);
 	return 0;
 }

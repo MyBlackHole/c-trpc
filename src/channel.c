@@ -100,6 +100,9 @@ struct tr_channel {
 	tr_channel_event_cb channel_event_cb;
 	void *callback_arg;
 
+	tr_channel_event_cb lifecycle_event_cb;
+	void *lifecycle_callback_arg;
+
 	pthread_cond_t reconnect_cond;
 	pthread_t reconnect_thread;
 	int reconnect_thread_started;
@@ -975,15 +978,21 @@ static void tr_channel_notify(struct tr_channel *channel,
 			      enum tr_channel_event event, int status)
 {
 	tr_channel_event_cb cb;
+	tr_channel_event_cb lifecycle_cb;
 	void *cb_arg;
+	void *lifecycle_arg;
 
 	pthread_mutex_lock(&channel->lock);
 	cb = channel->channel_event_cb;
 	cb_arg = channel->callback_arg;
+	lifecycle_cb = channel->lifecycle_event_cb;
+	lifecycle_arg = channel->lifecycle_callback_arg;
 	pthread_mutex_unlock(&channel->lock);
 
 	if (cb)
 		cb(channel, event, status, cb_arg);
+	if (lifecycle_cb)
+		lifecycle_cb(channel, event, status, lifecycle_arg);
 }
 
 static void tr_channel_fail_lane_streams(struct tr_channel *channel,
@@ -2397,6 +2406,20 @@ void tr_channel_destroy(struct tr_channel *channel)
 	pthread_cond_destroy(&channel->reconnect_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
+}
+
+int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
+				      tr_channel_event_cb event_cb,
+				      void *callback_arg)
+{
+	if (!channel)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&channel->lock);
+	channel->lifecycle_event_cb = event_cb;
+	channel->lifecycle_callback_arg = callback_arg;
+	pthread_mutex_unlock(&channel->lock);
+	return TR_OK;
 }
 
 int tr_channel_set_handler(struct tr_channel *channel,

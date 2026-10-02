@@ -15,7 +15,7 @@ tr_server
   │         ├─ RPC executor
   │         └─ peer table / counters
   ├─ accept thread
-  └─ reaper thread
+  └─ event-driven reaper thread
 ```
 
 `tr_runtime` 现在负责 Reactor 生命周期；Server 不再直接拥有 Reactor。
@@ -23,9 +23,13 @@ Server listener 也已从 `tr_server` 下沉到 `tr_runtime_shard[0]`：listen/c
 和最终 cleanup 都由 shard 负责，中央 accept thread 当前只借用该 fd。
 
 该变化不增加线程。Peer slot storage、capacity/high-water、reaping/ready/rejection
-计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。但 accept/reaper
-仍是中央线程，且当前仍借用 `server->lock` 串行化 peer table 操作；Channel/RPC
-构造与销毁仍由 Server 执行。
+计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。Shard 额外拥有
+peer lifecycle eventfd。Channel DOWN 的 Reactor callback 只 signal 该 eventfd，
+不取得 `server->lock`；reaper 被事件唤醒后再扫描并执行安全的
+quiesce/destroy。
+
+accept/reaper 仍是中央线程，peer table 的 publish/detach 目前仍借用
+`server->lock` 过渡串行化；Channel/RPC 构造与销毁仍由 Server 执行。
 
 当前内部配置仍显式要求 `shard_count == 1`。
 
@@ -57,7 +61,7 @@ flowchart TB
 ### TARGET V1 不再需要
 
 - 中央 accept thread；
-- Server reaper thread；
+- Server event-driven reaper thread（shard-local eventfd wake，无固定轮询）；
 - 每 peer 独立 timer thread。
 
 accept、connection error、peer reclaim 和 timer 应逐步收敛到 Reactor。
@@ -110,6 +114,7 @@ struct tr_runtime_shard {
     uint32_t peer_capacity;
     uint32_t peer_count;
     uint32_t peer_reaping_count;
+    int peer_event_fd;
 };
 ```
 
@@ -120,9 +125,9 @@ Client/Server 都通过 `shard[0]` 取得 Reactor。Server 的 RPC worker group
 Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
 
-listener 与 peer resource ownership 已下沉；accept/reaper execution、
-peer Channel/RPC lifecycle、Pipeline 与 routing 仍未完全下沉，应在后续 PR
-按 ownership 继续迁移。
+listener 与 peer resource ownership 已下沉；reaper wake 已事件化并归 shard。
+accept execution、reaper cleanup execution、peer Channel/RPC lifecycle、
+Pipeline 与 routing 仍未完全下沉，应在后续 PR 按 ownership 继续迁移。
 
 目标逻辑结构：
 

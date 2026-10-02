@@ -43,6 +43,15 @@ int tr_channel_create_deferred(
 int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
 					    int enabled);
 
+/*
+ * Internal lifecycle observer is independent from the upper-layer Channel
+ * handler used by RPC. It receives Channel events after the normal handler and
+ * must only perform short non-blocking notification work.
+ */
+int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
+				      tr_channel_event_cb event_cb,
+				      void *callback_arg);
+
 int tr_channel_start(struct tr_channel *channel);
 
 #endif
