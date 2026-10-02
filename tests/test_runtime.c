@@ -207,9 +207,8 @@ static void test_runtime_shard_listener_events(void)
 	int client_fd = -1;
 	int ret;
 
-	memset(&config, 0, sizeof(config));
+	runtime_test_config_init(&config, &shard_config, 1U);
 	memset(&ctx, 0, sizeof(ctx));
-	config.shard_count = 1U;
 
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
@@ -395,9 +394,8 @@ static void test_runtime_shard_peer_event_dispatch(void)
 	struct runtime_peer_event_dispatch_ctx ctx;
 	struct timespec deadline;
 
-	memset(&config, 0, sizeof(config));
+	runtime_test_config_init(&config, &shard_config, 1U);
 	memset(&ctx, 0, sizeof(ctx));
-	config.shard_count = 1U;
 	shard_config.peer_capacity = 1U;
 
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
