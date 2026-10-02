@@ -15,6 +15,7 @@ struct tr_runtime_shard {
 struct tr_runtime {
 	uint32_t shard_count;
 	struct tr_runtime_shard *shards;
+	int started;
 };
 
 int tr_runtime_create(const struct tr_runtime_config *config,
@@ -23,9 +24,11 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	struct tr_runtime *runtime;
 	uint32_t i;
 
-	if (!config || !out || config->shard_count != TR_RUNTIME_PHASE3_SHARDS)
+	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
+	if (!config || config->shard_count != TR_RUNTIME_PHASE3_SHARDS)
+		return TR_ERR_INVALID;
 
 	runtime = (struct tr_runtime *)calloc(1, sizeof(*runtime));
 	if (!runtime)
@@ -67,6 +70,8 @@ int tr_runtime_start(struct tr_runtime *runtime)
 
 	if (!runtime)
 		return TR_ERR_INVALID;
+	if (runtime->started)
+		return TR_ERR_STATE;
 
 	for (i = 0; i < runtime->shard_count; ++i) {
 		struct tr_runtime_shard *shard = &runtime->shards[i];
@@ -91,6 +96,7 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		shard->started = 1;
 	}
 
+	runtime->started = 1;
 	return TR_OK;
 }
 
@@ -101,6 +107,8 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 
 	if (!runtime)
 		return TR_ERR_INVALID;
+	if (!runtime->started)
+		return TR_OK;
 
 	i = runtime->shard_count;
 	while (i != 0U) {
@@ -118,6 +126,8 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 			shard->started = 0;
 	}
 
+	if (result == TR_OK)
+		runtime->started = 0;
 	return result;
 }
 
