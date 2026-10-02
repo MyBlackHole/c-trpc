@@ -255,6 +255,14 @@ tr_runtime_shard_reactor(const struct tr_runtime_shard *shard)
 	return shard ? shard->reactor : NULL;
 }
 
+int tr_runtime_shard_call(struct tr_runtime_shard *shard,
+			  int (*fn)(void *arg), void *arg)
+{
+	if (!shard || !fn)
+		return TR_ERR_INVALID;
+	return tr_reactor_call(shard->reactor, fn, arg);
+}
+
 struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
 {
