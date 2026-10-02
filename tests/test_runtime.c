@@ -41,6 +41,31 @@ static void test_runtime_rejects_multi_shard_before_phase4(void)
 	assert(runtime == NULL);
 }
 
+static void test_runtime_shard_rpc_executor_ownership(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+
+	memset(&config, 0, sizeof(config));
+	config.shard_count = 1U;
+	config.rpc_executor.endpoint_capacity = 4U;
+	config.rpc_executor.max_calls_per_endpoint = 8U;
+	config.rpc_executor.thread_count = 2U;
+
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	assert(tr_runtime_shard_rpc_executor(shard) != NULL);
+	tr_runtime_destroy(runtime);
+
+	memset(&config, 0, sizeof(config));
+	config.shard_count = 1U;
+	config.rpc_executor.thread_count = 1U;
+	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
+	assert(runtime == NULL);
+}
+
 static void test_runtime_lifecycle(void)
 {
 	struct tr_runtime_config config;
@@ -64,6 +89,7 @@ int main(void)
 {
 	RUN_TEST(test_runtime_single_shard_identity);
 	RUN_TEST(test_runtime_rejects_multi_shard_before_phase4);
+	RUN_TEST(test_runtime_shard_rpc_executor_ownership);
 	RUN_TEST(test_runtime_lifecycle);
 	return 0;
 }
