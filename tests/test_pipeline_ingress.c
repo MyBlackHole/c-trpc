@@ -306,8 +306,8 @@ static void test_pipeline_ingress_routing(void)
 
 	assert(tr_reactor_listener_unregister(reactor, listener) == TR_OK);
 	tr_socket_close(&listener);
-	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_OK);
 	assert(tr_pipeline_clear_control(pipeline, control) == TR_OK);
+	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_OK);
 	tr_pipeline_registry_destroy(registry);
 	tr_pipeline_destroy(pipeline);
 
