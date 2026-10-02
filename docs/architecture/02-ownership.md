@@ -49,8 +49,8 @@ flowchart TB
 
 | Object | Owner | 非 owner 如何访问 | 目标同步方式 |
 |---|---|---|---|
-| Listener fd | Reactor shard | legacy accept thread 只借用 fd | shard owns listen/close lifetime |
-| Peer slot storage / counters | Reactor shard | legacy accept/reaper under transition lock | shard owns capacity/storage; Server still drives lifecycle |
+| Listener fd | Reactor shard | Reactor epoll event | shard owns listen/close; Reactor owns accept readiness |
+| Peer slot storage / counters | Reactor shard | Reactor accept + legacy reaper under transition lock | shard owns capacity/storage; Server still drives final lifecycle |
 | Peer lifecycle eventfd | Reactor shard | Channel DOWN / rollback / publish signal | event notification；不取 server->lock |
 | Connection | Reactor shard | command | hot state 无锁 |
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
@@ -103,7 +103,7 @@ Cross-thread completion returns as an event to owner.
 因此 Server RPC executor、worker queue、listener、peer slot storage/counters
 已经成为 shard-local。Peer reaper wake 也已由固定轮询改为 shard-local eventfd
 通知，Reactor callback 不再为了唤醒 reaper 获取 Server-global lock。Peer 的
-Channel/RPC lifecycle 与 legacy accept/reaper publish/detach 同步仍是过渡状态；
+Channel/RPC lifecycle 与 legacy reaper publish/detach 同步仍是过渡状态；
 后续 connection table / buffer budget 继续按同一规则迁移。
 只有确实无法独立的资源才允许跨 shard 共享，并且必须单独说明同步与容量边界。
 
