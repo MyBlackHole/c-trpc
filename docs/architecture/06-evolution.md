@@ -188,7 +188,8 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - route attach 再校验 role/shard/pipeline_id/epoch/index/generation/owner Reactor；
 - routing mismatch 不消耗 reservation；
 - exact attach 才把 RESERVED 转为 ATTACHED；
-- registry 不拥有 Pipeline lifetime，destroy 前要求显式 unregister。
+- registry 不拥有 Pipeline lifetime，destroy 前要求显式 unregister；
+- registry 不向 owner domain 外返回裸 Pipeline pointer，按 ID 操作必须 owner 内 lookup+action。
 
 下一步：
 
