@@ -76,6 +76,12 @@ int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 				 int backlog, uint16_t *out_bound_port);
 int tr_runtime_shard_listener_fd(const struct tr_runtime_shard *shard);
 uint16_t tr_runtime_shard_bound_port(const struct tr_runtime_shard *shard);
+typedef void (*tr_runtime_listener_cb)(int fd, uint32_t events, void *arg);
+
+int tr_runtime_shard_enable_listener_events(struct tr_runtime_shard *shard,
+					    tr_runtime_listener_cb callback,
+					    void *arg);
+int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard);
 void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
 
 /*

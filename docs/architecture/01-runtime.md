@@ -13,14 +13,15 @@ tr_server
   │         ├─ Reactor
   │         ├─ listener
   │         ├─ RPC executor
-  │         └─ peer table / counters
-  ├─ accept thread
+  │         ├─ peer table / counters
+  │         └─ Reactor-owned accept
   └─ event-driven reaper thread
 ```
 
 `tr_runtime` 现在负责 Reactor 生命周期；Server 不再直接拥有 Reactor。
-Server listener 也已从 `tr_server` 下沉到 `tr_runtime_shard[0]`：listen/close
-和最终 cleanup 都由 shard 负责，中央 accept thread 当前只借用该 fd。
+Server listener 已从 `tr_server` 下沉到 `tr_runtime_shard[0]`，并直接注册到
+该 shard 的 Reactor epoll。listen/close/final cleanup 由 shard 负责，listener
+readiness 与 accept 由 Reactor owner 执行，不再创建中央 accept thread。
 
 该变化不增加线程。Peer slot storage、capacity/high-water、reaping/ready/rejection
 计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。Shard 额外拥有
@@ -28,8 +29,9 @@ peer lifecycle eventfd。Channel DOWN 的 Reactor callback 只 signal 该 eventf
 不取得 `server->lock`；reaper 被事件唤醒后再扫描并执行安全的
 quiesce/destroy。
 
-accept/reaper 仍是中央线程，peer table 的 publish/detach 目前仍借用
-`server->lock` 过渡串行化；Channel/RPC 构造与销毁仍由 Server 执行。
+accept 已进入 Reactor owner；reaper 仍是中央线程。peer table 的
+publish/detach 目前仍借用 `server->lock` 过渡串行化；Channel/RPC 构造与销毁
+仍由 Server/reaper 路径执行。
 
 当前内部配置仍显式要求 `shard_count == 1`。
 
@@ -60,11 +62,10 @@ flowchart TB
 
 ### TARGET V1 不再需要
 
-- 中央 accept thread；
 - Server event-driven reaper thread（shard-local eventfd wake，无固定轮询）；
 - 每 peer 独立 timer thread。
 
-accept、connection error、peer reclaim 和 timer 应逐步收敛到 Reactor。
+connection error、peer reclaim 和 timer 应继续收敛到 Reactor；accept 已完成迁移。
 
 ## 2. Per-Reactor Listener
 
@@ -125,9 +126,9 @@ Client/Server 都通过 `shard[0]` 取得 Reactor。Server 的 RPC worker group
 Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
 
-listener 与 peer resource ownership 已下沉；reaper wake 已事件化并归 shard。
-accept execution、reaper cleanup execution、peer Channel/RPC lifecycle、
-Pipeline 与 routing 仍未完全下沉，应在后续 PR 按 ownership 继续迁移。
+listener 与 peer resource ownership 已下沉；accept execution 已进入 Reactor；
+reaper wake 已事件化并归 shard。reaper cleanup execution、peer Channel/RPC
+lifecycle、Pipeline 与 routing 仍未完全下沉，应在后续 PR 按 ownership 继续迁移。
 
 目标逻辑结构：
 
@@ -249,7 +250,7 @@ Reactor shard
 | `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
 | `tr_server_create()` | 创建 single-shard Runtime（Reactor 尚未启动）+ shard[0] 的 `executor_threads` 个 RPC worker |
 | `tr_server_listen()` | 0 |
-| `tr_server_start()` | 3 个：Reactor、reaper、accept |
+| `tr_server_start()` | 2 个：Reactor、event-driven reaper |
 
 Client connect 才创建 RPC Endpoint worker；启用自动重连时仍可能增加
 reconnect thread。deadline / keepalive 不再产生独立线程，也不存在每个
@@ -259,5 +260,5 @@ Client/Server 实例额外持有的闲置 maintenance scheduler。
 检查创建前后的精确增量、正常销毁、未 start 的 Server 销毁和部分启动失败回收。
 它补充原有连接后线程上限测试，避免把 create 阶段的额外线程计入 baseline
 后漏检。故障注入覆盖 Client Reactor、三个 shard-local worker，以及 Server 的
-Reactor/reaper/accept 共七个启动点；每个成功创建的线程必须成功 join，
+Reactor/reaper 共六个启动点；每个成功创建的线程必须成功 join，
 失败回滚不允许遗留线程或重复 join。

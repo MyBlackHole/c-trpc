@@ -159,7 +159,7 @@ static void test_server_create_start_destroy_threads(void)
 				listen_loopback(server);
 				expect_threads(workers, 0U);
 				assert(tr_server_start(server) == TR_OK);
-				total += 3U; /* Reactor + accept + reaper。 */
+				total += 2U; /* Reactor + event-driven reaper。 */
 				expect_threads(total, 0U);
 			}
 			tr_server_destroy(server);
@@ -205,8 +205,8 @@ static void test_server_runtime_start_failures(void)
 	const unsigned workers = 3U;
 	unsigned stage;
 
-	/* 依次让 Reactor、reaper、accept 的 pthread_create 失败。 */
-	for (stage = 1U; stage <= 3U; ++stage) {
+	/* accept 已并入 Reactor；这里只剩 Reactor、reaper 两个 pthread 启动点。 */
+	for (stage = 1U; stage <= 2U; ++stage) {
 		struct tr_server_config config;
 		struct tr_server *server = NULL;
 		unsigned total = workers + stage - 1U;
