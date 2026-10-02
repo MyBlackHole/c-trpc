@@ -13,8 +13,7 @@ struct tr_rpc_endpoint;
 
 struct tr_runtime_peer {
 	int used;
-	int finalizing;
-	void *owner_arg;
+	void *finalize_ctx;
 	struct tr_conn_handle connection;
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
