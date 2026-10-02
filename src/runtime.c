@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 
+#include "tr/socket.h"
 #include "tr/status.h"
 #include "rpc_internal.h"
 
@@ -11,6 +12,8 @@ struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
 	struct tr_rpc_executor_group *rpc_executor;
+	int listen_fd;
+	uint16_t bound_port;
 	int started;
 };
 
@@ -25,6 +28,7 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	if (!shard)
 		return;
 
+	tr_runtime_shard_close_listener(shard);
 	if (shard->rpc_executor) {
 		tr_rpc_executor_group_destroy(shard->rpc_executor);
 		shard->rpc_executor = NULL;
@@ -77,6 +81,7 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		int ret;
 
 		shard->shard_id = i;
+		shard->listen_fd = -1;
 		ret = tr_reactor_create(&config->reactor, NULL, NULL, NULL,
 					&shard->reactor);
 		if (ret == TR_OK && config->rpc_executor.endpoint_capacity != 0U)
@@ -210,4 +215,47 @@ struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
 {
 	return shard ? shard->rpc_executor : NULL;
+}
+
+int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
+				 const char *address, uint16_t port,
+				 int backlog, uint16_t *out_bound_port)
+{
+	int fd = -1;
+	uint16_t bound = 0;
+	int ret;
+
+	if (!shard || !address || backlog <= 0)
+		return TR_ERR_INVALID;
+	if (shard->listen_fd >= 0)
+		return TR_ERR_STATE;
+
+	ret = tr_tcp_listen_ipv4(address, port, backlog, &fd, &bound);
+	if (ret != TR_OK)
+		return ret;
+
+	shard->listen_fd = fd;
+	shard->bound_port = bound;
+	if (out_bound_port)
+		*out_bound_port = bound;
+	return TR_OK;
+}
+
+int tr_runtime_shard_listener_fd(const struct tr_runtime_shard *shard)
+{
+	return shard ? shard->listen_fd : -1;
+}
+
+uint16_t tr_runtime_shard_bound_port(const struct tr_runtime_shard *shard)
+{
+	return shard ? shard->bound_port : 0U;
+}
+
+void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard)
+{
+	if (!shard)
+		return;
+
+	tr_socket_close(&shard->listen_fd);
+	shard->bound_port = 0U;
 }
