@@ -52,6 +52,16 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 				      tr_channel_event_cb event_cb,
 				      void *callback_arg);
 
+/*
+ * Server peer teardown is split in two:
+ * - detach_for_finalize(): owner-serialized, removes every Reactor/timer callback
+ *   source and makes the Channel unreachable from protocol dispatch;
+ * - finalize_detached(): owner-free memory/resource release, safe on a cleanup
+ *   context after detach returned.
+ */
+int tr_channel_detach_for_finalize(struct tr_channel *channel);
+void tr_channel_finalize_detached(struct tr_channel *channel);
+
 int tr_channel_start(struct tr_channel *channel);
 
 #endif

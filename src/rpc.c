@@ -11,6 +11,7 @@
 #include "reactor_internal.h"
 #include "observability_internal.h"
 
+#include <assert.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -270,6 +271,7 @@ struct tr_rpc_endpoint {
 
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
+	int teardown_detached;
 
 	/* Owner-visible coalescing state for retrying bounded pending tasks. */
 	int pending_executor_work;
@@ -4098,6 +4100,71 @@ static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
 	last = tr_refcount_put(&endpoint->refs);
 	if (last == 1)
 		tr_rpc_endpoint_release(endpoint);
+}
+
+static int tr_rpc_endpoint_detach_on_owner(void *arg)
+{
+	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
+
+	if (!endpoint)
+		return TR_ERR_INVALID;
+	if (!endpoint->executor.group)
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&endpoint->lock);
+	if (endpoint->teardown_detached) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return TR_OK;
+	}
+	endpoint->teardown_detached = 1;
+	pthread_mutex_unlock(&endpoint->lock);
+
+	/*
+	 * No new Channel callback can acquire Endpoint work after this point.
+	 * Owner serialization means a previously executing Channel/RPC callback
+	 * has already returned before this detach operation runs.
+	 */
+	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
+	tr_rpc_deadline_destroy(endpoint);
+
+	/*
+	 * Group-backed Server executors do not join here. stopping closes new
+	 * admission while already queued/running task references are allowed to
+	 * drain; finalize waits for those refs outside the Reactor owner.
+	 */
+	tr_rpc_executor_shutdown(endpoint);
+	return TR_OK;
+}
+
+int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint)
+{
+	if (!endpoint)
+		return TR_ERR_INVALID;
+	if (!endpoint->executor.group)
+		return TR_ERR_STATE;
+	return tr_rpc_owner_call(endpoint, tr_rpc_endpoint_detach_on_owner,
+				 endpoint);
+}
+
+void tr_rpc_endpoint_finalize_detached_with_stats(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
+{
+	if (!endpoint)
+		return;
+
+#ifndef NDEBUG
+	assert(endpoint->teardown_detached);
+#endif
+
+	tr_rpc_endpoint_wait_owner_only(endpoint);
+
+	/*
+	 * Existing worker/task references are now gone. Capture final counters
+	 * before dropping the owner's initial strong reference.
+	 */
+	if (stats)
+		(void)tr_rpc_endpoint_get_stats(endpoint, stats);
+	tr_rpc_endpoint_put(endpoint);
 }
 
 void tr_rpc_endpoint_destroy_with_stats(

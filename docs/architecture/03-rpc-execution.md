@@ -244,3 +244,33 @@ worker callback
 - worker handler 超时；
 - response ownership 在所有失败路径只有一次释放；
 - TSan 无新增共享状态 race。
+
+
+## 9. Endpoint Teardown: Detach Then Finalize
+
+Server peer teardown 不再由 cleanup thread 同步执行完整 Endpoint destructor。
+
+Phase 1 在 Reactor owner 上执行：
+
+```text
+detach Endpoint
+  -> Channel upper handler = NULL
+  -> unregister deadline timer
+  -> executor stopping = true
+  -> reject new executor task admission
+```
+
+Server 使用 shard-local executor group，因此该阶段不会 join worker。已经 queued /
+running 的 task 继续持有 Endpoint strong-ref 并正常完成。
+
+Phase 2 在 owner 外执行：
+
+```text
+wait Endpoint refs == owner reference
+  -> final executor/stat snapshot
+  -> drop owner ref
+  -> free Endpoint
+```
+
+因此 finalizer 不需要调用 `tr_reactor_quiesce()`，也不拥有任何 protocol state
+mutation 权限。

@@ -26,12 +26,16 @@ readiness 与 accept 由 Reactor owner 执行，不再创建中央 accept thread
 该变化不增加线程。Peer slot storage、capacity/high-water、reaping/ready/rejection
 计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。Shard 额外拥有
 peer lifecycle eventfd。Channel DOWN 的 Reactor callback 只 signal 该 eventfd，
-不取得 `server->lock`；reaper 被事件唤醒后再扫描并执行安全的
-quiesce/destroy。
+不取得 `server->lock`；reaper 被事件唤醒后扫描 disconnected peer。
 
-accept 已进入 Reactor owner；reaper 仍是中央线程。peer table 的
-publish/detach 目前仍借用 `server->lock` 过渡串行化；Channel/RPC 构造与销毁
-仍由 Server/reaper 路径执行。
+Reaping 已拆成两阶段。Peer 仍在 shard table 时，reaper 同步请求 Reactor owner
+执行 detach：移除 RPC/Channel callback、deadline/keepalive timer source，并关闭
+Server Endpoint 的 executor admission。只有 owner detach 成功后，peer 才从
+shard table 摘除并把 ownership 转移给 reaper。随后 reaper 只等待已有 worker
+strong-ref 排空、采集最终统计并 free，不再调用 Reactor quiesce/detach API。
+
+accept 已进入 Reactor owner；reaper 仍是中央 finalizer thread。peer table 的
+publish/detach 目前仍借用 `server->lock` 过渡串行化。
 
 当前内部配置仍显式要求 `shard_count == 1`。
 
@@ -127,8 +131,9 @@ Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
 
 listener 与 peer resource ownership 已下沉；accept execution 已进入 Reactor；
-reaper wake 已事件化并归 shard。reaper cleanup execution、peer Channel/RPC
-lifecycle、Pipeline 与 routing 仍未完全下沉，应在后续 PR 按 ownership 继续迁移。
+reaper wake 已事件化并归 shard；peer teardown 已拆为 owner detach + external
+finalize。剩余工作是移除 external finalizer thread 和 `server->lock` 的
+publish/detach 过渡同步，然后再继续 Pipeline 与 routing。
 
 目标逻辑结构：
 

@@ -61,8 +61,22 @@ event 最多处理固定批次的新连接，剩余 backlog 由 level-triggered 
 turn 继续驱动。
 
 reaper thread 仍保留，但不再每 10ms 轮询：Channel DOWN、partial peer rollback
-和 peer publish 通过 shard-local eventfd 唤醒它，再执行安全的
-quiesce/destroy。peer Channel/RPC lifecycle 尚未完全 owner 化。
+和 peer publish 通过 shard-local eventfd 唤醒它。Peer teardown 现在分成两阶段：
+
+```text
+Reactor owner detach
+  -> remove RPC/Channel callback sources
+  -> stop deadline/keepalive timer sources
+  -> close RPC executor admission
+  -> remove peer from shard table
+
+reaper finalize
+  -> wait already-owned worker refs
+  -> snapshot final stats
+  -> free Endpoint/Channel memory
+```
+
+因此 reaper 已不再执行 protocol detach/quiesce，只承担 owner-free finalization。
 
 当前仍固定 `shard_count = 1`。
 
