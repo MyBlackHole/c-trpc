@@ -187,7 +187,7 @@ static void wait_for_peer_close(int fd)
 
 	memset(&pfd, 0, sizeof(pfd));
 	pfd.fd = fd;
-	pfd.events = POLLIN | POLLHUP | POLLRDHUP;
+	pfd.events = POLLIN | POLLHUP;
 
 	do {
 		ret = poll(&pfd, 1, 10000);
