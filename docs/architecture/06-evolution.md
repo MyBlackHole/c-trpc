@@ -83,10 +83,12 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - Client/Server 不再直接拥有 Reactor lifecycle；
 - Runtime 统一负责 Reactor create/start/stop/destroy；
 - 显式 `shard_id = 0` 与 `shard_count = 1`；
-- public API、wire、listener、peer table、线程数量与启动时机保持不变；
+- public API、wire、线程数量与启动时机保持不变；
 - 独立测试验证 single-shard identity、拒绝提前启用 multi-shard，以及生命周期语义；
 - Server RPC executor group 已从 Server 全局 owner 下沉到 shard[0]；
 - Server Endpoint 只进入所属 shard 的 worker pool，不再依赖 Server-global executor owner；
+- Server listener fd / bound port 已从 Server 下沉到 shard[0] ownership；
+- 中央 accept thread 暂时只借用 shard-owned listener，不拥有其生命周期；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
 
 当前仍：
@@ -94,12 +96,13 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 ```text
 shard_count = 1
 Server accept/reaper remain central
-listener and peer table remain Server-owned
+listener is shard-owned
+peer table remains Server-owned
 ```
 
-completion event publication 的 control-plane lock 解耦已完成；下一阶段把
-listener ownership 下沉到 shard，继续保持 `shard_count = 1`。完成单 shard
-资源域后再打开 Phase 4 的 N shards。
+completion event publication 的 control-plane lock 解耦与 listener ownership
+下沉均已完成。下一阶段继续把 accept/peer resource ownership 向 shard 收敛，
+保持 `shard_count = 1`；完成单 shard 资源域后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 
