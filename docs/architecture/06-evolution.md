@@ -131,7 +131,11 @@ retired stats/shutdown 控制面，不在 hot path。Phase 3 ownership seam 至�
 - 每个 shard 独立创建 Reactor、peer storage/event source、RPC executor；
 - multi-shard start 失败按已启动 shard 反向 rollback；
 - 测试验证 3 shards 的 executor worker 总数与 Reactor 总数精确匹配配置；
-- Server/Client facade 仍显式创建 1 shard，因此 public 行为未改变。
+- Server/Client facade 仍显式创建 1 shard，因此 public 行为未改变；
+- Server 已引入 per-shard resource context，RPC message/reassembly pool 与
+  executor binding 不再是 Server-global hot resource；
+- start/drain/destroy 已按 server shard context 遍历，为 N-shard facade 做好
+  生命周期准备。
 
 下一步才在 Server 打开：
 

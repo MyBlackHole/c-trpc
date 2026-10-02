@@ -49,7 +49,7 @@ struct tr_facade_limits {
 
 	/*
 	 * Client：worker 由 Client RPC Endpoint 自己拥有。
-	 * Server：所有已接收 peer 的 RPC Endpoint 共用一个 worker pool。
+	 * Server：同一 shard 的 RPC Endpoint 共用 shard-local worker pool。
 	 */
 	uint32_t executor_threads;
 	/* 每个 Endpoint 独立的有界 task 容量。 */

@@ -88,8 +88,10 @@ finalization。若没有 worker ref，owner ref transfer 可立即完成 owner-f
 finalization。
 
 当前 Server/Client facade 仍固定使用 `shard_count = 1`；内部 Runtime 已支持
-N shards，并使用显式 per-shard resource config。SO_REUSEPORT 与 Server
-multi-shard routing 尚未打开。
+N shards，并使用显式 per-shard resource config。Server 自身也已引入
+`server_shard_context`，把 RPC message pool、reassembly pool、executor binding、
+peer lifecycle registration 都绑定到具体 Runtime shard，不再保留 Server-global
+hot buffer pool。SO_REUSEPORT 与公开 Server multi-shard routing 尚未打开。
 
 Reactor connection slot 已采用严格 single-owner 方向；slot generation/state 使用原子 capability metadata，外部控制通过 command 进入 Reactor。
 
