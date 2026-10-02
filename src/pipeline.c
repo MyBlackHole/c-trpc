@@ -54,6 +54,19 @@ static int tr_pipeline_connection_valid(const struct tr_pipeline *pipeline,
 	return pipeline && connection.reactor == pipeline->owner;
 }
 
+static int tr_pipeline_connection_is_data(const struct tr_pipeline *pipeline,
+					  struct tr_conn_handle connection)
+{
+	uint32_t i;
+
+	for (i = 0; i < pipeline->data_capacity; ++i)
+		if (pipeline->data_slots[i].used &&
+		    tr_pipeline_conn_equal(pipeline->data_slots[i].connection,
+					   connection))
+			return 1;
+	return 0;
+}
+
 static uint32_t tr_pipeline_stream_hash(uint32_t stream_id)
 {
 	uint32_t value = stream_id;
@@ -157,7 +170,8 @@ static int tr_pipeline_set_control_on_owner(void *arg)
 
 	if (!tr_pipeline_connection_valid(pipeline, request->connection))
 		return TR_ERR_INVALID;
-	if (pipeline->control_bound)
+	if (pipeline->control_bound ||
+	    tr_pipeline_connection_is_data(pipeline, request->connection))
 		return TR_ERR_STATE;
 
 	pipeline->control = request->connection;
@@ -250,6 +264,10 @@ static int tr_pipeline_add_data_on_owner(void *arg)
 
 	if (!tr_pipeline_connection_valid(pipeline, request->connection))
 		return TR_ERR_INVALID;
+	if ((pipeline->control_bound &&
+	     tr_pipeline_conn_equal(pipeline->control, request->connection)) ||
+	    tr_pipeline_connection_is_data(pipeline, request->connection))
+		return TR_ERR_STATE;
 	if (pipeline->data_count == pipeline->data_capacity)
 		return TR_AGAIN;
 
