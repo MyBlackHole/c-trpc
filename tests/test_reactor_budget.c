@@ -740,6 +740,7 @@ static void test_completion_zero_budget(void)
 	assert(tr_completion_queue_pop_batch(NULL, &out, 0U, &more) == 0U);
 	assert(more == 0);
 	assert(tr_completion_queue_init(&queue, 1U) == TR_OK);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
 	assert(tr_completion_queue_pop_batch(&queue, &out, 0U, &more) == 0U);
 	assert(more == 0);
 	assert(tr_completion_queue_push(&queue, &item, &wake) == TR_OK && wake == 1);

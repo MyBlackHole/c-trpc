@@ -19,6 +19,7 @@ struct tr_completion_queue {
 	uint32_t count;
 	uint32_t peak_count;
 	uint64_t full_events;
+	int accepting;
 	int wake_pending;
 };
 
@@ -27,8 +28,16 @@ int tr_completion_queue_init(struct tr_completion_queue *queue,
 void tr_completion_queue_destroy(struct tr_completion_queue *queue);
 
 /*
+ * Admission is queue-local so completion producers do not need Reactor
+ * control-plane serialization. open/close are linearized by queue->lock.
+ */
+int tr_completion_queue_open(struct tr_completion_queue *queue);
+void tr_completion_queue_close(struct tr_completion_queue *queue);
+
+/*
  * TR_OK 后 completion ownership 已转移给 queue。
  * TR_AGAIN 表示有界 queue 已满，调用方仍拥有 arg。
+ * TR_ERR_CLOSED 表示 admission 已关闭，调用方仍拥有 arg。
  */
 int tr_completion_queue_push(struct tr_completion_queue *queue,
 			     const struct tr_completion *completion,

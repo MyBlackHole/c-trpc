@@ -412,7 +412,7 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 	return TR_OK;
 }
 
-static int tr_reactor_push_completion_locked(
+static int tr_reactor_push_completion(
 	struct tr_reactor *reactor, const struct tr_completion *completion)
 {
 	int need_wake = 0;
@@ -2022,6 +2022,12 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_SYS;
 	}
 
+	/*
+	 * completion admission opens only after the consumer thread exists.
+	 * From this point producers synchronize only with the completion queue,
+	 * not with ctl_lock.
+	 */
+	(void)tr_completion_queue_open(&reactor->completions);
 	reactor->started = 1;
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return TR_OK;
@@ -2552,30 +2558,20 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	completion.fn = fn;
 	completion.arg = arg;
 
-	pthread_mutex_lock(&reactor->ctl_lock);
-	if (!reactor->started || !reactor->accepting) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		return TR_ERR_CLOSED;
-	}
-
 	/*
-	 * Completion 是 worker 已经完成的状态转移，不能因为 ring 暂时满就
-	 * 回退到 worker 直接修改协议状态。队列容量保持有界，用 producer
-	 * 等待形成背压。
+	 * completion admission is linearized by completions.lock, independently
+	 * of Reactor control-plane serialization. stop closes that admission gate
+	 * before publishing STOP, so every successful enqueue is guaranteed to be
+	 * covered by the shutdown drain and every later producer sees CLOSED.
+	 *
+	 * A full bounded queue still backpressures the worker. The worker never
+	 * falls back to mutating Reactor-owned protocol state directly.
 	 */
 	do {
-		ret = tr_reactor_push_completion_locked(reactor, &completion);
-		if (ret == TR_AGAIN) {
-			pthread_mutex_unlock(&reactor->ctl_lock);
+		ret = tr_reactor_push_completion(reactor, &completion);
+		if (ret == TR_AGAIN)
 			sched_yield();
-			pthread_mutex_lock(&reactor->ctl_lock);
-			if (!reactor->started || !reactor->accepting) {
-				ret = TR_ERR_CLOSED;
-				break;
-			}
-		}
 	} while (ret == TR_AGAIN);
-	pthread_mutex_unlock(&reactor->ctl_lock);
 	return ret;
 }
 
@@ -2895,6 +2891,12 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	}
 
 	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
+	/*
+	 * Close completion admission before STOP becomes visible to the owner.
+	 * queue->lock is the completion linearization point: pushes that won the
+	 * lock first are accepted and later drained; pushes after close fail.
+	 */
+	tr_completion_queue_close(&reactor->completions);
 	memset(&command, 0, sizeof(command));
 	command.type = TR_CMD_STOP;
 

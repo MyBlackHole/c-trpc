@@ -56,7 +56,7 @@ flowchart TB
 | RPC Call | Reactor shard | completion | hot state 无锁 |
 | Backup Pipeline | Reactor shard | command | hot state 无锁 |
 | Task | Worker | ownership transfer | 无共享修改 |
-| Completion | producer → Reactor | bounded per-Reactor MPSC queue | queue synchronization + wake coalescing |
+| Completion | producer → Reactor | bounded per-Reactor MPSC queue | queue-local admission + wake coalescing；不经过 ctl_lock |
 | RPC Executor / Worker Queue | Reactor shard | owner submit / local worker pop | shard-local mutex + cond 可接受 |
 | Generic Buffer Pool | shared | acquire/release | mutex 可接受 |
 | Shard-local buffer cache | Reactor shard | return via owner | TARGET 无锁 |
@@ -82,7 +82,7 @@ flowchart TB
 
 因此：
 
-- shard 内 command queue、worker queue、shared allocator 的局部锁可以长期保留；
+- shard 内 command queue、completion queue、worker queue、shared allocator 的局部锁可以长期保留；
 - 不允许为了资源复用重新引入跨 shard hot-path executor lock；
 - `channel->lock`、`endpoint->lock` 的目标是随着 ownership 收敛逐步缩小；
 - 不用大量 atomic 重新制造“隐式 shared state”。

@@ -43,8 +43,30 @@ void tr_completion_queue_destroy(struct tr_completion_queue *queue)
 	queue->count = 0;
 	queue->peak_count = 0;
 	queue->full_events = 0;
+	queue->accepting = 0;
 	queue->wake_pending = 0;
 	pthread_mutex_destroy(&queue->lock);
+}
+
+int tr_completion_queue_open(struct tr_completion_queue *queue)
+{
+	if (!queue)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&queue->lock);
+	queue->accepting = 1;
+	pthread_mutex_unlock(&queue->lock);
+	return TR_OK;
+}
+
+void tr_completion_queue_close(struct tr_completion_queue *queue)
+{
+	if (!queue)
+		return;
+
+	pthread_mutex_lock(&queue->lock);
+	queue->accepting = 0;
+	pthread_mutex_unlock(&queue->lock);
 }
 
 int tr_completion_queue_push(struct tr_completion_queue *queue,
@@ -57,6 +79,10 @@ int tr_completion_queue_push(struct tr_completion_queue *queue,
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
+	if (!queue->accepting) {
+		pthread_mutex_unlock(&queue->lock);
+		return TR_ERR_CLOSED;
+	}
 	if (queue->count == queue->capacity) {
 		queue->full_events++;
 		pthread_mutex_unlock(&queue->lock);

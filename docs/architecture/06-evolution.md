@@ -51,6 +51,8 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - completion batch drain；
 - completion backlog 下的 nonblocking event-loop continuation；
 - STOP 前已接受 completion 的 drain barrier；
+- completion admission 已下沉到 completion queue 自身锁域，worker hot path
+  不再经过 Reactor `ctl_lock`；
 - 每轮一个 command batch，wake 路径不重复消费命令预算；
 - command backlog 的保守非阻塞续处理与公平性/退出回归测试；
 - Command / Completion / Timer / RX / TX 共享整轮额度；
@@ -95,9 +97,9 @@ Server accept/reaper remain central
 listener and peer table remain Server-owned
 ```
 
-接下来先继续收敛 completion 的 event publication / hot-path lifecycle lock，
-然后把 listener ownership 下沉到 shard；两步都继续保持
-`shard_count = 1`。完成单 shard 资源域后再打开 Phase 4 的 N shards。
+completion event publication 的 control-plane lock 解耦已完成；下一阶段把
+listener ownership 下沉到 shard，继续保持 `shard_count = 1`。完成单 shard
+资源域后再打开 Phase 4 的 N shards。
 
 ## Phase 4 - Multi-Reactor Listener
 
