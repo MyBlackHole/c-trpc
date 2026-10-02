@@ -8,6 +8,7 @@
 
 #include "tr/socket.h"
 #include "tr/status.h"
+#include "reactor_internal.h"
 #include "rpc_internal.h"
 
 #define TR_RUNTIME_PHASE3_SHARDS 1U
@@ -29,6 +30,7 @@ struct tr_runtime_shard {
 
 	int listen_fd;
 	uint16_t bound_port;
+	int listener_events_registered;
 	int started;
 };
 
@@ -290,11 +292,45 @@ uint16_t tr_runtime_shard_bound_port(const struct tr_runtime_shard *shard)
 	return shard ? shard->bound_port : 0U;
 }
 
+int tr_runtime_shard_enable_listener_events(struct tr_runtime_shard *shard,
+					    tr_runtime_listener_cb callback,
+					    void *arg)
+{
+	int ret;
+
+	if (!shard || !callback || shard->listen_fd < 0)
+		return TR_ERR_INVALID;
+	if (shard->listener_events_registered)
+		return TR_ERR_STATE;
+
+	ret = tr_reactor_listener_register(shard->reactor, shard->listen_fd,
+					   callback, arg);
+	if (ret == TR_OK)
+		shard->listener_events_registered = 1;
+	return ret;
+}
+
+int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard)
+{
+	int ret;
+
+	if (!shard)
+		return TR_ERR_INVALID;
+	if (!shard->listener_events_registered)
+		return TR_OK;
+
+	ret = tr_reactor_listener_unregister(shard->reactor, shard->listen_fd);
+	if (ret == TR_OK)
+		shard->listener_events_registered = 0;
+	return ret;
+}
+
 void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard)
 {
 	if (!shard)
 		return;
 
+	(void)tr_runtime_shard_disable_listener_events(shard);
 	tr_socket_close(&shard->listen_fd);
 	shard->bound_port = 0U;
 }
