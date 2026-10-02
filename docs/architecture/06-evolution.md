@@ -93,7 +93,8 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - Server 仍负责 peer Channel/RPC 构造；disconnect teardown 已拆为 Reactor-owner detach + external finalize；
 - owner detach 移除 Channel/RPC callback、deadline/keepalive timer source，并关闭 executor admission；
 - 只有 owner detach 成功后 peer 才离开 shard table；reaper 只等待 worker refs、采集统计和 free；
-- Reactor accept 与 peer publish/table detach 仍通过过渡锁串行化；
+- Reactor accept、peer reserve/publish/table detach/live snapshot 已全部 owner-only，
+  不再通过 Server-global transition lock 串行化；
 - shard[0] peer lifecycle eventfd 已注册进 Reactor epoll；Channel DOWN/rollback/
   publish 只发 deferred owner event；
 - dedicated reaper thread 已删除；owner detach 后 peer slot 立即复用，旧
@@ -115,10 +116,11 @@ peer Channel/RPC lifecycle remains Server-driven
 ```
 
 completion event publication、listener ownership、peer resource ownership、
-accept execution、peer lifecycle event、owner detach 和 last-ref finalization
-均已 shard 化，dedicated accept/reaper thread 都已删除。下一阶段继续移除
-`server->lock` 的 peer publish/snapshot 中心同步角色；仍保持
-`shard_count = 1`，完成后再打开 Phase 4 的 N shards。
+accept execution、peer lifecycle event、owner detach、last-ref finalization 以及
+peer table mutation/snapshot 均已 shard owner 化，dedicated accept/reaper thread
+和 Server-global peer transition lock 都已删除。剩余 `finalizer_lock` 仅属于
+retired stats/shutdown 控制面，不在 hot path。仍保持 `shard_count = 1`，下一步
+可以开始 Phase 4 的 N shards 准备。
 
 ## Phase 4 - Multi-Reactor Listener
 
@@ -136,7 +138,8 @@ own connection table
 own peer state
 ```
 
-中央 accept/reaper 都已删除；Phase 4 前继续收敛剩余 Server transition lock。
+中央 accept/reaper 与 peer transition lock 都已删除；Phase 3 single-shard
+ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 
 ## Phase 5 - Pipeline / Connection Group
 
