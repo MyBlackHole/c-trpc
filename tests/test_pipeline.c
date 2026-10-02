@@ -173,8 +173,15 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(stats.stream_affinity_capacity == 4U);
 	assert(stats.stream_affinity_count == 1U);
 
+	/* CONTROL loss invalidates capabilities that were only RESERVED. */
+	assert(tr_pipeline_remove_data(pipeline, reused) == TR_OK);
+	assert(tr_pipeline_reserve_data(pipeline, &reused) == TR_OK);
 	assert(tr_pipeline_clear_control(pipeline, control) == TR_OK);
 	assert(tr_pipeline_control(pipeline, &connection) == TR_ERR_STALE);
+	assert(tr_pipeline_attach_data(pipeline, reused, data_conn2) ==
+	       TR_ERR_STATE);
+	assert(tr_pipeline_cancel_data_reservation(pipeline, reused) ==
+	       TR_ERR_STALE);
 
 	tr_pipeline_destroy(pipeline);
 	assert(tr_reactor_stop(other) == TR_OK);
