@@ -535,14 +535,15 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 	}
 }
 
-static int tr_server_adopt_peer(struct tr_server *server, int fd)
+static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 {
+	struct tr_server *server = shard->server;
 	struct tr_channel_config channel_config;
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_runtime_peer *peer;
 	struct tr_server_peer_guard peer_guard
-		TR_AUTO(tr_server_peer_guard_cleanup) = { server, NULL, 0 };
+		TR_AUTO(tr_server_peer_guard_cleanup) = { shard, NULL, 0 };
 	uint32_t slot;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
@@ -550,29 +551,30 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	{
 		struct tr_runtime_peer_stats peer_stats;
 
-		tr_runtime_shard_peer_stats(server->shard, &peer_stats);
+		tr_runtime_shard_peer_stats(shard->runtime, &peer_stats);
 		if (peer_stats.current >= peer_stats.capacity) {
-			tr_runtime_shard_peer_note_capacity_rejection(server->shard);
+			tr_runtime_shard_peer_note_capacity_rejection(
+				shard->runtime);
 			return TR_AGAIN;
 		}
 	}
 
-	for (slot = 0; slot < tr_server_peer_capacity(server); ++slot) {
-		peer = tr_server_peer_at(server, slot);
+	for (slot = 0; slot < tr_server_shard_peer_capacity(shard); ++slot) {
+		peer = tr_server_shard_peer_at(shard, slot);
 		if (peer && !peer->used)
 			break;
 	}
-	if (slot == tr_server_peer_capacity(server)) {
-		tr_runtime_shard_peer_note_capacity_rejection(server->shard);
+	if (slot == tr_server_shard_peer_capacity(shard)) {
+		tr_runtime_shard_peer_note_capacity_rejection(shard->runtime);
 		return TR_AGAIN;
 	}
 
-	peer = tr_server_peer_at(server, slot);
+	peer = tr_server_shard_peer_at(shard, slot);
 	memset(peer, 0, sizeof(*peer));
 	peer->finalize_ctx = calloc(1, sizeof(struct tr_server_detached_peer));
 	if (!peer->finalize_ctx)
 		return TR_ERR_NOMEM;
-	((struct tr_server_detached_peer *)peer->finalize_ctx)->server = server;
+	((struct tr_server_detached_peer *)peer->finalize_ctx)->shard = shard;
 	peer_guard.peer = peer;
 
 	if (tr_tcp_nodelay_policy_enabled(server->config.tcp_nodelay)) {
@@ -581,7 +583,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 			return ret;
 	}
 
-	ret = tr_reactor_adopt_fd(tr_server_reactor(server), owned_fd,
+	ret = tr_reactor_adopt_fd(tr_server_shard_reactor(shard), owned_fd,
 				  &peer->connection);
 	if (ret != TR_OK)
 		return ret;
@@ -598,7 +600,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		server->config.limits.window_update_threshold_bytes;
 	channel_config.max_message_bytes =
 		server->config.limits.max_message_bytes;
-	channel_config.reassembly_pool = &server->reassembly_pool;
+	channel_config.reassembly_pool = &shard->reassembly_pool;
 
 	/*
 	 * Server 必须先完成 RPC Endpoint/Method 安装，再启动 HELLO。
@@ -612,7 +614,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		return ret;
 
 	ret = tr_channel_set_lifecycle_observer(
-		peer->channel, tr_server_on_channel_lifecycle, server);
+		peer->channel, tr_server_on_channel_lifecycle, shard);
 	if (ret != TR_OK)
 		return ret;
 
@@ -620,8 +622,8 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	rpc_config.role = TR_RPC_SERVER;
 	rpc_config.max_methods = server->config.limits.max_methods;
 	rpc_config.max_calls = server->config.limits.max_calls;
-	rpc_config.message_pool = &server->rpc_message_pool;
-	rpc_config.executor_threads = server->config.limits.executor_threads;
+	rpc_config.message_pool = &shard->rpc_message_pool;
+	rpc_config.executor_threads = shard->executor_threads;
 	rpc_config.executor_queue_capacity =
 		server->config.limits.executor_queue_capacity;
 	rpc_config.executor_continuation_reserve =
@@ -630,7 +632,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		server->config.limits.observability_flags;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
-		peer->channel, &rpc_config, tr_server_rpc_executor(server),
+		peer->channel, &rpc_config, tr_server_shard_rpc_executor(shard),
 		&peer->rpc);
 	if (ret != TR_OK)
 		return ret;
@@ -655,13 +657,13 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 	}
 
 	peer->used = 1;
-	tr_server_note_peer_added_owner(server);
-	tr_runtime_shard_peer_note_ready(server->shard);
+	tr_server_note_peer_added_owner(shard);
+	tr_runtime_shard_peer_note_ready(shard->runtime);
 	/*
 	 * Cover the race where the connection went DOWN before this peer became
 	 * visible in the owner table. The shard eventfd coalesces the retry.
 	 */
-	tr_server_signal_peer_cleanup(server);
+	tr_server_signal_peer_cleanup(shard);
 	peer_guard.armed = 0;
 	return TR_OK;
 }
@@ -669,10 +671,10 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 static void tr_server_on_listener_ready(int listener, uint32_t events,
 					void *arg)
 {
-	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_server_shard *shard = (struct tr_server_shard *)arg;
 	uint32_t accepted = 0U;
 
-	if (!server || !(events & EPOLLIN))
+	if (!shard || !(events & EPOLLIN))
 		return;
 
 	while (accepted < TR_SERVER_ACCEPT_BATCH) {
@@ -685,14 +687,10 @@ static void tr_server_on_listener_ready(int listener, uint32_t events,
 			break;
 
 		/*
-		 * Runs on the Reactor owner. adopt_fd takes the owner fast path so
-		 * Channel/RPC setup sees an ACTIVE connection immediately.
-		 *
-		 * Bound each listener callback so an accept flood cannot monopolize
-		 * one Reactor turn. Level-triggered epoll will report the listener
-		 * again while backlog remains.
+		 * Runs on the shard Reactor owner. adopt_fd takes the owner fast path
+		 * so Channel/RPC setup sees an ACTIVE connection immediately.
 		 */
-		(void)tr_server_adopt_peer(server, fd);
+		(void)tr_server_adopt_peer(shard, fd);
 		accepted++;
 	}
 }
