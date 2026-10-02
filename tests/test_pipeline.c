@@ -66,6 +66,7 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(tr_pipeline_set_control(pipeline, wrong_control) == TR_ERR_INVALID);
 	assert(tr_pipeline_set_control(pipeline, control) == TR_OK);
 	assert(tr_pipeline_set_control(pipeline, control) == TR_ERR_STATE);
+	assert(tr_pipeline_add_data(pipeline, control, &data0) == TR_ERR_STATE);
 	assert(tr_pipeline_control(pipeline, &connection) == TR_OK);
 	assert(conn_equal(connection, control));
 
@@ -84,6 +85,7 @@ static void test_pipeline_connection_group_and_affinity(void)
 		       pipeline, fake_connection(other, 20U, 3U), &data0) ==
 	       TR_ERR_INVALID);
 	assert(tr_pipeline_add_data(pipeline, data_conn0, &data0) == TR_OK);
+	assert(tr_pipeline_add_data(pipeline, data_conn0, &reused) == TR_ERR_STATE);
 	assert(tr_pipeline_add_data(pipeline, data_conn1, &data1) == TR_OK);
 	assert(data0.index != data1.index);
 	assert(data0.generation != 0U);
