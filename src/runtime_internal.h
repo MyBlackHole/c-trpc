@@ -76,6 +76,10 @@ tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
 int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 				 const char *address, uint16_t port,
 				 int backlog, uint16_t *out_bound_port);
+int tr_runtime_shard_listen_ipv4_ex(struct tr_runtime_shard *shard,
+				    const char *address, uint16_t port,
+				    int backlog, int reuse_port,
+				    uint16_t *out_bound_port);
 int tr_runtime_shard_listener_fd(const struct tr_runtime_shard *shard);
 uint16_t tr_runtime_shard_bound_port(const struct tr_runtime_shard *shard);
 typedef void (*tr_runtime_listener_cb)(int fd, uint32_t events, void *arg);
