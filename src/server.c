@@ -914,21 +914,28 @@ int tr_server_register_stream_method(
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port)
 {
+	struct tr_server_shard *shard;
+
 	if (!server || !ipv4_address)
 		return TR_ERR_INVALID;
-	if (server->started || tr_server_listener_fd(server) >= 0)
+	shard = tr_server_primary_shard(server);
+	if (!shard)
+		return TR_ERR_STATE;
+	if (server->started || tr_server_shard_listener_fd(shard) >= 0)
 		return TR_ERR_STATE;
 
 	return tr_runtime_shard_listen_ipv4(
-		server->shard, ipv4_address, port, server->config.listen_backlog,
+		shard->runtime, ipv4_address, port, server->config.listen_backlog,
 		out_bound_port);
 }
 
 int tr_server_start(struct tr_server *server)
 {
+	uint32_t i;
 	int ret;
 
-	if (!server || tr_server_listener_fd(server) < 0)
+	if (!server || !tr_server_primary_shard(server) ||
+	    tr_server_shard_listener_fd(tr_server_primary_shard(server)) < 0)
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
@@ -937,30 +944,52 @@ int tr_server_start(struct tr_server *server)
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_runtime_shard_enable_peer_events(
-		server->shard, tr_server_on_peer_lifecycle_event, server);
-	if (ret != TR_OK) {
-		(void)tr_runtime_stop(server->runtime);
-		return ret;
-	}
-	server->peer_events_enabled = 1;
+	for (i = 0; i < server->shard_count; ++i) {
+		struct tr_server_shard *shard = &server->shards[i];
 
-	ret = tr_runtime_shard_enable_listener_events(
-		server->shard, tr_server_on_listener_ready, server);
-	if (ret != TR_OK) {
-		tr_server_disable_peer_events(server);
-		(void)tr_runtime_stop(server->runtime);
-		return ret;
+		ret = tr_runtime_shard_enable_peer_events(
+			shard->runtime, tr_server_on_peer_lifecycle_event, shard);
+		if (ret != TR_OK)
+			goto rollback_events;
+		shard->peer_events_enabled = 1;
+
+		if (tr_server_shard_listener_fd(shard) >= 0) {
+			ret = tr_runtime_shard_enable_listener_events(
+				shard->runtime, tr_server_on_listener_ready, shard);
+			if (ret != TR_OK)
+				goto rollback_events;
+		}
 	}
 
 	server->started = 1;
 	return TR_OK;
+
+rollback_events:
+	while (i != 0U) {
+		--i;
+		if (tr_server_shard_listener_fd(&server->shards[i]) >= 0)
+			(void)tr_runtime_shard_disable_listener_events(
+				server->shards[i].runtime);
+		tr_server_disable_peer_events(&server->shards[i]);
+	}
+	(void)tr_runtime_stop(server->runtime);
+	return ret;
 }
 
 static void tr_server_stop_accepting(struct tr_server *server)
 {
-	(void)tr_runtime_shard_disable_listener_events(server->shard);
-	tr_runtime_shard_close_listener(server->shard);
+	uint32_t i;
+
+	if (!server)
+		return;
+	for (i = 0; i < server->shard_count; ++i) {
+		struct tr_server_shard *shard = &server->shards[i];
+
+		if (tr_server_shard_listener_fd(shard) < 0)
+			continue;
+		(void)tr_runtime_shard_disable_listener_events(shard->runtime);
+		tr_runtime_shard_close_listener(shard->runtime);
+	}
 }
 
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
