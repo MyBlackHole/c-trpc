@@ -1,6 +1,7 @@
 #include "runtime_internal.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
@@ -22,9 +23,9 @@ struct tr_runtime_shard {
 	uint32_t peer_capacity;
 	uint32_t peer_count;
 	uint32_t peer_count_peak;
-	uint32_t peer_reaping_count;
+	_Atomic uint32_t peer_reaping_count;
 	uint64_t peers_ready_total;
-	uint64_t peers_reaped_total;
+	_Atomic uint64_t peers_reaped_total;
 	uint64_t peer_capacity_rejections;
 	int peer_event_fd;
 	int peer_events_registered;
@@ -373,7 +374,8 @@ void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard)
 
 	if (shard->peer_count != 0U)
 		shard->peer_count--;
-	shard->peer_reaping_count++;
+	(void)atomic_fetch_add_explicit(&shard->peer_reaping_count, 1U,
+					 memory_order_relaxed);
 }
 
 void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard)
@@ -381,9 +383,19 @@ void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard)
 	if (!shard)
 		return;
 
-	if (shard->peer_reaping_count != 0U)
-		shard->peer_reaping_count--;
-	shard->peers_reaped_total++;
+	{
+		uint32_t current = atomic_load_explicit(
+			&shard->peer_reaping_count, memory_order_relaxed);
+
+		while (current != 0U &&
+		       !atomic_compare_exchange_weak_explicit(
+			       &shard->peer_reaping_count, &current,
+			       current - 1U, memory_order_relaxed,
+			       memory_order_relaxed))
+			;
+	}
+	(void)atomic_fetch_add_explicit(&shard->peers_reaped_total, 1U,
+					 memory_order_relaxed);
 }
 
 void tr_runtime_shard_peer_note_capacity_rejection(
@@ -406,9 +418,11 @@ void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 	out->capacity = shard->peer_capacity;
 	out->current = shard->peer_count;
 	out->peak = shard->peer_count_peak;
-	out->reaping_current = shard->peer_reaping_count;
+	out->reaping_current = atomic_load_explicit(
+		&shard->peer_reaping_count, memory_order_relaxed);
 	out->ready_total = shard->peers_ready_total;
-	out->reaped_total = shard->peers_reaped_total;
+	out->reaped_total = atomic_load_explicit(
+		&shard->peers_reaped_total, memory_order_relaxed);
 	out->capacity_rejections = shard->peer_capacity_rejections;
 }
 
