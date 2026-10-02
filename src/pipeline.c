@@ -235,6 +235,26 @@ static int tr_pipeline_clear_control_on_owner(void *arg)
 
 	memset(&pipeline->control, 0, sizeof(pipeline->control));
 	pipeline->control_bound = 0;
+
+	/*
+	 * CONTROL owns issuance of DATA capabilities. Once CONTROL leaves, any
+	 * not-yet-attached capability must become unusable immediately.
+	 */
+	if (pipeline->data_reserved_count != 0U) {
+		uint32_t i;
+
+		for (i = 0; i < pipeline->data_capacity; ++i) {
+			struct tr_pipeline_data_slot *slot =
+				&pipeline->data_slots[i];
+
+			if (slot->state != TR_PIPELINE_DATA_RESERVED)
+				continue;
+			slot->state = TR_PIPELINE_DATA_FREE;
+			memset(&slot->connection, 0,
+			       sizeof(slot->connection));
+		}
+		pipeline->data_reserved_count = 0U;
+	}
 	return TR_OK;
 }
 
@@ -292,6 +312,8 @@ static int tr_pipeline_reserve_data_on_owner(void *arg)
 	struct tr_pipeline *pipeline = request->pipeline;
 	uint32_t i;
 
+	if (!pipeline->control_bound)
+		return TR_ERR_STATE;
 	if (pipeline->data_count + pipeline->data_reserved_count >=
 	    pipeline->data_capacity)
 		return TR_AGAIN;
@@ -341,6 +363,8 @@ static int tr_pipeline_attach_data_on_owner(void *arg)
 	struct tr_pipeline *pipeline = request->pipeline;
 	struct tr_pipeline_data_slot *slot;
 
+	if (!pipeline->control_bound)
+		return TR_ERR_STATE;
 	if (!tr_pipeline_connection_valid(pipeline, request->connection))
 		return TR_ERR_INVALID;
 	if ((pipeline->control_bound &&
