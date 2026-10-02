@@ -69,8 +69,6 @@ static void test_registry_and_data_route_attach(void)
 	struct tr_pipeline *pipeline;
 	struct tr_pipeline *same_id_new_epoch;
 	struct tr_pipeline *wrong_shard;
-	struct tr_pipeline *found = NULL;
-	struct tr_pipeline *attached_pipeline = NULL;
 	struct tr_pipeline_data_ref reserved;
 	struct tr_pipeline_data_ref attached_data;
 	struct tr_pipeline_data_ref cancelled;
@@ -110,15 +108,6 @@ static void test_registry_and_data_route_attach(void)
 	control_connection = fake_connection(owner, 10U, 1U);
 	assert(tr_pipeline_set_control(pipeline, control_connection) == TR_OK);
 
-	assert(tr_pipeline_registry_lookup(
-		       registry, UINT64_C(0x1001), UINT64_C(9), &found) == TR_OK);
-	assert(found == pipeline);
-	found = (struct tr_pipeline *)(uintptr_t)1U;
-	assert(tr_pipeline_registry_lookup(
-		       registry, UINT64_C(0x1001), UINT64_C(10), &found) ==
-	       TR_ERR_STALE);
-	assert(found == NULL);
-
 	assert(tr_pipeline_reserve_data(pipeline, &reserved) == TR_OK);
 	memset(&pipeline_stats, 0, sizeof(pipeline_stats));
 	assert(tr_pipeline_get_stats(pipeline, &pipeline_stats) == TR_OK);
@@ -136,36 +125,35 @@ static void test_registry_and_data_route_attach(void)
 	wrong = preface;
 	wrong.owner_shard_id++;
 	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &wrong, data_connection, NULL, NULL) ==
+		       registry, &wrong, data_connection, NULL) ==
 	       TR_ERR_STALE);
 
 	wrong = preface;
 	wrong.epoch++;
 	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &wrong, data_connection, NULL, NULL) ==
+		       registry, &wrong, data_connection, NULL) ==
 	       TR_ERR_STALE);
 
 	wrong = preface;
 	wrong.member_generation++;
 	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &wrong, data_connection, NULL, NULL) ==
+		       registry, &wrong, data_connection, NULL) ==
 	       TR_ERR_STALE);
 
 	wrong = preface;
 	wrong.role = TR_PIPELINE_ROUTE_CONTROL;
 	wrong.member_index = TR_PIPELINE_ROUTE_MEMBER_CONTROL;
 	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &wrong, data_connection, NULL, NULL) ==
+		       registry, &wrong, data_connection, NULL) ==
 	       TR_ERR_BAD_TYPE);
 
 	assert(tr_pipeline_registry_attach_data_route(
-		       registry, &preface, other_connection, NULL, NULL) ==
+		       registry, &preface, other_connection, NULL) ==
 	       TR_ERR_INVALID);
 
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &preface, data_connection,
-		       &attached_pipeline, &attached_data) == TR_OK);
-	assert(attached_pipeline == pipeline);
+		       &attached_data) == TR_OK);
 	assert(attached_data.index == reserved.index);
 	assert(attached_data.generation == reserved.generation);
 	assert(tr_pipeline_data_connection(
@@ -177,7 +165,7 @@ static void test_registry_and_data_route_attach(void)
 	/* Reservation was consumed exactly once. */
 	{
 		int duplicate_ret = tr_pipeline_registry_attach_data_route(
-			registry, &preface, data_connection, NULL, NULL);
+			registry, &preface, data_connection, NULL);
 
 		assert(duplicate_ret == TR_ERR_STATE ||
 		       duplicate_ret == TR_ERR_STALE);
@@ -194,7 +182,7 @@ static void test_registry_and_data_route_attach(void)
 	wrong = data_route(pipeline, cancelled);
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &wrong,
-		       fake_connection(owner, 21U, 1U), NULL, NULL) ==
+		       fake_connection(owner, 21U, 1U), NULL) ==
 	       TR_ERR_STALE);
 
 	memset(&registry_stats, 0, sizeof(registry_stats));
@@ -205,17 +193,8 @@ static void test_registry_and_data_route_attach(void)
 
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_OK);
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_ERR_STALE);
-	found = (struct tr_pipeline *)(uintptr_t)1U;
-	assert(tr_pipeline_registry_lookup(
-		       registry, UINT64_C(0x1001), UINT64_C(9), &found) ==
-	       TR_ERR_STALE);
-	assert(found == NULL);
-
 	/* New epoch may claim the same pipeline_id only after old unregister. */
 	assert(tr_pipeline_registry_register(registry, same_id_new_epoch) == TR_OK);
-	assert(tr_pipeline_registry_lookup(
-		       registry, UINT64_C(0x1001), UINT64_C(10), &found) == TR_OK);
-	assert(found == same_id_new_epoch);
 	assert(tr_pipeline_registry_unregister(
 		       registry, same_id_new_epoch) == TR_OK);
 
