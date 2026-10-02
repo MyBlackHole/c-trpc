@@ -750,7 +750,6 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	TR_ASSERT_REACTOR_OWNER(reactor);
 	struct epoll_event event;
 	struct tr_wire_limits limits;
-	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
 	if (slot >= reactor->config.max_connections)
@@ -782,14 +781,14 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	event.events = connection->epoll_events;
 	event.data.u64 = tr_conn_token(slot, generation);
 
-	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, owned_fd, &event) < 0) {
+	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
 		tr_parser_reset(&connection->parser);
 		connection->state = TR_CONN_ERROR;
 		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return TR_ERR_SYS;
 	}
 
-	connection->fd = tr_fd_take(&owned_fd);
+	connection->fd = fd;
 	tr_slot_set_state(reactor, slot, generation, TR_CONN_ACTIVE);
 	return TR_OK;
 }
@@ -1524,10 +1523,11 @@ static int tr_process_commands(struct tr_reactor *reactor,
 
 		switch (command->type) {
 		case TR_CMD_ADOPT_FD:
-			(void)tr_connection_adopt(reactor,
-						  command->slot,
-						  command->generation,
-						  command->u.adopt.fd);
+			if (tr_connection_adopt(reactor,
+						command->slot,
+						command->generation,
+						command->u.adopt.fd) != TR_OK)
+				close(command->u.adopt.fd);
 			break;
 		case TR_CMD_SEND:
 			tr_process_send(reactor, command);
@@ -2013,6 +2013,127 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	return TR_OK;
 }
 
+struct tr_reactor_listener_request {
+	struct tr_reactor *reactor;
+	int fd;
+	tr_reactor_listener_cb callback;
+	void *arg;
+};
+
+static int tr_reactor_listener_register_now(
+	struct tr_reactor *reactor, int fd, tr_reactor_listener_cb callback,
+	void *arg)
+{
+	struct epoll_event event;
+
+	if (reactor->listener_fd >= 0)
+		return TR_ERR_STATE;
+
+	memset(&event, 0, sizeof(event));
+	event.events = EPOLLIN | EPOLLERR | EPOLLHUP;
+	event.data.u64 = TR_LISTENER_TOKEN;
+	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0)
+		return TR_ERR_SYS;
+
+	reactor->listener_fd = fd;
+	reactor->listener_cb = callback;
+	reactor->listener_arg = arg;
+	return TR_OK;
+}
+
+static int tr_reactor_listener_unregister_now(struct tr_reactor *reactor,
+					       int fd)
+{
+	if (reactor->listener_fd < 0)
+		return TR_OK;
+	if (reactor->listener_fd != fd)
+		return TR_ERR_STALE;
+
+	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	reactor->listener_fd = -1;
+	reactor->listener_cb = NULL;
+	reactor->listener_arg = NULL;
+	return TR_OK;
+}
+
+static int tr_reactor_listener_register_on_owner(void *arg)
+{
+	struct tr_reactor_listener_request *request =
+		(struct tr_reactor_listener_request *)arg;
+
+	TR_ASSERT_REACTOR_OWNER(request->reactor);
+	return tr_reactor_listener_register_now(
+		request->reactor, request->fd, request->callback, request->arg);
+}
+
+static int tr_reactor_listener_unregister_on_owner(void *arg)
+{
+	struct tr_reactor_listener_request *request =
+		(struct tr_reactor_listener_request *)arg;
+
+	TR_ASSERT_REACTOR_OWNER(request->reactor);
+	return tr_reactor_listener_unregister_now(request->reactor, request->fd);
+}
+
+int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
+				 tr_reactor_listener_cb callback, void *arg)
+{
+	struct tr_reactor_listener_request request;
+	int started;
+	int ret;
+
+	if (!reactor || fd < 0 || !callback)
+		return TR_ERR_INVALID;
+
+	if (tr_reactor_is_owner_thread(reactor))
+		return tr_reactor_listener_register_now(reactor, fd, callback, arg);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		ret = tr_reactor_listener_register_now(reactor, fd, callback, arg);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.reactor = reactor;
+	request.fd = fd;
+	request.callback = callback;
+	request.arg = arg;
+	return tr_reactor_call(reactor, tr_reactor_listener_register_on_owner,
+			       &request);
+}
+
+int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd)
+{
+	struct tr_reactor_listener_request request;
+	int started;
+	int ret;
+
+	if (!reactor || fd < 0)
+		return TR_ERR_INVALID;
+
+	if (tr_reactor_is_owner_thread(reactor))
+		return tr_reactor_listener_unregister_now(reactor, fd);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		ret = tr_reactor_listener_unregister_now(reactor, fd);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	request.reactor = reactor;
+	request.fd = fd;
+	request.callback = NULL;
+	request.arg = NULL;
+	return tr_reactor_call(reactor, tr_reactor_listener_unregister_on_owner,
+			       &request);
+}
+
 int tr_reactor_start(struct tr_reactor *reactor)
 {
 	int error;
@@ -2054,6 +2175,28 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 
 	if (!reactor || fd < 0 || !out)
 		return TR_ERR_INVALID;
+
+	if (tr_reactor_is_owner_thread(reactor)) {
+		if (!atomic_load_explicit(&reactor->accepting,
+					 memory_order_acquire))
+			return TR_ERR_CLOSED;
+
+		ret = tr_slot_reserve(reactor, &slot, &generation);
+		if (ret != TR_OK)
+			return ret;
+
+		ret = tr_connection_adopt(reactor, slot, generation, fd);
+		if (ret != TR_OK) {
+			(void)tr_slot_set_state(reactor, slot, generation,
+						TR_CONN_FREE);
+			return ret;
+		}
+
+		out->reactor = reactor;
+		out->slot = slot;
+		out->generation = generation;
+		return TR_OK;
+	}
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started || !reactor->accepting) {
