@@ -153,7 +153,7 @@ static void test_server_create_start_destroy_threads(void)
 			reset_probe(0U);
 			assert(tr_server_create(&config, &server) == TR_OK);
 			assert(server != NULL);
-			/* create 只启动共享 executor，不启动 Reactor/timer。 */
+			/* create 只启动 shard-local executor，不启动 Reactor/timer。 */
 			expect_threads(workers, 0U);
 			if (start) {
 				listen_loopback(server);
@@ -217,7 +217,7 @@ static void test_server_runtime_start_failures(void)
 		listen_loopback(server);
 		assert(tr_server_start(server) == TR_ERR_SYS);
 		assert(atomic_load(&create_attempts) == workers + stage);
-		/* start 回滚新增线程，但 executor 仍由存活的 Server 持有。 */
+		/* start 回滚新增线程，但 executor 仍由存活的 shard 持有。 */
 		expect_threads(total, stage - 1U);
 		tr_server_destroy(server);
 		expect_threads(total, total);
