@@ -177,7 +177,49 @@ validated TRR1 fields
 preface 的 raw magic/CRC 由 routing parser 负责；registry attach 再次验证字段语义
 与 server-side registry/reservation state。二者职责不混用。
 
-下一步仍是把该 parser + registry attach 接入 accepted connection routing path。
+当前已增加 internal accepted DATA ingress path：
+
+```text
+listener/accept
+  -> Reactor adopt with fixed-size preface gate
+  -> read exactly 48 TRR1 bytes
+  -> parser + CRC/field validation
+  -> registry exact reservation attach
+  -> install routed downstream frame/event handler
+  -> existing TRP1 parser
+```
+
+Reactor preface gate 是 opt-in；普通 RPC connection 继续直接进入 TRP1 parser，
+没有额外 raw-buffer copy 或 routing branch。
+
+gate 每次 `recv()` 最多只读取尚未完成的 preface 字节，因此即使 socket receive
+queue 中已经是：
+
+```text
+[remaining TRR1][TRP1 HELLO/PING bytes]
+```
+
+Reactor 也不会 over-read。TRR1 完成并 attach 成功后，下一次 owner RX 循环才把
+剩余字节交给已有 TRP1 parser。
+
+错误 routing identity 会直接使该 accepted connection 失败，但不会消耗 DATA
+reservation；客户端可以使用原 exact capability 重新连接。
+
+成功 DATA connection 的 event handler 负责生命周期闭环：
+
+```text
+CLOSED / ERROR
+  -> registry exact detach(connection + route capability)
+  -> tr_pipeline_remove_data()
+  -> invalidate bound Stream affinity
+  -> downstream connection event
+```
+
+exact connection matching 防止旧 connection 的延迟 close callback 删除同 slot
+generation 后续的新 DATA membership。
+
+当前该 ingress adapter 仍是 internal foundation，尚未替换现有 public Server RPC
+listener，也尚未实现 CONTROL connection 的创建/注册协议。
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。
