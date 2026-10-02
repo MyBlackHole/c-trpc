@@ -37,6 +37,16 @@ int tr_rpc_endpoint_create_with_executor_group(
 void tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
+/*
+ * Server peer two-phase teardown:
+ * detach_for_finalize() runs protocol-source shutdown on the Reactor owner;
+ * finalize_detached_with_stats() waits only for already-owned worker refs and
+ * performs final memory release outside the owner.
+ */
+int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint);
+void tr_rpc_endpoint_finalize_detached_with_stats(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
+
 /* Internal deterministic diagnostics for the bounded Call deadline heap. */
 int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
 				  uint32_t *count,
