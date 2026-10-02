@@ -8,6 +8,7 @@
 #include "tr/socket.h"
 #include "tr/endian.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
