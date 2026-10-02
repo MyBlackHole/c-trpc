@@ -79,6 +79,7 @@ target("trcore")
         "src/runtime.c",
         "src/pipeline.c",
         "src/pipeline_route.c",
+        "src/pipeline_registry.c",
         "src/channel.c",
         "src/rpc_codec.c",
         "src/rpc_wire.c",
@@ -97,7 +98,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_timer_queue", "test_completion_queue", "test_pipeline", "test_pipeline_route", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_timer_queue", "test_completion_queue", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
