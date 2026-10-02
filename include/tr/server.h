@@ -15,7 +15,10 @@ struct tr_server;
 struct tr_server_config {
 	struct tr_facade_limits limits;
 
-	/* V1 Server facade 允许同时保留的最大 peer 对象数。 */
+	/* Server 内独立 Reactor/resource shard 数；0 由 init/default 归一化为 1。 */
+	uint32_t shard_count;
+
+	/* 所有 shard 合计允许同时保留的最大 peer 对象数。 */
 	uint32_t max_peers;
 	int listen_backlog;
 
@@ -81,6 +84,7 @@ struct tr_server_rpc_stats {
 };
 
 struct tr_server_stats {
+	uint32_t shard_count;
 	uint32_t max_peers;
 	uint32_t peers_current;
 	uint32_t peers_peak;
