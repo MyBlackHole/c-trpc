@@ -321,6 +321,7 @@ static void test_runtime_shard_peer_event_source(void)
 struct runtime_peer_event_dispatch_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
+	struct tr_runtime_shard *shard;
 	unsigned calls;
 };
 
@@ -333,6 +334,7 @@ static void runtime_peer_event_dispatch_cb(int fd, uint32_t events, void *arg)
 	if (!(events & EPOLLIN))
 		return;
 
+	tr_runtime_shard_drain_peer_event(ctx->shard);
 	pthread_mutex_lock(&ctx->lock);
 	ctx->calls++;
 	pthread_cond_broadcast(&ctx->cond);
@@ -357,6 +359,7 @@ static void test_runtime_shard_peer_event_dispatch(void)
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	shard = tr_runtime_shard_at(runtime, 0U);
 	assert(shard != NULL);
+	ctx.shard = shard;
 	assert(tr_runtime_start(runtime) == TR_OK);
 	assert(tr_runtime_shard_enable_peer_events(
 		       shard, runtime_peer_event_dispatch_cb, &ctx) == TR_OK);
@@ -372,11 +375,6 @@ static void test_runtime_shard_peer_event_dispatch(void)
 	assert(ctx.calls == 1U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/*
-	 * Runtime user callbacks own draining semantics. Server's callback drains
-	 * the eventfd before processing peer lifecycle state.
-	 */
-	tr_runtime_shard_drain_peer_event(shard);
 	assert(tr_runtime_shard_disable_peer_events(shard) == TR_OK);
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	tr_runtime_destroy(runtime);
