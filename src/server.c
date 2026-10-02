@@ -990,19 +990,53 @@ int tr_server_register_stream_method(
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port)
 {
-	struct tr_server_shard *shard;
+	uint16_t bound_port = port;
+	uint32_t i;
+	int reuse_port;
+	int ret;
 
-	if (!server || !ipv4_address)
+	if (!server || !ipv4_address || server->shard_count == 0U)
 		return TR_ERR_INVALID;
-	shard = tr_server_primary_shard(server);
-	if (!shard)
-		return TR_ERR_STATE;
-	if (server->started || tr_server_shard_listener_fd(shard) >= 0)
+	if (server->started)
 		return TR_ERR_STATE;
 
-	return tr_runtime_shard_listen_ipv4(
-		shard->runtime, ipv4_address, port, server->config.listen_backlog,
-		out_bound_port);
+	for (i = 0; i < server->shard_count; ++i)
+		if (tr_server_shard_listener_fd(&server->shards[i]) >= 0)
+			return TR_ERR_STATE;
+
+	reuse_port = server->shard_count > 1U;
+	for (i = 0; i < server->shard_count; ++i) {
+		struct tr_server_shard *shard = &server->shards[i];
+		uint16_t actual_port = 0U;
+		uint32_t backlog = tr_server_budget_share(
+			(uint32_t)server->config.listen_backlog,
+			server->shard_count, i);
+
+		ret = tr_runtime_shard_listen_ipv4_ex(
+			shard->runtime, ipv4_address,
+			i == 0U ? port : bound_port, (int)backlog,
+			reuse_port, &actual_port);
+		if (ret != TR_OK)
+			goto rollback;
+
+		if (i == 0U)
+			bound_port = actual_port;
+		else if (actual_port != bound_port) {
+			ret = TR_ERR_STATE;
+			goto rollback;
+		}
+	}
+
+	if (out_bound_port)
+		*out_bound_port = bound_port;
+	return TR_OK;
+
+rollback:
+	while (i != 0U) {
+		--i;
+		tr_runtime_shard_close_listener(server->shards[i].runtime);
+	}
+	return ret;
 }
 
 int tr_server_start(struct tr_server *server)
@@ -1010,11 +1044,13 @@ int tr_server_start(struct tr_server *server)
 	uint32_t i;
 	int ret;
 
-	if (!server || !tr_server_primary_shard(server) ||
-	    tr_server_shard_listener_fd(tr_server_primary_shard(server)) < 0)
+	if (!server || server->shard_count == 0U)
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
+	for (i = 0; i < server->shard_count; ++i)
+		if (tr_server_shard_listener_fd(&server->shards[i]) < 0)
+			return TR_ERR_STATE;
 
 	ret = tr_runtime_start(server->runtime);
 	if (ret != TR_OK)
