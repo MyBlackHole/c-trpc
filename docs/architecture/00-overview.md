@@ -32,10 +32,11 @@ flowchart LR
 Server
   ├─ 1 internal Runtime
   │    └─ shard[0]
-  │         └─ 1 Reactor
+  │         ├─ 1 Reactor
+  │         ├─ listener
+  │         └─ RPC executor
   ├─ accept thread
   ├─ reaper thread
-  ├─ shard[0]-local RPC executor
   └─ Reactor-local timers
 
 Client
@@ -52,8 +53,11 @@ RPC
 ```
 
 Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` 拥有唯一
-`tr_runtime_shard[0]`，该 shard 拥有 Reactor 的 create/start/stop/destroy。
-当前仍固定 `shard_count = 1`，accept/reaper 和 peer table 尚未 shard 化。
+`tr_runtime_shard[0]`。Server shard 当前已经拥有 Reactor、listener 和 RPC
+executor 的生命周期。中央 accept thread 仍然存在，但只借用 shard-owned
+listener fd；reaper 与 peer table 尚未 shard 化。
+
+当前仍固定 `shard_count = 1`。
 
 Reactor connection slot 已采用严格 single-owner 方向；slot generation/state 使用原子 capability metadata，外部控制通过 command 进入 Reactor。
 

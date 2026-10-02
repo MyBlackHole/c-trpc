@@ -72,9 +72,6 @@ struct tr_server {
 	int started;
 	int stop_accept;
 	int stop_reap;
-
-	int listen_fd;
-	uint16_t bound_port;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
@@ -89,6 +86,11 @@ static struct tr_rpc_executor_group *
 tr_server_rpc_executor(struct tr_server *server)
 {
 	return server ? tr_runtime_shard_rpc_executor(server->shard) : NULL;
+}
+
+static int tr_server_listener_fd(struct tr_server *server)
+{
+	return server ? tr_runtime_shard_listener_fd(server->shard) : -1;
 }
 
 static uint64_t tr_server_now_ms(void)
@@ -566,8 +568,8 @@ static void *tr_server_accept_main(void *arg)
 
 		pthread_mutex_lock(&server->lock);
 		stop = server->stop_accept;
-		listener = server->listen_fd;
 		pthread_mutex_unlock(&server->lock);
+		listener = tr_server_listener_fd(server);
 		if (stop)
 			break;
 
@@ -634,7 +636,6 @@ int tr_server_create(const struct tr_server_config *config,
 	if (!server_mem)
 		return TR_ERR_NOMEM;
 	server_mem->config = effective;
-	server_mem->listen_fd = -1;
 
 	if (pthread_mutex_init(&server_mem->lock, NULL) != 0)
 		return TR_ERR_INVALID;
@@ -790,32 +791,21 @@ int tr_server_register_stream_method(
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port)
 {
-	int fd = -1;
-	uint16_t bound = 0;
-	int ret;
-
 	if (!server || !ipv4_address)
 		return TR_ERR_INVALID;
-	if (server->started || server->listen_fd >= 0)
+	if (server->started || tr_server_listener_fd(server) >= 0)
 		return TR_ERR_STATE;
 
-	ret = tr_tcp_listen_ipv4(ipv4_address, port,
-				 server->config.listen_backlog, &fd, &bound);
-	if (ret != TR_OK)
-		return ret;
-
-	server->listen_fd = fd;
-	server->bound_port = bound;
-	if (out_bound_port)
-		*out_bound_port = bound;
-	return TR_OK;
+	return tr_runtime_shard_listen_ipv4(
+		server->shard, ipv4_address, port, server->config.listen_backlog,
+		out_bound_port);
 }
 
 int tr_server_start(struct tr_server *server)
 {
 	int ret;
 
-	if (!server || server->listen_fd < 0)
+	if (!server || tr_server_listener_fd(server) < 0)
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
@@ -859,7 +849,7 @@ static void tr_server_stop_accepting(struct tr_server *server)
 		server->accept_thread_started = 0;
 	}
 
-	tr_socket_close(&server->listen_fd);
+	tr_runtime_shard_close_listener(server->shard);
 }
 
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
@@ -973,7 +963,7 @@ void tr_server_destroy(struct tr_server *server)
 	if (!server)
 		return;
 
-	if (server->accept_thread_started || server->listen_fd >= 0)
+	if (server->accept_thread_started || tr_server_listener_fd(server) >= 0)
 		tr_server_stop_accepting(server);
 	if (server->reap_thread_started)
 		tr_server_stop_reaper(server);

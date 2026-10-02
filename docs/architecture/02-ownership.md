@@ -49,6 +49,7 @@ flowchart TB
 
 | Object | Owner | 非 owner 如何访问 | 目标同步方式 |
 |---|---|---|---|
+| Listener fd | Reactor shard | legacy accept thread 只借用 fd | shard owns listen/close lifetime |
 | Connection | Reactor shard | command | hot state 无锁 |
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
 | Stream | Reactor shard | command | hot state 无锁 |
@@ -97,9 +98,9 @@ Resources follow shard.
 Cross-thread completion returns as an event to owner.
 ```
 
-因此 Server RPC executor、worker queue、后续 listener/connection table/buffer
-budget 都优先成为 shard-local。只有确实无法独立的资源才允许跨 shard 共享，
-并且必须单独说明同步与容量边界。
+因此 Server RPC executor、worker queue 和 listener 已经成为 shard-local。
+后续 connection table / peer table / buffer budget 继续按同一规则迁移。只有确实
+无法独立的资源才允许跨 shard 共享，并且必须单独说明同步与容量边界。
 
 ## 6. Resource Transfer
 

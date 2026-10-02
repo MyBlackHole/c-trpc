@@ -43,4 +43,19 @@ tr_runtime_shard_reactor(const struct tr_runtime_shard *shard);
 struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
 
+/*
+ * Phase-3 listener ownership: the shard owns the listening fd even while the
+ * legacy central accept thread still borrows it to accept connections.
+ *
+ * A borrower must be quiesced/joined before close. close_listener() is a
+ * lifetime operation, not a concurrent cancellation primitive; closing while
+ * another thread still uses the numeric fd could race with fd reuse.
+ */
+int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
+				 const char *address, uint16_t port,
+				 int backlog, uint16_t *out_bound_port);
+int tr_runtime_shard_listener_fd(const struct tr_runtime_shard *shard);
+uint16_t tr_runtime_shard_bound_port(const struct tr_runtime_shard *shard);
+void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
+
 #endif
