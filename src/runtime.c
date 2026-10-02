@@ -11,6 +11,7 @@
 #include "tr/status.h"
 #include "reactor_internal.h"
 #include "rpc_internal.h"
+#include "socket_internal.h"
 
 struct tr_runtime_shard {
 	uint32_t shard_id;
@@ -279,9 +280,10 @@ tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
 	return shard ? shard->rpc_executor : NULL;
 }
 
-int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
-				 const char *address, uint16_t port,
-				 int backlog, uint16_t *out_bound_port)
+int tr_runtime_shard_listen_ipv4_ex(struct tr_runtime_shard *shard,
+				    const char *address, uint16_t port,
+				    int backlog, int reuse_port,
+				    uint16_t *out_bound_port)
 {
 	int fd = -1;
 	uint16_t bound = 0;
@@ -292,7 +294,8 @@ int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 	if (shard->listen_fd >= 0)
 		return TR_ERR_STATE;
 
-	ret = tr_tcp_listen_ipv4(address, port, backlog, &fd, &bound);
+	ret = tr_tcp_listen_ipv4_ex(address, port, backlog, reuse_port,
+				    &fd, &bound);
 	if (ret != TR_OK)
 		return ret;
 
@@ -301,6 +304,14 @@ int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 	if (out_bound_port)
 		*out_bound_port = bound;
 	return TR_OK;
+}
+
+int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
+				 const char *address, uint16_t port,
+				 int backlog, uint16_t *out_bound_port)
+{
+	return tr_runtime_shard_listen_ipv4_ex(shard, address, port, backlog,
+					       0, out_bound_port);
 }
 
 int tr_runtime_shard_listener_fd(const struct tr_runtime_shard *shard)

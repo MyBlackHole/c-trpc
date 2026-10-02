@@ -15,8 +15,15 @@ struct tr_server;
 struct tr_server_config {
 	struct tr_facade_limits limits;
 
-	/* V1 Server facade 允许同时保留的最大 peer 对象数。 */
+	/*
+	 * Server 内独立 Reactor/resource shard 数；0 由 init/default 归一化为 1。
+	 * shard_count > 1 时每个 shard 在同一 service port 上使用 SO_REUSEPORT。
+	 */
+	uint32_t shard_count;
+
+	/* 所有 shard 合计允许同时保留的最大 peer 对象数。 */
 	uint32_t max_peers;
+	/* 所有 listener 合计的 backlog budget，由 Server 确定性拆分到各 shard。 */
 	int listen_backlog;
 
 	/*
@@ -81,6 +88,8 @@ struct tr_server_rpc_stats {
 };
 
 struct tr_server_stats {
+	/* 当前 Server 实际运行的 shard 数。 */
+	uint32_t shard_count;
 	uint32_t max_peers;
 	uint32_t peers_current;
 	uint32_t peers_peak;
@@ -91,6 +100,10 @@ struct tr_server_stats {
 	uint64_t peers_reaped_total;
 	uint64_t peer_capacity_rejections;
 
+	/*
+	 * 所有 shard Reactor 的聚合视图：累计量/容量求和，max-per-turn /
+	 * timer lateness 取各 shard 最大值，histogram 合并。
+	 */
 	struct tr_reactor_stats reactor;
 	struct tr_pool_observation rpc_message_pool;
 	struct tr_pool_observation reassembly_pool;

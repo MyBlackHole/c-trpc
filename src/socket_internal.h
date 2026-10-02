@@ -4,6 +4,9 @@
 #include "tr/facade.h"
 
 int tr_tcp_set_nodelay(int fd, int enabled);
+int tr_tcp_listen_ipv4_ex(const char *address, uint16_t port, int backlog,
+			  int reuse_port, int *out_fd,
+			  uint16_t *out_bound_port);
 
 static inline int
 tr_tcp_nodelay_policy_valid(enum tr_tcp_nodelay_policy policy)

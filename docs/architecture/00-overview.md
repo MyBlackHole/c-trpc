@@ -87,11 +87,15 @@ slot 已经可以服务下一条连接。最后一个 worker/completion ref 释�
 finalization。若没有 worker ref，owner ref transfer 可立即完成 owner-free
 finalization。
 
-当前 Server/Client facade 仍固定使用 `shard_count = 1`；内部 Runtime 已支持
-N shards，并使用显式 per-shard resource config。Server 自身也已引入
-`server_shard_context`，把 RPC message pool、reassembly pool、executor binding、
-peer lifecycle registration 都绑定到具体 Runtime shard，不再保留 Server-global
-hot buffer pool。SO_REUSEPORT 与公开 Server multi-shard routing 尚未打开。
+Server facade 已支持 `shard_count = N`。Server-wide 的 peer、worker、queue、
+RX/TX pool、RPC message pool、reassembly pool 与 listen backlog 都保持“总预算”
+语义，通过 `base + remainder` 确定性拆给各 shard，不随 shard_count 隐式放大。
+
+`tr_server_listen()` 为每个 shard 创建一个 `SO_REUSEPORT` listener；port=0 时
+shard0 先取得实际端口，其余 shard 再绑定同一端口。每个 listener 直接注册到所属
+Reactor，accepted peer 只使用所属 shard 的 peer table、buffer pool 与 executor。
+
+Client facade 当前仍是单 shard。
 
 Reactor connection slot 已采用严格 single-owner 方向；slot generation/state 使用原子 capability metadata，外部控制通过 command 进入 Reactor。
 

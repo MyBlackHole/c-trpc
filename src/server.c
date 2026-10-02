@@ -75,12 +75,6 @@ struct tr_server {
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
 
-static struct tr_server_shard *
-tr_server_primary_shard(struct tr_server *server)
-{
-	return server && server->shard_count != 0U ? &server->shards[0] : NULL;
-}
-
 static struct tr_reactor *
 tr_server_shard_reactor(struct tr_server_shard *shard)
 {
@@ -189,6 +183,105 @@ static void tr_server_merge_rpc_stats(
 	dst->calls_deadline_exceeded += src->calls_deadline_exceeded;
 }
 
+static void tr_server_sum_reactor_work(struct tr_reactor_work *dst,
+				       const struct tr_reactor_work *src)
+{
+	dst->commands += src->commands;
+	dst->completions += src->completions;
+	dst->timer_callbacks += src->timer_callbacks;
+	dst->rx_bytes += src->rx_bytes;
+	dst->tx_bytes += src->tx_bytes;
+	dst->rx_dispatches += src->rx_dispatches;
+	dst->tx_dispatches += src->tx_dispatches;
+}
+
+static void tr_server_max_reactor_work(struct tr_reactor_work *dst,
+				       const struct tr_reactor_work *src)
+{
+	if (src->commands > dst->commands)
+		dst->commands = src->commands;
+	if (src->completions > dst->completions)
+		dst->completions = src->completions;
+	if (src->timer_callbacks > dst->timer_callbacks)
+		dst->timer_callbacks = src->timer_callbacks;
+	if (src->rx_bytes > dst->rx_bytes)
+		dst->rx_bytes = src->rx_bytes;
+	if (src->tx_bytes > dst->tx_bytes)
+		dst->tx_bytes = src->tx_bytes;
+	if (src->rx_dispatches > dst->rx_dispatches)
+		dst->rx_dispatches = src->rx_dispatches;
+	if (src->tx_dispatches > dst->tx_dispatches)
+		dst->tx_dispatches = src->tx_dispatches;
+}
+
+static void tr_server_merge_queue_observation(
+	struct tr_queue_observation *dst,
+	const struct tr_queue_observation *src)
+{
+	dst->capacity += src->capacity;
+	dst->current += src->current;
+	dst->peak += src->peak;
+	dst->full_events += src->full_events;
+}
+
+static void tr_server_merge_pool_observation(
+	struct tr_pool_observation *dst,
+	const struct tr_pool_observation *src)
+{
+	dst->capacity += src->capacity;
+	dst->current += src->current;
+	dst->peak += src->peak;
+	dst->exhausted_events += src->exhausted_events;
+}
+
+static void tr_server_merge_command_observation(
+	struct tr_reactor_command_observation *dst,
+	const struct tr_reactor_command_observation *src)
+{
+	dst->enqueued += src->enqueued;
+	dst->full_events += src->full_events;
+}
+
+static void tr_server_merge_reactor_stats(struct tr_reactor_stats *dst,
+					  const struct tr_reactor_stats *src)
+{
+	dst->turns += src->turns;
+	tr_server_sum_reactor_work(&dst->limits, &src->limits);
+	tr_server_sum_reactor_work(&dst->total, &src->total);
+	tr_server_max_reactor_work(&dst->max_per_turn, &src->max_per_turn);
+	tr_server_sum_reactor_work(&dst->budget_hits, &src->budget_hits);
+	dst->epoll_polls += src->epoll_polls;
+	dst->epoll_waits += src->epoll_waits;
+	if (src->timer_lateness_ns_max > dst->timer_lateness_ns_max)
+		dst->timer_lateness_ns_max = src->timer_lateness_ns_max;
+	dst->shutdown_completions += src->shutdown_completions;
+
+	tr_server_merge_queue_observation(&dst->command_queue,
+					  &src->command_queue);
+	tr_server_merge_queue_observation(&dst->completion_queue,
+					  &src->completion_queue);
+	tr_server_merge_command_observation(&dst->command_send,
+					    &src->command_send);
+	tr_server_merge_command_observation(&dst->command_resume_rx,
+					    &src->command_resume_rx);
+	tr_server_merge_command_observation(&dst->command_call,
+					    &src->command_call);
+	tr_server_merge_command_observation(&dst->command_other,
+					    &src->command_other);
+
+	tr_server_merge_pool_observation(&dst->rx_buffer_pool,
+					 &src->rx_buffer_pool);
+	tr_server_merge_pool_observation(&dst->tx_item_pool,
+					 &src->tx_item_pool);
+	tr_server_merge_pool_observation(&dst->control_tx_item_pool,
+					 &src->control_tx_item_pool);
+
+	dst->observability_flags |= src->observability_flags;
+	dst->busy_ns += src->busy_ns;
+	dst->poll_ns += src->poll_ns;
+	tr_merge_latency_histogram(&dst->turn_busy_ns, &src->turn_busy_ns);
+}
+
 static void tr_server_normalize_config(struct tr_server_config *config)
 {
 	struct tr_server_config defaults;
@@ -196,6 +289,8 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	const struct tr_facade_limits *d;
 
 	tr_server_config_init(&defaults);
+	if (config->shard_count == 0)
+		config->shard_count = defaults.shard_count;
 	if (config->max_peers == 0)
 		config->max_peers = defaults.max_peers;
 	if (config->listen_backlog <= 0)
@@ -234,11 +329,42 @@ void tr_server_config_init(struct tr_server_config *config)
 
 	memset(config, 0, sizeof(*config));
 	tr_facade_limits_init(&config->limits);
+	config->shard_count = 1U;
 	config->max_peers = 64U;
 	config->listen_backlog = 128;
 	config->tcp_nodelay = TR_TCP_NODELAY_DEFAULT;
 	config->keepalive_interval_ms = 30000U;
 	config->keepalive_timeout_ms = 10000U;
+}
+
+static uint32_t tr_server_budget_share(uint32_t total,
+				      uint32_t shard_count,
+				      uint32_t shard_index)
+{
+	uint32_t base = total / shard_count;
+	uint32_t remainder = total % shard_count;
+
+	return base + (shard_index < remainder ? 1U : 0U);
+}
+
+static int tr_server_budget_supports_shards(
+	const struct tr_server_config *config)
+{
+	uint32_t shards;
+
+	if (!config || config->shard_count == 0U)
+		return 0;
+	shards = config->shard_count;
+
+	return config->max_peers >= shards &&
+	       (uint32_t)config->listen_backlog >= shards &&
+	       config->limits.executor_threads >= shards &&
+	       config->limits.command_capacity >= shards &&
+	       config->limits.tx_item_capacity >= shards &&
+	       config->limits.control_tx_item_capacity >= shards &&
+	       config->limits.rx_buffer_count >= shards &&
+	       config->limits.rpc_message_pool_count >= shards &&
+	       config->limits.reassembly_pool_count >= shards;
 }
 
 static int tr_server_register_methods_on_peer(struct tr_server *server,
@@ -699,8 +825,7 @@ int tr_server_create(const struct tr_server_config *config,
 {
 	struct tr_server_config effective;
 	struct tr_runtime_config runtime_config;
-	struct tr_runtime_shard_config shard_config;
-	struct tr_reactor_config *reactor_config;
+	struct tr_runtime_shard_config *shard_configs = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
 	int ret;
@@ -726,7 +851,8 @@ int tr_server_create(const struct tr_server_config *config,
 			      16U :
 			      effective.limits.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
-	    effective.max_peers > (UINT32_MAX - 4U) / 2U)
+	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
+	    !tr_server_budget_supports_shards(&effective))
 		return TR_ERR_INVALID;
 
 	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
@@ -749,35 +875,72 @@ int tr_server_create(const struct tr_server_config *config,
 	}
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
-	memset(&shard_config, 0, sizeof(shard_config));
-	runtime_config.shard_count = 1U;
-	runtime_config.shards = &shard_config;
-	shard_config.peer_capacity = effective.max_peers;
-	shard_config.rpc_executor.endpoint_capacity = effective.max_peers;
-	shard_config.rpc_executor.max_calls_per_endpoint =
-		effective.limits.max_calls;
-	shard_config.rpc_executor.thread_count =
-		effective.limits.executor_threads;
-	reactor_config = &shard_config.reactor;
-	reactor_config->max_connections = effective.max_peers + 4U;
-	reactor_config->command_capacity = effective.limits.command_capacity;
-	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
-	reactor_config->control_tx_item_capacity =
-		effective.limits.control_tx_item_capacity;
-	reactor_config->rx_buffer_count = effective.limits.rx_buffer_count;
-	reactor_config->rx_buffer_size =
-		effective.limits.max_frame_payload_bytes;
-	reactor_config->max_payload_len =
-		effective.limits.max_frame_payload_bytes;
-	reactor_config->rx_budget_bytes =
-		effective.limits.max_frame_payload_bytes > UINT32_MAX / 4U ?
-			UINT32_MAX :
-			effective.limits.max_frame_payload_bytes * 4U;
-	reactor_config->tx_budget_bytes = reactor_config->rx_budget_bytes;
-	reactor_config->observability_flags =
-		effective.limits.observability_flags;
+	shard_configs = (struct tr_runtime_shard_config *)calloc(
+		effective.shard_count, sizeof(*shard_configs));
+	if (!shard_configs)
+		return TR_ERR_NOMEM;
+
+	runtime_config.shard_count = effective.shard_count;
+	runtime_config.shards = shard_configs;
+
+	{
+		uint32_t i;
+
+		for (i = 0; i < effective.shard_count; ++i) {
+			struct tr_runtime_shard_config *shard_config =
+				&shard_configs[i];
+			struct tr_reactor_config *reactor_config =
+				&shard_config->reactor;
+			uint32_t peer_capacity = tr_server_budget_share(
+				effective.max_peers, effective.shard_count, i);
+
+			shard_config->peer_capacity = peer_capacity;
+			shard_config->rpc_executor.endpoint_capacity =
+				peer_capacity;
+			shard_config->rpc_executor.max_calls_per_endpoint =
+				effective.limits.max_calls;
+			shard_config->rpc_executor.thread_count =
+				tr_server_budget_share(
+					effective.limits.executor_threads,
+					effective.shard_count, i);
+
+			reactor_config->max_connections = peer_capacity + 4U;
+			reactor_config->command_capacity =
+				tr_server_budget_share(
+					effective.limits.command_capacity,
+					effective.shard_count, i);
+			reactor_config->tx_item_capacity =
+				tr_server_budget_share(
+					effective.limits.tx_item_capacity,
+					effective.shard_count, i);
+			reactor_config->control_tx_item_capacity =
+				tr_server_budget_share(
+					effective.limits.control_tx_item_capacity,
+					effective.shard_count, i);
+			reactor_config->rx_buffer_count =
+				tr_server_budget_share(
+					effective.limits.rx_buffer_count,
+					effective.shard_count, i);
+			reactor_config->rx_buffer_size =
+				effective.limits.max_frame_payload_bytes;
+			reactor_config->max_payload_len =
+				effective.limits.max_frame_payload_bytes;
+			reactor_config->rx_budget_bytes =
+				effective.limits.max_frame_payload_bytes >
+						UINT32_MAX / 4U ?
+					UINT32_MAX :
+					effective.limits.max_frame_payload_bytes *
+						4U;
+			reactor_config->tx_budget_bytes =
+				reactor_config->rx_budget_bytes;
+			reactor_config->observability_flags =
+				effective.limits.observability_flags;
+		}
+	}
 
 	ret = tr_runtime_create(&runtime_config, &server->runtime);
+	free(shard_configs);
+	shard_configs = NULL;
 	if (ret != TR_OK)
 		return ret;
 
@@ -798,13 +961,17 @@ int tr_server_create(const struct tr_server_config *config,
 			server_shard->runtime =
 				tr_runtime_shard_at(server->runtime, i);
 			server_shard->executor_threads =
-				effective.limits.executor_threads;
+				tr_server_budget_share(
+					effective.limits.executor_threads,
+					effective.shard_count, i);
 			if (!server_shard->runtime)
 				return TR_ERR_STATE;
 
 			ret = tr_buffer_pool_init(
 				&server_shard->rpc_message_pool,
-				effective.limits.rpc_message_pool_count,
+				tr_server_budget_share(
+					effective.limits.rpc_message_pool_count,
+					effective.shard_count, i),
 				effective.limits.rpc_message_buffer_bytes);
 			if (ret != TR_OK)
 				return ret;
@@ -812,7 +979,9 @@ int tr_server_create(const struct tr_server_config *config,
 
 			ret = tr_buffer_pool_init(
 				&server_shard->reassembly_pool,
-				effective.limits.reassembly_pool_count,
+				tr_server_budget_share(
+					effective.limits.reassembly_pool_count,
+					effective.shard_count, i),
 				effective.limits.max_message_bytes);
 			if (ret != TR_OK)
 				return ret;
@@ -914,19 +1083,57 @@ int tr_server_register_stream_method(
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port)
 {
-	struct tr_server_shard *shard;
+	uint16_t bound_port = port;
+	uint32_t i;
+	int reuse_port;
+	int ret;
 
-	if (!server || !ipv4_address)
+	if (!server || !ipv4_address || server->shard_count == 0U)
 		return TR_ERR_INVALID;
-	shard = tr_server_primary_shard(server);
-	if (!shard)
-		return TR_ERR_STATE;
-	if (server->started || tr_server_shard_listener_fd(shard) >= 0)
+	if (server->started)
 		return TR_ERR_STATE;
 
-	return tr_runtime_shard_listen_ipv4(
-		shard->runtime, ipv4_address, port, server->config.listen_backlog,
-		out_bound_port);
+	for (i = 0; i < server->shard_count; ++i)
+		if (tr_server_shard_listener_fd(&server->shards[i]) >= 0)
+			return TR_ERR_STATE;
+
+	reuse_port = server->shard_count > 1U;
+	for (i = 0; i < server->shard_count; ++i) {
+		struct tr_server_shard *shard = &server->shards[i];
+		uint16_t actual_port = 0U;
+		uint32_t backlog = tr_server_budget_share(
+			(uint32_t)server->config.listen_backlog,
+			server->shard_count, i);
+
+		ret = tr_runtime_shard_listen_ipv4_ex(
+			shard->runtime, ipv4_address,
+			i == 0U ? port : bound_port, (int)backlog,
+			reuse_port, &actual_port);
+		if (ret != TR_OK)
+			goto rollback;
+
+		if (i == 0U)
+			bound_port = actual_port;
+		else if (actual_port != bound_port) {
+			ret = TR_ERR_STATE;
+			goto rollback;
+		}
+	}
+
+	if (out_bound_port)
+		*out_bound_port = bound_port;
+	return TR_OK;
+
+rollback:
+	{
+		uint32_t j;
+
+		for (j = 0; j < server->shard_count; ++j)
+			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0)
+				tr_runtime_shard_close_listener(
+					server->shards[j].runtime);
+	}
+	return ret;
 }
 
 int tr_server_start(struct tr_server *server)
@@ -934,11 +1141,13 @@ int tr_server_start(struct tr_server *server)
 	uint32_t i;
 	int ret;
 
-	if (!server || !tr_server_primary_shard(server) ||
-	    tr_server_shard_listener_fd(tr_server_primary_shard(server)) < 0)
+	if (!server || server->shard_count == 0U)
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
+	for (i = 0; i < server->shard_count; ++i)
+		if (tr_server_shard_listener_fd(&server->shards[i]) < 0)
+			return TR_ERR_STATE;
 
 	ret = tr_runtime_start(server->runtime);
 	if (ret != TR_OK)
@@ -1065,36 +1274,22 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 	struct tr_server_stats_owner_request *request =
 		(struct tr_server_stats_owner_request *)arg;
 	struct tr_server_shard *shard = request->shard;
-	struct tr_server *server = shard->server;
 	struct tr_server_stats *stats = request->stats;
 	struct tr_runtime_peer_stats peer_stats;
 	uint32_t i;
 
 	/*
 	 * Peer slots and owner-side counters are single-writer Reactor state.
-	 * External stats callers reach this function through tr_reactor_call().
+	 * External stats callers enter each shard owner synchronously.
 	 */
 	tr_runtime_shard_peer_stats(shard->runtime, &peer_stats);
-	stats->max_peers = peer_stats.capacity;
-	stats->peers_current = peer_stats.current;
-	stats->peers_peak = peer_stats.peak;
-	stats->peers_reaping_current = peer_stats.reaping_current;
-	stats->peers_ready_total = peer_stats.ready_total;
-	stats->peers_reaped_total = peer_stats.reaped_total;
-	stats->peer_capacity_rejections = peer_stats.capacity_rejections;
-
-	/*
-	 * Detached last-ref finalizers may merge retired stats on worker or owner
-	 * context. This lock protects only that cross-thread aggregate; it never
-	 * protects the peer table.
-	 */
-	pthread_mutex_lock(&server->finalizer_lock);
-	stats->channel = server->retired_channel_stats;
-	stats->rpc = server->retired_rpc_stats;
-	pthread_mutex_unlock(&server->finalizer_lock);
-
-	if (stats->rpc.executor_threads == 0)
-		stats->rpc.executor_threads = shard->executor_threads;
+	stats->max_peers += peer_stats.capacity;
+	stats->peers_current += peer_stats.current;
+	stats->peers_peak += peer_stats.peak;
+	stats->peers_reaping_current += peer_stats.reaping_current;
+	stats->peers_ready_total += peer_stats.ready_total;
+	stats->peers_reaped_total += peer_stats.reaped_total;
+	stats->peer_capacity_rejections += peer_stats.capacity_rejections;
 
 	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
@@ -1122,38 +1317,63 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 
 int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 {
-	struct tr_server_stats_owner_request request;
-	struct tr_server_shard *shard;
 	struct tr_server_stats stats;
+	uint32_t i;
 	int ret;
 
-	if (!server || !out)
+	if (!server || !out || server->shard_count == 0U)
 		return TR_ERR_INVALID;
-	shard = tr_server_primary_shard(server);
-	if (!shard)
-		return TR_ERR_STATE;
 
 	memset(&stats, 0, sizeof(stats));
-	ret = tr_reactor_get_stats(tr_server_shard_reactor(shard),
-				   &stats.reactor);
-	if (ret != TR_OK)
-		return ret;
-	ret = tr_buffer_pool_get_stats(&shard->rpc_message_pool,
-				       &stats.rpc_message_pool);
-	if (ret != TR_OK)
-		return ret;
-	ret = tr_buffer_pool_get_stats(&shard->reassembly_pool,
-				       &stats.reassembly_pool);
-	if (ret != TR_OK)
-		return ret;
+	stats.shard_count = server->shard_count;
 
-	request.shard = shard;
-	request.stats = &stats;
-	ret = tr_runtime_shard_call(shard->runtime,
-				    tr_server_collect_peer_stats_on_owner,
-				    &request);
-	if (ret != TR_OK)
-		return ret;
+	/*
+	 * Detached finalizers are cross-thread; take their aggregate once so it is
+	 * not duplicated while per-shard live state is collected.
+	 */
+	pthread_mutex_lock(&server->finalizer_lock);
+	stats.channel = server->retired_channel_stats;
+	stats.rpc = server->retired_rpc_stats;
+	pthread_mutex_unlock(&server->finalizer_lock);
+	stats.rpc.executor_threads = server->config.limits.executor_threads;
+
+	for (i = 0; i < server->shard_count; ++i) {
+		struct tr_server_stats_owner_request request;
+		struct tr_server_shard *shard = &server->shards[i];
+		struct tr_reactor_stats reactor_stats;
+		struct tr_pool_observation pool_stats;
+
+		memset(&reactor_stats, 0, sizeof(reactor_stats));
+		ret = tr_reactor_get_stats(tr_server_shard_reactor(shard),
+					   &reactor_stats);
+		if (ret != TR_OK)
+			return ret;
+		tr_server_merge_reactor_stats(&stats.reactor, &reactor_stats);
+
+		memset(&pool_stats, 0, sizeof(pool_stats));
+		ret = tr_buffer_pool_get_stats(&shard->rpc_message_pool,
+					       &pool_stats);
+		if (ret != TR_OK)
+			return ret;
+		tr_server_merge_pool_observation(&stats.rpc_message_pool,
+						 &pool_stats);
+
+		memset(&pool_stats, 0, sizeof(pool_stats));
+		ret = tr_buffer_pool_get_stats(&shard->reassembly_pool,
+					       &pool_stats);
+		if (ret != TR_OK)
+			return ret;
+		tr_server_merge_pool_observation(&stats.reassembly_pool,
+						 &pool_stats);
+
+		request.shard = shard;
+		request.stats = &stats;
+		ret = tr_runtime_shard_call(
+			shard->runtime, tr_server_collect_peer_stats_on_owner,
+			&request);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	*out = stats;
 	return TR_OK;

@@ -38,6 +38,11 @@ struct tr_facade_limits {
 	uint64_t initial_window_bytes;
 	uint64_t window_update_threshold_bytes;
 
+	/*
+	 * Client：以下 count/capacity 直接配置单个 Client Runtime。
+	 * Server：以下 count/capacity 是所有 Server shard 的总预算，由
+	 * tr_server_create() 确定性拆分；buffer size 不拆。
+	 */
 	uint32_t command_capacity;
 	uint32_t tx_item_capacity;
 	uint32_t control_tx_item_capacity;
@@ -49,7 +54,8 @@ struct tr_facade_limits {
 
 	/*
 	 * Client：worker 由 Client RPC Endpoint 自己拥有。
-	 * Server：同一 shard 的 RPC Endpoint 共用 shard-local worker pool。
+	 * Server：该值是所有 shard 的 worker 总预算；每个 shard 的 RPC Endpoint
+	 * 共用该 shard 分到的 worker pool。
 	 */
 	uint32_t executor_threads;
 	/* 每个 Endpoint 独立的有界 task 容量。 */

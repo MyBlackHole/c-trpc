@@ -58,15 +58,17 @@ int tr_tcp_set_nodelay(int fd, int enabled)
 	return TR_OK;
 }
 
-int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
-		       int *out_fd, uint16_t *out_bound_port)
+int tr_tcp_listen_ipv4_ex(const char *address, uint16_t port, int backlog,
+			  int reuse_port, int *out_fd,
+			  uint16_t *out_bound_port)
 {
 	struct sockaddr_in addr;
 	socklen_t addr_len;
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int one = 1;
 
-	if (!address || !out_fd || backlog <= 0)
+	if (!address || !out_fd || backlog <= 0 ||
+	    (reuse_port != 0 && reuse_port != 1))
 		return TR_ERR_INVALID;
 
 	*out_fd = -1;
@@ -75,6 +77,15 @@ int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
 		return TR_ERR_SYS;
 
 	(void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	if (reuse_port) {
+#ifdef SO_REUSEPORT
+		if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one,
+			       sizeof(one)) < 0)
+			return TR_ERR_SYS;
+#else
+		return TR_ERR_UNSUPPORTED;
+#endif
+	}
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
@@ -98,6 +109,13 @@ int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
 
 	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
+}
+
+int tr_tcp_listen_ipv4(const char *address, uint16_t port, int backlog,
+		       int *out_fd, uint16_t *out_bound_port)
+{
+	return tr_tcp_listen_ipv4_ex(address, port, backlog, 0, out_fd,
+				     out_bound_port);
 }
 
 int tr_tcp_connect_ipv4(const char *address, uint16_t port, int *out_fd)

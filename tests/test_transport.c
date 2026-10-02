@@ -5250,6 +5250,121 @@ static void test_client_server_facade_unary(void)
 }
 
 
+static void test_server_multi_shard_reuseport_facade(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *clients[4] = { NULL, NULL, NULL, NULL };
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_call_handle calls[4];
+	struct tr_server_stats stats;
+	struct facade_test_ctx ctx;
+	struct timespec deadline;
+	uint16_t port = 0U;
+	unsigned i;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.shard_count = 2U;
+	server_config.max_peers = 8U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.executor_threads = 2U;
+	server_config.limits.command_capacity = 32U;
+	server_config.limits.tx_item_capacity = 16U;
+	server_config.limits.control_tx_item_capacity = 8U;
+	server_config.limits.rx_buffer_count = 8U;
+	server_config.limits.rpc_message_pool_count = 8U;
+	server_config.limits.reassembly_pool_count = 4U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.limits.rpc_message_buffer_bytes = 4096U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 78U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1024U;
+	method.max_response_bytes = 1024U;
+	assert(tr_server_register_method(server, &method,
+					 facade_test_unary_handler, &ctx) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
+	assert(port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 1000U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	client_config.limits.rpc_message_buffer_bytes = 4096U;
+	client_config.limits.rpc_message_pool_count = 16U;
+	client_config.limits.reassembly_pool_count = 4U;
+	client_config.limits.rx_buffer_count = 16U;
+
+	request.data = (const uint8_t *)"facade-ping";
+	request.len = 11U;
+
+	for (i = 0; i < 4U; ++i) {
+		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
+		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
+		assert(tr_client_register_method(clients[i], &method) == TR_OK);
+		assert(tr_client_unary_call(
+			       clients[i], 78U, 1U, &request,
+			       facade_test_result, &ctx, &calls[i]) == TR_OK);
+	}
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&ctx.lock);
+	while ((ctx.server_calls < 4U || ctx.client_results < 4U) &&
+	       ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.server_calls == 4U);
+	assert(ctx.client_results == 4U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_server_get_stats(server, &stats) == TR_OK);
+	assert(stats.shard_count == 2U);
+	assert(stats.max_peers == 8U);
+	assert(stats.peers_current == 4U);
+	assert(stats.peers_ready_current == 4U);
+	assert(stats.rpc.executor_threads == 2U);
+	assert(stats.rpc.calls_started == 4U);
+	assert(stats.rpc_message_pool.capacity == 8U);
+	assert(stats.reassembly_pool.capacity == 4U);
+	assert(stats.reactor.command_queue.capacity == 32U);
+	assert(stats.reactor.tx_item_pool.capacity == 16U);
+	assert(stats.reactor.control_tx_item_pool.capacity == 8U);
+	assert(stats.reactor.rx_buffer_pool.capacity == 8U);
+
+	for (i = 0; i < 4U; ++i) {
+		int drain_ret = tr_client_begin_drain(clients[i]);
+
+		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
+		assert(tr_client_wait_drained(clients[i], 5000U) == TR_OK);
+	}
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	for (i = 0; i < 4U; ++i)
+		tr_client_destroy(clients[i]);
+	tr_server_destroy(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static void test_client_server_facade_nodelay_policy(void)
 {
 	struct tr_server_config server_config;
@@ -6103,6 +6218,7 @@ int main(void)
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();
+	test_server_multi_shard_reuseport_facade();
 	test_client_server_facade_nodelay_policy();
 	test_client_runtime_thread_bound();
 	test_server_runtime_thread_bound();

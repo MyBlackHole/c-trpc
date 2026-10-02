@@ -4,9 +4,9 @@
 
 ## 1. Server Runtime
 
-CURRENT 的 Server facade 仍固定使用 shard[0]，但内部 Runtime 已进入 Phase 4：
-`tr_runtime` 本身可以创建 N 个独立 shard。Server 尚未打开公开 multi-shard
-配置与 SO_REUSEPORT listener。
+CURRENT Server facade 已进入 Phase 4 Multi-Reactor：`tr_server_config.shard_count`
+可以创建 N 个独立 Server/Runtime shard，每个 shard 拥有独立 Reactor、listener、
+executor、peer table 与 hot buffer pool。
 
 ```text
 tr_server
@@ -50,9 +50,9 @@ struct tr_runtime_config {
 };
 ```
 
-每个 entry 独立描述 Reactor、peer capacity 和 RPC executor。Runtime 不再把一份
-资源配置机械复制 N 次；未来 Server 可以先把总预算确定性拆分，再交给 Runtime。
-当前 Server/Client facade 仍只传入一个 shard config，因此 public 行为不变。
+每个 entry 独立描述 Reactor、peer capacity 和 RPC executor。Runtime 不把一份
+资源配置机械复制 N 次；Server 先把 public total budget 确定性拆分，再将每个
+share 交给 Runtime。Client facade 仍只传入一个 shard config。
 
 TARGET V1 使用单进程多 Reactor：
 
@@ -139,13 +139,17 @@ struct tr_runtime_shard {
 };
 ```
 
-Client facade 当前仍通过 `shard[0]` 取得 Reactor。Server facade 也仍只创建
-一个 Runtime shard，但内部 Server 结构已不再把热资源挂在 `tr_server`：
-每个 Runtime shard 对应一个 `tr_server_shard` context，持有自己的 RPC message
-pool、reassembly pool、executor binding 与 peer-event registration state。
+Client facade 当前仍通过 `shard[0]` 取得 Reactor。Server 为每个 Runtime shard
+创建对应的 `tr_server_shard` context，持有自己的 RPC message pool、
+reassembly pool、executor binding 与 peer-event registration state。
 
-因此未来扩到 N shards 时，新的 listener/peer 不会重新争 Server-global buffer
-pool mutex；只需为每个 Runtime shard 初始化对应 Server shard context。
+Server 的 public count/capacity 配置保持 total-budget 语义，share 计算为：
+
+```text
+share[i] = total / shard_count + (i < total % shard_count ? 1 : 0)
+```
+
+因此开启更多 shard 不会把 worker 或内存池容量乘 N。
 
 Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
@@ -274,7 +278,7 @@ Reactor shard
 | 操作 | 新增线程 |
 |---|---|
 | `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
-| `tr_server_create()` | 创建 single-shard Runtime（Reactor 尚未启动）+ shard[0] 的 `executor_threads` 个 RPC worker |
+| `tr_server_create()` | 创建 N-shard Runtime（Reactor 尚未启动）；`executor_threads` 总预算拆分到 N 个 shard-local worker pool |
 | `tr_server_listen()` | 0 |
 | `tr_server_start()` | 1 个：Reactor；accept/peer cleanup 都是 Reactor event |
 
