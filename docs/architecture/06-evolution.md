@@ -176,9 +176,21 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - invalid complete preface terminal，禁止任意字节 resync；
 - member_generation 明确定义为 Pipeline membership generation，不复用 Reactor slot generation。
 
+已完成 registry / capability foundation：
+
+- bounded shard-local Pipeline registry；
+- registry 以 pipeline_id 为唯一 key，旧 epoch 未注销时新 epoch 不能并存；
+- Pipeline identity 增加 owner_shard_id + epoch；
+- DATA slot 状态拆成 FREE / RESERVED / ATTACHED；
+- CONTROL-plane 可先 reserve `(data_index, generation)`；
+- reservation 占容量但不参与 DATA selection/Stream affinity；
+- route attach 再校验 role/shard/pipeline_id/epoch/index/generation/owner Reactor；
+- routing mismatch 不消耗 reservation；
+- exact attach 才把 RESERVED 转为 ATTACHED；
+- registry 不拥有 Pipeline lifetime，destroy 前要求显式 unregister。
+
 下一步：
 
-- Pipeline registry 与 DATA slot reserve/attach；
 - accepted connection routing preface 接入；
 - CONTROL 建立/确认 DATA membership；
 - `TRANSFER_READY(stream_id, data_index)` barrier；
