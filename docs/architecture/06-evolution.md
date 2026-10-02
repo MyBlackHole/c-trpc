@@ -96,8 +96,10 @@ Unary completion、Streaming send/finish/cancel、metadata/cancellation 查询�
 - Reactor accept 与 peer publish/table detach 仍通过过渡锁串行化；
 - shard[0] peer lifecycle eventfd 已注册进 Reactor epoll；Channel DOWN/rollback/
   publish 只发 deferred owner event；
-- dedicated reaper thread 已删除；Endpoint owner ref 转交 last-ref finalizer，
-  finalizing peer slot 在实际 free 前禁止复用；
+- dedicated reaper thread 已删除；owner detach 后 peer slot 立即复用，旧
+  Channel/Server 回收信息由 detached-finalizer context 持有；
+- Endpoint owner ref 转交 last-ref finalizer，已有 worker ref 作为旧对象 lifetime
+  fence，不需要 cleanup thread 阻塞等待；
 - worker 数量、RPC 调度算法和 public/wire 行为保持不变。
 
 当前仍：
