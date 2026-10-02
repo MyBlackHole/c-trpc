@@ -480,8 +480,8 @@ static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
 
 	/*
 	 * 一旦 Channel/RPC 状态已经建立，Reactor callback 就可能观察过它们。
-	 * 此时失败不能直接 free；必须先发布 partial peer，
-	 * 再由 reaper 完成 quiescence 和 destroy。
+	 * 此时失败不能直接 free；必须先发布 partial peer，再通过
+	 * shard peer event 延后到当前 owner callback 返回后执行 detach。
 	 */
 	if (peer->channel || peer->rpc) {
 		pthread_mutex_lock(&guard->server->lock);
@@ -511,7 +511,8 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 		struct tr_runtime_peer_stats peer_stats;
 
 		tr_runtime_shard_peer_stats(server->shard, &peer_stats);
-		if (peer_stats.current >= peer_stats.capacity) {
+		if (peer_stats.current + peer_stats.reaping_current >=
+		    peer_stats.capacity) {
 			tr_runtime_shard_peer_note_capacity_rejection(server->shard);
 			pthread_mutex_unlock(&server->lock);
 			return TR_AGAIN;
@@ -520,7 +521,7 @@ static int tr_server_adopt_peer(struct tr_server *server, int fd)
 
 	for (slot = 0; slot < tr_server_peer_capacity(server); ++slot) {
 		peer = tr_server_peer_at(server, slot);
-		if (peer && !peer->used)
+		if (peer && !peer->used && !peer->finalizing)
 			break;
 	}
 	if (slot == tr_server_peer_capacity(server)) {
@@ -1030,7 +1031,8 @@ void tr_server_destroy(struct tr_server *server)
 	for (i = 0; i < tr_server_peer_capacity(server); ++i) {
 		struct tr_runtime_peer *peer = tr_server_peer_at(server, i);
 
-		if (!peer || (!peer->used && !peer->channel && !peer->rpc))
+		if (!peer || peer->finalizing ||
+		    (!peer->used && !peer->channel && !peer->rpc))
 			continue;
 		tr_server_destroy_peer(server, peer, 0);
 	}
