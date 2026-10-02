@@ -1,6 +1,7 @@
 #include "runtime_internal.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "tr/socket.h"
 #include "tr/status.h"
@@ -12,6 +13,16 @@ struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
 	struct tr_rpc_executor_group *rpc_executor;
+
+	struct tr_runtime_peer *peers;
+	uint32_t peer_capacity;
+	uint32_t peer_count;
+	uint32_t peer_count_peak;
+	uint32_t peer_reaping_count;
+	uint64_t peers_ready_total;
+	uint64_t peers_reaped_total;
+	uint64_t peer_capacity_rejections;
+
 	int listen_fd;
 	uint16_t bound_port;
 	int started;
@@ -37,6 +48,9 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		tr_reactor_destroy(shard->reactor);
 		shard->reactor = NULL;
 	}
+	free(shard->peers);
+	shard->peers = NULL;
+	shard->peer_capacity = 0U;
 }
 
 static int
@@ -82,8 +96,20 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 
 		shard->shard_id = i;
 		shard->listen_fd = -1;
-		ret = tr_reactor_create(&config->reactor, NULL, NULL, NULL,
-					&shard->reactor);
+		shard->peer_capacity = config->peer_capacity;
+		if (shard->peer_capacity != 0U) {
+			shard->peers = (struct tr_runtime_peer *)calloc(
+				shard->peer_capacity, sizeof(*shard->peers));
+			if (!shard->peers)
+				ret = TR_ERR_NOMEM;
+			else
+				ret = TR_OK;
+		} else {
+			ret = TR_OK;
+		}
+		if (ret == TR_OK)
+			ret = tr_reactor_create(&config->reactor, NULL, NULL, NULL,
+						&shard->reactor);
 		if (ret == TR_OK && config->rpc_executor.endpoint_capacity != 0U)
 			ret = tr_rpc_executor_group_create(
 				config->rpc_executor.endpoint_capacity,
@@ -258,4 +284,79 @@ void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard)
 
 	tr_socket_close(&shard->listen_fd);
 	shard->bound_port = 0U;
+}
+
+uint32_t tr_runtime_shard_peer_capacity(const struct tr_runtime_shard *shard)
+{
+	return shard ? shard->peer_capacity : 0U;
+}
+
+struct tr_runtime_peer *
+tr_runtime_shard_peer_at(struct tr_runtime_shard *shard, uint32_t slot)
+{
+	if (!shard || slot >= shard->peer_capacity)
+		return NULL;
+	return &shard->peers[slot];
+}
+
+void tr_runtime_shard_peer_note_added(struct tr_runtime_shard *shard)
+{
+	if (!shard)
+		return;
+
+	shard->peer_count++;
+	if (shard->peer_count > shard->peer_count_peak)
+		shard->peer_count_peak = shard->peer_count;
+}
+
+void tr_runtime_shard_peer_note_ready(struct tr_runtime_shard *shard)
+{
+	if (shard)
+		shard->peers_ready_total++;
+}
+
+void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard)
+{
+	if (!shard)
+		return;
+
+	if (shard->peer_count != 0U)
+		shard->peer_count--;
+	shard->peer_reaping_count++;
+}
+
+void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard)
+{
+	if (!shard)
+		return;
+
+	if (shard->peer_reaping_count != 0U)
+		shard->peer_reaping_count--;
+	shard->peers_reaped_total++;
+}
+
+void tr_runtime_shard_peer_note_capacity_rejection(
+	struct tr_runtime_shard *shard)
+{
+	if (shard)
+		shard->peer_capacity_rejections++;
+}
+
+void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
+				 struct tr_runtime_peer_stats *out)
+{
+	if (!out)
+		return;
+
+	memset(out, 0, sizeof(*out));
+	if (!shard)
+		return;
+
+	out->capacity = shard->peer_capacity;
+	out->current = shard->peer_count;
+	out->peak = shard->peer_count_peak;
+	out->reaping_current = shard->peer_reaping_count;
+	out->ready_total = shard->peers_ready_total;
+	out->reaped_total = shard->peers_reaped_total;
+	out->capacity_rejections = shard->peer_capacity_rejections;
 }

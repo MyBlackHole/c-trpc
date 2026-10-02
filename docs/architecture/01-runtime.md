@@ -12,7 +12,8 @@ tr_server
   │    └─ shard[0]
   │         ├─ Reactor
   │         ├─ listener
-  │         └─ RPC executor
+  │         ├─ RPC executor
+  │         └─ peer table / counters
   ├─ accept thread
   └─ reaper thread
 ```
@@ -21,7 +22,11 @@ tr_server
 Server listener 也已从 `tr_server` 下沉到 `tr_runtime_shard[0]`：listen/close
 和最终 cleanup 都由 shard 负责，中央 accept thread 当前只借用该 fd。
 
-该变化不增加线程，也没有改变 accept/reaper 执行模型或 peer table ownership。
+该变化不增加线程。Peer slot storage、capacity/high-water、reaping/ready/rejection
+计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。但 accept/reaper
+仍是中央线程，且当前仍借用 `server->lock` 串行化 peer table 操作；Channel/RPC
+构造与销毁仍由 Server 执行。
+
 当前内部配置仍显式要求 `shard_count == 1`。
 
 TARGET V1 使用单进程多 Reactor：
@@ -100,6 +105,11 @@ struct tr_runtime_shard {
     struct tr_rpc_executor_group *rpc_executor;
     int listen_fd;
     uint16_t bound_port;
+
+    struct tr_runtime_peer *peers;
+    uint32_t peer_capacity;
+    uint32_t peer_count;
+    uint32_t peer_reaping_count;
 };
 ```
 
@@ -110,8 +120,9 @@ Client/Server 都通过 `shard[0]` 取得 Reactor。Server 的 RPC worker group
 Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
 
-listener ownership 已下沉；accept execution、peer table、Pipeline 与 routing
-仍未下沉，应在后续 PR 按 ownership 继续迁移。
+listener 与 peer resource ownership 已下沉；accept/reaper execution、
+peer Channel/RPC lifecycle、Pipeline 与 routing 仍未完全下沉，应在后续 PR
+按 ownership 继续迁移。
 
 目标逻辑结构：
 
@@ -127,6 +138,7 @@ struct tr_runtime_shard {
     struct tr_rpc_executor_group rpc_executor;
 
     int listen_fd;
+    struct tr_runtime_peer *peers;
     struct tr_connection_table connections;
     struct tr_pipeline_table pipelines;
 
