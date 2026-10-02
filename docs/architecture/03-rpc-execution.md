@@ -126,6 +126,26 @@ already non-empty
 
 Reactor 每次 batch drain，而不是每个 completion 一次 wakeup。
 
+Completion admission 由 completion queue 自己串行化，不再借用 Reactor
+`ctl_lock`。生命周期顺序为：
+
+```text
+worker push
+   -> completion_queue.lock
+   -> admission open?
+   -> publish item
+   -> optional coalesced eventfd wake
+
+stop
+   -> close completion admission under completion_queue.lock
+   -> publish STOP command
+   -> Reactor shutdown drain all previously accepted completions
+```
+
+因此 completion producer 只竞争所属 shard 的 completion queue 短锁，不与
+adopt/send/call 等 Reactor 控制面共用生命周期 mutex。当前仍保留 mutex-protected
+bounded MPSC queue；是否进一步改为 SPSC/MPSC atomic ring 必须由 profile 决定。
+
 ## 5. Cancellation
 
 Cancellation 是少数真正适合跨线程 atomic 的状态：
