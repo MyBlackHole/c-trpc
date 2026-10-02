@@ -189,6 +189,105 @@ static void tr_server_merge_rpc_stats(
 	dst->calls_deadline_exceeded += src->calls_deadline_exceeded;
 }
 
+static void tr_server_sum_reactor_work(struct tr_reactor_work *dst,
+				       const struct tr_reactor_work *src)
+{
+	dst->commands += src->commands;
+	dst->completions += src->completions;
+	dst->timer_callbacks += src->timer_callbacks;
+	dst->rx_bytes += src->rx_bytes;
+	dst->tx_bytes += src->tx_bytes;
+	dst->rx_dispatches += src->rx_dispatches;
+	dst->tx_dispatches += src->tx_dispatches;
+}
+
+static void tr_server_max_reactor_work(struct tr_reactor_work *dst,
+				       const struct tr_reactor_work *src)
+{
+	if (src->commands > dst->commands)
+		dst->commands = src->commands;
+	if (src->completions > dst->completions)
+		dst->completions = src->completions;
+	if (src->timer_callbacks > dst->timer_callbacks)
+		dst->timer_callbacks = src->timer_callbacks;
+	if (src->rx_bytes > dst->rx_bytes)
+		dst->rx_bytes = src->rx_bytes;
+	if (src->tx_bytes > dst->tx_bytes)
+		dst->tx_bytes = src->tx_bytes;
+	if (src->rx_dispatches > dst->rx_dispatches)
+		dst->rx_dispatches = src->rx_dispatches;
+	if (src->tx_dispatches > dst->tx_dispatches)
+		dst->tx_dispatches = src->tx_dispatches;
+}
+
+static void tr_server_merge_queue_observation(
+	struct tr_queue_observation *dst,
+	const struct tr_queue_observation *src)
+{
+	dst->capacity += src->capacity;
+	dst->current += src->current;
+	dst->peak += src->peak;
+	dst->full_events += src->full_events;
+}
+
+static void tr_server_merge_pool_observation(
+	struct tr_pool_observation *dst,
+	const struct tr_pool_observation *src)
+{
+	dst->capacity += src->capacity;
+	dst->current += src->current;
+	dst->peak += src->peak;
+	dst->exhausted_events += src->exhausted_events;
+}
+
+static void tr_server_merge_command_observation(
+	struct tr_reactor_command_observation *dst,
+	const struct tr_reactor_command_observation *src)
+{
+	dst->enqueued += src->enqueued;
+	dst->full_events += src->full_events;
+}
+
+static void tr_server_merge_reactor_stats(struct tr_reactor_stats *dst,
+					  const struct tr_reactor_stats *src)
+{
+	dst->turns += src->turns;
+	tr_server_sum_reactor_work(&dst->limits, &src->limits);
+	tr_server_sum_reactor_work(&dst->total, &src->total);
+	tr_server_max_reactor_work(&dst->max_per_turn, &src->max_per_turn);
+	tr_server_sum_reactor_work(&dst->budget_hits, &src->budget_hits);
+	dst->epoll_polls += src->epoll_polls;
+	dst->epoll_waits += src->epoll_waits;
+	if (src->timer_lateness_ns_max > dst->timer_lateness_ns_max)
+		dst->timer_lateness_ns_max = src->timer_lateness_ns_max;
+	dst->shutdown_completions += src->shutdown_completions;
+
+	tr_server_merge_queue_observation(&dst->command_queue,
+					  &src->command_queue);
+	tr_server_merge_queue_observation(&dst->completion_queue,
+					  &src->completion_queue);
+	tr_server_merge_command_observation(&dst->command_send,
+					    &src->command_send);
+	tr_server_merge_command_observation(&dst->command_resume_rx,
+					    &src->command_resume_rx);
+	tr_server_merge_command_observation(&dst->command_call,
+					    &src->command_call);
+	tr_server_merge_command_observation(&dst->command_other,
+					    &src->command_other);
+
+	tr_server_merge_pool_observation(&dst->rx_buffer_pool,
+					 &src->rx_buffer_pool);
+	tr_server_merge_pool_observation(&dst->tx_item_pool,
+					 &src->tx_item_pool);
+	tr_server_merge_pool_observation(&dst->control_tx_item_pool,
+					 &src->control_tx_item_pool);
+
+	dst->observability_flags |= src->observability_flags;
+	dst->busy_ns += src->busy_ns;
+	dst->poll_ns += src->poll_ns;
+	tr_merge_latency_histogram(&dst->turn_busy_ns, &src->turn_busy_ns);
+}
+
 static void tr_server_normalize_config(struct tr_server_config *config)
 {
 	struct tr_server_config defaults;
@@ -1177,36 +1276,22 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 	struct tr_server_stats_owner_request *request =
 		(struct tr_server_stats_owner_request *)arg;
 	struct tr_server_shard *shard = request->shard;
-	struct tr_server *server = shard->server;
 	struct tr_server_stats *stats = request->stats;
 	struct tr_runtime_peer_stats peer_stats;
 	uint32_t i;
 
 	/*
 	 * Peer slots and owner-side counters are single-writer Reactor state.
-	 * External stats callers reach this function through tr_reactor_call().
+	 * External stats callers enter each shard owner synchronously.
 	 */
 	tr_runtime_shard_peer_stats(shard->runtime, &peer_stats);
-	stats->max_peers = peer_stats.capacity;
-	stats->peers_current = peer_stats.current;
-	stats->peers_peak = peer_stats.peak;
-	stats->peers_reaping_current = peer_stats.reaping_current;
-	stats->peers_ready_total = peer_stats.ready_total;
-	stats->peers_reaped_total = peer_stats.reaped_total;
-	stats->peer_capacity_rejections = peer_stats.capacity_rejections;
-
-	/*
-	 * Detached last-ref finalizers may merge retired stats on worker or owner
-	 * context. This lock protects only that cross-thread aggregate; it never
-	 * protects the peer table.
-	 */
-	pthread_mutex_lock(&server->finalizer_lock);
-	stats->channel = server->retired_channel_stats;
-	stats->rpc = server->retired_rpc_stats;
-	pthread_mutex_unlock(&server->finalizer_lock);
-
-	if (stats->rpc.executor_threads == 0)
-		stats->rpc.executor_threads = shard->executor_threads;
+	stats->max_peers += peer_stats.capacity;
+	stats->peers_current += peer_stats.current;
+	stats->peers_peak += peer_stats.peak;
+	stats->peers_reaping_current += peer_stats.reaping_current;
+	stats->peers_ready_total += peer_stats.ready_total;
+	stats->peers_reaped_total += peer_stats.reaped_total;
+	stats->peer_capacity_rejections += peer_stats.capacity_rejections;
 
 	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
@@ -1234,38 +1319,63 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 
 int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 {
-	struct tr_server_stats_owner_request request;
-	struct tr_server_shard *shard;
 	struct tr_server_stats stats;
+	uint32_t i;
 	int ret;
 
-	if (!server || !out)
+	if (!server || !out || server->shard_count == 0U)
 		return TR_ERR_INVALID;
-	shard = tr_server_primary_shard(server);
-	if (!shard)
-		return TR_ERR_STATE;
 
 	memset(&stats, 0, sizeof(stats));
-	ret = tr_reactor_get_stats(tr_server_shard_reactor(shard),
-				   &stats.reactor);
-	if (ret != TR_OK)
-		return ret;
-	ret = tr_buffer_pool_get_stats(&shard->rpc_message_pool,
-				       &stats.rpc_message_pool);
-	if (ret != TR_OK)
-		return ret;
-	ret = tr_buffer_pool_get_stats(&shard->reassembly_pool,
-				       &stats.reassembly_pool);
-	if (ret != TR_OK)
-		return ret;
+	stats.shard_count = server->shard_count;
 
-	request.shard = shard;
-	request.stats = &stats;
-	ret = tr_runtime_shard_call(shard->runtime,
-				    tr_server_collect_peer_stats_on_owner,
-				    &request);
-	if (ret != TR_OK)
-		return ret;
+	/*
+	 * Detached finalizers are cross-thread; take their aggregate once so it is
+	 * not duplicated while per-shard live state is collected.
+	 */
+	pthread_mutex_lock(&server->finalizer_lock);
+	stats.channel = server->retired_channel_stats;
+	stats.rpc = server->retired_rpc_stats;
+	pthread_mutex_unlock(&server->finalizer_lock);
+	stats.rpc.executor_threads = server->config.limits.executor_threads;
+
+	for (i = 0; i < server->shard_count; ++i) {
+		struct tr_server_stats_owner_request request;
+		struct tr_server_shard *shard = &server->shards[i];
+		struct tr_reactor_stats reactor_stats;
+		struct tr_pool_observation pool_stats;
+
+		memset(&reactor_stats, 0, sizeof(reactor_stats));
+		ret = tr_reactor_get_stats(tr_server_shard_reactor(shard),
+					   &reactor_stats);
+		if (ret != TR_OK)
+			return ret;
+		tr_server_merge_reactor_stats(&stats.reactor, &reactor_stats);
+
+		memset(&pool_stats, 0, sizeof(pool_stats));
+		ret = tr_buffer_pool_get_stats(&shard->rpc_message_pool,
+					       &pool_stats);
+		if (ret != TR_OK)
+			return ret;
+		tr_server_merge_pool_observation(&stats.rpc_message_pool,
+						 &pool_stats);
+
+		memset(&pool_stats, 0, sizeof(pool_stats));
+		ret = tr_buffer_pool_get_stats(&shard->reassembly_pool,
+					       &pool_stats);
+		if (ret != TR_OK)
+			return ret;
+		tr_server_merge_pool_observation(&stats.reassembly_pool,
+						 &pool_stats);
+
+		request.shard = shard;
+		request.stats = &stats;
+		ret = tr_runtime_shard_call(
+			shard->runtime, tr_server_collect_peer_stats_on_owner,
+			&request);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	*out = stats;
 	return TR_OK;
