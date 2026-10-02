@@ -30,6 +30,11 @@ int tr_pipeline_registry_create(
 	struct tr_pipeline_registry **out);
 void tr_pipeline_registry_destroy(struct tr_pipeline_registry *registry);
 
+struct tr_reactor *
+tr_pipeline_registry_owner(const struct tr_pipeline_registry *registry);
+uint32_t
+tr_pipeline_registry_owner_shard_id(const struct tr_pipeline_registry *registry);
+
 int tr_pipeline_registry_register(struct tr_pipeline_registry *registry,
 				  struct tr_pipeline *pipeline);
 int tr_pipeline_registry_unregister(struct tr_pipeline_registry *registry,
@@ -45,6 +50,11 @@ int tr_pipeline_registry_attach_data_route(
 	const struct tr_pipeline_route_preface *preface,
 	struct tr_conn_handle connection,
 	struct tr_pipeline_data_ref *data_out);
+
+int tr_pipeline_registry_detach_data_route(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle expected_connection);
 
 int tr_pipeline_registry_get_stats(
 	struct tr_pipeline_registry *registry,
