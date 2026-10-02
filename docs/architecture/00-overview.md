@@ -58,7 +58,8 @@ Pipeline foundation
        ├─ Stream -> DATA generation affinity
        ├─ TRR1 routing preface identity/parser
        ├─ shard-local registry + DATA reserve/attach capability
-       └─ owner-local accepted DATA preface gate -> TRP1 parser
+       ├─ owner-local accepted DATA preface gate -> TRP1 parser
+       └─ CONTROL session -> DATA offer -> TRANSFER_READY affinity barrier
 ```
 
 Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` 拥有唯一

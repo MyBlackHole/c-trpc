@@ -4,8 +4,8 @@
 
 ## 0. CURRENT Foundation
 
-Phase 5 第一层已经落地内部 `tr_pipeline` soft-state object，但尚未接入 public
-facade 或 wire routing。
+Phase 5 已落地内部 `tr_pipeline` soft-state、TRR1 routing、shard-local registry、
+accepted DATA ingress 与 internal CONTROL session；尚未接入 public Backup facade。
 
 当前对象固定：
 
@@ -31,13 +31,13 @@ one Pipeline
 
 所有 mutable operation 都通过 Pipeline owner Reactor 串行化。
 
-当前已实现 routing preface / wire identity 的固定格式与 incremental parser，但尚未
-接到 Server accept path / Pipeline registry。
+当前 routing preface / registry / DATA reserve-attach / accepted ingress 已实现；
+internal CONTROL session 也已能签发 DATA offer，并以原子 Stream affinity 建立
+`TRANSFER_READY` barrier。
 
 当前尚未实现：
 
-- CONTROL 建立 DATA membership 的 reserve/attach 协议消息；
-- `TRANSFER_READY` barrier；
+- CONTROL wire message 编码与 public control facade；
 - facade/Backup API；
 - cross-shard fd transfer；
 - durable backup identity / epoch fencing。
@@ -109,8 +109,8 @@ parser 只消费 48-byte preface；同一次 read 中剩余的 Transport bytes �
 frame parser。完整 preface 一旦 CRC/语义失败就是 connection-fatal，不尝试从任意
 字节重新同步。
 
-当前已经增加 shard-local bounded Pipeline registry 与 DATA reservation/attach
-capability，但还没有把 preface parser 接入 listener/accepted-fd path。
+当前已经增加 shard-local bounded Pipeline registry、DATA reservation/attach
+capability，以及 owner-local accepted DATA preface gate/ingress path。
 
 ### Registry / Reservation
 
@@ -231,6 +231,66 @@ generation 后续的新 DATA membership。
 
 当前该 ingress adapter 仍是 internal foundation，尚未替换现有 public Server RPC
 listener，也尚未实现 CONTROL connection 的创建/注册协议。
+## 0.2 CONTROL Session / TRANSFER_READY
+
+Phase 5 已增加 internal `tr_pipeline_control` session，作为一个运行期 Pipeline
+的 lifecycle owner。Registry 仍然只是 shard-local index，不接管 Pipeline 内存。
+
+CONTROL session create 顺序固定为：
+
+```text
+create Pipeline(owner shard, pipeline_id, epoch)
+  -> bind CONTROL connection
+  -> register Pipeline in shard registry
+```
+
+创建成功后，CONTROL 可以签发 DATA capability：
+
+```text
+reserve_data()
+  -> Pipeline RESERVED(index, generation)
+  -> DATA offer
+       pipeline_id
+       epoch
+       owner_shard_id
+       member_index
+       member_generation
+```
+
+该 offer 可以直接编码为前述 TRR1 DATA preface。签发 offer 本身**不等于** DATA
+ready：只要 socket 还没通过 ingress exact attach，Pipeline 中仍只有 RESERVED。
+
+`TRANSFER_READY` 的内部 barrier primitive 为：
+
+```text
+prepare_transfer(stream_id)
+  -> require active CONTROL
+  -> require at least one ATTACHED DATA
+  -> skip all RESERVED slots
+  -> select ATTACHED DATA by owner round-robin
+  -> atomically bind Stream -> (data_index, generation)
+  -> return TRANSFER_READY token
+```
+
+因此只有 `prepare_transfer()` 返回 TR_OK 后，CONTROL 才允许向客户端宣告该 Stream
+可以在指定 DATA membership 上发送 payload。Reservation 尚未 attach 时返回
+`TR_AGAIN`，不会错误提前发 READY。
+
+Stream affinity 建立和 DATA selection 在同一个 Reactor-owner operation 内完成，
+不存在“先选 DATA，期间 connection 被移除，再 bind Stream”的窗口。
+
+CONTROL session close 也有明确 quiescence gate：
+
+```text
+attached DATA != 0      -> reject close
+Stream affinity != 0    -> reject close
+only RESERVED remains   -> clear CONTROL cancels reservation
+                       -> unregister registry
+                       -> destroy Pipeline
+```
+
+这保证 Registry 不会留下指向已释放 Pipeline 的 entry，也不会在 active DATA/Stream
+仍依赖 Pipeline 时提前注销。
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。

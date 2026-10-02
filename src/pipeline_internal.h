@@ -21,6 +21,11 @@ struct tr_pipeline_data_ref {
 	uint32_t generation;
 };
 
+struct tr_pipeline_transfer_ready {
+	uint32_t stream_id;
+	struct tr_pipeline_data_ref data;
+};
+
 struct tr_pipeline_stats {
 	uint32_t owner_shard_id;
 	uint64_t pipeline_id;
@@ -84,6 +89,16 @@ int tr_pipeline_data_connection(struct tr_pipeline *pipeline,
  */
 int tr_pipeline_select_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref *out);
+
+/*
+ * CONTROL barrier primitive: select one currently ATTACHED DATA membership and
+ * bind stream affinity atomically on the owner. RESERVED slots are never
+ * eligible. TR_OK means the returned token is safe to advertise as
+ * TRANSFER_READY; TR_AGAIN means no attached DATA is currently available.
+ */
+int tr_pipeline_prepare_transfer(
+	struct tr_pipeline *pipeline, uint32_t stream_id,
+	struct tr_pipeline_transfer_ready *out);
 
 int tr_pipeline_bind_stream(struct tr_pipeline *pipeline, uint32_t stream_id,
 			    struct tr_pipeline_data_ref data);
