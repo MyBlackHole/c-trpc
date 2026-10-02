@@ -38,7 +38,7 @@ static void test_runtime_rejects_multi_shard_before_phase4(void)
 	config.shard_count = 2U;
 
 	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
-	assert(runtime == (struct tr_runtime *)(uintptr_t)1U);
+	assert(runtime == NULL);
 }
 
 static void test_runtime_lifecycle(void)
@@ -52,7 +52,7 @@ static void test_runtime_lifecycle(void)
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	assert(tr_runtime_start(runtime) == TR_OK);
-	assert(tr_runtime_start(runtime) == TR_OK);
+	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	tr_runtime_destroy(runtime);
