@@ -139,19 +139,22 @@ struct tr_runtime_shard {
 };
 ```
 
-Client/Server facade 当前仍通过 `shard[0]` 取得 Reactor。内部 Runtime 已可
-拥有多个 shard，且每个 shard 都独立创建 Reactor、peer resources、peer eventfd
-和可选 RPC executor。Server facade 尚未开始创建 shard[1..N]。
+Client facade 当前仍通过 `shard[0]` 取得 Reactor。Server facade 也仍只创建
+一个 Runtime shard，但内部 Server 结构已不再把热资源挂在 `tr_server`：
+每个 Runtime shard 对应一个 `tr_server_shard` context，持有自己的 RPC message
+pool、reassembly pool、executor binding 与 peer-event registration state。
+
+因此未来扩到 N shards 时，新的 listener/peer 不会重新争 Server-global buffer
+pool mutex；只需为每个 Runtime shard 初始化对应 Server shard context。
 
 Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
 生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
 
-listener 与 peer resource ownership 已下沉；accept execution 已进入 Reactor；
-peer lifecycle event source 与 detach/finalize 已完全事件化；dedicated finalizer
-thread 已移除。Peer reserve/publish/remove/live snapshot 也已全部串行化到 Reactor
-owner，不再依赖 Server-global peer mutex。Server 仅保留一个小型
-`finalizer_lock`，用于 detached finalizer 的 retired stats merge 与 shutdown
-condition；它不保护 peer table。后续可继续进入 Pipeline 与 routing。
+listener、peer、executor 与 Server hot-buffer resource ownership 已下沉；accept
+execution 已进入 Reactor；peer lifecycle event source 与 detach/finalize 已完全
+事件化。Peer reserve/publish/remove/live snapshot 全部串行化到 Reactor owner。
+Server 仅保留一个小型 `finalizer_lock`，用于 detached finalizer 的 retired
+stats merge 与 shutdown condition；它不保护 peer table 或 buffer pool。
 
 目标逻辑结构：
 
