@@ -53,13 +53,17 @@ static void test_pipeline_connection_group_and_affinity(void)
 
 	memset(&config, 0, sizeof(config));
 	config.owner = owner;
+	config.owner_shard_id = 3U;
 	config.pipeline_id = UINT64_C(0x1234);
+	config.epoch = UINT64_C(7);
 	config.data_capacity = 2U;
 	config.stream_affinity_capacity = 4U;
 	assert(tr_pipeline_create(&config, &pipeline) == TR_OK);
 	assert(pipeline != NULL);
 	assert(tr_pipeline_owner(pipeline) == owner);
+	assert(tr_pipeline_owner_shard_id(pipeline) == 3U);
 	assert(tr_pipeline_id(pipeline) == UINT64_C(0x1234));
+	assert(tr_pipeline_epoch(pipeline) == UINT64_C(7));
 
 	control = fake_connection(owner, 10U, 1U);
 	wrong_control = fake_connection(other, 10U, 1U);
@@ -80,6 +84,17 @@ static void test_pipeline_connection_group_and_affinity(void)
 	data_conn0 = fake_connection(owner, 20U, 3U);
 	data_conn1 = fake_connection(owner, 21U, 4U);
 	data_conn2 = fake_connection(owner, 22U, 5U);
+
+	/* RESERVED membership is not selectable until the exact capability attaches. */
+	assert(tr_pipeline_reserve_data(pipeline, &reused) == TR_OK);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_get_stats(pipeline, &stats) == TR_OK);
+	assert(stats.data_reserved_count == 1U);
+	assert(stats.data_count == 0U);
+	assert(tr_pipeline_select_data(pipeline, &selected) == TR_AGAIN);
+	assert(tr_pipeline_cancel_data_reservation(pipeline, reused) == TR_OK);
+	assert(tr_pipeline_cancel_data_reservation(pipeline, reused) ==
+	       TR_ERR_STALE);
 
 	assert(tr_pipeline_add_data(
 		       pipeline, fake_connection(other, 20U, 3U), &data0) ==
@@ -148,8 +163,11 @@ static void test_pipeline_connection_group_and_affinity(void)
 
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_pipeline_get_stats(pipeline, &stats) == TR_OK);
+	assert(stats.owner_shard_id == 3U);
 	assert(stats.pipeline_id == UINT64_C(0x1234));
+	assert(stats.epoch == UINT64_C(7));
 	assert(stats.control_bound == 1);
+	assert(stats.data_reserved_count == 0U);
 	assert(stats.data_capacity == 2U);
 	assert(stats.data_count == 2U);
 	assert(stats.stream_affinity_capacity == 4U);
