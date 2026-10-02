@@ -13,6 +13,8 @@ struct tr_rpc_endpoint;
 
 struct tr_runtime_peer {
 	int used;
+	int finalizing;
+	void *owner_arg;
 	struct tr_conn_handle connection;
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
@@ -106,7 +108,13 @@ void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
  * callbacks without taking the legacy Server transition lock. The eventfd is
  * coalescing; consumers drain it before scanning shard-owned peer resources.
  */
+typedef void (*tr_runtime_peer_event_cb)(int fd, uint32_t events, void *arg);
+
 int tr_runtime_shard_peer_event_fd(const struct tr_runtime_shard *shard);
+int tr_runtime_shard_enable_peer_events(struct tr_runtime_shard *shard,
+					tr_runtime_peer_event_cb callback,
+					void *arg);
+int tr_runtime_shard_disable_peer_events(struct tr_runtime_shard *shard);
 void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard);
 void tr_runtime_shard_drain_peer_event(struct tr_runtime_shard *shard);
 
