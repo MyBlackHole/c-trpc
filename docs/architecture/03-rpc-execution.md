@@ -263,14 +263,17 @@ detach Endpoint
 Server 使用 shard-local executor group，因此该阶段不会 join worker。已经 queued /
 running 的 task 继续持有 Endpoint strong-ref 并正常完成。
 
-Phase 2 在 owner 外执行：
+Phase 2 不再由 dedicated cleanup thread 等待。Owner detach 完成后先 arm
+last-ref finalizer，再释放 Endpoint 的 owner ref：
 
 ```text
-wait Endpoint refs == owner reference
+drop Endpoint owner ref
+  -> existing worker/completion refs keep object alive
+  -> last strong-ref release
   -> final executor/stat snapshot
-  -> drop owner ref
   -> free Endpoint
+  -> finalize detached Channel/context
 ```
 
-因此 finalizer 不需要调用 `tr_reactor_quiesce()`，也不拥有任何 protocol state
-mutation 权限。
+因此没有线程会阻塞等待 refcount；finalizer 不调用
+`tr_reactor_quiesce()`，也不拥有任何 protocol state mutation 权限。

@@ -13,6 +13,7 @@ struct tr_rpc_endpoint;
 
 struct tr_runtime_peer {
 	int used;
+	void *finalize_ctx;
 	struct tr_conn_handle connection;
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
@@ -85,9 +86,9 @@ int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard);
 void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
 
 /*
- * Peer storage is shard-owned. During the Phase-3 bridge the legacy Server
- * accept/reaper threads still serialize these APIs with server->lock.
- * Runtime owns storage/counters only; Server still owns Channel/RPC teardown.
+ * Peer storage is shard-owned. Accept and lifecycle detach run on the Reactor
+ * owner; server->lock is still a temporary cross-thread snapshot/finalizer
+ * transition lock. Runtime owns storage/counters only.
  */
 uint32_t tr_runtime_shard_peer_capacity(const struct tr_runtime_shard *shard);
 struct tr_runtime_peer *
@@ -102,11 +103,17 @@ void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 				 struct tr_runtime_peer_stats *out);
 
 /*
- * Shard-local peer lifecycle event source. Producers may signal from Reactor
- * callbacks without taking the legacy Server transition lock. The eventfd is
- * coalescing; consumers drain it before scanning shard-owned peer resources.
+ * Shard-local deferred peer lifecycle event source. Channel callbacks signal
+ * it from the Reactor owner; epoll dispatches it on a later Reactor turn so
+ * shared-connection DOWN notifications finish before detach begins.
  */
+typedef void (*tr_runtime_peer_event_cb)(int fd, uint32_t events, void *arg);
+
 int tr_runtime_shard_peer_event_fd(const struct tr_runtime_shard *shard);
+int tr_runtime_shard_enable_peer_events(struct tr_runtime_shard *shard,
+					tr_runtime_peer_event_cb callback,
+					void *arg);
+int tr_runtime_shard_disable_peer_events(struct tr_runtime_shard *shard);
 void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard);
 void tr_runtime_shard_drain_peer_event(struct tr_runtime_shard *shard);
 

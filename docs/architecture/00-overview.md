@@ -37,7 +37,6 @@ Server
   │         ├─ RPC executor
   │         └─ peer slots / peer counters
   ├─ accept thread
-  ├─ reaper thread
   └─ Reactor-local timers
 
 Client
@@ -60,23 +59,29 @@ readiness 由 Reactor owner 处理，不再存在独立 accept thread。每个 l
 event 最多处理固定批次的新连接，剩余 backlog 由 level-triggered epoll 在后续
 turn 继续驱动。
 
-reaper thread 仍保留，但不再每 10ms 轮询：Channel DOWN、partial peer rollback
-和 peer publish 通过 shard-local eventfd 唤醒它。Peer teardown 现在分成两阶段：
+Peer teardown 不再需要 dedicated reaper thread。Channel DOWN、partial peer
+rollback 和 peer publish 只 signal shard-local eventfd；该 eventfd 已注册到同一
+Reactor epoll，因此 cleanup 在后续 Reactor turn 执行，而不是在当前 Channel
+callback 内重入。
 
 ```text
 Reactor owner detach
-  -> remove RPC/Channel callback sources
-  -> stop deadline/keepalive timer sources
+  -> remove RPC/Channel callback + timer sources
   -> close RPC executor admission
-  -> remove peer from shard table
+  -> move Channel/finalizer context out of peer slot
+  -> clear peer slot for immediate reuse
+  -> transfer Endpoint owner ref
 
-reaper finalize
-  -> wait already-owned worker refs
-  -> snapshot final stats
-  -> free Endpoint/Channel memory
+last Endpoint strong-ref
+  -> final Endpoint stats/free
+  -> final Channel stats/free
+  -> retire peer slot
 ```
 
-因此 reaper 已不再执行 protocol detach/quiesce，只承担 owner-free finalization。
+如果仍有 worker task，strong-ref 保证旧 Endpoint/Channel context 存活；peer
+slot 已经可以服务下一条连接。最后一个 worker/completion ref 释放时自动
+finalization。若没有 worker ref，owner ref transfer 可立即完成 owner-free
+finalization。
 
 当前仍固定 `shard_count = 1`。
 

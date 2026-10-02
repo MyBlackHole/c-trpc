@@ -50,8 +50,8 @@ flowchart TB
 | Object | Owner | 非 owner 如何访问 | 目标同步方式 |
 |---|---|---|---|
 | Listener fd | Reactor shard | Reactor epoll event | shard owns listen/close; Reactor owns accept readiness |
-| Peer slot storage / counters | Reactor shard | Reactor accept + owner detach under transition lock | ownership leaves shard only after callback/timer detach |
-| Peer lifecycle eventfd | Reactor shard | Channel DOWN / rollback / publish signal | event notification；不取 server->lock |
+| Peer slot storage / counters | Reactor shard | Reactor accept + lifecycle event | slot clears after owner detach and is immediately reusable |
+| Peer lifecycle eventfd | Reactor shard | Channel DOWN / rollback / publish signal | same-Reactor deferred lifecycle event |
 | Connection | Reactor shard | command | hot state 无锁 |
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
 | Stream | Reactor shard | command | hot state 无锁 |
@@ -103,8 +103,9 @@ Cross-thread completion returns as an event to owner.
 因此 Server RPC executor、worker queue、listener、peer slot storage/counters
 已经成为 shard-local。Peer reaper wake 也已由固定轮询改为 shard-local eventfd
 通知，Reactor callback 不再为了唤醒 reaper 获取 Server-global lock。Peer 的
-Channel/RPC callback/timer detach 已回到 Reactor owner；reaper 只 finalize 已
-detached 对象。Peer publish/table detach 的 `server->lock` 同步仍是过渡状态；
+Channel/RPC callback/timer detach 已回到 Reactor owner；dedicated reaper 已删除。
+Detached Endpoint 的 owner ref 交给 last-ref finalizer，已有 worker ref 自然提供
+lifetime fencing。Peer publish/snapshot 的 `server->lock` 同步仍是过渡状态；
 后续 connection table / buffer budget 继续按同一规则迁移。
 只有确实无法独立的资源才允许跨 shard 共享，并且必须单独说明同步与容量边界。
 
@@ -120,9 +121,10 @@ no registered Channel keepalive timer
 no new RPC executor admission
 ```
 
-只有这些 owner-visible source 都 detach 后，peer slot 才能清空。Finalizer 只允许
-等待已经存在的 worker strong-ref、读取最终统计和释放内存，不允许重新进入
-Reactor protocol mutation。
+只有这些 owner-visible source 都 detach 后，Channel ownership 才能转移到
+detached-finalizer context，随后 peer slot 立即清空复用。旧 Endpoint 的 strong-ref
+负责真正的 lifetime fencing；最后一个 ref 触发 finalizer，只允许读取最终统计和
+释放 detached Endpoint/Channel，不允许重新进入 Reactor protocol mutation。
 
 ## 6. Resource Transfer
 

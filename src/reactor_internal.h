@@ -23,6 +23,7 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
+typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 
 /*
  * Register one listener/event source in the Reactor epoll set. The callback
@@ -34,6 +35,10 @@ typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 				 tr_reactor_listener_cb callback, void *arg);
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd);
+
+int tr_reactor_peer_event_register(struct tr_reactor *reactor, int fd,
+				   tr_reactor_peer_event_cb callback, void *arg);
+int tr_reactor_peer_event_unregister(struct tr_reactor *reactor, int fd);
 
 typedef uint64_t (*tr_reactor_timer_cb)(void *arg, uint64_t now_ns);
 

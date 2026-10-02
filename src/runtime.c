@@ -27,6 +27,7 @@ struct tr_runtime_shard {
 	uint64_t peers_reaped_total;
 	uint64_t peer_capacity_rejections;
 	int peer_event_fd;
+	int peer_events_registered;
 
 	int listen_fd;
 	uint16_t bound_port;
@@ -46,6 +47,7 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		return;
 
 	tr_runtime_shard_close_listener(shard);
+	(void)tr_runtime_shard_disable_peer_events(shard);
 	if (shard->peer_event_fd >= 0) {
 		close(shard->peer_event_fd);
 		shard->peer_event_fd = -1;
@@ -413,6 +415,41 @@ void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 int tr_runtime_shard_peer_event_fd(const struct tr_runtime_shard *shard)
 {
 	return shard ? shard->peer_event_fd : -1;
+}
+
+int tr_runtime_shard_enable_peer_events(struct tr_runtime_shard *shard,
+					tr_runtime_peer_event_cb callback,
+					void *arg)
+{
+	int ret;
+
+	if (!shard || shard->peer_event_fd < 0 || !callback)
+		return TR_ERR_INVALID;
+	if (shard->peer_events_registered)
+		return TR_ERR_STATE;
+
+	ret = tr_reactor_peer_event_register(shard->reactor,
+					     shard->peer_event_fd,
+					     callback, arg);
+	if (ret == TR_OK)
+		shard->peer_events_registered = 1;
+	return ret;
+}
+
+int tr_runtime_shard_disable_peer_events(struct tr_runtime_shard *shard)
+{
+	int ret;
+
+	if (!shard)
+		return TR_ERR_INVALID;
+	if (!shard->peer_events_registered)
+		return TR_OK;
+
+	ret = tr_reactor_peer_event_unregister(shard->reactor,
+					       shard->peer_event_fd);
+	if (ret == TR_OK)
+		shard->peer_events_registered = 0;
+	return ret;
 }
 
 void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard)

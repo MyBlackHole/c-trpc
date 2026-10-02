@@ -318,6 +318,70 @@ static void test_runtime_shard_peer_event_source(void)
 	assert(errno == EBADF);
 }
 
+struct runtime_peer_event_dispatch_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_runtime_shard *shard;
+	unsigned calls;
+};
+
+static void runtime_peer_event_dispatch_cb(int fd, uint32_t events, void *arg)
+{
+	struct runtime_peer_event_dispatch_ctx *ctx =
+		(struct runtime_peer_event_dispatch_ctx *)arg;
+
+	(void)fd;
+	if (!(events & EPOLLIN))
+		return;
+
+	tr_runtime_shard_drain_peer_event(ctx->shard);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->calls++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void test_runtime_shard_peer_event_dispatch(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	struct runtime_peer_event_dispatch_ctx ctx;
+	struct timespec deadline;
+
+	memset(&config, 0, sizeof(config));
+	memset(&ctx, 0, sizeof(ctx));
+	config.shard_count = 1U;
+	config.peer_capacity = 1U;
+
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	ctx.shard = shard;
+	assert(tr_runtime_start(runtime) == TR_OK);
+	assert(tr_runtime_shard_enable_peer_events(
+		       shard, runtime_peer_event_dispatch_cb, &ctx) == TR_OK);
+
+	tr_runtime_shard_signal_peer_event(shard);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.calls == 0U)
+		assert(pthread_cond_timedwait(&ctx.cond, &ctx.lock,
+					     &deadline) == 0);
+	assert(ctx.calls == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_runtime_shard_disable_peer_events(shard) == TR_OK);
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	tr_runtime_destroy(runtime);
+	assert(pthread_cond_destroy(&ctx.cond) == 0);
+	assert(pthread_mutex_destroy(&ctx.lock) == 0);
+}
+
 static void test_runtime_lifecycle(void)
 {
 	struct tr_runtime_config config;
@@ -346,6 +410,7 @@ int main(void)
 	RUN_TEST(test_runtime_shard_listener_events);
 	RUN_TEST(test_runtime_shard_peer_resources);
 	RUN_TEST(test_runtime_shard_peer_event_source);
+	RUN_TEST(test_runtime_shard_peer_event_dispatch);
 	RUN_TEST(test_runtime_lifecycle);
 	return 0;
 }

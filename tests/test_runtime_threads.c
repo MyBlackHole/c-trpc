@@ -159,7 +159,7 @@ static void test_server_create_start_destroy_threads(void)
 				listen_loopback(server);
 				expect_threads(workers, 0U);
 				assert(tr_server_start(server) == TR_OK);
-				total += 2U; /* Reactor + event-driven reaper。 */
+				total += 1U; /* accept/cleanup 都由 Reactor 事件驱动。 */
 				expect_threads(total, 0U);
 			}
 			tr_server_destroy(server);
@@ -203,25 +203,19 @@ static void test_server_worker_start_failures(void)
 static void test_server_runtime_start_failures(void)
 {
 	const unsigned workers = 3U;
-	unsigned stage;
+	struct tr_server_config config;
+	struct tr_server *server = NULL;
 
-	/* accept 已并入 Reactor；这里只剩 Reactor、reaper 两个 pthread 启动点。 */
-	for (stage = 1U; stage <= 2U; ++stage) {
-		struct tr_server_config config;
-		struct tr_server *server = NULL;
-		unsigned total = workers + stage - 1U;
-
-		server_config_init(&config, workers);
-		reset_probe(workers + stage);
-		assert(tr_server_create(&config, &server) == TR_OK);
-		listen_loopback(server);
-		assert(tr_server_start(server) == TR_ERR_SYS);
-		assert(atomic_load(&create_attempts) == workers + stage);
-		/* start 回滚新增线程，但 executor 仍由存活的 shard 持有。 */
-		expect_threads(total, stage - 1U);
-		tr_server_destroy(server);
-		expect_threads(total, total);
-	}
+	/* accept/reaper 均已移除；Server start 唯一 pthread 启动点是 Reactor。 */
+	server_config_init(&config, workers);
+	reset_probe(workers + 1U);
+	assert(tr_server_create(&config, &server) == TR_OK);
+	listen_loopback(server);
+	assert(tr_server_start(server) == TR_ERR_SYS);
+	assert(atomic_load(&create_attempts) == workers + 1U);
+	expect_threads(workers, 0U);
+	tr_server_destroy(server);
+	expect_threads(workers, workers);
 }
 
 #define RUN_TEST(fn) do { fn(); puts(#fn ": ok"); } while (0)
