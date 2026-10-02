@@ -34,7 +34,8 @@ Server
   │    └─ shard[0]
   │         ├─ 1 Reactor
   │         ├─ listener
-  │         └─ RPC executor
+  │         ├─ RPC executor
+  │         └─ peer slots / peer counters
   ├─ accept thread
   ├─ reaper thread
   └─ Reactor-local timers
