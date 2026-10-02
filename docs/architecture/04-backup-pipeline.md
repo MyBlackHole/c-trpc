@@ -1,6 +1,47 @@
 # Backup Pipeline
 
-**状态：TARGET V1；DataShard 为 FUTURE**
+**状态：CURRENT FOUNDATION → TARGET V1；DataShard 为 FUTURE**
+
+## 0. CURRENT Foundation
+
+Phase 5 第一层已经落地内部 `tr_pipeline` soft-state object，但尚未接入 public
+facade 或 wire routing。
+
+当前对象固定：
+
+```text
+one Pipeline
+  -> one Reactor owner
+  -> optional CONTROL membership
+  -> bounded DATA[0..N-1] membership
+  -> bounded Stream -> DATA affinity table
+```
+
+已经编码的 invariants：
+
+- CONTROL/DATA connection 必须属于 Pipeline owner Reactor；
+- 同一个物理 connection 只能出现一次，不能同时属于 CONTROL 与 DATA；
+- DATA slot 使用独立 generation，slot reuse 不会造成 ABA；
+- DATA 选择采用 owner-serialized round-robin，仅用于新 Stream 建立；
+- Stream 一旦绑定 DATA，生命周期内不允许重新绑定；
+- affinity 保存 `(data_index, data_generation)`；
+- DATA removal 会使绑定该 generation 的所有 Stream affinity 立即失效；
+- 同 index 后续被新 connection 复用时，旧 Stream 不会“复活”到新 connection；
+- membership/affinity 是 bounded preallocated state，没有无界容器。
+
+所有 mutable operation 都通过 Pipeline owner Reactor 串行化。
+
+当前尚未实现：
+
+- routing preface / wire identity；
+- CONTROL 建立 DATA membership 的协议消息；
+- `TRANSFER_READY` barrier；
+- facade/Backup API；
+- cross-shard fd transfer；
+- durable backup identity / epoch fencing。
+
+因此当前 `tr_pipeline` 是后续协议层的 ownership/membership substrate，不是完整
+Backup Pipeline protocol。
 
 ## 1. 定义
 
