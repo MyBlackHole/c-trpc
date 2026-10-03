@@ -147,14 +147,36 @@ tr_server_connection_group_listen(
 tr_server_start(server);
 ```
 
-This Server-side facade reuses the existing single-owner Pipeline engine.
-Applications see only `group_id/epoch`, logical stream/message identity and a
-byte view; Reactor handles, registry state, TRR1 parsing and membership
-generations remain internal. Returning
+The same stable Transport facade now exposes the Client-side CONTROL lifecycle
+without exposing routing internals:
+
+```c
+struct tr_connection_group_id group = {
+    .group_id = 42,
+    .epoch = 1,
+};
+
+tr_client_config_init(&client_cfg);
+tr_client_create(&client_cfg, &client);
+tr_client_connection_group_connect(
+    client, "127.0.0.1", group_port, &group);
+...
+tr_client_connection_group_close(client);
+tr_client_destroy(client);
+```
+
+The facade reuses the existing single-owner Pipeline engine. Applications see
+only `group_id/epoch`, logical stream/message identity and a byte view; Reactor
+handles, registry state, TRR1 parsing, owner shard and membership generations
+remain internal. Returning
 `TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP` retains the original RX buffer
 without an additional payload copy and requires one later
-`tr_connection_group_message_release()`. Public client-side group connect and
-DATA-lane establishment are the next P3 step.
+`tr_connection_group_message_release()`.
+
+The current Client slice establishes CONTROL only. Until public DATA-lane
+establishment lands, a received DATA_OFFER is cancelled internally so a Server
+reservation does not remain pinned and no DATA index/generation escapes the
+stable API.
 
 The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
 Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
