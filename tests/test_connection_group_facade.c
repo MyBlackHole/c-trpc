@@ -26,6 +26,7 @@
 struct public_group_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
+	struct tr_client *client;
 	unsigned authorized;
 	unsigned messages;
 	unsigned data_events;
@@ -37,6 +38,9 @@ struct public_group_ctx {
 	unsigned client_send_last;
 	uint32_t client_send_len;
 	uint8_t client_send_bytes[256];
+	int ready_send_first_ret;
+	int ready_send_second_ret;
+	unsigned retry_messages;
 	struct tr_connection_group_message retained;
 };
 
@@ -203,6 +207,19 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 	}
 
 	assert(message->stream_id == 5001U);
+	if (message->message_id == UINT64_C(4202)) {
+		assert(message->flags ==
+		       (TR_CONNECTION_GROUP_DATA_FIRST |
+			TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 1U);
+		assert(message->bytes.data[0] == 0xa5U);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->retry_messages++;
+		ctx->messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
 	assert(message->message_id == UINT64_C(4201));
 	pthread_mutex_lock(&ctx->lock);
 	assert((uint64_t)ctx->client_send_len + message->bytes.len <=
@@ -232,6 +249,29 @@ static void on_client_transfer_ready(
 	assert(group->group_id == TEST_GROUP_ID);
 	assert(group->epoch == TEST_GROUP_EPOCH);
 	assert(stream_id != 0U);
+
+	if (message_id == UINT64_C(4101) && ctx->client) {
+		uint8_t payload[130];
+		uint8_t retry = 0xa5U;
+		struct tr_transport_bytes bytes;
+		struct tr_transport_bytes retry_bytes;
+		uint32_t i;
+
+		for (i = 0; i < sizeof(payload); ++i)
+			payload[i] = (uint8_t)(i ^ 0x5aU);
+		bytes.data = payload;
+		bytes.len = (uint32_t)sizeof(payload);
+		retry_bytes.data = &retry;
+		retry_bytes.len = 1U;
+		ctx->ready_send_first_ret =
+			tr_client_connection_group_send(
+				ctx->client, stream_id, UINT64_C(4201), &bytes);
+		ctx->ready_send_second_ret =
+			tr_client_connection_group_send(
+				ctx->client, stream_id, UINT64_C(4202),
+				&retry_bytes);
+		memset(payload, 0, sizeof(payload));
+	}
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->transfer_ready++;
@@ -508,12 +548,13 @@ static void test_public_connection_group_client_data_offer(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.limits.max_frame_payload_bytes = 64U;
-	client_config.limits.max_message_bytes = 256U;
+	client_config.limits.max_message_bytes = 130U;
 	client_config.connection_groups.max_data_connections = 1U;
 	client_config.connection_groups.on_transfer_ready =
 		on_client_transfer_ready;
 	client_config.connection_groups.callback_arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
+	ctx.client = client;
 
 	group.group_id = TEST_GROUP_ID;
 	group.epoch = TEST_GROUP_EPOCH;
@@ -546,13 +587,15 @@ static void test_public_connection_group_client_data_offer(void)
 
 	{
 		uint8_t payload[130];
+		uint8_t retry = 0xa5U;
 		struct tr_transport_bytes bytes;
+		struct tr_transport_bytes retry_bytes;
 		uint32_t i;
 
 		for (i = 0; i < sizeof(payload); ++i)
 			payload[i] = (uint8_t)(i ^ 0x5aU);
 		bytes.data = payload;
-		bytes.len = 257U;
+		bytes.len = 131U;
 		assert(tr_client_connection_group_send(
 			       client, 5001U, UINT64_C(4200), &bytes) ==
 		       TR_ERR_BAD_LENGTH);
@@ -560,9 +603,8 @@ static void test_public_connection_group_client_data_offer(void)
 		assert(tr_client_connection_group_send(
 			       client, 9999U, UINT64_C(4201), &bytes) ==
 		       TR_ERR_STALE);
-		assert(tr_client_connection_group_send(
-			       client, 5001U, UINT64_C(4201), &bytes) == TR_OK);
-		memset(payload, 0, sizeof(payload));
+		assert(ctx.ready_send_first_ret == TR_OK);
+		assert(ctx.ready_send_second_ret == TR_AGAIN);
 
 		wait_counter(&ctx, &ctx.messages, 3U);
 		pthread_mutex_lock(&ctx.lock);
@@ -573,6 +615,13 @@ static void test_public_connection_group_client_data_offer(void)
 		for (i = 0; i < 130U; ++i)
 			assert(ctx.client_send_bytes[i] == (uint8_t)(i ^ 0x5aU));
 		pthread_mutex_unlock(&ctx.lock);
+
+		retry_bytes.data = &retry;
+		retry_bytes.len = 1U;
+		assert(tr_client_connection_group_send(
+			       client, 5001U, UINT64_C(4202),
+			       &retry_bytes) == TR_OK);
+		wait_counter(&ctx, &ctx.retry_messages, 1U);
 	}
 
 	assert(tr_client_connection_group_release_transfer(
