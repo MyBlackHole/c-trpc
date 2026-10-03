@@ -417,8 +417,13 @@ static int tr_client_group_connector_send_preface_on_owner(
 		}
 		if (n < 0 && errno == EINTR)
 			continue;
-		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-			return tr_client_group_connector_watch_on_owner(group);
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			int ret = tr_client_group_connector_watch_on_owner(group);
+
+			if (ret != TR_OK)
+				tr_client_group_fail_connector_on_owner(group, 1);
+			return ret;
+		}
 		tr_client_group_fail_connector_on_owner(group, 1);
 		return TR_ERR_SYS;
 	}
@@ -579,24 +584,31 @@ static void tr_client_group_start_next_on_owner(struct tr_client_group *group)
 		if (group->data[i].state != TR_CLIENT_GROUP_DATA_QUEUED)
 			continue;
 		ret = tr_client_group_begin_connector_on_owner(group, i);
-		if (ret != TR_OK &&
-		    group->data[i].state != TR_CLIENT_GROUP_DATA_FREE) {
-			/*
-			 * Failures before connector ownership is published still
-			 * need exact cancellation.
-			 */
+		if (ret == TR_OK)
+			return;
+		if (group->data[i].state == TR_CLIENT_GROUP_DATA_FREE)
+			return;
+
+		/*
+		 * Failures before connector ownership is published still need exact
+		 * cancellation. If cancellation succeeds, continue with the next
+		 * queued offer instead of leaving it stranded.
+		 */
+		{
 			int cancel_ret = tr_client_group_send_cancel_on_owner(
 				group, &group->data[i].route,
 				group->data[i].offer_message_id);
+
 			memset(&group->data[i], 0, sizeof(group->data[i]));
 			group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
-			if (cancel_ret != TR_OK && group->control.reactor)
+			if (cancel_ret != TR_OK && group->control.reactor) {
 				(void)tr_reactor_abort_on_owner(
 					group->control,
 					cancel_ret < 0 ? cancel_ret :
 							 TR_ERR_STATE);
+				return;
+			}
 		}
-		return;
 	}
 }
 
