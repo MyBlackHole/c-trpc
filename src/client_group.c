@@ -251,6 +251,9 @@ fail:
 }
 
 static void tr_client_group_start_next_on_owner(struct tr_client_group *group);
+static void tr_client_group_invalidate_data_transfers(
+	struct tr_client_group *group, uint32_t data_slot,
+	uint32_t data_generation);
 
 static void tr_client_group_connector_unwatch_on_owner(
 	struct tr_client_group *group)
