@@ -14,11 +14,8 @@ extern "C" {
  * Application-facing RPC contract.
  *
  * Endpoint/Channel/Executor construction is intentionally not declared here;
- * those are internal engine concerns.  The remaining endpoint pointer inside
- * tr_rpc_call_handle is a transitional implementation detail and will be
- * opaque-fied in a later API-boundary step.
+ * those are internal engine concerns.
  */
-struct tr_rpc_endpoint;
 
 #define TR_RPC_METADATA_MAX_BYTES 512U
 #define TR_RPC_METADATA_MAX_KEY_LEN 63U
@@ -64,14 +61,15 @@ enum tr_rpc_status {
 };
 
 /*
- * Transitional stable-sized capability.  Applications must treat every field
- * as opaque except equality-by-copy semantics; direct endpoint/slot inspection
- * is not part of the contract.
+ * Opaque fixed-size Call capability.
+ *
+ * Applications may copy/pass the whole value by value, but must not inspect or
+ * modify _private.  A zero-initialized value is invalid.  The representation
+ * deliberately does not expose Endpoint/slot/generation engine identity.
  */
+#define TR_RPC_CALL_PRIVATE_WORDS 2U
 struct tr_rpc_call_handle {
-	struct tr_rpc_endpoint *endpoint;
-	uint32_t slot;
-	uint32_t generation;
+	uint64_t _private[TR_RPC_CALL_PRIVATE_WORDS];
 };
 
 struct tr_rpc_method_desc {
