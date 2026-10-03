@@ -1336,8 +1336,10 @@ static int tr_client_group_send_on_owner(void *arg)
 		return ret;
 
 	if (bytes->len != 0U) {
-		if ((uint64_t)bytes->len >
-		    group->send_bytes_limit - group->send_bytes_inflight)
+		if (group->send_bytes_inflight > group->send_bytes_limit ||
+		    (uint64_t)bytes->len >
+			    group->send_bytes_limit -
+				    group->send_bytes_inflight)
 			return TR_AGAIN;
 		if ((size_t)bytes->len >
 		    SIZE_MAX - sizeof(*owned))
