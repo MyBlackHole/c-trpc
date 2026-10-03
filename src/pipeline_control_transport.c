@@ -115,10 +115,16 @@ static void tr_pipeline_control_transport_event(
 
 	teardown_status = tr_pipeline_control_abort(
 		transport->control, connection);
+	if (teardown_status != TR_OK) {
+		if (closed_cb)
+			closed_cb(
+				pipeline_id, epoch, teardown_status, closed_arg);
+		return;
+	}
 	transport->control = NULL;
 
 	if (closed_cb)
-		closed_cb(pipeline_id, epoch, teardown_status, closed_arg);
+		closed_cb(pipeline_id, epoch, TR_OK, closed_arg);
 	free(transport);
 }
 
