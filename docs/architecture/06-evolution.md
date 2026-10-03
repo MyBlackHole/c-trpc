@@ -271,7 +271,8 @@ c-trpc core Phase。
 - `rpc.h -> channel.h -> reactor.h` public dependency 已解除；
 - buffer/channel/reactor/frame/wire 以及 queue/parser/socket/wire codec helper 均退出安装 SDK；
 - detailed Reactor/Channel/Endpoint diagnostics 已移入 internal diagnostics；
-- retained RPC message 用固定 opaque release token，未增加 allocation/copy。
+- retained RPC message 用固定 opaque release token，未增加 allocation/copy；
+- `tr_rpc_call_handle` 已改为 16-byte opaque capability，不再公开 Endpoint pointer + slot/generation，stale-generation fencing 语义保持不变。
 
 当前 stable installed headers：
 
@@ -288,7 +289,6 @@ status.h
 
 下一阶段：
 
-- `tr_rpc_call_handle` opaque 化；
 - high-level semantic limits 与 implementation tuning 分离；
 - 设计 stable semantic observability；
 - generic Connection Group / Pipeline public capability。
