@@ -121,10 +121,13 @@ static int authorize_control(
 }
 
 static enum tr_frame_disposition data_frame_cb(
+	const struct tr_pipeline_route_preface *route,
 	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
 {
 	struct data_test_ctx *ctx = (struct data_test_ctx *)arg;
 
+	assert(route != NULL);
+	assert(route->pipeline_id == TEST_PIPELINE_ID);
 	(void)connection;
 	pthread_mutex_lock(&ctx->lock);
 	ctx->frames++;
@@ -135,11 +138,14 @@ static enum tr_frame_disposition data_frame_cb(
 }
 
 static void data_event_cb(
+	const struct tr_pipeline_route_preface *route,
 	struct tr_conn_handle connection, enum tr_connection_event event,
 	int status, void *arg)
 {
 	struct data_test_ctx *ctx = (struct data_test_ctx *)arg;
 
+	assert(route != NULL);
+	assert(route->pipeline_id == TEST_PIPELINE_ID);
 	(void)connection;
 	(void)event;
 	(void)status;
