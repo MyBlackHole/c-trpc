@@ -594,10 +594,11 @@ Absolute limits avoid duplicate-credit bugs if updates are retried or coalesced.
 
 ## Architecture documents
 
-架构设计按“总览、Runtime、Ownership、RPC 执行、Backup Pipeline、Durability/Recovery、演进路线、ADR”拆分，入口见
+架构设计以“Core scope、分层/API 边界、Runtime、Ownership、RPC、Connection Group、演进路线、ADR”为主线，入口见
 [`docs/architecture/README.md`](docs/architecture/README.md)。
 
-这些文档区分 CURRENT、TARGET V1 与 FUTURE，避免把规划能力误认为当前已经实现。
+Backup durability/recovery 只作为上层业务参考，不属于 c-trpc core contract。
+文档区分 CURRENT、TARGET V1、FUTURE 与 BUSINESS REFERENCE，避免把业务规划误认为 RPC/Transport 必须实现的能力。
 
 ## Important ownership rules
 
