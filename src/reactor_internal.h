@@ -75,6 +75,18 @@ int tr_reactor_peer_event_register(struct tr_reactor *reactor, int fd,
 				   tr_reactor_peer_event_cb callback, void *arg);
 int tr_reactor_peer_event_unregister(struct tr_reactor *reactor, int fd);
 
+typedef void (*tr_reactor_aux_event_cb)(int fd, uint32_t events, void *arg);
+
+/*
+ * One bounded auxiliary fd event source for owner-local state machines such as
+ * nonblocking connect completion. Reactor observes the fd but never owns or
+ * closes it. events accepts EPOLLIN/EPOLLOUT; ERR/HUP are always included.
+ */
+int tr_reactor_aux_event_register(struct tr_reactor *reactor, int fd,
+				  uint32_t events,
+				  tr_reactor_aux_event_cb callback, void *arg);
+int tr_reactor_aux_event_unregister(struct tr_reactor *reactor, int fd);
+
 typedef uint64_t (*tr_reactor_timer_cb)(void *arg, uint64_t now_ns);
 
 struct tr_reactor_timer_handle {
