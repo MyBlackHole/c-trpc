@@ -1662,8 +1662,8 @@ static void test_channel_stream_slot_reuse(void)
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &second) == TR_OK);
 	wait_channel_counter(&client_ctx, &client_ctx.opened, 2U);
 	wait_channel_counter(&server_ctx, &server_ctx.opened, 2U);
-	/* max_calls=1 guarantees slot reuse; the opaque capability must rotate. */
-	assert(memcmp(&second, &first, sizeof(second)) != 0);
+	assert(second.slot == first.slot);
+	assert(second.generation != first.generation);
 	assert(tr_stream_get_flow_state(first, &flow) == TR_ERR_STALE);
 
 	pthread_mutex_lock(&server_ctx.lock);
