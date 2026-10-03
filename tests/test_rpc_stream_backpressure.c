@@ -4,6 +4,7 @@
 #include "tr/reactor.h"
 #include "tr/rpc.h"
 #include "tr/status.h"
+#include "../src/rpc_internal.h"
 
 #include <assert.h>
 #include <fcntl.h>
@@ -234,13 +235,19 @@ server_message(struct tr_rpc_call_handle call,
 	switch (data[0]) {
 	case 'A':
 		ctx->a_messages++;
-		if (ctx->a_messages == 1U)
-			ctx->a_stream = message->stream;
+		if (ctx->a_messages == 1U) {
+			struct tr_stream_handle stream;
+			assert(tr_rpc_message_stream_internal(message, &stream) == TR_OK);
+			ctx->a_stream = stream;
+		}
 		break;
 	case 'B':
 		ctx->b_messages++;
-		if (ctx->b_messages == 1U)
-			ctx->b_stream = message->stream;
+		if (ctx->b_messages == 1U) {
+			struct tr_stream_handle stream;
+			assert(tr_rpc_message_stream_internal(message, &stream) == TR_OK);
+			ctx->b_stream = stream;
+		}
 		break;
 	case 'F':
 		ctx->filler_messages++;
