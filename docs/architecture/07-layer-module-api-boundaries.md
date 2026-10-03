@@ -698,10 +698,12 @@ construction。Client/Server 用户无需知道 Endpoint 如何绑定 Transport�
 
 这些实现是正确的 internal capability 技术，但 public layout 固化内部对象模型。
 
-目标：
+处理结果：
 
-- stable public handle opaque；
-- slot/generation 继续保留在 internal implementation。
+- stable public `tr_rpc_call_handle` 现在只暴露固定大小 `_private` capability；
+- Endpoint pointer、slot、generation 的编码/解析只存在于 RPC engine；
+- handle 仍按值复制，不增加 allocation、lock、queue 或 thread hop；
+- generation fencing 与 stale-handle 检查语义保持不变。
 
 ---
 
@@ -812,17 +814,14 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - buffer/channel/reactor/frame/wire 已退出 stable facade closure；
 - installed SDK 只保留自包含 facade/RPC headers。
 
-### P2 — RPC public surface — IN PROGRESS
+### P2 — RPC public surface — COMPLETE
 
 已完成：
 
 - application RPC API 与 Endpoint engine 分离；
 - Client/Server 用户不再看到 Channel/Endpoint construction；
-- retained message 用 opaque release token 保持零额外 allocation/copy。
-
-待完成：
-
-- `tr_rpc_call_handle` opaque 化，不再公开 endpoint pointer + slot/generation。
+- retained message 用 opaque release token 保持零额外 allocation/copy；
+- `tr_rpc_call_handle` 已 opaque 化，不再公开 Endpoint pointer + slot/generation，同时保持原有 stale-generation fencing。
 
 ### P3 — Transport / Connection Group public capability
 
