@@ -5,7 +5,6 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <time.h>
 
 #include "tr/buffer.h"
@@ -14,17 +13,13 @@
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"
-#include "tr/transport.h"
 #include "channel_internal.h"
+#include "client_group_internal.h"
 #include "facade_diagnostics_internal.h"
-#include "pipeline_control_wire_internal.h"
-#include "pipeline_route_internal.h"
-#include "reactor_internal.h"
 #include "rpc_internal.h"
 #include "runtime_internal.h"
 #include "socket_internal.h"
 
-#define TR_CLIENT_CONNECTION_GROUP_CONTROL_BUFFERS 4U
 
 struct tr_client {
 	struct tr_client_config config;
@@ -35,11 +30,7 @@ struct tr_client {
 	struct tr_rpc_endpoint *rpc;
 	struct tr_conn_handle connection;
 
-	struct tr_conn_handle connection_group;
-	struct tr_pipeline_route_preface connection_group_route;
-	struct tr_buffer_pool connection_group_control_pool;
-	uint32_t connection_group_generation;
-	int connection_group_control_pool_ready;
+	struct tr_client_group *connection_group;
 
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
@@ -126,6 +117,7 @@ void tr_client_config_init(struct tr_client_config *config)
 
 	memset(config, 0, sizeof(*config));
 	tr_facade_limits_init(&config->limits);
+	tr_connection_group_client_config_init(&config->connection_groups);
 	config->connect_timeout_ms = 5000U;
 	config->tcp_nodelay = TR_TCP_NODELAY_DEFAULT;
 	config->keepalive_interval_ms = 30000U;
@@ -173,216 +165,6 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 
 	*out_fd = tr_fd_take(&fd);
 	return TR_OK;
-}
-
-static int tr_client_send_all_fd(int fd, const uint8_t *data, size_t len,
-				 uint32_t timeout_ms)
-{
-	uint64_t start = tr_client_now_ms();
-
-	if (fd < 0 || (len != 0U && !data))
-		return TR_ERR_INVALID;
-
-	while (len != 0U) {
-		struct pollfd pfd;
-		ssize_t n;
-		int wait_ms;
-		int ret;
-
-		n = send(fd, data, len, MSG_NOSIGNAL);
-		if (n > 0) {
-			data += (size_t)n;
-			len -= (size_t)n;
-			continue;
-		}
-		if (n < 0 && errno == EINTR)
-			continue;
-		if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
-			return TR_ERR_SYS;
-
-		if (timeout_ms == 0U) {
-			wait_ms = -1;
-		} else {
-			uint64_t elapsed = tr_client_now_ms() - start;
-
-			if (elapsed >= timeout_ms)
-				return TR_ERR_TIMEOUT;
-			wait_ms = (int)(timeout_ms - elapsed);
-		}
-
-		memset(&pfd, 0, sizeof(pfd));
-		pfd.fd = fd;
-		pfd.events = POLLOUT;
-		do {
-			ret = poll(&pfd, 1, wait_ms);
-		} while (ret < 0 && errno == EINTR);
-		if (ret == 0)
-			return TR_ERR_TIMEOUT;
-		if (ret < 0)
-			return TR_ERR_SYS;
-	}
-	return TR_OK;
-}
-
-static uint32_t
-tr_client_connection_group_next_generation(struct tr_client *client)
-{
-	client->connection_group_generation++;
-	if (client->connection_group_generation == 0U)
-		client->connection_group_generation = 1U;
-	return client->connection_group_generation;
-}
-
-static int
-tr_client_connection_group_control_pool_ensure(struct tr_client *client)
-{
-	int ret;
-
-	if (client->connection_group_control_pool_ready)
-		return TR_OK;
-	ret = tr_buffer_pool_init(
-		&client->connection_group_control_pool,
-		TR_CLIENT_CONNECTION_GROUP_CONTROL_BUFFERS,
-		TR_PIPELINE_CONTROL_WIRE_SIZE);
-	if (ret != TR_OK)
-		return ret;
-	client->connection_group_control_pool_ready = 1;
-	return TR_OK;
-}
-
-static int tr_client_connection_group_message_matches(
-	const struct tr_client *client,
-	const struct tr_pipeline_control_wire_message *message)
-{
-	const struct tr_pipeline_route_preface *route;
-
-	if (!client || !message)
-		return 0;
-	route = &client->connection_group_route;
-	return message->owner_shard_id == route->owner_shard_id &&
-	       message->pipeline_id == route->pipeline_id &&
-	       message->epoch == route->epoch;
-}
-
-static int tr_client_connection_group_cancel_offer_on_owner(
-	struct tr_client *client, struct tr_conn_handle connection,
-	const struct tr_pipeline_control_wire_message *offer,
-	uint64_t message_id)
-{
-	struct tr_pipeline_control_wire_message cancel;
-	struct tr_buffer *buffer = NULL;
-	int ret;
-
-	ret = tr_buffer_acquire(
-		&client->connection_group_control_pool,
-		TR_PIPELINE_CONTROL_WIRE_SIZE, &buffer);
-	if (ret != TR_OK)
-		return ret;
-
-	cancel = *offer;
-	cancel.type = TR_PIPELINE_CONTROL_DATA_CANCEL;
-	cancel.stream_id = 0U;
-	ret = tr_pipeline_control_wire_encode(buffer->data, &cancel);
-	if (ret != TR_OK)
-		goto fail;
-	buffer->len = TR_PIPELINE_CONTROL_WIRE_SIZE;
-
-	ret = tr_reactor_send(
-		connection, TR_FRAME_PIPELINE_CONTROL, 0U, 0U, message_id, buffer);
-	if (ret == TR_OK)
-		return TR_OK;
-
-fail:
-	tr_buffer_release(buffer);
-	return ret;
-}
-
-static enum tr_frame_disposition tr_client_connection_group_control_frame(
-	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
-{
-	struct tr_client *client = (struct tr_client *)arg;
-	struct tr_pipeline_control_wire_message message;
-	int ret;
-
-	if (!client || !frame ||
-	    frame->header.type != TR_FRAME_PIPELINE_CONTROL ||
-	    frame->header.flags != 0U || frame->header.stream_id != 0U ||
-	    !frame->payload ||
-	    frame->payload->len != TR_PIPELINE_CONTROL_WIRE_SIZE) {
-		(void)tr_reactor_abort_on_owner(connection, TR_ERR_BAD_TYPE);
-		return TR_FRAME_RELEASE;
-	}
-
-	memset(&message, 0, sizeof(message));
-	ret = tr_pipeline_control_wire_decode(
-		frame->payload->data, frame->payload->len, &message);
-	if (ret != TR_OK ||
-	    !tr_client_connection_group_message_matches(client, &message)) {
-		if (ret == TR_OK)
-			ret = TR_ERR_STALE;
-		(void)tr_reactor_abort_on_owner(connection, ret);
-		return TR_FRAME_RELEASE;
-	}
-
-	/*
-	 * This P3 slice establishes only the public CONTROL lifecycle. Do not leak
-	 * DATA index/generation to applications: return unused reservations to the
-	 * Server until the next slice can establish the matching DATA lane.
-	 */
-	if (message.type == TR_PIPELINE_CONTROL_DATA_OFFER) {
-		ret = tr_client_connection_group_cancel_offer_on_owner(
-			client, connection, &message, frame->header.message_id);
-		if (ret == TR_OK)
-			return TR_FRAME_RELEASE;
-		if (ret >= 0)
-			ret = TR_ERR_STATE;
-	} else {
-		ret = TR_ERR_BAD_TYPE;
-	}
-
-	(void)tr_reactor_abort_on_owner(connection, ret);
-	return TR_FRAME_RELEASE;
-}
-
-struct tr_client_connection_group_adopt_request {
-	struct tr_client *client;
-	int fd;
-	int fd_consumed;
-	struct tr_conn_handle connection;
-};
-
-static int tr_client_connection_group_adopt_on_owner(void *arg)
-{
-	struct tr_client_connection_group_adopt_request *request =
-		(struct tr_client_connection_group_adopt_request *)arg;
-	struct tr_reactor *reactor = tr_client_reactor(request->client);
-	int ret;
-
-	ret = tr_reactor_adopt_fd(reactor, request->fd, &request->connection);
-	if (ret != TR_OK)
-		return ret;
-	request->fd_consumed = 1;
-
-	ret = tr_reactor_set_handler(
-		request->connection, tr_client_connection_group_control_frame,
-		NULL, request->client);
-	if (ret != TR_OK) {
-		(void)tr_reactor_close_on_owner(request->connection);
-		memset(&request->connection, 0, sizeof(request->connection));
-	}
-	return ret;
-}
-
-struct tr_client_connection_group_close_request {
-	struct tr_conn_handle connection;
-};
-
-static int tr_client_connection_group_close_on_owner(void *arg)
-{
-	struct tr_client_connection_group_close_request *request =
-		(struct tr_client_connection_group_close_request *)arg;
-
-	return tr_reactor_close_on_owner(request->connection);
 }
 
 int tr_client_create(const struct tr_client_config *config,
@@ -435,7 +217,12 @@ int tr_client_create(const struct tr_client_config *config,
 	runtime_config.shard_count = 1U;
 	runtime_config.shards = &shard_config;
 	reactor_config = &shard_config.reactor;
-	reactor_config->max_connections = 4U;
+	if (effective.connection_groups.max_data_connections > UINT32_MAX - 2U)
+		return TR_ERR_INVALID;
+	reactor_config->max_connections =
+		effective.connection_groups.max_data_connections + 2U;
+	if (reactor_config->max_connections < 4U)
+		reactor_config->max_connections = 4U;
 	reactor_config->command_capacity = effective.limits.command_capacity;
 	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
 	reactor_config->control_tx_item_capacity =
@@ -462,6 +249,22 @@ int tr_client_create(const struct tr_client_config *config,
 	ret = tr_runtime_start(client->runtime);
 	if (ret != TR_OK)
 		return ret;
+
+	{
+		struct tr_client_group_config group_config;
+
+		memset(&group_config, 0, sizeof(group_config));
+		group_config.owner = tr_client_reactor(client);
+		group_config.max_data_connections =
+			effective.connection_groups.max_data_connections;
+		group_config.connect_timeout_ms = effective.connect_timeout_ms;
+		group_config.tcp_nodelay =
+			tr_tcp_nodelay_policy_enabled(effective.tcp_nodelay);
+		ret = tr_client_group_create(
+			&group_config, &client->connection_group);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	*out = tr_client_owner_take(&client);
 	return TR_OK;
@@ -619,103 +422,17 @@ int tr_client_connection_group_connect(
 	struct tr_client *client, const char *ipv4_address, uint16_t port,
 	const struct tr_connection_group_id *group)
 {
-	struct tr_pipeline_route_preface route;
-	struct tr_client_connection_group_adopt_request request;
-	uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
-	int fd TR_AUTO(tr_fd_cleanup) = -1;
-	int ret;
-
-	if (!client || !ipv4_address || !group || port == 0U ||
-	    group->group_id == 0U || group->epoch == 0U)
+	if (!client || !client->connection_group)
 		return TR_ERR_INVALID;
-	if (client->connection_group.reactor)
-		return TR_ERR_STATE;
-
-	ret = tr_client_connection_group_control_pool_ensure(client);
-	if (ret != TR_OK)
-		return ret;
-
-	ret = tr_client_connect_fd(
-		ipv4_address, port, client->config.connect_timeout_ms, &fd);
-	if (ret != TR_OK)
-		return ret;
-
-	if (tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay)) {
-		ret = tr_tcp_set_nodelay(fd, 1);
-		if (ret != TR_OK)
-			return ret;
-	}
-
-	memset(&route, 0, sizeof(route));
-	route.version = TR_PIPELINE_ROUTE_VERSION;
-	route.role = TR_PIPELINE_ROUTE_CONTROL;
-	/*
-	 * The current Server facade binds the listener to internal shard 0.
-	 * Keep that routing detail inside Transport; it is not public identity.
-	 */
-	route.owner_shard_id = 0U;
-	route.pipeline_id = group->group_id;
-	route.epoch = group->epoch;
-	route.member_index = TR_PIPELINE_ROUTE_MEMBER_CONTROL;
-	route.member_generation =
-		tr_client_connection_group_next_generation(client);
-
-	ret = tr_pipeline_route_preface_encode(raw, &route);
-	if (ret != TR_OK)
-		return ret;
-	ret = tr_client_send_all_fd(
-		fd, raw, sizeof(raw), client->config.connect_timeout_ms);
-	if (ret != TR_OK)
-		return ret;
-
-	/*
-	 * Publish immutable route identity before the owner installs the handler.
-	 * The owner callback adopts the fd and installs the CONTROL frame handler
-	 * in one Reactor turn, so Server frames already buffered after TRR1 cannot
-	 * run through a NULL/default handler window.
-	 */
-	client->connection_group_route = route;
-	memset(&request, 0, sizeof(request));
-	request.client = client;
-	request.fd = fd;
-	ret = tr_reactor_call(
-		tr_client_reactor(client),
-		tr_client_connection_group_adopt_on_owner, &request);
-	if (request.fd_consumed)
-		(void)tr_fd_take(&fd);
-	if (ret != TR_OK) {
-		memset(&client->connection_group_route, 0,
-		       sizeof(client->connection_group_route));
-		return ret;
-	}
-
-	client->connection_group = request.connection;
-	return TR_OK;
+	return tr_client_group_connect(
+		client->connection_group, ipv4_address, port, group);
 }
 
 int tr_client_connection_group_close(struct tr_client *client)
 {
-	struct tr_client_connection_group_close_request request;
-	int ret;
-
-	if (!client)
+	if (!client || !client->connection_group)
 		return TR_ERR_INVALID;
-	if (!client->connection_group.reactor)
-		return TR_ERR_STATE;
-
-	request.connection = client->connection_group;
-	ret = tr_reactor_call(
-		client->connection_group.reactor,
-		tr_client_connection_group_close_on_owner, &request);
-	if (ret == TR_ERR_STALE || ret == TR_ERR_CLOSED)
-		ret = TR_OK;
-	if (ret != TR_OK)
-		return ret;
-
-	memset(&client->connection_group, 0, sizeof(client->connection_group));
-	memset(&client->connection_group_route, 0,
-	       sizeof(client->connection_group_route));
-	return TR_OK;
+	return tr_client_group_close(client->connection_group);
 }
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
@@ -831,8 +548,10 @@ void tr_client_destroy(struct tr_client *client)
 		(void)tr_channel_wait_drained(client->channel, 1000U);
 	}
 
-	if (client->connection_group.reactor)
-		(void)tr_client_connection_group_close(client);
+	if (client->connection_group) {
+		tr_client_group_destroy(client->connection_group);
+		client->connection_group = NULL;
+	}
 
 	if (client->runtime)
 		(void)tr_runtime_stop(client->runtime);
@@ -847,8 +566,6 @@ void tr_client_destroy(struct tr_client *client)
 		tr_buffer_pool_destroy(&client->reassembly_pool);
 	if (client->rpc_pool_ready)
 		tr_buffer_pool_destroy(&client->rpc_message_pool);
-	if (client->connection_group_control_pool_ready)
-		tr_buffer_pool_destroy(&client->connection_group_control_pool);
 
 	free(client);
 }
