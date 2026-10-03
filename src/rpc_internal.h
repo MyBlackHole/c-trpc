@@ -8,6 +8,8 @@
 #include "tr/observability.h"
 #include "tr/rpc.h"
 
+struct tr_rpc_endpoint;
+
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
 
 struct tr_rpc_endpoint_config {
