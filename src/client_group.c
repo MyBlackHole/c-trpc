@@ -335,12 +335,24 @@ static void tr_client_group_data_event(
 		return;
 
 	for (i = 0; i < group->data_capacity; ++i) {
+		int cancel_ret = TR_OK;
+
 		if (group->data[i].state != TR_CLIENT_GROUP_DATA_ACTIVE ||
 		    !tr_client_group_conn_equal(
 			    group->data[i].connection, connection))
 			continue;
+		if (!group->closing && group->control.reactor)
+			cancel_ret = tr_client_group_send_cancel_on_owner(
+				group, &group->data[i].route,
+				group->data[i].offer_message_id);
 		memset(&group->data[i], 0, sizeof(group->data[i]));
 		group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
+		if (cancel_ret != TR_OK && group->control.reactor) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
+			return;
+		}
 		break;
 	}
 	if (!group->closing)
@@ -368,10 +380,20 @@ static int tr_client_group_connector_finish_on_owner(
 	memset(&connection, 0, sizeof(connection));
 	ret = tr_reactor_adopt_fd(group->config.owner, fd, &connection);
 	if (ret != TR_OK) {
+		int cancel_ret;
+
 		tr_socket_close(&fd);
 		tr_client_group_connector_reset_on_owner(group, 0);
+		cancel_ret = tr_client_group_send_cancel_on_owner(
+			group, &data->route, data->offer_message_id);
 		memset(data, 0, sizeof(*data));
 		data->state = TR_CLIENT_GROUP_DATA_FREE;
+		if (cancel_ret != TR_OK && group->control.reactor) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
+			return ret;
+		}
 		tr_client_group_start_next_on_owner(group);
 		return ret;
 	}
@@ -380,10 +402,20 @@ static int tr_client_group_connector_finish_on_owner(
 		connection, tr_client_group_data_frame,
 		tr_client_group_data_event, group);
 	if (ret != TR_OK) {
+		int cancel_ret;
+
 		(void)tr_reactor_close_on_owner(connection);
 		tr_client_group_connector_reset_on_owner(group, 0);
+		cancel_ret = tr_client_group_send_cancel_on_owner(
+			group, &data->route, data->offer_message_id);
 		memset(data, 0, sizeof(*data));
 		data->state = TR_CLIENT_GROUP_DATA_FREE;
+		if (cancel_ret != TR_OK && group->control.reactor) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
+			return ret;
+		}
 		tr_client_group_start_next_on_owner(group);
 		return ret;
 	}
@@ -429,10 +461,11 @@ static int tr_client_group_connector_send_preface_on_owner(
 	}
 
 	/*
-	 * Once the complete route is on the wire, Server owns the decision:
-	 * successful attach retires membership on DATA close; rejected attach
-	 * exact-cancels the still-RESERVED capability. Do not send DATA_CANCEL
-	 * from this point because the route may already be ATTACHED.
+	 * Once the complete route is on the wire, attach state is ambiguous until
+	 * the socket lifecycle converges. DATA_CANCEL is exact and idempotent for
+	 * the issued generation: it frees RESERVED, and is a no-op for ATTACHED or
+	 * already FREE. Thus later local failure can safely send cancellation
+	 * without needing a separate attach ACK or risking ABA.
 	 */
 	return tr_client_group_connector_finish_on_owner(group);
 }
