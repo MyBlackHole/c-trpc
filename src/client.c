@@ -420,9 +420,14 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 	group_config.owner = tr_client_reactor(client);
 	group_config.max_data_connections =
 		client->config.connection_groups.max_data_connections;
+	group_config.max_transfers = client->config.limits.max_streams;
 	group_config.connect_timeout_ms = client->config.connect_timeout_ms;
 	group_config.tcp_nodelay =
 		tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay);
+	group_config.on_transfer_ready =
+		client->config.connection_groups.on_transfer_ready;
+	group_config.callback_arg =
+		client->config.connection_groups.callback_arg;
 
 	ret = tr_client_group_create(
 		&group_config, &client->connection_group);
@@ -452,6 +457,17 @@ int tr_client_connection_group_close(struct tr_client *client)
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 	return tr_client_group_close(client->connection_group);
+}
+
+int tr_client_connection_group_release_transfer(
+	struct tr_client *client, uint32_t stream_id)
+{
+	if (!client || stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!client->connection_group)
+		return TR_ERR_STATE;
+	return tr_client_group_release_transfer(
+		client->connection_group, stream_id);
 }
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)

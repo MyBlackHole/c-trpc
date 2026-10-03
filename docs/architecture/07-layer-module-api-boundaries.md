@@ -854,9 +854,15 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - peer DATA_CANCEL 对 exact generation 幂等：RESERVED -> FREE，ATTACHED/FREE 为 no-op，generation 已复用才 STALE，因此 preface handoff 不需要新增 attach ACK；
 - `max_data_connections == 0` 时继续由 Client 内部 exact DATA_CANCEL 归还 reservation。
 
+第四阶段已完成：
+
+- Client 消费 TRANSFER_READY，并要求 wire 中的 DATA index/generation 精确命中当前 ACTIVE DATA lane；
+- Client 使用 `limits.max_streams` 作为 bounded local transfer-affinity capacity，不新增重复的 public capacity knob；
+- public READY callback 只暴露 `group_id/epoch + stream_id + CONTROL message_id`，DATA routing capability 保持 internal；
+- Client transfer release 回到同一 Reactor owner 删除 affinity；DATA lane 关闭会按 exact generation 失效对应 affinity，slot reuse 不会让旧 Stream 漂移到新连接。
+
 待完成：
 
-- public client 对 TRANSFER_READY 的 route/affinity 消费；
 - logical transfer 的 Client DATA send/lifecycle capability；
 - 完整 group-level stable stats / drain semantics。
 
