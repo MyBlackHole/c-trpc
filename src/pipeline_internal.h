@@ -26,6 +26,11 @@ struct tr_pipeline_transfer_ready {
 	struct tr_pipeline_data_ref data;
 };
 
+struct tr_pipeline_attached_data {
+	struct tr_pipeline_data_ref data;
+	struct tr_conn_handle connection;
+};
+
 struct tr_pipeline_stats {
 	uint32_t owner_shard_id;
 	uint64_t pipeline_id;
@@ -82,6 +87,14 @@ int tr_pipeline_remove_data(struct tr_pipeline *pipeline,
 int tr_pipeline_data_connection(struct tr_pipeline *pipeline,
 				struct tr_pipeline_data_ref data,
 				struct tr_conn_handle *out);
+
+/*
+ * Owner-coherent snapshot of ATTACHED DATA memberships. Callers provide a
+ * bounded array; capacity smaller than the current attached count is rejected.
+ */
+int tr_pipeline_attached_data_snapshot(
+	struct tr_pipeline *pipeline, struct tr_pipeline_attached_data *out,
+	uint32_t capacity, uint32_t *count_out);
 
 /*
  * Round-robin 只在 live DATA slot 间选择。调用方在新 Stream 建立时 select 一次，
