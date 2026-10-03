@@ -1975,6 +1975,36 @@ static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
 					    tr_buffer_take(&task->payload));
 }
 
+static void tr_rpc_message_bind_internal(
+	struct tr_rpc_message *message, struct tr_buffer *storage,
+	struct tr_stream_handle stream)
+{
+	message->_private[0] = (uintptr_t)storage;
+	message->_private[1] = (uintptr_t)stream.channel;
+	message->_private[2] = (uintptr_t)stream.slot;
+	message->_private[3] = (uintptr_t)stream.generation;
+}
+
+static int tr_rpc_message_unpack_internal(
+	const struct tr_rpc_message *message, struct tr_buffer **storage_out,
+	struct tr_stream_handle *stream_out)
+{
+	if (!message || message->_private[0] == (uintptr_t)0 ||
+	    message->_private[1] == (uintptr_t)0)
+		return TR_ERR_INVALID;
+
+	if (storage_out)
+		*storage_out = (struct tr_buffer *)(uintptr_t)message->_private[0];
+	if (stream_out) {
+		memset(stream_out, 0, sizeof(*stream_out));
+		stream_out->channel =
+			(struct tr_channel *)(uintptr_t)message->_private[1];
+		stream_out->slot = (uint32_t)message->_private[2];
+		stream_out->generation = (uint32_t)message->_private[3];
+	}
+	return TR_OK;
+}
+
 static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
 				      struct tr_rpc_message *message,
 				      struct tr_rpc_wire_header *wire)
@@ -2000,7 +2030,7 @@ static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
 	memset(message, 0, sizeof(*message));
 	message->bytes.data = body;
 	message->bytes.len = wire->payload_len;
-	message->storage = task->payload;
+	tr_rpc_message_bind_internal(message, task->payload, task->stream);
 	return TR_OK;
 }
 
@@ -2356,7 +2386,6 @@ static int tr_rpc_executor_run_server_unary(
 		goto out;
 	}
 
-	message.stream = task->stream;
 	memset(&response, 0, sizeof(response));
 	response.status = TR_RPC_STATUS_INTERNAL;
 
@@ -2469,7 +2498,6 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 						 TR_RPC_STATUS_INTERNAL);
 			break;
 		}
-		message.stream = task->stream;
 
 		if (task->first_message && handlers->on_open)
 			ret = handlers->on_open(task->call, handler_arg);
@@ -2513,7 +2541,6 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 		if (task->payload) {
 			if (tr_rpc_decode_task_message(task, &message, &wire) ==
 			    TR_OK) {
-				message.stream = task->stream;
 				bytes = &message.bytes;
 				status = wire.status;
 			} else {
@@ -2537,7 +2564,6 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 
 		if (tr_rpc_decode_task_message(task, &message, &wire) ==
 		    TR_OK) {
-			message.stream = task->stream;
 			if (callbacks->on_message)
 				disposition = callbacks->on_message(
 					task->call, &message, callbacks->arg);
@@ -3862,7 +3888,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		struct tr_rpc_task task;
 
 		if (call->state == TR_RPC_CALL_FREE || !call->method ||
-		    call->method->desc.lane != failed_lane)
+		    call->method->desc.lane != (uint32_t)failed_lane)
 			continue;
 
 		/*
@@ -4252,7 +4278,8 @@ void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 static int tr_rpc_validate_method(const struct tr_rpc_method_desc *method)
 {
 	if (!method || method->service_id == 0 || method->method_id == 0 ||
-	    (method->lane != TR_LANE_CONTROL && method->lane != TR_LANE_BULK) ||
+	    (method->lane != TR_RPC_LANE_CONTROL &&
+	     method->lane != TR_RPC_LANE_BULK) ||
 	    method->request_codec_id != TR_RPC_CODEC_RAW ||
 	    method->response_codec_id != TR_RPC_CODEC_RAW ||
 	    method->max_request_bytes == 0 || method->max_response_bytes == 0)
@@ -4430,7 +4457,7 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 	call->pending_tx = tr_buffer_take(&request_buffer);
 	handle = tr_rpc_make_call_handle(endpoint, slot, call);
 
-	ret = tr_stream_open(endpoint->channel, method->desc.lane,
+	ret = tr_stream_open(endpoint->channel, (enum tr_lane)method->desc.lane,
 			     &call->stream);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(endpoint, call);
@@ -4549,7 +4576,7 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	}
 
 	handle = tr_rpc_make_call_handle(endpoint, slot, call);
-	ret = tr_stream_open(endpoint->channel, method->desc.lane,
+	ret = tr_stream_open(endpoint->channel, (enum tr_lane)method->desc.lane,
 			     &call->stream);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(endpoint, call);
@@ -5101,19 +5128,27 @@ int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
 				 &request);
 }
 
+int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
+				   struct tr_stream_handle *out)
+{
+	if (!out)
+		return TR_ERR_INVALID;
+	return tr_rpc_message_unpack_internal(message, NULL, out);
+}
+
 int tr_rpc_message_release(struct tr_rpc_message *message)
 {
-	struct tr_buffer *storage;
+	struct tr_buffer *storage = NULL;
+	struct tr_stream_handle stream;
 	int ret;
 
-	if (!message || !message->storage)
-		return TR_ERR_INVALID;
+	memset(&stream, 0, sizeof(stream));
+	ret = tr_rpc_message_unpack_internal(message, &storage, &stream);
+	if (ret != TR_OK)
+		return ret;
 
-	storage = message->storage;
-	message->storage = NULL;
-	ret = tr_rpc_release_stream_payload(message->stream, storage);
 	memset(message, 0, sizeof(*message));
-	return ret;
+	return tr_rpc_release_stream_payload(stream, storage);
 }
 
 static int tr_rpc_endpoint_flush_on_owner(void *arg)

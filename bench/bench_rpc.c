@@ -2,6 +2,7 @@
 #include "tr/client.h"
 #include "tr/server.h"
 #include "tr/status.h"
+#include "../src/facade_diagnostics_internal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -264,7 +265,7 @@ static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
 		.request_codec_id = TR_RPC_CODEC_RAW, .response_codec_id = TR_RPC_CODEC_RAW,
 		.max_request_bytes = max_bytes, .max_response_bytes = max_bytes
 	};
-	m.lane = id == METHOD_BULK ? TR_LANE_BULK : TR_LANE_CONTROL;
+	m.lane = id == METHOD_BULK ? TR_RPC_LANE_BULK : TR_RPC_LANE_CONTROL;
 	return m;
 }
 

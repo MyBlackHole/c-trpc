@@ -10,6 +10,7 @@
 #include "tr/buffer.h"
 #include "tr/channel.h"
 #include "channel_internal.h"
+#include "facade_diagnostics_internal.h"
 #include "tr/reactor.h"
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"

@@ -1,8 +1,10 @@
 # Runtime observability
 
-c-trpc exposes structured snapshots from the runtime instead of embedding a
-metrics backend in the core library. Applications may export these snapshots to
-Prometheus, logs, JSON, tracing systems, or project-specific monitoring.
+c-trpc collects structured snapshots inside the runtime instead of embedding a
+metrics backend in the core library. After the API-boundary cleanup, the
+low-level Reactor/Channel/Endpoint snapshot structures are an **internal
+diagnostics contract**, used by repository benchmarks/tests while a stable
+semantic observability API is designed.
 
 ## Cost model
 
@@ -14,9 +16,9 @@ Timing metrics are opt-in:
 limits.observability_flags |= TR_OBSERVABILITY_TIMING;
 ```
 
-The same flag exists on the low-level `tr_reactor_config` and
-`tr_rpc_endpoint_config`. With timing disabled, the scheduling hot paths do
-not perform the extra monotonic-clock reads used by latency histograms.
+The same flag is propagated internally to Reactor and RPC Endpoint engine
+configuration. With timing disabled, scheduling hot paths do not perform the
+extra monotonic-clock reads used by latency histograms.
 
 Timing histograms are diagnostic samples, not transactional accounting
 counters. A timing sample is recorded only when the relevant monotonic-clock
@@ -77,7 +79,7 @@ toward a specific upstream pressure source.
 
 ## RPC executor attribution
 
-`tr_rpc_endpoint_get_stats()` reports:
+The internal `tr_rpc_endpoint_get_stats()` snapshot reports:
 
 - executor queue `capacity/current/peak/full_events`;
 - current and peak ready-Call count;
@@ -93,8 +95,7 @@ Calls; it does not mean the executor node pool was physically exhausted.
 
 ## Server facade aggregation
 
-`tr_server_get_stats()` provides one facade-level view suitable for benchmark
-and production exporters. It includes:
+The internal `tr_server_get_stats()` aggregation provides the repository benchmark with one full engine-level view. It includes:
 
 - the Server-owned Reactor snapshot, including RX/TX/control TX pool pressure;
 - RPC message and reassembly pool `capacity/current/peak/exhausted_events`;

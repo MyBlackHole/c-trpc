@@ -56,13 +56,14 @@ The transport/RPC core performs no normal filesystem I/O and contains no backup-
 
 ## Runtime observability
 
-The core exposes allocation-free structured runtime snapshots for bottleneck
-attribution. Queue/pool counters and high-water marks are always collected;
-monotonic timing histograms are opt-in with `TR_OBSERVABILITY_TIMING` so
-production defaults do not add timing reads to scheduling hot paths.
-`tr_server_get_stats()` aggregates live and already-reaped peer evidence for
-end-of-run/runtime attribution. See
-[`docs/observability.md`](docs/observability.md).
+The runtime still collects allocation-free structured diagnostics for benchmark
+and internal bottleneck attribution. Queue/pool counters and high-water marks
+remain available inside the engine; monotonic timing histograms are opt-in with
+`TR_OBSERVABILITY_TIMING`.
+
+Detailed Reactor/Channel/Endpoint snapshots are intentionally **not** part of
+the stable installed SDK anymore. Repository benchmarks/tests use the internal
+diagnostics surface. See [`docs/observability.md`](docs/observability.md).
 
 ## High-level Client / Server facade
 
@@ -317,33 +318,24 @@ longer creates a private timer thread; scheduling stays inside the Reactor.
 
 ### Metrics / diagnostics
 
-Runtime snapshots are available without introducing filesystem logging into
-Transport Core:
+Detailed Reactor/Channel/Stream/Endpoint snapshots remain available to
+repository-internal diagnostics and benchmark code, but are no longer part of
+the stable installed SDK.
 
-```c
-struct tr_connection_stats conn;
-struct tr_channel_stats channel_stats;
-struct tr_stream_diagnostics stream_diag;
-struct tr_rpc_endpoint_stats rpc_stats;
+This separation is intentional:
 
-tr_reactor_get_connection_stats(connection, &conn);
-tr_channel_get_stats(channel, &channel_stats);
-tr_stream_get_diagnostics(stream, &stream_diag);
-tr_rpc_endpoint_get_stats(endpoint, &rpc_stats);
+```text
+stable application API
+    -> semantic RPC/facade contract
+
+internal diagnostics
+    -> Reactor queue/pool pressure
+    -> Channel/Stream state
+    -> Endpoint executor details
 ```
 
-Connection diagnostics include RX/TX bytes and frames, send/recv `EAGAIN`, RX
-pause count, last RX/TX activity, queued TX items and current backpressure
-flags. Channel diagnostics expose lane state, active Streams, logical
-message/byte counters, window updates, reconnect results, keepalive probes,
-timeouts and RTT. Stream diagnostics expose identity, half-close state,
-message cursors and byte-flow-control frontiers. RPC endpoint diagnostics show
-registered methods, current Call states, executor queue/running counts and
-cumulative Call/cancel/deadline counters.
-
-These APIs are snapshots for troubleshooting/metrics export. They do not imply
-that Channel liveness is application health; a future Health service belongs
-at the RPC/service layer.
+The implementation continues collecting the same bounded counters and optional
+timing histograms; only the compatibility boundary changed.
 
 ### Channel reconnect / connection replacement
 
@@ -533,29 +525,23 @@ The executor implementation therefore separates network progress from applicatio
 
 ### RAW codec and bulk fast path
 
-Small control-path messages may use the copied helper:
+The stable application API uses `tr_rpc_call_send()` with a borrowed
+`tr_rpc_bytes` view.
 
-```text
-application bytes
-      |
-RPC envelope + copy
-      |
-Transport DATA
-```
-
-Bulk RAW messages can use `tr_rpc_call_send_buffer()`:
+The engine still retains an internal copy-minimal Buffer fast path:
 
 ```text
 32-byte RPC envelope buffer  ----\
-                                 +--> tr_stream_sendv()
+                                 +--> Transport scatter/gather
 original application buffer  ----/          |
                                            v
                                        sendmsg(iovec)
 ```
 
-On `TR_OK`, both the small envelope buffer and original payload are owned by Transport. On failure, only the internally-created envelope is released and the caller retains its payload.
-
-This removes the extra sender-side large-payload copy introduced by a generic contiguous RPC envelope. If the logical RPC message spans multiple Transport DATA frames, TX still reads directly from the original slices while RX performs one bounded reassembly copy into the Channel `reassembly_pool`. Messages that fit in one frame retain the existing zero-copy receive path.
+That path remains available to internal benchmarks/tests while the public
+zero-copy abstraction is redesigned around an opaque ownership API instead of
+publishing allocator/Channel/Reactor structures. No extra copy was added by the
+API-boundary cleanup itself.
 
 ### RPC retained-message ownership
 
@@ -564,10 +550,13 @@ Streaming callbacks receive:
 ```c
 struct tr_rpc_message {
     struct tr_rpc_bytes bytes;
-    struct tr_buffer *storage;
-    struct tr_stream_handle stream;
+    uintptr_t _private[TR_RPC_MESSAGE_PRIVATE_WORDS];
 };
 ```
+
+Only `bytes` is application-visible. `_private` is an opaque fixed-size
+release capability; callers retaining a message must copy the descriptor
+unchanged and never inspect those words.
 
 Returning `TR_RPC_MESSAGE_RELEASE` returns the RX buffer after the callback.
 
@@ -619,8 +608,8 @@ Reactor、Channel、RPC、Call、Stream 等与实现结构直接对应的术语�
 - `tr_reactor_send()` returning `TR_OK` transfers its payload buffer.
 - `tr_reactor_sendv()` returning `TR_OK` transfers every supplied payload buffer.
 - `tr_stream_send()` / `tr_stream_sendv()` follow the same success-only transfer rule.
-- `tr_rpc_call_send_buffer()` transfers the application payload only on `TR_OK`.
-- any non-`TR_OK` send leaves caller-owned input buffers with the caller.
+- internal Buffer fast paths preserve success-only ownership transfer.
+- any failed stable send leaves caller-owned application bytes with the caller.
 - a command accepted by the bounded command ring owns its resources even if a later eventfd wake syscall fails.
 - `TR_STREAM_DATA_TAKE_OWNERSHIP` and `TR_RPC_MESSAGE_TAKE_OWNERSHIP` require explicit later release.
 - releasing an RX payload returns its byte credit to the Stream receive window; network receipt alone does not replenish the application window.

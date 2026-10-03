@@ -14,6 +14,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "channel_internal.h"
+#include "facade_diagnostics_internal.h"
 #include "rpc_internal.h"
 #include "runtime_internal.h"
 #include "socket_internal.h"

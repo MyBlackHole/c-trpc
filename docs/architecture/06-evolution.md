@@ -262,20 +262,36 @@ c-trpc core Phase。
 
 **状态：IN PROGRESS**
 
-第一阶段已完成：
+已完成：
 
 - SDK header 从 glob publication 改为 explicit allowlist；
 - CI 精确校验安装 header 集合；
-- external install consumer 改用 `tr/trpc.h` facade，不再以 Reactor 为 SDK 入口；
-- command_queue/parser/rpc_wire/socket/endian/guard/refcount/crc32c 不再安装。
+- external install consumer 只使用 stable `tr/trpc.h` facade；
+- `rpc.h` 已分离 application Method/Call/Streaming contract 与 internal Endpoint engine；
+- `rpc.h -> channel.h -> reactor.h` public dependency 已解除；
+- buffer/channel/reactor/frame/wire 以及 queue/parser/socket/wire codec helper 均退出安装 SDK；
+- detailed Reactor/Channel/Endpoint diagnostics 已移入 internal diagnostics；
+- retained RPC message 用固定 opaque release token，未增加 allocation/copy。
+
+当前 stable installed headers：
+
+```text
+trpc.h
+client.h
+server.h
+rpc.h
+rpc_codec.h
+facade.h
+observability.h
+status.h
+```
 
 下一阶段：
 
-- 分离 RPC application types/Call API 与 Endpoint engine；
-- 解除 `rpc.h -> channel.h -> reactor.h` 的 public transitive dependency；
-- buffer/channel/reactor/frame/wire 退出 stable facade closure；
-- public handle 不固化 owner pointer + slot/generation；
-- high-level config/stats 与 internal tuning/diagnostics 分离。
+- `tr_rpc_call_handle` opaque 化；
+- high-level semantic limits 与 implementation tuning 分离；
+- 设计 stable semantic observability；
+- generic Connection Group / Pipeline public capability。
 
 详细审查见 [分层、模块职责与 API 边界](07-layer-module-api-boundaries.md)。
 

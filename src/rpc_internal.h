@@ -3,7 +3,58 @@
 
 #include <stdint.h>
 
+#include "tr/buffer.h"
+#include "tr/channel.h"
+#include "tr/observability.h"
 #include "tr/rpc.h"
+
+enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
+
+struct tr_rpc_endpoint_config {
+	enum tr_rpc_role role;
+	uint32_t max_methods;
+	uint32_t max_calls;
+
+	/* Used for RPC envelope/control-path copies. */
+	struct tr_buffer_pool *message_pool;
+
+	uint32_t executor_queue_capacity;
+	uint32_t executor_threads;
+	uint32_t executor_continuation_reserve;
+	uint32_t observability_flags;
+};
+
+struct tr_rpc_endpoint_stats {
+	uint32_t max_methods;
+	uint32_t registered_methods;
+	uint32_t max_calls;
+	uint32_t opening_calls;
+	uint32_t active_calls;
+	uint32_t terminal_calls;
+
+	uint32_t executor_threads;
+	uint32_t executor_queued_tasks;
+	uint32_t executor_running_tasks;
+	uint32_t executor_queue_capacity;
+	uint32_t executor_continuation_reserve;
+
+	struct tr_queue_observation executor_queue;
+	uint32_t executor_ready_calls;
+	uint32_t executor_ready_calls_peak;
+	uint32_t observability_flags;
+
+	uint64_t executor_enqueued_tasks;
+	uint64_t executor_taken_tasks;
+	uint64_t executor_admission_limit_hits;
+	uint64_t executor_hard_full_events;
+	struct tr_latency_histogram executor_queue_wait_ns;
+	struct tr_latency_histogram executor_handler_ns;
+
+	uint64_t calls_started;
+	uint64_t calls_completed;
+	uint64_t calls_cancelled;
+	uint64_t calls_deadline_exceeded;
+};
 
 /* Stable Endpoint-lifetime Method hash shared with collision tests. */
 static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
@@ -18,6 +69,51 @@ static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 	value ^= value >> 31;
 	return value;
 }
+
+/* Low-level Endpoint engine: internal to facade/tests. */
+int tr_rpc_endpoint_create(struct tr_channel *channel,
+			   const struct tr_rpc_endpoint_config *config,
+			   struct tr_rpc_endpoint **out);
+void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
+
+int tr_rpc_register_method(struct tr_rpc_endpoint *endpoint,
+			   const struct tr_rpc_method_desc *method,
+			   tr_rpc_unary_handler unary_handler,
+			   void *handler_arg);
+int tr_rpc_register_stream_method(
+	struct tr_rpc_endpoint *endpoint, const struct tr_rpc_method_desc *method,
+	const struct tr_rpc_stream_handlers *handlers, void *handler_arg);
+
+int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
+			 uint32_t method_id, const struct tr_rpc_bytes *request,
+			 const struct tr_rpc_call_options *options,
+			 tr_rpc_unary_result_cb result_cb, void *result_arg,
+			 struct tr_rpc_call_handle *out);
+int tr_rpc_unary_call(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
+		      uint32_t method_id, const struct tr_rpc_bytes *request,
+		      tr_rpc_unary_result_cb result_cb, void *result_arg,
+		      struct tr_rpc_call_handle *out);
+int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
+			 uint32_t method_id,
+			 const struct tr_rpc_call_options *options,
+			 const struct tr_rpc_call_callbacks *callbacks,
+			 struct tr_rpc_call_handle *out);
+int tr_rpc_call_start(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
+		      uint32_t method_id,
+		      const struct tr_rpc_call_callbacks *callbacks,
+		      struct tr_rpc_call_handle *out);
+
+/* Internal zero-copy/copy-minimal Buffer fast path. */
+int tr_rpc_call_send_buffer(struct tr_rpc_call_handle call,
+			    struct tr_buffer *payload);
+
+int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint);
+int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
+			      struct tr_rpc_endpoint_stats *out);
+
+/* Test/diagnostic bridge without exposing Stream in public tr_rpc_message. */
+int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
+				   struct tr_stream_handle *out);
 
 struct tr_rpc_executor_group;
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
@@ -38,10 +134,7 @@ void tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
 /*
- * Server peer two-phase teardown:
- * detach_for_finalize() runs protocol-source shutdown on the Reactor owner;
- * finalize_detached_with_stats() waits only for already-owned worker refs and
- * performs final memory release outside the owner.
+ * Server peer two-phase teardown.
  */
 int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint);
 void tr_rpc_endpoint_finalize_detached_with_stats(
@@ -50,11 +143,6 @@ void tr_rpc_endpoint_finalize_detached_with_stats(
 typedef void (*tr_rpc_endpoint_detached_finalizer)(
 	const struct tr_rpc_endpoint_stats *stats, void *arg);
 
-/*
- * Transfer the detached Endpoint owner reference to a last-ref finalizer.
- * The callback runs after Endpoint memory has been released; it must not touch
- * the Endpoint and may run on either a worker or Reactor owner context.
- */
 int tr_rpc_endpoint_arm_detached_finalizer(
 	struct tr_rpc_endpoint *endpoint,
 	tr_rpc_endpoint_detached_finalizer finalizer, void *arg);
