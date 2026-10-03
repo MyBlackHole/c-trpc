@@ -19,6 +19,7 @@
 #include "runtime_internal.h"
 #include "socket_internal.h"
 #include "observability_internal.h"
+#include "pipeline_listener_internal.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
 
@@ -63,6 +64,8 @@ struct tr_server {
 
 	struct tr_server_method *methods;
 	uint32_t method_count;
+
+	struct tr_pipeline_listener *connection_group_listener;
 
 	struct tr_server_channel_stats retired_channel_stats;
 	struct tr_server_rpc_stats retired_rpc_stats;
