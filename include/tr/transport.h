@@ -79,7 +79,6 @@ struct tr_connection_group_server_config {
 	uint32_t max_connections;
 	uint32_t max_data_connections_per_group;
 	uint32_t max_streams_per_group;
-	uint32_t control_message_count;
 
 	tr_connection_group_authorize_cb authorize;
 	tr_connection_group_message_cb on_message;
