@@ -35,11 +35,17 @@ struct tr_client_group_data {
 	enum tr_client_group_data_state state;
 };
 
+enum tr_client_group_transfer_state {
+	TR_CLIENT_GROUP_TRANSFER_EMPTY = 0,
+	TR_CLIENT_GROUP_TRANSFER_USED = 1,
+	TR_CLIENT_GROUP_TRANSFER_TOMBSTONE = 2
+};
+
 struct tr_client_group_transfer {
 	uint32_t stream_id;
 	uint32_t data_slot;
 	uint32_t data_generation;
-	int used;
+	enum tr_client_group_transfer_state state;
 };
 
 struct tr_client_group {
@@ -59,7 +65,9 @@ struct tr_client_group {
 	uint32_t data_capacity;
 
 	struct tr_client_group_transfer *transfers;
+	uint32_t transfer_limit;
 	uint32_t transfer_capacity;
+	uint32_t transfer_count;
 
 	uint32_t connector_slot;
 	int connector_fd;
@@ -736,31 +744,58 @@ static int tr_client_group_ready_data_slot(
 	return TR_ERR_STALE;
 }
 
-static struct tr_client_group_transfer *
-tr_client_group_transfer_find(struct tr_client_group *group, uint32_t stream_id)
+static uint32_t tr_client_group_stream_hash(uint32_t stream_id)
 {
-	uint32_t i;
+	uint32_t value = stream_id;
 
-	if (!group || stream_id == 0U)
-		return NULL;
-	for (i = 0; i < group->transfer_capacity; ++i)
-		if (group->transfers[i].used &&
-		    group->transfers[i].stream_id == stream_id)
-			return &group->transfers[i];
-	return NULL;
+	value ^= value >> 16;
+	value *= UINT32_C(0x7feb352d);
+	value ^= value >> 15;
+	value *= UINT32_C(0x846ca68b);
+	value ^= value >> 16;
+	return value;
 }
 
-static struct tr_client_group_transfer *
-tr_client_group_transfer_reserve(struct tr_client_group *group)
+static int tr_client_group_transfer_find(
+	struct tr_client_group *group, uint32_t stream_id,
+	uint32_t *slot_out, uint32_t *insert_out)
 {
-	uint32_t i;
+	uint32_t start;
+	uint32_t tombstone = UINT32_MAX;
+	uint32_t offset;
 
-	if (!group)
-		return NULL;
-	for (i = 0; i < group->transfer_capacity; ++i)
-		if (!group->transfers[i].used)
-			return &group->transfers[i];
-	return NULL;
+	if (!group || stream_id == 0U || group->transfer_capacity == 0U)
+		return 0;
+	start = tr_client_group_stream_hash(stream_id) %
+		group->transfer_capacity;
+	for (offset = 0; offset < group->transfer_capacity; ++offset) {
+		uint32_t index =
+			(start + offset) % group->transfer_capacity;
+		struct tr_client_group_transfer *transfer =
+			&group->transfers[index];
+
+		if (transfer->state == TR_CLIENT_GROUP_TRANSFER_USED) {
+			if (transfer->stream_id == stream_id) {
+				if (slot_out)
+					*slot_out = index;
+				return 1;
+			}
+			continue;
+		}
+		if (transfer->state == TR_CLIENT_GROUP_TRANSFER_TOMBSTONE) {
+			if (tombstone == UINT32_MAX)
+				tombstone = index;
+			continue;
+		}
+
+		if (insert_out)
+			*insert_out =
+				tombstone != UINT32_MAX ? tombstone : index;
+		return 0;
+	}
+	if (insert_out)
+		*insert_out = tombstone;
+	return 0;
 }
 
 static void tr_client_group_clear_transfers(struct tr_client_group *group)
@@ -769,6 +804,7 @@ static void tr_client_group_clear_transfers(struct tr_client_group *group)
 		return;
 	memset(group->transfers, 0,
 	       (size_t)group->transfer_capacity * sizeof(*group->transfers));
+	group->transfer_count = 0U;
 }
 
 static void tr_client_group_invalidate_data_transfers(
@@ -783,10 +819,13 @@ static void tr_client_group_invalidate_data_transfers(
 		struct tr_client_group_transfer *transfer =
 			&group->transfers[i];
 
-		if (!transfer->used || transfer->data_slot != data_slot ||
+		if (transfer->state != TR_CLIENT_GROUP_TRANSFER_USED ||
+		    transfer->data_slot != data_slot ||
 		    transfer->data_generation != data_generation)
 			continue;
-		memset(transfer, 0, sizeof(*transfer));
+		transfer->state = TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
+		if (group->transfer_count != 0U)
+			group->transfer_count--;
 	}
 }
 
@@ -798,6 +837,8 @@ static int tr_client_group_accept_transfer_ready_on_owner(
 	struct tr_client_group_transfer *transfer;
 	struct tr_connection_group_id public_group;
 	uint32_t data_slot;
+	uint32_t existing = UINT32_MAX;
+	uint32_t insert = UINT32_MAX;
 	int ret;
 
 	if (!group || !message ||
@@ -806,22 +847,25 @@ static int tr_client_group_accept_transfer_ready_on_owner(
 		return TR_ERR_INVALID;
 	if (group->transfer_capacity == 0U || !group->transfers)
 		return TR_ERR_STATE;
-	if (tr_client_group_transfer_find(group, message->stream_id))
+	if (tr_client_group_transfer_find(
+		    group, message->stream_id, &existing, &insert))
+		return TR_ERR_STATE;
+	if (group->transfer_count >= group->transfer_limit ||
+	    insert == UINT32_MAX)
 		return TR_ERR_STATE;
 
 	ret = tr_client_group_ready_data_slot(group, message, &data_slot);
 	if (ret != TR_OK)
 		return ret;
 
-	transfer = tr_client_group_transfer_reserve(group);
-	if (!transfer)
-		return TR_ERR_STATE;
+	transfer = &group->transfers[insert];
 	memset(transfer, 0, sizeof(*transfer));
 	transfer->stream_id = message->stream_id;
 	transfer->data_slot = data_slot;
 	transfer->data_generation =
 		group->data[data_slot].route.member_generation;
-	transfer->used = 1;
+	transfer->state = TR_CLIENT_GROUP_TRANSFER_USED;
+	group->transfer_count++;
 
 	if (group->config.on_transfer_ready) {
 		public_group.group_id = group->control_route.pipeline_id;
@@ -1020,7 +1064,8 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 	    config->max_data_connections >
 		    UINT32_MAX - TR_CLIENT_GROUP_CONTROL_BUFFER_BASE ||
 	    (config->max_data_connections != 0U &&
-	     config->max_transfers == 0U))
+	     (config->max_transfers == 0U ||
+	      config->max_transfers > UINT32_MAX / 2U)))
 		return TR_ERR_INVALID;
 
 	group = (struct tr_client_group *)calloc(1, sizeof(*group));
@@ -1028,8 +1073,10 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 		return TR_ERR_NOMEM;
 	group->config = *config;
 	group->data_capacity = config->max_data_connections;
-	group->transfer_capacity =
+	group->transfer_limit =
 		config->max_data_connections != 0U ? config->max_transfers : 0U;
+	group->transfer_capacity =
+		group->transfer_limit != 0U ? group->transfer_limit * 2U : 0U;
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
 	group->connector_fd = -1;
 
@@ -1166,13 +1213,16 @@ static int tr_client_group_release_transfer_on_owner(void *arg)
 {
 	struct tr_client_group_release_transfer_request *request =
 		(struct tr_client_group_release_transfer_request *)arg;
-	struct tr_client_group_transfer *transfer;
+	struct tr_client_group *group = request->group;
+	uint32_t slot = UINT32_MAX;
 
-	transfer = tr_client_group_transfer_find(
-		request->group, request->stream_id);
-	if (!transfer)
+	if (!tr_client_group_transfer_find(
+		    group, request->stream_id, &slot, NULL))
 		return TR_ERR_STALE;
-	memset(transfer, 0, sizeof(*transfer));
+	group->transfers[slot].state =
+		TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
+	if (group->transfer_count != 0U)
+		group->transfer_count--;
 	return TR_OK;
 }
 
