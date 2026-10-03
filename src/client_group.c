@@ -840,10 +840,10 @@ static void tr_client_group_invalidate_data_transfers(
 }
 
 static void tr_client_group_send_buffer_release(
-	struct tr_buffer *buffer, void *arg)
+	struct tr_buffer *buffer)
 {
 	struct tr_client_group_send_buffer *owned =
-		(struct tr_client_group_send_buffer *)arg;
+		(struct tr_client_group_send_buffer *)buffer;
 	struct tr_client_group *group;
 
 	(void)buffer;
@@ -1356,9 +1356,8 @@ static int tr_client_group_send_on_owner(void *arg)
 		owned->buffer.data = owned->storage;
 		owned->buffer.capacity = bytes->len;
 		owned->buffer.len = bytes->len;
-		owned->buffer.release_cb =
+			owned->buffer.release_cb =
 			tr_client_group_send_buffer_release;
-		owned->buffer.release_arg = owned;
 		memcpy(owned->storage, bytes->data, bytes->len);
 		group->send_bytes_inflight += bytes->len;
 		payload = &owned->buffer;
