@@ -8,6 +8,7 @@ ADR 只记录“为什么做这个选择”，不重复实现细节。
 - [ADR-004：RPC worker 通过 completion 回 owner](ADR-004-worker-completion.md)
 - [ADR-005：Pipeline V1 固定一个 Reactor owner](ADR-005-pipeline-affinity.md)
 - [ADR-006：Split facade connection-group binding identity](ADR-006-split-facade-binding.md)
+- [ADR-007：分层/API 边界不能通过运行时额外 hop 实现](ADR-007-layering-performance.md)
 
 状态约定：
 
