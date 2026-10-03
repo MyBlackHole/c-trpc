@@ -13,6 +13,7 @@ struct tr_pipeline_control_transport {
 	struct tr_conn_handle connection;
 	struct tr_buffer_pool *message_pool;
 	struct tr_pipeline_route_preface control_route;
+	tr_pipeline_control_transport_closing_cb closing_cb;
 	tr_pipeline_control_transport_closed_cb closed_cb;
 	void *closed_arg;
 	int closing;
@@ -109,6 +110,8 @@ static void tr_pipeline_control_transport_event(
 	epoch = transport->control_route.epoch;
 	closed_cb = transport->closed_cb;
 	closed_arg = transport->closed_arg;
+	if (transport->closing_cb)
+		transport->closing_cb(closed_arg);
 
 	teardown_status = tr_pipeline_control_abort(
 		transport->control, connection);
@@ -142,6 +145,7 @@ int tr_pipeline_control_transport_create(
 	transport->connection = config->connection;
 	transport->message_pool = config->message_pool;
 	transport->control_route = config->control_route;
+	transport->closing_cb = config->closing_cb;
 	transport->closed_cb = config->closed_cb;
 	transport->closed_arg = config->closed_arg;
 
@@ -182,6 +186,7 @@ int tr_pipeline_control_transport_send_data_offer(
 		return TR_ERR_STATE;
 	if (route_out)
 		memset(route_out, 0, sizeof(*route_out));
+	memset(&offer, 0, sizeof(offer));
 
 	ret = tr_buffer_acquire(
 		transport->message_pool, TR_PIPELINE_CONTROL_WIRE_SIZE, &buffer);
