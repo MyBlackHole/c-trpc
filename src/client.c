@@ -435,7 +435,8 @@ int tr_client_connection_group_connect(
 {
 	int ret;
 
-	if (!client)
+	if (!client || !ipv4_address || !group || port == 0U ||
+	    group->group_id == 0U || group->epoch == 0U)
 		return TR_ERR_INVALID;
 	ret = tr_client_connection_group_ensure(client);
 	if (ret != TR_OK)
