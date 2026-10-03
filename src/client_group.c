@@ -844,12 +844,8 @@ static void tr_client_group_send_buffer_release(
 {
 	struct tr_client_group_send_buffer *owned =
 		(struct tr_client_group_send_buffer *)buffer;
-	struct tr_client_group *group;
+	struct tr_client_group *group = owned->group;
 
-	(void)buffer;
-	if (!owned)
-		return;
-	group = owned->group;
 	if (group) {
 		if (group->send_bytes_inflight >= owned->accounted_bytes)
 			group->send_bytes_inflight -= owned->accounted_bytes;
