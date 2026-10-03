@@ -49,7 +49,7 @@ int main(int argc, char **argv)
 	method.response_cardinality = TR_RPC_ONE;
 	method.request_codec_id = TR_RPC_CODEC_RAW;
 	method.response_codec_id = TR_RPC_CODEC_RAW;
-	method.lane = TR_LANE_CONTROL;
+	method.lane = TR_RPC_LANE_CONTROL;
 	method.max_request_bytes = 64U * 1024U;
 	method.max_response_bytes = 64U * 1024U;
 
