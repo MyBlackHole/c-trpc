@@ -3,11 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "reactor_internal.h"
 #include "tr/status.h"
 
 struct tr_pipeline_control {
 	struct tr_pipeline_registry *registry;
 	struct tr_pipeline *pipeline;
+	struct tr_pipeline_attached_data *abort_data;
+	uint32_t data_capacity;
 };
 
 static int tr_pipeline_control_offer_matches(
@@ -63,6 +66,13 @@ int tr_pipeline_control_create(
 	control = (struct tr_pipeline_control *)calloc(1, sizeof(*control));
 	if (!control)
 		return TR_ERR_NOMEM;
+	control->abort_data = (struct tr_pipeline_attached_data *)calloc(
+		config->data_capacity, sizeof(*control->abort_data));
+	if (!control->abort_data) {
+		free(control);
+		return TR_ERR_NOMEM;
+	}
+	control->data_capacity = config->data_capacity;
 
 	memset(&pipeline_config, 0, sizeof(pipeline_config));
 	pipeline_config.owner = owner;
@@ -96,6 +106,7 @@ fail_control:
 fail_pipeline:
 	tr_pipeline_destroy(control->pipeline);
 fail:
+	free(control->abort_data);
 	free(control);
 	return ret;
 }
@@ -264,6 +275,67 @@ int tr_pipeline_control_prepare_transfer_wire(
 	return ret;
 }
 
+int tr_pipeline_control_abort(
+	struct tr_pipeline_control *control,
+	struct tr_conn_handle expected_control)
+{
+	uint32_t count = 0U;
+	uint32_t i;
+	int result = TR_OK;
+	int ret;
+
+	if (!control || !control->pipeline || !control->registry ||
+	    !control->abort_data)
+		return TR_ERR_INVALID;
+
+	ret = tr_pipeline_attached_data_snapshot(
+		control->pipeline, control->abort_data,
+		control->data_capacity, &count);
+	if (ret != TR_OK)
+		return ret;
+
+	/*
+	 * Invalidate membership/affinity before closing sockets. DATA event
+	 * callbacks may then observe a stale route, but can never resurrect or
+	 * mutate the Pipeline being torn down.
+	 */
+	for (i = 0; i < count; ++i) {
+		ret = tr_pipeline_remove_data(
+			control->pipeline, control->abort_data[i].data);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+
+	ret = tr_pipeline_clear_control(
+		control->pipeline, expected_control);
+	if (ret != TR_OK)
+		return ret;
+
+	ret = tr_pipeline_registry_unregister(
+		control->registry, control->pipeline);
+	if (ret != TR_OK) {
+		(void)tr_pipeline_set_control(
+			control->pipeline, expected_control);
+		return ret;
+	}
+
+	tr_pipeline_destroy(control->pipeline);
+	control->pipeline = NULL;
+	control->registry = NULL;
+
+	for (i = 0; i < count; ++i) {
+		ret = tr_reactor_close_on_owner(
+			control->abort_data[i].connection);
+		if (ret != TR_OK && ret != TR_ERR_STALE && result == TR_OK)
+			result = ret;
+	}
+
+	free(control->abort_data);
+	control->abort_data = NULL;
+	free(control);
+	return result;
+}
+
 int tr_pipeline_control_close(
 	struct tr_pipeline_control *control,
 	struct tr_conn_handle expected_control)
@@ -308,6 +380,8 @@ int tr_pipeline_control_close(
 	tr_pipeline_destroy(control->pipeline);
 	control->pipeline = NULL;
 	control->registry = NULL;
+	free(control->abort_data);
+	control->abort_data = NULL;
 	free(control);
 	return TR_OK;
 }
