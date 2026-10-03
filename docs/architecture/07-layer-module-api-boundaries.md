@@ -585,29 +585,43 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 
 ---
 
-#### A2. SDK header installation has no visibility boundary — HIGH
+#### A2. SDK header installation has no visibility boundary — HIGH — PARTIALLY RESOLVED
 
-当前 `xmake.lua`：
+基线问题：
 
 ```lua
 add_headerfiles("include/(tr/*.h)")
 ```
 
-因此所有 `include/tr/*.h` 都被安装为 SDK header。
+会把任何新增 `include/tr/*.h` 自动发布为 SDK contract。
 
-其中包含明显 internal 实现：
+第一阶段已完成：
 
-- `command_queue.h`；
-- `parser.h`；
-- `wire.h`；
-- `rpc_wire.h`；
-- `socket.h`；
-- `reactor.h`。
+- `xmake.lua` 改为 explicit installed-header allowlist；
+- CI 对安装后的 header 集合做 exact diff；
+- 新增 header 不会因为目录位置自动变 public；
+- 以下明显 implementation header 已退出安装 SDK：
+  - `command_queue.h`；
+  - `parser.h`；
+  - `rpc_wire.h`；
+  - `socket.h`；
+  - `endian.h`；
+  - `guard.h`；
+  - `refcount.h`；
+  - `crc32c.h`。
 
-目标：
+仍未完成：
 
-- 显式 public-header allowlist；
-- internal header 移入 `src/` 或 private include；
+- `rpc.h` 仍混合 application API 与 Endpoint engine；
+- 因此 `buffer.h/channel.h/reactor.h/frame.h/wire.h` 仍作为 transitional
+  transitive dependency 被安装；
+- 下一阶段必须拆 RPC/Transport engine 才能把这些 Runtime headers 从 stable SDK
+  closure 移出。
+
+目标保持不变：
+
+- Stable Public / Advanced Public / Internal 明确分级；
+- Runtime/parser/wire/queue/socket implementation 最终不属于默认 stable SDK；
 - protocol-extension header 如需公开，单独定义兼容级别。
 
 ---
@@ -759,22 +773,21 @@ struct tr_pool_observation
 
 ---
 
-#### A10. CI currently treats Reactor as installed external SDK API — HIGH
+#### A10. CI currently treats Reactor as installed external SDK API — HIGH — RESOLVED IN FIRST STAGE
 
-安装测试明确：
+基线安装测试直接编译 external Reactor consumer，使 Runtime API 成为事实上的
+compatibility contract。
 
-```c
-#include <tr/reactor.h>
-```
+第一阶段已修改为：
 
-并从安装目录编译 external Reactor consumer。
+- external consumer 只 include `<tr/trpc.h>`；
+- 只使用 Client/Server facade config 与 status API；
+- install smoke 对 published header 集合做精确校验；
+- Reactor 行为测试继续留在 repository internal tests。
 
-这会把 Runtime internal API 变成事实上的 compatibility contract。
-
-目标：
-
-- install smoke 改测 stable public Client/Server/RPC API；
-- Reactor tests 留在 repository internal test。
+注意：`reactor.h` 当前仍因 `rpc.h -> channel.h -> reactor.h` 的过渡依赖被安装。
+这属于 A4/A5 的后续 API 拆分问题，不再由 install smoke 把 Reactor 定义成推荐 SDK
+入口。
 
 ---
 
@@ -803,11 +816,19 @@ struct tr_pool_observation
 - Backup durability 从 core roadmap/read-order 移出；
 - 新功能评审先检查 layer/module/API contract。
 
-### P1 — Public header boundary
+### P1 — Public header boundary — IN PROGRESS
 
-- 建立 explicit public-header allowlist；
-- 将 command_queue/parser/wire/socket/reactor 等从默认 SDK contract 移出；
-- 修改 install smoke。
+已完成：
+
+- explicit installed-header allowlist；
+- exact install-set CI gate；
+- external smoke 改用 public facade；
+- command_queue/parser/rpc_wire/socket/endian/guard/refcount/crc32c 退出 SDK。
+
+待完成：
+
+- 拆 RPC/Channel/Runtime transitive dependency；
+- buffer/channel/reactor/frame/wire 退出 stable facade closure。
 
 ### P2 — RPC public surface
 
