@@ -69,6 +69,9 @@ struct tr_client_group {
 	uint32_t transfer_capacity;
 	uint32_t transfer_count;
 
+	uint64_t send_bytes_limit;
+	uint64_t send_bytes_inflight;
+
 	uint32_t connector_slot;
 	int connector_fd;
 	int connector_connecting;
@@ -78,6 +81,13 @@ struct tr_client_group {
 
 	struct tr_reactor_timer_handle connector_timer;
 	int connector_timer_ready;
+};
+
+struct tr_client_group_send_buffer {
+	struct tr_buffer buffer;
+	struct tr_client_group *group;
+	uint32_t accounted_bytes;
+	uint8_t storage[];
 };
 
 void tr_connection_group_client_config_init(
@@ -829,6 +839,56 @@ static void tr_client_group_invalidate_data_transfers(
 	}
 }
 
+static void tr_client_group_send_buffer_release(
+	struct tr_buffer *buffer, void *arg)
+{
+	struct tr_client_group_send_buffer *owned =
+		(struct tr_client_group_send_buffer *)arg;
+	struct tr_client_group *group;
+
+	(void)buffer;
+	if (!owned)
+		return;
+	group = owned->group;
+	if (group) {
+		if (group->send_bytes_inflight >= owned->accounted_bytes)
+			group->send_bytes_inflight -= owned->accounted_bytes;
+		else
+			group->send_bytes_inflight = 0U;
+	}
+	free(owned);
+}
+
+static int tr_client_group_transfer_connection_on_owner(
+	struct tr_client_group *group, uint32_t stream_id,
+	struct tr_conn_handle *connection_out)
+{
+	struct tr_client_group_transfer *transfer;
+	struct tr_client_group_data *data;
+	uint32_t slot = UINT32_MAX;
+
+	if (!group || !connection_out || stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!tr_client_group_transfer_find(group, stream_id, &slot, NULL))
+		return TR_ERR_STALE;
+
+	transfer = &group->transfers[slot];
+	if (transfer->data_slot >= group->data_capacity)
+		return TR_ERR_STATE;
+	data = &group->data[transfer->data_slot];
+	if (data->state != TR_CLIENT_GROUP_DATA_ACTIVE ||
+	    data->route.member_generation != transfer->data_generation ||
+	    !data->connection.reactor) {
+		transfer->state = TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
+		if (group->transfer_count != 0U)
+			group->transfer_count--;
+		return TR_ERR_STALE;
+	}
+
+	*connection_out = data->connection;
+	return TR_OK;
+}
+
 static int tr_client_group_accept_transfer_ready_on_owner(
 	struct tr_client_group *group,
 	const struct tr_pipeline_control_wire_message *message,
@@ -1065,7 +1125,10 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 		    UINT32_MAX - TR_CLIENT_GROUP_CONTROL_BUFFER_BASE ||
 	    (config->max_data_connections != 0U &&
 	     (config->max_transfers == 0U ||
-	      config->max_transfers > UINT32_MAX / 2U)))
+	      config->max_transfers > UINT32_MAX / 2U ||
+	      config->max_message_bytes == 0U ||
+	      config->max_frame_payload_bytes == 0U ||
+	      config->max_frame_payload_bytes > config->max_message_bytes)))
 		return TR_ERR_INVALID;
 
 	group = (struct tr_client_group *)calloc(1, sizeof(*group));
@@ -1077,6 +1140,9 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 		config->max_data_connections != 0U ? config->max_transfers : 0U;
 	group->transfer_capacity =
 		group->transfer_limit != 0U ? group->transfer_limit * 2U : 0U;
+	group->send_bytes_limit =
+		(uint64_t)group->data_capacity *
+		(uint64_t)config->max_message_bytes;
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
 	group->connector_fd = -1;
 
@@ -1238,6 +1304,88 @@ int tr_client_group_release_transfer(
 	return tr_reactor_call(
 		group->config.owner,
 		tr_client_group_release_transfer_on_owner, &request);
+}
+
+struct tr_client_group_send_request {
+	struct tr_client_group *group;
+	uint32_t stream_id;
+	uint64_t message_id;
+	const struct tr_transport_bytes *bytes;
+};
+
+static int tr_client_group_send_on_owner(void *arg)
+{
+	struct tr_client_group_send_request *request =
+		(struct tr_client_group_send_request *)arg;
+	struct tr_client_group *group = request->group;
+	const struct tr_transport_bytes *bytes = request->bytes;
+	struct tr_client_group_send_buffer *owned = NULL;
+	struct tr_conn_handle connection;
+	struct tr_buffer *payload = NULL;
+	size_t allocation_size;
+	int ret;
+
+	if (!group->control.reactor)
+		return TR_ERR_CLOSED;
+	if (bytes->len > group->config.max_message_bytes)
+		return TR_ERR_BAD_LENGTH;
+
+	ret = tr_client_group_transfer_connection_on_owner(
+		group, request->stream_id, &connection);
+	if (ret != TR_OK)
+		return ret;
+
+	if (bytes->len != 0U) {
+		if ((uint64_t)bytes->len >
+		    group->send_bytes_limit - group->send_bytes_inflight)
+			return TR_AGAIN;
+		if ((size_t)bytes->len >
+		    SIZE_MAX - sizeof(*owned))
+			return TR_ERR_BAD_LENGTH;
+
+		allocation_size = sizeof(*owned) + (size_t)bytes->len;
+		owned = (struct tr_client_group_send_buffer *)malloc(
+			allocation_size);
+		if (!owned)
+			return TR_ERR_NOMEM;
+		memset(owned, 0, sizeof(*owned));
+		owned->group = group;
+		owned->accounted_bytes = bytes->len;
+		owned->buffer.data = owned->storage;
+		owned->buffer.capacity = bytes->len;
+		owned->buffer.len = bytes->len;
+		owned->buffer.release_cb =
+			tr_client_group_send_buffer_release;
+		owned->buffer.release_arg = owned;
+		memcpy(owned->storage, bytes->data, bytes->len);
+		group->send_bytes_inflight += bytes->len;
+		payload = &owned->buffer;
+	}
+
+	ret = tr_reactor_sendv_limited(
+		connection, TR_FRAME_DATA, 0U, request->stream_id,
+		request->message_id, payload ? &payload : NULL,
+		payload ? 1U : 0U, group->config.max_frame_payload_bytes);
+	if (ret != TR_OK && payload)
+		tr_buffer_release(payload);
+	return ret;
+}
+
+int tr_client_group_send(
+	struct tr_client_group *group, uint32_t stream_id,
+	uint64_t message_id, const struct tr_transport_bytes *bytes)
+{
+	struct tr_client_group_send_request request;
+
+	if (!group || stream_id == 0U || !bytes ||
+	    (bytes->len != 0U && !bytes->data))
+		return TR_ERR_INVALID;
+	request.group = group;
+	request.stream_id = stream_id;
+	request.message_id = message_id;
+	request.bytes = bytes;
+	return tr_reactor_call(
+		group->config.owner, tr_client_group_send_on_owner, &request);
 }
 
 void tr_client_group_destroy(struct tr_client_group *group)
