@@ -63,31 +63,17 @@ end
 target("trcore")
     set_kind("static")
     add_includedirs("include", {public = true})
-    -- SDK headers are an explicit compatibility boundary.
-    -- Do not use a glob here: adding a header under include/tr/ must not
-    -- automatically publish an implementation detail.
+    -- Stable SDK compatibility boundary. Runtime/Transport engine headers
+    -- stay repository-internal; internal tests include them from the source tree.
     add_headerfiles(
-        -- Intended facade/application entry points.
         "include/(tr/trpc.h)",
         "include/(tr/status.h)",
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
         "include/(tr/server.h)",
-        "include/(tr/rpc_codec.h)",
-        "include/(tr/observability.h)",
-
-        -- Transitional API/implementation dependencies. rpc.h still mixes
-        -- application Call types with the Endpoint engine, and therefore
-        -- pulls Channel/Reactor/Buffer headers into the installed closure.
         "include/(tr/rpc.h)",
-        -- These remain installed until the RPC/Transport engine split removes
-        -- Reactor/Channel/Buffer details from the stable facade headers.
-        "include/(tr/buffer.h)",
-        "include/(tr/cleanup.h)",
-        "include/(tr/channel.h)",
-        "include/(tr/reactor.h)",
-        "include/(tr/frame.h)",
-        "include/(tr/wire.h)")
+        "include/(tr/rpc_codec.h)",
+        "include/(tr/observability.h)")
     add_files(
         "src/status.c",
         "src/crc32c.c",
