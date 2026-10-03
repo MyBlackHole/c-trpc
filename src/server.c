@@ -123,13 +123,11 @@ static int tr_server_connection_group_config_valid(
 	if (config->max_groups == 0U)
 		return config->max_connections == 0U &&
 		       config->max_data_connections_per_group == 0U &&
-		       config->max_streams_per_group == 0U &&
-		       config->control_message_count == 0U;
+		       config->max_streams_per_group == 0U;
 
 	return config->max_connections >= config->max_groups &&
 	       config->max_data_connections_per_group != 0U &&
 	       config->max_streams_per_group != 0U &&
-	       config->control_message_count != 0U &&
 	       config->authorize != NULL;
 }
 
@@ -1140,8 +1138,13 @@ int tr_server_create(const struct tr_server_config *config,
 			effective.connection_groups.max_data_connections_per_group;
 		group_config.stream_affinity_capacity_per_pipeline =
 			effective.connection_groups.max_streams_per_group;
+		/*
+		 * Keep CONTROL payload-buffer tuning internal. The total group
+		 * connection budget is a conservative bounded default for concurrent
+		 * control sends without adding an implementation knob to the SDK.
+		 */
 		group_config.control_message_count =
-			effective.connection_groups.control_message_count;
+			effective.connection_groups.max_connections;
 		group_config.authorize_control =
 			tr_server_connection_group_authorize;
 		group_config.authorize_arg = server;
