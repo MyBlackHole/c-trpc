@@ -1337,10 +1337,11 @@ static int tr_client_group_send_on_owner(void *arg)
 			    group->send_bytes_limit -
 				    group->send_bytes_inflight)
 			return TR_AGAIN;
+#if SIZE_MAX <= UINT32_MAX
 		if ((size_t)bytes->len >
 		    SIZE_MAX - sizeof(*owned))
 			return TR_ERR_BAD_LENGTH;
-
+#endif
 		allocation_size = sizeof(*owned) + (size_t)bytes->len;
 		owned = (struct tr_client_group_send_buffer *)malloc(
 			allocation_size);
