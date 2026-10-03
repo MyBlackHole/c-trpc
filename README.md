@@ -188,10 +188,14 @@ transfer. A Server TRANSFER_READY is accepted only when its hidden DATA
 index/generation exactly matches one ACTIVE Client lane. The Client then installs
 a bounded local Stream affinity and invokes the optional
 `on_transfer_ready` callback with only group/stream/message identity.
-`tr_client_connection_group_release_transfer()` removes that local affinity.
-Payload send remains a separate P3 slice so its ownership, memory budget and
-backpressure contract can be defined explicitly instead of hidden behind an
-unbounded allocation.
+`tr_client_connection_group_send()` sends one logical message through that
+exact affinity; the application bytes are borrowed only for the call and copied
+into bounded internal ownership before TR_OK is returned. The Group derives its
+send-memory bound from `max_data_connections * max_message_bytes`, while the
+existing Reactor owns DATA fragmentation and TX scheduling. Temporary admission
+pressure returns `TR_AGAIN`; callers retry later. No second Group send queue or
+writable-notification contract is introduced in this slice.
+`tr_client_connection_group_release_transfer()` removes the local affinity.
 
 The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
 Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
