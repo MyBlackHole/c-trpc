@@ -1662,8 +1662,8 @@ static void test_channel_stream_slot_reuse(void)
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &second) == TR_OK);
 	wait_channel_counter(&client_ctx, &client_ctx.opened, 2U);
 	wait_channel_counter(&server_ctx, &server_ctx.opened, 2U);
-	assert(second.slot == first.slot);
-	assert(second.generation != first.generation);
+	/* max_calls=1 guarantees slot reuse; the opaque capability must rotate. */
+	assert(memcmp(&second, &first, sizeof(second)) != 0);
 	assert(tr_stream_get_flow_state(first, &flow) == TR_ERR_STALE);
 
 	pthread_mutex_lock(&server_ctx.lock);
@@ -2544,8 +2544,7 @@ static void test_rpc_deadline_heap_order(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 1U);
-	assert(root.slot == long_call.slot);
-	assert(root.generation == long_call.generation);
+	assert(memcmp(&root, &long_call, sizeof(root)) == 0);
 	long_deadline = root_deadline;
 
 	options.timeout_ms = 3000U;
@@ -2554,8 +2553,7 @@ static void test_rpc_deadline_heap_order(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 2U);
-	assert(root.slot == short_call.slot);
-	assert(root.generation == short_call.generation);
+	assert(memcmp(&root, &short_call, sizeof(root)) == 0);
 	assert(root_deadline < long_deadline);
 
 	options.timeout_ms = 4000U;
@@ -2564,8 +2562,7 @@ static void test_rpc_deadline_heap_order(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 3U);
-	assert(root.slot == short_call.slot);
-	assert(root.generation == short_call.generation);
+	assert(memcmp(&root, &short_call, sizeof(root)) == 0);
 
 	/*
 	 * The long Call is a non-root, non-last heap entry. Removing it forces
@@ -2575,21 +2572,19 @@ static void test_rpc_deadline_heap_order(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 2U);
-	assert(root.slot == short_call.slot);
-	assert(root.generation == short_call.generation);
+	assert(memcmp(&root, &short_call, sizeof(root)) == 0);
 
 	assert(tr_rpc_call_cancel(short_call) == TR_OK);
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 1U);
-	assert(root.slot == middle_call.slot);
-	assert(root.generation == middle_call.generation);
+	assert(memcmp(&root, &middle_call, sizeof(root)) == 0);
 
 	assert(tr_rpc_call_cancel(middle_call) == TR_OK);
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 0U);
-	assert(root.endpoint == NULL);
+	assert(memcmp(&root, &(struct tr_rpc_call_handle){ 0 }, sizeof(root)) == 0);
 	assert(root_deadline == 0U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
@@ -2775,8 +2770,7 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 1U);
-	assert(root.slot == first.slot);
-	assert(root.generation == first.generation);
+	assert(memcmp(&root, &first, sizeof(root)) == 0);
 	assert(root_deadline != 0U);
 
 	/* max_calls=1: the free-call list is empty while the first Call is live. */
@@ -2793,7 +2787,7 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 0U);
-	assert(root.endpoint == NULL);
+	assert(memcmp(&root, &(struct tr_rpc_call_handle){ 0 }, sizeof(root)) == 0);
 	assert(root_deadline == 0U);
 
 	pthread_mutex_lock(&ctx.lock);
@@ -2808,8 +2802,7 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 1U);
-	assert(root.slot == second.slot);
-	assert(root.generation == second.generation);
+	assert(memcmp(&root, &second, sizeof(root)) == 0);
 	assert(root_deadline != 0U);
 
 	pthread_mutex_lock(&ctx.lock);
@@ -2821,8 +2814,8 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 0U);
-	assert(second.slot == first.slot);
-	assert(second.generation != first.generation);
+	/* max_calls=1 guarantees slot reuse; the opaque capability must rotate. */
+	assert(memcmp(&second, &first, sizeof(second)) != 0);
 	assert(tr_rpc_call_is_cancelled(first, NULL) == TR_ERR_STALE);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
