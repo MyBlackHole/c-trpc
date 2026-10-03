@@ -1340,8 +1340,9 @@ int tr_server_connection_group_send_data_offer(
 	struct tr_server *server, uint64_t group_id, uint64_t epoch,
 	uint64_t message_id)
 {
-	if (!server || !server->connection_group_listener ||
-	    !server->started || group_id == 0U || epoch == 0U)
+	if (!server || group_id == 0U || epoch == 0U)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
 	return tr_pipeline_listener_send_data_offer(
@@ -1353,9 +1354,9 @@ int tr_server_connection_group_send_transfer_ready(
 	struct tr_server *server, uint64_t group_id, uint64_t epoch,
 	uint32_t stream_id, uint64_t message_id)
 {
-	if (!server || !server->connection_group_listener ||
-	    !server->started || group_id == 0U || epoch == 0U ||
-	    stream_id == 0U)
+	if (!server || group_id == 0U || epoch == 0U || stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
 	return tr_pipeline_listener_send_transfer_ready(
@@ -1367,9 +1368,9 @@ int tr_server_connection_group_release_transfer(
 	struct tr_server *server, uint64_t group_id, uint64_t epoch,
 	uint32_t stream_id)
 {
-	if (!server || !server->connection_group_listener ||
-	    !server->started || group_id == 0U || epoch == 0U ||
-	    stream_id == 0U)
+	if (!server || group_id == 0U || epoch == 0U || stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
 	return tr_pipeline_listener_release_transfer(
