@@ -169,6 +169,7 @@ static enum tr_frame_disposition tr_server_connection_group_data_frame(
 		message.flags |= TR_CONNECTION_GROUP_DATA_FIRST;
 	if (frame->header.flags & TR_FRAME_F_LAST)
 		message.flags |= TR_CONNECTION_GROUP_DATA_LAST;
+	message._private[1] = 1U;
 	if (frame->payload) {
 		message.bytes.data = frame->payload->data;
 		message.bytes.len = frame->payload->len;
@@ -215,7 +216,7 @@ int tr_connection_group_message_release(
 {
 	struct tr_buffer *buffer;
 
-	if (!message || message->_private[0] == 0U)
+	if (!message || message->_private[1] != 1U)
 		return TR_ERR_INVALID;
 
 	buffer = (struct tr_buffer *)(uintptr_t)message->_private[0];
@@ -223,7 +224,8 @@ int tr_connection_group_message_release(
 	message->_private[1] = 0U;
 	message->bytes.data = NULL;
 	message->bytes.len = 0U;
-	tr_buffer_release(buffer);
+	if (buffer)
+		tr_buffer_release(buffer);
 	return TR_OK;
 }
 
