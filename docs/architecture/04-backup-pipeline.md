@@ -5,7 +5,8 @@
 ## 0. CURRENT Foundation
 
 Phase 5 已落地内部 `tr_pipeline` soft-state、TRR1 routing、shard-local registry、
-accepted DATA ingress 与 internal CONTROL session；尚未接入 public Backup facade。
+accepted DATA ingress、internal CONTROL session，以及 `TRC1` CONTROL wire codec/
+state adapter；尚未接入 public Backup facade。
 
 当前对象固定：
 
@@ -33,11 +34,13 @@ one Pipeline
 
 当前 routing preface / registry / DATA reserve-attach / accepted ingress 已实现；
 internal CONTROL session 也已能签发 DATA offer，并以原子 Stream affinity 建立
-`TRANSFER_READY` barrier。
+`TRANSFER_READY` barrier。固定 48-byte `TRC1` CONTROL payload 已实现
+DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内部状态转换。
 
 当前尚未实现：
 
-- CONTROL wire message 编码与 public control facade；
+- CONTROL socket handler / public control facade；
+- Server shard 的正式 Pipeline listener/control-plane integration；
 - facade/Backup API；
 - cross-shard fd transfer；
 - durable backup identity / epoch fencing。
@@ -291,6 +294,72 @@ only RESERVED remains   -> clear CONTROL cancels reservation
 
 这保证 Registry 不会留下指向已释放 Pipeline 的 entry，也不会在 active DATA/Stream
 仍依赖 Pipeline 时提前注销。
+
+## 0.3 CONTROL Wire
+
+CONTROL runtime state 已经有固定 48-byte `TRC1` wire payload：
+
+```text
+offset  size  field
+0       4     magic = "TRC1"
+4       2     control_version = 1
+6       2     type
+8       4     flags = 0
+12      4     owner_shard_id
+16      8     pipeline_id
+24      8     epoch
+32      4     stream_id
+36      4     data_index
+40      4     data_generation
+44      4     reserved = 0
+```
+
+当前定义三种 message：
+
+```text
+DATA_OFFER
+  stream_id = 0
+  exact (owner_shard, pipeline_id, epoch, data_index, generation)
+
+DATA_CANCEL
+  stream_id = 0
+  exact reservation identity
+
+TRANSFER_READY
+  stream_id != 0
+  exact ATTACHED DATA identity
+```
+
+`TRC1` 不携带 Reactor slot/generation。DATA_OFFER 可以通过唯一的 codec helper
+直接转换成 TRR1 DATA route capability，避免 facade 重新拼接 identity。
+
+状态与 wire 的绑定不是“先改状态，再由另一个模块猜字段”：
+
+```text
+reserve_data_wire()
+  -> reserve DATA capability
+  -> encode DATA_OFFER
+  -> encode failure => cancel exact reservation
+
+cancel_data_wire()
+  -> decode/validate DATA_CANCEL
+  -> reconstruct exact capability identity
+  -> cancel only matching RESERVED slot
+
+prepare_transfer_wire(stream_id)
+  -> atomic prepare_transfer()
+  -> requires ATTACHED DATA
+  -> bind Stream affinity
+  -> encode TRANSFER_READY
+  -> encode failure => release newly-created affinity
+```
+
+因此 DATA 仍处于 RESERVED 时，`prepare_transfer_wire()` 返回 `TR_AGAIN` 且不会生成
+任何 READY payload；只有 exact ingress attach 成功后才能形成 TRANSFER_READY。
+
+当前 `TRC1` 仍是 internal CONTROL payload foundation。尚未把它安装成 public Server
+Pipeline listener 的 socket handler，也没有公开 Backup/Pipeline facade；这些属于
+下一阶段 transport/control-plane integration。
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。

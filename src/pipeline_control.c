@@ -163,6 +163,107 @@ int tr_pipeline_control_release_transfer(
 	return tr_pipeline_unbind_stream(control->pipeline, stream_id);
 }
 
+static void tr_pipeline_control_wire_identity(
+	struct tr_pipeline_control *control,
+	struct tr_pipeline_control_wire_message *message)
+{
+	message->version = TR_PIPELINE_CONTROL_WIRE_VERSION;
+	message->owner_shard_id =
+		tr_pipeline_owner_shard_id(control->pipeline);
+	message->pipeline_id = tr_pipeline_id(control->pipeline);
+	message->epoch = tr_pipeline_epoch(control->pipeline);
+}
+
+int tr_pipeline_control_reserve_data_wire(
+	struct tr_pipeline_control *control,
+	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+{
+	struct tr_pipeline_control_wire_message message;
+	struct tr_pipeline_data_offer offer;
+	int ret;
+
+	if (!control || !control->pipeline || !out)
+		return TR_ERR_INVALID;
+	memset(out, 0, TR_PIPELINE_CONTROL_WIRE_SIZE);
+	memset(&offer, 0, sizeof(offer));
+
+	ret = tr_pipeline_control_reserve_data(control, &offer);
+	if (ret != TR_OK)
+		return ret;
+
+	memset(&message, 0, sizeof(message));
+	tr_pipeline_control_wire_identity(control, &message);
+	message.type = TR_PIPELINE_CONTROL_DATA_OFFER;
+	message.data_index = offer.data.index;
+	message.data_generation = offer.data.generation;
+
+	ret = tr_pipeline_control_wire_encode(out, &message);
+	if (ret != TR_OK)
+		(void)tr_pipeline_control_cancel_data(control, &offer);
+	return ret;
+}
+
+int tr_pipeline_control_cancel_data_wire(
+	struct tr_pipeline_control *control, const uint8_t *data, uint32_t len)
+{
+	struct tr_pipeline_control_wire_message message;
+	struct tr_pipeline_data_offer offer;
+	int ret;
+
+	if (!control || !control->pipeline)
+		return TR_ERR_INVALID;
+
+	memset(&message, 0, sizeof(message));
+	ret = tr_pipeline_control_wire_decode(data, len, &message);
+	if (ret != TR_OK)
+		return ret;
+	if (message.type != TR_PIPELINE_CONTROL_DATA_CANCEL)
+		return TR_ERR_BAD_TYPE;
+
+	memset(&offer, 0, sizeof(offer));
+	offer.data.index = message.data_index;
+	offer.data.generation = message.data_generation;
+	offer.route.version = TR_PIPELINE_ROUTE_VERSION;
+	offer.route.role = TR_PIPELINE_ROUTE_DATA;
+	offer.route.owner_shard_id = message.owner_shard_id;
+	offer.route.pipeline_id = message.pipeline_id;
+	offer.route.epoch = message.epoch;
+	offer.route.member_index = message.data_index;
+	offer.route.member_generation = message.data_generation;
+
+	return tr_pipeline_control_cancel_data(control, &offer);
+}
+
+int tr_pipeline_control_prepare_transfer_wire(
+	struct tr_pipeline_control *control, uint32_t stream_id,
+	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+{
+	struct tr_pipeline_control_wire_message message;
+	struct tr_pipeline_transfer_ready ready;
+	int ret;
+
+	if (!control || !control->pipeline || !out || stream_id == 0U)
+		return TR_ERR_INVALID;
+	memset(out, 0, TR_PIPELINE_CONTROL_WIRE_SIZE);
+	memset(&ready, 0, sizeof(ready));
+
+	ret = tr_pipeline_control_prepare_transfer(control, stream_id, &ready);
+	if (ret != TR_OK)
+		return ret;
+
+	memset(&message, 0, sizeof(message));
+	tr_pipeline_control_wire_identity(control, &message);
+	message.type = TR_PIPELINE_CONTROL_TRANSFER_READY;
+	message.stream_id = ready.stream_id;
+	message.data_index = ready.data.index;
+	message.data_generation = ready.data.generation;
+
+	ret = tr_pipeline_control_wire_encode(out, &message);
+	if (ret != TR_OK)
+		(void)tr_pipeline_control_release_transfer(control, stream_id);
+	return ret;
+}
+
 int tr_pipeline_control_close(
 	struct tr_pipeline_control *control,
 	struct tr_conn_handle expected_control)
