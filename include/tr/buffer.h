@@ -9,8 +9,7 @@
 #include "tr/observability.h"
 
 struct tr_buffer;
-typedef void (*tr_buffer_release_cb)(
-	struct tr_buffer *buffer, void *arg);
+typedef void (*tr_buffer_release_cb)(struct tr_buffer *buffer);
 
 struct tr_buffer {
 	uint8_t *data;
@@ -26,7 +25,6 @@ struct tr_buffer {
 	 * The callback owns final disposal and may free the buffer itself.
 	 */
 	tr_buffer_release_cb release_cb;
-	void *release_arg;
 };
 
 struct tr_buffer_pool {
