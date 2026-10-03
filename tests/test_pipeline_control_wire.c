@@ -230,7 +230,10 @@ static void test_control_wire_state_machine(void)
 	assert(tr_pipeline_registry_detach_data_route(
 		       registry, &route, data_connection) == TR_OK);
 
-	/* DATA_CANCEL consumes only the exact still-RESERVED capability. */
+	/*
+	 * DATA_CANCEL is exact-generation idempotent. The first message consumes
+	 * RESERVED -> FREE; repeating the same generation is a successful no-op.
+	 */
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
 	assert(tr_pipeline_control_wire_decode(
@@ -241,11 +244,18 @@ static void test_control_wire_state_machine(void)
 	assert(tr_pipeline_control_cancel_data_wire(
 		       control, cancel_raw, sizeof(cancel_raw)) == TR_OK);
 	assert(tr_pipeline_control_cancel_data_wire(
+		       control, cancel_raw, sizeof(cancel_raw)) == TR_OK);
+
+	/*
+	 * Reusing the slot advances generation, so an old idempotent cancel cannot
+	 * affect the replacement reservation.
+	 */
+	assert(tr_pipeline_control_reserve_data_wire(
+		       control, offer_raw) == TR_OK);
+	assert(tr_pipeline_control_cancel_data_wire(
 		       control, cancel_raw, sizeof(cancel_raw)) == TR_ERR_STALE);
 
 	/* Forged epoch cannot cancel the real reservation. */
-	assert(tr_pipeline_control_reserve_data_wire(
-		       control, offer_raw) == TR_OK);
 	assert(tr_pipeline_control_wire_decode(
 		       offer_raw, sizeof(offer_raw), &offer) == TR_OK);
 	cancel = offer;
