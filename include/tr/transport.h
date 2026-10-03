@@ -69,6 +69,17 @@ typedef void (*tr_connection_group_data_event_cb)(
 	enum tr_connection_group_data_event event, int status, void *arg);
 
 /*
+ * Client-side TRANSFER_READY notification.
+ *
+ * The callback runs on the Client's owning I/O domain after the exact
+ * Stream -> DATA membership affinity has been installed. Applications see only
+ * semantic group/stream identity; DATA index/generation remain internal.
+ */
+typedef void (*tr_connection_group_transfer_ready_cb)(
+	const struct tr_connection_group_id *group, uint32_t stream_id,
+	uint64_t message_id, void *arg);
+
+/*
  * Optional Server-side generic Connection Group capability.
  *
  * max_groups == 0 keeps the capability disabled and reserves no extra
@@ -101,6 +112,13 @@ void tr_connection_group_server_config_init(
  */
 struct tr_connection_group_client_config {
 	uint32_t max_data_connections;
+
+	/*
+	 * Optional READY callback. Affinity state is still installed when this is
+	 * NULL, so applications may coordinate Stream identity out of band.
+	 */
+	tr_connection_group_transfer_ready_cb on_transfer_ready;
+	void *callback_arg;
 };
 
 void tr_connection_group_client_config_init(
@@ -123,6 +141,14 @@ int tr_client_connection_group_connect(
 	struct tr_client *client, const char *ipv4_address, uint16_t port,
 	const struct tr_connection_group_id *group);
 int tr_client_connection_group_close(struct tr_client *client);
+
+/*
+ * Release one Client-side logical transfer affinity after application-level
+ * Stream lifetime ends. The Server-side affinity is released independently by
+ * tr_server_connection_group_release_transfer().
+ */
+int tr_client_connection_group_release_transfer(
+	struct tr_client *client, uint32_t stream_id);
 
 /*
  * Group listener lifecycle is owned by tr_server.
