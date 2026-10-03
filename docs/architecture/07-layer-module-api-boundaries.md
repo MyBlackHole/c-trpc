@@ -861,9 +861,18 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - public READY callback 只暴露 `group_id/epoch + stream_id + CONTROL message_id`，DATA routing capability 保持 internal；
 - Client transfer release 回到同一 Reactor owner 删除 affinity；DATA lane 关闭会按 exact generation 失效对应 affinity，slot reuse 不会让旧 Stream 漂移到新连接。
 
+第五阶段已完成：
+
+- Client public `tr_client_connection_group_send()` 只按 READY affinity 发送，不允许重新选择 DATA lane；
+- 每次 send 都重新验证 exact DATA membership generation，lane replacement 后旧 Stream 返回 STALE；
+- public bytes 仅调用期间 borrowed；TR_OK 前复制到 owner-local owned buffer，应用可立即复用源内存；
+- send memory bound 从 `max_data_connections * max_message_bytes` 推导，不新增一个 implementation tuning knob；
+- Reactor 原有 DATA path 继续负责 FIRST/LAST、分片、TX fairness 与 EAGAIN；Group 不新增第二发送队列；
+- TX 完成/连接关闭/提交失败通过 one-shot Buffer release hook 回收 quota；
+- 当前 backpressure contract 为 `TR_AGAIN + caller retry`，不发布可能产生 false-ready 的单一 writable callback。
+
 待完成：
 
-- logical transfer 的 Client DATA send/lifecycle capability；
 - 完整 group-level stable stats / drain semantics。
 
 ### P4 — Config / Stats split — IN PROGRESS
