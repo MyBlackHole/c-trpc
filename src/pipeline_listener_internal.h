@@ -11,6 +11,15 @@ struct tr_pipeline_listener;
 typedef int (*tr_pipeline_listener_authorize_control_cb)(
 	const struct tr_pipeline_route_preface *route, void *arg);
 
+typedef enum tr_frame_disposition (*tr_pipeline_listener_data_frame_cb)(
+	const struct tr_pipeline_route_preface *route,
+	struct tr_conn_handle connection, struct tr_frame *frame, void *arg);
+
+typedef void (*tr_pipeline_listener_data_event_cb)(
+	const struct tr_pipeline_route_preface *route,
+	struct tr_conn_handle connection, enum tr_connection_event event,
+	int status, void *arg);
+
 struct tr_pipeline_listener_config {
 	struct tr_reactor *owner;
 	uint32_t owner_shard_id;
@@ -28,8 +37,8 @@ struct tr_pipeline_listener_config {
 	tr_pipeline_listener_authorize_control_cb authorize_control;
 	void *authorize_arg;
 
-	tr_reactor_frame_cb data_frame_cb;
-	tr_reactor_event_cb data_event_cb;
+	tr_pipeline_listener_data_frame_cb data_frame_cb;
+	tr_pipeline_listener_data_event_cb data_event_cb;
 	void *data_callback_arg;
 };
 
