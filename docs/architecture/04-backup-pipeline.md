@@ -60,6 +60,9 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   nonblocking connect/preface/adopt；
 - DATA establish 不新增 connector thread：connect readiness 复用 Reactor auxiliary
   fd event，timeout 复用 Reactor timer；同一时刻最多一个 connector in-flight；
+- DATA_CANCEL 是 exact-generation 幂等收敛：只释放 RESERVED；ATTACHED/同 generation
+  FREE 为 no-op，generation reuse 才 STALE，因此完整 preface 发出后的 attach 模糊窗口
+  不需要新增 DATA_ATTACH_ACK；
 - `max_data_connections == 0` 仍保持 CONTROL-only，并通过 exact DATA_CANCEL
   归还 offer reservation；
 - TRANSFER_READY route/affinity consumption 与 logical transfer DATA send 仍待实现；
