@@ -543,7 +543,11 @@ RPC
 
 ## 10. CURRENT Audit
 
-审查基于当前 `main`。
+审查基线为文档修改前的 `main@f2e5eafdad82e4543163e53d4e69d207059c2fb0`。
+
+本次文档变更已经处理 A1（core 文档的 Backup 耦合）：
+core overview/ownership/roadmap 已改为业务中立，Backup durability 被标记为
+BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项。
 
 ### 10.1 已满足
 
@@ -559,7 +563,7 @@ RPC
 
 ### 10.2 不满足 / 需要收敛
 
-#### A1. Core architecture documents are Backup-coupled — HIGH
+#### A1. Core architecture documents are Backup-coupled — HIGH — RESOLVED BY THIS DOC CHANGE
 
 当前：
 
@@ -573,11 +577,11 @@ RPC
 
 这会把业务正确性自然下沉到 RPC/Transport core。
 
-目标：
+处理结果：
 
-- core 架构使用 generic Application / Connection Group / Pipeline；
-- Backup durability 文档降为 business-layer reference；
-- core roadmap 不实现 backup_id/checkpoint/commit。
+- core 架构已改用 generic Application / Connection Group / Pipeline；
+- Backup durability 已降为 BUSINESS REFERENCE；
+- core roadmap 已把 Phase 6 改为 API Boundary Cleanup，不再实现 backup_id/checkpoint/commit。
 
 ---
 
