@@ -133,11 +133,6 @@ static int tr_server_connection_group_config_valid(
 	       config->authorize != NULL;
 }
 
-static int tr_server_connection_groups_enabled(const struct tr_server *server)
-{
-	return server && server->config.connection_groups.max_groups != 0U;
-}
-
 static int tr_server_connection_group_authorize(
 	const struct tr_pipeline_route_preface *route, void *arg)
 {
