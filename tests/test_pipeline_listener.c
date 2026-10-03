@@ -376,6 +376,11 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(offer.data_index == offer_route.member_index);
 	assert(offer.data_generation == offer_route.member_generation);
 
+	/* A RESERVED capability alone is never enough to publish READY. */
+	assert(tr_pipeline_listener_send_transfer_ready(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3000U,
+		       UINT64_C(999)) == TR_AGAIN);
+
 	/* Exact DATA socket joins the same listener and normal TRP1 begins after TRR1. */
 	data = connect_loopback(port);
 	send_route(data, &offer_route);
