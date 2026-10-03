@@ -651,55 +651,40 @@ add_headerfiles("include/(tr/*.h)")
 
 ---
 
-#### A4. Channel public API requires Reactor internals — HIGH
+#### A4. Channel public API requires Reactor internals — HIGH — RESOLVED FOR STABLE SDK
 
-当前 `tr_channel_create()` 要求调用者传入：
+基线 `tr_channel_create()` 要求调用者传入 `tr_conn_handle`，把 Reactor
+pointer + slot + generation 暴露给 Transport 使用者。
 
-```c
-struct tr_conn_handle
-```
+第二阶段处理结果：
 
-而 `tr_conn_handle` 公开：
+- `channel.h` / `reactor.h` 已退出安装的 stable SDK；
+- Client/Server facade 仍在库内部组合 Channel/Reactor；
+- repository internal tests 可以继续直接测试低层 Channel；
+- generic Connection Group/Transport public capability 后续单独设计，不复用
+  `tr_conn_handle` 作为业务 contract。
 
-```text
-Reactor pointer
-slot
-generation
-```
-
-这意味着使用 Channel capability 必须理解并管理 Runtime implementation。
-
-目标：
-
-- generic Transport/Connection API 自己拥有 connect/adopt lifecycle；
-- Reactor handle 留在 internal；
-- 如果保留 low-level Channel API，应降为 advanced/internal，不作为普通 public facade。
+因此该问题对 stable facade 已解除；低层 Channel 现在是 internal engine API。
 
 ---
 
-#### A5. rpc.h mixes application RPC API with lower-layer construction — HIGH
+#### A5. rpc.h mixes application RPC API with lower-layer construction — HIGH — RESOLVED
 
-当前同一个 `rpc.h` 同时包含：
-
-- Method/Call/Streaming public semantics；
-- `tr_rpc_endpoint_create(struct tr_channel *)`；
-- buffer pool pointer；
-- Stream handle；
-- low-level executor capacity。
-
-结果是 RPC application API 与 RPC engine integration API 混在一起。
-
-目标：
-
-拆分概念：
+第二阶段已拆分：
 
 ```text
-public RPC types/call API
-internal RPC endpoint engine
-optional advanced integration API
+include/tr/rpc.h
+  -> Method / Call / Streaming application contract
+
+src/rpc_internal.h
+  -> Endpoint config/create/destroy
+  -> Channel binding
+  -> executor config/stats
+  -> internal Buffer fast path
 ```
 
-普通 Client/Server 用户不需要知道 Channel/Endpoint construction。
+`rpc.h` 不再 include Channel/Buffer/Reactor，也不声明 Endpoint engine
+construction。Client/Server 用户无需知道 Endpoint 如何绑定 Transport。
 
 ---
 
@@ -742,34 +727,31 @@ optional advanced integration API
 
 ---
 
-#### A8. High-level Server stats embeds Runtime layout — MEDIUM
+#### A8. High-level Server stats embeds Runtime layout — MEDIUM — RESOLVED FOR STABLE SDK
 
-`tr_server_stats` 直接嵌入：
+原 `tr_server_stats` 直接嵌入 Reactor/pool implementation。
 
-```c
-struct tr_reactor_stats
-struct tr_pool_observation
-```
+第二阶段已将：
 
-这把高层 Server ABI 与 Runtime queue/pool implementation 绑定。
+- `tr_server_stats`；
+- `tr_server_get_stats()`；
+- `tr_client_get_channel_stats()`；
+- `tr_client_get_rpc_stats()`
 
-目标：
+移到 `facade_diagnostics_internal.h`。现有 benchmark/test 继续使用内部完整诊断，
+stable Server/Client header 不再绑定 Runtime stats layout。
 
-- stable semantic stats；
-- advanced runtime diagnostics 单独 API。
+后续仍需要设计真正的 stable semantic observability API。
 
 ---
 
-#### A9. Umbrella header exposes allocator — MEDIUM
+#### A9. Umbrella header exposes allocator — MEDIUM — RESOLVED
 
-`tr/trpc.h` 当前直接 include `tr/buffer.h`。
+`tr/trpc.h` 已移除 `buffer.h`。安装 SDK 现在只发布 facade/RPC application
+headers；Buffer/Channel/Reactor/Frame/Wire 都不再属于 stable installed surface。
 
-这使应用默认进入 memory-resource implementation surface。
-
-目标：
-
-- umbrella header 只包含 stable public capability；
-- zero-copy buffer API 如果需要，应提供 public buffer/view abstraction，而不是 allocator internals。
+内部 copy-minimal fast path 仍保留，没有因为 API cleanup 增加 copy。未来若公开
+zero-copy，将通过 opaque ownership abstraction 设计。
 
 ---
 
@@ -785,9 +767,8 @@ compatibility contract。
 - install smoke 对 published header 集合做精确校验；
 - Reactor 行为测试继续留在 repository internal tests。
 
-注意：`reactor.h` 当前仍因 `rpc.h -> channel.h -> reactor.h` 的过渡依赖被安装。
-这属于 A4/A5 的后续 API 拆分问题，不再由 install smoke 把 Reactor 定义成推荐 SDK
-入口。
+第二阶段已解除 `rpc.h -> channel.h -> reactor.h` 的 transitive dependency，
+Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 
 ---
 
@@ -816,7 +797,7 @@ compatibility contract。
 - Backup durability 从 core roadmap/read-order 移出；
 - 新功能评审先检查 layer/module/API contract。
 
-### P1 — Public header boundary — IN PROGRESS
+### P1 — Public header boundary — COMPLETE
 
 已完成：
 
@@ -825,16 +806,23 @@ compatibility contract。
 - external smoke 改用 public facade；
 - command_queue/parser/rpc_wire/socket/endian/guard/refcount/crc32c 退出 SDK。
 
+第二阶段补齐：
+
+- RPC/Channel/Runtime transitive dependency 已拆；
+- buffer/channel/reactor/frame/wire 已退出 stable facade closure；
+- installed SDK 只保留自包含 facade/RPC headers。
+
+### P2 — RPC public surface — IN PROGRESS
+
+已完成：
+
+- application RPC API 与 Endpoint engine 分离；
+- Client/Server 用户不再看到 Channel/Endpoint construction；
+- retained message 用 opaque release token 保持零额外 allocation/copy。
+
 待完成：
 
-- 拆 RPC/Channel/Runtime transitive dependency；
-- buffer/channel/reactor/frame/wire 退出 stable facade closure。
-
-### P2 — RPC public surface
-
-- 分离 application RPC API 与 endpoint engine API；
-- stable public handle opaque 化；
-- Client/Server 用户不再看到 Channel construction。
+- `tr_rpc_call_handle` opaque 化，不再公开 endpoint pointer + slot/generation。
 
 ### P3 — Transport / Connection Group public capability
 
@@ -842,10 +830,16 @@ compatibility contract。
 - 不暴露 Reactor/registry/TRR1 implementation；
 - 保留 zero-copy/ownership semantics。
 
-### P4 — Config / Stats split
+### P4 — Config / Stats split — IN PROGRESS
 
-- stable semantic limits/stats；
-- advanced performance tuning/runtime diagnostics 独立。
+已完成：
+
+- detailed Reactor/Channel/Endpoint diagnostics 退出 stable facade header。
+
+待完成：
+
+- stable semantic stats API；
+- `tr_facade_limits` 中 implementation tuning 与 semantic limits 分离。
 
 ### P5 — Physical directory cleanup
 
