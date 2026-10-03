@@ -254,7 +254,6 @@ static void test_public_connection_group_server(void)
 	struct tr_pipeline_route_preface data_route;
 	struct tr_pipeline_control_wire_message offer;
 	struct tr_pipeline_control_wire_message ready;
-	uint16_t rpc_port = 0U;
 	uint16_t group_port = 0U;
 	int control = -1;
 	int data = -1;
@@ -276,9 +275,6 @@ static void test_public_connection_group_server(void)
 	config.connection_groups.callback_arg = &ctx;
 
 	assert(tr_server_create(&config, &server) == TR_OK);
-	assert(tr_server_listen(
-		       server, "127.0.0.1", 0U, &rpc_port) == TR_OK);
-	assert(rpc_port != 0U);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
