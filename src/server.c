@@ -107,6 +107,133 @@ tr_server_shard_peer_at(struct tr_server_shard *shard, uint32_t slot)
 	return shard ? tr_runtime_shard_peer_at(shard->runtime, slot) : NULL;
 }
 
+void tr_connection_group_server_config_init(
+	struct tr_connection_group_server_config *config)
+{
+	if (!config)
+		return;
+	memset(config, 0, sizeof(*config));
+}
+
+static int tr_server_connection_group_config_valid(
+	const struct tr_connection_group_server_config *config)
+{
+	if (!config)
+		return 0;
+	if (config->max_groups == 0U)
+		return config->max_connections == 0U &&
+		       config->max_data_connections_per_group == 0U &&
+		       config->max_streams_per_group == 0U &&
+		       config->control_message_count == 0U;
+
+	return config->max_connections >= config->max_groups &&
+	       config->max_data_connections_per_group != 0U &&
+	       config->max_streams_per_group != 0U &&
+	       config->control_message_count != 0U &&
+	       config->authorize != NULL;
+}
+
+static int tr_server_connection_groups_enabled(const struct tr_server *server)
+{
+	return server && server->config.connection_groups.max_groups != 0U;
+}
+
+static int tr_server_connection_group_authorize(
+	const struct tr_pipeline_route_preface *route, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_connection_group_id group;
+
+	if (!server || !route || !server->config.connection_groups.authorize)
+		return TR_ERR_INVALID;
+
+	group.group_id = route->pipeline_id;
+	group.epoch = route->epoch;
+	return server->config.connection_groups.authorize(
+		&group, server->config.connection_groups.callback_arg);
+}
+
+static enum tr_frame_disposition tr_server_connection_group_data_frame(
+	const struct tr_pipeline_route_preface *route,
+	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_connection_group_message message;
+	enum tr_connection_group_message_disposition disposition;
+
+	(void)connection;
+	if (!server || !route || !frame ||
+	    frame->header.type != TR_FRAME_DATA ||
+	    !server->config.connection_groups.on_message)
+		return TR_FRAME_RELEASE;
+
+	memset(&message, 0, sizeof(message));
+	message.group.group_id = route->pipeline_id;
+	message.group.epoch = route->epoch;
+	message.stream_id = frame->header.stream_id;
+	message.message_id = frame->header.message_id;
+	if (frame->header.flags & TR_FRAME_F_FIRST)
+		message.flags |= TR_CONNECTION_GROUP_DATA_FIRST;
+	if (frame->header.flags & TR_FRAME_F_LAST)
+		message.flags |= TR_CONNECTION_GROUP_DATA_LAST;
+	if (frame->payload) {
+		message.bytes.data = frame->payload->data;
+		message.bytes.len = frame->payload->len;
+		message._private[0] = (uintptr_t)frame->payload;
+	}
+
+	disposition = server->config.connection_groups.on_message(
+		&message, server->config.connection_groups.callback_arg);
+	if (disposition == TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP &&
+	    frame->payload)
+		return TR_FRAME_TAKE_OWNERSHIP;
+	return TR_FRAME_RELEASE;
+}
+
+static void tr_server_connection_group_data_event(
+	const struct tr_pipeline_route_preface *route,
+	struct tr_conn_handle connection, enum tr_connection_event event,
+	int status, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_connection_group_id group;
+	enum tr_connection_group_data_event public_event;
+
+	(void)connection;
+	if (!server || !route || !server->config.connection_groups.on_data_event)
+		return;
+
+	if (event == TR_CONN_EVENT_CLOSED)
+		public_event = TR_CONNECTION_GROUP_DATA_CLOSED;
+	else if (event == TR_CONN_EVENT_ERROR)
+		public_event = TR_CONNECTION_GROUP_DATA_ERROR;
+	else
+		return;
+
+	group.group_id = route->pipeline_id;
+	group.epoch = route->epoch;
+	server->config.connection_groups.on_data_event(
+		&group, public_event, status,
+		server->config.connection_groups.callback_arg);
+}
+
+int tr_connection_group_message_release(
+	struct tr_connection_group_message *message)
+{
+	struct tr_buffer *buffer;
+
+	if (!message || message->_private[0] == 0U)
+		return TR_ERR_INVALID;
+
+	buffer = (struct tr_buffer *)(uintptr_t)message->_private[0];
+	message->_private[0] = 0U;
+	message->_private[1] = 0U;
+	message->bytes.data = NULL;
+	message->bytes.len = 0U;
+	tr_buffer_release(buffer);
+	return TR_OK;
+}
+
 static uint64_t tr_server_now_ms(void)
 {
 	struct timespec ts;
