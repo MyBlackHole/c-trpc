@@ -51,6 +51,9 @@ int tr_pipeline_control_prepare_transfer(
 	struct tr_pipeline_transfer_ready *out);
 int tr_pipeline_control_release_transfer(
 	struct tr_pipeline_control *control, uint32_t stream_id);
+int tr_pipeline_control_get_stats(
+	struct tr_pipeline_control *control,
+	struct tr_pipeline_stats *out);
 
 /*
  * CONTROL wire adapters keep runtime state transition and serialized identity
