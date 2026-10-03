@@ -51,6 +51,15 @@ int tr_pipeline_registry_attach_data_route(
 	struct tr_conn_handle connection,
 	struct tr_pipeline_data_ref *data_out);
 
+/*
+ * Cancel one exact RESERVED route after DATA establishment fails before
+ * membership becomes live. Already ATTACHED/stale/reused capabilities are not
+ * affected.
+ */
+int tr_pipeline_registry_cancel_data_route(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface);
+
 int tr_pipeline_registry_detach_data_route(
 	struct tr_pipeline_registry *registry,
 	const struct tr_pipeline_route_preface *preface,
