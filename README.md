@@ -137,7 +137,6 @@ cfg.connection_groups.max_groups = 64;
 cfg.connection_groups.max_connections = 256;
 cfg.connection_groups.max_data_connections_per_group = 4;
 cfg.connection_groups.max_streams_per_group = 1024;
-cfg.connection_groups.control_message_count = 128;
 cfg.connection_groups.authorize = authorize_group;
 cfg.connection_groups.on_message = on_group_data;
 cfg.connection_groups.callback_arg = app;
