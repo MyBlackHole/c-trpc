@@ -19,7 +19,6 @@ struct tr_pipeline_ingress_member {
 struct tr_pipeline_ingress_preface {
 	struct tr_pipeline_registry *registry;
 	struct tr_pipeline_route_parser parser;
-	struct tr_pipeline_ingress_member *member;
 	tr_reactor_frame_cb frame_cb;
 	tr_reactor_event_cb event_cb;
 	void *callback_arg;
@@ -63,14 +62,60 @@ static void tr_pipeline_ingress_event(
 		event_cb(connection, event, status, callback_arg);
 }
 
+int tr_pipeline_ingress_attach_data_route_on_owner(
+	const struct tr_pipeline_ingress_config *config,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle connection)
+{
+	struct tr_pipeline_ingress_member *member;
+	struct tr_pipeline_data_ref attached;
+	int ret;
+
+	if (!config || !config->registry || !preface ||
+	    connection.reactor != tr_pipeline_registry_owner(config->registry))
+		return TR_ERR_INVALID;
+
+	member = (struct tr_pipeline_ingress_member *)calloc(
+		1, sizeof(*member));
+	if (!member)
+		return TR_ERR_NOMEM;
+
+	memset(&attached, 0, sizeof(attached));
+	ret = tr_pipeline_registry_attach_data_route(
+		config->registry, preface, connection, &attached);
+	if (ret != TR_OK) {
+		free(member);
+		return ret;
+	}
+
+	member->registry = config->registry;
+	member->preface = *preface;
+	member->data = attached;
+	member->frame_cb = config->frame_cb;
+	member->event_cb = config->event_cb;
+	member->callback_arg = config->callback_arg;
+
+	ret = tr_reactor_set_handler(
+		connection, tr_pipeline_ingress_frame,
+		tr_pipeline_ingress_event, member);
+	if (ret != TR_OK) {
+		(void)tr_pipeline_registry_detach_data_route(
+			config->registry, preface, connection);
+		free(member);
+		return ret;
+	}
+
+	return TR_OK;
+}
+
 static int tr_pipeline_ingress_preface_feed(
 	struct tr_conn_handle connection, const uint8_t *data, size_t len,
 	int *done, void *arg)
 {
 	struct tr_pipeline_ingress_preface *ingress =
 		(struct tr_pipeline_ingress_preface *)arg;
+	struct tr_pipeline_ingress_config config;
 	struct tr_pipeline_route_preface preface;
-	struct tr_pipeline_data_ref attached;
 	size_t consumed = 0U;
 	int ready = 0;
 	int ret;
@@ -89,30 +134,16 @@ static int tr_pipeline_ingress_preface_feed(
 	if (!ready)
 		return TR_OK;
 
-	memset(&attached, 0, sizeof(attached));
-	ret = tr_pipeline_registry_attach_data_route(
-		ingress->registry, &preface, connection, &attached);
+	memset(&config, 0, sizeof(config));
+	config.registry = ingress->registry;
+	config.frame_cb = ingress->frame_cb;
+	config.event_cb = ingress->event_cb;
+	config.callback_arg = ingress->callback_arg;
+	ret = tr_pipeline_ingress_attach_data_route_on_owner(
+		&config, &preface, connection);
 	if (ret != TR_OK)
 		return ret;
 
-	ingress->member->registry = ingress->registry;
-	ingress->member->preface = preface;
-	ingress->member->data = attached;
-	ingress->member->frame_cb = ingress->frame_cb;
-	ingress->member->event_cb = ingress->event_cb;
-	ingress->member->callback_arg = ingress->callback_arg;
-
-	ret = tr_reactor_set_handler(
-		connection, tr_pipeline_ingress_frame,
-		tr_pipeline_ingress_event, ingress->member);
-	if (ret != TR_OK) {
-		(void)tr_pipeline_registry_detach_data_route(
-			ingress->registry, &preface, connection);
-		return ret;
-	}
-
-	/* Handler now owns member until CLOSED/ERROR. */
-	ingress->member = NULL;
 	*done = 1;
 	return TR_OK;
 }
@@ -124,7 +155,6 @@ static void tr_pipeline_ingress_preface_release(void *arg)
 
 	if (!ingress)
 		return;
-	free(ingress->member);
 	free(ingress);
 }
 
@@ -148,12 +178,6 @@ int tr_pipeline_ingress_adopt_data_fd_on_owner(
 		1, sizeof(*ingress));
 	if (!ingress)
 		return TR_ERR_NOMEM;
-	ingress->member = (struct tr_pipeline_ingress_member *)calloc(
-		1, sizeof(*ingress->member));
-	if (!ingress->member) {
-		free(ingress);
-		return TR_ERR_NOMEM;
-	}
 
 	ingress->registry = config->registry;
 	ingress->frame_cb = config->frame_cb;
