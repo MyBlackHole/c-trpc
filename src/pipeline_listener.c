@@ -202,6 +202,11 @@ static void tr_pipeline_listener_control_closed(
 	if (connection)
 		tr_pipeline_listener_connection_clear(connection);
 
+	if (teardown_status != TR_OK) {
+		session->closing = 1;
+		return;
+	}
+
 	memset(session, 0, sizeof(*session));
 	if (listener->pipelines_current != 0U)
 		listener->pipelines_current--;
@@ -659,7 +664,8 @@ void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 		return;
 
 	(void)tr_pipeline_listener_stop(listener);
-	if (listener->connections_current != 0U ||
+	if (listener->listener_registered || listener->listen_fd >= 0 ||
+	    listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return;
 
