@@ -227,13 +227,31 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - prepare_transfer -> TRANSFER_READY 保持“先 exact DATA attach，再 READY”；
 - READY 编码失败时回滚刚建立的 Stream affinity。
 
+已完成 shard-local Pipeline Transport/control-plane integration：
+
+- 新增 `TR_FRAME_PIPELINE_CONTROL`，CONTROL payload 使用 Reactor control TX pool；
+- 一个 internal Pipeline listener 固定属于一个 Reactor/shard owner；
+- listener 自己拥有 bounded Pipeline registry、connection/session slots 与
+  fixed-size CONTROL message pool；
+- CONTROL/DATA 共用同一个 exact TRR1 accepted-socket gate；
+- CONTROL route 必须先通过 application authorize hook，不能把远端 route 当授权；
+- CONTROL route 成功后 create/bind/register Pipeline 并安装真实 frame handler；
+- DATA route 复用 registry exact reservation attach，再进入普通 TRP1 parser；
+- server-side owner API 可通过真实 socket 发 DATA_OFFER / TRANSFER_READY；
+- DATA_CANCEL 在 CONTROL frame callback 中 exact 校验并消费 reservation；
+- CONTROL 断开先把 session 标为 CLOSING，再原子失效 membership/affinity；
+- group teardown 注销 Pipeline 后 owner-immediate 关闭 DATA sockets；
+- listener stop 会同步关闭 pending/CONTROL/DATA accepted sockets，不依赖后台线程；
+- real loopback test 覆盖 authorize -> OFFER -> DATA attach -> READY -> CANCEL ->
+  CONTROL failure group teardown -> same pipeline_id new epoch reuse。
+
 下一步：
 
-- 为 CONTROL connection 安装正式 Transport handler，承载 `TRC1` payload；
-- 将 Pipeline registry/ingress/control session 接入 Server shard 的正式
-  Pipeline listener/control plane；
-- 将 public Backup/Pipeline facade 接到 Pipeline membership 与 CONTROL wire；
-- 只有协议确实要求时才引入显式 cross-shard fd ownership transfer。
+- 把 internal Pipeline listener ownership/API 接入 public `tr_server`/`tr_client`
+  或独立 Backup facade，而不是让业务直接碰 internal Reactor handle；
+- 定义 OPEN/RESUME、transfer lifecycle、BARRIER/ACK/COMMIT 等业务 CONTROL message；
+- 进入 Phase 6 的 durable backup identity / epoch fencing / recovery；
+- 只有真实 profile/部署拓扑证明需要时，才增加 cross-shard fd transfer。
 
 当前仍不做单 Pipeline 跨 Reactor shared mutable state。
 

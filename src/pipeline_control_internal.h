@@ -66,6 +66,15 @@ int tr_pipeline_control_prepare_transfer_wire(
 	struct tr_pipeline_control *control, uint32_t stream_id,
 	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE]);
 
+/*
+ * Fatal CONTROL teardown. All ATTACHED DATA memberships are invalidated,
+ * their sockets are closed synchronously on the owner, outstanding RESERVED
+ * capabilities are cancelled, then the Pipeline is unregistered/destroyed.
+ */
+int tr_pipeline_control_abort(
+	struct tr_pipeline_control *control,
+	struct tr_conn_handle expected_control);
+
 int tr_pipeline_control_close(
 	struct tr_pipeline_control *control,
 	struct tr_conn_handle expected_control);

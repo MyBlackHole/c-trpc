@@ -5,8 +5,8 @@
 ## 0. CURRENT Foundation
 
 Phase 5 已落地内部 `tr_pipeline` soft-state、TRR1 routing、shard-local registry、
-accepted DATA ingress、internal CONTROL session，以及 `TRC1` CONTROL wire codec/
-state adapter；尚未接入 public Backup facade。
+accepted DATA ingress、internal CONTROL session、`TRC1` CONTROL wire，以及真实
+shard-local Pipeline listener/CONTROL Transport handler；尚未接入 public Backup facade。
 
 当前对象固定：
 
@@ -39,11 +39,10 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
 
 当前尚未实现：
 
-- CONTROL socket handler / public control facade；
-- Server shard 的正式 Pipeline listener/control-plane integration；
-- facade/Backup API；
-- cross-shard fd transfer；
-- durable backup identity / epoch fencing。
+- public control / Backup facade；
+- 现有 public `tr_server` / `tr_client` 对 Pipeline listener 的 ownership/API integration；
+- durable backup identity / checkpoint / commit / resume；
+- cross-shard fd transfer（仅当后续协议确实需要）。
 
 因此当前 `tr_pipeline` 是后续协议层的 ownership/membership substrate，不是完整
 Backup Pipeline protocol。
@@ -357,9 +356,47 @@ prepare_transfer_wire(stream_id)
 因此 DATA 仍处于 RESERVED 时，`prepare_transfer_wire()` 返回 `TR_AGAIN` 且不会生成
 任何 READY payload；只有 exact ingress attach 成功后才能形成 TRANSFER_READY。
 
-当前 `TRC1` 仍是 internal CONTROL payload foundation。尚未把它安装成 public Server
-Pipeline listener 的 socket handler，也没有公开 Backup/Pipeline facade；这些属于
-下一阶段 transport/control-plane integration。
+`TRC1` 已安装到真实 Transport CONTROL path。Pipeline listener 在每个 owner shard
+内拥有 bounded registry、connection/session slots 与 48-byte CONTROL message pool。
+
+真实 accepted socket 路径：
+
+```text
+accept
+  -> exact 48-byte TRR1 gate
+  -> CONTROL: mandatory authorize hook
+       -> create/bind/register Pipeline
+       -> install TR_FRAME_PIPELINE_CONTROL handler
+  -> DATA: registry exact reservation attach
+       -> install normal TRP1 DATA downstream handler
+```
+
+CONTROL payload 使用独立 `TR_FRAME_PIPELINE_CONTROL` Transport frame type，因此
+不会占用 BULK DATA TX-item pool。当前 server-side control-plane 可以在 owner 上
+发出 DATA_OFFER / TRANSFER_READY；client-side DATA_CANCEL 由真实 frame callback
+解码并只消费 exact RESERVED capability。
+
+CONTROL identity **不是客户端自证授权**。listener 要求调用方提供 authorize hook，
+hook 在 Pipeline create/register 之前校验完整 TRR1 CONTROL route（包括
+owner_shard/pipeline_id/epoch/member_generation）。
+
+CONTROL 连接异常关闭时执行 group-fatal soft-state teardown：
+
+```text
+mark session CLOSING
+  -> snapshot ATTACHED DATA
+  -> invalidate DATA membership + Stream affinity
+  -> clear CONTROL + cancel RESERVED capability
+  -> unregister/destroy Pipeline
+  -> owner-immediate close DATA sockets
+  -> release listener session/connection slots
+```
+
+这保证 DATA event callback 即使在 teardown 中重入，也看不到仍可接收新
+OFFER/READY 的旧 session；旧 registry identity 也不会在新 epoch 注册后复活。
+
+当前 listener 仍是 internal shard component，尚未由 public `tr_server` /
+`tr_client` facade 暴露；Backup durable semantics 也仍属于下一阶段。
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。
