@@ -65,7 +65,12 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   不需要新增 DATA_ATTACH_ACK；
 - `max_data_connections == 0` 仍保持 CONTROL-only，并通过 exact DATA_CANCEL
   归还 offer reservation；
-- TRANSFER_READY route/affinity consumption 与 logical transfer DATA send 仍待实现；
+- Client 已消费 TRANSFER_READY：READY 中的 DATA index/generation 必须精确命中
+  当前 ACTIVE lane，成功后在 owner 内建立 bounded `stream_id -> exact DATA generation`
+  affinity；public callback 仍只暴露语义 group/stream/message identity；
+- Client release 删除本地 affinity；DATA lane removal 只失效指向该 exact generation
+  的 affinity，同 index 后续复用不会使旧 Stream 复活；
+- logical transfer DATA send 的 payload ownership/memory budget/backpressure 仍待单独定义；
 - cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，

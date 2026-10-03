@@ -29,6 +29,9 @@ struct public_group_ctx {
 	unsigned authorized;
 	unsigned messages;
 	unsigned data_events;
+	unsigned transfer_ready;
+	uint32_t ready_stream_id;
+	uint64_t ready_message_id;
 	struct tr_connection_group_message retained;
 };
 
@@ -191,6 +194,25 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 	return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+}
+
+static void on_client_transfer_ready(
+	const struct tr_connection_group_id *group, uint32_t stream_id,
+	uint64_t message_id, void *arg)
+{
+	struct public_group_ctx *ctx = (struct public_group_ctx *)arg;
+
+	assert(group != NULL);
+	assert(group->group_id == TEST_GROUP_ID);
+	assert(group->epoch == TEST_GROUP_EPOCH);
+	assert(stream_id != 0U);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->transfer_ready++;
+	ctx->ready_stream_id = stream_id;
+	ctx->ready_message_id = message_id;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
 }
 
 static void on_group_data_event(
@@ -459,6 +481,9 @@ static void test_public_connection_group_client_data_offer(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connection_groups.max_data_connections = 1U;
+	client_config.connection_groups.on_transfer_ready =
+		on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 
 	group.group_id = TEST_GROUP_ID;
@@ -478,6 +503,38 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_server_connection_group_send_data_offer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
 		       UINT64_C(4002)) == TR_AGAIN);
+
+	assert(tr_client_connection_group_release_transfer(
+		       client, 5001U) == TR_ERR_STALE);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
+		       UINT64_C(4101)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.ready_stream_id == 5001U);
+	assert(ctx.ready_message_id == UINT64_C(4101));
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_client_connection_group_release_transfer(
+		       client, 5001U) == TR_OK);
+	assert(tr_client_connection_group_release_transfer(
+		       client, 5001U) == TR_ERR_STALE);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+
+	/* release makes the semantic stream id reusable on both sides. */
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
+		       UINT64_C(4102)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 2U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.ready_stream_id == 5001U);
+	assert(ctx.ready_message_id == UINT64_C(4102));
+	pthread_mutex_unlock(&ctx.lock);
+	assert(tr_client_connection_group_release_transfer(
+		       client, 5001U) == TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
 
 	assert(tr_client_connection_group_close(client) == TR_OK);
 	wait_counter(&ctx, &ctx.data_events, 1U);
