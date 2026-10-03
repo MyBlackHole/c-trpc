@@ -174,6 +174,15 @@ int tr_pipeline_control_release_transfer(
 	return tr_pipeline_unbind_stream(control->pipeline, stream_id);
 }
 
+int tr_pipeline_control_get_stats(
+	struct tr_pipeline_control *control,
+	struct tr_pipeline_stats *out)
+{
+	if (!control || !control->pipeline || !out)
+		return TR_ERR_INVALID;
+	return tr_pipeline_get_stats(control->pipeline, out);
+}
+
 static void tr_pipeline_control_wire_identity(
 	struct tr_pipeline_control *control,
 	struct tr_pipeline_control_wire_message *message)
