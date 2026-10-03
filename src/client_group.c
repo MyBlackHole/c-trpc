@@ -62,6 +62,13 @@ struct tr_client_group {
 	int connector_timer_ready;
 };
 
+void tr_connection_group_client_config_init(
+	struct tr_connection_group_client_config *config)
+{
+	if (config)
+		memset(config, 0, sizeof(*config));
+}
+
 static int tr_client_group_conn_equal(struct tr_conn_handle a,
 				      struct tr_conn_handle b)
 {
