@@ -74,6 +74,18 @@ int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
 			     struct tr_pipeline_data_ref *out);
 int tr_pipeline_cancel_data_reservation(
 	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
+
+/*
+ * Idempotent peer cancellation for one exact issued generation.
+ *
+ * RESERVED -> FREE is the only state mutation. The same generation already
+ * ATTACHED or already FREE returns TR_OK as a no-op; a reused generation is
+ * TR_ERR_STALE. This lets a peer converge after DATA preface handoff without
+ * needing an attach ACK and without risking ABA cancellation.
+ */
+int tr_pipeline_cancel_data_offer(
+	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
+
 int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref data,
 			    struct tr_conn_handle connection);

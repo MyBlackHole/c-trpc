@@ -55,8 +55,17 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   owner domain，但该选择不是 public identity；
 - Client-side CONTROL connect/close 已进入 stable facade；TRR1 CONTROL route、
   owner shard 与 member generation 全部由内部生成；
-- DATA lane 建立与 TRANSFER_READY route/affinity consumption 仍待实现；在此之前
-  Client 会把收到的 DATA_OFFER 通过 exact DATA_CANCEL 归还；
+- Client 可通过 semantic `max_data_connections` 启用 bounded automatic DATA lane；
+  DATA_OFFER 的 exact route 由 internal engine 消费，并在同一 owner domain 完成
+  nonblocking connect/preface/adopt；
+- DATA establish 不新增 connector thread：connect readiness 复用 Reactor auxiliary
+  fd event，timeout 复用 Reactor timer；同一时刻最多一个 connector in-flight；
+- DATA_CANCEL 是 exact-generation 幂等收敛：只释放 RESERVED；ATTACHED/同 generation
+  FREE 为 no-op，generation reuse 才 STALE，因此完整 preface 发出后的 attach 模糊窗口
+  不需要新增 DATA_ATTACH_ACK；
+- `max_data_connections == 0` 仍保持 CONTROL-only，并通过 exact DATA_CANCEL
+  归还 offer reservation；
+- TRANSFER_READY route/affinity consumption 与 logical transfer DATA send 仍待实现；
 - cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，

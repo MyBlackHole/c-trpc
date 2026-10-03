@@ -1638,6 +1638,17 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	return TR_OK;
 }
 
+int tr_server_get_connection_group_stats_internal(
+	struct tr_server *server, struct tr_pipeline_listener_stats *out)
+{
+	if (!server || !out)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener)
+		return TR_ERR_STATE;
+	return tr_pipeline_listener_get_stats(
+		server->connection_group_listener, out);
+}
+
 void tr_server_destroy(struct tr_server *server)
 {
 	uint32_t shard_index;

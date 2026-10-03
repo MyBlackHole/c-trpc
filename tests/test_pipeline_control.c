@@ -111,6 +111,13 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &offer1.route, data1, NULL) == TR_OK);
 
+	/*
+	 * Exact peer cancellation is idempotent across handoff ambiguity.
+	 * Once this generation is ATTACHED it is a successful no-op and must not
+	 * retire the live membership.
+	 */
+	assert(tr_pipeline_control_cancel_data(control, &offer1) == TR_OK);
+
 	memset(&ready0, 0, sizeof(ready0));
 	assert(tr_pipeline_control_prepare_transfer(
 		       control, 1001U, &ready0) == TR_OK);
@@ -147,6 +154,14 @@ static void test_pipeline_control_session(void)
 		       registry, &offer0.route, data0) == TR_OK);
 	assert(tr_pipeline_registry_detach_data_route(
 		       registry, &offer1.route, data1) == TR_OK);
+
+	/* Same exact generation already FREE is also an idempotent no-op. */
+	assert(tr_pipeline_control_cancel_data(control, &offer1) == TR_OK);
+	stale = offer1;
+	stale.data.generation++;
+	stale.route.member_generation++;
+	assert(tr_pipeline_control_cancel_data(control, &stale) ==
+	       TR_ERR_STALE);
 
 	/*
 	 * Outstanding RESERVED capability is CONTROL-owned. close() cancels it,

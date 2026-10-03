@@ -157,6 +157,8 @@ struct tr_connection_group_id group = {
 };
 
 tr_client_config_init(&client_cfg);
+/* 0 keeps CONTROL-only behavior; non-zero enables bounded automatic DATA lanes. */
+client_cfg.connection_groups.max_data_connections = 4;
 tr_client_create(&client_cfg, &client);
 tr_client_connection_group_connect(
     client, "127.0.0.1", group_port, &group);
@@ -173,10 +175,16 @@ remain internal. Returning
 without an additional payload copy and requires one later
 `tr_connection_group_message_release()`.
 
-The current Client slice establishes CONTROL only. Until public DATA-lane
-establishment lands, a received DATA_OFFER is cancelled internally so a Server
-reservation does not remain pinned and no DATA index/generation escapes the
-stable API.
+With `max_data_connections > 0`, a Client consumes DATA_OFFER internally:
+it opens a nonblocking DATA socket, waits for connect/preface progress through
+the owning Reactor, and submits the exact TRR1 DATA route on that same owner.
+Only one DATA connection establishment is in progress at a time while multiple
+attached DATA lanes may remain active. No connector thread or public DATA
+index/generation is introduced. With the default
+`max_data_connections == 0`, DATA_OFFER is still cancelled internally.
+
+TRANSFER_READY/Stream affinity consumption remains the next P3 slice; DATA lane
+membership becoming live does not by itself authorize a logical transfer.
 
 The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
 Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK

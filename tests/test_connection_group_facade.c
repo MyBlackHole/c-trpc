@@ -1,5 +1,6 @@
 #include "tr/trpc.h"
 
+#include "../src/facade_diagnostics_internal.h"
 #include "../src/pipeline_control_wire_internal.h"
 #include "../src/pipeline_route_internal.h"
 
@@ -244,6 +245,26 @@ static int wait_data_offer(struct tr_server *server, uint64_t message_id)
 	return TR_ERR_TIMEOUT;
 }
 
+static void wait_data_accepts(struct tr_server *server, uint64_t target)
+{
+	struct timespec pause;
+	unsigned i;
+
+	pause.tv_sec = 0;
+	pause.tv_nsec = 10000000L;
+	for (i = 0; i < 1000U; ++i) {
+		struct tr_pipeline_listener_stats stats;
+
+		memset(&stats, 0, sizeof(stats));
+		assert(tr_server_get_connection_group_stats_internal(
+			       server, &stats) == TR_OK);
+		if (stats.data_accepts >= target)
+			return;
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(!"timed out waiting for DATA attach");
+}
+
 static void test_public_connection_group_server(void)
 {
 	static const uint8_t payload[] = "public-group-data";
@@ -403,9 +424,77 @@ static void test_public_connection_group_client_control(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_client_data_offer(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_pipeline_listener_stats stats;
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(
+		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 1U;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+
+	assert(wait_data_offer(server, UINT64_C(4001)) == TR_OK);
+	wait_data_accepts(server, 1U);
+
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_server_get_connection_group_stats_internal(
+		       server, &stats) == TR_OK);
+	assert(stats.data_accepts == 1U);
+	assert(stats.connections_current == 2U);
+	assert(tr_server_connection_group_send_data_offer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+		       UINT64_C(4002)) == TR_AGAIN);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_counter(&ctx, &ctx.data_events, 1U);
+
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	tr_client_destroy(client);
+	tr_server_destroy(server);
+
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 int main(void)
 {
 	test_public_connection_group_server();
 	test_public_connection_group_client_control();
+	test_public_connection_group_client_data_offer();
 	return 0;
 }

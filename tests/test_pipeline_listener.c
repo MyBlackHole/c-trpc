@@ -326,6 +326,7 @@ static void test_pipeline_listener_control_and_data(void)
 	int bad_control = -1;
 	int control = -1;
 	int data = -1;
+	int duplicate_data = -1;
 	int control2 = -1;
 
 	memset(&data_ctx, 0, sizeof(data_ctx));
@@ -397,6 +398,21 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(data_ctx.last_type == TR_FRAME_PING);
 	pthread_mutex_unlock(&data_ctx.lock);
 	wait_listener_counts(listener, 1U, 2U);
+
+	/*
+	 * Replaying an already-ATTACHED DATA capability must reject only the new
+	 * socket. Failure cleanup exact-cancels RESERVED state, so it cannot retire
+	 * the live membership that already consumed this generation.
+	 */
+	duplicate_data = connect_loopback(port);
+	send_route(duplicate_data, &offer_route);
+	wait_peer_close(duplicate_data);
+	close(duplicate_data);
+	duplicate_data = -1;
+	wait_listener_counts(listener, 1U, 2U);
+	build_ping(ping);
+	send_all(data, ping, sizeof(ping));
+	wait_data_frames(&data_ctx, 2U);
 
 	/* TRANSFER_READY cannot be emitted until the DATA capability is ATTACHED. */
 	assert(tr_pipeline_listener_send_transfer_ready(

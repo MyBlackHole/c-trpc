@@ -15,6 +15,7 @@ struct tr_client;
 
 struct tr_client_config {
 	struct tr_facade_limits limits;
+	struct tr_connection_group_client_config connection_groups;
 
 	uint32_t connect_timeout_ms;
 

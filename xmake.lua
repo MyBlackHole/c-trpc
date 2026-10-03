@@ -102,6 +102,7 @@ target("trcore")
         "src/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
+        "src/client_group.c",
         "src/client.c",
         "src/server.c")
 target_end()
