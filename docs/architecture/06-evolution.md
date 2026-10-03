@@ -247,32 +247,38 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 
 下一步：
 
-- 把 internal Pipeline listener ownership/API 接入 public `tr_server`/`tr_client`
-  或独立 Backup facade，而不是让业务直接碰 internal Reactor handle；
-- 定义 OPEN/RESUME、transfer lifecycle、BARRIER/ACK/COMMIT 等业务 CONTROL message；
-- 进入 Phase 6 的 durable backup identity / epoch fencing / recovery；
+- 先完成 layer/module/API boundary cleanup，禁止业务直接碰 internal Reactor handle；
+- 把 generic Connection Group / Pipeline 能力封装成不依赖 Reactor 的 public/advanced Transport capability；
+- 分离 application RPC API 与 internal Endpoint engine API；
+- 建立 stable public header allowlist；
 - 只有真实 profile/部署拓扑证明需要时，才增加 cross-shard fd transfer。
 
 当前仍不做单 Pipeline 跨 Reactor shared mutable state。
 
-## Phase 6 - Backup Correctness
+Backup identity、checkpoint、commit、resume 等 durable 语义属于业务层，不再作为
+c-trpc core Phase。
 
-增加：
+## Phase 6 - API Boundary Cleanup
 
-- backup_id / pipeline_id / epoch；
-- STORED / CHECKPOINTED / COMMITTED；
-- BARRIER；
-- resume；
-- epoch fencing。
+目标：
+
+- stable / advanced / internal API 分级；
+- public header explicit allowlist；
+- Reactor/parser/wire/queue/socket helper 从默认 SDK contract 移出；
+- RPC Method/Call API 与 Endpoint engine construction 分离；
+- public handle 不固化 owner pointer + slot/generation；
+- high-level config/stats 与 internal tuning/diagnostics 分离。
+
+详细审查见 [分层、模块职责与 API 边界](07-layer-module-api-boundaries.md)。
 
 ## Phase 7 - Resource Driven Flow Control
 
 增加：
 
-- Pipeline inflight limit；
+- Connection Group inflight limit；
 - shard memory budget；
 - worker admission；
-- storage admission；
+- application/backend admission hook；
 - adaptive DATA parallelism。
 
 ## Phase 8 - Profile Before Further Complexity
@@ -284,7 +290,7 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - cross-shard route rate；
 - memory；
 - worker queue；
-- storage queue；
+- backend queue / admission；
 - P99 latency；
 - single huge Pipeline vs many small Pipelines。
 
