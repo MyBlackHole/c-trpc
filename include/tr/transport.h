@@ -29,7 +29,8 @@ struct tr_transport_bytes {
  * the underlying RX buffer to the application: copy this descriptor unchanged
  * and release it exactly once with tr_connection_group_message_release().
  * _private is an opaque release capability and must never be inspected or
- * modified by applications.
+ * modified by applications. All retained messages must be released before the
+ * owning tr_server is destroyed.
  */
 #define TR_CONNECTION_GROUP_MESSAGE_PRIVATE_WORDS 2U
 struct tr_connection_group_message {
