@@ -74,6 +74,9 @@ typedef void (*tr_connection_group_data_event_cb)(
  * The callback runs on the Client's owning I/O domain after the exact
  * Stream -> DATA membership affinity has been installed. Applications see only
  * semantic group/stream identity; DATA index/generation remain internal.
+ *
+ * It must not block on work that requires the same Client/Reactor owner to
+ * make progress.
  */
 typedef void (*tr_connection_group_transfer_ready_cb)(
 	const struct tr_connection_group_id *group, uint32_t stream_id,
