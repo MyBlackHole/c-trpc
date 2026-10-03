@@ -460,6 +460,7 @@ void tr_server_config_init(struct tr_server_config *config)
 
 	memset(config, 0, sizeof(*config));
 	tr_facade_limits_init(&config->limits);
+	tr_connection_group_server_config_init(&config->connection_groups);
 	config->shard_count = 1U;
 	config->max_peers = 64U;
 	config->listen_backlog = 128;
@@ -983,6 +984,10 @@ int tr_server_create(const struct tr_server_config *config,
 			      effective.limits.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
+	    !tr_server_connection_group_config_valid(
+		    &effective.connection_groups) ||
+	    effective.connection_groups.max_connections >
+		    UINT32_MAX - effective.max_peers - 4U ||
 	    !tr_server_budget_supports_shards(&effective))
 		return TR_ERR_INVALID;
 
@@ -1035,7 +1040,11 @@ int tr_server_create(const struct tr_server_config *config,
 					effective.limits.executor_threads,
 					effective.shard_count, i);
 
-			reactor_config->max_connections = peer_capacity + 4U;
+			reactor_config->max_connections =
+				peer_capacity + 4U +
+				(i == 0U ?
+				 effective.connection_groups.max_connections :
+				 0U);
 			reactor_config->command_capacity =
 				tr_server_budget_share(
 					effective.limits.command_capacity,
