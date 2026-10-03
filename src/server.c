@@ -1309,6 +1309,78 @@ rollback:
 	return ret;
 }
 
+int tr_server_connection_group_listen(
+	struct tr_server *server, const char *ipv4_address, uint16_t port,
+	int backlog, uint16_t *out_bound_port)
+{
+	if (!server || !ipv4_address || backlog <= 0)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener)
+		return TR_ERR_STATE;
+	if (server->started)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_listen_ipv4(
+		server->connection_group_listener, ipv4_address, port, backlog,
+		out_bound_port);
+}
+
+static int tr_server_connection_group_stop_internal(struct tr_server *server)
+{
+	if (!server || !server->connection_group_listener)
+		return TR_OK;
+	return tr_pipeline_listener_stop(server->connection_group_listener);
+}
+
+int tr_server_connection_group_stop(struct tr_server *server)
+{
+	if (!server)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener)
+		return TR_ERR_STATE;
+	return tr_server_connection_group_stop_internal(server);
+}
+
+int tr_server_connection_group_send_data_offer(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint64_t message_id)
+{
+	if (!server || !server->connection_group_listener ||
+	    !server->started || group_id == 0U || epoch == 0U)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_send_data_offer(
+		server->connection_group_listener, group_id, epoch,
+		message_id, NULL);
+}
+
+int tr_server_connection_group_send_transfer_ready(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint32_t stream_id, uint64_t message_id)
+{
+	if (!server || !server->connection_group_listener ||
+	    !server->started || group_id == 0U || epoch == 0U ||
+	    stream_id == 0U)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_send_transfer_ready(
+		server->connection_group_listener, group_id, epoch,
+		stream_id, message_id);
+}
+
+int tr_server_connection_group_release_transfer(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint32_t stream_id)
+{
+	if (!server || !server->connection_group_listener ||
+	    !server->started || group_id == 0U || epoch == 0U ||
+	    stream_id == 0U)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_release_transfer(
+		server->connection_group_listener, group_id, epoch, stream_id);
+}
+
 int tr_server_start(struct tr_server *server)
 {
 	uint32_t i;
