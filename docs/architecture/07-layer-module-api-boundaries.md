@@ -851,6 +851,7 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - 同时最多一个 DATA socket 处于 connect/preface establishment，多个 DATA lane 可以保持 ATTACHED，资源量由 semantic bound 限制；
 - Client Reactor connection budget 从该 DATA bound 推导，不再依赖 DATA lane 的隐式 magic capacity；
 - DATA route attach 失败时 Server 只 exact-cancel 仍为 RESERVED 的 capability；已经 ATTACHED、stale 或复用 generation 不受影响；
+- peer DATA_CANCEL 对 exact generation 幂等：RESERVED -> FREE，ATTACHED/FREE 为 no-op，generation 已复用才 STALE，因此 preface handoff 不需要新增 attach ACK；
 - `max_data_connections == 0` 时继续由 Client 内部 exact DATA_CANCEL 归还 reservation。
 
 待完成：
