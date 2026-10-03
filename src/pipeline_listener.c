@@ -403,8 +403,12 @@ static int tr_pipeline_listener_preface_feed(
 			listener, tracked, &route, connection);
 	else
 		ret = TR_ERR_BAD_TYPE;
-	if (ret != TR_OK)
+	if (ret != TR_OK) {
+		if (route.role == TR_PIPELINE_ROUTE_DATA)
+			(void)tr_pipeline_registry_cancel_data_route(
+				listener->registry, &route);
 		goto reject;
+	}
 
 	preface->handed_off = 1;
 	*done = 1;
