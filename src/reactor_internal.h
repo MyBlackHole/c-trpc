@@ -49,6 +49,14 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	const struct tr_reactor_preface_handler *preface,
 	struct tr_conn_handle *out);
 
+/*
+ * Owner-only immediate close helpers for compound owner state transitions.
+ * Unlike the public close/abort APIs, these do not enqueue a command: the
+ * connection is retired before the caller continues mutating related state.
+ */
+int tr_reactor_close_on_owner(struct tr_conn_handle connection);
+int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
+
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 
