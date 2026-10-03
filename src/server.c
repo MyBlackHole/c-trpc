@@ -1384,16 +1384,28 @@ int tr_server_connection_group_release_transfer(
 
 int tr_server_start(struct tr_server *server)
 {
+	uint32_t rpc_listener_count = 0U;
 	uint32_t i;
+	int group_listening;
 	int ret;
 
 	if (!server || server->shard_count == 0U)
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
+
 	for (i = 0; i < server->shard_count; ++i)
-		if (tr_server_shard_listener_fd(&server->shards[i]) < 0)
-			return TR_ERR_STATE;
+		if (tr_server_shard_listener_fd(&server->shards[i]) >= 0)
+			rpc_listener_count++;
+	if (rpc_listener_count != 0U &&
+	    rpc_listener_count != server->shard_count)
+		return TR_ERR_STATE;
+
+	group_listening =
+		server->connection_group_listener &&
+		tr_pipeline_listener_bound_port(server->connection_group_listener) != 0U;
+	if (rpc_listener_count == 0U && !group_listening)
+		return TR_ERR_STATE;
 
 	ret = tr_runtime_start(server->runtime);
 	if (ret != TR_OK)
