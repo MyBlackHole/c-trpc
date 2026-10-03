@@ -105,7 +105,6 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 	buf->next = NULL;
 	buf->len = 0;
 	buf->release_cb = NULL;
-	buf->release_arg = NULL;
 
 	pthread_mutex_unlock(&pool->lock);
 
@@ -117,17 +116,14 @@ void tr_buffer_release(struct tr_buffer *buffer)
 {
 	struct tr_buffer_pool *pool;
 	tr_buffer_release_cb release_cb;
-	void *release_arg;
 
 	if (!buffer)
 		return;
 
 	release_cb = buffer->release_cb;
 	if (release_cb) {
-		release_arg = buffer->release_arg;
 		buffer->release_cb = NULL;
-		buffer->release_arg = NULL;
-		release_cb(buffer, release_arg);
+		release_cb(buffer);
 		return;
 	}
 
