@@ -435,6 +435,49 @@ int tr_pipeline_cancel_data_reservation(
 		&request);
 }
 
+static int tr_pipeline_cancel_data_offer_on_owner(void *arg)
+{
+	struct tr_pipeline_data_cancel_request *request =
+		(struct tr_pipeline_data_cancel_request *)arg;
+	struct tr_pipeline *pipeline = request->pipeline;
+	struct tr_pipeline_data_slot *slot;
+
+	if (!pipeline || request->data.index >= pipeline->data_capacity ||
+	    request->data.generation == 0U)
+		return TR_ERR_STALE;
+
+	slot = &pipeline->data_slots[request->data.index];
+	if (slot->generation != request->data.generation)
+		return TR_ERR_STALE;
+
+	if (slot->state == TR_PIPELINE_DATA_RESERVED) {
+		slot->state = TR_PIPELINE_DATA_FREE;
+		memset(&slot->connection, 0, sizeof(slot->connection));
+		pipeline->data_reserved_count--;
+		return TR_OK;
+	}
+
+	if (slot->state == TR_PIPELINE_DATA_ATTACHED ||
+	    slot->state == TR_PIPELINE_DATA_FREE)
+		return TR_OK;
+
+	return TR_ERR_STATE;
+}
+
+int tr_pipeline_cancel_data_offer(
+	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data)
+{
+	struct tr_pipeline_data_cancel_request request;
+
+	if (!pipeline)
+		return TR_ERR_INVALID;
+	request.pipeline = pipeline;
+	request.data = data;
+	return tr_reactor_call(
+		pipeline->owner, tr_pipeline_cancel_data_offer_on_owner,
+		&request);
+}
+
 struct tr_pipeline_data_add_request {
 	struct tr_pipeline *pipeline;
 	struct tr_conn_handle connection;
