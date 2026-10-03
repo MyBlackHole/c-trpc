@@ -22,6 +22,15 @@ struct tr_transport_bytes {
 #define TR_CONNECTION_GROUP_DATA_FIRST (1U << 0)
 #define TR_CONNECTION_GROUP_DATA_LAST (1U << 1)
 
+/*
+ * DATA receive descriptor.
+ *
+ * bytes is valid for the callback duration. Returning TAKE_OWNERSHIP transfers
+ * the underlying RX buffer to the application: copy this descriptor unchanged
+ * and release it exactly once with tr_connection_group_message_release().
+ * _private is an opaque release capability and must never be inspected or
+ * modified by applications.
+ */
 #define TR_CONNECTION_GROUP_MESSAGE_PRIVATE_WORDS 2U
 struct tr_connection_group_message {
 	struct tr_connection_group_id group;
@@ -42,6 +51,10 @@ enum tr_connection_group_data_event {
 	TR_CONNECTION_GROUP_DATA_ERROR = 2
 };
 
+/*
+ * Callbacks execute on the Server's owning I/O domain. They must not block on
+ * work that requires that same Server/Reactor to make progress.
+ */
 typedef int (*tr_connection_group_authorize_cb)(
 	const struct tr_connection_group_id *group, void *arg);
 
