@@ -92,16 +92,32 @@ void tr_connection_group_server_config_init(
 	struct tr_connection_group_server_config *config);
 
 /*
- * Client-side generic Connection Group CONTROL lifecycle.
+ * Optional Client-side DATA-lane budget.
+ *
+ * max_data_connections == 0 preserves the CONTROL-only behavior: DATA_OFFER
+ * is cancelled internally. A non-zero value enables automatic DATA socket
+ * establishment up to this semantic bound. Routing/member generations remain
+ * internal and do not become application capabilities.
+ */
+struct tr_connection_group_client_config {
+	uint32_t max_data_connections;
+};
+
+void tr_connection_group_client_config_init(
+	struct tr_connection_group_client_config *config);
+
+/*
+ * Client-side generic Connection Group lifecycle.
  *
  * V1 keeps one active group per tr_client. connect() establishes the CONTROL
  * TCP connection, submits the internal routing identity and transfers socket
  * ownership to the Client's single owner domain. Reactor/shard/member
  * generations remain implementation details.
  *
- * DATA lane establishment is deliberately not part of this slice. Until that
- * capability is enabled, received DATA_OFFER reservations are cancelled
- * internally instead of exposing routing internals to the application.
+ * When client config enables DATA lanes, DATA_OFFER is consumed internally:
+ * the Client establishes the matching DATA socket on the same owner domain and
+ * submits the exact route capability without exposing index/generation.
+ * With max_data_connections == 0, offers are cancelled internally.
  */
 int tr_client_connection_group_connect(
 	struct tr_client *client, const char *ipv4_address, uint16_t port,
