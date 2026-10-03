@@ -175,20 +175,14 @@ jobs:
           xmake install -o "$prefix" trcore
 
           cat > "$RUNNER_TEMP/expected-headers.txt" <<'EOF'
-          buffer.h
-          channel.h
-          cleanup.h
           client.h
           facade.h
-          frame.h
           observability.h
-          reactor.h
           rpc.h
           rpc_codec.h
           server.h
           status.h
           trpc.h
-          wire.h
           EOF
           find "$prefix/include/tr" -maxdepth 1 -type f -printf '%f\n' | sort > "$RUNNER_TEMP/installed-headers.txt"
           diff -u "$RUNNER_TEMP/expected-headers.txt" "$RUNNER_TEMP/installed-headers.txt"
