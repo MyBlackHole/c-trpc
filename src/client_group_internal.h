@@ -12,6 +12,8 @@ struct tr_client_group_config {
 	struct tr_reactor *owner;
 	uint32_t max_data_connections;
 	uint32_t max_transfers;
+	uint32_t max_message_bytes;
+	uint32_t max_frame_payload_bytes;
 	uint32_t connect_timeout_ms;
 	int tcp_nodelay;
 	tr_connection_group_transfer_ready_cb on_transfer_ready;
@@ -28,5 +30,8 @@ int tr_client_group_connect(
 int tr_client_group_close(struct tr_client_group *group);
 int tr_client_group_release_transfer(
 	struct tr_client_group *group, uint32_t stream_id);
+int tr_client_group_send(
+	struct tr_client_group *group, uint32_t stream_id,
+	uint64_t message_id, const struct tr_transport_bytes *bytes);
 
 #endif
