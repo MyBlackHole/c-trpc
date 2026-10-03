@@ -836,10 +836,18 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - TAKE_OWNERSHIP 通过 opaque release token 直接保留原 RX buffer，不增加 payload copy；
 - 现有 Pipeline/registry/route/control/ingress engine 保持 internal single-owner 实现。
 
+第二阶段已完成：
+
+- Client facade 可通过 `group_id/epoch` 建立/关闭一个 active Group CONTROL connection；
+- CONTROL TRR1 route 由 Transport 内部生成，owner shard/member generation 不进入 public API；
+- fd adopt 与 CONTROL handler install 在同一个 Reactor owner turn 完成，不存在已接收 frame 落到 NULL/default handler 的窗口；
+- 当前未启用 DATA lane 时，DATA_OFFER 在 Client 内部发送 exact DATA_CANCEL 归还 reservation，不暴露 DATA index/generation；
+- Client destroy 在停止 Runtime 前同步回 owner 关闭 Group CONTROL。
+
 待完成：
 
-- Client-side group create/connect 与 DATA lane public capability；
-- public client 对 DATA_OFFER / TRANSFER_READY 的消费与 route 建立；
+- Client-side DATA lane 建立；
+- public client 对 DATA_OFFER / TRANSFER_READY 的 route/affinity 消费；
 - 完整 group-level stable stats / drain semantics。
 
 ### P4 — Config / Stats split — IN PROGRESS

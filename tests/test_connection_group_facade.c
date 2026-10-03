@@ -335,8 +335,77 @@ static void test_public_connection_group_server(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_client_control(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.callback_arg = &ctx;
+
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(
+		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_close(client) == TR_ERR_STATE);
+
+	group.group_id = 0U;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) ==
+	       TR_ERR_INVALID);
+
+	group.group_id = TEST_GROUP_ID;
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) == TR_OK);
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) ==
+	       TR_ERR_STATE);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+
+	/*
+	 * This slice owns only CONTROL. An offered DATA reservation is returned
+	 * internally with DATA_CANCEL; once that cancellation reaches the Server,
+	 * capacity=1 permits a new offer without exposing index/generation.
+	 */
+	assert(wait_data_offer(server, UINT64_C(3001)) == TR_OK);
+	assert(wait_data_offer(server, UINT64_C(3002)) == TR_OK);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	assert(tr_client_connection_group_close(client) == TR_ERR_STATE);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	tr_client_destroy(client);
+	tr_server_destroy(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 int main(void)
 {
 	test_public_connection_group_server();
+	test_public_connection_group_client_control();
 	return 0;
 }

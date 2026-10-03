@@ -5,6 +5,7 @@
 
 #include "tr/facade.h"
 #include "tr/rpc.h"
+#include "tr/transport.h"
 
 #ifdef __cplusplus
 extern "C" {

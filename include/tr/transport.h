@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 struct tr_server;
+struct tr_client;
 
 struct tr_connection_group_id {
 	uint64_t group_id;
@@ -89,6 +90,23 @@ struct tr_connection_group_server_config {
 
 void tr_connection_group_server_config_init(
 	struct tr_connection_group_server_config *config);
+
+/*
+ * Client-side generic Connection Group CONTROL lifecycle.
+ *
+ * V1 keeps one active group per tr_client. connect() establishes the CONTROL
+ * TCP connection, submits the internal routing identity and transfers socket
+ * ownership to the Client's single owner domain. Reactor/shard/member
+ * generations remain implementation details.
+ *
+ * DATA lane establishment is deliberately not part of this slice. Until that
+ * capability is enabled, received DATA_OFFER reservations are cancelled
+ * internally instead of exposing routing internals to the application.
+ */
+int tr_client_connection_group_connect(
+	struct tr_client *client, const char *ipv4_address, uint16_t port,
+	const struct tr_connection_group_id *group);
+int tr_client_connection_group_close(struct tr_client *client);
 
 /*
  * Group listener lifecycle is owned by tr_server.
