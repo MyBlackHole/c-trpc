@@ -249,7 +249,7 @@ static void wait_listener_counts(
 			return;
 		(void)nanosleep(&pause, NULL);
 	}
-	assert(!"listener counters did not converge");
+	assert(0 && "listener counters did not converge");
 }
 
 static void wait_data_frames(struct data_test_ctx *ctx, unsigned target)
