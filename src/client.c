@@ -250,22 +250,10 @@ int tr_client_create(const struct tr_client_config *config,
 	if (ret != TR_OK)
 		return ret;
 
-	{
-		struct tr_client_group_config group_config;
-
-		memset(&group_config, 0, sizeof(group_config));
-		group_config.owner = tr_client_reactor(client);
-		group_config.max_data_connections =
-			effective.connection_groups.max_data_connections;
-		group_config.connect_timeout_ms = effective.connect_timeout_ms;
-		group_config.tcp_nodelay =
-			tr_tcp_nodelay_policy_enabled(effective.tcp_nodelay);
-		ret = tr_client_group_create(
-			&group_config, &client->connection_group);
-		if (ret != TR_OK)
-			return ret;
-	}
-
+	/*
+	 * Connection Group engine is created lazily on first public Group use.
+	 * A normal RPC-only Client therefore pays no Group heap/pool/timer cost.
+	 */
 	*out = tr_client_owner_take(&client);
 	return TR_OK;
 }
@@ -418,20 +406,50 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	return TR_OK;
 }
 
+static int tr_client_connection_group_ensure(struct tr_client *client)
+{
+	struct tr_client_group_config group_config;
+	int ret;
+
+	if (!client)
+		return TR_ERR_INVALID;
+	if (client->connection_group)
+		return TR_OK;
+
+	memset(&group_config, 0, sizeof(group_config));
+	group_config.owner = tr_client_reactor(client);
+	group_config.max_data_connections =
+		client->config.connection_groups.max_data_connections;
+	group_config.connect_timeout_ms = client->config.connect_timeout_ms;
+	group_config.tcp_nodelay =
+		tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay);
+
+	ret = tr_client_group_create(
+		&group_config, &client->connection_group);
+	return ret;
+}
+
 int tr_client_connection_group_connect(
 	struct tr_client *client, const char *ipv4_address, uint16_t port,
 	const struct tr_connection_group_id *group)
 {
-	if (!client || !client->connection_group)
+	int ret;
+
+	if (!client)
 		return TR_ERR_INVALID;
+	ret = tr_client_connection_group_ensure(client);
+	if (ret != TR_OK)
+		return ret;
 	return tr_client_group_connect(
 		client->connection_group, ipv4_address, port, group);
 }
 
 int tr_client_connection_group_close(struct tr_client *client)
 {
-	if (!client || !client->connection_group)
+	if (!client)
 		return TR_ERR_INVALID;
+	if (!client->connection_group)
+		return TR_ERR_STATE;
 	return tr_client_group_close(client->connection_group);
 }
 
