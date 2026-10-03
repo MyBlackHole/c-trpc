@@ -183,8 +183,15 @@ attached DATA lanes may remain active. No connector thread or public DATA
 index/generation is introduced. With the default
 `max_data_connections == 0`, DATA_OFFER is still cancelled internally.
 
-TRANSFER_READY/Stream affinity consumption remains the next P3 slice; DATA lane
-membership becoming live does not by itself authorize a logical transfer.
+DATA lane membership becoming live does not by itself authorize a logical
+transfer. A Server TRANSFER_READY is accepted only when its hidden DATA
+index/generation exactly matches one ACTIVE Client lane. The Client then installs
+a bounded local Stream affinity and invokes the optional
+`on_transfer_ready` callback with only group/stream/message identity.
+`tr_client_connection_group_release_transfer()` removes that local affinity.
+Payload send remains a separate P3 slice so its ownership, memory budget and
+backpressure contract can be defined explicitly instead of hidden behind an
+unbounded allocation.
 
 The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
 Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
