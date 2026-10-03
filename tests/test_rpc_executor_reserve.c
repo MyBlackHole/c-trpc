@@ -4,6 +4,7 @@
 #include "tr/reactor.h"
 #include "tr/rpc.h"
 #include "tr/status.h"
+#include "../src/rpc_internal.h"
 
 #include <assert.h>
 #include <fcntl.h>
