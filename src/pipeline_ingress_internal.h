@@ -20,6 +20,16 @@ struct tr_pipeline_ingress_config {
  *
  * On error ownership of fd remains with the caller.
  */
+/*
+ * Attach an already-adopted connection after a shared TRR1 gate has parsed an
+ * exact DATA route. Used by the shard Pipeline listener so CONTROL and DATA
+ * can share one accepted-socket routing gate.
+ */
+int tr_pipeline_ingress_attach_data_route_on_owner(
+	const struct tr_pipeline_ingress_config *config,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle connection);
+
 int tr_pipeline_ingress_adopt_data_fd_on_owner(
 	const struct tr_pipeline_ingress_config *config, int fd,
 	struct tr_conn_handle *out);
