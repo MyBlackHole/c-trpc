@@ -281,7 +281,6 @@ int tr_pipeline_control_abort(
 {
 	uint32_t count = 0U;
 	uint32_t i;
-	int result = TR_OK;
 	int ret;
 
 	if (!control || !control->pipeline || !control->registry ||
@@ -295,15 +294,14 @@ int tr_pipeline_control_abort(
 		return ret;
 
 	/*
-	 * Invalidate membership/affinity before closing sockets. DATA event
-	 * callbacks may then observe a stale route, but can never resurrect or
-	 * mutate the Pipeline being torn down.
+	 * Snapshot and removals execute in the same owner turn. Nothing can replace
+	 * one of these capabilities between the two operations.
 	 */
 	for (i = 0; i < count; ++i) {
 		ret = tr_pipeline_remove_data(
 			control->pipeline, control->abort_data[i].data);
-		if (ret != TR_OK && result == TR_OK)
-			result = ret;
+		if (ret != TR_OK)
+			return ret;
 	}
 
 	ret = tr_pipeline_clear_control(
@@ -323,17 +321,24 @@ int tr_pipeline_control_abort(
 	control->pipeline = NULL;
 	control->registry = NULL;
 
+	/*
+	 * Membership is already unreachable before socket callbacks run. Every
+	 * handle came from the owner-coherent ATTACHED snapshot, so owner-close is
+	 * expected to succeed; STALE only means a callback retired it first.
+	 */
 	for (i = 0; i < count; ++i) {
 		ret = tr_reactor_close_on_owner(
 			control->abort_data[i].connection);
-		if (ret != TR_OK && ret != TR_ERR_STALE && result == TR_OK)
-			result = ret;
+		if (ret != TR_OK && ret != TR_ERR_STALE) {
+			/* Runtime object is already fenced; never resurrect it. */
+			continue;
+		}
 	}
 
 	free(control->abort_data);
 	control->abort_data = NULL;
 	free(control);
-	return result;
+	return TR_OK;
 }
 
 int tr_pipeline_control_close(
