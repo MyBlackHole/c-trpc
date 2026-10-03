@@ -4,227 +4,255 @@
 
 ## 1. System Context
 
+c-trpc 是通用 RPC / Transport library，不拥有业务语义。
+
 ```mermaid
 flowchart LR
-    APP["Backup / Business Application"]
-    CR["c-trpc Client Runtime"]
-    SR["c-trpc Server Runtime"]
-    META["Persistent Metadata"]
-    DATA["Persistent Backup Data"]
+    APP["Application / Business"]
+    C["c-trpc Client"]
+    S["c-trpc Server"]
+    EXT["Business-owned storage/services"]
 
-    APP --> CR
-    CR -->|"TCP / TLS / RPC"| SR
-    SR --> META
-    SR --> DATA
+    APP --> C
+    C -->|"RPC / Transport"| S
+    APP --> EXT
+    S --> EXT
 ```
 
-最终产物：
+Backup、数据库同步、对象复制等都属于 Application / Business。
+c-trpc 只负责通信、RPC 生命周期、Transport state 与 Runtime execution。
 
-- Server：独立二进制程序，Linux >= 3.10。
-- Client：独立二进制 + 可嵌入业务进程的 library。
-- Client library 不 fork、不 daemonize、不接管宿主进程全局生命周期。
+核心边界：
 
-## 2. CURRENT
+```text
+Business/Application
+        |
+        v
+Public Client/Server/RPC API
+        |
+        v
+RPC
+        |
+        v
+Transport / Connection Group
+        |
+        v
+Runtime / Reactor
+        |
+        v
+Linux
+```
+
+详细 API/layer 约束见
+[07-layer-module-api-boundaries.md](07-layer-module-api-boundaries.md)。
+
+## 2. CURRENT Core
 
 当前 `main` 的核心模型：
 
 ```text
 Server
-  ├─ 1 internal Runtime
-  │    └─ shard[0]
-  │         ├─ 1 Reactor
-  │         ├─ listener
-  │         ├─ RPC executor
-  │         ├─ peer slots / peer counters
-  │         └─ peer lifecycle eventfd
-  └─ Reactor-local timers
+  └─ internal Runtime
+       ├─ shard[0..N-1]
+       │    ├─ Reactor
+       │    ├─ SO_REUSEPORT listener
+       │    ├─ RPC executor
+       │    ├─ peer slots/counters
+       │    ├─ message/reassembly resources
+       │    └─ peer lifecycle eventfd
+       └─ Reactor-local timers
 
 Client
-  └─ 1 internal Runtime
+  └─ internal Runtime
        └─ shard[0]
-            └─ 1 Reactor
+            └─ Reactor
 
-Channel
-  ├─ control_connection
-  └─ bulk_connection
+Transport
+  ├─ Channel
+  ├─ Stream
+  ├─ shared/split physical connection policy
+  ├─ flow control
+  ├─ keepalive/reconnect/drain
+  └─ TRP1 framing
 
 RPC
   └─ Task -> Worker -> Completion -> original Reactor owner
 
-Pipeline foundation
+Connection Group / Pipeline
   └─ one Reactor owner
        ├─ CONTROL membership
        ├─ bounded DATA[N] membership
        ├─ Stream -> DATA generation affinity
-       ├─ TRR1 routing preface identity/parser
-       ├─ shard-local registry + DATA reserve/attach capability
-       ├─ owner-local accepted DATA preface gate -> TRP1 parser
-       └─ CONTROL session -> DATA offer -> TRANSFER_READY affinity barrier
+       ├─ TRR1 route identity
+       ├─ shard-local bounded registry
+       ├─ DATA reserve/attach capability
+       ├─ TRC1 CONTROL messages
+       └─ shard-local Pipeline listener
 ```
 
-Client/Server 已不再直接拥有 Reactor 生命周期；内部 `tr_runtime` 拥有唯一
-`tr_runtime_shard[0]`。Server shard 当前已经拥有 Reactor、listener、RPC executor、peer slots/counters
-以及 peer lifecycle eventfd。Listener 已直接注册到 Reactor epoll，accept
-readiness 由 Reactor owner 处理，不再存在独立 accept thread。每个 listener
-event 最多处理固定批次的新连接，剩余 backlog 由 level-triggered epoll 在后续
-turn 继续驱动。
+### 2.1 Runtime / Shard
 
-Peer table 的 reserve/publish/remove/live snapshot 已全部成为 Reactor
-single-owner 操作，不再经过 Server-global peer mutex。跨线程 last-ref finalizer
-只通过一个独立的 finalizer lock 合并 retired stats，并不接触 live peer table。
+Server facade 已支持 `shard_count = N`。
 
-Peer teardown 不再需要 dedicated reaper thread。Channel DOWN、partial peer
-rollback 和 peer publish 只 signal shard-local eventfd；该 eventfd 已注册到同一
-Reactor epoll，因此 cleanup 在后续 Reactor turn 执行，而不是在当前 Channel
-callback 内重入。
+每个 shard 独立拥有：
 
-```text
-Reactor owner detach
-  -> remove RPC/Channel callback + timer sources
-  -> close RPC executor admission
-  -> move Channel/finalizer context out of peer slot
-  -> clear peer slot for immediate reuse
-  -> transfer Endpoint owner ref
-
-last Endpoint strong-ref
-  -> final Endpoint stats/free
-  -> final Channel stats/free
-  -> retire peer slot
-```
-
-如果仍有 worker task，strong-ref 保证旧 Endpoint/Channel context 存活；peer
-slot 已经可以服务下一条连接。最后一个 worker/completion ref 释放时自动
-finalization。若没有 worker ref，owner ref transfer 可立即完成 owner-free
-finalization。
-
-Server facade 已支持 `shard_count = N`。Server-wide 的 peer、worker、queue、
-RX/TX pool、RPC message pool、reassembly pool 与 listen backlog 都保持“总预算”
-语义，通过 `base + remainder` 确定性拆给各 shard，不随 shard_count 隐式放大。
-
-`tr_server_listen()` 为每个 shard 创建一个 `SO_REUSEPORT` listener；port=0 时
-shard0 先取得实际端口，其余 shard 再绑定同一端口。每个 listener 直接注册到所属
-Reactor，accepted peer 只使用所属 shard 的 peer table、buffer pool 与 executor。
-
-Client facade 当前仍是单 shard。
-
-Reactor connection slot 已采用严格 single-owner 方向；slot generation/state 使用原子 capability metadata，外部控制通过 command 进入 Reactor。
-
-## 3. TARGET V1
-
-```mermaid
-flowchart TB
-    NET["TCP Clients"]
-
-    subgraph SERVER["Server Process"]
-        direction TB
-        L["SO_REUSEPORT : service_port"]
-
-        subgraph SHARDS["Reactor Shards"]
-            direction LR
-            R0["Reactor 0\nlistener 0"]
-            R1["Reactor 1\nlistener 1"]
-            RN["Reactor N\nlistener N"]
-        end
-
-        W0["Worker Pool 0"]
-        W1["Worker Pool 1"]
-        WN["Worker Pool N"]
-
-        L --> R0
-        L --> R1
-        L --> RN
-
-        R0 -->|"Task"| W0
-        R1 -->|"Task"| W1
-        RN -->|"Task"| WN
-
-        W0 -->|"Completion"| R0
-        W1 -->|"Completion"| R1
-        WN -->|"Completion"| RN
-    end
-
-    NET --> L
-```
-
-每个 Reactor shard 最终拥有自己的：
-
+- Reactor；
 - listener；
-- Connection；
-- Channel；
-- Stream；
-- RPC Endpoint/Call protocol state；
-- Backup Pipeline；
-- timer；
-- shard-local RPC executor / worker queue；
+- peer table；
+- RPC executor；
+- runtime queues；
+- RX/TX resources；
+- RPC message/reassembly resources；
+- timers；
 - shard-local metrics。
 
-Blocking worker 只拥有 task、临时工作状态和 result。
+Server-wide 配置保持 total-budget 语义，通过 deterministic base+remainder
+拆到 shard，不随 shard_count 隐式放大。
 
-## 4. Backup Pipeline
+`tr_server_listen()` 使用 per-shard `SO_REUSEPORT` listener。
+accepted peer 留在接受它的 shard，不在 hot path 跨 shard 迁移 fd。
+
+### 2.2 Ownership
+
+Peer table reserve/publish/remove/live snapshot 是 Reactor single-owner 操作。
+
+Worker 不直接修改 Connection/Channel/Stream/Endpoint/Call protocol state：
+
+```text
+Reactor owner
+   -> Task
+Worker
+   -> Completion
+original Reactor owner
+```
+
+旧 Endpoint/Channel teardown 使用 owner detach + strong-ref lifetime fencing，
+不需要 dedicated reaper thread。
+
+### 2.3 Connection Group / Pipeline
+
+当前 internal Pipeline 已是 generic multi-connection Transport foundation：
+
+```text
+one Pipeline
+  -> one Reactor owner
+  -> one CONTROL
+  -> DATA[N]
+  -> Stream affinity
+```
+
+真实 accepted socket 可以：
+
+```text
+accept
+  -> TRR1 preface
+      -> CONTROL: authorize -> session -> TRC1 handler
+      -> DATA: exact reservation attach -> normal TRP1 parser
+```
+
+CONTROL loss 会先 fence session，再失效 DATA membership/Stream affinity、
+注销 Pipeline，最后 owner-immediate 关闭 DATA sockets。
+
+这些机制属于通用 Transport capability，不定义 Backup checkpoint/commit 等业务语义。
+
+## 3. TARGET Layer Model
 
 ```mermaid
 flowchart TB
-    P["Backup Pipeline"]
-    C["CONTROL"]
-    D0["DATA[0]"]
-    D1["DATA[1]"]
-    DN["DATA[N-1]"]
+    APP["Application / Business"]
+    PUB["Stable Public API\nClient / Server / RPC / Transport capability"]
+    RPC["RPC Core\nMethod / Call / Codec / Deadline"]
+    TR["Transport\nChannel / Stream / Connection Group"]
+    RT["Runtime\nReactor / Timer / Queue / Socket"]
+    OS["Linux"]
 
-    P --> C
-    P --> D0
-    P --> D1
-    P --> DN
+    APP --> PUB
+    PUB --> RPC
+    RPC --> TR
+    TR --> RT
+    RT --> OS
 ```
 
-TARGET V1：
+目标要求：
+
+- Stable Public 不暴露 Reactor；
+- Stable Public 不暴露 slot/generation；
+- Stable Public 不要求调用者管理 parser/queue/socket fd；
+- internal module 可以 direct-call lower layer；
+- 同一 owner domain 不因为“分层”额外增加 thread hop/queue/copy。
+
+## 4. API Visibility Target
+
+目标区分：
 
 ```text
-一个 Pipeline
-    =
-一个 Reactor owner
-    =
-一个 CONTROL
-    +
-N 个 DATA connections
+Stable Public
+  -> Client / Server / Call / generic Transport capability
+
+Advanced Public
+  -> optional transport-only / zero-copy / tuning capability
+
+Internal
+  -> Reactor / Runtime
+  -> parser / wire / socket
+  -> command/completion/timer queue
+  -> Pipeline registry/route/ingress/control implementation
 ```
 
-DATA 并行度由 Client 请求、Server 协商，不写死数量。
+当前 SDK 仍存在 public/internal 混合，详见
+[07-layer-module-api-boundaries.md](07-layer-module-api-boundaries.md#10-current-audit)。
 
-## 5. 正确性与性能状态
+## 5. Performance Model
 
-Server 采用：
+c-trpc 的性能原则：
 
 ```text
-soft-stateful
-+
-durable-stateless
+Mutable protocol state -> Reactor shard single-owner
+Resources              -> follow shard
+Blocking work          -> Worker-owned
+Cross-thread           -> message + ownership transfer
+Same-owner layering    -> direct internal call is allowed
+Data path              -> bounded + copy-minimal
 ```
 
-允许 worker/Reactor 内存保存：
+分层不要求每层一个线程或 queue。
 
-- inflight chunk；
-- ACK batch；
-- dedup/hash cache；
-- flow-control；
-- buffer accounting；
-- storage handle；
-- Pipeline runtime state。
+允许：
 
-但以下事实不能只存在 RAM：
+```text
+RPC
+  -> Transport internal call
+  -> Reactor owner fast path
+  -> sendmsg()
+```
 
-- chunk durable completion；
-- manifest；
-- snapshot/backup commit；
-- epoch；
+避免：
+
+```text
+RPC -> queue -> Transport thread -> queue -> Runtime thread
+```
+
+除非 profile 明确证明需要这种执行域隔离。
+
+## 6. Core Non-goals
+
+c-trpc core 不负责：
+
+- Backup identity；
+- checkpoint / manifest；
+- STORED / CHECKPOINTED / COMMITTED；
+- business commit/resume；
 - retention/WORM；
-- authoritative resume checkpoint。
+- storage/filesystem transaction semantics。
 
-## 6. 一句话架构
+这些可以由业务层建立在 RPC / Connection Group 之上。
+
+## 7. 一句话架构
 
 ```text
-Protocol state     -> Reactor shard single-owner
-Blocking work      -> Worker-owned
-Cross-thread       -> message + ownership transfer
-Backup correctness -> durable metadata/storage + epoch fencing
-Backup performance -> Reactor-local soft state + pipeline
+Protocol state  -> Reactor shard single-owner
+Module boundary -> capability/API + explicit ownership
+Runtime detail  -> internal by default
+Hot path        -> direct owner fast path + bounded copy-minimal resources
+Business state  -> outside c-trpc core
 ```
