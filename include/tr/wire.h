@@ -36,7 +36,8 @@ enum tr_frame_type {
 	TR_FRAME_HELLO_ACK = 9,
 	TR_FRAME_GOAWAY = 10,
 	TR_FRAME_BIND = 11,
-	TR_FRAME_BIND_ACK = 12
+	TR_FRAME_BIND_ACK = 12,
+	TR_FRAME_PIPELINE_CONTROL = 13
 };
 
 struct tr_frame_header {
