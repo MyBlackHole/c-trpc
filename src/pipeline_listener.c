@@ -171,6 +171,15 @@ tr_pipeline_listener_session_reserve(struct tr_pipeline_listener *listener)
 	return NULL;
 }
 
+static void tr_pipeline_listener_control_closing(void *arg)
+{
+	struct tr_pipeline_listener_session *session =
+		(struct tr_pipeline_listener_session *)arg;
+
+	if (session && session->used)
+		session->closing = 1;
+}
+
 static void tr_pipeline_listener_control_closed(
 	uint64_t pipeline_id, uint64_t epoch, int teardown_status, void *arg)
 {
@@ -288,6 +297,8 @@ static int tr_pipeline_listener_accept_control(
 	transport_config.connection = connection;
 	transport_config.message_pool = &listener->message_pool;
 	transport_config.control_route = *route;
+	transport_config.closing_cb =
+		tr_pipeline_listener_control_closing;
 	transport_config.closed_cb =
 		tr_pipeline_listener_control_closed;
 	transport_config.closed_arg = session;
