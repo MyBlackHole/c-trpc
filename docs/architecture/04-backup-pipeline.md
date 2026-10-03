@@ -53,7 +53,10 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   RX buffer 通过 opaque release capability 保持零额外 payload copy；
 - listener/runtime ownership 仍为 single-owner；V1 facade 当前绑定一个 internal
   owner domain，但该选择不是 public identity；
-- Client-side group create/connect、DATA lane 建立与 public route consumption 仍待实现；
+- Client-side CONTROL connect/close 已进入 stable facade；TRR1 CONTROL route、
+  owner shard 与 member generation 全部由内部生成；
+- DATA lane 建立与 TRANSFER_READY route/affinity consumption 仍待实现；在此之前
+  Client 会把收到的 DATA_OFFER 通过 exact DATA_CANCEL 归还；
 - cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，
