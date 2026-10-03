@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "pipeline_route_internal.h"
+
 #define TR_PIPELINE_CONTROL_WIRE_SIZE 48U
 #define TR_PIPELINE_CONTROL_WIRE_VERSION 1U
 
@@ -50,5 +52,13 @@ int tr_pipeline_control_wire_encode(
 int tr_pipeline_control_wire_decode(
 	const uint8_t *data, uint32_t len,
 	struct tr_pipeline_control_wire_message *message);
+
+/*
+ * DATA_OFFER carries exactly the capability needed by a DATA socket TRR1
+ * preface. Convert it without exposing or inventing Reactor connection ids.
+ */
+int tr_pipeline_control_wire_data_route(
+	const struct tr_pipeline_control_wire_message *message,
+	struct tr_pipeline_route_preface *route);
 
 #endif
