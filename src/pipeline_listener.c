@@ -24,6 +24,7 @@ enum tr_pipeline_listener_connection_role {
 struct tr_pipeline_listener_connection {
 	struct tr_pipeline_listener *listener;
 	struct tr_conn_handle handle;
+	struct tr_pipeline_route_preface route;
 	uint32_t generation;
 	enum tr_pipeline_listener_connection_role role;
 	int used;
@@ -103,6 +104,7 @@ static void tr_pipeline_listener_connection_clear(
 		return;
 	listener = connection->listener;
 	memset(&connection->handle, 0, sizeof(connection->handle));
+	memset(&connection->route, 0, sizeof(connection->route));
 	connection->role = TR_PIPELINE_LISTENER_CONN_PENDING;
 	connection->used = 0;
 	if (listener && listener->connections_current != 0U)
@@ -127,6 +129,7 @@ tr_pipeline_listener_connection_reserve(
 		connection->used = 1;
 		connection->role = TR_PIPELINE_LISTENER_CONN_PENDING;
 		memset(&connection->handle, 0, sizeof(connection->handle));
+		memset(&connection->route, 0, sizeof(connection->route));
 		listener->connections_current++;
 		if (listener->connections_current > listener->connections_peak)
 			listener->connections_peak = listener->connections_current;
@@ -225,7 +228,8 @@ static enum tr_frame_disposition tr_pipeline_listener_data_frame(
 	if (!listener || !listener->config.data_frame_cb)
 		return TR_FRAME_RELEASE;
 	return listener->config.data_frame_cb(
-		connection, frame, listener->config.data_callback_arg);
+		&tracked->route, connection, frame,
+		listener->config.data_callback_arg);
 }
 
 static void tr_pipeline_listener_data_event(
@@ -235,11 +239,16 @@ static void tr_pipeline_listener_data_event(
 	struct tr_pipeline_listener_connection *tracked =
 		(struct tr_pipeline_listener_connection *)arg;
 	struct tr_pipeline_listener *listener = NULL;
-	tr_reactor_event_cb callback = NULL;
+	tr_pipeline_listener_data_event_cb callback = NULL;
+	struct tr_pipeline_route_preface route;
 	void *callback_arg = NULL;
+	int have_route = 0;
 
+	memset(&route, 0, sizeof(route));
 	if (tracked && tracked->used) {
 		listener = tracked->listener;
+		route = tracked->route;
+		have_route = 1;
 		if (listener) {
 			callback = listener->config.data_event_cb;
 			callback_arg = listener->config.data_callback_arg;
@@ -247,8 +256,8 @@ static void tr_pipeline_listener_data_event(
 		tr_pipeline_listener_connection_clear(tracked);
 	}
 
-	if (callback)
-		callback(connection, event, status, callback_arg);
+	if (callback && have_route)
+		callback(&route, connection, event, status, callback_arg);
 }
 
 static int tr_pipeline_listener_accept_control(
@@ -316,6 +325,7 @@ static int tr_pipeline_listener_accept_control(
 	}
 
 	session->transport = transport;
+	tracked->route = *route;
 	tracked->role = TR_PIPELINE_LISTENER_CONN_CONTROL;
 	listener->pipelines_current++;
 	if (listener->pipelines_current > listener->pipelines_peak)
@@ -344,6 +354,7 @@ static int tr_pipeline_listener_accept_data(
 	if (ret != TR_OK)
 		return ret;
 
+	tracked->route = *route;
 	tracked->role = TR_PIPELINE_LISTENER_CONN_DATA;
 	listener->data_accepts++;
 	return TR_OK;
