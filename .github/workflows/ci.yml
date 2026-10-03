@@ -208,6 +208,7 @@ jobs:
 
               if (client_config.limits.max_calls == 0U ||
                   server_config.limits.max_calls == 0U ||
+                  client_config.connection_groups.max_data_connections != 0U ||
                   server_config.connection_groups.max_groups != 0U)
                   return 1;
               return strcmp(tr_status_str(TR_OK), "ok") != 0;
