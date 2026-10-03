@@ -1,12 +1,16 @@
-# Backup Pipeline
+# Connection Group / Pipeline 与 Backup 业务映射
 
-**状态：CURRENT FOUNDATION → TARGET V1；DataShard 为 FUTURE**
+**状态：CURRENT CORE FOUNDATION + BUSINESS REFERENCE；DataShard 为 FUTURE**
+
+> Core boundary：本文件前半部分的 Pipeline/CONTROL/DATA/routing/affinity 属于通用
+> Transport Connection Group；backup_id/checkpoint/commit/durable ACK 等只用于说明
+> 上层 Backup 如何映射到该能力，不属于 c-trpc core contract。
 
 ## 0. CURRENT Foundation
 
 Phase 5 已落地内部 `tr_pipeline` soft-state、TRR1 routing、shard-local registry、
 accepted DATA ingress、internal CONTROL session、`TRC1` CONTROL wire，以及真实
-shard-local Pipeline listener/CONTROL Transport handler；尚未接入 public Backup facade。
+shard-local Pipeline listener/CONTROL Transport handler；尚未形成不依赖 Reactor internals 的 public generic Connection Group facade。
 
 当前对象固定：
 
@@ -37,15 +41,15 @@ internal CONTROL session 也已能签发 DATA offer，并以原子 Stream affini
 `TRANSFER_READY` barrier。固定 48-byte `TRC1` CONTROL payload 已实现
 DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内部状态转换。
 
-当前尚未实现：
+当前 core 尚未实现：
 
-- public control / Backup facade；
+- public generic Connection Group / Pipeline capability；
 - 现有 public `tr_server` / `tr_client` 对 Pipeline listener 的 ownership/API integration；
-- durable backup identity / checkpoint / commit / resume；
+- stable/advanced/internal API 边界收敛；
 - cross-shard fd transfer（仅当后续协议确实需要）。
 
-因此当前 `tr_pipeline` 是后续协议层的 ownership/membership substrate，不是完整
-Backup Pipeline protocol。
+因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，
+不是业务协议对象。Backup durable identity / checkpoint / commit / resume 由上层业务定义。
 
 ## 0.1 Routing Preface
 
@@ -397,6 +401,13 @@ OFFER/READY 的旧 session；旧 registry identity 也不会在新 epoch 注册�
 
 当前 listener 仍是 internal shard component，尚未由 public `tr_server` /
 `tr_client` facade 暴露；Backup durable semantics 也仍属于下一阶段。
+---
+
+## Business mapping reference（non-core）
+
+以下章节保留 Backup 作为一个使用 Connection Group 的示例。
+它们不定义 c-trpc core API，也不进入 c-trpc core roadmap。
+
 ## 1. 定义
 
 Backup Job 是持久业务对象；Pipeline 是一次运行期的传输/协议 soft-state domain。

@@ -4,7 +4,7 @@
 
 ## Context
 
-Backup Pipeline 可能包含一个 CONTROL 和多个 DATA connections，并维护 inflight、credit、ACK batch、cache 等大量 soft state。
+通用 Connection Group / Pipeline 可以包含一个 CONTROL 和多个 DATA connections，并维护 membership、affinity、credit、routing 等 Transport soft state。
 
 如果同一个 Pipeline 被多个 Reactor 直接共享，将重新引入跨 Reactor locking。
 
@@ -21,7 +21,10 @@ CONTROL + DATA[N]
 all ultimately owned by that Reactor
 ```
 
-DATA socket 若被其他 shard accept，通过 routing preface 找到 owner，再进行同进程 fd ownership transfer。
+V1 不允许同一个 mutable Pipeline 被多个 Reactor 共同拥有。
+accepted socket 必须在加入 Pipeline 前确定 owner；如果未来部署拓扑要求 accept shard 与
+Pipeline owner 不同，应显式选择 admission rejection、reuseport steering 或 fd ownership
+transfer，而不是共享 Pipeline state。
 
 ## Consequences
 

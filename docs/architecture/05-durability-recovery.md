@@ -1,6 +1,10 @@
-# Durability 与 Recovery
+# Backup Durability 与 Recovery（Business Reference）
 
-**状态：TARGET V1**
+**状态：BUSINESS REFERENCE / NON-CORE**
+
+> 本文描述 Backup 业务如何在 c-trpc RPC/Connection Group 之上实现 durability、
+> fencing、resume 与 commit。它不属于 c-trpc core contract，不要求 Runtime、
+> Transport 或 RPC 层实现 backup_id、checkpoint、manifest、COMMITTED 等业务状态。
 
 ## 1. ACK Level
 
