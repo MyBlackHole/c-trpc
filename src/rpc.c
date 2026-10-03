@@ -2386,7 +2386,6 @@ static int tr_rpc_executor_run_server_unary(
 		goto out;
 	}
 
-	message.stream = task->stream;
 	memset(&response, 0, sizeof(response));
 	response.status = TR_RPC_STATUS_INTERNAL;
 
@@ -2565,7 +2564,6 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 
 		if (tr_rpc_decode_task_message(task, &message, &wire) ==
 		    TR_OK) {
-			message.stream = task->stream;
 			if (callbacks->on_message)
 				disposition = callbacks->on_message(
 					task->call, &message, callbacks->arg);
@@ -4578,7 +4576,7 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	}
 
 	handle = tr_rpc_make_call_handle(endpoint, slot, call);
-	ret = tr_stream_open(endpoint->channel, method->desc.lane,
+	ret = tr_stream_open(endpoint->channel, (enum tr_lane)method->desc.lane,
 			     &call->stream);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(endpoint, call);
