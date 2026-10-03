@@ -763,6 +763,45 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_connection_notify(reactor, connection, event, status);
 }
 
+int tr_reactor_close_on_owner(struct tr_conn_handle connection)
+{
+	struct tr_reactor *reactor = connection.reactor;
+	struct tr_connection *conn;
+
+	if (!reactor || connection.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
+	conn = &reactor->connections[connection.slot];
+	if (conn->state != TR_CONN_ACTIVE ||
+	    conn->generation != connection.generation)
+		return TR_ERR_STALE;
+
+	tr_connection_close_internal(
+		reactor, conn, TR_CONN_EVENT_CLOSED, TR_OK);
+	return TR_OK;
+}
+
+int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status)
+{
+	struct tr_reactor *reactor = connection.reactor;
+	struct tr_connection *conn;
+
+	if (!reactor || status >= 0 ||
+	    connection.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
+	conn = &reactor->connections[connection.slot];
+	if (conn->state != TR_CONN_ACTIVE ||
+	    conn->generation != connection.generation)
+		return TR_ERR_STALE;
+
+	tr_connection_close_internal(
+		reactor, conn, TR_CONN_EVENT_ERROR, status);
+	return TR_OK;
+}
+
 static int tr_connection_adopt(
 	struct tr_reactor *reactor, uint32_t slot, uint32_t generation, int fd,
 	const struct tr_reactor_preface_handler *preface)
