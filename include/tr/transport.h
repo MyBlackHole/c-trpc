@@ -92,7 +92,8 @@ void tr_connection_group_server_config_init(
 /*
  * Group listener lifecycle is owned by tr_server.
  *
- * listen() is configured before tr_server_start(), like tr_server_listen().
+ * listen() is configured before tr_server_start(). A Server may start with
+ * only this group listener; an RPC listener is not required.
  * stop() stops accepting new groups and closes current soft-state group
  * connections. tr_server_drain()/destroy() also stop this listener.
  */
