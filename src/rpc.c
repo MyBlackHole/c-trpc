@@ -2164,7 +2164,7 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 			struct tr_rpc_task task = call->pending_executor_task;
 
 			if (call->state == TR_RPC_CALL_FREE ||
-			    task.call.generation != call->generation ||
+			    tr_rpc_call_handle_generation(task.call) != call->generation ||
 			    call->cancelled || call->admission_rejected ||
 			    call->executor_overloaded) {
 				tr_rpc_drop_pending_executor_task_locked(call);
