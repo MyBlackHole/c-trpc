@@ -49,6 +49,9 @@ struct tr_pipeline_listener_stats {
 	uint32_t connection_capacity;
 	uint32_t connections_current;
 	uint32_t connections_peak;
+	uint32_t data_connections_current;
+	uint32_t active_transfers;
+	uint32_t draining;
 	uint64_t control_accepts;
 	uint64_t data_accepts;
 	uint64_t route_rejections;
@@ -65,6 +68,7 @@ int tr_pipeline_listener_create(
 int tr_pipeline_listener_listen_ipv4(
 	struct tr_pipeline_listener *listener, const char *address,
 	uint16_t port, int backlog, uint16_t *out_bound_port);
+int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener);
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener);
 void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
 
