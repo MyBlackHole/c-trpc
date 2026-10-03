@@ -71,6 +71,7 @@ target("trcore")
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
         "include/(tr/server.h)",
+        "include/(tr/transport.h)",
         "include/(tr/rpc.h)",
         "include/(tr/rpc_codec.h)",
         "include/(tr/observability.h)")
@@ -113,7 +114,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_timer_queue", "test_completion_queue", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)

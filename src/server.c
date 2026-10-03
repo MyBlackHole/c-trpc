@@ -19,6 +19,7 @@
 #include "runtime_internal.h"
 #include "socket_internal.h"
 #include "observability_internal.h"
+#include "pipeline_listener_internal.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
 
@@ -64,6 +65,8 @@ struct tr_server {
 	struct tr_server_method *methods;
 	uint32_t method_count;
 
+	struct tr_pipeline_listener *connection_group_listener;
+
 	struct tr_server_channel_stats retired_channel_stats;
 	struct tr_server_rpc_stats retired_rpc_stats;
 
@@ -102,6 +105,128 @@ static struct tr_runtime_peer *
 tr_server_shard_peer_at(struct tr_server_shard *shard, uint32_t slot)
 {
 	return shard ? tr_runtime_shard_peer_at(shard->runtime, slot) : NULL;
+}
+
+void tr_connection_group_server_config_init(
+	struct tr_connection_group_server_config *config)
+{
+	if (!config)
+		return;
+	memset(config, 0, sizeof(*config));
+}
+
+static int tr_server_connection_group_config_valid(
+	const struct tr_connection_group_server_config *config)
+{
+	if (!config)
+		return 0;
+	if (config->max_groups == 0U)
+		return config->max_connections == 0U &&
+		       config->max_data_connections_per_group == 0U &&
+		       config->max_streams_per_group == 0U;
+
+	return config->max_connections >= config->max_groups &&
+	       config->max_data_connections_per_group != 0U &&
+	       config->max_streams_per_group != 0U &&
+	       config->authorize != NULL;
+}
+
+static int tr_server_connection_group_authorize(
+	const struct tr_pipeline_route_preface *route, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_connection_group_id group;
+
+	if (!server || !route || !server->config.connection_groups.authorize)
+		return TR_ERR_INVALID;
+
+	group.group_id = route->pipeline_id;
+	group.epoch = route->epoch;
+	return server->config.connection_groups.authorize(
+		&group, server->config.connection_groups.callback_arg);
+}
+
+static enum tr_frame_disposition tr_server_connection_group_data_frame(
+	const struct tr_pipeline_route_preface *route,
+	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_connection_group_message message;
+	enum tr_connection_group_message_disposition disposition;
+
+	(void)connection;
+	if (!server || !route || !frame ||
+	    frame->header.type != TR_FRAME_DATA ||
+	    !server->config.connection_groups.on_message)
+		return TR_FRAME_RELEASE;
+
+	memset(&message, 0, sizeof(message));
+	message.group.group_id = route->pipeline_id;
+	message.group.epoch = route->epoch;
+	message.stream_id = frame->header.stream_id;
+	message.message_id = frame->header.message_id;
+	if (frame->header.flags & TR_FRAME_F_FIRST)
+		message.flags |= TR_CONNECTION_GROUP_DATA_FIRST;
+	if (frame->header.flags & TR_FRAME_F_LAST)
+		message.flags |= TR_CONNECTION_GROUP_DATA_LAST;
+	message._private[1] = 1U;
+	if (frame->payload) {
+		message.bytes.data = frame->payload->data;
+		message.bytes.len = frame->payload->len;
+		message._private[0] = (uintptr_t)frame->payload;
+	}
+
+	disposition = server->config.connection_groups.on_message(
+		&message, server->config.connection_groups.callback_arg);
+	if (disposition == TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP &&
+	    frame->payload)
+		return TR_FRAME_TAKE_OWNERSHIP;
+	return TR_FRAME_RELEASE;
+}
+
+static void tr_server_connection_group_data_event(
+	const struct tr_pipeline_route_preface *route,
+	struct tr_conn_handle connection, enum tr_connection_event event,
+	int status, void *arg)
+{
+	struct tr_server *server = (struct tr_server *)arg;
+	struct tr_connection_group_id group;
+	enum tr_connection_group_data_event public_event;
+
+	(void)connection;
+	if (!server || !route || !server->config.connection_groups.on_data_event)
+		return;
+
+	if (event == TR_CONN_EVENT_CLOSED)
+		public_event = TR_CONNECTION_GROUP_DATA_CLOSED;
+	else if (event == TR_CONN_EVENT_ERROR)
+		public_event = TR_CONNECTION_GROUP_DATA_ERROR;
+	else
+		return;
+
+	group.group_id = route->pipeline_id;
+	group.epoch = route->epoch;
+	server->config.connection_groups.on_data_event(
+		&group, public_event, status,
+		server->config.connection_groups.callback_arg);
+}
+
+int tr_connection_group_message_release(
+	struct tr_connection_group_message *message)
+{
+	struct tr_buffer *buffer;
+
+	if (!message || message->_private[1] != 1U)
+		return TR_ERR_INVALID;
+
+	buffer = (struct tr_buffer *)(uintptr_t)message->_private[0];
+	message->_private[0] = 0U;
+	message->_private[1] = 0U;
+	message->bytes.data = NULL;
+	message->bytes.len = 0U;
+	if (buffer)
+		tr_buffer_release(buffer);
+	return TR_OK;
 }
 
 static uint64_t tr_server_now_ms(void)
@@ -330,6 +455,7 @@ void tr_server_config_init(struct tr_server_config *config)
 
 	memset(config, 0, sizeof(*config));
 	tr_facade_limits_init(&config->limits);
+	tr_connection_group_server_config_init(&config->connection_groups);
 	config->shard_count = 1U;
 	config->max_peers = 64U;
 	config->listen_backlog = 128;
@@ -853,6 +979,10 @@ int tr_server_create(const struct tr_server_config *config,
 			      effective.limits.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
+	    !tr_server_connection_group_config_valid(
+		    &effective.connection_groups) ||
+	    effective.connection_groups.max_connections >
+		    UINT32_MAX - effective.max_peers - 4U ||
 	    !tr_server_budget_supports_shards(&effective))
 		return TR_ERR_INVALID;
 
@@ -905,7 +1035,11 @@ int tr_server_create(const struct tr_server_config *config,
 					effective.limits.executor_threads,
 					effective.shard_count, i);
 
-			reactor_config->max_connections = peer_capacity + 4U;
+			reactor_config->max_connections =
+				peer_capacity + 4U +
+				(i == 0U ?
+				 effective.connection_groups.max_connections :
+				 0U);
 			reactor_config->command_capacity =
 				tr_server_budget_share(
 					effective.limits.command_capacity,
@@ -988,6 +1122,44 @@ int tr_server_create(const struct tr_server_config *config,
 				return ret;
 			server_shard->reassembly_pool_ready = 1;
 		}
+	}
+
+	if (effective.connection_groups.max_groups != 0U) {
+		struct tr_pipeline_listener_config group_config;
+		struct tr_server_shard *owner_shard = &server->shards[0];
+
+		memset(&group_config, 0, sizeof(group_config));
+		group_config.owner = tr_server_shard_reactor(owner_shard);
+		group_config.owner_shard_id =
+			tr_runtime_shard_id(owner_shard->runtime);
+		group_config.pipeline_capacity =
+			effective.connection_groups.max_groups;
+		group_config.connection_capacity =
+			effective.connection_groups.max_connections;
+		group_config.data_capacity_per_pipeline =
+			effective.connection_groups.max_data_connections_per_group;
+		group_config.stream_affinity_capacity_per_pipeline =
+			effective.connection_groups.max_streams_per_group;
+		/*
+		 * Keep CONTROL payload-buffer tuning internal. The total group
+		 * connection budget is a conservative bounded default for concurrent
+		 * control sends without adding an implementation knob to the SDK.
+		 */
+		group_config.control_message_count =
+			effective.connection_groups.max_connections;
+		group_config.authorize_control =
+			tr_server_connection_group_authorize;
+		group_config.authorize_arg = server;
+		group_config.data_frame_cb =
+			tr_server_connection_group_data_frame;
+		group_config.data_event_cb =
+			tr_server_connection_group_data_event;
+		group_config.data_callback_arg = server;
+
+		ret = tr_pipeline_listener_create(
+			&group_config, &server->connection_group_listener);
+		if (ret != TR_OK)
+			return ret;
 	}
 
 	*out = tr_server_owner_take(&server);
@@ -1137,18 +1309,103 @@ rollback:
 	return ret;
 }
 
+int tr_server_connection_group_listen(
+	struct tr_server *server, const char *ipv4_address, uint16_t port,
+	int backlog, uint16_t *out_bound_port)
+{
+	if (!server || !ipv4_address || backlog <= 0)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener)
+		return TR_ERR_STATE;
+	if (server->started)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_listen_ipv4(
+		server->connection_group_listener, ipv4_address, port, backlog,
+		out_bound_port);
+}
+
+static int tr_server_connection_group_stop_internal(struct tr_server *server)
+{
+	if (!server || !server->connection_group_listener)
+		return TR_OK;
+	return tr_pipeline_listener_stop(server->connection_group_listener);
+}
+
+int tr_server_connection_group_stop(struct tr_server *server)
+{
+	if (!server)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener)
+		return TR_ERR_STATE;
+	return tr_server_connection_group_stop_internal(server);
+}
+
+int tr_server_connection_group_send_data_offer(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint64_t message_id)
+{
+	if (!server || group_id == 0U || epoch == 0U)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_send_data_offer(
+		server->connection_group_listener, group_id, epoch,
+		message_id, NULL);
+}
+
+int tr_server_connection_group_send_transfer_ready(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint32_t stream_id, uint64_t message_id)
+{
+	if (!server || group_id == 0U || epoch == 0U || stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_send_transfer_ready(
+		server->connection_group_listener, group_id, epoch,
+		stream_id, message_id);
+}
+
+int tr_server_connection_group_release_transfer(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint32_t stream_id)
+{
+	if (!server || group_id == 0U || epoch == 0U || stream_id == 0U)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_release_transfer(
+		server->connection_group_listener, group_id, epoch, stream_id);
+}
+
 int tr_server_start(struct tr_server *server)
 {
+	uint32_t rpc_listener_count = 0U;
 	uint32_t i;
+	int group_listening;
 	int ret;
 
 	if (!server || server->shard_count == 0U)
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
+
 	for (i = 0; i < server->shard_count; ++i)
-		if (tr_server_shard_listener_fd(&server->shards[i]) < 0)
-			return TR_ERR_STATE;
+		if (tr_server_shard_listener_fd(&server->shards[i]) >= 0)
+			rpc_listener_count++;
+	if (rpc_listener_count != 0U &&
+	    rpc_listener_count != server->shard_count)
+		return TR_ERR_STATE;
+
+	group_listening =
+		server->connection_group_listener &&
+		tr_pipeline_listener_bound_port(server->connection_group_listener) != 0U;
+	if (rpc_listener_count == 0U && !group_listening)
+		return TR_ERR_STATE;
 
 	ret = tr_runtime_start(server->runtime);
 	if (ret != TR_OK)
@@ -1195,6 +1452,7 @@ static void tr_server_stop_accepting(struct tr_server *server)
 
 	if (!server)
 		return;
+	(void)tr_server_connection_group_stop_internal(server);
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_shard *shard = &server->shards[i];
 
@@ -1389,6 +1647,10 @@ void tr_server_destroy(struct tr_server *server)
 
 	if (server->shards)
 		tr_server_stop_accepting(server);
+	if (server->connection_group_listener) {
+		tr_pipeline_listener_destroy(server->connection_group_listener);
+		server->connection_group_listener = NULL;
+	}
 	if (server->shards)
 		for (shard_index = 0; shard_index < server->shard_count;
 		     ++shard_index)

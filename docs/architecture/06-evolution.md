@@ -272,7 +272,8 @@ c-trpc core Phase。
 - buffer/channel/reactor/frame/wire 以及 queue/parser/socket/wire codec helper 均退出安装 SDK；
 - detailed Reactor/Channel/Endpoint diagnostics 已移入 internal diagnostics；
 - retained RPC message 用固定 opaque release token，未增加 allocation/copy；
-- `tr_rpc_call_handle` 已改为 16-byte opaque capability，不再公开 Endpoint pointer + slot/generation，stale-generation fencing 语义保持不变。
+- `tr_rpc_call_handle` 已改为 16-byte opaque capability，不再公开 Endpoint pointer + slot/generation，stale-generation fencing 语义保持不变；
+- P3 第一阶段已提供 Server-side generic Connection Group public facade，复用 internal Pipeline listener，并以 opaque RX ownership token 保持 DATA receive 零额外 payload copy。
 
 当前 stable installed headers：
 
@@ -285,13 +286,14 @@ rpc_codec.h
 facade.h
 observability.h
 status.h
+transport.h
 ```
 
 下一阶段：
 
+- 完成 Client-side Connection Group connect / DATA lane public capability；
 - high-level semantic limits 与 implementation tuning 分离；
-- 设计 stable semantic observability；
-- generic Connection Group / Pipeline public capability。
+- 设计 stable semantic observability。
 
 详细审查见 [分层、模块职责与 API 边界](07-layer-module-api-boundaries.md)。
 

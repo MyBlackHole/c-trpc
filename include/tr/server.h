@@ -5,6 +5,7 @@
 
 #include "tr/facade.h"
 #include "tr/rpc.h"
+#include "tr/transport.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ struct tr_server;
 
 struct tr_server_config {
 	struct tr_facade_limits limits;
+	struct tr_connection_group_server_config connection_groups;
 
 	/*
 	 * Server 内独立 Reactor/resource shard 数；0 由 init/default 归一化为 1。
