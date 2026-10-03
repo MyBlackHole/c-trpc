@@ -655,6 +655,8 @@ int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
+	if (listener->pipelines_current != 0U && result == TR_OK)
+		result = TR_ERR_STATE;
 	return result;
 }
 
