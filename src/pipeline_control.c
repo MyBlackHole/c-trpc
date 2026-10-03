@@ -150,7 +150,7 @@ int tr_pipeline_control_cancel_data(
 	if (!tr_pipeline_control_offer_matches(control, offer))
 		return TR_ERR_STALE;
 
-	return tr_pipeline_cancel_data_reservation(
+	return tr_pipeline_cancel_data_offer(
 		control->pipeline, offer->data);
 }
 
