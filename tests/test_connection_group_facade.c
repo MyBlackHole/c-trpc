@@ -552,6 +552,10 @@ static void test_public_connection_group_client_data_offer(void)
 		for (i = 0; i < sizeof(payload); ++i)
 			payload[i] = (uint8_t)(i ^ 0x5aU);
 		bytes.data = payload;
+		bytes.len = 257U;
+		assert(tr_client_connection_group_send(
+			       client, 5001U, UINT64_C(4200), &bytes) ==
+		       TR_ERR_BAD_LENGTH);
 		bytes.len = (uint32_t)sizeof(payload);
 		assert(tr_client_connection_group_send(
 			       client, 9999U, UINT64_C(4201), &bytes) ==
@@ -573,6 +577,12 @@ static void test_public_connection_group_client_data_offer(void)
 
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_OK);
+	{
+		struct tr_transport_bytes empty = { NULL, 0U };
+		assert(tr_client_connection_group_send(
+			       client, 5001U, UINT64_C(4202), &empty) ==
+		       TR_ERR_STALE);
+	}
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_ERR_STALE);
 	assert(tr_server_connection_group_release_transfer(
