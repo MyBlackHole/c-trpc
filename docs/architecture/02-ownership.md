@@ -12,7 +12,7 @@ flowchart TB
         S["Stream"]
         EP["RPC Endpoint protocol state"]
         CALL["RPC Call state"]
-        P["Backup Pipeline"]
+        P["Connection Group / Pipeline"]
         T["Timers"]
     end
 
@@ -35,15 +35,14 @@ flowchart TB
 | I3 | 成功提交到 queue 后才发生 ownership transfer。 |
 | I4 | 失败的 enqueue 不转移 ownership，调用方仍负责释放资源。 |
 | I5 | Generation/epoch 不匹配的 command/completion 必须安全丢弃。 |
-| I6 | TARGET V1 中，一个 Pipeline 只属于一个 Reactor。 |
-| I7 | 一个 Stream 生命周期内只绑定一个 DATA connection。 |
-| I8 | DATA striping 只发生在 message/chunk boundary。 |
-| I9 | durable ACK 只能在约定 durability point 之后产生。 |
-| I10 | 所有 durable backup mutation 都受 epoch fencing 保护。 |
-| I11 | soft state 可以丢失而不破坏业务正确性。 |
-| I12 | CONTROL 可以优先于 DATA，但只能在 frame boundary 调度。 |
-| I13 | 可独立归属的运行时资源跟随 shard，不建立跨 shard hot-path 共享池。 |
-| I14 | Worker 完成工作后通过 completion/event 返回 owner，不直接修改 Reactor-owned 状态。 |
+| I6 | 一个 Connection Group / Pipeline 只属于一个 Reactor owner。 |
+| I7 | 一个 Stream 生命周期内只绑定一个 DATA connection generation。 |
+| I8 | DATA striping 只发生在 logical message/transfer boundary，不跨物理 connection 破坏单 Stream ordering。 |
+| I9 | CONTROL 可以优先于 DATA，但只能在 frame boundary 调度。 |
+| I10 | 可独立归属的运行时资源跟随 shard，不建立跨 shard hot-path 共享池。 |
+| I11 | Worker 完成工作后通过 completion/event 返回 owner，不直接修改 Reactor-owned 状态。 |
+| I12 | 上层只能通过 capability/API 使用下层，不直接修改下层 internal state。 |
+| I13 | public contract 不暴露 Reactor slot/generation、queue/pool 或 parser internals。 |
 
 ## 3. Ownership & Synchronization Matrix
 
@@ -57,7 +56,7 @@ flowchart TB
 | Stream | Reactor shard | command | hot state 无锁 |
 | RPC Endpoint protocol state | Reactor shard | command/completion | TARGET 去除 worker 直接修改 |
 | RPC Call | Reactor shard | completion | hot state 无锁 |
-| Backup Pipeline | Reactor shard | command | hot state 无锁 |
+| Connection Group / Pipeline | Reactor shard | command / owner API | hot state owner-only |
 | Task | Worker | ownership transfer | 无共享修改 |
 | Completion | producer → Reactor | bounded per-Reactor MPSC queue | queue-local admission + wake coalescing；不经过 ctl_lock |
 | RPC Executor / Worker Queue | Reactor shard | owner submit / local worker pop | shard-local mutex + cond 可接受 |
@@ -157,4 +156,4 @@ error
 - cross-shard fd handoff；
 - RPC task；
 - RPC completion（当前使用独立 bounded queue，不再复用 Command Queue）；
-- Pipeline work item。
+- Connection Group / Pipeline work item。
