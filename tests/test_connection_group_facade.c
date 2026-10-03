@@ -32,6 +32,11 @@ struct public_group_ctx {
 	unsigned transfer_ready;
 	uint32_t ready_stream_id;
 	uint64_t ready_message_id;
+	unsigned client_send_fragments;
+	unsigned client_send_first;
+	unsigned client_send_last;
+	uint32_t client_send_len;
+	uint8_t client_send_bytes[256];
 	struct tr_connection_group_message retained;
 };
 
@@ -182,18 +187,39 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 	assert(message != NULL);
 	assert(message->group.group_id == TEST_GROUP_ID);
 	assert(message->group.epoch == TEST_GROUP_EPOCH);
-	assert(message->stream_id == 3001U);
-	assert(message->message_id == UINT64_C(2001));
-	assert(message->flags ==
-	       (TR_CONNECTION_GROUP_DATA_FIRST |
-		TR_CONNECTION_GROUP_DATA_LAST));
 
+	if (message->stream_id == 3001U) {
+		assert(message->message_id == UINT64_C(2001));
+		assert(message->flags ==
+		       (TR_CONNECTION_GROUP_DATA_FIRST |
+			TR_CONNECTION_GROUP_DATA_LAST));
+
+		pthread_mutex_lock(&ctx->lock);
+		ctx->retained = *message;
+		ctx->messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+	}
+
+	assert(message->stream_id == 5001U);
+	assert(message->message_id == UINT64_C(4201));
 	pthread_mutex_lock(&ctx->lock);
-	ctx->retained = *message;
+	assert((uint64_t)ctx->client_send_len + message->bytes.len <=
+	       sizeof(ctx->client_send_bytes));
+	if (message->bytes.len != 0U)
+		memcpy(ctx->client_send_bytes + ctx->client_send_len,
+		       message->bytes.data, message->bytes.len);
+	ctx->client_send_len += message->bytes.len;
+	ctx->client_send_fragments++;
+	if (message->flags & TR_CONNECTION_GROUP_DATA_FIRST)
+		ctx->client_send_first++;
+	if (message->flags & TR_CONNECTION_GROUP_DATA_LAST)
+		ctx->client_send_last++;
 	ctx->messages++;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
-	return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+	return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 }
 
 static void on_client_transfer_ready(
@@ -469,6 +495,7 @@ static void test_public_connection_group_client_data_offer(void)
 	server_config.connection_groups.max_data_connections_per_group = 1U;
 	server_config.connection_groups.max_streams_per_group = 4U;
 	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
 	server_config.connection_groups.on_data_event = on_group_data_event;
 	server_config.connection_groups.callback_arg = &ctx;
 
@@ -480,6 +507,8 @@ static void test_public_connection_group_client_data_offer(void)
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
+	client_config.limits.max_frame_payload_bytes = 64U;
+	client_config.limits.max_message_bytes = 256U;
 	client_config.connection_groups.max_data_connections = 1U;
 	client_config.connection_groups.on_transfer_ready =
 		on_client_transfer_ready;
@@ -514,6 +543,33 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(ctx.ready_stream_id == 5001U);
 	assert(ctx.ready_message_id == UINT64_C(4101));
 	pthread_mutex_unlock(&ctx.lock);
+
+	{
+		uint8_t payload[130];
+		struct tr_transport_bytes bytes;
+		uint32_t i;
+
+		for (i = 0; i < sizeof(payload); ++i)
+			payload[i] = (uint8_t)(i ^ 0x5aU);
+		bytes.data = payload;
+		bytes.len = (uint32_t)sizeof(payload);
+		assert(tr_client_connection_group_send(
+			       client, 9999U, UINT64_C(4201), &bytes) ==
+		       TR_ERR_STALE);
+		assert(tr_client_connection_group_send(
+			       client, 5001U, UINT64_C(4201), &bytes) == TR_OK);
+		memset(payload, 0, sizeof(payload));
+
+		wait_counter(&ctx, &ctx.messages, 3U);
+		pthread_mutex_lock(&ctx.lock);
+		assert(ctx.client_send_fragments == 3U);
+		assert(ctx.client_send_first == 1U);
+		assert(ctx.client_send_last == 1U);
+		assert(ctx.client_send_len == 130U);
+		for (i = 0; i < 130U; ++i)
+			assert(ctx.client_send_bytes[i] == (uint8_t)(i ^ 0x5aU));
+		pthread_mutex_unlock(&ctx.lock);
+	}
 
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_OK);
