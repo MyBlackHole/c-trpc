@@ -128,6 +128,35 @@ without exposing Reactor/Connection internals. Call-level send/cancel/metadata
 operations continue to use the existing `tr_rpc_call_*()` APIs on the returned
 Call handle.
 
+The stable SDK also contains the first generic Connection Group transport
+capability in `tr/transport.h`. It is opt-in and disabled by default:
+
+```c
+tr_server_config_init(&cfg);
+cfg.connection_groups.max_groups = 64;
+cfg.connection_groups.max_connections = 256;
+cfg.connection_groups.max_data_connections_per_group = 4;
+cfg.connection_groups.max_streams_per_group = 1024;
+cfg.connection_groups.control_message_count = 128;
+cfg.connection_groups.authorize = authorize_group;
+cfg.connection_groups.on_message = on_group_data;
+cfg.connection_groups.callback_arg = app;
+
+tr_server_create(&cfg, &server);
+tr_server_connection_group_listen(
+    server, "0.0.0.0", 9100, 128, &group_port);
+tr_server_start(server);
+```
+
+This Server-side facade reuses the existing single-owner Pipeline engine.
+Applications see only `group_id/epoch`, logical stream/message identity and a
+byte view; Reactor handles, registry state, TRR1 parsing and membership
+generations remain internal. Returning
+`TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP` retains the original RX buffer
+without an additional payload copy and requires one later
+`tr_connection_group_message_release()`. Public client-side group connect and
+DATA-lane establishment are the next P3 step.
+
 The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
 Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
 latency coupling for small request/response traffic. The policy is explicit:
