@@ -1439,6 +1439,7 @@ static void tr_server_stop_accepting(struct tr_server *server)
 
 	if (!server)
 		return;
+	(void)tr_server_connection_group_stop_internal(server);
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_shard *shard = &server->shards[i];
 
@@ -1633,6 +1634,10 @@ void tr_server_destroy(struct tr_server *server)
 
 	if (server->shards)
 		tr_server_stop_accepting(server);
+	if (server->connection_group_listener) {
+		tr_pipeline_listener_destroy(server->connection_group_listener);
+		server->connection_group_listener = NULL;
+	}
 	if (server->shards)
 		for (shard_index = 0; shard_index < server->shard_count;
 		     ++shard_index)
