@@ -275,7 +275,7 @@ c-trpc core Phase。
 - `tr_rpc_call_handle` 已改为 16-byte opaque capability，不再公开 Endpoint pointer + slot/generation，stale-generation fencing 语义保持不变；
 - P3 第一阶段已提供 Server-side generic Connection Group public facade，复用 internal Pipeline listener，并以 opaque RX ownership token 保持 DATA receive 零额外 payload copy；
 - P3 第二阶段已提供 Client-side Group CONTROL connect/close；CONTROL route identity 保持 internal；
-- P3 第三阶段已提供 bounded Client DATA lane 自动建立：DATA_OFFER 由 internal Group engine 消费，nonblocking connect 使用 Reactor auxiliary fd event + timer，不新增 connector thread；Server 对失败 route 只 exact-cancel 仍为 RESERVED 的 generation。
+- P3 第三阶段已提供 bounded Client DATA lane 自动建立：DATA_OFFER 由 internal Group engine 消费，nonblocking connect 使用 Reactor auxiliary fd event + timer，不新增 connector thread；Server 对失败 route 只 exact-cancel 仍为 RESERVED 的 generation；peer DATA_CANCEL 对 exact generation 幂等，从而无需新增 DATA_ATTACH_ACK。
 
 当前 stable installed headers：
 
