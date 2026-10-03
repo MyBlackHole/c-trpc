@@ -823,11 +823,24 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - retained message 用 opaque release token 保持零额外 allocation/copy；
 - `tr_rpc_call_handle` 已 opaque 化，不再公开 Endpoint pointer + slot/generation，同时保持原有 stale-generation fencing。
 
-### P3 — Transport / Connection Group public capability
+### P3 — Transport / Connection Group public capability — IN PROGRESS
 
-- 设计 generic Transport/Connection Group facade；
-- 不暴露 Reactor/registry/TRR1 implementation；
-- 保留 zero-copy/ownership semantics。
+已完成第一阶段：
+
+- 新增 stable `tr/transport.h`，Server 可显式启用 bounded Connection Group capability；
+- `tr_server` 拥有 public group listener 生命周期，并将 group connection capacity
+  纳入 Reactor 预留预算；
+- CONTROL authorization 只暴露 `group_id/epoch`；
+- DATA receive 只暴露 semantic group/stream/message/bytes，不暴露
+  Reactor handle、registry、TRR1 或 member generation；
+- TAKE_OWNERSHIP 通过 opaque release token 直接保留原 RX buffer，不增加 payload copy；
+- 现有 Pipeline/registry/route/control/ingress engine 保持 internal single-owner 实现。
+
+待完成：
+
+- Client-side group create/connect 与 DATA lane public capability；
+- public client 对 DATA_OFFER / TRANSFER_READY 的消费与 route 建立；
+- 完整 group-level stable stats / drain semantics。
 
 ### P4 — Config / Stats split — IN PROGRESS
 
