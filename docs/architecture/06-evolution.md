@@ -214,12 +214,25 @@ ownership seam 基本收口，可进入 Phase 4 multi-shard enablement。
 - CONTROL close 在 attached DATA/Stream 未 quiesce 时拒绝；
 - close 会自动撤销仍未 attach 的 RESERVED capability，再 unregister/destroy Pipeline。
 
+已完成 internal CONTROL wire foundation：
+
+- 固定 48-byte `TRC1` payload，little-endian；
+- DATA_OFFER / DATA_CANCEL / TRANSFER_READY 三种 message；
+- wire identity 固定包含 owner_shard_id / pipeline_id / epoch /
+  data_index / data_generation，TRANSFER_READY 额外包含 stream_id；
+- 不在 wire 暴露 Reactor slot/generation；
+- DATA_OFFER 可唯一转换为现有 TRR1 DATA route capability；
+- reserve -> DATA_OFFER 编码失败时回滚 exact reservation；
+- DATA_CANCEL decode 后只取消完全匹配的 RESERVED capability；
+- prepare_transfer -> TRANSFER_READY 保持“先 exact DATA attach，再 READY”；
+- READY 编码失败时回滚刚建立的 Stream affinity。
+
 下一步：
 
-- 将 CONTROL session 接入正式 Pipeline control wire/facade；
-- 将 Pipeline registry/ingress 接入 Server shard 的正式 Pipeline listener/control plane；
-- 将内部 TRANSFER_READY token 编码成 CONTROL wire message；
-- 将 Channel/RPC/Backup facade 接到 Pipeline membership；
+- 为 CONTROL connection 安装正式 Transport handler，承载 `TRC1` payload；
+- 将 Pipeline registry/ingress/control session 接入 Server shard 的正式
+  Pipeline listener/control plane；
+- 将 public Backup/Pipeline facade 接到 Pipeline membership 与 CONTROL wire；
 - 只有协议确实要求时才引入显式 cross-shard fd ownership transfer。
 
 当前仍不做单 Pipeline 跨 Reactor shared mutable state。
