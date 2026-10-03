@@ -67,17 +67,19 @@ target("trcore")
     -- Do not use a glob here: adding a header under include/tr/ must not
     -- automatically publish an implementation detail.
     add_headerfiles(
-        -- Stable facade/application surface.
+        -- Intended facade/application entry points.
         "include/(tr/trpc.h)",
         "include/(tr/status.h)",
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
         "include/(tr/server.h)",
-        "include/(tr/rpc.h)",
         "include/(tr/rpc_codec.h)",
         "include/(tr/observability.h)",
 
-        -- Transitional transitive dependencies of rpc.h/channel.h.
+        -- Transitional API/implementation dependencies. rpc.h still mixes
+        -- application Call types with the Endpoint engine, and therefore
+        -- pulls Channel/Reactor/Buffer headers into the installed closure.
+        "include/(tr/rpc.h)",
         -- These remain installed until the RPC/Transport engine split removes
         -- Reactor/Channel/Buffer details from the stable facade headers.
         "include/(tr/buffer.h)",
