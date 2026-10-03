@@ -10,7 +10,11 @@
 
 Phase 5 已落地内部 `tr_pipeline` soft-state、TRR1 routing、shard-local registry、
 accepted DATA ingress、internal CONTROL session、`TRC1` CONTROL wire，以及真实
-shard-local Pipeline listener/CONTROL Transport handler；尚未形成不依赖 Reactor internals 的 public generic Connection Group facade。
+shard-local Pipeline listener/CONTROL Transport handler。Phase 6 P3 的第一阶段进一步
+加入 Server-side public Connection Group facade：应用通过 `tr/transport.h` 配置
+group capacity、CONTROL authorization、DATA receive callback，并由 `tr_server`
+拥有 listener 生命周期；public contract 不暴露 Reactor、registry、TRR1 parser、
+connection slot 或 member generation。
 
 当前对象固定：
 
@@ -41,12 +45,16 @@ internal CONTROL session 也已能签发 DATA offer，并以原子 Stream affini
 `TRANSFER_READY` barrier。固定 48-byte `TRC1` CONTROL payload 已实现
 DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内部状态转换。
 
-当前 core 尚未实现：
+当前 public capability 状态：
 
-- public generic Connection Group / Pipeline capability；
-- 现有 public `tr_server` / `tr_client` 对 Pipeline listener 的 ownership/API integration；
-- stable/advanced/internal API 边界收敛；
-- cross-shard fd transfer（仅当后续协议确实需要）。
+- Server side：已提供独立 Connection Group listener、CONTROL authorization、
+  DATA receive/event callback、DATA_OFFER、TRANSFER_READY 与 transfer release；
+- DATA callback 只看到 `group_id/epoch + stream_id/message_id + bytes`，retained
+  RX buffer 通过 opaque release capability 保持零额外 payload copy；
+- listener/runtime ownership 仍为 single-owner；V1 facade 当前绑定一个 internal
+  owner domain，但该选择不是 public identity；
+- Client-side group create/connect、DATA lane 建立与 public route consumption 仍待实现；
+- cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，
 不是业务协议对象。Backup durable identity / checkpoint / commit / resume 由上层业务定义。
