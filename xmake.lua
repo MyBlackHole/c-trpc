@@ -71,6 +71,7 @@ target("trcore")
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
         "include/(tr/server.h)",
+        "include/(tr/transport.h)",
         "include/(tr/rpc.h)",
         "include/(tr/rpc_codec.h)",
         "include/(tr/observability.h)")
