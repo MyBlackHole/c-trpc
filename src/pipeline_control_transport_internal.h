@@ -10,6 +10,7 @@
 
 struct tr_pipeline_control_transport;
 
+typedef void (*tr_pipeline_control_transport_closing_cb)(void *arg);
 typedef void (*tr_pipeline_control_transport_closed_cb)(
 	uint64_t pipeline_id, uint64_t epoch, int teardown_status, void *arg);
 
@@ -18,6 +19,7 @@ struct tr_pipeline_control_transport_config {
 	struct tr_conn_handle connection;
 	struct tr_buffer_pool *message_pool;
 	struct tr_pipeline_route_preface control_route;
+	tr_pipeline_control_transport_closing_cb closing_cb;
 	tr_pipeline_control_transport_closed_cb closed_cb;
 	void *closed_arg;
 };
