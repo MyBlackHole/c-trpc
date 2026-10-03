@@ -46,6 +46,10 @@ int tr_pipeline_control_transport_send_transfer_ready(
 int tr_pipeline_control_transport_release_transfer(
 	struct tr_pipeline_control_transport *transport, uint32_t stream_id);
 
+int tr_pipeline_control_transport_get_stats(
+	struct tr_pipeline_control_transport *transport,
+	struct tr_pipeline_stats *out);
+
 uint64_t tr_pipeline_control_transport_pipeline_id(
 	const struct tr_pipeline_control_transport *transport);
 uint64_t tr_pipeline_control_transport_epoch(
