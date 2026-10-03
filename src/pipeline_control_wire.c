@@ -110,3 +110,23 @@ int tr_pipeline_control_wire_decode(
 		return TR_ERR_INVALID;
 	return TR_OK;
 }
+
+int tr_pipeline_control_wire_data_route(
+	const struct tr_pipeline_control_wire_message *message,
+	struct tr_pipeline_route_preface *route)
+{
+	if (!message || !route ||
+	    message->type != TR_PIPELINE_CONTROL_DATA_OFFER ||
+	    !tr_pipeline_control_wire_fields_valid(message))
+		return TR_ERR_INVALID;
+
+	memset(route, 0, sizeof(*route));
+	route->version = TR_PIPELINE_ROUTE_VERSION;
+	route->role = TR_PIPELINE_ROUTE_DATA;
+	route->owner_shard_id = message->owner_shard_id;
+	route->pipeline_id = message->pipeline_id;
+	route->epoch = message->epoch;
+	route->member_index = message->data_index;
+	route->member_generation = message->data_generation;
+	return TR_OK;
+}
