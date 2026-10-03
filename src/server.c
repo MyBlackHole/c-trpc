@@ -1129,6 +1129,39 @@ int tr_server_create(const struct tr_server_config *config,
 		}
 	}
 
+	if (effective.connection_groups.max_groups != 0U) {
+		struct tr_pipeline_listener_config group_config;
+		struct tr_server_shard *owner_shard = &server->shards[0];
+
+		memset(&group_config, 0, sizeof(group_config));
+		group_config.owner = tr_server_shard_reactor(owner_shard);
+		group_config.owner_shard_id =
+			tr_runtime_shard_id(owner_shard->runtime);
+		group_config.pipeline_capacity =
+			effective.connection_groups.max_groups;
+		group_config.connection_capacity =
+			effective.connection_groups.max_connections;
+		group_config.data_capacity_per_pipeline =
+			effective.connection_groups.max_data_connections_per_group;
+		group_config.stream_affinity_capacity_per_pipeline =
+			effective.connection_groups.max_streams_per_group;
+		group_config.control_message_count =
+			effective.connection_groups.control_message_count;
+		group_config.authorize_control =
+			tr_server_connection_group_authorize;
+		group_config.authorize_arg = server;
+		group_config.data_frame_cb =
+			tr_server_connection_group_data_frame;
+		group_config.data_event_cb =
+			tr_server_connection_group_data_event;
+		group_config.data_callback_arg = server;
+
+		ret = tr_pipeline_listener_create(
+			&group_config, &server->connection_group_listener);
+		if (ret != TR_OK)
+			return ret;
+	}
+
 	*out = tr_server_owner_take(&server);
 	return TR_OK;
 }
