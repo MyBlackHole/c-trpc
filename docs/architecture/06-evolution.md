@@ -260,12 +260,20 @@ c-trpc core Phase。
 
 ## Phase 6 - API Boundary Cleanup
 
-目标：
+**状态：IN PROGRESS**
 
-- stable / advanced / internal API 分级；
-- public header explicit allowlist；
-- Reactor/parser/wire/queue/socket helper 从默认 SDK contract 移出；
-- RPC Method/Call API 与 Endpoint engine construction 分离；
+第一阶段已完成：
+
+- SDK header 从 glob publication 改为 explicit allowlist；
+- CI 精确校验安装 header 集合；
+- external install consumer 改用 `tr/trpc.h` facade，不再以 Reactor 为 SDK 入口；
+- command_queue/parser/rpc_wire/socket/endian/guard/refcount/crc32c 不再安装。
+
+下一阶段：
+
+- 分离 RPC application types/Call API 与 Endpoint engine；
+- 解除 `rpc.h -> channel.h -> reactor.h` 的 public transitive dependency；
+- buffer/channel/reactor/frame/wire 退出 stable facade closure；
 - public handle 不固化 owner pointer + slot/generation；
 - high-level config/stats 与 internal tuning/diagnostics 分离。
 
