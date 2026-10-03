@@ -270,7 +270,6 @@ static void test_public_connection_group_server(void)
 	config.connection_groups.max_connections = 4U;
 	config.connection_groups.max_data_connections_per_group = 2U;
 	config.connection_groups.max_streams_per_group = 8U;
-	config.connection_groups.control_message_count = 8U;
 	config.connection_groups.authorize = authorize_group;
 	config.connection_groups.on_message = on_group_message;
 	config.connection_groups.on_data_event = on_group_data_event;
