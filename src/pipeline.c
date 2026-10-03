@@ -577,6 +577,58 @@ int tr_pipeline_data_connection(struct tr_pipeline *pipeline,
 			       tr_pipeline_data_connection_on_owner, &request);
 }
 
+struct tr_pipeline_attached_snapshot_request {
+	struct tr_pipeline *pipeline;
+	struct tr_pipeline_attached_data *out;
+	uint32_t capacity;
+	uint32_t *count_out;
+};
+
+static int tr_pipeline_attached_data_snapshot_on_owner(void *arg)
+{
+	struct tr_pipeline_attached_snapshot_request *request =
+		(struct tr_pipeline_attached_snapshot_request *)arg;
+	struct tr_pipeline *pipeline = request->pipeline;
+	uint32_t count = 0U;
+	uint32_t i;
+
+	if (request->capacity < pipeline->data_count)
+		return TR_ERR_BAD_LENGTH;
+	if (pipeline->data_count != 0U && !request->out)
+		return TR_ERR_INVALID;
+
+	for (i = 0; i < pipeline->data_capacity; ++i) {
+		struct tr_pipeline_data_slot *slot = &pipeline->data_slots[i];
+
+		if (slot->state != TR_PIPELINE_DATA_ATTACHED)
+			continue;
+		request->out[count].data.index = i;
+		request->out[count].data.generation = slot->generation;
+		request->out[count].connection = slot->connection;
+		count++;
+	}
+	*request->count_out = count;
+	return TR_OK;
+}
+
+int tr_pipeline_attached_data_snapshot(
+	struct tr_pipeline *pipeline, struct tr_pipeline_attached_data *out,
+	uint32_t capacity, uint32_t *count_out)
+{
+	struct tr_pipeline_attached_snapshot_request request;
+
+	if (!pipeline || !count_out)
+		return TR_ERR_INVALID;
+	*count_out = 0U;
+	request.pipeline = pipeline;
+	request.out = out;
+	request.capacity = capacity;
+	request.count_out = count_out;
+	return tr_reactor_call(
+		pipeline->owner, tr_pipeline_attached_data_snapshot_on_owner,
+		&request);
+}
+
 struct tr_pipeline_select_request {
 	struct tr_pipeline *pipeline;
 	struct tr_pipeline_data_ref *out;
