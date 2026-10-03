@@ -8,6 +8,9 @@
 #include "tr/cleanup.h"
 #include "tr/observability.h"
 
+struct tr_buffer;
+typedef void (*tr_buffer_release_cb)(struct tr_buffer *buffer);
+
 struct tr_buffer {
 	uint8_t *data;
 	uint32_t capacity;
@@ -15,6 +18,13 @@ struct tr_buffer {
 
 	struct tr_buffer *next;
 	struct tr_buffer_pool *pool;
+
+	/*
+	 * Optional one-shot release hook for non-pool buffers. When set,
+	 * tr_buffer_release() invokes it instead of returning the buffer to pool.
+	 * The callback owns final disposal and may free the buffer itself.
+	 */
+	tr_buffer_release_cb release_cb;
 };
 
 struct tr_buffer_pool {

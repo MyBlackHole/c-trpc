@@ -154,6 +154,22 @@ int tr_client_connection_group_release_transfer(
 	struct tr_client *client, uint32_t stream_id);
 
 /*
+ * Send one logical DATA message on an already READY Client transfer.
+ *
+ * bytes is borrowed for the duration of the call only; on TR_OK the facade has
+ * copied it into bounded internal send ownership, so the application may reuse
+ * or free its memory immediately. TR_AGAIN means bounded send admission or the
+ * Reactor TX pool is temporarily full; no application ownership is transferred
+ * and the caller may retry later.
+ *
+ * The exact DATA lane is selected only from the existing stream affinity.
+ * DATA index/generation and FIRST/LAST fragmentation remain internal.
+ */
+int tr_client_connection_group_send(
+	struct tr_client *client, uint32_t stream_id, uint64_t message_id,
+	const struct tr_transport_bytes *bytes);
+
+/*
  * Group listener lifecycle is owned by tr_server.
  *
  * listen() is configured before tr_server_start(). A Server may start with

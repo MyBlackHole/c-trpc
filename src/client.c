@@ -421,6 +421,10 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 	group_config.max_data_connections =
 		client->config.connection_groups.max_data_connections;
 	group_config.max_transfers = client->config.limits.max_streams;
+	group_config.max_message_bytes =
+		client->config.limits.max_message_bytes;
+	group_config.max_frame_payload_bytes =
+		client->config.limits.max_frame_payload_bytes;
 	group_config.connect_timeout_ms = client->config.connect_timeout_ms;
 	group_config.tcp_nodelay =
 		tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay);
@@ -468,6 +472,19 @@ int tr_client_connection_group_release_transfer(
 		return TR_ERR_STATE;
 	return tr_client_group_release_transfer(
 		client->connection_group, stream_id);
+}
+
+int tr_client_connection_group_send(
+	struct tr_client *client, uint32_t stream_id, uint64_t message_id,
+	const struct tr_transport_bytes *bytes)
+{
+	if (!client || stream_id == 0U || !bytes ||
+	    (bytes->len != 0U && !bytes->data))
+		return TR_ERR_INVALID;
+	if (!client->connection_group)
+		return TR_ERR_STATE;
+	return tr_client_group_send(
+		client->connection_group, stream_id, message_id, bytes);
 }
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)

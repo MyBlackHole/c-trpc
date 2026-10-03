@@ -70,7 +70,14 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   affinity；public callback 仍只暴露语义 group/stream/message identity；
 - Client release 删除本地 affinity；DATA lane removal 只失效指向该 exact generation
   的 affinity，同 index 后续复用不会使旧 Stream 复活；
-- logical transfer DATA send 的 payload ownership/memory budget/backpressure 仍待单独定义；
+- Client logical DATA send 已进入 stable facade：每次 send 重新验证 Stream affinity
+  对应的 ACTIVE DATA generation；public payload 只在调用期间 borrowed，TR_OK 前复制到
+  internal owned buffer；
+- Group send memory 使用 `max_data_connections * max_message_bytes` 作为 owner-local
+  bounded quota，TX 完成、连接关闭或提交失败都会通过 one-shot Buffer release hook
+  归还 quota；Reactor 继续负责 DATA fragmentation/TX scheduling；
+- send admission 暂以 `TR_AGAIN + caller retry` 表达；暂不暴露 writable callback，
+  避免把 Group quota 与 Reactor global TX pool 两类资源错误压成一个假就绪事件；
 - cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，
