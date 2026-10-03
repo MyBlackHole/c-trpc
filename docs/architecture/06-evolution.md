@@ -276,7 +276,8 @@ c-trpc core Phase。
 - P3 第一阶段已提供 Server-side generic Connection Group public facade，复用 internal Pipeline listener，并以 opaque RX ownership token 保持 DATA receive 零额外 payload copy；
 - P3 第二阶段已提供 Client-side Group CONTROL connect/close；CONTROL route identity 保持 internal；
 - P3 第三阶段已提供 bounded Client DATA lane 自动建立：DATA_OFFER 由 internal Group engine 消费，nonblocking connect 使用 Reactor auxiliary fd event + timer，不新增 connector thread；Server 对失败 route 只 exact-cancel 仍为 RESERVED 的 generation；peer DATA_CANCEL 对 exact generation 幂等，从而无需新增 DATA_ATTACH_ACK；
-- P3 第四阶段已提供 Client TRANSFER_READY 消费与 bounded Stream affinity：READY 必须精确命中 ACTIVE DATA generation，public callback 不暴露 DATA routing identity，Client release 与 DATA-loss invalidation 都在原 Reactor owner 上完成。
+- P3 第四阶段已提供 Client TRANSFER_READY 消费与 bounded Stream affinity：READY 必须精确命中 ACTIVE DATA generation，public callback 不暴露 DATA routing identity，Client release 与 DATA-loss invalidation 都在原 Reactor owner 上完成；
+- P3 第五阶段已提供 Client logical DATA send：borrowed application bytes 在 owner 内复制到 bounded internal ownership，send-byte quota 从 DATA/message semantic limits 推导，Reactor 继续负责 fragmentation/TX，临时资源压力以 TR_AGAIN 反馈。
 
 当前 stable installed headers：
 
@@ -294,7 +295,6 @@ transport.h
 
 下一阶段：
 
-- 完成 logical transfer DATA send/lifecycle capability，并明确 payload ownership / memory budget / backpressure；
 - 完成 group-level stable drain/stats semantics；
 - high-level semantic limits 与 implementation tuning 分离；
 - 设计 stable semantic observability。
