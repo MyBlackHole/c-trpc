@@ -121,7 +121,7 @@ void tr_buffer_release(struct tr_buffer *buffer)
 		return;
 
 	release_cb = buffer->release_cb;
-	if (release_cb) {
+	if (!buffer->pool && release_cb) {
 		buffer->release_cb = NULL;
 		release_cb(buffer);
 		return;
