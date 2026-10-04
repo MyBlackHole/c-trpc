@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-#include "tr/observability.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,9 +49,6 @@ struct tr_facade_limits {
 	 * part of this stable semantic contract. Facade-owned runtime resources
 	 * are derived internally.
 	 */
-
-	/* Propagated to the facade-owned Reactor and RPC Endpoints. */
-	uint32_t observability_flags;
 };
 
 void tr_facade_limits_init(struct tr_facade_limits *limits);

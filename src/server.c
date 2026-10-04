@@ -908,7 +908,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	rpc_config.executor_continuation_reserve =
 		server->tuning.executor_continuation_reserve;
 	rpc_config.observability_flags =
-		server->config.limits.observability_flags;
+		server->tuning.observability_flags;
 	rpc_config.interceptor = server->config.interceptor;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
@@ -1008,6 +1008,8 @@ int tr_server_create_with_tuning(
 			&effective_tuning, effective.shard_count);
 
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
+	    (effective_tuning.observability_flags &
+	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes <
@@ -1111,7 +1113,7 @@ int tr_server_create_with_tuning(
 			reactor_config->tx_budget_bytes =
 				reactor_config->rx_budget_bytes;
 			reactor_config->observability_flags =
-				effective.limits.observability_flags;
+				effective_tuning.observability_flags;
 		}
 	}
 

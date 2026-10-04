@@ -36,6 +36,12 @@ struct tr_facade_tuning {
 	uint32_t executor_threads;
 	uint32_t executor_queue_capacity;
 	uint32_t executor_continuation_reserve;
+
+	/*
+	 * Internal diagnostics cost policy. TR_OBSERVABILITY_TIMING enables
+	 * monotonic-clock sampling in Reactor/RPC hot scheduling paths.
+	 */
+	uint32_t observability_flags;
 };
 
 void tr_facade_tuning_init(struct tr_facade_tuning *tuning);

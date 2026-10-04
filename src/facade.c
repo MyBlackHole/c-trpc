@@ -38,6 +38,7 @@ void tr_facade_tuning_init(struct tr_facade_tuning *tuning)
 	tuning->executor_threads = 4U;
 	tuning->executor_queue_capacity = 1024U;
 	tuning->executor_continuation_reserve = 0U;
+	tuning->observability_flags = 0U;
 }
 
 void tr_facade_tuning_normalize(
