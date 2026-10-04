@@ -7,7 +7,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
-#include "../reactor_internal.h"
+#include "../execution/reactor_internal.h"
 #include "socket_internal.h"
 #include "tr/socket.h"
 #include "tr/status.h"

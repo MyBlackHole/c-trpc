@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "tr/reactor.h"
+#include "../../execution/reactor.h"
 #include "tr/transport.h"
 
 struct tr_client_group;

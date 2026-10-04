@@ -9,7 +9,7 @@
 
 #include "tr/socket.h"
 #include "tr/status.h"
-#include "../reactor_internal.h"
+#include "../execution/reactor_internal.h"
 #include "../rpc/rpc_internal.h"
 #include "../io/socket_internal.h"
 

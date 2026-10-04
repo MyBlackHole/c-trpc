@@ -8,7 +8,7 @@
 #include "tr/refcount.h"
 #include "rpc_internal.h"
 #include "../transport/channel/channel_internal.h"
-#include "../reactor_internal.h"
+#include "../execution/reactor_internal.h"
 #include "../observability_internal.h"
 
 #include <assert.h>

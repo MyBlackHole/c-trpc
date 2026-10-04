@@ -2,7 +2,7 @@
 #define TR_PIPELINE_INGRESS_INTERNAL_H
 
 #include "../../group/pipeline_registry_internal.h"
-#include "tr/reactor.h"
+#include "../../execution/reactor.h"
 
 struct tr_pipeline_ingress_config {
 	struct tr_pipeline_registry *registry;

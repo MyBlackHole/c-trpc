@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "tr/reactor.h"
+#include "../execution/reactor.h"
 
 struct tr_pipeline;
 

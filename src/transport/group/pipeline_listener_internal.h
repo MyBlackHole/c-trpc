@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "../../group/pipeline_route_internal.h"
-#include "tr/reactor.h"
+#include "../../execution/reactor.h"
 
 struct tr_pipeline_listener;
 
