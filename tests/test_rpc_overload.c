@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
-#include "tr/buffer.h"
-#include "tr/channel.h"
-#include "tr/reactor.h"
+#include "../src/execution/buffer.h"
+#include "../src/transport/channel/channel.h"
+#include "../src/execution/reactor.h"
 #include "tr/rpc.h"
 #include "tr/status.h"
 #include "../src/rpc/rpc_internal.h"

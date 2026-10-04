@@ -1,7 +1,7 @@
 #include "../src/facade_binding.h"
 
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../src/transport/protocol/wire.h"
 
 #include <assert.h>
 #include <stdint.h>

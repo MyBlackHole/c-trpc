@@ -2,7 +2,7 @@
 #define TR_BUFFER_INTERNAL_H
 
 #include <stdint.h>
-#include "tr/buffer.h"
+#include "buffer.h"
 
 /*
  * Internal bounded on-demand pool: buffer_count bounds concurrent ownership.

@@ -11,12 +11,12 @@
 #include "../../io/connector_internal.h"
 #include "../../group/pipeline_control_wire_internal.h"
 #include "../../group/pipeline_route_internal.h"
-#include "../../reactor_internal.h"
+#include "../../execution/reactor_internal.h"
 #include "../../io/socket_internal.h"
-#include "tr/buffer.h"
+#include "../../execution/buffer.h"
 #include "tr/socket.h"
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../protocol/wire.h"
 
 #define TR_CLIENT_GROUP_CONTROL_BUFFER_BASE 4U
 #define TR_CLIENT_GROUP_NO_SLOT UINT32_MAX

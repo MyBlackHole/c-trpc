@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#include "tr/buffer.h"
-#include "tr/reactor.h"
+#include "../../execution/buffer.h"
+#include "../../execution/reactor.h"
 
 #ifdef __cplusplus
 extern "C" {

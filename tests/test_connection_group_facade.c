@@ -6,7 +6,7 @@
 
 #include "tr/crc32c.h"
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../src/transport/protocol/wire.h"
 
 #include <arpa/inet.h>
 #include <assert.h>

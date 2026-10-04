@@ -2,13 +2,13 @@
 #include "../src/group/pipeline_internal.h"
 #include "../src/group/pipeline_registry_internal.h"
 #include "../src/group/pipeline_route_internal.h"
-#include "../src/reactor_internal.h"
+#include "../src/execution/reactor_internal.h"
 
 #include "tr/crc32c.h"
-#include "tr/reactor.h"
+#include "../src/execution/reactor.h"
 #include "tr/socket.h"
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../src/transport/protocol/wire.h"
 
 #include <arpa/inet.h>
 #include <assert.h>

@@ -4,9 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "tr/buffer.h"
-#include "tr/frame.h"
-#include "tr/wire.h"
+#include "../../execution/buffer.h"
+#include "frame.h"
+#include "wire.h"
 
 #ifdef __cplusplus
 extern "C" {

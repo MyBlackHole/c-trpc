@@ -1,4 +1,4 @@
-#include "tr/buffer.h"
+#include "buffer.h"
 #include "tr/status.h"
 #include "buffer_internal.h"
 #include "../observability_internal.h"

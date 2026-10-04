@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#include "tr/buffer.h"
-#include "tr/frame.h"
+#include "buffer.h"
+#include "../transport/protocol/frame.h"
 #include "tr/observability.h"
 
 #ifdef __cplusplus

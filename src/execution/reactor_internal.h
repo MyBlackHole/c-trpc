@@ -2,7 +2,7 @@
 #define TR_REACTOR_INTERNAL_H
 
 #include <stddef.h>
-#include "tr/reactor.h"
+#include "reactor.h"
 
 /*
  * 提交一个 worker completion 回 Reactor owner。
