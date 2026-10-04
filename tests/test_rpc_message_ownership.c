@@ -1,5 +1,5 @@
 #include "tr/trpc.h"
-#include "tr/buffer.h"
+#include "../src/execution/buffer.h"
 #include "../src/execution/buffer_internal.h"
 
 #include <assert.h>
