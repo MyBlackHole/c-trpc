@@ -51,6 +51,7 @@ void tr_completion_queue_destroy(struct tr_completion_queue *queue)
 	assert(queue->waiters == 0U);
 #endif
 	queue->full_events = 0;
+	queue->admission_generation = 0U;
 	queue->waiters = 0U;
 	queue->accepting = 0;
 	queue->wake_pending = 0;
@@ -64,6 +65,9 @@ int tr_completion_queue_open(struct tr_completion_queue *queue)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
+	queue->admission_generation++;
+	if (queue->admission_generation == 0U)
+		queue->admission_generation = 1U;
 	queue->accepting = 1;
 	pthread_mutex_unlock(&queue->lock);
 	return TR_OK;
@@ -75,10 +79,14 @@ void tr_completion_queue_close(struct tr_completion_queue *queue)
 		return;
 
 	pthread_mutex_lock(&queue->lock);
+	queue->admission_generation++;
+	if (queue->admission_generation == 0U)
+		queue->admission_generation = 1U;
 	queue->accepting = 0;
 	/*
 	 * stop/close 是 producer wait 的生命周期 fence。所有因 full 阻塞的
 	 * worker 必须立即醒来观察 CLOSED，不能依赖 Reactor 再消费一批。
+	 * generation 同时阻止旧 waiter 在后续 reopen 后误入新的运行期。
 	 */
 	pthread_cond_broadcast(&queue->not_full);
 	pthread_mutex_unlock(&queue->lock);
@@ -127,12 +135,16 @@ int tr_completion_queue_push_wait(
 {
 	int wake = 0;
 	int waited = 0;
+	uint64_t admission_generation;
 
 	if (!queue || !completion || !completion->fn)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
-	while (queue->accepting && queue->count == queue->capacity) {
+	admission_generation = queue->admission_generation;
+	while (queue->accepting &&
+	       queue->admission_generation == admission_generation &&
+	       queue->count == queue->capacity) {
 		int error;
 
 		if (!waited) {
@@ -148,7 +160,8 @@ int tr_completion_queue_push_wait(
 		}
 	}
 
-	if (!queue->accepting) {
+	if (!queue->accepting ||
+	    queue->admission_generation != admission_generation) {
 		pthread_mutex_unlock(&queue->lock);
 		return TR_ERR_CLOSED;
 	}
