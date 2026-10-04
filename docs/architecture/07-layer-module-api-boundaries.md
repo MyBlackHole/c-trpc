@@ -903,12 +903,14 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 - Server internal tuning 仍是 aggregate budget -> deterministic shard split，但 public
   path 会保证 hidden default 至少支持每个 configured shard 一个必要资源 unit。
 
-暂缓：
+已完成：
 
-- `rpc_message_buffer_bytes` 仍留在 stable limits：当前 RPC encoder 需要一块能够容纳
-  完整 encoded logical RPC message 的固定 pool buffer。直接隐藏会在
-  `max_message_bytes > max_frame_payload_bytes` 时破坏大消息语义，直接放大到
-  `max_message_bytes` 又会显著扩大常驻内存。先重构 RPC message ownership，再迁移。
+- RPC encoded-message ownership 使用 bounded on-demand pool：descriptor/slot 数
+  保持 internal tuning 有界，单个 slot 按实际 encoded size 增长并复用；
+- facade 不再预分配 `pool_count * max_message_bytes` 的完整 storage，也不再需要
+  stable `rpc_message_buffer_bytes`；
+- Client ownership 保持本地，Server ownership 保持 shard-local；扩容在 pool mutex
+  之外执行，不新增跨 shard shared hot state。
 
 待完成：
 
@@ -916,8 +918,6 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
   暴露 executor node/thread 实现数量；
 - per-Service/Method semantic observability 如有需求，必须使用 shard-local
   accounting 再在 control plane 聚合，不能增加 shared hot counter；
-- RPC message pool 改为 bounded on-demand ownership 后移除
-  `rpc_message_buffer_bytes`；
 
 ### P5 — Physical directory cleanup
 

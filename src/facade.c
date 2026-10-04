@@ -15,7 +15,6 @@ void tr_facade_limits_init(struct tr_facade_limits *limits)
 
 	limits->max_frame_payload_bytes = 256U * 1024U;
 	limits->max_message_bytes = 4U * 1024U * 1024U;
-	limits->rpc_message_buffer_bytes = 256U * 1024U;
 
 	limits->initial_window_bytes = 8U * 1024U * 1024U;
 	limits->window_update_threshold_bytes = 512U * 1024U;
