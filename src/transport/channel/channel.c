@@ -7,7 +7,7 @@
 #include "tr/status.h"
 #include "../protocol/wire.h"
 #include "../../io/socket.h"
-#include "tr/endian.h"
+#include "../../endian.h"
 
 #include <assert.h>
 #include <limits.h>

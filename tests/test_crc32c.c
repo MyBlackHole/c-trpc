@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "tr/crc32c.h"
+#include "../src/crc32c.h"
 #include "../src/crc32c_internal.h"
 
 #include <assert.h>

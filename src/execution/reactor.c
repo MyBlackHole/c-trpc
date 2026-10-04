@@ -5,7 +5,7 @@
 #include "completion_queue.h"
 #include "timer_queue.h"
 #include "command_queue.h"
-#include "tr/crc32c.h"
+#include "../crc32c.h"
 #include "../transport/protocol/parser.h"
 #include "../io/socket.h"
 #include "tr/status.h"

@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "tr/crc32c.h"
+#include "../src/crc32c.h"
 
 #include <stdint.h>
 #include <stdio.h>

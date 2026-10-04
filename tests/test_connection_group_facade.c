@@ -4,7 +4,7 @@
 #include "../src/group/pipeline_control_wire_internal.h"
 #include "../src/group/pipeline_route_internal.h"
 
-#include "tr/crc32c.h"
+#include "../src/crc32c.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 

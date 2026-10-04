@@ -1,6 +1,6 @@
 #include "rpc_wire.h"
 
-#include "tr/endian.h"
+#include "../endian.h"
 #include "tr/status.h"
 
 #include <stddef.h>

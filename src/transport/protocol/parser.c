@@ -1,6 +1,6 @@
 #include "parser.h"
 
-#include "tr/crc32c.h"
+#include "../../crc32c.h"
 #include "tr/status.h"
 
 #include <string.h>

@@ -1,7 +1,7 @@
 #include "wire.h"
 
-#include "tr/crc32c.h"
-#include "tr/endian.h"
+#include "../../crc32c.h"
+#include "../../endian.h"
 #include "tr/status.h"
 
 #include <string.h>
