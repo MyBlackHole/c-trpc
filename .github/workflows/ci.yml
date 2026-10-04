@@ -177,7 +177,6 @@ jobs:
           cat > "$RUNNER_TEMP/expected-headers.txt" <<'EOF'
           client.h
           facade.h
-          observability.h
           rpc.h
           rpc_codec.h
           server.h
@@ -190,7 +189,7 @@ jobs:
 
           # These implementation headers used to be published only because
           # xmake installed include/tr/*.h with a glob. Keep them private.
-          for private_header in             command_queue.h crc32c.h endian.h guard.h parser.h refcount.h             rpc_wire.h socket.h; do
+          for private_header in             command_queue.h crc32c.h endian.h guard.h observability.h parser.h refcount.h             rpc_wire.h socket.h; do
             test ! -e "$prefix/include/tr/$private_header"
           done
 

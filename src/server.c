@@ -12,6 +12,7 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
 #include "facade_diagnostics_internal.h"
+#include "facade_tuning_internal.h"
 #include "tr/reactor.h"
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
@@ -58,6 +59,7 @@ struct tr_server_detached_peer {
 
 struct tr_server {
 	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
 
 	struct tr_runtime *runtime;
 	struct tr_server_shard *shards;
@@ -447,15 +449,7 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	TR_LIMIT_DEFAULT(max_message_bytes);
 	TR_LIMIT_DEFAULT(initial_window_bytes);
 	TR_LIMIT_DEFAULT(window_update_threshold_bytes);
-	TR_LIMIT_DEFAULT(command_capacity);
-	TR_LIMIT_DEFAULT(tx_item_capacity);
-	TR_LIMIT_DEFAULT(control_tx_item_capacity);
-	TR_LIMIT_DEFAULT(rx_buffer_count);
-	TR_LIMIT_DEFAULT(rpc_message_pool_count);
 	TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
-	TR_LIMIT_DEFAULT(reassembly_pool_count);
-	TR_LIMIT_DEFAULT(executor_threads);
-	TR_LIMIT_DEFAULT(executor_queue_capacity);
 #undef TR_LIMIT_DEFAULT
 }
 
@@ -486,23 +480,45 @@ static uint32_t tr_server_budget_share(uint32_t total,
 }
 
 static int tr_server_budget_supports_shards(
-	const struct tr_server_config *config)
+	const struct tr_server_config *config,
+	const struct tr_facade_tuning *tuning)
 {
 	uint32_t shards;
 
-	if (!config || config->shard_count == 0U)
+	if (!config || !tuning || config->shard_count == 0U)
 		return 0;
 	shards = config->shard_count;
 
 	return config->max_peers >= shards &&
 	       (uint32_t)config->listen_backlog >= shards &&
-	       config->limits.executor_threads >= shards &&
-	       config->limits.command_capacity >= shards &&
-	       config->limits.tx_item_capacity >= shards &&
-	       config->limits.control_tx_item_capacity >= shards &&
-	       config->limits.rx_buffer_count >= shards &&
-	       config->limits.rpc_message_pool_count >= shards &&
-	       config->limits.reassembly_pool_count >= shards;
+	       tuning->executor_threads >= shards &&
+	       tuning->command_capacity >= shards &&
+	       tuning->tx_item_capacity >= shards &&
+	       tuning->control_tx_item_capacity >= shards &&
+	       tuning->rx_buffer_count >= shards &&
+	       tuning->rpc_message_pool_count >= shards &&
+	       tuning->reassembly_pool_count >= shards;
+}
+
+static void tr_server_tuning_ensure_shard_minimums(
+	struct tr_facade_tuning *tuning, uint32_t shard_count)
+{
+	if (!tuning || shard_count == 0U)
+		return;
+
+#define TR_TUNING_AT_LEAST_SHARDS(field)       \
+	do {                                   \
+		if (tuning->field < shard_count) \
+			tuning->field = shard_count; \
+	} while (0)
+	TR_TUNING_AT_LEAST_SHARDS(command_capacity);
+	TR_TUNING_AT_LEAST_SHARDS(tx_item_capacity);
+	TR_TUNING_AT_LEAST_SHARDS(control_tx_item_capacity);
+	TR_TUNING_AT_LEAST_SHARDS(rx_buffer_count);
+	TR_TUNING_AT_LEAST_SHARDS(rpc_message_pool_count);
+	TR_TUNING_AT_LEAST_SHARDS(reassembly_pool_count);
+	TR_TUNING_AT_LEAST_SHARDS(executor_threads);
+#undef TR_TUNING_AT_LEAST_SHARDS
 }
 
 static int tr_server_register_methods_on_peer(struct tr_server *server,
@@ -888,11 +904,11 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	rpc_config.message_pool = &shard->rpc_message_pool;
 	rpc_config.executor_threads = shard->executor_threads;
 	rpc_config.executor_queue_capacity =
-		server->config.limits.executor_queue_capacity;
+		server->tuning.executor_queue_capacity;
 	rpc_config.executor_continuation_reserve =
-		server->config.limits.executor_continuation_reserve;
+		server->tuning.executor_continuation_reserve;
 	rpc_config.observability_flags =
-		server->config.limits.observability_flags;
+		server->tuning.observability_flags;
 	rpc_config.interceptor = server->config.interceptor;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
@@ -959,10 +975,13 @@ static void tr_server_on_listener_ready(int listener, uint32_t events,
 	}
 }
 
-int tr_server_create(const struct tr_server_config *config,
-		     struct tr_server **out)
+int tr_server_create_with_tuning(
+	const struct tr_server_config *config,
+	const struct tr_facade_tuning *tuning,
+	struct tr_server **out)
 {
 	struct tr_server_config effective;
+	struct tr_facade_tuning effective_tuning;
 	struct tr_runtime_config runtime_config;
 	struct tr_runtime_shard_config *shard_configs = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
@@ -979,29 +998,42 @@ int tr_server_create(const struct tr_server_config *config,
 		tr_server_config_init(&effective);
 	tr_server_normalize_config(&effective);
 
+	if (tuning)
+		effective_tuning = *tuning;
+	else
+		tr_facade_tuning_init(&effective_tuning);
+	tr_facade_tuning_normalize(&effective_tuning);
+	if (!tuning)
+		tr_server_tuning_ensure_shard_minimums(
+			&effective_tuning, effective.shard_count);
+
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
+	    (effective_tuning.observability_flags &
+	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes <
 		    TR_RPC_WIRE_HEADER_SIZE ||
-	    (effective.limits.executor_continuation_reserve != 0 &&
-	     effective.limits.executor_continuation_reserve >=
-		     (effective.limits.executor_queue_capacity < 16U ?
+	    (effective_tuning.executor_continuation_reserve != 0 &&
+	     effective_tuning.executor_continuation_reserve >=
+		     (effective_tuning.executor_queue_capacity < 16U ?
 			      16U :
-			      effective.limits.executor_queue_capacity)) ||
+			      effective_tuning.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
 	    !tr_server_connection_group_config_valid(
 		    &effective.connection_groups) ||
 	    effective.connection_groups.max_connections >
 		    UINT32_MAX - effective.max_peers - 4U ||
-	    !tr_server_budget_supports_shards(&effective))
+	    !tr_server_budget_supports_shards(
+		    &effective, &effective_tuning))
 		return TR_ERR_INVALID;
 
 	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
 	if (!server_mem)
 		return TR_ERR_NOMEM;
 	server_mem->config = effective;
+	server_mem->tuning = effective_tuning;
 
 	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
@@ -1044,7 +1076,7 @@ int tr_server_create(const struct tr_server_config *config,
 				effective.limits.max_calls;
 			shard_config->rpc_executor.thread_count =
 				tr_server_budget_share(
-					effective.limits.executor_threads,
+					effective_tuning.executor_threads,
 					effective.shard_count, i);
 
 			reactor_config->max_connections =
@@ -1054,19 +1086,19 @@ int tr_server_create(const struct tr_server_config *config,
 				 0U);
 			reactor_config->command_capacity =
 				tr_server_budget_share(
-					effective.limits.command_capacity,
+					effective_tuning.command_capacity,
 					effective.shard_count, i);
 			reactor_config->tx_item_capacity =
 				tr_server_budget_share(
-					effective.limits.tx_item_capacity,
+					effective_tuning.tx_item_capacity,
 					effective.shard_count, i);
 			reactor_config->control_tx_item_capacity =
 				tr_server_budget_share(
-					effective.limits.control_tx_item_capacity,
+					effective_tuning.control_tx_item_capacity,
 					effective.shard_count, i);
 			reactor_config->rx_buffer_count =
 				tr_server_budget_share(
-					effective.limits.rx_buffer_count,
+					effective_tuning.rx_buffer_count,
 					effective.shard_count, i);
 			reactor_config->rx_buffer_size =
 				effective.limits.max_frame_payload_bytes;
@@ -1081,7 +1113,7 @@ int tr_server_create(const struct tr_server_config *config,
 			reactor_config->tx_budget_bytes =
 				reactor_config->rx_budget_bytes;
 			reactor_config->observability_flags =
-				effective.limits.observability_flags;
+				effective_tuning.observability_flags;
 		}
 	}
 
@@ -1109,7 +1141,7 @@ int tr_server_create(const struct tr_server_config *config,
 				tr_runtime_shard_at(server->runtime, i);
 			server_shard->executor_threads =
 				tr_server_budget_share(
-					effective.limits.executor_threads,
+					effective_tuning.executor_threads,
 					effective.shard_count, i);
 			if (!server_shard->runtime)
 				return TR_ERR_STATE;
@@ -1117,7 +1149,7 @@ int tr_server_create(const struct tr_server_config *config,
 			ret = tr_buffer_pool_init(
 				&server_shard->rpc_message_pool,
 				tr_server_budget_share(
-					effective.limits.rpc_message_pool_count,
+					effective_tuning.rpc_message_pool_count,
 					effective.shard_count, i),
 				effective.limits.rpc_message_buffer_bytes);
 			if (ret != TR_OK)
@@ -1127,7 +1159,7 @@ int tr_server_create(const struct tr_server_config *config,
 			ret = tr_buffer_pool_init(
 				&server_shard->reassembly_pool,
 				tr_server_budget_share(
-					effective.limits.reassembly_pool_count,
+					effective_tuning.reassembly_pool_count,
 					effective.shard_count, i),
 				effective.limits.max_message_bytes);
 			if (ret != TR_OK)
@@ -1176,6 +1208,12 @@ int tr_server_create(const struct tr_server_config *config,
 
 	*out = tr_server_owner_take(&server);
 	return TR_OK;
+}
+
+int tr_server_create(const struct tr_server_config *config,
+		     struct tr_server **out)
+{
+	return tr_server_create_with_tuning(config, NULL, out);
 }
 
 static int tr_server_validate_method(const struct tr_rpc_method_desc *method,
@@ -1684,7 +1722,7 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	stats.channel = server->retired_channel_stats;
 	stats.rpc = server->retired_rpc_stats;
 	pthread_mutex_unlock(&server->finalizer_lock);
-	stats.rpc.executor_threads = server->config.limits.executor_threads;
+	stats.rpc.executor_threads = server->tuning.executor_threads;
 
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_stats_owner_request request;

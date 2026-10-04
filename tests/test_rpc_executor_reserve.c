@@ -162,6 +162,21 @@ static void wait_pool_full(struct tr_buffer_pool *pool, uint32_t count)
 	assert(tr_buffer_pool_free_count(pool) == count);
 }
 
+static void wait_channels_idle(struct tr_channel *client,
+			       struct tr_channel *server)
+{
+	unsigned i;
+
+	for (i = 0; i < 10000U; ++i) {
+		if (tr_channel_active_streams(client) == 0U &&
+		    tr_channel_active_streams(server) == 0U)
+			return;
+		pause_1ms();
+	}
+	assert(tr_channel_active_streams(client) == 0U);
+	assert(tr_channel_active_streams(server) == 0U);
+}
+
 static int server_open(struct tr_rpc_call_handle call, void *arg)
 {
 	struct reserve_ctx *ctx = arg;
@@ -462,6 +477,14 @@ int main(void)
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_rpc_call_close_send(calls[RECOVERY_INDEX]) == TR_OK);
 
+	/*
+	 * close_send() publishes transport half-close asynchronously. An empty
+	 * executor snapshot before the peer observes that half-close is not a
+	 * quiescence barrier: the later Stream event may enqueue one final
+	 * lifecycle task. Wait until both Channel Stream tables are empty first,
+	 * then require the executor and message pool to be fully drained.
+	 */
+	wait_channels_idle(client_channel, server_channel);
 	wait_executor(server_rpc, 0U, 0U);
 	wait_pool_full(&rpc_pool, 256U);
 

@@ -10,15 +10,25 @@ semantic observability API is designed.
 
 Cheap counters and bounded-queue high-water marks are always collected.
 
-Timing metrics are opt-in:
+Timing metrics are opt-in **repository diagnostics**, not stable facade
+configuration. Benchmarks/architecture tests enable them through the internal
+tuning seam:
 
 ```c
-limits.observability_flags |= TR_OBSERVABILITY_TIMING;
+struct tr_facade_tuning tuning;
+
+tr_facade_tuning_init(&tuning);
+tuning.observability_flags = TR_OBSERVABILITY_TIMING;
+tr_server_create_with_tuning(&config, &tuning, &server);
 ```
 
-The same flag is propagated internally to Reactor and RPC Endpoint engine
+The flag is propagated internally to Reactor and RPC Endpoint engine
 configuration. With timing disabled, scheduling hot paths do not perform the
 extra monotonic-clock reads used by latency histograms.
+
+`tr/observability.h` remains a repository-internal engine header because
+Reactor/RPC diagnostics use its fixed histogram and queue/pool snapshot types,
+but it is no longer installed as part of the stable SDK.
 
 Timing histograms are diagnostic samples, not transactional accounting
 counters. A timing sample is recorded only when the relevant monotonic-clock

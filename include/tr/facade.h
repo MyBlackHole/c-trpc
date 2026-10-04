@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-#include "tr/observability.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -21,8 +19,11 @@ enum tr_tcp_nodelay_policy {
 };
 
 /*
- * Client/Server facade 共用的高层 runtime limits。
+ * Client/Server facade 共用的高层 semantic limits。
  * 值为 0 的字段由 tr_facade_limits_init() 填入默认值。
+ *
+ * Reactor/pool/executor/diagnostic implementation resources are deliberately
+ * not represented here; facade-owned runtime tuning stays internal.
  *
  * V1 facade 有意只暴露 shared-connection 模式；
  * 更底层的 Channel API 仍支持 split CONTROL/BULK connection。
@@ -35,40 +36,16 @@ struct tr_facade_limits {
 	uint32_t max_frame_payload_bytes;
 	uint32_t max_message_bytes;
 
+	/*
+	 * Transitional RPC encoded-message storage ceiling. This remains public
+	 * until the fixed-size RPC message pool is replaced by bounded on-demand
+	 * ownership; unlike the removed queue/pool counts it directly constrains
+	 * the largest RPC payload the current facade can encode.
+	 */
+	uint32_t rpc_message_buffer_bytes;
+
 	uint64_t initial_window_bytes;
 	uint64_t window_update_threshold_bytes;
-
-	/*
-	 * Client：以下 count/capacity 直接配置单个 Client Runtime。
-	 * Server：以下 count/capacity 是所有 Server shard 的总预算，由
-	 * tr_server_create() 确定性拆分；buffer size 不拆。
-	 */
-	uint32_t command_capacity;
-	uint32_t tx_item_capacity;
-	uint32_t control_tx_item_capacity;
-	uint32_t rx_buffer_count;
-
-	uint32_t rpc_message_pool_count;
-	uint32_t rpc_message_buffer_bytes;
-	uint32_t reassembly_pool_count;
-
-	/*
-	 * Client：worker 由 Client RPC Endpoint 自己拥有。
-	 * Server：该值是所有 shard 的 worker 总预算；每个 shard 的 RPC Endpoint
-	 * 共用该 shard 分到的 worker pool。
-	 */
-	uint32_t executor_threads;
-	/* 每个 Endpoint 独立的有界 task 容量。 */
-	uint32_t executor_queue_capacity;
-	/*
-	 * Server-only opt-in：为已经接受的 Streaming Call continuation /
-	 * lifecycle task 保留的 executor node 数。0 表示禁用 reserve。
-	 * 必须小于 executor_queue_capacity。
-	 */
-	uint32_t executor_continuation_reserve;
-
-	/* Propagated to the facade-owned Reactor and RPC Endpoints. */
-	uint32_t observability_flags;
 };
 
 void tr_facade_limits_init(struct tr_facade_limits *limits);

@@ -344,8 +344,13 @@ silently changing the Server's per-peer limits.
 The benchmark binary exposes Server-only overrides for
 `--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`,
 `--control-tx-items`, and `--command-capacity`. A zero override keeps the
-existing derived benchmark default. These flags do not change
-library/facade defaults and are not passed to benchmark Clients.
+existing derived benchmark default.
+
+These flags are **repository-internal diagnostic tuning**, wired through
+`tr_facade_tuning` / `tr_server_create_with_tuning()`. They are deliberately
+not fields of the installed `tr_facade_limits` SDK contract, do not change
+public facade defaults, and are not passed to benchmark Clients as application
+configuration.
 
 The output records the actual observed pool capacities/executor queue size and
 emits staged pairwise comparisons:
@@ -570,10 +575,10 @@ capacity have both been controlled.
 
 ### Streaming continuation reserve
 
-Server RPC Endpoint 额外提供 opt-in 的
-`executor_continuation_reserve`（facade 对应
-`limits.executor_continuation_reserve`）。默认值为 0，因此现有容量曲线和部署行为
-不变。
+Server RPC Endpoint engine 仍支持 opt-in 的 `executor_continuation_reserve`。
+在 high-level facade 中，该 worker/node/reserve 布局已迁到 repository-internal
+`tr_facade_tuning`，不再属于 installed SDK。默认 reserve 仍为 0，因此现有容量曲线
+和 public facade 默认部署行为不变。
 
 启用 reserve 后仍只有一套有界 executor node pool：
 
@@ -590,7 +595,8 @@ Server RPC Endpoint 额外提供 opt-in 的
 连 continuation/lifecycle 工作都无法进入 executor。它不是吞吐量保证，也不是
 per-service QoS；默认 benchmark 暂时保持 reserve=0。后续应增加独立 Streaming
 fixed-rate 曲线，对比 reserve=0 与 reserve>0 下的 admission reject、continuation
-进展和尾延迟，再决定是否推荐 facade 默认值。
+进展和尾延迟，再决定是否需要设计应用可见的 semantic admission policy；不应直接
+把 executor node reserve 数重新暴露为 stable facade 字段。
 
 CI 对 open-loop 只检查计数守恒、payload 正确性、固定到达时间窗和最终 drain，
 不要求某个 QPS/P99，也不要求共享 runner 必须在某一 rate 点出现饱和。GCC release
