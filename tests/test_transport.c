@@ -9,7 +9,7 @@
 #include "tr/refcount.h"
 #include "tr/rpc.h"
 #include "tr/rpc_codec.h"
-#include "tr/rpc_wire.h"
+#include "../src/rpc/rpc_wire.h"
 #include "../src/transport/channel/channel.h"
 #include "tr/client.h"
 #include "tr/server.h"

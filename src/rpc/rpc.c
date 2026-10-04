@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "tr/rpc.h"
 
-#include "tr/rpc_wire.h"
+#include "rpc_wire.h"
 #include "tr/status.h"
 #include "tr/endian.h"
 #include "tr/guard.h"
