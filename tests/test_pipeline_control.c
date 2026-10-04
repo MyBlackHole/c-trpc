@@ -1,4 +1,4 @@
-#include "../src/pipeline_control_internal.h"
+#include "../src/group/pipeline_control_internal.h"
 #include "../src/group/pipeline_registry_internal.h"
 
 #include "tr/reactor.h"

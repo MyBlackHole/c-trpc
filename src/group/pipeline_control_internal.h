@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-#include "group/pipeline_internal.h"
-#include "group/pipeline_registry_internal.h"
-#include "group/pipeline_route_internal.h"
-#include "group/pipeline_control_wire_internal.h"
+#include "pipeline_internal.h"
+#include "pipeline_registry_internal.h"
+#include "pipeline_route_internal.h"
+#include "pipeline_control_wire_internal.h"
 
 struct tr_pipeline_control;
 

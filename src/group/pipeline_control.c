@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "reactor_internal.h"
+#include "../reactor_internal.h"
 #include "tr/status.h"
 
 struct tr_pipeline_control {
