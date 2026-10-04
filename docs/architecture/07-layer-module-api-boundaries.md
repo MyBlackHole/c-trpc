@@ -427,7 +427,8 @@ struct public_handle {
 
 ```text
 max_connections
-max_inflight_calls
+max_calls
+max_active_transfers
 max_message_bytes
 memory_budget_bytes
 worker_concurrency

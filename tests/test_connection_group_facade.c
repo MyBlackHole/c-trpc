@@ -585,6 +585,7 @@ static void test_public_connection_group_client_data_offer(void)
 	client_config.limits.max_frame_payload_bytes = 64U;
 	client_config.limits.max_message_bytes = 130U;
 	client_config.connection_groups.max_data_connections = 1U;
+	client_config.connection_groups.max_active_transfers = 3U;
 	client_config.connection_groups.on_transfer_ready =
 		on_client_transfer_ready;
 	client_config.connection_groups.callback_arg = &ctx;
@@ -619,6 +620,7 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(client_stats.draining == 0U);
 	assert(client_stats.data_connections == 1U);
 	assert(client_stats.active_transfers == 0U);
+	assert(client_stats.active_transfer_limit == 3U);
 	assert(client_stats.send_bytes_inflight == 0U);
 	assert(client_stats.send_bytes_limit == 130U);
 
@@ -841,6 +843,8 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connection_groups.max_data_connections = 1U;
+	/* max_active_transfers == 0 inherits the existing max_streams default. */
+	assert(client_config.connection_groups.max_active_transfers == 0U);
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 
 	group.group_id = TEST_GROUP_ID;
@@ -863,6 +867,7 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	assert(client_stats.draining == 1U);
 	assert(client_stats.data_connections == 0U);
 	assert(client_stats.active_transfers == 0U);
+	assert(client_stats.active_transfer_limit == client_config.limits.max_streams);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 5000U) == TR_OK);
 
