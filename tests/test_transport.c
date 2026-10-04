@@ -4288,6 +4288,15 @@ struct rpc_shape_ctx {
 	unsigned remote_closed;
 	unsigned finished;
 	unsigned events_after_finished;
+	unsigned server_context_ok;
+	unsigned client_context_ok;
+	unsigned initial_metadata_ok;
+	unsigned trailing_metadata_ok;
+	uint32_t expected_method_id;
+	enum tr_rpc_cardinality expected_request_cardinality;
+	enum tr_rpc_cardinality expected_response_cardinality;
+	const char *initial_value;
+	const char *trailing_value;
 	int finish_status;
 };
 
@@ -4296,10 +4305,21 @@ rpc_shape_server_message(struct tr_rpc_call_handle call,
 			 const struct tr_rpc_message *message, void *arg)
 {
 	struct rpc_shape_ctx *ctx = (struct rpc_shape_ctx *)arg;
-	(void)call;
+	struct tr_rpc_context context;
+
 	assert(message->bytes.len != 0);
+	memset(&context, 0, sizeof(context));
+	assert(tr_rpc_call_get_context(call, &context) == TR_OK);
+	assert(context.service_id == 3U);
+	assert(context.method_id == ctx->expected_method_id);
+	assert(context.request_cardinality ==
+	       ctx->expected_request_cardinality);
+	assert(context.response_cardinality ==
+	       ctx->expected_response_cardinality);
+	assert(context.cancelled == 0);
 
 	pthread_mutex_lock(&ctx->lock);
+	ctx->server_context_ok = 1U;
 	ctx->server_messages++;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
@@ -4318,8 +4338,16 @@ static void rpc_server_stream_half_close(struct tr_rpc_call_handle call,
 	second.data = (const uint8_t *)"server-stream-2";
 	second.len = 15;
 
+	assert(tr_rpc_call_set_metadata(
+		       call, "initial-id", ctx->initial_value,
+		       (uint16_t)strlen(ctx->initial_value)) == TR_OK);
 	assert(tr_rpc_call_send(call, &first) == TR_OK);
 	assert(tr_rpc_call_send(call, &second) == TR_OK);
+	assert(tr_rpc_call_set_metadata(call, "late-initial", "x", 1U) ==
+	       TR_ERR_STATE);
+	assert(tr_rpc_call_set_trailing_metadata(
+		       call, "trail-id", ctx->trailing_value,
+		       (uint16_t)strlen(ctx->trailing_value)) == TR_OK);
 	assert(tr_rpc_call_finish(call, 99) == TR_ERR_INVALID);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
 
@@ -4338,8 +4366,14 @@ static void rpc_client_stream_half_close(struct tr_rpc_call_handle call,
 	only.len = 20;
 	assert(tr_rpc_call_close_send(call) == TR_ERR_INVALID);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_ERR_STATE);
+	assert(tr_rpc_call_set_metadata(
+		       call, "initial-id", ctx->initial_value,
+		       (uint16_t)strlen(ctx->initial_value)) == TR_OK);
 	assert(tr_rpc_call_send(call, &only) == TR_OK);
 	assert(tr_rpc_call_send(call, &only) == TR_ERR_STATE);
+	assert(tr_rpc_call_set_trailing_metadata(
+		       call, "trail-id", ctx->trailing_value,
+		       (uint16_t)strlen(ctx->trailing_value)) == TR_OK);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
 
 	pthread_mutex_lock(&ctx->lock);
@@ -4352,8 +4386,18 @@ rpc_shape_client_message(struct tr_rpc_call_handle call,
 			 const struct tr_rpc_message *message, void *arg)
 {
 	struct rpc_shape_ctx *ctx = (struct rpc_shape_ctx *)arg;
-	(void)call;
+	uint8_t value[64];
+	uint16_t value_len = sizeof(value);
+
 	assert(message->bytes.len != 0);
+	if (tr_rpc_call_get_peer_metadata(
+		    call, "initial-id", value, &value_len) == TR_OK) {
+		assert(value_len == strlen(ctx->initial_value));
+		assert(memcmp(value, ctx->initial_value, value_len) == 0);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->initial_metadata_ok = 1U;
+		pthread_mutex_unlock(&ctx->lock);
+	}
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->client_messages++;
@@ -4377,6 +4421,30 @@ static void rpc_shape_client_event(struct tr_rpc_call_handle call,
 	else if (event == TR_RPC_CALL_EVENT_REMOTE_CLOSED)
 		ctx->remote_closed++;
 	else if (event == TR_RPC_CALL_EVENT_FINISHED) {
+		struct tr_rpc_context context;
+		uint8_t value[64];
+		uint16_t value_len = sizeof(value);
+
+		memset(&context, 0, sizeof(context));
+		assert(tr_rpc_call_get_context(call, &context) == TR_OK);
+		assert(context.service_id == 3U);
+		assert(context.method_id == ctx->expected_method_id);
+		assert(context.request_cardinality ==
+		       ctx->expected_request_cardinality);
+		assert(context.response_cardinality ==
+		       ctx->expected_response_cardinality);
+		ctx->client_context_ok = 1U;
+
+		assert(tr_rpc_call_get_peer_trailing_metadata(
+			       call, "trail-id", value, &value_len) == TR_OK);
+		assert(value_len == strlen(ctx->trailing_value));
+		assert(memcmp(value, ctx->trailing_value, value_len) == 0);
+		ctx->trailing_metadata_ok = 1U;
+
+		value_len = sizeof(value);
+		assert(tr_rpc_call_get_peer_metadata(
+			       call, "trail-id", value, &value_len) == TR_ERR_STALE);
+
 		ctx->finished++;
 		ctx->finish_status = status;
 	}
@@ -4428,6 +4496,16 @@ static void test_rpc_client_and_server_stream_shapes(void)
 
 	memset(&server_stream_ctx, 0, sizeof(server_stream_ctx));
 	memset(&client_stream_ctx, 0, sizeof(client_stream_ctx));
+	server_stream_ctx.expected_method_id = 1U;
+	server_stream_ctx.expected_request_cardinality = TR_RPC_ONE;
+	server_stream_ctx.expected_response_cardinality = TR_RPC_MANY;
+	server_stream_ctx.initial_value = "ss-initial";
+	server_stream_ctx.trailing_value = "ss-trailer";
+	client_stream_ctx.expected_method_id = 2U;
+	client_stream_ctx.expected_request_cardinality = TR_RPC_MANY;
+	client_stream_ctx.expected_response_cardinality = TR_RPC_ONE;
+	client_stream_ctx.initial_value = "cs-initial";
+	client_stream_ctx.trailing_value = "cs-trailer";
 	assert(pthread_mutex_init(&server_stream_ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&server_stream_ctx.cond, NULL) == 0);
 	assert(pthread_mutex_init(&client_stream_ctx.lock, NULL) == 0);
@@ -4541,6 +4619,10 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	assert(server_stream_ctx.finish_status == TR_RPC_STATUS_OK);
 	assert(server_stream_ctx.remote_closed == 0U);
 	assert(server_stream_ctx.events_after_finished == 0U);
+	assert(server_stream_ctx.server_context_ok == 1U);
+	assert(server_stream_ctx.client_context_ok == 1U);
+	assert(server_stream_ctx.initial_metadata_ok == 1U);
+	assert(server_stream_ctx.trailing_metadata_ok == 1U);
 	pthread_mutex_unlock(&server_stream_ctx.lock);
 
 	memset(&callbacks, 0, sizeof(callbacks));
@@ -4570,6 +4652,10 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	assert(client_stream_ctx.finish_status == TR_RPC_STATUS_OK);
 	assert(client_stream_ctx.remote_closed == 0U);
 	assert(client_stream_ctx.events_after_finished == 0U);
+	assert(client_stream_ctx.server_context_ok == 1U);
+	assert(client_stream_ctx.client_context_ok == 1U);
+	assert(client_stream_ctx.initial_metadata_ok == 1U);
+	assert(client_stream_ctx.trailing_metadata_ok == 1U);
 	pthread_mutex_unlock(&client_stream_ctx.lock);
 
 	memset(&client_stats, 0, sizeof(client_stats));
