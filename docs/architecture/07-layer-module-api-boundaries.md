@@ -571,7 +571,7 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 | Runtime shard ownership | 满足 | listener、peer state、executor/resource 已 shard-local |
 | Reactor single-owner | 满足 | protocol mutable state 基本遵循 owner mutation |
 | Worker completion returns to owner | 满足 | completion/event 返回原 owner，不直接修改协议状态 |
-| Pipeline implementation components | 满足 | registry/route/ingress/control/listener 当前都在 `src/*_internal.h`，未进入 `include/tr` |
+| Pipeline implementation components | 满足 | semantic core/registry 已进入 `src/group/`；route/ingress/control/listener 仍为 internal adapter，全部未进入 `include/tr` |
 | Pipeline business independence in code | 基本满足 | 当前代码使用 generic pipeline/control/data/stream 名称，没有引入 backup_id/checkpoint 等业务对象 |
 | bounded resource model | 满足 | queue/pool/table 大部分都有显式容量 |
 | hot-path no cross-shard shared pool | 满足 | 当前 shard resource ownership 与设计方向一致 |
@@ -953,11 +953,6 @@ src/runtime/
   runtime_internal.h
 
 src/group/
-  pipeline.c
-  pipeline_internal.h
-  pipeline_registry.c
-  pipeline_registry_internal.h
-
   pipeline.c
   pipeline_internal.h
   pipeline_registry.c
