@@ -891,6 +891,9 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 - P4 第二阶段进一步把 executor worker count / per-Endpoint node capacity /
   continuation reserve 移到 internal tuning；高层 facade 不再承诺当前 worker-pool
   和 task-node 实现布局；
+- P4 第三阶段把 timing observability flag 移到 internal tuning，并将
+  `observability.h` 从 installed SDK allowlist 移除；固定 histogram 与 queue/pool
+  snapshot 类型现在明确属于 engine diagnostics contract；
 - public Client/Server create 只接受 semantic config，并由 facade 内部生成 Runtime/Pool
   defaults；benchmark/architecture tests 通过 internal `*_create_with_tuning()`
   保留精确资源实验能力；
@@ -908,11 +911,10 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 
 - 如需应用可配置过载策略，设计 max-inflight/admission 等 semantic policy，不能重新
   暴露 executor node/thread 实现数量；
-- observability config 从 limits 中拆出；
+- facade-wide stable semantic observability 继续收敛：仅公开 Call/Service/Group
+  等业务语义计数，不公开 Reactor queue/pool/histogram layout；
 - RPC message pool 改为 bounded on-demand ownership 后移除
   `rpc_message_buffer_bytes`；
-- facade-wide stable semantic observability 继续收敛。
-
 ### P5 — Physical directory cleanup
 
 只有前面 capability 边界稳定后，再决定是否迁移为：

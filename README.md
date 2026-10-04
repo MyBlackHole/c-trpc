@@ -58,12 +58,15 @@ The transport/RPC core performs no normal filesystem I/O and contains no backup-
 
 The runtime still collects allocation-free structured diagnostics for benchmark
 and internal bottleneck attribution. Queue/pool counters and high-water marks
-remain available inside the engine; monotonic timing histograms are opt-in with
-`TR_OBSERVABILITY_TIMING`.
+remain available inside the engine; monotonic timing histograms remain opt-in
+through repository-internal diagnostic tuning.
 
-Detailed Reactor/Channel/Endpoint snapshots are intentionally **not** part of
-the stable installed SDK anymore. Repository benchmarks/tests use the internal
-diagnostics surface. See [`docs/observability.md`](docs/observability.md).
+Detailed Reactor/Channel/Endpoint snapshots, timing flags and diagnostic
+histogram/queue/pool types are intentionally **not** part of the stable
+installed SDK. Repository benchmarks/tests use the internal diagnostics
+surface. Stable semantic observability is currently limited to APIs whose
+meaning is independent of Runtime layout (for example Connection Group semantic
+stats). See [`docs/observability.md`](docs/observability.md).
 
 ## High-level Client / Server facade
 
