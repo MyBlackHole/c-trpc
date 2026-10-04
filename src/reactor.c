@@ -3360,6 +3360,39 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 	return ret;
 }
 
+int tr_reactor_call_or_stopped(
+	struct tr_reactor *reactor, int (*fn)(void *arg), void *arg)
+{
+	int ret;
+
+	if (!reactor || !fn)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor))
+		return fn(arg);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (!reactor->started) {
+		/*
+		 * 没有 owner thread，也没有可能复制 callback_arg 的 event dispatch。
+		 * ctl_lock 同时阻止另一个线程在 direct mutation 中启动 Reactor。
+		 */
+		ret = fn(arg);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire)) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return TR_ERR_CLOSED;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	/*
+	 * stop 可能在释放 ctl_lock 后抢先关闭 admission；这种并发情况下
+	 * tr_reactor_call() 返回 CLOSED，caller 不能回退 direct mutation。
+	 */
+	return tr_reactor_call(reactor, fn, arg);
+}
+
 struct tr_reactor_stats_request {
 	struct tr_reactor *reactor;
 	struct tr_reactor_stats *out;
