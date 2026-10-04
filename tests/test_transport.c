@@ -2370,6 +2370,10 @@ struct rpc_test_ctx {
 	pthread_cond_t cond;
 	unsigned server_calls;
 	unsigned client_results;
+	unsigned client_pre;
+	unsigned server_pre;
+	unsigned server_post;
+	unsigned client_post;
 	int client_status;
 	uint8_t request[64];
 	uint32_t request_len;
@@ -5058,6 +5062,407 @@ static void test_rpc_metadata_cancel_deadline(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct rpc_interceptor_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned client_pre[3];
+	unsigned server_pre[3];
+	unsigned server_post[3];
+	unsigned client_post[3];
+	unsigned stream_opened;
+	unsigned stream_messages;
+	unsigned stream_finished;
+	unsigned unary_handler_calls;
+	unsigned unary_results;
+	int stream_status;
+	int unary_status;
+	int auth_seen;
+	int trailer_seen;
+	int reject_metadata_seen;
+	int client_post_before_stream_callback;
+	int client_post_before_unary_callback;
+};
+
+static void wait_rpc_interceptor_counter(
+	struct rpc_interceptor_test_ctx *ctx, unsigned *value, unsigned target)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx->lock);
+	while (*value < target && ret == 0)
+		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	assert(*value >= target);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static int rpc_client_interceptor(
+	struct tr_rpc_call_handle call, enum tr_rpc_interceptor_phase phase,
+	int status, void *arg)
+{
+	struct rpc_interceptor_test_ctx *ctx =
+		(struct rpc_interceptor_test_ctx *)arg;
+	struct tr_rpc_context context;
+	uint8_t value[64];
+	uint16_t value_len;
+	uint32_t method_id;
+
+	memset(&context, 0, sizeof(context));
+	assert(tr_rpc_call_get_context(call, &context) == TR_OK);
+	assert(context.service_id == 77U);
+	method_id = context.method_id;
+	assert(method_id == 1U || method_id == 2U);
+
+	if (phase == TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL) {
+		assert(status == TR_RPC_STATUS_OK);
+		assert(tr_rpc_call_cancel(call) == TR_ERR_STATE);
+		assert(tr_rpc_call_set_metadata(
+			       call, "auth-token", "token-v1", 8U) == TR_OK);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->client_pre[method_id]++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_RPC_STATUS_OK;
+	}
+
+	assert(phase == TR_RPC_INTERCEPTOR_CLIENT_POST_CALL);
+	if (method_id == 1U) {
+		value_len = sizeof(value);
+		assert(status == TR_RPC_STATUS_OK);
+		assert(tr_rpc_call_get_peer_trailing_metadata(
+			       call, "server-trailer", value, &value_len) == TR_OK);
+		assert(value_len == 7U);
+		assert(memcmp(value, "done-v1", 7U) == 0);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->trailer_seen = 1;
+		pthread_mutex_unlock(&ctx->lock);
+	} else {
+		value_len = sizeof(value);
+		assert(status == TR_RPC_STATUS_PERMISSION_DENIED);
+		assert(tr_rpc_call_get_peer_metadata(
+			       call, "reject-by", value, &value_len) == TR_OK);
+		assert(value_len == 11U);
+		assert(memcmp(value, "interceptor", 11U) == 0);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->reject_metadata_seen = 1;
+		pthread_mutex_unlock(&ctx->lock);
+	}
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->client_post[method_id]++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_STATUS_OK;
+}
+
+static int rpc_server_interceptor(
+	struct tr_rpc_call_handle call, enum tr_rpc_interceptor_phase phase,
+	int status, void *arg)
+{
+	struct rpc_interceptor_test_ctx *ctx =
+		(struct rpc_interceptor_test_ctx *)arg;
+	struct tr_rpc_context context;
+	uint8_t value[64];
+	uint16_t value_len = sizeof(value);
+	uint32_t method_id;
+
+	memset(&context, 0, sizeof(context));
+	assert(tr_rpc_call_get_context(call, &context) == TR_OK);
+	assert(context.service_id == 77U);
+	method_id = context.method_id;
+	assert(method_id == 1U || method_id == 2U);
+
+	if (phase == TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER) {
+		assert(status == TR_RPC_STATUS_OK);
+		assert(tr_rpc_call_get_peer_metadata(
+			       call, "auth-token", value, &value_len) == TR_OK);
+		assert(value_len == 8U);
+		assert(memcmp(value, "token-v1", 8U) == 0);
+
+		pthread_mutex_lock(&ctx->lock);
+		ctx->auth_seen = 1;
+		ctx->server_pre[method_id]++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+
+		if (method_id == 2U) {
+			assert(tr_rpc_call_set_metadata(
+				       call, "reject-by", "interceptor", 11U) == TR_OK);
+			return TR_RPC_STATUS_PERMISSION_DENIED;
+		}
+		return TR_RPC_STATUS_OK;
+	}
+
+	assert(phase == TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER);
+	assert(status == TR_RPC_STATUS_OK);
+	assert(method_id == 1U);
+	assert(tr_rpc_call_set_trailing_metadata(
+		       call, "server-trailer", "done-v1", 7U) == TR_OK);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->server_post[method_id]++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_STATUS_OK;
+}
+
+static enum tr_rpc_message_disposition
+rpc_interceptor_stream_message(
+	struct tr_rpc_call_handle call, const struct tr_rpc_message *message,
+	void *arg)
+{
+	struct rpc_interceptor_test_ctx *ctx =
+		(struct rpc_interceptor_test_ctx *)arg;
+	(void)call;
+	assert(message != NULL);
+	assert(message->bytes.len == 4U);
+	assert(memcmp(message->bytes.data, "ping", 4U) == 0);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->stream_messages++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_MESSAGE_RELEASE;
+}
+
+static void rpc_interceptor_stream_half_close(
+	struct tr_rpc_call_handle call, void *arg)
+{
+	struct tr_rpc_bytes response;
+	(void)arg;
+
+	response.data = (const uint8_t *)"pong";
+	response.len = 4U;
+	assert(tr_rpc_call_send(call, &response) == TR_OK);
+	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
+}
+
+static void rpc_interceptor_client_stream_event(
+	struct tr_rpc_call_handle call, enum tr_rpc_call_event event,
+	int status, void *arg)
+{
+	struct rpc_interceptor_test_ctx *ctx =
+		(struct rpc_interceptor_test_ctx *)arg;
+	(void)call;
+
+	if (event == TR_RPC_CALL_EVENT_OPENED) {
+		pthread_mutex_lock(&ctx->lock);
+		ctx->stream_opened++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return;
+	}
+	if (event != TR_RPC_CALL_EVENT_FINISHED)
+		return;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->client_post_before_stream_callback =
+		ctx->client_post[1] == 1U;
+	ctx->stream_status = status;
+	ctx->stream_finished++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static int rpc_interceptor_unary_handler(
+	struct tr_rpc_call_handle call, const struct tr_rpc_bytes *request,
+	struct tr_rpc_unary_response *response, void *arg)
+{
+	struct rpc_interceptor_test_ctx *ctx =
+		(struct rpc_interceptor_test_ctx *)arg;
+	(void)call;
+	(void)request;
+	(void)response;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->unary_handler_calls++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_OK;
+}
+
+static void rpc_interceptor_unary_result(
+	struct tr_rpc_call_handle call, int status,
+	const struct tr_rpc_bytes *response, void *arg)
+{
+	struct rpc_interceptor_test_ctx *ctx =
+		(struct rpc_interceptor_test_ctx *)arg;
+	(void)call;
+	assert(response != NULL);
+	assert(response->len == 0U);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->client_post_before_unary_callback =
+		ctx->client_post[2] == 1U;
+	ctx->unary_status = status;
+	ctx->unary_results++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void test_rpc_interceptor_v1(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_rpc_method_desc stream_method;
+	struct tr_rpc_method_desc unary_method;
+	struct tr_rpc_stream_handlers stream_handlers;
+	struct tr_rpc_call_callbacks callbacks;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_rpc_endpoint *client_rpc = NULL;
+	struct tr_rpc_endpoint *server_rpc = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	struct tr_buffer_pool rpc_pool;
+	struct tr_rpc_call_handle stream_call;
+	struct tr_rpc_call_handle unary_call;
+	struct tr_rpc_bytes request;
+	struct rpc_interceptor_test_ctx ctx;
+	int client_fd;
+	int server_fd;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 128U;
+	reactor_config.tx_item_capacity = 64U;
+	reactor_config.control_tx_item_capacity = 32U;
+	reactor_config.rx_buffer_count = 32U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(
+		       &reactor_config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 16U;
+	channel_config.initial_window_bytes = 64U * 1024U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create(
+		       &channel_config, client_conn, client_conn,
+		       NULL, NULL, NULL, NULL, &client_channel) == TR_OK);
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(
+		       &channel_config, server_conn, server_conn,
+		       NULL, NULL, NULL, NULL, &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	assert(tr_buffer_pool_init(&rpc_pool, 32U, 4096U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 4U;
+	rpc_config.max_calls = 8U;
+	rpc_config.message_pool = &rpc_pool;
+	rpc_config.executor_threads = 1U;
+	rpc_config.executor_queue_capacity = 32U;
+	rpc_config.interceptor.fn = rpc_client_interceptor;
+	rpc_config.interceptor.arg = &ctx;
+	assert(tr_rpc_endpoint_create(
+		       client_channel, &rpc_config, &client_rpc) == TR_OK);
+
+	rpc_config.role = TR_RPC_SERVER;
+	rpc_config.interceptor.fn = rpc_server_interceptor;
+	rpc_config.interceptor.arg = &ctx;
+	assert(tr_rpc_endpoint_create(
+		       server_channel, &rpc_config, &server_rpc) == TR_OK);
+
+	memset(&stream_method, 0, sizeof(stream_method));
+	stream_method.service_id = 77U;
+	stream_method.method_id = 1U;
+	stream_method.request_cardinality = TR_RPC_MANY;
+	stream_method.response_cardinality = TR_RPC_ONE;
+	stream_method.request_codec_id = TR_RPC_CODEC_RAW;
+	stream_method.response_codec_id = TR_RPC_CODEC_RAW;
+	stream_method.lane = TR_LANE_CONTROL;
+	stream_method.max_request_bytes = 128U;
+	stream_method.max_response_bytes = 128U;
+	assert(tr_rpc_register_method(
+		       client_rpc, &stream_method, NULL, NULL) == TR_OK);
+	memset(&stream_handlers, 0, sizeof(stream_handlers));
+	stream_handlers.on_message = rpc_interceptor_stream_message;
+	stream_handlers.on_half_close = rpc_interceptor_stream_half_close;
+	assert(tr_rpc_register_stream_method(
+		       server_rpc, &stream_method, &stream_handlers, &ctx) == TR_OK);
+
+	unary_method = stream_method;
+	unary_method.method_id = 2U;
+	unary_method.request_cardinality = TR_RPC_ONE;
+	unary_method.response_cardinality = TR_RPC_ONE;
+	assert(tr_rpc_register_method(
+		       client_rpc, &unary_method, NULL, NULL) == TR_OK);
+	assert(tr_rpc_register_method(
+		       server_rpc, &unary_method,
+		       rpc_interceptor_unary_handler, &ctx) == TR_OK);
+
+	memset(&callbacks, 0, sizeof(callbacks));
+	callbacks.on_event = rpc_interceptor_client_stream_event;
+	callbacks.arg = &ctx;
+	assert(tr_rpc_call_start(
+		       client_rpc, 77U, 1U, &callbacks, &stream_call) == TR_OK);
+	wait_rpc_interceptor_counter(&ctx, &ctx.stream_opened, 1U);
+	request.data = (const uint8_t *)"ping";
+	request.len = 4U;
+	assert(tr_rpc_call_send(stream_call, &request) == TR_OK);
+	assert(tr_rpc_call_close_send(stream_call) == TR_OK);
+
+	wait_rpc_interceptor_counter(&ctx, &ctx.stream_messages, 1U);
+	wait_rpc_interceptor_counter(&ctx, &ctx.stream_finished, 1U);
+	wait_rpc_handle_stale(stream_call);
+
+	request.data = (const uint8_t *)"deny";
+	request.len = 4U;
+	assert(tr_rpc_unary_call(
+		       client_rpc, 77U, 2U, &request,
+		       rpc_interceptor_unary_result, &ctx, &unary_call) == TR_OK);
+	wait_rpc_interceptor_counter(&ctx, &ctx.unary_results, 1U);
+	wait_rpc_handle_stale(unary_call);
+
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.client_pre[1] == 1U);
+	assert(ctx.server_pre[1] == 1U);
+	assert(ctx.server_post[1] == 1U);
+	assert(ctx.client_post[1] == 1U);
+	assert(ctx.stream_status == TR_RPC_STATUS_OK);
+	assert(ctx.trailer_seen == 1);
+	assert(ctx.client_post_before_stream_callback == 1);
+
+	assert(ctx.client_pre[2] == 1U);
+	assert(ctx.server_pre[2] == 1U);
+	assert(ctx.server_post[2] == 0U);
+	assert(ctx.client_post[2] == 1U);
+	assert(ctx.unary_handler_calls == 0U);
+	assert(ctx.unary_status == TR_RPC_STATUS_PERMISSION_DENIED);
+	assert(ctx.reject_metadata_seen == 1);
+	assert(ctx.client_post_before_unary_callback == 1);
+	assert(ctx.auth_seen == 1);
+	pthread_mutex_unlock(&ctx.lock);
+
+	wait_for_pool_full(&rpc_pool, 32U);
+	tr_rpc_endpoint_destroy(client_rpc);
+	tr_rpc_endpoint_destroy(server_rpc);
+	tr_channel_destroy(client_channel);
+	tr_channel_destroy(server_channel);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	tr_buffer_pool_destroy(&rpc_pool);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 struct rpc_executor_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
@@ -5499,6 +5904,10 @@ struct facade_test_ctx {
 	pthread_cond_t cond;
 	unsigned server_calls;
 	unsigned client_results;
+	unsigned client_pre;
+	unsigned server_pre;
+	unsigned server_post;
+	unsigned client_post;
 	int client_status;
 	char request[64];
 	uint32_t request_len;
@@ -5546,6 +5955,44 @@ static void facade_test_result(struct tr_rpc_call_handle call, int status,
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static int facade_test_interceptor(
+	struct tr_rpc_call_handle call, enum tr_rpc_interceptor_phase phase,
+	int status, void *arg)
+{
+	struct facade_test_ctx *ctx = (struct facade_test_ctx *)arg;
+	struct tr_rpc_context context;
+
+	memset(&context, 0, sizeof(context));
+	assert(tr_rpc_call_get_context(call, &context) == TR_OK);
+	assert(context.service_id == 77U);
+	assert(context.method_id == 1U);
+
+	pthread_mutex_lock(&ctx->lock);
+	switch (phase) {
+	case TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->client_pre++;
+		break;
+	case TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->server_pre++;
+		break;
+	case TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->server_post++;
+		break;
+	case TR_RPC_INTERCEPTOR_CLIENT_POST_CALL:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->client_post++;
+		break;
+	default:
+		assert(!"unexpected facade interceptor phase");
+	}
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_STATUS_OK;
+}
+
 static void test_client_server_facade_unary(void)
 {
 	struct tr_server_config server_config;
@@ -5576,6 +6023,8 @@ static void test_client_server_facade_unary(void)
 	server_config.limits.reassembly_pool_count = 4U;
 	server_config.limits.rx_buffer_count = 32U;
 	server_config.limits.observability_flags = TR_OBSERVABILITY_TIMING;
+	server_config.interceptor.fn = facade_test_interceptor;
+	server_config.interceptor.arg = &ctx;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
@@ -5604,6 +6053,8 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.rpc_message_pool_count = 32U;
 	client_config.limits.reassembly_pool_count = 4U;
 	client_config.limits.rx_buffer_count = 32U;
+	client_config.interceptor.fn = facade_test_interceptor;
+	client_config.interceptor.arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 	nodelay_before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
@@ -5670,6 +6121,10 @@ static void test_client_server_facade_unary(void)
 	assert(ctx.server_calls == 2U);
 	assert(ctx.client_results == 2U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
+	assert(ctx.client_pre == 2U);
+	assert(ctx.server_pre == 2U);
+	assert(ctx.server_post == 2U);
+	assert(ctx.client_post == 2U);
 	pthread_mutex_unlock(&ctx.lock);
 
 	{
@@ -6679,6 +7134,7 @@ int main(void)
 	test_rpc_bidi_streaming_raw_fast_path();
 	test_rpc_client_and_server_stream_shapes();
 	test_rpc_metadata_cancel_deadline();
+	test_rpc_interceptor_v1();
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
 	test_client_server_facade_unary();

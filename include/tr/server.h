@@ -37,6 +37,9 @@ struct tr_server_config {
 	/* 0 表示禁用 Transport keepalive。 */
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
+
+	/* RPC Call-level owner interceptor；fn==NULL 表示禁用。 */
+	struct tr_rpc_interceptor interceptor;
 };
 
 void tr_server_config_init(struct tr_server_config *config);

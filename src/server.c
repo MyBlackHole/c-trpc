@@ -893,6 +893,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		server->config.limits.executor_continuation_reserve;
 	rpc_config.observability_flags =
 		server->config.limits.observability_flags;
+	rpc_config.interceptor = server->config.interceptor;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		peer->channel, &rpc_config, tr_server_shard_rpc_executor(shard),

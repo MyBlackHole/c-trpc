@@ -605,6 +605,56 @@ tr_rpc_call_get_peer_trailing_metadata(...);
 cardinality, relative deadline state, and cancellation state. It intentionally
 does not expose Endpoint/Stream/Reactor/slot identity.
 
+### RPC Interceptor V1
+
+Client/Server can install one fixed Call-level interceptor:
+
+```c
+struct tr_rpc_interceptor {
+    tr_rpc_interceptor_fn fn;
+    void *arg;
+};
+```
+
+Phases:
+
+```text
+CLIENT_PRE_CALL
+SERVER_PRE_HANDLER
+SERVER_POST_HANDLER
+CLIENT_POST_CALL
+```
+
+The hook runs synchronously on the owning Reactor and must be short/non-blocking.
+It may use Call Context/metadata APIs, but same-Call protocol mutation
+(`send/close_send/finish/cancel`) is rejected with `TR_ERR_STATE` while the
+hook is active.
+
+`SERVER_PRE_HANDLER` is the only V1 phase whose return value controls the Call:
+`OK` continues, while a valid non-OK RPC status rejects before the application
+handler runs. Other phases are observational/metadata hooks and should return
+`OK`.
+
+Typical usage:
+
+```text
+CLIENT_PRE_CALL
+  -> add trace/auth initial metadata
+
+SERVER_PRE_HANDLER
+  -> read auth/tenant/trace metadata
+  -> optional lightweight RPC rejection
+
+SERVER_POST_HANDLER
+  -> add trailers / finish metrics
+
+CLIENT_POST_CALL
+  -> read trailers / finish trace
+```
+
+V1 deliberately has no dynamic interceptor chain and no blocking/async interceptor
+continuation.
+
 Server handlers can read request metadata and set response metadata before the
 first response is encoded.
 
