@@ -432,7 +432,7 @@ TCP connection #1
        v
 Channel remains alive
        |
-       +--> client: optional connect/backoff reconnect thread
+       +--> client: Reactor timer + nonblocking connector
        |       or
        +--> server: application accepts a replacement socket
        |
@@ -468,10 +468,10 @@ struct tr_channel_reconnect_config cfg = {
 tr_channel_enable_client_reconnect(channel, &cfg);
 ```
 
-The V1 reconnect thread performs only low-rate connect/poll/backoff work. Once a
-socket is adopted, normal RX/TX remains owned by the epoll Reactor. Shared mode
-reconnects one physical connection for both lanes; split mode reconnects each
-failed lane independently.
+Client reconnect is fully Reactor-owned: backoff uses a Reactor-local timer and
+connect completion uses the bounded auxiliary-fd connector path. No per-Channel
+maintenance thread is created. Shared mode reconnects one physical connection
+for both lanes; split mode reconnects failed lanes independently.
 
 The server does not automatically accept or trust replacement sockets. Its
 listener/authentication layer accepts the socket, adopts it into the Reactor,
@@ -792,9 +792,9 @@ The Xmake CI matrix checks:
 - optional Server `executor_continuation_reserve` can keep a bounded number of executor nodes unavailable to new Unary/Streaming first-task admission while still allowing already-accepted Streaming continuation/lifecycle tasks to use them; the default is 0 (disabled), so enabling it is an explicit capacity policy
 - direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
-- V1 automatic client reconnect still uses one low-rate reconnect thread per enabled Client Channel; connect/poll/backoff may block and is intentionally not executed in Reactor timer callbacks
+- automatic Client reconnect is Reactor-owned and does not create a per-Channel thread; backoff is timer-driven and connect completion is nonblocking
 - server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
-- RPC Endpoint deadlines and Channel keepalive are Reactor-local; automatic reconnect still uses its transitional low-rate reconnect thread
+- RPC Endpoint deadlines, Channel keepalive, and automatic reconnect scheduling are Reactor-local
 - the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
 
 ## Build
