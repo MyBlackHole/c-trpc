@@ -21,10 +21,10 @@ struct tr_pipeline_registry_stats {
 };
 
 /*
- * Registry is a bounded shard-local index. It does not own Pipeline lifetime:
- * callers must unregister a Pipeline before destroying it. Pipeline pointers
- * do not escape the owner domain; the only persistent pointer capability is
- * the owner-local DATA ingress binding returned at exact attach time.
+ * Registry 是 bounded shard-local index，不拥有 Pipeline lifetime。
+ * Pipeline 必须先 unregister 再 destroy；Pipeline 裸指针不得逃逸 owner domain。
+ * 唯一允许长期保存的内部 pointer capability，是 exact DATA attach 后返回给
+ * owner-local ingress handler 的绑定，并且不能超过对应 membership 生命周期。
  */
 int tr_pipeline_registry_create(
 	const struct tr_pipeline_registry_config *config,
@@ -53,9 +53,9 @@ int tr_pipeline_registry_close_control(
 	struct tr_conn_handle expected_control);
 
 /*
- * DATA route attach consumes only an exact RESERVED Pipeline capability.
- * The preface is assumed to have passed raw magic/CRC validation; this API
- * independently revalidates semantic fields and registry identity.
+ * DATA route attach 只消费 generation 精确匹配的 RESERVED capability。
+ * routing preface 在进入本层前已经完成 magic/CRC 校验；本 API 仍会独立校验
+ * semantic fields 与 registry identity。
  */
 int tr_pipeline_registry_attach_data_route(
 	struct tr_pipeline_registry *registry,
@@ -64,10 +64,9 @@ int tr_pipeline_registry_attach_data_route(
 	struct tr_pipeline_data_ref *data_out);
 
 /*
- * Owner-only ingress attach variant. In addition to consuming the exact DATA
- * reservation it returns the owner-local Pipeline capability used by the DATA
- * connection's ingress handler. The returned pointer must not escape the owner
- * domain or outlive that exact DATA membership.
+ * Owner-only ingress attach 版本。除消费 exact DATA reservation 外，还返回
+ * DATA ingress handler 使用的 owner-local Pipeline capability。该指针不得逃逸
+ * owner domain，也不得超过对应 exact DATA membership 生命周期。
  */
 int tr_pipeline_registry_attach_data_route_local_on_owner(
 	struct tr_pipeline_registry *registry,
