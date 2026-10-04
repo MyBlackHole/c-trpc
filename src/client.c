@@ -36,6 +36,7 @@ struct tr_client {
 
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
+	struct tr_rpc_send_budget rpc_send_budget;
 	int rpc_pool_ready;
 	int reassembly_pool_ready;
 
@@ -99,7 +100,6 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 		TR_LIMIT_DEFAULT(max_message_bytes);
 		TR_LIMIT_DEFAULT(initial_window_bytes);
 		TR_LIMIT_DEFAULT(window_update_threshold_bytes);
-		TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
 #undef TR_LIMIT_DEFAULT
 	}
 }
@@ -172,6 +172,7 @@ int tr_client_create_with_tuning(
 	struct tr_runtime_shard_config shard_config;
 	struct tr_reactor_config *reactor_config;
 	struct tr_client *client TR_AUTO(tr_client_owner_cleanup) = NULL;
+	uint32_t rpc_wire_message_bytes;
 	int ret;
 
 	if (!out)
@@ -189,15 +190,25 @@ int tr_client_create_with_tuning(
 	else
 		tr_facade_tuning_init(&effective_tuning);
 	tr_facade_tuning_normalize(&effective_tuning);
+	if (!tuning &&
+	    effective_tuning.rpc_send_bytes_limit <
+		    effective.limits.max_message_bytes)
+		effective_tuning.rpc_send_bytes_limit =
+			effective.limits.max_message_bytes;
 
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
 	    (effective_tuning.observability_flags &
 	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
-	    effective.limits.rpc_message_buffer_bytes <
-		    TR_RPC_WIRE_HEADER_SIZE)
+	    effective.limits.max_message_bytes >
+		    UINT32_MAX - TR_RPC_ENVELOPE_BUFFER_SIZE ||
+	    effective_tuning.rpc_send_bytes_limit <
+		    effective.limits.max_message_bytes)
 		return TR_ERR_INVALID;
+	rpc_wire_message_bytes =
+		effective.limits.max_message_bytes +
+		TR_RPC_ENVELOPE_BUFFER_SIZE;
 
 	client = (struct tr_client *)calloc(1, sizeof(*client));
 	if (!client)
@@ -207,17 +218,19 @@ int tr_client_create_with_tuning(
 
 	ret = tr_buffer_pool_init(&client->rpc_message_pool,
 				  effective_tuning.rpc_message_pool_count,
-				  effective.limits.rpc_message_buffer_bytes);
+				  TR_RPC_ENVELOPE_BUFFER_SIZE);
 	if (ret != TR_OK)
 		return ret;
 	client->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&client->reassembly_pool,
 				  effective_tuning.reassembly_pool_count,
-				  effective.limits.max_message_bytes);
+				  rpc_wire_message_bytes);
 	if (ret != TR_OK)
 		return ret;
 	client->reassembly_pool_ready = 1;
+	client->rpc_send_budget.limit =
+		effective_tuning.rpc_send_bytes_limit;
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
 	memset(&shard_config, 0, sizeof(shard_config));
@@ -347,7 +360,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	channel_config.window_update_threshold_bytes =
 		client->config.limits.window_update_threshold_bytes;
 	channel_config.max_message_bytes =
-		client->config.limits.max_message_bytes;
+		client->config.limits.max_message_bytes +
+		TR_RPC_ENVELOPE_BUFFER_SIZE;
 	channel_config.reassembly_pool = &client->reassembly_pool;
 
 	ret = tr_channel_create(&channel_config, client->connection,
@@ -361,6 +375,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	rpc_config.max_methods = client->config.limits.max_methods;
 	rpc_config.max_calls = client->config.limits.max_calls;
 	rpc_config.message_pool = &client->rpc_message_pool;
+	rpc_config.send_budget = &client->rpc_send_budget;
 	rpc_config.executor_threads = client->tuning.executor_threads;
 	rpc_config.executor_queue_capacity =
 		client->tuning.executor_queue_capacity;
@@ -583,6 +598,10 @@ int tr_client_register_method(struct tr_client *client,
 {
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
+	if (!method ||
+	    method->max_request_bytes > client->config.limits.max_message_bytes ||
+	    method->max_response_bytes > client->config.limits.max_message_bytes)
+		return TR_ERR_INVALID;
 	return tr_rpc_register_method(client->rpc, method, NULL, NULL);
 }
 

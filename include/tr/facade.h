@@ -34,15 +34,11 @@ struct tr_facade_limits {
 	uint32_t max_calls;
 
 	uint32_t max_frame_payload_bytes;
-	uint32_t max_message_bytes;
-
 	/*
-	 * Transitional RPC encoded-message storage ceiling. This remains public
-	 * until the fixed-size RPC message pool is replaced by bounded on-demand
-	 * ownership; unlike the removed queue/pool counts it directly constrains
-	 * the largest RPC payload the current facade can encode.
+	 * Maximum application RPC message payload. RPC header/metadata overhead is
+	 * derived internally and does not consume this semantic budget.
 	 */
-	uint32_t rpc_message_buffer_bytes;
+	uint32_t max_message_bytes;
 
 	uint64_t initial_window_bytes;
 	uint64_t window_update_threshold_bytes;

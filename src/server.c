@@ -46,6 +46,7 @@ struct tr_server_shard {
 	struct tr_runtime_shard *runtime;
 	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
+	struct tr_rpc_send_budget rpc_send_budget;
 	uint32_t executor_threads;
 	int rpc_pool_ready;
 	int reassembly_pool_ready;
@@ -466,7 +467,6 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	TR_LIMIT_DEFAULT(max_message_bytes);
 	TR_LIMIT_DEFAULT(initial_window_bytes);
 	TR_LIMIT_DEFAULT(window_update_threshold_bytes);
-	TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
 #undef TR_LIMIT_DEFAULT
 }
 
@@ -496,6 +496,15 @@ static uint32_t tr_server_budget_share(uint32_t total,
 	return base + (shard_index < remainder ? 1U : 0U);
 }
 
+static uint64_t tr_server_budget_share_u64(
+	uint64_t total, uint32_t shard_count, uint32_t shard_index)
+{
+	uint64_t base = total / shard_count;
+	uint64_t remainder = total % shard_count;
+
+	return base + (shard_index < remainder ? 1U : 0U);
+}
+
 static int tr_server_budget_supports_shards(
 	const struct tr_server_config *config,
 	const struct tr_facade_tuning *tuning)
@@ -514,14 +523,21 @@ static int tr_server_budget_supports_shards(
 	       tuning->control_tx_item_capacity >= shards &&
 	       tuning->rx_buffer_count >= shards &&
 	       tuning->rpc_message_pool_count >= shards &&
-	       tuning->reassembly_pool_count >= shards;
+	       tuning->reassembly_pool_count >= shards &&
+	       tuning->rpc_send_bytes_limit >=
+		       (uint64_t)config->limits.max_message_bytes * shards;
 }
 
 static void tr_server_tuning_ensure_shard_minimums(
-	struct tr_facade_tuning *tuning, uint32_t shard_count)
+	struct tr_facade_tuning *tuning, uint32_t shard_count,
+	uint32_t max_message_bytes)
 {
+	uint64_t min_send_bytes;
+
 	if (!tuning || shard_count == 0U)
 		return;
+	min_send_bytes =
+		(uint64_t)max_message_bytes * (uint64_t)shard_count;
 
 #define TR_TUNING_AT_LEAST_SHARDS(field)       \
 	do {                                   \
@@ -536,6 +552,8 @@ static void tr_server_tuning_ensure_shard_minimums(
 	TR_TUNING_AT_LEAST_SHARDS(reassembly_pool_count);
 	TR_TUNING_AT_LEAST_SHARDS(executor_threads);
 #undef TR_TUNING_AT_LEAST_SHARDS
+	if (tuning->rpc_send_bytes_limit < min_send_bytes)
+		tuning->rpc_send_bytes_limit = min_send_bytes;
 }
 
 static int tr_server_register_methods_on_peer(struct tr_server *server,
@@ -895,7 +913,8 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	channel_config.window_update_threshold_bytes =
 		server->config.limits.window_update_threshold_bytes;
 	channel_config.max_message_bytes =
-		server->config.limits.max_message_bytes;
+		server->config.limits.max_message_bytes +
+		TR_RPC_ENVELOPE_BUFFER_SIZE;
 	channel_config.reassembly_pool = &shard->reassembly_pool;
 
 	/*
@@ -919,6 +938,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	rpc_config.max_methods = server->config.limits.max_methods;
 	rpc_config.max_calls = server->config.limits.max_calls;
 	rpc_config.message_pool = &shard->rpc_message_pool;
+	rpc_config.send_budget = &shard->rpc_send_budget;
 	rpc_config.executor_threads = shard->executor_threads;
 	rpc_config.executor_queue_capacity =
 		server->tuning.executor_queue_capacity;
@@ -1003,6 +1023,7 @@ int tr_server_create_with_tuning(
 	struct tr_runtime_shard_config *shard_configs = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
+	uint32_t rpc_wire_message_bytes;
 	int ret;
 
 	if (!out)
@@ -1022,15 +1043,16 @@ int tr_server_create_with_tuning(
 	tr_facade_tuning_normalize(&effective_tuning);
 	if (!tuning)
 		tr_server_tuning_ensure_shard_minimums(
-			&effective_tuning, effective.shard_count);
+			&effective_tuning, effective.shard_count,
+			effective.limits.max_message_bytes);
 
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
 	    (effective_tuning.observability_flags &
 	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
-	    effective.limits.rpc_message_buffer_bytes <
-		    TR_RPC_WIRE_HEADER_SIZE ||
+	    effective.limits.max_message_bytes >
+		    UINT32_MAX - TR_RPC_ENVELOPE_BUFFER_SIZE ||
 	    (effective_tuning.executor_continuation_reserve != 0 &&
 	     effective_tuning.executor_continuation_reserve >=
 		     (effective_tuning.executor_queue_capacity < 16U ?
@@ -1045,6 +1067,9 @@ int tr_server_create_with_tuning(
 	    !tr_server_budget_supports_shards(
 		    &effective, &effective_tuning))
 		return TR_ERR_INVALID;
+	rpc_wire_message_bytes =
+		effective.limits.max_message_bytes +
+		TR_RPC_ENVELOPE_BUFFER_SIZE;
 
 	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
 	if (!server_mem)
@@ -1168,17 +1193,21 @@ int tr_server_create_with_tuning(
 				tr_server_budget_share(
 					effective_tuning.rpc_message_pool_count,
 					effective.shard_count, i),
-				effective.limits.rpc_message_buffer_bytes);
+				TR_RPC_ENVELOPE_BUFFER_SIZE);
 			if (ret != TR_OK)
 				return ret;
 			server_shard->rpc_pool_ready = 1;
+			server_shard->rpc_send_budget.limit =
+				tr_server_budget_share_u64(
+					effective_tuning.rpc_send_bytes_limit,
+					effective.shard_count, i);
 
 			ret = tr_buffer_pool_init(
 				&server_shard->reassembly_pool,
 				tr_server_budget_share(
 					effective_tuning.reassembly_pool_count,
 					effective.shard_count, i),
-				effective.limits.max_message_bytes);
+				rpc_wire_message_bytes);
 			if (ret != TR_OK)
 				return ret;
 			server_shard->reassembly_pool_ready = 1;
@@ -1273,7 +1302,9 @@ int tr_server_register_method(struct tr_server *server,
 	struct tr_server_method *entry;
 
 	if (!server || !handler ||
-	    tr_server_validate_method(method, 1) != TR_OK)
+	    tr_server_validate_method(method, 1) != TR_OK ||
+	    method->max_request_bytes > server->config.limits.max_message_bytes ||
+	    method->max_response_bytes > server->config.limits.max_message_bytes)
 		return TR_ERR_INVALID;
 	if (server->started)
 		return TR_ERR_STATE;
@@ -1300,7 +1331,9 @@ int tr_server_register_stream_method(
 	struct tr_server_method *entry;
 
 	if (!server || !handlers ||
-	    tr_server_validate_method(method, 0) != TR_OK)
+	    tr_server_validate_method(method, 0) != TR_OK ||
+	    method->max_request_bytes > server->config.limits.max_message_bytes ||
+	    method->max_response_bytes > server->config.limits.max_message_bytes)
 		return TR_ERR_INVALID;
 	if (server->started)
 		return TR_ERR_STATE;

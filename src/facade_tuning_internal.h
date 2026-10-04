@@ -25,6 +25,8 @@ struct tr_facade_tuning {
 
 	uint32_t rpc_message_pool_count;
 	uint32_t reassembly_pool_count;
+	/* Client budget / aggregate Server shard budget for owned RPC payloads. */
+	uint64_t rpc_send_bytes_limit;
 
 	/*
 	 * Executor layout is implementation tuning, not stable application
