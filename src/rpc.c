@@ -3752,7 +3752,18 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 	call = tr_rpc_find_call_by_stream_locked(endpoint, stream, &slot);
 
 	if (!call) {
+		int close_unbound =
+			event == TR_STREAM_EVENT_REMOTE_CLOSED;
+
 		pthread_mutex_unlock(&endpoint->lock);
+		/*
+		 * V1 identifies an RPC Method in the first REQUEST frame. If a peer
+		 * half-closes before publishing that frame (for example zero-message
+		 * MANY request or cancel-before-first-request), there is no RPC Call
+		 * to own the Stream. Close our half so the Channel slot cannot leak.
+		 */
+		if (close_unbound)
+			(void)tr_stream_close(stream);
 		return;
 	}
 
@@ -4961,13 +4972,28 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 		goto out;
 	}
 
+	if (endpoint->config.role != TR_RPC_CLIENT) {
+		ret = TR_ERR_INVALID;
+		goto out;
+	}
+
 	cardinality =
 		tr_rpc_outbound_cardinality(endpoint, &call->method->desc);
 	if (cardinality == TR_RPC_ONE && call->tx_count != 1U) {
 		ret = TR_ERR_STATE;
 		goto out;
 	}
-	if (cardinality == TR_RPC_NONE && call->tx_count != 0U) {
+	if (cardinality == TR_RPC_MANY && call->tx_count == 0U) {
+		/*
+		 * V1 has no separate Method-open envelope: the first REQUEST carries
+		 * service_id/method_id. Zero-message request streams therefore cannot
+		 * be represented yet and must not silently half-close an anonymous
+		 * Channel Stream.
+		 */
+		ret = TR_ERR_STATE;
+		goto out;
+	}
+	if (cardinality != TR_RPC_ONE && cardinality != TR_RPC_MANY) {
 		ret = TR_ERR_STATE;
 		goto out;
 	}
