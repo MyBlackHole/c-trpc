@@ -990,6 +990,7 @@ src/transport/channel/
 
 src/io/
   socket.c
+  socket.h
   socket_internal.h
   connector.c
   connector_internal.h
@@ -1046,6 +1047,8 @@ src/execution/
 - Linux socket primitive 与 Reactor-owned nonblocking connector 已进入 `src/io/`；
   Socket 只负责 fd/TCP primitives，Connector 只负责 connect/preface/timer/aux-fd
   execution，不拥有 Channel/Group semantic state；
+- `socket.h` 已从 `include/tr/` 回收到 `src/io/`，作为 repository-internal I/O capability
+  header；生产代码与 internal tests 不再从 public include tree 获取 socket primitives；
 - `socket_internal.h` 不再 include facade policy；TCP_NODELAY policy validation/
   mapping 已回收到 `facade_policy_internal.h`，保持 `src/io/` 对 facade 无反向依赖；
 - Reactor implementation 与 command/completion/timer queues 已进入 `src/execution/`；
