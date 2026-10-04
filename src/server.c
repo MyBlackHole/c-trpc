@@ -1007,7 +1007,7 @@ int tr_server_create_with_tuning(
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
-	    effective_tuning.rpc_message_buffer_bytes <
+	    effective.limits.rpc_message_buffer_bytes <
 		    TR_RPC_WIRE_HEADER_SIZE ||
 	    (effective.limits.executor_continuation_reserve != 0 &&
 	     effective.limits.executor_continuation_reserve >=
@@ -1145,7 +1145,7 @@ int tr_server_create_with_tuning(
 				tr_server_budget_share(
 					effective_tuning.rpc_message_pool_count,
 					effective.shard_count, i),
-				effective_tuning.rpc_message_buffer_bytes);
+				effective.limits.rpc_message_buffer_bytes);
 			if (ret != TR_OK)
 				return ret;
 			server_shard->rpc_pool_ready = 1;
