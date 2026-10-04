@@ -3628,7 +3628,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 		task.call = tr_rpc_make_call_handle(endpoint, slot, call);
 		if (call->is_unary) {
-			if (call->response_received || call->result_delivered) {
+			if (!tr_rpc_status_valid(wire.status) ||
+			    call->response_received || call->result_delivered) {
 				pthread_mutex_unlock(&endpoint->lock);
 				(void)tr_stream_close(stream);
 				return TR_STREAM_DATA_RELEASE;
