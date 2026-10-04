@@ -165,8 +165,8 @@ stop
 
 - worker 不用 `sched_yield()` 消耗 CPU；
 - queue 容量仍然是硬上限，不建立 side queue；
-- stop/restart 之间有 admission generation fence，旧运行期 completion 不会 ABA
-  进入新运行期。
+- stop/restart 之间有 admission generation fence：已经在旧 admission epoch 中
+  进入 capacity wait 的 producer 即使晚于 reopen 醒来，也只能返回 CLOSED。
 
 当前仍保留 mutex + condition 的 bounded MPSC queue；是否进一步改为 atomic ring /
 futex 必须由 profile 决定，而不是为了“无锁”增加生命周期复杂度。
