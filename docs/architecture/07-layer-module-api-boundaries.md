@@ -707,25 +707,16 @@ construction。Client/Server 用户无需知道 Endpoint 如何绑定 Transport�
 
 ---
 
-#### A7. High-level facade config leaks queue/pool implementation — MEDIUM
+#### A7. High-level facade config leaks queue/pool implementation — MEDIUM — RESOLVED
 
-`tr_facade_limits` 当前直接包含：
+`tr_facade_limits` 曾直接包含 command/TX/RX/pool/executor worker/node 等实现容量。
 
-- command capacity；
-- tx item capacity；
-- control tx item capacity；
-- rx buffer count；
-- RPC message pool count；
-- reassembly pool count；
-- executor queue capacity。
+当前已完成收敛：这些字段已退出 stable config，统一进入 repository-internal
+`tr_facade_tuning`；public create 使用 facade-owned defaults，benchmark/architecture
+诊断才通过 tuned create 精确指定布局。
 
-这些参数对于性能调优有价值，但不是高层业务语义。
-
-目标：
-
-- stable config 暴露 semantic limits；
-- implementation tuning 移到 optional advanced tuning；
-- 默认配置不要求用户理解 Reactor allocator。
+后续若需要用户控制过载行为，应新增 max-inflight/admission 等 semantic policy，
+不能重新公开 Reactor allocator、worker count 或 executor node count。
 
 ---
 
@@ -897,6 +888,9 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 - P4 第一阶段已把 command ring / DATA TX / CONTROL TX / RX buffer /
   RPC message pool count / reassembly pool count 从 stable `tr_facade_limits`
   移到 repository-internal `tr_facade_tuning`；
+- P4 第二阶段进一步把 executor worker count / per-Endpoint node capacity /
+  continuation reserve 移到 internal tuning；高层 facade 不再承诺当前 worker-pool
+  和 task-node 实现布局；
 - public Client/Server create 只接受 semantic config，并由 facade 内部生成 Runtime/Pool
   defaults；benchmark/architecture tests 通过 internal `*_create_with_tuning()`
   保留精确资源实验能力；
@@ -912,8 +906,8 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 
 待完成：
 
-- executor threads / queue / continuation reserve 的 semantic-policy vs implementation
-  tuning 分类；
+- 如需应用可配置过载策略，设计 max-inflight/admission 等 semantic policy，不能重新
+  暴露 executor node/thread 实现数量；
 - observability config 从 limits 中拆出；
 - RPC message pool 改为 bounded on-demand ownership 后移除
   `rpc_message_buffer_bytes`；
