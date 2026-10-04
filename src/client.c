@@ -193,7 +193,7 @@ int tr_client_create_with_tuning(
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
-	    effective_tuning.rpc_message_buffer_bytes <
+	    effective.limits.rpc_message_buffer_bytes <
 		    TR_RPC_WIRE_HEADER_SIZE)
 		return TR_ERR_INVALID;
 
@@ -204,7 +204,7 @@ int tr_client_create_with_tuning(
 
 	ret = tr_buffer_pool_init(&client->rpc_message_pool,
 				  effective_tuning.rpc_message_pool_count,
-				  effective_tuning.rpc_message_buffer_bytes);
+				  effective.limits.rpc_message_buffer_bytes);
 	if (ret != TR_OK)
 		return ret;
 	client->rpc_pool_ready = 1;
