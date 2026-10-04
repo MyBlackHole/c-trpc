@@ -5065,6 +5065,7 @@ struct rpc_interceptor_test_ctx {
 	unsigned server_pre[3];
 	unsigned server_post[3];
 	unsigned client_post[3];
+	unsigned stream_opened;
 	unsigned stream_messages;
 	unsigned stream_finished;
 	unsigned unary_handler_calls;
@@ -5241,6 +5242,13 @@ static void rpc_interceptor_client_stream_event(
 		(struct rpc_interceptor_test_ctx *)arg;
 	(void)call;
 
+	if (event == TR_RPC_CALL_EVENT_OPENED) {
+		pthread_mutex_lock(&ctx->lock);
+		ctx->stream_opened++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return;
+	}
 	if (event != TR_RPC_CALL_EVENT_FINISHED)
 		return;
 
@@ -5400,6 +5408,7 @@ static void test_rpc_interceptor_v1(void)
 	callbacks.arg = &ctx;
 	assert(tr_rpc_call_start(
 		       client_rpc, 77U, 1U, &callbacks, &stream_call) == TR_OK);
+	wait_rpc_interceptor_counter(&ctx, &ctx.stream_opened, 1U);
 	request.data = (const uint8_t *)"ping";
 	request.len = 4U;
 	assert(tr_rpc_call_send(stream_call, &request) == TR_OK);
