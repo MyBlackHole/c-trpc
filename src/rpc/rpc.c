@@ -3,7 +3,7 @@
 
 #include "rpc_wire.h"
 #include "tr/status.h"
-#include "tr/endian.h"
+#include "../endian.h"
 #include "tr/guard.h"
 #include "tr/refcount.h"
 #include "rpc_internal.h"
