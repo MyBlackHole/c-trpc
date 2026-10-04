@@ -3,6 +3,7 @@
 #include "tr/server.h"
 #include "tr/status.h"
 #include "../src/facade_diagnostics_internal.h"
+#include "../src/facade_tuning_internal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -223,8 +224,8 @@ static struct options parse_options(int argc, char **argv)
 	return o;
 }
 
-static void configure_limits(struct tr_facade_limits *limits, const struct options *o,
-			     int server)
+static void configure_limits(
+	struct tr_facade_limits *limits, const struct options *o, int server)
 {
 	tr_facade_limits_init(limits);
 	limits->max_streams = 2U * o->capacity;
@@ -234,27 +235,37 @@ static void configure_limits(struct tr_facade_limits *limits, const struct optio
 	limits->max_message_bytes = o->bulk_bytes + 512U;
 	if (limits->max_message_bytes < limits->max_frame_payload_bytes)
 		limits->max_message_bytes = limits->max_frame_payload_bytes;
-	limits->rpc_message_buffer_bytes = limits->max_message_bytes;
-	limits->rpc_message_pool_count =
-		server && o->rpc_message_pool ?
-			o->rpc_message_pool : 2U * o->capacity + 16U;
-	limits->reassembly_pool_count =
-		server && o->reassembly_pool ?
-			o->reassembly_pool : o->capacity + 8U;
-	limits->rx_buffer_count =
-		server && o->rx_buffers ?
-			o->rx_buffers : 2U * o->capacity + 16U;
-	if (server && o->control_tx_items)
-		limits->control_tx_item_capacity = o->control_tx_items;
-	if (server && o->command_capacity)
-		limits->command_capacity = o->command_capacity;
-	limits->initial_window_bytes = (uint64_t)limits->max_message_bytes * 4U;
+	limits->initial_window_bytes =
+		(uint64_t)limits->max_message_bytes * 4U;
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
 	limits->executor_threads = o->workers;
 	limits->executor_queue_capacity =
-		server && o->executor_queue ? o->executor_queue : 4U * o->capacity;
+		server && o->executor_queue ?
+			o->executor_queue : 4U * o->capacity;
 	if (server)
 		limits->observability_flags = TR_OBSERVABILITY_TIMING;
+}
+
+static void configure_tuning(
+	struct tr_facade_tuning *tuning,
+	const struct tr_facade_limits *limits,
+	const struct options *o, int server)
+{
+	tr_facade_tuning_init(tuning);
+	tuning->rpc_message_buffer_bytes = limits->max_message_bytes;
+	tuning->rpc_message_pool_count =
+		server && o->rpc_message_pool ?
+			o->rpc_message_pool : 2U * o->capacity + 16U;
+	tuning->reassembly_pool_count =
+		server && o->reassembly_pool ?
+			o->reassembly_pool : o->capacity + 8U;
+	tuning->rx_buffer_count =
+		server && o->rx_buffers ?
+			o->rx_buffers : 2U * o->capacity + 16U;
+	if (server && o->control_tx_items)
+		tuning->control_tx_item_capacity = o->control_tx_items;
+	if (server && o->command_capacity)
+		tuning->command_capacity = o->command_capacity;
 }
 
 static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
@@ -290,6 +301,7 @@ static int echo(struct tr_rpc_call_handle call, const struct tr_rpc_bytes *reque
 static int run_server(const struct options *o)
 {
 	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	struct tr_server_stats stats;
 	struct rusage usage_after;
@@ -299,9 +311,11 @@ static int run_server(const struct options *o)
 	int status;
 	tr_server_config_init(&config);
 	configure_limits(&config.limits, o, 1);
+	configure_tuning(&tuning, &config.limits, o, 1);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
-	check(tr_server_create(&config, &server), "server create");
+	check(tr_server_create_with_tuning(
+		      &config, &tuning, &server), "server create");
 	for (id = 1; id <= 3; ++id) {
 		struct tr_rpc_method_desc m = method(id, o->bulk_bytes);
 		check(tr_server_register_method(server, &m, echo, &delays[id - 1U]), "server method");
@@ -316,11 +330,11 @@ static int run_server(const struct options *o)
 	       port, (long)getpid(), o->workers, o->capacity,
 	       o->executor_queue ? o->executor_queue : 4U * o->capacity,
 	       o->slow_ms,
-	       config.limits.rx_buffer_count,
-	       config.limits.rpc_message_pool_count,
-	       config.limits.reassembly_pool_count,
-	       config.limits.control_tx_item_capacity,
-	       config.limits.command_capacity);
+	       tuning.rx_buffer_count,
+	       tuning.rpc_message_pool_count,
+	       tuning.reassembly_pool_count,
+	       tuning.control_tx_item_capacity,
+	       tuning.command_capacity);
 	fflush(stdout);
 	/* No global signal policy: the harness closes this process's stdin. */
 	while (getchar() != EOF)
@@ -834,12 +848,14 @@ static int open_phase(struct client_run *run, const struct options *o)
 static int run_client(const struct options *o)
 {
 	struct tr_client_config config;
+	struct tr_facade_tuning tuning;
 	struct client_run run = {0};
 	pthread_condattr_t attr;
 	uint32_t i;
 	int status = EXIT_SUCCESS;
 	tr_client_config_init(&config);
 	configure_limits(&config.limits, o, 0);
+	configure_tuning(&tuning, &config.limits, o, 0);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
 	check(pthread_mutex_init(&run.lock, NULL), "mutex init");
@@ -855,7 +871,8 @@ static int run_client(const struct options *o)
 		run.slots[i].payload = malloc(o->bulk_bytes);
 		if (!run.slots[i].payload) fatal("payload allocation", errno);
 	}
-	check(tr_client_create(&config, &run.client), "client create");
+	check(tr_client_create_with_tuning(
+		      &config, &tuning, &run.client), "client create");
 	check(tr_client_connect(run.client, o->host, (uint16_t)o->port), "client connect");
 	check(tr_client_wait_ready(run.client, 5000U), "client ready");
 	for (i = 1U; i <= 3U; ++i) {
