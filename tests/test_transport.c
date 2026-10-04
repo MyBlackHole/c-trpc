@@ -4418,6 +4418,8 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	struct tr_conn_handle server_conn;
 	struct tr_buffer_pool rpc_pool;
 	struct tr_rpc_call_handle call;
+	struct tr_rpc_endpoint_stats client_stats;
+	struct tr_rpc_endpoint_stats server_stats;
 	struct rpc_shape_ctx server_stream_ctx;
 	struct rpc_shape_ctx client_stream_ctx;
 	struct tr_rpc_bytes message;
@@ -4569,6 +4571,13 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	assert(client_stream_ctx.remote_closed == 0U);
 	assert(client_stream_ctx.events_after_finished == 0U);
 	pthread_mutex_unlock(&client_stream_ctx.lock);
+
+	memset(&client_stats, 0, sizeof(client_stats));
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_rpc_endpoint_get_stats(client_rpc, &client_stats) == TR_OK);
+	assert(tr_rpc_endpoint_get_stats(server_rpc, &server_stats) == TR_OK);
+	assert(client_stats.calls_completed == 2U);
+	assert(server_stats.calls_completed == 2U);
 
 	wait_for_pool_full(&rpc_pool, 32);
 	assert(tr_reactor_stop(reactor) == TR_OK);
