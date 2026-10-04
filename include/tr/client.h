@@ -29,6 +29,9 @@ struct tr_client_config {
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
+	/* RPC Call-level owner interceptor；fn==NULL 表示禁用。 */
+	struct tr_rpc_interceptor interceptor;
+
 	/* 可选的 connection-level reconnect；in-flight Call 永远不会透明 replay。 */
 	int enable_reconnect;
 	uint32_t reconnect_initial_delay_ms;

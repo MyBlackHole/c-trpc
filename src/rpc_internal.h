@@ -24,6 +24,7 @@ struct tr_rpc_endpoint_config {
 	uint32_t executor_threads;
 	uint32_t executor_continuation_reserve;
 	uint32_t observability_flags;
+	struct tr_rpc_interceptor interceptor;
 };
 
 struct tr_rpc_endpoint_stats {
