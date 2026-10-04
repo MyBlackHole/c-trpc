@@ -979,6 +979,15 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 		if (ret == TR_OK)
 			return TR_FRAME_RELEASE;
 	} else if (message.type == TR_PIPELINE_CONTROL_TRANSFER_READY) {
+		/*
+		 * begin_drain() is a monotonic local admission barrier. A READY
+		 * observed after it returns must never create new local work, or
+		 * wait_drained() could report quiescence and later become non-drained.
+		 * The Server owns its affinity independently and may release it; final
+		 * CONTROL close also fences remaining remote soft state.
+		 */
+		if (group->draining)
+			return TR_FRAME_RELEASE;
 		ret = tr_client_group_accept_transfer_ready_on_owner(
 			group, &message, frame->header.message_id);
 		if (ret == TR_OK)
