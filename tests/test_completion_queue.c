@@ -94,6 +94,22 @@ static void test_completion_capacity_wait_and_close(void)
 	assert(pthread_create(&thread, NULL, push_wait_main, &producer) == 0);
 	wait_for_waiters(&queue, 1U);
 	tr_completion_queue_close(&queue);
+	{
+		uint64_t closed_generation;
+
+		pthread_mutex_lock(&queue.lock);
+		closed_generation = queue.admission_generation;
+		pthread_mutex_unlock(&queue.lock);
+
+		/*
+		 * 故意在旧 waiter join 前 reopen。旧 generation 无论何时重新取得
+		 * queue lock，都不能把上一运行期的 completion 投进新 epoch。
+		 */
+		assert(tr_completion_queue_open(&queue) == TR_OK);
+		pthread_mutex_lock(&queue.lock);
+		assert(queue.admission_generation != closed_generation);
+		pthread_mutex_unlock(&queue.lock);
+	}
 	assert(pthread_join(thread, NULL) == 0);
 	assert(producer.ret == TR_ERR_CLOSED);
 	assert(producer.need_wake == -1);
@@ -109,6 +125,7 @@ static void test_completion_capacity_wait_and_close(void)
 	assert(queue.full_events == 2U);
 	assert(queue.waiters == 0U);
 	pthread_mutex_unlock(&queue.lock);
+	tr_completion_queue_close(&queue);
 	tr_completion_queue_destroy(&queue);
 }
 
