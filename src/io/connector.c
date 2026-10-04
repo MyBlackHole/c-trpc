@@ -9,7 +9,7 @@
 
 #include "../execution/reactor_internal.h"
 #include "socket_internal.h"
-#include "tr/socket.h"
+#include "socket.h"
 #include "tr/status.h"
 
 #define TR_CONNECTOR_ADDRESS_CAPACITY 64U
