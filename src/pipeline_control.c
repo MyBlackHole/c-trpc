@@ -284,28 +284,31 @@ int tr_pipeline_control_prepare_transfer_wire(
 	return ret;
 }
 
-int tr_pipeline_control_abort(
-	struct tr_pipeline_control *control,
-	struct tr_conn_handle expected_control)
+struct tr_pipeline_control_teardown_request {
+	struct tr_pipeline_control *control;
+	struct tr_conn_handle expected_control;
+};
+
+static int tr_pipeline_control_abort_on_owner(void *arg)
 {
+	struct tr_pipeline_control_teardown_request *request =
+		(struct tr_pipeline_control_teardown_request *)arg;
+	struct tr_pipeline_control *control = request->control;
 	uint32_t count = 0U;
 	uint32_t i;
 	int ret;
 
-	if (!control || !control->pipeline || !control->registry ||
-	    !control->abort_data)
-		return TR_ERR_INVALID;
-
+	/*
+	 * Fatal teardown 必须在一个 Reactor owner turn 内完成。先取得 ATTACHED
+	 * membership 的一致快照，再逐个失效；remove_data() 同时清除指向对应
+	 * generation 的 Stream affinity。
+	 */
 	ret = tr_pipeline_attached_data_snapshot(
 		control->pipeline, control->abort_data,
 		control->data_capacity, &count);
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-	 * Snapshot and removals execute in the same owner turn. Nothing can replace
-	 * one of these capabilities between the two operations.
-	 */
 	for (i = 0; i < count; ++i) {
 		ret = tr_pipeline_remove_data(
 			control->pipeline, control->abort_data[i].data);
@@ -313,37 +316,80 @@ int tr_pipeline_control_abort(
 			return ret;
 	}
 
-	ret = tr_pipeline_clear_control(
-		control->pipeline, expected_control);
+	/*
+	 * registry helper 把“clear CONTROL + cancel RESERVED + unregister”
+	 * 合并为同一个 owner-side commit。成功后 Pipeline 已经不可被 routing
+	 * 或 CONTROL 再次发现，可以安全释放 soft-state。
+	 */
+	ret = tr_pipeline_registry_close_control(
+		control->registry, control->pipeline,
+		request->expected_control);
 	if (ret != TR_OK)
 		return ret;
-
-	ret = tr_pipeline_registry_unregister(
-		control->registry, control->pipeline);
-	if (ret != TR_OK) {
-		(void)tr_pipeline_set_control(
-			control->pipeline, expected_control);
-		return ret;
-	}
 
 	tr_pipeline_destroy(control->pipeline);
 	control->pipeline = NULL;
 	control->registry = NULL;
 
 	/*
-	 * Membership is already unreachable before socket callbacks run. Every
-	 * handle came from the owner-coherent ATTACHED snapshot, so owner-close is
-	 * expected to succeed; STALE only means a callback retired it first.
+	 * membership 已经先于 socket callback 失效。STALE 仅表示 close callback
+	 * 已经先一步回收该 exact connection generation，不需要恢复任何状态。
 	 */
 	for (i = 0; i < count; ++i) {
 		ret = tr_reactor_close_on_owner(
 			control->abort_data[i].connection);
-		if (ret != TR_OK && ret != TR_ERR_STALE) {
-			/* Runtime object is already fenced; never resurrect it. */
+		if (ret != TR_OK && ret != TR_ERR_STALE)
 			continue;
-		}
 	}
 
+	free(control->abort_data);
+	control->abort_data = NULL;
+	free(control);
+	return TR_OK;
+}
+
+int tr_pipeline_control_abort(
+	struct tr_pipeline_control *control,
+	struct tr_conn_handle expected_control)
+{
+	struct tr_pipeline_control_teardown_request request;
+	struct tr_reactor *owner;
+
+	if (!control || !control->pipeline || !control->registry ||
+	    !control->abort_data)
+		return TR_ERR_INVALID;
+
+	owner = tr_pipeline_registry_owner(control->registry);
+	if (!owner || expected_control.reactor != owner)
+		return TR_ERR_INVALID;
+
+	request.control = control;
+	request.expected_control = expected_control;
+	return tr_reactor_call(
+		owner, tr_pipeline_control_abort_on_owner, &request);
+}
+
+static int tr_pipeline_control_close_on_owner(void *arg)
+{
+	struct tr_pipeline_control_teardown_request *request =
+		(struct tr_pipeline_control_teardown_request *)arg;
+	struct tr_pipeline_control *control = request->control;
+	int ret;
+
+	/*
+	 * Graceful close 不允许 ATTACHED DATA/Stream affinity 存活；
+	 * registry helper 在任何不可逆修改之前完成这项校验。RESERVED capability
+	 * 属于 CONTROL，可在 commit 时一并取消。
+	 */
+	ret = tr_pipeline_registry_close_control(
+		control->registry, control->pipeline,
+		request->expected_control);
+	if (ret != TR_OK)
+		return ret;
+
+	tr_pipeline_destroy(control->pipeline);
+	control->pipeline = NULL;
+	control->registry = NULL;
 	free(control->abort_data);
 	control->abort_data = NULL;
 	free(control);
@@ -354,48 +400,18 @@ int tr_pipeline_control_close(
 	struct tr_pipeline_control *control,
 	struct tr_conn_handle expected_control)
 {
-	struct tr_pipeline_stats stats;
-	int ret;
+	struct tr_pipeline_control_teardown_request request;
+	struct tr_reactor *owner;
 
 	if (!control || !control->pipeline || !control->registry)
 		return TR_ERR_INVALID;
 
-	memset(&stats, 0, sizeof(stats));
-	ret = tr_pipeline_get_stats(control->pipeline, &stats);
-	if (ret != TR_OK)
-		return ret;
+	owner = tr_pipeline_registry_owner(control->registry);
+	if (!owner || expected_control.reactor != owner)
+		return TR_ERR_INVALID;
 
-	/*
-	 * Attached DATA and Stream affinity have external socket/transfer
-	 * lifetimes and must quiesce explicitly. RESERVED capabilities are owned
-	 * solely by CONTROL and are cancelled by clear_control().
-	 */
-	if (stats.data_count != 0U ||
-	    stats.stream_affinity_count != 0U)
-		return TR_ERR_STATE;
-
-	ret = tr_pipeline_clear_control(
-		control->pipeline, expected_control);
-	if (ret != TR_OK)
-		return ret;
-
-	ret = tr_pipeline_registry_unregister(
-		control->registry, control->pipeline);
-	if (ret != TR_OK) {
-		/*
-		 * Keep the session usable if registry state unexpectedly prevented
-		 * unregister after CONTROL clear.
-		 */
-		(void)tr_pipeline_set_control(
-			control->pipeline, expected_control);
-		return ret;
-	}
-
-	tr_pipeline_destroy(control->pipeline);
-	control->pipeline = NULL;
-	control->registry = NULL;
-	free(control->abort_data);
-	control->abort_data = NULL;
-	free(control);
-	return TR_OK;
+	request.control = control;
+	request.expected_control = expected_control;
+	return tr_reactor_call(
+		owner, tr_pipeline_control_close_on_owner, &request);
 }
