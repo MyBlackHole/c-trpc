@@ -24,6 +24,7 @@
 
 struct tr_client {
 	struct tr_client_config config;
+	struct tr_facade_tuning tuning;
 
 	struct tr_runtime *runtime;
 	struct tr_runtime_shard *shard;
@@ -99,8 +100,6 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 		TR_LIMIT_DEFAULT(initial_window_bytes);
 		TR_LIMIT_DEFAULT(window_update_threshold_bytes);
 		TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
-		TR_LIMIT_DEFAULT(executor_threads);
-		TR_LIMIT_DEFAULT(executor_queue_capacity);
 #undef TR_LIMIT_DEFAULT
 	}
 }
@@ -202,6 +201,7 @@ int tr_client_create_with_tuning(
 	if (!client)
 		return TR_ERR_NOMEM;
 	client->config = effective;
+	client->tuning = effective_tuning;
 
 	ret = tr_buffer_pool_init(&client->rpc_message_pool,
 				  effective_tuning.rpc_message_pool_count,
@@ -359,9 +359,9 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	rpc_config.max_methods = client->config.limits.max_methods;
 	rpc_config.max_calls = client->config.limits.max_calls;
 	rpc_config.message_pool = &client->rpc_message_pool;
-	rpc_config.executor_threads = client->config.limits.executor_threads;
+	rpc_config.executor_threads = client->tuning.executor_threads;
 	rpc_config.executor_queue_capacity =
-		client->config.limits.executor_queue_capacity;
+		client->tuning.executor_queue_capacity;
 	rpc_config.observability_flags =
 		client->config.limits.observability_flags;
 	rpc_config.interceptor = client->config.interceptor;

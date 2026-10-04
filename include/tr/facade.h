@@ -47,23 +47,10 @@ struct tr_facade_limits {
 	uint64_t window_update_threshold_bytes;
 
 	/*
-	 * Reactor queue/pool capacities are intentionally not part of this stable
-	 * semantic contract. Facade-owned runtime resources are derived internally.
+	 * Reactor/pool/executor implementation capacities are intentionally not
+	 * part of this stable semantic contract. Facade-owned runtime resources
+	 * are derived internally.
 	 */
-	/*
-	 * Client：worker 由 Client RPC Endpoint 自己拥有。
-	 * Server：该值是所有 shard 的 worker 总预算；每个 shard 的 RPC Endpoint
-	 * 共用该 shard 分到的 worker pool。
-	 */
-	uint32_t executor_threads;
-	/* 每个 Endpoint 独立的有界 task 容量。 */
-	uint32_t executor_queue_capacity;
-	/*
-	 * Server-only opt-in：为已经接受的 Streaming Call continuation /
-	 * lifecycle task 保留的 executor node 数。0 表示禁用 reserve。
-	 * 必须小于 executor_queue_capacity。
-	 */
-	uint32_t executor_continuation_reserve;
 
 	/* Propagated to the facade-owned Reactor and RPC Endpoints. */
 	uint32_t observability_flags;
