@@ -518,11 +518,14 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	struct data_test_ctx data_ctx;
 	struct tr_pipeline_route_preface route;
 	struct tr_pipeline_route_preface data_route;
+	struct tr_pipeline_route_preface data_route2;
 	struct tr_pipeline_control_wire_message offer;
+	struct tr_pipeline_control_wire_message offer2;
 	struct tr_pipeline_control_wire_message ready;
 	uint16_t port = 0U;
 	int control = -1;
 	int data = -1;
+	int data2 = -1;
 
 	memset(&data_ctx, 0, sizeof(data_ctx));
 	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
@@ -535,8 +538,8 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	config.owner = reactor;
 	config.owner_shard_id = 0U;
 	config.pipeline_capacity = 1U;
-	config.connection_capacity = 4U;
-	config.data_capacity_per_pipeline = 1U;
+	config.connection_capacity = 5U;
+	config.data_capacity_per_pipeline = 2U;
 	config.stream_affinity_capacity_per_pipeline = 4U;
 	config.control_message_count = 4U;
 	config.authorize_control = authorize_control;
@@ -598,7 +601,33 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(ready.data_index == offer.data_index);
 	assert(ready.data_generation == offer.data_generation);
 
-	send_empty_data(data, 7001U, UINT64_C(6002));
+	/*
+	 * Add a second DATA membership after READY. The stream is pinned to the
+	 * first exact generation, so replaying it on another live lane is also
+	 * connection-fatal and must not reach the application.
+	 */
+	memset(&data_route2, 0, sizeof(data_route2));
+	assert(tr_pipeline_listener_send_data_offer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		       UINT64_C(5004), &data_route2) == TR_OK);
+	memset(&offer2, 0, sizeof(offer2));
+	recv_control_message(control, UINT64_C(5004), &offer2);
+	data2 = connect_loopback(port);
+	send_route(data2, &data_route2);
+	wait_listener_counts(listener, 1U, 3U);
+
+	send_empty_data(data2, 7001U, UINT64_C(6002));
+	wait_peer_close(data2);
+	close(data2);
+	data2 = -1;
+	wait_data_events(&data_ctx, 2U);
+	wait_listener_counts(listener, 1U, 2U);
+	pthread_mutex_lock(&data_ctx.lock);
+	assert(data_ctx.frames == 0U);
+	pthread_mutex_unlock(&data_ctx.lock);
+
+	/* The READY stream remains valid on its originally selected DATA lane. */
+	send_empty_data(data, 7001U, UINT64_C(6003));
 	wait_data_frames(&data_ctx, 1U);
 	pthread_mutex_lock(&data_ctx.lock);
 	assert(data_ctx.last_type == TR_FRAME_DATA);
@@ -612,7 +641,7 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	wait_peer_close(data);
 	close(data);
 	data = -1;
-	wait_data_events(&data_ctx, 2U);
+	wait_data_events(&data_ctx, 3U);
 	wait_listener_counts(listener, 0U, 0U);
 
 	assert(tr_pipeline_listener_stop(listener) == TR_OK);
