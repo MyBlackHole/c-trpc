@@ -7,7 +7,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 
-#include "tr/socket.h"
+#include "../io/socket.h"
 #include "tr/status.h"
 #include "../execution/reactor_internal.h"
 #include "../rpc/rpc_internal.h"
