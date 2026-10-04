@@ -256,8 +256,11 @@ producer returns
 
 1. 继续把纯协议状态收敛到 Reactor owner；
 2. 缩短 Channel/RPC Endpoint 过渡锁持有范围；
-3. 为高频资源增加 owner-local/per-thread cache；
-4. 把 Client reconnect 迁移到 Reactor-owned nonblocking connector；
-5. 最后才考虑 lock-free MPSC/freelist。
+3. 用 command/completion wait/full/budget 指标确认真实调度压力；
+4. 为确有争用的高频资源增加 owner-local/per-thread cache；
+5. 最后才考虑 futex/atomic ring/lock-free freelist。
+
+Client reconnect、completion capacity wait、同步 command capacity wait 已经完成
+Reactor 化，不再列为未来工作。
 
 评审中如果出现“为了少一把锁而新增跨 owner 可变共享”，默认视为架构回退。
