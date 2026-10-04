@@ -180,9 +180,11 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 
 /*
  * 启用 V1 Client 自动 reconnect。
- * 一个轻量 Channel maintenance thread 负责 connect/backoff；socket 被
- * Reactor 接管后，正常 I/O 仍全部由 owner Reactor 执行。
- * disconnect 时 in-flight Stream 立即失败，不做透明 replay。
+ * connect/backoff/timeout 全部由所属 Reactor 的 timer + nonblocking connector
+ * 状态机推进，不创建每 Channel maintenance thread。
+ *
+ * disconnect 时 in-flight Stream 立即失败，不做透明 replay；新 TCP connection
+ * 完成后仍通过正常 HELLO handshake 恢复新的 Stream/Call admission。
  */
 int tr_channel_enable_client_reconnect(
 	struct tr_channel *channel,
