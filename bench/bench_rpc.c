@@ -225,7 +225,7 @@ static struct options parse_options(int argc, char **argv)
 }
 
 static void configure_limits(
-	struct tr_facade_limits *limits, const struct options *o, int server)
+	struct tr_facade_limits *limits, const struct options *o)
 {
 	tr_facade_limits_init(limits);
 	limits->max_streams = 2U * o->capacity;
@@ -309,7 +309,7 @@ static int run_server(const struct options *o)
 	uint32_t id;
 	int status;
 	tr_server_config_init(&config);
-	configure_limits(&config.limits, o, 1);
+	configure_limits(&config.limits, o);
 	configure_tuning(&tuning, o, 1);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
@@ -853,7 +853,7 @@ static int run_client(const struct options *o)
 	uint32_t i;
 	int status = EXIT_SUCCESS;
 	tr_client_config_init(&config);
-	configure_limits(&config.limits, o, 0);
+	configure_limits(&config.limits, o);
 	configure_tuning(&tuning, o, 0);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
