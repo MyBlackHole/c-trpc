@@ -5903,6 +5903,10 @@ struct facade_test_ctx {
 	pthread_cond_t cond;
 	unsigned server_calls;
 	unsigned client_results;
+	unsigned client_pre;
+	unsigned server_pre;
+	unsigned server_post;
+	unsigned client_post;
 	int client_status;
 	char request[64];
 	uint32_t request_len;
