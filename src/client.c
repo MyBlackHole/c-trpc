@@ -650,6 +650,15 @@ void tr_client_destroy(struct tr_client *client)
 	if (!client)
 		return;
 
+	/*
+	 * Client teardown 的 owner/quiescence barrier 必须发生在 Runtime stop 前。
+	 *
+	 * RPC destroy 会先 owner-serialize Channel handler detach，再 quiesce Reactor
+	 * callback，随后 shutdown/drain executor strong-ref；Channel destroy 也需要
+	 * owner 存活以关闭 reconnect/keepalive 与底层 connection handler。
+	 *
+	 * 只有所有上层 callback source 都移除后，Runtime 才能退出 event loop。
+	 */
 	if (client->channel) {
 		(void)tr_channel_begin_drain(client->channel);
 		(void)tr_channel_wait_drained(client->channel, 1000U);
@@ -660,15 +669,22 @@ void tr_client_destroy(struct tr_client *client)
 		client->connection_group = NULL;
 	}
 
-	if (client->runtime)
-		(void)tr_runtime_stop(client->runtime);
-
-	if (client->rpc)
+	if (client->rpc) {
 		tr_rpc_endpoint_destroy(client->rpc);
-	if (client->channel)
+		client->rpc = NULL;
+	}
+	if (client->channel) {
 		tr_channel_destroy(client->channel);
-	if (client->runtime)
+		client->channel = NULL;
+	}
+
+	if (client->runtime) {
+		(void)tr_runtime_stop(client->runtime);
 		tr_runtime_destroy(client->runtime);
+		client->runtime = NULL;
+		client->shard = NULL;
+	}
+
 	if (client->reassembly_pool_ready)
 		tr_buffer_pool_destroy(&client->reassembly_pool);
 	if (client->rpc_pool_ready)
