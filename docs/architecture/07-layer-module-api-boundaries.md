@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三、四、五、六、七、八、九、十、十一、十二、十三阶段已完成：
+第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四阶段已完成：
 
 ```text
 src/rpc/
@@ -976,11 +976,15 @@ src/transport/group/
 
 src/transport/protocol/
   wire.c
+  wire.h
   frame.c
+  frame.h
   parser.c
+  parser.h
 
 src/transport/channel/
   channel.c
+  channel.h
   channel_internal.h
 
 src/io/
@@ -991,6 +995,8 @@ src/io/
 
 src/execution/
   reactor.c
+  reactor.h
+  reactor_internal.h
   command_queue.c
   command_queue.h
   completion_queue.c
@@ -998,6 +1004,7 @@ src/execution/
   timer_queue.c
   timer_queue.h
   buffer.c
+  buffer.h
   buffer_internal.h
 ```
 
@@ -1051,10 +1058,13 @@ src/execution/
 - Buffer implementation/resource pool 已进入 `src/execution/`：它只定义 bounded
   buffer descriptor ownership、fixed/dynamic pool acquire/release 与资源压力统计，
   不拥有 RPC/Channel/Group semantic state；
-- `include/tr/buffer.h` 暂时保留为 repository-internal source-tree type contract，
-  因为 Reactor/Frame/Parser/Channel/RPC internal contract 仍直接共享
-  `struct tr_buffer` / `tr_buffer_pool`；在这些 capability header 解耦前不制造
-  `include/tr -> src/` 反向依赖；
+- execution/transport engine capability headers 已回收到各自 source module：
+  `reactor.h/reactor_internal.h/buffer.h` 位于 `src/execution/`，
+  `wire.h/frame.h/parser.h` 位于 `src/transport/protocol/`，
+  `channel.h` 位于 `src/transport/channel/`；
+- production code 不再通过 `include/tr/` 获取这些 internal engine types；
+  stable installed header closure 继续只包含既有 8 个 SDK headers，且不存在
+  `include/tr -> src/` 反向 include；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
@@ -1064,7 +1074,7 @@ src/execution/
 后续再按相同规则评估：
 
 ```text
-Reactor / Buffer capability header placement after dependency cleanup
+remaining source-tree utility/internal headers after dependency cleanup
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。

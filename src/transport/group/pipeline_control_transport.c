@@ -4,9 +4,9 @@
 #include <string.h>
 
 #include "../../group/pipeline_control_wire_internal.h"
-#include "../../reactor_internal.h"
+#include "../../execution/reactor_internal.h"
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../protocol/wire.h"
 
 struct tr_pipeline_control_transport {
 	struct tr_pipeline_control *control;
