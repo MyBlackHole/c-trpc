@@ -1,7 +1,7 @@
 #include "../src/runtime/runtime_internal.h"
 
 #include "tr/status.h"
-#include "tr/socket.h"
+#include "../src/io/socket.h"
 
 #include <assert.h>
 #include <errno.h>

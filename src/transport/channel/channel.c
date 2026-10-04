@@ -6,7 +6,7 @@
 
 #include "tr/status.h"
 #include "../protocol/wire.h"
-#include "tr/socket.h"
+#include "../../io/socket.h"
 #include "tr/endian.h"
 
 #include <assert.h>

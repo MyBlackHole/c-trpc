@@ -11,7 +11,7 @@
 #include "../../group/pipeline_registry_internal.h"
 #include "../../execution/reactor_internal.h"
 #include "../../execution/buffer.h"
-#include "tr/socket.h"
+#include "../../io/socket.h"
 #include "tr/status.h"
 
 #define TR_PIPELINE_LISTENER_ACCEPT_BATCH 16U

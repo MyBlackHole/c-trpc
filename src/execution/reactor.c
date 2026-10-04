@@ -7,7 +7,7 @@
 #include "command_queue.h"
 #include "tr/crc32c.h"
 #include "../transport/protocol/parser.h"
-#include "tr/socket.h"
+#include "../io/socket.h"
 #include "tr/status.h"
 #include "../transport/protocol/wire.h"
 #include "../observability_internal.h"

@@ -11,7 +11,7 @@
 #include "transport/channel/channel.h"
 #include "execution/reactor.h"
 #include "rpc/rpc_wire.h"
-#include "tr/socket.h"
+#include "io/socket.h"
 #include "tr/status.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"

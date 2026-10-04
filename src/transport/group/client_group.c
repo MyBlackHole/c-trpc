@@ -14,7 +14,7 @@
 #include "../../execution/reactor_internal.h"
 #include "../../io/socket_internal.h"
 #include "../../execution/buffer.h"
-#include "tr/socket.h"
+#include "../../io/socket.h"
 #include "tr/status.h"
 #include "../protocol/wire.h"
 
