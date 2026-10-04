@@ -262,19 +262,23 @@ static int tr_connector_start_on_owner(void *arg)
 	ret = tr_connector_arm_timeout_on_owner(connector);
 	if (ret != TR_OK) {
 		tr_connector_complete_on_owner(connector, ret);
-		return ret;
+		return TR_OK;
 	}
 
 	if (connector->connecting) {
 		ret = tr_connector_watch_on_owner(connector);
-		if (ret != TR_OK) {
+		if (ret != TR_OK)
 			tr_connector_complete_on_owner(connector, ret);
-			return ret;
-		}
 		return TR_OK;
 	}
 
-	return tr_connector_progress_on_owner(connector);
+	/*
+	 * 从 active=1 开始，attempt ownership 已经转移给 connector。
+	 * progress 可能同步完成并调用 callback，但 start() 仍返回 TR_OK；
+	 * 上层只能通过 completion 收敛这次 attempt，不能再次 rollback。
+	 */
+	(void)tr_connector_progress_on_owner(connector);
+	return TR_OK;
 }
 
 struct tr_connector_cancel_request {
