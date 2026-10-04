@@ -287,6 +287,7 @@ c-trpc core Phase。
 - RPC control-plane 收敛阶段把 Method registration 迁到 Reactor owner command；Client Call creation/start 已确认本来就是 owner-call，因此 application thread 不再直接写 Method registry 或创建 Call protocol state。
 - RPC Streaming Conformance 阶段冻结四种 cardinality 的 V1 生命周期：Client request half-close、Server final STATUS、STATUS(OK)+ONE exactly-one response、FINISHED terminal barrier、合法 status 域以及 MANY request 1..N 的当前 Method-open 限制；正常/取消/异常 terminal 进一步共用一次性通知与完成统计语义。
 - RPC Context/Metadata 阶段把 metadata 拆成 bounded local/peer initial 与 trailing 四个 scope：first REQUEST/RESPONSE 携带 initial，final STATUS 携带 trailers；新增 owner-consistent `tr_rpc_context` snapshot，作为后续 auth/tracing/metrics Interceptor 的稳定输入边界，而不暴露 Endpoint/Stream/slot。
+- RPC Interceptor V1 阶段增加 Client PRE / Server PRE / Server POST / Client POST 四个固定 Call-level phase：hook 同步运行于 Reactor owner、调用时不持 endpoint protocol lock；Server PRE 可返回 RPC status 做 handler 前拒绝，其余 phase 用于 Context/metadata/tracing/metrics；hook 内同 Call 的 send/finish/cancel 等 protocol mutation 由运行时拒绝。
 
 当前 stable installed headers：
 
