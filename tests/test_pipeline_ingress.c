@@ -1,6 +1,6 @@
 #include "../src/pipeline_ingress_internal.h"
-#include "../src/pipeline_internal.h"
-#include "../src/pipeline_registry_internal.h"
+#include "../src/group/pipeline_internal.h"
+#include "../src/group/pipeline_registry_internal.h"
 #include "../src/pipeline_route_internal.h"
 #include "../src/reactor_internal.h"
 

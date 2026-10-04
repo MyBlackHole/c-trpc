@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二阶段已完成：
+第一、二、三阶段已完成：
 
 ```text
 src/rpc/
@@ -951,6 +951,17 @@ src/rpc/
 src/runtime/
   runtime.c
   runtime_internal.h
+
+src/group/
+  pipeline.c
+  pipeline_internal.h
+  pipeline_registry.c
+  pipeline_registry_internal.h
+
+  pipeline.c
+  pipeline_internal.h
+  pipeline_registry.c
+  pipeline_registry_internal.h
 ```
 
 规则：
@@ -958,6 +969,8 @@ src/runtime/
 - stable/public headers 继续留在 `include/tr/`，不因源码目录移动扩大或缩小 SDK ABI；
 - RPC 内部实现只通过 `src/rpc/rpc_internal.h` 向 facade/runtime 暴露 engine contract；
 - Runtime 物理 module 只包含 shard/lifecycle/resource-domain orchestration；
+- Group 物理 module 第一阶段只包含 Pipeline membership/affinity semantic core 与
+  shard-local registry；TRR1 route、CONTROL、ingress/listener、Client adapter 暂不并入；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
@@ -968,7 +981,6 @@ src/runtime/
 
 ```text
 src/transport/
-src/group/
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。
