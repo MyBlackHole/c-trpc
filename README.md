@@ -552,15 +552,28 @@ Each RPC Endpoint registers one timer in its owning Reactor; standalone and
 high-level Client/Server endpoints use the same owner-local deadline path.
 There is no per-Endpoint deadline thread; scheduling is entirely Reactor-local.
 
-Initial metadata is a bounded TLV side channel:
+RPC metadata has two bounded scopes:
 
-- maximum encoded metadata per direction: 512 bytes
+**Initial metadata**
+
+- maximum encoded block: 512 bytes
 - user keys: lowercase ASCII `[a-z0-9_.-]`, maximum 63 bytes
 - values: binary bytes
 - duplicate keys are rejected in V1
 - user keys starting with `:` are reserved for protocol use
-- metadata is emitted only with the first outbound RPC message in a direction
-- metadata remains separate from the application RAW payload
+- Client initial metadata is emitted with the first REQUEST
+- Server initial metadata is emitted with the first RESPONSE
+
+**Trailing metadata**
+
+- maximum encoded block: 512 bytes
+- V1 supports Server Streaming -> Client trailers
+- trailers are carried only by final STATUS
+- Client may read trailers from the FINISHED callback
+- Unary V1 has no independent STATUS envelope, so Unary trailers are not yet supported
+- STATUS metadata never overwrites first-RESPONSE initial metadata
+
+Each Call keeps bounded local/peer initial and trailing storage; there is no dynamic metadata queue. Metadata remains separate from the application RAW payload.
 
 The RPC wire header stays 32 bytes. When metadata is present the body is:
 
@@ -576,12 +589,21 @@ bulk fast path therefore remains scatter/gather friendly; a first bulk message
 can be sent as a small RPC header/metadata slice plus the original application
 buffer.
 
-Public metadata helpers:
+Public Context/metadata helpers:
 
 ```c
+tr_rpc_call_get_context(...);
+
 tr_rpc_call_set_metadata(...);
 tr_rpc_call_get_peer_metadata(...);
+
+tr_rpc_call_set_trailing_metadata(...);
+tr_rpc_call_get_peer_trailing_metadata(...);
 ```
+
+`tr_rpc_context` is a read-only owner-consistent snapshot of Method identity,
+cardinality, relative deadline state, and cancellation state. It intentionally
+does not expose Endpoint/Stream/Reactor/slot identity.
 
 Server handlers can read request metadata and set response metadata before the
 first response is encoded.

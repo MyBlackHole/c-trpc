@@ -147,10 +147,14 @@ struct tr_rpc_call_slot {
 	uint64_t deadline_ns;
 	uint32_t deadline_heap_pos;
 
-	uint8_t local_metadata[TR_RPC_METADATA_MAX_BYTES];
-	uint16_t local_metadata_len;
-	uint8_t peer_metadata[TR_RPC_METADATA_MAX_BYTES];
-	uint16_t peer_metadata_len;
+	uint8_t local_initial_metadata[TR_RPC_METADATA_MAX_BYTES];
+	uint16_t local_initial_metadata_len;
+	uint8_t peer_initial_metadata[TR_RPC_METADATA_MAX_BYTES];
+	uint16_t peer_initial_metadata_len;
+	uint8_t local_trailing_metadata[TR_RPC_METADATA_MAX_BYTES];
+	uint16_t local_trailing_metadata_len;
+	uint8_t peer_trailing_metadata[TR_RPC_METADATA_MAX_BYTES];
+	uint16_t peer_trailing_metadata_len;
 
 	struct tr_buffer *pending_tx;
 	struct tr_buffer *pending_control;
@@ -531,8 +535,8 @@ tr_rpc_apply_options_locked(struct tr_rpc_endpoint *endpoint,
 
 		if (!tr_rpc_metadata_key_valid(item->key, &key_len))
 			return TR_ERR_INVALID;
-		ret = tr_rpc_metadata_add_raw(call->local_metadata,
-					      &call->local_metadata_len,
+		ret = tr_rpc_metadata_add_raw(call->local_initial_metadata,
+					      &call->local_initial_metadata_len,
 					      item->key, key_len, item->value,
 					      item->value_len, 0);
 		if (ret != TR_OK)
@@ -540,7 +544,7 @@ tr_rpc_apply_options_locked(struct tr_rpc_endpoint *endpoint,
 	}
 
 	if (options->timeout_ms) {
-		if ((uint32_t)call->local_metadata_len +
+		if ((uint32_t)call->local_initial_metadata_len +
 			    TR_RPC_DEADLINE_METADATA_BYTES >
 		    TR_RPC_METADATA_MAX_BYTES)
 			return TR_ERR_BAD_LENGTH;
@@ -558,16 +562,24 @@ static int tr_rpc_build_outbound_metadata_locked(
 	uint16_t wire_type, uint8_t out[TR_RPC_METADATA_MAX_BYTES],
 	uint16_t *out_len)
 {
-	uint16_t len;
+	uint16_t len = 0;
 
 	if (!endpoint || !call || !out || !out_len)
 		return TR_ERR_INVALID;
 
-	len = 0;
-	if (call->tx_count == 0 && wire_type != TR_RPC_WIRE_CANCEL) {
-		len = call->local_metadata_len;
+	/*
+	 * Metadata scope is determined by the RPC envelope:
+	 *   first REQUEST/RESPONSE -> initial metadata
+	 *   final STATUS           -> trailing metadata
+	 */
+	if (wire_type == TR_RPC_WIRE_STATUS) {
+		len = call->local_trailing_metadata_len;
 		if (len)
-			memcpy(out, call->local_metadata, len);
+			memcpy(out, call->local_trailing_metadata, len);
+	} else if (call->tx_count == 0 && wire_type != TR_RPC_WIRE_CANCEL) {
+		len = call->local_initial_metadata_len;
+		if (len)
+			memcpy(out, call->local_initial_metadata, len);
 	}
 
 	if (endpoint->config.role == TR_RPC_CLIENT &&
@@ -600,12 +612,12 @@ static int tr_rpc_build_outbound_metadata_locked(
 	return TR_OK;
 }
 
-static int tr_rpc_import_peer_metadata_locked(struct tr_rpc_endpoint *endpoint,
-					      struct tr_rpc_call_slot *call,
-					      uint16_t wire_type,
-					      const uint8_t *metadata,
-					      uint16_t metadata_len)
+static int tr_rpc_import_peer_metadata_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call,
+	uint16_t wire_type, const uint8_t *metadata, uint16_t metadata_len)
 {
+	uint8_t *dst;
+	uint16_t *dst_len;
 	uint32_t off = 0;
 	int ret;
 
@@ -615,7 +627,15 @@ static int tr_rpc_import_peer_metadata_locked(struct tr_rpc_endpoint *endpoint,
 	if (ret != TR_OK)
 		return ret;
 
-	call->peer_metadata_len = 0;
+	if (wire_type == TR_RPC_WIRE_STATUS) {
+		dst = call->peer_trailing_metadata;
+		dst_len = &call->peer_trailing_metadata_len;
+	} else {
+		dst = call->peer_initial_metadata;
+		dst_len = &call->peer_initial_metadata_len;
+	}
+	*dst_len = 0;
+
 	while (off < metadata_len) {
 		uint8_t key_len = metadata[off];
 		uint16_t value_len = tr_get_le16(metadata + off + 1U);
@@ -654,7 +674,7 @@ static int tr_rpc_import_peer_metadata_locked(struct tr_rpc_endpoint *endpoint,
 					return ret;
 			}
 		} else {
-			uint16_t new_len = call->peer_metadata_len;
+			uint16_t new_len = *dst_len;
 			int add_ret;
 			char key_copy[TR_RPC_METADATA_MAX_KEY_LEN + 1U];
 
@@ -664,13 +684,12 @@ static int tr_rpc_import_peer_metadata_locked(struct tr_rpc_endpoint *endpoint,
 			key_copy[key_len] = '\0';
 			if (!tr_rpc_metadata_key_valid(key_copy, NULL))
 				return TR_ERR_BAD_LENGTH;
-			add_ret = tr_rpc_metadata_add_raw(call->peer_metadata,
-							  &new_len, key_copy,
-							  key_len, value,
-							  value_len, 0);
+			add_ret = tr_rpc_metadata_add_raw(
+				dst, &new_len, key_copy, key_len,
+				value, value_len, 0);
 			if (add_ret != TR_OK)
 				return add_ret;
-			call->peer_metadata_len = new_len;
+			*dst_len = new_len;
 		}
 		off += entry_len;
 	}
@@ -3657,8 +3676,6 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	}
 
 	if (wire.type == TR_RPC_WIRE_STATUS) {
-		int first_response;
-
 		if (endpoint->config.role != TR_RPC_CLIENT ||
 		    tr_rpc_validate_stream_status_locked(call, &wire) != TR_OK) {
 			pthread_mutex_unlock(&endpoint->lock);
@@ -3666,22 +3683,17 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			return TR_STREAM_DATA_RELEASE;
 		}
 
-		first_response = call->rx_count == 0;
-		if (!first_response && metadata_len != 0) {
+		/*
+		 * STATUS metadata is always trailing metadata, regardless of whether
+		 * RESPONSE messages preceded it. This is deliberately separate from
+		 * first-response initial metadata.
+		 */
+		ret = tr_rpc_import_peer_metadata_locked(
+			endpoint, call, wire.type, metadata, metadata_len);
+		if (ret != TR_OK) {
 			pthread_mutex_unlock(&endpoint->lock);
 			(void)tr_stream_close(stream);
 			return TR_STREAM_DATA_RELEASE;
-		}
-		if (first_response) {
-			ret = tr_rpc_import_peer_metadata_locked(endpoint, call,
-								 wire.type,
-								 metadata,
-								 metadata_len);
-			if (ret != TR_OK) {
-				pthread_mutex_unlock(&endpoint->lock);
-				(void)tr_stream_close(stream);
-				return TR_STREAM_DATA_RELEASE;
-			}
 		}
 
 		call->final_status_seen = 1;
@@ -5073,6 +5085,17 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		ret = TR_ERR_STATE;
 		goto out;
 	}
+	/*
+	 * V1 initial response metadata is carried only by the first RESPONSE.
+	 * If a MANY-response method finishes with zero responses, STATUS can only
+	 * carry trailers; silently reclassifying initial metadata would make the
+	 * two scopes ambiguous.
+	 */
+	if (call->tx_count == 0U &&
+	    call->local_initial_metadata_len != 0U) {
+		ret = TR_ERR_STATE;
+		goto out;
+	}
 
 	method = call->method->desc;
 	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
@@ -5181,14 +5204,18 @@ struct tr_rpc_set_metadata_request {
 	const void *value;
 	uint16_t value_len;
 	size_t key_len;
+	int trailing;
 };
 
 static int tr_rpc_call_set_metadata_on_owner(void *arg)
 {
 	struct tr_rpc_set_metadata_request *request =
 		(struct tr_rpc_set_metadata_request *)arg;
-	struct tr_rpc_endpoint *endpoint = tr_rpc_call_handle_endpoint(request->handle);
+	struct tr_rpc_endpoint *endpoint =
+		tr_rpc_call_handle_endpoint(request->handle);
 	struct tr_rpc_call_slot *call;
+	uint8_t *dst;
+	uint16_t *dst_len;
 	int ret;
 
 	pthread_mutex_lock(&endpoint->lock);
@@ -5201,39 +5228,52 @@ static int tr_rpc_call_set_metadata_on_owner(void *arg)
 		ret = TR_ERR_CLOSED;
 		goto out;
 	}
-	if (call->tx_count != 0 || call->pending_tx != NULL ||
-	    call->pending_control != NULL) {
-		ret = TR_ERR_STATE;
-		goto out;
-	}
 
-	if (call->deadline_ns != 0 &&
-	    (uint32_t)call->local_metadata_len +
-			    TR_RPC_METADATA_TLV_HEADER_SIZE + request->key_len +
-			    request->value_len +
+	if (request->trailing) {
+		if (endpoint->config.role != TR_RPC_SERVER || call->is_unary ||
+		    call->final_status_sent || call->pending_control_is_final_status) {
+			ret = TR_ERR_STATE;
+			goto out;
+		}
+		dst = call->local_trailing_metadata;
+		dst_len = &call->local_trailing_metadata_len;
+	} else {
+		if (call->tx_count != 0 || call->pending_tx != NULL ||
+		    call->pending_control != NULL) {
+			ret = TR_ERR_STATE;
+			goto out;
+		}
+		if (call->deadline_ns != 0 &&
+		    (uint32_t)call->local_initial_metadata_len +
+			    TR_RPC_METADATA_TLV_HEADER_SIZE +
+			    request->key_len + request->value_len +
 			    TR_RPC_DEADLINE_METADATA_BYTES >
-		    TR_RPC_METADATA_MAX_BYTES) {
-		ret = TR_ERR_BAD_LENGTH;
-		goto out;
+			TR_RPC_METADATA_MAX_BYTES) {
+			ret = TR_ERR_BAD_LENGTH;
+			goto out;
+		}
+		dst = call->local_initial_metadata;
+		dst_len = &call->local_initial_metadata_len;
 	}
 
 	ret = tr_rpc_metadata_add_raw(
-		call->local_metadata, &call->local_metadata_len,
-		request->key, request->key_len, request->value,
-		request->value_len, 0);
+		dst, dst_len, request->key, request->key_len,
+		request->value, request->value_len, 0);
 
 out:
 	pthread_mutex_unlock(&endpoint->lock);
 	return ret;
 }
 
-int tr_rpc_call_set_metadata(struct tr_rpc_call_handle handle, const char *key,
-			     const void *value, uint16_t value_len)
+static int tr_rpc_call_set_metadata_scope(
+	struct tr_rpc_call_handle handle, const char *key,
+	const void *value, uint16_t value_len, int trailing)
 {
 	struct tr_rpc_set_metadata_request request;
 	size_t key_len;
 
-	if (!tr_rpc_call_handle_endpoint(handle) || !tr_rpc_metadata_key_valid(key, &key_len) ||
+	if (!tr_rpc_call_handle_endpoint(handle) ||
+	    !tr_rpc_metadata_key_valid(key, &key_len) ||
 	    (value_len != 0 && !value))
 		return TR_ERR_INVALID;
 
@@ -5242,8 +5282,25 @@ int tr_rpc_call_set_metadata(struct tr_rpc_call_handle handle, const char *key,
 	request.value = value;
 	request.value_len = value_len;
 	request.key_len = key_len;
-	return tr_rpc_owner_call(tr_rpc_call_handle_endpoint(handle),
-				 tr_rpc_call_set_metadata_on_owner, &request);
+	request.trailing = trailing;
+	return tr_rpc_owner_call(
+		tr_rpc_call_handle_endpoint(handle),
+		tr_rpc_call_set_metadata_on_owner, &request);
+}
+
+int tr_rpc_call_set_metadata(struct tr_rpc_call_handle handle, const char *key,
+			     const void *value, uint16_t value_len)
+{
+	return tr_rpc_call_set_metadata_scope(
+		handle, key, value, value_len, 0);
+}
+
+int tr_rpc_call_set_trailing_metadata(
+	struct tr_rpc_call_handle handle, const char *key,
+	const void *value, uint16_t value_len)
+{
+	return tr_rpc_call_set_metadata_scope(
+		handle, key, value, value_len, 1);
 }
 
 struct tr_rpc_get_metadata_request {
@@ -5252,14 +5309,18 @@ struct tr_rpc_get_metadata_request {
 	void *value;
 	uint16_t *value_len;
 	size_t key_len;
+	int trailing;
 };
 
 static int tr_rpc_call_get_peer_metadata_on_owner(void *arg)
 {
 	struct tr_rpc_get_metadata_request *request =
 		(struct tr_rpc_get_metadata_request *)arg;
-	struct tr_rpc_endpoint *endpoint = tr_rpc_call_handle_endpoint(request->handle);
+	struct tr_rpc_endpoint *endpoint =
+		tr_rpc_call_handle_endpoint(request->handle);
 	struct tr_rpc_call_slot *call;
+	const uint8_t *src;
+	uint16_t src_len;
 	const uint8_t *found = NULL;
 	uint16_t found_len = 0;
 	int ret;
@@ -5271,9 +5332,25 @@ static int tr_rpc_call_get_peer_metadata_on_owner(void *arg)
 		goto out;
 	}
 
+	if (request->trailing) {
+		if (endpoint->config.role != TR_RPC_CLIENT || call->is_unary) {
+			ret = TR_ERR_STATE;
+			goto out;
+		}
+		if (!call->final_status_seen) {
+			ret = TR_AGAIN;
+			goto out;
+		}
+		src = call->peer_trailing_metadata;
+		src_len = call->peer_trailing_metadata_len;
+	} else {
+		src = call->peer_initial_metadata;
+		src_len = call->peer_initial_metadata_len;
+	}
+
 	ret = tr_rpc_metadata_find_raw(
-		call->peer_metadata, call->peer_metadata_len,
-		request->key, request->key_len, &found, &found_len);
+		src, src_len, request->key, request->key_len,
+		&found, &found_len);
 	if (ret == TR_OK) {
 		if (!request->value) {
 			*request->value_len = found_len;
@@ -5292,9 +5369,9 @@ out:
 	return ret;
 }
 
-int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
-				  const char *key, void *value,
-				  uint16_t *value_len)
+static int tr_rpc_call_get_peer_metadata_scope(
+	struct tr_rpc_call_handle handle, const char *key, void *value,
+	uint16_t *value_len, int trailing)
 {
 	struct tr_rpc_get_metadata_request request;
 	size_t key_len;
@@ -5308,9 +5385,93 @@ int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
 	request.value = value;
 	request.value_len = value_len;
 	request.key_len = key_len;
-	return tr_rpc_owner_call(tr_rpc_call_handle_endpoint(handle),
-				 tr_rpc_call_get_peer_metadata_on_owner,
-				 &request);
+	request.trailing = trailing;
+	return tr_rpc_owner_call(
+		tr_rpc_call_handle_endpoint(handle),
+		tr_rpc_call_get_peer_metadata_on_owner, &request);
+}
+
+int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle handle,
+				  const char *key, void *value,
+				  uint16_t *value_len)
+{
+	return tr_rpc_call_get_peer_metadata_scope(
+		handle, key, value, value_len, 0);
+}
+
+int tr_rpc_call_get_peer_trailing_metadata(
+	struct tr_rpc_call_handle handle, const char *key, void *value,
+	uint16_t *value_len)
+{
+	return tr_rpc_call_get_peer_metadata_scope(
+		handle, key, value, value_len, 1);
+}
+
+struct tr_rpc_context_request {
+	struct tr_rpc_call_handle handle;
+	struct tr_rpc_context *out;
+};
+
+static int tr_rpc_call_get_context_on_owner(void *arg)
+{
+	struct tr_rpc_context_request *request =
+		(struct tr_rpc_context_request *)arg;
+	struct tr_rpc_endpoint *endpoint =
+		tr_rpc_call_handle_endpoint(request->handle);
+	struct tr_rpc_call_slot *call;
+	struct tr_rpc_context context;
+	uint64_t now;
+	uint64_t remaining_ns;
+	int ret = TR_OK;
+
+	pthread_mutex_lock(&endpoint->lock);
+	call = tr_rpc_lookup_call_handle_locked(request->handle);
+	if (!call || !call->method) {
+		ret = TR_ERR_STALE;
+		goto out;
+	}
+
+	memset(&context, 0, sizeof(context));
+	context.service_id = call->method->desc.service_id;
+	context.method_id = call->method->desc.method_id;
+	context.request_cardinality = call->method->desc.request_cardinality;
+	context.response_cardinality = call->method->desc.response_cardinality;
+	context.cancelled = call->cancelled;
+	context.cancel_status =
+		call->cancelled ? call->cancel_status : TR_RPC_STATUS_OK;
+
+	if (call->deadline_ns != 0U) {
+		context.has_deadline = 1;
+		now = tr_rpc_now_ns();
+		if (now == 0U) {
+			ret = TR_ERR_SYS;
+			goto out;
+		}
+		remaining_ns =
+			call->deadline_ns > now ? call->deadline_ns - now : 0U;
+		context.deadline_remaining_ms =
+			(remaining_ns + UINT64_C(999999)) / UINT64_C(1000000);
+	}
+	*request->out = context;
+
+out:
+	pthread_mutex_unlock(&endpoint->lock);
+	return ret;
+}
+
+int tr_rpc_call_get_context(struct tr_rpc_call_handle handle,
+			    struct tr_rpc_context *out)
+{
+	struct tr_rpc_context_request request;
+
+	if (!tr_rpc_call_handle_endpoint(handle) || !out)
+		return TR_ERR_INVALID;
+
+	request.handle = handle;
+	request.out = out;
+	return tr_rpc_owner_call(
+		tr_rpc_call_handle_endpoint(handle),
+		tr_rpc_call_get_context_on_owner, &request);
 }
 
 int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,

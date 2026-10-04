@@ -63,7 +63,12 @@ worker 不再直接取得 Endpoint/Call mutable-state lock。
 RX payload credit return、retained message release 和 worker 错误 close 也回到
 Reactor owner，因此 executor worker 不再直接修改 Stream protocol state。
 
-如果 handler 需要 metadata，应在 dispatch 时构造只读 snapshot 或独立 owned object。
+Handler 需要 Call identity/lifecycle 时使用 `tr_rpc_call_get_context()` 取得
+owner-consistent snapshot；initial/trailing metadata 通过独立 API 访问。Worker 不直接
+回读 live Endpoint/Call pointer。
+
+未来 Interceptor 也必须建立在 Call handle + Context snapshot + metadata API 上，
+不能重新获得 Endpoint/Stream/slot 等 engine identity。
 
 ## 3. Completion
 
