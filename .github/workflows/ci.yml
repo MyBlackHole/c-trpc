@@ -189,7 +189,7 @@ jobs:
 
           # These implementation headers used to be published only because
           # xmake installed include/tr/*.h with a glob. Keep them private.
-          for private_header in             command_queue.h crc32c.h endian.h guard.h observability.h parser.h refcount.h             rpc_wire.h socket.h; do
+          for private_header in             command_queue.h cleanup.h crc32c.h endian.h guard.h observability.h parser.h refcount.h             rpc_wire.h socket.h; do
             test ! -e "$prefix/include/tr/$private_header"
           done
 

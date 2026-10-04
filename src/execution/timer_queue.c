@@ -1,6 +1,6 @@
 #include "timer_queue.h"
 
-#include "tr/cleanup.h"
+#include "../cleanup.h"
 #include "tr/status.h"
 
 #include <limits.h>

@@ -1051,6 +1051,8 @@ src/execution/
   header；生产代码与 internal tests 不再从 public include tree 获取 socket primitives；
 - `crc32c.h` 与 `endian.h` 已从 `include/tr/` 回收到 `src/` 根部；前者是跨模块 checksum
   capability，后者是无状态 little-endian codec helper，两者都不属于 stable SDK contract；
+- `cleanup.h`、`guard.h`、`refcount.h` 已从 `include/tr/` 回收到 `src/` 根部；它们定义
+  compile-time cleanup、mutex scope guard 与 strong-reference primitives，不属于 stable SDK；
 - `socket_internal.h` 不再 include facade policy；TCP_NODELAY policy validation/
   mapping 已回收到 `facade_policy_internal.h`，保持 `src/io/` 对 facade 无反向依赖；
 - Reactor implementation 与 command/completion/timer queues 已进入 `src/execution/`；
@@ -1083,7 +1085,7 @@ src/execution/
 后续再按相同规则评估：
 
 ```text
-remaining source-tree utility/internal headers (cleanup / guard / refcount / observability)
+remaining source-tree utility/internal headers (observability)
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。
