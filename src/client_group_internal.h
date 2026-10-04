@@ -28,6 +28,10 @@ int tr_client_group_connect(
 	struct tr_client_group *group, const char *ipv4_address, uint16_t port,
 	const struct tr_connection_group_id *id);
 int tr_client_group_close(struct tr_client_group *group);
+int tr_client_group_begin_drain(struct tr_client_group *group);
+int tr_client_group_get_stats(
+	struct tr_client_group *group,
+	struct tr_connection_group_client_stats *out);
 int tr_client_group_release_transfer(
 	struct tr_client_group *group, uint32_t stream_id);
 int tr_client_group_send(

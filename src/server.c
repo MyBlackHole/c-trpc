@@ -239,6 +239,16 @@ static uint64_t tr_server_now_ms(void)
 	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
 }
 
+static void tr_server_pause_ms(uint32_t ms)
+{
+	struct timespec ts;
+
+	ts.tv_sec = (time_t)(ms / 1000U);
+	ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
+	while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
+		;
+}
+
 static void tr_server_merge_channel_stats(
 	struct tr_server_channel_stats *dst,
 	const struct tr_channel_stats *src, int current)
@@ -1339,6 +1349,84 @@ int tr_server_connection_group_stop(struct tr_server *server)
 	if (!server->connection_group_listener)
 		return TR_ERR_STATE;
 	return tr_server_connection_group_stop_internal(server);
+}
+
+int tr_server_connection_group_begin_drain(struct tr_server *server)
+{
+	if (!server)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
+		return TR_ERR_STATE;
+	return tr_pipeline_listener_begin_drain(
+		server->connection_group_listener);
+}
+
+int tr_server_connection_group_get_stats(
+	struct tr_server *server,
+	struct tr_connection_group_server_stats *out)
+{
+	struct tr_pipeline_listener_stats internal;
+	int ret;
+
+	if (!server || !out)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener)
+		return TR_ERR_STATE;
+
+	memset(&internal, 0, sizeof(internal));
+	ret = tr_pipeline_listener_get_stats(
+		server->connection_group_listener, &internal);
+	if (ret != TR_OK)
+		return ret;
+
+	memset(out, 0, sizeof(*out));
+	out->draining = internal.draining;
+	out->groups_current = internal.pipelines_current;
+	out->groups_peak = internal.pipelines_peak;
+	out->connections_current = internal.connections_current;
+	out->connections_peak = internal.connections_peak;
+	out->data_connections_current =
+		internal.data_connections_current;
+	out->active_transfers = internal.active_transfers;
+	out->control_accepts = internal.control_accepts;
+	out->data_accepts = internal.data_accepts;
+	out->route_rejections = internal.route_rejections;
+	out->capacity_rejections = internal.capacity_rejections;
+	return TR_OK;
+}
+
+int tr_server_connection_group_wait_drained(
+	struct tr_server *server, uint32_t timeout_ms)
+{
+	struct tr_connection_group_server_stats stats;
+	uint64_t start;
+
+	if (!server)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener || !server->started)
+		return TR_ERR_STATE;
+
+	start = tr_server_now_ms();
+	for (;;) {
+		int ret;
+
+		memset(&stats, 0, sizeof(stats));
+		ret = tr_server_connection_group_get_stats(server, &stats);
+		if (ret != TR_OK)
+			return ret;
+		if (!stats.draining)
+			return TR_ERR_STATE;
+		if (stats.groups_current == 0U &&
+		    stats.connections_current == 0U)
+			return TR_OK;
+		if (timeout_ms != 0U) {
+			uint64_t elapsed = tr_server_now_ms() - start;
+
+			if (elapsed >= timeout_ms)
+				return TR_ERR_TIMEOUT;
+		}
+		tr_server_pause_ms(1U);
+	}
 }
 
 int tr_server_connection_group_send_data_offer(

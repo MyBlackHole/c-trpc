@@ -280,6 +280,18 @@ int tr_pipeline_control_transport_release_transfer(
 		transport->control, stream_id);
 }
 
+int tr_pipeline_control_transport_get_stats(
+	struct tr_pipeline_control_transport *transport,
+	struct tr_pipeline_stats *out)
+{
+	if (!transport || !transport->control || !out)
+		return TR_ERR_INVALID;
+	if (transport->closing)
+		return TR_ERR_STATE;
+	return tr_pipeline_control_get_stats(
+		transport->control, out);
+}
+
 uint64_t tr_pipeline_control_transport_pipeline_id(
 	const struct tr_pipeline_control_transport *transport)
 {

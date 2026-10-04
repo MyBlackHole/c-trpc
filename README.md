@@ -197,6 +197,17 @@ pressure returns `TR_AGAIN`; callers retry later. No second Group send queue or
 writable-notification contract is introduced in this slice.
 `tr_client_connection_group_release_transfer()` removes the local affinity.
 
+Connection Group lifecycle now has explicit graceful drain semantics in addition
+to force-close `stop()`. Server begin-drain closes only the Group accept
+socket and rejects new DATA_OFFER / TRANSFER_READY creation; existing
+connections and transfers continue until applications release them and Clients
+close naturally. Client begin-drain is a monotonic local admission barrier: it stops new
+DATA-lane establishment and ignores TRANSFER_READY observed after the barrier,
+while transfers already READY before the barrier and in-flight sends may finish. Stable semantic
+stats report only Group/connection/DATA/transfer and send-byte lifecycle state;
+Reactor slots, route generations, queue occupancy and pool internals remain
+outside the SDK contract.
+
 The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
 Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
 latency coupling for small request/response traffic. The policy is explicit:

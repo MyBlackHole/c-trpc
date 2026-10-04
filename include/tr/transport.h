@@ -15,6 +15,36 @@ struct tr_connection_group_id {
 	uint64_t epoch;
 };
 
+/*
+ * Stable semantic Connection Group observations.
+ *
+ * These structures intentionally exclude Reactor slots, route generations,
+ * queue occupancy, parser pools and other implementation diagnostics.
+ */
+struct tr_connection_group_client_stats {
+	struct tr_connection_group_id group;
+	uint32_t control_connected;
+	uint32_t draining;
+	uint32_t data_connections;
+	uint32_t active_transfers;
+	uint64_t send_bytes_inflight;
+	uint64_t send_bytes_limit;
+};
+
+struct tr_connection_group_server_stats {
+	uint32_t draining;
+	uint32_t groups_current;
+	uint32_t groups_peak;
+	uint32_t connections_current;
+	uint32_t connections_peak;
+	uint32_t data_connections_current;
+	uint64_t active_transfers;
+	uint64_t control_accepts;
+	uint64_t data_accepts;
+	uint64_t route_rejections;
+	uint64_t capacity_rejections;
+};
+
 struct tr_transport_bytes {
 	const uint8_t *data;
 	uint32_t len;
@@ -146,6 +176,27 @@ int tr_client_connection_group_connect(
 int tr_client_connection_group_close(struct tr_client *client);
 
 /*
+ * Graceful Client Group drain.
+ *
+ * begin_drain() is a local admission barrier: it stops establishing newly
+ * offered DATA lanes and does not install TRANSFER_READY messages observed
+ * after the barrier. Transfers already READY before begin_drain() remain usable
+ * so application work can finish. The Server owns its transfer affinity
+ * independently and may release a late READY it had already issued.
+ *
+ * wait_drained() returns TR_OK when there are no active transfer affinities,
+ * no payload bytes still owned by DATA TX, and no pending DATA establishment.
+ * timeout_ms == 0 waits indefinitely. Do not call wait_drained() from a
+ * callback executing on this Client's owning I/O domain.
+ */
+int tr_client_connection_group_begin_drain(struct tr_client *client);
+int tr_client_connection_group_wait_drained(
+	struct tr_client *client, uint32_t timeout_ms);
+int tr_client_connection_group_get_stats(
+	struct tr_client *client,
+	struct tr_connection_group_client_stats *out);
+
+/*
  * Release one Client-side logical transfer affinity after application-level
  * Stream lifetime ends. The Server-side affinity is released independently by
  * tr_server_connection_group_release_transfer().
@@ -181,6 +232,24 @@ int tr_server_connection_group_listen(
 	struct tr_server *server, const char *ipv4_address, uint16_t port,
 	int backlog, uint16_t *out_bound_port);
 int tr_server_connection_group_stop(struct tr_server *server);
+
+/*
+ * Graceful Server Group drain.
+ *
+ * begin_drain() stops accepting new Groups and rejects new DATA_OFFER /
+ * TRANSFER_READY creation while preserving existing connections and transfer
+ * traffic. release_transfer() remains available so active work can quiesce.
+ *
+ * wait_drained() returns TR_OK after all existing Group connections disappear
+ * naturally. timeout_ms == 0 waits indefinitely. stop() remains the immediate
+ * force-close operation.
+ */
+int tr_server_connection_group_begin_drain(struct tr_server *server);
+int tr_server_connection_group_wait_drained(
+	struct tr_server *server, uint32_t timeout_ms);
+int tr_server_connection_group_get_stats(
+	struct tr_server *server,
+	struct tr_connection_group_server_stats *out);
 
 /* CONTROL-plane operations for one already accepted group. */
 int tr_server_connection_group_send_data_offer(

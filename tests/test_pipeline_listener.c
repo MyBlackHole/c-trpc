@@ -189,6 +189,23 @@ static void build_ping(uint8_t raw[TR_WIRE_HEADER_SIZE])
 	assert(tr_wire_header_encode(raw, &header) == TR_OK);
 }
 
+static void send_empty_data(
+	int fd, uint32_t stream_id, uint64_t message_id)
+{
+	struct tr_frame_header header;
+	uint8_t raw[TR_WIRE_HEADER_SIZE];
+
+	memset(&header, 0, sizeof(header));
+	header.version = TR_WIRE_ENV_VERSION;
+	header.type = TR_FRAME_DATA;
+	header.flags = TR_FRAME_F_FIRST | TR_FRAME_F_LAST;
+	header.stream_id = stream_id;
+	header.message_id = message_id;
+	header.payload_crc32c = tr_crc32c(NULL, 0U);
+	assert(tr_wire_header_encode(raw, &header) == TR_OK);
+	send_all(fd, raw, sizeof(raw));
+}
+
 static void recv_control_message(
 	int fd, uint64_t expected_message_id,
 	struct tr_pipeline_control_wire_message *message)
@@ -493,9 +510,152 @@ static void test_pipeline_listener_control_and_data(void)
 	pthread_mutex_destroy(&data_ctx.lock);
 }
 
+static void test_pipeline_listener_ready_ingress_barrier(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_pipeline_listener_config config;
+	struct tr_pipeline_listener *listener = NULL;
+	struct data_test_ctx data_ctx;
+	struct tr_pipeline_route_preface route;
+	struct tr_pipeline_route_preface data_route;
+	struct tr_pipeline_route_preface data_route2;
+	struct tr_pipeline_control_wire_message offer;
+	struct tr_pipeline_control_wire_message offer2;
+	struct tr_pipeline_control_wire_message ready;
+	uint16_t port = 0U;
+	int control = -1;
+	int data = -1;
+	int data2 = -1;
+
+	memset(&data_ctx, 0, sizeof(data_ctx));
+	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&data_ctx.cond, NULL) == 0);
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.owner_shard_id = 0U;
+	config.pipeline_capacity = 1U;
+	config.connection_capacity = 5U;
+	config.data_capacity_per_pipeline = 2U;
+	config.stream_affinity_capacity_per_pipeline = 4U;
+	config.control_message_count = 4U;
+	config.authorize_control = authorize_control;
+	config.data_frame_cb = data_frame_cb;
+	config.data_event_cb = data_event_cb;
+	config.data_callback_arg = &data_ctx;
+	assert(tr_pipeline_listener_create(&config, &listener) == TR_OK);
+	assert(tr_pipeline_listener_listen_ipv4(
+		       listener, "127.0.0.1", 0U, 16, &port) == TR_OK);
+
+	route = control_route(TEST_EPOCH_1);
+	control = connect_loopback(port);
+	send_route(control, &route);
+	wait_listener_counts(listener, 1U, 1U);
+
+	memset(&data_route, 0, sizeof(data_route));
+	assert(tr_pipeline_listener_send_data_offer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		       UINT64_C(5001), &data_route) == TR_OK);
+	memset(&offer, 0, sizeof(offer));
+	recv_control_message(control, UINT64_C(5001), &offer);
+
+	data = connect_loopback(port);
+	send_route(data, &data_route);
+	wait_listener_counts(listener, 1U, 2U);
+
+	/*
+	 * Physical DATA membership is not transfer authorization. DATA before
+	 * TRANSFER_READY is a protocol violation: no application callback and the
+	 * offending DATA lane is retired.
+	 */
+	send_empty_data(data, 7001U, UINT64_C(6001));
+	wait_peer_close(data);
+	close(data);
+	data = -1;
+	wait_data_events(&data_ctx, 1U);
+	wait_listener_counts(listener, 1U, 1U);
+	pthread_mutex_lock(&data_ctx.lock);
+	assert(data_ctx.frames == 0U);
+	pthread_mutex_unlock(&data_ctx.lock);
+
+	/* Re-establish DATA, publish READY, then the same stream is admitted. */
+	memset(&data_route, 0, sizeof(data_route));
+	assert(tr_pipeline_listener_send_data_offer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		       UINT64_C(5002), &data_route) == TR_OK);
+	memset(&offer, 0, sizeof(offer));
+	recv_control_message(control, UINT64_C(5002), &offer);
+	data = connect_loopback(port);
+	send_route(data, &data_route);
+	wait_listener_counts(listener, 1U, 2U);
+
+	assert(tr_pipeline_listener_send_transfer_ready(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 7001U,
+		       UINT64_C(5003)) == TR_OK);
+	memset(&ready, 0, sizeof(ready));
+	recv_control_message(control, UINT64_C(5003), &ready);
+	assert(ready.stream_id == 7001U);
+	assert(ready.data_index == offer.data_index);
+	assert(ready.data_generation == offer.data_generation);
+
+	/*
+	 * Add a second DATA membership after READY. The stream is pinned to the
+	 * first exact generation, so replaying it on another live lane is also
+	 * connection-fatal and must not reach the application.
+	 */
+	memset(&data_route2, 0, sizeof(data_route2));
+	assert(tr_pipeline_listener_send_data_offer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		       UINT64_C(5004), &data_route2) == TR_OK);
+	memset(&offer2, 0, sizeof(offer2));
+	recv_control_message(control, UINT64_C(5004), &offer2);
+	data2 = connect_loopback(port);
+	send_route(data2, &data_route2);
+	wait_listener_counts(listener, 1U, 3U);
+
+	send_empty_data(data2, 7001U, UINT64_C(6002));
+	wait_peer_close(data2);
+	close(data2);
+	data2 = -1;
+	wait_data_events(&data_ctx, 2U);
+	wait_listener_counts(listener, 1U, 2U);
+	pthread_mutex_lock(&data_ctx.lock);
+	assert(data_ctx.frames == 0U);
+	pthread_mutex_unlock(&data_ctx.lock);
+
+	/* The READY stream remains valid on its originally selected DATA lane. */
+	send_empty_data(data, 7001U, UINT64_C(6003));
+	wait_data_frames(&data_ctx, 1U);
+	pthread_mutex_lock(&data_ctx.lock);
+	assert(data_ctx.last_type == TR_FRAME_DATA);
+	pthread_mutex_unlock(&data_ctx.lock);
+	assert(tr_pipeline_listener_release_transfer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 7001U) == TR_OK);
+
+	shutdown(control, SHUT_RDWR);
+	close(control);
+	control = -1;
+	wait_peer_close(data);
+	close(data);
+	data = -1;
+	wait_data_events(&data_ctx, 3U);
+	wait_listener_counts(listener, 0U, 0U);
+
+	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+	tr_pipeline_listener_destroy(listener);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	pthread_cond_destroy(&data_ctx.cond);
+	pthread_mutex_destroy(&data_ctx.lock);
+}
+
 int main(void)
 {
 	test_pipeline_listener_control_and_data();
+	test_pipeline_listener_ready_ingress_barrier();
 	puts("pipeline listener/control transport: ok");
 	return 0;
 }

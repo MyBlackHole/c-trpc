@@ -230,6 +230,7 @@ struct tr_pipeline_registry_attach_request {
 	struct tr_pipeline_route_preface preface;
 	struct tr_conn_handle connection;
 	struct tr_pipeline_data_ref *data_out;
+	struct tr_pipeline **pipeline_out;
 };
 
 static int tr_pipeline_registry_attach_data_route_on_owner(void *arg)
@@ -273,6 +274,8 @@ static int tr_pipeline_registry_attach_data_route_on_owner(void *arg)
 
 	if (request->data_out)
 		*request->data_out = data;
+	if (request->pipeline_out)
+		*request->pipeline_out = pipeline;
 	return TR_OK;
 }
 
@@ -297,6 +300,31 @@ int tr_pipeline_registry_attach_data_route(
 	return tr_reactor_call(
 		registry->owner,
 		tr_pipeline_registry_attach_data_route_on_owner, &request);
+}
+
+int tr_pipeline_registry_attach_data_route_local_on_owner(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle connection,
+	struct tr_pipeline_data_ref *data_out,
+	struct tr_pipeline **pipeline_out)
+{
+	struct tr_pipeline_registry_attach_request request;
+
+	if (!registry || !preface || !pipeline_out ||
+	    connection.reactor != registry->owner)
+		return TR_ERR_INVALID;
+	if (data_out)
+		memset(data_out, 0, sizeof(*data_out));
+	*pipeline_out = NULL;
+
+	memset(&request, 0, sizeof(request));
+	request.registry = registry;
+	request.preface = *preface;
+	request.connection = connection;
+	request.data_out = data_out;
+	request.pipeline_out = pipeline_out;
+	return tr_pipeline_registry_attach_data_route_on_owner(&request);
 }
 
 struct tr_pipeline_registry_cancel_request {

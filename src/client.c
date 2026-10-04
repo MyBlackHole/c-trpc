@@ -463,6 +463,61 @@ int tr_client_connection_group_close(struct tr_client *client)
 	return tr_client_group_close(client->connection_group);
 }
 
+int tr_client_connection_group_begin_drain(struct tr_client *client)
+{
+	if (!client)
+		return TR_ERR_INVALID;
+	if (!client->connection_group)
+		return TR_ERR_STATE;
+	return tr_client_group_begin_drain(client->connection_group);
+}
+
+int tr_client_connection_group_get_stats(
+	struct tr_client *client,
+	struct tr_connection_group_client_stats *out)
+{
+	if (!client || !out)
+		return TR_ERR_INVALID;
+	if (!client->connection_group)
+		return TR_ERR_STATE;
+	return tr_client_group_get_stats(client->connection_group, out);
+}
+
+int tr_client_connection_group_wait_drained(
+	struct tr_client *client, uint32_t timeout_ms)
+{
+	struct tr_connection_group_client_stats stats;
+	uint64_t start;
+
+	if (!client)
+		return TR_ERR_INVALID;
+	if (!client->connection_group)
+		return TR_ERR_STATE;
+
+	start = tr_client_now_ms();
+	for (;;) {
+		int ret;
+
+		memset(&stats, 0, sizeof(stats));
+		ret = tr_client_group_get_stats(
+			client->connection_group, &stats);
+		if (ret != TR_OK)
+			return ret;
+		if (!stats.draining)
+			return TR_ERR_STATE;
+		if (stats.active_transfers == 0U &&
+		    stats.send_bytes_inflight == 0U)
+			return TR_OK;
+		if (timeout_ms != 0U) {
+			uint64_t elapsed = tr_client_now_ms() - start;
+
+			if (elapsed >= timeout_ms)
+				return TR_ERR_TIMEOUT;
+		}
+		tr_client_pause_ms(1U);
+	}
+}
+
 int tr_client_connection_group_release_transfer(
 	struct tr_client *client, uint32_t stream_id)
 {

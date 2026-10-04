@@ -53,6 +53,7 @@ struct tr_pipeline_listener {
 	int listen_fd;
 	uint16_t bound_port;
 	int listener_registered;
+	int draining;
 
 	uint32_t pipelines_current;
 	uint32_t pipelines_peak;
@@ -267,6 +268,9 @@ static int tr_pipeline_listener_accept_control(
 	struct tr_conn_handle connection)
 {
 	struct tr_pipeline_listener_session *session;
+
+	if (listener->draining)
+		return TR_ERR_CLOSED;
 	struct tr_pipeline_control_config control_config;
 	struct tr_pipeline_control *control = NULL;
 	struct tr_pipeline_control_transport_config transport_config;
@@ -603,9 +607,37 @@ int tr_pipeline_listener_listen_ipv4(
 	listener->listen_fd = fd;
 	listener->bound_port = bound;
 	listener->listener_registered = 1;
+	listener->draining = 0;
 	if (out_bound_port)
 		*out_bound_port = bound;
 	return TR_OK;
+}
+
+int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
+{
+	int result = TR_OK;
+	int ret;
+
+	if (!listener)
+		return TR_ERR_INVALID;
+	if (listener->draining)
+		return TR_OK;
+
+	if (listener->listener_registered) {
+		ret = tr_reactor_listener_unregister(
+			listener->config.owner, listener->listen_fd);
+		if (ret != TR_OK)
+			result = ret;
+		else
+			listener->listener_registered = 0;
+	}
+	if (!listener->listener_registered && listener->listen_fd >= 0) {
+		tr_socket_close(&listener->listen_fd);
+		listener->bound_port = 0U;
+	}
+	if (result == TR_OK)
+		listener->draining = 1;
+	return result;
 }
 
 struct tr_pipeline_listener_stop_request {
@@ -643,24 +675,13 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 {
 	struct tr_pipeline_listener_stop_request request;
-	int result = TR_OK;
+	int result;
 	int ret;
 
 	if (!listener)
 		return TR_ERR_INVALID;
 
-	if (listener->listener_registered) {
-		ret = tr_reactor_listener_unregister(
-			listener->config.owner, listener->listen_fd);
-		if (ret != TR_OK)
-			result = ret;
-		else
-			listener->listener_registered = 0;
-	}
-	if (!listener->listener_registered && listener->listen_fd >= 0) {
-		tr_socket_close(&listener->listen_fd);
-		listener->bound_port = 0U;
-	}
+	result = tr_pipeline_listener_begin_drain(listener);
 
 	if (listener->connections_current != 0U) {
 		request.listener = listener;
@@ -713,7 +734,11 @@ static int tr_pipeline_listener_send_offer_on_owner(void *arg)
 {
 	struct tr_pipeline_listener_offer_request *request =
 		(struct tr_pipeline_listener_offer_request *)arg;
-	struct tr_pipeline_listener_session *session =
+	struct tr_pipeline_listener_session *session;
+
+	if (request->listener->draining)
+		return TR_ERR_CLOSED;
+	session =
 		tr_pipeline_listener_session_find(
 			request->listener, request->pipeline_id, request->epoch);
 
@@ -756,7 +781,11 @@ static int tr_pipeline_listener_send_ready_on_owner(void *arg)
 {
 	struct tr_pipeline_listener_transfer_request *request =
 		(struct tr_pipeline_listener_transfer_request *)arg;
-	struct tr_pipeline_listener_session *session =
+	struct tr_pipeline_listener_session *session;
+
+	if (request->listener->draining)
+		return TR_ERR_CLOSED;
+	session =
 		tr_pipeline_listener_session_find(
 			request->listener, request->pipeline_id, request->epoch);
 
@@ -838,6 +867,33 @@ static int tr_pipeline_listener_stats_on_owner(void *arg)
 		listener->config.connection_capacity;
 	request->out->connections_current = listener->connections_current;
 	request->out->connections_peak = listener->connections_peak;
+	request->out->draining = listener->draining ? 1U : 0U;
+	{
+		uint32_t i;
+
+		for (i = 0; i < listener->config.connection_capacity; ++i)
+			if (listener->connections[i].used &&
+			    listener->connections[i].role ==
+				    TR_PIPELINE_LISTENER_CONN_DATA)
+				request->out->data_connections_current++;
+
+		for (i = 0; i < listener->config.pipeline_capacity; ++i) {
+			struct tr_pipeline_listener_session *session =
+				&listener->sessions[i];
+			struct tr_pipeline_stats stats;
+			int ret;
+
+			if (!session->used || session->closing ||
+			    !session->transport)
+				continue;
+			memset(&stats, 0, sizeof(stats));
+			ret = tr_pipeline_control_transport_get_stats(
+				session->transport, &stats);
+			if (ret == TR_OK)
+				request->out->active_transfers +=
+					stats.stream_affinity_count;
+		}
+	}
 	request->out->control_accepts = listener->control_accepts;
 	request->out->data_accepts = listener->data_accepts;
 	request->out->route_rejections = listener->route_rejections;

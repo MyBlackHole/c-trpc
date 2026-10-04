@@ -78,6 +78,16 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   归还 quota；Reactor 继续负责 DATA fragmentation/TX scheduling；
 - send admission 暂以 `TR_AGAIN + caller retry` 表达；暂不暴露 writable callback，
   避免把 Group quota 与 Reactor global TX pool 两类资源错误压成一个假就绪事件；
+- Client/Server 已提供 stable graceful drain：Server drain 只停止新 Group accept 并禁止
+  新 DATA_OFFER/TRANSFER_READY，已有 Group/Transfer 继续完成；Client drain 停止新的
+  DATA establishment，已有 READY transfer 继续 send/release；
+- `wait_drained` 只等待语义 work quiesce：Client 等 active transfer/send ownership
+  归零，Server 等现有 Group/connection 自然归零；force `stop()` 仍保留立即关闭语义；
+- stable Group stats 只暴露 active Group/connection/DATA/transfer、accept/reject 与
+  Client send-byte lifecycle，不暴露 Reactor slot/generation、queue/pool/connector；
+- Server DATA ingress 不信任 peer 仅凭已 attach 的物理 lane 自报 stream_id：每个 DATA frame
+  在 callback 前通过 Pipeline affinity 验证 `stream_id + data index/generation + connection`
+  exact match；未 READY/stale/wrong-lane frame 直接终止违规 DATA lane；
 - cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，

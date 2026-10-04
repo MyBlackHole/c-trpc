@@ -57,6 +57,7 @@ struct tr_client_group {
 	char address[TR_CLIENT_GROUP_ADDRESS_CAPACITY];
 	uint16_t port;
 	int closing;
+	int draining;
 
 	struct tr_buffer_pool control_pool;
 	int control_pool_ready;
@@ -336,7 +337,7 @@ static void tr_client_group_fail_connector_on_owner(
 						      TR_ERR_STATE);
 		return;
 	}
-	if (!group->closing)
+	if (!group->closing && !group->draining)
 		tr_client_group_start_next_on_owner(group);
 }
 
@@ -640,7 +641,8 @@ static void tr_client_group_start_next_on_owner(struct tr_client_group *group)
 {
 	uint32_t i;
 
-	if (!group || group->closing || !group->control.reactor ||
+	if (!group || group->closing || group->draining ||
+	    !group->control.reactor ||
 	    group->connector_slot != TR_CLIENT_GROUP_NO_SLOT)
 		return;
 
@@ -960,7 +962,7 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 	}
 
 	if (message.type == TR_PIPELINE_CONTROL_DATA_OFFER) {
-		if (group->data_capacity == 0U) {
+		if (group->data_capacity == 0U || group->draining) {
 			struct tr_pipeline_route_preface route;
 
 			memset(&route, 0, sizeof(route));
@@ -977,6 +979,15 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 		if (ret == TR_OK)
 			return TR_FRAME_RELEASE;
 	} else if (message.type == TR_PIPELINE_CONTROL_TRANSFER_READY) {
+		/*
+		 * begin_drain() is a monotonic local admission barrier. A READY
+		 * observed after it returns must never create new local work, or
+		 * wait_drained() could report quiescence and later become non-drained.
+		 * The Server owns its affinity independently and may release it; final
+		 * CONTROL close also fences remaining remote soft state.
+		 */
+		if (group->draining)
+			return TR_FRAME_RELEASE;
 		ret = tr_client_group_accept_transfer_ready_on_owner(
 			group, &message, frame->header.message_id);
 		if (ret == TR_OK)
@@ -1248,6 +1259,7 @@ int tr_client_group_connect(
 		group->port = 0U;
 		goto fail;
 	}
+	group->draining = 0;
 	return TR_OK;
 
 fail:
@@ -1264,6 +1276,120 @@ int tr_client_group_close(struct tr_client_group *group)
 	request.group = group;
 	return tr_reactor_call(
 		group->config.owner, tr_client_group_close_on_owner, &request);
+}
+
+struct tr_client_group_drain_request {
+	struct tr_client_group *group;
+};
+
+static int tr_client_group_begin_drain_on_owner(void *arg)
+{
+	struct tr_client_group_drain_request *request =
+		(struct tr_client_group_drain_request *)arg;
+	struct tr_client_group *group = request->group;
+	uint32_t i;
+
+	if (!group->control.reactor)
+		return TR_ERR_STATE;
+	if (group->draining)
+		return TR_OK;
+
+	group->draining = 1;
+
+	if (group->connector_slot != TR_CLIENT_GROUP_NO_SLOT) {
+		uint32_t slot = group->connector_slot;
+		struct tr_pipeline_route_preface route;
+		uint64_t message_id;
+		int ret;
+
+		if (slot >= group->data_capacity)
+			return TR_ERR_STATE;
+		route = group->data[slot].route;
+		message_id = group->data[slot].offer_message_id;
+		tr_client_group_connector_reset_on_owner(group, 1);
+		memset(&group->data[slot], 0, sizeof(group->data[slot]));
+		group->data[slot].state = TR_CLIENT_GROUP_DATA_FREE;
+		ret = tr_client_group_send_cancel_on_owner(
+			group, &route, message_id);
+		if (ret != TR_OK) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				ret < 0 ? ret : TR_ERR_STATE);
+			return ret;
+		}
+	}
+
+	for (i = 0; i < group->data_capacity; ++i) {
+		struct tr_client_group_data *data = &group->data[i];
+		int ret;
+
+		if (data->state != TR_CLIENT_GROUP_DATA_QUEUED)
+			continue;
+		ret = tr_client_group_send_cancel_on_owner(
+			group, &data->route, data->offer_message_id);
+		memset(data, 0, sizeof(*data));
+		data->state = TR_CLIENT_GROUP_DATA_FREE;
+		if (ret != TR_OK) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				ret < 0 ? ret : TR_ERR_STATE);
+			return ret;
+		}
+	}
+	return TR_OK;
+}
+
+int tr_client_group_begin_drain(struct tr_client_group *group)
+{
+	struct tr_client_group_drain_request request;
+
+	if (!group)
+		return TR_ERR_INVALID;
+	request.group = group;
+	return tr_reactor_call(
+		group->config.owner,
+		tr_client_group_begin_drain_on_owner, &request);
+}
+
+struct tr_client_group_stats_request {
+	struct tr_client_group *group;
+	struct tr_connection_group_client_stats *out;
+};
+
+static int tr_client_group_stats_on_owner(void *arg)
+{
+	struct tr_client_group_stats_request *request =
+		(struct tr_client_group_stats_request *)arg;
+	struct tr_client_group *group = request->group;
+	struct tr_connection_group_client_stats *out = request->out;
+	uint32_t i;
+
+	memset(out, 0, sizeof(*out));
+	out->group.group_id = group->control_route.pipeline_id;
+	out->group.epoch = group->control_route.epoch;
+	out->control_connected = group->control.reactor ? 1U : 0U;
+	out->draining = group->draining ? 1U : 0U;
+	out->active_transfers = group->transfer_count;
+	out->send_bytes_inflight = group->send_bytes_inflight;
+	out->send_bytes_limit = group->send_bytes_limit;
+	for (i = 0; i < group->data_capacity; ++i)
+		if (group->data[i].state == TR_CLIENT_GROUP_DATA_ACTIVE)
+			out->data_connections++;
+	return TR_OK;
+}
+
+int tr_client_group_get_stats(
+	struct tr_client_group *group,
+	struct tr_connection_group_client_stats *out)
+{
+	struct tr_client_group_stats_request request;
+
+	if (!group || !out)
+		return TR_ERR_INVALID;
+	request.group = group;
+	request.out = out;
+	return tr_reactor_call(
+		group->config.owner, tr_client_group_stats_on_owner, &request);
 }
 
 struct tr_client_group_release_transfer_request {
