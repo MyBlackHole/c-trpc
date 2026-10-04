@@ -55,6 +55,7 @@ flowchart TB
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
 | Stream | Reactor shard | command | hot state 无锁 |
 | RPC Endpoint protocol state | Reactor shard | command/completion | TARGET 去除 worker 直接修改 |
+| RPC Method registry | Reactor shard | synchronous owner command | descriptor copy 后一次性发布；无 application writer |
 | RPC Endpoint lifetime state | strong-ref owner/finalizer | refcount + `ref_lock/ref_cond` | 与 protocol lock 分离 |
 | RPC Call | Reactor shard | completion | hot state 无锁 |
 | Connection Group / Pipeline | Reactor shard | command / owner API | hot state owner-only |
