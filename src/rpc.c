@@ -3980,11 +3980,9 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 		return;
 	endpoint = build->endpoint;
 
-	if (build->handler_installed) {
-		(void)tr_channel_set_handler(endpoint->channel, NULL, NULL,
-					     NULL, NULL);
-		(void)tr_channel_quiesce(endpoint->channel);
-	}
+	if (build->handler_installed)
+		(void)tr_channel_set_handler(
+			endpoint->channel, NULL, NULL, NULL, NULL);
 	if (build->deadline_ready)
 		tr_rpc_deadline_destroy(endpoint);
 	if (build->executor_ready)
@@ -4310,8 +4308,13 @@ void tr_rpc_endpoint_destroy_with_stats(
 	 * 全部排空。Endpoint 只是借用 Channel，因此 destructor 必须保持同步：
 	 * 本函数返回后调用方可以立即安全销毁 Channel。
 	 */
-	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
-	(void)tr_channel_quiesce(endpoint->channel);
+	/*
+	 * set_handler() 是同步 owner publication：运行中返回时旧 Channel/RPC
+	 * callback 已退出；完全 stopped 时本来就没有 callback source。
+	 * 因此这里不再需要额外 quiesce round-trip。
+	 */
+	(void)tr_channel_set_handler(
+		endpoint->channel, NULL, NULL, NULL, NULL);
 	tr_rpc_deadline_destroy(endpoint);
 	tr_rpc_executor_shutdown(endpoint);
 	tr_rpc_endpoint_wait_owner_only(endpoint);
