@@ -520,7 +520,8 @@ static void test_public_connection_group_client_data_offer(void)
 	struct tr_client *client = NULL;
 	struct public_group_ctx ctx;
 	struct tr_connection_group_id group;
-	struct tr_pipeline_listener_stats stats;
+	struct tr_connection_group_client_stats client_stats;
+	struct tr_connection_group_server_stats server_stats;
 	uint16_t group_port = 0U;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -565,11 +566,28 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(wait_data_offer(server, UINT64_C(4001)) == TR_OK);
 	wait_data_accepts(server, 1U);
 
-	memset(&stats, 0, sizeof(stats));
-	assert(tr_server_get_connection_group_stats_internal(
-		       server, &stats) == TR_OK);
-	assert(stats.data_accepts == 1U);
-	assert(stats.connections_current == 2U);
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.draining == 0U);
+	assert(server_stats.groups_current == 1U);
+	assert(server_stats.connections_current == 2U);
+	assert(server_stats.data_connections_current == 1U);
+	assert(server_stats.active_transfers == 0U);
+	assert(server_stats.data_accepts == 1U);
+
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.group.group_id == TEST_GROUP_ID);
+	assert(client_stats.group.epoch == TEST_GROUP_EPOCH);
+	assert(client_stats.control_connected == 1U);
+	assert(client_stats.draining == 0U);
+	assert(client_stats.data_connections == 1U);
+	assert(client_stats.active_transfers == 0U);
+	assert(client_stats.send_bytes_inflight == 0U);
+	assert(client_stats.send_bytes_limit == 130U);
+
 	assert(tr_server_connection_group_send_data_offer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
 		       UINT64_C(4002)) == TR_AGAIN);
@@ -646,13 +664,78 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(ctx.ready_stream_id == 5001U);
 	assert(ctx.ready_message_id == UINT64_C(4102));
 	pthread_mutex_unlock(&ctx.lock);
+
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 1U);
+	assert(client_stats.send_bytes_inflight == 0U);
+
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.active_transfers == 1U);
+	assert(server_stats.data_connections_current == 1U);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_STATE);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_STATE);
+
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_send_data_offer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+		       UINT64_C(4301)) == TR_ERR_CLOSED);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
+		       UINT64_C(4302)) == TR_ERR_CLOSED);
+
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.draining == 1U);
+	assert(server_stats.groups_current == 1U);
+	assert(server_stats.connections_current == 2U);
+	assert(server_stats.active_transfers == 1U);
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.draining == 1U);
+	assert(client_stats.active_transfers == 1U);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 10U) == TR_ERR_TIMEOUT);
+
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_OK);
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 5000U) == TR_OK);
+
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.draining == 1U);
+	assert(client_stats.active_transfers == 0U);
+	assert(client_stats.send_bytes_inflight == 0U);
+	assert(client_stats.data_connections == 1U);
 
 	assert(tr_client_connection_group_close(client) == TR_OK);
 	wait_counter(&ctx, &ctx.data_events, 1U);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 5000U) == TR_OK);
+
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.draining == 1U);
+	assert(server_stats.groups_current == 0U);
+	assert(server_stats.connections_current == 0U);
+	assert(server_stats.data_connections_current == 0U);
+	assert(server_stats.active_transfers == 0U);
 
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
