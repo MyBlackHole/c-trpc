@@ -39,6 +39,12 @@ struct tr_rpc_call_options {
 	uint16_t metadata_count;
 };
 
+/*
+ * V1 executable Method 使用 ONE/MANY。
+ * 注意：当前 wire 没有独立 Method-open envelope，因此 Client request MANY 在
+ * close_send() 前至少要成功发送一条 REQUEST；真正 0-message streaming 属于
+ * future Method-open 扩展。
+ */
 enum tr_rpc_cardinality { TR_RPC_NONE = 0, TR_RPC_ONE = 1, TR_RPC_MANY = 2 };
 
 enum tr_rpc_status {
@@ -127,8 +133,14 @@ enum tr_rpc_message_disposition {
 enum tr_rpc_call_event {
 	TR_RPC_CALL_EVENT_OPENED = 1,
 	TR_RPC_CALL_EVENT_WRITABLE = 2,
+	/*
+	 * Peer 在 final STATUS 之前提前关闭 response half 时上报。
+	 * 正常 STATUS 后的 transport close 不重复上报该事件。
+	 */
 	TR_RPC_CALL_EVENT_REMOTE_CLOSED = 3,
+	/* Application terminal barrier；正常 Call 中它之后不再有其他事件。 */
 	TR_RPC_CALL_EVENT_FINISHED = 4,
+	/* final STATUS 之前的异常 terminal。 */
 	TR_RPC_CALL_EVENT_ERROR = 5
 };
 
@@ -165,7 +177,17 @@ struct tr_rpc_stream_handlers {
 	tr_rpc_stream_close_handler on_close;
 };
 
-/* Application Call continuation API. */
+/*
+ * Application Call continuation API.
+ *
+ * send(): Client 发送 REQUEST；Server 发送 RESPONSE。
+ *
+ * close_send(): 仅用于 Client request-side half-close。V1 ONE 必须已经发送
+ * exactly 1 条 REQUEST；MANY 必须已经发送至少 1 条 REQUEST。
+ *
+ * finish(): 仅用于 Server streaming Call，发送 final STATUS 并结束 response
+ * side。Server 不应使用 close_send() 绕过 STATUS。
+ */
 int tr_rpc_call_send(struct tr_rpc_call_handle call,
 		     const struct tr_rpc_bytes *message);
 int tr_rpc_call_close_send(struct tr_rpc_call_handle call);
