@@ -143,8 +143,33 @@ stop
 ```
 
 因此 completion producer 只竞争所属 shard 的 completion queue 短锁，不与
-adopt/send/call 等 Reactor 控制面共用生命周期 mutex。当前仍保留 mutex-protected
-bounded MPSC queue；是否进一步改为 SPSC/MPSC atomic ring 必须由 profile 决定。
+adopt/send/call 等 Reactor 控制面共用生命周期 mutex。
+
+满队列的 backpressure 规则：
+
+```text
+worker push
+   -> queue full
+   -> sleep on queue-local not_full
+   -> Reactor pop batch
+   -> wake blocked producers
+   -> retry under the same queue lock
+
+stop
+   -> close admission + advance admission generation
+   -> broadcast all waiters
+   -> old waiter returns CLOSED even if Reactor later reopen
+```
+
+这保证三件事：
+
+- worker 不用 `sched_yield()` 消耗 CPU；
+- queue 容量仍然是硬上限，不建立 side queue；
+- stop/restart 之间有 admission generation fence，旧运行期 completion 不会 ABA
+  进入新运行期。
+
+当前仍保留 mutex + condition 的 bounded MPSC queue；是否进一步改为 atomic ring /
+futex 必须由 profile 决定，而不是为了“无锁”增加生命周期复杂度。
 
 ## 5. Cancellation
 
