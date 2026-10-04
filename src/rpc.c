@@ -5085,6 +5085,17 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		ret = TR_ERR_STATE;
 		goto out;
 	}
+	/*
+	 * V1 initial response metadata is carried only by the first RESPONSE.
+	 * If a MANY-response method finishes with zero responses, STATUS can only
+	 * carry trailers; silently reclassifying initial metadata would make the
+	 * two scopes ambiguous.
+	 */
+	if (call->tx_count == 0U &&
+	    call->local_initial_metadata_len != 0U) {
+		ret = TR_ERR_STATE;
+		goto out;
+	}
 
 	method = call->method->desc;
 	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
