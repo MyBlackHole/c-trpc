@@ -85,7 +85,8 @@ struct tr_reactor_stats {
 
 	/*
 	 * Bounded queue pressure snapshots。
-	 * command full_events：producer 遇到满 ring 的失败/重试事件；
+	 * command full_events：producer 首次遇到满 ring 的压力事件；异步 command
+	 * 可能立即返回 TR_AGAIN，同步 owner request/STOP 则进入 capacity wait。
 	 * completion full_events：producer 遇到满 ring 并进入 capacity wait 的事件。
 	 */
 	struct tr_queue_observation command_queue;

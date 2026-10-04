@@ -35,7 +35,9 @@ sample counts, and totals and taking the maximum of `max_ns`.
 `tr_reactor_get_stats()` reports:
 
 - command and completion queue `capacity/current/peak/full_events`；
-  command `full_events` 表示 producer 遇到满 ring 的失败/重试，
+  command `full_events` 表示 producer 首次撞到满 ring 的压力：SEND/RESUME 等
+  异步 API 仍会立即 `TR_AGAIN`，CALL/QUIESCE/SET_HANDLER/STOP 这类同步或
+  lifecycle request 会进入 queue-local capacity wait；
   completion `full_events` 表示 worker handoff 遇到满 ring 并进入 capacity wait；
 - bounded per-turn work and budget-hit counters;
 - `busy_ns` and `poll_ns` when timing is enabled;
@@ -63,10 +65,13 @@ The Reactor snapshot also exposes the existing per-turn command fairness data:
 - `max_per_turn.commands`: largest observed turn;
 - `budget_hits.commands`: turns that consumed the full command budget.
 
-Producer-side command queue pressure is split into `SEND`, `RESUME_RX`,
-`CALL`, and other commands, each with accepted enqueue and queue-full counts.
-These counters are updated under the command queue's existing mutex and add no
-new allocation, clock read, or metrics lock.
+Command queue 的 producer-side pressure 按 `SEND`、`RESUME_RX`、`CALL`
+和 other 分类，每类都记录成功 enqueue 数与首次遇满次数。
+
+对于异步 SEND/RESUME，full count 表示立即 backpressure；对于同步 CALL，以及
+other 中的 QUIESCE/SET_HANDLER/STOP，则表示进入 capacity wait，而不是 command
+被丢弃。这些计数都复用 command queue 现有 mutex 更新，不增加 allocation、
+clock read 或额外 metrics lock。
 
 A SEND issued while already executing on the owning Reactor may attach directly
 to that connection's TX queue only when no command is pending and the Reactor is

@@ -16,7 +16,6 @@
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
-#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -467,6 +466,37 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 	if (need_wake)
 		(void)tr_reactor_signal(reactor);
 
+	return TR_OK;
+}
+
+static int tr_reactor_push_command_wait(
+	struct tr_reactor *reactor, const struct tr_command *command,
+	uint64_t expected_generation)
+{
+	int need_wake = 0;
+	int ret;
+
+	ret = tr_command_queue_push_wait(
+		&reactor->commands, command, expected_generation, &need_wake);
+	if (ret != TR_OK)
+		return ret;
+	if (need_wake)
+		(void)tr_reactor_signal(reactor);
+	return TR_OK;
+}
+
+static int tr_reactor_push_command_wait_force(
+	struct tr_reactor *reactor, const struct tr_command *command)
+{
+	int need_wake = 0;
+	int ret;
+
+	ret = tr_command_queue_push_wait_force(
+		&reactor->commands, command, &need_wake);
+	if (ret != TR_OK)
+		return ret;
+	if (need_wake)
+		(void)tr_reactor_signal(reactor);
 	return TR_OK;
 }
 
@@ -2677,6 +2707,7 @@ int tr_reactor_start(struct tr_reactor *reactor)
 	 * not with ctl_lock.
 	 */
 	(void)tr_completion_queue_open(&reactor->completions);
+	(void)tr_command_queue_wait_open(&reactor->commands);
 	reactor->started = 1;
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return TR_OK;
@@ -3009,31 +3040,31 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 	command.generation = connection.generation;
 	command.u.handler.request = &request;
 
-	pthread_mutex_lock(&reactor->ctl_lock);
-	if (!reactor->started || !reactor->accepting) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		tr_reactor_sync_destroy(&request.sync);
-		return TR_ERR_CLOSED;
-	}
-	if (!tr_slot_live(reactor, connection.slot, connection.generation)) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		tr_reactor_sync_destroy(&request.sync);
-		return TR_ERR_STALE;
-	}
+	{
+		uint64_t wait_generation;
 
-	do {
-		ret = tr_reactor_push_locked(reactor, &command);
-		if (ret == TR_AGAIN) {
+		pthread_mutex_lock(&reactor->ctl_lock);
+		if (!reactor->started || !reactor->accepting) {
 			pthread_mutex_unlock(&reactor->ctl_lock);
-			sched_yield();
-			pthread_mutex_lock(&reactor->ctl_lock);
-			if (!reactor->started || !reactor->accepting) {
-				ret = TR_ERR_CLOSED;
-				break;
-			}
+			tr_reactor_sync_destroy(&request.sync);
+			return TR_ERR_CLOSED;
 		}
-	} while (ret == TR_AGAIN);
-	pthread_mutex_unlock(&reactor->ctl_lock);
+		if (!tr_slot_live(
+			    reactor, connection.slot, connection.generation)) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			tr_reactor_sync_destroy(&request.sync);
+			return TR_ERR_STALE;
+		}
+		wait_generation =
+			tr_command_queue_wait_generation(&reactor->commands);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+
+		if (wait_generation == 0U)
+			ret = TR_ERR_CLOSED;
+		else
+			ret = tr_reactor_push_command_wait(
+				reactor, &command, wait_generation);
+	}
 
 	if (ret == TR_OK)
 		ret = tr_reactor_sync_wait(&request.sync);
@@ -3062,39 +3093,38 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 	command.type = TR_CMD_QUIESCE;
 	command.u.quiesce.sync = &sync;
 
-	pthread_mutex_lock(&reactor->ctl_lock);
-	if (!reactor->started) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		pthread_cond_destroy(&sync.cond);
-		pthread_mutex_destroy(&sync.lock);
-		return TR_OK;
-	}
-	if (tr_reactor_is_owner_thread(reactor)) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		pthread_cond_destroy(&sync.cond);
-		pthread_mutex_destroy(&sync.lock);
-		return TR_ERR_STATE;
-	}
-	if (!reactor->accepting) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		pthread_cond_destroy(&sync.cond);
-		pthread_mutex_destroy(&sync.lock);
-		return TR_ERR_CLOSED;
-	}
+	{
+		uint64_t wait_generation;
 
-	do {
-		ret = tr_reactor_push_locked(reactor, &command);
-		if (ret == TR_AGAIN) {
+		pthread_mutex_lock(&reactor->ctl_lock);
+		if (!reactor->started) {
 			pthread_mutex_unlock(&reactor->ctl_lock);
-			sched_yield();
-			pthread_mutex_lock(&reactor->ctl_lock);
-			if (!reactor->started || !reactor->accepting) {
-				ret = TR_ERR_CLOSED;
-				break;
-			}
+			pthread_cond_destroy(&sync.cond);
+			pthread_mutex_destroy(&sync.lock);
+			return TR_OK;
 		}
-	} while (ret == TR_AGAIN);
-	pthread_mutex_unlock(&reactor->ctl_lock);
+		if (tr_reactor_is_owner_thread(reactor)) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			pthread_cond_destroy(&sync.cond);
+			pthread_mutex_destroy(&sync.lock);
+			return TR_ERR_STATE;
+		}
+		if (!reactor->accepting) {
+			pthread_mutex_unlock(&reactor->ctl_lock);
+			pthread_cond_destroy(&sync.cond);
+			pthread_mutex_destroy(&sync.lock);
+			return TR_ERR_CLOSED;
+		}
+		wait_generation =
+			tr_command_queue_wait_generation(&reactor->commands);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+
+		if (wait_generation == 0U)
+			ret = TR_ERR_CLOSED;
+		else
+			ret = tr_reactor_push_command_wait(
+				reactor, &command, wait_generation);
+	}
 
 	if (ret == TR_OK) {
 		pthread_mutex_lock(&sync.lock);
@@ -3299,30 +3329,30 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 	command.u.call.arg = arg;
 	command.u.call.sync = &sync;
 
-	pthread_mutex_lock(&reactor->ctl_lock);
-	if (!reactor->started || !reactor->accepting) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		tr_reactor_sync_destroy(&sync);
-		return TR_ERR_CLOSED;
-	}
+	{
+		uint64_t wait_generation;
 
-	/*
-	 * 同步 owner call 保留现有 RPC API 的同步语义：有界 command ring
-	 * 短暂满时等待容量，而不是把 queue 满误报成业务操作失败。
-	 */
-	do {
-		ret = tr_reactor_push_locked(reactor, &command);
-		if (ret == TR_AGAIN) {
+		pthread_mutex_lock(&reactor->ctl_lock);
+		if (!reactor->started || !reactor->accepting) {
 			pthread_mutex_unlock(&reactor->ctl_lock);
-			sched_yield();
-			pthread_mutex_lock(&reactor->ctl_lock);
-			if (!reactor->started || !reactor->accepting) {
-				ret = TR_ERR_CLOSED;
-				break;
-			}
+			tr_reactor_sync_destroy(&sync);
+			return TR_ERR_CLOSED;
 		}
-	} while (ret == TR_AGAIN);
-	pthread_mutex_unlock(&reactor->ctl_lock);
+		wait_generation =
+			tr_command_queue_wait_generation(&reactor->commands);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+
+		/*
+		 * 同步 owner call 保留现有 RPC API 的同步语义：有界 command ring
+		 * 满时在 queue-local condition 上等待容量，不把容量压力误报成业务失败，
+		 * 也不使用 sched_yield 忙等。
+		 */
+		if (wait_generation == 0U)
+			ret = TR_ERR_CLOSED;
+		else
+			ret = tr_reactor_push_command_wait(
+				reactor, &command, wait_generation);
+	}
 
 	if (ret == TR_OK)
 		ret = tr_reactor_sync_wait(&sync);
@@ -3589,22 +3619,19 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 
 	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	/*
-	 * Close completion admission before STOP becomes visible to the owner.
-	 * queue->lock is the completion linearization point: pushes that won the
-	 * lock first are accepted and later drained; pushes after close fail.
+	 * 先关闭所有 producer admission：
+	 * - completion waiter 由 completion queue close 唤醒；
+	 * - synchronous command waiter 由 command wait_close 唤醒；
+	 * 然后 STOP 自己以 lifecycle-only force wait 等待 ring capacity。
+	 *
+	 * Reactor pop command 不取得 ctl_lock，因此这里持 ctl_lock 睡眠不会阻止
+	 * owner 释放 command slot，同时也阻止第二批普通 producer 越过 stop 边界。
 	 */
 	tr_completion_queue_close(&reactor->completions);
+	tr_command_queue_wait_close(&reactor->commands);
 	memset(&command, 0, sizeof(command));
 	command.type = TR_CMD_STOP;
-
-	do {
-		ret = tr_reactor_push_locked(reactor, &command);
-		if (ret == TR_AGAIN) {
-			pthread_mutex_unlock(&reactor->ctl_lock);
-			sched_yield();
-			pthread_mutex_lock(&reactor->ctl_lock);
-		}
-	} while (ret == TR_AGAIN);
+	ret = tr_reactor_push_command_wait_force(reactor, &command);
 
 	pthread_mutex_unlock(&reactor->ctl_lock);
 

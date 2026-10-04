@@ -255,6 +255,23 @@ worker callback
   -> synchronous status back to worker
 ```
 
+同步 owner command 的 ring 满载不会用 `sched_yield()` 轮询：
+
+```text
+worker/application thread
+  -> validate Reactor lifecycle under ctl_lock
+  -> snapshot command wait generation
+  -> release ctl_lock
+  -> wait on command_queue.not_full if full
+  -> owner batch pop wakes waiter
+  -> enqueue command
+  -> wait request reply
+```
+
+stop 会先关闭普通 command waiter admission；尚未成功入队的同步 request 直接返回
+`TR_ERR_CLOSED`，而已经入队的 request 仍排在 STOP 前执行。异步 SEND/RESUME
+仍保持 `TR_AGAIN`，不会因为本次优化变成隐式阻塞 API。
+
 `endpoint->lock` 当前仍作为 application 控制面尚未完全 owner 化之前的过渡锁。
 后续应迁移 Call 创建/注册/flush/stats 等剩余控制面，然后再缩小或删除这把锁。
 
