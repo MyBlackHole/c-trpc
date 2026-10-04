@@ -1,6 +1,6 @@
 #include "../src/group/pipeline_route_internal.h"
 
-#include "tr/endian.h"
+#include "../src/endian.h"
 #include "tr/status.h"
 
 #include <assert.h>

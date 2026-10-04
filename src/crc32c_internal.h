@@ -1,7 +1,7 @@
 #ifndef TR_CRC32C_INTERNAL_H
 #define TR_CRC32C_INTERNAL_H
 
-#include "tr/crc32c.h"
+#include "crc32c.h"
 
 /* Private backend entry points for differential tests; not installed in the SDK. */
 #if defined(__x86_64__) && !defined(TR_CRC32C_FORCE_PORTABLE)

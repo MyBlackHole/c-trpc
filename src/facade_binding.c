@@ -1,6 +1,6 @@
 #include "facade_binding.h"
 
-#include "tr/endian.h"
+#include "endian.h"
 #include "tr/status.h"
 
 #include <errno.h>

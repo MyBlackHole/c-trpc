@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四、十五、十六阶段：
+P5 第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -390,6 +390,9 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - Socket capability header 已从 `include/tr/socket.h` 回收到 `src/io/socket.h`；
   production/test 代码统一通过 I/O module-local header 使用 fd/TCP primitives，
   不改变 socket ownership、nonblocking policy、cleanup 语义或调用路径；
+- `crc32c.h` 与 `endian.h` 已从 `include/tr/` 回收到 `src/` 根部，作为跨模块
+  repository-internal shared utilities；调用方只改 include 路径，不改变 CRC backend、
+  wire byte order、inline codec 或 hot-path 行为；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -397,7 +400,7 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 
 下一阶段：
 
-- Group、Transport、network I/O、Reactor execution、Buffer resource 与 engine capability headers 的 P5 物理收敛已基本闭环；Socket capability header 也已回收到 `src/io/`；下一步继续评估 crc32c/endian/cleanup/guard/refcount/observability 这批 utility/internal headers；
+- Group、Transport、network I/O、Reactor execution、Buffer resource 与 engine capability headers 的 P5 物理收敛已基本闭环；Socket、CRC32C 与 endian headers 也已退出 public include tree；下一步继续评估 cleanup/guard/refcount/observability 这批 utility/internal headers；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

@@ -2,8 +2,8 @@
 
 #include <string.h>
 
-#include "tr/crc32c.h"
-#include "tr/endian.h"
+#include "../crc32c.h"
+#include "../endian.h"
 #include "tr/status.h"
 
 static const uint8_t tr_pipeline_route_magic[4] = { 'T', 'R', 'R', '1' };

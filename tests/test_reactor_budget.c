@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include "../src/execution/reactor.h"
 #include "../src/execution/command_queue.h"
-#include "tr/crc32c.h"
+#include "../src/crc32c.h"
 #include "../src/transport/protocol/parser.h"
 #include "tr/status.h"
 #include "../src/execution/completion_queue.h"

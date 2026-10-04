@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "tr/endian.h"
+#include "../endian.h"
 #include "tr/status.h"
 
 static const uint8_t tr_pipeline_control_wire_magic[4] = {
