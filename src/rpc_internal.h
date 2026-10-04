@@ -7,18 +7,38 @@
 #include "tr/channel.h"
 #include "tr/observability.h"
 #include "tr/rpc.h"
+#include "tr/rpc_wire.h"
 
 struct tr_rpc_endpoint;
 
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
+
+/* Largest header + metadata prefix + bounded metadata block. */
+#define TR_RPC_ENVELOPE_BUFFER_SIZE 	(TR_RPC_WIRE_HEADER_SIZE + TR_RPC_WIRE_METADATA_PREFIX_SIZE + 	 TR_RPC_METADATA_MAX_BYTES)
+
+/*
+ * Owner-local outbound payload budget.
+ *
+ * Client owns one budget. Server owns one per Reactor shard and shares it
+ * across that shard's peer Endpoints. Reserve/release therefore never needs a
+ * cross-shard lock or atomic; the budget lifetime must cover all Reactor TX
+ * buffers that reference it.
+ */
+struct tr_rpc_send_budget {
+	uint64_t limit;
+	uint64_t inflight;
+	uint64_t peak;
+	uint64_t exhausted_events;
+};
 
 struct tr_rpc_endpoint_config {
 	enum tr_rpc_role role;
 	uint32_t max_methods;
 	uint32_t max_calls;
 
-	/* Used for RPC envelope/control-path copies. */
+	/* Small RPC envelope/control buffer pool. */
 	struct tr_buffer_pool *message_pool;
+	struct tr_rpc_send_budget *send_budget;
 
 	uint32_t executor_queue_capacity;
 	uint32_t executor_threads;

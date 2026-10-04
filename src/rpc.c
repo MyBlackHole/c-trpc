@@ -160,7 +160,8 @@ struct tr_rpc_call_slot {
 	uint8_t peer_trailing_metadata[TR_RPC_METADATA_MAX_BYTES];
 	uint16_t peer_trailing_metadata_len;
 
-	struct tr_buffer *pending_tx;
+	struct tr_buffer *pending_tx_header;
+	struct tr_buffer *pending_tx_payload;
 	struct tr_buffer *pending_control;
 	int need_local_close;
 	int response_received;
@@ -191,7 +192,16 @@ struct tr_rpc_unary_completion {
 	struct tr_rpc_call_handle call;
 	int status;
 	uint32_t response_len;
+	struct tr_buffer payload;
+	struct tr_rpc_send_budget *payload_budget;
 	uint8_t response[];
+};
+
+struct tr_rpc_owned_payload {
+	struct tr_buffer buffer;
+	struct tr_rpc_send_budget *budget;
+	uint32_t accounted_bytes;
+	uint8_t storage[];
 };
 
 struct tr_rpc_task_completion {
@@ -1162,8 +1172,10 @@ static void tr_rpc_free_call_locked(struct tr_rpc_endpoint *endpoint,
 	generation = call->generation;
 	(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
 	tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
-	if (call->pending_tx)
-		tr_buffer_release(call->pending_tx);
+	if (call->pending_tx_header)
+		tr_buffer_release(call->pending_tx_header);
+	if (call->pending_tx_payload)
+		tr_buffer_release(call->pending_tx_payload);
 	if (call->pending_control)
 		tr_buffer_release(call->pending_control);
 	tr_rpc_drop_pending_executor_task_locked(call);
@@ -1232,6 +1244,61 @@ static int tr_rpc_status_valid(int status)
 {
 	return status >= TR_RPC_STATUS_OK &&
 	       status <= TR_RPC_STATUS_UNAUTHENTICATED;
+}
+
+static int tr_rpc_send_budget_reserve(
+	struct tr_rpc_send_budget *budget, uint32_t bytes)
+{
+	uint64_t next;
+
+	if (!budget || budget->limit == 0U)
+		return TR_ERR_INVALID;
+	if (bytes == 0U)
+		return TR_OK;
+	if (budget->inflight > budget->limit ||
+	    (uint64_t)bytes > budget->limit - budget->inflight) {
+		budget->exhausted_events++;
+		return TR_AGAIN;
+	}
+
+	next = budget->inflight + (uint64_t)bytes;
+	budget->inflight = next;
+	if (next > budget->peak)
+		budget->peak = next;
+	return TR_OK;
+}
+
+static void tr_rpc_send_budget_release(
+	struct tr_rpc_send_budget *budget, uint32_t bytes)
+{
+	if (!budget || bytes == 0U)
+		return;
+	assert(budget->inflight >= bytes);
+	budget->inflight -= bytes;
+}
+
+static void tr_rpc_owned_payload_release(struct tr_buffer *buffer)
+{
+	struct tr_rpc_owned_payload *owned =
+		(struct tr_rpc_owned_payload *)buffer;
+
+	if (!owned)
+		return;
+	tr_rpc_send_budget_release(owned->budget, owned->accounted_bytes);
+	free(owned);
+}
+
+static void tr_rpc_unary_completion_payload_release(struct tr_buffer *buffer)
+{
+	struct tr_rpc_unary_completion *completion;
+
+	if (!buffer)
+		return;
+	completion = (struct tr_rpc_unary_completion *)(
+		(uint8_t *)buffer - offsetof(struct tr_rpc_unary_completion, payload));
+	tr_rpc_send_budget_release(
+		completion->payload_budget, completion->response_len);
+	free(completion);
 }
 
 static void tr_rpc_semantic_start_locked(
@@ -1375,81 +1442,6 @@ static int tr_rpc_validate_stream_status_locked(
 	return TR_OK;
 }
 
-static int tr_rpc_encode_message(struct tr_rpc_endpoint *endpoint,
-				 struct tr_rpc_call_slot *call, uint16_t type,
-				 const struct tr_rpc_method_desc *method,
-				 uint32_t codec_id, int status,
-				 const struct tr_rpc_bytes *message,
-				 struct tr_buffer **out)
-{
-	struct tr_rpc_wire_header header;
-	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
-	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
-	uint16_t metadata_len = 0;
-	uint32_t encoded = 0;
-	uint32_t metadata_wire_len = 0;
-	uint32_t payload_off;
-	uint32_t total;
-	int ret;
-
-	if (!endpoint || !call || !method || !message || !out)
-		return TR_ERR_INVALID;
-	*out = NULL;
-
-	if (codec_id != TR_RPC_CODEC_RAW)
-		return TR_ERR_BAD_TYPE;
-	ret = tr_rpc_build_outbound_metadata_locked(endpoint, call, type,
-						    metadata, &metadata_len);
-	if (ret != TR_OK)
-		return ret;
-	if (metadata_len)
-		metadata_wire_len =
-			TR_RPC_WIRE_METADATA_PREFIX_SIZE + metadata_len;
-	if (message->len >
-	    UINT32_MAX - TR_RPC_WIRE_HEADER_SIZE - metadata_wire_len)
-		return TR_ERR_BAD_LENGTH;
-	total = TR_RPC_WIRE_HEADER_SIZE + metadata_wire_len + message->len;
-
-	ret = tr_buffer_acquire(endpoint->config.message_pool, total, &buffer);
-	if (ret != TR_OK)
-		return ret;
-
-	memset(&header, 0, sizeof(header));
-	header.version = TR_RPC_WIRE_VERSION;
-	header.type = type;
-	header.service_id = method->service_id;
-	header.method_id = method->method_id;
-	header.codec_id = codec_id;
-	header.flags = metadata_len ? TR_RPC_WIRE_F_METADATA : 0;
-	header.status = status;
-	header.payload_len = message->len;
-
-	ret = tr_rpc_wire_encode(buffer->data, &header);
-	if (ret != TR_OK)
-		return ret;
-
-	payload_off = TR_RPC_WIRE_HEADER_SIZE;
-	if (metadata_len) {
-		tr_put_le16(buffer->data + payload_off, metadata_len);
-		memcpy(buffer->data + payload_off +
-			       TR_RPC_WIRE_METADATA_PREFIX_SIZE,
-		       metadata, metadata_len);
-		payload_off += metadata_wire_len;
-	}
-
-	ret = tr_rpc_raw_encode(message, buffer->data + payload_off,
-				buffer->capacity - payload_off, &encoded);
-	if (ret != TR_OK || encoded != message->len) {
-		if (ret == TR_OK)
-			ret = TR_ERR_STATE;
-		return ret;
-	}
-
-	buffer->len = total;
-	*out = tr_buffer_take(&buffer);
-	return TR_OK;
-}
-
 static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
 				       struct tr_rpc_call_slot *call,
 				       uint16_t type,
@@ -1478,6 +1470,8 @@ static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
 		metadata_wire_len =
 			TR_RPC_WIRE_METADATA_PREFIX_SIZE + metadata_len;
 	total = TR_RPC_WIRE_HEADER_SIZE + metadata_wire_len;
+	if (total > TR_RPC_ENVELOPE_BUFFER_SIZE)
+		return TR_ERR_STATE;
 
 	ret = tr_buffer_acquire(endpoint->config.message_pool, total, &buffer);
 	if (ret != TR_OK)
@@ -1510,6 +1504,107 @@ static int tr_rpc_encode_header_buffer(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
+static int tr_rpc_copy_payload_locked(
+	struct tr_rpc_endpoint *endpoint, uint32_t codec_id,
+	const struct tr_rpc_bytes *message, struct tr_buffer **out)
+{
+	struct tr_rpc_owned_payload *owned;
+	uint32_t encoded = 0U;
+	size_t allocation_size;
+	int ret;
+
+	if (!endpoint || !message || !out ||
+	    (message->len != 0U && !message->data))
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (message->len == 0U)
+		return TR_OK;
+	if (codec_id != TR_RPC_CODEC_RAW)
+		return TR_ERR_BAD_TYPE;
+#if SIZE_MAX <= UINT32_MAX
+	if (message->len > (uint32_t)(SIZE_MAX - sizeof(*owned)))
+		return TR_ERR_BAD_LENGTH;
+#endif
+	allocation_size = sizeof(*owned) + (size_t)message->len;
+	owned = (struct tr_rpc_owned_payload *)malloc(allocation_size);
+	if (!owned)
+		return TR_ERR_NOMEM;
+	memset(owned, 0, sizeof(*owned));
+
+	ret = tr_rpc_send_budget_reserve(
+		endpoint->config.send_budget, message->len);
+	if (ret != TR_OK) {
+		free(owned);
+		return ret;
+	}
+
+	owned->budget = endpoint->config.send_budget;
+	owned->accounted_bytes = message->len;
+	owned->buffer.data = owned->storage;
+	owned->buffer.capacity = message->len;
+	owned->buffer.len = message->len;
+	owned->buffer.release_cb = tr_rpc_owned_payload_release;
+
+	ret = tr_rpc_raw_encode(
+		message, owned->buffer.data, owned->buffer.capacity, &encoded);
+	if (ret != TR_OK || encoded != message->len) {
+		if (ret == TR_OK)
+			ret = TR_ERR_STATE;
+		tr_buffer_release(&owned->buffer);
+		return ret;
+	}
+
+	*out = &owned->buffer;
+	return TR_OK;
+}
+
+static int tr_rpc_encode_message_parts(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call,
+	uint16_t type, const struct tr_rpc_method_desc *method,
+	uint32_t codec_id, int status, const struct tr_rpc_bytes *message,
+	struct tr_buffer **header_out, struct tr_buffer **payload_out)
+{
+	struct tr_buffer *header TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *payload TR_AUTO(tr_buffer_cleanup) = NULL;
+	int ret;
+
+	if (!endpoint || !call || !method || !message ||
+	    !header_out || !payload_out)
+		return TR_ERR_INVALID;
+	*header_out = NULL;
+	*payload_out = NULL;
+	if (codec_id != TR_RPC_CODEC_RAW)
+		return TR_ERR_BAD_TYPE;
+
+	ret = tr_rpc_encode_header_buffer(
+		endpoint, call, type, method, codec_id, status,
+		message->len, &header);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_rpc_copy_payload_locked(endpoint, codec_id, message, &payload);
+	if (ret != TR_OK)
+		return ret;
+
+	*header_out = tr_buffer_take(&header);
+	*payload_out = tr_buffer_take(&payload);
+	return TR_OK;
+}
+
+static int tr_rpc_send_message_parts(
+	struct tr_stream_handle stream, struct tr_buffer *header,
+	struct tr_buffer *payload)
+{
+	struct tr_buffer *parts[2];
+	uint32_t count = 1U;
+
+	if (!header)
+		return TR_ERR_INVALID;
+	parts[0] = header;
+	if (payload)
+		parts[count++] = payload;
+	return tr_stream_sendv(stream, parts, count);
+}
+
 static int tr_rpc_encode_control_locked(struct tr_rpc_endpoint *endpoint,
 					struct tr_rpc_call_slot *call,
 					uint16_t type, int status,
@@ -1532,10 +1627,15 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 
 	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL)
 		return TR_ERR_CLOSED;
-	if (call->pending_tx) {
-		ret = tr_stream_send(call->stream, call->pending_tx);
+	if (call->pending_tx_payload && !call->pending_tx_header)
+		return TR_ERR_STATE;
+	if (call->pending_tx_header) {
+		ret = tr_rpc_send_message_parts(
+			call->stream, call->pending_tx_header,
+			call->pending_tx_payload);
 		if (ret == TR_OK) {
-			(void)tr_buffer_take(&call->pending_tx);
+			(void)tr_buffer_take(&call->pending_tx_header);
+			(void)tr_buffer_take(&call->pending_tx_payload);
 			call->tx_count++;
 			call->need_local_close = 1;
 			call->state = TR_RPC_CALL_ACTIVE;
@@ -1576,7 +1676,8 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 				      struct tr_rpc_call_slot *call,
 				      int status)
 {
-	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *header TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *payload TR_AUTO(tr_buffer_cleanup) = NULL;
 	struct tr_rpc_bytes empty = { NULL, 0 };
 	int ret;
 
@@ -1584,19 +1685,21 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 	    endpoint->config.role != TR_RPC_SERVER)
 		return TR_ERR_INVALID;
 
-	ret = tr_rpc_encode_message(
+	ret = tr_rpc_encode_message_parts(
 		endpoint, call, TR_RPC_WIRE_RESPONSE, &call->method->desc,
-		call->method->desc.response_codec_id, status, &empty, &encoded);
+		call->method->desc.response_codec_id, status, &empty,
+		&header, &payload);
 	if (ret != TR_OK)
 		return ret;
 
-	call->pending_tx = tr_buffer_take(&encoded);
+	call->pending_tx_header = tr_buffer_take(&header);
+	call->pending_tx_payload = tr_buffer_take(&payload);
 	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 	tr_rpc_semantic_finish_locked(endpoint, call, status);
 
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
 	/*
-	 * TR_AGAIN means pending_tx is retained for the existing WRITABLE/flush
+	 * TR_AGAIN means pending TX parts are retained for the existing WRITABLE/flush
 	 * retry path. The overload decision itself has already been accepted.
 	 */
 	return ret == TR_AGAIN ? TR_OK : ret;
@@ -1616,7 +1719,6 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 				      int status)
 {
 	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
-	struct tr_rpc_bytes empty = { NULL, 0 };
 	struct tr_rpc_method_desc method;
 	int ret;
 
@@ -1627,9 +1729,9 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 		return TR_ERR_STATE;
 
 	method = call->method->desc;
-	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
-				    method.response_codec_id, status, &empty,
-				    &encoded);
+	ret = tr_rpc_encode_header_buffer(
+		endpoint, call, TR_RPC_WIRE_STATUS, &method,
+		method.response_codec_id, status, 0U, &encoded);
 	if (ret != TR_OK)
 		return ret;
 
@@ -1673,7 +1775,6 @@ tr_rpc_fail_stream_midstream_overload_locked(
 	struct tr_rpc_call_slot *call, int status)
 {
 	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
-	struct tr_rpc_bytes empty = { NULL, 0 };
 	struct tr_rpc_call_handle handle;
 	struct tr_rpc_method_desc method;
 	int ret;
@@ -1691,9 +1792,9 @@ tr_rpc_fail_stream_midstream_overload_locked(
 	tr_rpc_executor_mark_cancelled(endpoint, handle);
 
 	method = call->method->desc;
-	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
-				    method.response_codec_id, status, &empty,
-				    &encoded);
+	ret = tr_rpc_encode_header_buffer(
+		endpoint, call, TR_RPC_WIRE_STATUS, &method,
+		method.response_codec_id, status, 0U, &encoded);
 	if (ret != TR_OK)
 		return ret;
 
@@ -2465,33 +2566,74 @@ tr_rpc_schedule_pending_executor_retry(struct tr_rpc_endpoint *endpoint)
 	}
 }
 
+static int tr_rpc_unary_completion_adopt_payload(
+	struct tr_rpc_endpoint *endpoint,
+	struct tr_rpc_unary_completion *completion,
+	struct tr_buffer **out)
+{
+	int ret;
+
+	if (!endpoint || !completion || !out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (completion->response_len == 0U)
+		return TR_OK;
+
+	ret = tr_rpc_send_budget_reserve(
+		endpoint->config.send_budget, completion->response_len);
+	if (ret != TR_OK)
+		return ret;
+
+	completion->payload_budget = endpoint->config.send_budget;
+	completion->payload.data = completion->response;
+	completion->payload.capacity = completion->response_len;
+	completion->payload.len = completion->response_len;
+	completion->payload.release_cb =
+		tr_rpc_unary_completion_payload_release;
+	*out = &completion->payload;
+	return TR_OK;
+}
+
 static void tr_rpc_apply_unary_completion(void *arg)
 {
 	struct tr_rpc_unary_completion *completion =
 		(struct tr_rpc_unary_completion *)arg;
 	struct tr_rpc_endpoint *endpoint;
 	struct tr_rpc_call_slot *call;
-	struct tr_buffer *response_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
-	struct tr_rpc_bytes response;
+	struct tr_rpc_call_handle call_handle;
+	struct tr_buffer *response_header TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *response_payload = NULL;
+	int payload_adopted = 0;
+	int payload_transferred = 0;
 	int ret = TR_OK;
 
 	if (!completion)
 		return;
 
 	endpoint = completion->endpoint;
-	response.data = completion->response_len ? completion->response : NULL;
-	response.len = completion->response_len;
+	call_handle = completion->call;
 
-	/*
-	 * 这里由 Reactor owner thread 执行。endpoint->lock 暂时保留用于兼容
-	 * 仍可从 application 线程进入的旧 API；后续 ownership
-	 * 收敛后再缩减这把锁，而不是在本阶段直接替换成 atomic。
-	 */
 	pthread_mutex_lock(&endpoint->lock);
-	call = tr_rpc_lookup_call_handle_locked(completion->call);
+	call = tr_rpc_lookup_call_handle_locked(call_handle);
 	if (call && call->method && call->is_unary && !call->cancelled &&
-	    !call->pending_tx) {
-		uint32_t slot = tr_rpc_call_handle_slot(completion->call);
+	    !call->pending_tx_header && !call->pending_tx_payload) {
+		uint32_t slot = tr_rpc_call_handle_slot(call_handle);
+
+		if (completion->response_len != 0U) {
+			ret = tr_rpc_unary_completion_adopt_payload(
+				endpoint, completion, &response_payload);
+			if (ret == TR_AGAIN) {
+				completion->status =
+					TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+				completion->response_len = 0U;
+				response_payload = NULL;
+				ret = TR_OK;
+			} else if (ret == TR_OK) {
+				payload_adopted = 1;
+			}
+		}
+		if (ret != TR_OK)
+			goto unary_out;
 
 		ret = tr_rpc_run_interceptor_locked(
 			endpoint, slot, call, TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER,
@@ -2499,12 +2641,19 @@ static void tr_rpc_apply_unary_completion(void *arg)
 		if (ret != TR_OK)
 			goto unary_out;
 		call = &endpoint->calls[slot];
-		ret = tr_rpc_encode_message(
+
+		ret = tr_rpc_encode_header_buffer(
 			endpoint, call, TR_RPC_WIRE_RESPONSE,
 			&call->method->desc, call->method->desc.response_codec_id,
-			completion->status, &response, &response_buffer);
+			completion->status,
+			response_payload ? response_payload->len : 0U,
+			&response_header);
 		if (ret == TR_OK) {
-			call->pending_tx = tr_buffer_take(&response_buffer);
+			call->pending_tx_header =
+				tr_buffer_take(&response_header);
+			call->pending_tx_payload = response_payload;
+			response_payload = NULL;
+			payload_transferred = payload_adopted;
 			tr_rpc_semantic_finish_locked(
 				endpoint, call, completion->status);
 			(void)tr_rpc_try_unary_send_locked(endpoint, call);
@@ -2513,20 +2662,12 @@ static void tr_rpc_apply_unary_completion(void *arg)
 unary_out:
 	pthread_mutex_unlock(&endpoint->lock);
 
-	/*
-	 * completion 接管了原 task 的 Endpoint 强引用和 task_refs；
-	 * 必须在 owner thread 最后归还，避免 Call 在 completion 应用前复用。
-	 */
-	{
-		struct tr_rpc_call_handle call_handle = completion->call;
-
+	if (response_payload)
+		tr_buffer_release(response_payload);
+	else if (!payload_transferred)
 		free(completion);
-		/*
-		 * per-call executor serialization 必须覆盖 completion apply；
-		 * 只有 owner 已应用本次结果后，才允许同一 Call 的下一项任务运行。
-		 */
-		tr_rpc_finish_task_on_owner(endpoint, call_handle);
-	}
+
+	tr_rpc_finish_task_on_owner(endpoint, call_handle);
 }
 
 static int tr_rpc_prepare_unary_completion(
@@ -2550,6 +2691,7 @@ static int tr_rpc_prepare_unary_completion(
 	completion = (struct tr_rpc_unary_completion *)malloc(size);
 	if (!completion)
 		return TR_ERR_NOMEM;
+	memset(completion, 0, sizeof(*completion));
 
 	completion->endpoint = endpoint;
 	completion->call = task->call;
@@ -4297,6 +4439,7 @@ int tr_rpc_endpoint_create_with_executor_group(
 	int ret;
 
 	if (!channel || !config || !out || !config->message_pool ||
+	    !config->send_budget || config->send_budget->limit == 0U ||
 	    (config->role != TR_RPC_CLIENT && config->role != TR_RPC_SERVER) ||
 	    config->max_methods == 0 || config->max_calls == 0 ||
 	    (config->observability_flags & ~TR_OBSERVABILITY_VALID_FLAGS))
@@ -4792,7 +4935,8 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 	struct tr_rpc_method_entry *method;
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_call_handle handle;
-	struct tr_buffer *request_buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *request_header TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *request_payload TR_AUTO(tr_buffer_cleanup) = NULL;
 	const struct tr_rpc_call_options *options =
 		request->has_options ? &request->options : NULL;
 	uint32_t slot;
@@ -4841,17 +4985,17 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 		return ret;
 	}
 
-	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_REQUEST,
-				    &method->desc,
-				    method->desc.request_codec_id,
-				    TR_RPC_STATUS_OK, &request->request,
-				    &request_buffer);
+	ret = tr_rpc_encode_message_parts(
+		endpoint, call, TR_RPC_WIRE_REQUEST, &method->desc,
+		method->desc.request_codec_id, TR_RPC_STATUS_OK,
+		&request->request, &request_header, &request_payload);
 	if (ret != TR_OK) {
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return ret;
 	}
-	call->pending_tx = tr_buffer_take(&request_buffer);
+	call->pending_tx_header = tr_buffer_take(&request_header);
+	call->pending_tx_payload = tr_buffer_take(&request_payload);
 
 	ret = tr_stream_open(endpoint->channel, (enum tr_lane)method->desc.lane,
 			     &call->stream);
@@ -5102,7 +5246,8 @@ static int tr_rpc_call_send_on_owner(void *arg)
 	struct tr_rpc_endpoint *endpoint = tr_rpc_call_handle_endpoint(handle);
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_method_desc method;
-	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *header TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_buffer *payload TR_AUTO(tr_buffer_cleanup) = NULL;
 	uint16_t wire_type;
 	uint32_t codec_id;
 	uint32_t limit;
@@ -5114,13 +5259,14 @@ static int tr_rpc_call_send_on_owner(void *arg)
 	if (ret == TR_OK && message->len > limit)
 		ret = TR_ERR_BAD_LENGTH;
 	if (ret == TR_OK)
-		ret = tr_rpc_encode_message(endpoint, call, wire_type, &method,
-					    codec_id, TR_RPC_STATUS_OK, message,
-					    &encoded);
+		ret = tr_rpc_encode_message_parts(
+			endpoint, call, wire_type, &method, codec_id,
+			TR_RPC_STATUS_OK, message, &header, &payload);
 	if (ret == TR_OK) {
-		ret = tr_stream_send(call->stream, encoded);
+		ret = tr_rpc_send_message_parts(call->stream, header, payload);
 		if (ret == TR_OK) {
-			(void)tr_buffer_take(&encoded);
+			(void)tr_buffer_take(&header);
+			(void)tr_buffer_take(&payload);
 			call->tx_count++;
 		}
 	}
@@ -5294,12 +5440,8 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 	struct tr_rpc_call_slot *call;
 	struct tr_rpc_method_desc method;
 	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
-	struct tr_rpc_bytes empty;
 	enum tr_rpc_cardinality cardinality;
 	int ret;
-
-	empty.data = NULL;
-	empty.len = 0;
 
 	pthread_mutex_lock(&endpoint->lock);
 	call = tr_rpc_lookup_call_handle_locked(handle);
@@ -5344,9 +5486,9 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 	call = &endpoint->calls[tr_rpc_call_handle_slot(handle)];
 
 	method = call->method->desc;
-	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
-				    method.response_codec_id, status, &empty,
-				    &buffer);
+	ret = tr_rpc_encode_header_buffer(
+		endpoint, call, TR_RPC_WIRE_STATUS, &method,
+		method.response_codec_id, status, 0U, &buffer);
 	if (ret == TR_OK) {
 		ret = tr_stream_send(call->stream, buffer);
 		if (ret == TR_OK) {
@@ -5485,7 +5627,8 @@ static int tr_rpc_call_set_metadata_on_owner(void *arg)
 		dst = call->local_trailing_metadata;
 		dst_len = &call->local_trailing_metadata_len;
 	} else {
-		if (call->tx_count != 0 || call->pending_tx != NULL ||
+		if (call->tx_count != 0 || call->pending_tx_header != NULL ||
+		    call->pending_tx_payload != NULL ||
 		    call->pending_control != NULL) {
 			ret = TR_ERR_STATE;
 			goto out;
@@ -5761,7 +5904,8 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 			continue;
 
 		if (call->is_unary &&
-		    (call->pending_tx || call->need_local_close))
+		    (call->pending_tx_header || call->pending_tx_payload ||
+		     call->need_local_close))
 			ret = tr_rpc_try_unary_send_locked(endpoint, call);
 		else if (!call->is_unary && call->pending_control) {
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
