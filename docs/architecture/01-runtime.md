@@ -10,13 +10,13 @@ executor、peer table 与 hot buffer pool。
 
 ```text
 tr_server
-  ├─ tr_runtime
-  │    └─ shard[0]
-  │         ├─ Reactor
-  │         ├─ listener
-  │         ├─ RPC executor
-  │         ├─ peer table / counters
-  │         └─ Reactor-owned accept
+  └─ tr_runtime
+       └─ shard[0..N-1]
+            ├─ Reactor
+            ├─ SO_REUSEPORT listener
+            ├─ RPC executor
+            ├─ peer table / counters
+            └─ Reactor-owned accept
 ```
 
 `tr_runtime` 现在负责 Reactor 生命周期；Server 不再直接拥有 Reactor。
@@ -120,7 +120,7 @@ CURRENT 已落地最小内部形状：
 
 ```c
 struct tr_runtime {
-    uint32_t shard_count;          /* Runtime: N; Server facade CURRENT: 1 */
+    uint32_t shard_count;          /* Server: N；Client CURRENT: 1 */
     struct tr_runtime_shard *shards;
 };
 
@@ -242,8 +242,10 @@ Client library 必须保持嵌入友好：
 ## 6. Timer
 
 CURRENT：RPC deadline 与 Channel keepalive 已迁移到 Reactor-local timer，
-旧的 shared maintenance scheduler 已删除。reconnect/backoff 仍保留独立
-reconnect thread，因为 connect/poll/backoff 不能直接塞进 Reactor timer callback。
+旧的 shared maintenance scheduler 已删除。Client Channel 的自动 reconnect
+暂时仍保留低频 reconnect thread；Connection Group DATA establish 已采用
+nonblocking connect + Reactor auxiliary fd/timer，因此后续可复用同一 connector
+模型逐步移除 Channel reconnect thread。
 
 Reactor-local timer 基础设施已经落地：
 
@@ -280,7 +282,7 @@ Reactor shard
 | `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
 | `tr_server_create()` | 创建 N-shard Runtime（Reactor 尚未启动）；`executor_threads` 总预算拆分到 N 个 shard-local worker pool |
 | `tr_server_listen()` | 0 |
-| `tr_server_start()` | 1 个：Reactor；accept/peer cleanup 都是 Reactor event |
+| `tr_server_start()` | N 个：每个 shard 启动 1 个 Reactor；accept/peer cleanup 都在各自 owner Reactor 上执行 |
 
 Client connect 才创建 RPC Endpoint worker；启用自动重连时仍可能增加
 reconnect thread。deadline / keepalive 不再产生独立线程，也不存在每个
