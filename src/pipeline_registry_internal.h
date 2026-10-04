@@ -42,6 +42,17 @@ int tr_pipeline_registry_unregister(struct tr_pipeline_registry *registry,
 				    struct tr_pipeline *pipeline);
 
 /*
+ * 在一个 owner turn 内关闭 Pipeline CONTROL 并注销 registry entry。
+ *
+ * 该操作先验证 exact registry identity、CONTROL 存在以及不存在 ATTACHED DATA /
+ * Stream affinity；随后进入不可逆 commit：clear CONTROL、取消 RESERVED capability、
+ * 摘除 registry entry。成功后调用方可以安全 destroy Pipeline。
+ */
+int tr_pipeline_registry_close_control(
+	struct tr_pipeline_registry *registry, struct tr_pipeline *pipeline,
+	struct tr_conn_handle expected_control);
+
+/*
  * DATA route attach consumes only an exact RESERVED Pipeline capability.
  * The preface is assumed to have passed raw magic/CRC validation; this API
  * independently revalidates semantic fields and registry identity.
