@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "pipeline_internal.h"
-#include "../pipeline_route_internal.h"
+#include "pipeline_route_internal.h"
 
 struct tr_pipeline_registry;
 

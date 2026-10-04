@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "pipeline_control_internal.h"
-#include "pipeline_route_internal.h"
+#include "group/pipeline_route_internal.h"
 #include "tr/buffer.h"
 #include "tr/reactor.h"
 
