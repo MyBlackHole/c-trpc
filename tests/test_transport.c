@@ -2078,6 +2078,7 @@ static void test_channel_graceful_drain(void)
 {
 	struct tr_reactor_config reactor_config;
 	struct tr_channel_config channel_config;
+	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_reactor *reactor = NULL;
 	struct tr_channel *client_channel = NULL;
 	struct tr_channel *server_channel = NULL;
@@ -2144,7 +2145,23 @@ static void test_channel_graceful_drain(void)
 	server_stream = server_ctx.last_stream;
 	pthread_mutex_unlock(&server_ctx.lock);
 
+	/*
+	 * drain 与 reconnect disable 现在是同一个 Reactor owner transaction。
+	 * 先启用 reconnect，再进入 drain；drain 返回后任何重新 enable 都必须
+	 * 看到 local_draining barrier。
+	 */
+	memset(&reconnect_config, 0, sizeof(reconnect_config));
+	reconnect_config.ipv4_address = "127.0.0.1";
+	reconnect_config.control_port = 1U;
+	reconnect_config.initial_delay_ms = 10U;
+	reconnect_config.max_delay_ms = 20U;
+	reconnect_config.connect_timeout_ms = 50U;
+	assert(tr_channel_enable_client_reconnect(
+		       client_channel, &reconnect_config) == TR_OK);
+
 	assert(tr_channel_begin_drain(client_channel) == TR_OK);
+	assert(tr_channel_enable_client_reconnect(
+		       client_channel, &reconnect_config) == TR_ERR_CLOSED);
 	assert(tr_channel_wait_drained(client_channel, 0) == TR_AGAIN);
 	assert(tr_channel_get_state(client_channel, &channel_state) == TR_OK);
 	assert(channel_state == TR_CHANNEL_DRAINING);
