@@ -77,7 +77,7 @@ target("trcore")
     add_files(
         "src/status.c",
         "src/crc32c.c",
-        "src/buffer.c",
+        "src/execution/buffer.c",
         "src/transport/protocol/wire.c",
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",

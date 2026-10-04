@@ -1,6 +1,6 @@
 #include "tr/trpc.h"
 #include "tr/buffer.h"
-#include "../src/buffer_internal.h"
+#include "../src/execution/buffer_internal.h"
 
 #include <assert.h>
 #include <pthread.h>

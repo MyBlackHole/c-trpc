@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六、七、八、九、十、十一、十二阶段：
+P5 第一、二、三、四、五、六、七、八、九、十、十一、十二、十三阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -376,6 +376,12 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - `command_queue.h` 已从 `include/tr/` 下沉为 execution-local header；
   `include/tr/reactor.h` 与 `src/reactor_internal.h` 暂时保留，等待跨模块 Reactor
   capability/type boundary 进一步收敛后再决定最终 header 位置；
+- Buffer implementation 已迁到 `src/execution/`：fixed/dynamic bounded pool、
+  descriptor ownership、acquire/release 与 pool pressure stats 作为 execution resource
+  primitive 管理；Client/Server 只通过 execution-local `buffer_internal.h` 使用
+  on-demand pool 初始化；
+- `include/tr/buffer.h` 暂留 source-tree internal include 区域，因为 Reactor/Frame/
+  Parser/Channel/RPC 仍共享 Buffer capability/type；header relocation 留待 type boundary 收敛；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -383,7 +389,7 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 
 下一阶段：
 
-- Group、Transport、network I/O 与 Reactor execution substrate 的 P5 物理收敛已基本闭环；下一步评估 Buffer resource ownership 与 Reactor capability header placement；
+- Group、Transport、network I/O、Reactor execution 与 Buffer resource primitive 的 P5 物理收敛已基本闭环；下一步评估 Reactor/Buffer capability header placement 与剩余根目录 internal modules；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

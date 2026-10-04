@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三、四、五、六、七、八、九、十、十一、十二阶段已完成：
+第一、二、三、四、五、六、七、八、九、十、十一、十二、十三阶段已完成：
 
 ```text
 src/rpc/
@@ -997,6 +997,8 @@ src/execution/
   completion_queue.h
   timer_queue.c
   timer_queue.h
+  buffer.c
+  buffer_internal.h
 ```
 
 规则：
@@ -1046,6 +1048,13 @@ src/execution/
 - `include/tr/reactor.h` 与根 `src/reactor_internal.h` 暂不移动：前者仍承载跨模块
   internal Reactor capability types，后者被 Runtime/RPC/Group/Transport/I/O 广泛消费；
   在 capability/type dependency 收敛前，移动它们只会制造路径噪声而不会减少耦合；
+- Buffer implementation/resource pool 已进入 `src/execution/`：它只定义 bounded
+  buffer descriptor ownership、fixed/dynamic pool acquire/release 与资源压力统计，
+  不拥有 RPC/Channel/Group semantic state；
+- `include/tr/buffer.h` 暂时保留为 repository-internal source-tree type contract，
+  因为 Reactor/Frame/Parser/Channel/RPC internal contract 仍直接共享
+  `struct tr_buffer` / `tr_buffer_pool`；在这些 capability header 解耦前不制造
+  `include/tr -> src/` 反向依赖；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
@@ -1055,8 +1064,7 @@ src/execution/
 后续再按相同规则评估：
 
 ```text
-resource substrate: buffer
-Reactor capability header placement after dependency cleanup
+Reactor / Buffer capability header placement after dependency cleanup
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。
