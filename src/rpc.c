@@ -3558,6 +3558,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 	if (wire.type == TR_RPC_WIRE_REQUEST) {
 		enum tr_rpc_cardinality cardinality;
+		int hook_status = TR_RPC_STATUS_OK;
 
 		if (endpoint->config.role != TR_RPC_SERVER ||
 		    wire.status != 0) {
@@ -3639,6 +3640,31 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			return TR_STREAM_DATA_RELEASE;
 		}
 		call->rx_count++;
+
+		if (first_message) {
+			ret = tr_rpc_run_interceptor_locked(
+				endpoint, slot, call,
+				TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER,
+				TR_RPC_STATUS_OK, &hook_status);
+			if (ret != TR_OK) {
+				pthread_mutex_unlock(&endpoint->lock);
+				(void)tr_stream_close(stream);
+				return TR_STREAM_DATA_RELEASE;
+			}
+			call = &endpoint->calls[slot];
+			if (hook_status != TR_RPC_STATUS_OK) {
+				if (call->is_unary)
+					ret = tr_rpc_reject_unary_locked(
+						endpoint, call, hook_status);
+				else
+					ret = tr_rpc_reject_stream_admission_locked(
+						endpoint, call, hook_status);
+				pthread_mutex_unlock(&endpoint->lock);
+				if (ret != TR_OK)
+					(void)tr_stream_close(stream);
+				return TR_STREAM_DATA_RELEASE;
+			}
+		}
 
 		task.call = tr_rpc_make_call_handle(endpoint, slot, call);
 		task.first_message = (uint16_t)first_message;
