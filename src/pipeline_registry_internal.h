@@ -65,6 +65,17 @@ int tr_pipeline_registry_detach_data_route(
 	const struct tr_pipeline_route_preface *preface,
 	struct tr_conn_handle expected_connection);
 
+/*
+ * Validate that one logical stream is currently READY on the exact DATA route
+ * and physical connection that carried a DATA frame. This is the Server
+ * ingress barrier paired with TRANSFER_READY.
+ */
+int tr_pipeline_registry_validate_stream_route(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface,
+	uint32_t stream_id,
+	struct tr_conn_handle expected_connection);
+
 int tr_pipeline_registry_get_stats(
 	struct tr_pipeline_registry *registry,
 	struct tr_pipeline_registry_stats *out);
