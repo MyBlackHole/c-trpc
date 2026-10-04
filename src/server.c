@@ -8,14 +8,14 @@
 #include <string.h>
 #include <time.h>
 
-#include "tr/buffer.h"
-#include "tr/channel.h"
+#include "execution/buffer.h"
+#include "transport/channel/channel.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
 #include "facade_diagnostics_internal.h"
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
-#include "tr/reactor.h"
+#include "execution/reactor.h"
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"

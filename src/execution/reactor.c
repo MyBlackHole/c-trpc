@@ -1,15 +1,15 @@
 #define _GNU_SOURCE
-#include "tr/reactor.h"
+#include "reactor.h"
 
-#include "../reactor_internal.h"
+#include "reactor_internal.h"
 #include "completion_queue.h"
 #include "timer_queue.h"
 #include "command_queue.h"
 #include "tr/crc32c.h"
-#include "tr/parser.h"
+#include "../transport/protocol/parser.h"
 #include "tr/socket.h"
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../transport/protocol/wire.h"
 #include "../observability_internal.h"
 
 #include <assert.h>

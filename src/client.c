@@ -7,9 +7,9 @@
 #include <string.h>
 #include <time.h>
 
-#include "tr/buffer.h"
-#include "tr/channel.h"
-#include "tr/reactor.h"
+#include "execution/buffer.h"
+#include "transport/channel/channel.h"
+#include "execution/reactor.h"
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"

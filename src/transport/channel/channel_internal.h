@@ -1,7 +1,7 @@
 #ifndef TR_CHANNEL_INTERNAL_H
 #define TR_CHANNEL_INTERNAL_H
 
-#include "tr/channel.h"
+#include "channel.h"
 
 /* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);

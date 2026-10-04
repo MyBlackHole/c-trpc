@@ -1,9 +1,9 @@
 #ifndef TR_FACADE_DIAGNOSTICS_INTERNAL_H
 #define TR_FACADE_DIAGNOSTICS_INTERNAL_H
 
-#include "tr/channel.h"
+#include "transport/channel/channel.h"
 #include "tr/client.h"
-#include "tr/reactor.h"
+#include "execution/reactor.h"
 #include "tr/server.h"
 #include "rpc/rpc_internal.h"
 #include "transport/group/pipeline_listener_internal.h"

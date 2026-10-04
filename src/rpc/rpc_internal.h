@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 
-#include "tr/buffer.h"
-#include "tr/channel.h"
+#include "../execution/buffer.h"
+#include "../transport/channel/channel.h"
 #include "tr/observability.h"
 #include "tr/rpc.h"
 

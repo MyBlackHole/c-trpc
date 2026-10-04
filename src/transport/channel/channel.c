@@ -1,11 +1,11 @@
-#include "tr/channel.h"
+#include "channel.h"
 #include "channel_internal.h"
 #include "../../io/connector_internal.h"
 #include "../../io/socket_internal.h"
-#include "../../reactor_internal.h"
+#include "../../execution/reactor_internal.h"
 
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../protocol/wire.h"
 #include "tr/socket.h"
 #include "tr/endian.h"
 

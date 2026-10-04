@@ -1,4 +1,4 @@
-#include "tr/wire.h"
+#include "wire.h"
 
 #include "tr/crc32c.h"
 #include "tr/endian.h"

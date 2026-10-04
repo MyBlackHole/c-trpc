@@ -1,4 +1,4 @@
-#include "tr/parser.h"
+#include "parser.h"
 
 #include "tr/crc32c.h"
 #include "tr/status.h"
