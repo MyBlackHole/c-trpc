@@ -2474,6 +2474,7 @@ static void tr_rpc_apply_unary_completion(void *arg)
 			(void)tr_rpc_try_unary_send_locked(endpoint, call);
 		}
 	}
+unary_out:
 	pthread_mutex_unlock(&endpoint->lock);
 
 	/*
@@ -3779,6 +3780,16 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			}
 			call->response_received = 1;
 			call->result_delivered = 1;
+			ret = tr_rpc_run_interceptor_locked(
+				endpoint, slot, call,
+				TR_RPC_INTERCEPTOR_CLIENT_POST_CALL,
+				wire.status, NULL);
+			if (ret != TR_OK) {
+				pthread_mutex_unlock(&endpoint->lock);
+				(void)tr_stream_close(stream);
+				return TR_STREAM_DATA_RELEASE;
+			}
+			call = &endpoint->calls[slot];
 			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			task.type = TR_RPC_TASK_CLIENT_UNARY_RESULT;
 		} else {
