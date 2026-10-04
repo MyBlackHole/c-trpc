@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六、七、八、九阶段：
+P5 第一、二、三、四、五、六、七、八、九、十阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -360,6 +360,11 @@ P5 第一、二、三、四、五、六、七、八、九阶段：
 - 对应 `include/tr/wire.h` / `frame.h` / `parser.h` 暂不物理迁移：
   Reactor internal header 仍依赖 Frame 类型，先保持单向 include graph，避免
   `include/tr -> src/` 反向依赖；
+- Channel state engine 已迁到 `src/transport/channel/`：Channel 自己拥有 HELLO/
+  GOAWAY、Stream state/index、message ordering、flow-control、drain、keepalive 与 reconnect
+  policy；connector/socket/Reactor 仍只作为 execution capability 被调用，不随 Channel 迁移；
+- `include/tr/channel.h` 暂留 source-tree internal include 区域，等待 Reactor/Channel
+  header dependency 进一步收敛后再移动；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -367,7 +372,7 @@ P5 第一、二、三、四、五、六、七、八、九阶段：
 
 下一阶段：
 
-- Group 子系统与 TRP1 protocol implementation 的 P5 物理收敛已基本闭环；下一步评估 Channel state engine，以及 connector/socket/buffer 是否应继续作为 execution/resource substrate；
+- Group、TRP1 protocol 与 Channel state engine 的 P5 物理收敛已基本闭环；下一步评估 connector/socket/buffer/reactor 的 execution-resource boundary，以及 internal header placement；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

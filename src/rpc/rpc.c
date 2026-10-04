@@ -7,7 +7,7 @@
 #include "tr/guard.h"
 #include "tr/refcount.h"
 #include "rpc_internal.h"
-#include "../channel_internal.h"
+#include "../transport/channel/channel_internal.h"
 #include "../reactor_internal.h"
 #include "../observability_internal.h"
 

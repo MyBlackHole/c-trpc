@@ -16,7 +16,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "tr/wire.h"
-#include "../src/channel_internal.h"
+#include "../src/transport/channel/channel_internal.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
 #include "../src/reactor_internal.h"
