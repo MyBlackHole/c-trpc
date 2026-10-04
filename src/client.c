@@ -188,9 +188,11 @@ int tr_client_create_with_tuning(
 		effective_tuning = *tuning;
 	else
 		tr_facade_tuning_init(&effective_tuning);
-	tr_facade_tuning_normalize(&effective_tuning, &effective.limits);
+	tr_facade_tuning_normalize(&effective_tuning);
 
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
+	    (effective_tuning.observability_flags &
+	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes <
@@ -243,7 +245,7 @@ int tr_client_create_with_tuning(
 			effective.limits.max_frame_payload_bytes * 4U;
 	reactor_config->tx_budget_bytes = reactor_config->rx_budget_bytes;
 	reactor_config->observability_flags =
-		effective.limits.observability_flags;
+		effective_tuning.observability_flags;
 
 	ret = tr_runtime_create(&runtime_config, &client->runtime);
 	if (ret != TR_OK)
@@ -363,7 +365,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	rpc_config.executor_queue_capacity =
 		client->tuning.executor_queue_capacity;
 	rpc_config.observability_flags =
-		client->config.limits.observability_flags;
+		client->tuning.observability_flags;
 	rpc_config.interceptor = client->config.interceptor;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(

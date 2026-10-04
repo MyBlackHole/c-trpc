@@ -225,7 +225,7 @@ static struct options parse_options(int argc, char **argv)
 }
 
 static void configure_limits(
-	struct tr_facade_limits *limits, const struct options *o, int server)
+	struct tr_facade_limits *limits, const struct options *o)
 {
 	tr_facade_limits_init(limits);
 	limits->max_streams = 2U * o->capacity;
@@ -239,8 +239,6 @@ static void configure_limits(
 	limits->initial_window_bytes =
 		(uint64_t)limits->max_message_bytes * 4U;
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
-	if (server)
-		limits->observability_flags = TR_OBSERVABILITY_TIMING;
 }
 
 static void configure_tuning(
@@ -261,6 +259,8 @@ static void configure_tuning(
 	tuning->executor_queue_capacity =
 		server && o->executor_queue ?
 			o->executor_queue : 4U * o->capacity;
+	if (server)
+		tuning->observability_flags = TR_OBSERVABILITY_TIMING;
 	if (server && o->control_tx_items)
 		tuning->control_tx_item_capacity = o->control_tx_items;
 	if (server && o->command_capacity)
@@ -309,7 +309,7 @@ static int run_server(const struct options *o)
 	uint32_t id;
 	int status;
 	tr_server_config_init(&config);
-	configure_limits(&config.limits, o, 1);
+	configure_limits(&config.limits, o);
 	configure_tuning(&tuning, o, 1);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
@@ -853,7 +853,7 @@ static int run_client(const struct options *o)
 	uint32_t i;
 	int status = EXIT_SUCCESS;
 	tr_client_config_init(&config);
-	configure_limits(&config.limits, o, 0);
+	configure_limits(&config.limits, o);
 	configure_tuning(&tuning, o, 0);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
