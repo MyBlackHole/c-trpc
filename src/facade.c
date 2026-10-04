@@ -15,6 +15,7 @@ void tr_facade_limits_init(struct tr_facade_limits *limits)
 
 	limits->max_frame_payload_bytes = 256U * 1024U;
 	limits->max_message_bytes = 4U * 1024U * 1024U;
+	limits->rpc_message_buffer_bytes = 256U * 1024U;
 
 	limits->initial_window_bytes = 8U * 1024U * 1024U;
 	limits->window_update_threshold_bytes = 512U * 1024U;
@@ -36,12 +37,6 @@ void tr_facade_tuning_init(struct tr_facade_tuning *tuning)
 	tuning->rx_buffer_count = 64U;
 	tuning->rpc_message_pool_count = 64U;
 	tuning->reassembly_pool_count = 8U;
-	/*
-	 * Zero means derive from max_frame_payload_bytes. This keeps the internal
-	 * RPC wire buffer aligned with public frame semantics without publishing a
-	 * second byte-size knob.
-	 */
-	tuning->rpc_message_buffer_bytes = 0U;
 }
 
 void tr_facade_tuning_normalize(
@@ -66,8 +61,4 @@ void tr_facade_tuning_normalize(
 	TR_TUNING_DEFAULT(rpc_message_pool_count);
 	TR_TUNING_DEFAULT(reassembly_pool_count);
 #undef TR_TUNING_DEFAULT
-
-	if (tuning->rpc_message_buffer_bytes == 0U)
-		tuning->rpc_message_buffer_bytes =
-			limits->max_frame_payload_bytes;
 }
