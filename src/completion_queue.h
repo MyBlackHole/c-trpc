@@ -12,6 +12,7 @@ struct tr_completion {
 
 struct tr_completion_queue {
 	pthread_mutex_t lock;
+	pthread_cond_t not_full;
 	struct tr_completion *items;
 	uint32_t capacity;
 	uint32_t head;
@@ -19,6 +20,7 @@ struct tr_completion_queue {
 	uint32_t count;
 	uint32_t peak_count;
 	uint64_t full_events;
+	uint32_t waiters;
 	int accepting;
 	int wake_pending;
 };
@@ -42,6 +44,18 @@ void tr_completion_queue_close(struct tr_completion_queue *queue);
 int tr_completion_queue_push(struct tr_completion_queue *queue,
 			     const struct tr_completion *completion,
 			     int *need_wake);
+
+/*
+ * Blocking producer handoff used by worker completion paths.
+ *
+ * Queue full 时 producer 在 not_full 上睡眠，不做 sched_yield 自旋。
+ * TR_OK 表示 ownership 已转移；close 会唤醒全部 waiter 并返回
+ * TR_ERR_CLOSED，此时 ownership 仍属于调用方。
+ */
+int tr_completion_queue_push_wait(
+	struct tr_completion_queue *queue,
+	const struct tr_completion *completion,
+	int *need_wake);
 
 /*
  * 最多弹出 max_completions 项；has_more 返回本批之后是否仍有积压。
