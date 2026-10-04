@@ -823,7 +823,7 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - retained message 用 opaque release token 保持零额外 allocation/copy；
 - `tr_rpc_call_handle` 已 opaque 化，不再公开 Endpoint pointer + slot/generation，同时保持原有 stale-generation fencing。
 
-### P3 — Transport / Connection Group public capability — IN PROGRESS
+### P3 — Transport / Connection Group public capability — COMPLETE
 
 已完成第一阶段：
 
@@ -871,9 +871,17 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - TX 完成/连接关闭/提交失败通过 one-shot Buffer release hook 回收 quota；
 - 当前 backpressure contract 为 `TR_AGAIN + caller retry`，不发布可能产生 false-ready 的单一 writable callback。
 
-待完成：
+第六阶段已完成：
 
-- 完整 group-level stable stats / drain semantics。
+- Server `begin_drain` 只关闭 Group accept，保留既有 Group/Data/Transfer；draining 后不再创建新的 DATA_OFFER / TRANSFER_READY；
+- drain 前已 accept 但尚未完成 CONTROL preface 的 socket 在 route attach 时仍会被 draining fence 拒绝，避免 late Group creation；
+- Client `begin_drain` exact-cancel queued/connecting DATA capability，后续 DATA_OFFER 只 cancel；ACTIVE DATA 与 READY transfer 可继续完成；
+- Client `wait_drained` 等 active transfer、owned send payload 与 pending establishment quiesce；Server `wait_drained` 等既有 Group/connection 自然归零；
+- force `stop()` 与 graceful drain 语义明确分离；
+- stable Client stats 暴露 group/control/data/transfer/send-byte lifecycle；stable Server stats 暴露 group/connection/data/transfer 与 accept/reject counters；
+- Reactor slot/generation、TRR1 identity、connector、queue/pool occupancy 继续保持 internal。
+
+P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile 驱动的扩展。
 
 ### P4 — Config / Stats split — IN PROGRESS
 
@@ -881,9 +889,13 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 
 - detailed Reactor/Channel/Endpoint diagnostics 退出 stable facade header。
 
+已推进：
+
+- Connection Group 已具备 stable semantic stats，且与 internal Reactor/Pipeline diagnostics 分离。
+
 待完成：
 
-- stable semantic stats API；
+- facade-wide stable semantic observability 继续收敛；
 - `tr_facade_limits` 中 implementation tuning 与 semantic limits 分离。
 
 ### P5 — Physical directory cleanup
