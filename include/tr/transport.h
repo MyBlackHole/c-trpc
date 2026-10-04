@@ -27,6 +27,7 @@ struct tr_connection_group_client_stats {
 	uint32_t draining;
 	uint32_t data_connections;
 	uint32_t active_transfers;
+	uint32_t active_transfer_limit;
 	uint64_t send_bytes_inflight;
 	uint64_t send_bytes_limit;
 };
@@ -145,6 +146,14 @@ void tr_connection_group_server_config_init(
  */
 struct tr_connection_group_client_config {
 	uint32_t max_data_connections;
+
+	/*
+	 * Maximum simultaneously installed Stream -> DATA transfer affinities.
+	 * 0 inherits tr_client_config.limits.max_streams when DATA lanes are
+	 * enabled, preserving the pre-Phase-7 default. This is a semantic
+	 * application-visible inflight bound, not a hash-table capacity knob.
+	 */
+	uint32_t max_active_transfers;
 
 	/*
 	 * Optional READY callback. Affinity state is still installed when this is

@@ -175,6 +175,8 @@ struct tr_connection_group_id group = {
 tr_client_config_init(&client_cfg);
 /* 0 keeps CONTROL-only behavior; non-zero enables bounded automatic DATA lanes. */
 client_cfg.connection_groups.max_data_connections = 4;
+/* 0 inherits client_cfg.limits.max_streams for backward-compatible behavior. */
+client_cfg.connection_groups.max_active_transfers = 256;
 tr_client_create(&client_cfg, &client);
 tr_client_connection_group_connect(
     client, "127.0.0.1", group_port, &group);
@@ -204,6 +206,9 @@ transfer. A Server TRANSFER_READY is accepted only when its hidden DATA
 index/generation exactly matches one ACTIVE Client lane. The Client then installs
 a bounded local Stream affinity and invokes the optional
 `on_transfer_ready` callback with only group/stream/message identity.
+Client transfer concurrency is independently bounded by
+`connection_groups.max_active_transfers`; zero inherits the existing
+`limits.max_streams` value so old configurations keep the same behavior.
 `tr_client_connection_group_send()` sends one logical message through that
 exact affinity; the application bytes are borrowed only for the call and copied
 into bounded internal ownership before TR_OK is returned. The Group derives its

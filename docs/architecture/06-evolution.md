@@ -410,12 +410,24 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 
 ## Phase 7 - Resource Driven Flow Control
 
-增加：
+**状态：IN PROGRESS**
 
-- Connection Group inflight limit；
+第一阶段已完成 Connection Group inflight semantic budget：
+
+- Server 继续使用既有 `max_streams_per_group` 作为每 Group transfer affinity 上限；
+- Client 新增 `connection_groups.max_active_transfers`，不再把 Group transfer concurrency
+  隐式绑定到全局 `limits.max_streams`；
+- Client 值为 0 时继承 `limits.max_streams`，因此现有配置的默认行为不变；
+- existing internal `max_transfers` enforcement 直接复用，不新增 queue/thread/copy；
+- Client semantic stats 新增 `active_transfer_limit`，与 `active_transfers` 配对；
+- RPC `max_calls` 已经是 Call lifecycle semantic bound，本阶段不再造重复的
+  `max_inflight_calls` knob。
+
+后续：
+
 - shard memory budget；
 - worker admission；
-- application/backend admission hook；
+- application/backend admission hook（优先复用 SERVER_PRE_HANDLER，而不是新增第二套 hook）；
 - adaptive DATA parallelism。
 
 ## Phase 8 - Profile Before Further Complexity

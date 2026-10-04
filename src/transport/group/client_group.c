@@ -1173,6 +1173,7 @@ static int tr_client_group_stats_on_owner(void *arg)
 	out->control_connected = group->control.reactor ? 1U : 0U;
 	out->draining = group->draining ? 1U : 0U;
 	out->active_transfers = group->transfer_count;
+	out->active_transfer_limit = group->transfer_limit;
 	out->send_bytes_inflight = group->send_bytes_inflight;
 	out->send_bytes_limit = group->send_bytes_limit;
 	for (i = 0; i < group->data_capacity; ++i)

@@ -103,6 +103,16 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 		TR_LIMIT_DEFAULT(window_update_threshold_bytes);
 #undef TR_LIMIT_DEFAULT
 	}
+
+	/*
+	 * Connection Group transfer concurrency is a dedicated semantic budget.
+	 * Preserve the historical behavior by inheriting max_streams when callers
+	 * enable DATA lanes without choosing an explicit transfer limit.
+	 */
+	if (config->connection_groups.max_data_connections != 0U &&
+	    config->connection_groups.max_active_transfers == 0U)
+		config->connection_groups.max_active_transfers =
+			config->limits.max_streams;
 }
 
 void tr_client_config_init(struct tr_client_config *config)
@@ -433,7 +443,8 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 	group_config.owner = tr_client_reactor(client);
 	group_config.max_data_connections =
 		client->config.connection_groups.max_data_connections;
-	group_config.max_transfers = client->config.limits.max_streams;
+	group_config.max_transfers =
+		client->config.connection_groups.max_active_transfers;
 	group_config.max_message_bytes =
 		client->config.limits.max_message_bytes;
 	group_config.max_frame_payload_bytes =
