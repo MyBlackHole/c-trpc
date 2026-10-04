@@ -283,6 +283,7 @@ c-trpc core Phase。
 - Completion handoff 收敛阶段把 worker 满载路径从 `sched_yield()` 改为 bounded queue-local condition wait：Reactor batch pop 释放容量后唤醒 producer；stop 关闭 admission、广播 waiter 并推进 admission generation，防止旧 completion 在 Reactor restart 后跨 epoch 提交。
 - Command handoff 收敛阶段进一步删除 Reactor 剩余 `sched_yield()`：异步 SEND/RESUME 继续以 `TR_AGAIN` 表达有界 backpressure，只有同步 CALL/QUIESCE/SET_HANDLER 使用 generation-fenced condition wait；STOP 关闭普通 waiter admission 后使用 force wait 等待 ring slot，保持 FIFO shutdown barrier。
 - Control-plane lock 收敛阶段开始拆分过渡锁职责：Channel lifecycle observer 与 reconnect socket policy 改为 Reactor-owner publication；RPC Endpoint 将 strong-ref wait / detached-finalizer lifecycle 从 `endpoint->lock` 拆到独立 `ref_lock`，并统一所有 strong-ref release 的 waiter wakeup。
+- Client teardown/handler 收敛阶段把 RPC Endpoint 与 Channel 的销毁移动到 Runtime stop 之前，并将 upper-layer Channel handler publication 改为 Reactor owner barrier；完全 stopped 仅保留 teardown-only direct publication，因此 callback publication 不再占用 `channel->lock`。
 
 当前 stable installed headers：
 
