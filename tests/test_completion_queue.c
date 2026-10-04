@@ -129,6 +129,58 @@ static void test_completion_capacity_wait_and_close(void)
 	tr_completion_queue_destroy(&queue);
 }
 
+static void test_completion_batch_wakes_all_capacity_waiters(void)
+{
+	struct tr_completion_queue queue;
+	struct tr_completion seed = { noop, NULL };
+	struct tr_completion out[2];
+	struct push_wait_ctx producers[2];
+	pthread_t threads[2];
+	int has_more = 0;
+	size_t count;
+	unsigned i;
+
+	memset(producers, 0, sizeof(producers));
+	assert(tr_completion_queue_init(&queue, 2U) == TR_OK);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	assert(tr_completion_queue_push(&queue, &seed, NULL) == TR_OK);
+	assert(tr_completion_queue_push(&queue, &seed, NULL) == TR_OK);
+
+	for (i = 0; i < 2U; ++i) {
+		producers[i].queue = &queue;
+		producers[i].completion.fn = noop;
+		producers[i].completion.arg =
+			(void *)(uintptr_t)(10U + i);
+		assert(pthread_create(
+			       &threads[i], NULL, push_wait_main,
+			       &producers[i]) == 0);
+	}
+	wait_for_waiters(&queue, 2U);
+
+	count = tr_completion_queue_pop_batch(
+		&queue, out, 2U, &has_more);
+	assert(count == 2U);
+	assert(has_more == 0);
+
+	for (i = 0; i < 2U; ++i) {
+		assert(pthread_join(threads[i], NULL) == 0);
+		assert(producers[i].ret == TR_OK);
+	}
+	wait_for_waiters(&queue, 0U);
+
+	pthread_mutex_lock(&queue.lock);
+	assert(queue.count == 2U);
+	assert(queue.full_events == 2U);
+	pthread_mutex_unlock(&queue.lock);
+
+	tr_completion_queue_close(&queue);
+	count = tr_completion_queue_pop_batch(
+		&queue, out, 2U, &has_more);
+	assert(count == 2U);
+	assert(has_more == 0);
+	tr_completion_queue_destroy(&queue);
+}
+
 static void test_completion_admission_and_wake_coalescing(void)
 {
 	struct tr_completion_queue queue;
@@ -191,6 +243,7 @@ int main(void)
 {
 	test_completion_admission_and_wake_coalescing();
 	test_completion_capacity_wait_and_close();
+	test_completion_batch_wakes_all_capacity_waiters();
 	puts("completion admission/wake coalescing/capacity wait: ok");
 	return 0;
 }
