@@ -4064,14 +4064,26 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 		if (call->is_unary && endpoint->config.role == TR_RPC_CLIENT &&
 		    !call->result_delivered) {
-			if (tr_rpc_queue_unary_failure_locked(
+			ret = tr_rpc_run_interceptor_locked(
+				endpoint, slot, call,
+				TR_RPC_INTERCEPTOR_CLIENT_POST_CALL,
+				TR_RPC_STATUS_UNAVAILABLE, NULL);
+			call = &endpoint->calls[slot];
+			if (ret == TR_OK &&
+			    tr_rpc_queue_unary_failure_locked(
 				    endpoint, slot, call,
 				    TR_RPC_STATUS_UNAVAILABLE) == TR_OK)
 				call->terminal_notified = 1;
 		} else if (!call->is_unary &&
 			   endpoint->config.role == TR_RPC_CLIENT &&
 			   !call->final_status_seen) {
-			if (tr_rpc_queue_client_event_locked(
+			ret = tr_rpc_run_interceptor_locked(
+				endpoint, slot, call,
+				TR_RPC_INTERCEPTOR_CLIENT_POST_CALL,
+				TR_RPC_STATUS_UNAVAILABLE, NULL);
+			call = &endpoint->calls[slot];
+			if (ret == TR_OK &&
+			    tr_rpc_queue_client_event_locked(
 				    endpoint, slot, call,
 				    TR_RPC_CALL_EVENT_ERROR,
 				    TR_RPC_STATUS_UNAVAILABLE) == TR_OK)
@@ -4112,6 +4124,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 	enum tr_lane failed_lane;
 	uint32_t i;
+	int ret;
 
 	(void)channel;
 	(void)status;
@@ -4146,12 +4159,17 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 		}
 
 		if (endpoint->config.role == TR_RPC_CLIENT) {
-			if (call->is_unary) {
+			ret = tr_rpc_run_interceptor_locked(
+				endpoint, i, call,
+				TR_RPC_INTERCEPTOR_CLIENT_POST_CALL,
+				TR_RPC_STATUS_UNAVAILABLE, NULL);
+			call = &endpoint->calls[i];
+			if (ret == TR_OK && call->is_unary) {
 				if (tr_rpc_queue_unary_failure_locked(
 					    endpoint, i, call,
 					    TR_RPC_STATUS_UNAVAILABLE) == TR_OK)
 					call->terminal_notified = 1;
-			} else if (!call->terminal_notified) {
+			} else if (ret == TR_OK && !call->terminal_notified) {
 				if (tr_rpc_queue_client_event_locked(
 					    endpoint, i, call,
 					    TR_RPC_CALL_EVENT_ERROR,
