@@ -38,7 +38,7 @@ struct tr_connection_group_server_stats {
 	uint32_t connections_current;
 	uint32_t connections_peak;
 	uint32_t data_connections_current;
-	uint32_t active_transfers;
+	uint64_t active_transfers;
 	uint64_t control_accepts;
 	uint64_t data_accepts;
 	uint64_t route_rejections;
