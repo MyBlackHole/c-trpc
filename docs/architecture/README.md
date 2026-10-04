@@ -12,8 +12,9 @@ Backup、数据库同步、对象复制等属于上层业务；它们可以使�
 3. [01-runtime.md](01-runtime.md)：Server/Client Runtime、Reactor shard、listener 和线程模型。
 4. [02-ownership.md](02-ownership.md)：谁拥有状态、谁可以修改状态、哪些地方允许锁。
 5. [03-rpc-execution.md](03-rpc-execution.md)：RPC Task → Worker → Completion → Reactor owner。
-6. [04-backup-pipeline.md](04-backup-pipeline.md)：当前 legacy 文件名；其中 Pipeline/Connection Group foundation 属于 core，Backup durable 语义只作为上层映射参考。
-7. [06-evolution.md](06-evolution.md)：c-trpc core 演进路线。
+6. [08-rpc-streaming-conformance.md](08-rpc-streaming-conformance.md)：四种 RPC cardinality、half-close、final STATUS 与 terminal callback 契约。
+7. [04-backup-pipeline.md](04-backup-pipeline.md)：当前 legacy 文件名；其中 Pipeline/Connection Group foundation 属于 core，Backup durable 语义只作为上层映射参考。
+8. [06-evolution.md](06-evolution.md)：c-trpc core 演进路线。
 
 ## Business-layer reference（non-core）
 
