@@ -2800,6 +2800,7 @@ static void test_rpc_deadline_heap_order(void)
 	struct tr_rpc_call_handle middle_call;
 	struct tr_rpc_call_handle root;
 	struct tr_rpc_call_options options;
+	struct tr_rpc_context call_context;
 	uint64_t long_deadline;
 	uint64_t root_deadline;
 	uint32_t heap_count;
@@ -2861,6 +2862,17 @@ static void test_rpc_deadline_heap_order(void)
 	options.timeout_ms = 5000U;
 	assert(tr_rpc_call_start_ex(client_rpc, 92U, 1U, &options, NULL,
 				    &long_call) == TR_OK);
+	memset(&call_context, 0, sizeof(call_context));
+	assert(tr_rpc_call_get_context(long_call, &call_context) == TR_OK);
+	assert(call_context.service_id == 92U);
+	assert(call_context.method_id == 1U);
+	assert(call_context.request_cardinality == TR_RPC_MANY);
+	assert(call_context.response_cardinality == TR_RPC_MANY);
+	assert(call_context.has_deadline == 1);
+	assert(call_context.deadline_remaining_ms > 0U);
+	assert(call_context.deadline_remaining_ms <= 5000U);
+	assert(call_context.cancelled == 0);
+	assert(call_context.cancel_status == TR_RPC_STATUS_OK);
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 1U);
@@ -4721,6 +4733,8 @@ static int rpc_metadata_unary_handler(struct tr_rpc_call_handle call,
 	assert(value_len == 6);
 	assert(memcmp(value, "abc123", 6) == 0);
 	assert(tr_rpc_call_set_metadata(call, "server-id", "srv1", 4) == TR_OK);
+	assert(tr_rpc_call_set_trailing_metadata(
+		       call, "unary-trailer", "x", 1U) == TR_ERR_STATE);
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->metadata_server_calls++;
