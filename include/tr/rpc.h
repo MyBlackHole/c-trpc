@@ -47,6 +47,23 @@ struct tr_rpc_call_options {
  */
 enum tr_rpc_cardinality { TR_RPC_NONE = 0, TR_RPC_ONE = 1, TR_RPC_MANY = 2 };
 
+/*
+ * Call context snapshot。
+ *
+ * 这是 protocol identity/lifecycle 的只读快照，不暴露 Endpoint/Stream/slot。
+ * deadline_remaining_ms 只在 has_deadline != 0 时有效；它是读取瞬间的相对值。
+ */
+struct tr_rpc_context {
+	uint32_t service_id;
+	uint32_t method_id;
+	enum tr_rpc_cardinality request_cardinality;
+	enum tr_rpc_cardinality response_cardinality;
+	uint64_t deadline_remaining_ms;
+	int has_deadline;
+	int cancelled;
+	int cancel_status;
+};
+
 enum tr_rpc_status {
 	TR_RPC_STATUS_OK = 0,
 	TR_RPC_STATUS_CANCELLED = 1,
@@ -195,11 +212,33 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle call, int status);
 int tr_rpc_call_cancel(struct tr_rpc_call_handle call);
 int tr_rpc_call_is_cancelled(struct tr_rpc_call_handle call, int *status_out);
 
+/*
+ * Initial metadata:
+ * - set_metadata() 必须在本方向第一条业务 envelope 发送前调用；
+ * - get_peer_metadata() 读取 peer 首个 REQUEST/RESPONSE 的 initial metadata。
+ */
 int tr_rpc_call_set_metadata(struct tr_rpc_call_handle call, const char *key,
 			     const void *value, uint16_t value_len);
 int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle call,
 				  const char *key, void *value,
 				  uint16_t *value_len);
+
+/*
+ * Trailing metadata V1：
+ * - 仅 Server streaming Call 可在 final STATUS 提交前设置；
+ * - Client 在 FINISHED callback 内及 Call capability 尚存活期间读取；
+ * - Unary V1 没有独立 STATUS envelope，因此不支持 trailers。
+ */
+int tr_rpc_call_set_trailing_metadata(
+	struct tr_rpc_call_handle call, const char *key,
+	const void *value, uint16_t value_len);
+int tr_rpc_call_get_peer_trailing_metadata(
+	struct tr_rpc_call_handle call, const char *key,
+	void *value, uint16_t *value_len);
+
+/* 读取 Call identity/deadline/cancellation 的 owner-consistent snapshot。 */
+int tr_rpc_call_get_context(struct tr_rpc_call_handle call,
+			    struct tr_rpc_context *out);
 
 /* Release a retained TR_RPC_MESSAGE_TAKE_OWNERSHIP descriptor. */
 int tr_rpc_message_release(struct tr_rpc_message *message);
