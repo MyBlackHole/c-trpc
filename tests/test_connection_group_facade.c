@@ -681,23 +681,11 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_client_connection_group_wait_drained(
 		       client, 1U) == TR_ERR_STATE);
 
-	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
-	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
-	assert(tr_server_connection_group_send_data_offer(
-		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
-		       UINT64_C(4301)) == TR_ERR_CLOSED);
-	assert(tr_server_connection_group_send_transfer_ready(
-		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
-		       UINT64_C(4302)) == TR_ERR_CLOSED);
-
-	memset(&server_stats, 0, sizeof(server_stats));
-	assert(tr_server_connection_group_get_stats(
-		       server, &server_stats) == TR_OK);
-	assert(server_stats.draining == 1U);
-	assert(server_stats.groups_current == 1U);
-	assert(server_stats.connections_current == 2U);
-	assert(server_stats.active_transfers == 1U);
-
+	/*
+	 * Client drain is a monotonic local admission barrier. Existing READY work
+	 * remains usable, but a READY observed after begin_drain() must not create
+	 * a new local affinity. The Server owns that late affinity independently.
+	 */
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	memset(&client_stats, 0, sizeof(client_stats));
@@ -708,10 +696,49 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_client_connection_group_wait_drained(
 		       client, 10U) == TR_ERR_TIMEOUT);
 
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
+		       UINT64_C(4300)) == TR_OK);
+	{
+		struct timespec pause = { 0, 100000000L };
+		(void)nanosleep(&pause, NULL);
+	}
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.transfer_ready == 2U);
+	pthread_mutex_unlock(&ctx.lock);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 1U);
+
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.active_transfers == 2U);
+
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_send_data_offer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+		       UINT64_C(4301)) == TR_ERR_CLOSED);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5003U,
+		       UINT64_C(4302)) == TR_ERR_CLOSED);
+
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.draining == 1U);
+	assert(server_stats.groups_current == 1U);
+	assert(server_stats.connections_current == 2U);
+	assert(server_stats.active_transfers == 2U);
+
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_OK);
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U) == TR_OK);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 5000U) == TR_OK);
 
