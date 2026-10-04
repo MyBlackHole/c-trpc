@@ -313,7 +313,7 @@ P4 第一、二、三阶段：
   diagnostics 明确保持 internal；
 - 新增 repository-internal `tr_facade_tuning` 与 tuned create seam，供 benchmark /
   architecture diagnostics 使用，不进入 installed SDK；
-- `rpc_message_buffer_bytes` 暂留，等待 fixed RPC message pool ownership 重构后再移。
+- encoded RPC message storage 仍作为最后一个 transitional stable knob，留待下一阶段收敛。
 
 P4 第四阶段：
 
@@ -323,11 +323,19 @@ P4 第四阶段：
 - Server 复用 shard-owner + retired-peer finalizer 汇总，不新增全局热路径 atomic；
 - per-Service/Method breakdown 暂缓，后续必须采用 shard-local accounting。
 
+P4 第五阶段：
+
+- RPC encoded-message pool 改为 bounded on-demand ownership：slot 数量继续有界，
+  每个 slot 只在实际使用时增长，并在 steady-state 复用 capacity；
+- growth 在 slot 独占后、pool mutex 之外执行，不把 allocator latency 放进共享临界区；
+- stable `tr_facade_limits` 删除最后一个 implementation storage knob
+  `rpc_message_buffer_bytes`，RPC 大消息能力只由 semantic `max_message_bytes`
+  与 Method limit 约束；
+- Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
+
 下一阶段：
 
 - 评估 per-Service/Method semantic observability；
-- 重构 RPC encoded-message ownership，移除最后一个 transitional
-  `rpc_message_buffer_bytes`；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 
 详细审查见 [分层、模块职责与 API 边界](07-layer-module-api-boundaries.md)。

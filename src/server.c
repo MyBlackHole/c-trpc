@@ -10,6 +10,7 @@
 
 #include "tr/buffer.h"
 #include "tr/channel.h"
+#include "buffer_internal.h"
 #include "channel_internal.h"
 #include "facade_diagnostics_internal.h"
 #include "facade_tuning_internal.h"
@@ -466,7 +467,6 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	TR_LIMIT_DEFAULT(max_message_bytes);
 	TR_LIMIT_DEFAULT(initial_window_bytes);
 	TR_LIMIT_DEFAULT(window_update_threshold_bytes);
-	TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
 #undef TR_LIMIT_DEFAULT
 }
 
@@ -1029,8 +1029,6 @@ int tr_server_create_with_tuning(
 	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
-	    effective.limits.rpc_message_buffer_bytes <
-		    TR_RPC_WIRE_HEADER_SIZE ||
 	    (effective_tuning.executor_continuation_reserve != 0 &&
 	     effective_tuning.executor_continuation_reserve >=
 		     (effective_tuning.executor_queue_capacity < 16U ?
@@ -1163,12 +1161,12 @@ int tr_server_create_with_tuning(
 			if (!server_shard->runtime)
 				return TR_ERR_STATE;
 
-			ret = tr_buffer_pool_init(
+			ret = tr_buffer_pool_init_dynamic(
 				&server_shard->rpc_message_pool,
 				tr_server_budget_share(
 					effective_tuning.rpc_message_pool_count,
 					effective.shard_count, i),
-				effective.limits.rpc_message_buffer_bytes);
+				effective.limits.max_message_bytes);
 			if (ret != TR_OK)
 				return ret;
 			server_shard->rpc_pool_ready = 1;

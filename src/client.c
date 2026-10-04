@@ -13,6 +13,7 @@
 #include "tr/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"
+#include "buffer_internal.h"
 #include "channel_internal.h"
 #include "client_group_internal.h"
 #include "facade_diagnostics_internal.h"
@@ -99,7 +100,6 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 		TR_LIMIT_DEFAULT(max_message_bytes);
 		TR_LIMIT_DEFAULT(initial_window_bytes);
 		TR_LIMIT_DEFAULT(window_update_threshold_bytes);
-		TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
 #undef TR_LIMIT_DEFAULT
 	}
 }
@@ -194,9 +194,7 @@ int tr_client_create_with_tuning(
 	    (effective_tuning.observability_flags &
 	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
-		    effective.limits.max_frame_payload_bytes ||
-	    effective.limits.rpc_message_buffer_bytes <
-		    TR_RPC_WIRE_HEADER_SIZE)
+		    effective.limits.max_frame_payload_bytes)
 		return TR_ERR_INVALID;
 
 	client = (struct tr_client *)calloc(1, sizeof(*client));
@@ -205,9 +203,9 @@ int tr_client_create_with_tuning(
 	client->config = effective;
 	client->tuning = effective_tuning;
 
-	ret = tr_buffer_pool_init(&client->rpc_message_pool,
-				  effective_tuning.rpc_message_pool_count,
-				  effective.limits.rpc_message_buffer_bytes);
+	ret = tr_buffer_pool_init_dynamic(&client->rpc_message_pool,
+					  effective_tuning.rpc_message_pool_count,
+					  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
 		return ret;
 	client->rpc_pool_ready = 1;

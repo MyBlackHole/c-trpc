@@ -92,7 +92,6 @@ static void small_limits(struct tr_facade_limits *limits)
 	limits->max_message_bytes = 1024U;
 	limits->initial_window_bytes = 4096U;
 	limits->window_update_threshold_bytes = 256U;
-	limits->rpc_message_buffer_bytes = 256U;
 }
 
 static void server_config_init(struct tr_server_config *config)

@@ -1,5 +1,6 @@
 #include "tr/buffer.h"
 #include "tr/status.h"
+#include "buffer_internal.h"
 #include "observability_internal.h"
 
 #include <stdlib.h>
@@ -57,11 +58,52 @@ int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 	return TR_OK;
 }
 
+int tr_buffer_pool_init_dynamic(struct tr_buffer_pool *pool,
+				uint32_t buffer_count,
+				uint32_t max_buffer_size)
+{
+	struct tr_buffer *buffers TR_AUTO(tr_buffer_array_cleanup) = NULL;
+	uint32_t i;
+
+	if (!pool || buffer_count == 0U || max_buffer_size == 0U)
+		return TR_ERR_INVALID;
+
+	memset(pool, 0, sizeof(*pool));
+	buffers = (struct tr_buffer *)calloc(buffer_count, sizeof(*buffers));
+	if (!buffers)
+		return TR_ERR_NOMEM;
+
+	/*
+	 * Ownership is bounded by descriptor count. Storage grows only after a
+	 * descriptor is checked out; storage == NULL distinguishes this internal
+	 * mode from the fixed contiguous pool.
+	 */
+	if (pthread_mutex_init(&pool->lock, NULL) != 0)
+		return TR_ERR_INVALID;
+
+	pool->buffers = tr_buffer_array_take(&buffers);
+	pool->buffer_count = buffer_count;
+	pool->buffer_size = max_buffer_size;
+	pool->free_count = buffer_count;
+	for (i = 0; i < buffer_count; ++i) {
+		struct tr_buffer *buf = &pool->buffers[i];
+		buf->pool = pool;
+		buf->next = pool->free_list;
+		pool->free_list = buf;
+	}
+	return TR_OK;
+}
+
 void tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 {
+	uint32_t i;
+
 	if (!pool)
 		return;
 
+	if (!pool->storage && pool->buffers)
+		for (i = 0; i < pool->buffer_count; ++i)
+			free(pool->buffers[i].data);
 	free(pool->storage);
 	free(pool->buffers);
 	pool->storage = NULL;
@@ -79,6 +121,7 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 		      struct tr_buffer **out)
 {
 	struct tr_buffer *buf;
+	int dynamic;
 
 	if (!pool || !out || min_capacity == 0)
 		return TR_ERR_INVALID;
@@ -105,8 +148,20 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 	buf->next = NULL;
 	buf->len = 0;
 	buf->release_cb = NULL;
+	dynamic = pool->storage == NULL;
 
 	pthread_mutex_unlock(&pool->lock);
+
+	if (dynamic && buf->capacity < min_capacity) {
+		uint8_t *data = (uint8_t *)realloc(buf->data, min_capacity);
+
+		if (!data) {
+			tr_buffer_release(buf);
+			return TR_ERR_NOMEM;
+		}
+		buf->data = data;
+		buf->capacity = min_capacity;
+	}
 
 	*out = buf;
 	return TR_OK;

@@ -133,9 +133,10 @@ Stable `tr_facade_limits` describes application-visible protocol/concurrency
 semantics rather than current Reactor/pool/executor layout. Command/TX/RX,
 pool counts, worker counts, executor node capacity and continuation reserve are
 derived internally; repository benchmarks/architecture tests can override them
-only via an internal tuning seam that is not installed as SDK API. The transitional
-`rpc_message_buffer_bytes` ceiling remains public until fixed-size RPC message
-pool ownership is redesigned.
+only via an internal tuning seam that is not installed as SDK API. RPC
+encoded-message ownership uses a bounded internal slot pool whose buffers grow
+on demand up to the semantic `max_message_bytes` limit; no encoded-message
+storage size is exposed in the installed SDK.
 `tr_server_register_method()` / `tr_server_register_stream_method()` are
 pre-start operations in V1; every accepted peer receives an RPC endpoint with
 the registered method table. `tr_client_call_start*()` exposes Streaming Calls
