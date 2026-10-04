@@ -3978,7 +3978,9 @@ struct rpc_stream_test_ctx {
 	unsigned server_half_closed;
 	unsigned server_closed;
 	unsigned client_messages;
+	unsigned client_remote_closed;
 	unsigned client_finished;
+	unsigned client_events_after_finished;
 	int client_finish_status;
 	uint8_t server_data[3][128];
 	uint32_t server_len[3];
@@ -4032,6 +4034,9 @@ static void rpc_stream_server_half_close(struct tr_rpc_call_handle call,
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 
+	/* Server response termination must go through final STATUS, not close_send. */
+	assert(tr_rpc_call_close_send(call) == TR_ERR_INVALID);
+	assert(tr_rpc_call_finish(call, 99) == TR_ERR_INVALID);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
 }
 
@@ -4083,8 +4088,12 @@ static void rpc_stream_client_event(struct tr_rpc_call_handle call,
 	(void)call;
 
 	pthread_mutex_lock(&ctx->lock);
+	if (ctx->client_finished != 0U)
+		ctx->client_events_after_finished++;
 	if (event == TR_RPC_CALL_EVENT_OPENED)
 		ctx->client_opened++;
+	else if (event == TR_RPC_CALL_EVENT_REMOTE_CLOSED)
+		ctx->client_remote_closed++;
 	else if (event == TR_RPC_CALL_EVENT_FINISHED) {
 		ctx->client_finished++;
 		ctx->client_finish_status = status;
@@ -4239,9 +4248,12 @@ static void test_rpc_bidi_streaming_raw_fast_path(void)
 	wait_rpc_stream_counter(&ctx, &ctx.server_half_closed, 1);
 	wait_rpc_stream_counter(&ctx, &ctx.client_messages, 3);
 	wait_rpc_stream_counter(&ctx, &ctx.client_finished, 1);
+	wait_rpc_handle_stale(call);
 
 	pthread_mutex_lock(&ctx.lock);
 	assert(ctx.client_finish_status == TR_RPC_STATUS_OK);
+	assert(ctx.client_remote_closed == 0U);
+	assert(ctx.client_events_after_finished == 0U);
 	for (i = 0; i < 3; ++i) {
 		size_t len = strlen(messages[i]);
 		assert(ctx.server_len[i] == len);
@@ -4273,7 +4285,9 @@ struct rpc_shape_ctx {
 	unsigned opened;
 	unsigned server_messages;
 	unsigned client_messages;
+	unsigned remote_closed;
 	unsigned finished;
+	unsigned events_after_finished;
 	int finish_status;
 };
 
@@ -4306,6 +4320,7 @@ static void rpc_server_stream_half_close(struct tr_rpc_call_handle call,
 
 	assert(tr_rpc_call_send(call, &first) == TR_OK);
 	assert(tr_rpc_call_send(call, &second) == TR_OK);
+	assert(tr_rpc_call_finish(call, 99) == TR_ERR_INVALID);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
 
 	pthread_mutex_lock(&ctx->lock);
@@ -4321,6 +4336,8 @@ static void rpc_client_stream_half_close(struct tr_rpc_call_handle call,
 
 	only.data = (const uint8_t *)"client-stream-result";
 	only.len = 20;
+	assert(tr_rpc_call_close_send(call) == TR_ERR_INVALID);
+	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_ERR_STATE);
 	assert(tr_rpc_call_send(call, &only) == TR_OK);
 	assert(tr_rpc_call_send(call, &only) == TR_ERR_STATE);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
@@ -4353,8 +4370,12 @@ static void rpc_shape_client_event(struct tr_rpc_call_handle call,
 	(void)call;
 
 	pthread_mutex_lock(&ctx->lock);
+	if (ctx->finished != 0U)
+		ctx->events_after_finished++;
 	if (event == TR_RPC_CALL_EVENT_OPENED)
 		ctx->opened++;
+	else if (event == TR_RPC_CALL_EVENT_REMOTE_CLOSED)
+		ctx->remote_closed++;
 	else if (event == TR_RPC_CALL_EVENT_FINISHED) {
 		ctx->finished++;
 		ctx->finish_status = status;
@@ -4513,7 +4534,12 @@ static void test_rpc_client_and_server_stream_shapes(void)
 			       &server_stream_ctx.client_messages, 2);
 	wait_rpc_shape_counter(&server_stream_ctx, &server_stream_ctx.finished,
 			       1);
+	wait_rpc_handle_stale(call);
+	pthread_mutex_lock(&server_stream_ctx.lock);
 	assert(server_stream_ctx.finish_status == TR_RPC_STATUS_OK);
+	assert(server_stream_ctx.remote_closed == 0U);
+	assert(server_stream_ctx.events_after_finished == 0U);
+	pthread_mutex_unlock(&server_stream_ctx.lock);
 
 	memset(&callbacks, 0, sizeof(callbacks));
 	callbacks.on_message = rpc_shape_client_message;
@@ -4523,6 +4549,8 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	wait_rpc_shape_counter(&client_stream_ctx, &client_stream_ctx.opened,
 			       1);
 
+	/* V1 has no explicit Method-open envelope: MANY request is 1..N. */
+	assert(tr_rpc_call_close_send(call) == TR_ERR_STATE);
 	message.data = (const uint8_t *)"many-request";
 	message.len = 12;
 	assert(tr_rpc_call_send(call, &message) == TR_OK);
@@ -4535,7 +4563,12 @@ static void test_rpc_client_and_server_stream_shapes(void)
 			       &client_stream_ctx.client_messages, 1);
 	wait_rpc_shape_counter(&client_stream_ctx, &client_stream_ctx.finished,
 			       1);
+	wait_rpc_handle_stale(call);
+	pthread_mutex_lock(&client_stream_ctx.lock);
 	assert(client_stream_ctx.finish_status == TR_RPC_STATUS_OK);
+	assert(client_stream_ctx.remote_closed == 0U);
+	assert(client_stream_ctx.events_after_finished == 0U);
+	pthread_mutex_unlock(&client_stream_ctx.lock);
 
 	wait_for_pool_full(&rpc_pool, 32);
 	assert(tr_reactor_stop(reactor) == TR_OK);
