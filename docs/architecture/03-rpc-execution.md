@@ -63,7 +63,12 @@ worker 不再直接取得 Endpoint/Call mutable-state lock。
 RX payload credit return、retained message release 和 worker 错误 close 也回到
 Reactor owner，因此 executor worker 不再直接修改 Stream protocol state。
 
-如果 handler 需要 metadata，应在 dispatch 时构造只读 snapshot 或独立 owned object。
+Handler 需要 Call identity/lifecycle 时使用 `tr_rpc_call_get_context()` 取得
+owner-consistent snapshot；initial/trailing metadata 通过独立 API 访问。Worker 不直接
+回读 live Endpoint/Call pointer。
+
+未来 Interceptor 也必须建立在 Call handle + Context snapshot + metadata API 上，
+不能重新获得 Endpoint/Stream/slot 等 engine identity。
 
 ## 3. Completion
 
@@ -255,6 +260,20 @@ worker callback
   -> synchronous status back to worker
 ```
 
+Method registration 也属于同一 control-plane 模型：
+
+```text
+application register method
+    -> validate/copy descriptor
+    -> synchronous Reactor owner-call
+    -> duplicate/capacity check
+    -> publish Method entry + hash index
+    -> return TR_OK
+```
+
+因此注册成功本身就是 ordering barrier：后续 owner event 能看到完整 Method，
+不存在 application thread 与 inbound REQUEST 并发修改 Method table 的窗口。
+
 同步 owner command 的 ring 满载不会用 `sched_yield()` 轮询：
 
 ```text
@@ -272,8 +291,10 @@ stop 会先关闭普通 command waiter admission；尚未成功入队的同步 r
 `TR_ERR_CLOSED`，而已经入队的 request 仍排在 STOP 前执行。异步 SEND/RESUME
 仍保持 `TR_AGAIN`，不会因为本次优化变成隐式阻塞 API。
 
-`endpoint->lock` 当前仍作为 application 控制面尚未完全 owner 化之前的过渡锁。
-后续应迁移 Call 创建/注册/flush/stats 等剩余控制面，然后再缩小或删除这把锁。
+`endpoint->lock` 当前仍作为 protocol/fallback snapshot 的过渡锁。Method
+registration 与 Client Call creation/start 已经 owner 化；后续重点只剩 stats/read
+与 shutdown fallback 等确实跨执行域的路径，不能再把已经 owner-only 的控制面误写成
+未来工作。
 
 ## 9. 验收
 

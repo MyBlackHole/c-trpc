@@ -18,6 +18,18 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 			void *arg);
 
 /*
+ * 运行中：与 tr_reactor_call() 相同，由 owner 执行。
+ * 完全 stopped：在 ctl_lock 下由调用线程直接执行 fn；此时不存在 owner callback。
+ * 正在 stop（started && !accepting）：返回 TR_ERR_CLOSED，不允许 caller 越过
+ * teardown barrier 直接修改 owner state。
+ *
+ * 仅用于 teardown/config publication 这类“stopped 时直接修改也安全”的内部状态；
+ * fn 不得在 stopped direct path 中重新进入 Reactor lifecycle API。
+ */
+int tr_reactor_call_or_stopped(
+	struct tr_reactor *reactor, int (*fn)(void *arg), void *arg);
+
+/*
  * 在 Reactor owner thread 执行一个短小、非阻塞的同步操作，并把 fn 的
  * 返回值传回调用方。owner thread 内调用时直接执行，避免自等待。
  *

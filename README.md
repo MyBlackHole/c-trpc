@@ -499,7 +499,11 @@ This keeps listener, TLS/authentication, and service policy outside Channel.
   - `ONE -> MANY` (server streaming)
   - `MANY -> ONE` (client streaming)
   - `MANY -> MANY` (bidirectional streaming)
+- V1 request `MANY` means **1..N**, not 0..N: the first REQUEST is also the Method-open envelope
 - `TR_RPC_NONE` is reserved for a future explicit method-open envelope and is not executable in V1
+- Client `close_send()` closes only the request half; Server terminates streaming Calls with final `STATUS` through `finish(status)`
+- `STATUS(OK)` requires exactly one RESPONSE for response cardinality `ONE`; `MANY` permits 0..N
+- Client `FINISHED` is the normal application terminal barrier: no MESSAGE/WRITABLE/normal REMOTE_CLOSED follows it
 - final streaming `STATUS` RPC envelope separate from ordinary response messages
 - call-level deadline with monotonic local timers
 - deadline propagation to the server as a relative reserved metadata value
@@ -548,15 +552,28 @@ Each RPC Endpoint registers one timer in its owning Reactor; standalone and
 high-level Client/Server endpoints use the same owner-local deadline path.
 There is no per-Endpoint deadline thread; scheduling is entirely Reactor-local.
 
-Initial metadata is a bounded TLV side channel:
+RPC metadata has two bounded scopes:
 
-- maximum encoded metadata per direction: 512 bytes
+**Initial metadata**
+
+- maximum encoded block: 512 bytes
 - user keys: lowercase ASCII `[a-z0-9_.-]`, maximum 63 bytes
 - values: binary bytes
 - duplicate keys are rejected in V1
 - user keys starting with `:` are reserved for protocol use
-- metadata is emitted only with the first outbound RPC message in a direction
-- metadata remains separate from the application RAW payload
+- Client initial metadata is emitted with the first REQUEST
+- Server initial metadata is emitted with the first RESPONSE
+
+**Trailing metadata**
+
+- maximum encoded block: 512 bytes
+- V1 supports Server Streaming -> Client trailers
+- trailers are carried only by final STATUS
+- Client may read trailers from the FINISHED callback
+- Unary V1 has no independent STATUS envelope, so Unary trailers are not yet supported
+- STATUS metadata never overwrites first-RESPONSE initial metadata
+
+Each Call keeps bounded local/peer initial and trailing storage; there is no dynamic metadata queue. Metadata remains separate from the application RAW payload.
 
 The RPC wire header stays 32 bytes. When metadata is present the body is:
 
@@ -572,12 +589,21 @@ bulk fast path therefore remains scatter/gather friendly; a first bulk message
 can be sent as a small RPC header/metadata slice plus the original application
 buffer.
 
-Public metadata helpers:
+Public Context/metadata helpers:
 
 ```c
+tr_rpc_call_get_context(...);
+
 tr_rpc_call_set_metadata(...);
 tr_rpc_call_get_peer_metadata(...);
+
+tr_rpc_call_set_trailing_metadata(...);
+tr_rpc_call_get_peer_trailing_metadata(...);
 ```
+
+`tr_rpc_context` is a read-only owner-consistent snapshot of Method identity,
+cardinality, relative deadline state, and cancellation state. It intentionally
+does not expose Endpoint/Stream/Reactor/slot identity.
 
 Server handlers can read request metadata and set response metadata before the
 first response is encoded.
@@ -732,6 +758,11 @@ RPC:
 - real TCP `MANY -> MANY` bidirectional streaming
 - RAW bulk `send_buffer()` sender-side slice path
 - response final `STATUS` and Call finish
+- STATUS service/method/codec/status-domain validation
+- `STATUS(OK) + response ONE` requires exactly one RESPONSE
+- Client `FINISHED` remains the last normal application event
+- V1 zero-message MANY request half-close is rejected until an explicit Method-open envelope exists
+- Server `close_send()` is rejected; response termination must go through final STATUS
 - RPC message retain/release path
 - cardinality enforcement (`ONE` rejects a second message)
 - executor task lifetime / Call generation ownership

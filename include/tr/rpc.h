@@ -39,11 +39,35 @@ struct tr_rpc_call_options {
 	uint16_t metadata_count;
 };
 
+/*
+ * V1 executable Method 使用 ONE/MANY。
+ * 注意：当前 wire 没有独立 Method-open envelope，因此 Client request MANY 在
+ * close_send() 前至少要成功发送一条 REQUEST；真正 0-message streaming 属于
+ * future Method-open 扩展。
+ */
 enum tr_rpc_cardinality { TR_RPC_NONE = 0, TR_RPC_ONE = 1, TR_RPC_MANY = 2 };
+
+/*
+ * Call context snapshot。
+ *
+ * 这是 protocol identity/lifecycle 的只读快照，不暴露 Endpoint/Stream/slot。
+ * deadline_remaining_ms 只在 has_deadline != 0 时有效；它是读取瞬间的相对值。
+ */
+struct tr_rpc_context {
+	uint32_t service_id;
+	uint32_t method_id;
+	enum tr_rpc_cardinality request_cardinality;
+	enum tr_rpc_cardinality response_cardinality;
+	uint64_t deadline_remaining_ms;
+	int has_deadline;
+	int cancelled;
+	int cancel_status;
+};
 
 enum tr_rpc_status {
 	TR_RPC_STATUS_OK = 0,
 	TR_RPC_STATUS_CANCELLED = 1,
+	TR_RPC_STATUS_UNKNOWN = 2,
 	TR_RPC_STATUS_INVALID_ARGUMENT = 3,
 	TR_RPC_STATUS_DEADLINE_EXCEEDED = 4,
 	TR_RPC_STATUS_NOT_FOUND = 5,
@@ -126,8 +150,14 @@ enum tr_rpc_message_disposition {
 enum tr_rpc_call_event {
 	TR_RPC_CALL_EVENT_OPENED = 1,
 	TR_RPC_CALL_EVENT_WRITABLE = 2,
+	/*
+	 * Peer 在 final STATUS 之前提前关闭 response half 时上报。
+	 * 正常 STATUS 后的 transport close 不重复上报该事件。
+	 */
 	TR_RPC_CALL_EVENT_REMOTE_CLOSED = 3,
+	/* Application terminal barrier；正常 Call 中它之后不再有其他事件。 */
 	TR_RPC_CALL_EVENT_FINISHED = 4,
+	/* final STATUS 之前的异常 terminal。 */
 	TR_RPC_CALL_EVENT_ERROR = 5
 };
 
@@ -164,7 +194,17 @@ struct tr_rpc_stream_handlers {
 	tr_rpc_stream_close_handler on_close;
 };
 
-/* Application Call continuation API. */
+/*
+ * Application Call continuation API.
+ *
+ * send(): Client 发送 REQUEST；Server 发送 RESPONSE。
+ *
+ * close_send(): 仅用于 Client request-side half-close。V1 ONE 必须已经发送
+ * exactly 1 条 REQUEST；MANY 必须已经发送至少 1 条 REQUEST。
+ *
+ * finish(): 仅用于 Server streaming Call，发送 final STATUS 并结束 response
+ * side。Server 不应使用 close_send() 绕过 STATUS。
+ */
 int tr_rpc_call_send(struct tr_rpc_call_handle call,
 		     const struct tr_rpc_bytes *message);
 int tr_rpc_call_close_send(struct tr_rpc_call_handle call);
@@ -172,11 +212,33 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle call, int status);
 int tr_rpc_call_cancel(struct tr_rpc_call_handle call);
 int tr_rpc_call_is_cancelled(struct tr_rpc_call_handle call, int *status_out);
 
+/*
+ * Initial metadata:
+ * - set_metadata() 必须在本方向第一条业务 envelope 发送前调用；
+ * - get_peer_metadata() 读取 peer 首个 REQUEST/RESPONSE 的 initial metadata。
+ */
 int tr_rpc_call_set_metadata(struct tr_rpc_call_handle call, const char *key,
 			     const void *value, uint16_t value_len);
 int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle call,
 				  const char *key, void *value,
 				  uint16_t *value_len);
+
+/*
+ * Trailing metadata V1：
+ * - 仅 Server streaming Call 可在 final STATUS 提交前设置；
+ * - Client 在 FINISHED callback 内及 Call capability 尚存活期间读取；
+ * - Unary V1 没有独立 STATUS envelope，因此不支持 trailers。
+ */
+int tr_rpc_call_set_trailing_metadata(
+	struct tr_rpc_call_handle call, const char *key,
+	const void *value, uint16_t value_len);
+int tr_rpc_call_get_peer_trailing_metadata(
+	struct tr_rpc_call_handle call, const char *key,
+	void *value, uint16_t *value_len);
+
+/* 读取 Call identity/deadline/cancellation 的 owner-consistent snapshot。 */
+int tr_rpc_call_get_context(struct tr_rpc_call_handle call,
+			    struct tr_rpc_context *out);
 
 /* Release a retained TR_RPC_MESSAGE_TAKE_OWNERSHIP descriptor. */
 int tr_rpc_message_release(struct tr_rpc_message *message);

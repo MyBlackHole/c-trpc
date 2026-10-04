@@ -78,6 +78,13 @@ int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   struct tr_rpc_endpoint **out);
 void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
 
+/*
+ * Method publication 是同步 Reactor-owner control-plane barrier。
+ *
+ * method/handlers descriptor 在调用期间复制进 owner request；TR_OK 返回后 Method
+ * entry/index 已完整发布。handler_arg 的生命周期仍由调用方管理，至少必须覆盖
+ * Endpoint/已注册 Method 的使用期。
+ */
 int tr_rpc_register_method(struct tr_rpc_endpoint *endpoint,
 			   const struct tr_rpc_method_desc *method,
 			   tr_rpc_unary_handler unary_handler,

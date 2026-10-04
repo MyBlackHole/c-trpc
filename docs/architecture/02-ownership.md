@@ -55,6 +55,7 @@ flowchart TB
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
 | Stream | Reactor shard | command | hot state 无锁 |
 | RPC Endpoint protocol state | Reactor shard | command/completion | TARGET 去除 worker 直接修改 |
+| RPC Method registry | Reactor shard | synchronous owner command | descriptor copy 后一次性发布；无 application writer |
 | RPC Endpoint lifetime state | strong-ref owner/finalizer | refcount + `ref_lock/ref_cond` | 与 protocol lock 分离 |
 | RPC Call | Reactor shard | completion | hot state 无锁 |
 | Connection Group / Pipeline | Reactor shard | command / owner API | hot state owner-only |
@@ -105,7 +106,10 @@ Cross-thread completion returns as an event to owner.
 因此 Server RPC executor、worker queue、listener、peer slot storage/counters
 已经成为 shard-local。Peer reaper wake 也已由固定轮询改为 shard-local eventfd
 通知，Reactor callback 不再为了唤醒 reaper 获取 Server-global lock。Peer 的
-Channel/RPC callback/timer detach 已回到 Reactor owner；dedicated reaper 已删除。
+Channel/RPC callback/timer detach 已回到 Reactor owner；upper-layer Channel handler
+publication 也已 owner 化。Client teardown 会先 detach/destroy RPC + Channel，再停止
+Runtime Reactor，因此 normal teardown 不再需要 stopped-Reactor callback fallback。
+dedicated reaper 已删除。
 Detached Endpoint 的 owner ref 交给 last-ref finalizer，已有 worker ref 自然提供
 lifetime fencing。Peer reserve/publish/remove/live snapshot 现在全部由 Reactor
 owner 串行执行，不再存在 Server-global peer transition lock。

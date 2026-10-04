@@ -167,8 +167,8 @@ executor task publish 前 get
 owner ref + task refs
       |
 destroy:
-  detach Channel handler
-  quiesce Reactor callbacks
+  owner-serialize Channel handler detach
+  (handler publication itself is the old-callback quiescence barrier)
   unregister deadline timer
   close executor admission
   wait refs == 1
@@ -179,6 +179,20 @@ refs == 0 -> release Endpoint
 ```
 
 这里允许等待，是因为 API 的 contract 明确要求“destroy 返回即完全释放”。
+
+Client facade 还额外保证销毁顺序：
+
+```text
+begin drain / stop new work
+   -> destroy Connection Group
+   -> destroy RPC Endpoint
+   -> destroy Channel
+   -> stop/destroy Runtime Reactor
+   -> destroy backing pools
+```
+
+也就是说 callback source 与 worker completion 都在 Reactor 仍存活时完成正常 owner
+收敛，不再依赖 Runtime stop 后的 fallback finalize 路径。
 
 ### 9.2 Server detached finalize
 

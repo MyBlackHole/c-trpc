@@ -128,17 +128,19 @@ Stream table、flow-control、lane state、drain 和 snapshot diagnostics 暂时
 
 以下控制面已经退出该锁：
 
+- upper-layer handler publication/read：Reactor owner-only；
 - lifecycle observer publication/read：Reactor owner-only；
 - reconnect TCP_NODELAY policy publication：Reactor owner command；
 - reconnect timer/connector progression：Reactor owner；
 - drain barrier + reconnect disable + initial GOAWAY：同一个 Reactor owner transaction。
 
-upper-layer `set_handler()` 暂时仍使用 `channel->lock`，因为同步 Client teardown
-当前允许 Reactor stop 后再清空 handler；在明确重排 Client destroy/quiescence
-顺序之前不能简单改成 owner-call。
+`set_handler()` 在运行中是同步 owner publication，返回 TR_OK 时旧 callback 已退出。
+完全 stopped 时只允许 teardown-only direct publication；正在 stop 时返回 CLOSED，
+不会越过 owner barrier。
 
-后续目标是继续把修改型 application API 收敛到 owner，再按真实职责缩小该锁；
-不通过增加 atomic shared state 来“删除 mutex”。
+因此 `channel->lock` 当前主要剩余职责已经收敛到 Stream/lane/flow-control、
+application Stream API 与 snapshot diagnostics。后续是否继续 owner 化这些 API，
+应按调用语义和 profile 决定，不为了“删除 mutex”制造 command round-trip。
 
 ## 5. RPC Endpoint
 
@@ -151,11 +153,18 @@ RPC 可变协议状态的修改型 worker API 已经通过 owner-call 回到 Rea
 
 `endpoint->lock` 当前主要保护：
 
-- Call/Method table 与索引；
-- 尚未完全 owner 化的 application control-plane；
-- pending executor admission/Call transition。
+- Call table/index 与 fallback task completion；
+- Method table/index 的一致性 snapshot；
+- pending executor admission/Call transition；
+- 尚未 owner 化的少量 diagnostics/read 路径。
 
-它不再承担 strong-ref wait 或 detached-finalizer lifecycle。
+Method registration 已迁到 Reactor owner command；Client Unary/Streaming Call
+creation/start 原本也已经通过 owner-call 执行。因此 application thread 不再直接
+成为 Method/Call creation writer。Method registry 与 inbound REQUEST 现在由同一
+owner event ordering 串行化。
+
+它不再承担 strong-ref wait、detached-finalizer lifecycle 或 Method publication
+ordering。
 
 ### `endpoint->ref_lock`
 

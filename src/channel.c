@@ -963,14 +963,14 @@ static void tr_stream_notify(struct tr_channel *channel,
 			     struct tr_stream_handle handle,
 			     enum tr_stream_event event, int status)
 {
-	tr_stream_event_cb cb;
-	void *cb_arg;
+	tr_stream_event_cb cb = channel->stream_event_cb;
+	void *cb_arg = channel->callback_arg;
 
-	pthread_mutex_lock(&channel->lock);
-	cb = channel->stream_event_cb;
-	cb_arg = channel->callback_arg;
-	pthread_mutex_unlock(&channel->lock);
-
+	/*
+	 * upper-layer handler publication/read 都在 Reactor owner 上完成。
+	 * callback 调用前 snapshot，允许 callback 自己同步替换后续 handler，
+	 * 但不影响当前 event。
+	 */
 	if (cb)
 		cb(handle, event, status, cb_arg);
 }
@@ -978,24 +978,15 @@ static void tr_stream_notify(struct tr_channel *channel,
 static void tr_channel_notify(struct tr_channel *channel,
 			      enum tr_channel_event event, int status)
 {
-	tr_channel_event_cb cb;
-	tr_channel_event_cb lifecycle_cb;
-	void *cb_arg;
-	void *lifecycle_arg;
-
-	pthread_mutex_lock(&channel->lock);
-	cb = channel->channel_event_cb;
-	cb_arg = channel->callback_arg;
-	pthread_mutex_unlock(&channel->lock);
+	tr_channel_event_cb cb = channel->channel_event_cb;
+	tr_channel_event_cb lifecycle_cb = channel->lifecycle_event_cb;
+	void *cb_arg = channel->callback_arg;
+	void *lifecycle_arg = channel->lifecycle_callback_arg;
 
 	/*
-	 * lifecycle observer 只在 Reactor owner 上发布和读取，不再属于
-	 * channel->lock 保护域。先 snapshot 再调用 normal callback，保持原有
-	 * “本次 event 使用同一组 observer”语义。
+	 * 两组 callback 都是 owner publication。先 snapshot 再调用 normal handler，
+	 * 保持当前 event 的 observer 集合稳定；callback 内替换只影响后续 event。
 	 */
-	lifecycle_cb = channel->lifecycle_event_cb;
-	lifecycle_arg = channel->lifecycle_callback_arg;
-
 	if (cb)
 		cb(channel, event, status, cb_arg);
 	if (lifecycle_cb)
@@ -2412,10 +2403,6 @@ static int tr_channel_detach_on_owner(void *arg)
 	channel->keepalive_enabled = 0;
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
-	channel->data_cb = NULL;
-	channel->stream_event_cb = NULL;
-	channel->channel_event_cb = NULL;
-	channel->callback_arg = NULL;
 
 	control = channel->control_connection;
 	bulk = channel->bulk_connection;
@@ -2426,7 +2413,11 @@ static int tr_channel_detach_on_owner(void *arg)
 	memset(&channel->keepalive_timer, 0, sizeof(channel->keepalive_timer));
 	pthread_mutex_unlock(&channel->lock);
 
-	/* lifecycle observer 是 owner-only publication，不属于 channel->lock。 */
+	/* upper/lifecycle callback publication 都是 owner-only，不属于 channel->lock。 */
+	channel->data_cb = NULL;
+	channel->stream_event_cb = NULL;
+	channel->channel_event_cb = NULL;
+	channel->callback_arg = NULL;
 	channel->lifecycle_event_cb = NULL;
 	channel->lifecycle_callback_arg = NULL;
 
@@ -2549,22 +2540,45 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 		tr_channel_set_lifecycle_observer_on_owner, &request);
 }
 
+struct tr_channel_handler_request {
+	struct tr_channel *channel;
+	tr_stream_data_cb data_cb;
+	tr_stream_event_cb stream_event_cb;
+	tr_channel_event_cb channel_event_cb;
+	void *callback_arg;
+};
+
+static int tr_channel_set_handler_on_owner(void *arg)
+{
+	struct tr_channel_handler_request *request =
+		(struct tr_channel_handler_request *)arg;
+	struct tr_channel *channel = request->channel;
+
+	channel->data_cb = request->data_cb;
+	channel->stream_event_cb = request->stream_event_cb;
+	channel->channel_event_cb = request->channel_event_cb;
+	channel->callback_arg = request->callback_arg;
+	return TR_OK;
+}
+
 int tr_channel_set_handler(struct tr_channel *channel,
 			   tr_stream_data_cb data_cb,
 			   tr_stream_event_cb stream_event_cb,
 			   tr_channel_event_cb channel_event_cb,
 			   void *callback_arg)
 {
+	struct tr_channel_handler_request request;
+
 	if (!channel)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&channel->lock);
-	channel->data_cb = data_cb;
-	channel->stream_event_cb = stream_event_cb;
-	channel->channel_event_cb = channel_event_cb;
-	channel->callback_arg = callback_arg;
-	pthread_mutex_unlock(&channel->lock);
-	return TR_OK;
+	request.channel = channel;
+	request.data_cb = data_cb;
+	request.stream_event_cb = stream_event_cb;
+	request.channel_event_cb = channel_event_cb;
+	request.callback_arg = callback_arg;
+	return tr_reactor_call_or_stopped(
+		channel->reactor, tr_channel_set_handler_on_owner, &request);
 }
 
 int tr_channel_quiesce(struct tr_channel *channel)
