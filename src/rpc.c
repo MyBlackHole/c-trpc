@@ -3687,11 +3687,13 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		call->final_status_seen = 1;
 		call->final_status = wire.status;
 		(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
-		ret = tr_rpc_queue_client_event_locked(
-			endpoint, slot, call, TR_RPC_CALL_EVENT_FINISHED,
-			wire.status);
-		if (ret == TR_OK)
-			call->terminal_notified = 1;
+		/*
+		 * Normal STATUS、cancel、deadline、connection failure 都必须经过
+		 * 同一个 terminal helper：它同时线性化 FINISHED once 与
+		 * calls_completed observability。
+		 */
+		ret = tr_rpc_notify_terminal_locked(
+			endpoint, slot, call, wire.status);
 		pthread_mutex_unlock(&endpoint->lock);
 		if (ret != TR_OK)
 			(void)tr_stream_close(stream);
