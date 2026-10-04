@@ -113,6 +113,29 @@ enum tr_rpc_status {
 	TR_RPC_STATUS_UNAUTHENTICATED = 16
 };
 
+#define TR_RPC_STATUS_COUNT 17U
+
+/*
+ * Stable, layout-independent RPC lifecycle snapshot.
+ *
+ * Client started: the local Call API returned TR_OK and published a Call
+ * capability. Server started: the first valid REQUEST was accepted for a
+ * registered Method (including a later interceptor/admission rejection).
+ *
+ * finished is recorded exactly once when this endpoint commits the final
+ * application-visible RPC outcome. final_status[] is indexed by enum
+ * tr_rpc_status and its sum equals calls_finished.
+ *
+ * calls_inflight is a snapshot gauge (started - finished), not a Runtime slot,
+ * executor or transport count.
+ */
+struct tr_rpc_semantic_stats {
+	uint64_t calls_started;
+	uint64_t calls_finished;
+	uint64_t calls_inflight;
+	uint64_t final_status[TR_RPC_STATUS_COUNT];
+};
+
 /*
  * Opaque fixed-size Call capability.
  *

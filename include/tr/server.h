@@ -65,6 +65,13 @@ int tr_server_start(struct tr_server *server);
 /* 停止接收新 peer，发送 GOAWAY，并等待已有 Stream 结束。 */
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
 
+/*
+ * Stable aggregate RPC semantic lifecycle snapshot across live and already
+ * retired peers owned by this Server.
+ */
+int tr_server_get_rpc_semantic_stats(
+	struct tr_server *server, struct tr_rpc_semantic_stats *out);
+
 void tr_server_destroy(struct tr_server *server);
 
 #ifdef __cplusplus

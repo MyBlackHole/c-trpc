@@ -146,6 +146,8 @@ struct tr_rpc_call_slot {
 	int cancelled;
 	int cancel_status;
 	int terminal_notified;
+	int semantic_started;
+	int semantic_finished;
 	uint64_t deadline_ns;
 	uint32_t deadline_heap_pos;
 
@@ -315,6 +317,8 @@ struct tr_rpc_endpoint {
 	uint64_t stat_calls_completed;
 	uint64_t stat_calls_cancelled;
 	uint64_t stat_calls_deadline_exceeded;
+
+	struct tr_rpc_semantic_stats semantic;
 };
 
 #define TR_RPC_METADATA_RESERVED_TIMEOUT ":timeout-ms"
@@ -1228,6 +1232,32 @@ static int tr_rpc_status_valid(int status)
 {
 	return status >= TR_RPC_STATUS_OK &&
 	       status <= TR_RPC_STATUS_UNAUTHENTICATED;
+}
+
+static void tr_rpc_semantic_start_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call)
+{
+	if (!endpoint || !call || call->semantic_started)
+		return;
+
+	call->semantic_started = 1;
+	endpoint->semantic.calls_started++;
+}
+
+static void tr_rpc_semantic_finish_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call,
+	int status)
+{
+	if (!endpoint || !call || !call->semantic_started ||
+	    call->semantic_finished)
+		return;
+
+	if (!tr_rpc_status_valid(status))
+		status = TR_RPC_STATUS_INTERNAL;
+
+	call->semantic_finished = 1;
+	endpoint->semantic.calls_finished++;
+	endpoint->semantic.final_status[(uint32_t)status]++;
 }
 
 #define TR_RPC_INTERCEPTOR_CLIENT_PRE_BIT  (1U << 0)

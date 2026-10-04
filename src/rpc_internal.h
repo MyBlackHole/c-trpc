@@ -57,6 +57,8 @@ struct tr_rpc_endpoint_stats {
 	uint64_t calls_completed;
 	uint64_t calls_cancelled;
 	uint64_t calls_deadline_exceeded;
+
+	struct tr_rpc_semantic_stats semantic;
 };
 
 /* Stable Endpoint-lifetime Method hash shared with collision tests. */
@@ -120,6 +122,8 @@ int tr_rpc_call_send_buffer(struct tr_rpc_call_handle call,
 int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint);
 int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 			      struct tr_rpc_endpoint_stats *out);
+int tr_rpc_endpoint_get_semantic_stats(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_semantic_stats *out);
 
 /* Test/diagnostic bridge without exposing Stream in public tr_rpc_message. */
 int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,

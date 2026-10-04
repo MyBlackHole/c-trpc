@@ -78,6 +78,9 @@ int tr_client_call_start(struct tr_client *client, uint32_t service_id,
 int tr_client_begin_drain(struct tr_client *client);
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
 
+/* Stable RPC semantic lifecycle snapshot for this Client. */
+int tr_client_get_rpc_semantic_stats(
+	struct tr_client *client, struct tr_rpc_semantic_stats *out);
 
 void tr_client_destroy(struct tr_client *client);
 
