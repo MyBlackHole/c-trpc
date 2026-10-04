@@ -6187,12 +6187,12 @@ static void test_server_multi_shard_reuseport_facade(void)
 	server_config.shard_count = 2U;
 	server_config.max_peers = 8U;
 	server_config.keepalive_interval_ms = 0U;
-	server_config.limits.executor_threads = 2U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
 
 	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 2U;
 	tuning.command_capacity = 32U;
 	tuning.tx_item_capacity = 16U;
 	tuning.control_tx_item_capacity = 8U;
@@ -6466,6 +6466,8 @@ static void test_client_runtime_thread_bound(void)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
+	struct tr_facade_tuning server_tuning;
+	struct tr_facade_tuning client_tuning;
 	struct tr_server *server = NULL;
 	struct tr_client *client = NULL;
 	uint16_t port = 0;
@@ -6475,11 +6477,13 @@ static void test_client_runtime_thread_bound(void)
 	tr_server_config_init(&server_config);
 	server_config.max_peers = 1U;
 	server_config.keepalive_interval_ms = 0U;
-	server_config.limits.executor_threads = 1U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	tr_facade_tuning_init(&server_tuning);
+	server_tuning.executor_threads = 1U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &server_tuning, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -6487,12 +6491,14 @@ static void test_client_runtime_thread_bound(void)
 	client_config.keepalive_interval_ms = 20U;
 	client_config.keepalive_timeout_ms = 200U;
 	client_config.enable_reconnect = 0;
-	client_config.limits.executor_threads = 1U;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
+	tr_facade_tuning_init(&client_tuning);
+	client_tuning.executor_threads = 1U;
 
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_create_with_tuning(
+		       &client_config, &client_tuning, &client) == TR_OK);
 
 	/*
 	 * Client create 只启动 Reactor。connect 之后只允许新增一个 RPC
@@ -6519,6 +6525,7 @@ static void test_client_runtime_thread_bound(void)
 static void test_server_runtime_thread_bound(void)
 {
 	struct tr_server_config server_config;
+	struct tr_facade_tuning tuning;
 	struct tr_reactor_config reactor_config;
 	struct tr_channel_config channel_config;
 	struct tr_server *server = NULL;
@@ -6534,11 +6541,13 @@ static void test_server_runtime_thread_bound(void)
 	server_config.max_peers = 4U;
 	server_config.keepalive_interval_ms = 20U;
 	server_config.keepalive_timeout_ms = 200U;
-	server_config.limits.executor_threads = 2U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 2U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -6603,6 +6612,7 @@ static void test_server_shared_rpc_executor(void)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	struct tr_client *clients[4] = { NULL, NULL, NULL, NULL };
 	struct tr_rpc_method_desc method;
@@ -6621,11 +6631,13 @@ static void test_server_shared_rpc_executor(void)
 	tr_server_config_init(&server_config);
 	server_config.max_peers = 4U;
 	server_config.keepalive_interval_ms = 0U;
-	server_config.limits.executor_threads = 2U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 2U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
 	method.service_id = 88U;
@@ -6718,6 +6730,7 @@ static void test_server_peer_refcount_drain(void)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	struct tr_client *client = NULL;
 	struct tr_rpc_method_desc method;
@@ -6739,11 +6752,13 @@ static void test_server_peer_refcount_drain(void)
 	tr_server_config_init(&server_config);
 	server_config.max_peers = 1U;
 	server_config.keepalive_interval_ms = 0U;
-	server_config.limits.executor_threads = 1U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 1U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
 	method.service_id = 89U;

@@ -20,8 +20,6 @@ void tr_facade_limits_init(struct tr_facade_limits *limits)
 	limits->initial_window_bytes = 8U * 1024U * 1024U;
 	limits->window_update_threshold_bytes = 512U * 1024U;
 
-	limits->executor_threads = 4U;
-	limits->executor_queue_capacity = 1024U;
 }
 
 
@@ -37,6 +35,9 @@ void tr_facade_tuning_init(struct tr_facade_tuning *tuning)
 	tuning->rx_buffer_count = 64U;
 	tuning->rpc_message_pool_count = 64U;
 	tuning->reassembly_pool_count = 8U;
+	tuning->executor_threads = 4U;
+	tuning->executor_queue_capacity = 1024U;
+	tuning->executor_continuation_reserve = 0U;
 }
 
 void tr_facade_tuning_normalize(
@@ -60,5 +61,7 @@ void tr_facade_tuning_normalize(
 	TR_TUNING_DEFAULT(rx_buffer_count);
 	TR_TUNING_DEFAULT(rpc_message_pool_count);
 	TR_TUNING_DEFAULT(reassembly_pool_count);
+	TR_TUNING_DEFAULT(executor_threads);
+	TR_TUNING_DEFAULT(executor_queue_capacity);
 #undef TR_TUNING_DEFAULT
 }

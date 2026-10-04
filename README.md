@@ -122,9 +122,10 @@ tr_server_destroy(server);
 
 The facade owns the Reactor, RPC message pool and Channel reassembly pool.
 Stable `tr_facade_limits` describes application-visible protocol/concurrency
-semantics rather than current Reactor/pool capacities. Command/TX/RX and pool
-counts are derived internally; repository benchmarks can override them only via
-an internal tuning seam that is not installed as SDK API. The transitional
+semantics rather than current Reactor/pool/executor layout. Command/TX/RX,
+pool counts, worker counts, executor node capacity and continuation reserve are
+derived internally; repository benchmarks/architecture tests can override them
+only via an internal tuning seam that is not installed as SDK API. The transitional
 `rpc_message_buffer_bytes` ceiling remains public until fixed-size RPC message
 pool ownership is redesigned.
 `tr_server_register_method()` / `tr_server_register_stream_method()` are
@@ -670,7 +671,7 @@ first response is encoded.
 - bounded fixed-capacity executor task-node pool per RPC endpoint
 - optional Server continuation reserve partitions admission logically inside that same node pool: new Unary / first Streaming tasks stop at `capacity - reserve`, while already-accepted Streaming message/half-close/writable/close tasks may use the full capacity; it is not a second queue and does not change worker scheduling
 - low-level standalone RPC endpoints retain their own configurable worker pool
-- the high-level Server facade creates one `executor_threads` worker pool shared by all peer RPC endpoints
+- the high-level Server facade creates one bounded shard-local worker pool shared by peer RPC endpoints; exact worker/node counts are internal tuning, not stable facade API
 - one FIFO task queue per Call plus an endpoint-local ready-Call queue
 - the shared Server executor schedules ready endpoints while preserving endpoint-local Call ordering
 - at most one executor task for a Call runs at a time, so callbacks for one Call remain strictly serialized and ordered
@@ -876,7 +877,7 @@ The Xmake CI matrix checks:
 - executor workers run different Calls in parallel, but one Call is intentionally serialized and can therefore be delayed by its own slow handler
 - generic Streaming writes do not internally queue arbitrary application messages: `TR_AGAIN` is intentional backpressure and the caller retries after `TR_RPC_CALL_EVENT_WRITABLE` / server `on_writable`
 - Server executor saturation before the first Streaming handler callback is an admission rejection and returns final `RESOURCE_EXHAUSTED`; after callbacks have begun, one continuation task per Call may wait outside the executor while retaining its RX payload/credit, and a second not-yet-admitted task on that Call terminates only that Call with final `RESOURCE_EXHAUSTED` (earlier callbacks may already have produced side effects)
-- optional Server `executor_continuation_reserve` can keep a bounded number of executor nodes unavailable to new Unary/Streaming first-task admission while still allowing already-accepted Streaming continuation/lifecycle tasks to use them; the default is 0 (disabled), so enabling it is an explicit capacity policy
+- the Server executor supports an internal continuation reserve that can keep bounded task nodes available to already-accepted Streaming continuation/lifecycle work; the stable facade does not expose node-count tuning, and future application-facing admission policy should use semantic limits instead
 - direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
 - reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
 - automatic Client reconnect is Reactor-owned and does not create a per-Channel thread; backoff is timer-driven and connect completion is nonblocking

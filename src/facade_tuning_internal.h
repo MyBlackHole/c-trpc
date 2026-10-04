@@ -26,6 +26,16 @@ struct tr_facade_tuning {
 
 	uint32_t rpc_message_pool_count;
 	uint32_t reassembly_pool_count;
+
+	/*
+	 * Executor layout is implementation tuning, not stable application
+	 * semantics. Server executor_threads is an aggregate shard budget;
+	 * executor_queue_capacity is per Endpoint; continuation reserve is
+	 * Server-only and uses the same bounded node pool.
+	 */
+	uint32_t executor_threads;
+	uint32_t executor_queue_capacity;
+	uint32_t executor_continuation_reserve;
 };
 
 void tr_facade_tuning_init(struct tr_facade_tuning *tuning);

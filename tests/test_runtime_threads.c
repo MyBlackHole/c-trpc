@@ -93,19 +93,23 @@ static void small_limits(struct tr_facade_limits *limits)
 	limits->initial_window_bytes = 4096U;
 	limits->window_update_threshold_bytes = 256U;
 	limits->rpc_message_buffer_bytes = 256U;
-	limits->executor_threads = 1U;
-	limits->executor_queue_capacity = 16U;
 }
 
-static void server_config_init(struct tr_server_config *config,
-			       unsigned workers)
+static void server_config_init(struct tr_server_config *config)
 {
 	tr_server_config_init(config);
 	small_limits(&config->limits);
-	config->limits.executor_threads = workers;
 	config->max_peers = 2U;
 	config->keepalive_interval_ms = 10U;
 	config->keepalive_timeout_ms = 50U;
+}
+
+static void server_tuning_init(struct tr_facade_tuning *tuning,
+			       unsigned workers)
+{
+	tr_facade_tuning_init(tuning);
+	tuning->executor_threads = workers;
+	tuning->executor_queue_capacity = 16U;
 }
 
 static void listen_loopback(struct tr_server *server)
@@ -204,12 +208,15 @@ static void test_server_create_start_destroy_threads(void)
 	for (workers = 1U; workers <= 3U; workers += 2U) {
 		for (start = 0U; start <= 1U; ++start) {
 			struct tr_server_config config;
+			struct tr_facade_tuning tuning;
 			struct tr_server *server = NULL;
 			unsigned total = workers;
 
-			server_config_init(&config, workers);
+			server_config_init(&config);
+			server_tuning_init(&tuning, workers);
 			reset_probe(0U);
-			assert(tr_server_create(&config, &server) == TR_OK);
+			assert(tr_server_create_with_tuning(
+				       &config, &tuning, &server) == TR_OK);
 			assert(server != NULL);
 			/* create 只启动 shard-local executor，不启动 Reactor/timer。 */
 			expect_threads(workers, 0U);
@@ -229,14 +236,17 @@ static void test_server_create_start_destroy_threads(void)
 static void test_server_multi_shard_threads(void)
 {
 	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
-	server_config_init(&config, 4U);
+	server_config_init(&config);
+	server_tuning_init(&tuning, 4U);
 	config.shard_count = 2U;
 	config.max_peers = 4U;
 
 	reset_probe(0U);
-	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(tr_server_create_with_tuning(
+		       &config, &tuning, &server) == TR_OK);
 	assert(server != NULL);
 
 	/* Four total workers are split across two shard-local executors. */
@@ -255,14 +265,17 @@ static void test_server_multi_shard_threads(void)
 static void test_server_multi_shard_rejects_undersized_budget(void)
 {
 	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
-	server_config_init(&config, 1U);
+	server_config_init(&config);
+	server_tuning_init(&tuning, 1U);
 	config.shard_count = 2U;
 	config.max_peers = 2U;
 
 	reset_probe(0U);
-	assert(tr_server_create(&config, &server) == TR_ERR_INVALID);
+	assert(tr_server_create_with_tuning(
+		       &config, &tuning, &server) == TR_ERR_INVALID);
 	assert(server == NULL);
 	expect_threads(0U, 0U);
 }
@@ -273,11 +286,11 @@ static void test_server_internal_tuning_respects_shard_minimum(void)
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
-	server_config_init(&config, 2U);
+	server_config_init(&config);
 	config.shard_count = 2U;
 	config.max_peers = 2U;
 
-	tr_facade_tuning_init(&tuning);
+	server_tuning_init(&tuning, 2U);
 	tuning.rx_buffer_count = 1U;
 
 	reset_probe(0U);
@@ -292,9 +305,10 @@ static void test_server_internal_tuning_respects_shard_minimum(void)
 	 */
 	assert(tr_server_create(&config, &server) == TR_OK);
 	assert(server != NULL);
-	expect_threads(2U, 0U);
+	/* Public hidden default remains four workers. */
+	expect_threads(4U, 0U);
 	tr_server_destroy(server);
-	expect_threads(2U, 2U);
+	expect_threads(4U, 4U);
 }
 
 static void runtime_multi_shard_config_init(
@@ -387,11 +401,14 @@ static void test_server_worker_start_failures(void)
 
 	for (fail_at = 1U; fail_at <= 3U; ++fail_at) {
 		struct tr_server_config config;
+		struct tr_facade_tuning tuning;
 		struct tr_server *server = NULL;
 
-		server_config_init(&config, 3U);
+		server_config_init(&config);
+		server_tuning_init(&tuning, 3U);
 		reset_probe(fail_at);
-		assert(tr_server_create(&config, &server) == TR_ERR_SYS);
+		assert(tr_server_create_with_tuning(
+			       &config, &tuning, &server) == TR_ERR_SYS);
 		assert(server == NULL);
 		assert(atomic_load(&create_attempts) == fail_at);
 		/* 第 N 个 worker 启动失败，前 N-1 个必须已经退出并 join。 */
@@ -403,12 +420,15 @@ static void test_server_runtime_start_failures(void)
 {
 	const unsigned workers = 3U;
 	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
 	/* accept/reaper 均已移除；Server start 唯一 pthread 启动点是 Reactor。 */
-	server_config_init(&config, workers);
+	server_config_init(&config);
+	server_tuning_init(&tuning, workers);
 	reset_probe(workers + 1U);
-	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(tr_server_create_with_tuning(
+		       &config, &tuning, &server) == TR_OK);
 	listen_loopback(server);
 	assert(tr_server_start(server) == TR_ERR_SYS);
 	assert(atomic_load(&create_attempts) == workers + 1U);

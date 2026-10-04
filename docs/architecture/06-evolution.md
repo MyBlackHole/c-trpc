@@ -303,17 +303,18 @@ status.h
 transport.h
 ```
 
-P4 第一阶段：
+P4 第一、二阶段：
 
 - stable `tr_facade_limits` 已移除 command/TX/control-TX/RX/RPC-pool/reassembly
   这些 Reactor/Pool implementation capacities；
+- executor worker count / per-Endpoint node capacity / Streaming continuation reserve
+  也已迁入 repository-internal tuning，不再把当前线程池布局固化为 SDK ABI；
 - 新增 repository-internal `tr_facade_tuning` 与 tuned create seam，供 benchmark /
   architecture diagnostics 使用，不进入 installed SDK；
 - `rpc_message_buffer_bytes` 暂留，等待 fixed RPC message pool ownership 重构后再移。
 
 下一阶段：
 
-- executor policy 与 implementation tuning 继续拆分；
 - observability config 从 limits 中独立；
 - 继续设计 facade-wide stable semantic observability；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。

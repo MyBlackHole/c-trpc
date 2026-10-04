@@ -59,6 +59,7 @@ struct tr_server_detached_peer {
 
 struct tr_server {
 	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
 
 	struct tr_runtime *runtime;
 	struct tr_server_shard *shards;
@@ -449,8 +450,6 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	TR_LIMIT_DEFAULT(initial_window_bytes);
 	TR_LIMIT_DEFAULT(window_update_threshold_bytes);
 	TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
-	TR_LIMIT_DEFAULT(executor_threads);
-	TR_LIMIT_DEFAULT(executor_queue_capacity);
 #undef TR_LIMIT_DEFAULT
 }
 
@@ -492,7 +491,7 @@ static int tr_server_budget_supports_shards(
 
 	return config->max_peers >= shards &&
 	       (uint32_t)config->listen_backlog >= shards &&
-	       config->limits.executor_threads >= shards &&
+	       tuning->executor_threads >= shards &&
 	       tuning->command_capacity >= shards &&
 	       tuning->tx_item_capacity >= shards &&
 	       tuning->control_tx_item_capacity >= shards &&
@@ -518,6 +517,7 @@ static void tr_server_tuning_ensure_shard_minimums(
 	TR_TUNING_AT_LEAST_SHARDS(rx_buffer_count);
 	TR_TUNING_AT_LEAST_SHARDS(rpc_message_pool_count);
 	TR_TUNING_AT_LEAST_SHARDS(reassembly_pool_count);
+	TR_TUNING_AT_LEAST_SHARDS(executor_threads);
 #undef TR_TUNING_AT_LEAST_SHARDS
 }
 
@@ -904,9 +904,9 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	rpc_config.message_pool = &shard->rpc_message_pool;
 	rpc_config.executor_threads = shard->executor_threads;
 	rpc_config.executor_queue_capacity =
-		server->config.limits.executor_queue_capacity;
+		server->tuning.executor_queue_capacity;
 	rpc_config.executor_continuation_reserve =
-		server->config.limits.executor_continuation_reserve;
+		server->tuning.executor_continuation_reserve;
 	rpc_config.observability_flags =
 		server->config.limits.observability_flags;
 	rpc_config.interceptor = server->config.interceptor;
@@ -1012,11 +1012,11 @@ int tr_server_create_with_tuning(
 		    effective.limits.max_frame_payload_bytes ||
 	    effective.limits.rpc_message_buffer_bytes <
 		    TR_RPC_WIRE_HEADER_SIZE ||
-	    (effective.limits.executor_continuation_reserve != 0 &&
-	     effective.limits.executor_continuation_reserve >=
-		     (effective.limits.executor_queue_capacity < 16U ?
+	    (effective_tuning.executor_continuation_reserve != 0 &&
+	     effective_tuning.executor_continuation_reserve >=
+		     (effective_tuning.executor_queue_capacity < 16U ?
 			      16U :
-			      effective.limits.executor_queue_capacity)) ||
+			      effective_tuning.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
 	    !tr_server_connection_group_config_valid(
@@ -1031,6 +1031,7 @@ int tr_server_create_with_tuning(
 	if (!server_mem)
 		return TR_ERR_NOMEM;
 	server_mem->config = effective;
+	server_mem->tuning = effective_tuning;
 
 	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
@@ -1073,7 +1074,7 @@ int tr_server_create_with_tuning(
 				effective.limits.max_calls;
 			shard_config->rpc_executor.thread_count =
 				tr_server_budget_share(
-					effective.limits.executor_threads,
+					effective_tuning.executor_threads,
 					effective.shard_count, i);
 
 			reactor_config->max_connections =
@@ -1138,7 +1139,7 @@ int tr_server_create_with_tuning(
 				tr_runtime_shard_at(server->runtime, i);
 			server_shard->executor_threads =
 				tr_server_budget_share(
-					effective.limits.executor_threads,
+					effective_tuning.executor_threads,
 					effective.shard_count, i);
 			if (!server_shard->runtime)
 				return TR_ERR_STATE;
@@ -1719,7 +1720,7 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	stats.channel = server->retired_channel_stats;
 	stats.rpc = server->retired_rpc_stats;
 	pthread_mutex_unlock(&server->finalizer_lock);
-	stats.rpc.executor_threads = server->config.limits.executor_threads;
+	stats.rpc.executor_threads = server->tuning.executor_threads;
 
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_stats_owner_request request;

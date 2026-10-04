@@ -279,7 +279,7 @@ Reactor-local timer；实际 TCP connect timeout 由共享 connector 自己的 t
 | 操作 | 新增线程 |
 |---|---|
 | `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
-| `tr_server_create()` | 创建 N-shard Runtime（Reactor 尚未启动）；`executor_threads` 总预算拆分到 N 个 shard-local worker pool |
+| `tr_server_create()` | 创建 N-shard Runtime（Reactor 尚未启动）；内部 worker 总预算拆分到 N 个 shard-local worker pool，精确线程数不属于 stable facade config |
 | `tr_server_listen()` | 0 |
 | `tr_server_start()` | N 个：每个 shard 启动 1 个 Reactor；accept/peer cleanup 都在各自 owner Reactor 上执行 |
 
