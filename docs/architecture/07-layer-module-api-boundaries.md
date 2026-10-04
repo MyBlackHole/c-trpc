@@ -676,7 +676,7 @@ pointer + slot + generation 暴露给 Transport 使用者。
 include/tr/rpc.h
   -> Method / Call / Streaming application contract
 
-src/rpc_internal.h
+src/rpc/rpc_internal.h
   -> Endpoint config/create/destroy
   -> Channel binding
   -> executor config/stats
@@ -919,18 +919,38 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 - per-Service/Method semantic observability 如有需求，必须使用 shard-local
   accounting 再在 control plane 聚合，不能增加 shared hot counter；
 
-### P5 — Physical directory cleanup
+### P5 — Physical directory cleanup — IN PROGRESS
 
-只有前面 capability 边界稳定后，再决定是否迁移为：
+capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
+但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
+
+第一阶段已完成：
+
+```text
+src/rpc/
+  rpc.c
+  rpc_internal.h
+  rpc_codec.c
+  rpc_wire.c
+```
+
+规则：
+
+- stable/public headers 继续留在 `include/tr/`，不因源码目录移动扩大或缩小 SDK ABI；
+- RPC 内部实现只通过 `src/rpc/rpc_internal.h` 向 facade/runtime 暴露 engine contract；
+- RPC 到 Channel/Reactor/observability internal 的依赖显式跨回父目录；
+- tests 直接引用 internal contract 时也使用新的物理路径；
+- 本阶段不改变线程、owner、锁、队列、resource bound、wire 或 hot path。
+
+后续再按相同规则评估：
 
 ```text
 src/runtime/
 src/transport/
 src/group/
-src/rpc/
 ```
 
-目录结构应服务于已经确定的职责，而不是反过来决定架构。
+目录结构服务于已经确定的职责，而不是反过来决定架构。
 
 ---
 
