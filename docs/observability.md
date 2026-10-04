@@ -65,12 +65,13 @@ The Reactor snapshot also exposes the existing per-turn command fairness data:
 - `max_per_turn.commands`: largest observed turn;
 - `budget_hits.commands`: turns that consumed the full command budget.
 
-Producer-side command queue pressure is split into `SEND`, `RESUME_RX`,
-`CALL`, and other commands, each with accepted enqueue and first-full encounter counts.
-对于异步 SEND/RESUME，这个 full count 对应立即 backpressure；对于同步 CALL 和
-other 中的 QUIESCE/SET_HANDLER/STOP，它表示进入 capacity wait，而不是 command
-被丢弃。These counters are updated under the command queue's existing mutex and add no
-new allocation, clock read, or metrics lock.
+Command queue 的 producer-side pressure 按 `SEND`、`RESUME_RX`、`CALL`
+和 other 分类，每类都记录成功 enqueue 数与首次遇满次数。
+
+对于异步 SEND/RESUME，full count 表示立即 backpressure；对于同步 CALL，以及
+other 中的 QUIESCE/SET_HANDLER/STOP，则表示进入 capacity wait，而不是 command
+被丢弃。这些计数都复用 command queue 现有 mutex 更新，不增加 allocation、
+clock read 或额外 metrics lock。
 
 A SEND issued while already executing on the owning Reactor may attach directly
 to that connection's TX queue only when no command is pending and the Reactor is
