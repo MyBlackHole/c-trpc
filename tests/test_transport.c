@@ -2910,6 +2910,12 @@ static void test_channel_automatic_reconnect_shared(void)
 	assert(tr_channel_set_reconnect_tcp_nodelay(client_channel, 1) == TR_OK);
 	assert(tr_channel_enable_client_reconnect(client_channel,
 						  &reconnect_config) == TR_OK);
+	/*
+	 * reconnect socket policy 已由 Reactor owner 串行化；enable 发布后不允许
+	 * application thread 再修改本次 reconnect session 的 socket policy。
+	 */
+	assert(tr_channel_set_reconnect_tcp_nodelay(client_channel, 0) ==
+	       TR_ERR_STATE);
 	nodelay_before = tcp_nodelay_probe_read();
 
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &old_stream) ==
