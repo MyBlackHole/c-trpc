@@ -178,10 +178,11 @@ int tr_client_connection_group_close(struct tr_client *client);
 /*
  * Graceful Client Group drain.
  *
- * begin_drain() stops establishing newly offered DATA lanes but keeps already
- * READY transfers usable so application work can finish. CONTROL messages that
- * were already in flight may still establish READY affinity and must be
- * released normally.
+ * begin_drain() is a local admission barrier: it stops establishing newly
+ * offered DATA lanes and does not install TRANSFER_READY messages observed
+ * after the barrier. Transfers already READY before begin_drain() remain usable
+ * so application work can finish. The Server owns its transfer affinity
+ * independently and may release a late READY it had already issued.
  *
  * wait_drained() returns TR_OK when there are no active transfer affinities,
  * no payload bytes still owned by DATA TX, and no pending DATA establishment.
