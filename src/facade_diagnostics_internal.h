@@ -6,7 +6,7 @@
 #include "tr/reactor.h"
 #include "tr/server.h"
 #include "rpc/rpc_internal.h"
-#include "pipeline_listener_internal.h"
+#include "transport/group/pipeline_listener_internal.h"
 
 struct tr_server_channel_stats {
 	uint64_t active_streams_current;
