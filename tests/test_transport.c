@@ -4505,6 +4505,8 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	struct tr_rpc_call_handle call;
 	struct tr_rpc_endpoint_stats client_stats;
 	struct tr_rpc_endpoint_stats server_stats;
+	struct tr_rpc_semantic_stats client_semantic;
+	struct tr_rpc_semantic_stats server_semantic;
 	struct rpc_shape_ctx server_stream_ctx;
 	struct rpc_shape_ctx client_stream_ctx;
 	struct tr_rpc_bytes message;
@@ -4681,6 +4683,21 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	assert(tr_rpc_endpoint_get_stats(server_rpc, &server_stats) == TR_OK);
 	assert(client_stats.calls_completed == 2U);
 	assert(server_stats.calls_completed == 2U);
+
+	memset(&client_semantic, 0, sizeof(client_semantic));
+	memset(&server_semantic, 0, sizeof(server_semantic));
+	assert(tr_rpc_endpoint_get_semantic_stats(
+		       client_rpc, &client_semantic) == TR_OK);
+	assert(tr_rpc_endpoint_get_semantic_stats(
+		       server_rpc, &server_semantic) == TR_OK);
+	assert(client_semantic.calls_started == 2U);
+	assert(client_semantic.calls_finished == 2U);
+	assert(client_semantic.calls_inflight == 0U);
+	assert(client_semantic.final_status[TR_RPC_STATUS_OK] == 2U);
+	assert(server_semantic.calls_started == 2U);
+	assert(server_semantic.calls_finished == 2U);
+	assert(server_semantic.calls_inflight == 0U);
+	assert(server_semantic.final_status[TR_RPC_STATUS_OK] == 2U);
 
 	wait_for_pool_full(&rpc_pool, 32);
 	assert(tr_reactor_stop(reactor) == TR_OK);
@@ -4915,6 +4932,8 @@ static void test_rpc_metadata_cancel_deadline(void)
 	struct tr_rpc_bytes message;
 	struct tr_rpc_metadata metadata;
 	struct tr_rpc_call_options options;
+	struct tr_rpc_semantic_stats client_semantic;
+	struct tr_rpc_semantic_stats server_semantic;
 	struct rpc_control_ctx ctx;
 	int client_fd;
 	int server_fd;
@@ -5050,6 +5069,27 @@ static void test_rpc_metadata_cancel_deadline(void)
 	wait_rpc_control_counter(&ctx, &ctx.deadline_server_observed, 1);
 	assert(ctx.deadline_client_status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	assert(ctx.deadline_server_status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+
+	memset(&client_semantic, 0, sizeof(client_semantic));
+	memset(&server_semantic, 0, sizeof(server_semantic));
+	assert(tr_rpc_endpoint_get_semantic_stats(
+		       client_rpc, &client_semantic) == TR_OK);
+	assert(tr_rpc_endpoint_get_semantic_stats(
+		       server_rpc, &server_semantic) == TR_OK);
+	assert(client_semantic.calls_started == 3U);
+	assert(client_semantic.calls_finished == 3U);
+	assert(client_semantic.calls_inflight == 0U);
+	assert(client_semantic.final_status[TR_RPC_STATUS_OK] == 1U);
+	assert(client_semantic.final_status[TR_RPC_STATUS_CANCELLED] == 1U);
+	assert(client_semantic.final_status[
+		       TR_RPC_STATUS_DEADLINE_EXCEEDED] == 1U);
+	assert(server_semantic.calls_started == 3U);
+	assert(server_semantic.calls_finished == 3U);
+	assert(server_semantic.calls_inflight == 0U);
+	assert(server_semantic.final_status[TR_RPC_STATUS_OK] == 1U);
+	assert(server_semantic.final_status[TR_RPC_STATUS_CANCELLED] == 1U);
+	assert(server_semantic.final_status[
+		       TR_RPC_STATUS_DEADLINE_EXCEEDED] == 1U);
 
 	wait_for_pool_full(&rpc_pool, 32);
 	assert(tr_reactor_stop(reactor) == TR_OK);
@@ -6005,6 +6045,8 @@ static void test_client_server_facade_unary(void)
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
 	struct tr_server_stats server_stats;
+	struct tr_rpc_semantic_stats client_semantic;
+	struct tr_rpc_semantic_stats server_semantic;
 	struct facade_test_ctx ctx;
 	struct timespec deadline;
 	uint16_t port = 0;
@@ -6157,6 +6199,22 @@ static void test_client_server_facade_unary(void)
 	assert(server_stats.reactor.observability_flags ==
 	       TR_OBSERVABILITY_TIMING);
 	assert(server_stats.reactor.turn_busy_ns.samples != 0U);
+
+	memset(&client_semantic, 0, sizeof(client_semantic));
+	memset(&server_semantic, 0, sizeof(server_semantic));
+	assert(tr_client_get_rpc_semantic_stats(
+		       client, &client_semantic) == TR_OK);
+	assert(tr_server_get_rpc_semantic_stats(
+		       server, &server_semantic) == TR_OK);
+	/* client is the second Client object; Server aggregates the retired first peer. */
+	assert(client_semantic.calls_started == 1U);
+	assert(client_semantic.calls_finished == 1U);
+	assert(client_semantic.calls_inflight == 0U);
+	assert(client_semantic.final_status[TR_RPC_STATUS_OK] == 1U);
+	assert(server_semantic.calls_started == 2U);
+	assert(server_semantic.calls_finished == 2U);
+	assert(server_semantic.calls_inflight == 0U);
+	assert(server_semantic.final_status[TR_RPC_STATUS_OK] == 2U);
 
 	tr_client_destroy(client);
 	tr_server_destroy(server);
