@@ -344,8 +344,13 @@ silently changing the Server's per-peer limits.
 The benchmark binary exposes Server-only overrides for
 `--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`,
 `--control-tx-items`, and `--command-capacity`. A zero override keeps the
-existing derived benchmark default. These flags do not change
-library/facade defaults and are not passed to benchmark Clients.
+existing derived benchmark default.
+
+These flags are **repository-internal diagnostic tuning**, wired through
+`tr_facade_tuning` / `tr_server_create_with_tuning()`. They are deliberately
+not fields of the installed `tr_facade_limits` SDK contract, do not change
+public facade defaults, and are not passed to benchmark Clients as application
+configuration.
 
 The output records the actual observed pool capacities/executor queue size and
 emits staged pairwise comparisons:

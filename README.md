@@ -121,6 +121,12 @@ tr_server_destroy(server);
 ```
 
 The facade owns the Reactor, RPC message pool and Channel reassembly pool.
+Stable `tr_facade_limits` describes application-visible protocol/concurrency
+semantics rather than current Reactor/pool capacities. Command/TX/RX and pool
+counts are derived internally; repository benchmarks can override them only via
+an internal tuning seam that is not installed as SDK API. The transitional
+`rpc_message_buffer_bytes` ceiling remains public until fixed-size RPC message
+pool ownership is redesigned.
 `tr_server_register_method()` / `tr_server_register_stream_method()` are
 pre-start operations in V1; every accepted peer receives an RPC endpoint with
 the registered method table. `tr_client_call_start*()` exposes Streaming Calls
