@@ -268,6 +268,9 @@ static int tr_pipeline_listener_accept_control(
 	struct tr_conn_handle connection)
 {
 	struct tr_pipeline_listener_session *session;
+
+	if (listener->draining)
+		return TR_ERR_CLOSED;
 	struct tr_pipeline_control_config control_config;
 	struct tr_pipeline_control *control = NULL;
 	struct tr_pipeline_control_transport_config transport_config;
