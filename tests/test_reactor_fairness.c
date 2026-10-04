@@ -25,7 +25,7 @@ size_t __real_tr_command_queue_pop_batch(struct tr_command_queue *queue,
 	struct tr_command *out, size_t max_commands);
 int __real_tr_command_queue_push(struct tr_command_queue *queue,
 	const struct tr_command *command, int *need_wake);
-int __real_tr_completion_queue_push(struct tr_completion_queue *queue,
+int __real_tr_completion_queue_push_wait(struct tr_completion_queue *queue,
 	const struct tr_completion *completion, int *need_wake);
 int __real_epoll_wait(int fd, struct epoll_event *events, int maxevents,
 	int timeout);
@@ -36,6 +36,7 @@ enum scenario {
 	FULL_WAITERS,
 	STOP_DRAIN,
 	FULL_STOP,
+	COMPLETION_FULL_WAIT,
 	COMPLETION_FULL_STOP
 };
 
@@ -109,21 +110,34 @@ int __wrap_tr_command_queue_push(struct tr_command_queue *queue,
 	return ret;
 }
 
-int __wrap_tr_completion_queue_push(struct tr_completion_queue *queue,
+int __wrap_tr_completion_queue_push_wait(
+	struct tr_completion_queue *queue,
 	const struct tr_completion *completion, int *need_wake)
 {
-	int ret = __real_tr_completion_queue_push(queue, completion, need_wake);
 	struct test_ctx *ctx = active;
+	int full = 0;
+	int ret;
 
-	if (!ctx)
-		return ret;
-	pthread_mutex_lock(&ctx->lock);
-	if (ctx->scenario == COMPLETION_FULL_STOP &&
-	    ctx->gate_entered && !ctx->gate_release && ret == TR_AGAIN) {
-		ctx->completion_full = 1;
-		pthread_cond_broadcast(&ctx->cond);
+	/*
+	 * Test-only observation：owner 被 gate 阻塞期间 count 不会下降，因此在调用
+	 * real blocking API 前观察 full，等价于证明 producer 即将进入 capacity wait。
+	 */
+	if (ctx &&
+	    (ctx->scenario == COMPLETION_FULL_WAIT ||
+	     ctx->scenario == COMPLETION_FULL_STOP)) {
+		pthread_mutex_lock(&queue->lock);
+		full = queue->accepting && queue->count == queue->capacity;
+		pthread_mutex_unlock(&queue->lock);
+		if (full) {
+			pthread_mutex_lock(&ctx->lock);
+			ctx->completion_full = 1;
+			pthread_cond_broadcast(&ctx->cond);
+			pthread_mutex_unlock(&ctx->lock);
+		}
 	}
-	pthread_mutex_unlock(&ctx->lock);
+
+	ret = __real_tr_completion_queue_push_wait(
+		queue, completion, need_wake);
 	return ret;
 }
 
@@ -297,9 +311,11 @@ static void *stop_thread(void *arg)
 static void *completion_submit_thread(void *arg)
 {
 	struct test_ctx *ctx = arg;
+	int ret = tr_reactor_complete(
+		ctx->reactor, completion_callback, ctx);
 
-	assert(tr_reactor_complete(ctx->reactor, completion_callback, ctx) ==
-	       TR_ERR_CLOSED);
+	assert(ret == (ctx->scenario == COMPLETION_FULL_STOP ?
+		       TR_ERR_CLOSED : TR_OK));
 	return NULL;
 }
 
@@ -458,6 +474,35 @@ static void test_stop_drain(void)
 	puts("stop/fifo/completion-drain: ok");
 }
 
+static void test_completion_full_wait_resume(void)
+{
+	struct test_ctx ctx;
+	pthread_t gate;
+	pthread_t producer;
+	unsigned i;
+
+	setup(&ctx, COMPLETION_FULL_WAIT);
+	assert(pthread_create(&gate, NULL, gate_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.gate_entered);
+
+	for (i = 0; i < CAPACITY; ++i)
+		assert(tr_reactor_complete(
+			       ctx.reactor, completion_callback, &ctx) == TR_OK);
+
+	assert(pthread_create(
+		       &producer, NULL, completion_submit_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.completion_full);
+
+	/* owner 恢复后 pop batch 释放容量，blocked producer 必须成功 handoff。 */
+	release_gate(&ctx);
+	assert(pthread_join(gate, NULL) == 0);
+	assert(pthread_join(producer, NULL) == 0);
+	teardown(&ctx);
+
+	assert(ctx.completions == CAPACITY + 1U);
+	puts("completion-full/wait/pop-wake: ok");
+}
+
 static void test_completion_full_stop(void)
 {
 	struct test_ctx ctx;
@@ -506,6 +551,7 @@ int main(void)
 	test_full_queue_waiters(0);
 	test_full_queue_waiters(1);
 	test_stop_drain();
+	test_completion_full_wait_resume();
 	test_completion_full_stop();
 	alarm(0);
 	return 0;

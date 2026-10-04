@@ -8,8 +8,11 @@
  * 提交一个 worker completion 回 Reactor owner。
  *
  * fn 必须是非阻塞的短任务，禁止在回调里执行磁盘、网络、KMS 等阻塞工作。
- * TR_OK 表示 arg 的生命周期责任已经转移给 bounded completion queue；
- * 提交失败时仍由调用方负责。
+ * 跨线程提交遇到 bounded completion queue 满时会在 queue-local condition 上
+ * 等待容量，不做 sched_yield 自旋，也不允许 worker 绕过 owner。
+ *
+ * TR_OK 表示 arg 的生命周期责任已经转移给 completion queue/owner；
+ * stop/close 或 wait primitive 失败时 ownership 仍由调用方负责。
  */
 int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 			void *arg);

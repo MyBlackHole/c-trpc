@@ -2765,9 +2765,10 @@ static void *tr_rpc_executor_main(void *arg)
 			    tr_rpc_defer_task_completion(endpoint, task.call) !=
 				    TR_OK) {
 				/*
-				 * Reactor 已停止、queue 满或 OOM 时必须在 worker
-				 * 侧完成 rollback/finalize，不能泄漏 task strong-ref。
-				 * 正常运行路径统一由 Reactor owner 完成。
+				 * completion queue 满时 tr_reactor_complete() 会等待容量，
+				 * 不再把瞬时满载当成失败。只有 Reactor 已停止或 handoff
+				 * 本身失败时，worker 才在本地完成 rollback/finalize，
+				 * 不能泄漏 task strong-ref。
 				 */
 				tr_rpc_executor_complete_task(endpoint, task.call);
 				tr_rpc_task_done(endpoint, task.call);
