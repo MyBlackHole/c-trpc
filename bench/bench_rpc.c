@@ -249,7 +249,6 @@ static void configure_limits(
 
 static void configure_tuning(
 	struct tr_facade_tuning *tuning,
-	const struct tr_facade_limits *limits,
 	const struct options *o, int server)
 {
 	tr_facade_tuning_init(tuning);
@@ -311,7 +310,7 @@ static int run_server(const struct options *o)
 	int status;
 	tr_server_config_init(&config);
 	configure_limits(&config.limits, o, 1);
-	configure_tuning(&tuning, &config.limits, o, 1);
+	configure_tuning(&tuning, o, 1);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
 	check(tr_server_create_with_tuning(
@@ -855,7 +854,7 @@ static int run_client(const struct options *o)
 	int status = EXIT_SUCCESS;
 	tr_client_config_init(&config);
 	configure_limits(&config.limits, o, 0);
-	configure_tuning(&tuning, &config.limits, o, 0);
+	configure_tuning(&tuning, o, 0);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
 	check(pthread_mutex_init(&run.lock, NULL), "mutex init");
