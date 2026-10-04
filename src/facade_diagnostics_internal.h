@@ -5,7 +5,7 @@
 #include "tr/client.h"
 #include "tr/reactor.h"
 #include "tr/server.h"
-#include "rpc_internal.h"
+#include "rpc/rpc_internal.h"
 #include "pipeline_listener_internal.h"
 
 struct tr_server_channel_stats {

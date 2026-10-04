@@ -333,9 +333,17 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
+P5 第一阶段：
+
+- 开始 physical directory cleanup，首先把已经稳定的 RPC engine 实现迁到
+  `src/rpc/`；
+- public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
+- 不改变 RPC ownership、线程、锁、executor、resource bound、wire 或 hot path。
+
 下一阶段：
 
-- 评估 per-Service/Method semantic observability；
+- 按同样规则继续评估 `src/runtime/`、`src/transport/`、`src/group/`；
+- per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 
 详细审查见 [分层、模块职责与 API 边界](07-layer-module-api-boundaries.md)。

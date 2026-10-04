@@ -20,7 +20,7 @@
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
 #include "../src/reactor_internal.h"
-#include "../src/rpc_internal.h"
+#include "../src/rpc/rpc_internal.h"
 #include "../src/timer_queue.h"
 
 #include <assert.h>

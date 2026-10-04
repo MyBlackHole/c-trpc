@@ -4,7 +4,7 @@
 #include "tr/reactor.h"
 #include "tr/rpc.h"
 #include "tr/status.h"
-#include "../src/rpc_internal.h"
+#include "../src/rpc/rpc_internal.h"
 
 #include <assert.h>
 #include <errno.h>
