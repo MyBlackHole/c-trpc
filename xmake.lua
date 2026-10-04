@@ -87,7 +87,7 @@ target("trcore")
         "src/socket.c",
         "src/connector.c",
         "src/reactor.c",
-        "src/runtime.c",
+        "src/runtime/runtime.c",
         "src/pipeline.c",
         "src/pipeline_route.c",
         "src/pipeline_registry.c",

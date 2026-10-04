@@ -75,39 +75,54 @@ Backup、数据库同步、对象复制等都属于 c-trpc 之上的业务层。
 
 ### 2.1 Runtime
 
+这里区分**概念 Runtime layer** 与物理 `src/runtime/` module：
+
+- 概念 Runtime layer 包含 Reactor execution substrate；
+- 物理 `src/runtime/` 只负责 shard/lifecycle/resource-domain orchestration，
+  不接管 Reactor 的 epoll/queue/timer implementation。
+
 **Responsibility**
 
-- Reactor event loop；
-- socket ownership；
-- timer；
-- command/completion admission；
-- bounded runtime resources；
-- owner-thread execution。
+- shard resource-domain composition；
+- Reactor lifecycle create/start/stop/destroy；
+- shard-local shared RPC executor lifecycle；
+- listener / peer storage / deferred peer-event resource lifecycle；
+- shard identity and aggregate resource ownership。
 
 **Owns**
 
-- epoll/eventfd；
-- connection slot；
+- Runtime / RuntimeShard objects；
+- shard-local Reactor and shared executor object lifetime；
+- peer slot storage/counters；
+- listener fd and peer-event fd lifecycle。
+
+**Delegates to Reactor**
+
+- epoll event loop；
+- connection slot execution；
+- command/completion admission；
 - Reactor timer；
-- runtime queue/pool lifecycle。
+- Reactor queue/pool implementation。
 
 **Does not own**
 
 - RPC Method/Call 业务语义；
 - Stream routing policy；
 - Connection Group lifecycle policy；
+- Reactor internal queue/epoll implementation；
 - 业务 identity/durability。
 
 **Capability offered upward**
 
 ```text
-connection execution
-timer execution
-owner call/completion
-bounded I/O resource
+shard lifecycle
+owner Reactor capability
+shared executor capability
+listener/peer resource domain
+owner call
 ```
 
-Runtime 默认应是 internal implementation layer。
+Runtime 默认应是 internal orchestration module。
 
 ---
 
@@ -924,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一阶段已完成：
+第一、二阶段已完成：
 
 ```text
 src/rpc/
@@ -932,20 +947,26 @@ src/rpc/
   rpc_internal.h
   rpc_codec.c
   rpc_wire.c
+
+src/runtime/
+  runtime.c
+  runtime_internal.h
 ```
 
 规则：
 
 - stable/public headers 继续留在 `include/tr/`，不因源码目录移动扩大或缩小 SDK ABI；
 - RPC 内部实现只通过 `src/rpc/rpc_internal.h` 向 facade/runtime 暴露 engine contract；
-- RPC 到 Channel/Reactor/observability internal 的依赖显式跨回父目录；
+- Runtime 物理 module 只包含 shard/lifecycle/resource-domain orchestration；
+- Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
+  `src/runtime/`；它们仍是独立 execution substrate；
+- module 对 sibling internal dependency 使用显式跨目录 include；
 - tests 直接引用 internal contract 时也使用新的物理路径；
 - 本阶段不改变线程、owner、锁、队列、resource bound、wire 或 hot path。
 
 后续再按相同规则评估：
 
 ```text
-src/runtime/
 src/transport/
 src/group/
 ```

@@ -19,7 +19,7 @@
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "rpc/rpc_internal.h"
-#include "runtime_internal.h"
+#include "runtime/runtime_internal.h"
 #include "socket_internal.h"
 #include "observability_internal.h"
 #include "pipeline_listener_internal.h"
