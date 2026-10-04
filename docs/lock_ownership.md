@@ -130,7 +130,8 @@ Stream table、flow-control、lane state、drain 和 snapshot diagnostics 暂时
 
 - lifecycle observer publication/read：Reactor owner-only；
 - reconnect TCP_NODELAY policy publication：Reactor owner command；
-- reconnect timer/connector progression：Reactor owner。
+- reconnect timer/connector progression：Reactor owner；
+- drain barrier + reconnect disable + initial GOAWAY：同一个 Reactor owner transaction。
 
 upper-layer `set_handler()` 暂时仍使用 `channel->lock`，因为同步 Client teardown
 当前允许 Reactor stop 后再清空 handler；在明确重排 Client destroy/quiescence
