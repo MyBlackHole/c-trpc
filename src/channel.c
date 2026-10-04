@@ -1766,6 +1766,8 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	return TR_FRAME_RELEASE;
 }
 
+static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
+
 static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 					   enum tr_connection_event event,
 					   int status, void *arg)
@@ -1804,7 +1806,6 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 					  connection))
 				memset(&channel->pending_hello[i], 0,
 				       sizeof(channel->pending_hello[i]));
-		pthread_cond_broadcast(&channel->reconnect_cond);
 	}
 	pthread_mutex_unlock(&channel->lock);
 
@@ -1822,6 +1823,9 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 	if (bulk_down)
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_BULK_DOWN,
 				  stream_status);
+
+	if (control_down || bulk_down)
+		tr_channel_reconnect_schedule_on_owner(channel);
 }
 
 static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
@@ -2164,7 +2168,6 @@ int tr_channel_start(struct tr_channel *channel)
 struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
-	int reconnect_cond_ready;
 	int keepalive_timer_ready;
 	int protocol_pool_ready;
 	int control_handler_installed;
@@ -2205,8 +2208,6 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	free(channel->streams);
 	if (build->keepalive_timer_ready)
 		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
-	if (build->reconnect_cond_ready)
-		pthread_cond_destroy(&channel->reconnect_cond);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&channel->lock);
 	free(channel);
@@ -2281,10 +2282,6 @@ static int tr_channel_create_common(
 	if (pthread_mutex_init(&channel->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.lock_ready = 1;
-	if (pthread_cond_init(&channel->reconnect_cond, NULL) != 0)
-		return TR_ERR_INVALID;
-	build.reconnect_cond_ready = 1;
-
 	ret = tr_reactor_timer_register(channel->reactor,
 					tr_channel_keepalive_timer_main,
 					channel, &channel->keepalive_timer);
@@ -2469,7 +2466,6 @@ void tr_channel_finalize_detached(struct tr_channel *channel)
 	free(channel->stream_index);
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
-	pthread_cond_destroy(&channel->reconnect_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
 }
@@ -2656,7 +2652,6 @@ static int tr_channel_replace_connection_on_owner(void *arg)
 		channel->control_reconnecting = 0;
 		channel->control_reconnect_attempt = 0;
 	}
-	pthread_cond_broadcast(&channel->reconnect_cond);
 	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
 }
@@ -2695,7 +2690,8 @@ int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->reconnect_thread_started || channel->reconnect_enabled) {
+	if (channel->reconnect_enabled || channel->reconnect_connector ||
+	    channel->reconnect_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
@@ -2704,99 +2700,154 @@ int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
 	return TR_OK;
 }
 
-int tr_channel_enable_client_reconnect(
-	struct tr_channel *channel,
-	const struct tr_channel_reconnect_config *config)
+struct tr_channel_reconnect_enable_request {
+	struct tr_channel *channel;
+	char address[64];
+	uint16_t control_port;
+	uint16_t bulk_port;
+	uint32_t initial_delay_ms;
+	uint32_t max_delay_ms;
+	uint32_t connect_timeout_ms;
+};
+
+static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 {
-	size_t address_len;
-	uint32_t initial_delay;
-	uint32_t max_delay;
-	uint32_t connect_timeout;
-	int error;
-
-	if (!channel || !config || !config->ipv4_address ||
-	    config->control_port == 0 ||
-	    channel->config.role != TR_CHANNEL_CLIENT)
-		return TR_ERR_INVALID;
-
-	address_len = strlen(config->ipv4_address);
-	if (address_len == 0 ||
-	    address_len >= sizeof(channel->reconnect_address))
-		return TR_ERR_INVALID;
-
-	initial_delay = config->initial_delay_ms ? config->initial_delay_ms :
-						   200U;
-	max_delay = config->max_delay_ms ? config->max_delay_ms : 10000U;
-	connect_timeout =
-		config->connect_timeout_ms ? config->connect_timeout_ms : 5000U;
-	if (max_delay < initial_delay)
-		return TR_ERR_INVALID;
+	struct tr_channel_reconnect_enable_request *request =
+		(struct tr_channel_reconnect_enable_request *)arg;
+	struct tr_channel *channel = request->channel;
+	struct tr_connector_config connector_config;
+	struct tr_connector *connector = NULL;
+	struct tr_reactor_timer_handle timer;
+	int ret;
 
 	pthread_mutex_lock(&channel->lock);
 	if (channel->local_draining) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
-	if (channel->reconnect_thread_started || channel->reconnect_enabled) {
+	if (channel->reconnect_enabled || channel->reconnect_connector ||
+	    channel->reconnect_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
+	pthread_mutex_unlock(&channel->lock);
 
-	memcpy(channel->reconnect_address, config->ipv4_address,
-	       address_len + 1U);
-	channel->reconnect_control_port = config->control_port;
-	channel->reconnect_bulk_port = config->bulk_port ? config->bulk_port :
-							   config->control_port;
-	channel->reconnect_initial_delay_ms = initial_delay;
-	channel->reconnect_max_delay_ms = max_delay;
-	channel->reconnect_connect_timeout_ms = connect_timeout;
-	channel->reconnect_stop = 0;
+	memset(&connector_config, 0, sizeof(connector_config));
+	connector_config.owner = channel->reactor;
+	connector_config.timeout_ms = request->connect_timeout_ms;
+	connector_config.tcp_nodelay = channel->reconnect_tcp_nodelay;
+	connector_config.complete_cb = tr_channel_reconnect_connector_complete;
+	connector_config.callback_arg = channel;
+	ret = tr_connector_create(&connector_config, &connector);
+	if (ret != TR_OK)
+		return ret;
+
+	memset(&timer, 0, sizeof(timer));
+	ret = tr_reactor_timer_register(
+		channel->reactor, tr_channel_reconnect_timer_main,
+		channel, &timer);
+	if (ret != TR_OK) {
+		tr_connector_destroy(connector);
+		return ret;
+	}
+
+	pthread_mutex_lock(&channel->lock);
+	memcpy(channel->reconnect_address, request->address,
+	       sizeof(channel->reconnect_address));
+	channel->reconnect_control_port = request->control_port;
+	channel->reconnect_bulk_port = request->bulk_port;
+	channel->reconnect_initial_delay_ms = request->initial_delay_ms;
+	channel->reconnect_max_delay_ms = request->max_delay_ms;
+	channel->reconnect_connect_timeout_ms = request->connect_timeout_ms;
+	channel->reconnect_connector = connector;
+	channel->reconnect_timer = timer;
+	channel->reconnect_timer_registered = 1;
 	channel->reconnect_enabled = 1;
 	channel->control_reconnect_attempt = 0;
 	channel->bulk_reconnect_attempt = 0;
 	channel->control_reconnecting = 0;
 	channel->bulk_reconnecting = 0;
-
-	error = pthread_create(&channel->reconnect_thread, NULL,
-			       tr_channel_reconnect_thread_main, channel);
-	if (error != 0) {
-		channel->reconnect_enabled = 0;
-		pthread_mutex_unlock(&channel->lock);
-		return TR_ERR_SYS;
-	}
-	channel->reconnect_thread_started = 1;
-	pthread_cond_broadcast(&channel->reconnect_cond);
+	channel->reconnect_lane = TR_LANE_CONTROL;
 	pthread_mutex_unlock(&channel->lock);
+
+	tr_channel_reconnect_schedule_on_owner(channel);
+	return TR_OK;
+}
+
+int tr_channel_enable_client_reconnect(
+	struct tr_channel *channel,
+	const struct tr_channel_reconnect_config *config)
+{
+	struct tr_channel_reconnect_enable_request request;
+	size_t address_len;
+	uint32_t initial_delay;
+	uint32_t max_delay;
+	uint32_t connect_timeout;
+
+	if (!channel || !config || !config->ipv4_address ||
+	    config->control_port == 0U ||
+	    channel->config.role != TR_CHANNEL_CLIENT)
+		return TR_ERR_INVALID;
+
+	address_len = strlen(config->ipv4_address);
+	if (address_len == 0U || address_len >= sizeof(request.address))
+		return TR_ERR_INVALID;
+	initial_delay = config->initial_delay_ms ?
+			config->initial_delay_ms : 200U;
+	max_delay = config->max_delay_ms ? config->max_delay_ms : 10000U;
+	connect_timeout = config->connect_timeout_ms ?
+			  config->connect_timeout_ms : 5000U;
+	if (max_delay < initial_delay)
+		return TR_ERR_INVALID;
+
+	memset(&request, 0, sizeof(request));
+	request.channel = channel;
+	memcpy(request.address, config->ipv4_address, address_len + 1U);
+	request.control_port = config->control_port;
+	request.bulk_port = config->bulk_port ?
+			    config->bulk_port : config->control_port;
+	request.initial_delay_ms = initial_delay;
+	request.max_delay_ms = max_delay;
+	request.connect_timeout_ms = connect_timeout;
+	return tr_reactor_call(
+		channel->reactor,
+		tr_channel_enable_client_reconnect_on_owner, &request);
+}
+
+static int tr_channel_disable_client_reconnect_on_owner(void *arg)
+{
+	struct tr_channel *channel = (struct tr_channel *)arg;
+	struct tr_connector *connector;
+	struct tr_reactor_timer_handle timer;
+	int timer_registered;
+
+	pthread_mutex_lock(&channel->lock);
+	channel->reconnect_enabled = 0;
+	channel->control_reconnecting = 0;
+	channel->bulk_reconnecting = 0;
+	connector = channel->reconnect_connector;
+	channel->reconnect_connector = NULL;
+	timer = channel->reconnect_timer;
+	timer_registered = channel->reconnect_timer_registered;
+	channel->reconnect_timer_registered = 0;
+	memset(&channel->reconnect_timer, 0, sizeof(channel->reconnect_timer));
+	pthread_mutex_unlock(&channel->lock);
+
+	if (timer_registered) {
+		(void)tr_reactor_timer_arm(timer, 0U);
+		(void)tr_reactor_timer_unregister(timer);
+	}
+	tr_connector_destroy(connector);
 	return TR_OK;
 }
 
 int tr_channel_disable_client_reconnect(struct tr_channel *channel)
 {
-	pthread_t thread;
-	int join_thread = 0;
-
 	if (!channel)
 		return TR_ERR_INVALID;
-
-	pthread_mutex_lock(&channel->lock);
-	channel->reconnect_enabled = 0;
-	channel->reconnect_stop = 1;
-	pthread_cond_broadcast(&channel->reconnect_cond);
-	if (channel->reconnect_thread_started) {
-		thread = channel->reconnect_thread;
-		if (pthread_equal(pthread_self(), thread)) {
-			/* reconnect thread 会观察 reconnect_stop，并自行退出。 */
-			pthread_mutex_unlock(&channel->lock);
-			return TR_OK;
-		}
-		channel->reconnect_thread_started = 0;
-		join_thread = 1;
-	}
-	pthread_mutex_unlock(&channel->lock);
-
-	if (join_thread && pthread_join(thread, NULL) != 0)
-		return TR_ERR_SYS;
-	return TR_OK;
+	return tr_reactor_call(
+		channel->reactor,
+		tr_channel_disable_client_reconnect_on_owner, channel);
 }
 
 int tr_channel_enable_keepalive(struct tr_channel *channel,
@@ -2962,7 +3013,6 @@ int tr_channel_begin_drain(struct tr_channel *channel)
 
 	pthread_mutex_lock(&channel->lock);
 	channel->local_draining = 1;
-	pthread_cond_broadcast(&channel->reconnect_cond);
 	pthread_mutex_unlock(&channel->lock);
 
 	ret = tr_channel_send_pending_goaway(channel);
