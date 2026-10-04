@@ -31,8 +31,8 @@ struct tr_pipeline_listener_config {
 	uint32_t control_message_count;
 
 	/*
-	 * Required CONTROL admission/fencing hook. The listener never treats a
-	 * client-provided TRR1 CONTROL identity as authorization by itself.
+	 * 必须提供的 CONTROL admission/fencing hook。
+	 * listener 绝不能把客户端自报的 TRR1 CONTROL identity 直接视为授权结果。
 	 */
 	tr_pipeline_listener_authorize_control_cb authorize_control;
 	void *authorize_arg;
@@ -59,8 +59,8 @@ struct tr_pipeline_listener_stats {
 };
 
 /*
- * One listener belongs to exactly one Reactor/shard owner and owns its
- * shard-local Pipeline registry plus bounded CONTROL message buffers.
+ * 一个 listener 只属于一个 Reactor/shard owner，并拥有该 shard 的 Pipeline
+ * registry 与 bounded CONTROL message buffer 资源。
  */
 int tr_pipeline_listener_create(
 	const struct tr_pipeline_listener_config *config,
