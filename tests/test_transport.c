@@ -18,6 +18,7 @@
 #include "tr/wire.h"
 #include "../src/channel_internal.h"
 #include "../src/facade_diagnostics_internal.h"
+#include "../src/facade_tuning_internal.h"
 #include "../src/reactor_internal.h"
 #include "../src/rpc_internal.h"
 #include "../src/timer_queue.h"
@@ -5997,6 +5998,7 @@ static void test_client_server_facade_unary(void)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	struct tr_client *client = NULL;
 	struct tr_rpc_method_desc method;
@@ -6019,9 +6021,6 @@ static void test_client_server_facade_unary(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.rpc_message_pool_count = 32U;
-	server_config.limits.reassembly_pool_count = 4U;
-	server_config.limits.rx_buffer_count = 32U;
 	server_config.limits.observability_flags = TR_OBSERVABILITY_TIMING;
 	server_config.interceptor.fn = facade_test_interceptor;
 	server_config.interceptor.arg = &ctx;
@@ -6050,9 +6049,6 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
-	client_config.limits.rpc_message_pool_count = 32U;
-	client_config.limits.reassembly_pool_count = 4U;
-	client_config.limits.rx_buffer_count = 32U;
 	client_config.interceptor.fn = facade_test_interceptor;
 	client_config.interceptor.arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
@@ -6192,16 +6188,19 @@ static void test_server_multi_shard_reuseport_facade(void)
 	server_config.max_peers = 8U;
 	server_config.keepalive_interval_ms = 0U;
 	server_config.limits.executor_threads = 2U;
-	server_config.limits.command_capacity = 32U;
-	server_config.limits.tx_item_capacity = 16U;
-	server_config.limits.control_tx_item_capacity = 8U;
-	server_config.limits.rx_buffer_count = 8U;
-	server_config.limits.rpc_message_pool_count = 8U;
-	server_config.limits.reassembly_pool_count = 4U;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+
+	tr_facade_tuning_init(&tuning);
+	tuning.command_capacity = 32U;
+	tuning.tx_item_capacity = 16U;
+	tuning.control_tx_item_capacity = 8U;
+	tuning.rx_buffer_count = 8U;
+	tuning.rpc_message_pool_count = 8U;
+	tuning.reassembly_pool_count = 4U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
 	method.service_id = 78U;
@@ -6225,9 +6224,6 @@ static void test_server_multi_shard_reuseport_facade(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
-	client_config.limits.rpc_message_pool_count = 16U;
-	client_config.limits.reassembly_pool_count = 4U;
-	client_config.limits.rx_buffer_count = 16U;
 
 	request.data = (const uint8_t *)"facade-ping";
 	request.len = 11U;
@@ -6298,9 +6294,6 @@ static void test_client_server_facade_nodelay_policy(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.rpc_message_pool_count = 32U;
-	server_config.limits.reassembly_pool_count = 4U;
-	server_config.limits.rx_buffer_count = 32U;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
@@ -6312,9 +6305,6 @@ static void test_client_server_facade_nodelay_policy(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
-	client_config.limits.rpc_message_pool_count = 32U;
-	client_config.limits.reassembly_pool_count = 4U;
-	client_config.limits.rx_buffer_count = 32U;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 
 	before = tcp_nodelay_probe_read();
@@ -6489,9 +6479,6 @@ static void test_client_runtime_thread_bound(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.rpc_message_pool_count = 32U;
-	server_config.limits.reassembly_pool_count = 4U;
-	server_config.limits.rx_buffer_count = 32U;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
@@ -6504,9 +6491,6 @@ static void test_client_runtime_thread_bound(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
-	client_config.limits.rpc_message_pool_count = 32U;
-	client_config.limits.reassembly_pool_count = 4U;
-	client_config.limits.rx_buffer_count = 32U;
 
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 
@@ -6554,9 +6538,6 @@ static void test_server_runtime_thread_bound(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.rpc_message_pool_count = 64U;
-	server_config.limits.reassembly_pool_count = 8U;
-	server_config.limits.rx_buffer_count = 64U;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
@@ -6644,9 +6625,6 @@ static void test_server_shared_rpc_executor(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.rpc_message_pool_count = 64U;
-	server_config.limits.reassembly_pool_count = 8U;
-	server_config.limits.rx_buffer_count = 64U;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
@@ -6671,9 +6649,6 @@ static void test_server_shared_rpc_executor(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
-	client_config.limits.rpc_message_pool_count = 32U;
-	client_config.limits.reassembly_pool_count = 4U;
-	client_config.limits.rx_buffer_count = 32U;
 
 	for (i = 0; i < 4U; ++i) {
 		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
@@ -6768,9 +6743,6 @@ static void test_server_peer_refcount_drain(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.rpc_message_pool_count = 32U;
-	server_config.limits.reassembly_pool_count = 4U;
-	server_config.limits.rx_buffer_count = 32U;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
@@ -6801,9 +6773,6 @@ static void test_server_peer_refcount_drain(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.limits.rpc_message_buffer_bytes = 4096U;
-	client_config.limits.rpc_message_pool_count = 32U;
-	client_config.limits.reassembly_pool_count = 4U;
-	client_config.limits.rx_buffer_count = 32U;
 
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
