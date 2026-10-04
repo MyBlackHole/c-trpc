@@ -445,6 +445,7 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 	TR_LIMIT_DEFAULT(max_calls);
 	TR_LIMIT_DEFAULT(max_frame_payload_bytes);
 	TR_LIMIT_DEFAULT(max_message_bytes);
+	TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
 	TR_LIMIT_DEFAULT(initial_window_bytes);
 	TR_LIMIT_DEFAULT(window_update_threshold_bytes);
 	TR_LIMIT_DEFAULT(executor_threads);
