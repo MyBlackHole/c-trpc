@@ -1,5 +1,6 @@
 #include "pipeline_internal.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -162,6 +163,18 @@ void tr_pipeline_destroy(struct tr_pipeline *pipeline)
 {
 	if (!pipeline)
 		return;
+
+	/*
+	 * Pipeline 不拥有底层 socket；因此真正释放 soft-state 前，所有
+	 * membership/affinity 必须已经由 owner 完成解除。这里把架构约束变成
+	 * debug invariant，避免 teardown 顺序错误静默演化成 UAF。
+	 */
+#ifndef NDEBUG
+	assert(!pipeline->control_bound);
+	assert(pipeline->data_reserved_count == 0U);
+	assert(pipeline->data_count == 0U);
+	assert(pipeline->affinity_count == 0U);
+#endif
 
 	free(pipeline->affinities);
 	free(pipeline->data_slots);
