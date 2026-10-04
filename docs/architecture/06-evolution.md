@@ -285,6 +285,7 @@ c-trpc core Phase。
 - Control-plane lock 收敛阶段开始拆分过渡锁职责：Channel lifecycle observer 与 reconnect socket policy 改为 Reactor-owner publication；RPC Endpoint 将 strong-ref wait / detached-finalizer lifecycle 从 `endpoint->lock` 拆到独立 `ref_lock`，并统一所有 strong-ref release 的 waiter wakeup。
 - Client teardown/handler 收敛阶段把 RPC Endpoint 与 Channel 的销毁移动到 Runtime stop 之前，并将 upper-layer Channel handler publication 改为 Reactor owner barrier；完全 stopped 仅保留 teardown-only direct publication，因此 callback publication 不再占用 `channel->lock`。
 - RPC control-plane 收敛阶段把 Method registration 迁到 Reactor owner command；Client Call creation/start 已确认本来就是 owner-call，因此 application thread 不再直接写 Method registry 或创建 Call protocol state。
+- RPC Streaming Conformance 阶段冻结四种 cardinality 的 V1 生命周期：Client request half-close、Server final STATUS、STATUS(OK)+ONE exactly-one response、FINISHED terminal barrier、合法 status 域以及 MANY request 1..N 的当前 Method-open 限制；正常/取消/异常 terminal 进一步共用一次性通知与完成统计语义。
 
 当前 stable installed headers：
 
