@@ -5272,7 +5272,6 @@ static void test_server_multi_shard_reuseport_facade(void)
 	tuning.control_tx_item_capacity = 8U;
 	tuning.rx_buffer_count = 8U;
 	tuning.rpc_message_pool_count = 8U;
-	tuning.rpc_message_buffer_bytes = 4096U;
 	tuning.reassembly_pool_count = 4U;
 	assert(tr_server_create_with_tuning(
 		       &server_config, &tuning, &server) == TR_OK);
