@@ -50,7 +50,7 @@ struct tr_pipeline_listener_stats {
 	uint32_t connections_current;
 	uint32_t connections_peak;
 	uint32_t data_connections_current;
-	uint32_t active_transfers;
+	uint64_t active_transfers;
 	uint32_t draining;
 	uint64_t control_accepts;
 	uint64_t data_accepts;
