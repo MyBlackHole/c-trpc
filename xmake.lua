@@ -133,7 +133,7 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
             -- Observe real queue operations and poll boundaries without production hooks.
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
                         "-Wl,--wrap=tr_command_queue_pop_batch",
-                        "-Wl,--wrap=tr_completion_queue_push",
+                        "-Wl,--wrap=tr_completion_queue_push_wait",
                         "-Wl,--wrap=epoll_wait", {force = true})
         elseif name == "test_tx_priority" then
             add_ldflags("-Wl,--wrap=sendmsg", {force = true})
