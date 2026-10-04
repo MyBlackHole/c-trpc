@@ -53,6 +53,8 @@ struct tr_server_rpc_stats {
 	uint64_t calls_completed;
 	uint64_t calls_cancelled;
 	uint64_t calls_deadline_exceeded;
+
+	struct tr_rpc_semantic_stats semantic;
 };
 
 struct tr_server_stats {

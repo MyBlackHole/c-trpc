@@ -659,6 +659,18 @@ int tr_client_get_rpc_stats(struct tr_client *client,
 	return tr_rpc_endpoint_get_stats(client->rpc, out);
 }
 
+int tr_client_get_rpc_semantic_stats(
+	struct tr_client *client, struct tr_rpc_semantic_stats *out)
+{
+	if (!client || !out)
+		return TR_ERR_INVALID;
+
+	memset(out, 0, sizeof(*out));
+	if (!client->rpc)
+		return TR_OK;
+	return tr_rpc_endpoint_get_semantic_stats(client->rpc, out);
+}
+
 void tr_client_destroy(struct tr_client *client)
 {
 	if (!client)
