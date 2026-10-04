@@ -55,6 +55,7 @@ flowchart TB
 | Channel | Reactor shard | command | TARGET 去除业务 mutex |
 | Stream | Reactor shard | command | hot state 无锁 |
 | RPC Endpoint protocol state | Reactor shard | command/completion | TARGET 去除 worker 直接修改 |
+| RPC Endpoint lifetime state | strong-ref owner/finalizer | refcount + `ref_lock/ref_cond` | 与 protocol lock 分离 |
 | RPC Call | Reactor shard | completion | hot state 无锁 |
 | Connection Group / Pipeline | Reactor shard | command / owner API | hot state owner-only |
 | Outbound Connector | Reactor shard | owner API | connecting fd 由 connector 独占；completion/cancel 明确 transfer/close |
@@ -88,6 +89,7 @@ flowchart TB
 - shard 内 command queue、completion queue、worker queue、shared allocator 的局部锁可以长期保留；
 - 不允许为了资源复用重新引入跨 shard hot-path executor lock；
 - `channel->lock`、`endpoint->lock` 的目标是随着 ownership 收敛逐步缩小；
+- Endpoint strong-ref wait / detached-finalizer 已拆成独立 `ref_lock`，不再复用 protocol lock；
 - 不用大量 atomic 重新制造“隐式 shared state”。
 
 ## 5. Shard Resource Rule

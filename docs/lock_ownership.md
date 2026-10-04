@@ -120,36 +120,63 @@ ownership，free-list 因此是真共享状态。
 
 ### `channel->lock`
 
-**结论：当前保留，属于过渡锁。**
+**结论：当前保留，职责已经开始拆分。**
 
-Channel 目前仍可能被 Reactor callback / owner call 与 application API thread 访问。
-自动 reconnect 已经迁移到所属 Reactor 的 timer + nonblocking connector，不再形成
-第三个 reconnect pthread 执行域。
+Channel 仍同时服务 Reactor callback / owner call 与部分 application API，因此
+Stream table、flow-control、lane state、drain 和 snapshot diagnostics 暂时继续由
+`channel->lock` 保护。
 
-锁仍保护 lane mapping、Stream table、flow-control、capability negotiation、
-drain 与部分 diagnostics。后续继续把修改型 application API 收敛到 owner 后，
-再按 profile 缩小这把过渡锁；不通过增加 atomic shared state 来“删除 mutex”。
+以下控制面已经退出该锁：
+
+- lifecycle observer publication/read：Reactor owner-only；
+- reconnect TCP_NODELAY policy publication：Reactor owner command；
+- reconnect timer/connector progression：Reactor owner；
+- drain barrier + reconnect disable + initial GOAWAY：同一个 Reactor owner transaction。
+
+upper-layer `set_handler()` 暂时仍使用 `channel->lock`，因为同步 Client teardown
+当前允许 Reactor stop 后再清空 handler；在明确重排 Client destroy/quiescence
+顺序之前不能简单改成 owner-call。
+
+后续目标是继续把修改型 application API 收敛到 owner，再按真实职责缩小该锁；
+不通过增加 atomic shared state 来“删除 mutex”。
 
 ## 5. RPC Endpoint
 
 ### `endpoint->lock`
 
-**结论：当前保留，范围继续收敛。**
+**结论：当前保留为 protocol/control-plane 过渡锁。**
 
 RPC 可变协议状态的修改型 worker API 已经通过 owner-call 回到 Reactor；worker
 不再成为 Call/Stream protocol state 的共同 owner。
 
-`endpoint->lock` 目前仍保护尚未完全 owner 化的 application 控制面，以及：
+`endpoint->lock` 当前主要保护：
 
-- Call/Method 表的部分访问；
-- detached-finalizer/refcount 条件；
-- executor admission 的协调状态。
+- Call/Method table 与索引；
+- 尚未完全 owner 化的 application control-plane；
+- pending executor admission/Call transition。
+
+它不再承担 strong-ref wait 或 detached-finalizer lifecycle。
+
+### `endpoint->ref_lock`
+
+**结论：保留为纯 lifetime lock。**
+
+只保护：
+
+- owner-only strong-ref wait 的 `ref_cond`；
+- detached teardown flag；
+- detached finalizer pointer/arg；
+- refs 从 2 -> 1 时的 waiter wakeup 线性化。
+
+所有 strong-ref release 统一通过 `tr_rpc_endpoint_put()`，因此 task completion、
+pending-retry completion 等不同引用来源都不会漏掉 owner-only waiter 唤醒。
 
 后续优化顺序：
 
 1. 把剩余修改型 application API 收敛到 owner；
-2. 缩小锁保护范围；
-3. profile 仍显示争用后再考虑更细粒度结构。
+2. 继续缩小 `endpoint->lock`；
+3. `ref_lock` 保持独立，不把 lifetime condition 再并回 protocol lock；
+4. profile 仍显示争用后再考虑更细粒度结构。
 
 禁止用大量 atomic 重新制造隐式 shared mutable state。
 

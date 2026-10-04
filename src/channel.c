@@ -104,7 +104,6 @@ struct tr_channel {
 	void *lifecycle_callback_arg;
 
 	int reconnect_enabled;
-	int reconnect_configuring;
 	struct tr_connector *reconnect_connector;
 	struct tr_reactor_timer_handle reconnect_timer;
 	int reconnect_timer_registered;
@@ -987,9 +986,15 @@ static void tr_channel_notify(struct tr_channel *channel,
 	pthread_mutex_lock(&channel->lock);
 	cb = channel->channel_event_cb;
 	cb_arg = channel->callback_arg;
+	pthread_mutex_unlock(&channel->lock);
+
+	/*
+	 * lifecycle observer 只在 Reactor owner 上发布和读取，不再属于
+	 * channel->lock 保护域。先 snapshot 再调用 normal callback，保持原有
+	 * “本次 event 使用同一组 observer”语义。
+	 */
 	lifecycle_cb = channel->lifecycle_event_cb;
 	lifecycle_arg = channel->lifecycle_callback_arg;
-	pthread_mutex_unlock(&channel->lock);
 
 	if (cb)
 		cb(channel, event, status, cb_arg);
@@ -2411,8 +2416,6 @@ static int tr_channel_detach_on_owner(void *arg)
 	channel->stream_event_cb = NULL;
 	channel->channel_event_cb = NULL;
 	channel->callback_arg = NULL;
-	channel->lifecycle_event_cb = NULL;
-	channel->lifecycle_callback_arg = NULL;
 
 	control = channel->control_connection;
 	bulk = channel->bulk_connection;
@@ -2422,6 +2425,10 @@ static int tr_channel_detach_on_owner(void *arg)
 	channel->keepalive_timer_registered = 0;
 	memset(&channel->keepalive_timer, 0, sizeof(channel->keepalive_timer));
 	pthread_mutex_unlock(&channel->lock);
+
+	/* lifecycle observer 是 owner-only publication，不属于 channel->lock。 */
+	channel->lifecycle_event_cb = NULL;
+	channel->lifecycle_callback_arg = NULL;
 
 	/*
 	 * Owner context makes these operations non-waiting. Closed/stale
@@ -2509,18 +2516,37 @@ void tr_channel_destroy(struct tr_channel *channel)
 	free(channel);
 }
 
+struct tr_channel_lifecycle_observer_request {
+	struct tr_channel *channel;
+	tr_channel_event_cb event_cb;
+	void *callback_arg;
+};
+
+static int tr_channel_set_lifecycle_observer_on_owner(void *arg)
+{
+	struct tr_channel_lifecycle_observer_request *request =
+		(struct tr_channel_lifecycle_observer_request *)arg;
+
+	request->channel->lifecycle_event_cb = request->event_cb;
+	request->channel->lifecycle_callback_arg = request->callback_arg;
+	return TR_OK;
+}
+
 int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 				      tr_channel_event_cb event_cb,
 				      void *callback_arg)
 {
+	struct tr_channel_lifecycle_observer_request request;
+
 	if (!channel)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&channel->lock);
-	channel->lifecycle_event_cb = event_cb;
-	channel->lifecycle_callback_arg = callback_arg;
-	pthread_mutex_unlock(&channel->lock);
-	return TR_OK;
+	request.channel = channel;
+	request.event_cb = event_cb;
+	request.callback_arg = callback_arg;
+	return tr_reactor_call(
+		channel->reactor,
+		tr_channel_set_lifecycle_observer_on_owner, &request);
 }
 
 int tr_channel_set_handler(struct tr_channel *channel,
@@ -2681,21 +2707,41 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 	return TR_OK;
 }
 
-int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
-					    int enabled)
+struct tr_channel_reconnect_nodelay_request {
+	struct tr_channel *channel;
+	int enabled;
+};
+
+static int tr_channel_set_reconnect_tcp_nodelay_on_owner(void *arg)
 {
-	if (!channel || (enabled != 0 && enabled != 1))
-		return TR_ERR_INVALID;
+	struct tr_channel_reconnect_nodelay_request *request =
+		(struct tr_channel_reconnect_nodelay_request *)arg;
+	struct tr_channel *channel = request->channel;
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->reconnect_enabled || channel->reconnect_configuring ||
-	    channel->reconnect_connector || channel->reconnect_timer_registered) {
+	if (channel->reconnect_enabled || channel->reconnect_connector ||
+	    channel->reconnect_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
-	channel->reconnect_tcp_nodelay = enabled;
+	channel->reconnect_tcp_nodelay = request->enabled;
 	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
+}
+
+int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
+					    int enabled)
+{
+	struct tr_channel_reconnect_nodelay_request request;
+
+	if (!channel || (enabled != 0 && enabled != 1))
+		return TR_ERR_INVALID;
+
+	request.channel = channel;
+	request.enabled = enabled;
+	return tr_reactor_call(
+		channel->reactor,
+		tr_channel_set_reconnect_tcp_nodelay_on_owner, &request);
 }
 
 struct tr_channel_reconnect_enable_request {
@@ -2723,12 +2769,11 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
-	if (channel->reconnect_enabled || channel->reconnect_configuring ||
-	    channel->reconnect_connector || channel->reconnect_timer_registered) {
+	if (channel->reconnect_enabled || channel->reconnect_connector ||
+	    channel->reconnect_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
-	channel->reconnect_configuring = 1;
 	memset(&connector_config, 0, sizeof(connector_config));
 	connector_config.owner = channel->reactor;
 	connector_config.timeout_ms = request->connect_timeout_ms;
@@ -2737,12 +2782,8 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 	connector_config.complete_cb = tr_channel_reconnect_connector_complete;
 	connector_config.callback_arg = channel;
 	ret = tr_connector_create(&connector_config, &connector);
-	if (ret != TR_OK) {
-		pthread_mutex_lock(&channel->lock);
-		channel->reconnect_configuring = 0;
-		pthread_mutex_unlock(&channel->lock);
+	if (ret != TR_OK)
 		return ret;
-	}
 
 	memset(&timer, 0, sizeof(timer));
 	ret = tr_reactor_timer_register(
@@ -2750,9 +2791,6 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 		channel, &timer);
 	if (ret != TR_OK) {
 		tr_connector_destroy(connector);
-		pthread_mutex_lock(&channel->lock);
-		channel->reconnect_configuring = 0;
-		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
 
@@ -2768,7 +2806,6 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 	channel->reconnect_timer = timer;
 	channel->reconnect_timer_registered = 1;
 	channel->reconnect_enabled = 1;
-	channel->reconnect_configuring = 0;
 	channel->control_reconnect_attempt = 0;
 	channel->bulk_reconnect_attempt = 0;
 	channel->control_reconnecting = 0;
@@ -3008,21 +3045,33 @@ int tr_channel_get_state(struct tr_channel *channel, enum tr_channel_state *out)
 	return TR_OK;
 }
 
-int tr_channel_begin_drain(struct tr_channel *channel)
+static int tr_channel_begin_drain_on_owner(void *arg)
 {
+	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret;
 
-	if (!channel)
-		return TR_ERR_INVALID;
-
-	(void)tr_channel_disable_client_reconnect(channel);
-
+	/*
+	 * drain barrier 与 reconnect disable 必须在同一个 owner turn 内完成。
+	 * 否则 application thread 可能在“disable reconnect”返回后、设置
+	 * local_draining 前重新 enable reconnect。
+	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->local_draining = 1;
 	pthread_mutex_unlock(&channel->lock);
 
-	ret = tr_channel_send_pending_goaway(channel);
-	return ret;
+	ret = tr_channel_disable_client_reconnect_on_owner(channel);
+	if (ret != TR_OK)
+		return ret;
+	return tr_channel_send_pending_goaway(channel);
+}
+
+int tr_channel_begin_drain(struct tr_channel *channel)
+{
+	if (!channel)
+		return TR_ERR_INVALID;
+
+	return tr_reactor_call(
+		channel->reactor, tr_channel_begin_drain_on_owner, channel);
 }
 
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
