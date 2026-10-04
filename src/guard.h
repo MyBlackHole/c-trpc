@@ -3,7 +3,7 @@
 
 #include <pthread.h>
 
-#include "tr/cleanup.h"
+#include "cleanup.h"
 
 struct tr_mutex_guard {
 	pthread_mutex_t *mutex;

@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "tr/cleanup.h"
+#include "../cleanup.h"
 #include "tr/observability.h"
 
 struct tr_buffer;

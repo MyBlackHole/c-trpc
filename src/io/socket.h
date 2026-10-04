@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "tr/cleanup.h"
+#include "../cleanup.h"
 
 #ifdef __cplusplus
 extern "C" {
