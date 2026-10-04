@@ -880,6 +880,7 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 - force `stop()` 与 graceful drain 语义明确分离；
 - stable Client stats 暴露 group/control/data/transfer/send-byte lifecycle；stable Server stats 暴露 group/connection/data/transfer 与 accept/reject counters；
 - Server DATA ingress 在 application callback 前验证 `stream_id -> exact DATA generation/connection` affinity；物理 DATA attach 本身不构成 transfer authorization，未经过 TRANSFER_READY 的 DATA frame 会关闭违规 DATA lane；
+- DATA attach 时一次性绑定 owner-local Pipeline capability，frame hot path 只做现有 bounded Stream-affinity lookup，不做 frame-by-frame registry routing/hash，也不新增锁或 owner hop；
 - Reactor slot/generation、TRR1 identity、connector、queue/pool occupancy 继续保持 internal。
 
 P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile 驱动的扩展。
