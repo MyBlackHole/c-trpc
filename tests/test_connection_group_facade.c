@@ -300,6 +300,22 @@ static void on_group_data_event(
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static const char *counter_name(
+	struct public_group_ctx *ctx, const unsigned *counter)
+{
+	if (counter == &ctx->authorized)
+		return "authorized";
+	if (counter == &ctx->messages)
+		return "messages";
+	if (counter == &ctx->retry_messages)
+		return "retry_messages";
+	if (counter == &ctx->transfer_ready)
+		return "transfer_ready";
+	if (counter == &ctx->data_events)
+		return "data_events";
+	return "unknown";
+}
+
 static void wait_counter(
 	struct public_group_ctx *ctx, unsigned *counter, unsigned target)
 {
@@ -308,9 +324,18 @@ static void wait_counter(
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 10;
 	pthread_mutex_lock(&ctx->lock);
-	while (*counter < target)
-		assert(pthread_cond_timedwait(
-			       &ctx->cond, &ctx->lock, &deadline) == 0);
+	while (*counter < target) {
+		int ret = pthread_cond_timedwait(
+			&ctx->cond, &ctx->lock, &deadline);
+
+		if (ret != 0) {
+			fprintf(
+				stderr,
+				"timeout waiting for %s: current=%u target=%u\\n",
+				counter_name(ctx, counter), *counter, target);
+			assert(ret == 0);
+		}
+	}
 	pthread_mutex_unlock(&ctx->lock);
 }
 
