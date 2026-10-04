@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六、七阶段：
+P5 第一、二、三、四、五、六、七、八阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -351,7 +351,9 @@ P5 第一、二、三、四、五、六、七阶段：
 - Pipeline listener 已迁到 `src/transport/group/`，明确作为 server-side Group transport
   endpoint；它拥有 listen fd、Reactor registration、accepted connection/session slots、
   admission 与 CONTROL message pool，但通过 callback 与 Server facade 解耦；
-- Client adapter 继续独立；
+- Client Group endpoint 已迁到 `src/transport/group/`：拥有 CONTROL connect/adopt、
+  DATA connector/lane、TRANSFER_READY affinity、bounded DATA send ownership；真正的
+  `tr_client_connection_group_*` facade wrapper 继续留在 `client.c`；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -359,7 +361,7 @@ P5 第一、二、三、四、五、六、七阶段：
 
 下一阶段：
 
-- 按同样规则继续评估 Client adapter 与 generic `src/transport/` engine；
+- Group 子系统的 P5 物理收敛已基本闭环；下一步评估 generic `src/transport/` engine 归档边界；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

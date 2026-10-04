@@ -15,7 +15,7 @@
 #include "tr/status.h"
 #include "buffer_internal.h"
 #include "channel_internal.h"
-#include "client_group_internal.h"
+#include "transport/group/client_group_internal.h"
 #include "facade_diagnostics_internal.h"
 #include "facade_tuning_internal.h"
 #include "rpc/rpc_internal.h"
