@@ -332,7 +332,7 @@ static void wait_counter(
 		if (ret != 0) {
 			fprintf(
 				stderr,
-				"timeout waiting for %s: current=%u target=%u\\n",
+				"timeout waiting for %s: current=%u target=%u\n",
 				counter_name(ctx, counter), *counter, target);
 			assert(ret == 0);
 		}
