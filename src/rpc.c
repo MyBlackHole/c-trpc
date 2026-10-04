@@ -5255,13 +5255,6 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		goto out;
 	}
 
-	ret = tr_rpc_run_interceptor_locked(
-		endpoint, tr_rpc_call_handle_slot(handle), call,
-		TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER, status, NULL);
-	if (ret != TR_OK)
-		goto out;
-	call = &endpoint->calls[tr_rpc_call_handle_slot(handle)];
-
 	cardinality = call->method->desc.response_cardinality;
 	if (status == TR_RPC_STATUS_OK && cardinality == TR_RPC_ONE &&
 	    call->tx_count != 1U) {
@@ -5279,6 +5272,13 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		ret = TR_ERR_STATE;
 		goto out;
 	}
+
+	ret = tr_rpc_run_interceptor_locked(
+		endpoint, tr_rpc_call_handle_slot(handle), call,
+		TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER, status, NULL);
+	if (ret != TR_OK)
+		goto out;
+	call = &endpoint->calls[tr_rpc_call_handle_slot(handle)];
 
 	method = call->method->desc;
 	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_STATUS, &method,
