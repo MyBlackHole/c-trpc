@@ -216,6 +216,22 @@ Call 自己的 `task_refs` 与 Endpoint refcount 职责不同：
 - `tr_refcount`：保护 Endpoint 对象生命周期；
 - Call `task_refs`：阻止 Call slot 在 task/completion 尚未结束时复用。
 
+Endpoint 的 lifetime synchronization 现在与 protocol lock 分离：
+
+```text
+endpoint->lock
+    -> Call / Method / protocol transition
+
+endpoint->ref_lock + ref_cond
+    -> owner-only strong-ref wait
+    -> detached teardown/finalizer publication
+    -> ref release wakeup
+```
+
+所有 strong-ref release 必须统一经过 `tr_rpc_endpoint_put()`。它在 `ref_lock`
+下通知等待 owner-only 状态的 destructor，因此 task completion、pending-retry
+completion 或未来新增引用来源都不应自行实现另一套 ref_cond signal。
+
 ## 9.3 Pipeline / Listener teardown
 
 Pipeline registry 只保存 owner-local index，不拥有 Pipeline lifetime。
