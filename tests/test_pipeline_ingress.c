@@ -6,7 +6,7 @@
 
 #include "tr/crc32c.h"
 #include "../src/execution/reactor.h"
-#include "tr/socket.h"
+#include "../src/io/socket.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 
