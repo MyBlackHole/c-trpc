@@ -476,8 +476,8 @@ static int tr_reactor_push_completion(
 	int need_wake = 0;
 	int ret;
 
-	ret = tr_completion_queue_push(&reactor->completions, completion,
-				       &need_wake);
+	ret = tr_completion_queue_push_wait(
+		&reactor->completions, completion, &need_wake);
 	if (ret != TR_OK)
 		return ret;
 
@@ -3262,19 +3262,13 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	completion.arg = arg;
 
 	/*
-	 * completion admission is linearized by completions.lock, independently
-	 * of Reactor control-plane serialization. stop closes that admission gate
-	 * before publishing STOP, so every successful enqueue is guaranteed to be
-	 * covered by the shutdown drain and every later producer sees CLOSED.
+	 * completion admission 与 capacity wait 都由 completions.lock/not_full
+	 * 串行化，不借用 Reactor ctl_lock。queue 满时 worker 睡眠；Reactor pop
+	 * 释放容量后唤醒，stop 则 close admission 并唤醒全部 waiter。
 	 *
-	 * A full bounded queue still backpressures the worker. The worker never
-	 * falls back to mutating Reactor-owned protocol state directly.
+	 * 无论背压多重，worker 都不会回退直接修改 Reactor-owned protocol state。
 	 */
-	do {
-		ret = tr_reactor_push_completion(reactor, &completion);
-		if (ret == TR_AGAIN)
-			sched_yield();
-	} while (ret == TR_AGAIN);
+	ret = tr_reactor_push_completion(reactor, &completion);
 	return ret;
 }
 
