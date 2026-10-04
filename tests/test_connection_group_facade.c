@@ -746,10 +746,88 @@ static void test_public_connection_group_client_data_offer(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_client_drain_cancels_offer(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_connection_group_client_stats client_stats;
+	struct tr_connection_group_server_stats server_stats;
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.callback_arg = &ctx;
+
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(
+		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 1U;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(wait_data_offer(server, UINT64_C(4401)) == TR_OK);
+	/*
+	 * The second offer can be issued only after the first exact reservation
+	 * has been returned by the draining Client. No DATA socket is created.
+	 */
+	assert(wait_data_offer(server, UINT64_C(4402)) == TR_OK);
+
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.draining == 1U);
+	assert(client_stats.data_connections == 0U);
+	assert(client_stats.active_transfers == 0U);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 5000U) == TR_OK);
+
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.groups_current == 1U);
+	assert(server_stats.connections_current == 1U);
+	assert(server_stats.data_connections_current == 0U);
+	assert(server_stats.data_accepts == 0U);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	tr_client_destroy(client);
+	tr_server_destroy(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 int main(void)
 {
 	test_public_connection_group_server();
 	test_public_connection_group_client_control();
 	test_public_connection_group_client_data_offer();
+	test_public_connection_group_client_drain_cancels_offer();
 	return 0;
 }
