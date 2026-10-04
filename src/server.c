@@ -22,7 +22,7 @@
 #include "runtime/runtime_internal.h"
 #include "socket_internal.h"
 #include "observability_internal.h"
-#include "pipeline_listener_internal.h"
+#include "transport/group/pipeline_listener_internal.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
 

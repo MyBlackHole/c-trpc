@@ -5,11 +5,11 @@
 #include <string.h>
 #include <sys/epoll.h>
 
-#include "group/pipeline_control_internal.h"
-#include "transport/group/pipeline_control_transport_internal.h"
-#include "transport/group/pipeline_ingress_internal.h"
-#include "group/pipeline_registry_internal.h"
-#include "reactor_internal.h"
+#include "../../group/pipeline_control_internal.h"
+#include "pipeline_control_transport_internal.h"
+#include "pipeline_ingress_internal.h"
+#include "../../group/pipeline_registry_internal.h"
+#include "../../reactor_internal.h"
 #include "tr/buffer.h"
 #include "tr/socket.h"
 #include "tr/status.h"

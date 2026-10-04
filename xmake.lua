@@ -95,7 +95,7 @@ target("trcore")
         "src/group/pipeline_control_wire.c",
         "src/transport/group/pipeline_control_transport.c",
         "src/transport/group/pipeline_ingress.c",
-        "src/pipeline_listener.c",
+        "src/transport/group/pipeline_listener.c",
         "src/channel.c",
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_wire.c",

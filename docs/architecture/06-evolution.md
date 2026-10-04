@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六阶段：
+P5 第一、二、三、四、五、六、七阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -348,8 +348,10 @@ P5 第一、二、三、四、五、六阶段：
   Reactor owner capability 关闭 exact DATA connection，但不拥有 listener/TX/socket session；
 - Group DATA ingress 与 CONTROL transport adapter 已迁到 `src/transport/group/`：
   负责 Reactor preface/handler binding、DATA attach/detach、CONTROL TRP1 RX/TX；
-- Pipeline listener 与 Client adapter 继续独立；listener 仍拥有 listen fd、accepted
-  connection/session slots 与 admission，不能仅因使用 Group capability 就归入 semantic module；
+- Pipeline listener 已迁到 `src/transport/group/`，明确作为 server-side Group transport
+  endpoint；它拥有 listen fd、Reactor registration、accepted connection/session slots、
+  admission 与 CONTROL message pool，但通过 callback 与 Server facade 解耦；
+- Client adapter 继续独立；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -357,7 +359,7 @@ P5 第一、二、三、四、五、六阶段：
 
 下一阶段：
 
-- 按同样规则继续评估 Pipeline listener、Client adapter 与 generic `src/transport/` engine；
+- 按同样规则继续评估 Client adapter 与 generic `src/transport/` engine；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

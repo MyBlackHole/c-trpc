@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "group/pipeline_route_internal.h"
+#include "../../group/pipeline_route_internal.h"
 #include "tr/reactor.h"
 
 struct tr_pipeline_listener;
