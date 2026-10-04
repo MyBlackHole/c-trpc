@@ -5,7 +5,7 @@
 
 #include "../execution/buffer.h"
 #include "../transport/channel/channel.h"
-#include "tr/observability.h"
+#include "../observability.h"
 #include "tr/rpc.h"
 
 struct tr_rpc_endpoint;

@@ -1,7 +1,7 @@
 #ifndef TR_OBSERVABILITY_INTERNAL_H
 #define TR_OBSERVABILITY_INTERNAL_H
 
-#include "tr/observability.h"
+#include "observability.h"
 
 #include <stdint.h>
 

@@ -576,7 +576,7 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 | bounded resource model | 满足 | queue/pool/table 大部分都有显式容量 |
 | hot-path no cross-shard shared pool | 满足 | 当前 shard resource ownership 与设计方向一致 |
 
-### 10.2 不满足 / 需要收敛
+### 10.2 历史审查项 / 当前收敛状态
 
 #### A1. Core architecture documents are Backup-coupled — HIGH — RESOLVED BY THIS DOC CHANGE
 
@@ -600,7 +600,7 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 
 ---
 
-#### A2. SDK header installation has no visibility boundary — HIGH — PARTIALLY RESOLVED
+#### A2. SDK header installation has no visibility boundary — HIGH — RESOLVED
 
 基线问题：
 
@@ -608,61 +608,31 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 add_headerfiles("include/(tr/*.h)")
 ```
 
-会把任何新增 `include/tr/*.h` 自动发布为 SDK contract。
+曾经会把新增 `include/tr/*.h` 自动发布为 SDK contract。
 
-第一阶段已完成：
+处理结果：
 
-- `xmake.lua` 改为 explicit installed-header allowlist；
-- CI 对安装后的 header 集合做 exact diff；
-- 新增 header 不会因为目录位置自动变 public；
-- 以下明显 implementation header 已退出安装 SDK：
-  - `command_queue.h`；
-  - `parser.h`；
-  - `rpc_wire.h`；
-  - `socket.h`；
-  - `endian.h`；
-  - `guard.h`；
-  - `refcount.h`；
-  - `crc32c.h`。
+- `xmake.lua` 使用 explicit installed-header allowlist；
+- CI 对安装后的 header 集合做 exact diff，并显式断言历史 internal headers 不得安装；
+- `include/tr/` 的物理内容现在与 stable installed SDK closure 一致，仅保留 8 个 public headers；
+- Reactor/Channel/Buffer/parser/wire/socket、CRC/endian、lifetime 与 diagnostics headers 均已回收到 `src/`；
+- `rpc.h` 只保留 application RPC contract，Endpoint engine construction 位于 `src/rpc/rpc_internal.h`。
 
-仍未完成：
-
-- `rpc.h` 仍混合 application API 与 Endpoint engine；
-- 因此 `buffer.h/channel.h/reactor.h/frame.h/wire.h` 仍作为 transitional
-  transitive dependency 被安装；
-- 下一阶段必须拆 RPC/Transport engine 才能把这些 Runtime headers 从 stable SDK
-  closure 移出。
-
-目标保持不变：
-
-- Stable Public / Advanced Public / Internal 明确分级；
-- Runtime/parser/wire/queue/socket implementation 最终不属于默认 stable SDK；
-- protocol-extension header 如需公开，单独定义兼容级别。
+以后新增 Advanced Public capability 必须显式加入 allowlist 并定义兼容级别，不能靠目录位置自动发布。
 
 ---
 
-#### A3. Internal data structures are public ABI — HIGH
+#### A3. Internal data structures are public ABI — HIGH — RESOLVED FOR STABLE SDK
 
-例：
+基线中 command queue、parser、Buffer pool、Reactor/Channel 等 implementation layout
+曾位于 public include tree，容易被误认为 SDK ABI。
 
-`command_queue.h` 公开：
+处理结果：
 
-- `pthread_mutex_t`；
-- ring head/tail/count；
-- internal command union；
-- Reactor slot/generation。
-
-`parser.h` 公开 parser state machine、payload pool 和 CRC state。
-
-`buffer.h` 公开 pool mutex/free-list/storage layout。
-
-这不是 capability API，而是 implementation layout。
-
-目标：
-
-- internal struct private；
-- public API 使用 opaque object / buffer view；
-- zero-copy 需求通过 ownership API 解决，不通过暴露 allocator internals 解决。
+- command/completion/timer queue、parser/frame/wire、Buffer、Reactor、Channel 等结构均只位于 `src/`；
+- stable installed headers 不暴露 pthread mutex、ring layout、pool free-list、parser state 或 Reactor slot/generation；
+- repository internal tests 仍可直接测试这些 engine contracts，但不会因此扩大 SDK compatibility contract；
+- future zero-copy/advanced transport capability 必须通过 opaque ownership API 公开，不能重新暴露 allocator/runtime layout。
 
 ---
 
@@ -749,7 +719,7 @@ construction。Client/Server 用户无需知道 Endpoint 如何绑定 Transport�
 移到 `facade_diagnostics_internal.h`。现有 benchmark/test 继续使用内部完整诊断，
 stable Server/Client header 不再绑定 Runtime stats layout。
 
-后续仍需要设计真正的 stable semantic observability API。
+stable aggregate RPC semantic observability 已由 `tr_rpc_semantic_stats` 与 Client/Server facade accessor 提供；engine-level diagnostics 继续保持 internal。
 
 ---
 
@@ -1035,15 +1005,12 @@ src/execution/
 - TRP1 wire/frame/parser implementation 已进入 `src/transport/protocol/`；
   这一层只负责固定 header codec、frame ownership helper 与 incremental parser，
   不拥有 socket、Reactor event loop、connection/stream state；
-- `include/tr/wire.h`、`frame.h`、`parser.h` 暂时保留为 repository-internal
-  source-tree headers，因为 `reactor.h` 仍直接依赖 Frame 类型；在 Reactor/Channel
-  header boundary 收敛前，禁止制造 `include/tr -> src/` 的反向 include；
+- TRP1 wire/frame/parser capability headers 已收敛到 `src/transport/protocol/`；
 - Channel state engine 已进入 `src/transport/channel/`：拥有 HELLO/GOAWAY、
   Stream slot/index、message ordering、flow-control、drain、keepalive 与 reconnect policy；
 - Channel 只通过 Reactor/connector/socket capability 执行网络动作；这些模块仍属于
   execution/resource substrate，不因为 Channel 位于 Transport 就被机械搬入；
-- `include/tr/channel.h` 暂时保留为 repository-internal source-tree header；
-  先完成 Reactor/Channel type dependency 收敛，再决定 header 的最终物理位置；
+- Channel capability header 已收敛到 `src/transport/channel/`；
 - Linux socket primitive 与 Reactor-owned nonblocking connector 已进入 `src/io/`；
   Socket 只负责 fd/TCP primitives，Connector 只负责 connect/preface/timer/aux-fd
   execution，不拥有 Channel/Group semantic state；
@@ -1053,16 +1020,15 @@ src/execution/
   capability，后者是无状态 little-endian codec helper，两者都不属于 stable SDK contract；
 - `cleanup.h`、`guard.h`、`refcount.h` 已从 `include/tr/` 回收到 `src/` 根部；它们定义
   compile-time cleanup、mutex scope guard 与 strong-reference primitives，不属于 stable SDK；
+- `observability.h` 已回收到 `src/observability.h`；histogram、queue/pool snapshot 与 timing
+  flag 是 engine diagnostics contract，stable semantic observability 继续由 `tr/rpc.h` 定义；
 - `socket_internal.h` 不再 include facade policy；TCP_NODELAY policy validation/
   mapping 已回收到 `facade_policy_internal.h`，保持 `src/io/` 对 facade 无反向依赖；
 - Reactor implementation 与 command/completion/timer queues 已进入 `src/execution/`；
   Reactor 是 event execution owner，command/completion 是 bounded cross-context handoff，
   timer queue 是 owner-only bounded scheduler；
-- `command_queue.h` 已从 `include/tr/` 下沉到 execution-local header，因为没有
-  任何上层 capability header 依赖它；completion/timer queue headers 同样保持 local；
-- `include/tr/reactor.h` 与根 `src/reactor_internal.h` 暂不移动：前者仍承载跨模块
-  internal Reactor capability types，后者被 Runtime/RPC/Group/Transport/I/O 广泛消费；
-  在 capability/type dependency 收敛前，移动它们只会制造路径噪声而不会减少耦合；
+- `command_queue.h` 已从 `include/tr/` 下沉到 execution-local header；completion/timer queue headers 同样保持 local；
+- Reactor capability/internal headers 已收敛到 `src/execution/`；
 - Buffer implementation/resource pool 已进入 `src/execution/`：它只定义 bounded
   buffer descriptor ownership、fixed/dynamic pool acquire/release 与资源压力统计，
   不拥有 RPC/Channel/Group semantic state；
@@ -1071,7 +1037,7 @@ src/execution/
   `wire.h/frame.h/parser.h` 位于 `src/transport/protocol/`，
   `channel.h` 位于 `src/transport/channel/`；
 - production code 不再通过 `include/tr/` 获取这些 internal engine types；
-  stable installed header closure 继续只包含既有 8 个 SDK headers，且不存在
+  `include/tr/` 物理目录与 stable installed header closure 完全一致，只包含既有 8 个 SDK headers，且不存在
   `include/tr -> src/` 反向 include；
 - RPC wire header 已从 `include/tr/rpc_wire.h` 回收到 `src/rpc/rpc_wire.h`；
   TRPC request/response/cancel/status wire layout 与 metadata framing 明确属于 RPC
@@ -1082,10 +1048,11 @@ src/execution/
 - tests 直接引用 internal contract 时也使用新的物理路径；
 - 本阶段不改变线程、owner、锁、队列、resource bound、wire 或 hot path。
 
-后续再按相同规则评估：
+P5 source-tree header cleanup 已完成：
 
 ```text
-remaining source-tree utility/internal headers (observability)
+include/tr/ == stable installed SDK header closure
+internal engine / utility / diagnostics headers -> src/
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。
