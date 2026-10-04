@@ -3676,8 +3676,6 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	}
 
 	if (wire.type == TR_RPC_WIRE_STATUS) {
-		int first_response;
-
 		if (endpoint->config.role != TR_RPC_CLIENT ||
 		    tr_rpc_validate_stream_status_locked(call, &wire) != TR_OK) {
 			pthread_mutex_unlock(&endpoint->lock);
@@ -3685,22 +3683,17 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			return TR_STREAM_DATA_RELEASE;
 		}
 
-		first_response = call->rx_count == 0;
-		if (!first_response && metadata_len != 0) {
+		/*
+		 * STATUS metadata is always trailing metadata, regardless of whether
+		 * RESPONSE messages preceded it. This is deliberately separate from
+		 * first-response initial metadata.
+		 */
+		ret = tr_rpc_import_peer_metadata_locked(
+			endpoint, call, wire.type, metadata, metadata_len);
+		if (ret != TR_OK) {
 			pthread_mutex_unlock(&endpoint->lock);
 			(void)tr_stream_close(stream);
 			return TR_STREAM_DATA_RELEASE;
-		}
-		if (first_response) {
-			ret = tr_rpc_import_peer_metadata_locked(endpoint, call,
-								 wire.type,
-								 metadata,
-								 metadata_len);
-			if (ret != TR_OK) {
-				pthread_mutex_unlock(&endpoint->lock);
-				(void)tr_stream_close(stream);
-				return TR_STREAM_DATA_RELEASE;
-			}
 		}
 
 		call->final_status_seen = 1;
