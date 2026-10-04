@@ -25,6 +25,12 @@ size_t __real_tr_command_queue_pop_batch(struct tr_command_queue *queue,
 	struct tr_command *out, size_t max_commands);
 int __real_tr_command_queue_push(struct tr_command_queue *queue,
 	const struct tr_command *command, int *need_wake);
+int __real_tr_command_queue_push_wait(
+	struct tr_command_queue *queue, const struct tr_command *command,
+	uint64_t expected_generation, int *need_wake);
+int __real_tr_command_queue_push_wait_force(
+	struct tr_command_queue *queue, const struct tr_command *command,
+	int *need_wake);
 int __real_tr_completion_queue_push_wait(struct tr_completion_queue *queue,
 	const struct tr_completion *completion, int *need_wake);
 int __real_epoll_wait(int fd, struct epoll_event *events, int maxevents,
@@ -87,26 +93,62 @@ static void wait_flag(struct test_ctx *ctx, const int *flag)
 int __wrap_tr_command_queue_push(struct tr_command_queue *queue,
 	const struct tr_command *command, int *need_wake)
 {
-	int ret = __real_tr_command_queue_push(queue, command, need_wake);
-	struct test_ctx *ctx = active;
+	return __real_tr_command_queue_push(queue, command, need_wake);
+}
 
-	if (!ctx)
-		return ret;
-	pthread_mutex_lock(&ctx->lock);
-	if (ctx->gate_entered && !ctx->gate_release) {
-		if (ret == TR_AGAIN && command->type == TR_CMD_CALL)
+static int command_queue_full(struct tr_command_queue *queue)
+{
+	int full;
+
+	pthread_mutex_lock(&queue->lock);
+	full = queue->count == queue->capacity;
+	pthread_mutex_unlock(&queue->lock);
+	return full;
+}
+
+int __wrap_tr_command_queue_push_wait(
+	struct tr_command_queue *queue, const struct tr_command *command,
+	uint64_t expected_generation, int *need_wake)
+{
+	struct test_ctx *ctx = active;
+	int full = command_queue_full(queue);
+
+	if (ctx && ctx->gate_entered && !ctx->gate_release && full) {
+		pthread_mutex_lock(&ctx->lock);
+		if (command->type == TR_CMD_CALL)
 			ctx->call_full = 1;
-		if (ret == TR_AGAIN && command->type == TR_CMD_QUIESCE)
+		if (command->type == TR_CMD_QUIESCE)
 			ctx->quiesce_full = 1;
-		if (command->type == TR_CMD_STOP) {
-			if (ret == TR_AGAIN)
-				ctx->stop_full = 1;
-			if (ret == TR_OK)
-				ctx->stop_accepted = 1;
-		}
 		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
 	}
-	pthread_mutex_unlock(&ctx->lock);
+	return __real_tr_command_queue_push_wait(
+		queue, command, expected_generation, need_wake);
+}
+
+int __wrap_tr_command_queue_push_wait_force(
+	struct tr_command_queue *queue, const struct tr_command *command,
+	int *need_wake)
+{
+	struct test_ctx *ctx = active;
+	int full = command_queue_full(queue);
+	int ret;
+
+	if (ctx && command->type == TR_CMD_STOP && full) {
+		pthread_mutex_lock(&ctx->lock);
+		ctx->stop_full = 1;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+	}
+
+	ret = __real_tr_command_queue_push_wait_force(
+		queue, command, need_wake);
+	if (ctx && command->type == TR_CMD_STOP && ret == TR_OK) {
+		pthread_mutex_lock(&ctx->lock);
+		ctx->stop_accepted = 1;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+	}
 	return ret;
 }
 
