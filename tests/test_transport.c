@@ -13,7 +13,7 @@
 #include "../src/transport/channel/channel.h"
 #include "tr/client.h"
 #include "tr/server.h"
-#include "tr/socket.h"
+#include "../src/io/socket.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 #include "../src/transport/channel/channel_internal.h"
