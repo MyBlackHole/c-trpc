@@ -3439,6 +3439,7 @@ static int tr_rpc_cancel_on_owner(void *arg)
 	call->final_status_seen = 1;
 	call->final_status = status;
 	call->state = TR_RPC_CALL_TERMINAL;
+	tr_rpc_semantic_finish_locked(endpoint, call, status);
 	(void)tr_rpc_notify_terminal_locked(endpoint, tr_rpc_call_handle_slot(handle), call,
 					    status);
 
@@ -3916,6 +3917,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			call->final_status_seen = 1;
 			call->final_status = cancel_status;
 			call->state = TR_RPC_CALL_TERMINAL;
+			tr_rpc_semantic_finish_locked(
+				endpoint, call, cancel_status);
 			(void)tr_rpc_notify_terminal_locked(
 				endpoint, slot, call, cancel_status);
 		}
