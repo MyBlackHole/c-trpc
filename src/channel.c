@@ -104,6 +104,7 @@ struct tr_channel {
 	void *lifecycle_callback_arg;
 
 	int reconnect_enabled;
+	int reconnect_configuring;
 	struct tr_connector *reconnect_connector;
 	struct tr_reactor_timer_handle reconnect_timer;
 	int reconnect_timer_registered;
@@ -2687,8 +2688,8 @@ int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->reconnect_enabled || channel->reconnect_connector ||
-	    channel->reconnect_timer_registered) {
+	if (channel->reconnect_enabled || channel->reconnect_configuring ||
+	    channel->reconnect_connector || channel->reconnect_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
@@ -2722,22 +2723,26 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
-	if (channel->reconnect_enabled || channel->reconnect_connector ||
-	    channel->reconnect_timer_registered) {
+	if (channel->reconnect_enabled || channel->reconnect_configuring ||
+	    channel->reconnect_connector || channel->reconnect_timer_registered) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
-	pthread_mutex_unlock(&channel->lock);
-
+	channel->reconnect_configuring = 1;
 	memset(&connector_config, 0, sizeof(connector_config));
 	connector_config.owner = channel->reactor;
 	connector_config.timeout_ms = request->connect_timeout_ms;
 	connector_config.tcp_nodelay = channel->reconnect_tcp_nodelay;
+	pthread_mutex_unlock(&channel->lock);
 	connector_config.complete_cb = tr_channel_reconnect_connector_complete;
 	connector_config.callback_arg = channel;
 	ret = tr_connector_create(&connector_config, &connector);
-	if (ret != TR_OK)
+	if (ret != TR_OK) {
+		pthread_mutex_lock(&channel->lock);
+		channel->reconnect_configuring = 0;
+		pthread_mutex_unlock(&channel->lock);
 		return ret;
+	}
 
 	memset(&timer, 0, sizeof(timer));
 	ret = tr_reactor_timer_register(
@@ -2745,6 +2750,9 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 		channel, &timer);
 	if (ret != TR_OK) {
 		tr_connector_destroy(connector);
+		pthread_mutex_lock(&channel->lock);
+		channel->reconnect_configuring = 0;
+		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
 
@@ -2760,6 +2768,7 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 	channel->reconnect_timer = timer;
 	channel->reconnect_timer_registered = 1;
 	channel->reconnect_enabled = 1;
+	channel->reconnect_configuring = 0;
 	channel->control_reconnect_attempt = 0;
 	channel->bulk_reconnect_attempt = 0;
 	channel->control_reconnecting = 0;
