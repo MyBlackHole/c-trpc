@@ -893,12 +893,31 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 
 已推进：
 
-- Connection Group 已具备 stable semantic stats，且与 internal Reactor/Pipeline diagnostics 分离。
+- Connection Group 已具备 stable semantic stats，且与 internal Reactor/Pipeline diagnostics 分离；
+- P4 第一阶段已把 command ring / DATA TX / CONTROL TX / RX buffer /
+  RPC message pool count / reassembly pool count 从 stable `tr_facade_limits`
+  移到 repository-internal `tr_facade_tuning`；
+- public Client/Server create 只接受 semantic config，并由 facade 内部生成 Runtime/Pool
+  defaults；benchmark/architecture tests 通过 internal `*_create_with_tuning()`
+  保留精确资源实验能力；
+- Server internal tuning 仍是 aggregate budget -> deterministic shard split，但 public
+  path 会保证 hidden default 至少支持每个 configured shard 一个必要资源 unit。
+
+暂缓：
+
+- `rpc_message_buffer_bytes` 仍留在 stable limits：当前 RPC encoder 需要一块能够容纳
+  完整 encoded logical RPC message 的固定 pool buffer。直接隐藏会在
+  `max_message_bytes > max_frame_payload_bytes` 时破坏大消息语义，直接放大到
+  `max_message_bytes` 又会显著扩大常驻内存。先重构 RPC message ownership，再迁移。
 
 待完成：
 
-- facade-wide stable semantic observability 继续收敛；
-- `tr_facade_limits` 中 implementation tuning 与 semantic limits 分离。
+- executor threads / queue / continuation reserve 的 semantic-policy vs implementation
+  tuning 分类；
+- observability config 从 limits 中拆出；
+- RPC message pool 改为 bounded on-demand ownership 后移除
+  `rpc_message_buffer_bytes`；
+- facade-wide stable semantic observability 继续收敛。
 
 ### P5 — Physical directory cleanup
 
