@@ -875,7 +875,7 @@ Reactor/Channel/Buffer/Frame/Wire 已从安装 SDK 退出。
 
 - Server `begin_drain` 只关闭 Group accept，保留既有 Group/Data/Transfer；draining 后不再创建新的 DATA_OFFER / TRANSFER_READY；
 - drain 前已 accept 但尚未完成 CONTROL preface 的 socket 在 route attach 时仍会被 draining fence 拒绝，避免 late Group creation；
-- Client `begin_drain` exact-cancel queued/connecting DATA capability，后续 DATA_OFFER 只 cancel；ACTIVE DATA 与 READY transfer 可继续完成；
+- Client `begin_drain` exact-cancel queued/connecting DATA capability，后续 DATA_OFFER 只 cancel；它同时是本地 READY admission barrier，barrier 后观察到的新 TRANSFER_READY 不安装 affinity，barrier 前已 READY 的 transfer 可继续完成；
 - Client `wait_drained` 等 active transfer、owned send payload 与 pending establishment quiesce；Server `wait_drained` 等既有 Group/connection 自然归零；
 - force `stop()` 与 graceful drain 语义明确分离；
 - stable Client stats 暴露 group/control/data/transfer/send-byte lifecycle；stable Server stats 暴露 group/connection/data/transfer 与 accept/reject counters；
