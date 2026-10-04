@@ -10,9 +10,7 @@
 #include "tr/endian.h"
 
 #include <assert.h>
-#include <errno.h>
 #include <limits.h>
-#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -2506,7 +2504,6 @@ void tr_channel_destroy(struct tr_channel *channel)
 		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
 		channel->keepalive_timer_registered = 0;
 	}
-	pthread_cond_destroy(&channel->reconnect_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
 }
