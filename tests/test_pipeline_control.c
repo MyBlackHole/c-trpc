@@ -164,10 +164,23 @@ static void test_pipeline_control_session(void)
 	       TR_ERR_STALE);
 
 	/*
-	 * Outstanding RESERVED capability is CONTROL-owned. close() cancels it,
-	 * then unregisters and destroys the Pipeline.
+	 * RESERVED capability 属于 CONTROL。错误 CONTROL generation 的 close
+	 * 必须在 commit 前失败，不能先取消 reservation 再尝试恢复 CONTROL。
 	 */
 	assert(tr_pipeline_control_reserve_data(control, &offer0) == TR_OK);
+	{
+		struct tr_conn_handle stale_control = control_connection;
+		struct tr_pipeline_stats before_close;
+
+		stale_control.generation++;
+		assert(tr_pipeline_control_close(control, stale_control) ==
+		       TR_ERR_STALE);
+		memset(&before_close, 0, sizeof(before_close));
+		assert(tr_pipeline_control_get_stats(control, &before_close) ==
+		       TR_OK);
+		assert(before_close.control_bound == 1);
+		assert(before_close.data_reserved_count == 1U);
+	}
 	assert(tr_pipeline_control_close(control, control_connection) == TR_OK);
 	control = NULL;
 
