@@ -2039,6 +2039,7 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			tr_rpc_maybe_free_call_locked(endpoint, call);
 		}
 	}
+unary_out:
 	pthread_mutex_unlock(&endpoint->lock);
 
 	/*
@@ -2456,6 +2457,14 @@ static void tr_rpc_apply_unary_completion(void *arg)
 	call = tr_rpc_lookup_call_handle_locked(completion->call);
 	if (call && call->method && call->is_unary && !call->cancelled &&
 	    !call->pending_tx) {
+		uint32_t slot = tr_rpc_call_handle_slot(completion->call);
+
+		ret = tr_rpc_run_interceptor_locked(
+			endpoint, slot, call, TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER,
+			completion->status, NULL);
+		if (ret != TR_OK)
+			goto unary_out;
+		call = &endpoint->calls[slot];
 		ret = tr_rpc_encode_message(
 			endpoint, call, TR_RPC_WIRE_RESPONSE,
 			&call->method->desc, call->method->desc.response_codec_id,
@@ -3270,6 +3279,13 @@ static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
 		return TR_OK;
 
 	if (endpoint->config.role == TR_RPC_CLIENT) {
+		ret = tr_rpc_run_interceptor_locked(
+			endpoint, slot, call, TR_RPC_INTERCEPTOR_CLIENT_POST_CALL,
+			status, NULL);
+		if (ret != TR_OK)
+			return ret;
+		call = &endpoint->calls[slot];
+
 		if (call->is_unary)
 			ret = tr_rpc_queue_unary_failure_locked(endpoint, slot,
 								call, status);
@@ -5210,6 +5226,13 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		ret = TR_ERR_CLOSED;
 		goto out;
 	}
+
+	ret = tr_rpc_run_interceptor_locked(
+		endpoint, tr_rpc_call_handle_slot(handle), call,
+		TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER, status, NULL);
+	if (ret != TR_OK)
+		goto out;
+	call = &endpoint->calls[tr_rpc_call_handle_slot(handle)];
 
 	cardinality = call->method->desc.response_cardinality;
 	if (status == TR_RPC_STATUS_OK && cardinality == TR_RPC_ONE &&
