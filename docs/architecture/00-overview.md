@@ -126,12 +126,12 @@ Worker
 original Reactor owner
 ```
 
-旧 Endpoint/Channel teardown 使用 owner detach + strong-ref lifetime fencing，
+旧 Endpoint/Channel teardown 先由 owner 解除关联（detach），再用 strong-ref 作为生命周期隔离，
 不需要 dedicated reaper thread。
 
 ### 2.3 Connection Group / Pipeline
 
-当前 internal Pipeline 已是 generic multi-connection Transport foundation：
+当前 internal Pipeline 已形成通用的 multi-connection Transport 基础能力：
 
 ```text
 one Pipeline
@@ -147,11 +147,11 @@ one Pipeline
 accept
   -> TRR1 preface
       -> CONTROL: authorize -> session -> TRC1 handler
-      -> DATA: exact reservation attach -> normal TRP1 parser
+      -> DATA: generation 精确匹配 reservation 后 attach -> normal TRP1 parser
 ```
 
-CONTROL loss 会先 fence session，再失效 DATA membership/Stream affinity、
-注销 Pipeline，最后 owner-immediate 关闭 DATA sockets。
+CONTROL 连接失效后，先使当前 session 失效，再清除 DATA membership 与
+Stream affinity，随后注销 Pipeline，最后由 owner 立即关闭 DATA socket。
 
 这些机制属于通用 Transport capability，不定义 Backup checkpoint/commit 等业务语义。
 
