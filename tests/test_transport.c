@@ -1127,6 +1127,143 @@ static void wait_backpressure_frames(struct backpressure_test_ctx *ctx,
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+struct channel_handler_owner_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int owner_entered;
+	int owner_release;
+	int setter_done;
+	int setter_ret;
+};
+
+struct channel_handler_set_arg {
+	struct tr_channel *channel;
+	struct channel_handler_owner_ctx *ctx;
+};
+
+static int channel_handler_owner_gate(void *arg)
+{
+	struct channel_handler_owner_ctx *ctx =
+		(struct channel_handler_owner_ctx *)arg;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->owner_entered = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	while (!ctx->owner_release)
+		pthread_cond_wait(&ctx->cond, &ctx->lock);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_OK;
+}
+
+static void *channel_handler_set_thread(void *arg)
+{
+	struct channel_handler_set_arg *set_arg =
+		(struct channel_handler_set_arg *)arg;
+	struct channel_handler_owner_ctx *ctx = set_arg->ctx;
+	int ret;
+
+	ret = tr_channel_set_handler(
+		set_arg->channel, NULL, NULL, NULL, NULL);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->setter_ret = ret;
+	ctx->setter_done = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return NULL;
+}
+
+static void *channel_handler_gate_thread(void *arg)
+{
+	struct channel_handler_set_arg *set_arg =
+		(struct channel_handler_set_arg *)arg;
+
+	assert(tr_reactor_call(
+		       tr_channel_reactor(set_arg->channel),
+		       channel_handler_owner_gate, set_arg->ctx) == TR_OK);
+	return NULL;
+}
+
+static void test_channel_handler_publication_is_owner_serialized(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle connection;
+	struct channel_handler_owner_ctx ctx;
+	struct channel_handler_set_arg arg;
+	struct timespec deadline;
+	struct timespec pause_time = { 0, 100000000L };
+	pthread_t gate;
+	pthread_t setter;
+	int fds[2];
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 2U;
+	reactor_config.command_capacity = 32U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 8U;
+	reactor_config.rx_buffer_count = 4U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(
+		       &reactor_config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, fds[0], &connection) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, connection, connection,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+
+	arg.channel = channel;
+	arg.ctx = &ctx;
+	assert(pthread_create(
+		       &gate, NULL, channel_handler_gate_thread, &arg) == 0);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx.lock);
+	while (!ctx.owner_entered && ret == 0)
+		ret = pthread_cond_timedwait(
+			&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(pthread_create(
+		       &setter, NULL, channel_handler_set_thread, &arg) == 0);
+	(void)nanosleep(&pause_time, NULL);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.setter_done == 0);
+	ctx.owner_release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(pthread_join(gate, NULL) == 0);
+	assert(pthread_join(setter, NULL) == 0);
+	assert(ctx.setter_ret == TR_OK);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	/* 完全 stopped 后允许 teardown-only direct publication。 */
+	assert(tr_channel_set_handler(
+		       channel, NULL, NULL, NULL, NULL) == TR_OK);
+	tr_channel_destroy(channel);
+	tr_reactor_destroy(reactor);
+	assert(close(fds[1]) == 0);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static void test_reactor_rx_pool_backpressure(void)
 {
 	struct tr_reactor_config config;
@@ -6212,6 +6349,7 @@ int main(void)
 	test_reactor_local_timer_loop();
 	test_reactor_tcp_roundtrip();
 	test_reactor_handler_update_is_owner_serialized();
+	test_channel_handler_publication_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
 	test_channel_deferred_hello_gate();
 	test_channel_stream_id_index_collision_delete();
