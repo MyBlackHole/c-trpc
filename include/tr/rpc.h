@@ -64,6 +64,33 @@ struct tr_rpc_context {
 	int cancel_status;
 };
 
+enum tr_rpc_interceptor_phase {
+	TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL = 1,
+	TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER = 2,
+	TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER = 3,
+	TR_RPC_INTERCEPTOR_CLIENT_POST_CALL = 4
+};
+
+/*
+ * V1 Interceptor：
+ *
+ * - 在所属 Reactor owner 上同步执行，必须短小且非阻塞；
+ * - callback 内只允许使用 Call Context/metadata API，不应 send/finish/cancel；
+ * - SERVER_PRE_HANDLER 返回 OK 表示继续，返回合法非 OK RPC status 表示在
+ *   application handler 运行前拒绝该 Call；
+ * - 其他 phase 的返回值 V1 忽略，建议返回 OK。
+ *
+ * hook 运行时不会持有 endpoint->lock，因此 Context/metadata API 可安全重入。
+ */
+typedef int (*tr_rpc_interceptor_fn)(
+	struct tr_rpc_call_handle call, enum tr_rpc_interceptor_phase phase,
+	int status, void *arg);
+
+struct tr_rpc_interceptor {
+	tr_rpc_interceptor_fn fn;
+	void *arg;
+};
+
 enum tr_rpc_status {
 	TR_RPC_STATUS_OK = 0,
 	TR_RPC_STATUS_CANCELLED = 1,
