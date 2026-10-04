@@ -281,6 +281,7 @@ c-trpc core Phase。
 - P3 第六阶段已完成 stable graceful drain 与 semantic Group stats：drain 与 force stop 分离，Client/Server 都能等待语义 work quiesce，stable stats 不暴露 Reactor/route/queue/pool internal diagnostics。
 - Runtime 收敛阶段进一步抽出通用 Reactor-owned nonblocking connector：Channel automatic reconnect 与 Connection Group DATA establish 共用 connect/timeout ownership；Reactor auxiliary fd 从单槽升级为 bounded multi-source + generation fencing，因此同一 Client Reactor 可并行观察多个 connector，而不再为 Channel 创建 reconnect thread。
 - Completion handoff 收敛阶段把 worker 满载路径从 `sched_yield()` 改为 bounded queue-local condition wait：Reactor batch pop 释放容量后唤醒 producer；stop 关闭 admission、广播 waiter 并推进 admission generation，防止旧 completion 在 Reactor restart 后跨 epoch 提交。
+- Command handoff 收敛阶段进一步删除 Reactor 剩余 `sched_yield()`：异步 SEND/RESUME 继续以 `TR_AGAIN` 表达有界 backpressure，只有同步 CALL/QUIESCE/SET_HANDLER 使用 generation-fenced condition wait；STOP 关闭普通 waiter admission 后使用 force wait 等待 ring slot，保持 FIFO shutdown barrier。
 
 当前 stable installed headers：
 
