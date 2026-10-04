@@ -1,7 +1,7 @@
-#include "tr/command_queue.h"
+#include "command_queue.h"
 #include "tr/status.h"
 #include "tr/cleanup.h"
-#include "observability_internal.h"
+#include "../observability_internal.h"
 
 #include <assert.h>
 #include <stdlib.h>

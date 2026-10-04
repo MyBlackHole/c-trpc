@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "tr/command_queue.h"
+#include "../src/execution/command_queue.h"
 #include "tr/status.h"
 
 #include <assert.h>

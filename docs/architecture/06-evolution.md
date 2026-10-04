@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六、七、八、九、十、十一阶段：
+P5 第一、二、三、四、五、六、七、八、九、十、十一、十二阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -370,6 +370,12 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一阶段�
   Connector 负责 Reactor aux-fd + timer 驱动的 bounded connect/preface attempt；
 - TCP_NODELAY facade enum 的 valid/enabled helper 已从 Socket internal contract 移到
   `facade_policy_internal.h`，因此 I/O primitive 不再反向依赖 stable facade 类型；
+- Reactor implementation 与 command/completion/timer queues 已迁到 `src/execution/`：
+  Reactor 持有 epoll/eventfd、connection execution 与 queue/timer lifecycle；
+  command/completion queues 继续提供 bounded cross-context handoff，timer queue 保持 owner-only；
+- `command_queue.h` 已从 `include/tr/` 下沉为 execution-local header；
+  `include/tr/reactor.h` 与 `src/reactor_internal.h` 暂时保留，等待跨模块 Reactor
+  capability/type boundary 进一步收敛后再决定最终 header 位置；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -377,7 +383,7 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一阶段�
 
 下一阶段：
 
-- Group、TRP1 protocol、Channel state engine 与 network I/O primitives 的 P5 物理收敛已基本闭环；下一步评估 Reactor/queue/buffer execution-resource boundary，以及 internal header placement；
+- Group、Transport、network I/O 与 Reactor execution substrate 的 P5 物理收敛已基本闭环；下一步评估 Buffer resource ownership 与 Reactor capability header placement；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

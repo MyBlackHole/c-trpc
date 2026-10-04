@@ -2,7 +2,7 @@
 
 #include "tr/cleanup.h"
 #include "tr/status.h"
-#include "observability_internal.h"
+#include "../observability_internal.h"
 
 #include <assert.h>
 #include <stdlib.h>
