@@ -2370,6 +2370,10 @@ struct rpc_test_ctx {
 	pthread_cond_t cond;
 	unsigned server_calls;
 	unsigned client_results;
+	unsigned client_pre;
+	unsigned server_pre;
+	unsigned server_post;
+	unsigned client_post;
 	int client_status;
 	uint8_t request[64];
 	uint32_t request_len;
@@ -5946,6 +5950,44 @@ static void facade_test_result(struct tr_rpc_call_handle call, int status,
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static int facade_test_interceptor(
+	struct tr_rpc_call_handle call, enum tr_rpc_interceptor_phase phase,
+	int status, void *arg)
+{
+	struct facade_test_ctx *ctx = (struct facade_test_ctx *)arg;
+	struct tr_rpc_context context;
+
+	memset(&context, 0, sizeof(context));
+	assert(tr_rpc_call_get_context(call, &context) == TR_OK);
+	assert(context.service_id == 77U);
+	assert(context.method_id == 1U);
+
+	pthread_mutex_lock(&ctx->lock);
+	switch (phase) {
+	case TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->client_pre++;
+		break;
+	case TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->server_pre++;
+		break;
+	case TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->server_post++;
+		break;
+	case TR_RPC_INTERCEPTOR_CLIENT_POST_CALL:
+		assert(status == TR_RPC_STATUS_OK);
+		ctx->client_post++;
+		break;
+	default:
+		assert(!"unexpected facade interceptor phase");
+	}
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_STATUS_OK;
+}
+
 static void test_client_server_facade_unary(void)
 {
 	struct tr_server_config server_config;
@@ -5976,6 +6018,8 @@ static void test_client_server_facade_unary(void)
 	server_config.limits.reassembly_pool_count = 4U;
 	server_config.limits.rx_buffer_count = 32U;
 	server_config.limits.observability_flags = TR_OBSERVABILITY_TIMING;
+	server_config.interceptor.fn = facade_test_interceptor;
+	server_config.interceptor.arg = &ctx;
 	assert(tr_server_create(&server_config, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
@@ -6004,6 +6048,8 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.rpc_message_pool_count = 32U;
 	client_config.limits.reassembly_pool_count = 4U;
 	client_config.limits.rx_buffer_count = 32U;
+	client_config.interceptor.fn = facade_test_interceptor;
+	client_config.interceptor.arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 	nodelay_before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
@@ -6070,6 +6116,10 @@ static void test_client_server_facade_unary(void)
 	assert(ctx.server_calls == 2U);
 	assert(ctx.client_results == 2U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
+	assert(ctx.client_pre == 2U);
+	assert(ctx.server_pre == 2U);
+	assert(ctx.server_post == 2U);
+	assert(ctx.client_post == 2U);
 	pthread_mutex_unlock(&ctx.lock);
 
 	{
