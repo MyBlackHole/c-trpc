@@ -168,8 +168,10 @@ int tr_channel_set_handler(struct tr_channel *channel,
 			   void *callback_arg);
 
 /*
- * 等待可能已经观察到旧 Channel handler 的 Reactor callback 全部结束。
- * 应在替换/清空上层 handler 之后、释放旧 callback owner 之前调用。
+ * 显式等待 Channel 所属 Reactor 到达当前 command/event quiescence 点。
+ *
+ * tr_channel_set_handler() 本身已经是同步 owner publication，不要求调用方再用
+ * 本函数等待旧 handler；本 API 保留给需要独立 owner fence 的其他控制面场景。
  */
 int tr_channel_quiesce(struct tr_channel *channel);
 
