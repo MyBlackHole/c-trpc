@@ -571,7 +571,7 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 | Runtime shard ownership | 满足 | listener、peer state、executor/resource 已 shard-local |
 | Reactor single-owner | 满足 | protocol mutable state 基本遵循 owner mutation |
 | Worker completion returns to owner | 满足 | completion/event 返回原 owner，不直接修改协议状态 |
-| Pipeline implementation components | 满足 | semantic core/registry 已进入 `src/group/`；route/ingress/control/listener 仍为 internal adapter，全部未进入 `include/tr` |
+| Pipeline implementation components | 满足 | semantic core/registry 与 TRR1/TRC1 protocol codec 已进入 `src/group/`；control/ingress/listener/Client adapters 仍为 internal，全部未进入 `include/tr` |
 | Pipeline business independence in code | 基本满足 | 当前代码使用 generic pipeline/control/data/stream 名称，没有引入 backup_id/checkpoint 等业务对象 |
 | bounded resource model | 满足 | queue/pool/table 大部分都有显式容量 |
 | hot-path no cross-shard shared pool | 满足 | 当前 shard resource ownership 与设计方向一致 |
@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三阶段已完成：
+第一、二、三、四阶段已完成：
 
 ```text
 src/rpc/
@@ -957,6 +957,10 @@ src/group/
   pipeline_internal.h
   pipeline_registry.c
   pipeline_registry_internal.h
+  pipeline_route.c
+  pipeline_route_internal.h
+  pipeline_control_wire.c
+  pipeline_control_wire_internal.h
 ```
 
 规则：
@@ -964,8 +968,10 @@ src/group/
 - stable/public headers 继续留在 `include/tr/`，不因源码目录移动扩大或缩小 SDK ABI；
 - RPC 内部实现只通过 `src/rpc/rpc_internal.h` 向 facade/runtime 暴露 engine contract；
 - Runtime 物理 module 只包含 shard/lifecycle/resource-domain orchestration；
-- Group 物理 module 第一阶段只包含 Pipeline membership/affinity semantic core 与
-  shard-local registry；TRR1 route、CONTROL、ingress/listener、Client adapter 暂不并入；
+- Group 物理 module 已包含 Pipeline membership/affinity semantic core、
+  shard-local registry，以及不拥有 socket/session lifetime 的 TRR1/TRC1 protocol codec；
+- CONTROL session coordinator、ingress/listener/control transport、Client adapter
+  仍保持在 module 外，后续按 ownership 单独判断；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；

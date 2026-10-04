@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "pipeline_control_wire_internal.h"
+#include "group/pipeline_control_wire_internal.h"
 #include "reactor_internal.h"
 #include "tr/status.h"
 #include "tr/wire.h"

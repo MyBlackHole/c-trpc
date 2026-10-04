@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "pipeline_route_internal.h"
+#include "group/pipeline_route_internal.h"
 #include "reactor_internal.h"
 #include "tr/status.h"
 

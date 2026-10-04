@@ -1,6 +1,6 @@
-#include "../src/pipeline_control_wire_internal.h"
+#include "../src/group/pipeline_control_wire_internal.h"
 #include "../src/pipeline_listener_internal.h"
-#include "../src/pipeline_route_internal.h"
+#include "../src/group/pipeline_route_internal.h"
 
 #include "tr/crc32c.h"
 #include "tr/reactor.h"
