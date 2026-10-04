@@ -16,6 +16,7 @@
 #include "channel_internal.h"
 #include "client_group_internal.h"
 #include "facade_diagnostics_internal.h"
+#include "facade_tuning_internal.h"
 #include "rpc_internal.h"
 #include "runtime_internal.h"
 #include "socket_internal.h"
@@ -97,13 +98,7 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 		TR_LIMIT_DEFAULT(max_message_bytes);
 		TR_LIMIT_DEFAULT(initial_window_bytes);
 		TR_LIMIT_DEFAULT(window_update_threshold_bytes);
-		TR_LIMIT_DEFAULT(command_capacity);
-		TR_LIMIT_DEFAULT(tx_item_capacity);
-		TR_LIMIT_DEFAULT(control_tx_item_capacity);
-		TR_LIMIT_DEFAULT(rx_buffer_count);
-		TR_LIMIT_DEFAULT(rpc_message_pool_count);
 		TR_LIMIT_DEFAULT(rpc_message_buffer_bytes);
-		TR_LIMIT_DEFAULT(reassembly_pool_count);
 		TR_LIMIT_DEFAULT(executor_threads);
 		TR_LIMIT_DEFAULT(executor_queue_capacity);
 #undef TR_LIMIT_DEFAULT
@@ -167,10 +162,13 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 	return TR_OK;
 }
 
-int tr_client_create(const struct tr_client_config *config,
-		     struct tr_client **out)
+int tr_client_create_with_tuning(
+	const struct tr_client_config *config,
+	const struct tr_facade_tuning *tuning,
+	struct tr_client **out)
 {
 	struct tr_client_config effective;
+	struct tr_facade_tuning effective_tuning;
 	struct tr_runtime_config runtime_config;
 	struct tr_runtime_shard_config shard_config;
 	struct tr_reactor_config *reactor_config;
@@ -187,10 +185,17 @@ int tr_client_create(const struct tr_client_config *config,
 		tr_client_config_init(&effective);
 	tr_client_normalize_config(&effective);
 
+	if (tuning)
+		effective_tuning = *tuning;
+	else
+		tr_facade_tuning_init(&effective_tuning);
+	tr_facade_tuning_normalize(&effective_tuning, &effective.limits);
+
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes ||
-	    effective.limits.rpc_message_buffer_bytes < TR_RPC_WIRE_HEADER_SIZE)
+	    effective.limits.rpc_message_buffer_bytes <
+		    TR_RPC_WIRE_HEADER_SIZE)
 		return TR_ERR_INVALID;
 
 	client = (struct tr_client *)calloc(1, sizeof(*client));
@@ -199,14 +204,14 @@ int tr_client_create(const struct tr_client_config *config,
 	client->config = effective;
 
 	ret = tr_buffer_pool_init(&client->rpc_message_pool,
-				  effective.limits.rpc_message_pool_count,
+				  effective_tuning.rpc_message_pool_count,
 				  effective.limits.rpc_message_buffer_bytes);
 	if (ret != TR_OK)
 		return ret;
 	client->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&client->reassembly_pool,
-				  effective.limits.reassembly_pool_count,
+				  effective_tuning.reassembly_pool_count,
 				  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
 		return ret;
@@ -223,11 +228,11 @@ int tr_client_create(const struct tr_client_config *config,
 		effective.connection_groups.max_data_connections + 2U;
 	if (reactor_config->max_connections < 4U)
 		reactor_config->max_connections = 4U;
-	reactor_config->command_capacity = effective.limits.command_capacity;
-	reactor_config->tx_item_capacity = effective.limits.tx_item_capacity;
+	reactor_config->command_capacity = effective_tuning.command_capacity;
+	reactor_config->tx_item_capacity = effective_tuning.tx_item_capacity;
 	reactor_config->control_tx_item_capacity =
-		effective.limits.control_tx_item_capacity;
-	reactor_config->rx_buffer_count = effective.limits.rx_buffer_count;
+		effective_tuning.control_tx_item_capacity;
+	reactor_config->rx_buffer_count = effective_tuning.rx_buffer_count;
 	reactor_config->rx_buffer_size =
 		effective.limits.max_frame_payload_bytes;
 	reactor_config->max_payload_len =
@@ -256,6 +261,12 @@ int tr_client_create(const struct tr_client_config *config,
 	 */
 	*out = tr_client_owner_take(&client);
 	return TR_OK;
+}
+
+int tr_client_create(const struct tr_client_config *config,
+		     struct tr_client **out)
+{
+	return tr_client_create_with_tuning(config, NULL, out);
 }
 
 static void tr_client_reset_session(struct tr_client *client)
