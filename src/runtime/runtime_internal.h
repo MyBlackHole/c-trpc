@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../execution/reactor.h"
+#include "memory_budget.h"
 
 struct tr_runtime;
 struct tr_runtime_shard;
@@ -43,6 +44,13 @@ struct tr_runtime_rpc_executor_config {
 struct tr_runtime_shard_config {
 	struct tr_reactor_config reactor;
 	uint32_t peer_capacity;
+
+	/*
+	 * Internal Phase-7 shard memory budget. 0 means accounting-only/unbounded
+	 * until all major shard-local consumers participate in this capability.
+	 */
+	uint64_t memory_budget_bytes;
+
 	struct tr_runtime_rpc_executor_config rpc_executor;
 };
 
@@ -67,6 +75,16 @@ int tr_runtime_shard_call(struct tr_runtime_shard *shard,
 			  int (*fn)(void *arg), void *arg);
 struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
+
+/*
+ * Internal shard memory-budget capability. Consumers must reserve before
+ * allocating budgeted bytes and release the exact reservation on teardown.
+ */
+struct tr_memory_budget *
+tr_runtime_shard_memory_budget(struct tr_runtime_shard *shard);
+void tr_runtime_shard_memory_stats(
+	const struct tr_runtime_shard *shard,
+	struct tr_memory_budget_stats *out);
 
 /*
  * Listener lifetime is shard-owned. The listener event source is registered
