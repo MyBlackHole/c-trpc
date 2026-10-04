@@ -1,8 +1,8 @@
 #define _GNU_SOURCE
-#include "tr/reactor.h"
+#include "../src/execution/reactor.h"
 #include "tr/crc32c.h"
 #include "tr/status.h"
-#include "../src/reactor_internal.h"
+#include "../src/execution/reactor_internal.h"
 
 #include <assert.h>
 #include <errno.h>

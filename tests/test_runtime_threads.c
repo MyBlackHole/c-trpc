@@ -1,5 +1,5 @@
 #include "tr/client.h"
-#include "tr/reactor.h"
+#include "../src/execution/reactor.h"
 #include "tr/server.h"
 #include "tr/status.h"
 #include "../src/transport/channel/channel_internal.h"

@@ -1,9 +1,9 @@
 #define _GNU_SOURCE
 #include "../src/execution/command_queue.h"
-#include "tr/reactor.h"
+#include "../src/execution/reactor.h"
 #include "tr/status.h"
-#include "tr/wire.h"
-#include "../src/reactor_internal.h"
+#include "../src/transport/protocol/wire.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/execution/completion_queue.h"
 
 #include <assert.h>

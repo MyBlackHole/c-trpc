@@ -3,9 +3,9 @@
 #include "../src/group/pipeline_route_internal.h"
 
 #include "tr/crc32c.h"
-#include "tr/reactor.h"
+#include "../src/execution/reactor.h"
 #include "tr/status.h"
-#include "tr/wire.h"
+#include "../src/transport/protocol/wire.h"
 
 #include <arpa/inet.h>
 #include <assert.h>

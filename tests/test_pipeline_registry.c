@@ -2,7 +2,7 @@
 #include "../src/group/pipeline_registry_internal.h"
 #include "../src/group/pipeline_route_internal.h"
 
-#include "tr/reactor.h"
+#include "../src/execution/reactor.h"
 #include "tr/status.h"
 
 #include <assert.h>
