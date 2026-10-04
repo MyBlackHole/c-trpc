@@ -35,7 +35,9 @@ sample counts, and totals and taking the maximum of `max_ns`.
 `tr_reactor_get_stats()` reports:
 
 - command and completion queue `capacity/current/peak/full_events`；
-  command `full_events` 表示 producer 遇到满 ring 的失败/重试，
+  command `full_events` 表示 producer 首次撞到满 ring 的压力：SEND/RESUME 等
+  异步 API 仍会立即 `TR_AGAIN`，CALL/QUIESCE/SET_HANDLER/STOP 这类同步或
+  lifecycle request 会进入 queue-local capacity wait；
   completion `full_events` 表示 worker handoff 遇到满 ring 并进入 capacity wait；
 - bounded per-turn work and budget-hit counters;
 - `busy_ns` and `poll_ns` when timing is enabled;
@@ -64,8 +66,10 @@ The Reactor snapshot also exposes the existing per-turn command fairness data:
 - `budget_hits.commands`: turns that consumed the full command budget.
 
 Producer-side command queue pressure is split into `SEND`, `RESUME_RX`,
-`CALL`, and other commands, each with accepted enqueue and queue-full counts.
-These counters are updated under the command queue's existing mutex and add no
+`CALL`, and other commands, each with accepted enqueue and first-full encounter counts.
+对于异步 SEND/RESUME，这个 full count 对应立即 backpressure；对于同步 CALL 和
+other 中的 QUIESCE/SET_HANDLER/STOP，它表示进入 capacity wait，而不是 command
+被丢弃。These counters are updated under the command queue's existing mutex and add no
 new allocation, clock read, or metrics lock.
 
 A SEND issued while already executing on the owning Reactor may attach directly
