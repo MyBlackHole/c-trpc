@@ -3,7 +3,7 @@
 #include "tr/server.h"
 #include "tr/status.h"
 #include "../src/channel_internal.h"
-#include "../src/runtime_internal.h"
+#include "../src/runtime/runtime_internal.h"
 #include "../src/facade_tuning_internal.h"
 
 #include <assert.h>

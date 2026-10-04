@@ -19,7 +19,7 @@
 #include "facade_diagnostics_internal.h"
 #include "facade_tuning_internal.h"
 #include "rpc/rpc_internal.h"
-#include "runtime_internal.h"
+#include "runtime/runtime_internal.h"
 #include "socket_internal.h"
 
 
