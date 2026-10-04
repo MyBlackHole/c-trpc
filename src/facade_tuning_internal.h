@@ -14,8 +14,7 @@ struct tr_facade_limits;
  *
  * These capacities describe current Reactor/pool implementation details, not
  * application protocol semantics. They intentionally stay out of the installed
- * SDK. Zero fields are normalized to internal defaults; message buffer bytes
- * derive from the semantic frame limit when left zero.
+ * SDK. Zero fields are normalized to internal defaults.
  *
  * Server values are aggregate budgets split deterministically across shards.
  */
@@ -26,7 +25,6 @@ struct tr_facade_tuning {
 	uint32_t rx_buffer_count;
 
 	uint32_t rpc_message_pool_count;
-	uint32_t rpc_message_buffer_bytes;
 	uint32_t reassembly_pool_count;
 };
 
