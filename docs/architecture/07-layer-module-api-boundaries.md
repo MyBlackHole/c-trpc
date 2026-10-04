@@ -571,7 +571,7 @@ BUSINESS REFERENCE。其余 A2-A10 是当前代码/API 仍然存在的收敛项�
 | Runtime shard ownership | 满足 | listener、peer state、executor/resource 已 shard-local |
 | Reactor single-owner | 满足 | protocol mutable state 基本遵循 owner mutation |
 | Worker completion returns to owner | 满足 | completion/event 返回原 owner，不直接修改协议状态 |
-| Pipeline implementation components | 满足 | semantic core/protocol/CONTROL coordinator 位于 `src/group/`；ingress/control transport/listener endpoint 位于 `src/transport/group/`；Client adapter 仍为 internal |
+| Pipeline implementation components | 满足 | semantic core/protocol/CONTROL coordinator 位于 `src/group/`；server/client Group transport endpoints 与 ingress/control adapters 位于 `src/transport/group/` |
 | Pipeline business independence in code | 基本满足 | 当前代码使用 generic pipeline/control/data/stream 名称，没有引入 backup_id/checkpoint 等业务对象 |
 | bounded resource model | 满足 | queue/pool/table 大部分都有显式容量 |
 | hot-path no cross-shard shared pool | 满足 | 当前 shard resource ownership 与设计方向一致 |
@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三、四、五、六、七阶段已完成：
+第一、二、三、四、五、六、七、八阶段已完成：
 
 ```text
 src/rpc/
@@ -971,6 +971,8 @@ src/transport/group/
   pipeline_control_transport_internal.h
   pipeline_listener.c
   pipeline_listener_internal.h
+  client_group.c
+  client_group_internal.h
 ```
 
 规则：
@@ -987,10 +989,14 @@ src/transport/group/
   RX/TX 与 Reactor connection handler binding；
 - ingress/control-transport adapter 不成为 Group semantic state owner；
   Pipeline/Registry/CONTROL lifetime 仍由 `src/group/` 定义；
-- Pipeline listener 也已进入 `src/transport/group/`，作为 server-side Group
-  transport endpoint：拥有 listen fd、Reactor registration、accepted connection/session
-  slots、admission 与 bounded CONTROL message pool，但不依赖 Server facade 对象；
-- Client adapter 仍保持在 module 外，后续按 ownership 单独判断；
+- Pipeline listener 已进入 `src/transport/group/`，作为 server-side Group transport
+  endpoint：拥有 listen fd、Reactor registration、accepted connection/session slots、
+  admission 与 bounded CONTROL message pool，但不依赖 Server facade 对象；
+- Client Group endpoint 也已进入 `src/transport/group/`：拥有 CONTROL connection、
+  DATA connector/lane state、READY affinity consumption、bounded send ownership 与
+  Reactor handler/timer orchestration；它不依赖 `struct tr_client`；
+- stable `tr_client_connection_group_*` facade wrappers 继续留在 `client.c`，
+  负责把 Client config/runtime capability 组合到该 transport endpoint；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
