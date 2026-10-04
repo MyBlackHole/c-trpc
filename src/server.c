@@ -16,7 +16,7 @@
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
 #include "execution/reactor.h"
-#include "tr/rpc_wire.h"
+#include "rpc/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "rpc/rpc_internal.h"

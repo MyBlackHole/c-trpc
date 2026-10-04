@@ -10,7 +10,7 @@
 #include "execution/buffer.h"
 #include "transport/channel/channel.h"
 #include "execution/reactor.h"
-#include "tr/rpc_wire.h"
+#include "rpc/rpc_wire.h"
 #include "tr/socket.h"
 #include "tr/status.h"
 #include "execution/buffer_internal.h"

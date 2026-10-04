@@ -1,4 +1,4 @@
-#include "tr/rpc_wire.h"
+#include "rpc_wire.h"
 
 #include "tr/endian.h"
 #include "tr/status.h"

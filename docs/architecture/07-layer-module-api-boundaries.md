@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四阶段已完成：
+第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四、十五阶段已完成：
 
 ```text
 src/rpc/
@@ -947,6 +947,7 @@ src/rpc/
   rpc_internal.h
   rpc_codec.c
   rpc_wire.c
+  rpc_wire.h
 
 src/runtime/
   runtime.c
@@ -1065,6 +1066,9 @@ src/execution/
 - production code 不再通过 `include/tr/` 获取这些 internal engine types；
   stable installed header closure 继续只包含既有 8 个 SDK headers，且不存在
   `include/tr -> src/` 反向 include；
+- RPC wire header 已从 `include/tr/rpc_wire.h` 回收到 `src/rpc/rpc_wire.h`；
+  TRPC request/response/cancel/status wire layout 与 metadata framing 明确属于 RPC
+  engine internal contract，不进入 stable SDK；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
@@ -1074,7 +1078,7 @@ src/execution/
 后续再按相同规则评估：
 
 ```text
-remaining source-tree utility/internal headers after dependency cleanup
+remaining source-tree utility/internal headers (socket / crc32c / endian / cleanup / guard / refcount / observability)
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。
