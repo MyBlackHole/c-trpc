@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三、四、五、六、七、八、九、十阶段已完成：
+第一、二、三、四、五、六、七、八、九、十、十一阶段已完成：
 
 ```text
 src/rpc/
@@ -982,6 +982,12 @@ src/transport/protocol/
 src/transport/channel/
   channel.c
   channel_internal.h
+
+src/io/
+  socket.c
+  socket_internal.h
+  connector.c
+  connector_internal.h
 ```
 
 规则：
@@ -1018,6 +1024,11 @@ src/transport/channel/
   execution/resource substrate，不因为 Channel 位于 Transport 就被机械搬入；
 - `include/tr/channel.h` 暂时保留为 repository-internal source-tree header；
   先完成 Reactor/Channel type dependency 收敛，再决定 header 的最终物理位置；
+- Linux socket primitive 与 Reactor-owned nonblocking connector 已进入 `src/io/`；
+  Socket 只负责 fd/TCP primitives，Connector 只负责 connect/preface/timer/aux-fd
+  execution，不拥有 Channel/Group semantic state；
+- `socket_internal.h` 不再 include facade policy；TCP_NODELAY policy validation/
+  mapping 已回收到 `facade_policy_internal.h`，保持 `src/io/` 对 facade 无反向依赖；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
@@ -1027,7 +1038,7 @@ src/transport/channel/
 后续再按相同规则评估：
 
 ```text
-execution/resource substrate: reactor / connector / socket / buffer
+execution/resource substrate: reactor / queues / buffer
 internal header placement after Reactor/Channel dependency cleanup
 ```
 

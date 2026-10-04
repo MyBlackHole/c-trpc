@@ -8,11 +8,11 @@
 #include <sys/socket.h>
 #include <time.h>
 
-#include "../../connector_internal.h"
+#include "../../io/connector_internal.h"
 #include "../../group/pipeline_control_wire_internal.h"
 #include "../../group/pipeline_route_internal.h"
 #include "../../reactor_internal.h"
-#include "../../socket_internal.h"
+#include "../../io/socket_internal.h"
 #include "tr/buffer.h"
 #include "tr/socket.h"
 #include "tr/status.h"
