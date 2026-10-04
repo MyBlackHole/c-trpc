@@ -201,8 +201,9 @@ Connection Group lifecycle now has explicit graceful drain semantics in addition
 to force-close `stop()`. Server begin-drain closes only the Group accept
 socket and rejects new DATA_OFFER / TRANSFER_READY creation; existing
 connections and transfers continue until applications release them and Clients
-close naturally. Client begin-drain stops new DATA-lane establishment while
-allowing already READY transfers and in-flight sends to finish. Stable semantic
+close naturally. Client begin-drain is a monotonic local admission barrier: it stops new
+DATA-lane establishment and ignores TRANSFER_READY observed after the barrier,
+while transfers already READY before the barrier and in-flight sends may finish. Stable semantic
 stats report only Group/connection/DATA/transfer and send-byte lifecycle state;
 Reactor slots, route generations, queue occupancy and pool internals remain
 outside the SDK contract.
