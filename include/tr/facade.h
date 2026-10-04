@@ -39,19 +39,9 @@ struct tr_facade_limits {
 	uint64_t window_update_threshold_bytes;
 
 	/*
-	 * Client：以下 count/capacity 直接配置单个 Client Runtime。
-	 * Server：以下 count/capacity 是所有 Server shard 的总预算，由
-	 * tr_server_create() 确定性拆分；buffer size 不拆。
+	 * Reactor queue/pool capacities are intentionally not part of this stable
+	 * semantic contract. Facade-owned runtime resources are derived internally.
 	 */
-	uint32_t command_capacity;
-	uint32_t tx_item_capacity;
-	uint32_t control_tx_item_capacity;
-	uint32_t rx_buffer_count;
-
-	uint32_t rpc_message_pool_count;
-	uint32_t rpc_message_buffer_bytes;
-	uint32_t reassembly_pool_count;
-
 	/*
 	 * Client：worker 由 Client RPC Endpoint 自己拥有。
 	 * Server：该值是所有 shard 的 worker 总预算；每个 shard 的 RPC Endpoint
