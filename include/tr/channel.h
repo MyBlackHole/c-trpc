@@ -154,7 +154,12 @@ void tr_channel_destroy(struct tr_channel *channel);
 
 /*
  * 替换上层 callback，主要用于在已有 Channel 上叠加 RPC。
- * 旧 callback owner 在 in-flight callback 完成 quiescence 之前不能释放。
+ *
+ * 运行中的 Channel 通过所属 Reactor owner 同步发布：函数返回 TR_OK 时，
+ * 旧 callback 已不再执行，调用方可以释放旧 callback owner。
+ *
+ * Reactor 已完全 stopped 时允许 teardown-only direct publication；正在 stop
+ * 时返回 TR_ERR_CLOSED，禁止越过 owner teardown barrier 修改 callback。
  */
 int tr_channel_set_handler(struct tr_channel *channel,
 			   tr_stream_data_cb data_cb,
