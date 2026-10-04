@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "reactor_internal.h"
+#include "../reactor_internal.h"
 #include "tr/status.h"
 
 enum tr_pipeline_affinity_state {

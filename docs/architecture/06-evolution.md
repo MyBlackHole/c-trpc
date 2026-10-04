@@ -333,12 +333,14 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二阶段：
+P5 第一、二、三阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
   Runtime/RuntimeShard lifecycle、shard resource-domain、listener/peer storage
   与 shared executor composition；
+- Group semantic core 已迁到 `src/group/`：只包含 Pipeline membership/affinity
+  与 shard-local registry；route/control/ingress/listener/client adapter 继续独立；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
 - public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
@@ -346,7 +348,7 @@ P5 第一、二阶段：
 
 下一阶段：
 
-- 按同样规则评估 `src/transport/` 与 `src/group/`；
+- 按同样规则继续评估 Group adapters 与 `src/transport/`；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 
