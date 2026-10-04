@@ -1,11 +1,12 @@
 # 锁与并发所有权审查
 
-本文记录 c-trpc 当前主要 mutex 的职责、是否必要，以及未来可以删除它们的前提。
+本文描述 **当前 main 架构对应的同步模型**。判断一把锁是否应该存在时，先回答
+“谁拥有这份可变状态”，再讨论 mutex、atomic 或 lock-free。
 
-原则：
+核心原则：
 
-> 能通过 single-owner 解决的状态，不使用 mutex 弥补 ownership 不清晰；
-> 真正跨线程共享的数据，保留最简单、可验证的同步机制。
+> 能由 Reactor single-owner 串行化的协议状态，不使用 mutex 弥补 ownership 不清晰；
+> 真正跨线程共享的队列、资源池和生命周期条件，保留最简单、可验证的同步机制。
 
 ## 1. Reactor
 
@@ -13,266 +14,246 @@
 
 **结论：保留。**
 
-保护内容：
+它保护 producer 与 Reactor 生命周期之间的控制面事务，主要包括：
 
-- `started / accepting` 生命周期门禁；
-- stop 与 producer enqueue 的顺序；
-- slot reservation 与 command 提交之间的控制面事务。
+- `started / accepting` 门禁；
+- stop 与 command admission 的线性化顺序；
+- connection slot reservation 与 command 提交之间的事务边界。
 
-虽然 command queue 自身已经有 mutex，但两者职责不同。
+`ctl_lock` 不保护 socket RX/TX、parser、connection handler 等 owner 热状态。
 
-如果直接删除 `ctl_lock`，可能出现：
+停止顺序必须保持：
 
 ```text
-producer 看到 accepting=true
-        |
-stop 设置 accepting=false
-        |
-STOP command 入队
-        |
-producer 再把带资源的 command 排到 STOP 后面
-        |
-Reactor 退出
-        |
-command 永远不消费 -> resource leak
+accepting = false
+      ->
+close completion admission
+      ->
+enqueue STOP
+      ->
+owner drain 已接受 completion
+      ->
+close connections
+      ->
+join Reactor
 ```
 
-因此只有当 command queue 自身支持“close + enqueue ordering”原语后，
-`ctl_lock` 才有条件删除。
+这样 STOP 之后不会再出现“command/completion 已取得资源 ownership，但 owner 已退出”
+的悬空工作。
 
-### `command_queue.lock`
+### Command queue / Completion queue lock
 
 **结论：保留。**
 
-这是 bounded MPSC queue 的真实共享状态：
+两者都是 bounded MPSC：
 
-- 多 producer push；
-- 单 Reactor consumer pop。
+- 多 producer 提交；
+- 单 Reactor owner 消费。
 
-当前 mutex 实现简单、正确，而且不位于 socket RX/TX event hot path。
+queue lock 是 admission/ownership transfer 的线性化点。当前 mutex 实现不位于
+socket I/O 热路径，没有 profile 证据前不改成 lock-free。
 
-除非 profiling 证明这里成为瓶颈，否则不引入 lock-free MPSC。
+Completion queue 与 Command queue 独立，worker completion 不占用控制 command
+容量。stop 先关闭 completion admission，再发布 STOP；已经成功入队的 completion
+必须在 shutdown drain 中执行。
 
 ### TX pool lock
 
 **结论：保留。**
 
-TX item：
+TX item 可能由 application/RPC producer 获取、由 Reactor owner 释放，因此 free-list
+是真正的跨线程共享资源。后续若 profile 证明争用明显，可增加 per-owner/per-thread
+cache，而不是先改变 ownership 模型。
 
-- 由 application/RPC producer thread acquire；
-- 由 Reactor owner thread release。
+### Connection mutable state
 
-free-list 因此是真正跨线程共享资源。
+**结论：owner-only，不加 mutex。**
 
-未来可以替换为 per-thread cache 或 lock-free freelist，但不是 ownership 清理问题。
+以下状态由 Reactor owner 修改：
 
-### 已删除：`slot_lock`
+- parser；
+- TX/RX queue；
+- epoll interest；
+- connection handler/callback_arg；
+- connection state machine。
 
-slot 的 generation/state 已改为 C11 atomic capability metadata。
+slot 只通过 generation/state atomic metadata 向非 owner 暴露 capability snapshot。
 
-connection handler、parser、TX/RX state、epoll state 归 Reactor owner thread 独占，
-event-loop 不再通过 mutex 访问这些状态。
+## 2. Reactor-local Timer
 
-## 2. Buffer pool
+RPC deadline、Channel keepalive 已使用 Reactor-local bounded timer queue。
+
+Timer callback：
+
+- 在 Reactor owner 上执行；
+- 必须短小、非阻塞；
+- 只能推进 owner-side 状态；
+- 每轮受 timer budget 限制。
+
+当前不存在旧版 shared maintenance scheduler，也不存在每 Endpoint/Channel 一个
+deadline/keepalive thread。
+
+Client 自动 reconnect 仍保留一个低频 reconnect thread；这是当前 Channel 过渡模型，
+不是 timer scheduler。
+
+## 3. Buffer pool
 
 ### `tr_buffer_pool.lock`
 
 **结论：保留。**
 
-buffer 可能在：
+通用 buffer pool 的 buffer 可以跨 Reactor、worker 和 application callback 转移
+ownership，free-list 因此是真共享状态。
 
-- Reactor；
-- RPC worker；
-- application callback；
-- maintenance/reassembly 生命周期
+如果未来某个 pool 被证明严格属于一个 shard/owner，可以新增 owner-local fast pool，
+不能直接改变通用 pool 的同步契约。
 
-之间转移 ownership。
-
-pool free-list 是真实 shared state，因此需要同步。
-
-如果未来一个 pool 被严格限定为单 owner，可为该场景提供无锁专用 pool，
-但不能删除通用 pool 的锁。
-
-## 3. Channel
+## 4. Channel
 
 ### `channel->lock`
 
-**结论：保留。**
+**结论：当前保留，属于过渡锁。**
 
-当前 Channel 同时被以下执行上下文访问：
+Channel 目前仍可能被这些上下文访问：
 
-- Reactor callback；
-- application/API thread；
-- reconnect thread；
-- shared maintenance scheduler callback。
+- Reactor callback / owner call；
+- application API thread；
+- Client reconnect thread。
 
-保护内容包括：
+锁保护 lane mapping、Stream table、flow-control、capability negotiation、
+reconnect/drain 与部分 diagnostics。
 
-- connection handle/lane state；
-- Stream table；
-- flow-control counters；
-- capability negotiation；
-- keepalive/reconnect state；
-- diagnostics counters。
+长期目标不是“把 mutex 换 atomic”，而是继续把修改型操作迁移到 Reactor owner。
+当 reconnect 也迁移到 Reactor-owned nonblocking connector 后，再重新评估这把锁。
 
-上一轮 Reactor single-owner 重构暴露出的 connection-handle race 也证明，
-这些状态目前确实是跨线程共享的。
-
-未来如果 Channel 的全部状态也迁入 Reactor owner thread，才可能大规模减少该锁；
-在当前模型下直接删除是不安全的。
-
-## 4. RPC Endpoint
+## 5. RPC Endpoint
 
 ### `endpoint->lock`
 
-**结论：保留。**
+**结论：当前保留，范围继续收敛。**
 
-共享执行上下文：
+RPC 可变协议状态的修改型 worker API 已经通过 owner-call 回到 Reactor；worker
+不再成为 Call/Stream protocol state 的共同 owner。
 
-- Reactor/Channel callback；
-- RPC executor worker；
-- application thread；
-- deadline scheduler。
+`endpoint->lock` 目前仍保护尚未完全 owner 化的 application 控制面，以及：
 
-保护：
+- Call/Method 表的部分访问；
+- detached-finalizer/refcount 条件；
+- executor admission 的协调状态。
 
-- Call slot；
-- Method/Call 生命周期；
-- deadline；
-- cancellation；
-- pending control/data；
-- Endpoint refcount drain 条件。
+后续优化顺序：
 
-这不是冗余锁。
+1. 把剩余修改型 application API 收敛到 owner；
+2. 缩小锁保护范围；
+3. profile 仍显示争用后再考虑更细粒度结构。
 
-后续若出现 contention，应优先考虑：
+禁止用大量 atomic 重新制造隐式 shared mutable state。
 
-- Call 分片锁；
-- owner queue；
-- 减少持锁期间的编码/发送工作；
+## 6. RPC executor / executor group
 
-而不是直接换成 lock-free。
-
-## 5. RPC executor / executor group
-
-### executor lock
+### Executor lock
 
 **结论：保留。**
 
-保护 per-Endpoint bounded task node pool、Call FIFO、ready queue。
+保护 Endpoint 内 bounded task-node pool、per-Call FIFO、ready-Call queue。
 
-### executor-group lock
-
-**结论：保留。**
-
-保护 Server shared worker 的 ready-Endpoint queue。
-
-这两把锁保护不同层级的队列，不是重复锁。
-
-## 6. Shared maintenance scheduler
-
-### scheduler lock
+### Executor-group lock
 
 **结论：保留。**
 
-保护：
+保护 shard-local shared worker pool 的 ready-Endpoint queue。
 
-- entry register/unregister；
-- absolute deadline 更新；
-- callback running 状态；
-- scheduler stop。
+两把锁对应不同队列层级，不是重复锁。worker 只执行业务 Task，完成后通过
+Completion 返回原 Reactor owner。
 
-重要约束：
+## 7. Server / Runtime
 
-- scheduler callback 在 **不持 scheduler lock** 的情况下执行；
-- unregister 可以等待正在运行的 callback；
-- callback 内可以安全获取 Channel/RPC lock；
-- 避免形成 scheduler lock -> object lock 的长链。
+当前 Server 不再有旧版 `server->lock`、central accept thread 或 dedicated reaper
+thread。
 
-因此 scheduler lock 只保护调度元数据，不包围业务 callback。
+### Peer table
 
-## 7. Server
+Peer reserve/publish/remove/live snapshot 由所属 Reactor shard single-owner 串行化，
+不使用 Server-global peer transition lock。
 
-### `server->lock`
+### `server->finalizer_lock`
 
-**结论：保留。**
+**结论：保留，但不属于热路径。**
 
-Server 同时有：
+只保护：
 
-- accept thread；
-- reaper thread；
-- control/drain/destroy thread。
+- detached peer 最终统计合并；
+- `reaping_current` 等待条件；
+- shutdown condition broadcast。
 
-保护 peer table、peer_count、stop flags 和 listener 生命周期快照。
+它不保护 peer table、Connection、Channel 或 buffer pool。
 
-即使 stop flag 改成 atomic，peer table 仍然需要同步，因此单独删除该 mutex 收益很低。
+### Listener / peer lifecycle eventfd
 
-## 8. 同步 request 的临时 mutex/cond
+每 shard listener 直接注册到该 Reactor epoll；accept 由 owner 执行。
 
-例如 Reactor quiescence / synchronous SET_HANDLER 使用的临时 sync object。
+Channel DOWN/rollback 只 signal shard-local peer lifecycle eventfd，后续 detach 仍在
+同一 Reactor owner turn 执行，不创建 reaper thread。
 
-**结论：保留。**
+## 8. Connection Group / Pipeline
 
-这是跨线程 request/reply 的一次性同步，不在 event hot path。
+Pipeline、registry、DATA reservation/attach、Stream affinity 都属于一个 Reactor owner。
 
-它保证：
+热状态不使用 Pipeline-global mutex：
 
 ```text
-producer submit command
-        |
+CONTROL/DATA event
+      ->
+Pipeline owner Reactor
+      ->
+registry / membership / affinity mutation
+```
+
+跨线程调用必须通过 owner-call/command；registry 不拥有 Pipeline lifetime。
+
+teardown 的顺序要求：
+
+```text
+停止新 admission
+      ->
+失效 DATA membership / Stream affinity
+      ->
+clear CONTROL + cancel RESERVED
+      ->
+unregister registry
+      ->
+destroy Pipeline
+```
+
+`clear CONTROL + unregister` 必须作为同一 owner-side commit，不能在取消 RESERVED
+capability 后再尝试通过重新绑定 CONTROL 伪造事务回滚。
+
+## 9. 同步 request 的临时 mutex/cond
+
+Reactor `call/quiesce/set_handler` 等同步 request 使用临时 mutex/cond。
+
+**结论：保留。**
+
+它们实现：
+
+```text
+producer submit
+      ->
 Reactor owner apply
-        |
+      ->
 producer returns
 ```
 
-如果未来引入统一 completion/future primitive，可以统一实现，但不能简单删除等待同步。
+这是 request/reply 同步，不属于 event-loop 热路径。
 
-## 9. 本轮实际减少的同步开销
+## 10. 优化优先级
 
-本轮 shared maintenance 改造后：
+只有 profile 证明 contention 后，按以下顺序处理：
 
-- 高层 Server 不再为每个 peer 创建 RPC deadline thread；
-- 高层 Server 不再为每个启用 keepalive 的 peer 创建 Channel keepalive thread；
-- 高层 Client 的 RPC deadline + Channel keepalive 也共用一个 runtime scheduler。
+1. 继续把纯协议状态收敛到 Reactor owner；
+2. 缩短 Channel/RPC Endpoint 过渡锁持有范围；
+3. 为高频资源增加 owner-local/per-thread cache；
+4. 把 Client reconnect 迁移到 Reactor-owned nonblocking connector；
+5. 最后才考虑 lock-free MPSC/freelist。
 
-Server 结构：
-
-```text
-Server
-  |
-  +-- one shared maintenance scheduler thread
-       |
-       +-- Endpoint deadline entry
-       +-- Channel keepalive entry
-       +-- Endpoint deadline entry
-       +-- Channel keepalive entry
-       ...
-```
-
-Client 结构：
-
-```text
-Client
-  |
-  +-- one shared maintenance scheduler thread
-       |
-       +-- Endpoint deadline entry
-       +-- Channel keepalive entry
-```
-
-因此 Server peer 数量增加时 timer thread 数量保持 O(1)，高层 Client 也不再
-分别创建 deadline/keepalive timer thread。
-
-Client reconnect thread 暂时保留，因为 reconnect 包含 connect/poll/backoff，
-可能长时间阻塞，不应该在共享 timer scheduler 上执行。
-
-## 10. 后续锁优化优先级
-
-只有 profiling 证明存在 contention 后，建议按以下顺序处理：
-
-1. 缩短 Channel/RPC Endpoint 持锁范围；
-2. 将纯 owner-state 继续迁移到 owner thread；
-3. 为高频 pool 增加 per-thread/per-owner cache；
-4. 最后才考虑 lock-free command queue / freelist。
-
-不建议为了“锁更少”直接把当前有明确 shared ownership 的 mutex 换成原子操作。
+评审中如果出现“为了少一把锁而新增跨 owner 可变共享”，默认视为架构回退。

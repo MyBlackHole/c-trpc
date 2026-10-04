@@ -88,9 +88,7 @@ static enum tr_frame_disposition tr_pipeline_control_transport_frame(
 	return TR_FRAME_RELEASE;
 }
 
-static void tr_pipeline_control_transport_event(
-	struct tr_conn_handle connection, enum tr_connection_event event,
-	int status, void *arg)
+static int tr_pipeline_control_transport_abort_on_owner(void *arg)
 {
 	struct tr_pipeline_control_transport *transport =
 		(struct tr_pipeline_control_transport *)arg;
@@ -100,32 +98,55 @@ static void tr_pipeline_control_transport_event(
 	uint64_t epoch;
 	int teardown_status;
 
-	(void)event;
-	(void)status;
-	if (!transport || transport->closing)
-		return;
+	if (!transport || !transport->control)
+		return TR_ERR_INVALID;
 
-	transport->closing = 1;
 	pipeline_id = transport->control_route.pipeline_id;
 	epoch = transport->control_route.epoch;
 	closed_cb = transport->closed_cb;
 	closed_arg = transport->closed_arg;
-	if (transport->closing_cb)
-		transport->closing_cb(closed_arg);
+
+	/*
+	 * closing 是 admission fence，不代表 teardown 已经完成。第一次进入时先
+	 * 禁止新的 CONTROL work；若之前的 abort 因内部状态暂时未收敛而失败，
+	 * listener stop 可以再次调用本函数完成剩余 teardown。
+	 */
+	if (!transport->closing) {
+		transport->closing = 1;
+		if (transport->closing_cb)
+			transport->closing_cb(closed_arg);
+	}
 
 	teardown_status = tr_pipeline_control_abort(
-		transport->control, connection);
+		transport->control, transport->connection);
 	if (teardown_status != TR_OK) {
 		if (closed_cb)
 			closed_cb(
 				pipeline_id, epoch, teardown_status, closed_arg);
-		return;
+		return teardown_status;
 	}
 	transport->control = NULL;
 
 	if (closed_cb)
 		closed_cb(pipeline_id, epoch, TR_OK, closed_arg);
 	free(transport);
+	return TR_OK;
+}
+
+static void tr_pipeline_control_transport_event(
+	struct tr_conn_handle connection, enum tr_connection_event event,
+	int status, void *arg)
+{
+	struct tr_pipeline_control_transport *transport =
+		(struct tr_pipeline_control_transport *)arg;
+
+	(void)connection;
+	(void)event;
+	(void)status;
+	if (!transport)
+		return;
+
+	(void)tr_pipeline_control_transport_abort_on_owner(transport);
 }
 
 int tr_pipeline_control_transport_create(
@@ -278,6 +299,17 @@ int tr_pipeline_control_transport_release_transfer(
 		return TR_ERR_STATE;
 	return tr_pipeline_control_release_transfer(
 		transport->control, stream_id);
+}
+
+int tr_pipeline_control_transport_abort(
+	struct tr_pipeline_control_transport *transport)
+{
+	if (!transport || !transport->connection.reactor)
+		return TR_ERR_INVALID;
+
+	return tr_reactor_call(
+		transport->connection.reactor,
+		tr_pipeline_control_transport_abort_on_owner, transport);
 }
 
 int tr_pipeline_control_transport_get_stats(

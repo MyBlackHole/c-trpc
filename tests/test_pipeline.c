@@ -183,6 +183,11 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(tr_pipeline_cancel_data_reservation(pipeline, reused) ==
 	       TR_ERR_STALE);
 
+	/*
+	 * destroy 只释放已经 quiesce 的 Pipeline soft-state。DATA membership
+	 * 不由 Pipeline 拥有，测试必须先显式解除最后一个 ATTACHED generation。
+	 */
+	assert(tr_pipeline_remove_data(pipeline, data1) == TR_OK);
 	tr_pipeline_destroy(pipeline);
 	assert(tr_reactor_stop(other) == TR_OK);
 	assert(tr_reactor_stop(owner) == TR_OK);

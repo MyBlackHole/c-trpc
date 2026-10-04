@@ -151,43 +151,96 @@ scope cleanup 只能解决当前 lexical scope，不能解决跨线程、queue�
 
 ## 9. RPC Endpoint 生命周期
 
-RPC Endpoint 是当前第一个迁移到 shared ownership 的核心对象。
+RPC Endpoint 使用 strong refcount 保护跨 worker 的异步生命周期，但需要区分两种
+teardown 模式。
+
+### 9.1 同步 destroy
+
+Client/直接 owner 使用同步 destroy 时，Endpoint 只是 borrowed Channel，因此函数
+返回后必须允许调用方立即销毁 Channel：
 
 ```text
-peer/client owner ref = 1
-        |
-queue executor task
-        | get
-        v
-owner ref + task ref
-        |
-task completes
-        | put
-        v
-owner-only ref
-        |
+owner ref = 1
+      |
+executor task publish 前 get
+      v
+owner ref + task refs
+      |
 destroy:
-  clear handler
-  quiesce Channel callbacks
-  stop deadline source
-  stop new executor tasks
+  detach Channel handler
+  quiesce Reactor callbacks
+  unregister deadline timer
+  close executor admission
   wait refs == 1
-        |
+      |
 owner put
-        v
-refs == 0
-        |
-release Endpoint
+      v
+refs == 0 -> release Endpoint
 ```
 
-`tr_rpc_endpoint_destroy()` 保持同步语义，因为 Endpoint 只是 borrowed Channel。
+这里允许等待，是因为 API 的 contract 明确要求“destroy 返回即完全释放”。
 
-Endpoint destroy 返回后调用方可以立即 destroy Channel，所以所有异步 Endpoint reference 必须在返回前排空。
+### 9.2 Server detached finalize
 
-Call 自己的 `task_refs` 职责不同：
+Server peer 从 shard table 摘除时不能让 Reactor 等待正在执行的 worker。
+
+当前顺序：
+
+```text
+Reactor owner
+  -> detach RPC/Channel callbacks
+  -> unregister deadline/keepalive source
+  -> close executor admission
+  -> arm detached finalizer
+  -> clear peer slot immediately
+  -> drop Endpoint owner ref
+
+existing worker strong refs
+  -> continue naturally
+  -> last put
+  -> detached finalizer
+       -> collect final stats
+       -> finalize detached Channel
+       -> decrement reaping_current
+       -> free detached context
+```
+
+因此：
+
+- peer slot lifetime 与旧 Endpoint object lifetime 分离；
+- worker strong-ref 是 lifetime fence，不需要 reaper/cleanup thread 阻塞等待；
+- finalizer 只能做最终统计与释放，不能重新进入 Reactor protocol mutation。
+
+Call 自己的 `task_refs` 与 Endpoint refcount 职责不同：
 
 - `tr_refcount`：保护 Endpoint 对象生命周期；
-- Call `task_refs`：阻止 Call slot 在 task 尚未结束时被复用。
+- Call `task_refs`：阻止 Call slot 在 task/completion 尚未结束时复用。
+
+## 9.3 Pipeline / Listener teardown
+
+Pipeline registry 只保存 owner-local index，不拥有 Pipeline lifetime。
+
+正常 teardown 必须满足：
+
+```text
+stop admission
+   ->
+quiesce/abort CONTROL + DATA
+   ->
+data_reserved == 0
+data_attached == 0
+stream_affinity == 0
+control unbound
+   ->
+registry unregister
+   ->
+Pipeline destroy
+   ->
+Listener destroy
+```
+
+`Pipeline destroy`、`Registry destroy` 和 `Listener destroy` 在 debug build
+会检查这些不变量。destroy 不应再隐式承担可能失败的 stop/state transition。
 
 ## 10. Reactor ownership
 

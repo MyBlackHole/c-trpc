@@ -1,5 +1,6 @@
 #include "pipeline_listener_internal.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -666,6 +667,24 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 			result = ret;
 	}
 
+	/*
+	 * connection close callback 通常会完成 CONTROL fatal teardown。若某次
+	 * teardown 在 closing fence 之后返回错误，connection slot 可能已经清空，
+	 * 但 session 仍保留 transport。stop() 必须显式重试这些残留 session，
+	 * 不能仅依赖 connections_current 判断是否还需要 owner-side cleanup。
+	 */
+	for (i = 0; i < listener->config.pipeline_capacity; ++i) {
+		struct tr_pipeline_listener_session *session =
+			&listener->sessions[i];
+		int ret;
+
+		if (!session->used || !session->transport)
+			continue;
+		ret = tr_pipeline_control_transport_abort(session->transport);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+
 	if (listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return result == TR_OK ? TR_ERR_STATE : result;
@@ -683,7 +702,8 @@ int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 
 	result = tr_pipeline_listener_begin_drain(listener);
 
-	if (listener->connections_current != 0U) {
+	if (listener->connections_current != 0U ||
+	    listener->pipelines_current != 0U) {
 		request.listener = listener;
 		ret = tr_reactor_call(
 			listener->config.owner,
@@ -691,7 +711,9 @@ int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
-	if (listener->pipelines_current != 0U && result == TR_OK)
+	if ((listener->connections_current != 0U ||
+	     listener->pipelines_current != 0U) &&
+	    result == TR_OK)
 		result = TR_ERR_STATE;
 	return result;
 }
@@ -701,7 +723,16 @@ void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 	if (!listener)
 		return;
 
-	(void)tr_pipeline_listener_stop(listener);
+	/*
+	 * destroy 是纯内存析构，不再隐式执行可能失败的 stop。调用方必须先完成
+	 * listener/session quiescence；debug build 在这里直接验证生命周期不变量。
+	 */
+#ifndef NDEBUG
+	assert(!listener->listener_registered);
+	assert(listener->listen_fd < 0);
+	assert(listener->connections_current == 0U);
+	assert(listener->pipelines_current == 0U);
+#endif
 	if (listener->listener_registered || listener->listen_fd >= 0 ||
 	    listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)

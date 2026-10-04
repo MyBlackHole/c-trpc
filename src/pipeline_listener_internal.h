@@ -31,8 +31,8 @@ struct tr_pipeline_listener_config {
 	uint32_t control_message_count;
 
 	/*
-	 * Required CONTROL admission/fencing hook. The listener never treats a
-	 * client-provided TRR1 CONTROL identity as authorization by itself.
+	 * 必须提供的 CONTROL admission/fencing hook。
+	 * listener 绝不能把客户端自报的 TRR1 CONTROL identity 直接视为授权结果。
 	 */
 	tr_pipeline_listener_authorize_control_cb authorize_control;
 	void *authorize_arg;
@@ -59,8 +59,8 @@ struct tr_pipeline_listener_stats {
 };
 
 /*
- * One listener belongs to exactly one Reactor/shard owner and owns its
- * shard-local Pipeline registry plus bounded CONTROL message buffers.
+ * 一个 listener 只属于一个 Reactor/shard owner，并拥有该 shard 的 Pipeline
+ * registry 与 bounded CONTROL message buffer 资源。
  */
 int tr_pipeline_listener_create(
 	const struct tr_pipeline_listener_config *config,
@@ -69,6 +69,11 @@ int tr_pipeline_listener_listen_ipv4(
 	struct tr_pipeline_listener *listener, const char *address,
 	uint16_t port, int backlog, uint16_t *out_bound_port);
 int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener);
+
+/*
+ * stop() 负责关闭 admission 并把所有 connection/session 收敛到静止状态。
+ * destroy() 只释放已经 stop/quiesce 的对象，不隐式执行可能失败的状态推进。
+ */
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener);
 void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
 

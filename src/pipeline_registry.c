@@ -1,5 +1,6 @@
 #include "pipeline_registry_internal.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -116,6 +117,15 @@ void tr_pipeline_registry_destroy(struct tr_pipeline_registry *registry)
 	if (!registry)
 		return;
 
+	/*
+	 * Registry 不拥有 Pipeline lifetime。destroy 前必须由 owner 将所有
+	 * Pipeline 注销；否则 entries 中仍保存裸指针，直接释放 registry 会隐藏
+	 * teardown 顺序错误。
+	 */
+#ifndef NDEBUG
+	assert(registry->count == 0U);
+#endif
+
 	free(registry->entries);
 	free(registry);
 }
@@ -223,6 +233,77 @@ int tr_pipeline_registry_unregister(struct tr_pipeline_registry *registry,
 	request.pipeline = pipeline;
 	return tr_reactor_call(registry->owner,
 			       tr_pipeline_registry_unregister_on_owner, &request);
+}
+
+struct tr_pipeline_registry_close_control_request {
+	struct tr_pipeline_registry *registry;
+	struct tr_pipeline *pipeline;
+	struct tr_conn_handle expected_control;
+};
+
+static int tr_pipeline_registry_close_control_on_owner(void *arg)
+{
+	struct tr_pipeline_registry_close_control_request *request =
+		(struct tr_pipeline_registry_close_control_request *)arg;
+	struct tr_pipeline_registry *registry = request->registry;
+	struct tr_pipeline *pipeline = request->pipeline;
+	struct tr_pipeline_stats stats;
+	uint32_t found = UINT32_MAX;
+	int ret;
+
+	/*
+	 * 先完成全部可失败校验，再进入不可逆 commit 区间。这样 CONTROL clear
+	 * 取消 RESERVED capability 后，不再需要通过重新 set CONTROL 伪造回滚。
+	 */
+	if (!tr_pipeline_registry_find(
+		    registry, tr_pipeline_id(pipeline), &found, NULL))
+		return TR_ERR_STALE;
+	if (registry->entries[found].pipeline != pipeline)
+		return TR_ERR_STALE;
+
+	memset(&stats, 0, sizeof(stats));
+	ret = tr_pipeline_get_stats(pipeline, &stats);
+	if (ret != TR_OK)
+		return ret;
+	if (!stats.control_bound)
+		return TR_ERR_STALE;
+	if (stats.data_count != 0U || stats.stream_affinity_count != 0U)
+		return TR_ERR_STATE;
+
+	/*
+	 * commit point：clear_control() 只有 expected CONTROL 精确匹配时才会
+	 * 修改状态，并同时取消所有 RESERVED capability。成功后 registry entry
+	 * 在同一个 owner turn 内直接摘除，不再执行可能失败的第二阶段操作。
+	 */
+	ret = tr_pipeline_clear_control(pipeline, request->expected_control);
+	if (ret != TR_OK)
+		return ret;
+
+	registry->entries[found].pipeline = NULL;
+	registry->entries[found].pipeline_id = 0U;
+	registry->entries[found].state = TR_PIPELINE_REGISTRY_TOMBSTONE;
+	registry->count--;
+	return TR_OK;
+}
+
+int tr_pipeline_registry_close_control(
+	struct tr_pipeline_registry *registry, struct tr_pipeline *pipeline,
+	struct tr_conn_handle expected_control)
+{
+	struct tr_pipeline_registry_close_control_request request;
+
+	if (!registry || !pipeline ||
+	    tr_pipeline_owner(pipeline) != registry->owner ||
+	    tr_pipeline_owner_shard_id(pipeline) != registry->owner_shard_id)
+		return TR_ERR_INVALID;
+
+	memset(&request, 0, sizeof(request));
+	request.registry = registry;
+	request.pipeline = pipeline;
+	request.expected_control = expected_control;
+	return tr_reactor_call(
+		registry->owner, tr_pipeline_registry_close_control_on_owner,
+		&request);
 }
 
 struct tr_pipeline_registry_attach_request {

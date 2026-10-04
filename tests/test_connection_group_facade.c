@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -300,6 +301,22 @@ static void on_group_data_event(
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static const char *counter_name(
+	struct public_group_ctx *ctx, const unsigned *counter)
+{
+	if (counter == &ctx->authorized)
+		return "authorized";
+	if (counter == &ctx->messages)
+		return "messages";
+	if (counter == &ctx->retry_messages)
+		return "retry_messages";
+	if (counter == &ctx->transfer_ready)
+		return "transfer_ready";
+	if (counter == &ctx->data_events)
+		return "data_events";
+	return "unknown";
+}
+
 static void wait_counter(
 	struct public_group_ctx *ctx, unsigned *counter, unsigned target)
 {
@@ -308,9 +325,18 @@ static void wait_counter(
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 10;
 	pthread_mutex_lock(&ctx->lock);
-	while (*counter < target)
-		assert(pthread_cond_timedwait(
-			       &ctx->cond, &ctx->lock, &deadline) == 0);
+	while (*counter < target) {
+		int ret = pthread_cond_timedwait(
+			&ctx->cond, &ctx->lock, &deadline);
+
+		if (ret != 0) {
+			fprintf(
+				stderr,
+				"timeout waiting for %s: current=%u target=%u\n",
+				counter_name(ctx, counter), *counter, target);
+			assert(ret == 0);
+		}
+	}
 	pthread_mutex_unlock(&ctx->lock);
 }
 
@@ -405,6 +431,23 @@ static void test_public_connection_group_server(void)
 
 	data = connect_loopback(group_port);
 	send_route(data, &data_route);
+	wait_data_accepts(server, 1U);
+
+	/*
+	 * 物理 DATA membership 本身不是 transfer authorization。Server 必须先在
+	 * owner 上建立 Stream -> exact DATA generation affinity，并通过
+	 * TRANSFER_READY 把该 barrier 告知 peer，之后 DATA frame 才允许进入业务回调。
+	 */
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 3001U,
+		       UINT64_C(1002)) == TR_OK);
+	memset(&ready, 0, sizeof(ready));
+	recv_control_message(control, UINT64_C(1002), &ready);
+	assert(ready.type == TR_PIPELINE_CONTROL_TRANSFER_READY);
+	assert(ready.stream_id == 3001U);
+	assert(ready.data_index == offer.data_index);
+	assert(ready.data_generation == offer.data_generation);
+
 	send_data_message(data, 3001U, UINT64_C(2001),
 			  payload, (uint32_t)(sizeof(payload) - 1U));
 	wait_counter(&ctx, &ctx.messages, 1U);
@@ -418,15 +461,6 @@ static void test_public_connection_group_server(void)
 	assert(tr_connection_group_message_release(&ctx.retained) ==
 	       TR_ERR_INVALID);
 
-	assert(tr_server_connection_group_send_transfer_ready(
-		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 3001U,
-		       UINT64_C(1002)) == TR_OK);
-	memset(&ready, 0, sizeof(ready));
-	recv_control_message(control, UINT64_C(1002), &ready);
-	assert(ready.type == TR_PIPELINE_CONTROL_TRANSFER_READY);
-	assert(ready.stream_id == 3001U);
-	assert(ready.data_index == offer.data_index);
-	assert(ready.data_generation == offer.data_generation);
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 3001U) == TR_OK);
 

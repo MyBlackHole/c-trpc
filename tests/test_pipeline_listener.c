@@ -495,12 +495,16 @@ static void test_pipeline_listener_control_and_data(void)
 	control2 = connect_loopback(port);
 	send_route(control2, &route);
 	wait_listener_counts(listener, 1U, 1U);
-	shutdown(control2, SHUT_RDWR);
+
+	/*
+	 * stop() 本身必须完成 live CONTROL session 的 fatal teardown，而不是要求
+	 * 调用方先关闭 peer socket。成功返回后 destroy 只能做纯资源释放。
+	 */
+	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+	wait_peer_close(control2);
 	close(control2);
 	control2 = -1;
 	wait_listener_counts(listener, 0U, 0U);
-
-	assert(tr_pipeline_listener_stop(listener) == TR_OK);
 	tr_pipeline_listener_destroy(listener);
 	listener = NULL;
 	assert(tr_reactor_stop(reactor) == TR_OK);

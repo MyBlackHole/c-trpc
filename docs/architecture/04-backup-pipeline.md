@@ -243,7 +243,7 @@ listener/accept
   -> Reactor adopt with fixed-size preface gate
   -> read exactly 48 TRR1 bytes
   -> parser + CRC/field validation
-  -> registry exact reservation attach
+  -> registry generation 精确匹配 reservation 后 attach
   -> install routed downstream frame/event handler
   -> existing TRP1 parser
 ```
@@ -413,7 +413,7 @@ accept
   -> CONTROL: mandatory authorize hook
        -> create/bind/register Pipeline
        -> install TR_FRAME_PIPELINE_CONTROL handler
-  -> DATA: registry exact reservation attach
+  -> DATA: registry generation 精确匹配 reservation 后 attach
        -> install normal TRP1 DATA downstream handler
 ```
 
@@ -434,7 +434,7 @@ mark session CLOSING
   -> invalidate DATA membership + Stream affinity
   -> clear CONTROL + cancel RESERVED capability
   -> unregister/destroy Pipeline
-  -> owner-immediate close DATA sockets
+  -> 由 owner 立即关闭 DATA socket
   -> release listener session/connection slots
 ```
 
