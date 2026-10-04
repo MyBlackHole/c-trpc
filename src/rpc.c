@@ -146,6 +146,8 @@ struct tr_rpc_call_slot {
 	int cancelled;
 	int cancel_status;
 	int terminal_notified;
+	int semantic_started;
+	int semantic_finished;
 	uint64_t deadline_ns;
 	uint32_t deadline_heap_pos;
 
@@ -315,6 +317,8 @@ struct tr_rpc_endpoint {
 	uint64_t stat_calls_completed;
 	uint64_t stat_calls_cancelled;
 	uint64_t stat_calls_deadline_exceeded;
+
+	struct tr_rpc_semantic_stats semantic;
 };
 
 #define TR_RPC_METADATA_RESERVED_TIMEOUT ":timeout-ms"
@@ -1230,6 +1234,32 @@ static int tr_rpc_status_valid(int status)
 	       status <= TR_RPC_STATUS_UNAUTHENTICATED;
 }
 
+static void tr_rpc_semantic_start_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call)
+{
+	if (!endpoint || !call || call->semantic_started)
+		return;
+
+	call->semantic_started = 1;
+	endpoint->semantic.calls_started++;
+}
+
+static void tr_rpc_semantic_finish_locked(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call,
+	int status)
+{
+	if (!endpoint || !call || !call->semantic_started ||
+	    call->semantic_finished)
+		return;
+
+	if (!tr_rpc_status_valid(status))
+		status = TR_RPC_STATUS_INTERNAL;
+
+	call->semantic_finished = 1;
+	endpoint->semantic.calls_finished++;
+	endpoint->semantic.final_status[(uint32_t)status]++;
+}
+
 #define TR_RPC_INTERCEPTOR_CLIENT_PRE_BIT  (1U << 0)
 #define TR_RPC_INTERCEPTOR_SERVER_PRE_BIT  (1U << 1)
 #define TR_RPC_INTERCEPTOR_SERVER_POST_BIT (1U << 2)
@@ -1562,6 +1592,7 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 
 	call->pending_tx = tr_buffer_take(&encoded);
 	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
+	tr_rpc_semantic_finish_locked(endpoint, call, status);
 
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
 	/*
@@ -1606,6 +1637,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 	call->final_status = status;
 	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 	endpoint->stat_calls_completed++;
+	tr_rpc_semantic_finish_locked(endpoint, call, status);
 
 	ret = tr_stream_send(call->stream, encoded);
 	if (ret == TR_OK) {
@@ -2473,6 +2505,8 @@ static void tr_rpc_apply_unary_completion(void *arg)
 			completion->status, &response, &response_buffer);
 		if (ret == TR_OK) {
 			call->pending_tx = tr_buffer_take(&response_buffer);
+			tr_rpc_semantic_finish_locked(
+				endpoint, call, completion->status);
 			(void)tr_rpc_try_unary_send_locked(endpoint, call);
 		}
 	}
@@ -3314,6 +3348,7 @@ static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
 	if (ret == TR_OK) {
 		call->terminal_notified = 1;
 		endpoint->stat_calls_completed++;
+		tr_rpc_semantic_finish_locked(endpoint, call, status);
 	}
 	return ret;
 }
@@ -3404,6 +3439,7 @@ static int tr_rpc_cancel_on_owner(void *arg)
 	call->final_status_seen = 1;
 	call->final_status = status;
 	call->state = TR_RPC_CALL_TERMINAL;
+	tr_rpc_semantic_finish_locked(endpoint, call, status);
 	(void)tr_rpc_notify_terminal_locked(endpoint, tr_rpc_call_handle_slot(handle), call,
 					    status);
 
@@ -3665,6 +3701,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		call->rx_count++;
 
 		if (first_message) {
+			tr_rpc_semantic_start_locked(endpoint, call);
 			ret = tr_rpc_run_interceptor_locked(
 				endpoint, slot, call,
 				TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER,
@@ -3808,6 +3845,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		}
 
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
+		if (ret == TR_OK && call->is_unary)
+			tr_rpc_semantic_finish_locked(endpoint, call, wire.status);
 		pthread_mutex_unlock(&endpoint->lock);
 		if (ret != TR_OK) {
 			(void)tr_stream_close(stream);
@@ -3878,6 +3917,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			call->final_status_seen = 1;
 			call->final_status = cancel_status;
 			call->state = TR_RPC_CALL_TERMINAL;
+			tr_rpc_semantic_finish_locked(
+				endpoint, call, cancel_status);
 			(void)tr_rpc_notify_terminal_locked(
 				endpoint, slot, call, cancel_status);
 		}
@@ -4114,6 +4155,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				call->terminal_notified = 1;
 		}
 
+		tr_rpc_semantic_finish_locked(endpoint, call, terminal_status);
 		call->state = TR_RPC_CALL_TERMINAL;
 		tr_rpc_maybe_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
@@ -4196,6 +4238,8 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 				call->terminal_notified = 1;
 		}
 
+		tr_rpc_semantic_finish_locked(
+			endpoint, call, TR_RPC_STATUS_UNAVAILABLE);
 		tr_rpc_maybe_free_call_locked(endpoint, call);
 	}
 	tr_rpc_deadline_rearm_locked(endpoint);
@@ -4826,6 +4870,7 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 		return ret;
 	}
 
+	tr_rpc_semantic_start_locked(endpoint, call);
 	*request->out = handle;
 	pthread_mutex_unlock(&endpoint->lock);
 	return TR_OK;
@@ -4957,6 +5002,7 @@ static int tr_rpc_call_start_on_owner(void *arg)
 		return ret;
 	}
 
+	tr_rpc_semantic_start_locked(endpoint, call);
 	*request->out = handle;
 	pthread_mutex_unlock(&endpoint->lock);
 	return TR_OK;
@@ -5307,6 +5353,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 			(void)tr_buffer_take(&buffer);
 			call->final_status_sent = 1;
 			call->final_status = status;
+			tr_rpc_semantic_finish_locked(endpoint, call, status);
 			(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
@@ -5780,6 +5827,11 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 	out->calls_completed = endpoint->stat_calls_completed;
 	out->calls_cancelled = endpoint->stat_calls_cancelled;
 	out->calls_deadline_exceeded = endpoint->stat_calls_deadline_exceeded;
+	out->semantic = endpoint->semantic;
+	out->semantic.calls_inflight =
+		out->semantic.calls_started >= out->semantic.calls_finished ?
+			out->semantic.calls_started - out->semantic.calls_finished :
+			0U;
 
 	out->registered_methods = endpoint->method_count;
 
@@ -5823,5 +5875,20 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 	out->executor_handler_ns = endpoint->executor.handler_ns;
 	pthread_mutex_unlock(&endpoint->executor.lock);
 
+	return TR_OK;
+}
+
+int tr_rpc_endpoint_get_semantic_stats(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_semantic_stats *out)
+{
+	if (!endpoint || !out)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&endpoint->lock);
+	*out = endpoint->semantic;
+	out->calls_inflight =
+		out->calls_started >= out->calls_finished ?
+			out->calls_started - out->calls_finished : 0U;
+	pthread_mutex_unlock(&endpoint->lock);
 	return TR_OK;
 }

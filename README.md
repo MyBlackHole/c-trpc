@@ -64,9 +64,14 @@ through repository-internal diagnostic tuning.
 Detailed Reactor/Channel/Endpoint snapshots, timing flags and diagnostic
 histogram/queue/pool types are intentionally **not** part of the stable
 installed SDK. Repository benchmarks/tests use the internal diagnostics
-surface. Stable semantic observability is currently limited to APIs whose
-meaning is independent of Runtime layout (for example Connection Group semantic
-stats). See [`docs/observability.md`](docs/observability.md).
+surface.
+
+Stable semantic observability now includes layout-independent RPC lifecycle
+snapshots through `tr_client_get_rpc_semantic_stats()` and
+`tr_server_get_rpc_semantic_stats()`, plus the existing Connection Group
+semantic stats. RPC snapshots expose only started/finished/inflight Calls and
+final RPC status distribution; they do not expose worker, queue, pool, Reactor,
+slot or timing layout. See [`docs/observability.md`](docs/observability.md).
 
 ## High-level Client / Server facade
 

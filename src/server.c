@@ -277,6 +277,22 @@ static void tr_server_merge_channel_stats(
 	dst->keepalive_timeouts += src->keepalive_timeouts;
 }
 
+static void tr_server_merge_rpc_semantic_stats(
+	struct tr_rpc_semantic_stats *dst,
+	const struct tr_rpc_semantic_stats *src)
+{
+	uint32_t i;
+
+	if (!dst || !src)
+		return;
+
+	dst->calls_started += src->calls_started;
+	dst->calls_finished += src->calls_finished;
+	dst->calls_inflight += src->calls_inflight;
+	for (i = 0; i < TR_RPC_STATUS_COUNT; ++i)
+		dst->final_status[i] += src->final_status[i];
+}
+
 static void tr_server_merge_rpc_stats(
 	struct tr_server_rpc_stats *dst,
 	const struct tr_rpc_endpoint_stats *src, int current)
@@ -320,6 +336,7 @@ static void tr_server_merge_rpc_stats(
 	dst->calls_completed += src->calls_completed;
 	dst->calls_cancelled += src->calls_cancelled;
 	dst->calls_deadline_exceeded += src->calls_deadline_exceeded;
+	tr_server_merge_rpc_semantic_stats(&dst->semantic, &src->semantic);
 }
 
 static void tr_server_sum_reactor_work(struct tr_reactor_work *dst,
@@ -1763,6 +1780,24 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	}
 
 	*out = stats;
+	return TR_OK;
+}
+
+int tr_server_get_rpc_semantic_stats(
+	struct tr_server *server, struct tr_rpc_semantic_stats *out)
+{
+	struct tr_server_stats stats;
+	int ret;
+
+	if (!server || !out)
+		return TR_ERR_INVALID;
+
+	memset(&stats, 0, sizeof(stats));
+	ret = tr_server_get_stats(server, &stats);
+	if (ret != TR_OK)
+		return ret;
+
+	*out = stats.rpc.semantic;
 	return TR_OK;
 }
 

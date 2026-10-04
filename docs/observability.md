@@ -40,6 +40,52 @@ accounting.
 not allocate and snapshots can be aggregated by summing corresponding buckets,
 sample counts, and totals and taking the maximum of `max_ns`.
 
+## Stable RPC semantic observability
+
+The installed SDK exposes a deliberately small aggregate snapshot:
+
+```c
+struct tr_rpc_semantic_stats {
+    uint64_t calls_started;
+    uint64_t calls_finished;
+    uint64_t calls_inflight;
+    uint64_t final_status[TR_RPC_STATUS_COUNT];
+};
+```
+
+Facade accessors:
+
+```c
+tr_client_get_rpc_semantic_stats(client, &stats);
+tr_server_get_rpc_semantic_stats(server, &stats);
+```
+
+The contract is independent of Endpoint slots, executor workers and Transport
+connections:
+
+- Client `calls_started`: the Call API returned `TR_OK` and published a Call
+  capability;
+- Server `calls_started`: the first valid REQUEST was accepted for a
+  registered Method, including Calls later rejected by interceptor/admission;
+- `calls_finished`: one final application-visible RPC outcome was committed;
+- `calls_inflight`: snapshot gauge `started - finished`;
+- `final_status[status]`: exactly-once terminal status classification. The sum
+  of all buckets equals `calls_finished`.
+
+Cancellation and deadline are therefore not separate counter sources: they are
+`TR_RPC_STATUS_CANCELLED` and `TR_RPC_STATUS_DEADLINE_EXCEEDED` buckets.
+Likewise overload and connection loss appear as
+`TR_RPC_STATUS_RESOURCE_EXHAUSTED` and `TR_RPC_STATUS_UNAVAILABLE`.
+
+Server snapshots aggregate live shards and already retired peers through the
+existing owner/finalizer paths; no global hot-path atomic is added. A Server
+snapshot is structured rather than globally atomic across shards, so counters
+may advance while it is collected. After drain it is stable.
+
+This V1 is aggregate RPC observability only. Per-Service/Method semantic
+breakdown can be added later with shard-local accounting; it must not introduce
+a shared cross-shard hot counter.
+
 ## Reactor attribution
 
 `tr_reactor_get_stats()` reports:

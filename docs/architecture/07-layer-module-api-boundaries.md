@@ -894,6 +894,9 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 - P4 第三阶段把 timing observability flag 移到 internal tuning，并将
   `observability.h` 从 installed SDK allowlist 移除；固定 histogram 与 queue/pool
   snapshot 类型现在明确属于 engine diagnostics contract；
+- P4 第四阶段增加 stable aggregate `tr_rpc_semantic_stats`：started / finished /
+  inflight / final status distribution；Client 读取当前 Endpoint，Server 通过
+  shard-owner snapshot + retired-peer finalizer 聚合，不暴露 Runtime layout；
 - public Client/Server create 只接受 semantic config，并由 facade 内部生成 Runtime/Pool
   defaults；benchmark/architecture tests 通过 internal `*_create_with_tuning()`
   保留精确资源实验能力；
@@ -911,8 +914,8 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 
 - 如需应用可配置过载策略，设计 max-inflight/admission 等 semantic policy，不能重新
   暴露 executor node/thread 实现数量；
-- facade-wide stable semantic observability 继续收敛：仅公开 Call/Service/Group
-  等业务语义计数，不公开 Reactor queue/pool/histogram layout；
+- per-Service/Method semantic observability 如有需求，必须使用 shard-local
+  accounting 再在 control plane 聚合，不能增加 shared hot counter；
 - RPC message pool 改为 bounded on-demand ownership 后移除
   `rpc_message_buffer_bytes`；
 
