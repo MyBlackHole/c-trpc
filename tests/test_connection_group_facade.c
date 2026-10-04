@@ -431,6 +431,7 @@ static void test_public_connection_group_server(void)
 
 	data = connect_loopback(group_port);
 	send_route(data, &data_route);
+	wait_data_accepts(server, 1U);
 
 	/*
 	 * 物理 DATA membership 本身不是 transfer authorization。Server 必须先在
