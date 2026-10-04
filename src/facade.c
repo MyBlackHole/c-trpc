@@ -41,13 +41,11 @@ void tr_facade_tuning_init(struct tr_facade_tuning *tuning)
 	tuning->observability_flags = 0U;
 }
 
-void tr_facade_tuning_normalize(
-	struct tr_facade_tuning *tuning,
-	const struct tr_facade_limits *limits)
+void tr_facade_tuning_normalize(struct tr_facade_tuning *tuning)
 {
 	struct tr_facade_tuning defaults;
 
-	if (!tuning || !limits)
+	if (!tuning)
 		return;
 	tr_facade_tuning_init(&defaults);
 

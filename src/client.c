@@ -188,7 +188,7 @@ int tr_client_create_with_tuning(
 		effective_tuning = *tuning;
 	else
 		tr_facade_tuning_init(&effective_tuning);
-	tr_facade_tuning_normalize(&effective_tuning, &effective.limits);
+	tr_facade_tuning_normalize(&effective_tuning);
 
 	if (!tr_tcp_nodelay_policy_valid(effective.tcp_nodelay) ||
 	    (effective_tuning.observability_flags &

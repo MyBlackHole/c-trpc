@@ -7,7 +7,6 @@ struct tr_client;
 struct tr_client_config;
 struct tr_server;
 struct tr_server_config;
-struct tr_facade_limits;
 
 /*
  * Repository-internal implementation tuning.
@@ -45,9 +44,7 @@ struct tr_facade_tuning {
 };
 
 void tr_facade_tuning_init(struct tr_facade_tuning *tuning);
-void tr_facade_tuning_normalize(
-	struct tr_facade_tuning *tuning,
-	const struct tr_facade_limits *limits);
+void tr_facade_tuning_normalize(struct tr_facade_tuning *tuning);
 
 int tr_client_create_with_tuning(
 	const struct tr_client_config *config,

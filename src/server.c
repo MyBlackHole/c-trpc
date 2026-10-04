@@ -1002,7 +1002,7 @@ int tr_server_create_with_tuning(
 		effective_tuning = *tuning;
 	else
 		tr_facade_tuning_init(&effective_tuning);
-	tr_facade_tuning_normalize(&effective_tuning, &effective.limits);
+	tr_facade_tuning_normalize(&effective_tuning);
 	if (!tuning)
 		tr_server_tuning_ensure_shard_minimums(
 			&effective_tuning, effective.shard_count);

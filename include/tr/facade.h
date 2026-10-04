@@ -19,8 +19,11 @@ enum tr_tcp_nodelay_policy {
 };
 
 /*
- * Client/Server facade 共用的高层 runtime limits。
+ * Client/Server facade 共用的高层 semantic limits。
  * 值为 0 的字段由 tr_facade_limits_init() 填入默认值。
+ *
+ * Reactor/pool/executor/diagnostic implementation resources are deliberately
+ * not represented here; facade-owned runtime tuning stays internal.
  *
  * V1 facade 有意只暴露 shared-connection 模式；
  * 更底层的 Channel API 仍支持 split CONTROL/BULK connection。
@@ -43,12 +46,6 @@ struct tr_facade_limits {
 
 	uint64_t initial_window_bytes;
 	uint64_t window_update_threshold_bytes;
-
-	/*
-	 * Reactor/pool/executor implementation capacities are intentionally not
-	 * part of this stable semantic contract. Facade-owned runtime resources
-	 * are derived internally.
-	 */
 };
 
 void tr_facade_limits_init(struct tr_facade_limits *limits);
