@@ -13,6 +13,7 @@
 #include "buffer_internal.h"
 #include "transport/channel/channel_internal.h"
 #include "facade_diagnostics_internal.h"
+#include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
 #include "tr/reactor.h"
 #include "tr/rpc_wire.h"
@@ -20,7 +21,7 @@
 #include "tr/status.h"
 #include "rpc/rpc_internal.h"
 #include "runtime/runtime_internal.h"
-#include "socket_internal.h"
+#include "io/socket_internal.h"
 #include "observability_internal.h"
 #include "transport/group/pipeline_listener_internal.h"
 

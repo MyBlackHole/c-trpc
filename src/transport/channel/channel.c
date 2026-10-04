@@ -1,7 +1,7 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
-#include "../../connector_internal.h"
-#include "../../socket_internal.h"
+#include "../../io/connector_internal.h"
+#include "../../io/socket_internal.h"
 #include "../../reactor_internal.h"
 
 #include "tr/status.h"

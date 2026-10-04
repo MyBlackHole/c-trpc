@@ -11,7 +11,7 @@
 #include "tr/status.h"
 #include "../reactor_internal.h"
 #include "../rpc/rpc_internal.h"
-#include "../socket_internal.h"
+#include "../io/socket_internal.h"
 
 struct tr_runtime_shard {
 	uint32_t shard_id;

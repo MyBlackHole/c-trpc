@@ -17,10 +17,11 @@
 #include "transport/channel/channel_internal.h"
 #include "transport/group/client_group_internal.h"
 #include "facade_diagnostics_internal.h"
+#include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
 #include "rpc/rpc_internal.h"
 #include "runtime/runtime_internal.h"
-#include "socket_internal.h"
+#include "io/socket_internal.h"
 
 
 struct tr_client {
