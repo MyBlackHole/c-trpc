@@ -69,6 +69,11 @@ int tr_pipeline_listener_listen_ipv4(
 	struct tr_pipeline_listener *listener, const char *address,
 	uint16_t port, int backlog, uint16_t *out_bound_port);
 int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener);
+
+/*
+ * stop() 负责关闭 admission 并把所有 connection/session 收敛到静止状态。
+ * destroy() 只释放已经 stop/quiesce 的对象，不隐式执行可能失败的状态推进。
+ */
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener);
 void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
 
