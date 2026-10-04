@@ -42,7 +42,7 @@
 #define TR_WAKE_TOKEN UINT64_MAX
 #define TR_LISTENER_TOKEN (UINT64_MAX - UINT64_C(1))
 #define TR_PEER_EVENT_TOKEN (UINT64_MAX - UINT64_C(2))
-#define TR_AUX_EVENT_TOKEN (UINT64_MAX - UINT64_C(3))
+#define TR_REACTOR_AUX_EVENT_CAPACITY 16U
 
 /*
  * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
@@ -166,6 +166,14 @@ struct tr_slot {
 	_Atomic uint64_t meta;
 };
 
+struct tr_aux_event_source {
+	int fd;
+	uint16_t generation;
+	int used;
+	tr_reactor_aux_event_cb callback;
+	void *arg;
+};
+
 struct tr_reactor_sync {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
@@ -191,9 +199,7 @@ struct tr_reactor {
 	int peer_event_fd;
 	tr_reactor_peer_event_cb peer_event_cb;
 	void *peer_event_arg;
-	int aux_event_fd;
-	tr_reactor_aux_event_cb aux_event_cb;
-	void *aux_event_arg;
+	struct tr_aux_event_source aux_events[TR_REACTOR_AUX_EVENT_CAPACITY];
 	pthread_t thread;
 
 	pthread_mutex_t ctl_lock;
@@ -251,6 +257,40 @@ static void tr_conn_token_decode(uint64_t token, uint32_t *slot,
 {
 	*slot = (uint32_t)token;
 	*generation = (uint32_t)(token >> 32);
+}
+
+/*
+ * connection generation 永远跳过 UINT32_MAX，因此高 32 位全 1 可作为
+ * Reactor 内部 auxiliary event token 的独立 namespace。
+ *
+ * low 32 位：高 16 位是 aux generation，低 16 位是 slot。
+ */
+static uint64_t tr_aux_event_token(uint32_t slot, uint16_t generation)
+{
+	return (UINT64_C(0xffffffff) << 32) |
+	       ((uint64_t)generation << 16) | (uint64_t)slot;
+}
+
+static int tr_aux_event_token_decode(uint64_t token, uint32_t *slot,
+				     uint16_t *generation)
+{
+	uint32_t low;
+
+	if ((uint32_t)(token >> 32) != UINT32_MAX)
+		return 0;
+	low = (uint32_t)token;
+	*slot = low & UINT32_C(0xffff);
+	*generation = (uint16_t)(low >> 16);
+	return *slot < TR_REACTOR_AUX_EVENT_CAPACITY &&
+	       *generation != 0U && *generation != UINT16_MAX;
+}
+
+static uint16_t tr_aux_event_next_generation(uint16_t generation)
+{
+	generation++;
+	if (generation == 0U || generation == UINT16_MAX)
+		generation = 1U;
+	return generation;
 }
 
 static int tr_tx_pool_init(struct tr_tx_pool *pool, uint32_t capacity)
@@ -523,7 +563,7 @@ static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
 			continue;
 
 		generation = tr_slot_meta_generation(old) + 1U;
-		if (generation == 0)
+		if (generation == 0U || generation == UINT32_MAX)
 			generation = 1U;
 		desired = tr_slot_meta_make(generation, TR_CONN_RESERVED);
 
@@ -1900,6 +1940,25 @@ static void tr_drain_completions(struct tr_reactor *reactor)
 	} while (more);
 }
 
+static int tr_reactor_dispatch_aux_event(
+	struct tr_reactor *reactor, uint64_t token, uint32_t events)
+{
+	struct tr_aux_event_source *source;
+	uint32_t slot;
+	uint16_t generation;
+
+	if (!tr_aux_event_token_decode(token, &slot, &generation))
+		return 0;
+
+	source = &reactor->aux_events[slot];
+	if (!source->used || source->generation != generation ||
+	    !source->callback)
+		return 1;
+
+	source->callback(source->fd, events, source->arg);
+	return 1;
+}
+
 static void *tr_reactor_thread_main(void *arg)
 {
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
@@ -1972,13 +2031,10 @@ static void *tr_reactor_thread_main(void *arg)
 						reactor->peer_event_fd,
 						events[i].events,
 						reactor->peer_event_arg);
-			} else if (events[i].data.u64 == TR_AUX_EVENT_TOKEN) {
-				if (reactor->aux_event_cb &&
-				    reactor->aux_event_fd >= 0)
-					reactor->aux_event_cb(
-						reactor->aux_event_fd,
-						events[i].events,
-						reactor->aux_event_arg);
+			} else if (tr_reactor_dispatch_aux_event(
+					   reactor, events[i].data.u64,
+					   events[i].events)) {
+				/* auxiliary source 已在 helper 内完成 dispatch/stale drop */
 			} else {
 				tr_handle_connection_event(reactor,
 							   events[i].data.u64,
@@ -2085,7 +2141,8 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	reactor->wake_fd = -1;
 	reactor->listener_fd = -1;
 	reactor->peer_event_fd = -1;
-	reactor->aux_event_fd = -1;
+	for (i = 0; i < TR_REACTOR_AUX_EVENT_CAPACITY; ++i)
+		reactor->aux_events[i].fd = -1;
 
 	if (config)
 		reactor->config = *config;
@@ -2453,37 +2510,62 @@ static int tr_reactor_aux_event_register_now(
 	tr_reactor_aux_event_cb callback, void *arg)
 {
 	struct epoll_event event;
+	struct tr_aux_event_source *source = NULL;
+	uint32_t i;
 
-	if (reactor->aux_event_fd >= 0)
-		return TR_ERR_STATE;
 	if (events == 0U || (events & ~(uint32_t)(EPOLLIN | EPOLLOUT)) != 0U)
 		return TR_ERR_INVALID;
 
+	for (i = 0; i < TR_REACTOR_AUX_EVENT_CAPACITY; ++i) {
+		if (reactor->aux_events[i].used &&
+		    reactor->aux_events[i].fd == fd)
+			return TR_ERR_STATE;
+		if (!source && !reactor->aux_events[i].used)
+			source = &reactor->aux_events[i];
+	}
+	if (!source)
+		return TR_AGAIN;
+
+	source->generation =
+		tr_aux_event_next_generation(source->generation);
 	memset(&event, 0, sizeof(event));
 	event.events = events | EPOLLERR | EPOLLHUP;
-	event.data.u64 = TR_AUX_EVENT_TOKEN;
+	event.data.u64 = tr_aux_event_token(
+		(uint32_t)(source - reactor->aux_events), source->generation);
 	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0)
 		return TR_ERR_SYS;
 
-	reactor->aux_event_fd = fd;
-	reactor->aux_event_cb = callback;
-	reactor->aux_event_arg = arg;
+	source->fd = fd;
+	source->callback = callback;
+	source->arg = arg;
+	source->used = 1;
 	return TR_OK;
 }
 
 static int tr_reactor_aux_event_unregister_now(
 	struct tr_reactor *reactor, int fd)
 {
-	if (reactor->aux_event_fd < 0)
-		return TR_OK;
-	if (reactor->aux_event_fd != fd)
-		return TR_ERR_STALE;
+	uint32_t i;
+	int any_used = 0;
 
-	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-	reactor->aux_event_fd = -1;
-	reactor->aux_event_cb = NULL;
-	reactor->aux_event_arg = NULL;
-	return TR_OK;
+	for (i = 0; i < TR_REACTOR_AUX_EVENT_CAPACITY; ++i) {
+		struct tr_aux_event_source *source = &reactor->aux_events[i];
+
+		if (!source->used)
+			continue;
+		any_used = 1;
+		if (source->fd != fd)
+			continue;
+
+		(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+		source->fd = -1;
+		source->callback = NULL;
+		source->arg = NULL;
+		source->used = 0;
+		return TR_OK;
+	}
+
+	return any_used ? TR_ERR_STALE : TR_OK;
 }
 
 static int tr_reactor_aux_event_register_on_owner(void *arg)
