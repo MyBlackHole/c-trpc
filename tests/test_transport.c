@@ -5117,6 +5117,7 @@ static int rpc_client_interceptor(
 
 	if (phase == TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL) {
 		assert(status == TR_RPC_STATUS_OK);
+		assert(tr_rpc_call_cancel(call) == TR_ERR_STATE);
 		assert(tr_rpc_call_set_metadata(
 			       call, "auth-token", "token-v1", 8U) == TR_OK);
 		pthread_mutex_lock(&ctx->lock);
