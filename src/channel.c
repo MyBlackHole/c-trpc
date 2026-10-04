@@ -1,5 +1,6 @@
 #include "tr/channel.h"
 #include "channel_internal.h"
+#include "connector_internal.h"
 #include "socket_internal.h"
 #include "reactor_internal.h"
 
@@ -104,11 +105,11 @@ struct tr_channel {
 	tr_channel_event_cb lifecycle_event_cb;
 	void *lifecycle_callback_arg;
 
-	pthread_cond_t reconnect_cond;
-	pthread_t reconnect_thread;
-	int reconnect_thread_started;
 	int reconnect_enabled;
-	int reconnect_stop;
+	struct tr_connector *reconnect_connector;
+	struct tr_reactor_timer_handle reconnect_timer;
+	int reconnect_timer_registered;
+	enum tr_lane reconnect_lane;
 
 	char reconnect_address[64];
 	uint16_t reconnect_control_port;
@@ -1037,54 +1038,6 @@ static uint32_t tr_reconnect_delay_ms(uint32_t initial_ms, uint32_t max_ms,
 	return (uint32_t)delay;
 }
 
-static void tr_timespec_add_ms(struct timespec *ts, uint32_t delay_ms)
-{
-	ts->tv_sec += (time_t)(delay_ms / 1000U);
-	ts->tv_nsec += (long)(delay_ms % 1000U) * 1000000L;
-	if (ts->tv_nsec >= 1000000000L) {
-		ts->tv_sec++;
-		ts->tv_nsec -= 1000000000L;
-	}
-}
-
-static int tr_channel_connect_ipv4_timeout(const char *address, uint16_t port,
-					   uint32_t timeout_ms, int *out_fd)
-{
-	struct pollfd pfd;
-	int fd TR_AUTO(tr_fd_cleanup) = -1;
-	int ret;
-
-	if (!out_fd)
-		return TR_ERR_INVALID;
-	*out_fd = -1;
-
-	ret = tr_tcp_connect_ipv4(address, port, &fd);
-	if (ret == TR_OK) {
-		*out_fd = tr_fd_take(&fd);
-		return TR_OK;
-	}
-	if (ret != TR_IN_PROGRESS)
-		return ret;
-
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.fd = fd;
-	pfd.events = POLLOUT;
-
-	do {
-		ret = poll(&pfd, 1, (int)timeout_ms);
-	} while (ret < 0 && errno == EINTR);
-
-	if (ret <= 0)
-		return ret == 0 ? TR_AGAIN : TR_ERR_SYS;
-
-	ret = tr_tcp_finish_connect(fd);
-	if (ret != TR_OK)
-		return ret;
-
-	*out_fd = tr_fd_take(&fd);
-	return TR_OK;
-}
-
 static int tr_stream_allocate_locked(struct tr_channel *channel,
 				     uint32_t stream_id, enum tr_lane lane,
 				     enum tr_stream_slot_state state,
@@ -1875,8 +1828,7 @@ static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
 					    enum tr_lane *lane, uint16_t *port,
 					    uint32_t *attempt)
 {
-	if (!channel->reconnect_enabled || channel->reconnect_stop ||
-	    channel->local_draining)
+	if (!channel->reconnect_enabled || channel->local_draining)
 		return 0;
 
 	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
@@ -1921,13 +1873,39 @@ static int tr_channel_lane_still_down_locked(const struct tr_channel *channel,
 				      !channel->control_alive;
 }
 
-static void tr_channel_reconnect_finish_attempt(struct tr_channel *channel,
-						enum tr_lane lane, int success)
+static int tr_channel_reconnect_attempt_active_locked(
+	const struct tr_channel *channel, enum tr_lane lane)
+{
+	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION)
+		return channel->control_reconnecting &&
+		       channel->bulk_reconnecting &&
+		       channel->reconnect_lane == TR_LANE_CONTROL;
+	return channel->reconnect_lane == lane &&
+	       (lane == TR_LANE_BULK ? channel->bulk_reconnecting :
+				       channel->control_reconnecting);
+}
+
+static void tr_channel_reconnect_clear_attempt_locked(
+	struct tr_channel *channel, enum tr_lane lane)
+{
+	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
+		channel->control_reconnecting = 0;
+		channel->bulk_reconnecting = 0;
+	} else if (lane == TR_LANE_BULK) {
+		channel->bulk_reconnecting = 0;
+	} else {
+		channel->control_reconnecting = 0;
+	}
+}
+
+static void tr_channel_reconnect_finish_attempt(
+	struct tr_channel *channel, enum tr_lane lane, int success)
 {
 	pthread_mutex_lock(&channel->lock);
 	channel->stat_reconnect_attempts++;
 	if (success)
 		channel->stat_reconnect_successes++;
+
 	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
 		channel->control_reconnecting = 0;
 		channel->bulk_reconnecting = 0;
@@ -1955,102 +1933,141 @@ static void tr_channel_reconnect_finish_attempt(struct tr_channel *channel,
 			 channel->control_reconnect_attempt != UINT32_MAX)
 			channel->control_reconnect_attempt++;
 	}
-	pthread_cond_broadcast(&channel->reconnect_cond);
 	pthread_mutex_unlock(&channel->lock);
 }
 
-static void *tr_channel_reconnect_thread_main(void *arg)
+static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
+
+static void tr_channel_reconnect_connector_complete(
+	int status, int fd, void *arg)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
+	struct tr_conn_handle connection;
+	enum tr_lane lane;
+	int success = 0;
+	int ret;
 
-	for (;;) {
-		enum tr_lane lane = TR_LANE_CONTROL;
-		uint16_t port = 0;
-		uint32_t attempt = 0;
-		uint32_t delay_ms;
-		struct timespec deadline;
-		int fd TR_AUTO(tr_fd_cleanup) = -1;
-		int ret;
-		struct tr_conn_handle connection;
-
-		pthread_mutex_lock(&channel->lock);
-		while (!channel->reconnect_stop &&
-		       !tr_channel_reconnect_pick_locked(channel, &lane, &port,
-							 &attempt))
-			pthread_cond_wait(&channel->reconnect_cond,
-					  &channel->lock);
-
-		if (channel->reconnect_stop) {
-			pthread_mutex_unlock(&channel->lock);
-			break;
-		}
-
-		delay_ms = tr_reconnect_delay_ms(
-			channel->reconnect_initial_delay_ms,
-			channel->reconnect_max_delay_ms, attempt);
-		if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
-			if (channel->config.mode ==
-			    TR_CHANNEL_SHARED_CONNECTION) {
-				channel->control_reconnecting = 0;
-				channel->bulk_reconnecting = 0;
-			} else if (lane == TR_LANE_BULK) {
-				channel->bulk_reconnecting = 0;
-			} else {
-				channel->control_reconnecting = 0;
-			}
-			pthread_mutex_unlock(&channel->lock);
-			continue;
-		}
-		tr_timespec_add_ms(&deadline, delay_ms);
-
-		while (!channel->reconnect_stop &&
-		       tr_channel_lane_still_down_locked(channel, lane)) {
-			ret = pthread_cond_timedwait(&channel->reconnect_cond,
-						     &channel->lock, &deadline);
-			if (ret == ETIMEDOUT)
-				break;
-		}
-
-		if (channel->reconnect_stop) {
-			pthread_mutex_unlock(&channel->lock);
-			break;
-		}
-		if (!tr_channel_lane_still_down_locked(channel, lane)) {
-			if (channel->config.mode ==
-			    TR_CHANNEL_SHARED_CONNECTION) {
-				channel->control_reconnecting = 0;
-				channel->bulk_reconnecting = 0;
-			} else if (lane == TR_LANE_BULK) {
-				channel->bulk_reconnecting = 0;
-			} else {
-				channel->control_reconnecting = 0;
-			}
-			pthread_mutex_unlock(&channel->lock);
-			continue;
-		}
-		pthread_mutex_unlock(&channel->lock);
-
-		ret = tr_channel_connect_ipv4_timeout(
-			channel->reconnect_address, port,
-			channel->reconnect_connect_timeout_ms, &fd);
-		if (ret == TR_OK && channel->reconnect_tcp_nodelay)
-			ret = tr_tcp_set_nodelay(fd, 1);
-		if (ret == TR_OK) {
-			ret = tr_reactor_adopt_fd(channel->reactor, fd,
-						  &connection);
-			if (ret == TR_OK) {
-				(void)tr_fd_take(&fd);
-				ret = tr_channel_replace_connection(
-					channel, lane, connection);
-				if (ret != TR_OK)
-					(void)tr_reactor_close(connection);
-			}
-		}
-		tr_channel_reconnect_finish_attempt(channel, lane,
-						    ret == TR_OK);
+	if (!channel) {
+		tr_socket_close(&fd);
+		return;
 	}
 
-	return NULL;
+	pthread_mutex_lock(&channel->lock);
+	lane = channel->reconnect_lane;
+	if (!channel->reconnect_enabled ||
+	    !tr_channel_reconnect_attempt_active_locked(channel, lane) ||
+	    !tr_channel_lane_still_down_locked(channel, lane)) {
+		tr_channel_reconnect_clear_attempt_locked(channel, lane);
+		pthread_mutex_unlock(&channel->lock);
+		tr_socket_close(&fd);
+		tr_channel_reconnect_schedule_on_owner(channel);
+		return;
+	}
+	pthread_mutex_unlock(&channel->lock);
+
+	if (status == TR_OK) {
+		memset(&connection, 0, sizeof(connection));
+		ret = tr_reactor_adopt_fd(channel->reactor, fd, &connection);
+		if (ret == TR_OK) {
+			fd = -1;
+			ret = tr_channel_replace_connection(
+				channel, lane, connection);
+			if (ret != TR_OK)
+				(void)tr_reactor_close_on_owner(connection);
+		}
+		if (ret == TR_OK)
+			success = 1;
+	}
+	tr_socket_close(&fd);
+
+	tr_channel_reconnect_finish_attempt(channel, lane, success);
+	tr_channel_reconnect_schedule_on_owner(channel);
+}
+
+static uint64_t tr_channel_reconnect_timer_main(void *arg, uint64_t now_ns)
+{
+	struct tr_channel *channel = (struct tr_channel *)arg;
+	enum tr_lane lane;
+	uint16_t port;
+	int ret;
+	int valid;
+
+	(void)now_ns;
+	pthread_mutex_lock(&channel->lock);
+	lane = channel->reconnect_lane;
+	valid = channel->reconnect_enabled &&
+		tr_channel_reconnect_attempt_active_locked(channel, lane) &&
+		tr_channel_lane_still_down_locked(channel, lane);
+	port = lane == TR_LANE_BULK ?
+		       channel->reconnect_bulk_port :
+		       channel->reconnect_control_port;
+	if (!valid)
+		tr_channel_reconnect_clear_attempt_locked(channel, lane);
+	pthread_mutex_unlock(&channel->lock);
+
+	if (!valid) {
+		tr_channel_reconnect_schedule_on_owner(channel);
+		return 0U;
+	}
+
+	ret = tr_connector_start(
+		channel->reconnect_connector, channel->reconnect_address,
+		port, NULL, 0U);
+	if (ret != TR_OK) {
+		int still_active;
+
+		/*
+		 * connector 在进入 active 后失败时会同步/异步调用 completion。
+		 * 只有 start 在发布 connector ownership 前失败，attempt 才仍由这里收敛。
+		 */
+		pthread_mutex_lock(&channel->lock);
+		still_active =
+			tr_channel_reconnect_attempt_active_locked(channel, lane);
+		pthread_mutex_unlock(&channel->lock);
+		if (still_active) {
+			tr_channel_reconnect_finish_attempt(channel, lane, 0);
+			tr_channel_reconnect_schedule_on_owner(channel);
+		}
+	}
+	return 0U;
+}
+
+static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel)
+{
+	enum tr_lane lane = TR_LANE_CONTROL;
+	uint16_t port = 0U;
+	uint32_t attempt = 0U;
+	uint32_t delay_ms;
+	uint64_t now_ns;
+	uint64_t delay_ns;
+	uint64_t deadline_ns;
+	int picked;
+	int ret;
+
+	pthread_mutex_lock(&channel->lock);
+	picked = tr_channel_reconnect_pick_locked(
+		channel, &lane, &port, &attempt);
+	if (picked)
+		channel->reconnect_lane = lane;
+	pthread_mutex_unlock(&channel->lock);
+	if (!picked)
+		return;
+
+	(void)port;
+	delay_ms = tr_reconnect_delay_ms(
+		channel->reconnect_initial_delay_ms,
+		channel->reconnect_max_delay_ms, attempt);
+	now_ns = tr_channel_now_ns();
+	if (now_ns == 0U) {
+		tr_channel_reconnect_finish_attempt(channel, lane, 0);
+		return;
+	}
+	delay_ns = (uint64_t)delay_ms * UINT64_C(1000000);
+	deadline_ns = UINT64_MAX - now_ns < delay_ns ?
+			      UINT64_MAX : now_ns + delay_ns;
+	ret = tr_reactor_timer_arm(channel->reconnect_timer, deadline_ns);
+	if (ret != TR_OK)
+		tr_channel_reconnect_finish_attempt(channel, lane, 0);
 }
 
 static void tr_channel_default_config(struct tr_channel_config *config)
