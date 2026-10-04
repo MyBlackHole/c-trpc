@@ -358,8 +358,11 @@ static uint64_t tr_rpc_timeout_deadline_ns(uint32_t timeout_ms)
 
 /*
  * Mutable RPC protocol state is applied by the Channel's Reactor owner.
- * endpoint->lock remains as a transition lock until the remaining application
- * control-plane APIs have also moved behind owner commands.
+ * endpoint->lock 只保护 Call/Method/protocol transition；strong-ref wait 与
+ * detached-finalizer lifecycle 已拆到 endpoint->ref_lock。
+ *
+ * endpoint->lock 仍是过渡锁，直到剩余 application control-plane API 也迁移到
+ * owner command。
  */
 static int tr_rpc_owner_call(struct tr_rpc_endpoint *endpoint,
 			     int (*fn)(void *arg), void *arg)
