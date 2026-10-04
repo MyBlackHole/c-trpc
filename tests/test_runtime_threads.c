@@ -1,6 +1,8 @@
 #include "tr/client.h"
+#include "tr/reactor.h"
 #include "tr/server.h"
 #include "tr/status.h"
+#include "../src/channel_internal.h"
 #include "../src/runtime_internal.h"
 
 #include <assert.h>
@@ -9,6 +11,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /*
  * 仅此测试通过链接器 --wrap 观察库对 pthread 的调用。计数不包含宿主或
@@ -138,6 +141,64 @@ static void test_client_create_destroy_threads(void)
 		tr_client_destroy(client);
 		expect_threads(1U, 1U);
 	}
+}
+
+static void test_channel_reconnect_uses_no_extra_thread(void)
+{
+	struct tr_channel_config channel_config;
+	struct tr_channel_reconnect_config reconnect_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client = NULL;
+	struct tr_channel *server = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	int sockets[2];
+
+	reset_probe(0U);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	expect_threads(1U, 0U);
+
+	assert(tr_reactor_adopt_fd(reactor, sockets[0], &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, sockets[1], &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, client_conn, client_conn,
+		       NULL, NULL, NULL, NULL, &client) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create_deferred(
+		       &channel_config, server_conn, server_conn,
+		       NULL, NULL, NULL, NULL, &server) == TR_OK);
+	assert(tr_channel_start(client) == TR_OK);
+	assert(tr_channel_start(server) == TR_OK);
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+
+	memset(&reconnect_config, 0, sizeof(reconnect_config));
+	reconnect_config.ipv4_address = "127.0.0.1";
+	reconnect_config.control_port = 1U;
+	reconnect_config.initial_delay_ms = 10U;
+	reconnect_config.max_delay_ms = 40U;
+	reconnect_config.connect_timeout_ms = 50U;
+	assert(tr_channel_enable_client_reconnect(
+		       client, &reconnect_config) == TR_OK);
+
+	/* reconnect 只增加 Reactor timer/connector state，不创建 maintenance pthread。 */
+	expect_threads(1U, 0U);
+
+	assert(tr_channel_disable_client_reconnect(client) == TR_OK);
+	tr_channel_destroy(client);
+	tr_channel_destroy(server);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	expect_threads(1U, 1U);
+	tr_reactor_destroy(reactor);
 }
 
 static void test_server_create_start_destroy_threads(void)
@@ -336,6 +397,7 @@ static void test_server_runtime_start_failures(void)
 int main(void)
 {
 	RUN_TEST(test_client_create_destroy_threads);
+	RUN_TEST(test_channel_reconnect_uses_no_extra_thread);
 	RUN_TEST(test_server_create_start_destroy_threads);
 	RUN_TEST(test_server_multi_shard_threads);
 	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
