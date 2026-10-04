@@ -9,6 +9,7 @@
 
 struct tr_pipeline_ingress_member {
 	struct tr_pipeline_registry *registry;
+	struct tr_pipeline *pipeline;
 	struct tr_pipeline_route_preface preface;
 	struct tr_pipeline_data_ref data;
 	tr_reactor_frame_cb frame_cb;
@@ -30,7 +31,34 @@ static enum tr_frame_disposition tr_pipeline_ingress_frame(
 	struct tr_pipeline_ingress_member *member =
 		(struct tr_pipeline_ingress_member *)arg;
 
-	if (!member || !member->frame_cb)
+	if (!member)
+		return TR_FRAME_RELEASE;
+
+	if (frame && frame->header.type == TR_FRAME_DATA) {
+		struct tr_pipeline_data_ref data;
+		struct tr_conn_handle bound;
+		int ret;
+
+		memset(&data, 0, sizeof(data));
+		memset(&bound, 0, sizeof(bound));
+		ret = tr_pipeline_stream_data(
+			member->pipeline, frame->header.stream_id,
+			&data, &bound);
+		if (ret != TR_OK ||
+		    data.index != member->data.index ||
+		    data.generation != member->data.generation ||
+		    bound.reactor != connection.reactor ||
+		    bound.slot != connection.slot ||
+		    bound.generation != connection.generation) {
+			if (ret == TR_OK)
+				ret = TR_ERR_STALE;
+			(void)tr_reactor_abort_on_owner(
+				connection, ret < 0 ? ret : TR_ERR_STATE);
+			return TR_FRAME_RELEASE;
+		}
+	}
+
+	if (!member->frame_cb)
 		return TR_FRAME_RELEASE;
 	return member->frame_cb(connection, frame, member->callback_arg);
 }
@@ -81,8 +109,9 @@ int tr_pipeline_ingress_attach_data_route_on_owner(
 		return TR_ERR_NOMEM;
 
 	memset(&attached, 0, sizeof(attached));
-	ret = tr_pipeline_registry_attach_data_route(
-		config->registry, preface, connection, &attached);
+	ret = tr_pipeline_registry_attach_data_route_local_on_owner(
+		config->registry, preface, connection, &attached,
+		&member->pipeline);
 	if (ret != TR_OK) {
 		free(member);
 		return ret;
