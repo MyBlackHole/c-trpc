@@ -315,10 +315,19 @@ P4 第一、二、三阶段：
   architecture diagnostics 使用，不进入 installed SDK；
 - `rpc_message_buffer_bytes` 暂留，等待 fixed RPC message pool ownership 重构后再移。
 
+P4 第四阶段：
+
+- 新增 stable `tr_rpc_semantic_stats`；
+- Client/Server facade 提供 aggregate RPC lifecycle snapshot；
+- 指标只包含 started / finished / inflight / final RPC status distribution；
+- Server 复用 shard-owner + retired-peer finalizer 汇总，不新增全局热路径 atomic；
+- per-Service/Method breakdown 暂缓，后续必须采用 shard-local accounting。
+
 下一阶段：
 
-- 继续设计 facade-wide stable semantic observability，但只公开与 Runtime layout
-  无关的 RPC/Service 语义指标；
+- 评估 per-Service/Method semantic observability；
+- 重构 RPC encoded-message ownership，移除最后一个 transitional
+  `rpc_message_buffer_bytes`；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 
 详细审查见 [分层、模块职责与 API 边界](07-layer-module-api-boundaries.md)。
