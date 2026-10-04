@@ -86,6 +86,7 @@ target("trcore")
         "src/completion_queue.c",
         "src/timer_queue.c",
         "src/socket.c",
+        "src/connector.c",
         "src/reactor.c",
         "src/runtime.c",
         "src/pipeline.c",

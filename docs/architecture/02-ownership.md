@@ -57,6 +57,7 @@ flowchart TB
 | RPC Endpoint protocol state | Reactor shard | command/completion | TARGET 去除 worker 直接修改 |
 | RPC Call | Reactor shard | completion | hot state 无锁 |
 | Connection Group / Pipeline | Reactor shard | command / owner API | hot state owner-only |
+| Outbound Connector | Reactor shard | owner API | connecting fd 由 connector 独占；completion/cancel 明确 transfer/close |
 | Task | Worker | ownership transfer | 无共享修改 |
 | Completion | producer → Reactor | bounded per-Reactor MPSC queue | queue-local admission + wake coalescing；不经过 ctl_lock |
 | RPC Executor / Worker Queue | Reactor shard | owner submit / local worker pop | shard-local mutex + cond 可接受 |
@@ -156,4 +157,7 @@ error
 - cross-shard fd handoff；
 - RPC task；
 - RPC completion（当前使用独立 bounded queue，不再复用 Command Queue）；
-- Connection Group / Pipeline work item。
+- Connection Group / Pipeline work item；
+- Reactor-owned Connector attempt：`TR_OK` 表示 connector 已接管 attempt；connect
+  成功后 fd ownership 通过 completion 转移给 Channel/Group，失败或 cancel 由
+  connector 关闭。

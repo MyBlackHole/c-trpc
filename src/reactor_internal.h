@@ -78,9 +78,12 @@ int tr_reactor_peer_event_unregister(struct tr_reactor *reactor, int fd);
 typedef void (*tr_reactor_aux_event_cb)(int fd, uint32_t events, void *arg);
 
 /*
- * One bounded auxiliary fd event source for owner-local state machines such as
- * nonblocking connect completion. Reactor observes the fd but never owns or
- * closes it. events accepts EPOLLIN/EPOLLOUT; ERR/HUP are always included.
+ * Bounded auxiliary fd event sources，供 owner-local 状态机使用，例如多个并发的
+ * nonblocking connect。每个 registration 使用独立 generation token，slot 复用后
+ * stale epoll event 会被安全丢弃。
+ *
+ * Reactor 只观察 fd，不取得 fd ownership，也不会主动 close。
+ * events 只接受 EPOLLIN/EPOLLOUT；ERR/HUP 始终自动加入。
  */
 int tr_reactor_aux_event_register(struct tr_reactor *reactor, int fd,
 				  uint32_t events,

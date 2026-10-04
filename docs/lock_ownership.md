@@ -91,10 +91,8 @@ Timer callback：
 - 每轮受 timer budget 限制。
 
 当前不存在旧版 shared maintenance scheduler，也不存在每 Endpoint/Channel 一个
-deadline/keepalive thread。
-
-Client 自动 reconnect 仍保留一个低频 reconnect thread；这是当前 Channel 过渡模型，
-不是 timer scheduler。
+deadline/keepalive/reconnect thread。Client automatic reconnect 的 backoff 与 connect
+timeout 分别由 Reactor-local timer 和 shared nonblocking connector 驱动。
 
 ## 3. Buffer pool
 
@@ -114,17 +112,13 @@ ownership，free-list 因此是真共享状态。
 
 **结论：当前保留，属于过渡锁。**
 
-Channel 目前仍可能被这些上下文访问：
+Channel 目前仍可能被 Reactor callback / owner call 与 application API thread 访问。
+自动 reconnect 已经迁移到所属 Reactor 的 timer + nonblocking connector，不再形成
+第三个 reconnect pthread 执行域。
 
-- Reactor callback / owner call；
-- application API thread；
-- Client reconnect thread。
-
-锁保护 lane mapping、Stream table、flow-control、capability negotiation、
-reconnect/drain 与部分 diagnostics。
-
-长期目标不是“把 mutex 换 atomic”，而是继续把修改型操作迁移到 Reactor owner。
-当 reconnect 也迁移到 Reactor-owned nonblocking connector 后，再重新评估这把锁。
+锁仍保护 lane mapping、Stream table、flow-control、capability negotiation、
+drain 与部分 diagnostics。后续继续把修改型 application API 收敛到 owner 后，
+再按 profile 缩小这把过渡锁；不通过增加 atomic shared state 来“删除 mutex”。
 
 ## 5. RPC Endpoint
 

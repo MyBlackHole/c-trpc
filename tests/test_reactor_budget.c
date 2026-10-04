@@ -724,6 +724,86 @@ static void test_rx_ready_close_reuse(void)
 	puts("RX/queued-close/same-slot-reuse: ok");
 }
 
+struct aux_source_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int fd0;
+	int fd1;
+	unsigned seen0;
+	unsigned seen1;
+};
+
+static void aux_source_test_cb(int fd, uint32_t events, void *arg)
+{
+	struct aux_source_test_ctx *ctx = (struct aux_source_test_ctx *)arg;
+	char byte;
+	ssize_t n;
+
+	assert(events & EPOLLIN);
+	do {
+		n = read(fd, &byte, 1U);
+	} while (n < 0 && errno == EINTR);
+	assert(n == 1);
+
+	assert(pthread_mutex_lock(&ctx->lock) == 0);
+	if (fd == ctx->fd0)
+		ctx->seen0++;
+	else if (fd == ctx->fd1)
+		ctx->seen1++;
+	else
+		assert(!"unexpected auxiliary fd");
+	assert(pthread_cond_broadcast(&ctx->cond) == 0);
+	assert(pthread_mutex_unlock(&ctx->lock) == 0);
+}
+
+static void test_multiple_aux_sources(void)
+{
+	struct aux_source_test_ctx ctx;
+	struct tr_reactor *reactor = NULL;
+	struct timespec deadline;
+	int a[2];
+	int b[2];
+	char byte = 'x';
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, a) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, b) == 0);
+	ctx.fd0 = a[0];
+	ctx.fd1 = b[0];
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_aux_event_register(
+		       reactor, a[0], EPOLLIN, aux_source_test_cb, &ctx) == TR_OK);
+	assert(tr_reactor_aux_event_register(
+		       reactor, b[0], EPOLLIN, aux_source_test_cb, &ctx) == TR_OK);
+
+	assert(write(a[1], &byte, 1U) == 1);
+	assert(write(b[1], &byte, 1U) == 1);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	assert(pthread_mutex_lock(&ctx.lock) == 0);
+	while (ctx.seen0 == 0U || ctx.seen1 == 0U)
+		assert(pthread_cond_timedwait(
+			       &ctx.cond, &ctx.lock, &deadline) == 0);
+	assert(pthread_mutex_unlock(&ctx.lock) == 0);
+
+	assert(tr_reactor_aux_event_unregister(reactor, a[0]) == TR_OK);
+	assert(tr_reactor_aux_event_unregister(reactor, b[0]) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	assert(close(a[0]) == 0);
+	assert(close(a[1]) == 0);
+	assert(close(b[0]) == 0);
+	assert(close(b[1]) == 0);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("multiple auxiliary reactor sources: ok");
+}
+
 static void noop(void *arg)
 {
 	(void)arg;
@@ -763,6 +843,7 @@ int main(void)
 	test_owner_send_fast_path();
 	test_eagain_wait();
 	test_rx_ready_close_reuse();
+	test_multiple_aux_sources();
 	test_completion_zero_budget();
 	alarm(0U);
 	return 0;
