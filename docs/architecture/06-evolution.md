@@ -333,7 +333,7 @@ P4 第五阶段：
   与 Method limit 约束；
 - Client pool 为 owner-local，Server pool 继续 shard-local，不新增跨 shard 热路径共享状态。
 
-P5 第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八阶段：
+P5 第一、二、三、四、五、六、七、八、九、十、十一、十二、十三、十四、十五、十六、十七、十八、十九阶段：
 
 - RPC engine 已迁到 `src/rpc/`；
 - Runtime orchestrator 已迁到 `src/runtime/`，只包含
@@ -357,14 +357,11 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - TRP1 framing implementation 已迁到 `src/transport/protocol/`：
   `wire.c` 负责固定 header codec/validation，`frame.c` 负责 frame payload ownership，
   `parser.c` 负责 bounded incremental receive parsing；
-- 对应 `include/tr/wire.h` / `frame.h` / `parser.h` 暂不物理迁移：
-  Reactor internal header 仍依赖 Frame 类型，先保持单向 include graph，避免
-  `include/tr -> src/` 反向依赖；
+- TRP1 wire/frame/parser capability headers 已与实现一起收敛到 `src/transport/protocol/`；
 - Channel state engine 已迁到 `src/transport/channel/`：Channel 自己拥有 HELLO/
   GOAWAY、Stream state/index、message ordering、flow-control、drain、keepalive 与 reconnect
   policy；connector/socket/Reactor 仍只作为 execution capability 被调用，不随 Channel 迁移；
-- `include/tr/channel.h` 暂留 source-tree internal include 区域，等待 Reactor/Channel
-  header dependency 进一步收敛后再移动；
+- Channel capability header 已与 state engine 一起收敛到 `src/transport/channel/`；
 - Linux socket primitive 与 Reactor-owned nonblocking connector 已迁到 `src/io/`：
   Socket 负责 nonblocking/cloexec/listen/connect/accept/TCP_NODELAY 等 fd primitives，
   Connector 负责 Reactor aux-fd + timer 驱动的 bounded connect/preface attempt；
@@ -374,8 +371,7 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
   Reactor 持有 epoll/eventfd、connection execution 与 queue/timer lifecycle；
   command/completion queues 继续提供 bounded cross-context handoff，timer queue 保持 owner-only；
 - `command_queue.h` 已从 `include/tr/` 下沉为 execution-local header；
-  `include/tr/reactor.h` 与 `src/reactor_internal.h` 暂时保留，等待跨模块 Reactor
-  capability/type boundary 进一步收敛后再决定最终 header 位置；
+- Reactor capability/internal headers 已与 execution substrate 一起收敛到 `src/execution/`；
 - Buffer implementation 已迁到 `src/execution/`：fixed/dynamic bounded pool、
   descriptor ownership、acquire/release 与 pool pressure stats 作为 execution resource
   primitive 管理；Client/Server 只通过 execution-local `buffer_internal.h` 使用
@@ -396,14 +392,17 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - `cleanup.h`、`guard.h` 与 `refcount.h` 已从 `include/tr/` 回收到 `src/` 根部，
   作为 repository-internal lifetime/concurrency primitives；ownership transfer、scope unlock、
   strong-reference memory ordering 与错误语义保持不变；
+- `observability.h` 已从 `include/tr/` 回收到 `src/observability.h`；固定 histogram、queue/pool
+  snapshot 与 timing flag 保持 engine diagnostics contract，stable `tr_rpc_semantic_stats`
+  继续只由 installed `tr/rpc.h` 暴露；
 - Reactor/command/completion/timer queue 继续作为独立 execution substrate，
   不因概念 Runtime layer 而机械并入物理 Runtime module；
-- public headers 继续留在 `include/tr/`，只收敛 internal include/build path；
+- `include/tr/` 物理目录只保留实际安装的 stable SDK headers；所有 internal header 均位于 `src/`；
 - 不改变 ownership、线程、锁、executor、resource bound、wire 或 hot path。
 
 下一阶段：
 
-- Group、Transport、network I/O、Reactor execution、Buffer resource 与 engine capability headers 的 P5 物理收敛已基本闭环；Socket、CRC32C、endian 与 lifetime utility headers 均已退出 public include tree；下一步只剩 observability header 边界需要单独评估；
+- P5 source/header 物理边界收敛完成：`include/tr/` 只保留实际安装的 8 个 stable SDK headers，所有 engine/utility/diagnostics headers 均位于 `src/`；下一步进入 Phase 7 Resource Driven Flow Control；
 - per-Service/Method semantic observability 暂不因目录重构顺带引入；
 - Connection Group P3 capability 进入维护/验证阶段，不再扩大 routing/internal contract。
 

@@ -3,8 +3,8 @@
 c-trpc collects structured snapshots inside the runtime instead of embedding a
 metrics backend in the core library. After the API-boundary cleanup, the
 low-level Reactor/Channel/Endpoint snapshot structures are an **internal
-diagnostics contract**, used by repository benchmarks/tests while a stable
-semantic observability API is designed.
+diagnostics contract**, used by repository benchmarks/tests alongside the
+separate stable semantic observability API.
 
 ## Cost model
 
@@ -26,9 +26,9 @@ The flag is propagated internally to Reactor and RPC Endpoint engine
 configuration. With timing disabled, scheduling hot paths do not perform the
 extra monotonic-clock reads used by latency histograms.
 
-`tr/observability.h` remains a repository-internal engine header because
-Reactor/RPC diagnostics use its fixed histogram and queue/pool snapshot types,
-but it is no longer installed as part of the stable SDK.
+`src/observability.h` is a repository-internal diagnostics contract. Reactor/RPC
+engine diagnostics use its fixed histogram and queue/pool snapshot types, while
+stable semantic RPC observability remains defined by the installed `tr/rpc.h` API.
 
 Timing histograms are diagnostic samples, not transactional accounting
 counters. A timing sample is recorded only when the relevant monotonic-clock

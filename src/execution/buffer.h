@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "../cleanup.h"
-#include "tr/observability.h"
+#include "../observability.h"
 
 struct tr_buffer;
 typedef void (*tr_buffer_release_cb)(struct tr_buffer *buffer);
