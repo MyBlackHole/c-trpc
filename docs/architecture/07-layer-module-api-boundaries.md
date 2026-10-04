@@ -915,6 +915,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
   等业务语义计数，不公开 Reactor queue/pool/histogram layout；
 - RPC message pool 改为 bounded on-demand ownership 后移除
   `rpc_message_buffer_bytes`；
+
 ### P5 — Physical directory cleanup
 
 只有前面 capability 边界稳定后，再决定是否迁移为：

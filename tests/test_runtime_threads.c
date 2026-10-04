@@ -381,6 +381,37 @@ static void test_runtime_multi_shard_start_rollback(void)
 	expect_threads(5U, 5U);
 }
 
+static void test_facade_internal_tuning_rejects_invalid_observability(void)
+{
+	struct tr_client_config client_config;
+	struct tr_server_config server_config;
+	struct tr_facade_tuning tuning;
+	struct tr_client *client = NULL;
+	struct tr_server *server = NULL;
+
+	tr_client_config_init(&client_config);
+	small_limits(&client_config.limits);
+	tr_facade_tuning_init(&tuning);
+	tuning.observability_flags = UINT32_C(0x80000000);
+
+	reset_probe(0U);
+	assert(tr_client_create_with_tuning(
+		       &client_config, &tuning, &client) == TR_ERR_INVALID);
+	assert(client == NULL);
+	expect_threads(0U, 0U);
+
+	tr_server_config_init(&server_config);
+	small_limits(&server_config.limits);
+	tr_facade_tuning_init(&tuning);
+	tuning.observability_flags = UINT32_C(0x80000000);
+
+	reset_probe(0U);
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_ERR_INVALID);
+	assert(server == NULL);
+	expect_threads(0U, 0U);
+}
+
 static void test_client_thread_start_failure(void)
 {
 	struct tr_client_config config;
@@ -449,6 +480,7 @@ int main(void)
 	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
 	RUN_TEST(test_runtime_multi_shard_threads);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
+	RUN_TEST(test_facade_internal_tuning_rejects_invalid_observability);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);
 	RUN_TEST(test_server_runtime_start_failures);
