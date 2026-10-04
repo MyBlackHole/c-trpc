@@ -273,6 +273,58 @@ static void tr_client_group_invalidate_data_transfers(
 	struct tr_client_group *group, uint32_t data_slot,
 	uint32_t data_generation);
 
+static enum tr_frame_disposition tr_client_group_data_frame(
+	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
+{
+	(void)frame;
+	(void)arg;
+	/*
+	 * Server-to-Client DATA delivery 尚未进入当前 public capability。
+	 * 收到这类 payload 时明确终止 DATA lane，避免静默丢弃业务数据。
+	 */
+	(void)tr_reactor_abort_on_owner(connection, TR_ERR_UNSUPPORTED);
+	return TR_FRAME_RELEASE;
+}
+
+static void tr_client_group_data_event(
+	struct tr_conn_handle connection, enum tr_connection_event event,
+	int status, void *arg)
+{
+	struct tr_client_group *group = (struct tr_client_group *)arg;
+	uint32_t i;
+
+	(void)event;
+	(void)status;
+	if (!group)
+		return;
+
+	for (i = 0; i < group->data_capacity; ++i) {
+		int cancel_ret = TR_OK;
+
+		if (group->data[i].state != TR_CLIENT_GROUP_DATA_ACTIVE ||
+		    !tr_client_group_conn_equal(
+			    group->data[i].connection, connection))
+			continue;
+		if (!group->closing && group->control.reactor)
+			cancel_ret = tr_client_group_send_cancel_on_owner(
+				group, &group->data[i].route,
+				group->data[i].offer_message_id);
+		tr_client_group_invalidate_data_transfers(
+			group, i, group->data[i].route.member_generation);
+		memset(&group->data[i], 0, sizeof(group->data[i]));
+		group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
+		if (cancel_ret != TR_OK && group->control.reactor) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
+			return;
+		}
+		break;
+	}
+	if (!group->closing)
+		tr_client_group_start_next_on_owner(group);
+}
+
 static void tr_client_group_connector_complete(
 	int status, int fd, void *arg)
 {
