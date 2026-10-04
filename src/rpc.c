@@ -1203,6 +1203,44 @@ static int tr_rpc_validate_cardinality(enum tr_rpc_cardinality cardinality,
 	return TR_OK;
 }
 
+static int tr_rpc_status_valid(int status)
+{
+	return status >= TR_RPC_STATUS_OK &&
+	       status <= TR_RPC_STATUS_UNAUTHENTICATED;
+}
+
+/*
+ * Streaming final STATUS is the application terminal barrier.
+ *
+ * The peer must identify the same Method/codec as preceding RESPONSE frames.
+ * For a successful ONE response, exactly one RESPONSE must have arrived before
+ * STATUS(OK). Error STATUS may terminate before producing the nominal response.
+ */
+static int tr_rpc_validate_stream_status_locked(
+	const struct tr_rpc_call_slot *call,
+	const struct tr_rpc_wire_header *wire)
+{
+	const struct tr_rpc_method_desc *method;
+
+	if (!call || !call->method || !wire || call->is_unary ||
+	    call->final_status_seen || wire->payload_len != 0)
+		return TR_ERR_STATE;
+
+	method = &call->method->desc;
+	if (wire->service_id != method->service_id ||
+	    wire->method_id != method->method_id ||
+	    wire->codec_id != method->response_codec_id ||
+	    !tr_rpc_status_valid(wire->status))
+		return TR_ERR_STATE;
+
+	if (wire->status == TR_RPC_STATUS_OK &&
+	    method->response_cardinality == TR_RPC_ONE &&
+	    call->rx_count != 1U)
+		return TR_ERR_STATE;
+
+	return TR_OK;
+}
+
 static int tr_rpc_encode_message(struct tr_rpc_endpoint *endpoint,
 				 struct tr_rpc_call_slot *call, uint16_t type,
 				 const struct tr_rpc_method_desc *method,
@@ -2413,7 +2451,7 @@ static int tr_rpc_executor_run_server_unary(
 
 	ret = handler(task->call, &message.bytes, &response,
 		      task->u.server_unary.handler_arg);
-	if (ret != TR_OK)
+	if (ret != TR_OK || !tr_rpc_status_valid(response.status))
 		response.status = TR_RPC_STATUS_INTERNAL;
 
 	if (response.message.len >
@@ -3547,7 +3585,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		int first_response;
 
 		if (endpoint->config.role != TR_RPC_CLIENT || !call ||
-		    !call->method || call->cancelled) {
+		    !call->method || call->cancelled ||
+		    call->final_status_seen) {
 			pthread_mutex_unlock(&endpoint->lock);
 			(void)tr_stream_close(stream);
 			return TR_STREAM_DATA_RELEASE;
@@ -3619,9 +3658,8 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	if (wire.type == TR_RPC_WIRE_STATUS) {
 		int first_response;
 
-		if (endpoint->config.role != TR_RPC_CLIENT || !call ||
-		    call->is_unary || wire.payload_len != 0 ||
-		    call->final_status_seen) {
+		if (endpoint->config.role != TR_RPC_CLIENT ||
+		    tr_rpc_validate_stream_status_locked(call, &wire) != TR_OK) {
 			pthread_mutex_unlock(&endpoint->lock);
 			(void)tr_stream_close(stream);
 			return TR_STREAM_DATA_RELEASE;
@@ -3806,7 +3844,15 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				ret = tr_rpc_store_pending_executor_task_locked(
 					endpoint, call, &task);
 		} else if (!call->is_unary &&
-			   endpoint->config.role == TR_RPC_CLIENT) {
+			   endpoint->config.role == TR_RPC_CLIENT &&
+			   !call->final_status_seen) {
+			/*
+			 * FINISHED is the application terminal barrier. A normal Server
+			 * sends STATUS before closing its response half, so the subsequent
+			 * transport half-close must not create an event after FINISHED.
+			 * REMOTE_CLOSED remains useful only when the peer half-closes
+			 * before a final STATUS has been observed.
+			 */
 			ret = tr_rpc_queue_client_event_locked(
 				endpoint, slot, call,
 				TR_RPC_CALL_EVENT_REMOTE_CLOSED,
@@ -5031,7 +5077,8 @@ int tr_rpc_call_finish(struct tr_rpc_call_handle handle, int status)
 	struct tr_rpc_finish_request request;
 
 	if (!tr_rpc_call_handle_endpoint(handle) ||
-	    tr_rpc_call_handle_endpoint(handle)->config.role != TR_RPC_SERVER)
+	    tr_rpc_call_handle_endpoint(handle)->config.role != TR_RPC_SERVER ||
+	    !tr_rpc_status_valid(status))
 		return TR_ERR_INVALID;
 
 	request.handle = handle;
