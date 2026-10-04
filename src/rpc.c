@@ -2039,7 +2039,6 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			tr_rpc_maybe_free_call_locked(endpoint, call);
 		}
 	}
-unary_out:
 	pthread_mutex_unlock(&endpoint->lock);
 
 	/*
