@@ -222,26 +222,11 @@ static enum tr_frame_disposition tr_pipeline_listener_data_frame(
 	struct tr_pipeline_listener_connection *tracked =
 		(struct tr_pipeline_listener_connection *)arg;
 	struct tr_pipeline_listener *listener;
-	int ret;
 
 	if (!tracked || !tracked->used)
 		return TR_FRAME_RELEASE;
 	listener = tracked->listener;
-	if (!listener)
-		return TR_FRAME_RELEASE;
-
-	if (frame && frame->header.type == TR_FRAME_DATA) {
-		ret = tr_pipeline_registry_validate_stream_route(
-			listener->registry, &tracked->route,
-			frame->header.stream_id, connection);
-		if (ret != TR_OK) {
-			(void)tr_reactor_abort_on_owner(
-				connection, ret < 0 ? ret : TR_ERR_STATE);
-			return TR_FRAME_RELEASE;
-		}
-	}
-
-	if (!listener->config.data_frame_cb)
+	if (!listener || !listener->config.data_frame_cb)
 		return TR_FRAME_RELEASE;
 	return listener->config.data_frame_cb(
 		&tracked->route, connection, frame,
