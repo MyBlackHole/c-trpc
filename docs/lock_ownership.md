@@ -153,11 +153,18 @@ RPC 可变协议状态的修改型 worker API 已经通过 owner-call 回到 Rea
 
 `endpoint->lock` 当前主要保护：
 
-- Call/Method table 与索引；
-- 尚未完全 owner 化的 application control-plane；
-- pending executor admission/Call transition。
+- Call table/index 与 fallback task completion；
+- Method table/index 的一致性 snapshot；
+- pending executor admission/Call transition；
+- 尚未 owner 化的少量 diagnostics/read 路径。
 
-它不再承担 strong-ref wait 或 detached-finalizer lifecycle。
+Method registration 已迁到 Reactor owner command；Client Unary/Streaming Call
+creation/start 原本也已经通过 owner-call 执行。因此 application thread 不再直接
+成为 Method/Call creation writer。Method registry 与 inbound REQUEST 现在由同一
+owner event ordering 串行化。
+
+它不再承担 strong-ref wait、detached-finalizer lifecycle 或 Method publication
+ordering。
 
 ### `endpoint->ref_lock`
 

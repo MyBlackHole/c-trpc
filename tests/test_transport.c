@@ -1264,6 +1264,172 @@ static void test_channel_handler_publication_is_owner_serialized(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct rpc_method_owner_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int owner_entered;
+	int owner_release;
+	int registrar_done;
+	int registrar_ret;
+};
+
+struct rpc_method_register_arg {
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_channel *channel;
+	struct tr_rpc_method_desc method;
+	struct rpc_method_owner_ctx *ctx;
+};
+
+static int rpc_method_owner_gate(void *arg)
+{
+	struct rpc_method_owner_ctx *ctx =
+		(struct rpc_method_owner_ctx *)arg;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->owner_entered = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	while (!ctx->owner_release)
+		pthread_cond_wait(&ctx->cond, &ctx->lock);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_OK;
+}
+
+static void *rpc_method_gate_thread(void *arg)
+{
+	struct rpc_method_register_arg *register_arg =
+		(struct rpc_method_register_arg *)arg;
+
+	assert(tr_reactor_call(
+		       tr_channel_reactor(register_arg->channel),
+		       rpc_method_owner_gate, register_arg->ctx) == TR_OK);
+	return NULL;
+}
+
+static void *rpc_method_register_thread(void *arg)
+{
+	struct rpc_method_register_arg *register_arg =
+		(struct rpc_method_register_arg *)arg;
+	struct rpc_method_owner_ctx *ctx = register_arg->ctx;
+	int ret;
+
+	ret = tr_rpc_register_method(
+		register_arg->endpoint, &register_arg->method, NULL, NULL);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->registrar_ret = ret;
+	ctx->registrar_done = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return NULL;
+}
+
+static void test_rpc_method_registration_is_owner_serialized(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_rpc_endpoint *endpoint = NULL;
+	struct tr_conn_handle connection;
+	struct tr_buffer_pool rpc_pool;
+	struct rpc_method_owner_ctx ctx;
+	struct rpc_method_register_arg arg;
+	struct tr_rpc_endpoint_stats stats;
+	struct timespec deadline;
+	struct timespec pause_time = { 0, 100000000L };
+	pthread_t gate;
+	pthread_t registrar;
+	int fds[2];
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	memset(&arg, 0, sizeof(arg));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 2U;
+	reactor_config.command_capacity = 32U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 8U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(
+		       &reactor_config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, fds[0], &connection) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, connection, connection,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+
+	assert(tr_buffer_pool_init(&rpc_pool, 8U, 4096U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 4U;
+	rpc_config.max_calls = 4U;
+	rpc_config.message_pool = &rpc_pool;
+	rpc_config.executor_threads = 1U;
+	rpc_config.executor_queue_capacity = 16U;
+	assert(tr_rpc_endpoint_create(channel, &rpc_config, &endpoint) == TR_OK);
+
+	arg.endpoint = endpoint;
+	arg.channel = channel;
+	arg.ctx = &ctx;
+	arg.method.service_id = 71U;
+	arg.method.method_id = 1U;
+	arg.method.request_cardinality = TR_RPC_ONE;
+	arg.method.response_cardinality = TR_RPC_ONE;
+	arg.method.request_codec_id = TR_RPC_CODEC_RAW;
+	arg.method.response_codec_id = TR_RPC_CODEC_RAW;
+	arg.method.lane = TR_LANE_CONTROL;
+	arg.method.max_request_bytes = 128U;
+	arg.method.max_response_bytes = 128U;
+
+	assert(pthread_create(
+		       &gate, NULL, rpc_method_gate_thread, &arg) == 0);
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx.lock);
+	while (!ctx.owner_entered && ret == 0)
+		ret = pthread_cond_timedwait(
+			&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(pthread_create(
+		       &registrar, NULL, rpc_method_register_thread, &arg) == 0);
+	(void)nanosleep(&pause_time, NULL);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.registrar_done == 0);
+	ctx.owner_release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(pthread_join(gate, NULL) == 0);
+	assert(pthread_join(registrar, NULL) == 0);
+	assert(ctx.registrar_ret == TR_OK);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_rpc_endpoint_get_stats(endpoint, &stats) == TR_OK);
+	assert(stats.registered_methods == 1U);
+
+	tr_rpc_endpoint_destroy(endpoint);
+	tr_channel_destroy(channel);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	tr_buffer_pool_destroy(&rpc_pool);
+	assert(close(fds[1]) == 0);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static void test_reactor_rx_pool_backpressure(void)
 {
 	struct tr_reactor_config config;
@@ -6350,6 +6516,7 @@ int main(void)
 	test_reactor_tcp_roundtrip();
 	test_reactor_handler_update_is_owner_serialized();
 	test_channel_handler_publication_is_owner_serialized();
+	test_rpc_method_registration_is_owner_serialized();
 	test_reactor_rx_pool_backpressure();
 	test_channel_deferred_hello_gate();
 	test_channel_stream_id_index_collision_delete();
