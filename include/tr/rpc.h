@@ -64,6 +64,8 @@ struct tr_rpc_context {
 	int cancel_status;
 };
 
+struct tr_rpc_call_handle;
+
 enum tr_rpc_interceptor_phase {
 	TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL = 1,
 	TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER = 2,
