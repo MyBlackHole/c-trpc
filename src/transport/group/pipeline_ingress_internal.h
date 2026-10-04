@@ -1,7 +1,7 @@
 #ifndef TR_PIPELINE_INGRESS_INTERNAL_H
 #define TR_PIPELINE_INGRESS_INTERNAL_H
 
-#include "group/pipeline_registry_internal.h"
+#include "../../group/pipeline_registry_internal.h"
 #include "tr/reactor.h"
 
 struct tr_pipeline_ingress_config {

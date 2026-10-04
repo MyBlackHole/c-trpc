@@ -1,4 +1,4 @@
-#include "../src/pipeline_ingress_internal.h"
+#include "../src/transport/group/pipeline_ingress_internal.h"
 #include "../src/group/pipeline_internal.h"
 #include "../src/group/pipeline_registry_internal.h"
 #include "../src/group/pipeline_route_internal.h"
