@@ -3045,21 +3045,33 @@ int tr_channel_get_state(struct tr_channel *channel, enum tr_channel_state *out)
 	return TR_OK;
 }
 
-int tr_channel_begin_drain(struct tr_channel *channel)
+static int tr_channel_begin_drain_on_owner(void *arg)
 {
+	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret;
 
-	if (!channel)
-		return TR_ERR_INVALID;
-
-	(void)tr_channel_disable_client_reconnect(channel);
-
+	/*
+	 * drain barrier 与 reconnect disable 必须在同一个 owner turn 内完成。
+	 * 否则 application thread 可能在“disable reconnect”返回后、设置
+	 * local_draining 前重新 enable reconnect。
+	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->local_draining = 1;
 	pthread_mutex_unlock(&channel->lock);
 
-	ret = tr_channel_send_pending_goaway(channel);
-	return ret;
+	ret = tr_channel_disable_client_reconnect_on_owner(channel);
+	if (ret != TR_OK)
+		return ret;
+	return tr_channel_send_pending_goaway(channel);
+}
+
+int tr_channel_begin_drain(struct tr_channel *channel)
+{
+	if (!channel)
+		return TR_ERR_INVALID;
+
+	return tr_reactor_call(
+		channel->reactor, tr_channel_begin_drain_on_owner, channel);
 }
 
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
