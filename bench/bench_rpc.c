@@ -235,6 +235,7 @@ static void configure_limits(
 	limits->max_message_bytes = o->bulk_bytes + 512U;
 	if (limits->max_message_bytes < limits->max_frame_payload_bytes)
 		limits->max_message_bytes = limits->max_frame_payload_bytes;
+	limits->rpc_message_buffer_bytes = limits->max_message_bytes;
 	limits->initial_window_bytes =
 		(uint64_t)limits->max_message_bytes * 4U;
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
@@ -252,7 +253,6 @@ static void configure_tuning(
 	const struct options *o, int server)
 {
 	tr_facade_tuning_init(tuning);
-	tuning->rpc_message_buffer_bytes = limits->max_message_bytes;
 	tuning->rpc_message_pool_count =
 		server && o->rpc_message_pool ?
 			o->rpc_message_pool : 2U * o->capacity + 16U;
