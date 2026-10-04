@@ -83,7 +83,11 @@ struct tr_reactor_stats {
 	/* STOP drain is outside normal turn limits and total.completions. */
 	uint64_t shutdown_completions;
 
-	/* Bounded queue pressure snapshots; full_events are producer failures. */
+	/*
+	 * Bounded queue pressure snapshots。
+	 * command full_events：producer 遇到满 ring 的失败/重试事件；
+	 * completion full_events：producer 遇到满 ring 并进入 capacity wait 的事件。
+	 */
 	struct tr_queue_observation command_queue;
 	struct tr_queue_observation completion_queue;
 
