@@ -270,7 +270,10 @@ TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 			tr_rpc_executor_group_destroy)
 
 struct tr_rpc_endpoint {
+	/* Call/Method/protocol state. */
 	pthread_mutex_t lock;
+	/* strong-ref wait + detached finalizer lifecycle only. */
+	pthread_mutex_t ref_lock;
 	pthread_cond_t ref_cond;
 	int deadline_stopping;
 	struct tr_reactor_timer_handle deadline_timer;
@@ -1881,11 +1884,11 @@ tr_rpc_store_pending_executor_task_locked(struct tr_rpc_endpoint *endpoint,
 static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			     struct tr_rpc_call_handle handle)
 {
-	int last;
-
 	pthread_mutex_lock(&endpoint->lock);
 	if (tr_rpc_call_handle_slot(handle) < endpoint->config.max_calls) {
-		struct tr_rpc_call_slot *call = &endpoint->calls[tr_rpc_call_handle_slot(handle)];
+		struct tr_rpc_call_slot *call =
+			&endpoint->calls[tr_rpc_call_handle_slot(handle)];
+
 		if (call->state != TR_RPC_CALL_FREE &&
 		    call->generation == tr_rpc_call_handle_generation(handle)) {
 			if (call->task_refs != 0)
@@ -1893,19 +1896,14 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			tr_rpc_maybe_free_call_locked(endpoint, call);
 		}
 	}
-
-	/*
-	 * 在持有 endpoint->lock 时释放 task 持有的 Endpoint 强引用。
-	 * destroy 会在同一把锁/条件变量上等待，再释放 owner reference，
-	 * 因此这里完成 signal 之前 Endpoint 不可能被提前 free。
-	 */
-	last = tr_refcount_put(&endpoint->refs);
-	if (last == 0 && tr_refcount_read(&endpoint->refs) == 1U)
-		pthread_cond_broadcast(&endpoint->ref_cond);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	if (last == 1)
-		tr_rpc_endpoint_release(endpoint);
+	/*
+	 * protocol state 已释放 endpoint->lock 后再归还 strong-ref。
+	 * 所有 owner-only waiter 的唤醒统一由 tr_rpc_endpoint_put() 处理，
+	 * 避免某种 strong-ref 来源漏掉 ref_cond signal。
+	 */
+	tr_rpc_endpoint_put(endpoint);
 }
 
 struct tr_rpc_stream_payload_release {
@@ -3963,6 +3961,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 struct tr_rpc_endpoint_build {
 	struct tr_rpc_endpoint *endpoint;
 	int lock_ready;
+	int ref_lock_ready;
 	int ref_cond_ready;
 	int deadline_ready;
 	int executor_ready;
@@ -3994,6 +3993,8 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 	free(endpoint->methods);
 	if (build->ref_cond_ready)
 		pthread_cond_destroy(&endpoint->ref_cond);
+	if (build->ref_lock_ready)
+		pthread_mutex_destroy(&endpoint->ref_lock);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
@@ -4024,6 +4025,9 @@ int tr_rpc_endpoint_create_with_executor_group(
 	if (pthread_mutex_init(&endpoint->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.lock_ready = 1;
+	if (pthread_mutex_init(&endpoint->ref_lock, NULL) != 0)
+		return TR_ERR_INVALID;
+	build.ref_lock_ready = 1;
 	if (pthread_cond_init(&endpoint->ref_cond, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.ref_cond_ready = 1;
@@ -4110,10 +4114,10 @@ static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint)
 
 static void tr_rpc_endpoint_wait_owner_only(struct tr_rpc_endpoint *endpoint)
 {
-	pthread_mutex_lock(&endpoint->lock);
+	pthread_mutex_lock(&endpoint->ref_lock);
 	while (tr_refcount_read(&endpoint->refs) != 1U)
-		pthread_cond_wait(&endpoint->ref_cond, &endpoint->lock);
-	pthread_mutex_unlock(&endpoint->lock);
+		pthread_cond_wait(&endpoint->ref_cond, &endpoint->ref_lock);
+	pthread_mutex_unlock(&endpoint->ref_lock);
 }
 
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
@@ -4127,9 +4131,11 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	if (!endpoint)
 		return;
 
+	pthread_mutex_lock(&endpoint->ref_lock);
 	finalizer = endpoint->detached_finalizer;
 	finalizer_arg = endpoint->detached_finalizer_arg;
 	have_finalizer = finalizer != NULL;
+	pthread_mutex_unlock(&endpoint->ref_lock);
 	memset(&final_stats, 0, sizeof(final_stats));
 	if (have_finalizer)
 		(void)tr_rpc_endpoint_get_stats(endpoint, &final_stats);
@@ -4146,6 +4152,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	free(endpoint->calls);
 	free(endpoint->methods);
 	pthread_cond_destroy(&endpoint->ref_cond);
+	pthread_mutex_destroy(&endpoint->ref_lock);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
 
@@ -4160,7 +4167,17 @@ static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
 	if (!endpoint)
 		return;
 
+	/*
+	 * 所有 strong-ref release 都通过同一个 lifetime lock 线性化 owner-only
+	 * wait 的唤醒。这样 task、pending retry completion 等任意引用来源把
+	 * refs 从 2 降到 1 时都会通知同步 destructor。
+	 */
+	pthread_mutex_lock(&endpoint->ref_lock);
 	last = tr_refcount_put(&endpoint->refs);
+	if (last == 0 && tr_refcount_read(&endpoint->refs) == 1U)
+		pthread_cond_broadcast(&endpoint->ref_cond);
+	pthread_mutex_unlock(&endpoint->ref_lock);
+
 	if (last == 1)
 		tr_rpc_endpoint_release(endpoint);
 }
@@ -4174,13 +4191,13 @@ static int tr_rpc_endpoint_detach_on_owner(void *arg)
 	if (!endpoint->executor.group)
 		return TR_ERR_STATE;
 
-	pthread_mutex_lock(&endpoint->lock);
+	pthread_mutex_lock(&endpoint->ref_lock);
 	if (endpoint->teardown_detached) {
-		pthread_mutex_unlock(&endpoint->lock);
+		pthread_mutex_unlock(&endpoint->ref_lock);
 		return TR_OK;
 	}
 	endpoint->teardown_detached = 1;
-	pthread_mutex_unlock(&endpoint->lock);
+	pthread_mutex_unlock(&endpoint->ref_lock);
 
 	/*
 	 * No new Channel callback can acquire Endpoint work after this point.
@@ -4216,14 +4233,14 @@ int tr_rpc_endpoint_arm_detached_finalizer(
 	if (!endpoint || !finalizer)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&endpoint->lock);
+	pthread_mutex_lock(&endpoint->ref_lock);
 	if (!endpoint->teardown_detached || endpoint->detached_finalizer) {
-		pthread_mutex_unlock(&endpoint->lock);
+		pthread_mutex_unlock(&endpoint->ref_lock);
 		return TR_ERR_STATE;
 	}
 	endpoint->detached_finalizer = finalizer;
 	endpoint->detached_finalizer_arg = arg;
-	pthread_mutex_unlock(&endpoint->lock);
+	pthread_mutex_unlock(&endpoint->ref_lock);
 	return TR_OK;
 }
 
@@ -4233,10 +4250,10 @@ void tr_rpc_endpoint_release_detached_owner(struct tr_rpc_endpoint *endpoint)
 		return;
 
 #ifndef NDEBUG
-	pthread_mutex_lock(&endpoint->lock);
+	pthread_mutex_lock(&endpoint->ref_lock);
 	assert(endpoint->teardown_detached);
 	assert(endpoint->detached_finalizer != NULL);
-	pthread_mutex_unlock(&endpoint->lock);
+	pthread_mutex_unlock(&endpoint->ref_lock);
 #endif
 
 	tr_rpc_endpoint_put(endpoint);
@@ -4249,7 +4266,9 @@ void tr_rpc_endpoint_finalize_detached_with_stats(
 		return;
 
 #ifndef NDEBUG
+	pthread_mutex_lock(&endpoint->ref_lock);
 	assert(endpoint->teardown_detached);
+	pthread_mutex_unlock(&endpoint->ref_lock);
 #endif
 
 	tr_rpc_endpoint_wait_owner_only(endpoint);
