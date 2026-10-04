@@ -85,6 +85,9 @@ DATA_OFFER / DATA_CANCEL / TRANSFER_READY 编解码，并直接绑定这些内�
   归零，Server 等现有 Group/connection 自然归零；force `stop()` 仍保留立即关闭语义；
 - stable Group stats 只暴露 active Group/connection/DATA/transfer、accept/reject 与
   Client send-byte lifecycle，不暴露 Reactor slot/generation、queue/pool/connector；
+- Server DATA ingress 不信任 peer 仅凭已 attach 的物理 lane 自报 stream_id：每个 DATA frame
+  在 callback 前通过 Pipeline affinity 验证 `stream_id + data index/generation + connection`
+  exact match；未 READY/stale/wrong-lane frame 直接终止违规 DATA lane；
 - cross-shard fd transfer 仍只在 profile/部署需求证明必要时考虑。
 
 因此当前 `tr_pipeline` 是 Transport internal ownership/membership substrate，
