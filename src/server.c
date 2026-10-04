@@ -1,5 +1,6 @@
 #include "tr/server.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <pthread.h>
 #include <sys/epoll.h>
@@ -1747,6 +1748,19 @@ void tr_server_destroy(struct tr_server *server)
 	if (server->shards)
 		tr_server_stop_accepting(server);
 	if (server->connection_group_listener) {
+		int ret = tr_pipeline_listener_stop(
+			server->connection_group_listener);
+
+		/*
+		 * Server destroy 是终局生命周期边界。listener stop 成功后才允许
+		 * 释放其 registry/session 内存；失败表示内部 teardown invariant
+		 * 未收敛，继续释放 Runtime 反而可能制造 UAF。
+		 */
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
 		tr_pipeline_listener_destroy(server->connection_group_listener);
 		server->connection_group_listener = NULL;
 	}
