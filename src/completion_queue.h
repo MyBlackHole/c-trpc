@@ -20,6 +20,7 @@ struct tr_completion_queue {
 	uint32_t count;
 	uint32_t peak_count;
 	uint64_t full_events;
+	uint64_t admission_generation;
 	uint32_t waiters;
 	int accepting;
 	int wake_pending;
