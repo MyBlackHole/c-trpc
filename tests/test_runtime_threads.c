@@ -2,7 +2,7 @@
 #include "tr/reactor.h"
 #include "tr/server.h"
 #include "tr/status.h"
-#include "../src/channel_internal.h"
+#include "../src/transport/channel/channel_internal.h"
 #include "../src/runtime/runtime_internal.h"
 #include "../src/facade_tuning_internal.h"
 

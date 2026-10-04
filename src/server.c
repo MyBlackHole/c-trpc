@@ -11,7 +11,7 @@
 #include "tr/buffer.h"
 #include "tr/channel.h"
 #include "buffer_internal.h"
-#include "channel_internal.h"
+#include "transport/channel/channel_internal.h"
 #include "facade_diagnostics_internal.h"
 #include "facade_tuning_internal.h"
 #include "tr/reactor.h"
