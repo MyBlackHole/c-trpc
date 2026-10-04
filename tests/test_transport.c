@@ -1,6 +1,6 @@
 #include "tr/buffer.h"
 #include "tr/crc32c.h"
-#include "tr/command_queue.h"
+#include "../src/execution/command_queue.h"
 #include "tr/endian.h"
 #include "tr/frame.h"
 #include "tr/guard.h"
@@ -21,7 +21,7 @@
 #include "../src/facade_tuning_internal.h"
 #include "../src/reactor_internal.h"
 #include "../src/rpc/rpc_internal.h"
-#include "../src/timer_queue.h"
+#include "../src/execution/timer_queue.h"
 
 #include <assert.h>
 #include <dirent.h>

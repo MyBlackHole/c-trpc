@@ -939,7 +939,7 @@ P3 public capability 至此闭环；后续只接受 bugfix、验证与 profile �
 capability 边界已经稳定，开始让物理目录反映现有 ownership/module contract，
 但每一刀都只做文件归位与 include/build dependency 收敛，不趁目录迁移改变运行语义。
 
-第一、二、三、四、五、六、七、八、九、十、十一阶段已完成：
+第一、二、三、四、五、六、七、八、九、十、十一、十二阶段已完成：
 
 ```text
 src/rpc/
@@ -988,6 +988,15 @@ src/io/
   socket_internal.h
   connector.c
   connector_internal.h
+
+src/execution/
+  reactor.c
+  command_queue.c
+  command_queue.h
+  completion_queue.c
+  completion_queue.h
+  timer_queue.c
+  timer_queue.h
 ```
 
 规则：
@@ -1029,6 +1038,14 @@ src/io/
   execution，不拥有 Channel/Group semantic state；
 - `socket_internal.h` 不再 include facade policy；TCP_NODELAY policy validation/
   mapping 已回收到 `facade_policy_internal.h`，保持 `src/io/` 对 facade 无反向依赖；
+- Reactor implementation 与 command/completion/timer queues 已进入 `src/execution/`；
+  Reactor 是 event execution owner，command/completion 是 bounded cross-context handoff，
+  timer queue 是 owner-only bounded scheduler；
+- `command_queue.h` 已从 `include/tr/` 下沉到 execution-local header，因为没有
+  任何上层 capability header 依赖它；completion/timer queue headers 同样保持 local；
+- `include/tr/reactor.h` 与根 `src/reactor_internal.h` 暂不移动：前者仍承载跨模块
+  internal Reactor capability types，后者被 Runtime/RPC/Group/Transport/I/O 广泛消费；
+  在 capability/type dependency 收敛前，移动它们只会制造路径噪声而不会减少耦合；
 - Reactor、command/completion/timer queue 不因 Runtime layer 名称被机械搬入
   `src/runtime/`；它们仍是独立 execution substrate；
 - module 对 sibling internal dependency 使用显式跨目录 include；
@@ -1038,8 +1055,8 @@ src/io/
 后续再按相同规则评估：
 
 ```text
-execution/resource substrate: reactor / queues / buffer
-internal header placement after Reactor/Channel dependency cleanup
+resource substrate: buffer
+Reactor capability header placement after dependency cleanup
 ```
 
 目录结构服务于已经确定的职责，而不是反过来决定架构。
