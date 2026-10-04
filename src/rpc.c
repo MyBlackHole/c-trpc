@@ -295,6 +295,7 @@ struct tr_rpc_endpoint {
 
 	struct tr_rpc_executor executor;
 	struct tr_refcount refs;
+	uint32_t ref_waiters;
 	int teardown_detached;
 	tr_rpc_endpoint_detached_finalizer detached_finalizer;
 	void *detached_finalizer_arg;
@@ -4118,8 +4119,11 @@ static int tr_rpc_endpoint_get(struct tr_rpc_endpoint *endpoint)
 static void tr_rpc_endpoint_wait_owner_only(struct tr_rpc_endpoint *endpoint)
 {
 	pthread_mutex_lock(&endpoint->ref_lock);
-	while (tr_refcount_read(&endpoint->refs) != 1U)
-		pthread_cond_wait(&endpoint->ref_cond, &endpoint->ref_lock);
+	while (tr_refcount_read(&endpoint->refs) != 1U) {
+		endpoint->ref_waiters++;
+		(void)pthread_cond_wait(&endpoint->ref_cond, &endpoint->ref_lock);
+		endpoint->ref_waiters--;
+	}
 	pthread_mutex_unlock(&endpoint->ref_lock);
 }
 
@@ -4154,6 +4158,11 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	free(endpoint->deadline_heap);
 	free(endpoint->calls);
 	free(endpoint->methods);
+#ifndef NDEBUG
+	pthread_mutex_lock(&endpoint->ref_lock);
+	assert(endpoint->ref_waiters == 0U);
+	pthread_mutex_unlock(&endpoint->ref_lock);
+#endif
 	pthread_cond_destroy(&endpoint->ref_cond);
 	pthread_mutex_destroy(&endpoint->ref_lock);
 	pthread_mutex_destroy(&endpoint->lock);
@@ -4177,7 +4186,12 @@ static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
 	 */
 	pthread_mutex_lock(&endpoint->ref_lock);
 	last = tr_refcount_put(&endpoint->refs);
-	if (last == 0 && tr_refcount_read(&endpoint->refs) == 1U)
+	/*
+	 * 不把 signal 条件绑定到一次额外的 refcount read。只要同步 destructor
+	 * 正在等待，任意非最后一次 release 都会让 waiter 重新检查 refs==1；
+	 * 这样未来新增 strong-ref 来源也不会出现“2->1 唤醒遗漏”。
+	 */
+	if (last == 0 && endpoint->ref_waiters != 0U)
 		pthread_cond_broadcast(&endpoint->ref_cond);
 	pthread_mutex_unlock(&endpoint->ref_lock);
 
