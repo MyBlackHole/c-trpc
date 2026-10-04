@@ -241,11 +241,10 @@ Client library 必须保持嵌入友好：
 
 ## 6. Timer
 
-CURRENT：RPC deadline 与 Channel keepalive 已迁移到 Reactor-local timer，
-旧的 shared maintenance scheduler 已删除。Client Channel 的自动 reconnect
-暂时仍保留低频 reconnect thread；Connection Group DATA establish 已采用
-nonblocking connect + Reactor auxiliary fd/timer，因此后续可复用同一 connector
-模型逐步移除 Channel reconnect thread。
+CURRENT：RPC deadline、Channel keepalive 与 Client automatic reconnect backoff
+都已经迁移到 Reactor-local timer。Channel reconnect 与 Connection Group DATA
+establish 共享 Reactor-owned nonblocking connector；connect completion 通过 bounded
+auxiliary fd source 回到原 owner，不再创建 per-Channel reconnect thread。
 
 Reactor-local timer 基础设施已经落地：
 
@@ -268,10 +267,10 @@ Reactor shard
   └─ checkpoint timer
 ```
 
-迁移按 consumer 分步进行。RPC Endpoint 每个只占用一个 Reactor-local timer，
-内部扫描 bounded Call table，不按 Call 创建 timer；每个 Channel 也只注册一个
-默认 disarm 的 keepalive timer。reconnect 尚未迁移，legacy reconnect thread 暂时
-保留；不允许为了迁移一次性同时改动 Multi-Reactor 和 Channel connection-group 语义。
+RPC Endpoint 每个只占用一个 Reactor-local deadline timer，内部扫描 bounded Call
+table，不按 Call 创建 timer。Channel keepalive 与 reconnect backoff 分别使用
+Reactor-local timer；实际 TCP connect timeout 由共享 connector 自己的 timer 管理。
+这些 timer callback 只推进短小的 owner-side 状态，不执行阻塞 connect/poll。
 
 ## 7. CURRENT 创建阶段线程预算与回收
 
@@ -284,9 +283,9 @@ Reactor shard
 | `tr_server_listen()` | 0 |
 | `tr_server_start()` | N 个：每个 shard 启动 1 个 Reactor；accept/peer cleanup 都在各自 owner Reactor 上执行 |
 
-Client connect 才创建 RPC Endpoint worker；启用自动重连时仍可能增加
-reconnect thread。deadline / keepalive 不再产生独立线程，也不存在每个
-Client/Server 实例额外持有的闲置 maintenance scheduler。
+Client connect 才创建 RPC Endpoint worker。启用自动 reconnect 只增加
+Reactor-owned timer/connector state，不新增 pthread。deadline / keepalive /
+reconnect 都不再产生独立 maintenance thread。
 
 `tests/test_runtime_threads.c` 使用测试目标独有的 pthread create/join 包装，
 检查创建前后的精确增量、正常销毁、未 start 的 Server 销毁和部分启动失败回收。
