@@ -6294,10 +6294,7 @@ static void test_client_server_facade_nodelay_policy(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	tr_facade_tuning_init(&server_tuning);
-	server_tuning.executor_threads = 1U;
-	assert(tr_server_create_with_tuning(
-		       &server_config, &server_tuning, &server) == TR_OK);
+	assert(tr_server_create(&server_config, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -6483,10 +6480,10 @@ static void test_client_runtime_thread_bound(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	tr_facade_tuning_init(&tuning);
-	tuning.executor_threads = 2U;
+	tr_facade_tuning_init(&server_tuning);
+	server_tuning.executor_threads = 1U;
 	assert(tr_server_create_with_tuning(
-		       &server_config, &tuning, &server) == TR_OK);
+		       &server_config, &server_tuning, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -6547,7 +6544,10 @@ static void test_server_runtime_thread_bound(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 2U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
