@@ -1202,7 +1202,6 @@ int tr_client_group_connect(
 		return TR_ERR_INVALID;
 	if (group->control.reactor)
 		return TR_ERR_STATE;
-	group->draining = 0;
 	address_len = strlen(ipv4_address);
 	if (address_len == 0U || address_len >= sizeof(group->address))
 		return TR_ERR_INVALID;
@@ -1251,6 +1250,7 @@ int tr_client_group_connect(
 		group->port = 0U;
 		goto fail;
 	}
+	group->draining = 0;
 	return TR_OK;
 
 fail:
