@@ -353,6 +353,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		client->config.limits.executor_queue_capacity;
 	rpc_config.observability_flags =
 		client->config.limits.observability_flags;
+	rpc_config.interceptor = client->config.interceptor;
 
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		client->channel, &rpc_config, NULL, &client->rpc);
