@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <time.h>
 
+#include "connector_internal.h"
 #include "pipeline_control_wire_internal.h"
 #include "pipeline_route_internal.h"
 #include "reactor_internal.h"
@@ -74,14 +75,7 @@ struct tr_client_group {
 	uint64_t send_bytes_inflight;
 
 	uint32_t connector_slot;
-	int connector_fd;
-	int connector_connecting;
-	int connector_watched;
-	uint8_t connector_preface[TR_PIPELINE_ROUTE_PREFACE_SIZE];
-	size_t connector_preface_sent;
-
-	struct tr_reactor_timer_handle connector_timer;
-	int connector_timer_ready;
+	struct tr_connector *connector;
 };
 
 struct tr_client_group_send_buffer {
@@ -274,367 +268,114 @@ static void tr_client_group_invalidate_data_transfers(
 	struct tr_client_group *group, uint32_t data_slot,
 	uint32_t data_generation);
 
-static void tr_client_group_connector_unwatch_on_owner(
-	struct tr_client_group *group)
-{
-	if (!group->connector_watched)
-		return;
-	(void)tr_reactor_aux_event_unregister(
-		group->config.owner, group->connector_fd);
-	group->connector_watched = 0;
-}
+static void tr_client_group_start_next_on_owner(struct tr_client_group *group);
+static void tr_client_group_invalidate_data_transfers(
+	struct tr_client_group *group, uint32_t data_slot,
+	uint32_t data_generation);
 
-static void tr_client_group_connector_disarm_on_owner(
-	struct tr_client_group *group)
-{
-	if (group->connector_timer_ready)
-		(void)tr_reactor_timer_arm(group->connector_timer, 0U);
-}
-
-static void tr_client_group_connector_reset_on_owner(
-	struct tr_client_group *group, int close_fd)
-{
-	tr_client_group_connector_unwatch_on_owner(group);
-	tr_client_group_connector_disarm_on_owner(group);
-	if (close_fd)
-		tr_socket_close(&group->connector_fd);
-	else
-		group->connector_fd = -1;
-	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
-	group->connector_connecting = 0;
-	group->connector_preface_sent = 0U;
-	memset(group->connector_preface, 0, sizeof(group->connector_preface));
-}
-
-static int tr_client_group_connector_watch_on_owner(
-	struct tr_client_group *group);
-
-static void tr_client_group_fail_connector_on_owner(
-	struct tr_client_group *group, int cancel_reservation)
-{
-	uint32_t slot = group->connector_slot;
-	struct tr_pipeline_route_preface route;
-	uint64_t message_id = 0U;
-	int cancel_ret = TR_OK;
-
-	memset(&route, 0, sizeof(route));
-	if (slot < group->data_capacity) {
-		route = group->data[slot].route;
-		message_id = group->data[slot].offer_message_id;
-	}
-	tr_client_group_connector_reset_on_owner(group, 1);
-
-	if (slot < group->data_capacity) {
-		memset(&group->data[slot], 0, sizeof(group->data[slot]));
-		group->data[slot].state = TR_CLIENT_GROUP_DATA_FREE;
-	}
-	if (cancel_reservation && group->control.reactor)
-		cancel_ret = tr_client_group_send_cancel_on_owner(
-			group, &route, message_id);
-	if (cancel_ret != TR_OK) {
-		(void)tr_reactor_abort_on_owner(group->control, cancel_ret < 0 ?
-						      cancel_ret :
-						      TR_ERR_STATE);
-		return;
-	}
-	if (!group->closing && !group->draining)
-		tr_client_group_start_next_on_owner(group);
-}
-
-static enum tr_frame_disposition tr_client_group_data_frame(
-	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
-{
-	(void)frame;
-	(void)arg;
-	/*
-	 * Server-to-Client DATA delivery is not part of this P3 slice. Fail
-	 * explicitly instead of silently discarding application payload.
-	 */
-	(void)tr_reactor_abort_on_owner(connection, TR_ERR_UNSUPPORTED);
-	return TR_FRAME_RELEASE;
-}
-
-static void tr_client_group_data_event(
-	struct tr_conn_handle connection, enum tr_connection_event event,
-	int status, void *arg)
+static void tr_client_group_connector_complete(
+	int status, int fd, void *arg)
 {
 	struct tr_client_group *group = (struct tr_client_group *)arg;
-	uint32_t i;
+	struct tr_client_group_data *data;
+	struct tr_conn_handle connection;
+	struct tr_pipeline_route_preface route;
+	uint64_t message_id;
+	uint32_t slot;
+	int ret;
+	int cancel_ret = TR_OK;
 
-	(void)event;
-	(void)status;
-	if (!group)
+	if (!group) {
+		tr_socket_close(&fd);
 		return;
+	}
 
-	for (i = 0; i < group->data_capacity; ++i) {
-		int cancel_ret = TR_OK;
+	slot = group->connector_slot;
+	if (slot >= group->data_capacity) {
+		tr_socket_close(&fd);
+		return;
+	}
 
-		if (group->data[i].state != TR_CLIENT_GROUP_DATA_ACTIVE ||
-		    !tr_client_group_conn_equal(
-			    group->data[i].connection, connection))
-			continue;
-		if (!group->closing && group->control.reactor)
+	data = &group->data[slot];
+	route = data->route;
+	message_id = data->offer_message_id;
+	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
+
+	if (status != TR_OK) {
+		memset(data, 0, sizeof(*data));
+		data->state = TR_CLIENT_GROUP_DATA_FREE;
+		if (group->control.reactor)
 			cancel_ret = tr_client_group_send_cancel_on_owner(
-				group, &group->data[i].route,
-				group->data[i].offer_message_id);
-		tr_client_group_invalidate_data_transfers(
-			group, i, group->data[i].route.member_generation);
-		memset(&group->data[i], 0, sizeof(group->data[i]));
-		group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
+				group, &route, message_id);
 		if (cancel_ret != TR_OK && group->control.reactor) {
 			(void)tr_reactor_abort_on_owner(
 				group->control,
 				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
 			return;
 		}
-		break;
+		if (!group->closing && !group->draining)
+			tr_client_group_start_next_on_owner(group);
+		return;
 	}
-	if (!group->closing)
-		tr_client_group_start_next_on_owner(group);
-}
 
-static int tr_client_group_connector_finish_on_owner(
-	struct tr_client_group *group)
-{
-	struct tr_client_group_data *data;
-	struct tr_conn_handle connection;
-	uint32_t slot = group->connector_slot;
-	int fd;
-	int ret;
-
-	if (slot >= group->data_capacity)
-		return TR_ERR_STATE;
-	data = &group->data[slot];
-
-	tr_client_group_connector_unwatch_on_owner(group);
-	tr_client_group_connector_disarm_on_owner(group);
-	fd = group->connector_fd;
-	group->connector_fd = -1;
-
+	/*
+	 * TR_OK completion 把 connected fd ownership 转移给本 callback。
+	 * adopt 成功后 ownership 再转移给 Reactor；其他失败路径必须在此 close。
+	 */
 	memset(&connection, 0, sizeof(connection));
 	ret = tr_reactor_adopt_fd(group->config.owner, fd, &connection);
 	if (ret != TR_OK) {
-		int cancel_ret;
-
 		tr_socket_close(&fd);
-		tr_client_group_connector_reset_on_owner(group, 0);
-		cancel_ret = tr_client_group_send_cancel_on_owner(
-			group, &data->route, data->offer_message_id);
-		memset(data, 0, sizeof(*data));
-		data->state = TR_CLIENT_GROUP_DATA_FREE;
-		if (cancel_ret != TR_OK && group->control.reactor) {
-			(void)tr_reactor_abort_on_owner(
-				group->control,
-				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
-			return ret;
-		}
-		tr_client_group_start_next_on_owner(group);
-		return ret;
+		goto fail;
 	}
+	fd = -1;
 
 	ret = tr_reactor_set_handler(
 		connection, tr_client_group_data_frame,
 		tr_client_group_data_event, group);
 	if (ret != TR_OK) {
-		int cancel_ret;
-
 		(void)tr_reactor_close_on_owner(connection);
-		tr_client_group_connector_reset_on_owner(group, 0);
-		cancel_ret = tr_client_group_send_cancel_on_owner(
-			group, &data->route, data->offer_message_id);
-		memset(data, 0, sizeof(*data));
-		data->state = TR_CLIENT_GROUP_DATA_FREE;
-		if (cancel_ret != TR_OK && group->control.reactor) {
-			(void)tr_reactor_abort_on_owner(
-				group->control,
-				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
-			return ret;
-		}
-		tr_client_group_start_next_on_owner(group);
-		return ret;
+		goto fail;
 	}
 
 	data->connection = connection;
 	data->state = TR_CLIENT_GROUP_DATA_ACTIVE;
-	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
-	group->connector_connecting = 0;
-	group->connector_preface_sent = 0U;
-	memset(group->connector_preface, 0, sizeof(group->connector_preface));
 	tr_client_group_start_next_on_owner(group);
-	return TR_OK;
-}
+	return;
 
-static int tr_client_group_connector_send_preface_on_owner(
-	struct tr_client_group *group)
-{
-	while (group->connector_preface_sent <
-	       sizeof(group->connector_preface)) {
-		ssize_t n = send(
-			group->connector_fd,
-			group->connector_preface +
-				group->connector_preface_sent,
-			sizeof(group->connector_preface) -
-				group->connector_preface_sent,
-			MSG_NOSIGNAL);
-
-		if (n > 0) {
-			group->connector_preface_sent += (size_t)n;
-			continue;
-		}
-		if (n < 0 && errno == EINTR)
-			continue;
-		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			int ret = tr_client_group_connector_watch_on_owner(group);
-
-			if (ret != TR_OK)
-				tr_client_group_fail_connector_on_owner(group, 1);
-			return ret;
-		}
-		tr_client_group_fail_connector_on_owner(group, 1);
-		return TR_ERR_SYS;
-	}
-
-	/*
-	 * Once the complete route is on the wire, attach state is ambiguous until
-	 * the socket lifecycle converges. DATA_CANCEL is exact and idempotent for
-	 * the issued generation: it frees RESERVED, and is a no-op for ATTACHED or
-	 * already FREE. Thus later local failure can safely send cancellation
-	 * without needing a separate attach ACK or risking ABA.
-	 */
-	return tr_client_group_connector_finish_on_owner(group);
-}
-
-static int tr_client_group_connector_progress_on_owner(
-	struct tr_client_group *group)
-{
-	int ret;
-
-	if (group->connector_fd < 0 ||
-	    group->connector_slot >= group->data_capacity)
-		return TR_ERR_STATE;
-
-	if (group->connector_connecting) {
-		ret = tr_tcp_finish_connect(group->connector_fd);
-		if (ret != TR_OK) {
-			tr_client_group_fail_connector_on_owner(group, 1);
-			return ret;
-		}
-		group->connector_connecting = 0;
-		if (group->config.tcp_nodelay) {
-			ret = tr_tcp_set_nodelay(group->connector_fd, 1);
-			if (ret != TR_OK) {
-				tr_client_group_fail_connector_on_owner(group, 1);
-				return ret;
-			}
-		}
-	}
-	return tr_client_group_connector_send_preface_on_owner(group);
-}
-
-static void tr_client_group_connector_event(
-	int fd, uint32_t events, void *arg)
-{
-	struct tr_client_group *group = (struct tr_client_group *)arg;
-
-	if (!group || fd != group->connector_fd)
-		return;
-	if (events & (EPOLLERR | EPOLLHUP)) {
-		(void)tr_client_group_connector_progress_on_owner(group);
+fail:
+	memset(data, 0, sizeof(*data));
+	data->state = TR_CLIENT_GROUP_DATA_FREE;
+	if (group->control.reactor)
+		cancel_ret = tr_client_group_send_cancel_on_owner(
+			group, &route, message_id);
+	if (cancel_ret != TR_OK && group->control.reactor) {
+		(void)tr_reactor_abort_on_owner(
+			group->control,
+			cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
 		return;
 	}
-	if (events & EPOLLOUT)
-		(void)tr_client_group_connector_progress_on_owner(group);
-}
-
-static int tr_client_group_connector_watch_on_owner(
-	struct tr_client_group *group)
-{
-	int ret;
-
-	if (group->connector_watched)
-		return TR_OK;
-	ret = tr_reactor_aux_event_register(
-		group->config.owner, group->connector_fd, EPOLLOUT,
-		tr_client_group_connector_event, group);
-	if (ret == TR_OK)
-		group->connector_watched = 1;
-	return ret;
-}
-
-static uint64_t tr_client_group_connector_timeout(
-	void *arg, uint64_t now_ns)
-{
-	struct tr_client_group *group = (struct tr_client_group *)arg;
-
-	(void)now_ns;
-	if (group && group->connector_slot != TR_CLIENT_GROUP_NO_SLOT)
-		tr_client_group_fail_connector_on_owner(group, 1);
-	return 0U;
-}
-
-static int tr_client_group_connector_arm_on_owner(
-	struct tr_client_group *group)
-{
-	uint64_t now_ns;
-	uint64_t delay_ns;
-	uint64_t deadline_ns;
-
-	if (!group->connector_timer_ready)
-		return TR_ERR_STATE;
-	now_ns = tr_client_group_now_ns();
-	if (now_ns == 0U)
-		return TR_ERR_SYS;
-	delay_ns =
-		(uint64_t)group->config.connect_timeout_ms * UINT64_C(1000000);
-	deadline_ns = UINT64_MAX - now_ns < delay_ns ?
-			      UINT64_MAX :
-			      now_ns + delay_ns;
-	return tr_reactor_timer_arm(group->connector_timer, deadline_ns);
+	if (!group->closing && !group->draining)
+		tr_client_group_start_next_on_owner(group);
 }
 
 static int tr_client_group_begin_connector_on_owner(
 	struct tr_client_group *group, uint32_t slot)
 {
 	struct tr_client_group_data *data = &group->data[slot];
-	int fd = -1;
+	uint8_t preface[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	int ret;
 
-	ret = tr_pipeline_route_preface_encode(
-		group->connector_preface, &data->route);
+	ret = tr_pipeline_route_preface_encode(preface, &data->route);
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_tcp_connect_ipv4(group->address, group->port, &fd);
-	if (ret != TR_OK && ret != TR_IN_PROGRESS)
-		return ret;
-
 	group->connector_slot = slot;
-	group->connector_fd = fd;
-	group->connector_connecting = ret == TR_IN_PROGRESS;
-	group->connector_preface_sent = 0U;
 	data->state = TR_CLIENT_GROUP_DATA_CONNECTING;
-
-	ret = tr_client_group_connector_arm_on_owner(group);
-	if (ret != TR_OK) {
-		tr_client_group_fail_connector_on_owner(group, 1);
-		return ret;
-	}
-
-	if (group->connector_connecting) {
-		ret = tr_client_group_connector_watch_on_owner(group);
-		if (ret != TR_OK)
-			tr_client_group_fail_connector_on_owner(group, 1);
-		return ret;
-	}
-
-	if (group->config.tcp_nodelay) {
-		ret = tr_tcp_set_nodelay(group->connector_fd, 1);
-		if (ret != TR_OK) {
-			tr_client_group_fail_connector_on_owner(group, 1);
-			return ret;
-		}
-	}
-	return tr_client_group_connector_send_preface_on_owner(group);
+	ret = tr_connector_start(
+		group->connector, group->address, group->port,
+		preface, sizeof(preface));
+	return ret;
 }
 
 static void tr_client_group_start_next_on_owner(struct tr_client_group *group)
@@ -647,35 +388,39 @@ static void tr_client_group_start_next_on_owner(struct tr_client_group *group)
 		return;
 
 	for (i = 0; i < group->data_capacity; ++i) {
+		struct tr_pipeline_route_preface route;
+		uint64_t message_id;
 		int ret;
+		int cancel_ret;
 
 		if (group->data[i].state != TR_CLIENT_GROUP_DATA_QUEUED)
 			continue;
+
 		ret = tr_client_group_begin_connector_on_owner(group, i);
 		if (ret == TR_OK)
 			return;
-		if (group->data[i].state == TR_CLIENT_GROUP_DATA_FREE)
-			return;
 
 		/*
-		 * Failures before connector ownership is published still need exact
-		 * cancellation. If cancellation succeeds, continue with the next
-		 * queued offer instead of leaving it stranded.
+		 * connector 进入 active 后的失败会通过 completion callback 收敛。
+		 * 如果 callback 在 start() 内同步执行，它可能已经启动了下一条 offer；
+		 * 此时 connector_slot 不再指向 i，外层不能重复处理。
 		 */
-		{
-			int cancel_ret = tr_client_group_send_cancel_on_owner(
-				group, &group->data[i].route,
-				group->data[i].offer_message_id);
+		if (group->connector_slot != i)
+			return;
 
-			memset(&group->data[i], 0, sizeof(group->data[i]));
-			group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
-			if (cancel_ret != TR_OK && group->control.reactor) {
-				(void)tr_reactor_abort_on_owner(
-					group->control,
-					cancel_ret < 0 ? cancel_ret :
-							 TR_ERR_STATE);
-				return;
-			}
+		route = group->data[i].route;
+		message_id = group->data[i].offer_message_id;
+		group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
+		memset(&group->data[i], 0, sizeof(group->data[i]));
+		group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
+
+		cancel_ret = tr_client_group_send_cancel_on_owner(
+			group, &route, message_id);
+		if (cancel_ret != TR_OK && group->control.reactor) {
+			(void)tr_reactor_abort_on_owner(
+				group->control,
+				cancel_ret < 0 ? cancel_ret : TR_ERR_STATE);
+			return;
 		}
 	}
 }
@@ -1006,12 +751,9 @@ static void tr_client_group_stop_data_on_owner(struct tr_client_group *group)
 	uint32_t i;
 
 	tr_client_group_clear_transfers(group);
-	tr_client_group_connector_unwatch_on_owner(group);
-	tr_client_group_connector_disarm_on_owner(group);
-	tr_socket_close(&group->connector_fd);
+	if (group->connector)
+		(void)tr_connector_cancel(group->connector);
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
-	group->connector_connecting = 0;
-	group->connector_preface_sent = 0U;
 
 	for (i = 0; i < group->data_capacity; ++i) {
 		struct tr_conn_handle connection = group->data[i].connection;
@@ -1151,7 +893,6 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 		(uint64_t)group->data_capacity *
 		(uint64_t)config->max_message_bytes;
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
-	group->connector_fd = -1;
 
 	control_buffers =
 		config->max_data_connections + TR_CLIENT_GROUP_CONTROL_BUFFER_BASE;
@@ -1172,21 +913,30 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 			goto fail;
 		}
 
-		ret = tr_reactor_timer_register(
-			group->config.owner,
-			tr_client_group_connector_timeout, group,
-			&group->connector_timer);
-		if (ret != TR_OK)
-			goto fail;
-		group->connector_timer_ready = 1;
+		{
+			struct tr_connector_config connector_config;
+
+			memset(&connector_config, 0, sizeof(connector_config));
+			connector_config.owner = group->config.owner;
+			connector_config.timeout_ms =
+				group->config.connect_timeout_ms;
+			connector_config.tcp_nodelay = group->config.tcp_nodelay;
+			connector_config.complete_cb =
+				tr_client_group_connector_complete;
+			connector_config.callback_arg = group;
+			ret = tr_connector_create(
+				&connector_config, &group->connector);
+			if (ret != TR_OK)
+				goto fail;
+		}
 	}
 
 	*out = group;
 	return TR_OK;
 
 fail:
-	if (group->connector_timer_ready)
-		(void)tr_reactor_timer_unregister(group->connector_timer);
+	tr_connector_destroy(group->connector);
+	group->connector = NULL;
 	free(group->transfers);
 	free(group->data);
 	if (group->control_pool_ready)
@@ -1306,7 +1056,8 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 			return TR_ERR_STATE;
 		route = group->data[slot].route;
 		message_id = group->data[slot].offer_message_id;
-		tr_client_group_connector_reset_on_owner(group, 1);
+		(void)tr_connector_cancel(group->connector);
+		group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
 		memset(&group->data[slot], 0, sizeof(group->data[slot]));
 		group->data[slot].state = TR_CLIENT_GROUP_DATA_FREE;
 		ret = tr_client_group_send_cancel_on_owner(
@@ -1519,8 +1270,8 @@ void tr_client_group_destroy(struct tr_client_group *group)
 
 	if (group->control.reactor)
 		(void)tr_client_group_close(group);
-	if (group->connector_timer_ready)
-		(void)tr_reactor_timer_unregister(group->connector_timer);
+	tr_connector_destroy(group->connector);
+	group->connector = NULL;
 	free(group->transfers);
 	free(group->data);
 	if (group->control_pool_ready)
