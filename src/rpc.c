@@ -3790,6 +3790,15 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 	}
 
 	if (event == TR_STREAM_EVENT_WRITABLE) {
+		/*
+		 * final STATUS is an application terminal barrier. Transport may still
+		 * report writable before the close event is consumed, but no new
+		 * application continuation is legal after STATUS.
+		 */
+		if (call->final_status_seen || call->final_status_sent) {
+			pthread_mutex_unlock(&endpoint->lock);
+			return;
+		}
 		if (call->cancelled || call->pending_control) {
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
 			if (call->executor_overloaded && call->local_closed &&
