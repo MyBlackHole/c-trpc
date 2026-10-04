@@ -499,7 +499,11 @@ This keeps listener, TLS/authentication, and service policy outside Channel.
   - `ONE -> MANY` (server streaming)
   - `MANY -> ONE` (client streaming)
   - `MANY -> MANY` (bidirectional streaming)
+- V1 request `MANY` means **1..N**, not 0..N: the first REQUEST is also the Method-open envelope
 - `TR_RPC_NONE` is reserved for a future explicit method-open envelope and is not executable in V1
+- Client `close_send()` closes only the request half; Server terminates streaming Calls with final `STATUS` through `finish(status)`
+- `STATUS(OK)` requires exactly one RESPONSE for response cardinality `ONE`; `MANY` permits 0..N
+- Client `FINISHED` is the normal application terminal barrier: no MESSAGE/WRITABLE/normal REMOTE_CLOSED follows it
 - final streaming `STATUS` RPC envelope separate from ordinary response messages
 - call-level deadline with monotonic local timers
 - deadline propagation to the server as a relative reserved metadata value
@@ -732,6 +736,11 @@ RPC:
 - real TCP `MANY -> MANY` bidirectional streaming
 - RAW bulk `send_buffer()` sender-side slice path
 - response final `STATUS` and Call finish
+- STATUS service/method/codec/status-domain validation
+- `STATUS(OK) + response ONE` requires exactly one RESPONSE
+- Client `FINISHED` remains the last normal application event
+- V1 zero-message MANY request half-close is rejected until an explicit Method-open envelope exists
+- Server `close_send()` is rejected; response termination must go through final STATUS
 - RPC message retain/release path
 - cardinality enforcement (`ONE` rejects a second message)
 - executor task lifetime / Call generation ownership
