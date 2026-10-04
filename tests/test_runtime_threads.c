@@ -4,6 +4,7 @@
 #include "tr/status.h"
 #include "../src/channel_internal.h"
 #include "../src/runtime_internal.h"
+#include "../src/facade_tuning_internal.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -91,13 +92,7 @@ static void small_limits(struct tr_facade_limits *limits)
 	limits->max_message_bytes = 1024U;
 	limits->initial_window_bytes = 4096U;
 	limits->window_update_threshold_bytes = 256U;
-	limits->command_capacity = 32U;
-	limits->tx_item_capacity = 16U;
-	limits->control_tx_item_capacity = 8U;
-	limits->rx_buffer_count = 8U;
-	limits->rpc_message_pool_count = 16U;
 	limits->rpc_message_buffer_bytes = 256U;
-	limits->reassembly_pool_count = 8U;
 	limits->executor_threads = 1U;
 	limits->executor_queue_capacity = 16U;
 }
@@ -272,6 +267,36 @@ static void test_server_multi_shard_rejects_undersized_budget(void)
 	expect_threads(0U, 0U);
 }
 
+static void test_server_internal_tuning_respects_shard_minimum(void)
+{
+	struct tr_server_config config;
+	struct tr_facade_tuning tuning;
+	struct tr_server *server = NULL;
+
+	server_config_init(&config, 2U);
+	config.shard_count = 2U;
+	config.max_peers = 2U;
+
+	tr_facade_tuning_init(&tuning);
+	tuning.rx_buffer_count = 1U;
+
+	reset_probe(0U);
+	assert(tr_server_create_with_tuning(
+		       &config, &tuning, &server) == TR_ERR_INVALID);
+	assert(server == NULL);
+	expect_threads(0U, 0U);
+
+	/*
+	 * Public create owns hidden tuning defaults and must not expose this
+	 * implementation-capacity failure for the same valid semantic config.
+	 */
+	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(server != NULL);
+	expect_threads(2U, 0U);
+	tr_server_destroy(server);
+	expect_threads(2U, 2U);
+}
+
 static void runtime_multi_shard_config_init(
 	struct tr_runtime_config *config,
 	struct tr_runtime_shard_config shards[3])
@@ -401,6 +426,7 @@ int main(void)
 	RUN_TEST(test_server_create_start_destroy_threads);
 	RUN_TEST(test_server_multi_shard_threads);
 	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
+	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
 	RUN_TEST(test_runtime_multi_shard_threads);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_client_thread_start_failure);
