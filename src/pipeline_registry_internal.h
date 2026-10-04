@@ -23,7 +23,8 @@ struct tr_pipeline_registry_stats {
 /*
  * Registry is a bounded shard-local index. It does not own Pipeline lifetime:
  * callers must unregister a Pipeline before destroying it. Pipeline pointers
- * never escape an owner-serialized registry operation.
+ * do not escape the owner domain; the only persistent pointer capability is
+ * the owner-local DATA ingress binding returned at exact attach time.
  */
 int tr_pipeline_registry_create(
 	const struct tr_pipeline_registry_config *config,
@@ -52,6 +53,19 @@ int tr_pipeline_registry_attach_data_route(
 	struct tr_pipeline_data_ref *data_out);
 
 /*
+ * Owner-only ingress attach variant. In addition to consuming the exact DATA
+ * reservation it returns the owner-local Pipeline capability used by the DATA
+ * connection's ingress handler. The returned pointer must not escape the owner
+ * domain or outlive that exact DATA membership.
+ */
+int tr_pipeline_registry_attach_data_route_local_on_owner(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle connection,
+	struct tr_pipeline_data_ref *data_out,
+	struct tr_pipeline **pipeline_out);
+
+/*
  * Cancel one exact RESERVED route after DATA establishment fails before
  * membership becomes live. Already ATTACHED/stale/reused capabilities are not
  * affected.
@@ -63,17 +77,6 @@ int tr_pipeline_registry_cancel_data_route(
 int tr_pipeline_registry_detach_data_route(
 	struct tr_pipeline_registry *registry,
 	const struct tr_pipeline_route_preface *preface,
-	struct tr_conn_handle expected_connection);
-
-/*
- * Validate that one logical stream is currently READY on the exact DATA route
- * and physical connection that carried a DATA frame. This is the Server
- * ingress barrier paired with TRANSFER_READY.
- */
-int tr_pipeline_registry_validate_stream_route(
-	struct tr_pipeline_registry *registry,
-	const struct tr_pipeline_route_preface *preface,
-	uint32_t stream_id,
 	struct tr_conn_handle expected_connection);
 
 int tr_pipeline_registry_get_stats(
