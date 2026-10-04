@@ -37,16 +37,18 @@ int tr_channel_create_deferred(
 	struct tr_channel **out);
 
 /*
- * Facade-only socket policy injection. Must be set before automatic reconnect
- * starts; low-level Channel reconnect otherwise preserves the kernel default.
+ * Facade-only socket policy injection。通过 Channel 所属 Reactor owner 串行化，
+ * 必须在 automatic reconnect 启动前设置；低层 Channel reconnect 否则保留
+ * kernel default。
  */
 int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
 					    int enabled);
 
 /*
- * Internal lifecycle observer is independent from the upper-layer Channel
- * handler used by RPC. It receives Channel events after the normal handler and
- * must only perform short non-blocking notification work.
+ * Internal lifecycle observer 独立于 RPC 使用的 upper-layer Channel handler。
+ * publication 与读取都在 Channel 所属 Reactor owner 上完成，不属于
+ * channel->lock 保护域。observer 在 normal handler 之后收到 Channel event，
+ * 且只能执行短小、非阻塞的通知工作。
  */
 int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 				      tr_channel_event_cb event_cb,
