@@ -50,9 +50,17 @@ struct tr_runtime_config {
 };
 ```
 
-每个 entry 独立描述 Reactor、peer capacity 和 RPC executor。Runtime 不把一份
-资源配置机械复制 N 次；Server 先把 public total budget 确定性拆分，再将每个
-share 交给 Runtime。Client facade 仍只传入一个 shard config。
+每个 entry 独立描述 Reactor、peer capacity、RPC executor，以及 Phase 7
+内部的 shard memory budget capability。Runtime 不把一份资源配置机械复制 N 次；
+Server 先把 public total budget 确定性拆分，再将每个 share 交给 Runtime。
+Client facade 仍只传入一个 shard config。
+
+Phase 7 的 memory budget 目前是 **internal accounting foundation**，尚未成为 stable
+facade knob。每个 RuntimeShard 持有一个 thread-safe byte budget：
+`limit_bytes == 0` 表示迁移期间只记账、不执行上限；consumer 必须先 reserve，
+成功后才能分配，teardown 再 release exact bytes。peer table 是第一个接入的真实
+consumer，后续 Reactor/Buffer/RPC/Channel 资源会逐步接入。在主要 shard-local
+consumer 覆盖前，不对外宣称这是完整的 shard memory cap。
 
 TARGET V1 使用单进程多 Reactor：
 
@@ -131,7 +139,10 @@ struct tr_runtime_shard {
     int listen_fd;
     uint16_t bound_port;
 
+    struct tr_memory_budget memory_budget;
+
     struct tr_runtime_peer *peers;
+    uint64_t peer_storage_bytes;
     uint32_t peer_capacity;
     uint32_t peer_count;
     uint32_t peer_reaping_count;

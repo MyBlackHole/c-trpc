@@ -423,9 +423,20 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - RPC `max_calls` 已经是 Call lifecycle semantic bound，本阶段不再造重复的
   `max_inflight_calls` knob。
 
+第二阶段已建立 shard memory budget foundation：
+
+- RuntimeShard 持有 thread-safe byte budget，提供 reserve/release/current/peak/rejection evidence；
+- `limit_bytes == 0` 在迁移期表示 accounting-only/unbounded，不提前形成不完整的 stable contract；
+- Runtime peer table 作为第一个真实 consumer：allocate 前 reserve，所有失败/teardown 路径 exact release；
+- 预算拒绝返回 `TR_AGAIN`，与可恢复 resource admission pressure 语义一致；
+- stable `memory_budget_bytes` 暂不开放：Reactor/Buffer/RPC/Channel 等主要 shard-local
+  consumer 尚未全部接入，避免“配置了预算但仍能从旁路超出”的虚假保证。
+
 后续：
 
-- shard memory budget；
+- 将 Reactor fixed resources、Server shard Buffer pools、RPC/Channel lifecycle allocations
+  逐步接入同一个 shard budget；
+- 覆盖闭环后再公开 stable `memory_budget_bytes`；
 - worker admission；
 - application/backend admission hook（优先复用 SERVER_PRE_HANDLER，而不是新增第二套 hook）；
 - adaptive DATA parallelism。

@@ -17,8 +17,10 @@ struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
 	struct tr_rpc_executor_group *rpc_executor;
+	struct tr_memory_budget memory_budget;
 
 	struct tr_runtime_peer *peers;
+	uint64_t peer_storage_bytes;
 	uint32_t peer_capacity;
 	uint32_t peer_count;
 	uint32_t peer_count_peak;
@@ -62,6 +64,11 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	}
 	free(shard->peers);
 	shard->peers = NULL;
+	if (shard->peer_storage_bytes != 0U) {
+		(void)tr_memory_budget_release(
+			&shard->memory_budget, shard->peer_storage_bytes);
+		shard->peer_storage_bytes = 0U;
+	}
 	shard->peer_capacity = 0U;
 }
 
@@ -120,13 +127,25 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		shard->shard_id = i;
 		shard->listen_fd = -1;
 		shard->peer_event_fd = -1;
+		tr_memory_budget_init(
+			&shard->memory_budget, shard_config->memory_budget_bytes);
 		shard->peer_capacity = shard_config->peer_capacity;
 		if (shard->peer_capacity != 0U) {
-			shard->peers = (struct tr_runtime_peer *)calloc(
-				shard->peer_capacity, sizeof(*shard->peers));
-			if (!shard->peers) {
-				ret = TR_ERR_NOMEM;
-			} else {
+			uint64_t peer_storage_bytes =
+				(uint64_t)shard->peer_capacity *
+				(uint64_t)sizeof(*shard->peers);
+
+			ret = tr_memory_budget_reserve(
+				&shard->memory_budget, peer_storage_bytes);
+			if (ret == TR_OK) {
+				shard->peer_storage_bytes = peer_storage_bytes;
+				shard->peers = (struct tr_runtime_peer *)calloc(
+					shard->peer_capacity,
+					sizeof(*shard->peers));
+				if (!shard->peers)
+					ret = TR_ERR_NOMEM;
+			}
+			if (ret == TR_OK) {
 				shard->peer_event_fd =
 					eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 				ret = shard->peer_event_fd < 0 ?
@@ -278,6 +297,20 @@ struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
 {
 	return shard ? shard->rpc_executor : NULL;
+}
+
+struct tr_memory_budget *
+tr_runtime_shard_memory_budget(struct tr_runtime_shard *shard)
+{
+	return shard ? &shard->memory_budget : NULL;
+}
+
+void tr_runtime_shard_memory_stats(
+	const struct tr_runtime_shard *shard,
+	struct tr_memory_budget_stats *out)
+{
+	tr_memory_budget_get_stats(
+		shard ? &shard->memory_budget : NULL, out);
 }
 
 int tr_runtime_shard_listen_ipv4_ex(struct tr_runtime_shard *shard,
