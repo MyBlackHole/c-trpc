@@ -24,15 +24,15 @@ struct tr_pipeline_data_offer {
 };
 
 /*
- * CONTROL session owns one registered Pipeline runtime object.
+ * 一个 CONTROL session ownership 对应一个已注册的 Pipeline 运行期对象。
  *
- * create:
- *   create Pipeline -> bind CONTROL -> register in shard registry
+ * create：
+ *   create Pipeline -> bind CONTROL -> register 到 shard-local registry
  *
- * close:
- *   allowed only after all ATTACHED DATA and Stream affinities are gone.
- *   outstanding RESERVED capabilities are cancelled by CONTROL clear before
- *   unregister/destroy.
+ * close：
+ *   只有 ATTACHED DATA 和 Stream affinity 都已清空后才允许 graceful close。
+ *   CONTROL clear 会取消尚未 attach 的 RESERVED capability，并与 registry
+ *   unregister 在同一个 Reactor owner transaction 内完成。
  */
 int tr_pipeline_control_create(
 	const struct tr_pipeline_control_config *config,
@@ -56,9 +56,8 @@ int tr_pipeline_control_get_stats(
 	struct tr_pipeline_stats *out);
 
 /*
- * CONTROL wire adapters keep runtime state transition and serialized identity
- * in one place. reserve/prepare roll back the newly-created soft state if the
- * fixed-size message cannot be encoded.
+ * CONTROL wire adapter 把运行期状态转换与 wire identity 编码收敛在同一层。
+ * reserve/prepare 如果固定长度消息编码失败，会回滚本次新建的 soft-state。
  */
 int tr_pipeline_control_reserve_data_wire(
 	struct tr_pipeline_control *control,
@@ -70,9 +69,11 @@ int tr_pipeline_control_prepare_transfer_wire(
 	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE]);
 
 /*
- * Fatal CONTROL teardown. All ATTACHED DATA memberships are invalidated,
- * their sockets are closed synchronously on the owner, outstanding RESERVED
- * capabilities are cancelled, then the Pipeline is unregistered/destroyed.
+ * Fatal CONTROL teardown：
+ * - 先使全部 ATTACHED DATA membership 与对应 Stream affinity 失效；
+ * - 取消 RESERVED capability；
+ * - 从 shard-local registry 注销 Pipeline；
+ * - 最后由 Reactor owner 同步关闭 DATA socket 并释放 Pipeline soft-state。
  */
 int tr_pipeline_control_abort(
 	struct tr_pipeline_control *control,
