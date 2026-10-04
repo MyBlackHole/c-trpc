@@ -34,7 +34,9 @@ sample counts, and totals and taking the maximum of `max_ns`.
 
 `tr_reactor_get_stats()` reports:
 
-- command and completion queue `capacity/current/peak/full_events`;
+- command and completion queue `capacity/current/peak/full_events`；
+  command `full_events` 表示 producer 遇到满 ring 的失败/重试，
+  completion `full_events` 表示 worker handoff 遇到满 ring 并进入 capacity wait；
 - bounded per-turn work and budget-hit counters;
 - `busy_ns` and `poll_ns` when timing is enabled;
 - a per-turn busy-time histogram.
@@ -47,7 +49,10 @@ reactor_busy_ratio = busy_ns / (busy_ns + poll_ns)
 
 A high busy ratio together with low RPC queue wait points toward the Reactor as
 the limiting execution resource. Queue high-water and budget-hit counters show
-whether the pressure is command/completion scheduling or RX/TX work.
+whether the pressure is command/completion scheduling or RX/TX work。特别是
+completion `full_events` 增长表示 worker 曾被 Reactor completion 消费速率反压，
+不是 completion 被丢弃；需要结合 Reactor busy ratio、completion budget hits 和
+executor queue wait 判断瓶颈位置。
 
 ## Reactor command attribution
 
