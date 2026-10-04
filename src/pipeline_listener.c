@@ -5,7 +5,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 
-#include "pipeline_control_internal.h"
+#include "group/pipeline_control_internal.h"
 #include "pipeline_control_transport_internal.h"
 #include "pipeline_ingress_internal.h"
 #include "group/pipeline_registry_internal.h"

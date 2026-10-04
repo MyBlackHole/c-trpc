@@ -91,7 +91,7 @@ target("trcore")
         "src/group/pipeline.c",
         "src/group/pipeline_route.c",
         "src/group/pipeline_registry.c",
-        "src/pipeline_control.c",
+        "src/group/pipeline_control.c",
         "src/group/pipeline_control_wire.c",
         "src/pipeline_control_transport.c",
         "src/pipeline_ingress.c",
