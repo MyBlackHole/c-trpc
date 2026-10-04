@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "tr/socket.h"
+#include "socket.h"
 #include "tr/status.h"
 #include "socket_internal.h"
 
