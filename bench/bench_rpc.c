@@ -239,8 +239,6 @@ static void configure_limits(
 	limits->initial_window_bytes =
 		(uint64_t)limits->max_message_bytes * 4U;
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
-	if (server)
-		limits->observability_flags = TR_OBSERVABILITY_TIMING;
 }
 
 static void configure_tuning(
@@ -261,6 +259,8 @@ static void configure_tuning(
 	tuning->executor_queue_capacity =
 		server && o->executor_queue ?
 			o->executor_queue : 4U * o->capacity;
+	if (server)
+		tuning->observability_flags = TR_OBSERVABILITY_TIMING;
 	if (server && o->control_tx_items)
 		tuning->control_tx_item_capacity = o->control_tx_items;
 	if (server && o->command_capacity)

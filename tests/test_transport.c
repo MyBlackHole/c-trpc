@@ -5998,6 +5998,7 @@ static void test_client_server_facade_unary(void)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
+	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	struct tr_client *client = NULL;
 	struct tr_rpc_method_desc method;
@@ -6020,10 +6021,12 @@ static void test_client_server_facade_unary(void)
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
 	server_config.limits.rpc_message_buffer_bytes = 4096U;
-	server_config.limits.observability_flags = TR_OBSERVABILITY_TIMING;
 	server_config.interceptor.fn = facade_test_interceptor;
 	server_config.interceptor.arg = &ctx;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	tr_facade_tuning_init(&tuning);
+	tuning.observability_flags = TR_OBSERVABILITY_TIMING;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
 	method.service_id = 77U;

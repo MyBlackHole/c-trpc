@@ -73,8 +73,7 @@ target("trcore")
         "include/(tr/server.h)",
         "include/(tr/transport.h)",
         "include/(tr/rpc.h)",
-        "include/(tr/rpc_codec.h)",
-        "include/(tr/observability.h)")
+        "include/(tr/rpc_codec.h)")
     add_files(
         "src/status.c",
         "src/crc32c.c",
