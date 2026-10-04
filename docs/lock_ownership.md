@@ -54,12 +54,18 @@ queue lock 是 admission/ownership transfer 的线性化点。当前 mutex 实�
 socket I/O 热路径，没有 profile 证据前不改成 lock-free。
 
 Completion queue 与 Command queue 独立，worker completion 不占用控制 command
-容量。completion ring 满时 producer 在 queue-local `not_full` condition 上睡眠，
-Reactor batch pop 后唤醒；不使用 `sched_yield()` 忙等。
+容量。
 
-stop 先关闭 completion admission、推进 admission generation 并唤醒全部 waiter，
-再发布 STOP；已经成功入队的 completion 必须在 shutdown drain 中执行。旧 generation
-waiter 即使遇到后续 Reactor reopen，也只能返回 CLOSED，不能跨生命周期提交。
+两类 queue 的满载策略不同但都不使用 `sched_yield()`：
+
+- Completion：所有跨线程 handoff 都在 queue-local `not_full` 上等待容量；
+- Command：SEND/RESUME/CLOSE 等异步 API 仍立即返回 `TR_AGAIN`；只有
+  CALL/QUIESCE/SET_HANDLER 等同步 owner request 才等待容量；
+- STOP 使用 lifecycle-only force wait，不受普通 command waiter admission 关闭影响。
+
+stop 先关闭 completion admission 和普通 command waiter admission，推进各自
+generation 并唤醒 waiter，然后 STOP 自己等待真实 command slot。已经成功入队的
+旧工作仍按 FIFO 在 STOP 之前执行。
 
 ### TX pool lock
 
