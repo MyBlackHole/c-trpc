@@ -88,13 +88,6 @@ static void small_limits(struct tr_facade_limits *limits)
 	limits->max_message_bytes = 1024U;
 	limits->initial_window_bytes = 4096U;
 	limits->window_update_threshold_bytes = 256U;
-	limits->command_capacity = 32U;
-	limits->tx_item_capacity = 16U;
-	limits->control_tx_item_capacity = 8U;
-	limits->rx_buffer_count = 8U;
-	limits->rpc_message_pool_count = 16U;
-	limits->rpc_message_buffer_bytes = 256U;
-	limits->reassembly_pool_count = 8U;
 	limits->executor_threads = 1U;
 	limits->executor_queue_capacity = 16U;
 }
