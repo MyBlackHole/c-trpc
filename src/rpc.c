@@ -128,6 +128,7 @@ struct tr_rpc_call_slot {
 	uint32_t rx_count;
 	uint32_t task_refs;
 	uint32_t interceptor_mask;
+	int interceptor_active;
 
 	int is_unary;
 	int local_closed;
@@ -1291,6 +1292,7 @@ static int tr_rpc_run_interceptor_locked(
 	handle = tr_rpc_make_call_handle(endpoint, slot, call);
 	fn_arg = endpoint->config.interceptor.arg;
 	call->interceptor_mask |= bit;
+	call->interceptor_active = 1;
 
 	pthread_mutex_unlock(&endpoint->lock);
 	result = fn(handle, phase, status, fn_arg);
@@ -1300,6 +1302,7 @@ static int tr_rpc_run_interceptor_locked(
 	if (call->state == TR_RPC_CALL_FREE ||
 	    call->generation != generation)
 		return TR_ERR_STALE;
+	call->interceptor_active = 0;
 
 	if (phase == TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER) {
 		if (!tr_rpc_status_valid(result))
@@ -3375,6 +3378,10 @@ static int tr_rpc_cancel_on_owner(void *arg)
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_ERR_STALE;
 	}
+	if (call->interceptor_active) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return TR_ERR_STATE;
+	}
 	if (call->cancelled) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_OK;
@@ -5013,6 +5020,8 @@ static int tr_rpc_prepare_send_locked(struct tr_rpc_call_handle handle,
 	call = tr_rpc_lookup_call_handle_locked(handle);
 	if (!call || !call->method || call->is_unary)
 		return TR_ERR_STALE;
+	if (call->interceptor_active)
+		return TR_ERR_STATE;
 	if (call->cancelled || call->executor_overloaded ||
 	    call->state == TR_RPC_CALL_TERMINAL ||
 	    call->final_status_seen || call->final_status_sent ||
@@ -5167,6 +5176,10 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 		ret = TR_ERR_STALE;
 		goto out;
 	}
+	if (call->interceptor_active) {
+		ret = TR_ERR_STATE;
+		goto out;
+	}
 	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL) {
 		ret = TR_ERR_CLOSED;
 		goto out;
@@ -5247,6 +5260,10 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 	if (!call || !call->method || call->is_unary ||
 	    call->final_status_sent) {
 		ret = TR_ERR_STALE;
+		goto out;
+	}
+	if (call->interceptor_active) {
+		ret = TR_ERR_STATE;
 		goto out;
 	}
 	if (call->cancelled || call->executor_overloaded ||
