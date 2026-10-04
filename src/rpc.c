@@ -4354,14 +4354,74 @@ static int tr_rpc_validate_method(const struct tr_rpc_method_desc *method)
 	return TR_OK;
 }
 
+struct tr_rpc_register_method_request {
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_method_desc method;
+	enum tr_rpc_handler_kind kind;
+	tr_rpc_unary_handler unary_handler;
+	struct tr_rpc_stream_handlers stream_handlers;
+	int has_stream_handlers;
+	void *handler_arg;
+};
+
+static int tr_rpc_register_method_on_owner(void *arg)
+{
+	struct tr_rpc_register_method_request *request =
+		(struct tr_rpc_register_method_request *)arg;
+	struct tr_rpc_endpoint *endpoint = request->endpoint;
+	struct tr_rpc_method_entry *entry;
+	uint32_t slot;
+	int ret;
+
+	/*
+	 * Method publication 与 inbound REQUEST/Client Call start 共享同一个
+	 * Reactor owner ordering。endpoint->lock 仍保留给 stats/fallback 等
+	 * 非 owner snapshot，不再用它把 application thread 变成 Method writer。
+	 */
+	pthread_mutex_lock(&endpoint->lock);
+	if (tr_rpc_find_method_locked(
+		    endpoint, request->method.service_id,
+		    request->method.method_id)) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return TR_ERR_STATE;
+	}
+
+	if (endpoint->method_count == endpoint->config.max_methods) {
+		pthread_mutex_unlock(&endpoint->lock);
+		return TR_AGAIN;
+	}
+
+	slot = endpoint->method_count;
+	entry = &endpoint->methods[slot];
+	entry->used = 1;
+	entry->handler_kind = request->kind;
+	entry->desc = request->method;
+	entry->unary_handler = request->unary_handler;
+	if (request->has_stream_handlers)
+		entry->stream_handlers = request->stream_handlers;
+	entry->handler_arg = request->handler_arg;
+
+	ret = tr_rpc_method_index_insert_locked(
+		endpoint, request->method.service_id,
+		request->method.method_id, slot);
+	if (ret != TR_OK) {
+		memset(entry, 0, sizeof(*entry));
+		pthread_mutex_unlock(&endpoint->lock);
+		return ret;
+	}
+
+	endpoint->method_count++;
+	pthread_mutex_unlock(&endpoint->lock);
+	return TR_OK;
+}
+
 static int tr_rpc_register_method_internal(
 	struct tr_rpc_endpoint *endpoint,
 	const struct tr_rpc_method_desc *method, enum tr_rpc_handler_kind kind,
 	tr_rpc_unary_handler unary_handler,
 	const struct tr_rpc_stream_handlers *stream_handlers, void *handler_arg)
 {
-	struct tr_rpc_method_entry *entry;
-	uint32_t slot;
+	struct tr_rpc_register_method_request request;
 	int ret;
 
 	if (!endpoint)
@@ -4377,39 +4437,19 @@ static int tr_rpc_register_method_internal(
 	if (kind == TR_RPC_HANDLER_STREAM && !stream_handlers)
 		return TR_ERR_INVALID;
 
-	pthread_mutex_lock(&endpoint->lock);
-	if (tr_rpc_find_method_locked(endpoint, method->service_id,
-				      method->method_id)) {
-		pthread_mutex_unlock(&endpoint->lock);
-		return TR_ERR_STATE;
+	memset(&request, 0, sizeof(request));
+	request.endpoint = endpoint;
+	request.method = *method;
+	request.kind = kind;
+	request.unary_handler = unary_handler;
+	request.handler_arg = handler_arg;
+	if (stream_handlers) {
+		request.stream_handlers = *stream_handlers;
+		request.has_stream_handlers = 1;
 	}
 
-	if (endpoint->method_count == endpoint->config.max_methods) {
-		pthread_mutex_unlock(&endpoint->lock);
-		return TR_AGAIN;
-	}
-
-	slot = endpoint->method_count;
-	entry = &endpoint->methods[slot];
-	entry->used = 1;
-	entry->handler_kind = kind;
-	entry->desc = *method;
-	entry->unary_handler = unary_handler;
-	if (stream_handlers)
-		entry->stream_handlers = *stream_handlers;
-	entry->handler_arg = handler_arg;
-
-	ret = tr_rpc_method_index_insert_locked(
-		endpoint, method->service_id, method->method_id, slot);
-	if (ret != TR_OK) {
-		memset(entry, 0, sizeof(*entry));
-		pthread_mutex_unlock(&endpoint->lock);
-		return ret;
-	}
-
-	endpoint->method_count++;
-	pthread_mutex_unlock(&endpoint->lock);
-	return TR_OK;
+	return tr_rpc_owner_call(
+		endpoint, tr_rpc_register_method_on_owner, &request);
 }
 
 int tr_rpc_register_method(struct tr_rpc_endpoint *endpoint,
