@@ -6433,6 +6433,7 @@ static int shared_executor_test_handler(struct tr_rpc_call_handle call,
 	static const uint8_t reply[] = "shared-ok";
 	(void)call;
 	(void)request;
+	assert(tr_rpc_in_worker_context());
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->entered++;
@@ -6459,6 +6460,7 @@ static void shared_executor_test_result(struct tr_rpc_call_handle call,
 	struct shared_executor_test_ctx *ctx =
 		(struct shared_executor_test_ctx *)arg;
 	(void)call;
+	assert(tr_rpc_in_worker_context());
 	assert(status == TR_RPC_STATUS_OK);
 	assert(response != NULL);
 	assert(response->len == 9U);

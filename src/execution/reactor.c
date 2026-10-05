@@ -55,6 +55,11 @@ static int tr_reactor_is_owner_thread(const struct tr_reactor *reactor)
 	return reactor && tr_current_reactor_owner == reactor;
 }
 
+int tr_reactor_in_owner_context(void)
+{
+	return tr_current_reactor_owner != NULL;
+}
+
 #ifndef NDEBUG
 #define TR_ASSERT_REACTOR_OWNER(reactor) \
 	assert(tr_reactor_is_owner_thread((reactor)))
@@ -3735,6 +3740,14 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	if (!reactor)
 		return TR_ERR_INVALID;
 
+	/*
+	 * pthread_join(self) is a lifecycle bug, not a recoverable stop path.
+	 * Reject before closing admission so an owner callback cannot partially
+	 * stop its own Reactor and then continue on freed/closed state.
+	 */
+	if (tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
@@ -3762,7 +3775,9 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	if (ret != TR_OK)
 		return ret;
 
-	pthread_join(reactor->thread, NULL);
+	ret = pthread_join(reactor->thread, NULL);
+	if (ret != 0)
+		return TR_ERR_SYS;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	reactor->started = 0;
@@ -3772,11 +3787,19 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 
 void tr_reactor_destroy(struct tr_reactor *reactor)
 {
+	int ret;
+
 	if (!reactor)
 		return;
 
-	if (reactor->started)
-		(void)tr_reactor_stop(reactor);
+	if (reactor->started) {
+		ret = tr_reactor_stop(reactor);
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
+	}
 
 	if (reactor->wake_fd >= 0)
 		close(reactor->wake_fd);

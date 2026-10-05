@@ -10,6 +10,12 @@
 
 struct tr_rpc_endpoint;
 
+/*
+ * True while the current thread is one of c-trpc's RPC executor workers.
+ * Synchronous destroy must not join/wait for the worker that is executing it.
+ */
+int tr_rpc_in_worker_context(void);
+
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
 
 struct tr_rpc_endpoint_config {

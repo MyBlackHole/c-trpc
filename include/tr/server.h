@@ -76,6 +76,16 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
 int tr_server_get_rpc_semantic_stats(
 	struct tr_server *server, struct tr_rpc_semantic_stats *out);
 
+/*
+ * Synchronous terminal ownership release.
+ *
+ * The caller must stop initiating new Server API calls before destroy and must
+ * not call destroy from a c-trpc callback (Reactor owner callback, interceptor,
+ * RPC handler/result/event callback). Signal an external control thread and
+ * return from the callback before destroying the Server.
+ *
+ * Call handles and callback arguments do not extend Server lifetime.
+ */
 void tr_server_destroy(struct tr_server *server);
 
 #ifdef __cplusplus

@@ -16,6 +16,10 @@ c-trpc 以 ISO C11 为语言基线。作用域自动清理使用 GCC/Clang 的 `
 
 `tr_conn_handle`、`tr_stream_handle` 等 handle 是 capability，**不是 ownership**。
 
+`tr_rpc_call_handle` 同样是 borrowed capability：generation 可以识别同一 Endpoint
+内的 slot reuse，但 handle 本身不会 pin Endpoint lifetime。调用方必须保证 owning
+Client/Server 未进入 destroy，并在 Call terminal lifecycle 结束后停止使用旧 handle。
+
 ## 2. 成功才转移 ownership
 
 除非 API 文档明确说明，否则 ownership 只在返回 `TR_OK` 时发生转移。
@@ -156,8 +160,35 @@ teardown 模式。
 
 ### 9.1 同步 destroy
 
+同步 destroy 是 **external terminal operation**，不是 callback 内可重入 API。
+
+禁止在以下 execution context 直接 destroy Client/Server/Endpoint：
+
+- Reactor owner callback / interceptor；
+- RPC executor worker 上的 handler/result/event callback。
+
+原因不是“API 风格”，而是 quiescence dependency：destroy 需要等待 Reactor owner 或
+RPC worker 完成；从被等待的 execution context 内同步 destroy 会形成 self-join、
+self-wait，或者在 join 失败后继续释放仍在执行的对象。
+
+正确模式：
+
+```text
+callback / handler
+    -> publish shutdown intent
+    -> return
+
+external control thread
+    -> stop new application API entry
+    -> drain / quiesce
+    -> destroy
+```
+
+底层 lifecycle 同样遵守 fail-closed：`tr_reactor_stop()` 在 owner context 返回
+`TR_ERR_STATE`，而 Reactor/Runtime destroy 如果无法完成 stop，不得继续 free。
+
 Client/直接 owner 使用同步 destroy 时，Endpoint 只是 borrowed Channel，因此函数
-返回后必须允许调用方立即销毁 Channel：
+返回后必须允许调用方立即安全销毁 Channel：
 
 ```text
 owner ref = 1

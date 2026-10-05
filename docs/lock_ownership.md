@@ -38,6 +38,10 @@ close connections
 join Reactor
 ```
 
+`stop/destroy` 是 external lifecycle barrier，禁止从 Reactor owner callback 内执行。
+owner TLS 会让 `tr_reactor_stop()` 在任何 admission mutation 之前返回
+`TR_ERR_STATE`，从而避免 `pthread_join(self)` 或 partial-stop。
+
 这样 STOP 之后不会再出现“command/completion 已取得资源 ownership，但 owner 已退出”
 的悬空工作。
 
@@ -201,7 +205,12 @@ pending-retry completion 等不同引用来源都不会漏掉 owner-only waiter 
 
 **结论：保留。**
 
-保护 shard-local shared worker pool 的 ready-Endpoint queue。该队列使用 Endpoint
+保护 shard-local shared worker pool 的 ready-Endpoint queue。
+
+RPC worker 使用 thread-local execution-context 标记。同步 Endpoint/Facade destroy
+不得从 worker handler/result/event callback 中进入，因为 destroy 需要等待 worker
+strong-ref 或 join worker；callback 必须先返回，再由 external lifecycle owner
+执行 destroy。该队列使用 Endpoint
 内部 intrusive node；每个 Endpoint 由 `group_enqueued` 保证最多发布一个 scheduling
 token，因此不存在第二个固定-size ready ring，也不存在 retiring Endpoint overlap
 把 ring 填满后丢失 replacement token 的状态。

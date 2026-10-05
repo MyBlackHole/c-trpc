@@ -233,6 +233,14 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 	if (!runtime->started)
 		return TR_OK;
 
+	/*
+	 * Avoid partial multi-shard stop from a thread that belongs to the
+	 * execution domain being stopped. Facade destroy performs the same
+	 * preflight before mutating higher-level state.
+	 */
+	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
+		return TR_ERR_STATE;
+
 	i = runtime->shard_count;
 	while (i != 0U) {
 		struct tr_runtime_shard *shard;
@@ -257,11 +265,18 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 void tr_runtime_destroy(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int ret;
 
 	if (!runtime)
 		return;
 
-	(void)tr_runtime_stop(runtime);
+	ret = tr_runtime_stop(runtime);
+#ifndef NDEBUG
+	assert(ret == TR_OK);
+#endif
+	if (ret != TR_OK)
+		return;
+
 	for (i = 0; i < runtime->shard_count; ++i)
 		tr_runtime_shard_release(&runtime->shards[i]);
 	free(runtime->shards);

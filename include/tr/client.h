@@ -82,6 +82,17 @@ int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
 int tr_client_get_rpc_semantic_stats(
 	struct tr_client *client, struct tr_rpc_semantic_stats *out);
 
+/*
+ * Synchronous terminal ownership release.
+ *
+ * The caller must stop initiating new Client API calls before destroy and must
+ * not call destroy from a c-trpc callback (Reactor owner callback, interceptor,
+ * RPC handler/result/event callback). Such callbacks must hand shutdown intent
+ * to an external control thread and return first.
+ *
+ * Call handles do not extend Client lifetime and must not be used concurrently
+ * with or after this operation.
+ */
 void tr_client_destroy(struct tr_client *client);
 
 #ifdef __cplusplus
