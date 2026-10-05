@@ -18,11 +18,11 @@ struct tr_connector_config {
 };
 
 /*
- * Reactor-owned nonblocking connector。
+ * 由 Reactor 拥有的非阻塞连接器。
  *
  * start() 只启动状态机，不阻塞等待 connect/preface。
  *
- * ownership contract：
+ * 所有权契约：
  * - TR_OK：connector 已接管本次 attempt，complete_cb 必定调用一次（允许在
  *   start() 返回前同步调用）；
  * - error：attempt 未被接管，不会调用 complete_cb。
