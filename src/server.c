@@ -255,6 +255,16 @@ static uint64_t tr_server_now_ms(void)
 	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
 }
 
+static void tr_server_pause_ms(uint32_t ms)
+{
+	struct timespec ts;
+
+	ts.tv_sec = (time_t)(ms / 1000U);
+	ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
+	while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
+		;
+}
+
 static void tr_server_merge_channel_stats(
 	struct tr_server_channel_stats *dst,
 	const struct tr_channel_stats *src, int current)
@@ -598,23 +608,30 @@ tr_server_note_peer_added_owner(struct tr_server_shard *shard)
 	tr_runtime_shard_peer_note_added(shard->runtime);
 }
 
-static void tr_server_destroy_peer(struct tr_runtime_peer *peer)
+static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 {
 	if (!peer)
-		return;
+		return TR_OK;
 
 	if (peer->rpc) {
 		tr_rpc_endpoint_destroy(peer->rpc);
 		peer->rpc = NULL;
 	}
 	if (peer->channel) {
-		tr_channel_destroy(peer->channel);
+		int ret = tr_channel_destroy(peer->channel);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return ret;
 		peer->channel = NULL;
 	}
 
 	free(peer->finalize_ctx);
 	peer->finalize_ctx = NULL;
 	memset(peer, 0, sizeof(*peer));
+	return TR_OK;
 }
 
 static void tr_server_finish_detached_peer(
@@ -637,9 +654,16 @@ static void tr_server_finish_detached_peer(
 
 	memset(&channel_stats, 0, sizeof(channel_stats));
 	if (detached->channel) {
+		int ret;
+
 		if (tr_channel_get_stats(detached->channel, &channel_stats) == TR_OK)
 			have_channel_stats = 1;
-		tr_channel_finalize_detached(detached->channel);
+		ret = tr_channel_finalize_detached(detached->channel);
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
 		detached->channel = NULL;
 	}
 
@@ -1630,6 +1654,14 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	for (shard_index = 0; shard_index < server->shard_count; ++shard_index)
 		tr_server_disable_peer_events(&server->shards[shard_index]);
 
+	/*
+	 * Listener + peer-event unregister are synchronous owner barriers. After
+	 * both return, no accept path can publish a new peer and no lifecycle event
+	 * can detach/clear a peer slot, so the peer table is frozen for this
+	 * external drain phase.
+	 *
+	 * First pass publishes the admission barrier to every peer quickly.
+	 */
 	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
 		struct tr_server_shard *shard = &server->shards[shard_index];
 		uint32_t i;
@@ -1649,6 +1681,50 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	}
 
 	start = tr_server_now_ms();
+
+	/*
+	 * begin_drain(TR_AGAIN) means GOAWAY was not admitted yet. Retry pending
+	 * peers round-robin: one backpressured CONTROL lane must not prevent other
+	 * peers from publishing their shutdown boundary.
+	 */
+	for (;;) {
+		uint32_t pending = 0U;
+
+		for (shard_index = 0; shard_index < server->shard_count;
+		     ++shard_index) {
+			struct tr_server_shard *shard =
+				&server->shards[shard_index];
+			uint32_t i;
+
+			for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+				struct tr_runtime_peer *peer =
+					tr_server_shard_peer_at(shard, i);
+				int ret;
+
+				if (!peer || !peer->used)
+					continue;
+				ret = tr_channel_begin_drain(peer->channel);
+				if (ret == TR_AGAIN) {
+					pending++;
+					continue;
+				}
+				if (ret != TR_OK && final == TR_OK)
+					final = ret;
+			}
+		}
+
+		if (pending == 0U)
+			break;
+		if (timeout_ms == 0U)
+			return final == TR_OK ? TR_AGAIN : final;
+		if (tr_server_now_ms() - start >= timeout_ms)
+			return TR_ERR_TIMEOUT;
+		/*
+		 * CONTROL TX admission has no producer waitqueue today. Keep the only
+		 * periodic retry at this facade backpressure layer.
+		 */
+		tr_server_pause_ms(1U);
+	}
 	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
 		struct tr_server_shard *shard = &server->shards[shard_index];
 		uint32_t i;
@@ -1897,7 +1973,14 @@ void tr_server_destroy(struct tr_server *server)
 				if (!peer ||
 				    (!peer->used && !peer->channel && !peer->rpc))
 					continue;
-				tr_server_destroy_peer(peer);
+				{
+					int ret = tr_server_destroy_peer(peer);
+#ifndef NDEBUG
+					assert(ret == TR_OK);
+#endif
+					if (ret != TR_OK)
+						return;
+				}
 			}
 		}
 	}
