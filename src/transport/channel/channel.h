@@ -230,8 +230,12 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 int tr_channel_begin_drain(struct tr_channel *channel);
 
 /*
- * 同步等待 active Stream 归零。该进度依赖 Reactor owner 继续处理 RX/TX 和
- * close/cancel callback，因此 owner context 调用返回 TR_ERR_STATE。
+ * 同步等待 active Stream 归零。等待由 Channel 状态条件变量驱动，不周期
+ * 轮询 active Stream；只有 GOAWAY 因 bounded TX admission 尚未成功时保留
+ * 短周期 retry。timeout_ms == 0 保持非阻塞检查语义。
+ *
+ * 该进度依赖 Reactor owner 继续处理 RX/TX 和 close/cancel callback，因此
+ * owner context 调用返回 TR_ERR_STATE。
  */
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
 int tr_channel_get_state(struct tr_channel *channel,
