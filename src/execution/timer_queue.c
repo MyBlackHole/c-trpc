@@ -229,7 +229,7 @@ int tr_timer_queue_unregister(struct tr_timer_queue *queue,
 	entry->running = 0;
 	entry->callback = NULL;
 	entry->arg = NULL;
-	/* Generation survives reuse; stale tokens cannot release this slot twice. */
+	/* 代次跨槽位复用持续递增，陈旧令牌不能重复释放同一个槽位。 */
 	entry->next_free = queue->free_head;
 	queue->free_head = token.slot;
 	return TR_OK;
