@@ -15,25 +15,35 @@ env:
   XMAKE_VERSION: '3.1.1'
 
 jobs:
-  build-test:
-    name: build-test (${{ matrix.cc }}, ${{ matrix.mode }})
+  build-test-gcc:
+    name: build-test (gcc)
     runs-on: ubuntu-22.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {cc: gcc, mode: debug}
-          - {cc: gcc, mode: release}
-          - {cc: clang, mode: release}
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Build all targets and test
+      - name: Build all targets and test debug + release
         run: |
-          xmake f -c -y -m "${{ matrix.mode }}" --toolchain=${{ matrix.cc }} --crc32c_portable=n
+          for mode in debug release; do
+            xmake f -c -y -m "$mode" --toolchain=gcc --crc32c_portable=n
+            xmake build --all -v
+            xmake test -v -j1
+          done
+
+  build-test-clang:
+    name: build-test (clang)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Build all targets and test release
+        run: |
+          xmake f -c -y -m release --toolchain=clang --crc32c_portable=n
           xmake build --all -v
           xmake test -v -j1
 
