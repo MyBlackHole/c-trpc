@@ -107,9 +107,9 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 	}
 
 	/*
-	 * Connection Group transfer concurrency is a dedicated semantic budget.
-	 * Preserve the historical behavior by inheriting max_streams when callers
-	 * enable DATA lanes without choosing an explicit transfer limit.
+	 * 连接组传输并发使用独立语义预算。
+	 * 调用方启用 DATA 通道但未显式指定传输上限时，
+	 * 继承 max_streams 以保持历史行为。
 	 */
 	if (config->connection_groups.max_data_connections != 0U &&
 	    config->connection_groups.max_active_transfers == 0U)
@@ -269,8 +269,8 @@ int tr_client_create_with_tuning(
 		return ret;
 
 	/*
-	 * Connection Group engine is created lazily on first public Group use.
-	 * A normal RPC-only Client therefore pays no Group heap/pool/timer cost.
+	 * 连接组引擎只在第一次使用公开组 API 时按需创建。
+	 * 因此仅使用普通 RPC 的 Client 不承担组相关堆内存、资源池或定时器成本。
 	 */
 	*out = tr_client_owner_take(&client);
 	return TR_OK;
@@ -689,10 +689,10 @@ void tr_client_destroy(struct tr_client *client)
 		return;
 
 	/*
-	 * destroy is an external terminal operation. Calling it from a Reactor
-	 * callback or RPC worker would make synchronous teardown wait for itself.
-	 * The public contract forbids that context; defensively leave ownership
-	 * unchanged instead of partially destroying the Client.
+	 * destroy 是外部终止操作。
+	 * 从 Reactor 回调或 RPC 工作线程调用会使同步销毁等待自身。
+	 * 公开契约禁止这种执行上下文；防御性处理是保持所有权不变，
+	 * 而不是部分销毁 Client。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return;
@@ -732,9 +732,9 @@ void tr_client_destroy(struct tr_client *client)
 		assert(ret == TR_OK);
 #endif
 		/*
-		 * A failed lifecycle barrier means ownership has not converged.
-		 * Keep the remaining Client/Runtime storage alive rather than freeing
-		 * memory that an execution thread may still reference.
+		 * 生命周期屏障失败表示所有权尚未收敛。
+		 * 必须保留剩余 Client/Runtime 存储，
+		 * 不能释放执行线程仍可能引用的内存。
 		 */
 		if (ret != TR_OK)
 			return;
