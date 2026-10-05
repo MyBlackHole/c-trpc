@@ -1,103 +1,98 @@
 # trpc_transport_v1
 
-Linux 3.x+ C transport/RPC prototype focused on bounded resources, explicit ownership, high-throughput bulk streams, and a clean separation between generic transport/RPC and backup business semantics.
+面向 Linux 3.x+ 的 C 传输/RPC 原型，重点关注有界资源、显式所有权、高吞吐批量数据流，以及通用传输/RPC 与备份业务语义之间的清晰分离。
 
-## Architecture
-
-```text
-Application / business layer
-             |
-             v
-       RPC Service / Method
-       Call + Executor
-  ONE/MANY <-> ONE/MANY
-             |
-     RAW control message
-        or RAW slices
-             |
-             v
-        +--------- Channel ---------+
-        |                           |
-   CONTROL lane                 BULK lane
-        |                           |
-        +------ physical map -------+
-        |                           |
- control connection          bulk connection
-        |                           |
-        +------------+--------------+
-                     |
-                Stream layer
-            byte flow control
-                     |
-              Transport Frame
-                     |
-             owner Reactor
-                     |
-             epoll LT + eventfd
-              /             \
-           recv()          sendmsg()
-             |                 |
-       incremental       header + slices
-         parser              iovec[]
-             |                 |
-        RX buffer          TX item pools
-           pool        (bulk + control reserve)
-              \             /
-                    TCP
-```
-
-A Channel can run in:
-
-- `TR_CHANNEL_SHARED_CONNECTION`: CONTROL and BULK lanes map to one TCP connection.
-- `TR_CHANNEL_SPLIT_CONNECTIONS`: CONTROL and BULK use independent TCP connections while sharing one Reactor.
-
-The transport/RPC core performs no normal filesystem I/O and contains no backup-specific commit/storage semantics.
-
-
-## Runtime observability
-
-The runtime still collects allocation-free structured diagnostics for benchmark
-and internal bottleneck attribution. Queue/pool counters and high-water marks
-remain available inside the engine; monotonic timing histograms remain opt-in
-through repository-internal diagnostic tuning.
-
-Detailed Reactor/Channel/Endpoint snapshots, timing flags and diagnostic
-histogram/queue/pool types are intentionally **not** part of the stable
-installed SDK. Repository benchmarks/tests use the internal diagnostics
-surface.
-
-Stable semantic observability now includes layout-independent RPC lifecycle
-snapshots through `tr_client_get_rpc_semantic_stats()` and
-`tr_server_get_rpc_semantic_stats()`, plus the existing Connection Group
-semantic stats. RPC snapshots expose only started/finished/inflight Calls and
-final RPC status distribution; they do not expose worker, queue, pool, Reactor,
-slot or timing layout. See [`docs/observability.md`](docs/observability.md).
-
-## High-level Client / Server facade
-
-The library now includes a first high-level facade for applications that do not
-want to manage Reactor slots, connection generations, Channel construction, or
-accepted socket adoption directly:
+## 架构
 
 ```text
-Application
-   |
-   +--> tr_client -------------------+
-   |                                 |
-   +--> tr_server                    |
-                                     v
-                              RPC Endpoint
-                                     |
-                                  Channel
-                                     |
-                                 Connection
-                                     |
-                                  Reactor
-                                     |
-                                    TCP
+应用/业务层
+     |
+     v
+RPC 服务/方法
+Call + 执行器
+ONE/MANY <-> ONE/MANY
+     |
+RAW 控制消息
+或 RAW 分片
+     |
+     v
++--------- Channel ---------+
+|                           |
+CONTROL 通道              BULK 通道
+|                           |
++------ 物理映射 -----------+
+|                           |
+控制连接                 批量连接
+|                           |
++------------+--------------+
+             |
+          Stream 层
+        字节流量控制
+             |
+          传输帧
+             |
+      Reactor 所有者
+             |
+      epoll LT + eventfd
+        /             \
+     recv()          sendmsg()
+       |                 |
+    增量解析         头部 + 分片
+       |              iovec[]
+       |                 |
+   RX 缓冲区         TX 项资源池
+    资源池       （批量 + 控制预留）
+        \             /
+              TCP
 ```
 
-Client lifecycle:
+`Channel` 可以运行在两种模式：
+
+- `TR_CHANNEL_SHARED_CONNECTION`：CONTROL 与 BULK 通道映射到同一个 TCP 连接。
+- `TR_CHANNEL_SPLIT_CONNECTIONS`：CONTROL 与 BULK 使用独立 TCP 连接，但共享同一个 Reactor。
+
+传输/RPC 核心不执行常规文件系统 I/O，也不包含备份专用的提交/存储语义。
+
+## 运行时可观测性
+
+运行时仍会收集无额外分配的结构化诊断数据，用于基准测试和内部瓶颈归因。
+队列/资源池计数器与高水位仍保留在引擎内部；单调时钟计时直方图仍通过
+仓库内部诊断调优按需启用。
+
+详细的 Reactor/Channel/Endpoint 快照、计时标志以及诊断直方图/队列/资源池类型，
+有意**不属于**稳定安装 SDK。仓库内基准测试和测试程序使用内部诊断接口。
+
+稳定语义观测现在包括与内部布局无关的 RPC 生命周期快照，通过
+`tr_client_get_rpc_semantic_stats()` 和
+`tr_server_get_rpc_semantic_stats()` 获取，并保留现有连接组语义统计。
+RPC 快照只暴露已经开始/已经结束/进行中的 Call 和最终 RPC 状态分布；
+不会暴露工作线程、队列、资源池、Reactor、槽位或计时布局。
+详见 [`docs/observability.md`](docs/observability.md)。
+
+## 高层客户端/服务端门面
+
+库现在提供第一版高层门面，用于不希望直接管理 Reactor 槽位、连接代次、
+Channel 构造或已接收套接字接管的应用：
+
+```text
+应用
+ |
+ +--> tr_client -------------------+
+ |                                 |
+ +--> tr_server                    |
+                                   v
+                            RPC Endpoint
+                                   |
+                                Channel
+                                   |
+                               Connection
+                                   |
+                                Reactor
+                                   |
+                                  TCP
+```
+
+客户端生命周期：
 
 ```c
 struct tr_client_config cfg;
@@ -111,7 +106,7 @@ tr_client_unary_call(client, ...);
 tr_client_destroy(client);
 ```
 
-Server lifecycle:
+服务端生命周期：
 
 ```c
 struct tr_server_config cfg;
@@ -128,24 +123,22 @@ tr_server_drain(server, 5000);
 tr_server_destroy(server);
 ```
 
-The facade owns the Reactor, RPC message pool and Channel reassembly pool.
-Stable `tr_facade_limits` describes application-visible protocol/concurrency
-semantics rather than current Reactor/pool/executor layout. Command/TX/RX,
-pool counts, worker counts, executor node capacity and continuation reserve are
-derived internally; repository benchmarks/architecture tests can override them
-only via an internal tuning seam that is not installed as SDK API. RPC
-encoded-message ownership uses a bounded internal slot pool whose buffers grow
-on demand up to the semantic `max_message_bytes` limit; no encoded-message
-storage size is exposed in the installed SDK.
-`tr_server_register_method()` / `tr_server_register_stream_method()` are
-pre-start operations in V1; every accepted peer receives an RPC endpoint with
-the registered method table. `tr_client_call_start*()` exposes Streaming Calls
-without exposing Reactor/Connection internals. Call-level send/cancel/metadata
-operations continue to use the existing `tr_rpc_call_*()` APIs on the returned
-Call handle.
+门面拥有 Reactor、RPC 消息资源池和 Channel 重组资源池。
+稳定的 `tr_facade_limits` 描述应用可见的协议/并发语义，而不是当前
+Reactor/资源池/执行器布局。命令/TX/RX、资源池数量、工作线程数量、
+执行器节点容量和续处理预留都在内部推导；仓库基准测试/架构测试只能通过
+不安装为 SDK API 的内部调优入口覆盖它们。
 
-The stable SDK also contains the first generic Connection Group transport
-capability in `tr/transport.h`. It is opt-in and disabled by default:
+RPC 编码消息所有权使用有界内部槽位池，其缓冲区按需增长到语义
+`max_message_bytes` 上限；安装后的 SDK 不暴露编码消息存储大小。
+
+`tr_server_register_method()` / `tr_server_register_stream_method()`
+在 V1 中属于启动前操作；每个已接收对端都会获得包含已注册方法表的 RPC Endpoint。
+`tr_client_call_start*()` 在不暴露 Reactor/Connection 内部结构的前提下提供流式 Call。
+返回的 Call 句柄继续使用现有 `tr_rpc_call_*()` API 完成调用级发送/取消/元数据操作。
+
+稳定 SDK 还在 `tr/transport.h` 中包含第一版通用连接组传输能力。
+该能力按需启用，默认关闭：
 
 ```c
 tr_server_config_init(&cfg);
@@ -163,8 +156,7 @@ tr_server_connection_group_listen(
 tr_server_start(server);
 ```
 
-The same stable Transport facade now exposes the Client-side CONTROL lifecycle
-without exposing routing internals:
+同一个稳定传输门面现在也提供客户端 CONTROL 生命周期，并且不暴露路由内部实现：
 
 ```c
 struct tr_connection_group_id group = {
@@ -173,9 +165,9 @@ struct tr_connection_group_id group = {
 };
 
 tr_client_config_init(&client_cfg);
-/* 0 keeps CONTROL-only behavior; non-zero enables bounded automatic DATA lanes. */
+/* 0 保持仅 CONTROL 行为；非 0 启用有界自动 DATA 通道。 */
 client_cfg.connection_groups.max_data_connections = 4;
-/* 0 inherits client_cfg.limits.max_streams for backward-compatible behavior. */
+/* 0 继承 client_cfg.limits.max_streams，保持向后兼容行为。 */
 client_cfg.connection_groups.max_active_transfers = 256;
 tr_client_create(&client_cfg, &client);
 tr_client_connection_group_connect(
@@ -185,77 +177,69 @@ tr_client_connection_group_close(client);
 tr_client_destroy(client);
 ```
 
-The facade reuses the existing single-owner Pipeline engine. Applications see
-only `group_id/epoch`, logical stream/message identity and a byte view; Reactor
-handles, registry state, TRR1 parsing, owner shard and membership generations
-remain internal. Returning
-`TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP` retains the original RX buffer
-without an additional payload copy and requires one later
-`tr_connection_group_message_release()`.
+门面复用现有单所有者 Pipeline 引擎。应用只看到 `group_id/epoch`、
+逻辑 Stream/消息标识以及字节视图；Reactor 句柄、注册表状态、TRR1 解析、
+所有者分片和成员代次全部保持内部化。
+返回 `TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP` 会保留原始 RX 缓冲区，
+不增加额外载荷复制，并要求之后调用一次
+`tr_connection_group_message_release()`。
 
-With `max_data_connections > 0`, a Client consumes DATA_OFFER internally:
-it opens a nonblocking DATA socket, waits for connect/preface progress through
-the owning Reactor, and submits the exact TRR1 DATA route on that same owner.
-Only one DATA connection establishment is in progress at a time while multiple
-attached DATA lanes may remain active. No connector thread or public DATA
-index/generation is introduced. With the default
-`max_data_connections == 0`, DATA_OFFER is still cancelled internally.
+当 `max_data_connections > 0` 时，客户端在内部消费 `DATA_OFFER`：
+打开非阻塞 DATA 套接字，通过所属 Reactor 等待连接/前导信息推进，
+然后在同一所有者上提交精确 TRR1 DATA 路由。
+同一时刻只允许一个 DATA 连接建立过程进行，但可以同时保持多个已经附着的
+DATA 通道活动。不引入连接线程，也不公开 DATA 索引/代次。
+默认 `max_data_connections == 0` 时，`DATA_OFFER` 仍在内部取消。
 
-DATA lane membership becoming live does not by itself authorize a logical
-transfer. A Server TRANSFER_READY is accepted only when its hidden DATA
-index/generation exactly matches one ACTIVE Client lane. The Client then installs
-a bounded local Stream affinity and invokes the optional
-`on_transfer_ready` callback with only group/stream/message identity.
-Client transfer concurrency is independently bounded by
-`connection_groups.max_active_transfers`; zero inherits the existing
-`limits.max_streams` value so old configurations keep the same behavior.
-`tr_client_connection_group_send()` sends one logical message through that
-exact affinity; the application bytes are borrowed only for the call and copied
-into bounded internal ownership before TR_OK is returned. The Group derives its
-send-memory bound from `max_data_connections * max_message_bytes`, while the
-existing Reactor owns DATA fragmentation and TX scheduling. Temporary admission
-pressure returns `TR_AGAIN`; callers retry later. No second Group send queue or
-writable-notification contract is introduced in this slice.
-`tr_client_connection_group_release_transfer()` removes the local affinity.
+DATA 通道成员关系变为活动状态本身并不授权逻辑传输。
+只有服务端 `TRANSFER_READY` 隐藏的 DATA 索引/代次精确匹配一个
+`ACTIVE` 客户端通道时才接受。随后客户端建立有界本地 Stream 亲和关系，
+并调用可选 `on_transfer_ready` 回调；回调只暴露组/Stream/消息标识。
 
-Connection Group lifecycle now has explicit graceful drain semantics in addition
-to force-close `stop()`. Server begin-drain closes only the Group accept
-socket and rejects new DATA_OFFER / TRANSFER_READY creation; existing
-connections and transfers continue until applications release them and Clients
-close naturally. Client begin-drain is a monotonic local admission barrier: it stops new
-DATA-lane establishment and ignores TRANSFER_READY observed after the barrier,
-while transfers already READY before the barrier and in-flight sends may finish. Stable semantic
-stats report only Group/connection/DATA/transfer and send-byte lifecycle state;
-Reactor slots, route generations, queue occupancy and pool internals remain
-outside the SDK contract.
+客户端传输并发由 `connection_groups.max_active_transfers` 独立限制；
+值为 0 时继承现有 `limits.max_streams`，因此旧配置保持原行为。
+`tr_client_connection_group_send()` 通过精确亲和关系发送一条逻辑消息；
+应用字节只在本次调用期间借用，并在返回 `TR_OK` 前复制到有界内部所有权。
+连接组的发送内存上限由
+`max_data_connections * max_message_bytes` 推导，现有 Reactor 继续负责
+DATA 分片与 TX 调度。临时准入压力返回 `TR_AGAIN`，调用方稍后重试。
+本阶段不引入第二个连接组发送队列，也不增加可写通知契约。
+`tr_client_connection_group_release_transfer()` 用于移除本地亲和关系。
 
-The V1 facade deliberately uses `TR_CHANNEL_SHARED_CONNECTION`. Client and
-Server facade TCP sockets default to `TCP_NODELAY` to avoid Nagle/delayed-ACK
-latency coupling for small request/response traffic. The policy is explicit:
-`TR_TCP_NODELAY_DEFAULT` and `TR_TCP_NODELAY_ENABLED` enable it, while
-`TR_TCP_NODELAY_DISABLED` leaves the Linux default unchanged. Client automatic
-reconnect inherits the same setting before Reactor adoption. Raw `tr_tcp_*`
-helpers and low-level Channel connections do not force this facade policy.
+连接组生命周期现在除了强制关闭 `stop()` 外，还具有显式优雅排空语义。
+服务端开始排空时只关闭连接组接收套接字，并拒绝新建
+`DATA_OFFER / TRANSFER_READY`；现有连接和传输继续运行，直到应用释放它们且
+客户端自然关闭。客户端开始排空是单调本地准入屏障：停止建立新的 DATA 通道，
+并忽略屏障后观察到的 `TRANSFER_READY`；屏障前已经 READY 的传输和进行中的
+发送仍可完成。稳定语义统计只报告组/连接/DATA/传输以及发送字节生命周期状态；
+Reactor 槽位、路由代次、队列占用和资源池内部状态仍不属于 SDK 契约。
 
-The lower-level Channel API still supports split CONTROL/BULK connections. A production
-multi-client split facade needs a connection-binding identity in the handshake
-so the server can prove which independently accepted CONTROL and BULK sockets
-belong to the same logical Channel; that pairing protocol is intentionally not
-guessed or inferred from accept order.
+V1 门面有意使用 `TR_CHANNEL_SHARED_CONNECTION`。客户端和服务端门面的
+TCP 套接字默认启用 `TCP_NODELAY`，避免小请求/响应流量受到 Nagle/延迟 ACK
+耦合影响。策略是显式的：
+`TR_TCP_NODELAY_DEFAULT` 和 `TR_TCP_NODELAY_ENABLED` 启用该行为，
+`TR_TCP_NODELAY_DISABLED` 保持 Linux 默认值不变。
+客户端自动重连在 Reactor 接管前继承相同设置。
+原始 `tr_tcp_*` 辅助接口和低层 Channel 连接不会强制应用该门面策略。
 
-The server facade reclaims disconnected peer objects at runtime. Reactor
-callback teardown uses an explicit quiescence barrier: callbacks are disabled
-first, then the owning thread waits until the Reactor has crossed the barrier
-before RPC/Channel storage is released. Therefore `max_peers` is a bound on
-concurrently retained peer objects rather than cumulative accepts over the
-server lifetime.
+低层 Channel API 仍支持拆分 CONTROL/BULK 连接。
+生产级多客户端拆分门面需要在握手中加入连接绑定标识，使服务端能够证明
+独立接收的 CONTROL 与 BULK 套接字属于同一个逻辑 Channel；
+该配对协议不会根据接收顺序猜测或推断。
 
-Two real-process examples are built by default. Run them in separate terminals:
+服务端门面在运行期间回收已断开的对端对象。
+Reactor 回调销毁使用显式静默屏障：先禁用回调，再由所有者线程等待
+Reactor 穿过屏障，之后才释放 RPC/Channel 存储。
+因此 `max_peers` 限制的是同时保留的对端对象数量，而不是服务端整个生命周期
+累计接收的连接数量。
+
+默认构建两个真实进程示例。分别在两个终端运行：
 
 ```sh
 xmake run echo_server 9000
 xmake run echo_client 127.0.0.1 9000 hello
 ```
+
 
 ## Implemented
 
