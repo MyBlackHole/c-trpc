@@ -195,8 +195,9 @@ int tr_client_connection_group_close(struct tr_client *client);
  *
  * wait_drained() returns TR_OK when there are no active transfer affinities,
  * no payload bytes still owned by DATA TX, and no pending DATA establishment.
- * timeout_ms == 0 waits indefinitely. Do not call wait_drained() from a
- * callback executing on this Client's owning I/O domain.
+ * timeout_ms == 0 waits indefinitely. wait_drained() is an external blocking
+ * lifecycle wait: Reactor-owner callbacks and RPC worker callbacks receive
+ * TR_ERR_STATE. begin_drain() remains callback-safe for publishing drain intent.
  */
 int tr_client_connection_group_begin_drain(struct tr_client *client);
 int tr_client_connection_group_wait_drained(
@@ -250,8 +251,10 @@ int tr_server_connection_group_stop(struct tr_server *server);
  * traffic. release_transfer() remains available so active work can quiesce.
  *
  * wait_drained() returns TR_OK after all existing Group connections disappear
- * naturally. timeout_ms == 0 waits indefinitely. stop() remains the immediate
- * force-close operation.
+ * naturally. timeout_ms == 0 waits indefinitely. It is an external blocking
+ * lifecycle wait: Reactor-owner callbacks and RPC worker callbacks receive
+ * TR_ERR_STATE. begin_drain() remains callback-safe; stop() remains the
+ * immediate force-close operation.
  */
 int tr_server_connection_group_begin_drain(struct tr_server *server);
 int tr_server_connection_group_wait_drained(
