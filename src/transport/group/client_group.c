@@ -1633,12 +1633,16 @@ static int tr_client_group_detach_on_owner(void *arg)
 	return ret;
 }
 
-void tr_client_group_destroy(struct tr_client_group *group)
+int tr_client_group_destroy(struct tr_client_group *group)
 {
 	int ret;
 
 	if (!group)
-		return;
+		return TR_OK;
+
+	ret = tr_client_group_close_wait_admission(group);
+	if (ret != TR_OK)
+		return ret;
 
 	/*
 	 * Client facade guarantees destroy runs before Runtime stop. Use a
@@ -1652,7 +1656,7 @@ void tr_client_group_destroy(struct tr_client_group *group)
 	assert(ret == TR_OK);
 #endif
 	if (ret != TR_OK)
-		return;
+		return ret;
 
 	tr_connector_destroy(group->connector);
 	group->connector = NULL;
@@ -1660,5 +1664,8 @@ void tr_client_group_destroy(struct tr_client_group *group)
 	free(group->data);
 	if (group->control_pool_ready)
 		tr_buffer_pool_destroy(&group->control_pool);
+	pthread_cond_destroy(&group->drain_wait_cond);
+	pthread_mutex_destroy(&group->drain_wait_lock);
 	free(group);
+	return TR_OK;
 }
