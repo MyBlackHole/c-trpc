@@ -31,8 +31,8 @@ int tr_completion_queue_init(struct tr_completion_queue *queue,
 void tr_completion_queue_destroy(struct tr_completion_queue *queue);
 
 /*
- * Admission is queue-local so completion producers do not need Reactor
- * control-plane serialization. open/close are linearized by queue->lock.
+ * 准入状态属于队列本地，因此完成事件生产者不需要经过 Reactor 控制面串行化。
+ * open/close 由 queue->lock 建立线性化顺序。
  */
 int tr_completion_queue_open(struct tr_completion_queue *queue);
 void tr_completion_queue_close(struct tr_completion_queue *queue);
