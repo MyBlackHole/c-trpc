@@ -71,11 +71,20 @@ int tr_pipeline_listener_listen_ipv4(
 int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener);
 
 /*
+ * Event-driven lifecycle wait. owner protocol counters remain owner-only;
+ * external waiters observe only a published drain generation.
+ * timeout_ms == 0 waits indefinitely.
+ */
+int tr_pipeline_listener_wait_drained(
+	struct tr_pipeline_listener *listener, uint32_t timeout_ms);
+
+/*
  * stop() 负责关闭 admission 并把所有 connection/session 收敛到静止状态。
  * destroy() 只释放已经 stop/quiesce 的对象，不隐式执行可能失败的状态推进。
+ * TR_OK 才表示 storage 已释放；teardown barrier 未收敛时 fail-closed。
  */
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener);
-void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
+int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
 
 uint16_t tr_pipeline_listener_bound_port(
 	const struct tr_pipeline_listener *listener);

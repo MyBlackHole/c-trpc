@@ -591,6 +591,51 @@ static void wait_client_group_probe(
 	pthread_mutex_unlock(&probe->lock);
 }
 
+struct server_group_wait_probe {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_server *server;
+	int entered;
+	int done;
+	int ret;
+};
+
+static void *server_group_wait_main(void *arg)
+{
+	struct server_group_wait_probe *probe =
+		(struct server_group_wait_probe *)arg;
+
+	pthread_mutex_lock(&probe->lock);
+	probe->entered = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+
+	probe->ret = tr_server_connection_group_wait_drained(
+		probe->server, 5000U);
+
+	pthread_mutex_lock(&probe->lock);
+	probe->done = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+	return NULL;
+}
+
+static void wait_server_group_probe(
+	struct server_group_wait_probe *probe, int *field)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&probe->lock);
+	while (!*field && ret == 0)
+		ret = pthread_cond_timedwait(
+			&probe->cond, &probe->lock, &deadline);
+	assert(*field);
+	pthread_mutex_unlock(&probe->lock);
+}
+
 static void test_public_connection_group_client_data_offer(void)
 {
 	struct tr_server_config server_config;
@@ -602,7 +647,9 @@ static void test_public_connection_group_client_data_offer(void)
 	struct tr_connection_group_client_stats client_stats;
 	struct tr_connection_group_server_stats server_stats;
 	struct client_group_wait_probe wait_probe;
+	struct server_group_wait_probe server_wait;
 	pthread_t wait_thread;
+	pthread_t server_wait_thread;
 	uint16_t group_port = 0U;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -834,6 +881,9 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(server_stats.groups_current == 1U);
 	assert(server_stats.connections_current == 2U);
 	assert(server_stats.active_transfers == 2U);
+	/* Active group/connections keep the event-driven waiter blocked. */
+	assert(tr_server_connection_group_wait_drained(
+		       server, 10U) == TR_ERR_TIMEOUT);
 
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_OK);
@@ -856,10 +906,27 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(client_stats.send_bytes_inflight == 0U);
 	assert(client_stats.data_connections == 1U);
 
+	/*
+	 * Race waiter registration against the terminal Client close. Either
+	 * ordering is valid: a registered waiter must be broadcast, while a late
+	 * waiter must observe the already-completed generation. No lost wakeup.
+	 */
+	memset(&server_wait, 0, sizeof(server_wait));
+	server_wait.server = server;
+	assert(pthread_mutex_init(&server_wait.lock, NULL) == 0);
+	assert(pthread_cond_init(&server_wait.cond, NULL) == 0);
+	assert(pthread_create(
+		       &server_wait_thread, NULL,
+		       server_group_wait_main, &server_wait) == 0);
+	wait_server_group_probe(&server_wait, &server_wait.entered);
+
 	assert(tr_client_connection_group_close(client) == TR_OK);
 	wait_counter(&ctx, &ctx.data_events, 1U);
-	assert(tr_server_connection_group_wait_drained(
-		       server, 5000U) == TR_OK);
+	wait_server_group_probe(&server_wait, &server_wait.done);
+	assert(pthread_join(server_wait_thread, NULL) == 0);
+	assert(server_wait.ret == TR_OK);
+	pthread_cond_destroy(&server_wait.cond);
+	pthread_mutex_destroy(&server_wait.lock);
 
 	memset(&server_stats, 0, sizeof(server_stats));
 	assert(tr_server_connection_group_get_stats(
