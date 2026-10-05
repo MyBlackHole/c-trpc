@@ -90,6 +90,18 @@ struct tr_client_group {
 	uint64_t send_bytes_limit;
 	uint64_t send_bytes_inflight;
 
+	/*
+	 * Owner protocol state above remains single-writer. This lock publishes only
+	 * drain lifecycle generations to external waiters; it is not a second owner
+	 * lock for transfer/data state.
+	 */
+	pthread_mutex_t drain_lock;
+	pthread_cond_t drain_cond;
+	uint64_t drain_generation;
+	uint64_t drain_completed_generation;
+	uint32_t drain_waiters;
+	int drain_wait_closed;
+
 	uint32_t connector_slot;
 	struct tr_connector *connector;
 };
@@ -693,6 +705,51 @@ static int tr_client_group_transfer_find(
 	return 0;
 }
 
+static int tr_client_group_drained_on_owner(
+	const struct tr_client_group *group)
+{
+	uint32_t i;
+
+	if (!group || !group->draining)
+		return 0;
+	if (group->transfer_count != 0U || group->send_bytes_inflight != 0U ||
+	    group->connector_slot != TR_CLIENT_GROUP_NO_SLOT)
+		return 0;
+	for (i = 0; i < group->data_capacity; ++i)
+		if (group->data[i].state == TR_CLIENT_GROUP_DATA_QUEUED ||
+		    group->data[i].state == TR_CLIENT_GROUP_DATA_CONNECTING)
+			return 0;
+	return 1;
+}
+
+static void tr_client_group_publish_drain_on_owner(
+	struct tr_client_group *group)
+{
+	uint64_t generation;
+
+	if (!tr_client_group_drained_on_owner(group))
+		return;
+
+	pthread_mutex_lock(&group->drain_lock);
+	generation = group->drain_generation;
+	if (generation != 0U &&
+	    group->drain_completed_generation != generation) {
+		group->drain_completed_generation = generation;
+		pthread_cond_broadcast(&group->drain_cond);
+	}
+	pthread_mutex_unlock(&group->drain_lock);
+}
+
+static void tr_client_group_begin_drain_generation_on_owner(
+	struct tr_client_group *group)
+{
+	pthread_mutex_lock(&group->drain_lock);
+	group->drain_generation++;
+	if (group->drain_generation == 0U)
+		group->drain_generation = 1U;
+	pthread_mutex_unlock(&group->drain_lock);
+}
+
 static void tr_client_group_clear_transfers(struct tr_client_group *group)
 {
 	if (!group || !group->transfers)
@@ -700,6 +757,7 @@ static void tr_client_group_clear_transfers(struct tr_client_group *group)
 	memset(group->transfers, 0,
 	       (size_t)group->transfer_capacity * sizeof(*group->transfers));
 	group->transfer_count = 0U;
+	tr_client_group_publish_drain_on_owner(group);
 }
 
 static void tr_client_group_invalidate_data_transfers(
@@ -722,6 +780,7 @@ static void tr_client_group_invalidate_data_transfers(
 		if (group->transfer_count != 0U)
 			group->transfer_count--;
 	}
+	tr_client_group_publish_drain_on_owner(group);
 }
 
 static void tr_client_group_send_buffer_release(
@@ -736,6 +795,7 @@ static void tr_client_group_send_buffer_release(
 			group->send_bytes_inflight -= owned->accounted_bytes;
 		else
 			group->send_bytes_inflight = 0U;
+		tr_client_group_publish_drain_on_owner(group);
 	}
 	free(owned);
 }
@@ -763,6 +823,7 @@ static int tr_client_group_transfer_connection_on_owner(
 		transfer->state = TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
 		if (group->transfer_count != 0U)
 			group->transfer_count--;
+		tr_client_group_publish_drain_on_owner(group);
 		return TR_ERR_STALE;
 	}
 
@@ -1050,6 +1111,8 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 {
 	struct tr_client_group *group;
 	uint32_t control_buffers;
+	int drain_lock_ready = 0;
+	int drain_cond_ready = 0;
 	int ret;
 
 	if (!out)
@@ -1080,6 +1143,31 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 		(uint64_t)group->data_capacity *
 		(uint64_t)config->max_message_bytes;
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
+	if (pthread_mutex_init(&group->drain_lock, NULL) != 0) {
+		ret = TR_ERR_SYS;
+		goto fail;
+	}
+	drain_lock_ready = 1;
+	{
+		pthread_condattr_t attr;
+
+		if (pthread_condattr_init(&attr) != 0) {
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+			pthread_condattr_destroy(&attr);
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		if (pthread_cond_init(&group->drain_cond, &attr) != 0) {
+			pthread_condattr_destroy(&attr);
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		pthread_condattr_destroy(&attr);
+		drain_cond_ready = 1;
+	}
 
 	control_buffers =
 		config->max_data_connections + TR_CLIENT_GROUP_CONTROL_BUFFER_BASE;
@@ -1128,6 +1216,10 @@ fail:
 	free(group->data);
 	if (group->control_pool_ready)
 		tr_buffer_pool_destroy(&group->control_pool);
+	if (drain_cond_ready)
+		pthread_cond_destroy(&group->drain_cond);
+	if (drain_lock_ready)
+		pthread_mutex_destroy(&group->drain_lock);
 	free(group);
 	return ret;
 }
@@ -1235,13 +1327,17 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 		(struct tr_client_group_drain_request *)arg;
 	struct tr_client_group *group = request->group;
 	uint32_t i;
+	int final = TR_OK;
 
 	if (!group->control.reactor)
 		return TR_ERR_STATE;
-	if (group->draining)
+	if (group->draining) {
+		tr_client_group_publish_drain_on_owner(group);
 		return TR_OK;
+	}
 
 	group->draining = 1;
+	tr_client_group_begin_drain_generation_on_owner(group);
 
 	if (group->connector_slot != TR_CLIENT_GROUP_NO_SLOT) {
 		uint32_t slot = group->connector_slot;
@@ -1249,8 +1345,10 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 		uint64_t message_id;
 		int ret;
 
-		if (slot >= group->data_capacity)
-			return TR_ERR_STATE;
+		if (slot >= group->data_capacity) {
+			final = TR_ERR_STATE;
+			goto out;
+		}
 		route = group->data[slot].route;
 		message_id = group->data[slot].offer_message_id;
 		(void)tr_connector_cancel(group->connector);
@@ -1263,7 +1361,8 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 			(void)tr_reactor_abort_on_owner(
 				group->control,
 				ret < 0 ? ret : TR_ERR_STATE);
-			return ret;
+			final = ret;
+			goto out;
 		}
 	}
 
@@ -1281,10 +1380,14 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 			(void)tr_reactor_abort_on_owner(
 				group->control,
 				ret < 0 ? ret : TR_ERR_STATE);
-			return ret;
+			final = ret;
+			goto out;
 		}
 	}
-	return TR_OK;
+
+out:
+	tr_client_group_publish_drain_on_owner(group);
+	return final;
 }
 
 int tr_client_group_begin_drain(struct tr_client_group *group)
@@ -1298,6 +1401,84 @@ int tr_client_group_begin_drain(struct tr_client_group *group)
 		group->config.owner,
 		tr_client_group_begin_drain_on_owner, &request);
 }
+
+int tr_client_group_wait_drained(
+	struct tr_client_group *group, uint32_t timeout_ms)
+{
+	struct timespec deadline;
+	uint64_t generation;
+	int timed = timeout_ms != 0U;
+	int result = TR_OK;
+
+	if (!group)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
+	if (timed) {
+		uint64_t deadline_ns;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+			return TR_ERR_SYS;
+		deadline_ns =
+			(uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
+			(uint64_t)deadline.tv_nsec +
+			(uint64_t)timeout_ms * UINT64_C(1000000);
+		deadline.tv_sec =
+			(time_t)(deadline_ns / UINT64_C(1000000000));
+		deadline.tv_nsec =
+			(long)(deadline_ns % UINT64_C(1000000000));
+	}
+
+	pthread_mutex_lock(&group->drain_lock);
+	if (group->drain_wait_closed) {
+		pthread_mutex_unlock(&group->drain_lock);
+		return TR_ERR_CLOSED;
+	}
+	generation = group->drain_generation;
+	if (generation == 0U) {
+		pthread_mutex_unlock(&group->drain_lock);
+		return TR_ERR_STATE;
+	}
+	if (group->drain_completed_generation == generation) {
+		pthread_mutex_unlock(&group->drain_lock);
+		return TR_OK;
+	}
+	if (group->drain_waiters == UINT32_MAX) {
+		pthread_mutex_unlock(&group->drain_lock);
+		return TR_ERR_STATE;
+	}
+	group->drain_waiters++;
+
+	while (group->drain_completed_generation != generation) {
+		int ret;
+
+		if (group->drain_generation != generation) {
+			result = TR_ERR_STALE;
+			break;
+		}
+		if (timed)
+			ret = pthread_cond_timedwait(
+				&group->drain_cond, &group->drain_lock, &deadline);
+		else
+			ret = pthread_cond_wait(
+				&group->drain_cond, &group->drain_lock);
+		if (ret == 0)
+			continue;
+		if (timed && ret == ETIMEDOUT) {
+			result = TR_ERR_TIMEOUT;
+			break;
+		}
+		result = TR_ERR_SYS;
+		break;
+	}
+
+	assert(group->drain_waiters != 0U);
+	group->drain_waiters--;
+	pthread_mutex_unlock(&group->drain_lock);
+	return result;
+}
+
 
 struct tr_client_group_stats_request {
 	struct tr_client_group *group;
@@ -1360,6 +1541,7 @@ static int tr_client_group_release_transfer_on_owner(void *arg)
 		TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
 	if (group->transfer_count != 0U)
 		group->transfer_count--;
+	tr_client_group_publish_drain_on_owner(group);
 	return TR_OK;
 }
 
@@ -1499,12 +1681,20 @@ static int tr_client_group_detach_on_owner(void *arg)
 	return ret;
 }
 
-void tr_client_group_destroy(struct tr_client_group *group)
+int tr_client_group_destroy(struct tr_client_group *group)
 {
 	int ret;
 
 	if (!group)
-		return;
+		return TR_OK;
+
+	pthread_mutex_lock(&group->drain_lock);
+	group->drain_wait_closed = 1;
+	if (group->drain_waiters != 0U) {
+		pthread_mutex_unlock(&group->drain_lock);
+		return TR_ERR_STATE;
+	}
+	pthread_mutex_unlock(&group->drain_lock);
 
 	/*
 	 * Client facade guarantees destroy runs before Runtime stop. Use a
@@ -1518,7 +1708,7 @@ void tr_client_group_destroy(struct tr_client_group *group)
 	assert(ret == TR_OK);
 #endif
 	if (ret != TR_OK)
-		return;
+		return ret;
 
 	tr_connector_destroy(group->connector);
 	group->connector = NULL;
@@ -1526,5 +1716,8 @@ void tr_client_group_destroy(struct tr_client_group *group)
 	free(group->data);
 	if (group->control_pool_ready)
 		tr_buffer_pool_destroy(&group->control_pool);
+	pthread_cond_destroy(&group->drain_cond);
+	pthread_mutex_destroy(&group->drain_lock);
 	free(group);
+	return TR_OK;
 }
