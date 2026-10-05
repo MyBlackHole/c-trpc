@@ -40,11 +40,11 @@ struct tr_pipeline_control_wire_message {
 };
 
 /*
- * Fixed-size Pipeline CONTROL message payload.
+ * 固定大小的 Pipeline CONTROL 消息载荷。
  *
- * The outer Transport frame already protects payload bytes with CRC32C. TRC1
- * adds an explicit application magic/version and carries only routing/runtime
- * identity: no Reactor slot/generation ever crosses the wire.
+ * 外层 Transport 帧已经使用 CRC32C 保护载荷字节。
+ * TRC1 额外提供显式的应用 magic/version，并且只携带路由/运行时标识；
+ * Reactor 槽位或代次绝不会跨线协议传输。
  */
 int tr_pipeline_control_wire_encode(
 	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE],
@@ -54,8 +54,8 @@ int tr_pipeline_control_wire_decode(
 	struct tr_pipeline_control_wire_message *message);
 
 /*
- * DATA_OFFER carries exactly the capability needed by a DATA socket TRR1
- * preface. Convert it without exposing or inventing Reactor connection ids.
+ * DATA_OFFER 精确携带 DATA socket 的 TRR1 前导数据所需能力。
+ * 转换时不得暴露或虚构 Reactor 连接标识。
  */
 int tr_pipeline_control_wire_data_route(
 	const struct tr_pipeline_control_wire_message *message,
