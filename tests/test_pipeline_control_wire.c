@@ -188,7 +188,7 @@ static void test_control_wire_state_machine(void)
 	assert(tr_pipeline_control_create(
 		       &control_config, control_connection, &control) == TR_OK);
 
-	/* DATA_OFFER is created by the same operation that reserves capability. */
+	/* DATA_OFFER 由预留能力的同一操作创建。 */
 	memset(offer_raw, 0, sizeof(offer_raw));
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
@@ -200,8 +200,8 @@ static void test_control_wire_state_machine(void)
 	assert(offer.epoch == UINT64_C(51));
 
 	/*
-	 * Reservation is not readiness. The adapter must not emit any wire token
-	 * until the exact DATA offer is attached through the registry.
+	 * 预留不等于就绪。适配层不能在线协议上发送任何令牌，
+	 * 直到精确 DATA offer 已经通过注册表完成 attach。
 	 */
 	memset(ready_raw, 0xa5, sizeof(ready_raw));
 	assert(tr_pipeline_control_prepare_transfer_wire(
@@ -231,8 +231,8 @@ static void test_control_wire_state_machine(void)
 		       registry, &route, data_connection) == TR_OK);
 
 	/*
-	 * DATA_CANCEL is exact-generation idempotent. The first message consumes
-	 * RESERVED -> FREE; repeating the same generation is a successful no-op.
+	 * DATA_CANCEL 对精确代次幂等。第一次消息会执行
+	 * RESERVED -> FREE；重复相同代次时返回成功空操作。
 	 */
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
@@ -247,15 +247,15 @@ static void test_control_wire_state_machine(void)
 		       control, cancel_raw, sizeof(cancel_raw)) == TR_OK);
 
 	/*
-	 * Reusing the slot advances generation, so an old idempotent cancel cannot
-	 * affect the replacement reservation.
+	 * 槽位复用会推进代次，因此旧的幂等取消不能
+	 * 影响替换后的预留。
 	 */
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
 	assert(tr_pipeline_control_cancel_data_wire(
 		       control, cancel_raw, sizeof(cancel_raw)) == TR_ERR_STALE);
 
-	/* Forged epoch cannot cancel the real reservation. */
+	/* 伪造的 epoch 不能取消真实预留。 */
 	assert(tr_pipeline_control_wire_decode(
 		       offer_raw, sizeof(offer_raw), &offer) == TR_OK);
 	cancel = offer;
