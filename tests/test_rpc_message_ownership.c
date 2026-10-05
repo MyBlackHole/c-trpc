@@ -118,9 +118,9 @@ static void test_budgeted_buffer_pool(void)
 	assert(stats.peak_bytes == fixed_bytes);
 
 	/*
-	 * Dynamic pool reserves descriptors at init and storage growth on demand.
-	 * Retained capacity remains accounted after release and is returned only
-	 * when the pool is destroyed.
+	 * 动态资源池在初始化时预留描述符，存储按需增长。
+	 * 释放后保留容量仍计入预算，只有在
+	 * 资源池销毁时才归还。
 	 */
 	tr_memory_budget_init(&budget, descriptor_bytes + 64U);
 	assert(tr_buffer_pool_init_dynamic_budgeted(
