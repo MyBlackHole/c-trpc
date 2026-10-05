@@ -69,7 +69,7 @@ int tr_pipeline_control_prepare_transfer_wire(
 	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE]);
 
 /*
- * Fatal CONTROL teardown：
+ * CONTROL 致命错误清理：
  * - 先使全部 ATTACHED DATA membership 与对应 Stream affinity 失效；
  * - 取消 RESERVED capability；
  * - 从 shard-local registry 注销 Pipeline；
