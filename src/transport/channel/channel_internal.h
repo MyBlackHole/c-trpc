@@ -6,7 +6,7 @@
 /* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
 
-/* Stream wire-id hash shared by the bounded Channel index and its tests. */
+/* Stream 线协议标识哈希，由有界 Channel 索引及其测试共用。 */
 static inline uint32_t tr_channel_stream_id_hash(uint32_t stream_id)
 {
 	uint32_t value = stream_id;
@@ -55,11 +55,11 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 				      void *callback_arg);
 
 /*
- * Server peer teardown is split in two:
- * - detach_for_finalize(): owner-serialized, removes every Reactor/timer callback
- *   source and makes the Channel unreachable from protocol dispatch;
- * - finalize_detached(): owner-free memory/resource release, safe on a cleanup
- *   context after detach returned.
+ * Server Peer 清理分为两个阶段：
+ * - detach_for_finalize()：在所有者上串行化，移除全部 Reactor/定时器回调来源，
+ *   并让协议分发无法再访问 Channel；
+ * - finalize_detached()：不依赖所有者的内存/资源释放，
+ *   在 detach 返回后的清理上下文中安全执行。
  */
 int tr_channel_detach_for_finalize(struct tr_channel *channel);
 void tr_channel_finalize_detached(struct tr_channel *channel);
