@@ -8,9 +8,9 @@ extern "C" {
 #endif
 
 /*
- * High-level TCP send policy. DEFAULT deliberately resolves to ENABLED so
- * zero-initialized facade configs retain the low-latency RPC default.
- * DISABLED leaves Linux TCP's Nagle policy unchanged.
+ * 高层 TCP 发送策略。
+ * DEFAULT 有意解析为 ENABLED，使零初始化的门面配置保持低延迟 RPC 默认行为。
+ * DISABLED 保持 Linux TCP 的 Nagle 策略不变。
  */
 enum tr_tcp_nodelay_policy {
 	TR_TCP_NODELAY_DEFAULT = 0,
@@ -22,8 +22,8 @@ enum tr_tcp_nodelay_policy {
  * Client/Server facade 共用的高层 semantic limits。
  * 值为 0 的字段由 tr_facade_limits_init() 填入默认值。
  *
- * Reactor/pool/executor/diagnostic implementation resources are deliberately
- * not represented here; facade-owned runtime tuning stays internal.
+ * Reactor、资源池、执行器和诊断等实现资源不会在这里暴露；
+ * 门面拥有的运行时调优参数保持内部化。
  *
  * V1 facade 有意只暴露 shared-connection 模式；
  * 更底层的 Channel API 仍支持 split CONTROL/BULK connection。
