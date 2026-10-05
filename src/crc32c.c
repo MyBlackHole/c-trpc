@@ -8,9 +8,10 @@
 #endif
 
 /*
- * Reflected Castagnoli polynomial 0x82f63b78. Entry i is obtained by eight
- * steps of: crc = (crc >> 1) ^ (crc & 1 ? polynomial : 0), starting at i.
- * Read-only from process start: no table initialization or allocation.
+ * 反射形式的 Castagnoli 多项式 0x82f63b78。
+ * 表项 i 从 i 开始执行八次
+ * crc = (crc >> 1) ^ (crc & 1 ? polynomial : 0) 得到。
+ * 进程启动后始终只读，不需要运行时初始化表或动态分配。
  */
 static const uint32_t tr_crc32c_table[256] = {
 	0x00000000U, 0xf26b8303U, 0xe13b70f7U, 0x1350f3f4U,
@@ -91,13 +92,13 @@ uint32_t tr_crc32c_update_portable(uint32_t state, const void *data, size_t len)
 }
 
 #if TR_CRC32C_X86_SSE42
-/* Keep the dispatcher and the rest of the library at the baseline ISA. */
+/* 保持分派器和库的其他部分使用基础 ISA。 */
 __attribute__((target("sse4.2")))
 uint32_t tr_crc32c_update_sse42(uint32_t state, const void *data, size_t len)
 {
 	const uint8_t *p = data;
 
-	/* memcpy permits unaligned input without aliasing or out-of-bounds loads. */
+	/* 使用 memcpy 支持未对齐输入，同时避免别名问题和越界读取。 */
 	while (len >= sizeof(uint64_t)) {
 		uint64_t word;
 
@@ -159,11 +160,11 @@ uint32_t tr_crc32c_begin(void)
 
 uint32_t tr_crc32c_update(uint32_t state, const void *data, size_t len)
 {
-	/* Empty updates accept NULL, preserve any raw state, and need no dispatch. */
+	/* 空更新允许传入 NULL，保持任意原始状态，并且不需要执行后端分派。 */
 	if (len == 0)
 		return state;
 #if TR_CRC32C_X86_SSE42
-	/* pthread_once publishes the immutable function pointer to every caller. */
+	/* pthread_once 向所有调用方发布之后不再变化的函数指针。 */
 	(void)pthread_once(&tr_crc32c_once, tr_crc32c_select_backend);
 	return tr_crc32c_backend(state, data, len);
 #else
