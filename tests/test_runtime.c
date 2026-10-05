@@ -457,65 +457,53 @@ static void test_runtime_shard_peer_event_dispatch(void)
 
 static void test_runtime_shard_memory_budget(void)
 {
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
 	struct tr_runtime_config config;
 	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
-	struct tr_memory_budget *budget;
-	struct tr_memory_budget_stats stats;
 	uint64_t peer_bytes =
 		UINT64_C(2) * (uint64_t)sizeof(struct tr_runtime_peer);
 
+	/* Primitive semantics stay independently testable. */
+	tr_memory_budget_init(&budget, 16U);
+	assert(tr_memory_budget_reserve(&budget, 8U) == TR_OK);
+	assert(tr_memory_budget_reserve(&budget, 9U) == TR_AGAIN);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.limit_bytes == 16U);
+	assert(stats.current_bytes == 8U);
+	assert(stats.peak_bytes == 8U);
+	assert(stats.rejection_events == 1U);
+	assert(tr_memory_budget_release(&budget, 9U) == TR_ERR_STATE);
+	assert(tr_memory_budget_release(&budget, 8U) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(stats.peak_bytes == 8U);
+
+	/*
+	 * Accounting-only Runtime includes both the peer table and Reactor fixed
+	 * userspace allocations. Reactor therefore makes current strictly larger
+	 * than peer storage alone.
+	 */
 	runtime_test_config_init(&config, &shard_config, 1U);
 	shard_config.peer_capacity = 2U;
-	shard_config.memory_budget_bytes = peer_bytes + 16U;
-
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	shard = tr_runtime_shard_at(runtime, 0U);
 	assert(shard != NULL);
-	budget = tr_runtime_shard_memory_budget(shard);
-	assert(budget != NULL);
-
-	memset(&stats, 0, sizeof(stats));
-	tr_runtime_shard_memory_stats(shard, &stats);
-	assert(stats.limit_bytes == peer_bytes + 16U);
-	assert(stats.current_bytes == peer_bytes);
-	assert(stats.peak_bytes == peer_bytes);
-	assert(stats.rejection_events == 0U);
-
-	assert(tr_memory_budget_reserve(budget, 8U) == TR_OK);
-	tr_runtime_shard_memory_stats(shard, &stats);
-	assert(stats.current_bytes == peer_bytes + 8U);
-	assert(stats.peak_bytes == peer_bytes + 8U);
-
-	assert(tr_memory_budget_release(budget, 8U) == TR_OK);
-	assert(tr_memory_budget_release(budget, peer_bytes + 1U) ==
-	       TR_ERR_STATE);
-	assert(tr_memory_budget_reserve(budget, 17U) == TR_AGAIN);
-	tr_runtime_shard_memory_stats(shard, &stats);
-	assert(stats.current_bytes == peer_bytes);
-	assert(stats.peak_bytes == peer_bytes + 8U);
-	assert(stats.rejection_events == 1U);
-	tr_runtime_destroy(runtime);
-
-	runtime = (struct tr_runtime *)(uintptr_t)1U;
-	runtime_test_config_init(&config, &shard_config, 1U);
-	shard_config.peer_capacity = 2U;
-	shard_config.memory_budget_bytes = peer_bytes - 1U;
-	assert(tr_runtime_create(&config, &runtime) == TR_AGAIN);
-	assert(runtime == NULL);
-
-	/* 0 is accounting-only/unbounded during the Phase-7 migration. */
-	runtime_test_config_init(&config, &shard_config, 1U);
-	shard_config.peer_capacity = 1U;
-	assert(tr_runtime_create(&config, &runtime) == TR_OK);
-	shard = tr_runtime_shard_at(runtime, 0U);
 	tr_runtime_shard_memory_stats(shard, &stats);
 	assert(stats.limit_bytes == 0U);
-	assert(stats.current_bytes ==
-	       (uint64_t)sizeof(struct tr_runtime_peer));
+	assert(stats.current_bytes > peer_bytes);
 	assert(stats.peak_bytes == stats.current_bytes);
+	assert(stats.rejection_events == 0U);
 	tr_runtime_destroy(runtime);
+
+	/* With no peer table, a one-byte limit proves Reactor reserves first. */
+	runtime = (struct tr_runtime *)(uintptr_t)1U;
+	runtime_test_config_init(&config, &shard_config, 1U);
+	shard_config.memory_budget_bytes = 1U;
+	assert(tr_runtime_create(&config, &runtime) == TR_AGAIN);
+	assert(runtime == NULL);
 }
 
 static void test_runtime_lifecycle(void)

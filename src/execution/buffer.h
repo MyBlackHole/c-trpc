@@ -9,6 +9,7 @@
 #include "../observability.h"
 
 struct tr_buffer;
+struct tr_memory_budget;
 typedef void (*tr_buffer_release_cb)(struct tr_buffer *buffer);
 
 struct tr_buffer {
@@ -39,6 +40,9 @@ struct tr_buffer_pool {
 	uint32_t free_count;
 	uint32_t peak_in_use;
 	uint64_t exhausted_events;
+
+	/* Optional internal accounting owner; NULL keeps legacy unaccounted mode. */
+	struct tr_memory_budget *memory_budget;
 };
 
 int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,

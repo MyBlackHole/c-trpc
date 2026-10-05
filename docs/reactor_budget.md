@@ -22,8 +22,10 @@
 队列节点嵌入 connection，调度热路径不为此分配内存。关闭连接时同时移除 RX/TX
 就绪节点，再复用槽位；epoll token 的 generation 校验继续有效。
 
-**配置语义收紧：** `tr_reactor_config` 布局和零值选择默认值的行为不变，但两个
-字节预算从各 connection/flush 的局部额度变为所有连接共享的整轮额度。
+**轮次预算语义：** `tr_reactor_config` 的 RX/TX 零值默认行为保持不变；两个
+I/O 字节预算表示所有连接共享的整轮额度。Phase 7 另外增加了 repository-internal
+memory-budget capability pointer，它只参与 Reactor 固定 userspace heap accounting，
+不改变 RX/TX 调度额度语义。
 默认 RX/TX 各 4 MiB；应用不能再把它们理解为每连接每次回调额度。
 在多连接负载下，这可能改变吞吐与轮转次数，应按实际负载调优，不宣称吞吐提升。
 
@@ -59,8 +61,8 @@ STOP 仍按 FIFO 处理。停止接收后，所有已接受 Completion 必须完
 
 ## 最小诊断 API
 
-新增公开的 `tr_reactor_work`、`tr_reactor_stats` 与 `tr_reactor_get_stats()`。
-原有公开函数签名、配置布局和 connection stats 保留。
+`tr_reactor_work`、`tr_reactor_stats` 与 `tr_reactor_get_stats()` 继续作为
+repository-internal execution diagnostics。它们不属于 stable installed SDK。
 
 ```c
 struct tr_reactor_stats stats;

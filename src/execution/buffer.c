@@ -1,6 +1,7 @@
 #include "buffer.h"
 #include "tr/status.h"
 #include "buffer_internal.h"
+#include "../memory_budget.h"
 #include "../observability_internal.h"
 
 #include <stdlib.h>
@@ -9,41 +10,79 @@
 TR_DEFINE_PTR_OWNERSHIP(tr_buffer_array, struct tr_buffer, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_buffer_storage, uint8_t, free)
 
-int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
-			uint32_t buffer_size)
+static int tr_buffer_budget_reserve(
+	struct tr_memory_budget *budget, uint64_t bytes)
+{
+	return budget ? tr_memory_budget_reserve(budget, bytes) : TR_OK;
+}
+
+static void tr_buffer_budget_release(
+	struct tr_memory_budget *budget, uint64_t bytes)
+{
+	if (budget && bytes != 0U)
+		(void)tr_memory_budget_release(budget, bytes);
+}
+
+int tr_buffer_pool_init_budgeted(
+	struct tr_buffer_pool *pool, uint32_t buffer_count,
+	uint32_t buffer_size, struct tr_memory_budget *budget)
 {
 	struct tr_buffer *buffers TR_AUTO(tr_buffer_array_cleanup) = NULL;
 	uint8_t *storage TR_AUTO(tr_buffer_storage_cleanup) = NULL;
+	uint64_t descriptor_bytes;
+	uint64_t storage_bytes;
 	uint32_t i;
+	int ret;
 
 	if (!pool || buffer_count == 0 || buffer_size == 0)
 		return TR_ERR_INVALID;
-	if ((size_t)buffer_count > SIZE_MAX / (size_t)buffer_size)
+	if ((size_t)buffer_count > SIZE_MAX / sizeof(*buffers) ||
+	    (size_t)buffer_count > SIZE_MAX / (size_t)buffer_size)
 		return TR_ERR_BAD_LENGTH;
 
 	memset(pool, 0, sizeof(*pool));
+	descriptor_bytes =
+		(uint64_t)buffer_count * (uint64_t)sizeof(*buffers);
+	storage_bytes =
+		(uint64_t)buffer_count * (uint64_t)buffer_size;
+
+	ret = tr_buffer_budget_reserve(budget, descriptor_bytes);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_buffer_budget_reserve(budget, storage_bytes);
+	if (ret != TR_OK) {
+		tr_buffer_budget_release(budget, descriptor_bytes);
+		return ret;
+	}
 
 	buffers =
 		(struct tr_buffer *)calloc(buffer_count, sizeof(*buffers));
-	if (!buffers)
-		return TR_ERR_NOMEM;
+	if (!buffers) {
+		ret = TR_ERR_NOMEM;
+		goto fail_budget;
+	}
 
 	storage = (uint8_t *)malloc((size_t)buffer_count * buffer_size);
-	if (!storage)
-		return TR_ERR_NOMEM;
+	if (!storage) {
+		ret = TR_ERR_NOMEM;
+		goto fail_budget;
+	}
 
 	/*
 	 * 所有可能失败的 allocation 完成后再初始化 mutex。
 	 * 从这里开始构造过程不会再失败，因此 pool 正式接管全部资源 ownership。
 	 */
-	if (pthread_mutex_init(&pool->lock, NULL) != 0)
-		return TR_ERR_INVALID;
+	if (pthread_mutex_init(&pool->lock, NULL) != 0) {
+		ret = TR_ERR_INVALID;
+		goto fail_budget;
+	}
 
 	pool->buffers = tr_buffer_array_take(&buffers);
 	pool->storage = tr_buffer_storage_take(&storage);
 	pool->buffer_count = buffer_count;
 	pool->buffer_size = buffer_size;
 	pool->free_count = buffer_count;
+	pool->memory_budget = budget;
 
 	for (i = 0; i < buffer_count; ++i) {
 		struct tr_buffer *buf = &pool->buffers[i];
@@ -56,35 +95,62 @@ int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 	}
 
 	return TR_OK;
+
+fail_budget:
+	tr_buffer_budget_release(budget, storage_bytes);
+	tr_buffer_budget_release(budget, descriptor_bytes);
+	return ret;
 }
 
-int tr_buffer_pool_init_dynamic(struct tr_buffer_pool *pool,
-				uint32_t buffer_count,
-				uint32_t max_buffer_size)
+int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
+			uint32_t buffer_size)
+{
+	return tr_buffer_pool_init_budgeted(
+		pool, buffer_count, buffer_size, NULL);
+}
+
+int tr_buffer_pool_init_dynamic_budgeted(
+	struct tr_buffer_pool *pool, uint32_t buffer_count,
+	uint32_t max_buffer_size, struct tr_memory_budget *budget)
 {
 	struct tr_buffer *buffers TR_AUTO(tr_buffer_array_cleanup) = NULL;
+	uint64_t descriptor_bytes;
 	uint32_t i;
+	int ret;
 
 	if (!pool || buffer_count == 0U || max_buffer_size == 0U)
 		return TR_ERR_INVALID;
+	if ((size_t)buffer_count > SIZE_MAX / sizeof(*buffers))
+		return TR_ERR_BAD_LENGTH;
 
 	memset(pool, 0, sizeof(*pool));
+	descriptor_bytes =
+		(uint64_t)buffer_count * (uint64_t)sizeof(*buffers);
+	ret = tr_buffer_budget_reserve(budget, descriptor_bytes);
+	if (ret != TR_OK)
+		return ret;
+
 	buffers = (struct tr_buffer *)calloc(buffer_count, sizeof(*buffers));
-	if (!buffers)
+	if (!buffers) {
+		tr_buffer_budget_release(budget, descriptor_bytes);
 		return TR_ERR_NOMEM;
+	}
 
 	/*
 	 * Ownership is bounded by descriptor count. Storage grows only after a
 	 * descriptor is checked out; storage == NULL distinguishes this internal
 	 * mode from the fixed contiguous pool.
 	 */
-	if (pthread_mutex_init(&pool->lock, NULL) != 0)
+	if (pthread_mutex_init(&pool->lock, NULL) != 0) {
+		tr_buffer_budget_release(budget, descriptor_bytes);
 		return TR_ERR_INVALID;
+	}
 
 	pool->buffers = tr_buffer_array_take(&buffers);
 	pool->buffer_count = buffer_count;
 	pool->buffer_size = max_buffer_size;
 	pool->free_count = buffer_count;
+	pool->memory_budget = budget;
 	for (i = 0; i < buffer_count; ++i) {
 		struct tr_buffer *buf = &pool->buffers[i];
 		buf->pool = pool;
@@ -94,18 +160,46 @@ int tr_buffer_pool_init_dynamic(struct tr_buffer_pool *pool,
 	return TR_OK;
 }
 
+int tr_buffer_pool_init_dynamic(struct tr_buffer_pool *pool,
+				uint32_t buffer_count,
+				uint32_t max_buffer_size)
+{
+	return tr_buffer_pool_init_dynamic_budgeted(
+		pool, buffer_count, max_buffer_size, NULL);
+}
+
 void tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 {
+	struct tr_memory_budget *budget;
+	uint64_t descriptor_bytes;
+	uint64_t fixed_storage_bytes = 0U;
 	uint32_t i;
 
 	if (!pool)
 		return;
+
+	budget = pool->memory_budget;
+	descriptor_bytes =
+		(uint64_t)pool->buffer_count * (uint64_t)sizeof(*pool->buffers);
+	if (pool->storage) {
+		fixed_storage_bytes =
+			(uint64_t)pool->buffer_count *
+			(uint64_t)pool->buffer_size;
+	} else if (pool->buffers) {
+		for (i = 0; i < pool->buffer_count; ++i)
+			tr_buffer_budget_release(
+				budget, (uint64_t)pool->buffers[i].capacity);
+	}
 
 	if (!pool->storage && pool->buffers)
 		for (i = 0; i < pool->buffer_count; ++i)
 			free(pool->buffers[i].data);
 	free(pool->storage);
 	free(pool->buffers);
+
+	tr_buffer_budget_release(budget, fixed_storage_bytes);
+	tr_buffer_budget_release(budget, descriptor_bytes);
+
 	pool->storage = NULL;
 	pool->buffers = NULL;
 	pool->free_list = NULL;
@@ -114,6 +208,7 @@ void tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 	pool->free_count = 0;
 	pool->peak_in_use = 0;
 	pool->exhausted_events = 0;
+	pool->memory_budget = NULL;
 	pthread_mutex_destroy(&pool->lock);
 }
 
@@ -153,9 +248,21 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 	pthread_mutex_unlock(&pool->lock);
 
 	if (dynamic && buf->capacity < min_capacity) {
-		uint8_t *data = (uint8_t *)realloc(buf->data, min_capacity);
+		uint32_t old_capacity = buf->capacity;
+		uint64_t growth =
+			(uint64_t)min_capacity - (uint64_t)old_capacity;
+		uint8_t *data;
+		int ret;
 
+		ret = tr_buffer_budget_reserve(pool->memory_budget, growth);
+		if (ret != TR_OK) {
+			tr_buffer_release(buf);
+			return ret;
+		}
+
+		data = (uint8_t *)realloc(buf->data, min_capacity);
 		if (!data) {
+			tr_buffer_budget_release(pool->memory_budget, growth);
 			tr_buffer_release(buf);
 			return TR_ERR_NOMEM;
 		}

@@ -432,10 +432,23 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - stable `memory_budget_bytes` 暂不开放：Reactor/Buffer/RPC/Channel 等主要 shard-local
   consumer 尚未全部接入，避免“配置了预算但仍能从旁路超出”的虚假保证。
 
+第三阶段扩大 shard memory accounting 覆盖：
+
+- memory-budget primitive 从 `src/runtime/` 提升到 `src/memory_budget.h`，RuntimeShard
+  仍是 owner，execution/Buffer 只消费 capability，不形成反向 module dependency；
+- Reactor create 一次性精确 reserve 生命周期固定 userspace heap 请求，任一构造失败
+  或 destroy 都 exact release；kernel fd/epoll memory 不计入该 byte contract；
+- fixed Buffer pool 对 descriptor/storage 分别 reserve，dynamic pool 对 descriptor +
+  实际 `realloc` growth reserve，retained capacity 在 pool destroy 时归还；
+- Server shard RPC message/reassembly pools 接入所属 RuntimeShard budget；
+- Server teardown 顺序调整为 finalizer quiesce -> shard pool destroy -> Runtime destroy，
+  防止 budget consumer 晚于 owner；
+- Client facade message/reassembly pools、RPC Endpoint/Channel lifecycle allocations
+  仍未覆盖，因此 stable `memory_budget_bytes` 继续不开放。
+
 后续：
 
-- 将 Reactor fixed resources、Server shard Buffer pools、RPC/Channel lifecycle allocations
-  逐步接入同一个 shard budget；
+- 将 Client facade pools、RPC/Channel lifecycle allocations 接入同一个 shard budget；
 - 覆盖闭环后再公开 stable `memory_budget_bytes`；
 - worker admission；
 - application/backend admission hook（优先复用 SERVER_PRE_HANDLER，而不是新增第二套 hook）；

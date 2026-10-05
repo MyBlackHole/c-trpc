@@ -10,6 +10,7 @@
 #include "../io/socket.h"
 #include "tr/status.h"
 #include "../transport/protocol/wire.h"
+#include "../memory_budget.h"
 #include "../observability_internal.h"
 
 #include <assert.h>
@@ -189,6 +190,7 @@ struct tr_reactor_handler_request {
 
 struct tr_reactor {
 	struct tr_reactor_config config;
+	uint64_t memory_bytes;
 
 	int epoll_fd;
 	int wake_fd;
@@ -2102,6 +2104,73 @@ static void tr_default_config(struct tr_reactor_config *config)
 		tr_nonzero(config->tx_budget_bytes, 4U * 1024U * 1024U);
 }
 
+static int tr_reactor_memory_add(
+	uint64_t *total, uint64_t count, uint64_t item_bytes)
+{
+	uint64_t bytes;
+
+	if (!total)
+		return TR_ERR_INVALID;
+	if (count != 0U && item_bytes > UINT64_MAX / count)
+		return TR_ERR_BAD_LENGTH;
+	bytes = count * item_bytes;
+	if (*total > UINT64_MAX - bytes)
+		return TR_ERR_BAD_LENGTH;
+	*total += bytes;
+	return TR_OK;
+}
+
+static int tr_reactor_fixed_memory_bytes(
+	const struct tr_reactor_config *config, uint64_t *out)
+{
+	uint64_t timer_capacity;
+	uint64_t total = 0U;
+	int ret;
+
+	if (!config || !out)
+		return TR_ERR_INVALID;
+
+	timer_capacity =
+		(uint64_t)config->max_connections * 4U + 16U;
+	if (timer_capacity > UINT32_MAX)
+		return TR_ERR_BAD_LENGTH;
+
+#define TR_REACTOR_MEMORY_ADD(count, type_or_bytes)                  \
+	do {                                                          \
+		ret = tr_reactor_memory_add(                           \
+			&total, (uint64_t)(count),                    \
+			(uint64_t)(type_or_bytes));                    \
+		if (ret != TR_OK)                                    \
+			return ret;                                   \
+	} while (0)
+
+	TR_REACTOR_MEMORY_ADD(1U, sizeof(struct tr_reactor));
+	TR_REACTOR_MEMORY_ADD(config->max_connections, sizeof(struct tr_slot));
+	TR_REACTOR_MEMORY_ADD(
+		config->max_connections, sizeof(struct tr_connection));
+	TR_REACTOR_MEMORY_ADD(
+		config->command_capacity, sizeof(struct tr_command));
+	TR_REACTOR_MEMORY_ADD(
+		config->command_capacity, sizeof(struct tr_completion));
+	TR_REACTOR_MEMORY_ADD(
+		timer_capacity, sizeof(struct tr_timer_entry));
+	TR_REACTOR_MEMORY_ADD(timer_capacity, sizeof(uint32_t));
+	TR_REACTOR_MEMORY_ADD(
+		config->tx_item_capacity, sizeof(struct tr_tx_item));
+	TR_REACTOR_MEMORY_ADD(
+		config->control_tx_item_capacity, sizeof(struct tr_tx_item));
+	TR_REACTOR_MEMORY_ADD(
+		config->rx_buffer_count, sizeof(struct tr_buffer));
+	TR_REACTOR_MEMORY_ADD(
+		config->rx_buffer_count, config->rx_buffer_size);
+
+#undef TR_REACTOR_MEMORY_ADD
+
+	*out = total;
+	return TR_OK;
+}
+
+
 struct tr_reactor_build {
 	struct tr_reactor *reactor;
 	int ctl_lock_ready;
@@ -2144,6 +2213,9 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 
 	if (build->ctl_lock_ready)
 		pthread_mutex_destroy(&reactor->ctl_lock);
+	if (reactor->config.memory_budget && reactor->memory_bytes != 0U)
+		(void)tr_memory_budget_release(
+			reactor->config.memory_budget, reactor->memory_bytes);
 	free(reactor);
 	build->reactor = NULL;
 }
@@ -2154,8 +2226,10 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      struct tr_reactor **out)
 {
 	struct tr_reactor_build build TR_AUTO(tr_reactor_build_cleanup) = { 0 };
+	struct tr_reactor_config effective;
 	struct tr_reactor *reactor;
 	struct epoll_event wake_event;
+	uint64_t memory_bytes = 0U;
 	uint32_t i;
 	int ret;
 
@@ -2163,10 +2237,35 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		return TR_ERR_INVALID;
 
 	*out = NULL;
+	memset(&effective, 0, sizeof(effective));
+	if (config)
+		effective = *config;
+	tr_default_config(&effective);
+	if (effective.observability_flags & ~TR_OBSERVABILITY_VALID_FLAGS)
+		return TR_ERR_INVALID;
+	if (effective.max_payload_len > effective.rx_buffer_size)
+		return TR_ERR_BAD_LENGTH;
+
+	ret = tr_reactor_fixed_memory_bytes(&effective, &memory_bytes);
+	if (ret != TR_OK)
+		return ret;
+	if (effective.memory_budget) {
+		ret = tr_memory_budget_reserve(
+			effective.memory_budget, memory_bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
+
 	reactor = (struct tr_reactor *)calloc(1, sizeof(*reactor));
-	if (!reactor)
+	if (!reactor) {
+		if (effective.memory_budget)
+			(void)tr_memory_budget_release(
+				effective.memory_budget, memory_bytes);
 		return TR_ERR_NOMEM;
+	}
 	build.reactor = reactor;
+	reactor->config = effective;
+	reactor->memory_bytes = memory_bytes;
 	reactor->epoll_fd = -1;
 	reactor->wake_fd = -1;
 	reactor->listener_fd = -1;
@@ -2174,11 +2273,6 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	for (i = 0; i < TR_REACTOR_AUX_EVENT_CAPACITY; ++i)
 		reactor->aux_events[i].fd = -1;
 
-	if (config)
-		reactor->config = *config;
-	tr_default_config(&reactor->config);
-	if (reactor->config.observability_flags & ~TR_OBSERVABILITY_VALID_FLAGS)
-		return TR_ERR_INVALID;
 	reactor->stats.observability_flags = reactor->config.observability_flags;
 	reactor->stats.limits = (struct tr_reactor_work) {
 		.commands = TR_COMMAND_BATCH,
@@ -2189,9 +2283,6 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		.rx_dispatches = TR_RX_READY_BATCH,
 		.tx_dispatches = TR_TX_READY_BATCH
 	};
-
-	if (reactor->config.max_payload_len > reactor->config.rx_buffer_size)
-		return TR_ERR_BAD_LENGTH;
 
 	reactor->frame_cb = frame_cb;
 	reactor->event_cb = event_cb;
@@ -3703,5 +3794,8 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	free(reactor->slots);
 
 	pthread_mutex_destroy(&reactor->ctl_lock);
+	if (reactor->config.memory_budget && reactor->memory_bytes != 0U)
+		(void)tr_memory_budget_release(
+			reactor->config.memory_budget, reactor->memory_bytes);
 	free(reactor);
 }
