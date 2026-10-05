@@ -185,8 +185,10 @@ static int tr_client_group_close_wait_admission(
 
 	pthread_mutex_lock(&group->drain_wait_lock);
 	group->drain_wait_closed = 1;
-	if (group->drain_waiters != 0U)
+	if (group->drain_waiters != 0U) {
+		pthread_cond_broadcast(&group->drain_wait_cond);
 		ret = TR_ERR_STATE;
+	}
 	pthread_mutex_unlock(&group->drain_wait_lock);
 	return ret;
 }
