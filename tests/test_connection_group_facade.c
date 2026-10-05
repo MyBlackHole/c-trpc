@@ -930,7 +930,7 @@ static void test_client_group_destroy_after_remote_control_close(void)
 		assert(tr_client_create(&client_config, &client) == TR_OK);
 
 		group.group_id = TEST_GROUP_ID;
-		group.epoch = TEST_GROUP_EPOCH + i + 1U;
+		group.epoch = TEST_GROUP_EPOCH;
 		assert(tr_client_connection_group_connect(
 			       client, "127.0.0.1", group_port, &group) == TR_OK);
 		wait_counter(&ctx, &ctx.authorized, 1U);
