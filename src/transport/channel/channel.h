@@ -216,8 +216,14 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 				struct tr_channel_capabilities *out);
 
 /*
- * graceful shutdown：禁止创建新的本地 Stream，并在 ready lane 上发送
- * GOAWAY。已有 Stream 继续运行，直到自然 close/cancel。
+ * graceful shutdown：建立单调的 Stream admission barrier，并在 ready lane
+ * 上发送 GOAWAY。barrier 之后禁止新的本地 Stream；对端在收到 GOAWAY 前已经
+ * 发出、但在 barrier 之后才到达的 STREAM_OPEN 也会被 STREAM_CLOSE 拒绝，
+ * 不再增加本地 active Stream。已有 Stream 继续运行，直到自然 close/cancel。
+ *
+ * 因此 active Stream 在 begin_drain() 成功建立 barrier 后只能保持或减少，
+ * DRAINED 不会因为延迟到达的 peer OPEN 再退回 DRAINING。
+ *
  * 本操作幂等；TR_AGAIN 表示 GOAWAY control frame 暂时无法入队，
  * Channel 仍保持 draining，调用方可以重试。
  */
