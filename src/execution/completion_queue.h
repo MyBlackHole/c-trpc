@@ -47,7 +47,7 @@ int tr_completion_queue_push(struct tr_completion_queue *queue,
 			     int *need_wake);
 
 /*
- * Blocking producer handoff used by worker completion paths.
+ * 工作线程完成路径使用的阻塞式生产者移交接口。
  *
  * Queue full 时 producer 在 not_full 上睡眠，不做 sched_yield 自旋。
  * TR_OK 表示 ownership 已转移；close 会唤醒全部 waiter 并返回
