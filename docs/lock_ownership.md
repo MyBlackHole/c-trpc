@@ -296,6 +296,32 @@ start Reactor”，此时整个事务在 `ctl_lock` 排他区间完成，`start(
 不能插入 registration 与状态发布之间。正在 stop 的 Reactor 返回
 `TR_ERR_CLOSED`，不能越过 teardown barrier 直接发布或释放 Listener。
 
+Pipeline Listener 的 `connections_current/pipelines_current` 继续只由 owner
+修改。Server Group `wait_drained` 不再每 1 ms 读取统计，而只等待单独发布的
+drain generation：
+
+```text
+owner begin_drain
+    -> listener source detach
+    -> draining = 1
+    -> drain_generation++
+
+owner connection/session teardown
+    -> connections_current-- / pipelines_current--
+    -> 两者都为 0
+    -> publish drained_generation
+    -> cond broadcast
+
+external waiter
+    -> 只比较 generation
+    -> 不读取 owner counters
+```
+
+Listener destroy 也不再是静默的 `void` 析构。它先通过
+`tr_reactor_call_or_stopped()` 在 owner/stopped 串行化域验证 source 已 detach、
+fd 已关闭、connection/pipeline 计数归零，再关闭 waiter admission。只有验证成功
+才释放 registry/session/cond/mutex；正在 stop 或 waiter 尚未退出时 fail-closed。
+
 Client Connection Group 也遵守同一 owner 原则。以下状态只允许 Reactor
 所有者修改：
 
