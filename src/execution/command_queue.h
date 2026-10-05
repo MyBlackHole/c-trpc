@@ -75,7 +75,7 @@ struct tr_command_queue {
 	uint32_t waiters;
 	int wait_accepting;
 
-	/* Producer-side attribution, updated under the existing queue lock. */
+	/* 生产者侧归因统计，在现有队列锁保护下更新。 */
 	uint64_t pushed_send;
 	uint64_t full_send;
 	uint64_t pushed_resume_rx;
@@ -119,9 +119,9 @@ int tr_command_queue_push_wait(
 	uint64_t expected_generation, int *need_wake);
 
 /*
- * Lifecycle-only forced waiter，供 STOP admission 使用。
- * 忽略 wait_accepting/generation，只等待 ring capacity；Reactor owner pop
- * 不依赖 ctl_lock，因此 stop 可以持 ctl_lock 安全等待一个 STOP slot。
+ * 仅用于生命周期的强制等待接口，供 STOP 准入使用。
+ * 忽略 wait_accepting/generation，只等待环形队列容量；Reactor 所有者出队
+ * 不依赖 ctl_lock，因此 stop 可以持有 ctl_lock 安全等待一个 STOP 槽位。
  */
 int tr_command_queue_push_wait_force(
 	struct tr_command_queue *queue, const struct tr_command *command,
