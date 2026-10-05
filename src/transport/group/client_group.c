@@ -890,8 +890,10 @@ static int tr_client_group_adopt_control_on_owner(void *arg)
 	int ret;
 
 	request->executed = 1;
-	if (!group->control_connecting || group->control.reactor)
+	if (!group->control_connecting || group->control.reactor) {
+		group->control_connecting = 0;
 		return TR_ERR_STATE;
+	}
 
 	ret = tr_reactor_adopt_fd(
 		group->config.owner, request->fd,
