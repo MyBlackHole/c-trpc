@@ -2461,15 +2461,6 @@ static int tr_reactor_listener_register_publish_now(
 	return ret;
 }
 
-static int tr_reactor_listener_register_publish_on_owner(void *arg)
-{
-	struct tr_reactor_listener_publish_request *request =
-		(struct tr_reactor_listener_publish_request *)arg;
-
-	TR_ASSERT_REACTOR_OWNER(request->reactor);
-	return tr_reactor_listener_register_publish_now(request);
-}
-
 static int tr_reactor_listener_register_on_owner(void *arg)
 {
 	struct tr_reactor_listener_request *request =
@@ -2525,8 +2516,6 @@ int tr_reactor_listener_register_publish(
 	int (*publish)(void *arg), void *publish_arg)
 {
 	struct tr_reactor_listener_publish_request request;
-	int started;
-	int ret;
 
 	if (!reactor || fd < 0 || !callback || !publish)
 		return TR_ERR_INVALID;
@@ -2538,28 +2527,13 @@ int tr_reactor_listener_register_publish(
 	request.publish = publish;
 	request.publish_arg = publish_arg;
 
-	if (tr_reactor_is_owner_thread(reactor))
-		return tr_reactor_listener_register_publish_now(&request);
-
-	pthread_mutex_lock(&reactor->ctl_lock);
-	started = reactor->started;
-	if (!started) {
-		/*
-		 * 与 start() 共用 ctl_lock。source registration 和 caller state
-		 * publication 都完成后才允许 owner thread 出现。
-		 */
-		ret = tr_reactor_listener_register_publish_now(&request);
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		return ret;
-	}
-	pthread_mutex_unlock(&reactor->ctl_lock);
-
 	/*
-	 * 运行中由一个同步 owner call 完成两步；stop 若先关闭 admission，
-	 * call 会返回 CLOSED，既不会注册 source，也不会发布 caller state。
+	 * call_or_stopped 已经定义了所需的统一串行化域：
+	 * owner turn / stopped+ctl_lock / stopping=>CLOSED。
 	 */
-	return tr_reactor_call(
-		reactor, tr_reactor_listener_register_publish_on_owner, &request);
+	return tr_reactor_call_or_stopped(
+		reactor, (int (*)(void *))tr_reactor_listener_register_publish_now,
+		&request);
 }
 
 struct tr_reactor_listener_unregister_call_request {
@@ -2595,23 +2569,12 @@ static int tr_reactor_listener_unregister_call_now(
 	return request->fn(request->fn_arg);
 }
 
-static int tr_reactor_listener_unregister_call_on_owner(void *arg)
-{
-	struct tr_reactor_listener_unregister_call_request *request =
-		(struct tr_reactor_listener_unregister_call_request *)arg;
-
-	TR_ASSERT_REACTOR_OWNER(request->reactor);
-	return tr_reactor_listener_unregister_call_now(request);
-}
-
 int tr_reactor_listener_unregister_call(
 	struct tr_reactor *reactor,
 	tr_reactor_listener_cb callback, void *arg,
 	int (*fn)(void *arg), void *fn_arg)
 {
 	struct tr_reactor_listener_unregister_call_request request;
-	int started;
-	int ret;
 
 	if (!reactor || !callback || !fn)
 		return TR_ERR_INVALID;
@@ -2622,28 +2585,9 @@ int tr_reactor_listener_unregister_call(
 	request.fn = fn;
 	request.fn_arg = fn_arg;
 
-	if (tr_reactor_is_owner_thread(reactor))
-		return tr_reactor_listener_unregister_call_now(&request);
-
-	pthread_mutex_lock(&reactor->ctl_lock);
-	started = reactor->started;
-	if (!started) {
-		/*
-		 * stopped 状态下也必须把 source detach 与 caller teardown state
-		 * 作为一个 ctl_lock 临界区提交，防止并发 start/listen 插入中间。
-		 */
-		ret = tr_reactor_listener_unregister_call_now(&request);
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		return ret;
-	}
-	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire)) {
-		pthread_mutex_unlock(&reactor->ctl_lock);
-		return TR_ERR_CLOSED;
-	}
-	pthread_mutex_unlock(&reactor->ctl_lock);
-
-	return tr_reactor_call(
-		reactor, tr_reactor_listener_unregister_call_on_owner, &request);
+	return tr_reactor_call_or_stopped(
+		reactor, (int (*)(void *))tr_reactor_listener_unregister_call_now,
+		&request);
 }
 
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd)
