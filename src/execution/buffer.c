@@ -133,9 +133,9 @@ int tr_buffer_pool_init_dynamic_budgeted(
 	}
 
 	/*
-	 * Ownership is bounded by descriptor count. Storage grows only after a
-	 * descriptor is checked out; storage == NULL distinguishes this internal
-	 * mode from the fixed contiguous pool.
+	 * 所有权数量受描述符数量限制。
+	 * 只有描述符已经取出后才允许增长存储；
+	 * storage == NULL 用于区分这种内部模式与固定连续资源池。
 	 */
 	if (pthread_mutex_init(&pool->lock, NULL) != 0) {
 		tr_buffer_budget_release(budget, descriptor_bytes);
