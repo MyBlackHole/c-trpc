@@ -655,9 +655,9 @@ static void tr_server_finish_detached_peer(
 	pthread_mutex_unlock(&server->finalizer_lock);
 
 	/*
-	 * A disconnected peer may still occupy a slot while the shard's retired
-	 * Endpoint budget is full. Freeing one retired object reopens detach
-	 * admission; wake the owner so it can retry those slots.
+	 * 当分片的退役 Endpoint 预算已满时，断开的对端仍可能占用槽位。
+	 * 释放一个退役对象后会重新开放解除关联准入；
+	 * 此时唤醒所有者，使其可以重试这些槽位。
 	 */
 	tr_runtime_shard_signal_peer_event(shard->runtime);
 	free(detached);
@@ -697,18 +697,18 @@ static void tr_server_detach_disconnected_peers_on_owner(
 			continue;
 
 		/*
-		 * Peer-table slot lifetime and retired Endpoint lifetime are separate,
-		 * but both must remain bounded. When all retirement slots are in use,
-		 * leave this disconnected peer published and retry after a finalizer
-		 * signals the shard lifecycle eventfd.
+		 * 对端表槽位生命周期与退役 Endpoint 生命周期彼此独立，
+		 * 但二者都必须保持有界。
+		 * 当全部退役槽位都在使用时，保留该断开对端的已发布状态，
+		 * 等最终清理器通知分片生命周期 eventfd 后再重试。
 		 */
 		if (snapshot.rpc &&
 		    tr_runtime_shard_peer_reaping_at_capacity(shard->runtime))
 			break;
 
 		/*
-		 * Runs on the Reactor owner after Channel DOWN notifications return.
-		 * Remove all owner-visible callback/timer sources first.
+		 * 在 Channel DOWN 通知返回后，于 Reactor 所有者上执行。
+		 * 必须先移除全部所有者可见的回调和定时器事件源。
 		 */
 		if (snapshot.rpc) {
 			ret = tr_rpc_endpoint_detach_for_finalize(snapshot.rpc);
@@ -740,9 +740,9 @@ static void tr_server_detach_disconnected_peers_on_owner(
 		detached->channel = snapshot.channel;
 
 		/*
-		 * Slot lifetime is independent from old Endpoint worker refs. Once
-		 * owner detach is complete, clear the slot immediately so a new peer
-		 * may reuse it even while the detached Endpoint is still draining.
+		 * 槽位生命周期与旧 Endpoint 工作线程引用相互独立。
+		 * 所有者解除关联完成后立即清空槽位，
+		 * 即使已解除关联的 Endpoint 仍在排空，新对端也可以复用该槽位。
 		 */
 		memset(peer, 0, sizeof(*peer));
 		tr_runtime_shard_peer_note_removed_for_reap(shard->runtime);
@@ -975,8 +975,8 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	tr_server_note_peer_added_owner(shard);
 	tr_runtime_shard_peer_note_ready(shard->runtime);
 	/*
-	 * Cover the race where the connection went DOWN before this peer became
-	 * visible in the owner table. The shard eventfd coalesces the retry.
+	 * 处理连接在该对端发布到所有者表之前就进入 DOWN 的竞争窗口。
+	 * 分片 eventfd 用于合并后续重试。
 	 */
 	tr_server_signal_peer_cleanup(shard);
 	peer_guard.armed = 0;
@@ -1002,8 +1002,8 @@ static void tr_server_on_listener_ready(int listener, uint32_t events,
 			break;
 
 		/*
-		 * Runs on the shard Reactor owner. adopt_fd takes the owner fast path
-		 * so Channel/RPC setup sees an ACTIVE connection immediately.
+		 * 在分片 Reactor 所有者上执行。
+		 * adopt_fd 走所有者快速路径，使 Channel/RPC 设置能够立即看到 ACTIVE 连接。
 		 */
 		(void)tr_server_adopt_peer(shard, fd);
 		accepted++;
@@ -1222,9 +1222,9 @@ int tr_server_create_with_tuning(
 		group_config.stream_affinity_capacity_per_pipeline =
 			effective.connection_groups.max_streams_per_group;
 		/*
-		 * Keep CONTROL payload-buffer tuning internal. The total group
-		 * connection budget is a conservative bounded default for concurrent
-		 * control sends without adding an implementation knob to the SDK.
+		 * CONTROL 载荷 Buffer 调优保持内部化。
+		 * 组连接总预算为并发控制发送提供保守有界默认值，
+		 * 不向 SDK 增加实现级调优参数。
 		 */
 		group_config.control_message_count =
 			effective.connection_groups.max_connections;
@@ -1703,8 +1703,8 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 	uint32_t i;
 
 	/*
-	 * Peer slots and owner-side counters are single-writer Reactor state.
-	 * External stats callers enter each shard owner synchronously.
+	 * 对端槽位和所有者侧计数器属于 Reactor 单写状态。
+	 * 外部统计调用方通过同步方式进入各分片所有者。
 	 */
 	tr_runtime_shard_peer_stats(shard->runtime, &peer_stats);
 	stats->max_peers += peer_stats.capacity;
@@ -1753,8 +1753,8 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	stats.shard_count = server->shard_count;
 
 	/*
-	 * Detached finalizers are cross-thread; take their aggregate once so it is
-	 * not duplicated while per-shard live state is collected.
+	 * 已解除关联最终清理器会跨线程执行；
+	 * 聚合统计只读取一次，避免在收集各分片存活状态时重复计入。
 	 */
 	pthread_mutex_lock(&server->finalizer_lock);
 	stats.channel = server->retired_channel_stats;
@@ -1841,8 +1841,8 @@ void tr_server_destroy(struct tr_server *server)
 		return;
 
 	/*
-	 * Server teardown joins/quiesces Reactor and executor workers. Never begin
-	 * it from the execution context that must make that teardown progress.
+	 * Server 销毁需要等待 Reactor 和执行器工作线程退出并进入静默。
+	 * 绝不能从这些销毁流程所依赖的执行上下文中启动销毁。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return;
@@ -1879,9 +1879,8 @@ void tr_server_destroy(struct tr_server *server)
 		assert(ret == TR_OK);
 #endif
 		/*
-		 * Do not destroy peer/Runtime storage unless every shard owner has
-		 * crossed the stop barrier. Continuing after a failed join would turn
-		 * a lifecycle error into UAF.
+		 * 只有全部分片所有者都穿过停止屏障后，才能销毁对端/Runtime 存储。
+		 * 在线程等待失败后继续销毁，会把生命周期错误转化为释放后使用。
 		 */
 		if (ret != TR_OK)
 			return;
@@ -1910,8 +1909,8 @@ void tr_server_destroy(struct tr_server *server)
 	tr_server_wait_peer_finalizers(server);
 
 	/*
-	 * Shard pools are budget consumers; RuntimeShard owns the budget itself.
-	 * Release every pool reservation before destroying the Runtime/budget owner.
+	 * 分片资源池是预算使用方；RuntimeShard 自身拥有预算。
+	 * 销毁 Runtime/预算所有者之前，必须先归还全部资源池预留。
 	 */
 	if (server->shards) {
 		for (shard_index = 0; shard_index < server->shard_count;
