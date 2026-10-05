@@ -1,54 +1,54 @@
-# Runtime 与 Reactor Shard
+# 运行时与 Reactor 分片
 
-**状态：CURRENT → TARGET V1**
+**状态：当前实现 → V1 目标**
 
-## 1. Server Runtime
+## 1. 服务端运行时
 
-CURRENT Server facade 已进入 Phase 4 Multi-Reactor：`tr_server_config.shard_count`
-可以创建 N 个独立 Server/Runtime shard，每个 shard 拥有独立 Reactor、listener、
-executor、peer table 与 hot buffer pool。
+当前服务端门面已经进入第 4 阶段的多 Reactor 架构：`tr_server_config.shard_count`
+可以创建 N 个独立的服务端/运行时分片，每个分片拥有独立的 Reactor、监听器、
+执行器、对端表与热路径缓冲区资源池。
 
 ```text
 tr_server
   └─ tr_runtime
-       └─ shard[0..N-1]
+       └─ 分片[0..N-1]
             ├─ Reactor
-            ├─ SO_REUSEPORT listener
-            ├─ RPC executor
-            ├─ peer table / counters
-            └─ Reactor-owned accept
+            ├─ SO_REUSEPORT 监听器
+            ├─ RPC 执行器
+            ├─ 对端表/计数器
+            └─ Reactor 所有者执行 accept
 ```
 
-`tr_runtime` 现在负责 Reactor 生命周期；Server 不再直接拥有 Reactor。
-Server listener 已从 `tr_server` 下沉到 `tr_runtime_shard[0]`，并直接注册到
-该 shard 的 Reactor epoll。listen/close/final cleanup 由 shard 负责，listener
-readiness 与 accept 由 Reactor owner 执行，不再创建中央 accept thread。
+`tr_runtime` 现在负责 Reactor 生命周期；服务端不再直接拥有 Reactor。
+服务端监听器已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`，并直接注册到
+该分片的 Reactor epoll。监听、关闭和最终清理由分片负责；监听器就绪与 `accept`
+由 Reactor 所有者执行，不再创建中央接收线程。
 
-该变化不增加线程。Peer slot storage、capacity/high-water、reaping/ready/rejection
-计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。Shard 额外拥有
-peer lifecycle eventfd。Channel DOWN 的 Reactor callback 只 signal 该 eventfd；
-eventfd 本身注册在同一 Reactor epoll，因此 disconnected peer cleanup 在后续
-owner turn 执行，不需要额外线程。
+该变化不会增加线程。对端槽位存储、容量/高水位、回收中/就绪/拒绝
+计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。分片额外拥有
+对端生命周期 eventfd。Channel DOWN 的 Reactor 回调只负责通知该 eventfd；
+eventfd 本身注册在同一个 Reactor epoll 中，因此断开连接的对端清理会在后续
+所有者轮次执行，不需要额外线程。
 
-Peer 仍在 shard table 时，Reactor owner 执行 detach：移除 RPC/Channel callback、
-deadline/keepalive timer source，并关闭 Server Endpoint executor admission。
-随后 Channel ownership 和 Server 回收信息转移到预分配的 detached-finalizer
-context，peer slot 立即清空并允许下一条连接复用。Endpoint owner ref 再转交给
-last-ref finalizer：已有 worker task 继续持 strong-ref；最后一个 ref 释放时自动
-采集最终 Endpoint/Channel stats 并 free detached context。
+当对端仍位于分片表中时，Reactor 所有者执行解除关联：移除 RPC/Channel 回调、
+截止时间/保活定时器源，并关闭服务端 Endpoint 执行器的准入。
+随后 Channel 所有权和服务端回收信息转移到预分配的“已解除关联最终清理上下文”，
+对端槽位立即清空并允许下一条连接复用。Endpoint 所有者引用再转交给最后引用清理器：
+已有工作任务继续持有强引用；最后一个引用释放时自动采集最终 Endpoint/Channel
+统计并释放该清理上下文。
 
-slot lifetime 与 retired object lifetime 分离，但两者都必须有界：每 shard 的
-`reaping_current` 最大不超过该 shard 的 peer slot capacity。retiring budget 满时，
-新的 disconnected peer 暂留 peer table，不执行不可逆 detach；任一旧 finalizer
-归还 reaping slot 后 signal shard lifecycle eventfd，Reactor owner 再重试 detach。
-因此最多存在一份 live/table capacity 加一份同规模 retired capacity，不会因为 slot
+槽位生命周期与已退役对象生命周期相互分离，但两者都必须有界：每个分片的
+`reaping_current` 最大不超过该分片的对端槽位容量。当退役预算已满时，
+新的断连对端暂时保留在对端表中，不执行不可逆的解除关联；任一旧清理器
+归还回收槽位后通知分片生命周期 eventfd，Reactor 所有者再重试解除关联。
+因此最多存在一份存活/表容量加一份同规模退役容量，不会因为槽位
 复用产生无界 Endpoint/Channel 积压。
 
-`reaping_current` 统计的是已经脱离 peer table、仍在等待 strong-ref 的旧 peer，
-而不是占用中的 slot。Server destroy 只需等待 `reaping_current == 0`，不需要
-join reaper thread。
+`reaping_current` 统计的是已经脱离对端表、仍在等待强引用释放的旧对端，
+而不是占用中的槽位。服务端销毁只需等待 `reaping_current == 0`，不需要
+等待独立回收线程退出。
 
-Runtime config 已改为显式 per-shard config array：
+运行时配置已经改为显式的每分片配置数组：
 
 ```c
 struct tr_runtime_config {
@@ -57,44 +57,44 @@ struct tr_runtime_config {
 };
 ```
 
-每个 entry 独立描述 Reactor、peer capacity、RPC executor，以及 Phase 7
-内部的 shard memory budget capability。Runtime 不把一份资源配置机械复制 N 次；
-Server 先把 public total budget 确定性拆分，再将每个 share 交给 Runtime。
-Client facade 仍只传入一个 shard config。
+每个数组项独立描述 Reactor、对端容量、RPC 执行器，以及第 7 阶段
+内部的分片内存预算能力。运行时不会把一份资源配置机械复制 N 次；
+服务端先把公开的总预算确定性拆分，再将每份配额交给运行时。
+客户端门面仍只传入一个分片配置。
 
-Phase 7 的 memory budget 目前是 **internal accounting foundation**，尚未成为 stable
-facade knob。RuntimeShard 是 budget owner，跨模块 primitive 位于
-`src/memory_budget.h`，避免 execution 层反向依赖 Runtime module。
-`limit_bytes == 0` 表示迁移期间只记账、不执行上限；consumer 必须先 reserve，
-成功后才能分配，teardown 再 release exact bytes。
+第 7 阶段的内存预算目前是**内部记账基础能力**，尚未成为稳定门面的配置项。
+RuntimeShard 是预算所有者，跨模块原语位于
+`src/memory_budget.h`，避免执行层反向依赖运行时模块。
+`limit_bytes == 0` 表示迁移期间只记账、不执行上限；使用方必须先预留，
+成功后才能分配，销毁时再精确归还字节数。
 
 当前已接入：
 
-- Runtime peer table；
-- Reactor 生命周期固定 heap：Reactor object、slot/connection tables、
-  command/completion rings、timer entry/heap、TX/control-TX arrays、RX pool
-  descriptor/storage；
-- Server shard RPC message pool descriptor + on-demand retained capacity；
-- Server shard reassembly fixed descriptor/storage。
+- 运行时对端表；
+- Reactor 生命周期固定堆内存：Reactor 对象、槽位/连接表、
+  命令/完成环、定时器项/堆、TX/CONTROL-TX 数组、RX 资源池
+  描述符/存储；
+- 服务端分片 RPC 消息资源池描述符 + 按需保留容量；
+- 服务端分片重组固定描述符/存储。
 
-Budget 统计的是 c-trpc 主动请求的 userspace heap bytes，不包含 allocator metadata、
-pthread 实现内部内存，也不包含 fd/epoll 等 kernel memory。Client facade 的
-RPC/reassembly pools、RPC Endpoint/Channel lifecycle allocations 仍待接入，因此目前
-仍不对外宣称这是完整的 shard memory cap。
+预算统计的是 c-trpc 主动请求的用户态堆内存字节数，不包含分配器元数据、
+pthread 实现内部内存，也不包含 fd/epoll 等内核内存。客户端门面的
+RPC/重组资源池、RPC Endpoint/Channel 生命周期分配仍待接入，因此目前
+仍不对外宣称这是完整的分片内存上限。
 
-TARGET V1 使用单进程多 Reactor：
+V1 目标使用单进程多 Reactor：
 
 ```mermaid
 flowchart TB
-    NET["Network"]
-    subgraph PROC["Server Process"]
+    NET["网络"]
+    subgraph PROC["服务端进程"]
         direction LR
         R0["Reactor 0\nlisten_fd 0"]
         R1["Reactor 1\nlisten_fd 1"]
         R2["Reactor 2\nlisten_fd 2"]
-        W0["Worker Pool 0"]
-        W1["Worker Pool 1"]
-        W2["Worker Pool 2"]
+        W0["工作线程池 0"]
+        W1["工作线程池 1"]
+        W2["工作线程池 2"]
     end
 
     NET --> R0
@@ -109,46 +109,46 @@ flowchart TB
     W2 --> R2
 ```
 
-### TARGET V1 不再需要
+### V1 目标不再需要
 
-- 每 peer 独立 timer thread。
+- 每个对端独立的定时器线程。
 
-connection error、peer reclaim 和 timer 应继续收敛到 Reactor；accept 已完成迁移。
+连接错误、对端回收和定时器应继续收敛到 Reactor；接收连接已经完成迁移。
 
-## 2. Per-Reactor Listener
+## 2. 每 Reactor 监听器
 
 Linux >= 3.10 允许将 `SO_REUSEPORT` 作为基础能力。
 
-每个 shard：
+每个分片：
 
 ```text
 socket()
   -> SO_REUSEADDR
   -> SO_REUSEPORT
-  -> bind(same address)
+  -> bind(相同地址)
   -> listen()
-  -> epoll add
+  -> 加入 epoll
 ```
 
 目标是：
 
 ```text
-accept creator
+接收连接的执行者
     =
-initial fd owner
+fd 初始所有者
     =
-initial protocol owner
+协议状态初始所有者
 ```
 
 避免所有连接先经过中央线程再转交。
 
-## 3. Reactor Shard
+## 3. Reactor 分片
 
-CURRENT 已落地最小内部形状：
+当前已经落地最小内部形状：
 
 ```c
 struct tr_runtime {
-    uint32_t shard_count;          /* Server: N；Client CURRENT: 1 */
+    uint32_t shard_count;          /* 服务端：N；客户端当前：1 */
     struct tr_runtime_shard *shards;
 };
 
@@ -170,30 +170,30 @@ struct tr_runtime_shard {
 };
 ```
 
-Client facade 当前仍通过 `shard[0]` 取得 Reactor。Server 为每个 Runtime shard
-创建对应的 `tr_server_shard` context，持有自己的 RPC message pool、
-reassembly pool、executor binding 与 peer-event registration state。
+客户端门面当前仍通过 `shard[0]` 取得 Reactor。服务端为每个运行时分片
+创建对应的 `tr_server_shard` 上下文，持有自己的 RPC 消息资源池、
+重组资源池、执行器绑定与对端事件注册状态。
 
-Server 的 public count/capacity 配置保持 total-budget 语义，share 计算为：
+服务端的公开数量/容量配置保持总预算语义，份额计算为：
 
 ```text
 share[i] = total / shard_count + (i < total % shard_count ? 1 : 0)
 ```
 
-因此开启更多 shard 不会把 worker 或内存池容量乘 N。
+因此开启更多分片不会把工作线程或内存池容量乘以 N。
 
-Client 暂时保留 Endpoint-local executor：Client 当前只有单 Endpoint，且 worker
-生命周期与 connect/session 绑定；本阶段不为了“形式统一”改变其线程生命周期。
+客户端暂时保留 Endpoint 本地执行器：客户端当前只有单个 Endpoint，且工作线程
+生命周期与连接/会话绑定；本阶段不会为了“形式统一”改变其线程生命周期。
 
-listener、peer、executor 与 Server hot-buffer resource ownership 已下沉；accept
-execution 已进入 Reactor；peer lifecycle event source 与 detach/finalize 已完全
-事件化。Peer reserve/publish/remove/live snapshot 全部串行化到 Reactor owner。
-Server 仅保留一个小型 `finalizer_lock`，用于 detached finalizer 的 retired
-stats merge 与 shutdown condition；它不保护 peer table 或 buffer pool。
+监听器、对端、执行器与服务端热缓冲资源所有权已经下沉；接收连接的执行
+已经进入 Reactor；对端生命周期事件源与解除关联/最终清理已经完全事件化。
+对端的预留/发布/移除/存活快照全部串行化到 Reactor 所有者。
+服务端仅保留一个小型 `finalizer_lock`，用于已解除关联清理器的退役
+统计合并与关闭条件；它不保护对端表或缓冲资源池。
 
-Server teardown 在所有 peer/finalizer quiesce 后先销毁 shard Buffer pools，
-让它们把 reservation 归还给 RuntimeShard budget；最后才 destroy Runtime。
-budget owner 因此严格晚于所有 budget consumer 销毁。
+服务端销毁时，在所有对端/最终清理器静默后先销毁分片缓冲资源池，
+让它们把预留归还给 RuntimeShard 预算；最后才销毁运行时。
+因此预算所有者严格晚于所有预算使用方销毁。
 
 目标逻辑结构：
 
@@ -220,111 +220,111 @@ struct tr_runtime_shard {
 
 这只是架构形状，不要求一次性引入所有字段。
 
-## 4. Cross-Shard 操作
+## 4. 跨分片操作
 
-禁止非 owner 线程直接修改 shard-local protocol state。
+禁止非所有者线程直接修改分片本地协议状态。
 
 统一模式：
 
 ```text
-non-owner thread
+非所有者线程
     |
-    | command
+    | 命令
     v
-owner Reactor
+所有者 Reactor
     |
-    | mutate local state
+    | 修改本地状态
     v
-done
+完成
 ```
 
-对于 DATA socket affinity，如果 socket 被错误 shard accept：
+对于 DATA 套接字亲和关系，如果套接字被错误分片接收：
 
 ```text
 R7 accept(fd)
-  -> 读取固定 routing preface
-  -> resolve owner = R3
-  -> enqueue ADOPT_ROUTED_FD(fd) to R3
-  -> ownership 成功转移
+  -> 读取固定路由前导信息
+  -> 解析所有者 = R3
+  -> 向 R3 提交 ADOPT_ROUTED_FD(fd)
+  -> 所有权成功转移
 ```
 
-同进程内不需要 `SCM_RIGHTS`。
+同一进程内不需要 `SCM_RIGHTS`。
 
-## 5. Client Runtime
+## 5. 客户端运行时
 
-Client CURRENT：
+客户端当前模型：
 
 ```text
-application process
-  └─ c-trpc client
-       └─ internal tr_runtime
-            └─ shard[0]
-                 └─ 1 Reactor
+应用进程
+  └─ c-trpc 客户端
+       └─ 内部 tr_runtime
+            └─ 分片[0]
+                 └─ 1 个 Reactor
 ```
 
-Client 的外部 API 和线程行为未改变；Runtime 目前是内部 ownership layer。
+客户端的外部 API 和线程行为未改变；运行时目前是内部所有权层。
 
-FUTURE 才允许配置 N Reactor。
+未来才允许配置 N 个 Reactor。
 
-Client library 必须保持嵌入友好：
+客户端库必须保持良好的嵌入性：
 
-- 不 fork；
-- 不 daemonize；
-- 不改变宿主进程全局 signal policy；
+- 不 `fork`；
+- 不守护进程化；
+- 不改变宿主进程全局信号策略；
 - 不假设自己拥有整个进程；
-- 不默认设置全局 CPU affinity。
+- 不默认设置全局 CPU 亲和性。
 
-## 6. Timer
+## 6. 定时器
 
-CURRENT：RPC deadline、Channel keepalive 与 Client automatic reconnect backoff
-都已经迁移到 Reactor-local timer。Channel reconnect 与 Connection Group DATA
-establish 共享 Reactor-owned nonblocking connector；connect completion 通过 bounded
-auxiliary fd source 回到原 owner，不再创建 per-Channel reconnect thread。
+当前：RPC 截止时间、Channel 保活与客户端自动重连退避
+都已经迁移到 Reactor 本地定时器。Channel 重连与 Connection Group DATA
+建立共享 Reactor 所有的非阻塞连接器；连接完成通过有界
+辅助 fd 事件源回到原所有者，不再创建每 Channel 重连线程。
 
-Reactor-local timer 基础设施已经落地：
+Reactor 本地定时器基础设施已经落地：
 
-- 每 Reactor 一个 bounded timer queue；
-- generation handle 防止 stale timer 操作；
-- min-heap 维护最近 absolute `CLOCK_MONOTONIC` deadline；
-- 最近 deadline 直接驱动 `epoll_wait(timeout)`；
-- 单轮 timer callback 有固定 budget，避免 timer storm 长时间饿死 I/O；
-- callback 只允许执行短小、非阻塞的 owner-side 状态推进。
+- 每个 Reactor 一个有界定时器队列；
+- 代次句柄防止陈旧定时器操作；
+- 最小堆维护最近的绝对 `CLOCK_MONOTONIC` 截止时间；
+- 最近截止时间直接驱动 `epoll_wait(timeout)`；
+- 单轮定时器回调有固定预算，避免定时器风暴长时间饿死 I/O；
+- 回调只允许执行短小、非阻塞的所有者侧状态推进。
 
-TARGET：
+目标：
 
 ```text
-Reactor shard
-  ├─ RPC deadline
-  ├─ keepalive
-  ├─ reconnect/backoff
-  ├─ Pipeline timeout
-  ├─ ACK batch timeout
-  └─ checkpoint timer
+Reactor 分片
+  ├─ RPC 截止时间
+  ├─ 保活
+  ├─ 重连/退避
+  ├─ Pipeline 超时
+  ├─ ACK 批量超时
+  └─ 检查点定时器
 ```
 
-RPC Endpoint 每个只占用一个 Reactor-local deadline timer，内部扫描 bounded Call
-table，不按 Call 创建 timer。Channel keepalive 与 reconnect backoff 分别使用
-Reactor-local timer；实际 TCP connect timeout 由共享 connector 自己的 timer 管理。
-这些 timer callback 只推进短小的 owner-side 状态，不执行阻塞 connect/poll。
+每个 RPC Endpoint 只占用一个 Reactor 本地截止时间定时器，内部扫描有界 Call
+表，不按 Call 创建定时器。Channel 保活与重连退避分别使用
+Reactor 本地定时器；实际 TCP 连接超时由共享连接器自己的定时器管理。
+这些定时器回调只推进短小的所有者侧状态，不执行阻塞的连接或轮询操作。
 
-## 7. CURRENT 创建阶段线程预算与回收
+## 7. 当前创建阶段线程预算与回收
 
 以下是库自身的线程增量，不包含应用、测试工具或 sanitizer 的后台线程：
 
 | 操作 | 新增线程 |
 |---|---|
-| `tr_client_create()` | 启动 Runtime shard[0] 的 1 个 Reactor；尚未创建 RPC worker |
-| `tr_server_create()` | 创建 N-shard Runtime（Reactor 尚未启动）；内部 worker 总预算拆分到 N 个 shard-local worker pool，精确线程数不属于 stable facade config |
+| `tr_client_create()` | 启动运行时 `shard[0]` 的 1 个 Reactor；尚未创建 RPC 工作线程 |
+| `tr_server_create()` | 创建 N 分片运行时（Reactor 尚未启动）；内部工作线程总预算拆分到 N 个分片本地工作线程池，精确线程数不属于稳定门面配置 |
 | `tr_server_listen()` | 0 |
-| `tr_server_start()` | N 个：每个 shard 启动 1 个 Reactor；accept/peer cleanup 都在各自 owner Reactor 上执行 |
+| `tr_server_start()` | N 个：每个分片启动 1 个 Reactor；连接接收/对端清理都在各自所有者 Reactor 上执行 |
 
-Client connect 才创建 RPC Endpoint worker。启用自动 reconnect 只增加
-Reactor-owned timer/connector state，不新增 pthread。deadline / keepalive /
-reconnect 都不再产生独立 maintenance thread。
+客户端连接时才创建 RPC Endpoint 工作线程。启用自动重连只增加
+Reactor 所有的定时器/连接器状态，不新增 pthread。截止时间、保活和
+重连都不再产生独立维护线程。
 
 `tests/test_runtime_threads.c` 使用测试目标独有的 pthread create/join 包装，
-检查创建前后的精确增量、正常销毁、未 start 的 Server 销毁和部分启动失败回收。
-它补充原有连接后线程上限测试，避免把 create 阶段的额外线程计入 baseline
-后漏检。故障注入覆盖 Client Reactor、三个 shard-local worker，以及 Server 的
-Server start 只剩 Reactor 一个 pthread 启动点；每个成功创建的线程必须成功 join，
+检查创建前后的精确增量、正常销毁、未启动服务端的销毁和部分启动失败回收。
+它补充原有连接后线程上限测试，避免把创建阶段的额外线程计入基线后漏检。
+故障注入覆盖客户端 Reactor、三个分片本地工作线程，以及服务端启动阶段
+只剩 Reactor 一个 pthread 启动点；每个成功创建的线程必须成功 join，
 失败回滚不允许遗留线程或重复 join。

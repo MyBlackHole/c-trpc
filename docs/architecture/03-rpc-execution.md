@@ -1,29 +1,29 @@
 # RPC 执行模型
 
-**状态：TARGET V1，Task snapshot + worker owner-command 已落地**
+**状态：V1 目标，任务快照 + 工作线程所有者命令已经落地**
 
 ## 1. 目标
 
-RPC worker 可以执行阻塞业务，但不能成为 RPC protocol state 的共同 owner。
+RPC 工作线程可以执行阻塞业务，但不能成为 RPC 协议状态的共同所有者。
 
 ```mermaid
 sequenceDiagram
-    participant R as Reactor Owner
-    participant Q as Worker Queue
-    participant W as Blocking Worker
-    participant C as Completion Queue
+    participant R as Reactor 所有者
+    participant Q as 工作队列
+    participant W as 阻塞工作线程
+    participant C as 完成队列
 
-    R->>Q: Task(request snapshot, call id, generation)
-    Q->>W: ownership transfer
-    W->>W: handler / blocking work
-    W->>C: Completion(result, call id, generation)
-    C->>R: batch drain
-    R->>R: validate + mutate Call + encode response
+    R->>Q: 任务(请求快照, 调用标识, 代次)
+    Q->>W: 所有权转移
+    W->>W: 处理器/阻塞工作
+    W->>C: 完成结果(结果, 调用标识, 代次)
+    C->>R: 批量取出
+    R->>R: 校验 + 修改 Call + 编码响应
 ```
 
-## 2. Task
+## 2. 任务
 
-Task 应只携带 worker 真正需要的 snapshot/capability：
+任务应只携带工作线程真正需要的快照/能力：
 
 ```c
 struct tr_rpc_task {
@@ -43,7 +43,7 @@ struct tr_rpc_task {
 };
 ```
 
-worker 不应该依赖 mutable：
+工作线程不应该依赖以下可变对象：
 
 ```text
 struct tr_rpc_endpoint *
@@ -51,30 +51,31 @@ struct tr_rpc_call *
 struct tr_channel *
 ```
 
-当前实现已经在 task enqueue 时复制 Stream handle、Method Descriptor、
-server handlers、client callbacks 和 handler/callback arg；executor worker
-本身不再通过 `endpoint->lock` 回读 live Call。
+当前实现已经在任务入队时复制 Stream 句柄、Method Descriptor、
+服务端处理器、客户端回调以及处理器/回调参数；执行器工作线程
+本身不再通过 `endpoint->lock` 回读存活 Call。
 
-Task 仍保留 `tr_rpc_call_handle` 作为 callback 身份/capability。业务 callback
+任务仍保留 `tr_rpc_call_handle` 作为回调身份/能力句柄。业务回调
 主动调用 `tr_rpc_call_send()/send_buffer()/close_send()/finish()/cancel()`，
-以及 metadata/cancellation 查询时，会通过同步 Reactor owner-call 执行；
-worker 不再直接取得 Endpoint/Call mutable-state lock。
+以及元数据/取消查询时，会通过同步 Reactor 所有者调用执行；
+工作线程不再直接取得 Endpoint/Call 可变状态锁。
 
-RX payload credit return、retained message release 和 worker 错误 close 也回到
-Reactor owner，因此 executor worker 不再直接修改 Stream protocol state。
+RX 载荷额度归还、保留消息释放和工作线程错误关闭也回到
+Reactor 所有者，因此执行器工作线程不再直接修改 Stream 协议状态。
 
-Handler 需要 Call identity/lifecycle 时使用 `tr_rpc_call_get_context()` 取得
-owner-consistent snapshot；initial/trailing metadata 通过独立 API 访问。Worker 不直接
-回读 live Endpoint/Call pointer。
+处理器需要 Call 身份/生命周期时使用 `tr_rpc_call_get_context()` 取得
+所有者一致快照；初始/尾部元数据通过独立 API 访问。工作线程不直接
+回读存活 Endpoint/Call 指针。
 
-Interceptor V1 已建立在 Call handle + Context snapshot + metadata API 上，
-不会获得 Endpoint/Stream/slot 等 engine identity。Hook 在 Reactor owner 上同步执行，
-但调用 hook 前会释放 `endpoint->lock`，因此 Context/metadata API 可安全重入。
+V1 拦截器建立在 Call 句柄 + 上下文快照 + 元数据 API 上，
+不会获得 Endpoint/Stream/槽位等引擎内部标识。钩子在 Reactor 所有者上同步执行，
+但调用钩子前会释放 `endpoint->lock`，因此上下文/元数据 API 可以安全重入。
 
-Hook 必须短小非阻塞；同一个 Call 在 hook 期间的 send/close_send/finish/cancel
-由运行时返回 `TR_ERR_STATE`，防止 interceptor 重新成为协议状态 owner。
+钩子必须短小且非阻塞；同一个 Call 在钩子期间执行
+`send/close_send/finish/cancel` 时，运行时返回 `TR_ERR_STATE`，
+防止拦截器重新成为协议状态所有者。
 
-## 3. Completion
+## 3. 完成事件
 
 ```c
 struct tr_rpc_completion {
@@ -91,98 +92,98 @@ struct tr_rpc_completion {
 };
 ```
 
-Reactor apply 顺序：
+Reactor 应用完成结果的顺序：
 
 ```text
-lookup Endpoint
-  -> generation valid?
-lookup Call
-  -> generation valid?
-Pipeline / epoch valid? (if applicable)
-  -> apply result
-  -> update protocol state
-  -> enqueue TX
+查找 Endpoint
+  -> 代次有效？
+查找 Call
+  -> 代次有效？
+Pipeline / epoch 有效？（如果适用）
+  -> 应用结果
+  -> 更新协议状态
+  -> 加入 TX
 ```
 
-任意一步 stale：
+任意一步发现陈旧对象：
 
 ```text
-drop completion
-release owned resources
+丢弃完成事件
+释放其拥有的资源
 ```
 
-## 4. Completion Queue
+## 4. 完成队列
 
-每个 Reactor 一个 bounded MPSC completion queue：
+每个 Reactor 一个有界多生产者单消费者完成队列：
 
 ```text
-worker 0 ─┐
-worker 1 ─┼─> completion[R2] -> Reactor 2
-worker N ─┘
+工作线程 0 ─┐
+工作线程 1 ─┼─> completion[R2] -> Reactor 2
+工作线程 N ─┘
 ```
 
-第一版允许 mutex-protected queue，不为“无锁”牺牲正确性。
+第一版允许互斥锁保护的队列，不为“无锁”牺牲正确性。
 
-必须支持 wake coalescing：
+必须支持唤醒合并：
 
 ```text
-queue empty -> non-empty
-    -> eventfd wake
+队列 空 -> 非空
+    -> eventfd 唤醒
 
-already non-empty
-    -> only enqueue
+已经非空
+    -> 只入队
 ```
 
-Reactor 每次 batch drain，而不是每个 completion 一次 wakeup。
+Reactor 每次批量取出，而不是每个完成事件执行一次唤醒。
 
-Completion admission 由 completion queue 自己串行化，不再借用 Reactor
+完成事件准入由完成队列自己串行化，不再借用 Reactor
 `ctl_lock`。生命周期顺序为：
 
 ```text
-worker push
+工作线程提交
    -> completion_queue.lock
-   -> admission open?
-   -> publish item
-   -> optional coalesced eventfd wake
+   -> 准入是否开放？
+   -> 发布项目
+   -> 可选的合并 eventfd 唤醒
 
-stop
-   -> close completion admission under completion_queue.lock
-   -> publish STOP command
-   -> Reactor shutdown drain all previously accepted completions
+停止
+   -> 在 completion_queue.lock 下关闭完成事件准入
+   -> 发布 STOP 命令
+   -> Reactor 关闭阶段排空此前已经接受的所有完成事件
 ```
 
-因此 completion producer 只竞争所属 shard 的 completion queue 短锁，不与
-adopt/send/call 等 Reactor 控制面共用生命周期 mutex。
+因此完成事件生产者只竞争所属分片的完成队列短锁，不与
+接管/发送/调用等 Reactor 控制面共用生命周期互斥锁。
 
-满队列的 backpressure 规则：
+满队列的背压规则：
 
 ```text
-worker push
-   -> queue full
-   -> sleep on queue-local not_full
-   -> Reactor pop batch
-   -> wake blocked producers
-   -> retry under the same queue lock
+工作线程提交
+   -> 队列已满
+   -> 在队列本地 not_full 上休眠
+   -> Reactor 批量弹出
+   -> 唤醒被阻塞的生产者
+   -> 在同一队列锁下重试
 
-stop
-   -> close admission + advance admission generation
-   -> broadcast all waiters
-   -> old waiter returns CLOSED even if Reactor later reopen
+停止
+   -> 关闭准入 + 推进准入代次
+   -> 广播唤醒所有等待者
+   -> 即使 Reactor 随后重新开放，旧等待者仍返回 CLOSED
 ```
 
 这保证三件事：
 
-- worker 不用 `sched_yield()` 消耗 CPU；
-- queue 容量仍然是硬上限，不建立 side queue；
-- stop/restart 之间有 admission generation fence：已经在旧 admission epoch 中
-  进入 capacity wait 的 producer 即使晚于 reopen 醒来，也只能返回 CLOSED。
+- 工作线程不使用 `sched_yield()` 消耗 CPU；
+- 队列容量仍然是硬上限，不建立旁路队列；
+- 停止/重启之间存在准入代次隔离：已经在旧准入代次中
+  进入容量等待的生产者即使晚于重新开放才醒来，也只能返回 `CLOSED`。
 
-当前仍保留 mutex + condition 的 bounded MPSC queue；是否进一步改为 atomic ring /
-futex 必须由 profile 决定，而不是为了“无锁”增加生命周期复杂度。
+当前仍保留互斥锁 + 条件变量的有界多生产者单消费者队列；是否进一步改为
+原子环形队列/`futex` 必须由性能分析决定，而不是为了“无锁”增加生命周期复杂度。
 
-## 5. Cancellation
+## 5. 取消
 
-Cancellation 是少数真正适合跨线程 atomic 的状态：
+取消状态是少数真正适合跨线程原子变量的状态：
 
 ```c
 struct tr_cancel_token {
@@ -191,156 +192,155 @@ struct tr_cancel_token {
 };
 ```
 
-Reactor owner 写：
+Reactor 所有者写入：
 
-- remote CANCEL；
-- deadline；
-- shutdown。
+- 远端 `CANCEL`；
+- 截止时间；
+- 关闭流程。
 
-Worker 只查询。
+工作线程只查询。
 
-Cancellation token 不是 Call 本身；它不能授权 worker 修改 Call protocol state。
+取消令牌不是 Call 本身；它不能授权工作线程修改 Call 协议状态。
 
-## 6. Unary First
+## 6. 一元调用优先
 
 迁移顺序：
 
 ```text
-Unary
-  -> Task
-  -> Worker
-  -> Completion
-  -> Reactor response
+一元调用
+  -> 任务
+  -> 工作线程
+  -> 完成事件
+  -> Reactor 响应
 ```
 
-Unary 完成后再处理 Streaming。
+一元调用完成后再处理流式调用。
 
-## 7. Streaming
+## 7. 流式调用
 
-Streaming 对外 API 可以保留，但内部所有会改变协议状态的操作改成 owner command：
+流式调用对外 API 可以保留，但内部所有会改变协议状态的操作改成所有者命令：
 
 ```text
-worker:
+工作线程：
 tr_rpc_call_send(payload)
        |
        v
-build SEND command
+构造 SEND 命令
        |
        v
-owner Reactor
+所有者 Reactor
        |
        v
-Call / TX state mutation
+Call / TX 状态修改
 ```
 
 语义：
 
 ```text
 TR_OK
-    -> Reactor command queue 已取得 payload ownership
+    -> Reactor 命令队列已经取得 payload 所有权
 
-error
-    -> caller 仍拥有 payload
+错误
+    -> 调用方仍拥有 payload
 ```
 
 ## 8. 不允许的路径
 
 ```text
-Worker executor internals
+工作线程执行器内部
   -> pthread_mutex_lock(endpoint->lock)
-  -> read/mutate live Call
+  -> 读取/修改存活 Call
 ```
 
-这条隐式路径已经从 executor task dispatch 中移除。
+这条隐式路径已经从执行器任务分发中移除。
 
-worker callback 的修改型公开 API 已经通过 owner-call 回到 Reactor：
+工作线程回调的修改型公开 API 已经通过所有者调用回到 Reactor：
 
 ```text
-worker callback
-  -> bounded Reactor command
-  -> Reactor owner
-  -> validate generation
-  -> mutate Call / Stream
-  -> synchronous status back to worker
+工作线程回调
+  -> 有界 Reactor 命令
+  -> Reactor 所有者
+  -> 校验代次
+  -> 修改 Call / Stream
+  -> 将同步状态返回工作线程
 ```
 
-Method registration 也属于同一 control-plane 模型：
+Method 注册也属于同一控制面模型：
 
 ```text
-application register method
-    -> validate/copy descriptor
-    -> synchronous Reactor owner-call
-    -> duplicate/capacity check
-    -> publish Method entry + hash index
-    -> return TR_OK
+应用注册方法
+    -> 校验/复制描述符
+    -> 同步 Reactor 所有者调用
+    -> 重复/容量检查
+    -> 发布 Method 项 + 哈希索引
+    -> 返回 TR_OK
 ```
 
-因此注册成功本身就是 ordering barrier：后续 owner event 能看到完整 Method，
-不存在 application thread 与 inbound REQUEST 并发修改 Method table 的窗口。
+因此注册成功本身就是顺序屏障：后续所有者事件能够看到完整 Method，
+不存在应用线程与入站 `REQUEST` 并发修改 Method 表的窗口。
 
-同步 owner command 的 ring 满载不会用 `sched_yield()` 轮询：
+同步所有者命令在环形队列满载时不会使用 `sched_yield()` 轮询：
 
 ```text
-worker/application thread
-  -> validate Reactor lifecycle under ctl_lock
-  -> snapshot command wait generation
-  -> release ctl_lock
-  -> wait on command_queue.not_full if full
-  -> owner batch pop wakes waiter
-  -> enqueue command
-  -> wait request reply
+工作线程/应用线程
+  -> 在 ctl_lock 下校验 Reactor 生命周期
+  -> 获取命令等待代次快照
+  -> 释放 ctl_lock
+  -> 队列满时等待 command_queue.not_full
+  -> 所有者批量弹出并唤醒等待者
+  -> 命令入队
+  -> 等待请求响应
 ```
 
-stop 会先关闭普通 command waiter admission；尚未成功入队的同步 request 直接返回
-`TR_ERR_CLOSED`，而已经入队的 request 仍排在 STOP 前执行。异步 SEND/RESUME
+停止流程会先关闭普通命令等待者准入；尚未成功入队的同步请求直接返回
+`TR_ERR_CLOSED`，而已经入队的请求仍排在 `STOP` 前执行。异步 `SEND/RESUME`
 仍保持 `TR_AGAIN`，不会因为本次优化变成隐式阻塞 API。
 
-`endpoint->lock` 当前仍作为 protocol/fallback snapshot 的过渡锁。Method
-registration 与 Client Call creation/start 已经 owner 化；后续重点只剩 stats/read
-与 shutdown fallback 等确实跨执行域的路径，不能再把已经 owner-only 的控制面误写成
+`endpoint->lock` 当前仍作为协议/兜底快照的过渡锁。Method
+注册与客户端 Call 创建/启动已经所有者化；后续重点只剩统计/读取
+与关闭兜底等确实跨执行域的路径，不能再把已经仅所有者访问的控制面误写成
 未来工作。
 
 ## 9. 验收
 
 至少验证：
 
-- Call 在 worker 运行期间被 cancel；
-- Call slot 被释放并复用后旧 completion 到达；
-- Endpoint shutdown 与 completion 并发；
-- completion queue full；
-- worker handler 超时；
-- response ownership 在所有失败路径只有一次释放；
-- TSan 无新增共享状态 race。
+- Call 在工作线程运行期间被取消；
+- Call 槽位释放并复用后旧完成事件到达；
+- Endpoint 关闭与完成事件并发；
+- 完成队列已满；
+- 工作线程处理器超时；
+- 响应所有权在所有失败路径只释放一次；
+- TSan 无新增共享状态竞争。
 
+## 10. Endpoint 销毁：先解除关联，再最终释放
 
-## 9. Endpoint Teardown: Detach Then Finalize
+服务端对端销毁不再由清理线程同步执行完整 Endpoint 析构。
 
-Server peer teardown 不再由 cleanup thread 同步执行完整 Endpoint destructor。
-
-Phase 1 在 Reactor owner 上执行：
+第一阶段在 Reactor 所有者上执行：
 
 ```text
-detach Endpoint
-  -> Channel upper handler = NULL
-  -> unregister deadline timer
+解除 Endpoint 关联
+  -> Channel 上层处理器 = NULL
+  -> 注销截止时间定时器
   -> executor stopping = true
-  -> reject new executor task admission
+  -> 拒绝新的执行器任务准入
 ```
 
-Server 使用 shard-local executor group，因此该阶段不会 join worker。已经 queued /
-running 的 task 继续持有 Endpoint strong-ref 并正常完成。
+服务端使用分片本地执行器组，因此该阶段不会等待工作线程退出。已经排队/
+运行中的任务继续持有 Endpoint 强引用并正常完成。
 
-Phase 2 不再由 dedicated cleanup thread 等待。Owner detach 完成后先 arm
-last-ref finalizer，再释放 Endpoint 的 owner ref：
+第二阶段不再由独立清理线程等待。所有者解除关联完成后先设置
+最后引用清理器，再释放 Endpoint 的所有者引用：
 
 ```text
-drop Endpoint owner ref
-  -> existing worker/completion refs keep object alive
-  -> last strong-ref release
-  -> final executor/stat snapshot
-  -> free Endpoint
-  -> finalize detached Channel/context
+释放 Endpoint 所有者引用
+  -> 已有工作线程/完成事件引用继续保持对象存活
+  -> 最后一个强引用释放
+  -> 采集最终执行器/统计快照
+  -> 释放 Endpoint
+  -> 完成已解除关联的 Channel/上下文清理
 ```
 
-因此没有线程会阻塞等待 refcount；finalizer 不调用
-`tr_reactor_quiesce()`，也不拥有任何 protocol state mutation 权限。
+因此没有线程会阻塞等待引用计数；最终清理器不调用
+`tr_reactor_quiesce()`，也不拥有任何协议状态修改权限。

@@ -1,16 +1,16 @@
-# ADR-003：每 Reactor 使用独立 SO_REUSEPORT listener
+# ADR-003：每个 Reactor 使用独立 SO_REUSEPORT 监听器
 
-**Status: Accepted**
+**状态：已接受**
 
-## Context
+## 背景
 
-中央 accept thread 会让所有连接先经过一次用户态分发和 fd handoff。
+中央接收线程会让所有连接先经过一次用户态分发和 fd 移交。
 
-Linux 最低版本为 3.10，已经具备 SO_REUSEPORT。
+Linux 最低版本为 3.10，已经具备 `SO_REUSEPORT`。
 
-## Decision
+## 决策
 
-TARGET V1 每个 Reactor 创建自己的 listener：
+V1 目标是每个 Reactor 创建自己的监听器：
 
 ```text
 R0 -> listen_fd0
@@ -18,21 +18,22 @@ R1 -> listen_fd1
 ...
 RN -> listen_fdN
 
-all bind same IP:port with SO_REUSEPORT
+全部使用 SO_REUSEPORT 绑定相同 IP:端口
 ```
 
-每个 Reactor 自己 accept。
+每个 Reactor 自己执行 `accept`。
 
-## Consequences
+## 影响
 
 普通连接：
 
 ```text
-kernel -> owner Reactor
+内核 -> 所有者 Reactor
 ```
 
-无需中央 accept thread。
+无需中央接收线程。
 
-Backup DATA socket 仍可能被错误 shard accept，因此保留一个固定长度 pre-connection routing stage；需要 affinity 时在同一进程内将 fd ownership 转给目标 Reactor。
+备份 DATA 套接字仍可能被错误分片接收，因此保留固定长度的连接前路由阶段；
+需要亲和关系时，在同一进程内把 fd 所有权转给目标 Reactor。
 
-不依赖 EPOLLEXCLUSIVE、reuseport eBPF 或 io_uring，因此保持 Linux 3.10 基线。
+不依赖 `EPOLLEXCLUSIVE`、reuseport eBPF 或 io_uring，因此保持 Linux 3.10 基线。

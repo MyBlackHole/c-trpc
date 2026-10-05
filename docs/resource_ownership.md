@@ -1,28 +1,28 @@
 # 资源所有权规范
 
-c-trpc 以 ISO C11 为语言基线。作用域自动清理使用 GCC/Clang 的 `cleanup` attribute，
-但所有项目代码仍按 C11 语义组织，不启用 GNU statement expression、nested function 等额外语言特性。
+c-trpc 以 ISO C11 为语言基线。作用域自动清理使用 GCC/Clang 的 `cleanup` 属性，
+但所有项目代码仍按 C11 语义组织，不启用 GNU 语句表达式、嵌套函数等额外语言特性。
 
-本项目的资源模型以**显式 ownership**为核心，而不是依赖隐式生命周期。
+本项目的资源模型以**显式所有权**为核心，而不是依赖隐式生命周期。
 
 ## 1. 资源状态
 
 每个资源在任意时刻必须明确属于以下状态之一：
 
-- **owned**：当前存在唯一 owner，由它负责最终 release；
-- **borrowed**：临时借用，不获得 release 责任；
-- **shared reference**：通过 refcount 显式持有异步共享生命周期；
-- **transferred**：ownership 从一个 owner 明确转移到另一个 owner。
+- **当前拥有**：当前存在唯一所有者，由它负责最终释放；
+- **借用**：临时使用，不获得释放责任；
+- **共享强引用**：通过引用计数显式持有异步共享生命周期；
+- **已经转移**：所有权从一个所有者明确转移到另一个所有者。
 
-`tr_conn_handle`、`tr_stream_handle` 等 handle 是 capability，**不是 ownership**。
+`tr_conn_handle`、`tr_stream_handle` 等句柄是能力句柄，**不是所有权**。
 
-`tr_rpc_call_handle` 同样是 borrowed capability：generation 可以识别同一 Endpoint
-内的 slot reuse，但 handle 本身不会 pin Endpoint lifetime。调用方必须保证 owning
-Client/Server 未进入 destroy，并在 Call terminal lifecycle 结束后停止使用旧 handle。
+`tr_rpc_call_handle` 同样是借用能力句柄：代次可以识别同一 Endpoint
+内部的槽位复用，但句柄本身不会固定 Endpoint 生命周期。调用方必须保证拥有它的
+Client/Server 尚未进入销毁流程，并在 Call 终止生命周期结束后停止使用旧句柄。
 
-## 2. 成功才转移 ownership
+## 2. 仅成功时转移所有权
 
-除非 API 文档明确说明，否则 ownership 只在返回 `TR_OK` 时发生转移。
+除非 API 文档明确说明，否则只有返回 `TR_OK` 时才发生所有权转移。
 
 ```c
 struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
@@ -39,74 +39,75 @@ if (ret != TR_OK)
 return TR_OK;
 ```
 
-send 失败时 buffer 仍属于当前作用域，离开作用域会自动 cleanup。
-send 成功后 Reactor 接管 buffer，`tr_buffer_take()` 清空本地 cleanup-managed 变量，避免 double free。
+发送失败时 Buffer 仍属于当前作用域，离开作用域会自动清理。
+发送成功后 Reactor 接管 Buffer，`tr_buffer_take()` 清空本地自动清理变量，
+避免重复释放。
 
 ## 3. 作用域自动清理
 
-具有 lexical ownership 的局部资源，原则上优先使用 `TR_AUTO(cleanup_fn)`。
+具有词法作用域所有权的局部资源，原则上优先使用 `TR_AUTO(cleanup_fn)`。
 
-当前主要 typed ownership helper：
+当前主要类型化所有权辅助接口：
 
-- `tr_fd_cleanup()` / `tr_fd_take()`
-- `tr_buffer_cleanup()` / `tr_buffer_take()`
+- `tr_fd_cleanup()` / `tr_fd_take()`；
+- `tr_buffer_cleanup()` / `tr_buffer_take()`。
 
-新增资源类型时应提供 typed cleanup/take helper，不要依赖通用 `void *` cast 隐藏类型。
+新增资源类型时应提供类型化清理/接管辅助接口，不要依赖通用 `void *` 强制转换隐藏类型。
 
-cleanup 函数必须满足：
+清理函数必须满足：
 
-1. 能处理 disarmed/empty 状态；
-2. 一次只释放一个明确 owned 的资源；
+1. 能处理已经解除或为空的状态；
+2. 一次只释放一个明确由当前变量拥有的资源；
 3. 可行时把变量恢复为空状态；
-4. cleanup 自身不能偷偷取得新的 ownership。
+4. 清理函数自身不能偷偷取得新的所有权。
 
-## 4. cleanup 顺序
+## 4. 清理顺序
 
-cleanup variable 按声明顺序的**逆序**执行。
+自动清理变量按声明顺序的**逆序**执行。
 
-如果 child 依赖 parent，应先声明 parent，再声明 child：
+如果子对象依赖父对象，应先声明父对象，再声明子对象：
 
 ```c
 struct parent *parent TR_AUTO(parent_cleanup) = NULL;
 struct child *child TR_AUTO(child_cleanup) = NULL;
 ```
 
-离开作用域时先 cleanup child，再 cleanup parent。
+离开作用域时先清理子对象，再清理父对象。
 
-因此重排 cleanup-managed 变量声明时，必须同时检查生命周期依赖关系。
+因此重排自动清理变量声明时，必须同时检查生命周期依赖关系。
 
-## 5. 构造与事务 guard
+## 5. 构造与事务保护
 
 自动清理分为三种主要模式。
 
-### 5.1 简单 lexical owner
+### 5.1 简单词法作用域所有者
 
-适用于单一独立资源，例如 fd、buffer、heap allocation。
+适用于单一独立资源，例如 fd、Buffer、堆分配。
 
-### 5.2 complex build guard
+### 5.2 复杂构造保护
 
-如果对象只有完成多个初始化步骤后才能调用完整 destructor，则使用 build guard 记录哪些步骤已经成功。
+如果对象只有完成多个初始化步骤后才能调用完整析构函数，则使用构造保护对象记录哪些步骤已经成功。
 
-典型对象包括 Reactor、Channel、RPC Endpoint、executor group。
+典型对象包括 Reactor、Channel、RPC Endpoint、执行器组。
 
-build guard 主要解决两个问题：
+构造保护主要解决两个问题：
 
-- partial object 错误调用完整 destructor；
+- 对部分初始化对象错误调用完整析构函数；
 - 新增初始化步骤后忘记修改某个 `goto fail_*` 路径。
 
-成功构造完成后，必须显式 disarm build guard，把完整对象交给新的 owner。
+成功构造完成后，必须显式解除构造保护，把完整对象交给新的所有者。
 
-### 5.3 transaction rollback guard
+### 5.3 事务回滚保护
 
-对于在已有 owner 上执行多步状态修改的操作，使用 armed rollback guard。
+对于在已有所有者对象上执行多步状态修改的操作，使用已启用的回滚保护。
 
-典型场景：Client connect、Server peer adoption。
+典型场景：客户端连接、服务端对端接管。
 
-失败时 scope cleanup 自动 rollback；成功后必须显式 disarm guard。
+失败时作用域清理自动回滚；成功后必须显式解除回滚保护。
 
-## 6. 显式 ownership transfer
+## 6. 显式所有权转移
 
-ownership transfer 必须能从代码中直接看出来。
+所有权转移必须能够从代码中直接看出来。
 
 推荐：
 
@@ -118,265 +119,266 @@ dst = tr_buffer_take(&src);
 
 ```c
 dst = src;
-src = NULL;   /* 难以判断这是普通赋值还是 ownership transfer */
+src = NULL;   /* 难以判断这是普通赋值还是所有权转移 */
 ```
 
-因此 bare `ptr = NULL` 不应作为正常的 ownership move 语法。
+因此裸 `ptr = NULL` 不应作为正常的所有权移动语法。
 
 ## 7. 异步生命周期
 
-scope cleanup 只能解决当前 lexical scope，不能解决跨线程、queue、callback 的异步生命周期。
+作用域清理只能解决当前词法作用域，不能解决跨线程、队列、回调的异步生命周期。
 
 一个指针跨异步边界前，必须满足以下机制之一：
 
-- single-owner 保证；
-- 显式 quiescence；
-- 强引用 refcount。
+- 单所有者保证；
+- 显式静默屏障；
+- 强引用计数。
 
-禁止先把 pointer 发布给其他线程，再补 `get()`。
+禁止先把指针发布给其他线程，再补 `get()`。
 
-## 8. 强引用 refcount
+## 8. 强引用计数
 
-`struct tr_refcount` 是项目统一的 C11 strong-reference primitive。
+`struct tr_refcount` 是项目统一的 C11 强引用原语。
 
 规则：
 
-1. owner 通常以 ref=1 创建对象；
-2. async task 在发布之前必须先 get；
-3. 每次成功 get 必须有且只有一次 put；
-4. ref=0 是终态，禁止 resurrection；
-5. underflow 和 saturation 必须报错，禁止静默 wrap；
-6. 只有最后一次 put 才允许真正 release 对象。
+1. 所有者通常以 `ref = 1` 创建对象；
+2. 异步任务在发布之前必须先取得引用；
+3. 每次成功取得引用必须有且只有一次释放引用；
+4. `ref = 0` 是终态，禁止复活；
+5. 下溢和饱和必须报错，禁止静默回绕；
+6. 只有最后一次释放引用才允许真正释放对象。
 
-`tr_refcount_get_unless_zero()` 只用于 weak/capability lookup 尝试获得 strong reference。
-已经持有合法 strong reference 的代码应使用 `tr_refcount_get()`。
+`tr_refcount_get_unless_zero()` 只用于弱引用/能力查找尝试取得强引用。
+已经持有合法强引用的代码应使用 `tr_refcount_get()`。
 
-不要因为存在 refcount primitive 就给所有对象加 refcount。能用 unique ownership 或 quiescence 解决时，应优先使用更简单的模型。
+不要因为存在引用计数原语就给所有对象增加引用计数。
+能用唯一所有权或静默屏障解决时，应优先使用更简单的模型。
 
 ## 9. RPC Endpoint 生命周期
 
-RPC Endpoint 使用 strong refcount 保护跨 worker 的异步生命周期，但需要区分两种
-teardown 模式。
+RPC Endpoint 使用强引用计数保护跨工作线程的异步生命周期，但需要区分两种销毁模式。
 
-### 9.1 同步 destroy
+### 9.1 同步销毁
 
-同步 destroy 是 **external terminal operation**，不是 callback 内可重入 API。
+同步销毁是**外部终止操作**，不是回调内可重入 API。
 
-禁止在以下 execution context 直接 destroy Client/Server/Endpoint：
+禁止在以下执行上下文直接销毁 Client/Server/Endpoint：
 
-- Reactor owner callback / interceptor；
-- RPC executor worker 上的 handler/result/event callback。
+- Reactor 所有者回调/拦截器；
+- RPC 执行器工作线程上的处理器/结果/事件回调。
 
-原因不是“API 风格”，而是 quiescence dependency：destroy 需要等待 Reactor owner 或
-RPC worker 完成；从被等待的 execution context 内同步 destroy 会形成 self-join、
-self-wait，或者在 join 失败后继续释放仍在执行的对象。
+原因不是“API 风格”，而是静默依赖：销毁需要等待 Reactor 所有者或
+RPC 工作线程完成；从被等待的执行上下文内同步销毁会形成自等待、
+自等待线程退出，或者在线程等待失败后继续释放仍在执行的对象。
 
 正确模式：
 
 ```text
-callback / handler
-    -> publish shutdown intent
-    -> return
+回调 / 处理器
+    -> 发布关闭意图
+    -> 返回
 
-external control thread
-    -> stop new application API entry
-    -> drain / quiesce
-    -> destroy
+外部控制线程
+    -> 停止新的应用 API 入口
+    -> 排空 / 静默
+    -> 销毁
 ```
 
-底层 lifecycle 同样遵守 fail-closed：`tr_reactor_stop()` 在 owner context 返回
-`TR_ERR_STATE`，而 Reactor/Runtime destroy 如果无法完成 stop，不得继续 free。
+底层生命周期同样遵守失败即关闭原则：`tr_reactor_stop()` 在所有者上下文返回
+`TR_ERR_STATE`，而 Reactor/Runtime 销毁如果无法完成停止，不得继续释放内存。
 
-Client/直接 owner 使用同步 destroy 时，Endpoint 只是 borrowed Channel，因此函数
+Client/直接所有者使用同步销毁时，Endpoint 只是借用 Channel，因此函数
 返回后必须允许调用方立即安全销毁 Channel：
 
 ```text
-owner ref = 1
+所有者引用 = 1
       |
-executor task publish 前 get
+执行器任务发布前取得引用
       v
-owner ref + task refs
+所有者引用 + 任务引用
       |
-destroy:
-  owner-serialize Channel handler detach
-  (handler publication itself is the old-callback quiescence barrier)
-  unregister deadline timer
-  close executor admission
-  wait refs == 1
+销毁：
+  由所有者串行解除 Channel 处理器关联
+  （处理器发布本身就是旧回调静默屏障）
+  注销截止时间定时器
+  关闭执行器准入
+  等待 refs == 1
       |
-owner put
+释放所有者引用
       v
-refs == 0 -> release Endpoint
+refs == 0 -> 释放 Endpoint
 ```
 
-这里允许等待，是因为 API 的 contract 明确要求“destroy 返回即完全释放”。
+这里允许等待，因为 API 契约明确要求“销毁函数返回即完全释放”。
 
-Client facade 还额外保证销毁顺序：
+客户端门面还额外保证销毁顺序：
 
 ```text
-begin drain / stop new work
-   -> destroy Connection Group
-   -> destroy RPC Endpoint
-   -> destroy Channel
-   -> stop/destroy Runtime Reactor
-   -> destroy backing pools
+开始排空 / 停止新工作
+   -> 销毁 Connection Group
+   -> 销毁 RPC Endpoint
+   -> 销毁 Channel
+   -> 停止/销毁 Runtime Reactor
+   -> 销毁后备资源池
 ```
 
-也就是说 callback source 与 worker completion 都在 Reactor 仍存活时完成正常 owner
-收敛，不再依赖 Runtime stop 后的 fallback finalize 路径。
+也就是说，回调源与工作线程完成事件都在 Reactor 仍存活时完成正常所有者收敛，
+不再依赖 Runtime 停止后的兜底最终清理路径。
 
-### 9.2 Server detached finalize
+### 9.2 服务端解除关联后的最终清理
 
-Server peer 从 shard table 摘除时不能让 Reactor 等待正在执行的 worker。
+服务端对端从分片表摘除时，不能让 Reactor 等待正在执行的工作线程。
 
 当前顺序：
 
 ```text
-Reactor owner
-  -> check shard reaping budget
-  -> detach RPC/Channel callbacks
-  -> unregister deadline/keepalive source
-  -> close executor admission
-  -> arm detached finalizer
-  -> clear peer slot immediately
-  -> drop Endpoint owner ref
+Reactor 所有者
+  -> 检查分片回收预算
+  -> 解除 RPC/Channel 回调关联
+  -> 注销截止时间/保活事件源
+  -> 关闭执行器准入
+  -> 设置已解除关联最终清理器
+  -> 立即清空对端槽位
+  -> 释放 Endpoint 所有者引用
 
-existing worker strong refs
-  -> continue naturally
-  -> last put
-  -> detached finalizer
-       -> collect final stats
-       -> finalize detached Channel
-       -> decrement reaping_current
-       -> free detached context
+已有工作线程强引用
+  -> 自然继续
+  -> 最后一次释放引用
+  -> 已解除关联最终清理器
+       -> 采集最终统计
+       -> 最终释放已解除关联 Channel
+       -> 减少 reaping_current
+       -> 释放已解除关联上下文
 ```
 
 因此：
 
-- peer slot lifetime 与旧 Endpoint object lifetime 分离；
-- slot reuse 不等于 object lifetime 无界：每 shard 最多允许与 peer slot capacity
-  相同数量的 detached/reaping Endpoint；预算满时 disconnected peer 暂留 slot；
-- retired Endpoint finalizer 释放一个 budget 后通过 shard lifecycle eventfd 唤醒
-  Reactor owner，继续处理此前被延迟的 detach；
-- worker strong-ref 是 lifetime fence，不需要 reaper/cleanup thread 阻塞等待；
-- finalizer 只能做最终统计与释放，不能重新进入 Reactor protocol mutation。
+- 对端槽位生命周期与旧 Endpoint 对象生命周期分离；
+- 槽位复用不代表对象生命周期可以无界增长：每个分片最多允许与对端槽位容量
+  相同数量的已解除关联/回收中 Endpoint；预算满时，已断开对端暂留槽位；
+- 退役 Endpoint 最终清理器释放一个预算后，通过分片生命周期 eventfd 唤醒
+  Reactor 所有者，继续处理此前延迟的解除关联；
+- 工作线程强引用是生命周期隔离，不需要回收/清理线程阻塞等待；
+- 最终清理器只能做最终统计与释放，不能重新进入 Reactor 协议状态修改。
 
-Call 自己的 `task_refs` 与 Endpoint refcount 职责不同：
+Call 自己的 `task_refs` 与 Endpoint 引用计数职责不同：
 
 - `tr_refcount`：保护 Endpoint 对象生命周期；
-- Call `task_refs`：阻止 Call slot 在 task/completion 尚未结束时复用。
+- Call `task_refs`：阻止 Call 槽位在任务/完成事件尚未结束时复用。
 
-### 9.2.1 Retained RPC message lifetime
+### 9.2.1 保留 RPC 消息生命周期
 
-`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 是跨 worker callback 的异步 ownership transfer，
-因此 retained descriptor 不能只保存裸 `Channel *`。在把 message 暴露给 application
-callback 之前必须先取得 Endpoint strong reference；返回
-`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 时该引用与 RX Buffer 一起转移给 descriptor。
+`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 是跨工作线程回调的异步所有权转移，
+因此保留消息描述符不能只保存裸 `Channel *`。
+把消息暴露给应用回调之前必须先取得 Endpoint 强引用；
+返回 `TR_RPC_MESSAGE_TAKE_OWNERSHIP` 时，该引用与 RX Buffer 一起转移给描述符。
 
 ```text
-worker task ref
+工作任务引用
     +
-message lifetime ref
+消息生命周期引用
         |
-callback returns TAKE_OWNERSHIP
+回调返回 TAKE_OWNERSHIP
         |
-        +--> task ref 正常归还
+        +--> 任务引用正常归还
         |
-        +--> message ref 继续保活 Endpoint/Channel
+        +--> 消息引用继续保持 Endpoint/Channel 存活
                     |
-peer disconnect / detached finalize
+对端断开 / 已解除关联最终清理
                     |
-              waits for message release
+              等待消息释放
                     |
 tr_rpc_message_release()
-    -> return/release RX payload
-    -> Endpoint put
+    -> 归还/释放 RX 载荷
+    -> Endpoint 释放引用
 ```
 
-因此 retained message 可以安全跨 peer disconnect，但会延迟该 peer 的最终析构。
-descriptor ownership 只能释放一次；复制 descriptor 表示 ownership move，不表示复制
-strong reference。
+因此保留消息可以安全跨越对端断开，但会延迟该对端的最终析构。
+描述符所有权只能释放一次；复制描述符表示所有权移动，不表示复制强引用。
 
-Endpoint 的 lifetime synchronization 现在与 protocol lock 分离：
+Endpoint 的生命周期同步现在与协议锁分离：
 
 ```text
 endpoint->lock
-    -> Call / Method / protocol transition
+    -> Call / Method / 协议状态转换
 
 endpoint->ref_lock + ref_cond
-    -> owner-only strong-ref wait
-    -> detached teardown/finalizer publication
-    -> ref release wakeup
+    -> 仅所有者强引用等待
+    -> 已解除关联销毁/最终清理器发布
+    -> 引用释放唤醒
 ```
 
-所有 strong-ref release 必须统一经过 `tr_rpc_endpoint_put()`。它在 `ref_lock`
-下通知等待 owner-only 状态的 destructor，因此 task completion、pending-retry
-completion 或未来新增引用来源都不应自行实现另一套 ref_cond signal。
+所有强引用释放必须统一经过 `tr_rpc_endpoint_put()`。
+它在 `ref_lock` 下通知等待仅所有者状态的析构流程，因此任务完成、
+等待重试完成或未来新增引用来源都不应自行实现另一套 `ref_cond` 通知。
 
-## 9.3 Pipeline / Listener teardown
+## 9.3 Pipeline / Listener 销毁
 
-Pipeline registry 只保存 owner-local index，不拥有 Pipeline lifetime。
+Pipeline 注册表只保存所有者本地索引，不拥有 Pipeline 生命周期。
 
-正常 teardown 必须满足：
+正常销毁必须满足：
 
 ```text
-stop admission
+停止准入
    ->
-quiesce/abort CONTROL + DATA
+静默/中止 CONTROL + DATA
    ->
 data_reserved == 0
 data_attached == 0
 stream_affinity == 0
 control unbound
    ->
-registry unregister
+从注册表注销
    ->
-Pipeline destroy
+销毁 Pipeline
    ->
-Listener destroy
+销毁 Listener
 ```
 
-`Pipeline destroy`、`Registry destroy` 和 `Listener destroy` 在 debug build
-会检查这些不变量。destroy 不应再隐式承担可能失败的 stop/state transition。
+`Pipeline destroy`、`Registry destroy` 和 `Listener destroy` 在调试构建中
+会检查这些不变量。销毁函数不应再隐式承担可能失败的停止/状态转换。
 
-## 10. Reactor ownership
+## 10. Reactor 所有权
 
-Reactor/Connection 的可变 Transport 状态属于 Reactor owner thread。
+Reactor/Connection 的可变传输状态属于 Reactor 所有者线程。
 
 当前边界：
 
-- connection handler / callback_arg 只存放在 `tr_connection`，只由 Reactor owner thread 修改；
+- 连接处理器/`callback_arg` 只存放在 `tr_connection` 中，只由 Reactor 所有者线程修改；
 - 外部 `tr_reactor_set_handler()` 通过同步 `TR_CMD_SET_HANDLER` 提交修改；
-- frame/event callback dispatch 直接读取 owner-owned connection state，不获取 mutex；
-- slot 只保留 generation + state capability metadata，并通过一个 C11 atomic 值一次性发布；
-- 外部状态查询读取 atomic slot snapshot，不进入 event-loop mutex；
-- producer 侧 `ctl_lock` 和 command queue mutex 只负责跨线程控制面交接，不属于 Reactor event-loop 热路径。
+- 帧/事件回调分发直接读取所有者拥有的连接状态，不获取互斥锁；
+- 槽位只保留代次 + 状态能力元数据，并通过一个 C11 原子值一次性发布；
+- 外部状态查询读取原子槽位快照，不进入事件循环互斥锁；
+- 生产者侧 `ctl_lock` 和命令队列互斥锁只负责跨线程控制面交接，不属于 Reactor 事件循环热路径。
 
 ```text
-producer / RPC / Channel thread
+生产者 / RPC / Channel 线程
         |
-        | command + eventfd
+        | 命令 + eventfd
         v
----------------- cross-thread boundary ----------------
+---------------- 跨线程边界 ----------------
         |
         v
-Reactor owner thread
-  connection handler
-  parser
-  TX/RX queue
-  epoll interest
-  connection mutable state
+Reactor 所有者线程
+  连接处理器
+  解析器
+  TX/RX 队列
+  epoll 关注事件
+  连接可变状态
 ```
 
-不要用 mutex 去弥补不清楚的 owner 关系。能通过 single-owner 解决的状态，应优先通过 owner model 解决。
+不要用互斥锁弥补不清楚的所有者关系。
+能通过单所有者解决的状态，应优先通过所有者模型解决。
 
-Debug build 会通过 owner-thread invariant 检查关键 Reactor mutation，避免未来重新引入跨线程直接写状态。
+调试构建会通过所有者线程不变量检查关键 Reactor 修改，
+避免未来重新引入跨线程直接写状态。
 
-## 11. Lock ownership
+## 11. 锁所有权
 
-真正共享的状态仍然需要锁。持有 mutex 本身也是一种 scope-owned resource。
+真正共享的状态仍然需要锁。持有互斥锁本身也是一种作用域资源所有权。
 
-多 early-return 路径时推荐：
+存在多个提前返回路径时推荐：
 
 ```c
 struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
@@ -387,31 +389,34 @@ if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
 /* 任意 return 都会自动 unlock */
 ```
 
-需要提前 unlock 时调用 `tr_mutex_guard_unlock()`；它会先 disarm guard，再执行 unlock，避免重复 unlock。
+需要提前解锁时调用 `tr_mutex_guard_unlock()`；
+它会先解除保护对象，再执行解锁，避免重复解锁。
 
-mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Reactor owner-thread hot path 增加锁。
+互斥锁保护对象只用于真正共享状态，不能因为保护对象很方便，
+就给 Reactor 所有者线程热路径增加锁。
 
 ## 12. 错误路径
 
-局部 owned 资源优先自动 cleanup，因为新增 early return 时不会静默漏 release。
+局部拥有的资源优先使用自动清理，因为新增提前返回时不会静默遗漏释放。
 
-传统 downward `goto` unwind 仍允许用于无法合理拆成独立 scope resource 的复杂 partial object。
+传统向下跳转的 `goto` 清理仍允许用于无法合理拆成独立作用域资源的复杂部分初始化对象。
 
-但同一个资源不能同时被两套 cleanup 机制管理。
+但同一个资源不能同时由两套清理机制管理。
 
-错误路径设计目标：ownership 唯一、release 顺序明确、新增失败分支默认安全、不产生 double free / leak / UAF。
+错误路径设计目标：所有权唯一、释放顺序明确、新增失败分支默认安全，
+不产生重复释放、资源泄漏或释放后使用。
 
-## 13. 公共 API 的 ownership 说明
+## 13. 公共 API 的所有权说明
 
 资源相关公共 API 应明确写出：
 
-- 输入参数是 borrowed 还是 owned；
+- 输入参数是借用还是转移所有权；
 - 输出对象由谁拥有；
-- `TR_OK` 时 ownership 是否 transfer；
-- 失败时 ownership 是否保持不变；
-- destroy 是同步还是异步；
-- 是否需要 quiescence；
-- 是否允许从 callback/worker 中调用。
+- `TR_OK` 时所有权是否转移；
+- 失败时所有权是否保持不变；
+- 销毁是同步还是异步；
+- 是否需要静默；
+- 是否允许从回调/工作线程中调用。
 
 示例：
 
@@ -431,12 +436,14 @@ mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Re
 -std=c11 -Wall -Wextra -Werror -pedantic
 ```
 
-`TR_AUTO()` 只封装 GCC/Clang 的 `cleanup` attribute。
+`TR_AUTO()` 只封装 GCC/Clang 的 `cleanup` 属性。
 
-这不代表项目切换为 GNU C，也不意味着允许任意 GNU extension。
+这不代表项目切换为 GNU C，也不意味着允许任意 GNU 扩展。
 
 ## 15. 注释语言
 
-代码说明以中文为主，具体规范见 `docs/code_comments.md`。
+代码说明、文档说明和 API 契约说明必须使用中文，
+具体规范见 `docs/code_comments.md`。
 
-ownership、refcount、quiescence、Reactor、Channel、RPC 等术语保留英文，以便与 API 和实现结构直接对应。
+API、类型、变量、宏、协议字段、状态值、命令、日志和错误原文保持原样；
+所有权、引用计数、静默、工作线程、回滚等解释性概念使用中文。

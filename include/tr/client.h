@@ -78,20 +78,20 @@ int tr_client_call_start(struct tr_client *client, uint32_t service_id,
 int tr_client_begin_drain(struct tr_client *client);
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
 
-/* Stable RPC semantic lifecycle snapshot for this Client. */
+/* 获取该 Client 的稳定 RPC 语义生命周期快照。 */
 int tr_client_get_rpc_semantic_stats(
 	struct tr_client *client, struct tr_rpc_semantic_stats *out);
 
 /*
- * Synchronous terminal ownership release.
+ * 同步执行最终所有权释放。
  *
- * The caller must stop initiating new Client API calls before destroy and must
- * not call destroy from a c-trpc callback (Reactor owner callback, interceptor,
- * RPC handler/result/event callback). Such callbacks must hand shutdown intent
- * to an external control thread and return first.
+ * 调用 destroy 前，调用方必须停止发起新的 Client API 调用。
+ * 不允许从 c-trpc 回调中调用 destroy，包括 Reactor 所有者回调、拦截器、
+ * RPC 处理器/结果/事件回调。此类回调必须先把关闭意图交给外部控制线程，
+ * 然后从回调返回。
  *
- * Call handles do not extend Client lifetime and must not be used concurrently
- * with or after this operation.
+ * Call 句柄不会延长 Client 生命周期；不得与该销毁操作并发使用，
+ * 也不得在销毁完成后继续使用。
  */
 void tr_client_destroy(struct tr_client *client);
 

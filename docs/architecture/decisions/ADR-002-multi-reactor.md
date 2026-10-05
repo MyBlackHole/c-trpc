@@ -1,41 +1,42 @@
-# ADR-002：Server V1 采用单进程多 Reactor
+# ADR-002：服务端 V1 采用单进程多 Reactor
 
-**Status: Accepted**
+**状态：已接受**
 
-## Context
+## 背景
 
-备份场景存在大 buffer、Pipeline soft state、hash/compression/crypto、storage queue 和多个 DATA connection。
+备份场景存在大缓冲区、Pipeline 易失状态、哈希/压缩/加密、存储队列和多个 DATA 连接。
 
 候选方案：
 
-1. Nginx 风格 master + worker process；
-2. 单进程 + N Reactor threads。
+1. Nginx 风格主进程 + 工作进程；
+2. 单进程 + N 个 Reactor 线程。
 
-## Decision
+## 决策
 
-Server V1 采用：
+服务端 V1 采用：
 
 ```text
-one process
+单进程
 +
-N Reactor shards
+N 个 Reactor 分片
 +
-shared blocking worker pool
+共享阻塞工作线程池
 ```
 
-多进程只作为未来部署/故障隔离扩展，不作为 core runtime 基础。
+多进程只作为未来部署/故障隔离扩展，不作为核心运行时基础。
 
-## Rationale
+## 理由
 
-同进程可以：
+同一进程可以：
 
-- pointer/buffer ownership 直接转移；
-- DATA socket 跨 shard 不需要 SCM_RIGHTS；
-- cache/pool 可按 shard + shared 两层组织；
-- Server 与 Client 复用同一 runtime abstraction。
+- 直接转移指针/缓冲区所有权；
+- DATA 套接字跨分片不需要 `SCM_RIGHTS`；
+- 缓存/资源池可以按“分片本地 + 共享”两层组织；
+- 服务端与客户端复用同一运行时抽象。
 
-## Consequences
+## 影响
 
-主要代价是 fault isolation 较弱：一个致命进程错误会影响所有 shard。
+主要代价是故障隔离较弱：一个致命进程错误会影响全部分片。
 
-因此 durable correctness 必须假定整个 Server process 随时可以消失，通过 supervisor/systemd/container 重启并 resume。
+因此持久化正确性必须假定整个服务端进程随时可能消失，
+并通过 supervisor/systemd/container 重启后续传。
