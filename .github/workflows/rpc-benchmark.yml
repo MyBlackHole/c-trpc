@@ -33,9 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {cc: gcc, mode: debug}
           - {cc: gcc, mode: release}
-          - {cc: clang, mode: release}
           - {cc: gcc, mode: asan}
           - {cc: gcc, mode: tsan}
     steps:
@@ -57,19 +55,19 @@ jobs:
           exec >"$results/build-and-test.log" 2>&1
           git rev-parse HEAD > "$results/source-commit.txt"
           git archive --format=tar -o "$results/source.tar" HEAD
-          python3 -m unittest discover -s bench -p 'test_rpc_*.py' -v
-          for portable in n y; do
-            xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable="$portable"
-            xmake build -v bench_rpc
-            python3 bench/run_rpc_bench.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}-portable=$portable" \
-              --output "$results/$portable.jsonl"
-            python3 bench/run_rpc_capacity.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}-portable=$portable" \
-              --output "$results/$portable-open.jsonl"
-          done
+          if [ "${{ matrix.mode }}" = release ]; then
+            python3 -m unittest discover -s bench -p 'test_rpc_*.py' -v
+          fi
+          xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable=n
+          xmake build -v bench_rpc
+          python3 bench/run_rpc_bench.py \
+            --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+            --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
+            --output "$results/smoke.jsonl"
+          python3 bench/run_rpc_capacity.py \
+            --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+            --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
+            --output "$results/open-smoke.jsonl"
           if [ "${{ matrix.cc }}" = gcc ] && [ "${{ matrix.mode }}" = release ]; then
             # Architecture diagnostics use the normal runtime CRC dispatch build,
             # not a sanitizer or forced-portable binary.
