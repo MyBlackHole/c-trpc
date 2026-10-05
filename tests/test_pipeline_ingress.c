@@ -252,8 +252,9 @@ static void test_pipeline_ingress_routing(void)
 		       reactor, listener, ingress_listener_cb, &ctx) == TR_OK);
 
 	/*
-	 * First socket presents a stale generation. Reactor must close it and the
-	 * reservation must remain RESERVED for the exact retry capability.
+	 * 第一个套接字携带陈旧代次。
+	 * Reactor 必须关闭它，同时保持预留为 RESERVED，
+	 * 供精确重试能力继续使用。
 	 */
 	wrong = make_route(pipeline, reserved);
 	wrong.member_generation++;
@@ -270,10 +271,10 @@ static void test_pipeline_ingress_routing(void)
 	assert(pipeline_stats.data_count == 0U);
 
 	/*
-	 * Retry the exact capability. Fragment the preface, then coalesce its
-	 * remaining bytes with a normal TRP1 PING. The Reactor gate reads exactly
-	 * the remaining preface bytes, installs the routed handler, and only then
-	 * lets the existing TRP1 parser consume PING.
+	 * 使用精确能力重试。
+	 * 先把前导信息分片，再把剩余字节与普通 TRP1 PING 合并发送。
+	 * Reactor 门控只读取剩余前导信息字节，安装路由处理器，
+	 * 然后才允许现有 TRP1 解析器消费 PING。
 	 */
 	route = make_route(pipeline, reserved);
 	assert(tr_pipeline_route_preface_encode(route_raw, &route) == TR_OK);
