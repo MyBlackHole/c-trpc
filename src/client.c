@@ -26,6 +26,16 @@
 #include "io/socket_internal.h"
 
 
+static int tr_client_blocking_lifecycle_context(void)
+{
+	/*
+	 * Blocking lifecycle waits must run on an external control thread.
+	 * Reactor owner callbacks must return so I/O/timers can advance; RPC
+	 * workers must return so the current Call can publish its completion.
+	 */
+	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context();
+}
+
 struct tr_client {
 	struct tr_client_config config;
 	struct tr_facade_tuning tuning;
@@ -517,6 +527,8 @@ int tr_client_connection_group_wait_drained(
 
 	if (!client)
 		return TR_ERR_INVALID;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 
@@ -572,7 +584,11 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 {
 	uint64_t start;
 
-	if (!client || !client->channel)
+	if (!client)
+		return TR_ERR_STATE;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (!client->channel)
 		return TR_ERR_STATE;
 
 	start = tr_client_now_ms();
@@ -650,7 +666,11 @@ int tr_client_begin_drain(struct tr_client *client)
 
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
 {
-	if (!client || !client->channel)
+	if (!client)
+		return TR_ERR_STATE;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (!client->channel)
 		return TR_ERR_STATE;
 	return tr_channel_wait_drained(client->channel, timeout_ms);
 }

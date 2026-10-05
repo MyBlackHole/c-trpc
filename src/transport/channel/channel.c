@@ -3095,6 +3095,14 @@ int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 	if (!channel)
 		return TR_ERR_INVALID;
 
+	/*
+	 * drain completion requires Reactor progress: peer CLOSE/CANCEL, RX/TX and
+	 * stream callbacks all run on the owner. Waiting from that same owner would
+	 * stall the mechanism that can make active_streams reach zero.
+	 */
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
 	pthread_mutex_lock(&channel->lock);
 	if (!channel->local_draining) {
 		pthread_mutex_unlock(&channel->lock);

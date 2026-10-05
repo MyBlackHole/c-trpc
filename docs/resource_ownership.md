@@ -188,6 +188,26 @@ RPC 工作线程完成；从被等待的执行上下文内同步销毁会形成�
 底层生命周期同样遵守失败即关闭原则：`tr_reactor_stop()` 在所有者上下文返回
 `TR_ERR_STATE`，而 Reactor/Runtime 销毁如果无法完成停止，不得继续释放内存。
 
+同样的约束适用于**同步 lifecycle wait**，不仅是 destroy。任何需要等待
+Reactor/RPC executor 继续推进才能满足的条件，都不能从对应 execution context
+内部等待：
+
+```text
+callback / handler
+    -> begin_drain / publish shutdown intent
+    -> return
+
+external control thread
+    -> wait_ready / wait_drained / server_drain
+    -> destroy
+```
+
+当前 facade 对 Reactor owner callback、interceptor 和 RPC worker callback
+执行阻塞 wait 时返回 `TR_ERR_STATE`。其中 `tr_server_drain()` 必须在
+停止 listener/peer admission 之前完成该 context 检查，避免“报错但已经部分
+进入 drain”的半状态。Transport 层 `tr_channel_wait_drained()` 也直接拒绝
+Reactor owner context，使该规则不会依赖 facade 调用者自觉遵守。
+
 Client/直接所有者使用同步销毁时，Endpoint 只是借用 Channel，因此函数
 返回后必须允许调用方立即安全销毁 Channel：
 

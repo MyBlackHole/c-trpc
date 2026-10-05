@@ -60,6 +60,16 @@ struct tr_server_detached_peer {
 	struct tr_channel *channel;
 };
 
+static int tr_server_blocking_lifecycle_context(void)
+{
+	/*
+	 * Synchronous drain waits need both Reactor owner and RPC executor progress.
+	 * Entering them from either execution domain would wait for the current
+	 * callback/task to make progress after it returns.
+	 */
+	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context();
+}
+
 struct tr_server {
 	struct tr_server_config config;
 	struct tr_facade_tuning tuning;
@@ -1480,6 +1490,8 @@ int tr_server_connection_group_wait_drained(
 
 	if (!server)
 		return TR_ERR_INVALID;
+	if (tr_server_blocking_lifecycle_context())
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
@@ -1635,6 +1647,15 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	int final = TR_OK;
 
 	if (!server || !server->started)
+		return TR_ERR_STATE;
+
+	/*
+	 * Reject before the first lifecycle mutation. A handler waiting for its own
+	 * Stream, or an owner callback waiting for Reactor progress, would self-wait;
+	 * stopping listeners before detecting that error would also leave the Server
+	 * partially drained.
+	 */
+	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
 	tr_server_stop_accepting(server);

@@ -47,6 +47,11 @@ int tr_client_create(const struct tr_client_config *config,
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port);
 
+/*
+ * 同步等待连接进入 ready。
+ * 该操作依赖 Reactor progress，必须从外部控制线程调用；Reactor owner
+ * callback / interceptor / RPC worker callback 中调用返回 TR_ERR_STATE。
+ */
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms);
 
 int tr_client_register_method(struct tr_client *client,
@@ -75,6 +80,12 @@ int tr_client_call_start(struct tr_client *client, uint32_t service_id,
 			 const struct tr_rpc_call_callbacks *callbacks,
 			 struct tr_rpc_call_handle *out);
 
+/*
+ * begin_drain() 只发布单调 drain intent，可从 callback 内调用。
+ * wait_drained() 会同步等待现有 Stream 收敛，必须从外部控制线程调用；
+ * Reactor owner callback / interceptor / RPC worker callback 中调用返回
+ * TR_ERR_STATE，避免等待当前 execution context 自己完成。
+ */
 int tr_client_begin_drain(struct tr_client *client);
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
 

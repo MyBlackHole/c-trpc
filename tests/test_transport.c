@@ -2382,6 +2382,20 @@ struct rpc_test_ctx {
 	uint32_t response_len;
 };
 
+struct channel_wait_owner_probe {
+	struct tr_channel *channel;
+	int wait_ret;
+};
+
+static int channel_wait_drained_from_owner(void *arg)
+{
+	struct channel_wait_owner_probe *probe =
+		(struct channel_wait_owner_probe *)arg;
+
+	probe->wait_ret = tr_channel_wait_drained(probe->channel, 100U);
+	return TR_OK;
+}
+
 static void test_channel_graceful_drain(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -2399,6 +2413,7 @@ static void test_channel_graceful_drain(void)
 	struct tr_buffer *payload;
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
+	struct channel_wait_owner_probe wait_probe;
 	enum tr_channel_state channel_state;
 	int client_fd;
 	int server_fd;
@@ -2470,6 +2485,14 @@ static void test_channel_graceful_drain(void)
 	assert(tr_channel_begin_drain(client_channel) == TR_OK);
 	assert(tr_channel_enable_client_reconnect(
 		       client_channel, &reconnect_config) == TR_ERR_CLOSED);
+
+	memset(&wait_probe, 0, sizeof(wait_probe));
+	wait_probe.channel = client_channel;
+	assert(tr_reactor_call(
+		       reactor, channel_wait_drained_from_owner,
+		       &wait_probe) == TR_OK);
+	assert(wait_probe.wait_ret == TR_ERR_STATE);
+
 	assert(tr_channel_wait_drained(client_channel, 0) == TR_AGAIN);
 	assert(tr_channel_get_state(client_channel, &channel_state) == TR_OK);
 	assert(channel_state == TR_CHANNEL_DRAINING);
@@ -5943,6 +5966,8 @@ static void test_channel_keepalive_and_diagnostics(void)
 struct facade_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
+	struct tr_server *server;
+	int server_drain_from_worker_ret;
 	unsigned server_calls;
 	unsigned client_results;
 	unsigned client_pre;
@@ -5964,6 +5989,10 @@ static int facade_test_unary_handler(struct tr_rpc_call_handle call,
 	struct facade_test_ctx *ctx = (struct facade_test_ctx *)arg;
 	static const uint8_t reply[] = "facade-pong";
 	(void)call;
+
+	if (ctx->server)
+		ctx->server_drain_from_worker_ret =
+			tr_server_drain(ctx->server, 100U);
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->server_calls++;
@@ -6085,6 +6114,7 @@ static void test_client_server_facade_unary(void)
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
+	ctx.server = server;
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
@@ -6114,6 +6144,7 @@ static void test_client_server_facade_unary(void)
 	assert(ctx.server_calls == 1U);
 	assert(ctx.client_results == 1U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
+	assert(ctx.server_drain_from_worker_ret == TR_ERR_STATE);
 	assert(ctx.request_len == 11U);
 	assert(memcmp(ctx.request, "facade-ping", 11U) == 0);
 	assert(ctx.response_len == 11U);
