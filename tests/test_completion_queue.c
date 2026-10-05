@@ -214,7 +214,7 @@ static void test_completion_admission_and_wake_coalescing(void)
 	assert(count == 1U);
 	assert(has_more == 1);
 
-	/* Admission close is independent of remaining queued completions. */
+	/* 关闭准入与队列中剩余的完成事件相互独立。 */
 	tr_completion_queue_close(&queue);
 	assert(tr_completion_queue_push(&queue, &completion, NULL) ==
 	       TR_ERR_CLOSED);
@@ -224,7 +224,7 @@ static void test_completion_admission_and_wake_coalescing(void)
 	assert(count == 1U);
 	assert(has_more == 0);
 
-	/* Empty-drain clears wake coalescing; reopening starts a new wake epoch. */
+	/* 排空到空队列会清除唤醒合并状态；重新开放后进入新的唤醒周期。 */
 	assert(tr_completion_queue_open(&queue) == TR_OK);
 	need_wake = 0;
 	assert(tr_completion_queue_push(&queue, &completion, &need_wake) == TR_OK);
