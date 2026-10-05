@@ -241,142 +241,139 @@ xmake run echo_client 127.0.0.1 9000 hello
 ```
 
 
-## Implemented
+## 已实现
 
-### Transport wire / framing
+### 传输线协议/分帧
 
-- explicit little-endian wire codec; packed C structs are not used as wire ABI
-- 40-byte transport frame header
-- CRC32C for header and payload: portable table fallback and runtime-selected x86-64 SSE4.2 backend
-- frame type / flag / length validation
-- bounded maximum payload per transport frame
-- logical DATA messages larger than one frame are fragmented transparently using `FIRST/LAST` with one stable `message_id`
-- `HELLO`, `HELLO_ACK`, `GOAWAY`, `STREAM_OPEN`, `STREAM_CLOSE`, `WINDOW_UPDATE`, `DATA`, `PING/PONG`
-- logical lane declared at Stream open
+- 显式小端线协议编解码；不使用打包 C 结构体作为线协议 ABI；
+- 40 字节传输帧头；
+- 头部与载荷使用 CRC32C：提供可移植查表后端，并在运行时选择 x86-64 SSE4.2 后端；
+- 帧类型/标志/长度校验；
+- 每个传输帧的最大载荷有界；
+- 超过单帧的逻辑 DATA 消息使用 `FIRST/LAST` 自动分片，并保持同一个稳定 `message_id`；
+- 支持 `HELLO`、`HELLO_ACK`、`GOAWAY`、`STREAM_OPEN`、`STREAM_CLOSE`、`WINDOW_UPDATE`、`DATA`、`PING/PONG`；
+- 在 Stream 打开时声明逻辑通道。
 
-### Receive path
+### 接收路径
 
-- incremental parser supporting arbitrary header/payload fragmentation
-- `recv()` writes directly into the final RX payload buffer
-- bounded fixed-size RX buffer pool
-- parser/RX backpressure when the pool is exhausted
-- `EPOLLIN` disabled while RX is paused and restored by `tr_reactor_resume_rx()`
-- RX ownership can be automatically released or transferred upward
+- 增量解析器支持任意头部/载荷分片；
+- `recv()` 直接写入最终 RX 载荷缓冲区；
+- 有界固定大小 RX 缓冲资源池；
+- 资源池耗尽时对解析器/RX 施加背压；
+- RX 暂停时禁用 `EPOLLIN`，由 `tr_reactor_resume_rx()` 恢复；
+- RX 所有权可以自动释放，也可以向上层转移。
 
-### Send path
+### 发送路径
 
-- fixed-size BULK TX-item pool
-- independent reserved CONTROL TX-item pool
-- `sendmsg()` with fixed-capacity scatter/gather (`tr_reactor_sendv()`)
-- up to `TR_REACTOR_MAX_TX_SLICES` transport payload slices per frame
-- partial-write cursor works across header and multiple slices
-- `EPOLLOUT` enabled only after socket `EAGAIN`
-- per-connection TX byte budget and reactor-local ready queue
-- no per-frame heap allocation in steady-state Transport DATA submission
-- send ownership transfers only after the corresponding API returns `TR_OK`
+- 固定大小 BULK TX 项资源池；
+- 独立预留的 CONTROL TX 项资源池；
+- 使用固定容量分散/聚集的 `sendmsg()`（`tr_reactor_sendv()`）；
+- 每帧最多 `TR_REACTOR_MAX_TX_SLICES` 个传输载荷分片；
+- 部分写游标可以跨头部和多个分片继续推进；
+- 仅在套接字返回 `EAGAIN` 后启用 `EPOLLOUT`；
+- 每连接 TX 字节预算和 Reactor 本地就绪队列；
+- 稳态传输 DATA 提交不为每帧执行堆分配；
+- 仅当相应 API 返回 `TR_OK` 后才转移发送所有权。
 
-### Runtime
+### 运行时
 
-- Linux epoll level-triggered reactor
-- Reactor thread 独占 mutable connection state；event-loop handler/connection 热路径不依赖 slot mutex
-- slot generation/state 使用 C11 atomic capability metadata，跨线程 handler 更新通过同步 command 提交
-- bounded mutex-protected MPSC command ring
-- eventfd wakeup coalescing
-- generation-based connection handles and stale event rejection
-- per-connection higher-layer callback handlers
-- nonblocking IPv4 TCP helpers (`listen`, `connect`, `accept`)
-- connection-state snapshot API used to validate safe Channel replacement
+- Linux epoll 电平触发 Reactor；
+- Reactor 线程独占可变连接状态；事件循环处理器/连接热路径不依赖槽位互斥锁；
+- 槽位代次/状态使用 C11 原子能力元数据，跨线程处理器更新通过同步命令提交；
+- 有界互斥锁保护的多生产者单消费者命令环；
+- eventfd 唤醒合并；
+- 基于代次的连接句柄和陈旧事件拒绝；
+- 每连接上层回调处理器；
+- 非阻塞 IPv4 TCP 辅助接口（`listen`、`connect`、`accept`）；
+- 连接状态快照 API 用于验证 Channel 替换是否安全。
 
 ### Channel / Stream
 
-- logical `Channel` above physical TCP connections
-- symmetric per-connection `HELLO / HELLO_ACK` capability handshake before a lane becomes usable
-- protocol version range negotiation (V1 currently implements version 1)
-- peer receive capability negotiation for frame payload, logical message size, feature bits, and lane mapping
-- lane state now distinguishes `DOWN / RECONNECTING / HANDSHAKING / UP`; new Streams are gated until `UP`
-- negotiated frame ceilings are enforced by `tr_reactor_sendv_limited()`, so asymmetric peers actually send at the smaller receiver-supported frame size
-- CONTROL / BULK traffic lanes
-- shared-connection and split-connection policies
-- odd/even client/server Stream IDs
-- Stream open and half-close lifecycle
-- generation-based Stream handles
-- monotonically increasing per-stream message IDs
-- byte-based Stream flow control
-- absolute window limits (`WINDOW_UPDATE` is an absolute byte boundary, not a delta)
-- flow-control credit is returned only after upper-layer payload consumption
-- `tr_stream_send()` for one-buffer logical messages
-- `tr_stream_sendv()` for scatter/gather logical messages
-- TX fragmentation keeps the original buffers and sends fragment ranges directly through `sendmsg()`; it does not concatenate the payload
-- single-frame RX messages remain zero-copy from Reactor to Channel consumer
-- fragmented RX messages use an optional bounded `reassembly_pool` and one contiguous reassembly copy before one logical-message callback
-- upper layer can retain an RX logical-message payload and later return it through `tr_stream_release_payload()`
-- split mode isolates BULK connection failure from CONTROL connection operation
-- failed-lane Stream slots are invalidated immediately, so reconnect cannot leak `max_streams` capacity
-- logical Channel survives physical connection loss
-- `tr_channel_replace_connection()` attaches a new reactor-owned connection without recreating the Channel/RPC endpoint
-- shared mode replaces CONTROL+BULK together; split mode replaces lanes independently
-- client V1 optional automatic reconnect for numeric IPv4 endpoints
-- bounded exponential reconnect backoff with configurable connect timeout
-- server side intentionally uses explicit replacement after the application accepts/authenticates a new socket
-- Channel emits DOWN/UP/GOAWAY events and exposes per-lane `DOWN / RECONNECTING / HANDSHAKING / UP` state
-- existing Streams never survive a connection replacement; old handles become stale
+- 逻辑 `Channel` 位于物理 TCP 连接之上；
+- 每个连接在通道可用前执行对称 `HELLO / HELLO_ACK` 能力握手；
+- 协议版本范围协商（V1 当前实现版本 1）；
+- 对端接收能力协商，包括帧载荷、逻辑消息大小、特性位和通道映射；
+- 通道状态区分 `DOWN / RECONNECTING / HANDSHAKING / UP`；只有 `UP` 后才允许新 Stream；
+- 协商后的帧上限由 `tr_reactor_sendv_limited()` 强制执行，因此能力不对称的对端实际按较小接收上限发送；
+- CONTROL / BULK 流量通道；
+- 共享连接与拆分连接策略；
+- 客户端/服务端 Stream 标识使用奇偶分配；
+- Stream 打开与半关闭生命周期；
+- 基于代次的 Stream 句柄；
+- 每 Stream 单调递增消息标识；
+- 基于字节的 Stream 流量控制；
+- 绝对窗口上限（`WINDOW_UPDATE` 是绝对字节边界，不是增量）；
+- 只有上层消费载荷后才归还流量控制额度；
+- `tr_stream_send()` 用于单缓冲逻辑消息；
+- `tr_stream_sendv()` 用于分散/聚集逻辑消息；
+- TX 分片保留原始缓冲区，并通过 `sendmsg()` 直接发送分片范围，不拼接载荷；
+- 单帧 RX 消息从 Reactor 到 Channel 使用者保持零复制；
+- 分片 RX 消息使用可选有界 `reassembly_pool`，先进行一次连续重组复制，再触发一次逻辑消息回调；
+- 上层可以保留 RX 逻辑消息载荷，并在之后通过 `tr_stream_release_payload()` 归还；
+- 拆分模式将 BULK 连接故障与 CONTROL 连接运行隔离；
+- 故障通道对应的 Stream 槽位立即失效，因此重连不会泄漏 `max_streams` 容量；
+- 逻辑 Channel 在物理连接丢失后仍然存活；
+- `tr_channel_replace_connection()` 可以在不重建 Channel/RPC Endpoint 的情况下附着新的 Reactor 所有连接；
+- 共享模式同时替换 CONTROL+BULK；拆分模式独立替换各通道；
+- 客户端 V1 支持针对数字 IPv4 端点的可选自动重连；
+- 有界指数退避重连，并支持配置连接超时；
+- 服务端有意使用显式替换：应用接收并认证新套接字后再完成连接替换；
+- Channel 发出 DOWN/UP/GOAWAY 事件，并暴露每通道 `DOWN / RECONNECTING / HANDSHAKING / UP` 状态；
+- 连接替换后旧 Stream 不会存活；旧句柄全部变为陈旧句柄。
 
-### Capability handshake and graceful drain
+### 能力握手与优雅排空
 
-A physical TCP connection is not immediately considered Channel-ready. Both
-sides send a symmetric fixed-size `HELLO` describing their receive capability:
+物理 TCP 连接不会在接管后立即被视为 Channel 可用。双方都会发送固定大小的
+`HELLO`，声明自身接收能力：
 
 ```text
-TCP adopted
+TCP 已接管
    |
    v
 HANDSHAKING
    |  HELLO / HELLO_ACK
-   |  - protocol version range
-   |  - lane mask
-   |  - receive max frame payload
-   |  - receive max logical message
-   |  - feature bits
+   |  - 协议版本范围
+   |  - 通道掩码
+   |  - 接收最大帧载荷
+   |  - 接收最大逻辑消息
+   |  - 特性位
    v
 UP
    |
-   +--> new Streams allowed
+   +--> 允许新 Stream
 ```
 
-The advertised size limits are directional: a peer declaring a small local
-reassembly limit constrains what is sent **to that peer**; it does not
-unnecessarily constrain messages sent in the opposite direction.
+声明的大小上限具有方向性：对端声明较小的本地重组上限时，只限制**发送给该对端**
+的消息；不会无必要地限制反方向发送的消息。
 
-Graceful shutdown is exposed by:
+优雅关闭通过以下 API 暴露：
 
 ```c
 tr_channel_begin_drain(channel);
 tr_channel_wait_drained(channel, timeout_ms);
 ```
 
-`begin_drain()` is idempotent, disables reconnect, rejects new local Streams,
-and sends `GOAWAY` on each ready lane. Receiving `GOAWAY` prevents opening new
-Streams toward that peer. Existing Streams remain fully usable until they
-close/cancel naturally:
+`begin_drain()` 是幂等操作，会禁用重连、拒绝新的本地 Stream，并在每个就绪通道上
+发送 `GOAWAY`。收到 `GOAWAY` 后禁止向该对端打开新 Stream。
+已有 Stream 可以继续完整运行，直到自然关闭/取消：
 
 ```text
 RUNNING
    |
    | begin_drain + GOAWAY
    v
-DRAINING  -- existing Streams continue -->
+DRAINING  -- 已有 Stream 继续 -->
    |
    | active_streams == 0
    v
 DRAINED
 ```
 
-Transport does not force-cancel application work during drain; RPC/application
-deadlines decide how long outstanding operations may remain alive.
+排空过程中传输层不会强制取消应用工作；RPC/应用截止时间决定未完成操作最多存活多久。
 
-### Keepalive / liveness
+### 保活/存活检测
 
-Channel can optionally run low-rate transport liveness probes:
+Channel 可以按需运行低频传输层存活探测：
 
 ```c
 struct tr_channel_keepalive_config cfg = {
@@ -387,62 +384,56 @@ struct tr_channel_keepalive_config cfg = {
 tr_channel_enable_keepalive(channel, &cfg);
 ```
 
-Keepalive is intentionally different from service health. It answers only
-"is the peer/connection still making progress?". After peer-RX has been idle
-for `interval_ms`, Channel sends a `PING`. A matching `PONG` records an RTT
-sample. Any peer traffic observed after the probe is sufficient proof of
-liveness; if no peer activity is observed within `timeout_ms`, Channel aborts
-the physical connection with `TR_ERR_TIMEOUT`. Existing connection-loss and
-reconnect handling then runs normally.
+保活与服务健康检查有意分离。它只回答“对端/连接是否仍在推进？”
+当对端 RX 空闲达到 `interval_ms` 后，Channel 发送 `PING`。
+匹配的 `PONG` 会记录 RTT 样本。探测之后观察到任意对端流量都足以证明存活；
+如果 `timeout_ms` 内没有观察到对端活动，Channel 使用 `TR_ERR_TIMEOUT`
+中止物理连接，随后正常进入现有连接丢失与重连处理。
 
-Shared-connection mode emits one probe for the shared TCP connection; split
-mode tracks CONTROL and BULK independently. Every Channel registers one
-initially-disarmed keepalive timer in its owning Reactor; standalone and
-high-level Client/Server Channels use the same owner-local path. Keepalive no
-longer creates a private timer thread; scheduling stays inside the Reactor.
+共享连接模式对共享 TCP 连接只发送一组探测；拆分模式独立跟踪 CONTROL 和 BULK。
+每个 Channel 在所属 Reactor 中注册一个初始未启用的保活定时器；独立使用和高层
+客户端/服务端 Channel 都使用同一条所有者本地路径。保活不再创建私有定时器线程，
+调度全部留在 Reactor 内。
 
-### Metrics / diagnostics
+### 指标/诊断
 
-Detailed Reactor/Channel/Stream/Endpoint snapshots remain available to
-repository-internal diagnostics and benchmark code, but are no longer part of
-the stable installed SDK.
+详细 Reactor/Channel/Stream/Endpoint 快照仍提供给仓库内部诊断与基准测试代码，
+但不再属于稳定安装 SDK。
 
-This separation is intentional:
+这种分离是有意的：
 
 ```text
-stable application API
-    -> semantic RPC/facade contract
+稳定应用 API
+    -> RPC/门面语义契约
 
-internal diagnostics
-    -> Reactor queue/pool pressure
-    -> Channel/Stream state
-    -> Endpoint executor details
+内部诊断
+    -> Reactor 队列/资源池压力
+    -> Channel/Stream 状态
+    -> Endpoint 执行器细节
 ```
 
-The implementation continues collecting the same bounded counters and optional
-timing histograms; only the compatibility boundary changed.
+实现继续收集相同的有界计数器和可选计时直方图；变化的只是兼容性边界。
 
-### Channel reconnect / connection replacement
+### Channel 重连/连接替换
 
-Reconnect deliberately restores the **logical Channel**, not the byte state of
-old Streams:
+重连有意恢复**逻辑 Channel**，而不是恢复旧 Stream 的字节状态：
 
 ```text
-TCP connection #1
+TCP 连接 #1
        X
        |
-       +--> all Streams on the failed lane -> ERROR / stale handle
-       +--> in-flight RPC Calls            -> UNAVAILABLE
+       +--> 故障通道上的全部 Stream -> ERROR / 陈旧句柄
+       +--> 进行中的 RPC Call        -> UNAVAILABLE
        |
        v
-Channel remains alive
+Channel 继续存活
        |
-       +--> client: Reactor timer + nonblocking connector
-       |       or
-       +--> server: application accepts a replacement socket
+       +--> 客户端：Reactor 定时器 + 非阻塞连接器
+       |       或
+       +--> 服务端：应用接收替换套接字
        |
        v
-new reactor-owned Connection
+新的 Reactor 所有 Connection
        |
        v
 tr_channel_replace_connection()
@@ -451,20 +442,19 @@ tr_channel_replace_connection()
 HELLO / HELLO_ACK
        |
        v
-new Streams / new RPC Calls
+新的 Stream / 新的 RPC Call
 ```
 
-This boundary is intentional. Transport does **not** replay an RPC merely
-because TCP failed; it cannot know whether an operation is idempotent. Generic
-RPC retry and backup-specific resume remain upper-layer policies.
+这个边界是有意的。传输层不会仅因为 TCP 故障就重放 RPC；
+它无法知道操作是否幂等。通用 RPC 重试和备份专用续传都属于上层策略。
 
-Client automatic reconnect is enabled with:
+客户端自动重连通过以下配置启用：
 
 ```c
 struct tr_channel_reconnect_config cfg = {
     .ipv4_address = "127.0.0.1",
     .control_port = 9000,
-    .bulk_port = 9001,          /* 0 => control_port */
+    .bulk_port = 9001,          /* 0 表示使用 control_port */
     .initial_delay_ms = 200,
     .max_delay_ms = 10000,
     .connect_timeout_ms = 5000,
@@ -473,20 +463,19 @@ struct tr_channel_reconnect_config cfg = {
 tr_channel_enable_client_reconnect(channel, &cfg);
 ```
 
-Client reconnect is fully Reactor-owned: backoff uses a Reactor-local timer and
-connect completion uses the bounded auxiliary-fd connector path. No per-Channel
-maintenance thread is created. Shared mode reconnects one physical connection
-for both lanes; split mode reconnects failed lanes independently.
+客户端重连完全由 Reactor 拥有：退避使用 Reactor 本地定时器，连接完成使用有界辅助 fd
+连接器路径。不会为每个 Channel 创建维护线程。共享模式为两个通道重连一个物理连接；
+拆分模式独立重连故障通道。
 
-The server does not automatically accept or trust replacement sockets. Its
-listener/authentication layer accepts the socket, adopts it into the Reactor,
-and then calls:
+服务端不会自动接收或信任替换套接字。其监听/认证层接收套接字、交给 Reactor，
+然后调用：
 
 ```c
 tr_channel_replace_connection(channel, lane, new_connection);
 ```
 
-This keeps listener, TLS/authentication, and service policy outside Channel.
+这样监听器、TLS/认证和服务策略都保持在 Channel 之外。
+
 
 ### RPC model
 
