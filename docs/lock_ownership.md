@@ -133,6 +133,19 @@ Channel drain 使用单调 admission barrier。进入 `local_draining` 后：
 - 因而 `active_streams` 在 barrier 后只减不增，`DRAINED` 是终态而不是
   一个可能被延迟 OPEN 推翻的瞬时快照。
 
+`wait_drained` 使用 `channel->lock + drain_cond` 作为 waitqueue-like
+同步原语：
+
+- 最后一个 active Stream 释放时 broadcast；
+- draining 期间 lane 从 handshake 进入 ready 时 broadcast，使等待方重新判断
+  GOAWAY admission；
+- GOAWAY 成功发布后 broadcast，使等待方停止 backpressure retry cadence；
+- 正常等待直接睡到状态变化或总 deadline，不再每 1 ms 轮询 Stream 数；
+- 只有 GOAWAY 仍因 bounded TX admission 未完成时保留 1 ms retry，
+  该周期用于协议动作重试，不用于观察 Stream 生命周期。
+
+条件变量使用 `CLOCK_MONOTONIC`，与原先 drain timeout 的时钟语义一致。
+
 
 Channel 仍同时服务 Reactor 回调/所有者调用与部分应用 API，因此
 Stream 表、流量控制、通道状态、排空和快照诊断暂时继续由
