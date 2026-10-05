@@ -1377,6 +1377,27 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 						 TR_ERR_STATE);
 	}
 
+	/*
+	 * begin_drain() is a monotonic admission barrier. A peer may have sent
+	 * STREAM_OPEN just before receiving our GOAWAY; accepting that delayed frame
+	 * after local_draining became visible would make active_streams increase
+	 * again after wait_drained() had observed zero.
+	 *
+	 * Reject without allocating local Stream state. The peer already owns its
+	 * initiating Stream slot, so STREAM_CLOSE gives it an ordinary remote-close
+	 * signal. If even this bounded control frame cannot be admitted, close the
+	 * connection rather than leave the two endpoints with inconsistent Stream
+	 * ownership.
+	 */
+	if (channel->local_draining) {
+		pthread_mutex_unlock(&channel->lock);
+		ret = tr_reactor_send(connection, TR_FRAME_STREAM_CLOSE, 0,
+				      frame->header.stream_id, 0, NULL);
+		if (ret != TR_OK)
+			(void)tr_reactor_close_on_owner(connection);
+		return ret;
+	}
+
 	ret = tr_stream_allocate_locked(channel, frame->header.stream_id, lane,
 					TR_STREAM_SLOT_OPEN, &handle);
 	if (ret != TR_OK) {
@@ -1641,8 +1662,23 @@ static int tr_channel_handle_stream_close(struct tr_channel *channel,
 
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
-	if (!stream ||
-	    !tr_stream_connection_matches(channel, stream, connection)) {
+	if (!stream) {
+		/*
+		 * A STREAM_OPEN rejected after our drain barrier has no local Stream
+		 * slot. Its initiator may still answer our rejection with STREAM_CLOSE
+		 * when it closes its own half. Absorb only peer-owned ids while draining;
+		 * unknown locally-owned ids remain protocol errors.
+		 */
+		if (channel->local_draining &&
+		    !tr_stream_id_is_local(channel, frame->header.stream_id)) {
+			pthread_mutex_unlock(&channel->lock);
+			return TR_OK;
+		}
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+						 TR_ERR_STATE);
+	}
+	if (!tr_stream_connection_matches(channel, stream, connection)) {
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_STATE);

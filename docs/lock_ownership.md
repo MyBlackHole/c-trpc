@@ -124,6 +124,16 @@ Reactor 本地定时器和共享非阻塞连接器驱动。
 
 **结论：当前保留，职责已经开始拆分。**
 
+Channel drain 使用单调 admission barrier。进入 `local_draining` 后：
+
+- 本地 `tr_stream_open()` 不再分配 Stream；
+- 在 peer 收到 GOAWAY 前已发出、但 barrier 之后才到达的
+  `STREAM_OPEN` 不再创建本地 Stream，而是直接以 `STREAM_CLOSE` 拒绝；
+- 该拒绝的 reciprocal peer-local `STREAM_CLOSE` 在 drain 期间作为尾包吸收；
+- 因而 `active_streams` 在 barrier 后只减不增，`DRAINED` 是终态而不是
+  一个可能被延迟 OPEN 推翻的瞬时快照。
+
+
 Channel 仍同时服务 Reactor 回调/所有者调用与部分应用 API，因此
 Stream 表、流量控制、通道状态、排空和快照诊断暂时继续由
 `channel->lock` 保护。
