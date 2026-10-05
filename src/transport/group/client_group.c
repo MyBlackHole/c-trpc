@@ -57,6 +57,7 @@ struct tr_client_group {
 
 	char address[TR_CLIENT_GROUP_ADDRESS_CAPACITY];
 	uint16_t port;
+	int control_connecting;
 	int closing;
 	int draining;
 
@@ -841,40 +842,85 @@ static void tr_client_group_control_event(
 	group->closing = was_closing;
 }
 
+struct tr_client_group_prepare_connect_request {
+	struct tr_client_group *group;
+	uint32_t generation;
+};
+
+static int tr_client_group_prepare_connect_on_owner(void *arg)
+{
+	struct tr_client_group_prepare_connect_request *request =
+		(struct tr_client_group_prepare_connect_request *)arg;
+	struct tr_client_group *group = request->group;
+
+	if (group->control.reactor || group->control_connecting)
+		return TR_ERR_STATE;
+
+	group->control_connecting = 1;
+	request->generation = tr_client_group_next_generation(group);
+	return TR_OK;
+}
+
+static int tr_client_group_cancel_prepare_connect_on_owner(void *arg)
+{
+	struct tr_client_group_prepare_connect_request *request =
+		(struct tr_client_group_prepare_connect_request *)arg;
+
+	request->group->control_connecting = 0;
+	return TR_OK;
+}
+
 struct tr_client_group_adopt_request {
 	struct tr_client_group *group;
 	int fd;
 	int fd_consumed;
 	struct tr_conn_handle connection;
+	struct tr_pipeline_route_preface route;
+	char address[TR_CLIENT_GROUP_ADDRESS_CAPACITY];
+	uint16_t port;
 };
 
 static int tr_client_group_adopt_control_on_owner(void *arg)
 {
 	struct tr_client_group_adopt_request *request =
 		(struct tr_client_group_adopt_request *)arg;
+	struct tr_client_group *group = request->group;
 	int ret;
 
-	if (request->group->control.reactor)
+	if (!group->control_connecting || group->control.reactor)
 		return TR_ERR_STATE;
 
 	ret = tr_reactor_adopt_fd(
-		request->group->config.owner, request->fd,
+		group->config.owner, request->fd,
 		&request->connection);
 	if (ret != TR_OK)
-		return ret;
+		goto fail;
 	request->fd_consumed = 1;
 
 	ret = tr_reactor_set_handler(
 		request->connection, tr_client_group_control_frame,
-		tr_client_group_control_event, request->group);
+		tr_client_group_control_event, group);
 	if (ret != TR_OK) {
 		(void)tr_reactor_close_on_owner(request->connection);
 		memset(&request->connection, 0, sizeof(request->connection));
-		return ret;
+		goto fail;
 	}
 
-	request->group->control = request->connection;
+	/*
+	 * Handler publication and Group state publication are one owner turn.
+	 * No callback can observe a partially initialized control route.
+	 */
+	group->control = request->connection;
+	group->control_route = request->route;
+	memcpy(group->address, request->address, sizeof(group->address));
+	group->port = request->port;
+	group->draining = 0;
+	group->control_connecting = 0;
 	return TR_OK;
+
+fail:
+	group->control_connecting = 0;
+	return ret;
 }
 
 struct tr_client_group_close_request {
@@ -1001,26 +1047,36 @@ int tr_client_group_connect(
 	struct tr_client_group *group, const char *ipv4_address, uint16_t port,
 	const struct tr_connection_group_id *id)
 {
+	struct tr_client_group_prepare_connect_request prepare;
 	struct tr_client_group_adopt_request request;
 	struct tr_pipeline_route_preface route;
 	uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	size_t address_len;
 	int fd = -1;
 	int ret;
+	int prepared = 0;
 
 	if (!group || !ipv4_address || !id || port == 0U ||
 	    id->group_id == 0U || id->epoch == 0U)
 		return TR_ERR_INVALID;
-	if (group->control.reactor)
-		return TR_ERR_STATE;
+
 	address_len = strlen(ipv4_address);
-	if (address_len == 0U || address_len >= sizeof(group->address))
+	if (address_len == 0U || address_len >= TR_CLIENT_GROUP_ADDRESS_CAPACITY)
 		return TR_ERR_INVALID;
+
+	memset(&prepare, 0, sizeof(prepare));
+	prepare.group = group;
+	ret = tr_reactor_call(
+		group->config.owner,
+		tr_client_group_prepare_connect_on_owner, &prepare);
+	if (ret != TR_OK)
+		return ret;
+	prepared = 1;
 
 	ret = tr_client_group_connect_fd(
 		ipv4_address, port, group->config.connect_timeout_ms, &fd);
 	if (ret != TR_OK)
-		return ret;
+		goto fail;
 	if (group->config.tcp_nodelay) {
 		ret = tr_tcp_set_nodelay(fd, 1);
 		if (ret != TR_OK)
@@ -1034,7 +1090,7 @@ int tr_client_group_connect(
 	route.pipeline_id = id->group_id;
 	route.epoch = id->epoch;
 	route.member_index = TR_PIPELINE_ROUTE_MEMBER_CONTROL;
-	route.member_generation = tr_client_group_next_generation(group);
+	route.member_generation = prepare.generation;
 	ret = tr_pipeline_route_preface_encode(raw, &route);
 	if (ret != TR_OK)
 		goto fail;
@@ -1043,29 +1099,28 @@ int tr_client_group_connect(
 	if (ret != TR_OK)
 		goto fail;
 
-	group->control_route = route;
-	memcpy(group->address, ipv4_address, address_len + 1U);
-	group->port = port;
-
 	memset(&request, 0, sizeof(request));
 	request.group = group;
 	request.fd = fd;
+	request.route = route;
+	memcpy(request.address, ipv4_address, address_len + 1U);
+	request.port = port;
 	ret = tr_reactor_call(
 		group->config.owner,
 		tr_client_group_adopt_control_on_owner, &request);
+	prepared = 0; /* adopt path consumes or clears the owner reservation */
 	if (request.fd_consumed)
 		fd = -1;
-	if (ret != TR_OK) {
-		memset(&group->control_route, 0, sizeof(group->control_route));
-		memset(group->address, 0, sizeof(group->address));
-		group->port = 0U;
+	if (ret != TR_OK)
 		goto fail;
-	}
-	group->draining = 0;
 	return TR_OK;
 
 fail:
 	tr_socket_close(&fd);
+	if (prepared)
+		(void)tr_reactor_call(
+			group->config.owner,
+			tr_client_group_cancel_prepare_connect_on_owner, &prepare);
 	return ret;
 }
 
@@ -1316,13 +1371,56 @@ int tr_client_group_send(
 		group->config.owner, tr_client_group_send_on_owner, &request);
 }
 
+static int tr_client_group_detach_on_owner(void *arg)
+{
+	struct tr_client_group *group = (struct tr_client_group *)arg;
+	struct tr_conn_handle control;
+	int ret = TR_OK;
+
+	/*
+	 * destroy 的 owner barrier 必须无条件执行，不能通过外部线程读取
+	 * group->control.reactor 来猜测 callback 是否已经退出。
+	 */
+	group->closing = 1;
+	group->draining = 1;
+	group->control_connecting = 0;
+	tr_client_group_stop_data_on_owner(group);
+
+	control = group->control;
+	if (control.reactor) {
+		ret = tr_reactor_close_on_owner(control);
+		if (ret == TR_ERR_STALE)
+			ret = TR_OK;
+	}
+
+	memset(&group->control, 0, sizeof(group->control));
+	memset(&group->control_route, 0, sizeof(group->control_route));
+	memset(group->address, 0, sizeof(group->address));
+	group->port = 0U;
+	return ret;
+}
+
 void tr_client_group_destroy(struct tr_client_group *group)
 {
+	int ret;
+
 	if (!group)
 		return;
 
-	if (group->control.reactor)
-		(void)tr_client_group_close(group);
+	/*
+	 * Client facade guarantees destroy runs before Runtime stop. Use a
+	 * synchronous owner barrier so every callback that can reference group has
+	 * returned before storage is released. Fail closed if ownership cannot
+	 * converge.
+	 */
+	ret = tr_reactor_call(
+		group->config.owner, tr_client_group_detach_on_owner, group);
+#ifndef NDEBUG
+	assert(ret == TR_OK);
+#endif
+	if (ret != TR_OK)
+		return;
+
 	tr_connector_destroy(group->connector);
 	group->connector = NULL;
 	free(group->transfers);
