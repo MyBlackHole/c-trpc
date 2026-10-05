@@ -11,16 +11,16 @@ extern "C" {
 #endif
 
 /*
- * Application-facing RPC contract.
+ * 面向应用的 RPC 契约。
  *
- * Endpoint/Channel/Executor construction is intentionally not declared here;
- * those are internal engine concerns.
+ * 本头文件有意不声明 Endpoint/Channel/Executor 的构造接口；
+ * 这些属于内部引擎实现。
  */
 
 #define TR_RPC_METADATA_MAX_BYTES 512U
 #define TR_RPC_METADATA_MAX_KEY_LEN 63U
 
-/* RPC-level traffic class. Values intentionally match the current Transport lanes. */
+/* RPC 级流量类别；取值有意与当前 Transport 通道保持一致。 */
 #define TR_RPC_LANE_CONTROL 0U
 #define TR_RPC_LANE_BULK 1U
 
@@ -116,18 +116,18 @@ enum tr_rpc_status {
 #define TR_RPC_STATUS_COUNT 17U
 
 /*
- * Stable, layout-independent RPC lifecycle snapshot.
+ * 稳定且与内部布局无关的 RPC 生命周期快照。
  *
- * Client started: the local Call API returned TR_OK and published a Call
- * capability. Server started: the first valid REQUEST was accepted for a
- * registered Method (including a later interceptor/admission rejection).
+ * Client started：本地 Call API 返回 TR_OK，并发布了一个 Call 能力句柄。
+ * Server started：已注册 Method 接受第一条有效 REQUEST；之后即使被拦截器
+ * 或准入策略拒绝，也仍然计为已经开始。
  *
- * finished is recorded exactly once when this endpoint commits the final
- * application-visible RPC outcome. final_status[] is indexed by enum
- * tr_rpc_status and its sum equals calls_finished.
+ * 当该 Endpoint 提交最终应用可见 RPC 结果时，finished 恰好记录一次。
+ * final_status[] 使用 enum tr_rpc_status 作为索引，所有桶之和等于
+ * calls_finished。
  *
- * calls_inflight is a snapshot gauge (started - finished), not a Runtime slot,
- * executor or transport count.
+ * calls_inflight 是 started - finished 的快照值，不表示 Runtime 槽位、
+ * 执行器或 Transport 数量。
  */
 struct tr_rpc_semantic_stats {
 	uint64_t calls_started;
@@ -137,17 +137,14 @@ struct tr_rpc_semantic_stats {
 };
 
 /*
- * Opaque fixed-size Call capability.
+ * 固定大小的不透明 Call 能力句柄。
  *
- * Applications may copy/pass the whole value by value, but must not inspect or
- * modify _private. A zero-initialized value is invalid. The representation
- * deliberately does not expose Endpoint/slot/generation engine identity.
+ * 应用可以按值复制或传递完整结构，但不得检查或修改 _private。
+ * 零初始化值无效。该表示有意不暴露 Endpoint/槽位/代次等引擎内部标识。
  *
- * This is a borrowed capability, not an ownership reference: copying it does
- * not extend Client/Server/Endpoint lifetime. It must not be used concurrently
- * with owner destroy or after the owning facade has been destroyed. After the
- * Call's terminal callback/handler closure has completed, later continuation
- * use must be treated as invalid/stale.
+ * 这是借用能力，不是所有权引用：复制它不会延长 Client/Server/Endpoint
+ * 生命周期。不得与所有者销毁并发使用，也不得在所属门面销毁后继续使用。
+ * Call 的终止回调或处理器闭包完成后，后续续处理必须视为无效或陈旧操作。
  */
 #define TR_RPC_CALL_PRIVATE_WORDS 2U
 struct tr_rpc_call_handle {
@@ -164,7 +161,7 @@ struct tr_rpc_method_desc {
 	uint32_t request_codec_id;
 	uint32_t response_codec_id;
 
-	/* TR_RPC_LANE_CONTROL or TR_RPC_LANE_BULK. */
+	/* 取值为 TR_RPC_LANE_CONTROL 或 TR_RPC_LANE_BULK。 */
 	uint32_t lane;
 
 	/* 这是单条 message 上限，不是整个 Stream 的累计上限。 */
@@ -187,19 +184,16 @@ typedef void (*tr_rpc_unary_result_cb)(struct tr_rpc_call_handle call,
 				       void *arg);
 
 /*
- * Streaming receive descriptor.
+ * 流式接收描述符。
  *
- * bytes is the only application-visible payload view.  _private is a fixed
- * release capability used only by tr_rpc_message_release(); it keeps the
- * zero-copy TAKE_OWNERSHIP path without exposing Buffer/Stream/Channel types.
+ * bytes 是唯一对应用可见的载荷视图。_private 是固定大小的不透明释放能力，
+ * 仅供 tr_rpc_message_release() 使用；它在不暴露 Buffer/Stream/Channel 类型的
+ * 前提下保留零复制 TAKE_OWNERSHIP 路径。
  *
- * Returning TR_RPC_MESSAGE_TAKE_OWNERSHIP transfers both the RX payload and
- * the internal peer-lifetime pin to the application.  The retained descriptor
- * remains safe to release after peer disconnect and must be released exactly
- * once.  Copy the whole descriptor unchanged when moving that ownership; do
- * not release multiple copies.  Retained messages may delay peer teardown, so
- * applications must release them before expecting Client/Server destroy to
- * complete.
+ * 返回 TR_RPC_MESSAGE_TAKE_OWNERSHIP 时，RX 载荷和内部对端生命周期引用一起
+ * 转移给应用。保留的描述符即使在对端断开后也可以安全释放，但必须且只能释放一次。
+ * 转移该所有权时应原样复制整个描述符，不得释放多个副本。保留消息可能延迟对端销毁，
+ * 因此应用必须先释放全部保留消息，再等待 Client/Server 销毁完成。
  */
 #define TR_RPC_MESSAGE_PRIVATE_WORDS 4U
 struct tr_rpc_message {
@@ -305,7 +299,7 @@ int tr_rpc_call_get_peer_trailing_metadata(
 int tr_rpc_call_get_context(struct tr_rpc_call_handle call,
 			    struct tr_rpc_context *out);
 
-/* Release a retained TR_RPC_MESSAGE_TAKE_OWNERSHIP descriptor. */
+/* 释放通过 TR_RPC_MESSAGE_TAKE_OWNERSHIP 保留的消息描述符。 */
 int tr_rpc_message_release(struct tr_rpc_message *message);
 
 #ifdef __cplusplus
