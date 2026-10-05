@@ -76,9 +76,9 @@ int tr_pipeline_registry_attach_data_route_local_on_owner(
 	struct tr_pipeline **pipeline_out);
 
 /*
- * Cancel one exact RESERVED route after DATA establishment fails before
- * membership becomes live. Already ATTACHED/stale/reused capabilities are not
- * affected.
+ * DATA 建立失败且成员尚未变为存活状态时，
+ * 取消一个精确匹配的 RESERVED 路由。
+ * 已经 ATTACHED、已经过期或已经复用的能力不受影响。
  */
 int tr_pipeline_registry_cancel_data_route(
 	struct tr_pipeline_registry *registry,
