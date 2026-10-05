@@ -450,6 +450,10 @@ internal_queue_batch
 - 默认值必须足够工作；
 - 不能要求普通业务理解内部队列才能正确使用系统。
 
+`memory_budget_bytes` 只有在所有主要 shard-local allocation path 都参加同一
+reserve/release capability 后才能进入 stable semantic config。部分覆盖时只能作为
+internal accounting/evidence，不能对外宣称进程或 shard 内存已经被完整限制。
+
 ---
 
 ## 8. Observability Rules

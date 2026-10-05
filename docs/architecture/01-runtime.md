@@ -56,11 +56,24 @@ Server 先把 public total budget 确定性拆分，再将每个 share 交给 Ru
 Client facade 仍只传入一个 shard config。
 
 Phase 7 的 memory budget 目前是 **internal accounting foundation**，尚未成为 stable
-facade knob。每个 RuntimeShard 持有一个 thread-safe byte budget：
+facade knob。RuntimeShard 是 budget owner，跨模块 primitive 位于
+`src/memory_budget.h`，避免 execution 层反向依赖 Runtime module。
 `limit_bytes == 0` 表示迁移期间只记账、不执行上限；consumer 必须先 reserve，
-成功后才能分配，teardown 再 release exact bytes。peer table 是第一个接入的真实
-consumer，后续 Reactor/Buffer/RPC/Channel 资源会逐步接入。在主要 shard-local
-consumer 覆盖前，不对外宣称这是完整的 shard memory cap。
+成功后才能分配，teardown 再 release exact bytes。
+
+当前已接入：
+
+- Runtime peer table；
+- Reactor 生命周期固定 heap：Reactor object、slot/connection tables、
+  command/completion rings、timer entry/heap、TX/control-TX arrays、RX pool
+  descriptor/storage；
+- Server shard RPC message pool descriptor + on-demand retained capacity；
+- Server shard reassembly fixed descriptor/storage。
+
+Budget 统计的是 c-trpc 主动请求的 userspace heap bytes，不包含 allocator metadata、
+pthread 实现内部内存，也不包含 fd/epoll 等 kernel memory。Client facade 的
+RPC/reassembly pools、RPC Endpoint/Channel lifecycle allocations 仍待接入，因此目前
+仍不对外宣称这是完整的 shard memory cap。
 
 TARGET V1 使用单进程多 Reactor：
 
@@ -170,6 +183,10 @@ execution 已进入 Reactor；peer lifecycle event source 与 detach/finalize �
 事件化。Peer reserve/publish/remove/live snapshot 全部串行化到 Reactor owner。
 Server 仅保留一个小型 `finalizer_lock`，用于 detached finalizer 的 retired
 stats merge 与 shutdown condition；它不保护 peer table 或 buffer pool。
+
+Server teardown 在所有 peer/finalizer quiesce 后先销毁 shard Buffer pools，
+让它们把 reservation 归还给 RuntimeShard budget；最后才 destroy Runtime。
+budget owner 因此严格晚于所有 budget consumer 销毁。
 
 目标逻辑结构：
 

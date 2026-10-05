@@ -1,6 +1,7 @@
 #include "tr/trpc.h"
 #include "../src/execution/buffer.h"
 #include "../src/execution/buffer_internal.h"
+#include "../src/memory_budget.h"
 
 #include <assert.h>
 #include <pthread.h>
@@ -92,6 +93,59 @@ static void test_dynamic_pool(void)
 	tr_buffer_release(b);
 	assert(tr_buffer_pool_free_count(&pool) == 2U);
 	tr_buffer_pool_destroy(&pool);
+}
+
+static void test_budgeted_buffer_pool(void)
+{
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_buffer_pool pool;
+	struct tr_buffer *buffer = NULL;
+	uint64_t descriptor_bytes = (uint64_t)sizeof(struct tr_buffer);
+	uint64_t fixed_bytes =
+		UINT64_C(2) * descriptor_bytes + UINT64_C(2) * 64U;
+
+	tr_memory_budget_init(&budget, fixed_bytes);
+	assert(tr_buffer_pool_init_budgeted(
+		       &pool, 2U, 64U, &budget) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == fixed_bytes);
+	assert(stats.peak_bytes == fixed_bytes);
+	assert(stats.rejection_events == 0U);
+	tr_buffer_pool_destroy(&pool);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(stats.peak_bytes == fixed_bytes);
+
+	/*
+	 * Dynamic pool reserves descriptors at init and storage growth on demand.
+	 * Retained capacity remains accounted after release and is returned only
+	 * when the pool is destroyed.
+	 */
+	tr_memory_budget_init(&budget, descriptor_bytes + 64U);
+	assert(tr_buffer_pool_init_dynamic_budgeted(
+		       &pool, 1U, 128U, &budget) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == descriptor_bytes);
+
+	assert(tr_buffer_acquire(&pool, 64U, &buffer) == TR_OK);
+	assert(buffer != NULL && buffer->capacity == 64U);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == descriptor_bytes + 64U);
+	tr_buffer_release(buffer);
+	buffer = NULL;
+
+	assert(tr_buffer_acquire(&pool, 65U, &buffer) == TR_AGAIN);
+	assert(buffer == NULL);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == descriptor_bytes + 64U);
+	assert(stats.peak_bytes == descriptor_bytes + 64U);
+	assert(stats.rejection_events == 1U);
+
+	tr_buffer_pool_destroy(&pool);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(stats.peak_bytes == descriptor_bytes + 64U);
 }
 
 static void test_large_facade_rpc(void)
@@ -189,6 +243,7 @@ static void test_large_facade_rpc(void)
 int main(void)
 {
 	test_dynamic_pool();
+	test_budgeted_buffer_pool();
 	test_large_facade_rpc();
 	return 0;
 }

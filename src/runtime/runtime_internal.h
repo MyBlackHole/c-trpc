@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #include "../execution/reactor.h"
-#include "memory_budget.h"
+#include "../memory_budget.h"
 
 struct tr_runtime;
 struct tr_runtime_shard;

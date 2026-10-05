@@ -1162,22 +1162,26 @@ int tr_server_create_with_tuning(
 			if (!server_shard->runtime)
 				return TR_ERR_STATE;
 
-			ret = tr_buffer_pool_init_dynamic(
+			ret = tr_buffer_pool_init_dynamic_budgeted(
 				&server_shard->rpc_message_pool,
 				tr_server_budget_share(
 					effective_tuning.rpc_message_pool_count,
 					effective.shard_count, i),
-				effective.limits.max_message_bytes);
+				effective.limits.max_message_bytes,
+				tr_runtime_shard_memory_budget(
+					server_shard->runtime));
 			if (ret != TR_OK)
 				return ret;
 			server_shard->rpc_pool_ready = 1;
 
-			ret = tr_buffer_pool_init(
+			ret = tr_buffer_pool_init_budgeted(
 				&server_shard->reassembly_pool,
 				tr_server_budget_share(
 					effective_tuning.reassembly_pool_count,
 					effective.shard_count, i),
-				effective.limits.max_message_bytes);
+				effective.limits.max_message_bytes,
+				tr_runtime_shard_memory_budget(
+					server_shard->runtime));
 			if (ret != TR_OK)
 				return ret;
 			server_shard->reassembly_pool_ready = 1;
@@ -1867,21 +1871,32 @@ void tr_server_destroy(struct tr_server *server)
 
 	tr_server_wait_peer_finalizers(server);
 
-	if (server->runtime)
-		tr_runtime_destroy(server->runtime);
-
+	/*
+	 * Shard pools are budget consumers; RuntimeShard owns the budget itself.
+	 * Release every pool reservation before destroying the Runtime/budget owner.
+	 */
 	if (server->shards) {
 		for (shard_index = 0; shard_index < server->shard_count;
 		     ++shard_index) {
 			struct tr_server_shard *shard =
 				&server->shards[shard_index];
 
-			if (shard->reassembly_pool_ready)
+			if (shard->reassembly_pool_ready) {
 				tr_buffer_pool_destroy(&shard->reassembly_pool);
-			if (shard->rpc_pool_ready)
+				shard->reassembly_pool_ready = 0;
+			}
+			if (shard->rpc_pool_ready) {
 				tr_buffer_pool_destroy(&shard->rpc_message_pool);
+				shard->rpc_pool_ready = 0;
+			}
 		}
 	}
+
+	if (server->runtime) {
+		tr_runtime_destroy(server->runtime);
+		server->runtime = NULL;
+	}
+
 	free(server->shards);
 	server->shards = NULL;
 	server->shard_count = 0U;

@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 struct tr_reactor;
+struct tr_memory_budget;
 
 struct tr_reactor_limits {
 	uint32_t max_payload_len;
@@ -137,6 +138,9 @@ struct tr_reactor_config {
 
 	/* TR_OBSERVABILITY_* flags; timing is opt-in to protect the hot path. */
 	uint32_t observability_flags;
+
+	/* Internal RuntimeShard accounting owner; NULL keeps standalone mode. */
+	struct tr_memory_budget *memory_budget;
 };
 
 int tr_reactor_create(const struct tr_reactor_config *config,

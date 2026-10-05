@@ -154,9 +154,15 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		} else {
 			ret = TR_OK;
 		}
-		if (ret == TR_OK)
-			ret = tr_reactor_create(&shard_config->reactor, NULL, NULL,
-						NULL, &shard->reactor);
+		if (ret == TR_OK) {
+			struct tr_reactor_config reactor_config =
+				shard_config->reactor;
+
+			reactor_config.memory_budget = &shard->memory_budget;
+			ret = tr_reactor_create(
+				&reactor_config, NULL, NULL, NULL,
+				&shard->reactor);
+		}
 		if (ret == TR_OK &&
 		    shard_config->rpc_executor.endpoint_capacity != 0U)
 			ret = tr_rpc_executor_group_create(
