@@ -21,9 +21,9 @@ struct tr_buffer {
 	struct tr_buffer_pool *pool;
 
 	/*
-	 * Optional one-shot release hook for non-pool buffers. When set,
-	 * tr_buffer_release() invokes it instead of returning the buffer to pool.
-	 * The callback owns final disposal and may free the buffer itself.
+	 * 非资源池 Buffer 的可选单次释放钩子。
+	 * 设置后，tr_buffer_release() 会调用它，而不是把 Buffer 放回资源池。
+	 * 回调负责最终处置，也可以直接释放 Buffer 本身。
 	 */
 	tr_buffer_release_cb release_cb;
 };
@@ -41,7 +41,7 @@ struct tr_buffer_pool {
 	uint32_t peak_in_use;
 	uint64_t exhausted_events;
 
-	/* Optional internal accounting owner; NULL keeps legacy unaccounted mode. */
+	/* 可选的内部记账所有者；NULL 表示保持原有的不记账模式。 */
 	struct tr_memory_budget *memory_budget;
 };
 
