@@ -712,7 +712,18 @@ void tr_client_destroy(struct tr_client *client)
 	}
 
 	if (client->connection_group) {
-		tr_client_group_destroy(client->connection_group);
+		int ret = tr_client_group_destroy(client->connection_group);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		/*
+		 * Connection Group teardown 是 Runtime stop 之前的 owner barrier。
+		 * 若 callback/TX ownership 未收敛，保留 Client/Group/Runtime storage，
+		 * 不能把 lifecycle 错误升级成 UAF。
+		 */
+		if (ret != TR_OK)
+			return;
 		client->connection_group = NULL;
 	}
 
