@@ -546,6 +546,51 @@ static void test_public_connection_group_client_control(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct client_group_wait_probe {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_client *client;
+	int entered;
+	int done;
+	int ret;
+};
+
+static void *client_group_wait_main(void *arg)
+{
+	struct client_group_wait_probe *probe =
+		(struct client_group_wait_probe *)arg;
+
+	pthread_mutex_lock(&probe->lock);
+	probe->entered = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+
+	probe->ret = tr_client_connection_group_wait_drained(
+		probe->client, 5000U);
+
+	pthread_mutex_lock(&probe->lock);
+	probe->done = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+	return NULL;
+}
+
+static void wait_client_group_probe(
+	struct client_group_wait_probe *probe, int *field)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&probe->lock);
+	while (!*field && ret == 0)
+		ret = pthread_cond_timedwait(
+			&probe->cond, &probe->lock, &deadline);
+	assert(*field);
+	pthread_mutex_unlock(&probe->lock);
+}
+
 static void test_public_connection_group_client_data_offer(void)
 {
 	struct tr_server_config server_config;
@@ -556,6 +601,8 @@ static void test_public_connection_group_client_data_offer(void)
 	struct tr_connection_group_id group;
 	struct tr_connection_group_client_stats client_stats;
 	struct tr_connection_group_server_stats server_stats;
+	struct client_group_wait_probe wait_probe;
+	pthread_t wait_thread;
 	uint16_t group_port = 0U;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -732,6 +779,27 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_client_connection_group_wait_drained(
 		       client, 10U) == TR_ERR_TIMEOUT);
 
+	/*
+	 * Exercise the event-driven wait path with one pre-drain READY transfer.
+	 * The small pause is only a scheduling guard: the waiter has already entered
+	 * its public API before release_transfer() publishes the completion edge.
+	 */
+	memset(&wait_probe, 0, sizeof(wait_probe));
+	wait_probe.client = client;
+	assert(pthread_mutex_init(&wait_probe.lock, NULL) == 0);
+	assert(pthread_cond_init(&wait_probe.cond, NULL) == 0);
+	assert(pthread_create(
+		       &wait_thread, NULL, client_group_wait_main,
+		       &wait_probe) == 0);
+	wait_client_group_probe(&wait_probe, &wait_probe.entered);
+	{
+		struct timespec pause = { 0, 10L * 1000L * 1000L };
+		(void)nanosleep(&pause, NULL);
+	}
+	pthread_mutex_lock(&wait_probe.lock);
+	assert(!wait_probe.done);
+	pthread_mutex_unlock(&wait_probe.lock);
+
 	assert(tr_server_connection_group_send_transfer_ready(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
 		       UINT64_C(4300)) == TR_OK);
@@ -771,12 +839,16 @@ static void test_public_connection_group_client_data_offer(void)
 
 	assert(tr_client_connection_group_release_transfer(
 		       client, 5001U) == TR_OK);
+	wait_client_group_probe(&wait_probe, &wait_probe.done);
+	assert(pthread_join(wait_thread, NULL) == 0);
+	assert(wait_probe.ret == TR_OK);
+	pthread_cond_destroy(&wait_probe.cond);
+	pthread_mutex_destroy(&wait_probe.lock);
+
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U) == TR_OK);
-	assert(tr_client_connection_group_wait_drained(
-		       client, 5000U) == TR_OK);
 
 	memset(&client_stats, 0, sizeof(client_stats));
 	assert(tr_client_connection_group_get_stats(
