@@ -99,8 +99,9 @@ struct tr_rpc_task {
 	struct tr_buffer *payload;
 
 	/*
-	 * Worker execution snapshot.  Mutable Call/Endpoint state stays owned by
-	 * the Reactor; workers only consume these copied capabilities.
+	 * 工作线程执行快照。
+	 * 可变 Call/Endpoint 状态始终由 Reactor 拥有，
+	 * 工作线程只消费这些已经复制的能力。
 	 */
 	struct tr_stream_handle stream;
 	union {
@@ -179,9 +180,8 @@ struct tr_rpc_call_slot {
 	struct tr_rpc_call_callbacks callbacks;
 
 	/*
-	 * At most one Server executor task may wait outside the executor queue.
-	 * This keeps overload backpressure bounded by max_calls without allocating
-	 * an unbounded side queue.
+	 * 每个 Server Call 最多只有一个执行器任务可以在执行器队列外等待。
+	 * 这样无需分配无界旁路队列，也能让过载背压受 max_calls 约束。
 	 */
 	struct tr_rpc_task pending_executor_task;
 	int pending_executor_task_valid;
@@ -258,7 +258,7 @@ struct tr_rpc_executor {
 	uint32_t ready_peak;
 
 	struct tr_rpc_executor_group *group;
-	/* Protected by executor-group lock; one intrusive scheduling node/Endpoint. */
+	/* 由执行器组锁保护；每个 Endpoint 只有一个侵入式调度节点。 */
 	struct tr_rpc_endpoint *group_ready_next;
 	int group_enqueued;
 	int stopping;
@@ -271,9 +271,10 @@ struct tr_rpc_executor_group {
 	pthread_t *threads;
 
 	/*
-	 * Intrusive ready queue: every Endpoint can publish at most one scheduling
-	 * token via executor.group_enqueued. Queue capacity therefore follows
-	 * Endpoint lifetime bounds instead of a second fixed ring that can fill.
+	 * 侵入式就绪队列：每个 Endpoint 通过 executor.group_enqueued
+	 * 最多发布一个调度令牌。
+	 * 因此队列容量跟随 Endpoint 生命周期上限，
+	 * 不需要再维护一个可能被填满的固定环形队列。
 	 */
 	struct tr_rpc_endpoint *ready_head;
 	struct tr_rpc_endpoint *ready_tail;
@@ -290,9 +291,9 @@ TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 			tr_rpc_executor_group_destroy)
 
 struct tr_rpc_endpoint {
-	/* Call/Method/protocol state. */
+	/* Call/Method/协议状态。 */
 	pthread_mutex_t lock;
-	/* strong-ref wait + detached finalizer lifecycle only. */
+	/* 仅用于强引用等待和已解除关联最终清理器生命周期。 */
 	pthread_mutex_t ref_lock;
 	pthread_cond_t ref_cond;
 	int deadline_stopping;
@@ -320,7 +321,7 @@ struct tr_rpc_endpoint {
 	tr_rpc_endpoint_detached_finalizer detached_finalizer;
 	void *detached_finalizer_arg;
 
-	/* Owner-visible coalescing state for retrying bounded pending tasks. */
+	/* 所有者可见的合并状态，用于重试有界等待任务。 */
 	int pending_executor_work;
 	int pending_retry_scheduled;
 	uint32_t pending_retry_cursor;
@@ -586,9 +587,9 @@ static int tr_rpc_build_outbound_metadata_locked(
 		return TR_ERR_INVALID;
 
 	/*
-	 * Metadata scope is determined by the RPC envelope:
-	 *   first REQUEST/RESPONSE -> initial metadata
-	 *   final STATUS           -> trailing metadata
+	 * 元数据范围由 RPC 信封决定：
+	 *   第一条 REQUEST/RESPONSE -> 初始元数据
+	 *   最终 STATUS             -> 尾部元数据
 	 */
 	if (wire_type == TR_RPC_WIRE_STATUS) {
 		len = call->local_trailing_metadata_len;
@@ -1356,11 +1357,11 @@ static int tr_rpc_run_interceptor_locked(
 }
 
 /*
- * Streaming final STATUS is the application terminal barrier.
+ * 流式调用的最终 STATUS 是应用终止屏障。
  *
- * The peer must identify the same Method/codec as preceding RESPONSE frames.
- * For a successful ONE response, exactly one RESPONSE must have arrived before
- * STATUS(OK). Error STATUS may terminate before producing the nominal response.
+ * 对端必须使用与此前 RESPONSE 帧相同的 Method/编解码器标识。
+ * 对成功的 ONE 响应，STATUS(OK) 之前必须恰好已经收到一条 RESPONSE。
+ * 错误 STATUS 可以在名义响应产生之前终止 Call。
  */
 static int tr_rpc_validate_stream_status_locked(
 	const struct tr_rpc_call_slot *call,
@@ -1578,11 +1579,11 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 }
 
 /*
- * Server Unary overload is a protocol-level rejection, not a connection
- * failure. The request handler has not run when executor enqueue returns
- * TR_AGAIN, so it is safe to return RESOURCE_EXHAUSTED immediately.
+ * Server 一元调用过载属于协议级拒绝，不是连接故障。
+ * 执行器入队返回 TR_AGAIN 时，请求处理器尚未执行，
+ * 因此可以安全地立即返回 RESOURCE_EXHAUSTED。
  *
- * endpoint->lock must already be held by the Reactor owner thread.
+ * Reactor 所有者线程必须已经持有 endpoint->lock。
  */
 static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 				      struct tr_rpc_call_slot *call,
@@ -1608,19 +1609,19 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
 	/*
-	 * TR_AGAIN means pending_tx is retained for the existing WRITABLE/flush
-	 * retry path. The overload decision itself has already been accepted.
+	 * TR_AGAIN 表示 pending_tx 会保留给现有 WRITABLE/flush 重试路径。
+	 * 过载决策本身已经被接受。
 	 */
 	return ret == TR_AGAIN ? TR_OK : ret;
 }
 
 /*
- * A first streaming message that cannot enter the bounded Server executor is
- * still an admission failure: no application callback has run yet. Preserve
- * that distinction by returning final RESOURCE_EXHAUSTED instead of turning
- * executor pressure into a transport/connection failure.
+ * 第一条流式消息如果无法进入有界 Server 执行器，
+ * 仍然属于准入失败，因为此时还没有执行任何应用回调。
+ * 应返回最终 RESOURCE_EXHAUSTED，
+ * 不能把执行器压力伪装成传输/连接故障。
  *
- * endpoint->lock must already be held by the Reactor owner.
+ * Reactor 所有者必须已经持有 endpoint->lock。
  */
 static int
 tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
@@ -1673,11 +1674,11 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 }
 
 /*
- * Once application callbacks may already have run, overload is not an
- * admission rejection.  Stop admitting further callbacks for this Call,
- * return a final RESOURCE_EXHAUSTED status, and keep the physical connection
- * alive.  Any one pending RX task is dropped without returning Stream credit:
- * the Stream is being terminated, so its flow-control state will be retired.
+ * 一旦应用回调可能已经执行，后续过载就不再属于准入拒绝。
+ * 此时停止为该 Call 准入更多回调，
+ * 返回最终 RESOURCE_EXHAUSTED，同时保持物理连接存活。
+ * 已等待的单个 RX 任务会直接丢弃且不归还 Stream 额度：
+ * 该 Stream 正在终止，其流量控制状态也会随之退役。
  */
 static int
 tr_rpc_fail_stream_midstream_overload_locked(
@@ -1713,11 +1714,11 @@ tr_rpc_fail_stream_midstream_overload_locked(
 	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
 
 	/*
-	 * The application Call is terminal as soon as bounded continuation
-	 * admission is exhausted. Queue on_close behind any already-admitted
-	 * tasks now, rather than depending on which TCP half-close arrives last.
-	 * Keep the protocol Call slot alive until the Stream itself becomes
-	 * terminal so raced peer data is still recognized as overload fallout.
+	 * 有界续处理准入耗尽时，应用 Call 立即进入终止状态。
+	 * 此时把 on_close 排在已经准入的任务之后，
+	 * 不依赖哪一个 TCP 半关闭最后到达。
+	 * 协议 Call 槽位必须一直保留到 Stream 自身终止，
+	 * 这样竞争到达的对端数据仍会被识别为过载后续影响。
 	 */
 	(void)tr_rpc_notify_terminal_locked(endpoint, slot, call, status);
 
@@ -1783,8 +1784,9 @@ static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
 		return TR_ERR_INVALID;
 
 	/*
-	 * Caller holds endpoint->executor.lock, while group_ready_next is protected
-	 * solely by group->lock. group_enqueued prevents duplicate publication.
+	 * 调用方持有 endpoint->executor.lock；
+	 * group_ready_next 只由 group->lock 保护。
+	 * group_enqueued 防止重复发布。
 	 */
 #ifndef NDEBUG
 	assert(!endpoint->executor.group_enqueued);
@@ -1842,9 +1844,8 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	    executor->queued_count >=
 		    executor->capacity - executor->continuation_reserve) {
 		/*
-		 * Keep the last reserve nodes available for work belonging to Calls
-		 * that have already crossed admission. Existing first-task rejection
-		 * paths translate this TR_AGAIN into RESOURCE_EXHAUSTED.
+		 * 保留最后一部分节点给已经通过准入的 Call 使用。
+		 * 现有首任务拒绝路径会把这里的 TR_AGAIN 转换为 RESOURCE_EXHAUSTED。
 		 */
 		executor->admission_limit_hits++;
 		ret = TR_AGAIN;
@@ -2053,9 +2054,9 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 }
 
 /*
- * Store exactly one task per Call outside the bounded executor.  The task
- * snapshot owns any RX payload until it is admitted or the Call terminates.
- * endpoint->lock must already be held.
+ * 每个 Call 在有界执行器外恰好最多保存一个任务。
+ * 该任务快照在真正准入或 Call 终止前拥有对应 RX 载荷。
+ * 调用前必须已经持有 endpoint->lock。
  */
 static int
 tr_rpc_store_pending_executor_task_locked(struct tr_rpc_endpoint *endpoint,
@@ -2122,10 +2123,11 @@ static int tr_rpc_stream_release_payload_on_owner(void *arg)
 }
 
 /*
- * RX credit belongs to Stream protocol state, so worker threads return payload
- * ownership to the Reactor owner instead of mutating Stream under channel->lock.
- * If the Reactor can no longer accept commands, it cannot consume the payload;
- * release the buffer locally so shutdown cannot leak memory.
+ * RX 额度属于 Stream 协议状态，
+ * 因此工作线程把载荷所有权归还 Reactor 所有者，
+ * 而不是在 channel->lock 下直接修改 Stream。
+ * 如果 Reactor 已经不能再接受命令，就无法消费该载荷；
+ * 此时在本地释放 Buffer，避免关闭流程泄漏内存。
  */
 static int tr_rpc_release_stream_payload(struct tr_stream_handle stream,
 					 struct tr_buffer *payload)
@@ -2203,9 +2205,9 @@ static int tr_rpc_message_bind_internal(
 		return TR_ERR_INVALID;
 
 	/*
-	 * A retained public message may outlive the worker task and even the peer
-	 * connection. Pin Endpoint before publishing the descriptor so its
-	 * borrowed Channel remains alive until tr_rpc_message_release().
+	 * 被保留的公开消息可能比工作任务甚至对端连接存活更久。
+	 * 发布描述符之前先固定 Endpoint 生命周期，
+	 * 使其借用的 Channel 一直存活到 tr_rpc_message_release()。
 	 */
 	ret = tr_rpc_endpoint_get(endpoint);
 	if (ret != TR_OK)
@@ -2367,10 +2369,11 @@ static int tr_rpc_defer_task_completion(
 }
 
 /*
- * Executor node capacity becomes available when a worker takes a queued task,
- * not when that task later finishes.  Workers therefore coalesce one owner
- * completion after take(); the owner retries pending per-Call tasks without
- * inverting the endpoint->lock -> executor->lock order.
+ * 工作线程从队列取走任务时，执行器节点容量就已经重新可用，
+ * 不需要等任务实际执行完成。
+ * 因此工作线程在 take() 后合并发送一次所有者完成事件；
+ * 所有者再重试每 Call 等待任务，同时保持
+ * endpoint->lock -> executor->lock 的锁顺序不反转。
  */
 static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 {
@@ -2389,9 +2392,10 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 	scan_start = endpoint->pending_retry_cursor;
 
 	/*
-	 * Freeze this pass's start position. Successful admission updates the
-	 * cursor for the NEXT pass only; using the mutable cursor in this loop
-	 * would skip the slot immediately after every successful retry.
+	 * 固定本轮扫描的起始位置。
+	 * 成功准入只更新下一轮使用的游标；
+	 * 如果当前循环直接使用可变游标，
+	 * 每次成功重试后都会跳过紧随其后的槽位。
 	 */
 	for (n = 0; n < max_calls; ++n) {
 		uint32_t slot = (scan_start + n) % max_calls;
@@ -2399,8 +2403,8 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 		int ret = TR_OK;
 
 		/*
-		 * Per-Call RX/half-close work keeps precedence over the terminal
-		 * callback obligation. This preserves callback ordering.
+		 * 每 Call 的 RX/半关闭工作优先于终止回调义务，
+		 * 以保持回调顺序。
 		 */
 		if (call->pending_executor_task_valid) {
 			struct tr_rpc_task task = call->pending_executor_task;
@@ -2486,8 +2490,8 @@ static void tr_rpc_retry_pending_executor_on_owner(void *arg)
 				break;
 			} else {
 				/*
-				 * Executor teardown cannot deliver application
-				 * callbacks; do not keep a Call permanently pinned.
+				 * 执行器销毁期间无法继续投递应用回调，
+				 * 因此不能永久固定一个 Call。
 				 */
 				call->close_notify_pending = 0;
 			}
@@ -2744,8 +2748,9 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 		return tr_rpc_executor_run_server_unary(endpoint, task);
 
 	/*
-	 * Cancellation is executor scheduling metadata, not a worker read of
-	 * mutable RPC Call state.  Close/result/event notifications must still run.
+	 * 取消状态属于执行器调度元数据，
+	 * 不是工作线程直接读取可变 RPC Call 状态。
+	 * 关闭/结果/事件通知仍然必须执行。
 	 */
 	if (task->type != TR_RPC_TASK_SERVER_CLOSE &&
 	    task->type != TR_RPC_TASK_CLIENT_UNARY_RESULT &&
@@ -3322,8 +3327,9 @@ void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 		return;
 
 	/*
-	 * A group worker cannot synchronously join the group it belongs to.
-	 * Facade destroy rejects this context earlier; keep the engine defensive.
+	 * 组工作线程不能同步等待自己所属工作线程组退出。
+	 * 门面销毁会更早拒绝这种执行上下文；
+	 * 引擎内部仍保留防御性检查。
 	 */
 	if (tr_rpc_in_worker_context())
 		return;
@@ -3591,9 +3597,10 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 
 	handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
 	/*
-	 * Remove the expired root before cancellation so any failure/terminal
-	 * path cannot rediscover the same deadline. Explicit re-arm uses the
-	 * timer queue version rule, so returning zero below cannot overwrite it.
+	 * 执行取消前先移除已经到期的堆根，
+	 * 防止任意失败/终止路径再次发现同一个截止时间。
+	 * 显式重新启动使用定时器队列版本规则，
+	 * 因此下面返回零不会覆盖显式操作。
 	 */
 	(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
 	tr_rpc_deadline_rearm_locked(endpoint);
@@ -3683,10 +3690,9 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	    (wire.type == TR_RPC_WIRE_REQUEST ||
 	     (call->executor_overloaded && wire.type == TR_RPC_WIRE_CANCEL))) {
 		/*
-		 * The rejection path owns final STATUS + local half-close ordering.
-		 * A peer may race additional request data before observing STATUS;
-		 * discard it without inserting an early close ahead of the pending
-		 * rejection frame.
+		 * 拒绝路径拥有最终 STATUS + 本地半关闭的顺序。
+		 * 对端在观察到 STATUS 前可能竞争发送更多请求数据；
+		 * 直接丢弃这些数据，不能在等待发送的拒绝帧之前插入提前关闭。
 		 */
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_STREAM_DATA_RELEASE;
@@ -3810,9 +3816,9 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		ret = tr_rpc_queue_task_locked(endpoint, call, &task);
 		if (ret == TR_AGAIN && first_message) {
 			/*
-			 * Before the first executor task is admitted, no Server handler
-			 * has run. Report bounded admission pressure explicitly for both
-			 * Unary and Streaming Calls without poisoning the connection.
+			 * 第一条执行器任务准入前，还没有执行任何 Server 处理器。
+			 * 对一元和流式 Call 都应显式报告有界准入压力，
+			 * 同时不能污染整个连接。
 			 */
 			if (call->is_unary)
 				ret = tr_rpc_reject_unary_locked(
@@ -3941,9 +3947,9 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		}
 
 		/*
-		 * STATUS metadata is always trailing metadata, regardless of whether
-		 * RESPONSE messages preceded it. This is deliberately separate from
-		 * first-response initial metadata.
+		 * STATUS 元数据始终属于尾部元数据，
+		 * 无论此前是否已经发送 RESPONSE。
+		 * 它与第一条响应的初始元数据有意保持独立。
 		 */
 		ret = tr_rpc_import_peer_metadata_locked(
 			endpoint, call, wire.type, metadata, metadata_len);
@@ -4031,10 +4037,11 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 		pthread_mutex_unlock(&endpoint->lock);
 		/*
-		 * V1 identifies an RPC Method in the first REQUEST frame. If a peer
-		 * half-closes before publishing that frame (for example zero-message
-		 * MANY request or cancel-before-first-request), there is no RPC Call
-		 * to own the Stream. Close our half so the Channel slot cannot leak.
+		 * V1 在第一条 REQUEST 帧中识别 RPC Method。
+		 * 如果对端在发布该帧之前就半关闭
+		 * （例如零消息 MANY 请求或第一条请求前取消），
+		 * 就不存在可以拥有该 Stream 的 RPC Call。
+		 * 此时关闭本端半连接，避免 Channel 槽位泄漏。
 		 */
 		if (close_unbound)
 			(void)tr_stream_close(stream);
@@ -4062,9 +4069,9 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 	if (event == TR_STREAM_EVENT_WRITABLE) {
 		/*
-		 * final STATUS is an application terminal barrier. Transport may still
-		 * report writable before the close event is consumed, but no new
-		 * application continuation is legal after STATUS.
+		 * 最终 STATUS 是应用终止屏障。
+		 * 在关闭事件被消费前，Transport 仍可能报告可写，
+		 * 但 STATUS 之后不允许再产生新的应用续处理。
 		 */
 		if (call->final_status_seen || call->final_status_sent) {
 			pthread_mutex_unlock(&endpoint->lock);
@@ -4141,11 +4148,11 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			   endpoint->config.role == TR_RPC_CLIENT &&
 			   !call->final_status_seen) {
 			/*
-			 * FINISHED is the application terminal barrier. A normal Server
-			 * sends STATUS before closing its response half, so the subsequent
-			 * transport half-close must not create an event after FINISHED.
-			 * REMOTE_CLOSED remains useful only when the peer half-closes
-			 * before a final STATUS has been observed.
+			 * FINISHED 是应用终止屏障。
+			 * 正常 Server 会先发送 STATUS，再关闭响应方向，
+			 * 因此随后到达的传输半关闭不能在 FINISHED 后再生成事件。
+			 * 只有在观察到最终 STATUS 之前对端就半关闭时，
+			 * REMOTE_CLOSED 才仍然有意义。
 			 */
 			ret = tr_rpc_queue_client_event_locked(
 				endpoint, slot, call,
@@ -4165,9 +4172,10 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 						       TR_RPC_STATUS_UNAVAILABLE);
 
 		/*
-		 * Stream lifetime ends here even when Call lifetime continues while
-		 * executor callbacks/task_refs drain. Release the Stream-slot index
-		 * immediately so Channel may recycle that slot for a new generation.
+		 * 即使 Call 生命周期还要继续等待执行器回调/task_refs 排空，
+		 * Stream 生命周期也在这里结束。
+		 * 立即释放 Stream 槽位索引，
+		 * 使 Channel 可以为新代次复用该槽位。
 		 */
 		tr_rpc_unbind_call_stream_locked(endpoint, slot, call);
 
@@ -4269,8 +4277,8 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 			continue;
 
 		/*
-		 * The failed Channel lane no longer has a live Stream event source.
-		 * Detach the slot index before terminal Call callbacks drain.
+		 * 故障 Channel 通道已经不再有活动 Stream 事件源。
+		 * 在终止 Call 回调排空前先解除槽位索引关联。
 		 */
 		tr_rpc_unbind_call_stream_locked(endpoint, i, call);
 		(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
@@ -4576,17 +4584,17 @@ static int tr_rpc_endpoint_detach_on_owner(void *arg)
 	pthread_mutex_unlock(&endpoint->ref_lock);
 
 	/*
-	 * No new Channel callback can acquire Endpoint work after this point.
-	 * Owner serialization means a previously executing Channel/RPC callback
-	 * has already returned before this detach operation runs.
+	 * 到达这里后，不再允许新的 Channel 回调取得 Endpoint 工作。
+	 * 由于所有者串行化，之前正在执行的 Channel/RPC 回调
+	 * 在本次解除关联操作运行前已经返回。
 	 */
 	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
 	tr_rpc_deadline_destroy(endpoint);
 
 	/*
-	 * Group-backed Server executors do not join here. stopping closes new
-	 * admission while already queued/running task references are allowed to
-	 * drain; finalize waits for those refs outside the Reactor owner.
+	 * 由执行器组支持的 Server 执行器不会在这里等待工作线程退出。
+	 * stopping 关闭新的准入，同时允许已经排队/运行的任务引用自然排空；
+	 * finalize 在 Reactor 所有者之外等待这些引用。
 	 */
 	tr_rpc_executor_shutdown(endpoint);
 	return TR_OK;
@@ -4650,8 +4658,8 @@ void tr_rpc_endpoint_finalize_detached_with_stats(
 	tr_rpc_endpoint_wait_owner_only(endpoint);
 
 	/*
-	 * Existing worker/task references are now gone. Capture final counters
-	 * before dropping the owner's initial strong reference.
+	 * 现有工作线程/任务引用此时已经全部消失。
+	 * 释放所有者初始强引用之前先采集最终计数器。
 	 */
 	if (stats)
 		(void)tr_rpc_endpoint_get_stats(endpoint, stats);
@@ -4665,8 +4673,8 @@ void tr_rpc_endpoint_destroy_with_stats(
 		return;
 
 	/*
-	 * Synchronous destroy may wait for owner callbacks and executor refs, so
-	 * it is invalid from either execution context it would be waiting on.
+	 * 同步销毁可能等待所有者回调和执行器引用，
+	 * 因此不能从任何自身将被等待的执行上下文中调用。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return;
@@ -4688,8 +4696,8 @@ void tr_rpc_endpoint_destroy_with_stats(
 	tr_rpc_endpoint_wait_owner_only(endpoint);
 
 	/*
-	 * All task references are gone, so this captures final executor counters
-	 * and histograms rather than a pre-drain approximation.
+	 * 全部任务引用已经消失，因此这里采集的是最终执行器计数器和直方图，
+	 * 而不是排空前的近似值。
 	 */
 	if (stats)
 		(void)tr_rpc_endpoint_get_stats(endpoint, stats);
@@ -5328,10 +5336,10 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 	}
 	if (cardinality == TR_RPC_MANY && call->tx_count == 0U) {
 		/*
-		 * V1 has no separate Method-open envelope: the first REQUEST carries
-		 * service_id/method_id. Zero-message request streams therefore cannot
-		 * be represented yet and must not silently half-close an anonymous
-		 * Channel Stream.
+		 * V1 没有独立 Method 打开信封：
+		 * 第一条 REQUEST 携带 service_id/method_id。
+		 * 因此目前无法表示零消息请求流，
+		 * 也不能静默半关闭一个没有 RPC Method 身份的 Channel Stream。
 		 */
 		ret = TR_ERR_STATE;
 		goto out;
@@ -5409,10 +5417,9 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 		goto out;
 	}
 	/*
-	 * V1 initial response metadata is carried only by the first RESPONSE.
-	 * If a MANY-response method finishes with zero responses, STATUS can only
-	 * carry trailers; silently reclassifying initial metadata would make the
-	 * two scopes ambiguous.
+	 * V1 初始响应元数据只由第一条 RESPONSE 携带。
+	 * 如果 MANY 响应方法在零响应时结束，STATUS 只能携带尾部元数据；
+	 * 静默把初始元数据重新分类为尾部元数据会让两个范围产生歧义。
 	 */
 	if (call->tx_count == 0U &&
 	    call->local_initial_metadata_len != 0U) {
@@ -5827,9 +5834,9 @@ int tr_rpc_message_release(struct tr_rpc_message *message)
 		return ret;
 
 	/*
-	 * Consume the public capability exactly once. Endpoint remains pinned
-	 * while returning Stream RX credit so stream.channel cannot become stale
-	 * because of object destruction during this release.
+	 * 公开能力必须且只能消费一次。
+	 * 归还 Stream RX 额度期间继续固定 Endpoint 生命周期，
+	 * 防止本次释放过程中对象销毁导致 stream.channel 变成陈旧引用。
 	 */
 	memset(message, 0, sizeof(*message));
 	ret = tr_rpc_release_stream_payload(stream, storage);
