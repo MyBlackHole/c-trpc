@@ -1236,13 +1236,17 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 		(struct tr_client_group_drain_request *)arg;
 	struct tr_client_group *group = request->group;
 	uint32_t i;
+	int final = TR_OK;
 
 	if (!group->control.reactor)
 		return TR_ERR_STATE;
-	if (group->draining)
+	if (group->draining) {
+		tr_client_group_publish_drain_progress_on_owner(group);
 		return TR_OK;
+	}
 
 	group->draining = 1;
+	tr_client_group_publish_drain_start_on_owner(group);
 
 	if (group->connector_slot != TR_CLIENT_GROUP_NO_SLOT) {
 		uint32_t slot = group->connector_slot;
@@ -1250,8 +1254,10 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 		uint64_t message_id;
 		int ret;
 
-		if (slot >= group->data_capacity)
-			return TR_ERR_STATE;
+		if (slot >= group->data_capacity) {
+			final = TR_ERR_STATE;
+			goto out;
+		}
 		route = group->data[slot].route;
 		message_id = group->data[slot].offer_message_id;
 		(void)tr_connector_cancel(group->connector);
@@ -1264,7 +1270,8 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 			(void)tr_reactor_abort_on_owner(
 				group->control,
 				ret < 0 ? ret : TR_ERR_STATE);
-			return ret;
+			final = ret;
+			goto out;
 		}
 	}
 
@@ -1282,10 +1289,14 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 			(void)tr_reactor_abort_on_owner(
 				group->control,
 				ret < 0 ? ret : TR_ERR_STATE);
-			return ret;
+			final = ret;
+			goto out;
 		}
 	}
-	return TR_OK;
+
+out:
+	tr_client_group_publish_drain_progress_on_owner(group);
+	return final;
 }
 
 int tr_client_group_begin_drain(struct tr_client_group *group)
@@ -1299,6 +1310,95 @@ int tr_client_group_begin_drain(struct tr_client_group *group)
 		group->config.owner,
 		tr_client_group_begin_drain_on_owner, &request);
 }
+int tr_client_group_wait_drained(
+	struct tr_client_group *group, uint32_t timeout_ms)
+{
+	struct timespec deadline;
+	uint64_t generation;
+	int timed = timeout_ms != 0U;
+	int result = TR_OK;
+
+	if (!group)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
+	if (timed) {
+		uint64_t now_ns;
+		uint64_t timeout_ns;
+		uint64_t deadline_ns;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+			return TR_ERR_SYS;
+		now_ns = (uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
+			 (uint64_t)deadline.tv_nsec;
+		timeout_ns = (uint64_t)timeout_ms * UINT64_C(1000000);
+		deadline_ns = UINT64_MAX - now_ns < timeout_ns ?
+			UINT64_MAX : now_ns + timeout_ns;
+		deadline.tv_sec =
+			(time_t)(deadline_ns / UINT64_C(1000000000));
+		deadline.tv_nsec =
+			(long)(deadline_ns % UINT64_C(1000000000));
+	}
+
+	pthread_mutex_lock(&group->drain_wait_lock);
+	if (group->drain_wait_closed) {
+		pthread_mutex_unlock(&group->drain_wait_lock);
+		return TR_ERR_CLOSED;
+	}
+	if (!group->drain_wait_active || group->drain_generation == 0U) {
+		pthread_mutex_unlock(&group->drain_wait_lock);
+		return TR_ERR_STATE;
+	}
+
+	generation = group->drain_generation;
+	if (group->drained_generation == generation) {
+		pthread_mutex_unlock(&group->drain_wait_lock);
+		return TR_OK;
+	}
+	if (group->drain_waiters == UINT32_MAX) {
+		pthread_mutex_unlock(&group->drain_wait_lock);
+		return TR_ERR_STATE;
+	}
+	group->drain_waiters++;
+
+	while (group->drained_generation != generation) {
+		int ret;
+
+		if (group->drain_wait_closed) {
+			result = TR_ERR_CLOSED;
+			break;
+		}
+		if (!group->drain_wait_active ||
+		    group->drain_generation != generation) {
+			result = TR_ERR_STALE;
+			break;
+		}
+
+		if (timed)
+			ret = pthread_cond_timedwait(
+				&group->drain_wait_cond,
+				&group->drain_wait_lock, &deadline);
+		else
+			ret = pthread_cond_wait(
+				&group->drain_wait_cond,
+				&group->drain_wait_lock);
+		if (ret == 0)
+			continue;
+		if (timed && ret == ETIMEDOUT) {
+			result = TR_ERR_TIMEOUT;
+			break;
+		}
+		result = TR_ERR_SYS;
+		break;
+	}
+
+	assert(group->drain_waiters != 0U);
+	group->drain_waiters--;
+	pthread_mutex_unlock(&group->drain_wait_lock);
+	return result;
+}
+
 
 struct tr_client_group_stats_request {
 	struct tr_client_group *group;
