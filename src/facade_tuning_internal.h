@@ -9,13 +9,12 @@ struct tr_server;
 struct tr_server_config;
 
 /*
- * Repository-internal implementation tuning.
+ * 仓库内部的实现层调优参数。
  *
- * These capacities describe current Reactor/pool implementation details, not
- * application protocol semantics. They intentionally stay out of the installed
- * SDK. Zero fields are normalized to internal defaults.
+ * 这些容量描述当前 Reactor/资源池的实现细节，而不是应用协议语义。
+ * 它们有意不进入已安装 SDK；取值为 0 的字段会归一化为内部默认值。
  *
- * Server values are aggregate budgets split deterministically across shards.
+ * Server 侧数值是聚合预算，并按确定性规则拆分到各 shard。
  */
 struct tr_facade_tuning {
 	uint32_t command_capacity;
