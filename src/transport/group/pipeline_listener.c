@@ -646,40 +646,6 @@ int tr_pipeline_listener_listen_ipv4(
 	return TR_OK;
 }
 
-static int tr_pipeline_listener_begin_drain_on_owner(void *arg)
-{
-	struct tr_pipeline_listener *listener =
-		(struct tr_pipeline_listener *)arg;
-	int result = TR_OK;
-	int ret;
-
-	if (!listener)
-		return TR_ERR_INVALID;
-	if (listener->draining)
-		return TR_OK;
-
-	/*
-	 * listener_registered/listen_fd/draining 都属于 Reactor owner 状态。
-	 * unregister 与状态发布必须位于同一个 owner turn，不能让外部 lifecycle
-	 * 线程在同步 unregister 返回后继续直接写这些字段。
-	 */
-	if (listener->listener_registered) {
-		ret = tr_reactor_listener_unregister(
-			listener->config.owner, listener->listen_fd);
-		if (ret != TR_OK)
-			result = ret;
-		else
-			listener->listener_registered = 0;
-	}
-	if (!listener->listener_registered && listener->listen_fd >= 0) {
-		tr_socket_close(&listener->listen_fd);
-		listener->bound_port = 0U;
-	}
-	if (result == TR_OK)
-		listener->draining = 1;
-	return result;
-}
-
 static int tr_pipeline_listener_publish_drained_admission(void *arg)
 {
 	struct tr_pipeline_listener *listener =
@@ -694,43 +660,35 @@ static int tr_pipeline_listener_publish_drained_admission(void *arg)
 	return TR_OK;
 }
 
-/*
- * tr_reactor_call() 返回 CLOSED 时，Reactor 可能尚未启动，也可能正在停止。
- * 只有 unregister 成功，才能证明对应 listener source 已经没有 owner callback
- * 可以继续取得 listener。随后再通过 call_or_stopped 发布本地状态：
- * - 已完全 stopped：在 ctl_lock 排他区间直接发布；
- * - 恰好重新 start：重新回到 owner 串行化。
- */
-static int
-tr_pipeline_listener_begin_drain_after_closed(struct tr_pipeline_listener *listener)
+static int tr_pipeline_listener_begin_drain_on_owner(void *arg)
 {
-	int ret;
+	struct tr_pipeline_listener *listener =
+		(struct tr_pipeline_listener *)arg;
 
-	if (listener->listener_registered) {
-		ret = tr_reactor_listener_unregister(
-			listener->config.owner, listener->listen_fd);
-		if (ret != TR_OK)
-			return ret;
-	}
+	if (!listener)
+		return TR_ERR_INVALID;
 
-	return tr_reactor_call_or_stopped(
-		listener->config.owner,
+	/*
+	 * 即使已经 draining 也经过 Reactor listener ownership 检查。source 已
+	 * detach 时 unregister_call 仍执行 publication，因此该操作天然幂等。
+	 */
+	return tr_reactor_listener_unregister_call(
+		listener->config.owner, tr_pipeline_listener_on_ready, listener,
 		tr_pipeline_listener_publish_drained_admission, listener);
 }
 
 int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
 {
-	int ret;
-
 	if (!listener)
 		return TR_ERR_INVALID;
 
-	ret = tr_reactor_call(
-		listener->config.owner,
-		tr_pipeline_listener_begin_drain_on_owner, listener);
-	if (ret != TR_ERR_CLOSED)
-		return ret;
-	return tr_pipeline_listener_begin_drain_after_closed(listener);
+	/*
+	 * running/stopped 都只在 Reactor 的串行化域读取和修改 Listener
+	 * lifecycle state；外部线程不直接读取 listener_registered/listen_fd。
+	 */
+	return tr_reactor_listener_unregister_call(
+		listener->config.owner, tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_publish_drained_admission, listener);
 }
 
 struct tr_pipeline_listener_stop_request {
@@ -790,11 +748,15 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 	return result;
 }
 
-static int tr_pipeline_listener_check_stopped(void *arg)
+static int tr_pipeline_listener_stop_stopped(void *arg)
 {
 	struct tr_pipeline_listener *listener =
 		(struct tr_pipeline_listener *)arg;
+	int ret;
 
+	ret = tr_pipeline_listener_publish_drained_admission(listener);
+	if (ret != TR_OK)
+		return ret;
 	if (listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return TR_ERR_STATE;
@@ -817,16 +779,14 @@ int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 		return ret;
 
 	/*
-	 * 支持“先 listen、Reactor 尚未 start 就销毁”的合法构造回滚路径。
-	 * 正在 stop 的 Reactor 不允许越过 barrier；只有 listener unregister
-	 * 已经成功后才进入 stopped/restarted 安全发布与计数检查。
+	 * tr_reactor_call() 的 CLOSED 同时覆盖“未启动/已停止”和“正在停止”。
+	 * unregister_call 只允许前者进入 ctl_lock direct path；正在停止时继续
+	 * 返回 CLOSED，绝不越过 owner teardown barrier。detach、状态发布和
+	 * counter 检查在同一串行化区间完成。
 	 */
-	ret = tr_pipeline_listener_begin_drain_after_closed(listener);
-	if (ret != TR_OK)
-		return ret;
-	return tr_reactor_call_or_stopped(
-		listener->config.owner,
-		tr_pipeline_listener_check_stopped, listener);
+	return tr_reactor_listener_unregister_call(
+		listener->config.owner, tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_stop_stopped, listener);
 }
 
 void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
