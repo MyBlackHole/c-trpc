@@ -780,9 +780,14 @@ static void test_public_connection_group_client_data_offer(void)
 		       client, 10U) == TR_ERR_TIMEOUT);
 
 	/*
-	 * Exercise the event-driven wait path with one pre-drain READY transfer.
-	 * The small pause is only a scheduling guard: the waiter has already entered
-	 * its public API before release_transfer() publishes the completion edge.
+	 * Race waiter registration against release_transfer(). The earlier timed
+	 * wait already proves the blocking condvar path; here both orderings are
+	 * intentional and must be safe:
+	 *
+	 *   waiter registers -> release publishes + wakes
+	 *   release publishes -> waiter observes completed generation
+	 *
+	 * Either way there must be no lost wakeup.
 	 */
 	memset(&wait_probe, 0, sizeof(wait_probe));
 	wait_probe.client = client;
@@ -792,13 +797,6 @@ static void test_public_connection_group_client_data_offer(void)
 		       &wait_thread, NULL, client_group_wait_main,
 		       &wait_probe) == 0);
 	wait_client_group_probe(&wait_probe, &wait_probe.entered);
-	{
-		struct timespec pause = { 0, 10L * 1000L * 1000L };
-		(void)nanosleep(&pause, NULL);
-	}
-	pthread_mutex_lock(&wait_probe.lock);
-	assert(!wait_probe.done);
-	pthread_mutex_unlock(&wait_probe.lock);
 
 	assert(tr_server_connection_group_send_transfer_ready(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
