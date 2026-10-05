@@ -528,9 +528,9 @@ static void test_public_connection_group_client_control(void)
 	wait_counter(&ctx, &ctx.authorized, 1U);
 
 	/*
-	 * This slice owns only CONTROL. An offered DATA reservation is returned
-	 * internally with DATA_CANCEL; once that cancellation reaches the Server,
-	 * capacity=1 permits a new offer without exposing index/generation.
+	 * 当前实现只拥有 CONTROL。收到的 DATA 预留会在内部
+	 * 通过 DATA_CANCEL 归还；当该取消到达 Server 后，
+	 * capacity=1 即可允许新的 offer，而无需暴露索引/代次。
 	 */
 	assert(wait_data_offer(server, UINT64_C(3001)) == TR_OK);
 	assert(wait_data_offer(server, UINT64_C(3002)) == TR_OK);
@@ -691,7 +691,7 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
 
-	/* release makes the semantic stream id reusable on both sides. */
+	/* release 会让语义 Stream 标识在两端都可重新使用。 */
 	assert(tr_server_connection_group_send_transfer_ready(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
 		       UINT64_C(4102)) == TR_OK);
@@ -718,9 +718,9 @@ static void test_public_connection_group_client_data_offer(void)
 		       client, 1U) == TR_ERR_STATE);
 
 	/*
-	 * Client drain is a monotonic local admission barrier. Existing READY work
-	 * remains usable, but a READY observed after begin_drain() must not create
-	 * a new local affinity. The Server owns that late affinity independently.
+	 * Client 排空是单调的本地准入屏障。已经 READY 的工作
+	 * 仍可继续使用，但 begin_drain() 后观察到的 READY 不能创建
+	 * 新的本地亲和关系。Server 独立拥有该延迟到达的亲和关系。
 	 */
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
@@ -843,7 +843,7 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connection_groups.max_data_connections = 1U;
-	/* max_active_transfers == 0 inherits the existing max_streams default. */
+	/* max_active_transfers == 0 时继承现有 max_streams 默认值。 */
 	assert(client_config.connection_groups.max_active_transfers == 0U);
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 
@@ -856,8 +856,8 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(wait_data_offer(server, UINT64_C(4401)) == TR_OK);
 	/*
-	 * The second offer can be issued only after the first exact reservation
-	 * has been returned by the draining Client. No DATA socket is created.
+	 * 只有第一个精确预留
+	 * 被正在排空的 Client 归还后，才能发出第二个 offer；不会创建 DATA socket。
 	 */
 	assert(wait_data_offer(server, UINT64_C(4402)) == TR_OK);
 
