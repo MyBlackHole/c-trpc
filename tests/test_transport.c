@@ -2298,6 +2298,126 @@ static int channel_wait_drained_from_owner(void *arg)
 	return TR_OK;
 }
 
+struct channel_wait_thread_probe {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_channel *channel;
+	int entered;
+	int done;
+	int ret;
+};
+
+static void *channel_wait_thread_main(void *arg)
+{
+	struct channel_wait_thread_probe *probe =
+		(struct channel_wait_thread_probe *)arg;
+
+	pthread_mutex_lock(&probe->lock);
+	probe->entered = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+
+	probe->ret = tr_channel_wait_drained(probe->channel, 2000U);
+
+	pthread_mutex_lock(&probe->lock);
+	probe->done = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+	return NULL;
+}
+
+static void wait_channel_wait_probe(
+	struct channel_wait_thread_probe *probe, const int *field)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&probe->lock);
+	while (!*field && ret == 0)
+		ret = pthread_cond_timedwait(
+			&probe->cond, &probe->lock, &deadline);
+	assert(*field);
+	pthread_mutex_unlock(&probe->lock);
+}
+
+struct channel_drain_backpressure_probe {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_channel *channel;
+	int owner_entered;
+	int run_drain;
+	int drain_done;
+	int drain_ret;
+};
+
+static int channel_drain_backpressure_on_owner(void *arg)
+{
+	struct channel_drain_backpressure_probe *probe =
+		(struct channel_drain_backpressure_probe *)arg;
+
+	pthread_mutex_lock(&probe->lock);
+	probe->owner_entered = 1;
+	pthread_cond_broadcast(&probe->cond);
+	while (!probe->run_drain)
+		pthread_cond_wait(&probe->cond, &probe->lock);
+	pthread_mutex_unlock(&probe->lock);
+
+	probe->drain_ret = tr_channel_begin_drain(probe->channel);
+
+	pthread_mutex_lock(&probe->lock);
+	probe->drain_done = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+	return TR_OK;
+}
+
+static void *channel_drain_backpressure_thread(void *arg)
+{
+	struct channel_drain_backpressure_probe *probe =
+		(struct channel_drain_backpressure_probe *)arg;
+
+	assert(tr_reactor_call(
+		       tr_channel_reactor(probe->channel),
+		       channel_drain_backpressure_on_owner, probe) == TR_OK);
+	return NULL;
+}
+
+static void wait_channel_drain_probe(
+	struct channel_drain_backpressure_probe *probe, const int *field)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&probe->lock);
+	while (!*field && ret == 0)
+		ret = pthread_cond_timedwait(
+			&probe->cond, &probe->lock, &deadline);
+	assert(*field);
+	pthread_mutex_unlock(&probe->lock);
+}
+
+static void wait_connection_tx_frame(
+	struct tr_conn_handle connection, uint64_t target)
+{
+	unsigned i;
+
+	for (i = 0; i < 5000U; ++i) {
+		struct tr_connection_stats stats;
+		struct timespec pause_time = { 0, 1000000L };
+
+		memset(&stats, 0, sizeof(stats));
+		assert(tr_reactor_get_connection_stats(connection, &stats) == TR_OK);
+		if (stats.tx_frames >= target && stats.tx_queued_items == 0U)
+			return;
+		nanosleep(&pause_time, NULL);
+	}
+	assert(!"timed out waiting for control TX item release");
+}
+
 static void test_channel_graceful_drain(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -2317,6 +2437,8 @@ static void test_channel_graceful_drain(void)
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	struct channel_wait_owner_probe wait_probe;
+	struct channel_wait_thread_probe drain_wait;
+	pthread_t drain_wait_thread;
 	enum tr_channel_state channel_state;
 	int client_fd;
 	int server_fd;
@@ -2436,23 +2558,158 @@ static void test_channel_graceful_drain(void)
 	wait_for_pool_full(&tx_pool, 1);
 
 	assert(tr_channel_begin_drain(server_channel) == TR_OK);
+	/*
+	 * Active Stream keeps the condvar predicate false; a timed wait proves the
+	 * blocking path without relying on scheduler timing.
+	 */
+	assert(tr_channel_wait_drained(client_channel, 10U) == TR_AGAIN);
+
+	/*
+	 * Race waiter registration against both Stream closes. If close wins,
+	 * waiter observes the already-drained predicate; if registration wins, the
+	 * final Stream free broadcasts. Both orderings must be lossless.
+	 */
+	memset(&drain_wait, 0, sizeof(drain_wait));
+	drain_wait.channel = client_channel;
+	assert(pthread_mutex_init(&drain_wait.lock, NULL) == 0);
+	assert(pthread_cond_init(&drain_wait.cond, NULL) == 0);
+	assert(pthread_create(
+		       &drain_wait_thread, NULL,
+		       channel_wait_thread_main, &drain_wait) == 0);
+	wait_channel_wait_probe(&drain_wait, &drain_wait.entered);
+
 	assert(tr_stream_close(client_stream) == TR_OK);
 	assert(tr_stream_close(server_stream) == TR_OK);
-	assert(tr_channel_wait_drained(client_channel, 2000) == TR_OK);
-	assert(tr_channel_wait_drained(server_channel, 2000) == TR_OK);
+	wait_channel_wait_probe(&drain_wait, &drain_wait.done);
+	assert(pthread_join(drain_wait_thread, NULL) == 0);
+	assert(drain_wait.ret == TR_OK);
+	pthread_cond_destroy(&drain_wait.cond);
+	pthread_mutex_destroy(&drain_wait.lock);
+	assert(tr_channel_wait_drained(server_channel, 2000U) == TR_OK);
 	assert(tr_channel_get_state(client_channel, &channel_state) == TR_OK);
 	assert(channel_state == TR_CHANNEL_DRAINED);
 	assert(tr_channel_active_streams(client_channel) == 0);
 	assert(tr_channel_active_streams(server_channel) == 0);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&tx_pool);
 	destroy_channel_test_ctx(&server_ctx);
 	destroy_channel_test_ctx(&client_ctx);
 }
+
+static void test_channel_drain_goaway_backpressure(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	struct tr_connection_stats before;
+	struct channel_test_ctx client_ctx;
+	struct channel_test_ctx server_ctx;
+	struct channel_drain_backpressure_probe probe;
+	pthread_t owner_thread;
+	int client_fd;
+	int server_fd;
+
+	init_channel_test_ctx(&client_ctx);
+	init_channel_test_ctx(&server_ctx);
+	memset(&probe, 0, sizeof(probe));
+	assert(pthread_mutex_init(&probe.lock, NULL) == 0);
+	assert(pthread_cond_init(&probe.cond, NULL) == 0);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 8U;
+	/* One CONTROL item makes GOAWAY admission failure deterministic. */
+	reactor_config.control_tx_item_capacity = 1U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	reactor_config.rx_budget_bytes = 64U * 1024U;
+	reactor_config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create(
+		       &channel_config, client_conn, client_conn,
+		       channel_test_on_data, channel_test_on_stream_event,
+		       channel_test_on_channel_event, &client_ctx,
+		       &client_channel) == TR_OK);
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(
+		       &channel_config, server_conn, server_conn,
+		       channel_test_on_data, channel_test_on_stream_event,
+		       channel_test_on_channel_event, &server_ctx,
+		       &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	memset(&before, 0, sizeof(before));
+	assert(tr_reactor_get_connection_stats(client_conn, &before) == TR_OK);
+
+	probe.channel = client_channel;
+	assert(pthread_create(
+		       &owner_thread, NULL,
+		       channel_drain_backpressure_thread, &probe) == 0);
+	wait_channel_drain_probe(&probe, &probe.owner_entered);
+
+	/*
+	 * Owner is blocked. tr_reactor_send() reserves the sole CONTROL TX item
+	 * before queueing SEND, so begin_drain() cannot allocate GOAWAY and must
+	 * return TR_AGAIN.
+	 */
+	assert(tr_reactor_send(
+		       client_conn, TR_FRAME_PONG, 0U, 0U,
+		       UINT64_C(0xfeed), NULL) == TR_OK);
+
+	pthread_mutex_lock(&probe.lock);
+	probe.run_drain = 1;
+	pthread_cond_broadcast(&probe.cond);
+	pthread_mutex_unlock(&probe.lock);
+	wait_channel_drain_probe(&probe, &probe.drain_done);
+	assert(pthread_join(owner_thread, NULL) == 0);
+	assert(probe.drain_ret == TR_AGAIN);
+
+	/*
+	 * Stream quiescence is already true, but wait_drained() must not become a
+	 * second protocol owner and retry GOAWAY from the application thread.
+	 */
+	assert(tr_channel_wait_drained(client_channel, 0U) == TR_OK);
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.channel_goaway == 0U);
+	pthread_mutex_unlock(&server_ctx.lock);
+
+	wait_connection_tx_frame(client_conn, before.tx_frames + 1U);
+	assert(tr_channel_begin_drain(client_channel) == TR_OK);
+	wait_channel_counter(&server_ctx, &server_ctx.channel_goaway, 2U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
+	tr_reactor_destroy(reactor);
+	pthread_cond_destroy(&probe.cond);
+	pthread_mutex_destroy(&probe.lock);
+	destroy_channel_test_ctx(&server_ctx);
+	destroy_channel_test_ctx(&client_ctx);
+}
+
 
 static int rpc_test_unary_handler(struct tr_rpc_call_handle call,
 				  const struct tr_rpc_bytes *request,
@@ -7396,6 +7653,7 @@ int main(void)
 	test_channel_message_fragmentation_reassembly();
 	test_channel_split_lane_isolation();
 	test_channel_graceful_drain();
+	test_channel_drain_goaway_backpressure();
 	test_channel_automatic_reconnect_shared();
 	test_channel_version_negotiation_failure();
 	test_rpc_wire_and_raw_codec();
