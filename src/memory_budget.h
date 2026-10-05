@@ -7,11 +7,11 @@
 #include "tr/status.h"
 
 /*
- * Thread-safe byte budget shared by one RuntimeShard resource domain.
+ * 一个 RuntimeShard 资源域共享的线程安全字节预算。
  *
- * limit_bytes == 0 means accounting-only/unbounded. This lets Phase 7 attach
- * consumers incrementally without pretending the stable facade already has a
- * complete shard-memory limit.
+ * limit_bytes == 0 表示只记账而不设上限。
+ * 这样第 7 阶段可以逐步接入各类消费者，而不会假装稳定门面已经具备
+ * 完整的 shard 内存限制能力。
  */
 struct tr_memory_budget {
 	uint64_t limit_bytes;
