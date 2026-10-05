@@ -25,17 +25,17 @@ struct tr_pipeline_control_transport_config {
 };
 
 /*
- * Installs the real TRP1 frame handler for one CONTROL connection.
- * Ownership of control transfers to the transport on TR_OK.
+ * 为一个 CONTROL 连接安装真实的 TRP1 帧处理器。
+ * 返回 TR_OK 后，control 的所有权转移给 Transport。
  */
 int tr_pipeline_control_transport_create(
 	const struct tr_pipeline_control_transport_config *config,
 	struct tr_pipeline_control_transport **out);
 
 /*
- * Server-side CONTROL emissions. These APIs keep Pipeline state transition and
- * wire submission atomic with respect to failure: if queueing fails, the new
- * reservation/affinity is rolled back.
+ * Server 侧 CONTROL 发送接口。这些 API 保证 Pipeline 状态转换与
+ * 线协议提交相对于失败路径保持原子性：如果入队失败，新建的
+ * 预留或亲和关系会回滚。
  */
 int tr_pipeline_control_transport_send_data_offer(
 	struct tr_pipeline_control_transport *transport, uint64_t message_id,
