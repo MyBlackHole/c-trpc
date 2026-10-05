@@ -902,6 +902,7 @@ static void tr_client_group_stop_data_on_owner(struct tr_client_group *group)
 		memset(&group->data[i], 0, sizeof(group->data[i]));
 		group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
 	}
+	tr_client_group_publish_drain_progress_on_owner(group);
 }
 
 static void tr_client_group_control_event(
@@ -1051,6 +1052,8 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 {
 	struct tr_client_group *group;
 	uint32_t control_buffers;
+	int drain_wait_lock_ready = 0;
+	int drain_wait_cond_ready = 0;
 	int ret;
 
 	if (!out)
@@ -1081,6 +1084,31 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 		(uint64_t)group->data_capacity *
 		(uint64_t)config->max_message_bytes;
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
+	if (pthread_mutex_init(&group->drain_wait_lock, NULL) != 0) {
+		ret = TR_ERR_SYS;
+		goto fail;
+	}
+	drain_wait_lock_ready = 1;
+	{
+		pthread_condattr_t attr;
+
+		if (pthread_condattr_init(&attr) != 0) {
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+			pthread_condattr_destroy(&attr);
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		if (pthread_cond_init(&group->drain_wait_cond, &attr) != 0) {
+			pthread_condattr_destroy(&attr);
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		pthread_condattr_destroy(&attr);
+		drain_wait_cond_ready = 1;
+	}
 
 	control_buffers =
 		config->max_data_connections + TR_CLIENT_GROUP_CONTROL_BUFFER_BASE;
@@ -1129,6 +1157,10 @@ fail:
 	free(group->data);
 	if (group->control_pool_ready)
 		tr_buffer_pool_destroy(&group->control_pool);
+	if (drain_wait_cond_ready)
+		pthread_cond_destroy(&group->drain_wait_cond);
+	if (drain_wait_lock_ready)
+		pthread_mutex_destroy(&group->drain_wait_lock);
 	free(group);
 	return ret;
 }
