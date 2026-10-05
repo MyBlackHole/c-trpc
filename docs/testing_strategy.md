@@ -88,8 +88,22 @@ ASan         -> workload 内存安全
 TSan         -> workload 并发安全
 ```
 
-Clang 编译由普通 CI 的 `xmake build --all` 覆盖；debug 行为由正常 suite
-覆盖。CRC portable/fallback 由 CRC 专测覆盖，不在 benchmark 中重复。
+Clang 与 debug benchmark job 仍保留原 check identity，但只做对应
+`bench_rpc` build；真实 workload 只在 release/ASan/TSan 三种有独立证据价值
+的模式执行。CRC portable/fallback 由 CRC 专测覆盖，不在 benchmark 中重复。
+
+## CI check identity
+
+GitHub required checks / merge queue 可能按 job display name 绑定。优化矩阵时，
+原有稳定 check 名称视为外部自动化 ABI：
+
+- `build-test (gcc)`
+- `build-test (clang)`
+- 既有 `rpc-smoke (...)` 名称
+- sanitizer / install / CRC check 名称
+
+在无法读取 branch protection 配置时，默认保持这些名字不变。可以减少 job 内
+重复 workload，但不能通过随意改名让 required check 永远无法满足。
 
 ## 新增测试的门槛
 
