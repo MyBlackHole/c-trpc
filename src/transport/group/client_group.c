@@ -696,6 +696,7 @@ static void tr_client_group_clear_transfers(struct tr_client_group *group)
 	memset(group->transfers, 0,
 	       (size_t)group->transfer_capacity * sizeof(*group->transfers));
 	group->transfer_count = 0U;
+	tr_client_group_publish_drain_progress_on_owner(group);
 }
 
 static void tr_client_group_invalidate_data_transfers(
@@ -718,6 +719,7 @@ static void tr_client_group_invalidate_data_transfers(
 		if (group->transfer_count != 0U)
 			group->transfer_count--;
 	}
+	tr_client_group_publish_drain_progress_on_owner(group);
 }
 
 static void tr_client_group_send_buffer_release(
@@ -732,6 +734,7 @@ static void tr_client_group_send_buffer_release(
 			group->send_bytes_inflight -= owned->accounted_bytes;
 		else
 			group->send_bytes_inflight = 0U;
+		tr_client_group_publish_drain_progress_on_owner(group);
 	}
 	free(owned);
 }
@@ -759,6 +762,7 @@ static int tr_client_group_transfer_connection_on_owner(
 		transfer->state = TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
 		if (group->transfer_count != 0U)
 			group->transfer_count--;
+		tr_client_group_publish_drain_progress_on_owner(group);
 		return TR_ERR_STALE;
 	}
 
@@ -1001,6 +1005,7 @@ static int tr_client_group_adopt_control_on_owner(void *arg)
 	group->port = request->port;
 	group->draining = 0;
 	group->control_connecting = 0;
+	tr_client_group_publish_connected_on_owner(group);
 	return TR_OK;
 
 fail:
@@ -1356,6 +1361,7 @@ static int tr_client_group_release_transfer_on_owner(void *arg)
 		TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
 	if (group->transfer_count != 0U)
 		group->transfer_count--;
+	tr_client_group_publish_drain_progress_on_owner(group);
 	return TR_OK;
 }
 
