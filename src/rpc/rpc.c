@@ -2023,9 +2023,10 @@ static int tr_rpc_queue_task_locked(struct tr_rpc_endpoint *endpoint,
 		call->task_refs--;
 		/*
 		 * 当前仍持有 endpoint->lock，且 owner reference 仍然存活，
-		 * 因此这里的 rollback put 不可能成为最后一次 put。
+		 * 因此这里不会成为最后一次 put；仍必须走统一 lifetime wrapper，
+		 * 让可能等待 refs==1 的 destructor 得到 ref_cond wakeup。
 		 */
-		(void)tr_refcount_put(&endpoint->refs);
+		tr_rpc_endpoint_put(endpoint);
 	}
 	return ret;
 }
@@ -2171,39 +2172,75 @@ static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
 					    tr_buffer_take(&task->payload));
 }
 
-static void tr_rpc_message_bind_internal(
-	struct tr_rpc_message *message, struct tr_buffer *storage,
-	struct tr_stream_handle stream)
+static int tr_rpc_message_bind_internal(
+	struct tr_rpc_message *message, struct tr_rpc_endpoint *endpoint,
+	struct tr_buffer *storage, struct tr_stream_handle stream)
 {
+	int ret;
+
+	if (!message || !endpoint || !storage || !stream.channel)
+		return TR_ERR_INVALID;
+
+	/*
+	 * A retained public message may outlive the worker task and even the peer
+	 * connection. Pin Endpoint before publishing the descriptor so its
+	 * borrowed Channel remains alive until tr_rpc_message_release().
+	 */
+	ret = tr_rpc_endpoint_get(endpoint);
+	if (ret != TR_OK)
+		return ret;
+
 	message->_private[0] = (uintptr_t)storage;
-	message->_private[1] = (uintptr_t)stream.channel;
+	message->_private[1] = (uintptr_t)endpoint;
 	message->_private[2] = (uintptr_t)stream.slot;
 	message->_private[3] = (uintptr_t)stream.generation;
+	return TR_OK;
+}
+
+static void tr_rpc_message_unpin_internal(struct tr_rpc_message *message)
+{
+	struct tr_rpc_endpoint *endpoint;
+
+	if (!message)
+		return;
+	endpoint =
+		(struct tr_rpc_endpoint *)(uintptr_t)message->_private[1];
+	message->_private[1] = (uintptr_t)0;
+	if (endpoint)
+		tr_rpc_endpoint_put(endpoint);
 }
 
 static int tr_rpc_message_unpack_internal(
 	const struct tr_rpc_message *message, struct tr_buffer **storage_out,
+	struct tr_rpc_endpoint **endpoint_out,
 	struct tr_stream_handle *stream_out)
 {
+	struct tr_rpc_endpoint *endpoint;
+
 	if (!message || message->_private[0] == (uintptr_t)0 ||
 	    message->_private[1] == (uintptr_t)0)
 		return TR_ERR_INVALID;
 
+	endpoint =
+		(struct tr_rpc_endpoint *)(uintptr_t)message->_private[1];
 	if (storage_out)
-		*storage_out = (struct tr_buffer *)(uintptr_t)message->_private[0];
+		*storage_out =
+			(struct tr_buffer *)(uintptr_t)message->_private[0];
+	if (endpoint_out)
+		*endpoint_out = endpoint;
 	if (stream_out) {
 		memset(stream_out, 0, sizeof(*stream_out));
-		stream_out->channel =
-			(struct tr_channel *)(uintptr_t)message->_private[1];
+		stream_out->channel = endpoint->channel;
 		stream_out->slot = (uint32_t)message->_private[2];
 		stream_out->generation = (uint32_t)message->_private[3];
 	}
 	return TR_OK;
 }
 
-static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
-				      struct tr_rpc_message *message,
-				      struct tr_rpc_wire_header *wire)
+static int tr_rpc_decode_task_message(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_task *task,
+	struct tr_rpc_message *message, struct tr_rpc_wire_header *wire,
+	int pin_lifetime)
 {
 	const uint8_t *metadata = NULL;
 	const uint8_t *body = NULL;
@@ -2226,7 +2263,15 @@ static int tr_rpc_decode_task_message(struct tr_rpc_task *task,
 	memset(message, 0, sizeof(*message));
 	message->bytes.data = body;
 	message->bytes.len = wire->payload_len;
-	tr_rpc_message_bind_internal(message, task->payload, task->stream);
+	if (!pin_lifetime)
+		return TR_OK;
+
+	ret = tr_rpc_message_bind_internal(
+		message, endpoint, task->payload, task->stream);
+	if (ret != TR_OK) {
+		memset(message, 0, sizeof(*message));
+		return ret;
+	}
 	return TR_OK;
 }
 
@@ -2579,7 +2624,7 @@ static int tr_rpc_submit_unary_completion(
 static int tr_rpc_executor_run_server_unary(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_task *task)
 {
-	struct tr_rpc_message message;
+	struct tr_rpc_message message = { 0 };
 	struct tr_rpc_wire_header wire;
 	struct tr_rpc_unary_response response;
 	struct tr_rpc_bytes completion_response;
@@ -2588,7 +2633,8 @@ static int tr_rpc_executor_run_server_unary(
 	int ret;
 	int deferred = 0;
 
-	if (!handler || tr_rpc_decode_task_message(task, &message, &wire) != TR_OK) {
+	if (!handler || tr_rpc_decode_task_message(
+			    endpoint, task, &message, &wire, 0) != TR_OK) {
 		(void)tr_rpc_close_stream(task->stream);
 		goto out;
 	}
@@ -2690,7 +2736,7 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 
 	switch (task->type) {
 	case TR_RPC_TASK_SERVER_STREAM_MESSAGE: {
-		struct tr_rpc_message message;
+		struct tr_rpc_message message = { 0 };
 		struct tr_rpc_wire_header wire;
 		const struct tr_rpc_stream_handlers *handlers =
 			&task->u.server_stream.handlers;
@@ -2699,8 +2745,8 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 			TR_RPC_MESSAGE_RELEASE;
 		int ret = TR_OK;
 
-		if (tr_rpc_decode_task_message(task, &message, &wire) !=
-		    TR_OK) {
+		if (tr_rpc_decode_task_message(
+			    endpoint, task, &message, &wire, 1) != TR_OK) {
 			(void)tr_rpc_call_finish(task->call,
 						 TR_RPC_STATUS_INTERNAL);
 			break;
@@ -2717,6 +2763,8 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 
 		if (disposition == TR_RPC_MESSAGE_TAKE_OWNERSHIP)
 			(void)tr_buffer_take(&task->payload);
+		else
+			tr_rpc_message_unpin_internal(&message);
 		break;
 	}
 
@@ -2740,14 +2788,14 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 		break;
 
 	case TR_RPC_TASK_CLIENT_UNARY_RESULT: {
-		struct tr_rpc_message message;
+		struct tr_rpc_message message = { 0 };
 		struct tr_rpc_wire_header wire;
 		const struct tr_rpc_bytes *bytes = NULL;
 		int status = task->status;
 
 		if (task->payload) {
-			if (tr_rpc_decode_task_message(task, &message, &wire) ==
-			    TR_OK) {
+			if (tr_rpc_decode_task_message(
+				    endpoint, task, &message, &wire, 0) == TR_OK) {
 				bytes = &message.bytes;
 				status = wire.status;
 			} else {
@@ -2762,21 +2810,23 @@ static int tr_rpc_executor_run_task(struct tr_rpc_endpoint *endpoint,
 	}
 
 	case TR_RPC_TASK_CLIENT_MESSAGE: {
-		struct tr_rpc_message message;
+		struct tr_rpc_message message = { 0 };
 		struct tr_rpc_wire_header wire;
 		const struct tr_rpc_call_callbacks *callbacks =
 			&task->u.client_stream.callbacks;
 		enum tr_rpc_message_disposition disposition =
 			TR_RPC_MESSAGE_RELEASE;
 
-		if (tr_rpc_decode_task_message(task, &message, &wire) ==
-		    TR_OK) {
+		if (tr_rpc_decode_task_message(
+			    endpoint, task, &message, &wire, 1) == TR_OK) {
 			if (callbacks->on_message)
 				disposition = callbacks->on_message(
 					task->call, &message, callbacks->arg);
 		}
 		if (disposition == TR_RPC_MESSAGE_TAKE_OWNERSHIP)
 			(void)tr_buffer_take(&task->payload);
+		else
+			tr_rpc_message_unpin_internal(&message);
 		break;
 	}
 
@@ -5726,22 +5776,31 @@ int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
 {
 	if (!out)
 		return TR_ERR_INVALID;
-	return tr_rpc_message_unpack_internal(message, NULL, out);
+	return tr_rpc_message_unpack_internal(message, NULL, NULL, out);
 }
 
 int tr_rpc_message_release(struct tr_rpc_message *message)
 {
 	struct tr_buffer *storage = NULL;
+	struct tr_rpc_endpoint *endpoint = NULL;
 	struct tr_stream_handle stream;
 	int ret;
 
 	memset(&stream, 0, sizeof(stream));
-	ret = tr_rpc_message_unpack_internal(message, &storage, &stream);
+	ret = tr_rpc_message_unpack_internal(
+		message, &storage, &endpoint, &stream);
 	if (ret != TR_OK)
 		return ret;
 
+	/*
+	 * Consume the public capability exactly once. Endpoint remains pinned
+	 * while returning Stream RX credit so stream.channel cannot become stale
+	 * because of object destruction during this release.
+	 */
 	memset(message, 0, sizeof(*message));
-	return tr_rpc_release_stream_payload(stream, storage);
+	ret = tr_rpc_release_stream_payload(stream, storage);
+	tr_rpc_endpoint_put(endpoint);
+	return ret;
 }
 
 static int tr_rpc_endpoint_flush_on_owner(void *arg)

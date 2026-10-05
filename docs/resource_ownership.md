@@ -230,6 +230,37 @@ Call 自己的 `task_refs` 与 Endpoint refcount 职责不同：
 - `tr_refcount`：保护 Endpoint 对象生命周期；
 - Call `task_refs`：阻止 Call slot 在 task/completion 尚未结束时复用。
 
+### 9.2.1 Retained RPC message lifetime
+
+`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 是跨 worker callback 的异步 ownership transfer，
+因此 retained descriptor 不能只保存裸 `Channel *`。在把 message 暴露给 application
+callback 之前必须先取得 Endpoint strong reference；返回
+`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 时该引用与 RX Buffer 一起转移给 descriptor。
+
+```text
+worker task ref
+    +
+message lifetime ref
+        |
+callback returns TAKE_OWNERSHIP
+        |
+        +--> task ref 正常归还
+        |
+        +--> message ref 继续保活 Endpoint/Channel
+                    |
+peer disconnect / detached finalize
+                    |
+              waits for message release
+                    |
+tr_rpc_message_release()
+    -> return/release RX payload
+    -> Endpoint put
+```
+
+因此 retained message 可以安全跨 peer disconnect，但会延迟该 peer 的最终析构。
+descriptor ownership 只能释放一次；复制 descriptor 表示 ownership move，不表示复制
+strong reference。
+
 Endpoint 的 lifetime synchronization 现在与 protocol lock 分离：
 
 ```text

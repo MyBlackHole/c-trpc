@@ -186,7 +186,14 @@ typedef void (*tr_rpc_unary_result_cb)(struct tr_rpc_call_handle call,
  * bytes is the only application-visible payload view.  _private is a fixed
  * release capability used only by tr_rpc_message_release(); it keeps the
  * zero-copy TAKE_OWNERSHIP path without exposing Buffer/Stream/Channel types.
- * Applications must copy the whole descriptor unchanged when retaining it.
+ *
+ * Returning TR_RPC_MESSAGE_TAKE_OWNERSHIP transfers both the RX payload and
+ * the internal peer-lifetime pin to the application.  The retained descriptor
+ * remains safe to release after peer disconnect and must be released exactly
+ * once.  Copy the whole descriptor unchanged when moving that ownership; do
+ * not release multiple copies.  Retained messages may delay peer teardown, so
+ * applications must release them before expecting Client/Server destroy to
+ * complete.
  */
 #define TR_RPC_MESSAGE_PRIVATE_WORDS 4U
 struct tr_rpc_message {
