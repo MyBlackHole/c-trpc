@@ -61,7 +61,7 @@ static void test_pipeline_control_session(void)
 		       &control_config, control_connection, &control) == TR_OK);
 	assert(control != NULL);
 
-	/* Registry uniqueness fences a second runtime epoch/session with same id. */
+	/* 注册表唯一性阻止相同标识的第二个运行时 epoch/会话并存。 */
 	{
 		struct tr_pipeline_control_config duplicate_config = control_config;
 
@@ -77,8 +77,8 @@ static void test_pipeline_control_session(void)
 	assert(registry_stats.count == 1U);
 
 	/*
-	 * A reservation is an offer only. TRANSFER_READY is forbidden until an
-	 * exact DATA connection has consumed the capability.
+	 * 预留只代表一个提供信息。
+	 * 在精确 DATA 连接消费该能力之前，禁止发布 TRANSFER_READY。
 	 */
 	memset(&offer0, 0, sizeof(offer0));
 	assert(tr_pipeline_control_reserve_data(control, &offer0) == TR_OK);
@@ -94,7 +94,7 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_control_prepare_transfer(
 		       control, 1001U, &ready0) == TR_AGAIN);
 
-	/* A forged cancellation must not consume the real capability. */
+	/* 伪造取消操作不能消费真实能力。 */
 	stale = offer0;
 	stale.data.generation++;
 	stale.route.member_generation++;
@@ -102,8 +102,8 @@ static void test_pipeline_control_session(void)
 	       TR_ERR_STALE);
 
 	/*
-	 * Keep offer0 RESERVED while offer1 becomes ATTACHED. TRANSFER_READY must
-	 * skip the reservation even if round-robin encounters that slot first.
+	 * 保持 offer0 为 RESERVED，同时让 offer1 进入 ATTACHED。
+	 * 即使轮询先遇到该预留槽位，TRANSFER_READY 也必须跳过它。
 	 */
 	memset(&offer1, 0, sizeof(offer1));
 	assert(tr_pipeline_control_reserve_data(control, &offer1) == TR_OK);
@@ -112,9 +112,9 @@ static void test_pipeline_control_session(void)
 		       registry, &offer1.route, data1, NULL) == TR_OK);
 
 	/*
-	 * Exact peer cancellation is idempotent across handoff ambiguity.
-	 * Once this generation is ATTACHED it is a successful no-op and must not
-	 * retire the live membership.
+	 * 精确对端取消在移交模糊窗口中必须保持幂等。
+	 * 同一代次已经 ATTACHED 后，取消操作应成功但不修改状态，
+	 * 绝不能退役仍然存活的成员关系。
 	 */
 	assert(tr_pipeline_control_cancel_data(control, &offer1) == TR_OK);
 
@@ -125,11 +125,11 @@ static void test_pipeline_control_session(void)
 	assert(ready0.data.index == offer1.data.index);
 	assert(ready0.data.generation == offer1.data.generation);
 
-	/* Stream affinity is established exactly once. */
+	/* Stream 亲和关系只建立一次。 */
 	assert(tr_pipeline_control_prepare_transfer(
 		       control, 1001U, &ready1) == TR_ERR_STATE);
 
-	/* Attach the previously RESERVED offer0; next stream can now use it. */
+	/* 附着此前 RESERVED 的 offer0，后续 Stream 现在可以使用它。 */
 	data0 = fake_connection(owner, 20U, 1U);
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &offer0.route, data0, NULL) == TR_OK);
@@ -141,7 +141,7 @@ static void test_pipeline_control_session(void)
 	assert(ready1.data.index == offer0.data.index);
 	assert(ready1.data.generation == offer0.data.generation);
 
-	/* CONTROL cannot disappear while attached DATA/Stream lifetime remains. */
+	/* 只要已附着 DATA/Stream 生命周期仍存在，CONTROL 就不能消失。 */
 	assert(tr_pipeline_control_close(control, control_connection) ==
 	       TR_ERR_STATE);
 
@@ -155,7 +155,7 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_registry_detach_data_route(
 		       registry, &offer1.route, data1) == TR_OK);
 
-	/* Same exact generation already FREE is also an idempotent no-op. */
+	/* 同一精确代次已经 FREE 时，同样按幂等无操作处理。 */
 	assert(tr_pipeline_control_cancel_data(control, &offer1) == TR_OK);
 	stale = offer1;
 	stale.data.generation++;
