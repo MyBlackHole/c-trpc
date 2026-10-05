@@ -1,19 +1,25 @@
-# TCP / RPC 混合负载与 deadline 压力基准
+# TCP / RPC 混合负载与截止时间压力基准
 
 ## 本轮边界
 
-这是 opt-in 的诊断工具，本身不绕过或私自覆盖生产 socket 策略。当前高层
-Client/Server facade 默认对已连接 TCP socket 启用 `TCP_NODELAY`，显式
-`TR_TCP_NODELAY_DISABLED` 可保留 Linux 默认 Nagle 行为；自动 reconnect
-继承 Client 的同一策略。默认构建不生成 `bench_rpc`。原有 CRC、调度、生命周期
-和 Transport/RPC 单元测试继续保留；本工具不替代它们。
+这是按需启用的诊断工具，本身不会绕过或私自覆盖生产套接字策略。
+当前高层 Client/Server 门面默认对已经连接的 TCP 套接字启用 `TCP_NODELAY`，
+显式 `TR_TCP_NODELAY_DISABLED` 可以保留 Linux 默认 Nagle 行为；
+自动重连继承 Client 的同一策略。
+默认构建不生成 `bench_rpc`。
+原有 CRC、调度、生命周期和传输/RPC 单元测试继续保留；
+本工具不替代它们。
 
-真实路径为：独立 Client 进程 → IPv4 TCP → Channel → RPC worker → Unary
-response → Client result callback。方法 1 是 CONTROL lane 的小 Unary echo，
-方法 2 是 BULK lane 的大 Unary echo；二者共享同一个 facade TCP connection。
-BULK 不是裸 TCP 测试，也不是长期 Streaming / `send_buffer()` 零拷贝吞吐测试。
-默认大消息 64 KiB、frame 上限 16 KiB，真实执行 RPC envelope、分帧、CRC 和
-接收重组。请求前 8 字节携带序号，成功响应必须与请求长度、所有字节完全一致。
+真实路径为：
+独立 Client 进程 → IPv4 TCP → Channel → RPC 工作线程 → 一元响应 → Client 结果回调。
+方法 1 是 CONTROL 通道的小型一元 Echo，
+方法 2 是 BULK 通道的大型一元 Echo；
+二者共享同一个门面 TCP 连接。
+BULK 不是原始 TCP 测试，也不是长期流式调用 / `send_buffer()` 零复制吞吐测试。
+默认大消息 64 KiB、帧上限 16 KiB，
+真实执行 RPC 信封、分帧、CRC 和接收重组。
+请求前 8 字节携带序号，
+成功响应必须与请求长度、所有字节完全一致。
 
 ## 使用
 
@@ -33,20 +39,24 @@ python3 bench/run_rpc_bench.py \
   --trials 3 --requests 1000 --label gcc-release-portable \
   --output /tmp/rpc-bench/portable.jsonl
 
-# 功能 smoke / 统计核算自测；不用于发布性能结论。
+# 功能冒烟 / 统计核算自测；不用于发布性能结论。
 python3 -m unittest discover -s bench -p test_rpc_bench.py -v
 python3 bench/run_rpc_bench.py \
   --binary build/linux/x86_64/release/bench_rpc \
   --smoke --output /tmp/rpc-bench/smoke.jsonl
 ```
 
-Python 只使用标准库。输出包含构建标签、Git revision（存在时）、二进制 SHA256、
-CPU/内核/affinity/cgroup 配额、完整 server/client 命令和每阶段原始汇总结果。
-每个 case 的 stdout/stderr 单独保存在 `<output-stem>-logs/`。失败退出码和失败
-case 不会被吞掉。正常/恢复 case 有丢失、超时或拒绝时不是可比较的成功样本；
-错误计数仍保留在该 case 的原始 JSONL 中。
+Python 只使用标准库。
+输出包含构建标签、Git 版本（存在时）、二进制 SHA256、
+CPU/内核/亲和性/cgroup 配额、完整服务端/客户端命令和每阶段原始汇总结果。
+每个测试场景的 `stdout/stderr` 单独保存在 `<output-stem>-logs/`。
+失败退出码和失败场景不会被吞掉。
+正常/恢复场景如果有丢失、超时或拒绝，就不是可比较的成功样本；
+错误计数仍保留在该场景的原始 JSONL 中。
 
-默认仅监听 loopback。也可在两个终端手动运行（服务端 stdin EOF 后 drain）：
+默认只监听回环地址。
+也可以在两个终端手动运行
+（服务端标准输入 EOF 后进入排空）：
 
 ```sh
 ./build/linux/x86_64/release/bench_rpc server --port 9000 --bulk-bytes 65536
@@ -54,69 +64,95 @@ case 不会被吞掉。正常/恢复 case 有丢失、超时或拒绝时不是�
   --requests 2000 --window 8 --bulk-bytes 65536 --bulk-every 4
 ```
 
-`--host` 只接受数字 IPv4。手动跨主机运行需要两端配置匹配、安全网络边界和分别
-收集日志；自动 runner 只覆盖回环。工具不是生产认证服务，不应直接暴露到公网。
+`--host` 只接受数字 IPv4。
+手动跨主机运行需要两端配置匹配、安全网络边界和分别收集日志；
+自动运行器只覆盖回环。
+工具不是生产认证服务，不应直接暴露到公网。
 
 ## 负载与口径
 
-| runner 场景 | 内容 |
+| 运行器场景 | 内容 |
 |---|---|
-| small | 32 B Unary，窗口 1 / 8 / 32，分别运行 |
-| bulk | 64 KiB BULK Unary，窗口 8 |
-| mixed | 每 4 个请求一个 BULK，其余 small，窗口 8 |
-| mixed、多客户端 | 两个独立 Client 进程，各一个连接和窗口 8，共享一个 Server |
-| pressure → recovery | 16 窗口、5 ms deadline 调用 25 ms 延迟方法，随后同一 Client/连接发 64 个普通请求 |
+| `small` | 32 B 一元调用，窗口 1 / 8 / 32，分别运行 |
+| `bulk` | 64 KiB BULK 一元调用，窗口 8 |
+| `mixed` | 每 4 个请求一个 BULK，其余为 `small`，窗口 8 |
+| `mixed`、多客户端 | 两个独立 Client 进程，各一个连接和窗口 8，共享一个 Server |
+| `pressure -> recovery` | 16 窗口、5 ms 截止时间调用 25 ms 延迟方法，随后同一 Client/连接发送 64 个普通请求 |
 
-Server 使用 2 个共享业务 worker；每个 Client 使用 4 个 callback worker。
-普通 timeout 为 5 秒，容量参数为 64；所有池与消息大小都有显式上界。
-每个 Client 预热结束后通过 stdin gate 等待，所有 Client ready 后才一起放行。
-多客户端 case 还检查测量时间区间确实重叠，不能用串行测试冒充并发连接。
+Server 使用 2 个共享业务工作线程；
+每个 Client 使用 4 个回调工作线程。
+普通超时为 5 秒，容量参数为 64；
+所有资源池与消息大小都有显式上界。
+每个 Client 预热结束后通过标准输入门闩等待，
+全部 Client 就绪后才一起放行。
+多客户端场景还检查测量时间区间确实重叠，
+不能用串行测试冒充并发连接。
 
-- **闭环窗口模型**：一个有界异步窗口，收到 callback 后补充请求，不额外创建
-  每请求线程。不是独立于响应速率的 open-loop 到达模型。停止补充期间不会记录
-  本来可能到达但未实际提交的请求；无 coordinated-omission 修正，不能据此承诺
-  固定外部到达率下的 P99 或最大 QPS。
-- **延迟**：在 submit 前读取 CLOCK_MONOTONIC，到 callback 入口；包含同步
-  submit 的等待，不包含此前生成请求 payload 的时间。报告成功请求 P50/P99，
-  同时报告所有已接受请求（含 deadline/error）的 P99。nearest-rank 计算。
-  对应样本数为零时数值为 0，仅是占位，不表示零延迟。
-- **速率**：`ok_rps` 只计算经过内容验证的成功响应。`payload_MiB_s` 计算成功
-  请求 + 成功响应的应用字节总和，即 echo 情况为 2×payload；不是单向链路线速，
-  不含 frame/RPC/TCP 头、ACK、重传，也不是备份落盘速度。
-- **失败**：`submit_again`、其他 submit error、RPC deadline/error、内容错误分开
-  计数。每个失败提交只记录一次，不静默重试。attempted = accepted + submit
-  failures；accepted = completed = ok + callback failures。
-- **CPU/RSS**：Client CPU 是阶段内进程 user+system 差值；Client RSS 是该进程
-  生命周期峰值，不是阶段增量或全系统 RSS。Server 输出的是包含启动、预热、
-  drain 的生命周期 CPU/RSS，不能当成纯测量区间值。
-- **多进程**：每个 Client 保留自己的延迟分布和时间区间，不通过平均各进程 P99
-  冒充总体 P99。多连接吞吐也不能忽略各自的测量区间而直接相加。
+- **闭环窗口模型**：使用一个有界异步窗口，收到回调后补充请求，
+  不额外创建每请求线程。
+  这不是独立于响应速率的开环到达模型。
+  停止补充期间不会记录本来可能到达但未实际提交的请求；
+  没有协调遗漏修正，因此不能据此承诺固定外部到达率下的 P99 或最大 QPS。
+- **延迟**：提交前读取 `CLOCK_MONOTONIC`，到回调入口结束；
+  包含同步提交的等待，不包含此前生成请求载荷的时间。
+  报告成功请求 P50/P99，同时报告全部已经接受请求
+  （包含截止时间/错误）的 P99。
+  使用最近秩计算。
+  对应样本数为零时数值为 0，只是占位，不表示零延迟。
+- **速率**：`ok_rps` 只计算经过内容验证的成功响应。
+  `payload_MiB_s` 计算成功请求 + 成功响应的应用字节总和，
+  即 Echo 情况为 2×载荷；
+  不是单向链路线速，不包含帧/RPC/TCP 头、ACK、重传，
+  也不是备份落盘速度。
+- **失败**：`submit_again`、其他提交错误、RPC 截止时间/错误、内容错误分开计数。
+  每个失败提交只记录一次，不静默重试。
+  `attempted = accepted + submit failures`；
+  `accepted = completed = ok + callback failures`。
+- **CPU/RSS**：Client CPU 是阶段内进程用户态 + 内核态 CPU 时间差值；
+  Client RSS 是该进程生命周期峰值，不是阶段增量或全系统 RSS。
+  Server 输出的是包含启动、预热、排空的生命周期 CPU/RSS，
+  不能当成纯测量区间值。
+- **多进程**：每个 Client 保留自己的延迟分布和时间区间，
+  不通过平均各进程 P99 冒充总体 P99。
+  多连接吞吐也不能忽略各自测量区间而直接相加。
 
-pressure 故意让 deadline 小于受控 handler 延迟，覆盖失败后继续服务的路径；
-recovery 不启用 reconnect、不重建 Client/Server、也不先睡眠清空压力。它不是
-CPU/内存/FD 耗尽、随机网络故障或长稳测试。没有证据时不把它称为“已证明所有
-过载都能恢复”。故障矩阵和长稳仍需后续独立补充。
+`pressure` 故意让截止时间小于受控处理器延迟，
+覆盖失败后继续服务的路径；
+`recovery` 不启用重连、不重建 Client/Server，
+也不先睡眠清空压力。
+它不是 CPU/内存/fd 耗尽、随机网络故障或长稳测试。
+没有证据时不能把它称为“已经证明所有过载都能恢复”。
+故障矩阵和长稳仍需要后续独立补充。
 
-## Open-loop 到达率与 executor 容量曲线
+## 开环到达率与执行器容量曲线
 
-`run_rpc_capacity.py` 使用独立于 callback 完成速度的固定到达时间表。它不是
-“收到一个响应再发下一个”的 closed-loop window；每个预定 arrival 都必须落入
-以下三类之一：
+`run_rpc_capacity.py` 使用独立于回调完成速度的固定到达时间表。
+它不是“收到一个响应再发下一个”的闭环窗口；
+每个预定到达必须落入以下三类之一：
 
-1. 本地 in-flight slot 已满，记为 `scheduler_dropped`；
-2. 实际调用提交 API，但被同步拒绝，分别记为 `submit_again` / `submit_errors`；
-3. 提交成功，最终必须收到 callback，按 OK / deadline / RPC error / 数据损坏分类。
+1. 本地进行中槽位已满，记录为 `scheduler_dropped`；
+2. 实际调用提交 API，但被同步拒绝，
+   分别记录为 `submit_again` / `submit_errors`；
+3. 提交成功，最终必须收到回调，
+   按成功 / 截止时间 / RPC 错误 / 数据损坏分类。
 
-因此 offered load 不会因响应变慢而自动下降。latency 仍从**实际 submit** 到 callback，
-而预定时刻到实际 submit 的偏差独立记录为 `scheduler_late_*`，避免把负载发生器
-自己跟不上误解释成服务端性能。每轮结束后还记录 `drain_tail_ms`，用于观察 arrival
-停止后积压还需要多久才能排空。
+因此提供负载不会因为响应变慢而自动下降。
+延迟仍从**实际提交**到回调，
+而预定时刻到实际提交的偏差独立记录为
+`scheduler_late_*`，
+避免把负载发生器自身跟不上误解释成服务端性能。
+每轮结束后还记录 `drain_tail_ms`，
+用于观察停止到达后积压还需要多久才能排空。
 
-默认容量实验使用 2 个 Server worker、10 ms 受控 handler delay、16 个
-`executor_queue_capacity`、128 个本地 in-flight slots。默认 rate 点来自
-`workers × 1000 / slow_ms` 的 0.25×/0.5×/1×/2×/4×；这个算式只是选择测试点的
-**handler-only 理论上限**，忽略 Transport、RPC、调度和共享运行环境成本，不是实际
-系统容量，也不能当作通过门槛。
+默认容量实验使用 2 个 Server 工作线程、
+10 ms 受控处理器延迟、
+16 个 `executor_queue_capacity`、
+128 个本地进行中槽位。
+默认速率点来自
+`workers × 1000 / slow_ms` 的 0.25×/0.5×/1×/2×/4×；
+这个算式只是选择测试点的**仅处理器理论上限**，
+忽略传输、RPC、调度和共享运行环境成本，
+不是实际系统容量，也不能作为通过门槛。
 
 ```sh
 xmake f -c -y -m release --toolchain=gcc
@@ -128,77 +164,90 @@ python3 bench/run_rpc_capacity.py \
   --window 128 --capacity 128 --timeout-ms 1000 \
   --output /tmp/rpc-bench/open-loop.jsonl
 
-# 自定义 offered-rate 曲线
+# 自定义提供速率曲线
 python3 bench/run_rpc_capacity.py \
   --binary build/linux/x86_64/release/bench_rpc \
   --rates 50,100,200,400,800 \
   --output /tmp/rpc-bench/open-loop-custom.jsonl
 ```
 
-Server executor 队列耗尽时，只要请求仍处于**首个业务 task 尚未进入 executor**
-的 admission 阶段，就会显式返回容量拒绝而不是伪装成连接故障：
+Server 执行器队列耗尽时，
+只要请求仍处于**首个业务任务尚未进入执行器**的准入阶段，
+就会显式返回容量拒绝，而不是伪装成连接故障：
 
-- Unary 返回空 payload 的 `RESOURCE_EXHAUSTED` response；
-- Streaming 首条 REQUEST 若尚未执行 `on_open/on_message`，返回最终
-  `STATUS=RESOURCE_EXHAUSTED`；
+- 一元调用返回空载荷的 `RESOURCE_EXHAUSTED` 响应；
+- 流式调用首条 `REQUEST` 如果尚未执行 `on_open/on_message`，
+  返回最终 `STATUS=RESOURCE_EXHAUSTED`；
 - 物理 TCP/Channel 保持可用，后续 Call 可以继续服务。
 
-真正的 connection/transport failure 仍使用 `UNAVAILABLE`。
+真正的连接/传输故障仍使用 `UNAVAILABLE`。
 
-已经执行过 Streaming 业务 callback 后发生的 **mid-stream executor saturation**
-采用有界背压而不是立即关闭 Stream：
+已经执行过流式业务回调后发生的**流中期执行器饱和**
+采用有界背压，而不是立即关闭 Stream：
 
-- 每个已开始的 Server Streaming Call 最多保留 1 个尚未进入 executor 的 task；
-- pending message 保持 RX buffer ownership，因此在真正进入 worker 前不归还该
-  message 的 Stream flow-control credit；
-- executor worker 从 queue 取走 task、实际释放 node capacity 后，会向 Reactor
-  owner 合并投递 retry；owner 再把 pending task 按 Call 顺序放回 executor；
-- peer half-close 若恰好发生在 pending message 期间，也会排在该 message 之后，
+- 每个已经开始的 Server 流式 Call 最多保留 1 个尚未进入执行器的任务；
+- 等待中的消息保持 RX Buffer 所有权，
+  因此真正进入工作线程前不归还该消息的 Stream 流量控制额度；
+- 执行器工作线程从队列取走任务、实际释放节点容量后，
+  会向 Reactor 所有者合并投递重试；
+  所有者再把等待任务按 Call 顺序放回执行器；
+- 对端半关闭如果恰好发生在等待消息期间，
+  也会排在该消息之后，
   不允许 `on_half_close` 越过 `on_message`；
-- 如果同一个 Call 在已有 1 个 pending task 时又产生第二个无法接纳的 continuation，
-  bounded pending 已耗尽，此时只终止这个 Call 并返回最终
-  `RESOURCE_EXHAUSTED`，TCP/Channel 继续可用；
-- 该 Call 在终止前可能已经执行过早先 callback，因此这个
-  `RESOURCE_EXHAUSTED` **不是**“业务从未执行”的 admission rejection。
+- 如果同一个 Call 已有 1 个等待任务时，
+  又产生第二个无法接纳的续处理，
+  有界等待容量已经耗尽，
+  此时只终止这个 Call 并返回最终 `RESOURCE_EXHAUSTED`，
+  TCP/Channel 继续可用；
+- 该 Call 在终止前可能已经执行过更早的回调，
+  因此这个 `RESOURCE_EXHAUSTED`
+  **不是**“业务从未执行”的准入拒绝。
 
-确定性 `test_rpc_stream_backpressure` 使用 1 worker + 16 queue：先让两个
-Streaming Call 真正进入业务层，再用独立 filler Calls 填满 executor；验证 A 的
-continuation 被保留且 RX credit 暂不归还，释放 worker 后 A 按序恢复并继续成功；
-B 的第二个 pending continuation 超过每 Call 上限后得到
-`RESOURCE_EXHAUSTED`，但同一 Channel/Connection 上新的恢复 Call 仍成功。
+确定性 `test_rpc_stream_backpressure` 使用 1 个工作线程 + 16 个队列节点：
+先让两个流式 Call 真正进入业务层，
+再用独立填充 Call 填满执行器；
+验证 A 的续处理被保留且 RX 额度暂不归还，
+释放工作线程后 A 按顺序恢复并继续成功；
+B 的第二个等待续处理超过每 Call 上限后得到 `RESOURCE_EXHAUSTED`，
+但同一个 Channel/Connection 上的新恢复 Call 仍成功。
 
-容量工具分别统计 `resource_exhausted` 与 `unavailable`，两者都必须是
-`rpc_errors` 的子集，不能相互冒充。
+容量工具分别统计 `resource_exhausted` 与 `unavailable`，
+两者都必须是 `rpc_errors` 的子集，不能互相冒充。
 
-### Worker / handler scalability attribution matrix
+### 工作线程 / 处理器可扩展性归因矩阵
 
-`run_rpc_scalability.py` reuses the same fixed-rate arrival accounting but
-varies Server worker count and controlled handler cost. Its default matrix is:
+`run_rpc_scalability.py` 复用同一套固定速率到达记账，
+但改变 Server 工作线程数量和受控处理器成本。
+默认矩阵为：
 
 ```text
-workers:    1, 2, 4, 8
-handler_ms: 0, 1, 10
-executor:   64 nodes
-window:     128
+工作线程：      1, 2, 4, 8
+处理器毫秒：    0, 1, 10
+执行器：        64 个节点
+窗口：          128
 ```
 
-For nonzero handler delays, offered rates are generated from the handler-only
-arithmetic `workers * 1000 / handler_ms` at 0.5x/1x/2x/4x. For the 0 ms
-handler there is no meaningful handler-only capacity formula, so the default
-offered rates are explicit: 5000/10000/20000/40000 RPS.
+对于非零处理器延迟，
+提供速率从仅处理器算式
+`workers * 1000 / handler_ms`
+的 0.5×/1×/2×/4× 生成。
+对于 0 ms 处理器，
+不存在有意义的仅处理器容量算式，
+因此默认提供速率显式设为
+5000/10000/20000/40000 RPS。
 
-The matrix is multi-source when needed. A rate at or below the configured
-per-generator target uses one Client; higher rates are partitioned across up to
-32 independent `bench_rpc client` processes. High-rate generators default to
-one RPC worker each so the load generator does not spend shared-runner CPU on
-idle Client worker pools. Generators complete their
-window=1 warmup **sequentially**, so fanout cannot turn warmup itself into an
-unmeasured saturation workload. After every Client has reached the start gate,
-the runner sends absolute `CLOCK_MONOTONIC` start timestamps with small phase
-offsets so their local fixed-rate schedules interleave instead of starting as
-an accidental burst. Each process keeps its own scheduler lateness/drop
-accounting; the runner sums exact counts and keeps the worst generator lateness
-for load-fidelity attribution.
+需要时矩阵使用多个负载源。
+不高于单个发生器目标速率的点使用一个 Client；
+更高速率在最多 32 个独立 `bench_rpc client` 进程之间拆分。
+高负载发生器默认各使用一个 RPC 工作线程，
+避免负载发生器在共享运行器 CPU 上为闲置 Client 工作线程池付出成本。
+各发生器以窗口 1 完成预热时采用**顺序预热**，
+避免发生器数量本身把预热阶段变成未测量的饱和负载。
+所有 Client 到达开始门闩后，
+运行器发送绝对 `CLOCK_MONOTONIC` 开始时间戳，并加入很小的相位偏移，
+使各进程本地固定速率时间表交错，而不是偶然形成同一时刻突发。
+每个进程保留自己的调度迟到/丢弃记账；
+运行器汇总精确计数，并保留最差发生器迟到值用于负载保真度归因。
 
 ```sh
 python3 bench/run_rpc_scalability.py \
@@ -211,108 +260,120 @@ python3 bench/run_rpc_scalability.py \
   --output /tmp/rpc-bench/scalability.jsonl
 ```
 
-Every rate point retains the full Client and Server diagnostic records. Each
-`(workers, handler_ms)` group also emits a `scalability_summary` with the
-highest **clean scheduled rate**, the first exact Server pressure rate, the first
-load-generator lateness/drop rate, and maxima for Reactor busy ratio and
-executor queue-wait/handler P99.
+每个速率点都保留完整 Client 与 Server 诊断记录。
+每个 `(workers, handler_ms)` 分组还会输出一个
+`scalability_summary`，
+其中包含：
 
-High-rate rows also lengthen the measurement automatically. The runner treats
-`--requests` as a floor and raises the request count as needed to keep the
-scheduled arrival window at least `--min-arrival-ms`. This prevents a short
-high-QPS burst from fitting entirely inside the bounded executor queue and being
-misreported as sustained capacity.
+- 最高**干净计划速率**；
+- 第一个精确 Server 压力速率；
+- 第一个负载发生器迟到/丢弃速率；
+- Reactor 忙碌比例最大值；
+- 执行器队列等待/处理器 P99 最大值。
 
-“Clean scheduled rate” is deliberately stricter than “all requests eventually
-succeeded”: besides zero submit/RPC/resource-exhaustion errors, P99
-schedule-to-submit lateness must stay within one arrival interval. If a 10 kRPS
-schedule (100 us spacing) is being submitted several milliseconds late, the
-tool marks `load_generator_late` instead of claiming that the Server sustained
-10 kRPS. This boundary is about fidelity of the offered schedule, not a Server
-latency SLA.
+高速率行还会自动拉长测量时间。
+运行器把 `--requests` 当作下限，
+并按需要增加请求数，
+保证计划到达时间窗至少达到 `--min-arrival-ms`。
+这样可以防止短时高 QPS 突发全部装入有界执行器队列，
+却被误报为持续容量。
 
-The tool intentionally does **not** turn a Reactor-busy percentage or an RPC
-latency value into an automatic architecture verdict. Server wall signals come
-from observable events: executor admission/hard-full, Reactor
-command/completion queue full, or RX/TX/RPC-message/reassembly pool exhaustion.
-Load-generator backlog is a separate signal derived from P99 submission
-lateness crossing one scheduled arrival interval; explicit scheduler drops are
-reported separately as well. Neither condition is attributed to the Server.
+“干净计划速率”有意比“所有请求最终都成功”更严格：
+除了提交/RPC/资源耗尽错误必须为零，
+P99 计划到提交的迟到还必须保持在一个到达间隔以内。
+如果 10 kRPS 时间表（100 微秒间隔）实际提交已经晚了几毫秒，
+工具会标记 `load_generator_late`，
+而不是声称 Server 持续承载了 10 kRPS。
+这条边界衡量的是提供时间表的保真度，不是 Server 延迟 SLA。
 
-The GCC release CI job records one full matrix with normal runtime CRC dispatch
-as a diagnostic artifact. It has no throughput, scaling-efficiency, P99, or
-busy-ratio pass/fail threshold.
+工具有意**不会**把 Reactor 忙碌百分比或某个 RPC 延迟值
+自动转换成架构结论。
+Server 端瓶颈信号来自可观察事件：
 
-### Bounded-resource headroom A/B
+- 执行器准入/物理满；
+- Reactor 命令/完成队列满；
+- RX/TX/RPC 消息/重组资源池耗尽。
 
-When a scalability point first hits a bounded pool, `run_rpc_headroom.py`
-separates a configuration wall from a deeper runtime wall by rerunning the same
-offered rates with one controlled resource change.
+负载发生器积压是独立信号，
+由 P99 提交迟到超过一个计划到达间隔推导；
+显式调度丢弃也单独报告。
+这两类发生器信号都不能归因给 Server。
 
-The default experiment follows the first multi-source result as a staged
-single-variable chain:
+GCC `release` CI 任务使用正常运行时 CRC 分派记录一份完整矩阵，
+作为诊断构建产物。
+它没有吞吐、扩展效率、P99 或忙碌比例通过/失败阈值。
+
+### 有界资源余量对照实验
+
+当可扩展性测试点首次碰到某个有界资源池时，
+`run_rpc_headroom.py` 通过在相同提供速率下
+只改变一个受控资源，
+区分“配置容量墙”和“更深层运行时瓶颈”。
+
+默认实验沿用第一个多源结果，
+按单变量逐步增加：
 
 ```text
-workers:              8
-handler:              0 ms
-rates:                10k / 20k / 40k RPS
+工作线程：              8
+处理器：                0 ms
+速率：                  10k / 20k / 40k RPS
 
 baseline:
-  RX buffers:         benchmark-derived (272 at capacity=128)
-  executor queue:     64
+  RX buffers:           基准推导值（capacity=128 时为 272）
+  executor queue:       64
 
 rx_headroom:
-  RX buffers:         1024
-  executor queue:     64
+  RX buffers:           1024
+  executor queue:       64
 
 rx_executor_headroom:
-  RX buffers:         1024
-  executor queue:     256
-  CONTROL TX items:   benchmark default (128)
+  RX buffers:           1024
+  executor queue:       256
+  CONTROL TX items:     基准默认值（128）
 
 rx_executor_control_headroom:
-  RX buffers:         1024
-  executor queue:     256
-  CONTROL TX items:   2048
+  RX buffers:           1024
+  executor queue:       256
+  CONTROL TX items:     2048
 
 full_headroom:
-  RX buffers:         4096
-  executor queue:     256
-  CONTROL TX items:   2048
-  command queue:      benchmark default (1024)
+  RX buffers:           4096
+  executor queue:       256
+  CONTROL TX items:     2048
+  command queue:        基准默认值（1024）
 
 rx_ceiling_headroom:
-  RX buffers:         8192
-  executor queue:     256
-  CONTROL TX items:   2048
-  command queue:      benchmark default (1024)
+  RX buffers:           8192
+  executor queue:       256
+  CONTROL TX items:     2048
+  command queue:        基准默认值（1024）
 
 command_headroom:
-  RX buffers:         8192
-  executor queue:     256
-  CONTROL TX items:   2048
-  command queue:      4096
+  RX buffers:           8192
+  executor queue:       256
+  CONTROL TX items:     2048
+  command queue:        4096
 
 control_ceiling_headroom:
-  RX buffers:         8192
-  executor queue:     256
-  CONTROL TX items:   8192
-  command queue:      4096
+  RX buffers:           8192
+  executor queue:       256
+  CONTROL TX items:     8192
+  command queue:        4096
 
 executor_ceiling_headroom:
-  RX buffers:         8192
-  executor queue:     1024
-  CONTROL TX items:   8192
-  command queue:      4096
+  RX buffers:           8192
+  executor queue:       1024
+  CONTROL TX items:     8192
+  command queue:        4096
 
 command_ceiling_headroom:
-  RX buffers:         8192
-  executor queue:     1024
-  CONTROL TX items:   8192
-  command queue:      16384
+  RX buffers:           8192
+  executor queue:       1024
+  CONTROL TX items:     8192
+  command queue:        16384
 
-RPC message pool:     unchanged in all stages
-reassembly pool:      unchanged in all stages
+RPC message pool:       各阶段保持不变
+reassembly pool:        各阶段保持不变
 ```
 
 ```sh
@@ -335,147 +396,156 @@ python3 bench/run_rpc_headroom.py \
   --output /tmp/rpc-bench/resource-headroom.jsonl
 ```
 
-The A/B runner also separates generator in-flight headroom from Server capacity.
-The Server keeps `capacity=128` by default, while high-rate Clients use
-`generator-window=256` and `generator-capacity=256`. This prevents a full
-Client slot window from being mislabeled as a Server resource wall without
-silently changing the Server's per-peer limits.
+对照运行器还把发生器进行中余量与 Server 容量分开。
+Server 默认保持 `capacity=128`，
+而高速率 Client 使用
+`generator-window=256` 和 `generator-capacity=256`。
+这样可以防止 Client 槽位窗口填满时，
+在不改变 Server 每对端限制的前提下被误标记成 Server 资源墙。
 
-The benchmark binary exposes Server-only overrides for
-`--rx-buffers`, `--rpc-message-pool`, `--reassembly-pool`,
-`--control-tx-items`, and `--command-capacity`. A zero override keeps the
-existing derived benchmark default.
+基准二进制为 Server 单独提供以下覆盖参数：
 
-These flags are **repository-internal diagnostic tuning**, wired through
-`tr_facade_tuning` / `tr_server_create_with_tuning()`. They are deliberately
-not fields of the installed `tr_facade_limits` SDK contract, do not change
-public facade defaults, and are not passed to benchmark Clients as application
-configuration.
+`--rx-buffers`、`--rpc-message-pool`、`--reassembly-pool`、
+`--control-tx-items`、`--command-capacity`。
 
-The output records the actual observed pool capacities/executor queue size and
-emits staged pairwise comparisons:
+覆盖值为零时保持现有基准推导默认值。
 
-1. `baseline -> rx_headroom`, isolating RX buffer pressure;
-2. `rx_headroom -> rx_executor_headroom`, isolating executor hard-full;
-3. `rx_executor_headroom -> rx_executor_control_headroom`, isolating
-   CONTROL TX item exhaustion;
-4. `rx_executor_control_headroom -> full_headroom`, increasing RX from 1024
-   to 4096 after CONTROL TX has headroom;
-5. `full_headroom -> rx_ceiling_headroom`, increasing RX from 4096 to 8192
-   while leaving command capacity at its default;
-6. `rx_ceiling_headroom -> command_headroom`, increasing only Reactor command
-   capacity from 1024 to 4096;
-7. `command_headroom -> control_ceiling_headroom`, increasing only CONTROL TX
-   item capacity from 2048 to 8192;
-8. `control_ceiling_headroom -> executor_ceiling_headroom`, increasing only
-   per-Endpoint executor queue capacity from 256 to 1024;
-9. `executor_ceiling_headroom -> command_ceiling_headroom`, increasing only
-   Reactor command queue capacity from 4096 to 16384.
+这些参数属于**仓库内部诊断调优**，
+通过 `tr_facade_tuning` / `tr_server_create_with_tuning()` 接入。
+它们有意不进入已安装 `tr_facade_limits` SDK 契约，
+不改变公开门面默认值，
+也不会作为应用配置传给基准 Client。
 
-These final stages are deliberately ordered so CONTROL TX and executor pressure
-cannot hide the command-queue wall. The 4096 -> 16384 transition is the last
-pure capacity A/B before changing the existing per-turn command fairness budget:
-if the queue-full signal disappears, the previous 4096 wall was bounded burst
-headroom; if it persists while Reactor busy remains low and command-budget hits
-are recurrent, the next experiment should isolate command drain/fairness rather
-than jump directly to Multi-Reactor.
+输出会记录实际观察到的资源池容量/执行器队列大小，
+并输出逐阶段成对比较：
 
-All staged comparisons retain the first exact Server pressure rate and the
-wall-signal set before/after the resource change.
+1. `baseline -> rx_headroom`：隔离 RX Buffer 压力；
+2. `rx_headroom -> rx_executor_headroom`：隔离执行器物理满；
+3. `rx_executor_headroom -> rx_executor_control_headroom`：隔离 CONTROL TX 项耗尽；
+4. `rx_executor_control_headroom -> full_headroom`：CONTROL TX 已有余量后，把 RX 从 1024 增到 4096；
+5. `full_headroom -> rx_ceiling_headroom`：命令容量保持默认，把 RX 从 4096 增到 8192；
+6. `rx_ceiling_headroom -> command_headroom`：只把 Reactor 命令容量从 1024 增到 4096；
+7. `command_headroom -> control_ceiling_headroom`：只把 CONTROL TX 项容量从 2048 增到 8192；
+8. `control_ceiling_headroom -> executor_ceiling_headroom`：只把每 Endpoint 执行器队列容量从 256 增到 1024；
+9. `executor_ceiling_headroom -> command_ceiling_headroom`：只把 Reactor 命令队列容量从 4096 增到 16384。
 
-This is an isolation experiment, not an argument to increase production pool
-defaults. If RX exhaustion disappears and another bounded resource becomes the
-first wall, that new signal is investigated next. If Reactor busy time becomes
-the limiting evidence only after bounded resources have headroom, then a
-Reactor architecture change has a measurement basis.
+最后这些阶段有意按该顺序执行，
+避免 CONTROL TX 和执行器压力掩盖命令队列墙。
+4096 -> 16384 是改变现有每轮命令公平性预算之前最后一个纯容量对照实验：
 
-### Shared-runner wall repeatability
+- 如果队列满信号消失，说明之前 4096 的墙属于有界突发余量；
+- 如果队列满仍持续出现，同时 Reactor 忙碌比例保持较低、
+  命令预算命中反复出现，
+  下一步应隔离命令排空/公平性，
+  而不是直接跳到多 Reactor。
 
-Single high-rate runs on GitHub shared runners are diagnostic samples, not
-stable machine-capacity measurements. If two runs disagree about the first
-bounded wall, `run_rpc_repeatability.py` repeats the exact 40k schedule before
-any further architecture or capacity change is considered.
+全部分阶段比较都会保留资源变化前后的第一个精确 Server 压力速率和瓶颈信号集合。
 
-The GCC release CI job runs three trials for:
+这是一项隔离实验，不是提高生产资源池默认值的论据。
+如果 RX 耗尽消失后另一个有界资源成为第一个墙，
+就继续调查新的信号。
+只有在有界资源已经具有余量后，
+Reactor 忙碌时间才成为限制证据，
+才具备修改 Reactor 架构的测量基础。
 
-- `baseline`: benchmark-derived bounded resources;
-- `command_headroom`: RX=8192, executor=256, CONTROL TX=2048,
-  command capacity=4096;
-- `ceiling_headroom`: RX=8192, executor=1024, CONTROL TX=8192,
-  command capacity=4096;
-- `command_ceiling_headroom`: identical to `ceiling_headroom` except
-  command capacity=16384.
+### 共享运行器上的瓶颈可重复性
 
-Each trial retains the full Server/Client diagnostics. The summary reports
-clean-trial count, exact-Server-pressure-trial count, per-signal occurrence
-counts, min/median/max successful RPC/s, Reactor busy range, command-budget-hit
-range, and command queue peak. It also emits a machine-readable classification:
+GitHub 共享运行器上的单次高负载结果只是诊断样本，
+不是稳定机器容量测量。
+如果两次运行对第一个有界瓶颈得出不同结论，
+`run_rpc_repeatability.py` 会在考虑任何进一步架构或容量修改之前，
+重复完全相同的 40k 时间表。
 
-- `no_server_wall`: none of the repeated trials has an exact Server pressure signal;
-- `non_reproducible_server_wall`: Server pressure appears, but no exact Server
-  signal is present in every trial;
-- `reproducible_server_wall`: at least one exact Server signal is present in
-  every trial.
+GCC `release` CI 任务针对以下配置各运行三次：
 
-The summary separately exposes `reproducible_server_signals` and
-`sporadic_server_signals`. Client/load-generator signals remain in the general
-`signal_counts` but cannot by themselves classify a Server resource wall. There
-is still no throughput or latency CI gate.
+- `baseline`：基准推导的有界资源；
+- `command_headroom`：RX=8192、执行器=256、CONTROL TX=2048、命令容量=4096；
+- `ceiling_headroom`：RX=8192、执行器=1024、CONTROL TX=8192、命令容量=4096；
+- `command_ceiling_headroom`：与 `ceiling_headroom` 相同，但命令容量=16384。
 
-A wall observed in only one of three shared-runner trials is treated as
-non-reproducible evidence, not as a reason to change the production
-architecture. A repeatedly reproduced exact wall can then receive a targeted
-A/B experiment.
+每次试验保留完整 Server/Client 诊断。
+汇总会报告：
 
-#### PR #44 repeatability result
+- 干净试验数量；
+- 出现精确 Server 压力的试验数量；
+- 各信号出现次数；
+- 成功 RPC/s 的最小/中位/最大值；
+- Reactor 忙碌比例范围；
+- 命令预算命中范围；
+- 命令队列峰值。
 
-The GCC release repeatability artifact for PR #44 ran all three profiles three
-times at 40k scheduled RPC/s. All 9 cases reported zero exact Server pressure,
-zero command-budget hits and zero command-queue-full events. Command queue peak
-was only 35--44 entries even for the 4096-capacity profiles; successful rate was
-about 39.26k--39.58k RPC/s and Reactor busy ratio was about 0.267--0.289. The
-separate staged headroom run also completed its 40k points without an exact
-Server wall.
+还会输出机器可读分类：
 
-Therefore the earlier single shared-runner sample that filled the 4096 command
-queue is classified as non-reproducible evidence. It is not a basis for raising
-production command capacity or `TR_COMMAND_BATCH`; the latter remains a Reactor
-fairness policy and should only change after a stable repeated bottleneck is
-shown.
+- `no_server_wall`：重复试验都没有精确 Server 压力信号；
+- `non_reproducible_server_wall`：出现过 Server 压力，但没有任何一个精确 Server 信号在全部试验中都存在；
+- `reproducible_server_wall`：至少一个精确 Server 信号在每次试验中都存在。
 
-### Generator fanout sensitivity
+汇总还分别暴露
+`reproducible_server_signals` 和 `sporadic_server_signals`。
+Client/负载发生器信号仍保留在通用 `signal_counts` 中，
+但它们自身不能把某个瓶颈分类为 Server 资源墙。
+仍然没有吞吐或延迟 CI 门槛。
 
-The fixed-rate scalability tools can distribute one total offered rate across
-multiple independent Client processes. More generators reduce each Client's
-local scheduling rate, but every extra process also consumes scheduler time,
-memory and CPU on the same shared runner as the Server.
+如果一个瓶颈只在三次共享运行器试验中的一次出现，
+就把它视为不可重复证据，
+不能据此修改生产架构。
+只有反复复现的精确瓶颈才进入针对性对照实验。
 
-A fanout experiment must also keep **aggregate Client in-flight capacity**
-constant. Otherwise changing process count changes two variables at once:
-process fanout and total available Client slots.
+#### PR #44 可重复性结果
 
-`run_rpc_fanout.py` therefore fixes total generator window/capacity at 1024
-slots by default and divides those slots across the selected fanout:
+PR #44 的 GCC `release` 可重复性构建产物
+对全部四个配置在 40k 计划 RPC/s 下各运行三次。
+全部试验都报告：
+
+- 精确 Server 压力为 0；
+- 命令预算命中为 0；
+- 命令队列满事件为 0。
+
+即使在命令容量为 4096 的配置中，
+命令队列峰值也只有 35--44；
+成功速率约 39.26k--39.58k RPC/s；
+Reactor 忙碌比例约 0.267--0.289。
+独立的分阶段余量实验在 40k 点也没有出现精确 Server 墙。
+
+因此更早那次单一共享运行器样本中
+“4096 命令队列填满”的结果被分类为不可重复证据。
+不能据此提高生产命令容量或 `TR_COMMAND_BATCH`。
+后者仍然是 Reactor 公平性策略，
+只有稳定、可重复的瓶颈出现后才应调整。
+
+### 负载发生器进程数量敏感性
+
+固定速率可扩展性工具可以把同一总提供速率
+分配到多个独立 Client 进程。
+更多发生器会降低每个 Client 的本地调度速率，
+但每增加一个进程也会在和 Server 相同的共享运行器上消耗调度时间、内存和 CPU。
+
+发生器进程数量实验还必须保持**Client 总进行中容量**不变。
+否则改变进程数量的同时也改变总可用 Client 槽位，
+会一次改变两个变量。
+
+因此 `run_rpc_fanout.py` 默认把总发生器窗口/容量固定为 1024 槽位，
+再分配给不同进程数量：
 
 ```text
-total offered rate:        40000 RPC/s
-fanout:                    4 / 8 / 16 / 32 Clients
-per-generator rate:        10000 / 5000 / 2500 / 1250 RPC/s
-aggregate generator slots: 1024 in every case
-per-generator slots:       256 / 128 / 64 / 32
-generator workers:         1
-RX buffers:                8192
-executor queue:            1024
-CONTROL TX items:          8192
-command queue:             16384
+总提供速率：            40000 RPC/s
+发生器数量：            4 / 8 / 16 / 32 个 Client
+每发生器速率：          10000 / 5000 / 2500 / 1250 RPC/s
+发生器总槽位：          所有场景均为 1024
+每发生器槽位：          256 / 128 / 64 / 32
+发生器工作线程：        1
+RX buffers:             8192
+executor queue:         1024
+CONTROL TX items:       8192
+command queue:          16384
 ```
 
-Both generator window and generator capacity use the same per-generator slot
-count. The aggregate slot count must divide every requested fanout exactly and
-each Client must stay within the benchmark's 1..256 slot bound.
+发生器窗口和容量都使用同一个每发生器槽位数。
+总槽位数必须能被所有请求的发生器数量整除，
+并且每个 Client 必须保持在基准工具 1..256 槽位限制内。
 
-Two trials run the fanouts in opposite orders. This reduces fixed-order bias
-from runner warmup, throttling or transient host contention.
+两次试验使用相反的发生器数量顺序。
+这样可以降低运行器预热、节流或瞬时宿主竞争造成的固定顺序偏差。
 
 ```sh
 python3 bench/run_rpc_fanout.py \
@@ -485,75 +555,83 @@ python3 bench/run_rpc_fanout.py \
   --output /tmp/rpc-bench/generator-fanout-40k.jsonl
 ```
 
-Each fanout summary keeps generator pressure separate from Server pressure and
-reports:
+每种发生器数量的汇总都会把发生器压力与 Server 压力分开，
+并报告：
 
-- per-generator and aggregate slot controls used by the case;
-- clean, generator-drop, generator-late and exact-Server-pressure trial counts;
-- accepted/offered fraction and successful RPC/s range;
-- scheduler P99 lateness and dropped-arrival counts;
-- aggregate Client CPU time and peak RSS;
-- Reactor busy ratio;
-- command queue and CONTROL TX peak occupancy.
+- 每发生器和总槽位控制值；
+- 干净、发生器丢弃、发生器迟到、精确 Server 压力试验数；
+- 接受/提供比例和成功 RPC/s 范围；
+- 调度器 P99 迟到和丢弃到达数量；
+- Client 汇总 CPU 时间和峰值 RSS；
+- Reactor 忙碌比例；
+- 命令队列和 CONTROL TX 峰值占用。
 
-#### PR #48 initial sweep and confound
+#### PR #48 初始扫描及混杂变量
 
-The first fanout sweep in PR #48 held **per-Client** window/capacity at 256.
-That meant aggregate Client slots grew with fanout:
+PR #48 的第一轮发生器数量扫描保持**每个 Client**
+窗口/容量都是 256。
+因此总 Client 槽位会随发生器数量增长：
 
-- 4 generators: 1024 slots;
-- 8 generators: 2048 slots;
-- 16 generators: 4096 slots;
-- 32 generators: 8192 slots.
+- 4 个发生器：1024 槽位；
+- 8 个发生器：2048 槽位；
+- 16 个发生器：4096 槽位；
+- 32 个发生器：8192 槽位。
 
-All eight cases had zero exact Server pressure, while median accepted/offered
-fraction rose from about 0.60 at fanout 4 to about 0.91 at fanout 32. That trend
-cannot be attributed to process fanout because total Client concurrency grew by
-8x at the same time. The result is retained as evidence that generator-side
-capacity matters, not as evidence that 32 processes are intrinsically better.
+全部 8 个场景的精确 Server 压力都为零，
+而接受/提供比例中位数从 4 个发生器时约 0.60
+上升到 32 个发生器时约 0.91。
+这个趋势不能归因于进程数量，
+因为 Client 总并发容量同时增加了 8 倍。
+该结果保留为“负载发生器侧容量会影响结果”的证据，
+不能作为“32 个进程本质上更好”的证据。
 
-#### PR #49 constant-slot fanout result
+#### PR #49 固定总槽位的发生器数量结果
 
-PR #49 fixed aggregate generator capacity at 1024 slots and changed only the
-4/8/16/32 process fanout. All eight cases again reported zero exact Server
-pressure. The generator-side result showed two different failure modes:
+PR #49 把发生器总容量固定为 1024 槽位，
+只改变 4/8/16/32 个进程。
+全部 8 个场景同样没有精确 Server 压力。
+发生器侧出现两类不同失败模式：
 
-- 4 generators (256 slots each) accepted every scheduled arrival, but median
-  scheduler P99 lateness was about 393 ms. The 10k-RPS local scheduler could not
-  preserve the intended arrival times and effectively stretched the load.
-- 8 generators (128 slots each) reduced median P99 lateness to about 60 ms, but
-  accepted only about 49% of arrivals.
-- 16 generators (64 slots each) reduced median P99 lateness to about 5.7 ms,
-  while accepting about 41%.
-- 32 generators (32 slots each) reduced median P99 lateness further to about
-  2.6 ms, while accepting about 38%.
+- 4 个发生器（每个 256 槽位）接受全部计划到达，
+  但调度器 P99 迟到中位数约 393 ms。
+  10k-RPS 本地调度器无法保持预期到达时刻，
+  实际上把负载时间线拉长。
+- 8 个发生器（每个 128 槽位）
+  把 P99 迟到中位数降到约 60 ms，
+  但只接受约 49% 的到达。
+- 16 个发生器（每个 64 槽位）
+  把 P99 迟到中位数降到约 5.7 ms，
+  同时接受约 41%。
+- 32 个发生器（每个 32 槽位）
+  把 P99 迟到中位数进一步降到约 2.6 ms，
+  同时接受约 38%。
 
-The 32-generator result has the best scheduling fidelity of this set, but 1024
-aggregate slots are too small to absorb the backlog while the shared-runner
-Server drains only about 13--15k successful RPC/s. Thus process fanout and
-aggregate backlog capacity must be tuned as separate generator dimensions.
+在这一组中，32 个发生器的调度保真度最好，
+但总共 1024 个槽位不足以吸收积压，
+而共享运行器上的 Server 只能排空约 13--15k 成功 RPC/s。
+因此进程数量和总积压容量必须作为两个独立的负载发生器维度调优。
 
-### Generator slot sensitivity
+### 负载发生器槽位敏感性
 
-`run_rpc_generator_slots.py` keeps the 32-generator schedule fixed and changes
-only aggregate generator in-flight capacity:
+`run_rpc_generator_slots.py` 固定 32 个发生器的时间表，
+只改变发生器总进行中容量：
 
 ```text
-total offered rate:        40000 RPC/s
-generators:                32
-per-generator rate:        1250 RPC/s
-aggregate generator slots: 1024 / 2048 / 4096 / 8192
-per-generator slots:       32 / 64 / 128 / 256
-generator workers:         1
-RX buffers:                8192
-executor queue:            1024
-CONTROL TX items:          8192
-command queue:             16384
+总提供速率：            40000 RPC/s
+发生器：                32
+每发生器速率：          1250 RPC/s
+发生器总槽位：          1024 / 2048 / 4096 / 8192
+每发生器槽位：          32 / 64 / 128 / 256
+发生器工作线程：        1
+RX buffers:             8192
+executor queue:         1024
+CONTROL TX items:       8192
+command queue:          16384
 ```
 
-Two trials run slot capacities in opposite orders. Total offered rate, process
-fanout and Server headroom stay fixed, so this isolates how much generator-side
-backlog capacity is required before scheduler drops disappear.
+两次试验以相反顺序运行不同槽位容量。
+总提供速率、进程数量和 Server 余量保持不变，
+因此可以隔离“负载发生器侧需要多少积压容量才能不再丢弃到达”。
 
 ```sh
 python3 bench/run_rpc_generator_slots.py \
@@ -563,121 +641,193 @@ python3 bench/run_rpc_generator_slots.py \
   --output /tmp/rpc-bench/generator-slots-40k.jsonl
 ```
 
-This diagnostic does not justify increasing any production Client/Server
-capacity. It measures the load generator's ability to preserve the requested
-open-loop schedule. If the existing 8192-slot maximum still drops arrivals, the
-next step is to improve the benchmark generator's own capacity model rather
-than interpret the resulting curve as a Server ceiling.
+该诊断不能证明应该提高任何生产 Client/Server 容量。
+它只测量负载发生器保持请求开环时间表的能力。
+如果现有 8192 槽位最大值仍会丢弃到达，
+下一步应改进基准发生器自己的容量模型，
+而不是把得到的曲线解释为 Server 上限。
 
-Architecture or production-default changes should only use Server bottlenecks
-that remain stable after generator scheduling pressure and generator in-flight
-capacity have both been controlled.
+只有在负载发生器调度压力和发生器进行中容量都受控后，
+仍然稳定存在的 Server 瓶颈，
+才能用于架构或生产默认值变更。
 
-### Streaming continuation reserve
+### 流式续处理预留
 
-Server RPC Endpoint engine 仍支持 opt-in 的 `executor_continuation_reserve`。
-在 high-level facade 中，该 worker/node/reserve 布局已迁到 repository-internal
-`tr_facade_tuning`，不再属于 installed SDK。默认 reserve 仍为 0，因此现有容量曲线
-和 public facade 默认部署行为不变。
+Server RPC Endpoint 引擎仍支持按需启用
+`executor_continuation_reserve`。
+在高层门面中，
+该工作线程/节点/预留布局已经迁到仓库内部 `tr_facade_tuning`，
+不再属于已安装 SDK。
+默认预留仍为 0，
+因此现有容量曲线和公开门面默认部署行为不变。
 
-启用 reserve 后仍只有一套有界 executor node pool：
+启用预留后仍然只有一套有界执行器节点资源池：
 
-- 新 Unary 和 Streaming 首个业务 task 属于 admission work，只能使用
-  `executor_queue_capacity - reserve` 个 node；
-- 已经接受的 Streaming Call 的后续 message、half-close、writable、close task
-  可以继续使用全部 node；
-- admission 在 reserve 边界命中 `TR_AGAIN` 后，沿已有逻辑返回
-  `RESOURCE_EXHAUSTED`，不会把保留容量消耗掉；
-- reserve 不改变 worker 数、ready-Call 调度或同一 Call 的串行规则；
-- reserve 必须严格小于最终 executor queue capacity；0 表示关闭。
+- 新一元调用和流式首个业务任务属于准入工作，
+  只能使用 `executor_queue_capacity - reserve` 个节点；
+- 已经接受的流式 Call 的后续消息、半关闭、可写、关闭任务
+  可以继续使用全部节点；
+- 准入在预留边界命中 `TR_AGAIN` 后，
+  沿已有逻辑返回 `RESOURCE_EXHAUSTED`，
+  不会消耗保留容量；
+- 预留不改变工作线程数、就绪 Call 调度或同一 Call 的串行规则；
+- 预留必须严格小于最终执行器队列容量；0 表示关闭。
 
-这一策略的目标是避免大量新 Call 把所有 task node 占满，使已接受 Streaming Call
-连 continuation/lifecycle 工作都无法进入 executor。它不是吞吐量保证，也不是
-per-service QoS；默认 benchmark 暂时保持 reserve=0。后续应增加独立 Streaming
-fixed-rate 曲线，对比 reserve=0 与 reserve>0 下的 admission reject、continuation
-进展和尾延迟，再决定是否需要设计应用可见的 semantic admission policy；不应直接
-把 executor node reserve 数重新暴露为 stable facade 字段。
+该策略的目标是避免大量新 Call 占满全部任务节点，
+导致已经接受的流式 Call 连续处理/生命周期工作都无法进入执行器。
+它不是吞吐保证，也不是每服务 QoS；
+默认基准暂时保持 `reserve=0`。
+后续应增加独立流式固定速率曲线，
+比较 `reserve=0` 与 `reserve>0`
+下的准入拒绝、续处理进展和尾延迟，
+再决定是否需要设计应用可见的语义准入策略；
+不应直接把执行器节点预留数量重新暴露成稳定门面字段。
 
-CI 对 open-loop 只检查计数守恒、payload 正确性、固定到达时间窗和最终 drain，
-不要求某个 QPS/P99，也不要求共享 runner 必须在某一 rate 点出现饱和。GCC release
-额外保存一轮 5 点容量曲线作为诊断 artifact；它仍不是发布 SLA。
+CI 对开环测试只检查计数守恒、载荷正确性、
+固定到达时间窗和最终排空，
+不要求某个 QPS/P99，
+也不要求共享运行器必须在某个速率点出现饱和。
+GCC `release` 额外保存一轮 5 点容量曲线作为诊断构建产物；
+它仍然不是发布 SLA。
 
-### 2026-09-27 executor 饱和诊断
+### 2026-09-27 执行器饱和诊断
 
-在改成显式 `RESOURCE_EXHAUSTED` 之前，PR #29 的 GitHub shared runner（GCC
-release、2 workers、10 ms handler、executor queue=16、128 offered arrivals）已经
-确认了瓶颈位置：50/100/200 rps 全部成功；400 rps 为 80 OK + 48 UNAVAILABLE；
-800 rps 为 48 OK + 80 UNAVAILABLE。400/800 rps 的成功吞吐都约 196.6 RPC/s，
-而负载发生器 `scheduler_dropped=0`、P99 scheduler lateness 约 80/105 微秒。
-这些数字只用于证明 executor saturation 是真实瓶颈并校验新状态语义，不作为
-跨机器性能结论。新实现应在同类过载点把“handler 未执行的容量拒绝”报告为
-`RESOURCE_EXHAUSTED`，而不是把它伪装成连接不可用。
+在改成显式 `RESOURCE_EXHAUSTED` 之前，
+PR #29 的 GitHub 共享运行器
+（GCC `release`、2 个工作线程、10 ms 处理器、
+执行器队列=16、128 个提供到达）
+已经确认瓶颈位置：
+
+- 50/100/200 RPS 全部成功；
+- 400 RPS 为 80 成功 + 48 `UNAVAILABLE`；
+- 800 RPS 为 48 成功 + 80 `UNAVAILABLE`。
+
+400/800 RPS 的成功吞吐都约 196.6 RPC/s，
+而负载发生器 `scheduler_dropped=0`，
+P99 调度迟到约 80/105 微秒。
+这些数字只用于证明执行器饱和是真实瓶颈并校验新的状态语义，
+不作为跨机器性能结论。
+新实现应在同类过载点把
+“处理器未执行的容量拒绝”报告为 `RESOURCE_EXHAUSTED`，
+而不是伪装成连接不可用。
 
 ## 校验与 CI
 
-新 workflow 以 GCC debug/release、Clang release、ASan/UBSan、TSan 分别运行
-自动/纯软件 CRC 两种构建。每次执行 7 个真实场景；pressure 附带 recovery。
-校验计数守恒、每类请求覆盖、并发测量重叠、正常/恢复全部成功和实际出现压力
-失败；不检查毫秒级延迟或 MiB/s 是否达到阈值。超时仅用于发现挂死。
+新工作流使用 GCC `debug/release`、Clang `release`、
+ASan/UBSan、TSan，
+分别运行自动/纯软件 CRC 两种构建。
+每次执行 7 个真实场景；
+`pressure` 附带 `recovery`。
+校验计数守恒、每类请求覆盖、并发测量重叠、
+正常/恢复全部成功和实际出现压力失败；
+不检查毫秒级延迟或 MiB/s 是否达到阈值。
+超时只用于发现挂死。
 
-统计校验器的 10 组测试会拒绝漏计 completion、隐藏 submit rejection、类别合计
-错误、畸形/NaN 数字、错误时间区间、数据损坏、虚假 mixed 和无失败的 pressure。
-C 程序在 callback 可能提前到达时也不持锁调用同步 submit；sample/payload
-保持存活直到 callback 完成，异常退出清理先 destroy/join Client 再释放借用数据。
+统计校验器的 10 组测试会拒绝：
 
-CI 上传完整日志、输出和精确 Git source archive，保留原始失败退出码。源快照只
-用于重现当前代码，不含凭据、环境变量转储或 `.git`。没有自动重试失败的测试。
+- 漏计完成事件；
+- 隐藏提交拒绝；
+- 类别合计错误；
+- 畸形/NaN 数字；
+- 错误时间区间；
+- 数据损坏；
+- 虚假混合负载；
+- 没有失败的压力场景。
+
+C 程序在回调可能提前到达时也不会持锁调用同步提交；
+样本/载荷会保持存活直到回调完成；
+异常退出清理先销毁/等待 Client，再释放借用数据。
+
+CI 上传完整日志、输出和精确 Git 源码归档，
+保留原始失败退出码。
+源码快照只用于重现当前代码，
+不包含凭据、环境变量转储或 `.git`。
+失败测试没有自动重试。
 
 ## 2026-09-26 本地测量
 
-生产基线 `6d6f42535ed5d2ba12692852b5225bb6ff2d9df6`。从既有 CI archive 和
-已合并补丁还原后，整个 `src/` tree 为 `0b70881848ed4a8ae04ca1b3ffb17d21d660de64`，
-整个 `include/` tree 为 `d4f20305bcca4b95a9d2b3249c9e97b8ac0792a7`，与 GitHub
-基线完全相同。没有把旧 Reactor 或离线控制调度候选版本作为当前主线测量。
+生产基线 `6d6f42535ed5d2ba12692852b5225bb6ff2d9df6`。
+从既有 CI 归档和已合并补丁还原后，
+整个 `src/` 树为
+`0b70881848ed4a8ae04ca1b3ffb17d21d660de64`，
+整个 `include/` 树为
+`d4f20305bcca4b95a9d2b3249c9e97b8ac0792a7`，
+与 GitHub 基线完全相同。
+没有把旧 Reactor 或离线控制调度候选版本作为当前主线测量。
 
-GCC 14.2、`-O2 -g -pthread`，无 sanitizer/LTO；共享 KVM 环境，CPU 报告为
-AMD EPYC 9V74，CPU 时间配额为 4 核等价，无绑核。每 case 预热 100 次，每个
-普通 Client 测量 256 次，pressure 测量 64 次；三轮交替运行自动/纯软件后端。
-每 case 新建 Server，普通消息使用相同参数，pressure/recovery 在同一连接中。
-本地仓库是重建快照，原始 metadata 的本地 Git id 不是上述 GitHub 基线 id；
-基线识别依赖已核对的 source tree 与 binary hash，而不是伪造本地 HEAD。
+GCC 14.2、`-O2 -g -pthread`，无检查器/LTO；
+共享 KVM 环境，CPU 报告 AMD EPYC 9V74，
+CPU 时间配额为 4 核等价，没有绑核。
+每个场景预热 100 次，
+每个普通 Client 测量 256 次，
+`pressure` 测量 64 次；
+三轮交替运行自动/纯软件后端。
+每个场景新建 Server，
+普通消息使用相同参数，
+`pressure/recovery` 在同一个连接中。
+本地仓库是重建快照，
+原始元数据中的本地 Git 标识不是上述 GitHub 基线标识；
+基线识别依赖已经核对的源码树与二进制哈希，
+而不是伪造本地 HEAD。
 
-下表为三轮**单客户端**结果中位数；原始逐次运行汇总见
-`bench/results/rpc-20260926.csv`。它不是每请求 latency trace，更不是独占硬件 SLA。
-小样本、调度噪声和 TCP 延迟行为使结果波动明显，不用三轮数据给出显著性结论。
+下表为三轮**单客户端**结果中位数；
+原始逐次运行汇总见
+`bench/results/rpc-20260926.csv`。
+它不是每请求延迟跟踪，更不是独占硬件 SLA。
+小样本、调度噪声和 TCP 延迟行为使结果波动明显，
+不使用三轮数据给出显著性结论。
 
 | 负载 | 自动 CRC | 纯软件 CRC |
 |---|---:|---:|
-| small，窗口 1，成功 RPC/s | 9364.78 | 7533.52 |
-| small，窗口 1，成功 P99，微秒 | 269.87 | 277.16 |
-| bulk，窗口 8，双向应用 MiB/s | 286.51 | 205.44 |
-| mixed，窗口 8，成功 RPC/s | 207.77 | 175.96 |
-| mixed 中 small 成功 P99，微秒 | 87975.35 | 88256.18 |
+| `small`，窗口 1，成功 RPC/s | 9364.78 | 7533.52 |
+| `small`，窗口 1，成功 P99，微秒 | 269.87 | 277.16 |
+| `bulk`，窗口 8，双向应用 MiB/s | 286.51 | 205.44 |
+| `mixed`，窗口 8，成功 RPC/s | 207.77 | 175.96 |
+| `mixed` 中 `small` 成功 P99，微秒 | 87975.35 | 88256.18 |
 
-自动/软件版本在普通场景均完成全部请求。三轮 pressure 各 64 个请求均以
-DEADLINE_EXCEEDED 结束；后续 64 个恢复请求均成功。结果证明了这些有限场景，
-不证明不存在其他取消/恢复竞态。Sanitizer 数据只验证正确性，不混入性能表。
+自动/软件版本在普通场景都完成全部请求。
+三轮 `pressure` 各 64 个请求全部以
+`DEADLINE_EXCEEDED` 结束；
+后续 64 个恢复请求全部成功。
+结果只证明这些有限场景，
+不能证明不存在其他取消/恢复竞争。
+内存/线程检查器数据只验证正确性，
+不混入性能表。
 
 ### 历史发现与生产落地：TCP_NODELAY
 
-PR #26 测量时的主线 `src/socket.c` 没有设置 TCP_NODELAY。当时仅在未提交的临时对照构建中，给
-创建及 accept 成功的 TCP socket 设置并检查 TCP_NODELAY，其余代码/参数相同。
-三轮 mixed 单客户端 small P99 中位数从约 88 ms 变为约 0.616 ms；成功速率中位数
-从约 208 变为约 14092 RPC/s。两客户端实验也观察到明显变化，详见 CSV 中
-`nodelay-experiment`，**该实验不是提交版本的默认行为或性能**。
+PR #26 测量时的主线 `src/socket.c`
+没有设置 `TCP_NODELAY`。
+当时只在未提交的临时对照构建中，
+给创建及 `accept` 成功的 TCP 套接字设置并检查 `TCP_NODELAY`，
+其余代码/参数相同。
 
-这个 A/B 结果支持优先审查 Nagle/ACK 与小包发送的交互，而不是继续优化 CRC 或
-直接增加 Reactor。没有 packet trace，仍不能声称已经证明每一次延迟的具体来源。
-RFC 9293 Appendix A.3 讨论了 Nagle + delayed ACK 对 request/response 的影响；
-Linux TCP_NODELAY 的含义见 TCP 手册。
+三轮 `mixed` 单客户端 `small` P99 中位数
+从约 88 ms 变为约 0.616 ms；
+成功速率中位数从约 208 变为约 14092 RPC/s。
+两客户端实验也观察到明显变化，
+详见 CSV 中 `nodelay-experiment`。
+**该实验不是提交版本的默认行为或性能。**
 
-后续生产实现把策略收敛到高层 facade 边界：Client 首次连接、Server 已接受 peer、
-以及 Client 自动 reconnect 都在 Reactor 接管 fd **之前**应用同一策略；低层
-`tr_tcp_*` helper 不被全局强制修改。策略可显式禁用。测试通过链接期
-`setsockopt` observer 验证默认双向设置、显式禁用和 reconnect 继承，不以
-loopback 延迟数字作为 CI 通过门槛。上面的 2026-09-26 性能表仍是修改前历史基线，
-不能当作当前默认 socket 策略的测量结果。
+这个对照结果支持优先审查 Nagle/ACK 与小包发送的交互，
+而不是继续优化 CRC 或直接增加 Reactor。
+没有抓包跟踪，仍不能声称已经证明每一次延迟的具体来源。
+RFC 9293 附录 A.3 讨论了 Nagle + 延迟 ACK 对请求/响应的影响；
+Linux `TCP_NODELAY` 的含义见 TCP 手册。
+
+后续生产实现把策略收敛到高层门面边界：
+Client 首次连接、Server 已接收对端、
+以及 Client 自动重连，
+都会在 Reactor 接管 fd **之前**应用同一策略；
+低层 `tr_tcp_*` 辅助接口不会被全局强制修改。
+策略可以显式禁用。
+测试通过链接期 `setsockopt` 观察器验证
+默认双向设置、显式禁用和重连继承，
+不以回环延迟数字作为 CI 通过门槛。
+上面的 2026-09-26 性能表仍是修改前历史基线，
+不能当作当前默认套接字策略的测量结果。
 
 参考：
+
 - https://www.rfc-editor.org/rfc/rfc9293.html#appendix-A.3
 - https://man7.org/linux/man-pages/man7/tcp.7.html
