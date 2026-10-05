@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include "reactor.h"
 
+struct tr_memory_budget;
+
 /*
  * 提交一个 worker completion 回 Reactor owner。
  *
@@ -37,6 +39,10 @@ int tr_reactor_call_or_stopped(
  */
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
+
+/* Internal resource-domain capability; NULL for standalone/unbudgeted Reactor. */
+struct tr_memory_budget *
+tr_reactor_memory_budget(struct tr_reactor *reactor);
 
 /*
  * Optional raw connection preface gate. The Reactor reads exactly byte_count

@@ -446,9 +446,25 @@ P5 第一、二、三、四、五、六、七、八、九、十、十一、十�
 - Client facade message/reassembly pools、RPC Endpoint/Channel lifecycle allocations
   仍未覆盖，因此 stable `memory_budget_bytes` 继续不开放。
 
+第四阶段继续扩大 shard memory accounting：
+
+- Client 创建顺序调整为 Runtime/budget owner -> RPC/reassembly pools -> start；销毁时
+  protocol quiesce -> Runtime stop -> pools release -> Runtime destroy；
+- Channel/RPC 不新增 budget config 字段，而是从唯一 Reactor owner 派生同一
+  RuntimeShard budget capability；
+- Channel object、Stream table/index、protocol pool 已计账；
+- RPC Endpoint object、Method/Call/deadline/stream tables 与 endpoint-local executor
+  arrays 已计账；
+- shard RPC executor-group object、thread-handle array、ready-endpoint ring 已计账；
+- integration test 验证 Reactor baseline -> Channel -> RPC -> Channel -> baseline -> 0
+  的逐层 reserve/release 闭环；
+- stable `memory_budget_bytes` 仍不开放：Connection Group/Pipeline、connector 与
+  detached-finalizer 等 allocation path 尚未全部参与同一 budget。
+
 后续：
 
-- 将 Client facade pools、RPC/Channel lifecycle allocations 接入同一个 shard budget；
+- 收敛 Connection Group/Pipeline、connector、detached-finalizer 等剩余 shard-local
+  allocation path；
 - 覆盖闭环后再公开 stable `memory_budget_bytes`；
 - worker admission；
 - application/backend admission hook（优先复用 SERVER_PRE_HANDLER，而不是新增第二套 hook）；

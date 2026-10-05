@@ -344,3 +344,8 @@ drop Endpoint owner ref
 
 因此没有线程会阻塞等待 refcount；finalizer 不调用
 `tr_reactor_quiesce()`，也不拥有任何 protocol state mutation 权限。
+
+Phase 7 memory accounting 中，Endpoint/Channel 从其唯一 Reactor owner 派生
+RuntimeShard budget；Endpoint 最后一个 strong-ref 释放时先释放自己的固定 heap
+reservation，再执行 detached finalizer。Server 仍保证 RuntimeShard/budget owner
+晚于所有 Endpoint/Channel finalizer 销毁。

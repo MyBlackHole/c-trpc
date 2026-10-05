@@ -9,6 +9,7 @@
 #include "rpc_internal.h"
 #include "../transport/channel/channel_internal.h"
 #include "../execution/reactor_internal.h"
+#include "../memory_budget.h"
 #include "../observability_internal.h"
 
 #include <assert.h>
@@ -257,6 +258,8 @@ struct tr_rpc_executor {
 
 struct tr_rpc_executor_group {
 	pthread_mutex_t lock;
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
 	pthread_cond_t cond;
 	pthread_t *threads;
 	struct tr_rpc_endpoint **ready_endpoints;
@@ -271,13 +274,27 @@ struct tr_rpc_executor_group {
 	int stopping;
 };
 
-TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
+static void tr_rpc_group_mem_free(struct tr_rpc_executor_group *group)
+{
+	if (!group)
+		return;
+	if (group->memory_budget && group->memory_bytes != 0U)
+		(void)tr_memory_budget_release(
+			group->memory_budget, group->memory_bytes);
+	free(group);
+}
+
+TR_DEFINE_PTR_OWNERSHIP(
+	tr_rpc_group_mem, struct tr_rpc_executor_group, tr_rpc_group_mem_free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_thread_array, pthread_t, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_endpoint_array, struct tr_rpc_endpoint *, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 			tr_rpc_executor_group_destroy)
 
 struct tr_rpc_endpoint {
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
+
 	/* Call/Method/protocol state. */
 	pthread_mutex_t lock;
 	/* strong-ref wait + detached finalizer lifecycle only. */
@@ -320,6 +337,70 @@ struct tr_rpc_endpoint {
 
 	struct tr_rpc_semantic_stats semantic;
 };
+
+static int tr_rpc_memory_add(
+	uint64_t *total, uint64_t count, uint64_t item_bytes)
+{
+	uint64_t bytes;
+
+	if (!total)
+		return TR_ERR_INVALID;
+	if (count != 0U && item_bytes > UINT64_MAX / count)
+		return TR_ERR_BAD_LENGTH;
+	bytes = count * item_bytes;
+	if (*total > UINT64_MAX - bytes)
+		return TR_ERR_BAD_LENGTH;
+	*total += bytes;
+	return TR_OK;
+}
+
+static int tr_rpc_endpoint_calloc(
+	struct tr_rpc_endpoint *endpoint, size_t count, size_t item_size,
+	void **out)
+{
+	uint64_t bytes;
+	void *memory;
+	int ret;
+
+	if (!endpoint || !out || count == 0U || item_size == 0U)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (count > SIZE_MAX / item_size)
+		return TR_ERR_BAD_LENGTH;
+	bytes = (uint64_t)(count * item_size);
+
+	if (endpoint->memory_budget) {
+		ret = tr_memory_budget_reserve(endpoint->memory_budget, bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	memory = calloc(count, item_size);
+	if (!memory) {
+		if (endpoint->memory_budget)
+			(void)tr_memory_budget_release(
+				endpoint->memory_budget, bytes);
+		return TR_ERR_NOMEM;
+	}
+
+	if (endpoint->memory_bytes > UINT64_MAX - bytes) {
+		free(memory);
+		if (endpoint->memory_budget)
+			(void)tr_memory_budget_release(
+				endpoint->memory_budget, bytes);
+		return TR_ERR_BAD_LENGTH;
+	}
+	endpoint->memory_bytes += bytes;
+	*out = memory;
+	return TR_OK;
+}
+
+static void tr_rpc_endpoint_memory_release(
+	struct tr_memory_budget *budget, uint64_t bytes)
+{
+	if (budget && bytes != 0U)
+		(void)tr_memory_budget_release(budget, bytes);
+}
 
 #define TR_RPC_METADATA_RESERVED_TIMEOUT ":timeout-ms"
 #define TR_RPC_METADATA_RESERVED_TIMEOUT_LEN 11U
@@ -3094,18 +3175,42 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 	guard.armed = 1;
 
 	executor->group = group;
-	if (!group)
-		executor->threads =
-			(pthread_t *)calloc(thread_count, sizeof(*executor->threads));
-	executor->nodes = (struct tr_rpc_executor_node *)calloc(
-		capacity, sizeof(*executor->nodes));
-	executor->callq = (struct tr_rpc_executor_callq *)calloc(
-		endpoint->config.max_calls, sizeof(*executor->callq));
-	executor->ready_calls = (uint32_t *)calloc(
-		endpoint->config.max_calls, sizeof(*executor->ready_calls));
-	if ((!group && !executor->threads) || !executor->nodes ||
-	    !executor->callq || !executor->ready_calls)
-		return TR_ERR_NOMEM;
+	if (!group) {
+		void *memory = NULL;
+		int alloc_ret = tr_rpc_endpoint_calloc(
+			endpoint, thread_count, sizeof(*executor->threads),
+			&memory);
+
+		if (alloc_ret != TR_OK)
+			return alloc_ret;
+		executor->threads = (pthread_t *)memory;
+	}
+	{
+		void *memory = NULL;
+		int alloc_ret;
+
+		alloc_ret = tr_rpc_endpoint_calloc(
+			endpoint, capacity, sizeof(*executor->nodes), &memory);
+		if (alloc_ret != TR_OK)
+			return alloc_ret;
+		executor->nodes = (struct tr_rpc_executor_node *)memory;
+
+		memory = NULL;
+		alloc_ret = tr_rpc_endpoint_calloc(
+			endpoint, endpoint->config.max_calls,
+			sizeof(*executor->callq), &memory);
+		if (alloc_ret != TR_OK)
+			return alloc_ret;
+		executor->callq = (struct tr_rpc_executor_callq *)memory;
+
+		memory = NULL;
+		alloc_ret = tr_rpc_endpoint_calloc(
+			endpoint, endpoint->config.max_calls,
+			sizeof(*executor->ready_calls), &memory);
+		if (alloc_ret != TR_OK)
+			return alloc_ret;
+		executor->ready_calls = (uint32_t *)memory;
+	}
 
 	executor->capacity = capacity;
 	executor->continuation_reserve =
@@ -3176,10 +3281,10 @@ static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_executor_release(endpoint);
 }
 
-int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
-				 uint32_t max_calls_per_endpoint,
-				 uint32_t thread_count,
-				 struct tr_rpc_executor_group **out)
+int tr_rpc_executor_group_create_budgeted(
+	uint32_t endpoint_capacity, uint32_t max_calls_per_endpoint,
+	uint32_t thread_count, struct tr_memory_budget *budget,
+	struct tr_rpc_executor_group **out)
 {
 	struct tr_rpc_executor_group *group_mem
 		TR_AUTO(tr_rpc_group_mem_cleanup) = NULL;
@@ -3207,10 +3312,42 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	if (thread_count == 0)
 		thread_count = 1U;
 
-	group_mem =
-		(struct tr_rpc_executor_group *)calloc(1, sizeof(*group_mem));
-	if (!group_mem)
-		return TR_ERR_NOMEM;
+	{
+		uint64_t memory_bytes = 0U;
+		int budget_ret;
+
+		budget_ret = tr_rpc_memory_add(
+			&memory_bytes, 1U, sizeof(*group_mem));
+		if (budget_ret != TR_OK)
+			return budget_ret;
+		budget_ret = tr_rpc_memory_add(
+			&memory_bytes, thread_count, sizeof(*threads));
+		if (budget_ret != TR_OK)
+			return budget_ret;
+		budget_ret = tr_rpc_memory_add(
+			&memory_bytes, (uint64_t)endpoint_capacity + 1U,
+			sizeof(*ready_endpoints));
+		if (budget_ret != TR_OK)
+			return budget_ret;
+		if (budget) {
+			budget_ret = tr_memory_budget_reserve(
+				budget, memory_bytes);
+			if (budget_ret != TR_OK)
+				return budget_ret;
+		}
+
+		group_mem =
+			(struct tr_rpc_executor_group *)calloc(
+				1, sizeof(*group_mem));
+		if (!group_mem) {
+			if (budget)
+				(void)tr_memory_budget_release(
+					budget, memory_bytes);
+			return TR_ERR_NOMEM;
+		}
+		group_mem->memory_budget = budget;
+		group_mem->memory_bytes = memory_bytes;
+	}
 
 	threads = (pthread_t *)calloc(thread_count, sizeof(*threads));
 	/*
@@ -3248,6 +3385,15 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	return TR_OK;
 }
 
+int tr_rpc_executor_group_create(
+	uint32_t endpoint_capacity, uint32_t max_calls_per_endpoint,
+	uint32_t thread_count, struct tr_rpc_executor_group **out)
+{
+	return tr_rpc_executor_group_create_budgeted(
+		endpoint_capacity, max_calls_per_endpoint, thread_count,
+		NULL, out);
+}
+
 void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 {
 	uint32_t i;
@@ -3267,6 +3413,9 @@ void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 	free(group->threads);
 	pthread_cond_destroy(&group->cond);
 	pthread_mutex_destroy(&group->lock);
+	tr_rpc_endpoint_memory_release(
+		group->memory_budget, group->memory_bytes);
+	group->memory_bytes = 0U;
 	free(group);
 }
 
@@ -4283,6 +4432,9 @@ static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 		pthread_mutex_destroy(&endpoint->ref_lock);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&endpoint->lock);
+	tr_rpc_endpoint_memory_release(
+		endpoint->memory_budget, endpoint->memory_bytes);
+	endpoint->memory_bytes = 0U;
 	free(endpoint);
 	build->endpoint = NULL;
 }
@@ -4293,7 +4445,9 @@ int tr_rpc_endpoint_create_with_executor_group(
 {
 	struct tr_rpc_endpoint_build build
 		TR_AUTO(tr_rpc_endpoint_build_cleanup) = { 0 };
+	struct tr_memory_budget *budget;
 	struct tr_rpc_endpoint *endpoint;
+	uint64_t endpoint_bytes = sizeof(*endpoint);
 	int ret;
 
 	if (!channel || !config || !out || !config->message_pool ||
@@ -4303,10 +4457,20 @@ int tr_rpc_endpoint_create_with_executor_group(
 		return TR_ERR_INVALID;
 
 	*out = NULL;
+	budget = tr_reactor_memory_budget(tr_channel_reactor(channel));
+	if (budget) {
+		ret = tr_memory_budget_reserve(budget, endpoint_bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
 	endpoint = (struct tr_rpc_endpoint *)calloc(1, sizeof(*endpoint));
-	if (!endpoint)
+	if (!endpoint) {
+		tr_rpc_endpoint_memory_release(budget, endpoint_bytes);
 		return TR_ERR_NOMEM;
+	}
 	build.endpoint = endpoint;
+	endpoint->memory_budget = budget;
+	endpoint->memory_bytes = endpoint_bytes;
 
 	if (pthread_mutex_init(&endpoint->lock, NULL) != 0)
 		return TR_ERR_INVALID;
@@ -4320,26 +4484,56 @@ int tr_rpc_endpoint_create_with_executor_group(
 	if (tr_refcount_init(&endpoint->refs, 1U) != TR_OK)
 		return TR_ERR_STATE;
 
-	endpoint->methods = (struct tr_rpc_method_entry *)calloc(
-		config->max_methods, sizeof(*endpoint->methods));
-	endpoint->method_index_capacity =
-		tr_rpc_method_index_capacity_for(config->max_methods);
-	if (endpoint->method_index_capacity == 0U)
-		return TR_ERR_INVALID;
-	endpoint->method_index = (struct tr_rpc_method_index_entry *)calloc(
-		endpoint->method_index_capacity, sizeof(*endpoint->method_index));
-	endpoint->calls = (struct tr_rpc_call_slot *)calloc(
-		config->max_calls, sizeof(*endpoint->calls));
-	endpoint->deadline_heap = (uint32_t *)calloc(
-		config->max_calls, sizeof(*endpoint->deadline_heap));
-	endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
-	endpoint->call_by_stream_slot = (uint32_t *)calloc(
-		endpoint->stream_slot_capacity,
-		sizeof(*endpoint->call_by_stream_slot));
-	if (!endpoint->methods || !endpoint->method_index || !endpoint->calls ||
-	    !endpoint->deadline_heap || !endpoint->call_by_stream_slot ||
-	    endpoint->stream_slot_capacity == 0U)
-		return TR_ERR_NOMEM;
+	{
+		void *memory = NULL;
+
+		ret = tr_rpc_endpoint_calloc(
+			endpoint, config->max_methods,
+			sizeof(*endpoint->methods), &memory);
+		if (ret != TR_OK)
+			return ret;
+		endpoint->methods = (struct tr_rpc_method_entry *)memory;
+
+		endpoint->method_index_capacity =
+			tr_rpc_method_index_capacity_for(config->max_methods);
+		if (endpoint->method_index_capacity == 0U)
+			return TR_ERR_INVALID;
+		memory = NULL;
+		ret = tr_rpc_endpoint_calloc(
+			endpoint, endpoint->method_index_capacity,
+			sizeof(*endpoint->method_index), &memory);
+		if (ret != TR_OK)
+			return ret;
+		endpoint->method_index =
+			(struct tr_rpc_method_index_entry *)memory;
+
+		memory = NULL;
+		ret = tr_rpc_endpoint_calloc(
+			endpoint, config->max_calls,
+			sizeof(*endpoint->calls), &memory);
+		if (ret != TR_OK)
+			return ret;
+		endpoint->calls = (struct tr_rpc_call_slot *)memory;
+
+		memory = NULL;
+		ret = tr_rpc_endpoint_calloc(
+			endpoint, config->max_calls,
+			sizeof(*endpoint->deadline_heap), &memory);
+		if (ret != TR_OK)
+			return ret;
+		endpoint->deadline_heap = (uint32_t *)memory;
+
+		endpoint->stream_slot_capacity = tr_channel_max_streams(channel);
+		if (endpoint->stream_slot_capacity == 0U)
+			return TR_ERR_INVALID;
+		memory = NULL;
+		ret = tr_rpc_endpoint_calloc(
+			endpoint, endpoint->stream_slot_capacity,
+			sizeof(*endpoint->call_by_stream_slot), &memory);
+		if (ret != TR_OK)
+			return ret;
+		endpoint->call_by_stream_slot = (uint32_t *)memory;
+	}
 	{
 		uint32_t i;
 
@@ -4412,6 +4606,8 @@ static void tr_rpc_endpoint_wait_owner_only(struct tr_rpc_endpoint *endpoint)
 static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 {
 	tr_rpc_endpoint_detached_finalizer finalizer;
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
 	void *finalizer_arg;
 	struct tr_rpc_endpoint_stats final_stats;
 	int have_finalizer;
@@ -4420,6 +4616,8 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	if (!endpoint)
 		return;
 
+	memory_budget = endpoint->memory_budget;
+	memory_bytes = endpoint->memory_bytes;
 	pthread_mutex_lock(&endpoint->ref_lock);
 	finalizer = endpoint->detached_finalizer;
 	finalizer_arg = endpoint->detached_finalizer_arg;
@@ -4449,6 +4647,7 @@ static void tr_rpc_endpoint_release(struct tr_rpc_endpoint *endpoint)
 	pthread_mutex_destroy(&endpoint->ref_lock);
 	pthread_mutex_destroy(&endpoint->lock);
 	free(endpoint);
+	tr_rpc_endpoint_memory_release(memory_budget, memory_bytes);
 
 	if (have_finalizer)
 		finalizer(&final_stats, finalizer_arg);

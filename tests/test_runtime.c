@@ -125,10 +125,21 @@ static void test_runtime_reuseport_listener_group(void)
 
 static void test_runtime_shard_rpc_executor_ownership(void)
 {
+	struct tr_memory_budget_stats baseline_stats;
+	struct tr_memory_budget_stats executor_stats;
 	struct tr_runtime_config config;
 	struct tr_runtime_shard_config shard_config;
 	struct tr_runtime *runtime = NULL;
 	struct tr_runtime_shard *shard;
+
+	/* Establish the same Reactor-only accounting baseline. */
+	runtime_test_config_init(&config, &shard_config, 1U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	tr_runtime_shard_memory_stats(shard, &baseline_stats);
+	tr_runtime_destroy(runtime);
+	runtime = NULL;
 
 	runtime_test_config_init(&config, &shard_config, 1U);
 	shard_config.rpc_executor.endpoint_capacity = 4U;
@@ -139,7 +150,11 @@ static void test_runtime_shard_rpc_executor_ownership(void)
 	shard = tr_runtime_shard_at(runtime, 0U);
 	assert(shard != NULL);
 	assert(tr_runtime_shard_rpc_executor(shard) != NULL);
+	tr_runtime_shard_memory_stats(shard, &executor_stats);
+	assert(executor_stats.current_bytes > baseline_stats.current_bytes);
+	assert(executor_stats.peak_bytes >= executor_stats.current_bytes);
 	tr_runtime_destroy(runtime);
+	runtime = NULL;
 
 	runtime_test_config_init(&config, &shard_config, 1U);
 	shard_config.rpc_executor.thread_count = 1U;

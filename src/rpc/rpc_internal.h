@@ -9,6 +9,7 @@
 #include "tr/rpc.h"
 
 struct tr_rpc_endpoint;
+struct tr_memory_budget;
 
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
 
@@ -134,6 +135,10 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
 				 uint32_t thread_count,
 				 struct tr_rpc_executor_group **out);
+int tr_rpc_executor_group_create_budgeted(
+	uint32_t endpoint_capacity, uint32_t max_calls_per_endpoint,
+	uint32_t thread_count, struct tr_memory_budget *budget,
+	struct tr_rpc_executor_group **out);
 void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group);
 
 int tr_rpc_endpoint_create_with_executor_group(

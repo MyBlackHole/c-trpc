@@ -165,10 +165,11 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		}
 		if (ret == TR_OK &&
 		    shard_config->rpc_executor.endpoint_capacity != 0U)
-			ret = tr_rpc_executor_group_create(
+			ret = tr_rpc_executor_group_create_budgeted(
 				shard_config->rpc_executor.endpoint_capacity,
 				shard_config->rpc_executor.max_calls_per_endpoint,
 				shard_config->rpc_executor.thread_count,
+				&shard->memory_budget,
 				&shard->rpc_executor);
 		if (ret != TR_OK) {
 			tr_runtime_shard_release(shard);

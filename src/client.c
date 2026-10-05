@@ -214,20 +214,6 @@ int tr_client_create_with_tuning(
 	client->config = effective;
 	client->tuning = effective_tuning;
 
-	ret = tr_buffer_pool_init_dynamic(&client->rpc_message_pool,
-					  effective_tuning.rpc_message_pool_count,
-					  effective.limits.max_message_bytes);
-	if (ret != TR_OK)
-		return ret;
-	client->rpc_pool_ready = 1;
-
-	ret = tr_buffer_pool_init(&client->reassembly_pool,
-				  effective_tuning.reassembly_pool_count,
-				  effective.limits.max_message_bytes);
-	if (ret != TR_OK)
-		return ret;
-	client->reassembly_pool_ready = 1;
-
 	memset(&runtime_config, 0, sizeof(runtime_config));
 	memset(&shard_config, 0, sizeof(shard_config));
 	runtime_config.shard_count = 1U;
@@ -262,6 +248,25 @@ int tr_client_create_with_tuning(
 	client->shard = tr_runtime_shard_at(client->runtime, 0U);
 	if (!client->shard)
 		return TR_ERR_STATE;
+
+	ret = tr_buffer_pool_init_dynamic_budgeted(
+		&client->rpc_message_pool,
+		effective_tuning.rpc_message_pool_count,
+		effective.limits.max_message_bytes,
+		tr_runtime_shard_memory_budget(client->shard));
+	if (ret != TR_OK)
+		return ret;
+	client->rpc_pool_ready = 1;
+
+	ret = tr_buffer_pool_init_budgeted(
+		&client->reassembly_pool,
+		effective_tuning.reassembly_pool_count,
+		effective.limits.max_message_bytes,
+		tr_runtime_shard_memory_budget(client->shard));
+	if (ret != TR_OK)
+		return ret;
+	client->reassembly_pool_ready = 1;
+
 	ret = tr_runtime_start(client->runtime);
 	if (ret != TR_OK)
 		return ret;
@@ -714,17 +719,27 @@ void tr_client_destroy(struct tr_client *client)
 		client->channel = NULL;
 	}
 
-	if (client->runtime) {
+	if (client->runtime)
 		(void)tr_runtime_stop(client->runtime);
+
+	/*
+	 * Client pools borrow the RuntimeShard memory budget. Release all pool
+	 * reservations after protocol teardown but before destroying the owner.
+	 */
+	if (client->reassembly_pool_ready) {
+		tr_buffer_pool_destroy(&client->reassembly_pool);
+		client->reassembly_pool_ready = 0;
+	}
+	if (client->rpc_pool_ready) {
+		tr_buffer_pool_destroy(&client->rpc_message_pool);
+		client->rpc_pool_ready = 0;
+	}
+
+	if (client->runtime) {
 		tr_runtime_destroy(client->runtime);
 		client->runtime = NULL;
 		client->shard = NULL;
 	}
-
-	if (client->reassembly_pool_ready)
-		tr_buffer_pool_destroy(&client->reassembly_pool);
-	if (client->rpc_pool_ready)
-		tr_buffer_pool_destroy(&client->rpc_message_pool);
 
 	free(client);
 }

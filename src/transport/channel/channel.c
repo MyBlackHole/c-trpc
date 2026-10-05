@@ -3,6 +3,8 @@
 #include "../../io/connector_internal.h"
 #include "../../io/socket_internal.h"
 #include "../../execution/reactor_internal.h"
+#include "../../execution/buffer_internal.h"
+#include "../../memory_budget.h"
 
 #include "tr/status.h"
 #include "../protocol/wire.h"
@@ -67,6 +69,8 @@ struct tr_stream_slot {
 
 struct tr_channel {
 	struct tr_channel_config config;
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
 	pthread_mutex_t lock;
 
 	struct tr_reactor *reactor;
@@ -2160,6 +2164,58 @@ int tr_channel_start(struct tr_channel *channel)
 	return TR_OK;
 }
 
+static int tr_channel_memory_add(
+	uint64_t *total, uint64_t count, uint64_t item_bytes)
+{
+	uint64_t bytes;
+
+	if (!total)
+		return TR_ERR_INVALID;
+	if (count != 0U && item_bytes > UINT64_MAX / count)
+		return TR_ERR_BAD_LENGTH;
+	bytes = count * item_bytes;
+	if (*total > UINT64_MAX - bytes)
+		return TR_ERR_BAD_LENGTH;
+	*total += bytes;
+	return TR_OK;
+}
+
+static int tr_channel_memory_bytes(
+	const struct tr_channel_config *config, size_t index_capacity,
+	uint64_t *out)
+{
+	uint64_t total = 0U;
+	int ret;
+
+	if (!config || !out || index_capacity == 0U)
+		return TR_ERR_INVALID;
+
+	ret = tr_channel_memory_add(&total, 1U, sizeof(struct tr_channel));
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_channel_memory_add(
+		&total, config->max_streams, sizeof(struct tr_stream_slot));
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_channel_memory_add(
+		&total, (uint64_t)index_capacity,
+		sizeof(struct tr_stream_index_entry));
+	if (ret != TR_OK)
+		return ret;
+
+	*out = total;
+	return TR_OK;
+}
+
+static void tr_channel_memory_release(struct tr_channel *channel)
+{
+	if (!channel || !channel->memory_budget || channel->memory_bytes == 0U)
+		return;
+	(void)tr_memory_budget_release(
+		channel->memory_budget, channel->memory_bytes);
+	channel->memory_bytes = 0U;
+}
+
 struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
@@ -2205,6 +2261,7 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&channel->lock);
+	tr_channel_memory_release(channel);
 	free(channel);
 	build->channel = NULL;
 }
@@ -2230,7 +2287,11 @@ static int tr_channel_create_common(
 		      struct tr_channel **out)
 {
 	struct tr_channel_build build TR_AUTO(tr_channel_build_cleanup) = { 0 };
+	struct tr_channel_config effective;
+	struct tr_memory_budget *budget;
 	struct tr_channel *channel;
+	size_t index_capacity;
+	uint64_t memory_bytes;
 	int ret;
 
 	if (!out || !control_connection.reactor ||
@@ -2238,37 +2299,58 @@ static int tr_channel_create_common(
 		return TR_ERR_INVALID;
 
 	*out = NULL;
-	channel = (struct tr_channel *)calloc(1, sizeof(*channel));
-	if (!channel)
-		return TR_ERR_NOMEM;
-	build.channel = channel;
-
+	memset(&effective, 0, sizeof(effective));
 	if (config)
-		channel->config = *config;
-	tr_channel_default_config(&channel->config);
+		effective = *config;
+	tr_channel_default_config(&effective);
 
-	if ((channel->config.role != TR_CHANNEL_CLIENT &&
-	     channel->config.role != TR_CHANNEL_SERVER) ||
-	    (channel->config.mode != TR_CHANNEL_SHARED_CONNECTION &&
-	     channel->config.mode != TR_CHANNEL_SPLIT_CONNECTIONS) ||
-	    channel->config.min_protocol_version == 0 ||
-	    channel->config.max_protocol_version == 0 ||
-	    channel->config.min_protocol_version >
-		    channel->config.max_protocol_version)
+	if ((effective.role != TR_CHANNEL_CLIENT &&
+	     effective.role != TR_CHANNEL_SERVER) ||
+	    (effective.mode != TR_CHANNEL_SHARED_CONNECTION &&
+	     effective.mode != TR_CHANNEL_SPLIT_CONNECTIONS) ||
+	    effective.min_protocol_version == 0 ||
+	    effective.max_protocol_version == 0 ||
+	    effective.min_protocol_version > effective.max_protocol_version)
 		return TR_ERR_INVALID;
 
-	if (channel->config.reassembly_pool &&
-	    (channel->config.max_message_bytes == 0 ||
-	     channel->config.max_message_bytes >
-		     channel->config.reassembly_pool->buffer_size))
+	if (effective.reassembly_pool &&
+	    (effective.max_message_bytes == 0 ||
+	     effective.max_message_bytes >
+		     effective.reassembly_pool->buffer_size))
 		return TR_ERR_INVALID;
 
-	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
+	if (effective.mode == TR_CHANNEL_SHARED_CONNECTION) {
 		if (!tr_conn_equal(control_connection, bulk_connection))
 			return TR_ERR_INVALID;
 	} else if (tr_conn_equal(control_connection, bulk_connection)) {
 		return TR_ERR_INVALID;
 	}
+
+	index_capacity = tr_stream_index_capacity_for(effective.max_streams);
+	if (index_capacity == 0U)
+		return TR_ERR_INVALID;
+	ret = tr_channel_memory_bytes(&effective, index_capacity, &memory_bytes);
+	if (ret != TR_OK)
+		return ret;
+
+	budget = tr_reactor_memory_budget(control_connection.reactor);
+	if (budget) {
+		ret = tr_memory_budget_reserve(budget, memory_bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	channel = (struct tr_channel *)calloc(1, sizeof(*channel));
+	if (!channel) {
+		if (budget)
+			(void)tr_memory_budget_release(budget, memory_bytes);
+		return TR_ERR_NOMEM;
+	}
+	build.channel = channel;
+	channel->config = effective;
+	channel->memory_budget = budget;
+	channel->memory_bytes = memory_bytes;
+	channel->stream_index_capacity = index_capacity;
 
 	channel->reactor = control_connection.reactor;
 	channel->control_connection = control_connection;
@@ -2287,10 +2369,6 @@ static int tr_channel_create_common(
 
 	channel->streams = (struct tr_stream_slot *)calloc(
 		channel->config.max_streams, sizeof(*channel->streams));
-	channel->stream_index_capacity =
-		tr_stream_index_capacity_for(channel->config.max_streams);
-	if (channel->stream_index_capacity == 0U)
-		return TR_ERR_INVALID;
 	channel->stream_index = (struct tr_stream_index_entry *)calloc(
 		channel->stream_index_capacity, sizeof(*channel->stream_index));
 	if (!channel->streams || !channel->stream_index)
@@ -2305,9 +2383,11 @@ static int tr_channel_create_common(
 					i + 1U : TR_STREAM_FREE_NONE;
 	}
 
-	ret = tr_buffer_pool_init(&channel->protocol_pool,
-				  TR_CHANNEL_PROTOCOL_BUFFER_COUNT,
-				  TR_CHANNEL_PROTOCOL_BUFFER_SIZE);
+	ret = tr_buffer_pool_init_budgeted(
+		&channel->protocol_pool,
+		TR_CHANNEL_PROTOCOL_BUFFER_COUNT,
+		TR_CHANNEL_PROTOCOL_BUFFER_SIZE,
+		channel->memory_budget);
 	if (ret != TR_OK)
 		return ret;
 	build.protocol_pool_ready = 1;
@@ -2464,6 +2544,7 @@ void tr_channel_finalize_detached(struct tr_channel *channel)
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
 	pthread_mutex_destroy(&channel->lock);
+	tr_channel_memory_release(channel);
 	free(channel);
 }
 
@@ -2504,6 +2585,7 @@ void tr_channel_destroy(struct tr_channel *channel)
 		channel->keepalive_timer_registered = 0;
 	}
 	pthread_mutex_destroy(&channel->lock);
+	tr_channel_memory_release(channel);
 	free(channel);
 }
 

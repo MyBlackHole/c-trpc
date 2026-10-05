@@ -67,13 +67,20 @@ facade knob。RuntimeShard 是 budget owner，跨模块 primitive 位于
 - Reactor 生命周期固定 heap：Reactor object、slot/connection tables、
   command/completion rings、timer entry/heap、TX/control-TX arrays、RX pool
   descriptor/storage；
-- Server shard RPC message pool descriptor + on-demand retained capacity；
-- Server shard reassembly fixed descriptor/storage。
+- Runtime shard RPC executor-group object、thread-handle array 与 ready-endpoint ring；
+- Client/Server shard RPC message pool descriptor + on-demand retained capacity；
+- Client/Server shard reassembly fixed descriptor/storage；
+- Channel object、Stream table/index 与 protocol pool；
+- RPC Endpoint object、Method/Call/deadline/stream index tables，以及 endpoint-local
+  executor nodes/call queues/ready-call ring/thread-handle array。
+
+Channel/RPC 不单独传递 budget 配置：它们从唯一 Reactor owner 派生同一个
+RuntimeShard budget capability，避免 capability wiring 分叉。
 
 Budget 统计的是 c-trpc 主动请求的 userspace heap bytes，不包含 allocator metadata、
-pthread 实现内部内存，也不包含 fd/epoll 等 kernel memory。Client facade 的
-RPC/reassembly pools、RPC Endpoint/Channel lifecycle allocations 仍待接入，因此目前
-仍不对外宣称这是完整的 shard memory cap。
+pthread 实现内部内存、worker thread stack，也不包含 fd/epoll 等 kernel memory。
+Connection Group/Pipeline heap、connector state、per-peer detached-finalizer 等路径
+仍待接入，因此目前仍不对外宣称这是完整的 shard memory cap。
 
 TARGET V1 使用单进程多 Reactor：
 
@@ -187,6 +194,10 @@ stats merge 与 shutdown condition；它不保护 peer table 或 buffer pool。
 Server teardown 在所有 peer/finalizer quiesce 后先销毁 shard Buffer pools，
 让它们把 reservation 归还给 RuntimeShard budget；最后才 destroy Runtime。
 budget owner 因此严格晚于所有 budget consumer 销毁。
+
+Client 采用相同 owner 顺序：先创建 RuntimeShard，再初始化 budgeted RPC/reassembly
+pools；销毁时 protocol/Channel/RPC 先 quiesce，Runtime stop 后先销毁 pools，
+最后才销毁 Runtime/budget owner。
 
 目标逻辑结构：
 

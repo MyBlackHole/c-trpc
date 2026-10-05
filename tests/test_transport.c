@@ -14,6 +14,7 @@
 #include "tr/client.h"
 #include "tr/server.h"
 #include "../src/io/socket.h"
+#include "../src/memory_budget.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 #include "../src/transport/channel/channel_internal.h"
@@ -7125,6 +7126,91 @@ static void test_scope_cleanup_ownership(void)
 	}
 }
 
+static void test_channel_rpc_memory_budget_accounting(void)
+{
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_rpc_endpoint *endpoint = NULL;
+	struct tr_conn_handle connection;
+	struct tr_buffer_pool rpc_pool;
+	uint64_t reactor_bytes;
+	uint64_t channel_bytes;
+	uint64_t rpc_bytes;
+	int client_fd;
+	int server_fd;
+
+	tr_memory_budget_init(&budget, 0U);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 2U;
+	reactor_config.command_capacity = 32U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 4U;
+	reactor_config.rx_buffer_count = 4U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	reactor_config.memory_budget = &budget;
+	assert(tr_reactor_create(
+		       &reactor_config, NULL, NULL, NULL, &reactor) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	reactor_bytes = stats.current_bytes;
+	assert(reactor_bytes != 0U);
+
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &connection) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, connection, connection,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	channel_bytes = stats.current_bytes;
+	assert(channel_bytes > reactor_bytes);
+
+	assert(tr_buffer_pool_init(&rpc_pool, 4U, 4096U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 2U;
+	rpc_config.max_calls = 4U;
+	rpc_config.message_pool = &rpc_pool;
+	rpc_config.executor_threads = 1U;
+	rpc_config.executor_queue_capacity = 16U;
+	assert(tr_rpc_endpoint_create(channel, &rpc_config, &endpoint) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	rpc_bytes = stats.current_bytes;
+	assert(rpc_bytes > channel_bytes);
+
+	tr_rpc_endpoint_destroy(endpoint);
+	endpoint = NULL;
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == channel_bytes);
+
+	tr_channel_destroy(channel);
+	channel = NULL;
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == reactor_bytes);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	tr_reactor_destroy(reactor);
+	reactor = NULL;
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(stats.peak_bytes >= rpc_bytes);
+
+	tr_buffer_pool_destroy(&rpc_pool);
+	assert(close(server_fd) == 0);
+}
+
 int main(void)
 {
 	test_refcount_semantics();
@@ -7158,6 +7244,7 @@ int main(void)
 	test_channel_version_negotiation_failure();
 	test_rpc_wire_and_raw_codec();
 	test_rpc_method_index_collisions();
+	test_channel_rpc_memory_budget_accounting();
 	test_rpc_deadline_heap_order();
 	test_rpc_call_slot_reuse();
 	test_rpc_unary_raw_roundtrip();

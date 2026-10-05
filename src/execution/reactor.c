@@ -3393,6 +3393,12 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	return ret;
 }
 
+struct tr_memory_budget *
+tr_reactor_memory_budget(struct tr_reactor *reactor)
+{
+	return reactor ? reactor->config.memory_budget : NULL;
+}
+
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg)
 {
