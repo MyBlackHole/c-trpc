@@ -2461,6 +2461,18 @@ static int tr_channel_detach_on_owner(void *arg)
 		return TR_OK;
 	}
 
+	/*
+	 * Detached ownership transfer must cross every fallible lifetime barrier
+	 * while the peer is still owner-visible. Finalizers have no natural retry
+	 * queue, so they must not discover a live drain waiter after transfer.
+	 */
+	channel->drain_wait_closed = 1;
+	if (channel->drain_waiters != 0U) {
+		pthread_cond_broadcast(&channel->drain_cond);
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STATE;
+	}
+
 	channel->teardown_detached = 1;
 	channel->local_draining = 1;
 	channel->keepalive_enabled = 0;
@@ -2524,28 +2536,20 @@ static int tr_channel_close_wait_admission(struct tr_channel *channel)
 
 int tr_channel_finalize_detached(struct tr_channel *channel)
 {
-	int ret;
-
 	if (!channel)
 		return TR_OK;
 
 #ifndef NDEBUG
 	assert(channel->teardown_detached);
 	assert(!channel->keepalive_timer_registered);
+	assert(channel->drain_wait_closed);
+	assert(channel->drain_waiters == 0U);
 #endif
 
 	/*
-	 * No new waiter may cross this point. Existing waiter ownership is counted
-	 * explicitly instead of relying on pthread_cond_destroy() as an implicit
-	 * lifetime barrier.
+	 * All fallible owner/waiter barriers were completed before detached
+	 * ownership transfer. Finalization is now pure memory/resource release.
 	 */
-	ret = tr_channel_close_wait_admission(channel);
-#ifndef NDEBUG
-	assert(ret == TR_OK);
-#endif
-	if (ret != TR_OK)
-		return ret;
-
 	if (channel->streams) {
 		uint32_t i;
 
