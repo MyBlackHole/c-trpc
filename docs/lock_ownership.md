@@ -153,10 +153,15 @@ waiter 在同一把 lock 下登记后才能睡眠；destroy 先关闭新的 wait
 若已有 waiter 尚未退出则 fail-closed，不开始 callback/timer/storage teardown。
 只有 waiter 计数归零后才销毁 condvar/Stream/Pool/mutex。
 
-因此 `tr_channel_destroy()` / detached finalizer 是可失败的内部 teardown
-barrier，而不是无条件 `void free()`。上层 Client/Server 只有看到
-`TR_OK` 才能清空 Channel 指针并继续停止 Runtime；否则保持所有权不变，
-将生命周期错误停在当前层，禁止把它升级成 UAF。
+普通 `tr_channel_destroy()` 是可失败 teardown barrier，而不是无条件
+`void free()`。上层 Client/Server 只有看到 `TR_OK` 才能清空 Channel
+指针并继续停止 Runtime；否则保持所有权不变，禁止把生命周期错误升级成 UAF。
+
+Server detached 路径更严格：waiter admission 关闭与 `drain_waiters == 0`
+验证在 Reactor owner detach 阶段完成，此时对象仍在 peer table，失败就拒绝
+ownership transfer。只有 barrier 已经收敛才设置 `teardown_detached` 并把
+对象交给最后引用 finalizer；因此 detached finalizer 不再执行可失败同步，
+只负责纯资源释放。
 
 Channel 仍同时服务 Reactor 回调/所有者调用与部分应用 API，因此
 Stream 表、流量控制、通道状态、排空和快照诊断暂时继续由
