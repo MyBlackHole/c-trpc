@@ -39,6 +39,14 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
 /*
+ * Execution-context diagnostics used only for lifecycle guards.
+ * owner_context(reactor) matches one exact Reactor; in_owner_context() detects
+ * any c-trpc Reactor owner thread.
+ */
+int tr_reactor_owner_context(const struct tr_reactor *reactor);
+int tr_reactor_in_owner_context(void);
+
+/*
  * Optional raw connection preface gate. The Reactor reads exactly byte_count
  * bytes before allowing normal TRP1 parser input, so bytes following the
  * preface remain in the socket receive queue and are never over-read.

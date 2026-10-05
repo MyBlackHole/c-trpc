@@ -10,6 +10,7 @@
 #include "execution/buffer.h"
 #include "transport/channel/channel.h"
 #include "execution/reactor.h"
+#include "execution/reactor_internal.h"
 #include "rpc/rpc_wire.h"
 #include "io/socket.h"
 #include "tr/status.h"
@@ -685,6 +686,13 @@ void tr_client_destroy(struct tr_client *client)
 {
 	if (!client)
 		return;
+	/*
+	 * destroy() is a synchronous exclusive terminal operation. A c-trpc
+	 * callback must return to its external owner before invoking it.
+	 */
+	if (tr_runtime_owner_context(client->runtime) ||
+	    tr_rpc_endpoint_worker_context(client->rpc))
+		return;
 
 	/*
 	 * Client teardown 的 owner/quiescence barrier 必须发生在 Runtime stop 前。
@@ -715,7 +723,8 @@ void tr_client_destroy(struct tr_client *client)
 	}
 
 	if (client->runtime) {
-		(void)tr_runtime_stop(client->runtime);
+		if (tr_runtime_stop(client->runtime) != TR_OK)
+			return;
 		tr_runtime_destroy(client->runtime);
 		client->runtime = NULL;
 		client->shard = NULL;

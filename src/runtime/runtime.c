@@ -223,6 +223,31 @@ int tr_runtime_start(struct tr_runtime *runtime)
 	return TR_OK;
 }
 
+int tr_runtime_owner_context(const struct tr_runtime *runtime)
+{
+	uint32_t i;
+
+	if (!runtime)
+		return 0;
+	for (i = 0; i < runtime->shard_count; ++i)
+		if (tr_reactor_owner_context(runtime->shards[i].reactor))
+			return 1;
+	return 0;
+}
+
+int tr_runtime_worker_context(const struct tr_runtime *runtime)
+{
+	uint32_t i;
+
+	if (!runtime)
+		return 0;
+	for (i = 0; i < runtime->shard_count; ++i)
+		if (tr_rpc_executor_group_worker_context(
+			    runtime->shards[i].rpc_executor))
+			return 1;
+	return 0;
+}
+
 int tr_runtime_stop(struct tr_runtime *runtime)
 {
 	uint32_t i;
@@ -230,6 +255,9 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 
 	if (!runtime)
 		return TR_ERR_INVALID;
+	/* Preflight before stopping any shard: never leave a partial self-stop. */
+	if (tr_runtime_owner_context(runtime))
+		return TR_ERR_STATE;
 	if (!runtime->started)
 		return TR_OK;
 
@@ -260,8 +288,12 @@ void tr_runtime_destroy(struct tr_runtime *runtime)
 
 	if (!runtime)
 		return;
+	if (tr_runtime_owner_context(runtime) ||
+	    tr_runtime_worker_context(runtime))
+		return;
+	if (tr_runtime_stop(runtime) != TR_OK)
+		return;
 
-	(void)tr_runtime_stop(runtime);
 	for (i = 0; i < runtime->shard_count; ++i)
 		tr_runtime_shard_release(&runtime->shards[i]);
 	free(runtime->shards);

@@ -21,6 +21,23 @@
 _Static_assert(sizeof(uintptr_t) <= sizeof(uint64_t),
 	       "RPC Call capability requires pointers no wider than 64 bits");
 
+/*
+ * Application RPC handlers/results execute on executor workers. Synchronous
+ * facade destruction from this context can self-join or wait on the task's own
+ * Endpoint strong reference, so lifecycle code must be able to reject it.
+ */
+static _Thread_local struct tr_rpc_endpoint *tr_current_rpc_worker_endpoint;
+
+int tr_rpc_in_worker_context(void)
+{
+	return tr_current_rpc_worker_endpoint != NULL;
+}
+
+int tr_rpc_endpoint_worker_context(const struct tr_rpc_endpoint *endpoint)
+{
+	return endpoint && tr_current_rpc_worker_endpoint == endpoint;
+}
+
 static inline struct tr_rpc_endpoint *
 tr_rpc_call_handle_endpoint(struct tr_rpc_call_handle handle)
 {
@@ -325,6 +342,13 @@ struct tr_rpc_endpoint {
 
 	struct tr_rpc_semantic_stats semantic;
 };
+
+int tr_rpc_executor_group_worker_context(
+	const struct tr_rpc_executor_group *group)
+{
+	return group && tr_current_rpc_worker_endpoint &&
+	       tr_current_rpc_worker_endpoint->executor.group == group;
+}
 
 #define TR_RPC_METADATA_RESERVED_TIMEOUT ":timeout-ms"
 #define TR_RPC_METADATA_RESERVED_TIMEOUT_LEN 11U
@@ -2885,6 +2909,20 @@ static int tr_rpc_executor_run_observed_task(struct tr_rpc_endpoint *endpoint,
 	return ret;
 }
 
+static int tr_rpc_executor_run_worker_task(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_task *task)
+{
+	int ret;
+
+#ifndef NDEBUG
+	assert(tr_current_rpc_worker_endpoint == NULL);
+#endif
+	tr_current_rpc_worker_endpoint = endpoint;
+	ret = tr_rpc_executor_run_observed_task(endpoint, task);
+	tr_current_rpc_worker_endpoint = NULL;
+	return ret;
+}
+
 static int tr_rpc_executor_take(struct tr_rpc_endpoint *endpoint,
 				struct tr_rpc_task *task, int wait)
 {
@@ -3011,7 +3049,7 @@ static void *tr_rpc_executor_main(void *arg)
 
 		{
 			int task_done_deferred =
-				tr_rpc_executor_run_observed_task(endpoint, &task);
+				tr_rpc_executor_run_worker_task(endpoint, &task);
 			if (!task_done_deferred &&
 			    tr_rpc_defer_task_completion(endpoint, task.call) !=
 				    TR_OK) {
@@ -3074,7 +3112,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 
 		{
 			int task_done_deferred =
-				tr_rpc_executor_run_observed_task(endpoint, &task);
+				tr_rpc_executor_run_worker_task(endpoint, &task);
 			if (!task_done_deferred &&
 			    tr_rpc_defer_task_completion(endpoint, task.call) !=
 				    TR_OK) {
@@ -3308,6 +3346,8 @@ void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 	uint32_t i;
 
 	if (!group)
+		return;
+	if (tr_rpc_executor_group_worker_context(group))
 		return;
 
 	pthread_mutex_lock(&group->lock);
@@ -4644,6 +4684,8 @@ void tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
 {
 	if (!endpoint)
+		return;
+	if (tr_rpc_endpoint_worker_context(endpoint))
 		return;
 
 	/*

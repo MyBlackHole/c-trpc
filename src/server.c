@@ -16,6 +16,7 @@
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
 #include "execution/reactor.h"
+#include "execution/reactor_internal.h"
 #include "rpc/rpc_wire.h"
 #include "io/socket.h"
 #include "tr/status.h"
@@ -1838,6 +1839,13 @@ void tr_server_destroy(struct tr_server *server)
 
 	if (!server)
 		return;
+	/*
+	 * A callback cannot synchronously join/free its own Reactor or executor
+	 * domain. The external owner may invoke destroy again after callback exit.
+	 */
+	if (tr_runtime_owner_context(server->runtime) ||
+	    tr_runtime_worker_context(server->runtime))
+		return;
 
 	if (server->shards)
 		tr_server_stop_accepting(server);
@@ -1864,8 +1872,13 @@ void tr_server_destroy(struct tr_server *server)
 			tr_server_disable_peer_events(
 				&server->shards[shard_index]);
 
-	if (server->runtime && server->started)
-		(void)tr_runtime_stop(server->runtime);
+	if (server->runtime && server->started) {
+		int ret = tr_runtime_stop(server->runtime);
+
+		if (ret != TR_OK)
+			return;
+		server->started = 0;
+	}
 
 	if (server->shards) {
 		for (shard_index = 0; shard_index < server->shard_count;

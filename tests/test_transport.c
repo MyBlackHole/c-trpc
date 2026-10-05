@@ -5940,6 +5940,170 @@ static void test_channel_keepalive_and_diagnostics(void)
 	tr_reactor_destroy(reactor);
 }
 
+struct destroy_context_test_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_server *server;
+	struct tr_client *client;
+	unsigned owner_destroy_attempts;
+	unsigned server_worker_destroy_attempts;
+	unsigned client_worker_destroy_attempts;
+	unsigned results;
+	int result_status;
+};
+
+static int destroy_context_interceptor(
+	struct tr_rpc_call_handle call, enum tr_rpc_interceptor_phase phase,
+	int status, void *arg)
+{
+	struct destroy_context_test_ctx *ctx =
+		(struct destroy_context_test_ctx *)arg;
+
+	(void)call;
+	(void)status;
+	if (phase != TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER)
+		return TR_RPC_STATUS_OK;
+
+	tr_server_destroy(ctx->server);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->owner_destroy_attempts++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_STATUS_OK;
+}
+
+static int destroy_context_handler(
+	struct tr_rpc_call_handle call, const struct tr_rpc_bytes *request,
+	struct tr_rpc_unary_response *response, void *arg)
+{
+	struct destroy_context_test_ctx *ctx =
+		(struct destroy_context_test_ctx *)arg;
+	static const uint8_t reply[] = "still-alive";
+
+	(void)call;
+	assert(request != NULL);
+	tr_server_destroy(ctx->server);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->server_worker_destroy_attempts++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+
+	response->status = TR_RPC_STATUS_OK;
+	response->message.data = reply;
+	response->message.len = (uint32_t)(sizeof(reply) - 1U);
+	return TR_OK;
+}
+
+static void destroy_context_result(
+	struct tr_rpc_call_handle call, int status,
+	const struct tr_rpc_bytes *response, void *arg)
+{
+	struct destroy_context_test_ctx *ctx =
+		(struct destroy_context_test_ctx *)arg;
+
+	(void)call;
+	assert(response != NULL);
+	assert(response->len == 11U);
+	assert(memcmp(response->data, "still-alive", 11U) == 0);
+
+	tr_client_destroy(ctx->client);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->client_worker_destroy_attempts++;
+	ctx->results++;
+	ctx->result_status = status;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void test_facade_destroy_rejected_in_callback_context(void)
+{
+	struct destroy_context_test_ctx ctx;
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_call_handle call;
+	struct tr_rpc_semantic_stats stats;
+	struct timespec deadline;
+	uint16_t port = 0U;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	server_config.interceptor.fn = destroy_context_interceptor;
+	server_config.interceptor.arg = &ctx;
+	assert(tr_server_create(&server_config, &ctx.server) == TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 92U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1024U;
+	method.max_response_bytes = 1024U;
+	assert(tr_server_register_method(
+		       ctx.server, &method, destroy_context_handler, &ctx) == TR_OK);
+	assert(tr_server_listen(ctx.server, "127.0.0.1", 0U, &port) == TR_OK);
+	assert(tr_server_start(ctx.server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 1000U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	assert(tr_client_create(&client_config, &ctx.client) == TR_OK);
+	assert(tr_client_connect(ctx.client, "127.0.0.1", port) == TR_OK);
+	assert(tr_client_register_method(ctx.client, &method) == TR_OK);
+
+	request.data = (const uint8_t *)"ping";
+	request.len = 4U;
+	assert(tr_client_unary_call(
+		       ctx.client, 92U, 1U, &request,
+		       destroy_context_result, &ctx, &call) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx.lock);
+	while ((ctx.owner_destroy_attempts == 0U ||
+		ctx.server_worker_destroy_attempts == 0U ||
+		ctx.client_worker_destroy_attempts == 0U ||
+		ctx.results == 0U) && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.owner_destroy_attempts == 1U);
+	assert(ctx.server_worker_destroy_attempts == 1U);
+	assert(ctx.client_worker_destroy_attempts == 1U);
+	assert(ctx.results == 1U);
+	assert(ctx.result_status == TR_RPC_STATUS_OK);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/* All three callback-context destroy attempts were no-ops. */
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_client_get_rpc_semantic_stats(ctx.client, &stats) == TR_OK);
+	assert(stats.calls_finished == 1U);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_server_get_rpc_semantic_stats(ctx.server, &stats) == TR_OK);
+	assert(stats.calls_finished == 1U);
+
+	tr_client_destroy(ctx.client);
+	ctx.client = NULL;
+	tr_server_destroy(ctx.server);
+	ctx.server = NULL;
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 struct facade_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
@@ -7458,6 +7622,7 @@ int main(void)
 	test_rpc_interceptor_v1();
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
+	test_facade_destroy_rejected_in_callback_context();
 	test_client_server_facade_unary();
 	test_server_multi_shard_reuseport_facade();
 	test_client_server_facade_nodelay_policy();

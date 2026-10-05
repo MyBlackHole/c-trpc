@@ -10,6 +10,10 @@
 
 struct tr_rpc_endpoint;
 
+/* Lifecycle guard: true while this thread executes an RPC application worker. */
+int tr_rpc_in_worker_context(void);
+int tr_rpc_endpoint_worker_context(const struct tr_rpc_endpoint *endpoint);
+
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
 
 struct tr_rpc_endpoint_config {
@@ -130,6 +134,8 @@ int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
 				   struct tr_stream_handle *out);
 
 struct tr_rpc_executor_group;
+int tr_rpc_executor_group_worker_context(
+	const struct tr_rpc_executor_group *group);
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
 				 uint32_t thread_count,

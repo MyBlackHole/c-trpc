@@ -308,6 +308,28 @@ static void *gate_thread(void *arg)
 	return NULL;
 }
 
+static int owner_self_stop_callback(void *arg)
+{
+	struct test_ctx *ctx = (struct test_ctx *)arg;
+
+	assert(tr_reactor_stop(ctx->reactor) == TR_ERR_STATE);
+	return TR_OK;
+}
+
+static void test_owner_self_stop_rejected(void)
+{
+	struct test_ctx ctx;
+
+	setup(&ctx, BACKLOG);
+	assert(tr_reactor_call(
+		       ctx.reactor, owner_self_stop_callback, &ctx) == TR_OK);
+	/* The rejected self-stop must leave the Reactor fully usable. */
+	assert(tr_reactor_quiesce(ctx.reactor) == TR_OK);
+	teardown(&ctx);
+	puts("owner self-stop rejected: ok");
+}
+
+
 static int marker_callback(void *arg)
 {
 	struct test_ctx *ctx = arg;
@@ -588,6 +610,7 @@ static void test_completion_full_stop(void)
 int main(void)
 {
 	alarm(60); /* Covers joins too; failure never leaves CI blocked forever. */
+	test_owner_self_stop_rejected();
 	test_fairness(BACKLOG);
 	test_fairness(REFILL);
 	test_full_queue_waiters(0);

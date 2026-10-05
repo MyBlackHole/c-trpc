@@ -370,6 +370,24 @@ mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Re
 
 错误路径设计目标：ownership 唯一、release 顺序明确、新增失败分支默认安全、不产生 double free / leak / UAF。
 
+## 12.1 Synchronous destroy context
+
+Client/Server/Reactor destroy 属于 exclusive terminal operation，不是普通 callback
+内可重入 API。调用前，外部 owner 必须停止新的并发 API 使用，并让 c-trpc
+application callback 返回。
+
+禁止：
+
+```text
+Reactor owner callback -> destroy same facade -> join/free own owner stack
+RPC worker callback    -> destroy same facade -> join/wait own worker/ref
+```
+
+Runtime 会在任何 shard stop 前做 owner-context preflight；Reactor self-stop 返回
+`TR_ERR_STATE`。Stable Client/Server destroy 保持既有 `void` ABI，在 Reactor/RPC
+callback context 中拒绝推进 teardown，调用方应在 callback 返回后由外部 lifetime
+owner 再次调用 destroy。
+
 ## 13. 公共 API 的 ownership 说明
 
 资源相关公共 API 应明确写出：
