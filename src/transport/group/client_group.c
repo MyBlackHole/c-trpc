@@ -1,5 +1,6 @@
 #include "client_group_internal.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <poll.h>
 #include <stdlib.h>
@@ -874,6 +875,7 @@ struct tr_client_group_adopt_request {
 	struct tr_client_group *group;
 	int fd;
 	int fd_consumed;
+	int executed;
 	struct tr_conn_handle connection;
 	struct tr_pipeline_route_preface route;
 	char address[TR_CLIENT_GROUP_ADDRESS_CAPACITY];
@@ -887,6 +889,7 @@ static int tr_client_group_adopt_control_on_owner(void *arg)
 	struct tr_client_group *group = request->group;
 	int ret;
 
+	request->executed = 1;
 	if (!group->control_connecting || group->control.reactor)
 		return TR_ERR_STATE;
 
@@ -1108,7 +1111,8 @@ int tr_client_group_connect(
 	ret = tr_reactor_call(
 		group->config.owner,
 		tr_client_group_adopt_control_on_owner, &request);
-	prepared = 0; /* adopt path consumes or clears the owner reservation */
+	if (request.executed)
+		prepared = 0; /* owner adopt path consumes or clears reservation */
 	if (request.fd_consumed)
 		fd = -1;
 	if (ret != TR_OK)
