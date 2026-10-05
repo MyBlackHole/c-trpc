@@ -1316,18 +1316,96 @@ int tr_client_group_send(
 		group->config.owner, tr_client_group_send_on_owner, &request);
 }
 
-void tr_client_group_destroy(struct tr_client_group *group)
+static int tr_client_group_destroy_on_owner(void *arg)
 {
-	if (!group)
-		return;
+	struct tr_client_group *group =
+		(struct tr_client_group *)arg;
+	struct tr_conn_handle control;
+	uint32_t i;
+	int result = TR_OK;
+	int ret;
 
-	if (group->control.reactor)
-		(void)tr_client_group_close(group);
-	tr_connector_destroy(group->connector);
-	group->connector = NULL;
+	if (!group)
+		return TR_ERR_INVALID;
+
+	/*
+	 * destroy 是终局 owner barrier。先阻止 callback 产生新工作，再撤销
+	 * connector / DATA / CONTROL source。整个过程必须由 Reactor owner
+	 * 串行化，外部线程不能通过读取 group->control 判断是否可以 free。
+	 */
+	group->closing = 1;
+	group->draining = 1;
+	tr_client_group_stop_data_on_owner(group);
+
+	control = group->control;
+	if (control.reactor) {
+		ret = tr_reactor_close_on_owner(control);
+		if (ret == TR_ERR_STALE)
+			ret = TR_OK;
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+
+	/*
+	 * close callback 通常已经清空 control；若 connection 在调用前已经 stale，
+	 * teardown 仍负责清除 owner-local capability，避免下一次 destroy 继续把
+	 * 已死亡 handle 当作 active source。
+	 */
+	if (group->control.reactor &&
+	    tr_client_group_conn_equal(group->control, control)) {
+		memset(&group->control, 0, sizeof(group->control));
+		memset(&group->control_route, 0,
+		       sizeof(group->control_route));
+		memset(group->address, 0, sizeof(group->address));
+		group->port = 0U;
+	}
+
+	/*
+	 * Connector timer/aux-fd callback_arg 也保存 group。必须在 owner barrier
+	 * 内解除并释放，不能把 connector destroy 留到外部线程 free group 前。
+	 */
+	if (group->connector) {
+		tr_connector_destroy(group->connector);
+		group->connector = NULL;
+	}
+
+	/*
+	 * DATA TX buffer 的 release_cb 保存裸 group*。tr_reactor_close_on_owner()
+	 * 会同步释放 connection TX queue，因此到这里所有这样的 ownership 都必须
+	 * 已归还。非零表示生命周期没有收敛，绝不能继续 free group。
+	 */
+	if (group->send_bytes_inflight != 0U && result == TR_OK)
+		result = TR_ERR_STATE;
+	if (group->transfer_count != 0U && result == TR_OK)
+		result = TR_ERR_STATE;
+	for (i = 0; i < group->data_capacity; ++i)
+		if (group->data[i].state != TR_CLIENT_GROUP_DATA_FREE &&
+		    result == TR_OK)
+			result = TR_ERR_STATE;
+
+	return result;
+}
+
+int tr_client_group_destroy(struct tr_client_group *group)
+{
+	int ret;
+
+	if (!group)
+		return TR_OK;
+
+	ret = tr_reactor_call(
+		group->config.owner, tr_client_group_destroy_on_owner, group);
+	if (ret != TR_OK)
+		return ret;
+
 	free(group->transfers);
+	group->transfers = NULL;
 	free(group->data);
-	if (group->control_pool_ready)
+	group->data = NULL;
+	if (group->control_pool_ready) {
 		tr_buffer_pool_destroy(&group->control_pool);
+		group->control_pool_ready = 0;
+	}
 	free(group);
+	return TR_OK;
 }
