@@ -2562,6 +2562,90 @@ int tr_reactor_listener_register_publish(
 		reactor, tr_reactor_listener_register_publish_on_owner, &request);
 }
 
+struct tr_reactor_listener_unregister_call_request {
+	struct tr_reactor *reactor;
+	tr_reactor_listener_cb callback;
+	void *arg;
+	int (*fn)(void *arg);
+	void *fn_arg;
+};
+
+static int tr_reactor_listener_unregister_call_now(
+	struct tr_reactor_listener_unregister_call_request *request)
+{
+	struct tr_reactor *reactor = request->reactor;
+	int ret;
+
+	/*
+	 * Reactor 当前只有一个 listener source。若 source 仍存在，必须确认
+	 * callback ownership 属于调用方，避免 teardown 一个无关 listener。
+	 * source 已经不存在时仍执行 fn，使 teardown 保持幂等。
+	 */
+	if (reactor->listener_fd >= 0) {
+		if (reactor->listener_cb != request->callback ||
+		    reactor->listener_arg != request->arg)
+			return TR_ERR_STALE;
+
+		ret = tr_reactor_listener_unregister_now(
+			reactor, reactor->listener_fd);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	return request->fn(request->fn_arg);
+}
+
+static int tr_reactor_listener_unregister_call_on_owner(void *arg)
+{
+	struct tr_reactor_listener_unregister_call_request *request =
+		(struct tr_reactor_listener_unregister_call_request *)arg;
+
+	TR_ASSERT_REACTOR_OWNER(request->reactor);
+	return tr_reactor_listener_unregister_call_now(request);
+}
+
+int tr_reactor_listener_unregister_call(
+	struct tr_reactor *reactor,
+	tr_reactor_listener_cb callback, void *arg,
+	int (*fn)(void *arg), void *fn_arg)
+{
+	struct tr_reactor_listener_unregister_call_request request;
+	int started;
+	int ret;
+
+	if (!reactor || !callback || !fn)
+		return TR_ERR_INVALID;
+
+	request.reactor = reactor;
+	request.callback = callback;
+	request.arg = arg;
+	request.fn = fn;
+	request.fn_arg = fn_arg;
+
+	if (tr_reactor_is_owner_thread(reactor))
+		return tr_reactor_listener_unregister_call_now(&request);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	started = reactor->started;
+	if (!started) {
+		/*
+		 * stopped 状态下也必须把 source detach 与 caller teardown state
+		 * 作为一个 ctl_lock 临界区提交，防止并发 start/listen 插入中间。
+		 */
+		ret = tr_reactor_listener_unregister_call_now(&request);
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return ret;
+	}
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire)) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return TR_ERR_CLOSED;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
+	return tr_reactor_call(
+		reactor, tr_reactor_listener_unregister_call_on_owner, &request);
+}
+
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd)
 {
 	struct tr_reactor_listener_request request;
