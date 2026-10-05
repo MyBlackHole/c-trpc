@@ -222,6 +222,11 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
  * Channel 仍保持 draining，调用方可以重试。
  */
 int tr_channel_begin_drain(struct tr_channel *channel);
+
+/*
+ * 同步等待 active Stream 归零。该进度依赖 Reactor owner 继续处理 RX/TX 和
+ * close/cancel callback，因此 owner context 调用返回 TR_ERR_STATE。
+ */
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
 int tr_channel_get_state(struct tr_channel *channel,
 			 enum tr_channel_state *out);
