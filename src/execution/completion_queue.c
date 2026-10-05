@@ -84,7 +84,7 @@ void tr_completion_queue_close(struct tr_completion_queue *queue)
 		queue->admission_generation = 1U;
 	queue->accepting = 0;
 	/*
-	 * stop/close 是 producer wait 的生命周期 fence。所有因 full 阻塞的
+	 * stop/close 是生产者等待的生命周期屏障。所有因队列已满而阻塞的
 	 * worker 必须立即醒来观察 CLOSED，不能依赖 Reactor 再消费一批。
 	 * generation 同时阻止旧 waiter 在后续 reopen 后误入新的运行期。
 	 */
