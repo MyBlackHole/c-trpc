@@ -36,8 +36,7 @@ int tr_buffer_pool_init_budgeted(
 
 	if (!pool || buffer_count == 0 || buffer_size == 0)
 		return TR_ERR_INVALID;
-	if ((size_t)buffer_count > SIZE_MAX / sizeof(*buffers) ||
-	    (size_t)buffer_count > SIZE_MAX / (size_t)buffer_size)
+	if ((size_t)buffer_count > SIZE_MAX / (size_t)buffer_size)
 		return TR_ERR_BAD_LENGTH;
 
 	memset(pool, 0, sizeof(*pool));
@@ -120,9 +119,6 @@ int tr_buffer_pool_init_dynamic_budgeted(
 
 	if (!pool || buffer_count == 0U || max_buffer_size == 0U)
 		return TR_ERR_INVALID;
-	if ((size_t)buffer_count > SIZE_MAX / sizeof(*buffers))
-		return TR_ERR_BAD_LENGTH;
-
 	memset(pool, 0, sizeof(*pool));
 	descriptor_bytes =
 		(uint64_t)buffer_count * (uint64_t)sizeof(*buffers);
