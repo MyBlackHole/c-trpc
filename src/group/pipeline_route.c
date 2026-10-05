@@ -167,9 +167,10 @@ int tr_pipeline_route_parser_feed(
 		return TR_OK;
 
 	/*
-	 * A complete preface is a one-shot decision. Invalid routing identity is
-	 * connection-fatal; callers must close rather than trying to resynchronize
-	 * arbitrary bytes before the normal Transport framing begins.
+	 * 完整前导信息只允许做一次判定。
+	 * 非法路由标识属于连接致命错误；
+	 * 调用方必须关闭连接，不能在普通 Transport 分帧开始前
+	 * 尝试从任意字节重新同步。
 	 */
 	parser->done = 1;
 	ret = tr_pipeline_route_preface_decode(parser->raw, &decoded);
