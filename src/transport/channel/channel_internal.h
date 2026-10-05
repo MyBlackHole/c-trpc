@@ -39,7 +39,7 @@ int tr_channel_create_deferred(
 /*
  * Facade-only socket policy injection。通过 Channel 所属 Reactor owner 串行化，
  * 必须在 automatic reconnect 启动前设置；低层 Channel reconnect 否则保留
- * kernel default。
+ * 内核默认行为。
  */
 int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
 					    int enabled);
