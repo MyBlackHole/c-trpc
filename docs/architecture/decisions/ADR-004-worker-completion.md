@@ -1,33 +1,34 @@
-# ADR-004：RPC worker 通过 Completion 回 owner
+# ADR-004：RPC 工作线程通过完成事件返回所有者
 
-**Status: Accepted**
+**状态：已接受**
 
-## Context
+## 背景
 
-Blocking handler 必须在线程池执行，但如果 worker 直接持 Endpoint/Call 并修改协议状态，就会重新把 Reactor-owned state 变成跨线程 shared mutable state。
+阻塞式处理器必须在线程池执行，但如果工作线程直接持有 Endpoint/Call 并修改协议状态，
+就会重新把 Reactor 所有状态变成跨线程共享可变状态。
 
-## Decision
+## 决策
 
 执行路径：
 
 ```text
 Reactor
-  -> immutable Task
-  -> Worker
-  -> owned Result/Completion
-  -> original Reactor
+  -> 不可变任务
+  -> 工作线程
+  -> 拥有所有权的结果/完成事件
+  -> 原 Reactor
 ```
 
-Worker 不直接修改 Call/Endpoint/Channel/Pipeline protocol state。
+工作线程不直接修改 Call/Endpoint/Channel/Pipeline 协议状态。
 
-## Consequences
+## 影响
 
 需要：
 
-- per-Reactor completion queue；
-- call/endpoint generation；
-- stale completion 丢弃；
-- cancellation token；
-- streaming API 内部转 owner command。
+- 每 Reactor 完成队列；
+- Call/Endpoint 代次；
+- 丢弃陈旧完成事件；
+- 取消令牌；
+- 流式 API 内部转为所有者命令。
 
-第一阶段先迁移 Unary，Streaming 后续迁移。
+第一阶段先迁移一元调用，之后再迁移流式调用。
