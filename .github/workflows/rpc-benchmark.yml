@@ -33,9 +33,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {cc: gcc, mode: release}
-          - {cc: gcc, mode: asan}
-          - {cc: gcc, mode: tsan}
+          - {cc: gcc, mode: debug, workload: false}
+          - {cc: gcc, mode: release, workload: true}
+          - {cc: clang, mode: release, workload: false}
+          - {cc: gcc, mode: asan, workload: true}
+          - {cc: gcc, mode: tsan, workload: true}
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
@@ -60,14 +62,16 @@ jobs:
           fi
           xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable=n
           xmake build -v bench_rpc
-          python3 bench/run_rpc_bench.py \
-            --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-            --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
-            --output "$results/smoke.jsonl"
-          python3 bench/run_rpc_capacity.py \
-            --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-            --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
-            --output "$results/open-smoke.jsonl"
+          if [ "${{ matrix.workload }}" = true ]; then
+            python3 bench/run_rpc_bench.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
+              --output "$results/smoke.jsonl"
+            python3 bench/run_rpc_capacity.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
+              --output "$results/open-smoke.jsonl"
+          fi
           if [ "${{ matrix.cc }}" = gcc ] && [ "${{ matrix.mode }}" = release ]; then
             # Architecture diagnostics use the normal runtime CRC dispatch build,
             # not a sanitizer or forced-portable binary.
