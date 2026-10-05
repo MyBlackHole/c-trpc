@@ -1403,6 +1403,15 @@ static int tr_client_group_detach_on_owner(void *arg)
 	memset(&group->control_route, 0, sizeof(group->control_route));
 	memset(group->address, 0, sizeof(group->address));
 	group->port = 0U;
+
+	/*
+	 * Every Group-owned DATA payload carries a raw group pointer in its release
+	 * callback. Closing all DATA connections above must synchronously release
+	 * their TX queues before this owner barrier returns. Never free Group
+	 * storage while such a callback can still exist.
+	 */
+	if (group->send_bytes_inflight != 0U && ret == TR_OK)
+		ret = TR_ERR_STATE;
 	return ret;
 }
 
