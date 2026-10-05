@@ -1221,9 +1221,9 @@ int tr_server_create_with_tuning(
 		group_config.stream_affinity_capacity_per_pipeline =
 			effective.connection_groups.max_streams_per_group;
 		/*
-		 * Keep CONTROL payload-buffer tuning internal. The total group
-		 * connection budget is a conservative bounded default for concurrent
-		 * control sends without adding an implementation knob to the SDK.
+		 * CONTROL 载荷 Buffer 调优保持内部化。Group 总
+		 * 连接预算为并发控制发送提供保守的有界默认值，
+		 * 同时不向 SDK 增加实现层调节参数。
 		 */
 		group_config.control_message_count =
 			effective.connection_groups.max_connections;
@@ -1878,9 +1878,9 @@ void tr_server_destroy(struct tr_server *server)
 		assert(ret == TR_OK);
 #endif
 		/*
-		 * Do not destroy peer/Runtime storage unless every shard owner has
-		 * crossed the stop barrier. Continuing after a failed join would turn
-		 * a lifecycle error into UAF.
+		 * 只有每个 shard 所有者都
+		 * 跨过 stop 屏障后才能销毁 Peer/Runtime 存储。join 失败后继续执行会把
+		 * 生命周期错误转化为 UAF。
 		 */
 		if (ret != TR_OK)
 			return;
