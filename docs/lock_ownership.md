@@ -303,7 +303,28 @@ Client Connection Group 也遵守同一 owner 原则。以下状态只允许 Rea
 - CONTROL connect reservation；
 - remote address / port；
 - `closing / draining`；
-- DATA connection/transfer/connector scheduling 状态。
+- DATA connection/transfer/connector scheduling 状态；
+- `transfer_count / send_bytes_inflight` 等 drain predicate 原始状态。
+
+外部 `wait_drained` 不再每 1 ms 通过同步 owner stats 命令轮询这些字段。
+Group 只额外发布一个独立的 lifecycle generation：
+
+```text
+owner begin_drain
+    -> drain_generation++
+
+owner transfer/TX completion
+    -> predicate 成立
+    -> publish drained_generation
+    -> cond broadcast
+
+external waiter
+    -> 只比较 generation
+    -> 不读取/修改 owner protocol state
+```
+
+因此 wait metadata lock 不是第二把协议状态锁，不进入正常 DATA send/transfer
+热路径；只有 drain lifecycle 的开始/完成边沿会取得它。
 
 CONTROL 建立分为两个阶段：
 
@@ -326,6 +347,11 @@ Client Group DATA send buffer 的 release callback 会保存裸 `group *`，
 close 会先同步释放 TX queue，再分发 connection event；Group teardown
 关闭全部 DATA connection 后检查该不变量，未归零时 fail-closed，禁止释放
 仍可能被 buffer release callback 引用的 Group。
+
+Client Group destroy 同时关闭 drain waiter admission。已有 waiter 尚未退出时
+destroy 返回生命周期错误并保持 Group/Runtime 存活；waiter 会被 terminal
+broadcast 唤醒并返回，调用方之后才能重试终局销毁。这与 Channel waiter
+规则相同：对象释放不能与仍持有裸对象能力的阻塞 waiter 并发。
 
 销毁顺序要求：
 

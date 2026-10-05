@@ -22,13 +22,15 @@ struct tr_client_group_config {
 
 int tr_client_group_create(const struct tr_client_group_config *config,
 			   struct tr_client_group **out);
-void tr_client_group_destroy(struct tr_client_group *group);
+int tr_client_group_destroy(struct tr_client_group *group);
 
 int tr_client_group_connect(
 	struct tr_client_group *group, const char *ipv4_address, uint16_t port,
 	const struct tr_connection_group_id *id);
 int tr_client_group_close(struct tr_client_group *group);
 int tr_client_group_begin_drain(struct tr_client_group *group);
+int tr_client_group_wait_drained(
+	struct tr_client_group *group, uint32_t timeout_ms);
 int tr_client_group_get_stats(
 	struct tr_client_group *group,
 	struct tr_connection_group_client_stats *out);
