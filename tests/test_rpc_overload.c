@@ -310,16 +310,16 @@ int main(void)
 		result_args[i].index = i;
 	}
 
-	/* One running handler occupies the only worker. */
+	/* 一个正在运行的处理器占用唯一工作线程。 */
 	submit_call(client_rpc, &result_args[0], &calls[0]);
 	wait_handler_entered(&ctx, 1U);
 
-	/* Fill all 16 queued executor nodes while the worker remains blocked. */
+	/* 在工作线程保持阻塞时填满全部 16 个排队 Executor 节点。 */
 	for (i = 1U; i < INITIAL_ACCEPTED; ++i)
 		submit_call(client_rpc, &result_args[i], &calls[i]);
 	wait_executor_queue(server_rpc, SATURATED_QUEUED, 1U);
 
-	/* The next Unary is rejected explicitly without entering the handler. */
+	/* 下一个 Unary 在进入处理器前被显式拒绝。 */
 	submit_call(client_rpc, &result_args[OVERLOAD_INDEX],
 		    &calls[OVERLOAD_INDEX]);
 	wait_result(&ctx, OVERLOAD_INDEX);
@@ -329,7 +329,7 @@ int main(void)
 	assert(ctx.handler_completed == 0U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/* Release accepted work; the rejected Call must not poison the connection. */
+	/* 释放已接受工作；被拒绝的 Call 不能污染连接。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release = 1;
 	pthread_cond_broadcast(&ctx.cond);
@@ -345,7 +345,7 @@ int main(void)
 	assert(ctx.handler_completed == INITIAL_ACCEPTED);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/* Same Channel/Connection accepts new work after the overload response. */
+	/* 过载响应后，同一 Channel/Connection 仍能接受新工作。 */
 	submit_call(client_rpc, &result_args[RECOVERY_INDEX],
 		    &calls[RECOVERY_INDEX]);
 	wait_result(&ctx, RECOVERY_INDEX);
