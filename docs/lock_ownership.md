@@ -133,6 +133,30 @@ Channel drain 使用单调 admission barrier。进入 `local_draining` 后：
 - 因而 `active_streams` 在 barrier 后只减不增，`DRAINED` 是终态而不是
   一个可能被延迟 OPEN 推翻的瞬时快照。
 
+`wait_drained` 使用 `channel->lock + drain_cond` 作为 waitqueue-like
+同步原语：
+
+- predicate 只有 `active_streams == 0`；
+- 最后一个 active Stream 释放时 broadcast；
+- waiter 只等待状态，不发送帧、不重试 GOAWAY、不修改协议状态；
+- 正常等待直接睡到状态变化或总 deadline，不再每 1 ms 轮询 Stream 数。
+
+GOAWAY admission 属于 `begin_drain()` 的 Reactor-owner 协议动作。
+`begin_drain() == TR_AGAIN` 时由 facade/lifecycle caller 在外部控制层重试，
+不能把协议推进塞进 wait primitive。Server 的 one-shot drain 会在 peer table
+经过 listener/peer-event owner barrier 冻结后重试该 owner 操作。
+
+条件变量使用 `CLOCK_MONOTONIC`，与原先 drain timeout 的时钟语义一致。
+Channel destroy 与 waiter 不是并发安全组合。Channel 用
+`drain_wait_closed + drain_waiters` 显式管理 waiter admission/ownership：
+waiter 在同一把 lock 下登记后才能睡眠；destroy 先关闭新的 waiter admission，
+若已有 waiter 尚未退出则 fail-closed，不开始 callback/timer/storage teardown。
+只有 waiter 计数归零后才销毁 condvar/Stream/Pool/mutex。
+
+因此 `tr_channel_destroy()` / detached finalizer 是可失败的内部 teardown
+barrier，而不是无条件 `void free()`。上层 Client/Server 只有看到
+`TR_OK` 才能清空 Channel 指针并继续停止 Runtime；否则保持所有权不变，
+将生命周期错误停在当前层，禁止把它升级成 UAF。
 
 Channel 仍同时服务 Reactor 回调/所有者调用与部分应用 API，因此
 Stream 表、流量控制、通道状态、排空和快照诊断暂时继续由
