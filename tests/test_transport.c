@@ -1130,7 +1130,7 @@ static void test_channel_handler_publication_is_owner_serialized(void)
 	/* 完全 stopped 后允许 teardown-only direct publication。 */
 	assert(tr_channel_set_handler(
 		       channel, NULL, NULL, NULL, NULL) == TR_OK);
-	tr_channel_destroy(channel);
+	assert(tr_channel_destroy(channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	assert(close(fds[1]) == 0);
 	pthread_cond_destroy(&ctx.cond);
@@ -1294,7 +1294,7 @@ static void test_rpc_method_registration_is_owner_serialized(void)
 	assert(stats.registered_methods == 1U);
 
 	tr_rpc_endpoint_destroy(endpoint);
-	tr_channel_destroy(channel);
+	assert(tr_channel_destroy(channel) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
@@ -1646,7 +1646,7 @@ static void test_channel_deferred_hello_gate(void)
 	wait_channel_counter(&server_ctx, &server_ctx.received, 1U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	assert(close(client_fd) == 0);
 	destroy_channel_test_ctx(&server_ctx);
@@ -1760,7 +1760,7 @@ static void test_channel_stream_id_index_collision_delete(void)
 	pthread_mutex_unlock(&server_ctx.lock);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	assert(close(client_fd) == 0);
 	destroy_channel_test_ctx(&server_ctx);
@@ -1857,8 +1857,8 @@ static void test_channel_stream_slot_reuse(void)
 	wait_channel_active_streams(server_channel, 0U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	destroy_channel_test_ctx(&server_ctx);
 	destroy_channel_test_ctx(&client_ctx);
@@ -1985,8 +1985,8 @@ static void test_channel_stream_flow_control(void)
 
 	assert(tr_stream_close(client_stream) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	wait_for_pool_full(&tx_pool, 2);
 	tr_buffer_pool_destroy(&tx_pool);
@@ -2113,8 +2113,8 @@ static void test_channel_message_fragmentation_reassembly(void)
 
 	assert(tr_stream_close(client_stream) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	wait_for_pool_full(&tx_pool, 1);
 	tr_buffer_pool_destroy(&tx_pool);
@@ -2235,8 +2235,8 @@ static void test_channel_split_lane_isolation(void)
 	wait_channel_counter(&server_ctx, &server_ctx.received, 2);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	wait_for_pool_full(&tx_pool, 1);
 	tr_buffer_pool_destroy(&tx_pool);
@@ -2982,8 +2982,8 @@ static void test_rpc_method_index_collisions(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	pthread_cond_destroy(&ctx.cond);
@@ -3129,8 +3129,8 @@ static void test_rpc_deadline_heap_order(void)
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 }
@@ -3361,8 +3361,8 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	pthread_cond_destroy(&ctx.cond);
@@ -3516,8 +3516,8 @@ static void test_channel_automatic_reconnect_shared(void)
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	tr_socket_close(&listener);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&tx_pool);
 	destroy_channel_test_ctx(&server_ctx);
@@ -3687,8 +3687,8 @@ static void test_rpc_unary_raw_roundtrip(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 
@@ -3907,8 +3907,8 @@ static void test_channel_version_negotiation_failure(void)
 	       TR_ERR_CLOSED);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 }
 
@@ -4044,8 +4044,8 @@ static void test_rpc_connection_replacement_semantics(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	pthread_cond_destroy(&ctx.cond);
@@ -4180,8 +4180,8 @@ static void test_rpc_large_message_fragmentation(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	tr_buffer_pool_destroy(&reassembly_pool);
@@ -4489,8 +4489,8 @@ static void test_rpc_bidi_streaming_raw_fast_path(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&bulk_pool);
 	tr_buffer_pool_destroy(&rpc_pool);
@@ -4906,8 +4906,8 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 
@@ -5298,8 +5298,8 @@ static void test_rpc_metadata_cancel_deadline(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	pthread_cond_destroy(&ctx.cond);
@@ -5698,8 +5698,8 @@ static void test_rpc_interceptor_v1(void)
 	wait_for_pool_full(&rpc_pool, 32U);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
@@ -6028,8 +6028,8 @@ static void test_rpc_multithread_executor_per_call_serialization(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	pthread_cond_destroy(&ctx.cond);
@@ -6138,8 +6138,8 @@ static void test_channel_keepalive_and_diagnostics(void)
 
 	assert(tr_channel_disable_keepalive(client_channel) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 }
 
@@ -6868,7 +6868,7 @@ static void test_server_runtime_thread_bound(void)
 
 	assert(tr_reactor_stop(client_reactor) == TR_OK);
 	for (i = 0; i < 4U; ++i)
-		tr_channel_destroy(channels[i]);
+		assert(tr_channel_destroy(channels[i]) == TR_OK);
 	tr_reactor_destroy(client_reactor);
 	tr_server_destroy(server);
 }
