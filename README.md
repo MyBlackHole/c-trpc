@@ -706,204 +706,205 @@ struct tr_rpc_message {
 接收窗口额度也会继续被占用。
 
 
-## Flow-control model
+## 流量控制模型
 
-For each logical Stream:
+对于每个逻辑 Stream：
 
 ```text
-sender:
+发送方：
     tx_sent_bytes <= peer_absolute_send_limit
 
-receiver:
+接收方：
     rx_received_bytes <= rx_advertised_limit
 
-when upper layer consumes bytes:
+上层消费字节后：
     rx_consumed_bytes += n
     new_limit = rx_consumed_bytes + configured_window
     WINDOW_UPDATE(stream_id, absolute=new_limit)
 ```
 
-Absolute limits avoid duplicate-credit bugs if updates are retried or coalesced.
+使用绝对上限可以避免更新被重试或合并时重复增加额度。
 
-## Architecture documents
+## 架构文档
 
-架构设计以“Core scope、分层/API 边界、Runtime、Ownership、RPC、Connection Group、演进路线、ADR”为主线，入口见
-[`docs/architecture/README.md`](docs/architecture/README.md)。
+架构设计以“核心范围、分层/API 边界、运行时、所有权、RPC、连接组、演进路线、架构决策记录”为主线，
+入口见 [`docs/architecture/README.md`](docs/architecture/README.md)。
 
-Backup durability/recovery 只作为上层业务参考，不属于 c-trpc core contract。
-文档区分 CURRENT、TARGET V1、FUTURE 与 BUSINESS REFERENCE，避免把业务规划误认为 RPC/Transport 必须实现的能力。
+备份持久性/恢复只作为上层业务参考，不属于 c-trpc 核心契约。
+文档使用中文状态说明区分当前实现、V1 目标、未来扩展与业务参考，
+避免把业务规划误认为 RPC/传输层必须实现的能力。
 
-## Important ownership rules
+## 重要所有权规则
 
-The detailed C11 ownership/automatic-cleanup rules are documented in
-[`docs/resource_ownership.md`](docs/resource_ownership.md). Current mutex
-ownership and the lock-removal audit are documented in
-[`docs/lock_ownership.md`](docs/lock_ownership.md).
+详细 C11 所有权/自动清理规则见
+[`docs/resource_ownership.md`](docs/resource_ownership.md)。
+当前互斥锁所有权与锁删除审查见
+[`docs/lock_ownership.md`](docs/lock_ownership.md)。
 
-代码注释和 API 契约说明以中文为主。ownership、refcount、quiescence、
-Reactor、Channel、RPC、Call、Stream 等与实现结构直接对应的术语保留英文。
-具体规范见 [`docs/code_comments.md`](docs/code_comments.md)。
+代码注释、API 契约说明、README、设计文档和测试说明都必须使用中文。
+API、类型、变量、宏、协议字段、状态值、命令、日志和错误原文保持原样；
+具体规则见 [`docs/code_comments.md`](docs/code_comments.md)。
 
-- lexical owners should use typed `TR_AUTO(...)` cleanup where practical
-- explicit `*_take()` helpers disarm automatic cleanup when ownership moves
-- cleanup runs in reverse declaration order, so declaration order is a lifetime dependency
-- asynchronous shared users acquire a strong reference before publication and release it with a matching put
-- `tr_reactor_adopt_fd()` returning `TR_OK` transfers fd ownership to Reactor.
-- `tr_reactor_send()` returning `TR_OK` transfers its payload buffer.
-- `tr_reactor_sendv()` returning `TR_OK` transfers every supplied payload buffer.
-- `tr_stream_send()` / `tr_stream_sendv()` follow the same success-only transfer rule.
-- internal Buffer fast paths preserve success-only ownership transfer.
-- any failed stable send leaves caller-owned application bytes with the caller.
-- a command accepted by the bounded command ring owns its resources even if a later eventfd wake syscall fails.
-- `TR_STREAM_DATA_TAKE_OWNERSHIP` and `TR_RPC_MESSAGE_TAKE_OWNERSHIP` require explicit later release.
-- releasing an RX payload returns its byte credit to the Stream receive window; network receipt alone does not replenish the application window.
+- 词法作用域所有者在适合时应使用类型化 `TR_AUTO(...)` 自动清理；
+- 所有权转移时使用显式 `*_take()` 辅助接口解除自动清理；
+- 清理按声明逆序执行，因此声明顺序本身就是生命周期依赖；
+- 异步共享使用者在发布前取得强引用，并通过匹配的释放操作归还；
+- `tr_reactor_adopt_fd()` 返回 `TR_OK` 时，fd 所有权转移给 Reactor；
+- `tr_reactor_send()` 返回 `TR_OK` 时，其载荷缓冲区所有权发生转移；
+- `tr_reactor_sendv()` 返回 `TR_OK` 时，所有传入载荷缓冲区所有权发生转移；
+- `tr_stream_send()` / `tr_stream_sendv()` 遵循相同的“仅成功时转移”规则；
+- 内部 Buffer 快速路径保持相同的“仅成功时转移所有权”语义；
+- 稳定发送 API 失败时，应用字节仍由调用方拥有；
+- 命令一旦被有界命令环接受，即由命令环拥有其资源，即使后续 eventfd 唤醒系统调用失败也不回退所有权；
+- `TR_STREAM_DATA_TAKE_OWNERSHIP` 和 `TR_RPC_MESSAGE_TAKE_OWNERSHIP` 都要求之后显式释放；
+- 释放 RX 载荷时才把对应字节额度归还给 Stream 接收窗口；仅收到网络数据不会补充应用窗口。
 
-## Tests currently cover
+## 当前测试覆盖
 
-Transport:
+传输层：
 
-- little-endian encoding and CRC32C reference vector
-- frame encode/decode and corrupt header/payload CRC
-- one-byte-at-a-time fragmentation
-- parser buffer-pool backpressure
-- invalid flags/reserved fields
-- bounded command ring / eventfd wake behavior
-- real nonblocking loopback TCP
-- 1 MiB frame with deliberately small socket send buffer, exercising partial `sendmsg()` / `EPOLLOUT`
-- RX pool exhaustion -> pause `EPOLLIN` -> release -> resume
-- Stream open and absolute byte-window backpressure
-- retained RX payload -> release -> `WINDOW_UPDATE`
-- split CONTROL/BULK lane failure isolation
-- logical 1500-byte Stream message fragmented into 256-byte DATA frames and reassembled into exactly one callback
-- reassembly-buffer retain/release and returned flow-control credit
-- scatter/gather TX ownership through the RPC bulk fast path
-- shared Channel automatic client reconnect over a real TCP listener
-- failed Stream handles become stale and Stream slots are reusable after reconnect
-- server-side manual connection replacement and Channel UP events
-- split mode BULK replacement while the CONTROL connection remains live
-- symmetric HELLO/HELLO_ACK capability negotiation before lane UP
-- asymmetric receive limits (one side may accept 2048-byte messages while the other advertises only 256 bytes)
-- protocol-version mismatch closes the lane instead of entering UP
-- GOAWAY propagation and graceful `RUNNING -> DRAINING -> DRAINED` lifecycle
-- existing Stream traffic continues during drain while new Stream opens are rejected
+- 小端编码和 CRC32C 参考向量；
+- 帧编解码以及损坏的头部/载荷 CRC；
+- 每次一个字节的分片输入；
+- 解析器缓冲资源池背压；
+- 非法标志/保留字段；
+- 有界命令环 / eventfd 唤醒行为；
+- 真实非阻塞回环 TCP；
+- 1 MiB 帧配合刻意缩小的套接字发送缓冲区，覆盖部分 `sendmsg()` / `EPOLLOUT`；
+- RX 资源池耗尽 -> 暂停 `EPOLLIN` -> 释放 -> 恢复；
+- Stream 打开和绝对字节窗口背压；
+- 保留 RX 载荷 -> 释放 -> `WINDOW_UPDATE`；
+- 拆分 CONTROL/BULK 通道的故障隔离；
+- 1500 字节逻辑 Stream 消息分成 256 字节 DATA 帧，并精确重组为一次回调；
+- 重组缓冲区保留/释放和流量控制额度归还；
+- RPC 批量快速路径中的分散/聚集 TX 所有权；
+- 共享 Channel 在真实 TCP 监听器上的客户端自动重连；
+- 连接重连后故障 Stream 句柄变陈旧，Stream 槽位可重新使用；
+- 服务端手动连接替换和 Channel UP 事件；
+- 拆分模式下 BULK 替换时 CONTROL 连接保持活动；
+- 通道进入 UP 前完成对称 `HELLO/HELLO_ACK` 能力协商；
+- 非对称接收上限（一侧可接收 2048 字节消息，另一侧只声明 256 字节）；
+- 协议版本不匹配时关闭通道，而不是进入 UP；
+- `GOAWAY` 传播和优雅 `RUNNING -> DRAINING -> DRAINED` 生命周期；
+- 排空过程中已有 Stream 流量继续运行，新 Stream 打开被拒绝。
 
-RPC:
+RPC：
 
-- RPC envelope + RAW codec encode/decode
-- real TCP Unary request -> executor handler -> response -> half-close
-- real TCP `ONE -> MANY` server streaming
-- real TCP `MANY -> ONE` client streaming
-- real TCP `MANY -> MANY` bidirectional streaming
-- RAW bulk `send_buffer()` sender-side slice path
-- response final `STATUS` and Call finish
-- STATUS service/method/codec/status-domain validation
-- `STATUS(OK) + response ONE` requires exactly one RESPONSE
-- Client `FINISHED` remains the last normal application event
-- V1 zero-message MANY request half-close is rejected until an explicit Method-open envelope exists
-- Server `close_send()` is rejected; response termination must go through final STATUS
-- RPC message retain/release path
-- cardinality enforcement (`ONE` rejects a second message)
-- executor task lifetime / Call generation ownership
-- initial request/response metadata over real TCP
-- explicit client cancellation propagated to the server
-- server handler cancellation observation through `tr_rpc_call_is_cancelled()`
-- short client deadline producing `DEADLINE_EXCEEDED` locally and remotely
-- service-side completion when the peer was already half-closed
-- multi-worker executor: separate Calls execute concurrently while eight messages on one Streaming Call remain strictly serialized
-- high-level Server shared executor: four peer Calls with two configured workers never run more than two handlers concurrently
-- RPC Endpoint deadlines run on Reactor-local timers without per-Endpoint timer threads
-- Channel keepalive runs on Reactor-local timers without a private timer thread
-- facade create/start/destroy thread accounting and seven thread-start failure points, using test-only pthread wrapping
-- large Unary RPC request/response (1500/1700 bytes) transparently fragmented/reassembled with a 256-byte Transport frame limit
-- in-flight Unary interrupted by connection loss completes as `UNAVAILABLE` and is not replayed
-- a new Unary succeeds on replacement Connections without rebuilding RPC endpoints
-- high-level `tr_server` + `tr_client` facade performs a real TCP Unary RPC end-to-end
-- standalone `examples/echo_server` and `examples/echo_client` run as separate processes
-- Reactor callback quiescence during RPC/Channel teardown
-- server facade peer reclamation with `max_peers=1` across sequential clients
-- failed high-level Client connect attempts roll back and can be retried on the same Client object
-- C11 refcount invariants: no resurrection, no underflow, no saturation overflow
-- server peer retirement while a shared RPC handler is still running; Endpoint/Channel lifetime remains valid until the task reference drains
+- RPC 信封 + RAW 编解码；
+- 真实 TCP 一元请求 -> 执行器处理器 -> 响应 -> 半关闭；
+- 真实 TCP `ONE -> MANY` 服务端流式调用；
+- 真实 TCP `MANY -> ONE` 客户端流式调用；
+- 真实 TCP `MANY -> MANY` 双向流式调用；
+- RAW 批量 `send_buffer()` 发送端分片路径；
+- 响应最终 `STATUS` 和 Call 结束；
+- `STATUS` 的服务/方法/编解码器/状态域校验；
+- `STATUS(OK) + response ONE` 要求恰好一条 `RESPONSE`；
+- 客户端 `FINISHED` 保持最后一个正常应用事件；
+- 在存在显式 Method 打开信封前，V1 拒绝零消息 MANY 请求半关闭；
+- 服务端拒绝 `close_send()`；响应终止必须经过最终 `STATUS`；
+- RPC 消息保留/释放路径；
+- 基数强制约束（`ONE` 拒绝第二条消息）；
+- 执行器任务生命周期 / Call 代次所有权；
+- 真实 TCP 上的初始请求/响应元数据；
+- 显式客户端取消传播到服务端；
+- 服务端处理器通过 `tr_rpc_call_is_cancelled()` 观察取消；
+- 短客户端截止时间在本地和远端产生 `DEADLINE_EXCEEDED`；
+- 对端已经半关闭时的服务端完成；
+- 多工作线程执行器：不同 Call 并发执行，同时一个流式 Call 的八条消息仍严格串行；
+- 高层服务端共享执行器：4 个对端 Call 配置 2 个工作线程时，同时运行的处理器不超过 2 个；
+- RPC Endpoint 截止时间运行在 Reactor 本地定时器上，不创建每 Endpoint 定时器线程；
+- Channel 保活运行在 Reactor 本地定时器上，不创建私有定时器线程；
+- 门面创建/启动/销毁线程记账和 7 个线程启动故障点，使用仅测试目标的 pthread 包装；
+- 大型一元 RPC 请求/响应（1500/1700 字节）在 256 字节传输帧上自动分片/重组；
+- 进行中的一元调用被连接故障打断时以 `UNAVAILABLE` 结束，不执行重放；
+- 替换 Connection 后可以在不重建 RPC Endpoint 的情况下成功执行新一元调用；
+- 高层 `tr_server` + `tr_client` 门面通过真实 TCP 完成端到端一元 RPC；
+- 独立 `examples/echo_server` 与 `examples/echo_client` 作为两个进程运行；
+- RPC/Channel 销毁期间的 Reactor 回调静默；
+- 服务端门面在 `max_peers=1` 下跨多个顺序客户端回收对端；
+- 高层客户端连接失败会回滚，并允许在同一个 Client 对象上重试；
+- C11 引用计数不变量：不允许复活、不允许下溢、不允许饱和溢出；
+- 共享 RPC 处理器仍在运行时服务端对端进入退役；任务引用耗尽前 Endpoint/Channel 生命周期保持有效。
 
-The Xmake CI matrix checks:
+Xmake CI 矩阵检查：
 
-- GCC and Clang builds/tests in both debug and release modes
-- AddressSanitizer + UndefinedBehaviorSanitizer
-- ThreadSanitizer
-- Make compatibility entry points, compiler switching, installed SDK consumption,
-  and the Echo client/server as separate processes
+- GCC 和 Clang 在 debug/release 模式下的构建与测试；
+- AddressSanitizer + UndefinedBehaviorSanitizer；
+- ThreadSanitizer；
+- Make 兼容入口、编译器切换、安装后 SDK 消费；
+- Echo 客户端/服务端作为独立进程运行。
 
-## Deliberately not implemented yet
+## 有意暂未实现
 
-- receiver-side scatter/gather logical-message representation (fragmented RX currently performs one bounded reassembly copy)
-- typed codec registry / Protobuf integration
-- automatic generic Streaming send queue (Streaming caller currently retries `TR_AGAIN` after writable notification)
-- automatic generic RPC retry / transparent in-flight Call replay
-- DNS/name resolver and non-IPv4 reconnect endpoints
-- RPC/service Health service (Transport keepalive/liveness is implemented)
-- scalable timer wheel if bounded endpoint scans become measurable
-- strict CONTROL priority scheduler in shared-connection mode (split mode provides physical isolation)
-- multi-data-connection pool
-- TLS/mTLS transport provider integration
-- backup semantics / durable commit / backup resume / storage / filesystem I/O
-- split-connection Client/Server facade pairing/binding protocol
-- lock-free command queue / io_uring / kernel zerocopy optimizations
+- 接收端分散/聚集逻辑消息表示（分片 RX 当前执行一次有界重组复制）；
+- 类型化编解码器注册表 / Protobuf 集成；
+- 通用流式调用自动发送队列（流式调用方当前在可写通知后重试 `TR_AGAIN`）；
+- 通用 RPC 自动重试 / 透明进行中 Call 重放；
+- DNS/名称解析器以及非 IPv4 重连端点；
+- RPC/服务健康检查（传输层保活/存活检测已经实现）；
+- 如果未来有界 Endpoint 扫描成为可测瓶颈，再引入可扩展定时轮；
+- 共享连接模式下严格 CONTROL 优先调度器（拆分模式已经提供物理隔离）；
+- 多 DATA 连接资源池；
+- TLS/mTLS 传输提供者集成；
+- 备份语义 / 持久提交 / 备份续传 / 存储 / 文件系统 I/O；
+- 拆分连接客户端/服务端门面的配对/绑定协议；
+- 无锁命令队列 / io_uring / 内核零复制优化。
 
-## Current V1 constraints
+## 当前 V1 限制
 
-- one Transport frame remains bounded by `max_payload_len`; one logical Stream/RPC message may span many DATA frames
-- fragmented receive requires a configured bounded Channel `reassembly_pool`; `max_message_bytes` must fit one reassembly buffer
-- fragmented RX currently becomes one contiguous buffer before RPC dispatch; single-frame RX remains zero-copy
-- TX logical-message size is bounded by the current 32-bit message/reassembly sizing policy and configured flow-control limits
-- executor workers run different Calls in parallel, but one Call is intentionally serialized and can therefore be delayed by its own slow handler
-- generic Streaming writes do not internally queue arbitrary application messages: `TR_AGAIN` is intentional backpressure and the caller retries after `TR_RPC_CALL_EVENT_WRITABLE` / server `on_writable`
-- Server executor saturation before the first Streaming handler callback is an admission rejection and returns final `RESOURCE_EXHAUSTED`; after callbacks have begun, one continuation task per Call may wait outside the executor while retaining its RX payload/credit, and a second not-yet-admitted task on that Call terminates only that Call with final `RESOURCE_EXHAUSTED` (earlier callbacks may already have produced side effects)
-- the Server executor supports an internal continuation reserve that can keep bounded task nodes available to already-accepted Streaming continuation/lifecycle work; the stable facade does not expose node-count tuning, and future application-facing admission policy should use semantic limits instead
-- direct destruction must not run from a Reactor callback; RPC/Channel teardown now uses a Reactor quiescence barrier, while normal shutdown should still drain application work first
-- reconnect restores Channel connectivity only; all Streams from the failed physical connection are terminal and must be recreated
-- automatic Client reconnect is Reactor-owned and does not create a per-Channel thread; backoff is timer-driven and connect completion is nonblocking
-- server connection replacement remains explicit so accept/TLS/authentication policy stays outside the generic Channel
-- RPC Endpoint deadlines, Channel keepalive, and automatic reconnect scheduling are Reactor-local
-- the high-level Client/Server facade currently uses shared CONTROL/BULK TCP mapping; split mode remains available through the lower-level Channel API
+- 单个传输帧仍受 `max_payload_len` 限制；一个逻辑 Stream/RPC 消息可以跨多个 DATA 帧；
+- 分片接收要求配置有界 Channel `reassembly_pool`；`max_message_bytes` 必须能放入一个重组缓冲区；
+- 分片 RX 当前在 RPC 分发前重组为一个连续缓冲区；单帧 RX 仍保持零复制；
+- TX 逻辑消息大小受当前 32 位消息/重组大小策略和已配置流量控制限制约束；
+- 执行器工作线程可以并行运行不同 Call，但单个 Call 有意串行，因此可能被自身慢处理器延迟；
+- 通用流式写入不会在内部排队任意应用消息：`TR_AGAIN` 是有意的背压，调用方在 `TR_RPC_CALL_EVENT_WRITABLE` / 服务端 `on_writable` 后重试；
+- 服务端执行器在第一条流式处理器回调前饱和属于准入拒绝，并返回最终 `RESOURCE_EXHAUSTED`；回调已经开始后，每个 Call 最多允许一个续处理任务在执行器外等待并保留 RX 载荷/额度，同一 Call 第二个尚未准入任务会只终止该 Call 并返回最终 `RESOURCE_EXHAUSTED`（更早回调可能已经产生副作用）；
+- 服务端执行器支持内部续处理预留，可以为已经接受的流式续处理/生命周期工作保留有界任务节点；稳定门面不暴露节点数量调优，未来面向应用的准入策略应使用语义上限；
+- 不能从 Reactor 回调直接执行销毁；RPC/Channel 销毁现在使用 Reactor 静默屏障，正常关闭仍应先排空应用工作；
+- 重连只恢复 Channel 连通性；故障物理连接上的全部 Stream 都已终止，必须重新创建；
+- 客户端自动重连由 Reactor 拥有，不创建每 Channel 线程；退避由定时器驱动，连接完成使用非阻塞路径；
+- 服务端连接替换保持显式方式，使接收/TLS/认证策略位于通用 Channel 之外；
+- RPC Endpoint 截止时间、Channel 保活和自动重连调度都位于 Reactor 本地；
+- 高层客户端/服务端门面当前使用共享 CONTROL/BULK TCP 映射；低层 Channel API 仍提供拆分模式。
 
-## Build
+## 构建
 
-Requires Linux, GCC or Clang, and **Xmake 3.1.1 or newer**. The project language
-baseline is ISO C11. GCC/Clang's cleanup attribute is used only through the
-typed `TR_AUTO()` ownership helper.
+要求 Linux、GCC 或 Clang，以及 **Xmake 3.1.1 或更新版本**。
+项目语言基线为 ISO C11。GCC/Clang 的清理属性只通过类型化
+`TR_AUTO()` 所有权辅助接口使用。
 
 ```sh
 xmake f -m release --toolchain=gcc
-xmake                         # library and Echo examples
-xmake test -v -j1              # builds and runs all test executables
+xmake                         # 构建库与 Echo 示例
+xmake test -v -j1             # 构建并运行全部测试可执行程序
 
-# Run only the timer queue tests:
+# 只运行定时器队列测试：
 xmake test -v -j1 'test_timer_queue/*'
 ```
 
-`xmake.lua` is the only build definition. Artifacts live under
-`build/<platform>/<architecture>/<mode>/`, not in `src/`, `tests/` or `examples/`.
-The modes are `debug`, `release` (default), `asan` (ASan + UBSan), and `tsan`.
-Release preserves the original `-O2 -g` build and enabled assertions; tests
-explicitly undefine `NDEBUG` so their assertion-contained operations still run.
+`xmake.lua` 是唯一构建定义。产物位于
+`build/<platform>/<architecture>/<mode>/`，不放入 `src/`、`tests/` 或 `examples/`。
+模式包括 `debug`、`release`（默认）、`asan`（ASan + UBSan）和 `tsan`。
+release 保持原有 `-O2 -g` 构建并启用断言；测试会显式取消定义 `NDEBUG`，
+确保写在断言中的操作仍然执行。
 
-`make`, `make test`, `make test-timer`, and `make clean` remain thin forwarding
-entry points and also require Xmake; there is no second Make build graph.
-See the [build and test guide](docs/build.md) for compiler switching, sanitizer
-commands, SDK installation, and compatibility options.
+`make`、`make test`、`make test-timer` 和 `make clean` 保留为轻量转发入口，
+同样依赖 Xmake；不存在第二套 Make 构建图。
+编译器切换、sanitizer 命令、SDK 安装和兼容选项见
+[构建与测试指南](docs/build.md)。
 
-## Next milestone
+## 下一里程碑
 
-The high-level Client/Server facade, capability negotiation, graceful drain,
-keepalive/liveness, diagnostics, callback quiescence, and runtime peer
-reclamation are implemented. The next production work should focus on:
+高层客户端/服务端门面、能力协商、优雅排空、保活/存活检测、诊断、
+回调静默和运行时对端回收已经实现。下一阶段生产工作应重点处理：
 
-1. split CONTROL/BULK facade binding identity so independently accepted sockets can be paired securely.
-2. strict CONTROL priority at DATA-frame boundaries in shared-connection mode.
-3. typed codec registry (for example Protobuf) while retaining RAW bulk slices.
-4. TLS/mTLS provider integration before a connection enters Channel HELLO.
-5. explicit RPC/service Health service, separate from Transport keepalive.
-6. generic RPC retry policy only for methods marked retryable/idempotent.
-7. fuzz/soak/benchmark suites and real RPC/BULK profiling; CRC32C has portable/runtime-selected acceleration (see [CRC32C backends](docs/crc32c.md)), while optional RX vectored messages remain profile-driven.
+1. 为拆分 CONTROL/BULK 门面增加连接绑定标识，使独立接收的套接字能够安全配对；
+2. 共享连接模式下，在 DATA 帧边界实现严格 CONTROL 优先级；
+3. 在保留 RAW 批量分片的同时增加类型化编解码器注册表，例如 Protobuf；
+4. 在连接进入 Channel `HELLO` 前集成 TLS/mTLS 提供者；
+5. 提供显式 RPC/服务健康检查，与传输层保活分离；
+6. 只有标记为可重试/幂等的方法才允许使用通用 RPC 重试策略；
+7. 增加模糊测试/长稳测试/基准测试套件和真实 RPC/BULK 性能分析；CRC32C 已有可移植/运行时选择加速后端（见 [CRC32C 后端](docs/crc32c.md)），可选 RX 向量消息仍由性能分析驱动。
 
-Backup remains an application layer above this generic RPC/Transport library.
+备份始终位于该通用 RPC/传输库之上的应用层。
+
