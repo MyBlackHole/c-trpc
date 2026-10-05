@@ -99,7 +99,7 @@ static void test_registry_and_data_route_attach(void)
 
 	assert(tr_pipeline_registry_register(registry, pipeline) == TR_OK);
 	assert(tr_pipeline_registry_register(registry, pipeline) == TR_ERR_STATE);
-	/* pipeline_id is unique while the old epoch remains registered. */
+	/* 旧 epoch 仍在注册期间，pipeline_id 必须保持唯一。 */
 	assert(tr_pipeline_registry_register(registry, same_id_new_epoch) ==
 	       TR_ERR_STATE);
 	assert(tr_pipeline_registry_register(registry, wrong_shard) ==
@@ -119,8 +119,8 @@ static void test_registry_and_data_route_attach(void)
 	other_connection = fake_connection(other, 20U, 1U);
 
 	/*
-	 * Every mismatch must leave the reservation intact. The final exact route
-	 * therefore still attaches successfully using the original generation.
+	 * 每次不匹配都必须保持预留不变，因此最终的精确路由
+	 * 仍能使用原始代次成功 attach。
 	 */
 	wrong = preface;
 	wrong.owner_shard_id++;
@@ -162,7 +162,7 @@ static void test_registry_and_data_route_attach(void)
 	assert(observed.slot == data_connection.slot);
 	assert(observed.generation == data_connection.generation);
 
-	/* Reservation was consumed exactly once. */
+	/* 预留必须且只能被消费一次。 */
 	{
 		int duplicate_ret = tr_pipeline_registry_attach_data_route(
 			registry, &preface, data_connection, NULL);
@@ -176,7 +176,7 @@ static void test_registry_and_data_route_attach(void)
 	assert(pipeline_stats.data_reserved_count == 0U);
 	assert(pipeline_stats.data_count == 1U);
 
-	/* Cancelled capabilities remain stale and cannot attach later. */
+	/* 已取消能力保持过期状态，之后不能再 attach。 */
 	assert(tr_pipeline_reserve_data(pipeline, &cancelled) == TR_OK);
 	assert(tr_pipeline_cancel_data_reservation(pipeline, cancelled) == TR_OK);
 	wrong = data_route(pipeline, cancelled);
@@ -191,14 +191,14 @@ static void test_registry_and_data_route_attach(void)
 	assert(registry_stats.capacity == 2U);
 	assert(registry_stats.count == 1U);
 
-	/* Active CONTROL/DATA membership fences registry lifetime. */
+	/* 活动 CONTROL/DATA 成员关系会约束注册表生命周期。 */
 	assert(tr_pipeline_registry_unregister(registry, pipeline) ==
 	       TR_ERR_STATE);
 	assert(tr_pipeline_remove_data(pipeline, attached_data) == TR_OK);
 	assert(tr_pipeline_clear_control(pipeline, control_connection) == TR_OK);
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_OK);
 	assert(tr_pipeline_registry_unregister(registry, pipeline) == TR_ERR_STALE);
-	/* New epoch may claim the same pipeline_id only after old unregister. */
+	/* 只有旧实例 unregister 后，新 epoch 才能使用相同 pipeline_id。 */
 	assert(tr_pipeline_registry_register(registry, same_id_new_epoch) == TR_OK);
 	assert(tr_pipeline_registry_unregister(
 		       registry, same_id_new_epoch) == TR_OK);
