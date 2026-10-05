@@ -375,8 +375,8 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	int enabled;
 
 	/*
-	 * Reactor-local callback: all network actions stay on the owning event loop.
-	 * Channel lock is retained as a transition lock for public snapshot APIs.
+	 * Reactor 本地回调：全部网络操作都留在所属事件循环中。
+	 * Channel 锁继续作为公开快照 API 的状态转换锁。
 	 */
 	pthread_mutex_lock(&channel->lock);
 	enabled = channel->keepalive_enabled;
@@ -1218,9 +1218,9 @@ tr_channel_process_pending_hello_on_owner(void *arg)
 	frame.payload = &payload;
 
 	/*
-	 * Protocol errors already close the connection. Deferred replay mirrors
-	 * normal Reactor frame dispatch, where the handler result is not surfaced
-	 * synchronously to the Channel creator.
+	 * 协议错误已经会关闭连接。
+	 * 延迟重放保持与普通 Reactor 帧分发一致：
+	 * 处理器结果不会同步返回给 Channel 创建方。
 	 */
 	(void)tr_channel_handle_hello(request->channel,
 				      request->hello.connection, &frame);
@@ -1680,9 +1680,9 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	int ret = TR_OK;
 
 	/*
-	 * Deferred Channel creation installs the transport handler before upper
-	 * layers are ready. An early peer HELLO must not ACK or publish lane UP,
-	 * otherwise the peer can send application DATA into an unbound Channel.
+	 * 延迟 Channel 创建会在上层准备完成前先安装传输处理器。
+	 * 对端过早到达的 HELLO 不能立即 ACK，也不能发布通道 UP，
+	 * 否则对端可能向尚未绑定上层的 Channel 发送应用 DATA。
 	 */
 	if (frame->header.type == TR_FRAME_HELLO &&
 	    tr_channel_defer_hello_before_start(channel, connection, frame))
@@ -2110,9 +2110,9 @@ int tr_channel_start(struct tr_channel *channel)
 	}
 
 	/*
-	 * Upper-layer handlers are installed before deferred users call start().
-	 * Publish that readiness under the same lock used by RX deferral, and move
-	 * any already-received HELLO into stack-owned replay requests.
+	 * 延迟使用方调用 start() 前已经安装上层处理器。
+	 * 在与 RX 延迟处理相同的锁下发布该就绪状态，
+	 * 并把已经收到的 HELLO 转移到栈上拥有的重放请求。
 	 */
 	channel->handshake_started = 1;
 	for (i = 0; i < 2; ++i) {
@@ -2129,9 +2129,9 @@ int tr_channel_start(struct tr_channel *channel)
 	pthread_mutex_unlock(&channel->lock);
 
 	/*
-	 * Replay early peer HELLO on the Reactor owner. Only after this point can
-	 * ACK/lane-UP let the peer proceed to STREAM_OPEN/DATA, and the upper layer
-	 * is already bound.
+	 * 在 Reactor 所有者上重放过早到达的对端 HELLO。
+	 * 只有到达这一步后，ACK/通道 UP 才能允许对端继续进入 STREAM_OPEN/DATA；
+	 * 此时上层已经完成绑定。
 	 */
 	for (i = 0; i < 2; ++i) {
 		if (!pending[i].hello.valid)
@@ -2422,9 +2422,9 @@ static int tr_channel_detach_on_owner(void *arg)
 	channel->lifecycle_callback_arg = NULL;
 
 	/*
-	 * Owner context makes these operations non-waiting. Closed/stale
-	 * connections already have no future callback source, so their status is
-	 * intentionally ignored.
+	 * 所有者上下文使这些操作无需等待。
+	 * 已关闭或陈旧连接已经不会再产生后续回调源，
+	 * 因此有意忽略它们的状态。
 	 */
 	(void)tr_reactor_set_handler(control, NULL, NULL, NULL);
 	if (split)
@@ -2595,14 +2595,14 @@ struct tr_channel_replace_request {
 };
 
 /*
- * Replacement attachment must be atomic with respect to Reactor I/O callbacks.
+ * 替换连接的附着必须相对于 Reactor I/O 回调保持原子。
  *
- * If the handler becomes visible before Channel records the new lane mapping,
- * an already-readable peer HELLO can run immediately and observe lane_mask == 0,
- * incorrectly turning a healthy replacement connection into a protocol error.
+ * 如果处理器在 Channel 记录新通道映射之前就变得可见，
+ * 已经可读的对端 HELLO 可能立即执行并观察到 lane_mask == 0，
+ * 从而错误地把健康的替换连接判定为协议错误。
  *
- * Run validation, handler installation and lane publication in one owner
- * operation so no connection callback can interleave with the transition.
+ * 因此校验、处理器安装和通道发布必须放在同一个所有者操作中，
+ * 防止任何连接回调插入该状态转换。
  */
 static int tr_channel_replace_connection_on_owner(void *arg)
 {
@@ -2649,9 +2649,9 @@ static int tr_channel_replace_connection_on_owner(void *arg)
 	}
 
 	/*
-	 * tr_reactor_call() guarantees owner context here; set_handler therefore
-	 * updates the connection directly and cannot dispatch an I/O callback in
-	 * the middle of this transition.
+	 * tr_reactor_call() 保证这里处于所有者上下文；
+	 * 因此 set_handler 直接更新连接，
+	 * 不会在该状态转换中间分发 I/O 回调。
 	 */
 	ret = tr_reactor_set_handler(connection, tr_channel_on_frame,
 				     tr_channel_on_connection_event, channel);
@@ -2970,9 +2970,9 @@ int tr_channel_disable_keepalive(struct tr_channel *channel)
 		return TR_OK;
 
 	/*
-	 * Never wait for the Reactor while holding channel->lock. arm(0) is also a
-	 * synchronization barrier while running; after Reactor stop it directly
-	 * disarms the owner queue under ctl_lock.
+	 * 持有 channel->lock 时绝不能等待 Reactor。
+	 * 运行期间 arm(0) 同样是同步屏障；
+	 * Reactor 停止后，它会在 ctl_lock 下直接取消所有者队列中的定时器。
 	 */
 	ret = tr_reactor_timer_arm(timer, 0);
 	if (ret == TR_ERR_CLOSED)
