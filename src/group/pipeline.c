@@ -250,8 +250,8 @@ static int tr_pipeline_clear_control_on_owner(void *arg)
 	pipeline->control_bound = 0;
 
 	/*
-	 * CONTROL owns issuance of DATA capabilities. Once CONTROL leaves, any
-	 * not-yet-attached capability must become unusable immediately.
+	 * CONTROL 负责签发 DATA 能力。
+	 * CONTROL 离开后，所有尚未附加的能力都必须立即失效。
 	 */
 	if (pipeline->data_reserved_count != 0U) {
 		uint32_t i;
