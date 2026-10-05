@@ -331,19 +331,19 @@ int main(void)
 	}
 	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT);
 
-	/* Occupy the only worker with the first streaming admission. */
+	/* 用第一个流式准入占用唯一工作线程。 */
 	send_request(calls[0]);
 	wait_counter(&ctx, &ctx.server_opened, 1U);
 
-	/* Fill all executor nodes with first-message streaming tasks. */
+	/* 用流式首消息任务填满全部执行器节点。 */
 	for (i = 1U; i < ACCEPTED_CALLS; ++i)
 		send_request(calls[i]);
 	wait_executor_queue(server_rpc, QUEUED_CAPACITY, 1U);
 
 	/*
-	 * The next first message is rejected before on_open/on_message. It must
-	 * finish as RESOURCE_EXHAUSTED, not ERROR/UNAVAILABLE, and the connection
-	 * remains usable.
+	 * 下一条首消息必须在 on_open/on_message 之前被拒绝。
+	 * 它必须以 RESOURCE_EXHAUSTED 结束，而不是 ERROR/UNAVAILABLE，
+	 * 并且连接仍然可用。
 	 */
 	send_request(calls[OVERLOAD_INDEX]);
 	wait_finished(&ctx, OVERLOAD_INDEX);
@@ -370,7 +370,7 @@ int main(void)
 	assert(ctx.server_closed == 0U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/* Same Channel/Connection accepts a later streaming Call after overload. */
+	/* 过载后，同一个 Channel/Connection 仍然可以接受后续流式 Call。 */
 	send_request(calls[RECOVERY_INDEX]);
 	wait_finished(&ctx, RECOVERY_INDEX);
 	pthread_mutex_lock(&ctx.lock);
