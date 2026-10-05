@@ -130,6 +130,16 @@ int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
 				   struct tr_stream_handle *out);
 
 struct tr_rpc_executor_group;
+
+/*
+ * Worker-context predicates for lifecycle fences. They identify only the
+ * currently executing RPC worker/task; no public execution identity leaks.
+ */
+int tr_rpc_endpoint_is_current_worker(
+	const struct tr_rpc_endpoint *endpoint);
+int tr_rpc_executor_group_is_current_worker(
+	const struct tr_rpc_executor_group *group);
+
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
 				 uint32_t thread_count,

@@ -261,7 +261,12 @@ void tr_runtime_destroy(struct tr_runtime *runtime)
 	if (!runtime)
 		return;
 
-	(void)tr_runtime_stop(runtime);
+	/*
+	 * Runtime storage owns Reactor objects. A failed stop means an owner thread
+	 * may still execute against this memory; never continue into release.
+	 */
+	if (tr_runtime_stop(runtime) != TR_OK)
+		return;
 	for (i = 0; i < runtime->shard_count; ++i)
 		tr_runtime_shard_release(&runtime->shards[i]);
 	free(runtime->shards);
@@ -290,6 +295,18 @@ struct tr_reactor *
 tr_runtime_shard_reactor(const struct tr_runtime_shard *shard)
 {
 	return shard ? shard->reactor : NULL;
+}
+
+int tr_runtime_is_owner_context(const struct tr_runtime *runtime)
+{
+	uint32_t i;
+
+	if (!runtime)
+		return 0;
+	for (i = 0; i < runtime->shard_count; ++i)
+		if (tr_reactor_is_owner_context(runtime->shards[i].reactor))
+			return 1;
+	return 0;
 }
 
 int tr_runtime_shard_call(struct tr_runtime_shard *shard,

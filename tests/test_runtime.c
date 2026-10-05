@@ -506,6 +506,47 @@ static void test_runtime_shard_memory_budget(void)
 	assert(runtime == NULL);
 }
 
+struct runtime_owner_stop_ctx {
+	struct tr_reactor *reactor;
+	int stop_status;
+};
+
+static int runtime_stop_from_owner(void *arg)
+{
+	struct runtime_owner_stop_ctx *ctx =
+		(struct runtime_owner_stop_ctx *)arg;
+
+	ctx->stop_status = tr_reactor_stop(ctx->reactor);
+	return TR_OK;
+}
+
+static void test_runtime_rejects_owner_self_stop(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	struct runtime_owner_stop_ctx ctx;
+
+	runtime_test_config_init(&config, &shard_config, 1U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(tr_runtime_start(runtime) == TR_OK);
+
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.reactor = tr_runtime_shard_reactor(shard);
+	assert(ctx.reactor != NULL);
+
+	assert(tr_runtime_shard_call(
+		       shard, runtime_stop_from_owner, &ctx) == TR_OK);
+	assert(ctx.stop_status == TR_ERR_STATE);
+
+	/* Rejection must leave the owner alive and externally stoppable. */
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	tr_runtime_destroy(runtime);
+}
+
 static void test_runtime_lifecycle(void)
 {
 	struct tr_runtime_config config;
@@ -538,6 +579,7 @@ int main(void)
 	RUN_TEST(test_runtime_shard_peer_event_source);
 	RUN_TEST(test_runtime_shard_peer_event_dispatch);
 	RUN_TEST(test_runtime_shard_memory_budget);
+	RUN_TEST(test_runtime_rejects_owner_self_stop);
 	RUN_TEST(test_runtime_lifecycle);
 	return 0;
 }

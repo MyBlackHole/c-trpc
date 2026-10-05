@@ -55,6 +55,11 @@ static int tr_reactor_is_owner_thread(const struct tr_reactor *reactor)
 	return reactor && tr_current_reactor_owner == reactor;
 }
 
+int tr_reactor_is_owner_context(const struct tr_reactor *reactor)
+{
+	return tr_reactor_is_owner_thread(reactor);
+}
+
 #ifndef NDEBUG
 #define TR_ASSERT_REACTOR_OWNER(reactor) \
 	assert(tr_reactor_is_owner_thread((reactor)))
@@ -3734,6 +3739,8 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 
 	if (!reactor)
 		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started) {
@@ -3762,7 +3769,9 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	if (ret != TR_OK)
 		return ret;
 
-	pthread_join(reactor->thread, NULL);
+	ret = pthread_join(reactor->thread, NULL);
+	if (ret != 0)
+		return TR_ERR_SYS;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	reactor->started = 0;
@@ -3775,8 +3784,9 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	if (!reactor)
 		return;
 
-	if (reactor->started)
-		(void)tr_reactor_stop(reactor);
+	if (reactor->started &&
+	    tr_reactor_stop(reactor) != TR_OK)
+		return;
 
 	if (reactor->wake_fd >= 0)
 		close(reactor->wake_fd);

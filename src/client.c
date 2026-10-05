@@ -683,7 +683,21 @@ int tr_client_get_rpc_semantic_stats(
 
 void tr_client_destroy(struct tr_client *client)
 {
+	int ret;
+
 	if (!client)
+		return;
+
+	/*
+	 * Synchronous destroy may join the Client RPC worker and stop its Reactor.
+	 * Calling it from either execution domain would wait for/free the current
+	 * stack. Refuse before changing any ownership state; the external owner
+	 * remains responsible for a later destroy.
+	 */
+	if ((client->runtime &&
+	     tr_runtime_is_owner_context(client->runtime)) ||
+	    (client->rpc &&
+	     tr_rpc_endpoint_is_current_worker(client->rpc)))
 		return;
 
 	/*
@@ -715,7 +729,9 @@ void tr_client_destroy(struct tr_client *client)
 	}
 
 	if (client->runtime) {
-		(void)tr_runtime_stop(client->runtime);
+		ret = tr_runtime_stop(client->runtime);
+		if (ret != TR_OK)
+			return;
 		tr_runtime_destroy(client->runtime);
 		client->runtime = NULL;
 		client->shard = NULL;

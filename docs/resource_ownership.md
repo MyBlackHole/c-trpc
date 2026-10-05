@@ -360,7 +360,25 @@ if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
 
 mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Reactor owner-thread hot path 增加锁。
 
-## 12. 错误路径
+## 12. 终局 destroy 的执行上下文
+
+同步 `destroy/remove` 是 exclusive terminal operation，不是 callback-safe control API。
+
+规则：
+
+- Reactor owner callback 不得同步 stop/destroy 自己所属 Runtime/facade；
+- RPC worker/handler/result callback 不得 destroy 自己正在执行的 Endpoint/Client/Server；
+- destroy 调用前，外部 owner 必须停止新的并发 API 使用；
+- callback 若要触发退出，只发布 drain/shutdown intent，由外部 owner thread 完成最终 destroy。
+
+底层 lifecycle fence 会拒绝 self-stop/self-destroy，而不是在当前 callback stack 上
+`pthread_join(self)`、等待自己的 strong-ref，或继续释放仍被当前执行栈访问的资源。
+`tr_reactor_destroy()` / `tr_runtime_destroy()` 在 stop 失败时也不得继续 free。
+
+这是与 kernel remove/release 类似的边界：先让执行上下文退出并完成 quiescence，再由
+独立 owner 执行最终资源回收。
+
+## 13. 错误路径
 
 局部 owned 资源优先自动 cleanup，因为新增 early return 时不会静默漏 release。
 
@@ -370,7 +388,7 @@ mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Re
 
 错误路径设计目标：ownership 唯一、release 顺序明确、新增失败分支默认安全、不产生 double free / leak / UAF。
 
-## 13. 公共 API 的 ownership 说明
+## 14. 公共 API 的 ownership 说明
 
 资源相关公共 API 应明确写出：
 
@@ -392,7 +410,7 @@ mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Re
  */
 ```
 
-## 14. 编译器策略
+## 15. 编译器策略
 
 项目继续使用：
 
@@ -404,7 +422,7 @@ mutex guard 只用于真正 shared state，不能因为 guard 很方便就给 Re
 
 这不代表项目切换为 GNU C，也不意味着允许任意 GNU extension。
 
-## 15. 注释语言
+## 16. 注释语言
 
 代码说明以中文为主，具体规范见 `docs/code_comments.md`。
 

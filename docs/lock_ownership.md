@@ -41,6 +41,10 @@ join Reactor
 这样 STOP 之后不会再出现“command/completion 已取得资源 ownership，但 owner 已退出”
 的悬空工作。
 
+`tr_reactor_stop()` 只允许非 owner thread 调用。owner callback 内同步 stop 会造成
+self-join，因此直接返回 `TR_ERR_STATE`，且不能先关闭 admission。join 失败时 Reactor
+也保持 started ownership，destroy 不得继续释放其队列、fd 或 memory budget。
+
 ### Command queue / Completion queue lock
 
 **结论：保留。**

@@ -21,6 +21,25 @@
 _Static_assert(sizeof(uintptr_t) <= sizeof(uint64_t),
 	       "RPC Call capability requires pointers no wider than 64 bits");
 
+/*
+ * Worker execution identity is thread-local: no shared synchronization is
+ * needed, and facade teardown can reject self-join/self-wait before mutation.
+ */
+static _Thread_local struct tr_rpc_endpoint *tr_current_rpc_worker_endpoint;
+static _Thread_local struct tr_rpc_executor_group *tr_current_rpc_worker_group;
+
+int tr_rpc_endpoint_is_current_worker(
+	const struct tr_rpc_endpoint *endpoint)
+{
+	return endpoint && tr_current_rpc_worker_endpoint == endpoint;
+}
+
+int tr_rpc_executor_group_is_current_worker(
+	const struct tr_rpc_executor_group *group)
+{
+	return group && tr_current_rpc_worker_group == group;
+}
+
 static inline struct tr_rpc_endpoint *
 tr_rpc_call_handle_endpoint(struct tr_rpc_call_handle handle)
 {
@@ -3000,6 +3019,7 @@ static void *tr_rpc_executor_main(void *arg)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 
+	tr_current_rpc_worker_endpoint = endpoint;
 	for (;;) {
 		struct tr_rpc_task task;
 		int ret = tr_rpc_executor_take(endpoint, &task, 1);
@@ -3026,6 +3046,7 @@ static void *tr_rpc_executor_main(void *arg)
 			}
 		}
 	}
+	tr_current_rpc_worker_endpoint = NULL;
 
 	return NULL;
 }
@@ -3059,6 +3080,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 	struct tr_rpc_executor_group *group =
 		(struct tr_rpc_executor_group *)arg;
 
+	tr_current_rpc_worker_group = group;
 	for (;;) {
 		struct tr_rpc_endpoint *endpoint =
 			tr_rpc_executor_group_take(group);
@@ -3072,6 +3094,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 		if (ret <= 0)
 			continue;
 
+		tr_current_rpc_worker_endpoint = endpoint;
 		{
 			int task_done_deferred =
 				tr_rpc_executor_run_observed_task(endpoint, &task);
@@ -3087,7 +3110,9 @@ static void *tr_rpc_executor_group_main(void *arg)
 				tr_rpc_task_done(endpoint, task.call);
 			}
 		}
+		tr_current_rpc_worker_endpoint = NULL;
 	}
+	tr_current_rpc_worker_group = NULL;
 
 	return NULL;
 }

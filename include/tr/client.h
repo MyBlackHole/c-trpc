@@ -82,6 +82,16 @@ int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
 int tr_client_get_rpc_semantic_stats(
 	struct tr_client *client, struct tr_rpc_semantic_stats *out);
 
+/*
+ * Exclusive terminal operation.
+ *
+ * The caller must own the final external Client lifetime: no concurrent public
+ * API call may still use client. Do not call destroy from c-trpc RPC
+ * handlers/result callbacks/interceptors or Transport callbacks running on this
+ * Client's worker/Reactor. Unsafe self-destroy is refused; use drain/shutdown
+ * signaling from the callback and perform destroy later from an external
+ * owner thread.
+ */
 void tr_client_destroy(struct tr_client *client);
 
 #ifdef __cplusplus

@@ -76,6 +76,15 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
 int tr_server_get_rpc_semantic_stats(
 	struct tr_server *server, struct tr_rpc_semantic_stats *out);
 
+/*
+ * Exclusive terminal operation.
+ *
+ * The caller must own the final external Server lifetime: no concurrent public
+ * API call may still use server. Do not call destroy from c-trpc RPC handlers,
+ * interceptors or Transport callbacks running on this Server's worker/Reactor.
+ * Unsafe self-destroy is refused; signal drain/shutdown from the callback and
+ * perform destroy later from an external owner thread.
+ */
 void tr_server_destroy(struct tr_server *server);
 
 #ifdef __cplusplus
