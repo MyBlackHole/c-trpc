@@ -195,6 +195,8 @@ int tr_client_connection_group_close(struct tr_client *client);
  *
  * wait_drained() returns TR_OK when there are no active transfer affinities,
  * no payload bytes still owned by DATA TX, and no pending DATA establishment.
+ * The wait is event-driven from owner-published lifecycle generations; it does
+ * not poll owner stats or become a second protocol-state owner.
  * timeout_ms == 0 waits indefinitely. wait_drained() is an external blocking
  * lifecycle wait: Reactor-owner callbacks and RPC worker callbacks receive
  * TR_ERR_STATE. begin_drain() remains callback-safe for publishing drain intent.
