@@ -2426,6 +2426,25 @@ static int channel_wait_drained_from_owner(void *arg)
 	return TR_OK;
 }
 
+struct channel_delayed_close_probe {
+	struct tr_stream_handle first;
+	struct tr_stream_handle second;
+	int first_ret;
+	int second_ret;
+};
+
+static void *channel_delayed_close_main(void *arg)
+{
+	struct channel_delayed_close_probe *probe =
+		(struct channel_delayed_close_probe *)arg;
+	struct timespec pause_time = { 0, 10L * 1000L * 1000L };
+
+	nanosleep(&pause_time, NULL);
+	probe->first_ret = tr_stream_close(probe->first);
+	probe->second_ret = tr_stream_close(probe->second);
+	return NULL;
+}
+
 static void test_channel_graceful_drain(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -2445,6 +2464,8 @@ static void test_channel_graceful_drain(void)
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	struct channel_wait_owner_probe wait_probe;
+	struct channel_delayed_close_probe close_probe;
+	pthread_t close_thread;
 	enum tr_channel_state channel_state;
 	int client_fd;
 	int server_fd;
@@ -2564,9 +2585,22 @@ static void test_channel_graceful_drain(void)
 	wait_for_pool_full(&tx_pool, 1);
 
 	assert(tr_channel_begin_drain(server_channel) == TR_OK);
-	assert(tr_stream_close(client_stream) == TR_OK);
-	assert(tr_stream_close(server_stream) == TR_OK);
+
+	/*
+	 * Make wait_drained() enter its blocking path with an active Stream, then
+	 * retire both halves from another application thread. This deterministically
+	 * exercises drain_cond wakeup instead of the already-drained fast path.
+	 */
+	memset(&close_probe, 0, sizeof(close_probe));
+	close_probe.first = client_stream;
+	close_probe.second = server_stream;
+	assert(pthread_create(
+		       &close_thread, NULL, channel_delayed_close_main,
+		       &close_probe) == 0);
 	assert(tr_channel_wait_drained(client_channel, 2000) == TR_OK);
+	assert(pthread_join(close_thread, NULL) == 0);
+	assert(close_probe.first_ret == TR_OK);
+	assert(close_probe.second_ret == TR_OK);
 	assert(tr_channel_wait_drained(server_channel, 2000) == TR_OK);
 	assert(tr_channel_get_state(client_channel, &channel_state) == TR_OK);
 	assert(channel_state == TR_CHANNEL_DRAINED);
