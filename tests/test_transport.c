@@ -6776,6 +6776,156 @@ static void test_server_shared_rpc_executor(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct retained_rpc_message_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_rpc_message retained;
+	unsigned retained_count;
+};
+
+static enum tr_rpc_message_disposition
+retained_rpc_server_message(struct tr_rpc_call_handle call,
+			    const struct tr_rpc_message *message, void *arg)
+{
+	struct retained_rpc_message_ctx *ctx =
+		(struct retained_rpc_message_ctx *)arg;
+
+	(void)call;
+	assert(message != NULL);
+	assert(message->bytes.len == 6U);
+	assert(memcmp(message->bytes.data, "retain", 6U) == 0);
+
+	pthread_mutex_lock(&ctx->lock);
+	assert(ctx->retained_count == 0U);
+	ctx->retained = *message;
+	ctx->retained_count = 1U;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_RPC_MESSAGE_TAKE_OWNERSHIP;
+}
+
+static void test_retained_rpc_message_survives_peer_disconnect(void)
+{
+	struct retained_rpc_message_ctx ctx;
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_facade_tuning tuning;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_stream_handlers handlers;
+	struct tr_rpc_call_handle call;
+	struct tr_rpc_bytes bytes;
+	struct tr_server_stats stats;
+	struct timespec deadline;
+	struct timespec pause_time;
+	uint16_t port = 0U;
+	unsigned attempt;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 1U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 90U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_MANY;
+	method.response_cardinality = TR_RPC_MANY;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1024U;
+	method.max_response_bytes = 1024U;
+
+	memset(&handlers, 0, sizeof(handlers));
+	handlers.on_message = retained_rpc_server_message;
+	assert(tr_server_register_stream_method(
+		       server, &method, &handlers, &ctx) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 500U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_call_start(client, 90U, 1U, NULL, &call) == TR_OK);
+
+	bytes.data = (const uint8_t *)"retain";
+	bytes.len = 6U;
+	pause_time.tv_sec = 0;
+	pause_time.tv_nsec = 10000000L;
+	for (attempt = 0; attempt < 500U; ++attempt) {
+		ret = tr_rpc_call_send(call, &bytes);
+		if (ret == TR_OK)
+			break;
+		assert(ret == TR_AGAIN);
+		nanosleep(&pause_time, NULL);
+	}
+	assert(ret == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.retained_count == 0U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.retained_count == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/*
+	 * Disconnect the peer while application ownership still holds the RX
+	 * descriptor.  The retired Endpoint/Channel must stay alive solely because
+	 * of the message lifetime pin.
+	 */
+	tr_client_destroy(client);
+	client = NULL;
+
+	memset(&stats, 0, sizeof(stats));
+	for (attempt = 0; attempt < 500U; ++attempt) {
+		assert(tr_server_get_stats(server, &stats) == TR_OK);
+		if (stats.peers_current == 0U &&
+		    stats.peers_reaping_current == 1U)
+			break;
+		nanosleep(&pause_time, NULL);
+	}
+	assert(stats.peers_current == 0U);
+	assert(stats.peers_reaping_current == 1U);
+
+	ret = tr_rpc_message_release(&ctx.retained);
+	assert(ret == TR_OK || ret == TR_ERR_STALE || ret == TR_ERR_CLOSED);
+	assert(ctx.retained._private[0] == (uintptr_t)0);
+	assert(ctx.retained._private[1] == (uintptr_t)0);
+
+	memset(&stats, 0, sizeof(stats));
+	for (attempt = 0; attempt < 500U; ++attempt) {
+		assert(tr_server_get_stats(server, &stats) == TR_OK);
+		if (stats.peers_reaping_current == 0U)
+			break;
+		nanosleep(&pause_time, NULL);
+	}
+	assert(stats.peers_reaping_current == 0U);
+	assert(stats.peers_reaped_total >= 1U);
+
+	tr_server_destroy(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static void test_server_peer_refcount_drain(void)
 {
 	struct tr_server_config server_config;
@@ -7175,6 +7325,7 @@ int main(void)
 	test_client_runtime_thread_bound();
 	test_server_runtime_thread_bound();
 	test_server_shared_rpc_executor();
+	test_retained_rpc_message_survives_peer_disconnect();
 	test_server_peer_refcount_drain();
 
 	puts("all transport/RPC core tests passed");
