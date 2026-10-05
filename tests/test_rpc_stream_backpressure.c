@@ -437,7 +437,7 @@ int main(void)
 		args[i].index = i;
 	}
 
-	/* Two Calls enter application callbacks before overload begins. */
+	/* 过载开始前，两个 Call 已经进入应用回调。 */
 	start_call(client_rpc, 1U, &args[CALL_A], &calls[CALL_A]);
 	start_call(client_rpc, 1U, &args[CALL_B], &calls[CALL_B]);
 	wait_counter(&ctx, &ctx.client_opened, 2U, "initial client opens");
@@ -450,7 +450,7 @@ int main(void)
 	wait_counter(&ctx, &ctx.b_messages, 1U, "B1 callback");
 	b_before = wait_flow_balanced(ctx.b_stream);
 
-	/* One filler runs and blocks; the remaining 16 fill every executor node. */
+	/* 一个填充任务运行并阻塞，其余 16 个任务填满全部执行器节点。 */
 	for (i = 0; i < FILLER_COUNT; ++i)
 		start_call(client_rpc, 2U, &args[FILLER_BASE + i],
 			   &calls[FILLER_BASE + i]);
@@ -464,8 +464,8 @@ int main(void)
 	wait_executor(server_rpc, QUEUE_CAPACITY, 1U);
 
 	/*
-	 * A2 and B2 cannot enter the full executor.  They are retained one per
-	 * Call, and their RX credit must remain withheld.
+	 * A2 和 B2 无法进入已满执行器。
+	 * 每个 Call 各保留一个任务，同时必须继续扣留对应 RX 额度。
 	 */
 	send_tag(calls[CALL_A], 'A', '2');
 	wait_flow_backpressured(ctx.a_stream, &a_before);
@@ -473,9 +473,10 @@ int main(void)
 	wait_flow_backpressured(ctx.b_stream, &b_before);
 
 	/*
-	 * B3 exceeds the one-pending-task bound for Call B.  The Call may already
-	 * have produced side effects (B1 ran), so terminate only this Call with a
-	 * final RESOURCE_EXHAUSTED status; the connection must survive.
+	 * B3 超过 Call B 的单等待任务上限。
+	 * 该 Call 可能已经产生副作用（B1 已经执行），
+	 * 因此只能用最终 RESOURCE_EXHAUSTED 终止这个 Call，
+	 * 整个连接必须继续存活。
 	 */
 	send_tag(calls[CALL_B], 'B', '3');
 	wait_finished(&ctx, CALL_B);
@@ -486,7 +487,7 @@ int main(void)
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_rpc_call_close_send(calls[CALL_B]) == TR_OK);
 
-	/* Free executor capacity.  A2 must be retried by the Reactor owner. */
+	/* 释放执行器容量；A2 必须由 Reactor 所有者重试。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release_blocker = 1;
 	pthread_cond_broadcast(&ctx.cond);
@@ -495,7 +496,7 @@ int main(void)
 	wait_counter(&ctx, &ctx.a_messages, 2U, "A2 retry callback");
 	wait_flow_consumed_after(ctx.a_stream, &a_before);
 
-	/* Call A remains usable after backpressure and completes normally. */
+	/* Call A 在背压后仍然可用，并正常完成。 */
 	send_tag(calls[CALL_A], 'A', '3');
 	wait_finished(&ctx, CALL_A);
 	pthread_mutex_lock(&ctx.lock);
@@ -504,7 +505,7 @@ int main(void)
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_rpc_call_close_send(calls[CALL_A]) == TR_OK);
 
-	/* All filler Calls were admitted before the pending retry and still drain. */
+	/* 所有填充 Call 都在等待重试前已经准入，并且仍需正常排空。 */
 	for (i = 0; i < FILLER_COUNT; ++i)
 		wait_finished(&ctx, FILLER_BASE + i);
 	pthread_mutex_lock(&ctx.lock);
@@ -515,7 +516,7 @@ int main(void)
 
 	wait_executor(server_rpc, 0U, 0U);
 
-	/* A fresh Call on the same Channel/Connection succeeds after overload. */
+	/* 过载后，同一个 Channel/Connection 上的新 Call 仍然成功。 */
 	start_call(client_rpc, 1U, &args[RECOVERY_CALL], &calls[RECOVERY_CALL]);
 	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT, "recovery client open");
 	send_tag(calls[RECOVERY_CALL], 'R', '1');
