@@ -260,13 +260,31 @@ Pipeline 所有者 Reactor
 
 Pipeline Listener 的运行期状态同样属于 Reactor 所有者，包括
 `draining`、监听源注册状态、当前连接数与当前 Pipeline 数。外部 lifecycle
-线程执行 `begin_drain/stop` 时，运行中的状态转换必须作为一个 owner turn
-完成，不能在同步 owner 调用返回后直接读取或修改这些字段。
+线程执行 `listen/begin_drain/stop` 时，不能在同步 owner 调用前后直接
+读取或修改这些字段。
 
-构造阶段允许“先 listen、后 start Reactor”。此时没有 owner thread，
-teardown 先通过 Reactor listener unregister 屏障撤销 epoll source，再在
-stopped 排他区间发布 Listener 的 draining 状态；正在 stop 的 Reactor
-不能越过该屏障直接释放 Listener。
+监听 source 与 Listener 状态发布使用同一个生命周期事务：
+
+```text
+listen:
+epoll ADD
+      ->
+发布 listen_fd / bound_port / registered / !draining
+      ->
+允许下一次 dispatch
+
+drain:
+epoll DEL
+      ->
+发布 !registered / draining
+      ->
+返回调用方
+```
+
+运行中，上述步骤在同一个 owner turn 完成；构造阶段允许“先 listen、后
+start Reactor”，此时整个事务在 `ctl_lock` 排他区间完成，`start()`
+不能插入 registration 与状态发布之间。正在 stop 的 Reactor 返回
+`TR_ERR_CLOSED`，不能越过 teardown barrier 直接发布或释放 Listener。
 
 销毁顺序要求：
 
