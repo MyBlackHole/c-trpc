@@ -258,6 +258,16 @@ Pipeline 所有者 Reactor
 
 跨线程调用必须通过所有者调用/命令；注册表不拥有 Pipeline 生命周期。
 
+Pipeline Listener 的运行期状态同样属于 Reactor 所有者，包括
+`draining`、监听源注册状态、当前连接数与当前 Pipeline 数。外部 lifecycle
+线程执行 `begin_drain/stop` 时，运行中的状态转换必须作为一个 owner turn
+完成，不能在同步 owner 调用返回后直接读取或修改这些字段。
+
+构造阶段允许“先 listen、后 start Reactor”。此时没有 owner thread，
+teardown 先通过 Reactor listener unregister 屏障撤销 epoll source，再在
+stopped 排他区间发布 Listener 的 draining 状态；正在 stop 的 Reactor
+不能越过该屏障直接释放 Listener。
+
 销毁顺序要求：
 
 ```text
