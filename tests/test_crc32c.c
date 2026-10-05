@@ -26,7 +26,7 @@ static struct backend backends[3] = {
 };
 static size_t backend_count = 2U;
 
-/* Independent bitwise oracle, preserving the pre-optimization raw-state API. */
+/* 独立的逐位参考实现，保持优化前的原始状态 API 语义。 */
 static uint32_t reference(uint32_t state, const void *data, size_t len)
 {
 	const unsigned char *p = data;
@@ -94,7 +94,7 @@ static void *first_use_thread(void *arg)
 	return NULL;
 }
 
-/* Must run before any nonempty use of the public dispatch entry point. */
+/* 必须在公开分发入口第一次处理非空数据前运行。 */
 static void test_concurrent_first_use(void)
 {
 	pthread_barrier_t barrier;
@@ -249,7 +249,7 @@ static void test_guard_pages(void)
 	assert(mprotect(data, page, PROT_READ) == 0);
 	for (len = 0; len <= 257U; ++len) {
 		check_backends(UINT32_MAX, data, len);
-		/* len=0 even permits a pointer to the inaccessible trailing page. */
+		/* len=0 时甚至允许指针指向不可访问的尾部页。 */
 		check_backends(UINT32_C(0x1056fa49), data + page - len, len);
 	}
 	check_backends(UINT32_MAX, data, page);
@@ -269,7 +269,7 @@ int main(int argc, char **argv)
 	}
 	if (argc == 2)
 		assert(!available);
-	alarm(120U); /* Hang protection, not a performance threshold. */
+	alarm(120U); /* 这里只用于防止挂死，不是性能阈值。 */
 	test_concurrent_first_use();
 #if TR_CRC32C_X86_SSE42
 	if (available) {
