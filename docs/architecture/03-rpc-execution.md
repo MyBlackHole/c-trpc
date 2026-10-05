@@ -344,3 +344,10 @@ drop Endpoint owner ref
 
 因此没有线程会阻塞等待 refcount；finalizer 不调用
 `tr_reactor_quiesce()`，也不拥有任何 protocol state mutation 权限。
+
+Retained streaming message 也是 Endpoint lifetime fence。Worker 在把
+`tr_rpc_message` 发布给 application callback 前取得独立 strong-ref；callback 返回
+`TR_RPC_MESSAGE_RELEASE` 时立即归还，返回
+`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 时该 ref 随 descriptor 一起转移，直到
+`tr_rpc_message_release()`。因此 peer slot 可以先摘除，但 retained message 不会
+持有悬空的 raw Channel pointer，Endpoint/Channel finalize 必须等待该 ref。
