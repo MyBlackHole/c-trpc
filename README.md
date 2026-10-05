@@ -477,113 +477,110 @@ tr_channel_replace_connection(channel, lane, new_connection);
 这样监听器、TLS/认证和服务策略都保持在 Channel 之外。
 
 
-### RPC model
+### RPC 模型
 
-- `Method Descriptor`
-  - service / method IDs
-  - request / response cardinality
-  - request / response codec IDs
-  - CONTROL / BULK lane
-  - per-message size limits
-- generation-based `Call` handles bound to Transport Streams
-- `ONE -> ONE` Unary compatibility API
-- generic Streaming Call API using the same Call implementation
-- executable V1 shapes:
-  - `ONE -> ONE`
-  - `ONE -> MANY` (server streaming)
-  - `MANY -> ONE` (client streaming)
-  - `MANY -> MANY` (bidirectional streaming)
-- V1 request `MANY` means **1..N**, not 0..N: the first REQUEST is also the Method-open envelope
-- `TR_RPC_NONE` is reserved for a future explicit method-open envelope and is not executable in V1
-- Client `close_send()` closes only the request half; Server terminates streaming Calls with final `STATUS` through `finish(status)`
-- `STATUS(OK)` requires exactly one RESPONSE for response cardinality `ONE`; `MANY` permits 0..N
-- Client `FINISHED` is the normal application terminal barrier: no MESSAGE/WRITABLE/normal REMOTE_CLOSED follows it
-- final streaming `STATUS` RPC envelope separate from ordinary response messages
-- call-level deadline with monotonic local timers
-- deadline propagation to the server as a relative reserved metadata value
-- cooperative local/remote cancellation using the existing `CANCEL` RPC envelope
-- bounded initial metadata side channel on the first message in each direction
-- client Call events: opened, writable, remote-close, finished, error
-- server streaming callbacks: open, message, half-close, writable, close
-- cardinality enforcement is centralized; there is no separate RPC stack per streaming shape
+- 方法描述符
+  - 服务/方法标识；
+  - 请求/响应基数；
+  - 请求/响应编解码器标识；
+  - CONTROL / BULK 通道；
+  - 每消息大小限制；
+- 基于代次的 `Call` 句柄，与传输层 Stream 绑定；
+- `ONE -> ONE` 一元调用兼容 API；
+- 使用同一 Call 实现的通用流式调用 API；
+- V1 可执行形态：
+  - `ONE -> ONE`；
+  - `ONE -> MANY`（服务端流式）；
+  - `MANY -> ONE`（客户端流式）；
+  - `MANY -> MANY`（双向流式）；
+- V1 请求方向的 `MANY` 表示 **1..N**，不是 0..N：第一条 `REQUEST` 同时也是 Method 打开信封；
+- `TR_RPC_NONE` 为未来显式 Method 打开信封保留，V1 不可执行；
+- 客户端 `close_send()` 只关闭请求方向；服务端通过 `finish(status)` 发送最终 `STATUS` 来终止流式 Call；
+- `STATUS(OK)` 对响应基数 `ONE` 要求恰好一条 `RESPONSE`；`MANY` 允许 0..N；
+- 客户端 `FINISHED` 是正常应用终止屏障：之后不会再出现 `MESSAGE/WRITABLE` 或正常 `REMOTE_CLOSED`；
+- 流式调用最终 `STATUS` 使用独立 RPC 信封，与普通响应消息分离；
+- Call 级截止时间使用本地单调时钟定时器；
+- 截止时间通过保留元数据中的相对值传播到服务端；
+- 使用现有 `CANCEL` RPC 信封实现协作式本地/远端取消；
+- 每个方向第一条消息支持有界初始元数据旁路；
+- 客户端 Call 事件：打开、可写、远端关闭、结束、错误；
+- 服务端流式回调：打开、消息、半关闭、可写、关闭；
+- 基数约束统一执行，不为每种流式形态建立独立 RPC 栈。
 
-### Deadline, cancellation, and metadata
+### 截止时间、取消与元数据
 
-Call creation now has optional extended APIs:
+Call 创建现在提供可选扩展 API：
 
 ```c
 tr_rpc_unary_call_ex(..., const struct tr_rpc_call_options *options, ...);
 tr_rpc_call_start_ex(..., const struct tr_rpc_call_options *options, ...);
 ```
 
-`timeout_ms` starts a local monotonic deadline. The client also places the
-remaining relative timeout in reserved initial metadata so the server arms its
-own monotonic deadline without depending on synchronized wall clocks.
+`timeout_ms` 启动本地单调时钟截止时间。客户端还会把剩余相对超时时间放入
+保留初始元数据，使服务端能够在不依赖墙上时钟同步的情况下建立自己的单调时钟截止时间。
 
-Deadline expiry and explicit cancellation share the same Call terminal path:
+截止时间到期和显式取消共用同一条 Call 终止路径：
 
 ```text
 ACTIVE
   |
   +-- tr_rpc_call_cancel() ------> CANCELLED
   |
-  +-- deadline expiry -----------> DEADLINE_EXCEEDED
+  +-- 截止时间到期 ------------> DEADLINE_EXCEEDED
                                       |
-                                      +-> local completion callback
-                                      +-> best-effort CANCEL envelope
-                                      +-> Stream half-close
+                                      +-> 本地完成回调
+                                      +-> 尽力发送 CANCEL 信封
+                                      +-> Stream 半关闭
 ```
 
-Cancellation is deliberately cooperative. It does **not** roll back application
-side effects. A running handler can query:
+取消有意采用协作式语义。它**不会**回滚应用副作用。正在运行的处理器可以查询：
 
 ```c
 tr_rpc_call_is_cancelled(call, &status);
 ```
 
-RPC deadlines use `CLOCK_MONOTONIC` and scan the bounded Call table.
-Each RPC Endpoint registers one timer in its owning Reactor; standalone and
-high-level Client/Server endpoints use the same owner-local deadline path.
-There is no per-Endpoint deadline thread; scheduling is entirely Reactor-local.
+RPC 截止时间使用 `CLOCK_MONOTONIC`，并扫描有界 Call 表。
+每个 RPC Endpoint 在所属 Reactor 中注册一个定时器；独立 Endpoint 和高层
+客户端/服务端 Endpoint 都使用同一条所有者本地截止时间路径。
+不会为每个 Endpoint 创建截止时间线程，调度全部位于 Reactor 本地。
 
-RPC metadata has two bounded scopes:
+RPC 元数据有两个有界范围：
 
-**Initial metadata**
+**初始元数据**
 
-- maximum encoded block: 512 bytes
-- user keys: lowercase ASCII `[a-z0-9_.-]`, maximum 63 bytes
-- values: binary bytes
-- duplicate keys are rejected in V1
-- user keys starting with `:` are reserved for protocol use
-- Client initial metadata is emitted with the first REQUEST
-- Server initial metadata is emitted with the first RESPONSE
+- 最大编码块：512 字节；
+- 用户键：小写 ASCII `[a-z0-9_.-]`，最大 63 字节；
+- 值：二进制字节；
+- V1 拒绝重复键；
+- 以 `:` 开头的用户键保留给协议使用；
+- 客户端初始元数据随第一条 `REQUEST` 发送；
+- 服务端初始元数据随第一条 `RESPONSE` 发送。
 
-**Trailing metadata**
+**尾部元数据**
 
-- maximum encoded block: 512 bytes
-- V1 supports Server Streaming -> Client trailers
-- trailers are carried only by final STATUS
-- Client may read trailers from the FINISHED callback
-- Unary V1 has no independent STATUS envelope, so Unary trailers are not yet supported
-- STATUS metadata never overwrites first-RESPONSE initial metadata
+- 最大编码块：512 字节；
+- V1 支持服务端流式调用 -> 客户端尾部元数据；
+- 尾部元数据只由最终 `STATUS` 携带；
+- 客户端可在 `FINISHED` 回调中读取尾部元数据；
+- 一元调用 V1 没有独立 `STATUS` 信封，因此暂不支持一元尾部元数据；
+- `STATUS` 元数据不会覆盖第一条 `RESPONSE` 的初始元数据。
 
-Each Call keeps bounded local/peer initial and trailing storage; there is no dynamic metadata queue. Metadata remains separate from the application RAW payload.
+每个 Call 都保持有界的本地/对端初始和尾部存储；不存在动态元数据队列。
+元数据与应用 RAW 载荷保持分离。
 
-The RPC wire header stays 32 bytes. When metadata is present the body is:
+RPC 线协议头仍为 32 字节。有元数据时，消息体为：
 
 ```text
-RPC header (32 B)
-metadata_len (LE16)
-metadata TLVs
-application payload
+RPC 头部（32 字节）
+metadata_len（LE16）
+metadata TLV
+应用载荷
 ```
 
-`payload_len` continues to describe only the application payload. The sender
-bulk fast path therefore remains scatter/gather friendly; a first bulk message
-can be sent as a small RPC header/metadata slice plus the original application
-buffer.
+`payload_len` 仍只描述应用载荷。因此发送端批量快速路径仍适合分散/聚集发送；
+第一条批量消息可以由一个小型 RPC 头部/元数据分片加原始应用缓冲区组成。
 
-Public Context/metadata helpers:
+公开上下文/元数据辅助 API：
 
 ```c
 tr_rpc_call_get_context(...);
@@ -595,13 +592,12 @@ tr_rpc_call_set_trailing_metadata(...);
 tr_rpc_call_get_peer_trailing_metadata(...);
 ```
 
-`tr_rpc_context` is a read-only owner-consistent snapshot of Method identity,
-cardinality, relative deadline state, and cancellation state. It intentionally
-does not expose Endpoint/Stream/Reactor/slot identity.
+`tr_rpc_context` 是所有者一致的只读快照，包含 Method 标识、基数、
+相对截止时间状态与取消状态。它有意不暴露 Endpoint/Stream/Reactor/槽位标识。
 
-### RPC Interceptor V1
+### RPC V1 拦截器
 
-Client/Server can install one fixed Call-level interceptor:
+客户端/服务端可以安装一个固定 Call 级拦截器：
 
 ```c
 struct tr_rpc_interceptor {
@@ -610,7 +606,7 @@ struct tr_rpc_interceptor {
 };
 ```
 
-Phases:
+阶段：
 
 ```text
 CLIENT_PRE_CALL
@@ -619,83 +615,79 @@ SERVER_POST_HANDLER
 CLIENT_POST_CALL
 ```
 
-The hook runs synchronously on the owning Reactor and must be short/non-blocking.
-It may use Call Context/metadata APIs, but same-Call protocol mutation
-(`send/close_send/finish/cancel`) is rejected with `TR_ERR_STATE` while the
-hook is active.
+钩子同步运行在所属 Reactor 上，必须短小且非阻塞。
+它可以使用 Call 上下文/元数据 API，但同一 Call 的协议修改
+（`send/close_send/finish/cancel`）在钩子活动期间会被拒绝并返回
+`TR_ERR_STATE`。
 
-`SERVER_PRE_HANDLER` is the only V1 phase whose return value controls the Call:
-`OK` continues, while a valid non-OK RPC status rejects before the application
-handler runs. Other phases are observational/metadata hooks and should return
-`OK`.
+`SERVER_PRE_HANDLER` 是 V1 唯一允许返回值控制 Call 的阶段：
+返回 `OK` 继续；返回合法非 `OK` RPC 状态时，在应用处理器运行前拒绝。
+其他阶段用于观测/元数据处理，建议返回 `OK`。
 
-Typical usage:
+典型用途：
 
 ```text
 CLIENT_PRE_CALL
-  -> add trace/auth initial metadata
+  -> 添加链路追踪/认证初始元数据
 
 SERVER_PRE_HANDLER
-  -> read auth/tenant/trace metadata
-  -> optional lightweight RPC rejection
+  -> 读取认证/租户/链路追踪元数据
+  -> 可选轻量 RPC 拒绝
 
 SERVER_POST_HANDLER
-  -> add trailers / finish metrics
+  -> 添加尾部元数据 / 完成指标
 
 CLIENT_POST_CALL
-  -> read trailers / finish trace
+  -> 读取尾部元数据 / 结束链路追踪
 ```
 
-V1 deliberately has no dynamic interceptor chain and no blocking/async interceptor
-continuation.
+V1 有意不提供动态拦截器链，也不提供阻塞/异步拦截器续处理。
 
-Server handlers can read request metadata and set response metadata before the
-first response is encoded.
+服务端处理器可以读取请求元数据，并在第一条响应编码前设置响应元数据。
 
-### RPC executor boundary
+### RPC 执行器边界
 
-- application RPC callbacks never execute on the network Reactor thread
-- bounded fixed-capacity executor task-node pool per RPC endpoint
-- optional Server continuation reserve partitions admission logically inside that same node pool: new Unary / first Streaming tasks stop at `capacity - reserve`, while already-accepted Streaming message/half-close/writable/close tasks may use the full capacity; it is not a second queue and does not change worker scheduling
-- low-level standalone RPC endpoints retain their own configurable worker pool
-- the high-level Server facade creates one bounded shard-local worker pool shared by peer RPC endpoints; exact worker/node counts are internal tuning, not stable facade API
-- one FIFO task queue per Call plus an endpoint-local ready-Call queue
-- the shared Server executor schedules ready endpoints while preserving endpoint-local Call ordering
-- at most one executor task for a Call runs at a time, so callbacks for one Call remain strictly serialized and ordered
-- different Calls, including Calls from different peers, may run concurrently on shared workers
-- one task is taken per ready-Call scheduling turn, providing fairness without letting thread count scale with accepted peers
-- if a Server Unary request reaches a full executor queue, its handler is not invoked; the Call completes with `RESOURCE_EXHAUSTED` while the Channel remains usable
-- `UNAVAILABLE` remains reserved for connection/transport loss rather than local executor admission failure
-- incoming RPC payload ownership is held until executor processing completes
-- this naturally delays Stream receive-credit return while application processing is outstanding
-- each queued executor task holds a C11 strong reference on its RPC Endpoint
-- Call `task_refs` remain only for Call-slot reuse; Endpoint lifetime uses `tr_refcount`
+- 应用 RPC 回调绝不在网络 Reactor 线程上执行；
+- 每个 RPC Endpoint 使用有界固定容量执行器任务节点池；
+- 可选服务端续处理预留在同一节点池内进行逻辑准入分区：新的 Unary/第一条 Streaming 任务在 `capacity - reserve` 处停止准入，已经接受的 Streaming 消息/半关闭/可写/关闭任务可以使用完整容量；它不是第二个队列，也不改变工作线程调度；
+- 低层独立 RPC Endpoint 保留自己的可配置工作线程池；
+- 高层服务端门面创建一个有界分片本地工作线程池，由同分片对端 RPC Endpoint 共享；精确工作线程/节点数量属于内部调优，不是稳定门面 API；
+- 每个 Call 一条 FIFO 任务队列，再加一条 Endpoint 本地就绪 Call 队列；
+- 共享服务端执行器调度就绪 Endpoint，同时保持 Endpoint 内部 Call 顺序；
+- 同一个 Call 同时最多运行一个执行器任务，因此该 Call 的回调严格串行且有序；
+- 不同 Call（包括来自不同对端的 Call）可以在共享工作线程上并行执行；
+- 每次就绪 Call 调度轮次只取一个任务，在不让线程数随对端数增长的同时提供公平性；
+- 服务端一元请求到达已满执行器队列时，不调用其处理器；该 Call 以 `RESOURCE_EXHAUSTED` 结束，而 Channel 保持可用；
+- `UNAVAILABLE` 保留给连接/传输丢失，不用于本地执行器准入失败；
+- 入站 RPC 载荷所有权保持到执行器处理结束；
+- 因此应用处理未完成时自然延迟 Stream 接收额度归还；
+- 每个已排队执行器任务都持有 RPC Endpoint 的一个 C11 强引用；
+- Call 的 `task_refs` 只用于 Call 槽位复用；Endpoint 生命周期使用 `tr_refcount`。
 
-The executor implementation therefore separates network progress from application latency without sacrificing in-Call message ordering. Server worker count is now O(1) with respect to peer count; endpoint task queues remain independently bounded.
+因此，执行器实现把网络推进与应用延迟分离，同时不牺牲同一 Call 内消息顺序。
+服务端工作线程数量相对于对端数量保持 O(1)，各 Endpoint 任务队列仍独立有界。
 
-### RAW codec and bulk fast path
+### RAW 编解码与批量快速路径
 
-The stable application API uses `tr_rpc_call_send()` with a borrowed
-`tr_rpc_bytes` view.
+稳定应用 API 使用 `tr_rpc_call_send()` 和借用的
+`tr_rpc_bytes` 视图。
 
-The engine still retains an internal copy-minimal Buffer fast path:
+引擎内部仍保留尽量少复制的 Buffer 快速路径：
 
 ```text
-32-byte RPC envelope buffer  ----\
-                                 +--> Transport scatter/gather
-original application buffer  ----/          |
-                                           v
-                                       sendmsg(iovec)
+32 字节 RPC 信封缓冲区 ----\
+                            +--> 传输层分散/聚集
+原始应用缓冲区 ----------/          |
+                                      v
+                                  sendmsg(iovec)
 ```
 
-That path remains available to internal benchmarks/tests while the public
-zero-copy abstraction is redesigned around an opaque ownership API instead of
-publishing allocator/Channel/Reactor structures. No extra copy was added by the
-API-boundary cleanup itself.
+在围绕不透明所有权 API 重新设计公开零复制抽象期间，该路径仍供内部基准测试/测试使用，
+不会发布分配器/Channel/Reactor 结构。API 边界清理本身没有增加额外复制。
 
-### RPC retained-message ownership
+### RPC 保留消息所有权
 
-Streaming callbacks receive:
+流式回调接收：
 
 ```c
 struct tr_rpc_message {
@@ -704,13 +696,15 @@ struct tr_rpc_message {
 };
 ```
 
-Only `bytes` is application-visible. `_private` is an opaque fixed-size
-release capability; callers retaining a message must copy the descriptor
-unchanged and never inspect those words.
+应用只可见 `bytes`。`_private` 是固定大小的不透明释放能力；
+调用方保留消息时必须原样复制描述符，绝不能检查这些字段。
 
-Returning `TR_RPC_MESSAGE_RELEASE` returns the RX buffer after the callback.
+返回 `TR_RPC_MESSAGE_RELEASE` 会在回调结束后归还 RX 缓冲区。
 
-Returning `TR_RPC_MESSAGE_TAKE_OWNERSHIP` transfers the buffer to the callback owner; it must later call `tr_rpc_message_release()`. This also delays receive-window credit until the buffer is actually consumed.
+返回 `TR_RPC_MESSAGE_TAKE_OWNERSHIP` 会把缓冲区转移给回调所有者；
+之后必须调用 `tr_rpc_message_release()`。在缓冲区真正消费前，
+接收窗口额度也会继续被占用。
+
 
 ## Flow-control model
 
