@@ -311,6 +311,12 @@ callback 尚未退出时修改同一组状态。Client Group destroy 不允许�
 close callback 清空，都必须先执行一次 owner barrier，确认所有可能引用
 Group 的 callback 已退出，再释放 Group/Connector/Buffer storage。
 
+Client Group DATA send buffer 的 release callback 会保存裸 `group *`，
+因此 destroy 还必须满足 `send_bytes_inflight == 0`。Reactor connection
+close 会先同步释放 TX queue，再分发 connection event；Group teardown
+关闭全部 DATA connection 后检查该不变量，未归零时 fail-closed，禁止释放
+仍可能被 buffer release callback 引用的 Group。
+
 销毁顺序要求：
 
 ```text
