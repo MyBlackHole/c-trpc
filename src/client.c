@@ -1,5 +1,6 @@
 #include "tr/client.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
@@ -10,6 +11,7 @@
 #include "execution/buffer.h"
 #include "transport/channel/channel.h"
 #include "execution/reactor.h"
+#include "execution/reactor_internal.h"
 #include "rpc/rpc_wire.h"
 #include "io/socket.h"
 #include "tr/status.h"
@@ -687,6 +689,15 @@ void tr_client_destroy(struct tr_client *client)
 		return;
 
 	/*
+	 * destroy is an external terminal operation. Calling it from a Reactor
+	 * callback or RPC worker would make synchronous teardown wait for itself.
+	 * The public contract forbids that context; defensively leave ownership
+	 * unchanged instead of partially destroying the Client.
+	 */
+	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
+		return;
+
+	/*
 	 * Client teardown 的 owner/quiescence barrier 必须发生在 Runtime stop 前。
 	 *
 	 * RPC destroy 会先 owner-serialize Channel handler detach，再 quiesce Reactor
@@ -715,7 +726,18 @@ void tr_client_destroy(struct tr_client *client)
 	}
 
 	if (client->runtime) {
-		(void)tr_runtime_stop(client->runtime);
+		int ret = tr_runtime_stop(client->runtime);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		/*
+		 * A failed lifecycle barrier means ownership has not converged.
+		 * Keep the remaining Client/Runtime storage alive rather than freeing
+		 * memory that an execution thread may still reference.
+		 */
+		if (ret != TR_OK)
+			return;
 		tr_runtime_destroy(client->runtime);
 		client->runtime = NULL;
 		client->shard = NULL;

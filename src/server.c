@@ -16,6 +16,7 @@
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
 #include "execution/reactor.h"
+#include "execution/reactor_internal.h"
 #include "rpc/rpc_wire.h"
 #include "io/socket.h"
 #include "tr/status.h"
@@ -1839,6 +1840,13 @@ void tr_server_destroy(struct tr_server *server)
 	if (!server)
 		return;
 
+	/*
+	 * Server teardown joins/quiesces Reactor and executor workers. Never begin
+	 * it from the execution context that must make that teardown progress.
+	 */
+	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
+		return;
+
 	if (server->shards)
 		tr_server_stop_accepting(server);
 	if (server->connection_group_listener) {
@@ -1864,8 +1872,21 @@ void tr_server_destroy(struct tr_server *server)
 			tr_server_disable_peer_events(
 				&server->shards[shard_index]);
 
-	if (server->runtime && server->started)
-		(void)tr_runtime_stop(server->runtime);
+	if (server->runtime && server->started) {
+		int ret = tr_runtime_stop(server->runtime);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		/*
+		 * Do not destroy peer/Runtime storage unless every shard owner has
+		 * crossed the stop barrier. Continuing after a failed join would turn
+		 * a lifecycle error into UAF.
+		 */
+		if (ret != TR_OK)
+			return;
+		server->started = 0;
+	}
 
 	if (server->shards) {
 		for (shard_index = 0; shard_index < server->shard_count;

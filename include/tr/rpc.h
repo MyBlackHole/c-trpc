@@ -140,8 +140,14 @@ struct tr_rpc_semantic_stats {
  * Opaque fixed-size Call capability.
  *
  * Applications may copy/pass the whole value by value, but must not inspect or
- * modify _private.  A zero-initialized value is invalid.  The representation
+ * modify _private. A zero-initialized value is invalid. The representation
  * deliberately does not expose Endpoint/slot/generation engine identity.
+ *
+ * This is a borrowed capability, not an ownership reference: copying it does
+ * not extend Client/Server/Endpoint lifetime. It must not be used concurrently
+ * with owner destroy or after the owning facade has been destroyed. After the
+ * Call's terminal callback/handler closure has completed, later continuation
+ * use must be treated as invalid/stale.
  */
 #define TR_RPC_CALL_PRIVATE_WORDS 2U
 struct tr_rpc_call_handle {

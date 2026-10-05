@@ -39,6 +39,12 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
 /*
+ * True only while the current thread is executing inside a Reactor owner loop.
+ * Lifecycle stop/destroy must never wait for or free their own owner thread.
+ */
+int tr_reactor_in_owner_context(void);
+
+/*
  * Optional raw connection preface gate. The Reactor reads exactly byte_count
  * bytes before allowing normal TRP1 parser input, so bytes following the
  * preface remain in the socket receive queue and are never over-read.

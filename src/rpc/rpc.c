@@ -21,6 +21,13 @@
 _Static_assert(sizeof(uintptr_t) <= sizeof(uint64_t),
 	       "RPC Call capability requires pointers no wider than 64 bits");
 
+static _Thread_local unsigned tr_rpc_worker_depth;
+
+int tr_rpc_in_worker_context(void)
+{
+	return tr_rpc_worker_depth != 0U;
+}
+
 static inline struct tr_rpc_endpoint *
 tr_rpc_call_handle_endpoint(struct tr_rpc_call_handle handle)
 {
@@ -3000,6 +3007,7 @@ static void *tr_rpc_executor_main(void *arg)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 
+	tr_rpc_worker_depth++;
 	for (;;) {
 		struct tr_rpc_task task;
 		int ret = tr_rpc_executor_take(endpoint, &task, 1);
@@ -3027,6 +3035,7 @@ static void *tr_rpc_executor_main(void *arg)
 		}
 	}
 
+	tr_rpc_worker_depth--;
 	return NULL;
 }
 
@@ -3059,6 +3068,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 	struct tr_rpc_executor_group *group =
 		(struct tr_rpc_executor_group *)arg;
 
+	tr_rpc_worker_depth++;
 	for (;;) {
 		struct tr_rpc_endpoint *endpoint =
 			tr_rpc_executor_group_take(group);
@@ -3089,6 +3099,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 		}
 	}
 
+	tr_rpc_worker_depth--;
 	return NULL;
 }
 
@@ -3308,6 +3319,13 @@ void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 	uint32_t i;
 
 	if (!group)
+		return;
+
+	/*
+	 * A group worker cannot synchronously join the group it belongs to.
+	 * Facade destroy rejects this context earlier; keep the engine defensive.
+	 */
+	if (tr_rpc_in_worker_context())
 		return;
 
 	pthread_mutex_lock(&group->lock);
@@ -4644,6 +4662,13 @@ void tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
 {
 	if (!endpoint)
+		return;
+
+	/*
+	 * Synchronous destroy may wait for owner callbacks and executor refs, so
+	 * it is invalid from either execution context it would be waiting on.
+	 */
+	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return;
 
 	/*

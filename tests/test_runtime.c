@@ -1,4 +1,5 @@
 #include "../src/runtime/runtime_internal.h"
+#include "../src/execution/reactor_internal.h"
 
 #include "tr/status.h"
 #include "../src/io/socket.h"
@@ -506,6 +507,81 @@ static void test_runtime_shard_memory_budget(void)
 	assert(runtime == NULL);
 }
 
+struct runtime_self_stop_probe {
+	struct tr_runtime *runtime;
+	struct tr_reactor *reactor;
+	int owner_context_seen;
+};
+
+static int runtime_reactor_self_stop_on_owner(void *arg)
+{
+	struct runtime_self_stop_probe *probe =
+		(struct runtime_self_stop_probe *)arg;
+
+	probe->owner_context_seen = tr_reactor_in_owner_context();
+	return tr_reactor_stop(probe->reactor);
+}
+
+static int runtime_self_stop_on_owner(void *arg)
+{
+	struct runtime_self_stop_probe *probe =
+		(struct runtime_self_stop_probe *)arg;
+
+	probe->owner_context_seen = tr_reactor_in_owner_context();
+	return tr_runtime_stop(probe->runtime);
+}
+
+static int runtime_owner_ping(void *arg)
+{
+	int *seen = (int *)arg;
+
+	*seen = tr_reactor_in_owner_context();
+	return TR_OK;
+}
+
+static void test_runtime_self_stop_context_guards(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	struct runtime_self_stop_probe probe;
+	struct tr_reactor *reactor;
+	int ping_seen = 0;
+
+	runtime_test_config_init(&config, &shard_config, 1U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(tr_runtime_start(runtime) == TR_OK);
+	assert(!tr_reactor_in_owner_context());
+
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	reactor = tr_runtime_shard_reactor(shard);
+	assert(reactor != NULL);
+
+	memset(&probe, 0, sizeof(probe));
+	probe.runtime = runtime;
+	probe.reactor = reactor;
+	assert(tr_reactor_call(
+		       reactor, runtime_reactor_self_stop_on_owner,
+		       &probe) == TR_ERR_STATE);
+	assert(probe.owner_context_seen == 1);
+
+	/* Self-stop rejection must happen before admission is closed. */
+	assert(tr_reactor_call(reactor, runtime_owner_ping, &ping_seen) == TR_OK);
+	assert(ping_seen == 1);
+
+	probe.owner_context_seen = 0;
+	assert(tr_reactor_call(
+		       reactor, runtime_self_stop_on_owner,
+		       &probe) == TR_ERR_STATE);
+	assert(probe.owner_context_seen == 1);
+
+	/* External lifecycle owner can still stop and destroy normally. */
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	tr_runtime_destroy(runtime);
+}
+
 static void test_runtime_lifecycle(void)
 {
 	struct tr_runtime_config config;
@@ -538,6 +614,7 @@ int main(void)
 	RUN_TEST(test_runtime_shard_peer_event_source);
 	RUN_TEST(test_runtime_shard_peer_event_dispatch);
 	RUN_TEST(test_runtime_shard_memory_budget);
+	RUN_TEST(test_runtime_self_stop_context_guards);
 	RUN_TEST(test_runtime_lifecycle);
 	return 0;
 }
