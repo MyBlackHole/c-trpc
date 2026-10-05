@@ -85,10 +85,10 @@ struct tr_reactor_stats {
 	uint64_t shutdown_completions;
 
 	/*
-	 * Bounded queue pressure snapshots。
-	 * command full_events：producer 首次遇到满 ring 的压力事件；异步 command
-	 * 可能立即返回 TR_AGAIN，同步 owner request/STOP 则进入 capacity wait。
-	 * completion full_events：producer 遇到满 ring 并进入 capacity wait 的事件。
+	 * 有界队列压力快照。
+	 * command full_events：生产者首次遇到环形队列已满的压力事件；异步命令
+	 * 可能立即返回 TR_AGAIN，同步所有者请求/STOP 则进入容量等待。
+	 * completion full_events：生产者遇到环形队列已满并进入容量等待的事件。
 	 */
 	struct tr_queue_observation command_queue;
 	struct tr_queue_observation completion_queue;
@@ -155,9 +155,9 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 
 /*
  * 所有权：
- * - TR_OK：payload ownership 转移给 Reactor；
- * - 其他返回值：payload 仍由调用方拥有。
- * payload 可以为 NULL。
+ * - TR_OK：载荷所有权转移给 Reactor；
+ * - 其他返回值：载荷仍由调用方拥有。
+ * 载荷可以为 NULL。
  */
 int tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 		    uint32_t flags, uint32_t stream_id, uint64_t message_id,
