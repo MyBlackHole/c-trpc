@@ -2433,9 +2433,10 @@ struct tr_reactor_listener_publish_request {
 	void *publish_arg;
 };
 
-static int tr_reactor_listener_register_publish_now(
-	struct tr_reactor_listener_publish_request *request)
+static int tr_reactor_listener_register_publish_now(void *arg)
 {
+	struct tr_reactor_listener_publish_request *request =
+		(struct tr_reactor_listener_publish_request *)arg;
 	int ret;
 
 	ret = tr_reactor_listener_register_now(
@@ -2532,8 +2533,7 @@ int tr_reactor_listener_register_publish(
 	 * owner turn / stopped+ctl_lock / stopping=>CLOSED。
 	 */
 	return tr_reactor_call_or_stopped(
-		reactor, (int (*)(void *))tr_reactor_listener_register_publish_now,
-		&request);
+		reactor, tr_reactor_listener_register_publish_now, &request);
 }
 
 struct tr_reactor_listener_unregister_call_request {
@@ -2544,9 +2544,10 @@ struct tr_reactor_listener_unregister_call_request {
 	void *fn_arg;
 };
 
-static int tr_reactor_listener_unregister_call_now(
-	struct tr_reactor_listener_unregister_call_request *request)
+static int tr_reactor_listener_unregister_call_now(void *arg)
 {
+	struct tr_reactor_listener_unregister_call_request *request =
+		(struct tr_reactor_listener_unregister_call_request *)arg;
 	struct tr_reactor *reactor = request->reactor;
 	int ret;
 
@@ -2586,8 +2587,7 @@ int tr_reactor_listener_unregister_call(
 	request.fn_arg = fn_arg;
 
 	return tr_reactor_call_or_stopped(
-		reactor, (int (*)(void *))tr_reactor_listener_unregister_call_now,
-		&request);
+		reactor, tr_reactor_listener_unregister_call_now, &request);
 }
 
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd)
