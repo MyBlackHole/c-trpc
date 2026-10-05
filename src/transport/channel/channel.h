@@ -140,7 +140,7 @@ typedef void (*tr_channel_event_cb)(struct tr_channel *channel,
  *
  * Channel 会为 connection 安装 Reactor handler。销毁前必须先停止外部使用，
  * 并确保不存在并发 callback；tr_channel_destroy() 内部会清理 handler 并等待
- * callback quiescence。
+ * 回调静止。
  */
 int tr_channel_create(const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
