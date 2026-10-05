@@ -15,7 +15,7 @@ struct tr_facade_binding {
 	uint8_t identity[TR_FACADE_BIND_ID_SIZE];
 };
 
-/* Linux-only facade session identity. No weak PRNG fallback is permitted. */
+/* 仅用于 Linux 门面的会话标识；不允许回退到弱伪随机数生成器。 */
 int tr_facade_binding_generate_id(uint8_t out[TR_FACADE_BIND_ID_SIZE]);
 
 int tr_facade_binding_encode(uint8_t out[TR_FACADE_BIND_WIRE_SIZE],
