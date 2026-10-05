@@ -292,7 +292,7 @@ size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 		queue->wake_pending = 0;
 
 	/*
-	 * 一个 Reactor batch 可能释放多个 command slot。broadcast 让所有同步
+	 * 一个 Reactor 批次可能释放多个命令槽位。broadcast 让所有同步
 	 * waiter/STOP waiter 重新竞争实际空位，避免已有容量时仍有 producer 睡眠。
 	 */
 	if (count != 0U && queue->waiters != 0U)
