@@ -1,138 +1,137 @@
-# ADR-007：分层/API 边界不能通过运行时额外 hop 实现
+# ADR-007：分层/API 边界不能通过额外运行时跳转实现
 
-- Status: Accepted
-- Date: 2026-10-03
+- 状态：已接受
+- 日期：2026-10-03
 
-## Context
+## 背景
 
 c-trpc 同时追求：
 
-- 清晰的 Runtime / Transport / Connection Group / RPC / Facade 分层；
-- 明确 ownership；
-- 高性能、低拷贝、低锁、低调度开销。
+- 清晰的运行时/传输/连接组/RPC/门面分层；
+- 明确所有权；
+- 高性能、低复制、低锁、低调度开销。
 
 常见误区是把“模块化”实现成：
 
 ```text
-Layer A
-  -> queue
-  -> thread B
-  -> copy
-  -> Layer B
+A 层
+  -> 队列
+  -> B 线程
+  -> 复制
+  -> B 层
 ```
 
-如果每一层都引入 thread hop、serialization、heap allocation 或 buffer copy，
+如果每一层都引入线程跳转、序列化、堆分配或缓冲区复制，
 确实会伤害性能。
 
-另一种反方向误区是为了避免上述开销，把 lower-layer mutable struct、slot、
-generation、queue/pool 直接暴露给上层。这样虽然短期少了一层 API，但会破坏
-ownership、lifetime 和 compatibility boundary。
+另一种反方向误区是为了避免上述开销，把下层可变结构、槽位、
+代次、队列/资源池直接暴露给上层。这样虽然短期少了一层 API，
+但会破坏所有权、生命周期和兼容性边界。
 
-## Decision
+## 决策
 
 c-trpc 采用：
 
-> source/ownership/dependency layering，而不是 mandatory runtime-hop layering。
+> 源码边界、所有权边界和依赖边界分层，而不是强制增加运行时跳转的分层。
 
 分层只约束：
 
 - 谁拥有状态；
 - 谁允许修改；
 - 谁调用谁；
-- 哪些 API 属于 compatibility contract；
-- lifetime/backpressure 在哪里闭环。
+- 哪些 API 属于兼容性契约；
+- 生命周期/背压在哪里闭环。
 
 分层**不要求**：
 
 - 每层一个线程；
-- 每层一个 queue；
+- 每层一个队列；
 - 每层一次复制；
 - 每层一次序列化；
-- 每层一次 heap allocation。
+- 每层一次堆分配。
 
-同一 Reactor owner domain 内，upper internal module 可以直接调用 lower internal
-function。
+在同一个 Reactor 所有者域内，上层内部模块可以直接调用下层内部函数。
 
 例如允许：
 
 ```text
-RPC public API
-  -> RPC internal
-  -> Transport internal
-  -> Reactor owner fast path
+RPC 公开 API
+  -> RPC 内部实现
+  -> 传输层内部实现
+  -> Reactor 所有者快速路径
   -> sendmsg()
 ```
 
 而不是强制：
 
 ```text
-RPC thread
-  -> queue
-Transport thread
-  -> queue
-Runtime thread
+RPC 线程
+  -> 队列
+传输线程
+  -> 队列
+运行时线程
 ```
 
-## Performance Rules
+## 性能规则
 
-允许在模块内部使用：
+模块内部允许使用：
 
-- direct owner fast path；
-- static inline；
-- batching；
-- scatter/gather；
-- ownership transfer；
-- zero-copy/copy-minimal；
-- bounded/preallocated state；
-- shard-local resource；
-- specialized internal API。
+- 直接所有者快速路径；
+- `static inline`；
+- 批处理；
+- 分散/聚集；
+- 所有权转移；
+- 零复制/尽量少复制；
+- 有界/预分配状态；
+- 分片本地资源；
+- 专用内部 API。
 
 不允许默认以性能为理由：
 
-- public API 暴露 internal owner pointer；
-- public handle 固化 slot/generation；
-- 跨 shard 共享 mutable hot state；
-- 绕过 module ownership；
-- 把 internal queue/pool struct 当 public tuning API。
+- 公开 API 暴露内部所有者指针；
+- 公开句柄固化槽位/代次；
+- 跨分片共享可变热状态；
+- 绕过模块所有权；
+- 把内部队列/资源池结构当作公开调优 API。
 
-## Exception Gate
+## 例外门槛
 
-如果 profile 证明 API boundary 本身是瓶颈，优先：
+如果性能分析证明 API 边界本身是瓶颈，优先：
 
-1. 增加 internal fast path；
-2. inline/copy elision；
-3. batching；
-4. 调整 ownership transfer。
+1. 增加内部快速路径；
+2. 内联/消除复制；
+3. 批处理；
+4. 调整所有权转移。
 
-只有这些方法不足，且 benchmark 证明 public boundary 必须变化时，才允许新增 ADR。
+只有这些方法不足，并且基准测试证明公开边界必须变化时，才允许新增 ADR。
 
-## Consequences
+## 影响
 
 优点：
 
 - 模块职责可维护；
-- public ABI 不被实现细节锁死；
-- hot path 仍可 direct-call；
-- single-owner 与 locality 更容易优化；
-- 性能优化不会自然演变成 shared-state architecture。
+- 公开 ABI 不被实现细节锁死；
+- 热路径仍可直接调用；
+- 单所有者与局部性更容易优化；
+- 性能优化不会自然演变成共享状态架构。
 
 代价：
 
-- 需要维护 stable/advanced/internal API 分类；
-- 某些测试需要 internal headers；
-- public facade 与 internal engine 可能需要 adapter，但 adapter 不应自动增加 copy/hop。
+- 需要维护稳定/高级/内部 API 分类；
+- 某些测试需要内部头文件；
+- 公开门面与内部引擎可能需要适配器，但适配器不应自动增加复制/跳转。
 
-## Rejected Alternatives
+## 被拒绝的替代方案
 
-### 每层一个独立线程/queue
+### 每层一个独立线程/队列
 
-拒绝。它把模块边界变成调度边界，产生不必要 latency 和 cache transfer。
+拒绝。它把模块边界变成调度边界，产生不必要延迟和缓存迁移。
 
-### 所有实现结构都公开，调用方自行组合
+### 所有实现结构都公开，由调用方自行组合
 
-拒绝。它把 library internals 变成 compatibility contract，并把 ownership 正确性转嫁给应用。
+拒绝。它把库内部实现变成兼容性契约，并把所有权正确性转嫁给应用。
 
 ### 为了零开销完全取消模块 API
 
-拒绝。C function boundary/opaque handle 本身不是主要成本；真正需要优化的是 copy、
-allocation、lock、cache locality 和 scheduling。
+拒绝。C 函数边界/不透明句柄本身不是主要成本；真正需要优化的是复制、
+分配、锁、缓存局部性和调度。
