@@ -90,6 +90,23 @@ typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
  */
 int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 				 tr_reactor_listener_cb callback, void *arg);
+
+/*
+ * 将 listener source 注册与 caller owner-state 发布合并成一个生命周期事务。
+ *
+ * 运行中：两步在同一个 Reactor owner turn 完成；
+ * 完全 stopped：两步在 ctl_lock 下完成，start() 不能插入其间；
+ * 正在 stop：返回 TR_ERR_CLOSED，不执行任何发布。
+ *
+ * publish 在 source 已加入 epoll、但尚不可能 dispatch 的串行化区间执行。
+ * publish 返回失败时 Reactor 会先撤销 source registration 再返回错误。
+ * publish 必须短小、非阻塞；stopped direct path 中不得重入 Reactor lifecycle API。
+ */
+int tr_reactor_listener_register_publish(
+	struct tr_reactor *reactor, int fd,
+	tr_reactor_listener_cb callback, void *arg,
+	int (*publish)(void *arg), void *publish_arg);
+
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd);
 
 int tr_reactor_peer_event_register(struct tr_reactor *reactor, int fd,
