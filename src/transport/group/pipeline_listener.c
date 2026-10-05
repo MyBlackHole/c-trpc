@@ -579,36 +579,68 @@ fail:
 	return ret;
 }
 
+struct tr_pipeline_listener_listen_request {
+	struct tr_pipeline_listener *listener;
+	int fd;
+	uint16_t bound_port;
+};
+
+static int tr_pipeline_listener_publish_listen(void *arg)
+{
+	struct tr_pipeline_listener_listen_request *request =
+		(struct tr_pipeline_listener_listen_request *)arg;
+	struct tr_pipeline_listener *listener = request->listener;
+
+	/*
+	 * 这个检查与 source registration 处于同一个 Reactor ownership
+	 * transaction。不能在外部线程先读 listener_registered/listen_fd，
+	 * 否则会重新引入 lifecycle data race。
+	 */
+	if (listener->listen_fd >= 0 || listener->listener_registered)
+		return TR_ERR_STATE;
+
+	listener->listen_fd = request->fd;
+	listener->bound_port = request->bound_port;
+	listener->listener_registered = 1;
+	listener->draining = 0;
+	return TR_OK;
+}
+
 int tr_pipeline_listener_listen_ipv4(
 	struct tr_pipeline_listener *listener, const char *address,
 	uint16_t port, int backlog, uint16_t *out_bound_port)
 {
+	struct tr_pipeline_listener_listen_request request;
 	int fd = -1;
 	uint16_t bound = 0U;
 	int ret;
 
 	if (!listener || !address || backlog <= 0)
 		return TR_ERR_INVALID;
-	if (listener->listen_fd >= 0 || listener->listener_registered)
-		return TR_ERR_STATE;
 
 	ret = tr_tcp_listen_ipv4(
 		address, port, backlog, &fd, &bound);
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_reactor_listener_register(
+	request.listener = listener;
+	request.fd = fd;
+	request.bound_port = bound;
+
+	/*
+	 * source 对 epoll 可见与 Listener owner-state 发布必须是同一个
+	 * lifecycle transaction。函数成功返回前 callback 已经能安全观察
+	 * listen_fd/bound_port/listener_registered/draining 的完整状态。
+	 */
+	ret = tr_reactor_listener_register_publish(
 		listener->config.owner, fd,
-		tr_pipeline_listener_on_ready, listener);
+		tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_publish_listen, &request);
 	if (ret != TR_OK) {
 		tr_socket_close(&fd);
 		return ret;
 	}
 
-	listener->listen_fd = fd;
-	listener->bound_port = bound;
-	listener->listener_registered = 1;
-	listener->draining = 0;
 	if (out_bound_port)
 		*out_bound_port = bound;
 	return TR_OK;
