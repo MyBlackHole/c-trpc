@@ -76,9 +76,9 @@ static void tr_pipeline_ingress_event(
 		return;
 
 	/*
-	 * Connection close/error is the owner-side membership retirement point.
-	 * Exact capability+connection matching prevents a stale close callback
-	 * from detaching a replacement DATA membership.
+	 * 连接关闭/错误是所有者侧成员退役点。
+	 * 精确匹配能力与连接，可以防止过期关闭回调
+	 * 错误地分离替换后的 DATA 成员。
 	 */
 	(void)tr_pipeline_registry_detach_data_route(
 		member->registry, &member->preface, connection);
