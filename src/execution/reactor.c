@@ -2424,6 +2424,44 @@ static int tr_reactor_listener_unregister_now(struct tr_reactor *reactor,
 	return TR_OK;
 }
 
+struct tr_reactor_listener_publish_request {
+	struct tr_reactor *reactor;
+	int fd;
+	tr_reactor_listener_cb callback;
+	void *arg;
+	int (*publish)(void *arg);
+	void *publish_arg;
+};
+
+static int tr_reactor_listener_register_publish_now(void *arg)
+{
+	struct tr_reactor_listener_publish_request *request =
+		(struct tr_reactor_listener_publish_request *)arg;
+	int ret;
+
+	ret = tr_reactor_listener_register_now(
+		request->reactor, request->fd, request->callback, request->arg);
+	if (ret != TR_OK)
+		return ret;
+
+	/*
+	 * register_now() 已经把 source 放入 epoll，但当前仍处于同一个 owner
+	 * turn，或 stopped 状态下持有 ctl_lock；因此 publish 返回前 source
+	 * 不可能被 dispatch。publish 失败时同一串行化区间内撤销 source。
+	 */
+	ret = request->publish(request->publish_arg);
+	if (ret != TR_OK) {
+		int undo = tr_reactor_listener_unregister_now(
+			request->reactor, request->fd);
+#ifndef NDEBUG
+		assert(undo == TR_OK);
+#else
+		(void)undo;
+#endif
+	}
+	return ret;
+}
+
 static int tr_reactor_listener_register_on_owner(void *arg)
 {
 	struct tr_reactor_listener_request *request =
@@ -2471,6 +2509,85 @@ int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 	request.arg = arg;
 	return tr_reactor_call(reactor, tr_reactor_listener_register_on_owner,
 			       &request);
+}
+
+int tr_reactor_listener_register_publish(
+	struct tr_reactor *reactor, int fd,
+	tr_reactor_listener_cb callback, void *arg,
+	int (*publish)(void *arg), void *publish_arg)
+{
+	struct tr_reactor_listener_publish_request request;
+
+	if (!reactor || fd < 0 || !callback || !publish)
+		return TR_ERR_INVALID;
+
+	request.reactor = reactor;
+	request.fd = fd;
+	request.callback = callback;
+	request.arg = arg;
+	request.publish = publish;
+	request.publish_arg = publish_arg;
+
+	/*
+	 * call_or_stopped 已经定义了所需的统一串行化域：
+	 * owner turn / stopped+ctl_lock / stopping=>CLOSED。
+	 */
+	return tr_reactor_call_or_stopped(
+		reactor, tr_reactor_listener_register_publish_now, &request);
+}
+
+struct tr_reactor_listener_unregister_call_request {
+	struct tr_reactor *reactor;
+	tr_reactor_listener_cb callback;
+	void *arg;
+	int (*fn)(void *arg);
+	void *fn_arg;
+};
+
+static int tr_reactor_listener_unregister_call_now(void *arg)
+{
+	struct tr_reactor_listener_unregister_call_request *request =
+		(struct tr_reactor_listener_unregister_call_request *)arg;
+	struct tr_reactor *reactor = request->reactor;
+	int ret;
+
+	/*
+	 * Reactor 当前只有一个 listener source。若 source 仍存在，必须确认
+	 * callback ownership 属于调用方，避免 teardown 一个无关 listener。
+	 * source 已经不存在时仍执行 fn，使 teardown 保持幂等。
+	 */
+	if (reactor->listener_fd >= 0) {
+		if (reactor->listener_cb != request->callback ||
+		    reactor->listener_arg != request->arg)
+			return TR_ERR_STALE;
+
+		ret = tr_reactor_listener_unregister_now(
+			reactor, reactor->listener_fd);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	return request->fn(request->fn_arg);
+}
+
+int tr_reactor_listener_unregister_call(
+	struct tr_reactor *reactor,
+	tr_reactor_listener_cb callback, void *arg,
+	int (*fn)(void *arg), void *fn_arg)
+{
+	struct tr_reactor_listener_unregister_call_request request;
+
+	if (!reactor || !callback || !fn)
+		return TR_ERR_INVALID;
+
+	request.reactor = reactor;
+	request.callback = callback;
+	request.arg = arg;
+	request.fn = fn;
+	request.fn_arg = fn_arg;
+
+	return tr_reactor_call_or_stopped(
+		reactor, tr_reactor_listener_unregister_call_now, &request);
 }
 
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd)

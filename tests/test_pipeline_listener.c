@@ -656,10 +656,45 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	pthread_mutex_destroy(&data_ctx.lock);
 }
 
+static void test_pipeline_listener_prestart_teardown(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_pipeline_listener_config config;
+	struct tr_pipeline_listener *listener = NULL;
+	uint16_t port = 0U;
+
+	/*
+	 * Server 允许先 listen 再 start Runtime。这个构造阶段没有 owner thread，
+	 * 但 listener source 已经注册进 epoll；begin_drain/stop 必须能够在不启动
+	 * Reactor 的情况下完整撤销注册并完成纯内存析构。
+	 */
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.owner_shard_id = 0U;
+	config.pipeline_capacity = 1U;
+	config.connection_capacity = 2U;
+	config.data_capacity_per_pipeline = 1U;
+	config.stream_affinity_capacity_per_pipeline = 1U;
+	config.control_message_count = 2U;
+	config.authorize_control = authorize_control;
+	assert(tr_pipeline_listener_create(&config, &listener) == TR_OK);
+	assert(tr_pipeline_listener_listen_ipv4(
+		       listener, "127.0.0.1", 0U, 8, &port) == TR_OK);
+	assert(port != 0U);
+
+	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
+	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+	tr_pipeline_listener_destroy(listener);
+	tr_reactor_destroy(reactor);
+}
+
 int main(void)
 {
 	test_pipeline_listener_control_and_data();
 	test_pipeline_listener_ready_ingress_barrier();
+	test_pipeline_listener_prestart_teardown();
 	puts("pipeline listener/control transport: ok");
 	return 0;
 }

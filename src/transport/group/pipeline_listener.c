@@ -579,66 +579,116 @@ fail:
 	return ret;
 }
 
+struct tr_pipeline_listener_listen_request {
+	struct tr_pipeline_listener *listener;
+	int fd;
+	uint16_t bound_port;
+};
+
+static int tr_pipeline_listener_publish_listen(void *arg)
+{
+	struct tr_pipeline_listener_listen_request *request =
+		(struct tr_pipeline_listener_listen_request *)arg;
+	struct tr_pipeline_listener *listener = request->listener;
+
+	/*
+	 * 这个检查与 source registration 处于同一个 Reactor ownership
+	 * transaction。不能在外部线程先读 listener_registered/listen_fd，
+	 * 否则会重新引入 lifecycle data race。
+	 */
+	if (listener->listen_fd >= 0 || listener->listener_registered)
+		return TR_ERR_STATE;
+
+	listener->listen_fd = request->fd;
+	listener->bound_port = request->bound_port;
+	listener->listener_registered = 1;
+	listener->draining = 0;
+	return TR_OK;
+}
+
 int tr_pipeline_listener_listen_ipv4(
 	struct tr_pipeline_listener *listener, const char *address,
 	uint16_t port, int backlog, uint16_t *out_bound_port)
 {
+	struct tr_pipeline_listener_listen_request request;
 	int fd = -1;
 	uint16_t bound = 0U;
 	int ret;
 
 	if (!listener || !address || backlog <= 0)
 		return TR_ERR_INVALID;
-	if (listener->listen_fd >= 0 || listener->listener_registered)
-		return TR_ERR_STATE;
 
 	ret = tr_tcp_listen_ipv4(
 		address, port, backlog, &fd, &bound);
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_reactor_listener_register(
+	request.listener = listener;
+	request.fd = fd;
+	request.bound_port = bound;
+
+	/*
+	 * source 对 epoll 可见与 Listener owner-state 发布必须是同一个
+	 * lifecycle transaction。函数成功返回前 callback 已经能安全观察
+	 * listen_fd/bound_port/listener_registered/draining 的完整状态。
+	 */
+	ret = tr_reactor_listener_register_publish(
 		listener->config.owner, fd,
-		tr_pipeline_listener_on_ready, listener);
+		tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_publish_listen, &request);
 	if (ret != TR_OK) {
 		tr_socket_close(&fd);
 		return ret;
 	}
 
-	listener->listen_fd = fd;
-	listener->bound_port = bound;
-	listener->listener_registered = 1;
-	listener->draining = 0;
 	if (out_bound_port)
 		*out_bound_port = bound;
 	return TR_OK;
 }
 
-int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
+static int tr_pipeline_listener_publish_drained_admission(void *arg)
 {
-	int result = TR_OK;
-	int ret;
+	struct tr_pipeline_listener *listener =
+		(struct tr_pipeline_listener *)arg;
 
-	if (!listener)
-		return TR_ERR_INVALID;
-	if (listener->draining)
-		return TR_OK;
-
-	if (listener->listener_registered) {
-		ret = tr_reactor_listener_unregister(
-			listener->config.owner, listener->listen_fd);
-		if (ret != TR_OK)
-			result = ret;
-		else
-			listener->listener_registered = 0;
-	}
-	if (!listener->listener_registered && listener->listen_fd >= 0) {
+	listener->listener_registered = 0;
+	if (listener->listen_fd >= 0) {
 		tr_socket_close(&listener->listen_fd);
 		listener->bound_port = 0U;
 	}
-	if (result == TR_OK)
-		listener->draining = 1;
-	return result;
+	listener->draining = 1;
+	return TR_OK;
+}
+
+static int tr_pipeline_listener_begin_drain_on_owner(void *arg)
+{
+	struct tr_pipeline_listener *listener =
+		(struct tr_pipeline_listener *)arg;
+
+	if (!listener)
+		return TR_ERR_INVALID;
+
+	/*
+	 * 即使已经 draining 也经过 Reactor listener ownership 检查。source 已
+	 * detach 时 unregister_call 仍执行 publication，因此该操作天然幂等。
+	 */
+	return tr_reactor_listener_unregister_call(
+		listener->config.owner, tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_publish_drained_admission, listener);
+}
+
+int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
+{
+	if (!listener)
+		return TR_ERR_INVALID;
+
+	/*
+	 * running/stopped 都只在 Reactor 的串行化域读取和修改 Listener
+	 * lifecycle state；外部线程不直接读取 listener_registered/listen_fd。
+	 */
+	return tr_reactor_listener_unregister_call(
+		listener->config.owner, tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_publish_drained_admission, listener);
 }
 
 struct tr_pipeline_listener_stop_request {
@@ -651,7 +701,14 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 		(struct tr_pipeline_listener_stop_request *)arg;
 	struct tr_pipeline_listener *listener = request->listener;
 	uint32_t i;
-	int result = TR_OK;
+	int result;
+
+	/*
+	 * stop 的整个状态转换都由 owner 串行化：先关闭 listener admission，
+	 * 再关闭已有连接/transport，最后在同一个 owner turn 检查计数是否归零。
+	 * 外部线程不直接观察 owner-only counters。
+	 */
+	result = tr_pipeline_listener_begin_drain_on_owner(listener);
 
 	for (i = 0; i < listener->config.connection_capacity; ++i) {
 		struct tr_pipeline_listener_connection *tracked =
@@ -691,31 +748,45 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 	return result;
 }
 
+static int tr_pipeline_listener_stop_stopped(void *arg)
+{
+	struct tr_pipeline_listener *listener =
+		(struct tr_pipeline_listener *)arg;
+	int ret;
+
+	ret = tr_pipeline_listener_publish_drained_admission(listener);
+	if (ret != TR_OK)
+		return ret;
+	if (listener->connections_current != 0U ||
+	    listener->pipelines_current != 0U)
+		return TR_ERR_STATE;
+	return TR_OK;
+}
+
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 {
 	struct tr_pipeline_listener_stop_request request;
-	int result;
 	int ret;
 
 	if (!listener)
 		return TR_ERR_INVALID;
 
-	result = tr_pipeline_listener_begin_drain(listener);
+	request.listener = listener;
+	ret = tr_reactor_call(
+		listener->config.owner,
+		tr_pipeline_listener_stop_on_owner, &request);
+	if (ret != TR_ERR_CLOSED)
+		return ret;
 
-	if (listener->connections_current != 0U ||
-	    listener->pipelines_current != 0U) {
-		request.listener = listener;
-		ret = tr_reactor_call(
-			listener->config.owner,
-			tr_pipeline_listener_stop_on_owner, &request);
-		if (ret != TR_OK && result == TR_OK)
-			result = ret;
-	}
-	if ((listener->connections_current != 0U ||
-	     listener->pipelines_current != 0U) &&
-	    result == TR_OK)
-		result = TR_ERR_STATE;
-	return result;
+	/*
+	 * tr_reactor_call() 的 CLOSED 同时覆盖“未启动/已停止”和“正在停止”。
+	 * unregister_call 只允许前者进入 ctl_lock direct path；正在停止时继续
+	 * 返回 CLOSED，绝不越过 owner teardown barrier。detach、状态发布和
+	 * counter 检查在同一串行化区间完成。
+	 */
+	return tr_reactor_listener_unregister_call(
+		listener->config.owner, tr_pipeline_listener_on_ready, listener,
+		tr_pipeline_listener_stop_stopped, listener);
 }
 
 void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
