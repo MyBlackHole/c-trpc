@@ -370,7 +370,7 @@ static void test_pipeline_listener_control_and_data(void)
 		       listener, "127.0.0.1", 0U, 16, &port) == TR_OK);
 	assert(port != 0U);
 
-	/* Authorization, not client-provided identity alone, admits CONTROL. */
+	/* CONTROL 准入依赖授权，不能只相信客户端提供的标识。 */
 	route = control_route(TEST_EPOCH_1);
 	route.member_generation++;
 	bad_control = connect_loopback(port);
@@ -380,13 +380,13 @@ static void test_pipeline_listener_control_and_data(void)
 	bad_control = -1;
 	wait_listener_counts(listener, 0U, 0U);
 
-	/* Establish one real CONTROL connection through TRR1. */
+	/* 通过 TRR1 建立一条真实 CONTROL 连接。 */
 	route = control_route(TEST_EPOCH_1);
 	control = connect_loopback(port);
 	send_route(control, &route);
 	wait_listener_counts(listener, 1U, 1U);
 
-	/* Server reserves DATA and emits the exact capability over TRP1/TRC1. */
+	/* Server 预留 DATA，并通过 TRP1/TRC1 发送精确能力。 */
 	memset(&offer_route, 0, sizeof(offer_route));
 	assert(tr_pipeline_listener_send_data_offer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
@@ -400,12 +400,12 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(offer.data_index == offer_route.member_index);
 	assert(offer.data_generation == offer_route.member_generation);
 
-	/* A RESERVED capability alone is never enough to publish READY. */
+	/* 只有 RESERVED 能力时绝不能发布 READY。 */
 	assert(tr_pipeline_listener_send_transfer_ready(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3000U,
 		       UINT64_C(999)) == TR_AGAIN);
 
-	/* Exact DATA socket joins the same listener and normal TRP1 begins after TRR1. */
+	/* 精确 DATA 套接字加入同一监听器，并在 TRR1 之后进入普通 TRP1。 */
 	data = connect_loopback(port);
 	send_route(data, &offer_route);
 	build_ping(ping);
@@ -417,9 +417,9 @@ static void test_pipeline_listener_control_and_data(void)
 	wait_listener_counts(listener, 1U, 2U);
 
 	/*
-	 * Replaying an already-ATTACHED DATA capability must reject only the new
-	 * socket. Failure cleanup exact-cancels RESERVED state, so it cannot retire
-	 * the live membership that already consumed this generation.
+	 * 重放一个已经 ATTACHED 的 DATA 能力时，只能拒绝新套接字。
+	 * 失败清理只会精确取消 RESERVED 状态，
+	 * 因此不能退役已经消费该代次的存活成员关系。
 	 */
 	duplicate_data = connect_loopback(port);
 	send_route(duplicate_data, &offer_route);
@@ -431,7 +431,7 @@ static void test_pipeline_listener_control_and_data(void)
 	send_all(data, ping, sizeof(ping));
 	wait_data_frames(&data_ctx, 2U);
 
-	/* TRANSFER_READY cannot be emitted until the DATA capability is ATTACHED. */
+	/* DATA 能力进入 ATTACHED 前不能发送 TRANSFER_READY。 */
 	assert(tr_pipeline_listener_send_transfer_ready(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3001U,
 		       UINT64_C(1002)) == TR_OK);
@@ -444,7 +444,7 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(tr_pipeline_listener_release_transfer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3001U) == TR_OK);
 
-	/* A client DATA_CANCEL is handled by the real CONTROL frame callback. */
+	/* Client 的 DATA_CANCEL 由真实 CONTROL 帧回调处理。 */
 	memset(&offer_route2, 0, sizeof(offer_route2));
 	assert(tr_pipeline_listener_send_data_offer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
@@ -456,9 +456,9 @@ static void test_pipeline_listener_control_and_data(void)
 	send_control_message(control, UINT64_C(2001), &cancel);
 
 	/*
-	 * With one DATA attached and one reservation, another offer is full until
-	 * the cancel frame is actually consumed. Retry proves the handler released
-	 * only that exact reservation.
+	 * 已有一个 DATA 附着并保留一个预留时，
+	 * 在取消帧真正被消费前，新的提供操作应报告容量已满。
+	 * 后续重试用于证明处理器只释放了那个精确预留。
 	 */
 	memset(&offer_route2, 0, sizeof(offer_route2));
 	assert(wait_offer_retry(
@@ -469,9 +469,9 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(offer3.data_generation != offer2.data_generation);
 
 	/*
-	 * Fatal CONTROL loss invalidates the whole soft-state group: outstanding
-	 * reservations are cancelled, attached DATA is closed, registry entry is
-	 * removed, and the same pipeline_id can later start a new epoch.
+	 * CONTROL 致命丢失会使整个易失状态组失效：
+	 * 取消未完成预留、关闭已附着 DATA、移除注册表条目，
+	 * 之后同一个 pipeline_id 可以启动新的 epoch。
 	 */
 	shutdown(control, SHUT_RDWR);
 	close(control);
@@ -490,7 +490,7 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(stats.pipelines_peak == 1U);
 	assert(stats.connections_peak >= 2U);
 
-	/* New epoch with the same pipeline_id is admitted after old teardown. */
+	/* 旧状态销毁后，允许相同 pipeline_id 的新 epoch 准入。 */
 	route = control_route(TEST_EPOCH_2);
 	control2 = connect_loopback(port);
 	send_route(control2, &route);
@@ -571,9 +571,9 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	wait_listener_counts(listener, 1U, 2U);
 
 	/*
-	 * Physical DATA membership is not transfer authorization. DATA before
-	 * TRANSFER_READY is a protocol violation: no application callback and the
-	 * offending DATA lane is retired.
+	 * 物理 DATA 成员关系不等于传输授权。
+	 * TRANSFER_READY 之前收到 DATA 属于协议违规：
+	 * 不触发应用回调，并退役违规 DATA 通道。
 	 */
 	send_empty_data(data, 7001U, UINT64_C(6001));
 	wait_peer_close(data);
@@ -585,7 +585,7 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(data_ctx.frames == 0U);
 	pthread_mutex_unlock(&data_ctx.lock);
 
-	/* Re-establish DATA, publish READY, then the same stream is admitted. */
+	/* 重新建立 DATA、发布 READY 后，同一个 Stream 才允许准入。 */
 	memset(&data_route, 0, sizeof(data_route));
 	assert(tr_pipeline_listener_send_data_offer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
@@ -606,9 +606,10 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(ready.data_generation == offer.data_generation);
 
 	/*
-	 * Add a second DATA membership after READY. The stream is pinned to the
-	 * first exact generation, so replaying it on another live lane is also
-	 * connection-fatal and must not reach the application.
+	 * READY 后再增加第二个 DATA 成员关系。
+	 * Stream 已固定到第一个精确代次，
+	 * 因此在另一条存活通道上重放同一 Stream 同样属于连接致命错误，
+	 * 不能到达应用层。
 	 */
 	memset(&data_route2, 0, sizeof(data_route2));
 	assert(tr_pipeline_listener_send_data_offer(
@@ -630,7 +631,7 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(data_ctx.frames == 0U);
 	pthread_mutex_unlock(&data_ctx.lock);
 
-	/* The READY stream remains valid on its originally selected DATA lane. */
+	/* 已 READY 的 Stream 在最初选中的 DATA 通道上仍保持有效。 */
 	send_empty_data(data, 7001U, UINT64_C(6003));
 	wait_data_frames(&data_ctx, 1U);
 	pthread_mutex_lock(&data_ctx.lock);
