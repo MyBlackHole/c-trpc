@@ -614,8 +614,10 @@ int tr_pipeline_listener_listen_ipv4(
 	return TR_OK;
 }
 
-int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
+static int tr_pipeline_listener_begin_drain_on_owner(void *arg)
 {
+	struct tr_pipeline_listener *listener =
+		(struct tr_pipeline_listener *)arg;
 	int result = TR_OK;
 	int ret;
 
@@ -624,6 +626,11 @@ int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
 	if (listener->draining)
 		return TR_OK;
 
+	/*
+	 * listener_registered/listen_fd/draining 都属于 Reactor owner 状态。
+	 * unregister 与状态发布必须位于同一个 owner turn，不能让外部 lifecycle
+	 * 线程在同步 unregister 返回后继续直接写这些字段。
+	 */
 	if (listener->listener_registered) {
 		ret = tr_reactor_listener_unregister(
 			listener->config.owner, listener->listen_fd);
@@ -641,6 +648,16 @@ int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
 	return result;
 }
 
+int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
+{
+	if (!listener)
+		return TR_ERR_INVALID;
+
+	return tr_reactor_call(
+		listener->config.owner,
+		tr_pipeline_listener_begin_drain_on_owner, listener);
+}
+
 struct tr_pipeline_listener_stop_request {
 	struct tr_pipeline_listener *listener;
 };
@@ -651,7 +668,14 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 		(struct tr_pipeline_listener_stop_request *)arg;
 	struct tr_pipeline_listener *listener = request->listener;
 	uint32_t i;
-	int result = TR_OK;
+	int result;
+
+	/*
+	 * stop 的整个状态转换都由 owner 串行化：先关闭 listener admission，
+	 * 再关闭已有连接/transport，最后在同一个 owner turn 检查计数是否归零。
+	 * 外部线程不直接观察 owner-only counters。
+	 */
+	result = tr_pipeline_listener_begin_drain_on_owner(listener);
 
 	for (i = 0; i < listener->config.connection_capacity; ++i) {
 		struct tr_pipeline_listener_connection *tracked =
@@ -694,28 +718,14 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 {
 	struct tr_pipeline_listener_stop_request request;
-	int result;
-	int ret;
 
 	if (!listener)
 		return TR_ERR_INVALID;
 
-	result = tr_pipeline_listener_begin_drain(listener);
-
-	if (listener->connections_current != 0U ||
-	    listener->pipelines_current != 0U) {
-		request.listener = listener;
-		ret = tr_reactor_call(
-			listener->config.owner,
-			tr_pipeline_listener_stop_on_owner, &request);
-		if (ret != TR_OK && result == TR_OK)
-			result = ret;
-	}
-	if ((listener->connections_current != 0U ||
-	     listener->pipelines_current != 0U) &&
-	    result == TR_OK)
-		result = TR_ERR_STATE;
-	return result;
+	request.listener = listener;
+	return tr_reactor_call(
+		listener->config.owner,
+		tr_pipeline_listener_stop_on_owner, &request);
 }
 
 void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
