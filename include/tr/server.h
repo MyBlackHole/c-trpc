@@ -66,7 +66,13 @@ int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 
 int tr_server_start(struct tr_server *server);
 
-/* 停止接收新 peer，发送 GOAWAY，并等待已有 Stream 结束。 */
+/*
+ * 停止接收新 peer，发送 GOAWAY，并同步等待已有 Stream 结束。
+ *
+ * drain 是 external lifecycle barrier：Reactor owner callback / interceptor /
+ * RPC handler/result/event callback 中调用返回 TR_ERR_STATE，且不会先执行部分
+ * stop/drain 状态修改。callback 需要关闭 Server 时应通知外部控制线程。
+ */
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
 
 /*
