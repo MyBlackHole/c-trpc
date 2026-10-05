@@ -22,7 +22,12 @@ struct tr_client_group_config {
 
 int tr_client_group_create(const struct tr_client_group_config *config,
 			   struct tr_client_group **out);
-void tr_client_group_destroy(struct tr_client_group *group);
+/*
+ * 同步终局析构。成功返回前会在 Reactor owner 上撤销所有 callback source、
+ * 释放 Reactor 持有的 DATA TX ownership，并验证没有 send buffer 继续引用 group。
+ * lifecycle barrier 失败时返回错误且不得释放 group storage。
+ */
+int tr_client_group_destroy(struct tr_client_group *group);
 
 int tr_client_group_connect(
 	struct tr_client_group *group, const char *ipv4_address, uint16_t port,
