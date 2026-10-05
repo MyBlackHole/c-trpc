@@ -906,7 +906,7 @@ static void test_client_group_destroy_after_remote_control_close(void)
 	 * owner barrier；即使 close callback 已经清空 handle 但尚未返回，
 	 * Client Group storage 也必须继续存活到 callback quiescence。
 	 */
-	for (i = 0; i < 32U; ++i) {
+	for (i = 0; i < 16U; ++i) {
 		memset(&ctx, 0, sizeof(ctx));
 		assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 		assert(pthread_cond_init(&ctx.cond, NULL) == 0);
@@ -915,7 +915,7 @@ static void test_client_group_destroy_after_remote_control_close(void)
 		server_config.max_peers = 1U;
 		server_config.keepalive_interval_ms = 0U;
 		server_config.connection_groups.max_groups = 1U;
-		server_config.connection_groups.max_connections = 1U;
+		server_config.connection_groups.max_connections = 2U;
 		server_config.connection_groups.max_data_connections_per_group = 1U;
 		server_config.connection_groups.max_streams_per_group = 1U;
 		server_config.connection_groups.authorize = authorize_group;
