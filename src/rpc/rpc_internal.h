@@ -11,8 +11,8 @@
 struct tr_rpc_endpoint;
 
 /*
- * True while the current thread is one of c-trpc's RPC executor workers.
- * Synchronous destroy must not join/wait for the worker that is executing it.
+ * 当前线程属于 c-trpc RPC Executor 工作线程时返回真。
+ * 同步销毁不得 join 或等待正在执行销毁操作的工作线程自身。
  */
 int tr_rpc_in_worker_context(void);
 
@@ -23,7 +23,7 @@ struct tr_rpc_endpoint_config {
 	uint32_t max_methods;
 	uint32_t max_calls;
 
-	/* Used for RPC envelope/control-path copies. */
+	/* 用于 RPC 信封和控制路径复制。 */
 	struct tr_buffer_pool *message_pool;
 
 	uint32_t executor_queue_capacity;
@@ -67,7 +67,7 @@ struct tr_rpc_endpoint_stats {
 	struct tr_rpc_semantic_stats semantic;
 };
 
-/* Stable Endpoint-lifetime Method hash shared with collision tests. */
+/* Endpoint 生命周期内稳定的 Method 哈希，与冲突测试共用。 */
 static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 					  uint32_t method_id)
 {
@@ -81,7 +81,7 @@ static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 	return value;
 }
 
-/* Low-level Endpoint engine: internal to facade/tests. */
+/* 底层 Endpoint 引擎，仅供门面和测试内部使用。 */
 int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
 			   struct tr_rpc_endpoint **out);
@@ -121,7 +121,7 @@ int tr_rpc_call_start(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		      const struct tr_rpc_call_callbacks *callbacks,
 		      struct tr_rpc_call_handle *out);
 
-/* Internal zero-copy/copy-minimal Buffer fast path. */
+/* 内部零拷贝/最少拷贝 Buffer 快路径。 */
 int tr_rpc_call_send_buffer(struct tr_rpc_call_handle call,
 			    struct tr_buffer *payload);
 
@@ -131,7 +131,7 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 int tr_rpc_endpoint_get_semantic_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_semantic_stats *out);
 
-/* Test/diagnostic bridge without exposing Stream in public tr_rpc_message. */
+/* 测试/诊断桥接接口，不在公开 tr_rpc_message 中暴露 Stream。 */
 int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
 				   struct tr_stream_handle *out);
 
@@ -147,14 +147,14 @@ int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out);
 
 /*
- * Server reaping path: synchronously quiesce/drain the Endpoint, snapshot its
- * final counters, then release it. stats may be NULL.
+ * Server 回收路径：同步静止并排空 Endpoint，获取最终计数器快照后再释放。
+ * stats 可以为 NULL。
  */
 void tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
 /*
- * Server peer two-phase teardown.
+ * Server Peer 两阶段清理。
  */
 int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint);
 void tr_rpc_endpoint_finalize_detached_with_stats(
@@ -168,7 +168,7 @@ int tr_rpc_endpoint_arm_detached_finalizer(
 	tr_rpc_endpoint_detached_finalizer finalizer, void *arg);
 void tr_rpc_endpoint_release_detached_owner(struct tr_rpc_endpoint *endpoint);
 
-/* Internal deterministic diagnostics for the bounded Call deadline heap. */
+/* 有界 Call 截止时间堆的内部确定性诊断接口。 */
 int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
 				  uint32_t *count,
 				  struct tr_rpc_call_handle *root,
