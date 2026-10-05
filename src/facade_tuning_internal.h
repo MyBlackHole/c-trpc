@@ -26,18 +26,18 @@ struct tr_facade_tuning {
 	uint32_t reassembly_pool_count;
 
 	/*
-	 * Executor layout is implementation tuning, not stable application
-	 * semantics. Server executor_threads is an aggregate shard budget;
-	 * executor_queue_capacity is per Endpoint; continuation reserve is
-	 * Server-only and uses the same bounded node pool.
+	 * Executor 布局属于实现层调优，不是稳定的应用
+	 * 语义。Server 的 executor_threads 是 shard 聚合预算；
+	 * executor_queue_capacity 按 Endpoint 计算；continuation reserve
+	 * 仅用于 Server，并使用同一个有界节点池。
 	 */
 	uint32_t executor_threads;
 	uint32_t executor_queue_capacity;
 	uint32_t executor_continuation_reserve;
 
 	/*
-	 * Internal diagnostics cost policy. TR_OBSERVABILITY_TIMING enables
-	 * monotonic-clock sampling in Reactor/RPC hot scheduling paths.
+	 * 内部诊断开销策略。TR_OBSERVABILITY_TIMING 会启用
+	 * Reactor/RPC 热调度路径中的单调时钟采样。
 	 */
 	uint32_t observability_flags;
 };
