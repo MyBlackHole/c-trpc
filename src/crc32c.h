@@ -5,11 +5,10 @@
 #include <stdint.h>
 
 /*
- * CRC-32C (Castagnoli), not IEEE CRC-32. update() consumes and returns the
- * raw intermediate state; apply finish() once after the final segment.
- * Empty updates accept NULL and leave state unchanged. Otherwise data must
- * point to at least len readable bytes; no alignment is required.
- * Backend selection is automatic and safe for concurrent first calls.
+ * 这里实现 CRC-32C（Castagnoli），不是 IEEE CRC-32。
+ * update() 接收并返回原始中间状态；最后一个分段处理完成后只调用一次 finish()。
+ * 空更新允许传入 NULL，并保持状态不变；否则 data 必须指向至少 len 个可读字节，
+ * 不要求内存对齐。后端会自动选择，并且首次并发调用也是安全的。
  */
 uint32_t tr_crc32c_begin(void);
 uint32_t tr_crc32c_update(uint32_t state, const void *data, size_t len);
