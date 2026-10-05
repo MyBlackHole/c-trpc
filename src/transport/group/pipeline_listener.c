@@ -1,9 +1,13 @@
+#define _GNU_SOURCE
 #include "pipeline_listener_internal.h"
 
 #include <assert.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <time.h>
 
 #include "../../group/pipeline_control_internal.h"
 #include "pipeline_control_transport_internal.h"
@@ -56,6 +60,18 @@ struct tr_pipeline_listener {
 	int listener_registered;
 	int draining;
 
+	/*
+	 * Listener/Pipeline counters remain Reactor-owner only. This lock publishes
+	 * only drain lifecycle generations to external waiters.
+	 */
+	pthread_mutex_t drain_wait_lock;
+	pthread_cond_t drain_wait_cond;
+	uint64_t drain_generation;
+	uint64_t drained_generation;
+	uint32_t drain_waiters;
+	int drain_wait_active;
+	int drain_wait_closed;
+
 	uint32_t pipelines_current;
 	uint32_t pipelines_peak;
 	uint32_t connections_current;
@@ -73,6 +89,67 @@ struct tr_pipeline_listener_preface {
 	uint32_t connection_generation;
 	int handed_off;
 };
+
+static int tr_pipeline_listener_drain_complete_on_owner(
+	const struct tr_pipeline_listener *listener)
+{
+	return listener && listener->draining &&
+		listener->connections_current == 0U &&
+		listener->pipelines_current == 0U;
+}
+
+static void tr_pipeline_listener_publish_drain_progress_on_owner(
+	struct tr_pipeline_listener *listener)
+{
+	if (!tr_pipeline_listener_drain_complete_on_owner(listener))
+		return;
+
+	pthread_mutex_lock(&listener->drain_wait_lock);
+	if (listener->drain_wait_active &&
+	    listener->drained_generation != listener->drain_generation) {
+		listener->drained_generation = listener->drain_generation;
+		pthread_cond_broadcast(&listener->drain_wait_cond);
+	}
+	pthread_mutex_unlock(&listener->drain_wait_lock);
+}
+
+static void tr_pipeline_listener_publish_drain_start_on_owner(
+	struct tr_pipeline_listener *listener)
+{
+	pthread_mutex_lock(&listener->drain_wait_lock);
+	listener->drain_generation++;
+	if (listener->drain_generation == 0U)
+		listener->drain_generation = 1U;
+	listener->drained_generation = 0U;
+	listener->drain_wait_active = 1;
+	pthread_mutex_unlock(&listener->drain_wait_lock);
+
+	tr_pipeline_listener_publish_drain_progress_on_owner(listener);
+}
+
+static void tr_pipeline_listener_publish_listening_on_owner(
+	struct tr_pipeline_listener *listener)
+{
+	pthread_mutex_lock(&listener->drain_wait_lock);
+	listener->drain_wait_active = 0;
+	pthread_cond_broadcast(&listener->drain_wait_cond);
+	pthread_mutex_unlock(&listener->drain_wait_lock);
+}
+
+static int tr_pipeline_listener_close_wait_admission(
+	struct tr_pipeline_listener *listener)
+{
+	int ret = TR_OK;
+
+	pthread_mutex_lock(&listener->drain_wait_lock);
+	listener->drain_wait_closed = 1;
+	if (listener->drain_waiters != 0U) {
+		pthread_cond_broadcast(&listener->drain_wait_cond);
+		ret = TR_ERR_STATE;
+	}
+	pthread_mutex_unlock(&listener->drain_wait_lock);
+	return ret;
+}
 
 static uint32_t tr_pipeline_listener_next_generation(uint32_t generation)
 {
@@ -111,6 +188,8 @@ static void tr_pipeline_listener_connection_clear(
 	connection->used = 0;
 	if (listener && listener->connections_current != 0U)
 		listener->connections_current--;
+	if (listener)
+		tr_pipeline_listener_publish_drain_progress_on_owner(listener);
 }
 
 static struct tr_pipeline_listener_connection *
@@ -215,6 +294,7 @@ static void tr_pipeline_listener_control_closed(
 	memset(session, 0, sizeof(*session));
 	if (listener->pipelines_current != 0U)
 		listener->pipelines_current--;
+	tr_pipeline_listener_publish_drain_progress_on_owner(listener);
 }
 
 static enum tr_frame_disposition tr_pipeline_listener_data_frame(
@@ -516,6 +596,8 @@ int tr_pipeline_listener_create(
 {
 	struct tr_pipeline_listener *listener;
 	struct tr_pipeline_registry_config registry_config;
+	int drain_wait_lock_ready = 0;
+	int drain_wait_cond_ready = 0;
 	int ret;
 
 	if (!out)
@@ -537,6 +619,32 @@ int tr_pipeline_listener_create(
 		return TR_ERR_NOMEM;
 	listener->listen_fd = -1;
 	listener->config = *config;
+
+	if (pthread_mutex_init(&listener->drain_wait_lock, NULL) != 0) {
+		ret = TR_ERR_SYS;
+		goto fail;
+	}
+	drain_wait_lock_ready = 1;
+	{
+		pthread_condattr_t attr;
+
+		if (pthread_condattr_init(&attr) != 0) {
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+			pthread_condattr_destroy(&attr);
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		if (pthread_cond_init(&listener->drain_wait_cond, &attr) != 0) {
+			pthread_condattr_destroy(&attr);
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		pthread_condattr_destroy(&attr);
+		drain_wait_cond_ready = 1;
+	}
 
 	listener->sessions = (struct tr_pipeline_listener_session *)calloc(
 		config->pipeline_capacity, sizeof(*listener->sessions));
@@ -575,6 +683,10 @@ fail:
 		tr_pipeline_registry_destroy(listener->registry);
 	free(listener->connections);
 	free(listener->sessions);
+	if (drain_wait_cond_ready)
+		pthread_cond_destroy(&listener->drain_wait_cond);
+	if (drain_wait_lock_ready)
+		pthread_mutex_destroy(&listener->drain_wait_lock);
 	free(listener);
 	return ret;
 }
@@ -599,10 +711,18 @@ static int tr_pipeline_listener_publish_listen(void *arg)
 	if (listener->listen_fd >= 0 || listener->listener_registered)
 		return TR_ERR_STATE;
 
+	pthread_mutex_lock(&listener->drain_wait_lock);
+	if (listener->drain_wait_closed) {
+		pthread_mutex_unlock(&listener->drain_wait_lock);
+		return TR_ERR_CLOSED;
+	}
+	pthread_mutex_unlock(&listener->drain_wait_lock);
+
 	listener->listen_fd = request->fd;
 	listener->bound_port = request->bound_port;
 	listener->listener_registered = 1;
 	listener->draining = 0;
+	tr_pipeline_listener_publish_listening_on_owner(listener);
 	return TR_OK;
 }
 
@@ -650,13 +770,19 @@ static int tr_pipeline_listener_publish_drained_admission(void *arg)
 {
 	struct tr_pipeline_listener *listener =
 		(struct tr_pipeline_listener *)arg;
+	int was_draining;
 
+	was_draining = listener->draining;
 	listener->listener_registered = 0;
 	if (listener->listen_fd >= 0) {
 		tr_socket_close(&listener->listen_fd);
 		listener->bound_port = 0U;
 	}
 	listener->draining = 1;
+	if (!was_draining)
+		tr_pipeline_listener_publish_drain_start_on_owner(listener);
+	else
+		tr_pipeline_listener_publish_drain_progress_on_owner(listener);
 	return TR_OK;
 }
 
@@ -689,6 +815,95 @@ int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
 	return tr_reactor_listener_unregister_call(
 		listener->config.owner, tr_pipeline_listener_on_ready, listener,
 		tr_pipeline_listener_publish_drained_admission, listener);
+}
+
+int tr_pipeline_listener_wait_drained(
+	struct tr_pipeline_listener *listener, uint32_t timeout_ms)
+{
+	struct timespec deadline;
+	uint64_t generation;
+	int timed = timeout_ms != 0U;
+	int result = TR_OK;
+
+	if (!listener)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
+	if (timed) {
+		uint64_t now_ns;
+		uint64_t timeout_ns;
+		uint64_t deadline_ns;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+			return TR_ERR_SYS;
+		now_ns = (uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
+			 (uint64_t)deadline.tv_nsec;
+		timeout_ns = (uint64_t)timeout_ms * UINT64_C(1000000);
+		deadline_ns = UINT64_MAX - now_ns < timeout_ns ?
+			UINT64_MAX : now_ns + timeout_ns;
+		deadline.tv_sec =
+			(time_t)(deadline_ns / UINT64_C(1000000000));
+		deadline.tv_nsec =
+			(long)(deadline_ns % UINT64_C(1000000000));
+	}
+
+	pthread_mutex_lock(&listener->drain_wait_lock);
+	if (listener->drain_wait_closed) {
+		pthread_mutex_unlock(&listener->drain_wait_lock);
+		return TR_ERR_CLOSED;
+	}
+	if (!listener->drain_wait_active || listener->drain_generation == 0U) {
+		pthread_mutex_unlock(&listener->drain_wait_lock);
+		return TR_ERR_STATE;
+	}
+
+	generation = listener->drain_generation;
+	if (listener->drained_generation == generation) {
+		pthread_mutex_unlock(&listener->drain_wait_lock);
+		return TR_OK;
+	}
+	if (listener->drain_waiters == UINT32_MAX) {
+		pthread_mutex_unlock(&listener->drain_wait_lock);
+		return TR_ERR_STATE;
+	}
+	listener->drain_waiters++;
+
+	while (listener->drained_generation != generation) {
+		int ret;
+
+		if (listener->drain_wait_closed) {
+			result = TR_ERR_CLOSED;
+			break;
+		}
+		if (!listener->drain_wait_active ||
+		    listener->drain_generation != generation) {
+			result = TR_ERR_STALE;
+			break;
+		}
+
+		if (timed)
+			ret = pthread_cond_timedwait(
+				&listener->drain_wait_cond,
+				&listener->drain_wait_lock, &deadline);
+		else
+			ret = pthread_cond_wait(
+				&listener->drain_wait_cond,
+				&listener->drain_wait_lock);
+		if (ret == 0)
+			continue;
+		if (timed && ret == ETIMEDOUT) {
+			result = TR_ERR_TIMEOUT;
+			break;
+		}
+		result = TR_ERR_SYS;
+		break;
+	}
+
+	assert(listener->drain_waiters != 0U);
+	listener->drain_waiters--;
+	pthread_mutex_unlock(&listener->drain_wait_lock);
+	return result;
 }
 
 struct tr_pipeline_listener_stop_request {
@@ -789,25 +1004,41 @@ int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 		tr_pipeline_listener_stop_stopped, listener);
 }
 
-void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
+static int tr_pipeline_listener_verify_destroy(void *arg)
 {
-	if (!listener)
-		return;
+	struct tr_pipeline_listener *listener =
+		(struct tr_pipeline_listener *)arg;
 
-	/*
-	 * destroy 是纯内存析构，不再隐式执行可能失败的 stop。调用方必须先完成
-	 * listener/session quiescence；debug build 在这里直接验证生命周期不变量。
-	 */
-#ifndef NDEBUG
-	assert(!listener->listener_registered);
-	assert(listener->listen_fd < 0);
-	assert(listener->connections_current == 0U);
-	assert(listener->pipelines_current == 0U);
-#endif
+	if (!listener)
+		return TR_ERR_INVALID;
 	if (listener->listener_registered || listener->listen_fd >= 0 ||
 	    listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
-		return;
+		return TR_ERR_STATE;
+
+	return tr_pipeline_listener_close_wait_admission(listener);
+}
+
+int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
+{
+	int ret;
+
+	if (!listener)
+		return TR_OK;
+
+	/*
+	 * Validate owner-only lifecycle state in the same serialized domain used by
+	 * listener/source teardown. Fully stopped Reactor uses ctl_lock direct path;
+	 * an in-progress stop returns CLOSED instead of allowing free to race owner.
+	 */
+	ret = tr_reactor_call_or_stopped(
+		listener->config.owner,
+		tr_pipeline_listener_verify_destroy, listener);
+#ifndef NDEBUG
+	assert(ret == TR_OK);
+#endif
+	if (ret != TR_OK)
+		return ret;
 
 	if (listener->message_pool_ready)
 		tr_buffer_pool_destroy(&listener->message_pool);
@@ -815,7 +1046,10 @@ void tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 		tr_pipeline_registry_destroy(listener->registry);
 	free(listener->connections);
 	free(listener->sessions);
+	(void)pthread_cond_destroy(&listener->drain_wait_cond);
+	pthread_mutex_destroy(&listener->drain_wait_lock);
 	free(listener);
+	return TR_OK;
 }
 
 uint16_t tr_pipeline_listener_bound_port(
