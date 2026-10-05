@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "channel.h"
 #include "channel_internal.h"
 #include "../../io/connector_internal.h"
@@ -10,6 +11,7 @@
 #include "../../endian.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -68,6 +70,9 @@ struct tr_stream_slot {
 struct tr_channel {
 	struct tr_channel_config config;
 	pthread_mutex_t lock;
+	pthread_cond_t drain_cond;
+	uint32_t drain_waiters;
+	int drain_wait_closed;
 
 	struct tr_reactor *reactor;
 	struct tr_conn_handle control_connection;
@@ -897,8 +902,11 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 	stream->generation = generation;
 	stream->free_next = channel->free_stream_head;
 	channel->free_stream_head = slot;
-	if (channel->active_streams != 0)
+	if (channel->active_streams != 0) {
 		channel->active_streams--;
+		if (channel->active_streams == 0)
+			pthread_cond_broadcast(&channel->drain_cond);
+	}
 }
 
 static int tr_stream_connection_matches(const struct tr_channel *channel,
@@ -2199,6 +2207,7 @@ int tr_channel_start(struct tr_channel *channel)
 struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
+	int drain_cond_ready;
 	int keepalive_timer_ready;
 	int protocol_pool_ready;
 	int control_handler_installed;
@@ -2239,6 +2248,8 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	free(channel->streams);
 	if (build->keepalive_timer_ready)
 		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
+	if (build->drain_cond_ready)
+		pthread_cond_destroy(&channel->drain_cond);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&channel->lock);
 	free(channel);
@@ -2313,6 +2324,22 @@ static int tr_channel_create_common(
 	if (pthread_mutex_init(&channel->lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	build.lock_ready = 1;
+	{
+		pthread_condattr_t attr;
+
+		if (pthread_condattr_init(&attr) != 0)
+			return TR_ERR_SYS;
+		if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+			pthread_condattr_destroy(&attr);
+			return TR_ERR_SYS;
+		}
+		if (pthread_cond_init(&channel->drain_cond, &attr) != 0) {
+			pthread_condattr_destroy(&attr);
+			return TR_ERR_SYS;
+		}
+		pthread_condattr_destroy(&attr);
+		build.drain_cond_ready = 1;
+	}
 	ret = tr_reactor_timer_register(channel->reactor,
 					tr_channel_keepalive_timer_main,
 					channel, &channel->keepalive_timer);
@@ -2478,16 +2505,47 @@ int tr_channel_detach_for_finalize(struct tr_channel *channel)
 			       channel);
 }
 
-void tr_channel_finalize_detached(struct tr_channel *channel)
+static int tr_channel_client_reconnect_present(
+	struct tr_channel *channel);
+
+static int tr_channel_close_wait_admission(struct tr_channel *channel)
 {
+	int ret = TR_OK;
+
+	pthread_mutex_lock(&channel->lock);
+	channel->drain_wait_closed = 1;
+	if (channel->drain_waiters != 0U) {
+		pthread_cond_broadcast(&channel->drain_cond);
+		ret = TR_ERR_STATE;
+	}
+	pthread_mutex_unlock(&channel->lock);
+	return ret;
+}
+
+int tr_channel_finalize_detached(struct tr_channel *channel)
+{
+	int ret;
+
 	if (!channel)
-		return;
+		return TR_OK;
 
 #ifndef NDEBUG
 	assert(channel->teardown_detached);
 	assert(!channel->keepalive_timer_registered);
 #endif
 
+	/*
+	 * No new waiter may cross this point. Existing waiter ownership is counted
+	 * explicitly instead of relying on pthread_cond_destroy() as an implicit
+	 * lifetime barrier.
+	 */
+	ret = tr_channel_close_wait_admission(channel);
+#ifndef NDEBUG
+	assert(ret == TR_OK);
+#endif
+	if (ret != TR_OK)
+		return ret;
+
 	if (channel->streams) {
 		uint32_t i;
 
@@ -2499,34 +2557,89 @@ void tr_channel_finalize_detached(struct tr_channel *channel)
 	free(channel->stream_index);
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
+	(void)pthread_cond_destroy(&channel->drain_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
+	return TR_OK;
 }
 
-void tr_channel_destroy(struct tr_channel *channel)
+int tr_channel_destroy(struct tr_channel *channel)
 {
+	int control_handler_ret;
+	int bulk_handler_ret = TR_OK;
+	int ret;
+
 	if (!channel)
-		return;
+		return TR_OK;
 
-	(void)tr_channel_disable_keepalive(channel);
-	(void)tr_channel_disable_client_reconnect(channel);
-
-	(void)tr_reactor_set_handler(channel->control_connection, NULL, NULL,
-				     NULL);
-	if (!tr_conn_equal(channel->control_connection,
-			   channel->bulk_connection))
-		(void)tr_reactor_set_handler(channel->bulk_connection, NULL,
-					     NULL, NULL);
+	ret = tr_channel_close_wait_admission(channel);
+	if (ret != TR_OK)
+		return ret;
 
 	/*
-	 * 先阻止新的 Reactor callback 再次取得该 Channel，
-	 * 再等待已经复制了 callback_arg 的 in-flight callback 返回。
-	 * 这是释放 Channel 前必须完成的 quiescence 边界。
+	 * Teardown sources before freeing any storage they can reference. A Client
+	 * owns reconnect connector/timer state; Server Channels never enable that
+	 * source and may be finalized after their Reactor has already stopped.
 	 */
-	(void)tr_reactor_quiesce(channel->reactor);
+	ret = tr_channel_disable_keepalive(channel);
+	if (ret != TR_OK)
+		return ret;
+
+	if (channel->config.role == TR_CHANNEL_CLIENT &&
+	    tr_channel_client_reconnect_present(channel)) {
+		/*
+		 * A stopped Reactor is a valid teardown domain only when no reconnect
+		 * source remains. Normal Client facade teardown disables reconnect before
+		 * Runtime stop. If a low-level caller stops Reactor with connector/timer
+		 * ownership still published, fail closed rather than bypass owner detach.
+		 */
+		ret = tr_channel_disable_client_reconnect(channel);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	control_handler_ret = tr_reactor_set_handler(
+		channel->control_connection, NULL, NULL, NULL);
+	if (!tr_conn_equal(channel->control_connection,
+			   channel->bulk_connection))
+		bulk_handler_ret = tr_reactor_set_handler(
+			channel->bulk_connection, NULL, NULL, NULL);
+
+	/*
+	 * quiesce distinguishes "fully stopped" from "currently stopping":
+	 * - stopped: TR_OK, there can be no future callback even if SET_HANDLER
+	 *   returned CLOSED;
+	 * - stopping: TR_ERR_CLOSED, ownership has not converged yet, so fail closed.
+	 */
+	ret = tr_reactor_quiesce(channel->reactor);
+	if (ret != TR_OK)
+		return ret;
+
+	if (control_handler_ret != TR_OK &&
+	    control_handler_ret != TR_ERR_STALE &&
+	    control_handler_ret != TR_ERR_CLOSED)
+		return control_handler_ret;
+	if (bulk_handler_ret != TR_OK &&
+	    bulk_handler_ret != TR_ERR_STALE &&
+	    bulk_handler_ret != TR_ERR_CLOSED)
+		return bulk_handler_ret;
+
+	/*
+	 * keepalive has been synchronously disarmed above. Release its timer slot
+	 * before Channel storage so the timer queue no longer retains callback_arg.
+	 */
+	if (channel->keepalive_timer_registered) {
+		ret = tr_reactor_timer_unregister(channel->keepalive_timer);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+		channel->keepalive_timer_registered = 0;
+		memset(&channel->keepalive_timer, 0,
+		       sizeof(channel->keepalive_timer));
+	}
 
 	if (channel->streams) {
 		uint32_t i;
+
 		for (i = 0; i < channel->config.max_streams; ++i)
 			if (channel->streams[i].rx_reassembly)
 				tr_buffer_release(
@@ -2535,12 +2648,10 @@ void tr_channel_destroy(struct tr_channel *channel)
 	free(channel->stream_index);
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
-	if (channel->keepalive_timer_registered) {
-		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
-		channel->keepalive_timer_registered = 0;
-	}
+	(void)pthread_cond_destroy(&channel->drain_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
+	return TR_OK;
 }
 
 struct tr_channel_lifecycle_observer_request {
@@ -2934,6 +3045,21 @@ static int tr_channel_disable_client_reconnect_on_owner(void *arg)
 	return TR_OK;
 }
 
+static int tr_channel_client_reconnect_present(
+	struct tr_channel *channel)
+{
+	int present;
+
+	pthread_mutex_lock(&channel->lock);
+	present = channel->reconnect_enabled ||
+		channel->reconnect_connector != NULL ||
+		channel->reconnect_timer_registered ||
+		channel->control_reconnecting ||
+		channel->bulk_reconnecting;
+	pthread_mutex_unlock(&channel->lock);
+	return present;
+}
+
 int tr_channel_disable_client_reconnect(struct tr_channel *channel)
 {
 	if (!channel)
@@ -3126,63 +3252,84 @@ int tr_channel_begin_drain(struct tr_channel *channel)
 
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 {
-	uint64_t deadline_ns = 0;
+	struct timespec deadline;
+	int timed = timeout_ms != 0U;
+	int result = TR_OK;
 
 	if (!channel)
 		return TR_ERR_INVALID;
 
 	/*
-	 * drain completion requires Reactor progress: peer CLOSE/CANCEL, RX/TX and
-	 * stream callbacks all run on the owner. Waiting from that same owner would
-	 * stall the mechanism that can make active_streams reach zero.
+	 * wait_drained() is a pure waitqueue-style observer. It must not advance
+	 * Channel protocol state: GOAWAY admission/retry belongs to begin_drain()
+	 * on the Reactor owner. Waiting from the owner would stall the RX/TX and
+	 * close/cancel callbacks that can make active_streams reach zero.
 	 */
 	if (tr_reactor_in_owner_context())
 		return TR_ERR_STATE;
 
+	if (timed) {
+		uint64_t deadline_ns;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+			return TR_ERR_SYS;
+		deadline_ns = tr_add_sat_u64(
+			(uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
+				(uint64_t)deadline.tv_nsec,
+			(uint64_t)timeout_ms * UINT64_C(1000000));
+		deadline.tv_sec =
+			(time_t)(deadline_ns / UINT64_C(1000000000));
+		deadline.tv_nsec =
+			(long)(deadline_ns % UINT64_C(1000000000));
+	}
+
 	pthread_mutex_lock(&channel->lock);
+	if (channel->drain_wait_closed) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_CLOSED;
+	}
 	if (!channel->local_draining) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
-	pthread_mutex_unlock(&channel->lock);
-
-	if (timeout_ms != 0) {
-		struct timespec now;
-		if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-			return TR_ERR_SYS;
-		deadline_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
-			      (uint64_t)now.tv_nsec +
-			      (uint64_t)timeout_ms * UINT64_C(1000000);
-	}
-
-	for (;;) {
-		struct timespec pause_time;
-		uint32_t active;
-
-		pthread_mutex_lock(&channel->lock);
-		active = tr_channel_active_streams_locked(channel);
+	if (channel->active_streams == 0U) {
 		pthread_mutex_unlock(&channel->lock);
-		if (active == 0)
-			return TR_OK;
-		if (timeout_ms == 0)
-			return TR_AGAIN;
-
-		{
-			struct timespec now;
-			uint64_t now_ns;
-			if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-				return TR_ERR_SYS;
-			now_ns = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
-				 (uint64_t)now.tv_nsec;
-			if (now_ns >= deadline_ns)
-				return TR_AGAIN;
-		}
-
-		pause_time.tv_sec = 0;
-		pause_time.tv_nsec = 1000000L;
-		nanosleep(&pause_time, NULL);
-		(void)tr_channel_send_pending_goaway(channel);
+		return TR_OK;
 	}
+	if (!timed) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
+	if (channel->drain_waiters == UINT32_MAX) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STATE;
+	}
+	channel->drain_waiters++;
+
+	while (channel->active_streams != 0U) {
+		int ret;
+
+		if (channel->drain_wait_closed) {
+			result = TR_ERR_CLOSED;
+			break;
+		}
+		ret = pthread_cond_timedwait(
+			&channel->drain_cond, &channel->lock, &deadline);
+
+		if (ret == 0)
+			continue;
+		if (ret == ETIMEDOUT) {
+			result = TR_AGAIN;
+			break;
+		}
+		result = TR_ERR_SYS;
+		break;
+	}
+
+	assert(channel->drain_waiters != 0U);
+	channel->drain_waiters--;
+	pthread_mutex_unlock(&channel->lock);
+	return result;
 }
 
 int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
