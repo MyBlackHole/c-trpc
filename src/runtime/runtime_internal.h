@@ -45,8 +45,8 @@ struct tr_runtime_shard_config {
 	uint32_t peer_capacity;
 
 	/*
-	 * Internal Phase-7 shard memory budget. 0 means accounting-only/unbounded
-	 * until all major shard-local consumers participate in this capability.
+	 * 第 7 阶段内部 shard 内存预算。0 表示只记账而不设上限，
+	 * 直到主要 shard 本地消费者都接入该能力。
 	 */
 	uint64_t memory_budget_bytes;
 
