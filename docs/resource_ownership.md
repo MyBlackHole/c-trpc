@@ -202,6 +202,7 @@ Server peer 从 shard table 摘除时不能让 Reactor 等待正在执行的 wor
 
 ```text
 Reactor owner
+  -> check shard reaping budget
   -> detach RPC/Channel callbacks
   -> unregister deadline/keepalive source
   -> close executor admission
@@ -222,6 +223,10 @@ existing worker strong refs
 因此：
 
 - peer slot lifetime 与旧 Endpoint object lifetime 分离；
+- slot reuse 不等于 object lifetime 无界：每 shard 最多允许与 peer slot capacity
+  相同数量的 detached/reaping Endpoint；预算满时 disconnected peer 暂留 slot；
+- retired Endpoint finalizer 释放一个 budget 后通过 shard lifecycle eventfd 唤醒
+  Reactor owner，继续处理此前被延迟的 detach；
 - worker strong-ref 是 lifetime fence，不需要 reaper/cleanup thread 阻塞等待；
 - finalizer 只能做最终统计与释放，不能重新进入 Reactor protocol mutation。
 

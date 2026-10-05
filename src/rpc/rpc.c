@@ -218,6 +218,7 @@ struct tr_rpc_executor_callq {
 };
 
 struct tr_rpc_executor_group;
+struct tr_rpc_endpoint;
 
 struct tr_rpc_executor {
 	pthread_mutex_t lock;
@@ -250,6 +251,8 @@ struct tr_rpc_executor {
 	uint32_t ready_peak;
 
 	struct tr_rpc_executor_group *group;
+	/* Protected by executor-group lock; one intrusive scheduling node/Endpoint. */
+	struct tr_rpc_endpoint *group_ready_next;
 	int group_enqueued;
 	int stopping;
 	uint32_t started_threads;
@@ -259,12 +262,15 @@ struct tr_rpc_executor_group {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	pthread_t *threads;
-	struct tr_rpc_endpoint **ready_endpoints;
 
-	uint32_t capacity;
-	uint32_t head;
-	uint32_t tail;
-	uint32_t count;
+	/*
+	 * Intrusive ready queue: every Endpoint can publish at most one scheduling
+	 * token via executor.group_enqueued. Queue capacity therefore follows
+	 * Endpoint lifetime bounds instead of a second fixed ring that can fill.
+	 */
+	struct tr_rpc_endpoint *ready_head;
+	struct tr_rpc_endpoint *ready_tail;
+	uint32_t ready_count;
 
 	uint32_t thread_count;
 	uint32_t started_threads;
@@ -273,7 +279,6 @@ struct tr_rpc_executor_group {
 
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_thread_array, pthread_t, free)
-TR_DEFINE_PTR_OWNERSHIP(tr_rpc_endpoint_array, struct tr_rpc_endpoint *, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 			tr_rpc_executor_group_destroy)
 
@@ -1770,15 +1775,24 @@ static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
 	if (!group || !endpoint)
 		return TR_ERR_INVALID;
 
+	/*
+	 * Caller holds endpoint->executor.lock, while group_ready_next is protected
+	 * solely by group->lock. group_enqueued prevents duplicate publication.
+	 */
+#ifndef NDEBUG
+	assert(!endpoint->executor.group_enqueued);
+#endif
 	pthread_mutex_lock(&group->lock);
-	if (group->stopping)
+	if (group->stopping) {
 		ret = TR_ERR_CLOSED;
-	else if (group->count == group->capacity)
-		ret = TR_ERR_STATE;
-	else {
-		group->ready_endpoints[group->tail] = endpoint;
-		group->tail = (group->tail + 1U) % group->capacity;
-		group->count++;
+	} else {
+		endpoint->executor.group_ready_next = NULL;
+		if (group->ready_tail)
+			group->ready_tail->executor.group_ready_next = endpoint;
+		else
+			group->ready_head = endpoint;
+		group->ready_tail = endpoint;
+		group->ready_count++;
 		pthread_cond_signal(&group->cond);
 	}
 	pthread_mutex_unlock(&group->lock);
@@ -3022,17 +3036,20 @@ tr_rpc_executor_group_take(struct tr_rpc_executor_group *group)
 	struct tr_rpc_endpoint *endpoint;
 
 	pthread_mutex_lock(&group->lock);
-	while (group->count == 0 && !group->stopping)
+	while (!group->ready_head && !group->stopping)
 		pthread_cond_wait(&group->cond, &group->lock);
-	if (group->count == 0 && group->stopping) {
+	if (!group->ready_head && group->stopping) {
 		pthread_mutex_unlock(&group->lock);
 		return NULL;
 	}
 
-	endpoint = group->ready_endpoints[group->head];
-	group->ready_endpoints[group->head] = NULL;
-	group->head = (group->head + 1U) % group->capacity;
-	group->count--;
+	endpoint = group->ready_head;
+	group->ready_head = endpoint->executor.group_ready_next;
+	if (!group->ready_head)
+		group->ready_tail = NULL;
+	endpoint->executor.group_ready_next = NULL;
+	if (group->ready_count != 0U)
+		group->ready_count--;
 	pthread_mutex_unlock(&group->lock);
 	return endpoint;
 }
@@ -3236,8 +3253,6 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	struct tr_rpc_executor_group *group
 		TR_AUTO(tr_rpc_group_owner_cleanup) = NULL;
 	pthread_t *threads TR_AUTO(tr_rpc_thread_array_cleanup) = NULL;
-	struct tr_rpc_endpoint **ready_endpoints
-		TR_AUTO(tr_rpc_endpoint_array_cleanup) = NULL;
 	uint64_t total_calls;
 	uint32_t i;
 
@@ -3263,14 +3278,7 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 		return TR_ERR_NOMEM;
 
 	threads = (pthread_t *)calloc(thread_count, sizeof(*threads));
-	/*
-	 * Server reaper 会先从 peer table 移除旧 peer，再销毁旧 Endpoint。
-	 * 因此 retiring Endpoint 可能和 max_peers 个 live Endpoint 短暂重叠。
-	 * ready queue 额外保留一个 slot，用来容纳这个有界重叠窗口。
-	 */
-	ready_endpoints = (struct tr_rpc_endpoint **)calloc(
-		endpoint_capacity + 1U, sizeof(*ready_endpoints));
-	if (!threads || !ready_endpoints)
+	if (!threads)
 		return TR_ERR_NOMEM;
 
 	if (pthread_mutex_init(&group_mem->lock, NULL) != 0)
@@ -3281,9 +3289,6 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	}
 
 	group_mem->threads = tr_rpc_thread_array_take(&threads);
-	group_mem->ready_endpoints =
-		tr_rpc_endpoint_array_take(&ready_endpoints);
-	group_mem->capacity = endpoint_capacity + 1U;
 	group_mem->thread_count = thread_count;
 	group = tr_rpc_group_mem_take(&group_mem);
 
@@ -3313,7 +3318,11 @@ void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 	for (i = 0; i < group->started_threads; ++i)
 		(void)pthread_join(group->threads[i], NULL);
 
-	free(group->ready_endpoints);
+#ifndef NDEBUG
+	assert(group->ready_head == NULL);
+	assert(group->ready_tail == NULL);
+	assert(group->ready_count == 0U);
+#endif
 	free(group->threads);
 	pthread_cond_destroy(&group->cond);
 	pthread_mutex_destroy(&group->lock);

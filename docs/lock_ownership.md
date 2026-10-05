@@ -201,7 +201,10 @@ pending-retry completion 等不同引用来源都不会漏掉 owner-only waiter 
 
 **结论：保留。**
 
-保护 shard-local shared worker pool 的 ready-Endpoint queue。
+保护 shard-local shared worker pool 的 ready-Endpoint queue。该队列使用 Endpoint
+内部 intrusive node；每个 Endpoint 由 `group_enqueued` 保证最多发布一个 scheduling
+token，因此不存在第二个固定-size ready ring，也不存在 retiring Endpoint overlap
+把 ring 填满后丢失 replacement token 的状态。
 
 两把锁对应不同队列层级，不是重复锁。worker 只执行业务 Task，完成后通过
 Completion 返回原 Reactor owner。
