@@ -1518,6 +1518,8 @@ struct channel_test_ctx {
 	pthread_cond_t cond;
 	unsigned opened;
 	unsigned received;
+	unsigned remote_closed;
+	unsigned closed;
 	unsigned stream_errors;
 	unsigned channel_events;
 	unsigned channel_down;
@@ -1560,6 +1562,10 @@ static void channel_test_on_stream_event(struct tr_stream_handle stream,
 	if (event == TR_STREAM_EVENT_OPENED) {
 		ctx->opened++;
 		ctx->last_stream = stream;
+	} else if (event == TR_STREAM_EVENT_REMOTE_CLOSED) {
+		ctx->remote_closed++;
+	} else if (event == TR_STREAM_EVENT_CLOSED) {
+		ctx->closed++;
 	} else if (event == TR_STREAM_EVENT_ERROR) {
 		ctx->stream_errors++;
 	}
@@ -2387,6 +2393,30 @@ struct channel_wait_owner_probe {
 	int wait_ret;
 };
 
+struct channel_drain_open_race_probe {
+	struct tr_channel *draining;
+	struct tr_channel *peer;
+	struct tr_stream_handle raced_stream;
+	int drain_ret;
+	int open_ret;
+};
+
+static int channel_begin_drain_and_race_open_on_owner(void *arg)
+{
+	struct channel_drain_open_race_probe *probe =
+		(struct channel_drain_open_race_probe *)arg;
+
+	/*
+	 * Both operations execute in one owner turn. The peer cannot receive the
+	 * GOAWAY until this callback returns, so its STREAM_OPEN deterministically
+	 * represents an open that raced the drain barrier.
+	 */
+	probe->drain_ret = tr_channel_begin_drain(probe->draining);
+	probe->open_ret = tr_stream_open(
+		probe->peer, TR_LANE_CONTROL, &probe->raced_stream);
+	return TR_OK;
+}
+
 static int channel_wait_drained_from_owner(void *arg)
 {
 	struct channel_wait_owner_probe *probe =
@@ -2409,6 +2439,7 @@ static void test_channel_graceful_drain(void)
 	struct tr_stream_handle client_stream;
 	struct tr_stream_handle server_stream;
 	struct tr_stream_handle rejected;
+	struct channel_drain_open_race_probe race_probe;
 	struct tr_buffer_pool tx_pool;
 	struct tr_buffer *payload;
 	struct channel_test_ctx client_ctx;
@@ -2482,9 +2513,29 @@ static void test_channel_graceful_drain(void)
 	assert(tr_channel_enable_client_reconnect(
 		       client_channel, &reconnect_config) == TR_OK);
 
-	assert(tr_channel_begin_drain(client_channel) == TR_OK);
+	memset(&race_probe, 0, sizeof(race_probe));
+	race_probe.draining = client_channel;
+	race_probe.peer = server_channel;
+	assert(tr_reactor_call(
+		       reactor, channel_begin_drain_and_race_open_on_owner,
+		       &race_probe) == TR_OK);
+	assert(race_probe.drain_ret == TR_OK);
+	assert(race_probe.open_ret == TR_OK);
 	assert(tr_channel_enable_client_reconnect(
 		       client_channel, &reconnect_config) == TR_ERR_CLOSED);
+
+	/*
+	 * The raced peer OPEN was already submitted before peer GOAWAY could be
+	 * observed. The draining endpoint must reject it without allocating a local
+	 * Stream; the peer receives an ordinary remote-close for its local slot.
+	 */
+	wait_channel_counter(&server_ctx, &server_ctx.remote_closed, 1U);
+	assert(tr_channel_active_streams(client_channel) == 1U);
+	pthread_mutex_lock(&client_ctx.lock);
+	assert(client_ctx.opened == 1U);
+	pthread_mutex_unlock(&client_ctx.lock);
+	assert(tr_stream_close(race_probe.raced_stream) == TR_OK);
+	wait_channel_active_streams(server_channel, 1U);
 
 	memset(&wait_probe, 0, sizeof(wait_probe));
 	wait_probe.channel = client_channel;
