@@ -179,7 +179,7 @@ static void test_runtime_shard_listener_ownership(void)
 	assert(tr_runtime_shard_listener_fd(shard) == -1);
 	assert(tr_runtime_shard_bound_port(shard) == 0U);
 
-	/* Re-open proves explicit close fully releases the shard-owned resource. */
+	/* 再次打开用于证明显式关闭已经完全释放分片拥有的资源。 */
 	assert(tr_runtime_shard_listen_ipv4(
 		       shard, "127.0.0.1", 0U, 8, &bound) == TR_OK);
 	listener = tr_runtime_shard_listener_fd(shard);
@@ -187,7 +187,7 @@ static void test_runtime_shard_listener_ownership(void)
 
 	tr_runtime_destroy(runtime);
 
-	/* Runtime destruction is the final owner and must close a live listener. */
+	/* Runtime 销毁是最终所有者操作，必须关闭仍然存活的监听器。 */
 	errno = 0;
 	assert(fcntl(listener, F_GETFD) == -1);
 	assert(errno == EBADF);
@@ -275,8 +275,8 @@ static void test_runtime_shard_listener_events(void)
 	pthread_mutex_unlock(&ctx.lock);
 
 	/*
-	 * unregister is synchronous with the owner callback; once it returns the
-	 * callback cannot still be using the shard listener.
+	 * unregister 与所有者回调同步；
+	 * 它返回后，回调不可能继续使用该分片监听器。
 	 */
 	assert(tr_runtime_shard_disable_listener_events(shard) == TR_OK);
 	tr_socket_close(&client_fd);
@@ -380,7 +380,7 @@ static void test_runtime_shard_peer_event_source(void)
 	assert(poll(&pfd, 1U, 0) == 1);
 	assert(pfd.revents & POLLIN);
 
-	/* Multiple producers coalesce into one readable lifecycle event source. */
+	/* 多个生产者的通知合并到一个可读生命周期事件源。 */
 	tr_runtime_shard_drain_peer_event(shard);
 	pfd.revents = 0;
 	assert(poll(&pfd, 1U, 0) == 0);
@@ -467,7 +467,7 @@ static void test_runtime_shard_memory_budget(void)
 	uint64_t peer_bytes =
 		UINT64_C(2) * (uint64_t)sizeof(struct tr_runtime_peer);
 
-	/* Primitive semantics stay independently testable. */
+	/* 基础原语语义保持可以独立测试。 */
 	tr_memory_budget_init(&budget, 16U);
 	assert(tr_memory_budget_reserve(&budget, 8U) == TR_OK);
 	assert(tr_memory_budget_reserve(&budget, 9U) == TR_AGAIN);
@@ -483,9 +483,8 @@ static void test_runtime_shard_memory_budget(void)
 	assert(stats.peak_bytes == 8U);
 
 	/*
-	 * Accounting-only Runtime includes both the peer table and Reactor fixed
-	 * userspace allocations. Reactor therefore makes current strictly larger
-	 * than peer storage alone.
+	 * 只记账的 Runtime 同时包含对端表和 Reactor 固定用户态分配。
+	 * 因此 current 必须严格大于仅对端存储的大小。
 	 */
 	runtime_test_config_init(&config, &shard_config, 1U);
 	shard_config.peer_capacity = 2U;
@@ -499,7 +498,7 @@ static void test_runtime_shard_memory_budget(void)
 	assert(stats.rejection_events == 0U);
 	tr_runtime_destroy(runtime);
 
-	/* With no peer table, a one-byte limit proves Reactor reserves first. */
+	/* 不创建对端表时，一字节上限用于证明 Reactor 会先执行预算预留。 */
 	runtime = (struct tr_runtime *)(uintptr_t)1U;
 	runtime_test_config_init(&config, &shard_config, 1U);
 	shard_config.memory_budget_bytes = 1U;
@@ -567,7 +566,7 @@ static void test_runtime_self_stop_context_guards(void)
 		       &probe) == TR_ERR_STATE);
 	assert(probe.owner_context_seen == 1);
 
-	/* Self-stop rejection must happen before admission is closed. */
+	/* 自停止拒绝必须发生在关闭准入之前。 */
 	assert(tr_reactor_call(reactor, runtime_owner_ping, &ping_seen) == TR_OK);
 	assert(ping_seen == 1);
 
@@ -577,7 +576,7 @@ static void test_runtime_self_stop_context_guards(void)
 		       &probe) == TR_ERR_STATE);
 	assert(probe.owner_context_seen == 1);
 
-	/* External lifecycle owner can still stop and destroy normally. */
+	/* 外部生命周期所有者仍然可以正常停止并销毁。 */
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	tr_runtime_destroy(runtime);
 }
