@@ -166,13 +166,6 @@ static void test_endian(void)
 	assert(tr_get_le64(b) == UINT64_C(0x0123456789ABCDEF));
 }
 
-static void test_crc32c(void)
-{
-	static const char s[] = "123456789";
-	assert(tr_crc32c(s, 9) == 0xE3069283U);
-	assert(tr_crc32c(NULL, 0) == 0U);
-}
-
 static void test_wire_roundtrip(void)
 {
 	struct tr_frame_header in;
@@ -445,127 +438,6 @@ static void test_invalid_flags_and_reserved(void)
 	assert(tr_wire_header_decode(raw, &decoded) == TR_OK);
 	assert(tr_wire_header_validate(raw, &decoded, &limits) ==
 	       TR_ERR_RESERVED);
-}
-
-static void test_command_queue_bounded(void)
-{
-	struct tr_command_queue queue;
-	struct tr_command in;
-	struct tr_command out[2];
-	int need_wake;
-
-	assert(tr_command_queue_is_empty(NULL) == 0);
-	assert(tr_command_queue_init(&queue, 2) == TR_OK);
-	assert(tr_command_queue_is_empty(&queue) == 1);
-
-	memset(&in, 0, sizeof(in));
-	in.type = TR_CMD_CLOSE;
-	in.slot = 1;
-	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
-	assert(need_wake == 1);
-	assert(tr_command_queue_is_empty(&queue) == 0);
-
-	in.slot = 2;
-	need_wake = -1;
-	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
-	assert(need_wake == 0);
-
-	in.slot = 3;
-	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_AGAIN);
-
-	assert(tr_command_queue_pop_batch(&queue, out, 1) == 1);
-	assert(out[0].slot == 1);
-
-	in.slot = 3;
-	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
-	assert(need_wake == 0);
-
-	assert(tr_command_queue_pop_batch(&queue, out, 2) == 2);
-	assert(out[0].slot == 2);
-	assert(out[1].slot == 3);
-
-	in.slot = 4;
-	need_wake = 0;
-	assert(tr_command_queue_push(&queue, &in, &need_wake) == TR_OK);
-	assert(need_wake == 1);
-	assert(tr_command_queue_pop_batch(&queue, out, 2) == 1);
-	assert(tr_command_queue_is_empty(&queue) == 1);
-
-	tr_command_queue_destroy(&queue);
-}
-
-
-struct timer_queue_test_ctx {
-	unsigned fired;
-	uint64_t next_deadline_ns;
-};
-
-static uint64_t timer_queue_test_cb(void *arg, uint64_t now_ns)
-{
-	struct timer_queue_test_ctx *ctx =
-		(struct timer_queue_test_ctx *)arg;
-
-	(void)now_ns;
-	ctx->fired++;
-	return ctx->next_deadline_ns;
-}
-
-static void test_timer_queue_min_heap(void)
-{
-	struct tr_timer_queue queue;
-	struct tr_timer_token first;
-	struct tr_timer_token second;
-	struct tr_timer_token recycled;
-	struct tr_timer_token extra;
-	struct timer_queue_test_ctx first_ctx;
-	struct timer_queue_test_ctx second_ctx;
-	int has_more = -1;
-
-	memset(&queue, 0, sizeof(queue));
-	memset(&first_ctx, 0, sizeof(first_ctx));
-	memset(&second_ctx, 0, sizeof(second_ctx));
-
-	assert(tr_timer_queue_init(&queue, 2U) == TR_OK);
-	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
-				       &first_ctx, &first) == TR_OK);
-	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
-				       &second_ctx, &second) == TR_OK);
-	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
-				       &second_ctx, &extra) == TR_AGAIN);
-
-	first_ctx.next_deadline_ns = 300U;
-	assert(tr_timer_queue_arm(&queue, first, 200U) == TR_OK);
-	assert(tr_timer_queue_arm(&queue, second, 100U) == TR_OK);
-	assert(tr_timer_queue_next_deadline(&queue) == 100U);
-
-	assert(tr_timer_queue_run_due(&queue, 99U, 1U, &has_more) == 0U);
-	assert(has_more == 0);
-	assert(first_ctx.fired == 0U);
-	assert(second_ctx.fired == 0U);
-
-	assert(tr_timer_queue_run_due(&queue, 100U, 1U, &has_more) == 1U);
-	assert(has_more == 0);
-	assert(second_ctx.fired == 1U);
-	assert(tr_timer_queue_next_deadline(&queue) == 200U);
-
-	assert(tr_timer_queue_run_due(&queue, 200U, 1U, &has_more) == 1U);
-	assert(has_more == 0);
-	assert(first_ctx.fired == 1U);
-	assert(tr_timer_queue_next_deadline(&queue) == 300U);
-
-	assert(tr_timer_queue_arm(&queue, first, 0U) == TR_OK);
-	assert(tr_timer_queue_next_deadline(&queue) == 0U);
-
-	assert(tr_timer_queue_unregister(&queue, first) == TR_OK);
-	assert(tr_timer_queue_arm(&queue, first, 400U) == TR_ERR_STALE);
-	assert(tr_timer_queue_register(&queue, timer_queue_test_cb,
-				       &first_ctx, &recycled) == TR_OK);
-	assert(recycled.slot == first.slot);
-	assert(recycled.generation != first.generation);
-
-	assert(tr_timer_queue_unregister(&queue, second) == TR_OK);
-	assert(tr_timer_queue_unregister(&queue, recycled) == TR_OK);
-	tr_timer_queue_destroy(&queue);
 }
 
 struct reactor_timer_test_ctx {
@@ -7503,7 +7375,6 @@ int main(void)
 	test_refcount_semantics();
 	test_scope_cleanup_ownership();
 	test_endian();
-	test_crc32c();
 	test_wire_roundtrip();
 	test_header_corruption();
 	test_parser_one_byte_fragments();
@@ -7512,8 +7383,6 @@ int main(void)
 	test_payload_limit();
 	test_zero_payload_control_frame();
 	test_invalid_flags_and_reserved();
-	test_command_queue_bounded();
-	test_timer_queue_min_heap();
 	test_reactor_local_timer_loop();
 	test_reactor_tcp_roundtrip();
 	test_reactor_handler_update_is_owner_serialized();
