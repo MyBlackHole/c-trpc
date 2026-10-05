@@ -39,19 +39,19 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
 /*
- * True only while the current thread is executing inside a Reactor owner loop.
- * Lifecycle stop/destroy must never wait for or free their own owner thread.
+ * 仅当当前线程正在 Reactor 所有者循环中执行时为真。
+ * 生命周期 stop/destroy 绝不能等待或释放自己的所有者线程。
  */
 int tr_reactor_in_owner_context(void);
 
 /*
- * Optional raw connection preface gate. The Reactor reads exactly byte_count
- * bytes before allowing normal TRP1 parser input, so bytes following the
- * preface remain in the socket receive queue and are never over-read.
+ * 可选的原始连接前导数据门控。
+ * Reactor 在允许普通 TRP1 解析器输入前精确读取 byte_count 个字节，
+ * 因此前导数据之后的字节会保留在 socket 接收队列中，不会被过度读取。
  *
- * feed runs on the owner Reactor and must be short/non-blocking. On the final
- * fragment it must set *done = 1 after completing any routing/handler setup.
- * release is called exactly once on success or connection close/error.
+ * feed 在 Reactor 所有者上运行，必须短小且非阻塞。
+ * 最后一个分片完成全部路由/处理器设置后必须设置 *done = 1。
+ * 无论成功还是连接关闭/出错，release 都恰好调用一次。
  */
 typedef int (*tr_reactor_preface_feed_cb)(
 	struct tr_conn_handle connection, const uint8_t *data, size_t len,
@@ -71,9 +71,9 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	struct tr_conn_handle *out);
 
 /*
- * Owner-only immediate close helpers for compound owner state transitions.
- * Unlike the public close/abort APIs, these do not enqueue a command: the
- * connection is retired before the caller continues mutating related state.
+ * 仅限所有者使用的立即关闭辅助接口，用于复合所有者状态转换。
+ * 与公开 close/abort API 不同，这些接口不会入队命令：
+ * 在调用方继续修改相关状态前，连接已经完成退役。
  */
 int tr_reactor_close_on_owner(struct tr_conn_handle connection);
 int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
@@ -82,11 +82,11 @@ typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 
 /*
- * Register one listener/event source in the Reactor epoll set. The callback
- * runs on the Reactor owner and must be short/non-blocking.
+ * 在 Reactor 的 epoll 集合中注册一个 listener/事件源。
+ * 回调运行在 Reactor 所有者上，必须短小且非阻塞。
  *
- * register/unregister are synchronous lifecycle barriers. unregister returns
- * only after an in-flight callback has completed.
+ * register/unregister 是同步生命周期屏障；
+ * unregister 只有在正在执行的回调完成后才返回。
  */
 int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 				 tr_reactor_listener_cb callback, void *arg);
@@ -99,11 +99,10 @@ int tr_reactor_peer_event_unregister(struct tr_reactor *reactor, int fd);
 typedef void (*tr_reactor_aux_event_cb)(int fd, uint32_t events, void *arg);
 
 /*
- * Bounded auxiliary fd event sources，供 owner-local 状态机使用，例如多个并发的
- * nonblocking connect。每个 registration 使用独立 generation token，slot 复用后
- * stale epoll event 会被安全丢弃。
+ * 有界辅助 fd 事件源，供所有者本地状态机使用，例如多个并发的非阻塞连接。
+ * 每次注册使用独立代次令牌；槽位复用后，过期的 epoll 事件会被安全丢弃。
  *
- * Reactor 只观察 fd，不取得 fd ownership，也不会主动 close。
+ * Reactor 只观察 fd，不取得 fd 所有权，也不会主动关闭。
  * events 只接受 EPOLLIN/EPOLLOUT；ERR/HUP 始终自动加入。
  */
 int tr_reactor_aux_event_register(struct tr_reactor *reactor, int fd,
@@ -120,8 +119,8 @@ struct tr_reactor_timer_handle {
 };
 
 /*
- * Reactor-local timer capability. register/arm/unregister 都串行化到 owner；
- * callback 在 Reactor thread 上执行，必须短小且非阻塞。
+ * Reactor 本地定时器能力。register/arm/unregister 都串行化到所有者；
+ * 回调在 Reactor 线程上执行，必须短小且非阻塞。
  */
 int tr_reactor_timer_register(struct tr_reactor *reactor,
 			      tr_reactor_timer_cb callback, void *arg,
