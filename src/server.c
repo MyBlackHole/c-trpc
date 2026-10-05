@@ -845,15 +845,9 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
-	{
-		struct tr_runtime_peer_stats peer_stats;
-
-		tr_runtime_shard_peer_stats(shard->runtime, &peer_stats);
-		if (peer_stats.current >= peer_stats.capacity) {
-			tr_runtime_shard_peer_note_capacity_rejection(
-				shard->runtime);
-			return TR_AGAIN;
-		}
+	if (!tr_runtime_shard_peer_can_admit(shard->runtime)) {
+		tr_runtime_shard_peer_note_capacity_rejection(shard->runtime);
+		return TR_AGAIN;
 	}
 
 	for (slot = 0; slot < tr_server_shard_peer_capacity(shard); ++slot) {

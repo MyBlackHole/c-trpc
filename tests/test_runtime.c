@@ -313,7 +313,11 @@ static void test_runtime_shard_peer_resources(void)
 	assert(stats.capacity == 3U);
 	assert(stats.current == 0U);
 	assert(stats.peak == 0U);
+	assert(stats.lifetime_capacity == 6U);
+	assert(stats.lifetime_current == 0U);
+	assert(stats.lifetime_peak == 0U);
 	assert(stats.reaping_current == 0U);
+	assert(tr_runtime_shard_peer_can_admit(shard));
 	assert(stats.ready_total == 0U);
 	assert(stats.reaped_total == 0U);
 	assert(stats.capacity_rejections == 0U);
@@ -347,6 +351,52 @@ static void test_runtime_shard_peer_resources(void)
 	assert(stats.peak == 2U);
 	assert(stats.reaping_current == 0U);
 	assert(stats.reaped_total == 2U);
+
+	/*
+	 * Active slot reuse is independent from Endpoint object lifetime. Retired
+	 * peers can accumulate, but active + reaping remains bounded by the
+	 * RuntimeShard lifetime capacity.
+	 */
+	tr_runtime_shard_peer_note_added(shard);
+	tr_runtime_shard_peer_note_added(shard);
+	tr_runtime_shard_peer_note_added(shard);
+	assert(!tr_runtime_shard_peer_can_admit(shard));
+
+	tr_runtime_shard_peer_note_removed_for_reap(shard);
+	tr_runtime_shard_peer_note_removed_for_reap(shard);
+	tr_runtime_shard_peer_note_removed_for_reap(shard);
+	assert(tr_runtime_shard_peer_can_admit(shard));
+
+	tr_runtime_shard_peer_note_added(shard);
+	tr_runtime_shard_peer_note_added(shard);
+	tr_runtime_shard_peer_note_added(shard);
+	tr_runtime_shard_peer_stats(shard, &stats);
+	assert(stats.current == 3U);
+	assert(stats.reaping_current == 3U);
+	assert(stats.lifetime_current == 6U);
+	assert(stats.lifetime_peak == 6U);
+	assert(!tr_runtime_shard_peer_can_admit(shard));
+
+	tr_runtime_shard_peer_note_removed_for_reap(shard);
+	tr_runtime_shard_peer_note_removed_for_reap(shard);
+	tr_runtime_shard_peer_note_removed_for_reap(shard);
+	tr_runtime_shard_peer_stats(shard, &stats);
+	assert(stats.current == 0U);
+	assert(stats.reaping_current == 6U);
+	assert(stats.lifetime_current == 6U);
+	assert(!tr_runtime_shard_peer_can_admit(shard));
+
+	tr_runtime_shard_peer_note_reaped(shard);
+	assert(tr_runtime_shard_peer_can_admit(shard));
+	tr_runtime_shard_peer_note_reaped(shard);
+	tr_runtime_shard_peer_note_reaped(shard);
+	tr_runtime_shard_peer_note_reaped(shard);
+	tr_runtime_shard_peer_note_reaped(shard);
+	tr_runtime_shard_peer_note_reaped(shard);
+	tr_runtime_shard_peer_stats(shard, &stats);
+	assert(stats.reaping_current == 0U);
+	assert(stats.lifetime_current == 0U);
+	assert(stats.reaped_total == 8U);
 
 	tr_runtime_destroy(runtime);
 }

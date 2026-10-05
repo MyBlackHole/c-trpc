@@ -250,6 +250,7 @@ struct tr_rpc_executor {
 	uint32_t ready_peak;
 
 	struct tr_rpc_executor_group *group;
+	struct tr_rpc_endpoint *group_next;
 	int group_enqueued;
 	int stopping;
 	uint32_t started_threads;
@@ -259,11 +260,8 @@ struct tr_rpc_executor_group {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	pthread_t *threads;
-	struct tr_rpc_endpoint **ready_endpoints;
-
-	uint32_t capacity;
-	uint32_t head;
-	uint32_t tail;
+	struct tr_rpc_endpoint *ready_head;
+	struct tr_rpc_endpoint *ready_tail;
 	uint32_t count;
 
 	uint32_t thread_count;
@@ -273,7 +271,6 @@ struct tr_rpc_executor_group {
 
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_thread_array, pthread_t, free)
-TR_DEFINE_PTR_OWNERSHIP(tr_rpc_endpoint_array, struct tr_rpc_endpoint *, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
 			tr_rpc_executor_group_destroy)
 
@@ -1765,24 +1762,30 @@ tr_rpc_executor_ready_undo_push_locked(struct tr_rpc_executor *executor,
 static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
 					 struct tr_rpc_endpoint *endpoint)
 {
-	int ret = TR_OK;
-
 	if (!group || !endpoint)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&group->lock);
-	if (group->stopping)
-		ret = TR_ERR_CLOSED;
-	else if (group->count == group->capacity)
-		ret = TR_ERR_STATE;
-	else {
-		group->ready_endpoints[group->tail] = endpoint;
-		group->tail = (group->tail + 1U) % group->capacity;
-		group->count++;
-		pthread_cond_signal(&group->cond);
+	if (group->stopping) {
+		pthread_mutex_unlock(&group->lock);
+		return TR_ERR_CLOSED;
 	}
+
+	/*
+	 * One Endpoint owns at most one queued scheduling token. Store that token
+	 * as an intrusive link instead of a second fixed-capacity ring: retired
+	 * Endpoint overlap cannot overflow an unrelated queue capacity.
+	 */
+	endpoint->executor.group_next = NULL;
+	if (group->ready_tail)
+		group->ready_tail->executor.group_next = endpoint;
+	else
+		group->ready_head = endpoint;
+	group->ready_tail = endpoint;
+	group->count++;
+	pthread_cond_signal(&group->cond);
 	pthread_mutex_unlock(&group->lock);
-	return ret;
+	return TR_OK;
 }
 
 static int
@@ -3029,9 +3032,11 @@ tr_rpc_executor_group_take(struct tr_rpc_executor_group *group)
 		return NULL;
 	}
 
-	endpoint = group->ready_endpoints[group->head];
-	group->ready_endpoints[group->head] = NULL;
-	group->head = (group->head + 1U) % group->capacity;
+	endpoint = group->ready_head;
+	group->ready_head = endpoint->executor.group_next;
+	endpoint->executor.group_next = NULL;
+	if (!group->ready_head)
+		group->ready_tail = NULL;
 	group->count--;
 	pthread_mutex_unlock(&group->lock);
 	return endpoint;
@@ -3236,8 +3241,6 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	struct tr_rpc_executor_group *group
 		TR_AUTO(tr_rpc_group_owner_cleanup) = NULL;
 	pthread_t *threads TR_AUTO(tr_rpc_thread_array_cleanup) = NULL;
-	struct tr_rpc_endpoint **ready_endpoints
-		TR_AUTO(tr_rpc_endpoint_array_cleanup) = NULL;
 	uint64_t total_calls;
 	uint32_t i;
 
@@ -3263,14 +3266,7 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 		return TR_ERR_NOMEM;
 
 	threads = (pthread_t *)calloc(thread_count, sizeof(*threads));
-	/*
-	 * Server reaper 会先从 peer table 移除旧 peer，再销毁旧 Endpoint。
-	 * 因此 retiring Endpoint 可能和 max_peers 个 live Endpoint 短暂重叠。
-	 * ready queue 额外保留一个 slot，用来容纳这个有界重叠窗口。
-	 */
-	ready_endpoints = (struct tr_rpc_endpoint **)calloc(
-		endpoint_capacity + 1U, sizeof(*ready_endpoints));
-	if (!threads || !ready_endpoints)
+	if (!threads)
 		return TR_ERR_NOMEM;
 
 	if (pthread_mutex_init(&group_mem->lock, NULL) != 0)
@@ -3281,9 +3277,6 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	}
 
 	group_mem->threads = tr_rpc_thread_array_take(&threads);
-	group_mem->ready_endpoints =
-		tr_rpc_endpoint_array_take(&ready_endpoints);
-	group_mem->capacity = endpoint_capacity + 1U;
 	group_mem->thread_count = thread_count;
 	group = tr_rpc_group_mem_take(&group_mem);
 
@@ -3313,7 +3306,6 @@ void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
 	for (i = 0; i < group->started_threads; ++i)
 		(void)pthread_join(group->threads[i], NULL);
 
-	free(group->ready_endpoints);
 	free(group->threads);
 	pthread_cond_destroy(&group->cond);
 	pthread_mutex_destroy(&group->lock);

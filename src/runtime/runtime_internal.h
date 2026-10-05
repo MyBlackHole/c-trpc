@@ -21,10 +21,20 @@ struct tr_runtime_peer {
 };
 
 struct tr_runtime_peer_stats {
+	/* Active peer-table slot capacity/current/peak. */
 	uint32_t capacity;
 	uint32_t current;
 	uint32_t peak;
+
+	/*
+	 * Detached Endpoint/Channel objects may outlive their reusable peer slot.
+	 * lifetime_* bounds active + reaping objects, not just table occupancy.
+	 */
+	uint32_t lifetime_capacity;
+	uint32_t lifetime_current;
+	uint32_t lifetime_peak;
 	uint32_t reaping_current;
+
 	uint64_t ready_total;
 	uint64_t reaped_total;
 	uint64_t capacity_rejections;
@@ -120,6 +130,11 @@ void tr_runtime_shard_peer_note_added(struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_ready(struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard);
+/*
+ * Admission is allowed only when both an active slot and lifetime-object
+ * budget are available. Detached/reaping peers keep consuming lifetime budget.
+ */
+int tr_runtime_shard_peer_can_admit(const struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_capacity_rejection(
 	struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,

@@ -23,7 +23,11 @@ struct tr_server_config {
 	 */
 	uint32_t shard_count;
 
-	/* 所有 shard 合计允许同时保留的最大 peer 对象数。 */
+	/*
+	 * 所有 shard 合计允许同时 ACTIVE 的最大 peer 数。
+	 * 已 detach、等待异步 strong-ref drain 的 retired peer 不再占用 active
+	 * slot，但 Runtime 会以同规模的内部 lifetime tail budget 保证其仍有界。
+	 */
 	uint32_t max_peers;
 	/* 所有 listener 合计的 backlog budget，由 Server 确定性拆分到各 shard。 */
 	int listen_backlog;

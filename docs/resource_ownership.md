@@ -225,6 +225,10 @@ existing worker strong refs
 - worker strong-ref 是 lifetime fence，不需要 reaper/cleanup thread 阻塞等待；
 - finalizer 只能做最终统计与释放，不能重新进入 Reactor protocol mutation。
 
+slot 可复用不等于 object 可无界累积。RuntimeShard 对 active + reaping peer object
+设置独立 lifetime capacity；新 admission 必须同时取得 active slot 与 lifetime budget。
+因此慢 worker 可以让旧 Endpoint 跨 slot reuse 存活，但不能无限制造 retired object。
+
 Call 自己的 `task_refs` 与 Endpoint refcount 职责不同：
 
 - `tr_refcount`：保护 Endpoint 对象生命周期；

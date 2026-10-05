@@ -41,6 +41,17 @@ last-ref finalizer：已有 worker task 继续持 strong-ref；最后一个 ref 
 而不是占用中的 slot。Server destroy 只需等待 `reaping_current == 0`，不需要
 join reaper thread。
 
+Peer slot capacity 与 Endpoint object lifetime capacity 明确分离：`max_peers` 只限制
+同时 ACTIVE 的 peer-table slot；detached peer 可继续作为 reaping object 存活。
+RuntimeShard 使用内部 lifetime bound = `2 * peer_capacity`，每次新 peer admission 都
+要求 `active + reaping < lifetime_capacity`。disconnect 只是把一个对象从 active
+转换为 reaping，不增加 lifetime count；因此 slot 可及时复用，同时 retired object
+数量仍严格有界。
+
+Shard RPC executor-group 的 ready Endpoint queue 使用 intrusive link，每个 Endpoint
+最多发布一个 scheduling token，不再为 retiring overlap 猜测
+`endpoint_capacity + 1` 的 ring 大小。
+
 Runtime config 已改为显式 per-shard config array：
 
 ```c

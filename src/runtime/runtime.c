@@ -24,6 +24,8 @@ struct tr_runtime_shard {
 	uint32_t peer_capacity;
 	uint32_t peer_count;
 	uint32_t peer_count_peak;
+	uint32_t peer_lifetime_capacity;
+	uint32_t peer_lifetime_peak;
 	_Atomic uint32_t peer_reaping_count;
 	uint64_t peers_ready_total;
 	_Atomic uint64_t peers_reaped_total;
@@ -70,6 +72,8 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		shard->peer_storage_bytes = 0U;
 	}
 	shard->peer_capacity = 0U;
+	shard->peer_lifetime_capacity = 0U;
+	shard->peer_lifetime_peak = 0U;
 }
 
 static int tr_runtime_rpc_executor_config_valid(
@@ -86,7 +90,7 @@ static int tr_runtime_rpc_executor_config_valid(
 static int
 tr_runtime_shard_config_valid(const struct tr_runtime_shard_config *config)
 {
-	if (!config)
+	if (!config || config->peer_capacity > UINT32_MAX / 2U)
 		return 0;
 	return tr_runtime_rpc_executor_config_valid(&config->rpc_executor);
 }
@@ -130,6 +134,8 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		tr_memory_budget_init(
 			&shard->memory_budget, shard_config->memory_budget_bytes);
 		shard->peer_capacity = shard_config->peer_capacity;
+		shard->peer_lifetime_capacity =
+			shard->peer_capacity * 2U;
 		if (shard->peer_capacity != 0U) {
 			uint64_t peer_storage_bytes =
 				(uint64_t)shard->peer_capacity *
@@ -421,12 +427,20 @@ tr_runtime_shard_peer_at(struct tr_runtime_shard *shard, uint32_t slot)
 
 void tr_runtime_shard_peer_note_added(struct tr_runtime_shard *shard)
 {
+	uint32_t reaping;
+	uint32_t lifetime;
+
 	if (!shard)
 		return;
 
+	reaping = atomic_load_explicit(
+		&shard->peer_reaping_count, memory_order_relaxed);
 	shard->peer_count++;
 	if (shard->peer_count > shard->peer_count_peak)
 		shard->peer_count_peak = shard->peer_count;
+	lifetime = shard->peer_count + reaping;
+	if (lifetime > shard->peer_lifetime_peak)
+		shard->peer_lifetime_peak = lifetime;
 }
 
 void tr_runtime_shard_peer_note_ready(struct tr_runtime_shard *shard)
@@ -466,6 +480,21 @@ void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard)
 					 memory_order_relaxed);
 }
 
+int tr_runtime_shard_peer_can_admit(const struct tr_runtime_shard *shard)
+{
+	uint32_t reaping;
+	uint64_t lifetime;
+
+	if (!shard || shard->peer_capacity == 0U)
+		return 0;
+
+	reaping = atomic_load_explicit(
+		&shard->peer_reaping_count, memory_order_relaxed);
+	lifetime = (uint64_t)shard->peer_count + (uint64_t)reaping;
+	return shard->peer_count < shard->peer_capacity &&
+	       lifetime < (uint64_t)shard->peer_lifetime_capacity;
+}
+
 void tr_runtime_shard_peer_note_capacity_rejection(
 	struct tr_runtime_shard *shard)
 {
@@ -488,6 +517,9 @@ void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 	out->peak = shard->peer_count_peak;
 	out->reaping_current = atomic_load_explicit(
 		&shard->peer_reaping_count, memory_order_relaxed);
+	out->lifetime_capacity = shard->peer_lifetime_capacity;
+	out->lifetime_current = out->current + out->reaping_current;
+	out->lifetime_peak = shard->peer_lifetime_peak;
 	out->ready_total = shard->peers_ready_total;
 	out->reaped_total = atomic_load_explicit(
 		&shard->peers_reaped_total, memory_order_relaxed);
