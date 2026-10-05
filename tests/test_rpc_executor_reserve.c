@@ -404,7 +404,7 @@ int main(void)
 		args[i].index = i;
 	}
 
-	/* A is already admitted and occupies the only worker. */
+	/* A 已经准入，并占用唯一工作线程。 */
 	start_call(client_rpc, 1U, &args[CALL_A], &calls[CALL_A]);
 	for (i = 0; i <= ADMISSION_LIMIT; ++i) {
 		unsigned index = FILLER_BASE + i;
@@ -415,7 +415,7 @@ int main(void)
 	send_tag(calls[CALL_A], 'A', '1');
 	wait_flag(&ctx, &ctx.blocker_waiting);
 
-	/* New first tasks may consume only 14/16 nodes. */
+	/* 新 Call 的首任务最多只能使用 16 个节点中的 14 个。 */
 	for (i = 0; i < ADMISSION_LIMIT; ++i) {
 		unsigned index = FILLER_BASE + i;
 		send_tag(calls[index], 'F', (char)('0' + (i % 10U)));
@@ -423,8 +423,8 @@ int main(void)
 	wait_executor(server_rpc, ADMISSION_LIMIT, 1U);
 
 	/*
-	 * This first task is rejected while two physical executor nodes still
-	 * remain.  It proves the reserve is admission policy, not hard-full.
+	 * 即使仍有两个物理执行器节点可用，这个首任务也会被拒绝。
+	 * 这证明预留属于准入策略，而不是物理资源池已经完全耗尽。
 	 */
 	send_tag(calls[OVERLOAD_INDEX], 'F', 'X');
 	wait_finished(&ctx, OVERLOAD_INDEX);
@@ -437,8 +437,8 @@ int main(void)
 	wait_executor(server_rpc, ADMISSION_LIMIT, 1U);
 
 	/*
-	 * A2/A3 are continuations of an already accepted Call and may consume
-	 * the two reserved nodes even though new admissions are blocked.
+	 * A2/A3 属于已经接受的 Call 的续处理，
+	 * 即使新的准入已经被阻止，也允许使用两个预留节点。
 	 */
 	send_tag(calls[CALL_A], 'A', '2');
 	wait_executor(server_rpc, ADMISSION_LIMIT + 1U, 1U);
@@ -466,7 +466,7 @@ int main(void)
 	assert(tr_rpc_call_close_send(calls[OVERLOAD_INDEX]) == TR_OK);
 	wait_executor(server_rpc, 0U, 0U);
 
-	/* Admission recovers on the same connection after queued work drains. */
+	/* 已排队工作排空后，同一连接上的准入恢复。 */
 	start_call(client_rpc, 2U, &args[RECOVERY_INDEX], &calls[RECOVERY_INDEX]);
 	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT);
 	send_tag(calls[RECOVERY_INDEX], 'R', '1');
@@ -478,11 +478,11 @@ int main(void)
 	assert(tr_rpc_call_close_send(calls[RECOVERY_INDEX]) == TR_OK);
 
 	/*
-	 * close_send() publishes transport half-close asynchronously. An empty
-	 * executor snapshot before the peer observes that half-close is not a
-	 * quiescence barrier: the later Stream event may enqueue one final
-	 * lifecycle task. Wait until both Channel Stream tables are empty first,
-	 * then require the executor and message pool to be fully drained.
+	 * close_send() 异步发布传输半关闭。
+	 * 在对端观察到半关闭之前，即使执行器快照为空，也不代表已经静默：
+	 * 后续 Stream 事件仍可能加入最后一个生命周期任务。
+	 * 必须先等待两端 Channel Stream 表都为空，
+	 * 再要求执行器和消息资源池完全排空。
 	 */
 	wait_channels_idle(client_channel, server_channel);
 	wait_executor(server_rpc, 0U, 0U);
