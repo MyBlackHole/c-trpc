@@ -889,11 +889,97 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_client_destroy_live_data(void)
+{
+	enum { PAYLOAD_BYTES = 16U * 1024U * 1024U };
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_transport_bytes bytes;
+	uint8_t *payload;
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	server_config.limits.max_message_bytes = PAYLOAD_BYTES;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(
+		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	client_config.limits.max_message_bytes = PAYLOAD_BYTES;
+	client_config.connection_groups.max_data_connections = 1U;
+	client_config.connection_groups.max_active_transfers = 1U;
+	client_config.connection_groups.on_transfer_ready =
+		on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	ctx.client = client;
+
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+
+	assert(wait_data_offer(server, UINT64_C(6001)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 6001U,
+		       UINT64_C(5101)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+
+	payload = (uint8_t *)malloc(PAYLOAD_BYTES);
+	assert(payload != NULL);
+	memset(payload, 0x5a, PAYLOAD_BYTES);
+	bytes.data = payload;
+	bytes.len = PAYLOAD_BYTES;
+	assert(tr_client_connection_group_send(
+		       client, 6001U, UINT64_C(5201), &bytes) == TR_OK);
+	free(payload);
+
+	/*
+	 * 不先 close/drain Connection Group。destroy 必须自己跨 owner barrier：
+	 * DATA close 同步归还所有带 group* 的 TX buffer，然后才允许释放 group。
+	 * 大消息跨多个 Reactor TX quantum，使测试覆盖“destroy 时 TX 尚未自然完成”
+	 * 的实际路径；ASan/TSan 会验证 callback 与 release_cb 不再访问已释放 group。
+	 */
+	tr_client_destroy(client);
+	client = NULL;
+	ctx.client = NULL;
+
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	tr_server_destroy(server);
+
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 int main(void)
 {
 	test_public_connection_group_server();
 	test_public_connection_group_client_control();
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_client_drain_cancels_offer();
+	test_public_connection_group_client_destroy_live_data();
 	return 0;
 }
