@@ -1,68 +1,75 @@
 # Reactor 整轮预算与调度诊断
 
-本轮是 Phase 2 的预算收敛，不引入 CONTROL 优先级、多 Reactor 或重连状态机。
-命令 FIFO、同步 owner call、quiesce 与 STOP 前已接受 Completion 的清理语义保持不变。
+本轮是阶段 2 的预算收敛，不引入 CONTROL 优先级、多 Reactor 或重连状态机。
+命令 FIFO、同步所有者调用、静默以及 STOP 前已经接受的完成事件清理语义保持不变。
 
 ## 一轮只有一份额度
 
-一轮从 command dequeue 开始，到 epoll 返回后的 RX / Timer / TX 调度结束。
-轮次中途的 wake、可读、可写事件不会补充预算。
+一轮从命令出队开始，到 epoll 返回后的 RX / 定时器 / TX 调度结束。
+轮次中途的唤醒、可读、可写事件不会补充预算。
 
 | 工作 | 每轮上限 | 单位 |
 |---|---|---|
-| Command | 64 | 已出队命令，含失效句柄命令 |
-| Completion | 64 | 已出队 Completion |
-| Timer | 64 | Timer callback |
-| RX | `rx_budget_bytes` | 实际 recv 的 wire 字节，包含帧头 |
-| TX | `tx_budget_bytes` | 实际 sendmsg 的 wire 字节，包含帧头 |
-| RX ready / TX ready | 各 64 | 连接调度次数，不是不同连接数量 |
+| 命令 | 64 | 已出队命令，包含失效句柄命令 |
+| 完成事件 | 64 | 已出队完成事件 |
+| 定时器 | 64 | 定时器回调 |
+| RX | `rx_budget_bytes` | 实际 `recv` 的线协议字节，包含帧头 |
+| TX | `tx_budget_bytes` | 实际 `sendmsg` 的线协议字节，包含帧头 |
+| RX 就绪 / TX 就绪 | 各 64 | 连接调度次数，不是不同连接数量 |
 
-每次 RX/TX 连接调度还有 64 KiB quantum，达到 quantum 时移至对应就绪队列尾部。
+每次 RX/TX 连接调度还有 64 KiB 量子，达到量子时移至对应就绪队列尾部。
 只要还有整轮额度，一个连接可以再次获得调度；已有其他就绪连接会先得到机会。
-队列节点嵌入 connection，调度热路径不为此分配内存。关闭连接时同时移除 RX/TX
-就绪节点，再复用槽位；epoll token 的 generation 校验继续有效。
+队列节点嵌入 Connection，调度热路径不会因此分配内存。
+关闭连接时同时移除 RX/TX 就绪节点，再复用槽位；
+epoll 令牌的代次校验继续有效。
 
-**轮次预算语义：** `tr_reactor_config` 的 RX/TX 零值默认行为保持不变；两个
-I/O 字节预算表示所有连接共享的整轮额度。Phase 7 另外增加了 repository-internal
-memory-budget capability pointer，它只参与 Reactor 固定 userspace heap accounting，
-不改变 RX/TX 调度额度语义。
+**轮次预算语义：** `tr_reactor_config` 的 RX/TX 零值默认行为保持不变；
+两个 I/O 字节预算表示所有连接共享的整轮额度。
+阶段 7 另外增加了仓库内部内存预算能力指针，
+它只参与 Reactor 固定用户态堆内存记账，不改变 RX/TX 调度额度语义。
 默认 RX/TX 各 4 MiB；应用不能再把它们理解为每连接每次回调额度。
-在多连接负载下，这可能改变吞吐与轮转次数，应按实际负载调优，不宣称吞吐提升。
+在多连接负载下，这可能改变吞吐与轮转次数，应按实际负载调优，
+不能直接宣称吞吐提升。
 
-TX 不只是发送后扣减计数：发送前按剩余字节截断 iovec 列表，保证单次系统调用
-也不会超额。帧头、scatter/gather 跨片段、DATA 自动分帧均沿用 `wire_pos` 续传；
-预算可以小于一个帧头，不会因此插入别的消息或改变 wire 顺序。
+TX 不只是发送后扣减计数：发送前按剩余字节裁剪 iovec 列表，
+保证单次系统调用也不会超额。
+帧头、分散/聚集跨片段、DATA 自动分帧都沿用 `wire_pos` 续传；
+预算可以小于一个帧头，不会因此插入其他消息或改变线协议顺序。
 
 ## 续处理不等于忙等
 
 ```text
-命令/Completion/Timer 仍有工作，或 RX/TX 就绪队列非空
+命令/完成事件/定时器仍有工作，或 RX/TX 就绪队列非空
     -> epoll_wait(timeout=0)，让其他事件获得机会，下一轮继续
 
 TX 返回 EAGAIN
-    -> 移出可运行集合，等待 EPOLLOUT 后重新进入 TX ready
+    -> 移出可运行集合，等待 EPOLLOUT 后重新进入 TX 就绪队列
 
-RX 返回 EAGAIN / RX buffer pool 暂停
-    -> 不因“连接存在”而进入就绪队列；等待可读 / resume
+RX 返回 EAGAIN / RX Buffer 资源池暂停
+    -> 不因“连接存在”而进入就绪队列；等待可读 / 恢复
 
-没有当前可运行工作
-    -> 等待最近 Timer deadline，或无限期等待 I/O/wake
+当前没有可运行工作
+    -> 等待最近的定时器截止时间，或无限期等待 I/O/唤醒
 ```
 
-Completion 的零预算 pop 不消费条目，但在队列锁内观察并返回 `has_more`。
-非空时保留 `wake_pending`，空队列允许未来 producer 发出新唤醒。不会无锁读取
-队列计数，也不会依赖已经被合并的唤醒来继续处理积压。
+完成队列的零预算弹出不会消费条目，但会在队列锁内观察并返回 `has_more`。
+非空时保留 `wake_pending`，空队列允许未来生产者发出新唤醒。
+不会无锁读取队列计数，也不会依赖已经被合并的唤醒继续处理积压。
 
-wake 使用非 semaphore eventfd：一次成功读取已消费累计计数；新写入仍保持可读。
-不再反复读到 EAGAIN，避免持续唤醒生产者把 owner 留在 wake drain 循环。
+唤醒使用非信号量模式 eventfd：
+一次成功读取已经消费累计计数；新写入仍保持可读。
+不再反复读取到 `EAGAIN`，
+避免持续唤醒生产者把所有者留在唤醒排空循环。
 
-STOP 仍按 FIFO 处理。停止接收后，所有已接受 Completion 必须完整 drain，
-不受正常轮次的 64 条限制；不会因为为了公平性而丢弃退出清理。
+STOP 仍按 FIFO 处理。
+停止接收后，所有已经接受的完成事件必须完整排空，
+不受正常轮次的 64 条限制；
+不会因为公平性限制而丢弃退出清理工作。
 
 ## 最小诊断 API
 
-`tr_reactor_work`、`tr_reactor_stats` 与 `tr_reactor_get_stats()` 继续作为
-repository-internal execution diagnostics。它们不属于 stable installed SDK。
+`tr_reactor_work`、`tr_reactor_stats` 与 `tr_reactor_get_stats()`
+继续作为仓库内部执行诊断接口，不属于稳定安装 SDK。
 
 ```c
 struct tr_reactor_stats stats;
@@ -73,28 +80,33 @@ if (ret == TR_OK) {
 }
 ```
 
-统计由 owner 在轮次结束时一次性累计。运行中的外部线程通过现有同步 owner call
-获取一致快照；owner 回调直接读取，不自等待。创建后启动前、stop 返回并 join 后
-也可读取。与 stop 并发时可能返回 `TR_ERR_CLOSED`；失败不修改输出。
-调用方必须保证 Reactor 存活；这是同步诊断接口，不是信号安全或无等待接口。
+统计由所有者在轮次结束时一次性累计。
+运行中的外部线程通过现有同步所有者调用取得一致快照；
+所有者回调直接读取，不发生自等待。
+创建后启动前、`stop` 返回并完成线程等待后也可以读取。
+与停止并发时可能返回 `TR_ERR_CLOSED`；失败不修改输出。
+调用方必须保证 Reactor 存活；
+这是同步诊断接口，不是信号安全或无等待接口。
 
 | 字段 | 精确含义 |
 |---|---|
-| `turns` | 已完成的轮次，含收到 STOP 的命令轮次 |
+| `turns` | 已完成轮次，包含收到 STOP 的命令轮次 |
 | `limits` | 本 Reactor 的整轮工作上限 |
 | `total` | 已完成正常轮次累计工作；不含当前尚未完成轮次 |
 | `max_per_turn` | 各字段在已完成轮次中的最大值 |
-| `budget_hits` | 各字段额度减到零的轮次数；不代表当时必有积压 |
-| `epoll_polls / epoll_waits` | timeout 为零 / 非零的 epoll 调用次数；不代表实际睡眠时长 |
-| `timer_lateness_ns_max` | 有额度时，Timer batch dispatch 对最早到期项的迟到采样最大值 |
-| `shutdown_completions` | STOP drain 完成数，单独计数，不并入 `total.completions` |
+| `budget_hits` | 各字段额度减到零的轮次数；不代表当时一定存在积压 |
+| `epoll_polls / epoll_waits` | 超时为零 / 非零的 epoll 调用次数；不代表实际睡眠时长 |
+| `timer_lateness_ns_max` | 有额度时，定时器批量分发相对最早到期项的迟到采样最大值 |
+| `shutdown_completions` | STOP 排空完成事件数量，单独计数，不并入 `total.completions` |
 
-Timer 迟到采样不是每个回调的直方图，也不等于 P99。统计只覆盖调度器出队工作；
-回调内直接嵌套的 owner call/Completion 不重复计入命令/Completion 数量。
+定时器迟到采样不是每个回调的直方图，也不等于 P99。
+统计只覆盖调度器出队工作；
+回调内直接嵌套的所有者调用/完成事件不重复计入命令/完成事件数量。
 本轮没有新增队列等待时间、积压高水位、CPU 时间或延迟直方图。
 
-预算是工作数量约束，不是硬实时保证。不能抢占耗时 callback，也不限制任意
-应用 callback 的内部工作；CRC、协议解析、锁竞争与 EINTR 重试不等价于字节数。
+预算是工作数量约束，不是硬实时保证。
+不能抢占耗时回调，也不限制任意应用回调的内部工作；
+CRC、协议解析、锁竞争与 `EINTR` 重试不等价于字节数。
 
 ## 验证
 
@@ -104,24 +116,34 @@ xmake test -v -j1 'test_reactor_budget/*'
 xmake test -v -j1
 ```
 
-`test_reactor_budget` 仅在测试链接时包装 queue pop、recv、sendmsg、
-`tr_parser_produce` 和 epoll_wait；生产库没有测试钩子。RX 的实际字节数及
-首字节暂停门槛在解析器入口观察：当前 Reactor 将每次正数 recv 返回值原样
-传入该入口，避免把 libc 符号包装是否生效作为测试继续执行的前提。
-不会绕过 sanitizer 的系统调用拦截器。观察到的 RX/TX 总字节还必须与 owner
-快照一致，防止钩子漏执行时用零计数误报通过。
+`test_reactor_budget` 只在测试链接时包装队列弹出、`recv`、`sendmsg`、
+`tr_parser_produce` 和 `epoll_wait`；生产库没有测试钩子。
+RX 的实际字节数及首字节暂停门槛在解析器入口观察：
+当前 Reactor 会把每次正数 `recv` 返回值原样传入该入口，
+避免把 libc 符号包装是否生效作为测试继续执行的前提。
+不会绕过内存/线程检查器的系统调用拦截器。
+观察到的 RX/TX 总字节还必须与所有者快照一致，
+防止钩子漏执行时用零计数误报通过。
 
-覆盖 1、17、4096 字节额度，双连接双向 wire 校验，四 buffer 的 scatter/gather
-与自动分帧，200 个 Completion 与 200 次立即到期 Timer，EAGAIN 后等待并恢复，
-RX 待续处理时关闭并同槽位复用，以及零预算 Completion 标志。另有 70 连接、
-每轮 1 字节的场景，超过一次 epoll 的 64 事件批次：每个连接的首帧必须在任何
-连接第二帧完成前被接收，不能只靠最终收齐数据证明轮转公平性。测试为所有
-连接提供足够 RX buffer，避免把内存池背压混入调度顺序验证。
+覆盖 1、17、4096 字节额度，
+双连接双向线协议校验，四个 Buffer 的分散/聚集与自动分帧，
+200 个完成事件与 200 次立即到期定时器，
+`EAGAIN` 后等待并恢复，
+RX 待续处理时关闭并同槽位复用，以及零预算完成事件标志。
+另有 70 个连接、每轮 1 字节的场景，超过一次 epoll 的 64 事件批次：
+每个连接的首帧必须在任何连接第二帧完成前被接收，
+不能只靠最终收齐数据证明轮转公平性。
+测试为所有连接提供足够 RX Buffer，
+避免把内存池背压混入调度顺序验证。
 
-各运行场景同时核对运行中 owner/外部快照、停止后快照、精确字节累计、
-单轮峰值和预算耗尽计数。条件变量、执行计数和实际字节边界决定测试时序；
-10 秒具名条件等待和 60 秒进程 alarm 仅检测挂死，不把毫秒级耗时作为性能门槛。
-标准输出即时刷新，失败会报告具体等待条件。原有 fairness/退出、runtime threads、
-timer 与 Transport/RPC 测试继续纳入完整 CI，覆盖同步调用、STOP drain、
-RX pause/resume 等原有行为。Sanitizer CI 保留失败退出码，同时上传完整诊断日志；
-失败时附上精确 Git 源码快照，便于复现，不启用自动重试或错误抑制。
+各运行场景同时核对运行中所有者/外部快照、停止后快照、精确字节累计、
+单轮峰值和预算耗尽计数。
+条件变量、执行计数和实际字节边界决定测试时序；
+10 秒具名条件等待和 60 秒进程 `alarm` 只检测挂死，
+不把毫秒级耗时作为性能门槛。
+标准输出即时刷新，失败会报告具体等待条件。
+原有公平性/退出、运行时线程、定时器与传输/RPC 测试继续纳入完整 CI，
+覆盖同步调用、STOP 排空、RX 暂停/恢复等原有行为。
+内存/线程检查器 CI 保留失败退出码，同时上传完整诊断日志；
+失败时附上精确 Git 源码快照，便于复现，
+不启用自动重试或错误抑制。
