@@ -75,7 +75,7 @@ struct tr_command_queue {
 	uint32_t waiters;
 	int wait_accepting;
 
-	/* Producer-side attribution, updated under the existing queue lock. */
+	/* 生产者侧压力归因统计，在现有队列锁保护下更新。 */
 	uint64_t pushed_send;
 	uint64_t full_send;
 	uint64_t pushed_resume_rx;
