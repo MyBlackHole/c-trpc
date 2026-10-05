@@ -53,7 +53,7 @@ struct tr_connection_stats {
 	int tx_wait_writable;
 };
 
-/* Work units: dequeued entries, timer callbacks, wire bytes and ready visits. */
+/* 工作单位包括：已出队项目、定时器回调、线协议字节和就绪访问次数。 */
 struct tr_reactor_work {
 	uint64_t commands;
 	uint64_t completions;
@@ -74,14 +74,14 @@ struct tr_reactor_stats {
 	struct tr_reactor_work limits;
 	struct tr_reactor_work total;
 	struct tr_reactor_work max_per_turn;
-	/* Turns reaching a limit, not proof that more work remained. */
+	/* 达到上限的轮次数；并不证明当时一定还有剩余工作。 */
 	struct tr_reactor_work budget_hits;
-	/* epoll calls with zero / nonzero timeout, not measured sleep time. */
+	/* 超时参数为零/非零的 epoll 调用次数，不表示实际睡眠时长。 */
 	uint64_t epoll_polls;
 	uint64_t epoll_waits;
-	/* Oldest due timer's lateness sampled at timer batch dispatch. */
+	/* 分发定时器批次时采样最早到期定时器的迟到时间。 */
 	uint64_t timer_lateness_ns_max;
-	/* STOP drain is outside normal turn limits and total.completions. */
+	/* STOP 排空不受正常轮次限制，也不计入 total.completions。 */
 	uint64_t shutdown_completions;
 
 	/*
@@ -93,18 +93,18 @@ struct tr_reactor_stats {
 	struct tr_queue_observation command_queue;
 	struct tr_queue_observation completion_queue;
 
-	/* Producer-side attribution for command queue pressure. */
+	/* 命令队列压力的生产者侧归因统计。 */
 	struct tr_reactor_command_observation command_send;
 	struct tr_reactor_command_observation command_resume_rx;
 	struct tr_reactor_command_observation command_call;
 	struct tr_reactor_command_observation command_other;
 
-	/* Bounded transport pools. */
+	/* 有界传输资源池。 */
 	struct tr_pool_observation rx_buffer_pool;
 	struct tr_pool_observation tx_item_pool;
 	struct tr_pool_observation control_tx_item_pool;
 
-	/* Populated only when TR_OBSERVABILITY_TIMING is enabled. */
+	/* 仅在启用 TR_OBSERVABILITY_TIMING 时填充。 */
 	uint32_t observability_flags;
 	uint64_t busy_ns;
 	uint64_t poll_ns;
@@ -132,14 +132,14 @@ struct tr_reactor_config {
 	uint32_t rx_buffer_size;
 	uint32_t max_payload_len;
 
-	/* Aggregate wire-byte limits per Reactor turn, shared by all connections. */
+	/* 每个 Reactor 轮次共享的线协议字节总上限，由全部连接共同使用。 */
 	uint32_t rx_budget_bytes;
 	uint32_t tx_budget_bytes;
 
-	/* TR_OBSERVABILITY_* flags; timing is opt-in to protect the hot path. */
+	/* TR_OBSERVABILITY_* 标志；计时按需启用，避免影响热路径。 */
 	uint32_t observability_flags;
 
-	/* Internal RuntimeShard accounting owner; NULL keeps standalone mode. */
+	/* 内部 RuntimeShard 记账所有者；NULL 表示保持独立运行模式。 */
 	struct tr_memory_budget *memory_budget;
 };
 
@@ -213,11 +213,11 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 				    struct tr_connection_stats *out);
 
 /*
- * Coherent snapshot of completed turns since creation, excluding the current
- * turn and nested direct owner calls. Running reactors serialize the read via
- * synchronous owner call; owner callbacks read directly. Also valid before
- * start and after stop has joined. A race with stop may return TR_ERR_CLOSED;
- * failures leave *out unchanged. The caller must keep reactor alive.
+ * 返回自创建以来已完成轮次的一致快照，不包含当前轮次和嵌套直接所有者调用。
+ * Reactor 运行期间，通过同步所有者调用串行化读取；所有者回调可以直接读取。
+ * 启动前以及 stop 已经完成线程等待后同样有效。
+ * 与 stop 竞争时可能返回 TR_ERR_CLOSED；失败时保持 *out 不变。
+ * 调用方必须保证 reactor 在调用期间存活。
  */
 int tr_reactor_get_stats(struct tr_reactor *reactor, struct tr_reactor_stats *out);
 
