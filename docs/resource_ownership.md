@@ -226,6 +226,46 @@ refs == 0 -> 释放 Endpoint
 也就是说，回调源与工作线程完成事件都在 Reactor 仍存活时完成正常所有者收敛，
 不再依赖 Runtime 停止后的兜底最终清理路径。
 
+### 9.1.1 Client Connection Group 销毁
+
+Client Connection Group 本身不使用引用计数；它依赖 Reactor owner quiescence
+作为终局生命周期屏障。以下对象都可能异步保存裸 `group *`：
+
+- CONTROL/DATA connection 的 frame/event callback；
+- Connector 的 timer / auxiliary-fd callback；
+- DATA TX buffer 的 `release_cb`。
+
+因此不能由外部线程读取 `group->control` 判断“已经断开”后直接释放对象。
+正常销毁必须是一个同步 owner transaction：
+
+```text
+external destroy
+    ->
+Reactor owner
+    -> closing/draining = true
+    -> cancel Connector
+    -> close all DATA connections
+         -> 同步释放 connection TX queue
+         -> DATA send buffer release_cb
+         -> send_bytes_inflight--
+    -> close CONTROL connection
+    -> unregister/destroy Connector timer + aux source
+    -> verify:
+         send_bytes_inflight == 0
+         transfer_count == 0
+         all DATA slots FREE
+    ->
+owner barrier 返回
+    ->
+free transfers/data/pool/group
+```
+
+`send_bytes_inflight == 0` 不只是统计值，而是析构安全条件：DATA send buffer
+的 release callback 会访问 `group`，因此只要该计数仍非零，`group` 就不能释放。
+
+如果 owner barrier 返回错误，Client destroy 必须 fail-closed，保留
+Connection Group、Client 和 Runtime storage，不能继续进入 Runtime stop/free。
+
 ### 9.2 服务端解除关联后的最终清理
 
 服务端对端从分片表摘除时，不能让 Reactor 等待正在执行的工作线程。
