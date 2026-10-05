@@ -66,9 +66,9 @@ int tr_pipeline_control(struct tr_pipeline *pipeline,
 			struct tr_conn_handle *out);
 
 /*
- * CONTROL-plane membership capability:
- * reserve returns an index/generation before a DATA socket exists.
- * attach consumes only the exact RESERVED capability.
+ * CONTROL 控制面成员能力：
+ * reserve 在 DATA socket 存在前返回索引/代次；
+ * attach 只消费精确匹配的 RESERVED 能力。
  */
 int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
 			     struct tr_pipeline_data_ref *out);
@@ -76,12 +76,13 @@ int tr_pipeline_cancel_data_reservation(
 	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
 
 /*
- * Idempotent peer cancellation for one exact issued generation.
+ * 针对某个已签发精确代次的幂等对端取消。
  *
- * RESERVED -> FREE is the only state mutation. The same generation already
- * ATTACHED or already FREE returns TR_OK as a no-op; a reused generation is
- * TR_ERR_STALE. This lets a peer converge after DATA preface handoff without
- * needing an attach ACK and without risking ABA cancellation.
+ * 唯一状态变化是 RESERVED -> FREE。
+ * 同一代次已经 ATTACHED 或已经 FREE 时，以空操作返回 TR_OK；
+ * 代次已经复用时返回 TR_ERR_STALE。
+ * 这样对端在 DATA 前导数据移交后无需 attach ACK 也能收敛，
+ * 同时避免 ABA 取消风险。
  */
 int tr_pipeline_cancel_data_offer(
 	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
@@ -90,7 +91,7 @@ int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref data,
 			    struct tr_conn_handle connection);
 
-/* Compatibility helper: atomically reserve + attach one DATA membership. */
+/* 兼容辅助接口：原子地预留并附加一个 DATA 成员。 */
 int tr_pipeline_add_data(struct tr_pipeline *pipeline,
 			 struct tr_conn_handle connection,
 			 struct tr_pipeline_data_ref *out);
@@ -101,8 +102,8 @@ int tr_pipeline_data_connection(struct tr_pipeline *pipeline,
 				struct tr_conn_handle *out);
 
 /*
- * Owner-coherent snapshot of ATTACHED DATA memberships. Callers provide a
- * bounded array; capacity smaller than the current attached count is rejected.
+ * ATTACHED DATA 成员的所有者一致性快照。
+ * 调用方提供有界数组；容量小于当前已附加数量时拒绝请求。
  */
 int tr_pipeline_attached_data_snapshot(
 	struct tr_pipeline *pipeline, struct tr_pipeline_attached_data *out,
@@ -116,10 +117,11 @@ int tr_pipeline_select_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref *out);
 
 /*
- * CONTROL barrier primitive: select one currently ATTACHED DATA membership and
- * bind stream affinity atomically on the owner. RESERVED slots are never
- * eligible. TR_OK means the returned token is safe to advertise as
- * TRANSFER_READY; TR_AGAIN means no attached DATA is currently available.
+ * CONTROL 屏障原语：选择一个当前 ATTACHED 的 DATA 成员，
+ * 并在所有者上原子绑定 Stream 亲和关系。
+ * RESERVED 槽位永远不会参与选择。
+ * 返回 TR_OK 表示该令牌可以安全地作为 TRANSFER_READY 发布；
+ * 返回 TR_AGAIN 表示当前没有可用的已附加 DATA。
  */
 int tr_pipeline_prepare_transfer(
 	struct tr_pipeline *pipeline, uint32_t stream_id,
