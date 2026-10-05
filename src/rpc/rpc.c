@@ -385,7 +385,7 @@ static uint64_t tr_rpc_timeout_deadline_ns(uint32_t timeout_ms)
  * detached-finalizer lifecycle 已拆到 endpoint->ref_lock。
  *
  * endpoint->lock 仍是过渡锁，直到剩余 application control-plane API 也迁移到
- * owner command。
+ * 所有者命令。
  */
 static int tr_rpc_owner_call(struct tr_rpc_endpoint *endpoint,
 			     int (*fn)(void *arg), void *arg)
@@ -3959,7 +3959,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		/*
 		 * Normal STATUS、cancel、deadline、connection failure 都必须经过
 		 * 同一个 terminal helper：它同时线性化 FINISHED once 与
-		 * calls_completed observability。
+		 * calls_completed 可观测性统计。
 		 */
 		ret = tr_rpc_notify_terminal_locked(
 			endpoint, slot, call, wire.status);
