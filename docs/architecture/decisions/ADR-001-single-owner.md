@@ -1,38 +1,40 @@
-# ADR-001：Protocol state 采用 Reactor single-owner
+# ADR-001：协议状态采用 Reactor 单所有者
 
-**Status: Accepted**
+**状态：已接受**
 
-## Context
+## 背景
 
-Connection、Channel、Stream、RPC Call 等对象一旦允许 Reactor、worker、maintenance、application thread 共同直接修改，就需要大量 mutex/atomic，并容易产生生命周期 race。
+Connection、Channel、Stream、RPC Call 等对象一旦允许 Reactor、工作线程、
+维护线程和应用线程共同直接修改，就需要大量互斥锁/原子变量，并容易产生生命周期竞争。
 
-## Decision
+## 决策
 
-Mutable protocol state 由一个 Reactor shard 独占。
+可变协议状态由一个 Reactor 分片独占。
 
-非 owner：
+非所有者通过：
 
 ```text
-command/completion
-    -> owner Reactor
-    -> mutate
+命令/完成事件
+    -> 所有者 Reactor
+    -> 修改状态
 ```
 
-不允许通过“先拿对象锁”成为临时共同 owner。
+不允许通过“先取得对象锁”成为临时共同所有者。
 
-## Consequences
+## 影响
 
 优点：
 
-- hot path 大量状态无需锁；
-- ownership/lifetime 更容易证明；
-- stale generation 可以在 owner 入口统一处理；
+- 热路径大量状态无需加锁；
+- 所有权/生命周期更容易证明；
+- 陈旧代次可以在所有者入口统一处理；
 - TSan 模型更清晰。
 
 代价：
 
-- cross-thread API 需要 command queue；
-- 需要注意 queue backpressure 和 wakeup；
-- owner Reactor 可能成为 elephant-flow 单核瓶颈。
+- 跨线程 API 需要命令队列；
+- 需要处理队列背压和唤醒；
+- 所有者 Reactor 可能成为超大流量单核瓶颈。
 
-如果 profiling 证明单 owner 成为结构瓶颈，应进一步拆 state shard，而不是让多个线程直接共享同一对象。
+如果性能分析证明单所有者成为结构性瓶颈，应继续拆分状态分片，
+而不是让多个线程直接共享同一个对象。
