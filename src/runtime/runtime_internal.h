@@ -118,6 +118,8 @@ struct tr_runtime_peer *
 tr_runtime_shard_peer_at(struct tr_runtime_shard *shard, uint32_t slot);
 void tr_runtime_shard_peer_note_added(struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_ready(struct tr_runtime_shard *shard);
+int tr_runtime_shard_peer_reaping_at_capacity(
+	const struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard);
 void tr_runtime_shard_peer_note_capacity_rejection(

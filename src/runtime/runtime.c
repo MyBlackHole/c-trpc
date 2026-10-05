@@ -1,5 +1,6 @@
 #include "runtime_internal.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -435,6 +436,18 @@ void tr_runtime_shard_peer_note_ready(struct tr_runtime_shard *shard)
 		shard->peers_ready_total++;
 }
 
+int tr_runtime_shard_peer_reaping_at_capacity(
+	const struct tr_runtime_shard *shard)
+{
+	uint32_t current;
+
+	if (!shard || shard->peer_capacity == 0U)
+		return 0;
+	current = atomic_load_explicit(
+		&shard->peer_reaping_count, memory_order_acquire);
+	return current >= shard->peer_capacity;
+}
+
 void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard)
 {
 	if (!shard)
@@ -443,27 +456,36 @@ void tr_runtime_shard_peer_note_removed_for_reap(struct tr_runtime_shard *shard)
 	if (shard->peer_count != 0U)
 		shard->peer_count--;
 	(void)atomic_fetch_add_explicit(&shard->peer_reaping_count, 1U,
-					 memory_order_relaxed);
+					 memory_order_release);
 }
 
 void tr_runtime_shard_peer_note_reaped(struct tr_runtime_shard *shard)
 {
+	uint32_t current;
+	int decremented = 0;
+
 	if (!shard)
 		return;
 
-	{
-		uint32_t current = atomic_load_explicit(
-			&shard->peer_reaping_count, memory_order_relaxed);
-
-		while (current != 0U &&
-		       !atomic_compare_exchange_weak_explicit(
-			       &shard->peer_reaping_count, &current,
-			       current - 1U, memory_order_relaxed,
-			       memory_order_relaxed))
-			;
+	current = atomic_load_explicit(
+		&shard->peer_reaping_count, memory_order_acquire);
+	while (current != 0U) {
+		if (atomic_compare_exchange_weak_explicit(
+			    &shard->peer_reaping_count, &current,
+			    current - 1U, memory_order_acq_rel,
+			    memory_order_acquire)) {
+			decremented = 1;
+			break;
+		}
 	}
-	(void)atomic_fetch_add_explicit(&shard->peers_reaped_total, 1U,
-					 memory_order_relaxed);
+
+#ifndef NDEBUG
+	assert(decremented);
+#endif
+	if (decremented)
+		(void)atomic_fetch_add_explicit(
+			&shard->peers_reaped_total, 1U,
+			memory_order_relaxed);
 }
 
 void tr_runtime_shard_peer_note_capacity_rejection(

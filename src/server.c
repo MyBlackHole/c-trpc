@@ -653,6 +653,12 @@ static void tr_server_finish_detached_peer(
 	pthread_cond_broadcast(&server->finalizer_cond);
 	pthread_mutex_unlock(&server->finalizer_lock);
 
+	/*
+	 * A disconnected peer may still occupy a slot while the shard's retired
+	 * Endpoint budget is full. Freeing one retired object reopens detach
+	 * admission; wake the owner so it can retry those slots.
+	 */
+	tr_runtime_shard_signal_peer_event(shard->runtime);
 	free(detached);
 }
 
@@ -688,6 +694,16 @@ static void tr_server_detach_disconnected_peers_on_owner(
 			(struct tr_server_detached_peer *)snapshot.finalize_ctx;
 		if (!detached)
 			continue;
+
+		/*
+		 * Peer-table slot lifetime and retired Endpoint lifetime are separate,
+		 * but both must remain bounded. When all retirement slots are in use,
+		 * leave this disconnected peer published and retry after a finalizer
+		 * signals the shard lifecycle eventfd.
+		 */
+		if (snapshot.rpc &&
+		    tr_runtime_shard_peer_reaping_at_capacity(shard->runtime))
+			break;
 
 		/*
 		 * Runs on the Reactor owner after Channel DOWN notifications return.
@@ -1707,7 +1723,8 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 		if (!peer || !peer->used)
 			continue;
 
-		if (peer->rpc && peer->channel)
+		if (peer->rpc && peer->channel &&
+		    !tr_server_peer_disconnected(peer))
 			stats->peers_ready_current++;
 
 		if (peer->rpc &&

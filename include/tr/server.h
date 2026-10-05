@@ -23,7 +23,11 @@ struct tr_server_config {
 	 */
 	uint32_t shard_count;
 
-	/* 所有 shard 合计允许同时保留的最大 peer 对象数。 */
+	/*
+	 * 所有 shard 合计的 peer-table slot 上限。Detached/reaping peer 不再占
+	 * slot，但每 shard 的 retiring Endpoint 数内部同样受该 shard slot
+	 * capacity 限制，因此 slot reuse 不会演化成无界对象积压。
+	 */
 	uint32_t max_peers;
 	/* 所有 listener 合计的 backlog budget，由 Server 确定性拆分到各 shard。 */
 	int listen_backlog;

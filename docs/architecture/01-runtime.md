@@ -37,6 +37,13 @@ context，peer slot 立即清空并允许下一条连接复用。Endpoint owner 
 last-ref finalizer：已有 worker task 继续持 strong-ref；最后一个 ref 释放时自动
 采集最终 Endpoint/Channel stats 并 free detached context。
 
+slot lifetime 与 retired object lifetime 分离，但两者都必须有界：每 shard 的
+`reaping_current` 最大不超过该 shard 的 peer slot capacity。retiring budget 满时，
+新的 disconnected peer 暂留 peer table，不执行不可逆 detach；任一旧 finalizer
+归还 reaping slot 后 signal shard lifecycle eventfd，Reactor owner 再重试 detach。
+因此最多存在一份 live/table capacity 加一份同规模 retired capacity，不会因为 slot
+复用产生无界 Endpoint/Channel 积压。
+
 `reaping_current` 统计的是已经脱离 peer table、仍在等待 strong-ref 的旧 peer，
 而不是占用中的 slot。Server destroy 只需等待 `reaping_current == 0`，不需要
 join reaper thread。

@@ -6926,6 +6926,145 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_server_reaping_budget_defers_detach(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_facade_tuning tuning;
+	struct tr_server *server = NULL;
+	struct tr_client *first = NULL;
+	struct tr_client *second = NULL;
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_call_handle call;
+	struct shared_executor_test_ctx ctx;
+	struct tr_server_stats stats;
+	struct timespec deadline;
+	struct timespec pause_time;
+	uint16_t port = 0U;
+	unsigned attempt;
+	int ret = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	tr_facade_tuning_init(&tuning);
+	tuning.executor_threads = 1U;
+	assert(tr_server_create_with_tuning(
+		       &server_config, &tuning, &server) == TR_OK);
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = 91U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1024U;
+	method.max_response_bytes = 1024U;
+	assert(tr_server_register_method(server, &method,
+					 shared_executor_test_handler,
+					 &ctx) == TR_OK);
+	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 500U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+
+	assert(tr_client_create(&client_config, &first) == TR_OK);
+	assert(tr_client_connect(first, "127.0.0.1", port) == TR_OK);
+	assert(tr_client_register_method(first, &method) == TR_OK);
+	request.data = (const uint8_t *)"hold";
+	request.len = 4U;
+	assert(tr_client_unary_call(
+		       first, 91U, 1U, &request, NULL, NULL, &call) == TR_OK);
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx.lock);
+	while (ctx.entered < 1U && ret == 0)
+		ret = pthread_cond_timedwait(&ctx.cond, &ctx.lock, &deadline);
+	assert(ret == 0);
+	assert(ctx.active == 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	tr_client_destroy(first);
+	first = NULL;
+
+	pause_time.tv_sec = 0;
+	pause_time.tv_nsec = 10000000L;
+	memset(&stats, 0, sizeof(stats));
+	for (attempt = 0; attempt < 500U; ++attempt) {
+		assert(tr_server_get_stats(server, &stats) == TR_OK);
+		if (stats.peers_current == 0U &&
+		    stats.peers_reaping_current == 1U)
+			break;
+		nanosleep(&pause_time, NULL);
+	}
+	assert(stats.peers_current == 0U);
+	assert(stats.peers_reaping_current == 1U);
+
+	/*
+	 * Slot reuse remains allowed while the first Endpoint is retiring. The
+	 * second disconnected peer must stay published because the shard already
+	 * uses its only retiring-object slot.
+	 */
+	assert(tr_client_create(&client_config, &second) == TR_OK);
+	assert(tr_client_connect(second, "127.0.0.1", port) == TR_OK);
+	assert(tr_client_register_method(second, &method) == TR_OK);
+	tr_client_destroy(second);
+	second = NULL;
+
+	memset(&stats, 0, sizeof(stats));
+	for (attempt = 0; attempt < 500U; ++attempt) {
+		assert(tr_server_get_stats(server, &stats) == TR_OK);
+		if (stats.peers_current == 1U &&
+		    stats.peers_ready_current == 0U &&
+		    stats.peers_reaping_current == 1U)
+			break;
+		nanosleep(&pause_time, NULL);
+	}
+	assert(stats.peers_current == 1U);
+	assert(stats.peers_ready_current == 0U);
+	assert(stats.peers_reaping_current == 1U);
+
+	pthread_mutex_lock(&ctx.lock);
+	ctx.release = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/*
+	 * The first finalizer returns one retiring slot and signals peer_event_fd.
+	 * Owner retry then detaches/finalizes the already-disconnected second peer.
+	 */
+	memset(&stats, 0, sizeof(stats));
+	for (attempt = 0; attempt < 1000U; ++attempt) {
+		assert(tr_server_get_stats(server, &stats) == TR_OK);
+		if (stats.peers_current == 0U &&
+		    stats.peers_reaping_current == 0U &&
+		    stats.peers_reaped_total >= 2U)
+			break;
+		nanosleep(&pause_time, NULL);
+	}
+	assert(stats.peers_current == 0U);
+	assert(stats.peers_reaping_current == 0U);
+	assert(stats.peers_reaped_total >= 2U);
+
+	tr_server_destroy(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static void test_server_peer_refcount_drain(void)
 {
 	struct tr_server_config server_config;
@@ -7326,6 +7465,7 @@ int main(void)
 	test_server_runtime_thread_bound();
 	test_server_shared_rpc_executor();
 	test_retained_rpc_message_survives_peer_disconnect();
+	test_server_reaping_budget_defers_detach();
 	test_server_peer_refcount_drain();
 
 	puts("all transport/RPC core tests passed");
