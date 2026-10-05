@@ -139,8 +139,11 @@ typedef void (*tr_channel_event_cb)(struct tr_channel *channel,
  * split 模式要求两者是不同且存活的 handle。
  *
  * Channel 会为 connection 安装 Reactor handler。销毁前必须先停止外部使用，
- * 并确保不存在并发 callback；tr_channel_destroy() 内部会清理 handler 并等待
- * callback quiescence。
+ * 并确保不存在并发 callback/waiter；tr_channel_destroy() 内部会关闭 waiter
+ * admission、清理 handler 并等待 callback quiescence。
+ *
+ * 返回 TR_OK 才表示 Channel storage 已释放。若仍存在 drain waiter 或 teardown
+ * barrier 无法收敛，返回错误并保持对象存活，调用方不得继续释放所属 Runtime。
  */
 int tr_channel_create(const struct tr_channel_config *config,
 		      struct tr_conn_handle control_connection,
@@ -150,7 +153,7 @@ int tr_channel_create(const struct tr_channel_config *config,
 		      tr_channel_event_cb channel_event_cb, void *callback_arg,
 		      struct tr_channel **out);
 
-void tr_channel_destroy(struct tr_channel *channel);
+int tr_channel_destroy(struct tr_channel *channel);
 
 /*
  * 替换上层 callback，主要用于在已有 Channel 上叠加 RPC。
@@ -230,10 +233,26 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 int tr_channel_begin_drain(struct tr_channel *channel);
 
 /*
- * 同步等待 active Stream 归零。该进度依赖 Reactor owner 继续处理 RX/TX 和
- * close/cancel callback，因此 owner context 调用返回 TR_ERR_STATE。
+ * 同步等待 active Stream 归零。等待由 Channel 状态条件变量驱动，不周期
+ * 轮询 active Stream；timeout_ms == 0 保持非阻塞检查语义。
+ *
+ * 本函数是纯等待操作，不重试 GOAWAY，也不推进 Channel 协议状态。
+ * tr_channel_begin_drain() 返回 TR_AGAIN 时，调用方必须重试 begin_drain()
+ * 直到 GOAWAY admission 成功或选择终止 graceful drain。
+ *
+ * 该进度依赖 Reactor owner 继续处理 RX/TX 和 close/cancel callback，因此
+ * owner context 调用返回 TR_ERR_STATE。
+ *
+ * 调用方必须保证 wait_drained() 与 tr_channel_destroy() 不并发；destroy
+ * 是终局生命周期边界，销毁 condvar/mutex 前必须先停止新的外部 API 并等待
+ * 已有 waiter 返回。
  */
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
+
+/*
+ * DRAINED 表示本地 Stream 已全部静默；它不是“GOAWAY 已成功入队”的替代状态。
+ * 调用方仍必须检查/重试 begin_drain() 的 TR_AGAIN。
+ */
 int tr_channel_get_state(struct tr_channel *channel,
 			 enum tr_channel_state *out);
 uint32_t tr_channel_active_streams(struct tr_channel *channel);
