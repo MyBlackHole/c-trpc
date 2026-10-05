@@ -505,7 +505,7 @@ static void test_pipeline_listener_control_and_data(void)
 	close(control2);
 	control2 = -1;
 	wait_listener_counts(listener, 0U, 0U);
-	tr_pipeline_listener_destroy(listener);
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
 	listener = NULL;
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_reactor_destroy(reactor);
@@ -649,7 +649,7 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	wait_listener_counts(listener, 0U, 0U);
 
 	assert(tr_pipeline_listener_stop(listener) == TR_OK);
-	tr_pipeline_listener_destroy(listener);
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_reactor_destroy(reactor);
 	pthread_cond_destroy(&data_ctx.cond);
@@ -686,7 +686,7 @@ static void test_pipeline_listener_prestart_teardown(void)
 
 	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
 	assert(tr_pipeline_listener_stop(listener) == TR_OK);
-	tr_pipeline_listener_destroy(listener);
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
 	tr_reactor_destroy(reactor);
 }
 
