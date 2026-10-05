@@ -889,11 +889,71 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_client_group_destroy_after_remote_control_close(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	uint16_t group_port = 0U;
+	unsigned i;
+
+	/*
+	 * 反复覆盖 CONTROL peer close 与 Client destroy 的交叠窗口。
+	 * destroy 不能通过外部线程读取 group->control.reactor 来判断是否需要
+	 * owner barrier；即使 close callback 已经清空 handle 但尚未返回，
+	 * Client Group storage 也必须继续存活到 callback quiescence。
+	 */
+	for (i = 0; i < 16U; ++i) {
+		memset(&ctx, 0, sizeof(ctx));
+		assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+		assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+		tr_server_config_init(&server_config);
+		server_config.max_peers = 1U;
+		server_config.keepalive_interval_ms = 0U;
+		server_config.connection_groups.max_groups = 1U;
+		server_config.connection_groups.max_connections = 2U;
+		server_config.connection_groups.max_data_connections_per_group = 1U;
+		server_config.connection_groups.max_streams_per_group = 1U;
+		server_config.connection_groups.authorize = authorize_group;
+		server_config.connection_groups.callback_arg = &ctx;
+		assert(tr_server_create(&server_config, &server) == TR_OK);
+		assert(tr_server_connection_group_listen(
+			       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+		assert(tr_server_start(server) == TR_OK);
+
+		tr_client_config_init(&client_config);
+		client_config.keepalive_interval_ms = 0U;
+		assert(tr_client_create(&client_config, &client) == TR_OK);
+
+		group.group_id = TEST_GROUP_ID;
+		group.epoch = TEST_GROUP_EPOCH;
+		assert(tr_client_connection_group_connect(
+			       client, "127.0.0.1", group_port, &group) == TR_OK);
+		wait_counter(&ctx, &ctx.authorized, 1U);
+
+		/* Remote close is asynchronous from the Client Reactor's perspective. */
+		assert(tr_server_connection_group_stop(server) == TR_OK);
+		tr_client_destroy(client);
+		client = NULL;
+
+		assert(tr_server_drain(server, 5000U) == TR_OK);
+		tr_server_destroy(server);
+		server = NULL;
+		pthread_cond_destroy(&ctx.cond);
+		pthread_mutex_destroy(&ctx.lock);
+	}
+}
+
 int main(void)
 {
 	test_public_connection_group_server();
 	test_public_connection_group_client_control();
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_client_drain_cancels_offer();
+	test_client_group_destroy_after_remote_control_close();
 	return 0;
 }

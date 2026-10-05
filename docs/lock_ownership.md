@@ -286,6 +286,37 @@ start Reactor”，此时整个事务在 `ctl_lock` 排他区间完成，`start(
 不能插入 registration 与状态发布之间。正在 stop 的 Reactor 返回
 `TR_ERR_CLOSED`，不能越过 teardown barrier 直接发布或释放 Listener。
 
+Client Connection Group 也遵守同一 owner 原则。以下状态只允许 Reactor
+所有者修改：
+
+- CONTROL handle / route / generation；
+- CONTROL connect reservation；
+- remote address / port；
+- `closing / draining`；
+- DATA connection/transfer/connector scheduling 状态。
+
+CONTROL 建立分为两个阶段：
+
+```text
+owner: IDLE -> CONTROL_CONNECTING
+            -> 分配 generation
+external:   blocking connect + preface
+owner:      adopt fd + install handler + publish route/address/state
+            -> CONNECTED
+```
+
+这样既不把阻塞 connect 放进 Reactor，也不会让外部线程在旧 CONTROL
+callback 尚未退出时修改同一组状态。Client Group destroy 不允许通过
+读取 `control.reactor` 判断“是否还需要同步”；无论 handle 是否已经被
+close callback 清空，都必须先执行一次 owner barrier，确认所有可能引用
+Group 的 callback 已退出，再释放 Group/Connector/Buffer storage。
+
+Client Group DATA send buffer 的 release callback 会保存裸 `group *`，
+因此 destroy 还必须满足 `send_bytes_inflight == 0`。Reactor connection
+close 会先同步释放 TX queue，再分发 connection event；Group teardown
+关闭全部 DATA connection 后检查该不变量，未归零时 fail-closed，禁止释放
+仍可能被 buffer release callback 引用的 Group。
+
 销毁顺序要求：
 
 ```text
