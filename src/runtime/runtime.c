@@ -234,9 +234,8 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 		return TR_OK;
 
 	/*
-	 * Avoid partial multi-shard stop from a thread that belongs to the
-	 * execution domain being stopped. Facade destroy performs the same
-	 * preflight before mutating higher-level state.
+	 * 防止由属于被停止执行域的线程发起多分片部分停止。
+	 * 门面销毁在修改更高层状态前执行相同的预检查。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return TR_ERR_STATE;
@@ -584,8 +583,8 @@ void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard)
 	} while (written < 0 && errno == EINTR);
 
 	/*
-	 * EAGAIN means the eventfd counter is already saturated; a wake is
-	 * necessarily pending, so no additional action is required.
+	 * EAGAIN 表示 eventfd 计数器已经饱和，此时必然已有唤醒等待处理，
+	 * 因此不需要执行额外操作。
 	 */
 }
 
