@@ -777,11 +777,11 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 			return TR_FRAME_RELEASE;
 	} else if (message.type == TR_PIPELINE_CONTROL_TRANSFER_READY) {
 		/*
-		 * begin_drain() is a monotonic local admission barrier. A READY
-		 * observed after it returns must never create new local work, or
-		 * wait_drained() could report quiescence and later become non-drained.
-		 * The Server owns its affinity independently and may release it; final
-		 * CONTROL close also fences remaining remote soft state.
+		 * begin_drain() 是单调本地准入屏障。
+		 * 它返回后观察到的 READY 绝不能再创建新的本地工作，
+		 * 否则 wait_drained() 可能先报告静默，随后又重新变为非静默状态。
+		 * Server 独立拥有其亲和关系，可以自行释放；
+		 * 最终 CONTROL 关闭还会隔离剩余远端易失状态。
 		 */
 		if (group->draining)
 			return TR_FRAME_RELEASE;
