@@ -1,8 +1,10 @@
+#define _GNU_SOURCE
 #include "client_group_internal.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -62,6 +64,18 @@ struct tr_client_group {
 	int closing;
 	int draining;
 
+	/*
+	 * 协议状态仍严格属于 Reactor owner。这里仅发布 drain lifecycle generation
+	 * 给外部 waiter，不允许 waiter 借此锁直接读取/修改 transfer/data 状态。
+	 */
+	pthread_mutex_t drain_wait_lock;
+	pthread_cond_t drain_wait_cond;
+	uint64_t drain_generation;
+	uint64_t drained_generation;
+	uint32_t drain_waiters;
+	int drain_wait_active;
+	int drain_wait_closed;
+
 	struct tr_buffer_pool control_pool;
 	int control_pool_ready;
 
@@ -109,6 +123,72 @@ static uint64_t tr_client_group_now_ns(void)
 		return 0;
 	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) +
 	       (uint64_t)ts.tv_nsec;
+}
+
+static int
+tr_client_group_drain_complete_on_owner(const struct tr_client_group *group)
+{
+	uint32_t i;
+
+	if (!group || !group->draining || group->transfer_count != 0U ||
+	    group->send_bytes_inflight != 0U ||
+	    group->connector_slot != TR_CLIENT_GROUP_NO_SLOT)
+		return 0;
+
+	for (i = 0; i < group->data_capacity; ++i)
+		if (group->data[i].state == TR_CLIENT_GROUP_DATA_QUEUED ||
+		    group->data[i].state == TR_CLIENT_GROUP_DATA_CONNECTING)
+			return 0;
+	return 1;
+}
+
+static void tr_client_group_publish_drain_progress_on_owner(
+	struct tr_client_group *group)
+{
+	if (!tr_client_group_drain_complete_on_owner(group))
+		return;
+
+	pthread_mutex_lock(&group->drain_wait_lock);
+	if (group->drain_wait_active &&
+	    group->drained_generation != group->drain_generation) {
+		group->drained_generation = group->drain_generation;
+		pthread_cond_broadcast(&group->drain_wait_cond);
+	}
+	pthread_mutex_unlock(&group->drain_wait_lock);
+}
+
+static void tr_client_group_publish_drain_start_on_owner(
+	struct tr_client_group *group)
+{
+	pthread_mutex_lock(&group->drain_wait_lock);
+	group->drain_generation++;
+	if (group->drain_generation == 0U)
+		group->drain_generation = 1U;
+	group->drained_generation = 0U;
+	group->drain_wait_active = 1;
+	pthread_mutex_unlock(&group->drain_wait_lock);
+}
+
+static void tr_client_group_publish_connected_on_owner(
+	struct tr_client_group *group)
+{
+	pthread_mutex_lock(&group->drain_wait_lock);
+	group->drain_wait_active = 0;
+	pthread_cond_broadcast(&group->drain_wait_cond);
+	pthread_mutex_unlock(&group->drain_wait_lock);
+}
+
+static int tr_client_group_close_wait_admission(
+	struct tr_client_group *group)
+{
+	int ret = TR_OK;
+
+	pthread_mutex_lock(&group->drain_wait_lock);
+	group->drain_wait_closed = 1;
+	if (group->drain_waiters != 0U)
+		ret = TR_ERR_STATE;
+	pthread_mutex_unlock(&group->drain_wait_lock);
+	return ret;
 }
 
 static int tr_client_group_connect_fd(const char *address, uint16_t port,
