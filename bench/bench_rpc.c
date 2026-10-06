@@ -439,7 +439,7 @@ static int run_server(const struct options *o)
 		       stats.reassembly_pool.exhausted_events,
 		       stats.peers_ready_total, stats.peers_reaped_total);
 	}
-	tr_server_destroy(server);
+	check(tr_server_destroy(server), "server destroy");
 	return status == TR_OK ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
@@ -595,7 +595,7 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		fprintf(stderr, "phase %s: incomplete, duplicate callback or corrupt response (%u/%u)\n",
 			name, completed, count);
 		/* Keep samples and payloads alive until all library callbacks are joined. */
-		tr_client_destroy(run->client);
+		check(tr_client_destroy(run->client), "client destroy");
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -829,7 +829,7 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 	if (failed || run->bad_callback) {
 		fputs("open phase: incomplete or duplicate callback\n", stderr);
-		tr_client_destroy(run->client);
+		check(tr_client_destroy(run->client), "client destroy");
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -941,7 +941,7 @@ static int run_client(const struct options *o)
 		}
 	}
 	/* No reconnect/recreate between pressure and recovery. Teardown joins callbacks. */
-	tr_client_destroy(run.client);
+	check(tr_client_destroy(run.client), "client destroy");
 	for (i = 0; i < run.window; ++i) free(run.slots[i].payload);
 	free(run.slots);
 	check(pthread_cond_destroy(&run.cond), "cond destroy");
