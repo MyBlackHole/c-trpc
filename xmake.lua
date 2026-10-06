@@ -115,7 +115,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_source_detach", "test_channel_detach", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_source_detach", "test_channel_detach", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -178,6 +178,13 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
             add_ldflags("-Wl,--wrap=tr_channel_set_lifecycle_observer",
                         "-Wl,--wrap=tr_reactor_close_on_owner",
                         "-Wl,--wrap=tr_reactor_close", {force = true})
+        elseif name == "test_internal_constructor_ownership" then
+            -- 验证内部 constructor rollback 失败时 partial owner 仍可重试。
+            add_ldflags("-Wl,--wrap=tr_reactor_create",
+                        "-Wl,--wrap=tr_reactor_destroy",
+                        "-Wl,--wrap=tr_connector_create",
+                        "-Wl,--wrap=tr_buffer_pool_destroy",
+                        {force = true})
         end
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()

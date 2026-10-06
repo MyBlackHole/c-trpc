@@ -1176,22 +1176,22 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 	return TR_OK;
 
 fail:
-	if (group->connector) {
-		int destroy_ret = tr_connector_destroy(group->connector);
-#ifndef NDEBUG
-		assert(destroy_ret == TR_OK);
-#endif
-		if (destroy_ret != TR_OK)
-			return destroy_ret;
-		group->connector = NULL;
-	}
+	/*
+	 * connector_create() 是 constructor 的最后一个可失败步骤；一旦成功，
+	 * 函数立即提交 Group ownership，因此 fail 路径不可能拥有 connector。
+	 * rollback 这里只处理此前建立的本地 soft-state。
+	 */
 	if (group->control_pool_ready) {
 		int pool_ret = tr_buffer_pool_destroy(&group->control_pool);
-#ifndef NDEBUG
-		assert(pool_ret == TR_OK);
-#endif
-		if (pool_ret != TR_OK)
+
+		if (pool_ret != TR_OK) {
+			/*
+			 * pool outstanding ownership 使 terminal rollback 无法完成。
+			 * 保留整个 Group，调用方拿到 partial owner 后可继续 destroy。
+			 */
+			*out = group;
 			return pool_ret;
+		}
 		group->control_pool_ready = 0;
 	}
 	free(group->transfers);

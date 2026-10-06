@@ -677,15 +677,10 @@ int tr_pipeline_listener_create(
 	return TR_OK;
 
 fail:
-	if (listener->message_pool_ready) {
-		int pool_ret = tr_buffer_pool_destroy(&listener->message_pool);
-#ifndef NDEBUG
-		assert(pool_ret == TR_OK);
-#endif
-		if (pool_ret != TR_OK)
-			return pool_ret;
-		listener->message_pool_ready = 0;
-	}
+	/*
+	 * message_pool init 是 constructor 最后一个可失败步骤；成功后立即 commit，
+	 * 因此失败路径不可能持有 ready pool，不需要 fallible rollback。
+	 */
 	if (listener->registry)
 		tr_pipeline_registry_destroy(listener->registry);
 	free(listener->connections);
@@ -1041,9 +1036,10 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 	ret = tr_reactor_call_or_stopped(
 		listener->config.owner,
 		tr_pipeline_listener_verify_destroy, listener);
-#ifndef NDEBUG
-	assert(ret == TR_OK);
-#endif
+	/*
+	 * verify_destroy 是可恢复的 terminal barrier：仍有 listener/session/waiter
+	 * 时必须把错误返回给调用方，而不是在 debug 构建先 abort。
+	 */
 	if (ret != TR_OK)
 		return ret;
 

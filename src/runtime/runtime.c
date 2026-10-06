@@ -111,6 +111,29 @@ tr_runtime_shard_config_valid(const struct tr_runtime_shard_config *config)
 	return tr_runtime_rpc_executor_config_valid(&config->rpc_executor);
 }
 
+static int tr_runtime_create_rollback(
+	struct tr_runtime **out, struct tr_runtime *runtime, int cause)
+{
+	int rollback_ret;
+
+	if (!out || !runtime)
+		return cause;
+
+	rollback_ret = tr_runtime_destroy(runtime);
+	if (rollback_ret == TR_OK) {
+		*out = NULL;
+		return cause;
+	}
+
+	/*
+	 * constructor rollback 自身失败时，partial Runtime 必须继续有 owner。
+	 * Client/Server constructor 会接住非空 *out，并继续自己的 terminal
+	 * rollback；若仍失败，最终 ownership 继续向最外层调用方传播。
+	 */
+	*out = runtime;
+	return rollback_ret;
+}
+
 int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out)
 {
@@ -138,6 +161,15 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	}
 	runtime->shard_count = config->shard_count;
 
+	/*
+	 * 先初始化所有 shard 的 fd sentinel，使 partial Runtime 在任意构造点都能
+	 * 安全进入正式 destroy()；未访问 shard 保持其他字段为 calloc 零值。
+	 */
+	for (i = 0; i < runtime->shard_count; ++i) {
+		runtime->shards[i].listen_fd = -1;
+		runtime->shards[i].peer_event_fd = -1;
+	}
+
 	for (i = 0; i < runtime->shard_count; ++i) {
 		const struct tr_runtime_shard_config *shard_config =
 			&config->shards[i];
@@ -145,8 +177,6 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		int ret;
 
 		shard->shard_id = i;
-		shard->listen_fd = -1;
-		shard->peer_event_fd = -1;
 		tr_memory_budget_init(
 			&shard->memory_budget, shard_config->memory_budget_bytes);
 		shard->peer_capacity = shard_config->peer_capacity;
@@ -190,25 +220,8 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 				shard_config->rpc_executor.max_calls_per_endpoint,
 				shard_config->rpc_executor.thread_count,
 				&shard->rpc_executor);
-		if (ret != TR_OK) {
-			int release_ret = tr_runtime_shard_release(shard);
-#ifndef NDEBUG
-			assert(release_ret == TR_OK);
-#endif
-			(void)release_ret;
-			while (i != 0U) {
-				--i;
-				release_ret =
-					tr_runtime_shard_release(&runtime->shards[i]);
-#ifndef NDEBUG
-				assert(release_ret == TR_OK);
-#endif
-				(void)release_ret;
-			}
-			free(runtime->shards);
-			free(runtime);
-			return ret;
-		}
+		if (ret != TR_OK)
+			return tr_runtime_create_rollback(out, runtime, ret);
 	}
 
 	*out = runtime;
