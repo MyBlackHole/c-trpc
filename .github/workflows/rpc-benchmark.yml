@@ -72,44 +72,7 @@ jobs:
               --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
               --output "$results/open-smoke.jsonl"
           fi
-          if [ "${{ matrix.cc }}" = gcc ] && [ "${{ matrix.mode }}" = release ]; then
-            # Architecture diagnostics use the normal runtime CRC dispatch build,
-            # not a sanitizer or forced-portable binary.
-            xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable=n
-            xmake build -v bench_rpc
-            python3 bench/run_rpc_capacity.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --trials 1 --requests 128 \
-              --label "gcc-release-capacity-curve" \
-              --output "$results/capacity-curve.jsonl"
-            python3 bench/run_rpc_scalability.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --trials 1 --requests 256 \
-              --label "gcc-release-scalability-matrix" \
-              --output "$results/scalability-matrix.jsonl"
-            python3 bench/run_rpc_headroom.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --label "gcc-release-resource-headroom" \
-              --output "$results/resource-headroom.jsonl"
-            python3 bench/run_rpc_repeatability.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --trials 3 --rate 40000 \
-              --label "gcc-release-40k-repeatability" \
-              --output "$results/repeatability-40k.jsonl"
-            python3 bench/run_rpc_fanout.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --trials 2 --rate 40000 --fanouts 4,8,16,32 \
-              --aggregate-generator-slots 1024 \
-              --label "gcc-release-40k-generator-fanout" \
-              --output "$results/generator-fanout-40k.jsonl"
-            python3 bench/run_rpc_generator_slots.py \
-              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
-              --trials 2 --rate 40000 --generators 32 \
-              --aggregate-generator-slots 1024,2048,4096,8192 \
-              --label "gcc-release-40k-generator-slots" \
-              --output "$results/generator-slots-40k.jsonl"
-          fi
-      - name: Preserve exact source and benchmark diagnostics
+      - name: Preserve exact source and smoke diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
