@@ -136,7 +136,7 @@ static void test_client_create_destroy_threads(void)
 		assert(client != NULL);
 		/* 未 connect 时只有 Reactor，没有闲置的 maintenance thread。 */
 		expect_threads(1U, 0U);
-		tr_client_destroy(client);
+		assert(tr_client_destroy(client) == TR_OK);
 		expect_threads(1U, 1U);
 	}
 }
@@ -226,7 +226,7 @@ static void test_server_create_start_destroy_threads(void)
 				total += 1U; /* accept/cleanup 都由 Reactor 事件驱动。 */
 				expect_threads(total, 0U);
 			}
-			tr_server_destroy(server);
+			assert(tr_server_destroy(server) == TR_OK);
 			expect_threads(total, total);
 		}
 	}
@@ -257,7 +257,7 @@ static void test_server_multi_shard_threads(void)
 	assert(tr_server_start(server) == TR_OK);
 	expect_threads(6U, 0U);
 
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 	expect_threads(6U, 6U);
 }
 
@@ -306,7 +306,7 @@ static void test_server_internal_tuning_respects_shard_minimum(void)
 	assert(server != NULL);
 	/* Public hidden default remains four workers. */
 	expect_threads(4U, 0U);
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 	expect_threads(4U, 4U);
 }
 
@@ -463,7 +463,7 @@ static void test_server_runtime_start_failures(void)
 	assert(tr_server_start(server) == TR_ERR_SYS);
 	assert(atomic_load(&create_attempts) == workers + 1U);
 	expect_threads(workers, 0U);
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 	expect_threads(workers, workers);
 }
 
