@@ -64,26 +64,6 @@ static struct tr_reactor *tr_client_reactor(struct tr_client *client)
 	return client ? tr_runtime_shard_reactor(client->shard) : NULL;
 }
 
-static uint64_t tr_client_now_ms(void)
-{
-	struct timespec ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return 0;
-	return (uint64_t)ts.tv_sec * UINT64_C(1000) +
-	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
-}
-
-static void tr_client_pause_ms(uint32_t ms)
-{
-	struct timespec ts;
-
-	ts.tv_sec = (time_t)(ms / 1000U);
-	ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
-	while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
-		;
-}
-
 static void tr_client_normalize_config(struct tr_client_config *config)
 {
 	struct tr_client_config defaults;
