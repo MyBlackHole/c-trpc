@@ -133,7 +133,18 @@ Channel drain 使用单调 admission barrier。进入 `local_draining` 后：
 - 因而 `active_streams` 在 barrier 后只减不增，`DRAINED` 是终态而不是
   一个可能被延迟 OPEN 推翻的瞬时快照。
 
-`wait_drained` 使用 `channel->lock + drain_cond` 作为 waitqueue-like
+Channel 的阻塞状态观察统一使用 `channel->lock + state_cond`。
+同一个 waitqueue 可以服务多个 predicate，但每个 waiter 必须在循环中重新检查
+自己的条件：
+
+- `wait_ready(lane)`：对应 lane 的 `*_ready == 1`；
+- `wait_drained()`：`active_streams == 0`。
+
+状态 waitqueue 不是协议 owner。ready/drained waiter 都不发送帧、不推进握手、
+重连或排空状态；owner 只在真实状态边沿 broadcast。这样避免为每个 predicate
+增加一套 condvar/teardown accounting。
+
+`wait_drained` 使用 `channel->lock + state_cond` 作为 waitqueue-like
 同步原语：
 
 - predicate 只有 `active_streams == 0`；
@@ -148,7 +159,7 @@ GOAWAY admission 属于 `begin_drain()` 的 Reactor-owner 协议动作。
 
 条件变量使用 `CLOCK_MONOTONIC`，与原先 drain timeout 的时钟语义一致。
 Channel destroy 与 waiter 不是并发安全组合。Channel 用
-`drain_wait_closed + drain_waiters` 显式管理 waiter admission/ownership：
+`drain_wait_closed + state_waiters` 显式管理 waiter admission/ownership：
 waiter 在同一把 lock 下登记后才能睡眠；destroy 先关闭新的 waiter admission，
 若已有 waiter 尚未退出则 fail-closed，不开始 callback/timer/storage teardown。
 只有 waiter 计数归零后才销毁 condvar/Stream/Pool/mutex。
@@ -157,7 +168,7 @@ waiter 在同一把 lock 下登记后才能睡眠；destroy 先关闭新的 wait
 `void free()`。上层 Client/Server 只有看到 `TR_OK` 才能清空 Channel
 指针并继续停止 Runtime；否则保持所有权不变，禁止把生命周期错误升级成 UAF。
 
-Server detached 路径更严格：waiter admission 关闭与 `drain_waiters == 0`
+Server detached 路径更严格：waiter admission 关闭与 `state_waiters == 0`
 验证在 Reactor owner detach 阶段完成，此时对象仍在 peer table，失败就拒绝
 ownership transfer。只有 barrier 已经收敛才设置 `teardown_detached` 并把
 对象交给最后引用 finalizer；因此 detached finalizer 不再执行可失败同步，
