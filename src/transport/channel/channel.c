@@ -2510,6 +2510,7 @@ static int tr_channel_detach_on_owner(void *arg)
 	struct tr_reactor_timer_handle timer;
 	int timer_registered;
 	int split;
+	int ret;
 
 	if (!channel)
 		return TR_ERR_INVALID;
@@ -2544,28 +2545,50 @@ static int tr_channel_detach_on_owner(void *arg)
 	split = !tr_conn_equal(control, bulk);
 	timer_registered = channel->keepalive_timer_registered;
 	timer = channel->keepalive_timer;
-	channel->keepalive_timer_registered = 0;
-	memset(&channel->keepalive_timer, 0, sizeof(channel->keepalive_timer));
 	pthread_mutex_unlock(&channel->lock);
 
-	/* upper/lifecycle callback publication 都是 owner-only，不属于 channel->lock。 */
+	/*
+	 * handler publication 是 callback 生命周期屏障。TR_ERR_STALE 能证明
+	 * 这个 exact connection generation 已经退休；其他失败都必须保留
+	 * Channel ownership，并在 finalization 前重试收敛。
+	 */
+	ret = tr_reactor_set_handler(control, NULL, NULL, NULL);
+	if (ret != TR_OK && ret != TR_ERR_STALE)
+		return ret;
+	if (split) {
+		ret = tr_reactor_set_handler(bulk, NULL, NULL, NULL);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+	}
+
+	/*
+	 * timer publication 必须保持到 unregister 被确认成功。即使 handler 已经
+	 * detach，timer barrier 失败仍然可重试：Channel storage 保持存活，
+	 * keepalive admission 已关闭，下一次调用继续重试 exact timer barrier，
+	 * 不能假装 timer source 已经消失。
+	 */
+	if (timer_registered) {
+		ret = tr_reactor_timer_unregister(timer);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+
+		pthread_mutex_lock(&channel->lock);
+		channel->keepalive_timer_registered = 0;
+		memset(&channel->keepalive_timer, 0,
+		       sizeof(channel->keepalive_timer));
+		pthread_mutex_unlock(&channel->lock);
+	}
+
+	/*
+	 * 所有 owner-visible callback/timer source 已经完成 detach。此时才允许
+	 * 清除上层 callback publication，并发布 detached ownership。
+	 */
 	channel->data_cb = NULL;
 	channel->stream_event_cb = NULL;
 	channel->channel_event_cb = NULL;
 	channel->callback_arg = NULL;
 	channel->lifecycle_event_cb = NULL;
 	channel->lifecycle_callback_arg = NULL;
-
-	/*
-	 * Owner context makes these operations non-waiting. Closed/stale
-	 * connections already have no future callback source, so their status is
-	 * intentionally ignored.
-	 */
-	(void)tr_reactor_set_handler(control, NULL, NULL, NULL);
-	if (split)
-		(void)tr_reactor_set_handler(bulk, NULL, NULL, NULL);
-	if (timer_registered)
-		(void)tr_reactor_timer_unregister(timer);
 
 	pthread_mutex_lock(&channel->lock);
 	channel->teardown_detached = 1;

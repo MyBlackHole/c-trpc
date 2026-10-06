@@ -55,11 +55,15 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 				      void *callback_arg);
 
 /*
- * Server peer teardown is split in two:
- * - detach_for_finalize(): owner-serialized, removes every Reactor/timer callback
- *   source and makes the Channel unreachable from protocol dispatch;
- * - finalize_detached(): owner-free memory/resource release, safe on a cleanup
- *   context after detach returned.
+ * Server peer teardown 分成两个阶段：
+ * - detach_for_finalize()：由 owner 串行执行，移除全部 Reactor/timer callback
+ *   source，使 Channel 不再能被协议 dispatch 触达；
+ * - finalize_detached()：只做不依赖 owner 的内存/资源释放，必须在 detach
+ *   成功后才能调用。
+ *
+ * detach_for_finalize() 是可重试生命周期屏障。handler/timer detach 失败时
+ * Channel 继续由调用方拥有，并保留所有尚未确认解除的 publication；只有返回
+ * TR_OK 才会发布 teardown_detached，并允许进入 finalization。
  */
 int tr_channel_detach_for_finalize(struct tr_channel *channel);
 int tr_channel_finalize_detached(struct tr_channel *channel);
