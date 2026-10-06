@@ -143,6 +143,19 @@ int tr_command_queue_is_empty(struct tr_command_queue *queue);
  */
 uint64_t tr_command_queue_last_sequence(struct tr_command_queue *queue);
 
+/*
+ * 64-bit modular sequence comparison. A lifecycle barrier can never remain
+ * pending across 2^63 admitted commands, so half-range ordering is unambiguous.
+ * Sequence 0 is the pre-first-command sentinel and is always already satisfied.
+ */
+static inline int tr_command_sequence_after_eq(
+	uint64_t current, uint64_t target)
+{
+	if (target == 0U)
+		return 1;
+	return ((current - target) & (UINT64_C(1) << 63)) == 0U;
+}
+
 /* 返回实际复制到 out 的 command 数量。 */
 size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 				  struct tr_command *out, size_t max_commands);
