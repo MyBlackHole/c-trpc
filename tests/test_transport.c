@@ -1658,6 +1658,12 @@ static void test_channel_split_create_tx_exhaustion_rollback(void)
 	assert(probe.create_ret == TR_AGAIN);
 	assert(probe.channel == NULL);
 
+	/*
+	 * The first HELLO command was already behind the current CALL in the ring.
+	 * Rollback closes both handles immediately; the queued SEND then observes a
+	 * stale generation and releases its independently owned payload/TX item.
+	 */
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
 	assert(stats.control_tx_item_pool.current == 0U);
