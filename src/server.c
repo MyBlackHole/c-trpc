@@ -1423,11 +1423,20 @@ int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 rollback:
 	{
 		uint32_t j;
+		int rollback_ret = TR_OK;
 
-		for (j = 0; j < server->shard_count; ++j)
-			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0)
-				tr_runtime_shard_close_listener(
-					server->shards[j].runtime);
+		for (j = 0; j < server->shard_count; ++j) {
+			int close_ret;
+
+			if (tr_server_shard_listener_fd(&server->shards[j]) < 0)
+				continue;
+			close_ret = tr_runtime_shard_close_listener(
+				server->shards[j].runtime);
+			if (close_ret != TR_OK && rollback_ret == TR_OK)
+				rollback_ret = close_ret;
+		}
+		if (rollback_ret != TR_OK)
+			return rollback_ret;
 	}
 	return ret;
 }
@@ -1615,15 +1624,34 @@ int tr_server_start(struct tr_server *server)
 rollback_events:
 	{
 		uint32_t j;
+		int rollback_ret = TR_OK;
 
 		for (j = 0; j < server->shard_count; ++j) {
-			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0)
-				(void)tr_runtime_shard_disable_listener_events(
-					server->shards[j].runtime);
-			tr_server_disable_peer_events(&server->shards[j]);
+			int cleanup_ret;
+
+			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0) {
+				cleanup_ret =
+					tr_runtime_shard_disable_listener_events(
+						server->shards[j].runtime);
+				if (cleanup_ret != TR_OK &&
+				    rollback_ret == TR_OK)
+					rollback_ret = cleanup_ret;
+			}
+
+			cleanup_ret =
+				tr_server_disable_peer_events(&server->shards[j]);
+			if (cleanup_ret != TR_OK && rollback_ret == TR_OK)
+				rollback_ret = cleanup_ret;
 		}
+
+		{
+			int stop_ret = tr_runtime_stop(server->runtime);
+			if (stop_ret != TR_OK && rollback_ret == TR_OK)
+				rollback_ret = stop_ret;
+		}
+		if (rollback_ret != TR_OK)
+			return rollback_ret;
 	}
-	(void)tr_runtime_stop(server->runtime);
 	return ret;
 }
 
