@@ -15,6 +15,7 @@
 
 #define TR_CONNECTOR_ADDRESS_CAPACITY 64U
 #define TR_CONNECTOR_MAX_PREFACE_BYTES 256U
+#define TR_CONNECTOR_TEARDOWN_RETRY_NS UINT64_C(10000000)
 
 struct tr_connector {
 	struct tr_connector_config config;
@@ -228,17 +229,24 @@ static int tr_connector_watch_on_owner(struct tr_connector *connector)
 static uint64_t tr_connector_timeout(void *arg, uint64_t now_ns)
 {
 	struct tr_connector *connector = (struct tr_connector *)arg;
+	int ret;
 
-	(void)now_ns;
-	if (connector && connector->active) {
-		int ret =
-			tr_connector_complete_on_owner(connector, TR_ERR_TIMEOUT);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
-		(void)ret;
-	}
-	return 0U;
+	if (!connector || !connector->active)
+		return 0U;
+
+	ret = tr_connector_complete_on_owner(connector, TR_ERR_TIMEOUT);
+	if (ret == TR_OK)
+		return 0U;
+
+	/*
+	 * timeout 已经成为 terminal 状态，但 callback source detach 仍可能因为
+	 * epoll/owner barrier 暂时失败。不能在 debug 构建 abort，也不能返回 0
+	 * 让仍 active 的 Connector 永久失去驱动。保持所有 publication 不变，
+	 * 用同一个 timer 做短延迟重试，直到 completion 真正收敛。
+	 */
+	if (UINT64_MAX - now_ns < TR_CONNECTOR_TEARDOWN_RETRY_NS)
+		return UINT64_MAX;
+	return now_ns + TR_CONNECTOR_TEARDOWN_RETRY_NS;
 }
 
 static int tr_connector_arm_timeout_on_owner(struct tr_connector *connector)
