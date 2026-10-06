@@ -192,11 +192,11 @@ static void test_channel_reconnect_uses_no_extra_thread(void)
 	expect_threads(1U, 0U);
 
 	assert(tr_channel_disable_client_reconnect(client) == TR_OK);
-	tr_channel_destroy(client);
-	tr_channel_destroy(server);
+	assert(tr_channel_destroy(client) == TR_OK);
+	assert(tr_channel_destroy(server) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	expect_threads(1U, 1U);
-	tr_reactor_destroy(reactor);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
 }
 
 static void test_server_create_start_destroy_threads(void)
@@ -350,7 +350,7 @@ static void test_runtime_multi_shard_threads(void)
 
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	expect_threads(7U, 3U);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 	expect_threads(7U, 7U);
 }
 
@@ -376,7 +376,7 @@ static void test_runtime_multi_shard_start_rollback(void)
 	assert(atomic_load(&create_attempts) == 6U);
 	expect_threads(5U, 1U);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 	expect_threads(5U, 5U);
 }
 
