@@ -457,10 +457,6 @@ static void test_public_connection_group_server(void)
 	assert(memcmp(ctx.retained.bytes.data, payload,
 		      sizeof(payload) - 1U) == 0);
 	pthread_mutex_unlock(&ctx.lock);
-	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
-	assert(tr_connection_group_message_release(&ctx.retained) ==
-	       TR_ERR_INVALID);
-
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 3001U) == TR_OK);
 
@@ -472,6 +468,17 @@ static void test_public_connection_group_server(void)
 	assert(close(control) == 0);
 	control = -1;
 	assert(tr_server_drain(server, 5000U) == TR_OK);
+
+	/*
+	 * Retained DATA payload still owns one Runtime Reactor RX buffer. Terminal
+	 * destroy must stop/close admission but keep Runtime/Server storage alive.
+	 */
+	tr_server_destroy(server);
+	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
+	assert(tr_connection_group_message_release(&ctx.retained) ==
+	       TR_ERR_INVALID);
+
+	/* The same terminal operation is retryable after the final holder returns. */
 	tr_server_destroy(server);
 
 	pthread_cond_destroy(&ctx.cond);
