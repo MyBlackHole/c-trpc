@@ -2684,10 +2684,10 @@ static int tr_channel_close_wait_admission(struct tr_channel *channel)
 	return ret;
 }
 
-int tr_channel_finalize_detached(struct tr_channel *channel)
+void tr_channel_finalize_detached(struct tr_channel *channel)
 {
 	if (!channel)
-		return TR_OK;
+		return;
 
 #ifndef NDEBUG
 	assert(channel->teardown_detached);
@@ -2713,7 +2713,6 @@ int tr_channel_finalize_detached(struct tr_channel *channel)
 	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
-	return TR_OK;
 }
 
 int tr_channel_destroy(struct tr_channel *channel)
