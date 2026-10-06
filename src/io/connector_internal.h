@@ -31,12 +31,19 @@ struct tr_connector_config {
  * 此时 fd ownership 转移给 callback；失败时 connector 自行 close fd，并以 fd=-1
  * 回调。
  *
- * cancel() 不触发 completion callback；返回后 connector 已不再观察任何 fd/timer。
+ * cancel() 不触发 completion callback；只有返回 TR_OK 才表示 connector 已不再
+ * 观察任何 fd/armed timer。失败时 attempt/source ownership 保持可重试。
  */
 int tr_connector_create(
 	const struct tr_connector_config *config,
 	struct tr_connector **out);
-void tr_connector_destroy(struct tr_connector *connector);
+
+/*
+ * Terminal teardown. TR_OK means all Reactor callback sources are detached and
+ * storage is freed. Any error leaves connector ownership with the caller and
+ * destroy may be retried while the owner Reactor is still alive.
+ */
+int tr_connector_destroy(struct tr_connector *connector);
 
 int tr_connector_start(
 	struct tr_connector *connector, const char *ipv4_address, uint16_t port,

@@ -886,25 +886,38 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 	return TR_FRAME_RELEASE;
 }
 
-static void tr_client_group_stop_data_on_owner(struct tr_client_group *group)
+static int tr_client_group_stop_data_on_owner(struct tr_client_group *group)
 {
 	uint32_t i;
+	int ret;
 
-	tr_client_group_clear_transfers(group);
-	if (group->connector)
-		(void)tr_connector_cancel(group->connector);
+	/*
+	 * Connector source detach is the first fallible barrier. Do not clear
+	 * transfer/DATA ownership until it succeeds; otherwise a later connector
+	 * callback could target state we already declared free.
+	 */
+	if (group->connector) {
+		ret = tr_connector_cancel(group->connector);
+		if (ret != TR_OK)
+			return ret;
+	}
 	group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
+	tr_client_group_clear_transfers(group);
 
 	for (i = 0; i < group->data_capacity; ++i) {
 		struct tr_conn_handle connection = group->data[i].connection;
 
 		if (group->data[i].state == TR_CLIENT_GROUP_DATA_ACTIVE &&
-		    connection.reactor)
-			(void)tr_reactor_close_on_owner(connection);
+		    connection.reactor) {
+			ret = tr_reactor_close_on_owner(connection);
+			if (ret != TR_OK && ret != TR_ERR_STALE)
+				return ret;
+		}
 		memset(&group->data[i], 0, sizeof(group->data[i]));
 		group->data[i].state = TR_CLIENT_GROUP_DATA_FREE;
 	}
 	tr_client_group_publish_drain_progress_on_owner(group);
+	return TR_OK;
 }
 
 static void tr_client_group_control_event(
@@ -922,7 +935,14 @@ static void tr_client_group_control_event(
 
 	was_closing = group->closing;
 	group->closing = 1;
-	tr_client_group_stop_data_on_owner(group);
+	if (tr_client_group_stop_data_on_owner(group) != TR_OK) {
+		/*
+		 * Keep the stale CONTROL capability and terminal closing state as a
+		 * retry anchor for explicit close/destroy. Do not free owner state
+		 * while a connector callback source may still reference the Group.
+		 */
+		return;
+	}
 	memset(&group->control, 0, sizeof(group->control));
 	memset(&group->control_route, 0, sizeof(group->control_route));
 	memset(group->address, 0, sizeof(group->address));
@@ -1032,7 +1052,10 @@ static int tr_client_group_close_on_owner(void *arg)
 		return TR_ERR_STATE;
 
 	group->closing = 1;
-	tr_client_group_stop_data_on_owner(group);
+	ret = tr_client_group_stop_data_on_owner(group);
+	if (ret != TR_OK)
+		return ret;
+
 	control = group->control;
 	ret = tr_reactor_close_on_owner(control);
 	if (ret == TR_ERR_STALE)
@@ -1153,8 +1176,15 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 	return TR_OK;
 
 fail:
-	tr_connector_destroy(group->connector);
-	group->connector = NULL;
+	if (group->connector) {
+		int destroy_ret = tr_connector_destroy(group->connector);
+#ifndef NDEBUG
+		assert(destroy_ret == TR_OK);
+#endif
+		if (destroy_ret != TR_OK)
+			return destroy_ret;
+		group->connector = NULL;
+	}
 	if (group->control_pool_ready) {
 		int pool_ret = tr_buffer_pool_destroy(&group->control_pool);
 #ifndef NDEBUG
@@ -1281,13 +1311,10 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 
 	if (!group->control.reactor)
 		return TR_ERR_STATE;
-	if (group->draining) {
-		tr_client_group_publish_drain_progress_on_owner(group);
-		return TR_OK;
+	if (!group->draining) {
+		group->draining = 1;
+		tr_client_group_publish_drain_start_on_owner(group);
 	}
-
-	group->draining = 1;
-	tr_client_group_publish_drain_start_on_owner(group);
 
 	if (group->connector_slot != TR_CLIENT_GROUP_NO_SLOT) {
 		uint32_t slot = group->connector_slot;
@@ -1301,7 +1328,11 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 		}
 		route = group->data[slot].route;
 		message_id = group->data[slot].offer_message_id;
-		(void)tr_connector_cancel(group->connector);
+		ret = tr_connector_cancel(group->connector);
+		if (ret != TR_OK) {
+			final = ret;
+			goto out;
+		}
 		group->connector_slot = TR_CLIENT_GROUP_NO_SLOT;
 		memset(&group->data[slot], 0, sizeof(group->data[slot]));
 		group->data[slot].state = TR_CLIENT_GROUP_DATA_FREE;
@@ -1617,7 +1648,9 @@ static int tr_client_group_detach_on_owner(void *arg)
 	group->closing = 1;
 	group->draining = 1;
 	group->control_connecting = 0;
-	tr_client_group_stop_data_on_owner(group);
+	ret = tr_client_group_stop_data_on_owner(group);
+	if (ret != TR_OK)
+		return ret;
 
 	control = group->control;
 	if (control.reactor) {
@@ -1661,14 +1694,15 @@ int tr_client_group_destroy(struct tr_client_group *group)
 	 */
 	ret = tr_reactor_call(
 		group->config.owner, tr_client_group_detach_on_owner, group);
-#ifndef NDEBUG
-	assert(ret == TR_OK);
-#endif
 	if (ret != TR_OK)
 		return ret;
 
-	tr_connector_destroy(group->connector);
-	group->connector = NULL;
+	if (group->connector) {
+		ret = tr_connector_destroy(group->connector);
+		if (ret != TR_OK)
+			return ret;
+		group->connector = NULL;
+	}
 
 	if (group->control_pool_ready) {
 		ret = tr_buffer_pool_destroy(&group->control_pool);

@@ -3017,7 +3017,14 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 		channel->reactor, tr_channel_reconnect_timer_main,
 		channel, &timer);
 	if (ret != TR_OK) {
-		tr_connector_destroy(connector);
+		int destroy_ret = tr_connector_destroy(connector);
+
+		/*
+		 * Rollback failure means connector callback-source ownership did not
+		 * converge; report that error instead of pretending enable merely failed.
+		 */
+		if (destroy_ret != TR_OK)
+			return destroy_ret;
 		return ret;
 	}
 
@@ -3090,24 +3097,56 @@ static int tr_channel_disable_client_reconnect_on_owner(void *arg)
 	struct tr_connector *connector;
 	struct tr_reactor_timer_handle timer;
 	int timer_registered;
+	int ret;
 
+	/*
+	 * First close scheduling admission. Published source handles remain intact
+	 * until their individual teardown barriers succeed, so a failure is
+	 * retryable and cannot orphan callback_arg ownership.
+	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->reconnect_enabled = 0;
-	channel->control_reconnecting = 0;
-	channel->bulk_reconnecting = 0;
 	connector = channel->reconnect_connector;
-	channel->reconnect_connector = NULL;
 	timer = channel->reconnect_timer;
 	timer_registered = channel->reconnect_timer_registered;
-	channel->reconnect_timer_registered = 0;
-	memset(&channel->reconnect_timer, 0, sizeof(channel->reconnect_timer));
 	pthread_mutex_unlock(&channel->lock);
 
 	if (timer_registered) {
-		(void)tr_reactor_timer_arm(timer, 0U);
-		(void)tr_reactor_timer_unregister(timer);
+		ret = tr_reactor_timer_arm(timer, 0U);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+
+		ret = tr_reactor_timer_unregister(timer);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+
+		pthread_mutex_lock(&channel->lock);
+		if (channel->reconnect_timer_registered &&
+		    channel->reconnect_timer.reactor == timer.reactor &&
+		    channel->reconnect_timer.slot == timer.slot &&
+		    channel->reconnect_timer.generation == timer.generation) {
+			channel->reconnect_timer_registered = 0;
+			memset(&channel->reconnect_timer, 0,
+			       sizeof(channel->reconnect_timer));
+		}
+		pthread_mutex_unlock(&channel->lock);
 	}
-	tr_connector_destroy(connector);
+
+	if (connector) {
+		ret = tr_connector_destroy(connector);
+		if (ret != TR_OK)
+			return ret;
+
+		pthread_mutex_lock(&channel->lock);
+		if (channel->reconnect_connector == connector)
+			channel->reconnect_connector = NULL;
+		pthread_mutex_unlock(&channel->lock);
+	}
+
+	pthread_mutex_lock(&channel->lock);
+	channel->control_reconnecting = 0;
+	channel->bulk_reconnecting = 0;
+	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
 }
 
