@@ -141,8 +141,6 @@ static int tr_connector_watch_on_owner(struct tr_connector *connector);
 static int tr_connector_send_preface_on_owner(
 	struct tr_connector *connector)
 {
-	int ret;
-
 	while (connector->preface_sent < connector->preface_len) {
 		ssize_t n = send(
 			connector->fd,
@@ -156,11 +154,20 @@ static int tr_connector_send_preface_on_owner(
 		}
 		if (n < 0 && errno == EINTR)
 			continue;
-		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-			return tr_connector_watch_on_owner(connector);
+		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			int ret = tr_connector_watch_on_owner(connector);
 
-		ret = tr_connector_complete_on_owner(connector, TR_ERR_SYS);
-		return ret == TR_OK ? TR_ERR_SYS : ret;
+			if (ret == TR_OK)
+				return TR_OK;
+			return tr_connector_complete_on_owner(connector, ret);
+		}
+
+		/*
+		 * The attempt was already accepted. If completion publication succeeds,
+		 * start/progress itself remains successful; the network error is reported
+		 * exactly once through complete_cb.
+		 */
+		return tr_connector_complete_on_owner(connector, TR_ERR_SYS);
 	}
 
 	return tr_connector_complete_on_owner(connector, TR_OK);
@@ -175,22 +182,16 @@ static int tr_connector_progress_on_owner(struct tr_connector *connector)
 
 	if (connector->connecting) {
 		ret = tr_tcp_finish_connect(connector->fd);
-		if (ret != TR_OK) {
-			int complete_ret =
-				tr_connector_complete_on_owner(connector, ret);
-			return complete_ret == TR_OK ? ret : complete_ret;
-		}
+		if (ret != TR_OK)
+			return tr_connector_complete_on_owner(connector, ret);
 		connector->connecting = 0;
 	}
 
 	if (!connector->socket_ready) {
 		if (connector->config.tcp_nodelay) {
 			ret = tr_tcp_set_nodelay(connector->fd, 1);
-			if (ret != TR_OK) {
-				int complete_ret =
-					tr_connector_complete_on_owner(connector, ret);
-				return complete_ret == TR_OK ? ret : complete_ret;
-			}
+			if (ret != TR_OK)
+				return tr_connector_complete_on_owner(connector, ret);
 		}
 		connector->socket_ready = 1;
 	}
@@ -302,33 +303,22 @@ static int tr_connector_start_on_owner(void *arg)
 		       request->preface_len);
 
 	ret = tr_connector_arm_timeout_on_owner(connector);
-	if (ret != TR_OK) {
-		int complete_ret =
-			tr_connector_complete_on_owner(connector, ret);
-
-		return complete_ret == TR_OK ? TR_OK : complete_ret;
-	}
+	if (ret != TR_OK)
+		return tr_connector_complete_on_owner(connector, ret);
 
 	if (connector->connecting) {
 		ret = tr_connector_watch_on_owner(connector);
-		if (ret != TR_OK) {
-			int complete_ret =
-				tr_connector_complete_on_owner(connector, ret);
-
-			return complete_ret == TR_OK ? TR_OK : complete_ret;
-		}
+		if (ret != TR_OK)
+			return tr_connector_complete_on_owner(connector, ret);
 		return TR_OK;
 	}
 
 	/*
 	 * 从 active=1 开始，attempt ownership 已经转移给 connector。
-	 * progress 可能同步完成并调用 callback，但 start() 仍返回 TR_OK；
-	 * 上层只能通过 completion 收敛这次 attempt，不能再次 rollback。
+	 * progress 可能同步 completion，且 callback 允许销毁上层/Connector；
+	 * 因此本调用返回后绝不能再解引用 connector。
 	 */
-	ret = tr_connector_progress_on_owner(connector);
-	if (ret != TR_OK && connector->active)
-		return ret;
-	return TR_OK;
+	return tr_connector_progress_on_owner(connector);
 }
 
 struct tr_connector_cancel_request {
