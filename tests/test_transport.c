@@ -21,6 +21,7 @@
 #include "../src/facade_tuning_internal.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/rpc/rpc_internal.h"
+#include "../src/runtime/runtime_internal.h"
 #include "../src/execution/timer_queue.h"
 
 #include <assert.h>
@@ -44,6 +45,33 @@
 
 static pthread_mutex_t tcp_nodelay_probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned tcp_nodelay_probe_count;
+
+static _Atomic int fail_server_listener_disable_once;
+static _Atomic int fail_server_peer_event_disable_once;
+
+int __real_tr_runtime_shard_disable_listener_events(
+	struct tr_runtime_shard *shard);
+int __wrap_tr_runtime_shard_disable_listener_events(
+	struct tr_runtime_shard *shard)
+{
+	if (atomic_exchange_explicit(
+		    &fail_server_listener_disable_once, 0,
+		    memory_order_acq_rel))
+		return TR_ERR_SYS;
+	return __real_tr_runtime_shard_disable_listener_events(shard);
+}
+
+int __real_tr_runtime_shard_disable_peer_events(
+	struct tr_runtime_shard *shard);
+int __wrap_tr_runtime_shard_disable_peer_events(
+	struct tr_runtime_shard *shard)
+{
+	if (atomic_exchange_explicit(
+		    &fail_server_peer_event_disable_once, 0,
+		    memory_order_acq_rel))
+		return TR_ERR_SYS;
+	return __real_tr_runtime_shard_disable_peer_events(shard);
+}
 
 int __real_setsockopt(int fd, int level, int option_name,
 		      const void *option_value, socklen_t option_len);
@@ -6531,6 +6559,47 @@ static int facade_test_interceptor(
 	return TR_RPC_STATUS_OK;
 }
 
+static void test_server_drain_requires_freeze_barriers(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	uint16_t port = 0U;
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 2U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.max_frame_payload_bytes = 4096U;
+	server_config.limits.max_message_bytes = 16384U;
+	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_listen(
+		       server, "127.0.0.1", 0U, &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connect_timeout_ms = 2000U;
+	client_config.limits.max_frame_payload_bytes = 4096U;
+	client_config.limits.max_message_bytes = 16384U;
+	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+
+	atomic_store_explicit(
+		&fail_server_listener_disable_once, 1, memory_order_release);
+	assert(tr_server_drain(server, 2000U) == TR_ERR_SYS);
+
+	atomic_store_explicit(
+		&fail_server_peer_event_disable_once, 1, memory_order_release);
+	assert(tr_server_drain(server, 2000U) == TR_ERR_SYS);
+
+	assert(tr_server_drain(server, 2000U) == TR_OK);
+
+	tr_client_destroy(client);
+	tr_server_destroy(server);
+}
+
+
 static void test_client_server_facade_unary(void)
 {
 	struct tr_server_config server_config;
@@ -7959,6 +8028,7 @@ int main(void)
 	test_rpc_interceptor_v1();
 	test_rpc_multithread_executor_per_call_serialization();
 	test_channel_keepalive_and_diagnostics();
+	test_server_drain_requires_freeze_barriers();
 	test_client_server_facade_unary();
 	test_server_multi_shard_reuseport_facade();
 	test_client_server_facade_nodelay_policy();
