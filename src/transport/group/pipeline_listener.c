@@ -677,8 +677,15 @@ int tr_pipeline_listener_create(
 	return TR_OK;
 
 fail:
-	if (listener->message_pool_ready)
-		tr_buffer_pool_destroy(&listener->message_pool);
+	if (listener->message_pool_ready) {
+		int pool_ret = tr_buffer_pool_destroy(&listener->message_pool);
+#ifndef NDEBUG
+		assert(pool_ret == TR_OK);
+#endif
+		if (pool_ret != TR_OK)
+			return pool_ret;
+		listener->message_pool_ready = 0;
+	}
 	if (listener->registry)
 		tr_pipeline_registry_destroy(listener->registry);
 	free(listener->connections);
@@ -1040,8 +1047,12 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 	if (ret != TR_OK)
 		return ret;
 
-	if (listener->message_pool_ready)
-		tr_buffer_pool_destroy(&listener->message_pool);
+	if (listener->message_pool_ready) {
+		ret = tr_buffer_pool_destroy(&listener->message_pool);
+		if (ret != TR_OK)
+			return ret;
+		listener->message_pool_ready = 0;
+	}
 	if (listener->registry)
 		tr_pipeline_registry_destroy(listener->registry);
 	free(listener->connections);

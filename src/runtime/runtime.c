@@ -44,25 +44,37 @@ struct tr_runtime {
 	int started;
 };
 
-static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
+static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 {
-	if (!shard)
-		return;
+	int ret;
 
+	if (!shard)
+		return TR_OK;
+
+	/*
+	 * Terminal admission sources may be closed eagerly. If retained RX payload
+	 * keeps Reactor alive, leave shard storage/budget intact so release can be
+	 * retried after the application returns that payload.
+	 */
 	tr_runtime_shard_close_listener(shard);
 	(void)tr_runtime_shard_disable_peer_events(shard);
 	if (shard->peer_event_fd >= 0) {
 		close(shard->peer_event_fd);
 		shard->peer_event_fd = -1;
 	}
+
+	if (shard->reactor) {
+		ret = tr_reactor_destroy(shard->reactor);
+		if (ret != TR_OK)
+			return ret;
+		shard->reactor = NULL;
+	}
+
 	if (shard->rpc_executor) {
 		tr_rpc_executor_group_destroy(shard->rpc_executor);
 		shard->rpc_executor = NULL;
 	}
-	if (shard->reactor) {
-		tr_reactor_destroy(shard->reactor);
-		shard->reactor = NULL;
-	}
+
 	free(shard->peers);
 	shard->peers = NULL;
 	if (shard->peer_storage_bytes != 0U) {
@@ -71,6 +83,7 @@ static void tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		shard->peer_storage_bytes = 0U;
 	}
 	shard->peer_capacity = 0U;
+	return TR_OK;
 }
 
 static int tr_runtime_rpc_executor_config_valid(
@@ -172,10 +185,19 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 				shard_config->rpc_executor.thread_count,
 				&shard->rpc_executor);
 		if (ret != TR_OK) {
-			tr_runtime_shard_release(shard);
+			int release_ret = tr_runtime_shard_release(shard);
+#ifndef NDEBUG
+			assert(release_ret == TR_OK);
+#endif
+			(void)release_ret;
 			while (i != 0U) {
 				--i;
-				tr_runtime_shard_release(&runtime->shards[i]);
+				release_ret =
+					tr_runtime_shard_release(&runtime->shards[i]);
+#ifndef NDEBUG
+				assert(release_ret == TR_OK);
+#endif
+				(void)release_ret;
 			}
 			free(runtime->shards);
 			free(runtime);
@@ -262,26 +284,32 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 	return result;
 }
 
-void tr_runtime_destroy(struct tr_runtime *runtime)
+int tr_runtime_destroy(struct tr_runtime *runtime)
 {
 	uint32_t i;
 	int ret;
 
 	if (!runtime)
-		return;
+		return TR_OK;
 
 	ret = tr_runtime_stop(runtime);
 #ifndef NDEBUG
 	assert(ret == TR_OK);
 #endif
 	if (ret != TR_OK)
-		return;
+		return ret;
 
-	for (i = 0; i < runtime->shard_count; ++i)
-		tr_runtime_shard_release(&runtime->shards[i]);
+	for (i = 0; i < runtime->shard_count; ++i) {
+		ret = tr_runtime_shard_release(&runtime->shards[i]);
+		if (ret != TR_OK)
+			return ret;
+	}
 	free(runtime->shards);
+	runtime->shards = NULL;
 	free(runtime);
+	return TR_OK;
 }
+
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime)
 {

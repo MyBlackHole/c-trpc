@@ -63,7 +63,7 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out);
 int tr_runtime_start(struct tr_runtime *runtime);
 int tr_runtime_stop(struct tr_runtime *runtime);
-void tr_runtime_destroy(struct tr_runtime *runtime);
+int tr_runtime_destroy(struct tr_runtime *runtime);
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime);
 struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,

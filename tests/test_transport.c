@@ -1736,6 +1736,95 @@ static void wait_channel_ready_probe(
 	pthread_mutex_unlock(&probe->lock);
 }
 
+struct channel_split_create_probe {
+	struct tr_channel_config config;
+	struct tr_conn_handle control;
+	struct tr_conn_handle bulk;
+	struct tr_channel *channel;
+	int create_ret;
+};
+
+static int channel_split_create_on_owner(void *arg)
+{
+	struct channel_split_create_probe *probe =
+		(struct channel_split_create_probe *)arg;
+
+	probe->create_ret = tr_channel_create(
+		&probe->config, probe->control, probe->bulk,
+		NULL, NULL, NULL, NULL, &probe->channel);
+	return TR_OK;
+}
+
+static void test_channel_split_create_tx_exhaustion_rollback(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_conn_handle control;
+	struct tr_conn_handle bulk;
+	struct channel_split_create_probe probe;
+	struct tr_reactor_stats stats;
+	int control_fds[2];
+	int bulk_fds[2];
+
+	assert(socketpair(
+		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0,
+		       control_fds) == 0);
+	assert(socketpair(
+		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0,
+		       bulk_fds) == 0);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 32U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 1U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	reactor_config.rx_budget_bytes = 64U * 1024U;
+	reactor_config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(
+		       &reactor_config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(
+		       reactor, control_fds[0], &control) == TR_OK);
+	assert(tr_reactor_adopt_fd(
+		       reactor, bulk_fds[0], &bulk) == TR_OK);
+
+	memset(&probe, 0, sizeof(probe));
+	probe.control = control;
+	probe.bulk = bulk;
+	probe.config.role = TR_CHANNEL_CLIENT;
+	probe.config.mode = TR_CHANNEL_SPLIT_CONNECTIONS;
+	probe.config.max_streams = 4U;
+	probe.config.initial_window_bytes = 4096U;
+
+	/*
+	 * The callback owns the Reactor turn. The first HELLO consumes the only
+	 * CONTROL TX item and cannot be dispatched before this callback returns;
+	 * the second split-lane HELLO therefore deterministically returns TR_AGAIN.
+	 */
+	assert(tr_reactor_call(
+		       reactor, channel_split_create_on_owner, &probe) == TR_OK);
+	assert(probe.create_ret == TR_AGAIN);
+	assert(probe.channel == NULL);
+
+	/*
+	 * The first HELLO command was already behind the current CALL in the ring.
+	 * Rollback closes both handles immediately; the queued SEND then observes a
+	 * stale generation and releases its independently owned payload/TX item.
+	 */
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
+	assert(stats.control_tx_item_pool.current == 0U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(control_fds[1]) == 0);
+	assert(close(bulk_fds[1]) == 0);
+}
+
 static void test_channel_deferred_hello_gate(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -7846,6 +7935,7 @@ int main(void)
 	test_rpc_method_registration_is_owner_serialized();
 	test_rpc_destroy_fails_closed_while_reactor_stopping();
 	test_reactor_rx_pool_backpressure();
+	test_channel_split_create_tx_exhaustion_rollback();
 	test_channel_deferred_hello_gate();
 	test_channel_stream_id_index_collision_delete();
 	test_channel_stream_slot_reuse();

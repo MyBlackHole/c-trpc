@@ -2004,18 +2004,26 @@ void tr_server_destroy(struct tr_server *server)
 				&server->shards[shard_index];
 
 			if (shard->reassembly_pool_ready) {
-				tr_buffer_pool_destroy(&shard->reassembly_pool);
+				int ret = tr_buffer_pool_destroy(
+					&shard->reassembly_pool);
+				if (ret != TR_OK)
+					return;
 				shard->reassembly_pool_ready = 0;
 			}
 			if (shard->rpc_pool_ready) {
-				tr_buffer_pool_destroy(&shard->rpc_message_pool);
+				int ret = tr_buffer_pool_destroy(
+					&shard->rpc_message_pool);
+				if (ret != TR_OK)
+					return;
 				shard->rpc_pool_ready = 0;
 			}
 		}
 	}
 
 	if (server->runtime) {
-		tr_runtime_destroy(server->runtime);
+		int ret = tr_runtime_destroy(server->runtime);
+		if (ret != TR_OK)
+			return;
 		server->runtime = NULL;
 	}
 

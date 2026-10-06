@@ -231,7 +231,7 @@ int tr_reactor_close(struct tr_conn_handle connection);
 int tr_reactor_abort(struct tr_conn_handle connection, int status);
 
 int tr_reactor_stop(struct tr_reactor *reactor);
-void tr_reactor_destroy(struct tr_reactor *reactor);
+int tr_reactor_destroy(struct tr_reactor *reactor);
 
 #ifdef __cplusplus
 }

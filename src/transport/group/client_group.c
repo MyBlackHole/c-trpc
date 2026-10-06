@@ -1155,10 +1155,17 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 fail:
 	tr_connector_destroy(group->connector);
 	group->connector = NULL;
+	if (group->control_pool_ready) {
+		int pool_ret = tr_buffer_pool_destroy(&group->control_pool);
+#ifndef NDEBUG
+		assert(pool_ret == TR_OK);
+#endif
+		if (pool_ret != TR_OK)
+			return pool_ret;
+		group->control_pool_ready = 0;
+	}
 	free(group->transfers);
 	free(group->data);
-	if (group->control_pool_ready)
-		tr_buffer_pool_destroy(&group->control_pool);
 	if (drain_wait_cond_ready)
 		pthread_cond_destroy(&group->drain_wait_cond);
 	if (drain_wait_lock_ready)
@@ -1662,10 +1669,16 @@ int tr_client_group_destroy(struct tr_client_group *group)
 
 	tr_connector_destroy(group->connector);
 	group->connector = NULL;
+
+	if (group->control_pool_ready) {
+		ret = tr_buffer_pool_destroy(&group->control_pool);
+		if (ret != TR_OK)
+			return ret;
+		group->control_pool_ready = 0;
+	}
+
 	free(group->transfers);
 	free(group->data);
-	if (group->control_pool_ready)
-		tr_buffer_pool_destroy(&group->control_pool);
 	pthread_cond_destroy(&group->drain_wait_cond);
 	pthread_mutex_destroy(&group->drain_wait_lock);
 	free(group);

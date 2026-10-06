@@ -2195,13 +2195,19 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 		return;
 	reactor = build->reactor;
 
+	if (build->rx_pool_ready) {
+		int pool_ret = tr_buffer_pool_destroy(&reactor->rx_pool);
+#ifndef NDEBUG
+		assert(pool_ret == TR_OK);
+#endif
+		if (pool_ret != TR_OK)
+			return;
+		build->rx_pool_ready = 0;
+	}
 	if (reactor->wake_fd >= 0)
 		close(reactor->wake_fd);
 	if (reactor->epoll_fd >= 0)
 		close(reactor->epoll_fd);
-
-	if (build->rx_pool_ready)
-		tr_buffer_pool_destroy(&reactor->rx_pool);
 	if (build->control_tx_pool_ready)
 		tr_tx_pool_destroy(&reactor->control_tx_pool);
 	if (build->tx_pool_ready)
@@ -3902,12 +3908,12 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	return TR_OK;
 }
 
-void tr_reactor_destroy(struct tr_reactor *reactor)
+int tr_reactor_destroy(struct tr_reactor *reactor)
 {
 	int ret;
 
 	if (!reactor)
-		return;
+		return TR_OK;
 
 	if (reactor->started) {
 		ret = tr_reactor_stop(reactor);
@@ -3915,15 +3921,30 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 		assert(ret == TR_OK);
 #endif
 		if (ret != TR_OK)
-			return;
+			return ret;
 	}
 
-	if (reactor->wake_fd >= 0)
-		close(reactor->wake_fd);
-	if (reactor->epoll_fd >= 0)
-		close(reactor->epoll_fd);
+	/*
+	 * RX payload ownership may escape a callback through
+	 * TR_FRAME_TAKE_OWNERSHIP. Check that terminal edge before tearing down
+	 * epoll/queues/slots; a failed destroy must leave a retryable Reactor shell.
+	 */
+	ret = tr_buffer_pool_destroy(&reactor->rx_pool);
+#ifndef NDEBUG
+	assert(ret == TR_OK || ret == TR_ERR_STATE);
+#endif
+	if (ret != TR_OK)
+		return ret;
 
-	tr_buffer_pool_destroy(&reactor->rx_pool);
+	if (reactor->wake_fd >= 0) {
+		close(reactor->wake_fd);
+		reactor->wake_fd = -1;
+	}
+	if (reactor->epoll_fd >= 0) {
+		close(reactor->epoll_fd);
+		reactor->epoll_fd = -1;
+	}
+
 	tr_tx_pool_destroy(&reactor->control_tx_pool);
 	tr_tx_pool_destroy(&reactor->tx_pool);
 	tr_timer_queue_destroy(&reactor->timers);
@@ -3931,11 +3952,14 @@ void tr_reactor_destroy(struct tr_reactor *reactor)
 	tr_command_queue_destroy(&reactor->commands);
 
 	free(reactor->connections);
+	reactor->connections = NULL;
 	free(reactor->slots);
+	reactor->slots = NULL;
 
 	pthread_mutex_destroy(&reactor->ctl_lock);
 	if (reactor->config.memory_budget && reactor->memory_bytes != 0U)
 		(void)tr_memory_budget_release(
 			reactor->config.memory_budget, reactor->memory_bytes);
 	free(reactor);
+	return TR_OK;
 }
