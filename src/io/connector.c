@@ -44,19 +44,41 @@ static uint64_t tr_connector_now_ns(void)
 	       (uint64_t)ts.tv_nsec;
 }
 
-static void tr_connector_unwatch_on_owner(struct tr_connector *connector)
+static int tr_connector_unwatch_on_owner(struct tr_connector *connector)
 {
+	int ret;
+
 	if (!connector->watched)
-		return;
-	(void)tr_reactor_aux_event_unregister(
+		return TR_OK;
+
+	ret = tr_reactor_aux_event_unregister(
 		connector->config.owner, connector->fd);
+	/*
+	 * STALE proves this fd is not published in the aux source table anymore,
+	 * which is sufficient for connector lifetime safety.
+	 */
+	if (ret != TR_OK && ret != TR_ERR_STALE)
+		return ret;
+
 	connector->watched = 0;
+	return TR_OK;
 }
 
-static void tr_connector_disarm_on_owner(struct tr_connector *connector)
+static int tr_connector_disarm_on_owner(struct tr_connector *connector)
 {
-	if (connector->timer_registered)
-		(void)tr_reactor_timer_arm(connector->timer, 0U);
+	int ret;
+
+	if (!connector->timer_registered)
+		return TR_OK;
+
+	ret = tr_reactor_timer_arm(connector->timer, 0U);
+	if (ret == TR_ERR_STALE) {
+		/* The timer source is already absent; publish that fact locally. */
+		connector->timer_registered = 0;
+		memset(&connector->timer, 0, sizeof(connector->timer));
+		return TR_OK;
+	}
+	return ret;
 }
 
 static void tr_connector_reset_state(struct tr_connector *connector)
@@ -73,18 +95,27 @@ static void tr_connector_reset_state(struct tr_connector *connector)
 	memset(connector->preface, 0, sizeof(connector->preface));
 }
 
-static void tr_connector_complete_on_owner(
+static int tr_connector_complete_on_owner(
 	struct tr_connector *connector, int status)
 {
 	tr_connector_complete_cb callback;
 	void *callback_arg;
 	int fd = -1;
+	int ret;
 
 	if (!connector->active)
-		return;
+		return TR_OK;
 
-	tr_connector_unwatch_on_owner(connector);
-	tr_connector_disarm_on_owner(connector);
+	/*
+	 * Completion cannot publish upper-layer ownership until every callback
+	 * source that still carries connector * has been detached.
+	 */
+	ret = tr_connector_unwatch_on_owner(connector);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_connector_disarm_on_owner(connector);
+	if (ret != TR_OK)
+		return ret;
 
 	callback = connector->config.complete_cb;
 	callback_arg = connector->config.callback_arg;
@@ -101,6 +132,7 @@ static void tr_connector_complete_on_owner(
 	 * 返回前 adopt/close fd，甚至销毁上层对象，因此之后不能再访问 connector。
 	 */
 	callback(status, fd, callback_arg);
+	return TR_OK;
 }
 
 static int tr_connector_watch_on_owner(struct tr_connector *connector);
@@ -124,12 +156,11 @@ static int tr_connector_send_preface_on_owner(
 		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
 			return tr_connector_watch_on_owner(connector);
 
-		tr_connector_complete_on_owner(connector, TR_ERR_SYS);
-		return TR_ERR_SYS;
+		ret = tr_connector_complete_on_owner(connector, TR_ERR_SYS);
+		return ret == TR_OK ? TR_ERR_SYS : ret;
 	}
 
-	tr_connector_complete_on_owner(connector, TR_OK);
-	return TR_OK;
+	return tr_connector_complete_on_owner(connector, TR_OK);
 }
 
 static int tr_connector_progress_on_owner(struct tr_connector *connector)
@@ -142,8 +173,9 @@ static int tr_connector_progress_on_owner(struct tr_connector *connector)
 	if (connector->connecting) {
 		ret = tr_tcp_finish_connect(connector->fd);
 		if (ret != TR_OK) {
-			tr_connector_complete_on_owner(connector, ret);
-			return ret;
+			int complete_ret =
+				tr_connector_complete_on_owner(connector, ret);
+			return complete_ret == TR_OK ? ret : complete_ret;
 		}
 		connector->connecting = 0;
 	}
@@ -152,8 +184,9 @@ static int tr_connector_progress_on_owner(struct tr_connector *connector)
 		if (connector->config.tcp_nodelay) {
 			ret = tr_tcp_set_nodelay(connector->fd, 1);
 			if (ret != TR_OK) {
-				tr_connector_complete_on_owner(connector, ret);
-				return ret;
+				int complete_ret =
+					tr_connector_complete_on_owner(connector, ret);
+				return complete_ret == TR_OK ? ret : complete_ret;
 			}
 		}
 		connector->socket_ready = 1;
@@ -193,8 +226,14 @@ static uint64_t tr_connector_timeout(void *arg, uint64_t now_ns)
 	struct tr_connector *connector = (struct tr_connector *)arg;
 
 	(void)now_ns;
-	if (connector && connector->active)
-		tr_connector_complete_on_owner(connector, TR_ERR_TIMEOUT);
+	if (connector && connector->active) {
+		int ret =
+			tr_connector_complete_on_owner(connector, TR_ERR_TIMEOUT);
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		(void)ret;
+	}
 	return 0U;
 }
 
@@ -290,12 +329,19 @@ static int tr_connector_cancel_on_owner(void *arg)
 	struct tr_connector_cancel_request *request =
 		(struct tr_connector_cancel_request *)arg;
 	struct tr_connector *connector = request->connector;
+	int ret;
 
-	if (!connector->active)
-		return TR_OK;
+	/*
+	 * Always prove source quiescence, even for an already-inactive attempt.
+	 * Local active state must never substitute for callback-source ownership.
+	 */
+	ret = tr_connector_unwatch_on_owner(connector);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_connector_disarm_on_owner(connector);
+	if (ret != TR_OK)
+		return ret;
 
-	tr_connector_unwatch_on_owner(connector);
-	tr_connector_disarm_on_owner(connector);
 	tr_socket_close(&connector->fd);
 	tr_connector_reset_state(connector);
 	return TR_OK;
@@ -335,15 +381,46 @@ int tr_connector_create(
 	return TR_OK;
 }
 
-void tr_connector_destroy(struct tr_connector *connector)
+static int tr_connector_destroy_on_owner(void *arg)
 {
-	if (!connector)
-		return;
+	struct tr_connector *connector = (struct tr_connector *)arg;
+	struct tr_connector_cancel_request request;
+	int ret;
 
-	(void)tr_connector_cancel(connector);
-	if (connector->timer_registered)
-		(void)tr_reactor_timer_unregister(connector->timer);
+	request.connector = connector;
+	ret = tr_connector_cancel_on_owner(&request);
+	if (ret != TR_OK)
+		return ret;
+
+	if (connector->timer_registered) {
+		ret = tr_reactor_timer_unregister(connector->timer);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+		connector->timer_registered = 0;
+		memset(&connector->timer, 0, sizeof(connector->timer));
+	}
+	return TR_OK;
+}
+
+int tr_connector_destroy(struct tr_connector *connector)
+{
+	int ret;
+
+	if (!connector)
+		return TR_OK;
+
+	/*
+	 * Connector lifetime is subordinate to its Reactor. A parent must destroy
+	 * it before Reactor stop; an in-progress/stopped owner therefore fails
+	 * closed rather than freeing callback_arg storage optimistically.
+	 */
+	ret = tr_reactor_call(
+		connector->config.owner, tr_connector_destroy_on_owner, connector);
+	if (ret != TR_OK)
+		return ret;
+
 	free(connector);
+	return TR_OK;
 }
 
 int tr_connector_start(
