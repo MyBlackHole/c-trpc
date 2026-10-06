@@ -85,7 +85,7 @@ static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
 			   struct tr_rpc_endpoint **out);
-void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
+int tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
 
 /*
  * Method publication 是同步 Reactor-owner control-plane barrier。
@@ -150,7 +150,7 @@ int tr_rpc_endpoint_create_with_executor_group(
  * Server reaping path: synchronously quiesce/drain the Endpoint, snapshot its
  * final counters, then release it. stats may be NULL.
  */
-void tr_rpc_endpoint_destroy_with_stats(
+int tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
 /*
