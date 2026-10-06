@@ -2916,7 +2916,7 @@ static void test_channel_drain_goaway_backpressure(void)
 	reactor_config.max_connections = 4U;
 	reactor_config.command_capacity = 64U;
 	reactor_config.tx_item_capacity = 8U;
-	/* One CONTROL item makes GOAWAY admission failure deterministic. */
+	/* One ordinary CONTROL item lets the test fully exhaust that pool. */
 	reactor_config.control_tx_item_capacity = 1U;
 	reactor_config.rx_buffer_count = 8U;
 	reactor_config.rx_buffer_size = 4096U;
@@ -2959,9 +2959,9 @@ static void test_channel_drain_goaway_backpressure(void)
 	wait_channel_drain_probe(&probe, &probe.owner_entered);
 
 	/*
-	 * Owner is blocked. tr_reactor_send() reserves the sole CONTROL TX item
-	 * before queueing SEND, so begin_drain() cannot allocate GOAWAY and must
-	 * return TR_AGAIN.
+	 * Owner is blocked. tr_reactor_send() reserves the sole ordinary CONTROL
+	 * TX item before queueing SEND. GOAWAY must still succeed because it uses
+	 * the per-Connection lifecycle slot rather than control_tx_pool.
 	 */
 	assert(tr_reactor_send(
 		       client_conn, TR_FRAME_PONG, 0U, 0U,
@@ -2973,20 +2973,16 @@ static void test_channel_drain_goaway_backpressure(void)
 	pthread_mutex_unlock(&probe.lock);
 	wait_channel_drain_probe(&probe, &probe.drain_done);
 	assert(pthread_join(owner_thread, NULL) == 0);
-	assert(probe.drain_ret == TR_AGAIN);
+	assert(probe.drain_ret == TR_OK);
 
 	/*
-	 * Stream quiescence is already true, but wait_drained() must not become a
-	 * second protocol owner and retry GOAWAY from the application thread.
+	 * The pre-barrier PONG command remains a FIFO predecessor. Once it is
+	 * processed, the deferred embedded GOAWAY is attached automatically;
+	 * no second begin_drain()/poll loop is allowed or required.
 	 */
-	assert(tr_channel_wait_drained(client_channel, 0U) == TR_OK);
-	pthread_mutex_lock(&server_ctx.lock);
-	assert(server_ctx.channel_goaway == 0U);
-	pthread_mutex_unlock(&server_ctx.lock);
-
 	wait_connection_tx_frame(client_conn, before.tx_frames + 1U);
-	assert(tr_channel_begin_drain(client_channel) == TR_OK);
 	wait_channel_counter(&server_ctx, &server_ctx.channel_goaway, 2U);
+	assert(tr_channel_wait_drained(client_channel, 0U) == TR_OK);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
