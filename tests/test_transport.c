@@ -6305,7 +6305,13 @@ static void test_client_server_facade_unary(void)
 	client_config.interceptor.arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 	nodelay_before = tcp_nodelay_probe_read();
+	/*
+	 * tr_client_connect() exercised "waiter installed before CONTROL_UP".
+	 * Repeating wait_ready() after connect covers the opposite ordering: the
+	 * predicate is already true before the temporary lifecycle observer exists.
+	 */
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_client_wait_ready(client, 1000U) == TR_OK);
 	assert(tcp_nodelay_probe_read() == nodelay_before + 2U);
 	assert(tr_client_register_method(client, &method) == TR_OK);
 
