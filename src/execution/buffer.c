@@ -228,10 +228,15 @@ int tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 	pool->memory_budget = NULL;
 	pthread_mutex_unlock(&pool->lock);
 
-	if (!storage && buffers)
-		for (i = 0; i < buffer_count; ++i)
+	if (!storage && buffers) {
+		for (i = 0; i < buffer_count; ++i) {
 			tr_buffer_budget_release(
 				budget, (uint64_t)buffers[i].capacity);
+			free(buffers[i].data);
+			buffers[i].data = NULL;
+			buffers[i].capacity = 0U;
+		}
+	}
 	free(storage);
 	free(buffers);
 
