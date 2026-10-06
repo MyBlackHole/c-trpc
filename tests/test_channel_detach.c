@@ -95,7 +95,7 @@ static void fixture_init(struct channel_detach_fixture *fixture)
 
 static void fixture_finish(struct channel_detach_fixture *fixture)
 {
-	assert(tr_channel_finalize_detached(fixture->channel) == TR_OK);
+	tr_channel_finalize_detached(fixture->channel);
 	fixture->channel = NULL;
 
 	assert(tr_reactor_stop(fixture->reactor) == TR_OK);

@@ -66,7 +66,11 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
  * TR_OK 才会发布 teardown_detached，并允许进入 finalization。
  */
 int tr_channel_detach_for_finalize(struct tr_channel *channel);
-int tr_channel_finalize_detached(struct tr_channel *channel);
+/*
+ * detach_for_finalize() 成功后，所有可失败 lifecycle barrier 已经完成。
+ * finalize_detached() 只做 owner-free 本地资源释放，语义上不可失败。
+ */
+void tr_channel_finalize_detached(struct tr_channel *channel);
 
 int tr_channel_start(struct tr_channel *channel);
 

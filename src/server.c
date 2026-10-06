@@ -627,9 +627,6 @@ static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 	if (peer->rpc) {
 		int ret = tr_rpc_endpoint_destroy(peer->rpc);
 
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
 			return ret;
 		peer->rpc = NULL;
@@ -637,9 +634,6 @@ static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 	if (peer->channel) {
 		int ret = tr_channel_destroy(peer->channel);
 
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
 			return ret;
 		peer->channel = NULL;
@@ -671,16 +665,9 @@ static void tr_server_finish_detached_peer(
 
 	memset(&channel_stats, 0, sizeof(channel_stats));
 	if (detached->channel) {
-		int ret;
-
 		if (tr_channel_get_stats(detached->channel, &channel_stats) == TR_OK)
 			have_channel_stats = 1;
-		ret = tr_channel_finalize_detached(detached->channel);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
-		if (ret != TR_OK)
-			return;
+		tr_channel_finalize_detached(detached->channel);
 		detached->channel = NULL;
 	}
 
