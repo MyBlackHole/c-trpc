@@ -190,6 +190,46 @@ retained RX payload
 不要因为存在引用计数原语就给所有对象增加引用计数。
 能用唯一所有权或静默屏障解决时，应优先使用更简单的模型。
 
+## 8.1 Graceful shutdown 与 terminal destroy 分离
+
+Facade 不再把 graceful policy 隐藏在 destroy 中。
+
+```text
+需要优雅关闭：
+    begin_drain()
+        -> wait_drained(timeout)
+        -> destroy()
+
+需要立即终止：
+    destroy()
+```
+
+`tr_client_destroy()` / `tr_server_destroy()` 只负责 terminal ownership
+收敛，不选择 1 秒或其他魔法超时，也不替调用方决定是否等待业务 Stream。
+
+所有 terminal destroy 返回状态：
+
+- `TR_OK`：对象 storage 已释放，旧指针失效；
+- 非 `TR_OK`：对象仍由调用方拥有，可能已经关闭部分 admission/source，
+  调用方解决 outstanding holder/waiter 后重试；
+- execution owner / worker callback 中调用同步 destroy 返回
+  `TR_ERR_STATE`，不会静默失败。
+
+因此调用方不得写：
+
+```c
+tr_client_destroy(client);   /* 忽略结果 */
+client = NULL;
+```
+
+必须写：
+
+```c
+ret = tr_client_destroy(client);
+if (ret == TR_OK)
+    client = NULL;
+```
+
 ## 9. RPC Endpoint 生命周期
 
 RPC Endpoint 使用强引用计数保护跨工作线程的异步生命周期，但需要区分两种销毁模式。
