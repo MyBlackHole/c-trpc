@@ -3805,6 +3805,8 @@ static void test_channel_automatic_reconnect_shared(void)
 	wait_for_pool_full(&tx_pool, 1);
 
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
+	/* Terminal reconnect teardown is idempotent after all sources are detached. */
+	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	tr_socket_close(&listener);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
