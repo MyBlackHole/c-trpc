@@ -2244,6 +2244,32 @@ struct tr_channel_build {
 	int bulk_handler_installed;
 };
 
+struct tr_channel_build_close_request {
+	struct tr_conn_handle control;
+	struct tr_conn_handle bulk;
+	int split;
+};
+
+static int tr_channel_build_close_on_owner(void *arg)
+{
+	struct tr_channel_build_close_request *request =
+		(struct tr_channel_build_close_request *)arg;
+	int final = TR_OK;
+	int ret;
+
+	ret = tr_reactor_close_on_owner(request->control);
+	if (ret != TR_OK && ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
+		final = ret;
+
+	if (request->split) {
+		ret = tr_reactor_close_on_owner(request->bulk);
+		if (ret != TR_OK && ret != TR_ERR_STALE &&
+		    ret != TR_ERR_CLOSED && final == TR_OK)
+			final = ret;
+	}
+	return final;
+}
+
 static void tr_channel_build_cleanup(struct tr_channel_build *build)
 {
 	struct tr_channel *channel;
@@ -2263,8 +2289,23 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 					     NULL, NULL);
 		handlers_removed = 1;
 	}
-	if (handlers_removed && channel->reactor)
-		(void)tr_reactor_quiesce(channel->reactor);
+	if (handlers_removed && channel->reactor) {
+		struct tr_channel_build_close_request request;
+		int ret;
+
+		request.control = channel->control_connection;
+		request.bulk = channel->bulk_connection;
+		request.split = !tr_conn_equal(
+			request.control, request.bulk);
+		ret = tr_reactor_call(
+			channel->reactor, tr_channel_build_close_on_owner,
+			&request);
+#ifndef NDEBUG
+		assert(ret == TR_OK || ret == TR_ERR_CLOSED);
+#endif
+		if (ret != TR_OK && ret != TR_ERR_CLOSED)
+			return;
+	}
 
 	if (channel->streams) {
 		uint32_t i;
