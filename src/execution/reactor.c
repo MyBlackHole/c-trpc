@@ -2076,6 +2076,14 @@ static void *tr_reactor_thread_main(void *arg)
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
 
+	/*
+	 * start() holds ctl_lock across pthread_create and the new epoch
+	 * publication. A restarted owner must not dispatch persistent epoll/timer
+	 * sources until queues, started and accepting all belong to that epoch.
+	 */
+	pthread_mutex_lock(&reactor->ctl_lock);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
 	while (!reactor->stopping) {
 		struct tr_reactor_turn turn = { .left = reactor->stats.limits };
 		int commands_pending;
@@ -2994,21 +3002,15 @@ int tr_reactor_start(struct tr_reactor *reactor)
 
 	/*
 	 * stop() leaves stopping=1 and accepting=0 as the closed epoch marker.
-	 * A new start must publish the next epoch before the owner thread can
-	 * observe those fields; ctl_lock simultaneously prevents normal command
-	 * producers from entering until started is committed below.
-	 *
-	 * completion producers do not use ctl_lock, so their queue remains closed
-	 * until pthread_create() succeeds.
+	 * Reset only the owner-loop stop flag before creating the next owner.
+	 * The new thread blocks on ctl_lock above until this function has completed
+	 * the rest of the epoch publication.
 	 */
 	reactor->stopping = 0;
-	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
 
 	error = pthread_create(&reactor->thread, NULL, tr_reactor_thread_main,
 			       reactor);
 	if (error != 0) {
-		atomic_store_explicit(&reactor->accepting, 0,
-				      memory_order_release);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_SYS;
 	}
@@ -3021,6 +3023,7 @@ int tr_reactor_start(struct tr_reactor *reactor)
 	(void)tr_completion_queue_open(&reactor->completions);
 	(void)tr_command_queue_wait_open(&reactor->commands);
 	reactor->started = 1;
+	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return TR_OK;
 }
@@ -3646,6 +3649,14 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 		fn(arg);
 		return TR_OK;
 	}
+
+	/*
+	 * completion producer 不取得 ctl_lock，因此必须先观察 Reactor epoch
+	 * admission。这样 start() 可以先 reopen queue、最后发布 accepting；
+	 * stop() 也可以先关闭 accepting，再关闭 queue 并唤醒旧 waiter。
+	 */
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return TR_ERR_CLOSED;
 
 	completion.fn = fn;
 	completion.arg = arg;
