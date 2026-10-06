@@ -45,6 +45,57 @@ accepting = false
 这样可以保证 `STOP` 之后不会再出现“命令/完成事件已经取得资源所有权，
 但所有者已经退出”的悬空工作。
 
+### Reactor 运行 epoch
+
+`stop()` 不是 Reactor storage 的销毁操作。同一个 Reactor 在成功 stop 后允许
+再次 `start()`，因此每次 start/stop 都必须形成独立的运行 epoch：
+
+```text
+CREATED / STOPPED
+  accepting = 0
+  no owner thread
+        |
+        | start() under ctl_lock
+        v
+  stopping = 0
+  create owner pthread
+  owner waits on ctl_lock startup gate
+  reopen completion admission generation
+  reopen command-wait generation
+  started = 1
+  accepting = 1
+        |
+        | unlock ctl_lock
+        v
+RUNNING
+        |
+        | stop()
+        v
+  accepting = 0
+  close completion admission + advance generation
+  close command waiter admission + advance generation
+  enqueue STOP after all previously admitted commands
+  owner drains accepted completions
+  owner closes live connections
+  join owner
+  started = 0
+        v
+STOPPED
+```
+
+关键不变量：
+
+- `create()` 本身不开放 producer admission；
+- restart 的新 owner thread 在 `start()` 完整发布新 epoch 前不能 dispatch
+  已保留的 timer/listener/aux source；
+- completion producer 不取得 `ctl_lock`，因此必须先观察 `accepting`；
+- command/completion queue 的 generation 每轮重新开放，旧 epoch waiter 即使在
+  restart 后才醒来也只能返回 `TR_ERR_CLOSED`；
+- stop 会回收所有 live Connection，旧 `tr_conn_handle` 不跨 epoch 存活；
+- timer/listener/aux registration 属于 Reactor 对象，而不是某个运行 epoch；
+  未显式 unregister 的 source 会保留到下一轮 start，并且只能在 startup gate
+  之后恢复 dispatch。
+
 ### 命令队列/完成队列锁
 
 **结论：保留。**
