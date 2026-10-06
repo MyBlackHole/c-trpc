@@ -77,20 +77,18 @@ static void tr_pipeline_ingress_event(
 		return;
 
 	/*
-	 * Connection close/error is the owner-side membership retirement point.
-	 * Exact capability+connection matching prevents a stale close callback
-	 * from detaching a replacement DATA membership.
+	 * connection close/error 是 owner 侧 DATA membership 的终止退休点。
+	 * exact capability + connection 匹配保证旧连接的 close callback 不会
+	 * 错误摘除已经替换的新 DATA membership。
 	 *
-	 * TR_ERR_STALE is a valid terminal result: CONTROL abort retires DATA
-	 * membership and unregisters the Pipeline before it closes the physical
-	 * DATA connection, so this callback can legitimately observe "already
-	 * detached". Any other error means the lifecycle retirement itself failed
-	 * and must not be hidden behind the socket close status.
+	 * TR_ERR_STALE 是合法终止结果：CONTROL abort 可能先退休 DATA membership
+	 * 并从 registry 摘除 Pipeline，之后才关闭物理 DATA connection，因此这里
+	 * 合法观察到“已经解绑”。其他错误表示 membership 生命周期收敛本身失败，
+	 * 不能被 socket close/error 状态掩盖。
 	 *
-	 * member lifetime is tied to this terminal connection callback, not to
-	 * registry membership. The Reactor has already retired the connection slot
-	 * before invoking event_cb, so member is released exactly once regardless
-	 * of whether membership was already retired by CONTROL.
+	 * member 生命周期属于这次 terminal connection callback，而不是 registry
+	 * membership。Reactor 在调用 event_cb 前已经退休 connection slot，因此
+	 * 无论 membership 是否已被 CONTROL 提前退休，member 都只释放一次。
 	 */
 	detach_ret = tr_pipeline_registry_detach_data_route(
 		member->registry, &member->preface, connection);
@@ -146,10 +144,9 @@ int tr_pipeline_ingress_attach_data_route_on_owner(
 		int rollback_ret;
 
 		/*
-		 * Handler publication failed, so member was never transferred to the
-		 * connection callback source and remains locally owned. The just-attached
-		 * membership must still be retired before returning; a rollback failure
-		 * is the more important lifecycle error and therefore wins.
+		 * handler publication 失败时，member 尚未转移给 connection callback
+		 * source，仍由当前作用域拥有。刚 attach 的 membership 必须在返回前
+		 * 退休；若 rollback 本身失败，生命周期错误优先于原 publication 错误。
 		 */
 		rollback_ret = tr_pipeline_registry_detach_data_route(
 			config->registry, preface, connection);
