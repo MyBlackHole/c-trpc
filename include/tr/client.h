@@ -43,7 +43,14 @@ void tr_client_config_init(struct tr_client_config *config);
 int tr_client_create(const struct tr_client_config *config,
 		     struct tr_client **out);
 
-/* V1 facade 仅接受数字 IPv4 address。 */
+/*
+ * V1 facade 仅接受数字 IPv4 address。
+ *
+ * fd 被 Reactor 接管后，后续 Channel/RPC/keepalive/reconnect 任一步失败都会
+ * 同步执行 session rollback。只有 rollback 完整收敛时才返回原 connect 错误；
+ * rollback 自身失败时返回该生命周期错误，并保留 Client ownership 与尚未收敛
+ * 的内部对象，调用方应停止新的 connect 并通过 tr_client_destroy() 重试终止。
+ */
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port);
 
