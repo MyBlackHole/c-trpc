@@ -99,6 +99,14 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 			  const struct tr_command *command, int *need_wake);
 
 /*
+ * 原子批量入队。容量不足时一个 command 都不转移；成功时保持数组顺序，
+ * need_wake 表示该批次是否把 queue 从“无需 wake”推进到“需要 wake”。
+ */
+int tr_command_queue_push_batch(
+	struct tr_command_queue *queue, const struct tr_command *commands,
+	size_t count, int *need_wake);
+
+/*
  * 同步 owner request 的 capacity wait admission。
  *
  * open/close 只控制 push_wait() waiter，不改变普通 push() 的立即 TR_AGAIN
