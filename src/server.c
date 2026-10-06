@@ -819,13 +819,19 @@ static void tr_server_wait_peer_finalizers(struct tr_server *server)
 	pthread_mutex_unlock(&server->finalizer_lock);
 }
 
-static void tr_server_disable_peer_events(struct tr_server_shard *shard)
+static int tr_server_disable_peer_events(struct tr_server_shard *shard)
 {
-	if (!shard || !shard->peer_events_enabled)
-		return;
+	int ret;
 
-	(void)tr_runtime_shard_disable_peer_events(shard->runtime);
+	if (!shard || !shard->peer_events_enabled)
+		return TR_OK;
+
+	ret = tr_runtime_shard_disable_peer_events(shard->runtime);
+	if (ret != TR_OK)
+		return ret;
+
 	shard->peer_events_enabled = 0;
+	return TR_OK;
 }
 
 static void tr_server_signal_peer_cleanup(struct tr_server_shard *shard)
@@ -1614,28 +1620,53 @@ rollback_events:
 			if (tr_server_shard_listener_fd(&server->shards[j]) >= 0)
 				(void)tr_runtime_shard_disable_listener_events(
 					server->shards[j].runtime);
-			tr_server_disable_peer_events(&server->shards[j]);
+			(void)tr_server_disable_peer_events(&server->shards[j]);
 		}
 	}
 	(void)tr_runtime_stop(server->runtime);
 	return ret;
 }
 
-static void tr_server_stop_accepting(struct tr_server *server)
+static int tr_server_stop_accepting(struct tr_server *server)
 {
 	uint32_t i;
+	int ret;
 
 	if (!server)
-		return;
-	(void)tr_server_connection_group_stop_internal(server);
+		return TR_ERR_INVALID;
+
+	ret = tr_server_connection_group_stop_internal(server);
+	if (ret != TR_OK)
+		return ret;
+
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_shard *shard = &server->shards[i];
 
 		if (tr_server_shard_listener_fd(shard) < 0)
 			continue;
-		(void)tr_runtime_shard_disable_listener_events(shard->runtime);
+
+		ret = tr_runtime_shard_disable_listener_events(shard->runtime);
+		if (ret != TR_OK)
+			return ret;
 		tr_runtime_shard_close_listener(shard->runtime);
 	}
+	return TR_OK;
+}
+
+static int tr_server_freeze_peer_events(struct tr_server *server)
+{
+	uint32_t i;
+
+	if (!server)
+		return TR_ERR_INVALID;
+
+	for (i = 0; i < server->shard_count; ++i) {
+		int ret = tr_server_disable_peer_events(&server->shards[i]);
+
+		if (ret != TR_OK)
+			return ret;
+	}
+	return TR_OK;
 }
 
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
@@ -1656,9 +1687,15 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
-	tr_server_stop_accepting(server);
-	for (shard_index = 0; shard_index < server->shard_count; ++shard_index)
-		tr_server_disable_peer_events(&server->shards[shard_index]);
+	{
+		int ret = tr_server_stop_accepting(server);
+
+		if (ret != TR_OK)
+			return ret;
+		ret = tr_server_freeze_peer_events(server);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	/*
 	 * Listener + peer-event unregister are synchronous owner barriers. After
@@ -1918,8 +1955,15 @@ void tr_server_destroy(struct tr_server *server)
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return;
 
-	if (server->shards)
-		tr_server_stop_accepting(server);
+	if (server->shards) {
+		int ret = tr_server_stop_accepting(server);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
+	}
 	if (server->connection_group_listener) {
 		int ret = tr_pipeline_listener_stop(
 			server->connection_group_listener);
@@ -1943,11 +1987,15 @@ void tr_server_destroy(struct tr_server *server)
 			return;
 		server->connection_group_listener = NULL;
 	}
-	if (server->shards)
-		for (shard_index = 0; shard_index < server->shard_count;
-		     ++shard_index)
-			tr_server_disable_peer_events(
-				&server->shards[shard_index]);
+	if (server->shards) {
+		int ret = tr_server_freeze_peer_events(server);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
+	}
 
 	if (server->runtime && server->started) {
 		int ret = tr_runtime_stop(server->runtime);
