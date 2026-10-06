@@ -614,7 +614,13 @@ static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 		return TR_OK;
 
 	if (peer->rpc) {
-		tr_rpc_endpoint_destroy(peer->rpc);
+		int ret = tr_rpc_endpoint_destroy(peer->rpc);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return ret;
 		peer->rpc = NULL;
 	}
 	if (peer->channel) {
