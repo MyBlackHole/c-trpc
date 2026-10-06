@@ -865,36 +865,41 @@ static void tr_server_on_channel_lifecycle(struct tr_channel *channel,
 		tr_server_signal_peer_cleanup(shard);
 }
 
-struct tr_server_peer_guard {
-	struct tr_server_shard *shard;
-	struct tr_runtime_peer *peer;
-	int armed;
-};
-
-static void tr_server_peer_guard_cleanup(struct tr_server_peer_guard *guard)
+static int tr_server_adopt_peer_rollback(
+	struct tr_server_shard *shard, struct tr_runtime_peer *peer, int cause)
 {
-	struct tr_runtime_peer *peer;
+	int close_ret = TR_OK;
 
-	if (!guard || !guard->armed || !guard->shard || !guard->peer)
-		return;
-	peer = guard->peer;
-
-	if (peer->connection.reactor)
-		(void)tr_reactor_close(peer->connection);
+	if (!shard || !peer)
+		return cause;
 
 	/*
-	 * 一旦 Channel/RPC 状态已经建立，Reactor callback 就可能观察过它们。
-	 * 此时失败不能直接 free；必须先发布 partial peer，再通过
-	 * shard peer event 延后到当前 owner callback 返回后执行 detach。
+	 * tr_server_adopt_peer() 只在 shard Reactor owner callback 中执行。
+	 * rollback 不再把 CLOSE 重新排队，而是在当前 owner turn 直接退休 exact
+	 * connection；因此不受 command queue 容量影响，也不会留下 ACTIVE partial
+	 * peer 等待一个永远没有提交成功的 close command。
+	 */
+	if (peer->connection.reactor) {
+		close_ret = tr_reactor_close_on_owner(peer->connection);
+		if (close_ret == TR_ERR_STALE)
+			close_ret = TR_OK;
+	}
+
+	/*
+	 * 一旦 Channel/RPC publication 已经建立，不能在当前 owner callback 中
+	 * 同步 destroy。先发布 partial peer，延迟到后续 shard lifecycle turn 做
+	 * detach/finalize；connection 已在上面完成同步退休。
 	 */
 	if (peer->channel || peer->rpc) {
 		peer->used = 1;
-		tr_server_note_peer_added_owner(guard->shard);
-		tr_server_signal_peer_cleanup(guard->shard);
+		tr_server_note_peer_added_owner(shard);
+		tr_server_signal_peer_cleanup(shard);
 	} else {
 		free(peer->finalize_ctx);
 		memset(peer, 0, sizeof(*peer));
 	}
+
+	return close_ret != TR_OK ? close_ret : cause;
 }
 
 static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
@@ -904,8 +909,6 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_runtime_peer *peer;
-	struct tr_server_peer_guard peer_guard
-		TR_AUTO(tr_server_peer_guard_cleanup) = { shard, NULL, 0 };
 	uint32_t slot;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
@@ -937,20 +940,18 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	if (!peer->finalize_ctx)
 		return TR_ERR_NOMEM;
 	((struct tr_server_detached_peer *)peer->finalize_ctx)->shard = shard;
-	peer_guard.peer = peer;
 
 	if (tr_tcp_nodelay_policy_enabled(server->config.tcp_nodelay)) {
 		ret = tr_tcp_set_nodelay(owned_fd, 1);
 		if (ret != TR_OK)
-			return ret;
+			goto rollback;
 	}
 
 	ret = tr_reactor_adopt_fd(tr_server_shard_reactor(shard), owned_fd,
 				  &peer->connection);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 	(void)tr_fd_take(&owned_fd);
-	peer_guard.armed = 1;
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_SERVER;
@@ -973,12 +974,12 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 					 peer->connection, NULL, NULL, NULL, NULL,
 					 &peer->channel);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	ret = tr_channel_set_lifecycle_observer(
 		peer->channel, tr_server_on_channel_lifecycle, shard);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_SERVER;
@@ -998,15 +999,15 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		peer->channel, &rpc_config, tr_server_shard_rpc_executor(shard),
 		&peer->rpc);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	ret = tr_server_register_methods_on_peer(server, peer);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	ret = tr_channel_start(peer->channel);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	if (server->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -1016,7 +1017,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		ret = tr_channel_enable_keepalive(peer->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			return ret;
+			goto rollback;
 	}
 
 	peer->used = 1;
@@ -1027,8 +1028,10 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	 * visible in the owner table. The shard eventfd coalesces the retry.
 	 */
 	tr_server_signal_peer_cleanup(shard);
-	peer_guard.armed = 0;
 	return TR_OK;
+
+rollback:
+	return tr_server_adopt_peer_rollback(shard, peer, ret);
 }
 
 static void tr_server_on_listener_ready(int listener, uint32_t events,
