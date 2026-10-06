@@ -834,6 +834,12 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	connection->state = (event == TR_CONN_EVENT_ERROR) ? TR_CONN_ERROR :
 							     TR_CONN_CLOSED;
 
+	/*
+	 * Connection fd 由 Reactor 独占。这里的 DEL 只是尽早移除 interest；
+	 * 即使 DEL 报错，紧随其后的 close() 也会从 epoll 自动移除该 open file
+	 * description。slot state/generation 随后失效，因此已经返回到当前
+	 * epoll batch 的旧 token 也只能被当作 stale 丢弃。
+	 */
 	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, connection->fd, NULL);
 
 	close(connection->fd);
@@ -2476,6 +2482,33 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 	return TR_OK;
 }
 
+static int tr_reactor_epoll_del_source(struct tr_reactor *reactor, int fd)
+{
+	if (!reactor || fd < 0)
+		return TR_ERR_INVALID;
+
+	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL) == 0)
+		return TR_OK;
+
+	/*
+	 * unregister 是 callback 生命周期屏障。只有能够证明旧 registration
+	 * 已经不存在时，调用方才允许清除 callback/arg publication。
+	 *
+	 * ENOENT：该 open file description 已不在当前 epoll set；
+	 * EBADF：被观察 fd 或 epoll fd 已关闭，不再可能由本 Reactor dispatch；
+	 * EPERM：当前数值 fd 已指向不可加入 epoll 的对象，说明原 pollable
+	 *        open file description 已关闭/复用，其旧 registration 已随 close
+	 *        自动移除。
+	 *
+	 * 其他错误不能证明 source 已静默，必须 fail closed 并保留本地 publication
+	 * 供后续重试。
+	 */
+	if (errno == ENOENT || errno == EBADF || errno == EPERM)
+		return TR_OK;
+
+	return TR_ERR_SYS;
+}
+
 struct tr_reactor_listener_request {
 	struct tr_reactor *reactor;
 	int fd;
@@ -2507,12 +2540,17 @@ static int tr_reactor_listener_register_now(
 static int tr_reactor_listener_unregister_now(struct tr_reactor *reactor,
 					       int fd)
 {
+	int ret;
+
 	if (reactor->listener_fd < 0)
 		return TR_OK;
 	if (reactor->listener_fd != fd)
 		return TR_ERR_STALE;
 
-	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	ret = tr_reactor_epoll_del_source(reactor, fd);
+	if (ret != TR_OK)
+		return ret;
+
 	reactor->listener_fd = -1;
 	reactor->listener_cb = NULL;
 	reactor->listener_arg = NULL;
@@ -2548,11 +2586,14 @@ static int tr_reactor_listener_register_publish_now(void *arg)
 	if (ret != TR_OK) {
 		int undo = tr_reactor_listener_unregister_now(
 			request->reactor, request->fd);
-#ifndef NDEBUG
-		assert(undo == TR_OK);
-#else
-		(void)undo;
-#endif
+
+		/*
+		 * publish 已失败时必须把刚加入的 callback source 撤销。若 detach
+		 * barrier 自身失败，source publication 仍然存活，生命周期错误优先于
+		 * 原 publish 错误返回；调用方必须在释放 callback_arg 前重试 unregister。
+		 */
+		if (undo != TR_OK)
+			return undo;
 	}
 	return ret;
 }
@@ -2745,12 +2786,17 @@ static int tr_reactor_peer_event_register_now(
 static int tr_reactor_peer_event_unregister_now(
 	struct tr_reactor *reactor, int fd)
 {
+	int ret;
+
 	if (reactor->peer_event_fd < 0)
 		return TR_OK;
 	if (reactor->peer_event_fd != fd)
 		return TR_ERR_STALE;
 
-	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+	ret = tr_reactor_epoll_del_source(reactor, fd);
+	if (ret != TR_OK)
+		return ret;
+
 	reactor->peer_event_fd = -1;
 	reactor->peer_event_cb = NULL;
 	reactor->peer_event_arg = NULL;
@@ -2895,7 +2941,12 @@ static int tr_reactor_aux_event_unregister_now(
 		if (source->fd != fd)
 			continue;
 
-		(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+		{
+			int ret = tr_reactor_epoll_del_source(reactor, fd);
+
+			if (ret != TR_OK)
+				return ret;
+		}
 		source->fd = -1;
 		source->callback = NULL;
 		source->arg = NULL;

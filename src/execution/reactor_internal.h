@@ -91,8 +91,10 @@ typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
  * Register one listener/event source in the Reactor epoll set. The callback
  * runs on the Reactor owner and must be short/non-blocking.
  *
- * register/unregister are synchronous lifecycle barriers. unregister returns
- * only after an in-flight callback has completed.
+ * register/unregister are synchronous lifecycle barriers. unregister only
+ * clears callback publication after EPOLL_CTL_DEL has succeeded or the kernel
+ * state proves that the old registration is already absent. Unexpected detach
+ * failures preserve the publication and return an error so teardown can retry.
  */
 int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 				 tr_reactor_listener_cb callback, void *arg);
@@ -105,7 +107,9 @@ int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
  * 正在 stop：返回 TR_ERR_CLOSED，不执行任何发布。
  *
  * publish 在 source 已加入 epoll、但尚不可能 dispatch 的串行化区间执行。
- * publish 返回失败时 Reactor 会先撤销 source registration 再返回错误。
+ * publish 返回失败时 Reactor 会先撤销 source registration；若撤销屏障本身失败，
+ * 函数返回该生命周期错误并保留 source publication，调用方不得提前释放 callback_arg，
+ * 必须先重试 unregister。
  * publish 必须短小、非阻塞；stopped direct path 中不得重入 Reactor lifecycle API。
  */
 int tr_reactor_listener_register_publish(
