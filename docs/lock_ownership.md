@@ -45,6 +45,60 @@ accepting = false
 这样可以保证 `STOP` 之后不会再出现“命令/完成事件已经取得资源所有权，
 但所有者已经退出”的悬空工作。
 
+### Reactor 运行 epoch
+
+`stop()` 不是 Reactor storage 的销毁操作。同一个 Reactor 在成功 stop 后允许
+再次 `start()`，因此每次 start/stop 都必须形成独立的运行 epoch：
+
+```text
+CREATED / STOPPED
+  accepting = 0
+  no owner thread
+        |
+        | start() under ctl_lock
+        v
+  stopping = 0
+  create owner pthread
+  owner waits on ctl_lock startup gate
+  reopen completion admission generation
+  reopen command-wait generation
+  started = 1
+  accepting = 1
+        |
+        | unlock ctl_lock
+        v
+RUNNING
+        |
+        | stop()
+        v
+  accepting = 0
+  close completion admission + advance generation
+  close command waiter admission + advance generation
+  enqueue STOP after all previously admitted commands
+  owner drains accepted completions
+  owner closes live connections
+  join owner
+  started = 0
+        v
+STOPPED
+```
+
+关键不变量：
+
+- `create()` 本身不开放 producer admission；
+- restart 的新 owner thread 在 `start()` 完整发布新 epoch 前不能 dispatch
+  已保留的 timer/listener/aux source；
+- completion producer 不取得 `ctl_lock`；一次 handoff 开始时先在
+  completion queue 锁下取得明确的 admission generation，并把同一 generation
+  带到最终 `push_wait`，因此即使 producer 在入队前跨越完整 stop/restart，
+  也不能重新认领新 epoch；
+- command/completion queue 的 generation 每轮重新开放，旧 epoch waiter 或
+  延迟 producer 即使在 restart 后才继续执行，也只能返回 `TR_ERR_CLOSED`；
+- stop 会回收所有 live Connection，旧 `tr_conn_handle` 不跨 epoch 存活；
+- timer/listener/aux registration 属于 Reactor 对象，而不是某个运行 epoch；
+  未显式 unregister 的 source 会保留到下一轮 start，并且只能在 startup gate
+  之后恢复 dispatch。
+
 ### 命令队列/完成队列锁
 
 **结论：保留。**
@@ -58,6 +112,20 @@ accepting = false
 没有性能分析证据前不改成无锁实现。
 
 完成队列与命令队列相互独立，工作线程完成事件不会占用控制命令容量。
+
+completion handoff 与 command wait 一样绑定明确的 epoch token：
+
+```text
+producer
+  -> snapshot completion admission_generation
+  -> work may block / be preempted
+  -> push_wait(expected_generation)
+       current generation changed -> CLOSED
+       same generation           -> enqueue
+```
+
+generation 必须在 handoff 开始时取得，不能等到真正进入 `push_wait()` 后才
+读取“当前 generation”；否则一个旧 producer 可以在 stop/restart 后误投到新 epoch。
 
 两类队列的满载策略不同，但都不使用 `sched_yield()`：
 

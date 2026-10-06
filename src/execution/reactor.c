@@ -520,13 +520,15 @@ static int tr_reactor_push_command_wait_force(
 }
 
 static int tr_reactor_push_completion(
-	struct tr_reactor *reactor, const struct tr_completion *completion)
+	struct tr_reactor *reactor, const struct tr_completion *completion,
+	uint64_t expected_generation)
 {
 	int need_wake = 0;
 	int ret;
 
 	ret = tr_completion_queue_push_wait(
-		&reactor->completions, completion, &need_wake);
+		&reactor->completions, completion, expected_generation,
+		&need_wake);
 	if (ret != TR_OK)
 		return ret;
 
@@ -2076,6 +2078,14 @@ static void *tr_reactor_thread_main(void *arg)
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
 
+	/*
+	 * start() holds ctl_lock across pthread_create and the new epoch
+	 * publication. A restarted owner must not dispatch persistent epoll/timer
+	 * sources until queues, started and accepting all belong to that epoch.
+	 */
+	pthread_mutex_lock(&reactor->ctl_lock);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+
 	while (!reactor->stopping) {
 		struct tr_reactor_turn turn = { .left = reactor->stats.limits };
 		int commands_pending;
@@ -2456,7 +2466,11 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      &wake_event) < 0)
 		return TR_ERR_SYS;
 
-	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
+	/*
+	 * create() 只建立对象与内核资源，不开放运行期 producer admission。
+	 * 第一轮以及后续每一轮 start() 都显式开启新的 lifecycle epoch。
+	 */
+	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	*out = reactor;
 	build.reactor = NULL;
 	return TR_OK;
@@ -2988,6 +3002,14 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_STATE;
 	}
 
+	/*
+	 * stop() leaves stopping=1 and accepting=0 as the closed epoch marker.
+	 * Reset only the owner-loop stop flag before creating the next owner.
+	 * The new thread blocks on ctl_lock above until this function has completed
+	 * the rest of the epoch publication.
+	 */
+	reactor->stopping = 0;
+
 	error = pthread_create(&reactor->thread, NULL, tr_reactor_thread_main,
 			       reactor);
 	if (error != 0) {
@@ -2996,13 +3018,14 @@ int tr_reactor_start(struct tr_reactor *reactor)
 	}
 
 	/*
-	 * completion admission opens only after the consumer thread exists.
-	 * From this point producers synchronize only with the completion queue,
-	 * not with ctl_lock.
+	 * Reopen the queue-local admission epochs only after the consumer exists.
+	 * Both primitives advance their generation, so waiters from the previous
+	 * stopped epoch can never cross into this one.
 	 */
 	(void)tr_completion_queue_open(&reactor->completions);
 	(void)tr_command_queue_wait_open(&reactor->commands);
 	reactor->started = 1;
+	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return TR_OK;
 }
@@ -3615,6 +3638,7 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 			void *arg)
 {
 	struct tr_completion completion;
+	uint64_t admission_generation;
 	int ret;
 
 	if (!reactor || !fn)
@@ -3629,6 +3653,25 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 		return TR_OK;
 	}
 
+	/*
+	 * completion producer 不取得 ctl_lock。它必须在 handoff 开始时从
+	 * completion queue 取得明确的 admission generation，再观察 Reactor
+	 * RUNNING gate，并把原 token 带到最终入队点。这样 producer 即使跨越
+	 * stop/restart 被长时间挂起，也不能在醒来后误认新 epoch。
+	 */
+	admission_generation =
+		tr_completion_queue_admission_generation(&reactor->completions);
+	if (admission_generation == 0U)
+		return TR_ERR_CLOSED;
+
+	/*
+	 * queue open happens before start() publishes accepting=1. Keep the
+	 * Reactor-level gate as the final RUNNING publication, while the generation
+	 * above pins this producer to the exact queue epoch it first observed.
+	 */
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return TR_ERR_CLOSED;
+
 	completion.fn = fn;
 	completion.arg = arg;
 
@@ -3639,7 +3682,8 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	 *
 	 * 无论背压多重，worker 都不会回退直接修改 Reactor-owned protocol state。
 	 */
-	ret = tr_reactor_push_completion(reactor, &completion);
+	ret = tr_reactor_push_completion(
+		reactor, &completion, admission_generation);
 	return ret;
 }
 

@@ -16,6 +16,7 @@ static void noop(void *arg)
 struct push_wait_ctx {
 	struct tr_completion_queue *queue;
 	struct tr_completion completion;
+	uint64_t expected_generation;
 	int ret;
 	int need_wake;
 };
@@ -26,7 +27,8 @@ static void *push_wait_main(void *arg)
 
 	ctx->need_wake = -1;
 	ctx->ret = tr_completion_queue_push_wait(
-		ctx->queue, &ctx->completion, &ctx->need_wake);
+		ctx->queue, &ctx->completion, ctx->expected_generation,
+		&ctx->need_wake);
 	return NULL;
 }
 
@@ -63,6 +65,9 @@ static void test_completion_capacity_wait_and_close(void)
 	memset(&producer, 0, sizeof(producer));
 	assert(tr_completion_queue_init(&queue, 1U) == TR_OK);
 	assert(tr_completion_queue_open(&queue) == TR_OK);
+	producer.expected_generation =
+		tr_completion_queue_admission_generation(&queue);
+	assert(producer.expected_generation != 0U);
 
 	assert(tr_completion_queue_push(&queue, &first, &need_wake) == TR_OK);
 	assert(need_wake == 1);
@@ -143,6 +148,14 @@ static void test_completion_batch_wakes_all_capacity_waiters(void)
 	memset(producers, 0, sizeof(producers));
 	assert(tr_completion_queue_init(&queue, 2U) == TR_OK);
 	assert(tr_completion_queue_open(&queue) == TR_OK);
+	{
+		uint64_t generation =
+			tr_completion_queue_admission_generation(&queue);
+
+		assert(generation != 0U);
+		for (i = 0; i < 2U; ++i)
+			producers[i].expected_generation = generation;
+	}
 	assert(tr_completion_queue_push(&queue, &seed, NULL) == TR_OK);
 	assert(tr_completion_queue_push(&queue, &seed, NULL) == TR_OK);
 
@@ -239,11 +252,53 @@ static void test_completion_admission_and_wake_coalescing(void)
 	tr_completion_queue_destroy(&queue);
 }
 
+static void test_completion_delayed_old_epoch_rejected(void)
+{
+	struct tr_completion_queue queue;
+	struct tr_completion completion = { noop, NULL };
+	struct tr_completion out;
+	uint64_t old_generation;
+	uint64_t new_generation;
+	int need_wake = -1;
+	int has_more = 0;
+
+	assert(tr_completion_queue_init(&queue, 1U) == TR_OK);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	old_generation = tr_completion_queue_admission_generation(&queue);
+	assert(old_generation != 0U);
+
+	/*
+	 * 模拟 producer 已经开始旧 epoch handoff 并保存 token，但在真正取得
+	 * queue lock 前被长时间调度出去。
+	 */
+	tr_completion_queue_close(&queue);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	new_generation = tr_completion_queue_admission_generation(&queue);
+	assert(new_generation != 0U && new_generation != old_generation);
+
+	assert(tr_completion_queue_push_wait(
+		       &queue, &completion, old_generation, &need_wake) ==
+	       TR_ERR_CLOSED);
+	assert(need_wake == -1);
+
+	assert(tr_completion_queue_push_wait(
+		       &queue, &completion, new_generation, &need_wake) == TR_OK);
+	assert(need_wake == 1);
+	memset(&out, 0, sizeof(out));
+	assert(tr_completion_queue_pop_batch(
+		       &queue, &out, 1U, &has_more) == 1U);
+	assert(out.fn == noop && has_more == 0);
+
+	tr_completion_queue_close(&queue);
+	tr_completion_queue_destroy(&queue);
+}
+
 int main(void)
 {
 	test_completion_admission_and_wake_coalescing();
 	test_completion_capacity_wait_and_close();
 	test_completion_batch_wakes_all_capacity_waiters();
+	test_completion_delayed_old_epoch_rejected();
 	puts("completion admission/wake coalescing/capacity wait: ok");
 	return 0;
 }
