@@ -92,6 +92,20 @@ void tr_completion_queue_close(struct tr_completion_queue *queue)
 	pthread_mutex_unlock(&queue->lock);
 }
 
+uint64_t tr_completion_queue_admission_generation(
+	struct tr_completion_queue *queue)
+{
+	uint64_t generation;
+
+	if (!queue)
+		return 0U;
+
+	pthread_mutex_lock(&queue->lock);
+	generation = queue->accepting ? queue->admission_generation : 0U;
+	pthread_mutex_unlock(&queue->lock);
+	return generation;
+}
+
 int tr_completion_queue_push(struct tr_completion_queue *queue,
 			     const struct tr_completion *completion,
 			     int *need_wake)
@@ -131,19 +145,19 @@ int tr_completion_queue_push(struct tr_completion_queue *queue,
 int tr_completion_queue_push_wait(
 	struct tr_completion_queue *queue,
 	const struct tr_completion *completion,
+	uint64_t expected_generation,
 	int *need_wake)
 {
 	int wake = 0;
 	int waited = 0;
-	uint64_t admission_generation;
 
-	if (!queue || !completion || !completion->fn)
+	if (!queue || !completion || !completion->fn ||
+	    expected_generation == 0U)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
-	admission_generation = queue->admission_generation;
 	while (queue->accepting &&
-	       queue->admission_generation == admission_generation &&
+	       queue->admission_generation == expected_generation &&
 	       queue->count == queue->capacity) {
 		int error;
 
@@ -161,7 +175,7 @@ int tr_completion_queue_push_wait(
 	}
 
 	if (!queue->accepting ||
-	    queue->admission_generation != admission_generation) {
+	    queue->admission_generation != expected_generation) {
 		pthread_mutex_unlock(&queue->lock);
 		return TR_ERR_CLOSED;
 	}
