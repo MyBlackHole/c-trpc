@@ -70,9 +70,9 @@ struct tr_stream_slot {
 struct tr_channel {
 	struct tr_channel_config config;
 	pthread_mutex_t lock;
-	pthread_cond_t drain_cond;
-	uint32_t drain_waiters;
-	int drain_wait_closed;
+	pthread_cond_t state_cond;
+	uint32_t state_waiters;
+	int state_wait_closed;
 
 	struct tr_reactor *reactor;
 	struct tr_conn_handle control_connection;
@@ -604,6 +604,8 @@ tr_channel_set_caps_locked(struct tr_channel *channel, uint32_t lane_mask,
 		channel->bulk_ready = 1;
 		*bulk_up = 1;
 	}
+	if (*control_up || *bulk_up)
+		pthread_cond_broadcast(&channel->state_cond);
 }
 
 static uint32_t
@@ -905,7 +907,7 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 	if (channel->active_streams != 0) {
 		channel->active_streams--;
 		if (channel->active_streams == 0)
-			pthread_cond_broadcast(&channel->drain_cond);
+			pthread_cond_broadcast(&channel->state_cond);
 	}
 }
 
@@ -1845,6 +1847,7 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 					  connection))
 				memset(&channel->pending_hello[i], 0,
 				       sizeof(channel->pending_hello[i]));
+		pthread_cond_broadcast(&channel->state_cond);
 	}
 	pthread_mutex_unlock(&channel->lock);
 
@@ -2207,7 +2210,7 @@ int tr_channel_start(struct tr_channel *channel)
 struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
-	int drain_cond_ready;
+	int state_cond_ready;
 	int keepalive_timer_ready;
 	int protocol_pool_ready;
 	int control_handler_installed;
@@ -2248,8 +2251,8 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	free(channel->streams);
 	if (build->keepalive_timer_ready)
 		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
-	if (build->drain_cond_ready)
-		pthread_cond_destroy(&channel->drain_cond);
+	if (build->state_cond_ready)
+		pthread_cond_destroy(&channel->state_cond);
 	if (build->lock_ready)
 		pthread_mutex_destroy(&channel->lock);
 	free(channel);
@@ -2333,12 +2336,12 @@ static int tr_channel_create_common(
 			pthread_condattr_destroy(&attr);
 			return TR_ERR_SYS;
 		}
-		if (pthread_cond_init(&channel->drain_cond, &attr) != 0) {
+		if (pthread_cond_init(&channel->state_cond, &attr) != 0) {
 			pthread_condattr_destroy(&attr);
 			return TR_ERR_SYS;
 		}
 		pthread_condattr_destroy(&attr);
-		build.drain_cond_ready = 1;
+		build.state_cond_ready = 1;
 	}
 	ret = tr_reactor_timer_register(channel->reactor,
 					tr_channel_keepalive_timer_main,
@@ -2466,9 +2469,9 @@ static int tr_channel_detach_on_owner(void *arg)
 	 * while the peer is still owner-visible. Finalizers have no natural retry
 	 * queue, so they must not discover a live drain waiter after transfer.
 	 */
-	channel->drain_wait_closed = 1;
-	if (channel->drain_waiters != 0U) {
-		pthread_cond_broadcast(&channel->drain_cond);
+	channel->state_wait_closed = 1;
+	if (channel->state_waiters != 0U) {
+		pthread_cond_broadcast(&channel->state_cond);
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
@@ -2525,9 +2528,9 @@ static int tr_channel_close_wait_admission(struct tr_channel *channel)
 	int ret = TR_OK;
 
 	pthread_mutex_lock(&channel->lock);
-	channel->drain_wait_closed = 1;
-	if (channel->drain_waiters != 0U) {
-		pthread_cond_broadcast(&channel->drain_cond);
+	channel->state_wait_closed = 1;
+	if (channel->state_waiters != 0U) {
+		pthread_cond_broadcast(&channel->state_cond);
 		ret = TR_ERR_STATE;
 	}
 	pthread_mutex_unlock(&channel->lock);
@@ -2542,8 +2545,8 @@ int tr_channel_finalize_detached(struct tr_channel *channel)
 #ifndef NDEBUG
 	assert(channel->teardown_detached);
 	assert(!channel->keepalive_timer_registered);
-	assert(channel->drain_wait_closed);
-	assert(channel->drain_waiters == 0U);
+	assert(channel->state_wait_closed);
+	assert(channel->state_waiters == 0U);
 #endif
 
 	/*
@@ -2561,7 +2564,7 @@ int tr_channel_finalize_detached(struct tr_channel *channel)
 	free(channel->stream_index);
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
-	(void)pthread_cond_destroy(&channel->drain_cond);
+	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
 	return TR_OK;
@@ -2652,7 +2655,7 @@ int tr_channel_destroy(struct tr_channel *channel)
 	free(channel->stream_index);
 	free(channel->streams);
 	tr_buffer_pool_destroy(&channel->protocol_pool);
-	(void)pthread_cond_destroy(&channel->drain_cond);
+	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
 	return TR_OK;
@@ -3288,7 +3291,7 @@ int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 	}
 
 	pthread_mutex_lock(&channel->lock);
-	if (channel->drain_wait_closed) {
+	if (channel->state_wait_closed) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
@@ -3304,21 +3307,21 @@ int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 		pthread_mutex_unlock(&channel->lock);
 		return TR_AGAIN;
 	}
-	if (channel->drain_waiters == UINT32_MAX) {
+	if (channel->state_waiters == UINT32_MAX) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
-	channel->drain_waiters++;
+	channel->state_waiters++;
 
 	while (channel->active_streams != 0U) {
 		int ret;
 
-		if (channel->drain_wait_closed) {
+		if (channel->state_wait_closed) {
 			result = TR_ERR_CLOSED;
 			break;
 		}
 		ret = pthread_cond_timedwait(
-			&channel->drain_cond, &channel->lock, &deadline);
+			&channel->state_cond, &channel->lock, &deadline);
 
 		if (ret == 0)
 			continue;
@@ -3330,8 +3333,8 @@ int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 		break;
 	}
 
-	assert(channel->drain_waiters != 0U);
-	channel->drain_waiters--;
+	assert(channel->state_waiters != 0U);
+	channel->state_waiters--;
 	pthread_mutex_unlock(&channel->lock);
 	return result;
 }
