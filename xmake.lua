@@ -131,6 +131,9 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
         elseif name == "test_pipeline_listener" then
             -- Force CONTROL SEND admission failures to prove soft-state rollback.
             add_ldflags("-Wl,--wrap=tr_command_queue_push", {force = true})
+        elseif name == "test_pipeline_ingress" then
+            -- Inject terminal DATA membership detach failure without production hooks.
+            add_ldflags("-Wl,--wrap=tr_pipeline_registry_detach_data_route", {force = true})
         elseif name == "test_reactor_fairness" then
             -- Observe real queue operations and poll boundaries without production hooks.
             add_ldflags("-Wl,--wrap=tr_command_queue_push",

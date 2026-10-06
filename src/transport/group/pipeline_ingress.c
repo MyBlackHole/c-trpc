@@ -71,6 +71,7 @@ static void tr_pipeline_ingress_event(
 		(struct tr_pipeline_ingress_member *)arg;
 	tr_reactor_event_cb event_cb = NULL;
 	void *callback_arg = NULL;
+	int detach_ret;
 
 	if (!member)
 		return;
@@ -79,9 +80,23 @@ static void tr_pipeline_ingress_event(
 	 * Connection close/error is the owner-side membership retirement point.
 	 * Exact capability+connection matching prevents a stale close callback
 	 * from detaching a replacement DATA membership.
+	 *
+	 * TR_ERR_STALE is a valid terminal result: CONTROL abort retires DATA
+	 * membership and unregisters the Pipeline before it closes the physical
+	 * DATA connection, so this callback can legitimately observe "already
+	 * detached". Any other error means the lifecycle retirement itself failed
+	 * and must not be hidden behind the socket close status.
+	 *
+	 * member lifetime is tied to this terminal connection callback, not to
+	 * registry membership. The Reactor has already retired the connection slot
+	 * before invoking event_cb, so member is released exactly once regardless
+	 * of whether membership was already retired by CONTROL.
 	 */
-	(void)tr_pipeline_registry_detach_data_route(
+	detach_ret = tr_pipeline_registry_detach_data_route(
 		member->registry, &member->preface, connection);
+	if (detach_ret != TR_OK && detach_ret != TR_ERR_STALE)
+		status = detach_ret;
+
 	event_cb = member->event_cb;
 	callback_arg = member->callback_arg;
 	free(member);
@@ -128,10 +143,18 @@ int tr_pipeline_ingress_attach_data_route_on_owner(
 		connection, tr_pipeline_ingress_frame,
 		tr_pipeline_ingress_event, member);
 	if (ret != TR_OK) {
-		(void)tr_pipeline_registry_detach_data_route(
+		int rollback_ret;
+
+		/*
+		 * Handler publication failed, so member was never transferred to the
+		 * connection callback source and remains locally owned. The just-attached
+		 * membership must still be retired before returning; a rollback failure
+		 * is the more important lifecycle error and therefore wins.
+		 */
+		rollback_ret = tr_pipeline_registry_detach_data_route(
 			config->registry, preface, connection);
 		free(member);
-		return ret;
+		return rollback_ret != TR_OK ? rollback_ret : ret;
 	}
 
 	return TR_OK;

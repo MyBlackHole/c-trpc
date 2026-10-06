@@ -16,6 +16,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -27,12 +28,32 @@ struct ingress_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct tr_pipeline_ingress_config ingress;
+	struct tr_conn_handle last_connection;
 	unsigned accepted;
 	unsigned frames;
 	unsigned events;
 	uint16_t last_type;
 	int last_status;
 };
+
+static atomic_int fail_detach_once;
+
+int __real_tr_pipeline_registry_detach_data_route(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle expected_connection);
+
+int __wrap_tr_pipeline_registry_detach_data_route(
+	struct tr_pipeline_registry *registry,
+	const struct tr_pipeline_route_preface *preface,
+	struct tr_conn_handle expected_connection)
+{
+	if (atomic_exchange(&fail_detach_once, 0))
+		return TR_ERR_BAD_LENGTH;
+
+	return __real_tr_pipeline_registry_detach_data_route(
+		registry, preface, expected_connection);
+}
 
 static void send_all(int fd, const void *data, size_t len)
 {
@@ -116,6 +137,8 @@ static void ingress_listener_cb(int listener, uint32_t events, void *arg)
 			tr_socket_close(&fd);
 
 		pthread_mutex_lock(&ctx->lock);
+		if (ret == TR_OK)
+			ctx->last_connection = connection;
 		ctx->accepted++;
 		pthread_cond_broadcast(&ctx->cond);
 		pthread_mutex_unlock(&ctx->lock);
@@ -210,6 +233,7 @@ static void test_pipeline_ingress_routing(void)
 	struct tr_pipeline_route_preface route;
 	struct tr_pipeline_route_preface wrong;
 	struct tr_conn_handle control;
+	struct tr_conn_handle good_connection;
 	struct ingress_test_ctx ctx;
 	uint8_t route_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint8_t ping[TR_WIRE_HEADER_SIZE];
@@ -296,10 +320,38 @@ static void test_pipeline_ingress_routing(void)
 	assert(pipeline_stats.data_reserved_count == 0U);
 	assert(pipeline_stats.data_count == 1U);
 
+	/*
+	 * Force the terminal membership retirement to fail once. The callback must
+	 * surface that lifecycle error instead of silently reporting only the socket
+	 * close status. Because detach failed, the exact membership intentionally
+	 * remains live until the owner explicitly retries it below.
+	 */
+	pthread_mutex_lock(&ctx.lock);
+	good_connection = ctx.last_connection;
+	pthread_mutex_unlock(&ctx.lock);
+	atomic_store(&fail_detach_once, 1);
+
 	shutdown(good_client, SHUT_RDWR);
 	close(good_client);
 	good_client = -1;
 	wait_for_counter(&ctx.lock, &ctx.cond, &ctx.events, 1U);
+
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.last_status == TR_ERR_BAD_LENGTH);
+	pthread_mutex_unlock(&ctx.lock);
+	assert(atomic_load(&fail_detach_once) == 0);
+
+	memset(&pipeline_stats, 0, sizeof(pipeline_stats));
+	assert(tr_pipeline_get_stats(pipeline, &pipeline_stats) == TR_OK);
+	assert(pipeline_stats.data_count == 1U);
+
+	/*
+	 * Retry with the exact owner capability. Reactor slot retirement does not
+	 * erase the Pipeline's stored connection identity, so the failed lifecycle
+	 * edge remains recoverable without touching a replacement generation.
+	 */
+	assert(__real_tr_pipeline_registry_detach_data_route(
+		       registry, &route, good_connection) == TR_OK);
 
 	memset(&pipeline_stats, 0, sizeof(pipeline_stats));
 	assert(tr_pipeline_get_stats(pipeline, &pipeline_stats) == TR_OK);
