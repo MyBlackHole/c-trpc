@@ -59,7 +59,8 @@ int main(int argc, char **argv)
 	if (tr_client_create(&config, &client) != TR_OK ||
 	    tr_client_connect(client, address, port) != TR_OK) {
 		fprintf(stderr, "connect failed\n");
-		tr_client_destroy(client);
+		if (tr_client_destroy(client) != TR_OK)
+		fprintf(stderr, "client destroy failed\n");
 		return 1;
 	}
 
@@ -75,7 +76,8 @@ int main(int argc, char **argv)
 	method.max_response_bytes = 64U * 1024U;
 
 	if (tr_client_register_method(client, &method) != TR_OK) {
-		tr_client_destroy(client);
+		if (tr_client_destroy(client) != TR_OK)
+		fprintf(stderr, "client destroy failed\n");
 		return 1;
 	}
 
@@ -83,7 +85,8 @@ int main(int argc, char **argv)
 	request.len = (uint32_t)strlen(text);
 	if (tr_client_unary_call(client, 1U, 1U, &request, on_result, &result,
 				 &call) != TR_OK) {
-		tr_client_destroy(client);
+		if (tr_client_destroy(client) != TR_OK)
+		fprintf(stderr, "client destroy failed\n");
 		return 1;
 	}
 
@@ -100,7 +103,8 @@ int main(int argc, char **argv)
 			result.done ? result.status : wait_ret);
 	pthread_mutex_unlock(&result.lock);
 
-	tr_client_destroy(client);
+	if (tr_client_destroy(client) != TR_OK)
+		fprintf(stderr, "client destroy failed\n");
 	pthread_cond_destroy(&result.cond);
 	pthread_mutex_destroy(&result.lock);
 	return result.done && result.status == TR_RPC_STATUS_OK ? 0 : 1;
