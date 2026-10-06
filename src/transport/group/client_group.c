@@ -451,6 +451,7 @@ static void tr_client_group_connector_complete(
 		}
 		if (!group->closing && !group->draining)
 			tr_client_group_start_next_on_owner(group);
+		tr_client_group_publish_drain_progress_on_owner(group);
 		return;
 	}
 
@@ -493,6 +494,7 @@ fail:
 	}
 	if (!group->closing && !group->draining)
 		tr_client_group_start_next_on_owner(group);
+	tr_client_group_publish_drain_progress_on_owner(group);
 }
 
 static int tr_client_group_begin_connector_on_owner(
