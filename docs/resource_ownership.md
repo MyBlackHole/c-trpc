@@ -345,9 +345,15 @@ Endpoint teardown 是事务式 lifetime barrier，不是 best effort：
 - deadline timer unregister 失败：timer source 仍可能引用 Endpoint，禁止 free；
 - Server detached 模式只有在 handler/timer 全部静默、executor admission 关闭后，
   才发布 `teardown_detached=1`；
-- 构造失败清理也遵守同一规则：一旦 callback/timer source 已发布，cleanup
-  必须先成功解除来源；异常失败时宁可 fail-closed 保留部分对象，也不能释放
-  仍被异步 source 引用的内存。
+- Endpoint 构造不再让 `TR_AUTO` cleanup 承担 callback/timer/worker teardown：
+  本地 soft-state 先完成，deadline timer + Channel handler 在同一 Reactor owner
+  transaction 中发布；transaction 失败必须在返回前自行收敛；
+- standalone worker 只有在 Endpoint ownership 已经先转移到 `*out` 后才启动。
+  worker startup 失败时会立即尝试 terminal rollback；如果 rollback join 自身失败，
+  `*out` 保留 partial Endpoint ownership，调用方继续 `destroy()` 重试，禁止形成
+  无主泄漏；
+- shard executor group 同样只在 Runtime 已经归调用方所有之后由
+  `runtime_start()` 启动，`runtime_stop()` 负责可重试 join barrier。
 
 Client connect 失败回滚同样使用同步 owner close。物理 Connection 只有在
 owner 确认 close/stale 后，才允许解绑 RPC/Channel 并清空 Client handle；

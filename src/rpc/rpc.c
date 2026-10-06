@@ -262,7 +262,11 @@ struct tr_rpc_executor {
 	struct tr_rpc_endpoint *group_ready_next;
 	int group_enqueued;
 	int stopping;
+	/* mutex/cond 已初始化；构造失败 cleanup 据此判断是否可执行 shutdown。 */
+	int sync_ready;
 	uint32_t started_threads;
+	/* 已成功 join 的线程前缀；失败重试从该位置继续，禁止重复 join。 */
+	uint32_t join_cursor;
 };
 
 struct tr_rpc_executor_group {
@@ -281,13 +285,13 @@ struct tr_rpc_executor_group {
 
 	uint32_t thread_count;
 	uint32_t started_threads;
+	/* 已成功 join 的线程前缀；destroy 失败时保留以便精确重试。 */
+	uint32_t join_cursor;
 	int stopping;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_thread_array, pthread_t, free)
-TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_owner, struct tr_rpc_executor_group,
-			tr_rpc_executor_group_destroy)
 
 struct tr_rpc_endpoint {
 	/* Call/Method/protocol state. */
@@ -3118,19 +3122,6 @@ static void tr_rpc_executor_cleanup(struct tr_rpc_executor *executor)
 	executor->threads = NULL;
 }
 
-static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint);
-
-struct tr_rpc_executor_init_guard {
-	struct tr_rpc_endpoint *endpoint;
-	int armed;
-};
-
-static void
-tr_rpc_executor_init_guard_cleanup(struct tr_rpc_executor_init_guard *guard)
-{
-	if (guard && guard->armed && guard->endpoint)
-		tr_rpc_executor_destroy(guard->endpoint);
-}
 
 static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 				uint32_t capacity,
@@ -3138,8 +3129,6 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 				struct tr_rpc_executor_group *group)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
-	struct tr_rpc_executor_init_guard guard
-		TR_AUTO(tr_rpc_executor_init_guard_cleanup) = { endpoint, 0 };
 	uint32_t thread_count;
 	uint32_t i;
 
@@ -3169,7 +3158,7 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		pthread_mutex_destroy(&executor->lock);
 		return TR_ERR_INVALID;
 	}
-	guard.armed = 1;
+	executor->sync_ready = 1;
 
 	executor->group = group;
 	if (!group)
@@ -3201,23 +3190,42 @@ static int tr_rpc_executor_init(struct tr_rpc_endpoint *endpoint,
 		executor->callq[i].tail = TR_RPC_EXEC_NONE;
 	}
 
-	if (!group) {
-		for (i = 0; i < thread_count; ++i) {
-			if (pthread_create(&executor->threads[i], NULL,
-					   tr_rpc_executor_main, endpoint) != 0)
-				return TR_ERR_SYS;
-			executor->started_threads++;
-		}
-	}
-
-	guard.armed = 0;
 	return TR_OK;
 }
 
-static void tr_rpc_executor_shutdown(struct tr_rpc_endpoint *endpoint)
+static int tr_rpc_executor_start(struct tr_rpc_endpoint *endpoint)
+{
+	struct tr_rpc_executor *executor;
+	uint32_t i;
+
+	if (!endpoint)
+		return TR_ERR_INVALID;
+	executor = &endpoint->executor;
+	if (executor->group)
+		return TR_OK;
+	if (!executor->sync_ready || !executor->threads)
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&executor->lock);
+	if (executor->stopping) {
+		pthread_mutex_unlock(&executor->lock);
+		return TR_ERR_STATE;
+	}
+	pthread_mutex_unlock(&executor->lock);
+
+	for (i = executor->started_threads; i < executor->thread_count; ++i) {
+		if (pthread_create(&executor->threads[i], NULL,
+				   tr_rpc_executor_main, endpoint) != 0)
+			return TR_ERR_SYS;
+		executor->started_threads++;
+	}
+	return TR_OK;
+}
+
+static int tr_rpc_executor_shutdown_checked(
+	struct tr_rpc_endpoint *endpoint)
 {
 	struct tr_rpc_executor *executor = &endpoint->executor;
-	uint32_t i;
 
 	pthread_mutex_lock(&executor->lock);
 	if (!executor->stopping) {
@@ -3228,15 +3236,23 @@ static void tr_rpc_executor_shutdown(struct tr_rpc_endpoint *endpoint)
 
 	/*
 	 * standalone Endpoint 自己拥有 worker，因此 owner 最后一次 put 之前
-	 * 必须先 join 全部 worker。
-	 * Server 的 shard-local worker 由 executor group 拥有，只需要异步排空
-	 * 已经存在的 task reference。
+	 * 必须确认全部 worker 已 join。join 失败不清 started_threads，也不释放
+	 * executor storage；join_cursor 只在成功 join 后前移，下一次 destroy 从
+	 * exact 未收敛线程继续。
+	 *
+	 * Server 的 shard-local worker 由 executor group 拥有，这里只关闭该
+	 * Endpoint 的 task admission，不 join group worker。
 	 */
-	if (!executor->group) {
-		for (i = 0; i < executor->started_threads; ++i)
-			(void)pthread_join(executor->threads[i], NULL);
-		executor->started_threads = 0;
+	if (executor->group)
+		return TR_OK;
+
+	while (executor->join_cursor < executor->started_threads) {
+		if (pthread_join(
+			    executor->threads[executor->join_cursor], NULL) != 0)
+			return TR_ERR_SYS;
+		executor->join_cursor++;
 	}
+	return TR_OK;
 }
 
 static void tr_rpc_executor_release(struct tr_rpc_endpoint *endpoint)
@@ -3244,14 +3260,11 @@ static void tr_rpc_executor_release(struct tr_rpc_endpoint *endpoint)
 	struct tr_rpc_executor *executor = &endpoint->executor;
 
 	tr_rpc_executor_cleanup(executor);
-	pthread_cond_destroy(&executor->cond);
-	pthread_mutex_destroy(&executor->lock);
-}
-
-static void tr_rpc_executor_destroy(struct tr_rpc_endpoint *endpoint)
-{
-	tr_rpc_executor_shutdown(endpoint);
-	tr_rpc_executor_release(endpoint);
+	if (executor->sync_ready) {
+		pthread_cond_destroy(&executor->cond);
+		pthread_mutex_destroy(&executor->lock);
+		executor->sync_ready = 0;
+	}
 }
 
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
@@ -3261,11 +3274,8 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 {
 	struct tr_rpc_executor_group *group_mem
 		TR_AUTO(tr_rpc_group_mem_cleanup) = NULL;
-	struct tr_rpc_executor_group *group
-		TR_AUTO(tr_rpc_group_owner_cleanup) = NULL;
 	pthread_t *threads TR_AUTO(tr_rpc_thread_array_cleanup) = NULL;
 	uint64_t total_calls;
-	uint32_t i;
 
 	if (!out || endpoint_capacity == 0 || max_calls_per_endpoint == 0 ||
 	    endpoint_capacity == UINT32_MAX)
@@ -3301,50 +3311,127 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 
 	group_mem->threads = tr_rpc_thread_array_take(&threads);
 	group_mem->thread_count = thread_count;
-	group = tr_rpc_group_mem_take(&group_mem);
 
-	for (i = 0; i < thread_count; ++i) {
-		if (pthread_create(&group->threads[i], NULL,
-				   tr_rpc_executor_group_main, group) != 0)
-			return TR_ERR_SYS;
-		group->started_threads++;
-	}
-
-	*out = tr_rpc_group_owner_take(&group);
+	/*
+	 * create 只建立 group soft-state，不启动任何 worker。cond 初始化成功后
+	 * 已经没有后续可失败步骤，因此这里可以直接完成 ownership 转移，不需要
+	 * 一个会触碰 join barrier 的 TR_AUTO owner cleanup。
+	 */
+	*out = tr_rpc_group_mem_take(&group_mem);
 	return TR_OK;
 }
 
-void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group)
+int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 {
-	uint32_t i;
-
 	if (!group)
-		return;
-
-	/*
-	 * A group worker cannot synchronously join the group it belongs to.
-	 * Facade destroy rejects this context earlier; keep the engine defensive.
-	 */
+		return TR_OK;
 	if (tr_rpc_in_worker_context())
-		return;
+		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
+	if (group->started_threads == 0U) {
+		group->stopping = 0;
+		group->join_cursor = 0U;
+		pthread_mutex_unlock(&group->lock);
+		return TR_OK;
+	}
 	group->stopping = 1;
 	pthread_cond_broadcast(&group->cond);
 	pthread_mutex_unlock(&group->lock);
 
-	for (i = 0; i < group->started_threads; ++i)
-		(void)pthread_join(group->threads[i], NULL);
+	while (group->join_cursor < group->started_threads) {
+		if (pthread_join(group->threads[group->join_cursor], NULL) != 0)
+			return TR_ERR_SYS;
+		group->join_cursor++;
+	}
 
 #ifndef NDEBUG
 	assert(group->ready_head == NULL);
 	assert(group->ready_tail == NULL);
 	assert(group->ready_count == 0U);
 #endif
+
+	/*
+	 * 完整 join 后结束本 worker epoch。group storage 与 pthread_t array 保留，
+	 * 因而 Runtime 可以在后续 start() 开启一个全新的 worker epoch。
+	 */
+	group->started_threads = 0U;
+	group->join_cursor = 0U;
+	pthread_mutex_lock(&group->lock);
+	group->stopping = 0;
+	pthread_mutex_unlock(&group->lock);
+	return TR_OK;
+}
+
+int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
+{
+	int startable;
+
+	if (!group)
+		return TR_OK;
+	if (tr_rpc_in_worker_context())
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&group->lock);
+	startable = !group->stopping &&
+		    group->started_threads == 0U &&
+		    group->join_cursor == 0U;
+	pthread_mutex_unlock(&group->lock);
+	return startable ? TR_OK : TR_ERR_STATE;
+}
+
+int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
+{
+	uint32_t i;
+	int cause;
+	int stop_ret;
+
+	if (!group || !group->threads || group->thread_count == 0U)
+		return TR_ERR_INVALID;
+	if (tr_rpc_in_worker_context())
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&group->lock);
+	if (group->stopping || group->started_threads != 0U ||
+	    group->join_cursor != 0U) {
+		pthread_mutex_unlock(&group->lock);
+		return TR_ERR_STATE;
+	}
+	pthread_mutex_unlock(&group->lock);
+
+	for (i = 0; i < group->thread_count; ++i) {
+		if (pthread_create(&group->threads[i], NULL,
+				   tr_rpc_executor_group_main, group) != 0) {
+			cause = TR_ERR_SYS;
+			/*
+			 * Runtime 已经拥有 group，因此 rollback barrier 可以返回失败且
+			 * 保留 ownership。若 join 失败，生命周期错误优先。
+			 */
+			stop_ret = tr_rpc_executor_group_stop(group);
+			return stop_ret != TR_OK ? stop_ret : cause;
+		}
+		group->started_threads++;
+	}
+	return TR_OK;
+}
+
+int tr_rpc_executor_group_destroy_checked(
+	struct tr_rpc_executor_group *group)
+{
+	int ret;
+
+	if (!group)
+		return TR_OK;
+
+	ret = tr_rpc_executor_group_stop(group);
+	if (ret != TR_OK)
+		return ret;
+
 	free(group->threads);
 	pthread_cond_destroy(&group->cond);
 	pthread_mutex_destroy(&group->lock);
 	free(group);
+	return TR_OK;
 }
 
 static int tr_rpc_queue_client_event_locked(struct tr_rpc_endpoint *endpoint,
@@ -4336,45 +4423,52 @@ struct tr_rpc_endpoint_build {
 	int lock_ready;
 	int ref_lock_ready;
 	int ref_cond_ready;
-	int deadline_ready;
 	int executor_ready;
-	int handler_installed;
 };
+
+static int tr_rpc_endpoint_publish_on_owner(void *arg)
+{
+	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
+	int rollback_ret;
+	int ret;
+
+	if (!endpoint)
+		return TR_ERR_INVALID;
+
+	/*
+	 * deadline timer 与 Channel callback_arg 都属于异步 publication。
+	 * 二者必须在同一个 Reactor owner turn 内形成一个事务，避免 stop/event
+	 * 插入 publish 与 rollback 之间。
+	 */
+	ret = tr_rpc_deadline_init(endpoint);
+	if (ret != TR_OK)
+		return ret;
+
+	ret = tr_channel_set_handler(
+		endpoint->channel, tr_rpc_on_data,
+		tr_rpc_on_stream_event, tr_rpc_on_channel_event, endpoint);
+	if (ret == TR_OK)
+		return TR_OK;
+
+	rollback_ret = tr_rpc_deadline_destroy(endpoint);
+	return rollback_ret != TR_OK ? rollback_ret : ret;
+}
 
 static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 {
 	struct tr_rpc_endpoint *endpoint;
-	int ret;
 
 	if (!build || !build->endpoint)
 		return;
 	endpoint = build->endpoint;
 
 	/*
-	 * Once callback_arg/timer state has been published, construction rollback
-	 * must cross those same synchronous lifetime barriers before freeing
-	 * Endpoint storage. A cleanup hook cannot return a second error, so an
-	 * unexpected barrier failure intentionally fails closed.
+	 * build cleanup 只处理从未发布给异步 source 的本地资源。
+	 * timer/handler publication 必须由 publish_on_owner() 在返回前自行收敛；
+	 * worker 只有在 build ownership 已转移给 *out 之后才允许启动。
 	 */
-	if (build->handler_installed) {
-		ret = tr_channel_set_handler(
-			endpoint->channel, NULL, NULL, NULL, NULL);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
-		if (ret != TR_OK)
-			return;
-	}
-	if (build->deadline_ready) {
-		ret = tr_rpc_deadline_destroy(endpoint);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
-		if (ret != TR_OK)
-			return;
-	}
 	if (build->executor_ready)
-		tr_rpc_executor_destroy(endpoint);
+		tr_rpc_executor_release(endpoint);
 
 	free(endpoint->call_by_stream_slot);
 	free(endpoint->method_index);
@@ -4463,27 +4557,44 @@ int tr_rpc_endpoint_create_with_executor_group(
 	endpoint->channel = channel;
 	endpoint->config = *config;
 
-	ret = tr_rpc_deadline_init(endpoint);
-	if (ret != TR_OK)
-		return ret;
-	build.deadline_ready = 1;
-
+	/*
+	 * executor_init() 只创建 soft-state，不启动 worker，因此即使中途失败，
+	 * build cleanup 仍然只做不可失败的本地资源释放。
+	 */
+	build.executor_ready = 1;
 	ret = tr_rpc_executor_init(
 		endpoint, config->executor_queue_capacity,
 		config->executor_continuation_reserve, group);
 	if (ret != TR_OK)
 		return ret;
-	build.executor_ready = 1;
 
-	ret = tr_channel_set_handler(channel, tr_rpc_on_data,
-				     tr_rpc_on_stream_event,
-				     tr_rpc_on_channel_event, endpoint);
+	ret = tr_rpc_owner_call(
+		endpoint, tr_rpc_endpoint_publish_on_owner, endpoint);
 	if (ret != TR_OK)
 		return ret;
-	build.handler_installed = 1;
 
+	/*
+	 * 至此 Endpoint storage/timer/handler 已构造完成，ownership 先交给调用方。
+	 * standalone worker startup 发生在 ownership 转移之后，因此 partial start
+	 * 无论后续 join 是否失败，都有一个可见 Endpoint 可以显式 destroy/retry。
+	 */
 	*out = endpoint;
 	build.endpoint = NULL;
+
+	ret = tr_rpc_executor_start(endpoint);
+	if (ret != TR_OK) {
+		int rollback_ret = tr_rpc_endpoint_destroy(endpoint);
+
+		if (rollback_ret == TR_OK) {
+			*out = NULL;
+			return ret;
+		}
+		/*
+		 * worker startup rollback 自身失败时，Endpoint 保持在 *out 中；
+		 * lifecycle error 优先，调用方必须继续 destroy 该 partial Endpoint。
+		 */
+		return rollback_ret;
+	}
 	return TR_OK;
 }
 
@@ -4635,7 +4746,9 @@ static int tr_rpc_endpoint_detach_on_owner(void *arg)
 	if (ret != TR_OK)
 		return ret;
 
-	tr_rpc_executor_shutdown(endpoint);
+	ret = tr_rpc_executor_shutdown_checked(endpoint);
+	if (ret != TR_OK)
+		return ret;
 
 	pthread_mutex_lock(&endpoint->ref_lock);
 	endpoint->teardown_detached = 1;
@@ -4728,7 +4841,9 @@ int tr_rpc_endpoint_destroy_with_stats(
 	if (ret != TR_OK)
 		return ret;
 
-	tr_rpc_executor_shutdown(endpoint);
+	ret = tr_rpc_executor_shutdown_checked(endpoint);
+	if (ret != TR_OK)
+		return ret;
 	tr_rpc_endpoint_wait_owner_only(endpoint);
 
 	if (stats)
