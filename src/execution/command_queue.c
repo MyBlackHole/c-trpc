@@ -146,42 +146,6 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 	return ret;
 }
 
-int tr_command_queue_push_batch(
-	struct tr_command_queue *queue, const struct tr_command *commands,
-	size_t count, int *need_wake)
-{
-	size_t i;
-	int wake = 0;
-
-	if (!queue || !commands || count == 0U ||
-	    count > (size_t)UINT32_MAX)
-		return TR_ERR_INVALID;
-
-	pthread_mutex_lock(&queue->lock);
-	if (count > (size_t)(queue->capacity - queue->count)) {
-		/*
-		 * One producer transaction hit capacity. Attribute the pressure to
-		 * the first command; no command ownership transfers on failure.
-		 */
-		tr_command_queue_observe_full_locked(queue, &commands[0]);
-		pthread_mutex_unlock(&queue->lock);
-		return TR_AGAIN;
-	}
-
-	for (i = 0; i < count; ++i) {
-		int item_wake = 0;
-
-		(void)tr_command_queue_enqueue_locked(
-			queue, &commands[i], &item_wake);
-		if (item_wake)
-			wake = 1;
-	}
-	if (need_wake)
-		*need_wake = wake;
-	pthread_mutex_unlock(&queue->lock);
-	return TR_OK;
-}
-
 int tr_command_queue_wait_open(struct tr_command_queue *queue)
 {
 	if (!queue)
