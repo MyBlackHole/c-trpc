@@ -130,6 +130,56 @@ RPC 截止时间、Channel 保活已经使用 Reactor 本地有界定时器队�
 截止时间/保活/重连线程。客户端自动重连的退避与连接超时分别由
 Reactor 本地定时器和共享非阻塞连接器驱动。
 
+## 2.1 Connector callback source ownership
+
+Connector 的可变 attempt 状态仍由 Reactor owner 单写，但它同时持有两类
+异步 callback source：
+
+- aux fd source（EPOLLOUT）；
+- connector timeout timer。
+
+因此 `watched` / `timer_registered` 不是普通布尔缓存，而是 callback
+ownership publication。状态清除必须发生在 source detach barrier 之后：
+
+```text
+aux/timer source published
+        ->
+unregister/disarm
+        ->
+TR_OK 或 STALE（已确认 source 不存在）
+        ->
+clear watched / timer_registered
+```
+
+禁止：
+
+```text
+watched = 0
+        ->
+尝试 unregister
+        ->
+失败后 free Connector
+```
+
+Connector completion 也必须先完成 source detach，再把 fd/status 发布给上层
+callback。completion callback 允许同步销毁 Connector，因此 callback 返回后
+Connector 栈帧不得再次解引用 Connector。
+
+父对象遵守相同的两阶段提交：
+
+```text
+disable reconnect / stop DATA
+        ->
+teardown Connector/Timer
+        ->
+成功后
+        ->
+clear parent connector pointer / slot / reservation
+```
+
+任何 teardown barrier 失败都保留精确的 owner handle/pointer，使 terminal
+操作可以重试；不能通过先清本地状态来“伪造已解绑”。
+
 ## 3. Buffer 资源池
 
 ### `tr_buffer_pool.lock`
