@@ -2,6 +2,7 @@
 #include "reactor.h"
 
 #include "reactor_internal.h"
+#include "reactor_token_internal.h"
 #include "completion_queue.h"
 #include "timer_queue.h"
 #include "command_queue.h"
@@ -43,6 +44,10 @@
 #define TR_LISTENER_TOKEN (UINT64_MAX - UINT64_C(1))
 #define TR_PEER_EVENT_TOKEN (UINT64_MAX - UINT64_C(2))
 #define TR_REACTOR_AUX_EVENT_CAPACITY 16U
+
+_Static_assert(
+	TR_REACTOR_AUX_EVENT_CAPACITY <= UINT16_MAX,
+	"aux event slot must fit token low 16 bits");
 
 /*
  * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
@@ -183,7 +188,7 @@ struct tr_slot {
 
 struct tr_aux_event_source {
 	int fd;
-	uint16_t generation;
+	uint32_t generation;
 	int used;
 	tr_reactor_aux_event_cb callback;
 	void *arg;
@@ -282,40 +287,6 @@ static void tr_conn_token_decode(uint64_t token, uint32_t *slot,
 {
 	*slot = (uint32_t)token;
 	*generation = (uint32_t)(token >> 32);
-}
-
-/*
- * connection generation 永远跳过 UINT32_MAX，因此高 32 位全 1 可作为
- * Reactor 内部 auxiliary event token 的独立 namespace。
- *
- * low 32 位：高 16 位是 aux generation，低 16 位是 slot。
- */
-static uint64_t tr_aux_event_token(uint32_t slot, uint16_t generation)
-{
-	return (UINT64_C(0xffffffff) << 32) |
-	       ((uint64_t)generation << 16) | (uint64_t)slot;
-}
-
-static int tr_aux_event_token_decode(uint64_t token, uint32_t *slot,
-				     uint16_t *generation)
-{
-	uint32_t low;
-
-	if ((uint32_t)(token >> 32) != UINT32_MAX)
-		return 0;
-	low = (uint32_t)token;
-	*slot = low & UINT32_C(0xffff);
-	*generation = (uint16_t)(low >> 16);
-	return *slot < TR_REACTOR_AUX_EVENT_CAPACITY &&
-	       *generation != 0U && *generation != UINT16_MAX;
-}
-
-static uint16_t tr_aux_event_next_generation(uint16_t generation)
-{
-	generation++;
-	if (generation == 0U || generation == UINT16_MAX)
-		generation = 1U;
-	return generation;
 }
 
 static int tr_tx_pool_init(struct tr_tx_pool *pool, uint32_t capacity)
@@ -620,9 +591,8 @@ static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
 		if (tr_slot_meta_state(old) != TR_CONN_FREE)
 			continue;
 
-		generation = tr_slot_meta_generation(old) + 1U;
-		if (generation == 0U || generation == UINT32_MAX)
-			generation = 1U;
+		generation = tr_reactor_connection_next_generation(
+			tr_slot_meta_generation(old));
 		desired = tr_slot_meta_make(generation, TR_CONN_RESERVED);
 
 		if (!atomic_compare_exchange_strong_explicit(
@@ -2069,9 +2039,10 @@ static int tr_reactor_dispatch_aux_event(
 {
 	struct tr_aux_event_source *source;
 	uint32_t slot;
-	uint16_t generation;
+	uint32_t generation;
 
-	if (!tr_aux_event_token_decode(token, &slot, &generation))
+	if (!tr_reactor_aux_token_decode(
+		    token, TR_REACTOR_AUX_EVENT_CAPACITY, &slot, &generation))
 		return 0;
 
 	source = &reactor->aux_events[slot];
@@ -2918,10 +2889,10 @@ static int tr_reactor_aux_event_register_now(
 		return TR_AGAIN;
 
 	source->generation =
-		tr_aux_event_next_generation(source->generation);
+		tr_reactor_aux_next_generation(source->generation);
 	memset(&event, 0, sizeof(event));
 	event.events = events | EPOLLERR | EPOLLHUP;
-	event.data.u64 = tr_aux_event_token(
+	event.data.u64 = tr_reactor_aux_token(
 		(uint32_t)(source - reactor->aux_events), source->generation);
 	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0)
 		return TR_ERR_SYS;
