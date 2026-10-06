@@ -1489,22 +1489,7 @@ static void wait_channel_lane_down(struct tr_channel *channel,
 
 static void wait_channel_lane_up(struct tr_channel *channel, enum tr_lane lane)
 {
-	enum tr_channel_lane_state state = TR_CHANNEL_LANE_DOWN;
-	unsigned i;
-
-	for (i = 0; i < 5000; ++i) {
-		assert(tr_channel_get_lane_state(channel, lane, &state) ==
-		       TR_OK);
-		if (state == TR_CHANNEL_LANE_UP)
-			return;
-		{
-			struct timespec pause_time;
-			pause_time.tv_sec = 0;
-			pause_time.tv_nsec = 1000000L;
-			nanosleep(&pause_time, NULL);
-		}
-	}
-	assert(state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_wait_ready(channel, lane, 5000U) == TR_OK);
 }
 
 static void init_channel_test_ctx(struct channel_test_ctx *ctx)
