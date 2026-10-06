@@ -71,17 +71,30 @@ static void tr_pipeline_ingress_event(
 		(struct tr_pipeline_ingress_member *)arg;
 	tr_reactor_event_cb event_cb = NULL;
 	void *callback_arg = NULL;
+	int detach_ret;
 
 	if (!member)
 		return;
 
 	/*
-	 * Connection close/error is the owner-side membership retirement point.
-	 * Exact capability+connection matching prevents a stale close callback
-	 * from detaching a replacement DATA membership.
+	 * connection close/error 是 owner 侧 DATA membership 的终止退休点。
+	 * exact capability + connection 匹配保证旧连接的 close callback 不会
+	 * 错误摘除已经替换的新 DATA membership。
+	 *
+	 * TR_ERR_STALE 是合法终止结果：CONTROL abort 可能先退休 DATA membership
+	 * 并从 registry 摘除 Pipeline，之后才关闭物理 DATA connection，因此这里
+	 * 合法观察到“已经解绑”。其他错误表示 membership 生命周期收敛本身失败，
+	 * 不能被 socket close/error 状态掩盖。
+	 *
+	 * member 生命周期属于这次 terminal connection callback，而不是 registry
+	 * membership。Reactor 在调用 event_cb 前已经退休 connection slot，因此
+	 * 无论 membership 是否已被 CONTROL 提前退休，member 都只释放一次。
 	 */
-	(void)tr_pipeline_registry_detach_data_route(
+	detach_ret = tr_pipeline_registry_detach_data_route(
 		member->registry, &member->preface, connection);
+	if (detach_ret != TR_OK && detach_ret != TR_ERR_STALE)
+		status = detach_ret;
+
 	event_cb = member->event_cb;
 	callback_arg = member->callback_arg;
 	free(member);
@@ -128,10 +141,17 @@ int tr_pipeline_ingress_attach_data_route_on_owner(
 		connection, tr_pipeline_ingress_frame,
 		tr_pipeline_ingress_event, member);
 	if (ret != TR_OK) {
-		(void)tr_pipeline_registry_detach_data_route(
+		int rollback_ret;
+
+		/*
+		 * handler publication 失败时，member 尚未转移给 connection callback
+		 * source，仍由当前作用域拥有。刚 attach 的 membership 必须在返回前
+		 * 退休；若 rollback 本身失败，生命周期错误优先于原 publication 错误。
+		 */
+		rollback_ret = tr_pipeline_registry_detach_data_route(
 			config->registry, preface, connection);
 		free(member);
-		return ret;
+		return rollback_ret != TR_OK ? rollback_ret : ret;
 	}
 
 	return TR_OK;
