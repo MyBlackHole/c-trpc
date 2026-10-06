@@ -222,25 +222,44 @@ int tr_runtime_start(struct tr_runtime *runtime)
 	if (runtime->started)
 		return TR_ERR_STATE;
 
+	/*
+	 * A failed previous start may leave a shard in terminal stop/join recovery
+	 * if its rollback barrier failed. Do not silently treat that shard as a
+	 * healthy running epoch. The caller must first converge it with stop().
+	 */
+	for (i = 0; i < runtime->shard_count; ++i)
+		if (runtime->shards[i].started)
+			return TR_ERR_STATE;
+
 	for (i = 0; i < runtime->shard_count; ++i) {
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 		int ret;
 
-		if (shard->started)
-			continue;
 		ret = tr_reactor_start(shard->reactor);
 		if (ret != TR_OK) {
+			int rollback_ret = TR_OK;
+
 			while (i != 0U) {
 				struct tr_runtime_shard *started;
+				int stop_ret;
 
 				--i;
 				started = &runtime->shards[i];
-				if (started->started) {
-					(void)tr_reactor_stop(started->reactor);
+				if (!started->started)
+					continue;
+
+				stop_ret = tr_reactor_stop(started->reactor);
+				if (stop_ret == TR_OK)
 					started->started = 0;
-				}
+				else if (rollback_ret == TR_OK)
+					rollback_ret = stop_ret;
 			}
-			return ret;
+
+			/*
+			 * Rollback failure wins: Runtime now owns a partially stopped shard
+			 * and callers must see the lifecycle error before retrying stop().
+			 */
+			return rollback_ret != TR_OK ? rollback_ret : ret;
 		}
 		shard->started = 1;
 	}
@@ -252,12 +271,26 @@ int tr_runtime_start(struct tr_runtime *runtime)
 int tr_runtime_stop(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int any_started = 0;
 	int result = TR_OK;
 
 	if (!runtime)
 		return TR_ERR_INVALID;
-	if (!runtime->started)
+
+	/*
+	 * runtime->started means every shard completed start(). A failed start
+	 * rollback may intentionally leave only the shard whose stop barrier failed
+	 * marked started so a later stop() can retry that exact ownership edge.
+	 */
+	for (i = 0; i < runtime->shard_count; ++i)
+		if (runtime->shards[i].started) {
+			any_started = 1;
+			break;
+		}
+	if (!any_started) {
+		runtime->started = 0;
 		return TR_OK;
+	}
 
 	/*
 	 * Avoid partial multi-shard stop from a thread that belongs to the
