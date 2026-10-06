@@ -253,12 +253,10 @@ int tr_server_connection_group_stop(struct tr_server *server);
  * traffic. release_transfer() remains available so active work can quiesce.
  *
  * wait_drained() returns TR_OK after all existing Group connections disappear
- * naturally. The wait is event-driven from owner-published Listener lifecycle
- * generations; it does not poll owner counters or become a second state owner.
- * timeout_ms == 0 waits indefinitely. It is an external blocking lifecycle wait:
- * Reactor-owner callbacks and RPC worker callbacks receive TR_ERR_STATE.
- * begin_drain() remains callback-safe; stop() remains the immediate force-close
- * operation.
+ * naturally. timeout_ms == 0 waits indefinitely. It is an external blocking
+ * lifecycle wait: Reactor-owner callbacks and RPC worker callbacks receive
+ * TR_ERR_STATE. begin_drain() remains callback-safe; stop() remains the
+ * immediate force-close operation.
  */
 int tr_server_connection_group_begin_drain(struct tr_server *server);
 int tr_server_connection_group_wait_drained(
