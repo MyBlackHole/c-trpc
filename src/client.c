@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "tr/client.h"
 
 #include <assert.h>
@@ -563,9 +564,49 @@ int tr_client_connection_group_send(
 		client->connection_group, stream_id, message_id, bytes);
 }
 
+struct tr_client_ready_wait {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	uint64_t sequence;
+};
+
+static void tr_client_ready_event(
+	struct tr_channel *channel, enum tr_channel_event event,
+	int status, void *arg)
+{
+	struct tr_client_ready_wait *wait =
+		(struct tr_client_ready_wait *)arg;
+
+	(void)channel;
+	(void)event;
+	(void)status;
+	if (!wait)
+		return;
+
+	pthread_mutex_lock(&wait->lock);
+	wait->sequence++;
+	if (wait->sequence == 0U)
+		wait->sequence = 1U;
+	pthread_cond_broadcast(&wait->cond);
+	pthread_mutex_unlock(&wait->lock);
+}
+
+static void tr_client_ready_wait_free(struct tr_client_ready_wait *wait)
+{
+	if (!wait)
+		return;
+	(void)pthread_cond_destroy(&wait->cond);
+	pthread_mutex_destroy(&wait->lock);
+	free(wait);
+}
+
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 {
-	uint64_t start;
+	struct tr_client_ready_wait *wait = NULL;
+	struct timespec deadline;
+	int observer_installed = 0;
+	int result = TR_OK;
+	int ret;
 
 	if (!client)
 		return TR_ERR_STATE;
@@ -574,19 +615,123 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 	if (!client->channel)
 		return TR_ERR_STATE;
 
-	start = tr_client_now_ms();
+	wait = (struct tr_client_ready_wait *)calloc(1, sizeof(*wait));
+	if (!wait)
+		return TR_ERR_NOMEM;
+	if (pthread_mutex_init(&wait->lock, NULL) != 0) {
+		free(wait);
+		return TR_ERR_SYS;
+	}
+	{
+		pthread_condattr_t attr;
+
+		if (pthread_condattr_init(&attr) != 0) {
+			pthread_mutex_destroy(&wait->lock);
+			free(wait);
+			return TR_ERR_SYS;
+		}
+		if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0 ||
+		    pthread_cond_init(&wait->cond, &attr) != 0) {
+			pthread_condattr_destroy(&attr);
+			pthread_mutex_destroy(&wait->lock);
+			free(wait);
+			return TR_ERR_SYS;
+		}
+		pthread_condattr_destroy(&attr);
+	}
+
+	ret = tr_channel_set_lifecycle_observer(
+		client->channel, tr_client_ready_event, wait);
+	if (ret != TR_OK) {
+		tr_client_ready_wait_free(wait);
+		return ret;
+	}
+	observer_installed = 1;
+
+	if (timeout_ms != 0U) {
+		uint64_t now_ns;
+		uint64_t timeout_ns;
+		uint64_t deadline_ns;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+			result = TR_ERR_SYS;
+			goto out;
+		}
+		now_ns = (uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
+			 (uint64_t)deadline.tv_nsec;
+		timeout_ns = (uint64_t)timeout_ms * UINT64_C(1000000);
+		deadline_ns = now_ns > UINT64_MAX - timeout_ns ?
+			UINT64_MAX : now_ns + timeout_ns;
+		deadline.tv_sec =
+			(time_t)(deadline_ns / UINT64_C(1000000000));
+		deadline.tv_nsec =
+			(long)(deadline_ns % UINT64_C(1000000000));
+	}
+
 	for (;;) {
 		enum tr_channel_lane_state state;
-		int ret = tr_channel_get_lane_state(client->channel,
-						    TR_LANE_CONTROL, &state);
-		if (ret != TR_OK)
-			return ret;
-		if (state == TR_CHANNEL_LANE_UP)
-			return TR_OK;
-		if (timeout_ms != 0 && tr_client_now_ms() - start >= timeout_ms)
-			return TR_ERR_TIMEOUT;
-		tr_client_pause_ms(1U);
+		uint64_t sequence;
+
+		pthread_mutex_lock(&wait->lock);
+		sequence = wait->sequence;
+		pthread_mutex_unlock(&wait->lock);
+
+		ret = tr_channel_get_lane_state(
+			client->channel, TR_LANE_CONTROL, &state);
+		if (ret != TR_OK) {
+			result = ret;
+			break;
+		}
+		if (state == TR_CHANNEL_LANE_UP) {
+			result = TR_OK;
+			break;
+		}
+
+		pthread_mutex_lock(&wait->lock);
+		if (wait->sequence != sequence) {
+			pthread_mutex_unlock(&wait->lock);
+			continue;
+		}
+		if (timeout_ms == 0U)
+			ret = pthread_cond_wait(&wait->cond, &wait->lock);
+		else
+			ret = pthread_cond_timedwait(
+				&wait->cond, &wait->lock, &deadline);
+		pthread_mutex_unlock(&wait->lock);
+
+		if (ret == 0)
+			continue;
+		if (timeout_ms != 0U && ret == ETIMEDOUT) {
+			/*
+			 * A readiness event may race the absolute deadline. Recheck the
+			 * predicate once before reporting timeout.
+			 */
+			ret = tr_channel_get_lane_state(
+				client->channel, TR_LANE_CONTROL, &state);
+			if (ret == TR_OK && state == TR_CHANNEL_LANE_UP)
+				result = TR_OK;
+			else
+				result = ret == TR_OK ? TR_ERR_TIMEOUT : ret;
+			break;
+		}
+		result = TR_ERR_SYS;
+		break;
 	}
+
+out:
+	if (observer_installed) {
+		ret = tr_channel_set_lifecycle_observer(
+			client->channel, NULL, NULL);
+		if (ret != TR_OK) {
+			/*
+			 * callback_arg is still published. Keep its storage alive rather
+			 * than returning a dangling stack/heap pointer to the Reactor.
+			 */
+			return ret;
+		}
+	}
+	tr_client_ready_wait_free(wait);
+	return result;
 }
 
 int tr_client_register_method(struct tr_client *client,
