@@ -57,7 +57,8 @@ int main(int argc, char **argv)
 		    TR_OK ||
 	    tr_server_listen(server, "0.0.0.0", port, &bound) != TR_OK ||
 	    tr_server_start(server) != TR_OK) {
-		tr_server_destroy(server);
+		if (tr_server_destroy(server) != TR_OK)
+		return 1;
 		return 1;
 	}
 
@@ -71,6 +72,7 @@ int main(int argc, char **argv)
 		nanosleep(&pause_time, NULL);
 
 	(void)tr_server_drain(server, 5000U);
-	tr_server_destroy(server);
+	if (tr_server_destroy(server) != TR_OK)
+		return 1;
 	return 0;
 }
