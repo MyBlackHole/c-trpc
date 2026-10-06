@@ -1643,8 +1643,9 @@ static void tr_connection_try_enqueue_lifecycle_tx(
 	assert(connection->lifecycle_after_sequence != 0U ||
 	       reactor->last_processed_command_sequence == 0U);
 #endif
-	if (connection->lifecycle_after_sequence >
-	    reactor->last_processed_command_sequence)
+	if (!tr_command_sequence_after_eq(
+		    reactor->last_processed_command_sequence,
+		    connection->lifecycle_after_sequence))
 		return;
 
 	assert(reactor->lifecycle_tx_pending_count != 0U);
