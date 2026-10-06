@@ -136,6 +136,41 @@ src = NULL;   /* 难以判断这是普通赋值还是所有权转移 */
 
 禁止先把指针发布给其他线程，再补 `get()`。
 
+### 7.1 Buffer Pool 终局所有权
+
+Buffer descriptor 可以通过 Reactor/RPC/应用回调跨异步边界。Pool destroy
+不能假设调用时所有 descriptor 已自动归还。
+
+终局顺序：
+
+```text
+父对象停止新准入
+      ->
+pool.closed = 1
+      ->
+检查每个 descriptor.checked_out
+      |
+      +-- 仍有 holder：TR_ERR_STATE，父对象保持存活
+      |
+      +-- 全部归还：释放 pool storage
+```
+
+失败后的 Pool 继续允许已有 holder 调用 `tr_buffer_release()`，但拒绝新的
+`tr_buffer_acquire()`。holder 归还后由父对象重试 destroy。
+
+Reactor RX payload 可以通过 `TR_FRAME_TAKE_OWNERSHIP` 逃逸 callback，因此
+该 terminal barrier 必须向上传播：
+
+```text
+retained RX payload
+    -> Reactor rx_pool
+    -> RuntimeShard
+    -> Runtime
+    -> Client/Server
+```
+
+任何一层看到下层 destroy 失败，都不能继续 free 自己的 storage。
+
 ## 8. 强引用计数
 
 `struct tr_refcount` 是项目统一的 C11 强引用原语。
