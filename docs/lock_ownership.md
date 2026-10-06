@@ -73,9 +73,33 @@ accepting = false
 
 **结论：保留。**
 
-TX 项可能由应用/RPC 生产者获取、由 Reactor 所有者释放，因此空闲链表
-是真正的跨线程共享资源。后续如果性能分析证明争用明显，可以增加每所有者/
-每线程缓存，而不是先改变所有权模型。
+普通 DATA/CONTROL TX 项可能由应用/RPC 生产者获取、由 Reactor 所有者释放，
+因此空闲链表是真正的跨线程共享资源。后续如果性能分析证明争用明显，可以增加
+每所有者/每线程缓存，而不是先改变所有权模型。
+
+GOAWAY 是例外的终局生命周期控制帧，不再与普通 `control_tx_pool` 竞争。
+每个物理 Connection 内嵌一个 header-only `lifecycle_tx` slot：
+
+```text
+普通 CONTROL
+    -> control_tx_pool
+    -> command ring
+    -> connection TX FIFO
+
+GOAWAY
+    -> connection.lifecycle_tx
+    -> 等待 barrier 前 command sequence 全部处理
+    -> connection TX FIFO
+```
+
+GOAWAY 不占普通 TX pool，也不占新的 command ring slot，但不能越过 barrier 前
+已经成功提交的 command。Command queue 在现有锁下为每个入队 command 分配单调
+sequence；Channel drain 记录当前 FIFO frontier，Reactor 只在
+`last_processed_sequence >= lifecycle_after_sequence` 时把内嵌 GOAWAY
+挂到 TX tail。这样 terminal reserve 不会把 shutdown 资源竞争转化成 FIFO 破坏。
+
+平时没有 pending lifecycle TX 时，Reactor 不扫描 Connection；只有
+`lifecycle_tx_pending_count != 0` 才执行冷路径扫描。
 
 ### Connection 可变状态
 
