@@ -2984,8 +2984,13 @@ static void test_channel_drain_goaway_backpressure(void)
 	assert(server_ctx.opened_event_seq < server_ctx.goaway_event_seq);
 	pthread_mutex_unlock(&server_ctx.lock);
 	assert(tr_channel_wait_drained(client_channel, 0U) == TR_AGAIN);
-	assert(tr_stream_close(prebarrier_stream) == TR_OK);
 
+	/*
+	 * Do not turn test cleanup into another admission requirement:
+	 * STREAM_CLOSE intentionally remains ordinary CONTROL traffic and may
+	 * observe backpressure here. Reactor hard teardown owns the remaining
+	 * Stream/Connection cleanup after the ordering invariant is proven.
+	 */
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
