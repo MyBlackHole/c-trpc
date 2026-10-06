@@ -115,6 +115,26 @@ Reactor 本地定时器和共享非阻塞连接器驱动。
 通用 Buffer 资源池中的缓冲区可以跨 Reactor、工作线程和应用回调转移所有权，
 因此空闲链表是真共享状态。
 
+Pool 还承担终局生命周期门禁：
+
+```text
+OPEN
+  -> acquire: descriptor.checked_out = 1
+  -> destroy:
+       closed = 1
+       outstanding != 0 -> TR_ERR_STATE，保留 storage/lock
+       outstanding == 0 -> DEAD
+CLOSED
+  -> 新 acquire: TR_ERR_CLOSED
+  -> 已有 holder release: 允许
+  -> retry destroy
+```
+
+每个 descriptor 的 `checked_out` 位是 destroy 证明的一部分；仅依赖
+`free_count == capacity` 不足以抵御 double-release 伪造空闲计数。
+destroy 仍要求终局调用方先停止新的 API entrant；`closed` 解决的是已经持有
+descriptor 的异步所有权收敛，不替代父对象的 external lifetime contract。
+
 如果未来某个资源池被证明严格属于一个分片/所有者，可以新增所有者本地快速资源池，
 不能直接改变通用资源池的同步契约。
 
@@ -159,7 +179,7 @@ GOAWAY admission 属于 `begin_drain()` 的 Reactor-owner 协议动作。
 
 条件变量使用 `CLOCK_MONOTONIC`，与原先 drain timeout 的时钟语义一致。
 Channel destroy 与 waiter 不是并发安全组合。Channel 用
-`drain_wait_closed + state_waiters` 显式管理 waiter admission/ownership：
+`state_wait_closed + state_waiters` 显式管理 waiter admission/ownership：
 waiter 在同一把 lock 下登记后才能睡眠；destroy 先关闭新的 waiter admission，
 若已有 waiter 尚未退出则 fail-closed，不开始 callback/timer/storage teardown。
 只有 waiter 计数归零后才销毁 condvar/Stream/Pool/mutex。
