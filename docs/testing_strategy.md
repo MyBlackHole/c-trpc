@@ -89,8 +89,34 @@ TSan         -> workload 并发安全
 ```
 
 Clang 与 debug benchmark job 仍保留原 check identity，但只做对应
-`bench_rpc` build；真实 workload 只在 release/ASan/TSan 三种有独立证据价值
-的模式执行。CRC portable/fallback 由 CRC 专测覆盖，不在 benchmark 中重复。
+`bench_rpc` build；真实 smoke workload 只在 release/ASan/TSan 三种有独立
+证据价值的模式执行。CRC portable/fallback 由 CRC 专测覆盖，不在 benchmark
+中重复。
+
+PR required smoke 不承担容量曲线、扩展性矩阵、资源 headroom、40k repeatability、
+fanout 和 generator-slot sweep。这些属于架构/性能诊断，运行时间和波动来源都明显
+高于 correctness smoke，放入独立 `RPC benchmark diagnostics` workflow：
+
+```text
+pull request
+    -> RPC benchmark smoke
+       -> build / accounting unit tests
+       -> release smoke
+       -> ASan workload
+       -> TSan workload
+
+main push / workflow_dispatch
+    -> RPC benchmark diagnostics
+       -> capacity curve
+       -> scalability matrix
+       -> resource headroom
+       -> repeatability
+       -> fanout
+       -> generator-slot sweep
+```
+
+这样 PR gating 只回答“这次改动是否破坏真实 RPC correctness/lifetime workload”，
+重型性能诊断仍保留证据，但不再增加每个生命周期修复的合并延迟。
 
 ## CI check identity
 
