@@ -125,6 +125,11 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
         if name == "test_transport" then
             -- Observe facade/reconnect TCP_NODELAY policy without production hooks.
             add_ldflags("-Wl,--wrap=setsockopt", {force = true})
+        elseif name == "test_connector" then
+            -- 构造无 EPOLLOUT 的假连接并注入一次 aux detach 失败。
+            add_ldflags("-Wl,--wrap=tr_tcp_connect_ipv4",
+                        "-Wl,--wrap=tr_reactor_aux_event_unregister",
+                        {force = true})
         elseif name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
