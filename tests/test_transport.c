@@ -6438,7 +6438,10 @@ struct facade_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct tr_server *server;
+	struct tr_client *client;
 	int server_drain_from_worker_ret;
+	int server_destroy_from_worker_ret;
+	int client_destroy_from_callback_ret;
 	unsigned server_calls;
 	unsigned client_results;
 	unsigned client_pre;
@@ -6461,9 +6464,12 @@ static int facade_test_unary_handler(struct tr_rpc_call_handle call,
 	static const uint8_t reply[] = "facade-pong";
 	(void)call;
 
-	if (ctx->server)
+	if (ctx->server) {
 		ctx->server_drain_from_worker_ret =
 			tr_server_drain(ctx->server, 100U);
+		ctx->server_destroy_from_worker_ret =
+			tr_server_destroy(ctx->server);
+	}
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->server_calls++;
@@ -6484,6 +6490,10 @@ static void facade_test_result(struct tr_rpc_call_handle call, int status,
 {
 	struct facade_test_ctx *ctx = (struct facade_test_ctx *)arg;
 	(void)call;
+
+	if (ctx->client)
+		ctx->client_destroy_from_callback_ret =
+			tr_client_destroy(ctx->client);
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->client_results++;
@@ -6616,6 +6626,8 @@ static void test_client_server_facade_unary(void)
 	assert(ctx.client_results == 1U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
 	assert(ctx.server_drain_from_worker_ret == TR_ERR_STATE);
+	assert(ctx.server_destroy_from_worker_ret == TR_ERR_STATE);
+	assert(ctx.client_destroy_from_callback_ret == TR_ERR_STATE);
 	assert(ctx.request_len == 11U);
 	assert(memcmp(ctx.request, "facade-ping", 11U) == 0);
 	assert(ctx.response_len == 11U);
@@ -6629,7 +6641,9 @@ static void test_client_server_facade_unary(void)
 	 */
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
+	ctx.client = NULL;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
+	ctx.client = client;
 	{
 		unsigned attempt;
 		for (attempt = 0; attempt < 100U; ++attempt) {
@@ -7365,6 +7379,7 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
+	ctx.client = client;
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tr_client_register_method(client, &method) == TR_OK);
 	assert(tr_client_call_start(client, 90U, 1U, NULL, &call) == TR_OK);
