@@ -3655,13 +3655,21 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 
 	/*
 	 * completion producer 不取得 ctl_lock。它必须在 handoff 开始时从
-	 * completion queue 取得明确的 admission generation，并把同一 token
-	 * 带到最终入队点。这样 producer 即使跨越 stop/restart 被长时间挂起，
-	 * 也不能在醒来后误把旧 epoch completion 投进新 epoch。
+	 * completion queue 取得明确的 admission generation，再观察 Reactor
+	 * RUNNING gate，并把原 token 带到最终入队点。这样 producer 即使跨越
+	 * stop/restart 被长时间挂起，也不能在醒来后误认新 epoch。
 	 */
 	admission_generation =
 		tr_completion_queue_admission_generation(&reactor->completions);
 	if (admission_generation == 0U)
+		return TR_ERR_CLOSED;
+
+	/*
+	 * queue open happens before start() publishes accepting=1. Keep the
+	 * Reactor-level gate as the final RUNNING publication, while the generation
+	 * above pins this producer to the exact queue epoch it first observed.
+	 */
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
 		return TR_ERR_CLOSED;
 
 	completion.fn = fn;
