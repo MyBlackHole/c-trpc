@@ -1,5 +1,6 @@
 #include "connector_internal.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -140,6 +141,8 @@ static int tr_connector_watch_on_owner(struct tr_connector *connector);
 static int tr_connector_send_preface_on_owner(
 	struct tr_connector *connector)
 {
+	int ret;
+
 	while (connector->preface_sent < connector->preface_len) {
 		ssize_t n = send(
 			connector->fd,
@@ -300,14 +303,20 @@ static int tr_connector_start_on_owner(void *arg)
 
 	ret = tr_connector_arm_timeout_on_owner(connector);
 	if (ret != TR_OK) {
-		tr_connector_complete_on_owner(connector, ret);
-		return TR_OK;
+		int complete_ret =
+			tr_connector_complete_on_owner(connector, ret);
+
+		return complete_ret == TR_OK ? TR_OK : complete_ret;
 	}
 
 	if (connector->connecting) {
 		ret = tr_connector_watch_on_owner(connector);
-		if (ret != TR_OK)
-			tr_connector_complete_on_owner(connector, ret);
+		if (ret != TR_OK) {
+			int complete_ret =
+				tr_connector_complete_on_owner(connector, ret);
+
+			return complete_ret == TR_OK ? TR_OK : complete_ret;
+		}
 		return TR_OK;
 	}
 
@@ -316,7 +325,9 @@ static int tr_connector_start_on_owner(void *arg)
 	 * progress 可能同步完成并调用 callback，但 start() 仍返回 TR_OK；
 	 * 上层只能通过 completion 收敛这次 attempt，不能再次 rollback。
 	 */
-	(void)tr_connector_progress_on_owner(connector);
+	ret = tr_connector_progress_on_owner(connector);
+	if (ret != TR_OK && connector->active)
+		return ret;
 	return TR_OK;
 }
 
