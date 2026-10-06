@@ -30,6 +30,8 @@ struct tr_command {
 	uint16_t reserved;
 	uint32_t slot;
 	uint32_t generation;
+	/* Queue-assigned FIFO sequence; 0 means not yet enqueued. */
+	uint64_t sequence;
 
 	union {
 		struct {
@@ -71,6 +73,7 @@ struct tr_command_queue {
 	uint32_t count;
 	uint32_t peak_count;
 	uint64_t full_events;
+	uint64_t next_sequence;
 	uint64_t wait_generation;
 	uint32_t waiters;
 	int wait_accepting;
@@ -132,6 +135,13 @@ int tr_command_queue_push_wait_force(
  * NULL 返回 0，让调用方保守地走排队路径。
  */
 int tr_command_queue_is_empty(struct tr_command_queue *queue);
+
+/*
+ * Snapshot the greatest FIFO sequence assigned so far. Used by owner-local
+ * deferred lifecycle work to wait only for commands that were already admitted
+ * at its linearization point.
+ */
+uint64_t tr_command_queue_last_sequence(struct tr_command_queue *queue);
 
 /* 返回实际复制到 out 的 command 数量。 */
 size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
