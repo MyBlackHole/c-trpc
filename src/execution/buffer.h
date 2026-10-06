@@ -19,6 +19,8 @@ struct tr_buffer {
 
 	struct tr_buffer *next;
 	struct tr_buffer_pool *pool;
+	/* Pool descriptor ownership: 1 only while checked out by one holder. */
+	uint8_t checked_out;
 
 	/*
 	 * Optional one-shot release hook for non-pool buffers. When set,
@@ -40,6 +42,11 @@ struct tr_buffer_pool {
 	uint32_t free_count;
 	uint32_t peak_in_use;
 	uint64_t exhausted_events;
+	/*
+	 * Terminal admission gate. Once destroy observes an outstanding holder it
+	 * closes new acquire permanently; existing holders may still release.
+	 */
+	int closed;
 
 	/* Optional internal accounting owner; NULL keeps legacy unaccounted mode. */
 	struct tr_memory_budget *memory_budget;
@@ -47,7 +54,13 @@ struct tr_buffer_pool {
 
 int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 			uint32_t buffer_size);
-void tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
+/*
+ * Terminal destroy. Caller must already have stopped new API entrants.
+ * If descriptors are still checked out, closes new acquire and returns
+ * TR_ERR_STATE while keeping storage/mutex alive so existing holders can
+ * release and destroy can be retried.
+ */
+int tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
 
 int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 		      struct tr_buffer **out);
