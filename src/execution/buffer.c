@@ -4,6 +4,7 @@
 #include "../memory_budget.h"
 #include "../observability_internal.h"
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
