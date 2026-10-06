@@ -1639,6 +1639,10 @@ static void tr_connection_try_enqueue_lifecycle_tx(
 	    !connection->lifecycle_tx_busy ||
 	    connection->lifecycle_tx_enqueued)
 		return;
+#ifndef NDEBUG
+	assert(connection->lifecycle_after_sequence != 0U ||
+	       reactor->last_processed_command_sequence == 0U);
+#endif
 	if (connection->lifecycle_after_sequence >
 	    reactor->last_processed_command_sequence)
 		return;
@@ -2154,6 +2158,9 @@ static void *tr_reactor_thread_main(void *arg)
 	}
 
 	tr_cleanup_connections(reactor);
+#ifndef NDEBUG
+	assert(reactor->lifecycle_tx_pending_count == 0U);
+#endif
 	tr_current_reactor_owner = NULL;
 	return NULL;
 }
