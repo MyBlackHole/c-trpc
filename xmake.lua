@@ -115,7 +115,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_source_detach", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -143,6 +143,9 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
                         "-Wl,--wrap=sendmsg", "-Wl,--wrap=recv",
                         "-Wl,--wrap=tr_parser_produce",
                         "-Wl,--wrap=epoll_wait", {force = true})
+        elseif name == "test_reactor_source_detach" then
+            -- Inject EPOLL_CTL_DEL failures without production fault hooks.
+            add_ldflags("-Wl,--wrap=epoll_ctl", {force = true})
         end
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()
