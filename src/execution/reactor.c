@@ -2195,11 +2195,6 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 		return;
 	reactor = build->reactor;
 
-	if (reactor->wake_fd >= 0)
-		close(reactor->wake_fd);
-	if (reactor->epoll_fd >= 0)
-		close(reactor->epoll_fd);
-
 	if (build->rx_pool_ready) {
 		int pool_ret = tr_buffer_pool_destroy(&reactor->rx_pool);
 #ifndef NDEBUG
@@ -2209,6 +2204,10 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 			return;
 		build->rx_pool_ready = 0;
 	}
+	if (reactor->wake_fd >= 0)
+		close(reactor->wake_fd);
+	if (reactor->epoll_fd >= 0)
+		close(reactor->epoll_fd);
 	if (build->control_tx_pool_ready)
 		tr_tx_pool_destroy(&reactor->control_tx_pool);
 	if (build->tx_pool_ready)
