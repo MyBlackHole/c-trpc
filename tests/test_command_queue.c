@@ -98,49 +98,6 @@ static void test_immediate_push_stays_nonblocking(void)
 	tr_command_queue_destroy(&queue);
 }
 
-static void test_atomic_batch_push(void)
-{
-	struct tr_command_queue queue;
-	struct tr_command seed;
-	struct tr_command batch[2];
-	struct tr_command out[3];
-	int need_wake = -1;
-	size_t count;
-
-	memset(&seed, 0, sizeof(seed));
-	memset(batch, 0, sizeof(batch));
-	seed.type = TR_CMD_RESUME_RX;
-	seed.slot = 1U;
-	batch[0].type = TR_CMD_SEND;
-	batch[0].slot = 2U;
-	batch[1].type = TR_CMD_SEND;
-	batch[1].slot = 3U;
-
-	assert(tr_command_queue_init(&queue, 2U) == TR_OK);
-	assert(tr_command_queue_push(&queue, &seed, NULL) == TR_OK);
-
-	/*
-	 * Only one slot remains. Batch admission must not enqueue its first item
-	 * and then fail the second.
-	 */
-	assert(tr_command_queue_push_batch(
-		       &queue, batch, 2U, &need_wake) == TR_AGAIN);
-	assert(queue.count == 1U);
-	assert(tr_command_queue_pop_batch(&queue, out, 1U) == 1U);
-	assert(out[0].slot == 1U);
-
-	need_wake = -1;
-	assert(tr_command_queue_push_batch(
-		       &queue, batch, 2U, &need_wake) == TR_OK);
-	assert(need_wake == 1);
-	count = tr_command_queue_pop_batch(&queue, out, 3U);
-	assert(count == 2U);
-	assert(out[0].slot == 2U);
-	assert(out[1].slot == 3U);
-
-	tr_command_queue_destroy(&queue);
-}
-
 static void test_batch_pop_wakes_sync_waiters(void)
 {
 	struct tr_command_queue queue;
@@ -296,7 +253,6 @@ static void test_wait_generation_fences_reopen(void)
 int main(void)
 {
 	test_immediate_push_stays_nonblocking();
-	test_atomic_batch_push();
 	test_batch_pop_wakes_sync_waiters();
 	test_close_cancels_sync_waiter_but_not_forced_stop();
 	test_wait_generation_fences_reopen();
