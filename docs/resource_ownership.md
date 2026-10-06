@@ -232,6 +232,20 @@ refs == 0 -> 释放 Endpoint
 
 这里允许等待，因为 API 契约明确要求“销毁函数返回即完全释放”。
 
+Endpoint teardown 是事务式 lifetime barrier，不是 best effort：
+
+- Channel handler detach 失败：旧 callback_arg 仍可能引用 Endpoint，禁止 free；
+- deadline timer unregister 失败：timer source 仍可能引用 Endpoint，禁止 free；
+- Server detached 模式只有在 handler/timer 全部静默、executor admission 关闭后，
+  才发布 `teardown_detached=1`；
+- 构造失败清理也遵守同一规则：一旦 callback/timer source 已发布，cleanup
+  必须先成功解除来源；异常失败时宁可 fail-closed 保留部分对象，也不能释放
+  仍被异步 source 引用的内存。
+
+Client connect 失败回滚同样使用同步 owner close。物理 Connection 只有在
+owner 确认 close/stale 后，才允许解绑 RPC/Channel 并清空 Client handle；
+否则保持现有 ownership 以便重试。
+
 客户端门面还额外保证销毁顺序：
 
 ```text

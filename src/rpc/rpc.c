@@ -3623,25 +3623,33 @@ static int tr_rpc_deadline_init(struct tr_rpc_endpoint *endpoint)
 	return TR_OK;
 }
 
-static void tr_rpc_deadline_destroy(struct tr_rpc_endpoint *endpoint)
+static int tr_rpc_deadline_destroy(struct tr_rpc_endpoint *endpoint)
 {
 	struct tr_reactor_timer_handle timer;
+	int ret;
 
 	if (!endpoint->deadline_timer_registered)
-		return;
+		return TR_OK;
 
 	pthread_mutex_lock(&endpoint->lock);
 	endpoint->deadline_stopping = 1;
 	timer = endpoint->deadline_timer;
-	endpoint->deadline_timer_registered = 0;
-	memset(&endpoint->deadline_timer, 0, sizeof(endpoint->deadline_timer));
 	pthread_mutex_unlock(&endpoint->lock);
 
 	/*
-	 * unregister 是 owner-serialized 的同步 barrier：返回后 timer callback
-	 * 不会再取得 Endpoint，从而允许后续 executor/ref teardown 安全释放。
+	 * unregister is the synchronous callback lifetime barrier. Keep the local
+	 * registration publication intact until that barrier really succeeds; a
+	 * Reactor currently stopping may return CLOSED and must remain retryable.
 	 */
-	(void)tr_reactor_timer_unregister(timer);
+	ret = tr_reactor_timer_unregister(timer);
+	if (ret != TR_OK && ret != TR_ERR_STALE)
+		return ret;
+
+	pthread_mutex_lock(&endpoint->lock);
+	endpoint->deadline_timer_registered = 0;
+	memset(&endpoint->deadline_timer, 0, sizeof(endpoint->deadline_timer));
+	pthread_mutex_unlock(&endpoint->lock);
+	return TR_OK;
 }
 
 static enum tr_stream_data_disposition
@@ -4336,16 +4344,35 @@ struct tr_rpc_endpoint_build {
 static void tr_rpc_endpoint_build_cleanup(struct tr_rpc_endpoint_build *build)
 {
 	struct tr_rpc_endpoint *endpoint;
+	int ret;
 
 	if (!build || !build->endpoint)
 		return;
 	endpoint = build->endpoint;
 
-	if (build->handler_installed)
-		(void)tr_channel_set_handler(
+	/*
+	 * Once callback_arg/timer state has been published, construction rollback
+	 * must cross those same synchronous lifetime barriers before freeing
+	 * Endpoint storage. A cleanup hook cannot return a second error, so an
+	 * unexpected barrier failure intentionally fails closed.
+	 */
+	if (build->handler_installed) {
+		ret = tr_channel_set_handler(
 			endpoint->channel, NULL, NULL, NULL, NULL);
-	if (build->deadline_ready)
-		tr_rpc_deadline_destroy(endpoint);
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
+	}
+	if (build->deadline_ready) {
+		ret = tr_rpc_deadline_destroy(endpoint);
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
+	}
 	if (build->executor_ready)
 		tr_rpc_executor_destroy(endpoint);
 
@@ -4558,9 +4585,34 @@ static void tr_rpc_endpoint_put(struct tr_rpc_endpoint *endpoint)
 		tr_rpc_endpoint_release(endpoint);
 }
 
+static int tr_rpc_endpoint_detach_protocol_sources(
+	struct tr_rpc_endpoint *endpoint)
+{
+	int ret;
+
+	if (!endpoint)
+		return TR_ERR_INVALID;
+
+	/*
+	 * Channel handler publication is the primary callback lifetime barrier.
+	 * Do not progress to timer/executor/ref teardown while callback_arg can
+	 * still reference Endpoint storage.
+	 */
+	ret = tr_channel_set_handler(
+		endpoint->channel, NULL, NULL, NULL, NULL);
+	if (ret != TR_OK)
+		return ret;
+
+	ret = tr_rpc_deadline_destroy(endpoint);
+	if (ret != TR_OK)
+		return ret;
+	return TR_OK;
+}
+
 static int tr_rpc_endpoint_detach_on_owner(void *arg)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
+	int ret;
 
 	if (!endpoint)
 		return TR_ERR_INVALID;
@@ -4572,23 +4624,22 @@ static int tr_rpc_endpoint_detach_on_owner(void *arg)
 		pthread_mutex_unlock(&endpoint->ref_lock);
 		return TR_OK;
 	}
-	endpoint->teardown_detached = 1;
 	pthread_mutex_unlock(&endpoint->ref_lock);
 
 	/*
-	 * No new Channel callback can acquire Endpoint work after this point.
-	 * Owner serialization means a previously executing Channel/RPC callback
-	 * has already returned before this detach operation runs.
+	 * Publish detached only after every owner-visible callback/timer source is
+	 * gone. Otherwise a failed barrier would make retry incorrectly observe an
+	 * already-detached Endpoint while a callback source is still live.
 	 */
-	(void)tr_channel_set_handler(endpoint->channel, NULL, NULL, NULL, NULL);
-	tr_rpc_deadline_destroy(endpoint);
+	ret = tr_rpc_endpoint_detach_protocol_sources(endpoint);
+	if (ret != TR_OK)
+		return ret;
 
-	/*
-	 * Group-backed Server executors do not join here. stopping closes new
-	 * admission while already queued/running task references are allowed to
-	 * drain; finalize waits for those refs outside the Reactor owner.
-	 */
 	tr_rpc_executor_shutdown(endpoint);
+
+	pthread_mutex_lock(&endpoint->ref_lock);
+	endpoint->teardown_detached = 1;
+	pthread_mutex_unlock(&endpoint->ref_lock);
 	return TR_OK;
 }
 
@@ -4658,50 +4709,40 @@ void tr_rpc_endpoint_finalize_detached_with_stats(
 	tr_rpc_endpoint_put(endpoint);
 }
 
-void tr_rpc_endpoint_destroy_with_stats(
+int tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
 {
+	int ret;
+
 	if (!endpoint)
-		return;
+		return TR_OK;
 
-	/*
-	 * Synchronous destroy may wait for owner callbacks and executor refs, so
-	 * it is invalid from either execution context it would be waiting on.
-	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
-		return;
+		return TR_ERR_STATE;
 
 	/*
-	 * 先关闭所有可能产生新 Endpoint user 的来源，再等待已有 task reference
-	 * 全部排空。Endpoint 只是借用 Channel，因此 destructor 必须保持同步：
-	 * 本函数返回后调用方可以立即安全销毁 Channel。
+	 * Every asynchronous source must be synchronously detached before
+	 * executor/ref teardown. Failure preserves Endpoint ownership for retry.
 	 */
-	/*
-	 * set_handler() 是同步 owner publication：运行中返回时旧 Channel/RPC
-	 * callback 已退出；完全 stopped 时本来就没有 callback source。
-	 * 因此这里不再需要额外 quiesce round-trip。
-	 */
-	(void)tr_channel_set_handler(
-		endpoint->channel, NULL, NULL, NULL, NULL);
-	tr_rpc_deadline_destroy(endpoint);
+	ret = tr_rpc_endpoint_detach_protocol_sources(endpoint);
+	if (ret != TR_OK)
+		return ret;
+
 	tr_rpc_executor_shutdown(endpoint);
 	tr_rpc_endpoint_wait_owner_only(endpoint);
 
-	/*
-	 * All task references are gone, so this captures final executor counters
-	 * and histograms rather than a pre-drain approximation.
-	 */
 	if (stats)
 		(void)tr_rpc_endpoint_get_stats(endpoint, stats);
 
-	/* 释放 owner 创建时持有的初始强引用；此处必须是最后一次 put。 */
 	tr_rpc_endpoint_put(endpoint);
+	return TR_OK;
 }
 
-void tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
+int tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
 {
-	tr_rpc_endpoint_destroy_with_stats(endpoint, NULL);
+	return tr_rpc_endpoint_destroy_with_stats(endpoint, NULL);
 }
+
 
 static int tr_rpc_validate_method(const struct tr_rpc_method_desc *method)
 {

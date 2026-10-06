@@ -272,16 +272,54 @@ int tr_client_create(const struct tr_client_config *config,
 	return tr_client_create_with_tuning(config, NULL, out);
 }
 
-static void tr_client_reset_session(struct tr_client *client)
+struct tr_client_close_connection_request {
+	struct tr_conn_handle connection;
+};
+
+static int tr_client_close_connection_on_owner(void *arg)
+{
+	struct tr_client_close_connection_request *request =
+		(struct tr_client_close_connection_request *)arg;
+	int ret;
+
+	ret = tr_reactor_close_on_owner(request->connection);
+	return ret == TR_ERR_STALE ? TR_OK : ret;
+}
+
+static int tr_client_close_connection_sync(struct tr_conn_handle connection)
+{
+	struct tr_client_close_connection_request request;
+
+	if (!connection.reactor)
+		return TR_OK;
+	request.connection = connection;
+	return tr_reactor_call(
+		connection.reactor, tr_client_close_connection_on_owner, &request);
+}
+
+static int tr_client_reset_session(struct tr_client *client)
 {
 	if (!client)
-		return;
+		return TR_OK;
 
-	if (client->connection.reactor)
-		(void)tr_reactor_close(client->connection);
+	if (client->connection.reactor) {
+		int ret = tr_client_close_connection_sync(client->connection);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	if (client->rpc) {
-		tr_rpc_endpoint_destroy(client->rpc);
+		int ret = tr_rpc_endpoint_destroy(client->rpc);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return ret;
 		client->rpc = NULL;
 	}
 	if (client->channel) {
@@ -291,12 +329,13 @@ static void tr_client_reset_session(struct tr_client *client)
 		assert(ret == TR_OK);
 #endif
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->channel = NULL;
 	}
 
 	memset(&client->connection, 0, sizeof(client->connection));
 	client->connected = 0;
+	return TR_OK;
 }
 
 struct tr_client_session_guard {
@@ -308,7 +347,7 @@ static void
 tr_client_session_guard_cleanup(struct tr_client_session_guard *guard)
 {
 	if (guard && guard->armed && guard->client)
-		tr_client_reset_session(guard->client);
+		(void)tr_client_reset_session(guard->client);
 }
 
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
@@ -692,7 +731,13 @@ void tr_client_destroy(struct tr_client *client)
 	}
 
 	if (client->rpc) {
-		tr_rpc_endpoint_destroy(client->rpc);
+		int ret = tr_rpc_endpoint_destroy(client->rpc);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
 		client->rpc = NULL;
 	}
 	if (client->channel) {
