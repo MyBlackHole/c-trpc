@@ -211,6 +211,14 @@ int tr_channel_get_lane_state(struct tr_channel *channel, enum tr_lane lane,
 			      enum tr_channel_lane_state *out);
 
 /*
+ * 等待指定 lane 完成 HELLO/HELLO_ACK 并进入 UP。该等待只观察 Channel 状态，
+ * 不推进握手或重连协议。timeout_ms == 0 表示无限等待。
+ * Reactor owner context 调用返回 TR_ERR_STATE。
+ */
+int tr_channel_wait_ready(
+	struct tr_channel *channel, enum tr_lane lane, uint32_t timeout_ms);
+
+/*
  * 选定 lane 进入 UP 后，返回协商得到的 outbound limits。
  * max_frame_payload_bytes/max_message_bytes 表示 peer 声明的接收能力；
  * 本地接收上限仍由 Channel/Reactor 配置决定。
@@ -243,9 +251,9 @@ int tr_channel_begin_drain(struct tr_channel *channel);
  * 该进度依赖 Reactor owner 继续处理 RX/TX 和 close/cancel callback，因此
  * owner context 调用返回 TR_ERR_STATE。
  *
- * 调用方必须保证 wait_drained() 与 tr_channel_destroy() 不并发；destroy
- * 是终局生命周期边界，销毁 condvar/mutex 前必须先停止新的外部 API 并等待
- * 已有 waiter 返回。
+ * 所有 Channel state waiter（包括 wait_ready / wait_drained）都受同一
+ * teardown admission 保护。调用方仍必须停止新的外部 API；destroy/detach
+ * 会拒绝在已有 waiter 尚未退出时释放 Channel。
  */
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
 

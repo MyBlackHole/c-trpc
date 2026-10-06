@@ -1489,22 +1489,7 @@ static void wait_channel_lane_down(struct tr_channel *channel,
 
 static void wait_channel_lane_up(struct tr_channel *channel, enum tr_lane lane)
 {
-	enum tr_channel_lane_state state = TR_CHANNEL_LANE_DOWN;
-	unsigned i;
-
-	for (i = 0; i < 5000; ++i) {
-		assert(tr_channel_get_lane_state(channel, lane, &state) ==
-		       TR_OK);
-		if (state == TR_CHANNEL_LANE_UP)
-			return;
-		{
-			struct timespec pause_time;
-			pause_time.tv_sec = 0;
-			pause_time.tv_nsec = 1000000L;
-			nanosleep(&pause_time, NULL);
-		}
-	}
-	assert(state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_wait_ready(channel, lane, 5000U) == TR_OK);
 }
 
 static void init_channel_test_ctx(struct channel_test_ctx *ctx)
@@ -1554,6 +1539,52 @@ static void wait_connection_rx_frames(struct tr_conn_handle connection,
 	assert(!"connection did not receive expected frame");
 }
 
+struct channel_ready_wait_probe {
+	struct tr_channel *channel;
+	enum tr_lane lane;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int entered;
+	int done;
+	int ret;
+};
+
+static void *channel_ready_wait_main(void *arg)
+{
+	struct channel_ready_wait_probe *probe =
+		(struct channel_ready_wait_probe *)arg;
+
+	pthread_mutex_lock(&probe->lock);
+	probe->entered = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+
+	probe->ret = tr_channel_wait_ready(
+		probe->channel, probe->lane, 5000U);
+
+	pthread_mutex_lock(&probe->lock);
+	probe->done = 1;
+	pthread_cond_broadcast(&probe->cond);
+	pthread_mutex_unlock(&probe->lock);
+	return NULL;
+}
+
+static void wait_channel_ready_probe(
+	struct channel_ready_wait_probe *probe, const int *field)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&probe->lock);
+	while (!*field && ret == 0)
+		ret = pthread_cond_timedwait(
+			&probe->cond, &probe->lock, &deadline);
+	assert(*field);
+	pthread_mutex_unlock(&probe->lock);
+}
+
 static void test_channel_deferred_hello_gate(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -1562,6 +1593,8 @@ static void test_channel_deferred_hello_gate(void)
 	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle server_conn;
 	struct channel_test_ctx server_ctx;
+	struct channel_ready_wait_probe ready_probe;
+	pthread_t ready_thread;
 	enum tr_channel_lane_state lane_state;
 	uint8_t hello_payload[32] = { 0 };
 	uint8_t data_payload[4] = { 'p', 'i', 'n', 'g' };
@@ -1621,11 +1654,26 @@ static void test_channel_deferred_hello_gate(void)
 					 &lane_state) == TR_OK);
 	assert(lane_state != TR_CHANNEL_LANE_UP);
 
+	memset(&ready_probe, 0, sizeof(ready_probe));
+	ready_probe.channel = server_channel;
+	ready_probe.lane = TR_LANE_CONTROL;
+	assert(pthread_mutex_init(&ready_probe.lock, NULL) == 0);
+	assert(pthread_cond_init(&ready_probe.cond, NULL) == 0);
+	assert(pthread_create(
+		       &ready_thread, NULL, channel_ready_wait_main,
+		       &ready_probe) == 0);
+	wait_channel_ready_probe(&ready_probe, &ready_probe.entered);
+
 	assert(tr_channel_set_handler(server_channel, channel_test_on_data,
 				      channel_test_on_stream_event,
 				      channel_test_on_channel_event,
 				      &server_ctx) == TR_OK);
 	assert(tr_channel_start(server_channel) == TR_OK);
+	wait_channel_ready_probe(&ready_probe, &ready_probe.done);
+	assert(pthread_join(ready_thread, NULL) == 0);
+	assert(ready_probe.ret == TR_OK);
+	pthread_cond_destroy(&ready_probe.cond);
+	pthread_mutex_destroy(&ready_probe.lock);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_BULK);
 
