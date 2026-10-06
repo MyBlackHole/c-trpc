@@ -208,6 +208,7 @@ int tr_client_create_with_tuning(
 		return TR_ERR_NOMEM;
 	client->config = effective;
 	client->tuning = effective_tuning;
+	atomic_init(&client->ready_wait_active, 0);
 
 	ret = tr_buffer_pool_init_dynamic(&client->rpc_message_pool,
 					  effective_tuning.rpc_message_pool_count,
