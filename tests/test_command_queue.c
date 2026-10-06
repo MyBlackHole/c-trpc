@@ -82,7 +82,9 @@ static void test_immediate_push_stays_nonblocking(void)
 	need_wake = 1;
 	assert(tr_command_queue_push(&queue, &resume, &need_wake) == TR_OK);
 	assert(need_wake == 0);
+	assert(tr_command_queue_last_sequence(&queue) == 2U);
 	assert(tr_command_queue_push(&queue, &send, NULL) == TR_AGAIN);
+	assert(tr_command_queue_last_sequence(&queue) == 2U);
 
 	pthread_mutex_lock(&queue.lock);
 	assert(queue.count == 2U);
@@ -94,6 +96,9 @@ static void test_immediate_push_stays_nonblocking(void)
 
 	count = tr_command_queue_pop_batch(&queue, out, 2U);
 	assert(count == 2U);
+	assert(out[0].sequence == 1U);
+	assert(out[1].sequence == 2U);
+	assert(out[0].sequence < out[1].sequence);
 	assert(tr_command_queue_is_empty(&queue) == 1);
 	tr_command_queue_destroy(&queue);
 }
