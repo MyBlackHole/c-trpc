@@ -2238,74 +2238,157 @@ struct tr_channel_build {
 	struct tr_channel *channel;
 	int lock_ready;
 	int state_cond_ready;
-	int keepalive_timer_ready;
-	int control_handler_installed;
-	int bulk_handler_installed;
 };
 
-struct tr_channel_build_close_request {
-	struct tr_conn_handle control;
-	struct tr_conn_handle bulk;
-	int split;
+struct tr_channel_create_publish_request {
+	struct tr_channel *channel;
+	int start_handshake;
 };
 
-static int tr_channel_build_close_on_owner(void *arg)
+static int tr_channel_create_connection_active(
+	struct tr_conn_handle connection)
 {
-	struct tr_channel_build_close_request *request =
-		(struct tr_channel_build_close_request *)arg;
-	int final = TR_OK;
+	enum tr_connection_state state;
 	int ret;
 
-	ret = tr_reactor_close_on_owner(request->control);
-	if (ret != TR_OK && ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
-		final = ret;
+	ret = tr_reactor_get_connection_state(connection, &state);
+	if (ret != TR_OK)
+		return ret;
+	return state == TR_CONN_ACTIVE ? TR_OK : TR_ERR_STALE;
+}
 
-	if (request->split) {
-		ret = tr_reactor_close_on_owner(request->bulk);
-		if (ret != TR_OK && ret != TR_ERR_STALE &&
-		    ret != TR_ERR_CLOSED && final == TR_OK)
+static int tr_channel_create_rollback_on_owner(
+	struct tr_channel *channel, int control_handler_installed,
+	int bulk_handler_installed)
+{
+	struct tr_conn_handle control = channel->control_connection;
+	struct tr_conn_handle bulk = channel->bulk_connection;
+	int split = !tr_conn_equal(control, bulk);
+	int ret;
+	int final = TR_OK;
+
+	/*
+	 * constructor 尚未向调用方发布 Channel。回滚时先撤销已经发布的
+	 * callback_arg，再退休曾经进入 Channel publication transaction 的
+	 * physical connection。owner direct set_handler 对 exact active handle
+	 * 只会成功；若 connection 已经退休则返回 TR_ERR_STALE，同样证明 source
+	 * 已静默。
+	 */
+	if (control_handler_installed) {
+		ret = tr_reactor_set_handler(control, NULL, NULL, NULL);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
 			final = ret;
 	}
+	if (bulk_handler_installed) {
+		ret = tr_reactor_set_handler(bulk, NULL, NULL, NULL);
+		if (ret != TR_OK && ret != TR_ERR_STALE && final == TR_OK)
+			final = ret;
+	}
+
+	/*
+	 * 旧构造契约在任一 handler 已发布后都会关闭本次 Channel 使用的
+	 * connection。保持这个终止语义，同时让 close/stale 成为最终静默证明。
+	 */
+	if (control_handler_installed || bulk_handler_installed) {
+		ret = tr_reactor_close_on_owner(control);
+		if (ret != TR_OK && ret != TR_ERR_STALE && final == TR_OK)
+			final = ret;
+		if (split) {
+			ret = tr_reactor_close_on_owner(bulk);
+			if (ret != TR_OK && ret != TR_ERR_STALE &&
+			    final == TR_OK)
+				final = ret;
+		}
+	}
+
 	return final;
+}
+
+static int tr_channel_create_publish_on_owner(void *arg)
+{
+	struct tr_channel_create_publish_request *request =
+		(struct tr_channel_create_publish_request *)arg;
+	struct tr_channel *channel = request->channel;
+	struct tr_conn_handle control = channel->control_connection;
+	struct tr_conn_handle bulk = channel->bulk_connection;
+	int split = !tr_conn_equal(control, bulk);
+	int control_handler_installed = 0;
+	int bulk_handler_installed = 0;
+	int rollback_ret;
+	int ret;
+
+	/*
+	 * 先完成全部 connection capability 预检，再开始任何 callback publication。
+	 * 同一 owner turn 内不会有 epoll dispatch 插入，因此预检成功后 handler
+	 * publication 不会因为 connection replacement 与本事务竞争而失效。
+	 */
+	ret = tr_channel_create_connection_active(control);
+	if (ret != TR_OK)
+		return ret;
+	if (split) {
+		ret = tr_channel_create_connection_active(bulk);
+		if (ret != TR_OK)
+			return ret;
+	}
+
+	ret = tr_reactor_set_handler(
+		control, tr_channel_on_frame,
+		tr_channel_on_connection_event, channel);
+	if (ret != TR_OK)
+		return ret;
+	control_handler_installed = 1;
+
+	if (split) {
+		ret = tr_reactor_set_handler(
+			bulk, tr_channel_on_frame,
+			tr_channel_on_connection_event, channel);
+		if (ret != TR_OK)
+			goto rollback;
+		bulk_handler_installed = 1;
+	}
+
+	/*
+	 * HELLO admission 仍属于构造事务。owner 快路径只把 TX item 挂到
+	 * connection queue，不在这里执行 socket send，因此失败仍可在本 turn
+	 * 内撤销 handler 并退休 exact connection。
+	 */
+	if (request->start_handshake) {
+		ret = tr_channel_start(channel);
+		if (ret != TR_OK)
+			goto rollback;
+	}
+
+	/*
+	 * keepalive timer 最后发布。register 成功后本事务已经没有后续可失败步骤，
+	 * 因而 constructor error path 永远不需要 timer_unregister rollback。
+	 */
+	ret = tr_reactor_timer_register(
+		channel->reactor, tr_channel_keepalive_timer_main,
+		channel, &channel->keepalive_timer);
+	if (ret != TR_OK)
+		goto rollback;
+	channel->keepalive_timer_registered = 1;
+	return TR_OK;
+
+rollback:
+	rollback_ret = tr_channel_create_rollback_on_owner(
+		channel, control_handler_installed, bulk_handler_installed);
+	return rollback_ret != TR_OK ? rollback_ret : ret;
 }
 
 static void tr_channel_build_cleanup(struct tr_channel_build *build)
 {
 	struct tr_channel *channel;
-	int handlers_removed = 0;
 
 	if (!build || !build->channel)
 		return;
 	channel = build->channel;
 
-	if (build->control_handler_installed) {
-		(void)tr_reactor_set_handler(channel->control_connection, NULL,
-					     NULL, NULL);
-		handlers_removed = 1;
-	}
-	if (build->bulk_handler_installed) {
-		(void)tr_reactor_set_handler(channel->bulk_connection, NULL,
-					     NULL, NULL);
-		handlers_removed = 1;
-	}
-	if (handlers_removed && channel->reactor) {
-		struct tr_channel_build_close_request request;
-		int ret;
-
-		request.control = channel->control_connection;
-		request.bulk = channel->bulk_connection;
-		request.split = !tr_conn_equal(
-			request.control, request.bulk);
-		ret = tr_reactor_call(
-			channel->reactor, tr_channel_build_close_on_owner,
-			&request);
-#ifndef NDEBUG
-		assert(ret == TR_OK || ret == TR_ERR_CLOSED);
-#endif
-		if (ret != TR_OK && ret != TR_ERR_CLOSED)
-			return;
-	}
-
+	/*
+	 * TR_AUTO 这里只管理未发布的词法作用域资源。所有 Reactor handler、
+	 * timer、connection 生命周期边都必须在 create_publish owner transaction
+	 * 内先完成收敛，cleanup 本身不得执行任何可失败的异步 teardown。
+	 */
 	if (channel->streams) {
 		uint32_t i;
 		for (i = 0; i < channel->config.max_streams; ++i)
@@ -2314,8 +2397,6 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	}
 	free(channel->stream_index);
 	free(channel->streams);
-	if (build->keepalive_timer_ready)
-		(void)tr_reactor_timer_unregister(channel->keepalive_timer);
 	if (build->state_cond_ready)
 		pthread_cond_destroy(&channel->state_cond);
 	if (build->lock_ready)
@@ -2408,14 +2489,6 @@ static int tr_channel_create_common(
 		pthread_condattr_destroy(&attr);
 		build.state_cond_ready = 1;
 	}
-	ret = tr_reactor_timer_register(channel->reactor,
-					tr_channel_keepalive_timer_main,
-					channel, &channel->keepalive_timer);
-	if (ret != TR_OK)
-		return ret;
-	channel->keepalive_timer_registered = 1;
-	build.keepalive_timer_ready = 1;
-
 	channel->streams = (struct tr_stream_slot *)calloc(
 		channel->config.max_streams, sizeof(*channel->streams));
 	channel->stream_index_capacity =
@@ -2447,24 +2520,14 @@ static int tr_channel_create_common(
 	channel->channel_event_cb = channel_event_cb;
 	channel->callback_arg = callback_arg;
 
-	ret = tr_reactor_set_handler(control_connection, tr_channel_on_frame,
-				     tr_channel_on_connection_event, channel);
-	if (ret != TR_OK)
-		return ret;
-	build.control_handler_installed = 1;
+	{
+		struct tr_channel_create_publish_request request;
 
-	if (!tr_conn_equal(control_connection, bulk_connection)) {
-		ret = tr_reactor_set_handler(bulk_connection,
-					     tr_channel_on_frame,
-					     tr_channel_on_connection_event,
-					     channel);
-		if (ret != TR_OK)
-			return ret;
-		build.bulk_handler_installed = 1;
-	}
-
-	if (start_handshake) {
-		ret = tr_channel_start(channel);
+		request.channel = channel;
+		request.start_handshake = start_handshake;
+		ret = tr_reactor_call(
+			channel->reactor, tr_channel_create_publish_on_owner,
+			&request);
 		if (ret != TR_OK)
 			return ret;
 	}
