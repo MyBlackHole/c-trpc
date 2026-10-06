@@ -4,6 +4,7 @@
 
 #include "../src/crc32c.h"
 #include "../src/execution/reactor.h"
+#include "../src/execution/command_queue.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 
@@ -12,6 +13,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,6 +33,36 @@ struct data_test_ctx {
 	unsigned events;
 	uint16_t last_type;
 };
+
+/*
+ * 只在该测试目标通过 --wrap=tr_command_queue_push 生效。强制下一次 SEND
+ * admission 返回 TR_AGAIN，验证 Pipeline soft-state rollback；生产库不包含
+ * fault injection hook。
+ */
+static atomic_int fail_next_send_push;
+static atomic_uint injected_send_push_failures;
+
+int __real_tr_command_queue_push(
+	struct tr_command_queue *queue, const struct tr_command *command,
+	int *need_wake);
+
+int __wrap_tr_command_queue_push(
+	struct tr_command_queue *queue, const struct tr_command *command,
+	int *need_wake)
+{
+	if (command && command->type == TR_CMD_SEND &&
+	    atomic_exchange(&fail_next_send_push, 0)) {
+		atomic_fetch_add(&injected_send_push_failures, 1U);
+		return TR_AGAIN;
+	}
+
+	return __real_tr_command_queue_push(queue, command, need_wake);
+}
+
+static void fail_next_send_admission(void)
+{
+	assert(atomic_exchange(&fail_next_send_push, 1) == 0);
+}
 
 static void send_all(int fd, const void *data, size_t len)
 {
@@ -656,6 +688,114 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	pthread_mutex_destroy(&data_ctx.lock);
 }
 
+static void test_pipeline_send_failure_rolls_back_soft_state(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_pipeline_listener_config config;
+	struct tr_pipeline_listener *listener = NULL;
+	struct tr_pipeline_route_preface route;
+	struct tr_pipeline_route_preface data_route;
+	struct tr_pipeline_control_wire_message offer;
+	struct tr_pipeline_control_wire_message ready;
+	uint16_t port = 0U;
+	int control = -1;
+	int data = -1;
+	unsigned failures_before;
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.owner_shard_id = 0U;
+	config.pipeline_capacity = 1U;
+	config.connection_capacity = 3U;
+	/*
+	 * Capacity=1 makes a leaked failed offer immediately observable: the next
+	 * offer could not succeed if rollback left one RESERVED capability behind.
+	 */
+	config.data_capacity_per_pipeline = 1U;
+	config.stream_affinity_capacity_per_pipeline = 1U;
+	config.control_message_count = 4U;
+	config.authorize_control = authorize_control;
+	assert(tr_pipeline_listener_create(&config, &listener) == TR_OK);
+	assert(tr_pipeline_listener_listen_ipv4(
+		       listener, "127.0.0.1", 0U, 8, &port) == TR_OK);
+
+	route = control_route(TEST_EPOCH_1);
+	control = connect_loopback(port);
+	send_route(control, &route);
+	wait_listener_counts(listener, 1U, 1U);
+
+	failures_before = atomic_load(&injected_send_push_failures);
+	fail_next_send_admission();
+	memset(&data_route, 0, sizeof(data_route));
+	assert(tr_pipeline_listener_send_data_offer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		       UINT64_C(9001), &data_route) == TR_AGAIN);
+	assert(atomic_load(&injected_send_push_failures) ==
+	       failures_before + 1U);
+	assert(data_route.member_generation == 0U);
+
+	/*
+	 * The failed SEND must have cancelled the exact reservation. With only one
+	 * DATA slot, immediate success proves the slot returned to FREE.
+	 */
+	memset(&data_route, 0, sizeof(data_route));
+	assert(tr_pipeline_listener_send_data_offer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		       UINT64_C(9002), &data_route) == TR_OK);
+	memset(&offer, 0, sizeof(offer));
+	recv_control_message(control, UINT64_C(9002), &offer);
+	assert(offer.data_index == data_route.member_index);
+	assert(offer.data_generation == data_route.member_generation);
+
+	data = connect_loopback(port);
+	send_route(data, &data_route);
+	wait_listener_counts(listener, 1U, 2U);
+
+	failures_before = atomic_load(&injected_send_push_failures);
+	fail_next_send_admission();
+	assert(tr_pipeline_listener_send_transfer_ready(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 9101U,
+		       UINT64_C(9003)) == TR_AGAIN);
+	assert(atomic_load(&injected_send_push_failures) ==
+	       failures_before + 1U);
+
+	/*
+	 * prepare_transfer() installed stream affinity before SEND admission. A
+	 * successful retry for the same stream proves failed SEND removed it.
+	 */
+	assert(tr_pipeline_listener_send_transfer_ready(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 9101U,
+		       UINT64_C(9004)) == TR_OK);
+	memset(&ready, 0, sizeof(ready));
+	recv_control_message(control, UINT64_C(9004), &ready);
+	assert(ready.stream_id == 9101U);
+	assert(ready.data_index == offer.data_index);
+	assert(ready.data_generation == offer.data_generation);
+	assert(tr_pipeline_listener_release_transfer(
+		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 9101U) == TR_OK);
+
+	/*
+	 * CONTROL close is the normal transport terminal edge. It invalidates the
+	 * attached DATA membership and closes that DATA connection before Listener
+	 * storage is destroyed.
+	 */
+	shutdown(control, SHUT_RDWR);
+	close(control);
+	control = -1;
+	wait_peer_close(data);
+	close(data);
+	data = -1;
+	wait_listener_counts(listener, 0U, 0U);
+
+	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+}
+
 static void test_pipeline_listener_prestart_teardown(void)
 {
 	struct tr_reactor *reactor = NULL;
@@ -694,7 +834,9 @@ int main(void)
 {
 	test_pipeline_listener_control_and_data();
 	test_pipeline_listener_ready_ingress_barrier();
+	test_pipeline_send_failure_rolls_back_soft_state();
 	test_pipeline_listener_prestart_teardown();
+	assert(atomic_load(&fail_next_send_push) == 0);
 	puts("pipeline listener/control transport: ok");
 	return 0;
 }

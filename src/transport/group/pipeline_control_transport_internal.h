@@ -47,9 +47,14 @@ int tr_pipeline_control_transport_release_transfer(
 	struct tr_pipeline_control_transport *transport, uint32_t stream_id);
 
 /*
- * 显式终止一个 CONTROL transport。该操作在 connection 的 Reactor owner 上
- * 执行；第一次调用先关闭 admission，随后完成 Pipeline fatal teardown。
- * 如果前一次 connection event 已进入 closing 但 teardown 未完成，可安全重试。
+ * 收敛一个已经进入终止路径的 CONTROL transport。该操作在 connection 的
+ * Reactor owner 上执行；第一次调用先关闭 admission，随后完成 Pipeline fatal
+ * teardown。如果前一次 connection event 已进入 closing 但 teardown 未完成，可
+ * 安全重试。
+ *
+ * 调用方必须先确保 CONTROL connection 已关闭/正在其 close callback 中，因成功
+ * 返回会释放 transport callback_arg。本接口当前只供 Listener terminal teardown
+ * 在完成 connection close barrier 后重试残留 session。
  */
 int tr_pipeline_control_transport_abort(
 	struct tr_pipeline_control_transport *transport);
