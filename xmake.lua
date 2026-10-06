@@ -123,8 +123,11 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
         add_deps("trcore")
         add_undefines("NDEBUG")
         if name == "test_transport" then
-            -- Observe facade/reconnect TCP_NODELAY policy without production hooks.
-            add_ldflags("-Wl,--wrap=setsockopt", {force = true})
+            -- Observe/inject facade lifecycle edges without production hooks.
+            add_ldflags("-Wl,--wrap=setsockopt",
+                        "-Wl,--wrap=tr_runtime_shard_disable_listener_events",
+                        "-Wl,--wrap=tr_runtime_shard_disable_peer_events",
+                        {force = true})
         elseif name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
