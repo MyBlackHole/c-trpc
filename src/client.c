@@ -63,26 +63,6 @@ static struct tr_reactor *tr_client_reactor(struct tr_client *client)
 	return client ? tr_runtime_shard_reactor(client->shard) : NULL;
 }
 
-static uint64_t tr_client_now_ms(void)
-{
-	struct timespec ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return 0;
-	return (uint64_t)ts.tv_sec * UINT64_C(1000) +
-	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
-}
-
-static void tr_client_pause_ms(uint32_t ms)
-{
-	struct timespec ts;
-
-	ts.tv_sec = (time_t)(ms / 1000U);
-	ts.tv_nsec = (long)(ms % 1000U) * 1000000L;
-	while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
-		;
-}
-
 static void tr_client_normalize_config(struct tr_client_config *config)
 {
 	struct tr_client_config defaults;
@@ -565,8 +545,6 @@ int tr_client_connection_group_send(
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 {
-	uint64_t start;
-
 	if (!client)
 		return TR_ERR_STATE;
 	if (tr_client_blocking_lifecycle_context())
@@ -574,21 +552,9 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 	if (!client->channel)
 		return TR_ERR_STATE;
 
-	start = tr_client_now_ms();
-	for (;;) {
-		enum tr_channel_lane_state state;
-		int ret = tr_channel_get_lane_state(client->channel,
-						    TR_LANE_CONTROL, &state);
-		if (ret != TR_OK)
-			return ret;
-		if (state == TR_CHANNEL_LANE_UP)
-			return TR_OK;
-		if (timeout_ms != 0 && tr_client_now_ms() - start >= timeout_ms)
-			return TR_ERR_TIMEOUT;
-		tr_client_pause_ms(1U);
-	}
+	return tr_channel_wait_ready(
+		client->channel, TR_LANE_CONTROL, timeout_ms);
 }
-
 int tr_client_register_method(struct tr_client *client,
 			      const struct tr_rpc_method_desc *method)
 {
