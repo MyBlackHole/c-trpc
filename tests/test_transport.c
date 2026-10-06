@@ -2914,9 +2914,9 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
-	reactor_config.command_capacity = 64U;
+	/* Exhaust both ordinary command admission and CONTROL TX admission. */
+	reactor_config.command_capacity = 1U;
 	reactor_config.tx_item_capacity = 8U;
-	/* One ordinary CONTROL item lets the test fully exhaust that pool. */
 	reactor_config.control_tx_item_capacity = 1U;
 	reactor_config.rx_buffer_count = 8U;
 	reactor_config.rx_buffer_size = 4096U;
@@ -2960,8 +2960,8 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	/*
 	 * Owner is blocked. tr_reactor_send() reserves the sole ordinary CONTROL
-	 * TX item before queueing SEND. GOAWAY must still succeed because it uses
-	 * the per-Connection lifecycle slot rather than control_tx_pool.
+	 * TX item and fills the one-slot command ring. GOAWAY must still succeed:
+	 * its Connection-embedded lifecycle item does not consume either resource.
 	 */
 	assert(tr_reactor_send(
 		       client_conn, TR_FRAME_PONG, 0U, 0U,
