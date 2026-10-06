@@ -359,8 +359,8 @@ int main(void)
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	tr_rpc_endpoint_destroy(client_rpc);
 	tr_rpc_endpoint_destroy(server_rpc);
-	tr_channel_destroy(client_channel);
-	tr_channel_destroy(server_channel);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
 	tr_buffer_pool_destroy(&rpc_pool);
 	pthread_cond_destroy(&ctx.cond);

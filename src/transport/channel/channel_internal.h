@@ -62,7 +62,7 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
  *   context after detach returned.
  */
 int tr_channel_detach_for_finalize(struct tr_channel *channel);
-void tr_channel_finalize_detached(struct tr_channel *channel);
+int tr_channel_finalize_detached(struct tr_channel *channel);
 
 int tr_channel_start(struct tr_channel *channel);
 

@@ -305,7 +305,13 @@ static void tr_client_reset_session(struct tr_client *client)
 		client->rpc = NULL;
 	}
 	if (client->channel) {
-		tr_channel_destroy(client->channel);
+		int ret = tr_channel_destroy(client->channel);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
 		client->channel = NULL;
 	}
 
@@ -724,7 +730,13 @@ void tr_client_destroy(struct tr_client *client)
 		client->rpc = NULL;
 	}
 	if (client->channel) {
-		tr_channel_destroy(client->channel);
+		int ret = tr_channel_destroy(client->channel);
+
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
 		client->channel = NULL;
 	}
 
