@@ -1,7 +1,6 @@
 #include "tr/server.h"
 
 #include <assert.h>
-#include <errno.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <stdlib.h>
