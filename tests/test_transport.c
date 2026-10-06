@@ -2903,8 +2903,11 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
-	/* Exhaust both ordinary command admission and CONTROL TX admission. */
-	reactor_config.command_capacity = 1U;
+	/*
+	 * Two slots let setup adopt both fds. The gated phase below fills both
+	 * slots deterministically before drain.
+	 */
+	reactor_config.command_capacity = 2U;
 	reactor_config.tx_item_capacity = 8U;
 	reactor_config.control_tx_item_capacity = 1U;
 	reactor_config.rx_buffer_count = 8U;
@@ -2946,12 +2949,19 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	/*
 	 * Owner is blocked. A pre-barrier STREAM_OPEN reserves the sole ordinary
-	 * CONTROL TX item and fills the one-slot command ring. begin_drain() must
-	 * still succeed, but GOAWAY may not overtake this already-admitted OPEN.
+	 * CONTROL TX item; STREAM_OPEN + RESUME_RX fill the two-slot command ring.
+	 * begin_drain() must still succeed, but GOAWAY may not overtake the
+	 * already-admitted OPEN.
 	 */
 	assert(tr_stream_open(
 		       client_channel, TR_LANE_CONTROL,
 		       &prebarrier_stream) == TR_OK);
+	/*
+	 * STREAM_OPEN used one command slot and the sole ordinary CONTROL TX item.
+	 * RESUME_RX uses no TX item and fills the second command slot while owner
+	 * remains blocked.
+	 */
+	assert(tr_reactor_resume_rx(client_conn) == TR_OK);
 
 	pthread_mutex_lock(&probe.lock);
 	probe.run_drain = 1;
