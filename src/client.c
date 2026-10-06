@@ -314,9 +314,6 @@ static int tr_client_reset_session(struct tr_client *client)
 	if (client->connection.reactor) {
 		int ret = tr_client_close_connection_sync(client->connection);
 
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
 			return ret;
 	}
@@ -324,9 +321,6 @@ static int tr_client_reset_session(struct tr_client *client)
 	if (client->rpc) {
 		int ret = tr_rpc_endpoint_destroy(client->rpc);
 
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
 			return ret;
 		client->rpc = NULL;
@@ -334,9 +328,6 @@ static int tr_client_reset_session(struct tr_client *client)
 	if (client->channel) {
 		int ret = tr_channel_destroy(client->channel);
 
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
 			return ret;
 		client->channel = NULL;
@@ -347,16 +338,18 @@ static int tr_client_reset_session(struct tr_client *client)
 	return TR_OK;
 }
 
-struct tr_client_session_guard {
-	struct tr_client *client;
-	int armed;
-};
-
-static void
-tr_client_session_guard_cleanup(struct tr_client_session_guard *guard)
+static int tr_client_connect_rollback(
+	struct tr_client *client, int cause)
 {
-	if (guard && guard->armed && guard->client)
-		(void)tr_client_reset_session(guard->client);
+	int rollback_ret;
+
+	/*
+	 * fd 被 Reactor 接管以后，后续失败已经跨过异步 publication 边界。
+	 * rollback 必须显式返回状态：只有 reset_session() 真正收敛，才允许
+	 * 把原 connect 错误返回给调用方；rollback 自身失败时生命周期错误优先。
+	 */
+	rollback_ret = tr_client_reset_session(client);
+	return rollback_ret != TR_OK ? rollback_ret : cause;
 }
 
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
@@ -366,8 +359,6 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_channel_keepalive_config keepalive_config;
-	struct tr_client_session_guard session
-		TR_AUTO(tr_client_session_guard_cleanup) = { client, 0 };
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
 
@@ -391,7 +382,6 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	if (ret != TR_OK)
 		return ret;
 	(void)tr_fd_take(&fd);
-	session.armed = 1;
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
@@ -409,7 +399,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 				client->connection, NULL, NULL, NULL, NULL,
 				&client->channel);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_CLIENT;
@@ -426,7 +416,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	ret = tr_rpc_endpoint_create_with_executor_group(
 		client->channel, &rpc_config, NULL, &client->rpc);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	/*
 	 * 先完成初始 HELLO handshake，再允许后续 reconnect policy 接管。
@@ -434,7 +424,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	 */
 	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
 	if (ret != TR_OK)
-		return ret;
+		goto rollback;
 
 	if (client->config.keepalive_interval_ms != 0) {
 		keepalive_config.interval_ms =
@@ -444,7 +434,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_keepalive(client->channel,
 						  &keepalive_config);
 		if (ret != TR_OK)
-			return ret;
+			goto rollback;
 	}
 
 	if (client->config.enable_reconnect) {
@@ -452,7 +442,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 			client->channel,
 			tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay));
 		if (ret != TR_OK)
-			return ret;
+			goto rollback;
 
 		memset(&reconnect_config, 0, sizeof(reconnect_config));
 		reconnect_config.ipv4_address = ipv4_address;
@@ -467,12 +457,14 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		ret = tr_channel_enable_client_reconnect(client->channel,
 							 &reconnect_config);
 		if (ret != TR_OK)
-			return ret;
+			goto rollback;
 	}
 
 	client->connected = 1;
-	session.armed = 0;
 	return TR_OK;
+
+rollback:
+	return tr_client_connect_rollback(client, ret);
 }
 
 static int tr_client_connection_group_ensure(struct tr_client *client)
