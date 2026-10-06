@@ -2200,8 +2200,15 @@ static void tr_reactor_build_cleanup(struct tr_reactor_build *build)
 	if (reactor->epoll_fd >= 0)
 		close(reactor->epoll_fd);
 
-	if (build->rx_pool_ready)
-		tr_buffer_pool_destroy(&reactor->rx_pool);
+	if (build->rx_pool_ready) {
+		int pool_ret = tr_buffer_pool_destroy(&reactor->rx_pool);
+#ifndef NDEBUG
+		assert(pool_ret == TR_OK);
+#endif
+		if (pool_ret != TR_OK)
+			return;
+		build->rx_pool_ready = 0;
+	}
 	if (build->control_tx_pool_ready)
 		tr_tx_pool_destroy(&reactor->control_tx_pool);
 	if (build->tx_pool_ready)
