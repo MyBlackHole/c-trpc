@@ -473,13 +473,13 @@ static void test_public_connection_group_server(void)
 	 * Retained DATA payload still owns one Runtime Reactor RX buffer. Terminal
 	 * destroy must stop/close admission but keep Runtime/Server storage alive.
 	 */
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_ERR_STATE);
 	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
 	assert(tr_connection_group_message_release(&ctx.retained) ==
 	       TR_ERR_INVALID);
 
 	/* The same terminal operation is retryable after the final holder returns. */
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
@@ -547,8 +547,8 @@ static void test_public_connection_group_client_control(void)
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -946,8 +946,8 @@ static void test_public_connection_group_client_data_offer(void)
 
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
@@ -1027,8 +1027,8 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -1081,11 +1081,11 @@ static void test_client_group_destroy_after_remote_control_close(void)
 
 		/* Remote close is asynchronous from the Client Reactor's perspective. */
 		assert(tr_server_connection_group_stop(server) == TR_OK);
-		tr_client_destroy(client);
+		assert(tr_client_destroy(client) == TR_OK);
 		client = NULL;
 
 		assert(tr_server_drain(server, 5000U) == TR_OK);
-		tr_server_destroy(server);
+		assert(tr_server_destroy(server) == TR_OK);
 		server = NULL;
 		pthread_cond_destroy(&ctx.cond);
 		pthread_mutex_destroy(&ctx.lock);
