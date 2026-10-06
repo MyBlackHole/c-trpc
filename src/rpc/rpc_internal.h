@@ -81,7 +81,13 @@ static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 	return value;
 }
 
-/* Low-level Endpoint engine: internal to facade/tests. */
+/*
+ * Low-level Endpoint engine，仅供 facade/tests。
+ *
+ * 正常规则仍是 TR_OK 才转移 ownership。唯一例外是 standalone worker 启动后
+ * rollback join 自身失败：函数返回生命周期错误，同时 *out 保留 partial
+ * Endpoint ownership；调用方必须继续 tr_rpc_endpoint_destroy()，不得丢弃。
+ */
 int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
 			   struct tr_rpc_endpoint **out);
@@ -136,12 +142,31 @@ int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
 				   struct tr_stream_handle *out);
 
 struct tr_rpc_executor_group;
+
+/*
+ * create 只建立 group soft-state，不启动 worker；因此失败路径只包含不可失败
+ * 的本地资源释放。worker epoch 由 Runtime start/stop 显式控制。
+ */
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
 				 uint32_t thread_count,
 				 struct tr_rpc_executor_group **out);
-void tr_rpc_executor_group_destroy(struct tr_rpc_executor_group *group);
+int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group);
+int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group);
+int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group);
 
+/*
+ * terminal destroy 先执行可重试 stop/join barrier；pthread_join 失败时 group
+ * storage 与 exact 未 join thread handle 保持不变，调用方继续拥有 group。
+ */
+int tr_rpc_executor_group_destroy_checked(
+	struct tr_rpc_executor_group *group);
+
+/*
+ * group!=NULL 时 Endpoint 借用 shard executor group，不启动独立 worker。
+ * group==NULL 时 Endpoint publication 完成并先转移到 *out，随后启动 standalone
+ * worker；若 worker startup rollback join 失败，返回错误但 *out 保留 ownership。
+ */
 int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
 	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out);

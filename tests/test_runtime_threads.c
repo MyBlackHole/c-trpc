@@ -4,6 +4,8 @@
 #include "tr/status.h"
 #include "../src/transport/channel/channel_internal.h"
 #include "../src/runtime/runtime_internal.h"
+#include "../src/rpc/rpc_internal.h"
+#include "../src/execution/buffer.h"
 #include "../src/facade_tuning_internal.h"
 
 #include <assert.h>
@@ -13,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 /*
  * 仅此测试通过链接器 --wrap 观察库对 pthread 的调用。计数不包含宿主或
@@ -227,7 +230,7 @@ static void test_server_create_start_destroy_threads(void)
 			struct tr_server_config config;
 			struct tr_facade_tuning tuning;
 			struct tr_server *server = NULL;
-			unsigned total = workers;
+			unsigned total = 0U;
 
 			server_config_init(&config);
 			server_tuning_init(&tuning, workers);
@@ -235,13 +238,14 @@ static void test_server_create_start_destroy_threads(void)
 			assert(tr_server_create_with_tuning(
 				       &config, &tuning, &server) == TR_OK);
 			assert(server != NULL);
-			/* create 只启动 shard-local executor，不启动 Reactor/timer。 */
-			expect_threads(workers, 0U);
+			/* create 只建立 executor soft-state，不启动任何 pthread。 */
+			expect_threads(0U, 0U);
 			if (start) {
 				listen_loopback(server);
-				expect_threads(workers, 0U);
+				expect_threads(0U, 0U);
 				assert(tr_server_start(server) == TR_OK);
-				total += 1U; /* accept/cleanup 都由 Reactor 事件驱动。 */
+				total = workers + 1U;
+				/* worker epoch 与唯一 Reactor owner 都由 start() 建立。 */
 				expect_threads(total, 0U);
 			}
 			assert(tr_server_destroy(server) == TR_OK);
@@ -266,12 +270,12 @@ static void test_server_multi_shard_threads(void)
 		       &config, &tuning, &server) == TR_OK);
 	assert(server != NULL);
 
-	/* Four total workers are split across two shard-local executors. */
-	expect_threads(4U, 0U);
+	/* create/listen 都不启动 executor worker。 */
+	expect_threads(0U, 0U);
 	listen_loopback(server);
-	expect_threads(4U, 0U);
+	expect_threads(0U, 0U);
 
-	/* Server start adds exactly one Reactor per shard. */
+	/* start 同时建立四个 shard-local worker 与两个 Reactor owner。 */
 	assert(tr_server_start(server) == TR_OK);
 	expect_threads(6U, 0U);
 
@@ -322,10 +326,13 @@ static void test_server_internal_tuning_respects_shard_minimum(void)
 	 */
 	assert(tr_server_create(&config, &server) == TR_OK);
 	assert(server != NULL);
-	/* Public hidden default remains four workers. */
-	expect_threads(4U, 0U);
+	expect_threads(0U, 0U);
+	listen_loopback(server);
+	assert(tr_server_start(server) == TR_OK);
+	/* Public hidden default remains four workers + two shard Reactor owner。 */
+	expect_threads(6U, 0U);
 	assert(tr_server_destroy(server) == TR_OK);
-	expect_threads(4U, 4U);
+	expect_threads(6U, 6U);
 }
 
 static void runtime_multi_shard_config_init(
@@ -357,17 +364,17 @@ static void test_runtime_multi_shard_threads(void)
 	runtime_multi_shard_config_init(&config, shards);
 	reset_probe(0U);
 
-	/* Per-shard executor budgets sum to four workers; they are not multiplied. */
+	/* create 只分配 shard/executor soft-state。 */
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
-	expect_threads(4U, 0U);
+	expect_threads(0U, 0U);
 
-	/* Runtime start adds exactly one Reactor owner per shard. */
+	/* Runtime start 建立四个 worker + 三个 Reactor owner。 */
 	assert(tr_runtime_start(runtime) == TR_OK);
 	expect_threads(7U, 0U);
 
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	expect_threads(7U, 3U);
+	expect_threads(7U, 7U);
 	assert(tr_runtime_destroy(runtime) == TR_OK);
 	expect_threads(7U, 7U);
 }
@@ -404,21 +411,21 @@ static void test_runtime_multi_shard_start_rollback(void)
 	runtime_multi_shard_config_init(&config, shards);
 
 	/*
-	 * Attempts 1..4 are shard-local executor workers. Attempt 5 starts
-	 * Reactor 0; attempt 6 fails Reactor 1. Runtime must join Reactor 0 while
-	 * leaving the four executor workers owned by the still-live Runtime.
+	 * shard0: worker(1), Reactor(2)；shard1: worker(3,4), Reactor(5)。
+	 * 第 5 次 pthread_create 失败后，当前与此前 shard 的 worker/Reactor
+	 * epoch 都必须在 start() 返回前完整 rollback。
 	 */
-	reset_probe(6U);
+	reset_probe(5U);
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
-	expect_threads(4U, 0U);
+	expect_threads(0U, 0U);
 
 	assert(tr_runtime_start(runtime) == TR_ERR_SYS);
-	assert(atomic_load(&create_attempts) == 6U);
-	expect_threads(5U, 1U);
+	assert(atomic_load(&create_attempts) == 5U);
+	expect_threads(4U, 4U);
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
-	expect_threads(5U, 5U);
+	expect_threads(4U, 4U);
 }
 
 static void test_runtime_start_rollback_join_failure_is_retryable(void)
@@ -430,36 +437,201 @@ static void test_runtime_start_rollback_join_failure_is_retryable(void)
 	runtime_multi_shard_config_init(&config, shards);
 
 	/*
-	 * Reactor 1 create fails after Reactor 0 started. Then force Reactor 0's
-	 * rollback join to fail once. Runtime must preserve shard->started instead
-	 * of pretending rollback completed, and start() must refuse a new epoch
-	 * until stop() retries the outstanding join.
+	 * shard1 Reactor 创建失败后开始 rollback；再让 shard1 第一个 worker join
+	 * 失败。Runtime 必须保留该 group epoch，且下一次 start 在创建任何新线程
+	 * 之前就因 startability preflight 返回 TR_ERR_STATE。
 	 */
-	reset_probe(6U);
+	reset_probe(5U);
 	fail_join_once_at(1U);
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
-	expect_threads(4U, 0U);
+	expect_threads(0U, 0U);
 
 	assert(tr_runtime_start(runtime) == TR_ERR_SYS);
-	assert(atomic_load(&create_attempts) == 6U);
-	expect_threads(5U, 0U);
+	assert(atomic_load(&create_attempts) == 5U);
+	/* shard0 Reactor+worker 已收敛，shard1 两个 worker 等待 retry join。 */
+	expect_threads(4U, 2U);
 
 	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
+	assert(atomic_load(&create_attempts) == 5U);
 
-	/* Aggregate runtime->started is false, but the partial shard is recoverable. */
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	expect_threads(5U, 1U);
+	expect_threads(4U, 4U);
 
-	/* After the failed lifecycle edge converges, a clean new epoch can start. */
-	atomic_store(&fail_create_at, 0U);
+	/* 完整收敛后允许开启全新的 worker/Reactor epoch。 */
+	reset_probe(0U);
 	assert(tr_runtime_start(runtime) == TR_OK);
-	expect_threads(8U, 1U);
+	expect_threads(7U, 0U);
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	expect_threads(8U, 4U);
+	expect_threads(7U, 7U);
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
-	expect_threads(8U, 8U);
+	expect_threads(7U, 7U);
+}
+
+static void test_runtime_executor_group_join_failure_is_retryable(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard;
+	struct tr_runtime *runtime = NULL;
+
+	memset(&config, 0, sizeof(config));
+	memset(&shard, 0, sizeof(shard));
+	config.shard_count = 1U;
+	config.shards = &shard;
+	shard.rpc_executor.endpoint_capacity = 3U;
+	shard.rpc_executor.max_calls_per_endpoint = 2U;
+	shard.rpc_executor.thread_count = 3U;
+
+	reset_probe(0U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(runtime != NULL);
+	expect_threads(0U, 0U);
+	assert(tr_runtime_start(runtime) == TR_OK);
+	/* 三个 group worker + 一个 Reactor owner。 */
+	expect_threads(4U, 0U);
+
+	/*
+	 * destroy 先 join Reactor，再 join worker[0]，随后 worker[1] 第一次 join
+	 * 被注入失败。retry 必须从 worker[1] 继续，不能重复 join 已收敛线程。
+	 */
+	fail_join_once_at(3U);
+	assert(tr_runtime_destroy(runtime) == TR_ERR_SYS);
+	expect_threads(4U, 2U);
+
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	expect_threads(4U, 4U);
+}
+
+static void test_standalone_rpc_executor_join_failure_is_retryable(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel_config channel_config;
+	struct tr_channel *channel = NULL;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_rpc_endpoint *endpoint = NULL;
+	struct tr_buffer_pool message_pool;
+	struct tr_conn_handle connection;
+	int sockets[2];
+
+	memset(&message_pool, 0, sizeof(message_pool));
+	reset_probe(0U);
+	assert(socketpair(
+		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, sockets[0], &connection) == TR_OK);
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, connection, connection,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+
+	assert(tr_buffer_pool_init(&message_pool, 8U, 1024U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 2U;
+	rpc_config.max_calls = 2U;
+	rpc_config.message_pool = &message_pool;
+	rpc_config.executor_threads = 2U;
+	rpc_config.executor_queue_capacity = 16U;
+	assert(tr_rpc_endpoint_create_with_executor_group(
+		       channel, &rpc_config, NULL, &endpoint) == TR_OK);
+	assert(endpoint != NULL);
+	/* 一个 Reactor owner + 两个 standalone RPC worker。 */
+	expect_threads(3U, 0U);
+
+	/*
+	 * 第一个 RPC worker join 成功，第二个 join 失败。Endpoint 必须保持所有权，
+	 * 重试时只 join 第二个 worker，不能释放 mutex/queue/Endpoint storage。
+	 */
+	fail_join_once_at(2U);
+	assert(tr_rpc_endpoint_destroy(endpoint) == TR_ERR_SYS);
+	expect_threads(3U, 1U);
+
+	assert(tr_rpc_endpoint_destroy(endpoint) == TR_OK);
+	endpoint = NULL;
+	expect_threads(3U, 2U);
+
+	assert(tr_channel_destroy(channel) == TR_OK);
+	channel = NULL;
+	assert(tr_buffer_pool_destroy(&message_pool) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	expect_threads(3U, 3U);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(sockets[1]) == 0);
+}
+
+static void test_standalone_rpc_start_rollback_keeps_owner(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel_config channel_config;
+	struct tr_channel *channel = NULL;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_rpc_endpoint *endpoint = NULL;
+	struct tr_buffer_pool message_pool;
+	struct tr_conn_handle connection;
+	int sockets[2];
+
+	memset(&message_pool, 0, sizeof(message_pool));
+	reset_probe(0U);
+	assert(socketpair(
+		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, sockets[0], &connection) == TR_OK);
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, connection, connection,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+	assert(tr_buffer_pool_init(&message_pool, 8U, 1024U) == TR_OK);
+
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 2U;
+	rpc_config.max_calls = 2U;
+	rpc_config.message_pool = &message_pool;
+	rpc_config.executor_threads = 2U;
+	rpc_config.executor_queue_capacity = 16U;
+
+	/*
+	 * Reactor 已占第 1 次 pthread_create。让第 2 个 RPC worker（全局第 3 次）
+	 * 创建失败，再让 startup rollback 的第 1 次 join 失败。
+	 *
+	 * Endpoint publication 已完成且 ownership 已先放进 *out，因此 lifecycle
+	 * rollback 失败时必须保留 endpoint != NULL，绝不能泄漏无主对象。
+	 */
+	atomic_store(&fail_create_at, 3U);
+	fail_join_once_at(1U);
+	assert(tr_rpc_endpoint_create_with_executor_group(
+		       channel, &rpc_config, NULL, &endpoint) == TR_ERR_SYS);
+	assert(endpoint != NULL);
+	expect_threads(2U, 0U);
+
+	/* join fault 已消费；caller 用保留的 ownership 重试即可完成收敛。 */
+	assert(tr_rpc_endpoint_destroy(endpoint) == TR_OK);
+	endpoint = NULL;
+	expect_threads(2U, 1U);
+
+	assert(tr_channel_destroy(channel) == TR_OK);
+	assert(tr_buffer_pool_destroy(&message_pool) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	expect_threads(2U, 2U);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(sockets[1]) == 0);
 }
 
 static void test_facade_internal_tuning_rejects_invalid_observability(void)
@@ -520,10 +692,16 @@ static void test_server_worker_start_failures(void)
 		server_tuning_init(&tuning, 3U);
 		reset_probe(fail_at);
 		assert(tr_server_create_with_tuning(
-			       &config, &tuning, &server) == TR_ERR_SYS);
-		assert(server == NULL);
+			       &config, &tuning, &server) == TR_OK);
+		assert(server != NULL);
+		expect_threads(0U, 0U);
+		listen_loopback(server);
+
+		assert(tr_server_start(server) == TR_ERR_SYS);
 		assert(atomic_load(&create_attempts) == fail_at);
-		/* 第 N 个 worker 启动失败，前 N-1 个必须已经退出并 join。 */
+		/* 第 N 个 worker 启动失败，前 N-1 个在 start rollback 中完成 join。 */
+		expect_threads(fail_at - 1U, fail_at - 1U);
+		assert(tr_server_destroy(server) == TR_OK);
 		expect_threads(fail_at - 1U, fail_at - 1U);
 	}
 }
@@ -535,16 +713,18 @@ static void test_server_runtime_start_failures(void)
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
-	/* accept/reaper 均已移除；Server start 唯一 pthread 启动点是 Reactor。 */
+	/* 三个 worker 成功后，第 4 次 pthread_create（Reactor）失败。 */
 	server_config_init(&config);
 	server_tuning_init(&tuning, workers);
 	reset_probe(workers + 1U);
 	assert(tr_server_create_with_tuning(
 		       &config, &tuning, &server) == TR_OK);
+	expect_threads(0U, 0U);
 	listen_loopback(server);
 	assert(tr_server_start(server) == TR_ERR_SYS);
 	assert(atomic_load(&create_attempts) == workers + 1U);
-	expect_threads(workers, 0U);
+	/* Runtime start rollback 已经 join 三个 worker。 */
+	expect_threads(workers, workers);
 	assert(tr_server_destroy(server) == TR_OK);
 	expect_threads(workers, workers);
 }
@@ -563,6 +743,9 @@ int main(void)
 	RUN_TEST(test_reactor_join_failure_is_retryable);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_runtime_start_rollback_join_failure_is_retryable);
+	RUN_TEST(test_runtime_executor_group_join_failure_is_retryable);
+	RUN_TEST(test_standalone_rpc_executor_join_failure_is_retryable);
+	RUN_TEST(test_standalone_rpc_start_rollback_keeps_owner);
 	RUN_TEST(test_facade_internal_tuning_rejects_invalid_observability);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);

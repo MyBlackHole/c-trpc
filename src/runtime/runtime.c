@@ -75,7 +75,9 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	}
 
 	if (shard->rpc_executor) {
-		tr_rpc_executor_group_destroy(shard->rpc_executor);
+		ret = tr_rpc_executor_group_destroy_checked(shard->rpc_executor);
+		if (ret != TR_OK)
+			return ret;
 		shard->rpc_executor = NULL;
 	}
 
@@ -213,6 +215,36 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	return TR_OK;
 }
 
+static int tr_runtime_shard_stop_execution(
+	struct tr_runtime_shard *shard)
+{
+	int result = TR_OK;
+	int ret;
+
+	if (!shard)
+		return TR_OK;
+
+	/*
+	 * 保持既有顺序：先收敛 Reactor owner，再 join shard executor worker。
+	 * worker 在 Reactor 已停止时已有本地 completion fallback，不会把 join
+	 * barrier 变成对 Reactor progress 的依赖。
+	 */
+	if (shard->started) {
+		ret = tr_reactor_stop(shard->reactor);
+		if (ret == TR_OK)
+			shard->started = 0;
+		else
+			result = ret;
+	}
+
+	if (shard->rpc_executor) {
+		ret = tr_rpc_executor_group_stop(shard->rpc_executor);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+	return result;
+}
+
 int tr_runtime_start(struct tr_runtime *runtime)
 {
 	uint32_t i;
@@ -223,45 +255,62 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		return TR_ERR_STATE;
 
 	/*
-	 * A failed previous start may leave a shard in terminal stop/join recovery
-	 * if its rollback barrier failed. Do not silently treat that shard as a
-	 * healthy running epoch. The caller must first converge it with stop().
+	 * 新 epoch 必须在任何 pthread_create 之前验证所有 shard 都已从上一次
+	 * stop/rollback 完整收敛。否则后面的 shard 仍处于 stopping 时，前面的
+	 * shard 会先被重新启动，重新制造 partial epoch。
 	 */
-	for (i = 0; i < runtime->shard_count; ++i)
-		if (runtime->shards[i].started)
+	for (i = 0; i < runtime->shard_count; ++i) {
+		struct tr_runtime_shard *shard = &runtime->shards[i];
+
+		if (shard->started)
 			return TR_ERR_STATE;
+		if (shard->rpc_executor &&
+		    tr_rpc_executor_group_can_start(shard->rpc_executor) != TR_OK)
+			return TR_ERR_STATE;
+	}
 
 	for (i = 0; i < runtime->shard_count; ++i) {
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 		int ret;
 
+		/*
+		 * worker epoch 在 Runtime 已经由调用方拥有之后才启动。若部分
+		 * pthread_create 或 rollback join 失败，group storage 留在 shard 中，
+		 * runtime_stop()/destroy() 可以继续收敛。
+		 */
+		if (shard->rpc_executor) {
+			ret = tr_rpc_executor_group_start(shard->rpc_executor);
+			if (ret != TR_OK)
+				goto rollback;
+		}
+
 		ret = tr_reactor_start(shard->reactor);
-		if (ret != TR_OK) {
+		if (ret != TR_OK)
+			goto rollback;
+		shard->started = 1;
+		continue;
+
+rollback:
+		{
+			int cause = ret;
 			int rollback_ret = TR_OK;
-
-			while (i != 0U) {
-				struct tr_runtime_shard *started;
-				int stop_ret;
-
-				--i;
-				started = &runtime->shards[i];
-				if (!started->started)
-					continue;
-
-				stop_ret = tr_reactor_stop(started->reactor);
-				if (stop_ret == TR_OK)
-					started->started = 0;
-				else if (rollback_ret == TR_OK)
-					rollback_ret = stop_ret;
-			}
+			uint32_t j = i + 1U;
 
 			/*
-			 * Rollback failure wins: Runtime now owns a partially stopped shard
-			 * and callers must see the lifecycle error before retrying stop().
+			 * 包含当前 shard：group 可能已经启动而 Reactor 尚未成功。
+			 * 每个 shard 的 stop 都是幂等且可重试的。
 			 */
-			return rollback_ret != TR_OK ? rollback_ret : ret;
+			while (j != 0U) {
+				int stop_ret;
+
+				--j;
+				stop_ret =
+					tr_runtime_shard_stop_execution(&runtime->shards[j]);
+				if (stop_ret != TR_OK && rollback_ret == TR_OK)
+					rollback_ret = stop_ret;
+			}
+			return rollback_ret != TR_OK ? rollback_ret : cause;
 		}
-		shard->started = 1;
 	}
 
 	runtime->started = 1;
@@ -271,49 +320,26 @@ int tr_runtime_start(struct tr_runtime *runtime)
 int tr_runtime_stop(struct tr_runtime *runtime)
 {
 	uint32_t i;
-	int any_started = 0;
 	int result = TR_OK;
 
 	if (!runtime)
 		return TR_ERR_INVALID;
 
 	/*
-	 * runtime->started means every shard completed start(). A failed start
-	 * rollback may intentionally leave only the shard whose stop barrier failed
-	 * marked started so a later stop() can retry that exact ownership edge.
-	 */
-	for (i = 0; i < runtime->shard_count; ++i)
-		if (runtime->shards[i].started) {
-			any_started = 1;
-			break;
-		}
-	if (!any_started) {
-		runtime->started = 0;
-		return TR_OK;
-	}
-
-	/*
-	 * Avoid partial multi-shard stop from a thread that belongs to the
-	 * execution domain being stopped. Facade destroy performs the same
-	 * preflight before mutating higher-level state.
+	 * 即使 aggregate runtime->started 为 false，也可能存在 failed-start
+	 * 留下的 partial executor epoch，因此不能只根据 Reactor started 早退。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return TR_ERR_STATE;
 
 	i = runtime->shard_count;
 	while (i != 0U) {
-		struct tr_runtime_shard *shard;
 		int ret;
 
 		--i;
-		shard = &runtime->shards[i];
-		if (!shard->started)
-			continue;
-		ret = tr_reactor_stop(shard->reactor);
+		ret = tr_runtime_shard_stop_execution(&runtime->shards[i]);
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
-		if (ret == TR_OK)
-			shard->started = 0;
 	}
 
 	if (result == TR_OK)
@@ -330,9 +356,6 @@ int tr_runtime_destroy(struct tr_runtime *runtime)
 		return TR_OK;
 
 	ret = tr_runtime_stop(runtime);
-#ifndef NDEBUG
-	assert(ret == TR_OK);
-#endif
 	if (ret != TR_OK)
 		return ret;
 
