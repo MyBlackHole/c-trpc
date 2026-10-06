@@ -61,7 +61,16 @@ struct tr_runtime_config {
 
 int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out);
+/*
+ * start() is all-shards-or-error. If rollback itself hits a lifecycle barrier
+ * failure, the exact shard remains marked started and a new start is rejected
+ * until stop() converges that partial epoch.
+ */
 int tr_runtime_start(struct tr_runtime *runtime);
+/*
+ * stop() also converges partial shards left by a failed start rollback even
+ * when the aggregate Runtime was never published as started.
+ */
 int tr_runtime_stop(struct tr_runtime *runtime);
 int tr_runtime_destroy(struct tr_runtime *runtime);
 
