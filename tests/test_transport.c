@@ -1303,6 +1303,157 @@ static void test_rpc_method_registration_is_owner_serialized(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct rpc_destroy_stop_probe {
+	struct tr_reactor *reactor;
+	int ret;
+};
+
+static void *rpc_destroy_stop_main(void *arg)
+{
+	struct rpc_destroy_stop_probe *probe =
+		(struct rpc_destroy_stop_probe *)arg;
+
+	probe->ret = tr_reactor_stop(probe->reactor);
+	return NULL;
+}
+
+static void rpc_destroy_noop_completion(void *arg)
+{
+	(void)arg;
+}
+
+static void wait_reactor_completion_admission_closed(
+	struct tr_reactor *reactor)
+{
+	struct timespec pause = { 0, 1000000L };
+	unsigned i;
+
+	for (i = 0; i < 5000U; ++i) {
+		int ret = tr_reactor_complete(
+			reactor, rpc_destroy_noop_completion, NULL);
+
+		if (ret == TR_ERR_CLOSED)
+			return;
+		assert(ret == TR_OK);
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(!"timed out waiting for Reactor completion admission close");
+}
+
+static void test_rpc_destroy_fails_closed_while_reactor_stopping(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_rpc_endpoint_config rpc_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_rpc_endpoint *endpoint = NULL;
+	struct tr_conn_handle connection;
+	struct tr_buffer_pool rpc_pool;
+	struct rpc_method_owner_ctx gate_ctx;
+	struct rpc_method_register_arg gate_arg;
+	struct rpc_destroy_stop_probe stop_probe;
+	pthread_t gate_thread;
+	pthread_t stop_thread;
+	struct timespec deadline;
+	int fds[2];
+	int ret = 0;
+
+	memset(&gate_ctx, 0, sizeof(gate_ctx));
+	memset(&gate_arg, 0, sizeof(gate_arg));
+	memset(&stop_probe, 0, sizeof(stop_probe));
+	assert(pthread_mutex_init(&gate_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&gate_ctx.cond, NULL) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, fds) == 0);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 2U;
+	reactor_config.command_capacity = 32U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 8U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(
+		       &reactor_config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, fds[0], &connection) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(
+		       &channel_config, connection, connection,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+
+	assert(tr_buffer_pool_init(&rpc_pool, 8U, 4096U) == TR_OK);
+	memset(&rpc_config, 0, sizeof(rpc_config));
+	rpc_config.role = TR_RPC_CLIENT;
+	rpc_config.max_methods = 1U;
+	rpc_config.max_calls = 4U;
+	rpc_config.message_pool = &rpc_pool;
+	rpc_config.executor_threads = 1U;
+	rpc_config.executor_queue_capacity = 8U;
+	assert(tr_rpc_endpoint_create(channel, &rpc_config, &endpoint) == TR_OK);
+
+	gate_arg.endpoint = endpoint;
+	gate_arg.channel = channel;
+	gate_arg.ctx = &gate_ctx;
+	assert(pthread_create(
+		       &gate_thread, NULL, rpc_method_gate_thread,
+		       &gate_arg) == 0);
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&gate_ctx.lock);
+	while (!gate_ctx.owner_entered && ret == 0)
+		ret = pthread_cond_timedwait(
+			&gate_ctx.cond, &gate_ctx.lock, &deadline);
+	assert(ret == 0);
+	pthread_mutex_unlock(&gate_ctx.lock);
+
+	stop_probe.reactor = reactor;
+	assert(pthread_create(
+		       &stop_thread, NULL, rpc_destroy_stop_main,
+		       &stop_probe) == 0);
+
+	/*
+	 * Observe the actual stop admission boundary, not elapsed time. Any earlier
+	 * no-op completion remains owned by the Reactor and is drained before STOP.
+	 */
+	wait_reactor_completion_admission_closed(reactor);
+
+	/*
+	 * Channel callback_arg and deadline timer are still owner-published while
+	 * Reactor stop is in progress. Endpoint destroy must fail closed.
+	 */
+	assert(tr_rpc_endpoint_destroy(endpoint) == TR_ERR_CLOSED);
+
+	pthread_mutex_lock(&gate_ctx.lock);
+	gate_ctx.owner_release = 1;
+	pthread_cond_broadcast(&gate_ctx.cond);
+	pthread_mutex_unlock(&gate_ctx.lock);
+	assert(pthread_join(gate_thread, NULL) == 0);
+	assert(pthread_join(stop_thread, NULL) == 0);
+	assert(stop_probe.ret == TR_OK);
+
+	/*
+	 * Fully stopped is a distinct teardown domain. Channel/timer barriers can
+	 * now execute through their stopped-safe lifecycle paths.
+	 */
+	assert(tr_rpc_endpoint_destroy(endpoint) == TR_OK);
+	endpoint = NULL;
+	assert(tr_channel_destroy(channel) == TR_OK);
+	channel = NULL;
+	tr_reactor_destroy(reactor);
+	tr_buffer_pool_destroy(&rpc_pool);
+	assert(close(fds[1]) == 0);
+	pthread_cond_destroy(&gate_ctx.cond);
+	pthread_mutex_destroy(&gate_ctx.lock);
+}
+
+
 static void test_reactor_rx_pool_backpressure(void)
 {
 	struct tr_reactor_config config;
@@ -7693,6 +7844,7 @@ int main(void)
 	test_reactor_handler_update_is_owner_serialized();
 	test_channel_handler_publication_is_owner_serialized();
 	test_rpc_method_registration_is_owner_serialized();
+	test_rpc_destroy_fails_closed_while_reactor_stopping();
 	test_reactor_rx_pool_backpressure();
 	test_channel_deferred_hello_gate();
 	test_channel_stream_id_index_collision_delete();
