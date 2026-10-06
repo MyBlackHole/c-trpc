@@ -193,19 +193,23 @@ static void tr_pipeline_control_wire_identity(
 	message->epoch = tr_pipeline_epoch(control->pipeline);
 }
 
-int tr_pipeline_control_reserve_data_wire(
-	struct tr_pipeline_control *control,
-	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+struct tr_pipeline_control_reserve_wire_request {
+	struct tr_pipeline_control *control;
+	struct tr_pipeline_data_offer *offer_out;
+	uint8_t *out;
+};
+
+static int tr_pipeline_control_reserve_data_wire_on_owner(void *arg)
 {
+	struct tr_pipeline_control_reserve_wire_request *request =
+		(struct tr_pipeline_control_reserve_wire_request *)arg;
+	struct tr_pipeline_control *control = request->control;
 	struct tr_pipeline_control_wire_message message;
 	struct tr_pipeline_data_offer offer;
+	int rollback_ret;
 	int ret;
 
-	if (!control || !control->pipeline || !out)
-		return TR_ERR_INVALID;
-	memset(out, 0, TR_PIPELINE_CONTROL_WIRE_SIZE);
 	memset(&offer, 0, sizeof(offer));
-
 	ret = tr_pipeline_control_reserve_data(control, &offer);
 	if (ret != TR_OK)
 		return ret;
@@ -216,10 +220,47 @@ int tr_pipeline_control_reserve_data_wire(
 	message.data_index = offer.data.index;
 	message.data_generation = offer.data.generation;
 
-	ret = tr_pipeline_control_wire_encode(out, &message);
-	if (ret != TR_OK)
-		(void)tr_pipeline_control_cancel_data(control, &offer);
-	return ret;
+	ret = tr_pipeline_control_wire_encode(request->out, &message);
+	if (ret != TR_OK) {
+		/*
+		 * reserve 与 encode 都在同一个 owner turn。这里 rollback exact
+		 * generation，不允许 Reactor stop 插入两个状态转换之间。
+		 */
+		rollback_ret = tr_pipeline_control_cancel_data(control, &offer);
+		return rollback_ret != TR_OK ? rollback_ret : ret;
+	}
+
+	if (request->offer_out)
+		*request->offer_out = offer;
+	return TR_OK;
+}
+
+int tr_pipeline_control_reserve_data_wire_ex(
+	struct tr_pipeline_control *control,
+	struct tr_pipeline_data_offer *offer_out,
+	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+{
+	struct tr_pipeline_control_reserve_wire_request request;
+
+	if (!control || !control->pipeline || !out)
+		return TR_ERR_INVALID;
+	memset(out, 0, TR_PIPELINE_CONTROL_WIRE_SIZE);
+	if (offer_out)
+		memset(offer_out, 0, sizeof(*offer_out));
+
+	request.control = control;
+	request.offer_out = offer_out;
+	request.out = out;
+	return tr_reactor_call(
+		tr_pipeline_owner(control->pipeline),
+		tr_pipeline_control_reserve_data_wire_on_owner, &request);
+}
+
+int tr_pipeline_control_reserve_data_wire(
+	struct tr_pipeline_control *control,
+	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+{
+	return tr_pipeline_control_reserve_data_wire_ex(control, NULL, out);
 }
 
 int tr_pipeline_control_cancel_data_wire(
@@ -253,20 +294,25 @@ int tr_pipeline_control_cancel_data_wire(
 	return tr_pipeline_control_cancel_data(control, &offer);
 }
 
-int tr_pipeline_control_prepare_transfer_wire(
-	struct tr_pipeline_control *control, uint32_t stream_id,
-	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+struct tr_pipeline_control_prepare_wire_request {
+	struct tr_pipeline_control *control;
+	uint32_t stream_id;
+	uint8_t *out;
+};
+
+static int tr_pipeline_control_prepare_transfer_wire_on_owner(void *arg)
 {
+	struct tr_pipeline_control_prepare_wire_request *request =
+		(struct tr_pipeline_control_prepare_wire_request *)arg;
+	struct tr_pipeline_control *control = request->control;
 	struct tr_pipeline_control_wire_message message;
 	struct tr_pipeline_transfer_ready ready;
+	int rollback_ret;
 	int ret;
 
-	if (!control || !control->pipeline || !out || stream_id == 0U)
-		return TR_ERR_INVALID;
-	memset(out, 0, TR_PIPELINE_CONTROL_WIRE_SIZE);
 	memset(&ready, 0, sizeof(ready));
-
-	ret = tr_pipeline_control_prepare_transfer(control, stream_id, &ready);
+	ret = tr_pipeline_control_prepare_transfer(
+		control, request->stream_id, &ready);
 	if (ret != TR_OK)
 		return ret;
 
@@ -277,10 +323,31 @@ int tr_pipeline_control_prepare_transfer_wire(
 	message.data_index = ready.data.index;
 	message.data_generation = ready.data.generation;
 
-	ret = tr_pipeline_control_wire_encode(out, &message);
-	if (ret != TR_OK)
-		(void)tr_pipeline_control_release_transfer(control, stream_id);
-	return ret;
+	ret = tr_pipeline_control_wire_encode(request->out, &message);
+	if (ret != TR_OK) {
+		rollback_ret = tr_pipeline_control_release_transfer(
+			control, request->stream_id);
+		return rollback_ret != TR_OK ? rollback_ret : ret;
+	}
+	return TR_OK;
+}
+
+int tr_pipeline_control_prepare_transfer_wire(
+	struct tr_pipeline_control *control, uint32_t stream_id,
+	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE])
+{
+	struct tr_pipeline_control_prepare_wire_request request;
+
+	if (!control || !control->pipeline || !out || stream_id == 0U)
+		return TR_ERR_INVALID;
+	memset(out, 0, TR_PIPELINE_CONTROL_WIRE_SIZE);
+
+	request.control = control;
+	request.stream_id = stream_id;
+	request.out = out;
+	return tr_reactor_call(
+		tr_pipeline_owner(control->pipeline),
+		tr_pipeline_control_prepare_transfer_wire_on_owner, &request);
 }
 
 struct tr_pipeline_control_teardown_request {

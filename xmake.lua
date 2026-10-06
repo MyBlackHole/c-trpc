@@ -128,6 +128,9 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
         elseif name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
+        elseif name == "test_pipeline_listener" then
+            -- Force CONTROL SEND admission failures to prove soft-state rollback.
+            add_ldflags("-Wl,--wrap=tr_command_queue_push", {force = true})
         elseif name == "test_reactor_fairness" then
             -- Observe real queue operations and poll boundaries without production hooks.
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
