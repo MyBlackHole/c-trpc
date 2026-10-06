@@ -48,7 +48,9 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port);
 
 /*
- * 同步等待连接进入 ready。
+ * 同步等待 CONTROL lane 完成握手。实现通过 Channel lifecycle event 唤醒，
+ * 不周期轮询 Reactor 状态；timeout_ms == 0 表示无限等待。
+ *
  * 该操作依赖 Reactor progress，必须从外部控制线程调用；Reactor owner
  * callback / interceptor / RPC worker callback 中调用返回 TR_ERR_STATE。
  */
