@@ -2239,14 +2239,21 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	if (handlers_removed && channel->reactor)
 		(void)tr_reactor_quiesce(channel->reactor);
 
+	if (build->protocol_pool_ready) {
+		int ret = tr_buffer_pool_destroy(&channel->protocol_pool);
+#ifndef NDEBUG
+		assert(ret == TR_OK);
+#endif
+		if (ret != TR_OK)
+			return;
+		build->protocol_pool_ready = 0;
+	}
 	if (channel->streams) {
 		uint32_t i;
 		for (i = 0; i < channel->config.max_streams; ++i)
 			if (channel->streams[i].rx_reassembly)
 				tr_buffer_release(channel->streams[i].rx_reassembly);
 	}
-	if (build->protocol_pool_ready)
-		tr_buffer_pool_destroy(&channel->protocol_pool);
 	free(channel->stream_index);
 	free(channel->streams);
 	if (build->keepalive_timer_ready)
@@ -2452,6 +2459,7 @@ static int tr_channel_detach_on_owner(void *arg)
 	struct tr_reactor_timer_handle timer;
 	int timer_registered;
 	int split;
+	int ret;
 
 	if (!channel)
 		return TR_ERR_INVALID;
@@ -2476,7 +2484,6 @@ static int tr_channel_detach_on_owner(void *arg)
 		return TR_ERR_STATE;
 	}
 
-	channel->teardown_detached = 1;
 	channel->local_draining = 1;
 	channel->keepalive_enabled = 0;
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
@@ -2509,6 +2516,20 @@ static int tr_channel_detach_on_owner(void *arg)
 		(void)tr_reactor_set_handler(bulk, NULL, NULL, NULL);
 	if (timer_registered)
 		(void)tr_reactor_timer_unregister(timer);
+
+	/*
+	 * Protocol buffers may be owned by Reactor TX. Detached finalizers have no
+	 * retry queue, so prove this pool is quiescent while the peer is still
+	 * owner-visible. Failure leaves the Channel in terminal-detaching state and
+	 * the peer lifecycle event can retry later.
+	 */
+	ret = tr_buffer_pool_destroy(&channel->protocol_pool);
+	if (ret != TR_OK)
+		return ret;
+
+	pthread_mutex_lock(&channel->lock);
+	channel->teardown_detached = 1;
+	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
 }
 
@@ -2563,7 +2584,10 @@ int tr_channel_finalize_detached(struct tr_channel *channel)
 	}
 	free(channel->stream_index);
 	free(channel->streams);
-	tr_buffer_pool_destroy(&channel->protocol_pool);
+#ifndef NDEBUG
+	assert(channel->protocol_pool.buffers == NULL);
+	assert(channel->protocol_pool.buffer_count == 0U);
+#endif
 	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
@@ -2644,6 +2668,10 @@ int tr_channel_destroy(struct tr_channel *channel)
 		       sizeof(channel->keepalive_timer));
 	}
 
+	ret = tr_buffer_pool_destroy(&channel->protocol_pool);
+	if (ret != TR_OK)
+		return ret;
+
 	if (channel->streams) {
 		uint32_t i;
 
@@ -2654,7 +2682,6 @@ int tr_channel_destroy(struct tr_channel *channel)
 	}
 	free(channel->stream_index);
 	free(channel->streams);
-	tr_buffer_pool_destroy(&channel->protocol_pool);
 	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
