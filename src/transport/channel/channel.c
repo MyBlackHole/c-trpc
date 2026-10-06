@@ -676,8 +676,9 @@ tr_channel_active_streams_locked(const struct tr_channel *channel)
 	return channel->active_streams;
 }
 
-static int tr_channel_send_pending_goaway(struct tr_channel *channel)
+static int tr_channel_send_pending_goaway_on_owner(void *arg)
 {
+	struct tr_channel *channel = (struct tr_channel *)arg;
 	struct tr_conn_handle control_connection;
 	struct tr_conn_handle bulk_connection;
 	int send_control = 0;
@@ -702,8 +703,7 @@ static int tr_channel_send_pending_goaway(struct tr_channel *channel)
 	pthread_mutex_unlock(&channel->lock);
 
 	if (send_control) {
-		tmp = tr_reactor_send(control_connection, TR_FRAME_GOAWAY, 0, 0,
-				      0, NULL);
+		tmp = tr_reactor_send_goaway_on_owner(control_connection);
 		if (tmp == TR_OK) {
 			pthread_mutex_lock(&channel->lock);
 			if (tr_conn_equal(channel->control_connection,
@@ -719,8 +719,7 @@ static int tr_channel_send_pending_goaway(struct tr_channel *channel)
 	}
 
 	if (send_bulk && !tr_conn_equal(bulk_connection, control_connection)) {
-		tmp = tr_reactor_send(bulk_connection, TR_FRAME_GOAWAY, 0, 0, 0,
-				      NULL);
+		tmp = tr_reactor_send_goaway_on_owner(bulk_connection);
 		if (tmp == TR_OK) {
 			pthread_mutex_lock(&channel->lock);
 			if (tr_conn_equal(channel->bulk_connection,
@@ -1216,7 +1215,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_CONTROL_UP, TR_OK);
 	if (bulk_up)
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_BULK_UP, TR_OK);
-	(void)tr_channel_send_pending_goaway(channel);
+	(void)tr_channel_send_pending_goaway_on_owner(channel);
 	return TR_OK;
 }
 
@@ -1345,7 +1344,7 @@ static int tr_channel_handle_hello_ack(struct tr_channel *channel,
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_CONTROL_UP, TR_OK);
 	if (bulk_up)
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_BULK_UP, TR_OK);
-	(void)tr_channel_send_pending_goaway(channel);
+	(void)tr_channel_send_pending_goaway_on_owner(channel);
 	return TR_OK;
 }
 
@@ -3305,7 +3304,7 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 	ret = tr_channel_disable_client_reconnect_on_owner(channel);
 	if (ret != TR_OK)
 		return ret;
-	return tr_channel_send_pending_goaway(channel);
+	return tr_channel_send_pending_goaway_on_owner(channel);
 }
 
 int tr_channel_wait_ready(
@@ -3731,7 +3730,9 @@ int tr_channel_flush(struct tr_channel *channel)
 	pthread_mutex_unlock(&channel->lock);
 
 	{
-		int ret = tr_channel_send_pending_goaway(channel);
+		int ret = tr_reactor_call(
+			channel->reactor,
+			tr_channel_send_pending_goaway_on_owner, channel);
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
