@@ -164,48 +164,80 @@ int tr_buffer_pool_init_dynamic(struct tr_buffer_pool *pool,
 		pool, buffer_count, max_buffer_size, NULL);
 }
 
-void tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
+int tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 {
 	struct tr_memory_budget *budget;
+	struct tr_buffer *buffers;
+	uint8_t *storage;
 	uint64_t descriptor_bytes;
 	uint64_t fixed_storage_bytes = 0U;
+	uint32_t buffer_count;
+	uint32_t buffer_size;
 	uint32_t i;
 
 	if (!pool)
-		return;
+		return TR_OK;
 
-	budget = pool->memory_budget;
-	descriptor_bytes =
-		(uint64_t)pool->buffer_count * (uint64_t)sizeof(*pool->buffers);
-	if (pool->storage) {
-		fixed_storage_bytes =
-			(uint64_t)pool->buffer_count *
-			(uint64_t)pool->buffer_size;
-	} else if (pool->buffers) {
-		for (i = 0; i < pool->buffer_count; ++i)
-			tr_buffer_budget_release(
-				budget, (uint64_t)pool->buffers[i].capacity);
+	/*
+	 * Zeroed/uninitialized and already-destroyed pools are harmless. This check
+	 * intentionally happens before touching lock, which is not initialized in
+	 * those states.
+	 */
+	if (!pool->buffers && pool->buffer_count == 0U)
+		return TR_OK;
+
+	pthread_mutex_lock(&pool->lock);
+	pool->closed = 1;
+
+	if (pool->free_count != pool->buffer_count) {
+		pthread_mutex_unlock(&pool->lock);
+		return TR_ERR_STATE;
+	}
+	for (i = 0; i < pool->buffer_count; ++i) {
+		if (pool->buffers[i].checked_out) {
+			pthread_mutex_unlock(&pool->lock);
+			return TR_ERR_STATE;
+		}
 	}
 
-	if (!pool->storage && pool->buffers)
-		for (i = 0; i < pool->buffer_count; ++i)
-			free(pool->buffers[i].data);
-	free(pool->storage);
-	free(pool->buffers);
+	/*
+	 * From this point the terminal caller contract guarantees no new API
+	 * entrants. Detach storage from the pool while holding the lock so a failed
+	 * earlier destroy can be retried after all holders return.
+	 */
+	budget = pool->memory_budget;
+	buffers = pool->buffers;
+	storage = pool->storage;
+	buffer_count = pool->buffer_count;
+	buffer_size = pool->buffer_size;
+	descriptor_bytes =
+		(uint64_t)buffer_count * (uint64_t)sizeof(*buffers);
+	if (storage)
+		fixed_storage_bytes =
+			(uint64_t)buffer_count * (uint64_t)buffer_size;
+
+	pool->buffers = NULL;
+	pool->storage = NULL;
+	pool->free_list = NULL;
+	pool->buffer_count = 0U;
+	pool->buffer_size = 0U;
+	pool->free_count = 0U;
+	pool->peak_in_use = 0U;
+	pool->exhausted_events = 0U;
+	pool->memory_budget = NULL;
+	pthread_mutex_unlock(&pool->lock);
+
+	if (!storage && buffers)
+		for (i = 0; i < buffer_count; ++i)
+			tr_buffer_budget_release(
+				budget, (uint64_t)buffers[i].capacity);
+	free(storage);
+	free(buffers);
 
 	tr_buffer_budget_release(budget, fixed_storage_bytes);
 	tr_buffer_budget_release(budget, descriptor_bytes);
-
-	pool->storage = NULL;
-	pool->buffers = NULL;
-	pool->free_list = NULL;
-	pool->buffer_count = 0;
-	pool->buffer_size = 0;
-	pool->free_count = 0;
-	pool->peak_in_use = 0;
-	pool->exhausted_events = 0;
-	pool->memory_budget = NULL;
 	pthread_mutex_destroy(&pool->lock);
+	return TR_OK;
 }
 
 int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
@@ -219,10 +251,15 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 
 	*out = NULL;
 
-	if (min_capacity > pool->buffer_size)
-		return TR_ERR_BAD_LENGTH;
-
 	pthread_mutex_lock(&pool->lock);
+	if (pool->closed) {
+		pthread_mutex_unlock(&pool->lock);
+		return TR_ERR_CLOSED;
+	}
+	if (min_capacity > pool->buffer_size) {
+		pthread_mutex_unlock(&pool->lock);
+		return TR_ERR_BAD_LENGTH;
+	}
 
 	buf = pool->free_list;
 	if (!buf) {
@@ -233,6 +270,8 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 
 	pool->free_list = buf->next;
 	pool->free_count--;
+	assert(!buf->checked_out);
+	buf->checked_out = 1U;
 	tr_observe_high_water_u32(&pool->peak_in_use,
 				  pool->buffer_count - pool->free_count);
 
@@ -290,10 +329,20 @@ void tr_buffer_release(struct tr_buffer *buffer)
 	pool = buffer->pool;
 
 	pthread_mutex_lock(&pool->lock);
+	/*
+	 * A duplicate release must never manufacture free_count and make terminal
+	 * destroy believe another descriptor has been returned.
+	 */
+	if (!buffer->checked_out) {
+		pthread_mutex_unlock(&pool->lock);
+		return;
+	}
 
+	buffer->checked_out = 0U;
 	buffer->len = 0;
 	buffer->next = pool->free_list;
 	pool->free_list = buffer;
+	assert(pool->free_count < pool->buffer_count);
 	pool->free_count++;
 
 	pthread_mutex_unlock(&pool->lock);
