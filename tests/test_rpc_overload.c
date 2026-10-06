@@ -357,8 +357,8 @@ int main(void)
 
 	wait_pool_full(&rpc_pool, 128U);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_rpc_endpoint_destroy(client_rpc);
-	tr_rpc_endpoint_destroy(server_rpc);
+	assert(tr_rpc_endpoint_destroy(client_rpc) == TR_OK);
+	assert(tr_rpc_endpoint_destroy(server_rpc) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
