@@ -402,6 +402,27 @@ static void test_reactor_join_failure_is_retryable(void)
 	assert(tr_reactor_destroy(reactor) == TR_OK);
 }
 
+static void test_reactor_destroy_join_failure_is_retryable(void)
+{
+	struct tr_reactor *reactor = NULL;
+
+	reset_probe(0U);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	expect_threads(1U, 0U);
+
+	/*
+	 * destroy 内部必须把 stop/join failure 当作正常可返回生命周期错误。
+	 * 第一次 join 失败时对象仍由 caller 拥有；第二次 destroy 重试同一 barrier。
+	 */
+	fail_join_once_at(1U);
+	assert(tr_reactor_destroy(reactor) == TR_ERR_SYS);
+	expect_threads(1U, 0U);
+
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	expect_threads(1U, 1U);
+}
+
 static void test_runtime_multi_shard_start_rollback(void)
 {
 	struct tr_runtime_config config;
@@ -741,6 +762,7 @@ int main(void)
 	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
 	RUN_TEST(test_runtime_multi_shard_threads);
 	RUN_TEST(test_reactor_join_failure_is_retryable);
+	RUN_TEST(test_reactor_destroy_join_failure_is_retryable);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_runtime_start_rollback_join_failure_is_retryable);
 	RUN_TEST(test_runtime_executor_group_join_failure_is_retryable);

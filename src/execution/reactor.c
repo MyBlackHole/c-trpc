@@ -4154,10 +4154,11 @@ int tr_reactor_destroy(struct tr_reactor *reactor)
 		return TR_OK;
 
 	if (reactor->started) {
+		/*
+		 * stop()/pthread_join 是显式可重试生命周期屏障。失败时 Reactor
+		 * 仍由调用方拥有，destroy 必须传播错误，debug 构建不能抢先 abort。
+		 */
 		ret = tr_reactor_stop(reactor);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
 			return ret;
 	}

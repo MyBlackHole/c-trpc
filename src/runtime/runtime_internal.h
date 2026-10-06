@@ -59,6 +59,11 @@ struct tr_runtime_config {
 	const struct tr_runtime_shard_config *shards;
 };
 
+/*
+ * 正常失败时 *out 保持 NULL。若 constructor rollback 本身失败，函数返回
+ * lifecycle error，同时 *out 保留 partial Runtime ownership；调用方必须
+ * 继续 tr_runtime_destroy() 重试，不能丢弃该对象。
+ */
 int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out);
 /*
