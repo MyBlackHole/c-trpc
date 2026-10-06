@@ -719,15 +719,25 @@ void tr_client_destroy(struct tr_client *client)
 		 */
 		if (ret != TR_OK)
 			return;
-		tr_runtime_destroy(client->runtime);
+		ret = tr_runtime_destroy(client->runtime);
+		if (ret != TR_OK)
+			return;
 		client->runtime = NULL;
 		client->shard = NULL;
 	}
 
-	if (client->reassembly_pool_ready)
-		tr_buffer_pool_destroy(&client->reassembly_pool);
-	if (client->rpc_pool_ready)
-		tr_buffer_pool_destroy(&client->rpc_message_pool);
+	if (client->reassembly_pool_ready) {
+		int ret = tr_buffer_pool_destroy(&client->reassembly_pool);
+		if (ret != TR_OK)
+			return;
+		client->reassembly_pool_ready = 0;
+	}
+	if (client->rpc_pool_ready) {
+		int ret = tr_buffer_pool_destroy(&client->rpc_message_pool);
+		if (ret != TR_OK)
+			return;
+		client->rpc_pool_ready = 0;
+	}
 
 	free(client);
 }
