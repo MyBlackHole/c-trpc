@@ -293,6 +293,23 @@ RPC 工作线程使用线程本地执行上下文标记。同步 Endpoint/Facade
 对端预留/发布/移除/存活快照由所属 Reactor 分片单所有者串行化，
 不使用服务端全局对端状态转换锁。
 
+Server drain 是一个明确的 lifecycle freeze 例外。外部线程在读取 peer table
+之前必须依次完成：
+
+```text
+disable listener sources
+        ->
+disable peer-lifecycle event sources
+        ->
+peer table frozen
+        ->
+external read-only drain traversal
+```
+
+任一 unregister 失败都不能进入外部遍历，也不能提前把
+`peer_events_enabled` 发布为 false。partial freeze 单调且可重试：
+已成功关闭的 source 保持关闭，下一次 drain 从尚未完成的 barrier 继续。
+
 ### `server->finalizer_lock`
 
 **结论：保留，但不属于热路径。**
