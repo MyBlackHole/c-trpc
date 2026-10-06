@@ -812,8 +812,13 @@ static void noop(void *arg)
 struct reactor_restart_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
+	struct tr_reactor *reactor;
+	struct tr_reactor_timer_handle timer;
 	unsigned owner_calls;
 	unsigned completions;
+	unsigned timer_fired;
+	int timer_fd;
+	int timer_adopt_status;
 };
 
 static int reactor_restart_owner_call(void *arg)
@@ -850,15 +855,68 @@ static void reactor_restart_wait_completion(
 	assert(pthread_mutex_unlock(&ctx->lock) == 0);
 }
 
+static uint64_t reactor_restart_timer(void *arg, uint64_t now_ns)
+{
+	struct reactor_restart_ctx *ctx =
+		(struct reactor_restart_ctx *)arg;
+	struct tr_conn_handle handle;
+	int fd;
+	int ret;
+
+	(void)now_ns;
+	assert(tr_reactor_in_owner_context());
+
+	assert(pthread_mutex_lock(&ctx->lock) == 0);
+	fd = ctx->timer_fd;
+	assert(fd >= 0);
+	assert(pthread_mutex_unlock(&ctx->lock) == 0);
+
+	memset(&handle, 0, sizeof(handle));
+	ret = tr_reactor_adopt_fd(ctx->reactor, fd, &handle);
+
+	assert(pthread_mutex_lock(&ctx->lock) == 0);
+	ctx->timer_adopt_status = ret;
+	if (ret == TR_OK)
+		ctx->timer_fd = -1; /* Reactor owns fd after successful adopt. */
+	ctx->timer_fired++;
+	assert(pthread_cond_broadcast(&ctx->cond) == 0);
+	assert(pthread_mutex_unlock(&ctx->lock) == 0);
+	return 0U;
+}
+
+static void reactor_restart_wait_timer(struct reactor_restart_ctx *ctx)
+{
+	struct timespec deadline;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	assert(pthread_mutex_lock(&ctx->lock) == 0);
+	while (ctx->timer_fired == 0U)
+		assert(pthread_cond_timedwait(
+			       &ctx->cond, &ctx->lock, &deadline) == 0);
+	assert(pthread_mutex_unlock(&ctx->lock) == 0);
+}
+
 static void test_reactor_restart_epoch(void)
 {
 	struct tr_reactor *reactor = NULL;
 	struct reactor_restart_ctx ctx;
+	int timer_sockets[2];
 
 	memset(&ctx, 0, sizeof(ctx));
+	ctx.timer_fd = -1;
+	ctx.timer_adopt_status = TR_ERR_STATE;
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	ctx.reactor = reactor;
+
+	/*
+	 * Timer registration is owner-state configuration and is valid before the
+	 * first start. Keep this exact token across stop/restart.
+	 */
+	assert(tr_reactor_timer_register(
+		       reactor, reactor_restart_timer, &ctx, &ctx.timer) == TR_OK);
 
 	/* create() is not a running admission epoch. */
 	assert(tr_reactor_call(
@@ -882,8 +940,21 @@ static void test_reactor_restart_epoch(void)
 	assert(tr_reactor_complete(
 		       reactor, reactor_restart_completion, &ctx) == TR_ERR_CLOSED);
 
+	/*
+	 * Arm the retained timer while stopped. It becomes immediately due in the
+	 * next epoch and attempts an owner-fast-path fd adopt. Success proves a
+	 * persistent source cannot dispatch before start() publishes accepting=1.
+	 */
+	assert(socketpair(
+		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, timer_sockets) == 0);
+	ctx.timer_fd = timer_sockets[0];
+	assert(tr_reactor_timer_arm(ctx.timer, 1U) == TR_OK);
+
 	/* A second start establishes a fresh, fully usable lifecycle epoch. */
 	assert(tr_reactor_start(reactor) == TR_OK);
+	reactor_restart_wait_timer(&ctx);
+	assert(ctx.timer_adopt_status == TR_OK);
+	assert(ctx.timer_fd == -1);
 	assert(tr_reactor_call(
 		       reactor, reactor_restart_owner_call, &ctx) == TR_OK);
 	assert(ctx.owner_calls == 2U);
@@ -891,7 +962,9 @@ static void test_reactor_restart_epoch(void)
 		       reactor, reactor_restart_completion, &ctx) == TR_OK);
 	reactor_restart_wait_completion(&ctx, 2U);
 	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(close(timer_sockets[1]) == 0);
 	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_timer_unregister(ctx.timer) == TR_OK);
 	assert(tr_reactor_destroy(reactor) == TR_OK);
 
 	assert(pthread_cond_destroy(&ctx.cond) == 0);
