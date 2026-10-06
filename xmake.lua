@@ -115,7 +115,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_source_detach", "test_channel_detach", "test_channel_create_transaction", "test_client_connect_rollback", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_source_detach", "test_channel_detach", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -166,6 +166,13 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
             -- 注入 connect 后半段失败与 rollback 失败，验证 ownership 可重试。
             add_ldflags("-Wl,--wrap=tr_rpc_endpoint_create_with_executor_group",
                         "-Wl,--wrap=tr_channel_destroy", {force = true})
+        elseif name == "test_facade_constructor_ownership" then
+            -- 验证 Client/Server constructor rollback 失败后仍保留显式 owner。
+            add_ldflags("-Wl,--wrap=tr_runtime_start",
+                        "-Wl,--wrap=tr_runtime_stop",
+                        "-Wl,--wrap=tr_runtime_destroy",
+                        "-Wl,--wrap=tr_buffer_pool_init_dynamic_budgeted",
+                        {force = true})
         end
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()

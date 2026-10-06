@@ -40,6 +40,14 @@ struct tr_client_config {
 
 void tr_client_config_init(struct tr_client_config *config);
 
+/*
+ * 正常成功时返回 TR_OK 并把 Client ownership 写入 *out。
+ * 正常构造失败且 rollback 完整收敛时，*out 保持 NULL。
+ *
+ * 极端情况下，如果构造失败后的 terminal rollback 自身也失败，函数返回该
+ * 生命周期错误，同时 *out 保留 partial Client ownership；调用方必须停止
+ * 继续使用业务 API，并通过 tr_client_destroy() 重试收敛。
+ */
 int tr_client_create(const struct tr_client_config *config,
 		     struct tr_client **out);
 

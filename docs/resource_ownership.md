@@ -122,6 +122,12 @@ struct child *child TR_AUTO(child_cleanup) = NULL;
 如果可以通过“先预检、后提交”或调整 publication 顺序消除 rollback，
 应优先消除 rollback，而不是给 `void cleanup` 增加更多补偿逻辑。
 
+对于 facade constructor，如果对象已经跨过可失败的 terminal lifecycle 边界，
+普通错误仍应尽量 rollback 到 `*out == NULL`。只有 rollback barrier 自身失败时，
+允许“错误返回 + 非空 `*out`”作为显式 ownership 逃生口；调用方此时不得继续
+业务操作，只能持有该 partial owner 并重复调用对应 `destroy()` 直到收敛。
+这比在 `void cleanup` 中吞掉错误或制造无主泄漏更安全。
+
 成功构造完成后，必须显式解除构造保护，把完整对象交给新的所有者。
 
 ### 5.3 事务回滚保护
