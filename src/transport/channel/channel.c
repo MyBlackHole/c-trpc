@@ -20,7 +20,6 @@
 #include <time.h>
 
 #define TR_CHANNEL_HELLO_WIRE_SIZE 32U
-#define TR_CHANNEL_PROTOCOL_BUFFER_COUNT 8U
 #define TR_CHANNEL_PROTOCOL_BUFFER_SIZE 64U
 #define TR_STREAM_FREE_NONE UINT32_MAX
 
@@ -91,7 +90,6 @@ struct tr_channel {
 	int bulk_goaway_sent;
 	struct tr_channel_capabilities control_caps;
 	struct tr_channel_capabilities bulk_caps;
-	struct tr_buffer_pool protocol_pool;
 
 	uint32_t next_local_stream_id;
 	uint32_t free_stream_head;
@@ -509,6 +507,36 @@ static int tr_channel_local_capabilities(struct tr_channel *channel,
 	return TR_OK;
 }
 
+struct tr_channel_protocol_buffer {
+	struct tr_buffer buffer;
+	uint8_t storage[TR_CHANNEL_PROTOCOL_BUFFER_SIZE];
+};
+
+static void tr_channel_protocol_buffer_release(struct tr_buffer *buffer)
+{
+	free(buffer);
+}
+
+static int tr_channel_protocol_buffer_acquire(
+	uint32_t size, struct tr_buffer **out)
+{
+	struct tr_channel_protocol_buffer *owned;
+
+	if (!out || size == 0U || size > TR_CHANNEL_PROTOCOL_BUFFER_SIZE)
+		return TR_ERR_INVALID;
+	*out = NULL;
+
+	owned = (struct tr_channel_protocol_buffer *)calloc(1, sizeof(*owned));
+	if (!owned)
+		return TR_ERR_NOMEM;
+
+	owned->buffer.data = owned->storage;
+	owned->buffer.capacity = TR_CHANNEL_PROTOCOL_BUFFER_SIZE;
+	owned->buffer.release_cb = tr_channel_protocol_buffer_release;
+	*out = &owned->buffer;
+	return TR_OK;
+}
+
 static int tr_channel_send_hello(struct tr_channel *channel,
 				 struct tr_conn_handle connection)
 {
@@ -519,8 +547,8 @@ static int tr_channel_send_hello(struct tr_channel *channel,
 	ret = tr_channel_local_capabilities(channel, connection, &local);
 	if (ret != TR_OK)
 		return ret;
-	ret = tr_buffer_acquire(&channel->protocol_pool,
-				TR_CHANNEL_HELLO_WIRE_SIZE, &buffer);
+	ret = tr_channel_protocol_buffer_acquire(
+		TR_CHANNEL_HELLO_WIRE_SIZE, &buffer);
 	if (ret != TR_OK)
 		return ret;
 
@@ -575,8 +603,8 @@ static int tr_channel_send_hello_ack(struct tr_channel *channel,
 	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	int ret;
 
-	ret = tr_buffer_acquire(&channel->protocol_pool,
-				TR_CHANNEL_HELLO_WIRE_SIZE, &buffer);
+	ret = tr_channel_protocol_buffer_acquire(
+		TR_CHANNEL_HELLO_WIRE_SIZE, &buffer);
 	if (ret != TR_OK)
 		return ret;
 
@@ -2212,36 +2240,9 @@ struct tr_channel_build {
 	int lock_ready;
 	int state_cond_ready;
 	int keepalive_timer_ready;
-	int protocol_pool_ready;
 	int control_handler_installed;
 	int bulk_handler_installed;
 };
-
-struct tr_channel_build_close_request {
-	struct tr_conn_handle control;
-	struct tr_conn_handle bulk;
-	int split;
-};
-
-static int tr_channel_build_close_on_owner(void *arg)
-{
-	struct tr_channel_build_close_request *request =
-		(struct tr_channel_build_close_request *)arg;
-	int final = TR_OK;
-	int ret;
-
-	ret = tr_reactor_close_on_owner(request->control);
-	if (ret != TR_OK && ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
-		final = ret;
-
-	if (request->split) {
-		ret = tr_reactor_close_on_owner(request->bulk);
-		if (ret != TR_OK && ret != TR_ERR_STALE &&
-		    ret != TR_ERR_CLOSED && final == TR_OK)
-			final = ret;
-	}
-	return final;
-}
 
 static void tr_channel_build_cleanup(struct tr_channel_build *build)
 {
@@ -2262,41 +2263,9 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 					     NULL, NULL);
 		handlers_removed = 1;
 	}
+	if (handlers_removed && channel->reactor)
+		(void)tr_reactor_quiesce(channel->reactor);
 
-	/*
-	 * Once a partially built Channel has published a handler or queued HELLO,
-	 * the underlying Connection is no longer reusable as a raw transport.
-	 * Close it synchronously on the owner so every queued TX item releases its
-	 * payload before protocol_pool teardown.
-	 */
-	if (handlers_removed && channel->reactor) {
-		struct tr_channel_build_close_request request;
-		int ret;
-
-		request.control = channel->control_connection;
-		request.bulk = channel->bulk_connection;
-		request.split = !tr_conn_equal(
-			request.control, request.bulk);
-		ret = tr_reactor_call(
-			channel->reactor, tr_channel_build_close_on_owner,
-			&request);
-		if (ret != TR_OK && ret != TR_ERR_CLOSED) {
-#ifndef NDEBUG
-			assert(ret == TR_OK);
-#endif
-			return;
-		}
-	}
-
-	if (build->protocol_pool_ready) {
-		int ret = tr_buffer_pool_destroy(&channel->protocol_pool);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
-		if (ret != TR_OK)
-			return;
-		build->protocol_pool_ready = 0;
-	}
 	if (channel->streams) {
 		uint32_t i;
 		for (i = 0; i < channel->config.max_streams; ++i)
@@ -2426,13 +2395,6 @@ static int tr_channel_create_common(
 				(i + 1U < channel->config.max_streams) ?
 					i + 1U : TR_STREAM_FREE_NONE;
 	}
-
-	ret = tr_buffer_pool_init(&channel->protocol_pool,
-				  TR_CHANNEL_PROTOCOL_BUFFER_COUNT,
-				  TR_CHANNEL_PROTOCOL_BUFFER_SIZE);
-	if (ret != TR_OK)
-		return ret;
-	build.protocol_pool_ready = 1;
 
 	channel->control_alive = 1;
 	channel->bulk_alive = 1;
@@ -2566,16 +2528,6 @@ static int tr_channel_detach_on_owner(void *arg)
 	if (timer_registered)
 		(void)tr_reactor_timer_unregister(timer);
 
-	/*
-	 * Protocol buffers may be owned by Reactor TX. Detached finalizers have no
-	 * retry queue, so prove this pool is quiescent while the peer is still
-	 * owner-visible. Failure leaves the Channel in terminal-detaching state and
-	 * the peer lifecycle event can retry later.
-	 */
-	ret = tr_buffer_pool_destroy(&channel->protocol_pool);
-	if (ret != TR_OK)
-		return ret;
-
 	pthread_mutex_lock(&channel->lock);
 	channel->teardown_detached = 1;
 	pthread_mutex_unlock(&channel->lock);
@@ -2633,10 +2585,6 @@ int tr_channel_finalize_detached(struct tr_channel *channel)
 	}
 	free(channel->stream_index);
 	free(channel->streams);
-#ifndef NDEBUG
-	assert(channel->protocol_pool.buffers == NULL);
-	assert(channel->protocol_pool.buffer_count == 0U);
-#endif
 	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
 	free(channel);
@@ -2716,10 +2664,6 @@ int tr_channel_destroy(struct tr_channel *channel)
 		memset(&channel->keepalive_timer, 0,
 		       sizeof(channel->keepalive_timer));
 	}
-
-	ret = tr_buffer_pool_destroy(&channel->protocol_pool);
-	if (ret != TR_OK)
-		return ret;
 
 	if (channel->streams) {
 		uint32_t i;
