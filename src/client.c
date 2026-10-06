@@ -719,13 +719,12 @@ void tr_client_destroy(struct tr_client *client)
 		 */
 		if (ret != TR_OK)
 			return;
-		ret = tr_runtime_destroy(client->runtime);
-		if (ret != TR_OK)
-			return;
-		client->runtime = NULL;
-		client->shard = NULL;
 	}
 
+	/*
+	 * Pools may borrow RuntimeShard accounting in later phases. Release them
+	 * after protocol users are gone but before destroying their resource owner.
+	 */
 	if (client->reassembly_pool_ready) {
 		int ret = tr_buffer_pool_destroy(&client->reassembly_pool);
 		if (ret != TR_OK)
@@ -737,6 +736,14 @@ void tr_client_destroy(struct tr_client *client)
 		if (ret != TR_OK)
 			return;
 		client->rpc_pool_ready = 0;
+	}
+
+	if (client->runtime) {
+		int ret = tr_runtime_destroy(client->runtime);
+		if (ret != TR_OK)
+			return;
+		client->runtime = NULL;
+		client->shard = NULL;
 	}
 
 	free(client);
