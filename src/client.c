@@ -56,7 +56,16 @@ struct tr_client {
 	int connected;
 };
 
-TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_destroy)
+static void tr_client_owner_release(struct tr_client *client)
+{
+	int ret = tr_client_destroy(client);
+#ifndef NDEBUG
+	assert(ret == TR_OK);
+#endif
+	(void)ret;
+}
+
+TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_owner_release)
 
 static struct tr_reactor *tr_client_reactor(struct tr_client *client)
 {
@@ -691,10 +700,12 @@ int tr_client_get_rpc_semantic_stats(
 	return tr_rpc_endpoint_get_semantic_stats(client->rpc, out);
 }
 
-void tr_client_destroy(struct tr_client *client)
+int tr_client_destroy(struct tr_client *client)
 {
+	int ret;
+
 	if (!client)
-		return;
+		return TR_OK;
 
 	/*
 	 * destroy is an external terminal operation. Calling it from a Reactor
@@ -703,67 +714,43 @@ void tr_client_destroy(struct tr_client *client)
 	 * unchanged instead of partially destroying the Client.
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
-		return;
+		return TR_ERR_STATE;
 
 	/*
-	 * Client teardown 的 owner/quiescence barrier 必须发生在 Runtime stop 前。
+	 * destroy 是纯 terminal teardown，不内置 graceful-drain policy 或魔法超时。
+	 * 需要优雅排空时，调用方必须在此之前显式调用 begin_drain/wait_drained。
 	 *
-	 * RPC destroy 会先 owner-serialize Channel handler detach，再 quiesce Reactor
-	 * callback，随后 shutdown/drain executor strong-ref；Channel destroy 也需要
-	 * owner 存活以关闭 reconnect/keepalive 与底层 connection handler。
-	 *
-	 * 只有所有上层 callback source 都移除后，Runtime 才能退出 event loop。
+	 * 所有 callback source 与上层 owner barrier 仍必须在 Runtime stop 前收敛。
 	 */
-	if (client->channel) {
-		(void)tr_channel_begin_drain(client->channel);
-		(void)tr_channel_wait_drained(client->channel, 1000U);
-	}
-
 	if (client->connection_group) {
-		int ret = tr_client_group_destroy(client->connection_group);
-
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
+		ret = tr_client_group_destroy(client->connection_group);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->connection_group = NULL;
 	}
 
 	if (client->rpc) {
-		int ret = tr_rpc_endpoint_destroy(client->rpc);
-
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
+		ret = tr_rpc_endpoint_destroy(client->rpc);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->rpc = NULL;
 	}
 	if (client->channel) {
-		int ret = tr_channel_destroy(client->channel);
-
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
+		ret = tr_channel_destroy(client->channel);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->channel = NULL;
 	}
 
 	if (client->runtime) {
-		int ret = tr_runtime_stop(client->runtime);
-
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
+		ret = tr_runtime_stop(client->runtime);
 		/*
 		 * A failed lifecycle barrier means ownership has not converged.
 		 * Keep the remaining Client/Runtime storage alive rather than freeing
 		 * memory that an execution thread may still reference.
 		 */
 		if (ret != TR_OK)
-			return;
+			return ret;
 	}
 
 	/*
@@ -771,25 +758,26 @@ void tr_client_destroy(struct tr_client *client)
 	 * after protocol users are gone but before destroying their resource owner.
 	 */
 	if (client->reassembly_pool_ready) {
-		int ret = tr_buffer_pool_destroy(&client->reassembly_pool);
+		ret = tr_buffer_pool_destroy(&client->reassembly_pool);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->reassembly_pool_ready = 0;
 	}
 	if (client->rpc_pool_ready) {
-		int ret = tr_buffer_pool_destroy(&client->rpc_message_pool);
+		ret = tr_buffer_pool_destroy(&client->rpc_message_pool);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->rpc_pool_ready = 0;
 	}
 
 	if (client->runtime) {
-		int ret = tr_runtime_destroy(client->runtime);
+		ret = tr_runtime_destroy(client->runtime);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		client->runtime = NULL;
 		client->shard = NULL;
 	}
 
 	free(client);
+	return TR_OK;
 }
