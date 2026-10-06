@@ -211,6 +211,14 @@ int tr_channel_get_lane_state(struct tr_channel *channel, enum tr_lane lane,
 			      enum tr_channel_lane_state *out);
 
 /*
+ * 等待指定 lane 完成 HELLO/HELLO_ACK 并进入 UP。该等待只观察 Channel 状态，
+ * 不推进握手或重连协议。timeout_ms == 0 表示无限等待。
+ * Reactor owner context 调用返回 TR_ERR_STATE。
+ */
+int tr_channel_wait_ready(
+	struct tr_channel *channel, enum tr_lane lane, uint32_t timeout_ms);
+
+/*
  * 选定 lane 进入 UP 后，返回协商得到的 outbound limits。
  * max_frame_payload_bytes/max_message_bytes 表示 peer 声明的接收能力；
  * 本地接收上限仍由 Channel/Reactor 配置决定。
