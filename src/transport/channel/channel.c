@@ -3248,6 +3248,85 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 	return tr_channel_send_pending_goaway(channel);
 }
 
+int tr_channel_wait_ready(
+	struct tr_channel *channel, enum tr_lane lane, uint32_t timeout_ms)
+{
+	struct timespec deadline;
+	int timed = timeout_ms != 0U;
+	int result = TR_OK;
+
+	if (!channel ||
+	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
+	if (timed) {
+		uint64_t deadline_ns;
+
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+			return TR_ERR_SYS;
+		deadline_ns = tr_add_sat_u64(
+			(uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
+				(uint64_t)deadline.tv_nsec,
+			(uint64_t)timeout_ms * UINT64_C(1000000));
+		deadline.tv_sec =
+			(time_t)(deadline_ns / UINT64_C(1000000000));
+		deadline.tv_nsec =
+			(long)(deadline_ns % UINT64_C(1000000000));
+	}
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->state_wait_closed) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_CLOSED;
+	}
+	if ((lane == TR_LANE_CONTROL && channel->control_ready) ||
+	    (lane == TR_LANE_BULK && channel->bulk_ready)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+	if (channel->state_waiters == UINT32_MAX) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STATE;
+	}
+	channel->state_waiters++;
+
+	for (;;) {
+		int ready = lane == TR_LANE_CONTROL ?
+			channel->control_ready : channel->bulk_ready;
+		int ret;
+
+		if (ready)
+			break;
+		if (channel->state_wait_closed) {
+			result = TR_ERR_CLOSED;
+			break;
+		}
+
+		if (timed)
+			ret = pthread_cond_timedwait(
+				&channel->state_cond, &channel->lock, &deadline);
+		else
+			ret = pthread_cond_wait(
+				&channel->state_cond, &channel->lock);
+
+		if (ret == 0)
+			continue;
+		if (timed && ret == ETIMEDOUT) {
+			result = TR_ERR_TIMEOUT;
+			break;
+		}
+		result = TR_ERR_SYS;
+		break;
+	}
+
+	assert(channel->state_waiters != 0U);
+	channel->state_waiters--;
+	pthread_mutex_unlock(&channel->lock);
+	return result;
+}
+
 int tr_channel_begin_drain(struct tr_channel *channel)
 {
 	if (!channel)
