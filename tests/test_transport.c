@@ -2695,24 +2695,6 @@ static void wait_channel_drain_probe(
 	pthread_mutex_unlock(&probe->lock);
 }
 
-static void wait_connection_tx_frame(
-	struct tr_conn_handle connection, uint64_t target)
-{
-	unsigned i;
-
-	for (i = 0; i < 5000U; ++i) {
-		struct tr_connection_stats stats;
-		struct timespec pause_time = { 0, 1000000L };
-
-		memset(&stats, 0, sizeof(stats));
-		assert(tr_reactor_get_connection_stats(connection, &stats) == TR_OK);
-		if (stats.tx_frames >= target && stats.tx_queued_items == 0U)
-			return;
-		nanosleep(&pause_time, NULL);
-	}
-	assert(!"timed out waiting for control TX item release");
-}
-
 static void test_channel_graceful_drain(void)
 {
 	struct tr_reactor_config reactor_config;
