@@ -190,6 +190,70 @@ int tr_pipeline_registry_register(struct tr_pipeline_registry *registry,
 			       tr_pipeline_registry_register_on_owner, &request);
 }
 
+
+struct tr_pipeline_registry_control_request {
+	struct tr_pipeline_registry *registry;
+	struct tr_pipeline *pipeline;
+	struct tr_conn_handle control_connection;
+};
+
+static int tr_pipeline_registry_register_control_on_owner(void *arg)
+{
+	struct tr_pipeline_registry_control_request *request =
+		(struct tr_pipeline_registry_control_request *)arg;
+	struct tr_pipeline_registry *registry = request->registry;
+	struct tr_pipeline *pipeline = request->pipeline;
+	struct tr_pipeline_registry_entry *entry;
+	uint32_t found = UINT32_MAX;
+	uint32_t insert = UINT32_MAX;
+	int ret;
+
+	/*
+	 * Complete every failure-capable registry check before publishing CONTROL.
+	 * After set_control() succeeds, the remaining registry writes are an
+	 * owner-local commit and cannot require a compensating lifecycle call.
+	 */
+	if (tr_pipeline_owner(pipeline) != registry->owner ||
+	    tr_pipeline_owner_shard_id(pipeline) != registry->owner_shard_id ||
+	    request->control_connection.reactor != registry->owner)
+		return TR_ERR_INVALID;
+
+	if (tr_pipeline_registry_find(registry, tr_pipeline_id(pipeline),
+				      &found, &insert))
+		return TR_ERR_STATE;
+	if (registry->count == registry->capacity || insert == UINT32_MAX)
+		return TR_AGAIN;
+
+	ret = tr_pipeline_set_control(pipeline, request->control_connection);
+	if (ret != TR_OK)
+		return ret;
+
+	entry = &registry->entries[insert];
+	entry->pipeline_id = tr_pipeline_id(pipeline);
+	entry->pipeline = pipeline;
+	entry->state = TR_PIPELINE_REGISTRY_USED;
+	registry->count++;
+	return TR_OK;
+}
+
+int tr_pipeline_registry_register_control(
+	struct tr_pipeline_registry *registry, struct tr_pipeline *pipeline,
+	struct tr_conn_handle control_connection)
+{
+	struct tr_pipeline_registry_control_request request;
+
+	if (!registry || !pipeline)
+		return TR_ERR_INVALID;
+
+	memset(&request, 0, sizeof(request));
+	request.registry = registry;
+	request.pipeline = pipeline;
+	request.control_connection = control_connection;
+	return tr_reactor_call(
+		registry->owner, tr_pipeline_registry_register_control_on_owner,
+		&request);
+}
+
 static int tr_pipeline_registry_unregister_on_owner(void *arg)
 {
 	struct tr_pipeline_registry_pipeline_request *request =

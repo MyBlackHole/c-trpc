@@ -193,6 +193,61 @@ static void test_pipeline_control_session(void)
 	tr_reactor_destroy(owner);
 }
 
+static void test_pipeline_control_registry_capacity_failure_is_precommit(void)
+{
+	struct tr_reactor *owner = NULL;
+	struct tr_pipeline_registry_config registry_config;
+	struct tr_pipeline_registry *registry = NULL;
+	struct tr_pipeline_registry_stats stats;
+	struct tr_pipeline_control_config config;
+	struct tr_pipeline_control *first = NULL;
+	struct tr_pipeline_control *second = NULL;
+	struct tr_conn_handle first_connection;
+	struct tr_conn_handle second_connection;
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &owner) == TR_OK);
+	assert(tr_reactor_start(owner) == TR_OK);
+
+	memset(&registry_config, 0, sizeof(registry_config));
+	registry_config.owner = owner;
+	registry_config.owner_shard_id = 7U;
+	registry_config.capacity = 1U;
+	assert(tr_pipeline_registry_create(&registry_config, &registry) == TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.registry = registry;
+	config.pipeline_id = UINT64_C(0x7001);
+	config.epoch = UINT64_C(1);
+	config.data_capacity = 1U;
+	config.stream_affinity_capacity = 2U;
+
+	first_connection = fake_connection(owner, 30U, 1U);
+	assert(tr_pipeline_control_create(
+		       &config, first_connection, &first) == TR_OK);
+	assert(first != NULL);
+
+	/*
+	 * Capacity rejection must happen before CONTROL is bound on the candidate
+	 * Pipeline. The failed create therefore needs no lifecycle rollback and can
+	 * destroy its private soft-state immediately.
+	 */
+	config.pipeline_id = UINT64_C(0x7002);
+	second_connection = fake_connection(owner, 31U, 1U);
+	assert(tr_pipeline_control_create(
+		       &config, second_connection, &second) == TR_AGAIN);
+	assert(second == NULL);
+
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_registry_get_stats(registry, &stats) == TR_OK);
+	assert(stats.count == 1U);
+
+	assert(tr_pipeline_control_close(first, first_connection) == TR_OK);
+	first = NULL;
+	tr_pipeline_registry_destroy(registry);
+	assert(tr_reactor_stop(owner) == TR_OK);
+	assert(tr_reactor_destroy(owner) == TR_OK);
+}
+
 static void test_pipeline_control_validation(void)
 {
 	struct tr_pipeline_control_config config;
@@ -210,6 +265,7 @@ static void test_pipeline_control_validation(void)
 int main(void)
 {
 	test_pipeline_control_validation();
+	test_pipeline_control_registry_capacity_failure_is_precommit();
 	test_pipeline_control_session();
 	puts("pipeline control/transfer-ready: ok");
 	return 0;
