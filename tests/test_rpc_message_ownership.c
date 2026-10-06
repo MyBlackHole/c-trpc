@@ -232,8 +232,8 @@ static void test_large_facade_rpc(void)
 	assert(ret == TR_OK || ret == TR_AGAIN);
 	assert(tr_client_wait_drained(client, 5000U) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 	free(reply);
