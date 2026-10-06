@@ -50,6 +50,7 @@ void tr_command_queue_destroy(struct tr_command_queue *queue)
 	assert(queue->waiters == 0U);
 #endif
 	queue->full_events = 0;
+	queue->next_sequence = 0U;
 	queue->wait_generation = 0U;
 	queue->waiters = 0U;
 	queue->wait_accepting = 0;
