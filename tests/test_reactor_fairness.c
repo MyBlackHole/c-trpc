@@ -32,7 +32,8 @@ int __real_tr_command_queue_push_wait_force(
 	struct tr_command_queue *queue, const struct tr_command *command,
 	int *need_wake);
 int __real_tr_completion_queue_push_wait(struct tr_completion_queue *queue,
-	const struct tr_completion *completion, int *need_wake);
+	const struct tr_completion *completion, uint64_t expected_generation,
+	int *need_wake);
 int __real_epoll_wait(int fd, struct epoll_event *events, int maxevents,
 	int timeout);
 
@@ -154,7 +155,8 @@ int __wrap_tr_command_queue_push_wait_force(
 
 int __wrap_tr_completion_queue_push_wait(
 	struct tr_completion_queue *queue,
-	const struct tr_completion *completion, int *need_wake)
+	const struct tr_completion *completion, uint64_t expected_generation,
+	int *need_wake)
 {
 	struct test_ctx *ctx = active;
 	int full = 0;
@@ -179,7 +181,7 @@ int __wrap_tr_completion_queue_push_wait(
 	}
 
 	ret = __real_tr_completion_queue_push_wait(
-		queue, completion, need_wake);
+		queue, completion, expected_generation, need_wake);
 	return ret;
 }
 
