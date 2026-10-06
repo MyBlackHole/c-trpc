@@ -87,22 +87,21 @@ int tr_pipeline_control_create(
 	if (ret != TR_OK)
 		goto fail;
 
-	ret = tr_pipeline_set_control(control->pipeline, control_connection);
+	/*
+	 * CONTROL bind 与 registry publication 必须属于同一个 owner transaction。
+	 * registry helper 会在任何 Pipeline mutation 之前完成 duplicate/capacity
+	 * 校验；成功 bind 后只剩不可失败的 owner-local registry commit，因此这里
+	 * 不再需要第二个 fallible clear_control() rollback。
+	 */
+	ret = tr_pipeline_registry_register_control(
+		config->registry, control->pipeline, control_connection);
 	if (ret != TR_OK)
 		goto fail_pipeline;
-
-	ret = tr_pipeline_registry_register(
-		config->registry, control->pipeline);
-	if (ret != TR_OK)
-		goto fail_control;
 
 	control->registry = config->registry;
 	*out = control;
 	return TR_OK;
 
-fail_control:
-	(void)tr_pipeline_clear_control(
-		control->pipeline, control_connection);
 fail_pipeline:
 	tr_pipeline_destroy(control->pipeline);
 fail:

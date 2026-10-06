@@ -38,6 +38,17 @@ tr_pipeline_registry_owner_shard_id(const struct tr_pipeline_registry *registry)
 
 int tr_pipeline_registry_register(struct tr_pipeline_registry *registry,
 				  struct tr_pipeline *pipeline);
+
+/*
+ * CONTROL publication transaction. Registry duplicate/capacity checks happen
+ * before Pipeline mutation; once CONTROL bind succeeds, registry insertion is
+ * an infallible owner-local commit. This avoids a second fallible owner call
+ * solely to roll back CONTROL when registration fails.
+ */
+int tr_pipeline_registry_register_control(
+	struct tr_pipeline_registry *registry, struct tr_pipeline *pipeline,
+	struct tr_conn_handle control_connection);
+
 int tr_pipeline_registry_unregister(struct tr_pipeline_registry *registry,
 				    struct tr_pipeline *pipeline);
 
