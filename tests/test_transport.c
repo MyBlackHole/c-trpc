@@ -6438,7 +6438,10 @@ struct facade_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct tr_server *server;
+	struct tr_client *client;
 	int server_drain_from_worker_ret;
+	int server_destroy_from_worker_ret;
+	int client_destroy_from_callback_ret;
 	unsigned server_calls;
 	unsigned client_results;
 	unsigned client_pre;
@@ -6461,9 +6464,12 @@ static int facade_test_unary_handler(struct tr_rpc_call_handle call,
 	static const uint8_t reply[] = "facade-pong";
 	(void)call;
 
-	if (ctx->server)
+	if (ctx->server) {
 		ctx->server_drain_from_worker_ret =
 			tr_server_drain(ctx->server, 100U);
+		ctx->server_destroy_from_worker_ret =
+			tr_server_destroy(ctx->server);
+	}
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->server_calls++;
@@ -6484,6 +6490,10 @@ static void facade_test_result(struct tr_rpc_call_handle call, int status,
 {
 	struct facade_test_ctx *ctx = (struct facade_test_ctx *)arg;
 	(void)call;
+
+	if (ctx->client)
+		ctx->client_destroy_from_callback_ret =
+			tr_client_destroy(ctx->client);
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->client_results++;
@@ -6595,6 +6605,7 @@ static void test_client_server_facade_unary(void)
 	client_config.interceptor.fn = facade_test_interceptor;
 	client_config.interceptor.arg = &ctx;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
+	ctx.client = client;
 	nodelay_before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tcp_nodelay_probe_read() == nodelay_before + 2U);
@@ -6616,6 +6627,8 @@ static void test_client_server_facade_unary(void)
 	assert(ctx.client_results == 1U);
 	assert(ctx.client_status == TR_RPC_STATUS_OK);
 	assert(ctx.server_drain_from_worker_ret == TR_ERR_STATE);
+	assert(ctx.server_destroy_from_worker_ret == TR_ERR_STATE);
+	assert(ctx.client_destroy_from_callback_ret == TR_ERR_STATE);
 	assert(ctx.request_len == 11U);
 	assert(memcmp(ctx.request, "facade-ping", 11U) == 0);
 	assert(ctx.response_len == 11U);
@@ -6627,9 +6640,11 @@ static void test_client_server_facade_unary(void)
 	 * Reuse one client object across transient connect rejection as well: a
 	 * failed connect attempt must roll all session state back to INIT.
 	 */
-	tr_client_destroy(client);
+	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
+	ctx.client = NULL;
 	assert(tr_client_create(&client_config, &client) == TR_OK);
+	ctx.client = client;
 	{
 		unsigned attempt;
 		for (attempt = 0; attempt < 100U; ++attempt) {
@@ -6716,8 +6731,8 @@ static void test_client_server_facade_unary(void)
 	assert(server_semantic.calls_inflight == 0U);
 	assert(server_semantic.final_status[TR_RPC_STATUS_OK] == 2U);
 
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -6831,8 +6846,8 @@ static void test_server_multi_shard_reuseport_facade(void)
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
 	for (i = 0; i < 4U; ++i)
-		tr_client_destroy(clients[i]);
-	tr_server_destroy(server);
+		assert(tr_client_destroy(clients[i]) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -6868,9 +6883,9 @@ static void test_client_server_facade_nodelay_policy(void)
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tcp_nodelay_probe_read() == before);
 
-	tr_client_destroy(client);
+	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 	server = NULL;
 
 	tr_client_config_init(&client_config);
@@ -7075,8 +7090,8 @@ static void test_client_runtime_thread_bound(void)
 	after = test_linux_thread_count();
 	assert(after <= before + 1U);
 
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 }
 
 static void test_server_runtime_thread_bound(void)
@@ -7161,7 +7176,7 @@ static void test_server_runtime_thread_bound(void)
 	for (i = 0; i < 4U; ++i)
 		assert(tr_channel_destroy(channels[i]) == TR_OK);
 	tr_reactor_destroy(client_reactor);
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 }
 
 static void test_server_shared_rpc_executor(void)
@@ -7273,8 +7288,8 @@ static void test_server_shared_rpc_executor(void)
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
 	for (i = 0; i < 4U; ++i)
-		tr_client_destroy(clients[i]);
-	tr_server_destroy(server);
+		assert(tr_client_destroy(clients[i]) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
@@ -7396,7 +7411,7 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	 * descriptor.  The retired Endpoint/Channel must stay alive solely because
 	 * of the message lifetime pin.
 	 */
-	tr_client_destroy(client);
+	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 
 	memset(&stats, 0, sizeof(stats));
@@ -7425,7 +7440,7 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	assert(stats.peers_reaping_current == 0U);
 	assert(stats.peers_reaped_total >= 1U);
 
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -7502,7 +7517,7 @@ static void test_server_reaping_budget_defers_detach(void)
 	assert(ctx.active == 1U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	tr_client_destroy(first);
+	assert(tr_client_destroy(first) == TR_OK);
 	first = NULL;
 
 	pause_time.tv_sec = 0;
@@ -7526,7 +7541,7 @@ static void test_server_reaping_budget_defers_detach(void)
 	assert(tr_client_create(&client_config, &second) == TR_OK);
 	assert(tr_client_connect(second, "127.0.0.1", port) == TR_OK);
 	assert(tr_client_register_method(second, &method) == TR_OK);
-	tr_client_destroy(second);
+	assert(tr_client_destroy(second) == TR_OK);
 	second = NULL;
 
 	memset(&stats, 0, sizeof(stats));
@@ -7564,7 +7579,7 @@ static void test_server_reaping_budget_defers_detach(void)
 	assert(stats.peers_reaping_current == 0U);
 	assert(stats.peers_reaped_total >= 2U);
 
-	tr_server_destroy(server);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -7654,7 +7669,7 @@ static void test_server_peer_refcount_drain(void)
 	 * peer slot, but last-ref finalization must keep detached Endpoint/Channel
 	 * state alive until this task releases its strong ref.
 	 */
-	tr_client_destroy(client);
+	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 
 	assert(tr_client_create(&client_config, &client) == TR_OK);
@@ -7756,8 +7771,8 @@ static void test_server_peer_refcount_drain(void)
 	assert(atomic_load_explicit(&stats_poll.failures,
 				    memory_order_relaxed) == 0U);
 
-	tr_client_destroy(client);
-	tr_server_destroy(server);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }

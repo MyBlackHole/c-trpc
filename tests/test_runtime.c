@@ -46,7 +46,7 @@ static void test_runtime_single_shard_identity(void)
 	assert(tr_runtime_shard_rpc_executor(shard) == NULL);
 	assert(tr_runtime_shard_at(runtime, 1U) == NULL);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
 static void test_runtime_multi_shard_identity(void)
@@ -76,7 +76,7 @@ static void test_runtime_multi_shard_identity(void)
 	}
 	assert(tr_runtime_shard_at(runtime, 3U) == NULL);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
 static void test_runtime_rejects_invalid_shard_config(void)
@@ -121,7 +121,7 @@ static void test_runtime_reuseport_listener_group(void)
 	assert(tr_runtime_shard_listener_fd(shard0) >= 0);
 	assert(tr_runtime_shard_listener_fd(shard1) >= 0);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
 static void test_runtime_shard_rpc_executor_ownership(void)
@@ -140,7 +140,7 @@ static void test_runtime_shard_rpc_executor_ownership(void)
 	shard = tr_runtime_shard_at(runtime, 0U);
 	assert(shard != NULL);
 	assert(tr_runtime_shard_rpc_executor(shard) != NULL);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 
 	runtime_test_config_init(&config, &shard_config, 1U);
 	shard_config.rpc_executor.thread_count = 1U;
@@ -175,7 +175,7 @@ static void test_runtime_shard_listener_ownership(void)
 	assert(tr_runtime_shard_listen_ipv4(
 		       shard, "127.0.0.1", 0U, 8, NULL) == TR_ERR_STATE);
 
-	tr_runtime_shard_close_listener(shard);
+	assert(tr_runtime_shard_close_listener(shard) == TR_OK);
 	assert(tr_runtime_shard_listener_fd(shard) == -1);
 	assert(tr_runtime_shard_bound_port(shard) == 0U);
 
@@ -185,7 +185,7 @@ static void test_runtime_shard_listener_ownership(void)
 	listener = tr_runtime_shard_listener_fd(shard);
 	assert(listener >= 0);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 
 	/* Runtime destruction is the final owner and must close a live listener. */
 	errno = 0;
@@ -281,7 +281,7 @@ static void test_runtime_shard_listener_events(void)
 	assert(tr_runtime_shard_disable_listener_events(shard) == TR_OK);
 	tr_socket_close(&client_fd);
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 	assert(pthread_cond_destroy(&ctx.cond) == 0);
 	assert(pthread_mutex_destroy(&ctx.lock) == 0);
 }
@@ -349,7 +349,7 @@ static void test_runtime_shard_peer_resources(void)
 	assert(stats.reaping_current == 0U);
 	assert(stats.reaped_total == 2U);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
 static void test_runtime_shard_peer_event_source(void)
@@ -385,7 +385,7 @@ static void test_runtime_shard_peer_event_source(void)
 	pfd.revents = 0;
 	assert(poll(&pfd, 1U, 0) == 0);
 
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 
 	errno = 0;
 	assert(fcntl(event_fd, F_GETFD) == -1);
@@ -451,7 +451,7 @@ static void test_runtime_shard_peer_event_dispatch(void)
 
 	assert(tr_runtime_shard_disable_peer_events(shard) == TR_OK);
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 	assert(pthread_cond_destroy(&ctx.cond) == 0);
 	assert(pthread_mutex_destroy(&ctx.lock) == 0);
 }
@@ -497,7 +497,7 @@ static void test_runtime_shard_memory_budget(void)
 	assert(stats.current_bytes > peer_bytes);
 	assert(stats.peak_bytes == stats.current_bytes);
 	assert(stats.rejection_events == 0U);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 
 	/* With no peer table, a one-byte limit proves Reactor reserves first. */
 	runtime = (struct tr_runtime *)(uintptr_t)1U;
@@ -579,7 +579,7 @@ static void test_runtime_self_stop_context_guards(void)
 
 	/* External lifecycle owner can still stop and destroy normally. */
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
 static void test_runtime_lifecycle(void)
@@ -596,7 +596,7 @@ static void test_runtime_lifecycle(void)
 	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
 	assert(tr_runtime_stop(runtime) == TR_OK);
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	tr_runtime_destroy(runtime);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
 #define RUN_TEST(fn) do { fn(); puts(#fn ": ok"); } while (0)

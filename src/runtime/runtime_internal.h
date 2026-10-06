@@ -106,7 +106,7 @@ int tr_runtime_shard_enable_listener_events(struct tr_runtime_shard *shard,
 					    tr_runtime_listener_cb callback,
 					    void *arg);
 int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard);
-void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
+int tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
 
 /*
  * Peer storage is shard-owned. Accept, publish, lifecycle detach and live

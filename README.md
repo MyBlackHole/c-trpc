@@ -103,7 +103,7 @@ tr_client_create(&cfg, &client);
 tr_client_connect(client, "127.0.0.1", 9000);
 tr_client_register_method(client, &method);
 tr_client_unary_call(client, ...);
-tr_client_destroy(client);
+assert(tr_client_destroy(client) == TR_OK);
 ```
 
 服务端生命周期：
@@ -120,7 +120,7 @@ tr_server_listen(server, "0.0.0.0", 9000, &bound_port);
 tr_server_start(server);
 ...
 tr_server_drain(server, 5000);
-tr_server_destroy(server);
+assert(tr_server_destroy(server) == TR_OK);
 ```
 
 门面拥有 Reactor、RPC 消息资源池和 Channel 重组资源池。
@@ -174,7 +174,7 @@ tr_client_connection_group_connect(
     client, "127.0.0.1", group_port, &group);
 ...
 tr_client_connection_group_close(client);
-tr_client_destroy(client);
+assert(tr_client_destroy(client) == TR_OK);
 ```
 
 门面复用现有单所有者 Pipeline 引擎。应用只看到 `group_id/epoch`、

@@ -56,8 +56,12 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	 * keeps Reactor alive, leave shard storage/budget intact so release can be
 	 * retried after the application returns that payload.
 	 */
-	tr_runtime_shard_close_listener(shard);
-	(void)tr_runtime_shard_disable_peer_events(shard);
+	ret = tr_runtime_shard_close_listener(shard);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_runtime_shard_disable_peer_events(shard);
+	if (ret != TR_OK)
+		return ret;
 	if (shard->peer_event_fd >= 0) {
 		close(shard->peer_event_fd);
 		shard->peer_event_fd = -1;
@@ -440,14 +444,20 @@ int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard)
 	return ret;
 }
 
-void tr_runtime_shard_close_listener(struct tr_runtime_shard *shard)
+int tr_runtime_shard_close_listener(struct tr_runtime_shard *shard)
 {
-	if (!shard)
-		return;
+	int ret;
 
-	(void)tr_runtime_shard_disable_listener_events(shard);
+	if (!shard)
+		return TR_ERR_INVALID;
+
+	ret = tr_runtime_shard_disable_listener_events(shard);
+	if (ret != TR_OK)
+		return ret;
+
 	tr_socket_close(&shard->listen_fd);
 	shard->bound_port = 0U;
+	return TR_OK;
 }
 
 uint32_t tr_runtime_shard_peer_capacity(const struct tr_runtime_shard *shard)

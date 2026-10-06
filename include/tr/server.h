@@ -89,9 +89,14 @@ int tr_server_get_rpc_semantic_stats(
  * RPC 处理器/结果/事件回调。必须先通知外部控制线程并从回调返回，
  * 再销毁 Server。
  *
+ * destroy 只执行 terminal teardown，不替代显式 tr_server_drain()。
+ *
+ * 返回 TR_OK 才表示 Server storage 已释放。任何错误都表示对象仍由调用方拥有，
+ * 可能已经关闭部分 admission/source；调用方解决 outstanding ownership 后可重试。
+ *
  * Call 句柄和回调参数不会延长 Server 生命周期。
  */
-void tr_server_destroy(struct tr_server *server);
+int tr_server_destroy(struct tr_server *server);
 
 #ifdef __cplusplus
 }

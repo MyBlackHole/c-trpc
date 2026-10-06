@@ -101,10 +101,16 @@ int tr_client_get_rpc_semantic_stats(
  * RPC 处理器/结果/事件回调。此类回调必须先把关闭意图交给外部控制线程，
  * 然后从回调返回。
  *
+ * destroy 只执行 terminal teardown，不隐式执行 graceful drain，也没有内部
+ * 超时策略。需要优雅关闭时，调用方必须先显式 begin_drain()/wait_drained()。
+ *
+ * 返回 TR_OK 才表示 Client storage 已释放。任何错误都表示对象仍由调用方拥有，
+ * 可能已进入部分 terminal 状态；调用方修复 outstanding ownership 后可重试。
+ *
  * Call 句柄不会延长 Client 生命周期；不得与该销毁操作并发使用，
  * 也不得在销毁完成后继续使用。
  */
-void tr_client_destroy(struct tr_client *client);
+int tr_client_destroy(struct tr_client *client);
 
 #ifdef __cplusplus
 }
