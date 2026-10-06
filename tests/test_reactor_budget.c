@@ -809,6 +809,96 @@ static void noop(void *arg)
 	(void)arg;
 }
 
+struct reactor_restart_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned owner_calls;
+	unsigned completions;
+};
+
+static int reactor_restart_owner_call(void *arg)
+{
+	struct reactor_restart_ctx *ctx =
+		(struct reactor_restart_ctx *)arg;
+
+	ctx->owner_calls++;
+	return TR_OK;
+}
+
+static void reactor_restart_completion(void *arg)
+{
+	struct reactor_restart_ctx *ctx =
+		(struct reactor_restart_ctx *)arg;
+
+	assert(pthread_mutex_lock(&ctx->lock) == 0);
+	ctx->completions++;
+	assert(pthread_cond_broadcast(&ctx->cond) == 0);
+	assert(pthread_mutex_unlock(&ctx->lock) == 0);
+}
+
+static void reactor_restart_wait_completion(
+	struct reactor_restart_ctx *ctx, unsigned target)
+{
+	struct timespec deadline;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	assert(pthread_mutex_lock(&ctx->lock) == 0);
+	while (ctx->completions < target)
+		assert(pthread_cond_timedwait(
+			       &ctx->cond, &ctx->lock, &deadline) == 0);
+	assert(pthread_mutex_unlock(&ctx->lock) == 0);
+}
+
+static void test_reactor_restart_epoch(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct reactor_restart_ctx ctx;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+
+	/* create() is not a running admission epoch. */
+	assert(tr_reactor_call(
+		       reactor, reactor_restart_owner_call, &ctx) == TR_ERR_CLOSED);
+	assert(tr_reactor_complete(
+		       reactor, reactor_restart_completion, &ctx) == TR_ERR_CLOSED);
+
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_ERR_STATE);
+	assert(tr_reactor_call(
+		       reactor, reactor_restart_owner_call, &ctx) == TR_OK);
+	assert(ctx.owner_calls == 1U);
+	assert(tr_reactor_complete(
+		       reactor, reactor_restart_completion, &ctx) == TR_OK);
+	reactor_restart_wait_completion(&ctx, 1U);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+
+	/* stop() closes the old command/completion generations. */
+	assert(tr_reactor_call(
+		       reactor, reactor_restart_owner_call, &ctx) == TR_ERR_CLOSED);
+	assert(tr_reactor_complete(
+		       reactor, reactor_restart_completion, &ctx) == TR_ERR_CLOSED);
+
+	/* A second start establishes a fresh, fully usable lifecycle epoch. */
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_call(
+		       reactor, reactor_restart_owner_call, &ctx) == TR_OK);
+	assert(ctx.owner_calls == 2U);
+	assert(tr_reactor_complete(
+		       reactor, reactor_restart_completion, &ctx) == TR_OK);
+	reactor_restart_wait_completion(&ctx, 2U);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+
+	assert(pthread_cond_destroy(&ctx.cond) == 0);
+	assert(pthread_mutex_destroy(&ctx.lock) == 0);
+	puts("reactor stop/restart epoch: ok");
+}
+
 static void test_completion_zero_budget(void)
 {
 	struct tr_completion_queue queue;
@@ -844,6 +934,7 @@ int main(void)
 	test_eagain_wait();
 	test_rx_ready_close_reuse();
 	test_multiple_aux_sources();
+	test_reactor_restart_epoch();
 	test_completion_zero_budget();
 	alarm(0U);
 	return 0;
