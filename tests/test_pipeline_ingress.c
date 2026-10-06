@@ -321,10 +321,9 @@ static void test_pipeline_ingress_routing(void)
 	assert(pipeline_stats.data_count == 1U);
 
 	/*
-	 * Force the terminal membership retirement to fail once. The callback must
-	 * surface that lifecycle error instead of silently reporting only the socket
-	 * close status. Because detach failed, the exact membership intentionally
-	 * remains live until the owner explicitly retries it below.
+	 * 强制 terminal membership 退休失败一次。callback 必须把该生命周期错误
+	 * 暴露给上层，而不能只报告 socket close 状态。由于 detach 失败，exact
+	 * membership 会继续保持存活，直到 owner 在下面显式重试收敛。
 	 */
 	pthread_mutex_lock(&ctx.lock);
 	good_connection = ctx.last_connection;
@@ -346,9 +345,9 @@ static void test_pipeline_ingress_routing(void)
 	assert(pipeline_stats.data_count == 1U);
 
 	/*
-	 * Retry with the exact owner capability. Reactor slot retirement does not
-	 * erase the Pipeline's stored connection identity, so the failed lifecycle
-	 * edge remains recoverable without touching a replacement generation.
+	 * 使用 exact owner capability 重试。Reactor slot 退休不会抹掉 Pipeline
+	 * 保存的 connection identity，因此失败的生命周期边仍可继续收敛，并且
+	 * 不会误触碰后续 replacement generation。
 	 */
 	assert(__real_tr_pipeline_registry_detach_data_route(
 		       registry, &route, good_connection) == TR_OK);
