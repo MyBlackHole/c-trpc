@@ -1155,8 +1155,6 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 fail:
 	tr_connector_destroy(group->connector);
 	group->connector = NULL;
-	free(group->transfers);
-	free(group->data);
 	if (group->control_pool_ready) {
 		int pool_ret = tr_buffer_pool_destroy(&group->control_pool);
 #ifndef NDEBUG
@@ -1166,6 +1164,8 @@ fail:
 			return pool_ret;
 		group->control_pool_ready = 0;
 	}
+	free(group->transfers);
+	free(group->data);
 	if (drain_wait_cond_ready)
 		pthread_cond_destroy(&group->drain_wait_cond);
 	if (drain_wait_lock_ready)
