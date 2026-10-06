@@ -1548,6 +1548,9 @@ struct channel_test_ctx {
 	unsigned channel_down;
 	unsigned channel_up;
 	unsigned channel_goaway;
+	uint64_t ordered_event_seq;
+	uint64_t opened_event_seq;
+	uint64_t goaway_event_seq;
 	struct tr_stream_handle last_stream;
 	struct tr_buffer *held_payload;
 	uint64_t last_message_id;
@@ -1584,6 +1587,7 @@ static void channel_test_on_stream_event(struct tr_stream_handle stream,
 	pthread_mutex_lock(&ctx->lock);
 	if (event == TR_STREAM_EVENT_OPENED) {
 		ctx->opened++;
+		ctx->opened_event_seq = ++ctx->ordered_event_seq;
 		ctx->last_stream = stream;
 	} else if (event == TR_STREAM_EVENT_REMOTE_CLOSED) {
 		ctx->remote_closed++;
@@ -1613,8 +1617,11 @@ static void channel_test_on_channel_event(struct tr_channel *channel,
 		 event == TR_CHANNEL_EVENT_BULK_UP)
 		ctx->channel_up++;
 	else if (event == TR_CHANNEL_EVENT_CONTROL_GOAWAY ||
-		 event == TR_CHANNEL_EVENT_BULK_GOAWAY)
+		 event == TR_CHANNEL_EVENT_BULK_GOAWAY) {
 		ctx->channel_goaway++;
+		if (ctx->goaway_event_seq == 0U)
+			ctx->goaway_event_seq = ++ctx->ordered_event_seq;
+	}
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 }
@@ -2897,7 +2904,7 @@ static void test_channel_drain_goaway_backpressure(void)
 	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle client_conn;
 	struct tr_conn_handle server_conn;
-	struct tr_connection_stats before;
+	struct tr_stream_handle prebarrier_stream;
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	struct channel_drain_backpressure_probe probe;
@@ -2949,9 +2956,6 @@ static void test_channel_drain_goaway_backpressure(void)
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 
-	memset(&before, 0, sizeof(before));
-	assert(tr_reactor_get_connection_stats(client_conn, &before) == TR_OK);
-
 	probe.channel = client_channel;
 	assert(pthread_create(
 		       &owner_thread, NULL,
@@ -2959,13 +2963,13 @@ static void test_channel_drain_goaway_backpressure(void)
 	wait_channel_drain_probe(&probe, &probe.owner_entered);
 
 	/*
-	 * Owner is blocked. tr_reactor_send() reserves the sole ordinary CONTROL
-	 * TX item and fills the one-slot command ring. GOAWAY must still succeed:
-	 * its Connection-embedded lifecycle item does not consume either resource.
+	 * Owner is blocked. A pre-barrier STREAM_OPEN reserves the sole ordinary
+	 * CONTROL TX item and fills the one-slot command ring. begin_drain() must
+	 * still succeed, but GOAWAY may not overtake this already-admitted OPEN.
 	 */
-	assert(tr_reactor_send(
-		       client_conn, TR_FRAME_PONG, 0U, 0U,
-		       UINT64_C(0xfeed), NULL) == TR_OK);
+	assert(tr_stream_open(
+		       client_channel, TR_LANE_CONTROL,
+		       &prebarrier_stream) == TR_OK);
 
 	pthread_mutex_lock(&probe.lock);
 	probe.run_drain = 1;
@@ -2976,13 +2980,19 @@ static void test_channel_drain_goaway_backpressure(void)
 	assert(probe.drain_ret == TR_OK);
 
 	/*
-	 * The pre-barrier PONG command remains a FIFO predecessor. Once it is
-	 * processed, the deferred embedded GOAWAY is attached automatically;
-	 * no second begin_drain()/poll loop is allowed or required.
+	 * Command sequence barrier preserves the pre-barrier OPEN as a FIFO
+	 * predecessor. The peer must observe OPENED before GOAWAY, while GOAWAY
+	 * itself requires no second begin_drain()/poll retry.
 	 */
-	wait_connection_tx_frame(client_conn, before.tx_frames + 1U);
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 1U);
 	wait_channel_counter(&server_ctx, &server_ctx.channel_goaway, 2U);
-	assert(tr_channel_wait_drained(client_channel, 0U) == TR_OK);
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.opened_event_seq != 0U);
+	assert(server_ctx.goaway_event_seq != 0U);
+	assert(server_ctx.opened_event_seq < server_ctx.goaway_event_seq);
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_channel_wait_drained(client_channel, 0U) == TR_AGAIN);
+	assert(tr_stream_close(prebarrier_stream) == TR_OK);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
