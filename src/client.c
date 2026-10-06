@@ -6,6 +6,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 
@@ -55,6 +56,7 @@ struct tr_client {
 	int reassembly_pool_ready;
 
 	int connected;
+	_Atomic int ready_wait_active;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_destroy)
@@ -594,12 +596,25 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 		return TR_ERR_STATE;
 	if (!client->channel)
 		return TR_ERR_STATE;
+	{
+		int expected = 0;
+
+		if (!atomic_compare_exchange_strong_explicit(
+			    &client->ready_wait_active, &expected, 1,
+			    memory_order_acq_rel, memory_order_acquire))
+			return TR_ERR_STATE;
+	}
 
 	wait = (struct tr_client_ready_wait *)calloc(1, sizeof(*wait));
-	if (!wait)
+	if (!wait) {
+		atomic_store_explicit(
+			&client->ready_wait_active, 0, memory_order_release);
 		return TR_ERR_NOMEM;
+	}
 	if (pthread_mutex_init(&wait->lock, NULL) != 0) {
 		free(wait);
+		atomic_store_explicit(
+			&client->ready_wait_active, 0, memory_order_release);
 		return TR_ERR_SYS;
 	}
 	{
@@ -608,6 +623,9 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 		if (pthread_condattr_init(&attr) != 0) {
 			pthread_mutex_destroy(&wait->lock);
 			free(wait);
+			atomic_store_explicit(
+				&client->ready_wait_active, 0,
+				memory_order_release);
 			return TR_ERR_SYS;
 		}
 		if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0 ||
@@ -624,6 +642,8 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 		client->channel, tr_client_ready_event, wait);
 	if (ret != TR_OK) {
 		tr_client_ready_wait_free(wait);
+		atomic_store_explicit(
+			&client->ready_wait_active, 0, memory_order_release);
 		return ret;
 	}
 	observer_installed = 1;
@@ -711,6 +731,8 @@ out:
 		}
 	}
 	tr_client_ready_wait_free(wait);
+	atomic_store_explicit(
+		&client->ready_wait_active, 0, memory_order_release);
 	return result;
 }
 
