@@ -23,7 +23,9 @@ static atomic_uint create_attempts;
 static atomic_uint created_threads;
 static atomic_uint join_attempts;
 static atomic_uint joined_threads;
+static atomic_uint join_failures;
 static atomic_uint fail_create_at;
+static atomic_uint fail_join_at;
 
 int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 			 void *(*start)(void *), void *arg);
@@ -45,9 +47,14 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 
 int __wrap_pthread_join(pthread_t thread, void **result)
 {
+	unsigned attempt = atomic_fetch_add(&join_attempts, 1U) + 1U;
 	int ret;
 
-	atomic_fetch_add(&join_attempts, 1U);
+	if (attempt == atomic_load(&fail_join_at)) {
+		atomic_fetch_add(&join_failures, 1U);
+		return EINVAL;
+	}
+
 	ret = __real_pthread_join(thread, result);
 	if (ret == 0)
 		atomic_fetch_add(&joined_threads, 1U);
@@ -59,27 +66,38 @@ static void expect_threads(unsigned created, unsigned joined)
 	unsigned actual_created = atomic_load(&created_threads);
 	unsigned actual_joined = atomic_load(&joined_threads);
 	unsigned actual_joins = atomic_load(&join_attempts);
+	unsigned actual_join_failures = atomic_load(&join_failures);
 
 	if (actual_created != created || actual_joined != joined ||
-	    actual_joins != joined)
-		fprintf(stderr, "threads: created=%u joined=%u join_attempts=%u; "
-			"expected created=%u joined=%u\n", actual_created,
-			actual_joined, actual_joins, created, joined);
+	    actual_joins != actual_joined + actual_join_failures)
+		fprintf(stderr,
+			"threads: created=%u joined=%u join_attempts=%u "
+			"join_failures=%u; expected created=%u joined=%u\n",
+			actual_created, actual_joined, actual_joins,
+			actual_join_failures, created, joined);
 	assert(actual_created == created);
 	assert(actual_joined == joined);
-	assert(actual_joins == joined);
+	assert(actual_joins == actual_joined + actual_join_failures);
 }
 
 static void reset_probe(unsigned fail_at)
 {
-	/* 成功创建必须一一对应成功 join；重复 join 同样算失败。 */
+	/* 成功创建必须最终一一对应成功 join；失败 join 只允许显式 retry。 */
 	expect_threads(atomic_load(&created_threads),
 		       atomic_load(&created_threads));
 	atomic_store(&create_attempts, 0U);
 	atomic_store(&created_threads, 0U);
 	atomic_store(&join_attempts, 0U);
 	atomic_store(&joined_threads, 0U);
+	atomic_store(&join_failures, 0U);
 	atomic_store(&fail_create_at, fail_at);
+	atomic_store(&fail_join_at, 0U);
+}
+
+static void fail_join_once_at(unsigned attempt)
+{
+	assert(attempt != 0U);
+	atomic_store(&fail_join_at, attempt);
 }
 
 static void small_limits(struct tr_facade_limits *limits)
@@ -354,6 +372,29 @@ static void test_runtime_multi_shard_threads(void)
 	expect_threads(7U, 7U);
 }
 
+static void test_reactor_join_failure_is_retryable(void)
+{
+	struct tr_reactor *reactor = NULL;
+
+	reset_probe(0U);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	expect_threads(1U, 0U);
+
+	/*
+	 * STOP is already accepted before pthread_join(). A failed join must keep
+	 * the exact owner thread handle and retry only the join barrier, never queue
+	 * a second STOP to an owner that may already have exited.
+	 */
+	fail_join_once_at(1U);
+	assert(tr_reactor_stop(reactor) == TR_ERR_SYS);
+	expect_threads(1U, 0U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	expect_threads(1U, 1U);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+}
+
 static void test_runtime_multi_shard_start_rollback(void)
 {
 	struct tr_runtime_config config;
@@ -378,6 +419,47 @@ static void test_runtime_multi_shard_start_rollback(void)
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
 	expect_threads(5U, 5U);
+}
+
+static void test_runtime_start_rollback_join_failure_is_retryable(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shards[3];
+	struct tr_runtime *runtime = NULL;
+
+	runtime_multi_shard_config_init(&config, shards);
+
+	/*
+	 * Reactor 1 create fails after Reactor 0 started. Then force Reactor 0's
+	 * rollback join to fail once. Runtime must preserve shard->started instead
+	 * of pretending rollback completed, and start() must refuse a new epoch
+	 * until stop() retries the outstanding join.
+	 */
+	reset_probe(6U);
+	fail_join_once_at(1U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(runtime != NULL);
+	expect_threads(4U, 0U);
+
+	assert(tr_runtime_start(runtime) == TR_ERR_SYS);
+	assert(atomic_load(&create_attempts) == 6U);
+	expect_threads(5U, 0U);
+
+	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
+
+	/* Aggregate runtime->started is false, but the partial shard is recoverable. */
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	expect_threads(5U, 1U);
+
+	/* After the failed lifecycle edge converges, a clean new epoch can start. */
+	atomic_store(&fail_create_at, 0U);
+	assert(tr_runtime_start(runtime) == TR_OK);
+	expect_threads(8U, 1U);
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	expect_threads(8U, 4U);
+
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	expect_threads(8U, 8U);
 }
 
 static void test_facade_internal_tuning_rejects_invalid_observability(void)
@@ -478,7 +560,9 @@ int main(void)
 	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
 	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
 	RUN_TEST(test_runtime_multi_shard_threads);
+	RUN_TEST(test_reactor_join_failure_is_retryable);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
+	RUN_TEST(test_runtime_start_rollback_join_failure_is_retryable);
 	RUN_TEST(test_facade_internal_tuning_rejects_invalid_observability);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);

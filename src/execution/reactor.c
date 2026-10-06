@@ -221,6 +221,13 @@ struct tr_reactor {
 	pthread_mutex_t ctl_lock;
 	int started;
 	_Atomic int accepting;
+	/*
+	 * ctl_lock-protected terminal edge. Once the STOP command has been
+	 * accepted, retrying stop() must only retry pthread_join(); enqueueing a
+	 * second STOP could wait forever after the owner has already exited.
+	 */
+	int stop_submitted;
+	/* Owner-only event-loop stop flag, reset only when a new epoch starts. */
 	int stopping;
 	/* Owner-only: a popped command batch still has FIFO predecessors. */
 	int command_dispatching;
@@ -3054,10 +3061,10 @@ int tr_reactor_start(struct tr_reactor *reactor)
 	}
 
 	/*
-	 * stop() leaves stopping=1 and accepting=0 as the closed epoch marker.
-	 * Reset only the owner-loop stop flag before creating the next owner.
-	 * The new thread blocks on ctl_lock above until this function has completed
-	 * the rest of the epoch publication.
+	 * A successful stop() has already joined the previous owner and cleared
+	 * stop_submitted. Reset only the owner-loop flag before creating the next
+	 * epoch. The new thread blocks on ctl_lock until started/accepting and queue
+	 * admission all belong to the same epoch.
 	 */
 	reactor->stopping = 0;
 
@@ -4075,7 +4082,7 @@ int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle)
 int tr_reactor_stop(struct tr_reactor *reactor)
 {
 	struct tr_command command;
-	int ret;
+	int ret = TR_OK;
 
 	if (!reactor)
 		return TR_ERR_INVALID;
@@ -4094,21 +4101,34 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 		return TR_OK;
 	}
 
-	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	/*
-	 * 先关闭所有 producer admission：
-	 * - completion waiter 由 completion queue close 唤醒；
-	 * - synchronous command waiter 由 command wait_close 唤醒；
-	 * 然后 STOP 自己以 lifecycle-only force wait 等待 ring capacity。
+	 * stop_submitted separates two lifecycle barriers:
 	 *
-	 * Reactor pop command 不取得 ctl_lock，因此这里持 ctl_lock 睡眠不会阻止
-	 * owner 释放 command slot，同时也阻止第二批普通 producer 越过 stop 边界。
+	 *   RUNNING -> STOP submitted -> owner exits -> pthread_join succeeds
+	 *
+	 * pthread_join() itself is fallible. Once STOP has been accepted, a retry
+	 * must never enqueue another STOP: the owner may already have exited and no
+	 * consumer would remain to free command-ring capacity or process it.
 	 */
-	tr_completion_queue_close(&reactor->completions);
-	tr_command_queue_wait_close(&reactor->commands);
-	memset(&command, 0, sizeof(command));
-	command.type = TR_CMD_STOP;
-	ret = tr_reactor_push_command_wait_force(reactor, &command);
+	if (!reactor->stop_submitted) {
+		atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
+		/*
+		 * 先关闭所有 producer admission：
+		 * - completion waiter 由 completion queue close 唤醒；
+		 * - synchronous command waiter 由 command wait_close 唤醒；
+		 * 然后 STOP 自己以 lifecycle-only force wait 等待 ring capacity。
+		 *
+		 * Reactor pop command 不取得 ctl_lock，因此这里持 ctl_lock 睡眠不会阻止
+		 * owner 释放 command slot，同时也阻止第二批普通 producer 越过 stop 边界。
+		 */
+		tr_completion_queue_close(&reactor->completions);
+		tr_command_queue_wait_close(&reactor->commands);
+		memset(&command, 0, sizeof(command));
+		command.type = TR_CMD_STOP;
+		ret = tr_reactor_push_command_wait_force(reactor, &command);
+		if (ret == TR_OK)
+			reactor->stop_submitted = 1;
+	}
 
 	pthread_mutex_unlock(&reactor->ctl_lock);
 
@@ -4121,6 +4141,7 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	reactor->started = 0;
+	reactor->stop_submitted = 0;
 	pthread_mutex_unlock(&reactor->ctl_lock);
 	return TR_OK;
 }

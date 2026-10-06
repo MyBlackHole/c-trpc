@@ -245,6 +245,10 @@ int tr_reactor_abort(struct tr_conn_handle connection, int status);
 /*
  * 关闭当前运行 epoch 并等待 owner thread 退出。成功后可再次 start()。
  * stop 是外部同步生命周期屏障，禁止从 Reactor owner callback 内调用。
+ *
+ * STOP command 一旦被接受，后续即使 pthread_join() 暂时失败，也不会重新提交
+ * 第二个 STOP。对象保持 caller-owned 的 terminal 状态；再次 stop()/destroy()
+ * 会重试同一 owner thread 的 join barrier，直到成功后才允许开始新 epoch。
  */
 int tr_reactor_stop(struct tr_reactor *reactor);
 int tr_reactor_destroy(struct tr_reactor *reactor);
