@@ -514,7 +514,7 @@ struct tr_channel_protocol_buffer {
 
 static void tr_channel_protocol_buffer_release(struct tr_buffer *buffer)
 {
-	free(buffer);
+	free((struct tr_channel_protocol_buffer *)buffer);
 }
 
 static int tr_channel_protocol_buffer_acquire(
