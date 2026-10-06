@@ -596,9 +596,9 @@ tr_channel_normalize_create_hello_error(struct tr_channel *channel,
 	return still_alive ? ret : TR_OK;
 }
 
-static int tr_channel_send_hello_ack(struct tr_channel *channel,
-				     struct tr_conn_handle connection,
-				     const struct tr_channel_capabilities *caps)
+static int tr_channel_send_hello_ack(
+	struct tr_conn_handle connection,
+	const struct tr_channel_capabilities *caps)
 {
 	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
 	int ret;
@@ -1203,7 +1203,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	ack_caps = local;
 	ack_caps.protocol_version = high;
 	ack_caps.feature_bits = negotiated.feature_bits;
-	ret = tr_channel_send_hello_ack(channel, connection, &ack_caps);
+	ret = tr_channel_send_hello_ack(connection, &ack_caps);
 	if (ret != TR_OK)
 		return tr_channel_protocol_error(channel, connection, ret);
 
@@ -2511,7 +2511,6 @@ static int tr_channel_detach_on_owner(void *arg)
 	struct tr_reactor_timer_handle timer;
 	int timer_registered;
 	int split;
-	int ret;
 
 	if (!channel)
 		return TR_ERR_INVALID;
