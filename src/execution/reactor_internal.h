@@ -78,6 +78,12 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 int tr_reactor_close_on_owner(struct tr_conn_handle connection);
 int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
 
+/*
+ * Owner-only terminal control send. GOAWAY uses one Connection-embedded
+ * header-only TX slot, independent of ordinary control TX pool/command capacity.
+ */
+int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection);
+
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 

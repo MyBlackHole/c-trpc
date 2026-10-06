@@ -1548,6 +1548,9 @@ struct channel_test_ctx {
 	unsigned channel_down;
 	unsigned channel_up;
 	unsigned channel_goaway;
+	uint64_t ordered_event_seq;
+	uint64_t opened_event_seq;
+	uint64_t goaway_event_seq;
 	struct tr_stream_handle last_stream;
 	struct tr_buffer *held_payload;
 	uint64_t last_message_id;
@@ -1584,6 +1587,7 @@ static void channel_test_on_stream_event(struct tr_stream_handle stream,
 	pthread_mutex_lock(&ctx->lock);
 	if (event == TR_STREAM_EVENT_OPENED) {
 		ctx->opened++;
+		ctx->opened_event_seq = ++ctx->ordered_event_seq;
 		ctx->last_stream = stream;
 	} else if (event == TR_STREAM_EVENT_REMOTE_CLOSED) {
 		ctx->remote_closed++;
@@ -1613,8 +1617,11 @@ static void channel_test_on_channel_event(struct tr_channel *channel,
 		 event == TR_CHANNEL_EVENT_BULK_UP)
 		ctx->channel_up++;
 	else if (event == TR_CHANNEL_EVENT_CONTROL_GOAWAY ||
-		 event == TR_CHANNEL_EVENT_BULK_GOAWAY)
+		 event == TR_CHANNEL_EVENT_BULK_GOAWAY) {
 		ctx->channel_goaway++;
+		if (ctx->goaway_event_seq == 0U)
+			ctx->goaway_event_seq = ++ctx->ordered_event_seq;
+	}
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 }
@@ -2688,24 +2695,6 @@ static void wait_channel_drain_probe(
 	pthread_mutex_unlock(&probe->lock);
 }
 
-static void wait_connection_tx_frame(
-	struct tr_conn_handle connection, uint64_t target)
-{
-	unsigned i;
-
-	for (i = 0; i < 5000U; ++i) {
-		struct tr_connection_stats stats;
-		struct timespec pause_time = { 0, 1000000L };
-
-		memset(&stats, 0, sizeof(stats));
-		assert(tr_reactor_get_connection_stats(connection, &stats) == TR_OK);
-		if (stats.tx_frames >= target && stats.tx_queued_items == 0U)
-			return;
-		nanosleep(&pause_time, NULL);
-	}
-	assert(!"timed out waiting for control TX item release");
-}
-
 static void test_channel_graceful_drain(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -2897,7 +2886,7 @@ static void test_channel_drain_goaway_backpressure(void)
 	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle client_conn;
 	struct tr_conn_handle server_conn;
-	struct tr_connection_stats before;
+	struct tr_stream_handle prebarrier_stream;
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	struct channel_drain_backpressure_probe probe;
@@ -2914,9 +2903,12 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
-	reactor_config.command_capacity = 64U;
+	/*
+	 * Two slots let setup adopt both fds. The gated phase below fills both
+	 * slots deterministically before drain.
+	 */
+	reactor_config.command_capacity = 2U;
 	reactor_config.tx_item_capacity = 8U;
-	/* One CONTROL item makes GOAWAY admission failure deterministic. */
 	reactor_config.control_tx_item_capacity = 1U;
 	reactor_config.rx_buffer_count = 8U;
 	reactor_config.rx_buffer_size = 4096U;
@@ -2949,9 +2941,6 @@ static void test_channel_drain_goaway_backpressure(void)
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 
-	memset(&before, 0, sizeof(before));
-	assert(tr_reactor_get_connection_stats(client_conn, &before) == TR_OK);
-
 	probe.channel = client_channel;
 	assert(pthread_create(
 		       &owner_thread, NULL,
@@ -2959,13 +2948,20 @@ static void test_channel_drain_goaway_backpressure(void)
 	wait_channel_drain_probe(&probe, &probe.owner_entered);
 
 	/*
-	 * Owner is blocked. tr_reactor_send() reserves the sole CONTROL TX item
-	 * before queueing SEND, so begin_drain() cannot allocate GOAWAY and must
-	 * return TR_AGAIN.
+	 * Owner is blocked. A pre-barrier STREAM_OPEN reserves the sole ordinary
+	 * CONTROL TX item; STREAM_OPEN + RESUME_RX fill the two-slot command ring.
+	 * begin_drain() must still succeed, but GOAWAY may not overtake the
+	 * already-admitted OPEN.
 	 */
-	assert(tr_reactor_send(
-		       client_conn, TR_FRAME_PONG, 0U, 0U,
-		       UINT64_C(0xfeed), NULL) == TR_OK);
+	assert(tr_stream_open(
+		       client_channel, TR_LANE_CONTROL,
+		       &prebarrier_stream) == TR_OK);
+	/*
+	 * STREAM_OPEN used one command slot and the sole ordinary CONTROL TX item.
+	 * RESUME_RX uses no TX item and fills the second command slot while owner
+	 * remains blocked.
+	 */
+	assert(tr_reactor_resume_rx(client_conn) == TR_OK);
 
 	pthread_mutex_lock(&probe.lock);
 	probe.run_drain = 1;
@@ -2973,21 +2969,28 @@ static void test_channel_drain_goaway_backpressure(void)
 	pthread_mutex_unlock(&probe.lock);
 	wait_channel_drain_probe(&probe, &probe.drain_done);
 	assert(pthread_join(owner_thread, NULL) == 0);
-	assert(probe.drain_ret == TR_AGAIN);
+	assert(probe.drain_ret == TR_OK);
 
 	/*
-	 * Stream quiescence is already true, but wait_drained() must not become a
-	 * second protocol owner and retry GOAWAY from the application thread.
+	 * Command sequence barrier preserves the pre-barrier OPEN as a FIFO
+	 * predecessor. The peer must observe OPENED before GOAWAY, while GOAWAY
+	 * itself requires no second begin_drain()/poll retry.
 	 */
-	assert(tr_channel_wait_drained(client_channel, 0U) == TR_OK);
-	pthread_mutex_lock(&server_ctx.lock);
-	assert(server_ctx.channel_goaway == 0U);
-	pthread_mutex_unlock(&server_ctx.lock);
-
-	wait_connection_tx_frame(client_conn, before.tx_frames + 1U);
-	assert(tr_channel_begin_drain(client_channel) == TR_OK);
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 1U);
 	wait_channel_counter(&server_ctx, &server_ctx.channel_goaway, 2U);
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.opened_event_seq != 0U);
+	assert(server_ctx.goaway_event_seq != 0U);
+	assert(server_ctx.opened_event_seq < server_ctx.goaway_event_seq);
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_channel_wait_drained(client_channel, 0U) == TR_AGAIN);
 
+	/*
+	 * Do not turn test cleanup into another admission requirement:
+	 * STREAM_CLOSE intentionally remains ordinary CONTROL traffic and may
+	 * observe backpressure here. Reactor hard teardown owns the remaining
+	 * Stream/Connection cleanup after the ordering invariant is proven.
+	 */
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);

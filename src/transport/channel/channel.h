@@ -235,8 +235,8 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
  * 因此 active Stream 在 begin_drain() 成功建立 barrier 后只能保持或减少，
  * DRAINED 不会因为延迟到达的 peer OPEN 再退回 DRAINING。
  *
- * 本操作幂等；TR_AGAIN 表示 GOAWAY control frame 暂时无法入队，
- * Channel 仍保持 draining，调用方可以重试。
+ * 本操作幂等。GOAWAY 使用 Connection 内嵌的终局 lifecycle TX slot，
+ * 不与普通 control TX pool / command ring 容量竞争。
  */
 int tr_channel_begin_drain(struct tr_channel *channel);
 
@@ -244,9 +244,8 @@ int tr_channel_begin_drain(struct tr_channel *channel);
  * 同步等待 active Stream 归零。等待由 Channel 状态条件变量驱动，不周期
  * 轮询 active Stream；timeout_ms == 0 保持非阻塞检查语义。
  *
- * 本函数是纯等待操作，不重试 GOAWAY，也不推进 Channel 协议状态。
- * tr_channel_begin_drain() 返回 TR_AGAIN 时，调用方必须重试 begin_drain()
- * 直到 GOAWAY admission 成功或选择终止 graceful drain。
+ * 本函数是纯等待操作，不发送 GOAWAY，也不推进 Channel 协议状态。
+ * GOAWAY admission 已在 begin_drain() 的 owner transaction 中完成。
  *
  * 该进度依赖 Reactor owner 继续处理 RX/TX 和 close/cancel callback，因此
  * owner context 调用返回 TR_ERR_STATE。
@@ -258,8 +257,8 @@ int tr_channel_begin_drain(struct tr_channel *channel);
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
 
 /*
- * DRAINED 表示本地 Stream 已全部静默；它不是“GOAWAY 已成功入队”的替代状态。
- * 调用方仍必须检查/重试 begin_drain() 的 TR_AGAIN。
+ * DRAINED 表示本地 Stream 已全部静默。GOAWAY admission 属于 begin_drain()
+ * 的终局协议边界，与该状态查询彼此独立。
  */
 int tr_channel_get_state(struct tr_channel *channel,
 			 enum tr_channel_state *out);

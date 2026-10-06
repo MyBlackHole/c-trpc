@@ -141,6 +141,16 @@ struct tr_connection {
 	struct tr_tx_item *tx_active;
 	uint32_t tx_control_streak;
 
+	/*
+	 * Header-only terminal control reserve. This item is embedded so GOAWAY
+	 * admission cannot fail because ordinary control_tx_pool or command-ring
+	 * capacity is exhausted.
+	 */
+	struct tr_tx_item lifecycle_tx;
+	uint64_t lifecycle_after_sequence;
+	int lifecycle_tx_busy;
+	int lifecycle_tx_enqueued;
+
 	uint32_t epoll_events;
 	int tx_wait_writable;
 	int tx_scheduled;
@@ -214,6 +224,8 @@ struct tr_reactor {
 	int stopping;
 	/* Owner-only: a popped command batch still has FIFO predecessors. */
 	int command_dispatching;
+	uint64_t last_processed_command_sequence;
+	uint32_t lifecycle_tx_pending_count;
 
 	struct tr_command_queue commands;
 	struct tr_completion_queue completions;
@@ -771,7 +783,14 @@ static void tr_release_tx_queue(struct tr_reactor *reactor,
 				if (item->payloads[i])
 					tr_buffer_release(item->payloads[i]);
 		}
-		tr_tx_pool_release(item->owner_pool, item);
+		if (item == &connection->lifecycle_tx) {
+			memset(item, 0, sizeof(*item));
+			connection->lifecycle_after_sequence = 0U;
+			connection->lifecycle_tx_busy = 0;
+			connection->lifecycle_tx_enqueued = 0;
+		} else {
+			tr_tx_pool_release(item->owner_pool, item);
+		}
 		item = next;
 	}
 
@@ -834,6 +853,14 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	}
 	tr_parser_reset(&connection->parser);
 	tr_release_tx_queue(reactor, connection);
+	if (connection->lifecycle_tx_busy && !connection->lifecycle_tx_enqueued) {
+		assert(reactor->lifecycle_tx_pending_count != 0U);
+		reactor->lifecycle_tx_pending_count--;
+		memset(&connection->lifecycle_tx, 0,
+		       sizeof(connection->lifecycle_tx));
+		connection->lifecycle_after_sequence = 0U;
+		connection->lifecycle_tx_busy = 0;
+	}
 
 	__atomic_store_n(&connection->tx_wait_writable, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->rx_paused, 0, __ATOMIC_RELAXED);
@@ -1137,7 +1164,14 @@ static void tr_connection_complete_tx(struct tr_connection *connection,
 			if (item->payloads[i])
 				tr_buffer_release(item->payloads[i]);
 	}
-	tr_tx_pool_release(item->owner_pool, item);
+	if (item == &connection->lifecycle_tx) {
+		memset(item, 0, sizeof(*item));
+		connection->lifecycle_after_sequence = 0U;
+		connection->lifecycle_tx_busy = 0;
+		connection->lifecycle_tx_enqueued = 0;
+	} else {
+		tr_tx_pool_release(item->owner_pool, item);
+	}
 }
 
 static void tr_connection_flush_tx(struct tr_reactor *reactor,
@@ -1598,6 +1632,41 @@ static void tr_enqueue_tx_item_owner(struct tr_reactor *reactor,
 	tr_schedule_tx(reactor, connection);
 }
 
+static void tr_connection_try_enqueue_lifecycle_tx(
+	struct tr_reactor *reactor, struct tr_connection *connection)
+{
+	if (!connection || connection->state != TR_CONN_ACTIVE ||
+	    !connection->lifecycle_tx_busy ||
+	    connection->lifecycle_tx_enqueued)
+		return;
+#ifndef NDEBUG
+	assert(connection->lifecycle_after_sequence != 0U ||
+	       reactor->last_processed_command_sequence == 0U);
+#endif
+	if (!tr_command_sequence_after_eq(
+		    reactor->last_processed_command_sequence,
+		    connection->lifecycle_after_sequence))
+		return;
+
+	assert(reactor->lifecycle_tx_pending_count != 0U);
+	reactor->lifecycle_tx_pending_count--;
+	connection->lifecycle_tx_enqueued = 1;
+	tr_enqueue_tx_item_owner(
+		reactor, connection, &connection->lifecycle_tx);
+}
+
+static void tr_reactor_flush_lifecycle_tx(struct tr_reactor *reactor)
+{
+	uint32_t i;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
+	if (reactor->lifecycle_tx_pending_count == 0U)
+		return;
+	for (i = 0; i < reactor->config.max_connections; ++i)
+		tr_connection_try_enqueue_lifecycle_tx(
+			reactor, &reactor->connections[i]);
+}
+
 static int tr_send_item_owner(struct tr_reactor *reactor,
 			      struct tr_conn_handle handle,
 			      struct tr_tx_item *item)
@@ -1802,8 +1871,11 @@ static int tr_process_commands(struct tr_reactor *reactor,
 		default:
 			break;
 		}
+		reactor->last_processed_command_sequence =
+			command->sequence;
 	}
 	reactor->command_dispatching = 0;
+	tr_reactor_flush_lifecycle_tx(reactor);
 
 	/*
 	 * A full batch may leave work whose wake has already been consumed.
@@ -2087,6 +2159,9 @@ static void *tr_reactor_thread_main(void *arg)
 	}
 
 	tr_cleanup_connections(reactor);
+#ifndef NDEBUG
+	assert(reactor->lifecycle_tx_pending_count == 0U);
+#endif
 	tr_current_reactor_owner = NULL;
 	return NULL;
 }
@@ -3031,6 +3106,53 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 	out->generation = generation;
 
 	pthread_mutex_unlock(&reactor->ctl_lock);
+	return TR_OK;
+}
+
+int tr_reactor_send_goaway_on_owner(struct tr_conn_handle handle)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+	struct tr_tx_item *item;
+
+	if (!reactor || handle.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+
+	connection = tr_lookup_connection(
+		reactor, handle.slot, handle.generation);
+	if (!connection)
+		return TR_ERR_STALE;
+
+	/*
+	 * At most one terminal GOAWAY item exists per physical Connection. Repeated
+	 * drain publication before wire completion is therefore idempotent.
+	 */
+	if (connection->lifecycle_tx_busy)
+		return TR_OK;
+
+	item = &connection->lifecycle_tx;
+	memset(item, 0, sizeof(*item));
+	item->type = TR_FRAME_GOAWAY;
+	item->stream_id = 0U;
+	item->message_id = 0U;
+	item->message_len = 0U;
+	item->message_pos = 0U;
+	item->max_frame_payload_len = reactor->config.max_payload_len;
+
+	/*
+	 * Snapshot the FIFO frontier under the command-queue lock. Commands already
+	 * admitted at this drain linearization point remain predecessors. Later
+	 * producers receive a larger sequence and cannot delay GOAWAY.
+	 */
+	connection->lifecycle_after_sequence =
+		tr_command_queue_last_sequence(&reactor->commands);
+	connection->lifecycle_tx_busy = 1;
+	connection->lifecycle_tx_enqueued = 0;
+	reactor->lifecycle_tx_pending_count++;
+
+	tr_connection_try_enqueue_lifecycle_tx(reactor, connection);
 	return TR_OK;
 }
 

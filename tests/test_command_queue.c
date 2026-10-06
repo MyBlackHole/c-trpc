@@ -82,7 +82,9 @@ static void test_immediate_push_stays_nonblocking(void)
 	need_wake = 1;
 	assert(tr_command_queue_push(&queue, &resume, &need_wake) == TR_OK);
 	assert(need_wake == 0);
+	assert(tr_command_queue_last_sequence(&queue) == 2U);
 	assert(tr_command_queue_push(&queue, &send, NULL) == TR_AGAIN);
+	assert(tr_command_queue_last_sequence(&queue) == 2U);
 
 	pthread_mutex_lock(&queue.lock);
 	assert(queue.count == 2U);
@@ -94,6 +96,9 @@ static void test_immediate_push_stays_nonblocking(void)
 
 	count = tr_command_queue_pop_batch(&queue, out, 2U);
 	assert(count == 2U);
+	assert(out[0].sequence == 1U);
+	assert(out[1].sequence == 2U);
+	assert(out[0].sequence < out[1].sequence);
 	assert(tr_command_queue_is_empty(&queue) == 1);
 	tr_command_queue_destroy(&queue);
 }
@@ -250,12 +255,43 @@ static void test_wait_generation_fences_reopen(void)
 	tr_command_queue_destroy(&queue);
 }
 
+static void test_sequence_wrap_order(void)
+{
+	struct tr_command_queue queue;
+	struct tr_command command;
+	struct tr_command out[2];
+
+	memset(&command, 0, sizeof(command));
+	command.type = TR_CMD_RESUME_RX;
+	assert(tr_command_queue_init(&queue, 2U) == TR_OK);
+
+	/* Force the only interesting boundary without executing 2^64 pushes. */
+	pthread_mutex_lock(&queue.lock);
+	queue.next_sequence = UINT64_MAX - 1U;
+	pthread_mutex_unlock(&queue.lock);
+
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_OK);
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_OK);
+	assert(tr_command_queue_last_sequence(&queue) == 1U);
+	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 2U);
+	assert(out[0].sequence == UINT64_MAX);
+	assert(out[1].sequence == 1U);
+
+	assert(tr_command_sequence_after_eq(UINT64_MAX, UINT64_MAX));
+	assert(tr_command_sequence_after_eq(1U, UINT64_MAX));
+	assert(!tr_command_sequence_after_eq(UINT64_MAX, 1U));
+	assert(tr_command_sequence_after_eq(0U, 0U));
+
+	tr_command_queue_destroy(&queue);
+}
+
 int main(void)
 {
 	test_immediate_push_stays_nonblocking();
 	test_batch_pop_wakes_sync_waiters();
 	test_close_cancels_sync_waiter_but_not_forced_stop();
 	test_wait_generation_fences_reopen();
+	test_sequence_wrap_order();
 	puts("command queue selective capacity waits: ok");
 	return 0;
 }

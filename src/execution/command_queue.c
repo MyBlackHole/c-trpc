@@ -50,6 +50,7 @@ void tr_command_queue_destroy(struct tr_command_queue *queue)
 	assert(queue->waiters == 0U);
 #endif
 	queue->full_events = 0;
+	queue->next_sequence = 0U;
 	queue->wait_generation = 0U;
 	queue->waiters = 0U;
 	queue->wait_accepting = 0;
@@ -109,10 +110,16 @@ static int tr_command_queue_enqueue_locked(
 	struct tr_command_queue *queue, const struct tr_command *command,
 	int *need_wake)
 {
+	struct tr_command queued;
 	int wake = 0;
 
 	tr_command_queue_observe_push_locked(queue, command);
-	queue->items[queue->tail] = *command;
+	queued = *command;
+	queue->next_sequence++;
+	if (queue->next_sequence == 0U)
+		queue->next_sequence = 1U;
+	queued.sequence = queue->next_sequence;
+	queue->items[queue->tail] = queued;
 	queue->tail = (queue->tail + 1U) % queue->capacity;
 	queue->count++;
 	tr_observe_high_water_u32(&queue->peak_count, queue->count);
@@ -271,6 +278,19 @@ int tr_command_queue_is_empty(struct tr_command_queue *queue)
 	pthread_mutex_unlock(&queue->lock);
 	return empty;
 }
+
+uint64_t tr_command_queue_last_sequence(struct tr_command_queue *queue)
+{
+	uint64_t sequence;
+
+	if (!queue)
+		return 0U;
+	pthread_mutex_lock(&queue->lock);
+	sequence = queue->next_sequence;
+	pthread_mutex_unlock(&queue->lock);
+	return sequence;
+}
+
 
 size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 				  struct tr_command *out, size_t max_commands)
