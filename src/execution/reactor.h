@@ -147,6 +147,18 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      tr_reactor_frame_cb frame_cb,
 		      tr_reactor_event_cb event_cb, void *callback_arg,
 		      struct tr_reactor **out);
+
+/*
+ * 开启一个新的 Reactor 运行 epoch。
+ *
+ * create() 后以及每次成功 stop() 后 Reactor 都处于非运行状态；同一个 Reactor
+ * 可以再次 start。每次 start 都重新开放 command/completion admission generation，
+ * 旧 epoch 中被 stop 唤醒的 waiter 不得进入新 epoch。
+ *
+ * stop 会关闭并回收所有存活 connection，因此旧 tr_conn_handle 不跨 epoch 保持
+ * 存活。Reactor-local 的已注册 timer/listener/aux source 属于 Reactor 对象本身，
+ * 未显式 unregister 时会保留，并在下一 epoch owner 完整发布后恢复 dispatch。
+ */
 int tr_reactor_start(struct tr_reactor *reactor);
 
 /* 所有权：返回 TR_OK 后 fd 由 Reactor 接管；失败时仍由调用方拥有。 */
@@ -230,6 +242,10 @@ int tr_reactor_close(struct tr_conn_handle connection);
 /* 主动使存活 connection 失败，并通过 connection callback 上报 status。 */
 int tr_reactor_abort(struct tr_conn_handle connection, int status);
 
+/*
+ * 关闭当前运行 epoch 并等待 owner thread 退出。成功后可再次 start()。
+ * stop 是外部同步生命周期屏障，禁止从 Reactor owner callback 内调用。
+ */
 int tr_reactor_stop(struct tr_reactor *reactor);
 int tr_reactor_destroy(struct tr_reactor *reactor);
 
