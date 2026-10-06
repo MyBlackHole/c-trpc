@@ -167,6 +167,12 @@ Channel 仍同时服务 Reactor 回调/所有者调用与部分应用 API，因�
 Stream 表、流量控制、通道状态、排空和快照诊断暂时继续由
 `channel->lock` 保护。
 
+Client `wait_ready` 不再每 1 ms 查询 Channel 状态。它临时安装一个
+lifecycle observer，由 Reactor owner 在 CONTROL lifecycle event 上唤醒外部
+waiter；waiter 被唤醒后只通过受 `channel->lock` 保护的快照 API 重新判断
+predicate，不直接修改协议状态。observer 安装/清除都是同步 owner publication，
+因此清除成功后 callback_arg 不会再被 Reactor 访问。
+
 以下控制面已经退出该锁：
 
 - 上层处理器发布/读取：仅 Reactor 所有者访问；
