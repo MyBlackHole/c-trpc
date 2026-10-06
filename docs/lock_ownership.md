@@ -197,9 +197,11 @@ Channel 的阻塞状态观察统一使用 `channel->lock + state_cond`。
 - 正常等待直接睡到状态变化或总 deadline，不再每 1 ms 轮询 Stream 数。
 
 GOAWAY admission 属于 `begin_drain()` 的 Reactor-owner 协议动作。
-`begin_drain() == TR_AGAIN` 时由 facade/lifecycle caller 在外部控制层重试，
-不能把协议推进塞进 wait primitive。Server 的 one-shot drain 会在 peer table
-经过 listener/peer-event owner barrier 冻结后重试该 owner 操作。
+它使用 Connection 内嵌 lifecycle TX slot，并以 command sequence barrier 保留
+drain 线性化点之前已经成功提交的命令顺序，因此不再向 facade 暴露普通
+CONTROL TX pool / command ring 的 `TR_AGAIN`。Server one-shot drain 在
+peer table 经过 listener/peer-event owner barrier 冻结后只需发布一次
+`begin_drain()`，随后进入纯 `wait_drained()`。
 
 条件变量使用 `CLOCK_MONOTONIC`，与原先 drain timeout 的时钟语义一致。
 Channel destroy 与 waiter 不是并发安全组合。Channel 用
