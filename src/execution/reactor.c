@@ -2456,7 +2456,11 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      &wake_event) < 0)
 		return TR_ERR_SYS;
 
-	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
+	/*
+	 * create() 只建立对象与内核资源，不开放运行期 producer admission。
+	 * 第一轮以及后续每一轮 start() 都显式开启新的 lifecycle epoch。
+	 */
+	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	*out = reactor;
 	build.reactor = NULL;
 	return TR_OK;
@@ -2988,17 +2992,31 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_STATE;
 	}
 
+	/*
+	 * stop() leaves stopping=1 and accepting=0 as the closed epoch marker.
+	 * A new start must publish the next epoch before the owner thread can
+	 * observe those fields; ctl_lock simultaneously prevents normal command
+	 * producers from entering until started is committed below.
+	 *
+	 * completion producers do not use ctl_lock, so their queue remains closed
+	 * until pthread_create() succeeds.
+	 */
+	reactor->stopping = 0;
+	atomic_store_explicit(&reactor->accepting, 1, memory_order_release);
+
 	error = pthread_create(&reactor->thread, NULL, tr_reactor_thread_main,
 			       reactor);
 	if (error != 0) {
+		atomic_store_explicit(&reactor->accepting, 0,
+				      memory_order_release);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_SYS;
 	}
 
 	/*
-	 * completion admission opens only after the consumer thread exists.
-	 * From this point producers synchronize only with the completion queue,
-	 * not with ctl_lock.
+	 * Reopen the queue-local admission epochs only after the consumer exists.
+	 * Both primitives advance their generation, so waiters from the previous
+	 * stopped epoch can never cross into this one.
 	 */
 	(void)tr_completion_queue_open(&reactor->completions);
 	(void)tr_command_queue_wait_open(&reactor->commands);
