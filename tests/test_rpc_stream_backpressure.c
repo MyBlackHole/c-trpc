@@ -547,8 +547,8 @@ int main(void)
 	wait_executor(server_rpc, 0U, 0U);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	tr_rpc_endpoint_destroy(client_rpc);
-	tr_rpc_endpoint_destroy(server_rpc);
+	assert(tr_rpc_endpoint_destroy(client_rpc) == TR_OK);
+	assert(tr_rpc_endpoint_destroy(server_rpc) == TR_OK);
 	tr_channel_destroy(client_channel);
 	tr_channel_destroy(server_channel);
 	tr_reactor_destroy(reactor);
