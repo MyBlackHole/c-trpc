@@ -92,7 +92,17 @@ struct tr_server {
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
-TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_destroy)
+
+static void tr_server_owner_release(struct tr_server *server)
+{
+	int ret = tr_server_destroy(server);
+#ifndef NDEBUG
+	assert(ret == TR_OK);
+#endif
+	(void)ret;
+}
+
+TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_owner_release)
 
 static struct tr_reactor *
 tr_server_shard_reactor(struct tr_server_shard *shard)
@@ -808,13 +818,20 @@ static void tr_server_wait_peer_finalizers(struct tr_server *server)
 	pthread_mutex_unlock(&server->finalizer_lock);
 }
 
-static void tr_server_disable_peer_events(struct tr_server_shard *shard)
+static int tr_server_disable_peer_events(struct tr_server_shard *shard)
 {
-	if (!shard || !shard->peer_events_enabled)
-		return;
+	int ret;
 
-	(void)tr_runtime_shard_disable_peer_events(shard->runtime);
+	if (!shard)
+		return TR_ERR_INVALID;
+	if (!shard->peer_events_enabled)
+		return TR_OK;
+
+	ret = tr_runtime_shard_disable_peer_events(shard->runtime);
+	if (ret != TR_OK)
+		return ret;
 	shard->peer_events_enabled = 0;
+	return TR_OK;
 }
 
 static void tr_server_signal_peer_cleanup(struct tr_server_shard *shard)
@@ -1610,21 +1627,28 @@ rollback_events:
 	return ret;
 }
 
-static void tr_server_stop_accepting(struct tr_server *server)
+static int tr_server_stop_accepting(struct tr_server *server)
 {
 	uint32_t i;
+	int ret;
 
 	if (!server)
-		return;
-	(void)tr_server_connection_group_stop_internal(server);
+		return TR_ERR_INVALID;
+
+	ret = tr_server_connection_group_stop_internal(server);
+	if (ret != TR_OK)
+		return ret;
+
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_shard *shard = &server->shards[i];
 
 		if (tr_server_shard_listener_fd(shard) < 0)
 			continue;
-		(void)tr_runtime_shard_disable_listener_events(shard->runtime);
-		tr_runtime_shard_close_listener(shard->runtime);
+		ret = tr_runtime_shard_close_listener(shard->runtime);
+		if (ret != TR_OK)
+			return ret;
 	}
+	return TR_OK;
 }
 
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
@@ -1645,9 +1669,17 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
-	tr_server_stop_accepting(server);
-	for (shard_index = 0; shard_index < server->shard_count; ++shard_index)
-		tr_server_disable_peer_events(&server->shards[shard_index]);
+	{
+		int ret = tr_server_stop_accepting(server);
+		if (ret != TR_OK)
+			return ret;
+	}
+	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
+		int ret = tr_server_disable_peer_events(
+			&server->shards[shard_index]);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	/*
 	 * Listener + peer-event unregister are synchronous owner barriers. After
@@ -1850,24 +1882,28 @@ int tr_server_get_connection_group_stats_internal(
 		server->connection_group_listener, out);
 }
 
-void tr_server_destroy(struct tr_server *server)
+int tr_server_destroy(struct tr_server *server)
 {
 	uint32_t shard_index;
+	int ret;
 
 	if (!server)
-		return;
+		return TR_OK;
 
 	/*
 	 * Server teardown joins/quiesces Reactor and executor workers. Never begin
 	 * it from the execution context that must make that teardown progress.
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
-		return;
+		return TR_ERR_STATE;
 
-	if (server->shards)
-		tr_server_stop_accepting(server);
+	if (server->shards) {
+		ret = tr_server_stop_accepting(server);
+		if (ret != TR_OK)
+			return ret;
+	}
 	if (server->connection_group_listener) {
-		int ret = tr_pipeline_listener_stop(
+		ret = tr_pipeline_listener_stop(
 			server->connection_group_listener);
 
 		/*
@@ -1875,39 +1911,32 @@ void tr_server_destroy(struct tr_server *server)
 		 * 释放其 registry/session 内存；失败表示内部 teardown invariant
 		 * 未收敛，继续释放 Runtime 反而可能制造 UAF。
 		 */
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
-			return;
+			return ret;
 		ret = tr_pipeline_listener_destroy(
 			server->connection_group_listener);
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
 		if (ret != TR_OK)
-			return;
+			return ret;
 		server->connection_group_listener = NULL;
 	}
 	if (server->shards)
 		for (shard_index = 0; shard_index < server->shard_count;
-		     ++shard_index)
-			tr_server_disable_peer_events(
+		     ++shard_index) {
+			ret = tr_server_disable_peer_events(
 				&server->shards[shard_index]);
+			if (ret != TR_OK)
+				return ret;
+		}
 
 	if (server->runtime && server->started) {
-		int ret = tr_runtime_stop(server->runtime);
-
-#ifndef NDEBUG
-		assert(ret == TR_OK);
-#endif
+		ret = tr_runtime_stop(server->runtime);
 		/*
 		 * Do not destroy peer/Runtime storage unless every shard owner has
 		 * crossed the stop barrier. Continuing after a failed join would turn
 		 * a lifecycle error into UAF.
 		 */
 		if (ret != TR_OK)
-			return;
+			return ret;
 		server->started = 0;
 	}
 
@@ -1926,12 +1955,9 @@ void tr_server_destroy(struct tr_server *server)
 				    (!peer->used && !peer->channel && !peer->rpc))
 					continue;
 				{
-					int ret = tr_server_destroy_peer(peer);
-#ifndef NDEBUG
-					assert(ret == TR_OK);
-#endif
+					ret = tr_server_destroy_peer(peer);
 					if (ret != TR_OK)
-						return;
+						return ret;
 				}
 			}
 		}
@@ -1953,23 +1979,23 @@ void tr_server_destroy(struct tr_server *server)
 				int ret = tr_buffer_pool_destroy(
 					&shard->reassembly_pool);
 				if (ret != TR_OK)
-					return;
+					return ret;
 				shard->reassembly_pool_ready = 0;
 			}
 			if (shard->rpc_pool_ready) {
 				int ret = tr_buffer_pool_destroy(
 					&shard->rpc_message_pool);
 				if (ret != TR_OK)
-					return;
+					return ret;
 				shard->rpc_pool_ready = 0;
 			}
 		}
 	}
 
 	if (server->runtime) {
-		int ret = tr_runtime_destroy(server->runtime);
+		ret = tr_runtime_destroy(server->runtime);
 		if (ret != TR_OK)
-			return;
+			return ret;
 		server->runtime = NULL;
 	}
 
@@ -1982,5 +2008,6 @@ void tr_server_destroy(struct tr_server *server)
 		pthread_cond_destroy(&server->finalizer_cond);
 	pthread_mutex_destroy(&server->finalizer_lock);
 	free(server);
+	return TR_OK;
 }
 
