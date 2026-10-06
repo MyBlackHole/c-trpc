@@ -56,16 +56,28 @@ struct tr_client {
 	int connected;
 };
 
-static void tr_client_owner_release(struct tr_client *client)
+static int tr_client_create_rollback(
+	struct tr_client **out, struct tr_client *client, int cause)
 {
-	int ret = tr_client_destroy(client);
-#ifndef NDEBUG
-	assert(ret == TR_OK);
-#endif
-	(void)ret;
-}
+	int rollback_ret;
 
-TR_DEFINE_PTR_OWNERSHIP(tr_client_owner, struct tr_client, tr_client_owner_release)
+	if (!out || !client)
+		return cause;
+
+	/*
+	 * constructor 失败后显式执行 terminal rollback，不能把 fallible destroy
+	 * 藏在 void cleanup。rollback 成功保持传统的 *out==NULL；rollback 自身
+	 * 失败时把 partial Client ownership 留在 *out，调用方可继续 destroy。
+	 */
+	rollback_ret = tr_client_destroy(client);
+	if (rollback_ret == TR_OK) {
+		*out = NULL;
+		return cause;
+	}
+
+	*out = client;
+	return rollback_ret;
+}
 
 static struct tr_reactor *tr_client_reactor(struct tr_client *client)
 {
@@ -183,12 +195,14 @@ int tr_client_create_with_tuning(
 	struct tr_runtime_config runtime_config;
 	struct tr_runtime_shard_config shard_config;
 	struct tr_reactor_config *reactor_config;
-	struct tr_client *client TR_AUTO(tr_client_owner_cleanup) = NULL;
+	struct tr_client *client = NULL;
 	int ret;
 
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
 
 	if (config)
 		effective = *config;
@@ -219,14 +233,14 @@ int tr_client_create_with_tuning(
 					  effective_tuning.rpc_message_pool_count,
 					  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
-		return ret;
+		return tr_client_create_rollback(out, client, ret);
 	client->rpc_pool_ready = 1;
 
 	ret = tr_buffer_pool_init(&client->reassembly_pool,
 				  effective_tuning.reassembly_pool_count,
 				  effective.limits.max_message_bytes);
 	if (ret != TR_OK)
-		return ret;
+		return tr_client_create_rollback(out, client, ret);
 	client->reassembly_pool_ready = 1;
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
@@ -235,7 +249,8 @@ int tr_client_create_with_tuning(
 	runtime_config.shards = &shard_config;
 	reactor_config = &shard_config.reactor;
 	if (effective.connection_groups.max_data_connections > UINT32_MAX - 2U)
-		return TR_ERR_INVALID;
+		return tr_client_create_rollback(
+			out, client, TR_ERR_INVALID);
 	reactor_config->max_connections =
 		effective.connection_groups.max_data_connections + 2U;
 	if (reactor_config->max_connections < 4U)
@@ -259,19 +274,19 @@ int tr_client_create_with_tuning(
 
 	ret = tr_runtime_create(&runtime_config, &client->runtime);
 	if (ret != TR_OK)
-		return ret;
+		return tr_client_create_rollback(out, client, ret);
 	client->shard = tr_runtime_shard_at(client->runtime, 0U);
 	if (!client->shard)
-		return TR_ERR_STATE;
+		return tr_client_create_rollback(out, client, TR_ERR_STATE);
 	ret = tr_runtime_start(client->runtime);
 	if (ret != TR_OK)
-		return ret;
+		return tr_client_create_rollback(out, client, ret);
 
 	/*
 	 * Connection Group engine is created lazily on first public Group use.
 	 * A normal RPC-only Client therefore pays no Group heap/pool/timer cost.
 	 */
-	*out = tr_client_owner_take(&client);
+	*out = client;
 	return TR_OK;
 }
 

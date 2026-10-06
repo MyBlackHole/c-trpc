@@ -93,16 +93,28 @@ struct tr_server {
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 
-static void tr_server_owner_release(struct tr_server *server)
+static int tr_server_create_rollback(
+	struct tr_server **out, struct tr_server *server, int cause)
 {
-	int ret = tr_server_destroy(server);
-#ifndef NDEBUG
-	assert(ret == TR_OK);
-#endif
-	(void)ret;
-}
+	int rollback_ret;
 
-TR_DEFINE_PTR_OWNERSHIP(tr_server_owner, struct tr_server, tr_server_owner_release)
+	if (!out || !server)
+		return cause;
+
+	/*
+	 * Server constructor 不再依赖 fallible void owner cleanup。正常 rollback
+	 * 完整收敛时保持 *out==NULL；若 terminal cleanup 自身失败，则把 partial
+	 * Server ownership 留给调用方，后续显式 tr_server_destroy() 可继续重试。
+	 */
+	rollback_ret = tr_server_destroy(server);
+	if (rollback_ret == TR_OK) {
+		*out = NULL;
+		return cause;
+	}
+
+	*out = server;
+	return rollback_ret;
+}
 
 static struct tr_reactor *
 tr_server_shard_reactor(struct tr_server_shard *shard)
@@ -1056,12 +1068,14 @@ int tr_server_create_with_tuning(
 	struct tr_runtime_config runtime_config;
 	struct tr_runtime_shard_config *shard_configs = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
-	struct tr_server *server TR_AUTO(tr_server_owner_cleanup) = NULL;
+	struct tr_server *server = NULL;
 	int ret;
 
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
+	if (tr_server_blocking_lifecycle_context())
+		return TR_ERR_STATE;
 
 	if (config)
 		effective = *config;
@@ -1108,21 +1122,19 @@ int tr_server_create_with_tuning(
 		return TR_ERR_INVALID;
 	server = tr_server_mem_take(&server_mem);
 	if (pthread_cond_init(&server->finalizer_cond, NULL) != 0)
-		return TR_ERR_SYS;
+		return tr_server_create_rollback(out, server, TR_ERR_SYS);
 	server->finalizer_cond_ready = 1;
 
 	server->methods = (struct tr_server_method *)calloc(
 		effective.limits.max_methods, sizeof(*server->methods));
-	if (!server->methods) {
-		ret = TR_ERR_NOMEM;
-		return ret;
-	}
+	if (!server->methods)
+		return tr_server_create_rollback(out, server, TR_ERR_NOMEM);
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
 	shard_configs = (struct tr_runtime_shard_config *)calloc(
 		effective.shard_count, sizeof(*shard_configs));
 	if (!shard_configs)
-		return TR_ERR_NOMEM;
+		return tr_server_create_rollback(out, server, TR_ERR_NOMEM);
 
 	runtime_config.shard_count = effective.shard_count;
 	runtime_config.shards = shard_configs;
@@ -1190,13 +1202,13 @@ int tr_server_create_with_tuning(
 	free(shard_configs);
 	shard_configs = NULL;
 	if (ret != TR_OK)
-		return ret;
+		return tr_server_create_rollback(out, server, ret);
 
 	server->shard_count = tr_runtime_shard_count(server->runtime);
 	server->shards = (struct tr_server_shard *)calloc(
 		server->shard_count, sizeof(*server->shards));
 	if (!server->shards)
-		return TR_ERR_NOMEM;
+		return tr_server_create_rollback(out, server, TR_ERR_NOMEM);
 
 	{
 		uint32_t i;
@@ -1213,7 +1225,8 @@ int tr_server_create_with_tuning(
 					effective_tuning.executor_threads,
 					effective.shard_count, i);
 			if (!server_shard->runtime)
-				return TR_ERR_STATE;
+				return tr_server_create_rollback(
+					out, server, TR_ERR_STATE);
 
 			ret = tr_buffer_pool_init_dynamic_budgeted(
 				&server_shard->rpc_message_pool,
@@ -1224,7 +1237,7 @@ int tr_server_create_with_tuning(
 				tr_runtime_shard_memory_budget(
 					server_shard->runtime));
 			if (ret != TR_OK)
-				return ret;
+				return tr_server_create_rollback(out, server, ret);
 			server_shard->rpc_pool_ready = 1;
 
 			ret = tr_buffer_pool_init_budgeted(
@@ -1236,7 +1249,7 @@ int tr_server_create_with_tuning(
 				tr_runtime_shard_memory_budget(
 					server_shard->runtime));
 			if (ret != TR_OK)
-				return ret;
+				return tr_server_create_rollback(out, server, ret);
 			server_shard->reassembly_pool_ready = 1;
 		}
 	}
@@ -1276,10 +1289,10 @@ int tr_server_create_with_tuning(
 		ret = tr_pipeline_listener_create(
 			&group_config, &server->connection_group_listener);
 		if (ret != TR_OK)
-			return ret;
+			return tr_server_create_rollback(out, server, ret);
 	}
 
-	*out = tr_server_owner_take(&server);
+	*out = server;
 	return TR_OK;
 }
 

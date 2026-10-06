@@ -48,6 +48,14 @@ struct tr_server_config {
 
 void tr_server_config_init(struct tr_server_config *config);
 
+/*
+ * 正常成功时返回 TR_OK 并把 Server ownership 写入 *out。
+ * 正常构造失败且 rollback 完整收敛时，*out 保持 NULL。
+ *
+ * 如果 constructor rollback 本身失败，函数返回生命周期错误，同时 *out
+ * 保留 partial Server ownership；调用方不得继续 start/listen/register，
+ * 应直接通过 tr_server_destroy() 重试终止收敛。
+ */
 int tr_server_create(const struct tr_server_config *config,
 		     struct tr_server **out);
 
