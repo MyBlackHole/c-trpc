@@ -36,7 +36,13 @@ struct tr_connector_config {
 int tr_connector_create(
 	const struct tr_connector_config *config,
 	struct tr_connector **out);
-void tr_connector_destroy(struct tr_connector *connector);
+
+/*
+ * Terminal teardown. TR_OK means all Reactor callback sources are detached and
+ * storage is freed. Any error leaves connector ownership with the caller and
+ * destroy may be retried while the owner Reactor is still alive.
+ */
+int tr_connector_destroy(struct tr_connector *connector);
 
 int tr_connector_start(
 	struct tr_connector *connector, const char *ipv4_address, uint16_t port,
