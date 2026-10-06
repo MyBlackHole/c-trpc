@@ -520,13 +520,15 @@ static int tr_reactor_push_command_wait_force(
 }
 
 static int tr_reactor_push_completion(
-	struct tr_reactor *reactor, const struct tr_completion *completion)
+	struct tr_reactor *reactor, const struct tr_completion *completion,
+	uint64_t expected_generation)
 {
 	int need_wake = 0;
 	int ret;
 
 	ret = tr_completion_queue_push_wait(
-		&reactor->completions, completion, &need_wake);
+		&reactor->completions, completion, expected_generation,
+		&need_wake);
 	if (ret != TR_OK)
 		return ret;
 
@@ -3636,6 +3638,7 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 			void *arg)
 {
 	struct tr_completion completion;
+	uint64_t admission_generation;
 	int ret;
 
 	if (!reactor || !fn)
@@ -3651,11 +3654,14 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	}
 
 	/*
-	 * completion producer 不取得 ctl_lock，因此必须先观察 Reactor epoch
-	 * admission。这样 start() 可以先 reopen queue、最后发布 accepting；
-	 * stop() 也可以先关闭 accepting，再关闭 queue 并唤醒旧 waiter。
+	 * completion producer 不取得 ctl_lock。它必须在 handoff 开始时从
+	 * completion queue 取得明确的 admission generation，并把同一 token
+	 * 带到最终入队点。这样 producer 即使跨越 stop/restart 被长时间挂起，
+	 * 也不能在醒来后误把旧 epoch completion 投进新 epoch。
 	 */
-	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+	admission_generation =
+		tr_completion_queue_admission_generation(&reactor->completions);
+	if (admission_generation == 0U)
 		return TR_ERR_CLOSED;
 
 	completion.fn = fn;
@@ -3668,7 +3674,8 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	 *
 	 * 无论背压多重，worker 都不会回退直接修改 Reactor-owned protocol state。
 	 */
-	ret = tr_reactor_push_completion(reactor, &completion);
+	ret = tr_reactor_push_completion(
+		reactor, &completion, admission_generation);
 	return ret;
 }
 
