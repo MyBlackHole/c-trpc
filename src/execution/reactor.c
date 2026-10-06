@@ -225,6 +225,7 @@ struct tr_reactor {
 	/* Owner-only: a popped command batch still has FIFO predecessors. */
 	int command_dispatching;
 	uint64_t last_processed_command_sequence;
+	uint32_t lifecycle_tx_pending_count;
 
 	struct tr_command_queue commands;
 	struct tr_completion_queue completions;
@@ -853,6 +854,8 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_parser_reset(&connection->parser);
 	tr_release_tx_queue(reactor, connection);
 	if (connection->lifecycle_tx_busy && !connection->lifecycle_tx_enqueued) {
+		assert(reactor->lifecycle_tx_pending_count != 0U);
+		reactor->lifecycle_tx_pending_count--;
 		memset(&connection->lifecycle_tx, 0,
 		       sizeof(connection->lifecycle_tx));
 		connection->lifecycle_after_sequence = 0U;
@@ -1640,6 +1643,8 @@ static void tr_connection_try_enqueue_lifecycle_tx(
 	    reactor->last_processed_command_sequence)
 		return;
 
+	assert(reactor->lifecycle_tx_pending_count != 0U);
+	reactor->lifecycle_tx_pending_count--;
 	connection->lifecycle_tx_enqueued = 1;
 	tr_enqueue_tx_item_owner(
 		reactor, connection, &connection->lifecycle_tx);
@@ -1650,6 +1655,8 @@ static void tr_reactor_flush_lifecycle_tx(struct tr_reactor *reactor)
 	uint32_t i;
 
 	TR_ASSERT_REACTOR_OWNER(reactor);
+	if (reactor->lifecycle_tx_pending_count == 0U)
+		return;
 	for (i = 0; i < reactor->config.max_connections; ++i)
 		tr_connection_try_enqueue_lifecycle_tx(
 			reactor, &reactor->connections[i]);
@@ -3135,6 +3142,7 @@ int tr_reactor_send_goaway_on_owner(struct tr_conn_handle handle)
 		tr_command_queue_last_sequence(&reactor->commands);
 	connection->lifecycle_tx_busy = 1;
 	connection->lifecycle_tx_enqueued = 0;
+	reactor->lifecycle_tx_pending_count++;
 
 	tr_connection_try_enqueue_lifecycle_tx(reactor, connection);
 	return TR_OK;
