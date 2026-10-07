@@ -75,6 +75,7 @@ struct tr_server {
 
 	struct tr_runtime *runtime;
 	struct tr_server_shard *shards;
+	/* 已绑定 Runtime、允许销毁路径遍历的分片前缀。 */
 	uint32_t shard_count;
 
 	struct tr_server_method *methods;
@@ -1194,16 +1195,17 @@ int tr_server_create_with_tuning(
 	if (ret != TR_OK)
 		return tr_server_create_rollback(out, server, ret);
 
-	server->shard_count = tr_runtime_shard_count(server->runtime);
-	server->shards = (struct tr_server_shard *)calloc(
-		server->shard_count, sizeof(*server->shards));
-	if (!server->shards)
-		return tr_server_create_rollback(out, server, TR_ERR_NOMEM);
-
 	{
+		uint32_t shard_count = tr_runtime_shard_count(server->runtime);
 		uint32_t i;
 
-		for (i = 0; i < server->shard_count; ++i) {
+		/* 分配成功前不发布可遍历数量，回滚仍可安全处理空数组。 */
+		server->shards = (struct tr_server_shard *)calloc(
+			shard_count, sizeof(*server->shards));
+		if (!server->shards)
+			return tr_server_create_rollback(out, server, TR_ERR_NOMEM);
+
+		for (i = 0; i < shard_count; ++i) {
 			struct tr_server_shard *server_shard =
 				&server->shards[i];
 
@@ -1217,6 +1219,13 @@ int tr_server_create_with_tuning(
 			if (!server_shard->runtime)
 				return tr_server_create_rollback(
 					out, server, TR_ERR_STATE);
+
+			/*
+			 * 先发布有效 Runtime 绑定，再获取分片资源。后续失败时，
+			 * 当前分片由各 pool_ready 标志精确回收；尚未绑定的尾部
+			 * 条目不进入销毁和 finalizer 等待路径。
+			 */
+			server->shard_count = i + 1U;
 
 			ret = tr_buffer_pool_init_dynamic_budgeted(
 				&server_shard->rpc_message_pool,
@@ -2041,4 +2050,3 @@ int tr_server_destroy(struct tr_server *server)
 	free(server);
 	return TR_OK;
 }
-
