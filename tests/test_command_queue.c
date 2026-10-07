@@ -158,21 +158,16 @@ static void test_batch_pop_wakes_sync_waiters(void)
 	tr_command_queue_destroy(&queue);
 }
 
-static void test_close_cancels_sync_waiter_but_not_forced_stop(void)
+static void test_close_cancels_waiter_and_stop_uses_reserve(void)
 {
 	struct tr_command_queue queue;
-	struct tr_command seed;
+	struct tr_command seed = { .type = TR_CMD_RESUME_RX };
+	struct tr_command stop = { .type = TR_CMD_STOP };
 	struct tr_command out;
-	struct wait_ctx normal;
-	struct wait_ctx forced;
+	struct wait_ctx normal = { 0 };
 	pthread_t normal_thread;
-	pthread_t forced_thread;
 	uint64_t generation;
-
-	memset(&seed, 0, sizeof(seed));
-	memset(&normal, 0, sizeof(normal));
-	memset(&forced, 0, sizeof(forced));
-	seed.type = TR_CMD_RESUME_RX;
+	int need_wake = -1;
 
 	assert(tr_command_queue_init(&queue, 1U) == TR_OK);
 	assert(tr_command_queue_wait_open(&queue) == TR_OK);
@@ -183,38 +178,102 @@ static void test_close_cancels_sync_waiter_but_not_forced_stop(void)
 	normal.queue = &queue;
 	normal.generation = generation;
 	normal.command.type = TR_CMD_CALL;
-	forced.queue = &queue;
-	forced.force = 1;
-	forced.command.type = TR_CMD_STOP;
-
-	assert(pthread_create(
-		       &normal_thread, NULL, wait_main, &normal) == 0);
-	assert(pthread_create(
-		       &forced_thread, NULL, wait_main, &forced) == 0);
-	wait_for_waiters(&queue, 2U);
+	assert(pthread_create(&normal_thread, NULL, wait_main, &normal) == 0);
+	wait_for_waiters(&queue, 1U);
 
 	tr_command_queue_wait_close(&queue);
 	assert(pthread_join(normal_thread, NULL) == 0);
 	assert(normal.ret == TR_ERR_CLOSED);
 	assert(normal.need_wake == -1);
 
-	/*
-	 * close 只取消普通同步 waiter。STOP force waiter 会重新检查 ring，
-	 * 发现仍满后继续睡眠，直到 owner pop 释放真实容量。
-	 */
-	wait_for_waiters(&queue, 1U);
+	/* 尚未消费普通命令；STOP 必须不等待、不挤占普通容量。 */
+	assert(tr_command_queue_push_wait_force(&queue, &stop, &need_wake) == TR_OK);
+	assert(need_wake == 0);
+	wait_for_waiters(&queue, 0U);
+	assert(queue.count == 1U && queue.peak_count == 1U);
+	assert(queue.full_call == 1U && queue.full_other == 0U);
 	assert(tr_command_queue_pop_batch(&queue, &out, 1U) == 1U);
 	assert(out.type == TR_CMD_RESUME_RX);
-	assert(pthread_join(forced_thread, NULL) == 0);
-	assert(forced.ret == TR_OK);
+	assert(!tr_command_queue_is_empty(&queue));
 	assert(tr_command_queue_pop_batch(&queue, &out, 1U) == 1U);
 	assert(out.type == TR_CMD_STOP);
-	wait_for_waiters(&queue, 0U);
+	assert(tr_command_queue_is_empty(&queue));
+	tr_command_queue_destroy(&queue);
+}
 
-	pthread_mutex_lock(&queue.lock);
-	assert(queue.full_call == 1U);
-	assert(queue.full_other == 1U);
-	pthread_mutex_unlock(&queue.lock);
+static void test_stop_fifo_budget_and_epoch(void)
+{
+	struct tr_command_queue queue;
+	struct tr_command command = { .type = TR_CMD_RESUME_RX };
+	struct tr_command stop = { .type = TR_CMD_STOP };
+	struct tr_command out[2];
+	uint64_t old_generation;
+	int need_wake = -1;
+
+	assert(tr_command_queue_init(&queue, 2U) == TR_OK);
+	assert(tr_command_queue_wait_open(&queue) == TR_OK);
+	old_generation = tr_command_queue_wait_generation(&queue);
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_OK);
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_OK);
+	assert(tr_command_queue_push_wait_force(&queue, &stop, NULL) == TR_OK);
+	assert(tr_command_queue_last_sequence(&queue) == 3U);
+	assert(tr_command_queue_push_wait_force(&queue, &stop, &need_wake) ==
+	       TR_ERR_STATE);
+	assert(need_wake == -1);
+	assert(tr_command_queue_push_wait_force(&queue, &command, NULL) ==
+	       TR_ERR_INVALID);
+	assert(tr_command_queue_last_sequence(&queue) == 3U);
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_ERR_CLOSED);
+	assert(tr_command_queue_push_wait(
+		       &queue, &command, old_generation, NULL) == TR_ERR_CLOSED);
+	assert(tr_command_queue_wait_open(&queue) == TR_ERR_STATE);
+
+	/* 满 batch 只能弹出两个前驱，STOP 留到下一 batch，不能突破预算。 */
+	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 2U);
+	assert(out[0].sequence == 1U && out[1].sequence == 2U);
+	assert(queue.count == 0U && queue.stop_pending);
+	assert(queue.wake_pending && !tr_command_queue_is_empty(&queue));
+	assert(tr_command_queue_pop_batch(&queue, out, 0U) == 0U);
+	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 1U);
+	assert(out[0].type == TR_CMD_STOP && out[0].sequence == 3U);
+	assert(tr_command_queue_is_empty(&queue) && !queue.wake_pending);
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_ERR_CLOSED);
+	assert(tr_command_queue_push_wait_force(&queue, &stop, NULL) == TR_ERR_STATE);
+
+	assert(tr_command_queue_wait_open(&queue) == TR_OK);
+	assert(tr_command_queue_push_wait(
+		       &queue, &command, old_generation, NULL) == TR_ERR_CLOSED);
+	assert(tr_command_queue_push_wait(
+		       &queue, &command, tr_command_queue_wait_generation(&queue),
+		       &need_wake) == TR_OK);
+	assert(need_wake == 1);
+	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 1U);
+	assert(out[0].type == TR_CMD_RESUME_RX && out[0].sequence == 4U);
+	tr_command_queue_destroy(&queue);
+}
+
+static void test_stop_empty_and_sequence_wrap(void)
+{
+	struct tr_command_queue queue;
+	struct tr_command stop = { .type = TR_CMD_STOP };
+	struct tr_command command = { .type = TR_CMD_RESUME_RX };
+	struct tr_command out[2];
+	int need_wake = 0;
+
+	assert(tr_command_queue_init(&queue, 1U) == TR_OK);
+	assert(tr_command_queue_push_wait_force(&queue, &stop, &need_wake) == TR_OK);
+	assert(need_wake == 1 && !tr_command_queue_is_empty(&queue));
+	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 1U);
+	assert(out[0].type == TR_CMD_STOP);
+	assert(tr_command_queue_wait_open(&queue) == TR_OK);
+
+	queue.next_sequence = UINT64_MAX - 1U;
+	assert(tr_command_queue_push(&queue, &command, NULL) == TR_OK);
+	assert(tr_command_queue_push_wait_force(&queue, &stop, NULL) == TR_OK);
+	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 2U);
+	assert(out[0].type == TR_CMD_RESUME_RX && out[0].sequence == UINT64_MAX);
+	assert(out[1].type == TR_CMD_STOP && out[1].sequence == 1U);
+	assert(tr_command_sequence_after_eq(out[1].sequence, out[0].sequence));
 	tr_command_queue_destroy(&queue);
 }
 
@@ -289,7 +348,9 @@ int main(void)
 {
 	test_immediate_push_stays_nonblocking();
 	test_batch_pop_wakes_sync_waiters();
-	test_close_cancels_sync_waiter_but_not_forced_stop();
+	test_close_cancels_waiter_and_stop_uses_reserve();
+	test_stop_fifo_budget_and_epoch();
+	test_stop_empty_and_sequence_wrap();
 	test_wait_generation_fences_reopen();
 	test_sequence_wrap_order();
 	puts("command queue selective capacity waits: ok");
