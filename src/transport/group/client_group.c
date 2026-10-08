@@ -1060,6 +1060,10 @@ static int tr_client_group_close_on_owner(void *arg)
 	ret = tr_reactor_close_on_owner(control);
 	if (ret == TR_ERR_STALE)
 		ret = TR_OK;
+	if (ret != TR_OK) {
+		group->closing = 0;
+		return ret;
+	}
 	if (group->control.reactor &&
 	    tr_client_group_conn_equal(group->control, control)) {
 		memset(&group->control, 0, sizeof(group->control));
@@ -1657,6 +1661,8 @@ static int tr_client_group_detach_on_owner(void *arg)
 		ret = tr_reactor_close_on_owner(control);
 		if (ret == TR_ERR_STALE)
 			ret = TR_OK;
+		if (ret != TR_OK)
+			return ret;
 	}
 
 	memset(&group->control, 0, sizeof(group->control));
