@@ -287,6 +287,8 @@ struct tr_rpc_executor_group {
 	uint32_t started_threads;
 	/* 已成功 join 的线程前缀；destroy 失败时保留以便精确重试。 */
 	uint32_t join_cursor;
+	/* 已接受但尚未完成的任务数；worker 停机前必须排空。 */
+	uint64_t outstanding_tasks;
 	int stopping;
 };
 
@@ -1778,6 +1780,42 @@ tr_rpc_executor_ready_undo_push_locked(struct tr_rpc_executor *executor,
 	executor->ready_count--;
 }
 
+static int tr_rpc_executor_group_task_accept(
+	struct tr_rpc_executor_group *group)
+{
+	int ret = TR_OK;
+
+	if (!group)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&group->lock);
+	if (group->stopping) {
+		ret = TR_ERR_CLOSED;
+	} else if (group->outstanding_tasks == UINT64_MAX) {
+		ret = TR_ERR_STATE;
+	} else {
+		group->outstanding_tasks++;
+	}
+	pthread_mutex_unlock(&group->lock);
+	return ret;
+}
+
+static void tr_rpc_executor_group_task_done(
+	struct tr_rpc_executor_group *group)
+{
+	if (!group)
+		return;
+
+	pthread_mutex_lock(&group->lock);
+#ifndef NDEBUG
+	assert(group->outstanding_tasks != 0U);
+#endif
+	if (group->outstanding_tasks != 0U)
+		group->outstanding_tasks--;
+	pthread_cond_broadcast(&group->cond);
+	pthread_mutex_unlock(&group->lock);
+}
+
 static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
 					 struct tr_rpc_endpoint *endpoint)
 {
@@ -1794,7 +1832,8 @@ static int tr_rpc_executor_group_enqueue(struct tr_rpc_executor_group *group,
 	assert(!endpoint->executor.group_enqueued);
 #endif
 	pthread_mutex_lock(&group->lock);
-	if (group->stopping) {
+	/* 停机只拒绝新任务；已有强引用任务仍可发布内部调度令牌。 */
+	if (group->stopping && group->outstanding_tasks == 0U) {
 		ret = TR_ERR_CLOSED;
 	} else {
 		endpoint->executor.group_ready_next = NULL;
@@ -1831,6 +1870,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	struct tr_rpc_executor_node *node;
 	uint32_t node_index;
 	int admission;
+	int group_task_accepted = 0;
 	int ret = TR_OK;
 
 	if (!task || tr_rpc_call_handle_slot(task->call) >= endpoint->config.max_calls)
@@ -1872,6 +1912,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		callq->tail = TR_RPC_EXEC_NONE;
 		callq->queued_count = 0;
 		callq->cancelled = 0;
+	}
+	if (executor->group) {
+		ret = tr_rpc_executor_group_task_accept(executor->group);
+		if (ret != TR_OK)
+			goto out;
+		group_task_accepted = 1;
 	}
 
 	node_index = executor->free_head;
@@ -1915,6 +1961,8 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 			if (callq->queued_count != 0)
 				callq->queued_count--;
 			executor->queued_count--;
+			if (group_task_accepted)
+				tr_rpc_executor_group_task_done(executor->group);
 			goto out;
 		}
 		callq->ready = 1;
@@ -1951,6 +1999,9 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 						callq->queued_count--;
 					if (executor->queued_count != 0)
 						executor->queued_count--;
+					if (group_task_accepted)
+						tr_rpc_executor_group_task_done(
+							executor->group);
 					goto out;
 				}
 				executor->group_enqueued = 1;
@@ -2088,6 +2139,8 @@ tr_rpc_store_pending_executor_task_locked(struct tr_rpc_endpoint *endpoint,
 static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 			     struct tr_rpc_call_handle handle)
 {
+	struct tr_rpc_executor_group *group = endpoint->executor.group;
+
 	pthread_mutex_lock(&endpoint->lock);
 	if (tr_rpc_call_handle_slot(handle) < endpoint->config.max_calls) {
 		struct tr_rpc_call_slot *call =
@@ -2108,6 +2161,8 @@ static void tr_rpc_task_done(struct tr_rpc_endpoint *endpoint,
 	 * 避免某种 strong-ref 来源漏掉 ref_cond signal。
 	 */
 	tr_rpc_endpoint_put(endpoint);
+	/* 归还端点强引用后，再确认执行组中的任务已完成。 */
+	tr_rpc_executor_group_task_done(group);
 }
 
 struct tr_rpc_stream_payload_release {
@@ -3049,9 +3104,11 @@ tr_rpc_executor_group_take(struct tr_rpc_executor_group *group)
 	struct tr_rpc_endpoint *endpoint;
 
 	pthread_mutex_lock(&group->lock);
-	while (!group->ready_head && !group->stopping)
+	while (!group->ready_head &&
+	       (!group->stopping || group->outstanding_tasks != 0U))
 		pthread_cond_wait(&group->cond, &group->lock);
-	if (!group->ready_head && group->stopping) {
+	if (!group->ready_head && group->stopping &&
+	    group->outstanding_tasks == 0U) {
 		pthread_mutex_unlock(&group->lock);
 		return NULL;
 	}
@@ -3330,6 +3387,12 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 
 	pthread_mutex_lock(&group->lock);
 	if (group->started_threads == 0U) {
+		if (group->ready_head || group->ready_tail ||
+		    group->ready_count != 0U ||
+		    group->outstanding_tasks != 0U) {
+			pthread_mutex_unlock(&group->lock);
+			return TR_ERR_STATE;
+		}
 		group->stopping = 0;
 		group->join_cursor = 0U;
 		pthread_mutex_unlock(&group->lock);
@@ -3345,11 +3408,20 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 		group->join_cursor++;
 	}
 
+	pthread_mutex_lock(&group->lock);
+	if (group->ready_head || group->ready_tail ||
+	    group->ready_count != 0U || group->outstanding_tasks != 0U) {
+		pthread_mutex_unlock(&group->lock);
+		return TR_ERR_STATE;
+	}
+
 #ifndef NDEBUG
 	assert(group->ready_head == NULL);
 	assert(group->ready_tail == NULL);
 	assert(group->ready_count == 0U);
+	assert(group->outstanding_tasks == 0U);
 #endif
+	pthread_mutex_unlock(&group->lock);
 
 	/*
 	 * 完整 join 后结束本 worker epoch。group storage 与 pthread_t array 保留，
