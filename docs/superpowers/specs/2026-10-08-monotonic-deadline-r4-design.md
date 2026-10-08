@@ -21,9 +21,13 @@ GitHub #154 的 R4（P1-3）要求连接与等待流程使用绝对截止时间�
 
 本次不改变公开配置、默认超时、自动重连策略、异步 DATA `Connector` 定时器或协议格式，也不把 Reactor 所有者线程队列中的非等待工作重新定义为可中断操作。
 
+## 适用范围
+
+本设计针对 Linux 用户态 C 库，使用 POSIX 的 `poll()`、`clock_gettime()` 与 `pthread_cond_timedwait()`；不声称这是内核态实现或内核补丁规范。若将来移植进 Linux 内核，应改用内核时间与等待接口，例如 `ktime_get()`、`ktime_t` 和 `wait_event_hrtimeout()`，并按内核编码风格另行审查。[内核时间接口](https://docs.kernel.org/core-api/timekeeping.html) [内核等待接口](https://docs.kernel.org/driver-api/basics.html) [内核编码风格](https://docs.kernel.org/process/coding-style.html)
+
 ## 内部截止时间契约
 
-新增 `src/execution/deadline_internal.h` 与 `src/execution/deadline.c`，作为仅供仓库内部使用的时间原语，并将实现文件加入 `xmake.lua` 的 `trcore` 源文件清单。截止时间对象保存 `CLOCK_MONOTONIC` 绝对时间及有限/无限标记；有限截止时间的加法饱和到当前平台可表示的最大 `timespec`，剩余时长计算也不得发生整数回绕。
+新增 `src/execution/deadline_internal.h` 与 `src/execution/deadline.c`，作为仅供仓库内部使用的时间原语，并将实现文件加入 `xmake.lua` 的 `trcore` 源文件清单。截止时间对象保存 `CLOCK_MONOTONIC` 绝对 `timespec` 及有限/无限标记。辅助模块必须根据构建目标的 `time_t` 可表示范围进行检查，不得假设 `time_t` 固定为 64 位；加法无法表示时饱和到最大有效值（`tv_sec` 为可表示最大值，`tv_nsec` 为 `999999999`），剩余时长比较与换算也不得发生整数回绕。该极端边界允许比请求时限更早到期，但绝不能因溢出变成更长等待或无限等待。
 
 辅助模块提供以下能力：
 
