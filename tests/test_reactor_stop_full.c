@@ -194,9 +194,21 @@ static void watchdog(int signal_number)
 {
 	static const char message[] =
 		"R8 regression: timeout while stop and owner callback wait\n";
+	size_t offset = 0U;
 
 	(void)signal_number;
-	(void)write(STDERR_FILENO, message, sizeof(message) - 1U);
+	while (offset < sizeof(message) - 1U) {
+		ssize_t written = write(STDERR_FILENO, message + offset,
+					sizeof(message) - 1U - offset);
+
+		if (written > 0) {
+			offset += (size_t)written;
+			continue;
+		}
+		if (written < 0 && errno == EINTR)
+			continue;
+		break;
+	}
 	_exit(124);
 }
 
