@@ -4,6 +4,7 @@
 
 #include "../src/crc32c.h"
 #include "../src/execution/reactor.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/execution/command_queue.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
@@ -11,12 +12,14 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -41,6 +44,57 @@ struct data_test_ctx {
  */
 static atomic_int fail_next_send_push;
 static atomic_uint injected_send_push_failures;
+static int fail_next_listener_publish;
+static int injected_listener_fd = -1;
+static int fail_listener_del_fd = -1;
+
+int __real_tr_reactor_listener_register_publish(
+	struct tr_reactor *reactor, int fd,
+	tr_reactor_listener_cb callback, void *arg,
+	int (*publish)(void *arg), void *publish_arg,
+	void (*on_retained)(void *arg), void *retained_arg,
+	int *out_retained);
+
+int __real_epoll_ctl(
+	int epfd, int op, int fd, struct epoll_event *event);
+
+static int injected_listener_publish_failure(void *arg)
+{
+	(void)arg;
+	return TR_ERR_STATE;
+}
+
+int __wrap_tr_reactor_listener_register_publish(
+	struct tr_reactor *reactor, int fd,
+	tr_reactor_listener_cb callback, void *arg,
+	int (*publish)(void *arg), void *publish_arg,
+	void (*on_retained)(void *arg), void *retained_arg,
+	int *out_retained)
+{
+	if (!fail_next_listener_publish)
+		return __real_tr_reactor_listener_register_publish(
+			reactor, fd, callback, arg, publish, publish_arg,
+			on_retained, retained_arg, out_retained);
+
+	fail_next_listener_publish = 0;
+	injected_listener_fd = fd;
+	fail_listener_del_fd = fd;
+	return __real_tr_reactor_listener_register_publish(
+		reactor, fd, callback, arg,
+		injected_listener_publish_failure, NULL,
+		on_retained, retained_arg, out_retained);
+}
+
+int __wrap_epoll_ctl(
+	int epfd, int op, int fd, struct epoll_event *event)
+{
+	if (op == EPOLL_CTL_DEL && fd == fail_listener_del_fd) {
+		fail_listener_del_fd = -1;
+		errno = EIO;
+		return -1;
+	}
+	return __real_epoll_ctl(epfd, op, fd, event);
+}
 
 int __real_tr_command_queue_push(
 	struct tr_command_queue *queue, const struct tr_command *command,
@@ -830,12 +884,53 @@ static void test_pipeline_listener_prestart_teardown(void)
 	tr_reactor_destroy(reactor);
 }
 
+static void test_listener_publish_rollback_keeps_fd_until_drain(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_pipeline_listener_config config;
+	struct tr_pipeline_listener *listener = NULL;
+	uint16_t port = 0U;
+	int ret;
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.owner_shard_id = 0U;
+	config.pipeline_capacity = 1U;
+	config.connection_capacity = 2U;
+	config.data_capacity_per_pipeline = 1U;
+	config.stream_affinity_capacity_per_pipeline = 1U;
+	config.control_message_count = 2U;
+	config.authorize_control = authorize_control;
+	assert(tr_pipeline_listener_create(&config, &listener) == TR_OK);
+
+	fail_next_listener_publish = 1;
+	ret = tr_pipeline_listener_listen_ipv4(
+		listener, "127.0.0.1", 0U, 8, &port);
+	assert(ret == TR_ERR_SYS);
+	assert(injected_listener_fd >= 0);
+	assert(fail_listener_del_fd == -1);
+	assert(fcntl(injected_listener_fd, F_GETFD) >= 0);
+
+	/* Reactor 仍发布 source 时，listener 必须保留 fd，直到 drain 成功。 */
+	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
+	errno = 0;
+	assert(fcntl(injected_listener_fd, F_GETFD) < 0 && errno == EBADF);
+	injected_listener_fd = -1;
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+}
+
 int main(void)
 {
 	test_pipeline_listener_control_and_data();
 	test_pipeline_listener_ready_ingress_barrier();
 	test_pipeline_send_failure_rolls_back_soft_state();
 	test_pipeline_listener_prestart_teardown();
+	test_listener_publish_rollback_keeps_fd_until_drain();
 	assert(atomic_load(&fail_next_send_push) == 0);
 	puts("pipeline listener/control transport: ok");
 	return 0;

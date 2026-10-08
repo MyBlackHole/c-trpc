@@ -134,8 +134,10 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
         elseif name == "test_pipeline_listener" then
-            -- Force CONTROL SEND admission failures to prove soft-state rollback.
-            add_ldflags("-Wl,--wrap=tr_command_queue_push", {force = true})
+            -- 注入发布失败和 listener DEL 错误，验证失败回滚期间的 fd 所有权。
+            add_ldflags("-Wl,--wrap=tr_command_queue_push",
+                        "-Wl,--wrap=tr_reactor_listener_register_publish",
+                        "-Wl,--wrap=epoll_ctl", {force = true})
         elseif name == "test_pipeline_ingress" then
             -- 仅在测试中注入 terminal DATA membership detach 失败，不污染生产代码。
             add_ldflags("-Wl,--wrap=tr_pipeline_registry_detach_data_route", {force = true})
