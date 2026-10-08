@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,15 +153,16 @@ struct tr_connection {
 	int lifecycle_tx_enqueued;
 
 	uint32_t epoll_events;
-	int tx_wait_writable;
 	int tx_scheduled;
-	int rx_paused;
 	int rx_scheduled;
 	int rx_error_pending;
 
 	struct tr_connection *tx_ready_next;
 	struct tr_connection *rx_ready_next;
 
+	/* 以下字段供所有者线程与统计读取线程共享，运行期统一使用原子访问。 */
+	int tx_wait_writable;
+	int rx_paused;
 	uint64_t rx_bytes;
 	uint64_t tx_bytes;
 	uint64_t rx_frames;
@@ -886,6 +888,25 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_connection_notify(reactor, connection, event, status);
 }
 
+static void tr_connection_stats_reset(struct tr_connection *connection,
+				      uint64_t now_ns)
+{
+	__atomic_store_n(&connection->tx_wait_writable, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->rx_paused, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->rx_bytes, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->tx_bytes, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->rx_frames, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->tx_frames, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->recv_eagain, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->send_eagain, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->rx_pauses_count, 0U, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->last_rx_activity_ns, now_ns,
+			 __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->last_tx_activity_ns, now_ns,
+			 __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->tx_queued_items, 0U, __ATOMIC_RELAXED);
+}
+
 int tr_reactor_close_on_owner(struct tr_conn_handle connection)
 {
 	struct tr_reactor *reactor = connection.reactor;
@@ -940,7 +961,10 @@ static int tr_connection_adopt(
 		return TR_ERR_STALE;
 
 	connection = &reactor->connections[slot];
-	memset(connection, 0, sizeof(*connection));
+	/* 统计字段可被外部线程读取，复用时只能对它们执行原子重置。 */
+	memset(connection, 0,
+	       offsetof(struct tr_connection, tx_wait_writable));
+	tr_connection_stats_reset(connection, tr_reactor_now_ns());
 	connection->fd = -1;
 	connection->slot = slot;
 	connection->generation = generation;
@@ -961,11 +985,6 @@ static int tr_connection_adopt(
 		connection->preface_release = preface->release;
 		connection->preface_arg = preface->arg;
 	}
-	__atomic_store_n(&connection->last_rx_activity_ns, tr_reactor_now_ns(),
-			 __ATOMIC_RELAXED);
-	__atomic_store_n(&connection->last_tx_activity_ns, tr_reactor_now_ns(),
-			 __ATOMIC_RELAXED);
-
 	limits.max_payload_len = reactor->config.max_payload_len;
 	ret = tr_parser_init(&connection->parser, &reactor->rx_pool, &limits);
 	if (ret != TR_OK) {
@@ -3611,6 +3630,16 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 
 		memset(out, 0, sizeof(*out));
 		out->state = tr_slot_meta_state(before);
+		if (out->state == TR_CONN_RESERVED) {
+			after = atomic_load_explicit(
+				&reactor->slots[connection.slot].meta,
+				memory_order_acquire);
+			if (before == after)
+				return TR_OK;
+			if (tr_slot_meta_generation(after) != connection.generation)
+				return TR_ERR_STALE;
+			continue;
+		}
 		out->rx_bytes = __atomic_load_n(&conn->rx_bytes, __ATOMIC_RELAXED);
 		out->tx_bytes = __atomic_load_n(&conn->tx_bytes, __ATOMIC_RELAXED);
 		out->rx_frames =
