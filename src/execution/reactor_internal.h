@@ -88,13 +88,15 @@ typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 
 /*
- * Register one listener/event source in the Reactor epoll set. The callback
- * runs on the Reactor owner and must be short/non-blocking.
+ * 在 Reactor epoll 集中注册一个 listener 事件源。回调由 owner 执行，必须短小且非阻塞。
  *
- * register/unregister are synchronous lifecycle barriers. unregister only
- * clears callback publication after EPOLL_CTL_DEL has succeeded or the kernel
- * state proves that the old registration is already absent. Unexpected detach
- * failures preserve the publication and return an error so teardown can retry.
+ * fd 由调用方持有，Reactor 只借用它。调用方必须保持注册时的 fd 数值和
+ * open file description 不变，直到 unregister 返回 TR_OK；dup 可以存在，但
+ * 不能因此提前关闭或复用注册用的 fd。
+ *
+ * register/unregister 是同步生命周期屏障。只有 EPOLL_CTL_DEL 成功才会清除
+ * callback/arg 发布。DEL 的任何错误都返回错误并保留发布；在重试成功或
+ * Reactor 销毁前，调用方必须保持 callback arg 有效。
  */
 int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 				 tr_reactor_listener_cb callback, void *arg);
@@ -135,6 +137,7 @@ int tr_reactor_listener_unregister_call(
 
 int tr_reactor_listener_unregister(struct tr_reactor *reactor, int fd);
 
+/* peer event source 遵循与 listener 相同的借用 fd 和 unregister 生命周期契约。 */
 int tr_reactor_peer_event_register(struct tr_reactor *reactor, int fd,
 				   tr_reactor_peer_event_cb callback, void *arg);
 int tr_reactor_peer_event_unregister(struct tr_reactor *reactor, int fd);
@@ -146,7 +149,11 @@ typedef void (*tr_reactor_aux_event_cb)(int fd, uint32_t events, void *arg);
  * nonblocking connect。每个 registration 使用独立 generation token，slot 复用后
  * stale epoll event 会被安全丢弃。
  *
- * Reactor 只观察 fd，不取得 fd ownership，也不会主动 close。
+ * Reactor 只借用 fd，不取得 ownership，也不会主动 close。调用方必须保持
+ * 注册时的 fd 数值和 open file description 不变，直到 unregister 返回 TR_OK；
+ * dup 可以存在，但不能提前关闭或复用注册用的 fd。
+ * unregister 的 EPOLL_CTL_DEL 失败时保留 callback/arg 发布，调用方须保持 arg
+ * 有效，直到重试成功或 Reactor 销毁。
  * events 只接受 EPOLLIN/EPOLLOUT；ERR/HUP 始终自动加入。
  */
 int tr_reactor_aux_event_register(struct tr_reactor *reactor, int fd,

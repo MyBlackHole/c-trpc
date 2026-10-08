@@ -2517,21 +2517,11 @@ static int tr_reactor_epoll_del_source(struct tr_reactor *reactor, int fd)
 		return TR_OK;
 
 	/*
-	 * unregister 是 callback 生命周期屏障。只有能够证明旧 registration
-	 * 已经不存在时，调用方才允许清除 callback/arg publication。
-	 *
-	 * ENOENT：该 open file description 已不在当前 epoll set；
-	 * EBADF：被观察 fd 或 epoll fd 已关闭，不再可能由本 Reactor dispatch；
-	 * EPERM：当前数值 fd 已指向不可加入 epoll 的对象，说明原 pollable
-	 *        open file description 已关闭/复用，其旧 registration 已随 close
-	 *        自动移除。
-	 *
-	 * 其他错误不能证明 source 已静默，必须 fail closed 并保留本地 publication
-	 * 供后续重试。
+	 * epoll registration 的身份同时包含 fd 数值和 open file description。
+	 * fd 被关闭并复用后，ENOENT、EBADF、EPERM 都可能与旧 registration 仍
+	 * 存在并存，不能用错误码推断旧事件已静默。解绑屏障只接受 DEL 成功；
+	 * 任何失败都保留 callback publication，供调用方重试或销毁 Reactor。
 	 */
-	if (errno == ENOENT || errno == EBADF || errno == EPERM)
-		return TR_OK;
-
 	return TR_ERR_SYS;
 }
 
