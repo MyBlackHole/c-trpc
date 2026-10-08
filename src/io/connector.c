@@ -17,6 +17,12 @@
 #define TR_CONNECTOR_MAX_PREFACE_BYTES 256U
 #define TR_CONNECTOR_TEARDOWN_RETRY_NS UINT64_C(10000000)
 
+enum tr_connector_terminal_action {
+	TR_CONNECTOR_TERMINAL_NONE = 0,
+	TR_CONNECTOR_TERMINAL_COMPLETE,
+	TR_CONNECTOR_TERMINAL_CANCEL
+};
+
 struct tr_connector {
 	struct tr_connector_config config;
 
@@ -24,6 +30,8 @@ struct tr_connector {
 	uint16_t port;
 	int fd;
 	int active;
+	enum tr_connector_terminal_action terminal_action;
+	int terminal_status;
 	int connecting;
 	int watched;
 	int socket_ready;
@@ -56,8 +64,7 @@ static int tr_connector_unwatch_on_owner(struct tr_connector *connector)
 	ret = tr_reactor_aux_event_unregister(
 		connector->config.owner, connector->fd);
 	/*
-	 * STALE proves this fd is not published in the aux source table anymore,
-	 * which is sufficient for connector lifetime safety.
+	 * STALE 表示此 fd 已从 aux source 表移除，足以保证 Connector 生命周期安全。
 	 */
 	if (ret != TR_OK && ret != TR_ERR_STALE)
 		return ret;
@@ -75,7 +82,7 @@ static int tr_connector_disarm_on_owner(struct tr_connector *connector)
 
 	ret = tr_reactor_timer_arm(connector->timer, 0U);
 	if (ret == TR_ERR_STALE) {
-		/* The timer source is already absent; publish that fact locally. */
+		/* timer source 已不存在，在本地同步记录该状态。 */
 		connector->timer_registered = 0;
 		memset(&connector->timer, 0, sizeof(connector->timer));
 		return TR_OK;
@@ -87,6 +94,8 @@ static void tr_connector_reset_state(struct tr_connector *connector)
 {
 	connector->fd = -1;
 	connector->active = 0;
+	connector->terminal_action = TR_CONNECTOR_TERMINAL_NONE;
+	connector->terminal_status = TR_OK;
 	connector->connecting = 0;
 	connector->watched = 0;
 	connector->socket_ready = 0;
@@ -107,10 +116,16 @@ static int tr_connector_complete_on_owner(
 
 	if (!connector->active)
 		return TR_OK;
+	if (connector->terminal_action == TR_CONNECTOR_TERMINAL_CANCEL)
+		return TR_ERR_STATE;
+	if (connector->terminal_action == TR_CONNECTOR_TERMINAL_NONE) {
+		connector->terminal_action = TR_CONNECTOR_TERMINAL_COMPLETE;
+		connector->terminal_status = status;
+	}
+	status = connector->terminal_status;
 
 	/*
-	 * Completion cannot publish upper-layer ownership until every callback
-	 * source that still carries connector * has been detached.
+	 * 只有拆除所有仍持有 Connector 指针的回调源后，才能向上层移交 fd 所有权。
 	 */
 	ret = tr_connector_unwatch_on_owner(connector);
 	if (ret != TR_OK)
@@ -134,6 +149,23 @@ static int tr_connector_complete_on_owner(
 	 * 返回前 adopt/close fd，甚至销毁上层对象，因此之后不能再访问 connector。
 	 */
 	callback(status, fd, callback_arg);
+	return TR_OK;
+}
+
+static int tr_connector_cancel_cleanup_on_owner(
+	struct tr_connector *connector)
+{
+	int ret;
+
+	ret = tr_connector_unwatch_on_owner(connector);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_connector_disarm_on_owner(connector);
+	if (ret != TR_OK)
+		return ret;
+
+	tr_socket_close(&connector->fd);
+	tr_connector_reset_state(connector);
 	return TR_OK;
 }
 
@@ -164,9 +196,8 @@ static int tr_connector_send_preface_on_owner(
 		}
 
 		/*
-		 * The attempt was already accepted. If completion publication succeeds,
-		 * start/progress itself remains successful; the network error is reported
-		 * exactly once through complete_cb.
+		 * attempt 已经接管。若 completion 能完成发布，start/progress 本身仍返回成功；
+		 * 网络错误通过 complete_cb 恰好报告一次。
 		 */
 		return tr_connector_complete_on_owner(connector, TR_ERR_SYS);
 	}
@@ -208,6 +239,15 @@ static void tr_connector_event(
 	(void)events;
 	if (!connector || !connector->active || fd != connector->fd)
 		return;
+	if (connector->terminal_action == TR_CONNECTOR_TERMINAL_COMPLETE) {
+		(void)tr_connector_complete_on_owner(
+			connector, connector->terminal_status);
+		return;
+	}
+	if (connector->terminal_action == TR_CONNECTOR_TERMINAL_CANCEL) {
+		(void)tr_connector_cancel_cleanup_on_owner(connector);
+		return;
+	}
 	(void)tr_connector_progress_on_owner(connector);
 }
 
@@ -234,15 +274,19 @@ static uint64_t tr_connector_timeout(void *arg, uint64_t now_ns)
 	if (!connector || !connector->active)
 		return 0U;
 
-	ret = tr_connector_complete_on_owner(connector, TR_ERR_TIMEOUT);
+	if (connector->terminal_action == TR_CONNECTOR_TERMINAL_CANCEL)
+		ret = tr_connector_cancel_cleanup_on_owner(connector);
+	else
+		ret = tr_connector_complete_on_owner(
+			connector,
+			connector->terminal_action == TR_CONNECTOR_TERMINAL_COMPLETE ?
+				connector->terminal_status : TR_ERR_TIMEOUT);
 	if (ret == TR_OK)
 		return 0U;
 
 	/*
-	 * timeout 已经成为 terminal 状态，但 callback source detach 仍可能因为
-	 * epoll/owner barrier 暂时失败。不能在 debug 构建 abort，也不能返回 0
-	 * 让仍 active 的 Connector 永久失去驱动。保持所有 publication 不变，
-	 * 用同一个 timer 做短延迟重试，直到 completion 真正收敛。
+	 * 首次终态已经锁存，但 callback source detach 仍可能暂时失败。保持现有
+	 * publication 不变，用同一个 timer 短暂延迟重试，直到终态清理完成。
 	 */
 	if (UINT64_MAX - now_ns < TR_CONNECTOR_TEARDOWN_RETRY_NS)
 		return UINT64_MAX;
@@ -338,22 +382,17 @@ static int tr_connector_cancel_on_owner(void *arg)
 	struct tr_connector_cancel_request *request =
 		(struct tr_connector_cancel_request *)arg;
 	struct tr_connector *connector = request->connector;
-	int ret;
 
-	/*
-	 * Always prove source quiescence, even for an already-inactive attempt.
-	 * Local active state must never substitute for callback-source ownership.
-	 */
-	ret = tr_connector_unwatch_on_owner(connector);
-	if (ret != TR_OK)
-		return ret;
-	ret = tr_connector_disarm_on_owner(connector);
-	if (ret != TR_OK)
-		return ret;
+	if (connector->active) {
+		if (connector->terminal_action ==
+		    TR_CONNECTOR_TERMINAL_COMPLETE)
+			return TR_ERR_STATE;
+		if (connector->terminal_action == TR_CONNECTOR_TERMINAL_NONE)
+			connector->terminal_action = TR_CONNECTOR_TERMINAL_CANCEL;
+	}
 
-	tr_socket_close(&connector->fd);
-	tr_connector_reset_state(connector);
-	return TR_OK;
+	/* 即使 attempt 已 inactive，也必须确认不会遗留任何 Reactor 回调源。 */
+	return tr_connector_cancel_cleanup_on_owner(connector);
 }
 
 int tr_connector_create(
@@ -419,9 +458,8 @@ int tr_connector_destroy(struct tr_connector *connector)
 		return TR_OK;
 
 	/*
-	 * Connector lifetime is subordinate to its Reactor. A parent must destroy
-	 * it before Reactor stop; an in-progress/stopped owner therefore fails
-	 * closed rather than freeing callback_arg storage optimistically.
+	 * Connector 生命周期依附于 Reactor。父对象必须在 Reactor stop 前销毁它；owner
+	 * 正在停止或已经停止时保守返回错误，不提前释放 callback_arg 所属存储。
 	 */
 	ret = tr_reactor_call(
 		connector->config.owner, tr_connector_destroy_on_owner, connector);
