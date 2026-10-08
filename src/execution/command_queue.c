@@ -63,6 +63,9 @@ void tr_command_queue_destroy(struct tr_command_queue *queue)
 	queue->pushed_other = 0;
 	queue->full_other = 0;
 	queue->wake_pending = 0;
+	memset(&queue->stop_command, 0, sizeof(queue->stop_command));
+	queue->stop_pending = 0;
+	queue->stop_closed = 0;
 	pthread_cond_destroy(&queue->not_full);
 	pthread_mutex_destroy(&queue->lock);
 }
@@ -142,6 +145,10 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
+	if (queue->stop_closed) {
+		pthread_mutex_unlock(&queue->lock);
+		return TR_ERR_CLOSED;
+	}
 	if (queue->count == queue->capacity) {
 		tr_command_queue_observe_full_locked(queue, command);
 		pthread_mutex_unlock(&queue->lock);
@@ -159,6 +166,11 @@ int tr_command_queue_wait_open(struct tr_command_queue *queue)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
+	if (queue->stop_pending) {
+		pthread_mutex_unlock(&queue->lock);
+		return TR_ERR_STATE;
+	}
+	queue->stop_closed = 0;
 	queue->wait_generation++;
 	if (queue->wait_generation == 0U)
 		queue->wait_generation = 1U;
@@ -238,32 +250,41 @@ int tr_command_queue_push_wait_force(
 	struct tr_command_queue *queue, const struct tr_command *command,
 	int *need_wake)
 {
-	int waited = 0;
-	int ret;
+	int wake = 0;
 
-	if (!queue || !command)
+	if (!queue || !command || command->type != TR_CMD_STOP)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&queue->lock);
-	while (queue->count == queue->capacity) {
-		int error;
-
-		if (!waited) {
-			tr_command_queue_observe_full_locked(queue, command);
-			waited = 1;
-		}
-		queue->waiters++;
-		error = pthread_cond_wait(&queue->not_full, &queue->lock);
-		queue->waiters--;
-		if (error != 0) {
-			pthread_mutex_unlock(&queue->lock);
-			return TR_ERR_SYS;
-		}
+	if (queue->stop_closed) {
+		pthread_mutex_unlock(&queue->lock);
+		return TR_ERR_STATE;
 	}
 
-	ret = tr_command_queue_enqueue_locked(queue, command, need_wake);
+	/*
+	 * STOP 不竞争普通 ring 容量。固定槽位已包含在 Reactor 对象及其
+	 * sizeof 内存预算中；压力下无需分配，也不等待 consumer 提供空位。
+	 * 与普通入队共用 lock/sequence，保留已接受命令的 FIFO 边界。
+	 */
+	queue->stop_command = *command;
+	queue->next_sequence++;
+	if (queue->next_sequence == 0U)
+		queue->next_sequence = 1U;
+	queue->stop_command.sequence = queue->next_sequence;
+	queue->stop_pending = 1;
+	queue->stop_closed = 1;
+	queue->wait_accepting = 0;
+	tr_command_queue_observe_push_locked(queue, command);
+	pthread_cond_broadcast(&queue->not_full);
+
+	if (!queue->wake_pending) {
+		queue->wake_pending = 1;
+		wake = 1;
+	}
+	if (need_wake)
+		*need_wake = wake;
 	pthread_mutex_unlock(&queue->lock);
-	return ret;
+	return TR_OK;
 }
 
 int tr_command_queue_is_empty(struct tr_command_queue *queue)
@@ -274,7 +295,7 @@ int tr_command_queue_is_empty(struct tr_command_queue *queue)
 		return 0;
 
 	pthread_mutex_lock(&queue->lock);
-	empty = queue->count == 0;
+	empty = queue->count == 0 && !queue->stop_pending;
 	pthread_mutex_unlock(&queue->lock);
 	return empty;
 }
@@ -308,12 +329,19 @@ size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 		queue->count--;
 	}
 
-	if (queue->count == 0)
+	/* STOP 不能越过 ring 中的前驱，也不能突破本轮 max_commands。 */
+	if (queue->count == 0 && queue->stop_pending && count < max_commands) {
+		out[count++] = queue->stop_command;
+		memset(&queue->stop_command, 0, sizeof(queue->stop_command));
+		queue->stop_pending = 0;
+	}
+
+	if (queue->count == 0 && !queue->stop_pending)
 		queue->wake_pending = 0;
 
 	/*
 	 * 一个 Reactor batch 可能释放多个 command slot。broadcast 让所有同步
-	 * waiter/STOP waiter 重新竞争实际空位，避免已有容量时仍有 producer 睡眠。
+	 * waiter 重新竞争实际空位；STOP 使用独立固定槽位，不属于容量 waiter。
 	 */
 	if (count != 0U && queue->waiters != 0U)
 		pthread_cond_broadcast(&queue->not_full);

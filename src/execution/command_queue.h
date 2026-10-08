@@ -89,6 +89,15 @@ struct tr_command_queue {
 	uint64_t full_other;
 
 	int wake_pending;
+
+	/*
+	 * 固定的停止专用槽位，不占普通 ring 的 capacity/count/peak_count。
+	 * STOP 仅在普通 ring 排空后弹出；stop_closed 保持到下一 epoch open，
+	 * 防止已经弹出 STOP 后又接受新命令。所有字段均由 lock 保护。
+	 */
+	struct tr_command stop_command;
+	int stop_pending;
+	int stop_closed;
 };
 
 int tr_command_queue_init(struct tr_command_queue *queue, uint32_t capacity);
@@ -104,8 +113,9 @@ int tr_command_queue_push(struct tr_command_queue *queue,
 /*
  * 同步 owner request 的 capacity wait admission。
  *
- * open/close 只控制 push_wait() waiter，不改变普通 push() 的立即 TR_AGAIN
- * 语义。generation 由生命周期 owner 在 ctl_lock 保护下取样，防止 stop
+ * close 控制 push_wait() waiter，普通 push() 在 STOP 提交前仍为有界立即入队。
+ * STOP 提交会关闭整个 epoch；消费 STOP 后，open 才重开普通及等待准入。
+ * generation 由生命周期 owner 在 ctl_lock 保护下取样，防止 stop
  * 关闭 waiter 后旧 request 重新混入新的 admission epoch。
  */
 int tr_command_queue_wait_open(struct tr_command_queue *queue);
@@ -122,16 +132,21 @@ int tr_command_queue_push_wait(
 	uint64_t expected_generation, int *need_wake);
 
 /*
- * Lifecycle-only forced waiter，供 STOP admission 使用。
- * 忽略 wait_accepting/generation，只等待 ring capacity；Reactor owner pop
- * 不依赖 ctl_lock，因此 stop 可以持 ctl_lock 安全等待一个 STOP slot。
+ * 仅供 STOP 使用的固定容量保留通道，不分配内存、不等待普通 ring 空位。
+ * 保留原内部函数名，但此入口已经不再是 capacity waiter：不能在持有
+ * Reactor ctl_lock 时等待 owner 消费，因为 owner 回调自身也可能需要该锁。
+ *
+ * 在 queue->lock 下关闭本 epoch 的新命令，STOP 排在所有已接受命令之后；
+ * pop_batch 先取普通 ring，再取 STOP，且两者共用原 batch budget。
+ * 非 STOP 返回 TR_ERR_INVALID；同 epoch 重复提交返回 TR_ERR_STATE。
+ * 只有上一 STOP 已弹出，wait_open 才能开启下一 epoch。
  */
 int tr_command_queue_push_wait_force(
 	struct tr_command_queue *queue, const struct tr_command *command,
 	int *need_wake);
 
 /*
- * 锁内判断 ring 是否为空。返回 1 表示当前无 pending command；
+ * 锁内判断普通 ring 与 STOP 保留槽。返回 1 表示当前无 pending command；
  * NULL 返回 0，让调用方保守地走排队路径。
  */
 int tr_command_queue_is_empty(struct tr_command_queue *queue);
