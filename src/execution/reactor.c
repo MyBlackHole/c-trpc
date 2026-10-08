@@ -2580,6 +2580,9 @@ struct tr_reactor_listener_publish_request {
 	void *arg;
 	int (*publish)(void *arg);
 	void *publish_arg;
+	void (*on_retained)(void *arg);
+	void *retained_arg;
+	int *out_retained;
 };
 
 static int tr_reactor_listener_register_publish_now(void *arg)
@@ -2608,8 +2611,12 @@ static int tr_reactor_listener_register_publish_now(void *arg)
 		 * barrier 自身失败，source publication 仍然存活，生命周期错误优先于
 		 * 原 publish 错误返回；调用方必须在释放 callback_arg 前重试 unregister。
 		 */
-		if (undo != TR_OK)
+		if (undo != TR_OK) {
+			if (request->on_retained)
+				request->on_retained(request->retained_arg);
+			*request->out_retained = 1;
 			return undo;
+		}
 	}
 	return ret;
 }
@@ -2666,10 +2673,15 @@ int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
 int tr_reactor_listener_register_publish(
 	struct tr_reactor *reactor, int fd,
 	tr_reactor_listener_cb callback, void *arg,
-	int (*publish)(void *arg), void *publish_arg)
+	int (*publish)(void *arg), void *publish_arg,
+	void (*on_retained)(void *arg), void *retained_arg,
+	int *out_retained)
 {
 	struct tr_reactor_listener_publish_request request;
 
+	if (!out_retained)
+		return TR_ERR_INVALID;
+	*out_retained = 0;
 	if (!reactor || fd < 0 || !callback || !publish)
 		return TR_ERR_INVALID;
 
@@ -2679,6 +2691,9 @@ int tr_reactor_listener_register_publish(
 	request.arg = arg;
 	request.publish = publish;
 	request.publish_arg = publish_arg;
+	request.on_retained = on_retained;
+	request.retained_arg = retained_arg;
+	request.out_retained = out_retained;
 
 	/*
 	 * call_or_stopped 已经定义了所需的统一串行化域：

@@ -328,11 +328,13 @@ static void test_register_publish_reports_rollback_barrier_failure(
 {
 	int fd = make_event_fd();
 	int other = make_event_fd();
+	int retained = 0;
 
 	inject_del_fault(fd, EPOLL_DEL_FAULT_EIO);
 	assert(tr_reactor_listener_register_publish(
 		       reactor, fd, source_callback, &callback_hits,
-		       publish_fail, NULL) == TR_ERR_SYS);
+		       publish_fail, NULL, NULL, NULL, &retained) == TR_ERR_SYS);
+	assert(retained == 1);
 
 	/* 回滚屏障失败时保留发布状态，不能伪装为事务已完整撤销。 */
 	assert(tr_reactor_listener_register(

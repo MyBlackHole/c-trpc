@@ -56,6 +56,7 @@ struct tr_pipeline_listener {
 	struct tr_pipeline_listener_connection *connections;
 
 	int listen_fd;
+	int retained_listen_fd;
 	uint16_t bound_port;
 	int listener_registered;
 	int draining;
@@ -571,7 +572,8 @@ static void tr_pipeline_listener_on_ready(
 		(struct tr_pipeline_listener *)arg;
 	uint32_t accepted = 0U;
 
-	if (!listener || !(events & EPOLLIN))
+	if (!listener || listener->retained_listen_fd >= 0 ||
+	    !(events & EPOLLIN))
 		return;
 
 	while (accepted < TR_PIPELINE_LISTENER_ACCEPT_BATCH) {
@@ -618,6 +620,7 @@ int tr_pipeline_listener_create(
 	if (!listener)
 		return TR_ERR_NOMEM;
 	listener->listen_fd = -1;
+	listener->retained_listen_fd = -1;
 	listener->config = *config;
 
 	if (pthread_mutex_init(&listener->drain_wait_lock, NULL) != 0) {
@@ -728,12 +731,23 @@ static int tr_pipeline_listener_publish_listen(void *arg)
 	return TR_OK;
 }
 
+static void tr_pipeline_listener_retain_failed_listen(void *arg)
+{
+	struct tr_pipeline_listener_listen_request *request =
+		(struct tr_pipeline_listener_listen_request *)arg;
+	struct tr_pipeline_listener *listener = request->listener;
+
+	/* DEL 回滚失败时，等待后续 drain 跨过解绑屏障后再关闭该 fd。 */
+	listener->retained_listen_fd = request->fd;
+}
+
 int tr_pipeline_listener_listen_ipv4(
 	struct tr_pipeline_listener *listener, const char *address,
 	uint16_t port, int backlog, uint16_t *out_bound_port)
 {
 	struct tr_pipeline_listener_listen_request request;
 	int fd = -1;
+	int retained = 0;
 	uint16_t bound = 0U;
 	int ret;
 
@@ -757,9 +771,11 @@ int tr_pipeline_listener_listen_ipv4(
 	ret = tr_reactor_listener_register_publish(
 		listener->config.owner, fd,
 		tr_pipeline_listener_on_ready, listener,
-		tr_pipeline_listener_publish_listen, &request);
+		tr_pipeline_listener_publish_listen, &request,
+		tr_pipeline_listener_retain_failed_listen, &request, &retained);
 	if (ret != TR_OK) {
-		tr_socket_close(&fd);
+		if (!retained)
+			tr_socket_close(&fd);
 		return ret;
 	}
 
@@ -773,10 +789,17 @@ static int tr_pipeline_listener_publish_drained_admission(void *arg)
 	struct tr_pipeline_listener *listener =
 		(struct tr_pipeline_listener *)arg;
 	int was_draining;
+	int listen_fd;
 
 	was_draining = listener->draining;
+	listen_fd = listener->listen_fd;
 	listener->listener_registered = 0;
-	if (listener->listen_fd >= 0) {
+	if (listener->retained_listen_fd >= 0 &&
+	    listener->retained_listen_fd != listen_fd)
+		tr_socket_close(&listener->retained_listen_fd);
+	else
+		listener->retained_listen_fd = -1;
+	if (listen_fd >= 0) {
 		tr_socket_close(&listener->listen_fd);
 		listener->bound_port = 0U;
 	}
@@ -1014,6 +1037,7 @@ static int tr_pipeline_listener_verify_destroy(void *arg)
 	if (!listener)
 		return TR_ERR_INVALID;
 	if (listener->listener_registered || listener->listen_fd >= 0 ||
+	    listener->retained_listen_fd >= 0 ||
 	    listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return TR_ERR_STATE;

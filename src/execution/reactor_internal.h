@@ -111,13 +111,17 @@ int tr_reactor_listener_register(struct tr_reactor *reactor, int fd,
  * publish 在 source 已加入 epoll、但尚不可能 dispatch 的串行化区间执行。
  * publish 返回失败时 Reactor 会先撤销 source registration；若撤销屏障本身失败，
  * 函数返回该生命周期错误并保留 source publication，调用方不得提前释放 callback_arg，
- * 必须先重试 unregister。
+ * 必须先重试 unregister。此时 on_retained 会在相同串行化区间执行，用于让调用方
+ * 记录仍由 Reactor 发布的资源所有权；out_retained 会报告错误返回时 source 是否仍
+ * 发布。没有提供 on_retained 的调用方仍必须根据 out_retained 自行保留资源。
  * publish 必须短小、非阻塞；stopped direct path 中不得重入 Reactor lifecycle API。
  */
 int tr_reactor_listener_register_publish(
 	struct tr_reactor *reactor, int fd,
 	tr_reactor_listener_cb callback, void *arg,
-	int (*publish)(void *arg), void *publish_arg);
+	int (*publish)(void *arg), void *publish_arg,
+	void (*on_retained)(void *arg), void *retained_arg,
+	int *out_retained);
 
 /*
  * 将 listener source detach 与 caller teardown state 合并为一个生命周期事务。
