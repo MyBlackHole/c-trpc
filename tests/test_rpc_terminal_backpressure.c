@@ -357,6 +357,10 @@ int main(void)
 		    &calls[RESPONSE_INDEX]);
 	wait_backpressure(client_rpc, 2U);
 
+	/* A physical disconnect must not replace either retained terminal result. */
+	assert(tr_reactor_abort(client_conn, TR_ERR_SYS) == TR_OK);
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+
 	pthread_mutex_lock(&ctx.lock);
 	assert(ctx.delivered == 0U);
 	ctx.release_cancel_handler = 1;
