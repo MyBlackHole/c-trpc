@@ -72,6 +72,17 @@ int __wrap_poll(struct pollfd *fds, nfds_t count, int timeout_ms)
 	return step->result;
 }
 
+/*
+ * glibc Fortify 可能把 poll() 降低成 __poll_chk()。Sanitizer 与发行版
+ * 编译器设置不同，两个入口都必须指向同一测试脚本。
+ */
+int __wrap___poll_chk(struct pollfd *fds, nfds_t count, int timeout_ms,
+		       size_t fds_size)
+{
+	assert(fds_size >= count * sizeof(*fds));
+	return __wrap_poll(fds, count, timeout_ms);
+}
+
 static void check_consumed_at(const char *test, int line)
 {
 	if (step_index != step_count)
