@@ -3660,6 +3660,23 @@ static void test_rpc_call_slot_reuse(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+struct split_reconnect_close_probe {
+	struct tr_conn_handle control;
+	struct tr_conn_handle bulk;
+};
+
+static int close_split_reconnect_pair_on_owner(void *arg)
+{
+	struct split_reconnect_close_probe *probe =
+		(struct split_reconnect_close_probe *)arg;
+	int ret;
+
+	ret = tr_reactor_close_on_owner(probe->control);
+	if (ret != TR_OK)
+		return ret;
+	return tr_reactor_close_on_owner(probe->bulk);
+}
+
 static int accept_reconnect_connection(int listener)
 {
 	struct pollfd pfd;
@@ -3702,6 +3719,7 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	struct tr_channel_stats stats;
+	struct split_reconnect_close_probe close_probe;
 	enum tr_channel_lane_state lane_state;
 	uint16_t control_port;
 	uint16_t bulk_port;
@@ -3782,8 +3800,10 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
 	 * Close both old client connections back-to-back. The reconnect delay
 	 * leaves both DOWN notifications visible before the first retry starts.
 	 */
-	assert(tr_reactor_close(client_control) == TR_OK);
-	assert(tr_reactor_close(client_bulk) == TR_OK);
+	close_probe.control = client_control;
+	close_probe.bulk = client_bulk;
+	assert(tr_reactor_call(reactor, close_split_reconnect_pair_on_owner,
+			       &close_probe) == TR_OK);
 	wait_channel_counter(&client_ctx, &client_ctx.channel_down, 2U);
 	wait_channel_counter(&server_ctx, &server_ctx.channel_down, 2U);
 
