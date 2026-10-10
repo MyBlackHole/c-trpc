@@ -2375,33 +2375,6 @@ static int tr_rpc_release_stream_payload(struct tr_stream_handle stream,
 	return ret;
 }
 
-struct tr_rpc_stream_close_request {
-	struct tr_stream_handle stream;
-};
-
-static int tr_rpc_stream_close_on_owner(void *arg)
-{
-	struct tr_rpc_stream_close_request *request =
-		(struct tr_rpc_stream_close_request *)arg;
-
-	return tr_stream_close(request->stream);
-}
-
-static int tr_rpc_close_stream(struct tr_stream_handle stream)
-{
-	struct tr_rpc_stream_close_request request;
-	struct tr_reactor *reactor;
-
-	if (!stream.channel)
-		return TR_ERR_STALE;
-	reactor = tr_channel_reactor(stream.channel);
-	if (!reactor)
-		return TR_ERR_STATE;
-
-	request.stream = stream;
-	return tr_reactor_call(reactor, tr_rpc_stream_close_on_owner, &request);
-}
-
 static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
 {
 	if (!task || !task->payload)
