@@ -94,7 +94,17 @@ static void test_zero_and_infinite(void)
 	assert(tr_deadline_poll_fd(17, POLLOUT, &deadline, 0) ==
 	       TR_ERR_TIMEOUT);
 	add_step(0, 1, 0, 0);
-	assert(tr_deadline_poll_fd(17, POLLOUT, &deadline, 1) == TR_OK);
+	{
+		int status = tr_deadline_poll_fd(17, POLLOUT, &deadline, 1);
+
+		if (status != TR_OK || step_index != step_count)
+			fprintf(stderr,
+				"zero probe: status=%d, steps=%u/%u, infinite=%d, sec=%jd, nsec=%ld\n",
+				status, step_index, step_count, deadline.infinite,
+				(intmax_t)deadline.absolute.tv_sec,
+				deadline.absolute.tv_nsec);
+		assert(status == TR_OK);
+	}
 	check_consumed();
 
 	set_now(100, 0);
