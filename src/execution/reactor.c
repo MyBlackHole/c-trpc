@@ -3678,6 +3678,8 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 		pthread_mutex_lock(&sync.lock);
 		while (!sync.done)
 			pthread_cond_wait(&sync.cond, &sync.lock);
+		/* A failed owner epoch may complete QUIESCE with TR_ERR_SYS. */
+		ret = sync.status;
 		pthread_mutex_unlock(&sync.lock);
 	}
 
