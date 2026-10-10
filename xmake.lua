@@ -115,7 +115,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_channel_detach", "test_channel_control_retry", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -162,6 +162,12 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
         elseif name == "test_reactor_source_detach" then
             -- Inject EPOLL_CTL_DEL failures without production fault hooks.
             add_ldflags("-Wl,--wrap=epoll_ctl", {force = true})
+        elseif name == "test_reactor_fatal_exit" then
+            -- Inject EIO at the owner poll, capture accepted waiters and
+            -- prove the bounded command/completion queues are drained.
+            add_ldflags("-Wl,--wrap=epoll_wait",
+                        "-Wl,--wrap=tr_command_queue_push_wait",
+                        "-Wl,--wrap=tr_completion_queue_push_wait", {force = true})
         elseif name == "test_reactor_stop_full" then
             -- 固定满队列停机交错，验证 FIFO、join 重试及新 epoch。
             add_ldflags("-Wl,--wrap=tr_command_queue_push_wait_force",
