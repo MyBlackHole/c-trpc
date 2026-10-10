@@ -267,6 +267,7 @@ int main(void)
 	struct tr_stream_handle second;
 	struct tr_stream_handle third;
 	struct tr_stream_handle fourth;
+	struct tr_stream_handle fifth;
 	struct tr_stream_flow_state flow;
 	struct tr_channel_stats stats;
 	struct tr_buffer_pool pool;
@@ -391,7 +392,15 @@ int main(void)
 	atomic_store_explicit(&auto_release_data, 0, memory_order_relaxed);
 	close_stream(fourth, &server_ctx, client, server);
 
-	/* A stopped Reactor must retain no callback into freed Channel storage. */
+	/*
+	 * Stop the Reactor while a real WINDOW_UPDATE obligation remains armed.
+	 * Channel destroy must unregister its callback before releasing storage.
+	 */
+	fifth = open_stream(client, &client_ctx, &server_ctx, 5U);
+	send_bytes(fifth, &pool, WINDOW_BYTES);
+	wait_count(&server_ctx, &server_ctx.received, 7U);
+	atomic_store_explicit(&fail_window_updates, 100U, memory_order_relaxed);
+	assert(release_message(&server_ctx, 6U) == TR_AGAIN);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client) == TR_OK);
 	assert(tr_channel_destroy(server) == TR_OK);
