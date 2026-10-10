@@ -1218,8 +1218,25 @@ static int tr_channel_protocol_error(struct tr_channel *channel,
 				     struct tr_conn_handle connection,
 				     int status)
 {
+	int ret;
+
 	(void)channel;
-	(void)tr_reactor_close(connection);
+	/*
+	 * Frame dispatch and deferred HELLO replay both run on the Reactor owner.
+	 * A protocol failure must retire the exact connection generation now:
+	 * tr_reactor_close() would compete for bounded command capacity and can
+	 * return TR_AGAIN, leaving the malformed peer alive. Notify the Channel
+	 * through the error event, rather than reporting a graceful close.
+	 *
+	 * Some internal admission failures are TR_AGAIN; abort requires a
+	 * negative status even though such a failure is terminal here.
+	 * Callers have released channel->lock before entering this helper, so
+	 * the synchronous connection event may safely retire its Stream slots.
+	 */
+	ret = tr_reactor_abort_on_owner(connection,
+				      status < 0 ? status : TR_ERR_STATE);
+	if (ret != TR_OK && ret != TR_ERR_STALE)
+		return ret;
 	return status;
 }
 
