@@ -21,6 +21,7 @@
 
 static _Atomic uint32_t fail_window_updates;
 static _Atomic uint32_t window_attempts;
+static _Atomic int auto_release_data;
 
 int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 			   uint32_t flags, uint32_t stream_id,
@@ -105,16 +106,19 @@ on_data(struct tr_stream_handle stream, uint64_t message_id,
 	struct tr_buffer *payload, void *arg)
 {
 	struct callback_context *ctx = arg;
+	int release = atomic_load_explicit(&auto_release_data,
+					 memory_order_relaxed);
 	(void)message_id;
 
 	pthread_mutex_lock(&ctx->lock);
 	assert(ctx->received < MAX_HELD);
 	ctx->incoming[ctx->received] = stream;
-	ctx->held[ctx->received] = payload;
+	ctx->held[ctx->received] = release ? NULL : payload;
 	ctx->received++;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
-	return TR_STREAM_DATA_TAKE_OWNERSHIP;
+	return release ? TR_STREAM_DATA_RELEASE :
+			 TR_STREAM_DATA_TAKE_OWNERSHIP;
 }
 
 static void on_stream_event(struct tr_stream_handle stream,
@@ -374,6 +378,17 @@ int main(void)
 				    memory_order_relaxed) == before);
 	assert(tr_stream_get_flow_state(fourth, &flow) == TR_OK);
 	assert(flow.tx_send_limit == WINDOW_BYTES);
+
+	/* An owner callback returning RELEASE also needs automatic retry; unlike
+	 * retained payloads it cannot rely on a future public release call.
+	 */
+	atomic_store_explicit(&auto_release_data, 1, memory_order_relaxed);
+	atomic_store_explicit(&fail_window_updates, 2U, memory_order_relaxed);
+	send_bytes(fourth, &pool, WINDOW_BYTES);
+	wait_count(&server_ctx, &server_ctx.received, 6U);
+	wait_attempts(before + 3U);
+	wait_flow(fourth, 2U * WINDOW_BYTES);
+	atomic_store_explicit(&auto_release_data, 0, memory_order_relaxed);
 	close_stream(fourth, &server_ctx, client, server);
 
 	/* A stopped Reactor must retain no callback into freed Channel storage. */
