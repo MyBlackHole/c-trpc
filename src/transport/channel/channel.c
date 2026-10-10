@@ -2031,6 +2031,15 @@ static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
 		return 0;
 	}
 
+	/*
+	 * A Channel owns one reconnect timer and one Connector. In split mode,
+	 * do not let a second lane replace reconnect_lane while the first lane's
+	 * delayed or in-flight attempt still owns those shared sources.
+	 * Completion will schedule the other down lane after releasing ownership.
+	 */
+	if (channel->control_reconnecting || channel->bulk_reconnecting)
+		return 0;
+
 	if (!channel->control_alive && !channel->control_peer_draining &&
 	    !channel->control_reconnecting) {
 		channel->control_reconnecting = 1;
