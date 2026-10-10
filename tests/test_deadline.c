@@ -72,10 +72,15 @@ int __wrap_poll(struct pollfd *fds, nfds_t count, int timeout_ms)
 	return step->result;
 }
 
-static void check_consumed(void)
+static void check_consumed_at(const char *test, int line)
 {
+	if (step_index != step_count)
+		fprintf(stderr, "%s:%d: consumed %u/%u poll steps\n",
+			test, line, step_index, step_count);
 	assert(step_index == step_count);
 }
+
+#define check_consumed() check_consumed_at(__func__, __LINE__)
 
 static void test_zero_and_infinite(void)
 {
