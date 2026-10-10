@@ -115,7 +115,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_channel_detach", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_channel_detach", "test_channel_control_retry", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -167,6 +167,9 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
             add_ldflags("-Wl,--wrap=tr_command_queue_push_wait_force",
                         "-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=pthread_join", {force = true})
+        elseif name == "test_channel_control_retry" then
+            -- Fail WINDOW_UPDATE send admission without impacting HELLO / DATA.
+            add_ldflags("-Wl,--wrap=tr_reactor_send", {force = true})
         elseif name == "test_channel_detach" then
             -- 验证 handler/timer teardown barrier 在失败后仍可重试。
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",

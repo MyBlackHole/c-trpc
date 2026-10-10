@@ -22,6 +22,8 @@
 #define TR_CHANNEL_HELLO_WIRE_SIZE 32U
 #define TR_CHANNEL_PROTOCOL_BUFFER_SIZE 64U
 #define TR_STREAM_FREE_NONE UINT32_MAX
+/* Coalesced retry, bounded independently of the number of live Streams. */
+#define TR_CHANNEL_WINDOW_RETRY_NS UINT64_C(25000000)
 
 enum tr_stream_slot_state {
 	TR_STREAM_SLOT_FREE = 0,
@@ -126,8 +128,11 @@ struct tr_channel {
 
 	int keepalive_enabled;
 	int teardown_detached;
+	/* Shared maintenance timer: keepalive and retryable WINDOW_UPDATE. */
 	struct tr_reactor_timer_handle keepalive_timer;
 	int keepalive_timer_registered;
+	int window_retry_pending;
+	int window_retry_scheduled;
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 	uint64_t keepalive_next_ping_id;
@@ -370,39 +375,81 @@ tr_channel_keepalive_tick_ms_locked(const struct tr_channel *channel)
 	return tick_ms;
 }
 
+static int tr_send_window_update_locked(struct tr_channel *channel,
+					struct tr_stream_slot *stream);
+
 static uint64_t
 tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
-	uint32_t tick_ms;
+	uint64_t next_ns = 0;
+	uint64_t deadline_ns;
+	uint32_t tick_ms = 0;
+	uint32_t i;
 	int enabled;
+	int retry_pending;
 
 	/*
-	 * Reactor-local callback: all network actions stay on the owning event loop.
-	 * Channel lock is retained as a transition lock for public snapshot APIs.
+	 * One registered, Reactor-owned timer serves two independent obligations.
+	 * A failed WINDOW_UPDATE is retried without requiring another RX event or
+	 * an application flush. Only the current Stream slots are scanned: an old
+	 * stream_id/generation cannot survive slot reuse.
 	 */
 	pthread_mutex_lock(&channel->lock);
+	channel->window_retry_scheduled = 0;
+	if (channel->window_retry_pending) {
+		channel->window_retry_pending = 0;
+		for (i = 0; i < channel->config.max_streams; ++i) {
+			struct tr_stream_slot *stream = &channel->streams[i];
+			int ret;
+
+			if (stream->state == TR_STREAM_SLOT_FREE ||
+			    stream->pending_advertised_limit == 0)
+				continue;
+
+			ret = tr_send_window_update_locked(channel, stream);
+			if (ret != TR_OK && ret != TR_ERR_CLOSED &&
+			    ret != TR_ERR_STALE)
+				channel->window_retry_pending = 1;
+		}
+	}
 	enabled = channel->keepalive_enabled;
 	pthread_mutex_unlock(&channel->lock);
-	if (!enabled)
-		return 0;
 
-	tr_channel_keepalive_check_lane(channel, TR_LANE_CONTROL);
-	tr_channel_keepalive_check_lane(channel, TR_LANE_BULK);
+	if (enabled) {
+		tr_channel_keepalive_check_lane(channel, TR_LANE_CONTROL);
+		tr_channel_keepalive_check_lane(channel, TR_LANE_BULK);
+	}
 
 	pthread_mutex_lock(&channel->lock);
 	enabled = channel->keepalive_enabled;
 	tick_ms = enabled ? tr_channel_keepalive_tick_ms_locked(channel) : 0U;
+	retry_pending = channel->window_retry_pending;
+	if (retry_pending)
+		channel->window_retry_scheduled = 1;
 	pthread_mutex_unlock(&channel->lock);
 
-	if (!enabled)
+	if (!enabled && !retry_pending)
 		return 0;
 	if (now_ns == 0)
 		now_ns = tr_channel_now_ns();
-	if (now_ns == 0)
+	if (now_ns == 0) {
+		/* No timer is armed if CLOCK_MONOTONIC is unavailable. */
+		pthread_mutex_lock(&channel->lock);
+		channel->window_retry_scheduled = 0;
+		pthread_mutex_unlock(&channel->lock);
 		return 0;
-	return tr_add_sat_u64(
-		now_ns, (uint64_t)tick_ms * UINT64_C(1000000));
+	}
+	if (enabled)
+		next_ns = tr_add_sat_u64(
+			now_ns, (uint64_t)tick_ms * UINT64_C(1000000));
+	if (retry_pending) {
+		deadline_ns =
+			tr_add_sat_u64(now_ns, TR_CHANNEL_WINDOW_RETRY_NS);
+		if (next_ns == 0 || deadline_ns < next_ns)
+			next_ns = deadline_ns;
+	}
+	return next_ns;
 }
 
 static uint32_t tr_channel_local_max_message(const struct tr_channel *channel,
@@ -983,17 +1030,64 @@ static int tr_send_window_update_locked(struct tr_channel *channel,
 	return ret;
 }
 
-static void tr_stream_consume_locked(struct tr_channel *channel,
-				     struct tr_stream_slot *stream,
-				     uint64_t bytes)
+/*
+ * The caller must kick the maintenance timer AFTER dropping channel->lock.
+ * Reactor synchronous owner calls while holding this lock can deadlock RX.
+ */
+static int tr_channel_schedule_window_retry_on_owner(void *arg)
+{
+	struct tr_channel *channel = (struct tr_channel *)arg;
+	struct tr_reactor_timer_handle timer;
+	uint64_t now_ns;
+	int need_arm;
+	int ret;
+
+	pthread_mutex_lock(&channel->lock);
+	need_arm = channel->window_retry_pending &&
+		   !channel->window_retry_scheduled &&
+		   channel->keepalive_timer_registered &&
+		   !channel->teardown_detached;
+	timer = channel->keepalive_timer;
+	pthread_mutex_unlock(&channel->lock);
+	if (!need_arm)
+		return TR_OK;
+
+	now_ns = tr_channel_now_ns();
+	if (now_ns == 0)
+		return TR_ERR_SYS;
+	ret = tr_reactor_timer_arm(
+		timer, tr_add_sat_u64(now_ns, TR_CHANNEL_WINDOW_RETRY_NS));
+	if (ret == TR_OK) {
+		pthread_mutex_lock(&channel->lock);
+		channel->window_retry_scheduled = 1;
+		pthread_mutex_unlock(&channel->lock);
+	}
+	return ret;
+}
+
+static int tr_channel_schedule_window_retry(struct tr_channel *channel)
+{
+	return tr_reactor_call(channel->reactor,
+			       tr_channel_schedule_window_retry_on_owner, channel);
+}
+
+static int tr_stream_consume_locked(struct tr_channel *channel,
+				    struct tr_stream_slot *stream,
+				    uint64_t bytes)
 {
 	uint64_t available =
 		stream->rx_received_bytes - stream->rx_consumed_bytes;
+	int ret;
 
 	if (bytes > available)
 		bytes = available;
 	stream->rx_consumed_bytes += bytes;
-	(void)tr_send_window_update_locked(channel, stream);
+	ret = tr_send_window_update_locked(channel, stream);
+	if (ret == TR_AGAIN) {
+		channel->window_retry_pending = 1;
+		return 1;
+	}
+	return 0;
 }
 
 static void tr_stream_notify(struct tr_channel *channel,
@@ -1673,8 +1767,10 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_handle(handle);
 	if (stream)
-		tr_stream_consume_locked(channel, stream, logical_len);
+		ret = tr_stream_consume_locked(channel, stream, logical_len);
 	pthread_mutex_unlock(&channel->lock);
+	if (ret)
+		(void)tr_channel_schedule_window_retry(channel);
 
 	if (fragmented && deliver)
 		tr_buffer_release(deliver);
@@ -3301,10 +3397,30 @@ int tr_channel_enable_keepalive(struct tr_channel *channel,
 	return ret;
 }
 
+/*
+ * The timer also owns WINDOW_UPDATE retries. Disabling keepalive must never
+ * erase a pending retry's only progress source; serialize the decision with
+ * the Reactor owner, not a stale off-owner snapshot.
+ */
+static int tr_channel_disarm_keepalive_on_owner(void *arg)
+{
+	struct tr_channel *channel = (struct tr_channel *)arg;
+	struct tr_reactor_timer_handle timer;
+	int retry_scheduled;
+	int registered;
+
+	pthread_mutex_lock(&channel->lock);
+	registered = channel->keepalive_timer_registered;
+	retry_scheduled = channel->window_retry_scheduled;
+	timer = channel->keepalive_timer;
+	pthread_mutex_unlock(&channel->lock);
+	if (!registered || retry_scheduled)
+		return TR_OK;
+	return tr_reactor_timer_arm(timer, 0);
+}
+
 int tr_channel_disable_keepalive(struct tr_channel *channel)
 {
-	struct tr_reactor_timer_handle timer;
-	int registered;
 	int ret;
 
 	if (!channel)
@@ -3314,19 +3430,11 @@ int tr_channel_disable_keepalive(struct tr_channel *channel)
 	channel->keepalive_enabled = 0;
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_CONTROL);
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
-	registered = channel->keepalive_timer_registered;
-	timer = channel->keepalive_timer;
 	pthread_mutex_unlock(&channel->lock);
 
-	if (!registered)
-		return TR_OK;
-
-	/*
-	 * Never wait for the Reactor while holding channel->lock. arm(0) is also a
-	 * synchronization barrier while running; after Reactor stop it directly
-	 * disarms the owner queue under ctl_lock.
-	 */
-	ret = tr_reactor_timer_arm(timer, 0);
+	/* Do not synchronize with the owner while holding channel->lock. */
+	ret = tr_reactor_call(channel->reactor,
+			      tr_channel_disarm_keepalive_on_owner, channel);
 	if (ret == TR_ERR_CLOSED)
 		return TR_OK;
 	return ret;
@@ -3803,6 +3911,7 @@ int tr_stream_release_payload(struct tr_stream_handle handle,
 	struct tr_stream_slot *stream;
 	uint32_t len;
 	int ret = TR_OK;
+	int kick_retry = 0;
 
 	if (!payload)
 		return TR_ERR_INVALID;
@@ -3817,7 +3926,7 @@ int tr_stream_release_payload(struct tr_stream_handle handle,
 	stream = tr_stream_lookup_handle(handle);
 	if (stream) {
 		uint64_t before = stream->rx_advertised_limit;
-		tr_stream_consume_locked(channel, stream, len);
+		kick_retry = tr_stream_consume_locked(channel, stream, len);
 		if (stream->pending_advertised_limit != 0 &&
 		    stream->rx_advertised_limit == before)
 			ret = TR_AGAIN;
@@ -3825,6 +3934,11 @@ int tr_stream_release_payload(struct tr_stream_handle handle,
 		ret = TR_ERR_STALE;
 	}
 	pthread_mutex_unlock(&channel->lock);
+	if (kick_retry) {
+		int arm_ret = tr_channel_schedule_window_retry(channel);
+		if (arm_ret != TR_OK && ret == TR_OK)
+			ret = arm_ret;
+	}
 
 	tr_buffer_release(payload);
 	return ret;
@@ -3834,6 +3948,7 @@ int tr_channel_flush(struct tr_channel *channel)
 {
 	uint32_t i;
 	int result = TR_OK;
+	int kick_retry = 0;
 
 	if (!channel)
 		return TR_ERR_INVALID;
@@ -3848,10 +3963,19 @@ int tr_channel_flush(struct tr_channel *channel)
 			continue;
 
 		ret = tr_send_window_update_locked(channel, stream);
+		if (ret == TR_AGAIN) {
+			channel->window_retry_pending = 1;
+			kick_retry = 1;
+		}
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
 	pthread_mutex_unlock(&channel->lock);
+	if (kick_retry) {
+		int ret = tr_channel_schedule_window_retry(channel);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
 
 	{
 		int ret = tr_reactor_call(
