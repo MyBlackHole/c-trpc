@@ -313,6 +313,8 @@ struct tr_rpc_endpoint {
 	int deadline_timer_registered;
 	uint32_t *deadline_heap;
 	uint32_t deadline_heap_count;
+	/* Shared owner timer for deadlines and final STATUS half-close retries. */
+	uint64_t final_close_retry_deadline_ns;
 
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint_config config;
@@ -349,6 +351,7 @@ struct tr_rpc_endpoint {
 #define TR_RPC_METADATA_RESERVED_TIMEOUT ":timeout-ms"
 #define TR_RPC_METADATA_RESERVED_TIMEOUT_LEN 11U
 #define TR_RPC_METADATA_TLV_HEADER_SIZE 3U
+#define TR_RPC_FINAL_CLOSE_RETRY_NS UINT64_C(25000000)
 #define TR_RPC_DEADLINE_METADATA_BYTES     \
 	(TR_RPC_METADATA_TLV_HEADER_SIZE + \
 	 TR_RPC_METADATA_RESERVED_TIMEOUT_LEN + 8U)
@@ -883,16 +886,44 @@ static int tr_rpc_deadline_update_locked(struct tr_rpc_endpoint *endpoint,
 	return TR_OK;
 }
 
-static void tr_rpc_deadline_rearm_locked(struct tr_rpc_endpoint *endpoint)
+static int tr_rpc_deadline_rearm_locked(struct tr_rpc_endpoint *endpoint)
 {
 	uint64_t earliest = 0U;
+	uint64_t close_retry = endpoint->final_close_retry_deadline_ns;
 
 	if (endpoint->deadline_stopping ||
 	    !endpoint->deadline_timer_registered)
-		return;
+		return TR_ERR_CLOSED;
 	if (endpoint->deadline_heap_count != 0U)
 		earliest = endpoint->calls[endpoint->deadline_heap[0]].deadline_ns;
-	(void)tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
+	if (close_retry != 0U && (earliest == 0U || close_retry < earliest))
+		earliest = close_retry;
+	return tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
+}
+
+/*
+ * After a final STATUS was accepted by Transport, STREAM_CLOSE is a protocol
+ * obligation that survives control TX backpressure. Drive it from the
+ * existing owner timer, not from an unbounded worker or client flush.
+ */
+static int tr_rpc_schedule_final_close_retry_locked(
+	struct tr_rpc_endpoint *endpoint)
+{
+	uint64_t now;
+	uint64_t candidate;
+
+	if (endpoint->deadline_stopping ||
+	    !endpoint->deadline_timer_registered)
+		return TR_ERR_CLOSED;
+	now = tr_rpc_now_ns();
+	if (now == 0U)
+		return TR_ERR_SYS;
+	candidate = UINT64_MAX - now < TR_RPC_FINAL_CLOSE_RETRY_NS ?
+			UINT64_MAX : now + TR_RPC_FINAL_CLOSE_RETRY_NS;
+	if (endpoint->final_close_retry_deadline_ns == 0U ||
+	    candidate < endpoint->final_close_retry_deadline_ns)
+		endpoint->final_close_retry_deadline_ns = candidate;
+	return tr_rpc_deadline_rearm_locked(endpoint);
 }
 
 static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
@@ -902,7 +933,7 @@ static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
 	int ret = tr_rpc_deadline_update_locked(endpoint, call, deadline_ns);
 
 	if (ret == TR_OK)
-		tr_rpc_deadline_rearm_locked(endpoint);
+		(void)tr_rpc_deadline_rearm_locked(endpoint);
 	return ret;
 }
 
@@ -1689,7 +1720,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
 			call->need_local_close = 1;
-			ret = TR_OK;
+			ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
 		}
 	} else if (ret == TR_AGAIN) {
 		call->pending_control = tr_buffer_take(&encoded);
@@ -1759,7 +1790,7 @@ tr_rpc_fail_stream_midstream_overload_locked(
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
 			call->need_local_close = 1;
-			ret = TR_OK;
+			ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
 		}
 	} else if (ret == TR_AGAIN) {
 		call->pending_control = tr_buffer_take(&encoded);
@@ -3693,6 +3724,8 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 			if (call->admission_rejected && call->remote_closed)
 				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
+		} else if (ret == TR_AGAIN && call->final_status_sent) {
+			ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
 		}
 	}
 	return ret;
@@ -3785,54 +3818,100 @@ static int tr_rpc_cancel_internal(struct tr_rpc_call_handle handle, int status)
 	request.status = status;
 	return tr_rpc_owner_call(endpoint, tr_rpc_cancel_on_owner, &request);
 }
+/*
+ * STATUS is the application terminal barrier. Transport still owns a pending
+ * half-close when its bounded control pool returns TR_AGAIN. Never resubmit
+ * STATUS, only retry STREAM_CLOSE for the same generation while the Call lives.
+ */
+static int tr_rpc_try_final_close_locked(struct tr_rpc_endpoint *endpoint,
+					 uint32_t slot,
+					 struct tr_rpc_call_slot *call)
+{
+	int ret = tr_stream_close(call->stream);
+
+	if (ret != TR_OK && ret != TR_ERR_CLOSED && ret != TR_ERR_STALE)
+		return ret;
+	call->need_local_close = 0;
+	tr_rpc_mark_local_closed_locked(endpoint, call);
+	if (ret == TR_ERR_STALE || call->remote_closed) {
+		call->state = TR_RPC_CALL_TERMINAL;
+		(void)tr_rpc_notify_terminal_locked(
+			endpoint, slot, call,
+			ret == TR_ERR_STALE ? TR_RPC_STATUS_UNAVAILABLE :
+						call->final_status);
+		tr_rpc_maybe_free_call_locked(endpoint, call);
+	}
+	return TR_OK;
+}
+
 static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
-	struct tr_rpc_call_slot *call;
-	struct tr_rpc_call_handle handle;
+	struct tr_rpc_call_handle expired_handle = { 0 };
 	struct tr_rpc_cancel_request request;
-	uint32_t expired_slot;
-	uint64_t earliest;
+	uint32_t i;
+	int expired = 0;
+	int retry = 0;
 
-	if (now_ns == 0)
+	if (now_ns == 0U)
 		now_ns = tr_rpc_now_ns();
 
 	pthread_mutex_lock(&endpoint->lock);
-	if (endpoint->deadline_stopping ||
-	    endpoint->deadline_heap_count == 0U) {
+	if (endpoint->deadline_stopping) {
 		pthread_mutex_unlock(&endpoint->lock);
 		return 0;
 	}
 
-	expired_slot = endpoint->deadline_heap[0];
-	if (expired_slot >= endpoint->config.max_calls) {
-		pthread_mutex_unlock(&endpoint->lock);
-		return 0;
-	}
-	call = &endpoint->calls[expired_slot];
-	earliest = call->deadline_ns;
-	if (call->deadline_heap_pos != 0U || earliest == 0U) {
-		pthread_mutex_unlock(&endpoint->lock);
-		return 0;
-	}
-	if (earliest > now_ns) {
-		pthread_mutex_unlock(&endpoint->lock);
-		return earliest;
+	if (endpoint->final_close_retry_deadline_ns != 0U &&
+	    endpoint->final_close_retry_deadline_ns <= now_ns) {
+		endpoint->final_close_retry_deadline_ns = 0U;
+		for (i = 0; i < endpoint->config.max_calls; ++i) {
+			struct tr_rpc_call_slot *call = &endpoint->calls[i];
+			int ret;
+
+			if (call->state == TR_RPC_CALL_FREE ||
+			    !call->final_status_sent || !call->need_local_close)
+				continue;
+			ret = tr_rpc_try_final_close_locked(endpoint, i, call);
+			if (ret != TR_OK)
+				retry = 1;
+		}
+		if (retry)
+			endpoint->final_close_retry_deadline_ns =
+				UINT64_MAX - now_ns < TR_RPC_FINAL_CLOSE_RETRY_NS ?
+				UINT64_MAX :
+				now_ns + TR_RPC_FINAL_CLOSE_RETRY_NS;
 	}
 
-	handle = tr_rpc_make_call_handle(endpoint, expired_slot, call);
 	/*
-	 * Remove the expired root before cancellation so any failure/terminal
-	 * path cannot rediscover the same deadline. Explicit re-arm uses the
-	 * timer queue version rule, so returning zero below cannot overwrite it.
+	 * Consume one expired deadline per invocation; preserve the existing
+	 * deadline heap ordering and the timer's callback-version contract.
 	 */
-	(void)tr_rpc_deadline_update_locked(endpoint, call, 0U);
-	tr_rpc_deadline_rearm_locked(endpoint);
+	if (endpoint->deadline_heap_count != 0U) {
+		uint32_t root = endpoint->deadline_heap[0];
+		struct tr_rpc_call_slot *call;
+
+		if (root < endpoint->config.max_calls) {
+			call = &endpoint->calls[root];
+			if (call->deadline_heap_pos == 0U &&
+			    call->deadline_ns != 0U &&
+			    call->deadline_ns <= now_ns) {
+				expired_handle =
+					tr_rpc_make_call_handle(endpoint, root, call);
+				(void)tr_rpc_deadline_update_locked(
+					endpoint, call, 0U);
+				expired = 1;
+			}
+		}
+	}
+	(void)tr_rpc_deadline_rearm_locked(endpoint);
 	pthread_mutex_unlock(&endpoint->lock);
 
-	request.handle = handle;
-	request.status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
-	(void)tr_rpc_cancel_on_owner(&request);
+	if (expired) {
+		request.handle = expired_handle;
+		request.status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
+		(void)tr_rpc_cancel_on_owner(&request);
+	}
 	return 0;
 }
 
@@ -4308,6 +4387,14 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 		 * report writable before the close event is consumed, but no new
 		 * application continuation is legal after STATUS.
 		 */
+		if (call->final_status_sent && call->need_local_close) {
+			ret = tr_rpc_try_final_close_locked(endpoint, slot, call);
+			if (ret == TR_AGAIN)
+				ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
+			pthread_mutex_unlock(&endpoint->lock);
+			(void)ret;
+			return;
+		}
 		if (call->final_status_seen || call->final_status_sent) {
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
@@ -5752,9 +5839,9 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 				}
 				ret = TR_OK;
 			} else if (ret == TR_AGAIN) {
-				/* STATUS 已提交给 Transport，close 后续由内部 retry 完成。 */
+				/* STATUS committed: schedule the remaining half-close. */
 				call->need_local_close = 1;
-				ret = TR_OK;
+				ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
 			}
 		}
 	}
