@@ -3802,8 +3802,8 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
 	wait_channel_lane_up(client_channel, TR_LANE_BULK);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_BULK);
-	wait_channel_counter(&client_ctx, &client_ctx.channel_up, 2U);
-	wait_channel_counter(&server_ctx, &server_ctx.channel_up, 2U);
+	wait_channel_counter(&client_ctx, &client_ctx.channel_up, 4U);
+	wait_channel_counter(&server_ctx, &server_ctx.channel_up, 4U);
 
 	assert(tr_channel_get_lane_state(client_channel, TR_LANE_CONTROL,
 					 &lane_state) == TR_OK);
