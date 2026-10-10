@@ -268,6 +268,8 @@ int main(void)
 	struct tr_buffer_pool pool;
 	struct callback_context client_ctx;
 	struct callback_context server_ctx;
+	uint64_t updates_before;
+	uint32_t attempts_before;
 	uint32_t before;
 	int fd_client;
 	int fd_server;
@@ -315,18 +317,22 @@ int main(void)
 	send_bytes(first, &pool, 128U);
 	send_bytes(first, &pool, 128U);
 	wait_count(&server_ctx, &server_ctx.received, 2U);
+	assert(tr_channel_get_stats(server, &stats) == TR_OK);
+	updates_before = stats.window_updates_tx;
+	attempts_before = atomic_load_explicit(&window_attempts,
+					      memory_order_relaxed);
 	atomic_store_explicit(&fail_window_updates, 2U, memory_order_relaxed);
 	assert(release_message(&server_ctx, 0U) == TR_AGAIN);
 	assert(release_message(&server_ctx, 1U) == TR_AGAIN);
 	assert(tr_stream_get_flow_state(first, &flow) == TR_OK);
 	assert(flow.tx_send_limit == WINDOW_BYTES);
-	wait_attempts(3U);
+	wait_attempts(attempts_before + 3U);
 	wait_flow(first, 2U * WINDOW_BYTES);
 	assert(tr_channel_get_stats(server, &stats) == TR_OK);
 	/* Absolute credit never overflows the peer window, regardless of how
 	 * many retries were needed. The wire limit is checked above.
 	 */
-	assert(stats.window_updates_tx >= 1U);
+	assert(stats.window_updates_tx > updates_before);
 	send_bytes(first, &pool, 256U);
 	wait_count(&server_ctx, &server_ctx.received, 3U);
 	assert(release_message(&server_ctx, 2U) == TR_OK);
@@ -355,8 +361,12 @@ int main(void)
 	atomic_store_explicit(&fail_window_updates, 100U, memory_order_relaxed);
 	assert(release_message(&server_ctx, 4U) == TR_AGAIN);
 	close_stream(third, &server_ctx, client, server);
-	before = atomic_load_explicit(&window_attempts, memory_order_relaxed);
+	/* Initial Stream OPEN itself requires a WINDOW_UPDATE: end injection
+	 * before opening the replacement, then isolate the old retry timer.
+	 */
+	atomic_store_explicit(&fail_window_updates, 0U, memory_order_relaxed);
 	fourth = open_stream(client, &client_ctx, &server_ctx, 4U);
+	before = atomic_load_explicit(&window_attempts, memory_order_relaxed);
 	assert(fourth.slot == third.slot);
 	assert(fourth.generation != third.generation);
 	sleep_ms(100);
