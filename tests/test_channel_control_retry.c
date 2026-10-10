@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -142,6 +143,14 @@ static void wait_count(struct callback_context *ctx, unsigned *value,
 	pthread_mutex_lock(&ctx->lock);
 	while (*value < wanted && ret == 0)
 		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &limit);
+	if (*value < wanted)
+		fprintf(stderr,
+			"wait_count timeout: want=%u actual=%u opened=%u "
+			"received=%u attempts=%u remaining_failures=%u\n",
+			wanted, *value, ctx->opened, ctx->received,
+			atomic_load_explicit(&window_attempts, memory_order_relaxed),
+			atomic_load_explicit(&fail_window_updates,
+					     memory_order_relaxed));
 	assert(*value >= wanted);
 	pthread_mutex_unlock(&ctx->lock);
 }
