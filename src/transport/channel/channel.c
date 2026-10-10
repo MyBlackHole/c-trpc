@@ -2040,8 +2040,10 @@ static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
 	if (channel->control_reconnecting || channel->bulk_reconnecting)
 		return 0;
 
-	/* After a failed CONTROL attempt, give a down BULK lane its turn.
-	 * The existing shared timer/Connector remains strictly single-flight.
+	/*
+	 * Prefer the opposite lane after a failed attempt. A single Connector
+	 * remains owned by only one lane, but neither failing peer can monopolize
+	 * all retry slots while the other is still down.
 	 */
 	if (channel->reconnect_lane == TR_LANE_CONTROL &&
 	    channel->control_reconnect_attempt != 0U &&
@@ -2050,6 +2052,16 @@ static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
 		*lane = TR_LANE_BULK;
 		*port = channel->reconnect_bulk_port;
 		*attempt = channel->bulk_reconnect_attempt;
+		return 1;
+	}
+
+	if (channel->reconnect_lane == TR_LANE_BULK &&
+	    channel->bulk_reconnect_attempt != 0U &&
+	    !channel->control_alive && !channel->control_peer_draining) {
+		channel->control_reconnecting = 1;
+		*lane = TR_LANE_CONTROL;
+		*port = channel->reconnect_control_port;
+		*attempt = channel->control_reconnect_attempt;
 		return 1;
 	}
 
