@@ -224,11 +224,13 @@ struct tr_reactor {
 	int started;
 	_Atomic int accepting;
 	/*
-	 * ctl_lock-protected terminal edge. Once the STOP command has been
-	 * accepted, retrying stop() must only retry pthread_join(); enqueueing a
-	 * second STOP could wait forever after the owner has already exited.
+	 * ctl_lock-protected terminal edge. Once STOP is accepted OR the owner
+	 * enters fatal exit, stop() must only join the original owner. Submitting
+	 * another STOP after epoll_wait failed would leave it without a consumer.
 	 */
 	int stop_submitted;
+	/* The owner committed fatal shutdown for this epoch, not a normal STOP. */
+	int fatal_exit;
 	/* Owner-only event-loop stop flag, reset only when a new epoch starts. */
 	int stopping;
 	/* Owner-only: a popped command batch still has FIFO predecessors. */
@@ -2002,16 +2004,16 @@ static int tr_reactor_timer_timeout_ms(struct tr_reactor *reactor)
 	return (int)timeout_ms;
 }
 
-static void tr_cleanup_connections(struct tr_reactor *reactor)
+static void tr_cleanup_connections(struct tr_reactor *reactor, int failed)
 {
 	uint32_t i;
 
 	for (i = 0; i < reactor->config.max_connections; ++i) {
 		if (reactor->connections[i].state == TR_CONN_ACTIVE)
-			tr_connection_close_internal(reactor,
-						     &reactor->connections[i],
-						     TR_CONN_EVENT_CLOSED,
-						     TR_OK);
+			tr_connection_close_internal(
+				reactor, &reactor->connections[i],
+				failed ? TR_CONN_EVENT_ERROR : TR_CONN_EVENT_CLOSED,
+				failed ? TR_ERR_SYS : TR_OK);
 	}
 }
 
@@ -2083,6 +2085,94 @@ static void tr_drain_completions(struct tr_reactor *reactor)
 	} while (more);
 }
 
+/*
+ * An unrecoverable epoll failure is a failed owner epoch, not a STOP command.
+ *
+ * Complete accepted synchronous requests with a failure (their sync storage
+ * lives on the blocked caller's stack), and release ownership of commands
+ * which were accepted but never dispatched. Admission is already closed
+ * before this runs. We must not apply arbitrary user CALL functions during
+ * teardown, since the promised owner transaction never executed.
+ */
+static void tr_reactor_abort_pending_commands(struct tr_reactor *reactor)
+{
+	struct tr_command commands[TR_COMMAND_BATCH];
+	size_t count;
+	size_t i;
+
+	TR_ASSERT_REACTOR_OWNER(reactor);
+	do {
+		count = tr_command_queue_pop_batch(
+			&reactor->commands, commands, TR_COMMAND_BATCH);
+		for (i = 0; i < count; ++i) {
+			const struct tr_command *cmd = &commands[i];
+
+			switch (cmd->type) {
+			case TR_CMD_ADOPT_FD:
+				/* An accepted ADOPT_FD owns the exact fd and reservation. */
+				close(cmd->u.adopt.fd);
+				(void)tr_slot_set_state(
+					reactor, cmd->slot, cmd->generation,
+					TR_CONN_FREE);
+				break;
+			case TR_CMD_SEND: {
+				struct tr_tx_item *item = cmd->u.send.item;
+				uint32_t j;
+
+				if (!item)
+					break;
+				for (j = 0; j < item->payload_count; ++j)
+					if (item->payloads[j])
+						tr_buffer_release(item->payloads[j]);
+				tr_tx_pool_release(item->owner_pool, item);
+				break;
+			}
+			case TR_CMD_SET_HANDLER:
+				if (cmd->u.handler.request)
+					tr_reactor_sync_complete(
+						&cmd->u.handler.request->sync, TR_ERR_SYS);
+				break;
+			case TR_CMD_QUIESCE:
+				tr_reactor_sync_complete(cmd->u.quiesce.sync,
+							 TR_ERR_SYS);
+				break;
+			case TR_CMD_CALL:
+				tr_reactor_sync_complete(cmd->u.call.sync, TR_ERR_SYS);
+				break;
+			case TR_CMD_RESUME_RX:
+			case TR_CMD_CLOSE:
+			case TR_CMD_ABORT:
+			case TR_CMD_STOP:
+				/* These unexecuted commands own no external resource. */
+				break;
+			default:
+				break;
+			}
+		}
+	} while (count != 0U);
+}
+
+/*
+ * Called by the owner after a non-EINTR epoll_wait failure. Publish the
+ * terminal epoch boundary before touching accepted work. ctl_lock prevents
+ * producers from publishing a new command after the gate closes; queue-local
+ * close also wakes blocked synchronous/worker producers, including a
+ * producer that sampled an admission generation before the failure.
+ */
+static void tr_reactor_begin_fatal_exit(struct tr_reactor *reactor)
+{
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
+	pthread_mutex_lock(&reactor->ctl_lock);
+	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
+	reactor->fatal_exit = 1;
+	/* A racing stop() must join this owner, not enqueue another STOP. */
+	reactor->stop_submitted = 1;
+	tr_completion_queue_close(&reactor->completions);
+	tr_command_queue_wait_close(&reactor->commands);
+	pthread_mutex_unlock(&reactor->ctl_lock);
+}
+
 static int tr_reactor_dispatch_aux_event(
 	struct tr_reactor *reactor, uint64_t token, uint32_t events)
 {
@@ -2106,6 +2196,7 @@ static void *tr_reactor_thread_main(void *arg)
 {
 	struct tr_reactor *reactor = (struct tr_reactor *)arg;
 	struct epoll_event events[TR_REACTOR_EVENT_BATCH];
+	int failed = 0;
 
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
@@ -2161,6 +2252,8 @@ static void *tr_reactor_thread_main(void *arg)
 			tr_record_turn(reactor, &turn);
 			if (interrupted)
 				continue;
+			failed = 1;
+			tr_reactor_begin_fatal_exit(reactor);
 			break;
 		}
 
@@ -2200,7 +2293,15 @@ static void *tr_reactor_thread_main(void *arg)
 		tr_record_turn(reactor, &turn);
 	}
 
-	tr_cleanup_connections(reactor);
+	if (failed) {
+		/* Cancel stack-backed sync commands before their callers can hang. */
+		tr_reactor_abort_pending_commands(reactor);
+		/* Accepted completions own their args and must run once. */
+		tr_drain_completions(reactor);
+	}
+	tr_cleanup_connections(reactor, failed);
+	if (failed)
+		tr_drain_completions(reactor);
 #ifndef NDEBUG
 	assert(reactor->lifecycle_tx_pending_count == 0U);
 #endif
@@ -3091,6 +3192,7 @@ int tr_reactor_start(struct tr_reactor *reactor)
 	 * admission all belong to the same epoch.
 	 */
 	reactor->stopping = 0;
+	reactor->fatal_exit = 0;
 
 	error = pthread_create(&reactor->thread, NULL, tr_reactor_thread_main,
 			       reactor);
@@ -3576,6 +3678,8 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 		pthread_mutex_lock(&sync.lock);
 		while (!sync.done)
 			pthread_cond_wait(&sync.cond, &sync.lock);
+		/* A failed owner epoch may complete QUIESCE with TR_ERR_SYS. */
+		ret = sync.status;
 		pthread_mutex_unlock(&sync.lock);
 	}
 
@@ -4138,11 +4242,12 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	/*
 	 * stop_submitted separates two lifecycle barriers:
 	 *
-	 *   RUNNING -> STOP submitted -> owner exits -> pthread_join succeeds
+	 *   RUNNING -> STOP submitted/fatal exit -> owner exits -> join succeeds
 	 *
-	 * pthread_join() itself is fallible. Once STOP has been accepted, a retry
-	 * must never enqueue another STOP: the owner may already have exited and no
-	 * consumer would remain to free command-ring capacity or process it.
+	 * pthread_join() itself is fallible. Once STOP has been accepted, or a
+	 * fatal epoll error has ended the owner epoch, a retry must never enqueue
+	 * another STOP: the owner may already have exited, with no consumer to
+	 * process it.
 	 */
 	if (!reactor->stop_submitted) {
 		atomic_store_explicit(&reactor->accepting, 0, memory_order_release);

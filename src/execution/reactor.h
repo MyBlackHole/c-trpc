@@ -213,6 +213,8 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
  * 最后才允许释放 callback owner 的状态。
  *
  * 禁止从 Reactor thread 自身调用，否则会形成自等待。
+ * 如果 owner 在屏障执行前因致命 epoll 错误退出，返回 TR_ERR_SYS 而不是
+ * 错误地报告 quiescence 已成立；仅被队列关闭拒绝的请求返回 TR_ERR_CLOSED。
  */
 int tr_reactor_quiesce(struct tr_reactor *reactor);
 
@@ -249,6 +251,12 @@ int tr_reactor_abort(struct tr_conn_handle connection, int status);
  * STOP command 一旦被接受，后续即使 pthread_join() 暂时失败，也不会重新提交
  * 第二个 STOP。对象保持 caller-owned 的 terminal 状态；再次 stop()/destroy()
  * 会重试同一 owner thread 的 join barrier，直到成功后才允许开始新 epoch。
+ *
+ * epoll_wait 发生非 EINTR 的致命错误时，owner 自行关闭两个队列的准入，
+ * 让已接受但未执行的同步请求返回 TR_ERR_SYS，归还其余命令所有权，
+ * 执行已接受的 completion，并以 TR_CONN_EVENT_ERROR/TR_ERR_SYS 通知连接。
+ * 这一异常退出同样进入 join-only 阶段；stop() 负责等待并回收线程，不会
+ * 向已失去 consumer 的队列再次发送 STOP。完成 stop() 后仍可重新 start()。
  */
 int tr_reactor_stop(struct tr_reactor *reactor);
 int tr_reactor_destroy(struct tr_reactor *reactor);
