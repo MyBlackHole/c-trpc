@@ -3852,7 +3852,7 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
  * CONTROL priority, BULK would starve forever; the shared Connector must
  * offer the other down lane a turn after each failed attempt.
  */
-static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lane)
+static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lane, int both_unreachable)
 {
 	struct tr_reactor_config reactor_config;
 	struct tr_channel_config channel_config;
@@ -3932,29 +3932,55 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 						  &reconnect_config) == TR_OK);
 
 	/* Keep one port unreachable while the opposite lane is recoverable. */
-	if (failing_lane == TR_LANE_CONTROL)
+	if (both_unreachable || failing_lane == TR_LANE_CONTROL)
 		tr_socket_close(&control_listener);
-	else
+	if (both_unreachable || failing_lane == TR_LANE_BULK)
 		tr_socket_close(&bulk_listener);
 	close_probe.control = client_control;
 	close_probe.bulk = client_bulk;
 	assert(tr_reactor_call(reactor, close_split_reconnect_pair_on_owner,
 			       &close_probe) == TR_OK);
 	wait_channel_counter(&client_ctx, &client_ctx.channel_down, 2U);
-	new_fd = accept_reconnect_connection(
-		healthy_lane == TR_LANE_BULK ? bulk_listener : control_listener);
-	assert(tr_reactor_adopt_fd(reactor, new_fd, &server_new) == TR_OK);
-	assert(tr_channel_replace_connection(server_channel, healthy_lane,
-					     server_new) == TR_OK);
-	wait_channel_lane_up(client_channel, healthy_lane);
-	wait_channel_lane_up(server_channel, healthy_lane);
-	assert(tr_channel_get_lane_state(client_channel, failing_lane,
-					 &state) == TR_OK);
-	/* An unreachable lane may be DOWN or actively RECONNECTING. */
-	assert(state != TR_CHANNEL_LANE_UP);
-	assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
-	assert(stats.reconnect_attempts >= 2U);
-	assert(stats.reconnect_successes >= 1U);
+	if (both_unreachable) {
+		unsigned i;
+
+		/* No listener is reachable. Both retry budgets must keep making
+		 * bounded progress without introducing a busy loop or a worker.
+		 */
+		for (i = 0; i < 5000U; ++i) {
+			assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
+			if (stats.reconnect_attempts >= 6U)
+				break;
+			{
+				const struct timespec pause = { 0, 1000000L };
+				(void)nanosleep(&pause, NULL);
+			}
+		}
+		assert(stats.reconnect_attempts >= 6U);
+		assert(stats.reconnect_successes == 0U);
+		assert(tr_channel_get_lane_state(client_channel, TR_LANE_CONTROL,
+						 &state) == TR_OK);
+		assert(state != TR_CHANNEL_LANE_UP);
+		assert(tr_channel_get_lane_state(client_channel, TR_LANE_BULK,
+						 &state) == TR_OK);
+		assert(state != TR_CHANNEL_LANE_UP);
+	} else {
+		new_fd = accept_reconnect_connection(
+			healthy_lane == TR_LANE_BULK ? bulk_listener : control_listener);
+		assert(tr_reactor_adopt_fd(reactor, new_fd, &server_new) == TR_OK);
+		assert(tr_channel_replace_connection(server_channel, healthy_lane,
+						     server_new) == TR_OK);
+		wait_channel_lane_up(client_channel, healthy_lane);
+		wait_channel_lane_up(server_channel, healthy_lane);
+		assert(tr_channel_get_lane_state(client_channel, failing_lane,
+						 &state) == TR_OK);
+		/* An unreachable lane may be DOWN or actively RECONNECTING. */
+		assert(state != TR_CHANNEL_LANE_UP);
+		assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
+		assert(stats.reconnect_attempts >= 2U);
+		assert(stats.reconnect_successes >= 1U);
+	
+	}
 
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	tr_socket_close(&control_listener);
@@ -8273,8 +8299,9 @@ int main(void)
 	test_channel_drain_goaway_backpressure();
 	test_channel_automatic_reconnect_shared();
 	test_channel_automatic_reconnect_split_simultaneous();
-	test_channel_reconnect_one_lane_unreachable(TR_LANE_CONTROL);
-	test_channel_reconnect_one_lane_unreachable(TR_LANE_BULK);
+	test_channel_reconnect_one_lane_unreachable(TR_LANE_CONTROL, 0);
+	test_channel_reconnect_one_lane_unreachable(TR_LANE_BULK, 0);
+	test_channel_reconnect_one_lane_unreachable(TR_LANE_CONTROL, 1);
 	test_channel_version_negotiation_failure();
 	test_rpc_wire_and_raw_codec();
 	test_rpc_method_index_collisions();
