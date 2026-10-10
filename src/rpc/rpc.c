@@ -3580,6 +3580,21 @@ static int tr_rpc_queue_client_event_locked(struct tr_rpc_endpoint *endpoint,
 	return tr_rpc_queue_task_locked(endpoint, call, &task);
 }
 
+/* Terminal events must survive a temporarily full executor. */
+static int tr_rpc_queue_client_terminal_event_locked(
+	struct tr_rpc_endpoint *endpoint, uint32_t slot,
+	struct tr_rpc_call_slot *call, enum tr_rpc_call_event event, int status)
+{
+	struct tr_rpc_task task;
+
+	memset(&task, 0, sizeof(task));
+	task.type = TR_RPC_TASK_CLIENT_EVENT;
+	task.call = tr_rpc_make_call_handle(endpoint, slot, call);
+	task.event = event;
+	task.status = status;
+	return tr_rpc_queue_terminal_task_locked(endpoint, call, &task);
+}
+
 static int tr_rpc_queue_unary_failure_locked(struct tr_rpc_endpoint *endpoint,
 					     uint32_t slot,
 					     struct tr_rpc_call_slot *call,
@@ -3625,14 +3640,10 @@ static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
 		if (call->is_unary)
 			ret = tr_rpc_queue_unary_failure_locked(endpoint, slot,
 								call, status);
-		else {
-			memset(&task, 0, sizeof(task));
-			task.type = TR_RPC_TASK_CLIENT_EVENT;
-			task.call = tr_rpc_make_call_handle(endpoint, slot, call);
-			task.event = TR_RPC_CALL_EVENT_FINISHED;
-			task.status = status;
-			ret = tr_rpc_queue_terminal_task_locked(endpoint, call, &task);
-		}
+		else
+			ret = tr_rpc_queue_client_terminal_event_locked(
+				endpoint, slot, call,
+				TR_RPC_CALL_EVENT_FINISHED, status);
 	} else if (!call->is_unary && call->method &&
 		   call->method->handler_kind == TR_RPC_HANDLER_STREAM) {
 		memset(&task, 0, sizeof(task));
@@ -4431,14 +4442,14 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 				call->terminal_notified = 1;
 		} else if (!call->is_unary &&
 			   endpoint->config.role == TR_RPC_CLIENT &&
-			   !call->final_status_seen) {
+			   !call->final_status_seen && !call->terminal_notified) {
 			ret = tr_rpc_run_interceptor_locked(
 				endpoint, slot, call,
 				TR_RPC_INTERCEPTOR_CLIENT_POST_CALL,
 				TR_RPC_STATUS_UNAVAILABLE, NULL);
 			call = &endpoint->calls[slot];
 			if (ret == TR_OK &&
-			    tr_rpc_queue_client_event_locked(
+			    tr_rpc_queue_client_terminal_event_locked(
 				    endpoint, slot, call,
 				    TR_RPC_CALL_EVENT_ERROR,
 				    TR_RPC_STATUS_UNAVAILABLE) == TR_OK)
@@ -4455,10 +4466,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			task.call =
 				tr_rpc_make_call_handle(endpoint, slot, call);
 			task.status = terminal_status;
-			ret = tr_rpc_queue_task_locked(endpoint, call, &task);
-			if (ret == TR_AGAIN && call->executor_overloaded)
-				ret = tr_rpc_store_pending_executor_task_locked(
-					endpoint, call, &task);
+			ret = tr_rpc_queue_terminal_task_locked(endpoint, call, &task);
 			if (ret == TR_OK)
 				call->terminal_notified = 1;
 		}
@@ -4526,7 +4534,7 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 					    TR_RPC_STATUS_UNAVAILABLE) == TR_OK)
 					call->terminal_notified = 1;
 			} else if (ret == TR_OK && !call->terminal_notified) {
-				if (tr_rpc_queue_client_event_locked(
+				if (tr_rpc_queue_client_terminal_event_locked(
 					    endpoint, i, call,
 					    TR_RPC_CALL_EVENT_ERROR,
 					    TR_RPC_STATUS_UNAVAILABLE) == TR_OK)
@@ -4541,8 +4549,8 @@ static void tr_rpc_on_channel_event(struct tr_channel *channel,
 			task.type = TR_RPC_TASK_SERVER_CLOSE;
 			task.call = tr_rpc_make_call_handle(endpoint, i, call);
 			task.status = TR_RPC_STATUS_UNAVAILABLE;
-			if (tr_rpc_queue_task_locked(endpoint, call, &task) ==
-			    TR_OK)
+			if (tr_rpc_queue_terminal_task_locked(endpoint, call,
+							&task) == TR_OK)
 				call->terminal_notified = 1;
 		}
 
