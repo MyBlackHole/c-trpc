@@ -42,6 +42,28 @@
 #define TEST_POOL_COUNT 4U
 #define TEST_BUF_SIZE (1024U * 1024U)
 
+/*
+ * Fail exactly one nonzero timer arm in the reconnect owner callback. The
+ * fixture does not enable keepalive, so this is the reconnect timer only.
+ */
+static atomic_uint fail_reconnect_timer_arm;
+
+int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
+			       uint64_t deadline_ns);
+
+int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
+			       uint64_t deadline_ns)
+{
+	unsigned expected = 1U;
+
+	if (deadline_ns != 0U &&
+	    atomic_compare_exchange_strong_explicit(
+		    &fail_reconnect_timer_arm, &expected, 0U,
+		    memory_order_relaxed, memory_order_relaxed))
+		return TR_ERR_SYS;
+	return __real_tr_reactor_timer_arm(handle, deadline_ns);
+}
+
 static pthread_mutex_t tcp_nodelay_probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned tcp_nodelay_probe_count;
 
@@ -1548,6 +1570,9 @@ struct channel_test_ctx {
 	unsigned channel_down;
 	unsigned channel_up;
 	unsigned channel_goaway;
+	unsigned reconnect_failures;
+	int reconnect_failure_status;
+	enum tr_channel_event reconnect_failure_event;
 	uint64_t ordered_event_seq;
 	uint64_t opened_event_seq;
 	uint64_t goaway_event_seq;
@@ -1621,6 +1646,11 @@ static void channel_test_on_channel_event(struct tr_channel *channel,
 		ctx->channel_goaway++;
 		if (ctx->goaway_event_seq == 0U)
 			ctx->goaway_event_seq = ++ctx->ordered_event_seq;
+	} else if (event == TR_CHANNEL_EVENT_CONTROL_RECONNECT_FAILED ||
+		   event == TR_CHANNEL_EVENT_BULK_RECONNECT_FAILED) {
+		ctx->reconnect_failures++;
+		ctx->reconnect_failure_status = status;
+		ctx->reconnect_failure_event = event;
 	}
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
@@ -3988,6 +4018,101 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	tr_socket_close(&control_listener);
 	tr_socket_close(&bulk_listener);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	destroy_channel_test_ctx(&server_ctx);
+	destroy_channel_test_ctx(&client_ctx);
+}
+
+/*
+ * An owner timer-arm failure has no future wakeup. Verify that reconnect
+ * becomes explicitly disabled, publishes a terminal error, and retains its
+ * callback-source handles until the normal disable barrier succeeds.
+ */
+static void test_channel_reconnect_timer_arm_failure(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_channel_reconnect_config reconnect_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle client_conn, server_conn;
+	struct channel_test_ctx client_ctx, server_ctx;
+	uint16_t port;
+	int listener = -1, client_fd = -1, server_fd = -1;
+
+	init_channel_test_ctx(&client_ctx);
+	init_channel_test_ctx(&server_ctx);
+	make_tcp_pair_keep_listener(&listener, &port, &client_fd, &server_fd);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 128U;
+	reactor_config.tx_item_capacity = 32U;
+	reactor_config.control_tx_item_capacity = 32U;
+	reactor_config.rx_buffer_count = 16U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 8U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &client_ctx,
+				 &client_channel) == TR_OK);
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &server_ctx,
+				 &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+
+	memset(&reconnect_config, 0, sizeof(reconnect_config));
+	reconnect_config.ipv4_address = "127.0.0.1";
+	reconnect_config.control_port = port;
+	reconnect_config.initial_delay_ms = 10U;
+	reconnect_config.max_delay_ms = 40U;
+	reconnect_config.connect_timeout_ms = 500U;
+	assert(tr_channel_enable_client_reconnect(client_channel,
+						  &reconnect_config) == TR_OK);
+
+	atomic_store(&fail_reconnect_timer_arm, 1U);
+	assert(tr_reactor_close(client_conn) == TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.reconnect_failures, 1U);
+	assert(client_ctx.reconnect_failure_status == TR_ERR_SYS);
+	assert(client_ctx.reconnect_failure_event ==
+	       TR_CHANNEL_EVENT_CONTROL_RECONNECT_FAILED);
+	assert(atomic_load(&fail_reconnect_timer_arm) == 0U);
+	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
+	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
+
+	/*
+	 * Enabling on a down Channel immediately arms the retry. A second
+	 * injected failure must be returned to the caller and rolled back.
+	 */
+	atomic_store(&fail_reconnect_timer_arm, 1U);
+	assert(tr_channel_enable_client_reconnect(client_channel,
+						  &reconnect_config) == TR_ERR_SYS);
+	wait_channel_counter(&client_ctx, &client_ctx.reconnect_failures, 2U);
+	assert(atomic_load(&fail_reconnect_timer_arm) == 0U);
+	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
+
+	tr_socket_close(&listener);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
@@ -8301,6 +8426,7 @@ int main(void)
 	test_channel_graceful_drain();
 	test_channel_drain_goaway_backpressure();
 	test_channel_automatic_reconnect_shared();
+	test_channel_reconnect_timer_arm_failure();
 	test_channel_automatic_reconnect_split_simultaneous();
 	test_channel_reconnect_one_lane_unreachable(TR_LANE_CONTROL, 0);
 	test_channel_reconnect_one_lane_unreachable(TR_LANE_BULK, 0);
