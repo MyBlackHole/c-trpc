@@ -168,6 +168,8 @@ struct tr_rpc_call_slot {
 	struct tr_buffer *pending_tx;
 	struct tr_buffer *pending_control;
 	int need_local_close;
+	/* A failed Server Unary completion now owns an error/close obligation. */
+	int unary_failure_pending;
 	int response_received;
 	int result_delivered;
 
@@ -1673,6 +1675,76 @@ static int tr_rpc_reject_unary_locked(struct tr_rpc_endpoint *endpoint,
 }
 
 /*
+ * An already-executed Server Unary must never disappear after response
+ * allocation/encoding failure. Prefer an empty INTERNAL RESPONSE; when even
+ * that cannot be allocated, half-close the Stream so the Client observes
+ * UNAVAILABLE rather than waiting for a result that will never arrive.
+ *
+ * The fallback has no heap allocation of its own and is always applied by
+ * the Reactor owner with endpoint->lock held. Retries are bounded by the
+ * existing per-Call state and shared RPC owner timer.
+ */
+static int tr_rpc_fail_server_unary_locked(struct tr_rpc_endpoint *endpoint,
+					    struct tr_rpc_call_slot *call)
+{
+	struct tr_buffer *encoded TR_AUTO(tr_buffer_cleanup) = NULL;
+	struct tr_rpc_bytes empty = { NULL, 0 };
+	int ret;
+
+	if (!endpoint || !call || !call->method || !call->is_unary ||
+	    endpoint->config.role != TR_RPC_SERVER)
+		return TR_ERR_INVALID;
+	if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL ||
+	    call->unary_failure_pending || call->pending_tx || call->tx_count != 0U)
+		return TR_OK;
+
+	call->unary_failure_pending = 1;
+	call->final_status = TR_RPC_STATUS_INTERNAL;
+	tr_rpc_semantic_finish_locked(endpoint, call, TR_RPC_STATUS_INTERNAL);
+	(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
+
+	ret = tr_rpc_encode_message(endpoint, call, TR_RPC_WIRE_RESPONSE,
+				    &call->method->desc,
+				    call->method->desc.response_codec_id,
+				    TR_RPC_STATUS_INTERNAL, &empty, &encoded);
+	if (ret == TR_OK)
+		call->pending_tx = tr_buffer_take(&encoded);
+	else
+		call->need_local_close = 1;
+
+	ret = tr_rpc_try_unary_send_locked(endpoint, call);
+	if (ret == TR_OK)
+		return TR_OK;
+	if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
+		call->need_local_close = 0;
+		call->state = TR_RPC_CALL_TERMINAL;
+		tr_rpc_maybe_free_call_locked(endpoint, call);
+		return TR_OK;
+	}
+	if (ret == TR_AGAIN)
+		return tr_rpc_schedule_final_close_retry_locked(endpoint);
+
+	/*
+	 * If the error envelope cannot be admitted for a non-backpressure
+	 * reason, do not retain a response that can never progress: downgrade
+	 * to a header-free half-close. Its own TR_AGAIN also uses the timer.
+	 */
+	if (call->pending_tx)
+		tr_buffer_release(tr_buffer_take(&call->pending_tx));
+	call->need_local_close = 1;
+	ret = tr_rpc_try_unary_send_locked(endpoint, call);
+	if (ret == TR_OK)
+		return TR_OK;
+	if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
+		call->need_local_close = 0;
+		call->state = TR_RPC_CALL_TERMINAL;
+		tr_rpc_maybe_free_call_locked(endpoint, call);
+		return TR_OK;
+	}
+	return tr_rpc_schedule_final_close_retry_locked(endpoint);
+}
+
+/*
  * A first streaming message that cannot enter the bounded Server executor is
  * still an admission failure: no application callback has run yet. Preserve
  * that distinction by returning final RESOURCE_EXHAUSTED instead of turning
@@ -2303,33 +2375,6 @@ static int tr_rpc_release_stream_payload(struct tr_stream_handle stream,
 	return ret;
 }
 
-struct tr_rpc_stream_close_request {
-	struct tr_stream_handle stream;
-};
-
-static int tr_rpc_stream_close_on_owner(void *arg)
-{
-	struct tr_rpc_stream_close_request *request =
-		(struct tr_rpc_stream_close_request *)arg;
-
-	return tr_stream_close(request->stream);
-}
-
-static int tr_rpc_close_stream(struct tr_stream_handle stream)
-{
-	struct tr_rpc_stream_close_request request;
-	struct tr_reactor *reactor;
-
-	if (!stream.channel)
-		return TR_ERR_STALE;
-	reactor = tr_channel_reactor(stream.channel);
-	if (!reactor)
-		return TR_ERR_STATE;
-
-	request.stream = stream;
-	return tr_reactor_call(reactor, tr_rpc_stream_close_on_owner, &request);
-}
-
 static void tr_rpc_release_task_payload(struct tr_rpc_task *task)
 {
 	if (!task || !task->payload)
@@ -2681,6 +2726,33 @@ tr_rpc_schedule_pending_executor_retry(struct tr_rpc_endpoint *endpoint)
 	}
 }
 
+struct tr_rpc_unary_failure_request {
+	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_call_handle call;
+};
+
+/*
+ * The worker keeps its task_ref/Endpoint strong reference until its normal
+ * completion handoff finishes. This stack-only owner request thus cannot
+ * race Call-slot reuse and needs no second allocation under OOM.
+ */
+static int tr_rpc_fail_server_unary_on_owner(void *arg)
+{
+	struct tr_rpc_unary_failure_request *request = arg;
+	struct tr_rpc_call_slot *call;
+	int ret = TR_OK;
+
+	if (!request || !request->endpoint)
+		return TR_ERR_INVALID;
+	pthread_mutex_lock(&request->endpoint->lock);
+	call = tr_rpc_lookup_call_handle_locked(request->call);
+	if (call && call->method && call->is_unary && !call->cancelled &&
+	    call->state != TR_RPC_CALL_TERMINAL)
+		ret = tr_rpc_fail_server_unary_locked(request->endpoint, call);
+	pthread_mutex_unlock(&request->endpoint->lock);
+	return ret;
+}
+
 static void tr_rpc_apply_unary_completion(void *arg)
 {
 	struct tr_rpc_unary_completion *completion =
@@ -2712,21 +2784,26 @@ static void tr_rpc_apply_unary_completion(void *arg)
 		ret = tr_rpc_run_interceptor_locked(
 			endpoint, slot, call, TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER,
 			completion->status, NULL);
-		if (ret != TR_OK)
-			goto unary_out;
-		call = &endpoint->calls[slot];
-		ret = tr_rpc_encode_message(
-			endpoint, call, TR_RPC_WIRE_RESPONSE,
-			&call->method->desc, call->method->desc.response_codec_id,
-			completion->status, &response, &response_buffer);
 		if (ret == TR_OK) {
-			call->pending_tx = tr_buffer_take(&response_buffer);
-			tr_rpc_semantic_finish_locked(
-				endpoint, call, completion->status);
-			(void)tr_rpc_try_unary_send_locked(endpoint, call);
+			call = &endpoint->calls[slot];
+			ret = tr_rpc_encode_message(
+				endpoint, call, TR_RPC_WIRE_RESPONSE,
+				&call->method->desc,
+				call->method->desc.response_codec_id,
+				completion->status, &response, &response_buffer);
+			if (ret == TR_OK) {
+				call->pending_tx = tr_buffer_take(&response_buffer);
+				tr_rpc_semantic_finish_locked(
+					endpoint, call, completion->status);
+				(void)tr_rpc_try_unary_send_locked(endpoint, call);
+			}
+		}
+		if (ret != TR_OK) {
+			/* Encoding/interceptor failure is an owned terminal edge. */
+			call = &endpoint->calls[slot];
+			(void)tr_rpc_fail_server_unary_locked(endpoint, call);
 		}
 	}
-unary_out:
 	pthread_mutex_unlock(&endpoint->lock);
 
 	/*
@@ -2801,14 +2878,12 @@ static int tr_rpc_executor_run_server_unary(
 	struct tr_rpc_bytes completion_response;
 	struct tr_rpc_unary_completion *completion = NULL;
 	tr_rpc_unary_handler handler = task->u.server_unary.handler;
-	int ret;
+	int ret = TR_ERR_BAD_TYPE;
 	int deferred = 0;
 
 	if (!handler || tr_rpc_decode_task_message(
-			    endpoint, task, &message, &wire, 0) != TR_OK) {
-		(void)tr_rpc_close_stream(task->stream);
+			    endpoint, task, &message, &wire, 0) != TR_OK)
 		goto out;
-	}
 
 	memset(&response, 0, sizeof(response));
 	response.status = TR_RPC_STATUS_INTERNAL;
@@ -2830,8 +2905,6 @@ static int tr_rpc_executor_run_server_unary(
 	ret = tr_rpc_prepare_unary_completion(
 		endpoint, task, response.status, &completion_response,
 		&completion);
-	if (ret != TR_OK)
-		goto out;
 
 out:
 	/*
@@ -2849,8 +2922,20 @@ out:
 		} else {
 			free(completion);
 			completion = NULL;
-			(void)tr_rpc_close_stream(task->stream);
 		}
+	}
+	if (!deferred) {
+		struct tr_rpc_unary_failure_request request;
+
+		request.endpoint = endpoint;
+		request.call = task->call;
+		/*
+		 * No heap dependency and no worker-side Call mutation. A failed
+		 * Reactor owner epoch rejects this request; its connection-close
+		 * path is then responsible for the remaining Call lifecycle.
+		 */
+		(void)tr_rpc_owner_call(endpoint,
+					tr_rpc_fail_server_unary_on_owner, &request);
 	}
 	return deferred;
 }
@@ -3869,10 +3954,24 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 			struct tr_rpc_call_slot *call = &endpoint->calls[i];
 			int ret;
 
-			if (call->state == TR_RPC_CALL_FREE ||
-			    !call->final_status_sent || !call->need_local_close)
+			if (call->state == TR_RPC_CALL_FREE)
 				continue;
-			ret = tr_rpc_try_final_close_locked(endpoint, i, call);
+			if (call->unary_failure_pending &&
+			    (call->pending_tx || call->need_local_close)) {
+				ret = tr_rpc_try_unary_send_locked(endpoint, call);
+				if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
+					call->need_local_close = 0;
+					call->state = TR_RPC_CALL_TERMINAL;
+					tr_rpc_maybe_free_call_locked(endpoint, call);
+					ret = TR_OK;
+				}
+			} else if (call->final_status_sent &&
+				   call->need_local_close) {
+				ret = tr_rpc_try_final_close_locked(endpoint, i,
+								   call);
+			} else {
+				continue;
+			}
 			if (ret != TR_OK)
 				retry = 1;
 		}
