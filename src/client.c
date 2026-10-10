@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "execution/buffer.h"
+#include "execution/deadline_internal.h"
 #include "transport/channel/channel.h"
 #include "execution/reactor.h"
 #include "execution/reactor_internal.h"
@@ -146,13 +147,12 @@ void tr_client_config_init(struct tr_client_config *config)
 }
 
 static int tr_client_connect_fd(const char *address, uint16_t port,
-				uint32_t timeout_ms, int *out_fd)
+				const struct tr_deadline *deadline, int *out_fd)
 {
-	struct pollfd pfd;
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
 
-	if (!out_fd)
+	if (!deadline || !out_fd)
 		return TR_ERR_INVALID;
 	*out_fd = -1;
 
@@ -164,18 +164,10 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 	if (ret != TR_IN_PROGRESS)
 		return ret;
 
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.fd = fd;
-	pfd.events = POLLOUT;
-
-	do {
-		ret = poll(&pfd, 1, (int)timeout_ms);
-	} while (ret < 0 && errno == EINTR);
-
-	if (ret == 0)
-		return TR_ERR_TIMEOUT;
-	if (ret < 0)
-		return TR_ERR_SYS;
+	/* EINTR、短 poll 和超大毫秒数不能重新获得完整预算。 */
+	ret = tr_deadline_poll_fd(fd, POLLOUT, deadline, 0);
+	if (ret != TR_OK)
+		return ret;
 
 	ret = tr_tcp_finish_connect(fd);
 	if (ret != TR_OK)
@@ -374,16 +366,22 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_channel_keepalive_config keepalive_config;
+	struct tr_deadline connect_deadline;
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
 	int ret;
 
 	if (!client || !ipv4_address || port == 0)
 		return TR_ERR_INVALID;
-	if (client->channel || client->rpc)
+	if (client->channel || client->rpc ||
+	    tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
-	ret = tr_client_connect_fd(ipv4_address, port,
-				   client->config.connect_timeout_ms, &fd);
+	/* TCP connect 和 HELLO 握手共享同一个绝对截止时间。 */
+	ret = tr_deadline_init_ms(&connect_deadline,
+				  client->config.connect_timeout_ms);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_client_connect_fd(ipv4_address, port, &connect_deadline, &fd);
 	if (ret != TR_OK)
 		return ret;
 
@@ -437,7 +435,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	 * 先完成初始 HELLO handshake，再允许后续 reconnect policy 接管。
 	 * 这样 connect 失败时 rollback 不会与 connection replacement 竞态。
 	 */
-	ret = tr_client_wait_ready(client, client->config.connect_timeout_ms);
+	ret = tr_channel_wait_ready_deadline(
+		client->channel, TR_LANE_CONTROL, &connect_deadline);
 	if (ret != TR_OK)
 		goto rollback;
 

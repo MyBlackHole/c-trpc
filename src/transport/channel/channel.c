@@ -3616,32 +3616,28 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 	return tr_channel_send_pending_goaway_on_owner(channel);
 }
 
-int tr_channel_wait_ready(
-	struct tr_channel *channel, enum tr_lane lane, uint32_t timeout_ms)
+int tr_channel_wait_ready_deadline(
+	struct tr_channel *channel, enum tr_lane lane,
+	const struct tr_deadline *deadline)
 {
-	struct timespec deadline;
-	int timed = timeout_ms != 0U;
+	int timed;
 	int result = TR_OK;
+	int expired;
+	int ret;
 
-	if (!channel ||
+	if (!channel || !deadline ||
 	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
 		return TR_ERR_INVALID;
 	if (tr_reactor_in_owner_context())
 		return TR_ERR_STATE;
 
+	timed = !deadline->infinite;
 	if (timed) {
-		uint64_t deadline_ns;
-
-		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
-			return TR_ERR_SYS;
-		deadline_ns = tr_add_sat_u64(
-			(uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
-				(uint64_t)deadline.tv_nsec,
-			(uint64_t)timeout_ms * UINT64_C(1000000));
-		deadline.tv_sec =
-			(time_t)(deadline_ns / UINT64_C(1000000000));
-		deadline.tv_nsec =
-			(long)(deadline_ns % UINT64_C(1000000000));
+		ret = tr_deadline_expired(deadline, &expired);
+		if (ret != TR_OK)
+			return ret;
+		if (expired)
+			return TR_ERR_TIMEOUT;
 	}
 
 	pthread_mutex_lock(&channel->lock);
@@ -3663,8 +3659,22 @@ int tr_channel_wait_ready(
 	for (;;) {
 		int ready = lane == TR_LANE_CONTROL ?
 			channel->control_ready : channel->bulk_ready;
-		int ret;
 
+		/*
+		 * 不能因另一阶段或已到期后的 READY 事件重新获得时间。
+		 * 同时保留关闭状态和条件变量原有的所有权屏障。
+		 */
+		if (timed) {
+			ret = tr_deadline_expired(deadline, &expired);
+			if (ret != TR_OK) {
+				result = ret;
+				break;
+			}
+			if (expired) {
+				result = TR_ERR_TIMEOUT;
+				break;
+			}
+		}
 		if (ready)
 			break;
 		if (channel->state_wait_closed) {
@@ -3674,7 +3684,8 @@ int tr_channel_wait_ready(
 
 		if (timed)
 			ret = pthread_cond_timedwait(
-				&channel->state_cond, &channel->lock, &deadline);
+				&channel->state_cond, &channel->lock,
+				&deadline->absolute);
 		else
 			ret = pthread_cond_wait(
 				&channel->state_cond, &channel->lock);
@@ -3693,6 +3704,28 @@ int tr_channel_wait_ready(
 	channel->state_waiters--;
 	pthread_mutex_unlock(&channel->lock);
 	return result;
+}
+
+int tr_channel_wait_ready(
+	struct tr_channel *channel, enum tr_lane lane, uint32_t timeout_ms)
+{
+	struct tr_deadline deadline;
+	int ret;
+
+	if (!channel ||
+	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
+	if (timeout_ms == 0U) {
+		tr_deadline_init_infinite(&deadline);
+	} else {
+		ret = tr_deadline_init_ms(&deadline, timeout_ms);
+		if (ret != TR_OK)
+			return ret;
+	}
+	return tr_channel_wait_ready_deadline(channel, lane, &deadline);
 }
 
 int tr_channel_begin_drain(struct tr_channel *channel)
