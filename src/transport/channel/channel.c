@@ -1947,7 +1947,7 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	return TR_FRAME_RELEASE;
 }
 
-static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
+static int tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
 
 static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 					   enum tr_connection_event event,
@@ -2156,7 +2156,7 @@ static void tr_channel_reconnect_finish_attempt(
 	pthread_mutex_unlock(&channel->lock);
 }
 
-static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
+static int tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
 
 static void tr_channel_reconnect_connector_complete(
 	int status, int fd, void *arg)
@@ -2252,7 +2252,7 @@ static uint64_t tr_channel_reconnect_timer_main(void *arg, uint64_t now_ns)
 	return 0U;
 }
 
-static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel)
+static int tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel)
 {
 	enum tr_lane lane = TR_LANE_CONTROL;
 	uint16_t port = 0U;
@@ -2271,7 +2271,7 @@ static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel)
 		channel->reconnect_lane = lane;
 	pthread_mutex_unlock(&channel->lock);
 	if (!picked)
-		return;
+		return TR_OK;
 
 	(void)port;
 	delay_ms = tr_reconnect_delay_ms(
@@ -2279,15 +2279,33 @@ static void tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel)
 		channel->reconnect_max_delay_ms, attempt);
 	now_ns = tr_channel_now_ns();
 	if (now_ns == 0U) {
-		tr_channel_reconnect_finish_attempt(channel, lane, 0);
-		return;
+		ret = TR_ERR_SYS;
+		goto arm_failed;
 	}
 	delay_ns = (uint64_t)delay_ms * UINT64_C(1000000);
 	deadline_ns = UINT64_MAX - now_ns < delay_ns ?
 			      UINT64_MAX : now_ns + delay_ns;
 	ret = tr_reactor_timer_arm(channel->reconnect_timer, deadline_ns);
-	if (ret != TR_OK)
-		tr_channel_reconnect_finish_attempt(channel, lane, 0);
+	if (ret == TR_OK)
+		return TR_OK;
+
+arm_failed:
+	/*
+	 * No timer was armed, so there is no future owner callback to advance
+	 * this attempt. Fail closed rather than silently leaving reconnect
+	 * enabled but permanently idle. Preserve timer/Connector ownership for
+	 * the normal disable/destroy teardown barrier.
+	 */
+	tr_channel_reconnect_finish_attempt(channel, lane, 0);
+	pthread_mutex_lock(&channel->lock);
+	channel->reconnect_enabled = 0;
+	pthread_mutex_unlock(&channel->lock);
+	tr_channel_notify(channel,
+		lane == TR_LANE_BULK ?
+			TR_CHANNEL_EVENT_BULK_RECONNECT_FAILED :
+			TR_CHANNEL_EVENT_CONTROL_RECONNECT_FAILED,
+		ret < 0 ? ret : TR_ERR_STATE);
+	return ret;
 }
 
 static void tr_channel_default_config(struct tr_channel_config *config)
@@ -3213,6 +3231,8 @@ struct tr_channel_reconnect_enable_request {
 	uint32_t connect_timeout_ms;
 };
 
+static int tr_channel_disable_client_reconnect_on_owner(void *arg);
+
 static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 {
 	struct tr_channel_reconnect_enable_request *request =
@@ -3279,7 +3299,13 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 	channel->reconnect_lane = TR_LANE_CONTROL;
 	pthread_mutex_unlock(&channel->lock);
 
-	tr_channel_reconnect_schedule_on_owner(channel);
+	ret = tr_channel_reconnect_schedule_on_owner(channel);
+	if (ret != TR_OK) {
+		int cleanup_ret =
+			tr_channel_disable_client_reconnect_on_owner(channel);
+
+		return cleanup_ret == TR_OK ? ret : cleanup_ret;
+	}
 	return TR_OK;
 }
 

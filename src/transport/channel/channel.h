@@ -40,7 +40,12 @@ enum tr_channel_event {
 	TR_CHANNEL_EVENT_CONTROL_UP = 3,
 	TR_CHANNEL_EVENT_BULK_UP = 4,
 	TR_CHANNEL_EVENT_CONTROL_GOAWAY = 5,
-	TR_CHANNEL_EVENT_BULK_GOAWAY = 6
+	TR_CHANNEL_EVENT_BULK_GOAWAY = 6,
+	/* Automatic reconnect cannot advance because its owner timer failed.
+	 * The status is negative; disable/destroy still owns callback teardown.
+	 */
+	TR_CHANNEL_EVENT_CONTROL_RECONNECT_FAILED = 7,
+	TR_CHANNEL_EVENT_BULK_RECONNECT_FAILED = 8
 };
 
 enum tr_channel_state {

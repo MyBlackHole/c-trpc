@@ -125,6 +125,7 @@ for _, name in ipairs({"test_transport", "test_connection_group_facade", "test_t
         if name == "test_transport" then
             -- Observe facade/reconnect TCP_NODELAY policy without production hooks.
             add_ldflags("-Wl,--wrap=setsockopt", {force = true})
+            add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_connection_group_facade" then
             -- 注入 CONTROL close 失败，验证 Group terminal destroy 保留能力句柄。
             add_ldflags("-Wl,--wrap=tr_reactor_close_on_owner", {force = true})
