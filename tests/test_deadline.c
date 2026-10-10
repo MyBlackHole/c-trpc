@@ -133,6 +133,32 @@ static void test_eintr_and_early_return(void)
 	check_consumed();
 }
 
+/*
+ * 用两个等待模拟 TCP → 握手 / TCP → 前导数据：第二阶段只能看到剩余预算，
+ * 不能重新使用完整 100ms。
+ */
+static void test_shared_deadline_stages(void)
+{
+	struct tr_deadline deadline;
+
+	set_now(100, 0);
+	assert(tr_deadline_init_ms(&deadline, 100) == TR_OK);
+	add_step(100, 1, 0, 80);
+	assert(tr_deadline_poll_fd(17, POLLOUT, &deadline, 0) == TR_OK);
+	add_step(20, 1, 0, 5);
+	assert(tr_deadline_poll_fd(17, POLLOUT, &deadline, 0) == TR_OK);
+	check_consumed();
+
+	set_now(100, 0);
+	assert(tr_deadline_init_ms(&deadline, 100) == TR_OK);
+	add_step(100, 1, 0, 80);
+	assert(tr_deadline_poll_fd(17, POLLOUT, &deadline, 0) == TR_OK);
+	add_step(20, 0, 0, 20);
+	assert(tr_deadline_poll_fd(17, POLLOUT, &deadline, 0) ==
+	       TR_ERR_TIMEOUT);
+	check_consumed();
+}
+
 static void test_large_timeouts(void)
 {
 	struct tr_deadline deadline;
@@ -216,6 +242,7 @@ int main(void)
 {
 	test_zero_and_infinite();
 	test_eintr_and_early_return();
+	test_shared_deadline_stages();
 	test_large_timeouts();
 	test_saturation_and_failure();
 	test_poll_error();
