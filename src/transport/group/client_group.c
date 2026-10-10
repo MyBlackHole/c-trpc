@@ -15,6 +15,7 @@
 #include "../../group/pipeline_control_wire_internal.h"
 #include "../../group/pipeline_route_internal.h"
 #include "../../execution/reactor_internal.h"
+#include "../../execution/deadline_internal.h"
 #include "../../io/socket_internal.h"
 #include "../../execution/buffer.h"
 #include "../../io/socket.h"
@@ -115,16 +116,6 @@ static int tr_client_group_conn_equal(struct tr_conn_handle a,
 	       a.generation == b.generation;
 }
 
-static uint64_t tr_client_group_now_ns(void)
-{
-	struct timespec ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return 0;
-	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) +
-	       (uint64_t)ts.tv_nsec;
-}
-
 static int
 tr_client_group_drain_complete_on_owner(const struct tr_client_group *group)
 {
@@ -194,13 +185,12 @@ static int tr_client_group_close_wait_admission(
 }
 
 static int tr_client_group_connect_fd(const char *address, uint16_t port,
-				      uint32_t timeout_ms, int *out_fd)
+				      const struct tr_deadline *deadline, int *out_fd)
 {
-	struct pollfd pfd;
 	int fd = -1;
 	int ret;
 
-	if (!address || !out_fd || port == 0U)
+	if (!address || !deadline || !out_fd || port == 0U)
 		return TR_ERR_INVALID;
 	*out_fd = -1;
 
@@ -212,21 +202,11 @@ static int tr_client_group_connect_fd(const char *address, uint16_t port,
 	if (ret != TR_IN_PROGRESS)
 		return ret;
 
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.fd = fd;
-	pfd.events = POLLOUT;
-	do {
-		ret = poll(&pfd, 1, (int)timeout_ms);
-	} while (ret < 0 && errno == EINTR);
-	if (ret == 0) {
+	ret = tr_deadline_poll_fd(fd, POLLOUT, deadline, 0);
+	if (ret != TR_OK) {
 		tr_socket_close(&fd);
-		return TR_ERR_TIMEOUT;
+		return ret;
 	}
-	if (ret < 0) {
-		tr_socket_close(&fd);
-		return TR_ERR_SYS;
-	}
-
 	ret = tr_tcp_finish_connect(fd);
 	if (ret != TR_OK) {
 		tr_socket_close(&fd);
@@ -237,18 +217,23 @@ static int tr_client_group_connect_fd(const char *address, uint16_t port,
 }
 
 static int tr_client_group_send_all_fd(int fd, const uint8_t *data, size_t len,
-				       uint32_t timeout_ms)
+				       const struct tr_deadline *deadline)
 {
-	uint64_t start_ns = tr_client_group_now_ns();
+	int expired;
+	int ret;
 
-	if (fd < 0 || (len != 0U && !data))
+	if (fd < 0 || !deadline || (len != 0U && !data))
 		return TR_ERR_INVALID;
 
 	while (len != 0U) {
-		struct pollfd pfd;
 		ssize_t n;
-		int wait_ms;
-		int ret;
+
+		/* 成功分段发送或连续 EINTR 都不得越过整个 connect 时限。 */
+		ret = tr_deadline_expired(deadline, &expired);
+		if (ret != TR_OK)
+			return ret;
+		if (expired)
+			return TR_ERR_TIMEOUT;
 
 		n = send(fd, data, len, MSG_NOSIGNAL);
 		if (n > 0) {
@@ -261,32 +246,14 @@ static int tr_client_group_send_all_fd(int fd, const uint8_t *data, size_t len,
 		if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
 			return TR_ERR_SYS;
 
-		if (timeout_ms == 0U) {
-			wait_ms = -1;
-		} else {
-			uint64_t now_ns = tr_client_group_now_ns();
-			uint64_t elapsed_ms;
-
-			if (now_ns == 0U || now_ns < start_ns)
-				return TR_ERR_SYS;
-			elapsed_ms = (now_ns - start_ns) / UINT64_C(1000000);
-			if (elapsed_ms >= timeout_ms)
-				return TR_ERR_TIMEOUT;
-			wait_ms = (int)(timeout_ms - elapsed_ms);
-		}
-
-		memset(&pfd, 0, sizeof(pfd));
-		pfd.fd = fd;
-		pfd.events = POLLOUT;
-		do {
-			ret = poll(&pfd, 1, wait_ms);
-		} while (ret < 0 && errno == EINTR);
-		if (ret == 0)
-			return TR_ERR_TIMEOUT;
-		if (ret < 0)
-			return TR_ERR_SYS;
+		ret = tr_deadline_poll_fd(fd, POLLOUT, deadline, 0);
+		if (ret != TR_OK)
+			return ret;
 	}
-	return TR_OK;
+	ret = tr_deadline_expired(deadline, &expired);
+	if (ret != TR_OK)
+		return ret;
+	return expired ? TR_ERR_TIMEOUT : TR_OK;
 }
 
 static uint32_t tr_client_group_next_generation(struct tr_client_group *group)
@@ -1215,6 +1182,7 @@ int tr_client_group_connect(
 	struct tr_client_group_prepare_connect_request prepare;
 	struct tr_client_group_adopt_request request;
 	struct tr_pipeline_route_preface route;
+	struct tr_deadline connect_deadline;
 	uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	size_t address_len;
 	int fd = -1;
@@ -1238,8 +1206,13 @@ int tr_client_group_connect(
 		return ret;
 	prepared = 1;
 
+	/* 只在 owner prepare 完成后开始计时；TCP 和前导数据共用期限。 */
+	ret = tr_deadline_init_ms(&connect_deadline,
+				  group->config.connect_timeout_ms);
+	if (ret != TR_OK)
+		goto fail;
 	ret = tr_client_group_connect_fd(
-		ipv4_address, port, group->config.connect_timeout_ms, &fd);
+		ipv4_address, port, &connect_deadline, &fd);
 	if (ret != TR_OK)
 		goto fail;
 	if (group->config.tcp_nodelay) {
@@ -1260,7 +1233,7 @@ int tr_client_group_connect(
 	if (ret != TR_OK)
 		goto fail;
 	ret = tr_client_group_send_all_fd(
-		fd, raw, sizeof(raw), group->config.connect_timeout_ms);
+		fd, raw, sizeof(raw), &connect_deadline);
 	if (ret != TR_OK)
 		goto fail;
 
