@@ -25,6 +25,7 @@
  */
 static atomic_int fake_connect_enabled;
 static atomic_int fake_connector_fd;
+static atomic_int fake_connector_peer;
 static atomic_uint aux_register_count;
 static atomic_uint aux_unregister_count;
 static atomic_int fail_aux_unregister_once;
@@ -48,8 +49,11 @@ int __wrap_tr_tcp_connect_ipv4(const char *address, uint16_t port,
 	(void)port;
 	assert(pipe2(fds, O_NONBLOCK | O_CLOEXEC) == 0);
 	*out_fd = fds[0];
-	/* Closing the writer preserves the read-end's non-writable property. */
-	assert(close(fds[1]) == 0);
+	/* Keep the writer open: otherwise EPOLLHUP would complete the fake
+	 * connection before the cancellation barrier can be exercised.
+	 */
+	atomic_store_explicit(&fake_connector_peer, fds[1],
+				      memory_order_release);
 	atomic_store_explicit(&fake_connector_fd, fds[0],
 			      memory_order_release);
 	return TR_IN_PROGRESS;
@@ -166,6 +170,7 @@ int main(void)
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
 	atomic_store(&fake_connector_fd, -1);
+	atomic_store(&fake_connector_peer, -1);
 	make_pair(&client_fd, &server_fd);
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
@@ -235,6 +240,7 @@ int main(void)
 	assert(fcntl(watched_fd, F_GETFD) == -1 && errno == EBADF);
 	assert(tr_reactor_quiesce(reactor) == TR_OK);
 	assert(ctx.unexpected == 0U);
+	assert(close(atomic_load(&fake_connector_peer)) == 0);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(server) == TR_OK);
