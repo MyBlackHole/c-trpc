@@ -2,6 +2,7 @@
 #define TR_CHANNEL_INTERNAL_H
 
 #include "channel.h"
+#include "../../execution/deadline_internal.h"
 
 /* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
@@ -71,6 +72,11 @@ int tr_channel_detach_for_finalize(struct tr_channel *channel);
  * finalize_detached() 只做 owner-free 本地资源释放，语义上不可失败。
  */
 void tr_channel_finalize_detached(struct tr_channel *channel);
+
+/* 供 Client connect 使用；TCP 与 HELLO 共享上游创建的截止时间。 */
+int tr_channel_wait_ready_deadline(
+	struct tr_channel *channel, enum tr_lane lane,
+	const struct tr_deadline *deadline);
 
 int tr_channel_start(struct tr_channel *channel);
 
