@@ -266,6 +266,7 @@ static void test_protocol_error(enum malformed_frame kind)
 	struct tr_conn_handle good_client_conn;
 	struct tr_conn_handle good_server_conn;
 	struct tr_conn_handle replacement_conn;
+	struct tr_conn_handle replacements[2];
 	struct tr_stream_handle bad_stream;
 	struct tr_stream_handle good_stream;
 	struct tr_stream_handle server_stream;
@@ -273,7 +274,9 @@ static void test_protocol_error(enum malformed_frame kind)
 	struct test_ctx ctx;
 	enum tr_channel_lane_state state;
 	int bcfd, bsfd, gcfd, gsfd;
-	int replacement_fd, replacement_peer;
+	int replacement_fd, replacement_peer[2] = { -1, -1 };
+	int found_replacement = 0;
+	unsigned replacement_count = 0;
 	int expected_status;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -384,10 +387,22 @@ static void test_protocol_error(enum malformed_frame kind)
 	 * previous handle pending teardown.
 	 */
 	atomic_store_explicit(&ctx.inject, 0, memory_order_release);
-	create_pair(&replacement_fd, &replacement_peer);
-	assert(tr_reactor_adopt_fd(reactor, replacement_fd,
-				   &replacement_conn) == TR_OK);
-	assert(replacement_conn.slot == bad_server_conn.slot);
+	/*
+	 * The peer half may also have freed a lower-numbered slot. Keep
+	 * replacement owners alive until the exact victim slot is reused;
+	 * do not assume a fixed order for the two EOF callbacks.
+	 */
+	while (replacement_count < 2U && !found_replacement) {
+		create_pair(&replacement_fd,
+			    &replacement_peer[replacement_count]);
+		assert(tr_reactor_adopt_fd(reactor, replacement_fd,
+					   &replacements[replacement_count]) ==
+		       TR_OK);
+		replacement_conn = replacements[replacement_count++];
+		found_replacement =
+			replacement_conn.slot == bad_server_conn.slot;
+	}
+	assert(found_replacement);
 	assert(replacement_conn.generation != bad_server_conn.generation);
 	assert(tr_reactor_call(reactor, abort_stale_on_owner,
 			      &bad_server_conn) == TR_OK);
@@ -402,7 +417,8 @@ static void test_protocol_error(enum malformed_frame kind)
 	assert(tr_reactor_destroy(reactor) == TR_OK);
 	assert(tr_buffer_pool_free_count(&pool) == PAYLOAD_COUNT);
 	assert(tr_buffer_pool_destroy(&pool) == TR_OK);
-	assert(close(replacement_peer) == 0);
+	while (replacement_count != 0U)
+		assert(close(replacement_peer[--replacement_count]) == 0);
 	active = NULL;
 	assert(pthread_cond_destroy(&ctx.cond) == 0);
 	assert(pthread_mutex_destroy(&ctx.lock) == 0);
