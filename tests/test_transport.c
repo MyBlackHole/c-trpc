@@ -3660,6 +3660,173 @@ static void test_rpc_call_slot_reuse(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static int accept_reconnect_connection(int listener)
+{
+	struct pollfd pfd;
+	int fd = -1;
+	unsigned i;
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = listener;
+	pfd.events = POLLIN;
+	assert(poll(&pfd, 1, 5000) == 1);
+	for (i = 0; i < 100U && fd < 0; ++i) {
+		int ret = tr_tcp_accept(listener, &fd);
+		if (ret == TR_OK)
+			break;
+		assert(ret == TR_AGAIN);
+	}
+	assert(fd >= 0);
+	return fd;
+}
+
+/*
+ * Both split lanes share one reconnect timer and Connector. Disconnecting
+ * both physical connections in the same owner window must still reconnect
+ * CONTROL and then BULK, rather than leaving one lane permanently down.
+ */
+static void test_channel_automatic_reconnect_split_simultaneous(void)
+{
+	struct tr_reactor_config reactor_config;
+	struct tr_channel_config channel_config;
+	struct tr_channel_reconnect_config reconnect_config;
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle client_control;
+	struct tr_conn_handle client_bulk;
+	struct tr_conn_handle server_control;
+	struct tr_conn_handle server_bulk;
+	struct tr_conn_handle server_new_control;
+	struct tr_conn_handle server_new_bulk;
+	struct channel_test_ctx client_ctx;
+	struct channel_test_ctx server_ctx;
+	struct tr_channel_stats stats;
+	enum tr_channel_lane_state lane_state;
+	uint16_t control_port;
+	uint16_t bulk_port;
+	int control_listener = -1;
+	int bulk_listener = -1;
+	int client_control_fd = -1;
+	int server_control_fd = -1;
+	int client_bulk_fd = -1;
+	int server_bulk_fd = -1;
+	int new_server_control_fd = -1;
+	int new_server_bulk_fd = -1;
+
+	init_channel_test_ctx(&client_ctx);
+	init_channel_test_ctx(&server_ctx);
+	make_tcp_pair_keep_listener(&control_listener, &control_port,
+				    &client_control_fd, &server_control_fd);
+	make_tcp_pair_keep_listener(&bulk_listener, &bulk_port,
+				    &client_bulk_fd, &server_bulk_fd);
+	assert(control_port != bulk_port);
+
+	memset(&reactor_config, 0, sizeof(reactor_config));
+	reactor_config.max_connections = 8U;
+	reactor_config.command_capacity = 128U;
+	reactor_config.tx_item_capacity = 32U;
+	reactor_config.control_tx_item_capacity = 32U;
+	reactor_config.rx_buffer_count = 16U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	reactor_config.rx_budget_bytes = 64U * 1024U;
+	reactor_config.tx_budget_bytes = 64U * 1024U;
+
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_control_fd,
+				   &client_control) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_bulk_fd,
+				   &client_bulk) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_control_fd,
+				   &server_control) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_bulk_fd,
+				   &server_bulk) == TR_OK);
+
+	memset(&channel_config, 0, sizeof(channel_config));
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SPLIT_CONNECTIONS;
+	channel_config.max_streams = 8U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create(&channel_config, client_control, client_bulk,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &client_ctx,
+				 &client_channel) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create(&channel_config, server_control, server_bulk,
+				 channel_test_on_data,
+				 channel_test_on_stream_event,
+				 channel_test_on_channel_event, &server_ctx,
+				 &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(client_channel, TR_LANE_BULK);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_BULK);
+
+	memset(&reconnect_config, 0, sizeof(reconnect_config));
+	reconnect_config.ipv4_address = "127.0.0.1";
+	reconnect_config.control_port = control_port;
+	reconnect_config.bulk_port = bulk_port;
+	reconnect_config.initial_delay_ms = 10U;
+	reconnect_config.max_delay_ms = 40U;
+	reconnect_config.connect_timeout_ms = 500U;
+	assert(tr_channel_enable_client_reconnect(client_channel,
+						  &reconnect_config) == TR_OK);
+
+	/*
+	 * Close both old client connections back-to-back. The reconnect delay
+	 * leaves both DOWN notifications visible before the first retry starts.
+	 */
+	assert(tr_reactor_close(client_control) == TR_OK);
+	assert(tr_reactor_close(client_bulk) == TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.channel_down, 2U);
+	wait_channel_counter(&server_ctx, &server_ctx.channel_down, 2U);
+
+	new_server_control_fd = accept_reconnect_connection(control_listener);
+	new_server_bulk_fd = accept_reconnect_connection(bulk_listener);
+	assert(tr_reactor_adopt_fd(reactor, new_server_control_fd,
+				   &server_new_control) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, new_server_bulk_fd,
+				   &server_new_bulk) == TR_OK);
+	assert(tr_channel_replace_connection(server_channel, TR_LANE_CONTROL,
+					     server_new_control) == TR_OK);
+	assert(tr_channel_replace_connection(server_channel, TR_LANE_BULK,
+					     server_new_bulk) == TR_OK);
+
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(client_channel, TR_LANE_BULK);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_BULK);
+	wait_channel_counter(&client_ctx, &client_ctx.channel_up, 2U);
+	wait_channel_counter(&server_ctx, &server_ctx.channel_up, 2U);
+
+	assert(tr_channel_get_lane_state(client_channel, TR_LANE_CONTROL,
+					 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_get_lane_state(client_channel, TR_LANE_BULK,
+					 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
+	assert(stats.reconnect_attempts >= 2U);
+	assert(stats.reconnect_successes >= 2U);
+
+	/* Teardown must quiesce the shared timer/Connector after both lanes recover. */
+	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
+	tr_socket_close(&control_listener);
+	tr_socket_close(&bulk_listener);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
+	tr_reactor_destroy(reactor);
+	destroy_channel_test_ctx(&server_ctx);
+	destroy_channel_test_ctx(&client_ctx);
+}
+
 static void test_channel_automatic_reconnect_shared(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -7965,6 +8132,7 @@ int main(void)
 	test_channel_graceful_drain();
 	test_channel_drain_goaway_backpressure();
 	test_channel_automatic_reconnect_shared();
+	test_channel_automatic_reconnect_split_simultaneous();
 	test_channel_version_negotiation_failure();
 	test_rpc_wire_and_raw_codec();
 	test_rpc_method_index_collisions();
