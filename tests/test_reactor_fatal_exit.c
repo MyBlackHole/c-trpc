@@ -427,8 +427,19 @@ static void test_fatal_epoch(int concurrent_stop)
 		assert(tr_reactor_stop(ctx.reactor) == TR_OK);
 	}
 
-	for (i = 0; i < 3; ++i)
+	for (i = 0; i < 3; ++i) {
+		if (req[i].ret != TR_ERR_SYS)
+			fprintf(stderr,
+				"fatal case=%d accepted command=%d kind=%d ret=%d expected=%d "
+				"entered=%d accepted=%d\n",
+				concurrent_stop, i, (int)req[i].kind,
+				req[i].ret, TR_ERR_SYS, ctx.sync_entered,
+				ctx.sync_admitted);
 		assert(req[i].ret == TR_ERR_SYS);
+	}
+	if (req[3].ret != TR_ERR_CLOSED)
+		fprintf(stderr, "fatal case=%d blocked command ret=%d\n",
+				concurrent_stop, req[3].ret);
 	assert(req[3].ret == TR_ERR_CLOSED);
 	assert(completion_request.ret == TR_ERR_CLOSED);
 	assert(ctx.unexpected_calls == 0);
