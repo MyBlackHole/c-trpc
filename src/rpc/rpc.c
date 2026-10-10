@@ -2143,7 +2143,9 @@ static int tr_rpc_queue_terminal_task_locked(
 	struct tr_rpc_task snapshot;
 	int ret;
 
-	if (!endpoint || !call || !task || call->pending_terminal_task_valid)
+	if (!endpoint || !call || !task)
+		return TR_ERR_INVALID;
+	if (call->pending_terminal_task_valid)
 		return TR_ERR_STATE;
 
 	ret = tr_rpc_queue_task_locked(endpoint, call, task);
@@ -3601,6 +3603,7 @@ static int tr_rpc_queue_unary_failure_locked(struct tr_rpc_endpoint *endpoint,
 					     int status)
 {
 	struct tr_rpc_task task;
+	int ret;
 
 	if (call->result_delivered)
 		return TR_OK;
@@ -3609,13 +3612,10 @@ static int tr_rpc_queue_unary_failure_locked(struct tr_rpc_endpoint *endpoint,
 	task.type = TR_RPC_TASK_CLIENT_UNARY_RESULT;
 	task.call = tr_rpc_make_call_handle(endpoint, slot, call);
 	task.status = status;
-	{
-		int ret = tr_rpc_queue_terminal_task_locked(endpoint, call, &task);
-
-		if (ret == TR_OK)
-			call->result_delivered = 1;
-		return ret;
-	}
+	ret = tr_rpc_queue_terminal_task_locked(endpoint, call, &task);
+	if (ret == TR_OK)
+		call->result_delivered = 1;
+	return ret;
 }
 
 static int tr_rpc_notify_terminal_locked(struct tr_rpc_endpoint *endpoint,
