@@ -3977,7 +3977,10 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 		/* An unreachable lane may be DOWN or actively RECONNECTING. */
 		assert(state != TR_CHANNEL_LANE_UP);
 		assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
-		assert(stats.reconnect_attempts >= 2U);
+		/* The healthy lane may connect on its first turn; the opposite
+		 * failure need not have completed before it reaches UP.
+		 */
+		assert(stats.reconnect_attempts >= 1U);
 		assert(stats.reconnect_successes >= 1U);
 	
 	}
