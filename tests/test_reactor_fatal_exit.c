@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../src/execution/reactor.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/execution/command_queue.h"
 #include "../src/execution/completion_queue.h"
 #include "../src/execution/buffer.h"
@@ -388,7 +389,7 @@ static void test_fatal_epoch(int concurrent_stop)
 	wait_queue_waiters(&ctx, 0);
 
 	/* The separate bounded completion queue must wake its blocked worker. */
-	for (i = 0; i < COMMAND_CAPACITY; ++i)
+	for (i = 0; i < (int)COMMAND_CAPACITY; ++i)
 		assert(tr_reactor_complete(ctx.reactor, on_completion, &ctx) ==
 		       TR_OK);
 	completion_request.ctx = &ctx;
