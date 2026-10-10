@@ -126,7 +126,8 @@ for _, name in ipairs({"test_deadline", "test_transport", "test_connection_group
         if name == "test_deadline" then
             -- 只在测试链接阶段模拟单调时钟及 poll 调度结果。
             add_ldflags("-Wl,--wrap=clock_gettime",
-                        "-Wl,--wrap=poll", {force = true})
+                        "-Wl,--wrap=poll",
+                        "-Wl,--wrap=__poll_chk", {force = true})
         elseif name == "test_transport" then
             -- Observe facade/reconnect TCP_NODELAY policy without production hooks.
             add_ldflags("-Wl,--wrap=setsockopt", {force = true})
