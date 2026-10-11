@@ -60,7 +60,6 @@ int main(int argc, char **argv)
 	assert(checked == 2);
 	tr_socket_close(&client);
 	tr_socket_close(&listener);
-	puts("listen/connect sockets: atomic nonblocking and no exec "
-	     "inheritance");
+	puts("监听/连接 socket：原子非阻塞且不会被 exec 继承");
 	return 0;
 }
