@@ -9,7 +9,7 @@
 
 ## 新增和修改源码的格式门禁
 
-`Changed source formatting` 工作流固定使用 clang-format **18.1.8**，独立于日志文本
+`修改源码格式检查` 工作流固定使用 clang-format **18.1.8**，独立于日志文本
 formatter 功能测试。它在普通 `pull_request`（包括 fork）和 main push 运行，只有
 `contents: read` 权限，不使用 `pull_request_target`，不保留 checkout 凭据。
 

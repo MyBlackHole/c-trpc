@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated integration fixtures; requires the same pinned formatter as CI."""
+"""独立 Git 仓库集成测试；使用与 CI 相同的固定版本格式工具。"""
 import os
 from pathlib import Path
 import subprocess
@@ -151,8 +151,8 @@ class FormatGate(unittest.TestCase):
         self.write("new.c", "int good;\n")
         self.commit()
         self.git("checkout", "-q", "main")
-        # Base branch formats old debt; comparing base-tip directly would make
-        # the feature appear to reintroduce debt and falsely reject it.
+        # 目标分支已整理历史格式；若直接比较其最新提交，会错误地
+        # 认为功能分支重新引入历史格式问题，从而产生误报。
         self.write("debt.c", "int old_debt;\n\n// unchanged separator\n\nint good;\n")
         advanced_base = self.commit()
         self.git("checkout", "-q", "feature")

@@ -1,5 +1,5 @@
 ---
-# Opt-in C analysis profile, not an executed CI analyzer gate. See tooling-policy.
+# 可选 C 分析配置，并非已运行的 CI 分析门禁；详见 tooling-policy。
 Checks: '-*,clang-diagnostic-*,clang-analyzer-core.*,clang-analyzer-unix.*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.*'
 WarningsAsErrors: ''
 HeaderFilterRegex: '(^|/)(include|src)/.*\.h$'
