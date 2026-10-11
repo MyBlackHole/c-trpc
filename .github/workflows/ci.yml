@@ -375,7 +375,21 @@ jobs:
           results="$RUNNER_TEMP/readahead-${{ matrix.mode }}"
           mkdir -p "$results"
           exec 3>&1
-          trap 'status=$?; tail -n 120 "$results/build-and-test.log" >&3; exit "$status"' EXIT
+          report_exit() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              {
+                echo '反应器对象的未定义接收符号：'
+                nm -u "build/.objs/trcore/linux/x86_64/${{ matrix.mode }}/src/execution/reactor.c.o"
+                echo '专测中的接收与解析包装符号：'
+                nm "build/linux/x86_64/${{ matrix.mode }}/test_bounded_readahead" | grep -E 'recv|tr_parser_(prepare|produce)'
+              } > "$results/recv-symbols.log" 2>&1 || echo '静态符号诊断未完整执行；保留原测试退出码。' >&3
+              tail -n 100 "$results/recv-symbols.log" >&3
+            fi
+            tail -n 120 "$results/build-and-test.log" >&3
+            exit "$status"
+          }
+          trap report_exit EXIT
           exec >"$results/build-and-test.log" 2>&1
           git rev-parse HEAD > "$results/source-commit.txt"
           xmake f -c -y -m ${{ matrix.mode }} --toolchain=gcc \

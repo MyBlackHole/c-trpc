@@ -26,6 +26,8 @@ struct context {
 	struct tr_parser *parser;
 	size_t recv_limit;
 	size_t network_bytes;
+	size_t recv_calls;
+	size_t produced_bytes;
 	size_t turn_network;
 	size_t turn_produced;
 	size_t turn_scratch;
@@ -96,6 +98,7 @@ ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
 	ssize_t n;
 
 	assert(ctx != NULL);
+	ctx->recv_calls++;
 	assert(len <= ctx->byte_budget - ctx->turn_network);
 	if (ctx->errors_left) {
 		errno = ctx->errors_left-- == 2 ? EINTR : EAGAIN;
@@ -131,6 +134,7 @@ int __wrap_tr_parser_produce(struct tr_parser *parser, size_t produced,
 {
 	active->parser = parser;
 	active->turn_produced += produced;
+	active->produced_bytes += produced;
 #ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
 	if (!active->direct_produce) {
 		active->turn_scratch += produced;
@@ -263,6 +267,13 @@ static int check_network(void *arg)
 	struct tr_reactor_stats stats;
 
 	assert(tr_reactor_get_stats(ctx->reactor, &stats) == TR_OK);
+	if (stats.total.rx_bytes != ctx->network_bytes)
+		fprintf(stderr,
+		        "接收观测不一致：recv_calls=%zu recv_bytes=%zu "
+		        "produce_bytes=%zu stats_rx=%llu\n",
+		        ctx->recv_calls, ctx->network_bytes,
+		        ctx->produced_bytes,
+		        (unsigned long long)stats.total.rx_bytes);
 	assert(stats.total.rx_bytes == ctx->network_bytes);
 	assert(stats.max_per_turn.rx_bytes <= ctx->byte_budget);
 	return TR_OK;

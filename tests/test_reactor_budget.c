@@ -48,6 +48,9 @@ struct test_ctx {
 #endif
 	size_t turn_tx;
 	uint64_t observed_rx;
+	uint64_t recv_wrapper_calls;
+	uint64_t recv_wrapper_bytes;
+	uint64_t produced_bytes;
 	uint64_t observed_tx;
 	unsigned checked_turns;
 	int monitor;
@@ -131,18 +134,25 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 
 ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
 {
-	if (active && active->monitor)
+	if (active && active->monitor) {
+		active->recv_wrapper_calls++;
 		assert(len <= active->byte_budget - active->turn_rx);
+	}
 #ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
 	ssize_t n = __real_recv(fd, buffer, len, flags);
 
 	if (active && active->monitor && n > 0) {
 		active->turn_rx += (size_t)n;
 		active->observed_rx += (uint64_t)n;
+		active->recv_wrapper_bytes += (uint64_t)n;
 	}
 	return n;
 #else
-	return __real_recv(fd, buffer, len, flags);
+	ssize_t n = __real_recv(fd, buffer, len, flags);
+
+	if (active && active->monitor && n > 0)
+		active->recv_wrapper_bytes += (uint64_t)n;
+	return n;
 #endif
 }
 
@@ -152,6 +162,8 @@ ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
 int __wrap_tr_parser_produce(struct tr_parser *parser, size_t produced,
 			     struct tr_frame *frame)
 {
+	if (active && active->monitor)
+		active->produced_bytes += produced;
 #ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
 	if (active && active->monitor)
 		active->turn_produced += produced;
@@ -369,6 +381,15 @@ static int finish_on_owner(void *arg)
 	assert(memcmp(&again, &ctx->stats, sizeof(again)) == 0);
 	check_stats(&again, ctx->byte_budget);
 	/* 被绕过的观察者必须失败，而不是静默报告零工作。 */
+	if (ctx->observed_rx != again.total.rx_bytes)
+		fprintf(stderr,
+		        "接收观测不一致：recv_calls=%llu recv_bytes=%llu "
+		        "produce_bytes=%llu observed_rx=%llu stats_rx=%llu\n",
+		        (unsigned long long)ctx->recv_wrapper_calls,
+		        (unsigned long long)ctx->recv_wrapper_bytes,
+		        (unsigned long long)ctx->produced_bytes,
+		        (unsigned long long)ctx->observed_rx,
+		        (unsigned long long)again.total.rx_bytes);
 	assert(ctx->observed_rx == again.total.rx_bytes);
 	assert(ctx->observed_tx == again.total.tx_bytes);
 	check_turn(ctx);
