@@ -1968,7 +1968,9 @@ static int tr_reactor_timer_timeout_ms(struct tr_reactor *reactor)
 		return 0;
 
 	delta_ns = deadline_ns - now_ns;
-	timeout_ms = (delta_ns + UINT64_C(999999)) / UINT64_C(1000000);
+	/* 先除再补余数，避免 UINT64_MAX 附近的期限加法回绕。 */
+	timeout_ms = delta_ns / UINT64_C(1000000) +
+		     (delta_ns % UINT64_C(1000000) != 0U);
 	if (timeout_ms > (uint64_t)INT_MAX)
 		return INT_MAX;
 	return (int)timeout_ms;
