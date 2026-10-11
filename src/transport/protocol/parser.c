@@ -39,6 +39,11 @@ void tr_parser_reset(struct tr_parser *parser)
 	if (parser->payload)
 		tr_buffer_release(parser->payload);
 
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	parser->scratch_begin = 0;
+	parser->scratch_end = 0;
+#endif
+
 	tr_parser_clear_current(parser);
 }
 

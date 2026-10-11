@@ -352,3 +352,62 @@ jobs:
           xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
           xmake build test_crc32c
           qemu-x86_64 -cpu max,-sse4.2 build/linux/x86_64/release/test_crc32c --expect-portable
+
+  experimental-readahead:
+    name: experimental readahead (${{ matrix.mode }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [release, asan]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: 验证默认关闭候选的 ON 接收路径
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/readahead-${{ matrix.mode }}"
+          mkdir -p "$results"
+          exec 3>&1
+          report_exit() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              {
+                echo '反应器对象的未定义接收符号：'
+                nm -u "build/.objs/trcore/linux/x86_64/${{ matrix.mode }}/src/execution/reactor.c.o"
+                echo '专测中的接收与解析包装符号：'
+                nm "build/linux/x86_64/${{ matrix.mode }}/test_bounded_readahead" | grep -E 'recv|tr_parser_(prepare|produce)'
+              } > "$results/recv-symbols.log" 2>&1 || echo '静态符号诊断未完整执行；保留原测试退出码。' >&3
+              tail -n 100 "$results/recv-symbols.log" >&3
+            fi
+            tail -n 120 "$results/build-and-test.log" >&3
+            exit "$status"
+          }
+          trap report_exit EXIT
+          exec >"$results/build-and-test.log" 2>&1
+          git rev-parse HEAD > "$results/source-commit.txt"
+          xmake f -c -y -m ${{ matrix.mode }} --toolchain=gcc \
+            --crc32c_portable=n --experimental_bounded_readahead=y
+          xmake test -v -j1 \
+            'test_bounded_readahead/*' 'test_reactor_budget/*' \
+            'test_reactor_fairness/*' 'test_transport/*' \
+            'test_pipeline_ingress/*' 'test_pipeline_listener/*'
+      - name: 归档实验路径失败时的源码
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/readahead-${{ matrix.mode }}"
+          git archive --format=tar -o "$RUNNER_TEMP/readahead-${{ matrix.mode }}/source.tar" HEAD
+      - name: 保留实验路径构建与测试诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: experimental-readahead-${{ matrix.mode }}
+          path: ${{ runner.temp }}/readahead-${{ matrix.mode }}
+          if-no-files-found: ignore
+          retention-days: 7

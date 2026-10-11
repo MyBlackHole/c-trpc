@@ -18,6 +18,11 @@ enum tr_parser_state {
 	TR_PARSER_PAYLOAD
 };
 
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+#define TR_PARSER_READAHEAD_BYTES 4096U
+#define TR_PARSER_READAHEAD_SMALL 512U
+#endif
+
 struct tr_parser {
 	enum tr_parser_state state;
 
@@ -31,6 +36,12 @@ struct tr_parser {
 
 	struct tr_buffer_pool *pool;
 	struct tr_wire_limits limits;
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	/* 仅实验构建拥有缓存；逐帧清理保留余数，reset 丢弃余数。 */
+	uint8_t scratch[TR_PARSER_READAHEAD_BYTES];
+	uint32_t scratch_begin;
+	uint32_t scratch_end;
+#endif
 };
 
 int tr_parser_init(struct tr_parser *parser, struct tr_buffer_pool *pool,

@@ -14,6 +14,16 @@ if has_config("crc32c_portable") then
     add_defines("TR_CRC32C_FORCE_PORTABLE")
 end
 
+-- 仅供串行 A/B 验证，默认路径与对象大小保持不变。
+option("experimental_bounded_readahead")
+    set_default(false)
+    set_showmenu(true)
+    set_description("实验性 4 KiB 有界跨帧预读（默认关闭）")
+option_end()
+if has_config("experimental_bounded_readahead") then
+    add_defines("TR_EXPERIMENTAL_BOUNDED_READAHEAD")
+end
+
 set_languages("c11")
 set_warnings("all", "extra", "error")
 set_symbols("debug")
@@ -129,14 +139,21 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "test_server_stats_retiring", "test_reactor_timer_deadline", "test_rpc_deadline_failure", "test_connector_deadline", "test_inbound_handshake_deadline", "test_rpc_deadline_fault", "test_reactor_tokens", "test_channel_ready_deadline", "test_client_connect_deadline", "test_server_drain_deadline", "test_deadline", "test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_protocol_error", "test_channel_reconnect_teardown", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_unary_failure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_bounded_readahead", "test_echo_client_i18n", "test_socket_atomic_flags", "test_server_stats_retiring", "test_reactor_timer_deadline", "test_rpc_deadline_failure", "test_connector_deadline", "test_inbound_handshake_deadline", "test_rpc_deadline_fault", "test_reactor_tokens", "test_channel_ready_deadline", "test_client_connect_deadline", "test_server_drain_deadline", "test_deadline", "test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_protocol_error", "test_channel_reconnect_teardown", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_unary_failure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
         add_files("tests/" .. name .. ".c")
         add_deps("trcore")
         add_undefines("NDEBUG")
-        if name == "test_echo_client_i18n" then
+        if name == "test_bounded_readahead" then
+            -- 仅局部专测拦截接收/解析/轮次边界。
+            add_ldflags("-Wl,--wrap=recv", "-Wl,--wrap=__recv_chk",
+                        "-Wl,--wrap=epoll_wait",
+                        "-Wl,--wrap=tr_parser_prepare",
+                        "-Wl,--wrap=tr_parser_produce",
+                        "-Wl,--wrap=tr_command_queue_pop_batch", {force = true})
+        elseif name == "test_echo_client_i18n" then
             after_build(copy_echo_catalog)
         elseif name == "test_inbound_handshake_deadline" then
             -- 真实 TCP 与 owner timer 精确推进；故障注入只存在于本测试目标。
@@ -238,6 +255,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_reactor_budget" then
             add_ldflags("-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=sendmsg", "-Wl,--wrap=recv",
+                        "-Wl,--wrap=__recv_chk",
                         "-Wl,--wrap=tr_parser_produce",
                         "-Wl,--wrap=epoll_wait", {force = true})
         elseif name == "test_reactor_source_detach" then
