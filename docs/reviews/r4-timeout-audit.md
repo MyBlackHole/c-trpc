@@ -89,14 +89,38 @@ owner，下一次可写事件再恢复 `preface_sent` 偏移。使用原来的�
 覆盖多次 `EINTR`、到期瞬间发送成功、两字节部分发送后恢复剩余内容；
 原有 cancel-vs-complete 终态锁存与注销失败重试测试继续保留。
 
-### 尚未完成：RPC 与极端换算边界
+### RPC Deadline：PR #195 的失败处理与回调重排
 
-1. `src/rpc/rpc.c`：`tr_rpc_timeout_deadline_ns()` 没有单独处理
-   `tr_rpc_now_ns()==0` 的读取失败哨兵；`tr_rpc_deadline_set_locked()`
-   丢弃重设定时器的错误。需要按调用准入、既有 Call 和回收分别设计失败语义。
-2. Reactor / RPC 仍有 `(delta_ns + 999999) / 1000000` 形式的向上取整。
-   极端 `uint64_t` 边界可能先加法回绕，需专门的边界回归；不将这种极端
-   算术边界描述为普通运行时已经复现的故障。
+`src/rpc/rpc.c` 在 Client Unary/Streaming Call 的截止时间构造阶段识别
+`tr_rpc_now_ns()==0` 时钟读取失败，立即返回 `TR_ERR_SYS`，不向 owner
+提交 Call admission。Server 端解析有效的 `:timeout-ms` 若读时钟失败，
+返回系统错误而不是把错误归咎于元数据格式。
 
-以上剩余项不在 PR #193 中修改；不能通过新增无界工作队列或削弱
-终态锁存、回调撤销屏障来规避问题。
+RPC deadline heap 的新增/修改必须同时完成 timer arm 才算成功；若 arm
+失败，恢复旧 deadline 和堆顺序，由上层在未发布 Call 时执行正常回滚。
+已经进入 terminal 的 Call 删除期限仍保持单调，不能因重新 arm 失败而
+复活旧 Call。当前有效 timer 的回调在消费一个到期期限后，通过返回
+`next_deadline_ns` 让原有 timer queue 自动重排剩余 Call；若取消路径
+一次显式重排失败，timer callback 的返回值仍能保留后继期限，
+与 queue 内现有 version fence 共同保证不覆盖显式成功的 arm/unregister。
+
+`test_rpc_deadline_fault` 使用真实 Reactor / Channel / RPC Endpoint，
+仅在测试链接期故障注入，覆盖两个 Client Call 入口的时钟失败、
+Unary/Streaming 定时器 arm 失败、旧期限 heap 回滚、Call slot 重用，
+以及两个顺序到期的 Call 在一次 rearm 失败后仍分别收到唯一超时终态。
+
+### 尚未完成：极端时间换算与终态重试
+
+1. Reactor / RPC 仍有 `(delta_ns + 999999) / 1000000` 形式的向上取整，
+   极端 `uint64_t` 边界可能先加法回绕，需要单独的边界回归。
+2. final STATUS 已提交后的 `STREAM_CLOSE` 退避调度仍需对
+   `tr_rpc_schedule_final_close_retry_locked()` 的首次 timer arm 失败做
+   独立的终态推进和无孤儿义务验证；其故障语义不同于尚未发布的 Call
+   deadline，不能简单回滚已发布的 STATUS。
+3. 在 Endpoint/Channel 终止阶段，持久性的定时器源失效应与回调
+   解绑屏障共同审查；当前 PR 保证短暂 arm 故障不会让新 Call 被误接受，
+   且正常有效的 timer callback 可以恢复剩余期限，不宣称解决永久
+   故障下所有已存在的网络及执行器责任。
+
+以上后续事项不能通过新增无界工作队列或削弱已有 ownership、回调撤销和
+completion-once 语义规避。
