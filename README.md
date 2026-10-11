@@ -2,7 +2,7 @@
 
 面向 Linux 的 C 传输/RPC 库，重点关注有界资源、显式所有权、高吞吐批量数据流，以及通用传输/RPC 与备份业务语义之间的清晰分离。
 
-当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件与 C linkage。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
+当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件与 C 链接约定。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
 ## 架构
 
@@ -179,7 +179,7 @@ tr_client_connection_group_close(client);
 assert(tr_client_destroy(client) == TR_OK);
 ```
 
-门面复用现有单所有者 Pipeline 引擎。应用只看到 `group_id/epoch`、
+门面复用现有单所有者流水线引擎。应用只看到 `group_id/epoch`、
 逻辑 Stream/消息标识以及字节视图；Reactor 句柄、注册表状态、TRR1 解析、
 所有者分片和成员代次全部保持内部化。
 返回 `TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP` 会保留原始 RX 缓冲区，
@@ -500,15 +500,15 @@ tr_channel_replace_connection(channel, lane, new_connection);
   - `ONE -> MANY`（服务端流式）；
   - `MANY -> ONE`（客户端流式）；
   - `MANY -> MANY`（双向流式）；
-- V1 请求方向的 `MANY` 表示 **1..N**，不是 0..N：第一条 `REQUEST` 同时也是 Method 打开信封；
-- `TR_RPC_NONE` 为未来显式 Method 打开信封保留，V1 不可执行；
+- V1 请求方向的 `MANY` 表示 **1..N**，不是 0..N：第一条 `REQUEST` 同时也是方法开启消息的封装；
+- `TR_RPC_NONE` 为未来显式的方法开启消息封装保留，V1 不可执行；
 - 客户端 `close_send()` 只关闭请求方向；服务端通过 `finish(status)` 发送最终 `STATUS` 来终止流式 Call；
 - `STATUS(OK)` 对响应基数 `ONE` 要求恰好一条 `RESPONSE`；`MANY` 允许 0..N；
 - 客户端 `FINISHED` 是正常应用终止屏障：之后不会再出现 `MESSAGE/WRITABLE` 或正常 `REMOTE_CLOSED`；
-- 流式调用最终 `STATUS` 使用独立 RPC 信封，与普通响应消息分离；
+- 流式调用最终 `STATUS` 使用独立 RPC 消息封装，与普通响应消息分离；
 - Call 级截止时间使用本地单调时钟定时器；
 - 截止时间通过保留元数据中的相对值传播到服务端；
-- 使用现有 `CANCEL` RPC 信封实现协作式本地/远端取消；
+- 使用现有 `CANCEL` RPC 消息封装实现协作式本地/远端取消；
 - 每个方向第一条消息支持有界初始元数据旁路；
 - 客户端 Call 事件：打开、可写、远端关闭、结束、错误；
 - 服务端流式回调：打开、消息、半关闭、可写、关闭；
@@ -536,7 +536,7 @@ ACTIVE
   +-- 截止时间到期 ------------> DEADLINE_EXCEEDED
                                       |
                                       +-> 本地完成回调
-                                      +-> 尽力发送 CANCEL 信封
+                                      +-> 尽力发送 CANCEL 消息封装
                                       +-> Stream 半关闭
 ```
 
@@ -569,7 +569,7 @@ RPC 元数据有两个有界范围：
 - V1 支持服务端流式调用 -> 客户端尾部元数据；
 - 尾部元数据只由最终 `STATUS` 携带；
 - 客户端可在 `FINISHED` 回调中读取尾部元数据；
-- 一元调用 V1 没有独立 `STATUS` 信封，因此暂不支持一元尾部元数据；
+- 一元调用 V1 没有独立 `STATUS` 消息封装，因此暂不支持一元尾部元数据；
 - `STATUS` 元数据不会覆盖第一条 `RESPONSE` 的初始元数据。
 
 每个 Call 都保持有界的本地/对端初始和尾部存储；不存在动态元数据队列。
@@ -580,7 +580,7 @@ RPC 线协议头仍为 32 字节。有元数据时，消息体为：
 ```text
 RPC 头部（32 字节）
 metadata_len（LE16）
-metadata TLV
+元数据 TLV
 应用载荷
 ```
 
@@ -656,7 +656,7 @@ V1 有意不提供动态拦截器链，也不提供阻塞/异步拦截器续处�
 
 - 应用 RPC 回调绝不在网络 Reactor 线程上执行；
 - 每个 RPC Endpoint 使用有界固定容量执行器任务节点池；
-- 可选服务端续处理预留在同一节点池内进行逻辑准入分区：新的 Unary/第一条 Streaming 任务在 `capacity - reserve` 处停止准入，已经接受的 Streaming 消息/半关闭/可写/关闭任务可以使用完整容量；它不是第二个队列，也不改变工作线程调度；
+- 可选服务端续处理预留在同一节点池内进行逻辑准入分区：新的一元调用/第一条流式调用任务在 `capacity - reserve` 处停止准入，已经接受的流式消息/半关闭/可写/关闭任务可以使用完整容量；它不是第二个队列，也不改变工作线程调度；
 - 低层独立 RPC Endpoint 保留自己的可配置工作线程池；
 - 高层服务端门面创建一个有界分片本地工作线程池，由同分片对端 RPC Endpoint 共享；精确工作线程/节点数量属于内部调优，不是稳定门面 API；
 - 每个 Call 一条 FIFO 任务队列，再加一条 Endpoint 本地就绪 Call 队列；
@@ -682,7 +682,7 @@ V1 有意不提供动态拦截器链，也不提供阻塞/异步拦截器续处�
 引擎内部仍保留尽量少复制的 Buffer 快速路径：
 
 ```text
-32 字节 RPC 信封缓冲区 ----\
+32 字节 RPC 消息封装缓冲区 ----\
                             +--> 传输层分散/聚集
 原始应用缓冲区 ----------/          |
                                       v
@@ -749,8 +749,10 @@ struct tr_rpc_message {
 [`docs/lock_ownership.md`](docs/lock_ownership.md)。
 
 代码注释、API 契约说明、README、设计文档和测试说明都必须使用中文。
-API、类型、变量、宏、协议字段、状态值、命令、日志和错误原文保持原样；
-具体规则见 [`docs/code_comments.md`](docs/code_comments.md)。
+API、类型、变量、宏、协议字段、状态值、命令及机器可解析的日志/错误标记保持原样；
+新写的纯人读说明使用中文。语言边界见
+[项目语言约定](docs/PROJECT_LANGUAGE.md)，注释要求见
+[`docs/code_comments.md`](docs/code_comments.md)。
 
 - 词法作用域所有者在适合时应使用类型化 `TR_AUTO(...)` 自动清理；
 - 所有权转移时使用显式 `*_take()` 辅助接口解除自动清理；
@@ -797,7 +799,7 @@ API、类型、变量、宏、协议字段、状态值、命令、日志和错�
 
 RPC：
 
-- RPC 信封 + RAW 编解码；
+- RPC 消息封装 + RAW 编解码；
 - 真实 TCP 一元请求 -> 执行器处理器 -> 响应 -> 半关闭；
 - 真实 TCP `ONE -> MANY` 服务端流式调用；
 - 真实 TCP `MANY -> ONE` 客户端流式调用；
@@ -807,7 +809,7 @@ RPC：
 - `STATUS` 的服务/方法/编解码器/状态域校验；
 - `STATUS(OK) + response ONE` 要求恰好一条 `RESPONSE`；
 - 客户端 `FINISHED` 保持最后一个正常应用事件；
-- 在存在显式 Method 打开信封前，V1 拒绝零消息 MANY 请求半关闭；
+- 在存在方法开启消息的独立封装前，V1 拒绝零消息 MANY 请求半关闭；
 - 服务端拒绝 `close_send()`；响应终止必须经过最终 `STATUS`；
 - RPC 消息保留/释放路径；
 - 基数强制约束（`ONE` 拒绝第二条消息）；
@@ -892,12 +894,12 @@ xmake test -v -j1 'test_timer_queue/*'
 `xmake.lua` 是唯一构建定义。产物位于
 `build/<platform>/<architecture>/<mode>/`，不放入 `src/`、`tests/` 或 `examples/`。
 模式包括 `debug`、`release`（默认）、`asan`（ASan + UBSan）和 `tsan`。
-release 保持原有 `-O2 -g` 构建并启用断言；测试会显式取消定义 `NDEBUG`，
+`release` 模式保持原有 `-O2 -g` 构建并启用断言；测试会显式取消定义 `NDEBUG`，
 确保写在断言中的操作仍然执行。
 
 `make`、`make test`、`make test-timer` 和 `make clean` 保留为轻量转发入口，
 同样依赖 Xmake；不存在第二套 Make 构建图。
-编译器切换、sanitizer 命令、SDK 安装和兼容选项见
+编译器切换、内存/线程检查器命令、SDK 安装和兼容选项见
 [构建与测试指南](docs/build.md)。
 
 ## 下一里程碑

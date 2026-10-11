@@ -19,14 +19,14 @@ enum tr_tcp_nodelay_policy {
 };
 
 /*
- * Client/Server facade 共用的高层 semantic limits。
+ * Client/Server 门面共用的高层语义上限。
  * 值为 0 的字段由 tr_facade_limits_init() 填入默认值。
  *
  * Reactor、资源池、执行器和诊断等实现资源不会在这里暴露；
  * 门面拥有的运行时调优参数保持内部化。
  *
- * V1 facade 有意只暴露 shared-connection 模式；
- * 更底层的 Channel API 仍支持 split CONTROL/BULK connection。
+ * V1 门面有意只暴露共享连接模式；
+ * 更底层的 Channel API 仍支持拆分 CONTROL/BULK 连接。
  */
 struct tr_facade_limits {
 	uint32_t max_streams;
