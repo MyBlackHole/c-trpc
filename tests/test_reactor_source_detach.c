@@ -24,6 +24,7 @@ static int epoll_del_fault_fd = -1;
 static int observed_epoll_fd = -1;
 static int observed_del_errno;
 static unsigned callback_hits;
+static uint64_t observed_add_token;
 
 int __real_epoll_ctl(
 	int epfd, int op, int fd, struct epoll_event *event);
@@ -34,8 +35,10 @@ int __wrap_epoll_ctl(
 	enum epoll_del_fault_mode fault;
 	int ret;
 
-	if (op == EPOLL_CTL_ADD)
+	if (op == EPOLL_CTL_ADD) {
 		observed_epoll_fd = epfd;
+		observed_add_token = event->data.u64;
+	}
 
 	if (op == EPOLL_CTL_DEL && fd == epoll_del_fault_fd &&
 	    epoll_del_fault != EPOLL_DEL_FAULT_NONE) {
@@ -174,6 +177,28 @@ static void test_aux_detach_failure_preserves_publication(
 		       reactor, fd, EPOLLIN, source_callback, &callback_hits) == TR_OK);
 	assert(tr_reactor_aux_event_unregister(reactor, fd) == TR_OK);
 
+	assert(close(fd) == 0);
+}
+
+/* Exercise production registration, not only the token helper. The old
+ * 16-bit generation reused the first token on registration 65535. */
+static void test_aux_token_does_not_repeat_at_16_bit_boundary(
+	struct tr_reactor *reactor)
+{
+	int fd = make_event_fd();
+	uint64_t first_token = 0U;
+	uint32_t i;
+
+	for (i = 0U; i < 65536U; ++i) {
+		assert(tr_reactor_aux_event_register(
+			       reactor, fd, EPOLLIN, source_callback,
+			       &callback_hits) == TR_OK);
+		if (i == 0U)
+			first_token = observed_add_token;
+		else
+			assert(observed_add_token != first_token);
+		assert(tr_reactor_aux_event_unregister(reactor, fd) == TR_OK);
+	}
 	assert(close(fd) == 0);
 }
 
@@ -356,6 +381,7 @@ int main(void)
 	test_listener_detach_failure_preserves_publication(reactor);
 	test_peer_detach_failure_preserves_publication(reactor);
 	test_aux_detach_failure_preserves_publication(reactor);
+	test_aux_token_does_not_repeat_at_16_bit_boundary(reactor);
 	test_register_publish_reports_rollback_barrier_failure(reactor);
 
 	assert(callback_hits == 0U);
