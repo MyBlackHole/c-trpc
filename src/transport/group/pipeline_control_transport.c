@@ -106,10 +106,9 @@ static int tr_pipeline_control_transport_abort_on_owner(void *arg)
 	closed_cb = transport->closed_cb;
 	closed_arg = transport->closed_arg;
 
-	/*
-	 * closing 是 admission fence，不代表 teardown 已经完成。第一次进入时先
-	 * 禁止新的 CONTROL work；若之前的 abort 因内部状态暂时未收敛而失败，
-	 * listener stop 可以再次调用本函数完成剩余 teardown。
+	/* closing 是准入屏障，不代表拆除已经完成。第一次进入时先
+	 * 禁止新的 CONTROL 工作；若之前的中止因内部状态暂时未收敛而失败，
+	 * 监听器停止可以再次调用本函数完成剩余拆除。
 	 */
 	if (!transport->closing) {
 		transport->closing = 1;
@@ -225,10 +224,8 @@ static int tr_pipeline_control_transport_send_data_offer_on_owner(void *arg)
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-	 * reserve_data_wire_ex() returns the exact capability created by the same
-	 * owner transaction. No encode->decode round trip is needed to reconstruct
-	 * rollback identity.
+	/* reserve_data_wire_ex() 返回同一所有者事务创建的精确能力凭证。
+	 * 无需通过编码后再解码来重建回滚标识。
 	 */
 	ret = tr_pipeline_control_reserve_data_wire_ex(
 		transport->control, &offer, buffer->data);
@@ -239,10 +236,9 @@ static int tr_pipeline_control_transport_send_data_offer_on_owner(void *arg)
 	ret = tr_pipeline_control_transport_send_wire(
 		transport, buffer, request->message_id);
 	if (ret != TR_OK) {
-		/*
-		 * SEND admission and reservation rollback execute in the same owner turn.
-		 * A failed send never transfers buffer ownership, so both capability and
-		 * buffer remain locally recoverable here.
+		/* SEND 准入与预留回滚在同一个所有者处理轮次执行。
+		 * 发送失败绝不转移缓冲区所有权，因此能力凭证与缓冲区
+		 * 在此都仍可由本地回收。
 		 */
 		rollback_ret = tr_pipeline_control_cancel_data(
 			transport->control, &offer);

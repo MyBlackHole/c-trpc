@@ -65,9 +65,8 @@ struct tr_client_group {
 	int closing;
 	int draining;
 
-	/*
-	 * 协议状态仍严格属于 Reactor owner。这里仅发布 drain lifecycle generation
-	 * 给外部 waiter，不允许 waiter 借此锁直接读取/修改 transfer/data 状态。
+	/* 协议状态仍严格属于反应器所有者。这里仅向外部等待者发布排空生命周期代次，
+	 * 不允许等待者借此锁直接读取或修改传输与数据状态。
 	 */
 	pthread_mutex_t drain_wait_lock;
 	pthread_cond_t drain_wait_cond;
@@ -228,7 +227,7 @@ static int tr_client_group_send_all_fd(int fd, const uint8_t *data, size_t len,
 	while (len != 0U) {
 		ssize_t n;
 
-		/* 成功分段发送或连续 EINTR 都不得越过整个 connect 时限。 */
+		/* 成功分段发送或连续 EINTR 都不得越过整个连接时限。 */
 		ret = tr_deadline_expired(deadline, &expired);
 		if (ret != TR_OK)
 			return ret;
@@ -329,9 +328,8 @@ static enum tr_frame_disposition tr_client_group_data_frame(
 {
 	(void)frame;
 	(void)arg;
-	/*
-	 * Server-to-Client DATA delivery 尚未进入当前 public capability。
-	 * 收到这类 payload 时明确终止 DATA lane，避免静默丢弃业务数据。
+	/* 服务端到客户端的 DATA 交付尚未进入当前公开能力范围。
+	 * 收到这类负载时明确终止 DATA 通道，避免静默丢弃业务数据。
 	 */
 	(void)tr_reactor_abort_on_owner(connection, TR_ERR_UNSUPPORTED);
 	return TR_FRAME_RELEASE;
@@ -421,9 +419,8 @@ static void tr_client_group_connector_complete(
 		return;
 	}
 
-	/*
-	 * TR_OK completion 把 connected fd ownership 转移给本 callback。
-	 * adopt 成功后 ownership 再转移给 Reactor；其他失败路径必须在此 close。
+	/* TR_OK 完成结果把已连接 fd 所有权转移给本回调。
+	 * 接管成功后所有权再转移给反应器；其他失败路径必须在此关闭。
 	 */
 	memset(&connection, 0, sizeof(connection));
 	ret = tr_reactor_adopt_fd(group->config.owner, fd, &connection);
@@ -503,9 +500,8 @@ static void tr_client_group_start_next_on_owner(struct tr_client_group *group)
 		if (ret == TR_OK)
 			return;
 
-		/*
-		 * connector 进入 active 后的失败会通过 completion callback 收敛。
-		 * 如果 callback 在 start() 内同步执行，它可能已经启动了下一条 offer；
+		/* connector 进入活跃状态后的失败会通过完成回调收敛。
+		 * 如果回调在 start() 内同步执行，它可能已经启动了下一条提议；
 		 * 此时 connector_slot 不再指向 i，外层不能重复处理。
 		 */
 		if (group->connector_slot != i)
@@ -831,12 +827,10 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 		if (ret == TR_OK)
 			return TR_FRAME_RELEASE;
 	} else if (message.type == TR_PIPELINE_CONTROL_TRANSFER_READY) {
-		/*
-		 * begin_drain() is a monotonic local admission barrier. A READY
-		 * observed after it returns must never create new local work, or
-		 * wait_drained() could report quiescence and later become non-drained.
-		 * The Server owns its affinity independently and may release it; final
-		 * CONTROL close also fences remaining remote soft state.
+		/* begin_drain() 是单调的本地准入屏障。它返回后观察到的 READY
+		 * 绝不能创建新本地工作，否则 wait_drained() 可能先报告静止，
+		 * 之后又变成未排空。服务端独立拥有其亲和绑定，可以释放它；
+		 * 最终 CONTROL 关闭也会隔断剩余远端软状态。
 		 */
 		if (group->draining)
 			return TR_FRAME_RELEASE;
@@ -858,10 +852,8 @@ static int tr_client_group_stop_data_on_owner(struct tr_client_group *group)
 	uint32_t i;
 	int ret;
 
-	/*
-	 * Connector source detach is the first fallible barrier. Do not clear
-	 * transfer/DATA ownership until it succeeds; otherwise a later connector
-	 * callback could target state we already declared free.
+	/* Connector 事件源解绑是第一个可能失败的屏障。在其成功前不要清除
+	 * 传输或 DATA 所有权；否则后续连接器回调可能指向已被声明为空闲的状态。
 	 */
 	if (group->connector) {
 		ret = tr_connector_cancel(group->connector);
@@ -903,10 +895,9 @@ static void tr_client_group_control_event(
 	was_closing = group->closing;
 	group->closing = 1;
 	if (tr_client_group_stop_data_on_owner(group) != TR_OK) {
-		/*
-		 * Keep the stale CONTROL capability and terminal closing state as a
-		 * retry anchor for explicit close/destroy. Do not free owner state
-		 * while a connector callback source may still reference the Group.
+		/* 保留陈旧 CONTROL
+		 * 能力凭证与终止关闭状态，作为显式关闭或销毁的重试依据。
+		 * 只要连接器回调源仍可能引用 Group，就不要释放所有者状态。
 		 */
 		return;
 	}
@@ -985,9 +976,8 @@ static int tr_client_group_adopt_control_on_owner(void *arg)
 		goto fail;
 	}
 
-	/*
-	 * Handler publication and Group state publication are one owner turn.
-	 * No callback can observe a partially initialized control route.
+	/* 处理函数发布与 Group 状态发布处于一个所有者处理轮次。
+	 * 任何回调都不能观察到部分初始化的控制路由。
 	 */
 	group->control = request->connection;
 	group->control_route = request->route;
@@ -1147,18 +1137,17 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 	return TR_OK;
 
 fail:
-	/*
-	 * connector_create() 是 constructor 的最后一个可失败步骤；一旦成功，
-	 * 函数立即提交 Group ownership，因此 fail 路径不可能拥有 connector。
-	 * rollback 这里只处理此前建立的本地 soft-state。
+	/* connector_create() 是构造函数的最后一个可失败步骤；一旦成功，
+	 * 函数立即提交 Group 所有权，因此失败路径不可能拥有 connector。
+	 * 这里的回滚只处理此前建立的本地软状态。
 	 */
 	if (group->control_pool_ready) {
 		int pool_ret = tr_buffer_pool_destroy(&group->control_pool);
 
 		if (pool_ret != TR_OK) {
-			/*
-			 * pool outstanding ownership 使 terminal rollback 无法完成。
-			 * 保留整个 Group，调用方拿到 partial owner 后可继续 destroy。
+			/* 池中尚未归还的所有权使终止回滚无法完成。
+			 * 保留整个 Group。
+			 * 调用方拿到部分构造对象的所有权后可继续销毁。
 			 */
 			*out = group;
 			return pool_ret;
@@ -1206,7 +1195,7 @@ int tr_client_group_connect(
 		return ret;
 	prepared = 1;
 
-	/* 只在 owner prepare 完成后开始计时；TCP 和前导数据共用期限。 */
+	/* 只在所有者准备完成后开始计时；TCP 和前导数据共用期限。 */
 	ret = tr_deadline_init_ms(&connect_deadline,
 				  group->config.connect_timeout_ms);
 	if (ret != TR_OK)
@@ -1247,7 +1236,7 @@ int tr_client_group_connect(
 		group->config.owner,
 		tr_client_group_adopt_control_on_owner, &request);
 	if (request.executed)
-		prepared = 0; /* owner adopt path consumes or clears reservation */
+		prepared = 0; /* 所有者接管路径消耗或清除预留 */
 	if (request.fd_consumed)
 		fd = -1;
 	if (ret != TR_OK)
@@ -1608,9 +1597,8 @@ static int tr_client_group_detach_on_owner(void *arg)
 	struct tr_conn_handle control;
 	int ret = TR_OK;
 
-	/*
-	 * destroy 的 owner barrier 必须无条件执行，不能通过外部线程读取
-	 * group->control.reactor 来猜测 callback 是否已经退出。
+	/* 销毁的所有者屏障必须无条件执行，不能通过外部线程读取
+	 * group->control.reactor 来猜测回调是否已经退出。
 	 */
 	group->closing = 1;
 	group->draining = 1;
@@ -1633,11 +1621,10 @@ static int tr_client_group_detach_on_owner(void *arg)
 	memset(group->address, 0, sizeof(group->address));
 	group->port = 0U;
 
-	/*
-	 * Every Group-owned DATA payload carries a raw group pointer in its release
-	 * callback. Closing all DATA connections above must synchronously release
-	 * their TX queues before this owner barrier returns. Never free Group
-	 * storage while such a callback can still exist.
+	/* 每个 Group 拥有的 DATA 负载在其释放回调中携带原始 group 指针。
+	 * 在此所有者屏障返回前，上方全部 DATA 连接关闭时
+	 * 必须同步释放其发送队列。只要此类回调仍可能存在，
+	 * 就绝不能释放 Group 存储。
 	 */
 	if (group->send_bytes_inflight != 0U && ret == TR_OK)
 		ret = TR_ERR_STATE;
@@ -1655,11 +1642,9 @@ int tr_client_group_destroy(struct tr_client_group *group)
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-	 * Client facade guarantees destroy runs before Runtime stop. Use a
-	 * synchronous owner barrier so every callback that can reference group has
-	 * returned before storage is released. Fail closed if ownership cannot
-	 * converge.
+	/* 客户端门面保证销毁发生在运行时停止之前。使用同步所有者屏障，
+	 * 确保释放存储前，所有可能引用 group 的回调都已返回。
+	 * 若所有权无法收敛，则保守拒绝。
 	 */
 	ret = tr_reactor_call(
 		group->config.owner, tr_client_group_detach_on_owner, group);

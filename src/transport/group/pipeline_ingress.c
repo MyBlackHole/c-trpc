@@ -76,19 +76,18 @@ static void tr_pipeline_ingress_event(
 	if (!member)
 		return;
 
-	/*
-	 * connection close/error 是 owner 侧 DATA membership 的终止退休点。
-	 * exact capability + connection 匹配保证旧连接的 close callback 不会
-	 * 错误摘除已经替换的新 DATA membership。
+	/* 连接关闭或错误是所有者侧 DATA 成员关系的终止退役点。
+	 * 精确能力凭证与连接匹配保证旧连接的关闭回调不会
+	 * 错误摘除已经替换的新 DATA 成员关系。
 	 *
-	 * TR_ERR_STALE 是合法终止结果：CONTROL abort 可能先退休 DATA membership
-	 * 并从 registry 摘除 Pipeline，之后才关闭物理 DATA connection，因此这里
-	 * 合法观察到“已经解绑”。其他错误表示 membership 生命周期收敛本身失败，
-	 * 不能被 socket close/error 状态掩盖。
+	 * TR_ERR_STALE 是合法终止结果：CONTROL 中止可能先退役 DATA 成员关系
+	 * 并从注册表摘除 Pipeline，之后才关闭物理 DATA 连接，因此这里
+	 * 合法观察到“已经解绑”。其他错误表示成员关系生命周期收敛本身失败，
+	 * 不能被套接字关闭或错误状态掩盖。
 	 *
-	 * member 生命周期属于这次 terminal connection callback，而不是 registry
-	 * membership。Reactor 在调用 event_cb 前已经退休 connection slot，因此
-	 * 无论 membership 是否已被 CONTROL 提前退休，member 都只释放一次。
+	 * member 生命周期属于这次终止连接回调，而不是注册表
+	 * 成员关系。反应器在调用 event_cb 前已经退役连接槽位，因此
+	 * 无论成员关系是否已被 CONTROL 提前退役，member 都只释放一次。
 	 */
 	detach_ret = tr_pipeline_registry_detach_data_route(
 		member->registry, &member->preface, connection);
@@ -143,10 +142,9 @@ int tr_pipeline_ingress_attach_data_route_on_owner(
 	if (ret != TR_OK) {
 		int rollback_ret;
 
-		/*
-		 * handler publication 失败时，member 尚未转移给 connection callback
-		 * source，仍由当前作用域拥有。刚 attach 的 membership 必须在返回前
-		 * 退休；若 rollback 本身失败，生命周期错误优先于原 publication 错误。
+		/* 处理函数发布失败时，member 尚未转移给连接回调源，
+		 * 仍由当前作用域拥有。刚附接的成员关系必须在返回前
+		 * 退役；若回滚本身失败，生命周期错误优先于原发布错误。
 		 */
 		rollback_ret = tr_pipeline_registry_detach_data_route(
 			config->registry, preface, connection);
