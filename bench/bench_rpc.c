@@ -37,7 +37,7 @@ struct options {
 };
 
 struct sample {
-	uint64_t scheduled_ns, start_ns, end_ns;
+	uint64_t scheduled_ns, start_ns, submit_ns, end_ns;
 	uint32_t bytes, method;
 	int submit_status, rpc_status, valid, scheduler_dropped;
 };
@@ -636,6 +636,10 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	uint64_t *ok_lat = malloc((size_t)count * sizeof(*ok_lat));
 	uint64_t *all_lat = malloc((size_t)count * sizeof(*all_lat));
 	uint64_t *lag = malloc((size_t)count * sizeof(*lag));
+	uint64_t *submit_lag = malloc((size_t)count * sizeof(*submit_lag));
+	uint64_t first_submit = 0, last_submit = 0;
+	uint32_t submitted_in_window = 0, completed_in_window = 0;
+	uint32_t accepted_in_window = 0;
 	uint64_t bytes = 0;
 	uint32_t i, attempted = 0, accepted = 0, ok = 0, deadlines = 0;
 	uint32_t rpc_errors = 0, unavailable = 0, resource_exhausted = 0;
@@ -644,7 +648,7 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	double drain_elapsed;
 	double drain_tail_ms;
 
-	if (!ok_lat || !all_lat || !lag)
+	if (!ok_lat || !all_lat || !lag || !submit_lag)
 		fatal("open-loop report allocation", errno);
 
 	for (i = 0; i < count; ++i) {
@@ -655,7 +659,15 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 			dropped++;
 			continue;
 		}
-		attempted++;
+		submit_lag[attempted++] =
+		        s->submit_ns > s->scheduled_ns
+		                ? s->submit_ns - s->scheduled_ns
+		                : 0;
+		if (!first_submit)
+			first_submit = s->submit_ns;
+		last_submit = s->submit_ns;
+		if (s->submit_ns >= begin && s->submit_ns < horizon)
+			submitted_in_window++;
 		if (s->submit_status != TR_OK) {
 			if (s->submit_status == TR_AGAIN)
 				again++;
@@ -663,6 +675,10 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 				submit_errors++;
 			continue;
 		}
+		if (s->submit_ns >= begin && s->submit_ns < horizon)
+			accepted_in_window++;
+		if (s->end_ns >= begin && s->end_ns < horizon)
+			completed_in_window++;
 		all_lat[accepted++] = s->end_ns - s->start_ns;
 		if (!s->valid) {
 			invalid++;
@@ -683,15 +699,19 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	qsort(ok_lat, ok, sizeof(*ok_lat), compare_u64);
 	qsort(all_lat, accepted, sizeof(*all_lat), compare_u64);
 	qsort(lag, count, sizeof(*lag), compare_u64);
+	qsort(submit_lag, attempted, sizeof(*submit_lag), compare_u64);
 	arrival_window = (double)(horizon - begin) / 1e9;
 	drain_elapsed = (double)(end - begin) / 1e9;
 	drain_tail_ms = end > horizon ? (double)(end - horizon) / 1e6 : 0.0;
 
 	printf("{\"type\":\"open_phase\",\"schema\":1,\"phase\":\"measure\","
 	       "\"scenario\":\"open\",\"pid\":%ld,\"window\":%u,"
-	       "\"rate_rps\":%u,\"start_ns\":%" PRIu64 ",\"schedule_horizon_ns\":%" PRIu64 ","
-	       "\"end_ns\":%" PRIu64 ",\"arrival_window_s\":%.9f,\"drain_elapsed_s\":%.9f,"
-	       "\"drain_tail_ms\":%.6f,\"client_cpu_s\":%.9f,\"client_peak_rss_kib\":%ld,"
+	       "\"rate_rps\":%u,\"start_ns\":%" PRIu64
+	       ",\"schedule_horizon_ns\":%" PRIu64 ","
+	       "\"end_ns\":%" PRIu64
+	       ",\"arrival_window_s\":%.9f,\"drain_elapsed_s\":%.9f,"
+	       "\"drain_tail_ms\":%.6f,\"client_cpu_s\":%.9f,\"client_peak_rss_"
+	       "kib\":%ld,"
 	       "\"offered\":%u,\"scheduler_dropped\":%u,\"attempted\":%u,"
 	       "\"accepted\":%u,\"completed\":%u,\"ok\":%u,\"submit_again\":%u,"
 	       "\"submit_errors\":%u,\"deadlines\":%u,\"rpc_errors\":%u,"
@@ -700,16 +720,26 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	       "\"ok_rps\":%.3f,\"payload_MiB_s\":%.6f,"
 	       "\"ok_p50_us\":%.3f,\"ok_p99_us\":%.3f,\"accepted_p99_us\":%.3f,"
 	       "\"scheduler_late_p50_us\":%.3f,\"scheduler_late_p99_us\":%.3f,"
-	       "\"scheduler_late_max_us\":%.3f}\n",
+	       "\"scheduler_late_max_us\":%.3f,"
+	       "\"submission_schema\":1,\"first_submit_ns\":%" PRIu64 ","
+	       "\"last_submit_ns\":%" PRIu64 ",\"submitted_in_window\":%u,"
+	       "\"accepted_in_window\":%u,\"completed_in_window\":%u,\"submit_"
+	       "late_p99_us\":%.3f,"
+	       "\"submit_late_max_us\":%.3f}\n",
 	       (long)getpid(), window, rate_rps, begin, horizon, end,
-	       arrival_window, drain_elapsed, drain_tail_ms, client_cpu_s, peak_rss_kib,
-	       count, dropped, attempted, accepted, accepted, ok, again, submit_errors,
-	       deadlines, rpc_errors, unavailable, resource_exhausted, invalid,
-	       (double)ok / (double)count,
+	       arrival_window, drain_elapsed, drain_tail_ms, client_cpu_s,
+	       peak_rss_kib, count, dropped, attempted, accepted, accepted, ok,
+	       again, submit_errors, deadlines, rpc_errors, unavailable,
+	       resource_exhausted, invalid, (double)ok / (double)count,
 	       ok / drain_elapsed, (double)bytes / (1048576.0 * drain_elapsed),
 	       percentile(ok_lat, ok, 50U), percentile(ok_lat, ok, 99U),
 	       percentile(all_lat, accepted, 99U), percentile(lag, count, 50U),
-	       percentile(lag, count, 99U), (double)lag[count - 1U] / 1000.0);
+	       percentile(lag, count, 99U), (double)lag[count - 1U] / 1000.0,
+	       first_submit, last_submit, submitted_in_window,
+	       accepted_in_window, completed_in_window,
+	       percentile(submit_lag, attempted, 99U),
+	       attempted ? (double)submit_lag[attempted - 1U] / 1000.0 : 0.0);
+	free(submit_lag);
 	free(lag);
 	free(all_lat);
 	free(ok_lat);
@@ -782,6 +812,8 @@ static int open_phase(struct client_run *run, const struct options *o)
 		request.len = s->bytes;
 		check(pthread_mutex_unlock(&run->lock), "open submit unlock");
 
+		/* 近似 API 入口，不是网络发送或服务端到达时间。 */
+		s->submit_ns = now_ns();
 		ret = tr_client_unary_call_ex(run->client, SERVICE, METHOD_SLOW,
 			&request, &call_options, result, slot, &handle);
 

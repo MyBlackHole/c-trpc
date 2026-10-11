@@ -12,6 +12,7 @@ import subprocess
 import sys
 from typing import Any
 
+from rpc_load_quality import load_quality
 from run_rpc_bench import metadata as base_metadata
 from run_rpc_headroom import run_profile_case, server_pressure
 from run_rpc_scalability import (
@@ -97,6 +98,11 @@ def summarize_fanout(generators: int,
         "per_generator_slots": per_generator_slots,
         "aggregate_generator_slots": aggregate_generator_slots,
         "clean_trials": sum(clean_result(result) for result in results),
+        "load_quality_trials": {
+            status: sum(result.get("load_quality", {}).get("status", "unknown") == status
+                        for result in results)
+            for status in ("pass", "fail", "unknown")
+        },
         "generator_drop_trials": sum(
             result["client"]["scheduler_dropped"] > 0 for result in results),
         "generator_late_trials": sum(
@@ -124,8 +130,19 @@ def summarize_fanout(generators: int,
     }
 
 
+def request_budget(rate: int, requests: int, min_arrival_ms: int,
+                   duration_ms: int | None) -> int:
+    # 显式时长优先，避免请求数下限把有限时长悄悄延长。
+    return (math.ceil(rate * duration_ms / 1000) if duration_ms is not None
+            else max(requests, math.ceil(rate * min_arrival_ms / 1000)))
+
+
 def validate_args(parser: argparse.ArgumentParser,
                   args: argparse.Namespace) -> None:
+    if args.duration_ms is not None and not 10 <= args.duration_ms <= 10000:
+        parser.error("duration-ms must be in 10..10000")
+    if not math.isfinite(args.max_submit_late_us) or args.max_submit_late_us < 0:
+        parser.error("max-submit-late-us must be finite and non-negative")
     if not os.access(args.binary, os.X_OK):
         parser.error("binary is not executable")
     if not 1 <= args.trials <= 5:
@@ -174,6 +191,8 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--requests", type=int, default=256)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
+    parser.add_argument("--duration-ms", type=int)
+    parser.add_argument("--max-submit-late-us", type=float, default=1000.0)
     parser.add_argument("--generator-workers", type=int, default=1)
     parser.add_argument("--aggregate-generator-slots", type=int, default=1024)
     parser.add_argument("--timeout-ms", type=int, default=3000)
@@ -185,8 +204,8 @@ def main() -> int:
     args.binary = args.binary.resolve(strict=True)
     validate_args(parser, args)
 
-    requests = max(
-        args.requests, math.ceil(args.rate * args.min_arrival_ms / 1000.0))
+    requests = request_budget(args.rate, args.requests, args.min_arrival_ms,
+                              args.duration_ms)
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
     metadata = base_metadata(args.binary, args.label)
@@ -197,6 +216,8 @@ def main() -> int:
         "rate_rps": args.rate,
         "fanouts": args.fanouts,
         "requests": requests,
+        "duration_ms": args.duration_ms,
+        "max_submit_late_us": args.max_submit_late_us,
         "workers": args.workers,
         "generator_workers": args.generator_workers,
         "aggregate_generator_slots": args.aggregate_generator_slots,
@@ -271,11 +292,13 @@ def main() -> int:
                 result["type"] = "fanout_case"
                 result["schema"] = 2
                 result["wall_signals"] = exact_wall_signals(result)
+                result["load_quality"] = load_quality(result, args.max_submit_late_us)
                 results_by_fanout[generators].append(result)
                 output.write(json.dumps(result, allow_nan=False) + "\n")
                 output.flush()
                 print(
                     f"trial={trial} generators={generators} "
+                    f"load_quality={result['load_quality']['status']} "
                     f"slots={generator_slots}x{generators} "
                     f"accepted={result['client']['accepted']}/"
                     f"{result['client']['offered']} "
@@ -293,6 +316,7 @@ def main() -> int:
             output.flush()
             print(
                 f"fanout={generators} "
+                f"load_quality={summary['load_quality_trials']} "
                 f"clean={summary['clean_trials']}/{summary['trials']} "
                 f"accepted_median={summary['accepted_fraction_median']:.3f} "
                 f"ok_rps_median={summary['ok_rps_median']:.1f} "
