@@ -11,9 +11,8 @@
 #include "../src/execution/deadline_internal.h"
 #include "tr/status.h"
 
-/*
- * 测试链接期故障注入：只有发起 wait_drained 的控制线程启用 probe。
- * Reactor owner / 其他测试线程直接进入原函数，避免影响真实状态推进。
+/* 测试链接期故障注入：只有发起 wait_drained 的控制线程启用探针。
+ * 反应器所有者与其他测试线程直接进入原函数，避免影响真实状态推进。
  */
 struct tr_test_drain_deadline_probe {
 	struct timespec absolute;
@@ -71,7 +70,7 @@ int __wrap_pthread_cond_timedwait(pthread_cond_t *cond,
 	assert(abstime->tv_sec == probe->absolute.tv_sec);
 	assert(abstime->tv_nsec == probe->absolute.tv_nsec);
 	probe->timedwait_calls++;
-	/* 模拟一次真实的 condwait 超时；调用方仍然持有 mutex。 */
+	/* 模拟一次真实的条件等待超时；调用方仍然持有互斥锁。 */
 	return ETIMEDOUT;
 }
 

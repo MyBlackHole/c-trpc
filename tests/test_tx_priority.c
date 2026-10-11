@@ -41,7 +41,7 @@ struct fixture {
 	size_t parsed_len;
 };
 
-/* Set before Reactor start; reset only after join. Observations are owner-only. */
+/* 反应器启动前设置，仅在线程回收后重置。观测仅限所有者。 */
 static struct fixture *active;
 ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
 
@@ -71,7 +71,7 @@ static void observe_sent(struct fixture *f, const struct msghdr *message, size_t
 		f->parsed_len += frame_len;
 		if (header.type == TR_FRAME_PING && f->refill_left) {
 			f->refill_left--;
-			/* The real producer API enqueues work; it does not dispatch inline. */
+			/* 真实生产者 API 将工作入队，不内联分派。 */
 			assert(tr_reactor_send(f->handle, TR_FRAME_PING, 0, 0,
 					       f->next_ping++, NULL) == TR_OK);
 		}
@@ -83,7 +83,7 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 	struct fixture *f = active;
 	ssize_t n;
 
-	/* Fault injection only: keep the real socket and EPOLLOUT resume path. */
+	/* 仅注入故障：保留真实套接字与 EPOLLOUT 恢复路径。 */
 	if (f && f->inject_eagain && f->observed_len == 1U && !f->eagain_count) {
 		f->eagain_count++;
 		errno = EAGAIN;
@@ -109,7 +109,7 @@ static void wait_flag(struct fixture *f, const int *flag)
 	struct timespec deadline;
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
-	deadline.tv_sec += 10; /* Hang guard, not a performance threshold. */
+	deadline.tv_sec += 10; /* 防挂起保护，不是性能阈值。 */
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	while (!*flag)
 		assert(pthread_cond_timedwait(&f->cond, &f->lock, &deadline) == 0);
@@ -415,7 +415,7 @@ static void test_older_control_fifo(void)
 	send_data(&f, 100U, 2U);
 	send_item(&f, TR_FRAME_PING, 0, 0, 13U, 0);
 	release_owner(&f, gate_id);
-	/* Older controls are not reordered behind DATA; the limit is on overtakes. */
+	/* 较旧控制项不会被重排到 DATA 后面；限制针对越过次数。 */
 	for (i = 1U; i <= 12U; ++i)
 		expect_item(&f, TR_FRAME_PING, 0, 0, i, 0);
 	expect_data(&f, 100U, 0, 2U);
@@ -445,7 +445,7 @@ static void test_close_reuse(void)
 	assert(tr_buffer_acquire(&f.pool, 1U, &unaccepted) == TR_OK);
 	unaccepted->len = 0;
 	assert(tr_reactor_send(f.handle, TR_FRAME_PING, 0, 0, 100U, unaccepted) == TR_AGAIN);
-	tr_buffer_release(unaccepted); /* Failed send did not take ownership. */
+	tr_buffer_release(unaccepted); /* 发送失败未接管所有权。 */
 	assert(tr_reactor_close(old) == TR_OK);
 	release_tx(&f);
 	assert(tr_reactor_quiesce(f.reactor) == TR_OK);
@@ -454,7 +454,7 @@ static void test_close_reuse(void)
 	adopt_pair(&f);
 	assert(f.handle.slot == old.slot && f.handle.generation != old.generation);
 	assert(tr_reactor_send(old, TR_FRAME_PING, 0, 0, 1U, NULL) == TR_ERR_STALE);
-	/* Stop the observer parsing the deliberately truncated old byte stream. */
+	/* 停止观察者解析有意截断的旧字节流。 */
 	gate_id = hold_owner(&f);
 	f.parsed_len = f.observed_len;
 	for (i = 0; i < CONTROL_CAPACITY; ++i)

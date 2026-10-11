@@ -42,9 +42,8 @@
 #define TEST_POOL_COUNT 4U
 #define TEST_BUF_SIZE (1024U * 1024U)
 
-/*
- * Fail exactly one nonzero timer arm in the reconnect owner callback. The
- * fixture does not enable keepalive, so this is the reconnect timer only.
+/* 只让重连所有者回调中恰好一次非零定时器设置失败。
+ * 夹具不启用保活，因此这只会是重连定时器。
  */
 static atomic_uint fail_reconnect_timer_arm;
 
@@ -352,7 +351,7 @@ static void test_parser_pool_backpressure(void)
 	       TR_FRAME_READY);
 	assert(tr_buffer_pool_free_count(&pool) == 0);
 
-	/* Feed only the second header. The parser then needs a payload buffer. */
+	/* 只输入第二个头部。解析器随后需要负载缓冲区。 */
 	off = 0;
 	while (off < TR_WIRE_HEADER_SIZE) {
 		size_t n = tr_parser_write_len(&parser);
@@ -937,9 +936,8 @@ static void test_reactor_handler_update_is_owner_serialized(void)
 	assert(pthread_create(&setter, NULL, reactor_handler_set_thread,
 			      &set_arg) == 0);
 
-	/*
-	 * 旧 callback 尚未返回时，SET_HANDLER command 只能排队，
-	 * 不能从 producer thread 直接修改 handler。
+	/* 旧回调尚未返回时，SET_HANDLER 命令只能排队，
+	 * 不能从生产者线程直接修改处理函数。
 	 */
 	pause_time.tv_sec = 0;
 	pause_time.tv_nsec = 100000000L;
@@ -1149,7 +1147,7 @@ static void test_channel_handler_publication_is_owner_serialized(void)
 	assert(ctx.setter_ret == TR_OK);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	/* 完全 stopped 后允许 teardown-only direct publication。 */
+	/* 完全停止后允许仅用于拆除的直接发布。 */
 	assert(tr_channel_set_handler(
 		       channel, NULL, NULL, NULL, NULL) == TR_OK);
 	assert(tr_channel_destroy(channel) == TR_OK);
@@ -1440,15 +1438,13 @@ static void test_rpc_destroy_fails_closed_while_reactor_stopping(void)
 		       &stop_thread, NULL, rpc_destroy_stop_main,
 		       &stop_probe) == 0);
 
-	/*
-	 * Observe the actual stop admission boundary, not elapsed time. Any earlier
-	 * no-op completion remains owned by the Reactor and is drained before STOP.
+	/* 观察真实停止准入边界，而非经过时间。任何更早的无操作完成项
+	 * 仍由反应器拥有，并在 STOP 前排空。
 	 */
 	wait_reactor_completion_admission_closed(reactor);
 
-	/*
-	 * Channel callback_arg and deadline timer are still owner-published while
-	 * Reactor stop is in progress. Endpoint destroy must fail closed.
+	/* 反应器停止进行中时，Channel callback_arg 与截止时间定时器
+	 * 仍由所有者发布。Endpoint 销毁必须保守拒绝。
 	 */
 	assert(tr_rpc_endpoint_destroy(endpoint) == TR_ERR_CLOSED);
 
@@ -1460,9 +1456,8 @@ static void test_rpc_destroy_fails_closed_while_reactor_stopping(void)
 	assert(pthread_join(stop_thread, NULL) == 0);
 	assert(stop_probe.ret == TR_OK);
 
-	/*
-	 * Fully stopped is a distinct teardown domain. Channel/timer barriers can
-	 * now execute through their stopped-safe lifecycle paths.
+	/* 完全停止是不同的拆除域。Channel 与定时器屏障
+	 * 现在可通过各自停止状态下安全的生命周期路径执行。
 	 */
 	assert(tr_rpc_endpoint_destroy(endpoint) == TR_OK);
 	endpoint = NULL;
@@ -1836,20 +1831,17 @@ static void test_channel_split_create_tx_exhaustion_rollback(void)
 	probe.config.max_streams = 4U;
 	probe.config.initial_window_bytes = 4096U;
 
-	/*
-	 * The callback owns the Reactor turn. The first HELLO consumes the only
-	 * CONTROL TX item and cannot be dispatched before this callback returns;
-	 * the second split-lane HELLO therefore deterministically returns TR_AGAIN.
+	/* 回调拥有该反应器轮次。第一个 HELLO 消耗唯一 CONTROL 发送项，
+	 * 此回调返回前无法分派；因此第二条分离通道 HELLO 确定性返回 TR_AGAIN。
 	 */
 	assert(tr_reactor_call(
 		       reactor, channel_split_create_on_owner, &probe) == TR_OK);
 	assert(probe.create_ret == TR_AGAIN);
 	assert(probe.channel == NULL);
 
-	/*
-	 * The first HELLO command was already behind the current CALL in the ring.
-	 * Rollback closes both handles immediately; the queued SEND then observes a
-	 * stale generation and releases its independently owned payload/TX item.
+	/* 第一个 HELLO 命令已在环形队列中排在当前 CALL 之后。
+	 * 回滚立即关闭两个句柄；随后排队 SEND 观察到陈旧代次，
+	 * 释放其独立拥有的负载与发送项。
 	 */
 	assert(tr_reactor_quiesce(reactor) == TR_OK);
 	memset(&stats, 0, sizeof(stats));
@@ -1905,7 +1897,7 @@ static void test_channel_deferred_hello_gate(void)
 		       &channel_config, server_conn, server_conn,
 		       NULL, NULL, NULL, NULL, &server_channel) == TR_OK);
 
-	/* Peer races HELLO ahead of Server RPC/service binding. */
+	/* 对端抢在服务端 RPC 或服务绑定前发送 HELLO。 */
 	tr_put_le16(hello_payload + 0, TR_CHANNEL_PROTOCOL_VERSION);
 	tr_put_le16(hello_payload + 2, TR_CHANNEL_PROTOCOL_VERSION);
 	tr_put_le32(hello_payload + 4,
@@ -1920,9 +1912,8 @@ static void test_channel_deferred_hello_gate(void)
 	wire = NULL;
 	wait_connection_rx_frames(server_conn, 1U);
 
-	/*
-	 * Receiving peer HELLO is not service readiness. Before start(), the
-	 * deferred Channel must not ACK it or publish lane UP.
+	/* 收到对端 HELLO 不等于服务就绪。start() 前，
+	 * 延后创建的 Channel 不得回复 ACK 或发布通道 UP。
 	 */
 	assert(tr_channel_get_lane_state(server_channel, TR_LANE_CONTROL,
 					 &lane_state) == TR_OK);
@@ -1954,7 +1945,7 @@ static void test_channel_deferred_hello_gate(void)
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_BULK);
 
-	/* Once service-ready, the same connection may proceed to Stream DATA. */
+	/* 服务就绪后，同一连接可以继续流 DATA。 */
 	build_wire_frame(&wire, &wire_len, TR_FRAME_STREAM_OPEN, 0U, 1U,
 			 4096U, NULL, 0U);
 	assert(write(client_fd, wire, wire_len) == (ssize_t)wire_len);
@@ -1995,10 +1986,8 @@ static void test_channel_stream_id_index_collision_delete(void)
 	int client_fd;
 	int server_fd;
 
-	/*
-	 * max_streams=3 creates an 8-entry index. These three valid Client Stream
-	 * ids intentionally share one initial bucket, forcing a linear-probe
-	 * cluster and exercising backward-shift deletion.
+	/* max_streams=3 创建 8 项索引。这三个有效客户端流标识
+	 * 有意共享一个初始桶，强制形成线性探测簇，测试后移删除。
 	 */
 	assert((tr_channel_stream_id_hash(stream_ids[0]) & 7U) ==
 	       (tr_channel_stream_id_hash(stream_ids[1]) & 7U));
@@ -2059,9 +2048,8 @@ static void test_channel_stream_id_index_collision_delete(void)
 	}
 	assert(tr_channel_active_streams(server_channel) == 3U);
 
-	/*
-	 * Close local half first, then peer half. The middle hash entry disappears
-	 * while stream_id=43 remains farther down the same probe cluster.
+	/* 先关闭本地半侧，再关闭对端半侧。中间哈希条目消失时，
+	 * stream_id=43 仍位于同一探测簇更后方。
 	 */
 	assert(tr_stream_close(handles[1]) == TR_OK);
 	build_wire_frame(&wire, &wire_len, TR_FRAME_STREAM_CLOSE, 0U,
@@ -2153,7 +2141,7 @@ static void test_channel_stream_slot_reuse(void)
 	assert(tr_channel_active_streams(client_channel) == 1U);
 	assert(tr_channel_active_streams(server_channel) == 1U);
 
-	/* The single free-list entry is exhausted until this Stream is retired. */
+	/* 此流退役前，唯一空闲链表项已耗尽。 */
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &second) ==
 	       TR_AGAIN);
 
@@ -2431,7 +2419,7 @@ static void test_channel_message_fragmentation_reassembly(void)
 	server_ctx.held_payload = NULL;
 	pthread_mutex_unlock(&server_ctx.lock);
 
-	/* All six transport fragments were reassembled into one logical message. */
+	/* 六个传输分片全部重组为一个逻辑消息。 */
 	assert(tr_buffer_pool_free_count(&reassembly_pool) == 1);
 	assert(tr_stream_release_payload(server_stream, payload) == TR_OK);
 	assert(tr_buffer_pool_free_count(&reassembly_pool) == 2);
@@ -2520,7 +2508,7 @@ static void test_channel_split_lane_isolation(void)
 	wait_channel_counter(&client_ctx, &client_ctx.opened, 2);
 	wait_channel_counter(&server_ctx, &server_ctx.opened, 2);
 
-	/* Losing BULK must not make the CONTROL lane unusable. */
+	/* BULK 丢失不得使 CONTROL 通道不可用。 */
 	assert(tr_reactor_close(client_bulk) == TR_OK);
 	wait_channel_counter(&client_ctx, &client_ctx.channel_events, 1);
 	wait_channel_lane_down(client_channel, TR_LANE_BULK);
@@ -2538,7 +2526,7 @@ static void test_channel_split_lane_isolation(void)
 	assert(tr_stream_send(bulk_stream, control_payload) == TR_ERR_STALE);
 	tr_buffer_release(control_payload);
 
-	/* BULK can be replaced independently without disturbing CONTROL. */
+	/* BULK 可独立替换，不干扰 CONTROL。 */
 	make_tcp_pair(&cbfd2, &sbfd2);
 	assert(tr_reactor_adopt_fd(reactor, cbfd2, &client_bulk2) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, sbfd2, &server_bulk2) == TR_OK);
@@ -2603,10 +2591,8 @@ static int channel_begin_drain_and_race_open_on_owner(void *arg)
 	struct channel_drain_open_race_probe *probe =
 		(struct channel_drain_open_race_probe *)arg;
 
-	/*
-	 * Both operations execute in one owner turn. The peer cannot receive the
-	 * GOAWAY until this callback returns, so its STREAM_OPEN deterministically
-	 * represents an open that raced the drain barrier.
+	/* 两个操作在同一所有者处理轮次执行。此回调返回前对端无法收到 GOAWAY，
+	 * 因此其 STREAM_OPEN 确定性地代表与排空屏障竞争的打开操作。
 	 */
 	probe->drain_ret = tr_channel_begin_drain(probe->draining);
 	probe->open_ret = tr_stream_open(
@@ -2800,10 +2786,9 @@ static void test_channel_graceful_drain(void)
 	server_stream = server_ctx.last_stream;
 	pthread_mutex_unlock(&server_ctx.lock);
 
-	/*
-	 * drain 与 reconnect disable 现在是同一个 Reactor owner transaction。
-	 * 先启用 reconnect，再进入 drain；drain 返回后任何重新 enable 都必须
-	 * 看到 local_draining barrier。
+	/* 排空与禁用重连现在是同一个反应器所有者事务。
+	 * 先启用重连，再进入排空；排空返回后任何重新启用都必须
+	 * 看到 local_draining 屏障。
 	 */
 	memset(&reconnect_config, 0, sizeof(reconnect_config));
 	reconnect_config.ipv4_address = "127.0.0.1";
@@ -2825,10 +2810,9 @@ static void test_channel_graceful_drain(void)
 	assert(tr_channel_enable_client_reconnect(
 		       client_channel, &reconnect_config) == TR_ERR_CLOSED);
 
-	/*
-	 * The raced peer OPEN was already submitted before peer GOAWAY could be
-	 * observed. The draining endpoint must reject it without allocating a local
-	 * Stream; the peer receives an ordinary remote-close for its local slot.
+	/* 在对端能观察到 GOAWAY 前，并发对端 OPEN 已被提交。
+	 * 排空中的端点必须拒绝它，不分配本地流；
+	 * 对端为其本地槽位收到普通远端关闭通知。
 	 */
 	wait_channel_counter(&server_ctx, &server_ctx.remote_closed, 1U);
 	assert(tr_channel_active_streams(client_channel) == 1U);
@@ -2855,7 +2839,7 @@ static void test_channel_graceful_drain(void)
 	assert(tr_stream_open(server_channel, TR_LANE_CONTROL, &rejected) ==
 	       TR_ERR_CLOSED);
 
-	/* Existing streams remain usable while the Channel drains. */
+	/* Channel 排空期间，已有流仍可用。 */
 	assert(tr_buffer_pool_init(&tx_pool, 1, 64) == TR_OK);
 	assert(tr_buffer_acquire(&tx_pool, 32, &payload) == TR_OK);
 	memcpy(payload->data, "drain-still-flows", 17);
@@ -2865,16 +2849,13 @@ static void test_channel_graceful_drain(void)
 	wait_for_pool_full(&tx_pool, 1);
 
 	assert(tr_channel_begin_drain(server_channel) == TR_OK);
-	/*
-	 * Active Stream keeps the condvar predicate false; a timed wait proves the
-	 * blocking path without relying on scheduler timing.
+	/* 活跃流使条件变量谓词为假；限时等待证明阻塞路径，
+	 * 不依赖调度器时序。
 	 */
 	assert(tr_channel_wait_drained(client_channel, 10U) == TR_AGAIN);
 
-	/*
-	 * Race waiter registration against both Stream closes. If close wins,
-	 * waiter observes the already-drained predicate; if registration wins, the
-	 * final Stream free broadcasts. Both orderings must be lossless.
+	/* 让等待者注册与两侧流关闭竞争。若关闭先发生，等待者观察到已排空谓词；
+	 * 若注册先发生，最终流释放会广播。两种顺序都不得丢失通知。
 	 */
 	memset(&drain_wait, 0, sizeof(drain_wait));
 	drain_wait.channel = client_channel;
@@ -2933,9 +2914,8 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
-	/*
-	 * Two slots let setup adopt both fds. The gated phase below fills both
-	 * slots deterministically before drain.
+	/* 两个槽位使设置过程可以接管两个 fd。
+	 * 下方受门禁控制的阶段在排空前确定性填满两个槽位。
 	 */
 	reactor_config.command_capacity = 2U;
 	reactor_config.tx_item_capacity = 8U;
@@ -2977,19 +2957,15 @@ static void test_channel_drain_goaway_backpressure(void)
 		       channel_drain_backpressure_thread, &probe) == 0);
 	wait_channel_drain_probe(&probe, &probe.owner_entered);
 
-	/*
-	 * Owner is blocked. A pre-barrier STREAM_OPEN reserves the sole ordinary
-	 * CONTROL TX item; STREAM_OPEN + RESUME_RX fill the two-slot command ring.
-	 * begin_drain() must still succeed, but GOAWAY may not overtake the
-	 * already-admitted OPEN.
+	/* 所有者被阻塞。屏障前的 STREAM_OPEN 预留唯一普通 CONTROL 发送项；
+	 * STREAM_OPEN + RESUME_RX 填满双槽命令环形队列。
+	 * begin_drain() 仍必须成功，但 GOAWAY 不得越过已获准 OPEN。
 	 */
 	assert(tr_stream_open(
 		       client_channel, TR_LANE_CONTROL,
 		       &prebarrier_stream) == TR_OK);
-	/*
-	 * STREAM_OPEN used one command slot and the sole ordinary CONTROL TX item.
-	 * RESUME_RX uses no TX item and fills the second command slot while owner
-	 * remains blocked.
+	/* STREAM_OPEN 使用一个命令槽位与唯一普通 CONTROL 发送项。
+	 * RESUME_RX 不使用发送项，在所有者仍阻塞时填满第二个命令槽位。
 	 */
 	assert(tr_reactor_resume_rx(client_conn) == TR_OK);
 
@@ -3001,10 +2977,9 @@ static void test_channel_drain_goaway_backpressure(void)
 	assert(pthread_join(owner_thread, NULL) == 0);
 	assert(probe.drain_ret == TR_OK);
 
-	/*
-	 * Command sequence barrier preserves the pre-barrier OPEN as a FIFO
-	 * predecessor. The peer must observe OPENED before GOAWAY, while GOAWAY
-	 * itself requires no second begin_drain()/poll retry.
+	/* 命令序号屏障把屏障前的 OPEN 保留为 FIFO 前驱。
+	 * 对端必须先观察 OPENED，再观察 GOAWAY，
+	 * 且 GOAWAY 自身不需要第二次 begin_drain() 或轮询重试。
 	 */
 	wait_channel_counter(&server_ctx, &server_ctx.opened, 1U);
 	wait_channel_counter(&server_ctx, &server_ctx.channel_goaway, 2U);
@@ -3015,11 +2990,9 @@ static void test_channel_drain_goaway_backpressure(void)
 	pthread_mutex_unlock(&server_ctx.lock);
 	assert(tr_channel_wait_drained(client_channel, 0U) == TR_AGAIN);
 
-	/*
-	 * Do not turn test cleanup into another admission requirement:
-	 * STREAM_CLOSE intentionally remains ordinary CONTROL traffic and may
-	 * observe backpressure here. Reactor hard teardown owns the remaining
-	 * Stream/Connection cleanup after the ordering invariant is proven.
+	/* 不要让测试清理成为另一个准入要求：STREAM_CLOSE 有意保持为
+	 * 普通 CONTROL 流量，此处可能遇到背压。排序不变量被证明后，
+	 * 由反应器强制拆除负责剩余流与连接清理。
 	 */
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
@@ -3193,7 +3166,7 @@ static void test_rpc_method_index_collisions(void)
 	int client_fd;
 	int server_fd;
 
-	/* max_methods=3 -> 8 buckets; force one linear-probe cluster. */
+	/* max_methods=3 -> 8 个桶；强制形成一个线性探测簇。 */
 	assert((tr_rpc_method_hash(1U, method_ids[0]) & 7U) ==
 	       (tr_rpc_method_hash(1U, method_ids[1]) & 7U));
 	assert((tr_rpc_method_hash(1U, method_ids[1]) & 7U) ==
@@ -3270,7 +3243,7 @@ static void test_rpc_method_index_collisions(void)
 					      &handler_args[i]) == TR_OK);
 	}
 
-	/* Duplicate detection still wins even when the table is at method limit. */
+	/* 即使表达到方法上限，重复检测仍优先。 */
 	assert(tr_rpc_register_method(client_rpc, &methods[1], NULL, NULL) ==
 	       TR_ERR_STATE);
 	assert(tr_rpc_register_method(server_rpc, &methods[1],
@@ -3425,9 +3398,8 @@ static void test_rpc_deadline_heap_order(void)
 	assert(heap_count == 3U);
 	assert(memcmp(&root, &short_call, sizeof(root)) == 0);
 
-	/*
-	 * The long Call is a non-root, non-last heap entry. Removing it forces
-	 * the last entry into the hole and exercises the local heap repair path.
+	/* 长 Call 是非根、非末尾堆条目。移除它会迫使末尾条目进入空位，
+	 * 测试局部堆修复路径。
 	 */
 	assert(tr_rpc_call_cancel(long_call) == TR_OK);
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
@@ -3634,7 +3606,7 @@ static void test_rpc_call_slot_reuse(void)
 	assert(memcmp(&root, &first, sizeof(root)) == 0);
 	assert(root_deadline != 0U);
 
-	/* max_calls=1: the free-call list is empty while the first Call is live. */
+	/* max_calls=1：首个 Call 存活时，空闲 Call 链表为空。 */
 	assert(tr_rpc_unary_call_ex(client_rpc, 91U, 1U, &request,
 				   &call_options, rpc_slot_reuse_result,
 				   &ctx, &rejected) == TR_AGAIN);
@@ -3675,7 +3647,7 @@ static void test_rpc_call_slot_reuse(void)
 	assert(tr_rpc_deadline_heap_snapshot(client_rpc, &heap_count, &root,
 					     &root_deadline) == TR_OK);
 	assert(heap_count == 0U);
-	/* max_calls=1 guarantees slot reuse; the opaque capability must rotate. */
+	/* max_calls=1 保证槽位复用；不透明能力凭证必须轮换。 */
 	assert(memcmp(&second, &first, sizeof(second)) != 0);
 	assert(tr_rpc_call_is_cancelled(first, NULL) == TR_ERR_STALE);
 
@@ -3727,10 +3699,9 @@ static int accept_reconnect_connection(int listener)
 	return fd;
 }
 
-/*
- * Both split lanes share one reconnect timer and Connector. Disconnecting
- * both physical connections in the same owner window must still reconnect
- * CONTROL and then BULK, rather than leaving one lane permanently down.
+/* 两条分离通道共享一个重连定时器与 Connector。在同一所有者窗口
+ * 断开两个物理连接，仍必须先重连 CONTROL 再重连 BULK，
+ * 而不是让某条通道永久断开。
  */
 static void test_channel_automatic_reconnect_split_simultaneous(void)
 {
@@ -3826,9 +3797,8 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
 	assert(tr_channel_enable_client_reconnect(client_channel,
 						  &reconnect_config) == TR_OK);
 
-	/*
-	 * Close both old client connections back-to-back. The reconnect delay
-	 * leaves both DOWN notifications visible before the first retry starts.
+	/* 连续关闭两个旧客户端连接。重连延迟使首次重试开始前，
+	 * 两个 DOWN 通知都可见。
 	 */
 	close_probe.control = client_control;
 	close_probe.bulk = client_bulk;
@@ -3865,7 +3835,7 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
 	assert(stats.reconnect_attempts >= 2U);
 	assert(stats.reconnect_successes >= 2U);
 
-	/* Teardown must quiesce the shared timer/Connector after both lanes recover. */
+	/* 两条通道恢复后，拆除必须使共享定时器与 Connector 静止。 */
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	tr_socket_close(&control_listener);
 	tr_socket_close(&bulk_listener);
@@ -3877,10 +3847,9 @@ static void test_channel_automatic_reconnect_split_simultaneous(void)
 	destroy_channel_test_ctx(&client_ctx);
 }
 
-/*
- * Keep CONTROL unreachable while BULK's listener is available. With fixed
- * CONTROL priority, BULK would starve forever; the shared Connector must
- * offer the other down lane a turn after each failed attempt.
+/* 保持 CONTROL 不可达，而 BULK 监听器可用。固定 CONTROL 优先级
+ * 会使 BULK 永久饥饿；共享 Connector 必须在每次尝试失败后，
+ * 给另一条断开通道一个轮次。
  */
 static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lane, int both_unreachable)
 {
@@ -3961,7 +3930,7 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 	assert(tr_channel_enable_client_reconnect(client_channel,
 						  &reconnect_config) == TR_OK);
 
-	/* Keep one port unreachable while the opposite lane is recoverable. */
+	/* 保持一个端口不可达，而另一条通道可恢复。 */
 	if (both_unreachable || failing_lane == TR_LANE_CONTROL)
 		tr_socket_close(&control_listener);
 	if (both_unreachable || failing_lane == TR_LANE_BULK)
@@ -3974,8 +3943,8 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 	if (both_unreachable) {
 		unsigned i;
 
-		/* No listener is reachable. Both retry budgets must keep making
-		 * bounded progress without introducing a busy loop or a worker.
+		/* 没有监听器可达。两个重试预算都必须持续取得有界进展，
+		 * 不引入忙循环或工作线程。
 		 */
 		for (i = 0; i < 5000U; ++i) {
 			assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
@@ -4004,11 +3973,11 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 		wait_channel_lane_up(server_channel, healthy_lane);
 		assert(tr_channel_get_lane_state(client_channel, failing_lane,
 						 &state) == TR_OK);
-		/* An unreachable lane may be DOWN or actively RECONNECTING. */
+		/* 不可达通道可能为 DOWN，或正处于 RECONNECTING。 */
 		assert(state != TR_CHANNEL_LANE_UP);
 		assert(tr_channel_get_stats(client_channel, &stats) == TR_OK);
-		/* The healthy lane may connect on its first turn; the opposite
-		 * failure need not have completed before it reaches UP.
+		/* 健康通道可能在首次轮次就连接；
+		 * 它到达 UP 前，另一侧失败不必已完成。
 		 */
 		assert(stats.reconnect_attempts >= 1U);
 		assert(stats.reconnect_successes >= 1U);
@@ -4026,10 +3995,8 @@ static void test_channel_reconnect_one_lane_unreachable(enum tr_lane failing_lan
 	destroy_channel_test_ctx(&client_ctx);
 }
 
-/*
- * An owner timer-arm failure has no future wakeup. Verify that reconnect
- * becomes explicitly disabled, publishes a terminal error, and retains its
- * callback-source handles until the normal disable barrier succeeds.
+/* 所有者定时器设置失败后没有未来唤醒。验证重连被显式禁用、
+ * 发布终止错误，并保留回调源句柄直到正常禁用屏障成功。
  */
 static void test_channel_reconnect_timer_arm_failure(void)
 {
@@ -4101,9 +4068,8 @@ static void test_channel_reconnect_timer_arm_failure(void)
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 
-	/*
-	 * Enabling on a down Channel immediately arms the retry. A second
-	 * injected failure must be returned to the caller and rolled back.
+	/* 在断开的 Channel 上启用重连会立即设置重试定时。
+	 * 第二次注入失败必须返回给调用者并回滚。
 	 */
 	atomic_store(&fail_reconnect_timer_arm, 1U);
 	assert(tr_channel_enable_client_reconnect(client_channel,
@@ -4202,9 +4168,8 @@ static void test_channel_automatic_reconnect_shared(void)
 	assert(tr_channel_set_reconnect_tcp_nodelay(client_channel, 1) == TR_OK);
 	assert(tr_channel_enable_client_reconnect(client_channel,
 						  &reconnect_config) == TR_OK);
-	/*
-	 * reconnect socket policy 已由 Reactor owner 串行化；enable 发布后不允许
-	 * application thread 再修改本次 reconnect session 的 socket policy。
+	/* 重连套接字策略已由反应器所有者串行化；启用发布后不允许
+	 * 应用线程再修改本次重连会话的套接字策略。
 	 */
 	assert(tr_channel_set_reconnect_tcp_nodelay(client_channel, 0) ==
 	       TR_ERR_STATE);
@@ -4266,7 +4231,7 @@ static void test_channel_automatic_reconnect_shared(void)
 	wait_for_pool_full(&tx_pool, 1);
 
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
-	/* Terminal reconnect teardown is idempotent after all sources are detached. */
+	/* 全部事件源解绑后，终止重连拆除是幂等的。 */
 	assert(tr_channel_disable_client_reconnect(client_channel) == TR_OK);
 	tr_socket_close(&listener);
 	assert(tr_reactor_stop(reactor) == TR_OK);
@@ -4760,7 +4725,7 @@ static void test_rpc_connection_replacement_semantics(void)
 				 rpc_reconnect_result, &ctx, &call) == TR_OK);
 	wait_rpc_reconnect_counter(&ctx, &ctx.server_calls, 1);
 
-	/* In-flight RPC is not transparently replayed across a TCP replacement. */
+	/* 进行中的 RPC 不会跨 TCP 替换透明重放。 */
 	assert(tr_reactor_close(client_conn) == TR_OK);
 	wait_rpc_reconnect_counter(&ctx, &ctx.client_results, 1);
 	pthread_mutex_lock(&ctx.lock);
@@ -4784,7 +4749,7 @@ static void test_rpc_connection_replacement_semantics(void)
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 
-	/* New Calls use the replacement Connection and work normally. */
+	/* 新 Call 使用替代 Connection，正常工作。 */
 	request.data = (const uint8_t *)"second";
 	request.len = 6;
 	assert(tr_rpc_unary_call(client_rpc, 77, 1, &request,
@@ -5008,7 +4973,7 @@ static void rpc_stream_server_half_close(struct tr_rpc_call_handle call,
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 
-	/* Server response termination must go through final STATUS, not close_send. */
+	/* 服务端响应终止必须经过最终 STATUS，而不是 close_send。 */
 	assert(tr_rpc_call_close_send(call) == TR_ERR_INVALID);
 	assert(tr_rpc_call_finish(call, 99) == TR_ERR_INVALID);
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
@@ -5609,7 +5574,7 @@ static void test_rpc_client_and_server_stream_shapes(void)
 	wait_rpc_shape_counter(&client_stream_ctx, &client_stream_ctx.opened,
 			       1);
 
-	/* V1 has no explicit Method-open envelope: MANY request is 1..N. */
+	/* V1 没有显式 Method 打开封装：MANY 请求为 1..N。 */
 	assert(tr_rpc_call_close_send(call) == TR_ERR_STATE);
 	message.data = (const uint8_t *)"many-request";
 	message.len = 12;
@@ -6864,7 +6829,7 @@ static void test_channel_keepalive_and_diagnostics(void)
 	assert(stats.control_last_rtt_ns > 0U);
 	assert(tr_channel_disable_keepalive(client_channel) == TR_OK);
 
-	/* Suppress peer PONG generation to exercise the timeout path. */
+	/* 抑制对端生成 PONG，以测试超时路径。 */
 	assert(tr_reactor_set_handler(server_conn, NULL, NULL, NULL) == TR_OK);
 	keepalive.timeout_ms = 40U;
 	assert(tr_channel_enable_keepalive(client_channel, &keepalive) ==
@@ -7098,10 +7063,9 @@ static void test_client_server_facade_unary(void)
 	assert(memcmp(ctx.response, "facade-pong", 11U) == 0);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/*
-	 * max_peers=1 verifies that a disconnected peer is reclaimed at runtime.
-	 * Reuse one client object across transient connect rejection as well: a
-	 * failed connect attempt must roll all session state back to INIT.
+	/* max_peers=1 验证已断开对端在运行时回收。
+	 * 也跨短暂连接拒绝复用同一客户端对象：
+	 * 连接尝试失败必须把全部会话状态回滚到 INIT。
 	 */
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
@@ -7184,7 +7148,7 @@ static void test_client_server_facade_unary(void)
 		       client, &client_semantic) == TR_OK);
 	assert(tr_server_get_rpc_semantic_stats(
 		       server, &server_semantic) == TR_OK);
-	/* client is the second Client object; Server aggregates the retired first peer. */
+	/* client 是第二个 Client 对象；Server 聚合已退役的首个对端。 */
 	assert(client_semantic.calls_started == 1U);
 	assert(client_semantic.calls_finished == 1U);
 	assert(client_semantic.calls_inflight == 0U);
@@ -7535,10 +7499,9 @@ static void test_client_runtime_thread_bound(void)
 	assert(tr_client_create_with_tuning(
 		       &client_config, &client_tuning, &client) == TR_OK);
 
-	/*
-	 * Client create 只启动 Reactor。connect 之后只允许新增一个 RPC
-	 * executor worker；deadline 与 keepalive 都是 Reactor-local timer，
-	 * 不能再额外创建 timer thread。
+	/* 客户端创建只启动反应器。连接之后只允许新增一个 RPC
+	 * 执行器工作线程；截止时间与保活都是反应器本地定时器，
+	 * 不能再额外创建定时器线程。
 	 */
 	before = test_linux_thread_count();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
@@ -7599,10 +7562,9 @@ static void test_server_runtime_thread_bound(void)
 				 &client_reactor) == TR_OK);
 	assert(tr_reactor_start(client_reactor) == TR_OK);
 
-	/*
-	 * baseline 已包含 Server Reactor/accept/reaper/shared executor 和
-	 * Client Reactor。后续只增加 peer/Channel，不应再按 peer 数量创建
-	 * deadline/keepalive thread。
+	/* 基线已包含服务端反应器、接受、回收、共享执行器与
+	 * 客户端反应器。后续只增加对端或 Channel，不应再按对端数量
+	 * 创建截止时间或保活线程。
 	 */
 	before = test_linux_thread_count();
 
@@ -7717,9 +7679,8 @@ static void test_server_shared_rpc_executor(void)
 	assert(ctx.active == 2U);
 	assert(ctx.max_active == 2U);
 
-	/*
-	 * Both shared workers are blocked above. No third handler may start until
-	 * one of those two workers is released.
+	/* 两个共享工作线程都在上方被阻塞。
+	 * 其中一个被放行前，不得启动第三个处理函数。
 	 */
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 1;
@@ -7869,10 +7830,8 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	assert(ctx.retained_count == 1U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/*
-	 * Disconnect the peer while application ownership still holds the RX
-	 * descriptor.  The retired Endpoint/Channel must stay alive solely because
-	 * of the message lifetime pin.
+	/* 应用所有权仍持有接收描述符时断开对端。
+	 * 退役的 Endpoint/Channel 必须仅因消息生命周期保护而保持存活。
 	 */
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
@@ -7996,10 +7955,8 @@ static void test_server_reaping_budget_defers_detach(void)
 	assert(stats.peers_current == 0U);
 	assert(stats.peers_reaping_current == 1U);
 
-	/*
-	 * Slot reuse remains allowed while the first Endpoint is retiring. The
-	 * second disconnected peer must stay published because the shard already
-	 * uses its only retiring-object slot.
+	/* 首个 Endpoint 退役期间仍允许槽位复用。第二个断开的对端
+	 * 必须保持发布，因为分片已用掉唯一退役对象槽位。
 	 */
 	assert(tr_client_create(&client_config, &second) == TR_OK);
 	assert(tr_client_connect(second, "127.0.0.1", port) == TR_OK);
@@ -8025,9 +7982,8 @@ static void test_server_reaping_budget_defers_detach(void)
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/*
-	 * The first finalizer returns one retiring slot and signals peer_event_fd.
-	 * Owner retry then detaches/finalizes the already-disconnected second peer.
+	/* 第一个收尾器归还一个退役槽位并通知 peer_event_fd。
+	 * 所有者重试随后解绑并收尾已断开的第二个对端。
 	 */
 	memset(&stats, 0, sizeof(stats));
 	for (attempt = 0; attempt < 1000U; ++attempt) {
@@ -8126,11 +8082,9 @@ static void test_server_peer_refcount_drain(void)
 	assert(ctx.active == 1U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/*
-	 * Close the first peer while its server callback still owns an Endpoint
-	 * task reference. Reactor owner detach may immediately retire/reuse the
-	 * peer slot, but last-ref finalization must keep detached Endpoint/Channel
-	 * state alive until this task releases its strong ref.
+	/* 首个对端的服务端回调仍拥有 Endpoint 任务引用时关闭该对端。
+	 * 反应器所有者解绑可立即退役或复用对端槽位，但最后引用收尾
+	 * 必须使已解绑 Endpoint/Channel 状态保持存活，直到此任务释放强引用。
 	 */
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
@@ -8154,7 +8108,7 @@ static void test_server_peer_refcount_drain(void)
 				    shared_executor_test_result, &ctx,
 				    &call) == TR_OK);
 
-	/* The only shared worker is still occupied by the retired peer task. */
+	/* 唯一共享工作线程仍被已退役对端任务占据。 */
 	{
 		struct timespec pause_time;
 		pause_time.tv_sec = 0;
@@ -8320,12 +8274,12 @@ static void test_refcount_semantics(void)
 	assert(tr_refcount_put(&ref) == 1);
 	assert(tr_refcount_read(&ref) == 0U);
 
-	/* Dead objects cannot be resurrected or decremented below zero. */
+	/* 死亡对象不能复活，也不能递减到零以下。 */
 	assert(tr_refcount_get(&ref) == TR_ERR_STATE);
 	assert(tr_refcount_get_unless_zero(&ref) == 0);
 	assert(tr_refcount_put(&ref) == TR_ERR_STATE);
 
-	/* Invalid and saturation-adjacent initial states are explicit. */
+	/* 无效与接近饱和的初始状态须显式表达。 */
 	assert(tr_refcount_init(&ref, 0U) == TR_ERR_INVALID);
 	assert(tr_refcount_init(&ref, UINT32_MAX) == TR_ERR_INVALID);
 	assert(tr_refcount_init(&ref, UINT32_MAX - 1U) == TR_OK);
@@ -8366,9 +8320,8 @@ static void test_scope_cleanup_ownership(void)
 	tr_socket_close(&owned_fd);
 	assert(owned_fd == -1);
 
-	/*
-	 * Scope cleanup is LIFO. Resource declarations must therefore follow
-	 * dependency order: dependencies first, dependents later.
+	/* 作用域清理按后进先出顺序执行。因此资源声明必须遵循依赖顺序：
+	 * 被依赖资源在前，依赖方在后。
 	 */
 	{
 		struct cleanup_order_probe first

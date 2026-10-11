@@ -19,9 +19,8 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * Inject failure only on the server's Transport STREAM_CLOSE. Its final RPC
- * STATUS and all unrelated control frames must continue to flow normally.
+/* 只在服务端传输 STREAM_CLOSE 上注入失败。其最终 RPC STATUS
+ * 以及所有无关控制帧都必须继续正常流动。
  */
 #define CALL_COUNT 3U
 
@@ -213,7 +212,7 @@ on_server_message(struct tr_rpc_call_handle call,
 
 	assert(message && message->bytes.len == 4U);
 	assert(memcmp(message->bytes.data, "work", 4U) == 0);
-	/* This must return success even when the following close is congested. */
+	/* 即使后续关闭拥塞，这里也必须返回成功。 */
 	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) ==
 	       (atomic_load(&scheduling_fault) == 3 ? TR_ERR_STALE :
 		(atomic_load(&scheduling_fault) ? TR_ERR_SYS : TR_OK)));
@@ -286,7 +285,7 @@ static void start_and_finish(struct tr_rpc_endpoint *endpoint,
 	callbacks.arg = arg;
 	assert(tr_rpc_call_start(endpoint, 1U, method_id, &callbacks, out) == TR_OK);
 	wait_count(arg->ctx, &arg->ctx->opened, arg->index + 1U);
-	/* 同一 owner turn 提交请求与半关闭，隔离本测试的准入/重试边界。 */
+	/* 同一所有者处理轮次提交请求与半关闭，隔离本测试的准入或重试边界。 */
 	assert(tr_reactor_call(arg->ctx->reactor, send_and_close, out) == TR_OK);
 }
 
@@ -414,7 +413,7 @@ static void run_case(int fault)
 		enum tr_channel_lane_state state;
 		unsigned lane;
 
-		/* 两条物理连接均存活；错 lane 的首个 REQUEST 不得创建 Call。 */
+		/* 两条物理连接均存活；错误通道的首个 REQUEST 不得创建 Call。 */
 		atomic_store(&scheduling_fault, fault);
 		start_and_finish(client_rpc, &args[0], &calls[0], 1U);
 		wait_count(&ctx, &ctx.finished, 1U);
@@ -428,7 +427,7 @@ static void run_case(int fault)
 			assert(tr_channel_get_lane_state(client_channel, (enum tr_lane)lane,
 				&state) == TR_OK && state == TR_CHANNEL_LANE_UP);
 		}
-		/* 在服务端声明的另一条 lane 发起匹配方法，证明未被误关。 */
+		/* 在服务端声明的另一条通道发起匹配方法，证明未被误关。 */
 		method.method_id = 2U;
 		assert(tr_rpc_register_method(client_rpc, &method, NULL, NULL) == TR_OK);
 		assert(tr_rpc_register_stream_method(server_rpc, &method, &handlers, &ctx) == TR_OK);
@@ -446,7 +445,7 @@ static void run_case(int fault)
 		struct tr_rpc_semantic_stats stats;
 		enum tr_channel_lane_state lane_state;
 
-		/* STATUS 已提交后的调度失败必须退休所属 lane。 */
+		/* STATUS 已提交后的调度失败必须退役所属通道。 */
 		atomic_store(&scheduling_fault, fault);
 		atomic_store(&fail_server_close, 1U);
 		start_and_finish(client_rpc, &args[0], &calls[0], 1U);
@@ -466,7 +465,7 @@ static void run_case(int fault)
 		goto cleanup;
 	}
 
-	/* Normal completion: four failed close admissions, then auto recovery. */
+	/* 正常完成：四次关闭准入失败，然后自动恢复。 */
 	atomic_store_explicit(&fail_server_close, 4U, memory_order_relaxed);
 	start_and_finish(client_rpc, &args[0], &calls[0], 1U);
 	wait_count(&ctx, &ctx.messages, 1U);
@@ -476,7 +475,7 @@ static void run_case(int fault)
 	wait_empty(client_channel, server_channel);
 	assert(ctx.finished_status[0] == TR_RPC_STATUS_OK);
 
-	/* Keep failing, prove bounded timer progress without spinning or flush. */
+	/* 持续失败，证明定时器进展有界，无需自旋或刷新。 */
 	atomic_store_explicit(&fail_server_close, 100U, memory_order_relaxed);
 	attempts_before = atomic_load_explicit(&close_attempts,
 					      memory_order_relaxed);
@@ -494,9 +493,8 @@ static void run_case(int fault)
 	wait_empty(client_channel, server_channel);
 	assert(ctx.finished_status[1] == TR_RPC_STATUS_OK);
 
-	/*
-	 * Disconnect with an in-flight close retry; the Reactor callback must
-	 * retire the Call and prevent a stale timer from touching the Stream.
+	/* 关闭重试进行中时断开；反应器回调必须退役 Call，
+	 * 防止陈旧定时器接触流。
 	 */
 	atomic_store_explicit(&fail_server_close, 100U, memory_order_relaxed);
 	attempts_before = atomic_load_explicit(&close_attempts,

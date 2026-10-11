@@ -251,7 +251,7 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	send_message(second_call, (unsigned char)'c');
 	wait_for_executor_state(&context, 3U, 1U, 1U);
 
-	/* 单分片停机依次等待 Reactor 所有者线程和 RPC 执行组工作线程。 */
+	/* 单分片停机依次等待反应器所有者线程和 RPC 执行组工作线程。 */
 	pthread_mutex_lock(&join_watch_lock);
 	join_watch_context = &context;
 	join_watch_count = 0U;

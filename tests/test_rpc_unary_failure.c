@@ -23,7 +23,7 @@
 #define CASE_COUNT 5U
 #define POOL_SIZE 64U
 
-/* Test-only fault injection: never compiled into trcore. */
+/* 仅供测试的故障注入：绝不编译进 trcore。 */
 static _Thread_local int fail_worker_completion_malloc;
 static _Atomic(struct tr_buffer_pool *) server_pool;
 static _Atomic uint32_t fail_server_encoding;
@@ -286,16 +286,16 @@ static int on_unary(struct tr_rpc_call_handle call,
 
 	switch (id) {
 	case 0:
-		/* Fail the worker's first malloc after handler completion. */
+		/* 使处理函数完成后工作线程的首次 malloc 失败。 */
 		fail_worker_completion_malloc = 1;
 		break;
 	case 1:
-		/* Normal response fails, then empty INTERNAL response succeeds. */
+		/* 正常响应失败，然后空 INTERNAL 响应成功。 */
 		atomic_store_explicit(&fail_server_encoding, 1U,
 				      memory_order_relaxed);
 		break;
 	case 2:
-		/* Neither normal nor error RESPONSE fits the available pool. */
+		/* 正常 RESPONSE 与错误 RESPONSE 都无法放入可用池。 */
 		atomic_store_explicit(&fail_server_encoding, 2U,
 				      memory_order_relaxed);
 		atomic_store_explicit(&fail_server_close, 3U,
@@ -463,9 +463,9 @@ static void run_case(int fault)
 	if (fault == 4) {
 		const struct tr_rpc_bytes request = { (const uint8_t *)"3", 1U };
 
-		/*
-		 * 第一轮半关闭背压正常 arm；完成任务在同一 owner turn 归还引用。
-		 * 第二轮由 timer 驱动，注入 STALE 后必须安全退休无 task_ref 的槽。
+		/* 第一轮半关闭背压正常设置定时；完成任务在同一所有者处理轮次归还引用。
+		 * 第二轮由定时器驱动，注入 STALE 后必须安全退役无 task_ref
+		 * 的槽位。
 		 */
 		assert(atomic_load(&fault_close_count) == 2U);
 		atomic_store(&scheduling_fault, 0);
@@ -480,8 +480,7 @@ static void run_case(int fault)
 			server_conn) == TR_OK);
 		assert(tr_channel_wait_ready(client_channel, TR_LANE_CONTROL, 5000U) == TR_OK);
 		assert(tr_channel_wait_ready(server_channel, TR_LANE_CONTROL, 5000U) == TR_OK);
-		/*
-		 * 顺序 allocate/free 一个 Call 无法发现 free-list 自环。两个处理器
+		/* 顺序分配并释放一个 Call 无法发现空闲链表自环。两个处理器
 		 * 都停在门闩上，确保客户端与服务端各有两个不同的存活槽位。
 		 */
 		pthread_mutex_lock(&ctx.lock);

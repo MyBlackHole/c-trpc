@@ -158,7 +158,7 @@ int __wrap_epoll_wait(int fd, struct epoll_event *events, int count, int timeout
 	for (i = 0; i < ret && probe && probe->wait_writable; ++i) {
 		if (events[i].data.u64 != probe->event_token)
 			continue;
-		/* 真实 epoll 返回 Connector token，在分派前推进时钟。 */
+		/* 真实 epoll 返回 Connector 令牌，在分派前推进时钟。 */
 		probe->wait_writable = 0;
 		probe->now_ns = TEST_START_NS + probe->elapsed_ns;
 		probe->fail_clock = probe->fail_progress_clock;
