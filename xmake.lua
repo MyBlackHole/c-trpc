@@ -148,7 +148,8 @@ for _, name in ipairs({"test_bounded_readahead", "test_echo_client_i18n", "test_
         add_undefines("NDEBUG")
         if name == "test_bounded_readahead" then
             -- 仅局部专测拦截接收/解析/轮次边界。
-            add_ldflags("-Wl,--wrap=recv", "-Wl,--wrap=epoll_wait",
+            add_ldflags("-Wl,--wrap=recv", "-Wl,--wrap=__recv_chk",
+                        "-Wl,--wrap=epoll_wait",
                         "-Wl,--wrap=tr_parser_prepare",
                         "-Wl,--wrap=tr_parser_produce",
                         "-Wl,--wrap=tr_command_queue_pop_batch", {force = true})
@@ -254,6 +255,7 @@ for _, name in ipairs({"test_bounded_readahead", "test_echo_client_i18n", "test_
         elseif name == "test_reactor_budget" then
             add_ldflags("-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=sendmsg", "-Wl,--wrap=recv",
+                        "-Wl,--wrap=__recv_chk",
                         "-Wl,--wrap=tr_parser_produce",
                         "-Wl,--wrap=epoll_wait", {force = true})
         elseif name == "test_reactor_source_detach" then

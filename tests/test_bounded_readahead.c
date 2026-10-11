@@ -10,9 +10,11 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -27,6 +29,11 @@ struct context {
 	size_t recv_limit;
 	size_t network_bytes;
 	size_t recv_calls;
+	size_t plain_recv_calls;
+	size_t fortified_recv_calls;
+	unsigned injected_eintr;
+	unsigned injected_eagain;
+	unsigned injected_short_read;
 	size_t produced_bytes;
 	size_t turn_network;
 	size_t turn_produced;
@@ -58,6 +65,8 @@ static struct context *active;
 int __real_epoll_wait(int fd, struct epoll_event *events, int maxevents,
                       int timeout);
 ssize_t __real_recv(int fd, void *buf, size_t len, int flags);
+ssize_t __real___recv_chk(int fd, void *buf, size_t len, size_t buflen,
+                          int flags);
 int __real_tr_parser_prepare(struct tr_parser *parser);
 int __real_tr_parser_produce(struct tr_parser *parser, size_t produced,
                              struct tr_frame *out);
@@ -92,21 +101,33 @@ int __wrap_epoll_wait(int fd, struct epoll_event *events, int maxevents,
 	return __real_epoll_wait(fd, events, maxevents, timeout);
 }
 
-ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
+static ssize_t receive(int fd, void *buf, size_t len, size_t buflen, int flags,
+                       int fortified)
 {
 	struct context *ctx = active;
 	ssize_t n;
 
 	assert(ctx != NULL);
 	ctx->recv_calls++;
+	if (fortified)
+		ctx->fortified_recv_calls++;
+	else
+		ctx->plain_recv_calls++;
 	assert(len <= ctx->byte_budget - ctx->turn_network);
 	if (ctx->errors_left) {
 		errno = ctx->errors_left-- == 2 ? EINTR : EAGAIN;
+		if (errno == EINTR)
+			ctx->injected_eintr++;
+		else
+			ctx->injected_eagain++;
 		return -1;
 	}
-	if (ctx->recv_limit && len > ctx->recv_limit)
+	if (ctx->recv_limit && len > ctx->recv_limit) {
+		ctx->injected_short_read++;
 		len = ctx->recv_limit;
-	n = __real_recv(fd, buf, len, flags);
+	}
+	n = fortified ? __real___recv_chk(fd, buf, len, buflen, flags)
+	              : __real_recv(fd, buf, len, flags);
 	if (n > 0) {
 #ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
 		ctx->direct_produce =
@@ -117,6 +138,20 @@ ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
 		ctx->turn_network += (size_t)n;
 	}
 	return n;
+}
+
+ssize_t __wrap_recv(int fd, void *buf, size_t len, int flags)
+{
+	return receive(fd, buf, len, 0, flags, 0);
+}
+
+ssize_t __wrap___recv_chk(int fd, void *buf, size_t len, size_t buflen,
+                          int flags)
+{
+	/* 先保留真实 Fortify 拒绝；短读或错误注入不能掩盖非法范围。 */
+	if (len > buflen)
+		return __real___recv_chk(fd, buf, len, buflen, flags);
+	return receive(fd, buf, len, buflen, flags, 1);
 }
 
 int __wrap_tr_parser_prepare(struct tr_parser *parser)
@@ -274,6 +309,8 @@ static int check_network(void *arg)
 		        ctx->recv_calls, ctx->network_bytes,
 		        ctx->produced_bytes,
 		        (unsigned long long)stats.total.rx_bytes);
+	assert(ctx->plain_recv_calls + ctx->fortified_recv_calls ==
+	       ctx->recv_calls);
 	assert(stats.total.rx_bytes == ctx->network_bytes);
 	assert(stats.max_per_turn.rx_bytes <= ctx->byte_budget);
 	return TR_OK;
@@ -309,6 +346,11 @@ static void test_sequence(unsigned budget, size_t recv_limit, int faults)
 	wait_counts(&ctx, 10, 1);
 	assert(ctx.status == TR_OK);
 	assert(ctx.frames == 10);
+	assert(ctx.errors_left == 0);
+	if (faults)
+		assert(ctx.injected_eintr == 1 && ctx.injected_eagain == 1);
+	if (recv_limit && recv_limit < budget)
+		assert(ctx.injected_short_read != 0);
 	destroy(&ctx, sockets[0]);
 }
 
@@ -536,6 +578,72 @@ static void test_preface(void)
 	destroy(&ctx, sockets[0]);
 }
 
+static void test_fortified_entry(void)
+{
+	unsigned entry;
+	unsigned fault;
+
+	/* 两个入口都显式验证注入和 MSG_PEEK，不能因编译器选路而静默漏测。 */
+	for (entry = 0; entry < 2; entry++) {
+		struct context ctx = {
+		        .byte_budget = 64, .recv_limit = 3, .errors_left = 2};
+		char bytes[8] = {0};
+		int sockets[2];
+		unsigned call;
+
+		assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0,
+		                  sockets) == 0);
+		active = &ctx;
+		assert(write(sockets[0], "abcdefgh", sizeof(bytes)) ==
+		       sizeof(bytes));
+		for (call = 0; call < 4; call++) {
+			int flags = MSG_DONTWAIT | (call == 2 ? MSG_PEEK : 0);
+			ssize_t n =
+			        entry ? __wrap___recv_chk(sockets[1], bytes,
+			                                  sizeof(bytes),
+			                                  sizeof(bytes), flags)
+			              : __wrap_recv(sockets[1], bytes,
+			                            sizeof(bytes), flags);
+
+			if (call < 2)
+				assert(n == -1 &&
+				       errno == (call == 0 ? EINTR : EAGAIN));
+			else
+				assert(n == 3 && memcmp(bytes, "abc", 3) == 0);
+		}
+		assert(ctx.errors_left == 0 && ctx.recv_calls == 4 &&
+		       ctx.network_bytes == 6);
+		assert(ctx.plain_recv_calls == (entry ? 0U : 4U));
+		assert(ctx.fortified_recv_calls == (entry ? 4U : 0U));
+		assert(ctx.injected_eintr == 1 && ctx.injected_eagain == 1 &&
+		       ctx.injected_short_read == 2);
+		active = NULL;
+		assert(close(sockets[0]) == 0);
+		assert(close(sockets[1]) == 0);
+	}
+
+	/* 每个反例都在无 Reactor 线程的子进程验证真实 Fortify SIGABRT。 */
+	for (fault = 0; fault < 3; fault++) {
+		pid_t child = fork();
+		int status;
+
+		assert(child >= 0);
+		if (child == 0) {
+			struct context invalid = {.byte_budget = 64,
+			                          .recv_limit = 1,
+			                          .errors_left = fault};
+			char tiny[1];
+
+			active = &invalid;
+			(void)__wrap___recv_chk(-1, tiny, 2, sizeof(tiny),
+			                        MSG_DONTWAIT);
+			_exit(77); /* 不能被短读、EINTR 或 EAGAIN 提前返回。 */
+		}
+		assert(waitpid(child, &status, 0) == child);
+		assert(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+	}
+}
+
 static void test_reset(void)
 {
 	struct tr_buffer_pool pool;
@@ -569,6 +677,7 @@ static void test_reset(void)
 
 int main(void)
 {
+	test_fortified_entry();
 	test_reset();
 	test_sequence(65536, 0, 0);
 	test_sequence(37, 0, 1);

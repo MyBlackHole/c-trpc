@@ -175,4 +175,27 @@ pilot请求数small=16000、bulk=4000、mixed=8000，各先A再B。每场景取p
 - 独立reviewer重新核对30样本计数、二进制hash和逐对计算，认可不推广结论。
 - 草稿新增ON release/asan定向CI，ASan保留 `detect_leaks=1:halt_on_error=1`，
   UBSan保留halt-on-error。没有continue-on-error、自动禁用LSan或降低原OFF门禁。
-  远端运行在本报告提交时尚未执行；将来CI通过也不等于性能收益通过。
+  初次报告时远端尚未执行，后续结果见下节；CI通过也不等于性能收益通过。
+
+
+## 远端测试观测兼容性追记
+
+初始草稿远端head `29deccb2a507d68735c799efb89f450f8ad99da6` 的ASan检查
+发生接收观测断言失败。诊断head `0d37876bd1990dfc853eb5f225f5b5b87174e494`
+保留原断言并增加仅失败输出，证实Reactor对象引用 `__recv_chk`，原普通recv
+wrapper调用次数为0；parser产出与Reactor统计分别为18298/18298，预算专测为
+416/416，而旧wrapper观测为0。这是测试未覆盖真实fortified入口的证据，不能
+归因于预读网络计量错误，也不能把新增诊断称为产品修复。
+
+兼容改动仅在两个测试链接目标补充 `__recv_chk` 包装，签名保持glibc ABI：
+`ssize_t (int fd, void *buf, size_t len, size_t buflen, int flags)`。
+原始len超过buflen时先把全部原参数交给 `__real___recv_chk`，不允许短读或
+EINTR/EAGAIN注入掩盖Fortify失败；正常范围才共享测试计量/注入，保留buflen和
+flags，仍调用真实fortified入口，不退回普通recv或裸syscall。没有关闭或更改
+生产Fortify/Sanitizer/LSan，未改生产接收源码、预算或此前性能数据。
+
+两个入口分别断言实际命中、短读、EINTR、EAGAIN和MSG_PEEK行为；独立子进程
+负例在三种注入配置下验证非法长度仍产生SIGABRT。原网络/缓存额度断言不删减。
+本地release OFF及显式 `_FORTIFY_SOURCE=2` 的ASan ON定向验证通过；本地ASan
+仍只用detect_leaks=0验证地址/UB，LSan原环境失败记录不变。远端保持detect_leaks=1，
+此兼容修复的远端结果需继续按PR精确head检查，不能提前宣称通过。

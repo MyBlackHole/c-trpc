@@ -49,6 +49,8 @@ struct test_ctx {
 	size_t turn_tx;
 	uint64_t observed_rx;
 	uint64_t recv_wrapper_calls;
+	uint64_t recv_plain_calls;
+	uint64_t recv_chk_calls;
 	uint64_t recv_wrapper_bytes;
 	uint64_t produced_bytes;
 	uint64_t observed_tx;
@@ -79,6 +81,8 @@ size_t __real_tr_command_queue_pop_batch(struct tr_command_queue *queue,
 					struct tr_command *out, size_t max);
 ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
 ssize_t __real_recv(int fd, void *buffer, size_t len, int flags);
+ssize_t __real___recv_chk(int fd, void *buffer, size_t len, size_t buflen,
+                          int flags);
 int __real_tr_parser_produce(struct tr_parser *parser, size_t produced,
 			      struct tr_frame *frame);
 int __real_epoll_wait(int fd, struct epoll_event *events, int max, int timeout);
@@ -132,28 +136,43 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 	return n;
 }
 
-ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
+static ssize_t receive(int fd, void *buffer, size_t len, size_t buflen,
+                       int flags, int fortified)
 {
+	ssize_t n;
+
 	if (active && active->monitor) {
 		active->recv_wrapper_calls++;
+		if (fortified)
+			active->recv_chk_calls++;
+		else
+			active->recv_plain_calls++;
 		assert(len <= active->byte_budget - active->turn_rx);
 	}
-#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
-	ssize_t n = __real_recv(fd, buffer, len, flags);
-
+	n = fortified ? __real___recv_chk(fd, buffer, len, buflen, flags)
+	              : __real_recv(fd, buffer, len, flags);
 	if (active && active->monitor && n > 0) {
+		active->recv_wrapper_bytes += (uint64_t)n;
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
 		active->turn_rx += (size_t)n;
 		active->observed_rx += (uint64_t)n;
-		active->recv_wrapper_bytes += (uint64_t)n;
+#endif
 	}
 	return n;
-#else
-	ssize_t n = __real_recv(fd, buffer, len, flags);
+}
 
-	if (active && active->monitor && n > 0)
-		active->recv_wrapper_bytes += (uint64_t)n;
-	return n;
-#endif
+ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
+{
+	return receive(fd, buffer, len, 0, flags, 0);
+}
+
+ssize_t __wrap___recv_chk(int fd, void *buffer, size_t len, size_t buflen,
+                          int flags)
+{
+	/* 测试预算断言也不能取代 Fortify 本身对非法范围的拒绝。 */
+	if (len > buflen)
+		return __real___recv_chk(fd, buffer, len, buflen, flags);
+	return receive(fd, buffer, len, buflen, flags, 1);
 }
 
 /* 此库边界接收精确的正 recv 结果。独立于 libc 或 Sanitizer 符号插入进行观察；
@@ -390,6 +409,8 @@ static int finish_on_owner(void *arg)
 		        (unsigned long long)ctx->produced_bytes,
 		        (unsigned long long)ctx->observed_rx,
 		        (unsigned long long)again.total.rx_bytes);
+	assert(ctx->recv_plain_calls + ctx->recv_chk_calls ==
+	       ctx->recv_wrapper_calls);
 	assert(ctx->observed_rx == again.total.rx_bytes);
 	assert(ctx->observed_tx == again.total.tx_bytes);
 	check_turn(ctx);
