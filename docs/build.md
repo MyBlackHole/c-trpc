@@ -95,6 +95,8 @@ xmake run echo_server 9000
 xmake run echo_client 127.0.0.1 9000 hello
 ```
 
+Echo 客户端人读诊断支持英语和简体中文，选择方式见 [Echo 客户端诊断语言](echo-client-i18n.md)。
+
 安装静态库与公开头文件：
 
 ```sh

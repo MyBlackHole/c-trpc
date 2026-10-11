@@ -1,11 +1,69 @@
+#define _POSIX_C_SOURCE 200809L
 #include "tr/client.h"
 #include "tr/status.h"
 
+#include <libintl.h>
+#include <limits.h>
+#include <locale.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+
+#define ECHO_DOMAIN "c-trpc-examples"
+#define ECHO_USAGE                                                             \
+	"Usage: echo_client [--lang=auto|en|zh_CN] [--] [address [port "       \
+	"[payload]]]\n"
+
+/* Linux 示例将翻译资源与可执行文件一起部署，不依赖启动目录。 */
+static void bind_messages(void)
+{
+	char directory[PATH_MAX];
+	ssize_t length =
+	        readlink("/proc/self/exe", directory, sizeof(directory) - 1U);
+	char *slash;
+	static const char suffix[] = "/locales";
+
+	if (length < 0 || (size_t)length >= sizeof(directory) - 1U)
+		return;
+	directory[length] = '\0';
+	slash = strrchr(directory, '/');
+	if (!slash ||
+	    (size_t)(slash - directory) + sizeof(suffix) > sizeof(directory))
+		return;
+	memcpy(slash, suffix, sizeof(suffix));
+	(void)bindtextdomain(ECHO_DOMAIN, directory);
+	(void)bind_textdomain_codeset(ECHO_DOMAIN, "UTF-8");
+}
+
+/* 仅独立 CLI 在建线程前初始化消息 locale；库与其他 locale 类别不变。 */
+static void initialize_messages(const char *language)
+{
+	const char *selected = NULL;
+
+	bind_messages();
+	if (language && strcmp(language, "en") == 0) {
+		(void)setlocale(LC_MESSAGES, "C");
+		return;
+	}
+	if (language && strcmp(language, "zh_CN") == 0) {
+		/* 显式选项优先于 LANGUAGE；仅修改本进程的环境副本。 */
+		if (setenv("LANGUAGE", "zh_CN", 1) == 0) {
+			selected = setlocale(LC_MESSAGES, "zh_CN.UTF-8");
+			if (!selected)
+				selected = setlocale(LC_MESSAGES, "zh_CN.utf8");
+			if (!selected)
+				selected = setlocale(LC_MESSAGES, "");
+		}
+	} else if (!language || !*language || strcmp(language, "auto") == 0) {
+		selected = setlocale(LC_MESSAGES, "");
+	}
+	/* 老版本 glibc 在 C.UTF-8 下仍应用 LANGUAGE；统一 C 家族为原文。 */
+	if (!selected || strncmp(selected, "C.", 2) == 0)
+		(void)setlocale(LC_MESSAGES, "C");
+}
 
 struct result_ctx {
 	pthread_mutex_t lock;
@@ -46,10 +104,31 @@ int main(int argc, char **argv)
 	struct tr_rpc_call_handle call;
 	struct result_ctx result;
 	struct timespec deadline;
-	const char *address = argc > 1 ? argv[1] : "127.0.0.1";
-	uint16_t port = argc > 2 ? (uint16_t)strtoul(argv[2], NULL, 10) : 9000U;
-	const char *text = argc > 3 ? argv[3] : "hello";
+	const char *language = getenv("CTRPC_LANG");
+	const char *address;
+	const char *text;
+	uint16_t port;
+	int first = 1;
 	int wait_ret = 0;
+
+	/* 只在地址之前识别选项，不解释端口或负载中的选项样式文本。 */
+	if (argc > first && strncmp(argv[first], "--lang=", 7) == 0) {
+		language = argv[first++] + 7;
+		if (strcmp(language, "auto") != 0 &&
+		    strcmp(language, "en") != 0 &&
+		    strcmp(language, "zh_CN") != 0) {
+			initialize_messages(getenv("CTRPC_LANG"));
+			fputs(dgettext(ECHO_DOMAIN, ECHO_USAGE), stderr);
+			return 2;
+		}
+	}
+	initialize_messages(language);
+	if (argc > first && strcmp(argv[first], "--") == 0)
+		++first;
+	address = argc > first ? argv[first] : "127.0.0.1";
+	port = argc > first + 1 ? (uint16_t)strtoul(argv[first + 1], NULL, 10)
+	                        : 9000U;
+	text = argc > first + 2 ? argv[first + 2] : "hello";
 
 	memset(&result, 0, sizeof(result));
 	pthread_mutex_init(&result.lock, NULL);
@@ -58,9 +137,10 @@ int main(int argc, char **argv)
 	tr_client_config_init(&config);
 	if (tr_client_create(&config, &client) != TR_OK ||
 	    tr_client_connect(client, address, port) != TR_OK) {
-		fprintf(stderr, "connect failed\n");
+		fputs(dgettext(ECHO_DOMAIN, "connect failed\n"), stderr);
 		if (tr_client_destroy(client) != TR_OK)
-			fprintf(stderr, "client destroy failed\n");
+			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
+			      stderr);
 		return 1;
 	}
 
@@ -77,7 +157,8 @@ int main(int argc, char **argv)
 
 	if (tr_client_register_method(client, &method) != TR_OK) {
 		if (tr_client_destroy(client) != TR_OK)
-			fprintf(stderr, "client destroy failed\n");
+			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
+			      stderr);
 		return 1;
 	}
 
@@ -86,7 +167,8 @@ int main(int argc, char **argv)
 	if (tr_client_unary_call(client, 1U, 1U, &request, on_result, &result,
 				 &call) != TR_OK) {
 		if (tr_client_destroy(client) != TR_OK)
-			fprintf(stderr, "client destroy failed\n");
+			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
+			      stderr);
 		return 1;
 	}
 
@@ -99,12 +181,12 @@ int main(int argc, char **argv)
 	if (result.done && result.status == TR_RPC_STATUS_OK)
 		printf("response: %s\n", result.response);
 	else
-		fprintf(stderr, "RPC failed: %d\n",
-			result.done ? result.status : wait_ret);
+		fprintf(stderr, dgettext(ECHO_DOMAIN, "RPC failed: %d\n"),
+		        result.done ? result.status : wait_ret);
 	pthread_mutex_unlock(&result.lock);
 
 	if (tr_client_destroy(client) != TR_OK) {
-		fprintf(stderr, "client destroy failed\n");
+		fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"), stderr);
 		pthread_cond_destroy(&result.cond);
 		pthread_mutex_destroy(&result.lock);
 		return 1;

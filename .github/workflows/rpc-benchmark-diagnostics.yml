@@ -28,7 +28,7 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Build benchmark target and run architecture diagnostics
+      - name: 构建基准目标并运行架构诊断
         run: |
           set -euo pipefail
           results="$RUNNER_TEMP/rpc-bench-diagnostics"
@@ -80,7 +80,7 @@ jobs:
             --aggregate-generator-slots 1024,2048,4096,8192 \
             --label "gcc-release-40k-generator-slots" \
             --output "$results/generator-slots-40k.jsonl"
-      - name: Preserve exact source and benchmark diagnostics
+      - name: 保留精确源码快照与基准测试诊断
         if: always()
         uses: actions/upload-artifact@v4
         with:
