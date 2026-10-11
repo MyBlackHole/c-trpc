@@ -4,8 +4,7 @@
 #include <stdint.h>
 #include <time.h>
 
-/*
- * 内部绝对截止时间。有限值包括 0ms 立即到期；无限等待必须显式声明，
+/* 内部绝对截止时间。有限值包括 0ms 立即到期；无限等待必须显式声明，
  * 避免不同公开 API 的 timeout_ms == 0 语义互相污染。
  */
 struct tr_deadline {
@@ -13,8 +12,7 @@ struct tr_deadline {
 	int infinite;
 };
 
-/*
- * 只接受 init_ms/init_infinite 产生的合法期限。转换为 Reactor 纳秒时间；
+/* 只接受 init_ms/init_infinite 产生的合法期限。转换为反应器纳秒时间；
  * 溢出时饱和，无限期限返回 0。init_ms 已校验非负秒数和纳秒范围。
  */
 static inline uint64_t tr_deadline_to_ns(const struct tr_deadline *deadline)
@@ -39,8 +37,7 @@ void tr_deadline_init_infinite(struct tr_deadline *deadline);
 /* 有限截止时间到期返回 *expired=1；clock_gettime 失败返回 TR_ERR_SYS。 */
 int tr_deadline_expired(const struct tr_deadline *deadline, int *expired);
 
-/*
- * 使用同一个绝对截止时间循环处理 EINTR、提前 poll(0) 和 INT_MAX 分段。
+/* 使用同一个绝对截止时间循环处理 EINTR、提前 poll(0) 和 INT_MAX 分段。
  * allow_zero_probe 仅用于原本超时为 0 的非阻塞 connect：允许一次 poll(0)。
  * 返回 TR_OK 表示就绪，TR_ERR_TIMEOUT 表示总期限耗尽。
  */

@@ -68,9 +68,8 @@ int tr_buffer_pool_init_budgeted(
 		goto fail_budget;
 	}
 
-	/*
-	 * 所有可能失败的 allocation 完成后再初始化 mutex。
-	 * 从这里开始构造过程不会再失败，因此 pool 正式接管全部资源 ownership。
+	/* 所有可能失败的内存分配完成后再初始化互斥锁。
+	 * 从这里开始构造过程不会再失败，因此池正式接管全部资源所有权。
 	 */
 	if (pthread_mutex_init(&pool->lock, NULL) != 0) {
 		ret = TR_ERR_INVALID;
@@ -133,10 +132,8 @@ int tr_buffer_pool_init_dynamic_budgeted(
 		return TR_ERR_NOMEM;
 	}
 
-	/*
-	 * Ownership is bounded by descriptor count. Storage grows only after a
-	 * descriptor is checked out; storage == NULL distinguishes this internal
-	 * mode from the fixed contiguous pool.
+	/* 所有权数量受描述符数量限制。只有描述符被取出后存储才增长；
+	 * storage == NULL 将此内部模式与固定连续池区分开。
 	 */
 	if (pthread_mutex_init(&pool->lock, NULL) != 0) {
 		tr_buffer_budget_release(budget, descriptor_bytes);
@@ -179,10 +176,8 @@ int tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 	if (!pool)
 		return TR_OK;
 
-	/*
-	 * Zeroed/uninitialized and already-destroyed pools are harmless. This check
-	 * intentionally happens before touching lock, which is not initialized in
-	 * those states.
+	/* 清零但未初始化的池，以及已销毁的池，均无害。
+	 * 此检查有意安排在接触锁之前，因为这些状态下锁尚未初始化。
 	 */
 	if (!pool->buffers && pool->buffer_count == 0U)
 		return TR_OK;
@@ -201,10 +196,9 @@ int tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
 		}
 	}
 
-	/*
-	 * From this point the terminal caller contract guarantees no new API
-	 * entrants. Detach storage from the pool while holding the lock so a failed
-	 * earlier destroy can be retried after all holders return.
+	/* 从此处起，终止调用者契约保证不会有新的 API 调用进入。
+	 * 在持锁时将存储从池中分离，以便所有持有者归还后
+	 * 可以重试之前失败的销毁。
 	 */
 	budget = pool->memory_budget;
 	buffers = pool->buffers;
@@ -335,9 +329,8 @@ void tr_buffer_release(struct tr_buffer *buffer)
 	pool = buffer->pool;
 
 	pthread_mutex_lock(&pool->lock);
-	/*
-	 * A duplicate release must never manufacture free_count and make terminal
-	 * destroy believe another descriptor has been returned.
+	/* 重复释放绝不能虚增 free_count，
+	 * 使终止销毁误以为另一个描述符已归还。
 	 */
 	if (!buffer->checked_out) {
 		pthread_mutex_unlock(&pool->lock);

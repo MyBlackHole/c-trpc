@@ -19,13 +19,12 @@ struct tr_buffer {
 
 	struct tr_buffer *next;
 	struct tr_buffer_pool *pool;
-	/* Pool descriptor ownership: 1 only while checked out by one holder. */
+	/* 池描述符所有权：仅在被一个持有者取出期间为 1。 */
 	uint8_t checked_out;
 
-	/*
-	 * Optional one-shot release hook for non-pool buffers. When set,
-	 * tr_buffer_release() invokes it instead of returning the buffer to pool.
-	 * The callback owns final disposal and may free the buffer itself.
+	/* 非池缓冲区的可选一次性释放钩子。设置后，
+	 * tr_buffer_release() 调用它，而不是将缓冲区归还池。
+	 * 回调负责最终处置，也可以释放缓冲区本身。
 	 */
 	tr_buffer_release_cb release_cb;
 };
@@ -42,23 +41,20 @@ struct tr_buffer_pool {
 	uint32_t free_count;
 	uint32_t peak_in_use;
 	uint64_t exhausted_events;
-	/*
-	 * Terminal admission gate. Once destroy observes an outstanding holder it
-	 * closes new acquire permanently; existing holders may still release.
+	/* 终止准入门禁。一旦销毁观察到尚未归还的持有者，
+	 * 就永久关闭新获取；现有持有者仍可释放。
 	 */
 	int closed;
 
-	/* Optional internal accounting owner; NULL keeps legacy unaccounted mode. */
+	/* 可选的内部记账所有者；NULL 保留旧有不记账模式。 */
 	struct tr_memory_budget *memory_budget;
 };
 
 int tr_buffer_pool_init(struct tr_buffer_pool *pool, uint32_t buffer_count,
 			uint32_t buffer_size);
-/*
- * Terminal destroy. Caller must already have stopped new API entrants.
- * If descriptors are still checked out, closes new acquire and returns
- * TR_ERR_STATE while keeping storage/mutex alive so existing holders can
- * release and destroy can be retried.
+/* 终止销毁。调用者必须已经阻止新的 API 调用进入。
+ * 若仍有被取出的描述符，则关闭新获取并返回 TR_ERR_STATE，
+ * 同时保留存储与互斥锁，以便现有持有者释放后重试销毁。
  */
 int tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
 
@@ -66,9 +62,8 @@ int tr_buffer_acquire(struct tr_buffer_pool *pool, uint32_t min_capacity,
 		      struct tr_buffer **out);
 void tr_buffer_release(struct tr_buffer *buffer);
 
-/*
- * scope-owned buffer 离开作用域时会自动归还所属 pool。
- * 只有明确需要把 ownership 转移到当前作用域之外时，才调用 tr_buffer_take()。
+/* 作用域拥有的缓冲区离开作用域时会自动归还所属池。
+ * 只有明确需要把所有权转移到当前作用域之外时，才调用 tr_buffer_take()。
  */
 TR_DEFINE_PTR_OWNERSHIP(tr_buffer, struct tr_buffer, tr_buffer_release)
 
