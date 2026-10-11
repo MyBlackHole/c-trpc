@@ -3737,38 +3737,22 @@ int tr_channel_begin_drain(struct tr_channel *channel)
 		channel->reactor, tr_channel_begin_drain_on_owner, channel);
 }
 
-int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
+int tr_channel_wait_drained_deadline(
+	struct tr_channel *channel, const struct tr_deadline *deadline)
 {
-	struct timespec deadline;
-	int timed = timeout_ms != 0U;
+	int timed = deadline != NULL;
 	int result = TR_OK;
 
-	if (!channel)
+	if (!channel || (deadline && deadline->infinite))
 		return TR_ERR_INVALID;
 
 	/*
-	 * wait_drained() is a pure waitqueue-style observer. It must not advance
-	 * Channel protocol state: GOAWAY admission/retry belongs to begin_drain()
-	 * on the Reactor owner. Waiting from the owner would stall the RX/TX and
-	 * close/cancel callbacks that can make active_streams reach zero.
+	 * wait_drained() 只是等待队列观察者，不驱动 Channel 协议。
+	 * GOAWAY admission/retry 属于 Reactor owner 上的 begin_drain()。
+	 * owner 如果在这里等待，将阻塞用于排空的 RX/TX/close callback。
 	 */
 	if (tr_reactor_in_owner_context())
 		return TR_ERR_STATE;
-
-	if (timed) {
-		uint64_t deadline_ns;
-
-		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
-			return TR_ERR_SYS;
-		deadline_ns = tr_add_sat_u64(
-			(uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
-				(uint64_t)deadline.tv_nsec,
-			(uint64_t)timeout_ms * UINT64_C(1000000));
-		deadline.tv_sec =
-			(time_t)(deadline_ns / UINT64_C(1000000000));
-		deadline.tv_nsec =
-			(long)(deadline_ns % UINT64_C(1000000000));
-	}
 
 	pthread_mutex_lock(&channel->lock);
 	if (channel->state_wait_closed) {
@@ -3800,8 +3784,13 @@ int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 			result = TR_ERR_CLOSED;
 			break;
 		}
+		/*
+		 * 使用调用方传入的原始绝对期限。多个 peer 不能分别取整后
+		 * 重建相对 timeout，也不能延长同一 Server drain 的预算。
+		 */
 		ret = pthread_cond_timedwait(
-			&channel->state_cond, &channel->lock, &deadline);
+			&channel->state_cond, &channel->lock,
+			&deadline->absolute);
 
 		if (ret == 0)
 			continue;
@@ -3817,6 +3806,26 @@ int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
 	channel->state_waiters--;
 	pthread_mutex_unlock(&channel->lock);
 	return result;
+}
+
+int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms)
+{
+	struct tr_deadline deadline;
+	int ret;
+
+	if (!channel)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+
+	/* 公开接口的 0ms 语义始终是立即检查，不是无限等待。 */
+	if (timeout_ms == 0U)
+		return tr_channel_wait_drained_deadline(channel, NULL);
+
+	ret = tr_deadline_init_ms(&deadline, timeout_ms);
+	if (ret != TR_OK)
+		return ret;
+	return tr_channel_wait_drained_deadline(channel, &deadline);
 }
 
 int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
