@@ -1,6 +1,10 @@
 #ifndef TR_STATUS_H
 #define TR_STATUS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum tr_status {
 	TR_OK = 0,
 	TR_AGAIN = 1,
@@ -26,5 +30,9 @@ enum tr_status {
 };
 
 const char *tr_status_str(int status);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -365,6 +365,13 @@ static void test_protocol_error(enum malformed_frame kind)
 	assert(state == TR_CHANNEL_LANE_DOWN);
 	assert(tr_channel_active_streams(bad_server) == 0U);
 
+	/*
+	 * 错误回调的通知早于本轮 owner 返回。同步 abort 的断言已在上面验证；
+	 * 后续健康连接探针先等待故意填满的命令队列排空，避免把正常的
+	 * TR_AGAIN 准入背压误判为另一连接失效。
+	 */
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+
 	/* The other connection on this same Reactor remains fully functional. */
 	assert(tr_channel_get_lane_state(good_server, TR_LANE_CONTROL, &state) ==
 	       TR_OK);
