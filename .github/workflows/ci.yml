@@ -21,9 +21,21 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: 准备私有中文消息 locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y locales
+          mkdir -p "$RUNNER_TEMP/echo-locale"
+          localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
+          echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: 校验 Echo 翻译目录
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext
+          python3 scripts/compile_echo_catalog.py --check
       - name: 构建全部目标并测试 debug 与 release 模式
         run: |
           for mode in debug release; do
@@ -38,6 +50,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: 准备私有中文消息 locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y locales
+          mkdir -p "$RUNNER_TEMP/echo-locale"
+          localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
+          echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
@@ -53,6 +72,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: 准备私有中文消息 locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y locales
+          mkdir -p "$RUNNER_TEMP/echo-locale"
+          localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
+          echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
@@ -90,6 +116,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: 准备私有中文消息 locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y locales
+          mkdir -p "$RUNNER_TEMP/echo-locale"
+          localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
+          echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
@@ -126,6 +159,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      - name: 准备私有中文消息 locale
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y locales
+          mkdir -p "$RUNNER_TEMP/echo-locale"
+          localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
+          echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
