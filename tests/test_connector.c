@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -29,12 +31,21 @@ struct connector_test_ctx {
 	unsigned unregister_completed;
 	int cancel_on_unregister_failure;
 	int nested_cancel_status;
+	int callback_fd;
 };
 
 enum fake_connect_mode {
 	FAKE_CONNECT_DISABLED = 0,
 	FAKE_CONNECT_PIPE,
-	FAKE_CONNECT_FULL_SOCKET
+	FAKE_CONNECT_FULL_SOCKET,
+	FAKE_CONNECT_WRITABLE_SOCKET
+};
+
+enum fake_send_mode {
+	FAKE_SEND_DISABLED = 0,
+	FAKE_SEND_CONTINUOUS_EINTR,
+	FAKE_SEND_PARTIAL_THEN_EINTR,
+	FAKE_SEND_CROSS_DEADLINE
 };
 
 static atomic_int fake_connect_mode;
@@ -43,10 +54,78 @@ static atomic_uint aux_unregister_attempts;
 static _Atomic(struct connector_test_ctx *) unregister_test_ctx;
 static int fake_connect_peer = -1;
 
+/*
+ * 单独测试 Connector preface；仅在 fake fd 上包装 send。模拟时钟随
+ * EINTR 次数增加，不依赖真实几毫秒的调度间隙。
+ */
+static atomic_int fake_send_mode;
+static atomic_int fake_send_fd;
+static atomic_uint fake_send_calls;
+static atomic_int fake_clock_enabled;
+static uint64_t fake_clock_base_ns;
+
 int __real_tr_tcp_connect_ipv4(
 	const char *address, uint16_t port, int *out_fd);
 int __real_tr_reactor_aux_event_unregister(
 	struct tr_reactor *reactor, int fd);
+ssize_t __real_send(int fd, const void *buf, size_t len, int flags);
+int __real_clock_gettime(clockid_t clock_id, struct timespec *tp);
+
+int __wrap_clock_gettime(clockid_t clock_id, struct timespec *tp)
+{
+	uint64_t now_ns;
+
+	if (clock_id != CLOCK_MONOTONIC ||
+	    !atomic_load(&fake_clock_enabled) ||
+	    !tr_reactor_in_owner_context())
+		return __real_clock_gettime(clock_id, tp);
+
+	now_ns = fake_clock_base_ns +
+		 (uint64_t)atomic_load(&fake_send_calls) * UINT64_C(1000000);
+	tp->tv_sec = (time_t)(now_ns / UINT64_C(1000000000));
+	tp->tv_nsec = (long)(now_ns % UINT64_C(1000000000));
+	return 0;
+}
+
+ssize_t __wrap_send(int fd, const void *buf, size_t len, int flags)
+{
+	int mode = atomic_load(&fake_send_mode);
+	unsigned int attempt;
+
+	if (mode == FAKE_SEND_DISABLED ||
+	    fd != atomic_load(&fake_send_fd))
+		return __real_send(fd, buf, len, flags);
+
+	assert(flags & MSG_NOSIGNAL);
+	attempt = atomic_fetch_add(&fake_send_calls, 1U);
+	switch (mode) {
+	case FAKE_SEND_CONTINUOUS_EINTR:
+		/*
+		 * 防止缺陷回归时测试无限循环：旧代码在同一 owner turn
+		 * 反复 EINTR 至第 33 次才 EAGAIN；修复后 timer 第 3 次到期。
+		 */
+		if (attempt < 32U) {
+			errno = EINTR;
+			return -1;
+		}
+		errno = EAGAIN;
+		return -1;
+	case FAKE_SEND_PARTIAL_THEN_EINTR:
+		if (attempt == 0U)
+			return __real_send(fd, buf, len > 2U ? 2U : len, flags);
+		if (attempt == 1U) {
+			errno = EINTR;
+			return -1;
+		}
+		return __real_send(fd, buf, len, flags);
+	case FAKE_SEND_CROSS_DEADLINE:
+		/* 成功写入发生在截止时间边界，成功终态仍必须被期限拒绝。 */
+		return __real_send(fd, buf, len, flags);
+	default:
+		assert(!"unexpected fake send mode");
+		return -1;
+	}
+}
 
 int __wrap_tr_tcp_connect_ipv4(
 	const char *address, uint16_t port, int *out_fd)
@@ -66,6 +145,17 @@ int __wrap_tr_tcp_connect_ipv4(
 		*out_fd = pipefd[0];
 		fake_connect_peer = pipefd[1];
 		return TR_IN_PROGRESS;
+	}
+	if (mode == FAKE_CONNECT_WRITABLE_SOCKET) {
+		int sockets[2];
+
+		assert(socketpair(AF_UNIX,
+				  SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+				  0, sockets) == 0);
+		*out_fd = sockets[0];
+		fake_connect_peer = sockets[1];
+		atomic_store(&fake_send_fd, sockets[0]);
+		return TR_OK;
 	}
 	if (mode == FAKE_CONNECT_FULL_SOCKET) {
 		char filler[4096] = {0};
@@ -241,10 +331,12 @@ static void connector_record_completion(int status, int fd, void *arg)
 {
 	struct connector_test_ctx *ctx =
 		(struct connector_test_ctx *)arg;
+	int transferred_fd = fd;
 
 	tr_socket_close(&fd);
 	pthread_mutex_lock(&ctx->lock);
 	ctx->status = status;
+	ctx->callback_fd = transferred_fd;
 	ctx->callbacks++;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
@@ -592,6 +684,102 @@ static void test_cancel_wins_over_later_writable_event(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+
+static void test_preface_eintr_and_deadline(
+	enum fake_send_mode mode, uint32_t timeout_ms,
+	int expected_status, unsigned int expected_sends)
+{
+	static const uint8_t preface[] = {0x43U, 0x54U, 0x52U, 0x50U};
+	struct tr_reactor *reactor = NULL;
+	struct tr_connector_config config;
+	struct connector_test_ctx ctx;
+	struct timespec base;
+	int use_fake_clock = mode != FAKE_SEND_PARTIAL_THEN_EINTR;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.timeout_ms = timeout_ms;
+	config.complete_cb = connector_record_completion;
+	config.callback_arg = &ctx;
+	assert(tr_connector_create(&config, &ctx.connector) == TR_OK);
+
+	atomic_store(&fake_send_fd, -1);
+	atomic_store(&fake_send_calls, 0U);
+	atomic_store(&fake_send_mode, mode);
+	atomic_store(&fake_connect_mode, FAKE_CONNECT_WRITABLE_SOCKET);
+	if (use_fake_clock) {
+		assert(__real_clock_gettime(CLOCK_MONOTONIC, &base) == 0);
+		fake_clock_base_ns =
+			(uint64_t)base.tv_sec * UINT64_C(1000000000) +
+			(uint64_t)base.tv_nsec;
+		atomic_store(&fake_clock_enabled, 1);
+	}
+
+	assert(tr_connector_start(
+		       ctx.connector, "127.0.0.1", 1U,
+		       preface, (uint32_t)sizeof(preface)) == TR_OK);
+	wait_connector_callback(&ctx);
+	atomic_store(&fake_clock_enabled, 0);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.status == expected_status);
+	assert(ctx.callbacks == 1);
+	assert((ctx.callback_fd >= 0) == (expected_status == TR_OK));
+	pthread_mutex_unlock(&ctx.lock);
+
+	if (atomic_load(&fake_send_calls) != expected_sends)
+		fprintf(stderr, "mode=%d: send calls=%u, expected=%u\\n",
+			mode, atomic_load(&fake_send_calls), expected_sends);
+	assert(atomic_load(&fake_send_calls) == expected_sends);
+	if (mode == FAKE_SEND_PARTIAL_THEN_EINTR) {
+		uint8_t received[sizeof(preface)];
+		ssize_t bytes;
+
+		bytes = recv(fake_connect_peer, received, sizeof(received), 0);
+		assert(bytes == (ssize_t)sizeof(received));
+		assert(memcmp(received, preface, sizeof(preface)) == 0);
+	}
+	assert(tr_connector_destroy(ctx.connector) == TR_OK);
+	ctx.connector = NULL;
+	atomic_store(&fake_send_mode, FAKE_SEND_DISABLED);
+	atomic_store(&fake_send_fd, -1);
+	atomic_store(&fake_connect_mode, FAKE_CONNECT_DISABLED);
+	close_fake_connect_peer();
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
+static void test_eintr_does_not_starve_timeout(void)
+{
+	/*
+	 * 合成 owner 单调时钟每次 EINTR 推进 1ms，timeout=3ms。
+	 * 修复后至多三次 send 就能触达 timer；旧逻辑在一次
+	 * owner callback 内忙重试 32 次，再 EAGAIN 后才归还 owner。
+	 */
+	test_preface_eintr_and_deadline(FAKE_SEND_CONTINUOUS_EINTR,
+					3U, TR_ERR_TIMEOUT, 3U);
+}
+
+static void test_success_at_deadline_is_timeout(void)
+{
+	/* send 返回成功的同一 turn 刚好到期，不能以 TR_OK 覆盖超时。 */
+	test_preface_eintr_and_deadline(FAKE_SEND_CROSS_DEADLINE,
+					1U, TR_ERR_TIMEOUT, 1U);
+}
+
+static void test_partial_send_survives_eintr(void)
+{
+	/* 先写两字节，再 EINTR，下个 EPOLLOUT 应从原来的偏移继续。 */
+	test_preface_eintr_and_deadline(FAKE_SEND_PARTIAL_THEN_EINTR,
+					5000U, TR_OK, 3U);
+}
+
 int main(void)
 {
 	test_completion_may_destroy_connector();
@@ -600,5 +788,8 @@ int main(void)
 	test_timeout_status_survives_writable_event();
 	test_completed_timeout_rejects_late_cancel();
 	test_cancel_wins_over_later_writable_event();
+	test_eintr_does_not_starve_timeout();
+	test_success_at_deadline_is_timeout();
+	test_partial_send_survives_eintr();
 	return 0;
 }
