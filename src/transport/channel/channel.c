@@ -22,7 +22,7 @@
 #define TR_CHANNEL_HELLO_WIRE_SIZE 32U
 #define TR_CHANNEL_PROTOCOL_BUFFER_SIZE 64U
 #define TR_STREAM_FREE_NONE UINT32_MAX
-/* Coalesced retry, bounded independently of the number of live Streams. */
+/* 合并重试，其上限独立于存活流的数量。 */
 #define TR_CHANNEL_WINDOW_RETRY_NS UINT64_C(25000000)
 
 enum tr_stream_slot_state {
@@ -128,7 +128,7 @@ struct tr_channel {
 
 	int keepalive_enabled;
 	int teardown_detached;
-	/* Shared maintenance timer: keepalive and retryable WINDOW_UPDATE. */
+	/* 共享维护定时器：保活与可重试的 WINDOW_UPDATE。 */
 	struct tr_reactor_timer_handle keepalive_timer;
 	int keepalive_timer_registered;
 	int window_retry_pending;
@@ -293,12 +293,11 @@ static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 		return;
 
 	if (outstanding) {
-		/*
-         * probe 发出后的任意 peer traffic 都足以证明 connection 仍存活。
-         * 在 timeout 边界前继续保留 outstanding probe，使显式 PONG 仍可提供
-         * RTT sample；如果只观察到其他 traffic，则正常结束 probe，
-         * 不把 connection 判定为失败。
-         */
+		/* 探测发出后的任意对端流量都足以证明连接仍存活。
+		 * 在超时边界前继续保留未完成探测，使显式 PONG 仍可提供
+		 * 往返时间样本；如果只观察到其他流量，则正常结束探测，
+		 * 不把连接判定为失败。
+		 */
 		if (stats.last_rx_activity_ns > sent_ns) {
 			if (now - sent_ns >= timeout_ns) {
 				pthread_mutex_lock(&channel->lock);
@@ -389,11 +388,9 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	int enabled;
 	int retry_pending;
 
-	/*
-	 * One registered, Reactor-owned timer serves two independent obligations.
-	 * A failed WINDOW_UPDATE is retried without requiring another RX event or
-	 * an application flush. Only the current Stream slots are scanned: an old
-	 * stream_id/generation cannot survive slot reuse.
+	/* 一个已注册、由反应器拥有的定时器承担两个独立职责。
+	 * 失败的 WINDOW_UPDATE 无需另一接收事件或应用刷新即可重试。
+	 * 只扫描当前流槽位：旧 stream_id/generation 不能在槽位复用后存活。
 	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->window_retry_scheduled = 0;
@@ -434,7 +431,7 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	if (now_ns == 0)
 		now_ns = tr_channel_now_ns();
 	if (now_ns == 0) {
-		/* No timer is armed if CLOCK_MONOTONIC is unavailable. */
+		/* CLOCK_MONOTONIC 不可用时不设置定时器。 */
 		pthread_mutex_lock(&channel->lock);
 		channel->window_retry_scheduled = 0;
 		pthread_mutex_unlock(&channel->lock);
@@ -624,11 +621,10 @@ tr_channel_normalize_create_hello_error(struct tr_channel *channel,
 	if (ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
 		return ret;
 
-	/*
-	 * handler 已经安装后，peer 可能在 Channel create 返回前完成协议判定
-	 * 并关闭 connection。create 的既有契约是“构造成功，随后通过 lane DOWN
-	 * 表达协商失败”。先跨过 Reactor quiescence barrier，确保可能的 close
-	 * callback 已完成，再根据 Channel 自身状态判断是否属于该异步关闭。
+	/* 处理函数已经安装后，对端可能在 Channel 创建返回前完成协议判定
+	 * 并关闭连接。创建的既有契约是“构造成功，随后通过通道 DOWN
+	 * 表达协商失败”。先跨过反应器静止屏障，确保可能的关闭
+	 * 回调已完成，再根据 Channel 自身状态判断是否属于该异步关闭。
 	 */
 	(void)tr_reactor_quiesce(channel->reactor);
 
@@ -1030,9 +1026,8 @@ static int tr_send_window_update_locked(struct tr_channel *channel,
 	return ret;
 }
 
-/*
- * The caller must kick the maintenance timer AFTER dropping channel->lock.
- * Reactor synchronous owner calls while holding this lock can deadlock RX.
+/* 调用者必须在释放 channel->lock 后触发维护定时器。
+ * 持有此锁时进行反应器同步所有者调用可能使接收路径死锁。
  */
 static int tr_channel_schedule_window_retry_on_owner(void *arg)
 {
@@ -1097,10 +1092,9 @@ static void tr_stream_notify(struct tr_channel *channel,
 	tr_stream_event_cb cb = channel->stream_event_cb;
 	void *cb_arg = channel->callback_arg;
 
-	/*
-	 * upper-layer handler publication/read 都在 Reactor owner 上完成。
-	 * callback 调用前 snapshot，允许 callback 自己同步替换后续 handler，
-	 * 但不影响当前 event。
+	/* 上层处理函数的发布与读取都在反应器所有者上完成。
+	 * 回调调用前取快照，允许回调自己同步替换后续处理函数，
+	 * 但不影响当前事件。
 	 */
 	if (cb)
 		cb(handle, event, status, cb_arg);
@@ -1114,9 +1108,8 @@ static void tr_channel_notify(struct tr_channel *channel,
 	void *cb_arg = channel->callback_arg;
 	void *lifecycle_arg = channel->lifecycle_callback_arg;
 
-	/*
-	 * 两组 callback 都是 owner publication。先 snapshot 再调用 normal handler，
-	 * 保持当前 event 的 observer 集合稳定；callback 内替换只影响后续 event。
+	/* 两组回调都是所有者发布。先取快照再调用普通处理函数，
+	 * 保持当前事件的观察者集合稳定；回调内替换只影响后续事件。
 	 */
 	if (cb)
 		cb(channel, event, status, cb_arg);
@@ -1221,17 +1214,15 @@ static int tr_channel_protocol_error(struct tr_channel *channel,
 	int ret;
 
 	(void)channel;
-	/*
-	 * Frame dispatch and deferred HELLO replay both run on the Reactor owner.
-	 * A protocol failure must retire the exact connection generation now:
-	 * tr_reactor_close() would compete for bounded command capacity and can
-	 * return TR_AGAIN, leaving the malformed peer alive. Notify the Channel
-	 * through the error event, rather than reporting a graceful close.
+	/* 帧分派与延后 HELLO 重放都在反应器所有者上运行。
+	 * 协议失败必须立即退役精确连接代次：tr_reactor_close() 会竞争有界
+	 * 命令容量，可能返回 TR_AGAIN，使畸形对端继续存活。
+	 * 通过错误事件通知 Channel，而不是报告优雅关闭。
 	 *
-	 * Some internal admission failures are TR_AGAIN; abort requires a
-	 * negative status even though such a failure is terminal here.
-	 * Callers have released channel->lock before entering this helper, so
-	 * the synchronous connection event may safely retire its Stream slots.
+	 * 某些内部准入失败为 TR_AGAIN；尽管此处这种失败是终止性的，
+	 * 中止操作仍要求负状态码。
+	 * 调用者进入此辅助函数前已释放 channel->lock，因此
+	 * 同步连接事件可以安全地退役其流槽位。
 	 */
 	ret = tr_reactor_abort_on_owner(connection,
 				      status < 0 ? status : TR_ERR_STATE);
@@ -1296,7 +1287,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	memset(&negotiated, 0, sizeof(negotiated));
 	negotiated.protocol_version = high;
 	negotiated.lane_mask = expected_lane_mask;
-	/* Peer HELLO 声明的是 peer 的接收能力，也就是我们的 TX limits。 */
+	/* 对端 HELLO 声明的是对端接收能力，也就是我们的发送上限。 */
 	negotiated.max_frame_payload_bytes =
 		peer_max_frame < local.max_frame_payload_bytes ?
 			peer_max_frame :
@@ -1309,7 +1300,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_UNSUPPORTED);
 
-	/* ACK 把本地 receive limits 返回给 peer。 */
+	/* ACK 把本地接收上限返回给对端。 */
 	ack_caps = local;
 	ack_caps.protocol_version = high;
 	ack_caps.feature_bits = negotiated.feature_bits;
@@ -1365,10 +1356,8 @@ tr_channel_process_pending_hello_on_owner(void *arg)
 	frame.header.payload_len = TR_CHANNEL_HELLO_WIRE_SIZE;
 	frame.payload = &payload;
 
-	/*
-	 * Protocol errors already close the connection. Deferred replay mirrors
-	 * normal Reactor frame dispatch, where the handler result is not surfaced
-	 * synchronously to the Channel creator.
+	/* 协议错误已经关闭连接。延后重放与正常反应器帧分派一致，
+	 * 不会同步地将处理函数结果呈现给 Channel 创建者。
 	 */
 	(void)tr_channel_handle_hello(request->channel,
 				      request->hello.connection, &frame);
@@ -1525,17 +1514,14 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 						 TR_ERR_STATE);
 	}
 
-	/*
-	 * begin_drain() is a monotonic admission barrier. A peer may have sent
-	 * STREAM_OPEN just before receiving our GOAWAY; accepting that delayed frame
-	 * after local_draining became visible would make active_streams increase
-	 * again after wait_drained() had observed zero.
+	/* begin_drain() 是单向准入屏障。对端可能在收到我们的 GOAWAY 前
+	 * 刚发出 STREAM_OPEN；若在 local_draining 可见后接受该延迟帧，
+	 * active_streams 可能在 wait_drained() 已观察到零后再次增加。
 	 *
-	 * Reject without allocating local Stream state. The peer already owns its
-	 * initiating Stream slot, so STREAM_CLOSE gives it an ordinary remote-close
-	 * signal. If even this bounded control frame cannot be admitted, close the
-	 * connection rather than leave the two endpoints with inconsistent Stream
-	 * ownership.
+	 * 拒绝时不分配本地流状态。对端已拥有其发起流的槽位，
+	 * 因此 STREAM_CLOSE 向它提供普通远端关闭信号。
+	 * 如果连此有界控制帧也无法获准，则关闭连接，
+	 * 而不是让两端的流所有权不一致。
 	 */
 	if (channel->local_draining) {
 		pthread_mutex_unlock(&channel->lock);
@@ -1676,11 +1662,10 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 						 TR_ERR_STATE);
 	}
 
-	/*
-     * 单 frame message 保持 zero-copy。
-     * fragmented message 只复制一次到有界的 Channel reassembly buffer，
-     * 之后 Transport frame buffer 可以立即归还 Reactor RX pool。
-     */
+	/* 单帧消息保持零拷贝。
+	 * 分片消息只复制一次到有界的 Channel 重组缓冲区，
+	 * 之后传输帧缓冲区可以立即归还反应器接收池。
+	 */
 	if (!fragmented) {
 		if (stream->rx_reassembly ||
 		    (channel->config.max_message_bytes != 0 &&
@@ -1813,11 +1798,10 @@ static int tr_channel_handle_stream_close(struct tr_channel *channel,
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
 	if (!stream) {
-		/*
-		 * A STREAM_OPEN rejected after our drain barrier has no local Stream
-		 * slot. Its initiator may still answer our rejection with STREAM_CLOSE
-		 * when it closes its own half. Absorb only peer-owned ids while draining;
-		 * unknown locally-owned ids remain protocol errors.
+		/* 在排空屏障后被拒绝的 STREAM_OPEN 没有本地流槽位。
+		 * 其发起方在关闭自身半侧时，仍可能用 STREAM_CLOSE
+		 * 回复我们的拒绝。
+		 * 排空期间仅吸收对端拥有的标识；未知的本地拥有标识仍为协议错误。
 		 */
 		if (channel->local_draining &&
 		    !tr_stream_id_is_local(channel, frame->header.stream_id)) {
@@ -1865,10 +1849,9 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret = TR_OK;
 
-	/*
-	 * Deferred Channel creation installs the transport handler before upper
-	 * layers are ready. An early peer HELLO must not ACK or publish lane UP,
-	 * otherwise the peer can send application DATA into an unbound Channel.
+	/* 延后 Channel 创建会在上层就绪前安装传输处理函数。
+	 * 过早的对端 HELLO 不得回复 ACK 或发布通道 UP，
+	 * 否则对端可以向未绑定的 Channel 发送应用 DATA。
 	 */
 	if (frame->header.type == TR_FRAME_HELLO &&
 	    tr_channel_defer_hello_before_start(channel, connection, frame))
@@ -1991,7 +1974,7 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 	}
 	pthread_mutex_unlock(&channel->lock);
 
-	/* Transport connection replacement 不保留旧 Stream 的 byte state。 */
+	/* 传输连接替换不保留旧流的字节状态。 */
 	if (control_down)
 		tr_channel_fail_lane_streams(channel, TR_LANE_CONTROL,
 					     stream_status);
@@ -2031,19 +2014,16 @@ static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
 		return 0;
 	}
 
-	/*
-	 * A Channel owns one reconnect timer and one Connector. In split mode,
-	 * do not let a second lane replace reconnect_lane while the first lane's
-	 * delayed or in-flight attempt still owns those shared sources.
-	 * Completion will schedule the other down lane after releasing ownership.
+	/* 一个 Channel 拥有一个重连定时器和一个 Connector。分离模式下，
+	 * 当第一条通道的延迟或进行中尝试仍拥有这些共享事件源时，
+	 * 不要让第二条通道替换 reconnect_lane。
+	 * 完成后会在释放所有权后调度另一条已断开的通道。
 	 */
 	if (channel->control_reconnecting || channel->bulk_reconnecting)
 		return 0;
 
-	/*
-	 * Prefer the opposite lane after a failed attempt. A single Connector
-	 * remains owned by only one lane, but neither failing peer can monopolize
-	 * all retry slots while the other is still down.
+	/* 尝试失败后优先选择另一条通道。单个 Connector 仍仅由一条通道拥有，
+	 * 但另一通道仍断开时，任何一个失败对端都不能独占全部重试机会。
 	 */
 	if (channel->reconnect_lane == TR_LANE_CONTROL &&
 	    channel->control_reconnect_attempt != 0U &&
@@ -2236,9 +2216,9 @@ static uint64_t tr_channel_reconnect_timer_main(void *arg, uint64_t now_ns)
 	if (ret != TR_OK) {
 		int still_active;
 
-		/*
-		 * connector 在进入 active 后失败时会同步/异步调用 completion。
-		 * 只有 start 在发布 connector ownership 前失败，attempt 才仍由这里收敛。
+		/* connector 在进入活跃状态后失败时会同步或异步调用完成回调。
+		 * 只有启动在发布 connector
+		 * 所有权前失败，本次尝试才仍由这里收敛。
 		 */
 		pthread_mutex_lock(&channel->lock);
 		still_active =
@@ -2290,11 +2270,9 @@ static int tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel)
 		return TR_OK;
 
 arm_failed:
-	/*
-	 * No timer was armed, so there is no future owner callback to advance
-	 * this attempt. Fail closed rather than silently leaving reconnect
-	 * enabled but permanently idle. Preserve timer/Connector ownership for
-	 * the normal disable/destroy teardown barrier.
+	/* 没有设置定时器，因此没有未来的所有者回调来推进本次尝试。
+	 * 保守拒绝，而不是静默留下已启用但永久空闲的重连。
+	 * 保留定时器与 Connector 所有权，供正常禁用或销毁拆除屏障处理。
 	 */
 	tr_channel_reconnect_finish_attempt(channel, lane, 0);
 	pthread_mutex_lock(&channel->lock);
@@ -2348,10 +2326,9 @@ int tr_channel_start(struct tr_channel *channel)
 		return TR_OK;
 	}
 
-	/*
-	 * Upper-layer handlers are installed before deferred users call start().
-	 * Publish that readiness under the same lock used by RX deferral, and move
-	 * any already-received HELLO into stack-owned replay requests.
+	/* 延后创建的使用方调用 start() 前，上层处理函数已安装。
+	 * 在接收延后所用的同一锁下发布该就绪状态，并将已收到的 HELLO
+	 * 移入栈拥有的重放请求。
 	 */
 	channel->handshake_started = 1;
 	for (i = 0; i < 2; ++i) {
@@ -2367,10 +2344,8 @@ int tr_channel_start(struct tr_channel *channel)
 	split = !tr_conn_equal(control_connection, bulk_connection);
 	pthread_mutex_unlock(&channel->lock);
 
-	/*
-	 * Replay early peer HELLO on the Reactor owner. Only after this point can
-	 * ACK/lane-UP let the peer proceed to STREAM_OPEN/DATA, and the upper layer
-	 * is already bound.
+	/* 在反应器所有者上重放过早的对端 HELLO。只有此后，
+	 * ACK 或通道 UP 才能允许对端继续 STREAM_OPEN/DATA，且上层已经绑定。
 	 */
 	for (i = 0; i < 2; ++i) {
 		if (!pending[i].hello.valid)
@@ -2432,12 +2407,10 @@ static int tr_channel_create_rollback_on_owner(
 	int ret;
 	int final = TR_OK;
 
-	/*
-	 * constructor 尚未向调用方发布 Channel。回滚时先撤销已经发布的
-	 * callback_arg，再退休曾经进入 Channel publication transaction 的
-	 * physical connection。owner direct set_handler 对 exact active handle
-	 * 只会成功；若 connection 已经退休则返回 TR_ERR_STALE，同样证明 source
-	 * 已静默。
+	/* 构造函数尚未向调用方发布 Channel。回滚时先撤销已经发布的
+	 * callback_arg，再退役曾经进入 Channel 发布事务的
+	 * 物理连接。所有者直接 set_handler 对精确活跃句柄只会成功；
+	 * 若连接已经退役则返回 TR_ERR_STALE，同样证明事件源已静默。
 	 */
 	if (control_handler_installed) {
 		ret = tr_reactor_set_handler(control, NULL, NULL, NULL);
@@ -2450,9 +2423,8 @@ static int tr_channel_create_rollback_on_owner(
 			final = ret;
 	}
 
-	/*
-	 * 旧构造契约在任一 handler 已发布后都会关闭本次 Channel 使用的
-	 * connection。保持这个终止语义，同时让 close/stale 成为最终静默证明。
+	/* 旧构造契约在任一处理函数已发布后都会关闭本次 Channel 使用的
+	 * 连接。保持这个终止语义，同时让关闭或陈旧状态成为最终静默证明。
 	 */
 	if (control_handler_installed || bulk_handler_installed) {
 		ret = tr_reactor_close_on_owner(control);
@@ -2482,10 +2454,9 @@ static int tr_channel_create_publish_on_owner(void *arg)
 	int rollback_ret;
 	int ret;
 
-	/*
-	 * 先完成全部 connection capability 预检，再开始任何 callback publication。
-	 * 同一 owner turn 内不会有 epoll dispatch 插入，因此预检成功后 handler
-	 * publication 不会因为 connection replacement 与本事务竞争而失效。
+	/* 先完成全部连接能力凭证预检，再开始任何回调发布。
+	 * 同一所有者处理轮次内不会有 epoll 分派插入，因此预检成功后处理函数
+	 * 发布不会因为连接替换与本事务竞争而失效。
 	 */
 	ret = tr_channel_create_connection_active(control);
 	if (ret != TR_OK)
@@ -2512,10 +2483,9 @@ static int tr_channel_create_publish_on_owner(void *arg)
 		bulk_handler_installed = 1;
 	}
 
-	/*
-	 * HELLO admission 仍属于构造事务。owner 快路径只把 TX item 挂到
-	 * connection queue，不在这里执行 socket send，因此失败仍可在本 turn
-	 * 内撤销 handler 并退休 exact connection。
+	/* HELLO 准入仍属于构造事务。所有者快速路径只把发送项挂到
+	 * 连接队列，不在这里执行套接字发送，因此失败仍可在本轮次
+	 * 内撤销处理函数并退役精确连接。
 	 */
 	if (request->start_handshake) {
 		ret = tr_channel_start(channel);
@@ -2523,9 +2493,8 @@ static int tr_channel_create_publish_on_owner(void *arg)
 			goto rollback;
 	}
 
-	/*
-	 * keepalive timer 最后发布。register 成功后本事务已经没有后续可失败步骤，
-	 * 因而 constructor error path 永远不需要 timer_unregister rollback。
+	/* 保活定时器最后发布。注册成功后本事务已经没有后续可失败步骤，
+	 * 因而构造函数错误路径永远不需要 timer_unregister 回滚。
 	 */
 	ret = tr_reactor_timer_register(
 		channel->reactor, tr_channel_keepalive_timer_main,
@@ -2549,10 +2518,9 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 		return;
 	channel = build->channel;
 
-	/*
-	 * TR_AUTO 这里只管理未发布的词法作用域资源。所有 Reactor handler、
-	 * timer、connection 生命周期边都必须在 create_publish owner transaction
-	 * 内先完成收敛，cleanup 本身不得执行任何可失败的异步 teardown。
+	/* TR_AUTO 这里只管理未发布的词法作用域资源。所有反应器处理函数、
+	 * 定时器、连接生命周期边都必须在 create_publish 所有者事务
+	 * 内先完成收敛，清理本身不得执行任何可失败的异步拆除。
 	 */
 	if (channel->streams) {
 		uint32_t i;
@@ -2766,10 +2734,8 @@ static int tr_channel_detach_on_owner(void *arg)
 		return TR_OK;
 	}
 
-	/*
-	 * Detached ownership transfer must cross every fallible lifetime barrier
-	 * while the peer is still owner-visible. Finalizers have no natural retry
-	 * queue, so they must not discover a live drain waiter after transfer.
+	/* 解绑所有权转移必须在对端仍对所有者可见时跨过每个可能失败的生命周期屏障。
+	 * 收尾器没有天然的重试队列，因此不能在转移后才发现存活的排空等待者。
 	 */
 	channel->state_wait_closed = 1;
 	if (channel->state_waiters != 0U) {
@@ -2790,10 +2756,9 @@ static int tr_channel_detach_on_owner(void *arg)
 	timer = channel->keepalive_timer;
 	pthread_mutex_unlock(&channel->lock);
 
-	/*
-	 * handler publication 是 callback 生命周期屏障。TR_ERR_STALE 能证明
-	 * 这个 exact connection generation 已经退休；其他失败都必须保留
-	 * Channel ownership，并在 finalization 前重试收敛。
+	/* 处理函数发布是回调生命周期屏障。TR_ERR_STALE 能证明
+	 * 这个精确连接代次已经退役；其他失败都必须保留
+	 * Channel 所有权，并在收尾前重试收敛。
 	 */
 	ret = tr_reactor_set_handler(control, NULL, NULL, NULL);
 	if (ret != TR_OK && ret != TR_ERR_STALE)
@@ -2804,11 +2769,10 @@ static int tr_channel_detach_on_owner(void *arg)
 			return ret;
 	}
 
-	/*
-	 * timer publication 必须保持到 unregister 被确认成功。即使 handler 已经
-	 * detach，timer barrier 失败仍然可重试：Channel storage 保持存活，
-	 * keepalive admission 已关闭，下一次调用继续重试 exact timer barrier，
-	 * 不能假装 timer source 已经消失。
+	/* 定时器发布必须保持到注销被确认成功。即使处理函数已经
+	 * 解绑，定时器屏障失败仍然可重试：Channel 存储保持存活，
+	 * 保活准入已关闭，下一次调用继续重试精确定时器屏障，
+	 * 不能假装定时器源已经消失。
 	 */
 	if (timer_registered) {
 		ret = tr_reactor_timer_unregister(timer);
@@ -2822,9 +2786,8 @@ static int tr_channel_detach_on_owner(void *arg)
 		pthread_mutex_unlock(&channel->lock);
 	}
 
-	/*
-	 * 所有 owner-visible callback/timer source 已经完成 detach。此时才允许
-	 * 清除上层 callback publication，并发布 detached ownership。
+	/* 所有所有者可见的回调或定时器源已经完成解绑。此时才允许
+	 * 清除上层回调发布，并发布已解绑所有权。
 	 */
 	channel->data_cb = NULL;
 	channel->stream_event_cb = NULL;
@@ -2876,9 +2839,8 @@ void tr_channel_finalize_detached(struct tr_channel *channel)
 	assert(channel->state_waiters == 0U);
 #endif
 
-	/*
-	 * All fallible owner/waiter barriers were completed before detached
-	 * ownership transfer. Finalization is now pure memory/resource release.
+	/* 所有可能失败的所有者与等待者屏障都已在解绑所有权转移前完成。
+	 * 现在收尾只是纯内存与资源释放。
 	 */
 	if (channel->streams) {
 		uint32_t i;
@@ -2908,10 +2870,9 @@ int tr_channel_destroy(struct tr_channel *channel)
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-	 * Teardown sources before freeing any storage they can reference. A Client
-	 * owns reconnect connector/timer state; Server Channels never enable that
-	 * source and may be finalized after their Reactor has already stopped.
+	/* 释放事件源可引用的任何存储前先拆除事件源。客户端
+	 * 拥有重连连接器与定时器状态；服务端 Channel 从不启用该
+	 * 事件源，可以在其反应器已停止后收尾。
 	 */
 	ret = tr_channel_disable_keepalive(channel);
 	if (ret != TR_OK)
@@ -2919,11 +2880,10 @@ int tr_channel_destroy(struct tr_channel *channel)
 
 	if (channel->config.role == TR_CHANNEL_CLIENT &&
 	    tr_channel_client_reconnect_present(channel)) {
-		/*
-		 * A stopped Reactor is a valid teardown domain only when no reconnect
-		 * source remains. Normal Client facade teardown disables reconnect before
-		 * Runtime stop. If a low-level caller stops Reactor with connector/timer
-		 * ownership still published, fail closed rather than bypass owner detach.
+		/* 只有没有剩余重连事件源时，已停止反应器才是有效拆除域。
+		 * 正常客户端门面拆除在运行时停止前禁用重连。若底层调用者在
+		 * 连接器或定时器所有权仍发布时停止反应器，则保守拒绝，
+		 * 而不是绕过所有者解绑。
 		 */
 		ret = tr_channel_disable_client_reconnect(channel);
 		if (ret != TR_OK)
@@ -2937,11 +2897,9 @@ int tr_channel_destroy(struct tr_channel *channel)
 		bulk_handler_ret = tr_reactor_set_handler(
 			channel->bulk_connection, NULL, NULL, NULL);
 
-	/*
-	 * quiesce distinguishes "fully stopped" from "currently stopping":
-	 * - stopped: TR_OK, there can be no future callback even if SET_HANDLER
-	 *   returned CLOSED;
-	 * - stopping: TR_ERR_CLOSED, ownership has not converged yet, so fail closed.
+	/* quiesce 区分“完全停止”与“正在停止”：
+	 * - 已停止：TR_OK，即使 SET_HANDLER 返回 CLOSED，也不会再有未来回调；
+	 * - 停止中：TR_ERR_CLOSED，所有权尚未收敛，因此保守拒绝。
 	 */
 	ret = tr_reactor_quiesce(channel->reactor);
 	if (ret != TR_OK)
@@ -2956,9 +2914,8 @@ int tr_channel_destroy(struct tr_channel *channel)
 	    bulk_handler_ret != TR_ERR_CLOSED)
 		return bulk_handler_ret;
 
-	/*
-	 * keepalive has been synchronously disarmed above. Release its timer slot
-	 * before Channel storage so the timer queue no longer retains callback_arg.
+	/* 上方已同步解除保活定时。在 Channel 存储之前释放其定时器槽位，
+	 * 使定时器队列不再保留 callback_arg。
 	 */
 	if (channel->keepalive_timer_registered) {
 		ret = tr_reactor_timer_unregister(channel->keepalive_timer);
@@ -3072,15 +3029,13 @@ struct tr_channel_replace_request {
 	struct tr_conn_handle connection;
 };
 
-/*
- * Replacement attachment must be atomic with respect to Reactor I/O callbacks.
+/* 替换附接必须相对于反应器 I/O 回调保持原子性。
  *
- * If the handler becomes visible before Channel records the new lane mapping,
- * an already-readable peer HELLO can run immediately and observe lane_mask == 0,
- * incorrectly turning a healthy replacement connection into a protocol error.
+ * 如果处理函数在 Channel 记录新通道映射前可见，已可读的对端 HELLO
+ * 可能立即运行并观察到 lane_mask == 0，错误地把健康替换连接变为协议错误。
  *
- * Run validation, handler installation and lane publication in one owner
- * operation so no connection callback can interleave with the transition.
+ * 在一个所有者操作中执行验证、处理函数安装与通道发布，
+ * 使任何连接回调都不能插入此转换。
  */
 static int tr_channel_replace_connection_on_owner(void *arg)
 {
@@ -3126,10 +3081,8 @@ static int tr_channel_replace_connection_on_owner(void *arg)
 		}
 	}
 
-	/*
-	 * tr_reactor_call() guarantees owner context here; set_handler therefore
-	 * updates the connection directly and cannot dispatch an I/O callback in
-	 * the middle of this transition.
+	/* tr_reactor_call() 在此保证所有者上下文；因此 set_handler
+	 * 直接更新连接，不能在此转换中途分派 I/O 回调。
 	 */
 	ret = tr_reactor_set_handler(connection, tr_channel_on_frame,
 				     tr_channel_on_connection_event, channel);
@@ -3286,9 +3239,8 @@ static int tr_channel_enable_client_reconnect_on_owner(void *arg)
 	if (ret != TR_OK) {
 		int destroy_ret = tr_connector_destroy(connector);
 
-		/*
-		 * Rollback failure means connector callback-source ownership did not
-		 * converge; report that error instead of pretending enable merely failed.
+		/* 回滚失败意味着连接器回调源所有权未收敛；
+		 * 报告该错误，而不是假装仅为启用失败。
 		 */
 		if (destroy_ret != TR_OK)
 			return destroy_ret;
@@ -3372,10 +3324,8 @@ static int tr_channel_disable_client_reconnect_on_owner(void *arg)
 	int timer_registered;
 	int ret;
 
-	/*
-	 * First close scheduling admission. Published source handles remain intact
-	 * until their individual teardown barriers succeed, so a failure is
-	 * retryable and cannot orphan callback_arg ownership.
+	/* 先关闭调度准入。已发布的事件源句柄保持完整，直到各自的
+	 * 拆除屏障成功，因此失败可重试，也不会使 callback_arg 所有权失管。
 	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->reconnect_enabled = 0;
@@ -3489,10 +3439,9 @@ int tr_channel_enable_keepalive(struct tr_channel *channel,
 	return ret;
 }
 
-/*
- * The timer also owns WINDOW_UPDATE retries. Disabling keepalive must never
- * erase a pending retry's only progress source; serialize the decision with
- * the Reactor owner, not a stale off-owner snapshot.
+/* 此定时器也负责 WINDOW_UPDATE 重试。禁用保活绝不能抹除
+ * 待处理重试唯一的进展来源；与反应器所有者串行化该决策，
+ * 而不是使用所有者外部的陈旧快照。
  */
 static int tr_channel_disarm_keepalive_on_owner(void *arg)
 {
@@ -3524,7 +3473,7 @@ int tr_channel_disable_keepalive(struct tr_channel *channel)
 	tr_channel_keepalive_reset_locked(channel, TR_LANE_BULK);
 	pthread_mutex_unlock(&channel->lock);
 
-	/* Do not synchronize with the owner while holding channel->lock. */
+	/* 持有 channel->lock 时不要与所有者同步。 */
 	ret = tr_reactor_call(channel->reactor,
 			      tr_channel_disarm_keepalive_on_owner, channel);
 	if (ret == TR_ERR_CLOSED)
@@ -3616,10 +3565,9 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret;
 
-	/*
-	 * drain barrier 与 reconnect disable 必须在同一个 owner turn 内完成。
-	 * 否则 application thread 可能在“disable reconnect”返回后、设置
-	 * local_draining 前重新 enable reconnect。
+	/* 排空屏障与禁用重连必须在同一个所有者处理轮次内完成。
+	 * 否则应用线程可能在“禁用重连”返回后、设置
+	 * local_draining 前重新启用重连。
 	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->local_draining = 1;
@@ -3681,8 +3629,7 @@ int tr_channel_wait_ready_deadline(
 		int ready = lane == TR_LANE_CONTROL ?
 			channel->control_ready : channel->bulk_ready;
 
-		/*
-		 * 不能因另一阶段或已到期后的 READY 事件重新获得时间。
+		/* 不能因另一阶段或已到期后的 READY 事件重新获得时间。
 		 * 同时保留关闭状态和条件变量原有的所有权屏障。
 		 */
 		if (timed) {
@@ -3767,10 +3714,9 @@ int tr_channel_wait_drained_deadline(
 	if (!channel || (deadline && deadline->infinite))
 		return TR_ERR_INVALID;
 
-	/*
-	 * wait_drained() 只是等待队列观察者，不驱动 Channel 协议。
-	 * GOAWAY admission/retry 属于 Reactor owner 上的 begin_drain()。
-	 * owner 如果在这里等待，将阻塞用于排空的 RX/TX/close callback。
+	/* wait_drained() 只是等待队列观察者，不驱动 Channel 协议。
+	 * GOAWAY 准入或重试属于反应器所有者上的 begin_drain()。
+	 * 所有者如果在这里等待，将阻塞用于排空的接收、发送或关闭回调。
 	 */
 	if (tr_reactor_in_owner_context())
 		return TR_ERR_STATE;
@@ -3805,9 +3751,8 @@ int tr_channel_wait_drained_deadline(
 			result = TR_ERR_CLOSED;
 			break;
 		}
-		/*
-		 * 使用调用方传入的原始绝对期限。多个 peer 不能分别取整后
-		 * 重建相对 timeout，也不能延长同一 Server drain 的预算。
+		/* 使用调用方传入的原始绝对期限。多个对端不能分别取整后
+		 * 重建相对超时，也不能延长同一服务端排空的预算。
 		 */
 		ret = pthread_cond_timedwait(
 			&channel->state_cond, &channel->lock,

@@ -10,9 +10,8 @@
 
 struct tr_rpc_endpoint;
 
-/*
- * True while the current thread is one of c-trpc's RPC executor workers.
- * Synchronous destroy must not join/wait for the worker that is executing it.
+/* 当前线程为 c-trpc 的 RPC 执行器工作线程之一时为真。
+ * 同步销毁不得回收或等待正在执行销毁的工作线程。
  */
 int tr_rpc_in_worker_context(void);
 
@@ -23,7 +22,7 @@ struct tr_rpc_endpoint_config {
 	uint32_t max_methods;
 	uint32_t max_calls;
 
-	/* Used for RPC envelope/control-path copies. */
+	/* 用于 RPC 封装或控制路径复制。 */
 	struct tr_buffer_pool *message_pool;
 
 	uint32_t executor_queue_capacity;
@@ -67,7 +66,7 @@ struct tr_rpc_endpoint_stats {
 	struct tr_rpc_semantic_stats semantic;
 };
 
-/* Stable Endpoint-lifetime Method hash shared with collision tests. */
+/* 与碰撞测试共用的、在 Endpoint 生命周期内稳定的 Method 哈希。 */
 static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 					  uint32_t method_id)
 {
@@ -81,24 +80,22 @@ static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 	return value;
 }
 
-/*
- * Low-level Endpoint engine，仅供 facade/tests。
+/* 底层 Endpoint 引擎，仅供门面与测试使用。
  *
- * 正常规则仍是 TR_OK 才转移 ownership。唯一例外是 standalone worker 启动后
- * rollback join 自身失败：函数返回生命周期错误，同时 *out 保留 partial
- * Endpoint ownership；调用方必须继续 tr_rpc_endpoint_destroy()，不得丢弃。
+ * 正常规则仍是只有 TR_OK 才转移所有权。唯一例外是独立工作线程启动后
+ * 回滚时的线程回收自身失败：函数返回生命周期错误，同时 *out 保留部分构造的
+ * Endpoint 所有权；调用方必须继续 tr_rpc_endpoint_destroy()，不得丢弃。
  */
 int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
 			   struct tr_rpc_endpoint **out);
 int tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
 
-/*
- * Method publication 是同步 Reactor-owner control-plane barrier。
+/* Method 发布是同步反应器所有者控制平面屏障。
  *
- * method/handlers descriptor 在调用期间复制进 owner request；TR_OK 返回后 Method
- * entry/index 已完整发布。handler_arg 的生命周期仍由调用方管理，至少必须覆盖
- * Endpoint/已注册 Method 的使用期。
+ * method/handlers 描述符在调用期间复制进所有者请求；TR_OK 返回后 Method
+ * 条目与索引已完整发布。handler_arg 的生命周期仍由调用方管理，至少必须覆盖
+ * Endpoint 或已注册 Method 的使用期。
  */
 int tr_rpc_register_method(struct tr_rpc_endpoint *endpoint,
 			   const struct tr_rpc_method_desc *method,
@@ -127,7 +124,7 @@ int tr_rpc_call_start(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 		      const struct tr_rpc_call_callbacks *callbacks,
 		      struct tr_rpc_call_handle *out);
 
-/* Internal zero-copy/copy-minimal Buffer fast path. */
+/* 内部零拷贝或最少拷贝缓冲区快速路径。 */
 int tr_rpc_call_send_buffer(struct tr_rpc_call_handle call,
 			    struct tr_buffer *payload);
 
@@ -137,15 +134,14 @@ int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 int tr_rpc_endpoint_get_semantic_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_semantic_stats *out);
 
-/* Test/diagnostic bridge without exposing Stream in public tr_rpc_message. */
+/* 测试与诊断桥接，不在公开 tr_rpc_message 中暴露流。 */
 int tr_rpc_message_stream_internal(const struct tr_rpc_message *message,
 				   struct tr_stream_handle *out);
 
 struct tr_rpc_executor_group;
 
-/*
- * create 只建立 group soft-state，不启动 worker；因此失败路径只包含不可失败
- * 的本地资源释放。worker epoch 由 Runtime start/stop 显式控制。
+/* 创建只建立组软状态，不启动工作线程；因此失败路径只包含不可失败
+ * 的本地资源释放。工作线程轮次由 Runtime 启动或停止显式控制。
  */
 int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
@@ -155,32 +151,27 @@ int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group);
 int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group);
 int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group);
 
-/*
- * terminal destroy 先执行可重试 stop/join barrier；pthread_join 失败时 group
- * storage 与 exact 未 join thread handle 保持不变，调用方继续拥有 group。
+/* 终止销毁先执行可重试的停止与线程回收屏障；pthread_join 失败时组
+ * 存储与精确的未回收线程句柄保持不变，调用方继续拥有组。
  */
 int tr_rpc_executor_group_destroy_checked(
 	struct tr_rpc_executor_group *group);
 
-/*
- * group!=NULL 时 Endpoint 借用 shard executor group，不启动独立 worker。
- * group==NULL 时 Endpoint publication 完成并先转移到 *out，随后启动 standalone
- * worker；若 worker startup rollback join 失败，返回错误但 *out 保留 ownership。
+/* group!=NULL 时 Endpoint 借用分片执行器组，不启动独立工作线程。
+ * group==NULL 时 Endpoint 发布完成并先转移到 *out，随后启动独立
+ * 工作线程；若工作线程启动回滚时的回收失败，返回错误但 *out 保留所有权。
  */
 int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
 	struct tr_rpc_executor_group *group, struct tr_rpc_endpoint **out);
 
-/*
- * Server reaping path: synchronously quiesce/drain the Endpoint, snapshot its
- * final counters, then release it. stats may be NULL.
+/* 服务端回收路径：同步使 Endpoint 静止并排空，对其最终计数器取快照，
+ * 然后释放它。stats 可以为 NULL。
  */
 int tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
-/*
- * Server peer two-phase teardown.
- */
+/* 服务端对端两阶段拆除。 */
 int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint);
 void tr_rpc_endpoint_finalize_detached_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
@@ -193,7 +184,7 @@ int tr_rpc_endpoint_arm_detached_finalizer(
 	tr_rpc_endpoint_detached_finalizer finalizer, void *arg);
 void tr_rpc_endpoint_release_detached_owner(struct tr_rpc_endpoint *endpoint);
 
-/* Internal deterministic diagnostics for the bounded Call deadline heap. */
+/* 用于有界 Call 截止时间堆的内部确定性诊断。 */
 int tr_rpc_deadline_heap_snapshot(struct tr_rpc_endpoint *endpoint,
 				  uint32_t *count,
 				  struct tr_rpc_call_handle *root,

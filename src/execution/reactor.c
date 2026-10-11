@@ -31,7 +31,7 @@
 #include <unistd.h>
 
 #define TR_REACTOR_EVENT_BATCH 64U
-/* One command batch per event-loop turn, not drain-until-empty. */
+/* 每个事件循环轮次处理一个命令批次，而不是持续排空至队列为空。 */
 #define TR_COMMAND_BATCH 64U
 #define TR_COMPLETION_BATCH 64U
 #define TR_TIMER_BATCH 64U
@@ -39,7 +39,7 @@
 #define TR_RX_READY_BATCH 64U
 #define TR_IO_QUANTUM (64U * 1024U)
 #define TR_REACTOR_MAX_PREFACE_BYTES 256U
-/* Bound priority overtakes of the oldest DATA frame, across loop turns. */
+/* 跨循环轮次限制优先级调度越过最老 DATA 帧的次数。 */
 #define TR_CONTROL_BURST 8U
 #define TR_WAKE_TOKEN UINT64_MAX
 #define TR_LISTENER_TOKEN (UINT64_MAX - UINT64_C(1))
@@ -50,9 +50,8 @@ _Static_assert(
 	TR_REACTOR_AUX_EVENT_CAPACITY <= UINT16_MAX - 2U,
 	"aux slots must exclude wake/listener/peer-event tokens");
 
-/*
- * 每个 Reactor owner thread 只登记自己当前执行的 Reactor。
- * 外部线程不会写该 TLS，因此 owner 校验不需要 mutex/atomic。
+/* 每个反应器所有者线程只登记自己当前执行的反应器。
+ * 外部线程不会写该 TLS，因此所有者校验不需要互斥锁或原子操作。
  */
 static _Thread_local struct tr_reactor *tr_current_reactor_owner;
 
@@ -73,7 +72,7 @@ int tr_reactor_in_owner_context(void)
 #define TR_ASSERT_REACTOR_OWNER(reactor) ((void)(reactor))
 #endif
 
-/* One instance per outer loop, shared by every dispatch entry point. */
+/* 每个外层循环一个实例，由所有分派入口共享。 */
 struct tr_reactor_turn {
 	struct tr_reactor_work left;
 	uint64_t timer_lateness_ns;
@@ -89,7 +88,7 @@ struct tr_tx_pool;
 struct tr_tx_item {
 	struct tr_tx_item *next;
 	struct tr_tx_item *prev;
-	/* FIFO of every non-DATA item, including ordering barriers. */
+	/* 所有非 DATA 项的 FIFO，包括排序屏障。 */
 	struct tr_tx_item *control_next;
 	struct tr_tx_pool *owner_pool;
 	uint8_t header[TR_WIRE_HEADER_SIZE];
@@ -125,8 +124,7 @@ struct tr_connection {
 	uint32_t generation;
 	enum tr_connection_state state;
 
-	/*
-	 * 以下 handler 只允许 Reactor owner thread 修改和读取。
+	/* 以下处理函数只允许反应器所有者线程修改和读取。
 	 * 外部线程必须通过 TR_CMD_SET_HANDLER 提交变更。
 	 */
 	tr_reactor_frame_cb frame_cb;
@@ -147,10 +145,9 @@ struct tr_connection {
 	struct tr_tx_item *tx_active;
 	uint32_t tx_control_streak;
 
-	/*
-	 * Header-only terminal control reserve. This item is embedded so GOAWAY
-	 * admission cannot fail because ordinary control_tx_pool or command-ring
-	 * capacity is exhausted.
+	/* 仅含头部的终止控制预留。此项内嵌，
+	 * 因此普通 control_tx_pool 或命令环形队列容量耗尽
+	 * 不会使 GOAWAY 准入失败。
 	 */
 	struct tr_tx_item lifecycle_tx;
 	uint64_t lifecycle_after_sequence;
@@ -181,9 +178,8 @@ struct tr_connection {
 };
 
 struct tr_slot {
-	/*
-	 * capability metadata 允许跨线程读取/预留，但必须通过 C11 atomic
-	 * 一次性更新 generation + state，避免复用 slot 时出现撕裂状态。
+	/* 能力凭证元数据允许跨线程读取或预留，但必须通过 C11 原子操作
+	 * 一次性更新 generation + state，避免复用槽位时出现撕裂状态。
 	 */
 	_Atomic uint64_t meta;
 };
@@ -228,17 +224,16 @@ struct tr_reactor {
 	pthread_mutex_t ctl_lock;
 	int started;
 	_Atomic int accepting;
-	/*
-	 * ctl_lock-protected terminal edge. Once STOP is accepted OR the owner
-	 * enters fatal exit, stop() must only join the original owner. Submitting
-	 * another STOP after epoll_wait failed would leave it without a consumer.
+	/* 由 ctl_lock 保护的终止边界。一旦 STOP 被接受或所有者进入致命退出，
+	 * stop() 就只能等待并回收原所有者。epoll_wait 失败后再提交
+	 * 另一个 STOP 会使它没有消费者。
 	 */
 	int stop_submitted;
-	/* The owner committed fatal shutdown for this epoch, not a normal STOP. */
+	/* 所有者已为本轮次提交致命关闭，而非正常 STOP。 */
 	int fatal_exit;
-	/* Owner-only event-loop stop flag, reset only when a new epoch starts. */
+	/* 仅限所有者的事件循环停止标志，仅在新轮次开始时重置。 */
 	int stopping;
-	/* Owner-only: a popped command batch still has FIFO predecessors. */
+	/* 仅限所有者：已弹出的命令批次仍有 FIFO 前驱。 */
 	int command_dispatching;
 	uint64_t last_processed_command_sequence;
 	uint32_t lifecycle_tx_pending_count;
@@ -258,7 +253,7 @@ struct tr_reactor {
 	struct tr_connection *rx_ready_head;
 	struct tr_connection *rx_ready_tail;
 
-	/* Owner-written; external snapshots are serialized through owner call. */
+	/* 由所有者写入；外部快照通过所有者调用串行化。 */
 	struct tr_reactor_stats stats;
 
 	tr_reactor_frame_cb frame_cb;
@@ -457,13 +452,12 @@ static int tr_reactor_push_locked(struct tr_reactor *reactor,
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-     * command 一旦进入有界队列，ownership 就已经转移给 Reactor。
-     * 后续 eventfd wake 失败不能再把这次 push 报告成失败，否则 producer
-     * 可能释放仍被 queue 引用的资源，造成 UAF。
-     * tr_reactor_signal() 已把 EAGAIN 视为成功；其他 wake 失败表示 runtime
-     * 已异常，但已经入队的 command 仍然归 Reactor 所有。
-     */
+	/* 命令一旦进入有界队列，所有权就已经转移给反应器。
+	 * 后续 eventfd 唤醒失败不能再把这次入队报告成失败，否则生产者
+	 * 可能释放仍被队列引用的资源，造成释放后使用。
+	 * tr_reactor_signal() 已把 EAGAIN 视为成功；其他唤醒失败表示运行时
+	 * 已异常，但已经入队的命令仍然归反应器所有。
+	 */
 	if (need_wake)
 		(void)tr_reactor_signal(reactor);
 
@@ -514,8 +508,7 @@ static int tr_reactor_push_completion(
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-	 * 与 command 相同：queue 已接受后 ownership 已转移，eventfd 的异常
+	/* 与命令相同：队列已接受后所有权已转移，eventfd 的异常
 	 * 不能把提交结果翻转成失败。
 	 */
 	if (need_wake)
@@ -815,11 +808,10 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	connection->state = (event == TR_CONN_EVENT_ERROR) ? TR_CONN_ERROR :
 							     TR_CONN_CLOSED;
 
-	/*
-	 * Connection fd 由 Reactor 独占。这里的 DEL 只是尽早移除 interest；
-	 * 即使 DEL 报错，紧随其后的 close() 也会从 epoll 自动移除该 open file
-	 * description。slot state/generation 随后失效，因此已经返回到当前
-	 * epoll batch 的旧 token 也只能被当作 stale 丢弃。
+	/* 连接 fd 由反应器独占。这里的 DEL 只是尽早移除关注事件；
+	 * 即使 DEL 报错，紧随其后的 close() 也会从 epoll 自动移除该打开文件
+	 * 描述。槽位状态与代次随后失效，因此已经返回到当前
+	 * epoll 批次的旧令牌也只能被当作陈旧令牌丢弃。
 	 */
 	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, connection->fd, NULL);
 
@@ -1029,7 +1021,7 @@ static int tr_tx_prepare_frame(struct tr_reactor *reactor,
 	else
 		frame_len = (uint32_t)remaining;
 
-	/* 长度为 0 的非 DATA control message 仍然构成一个完整 frame。 */
+	/* 长度为 0 的非 DATA 控制消息仍然构成一个完整帧。 */
 	if (item->type != TR_FRAME_DATA && item->message_pos != 0)
 		return TR_ERR_STATE;
 
@@ -1113,7 +1105,7 @@ static int tr_tx_build_iov(struct tr_tx_item *item,
 	return count;
 }
 
-/* Only these header-only frames may cross DATA, never another control item. */
+/* 只有这些仅含头部的帧可以越过 DATA，绝不能越过另一个控制项。 */
 static int tr_tx_can_bypass_data(const struct tr_tx_item *item)
 {
 	if (item->message_len != 0 || item->base_flags != 0)
@@ -1129,7 +1121,7 @@ static struct tr_tx_item *tr_connection_next_tx(struct tr_connection *connection
 	struct tr_tx_item *item = connection->tx_active;
 	struct tr_tx_item *control = connection->tx_control_head;
 
-	/* A partially submitted frame must survive both quota yield and EAGAIN. */
+	/* 部分提交的帧必须在配额让出和 EAGAIN 后都继续保留。 */
 	if (item && item->wire_pos != 0)
 		return item;
 
@@ -1145,7 +1137,7 @@ static struct tr_tx_item *tr_connection_next_tx(struct tr_connection *connection
 static void tr_connection_complete_tx(struct tr_connection *connection,
 				      struct tr_tx_item *item)
 {
-	/* The selected control may be inside the FIFO: remove it in O(1). */
+	/* 选中的控制项可能位于 FIFO 内部：以 O(1) 移除它。 */
 	if (item->prev)
 		item->prev->next = item->next;
 	else
@@ -1198,7 +1190,7 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		ssize_t n;
 		int iov_count;
 
-		/* Prepare a continuation only when selected, not ahead of CONTROL. */
+		/* 仅在被选中时准备延续帧，不要提前到 CONTROL 之前。 */
 		if (item->wire_len == 0) {
 			int ret = tr_tx_prepare_frame(reactor, item);
 
@@ -1216,7 +1208,7 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 			return;
 		}
 
-		/* Limit the syscall itself, including header and scatter/gather slices. */
+		/* 限制系统调用本身，包括头部与分散聚集片段。 */
 		{
 			size_t remaining = budget;
 			int i;
@@ -1531,7 +1523,7 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 		return;
 	}
 
-	/* Quantum/turn exhaustion is runnable work, unlike EAGAIN or RX pause. */
+	/* 时间片或轮次预算耗尽仍属于可运行工作，与 EAGAIN 或接收暂停不同。 */
 	tr_schedule_rx(reactor, connection);
 }
 
@@ -1581,7 +1573,7 @@ static void tr_reactor_drain_wake(struct tr_reactor *reactor)
 	for (;;) {
 		ssize_t n = read(reactor->wake_fd, &value, sizeof(value));
 
-		/* A non-semaphore eventfd read consumes the accumulated counter. */
+		/* 非信号量模式的 eventfd 读取会消耗累计计数器。 */
 		if (n == (ssize_t)sizeof(value))
 			return;
 		if (n < 0 && errno == EINTR)
@@ -1832,10 +1824,8 @@ static int tr_process_commands(struct tr_reactor *reactor,
 	count = tr_command_queue_pop_batch(&reactor->commands, commands,
 					   (size_t)turn->left.commands);
 	turn->left.commands -= count;
-	/*
-	 * Commands copied into this local batch are no longer visible in ring
-	 * count, but later entries are still FIFO predecessors of work generated
-	 * while dispatching an earlier entry.
+	/* 复制到此本地批次的命令不再计入环形队列数量，
+	 * 但分派较早项时生成的工作，仍须把批次中的较晚项视为 FIFO 前驱。
 	 */
 	assert(!reactor->command_dispatching);
 	reactor->command_dispatching = count != 0;
@@ -1883,12 +1873,10 @@ static int tr_process_commands(struct tr_reactor *reactor,
 	reactor->command_dispatching = 0;
 	tr_reactor_flush_lifecycle_tx(reactor);
 
-	/*
-	 * A full batch may leave work whose wake has already been consumed.
-	 * Conservatively poll once more without blocking, even if this batch
-	 * exactly emptied the ring. A short batch emptied it under queue->lock;
-	 * any later producer then sets wake_pending and signals the eventfd.
-	 * No unsynchronized queue count snapshot or extra queue API is needed.
+	/* 完整批次可能留下唤醒已被消耗的工作。即使本批次恰好排空环形队列，
+	 * 也保守地再进行一次非阻塞轮询。短批次在 queue->lock 下排空队列；
+	 * 任何后续生产者都会设置 wake_pending 并通知 eventfd。
+	 * 无需未同步的队列数量快照或额外队列 API。
 	 */
 	return turn->left.commands == 0;
 }
@@ -1918,7 +1906,7 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 		return;
 
 	if (events & EPOLLERR) {
-		/* Preserve readable-before-error handling when RX is deferred. */
+		/* 接收延后时保留先处理可读、再处理错误的顺序。 */
 		if (connection->rx_scheduled)
 			connection->rx_error_pending = 1;
 		else
@@ -2048,7 +2036,7 @@ static void tr_drain_completions(struct tr_reactor *reactor)
 {
 	int more;
 
-	/* accepting is closed before STOP: all remaining entries must be applied. */
+	/* STOP 前已关闭 accepting：必须应用所有剩余条目。 */
 	do {
 		uint64_t remaining = TR_COMPLETION_BATCH;
 
@@ -2057,14 +2045,11 @@ static void tr_drain_completions(struct tr_reactor *reactor)
 	} while (more);
 }
 
-/*
- * An unrecoverable epoll failure is a failed owner epoch, not a STOP command.
+/* 不可恢复的 epoll 失败意味着所有者轮次失败，不是 STOP 命令。
  *
- * Complete accepted synchronous requests with a failure (their sync storage
- * lives on the blocked caller's stack), and release ownership of commands
- * which were accepted but never dispatched. Admission is already closed
- * before this runs. We must not apply arbitrary user CALL functions during
- * teardown, since the promised owner transaction never executed.
+ * 以失败完成已接受的同步请求（其同步存储位于被阻塞调用者的栈上），
+ * 并释放已接受但从未分派的命令所有权。运行到此处前准入已经关闭。
+ * 拆除期间不得应用任意用户 CALL 函数，因为承诺的所有者事务从未执行。
  */
 static void tr_reactor_abort_pending_commands(struct tr_reactor *reactor)
 {
@@ -2081,7 +2066,7 @@ static void tr_reactor_abort_pending_commands(struct tr_reactor *reactor)
 
 			switch (cmd->type) {
 			case TR_CMD_ADOPT_FD:
-				/* An accepted ADOPT_FD owns the exact fd and reservation. */
+				/* 已接受的 ADOPT_FD 拥有精确的 fd 与预留。 */
 				close(cmd->u.adopt.fd);
 				(void)tr_slot_set_state(
 					reactor, cmd->slot, cmd->generation,
@@ -2115,7 +2100,7 @@ static void tr_reactor_abort_pending_commands(struct tr_reactor *reactor)
 			case TR_CMD_CLOSE:
 			case TR_CMD_ABORT:
 			case TR_CMD_STOP:
-				/* These unexecuted commands own no external resource. */
+				/* 这些未执行命令不拥有外部资源。 */
 				break;
 			default:
 				break;
@@ -2124,12 +2109,10 @@ static void tr_reactor_abort_pending_commands(struct tr_reactor *reactor)
 	} while (count != 0U);
 }
 
-/*
- * Called by the owner after a non-EINTR epoll_wait failure. Publish the
- * terminal epoch boundary before touching accepted work. ctl_lock prevents
- * producers from publishing a new command after the gate closes; queue-local
- * close also wakes blocked synchronous/worker producers, including a
- * producer that sampled an admission generation before the failure.
+/* 由所有者在非 EINTR 的 epoll_wait 失败后调用。接触已接受工作前先发布
+ * 终止轮次边界。ctl_lock 阻止生产者在门禁关闭后发布新命令；
+ * 队列本地关闭也会唤醒被阻塞的同步或工作线程生产者，包括在失败前
+ * 已采样准入代次的生产者。
  */
 static void tr_reactor_begin_fatal_exit(struct tr_reactor *reactor)
 {
@@ -2138,7 +2121,7 @@ static void tr_reactor_begin_fatal_exit(struct tr_reactor *reactor)
 	pthread_mutex_lock(&reactor->ctl_lock);
 	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	reactor->fatal_exit = 1;
-	/* A racing stop() must join this owner, not enqueue another STOP. */
+	/* 并发的 stop() 必须等待并回收此所有者，而不是再入队一个 STOP。 */
 	reactor->stop_submitted = 1;
 	tr_completion_queue_close(&reactor->completions);
 	tr_command_queue_wait_close(&reactor->commands);
@@ -2174,10 +2157,9 @@ static void *tr_reactor_thread_main(void *arg)
 	assert(tr_current_reactor_owner == NULL);
 	tr_current_reactor_owner = reactor;
 
-	/*
-	 * start() holds ctl_lock across pthread_create and the new epoch
-	 * publication. A restarted owner must not dispatch persistent epoll/timer
-	 * sources until queues, started and accepting all belong to that epoch.
+	/* start() 在 pthread_create 与新轮次发布期间持有 ctl_lock。
+	 * 重新启动的所有者必须等队列、started 与 accepting 都属于该轮次后，
+	 * 才能分派持久的 epoll 或定时器源。
 	 */
 	pthread_mutex_lock(&reactor->ctl_lock);
 	pthread_mutex_unlock(&reactor->ctl_lock);
@@ -2251,7 +2233,8 @@ static void *tr_reactor_thread_main(void *arg)
 			} else if (tr_reactor_dispatch_aux_event(
 					   reactor, events[i].data.u64,
 					   events[i].events)) {
-				/* auxiliary source 已在 helper 内完成 dispatch/stale drop */
+				/* 辅助事件源已在辅助函数内完成分派或陈旧事件丢弃
+				 */
 			} else {
 				tr_handle_connection_event(reactor,
 							   events[i].data.u64,
@@ -2260,16 +2243,16 @@ static void *tr_reactor_thread_main(void *arg)
 		}
 
 		tr_run_rx_ready(reactor, &turn);
-		/* I/O may cross a deadline, but does not replenish timer/TX budgets. */
+		/* I/O 可能越过截止时间，但不会补充定时器或发送预算。 */
 		(void)tr_process_timers(reactor, &turn);
 		tr_run_tx_ready(reactor, &turn);
 		tr_record_turn(reactor, &turn);
 	}
 
 	if (failed) {
-		/* Cancel stack-backed sync commands before their callers can hang. */
+		/* 在调用者可能挂起前取消基于栈存储的同步命令。 */
 		tr_reactor_abort_pending_commands(reactor);
-		/* Accepted completions own their args and must run once. */
+		/* 已接受的完成项拥有其参数，必须运行一次。 */
 		tr_drain_completions(reactor);
 	}
 	tr_cleanup_connections(reactor, failed);
@@ -2514,10 +2497,8 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		return ret;
 	build.commands_ready = 1;
 
-	/*
-	 * V1 completion capacity inherits command_capacity.  The queues are
-	 * physically independent; a later public tuning knob can split capacities
-	 * without changing completion ownership semantics.
+	/* V1 完成队列容量继承 command_capacity。两个队列在物理上独立；
+	 * 后续公开调节项可拆分容量，而不改变完成项所有权语义。
 	 */
 	ret = tr_completion_queue_init(&reactor->completions,
 				       reactor->config.command_capacity);
@@ -2572,9 +2553,8 @@ int tr_reactor_create(const struct tr_reactor_config *config,
 		      &wake_event) < 0)
 		return TR_ERR_SYS;
 
-	/*
-	 * create() 只建立对象与内核资源，不开放运行期 producer admission。
-	 * 第一轮以及后续每一轮 start() 都显式开启新的 lifecycle epoch。
+	/* create() 只建立对象与内核资源，不开放运行期生产者准入。
+	 * 第一轮以及后续每一轮 start() 都显式开启新的生命周期轮次。
 	 */
 	atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
 	*out = reactor;
@@ -2590,11 +2570,10 @@ static int tr_reactor_epoll_del_source(struct tr_reactor *reactor, int fd)
 	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, fd, NULL) == 0)
 		return TR_OK;
 
-	/*
-	 * epoll registration 的身份同时包含 fd 数值和 open file description。
-	 * fd 被关闭并复用后，ENOENT、EBADF、EPERM 都可能与旧 registration 仍
+	/* epoll 注册的身份同时包含 fd 数值和打开文件描述。
+	 * fd 被关闭并复用后，ENOENT、EBADF、EPERM 都可能与旧注册仍
 	 * 存在并存，不能用错误码推断旧事件已静默。解绑屏障只接受 DEL 成功；
-	 * 任何失败都保留 callback publication，供调用方重试或销毁 Reactor。
+	 * 任何失败都保留回调发布，供调用方重试或销毁反应器。
 	 */
 	return TR_ERR_SYS;
 }
@@ -2670,20 +2649,18 @@ static int tr_reactor_listener_register_publish_now(void *arg)
 	if (ret != TR_OK)
 		return ret;
 
-	/*
-	 * register_now() 已经把 source 放入 epoll，但当前仍处于同一个 owner
-	 * turn，或 stopped 状态下持有 ctl_lock；因此 publish 返回前 source
-	 * 不可能被 dispatch。publish 失败时同一串行化区间内撤销 source。
+	/* register_now() 已经把事件源放入 epoll，但当前仍处于同一个所有者
+	 * 处理轮次，或已停止状态下持有 ctl_lock；因此发布返回前事件源
+	 * 不可能被分派。发布失败时在同一串行化区间内撤销事件源。
 	 */
 	ret = request->publish(request->publish_arg);
 	if (ret != TR_OK) {
 		int undo = tr_reactor_listener_unregister_now(
 			request->reactor, request->fd);
 
-		/*
-		 * publish 已失败时必须把刚加入的 callback source 撤销。若 detach
-		 * barrier 自身失败，source publication 仍然存活，生命周期错误优先于
-		 * 原 publish 错误返回；调用方必须在释放 callback_arg 前重试 unregister。
+		/* 发布已失败时必须把刚加入的回调源撤销。若解绑屏障
+		 * 自身失败，事件源发布仍然存活，生命周期错误优先于
+		 * 原发布错误返回；调用方必须在释放 callback_arg 前重试注销。
 		 */
 		if (undo != TR_OK) {
 			if (request->on_retained)
@@ -2769,9 +2746,8 @@ int tr_reactor_listener_register_publish(
 	request.retained_arg = retained_arg;
 	request.out_retained = out_retained;
 
-	/*
-	 * call_or_stopped 已经定义了所需的统一串行化域：
-	 * owner turn / stopped+ctl_lock / stopping=>CLOSED。
+	/* call_or_stopped 已经定义了所需的统一串行化域：
+	 * 所有者处理轮次 / 已停止且持有 ctl_lock / 停止中则返回 CLOSED。
 	 */
 	return tr_reactor_call_or_stopped(
 		reactor, tr_reactor_listener_register_publish_now, &request);
@@ -2792,10 +2768,9 @@ static int tr_reactor_listener_unregister_call_now(void *arg)
 	struct tr_reactor *reactor = request->reactor;
 	int ret;
 
-	/*
-	 * Reactor 当前只有一个 listener source。若 source 仍存在，必须确认
-	 * callback ownership 属于调用方，避免 teardown 一个无关 listener。
-	 * source 已经不存在时仍执行 fn，使 teardown 保持幂等。
+	/* 反应器当前只有一个监听器事件源。若事件源仍存在，必须确认
+	 * 回调所有权属于调用方，避免拆除一个无关监听器。
+	 * 事件源已经不存在时仍执行 fn，使拆除保持幂等。
 	 */
 	if (reactor->listener_fd >= 0) {
 		if (reactor->listener_cb != request->callback ||
@@ -3158,11 +3133,9 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_STATE;
 	}
 
-	/*
-	 * A successful stop() has already joined the previous owner and cleared
-	 * stop_submitted. Reset only the owner-loop flag before creating the next
-	 * epoch. The new thread blocks on ctl_lock until started/accepting and queue
-	 * admission all belong to the same epoch.
+	/* 成功的 stop() 已等待并回收前一个所有者，并清除了 stop_submitted。
+	 * 创建下一轮次前只重置所有者循环标志。新线程阻塞在 ctl_lock 上，
+	 * 直到 started/accepting 与队列准入都属于同一轮次。
 	 */
 	reactor->stopping = 0;
 	reactor->fatal_exit = 0;
@@ -3174,10 +3147,8 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_SYS;
 	}
 
-	/*
-	 * Reopen the queue-local admission epochs only after the consumer exists.
-	 * Both primitives advance their generation, so waiters from the previous
-	 * stopped epoch can never cross into this one.
+	/* 只有消费者存在后才重开队列本地准入轮次。
+	 * 两个原语都推进代次，因此前一已停止轮次的等待者绝不能进入本轮次。
 	 */
 	(void)tr_completion_queue_open(&reactor->completions);
 	(void)tr_command_queue_wait_open(&reactor->commands);
@@ -3258,9 +3229,8 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 		return TR_ERR_CLOSED;
 	}
 
-	/*
-	 * ctl_lock 只串行化 producer 控制面；slot capability 本身使用 atomic
-	 * generation+state 发布，Reactor event loop 不需要参与这把锁。
+	/* ctl_lock 只串行化生产者控制平面；槽位能力凭证本身使用原子
+	 * generation+state 发布，反应器事件循环不需要参与这把锁。
 	 */
 	ret = tr_slot_reserve(reactor, &slot, &generation);
 	if (ret != TR_OK) {
@@ -3305,9 +3275,8 @@ int tr_reactor_send_goaway_on_owner(struct tr_conn_handle handle)
 	if (!connection)
 		return TR_ERR_STALE;
 
-	/*
-	 * At most one terminal GOAWAY item exists per physical Connection. Repeated
-	 * drain publication before wire completion is therefore idempotent.
+	/* 每个物理 Connection 最多存在一个终止 GOAWAY 项。
+	 * 因此线协议完成前重复发布排空是幂等的。
 	 */
 	if (connection->lifecycle_tx_busy)
 		return TR_OK;
@@ -3321,10 +3290,8 @@ int tr_reactor_send_goaway_on_owner(struct tr_conn_handle handle)
 	item->message_pos = 0U;
 	item->max_frame_payload_len = reactor->config.max_payload_len;
 
-	/*
-	 * Snapshot the FIFO frontier under the command-queue lock. Commands already
-	 * admitted at this drain linearization point remain predecessors. Later
-	 * producers receive a larger sequence and cannot delay GOAWAY.
+	/* 在命令队列锁下对 FIFO 前沿取快照。此排空线性化点之前
+	 * 已获准的命令仍为前驱。后续生产者获得更大的序号，不能延后 GOAWAY。
 	 */
 	connection->lifecycle_after_sequence =
 		tr_command_queue_last_sequence(&reactor->commands);
@@ -3398,15 +3365,13 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 		return ret;
 	}
 
-	/*
-	 * Channel/RPC owner callbacks can attach TX directly only when doing so
-	 * cannot overtake command work. The synchronized empty check linearizes
-	 * against concurrent producers. command_dispatching additionally covers
-	 * commands already popped into the current local batch: those entries are
-	 * no longer in ring count but must remain FIFO predecessors.
+	/* Channel/RPC 所有者回调只有在不会越过命令工作时才能直接附接发送项。
+	 * 同步的空队列检查相对于并发生产者线性化。command_dispatching 还覆盖
+	 * 已弹出到当前本地批次的命令：这些条目已不计入环形队列数量，
+	 * 但必须仍为 FIFO 前驱。
 	 *
-	 * If either kind of predecessor exists, fall through to the normal bounded
-	 * command path. accepting remains the shutdown linearization gate.
+	 * 若任一类前驱存在，则继续走普通有界命令路径。
+	 * accepting 仍是关闭操作的线性化门禁。
 	 */
 	if (tr_reactor_is_owner_thread(reactor) &&
 	    !reactor->command_dispatching &&
@@ -3531,9 +3496,8 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 	if (!reactor || connection.slot >= reactor->config.max_connections)
 		return TR_ERR_INVALID;
 
-	/*
-	 * 已经位于 Reactor owner thread 时直接修改 connection 状态，
-	 * 避免同步 command 对自己形成自等待。
+	/* 已经位于反应器所有者线程时直接修改连接状态，
+	 * 避免同步命令对自己形成自等待。
 	 */
 	if (tr_reactor_is_owner_thread(reactor)) {
 		struct tr_connection *conn =
@@ -3651,7 +3615,7 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 		pthread_mutex_lock(&sync.lock);
 		while (!sync.done)
 			pthread_cond_wait(&sync.cond, &sync.lock);
-		/* A failed owner epoch may complete QUIESCE with TR_ERR_SYS. */
+		/* 失败的所有者轮次可能以 TR_ERR_SYS 完成 QUIESCE。 */
 		ret = sync.status;
 		pthread_mutex_unlock(&sync.lock);
 	}
@@ -3750,10 +3714,10 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 			__atomic_load_n(&conn->tx_wait_writable,
 					__ATOMIC_RELAXED);
 
-		/*
-		 * slot 在读取统计期间发生 close/reuse 时重新读取。
-		 * 如果 generation 已变化，则旧 handle 已 stale；如果只是同一
-		 * generation 的 state 转换，则重试得到同一个生命周期阶段的快照。
+		/* 槽位在读取统计期间发生关闭或复用时重新读取。
+		 * 如果 generation 已变化，则旧句柄已陈旧；如果只是同一
+		 * generation 的 state
+		 * 转换，则重试得到同一个生命周期阶段的快照。
 		 */
 		after = atomic_load_explicit(&reactor->slots[connection.slot].meta,
 					     memory_order_acquire);
@@ -3813,30 +3777,27 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	if (!reactor || !fn)
 		return TR_ERR_INVALID;
 
-	/*
-	 * owner 内提交 completion 时直接应用；跨线程才进入独立 completion
-	 * queue，避免 completion 再占用控制 command 容量。
+	/* 所有者内提交完成项时直接应用；跨线程才进入独立完成
+	 * 队列，避免完成项再占用控制命令容量。
 	 */
 	if (tr_reactor_is_owner_thread(reactor)) {
 		fn(arg);
 		return TR_OK;
 	}
 
-	/*
-	 * completion producer 不取得 ctl_lock。它必须在 handoff 开始时从
-	 * completion queue 取得明确的 admission generation，再观察 Reactor
-	 * RUNNING gate，并把原 token 带到最终入队点。这样 producer 即使跨越
-	 * stop/restart 被长时间挂起，也不能在醒来后误认新 epoch。
+	/* 完成项生产者不取得 ctl_lock。它必须在交接开始时从
+	 * 完成队列取得明确的准入代次，再观察反应器 RUNNING 门禁，
+	 * 并把原令牌带到最终入队点。这样生产者即使跨越
+	 * 停止或重启被长时间挂起，也不能在醒来后误认新轮次。
 	 */
 	admission_generation =
 		tr_completion_queue_admission_generation(&reactor->completions);
 	if (admission_generation == 0U)
 		return TR_ERR_CLOSED;
 
-	/*
-	 * queue open happens before start() publishes accepting=1. Keep the
-	 * Reactor-level gate as the final RUNNING publication, while the generation
-	 * above pins this producer to the exact queue epoch it first observed.
+	/* 队列开放发生在 start() 发布 accepting=1 之前。保留反应器级门禁
+	 * 作为最终 RUNNING 发布，同时上方的代次将此生产者
+	 * 限定到它最初观察到的精确队列轮次。
 	 */
 	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
 		return TR_ERR_CLOSED;
@@ -3844,12 +3805,11 @@ int tr_reactor_complete(struct tr_reactor *reactor, void (*fn)(void *arg),
 	completion.fn = fn;
 	completion.arg = arg;
 
-	/*
-	 * completion admission 与 capacity wait 都由 completions.lock/not_full
-	 * 串行化，不借用 Reactor ctl_lock。queue 满时 worker 睡眠；Reactor pop
-	 * 释放容量后唤醒，stop 则 close admission 并唤醒全部 waiter。
+	/* 完成项准入与容量等待都由 completions.lock/not_full
+	 * 串行化，不借用反应器 ctl_lock。队列满时工作线程睡眠；反应器弹出
+	 * 释放容量后唤醒，停止则关闭准入并唤醒全部等待者。
 	 *
-	 * 无论背压多重，worker 都不会回退直接修改 Reactor-owned protocol state。
+	 * 无论背压多重，工作线程都不会回退到直接修改反应器拥有的协议状态。
 	 */
 	ret = tr_reactor_push_completion(
 		reactor, &completion, admission_generation);
@@ -3866,8 +3826,7 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 	if (!reactor || !fn)
 		return TR_ERR_INVALID;
 
-	/*
-	 * Reactor callback/command 内部再次调用 owner API 时必须直接执行，
+	/* 反应器回调或命令内部再次调用所有者 API 时必须直接执行，
 	 * 否则同步等待自己会死锁。
 	 */
 	if (tr_reactor_is_owner_thread(reactor))
@@ -3896,9 +3855,8 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 			tr_command_queue_wait_generation(&reactor->commands);
 		pthread_mutex_unlock(&reactor->ctl_lock);
 
-		/*
-		 * 同步 owner call 保留现有 RPC API 的同步语义：有界 command ring
-		 * 满时在 queue-local condition 上等待容量，不把容量压力误报成业务失败，
+		/* 同步所有者调用保留现有 RPC API 的同步语义：有界命令环形队列
+		 * 满时在队列本地条件变量上等待容量，不把容量压力误报成业务失败，
 		 * 也不使用 sched_yield 忙等。
 		 */
 		if (wait_generation == 0U)
@@ -3926,9 +3884,8 @@ int tr_reactor_call_or_stopped(
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started) {
-		/*
-		 * 没有 owner thread，也没有可能复制 callback_arg 的 event dispatch。
-		 * ctl_lock 同时阻止另一个线程在 direct mutation 中启动 Reactor。
+		/* 没有所有者线程，也没有可能复制 callback_arg 的事件分派。
+		 * ctl_lock 同时阻止另一个线程在直接修改过程中启动反应器。
 		 */
 		ret = fn(arg);
 		pthread_mutex_unlock(&reactor->ctl_lock);
@@ -3940,9 +3897,8 @@ int tr_reactor_call_or_stopped(
 	}
 	pthread_mutex_unlock(&reactor->ctl_lock);
 
-	/*
-	 * stop 可能在释放 ctl_lock 后抢先关闭 admission；这种并发情况下
-	 * tr_reactor_call() 返回 CLOSED，caller 不能回退 direct mutation。
+	/* 停止操作可能在释放 ctl_lock 后抢先关闭准入；这种并发情况下
+	 * tr_reactor_call() 返回 CLOSED，调用者不能回退到直接修改。
 	 */
 	return tr_reactor_call(reactor, fn, arg);
 }
@@ -4198,10 +4154,9 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	if (!reactor)
 		return TR_ERR_INVALID;
 
-	/*
-	 * pthread_join(self) is a lifecycle bug, not a recoverable stop path.
-	 * Reject before closing admission so an owner callback cannot partially
-	 * stop its own Reactor and then continue on freed/closed state.
+	/* pthread_join(self) 是生命周期错误，不是可恢复的停止路径。
+	 * 关闭准入前先拒绝，使所有者回调不能部分停止自身反应器，
+	 * 然后继续操作已释放或已关闭的状态。
 	 */
 	if (tr_reactor_is_owner_thread(reactor))
 		return TR_ERR_STATE;
@@ -4212,26 +4167,25 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 		return TR_OK;
 	}
 
-	/*
-	 * stop_submitted separates two lifecycle barriers:
+	/* stop_submitted 区分两个生命周期屏障：
 	 *
-	 *   RUNNING -> STOP submitted/fatal exit -> owner exits -> join succeeds
+	 *   RUNNING -> STOP 已提交或致命退出 -> 所有者退出 -> 线程回收成功
 	 *
-	 * pthread_join() itself is fallible. Once STOP has been accepted, or a
-	 * fatal epoll error has ended the owner epoch, a retry must never enqueue
-	 * another STOP: the owner may already have exited, with no consumer to
-	 * process it.
+	 * pthread_join() 本身可能失败。一旦 STOP 被接受，或致命 epoll 错误
+	 * 结束所有者轮次，重试绝不能再入队另一个 STOP：
+	 * 所有者可能已经退出，没有消费者来处理它。
 	 */
 	if (!reactor->stop_submitted) {
 		atomic_store_explicit(&reactor->accepting, 0, memory_order_release);
-		/*
-		 * 先关闭所有 producer admission：
-		 * - completion waiter 由 completion queue close 唤醒；
-		 * - synchronous command waiter 由 command wait_close 唤醒；
-		 * 然后 STOP 自己以 lifecycle-only force wait 等待 ring capacity。
+		/* 先关闭所有生产者准入：
+		 * - 完成项等待者由完成队列关闭唤醒；
+		 * - 同步命令等待者由命令 wait_close 唤醒；
+		 * 然后 STOP
+		 * 自身通过仅用于生命周期的强制等待来等待环形队列容量。
 		 *
-		 * Reactor pop command 不取得 ctl_lock，因此这里持 ctl_lock 睡眠不会阻止
-		 * owner 释放 command slot，同时也阻止第二批普通 producer 越过 stop 边界。
+		 * 反应器弹出命令不取得 ctl_lock，因此这里持 ctl_lock
+		 * 睡眠不会阻止
+		 * 所有者释放命令槽位，同时也阻止第二批普通生产者越过停止边界。
 		 */
 		tr_completion_queue_close(&reactor->completions);
 		tr_command_queue_wait_close(&reactor->commands);
@@ -4266,19 +4220,17 @@ int tr_reactor_destroy(struct tr_reactor *reactor)
 		return TR_OK;
 
 	if (reactor->started) {
-		/*
-		 * stop()/pthread_join 是显式可重试生命周期屏障。失败时 Reactor
-		 * 仍由调用方拥有，destroy 必须传播错误，debug 构建不能抢先 abort。
+		/* stop()/pthread_join 是显式可重试生命周期屏障。失败时反应器
+		 * 仍由调用方拥有，销毁必须传播错误，调试构建不能抢先中止。
 		 */
 		ret = tr_reactor_stop(reactor);
 		if (ret != TR_OK)
 			return ret;
 	}
 
-	/*
-	 * RX payload ownership may escape a callback through
-	 * TR_FRAME_TAKE_OWNERSHIP. Check that terminal edge before tearing down
-	 * epoll/queues/slots; a failed destroy must leave a retryable Reactor shell.
+	/* 接收负载所有权可能通过 TR_FRAME_TAKE_OWNERSHIP 逃逸回调。
+	 * 拆除 epoll、队列与槽位前检查该终止边界；
+	 * 失败的销毁必须留下可重试的反应器外壳。
 	 */
 	ret = tr_buffer_pool_destroy(&reactor->rx_pool);
 #ifndef NDEBUG
