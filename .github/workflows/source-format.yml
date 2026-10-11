@@ -1,0 +1,30 @@
+name: 修改源码格式检查
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  changed-source:
+    name: 新增与修改行格式门禁
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 安装固定版本格式工具
+        run: python -m pip install 'clang-format==18.1.8'
+      - name: 运行门禁正反例自测
+        run: python scripts/test_source_format.py
+      - name: 检查新增和修改的源码行
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/check_source_format.py --base "$BASE_SHA" --head "$HEAD_SHA"
