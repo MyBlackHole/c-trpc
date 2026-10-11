@@ -340,7 +340,7 @@ RPC
 目标包括：
 
 - 客户端 / 服务端生命周期；
-- Method/Call/Streaming；
+- Method/Call/流式调用；
 - 通用传输/连接组高层能力；
 - 语义限制；
 - 稳定可观测性。
@@ -622,7 +622,7 @@ add_headerfiles("include/(tr/*.h)")
 - `xmake.lua` 使用显式安装头文件白名单；
 - CI 对安装后的头文件集合执行精确差异检查，并显式断言历史内部头文件不得安装；
 - `include/tr/` 的物理内容现在与稳定安装 SDK 闭包一致，只保留 8 个公开头文件；
-- Reactor/Channel/Buffer/解析器/线协议/套接字、CRC/endian、生命周期与诊断头文件都已经回收到 `src/`；
+- Reactor/Channel/Buffer/解析器/线协议/套接字、CRC/字节序、生命周期与诊断头文件都已经回收到 `src/`；
 - `rpc.h` 只保留应用 RPC 契约，Endpoint 引擎构造位于 `src/rpc/rpc_internal.h`。
 
 以后新增高级公开能力必须显式加入白名单并定义兼容级别，不能依靠目录位置自动发布。
@@ -665,7 +665,7 @@ add_headerfiles("include/(tr/*.h)")
 
 ```text
 include/tr/rpc.h
-  -> Method / Call / Streaming 应用契约
+  -> Method / Call / 流式调用应用契约
 
 src/rpc/rpc_internal.h
   -> Endpoint 配置/创建/销毁

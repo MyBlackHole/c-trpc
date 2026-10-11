@@ -84,9 +84,9 @@ sequenceDiagram
     participant M as 元数据后端
 
     C->>S: RESUME_BACKUP(backup_id, previous_epoch=17)
-    S->>M: 获取下一 epoch / 加载持久化进度
-    M-->>S: epoch=18, checkpoint
-    S-->>C: pipeline_id, epoch=18, route token, missing ranges
+    S->>M: 获取下一代次 / 加载持久化进度
+    M-->>S: epoch=18, 检查点
+    S-->>C: pipeline_id, epoch=18, 路由令牌, 缺失区间
     C->>S: 仅重传尚未持久化的数据块
 ```
 
