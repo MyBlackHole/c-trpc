@@ -9,7 +9,7 @@ Copyright 2026 Black Hole
 
 ## 当前分发内容
 
-当前源码树未包含 vendored 第三方库或 Git submodule。构建依赖操作系统的
+当前源码树未包含随源码分发的第三方库或 Git 子模块。构建依赖操作系统的
 POSIX/Linux 接口、C/POSIX 运行库和编译器；Xmake、编译器、格式检查器及 CI
 Actions 是外部工具，不因本项目许可而被重新授权。重新分发这些工具或系统库时，
 应另行遵守其各自许可。

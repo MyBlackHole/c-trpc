@@ -59,7 +59,7 @@ xmake f -c -y -m debug --toolchain=clang
 xmake build --all
 xmake test -v -j1
 
-# 切回 GCC release
+# 切回 GCC 的 release 模式
 xmake f -c -y -m release --toolchain=gcc
 xmake test -v -j1
 ```
@@ -162,7 +162,7 @@ make all CC=gcc CFLAGS='-I"/opt/vendor sdk/include"' \
 
 检查类别包括 GCC（`debug + release`）、Clang（`release`）、
 ASan + UBSan、TSan，以及 Make 兼容/编译器切换/SDK 安装/独立进程示例。
-功能与 sanitizer 检查均构建全部目标，并通过 `xmake test` 执行所有注册测试。
+功能与内存/线程检查器检查均构建全部目标，并通过 `xmake test` 执行所有注册测试。
 Make 兼容检查还使用包含空格/单引号的工具路径、强制包含头文件路径和带引号的字符串宏，
 实际构建全部目标并运行测试；通过 `readelf` 验证最终 ELF
 保留字面量 `$ORIGIN`，而不只是检查配置命令显示文本。

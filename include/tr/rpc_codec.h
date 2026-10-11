@@ -15,10 +15,10 @@ struct tr_rpc_bytes {
 };
 
 /*
- * RAW 是 V1 baseline codec。
- * 下面的 copied helper 适合 application-facing 小消息。
- * 内部 Transport engine 可以使用 copy-minimal Buffer fast path，但该能力
- * 不属于 stable RPC application contract。
+ * RAW 是 V1 基线编解码器。
+ * 下面采用复制方式的辅助接口适合面向应用的小消息。
+ * 内部 Transport 引擎可以使用尽量少复制的 Buffer 快速路径，但该能力
+ * 不属于稳定的 RPC 应用契约。
  */
 int tr_rpc_raw_encode(const struct tr_rpc_bytes *input, uint8_t *dst,
 		      uint32_t capacity, uint32_t *written);

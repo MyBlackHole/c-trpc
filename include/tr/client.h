@@ -20,19 +20,19 @@ struct tr_client_config {
 	uint32_t connect_timeout_ms;
 
 	/*
-	 * DEFAULT/ENABLED 在首次连接及自动 reconnect 的 TCP socket 上启用
+	 * DEFAULT/ENABLED 在首次连接及自动重连的 TCP 套接字上启用
 	 * TCP_NODELAY；DISABLED 保留内核默认 Nagle 行为。
 	 */
 	enum tr_tcp_nodelay_policy tcp_nodelay;
 
-	/* 0 表示禁用 Transport keepalive。 */
+	/* 0 表示禁用 Transport 保活。 */
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
-	/* RPC Call-level owner interceptor；fn==NULL 表示禁用。 */
+	/* RPC Call 级所有者拦截器；fn==NULL 表示禁用。 */
 	struct tr_rpc_interceptor interceptor;
 
-	/* 可选的 connection-level reconnect；in-flight Call 永远不会透明 replay。 */
+	/* 可选的连接级重连；进行中的 Call 永远不会透明重放。 */
 	int enable_reconnect;
 	uint32_t reconnect_initial_delay_ms;
 	uint32_t reconnect_max_delay_ms;
@@ -41,31 +41,31 @@ struct tr_client_config {
 void tr_client_config_init(struct tr_client_config *config);
 
 /*
- * 正常成功时返回 TR_OK 并把 Client ownership 写入 *out。
- * 正常构造失败且 rollback 完整收敛时，*out 保持 NULL。
+ * 正常成功时返回 TR_OK，并通过 *out 向调用方转移 Client 所有权。
+ * 正常构造失败且回滚完整收敛时，*out 保持 NULL。
  *
- * 极端情况下，如果构造失败后的 terminal rollback 自身也失败，函数返回该
- * 生命周期错误，同时 *out 保留 partial Client ownership；调用方必须停止
- * 继续使用业务 API，并通过 tr_client_destroy() 重试收敛。
+ * 极端情况下，如果构造失败后的终止回滚自身也失败，函数返回该
+ * 生命周期错误，同时 *out 保留部分构造的 Client 的所有权；调用方必须
+ * 停止继续使用业务 API，并通过 tr_client_destroy() 重试收敛。
  */
 int tr_client_create(const struct tr_client_config *config,
 		     struct tr_client **out);
 
 /*
- * V1 facade 仅接受数字 IPv4 address。
+ * V1 门面仅接受数字形式的 IPv4 地址。
  *
- * fd 被 Reactor 接管后，后续 Channel/RPC/keepalive/reconnect 任一步失败都会
- * 同步执行 session rollback。只有 rollback 完整收敛时才返回原 connect 错误；
- * rollback 自身失败时返回该生命周期错误，并保留 Client ownership 与尚未收敛
- * 的内部对象，调用方应停止新的 connect 并通过 tr_client_destroy() 重试终止。
+ * fd 被 Reactor 接管后，后续 Channel/RPC/保活/重连任一步失败都会
+ * 同步执行会话回滚。只有回滚完整收敛时才返回原连接错误；
+ * 回滚自身失败时返回该生命周期错误，并保留 Client 所有权与尚未收敛
+ * 的内部对象，调用方应停止新的连接尝试并通过 tr_client_destroy() 重试终止。
  */
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port);
 
 /*
- * 同步等待连接进入 ready。
- * 该操作依赖 Reactor progress，必须从外部控制线程调用；Reactor owner
- * callback / interceptor / RPC worker callback 中调用返回 TR_ERR_STATE。
+ * 同步等待连接就绪。
+ * 该操作依赖 Reactor 推进，必须从外部控制线程调用；从 Reactor 所有者
+ * 回调、拦截器或 RPC 工作线程回调中调用时返回 TR_ERR_STATE。
  */
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms);
 
@@ -96,10 +96,10 @@ int tr_client_call_start(struct tr_client *client, uint32_t service_id,
 			 struct tr_rpc_call_handle *out);
 
 /*
- * begin_drain() 只发布单调 drain intent，可从 callback 内调用。
+ * begin_drain() 只发布单调的排空意图，可从回调内调用。
  * wait_drained() 会同步等待现有 Stream 收敛，必须从外部控制线程调用；
- * Reactor owner callback / interceptor / RPC worker callback 中调用返回
- * TR_ERR_STATE，避免等待当前 execution context 自己完成。
+ * 从 Reactor 所有者回调、拦截器或 RPC 工作线程回调中调用时返回
+ * TR_ERR_STATE，避免等待当前执行上下文本身完成。
  */
 int tr_client_begin_drain(struct tr_client *client);
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
@@ -116,11 +116,11 @@ int tr_client_get_rpc_semantic_stats(
  * RPC 处理器/结果/事件回调。此类回调必须先把关闭意图交给外部控制线程，
  * 然后从回调返回。
  *
- * destroy 只执行 terminal teardown，不隐式执行 graceful drain，也没有内部
+ * destroy 只执行终止拆除，不隐式执行优雅排空，也没有内部
  * 超时策略。需要优雅关闭时，调用方必须先显式 begin_drain()/wait_drained()。
  *
- * 返回 TR_OK 才表示 Client storage 已释放。任何错误都表示对象仍由调用方拥有，
- * 可能已进入部分 terminal 状态；调用方修复 outstanding ownership 后可重试。
+ * 返回 TR_OK 才表示 Client 存储已释放。任何错误都表示对象仍由调用方拥有，
+ * 可能已进入部分终止状态；调用方解决尚未归还的所有权后可重试。
  *
  * Call 句柄不会延长 Client 生命周期；不得与该销毁操作并发使用，
  * 也不得在销毁完成后继续使用。
