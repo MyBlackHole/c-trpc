@@ -314,9 +314,8 @@ int main(void)
 	assert(tr_channel_wait_ready(server, TR_LANE_CONTROL, 5000U) == TR_OK);
 	assert(tr_buffer_pool_init(&pool, 8U, 512U) == TR_OK);
 
-	/*
-	 * Two failed submissions must be coalesced to the latest absolute
-	 * credit limit. The timer stays active even though keepalive is disabled.
+	/* 两次失败提交必须合并为最新的绝对额度上限。
+	 * 即使禁用保活，定时器也保持活跃。
 	 */
 	first = open_stream(client, &client_ctx, &server_ctx, 1U);
 	send_bytes(first, &pool, 128U);
@@ -334,8 +333,8 @@ int main(void)
 	wait_attempts(attempts_before + 3U);
 	wait_flow(first, 2U * WINDOW_BYTES);
 	assert(tr_channel_get_stats(server, &stats) == TR_OK);
-	/* Absolute credit never overflows the peer window, regardless of how
-	 * many retries were needed. The wire limit is checked above.
+	/* 无论需要多少次重试，绝对额度都不会使对端窗口溢出。
+	 * 线协议上限已在上方检查。
 	 */
 	assert(stats.window_updates_tx > updates_before);
 	send_bytes(first, &pool, 256U);
@@ -343,7 +342,7 @@ int main(void)
 	assert(release_message(&server_ctx, 2U) == TR_OK);
 	close_stream(first, &server_ctx, client, server);
 
-	/* Disabling keepalive cannot disarm the only pending credit retry. */
+	/* 禁用保活不能解除唯一待处理额度重试的定时。 */
 	second = open_stream(client, &client_ctx, &server_ctx, 2U);
 	keepalive.interval_ms = 10000U;
 	keepalive.timeout_ms = 10000U;
@@ -356,9 +355,8 @@ int main(void)
 	wait_flow(second, 2U * WINDOW_BYTES);
 	close_stream(second, &server_ctx, client, server);
 
-	/*
-	 * Retire a Stream with an outstanding retry, then reuse its only slot.
-	 * The old absolute credit must never apply to the new stream_id.
+	/* 退役带有未完成重试的流，然后复用其唯一槽位。
+	 * 旧绝对额度绝不能应用到新的 stream_id。
 	 */
 	third = open_stream(client, &client_ctx, &server_ctx, 3U);
 	send_bytes(third, &pool, WINDOW_BYTES);
@@ -366,8 +364,8 @@ int main(void)
 	atomic_store_explicit(&fail_window_updates, 100U, memory_order_relaxed);
 	assert(release_message(&server_ctx, 4U) == TR_AGAIN);
 	close_stream(third, &server_ctx, client, server);
-	/* Initial Stream OPEN itself requires a WINDOW_UPDATE: end injection
-	 * before opening the replacement, then isolate the old retry timer.
+	/* 初始流 OPEN 本身需要 WINDOW_UPDATE：
+	 * 打开替代流前结束注入，然后隔离旧重试定时器。
 	 */
 	atomic_store_explicit(&fail_window_updates, 0U, memory_order_relaxed);
 	fourth = open_stream(client, &client_ctx, &server_ctx, 4U);
@@ -380,8 +378,8 @@ int main(void)
 	assert(tr_stream_get_flow_state(fourth, &flow) == TR_OK);
 	assert(flow.tx_send_limit == WINDOW_BYTES);
 
-	/* An owner callback returning RELEASE also needs automatic retry; unlike
-	 * retained payloads it cannot rely on a future public release call.
+	/* 返回 RELEASE 的所有者回调也需要自动重试；
+	 * 与保留的负载不同，它不能依赖未来的公开释放调用。
 	 */
 	atomic_store_explicit(&auto_release_data, 1, memory_order_relaxed);
 	atomic_store_explicit(&fail_window_updates, 2U, memory_order_relaxed);
@@ -392,9 +390,8 @@ int main(void)
 	atomic_store_explicit(&auto_release_data, 0, memory_order_relaxed);
 	close_stream(fourth, &server_ctx, client, server);
 
-	/*
-	 * Stop the Reactor while a real WINDOW_UPDATE obligation remains armed.
-	 * Channel destroy must unregister its callback before releasing storage.
+	/* 真实 WINDOW_UPDATE 义务仍处于定时状态时停止反应器。
+	 * Channel 销毁必须在释放存储前注销其回调。
 	 */
 	fifth = open_stream(client, &client_ctx, &server_ctx, 5U);
 	send_bytes(fifth, &pool, WINDOW_BYTES);

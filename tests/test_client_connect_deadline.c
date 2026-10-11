@@ -136,7 +136,7 @@ int __wrap_pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex,
 	assert(probe->finish_calls == 1U);
 	assert(probe->now.tv_sec == 100);
 	assert(probe->now.tv_nsec == (long)probe->tcp_elapsed_ms * 1000000L);
-	/* TCP 已消耗 80ms，真实 HELLO wait 只能继承原 100ms 绝对期限。 */
+	/* TCP 已消耗 80ms，真实 HELLO 等待只能继承原 100ms 绝对期限。 */
 	assert(deadline->tv_sec == 100);
 	assert(deadline->tv_nsec == (long)TEST_TIMEOUT_MS * 1000000L);
 	probe->hello_waits++;
@@ -191,7 +191,7 @@ int main(void)
 	config.keepalive_interval_ms = 0U;
 	config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
 	assert(tr_client_create(&config, &client) == TR_OK);
-	/* 同一个 Client 重复连接，证明各失败路径没有留下 partial session。 */
+	/* 同一个 Client 重复连接，证明各失败路径没有留下部分会话。 */
 	run_case(client, 80U, 0U, 0);
 	run_case(client, 80U, 3U, 0);
 	run_case(client, 100U, 0U, 0);

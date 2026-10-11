@@ -17,11 +17,9 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * A non-writable pipe read end makes a deterministic CONNECTING socket:
- * the Connector registers EPOLLOUT but cannot complete before cancellation.
- * Only the reconnect attempt is redirected; initial Channel connections
- * use ordinary socketpairs and the real Reactor.
+/* 不可写的管道读端形成确定性的 CONNECTING 套接字：
+ * Connector 注册 EPOLLOUT，但在取消前无法完成。
+ * 只重定向重连尝试；初始 Channel 连接使用普通套接字对与真实反应器。
  */
 static atomic_int fake_connect_enabled;
 static atomic_int fake_connector_fd;
@@ -49,8 +47,8 @@ int __wrap_tr_tcp_connect_ipv4(const char *address, uint16_t port,
 	(void)port;
 	assert(pipe2(fds, O_NONBLOCK | O_CLOEXEC) == 0);
 	*out_fd = fds[0];
-	/* Keep the writer open: otherwise EPOLLHUP would complete the fake
-	 * connection before the cancellation barrier can be exercised.
+	/* 保持写端打开：否则 EPOLLHUP 会在取消屏障被测试前
+	 * 完成伪造连接。
 	 */
 	atomic_store_explicit(&fake_connector_peer, fds[1],
 				      memory_order_release);
@@ -219,10 +217,9 @@ int main(void)
 	assert(watched_fd >= 0);
 	assert(fcntl(watched_fd, F_GETFD) >= 0);
 
-	/*
-	 * The first Channel destroy crosses the waiter and keepalive barriers,
-	 * then fails to detach the Connector's epoll source. The Channel and
-	 * callback_arg must remain live so a second destroy can retry safely.
+	/* 第一次 Channel 销毁跨过等待者与保活屏障，
+	 * 然后解绑 Connector 的 epoll 事件源失败。Channel 与 callback_arg
+	 * 必须保持存活，使第二次销毁能够安全重试。
 	 */
 	atomic_store(&fail_aux_unregister_once, 1);
 	assert(tr_channel_destroy(client) == TR_ERR_SYS);
@@ -230,8 +227,8 @@ int main(void)
 	assert(atomic_load(&aux_unregister_count) == 1U);
 	assert(fcntl(watched_fd, F_GETFD) >= 0);
 
-	/* Retry removes the source, disarms the timeout, closes its fd, and
-	 * finally releases Channel storage. No late callback may follow.
+	/* 重试移除事件源、解除超时定时、关闭其 fd，
+	 * 最后释放 Channel 存储。之后不得有迟到回调。
 	 */
 	assert(tr_channel_destroy(client) == TR_OK);
 	client = NULL;

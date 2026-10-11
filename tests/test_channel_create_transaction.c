@@ -135,7 +135,7 @@ static void fixture_init(struct channel_create_fixture *fixture, int split)
 		fixture->bulk = fixture->control;
 	}
 
-	/* adopt command 必须先进入 owner state，随后构造预检才能观察 ACTIVE。 */
+	/* 接管命令必须先进入所有者状态，随后构造预检才能观察 ACTIVE。 */
 	assert(tr_reactor_quiesce(fixture->reactor) == TR_OK);
 	reset_faults();
 }
@@ -221,9 +221,8 @@ static void test_second_handler_failure_rolls_back_in_owner_turn(void)
 		       NULL, NULL, NULL, NULL, &channel) == TR_ERR_SYS);
 	assert(channel == NULL);
 
-	/*
-	 * 第一次 control publication 成功，第二次 bulk publication 被注入失败；
-	 * 第三次 set_handler 是同一 owner turn 内撤销 control callback source。
+	/* 第一次控制通道发布成功，第二次批量通道发布被注入失败；
+	 * 第三次 set_handler 是同一所有者处理轮次内撤销控制回调源。
 	 */
 	assert(atomic_load(&handler_attempts) == 3U);
 	assert(atomic_load(&timer_register_attempts) == 0U);
@@ -270,9 +269,8 @@ static void test_timer_publish_failure_needs_no_timer_rollback(void)
 		       NULL, NULL, NULL, NULL, &channel) == TR_ERR_SYS);
 	assert(channel == NULL);
 
-	/*
-	 * timer 是 transaction 的最后一个 publication。register 自身失败时
-	 * handle 从未发布，因此 error path 不允许调用 timer_unregister。
+	/* 定时器是事务的最后一个发布。注册自身失败时
+	 * 句柄从未发布，因此错误路径不允许调用 timer_unregister。
 	 */
 	assert(atomic_load(&handler_attempts) == 2U);
 	assert(atomic_load(&timer_register_attempts) == 1U);

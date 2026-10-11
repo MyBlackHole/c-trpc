@@ -228,7 +228,7 @@ static void test_stop_fifo_budget_and_epoch(void)
 		       &queue, &command, old_generation, NULL) == TR_ERR_CLOSED);
 	assert(tr_command_queue_wait_open(&queue) == TR_ERR_STATE);
 
-	/* 满 batch 只能弹出两个前驱，STOP 留到下一 batch，不能突破预算。 */
+	/* 满批次只能弹出两个前驱，STOP 留到下一批次，不能突破预算。 */
 	assert(tr_command_queue_pop_batch(&queue, out, 2U) == 2U);
 	assert(out[0].sequence == 1U && out[1].sequence == 2U);
 	assert(queue.count == 0U && queue.stop_pending);
@@ -324,7 +324,7 @@ static void test_sequence_wrap_order(void)
 	command.type = TR_CMD_RESUME_RX;
 	assert(tr_command_queue_init(&queue, 2U) == TR_OK);
 
-	/* Force the only interesting boundary without executing 2^64 pushes. */
+	/* 不执行 2^64 次入队，直接构造唯一值得关注的边界。 */
 	pthread_mutex_lock(&queue.lock);
 	queue.next_sequence = UINT64_MAX - 1U;
 	pthread_mutex_unlock(&queue.lock);

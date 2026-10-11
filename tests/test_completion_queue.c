@@ -85,13 +85,12 @@ static void test_completion_capacity_wait_and_close(void)
 	assert(out[0].arg == (void *)(uintptr_t)1U);
 	assert(pthread_join(thread, NULL) == 0);
 	assert(producer.ret == TR_OK);
-	/* pop 清空了旧 wake epoch，blocked producer 必须重新请求 wake。 */
+	/* 弹出清空了旧唤醒轮次，被阻塞的生产者必须重新请求唤醒。 */
 	assert(producer.need_wake == 1);
 	wait_for_waiters(&queue, 0U);
 
-	/*
-	 * queue 再次满时，close 必须直接唤醒 waiter 返回 CLOSED；producer
-	 * ownership 未转移，已有 completion 仍可由 consumer drain。
+	/* 队列再次满时，关闭必须直接唤醒等待者返回 CLOSED；生产者
+	 * 所有权未转移，已有完成项仍可由消费者排空。
 	 */
 	producer.completion.arg = (void *)(uintptr_t)3U;
 	producer.ret = TR_OK;
@@ -106,9 +105,8 @@ static void test_completion_capacity_wait_and_close(void)
 		closed_generation = queue.admission_generation;
 		pthread_mutex_unlock(&queue.lock);
 
-		/*
-		 * 故意在旧 waiter join 前 reopen。旧 generation 无论何时重新取得
-		 * queue lock，都不能把上一运行期的 completion 投进新 epoch。
+		/* 故意在旧等待线程回收前重开。旧 generation 无论何时重新取得
+		 * 队列锁，都不能把上一运行期的完成项投入新轮次。
 		 */
 		assert(tr_completion_queue_open(&queue) == TR_OK);
 		pthread_mutex_lock(&queue.lock);
@@ -227,7 +225,7 @@ static void test_completion_admission_and_wake_coalescing(void)
 	assert(count == 1U);
 	assert(has_more == 1);
 
-	/* Admission close is independent of remaining queued completions. */
+	/* 准入关闭独立于剩余排队完成项。 */
 	tr_completion_queue_close(&queue);
 	assert(tr_completion_queue_push(&queue, &completion, NULL) ==
 	       TR_ERR_CLOSED);
@@ -237,7 +235,7 @@ static void test_completion_admission_and_wake_coalescing(void)
 	assert(count == 1U);
 	assert(has_more == 0);
 
-	/* Empty-drain clears wake coalescing; reopening starts a new wake epoch. */
+	/* 空队列排空清除唤醒合并；重开启动新唤醒轮次。 */
 	assert(tr_completion_queue_open(&queue) == TR_OK);
 	need_wake = 0;
 	assert(tr_completion_queue_push(&queue, &completion, &need_wake) == TR_OK);
@@ -267,9 +265,8 @@ static void test_completion_delayed_old_epoch_rejected(void)
 	old_generation = tr_completion_queue_admission_generation(&queue);
 	assert(old_generation != 0U);
 
-	/*
-	 * 模拟 producer 已经开始旧 epoch handoff 并保存 token，但在真正取得
-	 * queue lock 前被长时间调度出去。
+	/* 模拟生产者已经开始旧轮次交接并保存令牌，
+	 * 但在真正取得队列锁前被长时间调度出去。
 	 */
 	tr_completion_queue_close(&queue);
 	assert(tr_completion_queue_open(&queue) == TR_OK);

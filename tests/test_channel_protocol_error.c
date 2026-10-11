@@ -55,12 +55,11 @@ static struct test_ctx *active;
 int __real_tr_reactor_abort_on_owner(struct tr_conn_handle connection,
 				     int status);
 
-/*
- * The malformed frame callback is running on the sole Reactor owner.
- * Fill the *real* command ring with harmless RESUME_RX entries right before
- * the requested abort; no consumer can pop them until this callback returns.
- * An ordinary tr_reactor_close would now fail with TR_AGAIN, whereas the
- * owner-only abort must retire the exact connection immediately.
+/* 畸形帧回调正在唯一反应器所有者上运行。
+ * 就在请求中止前，用无害的 RESUME_RX 条目填满真实命令环形队列；
+ * 此回调返回前，没有消费者可以弹出它们。
+ * 普通 tr_reactor_close 此时会以 TR_AGAIN 失败，
+ * 而仅限所有者的中止必须立即退役精确连接。
  */
 int __wrap_tr_reactor_abort_on_owner(struct tr_conn_handle connection,
 				     int status)
@@ -247,7 +246,7 @@ static void send_bad_frame(enum malformed_frame kind,
 		memset(payload->data, 0, size);
 		payload->len = size;
 	}
-	/* On success the Reactor owns payload, including the malformed frame. */
+	/* 成功时反应器拥有 payload，包括畸形帧。 */
 	assert(tr_reactor_send(sender, type, flags, stream_id, message_id,
 			       payload) == TR_OK);
 }
@@ -339,7 +338,7 @@ static void test_protocol_error(enum malformed_frame kind)
 	       TR_OK);
 	assert(tr_buffer_pool_init(&pool, PAYLOAD_COUNT, 64U) == TR_OK);
 
-	/* A live Stream proves Channel error cleanup runs synchronously. */
+	/* 存活流证明 Channel 错误清理同步运行。 */
 	assert(tr_stream_open(bad_client, TR_LANE_CONTROL, &bad_stream) ==
 	       TR_OK);
 	wait_count(&ctx, &ctx.bad_server_opened, 1U, "bad Stream opened");
@@ -365,14 +364,13 @@ static void test_protocol_error(enum malformed_frame kind)
 	assert(state == TR_CHANNEL_LANE_DOWN);
 	assert(tr_channel_active_streams(bad_server) == 0U);
 
-	/*
-	 * 错误回调的通知早于本轮 owner 返回。同步 abort 的断言已在上面验证；
+	/* 错误回调的通知早于本轮所有者返回。同步中止的断言已在上面验证；
 	 * 后续健康连接探针先等待故意填满的命令队列排空，避免把正常的
 	 * TR_AGAIN 准入背压误判为另一连接失效。
 	 */
 	assert(tr_reactor_quiesce(reactor) == TR_OK);
 
-	/* The other connection on this same Reactor remains fully functional. */
+	/* 同一反应器上的另一连接仍完整可用。 */
 	assert(tr_channel_get_lane_state(good_server, TR_LANE_CONTROL, &state) ==
 	       TR_OK);
 	assert(state == TR_CHANNEL_LANE_UP);
@@ -388,16 +386,12 @@ static void test_protocol_error(enum malformed_frame kind)
 	assert(tr_stream_close(server_stream) == TR_OK);
 	wait_streams_empty(good_client, good_server);
 
-	/*
-	 * Reuse the victim connection slot. An old-generation abort must not
-	 * touch the replacement, even while its Channel still holds the stale
-	 * previous handle pending teardown.
+	/* 复用受测连接槽位。旧代次中止不得接触替代连接，
+	 * 即使其 Channel 仍持有陈旧的前一个句柄等待拆除。
 	 */
 	atomic_store_explicit(&ctx.inject, 0, memory_order_release);
-	/*
-	 * The peer half may also have freed a lower-numbered slot. Keep
-	 * replacement owners alive until the exact victim slot is reused;
-	 * do not assume a fixed order for the two EOF callbacks.
+	/* 对端半侧也可能释放了编号更低的槽位。保持替代所有者存活，
+	 * 直到精确的受测槽位被复用；不要假定两个 EOF 回调有固定顺序。
 	 */
 	while (replacement_count < 2U && !found_replacement) {
 		create_pair(&replacement_fd,
