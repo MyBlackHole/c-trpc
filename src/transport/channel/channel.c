@@ -2575,6 +2575,21 @@ struct tr_reactor *tr_channel_reactor(struct tr_channel *channel)
 	return channel ? channel->reactor : NULL;
 }
 
+int tr_channel_abort_lane_on_owner(struct tr_channel *channel,
+                                  enum tr_lane lane, int status)
+{
+	struct tr_conn_handle connection;
+
+	if (!channel || (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK) ||
+	    status >= 0)
+		return TR_ERR_INVALID;
+	pthread_mutex_lock(&channel->lock);
+	connection = lane == TR_LANE_CONTROL ? channel->control_connection :
+					     channel->bulk_connection;
+	pthread_mutex_unlock(&channel->lock);
+	return tr_reactor_abort_on_owner(connection, status);
+}
+
 uint32_t tr_channel_max_streams(struct tr_channel *channel)
 {
 	return channel ? channel->config.max_streams : 0U;
@@ -4135,6 +4150,21 @@ int tr_stream_get_flow_state(struct tr_stream_handle handle,
 	out->rx_advertised_limit = stream->rx_advertised_limit;
 	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
+}
+
+int tr_stream_get_lane_internal(struct tr_stream_handle handle,
+                               enum tr_lane *out)
+{
+	struct tr_stream_slot *stream;
+
+	if (!handle.channel || !out)
+		return TR_ERR_INVALID;
+	pthread_mutex_lock(&handle.channel->lock);
+	stream = tr_stream_lookup_handle(handle);
+	if (stream)
+		*out = stream->lane;
+	pthread_mutex_unlock(&handle.channel->lock);
+	return stream ? TR_OK : TR_ERR_STALE;
 }
 
 int tr_stream_get_diagnostics(struct tr_stream_handle handle,

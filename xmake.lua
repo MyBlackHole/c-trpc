@@ -142,7 +142,8 @@ for _, name in ipairs({"test_reactor_timer_deadline", "test_rpc_deadline_failure
         elseif name == "test_rpc_deadline_failure" then
             add_ldflags("-Wl,--wrap=clock_gettime",
                         "-Wl,--wrap=tr_reactor_timer_register",
-                        "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
+                        "-Wl,--wrap=tr_reactor_timer_arm",
+                        "-Wl,--wrap=tr_rpc_wire_decode_ex", {force = true})
         elseif name == "test_connector_deadline" then
             add_ldflags("-Wl,--wrap=tr_tcp_connect_ipv4",
                         "-Wl,--wrap=tr_tcp_finish_connect",
@@ -238,14 +239,19 @@ for _, name in ipairs({"test_reactor_timer_deadline", "test_rpc_deadline_failure
             add_ldflags("-Wl,--wrap=tr_command_queue_push_wait_force",
                         "-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=pthread_join", {force = true})
+
         elseif name == "test_rpc_unary_failure" then
             -- OOM and pool-exhaustion injection belongs to the test binary.
             add_ldflags("-Wl,--wrap=malloc",
                         "-Wl,--wrap=tr_buffer_acquire",
-                        "-Wl,--wrap=tr_reactor_send", {force = true})
+                        "-Wl,--wrap=tr_reactor_send",
+                        "-Wl,--wrap=clock_gettime",
+                        "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_rpc_final_close_retry" then
-            -- Fail only server STREAM_CLOSE control admission.
-            add_ldflags("-Wl,--wrap=tr_reactor_send", {force = true})
+            -- 注入服务端 STREAM_CLOSE 准入与首次重试调度失败。
+            add_ldflags("-Wl,--wrap=tr_reactor_send",
+                        "-Wl,--wrap=clock_gettime",
+                        "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_channel_protocol_error" then
             -- Observe immediate owner abort while the actual command ring is full.
             add_ldflags("-Wl,--wrap=tr_reactor_abort_on_owner", {force = true})
