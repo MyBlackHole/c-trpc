@@ -479,7 +479,8 @@ static void test_cleanup_and_callback_progress(int cancel_root)
 	for (i = 0; i < 3U; ++i)
 		assert(f.status[i] == (cancel_root && i == 0U ?
 			TR_RPC_STATUS_CANCELLED : TR_RPC_STATUS_DEADLINE_EXCEEDED));
-	/* #195 的终态删除仍尝试 rearm；注入失败后必须继续唯一终态推进。 */
+	/* #195 的终态删除仍尝试重新设置定时；注入失败后必须继续唯一终态推进。
+	 */
 	assert(atomic_load(&failed_arms) >= 1U);
 	assert_heap_count(&f, 0U);
 	fixture_destroy(&f);
@@ -613,7 +614,7 @@ static void test_half_close_order(int remote_first)
 	fixture_init(&f);
 	f.respond = 3;
 	callbacks.on_event = on_call_event;
-	/* 不设置 deadline，证明终态由半关闭本身产生，不由定时器兜底。 */
+	/* 不设置截止时间，证明终态由半关闭本身产生，不由定时器兜底。 */
 	for (i = 0; i < 3U; ++i) {
 		callbacks.arg = &f.args[i];
 		assert(tr_rpc_call_start(f.rpc, 1U, 2U, &callbacks, &f.calls[0]) == TR_OK);

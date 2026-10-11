@@ -18,7 +18,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* 只在本测试二进制中包装时钟和 RPC timer arm。 */
+/* 只在本测试二进制中包装时钟和 RPC 定时器设置。 */
 static _Thread_local int fail_monotonic_clock_once;
 static atomic_uint fail_next_timer_arm;
 static atomic_uint injected_arm_failures;
@@ -235,7 +235,7 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	uint64_t original_deadline, root_deadline;
 	struct tr_rpc_endpoint_stats stats;
 
-	/* 两个 Client 入口在提交任何 Call ownership 前发现时钟失败。 */
+	/* 两个客户端入口在提交任何 Call 所有权前发现时钟失败。 */
 	fail_monotonic_clock_once = 1;
 	assert(start_stream(f, 5000U, &arg, &failed) == TR_ERR_SYS);
 	assert(fail_monotonic_clock_once == 0);
@@ -246,13 +246,13 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	assert(fail_monotonic_clock_once == 0);
 	verify_heap(f, 0U, NULL, NULL);
 
-	/* arm 失败时必须撤回新期限，不能在 heap 留下无 timer 的 Call。 */
+	/* 设置定时失败时必须撤回新期限，不能在堆留下无定时器的 Call。 */
 	atomic_store(&fail_next_timer_arm, 1U);
 	assert(start_stream(f, 5000U, &arg, &failed) == TR_ERR_SYS);
 	assert(atomic_load(&fail_next_timer_arm) == 0U);
 	verify_heap(f, 0U, NULL, NULL);
 
-	/* Unary 入口使用相同的期限提交屏障，arm 失败也必须撤回。 */
+	/* 一元调用入口使用相同的期限提交屏障，设置定时失败也必须撤回。 */
 	atomic_store(&fail_next_timer_arm, 1U);
 	assert(tr_rpc_unary_call_ex(f->client_rpc, 92U, 2U, &request,
 				    &options, NULL, NULL, &failed) == TR_ERR_SYS);
@@ -261,11 +261,11 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	assert(tr_rpc_endpoint_get_stats(f->client_rpc, &stats) == TR_OK);
 	assert(stats.semantic.calls_inflight == 0U);
 
-	/* 同一 Call slot 重新分配，不应被此前未提交的期限污染。 */
+	/* 同一 Call 槽位重新分配，不应被此前未提交的期限污染。 */
 	assert(start_stream(f, 5000U, &arg, &long_call) == TR_OK);
 	verify_heap(f, 1U, &long_call, &original_deadline);
 
-	/* 更早的新 deadline arm 失败：保留旧根及原本的绝对期限。 */
+	/* 更早的新截止时间设置失败：保留旧根及原本的绝对期限。 */
 	atomic_store(&fail_next_timer_arm, 1U);
 	assert(start_stream(f, 1000U, &arg, &failed) == TR_ERR_SYS);
 	verify_heap(f, 1U, &long_call, &root_deadline);
@@ -288,10 +288,9 @@ static void test_callback_rearm_failure(struct fixture *f)
 	struct callback_arg first_arg = { .ctx = &f->ctx, .index = 1U };
 	struct callback_arg second_arg = { .ctx = &f->ctx, .index = 2U };
 
-	/*
-	 * 第一个 deadline 到期后，cancel 路径会尝试把共享 timer
-	 * arm 到第二个 Call；注入这唯一一次失败。timer callback
-	 * 必须用返回值在原来的 timer queue 中恢复后继期限。
+	/* 第一个截止时间到期后，取消路径会尝试把共享定时器
+	 * 设置到第二个 Call；注入这唯一一次失败。定时器回调
+	 * 必须用返回值在原来的定时器队列中恢复后继期限。
 	 */
 	assert(start_stream(f, 250U, &first_arg, &first) == TR_OK);
 	assert(start_stream(f, 550U, &second_arg, &second) == TR_OK);

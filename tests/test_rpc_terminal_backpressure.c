@@ -15,10 +15,9 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * An actual client executor is held at one running + sixteen queued tasks.
- * A CANCELLED result and a successful unary response must both survive the
- * full ring without requiring an application call to flush internal work.
+/* 将真实客户端执行器保持在一个运行中任务与十六个排队任务的状态。
+ * CANCELLED 结果与成功一元响应都必须在满环形队列下被保留，
+ * 不要求应用调用来刷新内部工作。
  */
 #define QUEUE_CAPACITY 16U
 #define FILLER_COUNT QUEUE_CAPACITY
@@ -342,9 +341,8 @@ int main(void)
 		start_unary(client_rpc, 1U, &args[i], &calls[i]);
 	wait_executor_full(client_rpc);
 
-	/*
-	 * Hold the server response of this Call until CANCEL is committed.
-	 * Its terminal callback must not be dropped while the client queue is full.
+	/* 阻止此 Call 的服务端响应，直到 CANCEL 已提交。
+	 * 客户端队列已满时，其终止回调不得丢弃。
 	 */
 	start_unary(client_rpc, 2U, &args[CANCEL_INDEX],
 		    &calls[CANCEL_INDEX]);
@@ -352,12 +350,12 @@ int main(void)
 	assert(tr_rpc_call_cancel(calls[CANCEL_INDEX]) == TR_OK);
 	wait_backpressure(client_rpc, 1U);
 
-	/* An already-received success response also owns an RX buffer on retry. */
+	/* 重试时，已收到的成功响应也拥有一个接收缓冲区。 */
 	start_unary(client_rpc, 1U, &args[RESPONSE_INDEX],
 		    &calls[RESPONSE_INDEX]);
 	wait_backpressure(client_rpc, 2U);
 
-	/* A physical disconnect must not replace either retained terminal result. */
+	/* 物理断开不得替换任一保留的终止结果。 */
 	assert(tr_reactor_abort(client_conn, TR_ERR_SYS) == TR_OK);
 	assert(tr_reactor_quiesce(reactor) == TR_OK);
 
@@ -367,7 +365,7 @@ int main(void)
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/* Worker take() must reschedule both pending Call-local terminal slots. */
+	/* 工作线程 take() 必须重新调度两个待处理的 Call 本地终止槽位。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release_first_callback = 1;
 	pthread_cond_broadcast(&ctx.cond);
