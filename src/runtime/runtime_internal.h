@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "../execution/reactor.h"
+#include "../execution/deadline_internal.h"
 #include "../memory_budget.h"
 
 struct tr_runtime;
@@ -14,6 +15,9 @@ struct tr_rpc_endpoint;
 
 struct tr_runtime_peer {
 	int used;
+	/* 握手租约和就绪标记只由所属 Reactor 修改。 */
+	int ready;
+	struct tr_deadline handshake_deadline;
 	void *finalize_ctx;
 	struct tr_conn_handle connection;
 	struct tr_channel *channel;

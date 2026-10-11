@@ -52,6 +52,8 @@ struct tr_server_shard {
 	int rpc_pool_ready;
 	int reassembly_pool_ready;
 	int peer_events_enabled;
+	struct tr_reactor_timer_handle handshake_timer;
+	int handshake_timer_registered;
 };
 
 struct tr_server_detached_peer {
@@ -466,6 +468,8 @@ static void tr_server_normalize_config(struct tr_server_config *config)
 		config->max_peers = defaults.max_peers;
 	if (config->listen_backlog <= 0)
 		config->listen_backlog = defaults.listen_backlog;
+	if (config->handshake_timeout_ms == 0U)
+		config->handshake_timeout_ms = defaults.handshake_timeout_ms;
 
 	l = &config->limits;
 	d = &defaults.limits;
@@ -498,6 +502,7 @@ void tr_server_config_init(struct tr_server_config *config)
 	config->tcp_nodelay = TR_TCP_NODELAY_DEFAULT;
 	config->keepalive_interval_ms = 30000U;
 	config->keepalive_timeout_ms = 10000U;
+	config->handshake_timeout_ms = 10000U;
 }
 
 static uint32_t tr_server_budget_share(uint32_t total,
@@ -830,14 +835,103 @@ static void tr_server_signal_peer_cleanup(struct tr_server_shard *shard)
 		tr_runtime_shard_signal_peer_event(shard->runtime);
 }
 
+/* 每分片复用一个有界定时器，只扫描当前 peer 槽位，不保留旧代次指针。 */
+static uint64_t tr_server_handshake_timer_main(void *arg, uint64_t now_ns)
+{
+	struct tr_server_shard *shard = (struct tr_server_shard *)arg;
+	uint64_t next = 0U;
+	uint32_t i;
+
+	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+		struct tr_runtime_peer *peer =
+			tr_server_shard_peer_at(shard, i);
+		uint64_t deadline;
+		int ret;
+
+		if (!peer || !peer->used || peer->ready ||
+		    tr_server_peer_disconnected(peer))
+			continue;
+		deadline = tr_deadline_to_ns(&peer->handshake_deadline);
+		if (deadline <= now_ns) {
+			ret = tr_reactor_abort_on_owner(peer->connection,
+							TR_ERR_TIMEOUT);
+			if (ret == TR_OK || ret == TR_ERR_STALE) {
+				tr_server_signal_peer_cleanup(shard);
+				continue;
+			}
+			/* 退休失败仍保留租约，下个 owner turn 重试。 */
+			deadline = now_ns == UINT64_MAX ? now_ns : now_ns + 1U;
+		}
+		if (next == 0U || deadline < next)
+			next = deadline;
+	}
+	return next;
+}
+
+static int tr_server_arm_handshake_on_owner(struct tr_server_shard *shard,
+					    struct tr_runtime_peer *peer)
+{
+	uint64_t next = tr_deadline_to_ns(&peer->handshake_deadline);
+	uint32_t i;
+	int ret;
+
+	if (!shard->handshake_timer_registered) {
+		ret = tr_reactor_timer_register(tr_server_shard_reactor(shard),
+						tr_server_handshake_timer_main,
+						shard, &shard->handshake_timer);
+		if (ret != TR_OK)
+			return ret;
+		shard->handshake_timer_registered = 1;
+	}
+	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+		struct tr_runtime_peer *pending =
+			tr_server_shard_peer_at(shard, i);
+		uint64_t deadline;
+
+		if (!pending || !pending->used || pending->ready ||
+		    tr_server_peer_disconnected(pending))
+			continue;
+		deadline = tr_deadline_to_ns(&pending->handshake_deadline);
+		if (deadline < next)
+			next = deadline;
+	}
+	/* arm 失败不得发布无唤醒保障的新连接；旧定时器状态保持不变。 */
+	return tr_reactor_timer_arm(shard->handshake_timer, next);
+}
+
 static void tr_server_on_channel_lifecycle(struct tr_channel *channel,
 					   enum tr_channel_event event,
 					   int status, void *arg)
 {
 	struct tr_server_shard *shard = (struct tr_server_shard *)arg;
 
-	(void)channel;
 	(void)status;
+	if (event == TR_CHANNEL_EVENT_CONTROL_UP) {
+		uint32_t i;
+
+		for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+			struct tr_runtime_peer *peer =
+				tr_server_shard_peer_at(shard, i);
+			int expired;
+			int ret;
+
+			if (!peer || peer->channel != channel || peer->ready)
+				continue;
+			/* RX 与到期 timer 同轮就绪时，晚到的 HELLO 不能越过租约。 */
+			ret = tr_deadline_expired(&peer->handshake_deadline,
+						  &expired);
+			if (ret != TR_OK || expired) {
+				(void)tr_reactor_abort_on_owner(
+					peer->connection,
+					ret != TR_OK ? ret : TR_ERR_TIMEOUT);
+				tr_server_signal_peer_cleanup(shard);
+				return;
+			}
+			peer->ready = 1;
+			tr_runtime_shard_peer_note_ready(shard->runtime);
+			break;
+		}
+	}
 	if (event == TR_CHANNEL_EVENT_CONTROL_DOWN ||
 	    event == TR_CHANNEL_EVENT_BULK_DOWN)
 		tr_server_signal_peer_cleanup(shard);
@@ -914,6 +1008,13 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 
 	peer = tr_server_shard_peer_at(shard, slot);
 	memset(peer, 0, sizeof(*peer));
+	ret = tr_deadline_init_ms(&peer->handshake_deadline,
+				  server->config.handshake_timeout_ms);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_server_arm_handshake_on_owner(shard, peer);
+	if (ret != TR_OK)
+		return ret;
 	peer->finalize_ctx = calloc(1, sizeof(struct tr_server_detached_peer));
 	if (!peer->finalize_ctx)
 		return TR_ERR_NOMEM;
@@ -1000,7 +1101,6 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 
 	peer->used = 1;
 	tr_server_note_peer_added_owner(shard);
-	tr_runtime_shard_peer_note_ready(shard->runtime);
 	/*
 	 * Cover the race where the connection went DOWN before this peer became
 	 * visible in the owner table. The shard eventfd coalesces the retry.
@@ -1255,6 +1355,8 @@ int tr_server_create_with_tuning(
 			effective.connection_groups.max_groups;
 		group_config.connection_capacity =
 			effective.connection_groups.max_connections;
+		group_config.handshake_timeout_ms =
+			effective.handshake_timeout_ms;
 		group_config.data_capacity_per_pipeline =
 			effective.connection_groups.max_data_connections_per_group;
 		group_config.stream_affinity_capacity_per_pipeline =
@@ -1818,7 +1920,7 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 		if (!peer || !peer->used)
 			continue;
 
-		if (peer->rpc && peer->channel &&
+		if (peer->ready && peer->rpc && peer->channel &&
 		    !tr_server_peer_disconnected(peer))
 			stats->peers_ready_current++;
 
@@ -1967,8 +2069,18 @@ int tr_server_destroy(struct tr_server *server)
 	if (server->shards)
 		for (shard_index = 0; shard_index < server->shard_count;
 		     ++shard_index) {
-			ret = tr_server_disable_peer_events(
-				&server->shards[shard_index]);
+			struct tr_server_shard *shard =
+				&server->shards[shard_index];
+
+			/* listener 解绑已同步关闭注册入口；跨过 timer 屏障才可释放分片。 */
+			if (shard->handshake_timer_registered) {
+				ret = tr_reactor_timer_unregister(
+					shard->handshake_timer);
+				if (ret != TR_OK)
+					return ret;
+				shard->handshake_timer_registered = 0;
+			}
+			ret = tr_server_disable_peer_events(shard);
 			if (ret != TR_OK)
 				return ret;
 		}

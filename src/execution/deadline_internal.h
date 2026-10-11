@@ -13,6 +13,26 @@ struct tr_deadline {
 	int infinite;
 };
 
+/*
+ * 只接受 init_ms/init_infinite 产生的合法期限。转换为 Reactor 纳秒时间；
+ * 溢出时饱和，无限期限返回 0。init_ms 已校验非负秒数和纳秒范围。
+ */
+static inline uint64_t tr_deadline_to_ns(const struct tr_deadline *deadline)
+{
+	uint64_t seconds;
+	uint64_t nanos;
+
+	if (deadline->infinite)
+		return 0U;
+	seconds = (uint64_t)deadline->absolute.tv_sec;
+	if (seconds > UINT64_MAX / UINT64_C(1000000000))
+		return UINT64_MAX;
+	nanos = seconds * UINT64_C(1000000000);
+	if ((uint64_t)deadline->absolute.tv_nsec > UINT64_MAX - nanos)
+		return UINT64_MAX;
+	return nanos + (uint64_t)deadline->absolute.tv_nsec;
+}
+
 int tr_deadline_init_ms(struct tr_deadline *deadline, uint32_t timeout_ms);
 void tr_deadline_init_infinite(struct tr_deadline *deadline);
 
