@@ -594,6 +594,12 @@ static void test_pipeline_listener_control_and_data(void)
 	       TR_ERR_TIMEOUT);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
 
+	/* 超大有限期限不能被有符号 time_t 转换误认为无限等待。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, UINT32_MAX, 0);
+	assert(tr_pipeline_listener_wait_drained(listener, UINT32_MAX) ==
+	       TR_ERR_TIMEOUT);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
+
 	/* 截止时间初始化失败不进入条件等待，也不能清除 session 所有权。 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 1);
 	assert(tr_pipeline_listener_wait_drained(listener, 10U) ==
