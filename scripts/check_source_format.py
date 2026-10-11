@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """检查已提交 Git 快照中的 C 系列修改行，不写回文件。"""
-import argparse
 import bisect
 import difflib
 import os
@@ -9,6 +8,8 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+
+from tool_i18n import parser_for
 
 VERSION = "18.1.8"
 EXTENSIONS = {".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"}
@@ -62,15 +63,15 @@ def affected_lines(data, offset, length):
     return range(first, last + 1)
 
 
-def check(base_ref, head_ref, formatter):
+def check(base_ref, head_ref, formatter, _=lambda message: message):
     version = run(formatter, "--version").decode().strip()
     if not re.search(r"\bversion " + re.escape(VERSION) + r"(?:\s|$)", version):
-        raise ValueError(f"要求 clang-format {VERSION}，实际为 {version}")
+        raise ValueError(_("clang-format {required} is required; found {actual}").format(required=VERSION, actual=version))
     base, head = commit(base_ref), commit(head_ref)
     if commit("HEAD") != head:
-        raise ValueError("请先检出 --head 指定的提交，确保使用该版本的 .clang-format")
+        raise ValueError(_("Check out the --head commit first to use its .clang-format"))
     if git("status", "--porcelain", "--untracked-files=no"):
-        raise ValueError("已跟踪文件必须保持干净；请先提交修改再检查")
+        raise ValueError(_("Tracked files must be clean; commit changes before checking"))
     base = git("merge-base", base, head).decode().strip()
     # 即使仅修改文档或差异为空，也要校验格式配置。
     run(formatter, "--style=file", "--fallback-style=none", "--dump-config")
@@ -79,7 +80,7 @@ def check(base_ref, head_ref, formatter):
     for status, old_path, path in changes(base, head):
         mode = git("--literal-pathspecs", "ls-tree", head, "--", path).split(b" ", 1)[0]
         if mode not in (b"100644", b"100755"):
-            raise ValueError(f"源码必须是普通文件：{path!r}")
+            raise ValueError(_("Source must be a regular file: {path!r}").format(path=path))
         new = git("show", f"{head}:{path}")
         new_source = (status == "A" or status.startswith("C")
                       or Path(old_path).suffix.lower() not in EXTENSIONS)
@@ -92,29 +93,29 @@ def check(base_ref, head_ref, formatter):
                                 "--assume-filename=" + str(Path(path).absolute()),
                                 "--output-replacements-xml", data=new))
         if xml.attrib.get("incomplete_format") == "true":
-            raise ValueError(f"格式解析未完成：{path!r}")
+            raise ValueError(_("Formatting is incomplete: {path!r}").format(path=path))
         bad = set()
         for replacement in xml.findall("replacement"):
             bad.update(lines.intersection(affected_lines(
                 new, int(replacement.attrib["offset"]), int(replacement.attrib["length"]))))
         if bad:
             failures += 1
-            print(f"{path!r}：以下修改行需要调整格式：{','.join(map(str, sorted(bad)))}")
-    print(f"clang-format {VERSION}：检查 {checked} 个修改源码文件，{failures} 个不合格；共同祖先 {base}")
+            print(_("{path!r}: changed lines need formatting: {lines}").format(path=path, lines=','.join(map(str, sorted(bad)))))
+    print(_("clang-format {version}: checked {checked} changed source files, {failures} failed; merge base {base}").format(version=VERSION, checked=checked, failures=failures, base=base))
     return bool(failures)
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", required=True, help="PR 目标分支 SHA/引用；从共同祖先开始比较")
-    parser.add_argument("--head", default="HEAD", help="待检查的提交，默认为 HEAD")
-    parser.add_argument("--clang-format", default="clang-format", help="clang-format 可执行文件路径")
+    parser, _ = parser_for("Check changed C-family lines in committed Git snapshots without modifying files.")
+    parser.add_argument("--base", required=True, help=_("PR target branch SHA/ref; compare from the merge base"))
+    parser.add_argument("--head", default="HEAD", help=_("Commit to check (default: HEAD)"))
+    parser.add_argument("--clang-format", default="clang-format", help=_("Path to the clang-format executable"))
     args = parser.parse_args()
     try:
         os.chdir(git("rev-parse", "--show-toplevel").decode().strip())
-        return int(check(args.base, args.head, args.clang_format))
+        return int(check(args.base, args.head, args.clang_format, _))
     except (ValueError, OSError, subprocess.CalledProcessError, ET.ParseError) as error:
-        print(f"源码格式检查失败：{error}", file=sys.stderr)
+        print(_("Source format check failed: {error}").format(error=error), file=sys.stderr)
         if isinstance(error, subprocess.CalledProcessError):
             print(error.stderr.decode(errors="replace"), file=sys.stderr)
         return 2

@@ -24,7 +24,7 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Build all targets and test debug + release
+      - name: 构建全部目标并测试 debug 与 release 模式
         run: |
           for mode in debug release; do
             xmake f -c -y -m "$mode" --toolchain=gcc --crc32c_portable=n
@@ -41,7 +41,7 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Build all targets and test release
+      - name: 构建全部目标并测试 release 模式
         run: |
           xmake f -c -y -m release --toolchain=clang --crc32c_portable=n
           xmake build --all -v
@@ -56,7 +56,7 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Build all targets and test
+      - name: 构建全部目标并运行测试
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
@@ -70,10 +70,10 @@ jobs:
           xmake f -c -y -m asan --toolchain=gcc --crc32c_portable=n
           xmake build --all -v
           xmake test -v -j1
-      - name: Archive failed sanitizer source
+      - name: 归档运行时检查失败时的源码
         if: failure()
         run: git archive --format=tar -o "$RUNNER_TEMP/sanitizer-source.tar" HEAD
-      - name: Preserve sanitizer diagnostics
+      - name: 保留运行时检查诊断
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -93,7 +93,7 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Build all targets and test
+      - name: 构建全部目标并运行测试
         env:
           TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
         run: |
@@ -106,10 +106,10 @@ jobs:
           xmake f -c -y -m tsan --toolchain=gcc --crc32c_portable=n
           xmake build --all -v
           xmake test -v -j1
-      - name: Archive failed sanitizer source
+      - name: 归档运行时检查失败时的源码
         if: failure()
         run: git archive --format=tar -o "$RUNNER_TEMP/sanitizer-source.tar" HEAD
-      - name: Preserve sanitizer diagnostics
+      - name: 保留运行时检查诊断
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -129,12 +129,12 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Validate project formatting configuration
+      - name: 验证项目格式配置
         run: |
           python3 -m pip install 'clang-format==18.1.8'
           clang-format --style=file --dump-config > /dev/null
           clang-format --dry-run --Werror include/tr/status.h src/status.c
-      - name: Compatibility entry points and compiler switch
+      - name: 验证兼容入口与编译器切换
         run: |
           set -euo pipefail
           log_file="$RUNNER_TEMP/make-compat.log"
@@ -146,7 +146,7 @@ jobs:
           make test-timer CC=gcc
           make clean
           make all CC=clang MODE=debug
-      - name: Quoted flags, tool path and literal ORIGIN
+      - name: 验证带引号的参数、工具路径与 ORIGIN 字面值
         run: |
           set -euo pipefail
           log_file="$RUNNER_TEMP/quoted-build.log"
@@ -172,7 +172,7 @@ jobs:
             CFLAGS="-include \"$probe_header\"" \
             LDFLAGS='-Wl,-rpath,$$ORIGIN/compat-sdk'
           readelf -d build/linux/x86_64/release/test_transport | grep -F '$ORIGIN/compat-sdk'
-      - name: Install, validate SDK header boundary and run public facade consumer
+      - name: 安装并验证 SDK 头文件边界，运行公共门面消费端
         run: |
           set -euo pipefail
           log_file="$RUNNER_TEMP/sdk-install.log"
@@ -258,7 +258,7 @@ jobs:
             echo "$cxx: explicit SDK headers and public facade consumer passed"
           done
           test -z "$(git status --porcelain --untracked-files=all)"
-      - name: Echo examples as separate processes
+      - name: 以独立进程运行 Echo 示例
         run: |
           set -euo pipefail
           xmake build echo_server
@@ -277,7 +277,7 @@ jobs:
           if [ -z "$port" ]; then cat "$server_log"; exit 1; fi
           timeout 20s xmake run echo_client 127.0.0.1 "$port" xmake-smoke | tee "$RUNNER_TEMP/echo-client.log"
           grep -Fx 'response: xmake-smoke' "$RUNNER_TEMP/echo-client.log"
-      - name: Preserve smoke-test diagnostics
+      - name: 保留冒烟测试诊断
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -300,14 +300,14 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
-      - name: Install user-mode CPU emulator
+      - name: 安装用户态 CPU 模拟器
         run: sudo apt-get update && sudo apt-get install -y qemu-user
-      - name: Run forced portable backend
+      - name: 运行强制可移植后端
         run: |
           xmake f -c -y -m release --toolchain=gcc --crc32c_portable=y
           xmake build test_crc32c
           xmake run test_crc32c --expect-portable
-      - name: Run automatic dispatch with SSE4.2 hidden
+      - name: 隐藏 SSE4.2 后运行自动分派
         run: |
           xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
           xmake build test_crc32c
