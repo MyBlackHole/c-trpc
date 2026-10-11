@@ -42,6 +42,7 @@ struct tr_server_method {
 };
 
 struct tr_server;
+struct tr_server_detached_peer;
 
 struct tr_server_shard {
 	struct tr_server *server;
@@ -54,9 +55,15 @@ struct tr_server_shard {
 	int peer_events_enabled;
 	struct tr_reactor_timer_handle handshake_timer;
 	int handshake_timer_registered;
+	struct tr_server_detached_peer *detached_peers;
+	struct tr_server_channel_stats retired_channel_stats;
+	struct tr_server_rpc_stats retired_rpc_stats;
 };
 
 struct tr_server_detached_peer {
+	struct tr_server_detached_peer *next;
+	struct tr_rpc_endpoint_stats rpc_stats;
+	struct tr_channel_stats channel_stats;
 	struct tr_server_shard *shard;
 	struct tr_channel *channel;
 };
@@ -84,9 +91,6 @@ struct tr_server {
 	uint32_t method_count;
 
 	struct tr_pipeline_listener *connection_group_listener;
-
-	struct tr_server_channel_stats retired_channel_stats;
-	struct tr_server_rpc_stats retired_rpc_stats;
 
 	pthread_mutex_t finalizer_lock;
 	pthread_cond_t finalizer_cond;
@@ -648,6 +652,7 @@ static void tr_server_finish_detached_peer(
 	struct tr_server_shard *shard;
 	struct tr_server *server;
 	struct tr_channel_stats channel_stats;
+	struct tr_server_detached_peer **link;
 	int have_channel_stats = 0;
 
 	if (!detached)
@@ -668,12 +673,18 @@ static void tr_server_finish_detached_peer(
 	}
 
 	pthread_mutex_lock(&server->finalizer_lock);
+	for (link = &shard->detached_peers; *link; link = &(*link)->next) {
+		if (*link == detached) {
+			*link = detached->next;
+			break;
+		}
+	}
 	if (rpc_stats)
-		tr_server_merge_rpc_stats(&server->retired_rpc_stats,
-					  rpc_stats, 0);
+		tr_server_merge_rpc_stats(&shard->retired_rpc_stats, rpc_stats,
+		                          0);
 	if (have_channel_stats)
-		tr_server_merge_channel_stats(&server->retired_channel_stats,
-					      &channel_stats, 0);
+		tr_server_merge_channel_stats(&shard->retired_channel_stats,
+		                              &channel_stats, 0);
 	tr_runtime_shard_peer_note_reaped(shard->runtime);
 	pthread_cond_broadcast(&server->finalizer_cond);
 	pthread_mutex_unlock(&server->finalizer_lock);
@@ -762,6 +773,19 @@ static void tr_server_detach_disconnected_peers_on_owner(
 
 		detached->shard = shard;
 		detached->channel = snapshot.channel;
+		/* Keep the last owner snapshot visible until final stats
+		 * replace it. Never retain an Endpoint pointer past its owner
+		 * reference. */
+		if (snapshot.rpc)
+			(void)tr_rpc_endpoint_get_stats(snapshot.rpc,
+			                                &detached->rpc_stats);
+		if (snapshot.channel)
+			(void)tr_channel_get_stats(snapshot.channel,
+			                           &detached->channel_stats);
+		pthread_mutex_lock(&shard->server->finalizer_lock);
+		detached->next = shard->detached_peers;
+		shard->detached_peers = detached;
+		pthread_mutex_unlock(&shard->server->finalizer_lock);
 
 		/*
 		 * Slot lifetime is independent from old Endpoint worker refs. Once
@@ -1884,6 +1908,81 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	return final;
 }
 
+/* Only cumulative fields are archived; current gauges come from live peers. */
+static void tr_server_collect_retired_stats(struct tr_server_shard *shard,
+                                            struct tr_server_stats *stats)
+{
+	struct tr_server_detached_peer *detached;
+
+	stats->channel.streams_opened +=
+	        shard->retired_channel_stats.streams_opened;
+	stats->channel.streams_closed +=
+	        shard->retired_channel_stats.streams_closed;
+	stats->channel.stream_errors +=
+	        shard->retired_channel_stats.stream_errors;
+	stats->channel.messages_tx += shard->retired_channel_stats.messages_tx;
+	stats->channel.messages_rx += shard->retired_channel_stats.messages_rx;
+	stats->channel.bytes_tx += shard->retired_channel_stats.bytes_tx;
+	stats->channel.bytes_rx += shard->retired_channel_stats.bytes_rx;
+	stats->channel.window_updates_tx +=
+	        shard->retired_channel_stats.window_updates_tx;
+	stats->channel.window_updates_rx +=
+	        shard->retired_channel_stats.window_updates_rx;
+	stats->channel.reconnect_attempts +=
+	        shard->retired_channel_stats.reconnect_attempts;
+	stats->channel.reconnect_successes +=
+	        shard->retired_channel_stats.reconnect_successes;
+	stats->channel.keepalive_pings_sent +=
+	        shard->retired_channel_stats.keepalive_pings_sent;
+	stats->channel.keepalive_pongs_received +=
+	        shard->retired_channel_stats.keepalive_pongs_received;
+	stats->channel.keepalive_timeouts +=
+	        shard->retired_channel_stats.keepalive_timeouts;
+	if (shard->retired_rpc_stats.executor_threads >
+	    stats->rpc.executor_threads)
+		stats->rpc.executor_threads =
+		        shard->retired_rpc_stats.executor_threads;
+	if (shard->retired_rpc_stats.executor_queue_peak_max_per_endpoint >
+	    stats->rpc.executor_queue_peak_max_per_endpoint)
+		stats->rpc.executor_queue_peak_max_per_endpoint =
+		        shard->retired_rpc_stats
+		                .executor_queue_peak_max_per_endpoint;
+	if (shard->retired_rpc_stats
+	            .executor_ready_calls_peak_max_per_endpoint >
+	    stats->rpc.executor_ready_calls_peak_max_per_endpoint)
+		stats->rpc.executor_ready_calls_peak_max_per_endpoint =
+		        shard->retired_rpc_stats
+		                .executor_ready_calls_peak_max_per_endpoint;
+	stats->rpc.executor_enqueued_tasks +=
+	        shard->retired_rpc_stats.executor_enqueued_tasks;
+	stats->rpc.executor_taken_tasks +=
+	        shard->retired_rpc_stats.executor_taken_tasks;
+	stats->rpc.executor_admission_limit_hits +=
+	        shard->retired_rpc_stats.executor_admission_limit_hits;
+	stats->rpc.executor_hard_full_events +=
+	        shard->retired_rpc_stats.executor_hard_full_events;
+	tr_merge_latency_histogram(
+	        &stats->rpc.executor_queue_wait_ns,
+	        &shard->retired_rpc_stats.executor_queue_wait_ns);
+	tr_merge_latency_histogram(
+	        &stats->rpc.executor_handler_ns,
+	        &shard->retired_rpc_stats.executor_handler_ns);
+	stats->rpc.calls_started += shard->retired_rpc_stats.calls_started;
+	stats->rpc.calls_completed += shard->retired_rpc_stats.calls_completed;
+	stats->rpc.calls_cancelled += shard->retired_rpc_stats.calls_cancelled;
+	stats->rpc.calls_deadline_exceeded +=
+	        shard->retired_rpc_stats.calls_deadline_exceeded;
+	tr_server_merge_rpc_semantic_stats(&stats->rpc.semantic,
+	                                   &shard->retired_rpc_stats.semantic);
+
+	for (detached = shard->detached_peers; detached;
+	     detached = detached->next) {
+		tr_server_merge_rpc_stats(&stats->rpc, &detached->rpc_stats, 0);
+		tr_server_merge_channel_stats(&stats->channel,
+		                              &detached->channel_stats, 0);
+	}
+}
+
 struct tr_server_stats_owner_request {
 	struct tr_server_shard *shard;
 	struct tr_server_stats *stats;
@@ -1902,7 +2001,10 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 	 * Peer slots and owner-side counters are single-writer Reactor state.
 	 * External stats callers enter each shard owner synchronously.
 	 */
+	pthread_mutex_lock(&shard->server->finalizer_lock);
+	tr_server_collect_retired_stats(shard, stats);
 	tr_runtime_shard_peer_stats(shard->runtime, &peer_stats);
+	pthread_mutex_unlock(&shard->server->finalizer_lock);
 	stats->max_peers += peer_stats.capacity;
 	stats->peers_current += peer_stats.current;
 	stats->peers_peak += peer_stats.peak;
@@ -1948,14 +2050,6 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	memset(&stats, 0, sizeof(stats));
 	stats.shard_count = server->shard_count;
 
-	/*
-	 * Detached finalizers are cross-thread; take their aggregate once so it is
-	 * not duplicated while per-shard live state is collected.
-	 */
-	pthread_mutex_lock(&server->finalizer_lock);
-	stats.channel = server->retired_channel_stats;
-	stats.rpc = server->retired_rpc_stats;
-	pthread_mutex_unlock(&server->finalizer_lock);
 	stats.rpc.executor_threads = server->tuning.executor_threads;
 
 	for (i = 0; i < server->shard_count; ++i) {

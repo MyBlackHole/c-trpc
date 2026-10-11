@@ -171,3 +171,11 @@ Reactor 快照也暴露已有的每轮命令公平性数据：
 
 可观测性计数器提供的是证据，不是自动策略。
 CI 应继续以确定性不变量作为门槛，而不是固定 QPS 或延迟阈值。
+
+### Server peer 回收期间的累计值
+
+Server 按 shard 在 owner 上统一收集 live peer、detached peer 的最后快照及已回收累计值。
+Detached peer 的快照保持可见，直到 finalizer 在同一锁下以最终统计替换它；worker
+退出期间新增的累计值可能延迟到最终回收才可见，但不会因 peer-table slot 释放而回退，
+也不会在最终归档时重复累计。当前资源 gauge 仍只表示 live peer，`peers_reaping_current`
+单独表示等待回收的 peer。多 shard 聚合不是全局同一时刻的快照。
