@@ -773,9 +773,10 @@ static void tr_server_detach_disconnected_peers_on_owner(
 
 		detached->shard = shard;
 		detached->channel = snapshot.channel;
-		/* Keep the last owner snapshot visible until final stats
-		 * replace it. Never retain an Endpoint pointer past its owner
-		 * reference. */
+		/*
+		 * 保留 owner 最后快照，直到归档快照替换它。
+		 * 不在 owner 引用释放后保留 Endpoint 指针。
+		 */
 		if (snapshot.rpc)
 			(void)tr_rpc_endpoint_get_stats(snapshot.rpc,
 			                                &detached->rpc_stats);
@@ -1908,7 +1909,7 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	return final;
 }
 
-/* Only cumulative fields are archived; current gauges come from live peers. */
+/* 仅归档累计字段；当前资源 gauge 来自 live peer。 */
 static void tr_server_collect_retired_stats(struct tr_server_shard *shard,
                                             struct tr_server_stats *stats)
 {

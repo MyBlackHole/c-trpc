@@ -112,7 +112,7 @@ static void test_retirement(uint32_t shard_count)
 		assert(tr_server_get_stats(s, &st) == TR_OK);
 		assert_cumulative(&st, &previous);
 		previous = st;
-		printf("before disconnect: started=%llu reaping=%u\n",
+		printf("断连前：started=%llu reaping=%u\n",
 		       (unsigned long long)st.rpc.semantic.calls_started,
 		       st.peers_reaping_current);
 		assert(st.rpc.semantic.calls_started == cycle);
@@ -125,7 +125,7 @@ static void test_retirement(uint32_t shard_count)
 				break;
 			nanosleep(&pause, NULL);
 		}
-		printf("while worker retained: started=%llu reaping=%u\n",
+		printf("worker 尚未退出：started=%llu reaping=%u\n",
 		       (unsigned long long)st.rpc.semantic.calls_started,
 		       st.peers_reaping_current);
 		assert(st.peers_reaping_current == 1);
@@ -162,7 +162,7 @@ static void test_retirement(uint32_t shard_count)
 				break;
 			nanosleep(&pause, NULL);
 		}
-		printf("after finalization: started=%llu reaping=%u\n",
+		printf("归档后：started=%llu reaping=%u\n",
 		       (unsigned long long)st.rpc.semantic.calls_started,
 		       st.peers_reaping_current);
 		assert(st.peers_reaping_current == 0);

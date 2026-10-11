@@ -14,7 +14,7 @@
 int __real_socket(int domain, int type, int protocol);
 static unsigned int checked;
 
-/* Stop at the syscall return, before any library fcntl could hide the race. */
+/* 在系统调用返回边界检查，避免库内随后执行的 fcntl 掩盖继承窗口。 */
 int __wrap_socket(int domain, int type, int protocol)
 {
 	int fd = __real_socket(domain, type, protocol);
