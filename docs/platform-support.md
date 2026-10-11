@@ -7,6 +7,10 @@
 - 公开安装头文件为 trpc.h、status.h、facade.h、client.h、server.h、transport.h、rpc.h、rpc_codec.h。内部头文件不属于 SDK。
 - C++11 消费端仅验证公开头可独立包含、C linkage 和门面配置/状态调用，不承诺内部 C 实现可按 C++ 编译。
 
+主动连接及监听 socket 使用 Linux 的 `SOCK_NONBLOCK | SOCK_CLOEXEC` 原子创建；
+不回退到创建后 `fcntl` 设置，避免并发 fork/exec 继承窗口。该保证针对
+`socket()` 创建路径；现有 accept4 不可用时的 accept 兼容路径不在此保证内。
+
 原先的 “Linux 3.x+” 没有对应最低版本内核测试，因此不再作为支持承诺。
 `SO_REUSEPORT` 等系统能力对具体配置有额外要求；调用失败应检查返回状态。
 CI 的发行版标签不等于最小内核版本测试。arm64、32 位、大端、旧内核和其他 libc
