@@ -831,3 +831,47 @@ Client 首次连接、Server 已接收对端、
 
 - https://www.rfc-editor.org/rfc/rfc9293.html#appendix-A.3
 - https://man7.org/linux/man-pages/man7/tcp.7.html
+
+## 发生器入口校准（附加证据 schema 1）
+
+`run_rpc_fanout.py` 继续固定 `--aggregate-generator-slots`，每个扇出必须整除
+总槽位，且每发生器为 1–256；不能通过增加总槽位解释为纯发生器扩展。
+`--duration-ms 1000` 显式覆盖请求数下限，按总率向上取整请求数；分配到各发生器后
+各自时长有整数舍入与起点相移，并非完全相同的到达窗口。允许 10–10000 ms，
+`--trials` 为 1–5，奇偶轮反向顺序；这些是有限诊断，不是长期稳态证明。
+
+```sh
+python3 bench/run_rpc_fanout.py --binary build/linux/x86_64/release/bench_rpc \
+  --output bench/results/calibration.jsonl --rate 1000 --fanouts 2,4 \
+  --aggregate-generator-slots 256 --duration-ms 1000 --trials 3 \
+  --max-submit-late-us 1000
+python3 -m unittest discover -s bench -p 'test_rpc_*.py' -v
+```
+
+新增 `load_quality` 是本地提交入口近似的筛查，不是业务 SLO 或容量认证。
+规则显式记录 `max_submit_late_us`（默认 1000 µs，仅诊断预算）：全部计划请求必须
+实际尝试且被 API 接受、入口位于各自到达窗、最大入口迟到不超过预算，且各发生器
+计划起点符合运行器的相移规则，才标 `pass`。只满足 P99 不足以通过；任何失败
+保留在原始结果中，不改变程序正确性退出码。摘要中的 `load_quality_trials` 分列
+pass/fail/unknown；既有 `clean_trials` 属于旧诊断的功能/压力计数，不能当作新入口时序
+筛查合格数。旧记录缺入口证据为 `unknown`，
+`rpc_load_quality.load_quality()` 也可离线分析原始 case。破损计数/时间字段直接拒绝。
+
+- `offered` 为计划，`attempted` 为实际 API 调用次数；未接受为
+  `offered-accepted = scheduler_dropped+submit_again+submit_errors`。
+  `completed` 是排空后回调完成数，完整保留成功、deadline、RPC 状态、内容错误。
+- `submit_ns` 在锁/载荷准备之后、调用之前读取单调时钟。它可能随后被抢占，
+  不是实际网络发送时间或服务端到达时间。每次尝试新增一次取时，增加了发生器开销；
+  结果只适用于该已插桩二进制，不能把新旧发生器性能变化归因于服务端。
+- `submitted_in_window` 按自身 `[start_ns,schedule_horizon_ns)` 的入口计数；
+  `accepted_in_window` 是这些入口中最终 API 返回成功的数量，不是返回时刻计数。
+  `completed_in_window` 按回调完成时间计数，故可小于已接受数，排空尾部单列。
+  各进程窗口有相移，不相加为同一全局到达窗。公共观察窗口严格使用最早计划起点至
+  最晚排空终点，整体 attempted/accepted/completed/ok 速率全用这一相同分母。
+  该速率包含尾部，不能冒充到达窗口提交速率。
+- 每个发生器保留原始 P99、入口迟到 P99/最大值及窗口速率；不平均 P99，
+  不声称整体合并分位数。已完成数与 API 接受数守恒并不证明成功或平滑到达。
+- 即使入口筛查通过，`server_arrival_fidelity` 仍为 `unknown`，
+  `server_capacity` 仍为 `not_established`。先报告负载筛查与错误类别，再讨论同配置
+  下的服务端拒绝/成功吞吐；不能从发生器迟到、丢弃或短时无错误点推出服务端上限。
+  内部计时漏样仍未修；不使用内部计时作为校准门槛或精确成本结论。

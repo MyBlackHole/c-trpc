@@ -67,6 +67,13 @@ def result(generators=8, offered=10000, accepted=10000,
 
 
 class FanoutTests(unittest.TestCase):
+    def test_quality_summary_preserves_unknown_and_failed_trials(self):
+        rows = [result(), result(), result()]
+        rows[0]["load_quality"] = {"status": "pass"}
+        rows[1]["load_quality"] = {"status": "fail"}
+        self.assertEqual(summarize_fanout(8, rows)["load_quality_trials"],
+                         {"pass": 1, "fail": 1, "unknown": 1})
+
     def test_slots_per_generator_keeps_total_constant(self):
         self.assertEqual(slots_per_generator(1024, 4), 256)
         self.assertEqual(slots_per_generator(1024, 8), 128)

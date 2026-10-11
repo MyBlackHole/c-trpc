@@ -76,6 +76,9 @@ def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
     if row["start_ns"] >= row["schedule_horizon_ns"] or row["end_ns"] < row["start_ns"]:
         raise ValueError("invalid open-loop timestamps")
 
+    from rpc_load_quality import validate_submission_evidence
+    validate_submission_evidence(row)
+
     expected_window = expected / rate_rps
     if not math.isclose(row["arrival_window_s"], expected_window,
                         rel_tol=1e-6, abs_tol=1e-9):
