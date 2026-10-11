@@ -14,6 +14,7 @@
 #include "pipeline_ingress_internal.h"
 #include "../../group/pipeline_registry_internal.h"
 #include "../../execution/reactor_internal.h"
+#include "../../execution/deadline_internal.h"
 #include "../../execution/buffer.h"
 #include "../../io/socket.h"
 #include "tr/status.h"
@@ -845,7 +846,7 @@ int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
 int tr_pipeline_listener_wait_drained(
 	struct tr_pipeline_listener *listener, uint32_t timeout_ms)
 {
-	struct timespec deadline;
+	struct tr_deadline deadline;
 	uint64_t generation;
 	int timed = timeout_ms != 0U;
 	int result = TR_OK;
@@ -855,22 +856,12 @@ int tr_pipeline_listener_wait_drained(
 	if (tr_reactor_in_owner_context())
 		return TR_ERR_STATE;
 
+	/* 0ms 仍表示无限等待；有限值统一使用 time_t 安全的绝对截止时间。 */
 	if (timed) {
-		uint64_t now_ns;
-		uint64_t timeout_ns;
-		uint64_t deadline_ns;
+		int ret = tr_deadline_init_ms(&deadline, timeout_ms);
 
-		if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
-			return TR_ERR_SYS;
-		now_ns = (uint64_t)deadline.tv_sec * UINT64_C(1000000000) +
-			 (uint64_t)deadline.tv_nsec;
-		timeout_ns = (uint64_t)timeout_ms * UINT64_C(1000000);
-		deadline_ns = UINT64_MAX - now_ns < timeout_ns ?
-			UINT64_MAX : now_ns + timeout_ns;
-		deadline.tv_sec =
-			(time_t)(deadline_ns / UINT64_C(1000000000));
-		deadline.tv_nsec =
-			(long)(deadline_ns % UINT64_C(1000000000));
+		if (ret != TR_OK)
+			return ret;
 	}
 
 	pthread_mutex_lock(&listener->drain_wait_lock);
@@ -910,7 +901,7 @@ int tr_pipeline_listener_wait_drained(
 		if (timed)
 			ret = pthread_cond_timedwait(
 				&listener->drain_wait_cond,
-				&listener->drain_wait_lock, &deadline);
+				&listener->drain_wait_lock, &deadline.absolute);
 		else
 			ret = pthread_cond_wait(
 				&listener->drain_wait_cond,
