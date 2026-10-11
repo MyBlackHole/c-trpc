@@ -34,11 +34,15 @@ class FormatGate(unittest.TestCase):
         return self.git("rev-parse", "HEAD")
 
     def gate(self, expected, base=None, formatter=None):
-        result = subprocess.run(["python3", str(SCRIPT), "--base", base or self.base,
-                                 "--clang-format", formatter or FORMATTER], cwd=self.root,
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-        return result.stdout + result.stderr
+        outputs = []
+        for language in ("en", "zh_CN"):
+            result = subprocess.run(["python3", str(SCRIPT), "--base", base or self.base,
+                                     "--clang-format", formatter or FORMATTER,
+                                     "--lang=" + language], cwd=self.root,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+            outputs.append(result.stdout + result.stderr)
+        return outputs[0]
 
     def test_empty_diff(self):
         self.gate(0)

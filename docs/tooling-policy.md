@@ -64,3 +64,6 @@ core/unix/security 范围，移除 C++ modernize/google/performance 等宽泛选
 
 配置替换本身没有据此统一重标其他文件。后续维护者单独确认项目自有内容的授权，
 当前许可见[许可与来源范围](licensing.md)；历史第三方文件仍保留上述许可。
+
+工具人读帮助与诊断的语言选择、翻译目录维护及当前覆盖边界见
+[工具输出国际化](tool-output-i18n.md)。
