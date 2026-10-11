@@ -17,9 +17,9 @@ class FormatGate(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.git("init", "-b", "main")
         self.git("config", "user.email", "fixture@example.invalid")
-        self.git("config", "user.name", "Format fixture")
+        self.git("config", "user.name", "格式门禁自测")
         self.write(".clang-format", "BasedOnStyle: LLVM\nIndentWidth: 8\nUseTab: Always\n")
-        self.write("debt.c", "int   old_debt;\n\n// unchanged separator\n\nint good;\n")
+        self.write("debt.c", "int   old_debt;\n\n// 未修改分隔\n\nint good;\n")
         self.base = self.commit()
 
     def git(self, *args):
@@ -30,7 +30,7 @@ class FormatGate(unittest.TestCase):
 
     def commit(self):
         self.git("add", ".")
-        self.git("commit", "-qm", "fixture")
+        self.git("commit", "-qm", "自测提交")
         return self.git("rev-parse", "HEAD")
 
     def gate(self, expected, base=None, formatter=None):
@@ -44,7 +44,7 @@ class FormatGate(unittest.TestCase):
         self.gate(0)
 
     def test_documentation_only(self):
-        self.write("README.md", "documentation\n")
+        self.write("README.md", "文档\n")
         self.commit()
         self.gate(0)
 
@@ -59,12 +59,12 @@ class FormatGate(unittest.TestCase):
         self.gate(1)
 
     def test_modified_good_with_old_debt(self):
-        self.write("debt.c", "int   old_debt;\n\n// unchanged separator\n\nint changed;\n")
+        self.write("debt.c", "int   old_debt;\n\n// 未修改分隔\n\nint changed;\n")
         self.commit()
         self.gate(0)
 
     def test_modified_bad(self):
-        self.write("debt.c", "int   old_debt;\n\n// unchanged separator\n\nint   changed;\n")
+        self.write("debt.c", "int   old_debt;\n\n// 未修改分隔\n\nint   changed;\n")
         self.commit()
         self.gate(1)
 
@@ -75,7 +75,7 @@ class FormatGate(unittest.TestCase):
 
     def test_rename_and_edit(self):
         self.git("mv", "debt.c", "renamed file.c")
-        self.write("renamed file.c", "int   old_debt;\n\n// unchanged separator\n\nint   changed;\n")
+        self.write("renamed file.c", "int   old_debt;\n\n// 未修改分隔\n\nint   changed;\n")
         self.commit()
         self.gate(1)
 
@@ -97,7 +97,7 @@ class FormatGate(unittest.TestCase):
         self.gate(0)
 
     def test_deleted_lines(self):
-        self.write("debt.c", "int   old_debt;\n\n// unchanged separator\n\n")
+        self.write("debt.c", "int   old_debt;\n\n// 未修改分隔\n\n")
         self.commit()
         self.gate(0)
 
@@ -153,7 +153,7 @@ class FormatGate(unittest.TestCase):
         self.git("checkout", "-q", "main")
         # 目标分支已整理历史格式；若直接比较其最新提交，会错误地
         # 认为功能分支重新引入历史格式问题，从而产生误报。
-        self.write("debt.c", "int old_debt;\n\n// unchanged separator\n\nint good;\n")
+        self.write("debt.c", "int old_debt;\n\n// 未修改分隔\n\nint good;\n")
         advanced_base = self.commit()
         self.git("checkout", "-q", "feature")
         self.gate(0, base=advanced_base)

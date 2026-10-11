@@ -44,7 +44,7 @@ merge-base、空 diff、仅文档、删除、改名及特殊路径、UTF-8 字�
 
 ## clang-tidy 的实际覆盖边界
 
-`.clang-tidy` 是供后续试运行的 **C 语言 opt-in 配置**，不是已接入的 CI 安全门。
+`.clang-tidy` 是供后续试运行的 **C 语言可选配置**，不是已接入的 CI 安全门。
 `FormatStyle: file` 复用 `.clang-format`；仅保留 clang 编译诊断与 analyzer 的
 core/unix/security 范围，移除 C++ modernize/google/performance 等宽泛选择；
 项目头过滤范围明确为 include/src 下的 `.h`。WarningsAsErrors 暂为空，不把未经
