@@ -21,6 +21,12 @@ jobs:
           python-version: '3.12'
       - name: 安装固定版本格式工具
         run: python -m pip install 'clang-format==18.1.8'
+      - name: 校验 gettext 翻译目录与语言回归
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext
+          python scripts/compile_tool_catalog.py --check
+          python scripts/test_tool_i18n.py
       - name: 运行门禁正反例自测
         run: python scripts/test_source_format.py
       - name: 检查新增和修改的源码行

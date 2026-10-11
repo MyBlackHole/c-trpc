@@ -1,0 +1,78 @@
+# 项目工具简体中文翻译。
+msgid ""
+msgstr ""
+"Project-Id-Version: tools 1\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"POT-Creation-Date: 2026-10-11 00:00+0000\n"
+"PO-Revision-Date: 2026-10-11 00:00+0000\n"
+"Last-Translator: Project maintainers\n"
+"Language-Team: Simplified Chinese\n"
+
+msgid "Check changed C-family lines in committed Git snapshots without modifying files."
+msgstr "检查已提交 Git 快照中的 C 系列修改行，不写回文件。"
+
+msgid "Check out the --head commit first to use its .clang-format"
+msgstr "请先检出 --head 指定的提交，确保使用该版本的 .clang-format"
+
+msgid "Commit to check (default: HEAD)"
+msgstr "待检查的提交，默认为 HEAD"
+
+#, python-brace-format
+msgid "Formatting is incomplete: {path!r}"
+msgstr "格式解析未完成：{path!r}"
+
+msgid "Human-readable output language (default: auto)"
+msgstr "人读输出语言（默认：auto）"
+
+#, python-brace-format
+msgid "Invalid --lang value: {value}; expected auto, en or zh_CN"
+msgstr "无效的 --lang 值：{value}；应为 auto、en 或 zh_CN"
+
+msgid "PR target branch SHA/ref; compare from the merge base"
+msgstr "PR 目标分支 SHA/引用；从共同祖先开始比较"
+
+msgid "Path to the clang-format executable"
+msgstr "clang-format 可执行文件路径"
+
+#, python-brace-format
+msgid "Source format check failed: {error}"
+msgstr "源码格式检查失败：{error}"
+
+#, python-brace-format
+msgid "Source must be a regular file: {path!r}"
+msgstr "源码必须是普通文件：{path!r}"
+
+msgid "Tracked files must be clean; commit changes before checking"
+msgstr "已跟踪文件必须保持干净；请先提交修改再检查"
+
+#, python-brace-format
+msgid "clang-format {required} is required; found {actual}"
+msgstr "要求 clang-format {required}，实际为 {actual}"
+
+#, python-brace-format
+msgid "clang-format {version}: checked {checked} changed source files, {failures} failed; merge base {base}"
+msgstr "clang-format {version}：检查 {checked} 个修改源码文件，{failures} 个不合格；共同祖先 {base}"
+
+#, python-brace-format
+msgid "{path!r}: changed lines need formatting: {lines}"
+msgstr "{path!r}：以下修改行需要调整格式：{lines}"
+
+msgid "Validate and reproducibly compile tool translations."
+msgstr "校验并可重复生成工具翻译目录。"
+
+msgid "Check that committed MO files are reproducible"
+msgstr "检查已提交 MO 是否可重复生成"
+
+msgid "Translation catalog is stale; run scripts/compile_tool_catalog.py"
+msgstr "翻译目录已过期；请运行 scripts/compile_tool_catalog.py"
+
+#, python-brace-format
+msgid "Could not compile translation catalog: {error}"
+msgstr "无法编译翻译目录：{error}"
+
+msgid "Translation placeholders differ"
+msgstr "译文占位符与原文不一致"
