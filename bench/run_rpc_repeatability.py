@@ -159,7 +159,7 @@ def main() -> int:
         args.requests, math.ceil(args.rate * args.min_arrival_ms / 1000.0))
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    metadata = base_metadata(args.binary, args.label)
+    metadata = base_metadata(args.binary, args.label, load_mode="open")
     metadata.update({
         "type": "repeatability_metadata",
         "schema": 1,

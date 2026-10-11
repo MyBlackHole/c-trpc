@@ -206,7 +206,7 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
 
 def metadata(binary: Path, label: str, workers: int, slow_ms: int,
              executor_queue: int, window: int) -> dict[str, Any]:
-    row = closed_loop_metadata(binary, label)
+    row = closed_loop_metadata(binary, label, load_mode="open")
     row["type"] = "capacity_metadata"
     row["load_model"] = (
         "fixed-rate scheduled arrivals; bounded in-flight slots; every missed "
