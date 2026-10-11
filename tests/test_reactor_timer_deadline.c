@@ -11,7 +11,7 @@
 #include <sys/epoll.h>
 #include <time.h>
 
-/* 除持锁观测值外，其余配置在 pthread_create 至 join 期间保持不变。 */
+/* 除持锁观测值外，其余配置在 pthread_create 至线程回收期间保持不变。 */
 static pthread_t caller;
 static int expected_timeout;
 static int observed;

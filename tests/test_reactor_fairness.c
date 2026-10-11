@@ -20,7 +20,7 @@
 #define COMMAND_BUDGET 64U
 #define COMPLETIONS 200U
 
-/* Link-time observers belong only to this executable, not the library/SDK. */
+/* 链接时观察者仅属于此可执行文件，不属于库或 SDK。 */
 size_t __real_tr_command_queue_pop_batch(struct tr_command_queue *queue,
 	struct tr_command *out, size_t max_commands);
 int __real_tr_command_queue_push(struct tr_command_queue *queue,
@@ -75,7 +75,7 @@ struct test_ctx {
 	unsigned completions_after_stop;
 };
 
-/* Published before starting the Reactor and cleared only after its join. */
+/* 启动反应器前发布，仅在线程回收后清除。 */
 static struct test_ctx *active;
 
 static void wait_flag(struct test_ctx *ctx, const int *flag)
@@ -83,7 +83,7 @@ static void wait_flag(struct test_ctx *ctx, const int *flag)
 	struct timespec deadline;
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
-	deadline.tv_sec += 10; /* Hang guard, not a latency acceptance threshold. */
+	deadline.tv_sec += 10; /* 防挂起保护，不是延迟验收阈值。 */
 	pthread_mutex_lock(&ctx->lock);
 	while (!*flag)
 		assert(pthread_cond_timedwait(&ctx->cond, &ctx->lock,
@@ -162,9 +162,8 @@ int __wrap_tr_completion_queue_push_wait(
 	int full = 0;
 	int ret;
 
-	/*
-	 * Test-only observation：owner 被 gate 阻塞期间 count 不会下降，因此在调用
-	 * real blocking API 前观察 full，等价于证明 producer 即将进入 capacity wait。
+	/* 仅供测试的观测：所有者被门禁阻塞期间 count 不会下降，因此在调用
+	 * 真实阻塞 API 前观察满队列，等价于证明生产者即将进入容量等待。
 	 */
 	if (ctx &&
 	    (ctx->scenario == COMPLETION_FULL_WAIT ||
@@ -204,7 +203,7 @@ size_t __wrap_tr_command_queue_pop_batch(struct tr_command_queue *queue,
 			if (out[i].type == TR_CMD_STOP)
 				ctx->stop_popped = 1;
 		}
-		/* Refill through the real public producer path before dispatch. */
+		/* 分派前通过真实公开生产者路径重新填充。 */
 		if (ctx->scenario == REFILL && ctx->issued < 3U * CAPACITY) {
 			refill = count;
 			if (refill > 3U * CAPACITY - ctx->issued)
@@ -226,13 +225,13 @@ int __wrap_epoll_wait(int fd, struct epoll_event *events, int maxevents,
 	if (ctx) {
 		pthread_mutex_lock(&ctx->lock);
 		if (ctx->measuring) {
-			/* Also catches a second command batch in the wake-event path. */
+			/* 也捕获唤醒事件路径中的第二个命令批次。 */
 			assert(ctx->commands_since_poll <= COMMAND_BUDGET);
 			ctx->commands_since_poll = 0;
 			ctx->polls++;
 			if (ctx->scenario == BACKLOG || ctx->scenario == REFILL) {
 				if (ctx->resumes < ctx->issued) {
-					/* The first poll may consume the initial producer wake. */
+					/* 首次轮询可能消耗初始生产者唤醒。 */
 					if (ctx->resumes != 0U)
 						assert(timeout == 0);
 				} else if (timeout != 0) {
@@ -285,7 +284,7 @@ static enum tr_frame_disposition frame_callback(struct tr_conn_handle connection
 	return TR_FRAME_RELEASE;
 }
 
-/* The only intentionally blocking owner callback is this test barrier. */
+/* 唯一有意阻塞的所有者回调是此测试屏障。 */
 static int gate_callback(void *arg)
 {
 	struct test_ctx *ctx = arg;
@@ -317,7 +316,7 @@ static int marker_callback(void *arg)
 	pthread_mutex_lock(&ctx->lock);
 	assert(ctx->resumes == CAPACITY);
 	pthread_mutex_unlock(&ctx->lock);
-	return TR_ERR_UNSUPPORTED; /* Preserve the exact owner result. */
+	return TR_ERR_UNSUPPORTED; /* 保留精确的所有者结果。 */
 }
 
 static void *call_thread(void *arg)
@@ -415,7 +414,7 @@ static void enqueue_resumes(struct test_ctx *ctx, unsigned count)
 {
 	unsigned i;
 
-	/* Owner is at the gate; no command can disappear while filling the ring. */
+	/* 所有者停在门禁；填满环形队列期间不可能有命令消失。 */
 	for (i = 0; i < count; ++i)
 		assert(tr_reactor_resume_rx(ctx->connection) == TR_OK);
 	ctx->issued = count;
@@ -445,7 +444,7 @@ static void test_fairness(enum scenario scenario)
 	       (ssize_t)sizeof(wire));
 	release_gate(&ctx);
 	assert(pthread_join(gate, NULL) == 0);
-	/* No new producer or timer wakes the remaining backlog to make it pass. */
+	/* 没有新生产者或定时器唤醒剩余积压来使测试通过。 */
 	wait_flag(&ctx, &ctx.idle_seen);
 	assert(recv(ctx.peer_fd, response, sizeof(response), MSG_WAITALL) ==
 	       (ssize_t)sizeof(response));
@@ -475,7 +474,7 @@ static void test_full_queue_waiters(int stopping)
 	if (stopping) {
 		assert(pthread_create(&stopper, NULL, stop_thread, &ctx) == 0);
 		wait_flag(&ctx, &ctx.stop_full);
-		/* These must reject without waiting for the blocked owner to resume. */
+		/* 这些操作必须拒绝，无需等待被阻塞所有者恢复。 */
 		assert(pthread_join(caller, NULL) == 0);
 		assert(pthread_join(quiescer, NULL) == 0);
 	}
@@ -537,7 +536,7 @@ static void test_completion_full_wait_resume(void)
 		       &producer, NULL, completion_submit_thread, &ctx) == 0);
 	wait_flag(&ctx, &ctx.completion_full);
 
-	/* owner 恢复后 pop batch 释放容量，blocked producer 必须成功 handoff。 */
+	/* 所有者恢复后，弹出批次释放容量，被阻塞生产者必须成功交接。 */
 	release_gate(&ctx);
 	assert(pthread_join(gate, NULL) == 0);
 	assert(pthread_join(producer, NULL) == 0);
@@ -569,10 +568,8 @@ static void test_completion_full_stop(void)
 	assert(pthread_create(&stopper, NULL, stop_thread, &ctx) == 0);
 	wait_flag(&ctx, &ctx.stop_accepted);
 
-	/*
-	 * The producer must observe queue-local admission close even while the
-	 * owner is still blocked. This proves stop does not rely on ctl_lock
-	 * handoff from the completion producer.
+	/* 即使所有者仍被阻塞，生产者也必须观察到队列本地准入关闭。
+	 * 这证明停止不依赖完成项生产者交接 ctl_lock。
 	 */
 	assert(pthread_join(producer, NULL) == 0);
 
@@ -589,7 +586,7 @@ static void test_completion_full_stop(void)
 
 int main(void)
 {
-	alarm(60); /* Covers joins too; failure never leaves CI blocked forever. */
+	alarm(60); /* 也覆盖线程回收；失败绝不会让 CI 永久阻塞。 */
 	test_fairness(BACKLOG);
 	test_fairness(REFILL);
 	test_full_queue_waiters(0);

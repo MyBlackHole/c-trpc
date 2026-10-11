@@ -39,7 +39,7 @@ struct test_ctx {
 	unsigned frames;
 	unsigned first_frames;
 	int verify_rx_rotation;
-	/* Below are owner-only observations, delimited by command dequeue. */
+	/* 以下为仅限所有者的观测，以命令出队为边界。 */
 	unsigned turn_timers;
 	unsigned turn_completions;
 	size_t turn_rx;
@@ -49,10 +49,10 @@ struct test_ctx {
 	unsigned checked_turns;
 	int monitor;
 	int send_eagain;
-	int watch_idle; /* Immutable while the Reactor is running. */
+	int watch_idle; /* 反应器运行期间不可变。 */
 	int gate_first_rx;
 	int first_rx_seen;
-	/* Gate and progress predicates are protected by lock. */
+	/* 门禁与进度谓词由 lock 保护。 */
 	int entered;
 	int release;
 	int done;
@@ -66,7 +66,7 @@ struct test_ctx {
 	int owner_reply_release;
 };
 
-/* Installed before pthread_create and cleared after stop/join. */
+/* pthread_create 前安装，停止与回收线程后清除。 */
 static struct test_ctx *active;
 
 size_t __real_tr_command_queue_pop_batch(struct tr_command_queue *queue,
@@ -128,10 +128,8 @@ ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
 	return __real_recv(fd, buffer, len, flags);
 }
 
-/*
- * This library boundary receives exactly the positive recv result. Observe it
- * independently of libc/sanitizer symbol interposition; never bypass ASan's
- * recv interceptor just to make a test gate run.
+/* 此库边界接收精确的正 recv 结果。独立于 libc 或 Sanitizer 符号插入进行观察；
+ * 绝不只为使测试门禁运行而绕过 ASan 的 recv 拦截器。
  */
 int __wrap_tr_parser_produce(struct tr_parser *parser, size_t produced,
 			     struct tr_frame *frame)
@@ -170,7 +168,7 @@ static void wait_for_condition(struct test_ctx *ctx, const int *predicate,
 	struct timespec deadline;
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
-	deadline.tv_sec += 10; /* Hang guard, not a latency acceptance threshold. */
+	deadline.tv_sec += 10; /* 防挂起保护，不是延迟验收阈值。 */
 	assert(pthread_mutex_lock(&ctx->lock) == 0);
 	while (!*predicate) {
 		int ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
@@ -262,7 +260,7 @@ static enum tr_frame_disposition frame_cb(struct tr_conn_handle handle,
 	return TR_FRAME_RELEASE;
 }
 
-/* Test-only blocking gate: production owner callbacks must never wait. */
+/* 仅供测试的阻塞门禁：生产所有者回调绝不能等待。 */
 static int gate(void *arg)
 {
 	struct test_ctx *ctx = arg;
@@ -342,12 +340,12 @@ static int finish_on_owner(void *arg)
 	struct test_ctx *ctx = arg;
 	struct tr_reactor_stats again;
 
-	/* Two direct owner snapshots cannot observe a partly recorded turn. */
+	/* 两次直接所有者快照不能观察到部分记录的轮次。 */
 	assert(tr_reactor_get_stats(ctx->reactor, &ctx->stats) == TR_OK);
 	assert(tr_reactor_get_stats(ctx->reactor, &again) == TR_OK);
 	assert(memcmp(&again, &ctx->stats, sizeof(again)) == 0);
 	check_stats(&again, ctx->byte_budget);
-	/* A bypassed observer must fail, rather than silently reporting zero work. */
+	/* 被绕过的观察者必须失败，而不是静默报告零工作。 */
 	assert(ctx->observed_rx == again.total.rx_bytes);
 	assert(ctx->observed_tx == again.total.tx_bytes);
 	check_turn(ctx);
@@ -468,7 +466,7 @@ static void test_mixed_budget(uint32_t budget, unsigned connections)
 
 	assert(connections != 0U && connections <= MAX_TEST_CONNECTIONS);
 	create_ctx(&ctx, budget, connections);
-	/* More than one epoll batch; every stream must progress before any finishes. */
+	/* 超过一个 epoll 批次；任何流完成前，每个流都必须取得进展。 */
 	ctx.verify_rx_rotation = budget == 1U && connections > 64U;
 	ctx.timer_goal = CALLBACKS;
 	ctx.completion_goal = CALLBACKS;
@@ -575,10 +573,8 @@ static void test_owner_send_fast_path(void)
 	assert(stats.command_send.enqueued == 0U);
 	assert(stats.command_send.full_events == 0U);
 
-	/*
-	 * Block this test callback before its reply, enqueue an external SEND, then
-	 * resume the owner. The owner-generated PONG must remain behind the already
-	 * pending PING in command FIFO order.
+	/* 回复前阻塞此测试回调，将外部 SEND 入队，再恢复所有者。
+	 * 所有者生成的 PONG 必须按命令 FIFO 顺序，留在已待处理的 PING 后面。
 	 */
 	ctx.owner_reply_done = 0;
 	ctx.owner_reply_gate = 1;
@@ -606,9 +602,8 @@ static void test_owner_send_fast_path(void)
 	assert(stats.command_send.full_events == 0U);
 	ctx.owner_reply_gate = 0;
 
-	/*
-	 * A SEND issued from inside TR_CMD_CALL must not bypass commands already
-	 * popped into the same local batch. It therefore re-enters the ring.
+	/* 从 TR_CMD_CALL 内发出的 SEND 不得绕过已弹出到同一本地批次的命令。
+	 * 因此它重新进入环形队列。
 	 */
 	owner_call.handle = handle;
 	owner_call.message_id = 789U;
@@ -661,7 +656,7 @@ static void test_eagain_wait(void)
 	wait_for(&ctx, &ctx.entered);
 	assert(tr_reactor_send(handle, TR_FRAME_PING, 0U, 0U, 0U, NULL) == TR_OK);
 	release_gate(&ctx, thread);
-	wait_for(&ctx, &ctx.idle); /* Real EAGAIN must permit a blocking epoll wait. */
+	wait_for(&ctx, &ctx.idle); /* 真实 EAGAIN 必须允许阻塞 epoll 等待。 */
 	received = malloc(filled + TR_WIRE_HEADER_SIZE);
 	assert(received);
 	read_exact(sockets[1], received, filled + TR_WIRE_HEADER_SIZE);
@@ -700,7 +695,7 @@ static void test_rx_ready_close_reuse(void)
 	assert(write(old_sockets[1], wire, sizeof(wire)) == (ssize_t)sizeof(wire));
 	release_gate(&ctx, thread);
 	wait_for(&ctx, &ctx.rx_entered);
-	/* The first byte uses the turn quota; close must remove its RX continuation. */
+	/* 首字节消耗轮次配额；关闭必须移除其接收延续任务。 */
 	assert(tr_reactor_close(old_handle) == TR_OK);
 	assert(pthread_mutex_lock(&ctx.lock) == 0);
 	ctx.rx_release = 1;
@@ -877,7 +872,7 @@ static uint64_t reactor_restart_timer(void *arg, uint64_t now_ns)
 	assert(pthread_mutex_lock(&ctx->lock) == 0);
 	ctx->timer_adopt_status = ret;
 	if (ret == TR_OK)
-		ctx->timer_fd = -1; /* Reactor owns fd after successful adopt. */
+		ctx->timer_fd = -1; /* 成功接管后，反应器拥有 fd。 */
 	ctx->timer_fired++;
 	assert(pthread_cond_broadcast(&ctx->cond) == 0);
 	assert(pthread_mutex_unlock(&ctx->lock) == 0);
@@ -911,14 +906,13 @@ static void test_reactor_restart_epoch(void)
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
 	ctx.reactor = reactor;
 
-	/*
-	 * Timer registration is owner-state configuration and is valid before the
-	 * first start. Keep this exact token across stop/restart.
+	/* 定时器注册是所有者状态配置，首次启动前也有效。
+	 * 跨停止或重启保留此精确令牌。
 	 */
 	assert(tr_reactor_timer_register(
 		       reactor, reactor_restart_timer, &ctx, &ctx.timer) == TR_OK);
 
-	/* create() is not a running admission epoch. */
+	/* create() 不是运行中的准入轮次。 */
 	assert(tr_reactor_call(
 		       reactor, reactor_restart_owner_call, &ctx) == TR_ERR_CLOSED);
 	assert(tr_reactor_complete(
@@ -934,23 +928,22 @@ static void test_reactor_restart_epoch(void)
 	reactor_restart_wait_completion(&ctx, 1U);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 
-	/* stop() closes the old command/completion generations. */
+	/* stop() 关闭旧命令与完成项代次。 */
 	assert(tr_reactor_call(
 		       reactor, reactor_restart_owner_call, &ctx) == TR_ERR_CLOSED);
 	assert(tr_reactor_complete(
 		       reactor, reactor_restart_completion, &ctx) == TR_ERR_CLOSED);
 
-	/*
-	 * Arm the retained timer while stopped. It becomes immediately due in the
-	 * next epoch and attempts an owner-fast-path fd adopt. Success proves a
-	 * persistent source cannot dispatch before start() publishes accepting=1.
+	/* 停止时为保留的定时器设置定时。它在下一轮次立即到期，
+	 * 并尝试通过所有者快速路径接管 fd。成功证明
+	 * 持久事件源不能在 start() 发布 accepting=1 前分派。
 	 */
 	assert(socketpair(
 		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, timer_sockets) == 0);
 	ctx.timer_fd = timer_sockets[0];
 	assert(tr_reactor_timer_arm(ctx.timer, 1U) == TR_OK);
 
-	/* A second start establishes a fresh, fully usable lifecycle epoch. */
+	/* 第二次启动建立全新且完整可用的生命周期轮次。 */
 	assert(tr_reactor_start(reactor) == TR_OK);
 	reactor_restart_wait_timer(&ctx);
 	assert(ctx.timer_adopt_status == TR_OK);
@@ -998,7 +991,7 @@ static void test_completion_zero_budget(void)
 int main(void)
 {
 	assert(setvbuf(stdout, NULL, _IONBF, 0) == 0);
-	alarm(60U); /* Hang protection, not a latency or throughput threshold. */
+	alarm(60U); /* 防挂起保护，不是延迟或吞吐阈值。 */
 	test_mixed_budget(1U, 2U);
 	test_mixed_budget(17U, 2U);
 	test_mixed_budget(4096U, 2U);

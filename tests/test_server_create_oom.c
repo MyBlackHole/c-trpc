@@ -27,7 +27,7 @@ struct allocation_probe {
 	int fail_destroy_once;
 };
 
-/* 仅当前构造线程注入失败，不影响后续启动的 Reactor/worker。 */
+/* 仅当前构造线程注入失败，不影响后续启动的反应器或工作线程。 */
 static _Thread_local struct allocation_probe probe;
 
 void *__real_calloc(size_t count, size_t size);
@@ -69,7 +69,7 @@ int __wrap_tr_runtime_create(const struct tr_runtime_config *config,
 {
 	int ret = __real_tr_runtime_create(config, out);
 
-	/* 返回后的第一处分配就是 Server 分片数组，不依赖私有结构体大小。 */
+	/* 返回后的第一处分配就是服务端分片数组，不依赖私有结构体大小。 */
 	if (probe.enabled && ret == TR_OK)
 		probe.runtime_ready = 1;
 	return ret;
@@ -223,7 +223,7 @@ int main(void)
 		size_t allocations = test_success(shards, sentinel);
 		size_t n;
 
-		/* 数组 + 每个分片至少一处分配；防止注入未覆盖目标却误通过。 */
+		/* 数组与每个分片至少一处分配；防止注入未覆盖目标却误通过。 */
 		assert(allocations > (size_t)shards);
 		for (n = 1U; n <= allocations; ++n) {
 			test_failure(shards, n, 0, sentinel);

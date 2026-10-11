@@ -234,7 +234,8 @@ static void on_completion(void *arg)
 }
 
 /* 触发完成回调执行后才开启 poll 闸门；若由调用线程提前开启，
- * 所有者可能在完成事件入队前停住。 */
+ * 所有者可能在完成事件入队前停住。
+ */
 static void on_trigger_completion(void *arg)
 {
 	struct fatal_ctx *ctx = arg;
@@ -360,7 +361,7 @@ static void test_fatal_epoch(int concurrent_stop)
 				   &ctx.connection) == TR_OK);
 	assert(tr_reactor_quiesce(ctx.reactor) == TR_OK);
 
-	/* Force next owner poll to fail only after we have filled both queues. */
+	/* 只有填满两个队列后，才强制下一次所有者轮询失败。 */
 	assert(tr_reactor_complete(ctx.reactor, on_trigger_completion, &ctx) ==
 	       TR_OK);
 	wait_value(&ctx, &ctx.gate_entered, 1, "owner poll gate");
@@ -374,7 +375,7 @@ static void test_fatal_epoch(int concurrent_stop)
 			       TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
 			       1U, 1U, buffer) == TR_OK);
 
-	/* Accepted ADOPT owns the new fd before any epoll processing occurs. */
+	/* 已接受的 ADOPT 在任何 epoll 处理发生前拥有新 fd。 */
 	socket_pair(&queued_fd, &queued_peer);
 	assert(tr_reactor_adopt_fd(ctx.reactor, queued_fd, &queued_adopt) ==
 	       TR_OK);
@@ -389,7 +390,8 @@ static void test_fatal_epoch(int concurrent_stop)
 			   "accepted synchronous owner commands");
 	}
 
-	/* SEND + ADOPT + CALL + QUIESCE + SET_HANDLER + RESUME = full ring. */
+	/* SEND + ADOPT + CALL + QUIESCE + SET_HANDLER + RESUME 填满环形队列。
+	 */
 	assert(tr_reactor_resume_rx(ctx.connection) == TR_OK);
 	req[3].ctx = &ctx;
 	req[3].kind = SYNC_CALL;
@@ -399,7 +401,7 @@ static void test_fatal_epoch(int concurrent_stop)
 	wait_value(&ctx, &ctx.sync_entered, 5, "blocked sync producer");
 	wait_queue_waiters(&ctx, 0);
 
-	/* The separate bounded completion queue must wake its blocked worker. */
+	/* 独立的有界完成队列必须唤醒其被阻塞工作线程。 */
 	for (i = 0; i < (int)COMMAND_CAPACITY; ++i)
 		assert(tr_reactor_complete(ctx.reactor, on_completion, &ctx) ==
 		       TR_OK);
@@ -412,17 +414,17 @@ static void test_fatal_epoch(int concurrent_stop)
 	if (concurrent_stop) {
 		assert(pthread_create(&stopper, NULL, stop_thread, &ctx) == 0);
 		stop_spawned = 1;
-		/* The normal stop closes admission before trying to join owner. */
+		/* 正常停止在尝试回收所有者线程前关闭准入。 */
 		for (i = 0; i < 10000; ++i) {
 			if (tr_reactor_complete(ctx.reactor, on_completion, &ctx) ==
 			    TR_ERR_CLOSED)
 				break;
-			/* Queue full itself can block; do not retry this operation. */
+			/* 队列满本身可能阻塞；不要重试此操作。 */
 			assert(!"stop admission must close before probe");
 		}
 	}
 
-	/* Owner enters EIO exit, rejects pending work, and drains completions. */
+	/* 所有者进入 EIO 退出，拒绝待处理工作并排空完成项。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release_gate = 1;
 	notify(&ctx);
@@ -463,7 +465,7 @@ static void test_fatal_epoch(int concurrent_stop)
 	assert(close(peer_fd) == 0);
 	assert(close(queued_peer) == 0);
 
-	/* A joined failed epoch cannot replay any old command on restart. */
+	/* 线程已回收的失败轮次，重启时不能重放任何旧命令。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.trap_poll = 0;
 	pthread_mutex_unlock(&ctx.lock);
