@@ -1,17 +1,6 @@
 ---
-Checks:          '-*,readability-identifier*,google-*,clang-diagnostic-*,clang-analyzer-*,-clang-analyzer-security.insecureAPI.*,openmp-*,performance-*,portability-*,modernize-*'
-WarningsAsErrors: '*,-clang-diagnostic-implicitly-unsigned-literal,-google-readability-*,-google-explicit-constructor,-modernize-*,modernize-avoid-c-arrays,-google-explicit-constructor,-performance-move-const-arg,-performance-noexcept-move-constructor,'
-HeaderFilterRegex: ''
-AnalyzeTemporaryDtors: false
+# Opt-in C analysis profile, not an executed CI analyzer gate. See tooling-policy.
+Checks: '-*,clang-diagnostic-*,clang-analyzer-core.*,clang-analyzer-unix.*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.*'
+WarningsAsErrors: ''
+HeaderFilterRegex: '(^|/)(include|src)/.*\.h$'
 FormatStyle: file
-CheckOptions:
-  - key: readability-identifier-naming.ClassCase
-    value: lower_case
-  - key: readability-identifier-naming.LocalConstantCase
-    value: lower_case
-  - key: readability-identifier-naming.LocalVariableCase
-    value: lower_case
-  - key: readability-identifier-naming.VariableCase
-    value: lower_case
-  - key: readability-identifier-naming.StaticConstantCase
-    value: UPPER_CASE

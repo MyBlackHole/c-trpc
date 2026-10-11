@@ -1,0 +1,29 @@
+name: Changed source formatting
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  changed-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned formatter
+        run: python -m pip install 'clang-format==18.1.8'
+      - name: Test gate positive and negative fixtures
+        run: python scripts/test_source_format.py
+      - name: Check added and modified source lines
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/check_source_format.py --base "$BASE_SHA" --head "$HEAD_SHA"
