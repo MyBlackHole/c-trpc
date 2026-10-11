@@ -109,25 +109,23 @@ int main(void)
 	client_fd = connect_loopback(port);
 	wait_for_peer(server);
 
-	/*
-	 * 第一次 terminal destroy 在 RPC barrier 处失败。旧实现 debug build 会
-	 * assert-abort；新实现必须返回错误并保留 Server/peer ownership。
+	/* 第一次终止销毁在 RPC 屏障处失败。旧实现调试构建会
+	 * 断言中止；新实现必须返回错误并保留 Server 与对端所有权。
 	 */
 	atomic_store(&fail_rpc_destroy_once, 1);
 	assert(tr_server_destroy(server) == TR_ERR_SYS);
 	assert(atomic_load(&rpc_destroy_attempts) == 1U);
 	assert(atomic_load(&channel_destroy_attempts) == 0U);
 
-	/*
-	 * 第二次重试让 RPC 正常收敛，再在 Channel destroy 处失败。
-	 * peer->rpc 已清空，但 peer->channel 与 Server storage 必须继续保留。
+	/* 第二次重试让 RPC 正常收敛，再在 Channel 销毁处失败。
+	 * peer->rpc 已清空，但 peer->channel 与 Server 存储必须继续保留。
 	 */
 	atomic_store(&fail_channel_destroy_once, 1);
 	assert(tr_server_destroy(server) == TR_ERR_SYS);
 	assert(atomic_load(&rpc_destroy_attempts) == 2U);
 	assert(atomic_load(&channel_destroy_attempts) == 1U);
 
-	/* 第三次从剩余 Channel ownership 继续，最终完整释放 Server。 */
+	/* 第三次从剩余 Channel 所有权继续，最终完整释放 Server。 */
 	assert(tr_server_destroy(server) == TR_OK);
 	server = NULL;
 	assert(atomic_load(&rpc_destroy_attempts) == 2U);

@@ -152,19 +152,17 @@ int main(void)
 
 	client_fd = connect_loopback(port);
 
-	/*
-	 * observer publication 在 peer adopt 中故意失败。rollback 必须在当前
-	 * Reactor owner turn 调用 close_on_owner()，不能再向 command queue
-	 * 提交普通 close。
+	/* 观察者发布在对端接管中故意失败。回滚必须在当前
+	 * 反应器所有者处理轮次调用 close_on_owner()，不能再向命令队列
+	 * 提交普通关闭。
 	 */
 	wait_for_owner_close();
 	assert(atomic_load(&observer_attempts) == 1U);
 	assert(atomic_load(&owner_close_attempts) == 1U);
 	assert(atomic_load(&queued_close_attempts) == 0U);
 
-	/*
-	 * Channel 已经存在，因此 rollback 会发布 partial peer 并通过 shard
-	 * lifecycle event 延迟 detach。最终 peer slot 与 detached storage 都必须
+	/* Channel 已经存在，因此回滚会发布部分对端，并通过分片
+	 * 生命周期事件延后解绑。最终对端槽位与已解绑存储都必须
 	 * 被回收，不得留下 ACTIVE/used 残留。
 	 */
 	wait_for_peer_reap(server);

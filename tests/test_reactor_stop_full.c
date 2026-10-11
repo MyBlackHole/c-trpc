@@ -43,7 +43,7 @@ struct stop_test {
 	uint64_t predecessor_sequence;
 };
 
-/* 在 owner 创建之前发布，owner 已 join 后才撤销。其可变字段受 lock 保护。 */
+/* 在所有者创建之前发布，所有者已回收后才撤销。其可变字段受 lock 保护。 */
 static struct stop_test *active;
 static _Thread_local int joining_owner;
 
@@ -72,9 +72,8 @@ int __wrap_tr_command_queue_push_wait_force(
 		assert(queue->count == queue->capacity);
 		pthread_mutex_unlock(&queue->lock);
 
-		/*
-		 * 此刻 stop 已持 ctl_lock、关闭准入，且普通队列确实已满。
-		 * 先允许 owner 回调尝试 close/abort/send，再进入真实 STOP 路径。
+		/* 此刻停止操作已持 ctl_lock、关闭准入，且普通队列确实已满。
+		 * 先允许所有者回调尝试关闭、中止或发送，再进入真实 STOP 路径。
 		 * 旧实现会持 ctl_lock 等待空位，构成确定性的相互等待。
 		 */
 		pthread_mutex_lock(&ctx->lock);
@@ -249,7 +248,7 @@ static void run_case(enum callback_operation operation, int fail_join)
 	ctx.measuring = 1;
 	pthread_mutex_unlock(&ctx.lock);
 
-	/* owner 停留在回调内，这条已经接受的命令将占满唯一的普通槽位。 */
+	/* 所有者停留在回调内，这条已经接受的命令将占满唯一的普通槽位。 */
 	assert(tr_reactor_resume_rx(ctx.connection) == TR_OK);
 	assert(pthread_create(&stopper, NULL, stop_thread, &ctx) == 0);
 	assert(pthread_join(stopper, NULL) == 0);
@@ -258,7 +257,7 @@ static void run_case(enum callback_operation operation, int fail_join)
 	assert(ctx.call_result == TR_OK);
 	assert(ctx.stop_result == (fail_join ? TR_ERR_SYS : TR_OK));
 
-	/* 保留既有 join 重试保证：第二次 stop 不得再次提交 STOP。 */
+	/* 保留既有线程回收重试保证：第二次停止不得再次提交 STOP。 */
 	joining_owner = 1;
 	assert(tr_reactor_stop(ctx.reactor) == TR_OK);
 	joining_owner = 0;
@@ -267,7 +266,7 @@ static void run_case(enum callback_operation operation, int fail_join)
 	assert(ctx.predecessor_pops == 1U);
 	assert(ctx.join_attempts == (fail_join ? 2U : 1U));
 
-	ctx.measuring = 0; /* owner 已 join，不存在并发访问。 */
+	ctx.measuring = 0; /* 所有者已回收，不存在并发访问。 */
 	assert(tr_reactor_start(ctx.reactor) == TR_OK);
 	assert(tr_reactor_call(ctx.reactor, restart_callback, &seen) == TR_OK);
 	assert(seen == 1);

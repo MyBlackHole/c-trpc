@@ -24,7 +24,7 @@ static uint64_t count_callback(void *arg, uint64_t now_ns)
 	return 0;
 }
 
-/* Every slot belongs to exactly one of the free list or registered set. */
+/* 每个槽位恰好属于空闲链表或已注册集合之一。 */
 static void check_queue(const struct tr_timer_queue *queue)
 {
 	unsigned char free_seen[MODEL_CAPACITY] = {0};
@@ -107,7 +107,7 @@ static void test_registration_recycling(void)
 	assert(extra.slot == 42U && extra.generation == 43U);
 	assert(tr_timer_queue_arm(&queue, ctx[1].token, 0U) == TR_OK);
 	assert(tr_timer_queue_register(&queue, count_callback, ctx, &extra) ==
-	       TR_AGAIN); /* Disarming is not unregistering. */
+	       TR_AGAIN); /* 解除定时不是注销。 */
 	assert(tr_timer_queue_unregister(&queue, ctx[1].token) == TR_OK);
 	assert(tr_timer_queue_unregister(&queue, ctx[3].token) == TR_OK);
 	check_queue(&queue);
@@ -196,7 +196,7 @@ static uint64_t mutate_callback(void *arg, uint64_t now_ns)
 		}
 		break;
 	}
-	return 1U; /* Must not override the explicit mutation above. */
+	return 1U; /* 不得覆盖上方显式修改。 */
 }
 
 static void test_callback_mutations(void)
@@ -241,7 +241,7 @@ static void test_equal_deadlines_budget(void)
 	for (i = 0; i < 4U; ++i)
 		assert(tr_timer_queue_register(&queue, count_callback, &ctx[i],
 					       &ctx[i].token) == TR_OK);
-	/* Insert in reverse order; equal deadlines must still follow slot order. */
+	/* 逆序插入；相同截止时间仍必须遵循槽位顺序。 */
 	for (i = 4U; i != 0; --i)
 		assert(tr_timer_queue_arm(&queue, ctx[i - 1U].token, 10U) == TR_OK);
 	assert(tr_timer_queue_run_due(&queue, 10U, 2U, &more) == 2U);

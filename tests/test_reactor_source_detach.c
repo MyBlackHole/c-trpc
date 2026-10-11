@@ -180,8 +180,9 @@ static void test_aux_detach_failure_preserves_publication(
 	assert(close(fd) == 0);
 }
 
-/* Exercise production registration, not only the token helper. The old
- * 16-bit generation reused the first token on registration 65535. */
+/* 测试生产注册，而非仅测令牌辅助函数。
+ * 旧 16 位代次在第 65535 次注册时复用了首个令牌。
+ */
 static void test_aux_token_does_not_repeat_at_16_bit_boundary(
 	struct tr_reactor *reactor)
 {
@@ -290,7 +291,7 @@ static void test_lost_fd_identity_does_not_confirm_detach(
 		       fd_identity_callback, &context) == TR_OK);
 	assert(observed_epoll_fd >= 0);
 
-	/* 保留旧 open file description 的 dup，再关闭并可选复用原 fd 数值。 */
+	/* 保留旧打开文件描述的 dup，再关闭并可选复用原 fd 数值。 */
 	assert(close(registered_fd) == 0);
 	if (replacement_fd >= 0) {
 		assert(dup2(replacement_fd, registered_fd) == registered_fd);
@@ -307,7 +308,7 @@ static void test_lost_fd_identity_does_not_confirm_detach(
 	       TR_ERR_SYS);
 	assert(observed_del_errno == expected_errno);
 
-	/* 失败的 DEL 没有证明旧注册已移除，原 callback publication 必须保留。 */
+	/* 失败的 DEL 没有证明旧注册已移除，原回调发布必须保留。 */
 	assert(tr_reactor_aux_event_register(
 		       reactor, registered_fd, EPOLLIN,
 		       source_callback, &callback_hits) == TR_ERR_STATE);
@@ -315,7 +316,7 @@ static void test_lost_fd_identity_does_not_confirm_detach(
 	assert(event_count == 1);
 	assert(event.data.u64 == old_token);
 
-	/* 旧事件仍能进入 Reactor；失败的解绑必须继续保活原 callback arg。 */
+	/* 旧事件仍能进入反应器；失败的解绑必须继续保活原回调参数。 */
 	assert(tr_reactor_start(reactor) == TR_OK);
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 10;
@@ -336,7 +337,7 @@ static void test_lost_fd_identity_does_not_confirm_detach(
 		       reactor, registered_fd, EPOLLIN,
 		       source_callback, &callback_hits) == TR_ERR_STATE);
 
-	/* 销毁 Reactor 关闭 epoll fd 后，才释放源对象和 callback arg。 */
+	/* 销毁反应器关闭 epoll fd 后，才释放源对象和回调参数。 */
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_reactor_destroy(reactor) == TR_OK);
 	assert(pthread_cond_destroy(&context.condition) == 0);

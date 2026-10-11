@@ -16,10 +16,9 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * 测试链接期只替换 Server 到 Channel 的排空等待边界：
- * 使用真实 Reactor、Server 和两个已发布 peer，保持 begin_drain 原样执行。
- * 针对未到期/已到期等状态注入确定性等待结果，不依赖实际睡满超时。
+/* 测试链接期只替换 Server 到 Channel 的排空等待边界：
+ * 使用真实反应器、Server 和两个已发布对端，保持 begin_drain 原样执行。
+ * 针对未到期或已到期等状态注入确定性等待结果，不依赖实际睡满超时。
  */
 enum drain_case {
 	DRAIN_CASE_NONE,
@@ -62,7 +61,7 @@ int __wrap_tr_deadline_init_ms(struct tr_deadline *deadline,
 	if (active_case == DRAIN_CASE_NONE)
 		return __real_tr_deadline_init_ms(deadline, timeout_ms);
 
-	/* 期限只在所有 peer 发布 GOAWAY barrier 后构造一次。 */
+	/* 期限只在所有对端发布 GOAWAY 屏障后构造一次。 */
 	assert(begin_calls == 2U);
 	assert(deadline_inits == 0U);
 	assert(timeout_ms == 30000U);
@@ -126,7 +125,7 @@ int __wrap_tr_channel_wait_drained_deadline(
 
 	switch (active_case) {
 	case DRAIN_CASE_SUCCESS:
-		/* 真实 Channel，无 Stream 时立即完成。 */
+		/* 真实 Channel，无流时立即完成。 */
 		return __real_tr_channel_wait_drained_deadline(channel, deadline);
 	case DRAIN_CASE_PEER_AGAIN:
 	case DRAIN_CASE_GLOBAL_TIMEOUT:
@@ -236,7 +235,7 @@ static void run_case(enum drain_case test_case, uint32_t timeout_ms,
 	assert(deadline_checks == expected_checks);
 	assert(deadline_inits == (timeout_ms != 0U ? 1U : 0U));
 
-	/* teardown 必须保留真实 Server/Channel 所有权，不能由测试跳过。 */
+	/* 拆除必须保留真实 Server/Channel 所有权，不能由测试跳过。 */
 	assert(tr_server_destroy(server) == TR_OK);
 	assert(close(peers[0]) == 0);
 	assert(close(peers[1]) == 0);
