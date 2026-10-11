@@ -67,9 +67,8 @@ void tr_deadline_init_infinite(struct tr_deadline *deadline)
 	deadline->infinite = 1;
 }
 
-/*
- * 向上取整剩余毫秒，且有限等待只返回 [0, INT_MAX]。
- * 先比较/借位再乘 1000，避免超大 time_t 差值算术溢出。
+/* 向上取整剩余毫秒，且有限等待只返回 [0, INT_MAX]。
+ * 先比较或借位再乘 1000，避免超大 time_t 差值算术溢出。
  */
 static int tr_deadline_poll_ms(const struct tr_deadline *deadline,
 			      int *wait_ms, int *expired)
@@ -149,7 +148,7 @@ int tr_deadline_poll_fd(int fd, short events,
 		pfd.revents = 0;
 		ret = poll(&pfd, 1, wait_ms);
 		if (ret > 0) {
-			/* 仅显式 0ms connect 保留一次立即就绪探测。 */
+			/* 仅显式 0ms 连接保留一次立即就绪探测。 */
 			if (first && expired && allow_zero_probe)
 				return TR_OK;
 			ret = tr_deadline_expired(deadline, &expired);

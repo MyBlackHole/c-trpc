@@ -83,10 +83,9 @@ void tr_completion_queue_close(struct tr_completion_queue *queue)
 	if (queue->admission_generation == 0U)
 		queue->admission_generation = 1U;
 	queue->accepting = 0;
-	/*
-	 * stop/close 是 producer wait 的生命周期 fence。所有因 full 阻塞的
-	 * worker 必须立即醒来观察 CLOSED，不能依赖 Reactor 再消费一批。
-	 * generation 同时阻止旧 waiter 在后续 reopen 后误入新的运行期。
+	/* 停止或关闭是生产者等待的生命周期屏障。所有因满队列而阻塞的
+	 * 工作线程必须立即醒来观察 CLOSED，不能依赖反应器再消费一批。
+	 * generation 同时阻止旧等待者在后续重开后误入新的运行期。
 	 */
 	pthread_cond_broadcast(&queue->not_full);
 	pthread_mutex_unlock(&queue->lock);
@@ -220,10 +219,9 @@ size_t tr_completion_queue_pop_batch(struct tr_completion_queue *queue,
 	if (!more)
 		queue->wake_pending = 0;
 
-	/*
-	 * 一次 batch 可能释放多个 slot。broadcast 避免只唤醒一个 producer 后，
-	 * 其他 waiter 在 queue 已有空位时仍永久睡眠；producer 数量受 worker
-	 * budget 限制，不在 socket I/O 热路径。
+	/* 一次批处理可能释放多个槽位。广播避免只唤醒一个生产者后，
+	 * 其他等待者在队列已有空位时仍永久睡眠；生产者数量受工作线程
+	 * 预算限制，不在套接字 I/O 热路径。
 	 */
 	if (count != 0U && queue->waiters != 0U)
 		pthread_cond_broadcast(&queue->not_full);

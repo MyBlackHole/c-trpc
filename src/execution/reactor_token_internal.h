@@ -3,18 +3,17 @@
 
 #include <stdint.h>
 
-/*
- * Reactor event token namespace：
+/* 反应器事件令牌命名空间：
  *
- * connection token:
+ * 连接令牌：
  *   [ generation:32 ][ slot:32 ]
  *
- * internal auxiliary token:
+ * 内部辅助令牌：
  *   [ 0xFFFF:16 ][ generation:32 ][ slot:16 ]
  *
- * 因此 connection generation 必须避开 0xFFFFxxxx；aux generation 可以使用
- * 完整非零 uint32_t 空间。wake/listener/peer-event 使用 UINT64_MAX 附近固定
- * token，其低 16 位超出 aux slot capacity，不会被 aux decoder 接受。
+ * 因此连接 generation 必须避开 0xFFFFxxxx；辅助 generation 可以使用
+ * 完整非零 uint32_t 空间。唤醒、监听器和对端事件使用 UINT64_MAX 附近固定
+ * 令牌，其低 16 位超出辅助槽位容量，不会被辅助解码器接受。
  */
 #define TR_REACTOR_INTERNAL_TOKEN_PREFIX UINT16_C(0xffff)
 #define TR_REACTOR_CONNECTION_GENERATION_MAX UINT32_C(0xfffeffff)
