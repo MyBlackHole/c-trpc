@@ -984,6 +984,12 @@ static void test_public_connection_group_client_data_offer(void)
 		       client, 10U) == TR_ERR_TIMEOUT);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
 
+	/* UINT32_MAX 毫秒也必须保持有限，且原绝对 deadline 不可重算。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, UINT32_MAX, 0);
+	assert(tr_client_connection_group_wait_drained(
+		       client, UINT32_MAX) == TR_ERR_TIMEOUT);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
+
 	/* clock/deadline 初始化失败必须显式返回；不能误入 condwait。 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 1);
 	assert(tr_client_connection_group_wait_drained(
