@@ -55,6 +55,72 @@ core/unix/security 范围，移除 C++ modernize/google/performance 等宽泛选
 宏与平台组合、验证选中的检查及头文件覆盖，并为抑制项给出理由。禁止自动 `--fix`
 制造大面积改动；格式工具也不证明线程安全、ownership、ABI 或所有故障路径正确。
 
+## 真实编译数据库：仅完成分析输入准备
+
+`python3 scripts/check_compile_commands.py` 使用 Xmake 原生
+`xmake project -k compile_commands --lsp=clangd -t trcore <目录>` 导出数据库，不手写
+`compile_commands.json`，不添加分析专用宏或替换编译器。运行需要 Python 3.9+
+及已经配置的 Xmake；CI 仍固定 Xmake 3.1.1。最小复现：
+
+```sh
+xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
+python3 scripts/check_compile_commands.py \
+    --output-dir build/compdb/gcc-release --mode release \
+    --toolchain gcc --crc32c-portable n --arch x86_64
+# 在相同检出、工具链和配置下复查已有产物；不会重新导出。
+python3 scripts/check_compile_commands.py \
+    --output-dir build/compdb/gcc-release --mode release \
+    --toolchain gcc --crc32c-portable n --arch x86_64 --check-only
+python3 scripts/test_compile_commands.py -v
+```
+
+可用 `--xmake /路径/xmake` 或环境变量 `XMAKE` 指定单个可执行文件，
+`--lang` 沿用[工具输出国际化](tool-output-i18n.md)。脚本不重新配置项目。
+切换模式、编译器、CRC 后端或参数后必须用新配置导出，不能只改目录标签。
+同一工作树不要并发执行重新配置与导出。
+
+校验边界：
+
+- 生产范围是当前 Linux 构建的 `trcore`，独立比较磁盘 `src/**/*.c`、
+  Xmake 已解析的 `trcore:sourcebatches()` 和数据库条目，拒绝缺失、重复及
+  额外生产条目。不硬编码源文件名单或数量；正常增删源码与 Xmake 定义即可。
+  当前要求全部 `src` C 文件参加该目标；未来引入平台条件源或生成源时，必须
+  有意识地更新覆盖策略。这不是通用 Xmake 项目校验器。
+- 从 Xmake `compiler.compargv(..., rawargs=true)` 读取各源文件真实命令，
+  逐项比较 `arguments`，包含编译器、对象路径、宏、包含路径与全部参数顺序；
+  保留空格、引号和参数边界，不经命令行字符串重新拆分；显式选择原生
+  `--lsp=clangd` 以保留 `-isystem`，避免默认导出将其改写为 `-I`。
+- 另行检查 C11、项目 `include` 路径、`-pthread`、直接警告开关，以及直接
+  `-D/-U` 命令行宏中的 `TR_CRC32C_FORCE_PORTABLE` 与选项相符、`NDEBUG`
+  保持未定义（包括函数式宏定义）。当前基线拒绝 `-w` 与 `-Wno-*` 关闭、抑制或降级
+  警告；若未来确需例外，应单独评审，而不是借额外参数绕过基线。
+  不凭两个同源列表相等宣称覆盖完备，也不凭出现一个正确 flag 忽略后续覆盖。
+  内部头的相对包含按真实命令保留，不人为补 `-Isrc` 或 feature-test 宏。
+- Xmake 3.1.1 原生导出即使选择 `trcore`，也会附带注册测试条目；文件保持
+  原样，测试条目不能替代生产条目。未来分析仍须明确选择 `src` 翻译单元，
+  不能把整份数据库视为已验证的全目标分析输入。示例、基准和测试不计入这里的
+  生产覆盖；测试的 `-UNDEBUG` 与链接期 `--wrap` 不混入生产命令。
+- 同目录 `configuration.json` 记录 Git 提交、`xmake.lua` 摘要、Xmake 版本、
+  公开配置（平台/架构/模式/工具链/CRC/额外参数等）、编译器路径与版本首行、
+  数据库摘要及条目数量。复查时与当前配置比对，拒绝旧配置或文件混配。
+  这些是配置身份记录，不是源码完整性签名、工具链供应链证明或编译语义证明。
+  数据库含本机绝对路径，CI 归档用于诊断，换机器应重新导出。
+
+CI 在既有 GCC debug/release、Clang release 作业内校验 Linux/x86_64 自动
+CRC 配置，保留原有检查名称；CRC 专测另校验 GCC release 的可移植宏配置。
+GCC 作业内运行从真实导出派生的正负例，包含实际 debug/portable 切换、
+含空格和单引号的检出/包含路径与字符串宏，以及缺漏、重复、错误参数、错误配置、
+摘要不匹配与失败退出码。消毒器数据库可按各自模式单独导出，此处不扩充其 CI 矩阵。
+
+**本项只是 issue #154 P1-4 / D1 的前置输入准备，不标记 D1 完成。**
+没有运行 clang-tidy、Clang analyzer 或 GCC `-fanalyzer`，没有固定分析器版本、
+建立告警基线、验证所选分析检查或头文件分析覆盖。命令匹配也不证明预处理后
+宏状态：`-Wp,...`、`@response`、强制包含头等转交/预处理途径未展开。
+也不证明所有头文件独立可编译、运行时正确性或跨架构可移植性；仍以真实 Xmake
+构建/测试及后续单独验收为准。未改变 `.clang-tidy` 的可选状态或告警升级策略。
+
+数据库字段遵循 [Clang 编译数据库规范](https://clang.llvm.org/docs/JSONCompilationDatabase.html)。
+
 ## 历史来源边界
 
 替换前的两个配置来自 Linux：`.clang-format` 与 v6.10 同名文件逐字节一致，

@@ -1,6 +1,7 @@
 # 工具输出国际化
 
-第一阶段覆盖 `scripts/check_source_format.py` 的项目自有帮助、错误上下文与摘要，
+当前覆盖 `scripts/check_source_format.py` 与 `scripts/check_compile_commands.py`
+的项目自有帮助、错误上下文与摘要，
 以及翻译目录维护入口。文档和源码注释保持中文；运行时以完整英文句子为 gettext
 msgid，简体中文维护在 `locales/zh_CN/LC_MESSAGES/c-trpc-tools.po`，编译后的 MO
 随仓库提供。缺译、目录缺失或损坏时回退英文，不改变检查结论和退出码。

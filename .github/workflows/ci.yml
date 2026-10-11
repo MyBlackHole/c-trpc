@@ -40,9 +40,20 @@ jobs:
         run: |
           for mode in debug release; do
             xmake f -c -y -m "$mode" --toolchain=gcc --crc32c_portable=n
+            python3 scripts/check_compile_commands.py --output-dir "build/compdb/gcc-$mode" --mode "$mode" --toolchain gcc --crc32c-portable n --arch x86_64
             xmake build --all -v
             xmake test -v -j1
           done
+      - name: 验证真实编译数据库的正负例
+        run: python3 scripts/test_compile_commands.py -v
+      - name: 保留 GCC 编译数据库与配置身份
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compilation-database-gcc
+          path: build/compdb/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-test-clang:
     name: build-test (clang)
@@ -63,8 +74,17 @@ jobs:
       - name: 构建全部目标并测试 release 模式
         run: |
           xmake f -c -y -m release --toolchain=clang --crc32c_portable=n
+          python3 scripts/check_compile_commands.py --output-dir build/compdb/clang-release --mode release --toolchain clang --crc32c-portable n --arch x86_64
           xmake build --all -v
           xmake test -v -j1
+      - name: 保留 Clang 编译数据库与配置身份
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compilation-database-clang
+          path: build/compdb/
+          if-no-files-found: ignore
+          retention-days: 7
 
   asan-ubsan:
     name: ASan + UBSan
@@ -351,6 +371,7 @@ jobs:
       - name: 运行强制可移植后端
         run: |
           xmake f -c -y -m release --toolchain=gcc --crc32c_portable=y
+          python3 scripts/check_compile_commands.py --output-dir build/compdb/gcc-portable --mode release --toolchain gcc --crc32c-portable y --arch x86_64
           xmake build test_crc32c
           xmake run test_crc32c --expect-portable
       - name: 隐藏 SSE4.2 后运行自动分派
