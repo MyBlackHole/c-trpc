@@ -29,10 +29,9 @@
 
 static int tr_client_blocking_lifecycle_context(void)
 {
-	/*
-	 * Blocking lifecycle waits must run on an external control thread.
-	 * Reactor owner callbacks must return so I/O/timers can advance; RPC
-	 * workers must return so the current Call can publish its completion.
+	/* 阻塞的生命周期等待必须在外部控制线程运行。
+	 * 反应器所有者回调必须返回，I/O 与定时器才能推进；
+	 * RPC 工作线程必须返回，当前 Call 才能发布完成结果。
 	 */
 	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context();
 }
@@ -65,10 +64,9 @@ static int tr_client_create_rollback(
 	if (!out || !client)
 		return cause;
 
-	/*
-	 * constructor 失败后显式执行 terminal rollback，不能把 fallible destroy
-	 * 藏在 void cleanup。rollback 成功保持传统的 *out==NULL；rollback 自身
-	 * 失败时把 partial Client ownership 留在 *out，调用方可继续 destroy。
+	/* 构造函数失败后显式执行终止回滚，不能把可能失败的销毁
+	 * 藏在无返回值清理中。回滚成功保持传统的 *out==NULL；回滚自身
+	 * 失败时把部分构造的 Client 所有权留在 *out，调用方可继续销毁。
 	 */
 	rollback_ret = tr_client_destroy(client);
 	if (rollback_ret == TR_OK) {
@@ -118,10 +116,9 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 #undef TR_LIMIT_DEFAULT
 	}
 
-	/*
-	 * Connection Group transfer concurrency is a dedicated semantic budget.
-	 * Preserve the historical behavior by inheriting max_streams when callers
-	 * enable DATA lanes without choosing an explicit transfer limit.
+	/* 连接组传输并发度是专用的语义预算。
+	 * 调用者启用 DATA 通道而未选择显式传输上限时，
+	 * 通过继承 max_streams 保留历史行为。
 	 */
 	if (config->connection_groups.max_data_connections != 0U &&
 	    config->connection_groups.max_active_transfers == 0U)
@@ -274,9 +271,8 @@ int tr_client_create_with_tuning(
 	if (ret != TR_OK)
 		return tr_client_create_rollback(out, client, ret);
 
-	/*
-	 * Connection Group engine is created lazily on first public Group use.
-	 * A normal RPC-only Client therefore pays no Group heap/pool/timer cost.
+	/* 连接组引擎在首次使用公开 Group 接口时才创建。
+	 * 因此仅使用 RPC 的普通客户端不承担 Group 堆、池或定时器成本。
 	 */
 	*out = client;
 	return TR_OK;
@@ -350,10 +346,9 @@ static int tr_client_connect_rollback(
 {
 	int rollback_ret;
 
-	/*
-	 * fd 被 Reactor 接管以后，后续失败已经跨过异步 publication 边界。
-	 * rollback 必须显式返回状态：只有 reset_session() 真正收敛，才允许
-	 * 把原 connect 错误返回给调用方；rollback 自身失败时生命周期错误优先。
+	/* fd 被反应器接管以后，后续失败已经跨过异步发布边界。
+	 * 回滚必须显式返回状态：只有 reset_session() 真正收敛，才允许
+	 * 把原连接错误返回给调用方；回滚自身失败时生命周期错误优先。
 	 */
 	rollback_ret = tr_client_reset_session(client);
 	return rollback_ret != TR_OK ? rollback_ret : cause;
@@ -376,7 +371,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	    tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
-	/* TCP connect 和 HELLO 握手共享同一个绝对截止时间。 */
+	/* TCP 连接和 HELLO 握手共享同一个绝对截止时间。 */
 	ret = tr_deadline_init_ms(&connect_deadline,
 				  client->config.connect_timeout_ms);
 	if (ret != TR_OK)
@@ -431,9 +426,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	if (ret != TR_OK)
 		goto rollback;
 
-	/*
-	 * 先完成初始 HELLO handshake，再允许后续 reconnect policy 接管。
-	 * 这样 connect 失败时 rollback 不会与 connection replacement 竞态。
+	/* 先完成初始 HELLO 握手，再允许后续重连策略接管。
+	 * 这样连接失败时回滚不会与连接替换竞争。
 	 */
 	ret = tr_channel_wait_ready_deadline(
 		client->channel, TR_LANE_CONTROL, &connect_deadline);
@@ -713,20 +707,17 @@ int tr_client_destroy(struct tr_client *client)
 	if (!client)
 		return TR_OK;
 
-	/*
-	 * destroy is an external terminal operation. Calling it from a Reactor
-	 * callback or RPC worker would make synchronous teardown wait for itself.
-	 * The public contract forbids that context; defensively leave ownership
-	 * unchanged instead of partially destroying the Client.
+	/* 销毁是外部终止操作。从反应器回调或 RPC 工作线程调用它，
+	 * 会使同步拆除等待自身。公开契约禁止此上下文；
+	 * 防御性地保持所有权不变，而不是部分销毁客户端。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return TR_ERR_STATE;
 
-	/*
-	 * destroy 是纯 terminal teardown，不内置 graceful-drain policy 或魔法超时。
+	/* 销毁是纯终止拆除，不内置优雅排空策略或隐含超时。
 	 * 需要优雅排空时，调用方必须在此之前显式调用 begin_drain/wait_drained。
 	 *
-	 * 所有 callback source 与上层 owner barrier 仍必须在 Runtime stop 前收敛。
+	 * 所有回调源与上层所有者屏障仍必须在运行时停止前收敛。
 	 */
 	if (client->connection_group) {
 		ret = tr_client_group_destroy(client->connection_group);
@@ -750,18 +741,16 @@ int tr_client_destroy(struct tr_client *client)
 
 	if (client->runtime) {
 		ret = tr_runtime_stop(client->runtime);
-		/*
-		 * A failed lifecycle barrier means ownership has not converged.
-		 * Keep the remaining Client/Runtime storage alive rather than freeing
-		 * memory that an execution thread may still reference.
+		/* 生命周期屏障失败意味着所有权尚未收敛。
+		 * 保持剩余 Client/Runtime
+		 * 存储存活，不释放执行线程可能仍引用的内存。
 		 */
 		if (ret != TR_OK)
 			return ret;
 	}
 
-	/*
-	 * Pools may borrow RuntimeShard accounting in later phases. Release them
-	 * after protocol users are gone but before destroying their resource owner.
+	/* 池在后续阶段可能借用 RuntimeShard 记账。
+	 * 在协议使用方离开后、销毁其资源所有者前释放池。
 	 */
 	if (client->reassembly_pool_ready) {
 		ret = tr_buffer_pool_destroy(&client->reassembly_pool);

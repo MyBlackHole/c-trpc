@@ -20,9 +20,8 @@ struct tr_client_group_config {
 	void *callback_arg;
 };
 
-/*
- * 正常失败时 *out 保持 NULL。若 constructor rollback 自身失败，返回该
- * lifecycle error，并通过非空 *out 保留 partial Group ownership；调用方
+/* 正常失败时 *out 保持 NULL。若构造回滚自身失败，返回该
+ * 生命周期错误，并通过非空 *out 保留部分构造的 Group 所有权；调用方
  * 只能继续 tr_client_group_destroy() 重试收敛。
  */
 int tr_client_group_create(const struct tr_client_group_config *config,

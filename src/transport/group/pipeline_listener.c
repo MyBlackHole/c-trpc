@@ -65,9 +65,8 @@ struct tr_pipeline_listener {
 	struct tr_reactor_timer_handle handshake_timer;
 	int handshake_timer_registered;
 
-	/*
-	 * Listener/Pipeline counters remain Reactor-owner only. This lock publishes
-	 * only drain lifecycle generations to external waiters.
+	/* 监听器与 Pipeline 计数器仍仅由反应器所有者访问。
+	 * 此锁只向外部等待者发布排空生命周期代次。
 	 */
 	pthread_mutex_t drain_wait_lock;
 	pthread_cond_t drain_wait_cond;
@@ -448,7 +447,7 @@ static int tr_pipeline_listener_accept_data(
 	return TR_OK;
 }
 
-/* 单个 owner timer 扫描有界连接表；成功交接的 CONTROL/DATA 不再占租约。 */
+/* 单个所有者定时器扫描有界连接表；成功交接的 CONTROL/DATA 不再占租约。 */
 static uint64_t tr_pipeline_listener_handshake_timer_main(void *arg,
 							  uint64_t now_ns)
 {
@@ -539,7 +538,8 @@ static int tr_pipeline_listener_preface_feed(
 	{
 		int expired;
 
-		/* 即使同一轮先分发 RX，过期的最后一个字节也不能完成交接。 */
+		/* 即使同一轮先分发接收事件，过期的最后一个字节也不能完成交接。
+		 */
 		ret = tr_deadline_expired(&tracked->handshake_deadline,
 					  &expired);
 		if (ret != TR_OK || expired) {
@@ -575,10 +575,9 @@ static int tr_pipeline_listener_preface_feed(
 		goto reject;
 	}
 
-	/*
-	 * 协议 handler 已拥有连接的终止清理。即使下面的最终期限检查失败，
+	/* 协议处理函数已拥有连接的终止清理。即使下面的最终期限检查失败，
 	 * preface_release 也不能先清空 tracked，否则 DATA/CONTROL 的关闭回调
-	 * 会失去精确路由与会话所有权。返回错误后由 Reactor 统一关闭连接。
+	 * 会失去精确路由与会话所有权。返回错误后由反应器统一关闭连接。
 	 */
 	preface->handed_off = 1;
 	{
@@ -641,7 +640,8 @@ static int tr_pipeline_listener_adopt_fd(
 	if (ret == TR_OK)
 		ret = tr_pipeline_listener_arm_handshake_on_owner(listener);
 	if (ret != TR_OK) {
-		/* fd 尚未交给 Reactor；调用者关闭它，不能留下无到期唤醒的槽位。 */
+		/* fd 尚未交给反应器；调用者关闭它，不能留下无到期唤醒的槽位。
+		 */
 		tr_pipeline_listener_connection_clear(tracked);
 		return ret;
 	}
@@ -790,9 +790,8 @@ int tr_pipeline_listener_create(
 	return TR_OK;
 
 fail:
-	/*
-	 * message_pool init 是 constructor 最后一个可失败步骤；成功后立即 commit，
-	 * 因此失败路径不可能持有 ready pool，不需要 fallible rollback。
+	/* message_pool 初始化是构造函数最后一个可失败步骤；成功后立即提交，
+	 * 因此失败路径不可能持有就绪池，不需要可能失败的回滚。
 	 */
 	if (listener->registry)
 		tr_pipeline_registry_destroy(listener->registry);
@@ -818,10 +817,9 @@ static int tr_pipeline_listener_publish_listen(void *arg)
 		(struct tr_pipeline_listener_listen_request *)arg;
 	struct tr_pipeline_listener *listener = request->listener;
 
-	/*
-	 * 这个检查与 source registration 处于同一个 Reactor ownership
-	 * transaction。不能在外部线程先读 listener_registered/listen_fd，
-	 * 否则会重新引入 lifecycle data race。
+	/* 这个检查与事件源注册处于同一个反应器所有权事务。
+	 * 不能在外部线程先读 listener_registered/listen_fd，
+	 * 否则会重新引入生命周期数据竞争。
 	 */
 	if (listener->listen_fd >= 0 || listener->listener_registered)
 		return TR_ERR_STATE;
@@ -847,7 +845,7 @@ static void tr_pipeline_listener_retain_failed_listen(void *arg)
 		(struct tr_pipeline_listener_listen_request *)arg;
 	struct tr_pipeline_listener *listener = request->listener;
 
-	/* DEL 回滚失败时，等待后续 drain 跨过解绑屏障后再关闭该 fd。 */
+	/* DEL 回滚失败时，等待后续排空跨过解绑屏障后再关闭该 fd。 */
 	listener->retained_listen_fd = request->fd;
 }
 
@@ -873,9 +871,8 @@ int tr_pipeline_listener_listen_ipv4(
 	request.fd = fd;
 	request.bound_port = bound;
 
-	/*
-	 * source 对 epoll 可见与 Listener owner-state 发布必须是同一个
-	 * lifecycle transaction。函数成功返回前 callback 已经能安全观察
+	/* 事件源对 epoll 可见与监听器所有者状态发布必须是同一个
+	 * 生命周期事务。函数成功返回前，回调已经能安全观察
 	 * listen_fd/bound_port/listener_registered/draining 的完整状态。
 	 */
 	ret = tr_reactor_listener_register_publish(
@@ -929,9 +926,8 @@ static int tr_pipeline_listener_begin_drain_on_owner(void *arg)
 	if (!listener)
 		return TR_ERR_INVALID;
 
-	/*
-	 * 即使已经 draining 也经过 Reactor listener ownership 检查。source 已
-	 * detach 时 unregister_call 仍执行 publication，因此该操作天然幂等。
+	/* 即使已经 draining 也经过反应器监听器所有权检查。事件源已
+	 * 解绑时 unregister_call 仍执行发布，因此该操作天然幂等。
 	 */
 	return tr_reactor_listener_unregister_call(
 		listener->config.owner, tr_pipeline_listener_on_ready, listener,
@@ -943,9 +939,8 @@ int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener)
 	if (!listener)
 		return TR_ERR_INVALID;
 
-	/*
-	 * running/stopped 都只在 Reactor 的串行化域读取和修改 Listener
-	 * lifecycle state；外部线程不直接读取 listener_registered/listen_fd。
+	/* 运行中或已停止时，都只在反应器的串行化域读取和修改监听器
+	 * 生命周期状态；外部线程不直接读取 listener_registered/listen_fd。
 	 */
 	return tr_reactor_listener_unregister_call(
 		listener->config.owner, tr_pipeline_listener_on_ready, listener,
@@ -1043,10 +1038,9 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 	uint32_t i;
 	int result;
 
-	/*
-	 * stop 的整个状态转换都由 owner 串行化：先关闭 listener admission，
-	 * 再关闭已有连接/transport，最后在同一个 owner turn 检查计数是否归零。
-	 * 外部线程不直接观察 owner-only counters。
+	/* 停止的整个状态转换都由所有者串行化：先关闭监听器准入，
+	 * 再关闭已有连接与传输对象，最后在同一个所有者处理轮次检查计数是否归零。
+	 * 外部线程不直接观察仅限所有者访问的计数器。
 	 */
 	result = tr_pipeline_listener_begin_drain_on_owner(listener);
 
@@ -1064,11 +1058,10 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 			result = ret;
 	}
 
-	/*
-	 * connection close callback 通常会完成 CONTROL fatal teardown。若某次
-	 * teardown 在 closing fence 之后返回错误，connection slot 可能已经清空，
-	 * 但 session 仍保留 transport。stop() 必须显式重试这些残留 session，
-	 * 不能仅依赖 connections_current 判断是否还需要 owner-side cleanup。
+	/* 连接关闭回调通常会完成 CONTROL 致命拆除。若某次
+	 * 拆除在关闭屏障之后返回错误，连接槽位可能已经清空，
+	 * 但会话仍保留传输对象。stop() 必须显式重试这些残留会话，
+	 * 不能仅依赖 connections_current 判断是否还需要所有者侧清理。
 	 */
 	for (i = 0; i < listener->config.pipeline_capacity; ++i) {
 		struct tr_pipeline_listener_session *session =
@@ -1118,11 +1111,10 @@ int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener)
 	if (ret != TR_ERR_CLOSED)
 		return ret;
 
-	/*
-	 * tr_reactor_call() 的 CLOSED 同时覆盖“未启动/已停止”和“正在停止”。
-	 * unregister_call 只允许前者进入 ctl_lock direct path；正在停止时继续
-	 * 返回 CLOSED，绝不越过 owner teardown barrier。detach、状态发布和
-	 * counter 检查在同一串行化区间完成。
+	/* tr_reactor_call() 的 CLOSED 同时覆盖“未启动/已停止”和“正在停止”。
+	 * unregister_call 只允许前者进入 ctl_lock 直接路径；正在停止时继续
+	 * 返回 CLOSED，绝不越过所有者拆除屏障。解绑、状态发布和
+	 * 计数器检查在同一串行化区间完成。
 	 */
 	return tr_reactor_listener_unregister_call(
 		listener->config.owner, tr_pipeline_listener_on_ready, listener,
@@ -1152,22 +1144,21 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 	if (!listener)
 		return TR_OK;
 
-	/*
-	 * Validate owner-only lifecycle state in the same serialized domain used by
-	 * listener/source teardown. Fully stopped Reactor uses ctl_lock direct path;
-	 * an in-progress stop returns CLOSED instead of allowing free to race owner.
+	/* 在监听器与事件源拆除所用的同一串行化域验证仅限所有者访问的生命周期状态。
+	 * 完全停止的反应器使用 ctl_lock 直接路径；停止进行中则返回 CLOSED，
+	 * 而不是允许释放与所有者竞争。
 	 */
 	ret = tr_reactor_call_or_stopped(
 		listener->config.owner,
 		tr_pipeline_listener_verify_destroy, listener);
-	/*
-	 * verify_destroy 是可恢复的 terminal barrier：仍有 listener/session/waiter
-	 * 时必须把错误返回给调用方，而不是在 debug 构建先 abort。
+	/* verify_destroy 是可恢复的终止屏障：仍有监听器、会话或等待者
+	 * 时必须把错误返回给调用方，而不是在调试构建先中止。
 	 */
 	if (ret != TR_OK)
 		return ret;
 
-	/* verify_destroy 已在 owner 上关闭准入；先解绑 timer 才能释放回调参数。 */
+	/* verify_destroy 已在所有者上关闭准入；先解绑定时器才能释放回调参数。
+	 */
 	if (listener->handshake_timer_registered) {
 		ret = tr_reactor_timer_unregister(listener->handshake_timer);
 		if (ret != TR_OK)

@@ -11,19 +11,16 @@ struct tr_pipeline_ingress_config {
 	void *callback_arg;
 };
 
-/*
- * Owner-only accepted-fd handoff for Pipeline DATA sockets.
+/* 仅限所有者的 Pipeline DATA 套接字已接受 fd 交接。
  *
- * On TR_OK the Reactor owns fd and a fixed 48-byte TRR1 preface gate is
- * installed. Only an exact registry reservation attach transitions the
- * connection to normal TRP1 frame dispatch.
+ * TR_OK 时反应器拥有 fd，且已安装固定 48 字节的 TRR1 前导门禁。
+ * 只有精确注册表预留附接才会将连接转入正常 TRP1 帧分派。
  *
- * On error ownership of fd remains with the caller.
+ * 出错时 fd 所有权仍归调用者。
  */
-/*
- * Attach an already-adopted connection after a shared TRR1 gate has parsed an
- * exact DATA route. Used by the shard Pipeline listener so CONTROL and DATA
- * can share one accepted-socket routing gate.
+/* 共享 TRR1 门禁解析出精确 DATA 路由后，附接已接管的连接。
+ * 供分片 Pipeline 监听器使用，使 CONTROL 与 DATA
+ * 可以共用一个已接受套接字的路由门禁。
  */
 int tr_pipeline_ingress_attach_data_route_on_owner(
 	const struct tr_pipeline_ingress_config *config,

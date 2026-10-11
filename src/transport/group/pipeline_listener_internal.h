@@ -32,9 +32,8 @@ struct tr_pipeline_listener_config {
 	/* TRR1 的绝对总期限；0 采用 10000ms 默认值，不随字节到达续期。 */
 	uint32_t handshake_timeout_ms;
 
-	/*
-	 * 必须提供的 CONTROL admission/fencing hook。
-	 * listener 绝不能把客户端自报的 TRR1 CONTROL identity 直接视为授权结果。
+	/* 必须提供的 CONTROL 准入与隔离钩子。
+	 * 监听器绝不能把客户端自报的 TRR1 CONTROL 标识直接视为授权结果。
 	 */
 	tr_pipeline_listener_authorize_control_cb authorize_control;
 	void *authorize_arg;
@@ -60,9 +59,8 @@ struct tr_pipeline_listener_stats {
 	uint64_t capacity_rejections;
 };
 
-/*
- * 一个 listener 只属于一个 Reactor/shard owner，并拥有该 shard 的 Pipeline
- * registry 与 bounded CONTROL message buffer 资源。
+/* 一个监听器只属于一个反应器或分片所有者，并拥有该分片的 Pipeline
+ * 注册表与有界 CONTROL 消息缓冲资源。
  */
 int tr_pipeline_listener_create(
 	const struct tr_pipeline_listener_config *config,
@@ -72,18 +70,16 @@ int tr_pipeline_listener_listen_ipv4(
 	uint16_t port, int backlog, uint16_t *out_bound_port);
 int tr_pipeline_listener_begin_drain(struct tr_pipeline_listener *listener);
 
-/*
- * Event-driven lifecycle wait. owner protocol counters remain owner-only;
- * external waiters observe only a published drain generation.
- * timeout_ms == 0 waits indefinitely.
+/* 事件驱动的生命周期等待。所有者协议计数器仍仅限所有者访问；
+ * 外部等待者只观察已发布的排空代次。
+ * timeout_ms == 0 表示无限等待。
  */
 int tr_pipeline_listener_wait_drained(
 	struct tr_pipeline_listener *listener, uint32_t timeout_ms);
 
-/*
- * stop() 负责关闭 admission 并把所有 connection/session 收敛到静止状态。
- * destroy() 只释放已经 stop/quiesce 的对象，不隐式执行可能失败的状态推进。
- * TR_OK 才表示 storage 已释放；teardown barrier 未收敛时 fail-closed。
+/* stop() 负责关闭准入并把所有连接与会话收敛到静止状态。
+ * destroy() 只释放已经停止或静止的对象，不隐式执行可能失败的状态推进。
+ * 只有 TR_OK 才表示存储已释放；拆除屏障未收敛时保守拒绝。
  */
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener);
 int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
