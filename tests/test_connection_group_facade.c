@@ -1,4 +1,5 @@
 #include "tr/trpc.h"
+#include "drain_deadline_probe.h"
 
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/execution/reactor_internal.h"
@@ -798,6 +799,7 @@ static void test_public_connection_group_client_data_offer(void)
 	struct tr_connection_group_server_stats server_stats;
 	struct client_group_wait_probe wait_probe;
 	struct server_group_wait_probe server_wait;
+	struct tr_test_drain_deadline_probe deadline_probe;
 	pthread_t wait_thread;
 	pthread_t server_wait_thread;
 	uint16_t group_port = 0U;
@@ -973,8 +975,20 @@ static void test_public_connection_group_client_data_offer(void)
 		       client, &client_stats) == TR_OK);
 	assert(client_stats.draining == 1U);
 	assert(client_stats.active_transfers == 1U);
+	/*
+	 * 真实 Client Group 仍有 active transfer：定点拦截有限 condwait，
+	 * 确认超时由公共 helper 计算且原始 CLOCK_MONOTONIC timespec 直传。
+	 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 0);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 10U) == TR_ERR_TIMEOUT);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
+
+	/* clock/deadline 初始化失败必须显式返回；不能误入 condwait。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 1);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 10U) == TR_ERR_SYS);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 0U);
 
 	/*
 	 * Race waiter registration against release_transfer(). The earlier timed
@@ -1098,6 +1112,7 @@ static void test_public_connection_group_client_data_offer(void)
 
 static void test_public_connection_group_client_drain_cancels_offer(void)
 {
+	struct tr_test_drain_deadline_probe deadline_probe;
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
 	struct tr_server *server = NULL;
@@ -1157,6 +1172,12 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	assert(client_stats.active_transfer_limit == client_config.limits.max_streams);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 5000U) == TR_OK);
+
+	/* 0ms 仍表示无限等待；已排空时直接返回，不读取时钟。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, 0U, 0);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 0U) == TR_OK);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 0U, 0U);
 
 	memset(&server_stats, 0, sizeof(server_stats));
 	assert(tr_server_connection_group_get_stats(
