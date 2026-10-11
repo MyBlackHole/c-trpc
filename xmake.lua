@@ -62,6 +62,8 @@ end
 
 target("trcore")
     set_kind("static")
+    -- 源码与已安装 SDK 同时携带许可和适用署名。
+    add_installfiles("LICENSE", "NOTICE", "docs/licensing.md", {prefixdir = "share/doc/c-trpc"})
     add_includedirs("include", {public = true})
     -- Stable SDK compatibility boundary. Runtime/Transport engine headers
     -- stay repository-internal; internal tests include them from the source tree.

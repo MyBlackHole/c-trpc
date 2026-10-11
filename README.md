@@ -915,3 +915,8 @@ release 保持原有 `-O2 -g` 构建并启用断言；测试会显式取消定�
 
 备份始终位于该通用 RPC/传输库之上的应用层。
 
+
+## 许可证
+
+Copyright 2026 Black Hole。当前项目内容采用 [Apache-2.0](LICENSE)，署名见
+[NOTICE](NOTICE)；第三方工具和历史 Linux 配置的范围见[许可说明](docs/licensing.md)。

@@ -184,6 +184,18 @@ jobs:
           prefix="$RUNNER_TEMP/trpc sdk"
           xmake install -o "$prefix" trcore
 
+          # 许可文本随已安装 SDK 和源码归档分发，内容不得丢失或变化。
+          for legal_file in LICENSE NOTICE; do
+            cmp "$legal_file" "$prefix/share/doc/c-trpc/$legal_file"
+          done
+          cmp docs/licensing.md "$prefix/share/doc/c-trpc/licensing.md"
+          archive_dir="$RUNNER_TEMP/trpc-source-license"
+          mkdir -p "$archive_dir"
+          git archive --format=tar HEAD | tar -xf - -C "$archive_dir"
+          cmp LICENSE "$archive_dir/LICENSE"
+          cmp NOTICE "$archive_dir/NOTICE"
+          cmp docs/licensing.md "$archive_dir/docs/licensing.md"
+
           cat > "$RUNNER_TEMP/expected-headers.txt" <<'EOF'
           client.h
           facade.h

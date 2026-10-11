@@ -104,6 +104,8 @@ xmake install -o /tmp/c-trpc-sdk trcore
 ```
 
 安装后保留 `include/tr/*.h` 的路径，静态库位于 `lib/libtrcore.a`。
+`LICENSE`、`NOTICE` 和 `licensing.md` 安装到 `share/doc/c-trpc/`；源码归档
+同样必须保留根目录许可文件及 `docs/licensing.md`，CI 逐字节校验两种分发。
 外部 C 程序使用 `-I/tmp/c-trpc-sdk/include -L/tmp/c-trpc-sdk/lib -ltrcore`
 并在编译/链接时增加 `-pthread`。CI 将 SDK 安装到包含空格的路径，
 使用 GCC 和 Clang 分别单独编译每个已安装公开头文件，并链接、运行外部 C11 程序，
