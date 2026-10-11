@@ -231,6 +231,7 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	struct tr_rpc_call_handle long_call, reused_call;
 	struct tr_rpc_bytes request = { (const uint8_t *)"x", 1U };
 	struct callback_arg arg = { .ctx = &f->ctx, .index = 0U };
+	struct callback_arg reused_arg = { .ctx = &f->ctx, .index = 3U };
 	uint64_t original_deadline, root_deadline;
 	struct tr_rpc_endpoint_stats stats;
 
@@ -264,12 +265,13 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	assert(root_deadline == original_deadline);
 
 	/* 失败后仍能在同一 Endpoint 上创建、取消新的 Call。 */
-	assert(start_stream(f, 3000U, &arg, &reused_call) == TR_OK);
+	assert(start_stream(f, 3000U, &reused_arg, &reused_call) == TR_OK);
 	verify_heap(f, 2U, &reused_call, NULL);
 	assert(tr_rpc_call_cancel(reused_call) == TR_OK);
 	assert(tr_rpc_call_cancel(long_call) == TR_OK);
 	verify_heap(f, 0U, NULL, NULL);
 	wait_finished(&f->ctx, 0U, TR_RPC_STATUS_CANCELLED);
+	wait_finished(&f->ctx, 3U, TR_RPC_STATUS_CANCELLED);
 	assert(atomic_load(&injected_arm_failures) == 2U);
 }
 
