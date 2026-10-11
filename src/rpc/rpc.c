@@ -6380,8 +6380,8 @@ int tr_rpc_message_release(struct tr_rpc_message *message)
 	if (ret != TR_OK)
 		return ret;
 
-	/* 精确消耗一次公开能力凭证。归还流接收额度期间 Endpoint
-	 * 仍受生命周期保护， 使 stream.channel
+	/* 精确消耗一次公开能力凭证。归还流接收额度期间，
+	 * Endpoint 仍受生命周期保护，保证 stream.channel
 	 * 不会因本次释放中的对象销毁而变得陈旧。
 	 */
 	memset(message, 0, sizeof(*message));

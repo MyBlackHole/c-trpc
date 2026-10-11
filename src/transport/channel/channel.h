@@ -223,7 +223,7 @@ int tr_channel_wait_ready(
 int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 				struct tr_channel_capabilities *out);
 
-/* 优雅关闭：建立单向的流准入屏障，并在就绪通道
+/* 优雅关闭：建立单调的流准入屏障，并在就绪通道
  * 上发送 GOAWAY。屏障之后禁止新的本地流；对端在收到 GOAWAY 前已经
  * 发出、但在屏障之后才到达的 STREAM_OPEN 也会被 STREAM_CLOSE 拒绝，
  * 不再增加本地活跃流。已有流继续运行，直到自然关闭或取消。

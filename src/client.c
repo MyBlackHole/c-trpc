@@ -742,8 +742,8 @@ int tr_client_destroy(struct tr_client *client)
 	if (client->runtime) {
 		ret = tr_runtime_stop(client->runtime);
 		/* 生命周期屏障失败意味着所有权尚未收敛。
-		 * 保持剩余 Client/Runtime
-		 * 存储存活，不释放执行线程可能仍引用的内存。
+		 * 保持剩余 Client/Runtime 存储存活。
+		 * 不释放执行线程可能仍引用的内存。
 		 */
 		if (ret != TR_OK)
 			return ret;
