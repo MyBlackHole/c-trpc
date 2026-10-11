@@ -89,7 +89,7 @@ static void fixture_init(struct channel_detach_fixture *fixture)
 		       NULL, NULL, NULL, NULL, &fixture->channel) == TR_OK);
 	assert(fixture->channel != NULL);
 
-	/* 忽略构造阶段调用；故障注入只从 publication 完成后开始。 */
+	/* 忽略构造阶段调用；故障注入只从发布完成后开始。 */
 	reset_faults();
 }
 
@@ -116,9 +116,8 @@ static void test_handler_detach_failure_is_retryable(void)
 	assert(tr_channel_detach_for_finalize(fixture.channel) == TR_ERR_SYS);
 	assert(atomic_load(&fail_handler_once) == 0);
 
-	/*
-	 * handler barrier 在 timer detach 前失败。Channel 仍由调用方拥有，
-	 * timer publication 不能被提前消费或清零。
+	/* 处理函数屏障在定时器解绑前失败。Channel 仍由调用方拥有，
+	 * 定时器发布不能被提前消耗或清零。
 	 */
 	assert(atomic_load(&handler_attempts) == 1U);
 	assert(atomic_load(&timer_attempts) == 0U);
@@ -142,9 +141,8 @@ static void test_timer_detach_failure_keeps_publication(void)
 	assert(atomic_load(&handler_attempts) == 1U);
 	assert(atomic_load(&timer_attempts) == 1U);
 
-	/*
-	 * 第一次 unregister 失败后必须保留 keepalive_timer_registered 和 exact
-	 * timer handle，因此重试时必须再次真正进入 timer_unregister。
+	/* 第一次注销失败后必须保留 keepalive_timer_registered 和精确
+	 * 定时器句柄，因此重试时必须再次真正进入 timer_unregister。
 	 */
 	assert(tr_channel_detach_for_finalize(fixture.channel) == TR_OK);
 	assert(atomic_load(&handler_attempts) == 2U);
@@ -162,10 +160,9 @@ static void test_stale_connection_is_already_detached(void)
 	assert(tr_reactor_close(fixture.connection) == TR_OK);
 	assert(tr_reactor_quiesce(fixture.reactor) == TR_OK);
 
-	/*
-	 * exact connection generation 已经退休。set_handler() 可以返回
-	 * TR_ERR_STALE，这能够证明未来不会再有该 connection callback 引用
-	 * Channel；但 timer detach 仍然必须完成。
+	/* 精确连接代次已经退役。set_handler() 可以返回
+	 * TR_ERR_STALE，这能够证明未来不会再有该连接回调引用
+	 * Channel；但定时器解绑仍然必须完成。
 	 */
 	reset_faults();
 	assert(tr_channel_detach_for_finalize(fixture.channel) == TR_OK);

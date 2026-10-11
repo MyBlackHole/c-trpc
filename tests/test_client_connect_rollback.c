@@ -84,9 +84,8 @@ static void test_successful_rollback_restores_connect_state(void)
 	create_listener(&listener, &port);
 	reset_faults();
 
-	/*
-	 * RPC publication 前注入失败。第一次 connect 的显式 rollback 必须完整
-	 * 清掉 connection + Channel，使第二次 connect 不会被残留 session 拒绝。
+	/* RPC 发布前注入失败。第一次连接的显式回滚必须完整
+	 * 清掉连接与 Channel，使第二次连接不会被残留会话拒绝。
 	 */
 	atomic_store(&fail_rpc_create_once, 1);
 	assert(tr_client_connect(client, "127.0.0.1", port) ==
@@ -113,10 +112,9 @@ static void test_rollback_failure_wins_and_destroy_can_retry(void)
 	create_listener(&listener, &port);
 	reset_faults();
 
-	/*
-	 * 原始 RPC create 错误是 BAD_LENGTH，再让 Channel destroy rollback
-	 * 失败一次。connect 必须返回 rollback 的 TR_ERR_SYS，而不是把对象伪装
-	 * 成已经恢复到 disconnected 状态。
+	/* 原始 RPC 创建错误是 BAD_LENGTH，再让 Channel 销毁回滚
+	 * 失败一次。连接必须返回回滚的 TR_ERR_SYS，而不是把对象伪装
+	 * 成已经恢复到已断开状态。
 	 */
 	atomic_store(&fail_rpc_create_once, 1);
 	atomic_store(&fail_channel_destroy_once, 1);
@@ -125,12 +123,11 @@ static void test_rollback_failure_wins_and_destroy_can_retry(void)
 	assert(atomic_load(&channel_destroy_attempts) == 1U);
 	assert(atomic_load(&fail_channel_destroy_once) == 0);
 
-	/* partial session 仍归 Client 所有，禁止开始新的 connect epoch。 */
+	/* 部分会话仍归 Client 所有，禁止开始新的连接轮次。 */
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_ERR_STATE);
 
-	/*
-	 * 故障已消费，terminal destroy 必须从保留的 Channel ownership 继续收敛，
-	 * 而不是因为前一次 connect 返回错误就丢失该对象。
+	/* 故障已消耗，终止销毁必须从保留的 Channel 所有权继续收敛，
+	 * 而不是因为前一次连接返回错误就丢失该对象。
 	 */
 	assert(tr_client_destroy(client) == TR_OK);
 	assert(atomic_load(&channel_destroy_attempts) == 2U);

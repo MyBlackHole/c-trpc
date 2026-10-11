@@ -18,9 +18,8 @@ static void test_destroy_closes_acquire_until_holders_return(void)
 	assert(tr_buffer_acquire(&pool, 64U, &second) == TR_OK);
 	assert(tr_buffer_pool_free_count(&pool) == 0U);
 
-	/*
-	 * Terminal destroy closes new admission but keeps storage and lock alive
-	 * while existing holders still own descriptors.
+	/* 终止销毁关闭新准入，但现有持有者仍拥有描述符时，
+	 * 保持存储与锁存活。
 	 */
 	assert(tr_buffer_pool_destroy(&pool) == TR_ERR_STATE);
 	assert(tr_buffer_acquire(&pool, 16U, &rejected) == TR_ERR_CLOSED);
@@ -29,9 +28,8 @@ static void test_destroy_closes_acquire_until_holders_return(void)
 	tr_buffer_release(first);
 	assert(tr_buffer_pool_free_count(&pool) == 1U);
 
-	/*
-	 * Duplicate release must not manufacture free_count and hide the second
-	 * outstanding descriptor from terminal destroy.
+	/* 重复释放不得虚增 free_count，
+	 * 使终止销毁看不到第二个尚未归还的描述符。
 	 */
 	tr_buffer_release(first);
 	assert(tr_buffer_pool_free_count(&pool) == 1U);
