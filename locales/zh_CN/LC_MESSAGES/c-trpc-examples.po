@@ -1,0 +1,30 @@
+# Echo 示例人读诊断的简体中文翻译。
+msgid ""
+msgstr ""
+"Project-Id-Version: c-trpc-examples\n"
+"Report-Msgid-Bugs-To: https://github.com/MyBlackHole/c-trpc/issues\n"
+"POT-Creation-Date: 2026-10-11 00:00+0000\n"
+"PO-Revision-Date: 2026-10-11 00:00+0000\n"
+"Last-Translator: c-trpc maintainers\n"
+"Language-Team: Simplified Chinese\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: examples/echo_client.c
+msgid "connect failed\n"
+msgstr "连接失败\n"
+
+#: examples/echo_client.c
+msgid "client destroy failed\n"
+msgstr "客户端销毁失败\n"
+
+#: examples/echo_client.c
+#, c-format
+msgid "RPC failed: %d\n"
+msgstr "RPC 失败：%d\n"
+
+#: examples/echo_client.c
+msgid "Usage: echo_client [--lang=auto|en|zh_CN] [--] [address [port [payload]]]\n"
+msgstr "用法：echo_client [--lang=auto|en|zh_CN] [--] [address [port [payload]]]\n"
