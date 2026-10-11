@@ -371,7 +371,7 @@ def metadata(binary: Path, label: str, workers: list[int],
              window: int, max_generators: int,
              target_rate_per_generator: int,
              min_arrival_ms: int, generator_workers: int) -> dict[str, Any]:
-    row = base_metadata(binary, label)
+    row = base_metadata(binary, label, load_mode="open")
     row["type"] = "scalability_metadata"
     row["schema"] = 1
     row["workers"] = workers

@@ -155,7 +155,7 @@ def compare_profiles(before_results: list[dict[str, Any]],
 
 
 def metadata(binary: Path, args: argparse.Namespace) -> dict[str, Any]:
-    row = base_metadata(binary, args.label)
+    row = base_metadata(binary, args.label, load_mode="open")
     row.update({
         "type": "headroom_metadata",
         "schema": 1,

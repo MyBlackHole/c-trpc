@@ -208,7 +208,7 @@ def main() -> int:
                               args.duration_ms)
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    metadata = base_metadata(args.binary, args.label)
+    metadata = base_metadata(args.binary, args.label, load_mode="open")
     metadata.update({
         "type": "fanout_metadata",
         "schema": 2,

@@ -232,7 +232,14 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
             log.close()
 
 
-def metadata(binary: Path, label: str) -> dict[str, Any]:
+def metadata(binary: Path, label: str, *, load_mode: str = "closed") -> dict[str, Any]:
+    if load_mode not in ("closed", "open"):
+        raise ValueError("load_mode must be closed or open")
+    load_model = (
+        "closed-loop bounded window; no coordinated-omission correction"
+        if load_mode == "closed" else
+        "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; "
+        "scheduler drops and submission lateness are reported separately")
     root = Path(__file__).resolve().parents[1]
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root,
                               text=True, capture_output=True, check=False)
@@ -247,7 +254,7 @@ def metadata(binary: Path, label: str) -> dict[str, Any]:
             "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
             "cgroup_cpu_max": quota.read_text().strip() if quota.exists() else None,
             "clock": "CLOCK_MONOTONIC", "transport": "TCP IPv4 loopback",
-            "load_model": "closed-loop bounded window; no coordinated-omission correction",
+            "load_model": load_model,
             "latency": "before submission to result callback entry; successful and accepted separately",
             "goodput": "verified successful request+response application bytes; excludes wire overhead",
             "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only"}
