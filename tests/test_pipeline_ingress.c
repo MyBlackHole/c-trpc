@@ -275,9 +275,8 @@ static void test_pipeline_ingress_routing(void)
 	assert(tr_reactor_listener_register(
 		       reactor, listener, ingress_listener_cb, &ctx) == TR_OK);
 
-	/*
-	 * First socket presents a stale generation. Reactor must close it and the
-	 * reservation must remain RESERVED for the exact retry capability.
+	/* 第一个套接字提供陈旧代次。反应器必须关闭它，
+	 * 预留必须保持 RESERVED，以供精确重试能力凭证使用。
 	 */
 	wrong = make_route(pipeline, reserved);
 	wrong.member_generation++;
@@ -293,11 +292,9 @@ static void test_pipeline_ingress_routing(void)
 	assert(pipeline_stats.data_reserved_count == 1U);
 	assert(pipeline_stats.data_count == 0U);
 
-	/*
-	 * Retry the exact capability. Fragment the preface, then coalesce its
-	 * remaining bytes with a normal TRP1 PING. The Reactor gate reads exactly
-	 * the remaining preface bytes, installs the routed handler, and only then
-	 * lets the existing TRP1 parser consume PING.
+	/* 重试精确能力凭证。将前导分片，再把其剩余字节与普通 TRP1 PING 合并。
+	 * 反应器门禁精确读取剩余前导字节，安装路由处理函数，
+	 * 之后才让现有 TRP1 解析器消耗 PING。
 	 */
 	route = make_route(pipeline, reserved);
 	assert(tr_pipeline_route_preface_encode(route_raw, &route) == TR_OK);
@@ -320,10 +317,9 @@ static void test_pipeline_ingress_routing(void)
 	assert(pipeline_stats.data_reserved_count == 0U);
 	assert(pipeline_stats.data_count == 1U);
 
-	/*
-	 * 强制 terminal membership 退休失败一次。callback 必须把该生命周期错误
-	 * 暴露给上层，而不能只报告 socket close 状态。由于 detach 失败，exact
-	 * membership 会继续保持存活，直到 owner 在下面显式重试收敛。
+	/* 强制终止成员关系退役失败一次。回调必须把该生命周期错误
+	 * 暴露给上层，而不能只报告套接字关闭状态。由于解绑失败，精确
+	 * 成员关系会继续保持存活，直到所有者在下面显式重试收敛。
 	 */
 	pthread_mutex_lock(&ctx.lock);
 	good_connection = ctx.last_connection;
@@ -344,10 +340,9 @@ static void test_pipeline_ingress_routing(void)
 	assert(tr_pipeline_get_stats(pipeline, &pipeline_stats) == TR_OK);
 	assert(pipeline_stats.data_count == 1U);
 
-	/*
-	 * 使用 exact owner capability 重试。Reactor slot 退休不会抹掉 Pipeline
-	 * 保存的 connection identity，因此失败的生命周期边仍可继续收敛，并且
-	 * 不会误触碰后续 replacement generation。
+	/* 使用精确所有者能力凭证重试。反应器槽位退役不会抹掉 Pipeline
+	 * 保存的连接标识，因此失败的生命周期边仍可继续收敛，
+	 * 并且不会误触碰后续替代代次。
 	 */
 	assert(__real_tr_pipeline_registry_detach_data_route(
 		       registry, &route, good_connection) == TR_OK);

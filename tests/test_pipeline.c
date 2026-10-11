@@ -74,7 +74,7 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(tr_pipeline_control(pipeline, &connection) == TR_OK);
 	assert(conn_equal(connection, control));
 
-	/* Stale clear must not detach the current CONTROL membership. */
+	/* 陈旧的清除操作不得解绑当前 CONTROL 成员关系。 */
 	assert(tr_pipeline_clear_control(
 		       pipeline, fake_connection(owner, 10U, 2U)) ==
 	       TR_ERR_STALE);
@@ -85,7 +85,7 @@ static void test_pipeline_connection_group_and_affinity(void)
 	data_conn1 = fake_connection(owner, 21U, 4U);
 	data_conn2 = fake_connection(owner, 22U, 5U);
 
-	/* RESERVED membership is not selectable until the exact capability attaches. */
+	/* 精确能力凭证附接前，RESERVED 成员关系不可选。 */
 	assert(tr_pipeline_reserve_data(pipeline, &reused) == TR_OK);
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_pipeline_get_stats(pipeline, &stats) == TR_OK);
@@ -107,7 +107,7 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(data1.generation != 0U);
 	assert(tr_pipeline_add_data(pipeline, data_conn2, &reused) == TR_AGAIN);
 
-	/* Selection is round-robin across current live DATA slots. */
+	/* 在当前存活 DATA 槽位之间轮询选择。 */
 	assert(tr_pipeline_select_data(pipeline, &selected) == TR_OK);
 	assert(selected.index == data0.index);
 	assert(selected.generation == data0.generation);
@@ -117,9 +117,8 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(tr_pipeline_select_data(pipeline, &selected) == TR_OK);
 	assert(selected.index == data0.index);
 
-	/*
-	 * Stream affinity is immutable for the Stream lifetime: select once,
-	 * bind once, and all later lookups return the same DATA generation.
+	/* 流亲和绑定在流生命周期内不可变：选择一次、绑定一次，
+	 * 全部后续查找都返回相同 DATA 代次。
 	 */
 	assert(tr_pipeline_bind_stream(pipeline, 101U, data0) == TR_OK);
 	assert(tr_pipeline_bind_stream(pipeline, 102U, data1) == TR_OK);
@@ -137,9 +136,8 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(affinity.generation == data1.generation);
 	assert(conn_equal(connection, data_conn1));
 
-	/*
-	 * DATA failure invalidates all Stream affinity for that exact slot
-	 * generation. Reusing the same index must not resurrect old Streams.
+	/* DATA 失败使该精确槽位代次的全部流亲和绑定失效。
+	 * 复用同一索引不得复活旧流。
 	 */
 	assert(tr_pipeline_remove_data(pipeline, data0) == TR_OK);
 	assert(tr_pipeline_remove_data(pipeline, data0) == TR_ERR_STALE);
@@ -173,7 +171,7 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(stats.stream_affinity_capacity == 4U);
 	assert(stats.stream_affinity_count == 1U);
 
-	/* CONTROL loss invalidates capabilities that were only RESERVED. */
+	/* CONTROL 丢失使仅处于 RESERVED 的能力凭证失效。 */
 	assert(tr_pipeline_remove_data(pipeline, reused) == TR_OK);
 	assert(tr_pipeline_reserve_data(pipeline, &reused) == TR_OK);
 	assert(tr_pipeline_clear_control(pipeline, control) == TR_OK);
@@ -183,9 +181,8 @@ static void test_pipeline_connection_group_and_affinity(void)
 	assert(tr_pipeline_cancel_data_reservation(pipeline, reused) ==
 	       TR_ERR_STALE);
 
-	/*
-	 * destroy 只释放已经 quiesce 的 Pipeline soft-state。DATA membership
-	 * 不由 Pipeline 拥有，测试必须先显式解除最后一个 ATTACHED generation。
+	/* 销毁只释放已经静止的 Pipeline 软状态。DATA 成员关系
+	 * 不由 Pipeline 拥有，测试必须先显式解除最后一个 ATTACHED 代次。
 	 */
 	assert(tr_pipeline_remove_data(pipeline, data1) == TR_OK);
 	tr_pipeline_destroy(pipeline);

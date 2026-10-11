@@ -54,8 +54,7 @@ static atomic_uint aux_unregister_attempts;
 static _Atomic(struct connector_test_ctx *) unregister_test_ctx;
 static int fake_connect_peer = -1;
 
-/*
- * 单独测试 Connector preface；仅在 fake fd 上包装 send。模拟时钟随
+/* 单独测试 Connector 前导；仅在伪 fd 上包装 send。模拟时钟随
  * EINTR 次数增加，不依赖真实几毫秒的调度间隙。
  */
 static atomic_int fake_send_mode;
@@ -100,9 +99,8 @@ ssize_t __wrap_send(int fd, const void *buf, size_t len, int flags)
 	attempt = atomic_fetch_add(&fake_send_calls, 1U);
 	switch (mode) {
 	case FAKE_SEND_CONTINUOUS_EINTR:
-		/*
-		 * 防止缺陷回归时测试无限循环：旧代码在同一 owner turn
-		 * 反复 EINTR 至第 33 次才 EAGAIN；修复后 timer 第 3 次到期。
+		/* 防止缺陷回归时测试无限循环：旧代码在同一所有者处理轮次
+		 * 反复 EINTR 至第 33 次才 EAGAIN；修复后定时器第 3 次到期。
 		 */
 		if (attempt < 32U) {
 			errno = EINTR;
@@ -404,9 +402,9 @@ static void test_completion_may_destroy_connector(void)
 	assert(tr_connector_create(
 		       &connector_config, &ctx.connector) == TR_OK);
 
-	/*
-	 * completion 可能在 tr_connector_start() 内同步执行，也可能稍后由 EPOLLOUT 触发。
-	 * 两种情况下 callback 都可能在 Connector 调用栈退出前销毁对象，因此之后不能再解引用。
+	/* 完成回调可能在 tr_connector_start() 内同步执行，也可能稍后由 EPOLLOUT
+	 * 触发。 两种情况下回调都可能在 Connector
+	 * 调用栈退出前销毁对象，因此之后不能再解引用。
 	 */
 	assert(tr_connector_start(
 		       ctx.connector, "127.0.0.1", port, NULL, 0U) == TR_OK);
@@ -486,10 +484,9 @@ static void test_timeout_detach_failure_retries(void)
 	atomic_store(&fail_aux_unregister_once, 1);
 	atomic_store(&aux_unregister_attempts, 0U);
 
-	/*
-	 * fake connect 使用 pipe read-end，并只监听 EPOLLOUT，因此连接不会产生
-	 * progress event，只能由 timeout 驱动。第一次 timeout detach 注入失败后，
-	 * timer 必须自动重排；第二次成功后 completion 只能发布一次。
+	/* 伪连接使用管道读端，并只监听 EPOLLOUT，因此连接不会产生
+	 * 进展事件，只能由超时驱动。第一次超时解绑注入失败后，
+	 * 定时器必须自动重排；第二次成功后完成结果只能发布一次。
 	 */
 	assert(tr_connector_start(
 		       ctx.connector, "127.0.0.1", 1U, NULL, 0U) == TR_OK);
@@ -543,14 +540,13 @@ static void test_timeout_status_survives_writable_event(void)
 	atomic_store(&fake_connect_mode, FAKE_CONNECT_FULL_SOCKET);
 	atomic_store(&fail_aux_unregister_once, 1);
 	atomic_store(&aux_unregister_attempts, 0U);
-	/* 真实 socketpair 先被填满，确保 preface 发送进入 EPOLLOUT 等待。 */
+	/* 真实套接字对先被填满，确保前导发送进入 EPOLLOUT 等待。 */
 	assert(tr_connector_start(
 		       ctx.connector, "127.0.0.1", 1U,
 		       preface, (uint32_t)sizeof(preface)) == TR_OK);
 	wait_unregister_failure(&ctx);
 
-	/*
-	 * 暂停在第一次 detach 失败处，先排空对端令 fd 可写，再放行 owner。
+	/* 暂停在第一次解绑失败处，先排空对端令 fd 可写，再放行所有者。
 	 * 如事件回调仍推进状态机，这里会错误地以 TR_OK 覆盖超时结果。
 	 */
 	drain_fake_connect_peer();
@@ -757,10 +753,9 @@ static void test_preface_eintr_and_deadline(
 
 static void test_eintr_does_not_starve_timeout(void)
 {
-	/*
-	 * 合成 owner 单调时钟每次 EINTR 推进 1ms，timeout=3ms。
-	 * 修复后至多三次 send 就能触达 timer；旧逻辑在一次
-	 * owner callback 内忙重试 32 次，再 EAGAIN 后才归还 owner。
+	/* 合成所有者单调时钟每次 EINTR 推进 1ms，timeout=3ms。
+	 * 修复后至多三次 send 就能触达定时器；旧逻辑在一次
+	 * 所有者回调内忙重试 32 次，再 EAGAIN 后才归还所有者。
 	 */
 	test_preface_eintr_and_deadline(FAKE_SEND_CONTINUOUS_EINTR,
 					3U, TR_ERR_TIMEOUT, 3U);
@@ -768,7 +763,7 @@ static void test_eintr_does_not_starve_timeout(void)
 
 static void test_success_at_deadline_is_timeout(void)
 {
-	/* send 返回成功的同一 turn 刚好到期，不能以 TR_OK 覆盖超时。 */
+	/* send 返回成功的同一轮次刚好到期，不能以 TR_OK 覆盖超时。 */
 	test_preface_eintr_and_deadline(FAKE_SEND_CROSS_DEADLINE,
 					1U, TR_ERR_TIMEOUT, 1U);
 }

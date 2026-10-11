@@ -107,17 +107,16 @@ static void test_runtime_constructor_rollback_keeps_owner(void)
 	atomic_store(&fail_reactor_create_at, 2U);
 	atomic_store(&fail_reactor_destroy_once, 1);
 
-	/*
-	 * shard0 Reactor 已构造，shard1 Reactor create 返回 BAD_LENGTH。
-	 * constructor rollback 随后在销毁 shard0 Reactor 时再失败一次。
-	 * lifecycle error 必须优先，同时通过 *out 保留 partial Runtime owner。
+	/* 分片 0 反应器已构造，分片 1 反应器创建返回 BAD_LENGTH。
+	 * 构造回滚随后在销毁分片 0 反应器时再失败一次。
+	 * 生命周期错误必须优先，同时通过 *out 保留部分构造的 Runtime 所有者。
 	 */
 	assert(tr_runtime_create(&config, &runtime) == TR_ERR_SYS);
 	assert(runtime != NULL);
 	assert(atomic_load(&reactor_create_attempts) == 2U);
 	assert(atomic_load(&reactor_destroy_attempts) == 1U);
 
-	/* destroy fault 已消费，调用方继续使用保留 ownership 即可完成收敛。 */
+	/* 销毁故障已消耗，调用方继续使用保留的所有权即可完成收敛。 */
 	assert(tr_runtime_destroy(runtime) == TR_OK);
 	runtime = NULL;
 	assert(atomic_load(&reactor_destroy_attempts) == 2U);
@@ -153,9 +152,8 @@ static void test_client_group_constructor_rollback_keeps_owner(void)
 	config.tcp_nodelay = 0;
 	config.on_transfer_ready = noop_transfer_ready;
 
-	/*
-	 * connector create 是 Group constructor 最后一个可失败步骤。强制它失败，
-	 * 随后再让 control pool rollback destroy 失败一次。
+	/* 连接器创建是 Group 构造函数最后一个可失败步骤。强制它失败，
+	 * 随后再让控制池回滚销毁失败一次。
 	 */
 	atomic_store(&fail_connector_create_once, 1);
 	atomic_store(&fail_pool_destroy_once, 1);
@@ -207,9 +205,8 @@ static void test_pipeline_listener_destroy_is_retryable(void)
 		       listener, "127.0.0.1", 0U, 4, &port) == TR_OK);
 	assert(port != 0U);
 
-	/*
-	 * listener source 仍然发布时 destroy 是正常可恢复错误。debug/release 都必须
-	 * 返回 TR_ERR_STATE，而不是 assert-abort。
+	/* 监听器事件源仍然发布时，销毁是正常可恢复错误。调试和发布构建都必须
+	 * 返回 TR_ERR_STATE，而不是断言中止。
 	 */
 	assert(tr_pipeline_listener_destroy(listener) == TR_ERR_STATE);
 	assert(tr_pipeline_listener_stop(listener) == TR_OK);
