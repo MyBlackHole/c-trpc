@@ -827,7 +827,7 @@ static enum tr_frame_disposition tr_client_group_control_frame(
 		if (ret == TR_OK)
 			return TR_FRAME_RELEASE;
 	} else if (message.type == TR_PIPELINE_CONTROL_TRANSFER_READY) {
-		/* begin_drain() 是单向的本地准入屏障。它返回后观察到的 READY
+		/* begin_drain() 是单调的本地准入屏障。它返回后观察到的 READY
 		 * 绝不能创建新本地工作，否则 wait_drained() 可能先报告静止，
 		 * 之后又变成未排空。服务端独立拥有其亲和绑定，可以释放它；
 		 * 最终 CONTROL 关闭也会隔断剩余远端软状态。
@@ -1146,8 +1146,8 @@ fail:
 
 		if (pool_ret != TR_OK) {
 			/* 池中尚未归还的所有权使终止回滚无法完成。
-			 * 保留整个
-			 * Group，调用方拿到部分构造对象的所有权后可继续销毁。
+			 * 保留整个 Group。
+			 * 调用方拿到部分构造对象的所有权后可继续销毁。
 			 */
 			*out = group;
 			return pool_ret;
@@ -1622,9 +1622,9 @@ static int tr_client_group_detach_on_owner(void *arg)
 	group->port = 0U;
 
 	/* 每个 Group 拥有的 DATA 负载在其释放回调中携带原始 group 指针。
-	 * 在此所有者屏障返回前，上方关闭全部 DATA
-	 * 连接必须同步释放它们的发送队列。 只要此类回调仍可能存在，就绝不能释放
-	 * Group 存储。
+	 * 在此所有者屏障返回前，上方全部 DATA 连接关闭时
+	 * 必须同步释放其发送队列。只要此类回调仍可能存在，
+	 * 就绝不能释放 Group 存储。
 	 */
 	if (group->send_bytes_inflight != 0U && ret == TR_OK)
 		ret = TR_ERR_STATE;
