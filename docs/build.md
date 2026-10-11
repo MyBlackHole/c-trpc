@@ -16,22 +16,18 @@ CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/gu
 ```sh
 xmake f -m release --toolchain=gcc
 xmake                         # 默认构建静态库和两个示例
-xmake build --all             # 同时构建三个测试程序
+xmake build --all             # 同时构建全部测试和基准目标
 xmake test -v -j1             # 自动构建并执行全部测试
 xmake test -v -j1 'test_timer_queue/*'
 xmake test -v -j1 'test_runtime_threads/*'
 ```
 
-| 目标 | 类型 | 默认构建 |
-|---|---|---|
-| `trcore` | 静态库 `libtrcore.a` | 是 |
-| `echo_server` / `echo_client` | 独立可执行程序 | 是 |
-| `test_transport` | 传输/RPC 集成测试 | 否，由 `xmake test` 或 `build --all` 构建 |
-| `test_timer_queue` | 定时器生命周期与模型测试 | 否，由 `xmake test` 或 `build --all` 构建 |
-| `test_runtime_threads` | 门面线程预算与启动失败回收测试 | 否，由 `xmake test` 或 `build --all` 构建 |
+默认构建 `trcore` 静态库和 `echo_server` / `echo_client`。
+测试按基础原语、传输/RPC 集成、故障注入、生命周期、并发及期限边界组织，
+测试与基准目标的完整清单以 `xmake.lua` 为单一来源，不在此手工维护数量。
 
 每个测试目标注册一个 `default` 测试。通配选择器使用引号，避免由命令行解释器展开。
-`-j1` 串行执行这三个测试程序，不改变它们内部的并发测试行为。
+`-j1` 串行执行全部注册测试，不改变它们内部的并发测试行为。
 测试实时输出，每个测试程序的执行超时为 120 秒；失败直接返回非零状态。
 
 `test_runtime_threads` 仅在自身链接时包装 `pthread_create` / `pthread_join`，
@@ -111,10 +107,10 @@ xmake install -o /tmp/c-trpc-sdk trcore
 外部 C 程序使用 `-I/tmp/c-trpc-sdk/include -L/tmp/c-trpc-sdk/lib -ltrcore`
 并在编译/链接时增加 `-pthread`。CI 将 SDK 安装到包含空格的路径，
 使用 GCC 和 Clang 分别单独编译每个已安装公开头文件，并链接、运行外部 C11 程序，
-实际执行 Reactor 的创建、启动、静默、停止和销毁生命周期。
+校验门面默认配置与状态函数的公开链接；C++11 同样独立编译各头文件并链接运行此消费端。
 使用程序只引用安装后的包含目录/库目录，运行超时 10 秒；
 另有独立 Echo 服务端/客户端验证请求响应，
-不以仅调用状态辅助接口代替运行时验证。
+运行时创建、启动、连接、请求响应和回收由测试集及独立进程 Echo 验证，不能将配置消费端本身称作完整运行时验证。
 
 ## Make 兼容入口
 
@@ -162,9 +158,9 @@ make all CC=gcc CFLAGS='-I"/opt/vendor sdk/include"' \
 
 ## CI 范围
 
-五项检查为 GCC（`debug + release`）、Clang（`debug + release`）、
+检查类别包括 GCC（`debug + release`）、Clang（`release`）、
 ASan + UBSan、TSan，以及 Make 兼容/编译器切换/SDK 安装/独立进程示例。
-前四项均构建全部目标，并通过 `xmake test` 执行三个测试程序。
+功能与 sanitizer 检查均构建全部目标，并通过 `xmake test` 执行所有注册测试。
 Make 兼容检查还使用包含空格/单引号的工具路径、强制包含头文件路径和带引号的字符串宏，
 实际构建全部目标并运行测试；通过 `readelf` 验证最终 ELF
 保留字面量 `$ORIGIN`，而不只是检查配置命令显示文本。

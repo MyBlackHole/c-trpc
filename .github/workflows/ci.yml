@@ -129,6 +129,11 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: Validate project formatting configuration
+        run: |
+          python3 -m pip install 'clang-format==18.1.8'
+          clang-format --style=file --dump-config > /dev/null
+          clang-format --dry-run --Werror include/tr/status.h src/status.c
       - name: Compatibility entry points and compiler switch
         run: |
           set -euo pipefail
@@ -226,6 +231,19 @@ jobs:
             "$cc" -std=c11 -Wall -Wextra -Werror -pedantic -pthread               -I"$prefix/include" "$RUNNER_TEMP/consumer.c"               -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer-$cc"
             timeout 10s "$RUNNER_TEMP/consumer-$cc"
             echo "$cc: explicit SDK headers and public facade consumer passed"
+          done
+          # 还需验证 C linkage：仅语法检查无法发现符号改名。
+          for cxx in g++ clang++; do
+            for header in "$prefix"/include/tr/*.h; do
+              printf '#include <tr/%s>\n' "$(basename "$header")" | \
+                "$cxx" -std=c++11 -Wall -Wextra -Werror -pedantic -pthread \
+                -I"$prefix/include" -x c++ -fsyntax-only -
+            done
+            "$cxx" -std=c++11 -Wall -Wextra -Werror -pedantic -pthread \
+              -I"$prefix/include" -x c++ "$RUNNER_TEMP/consumer.c" -x none \
+              -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer-$cxx"
+            timeout 10s "$RUNNER_TEMP/consumer-$cxx"
+            echo "$cxx: explicit SDK headers and public facade consumer passed"
           done
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: Echo examples as separate processes
