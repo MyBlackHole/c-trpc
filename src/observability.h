@@ -7,21 +7,19 @@
 extern "C" {
 #endif
 
-/*
- * Cheap counters/high-water marks are always collected. Timing histograms are
- * opt-in because they require monotonic-clock reads on hot scheduling paths.
+/* 始终采集低成本计数器与高水位。计时直方图需要显式启用，
+ * 因为它们需要在热调度路径读取单调时钟。
  */
 #define TR_OBSERVABILITY_TIMING (1U << 0)
 #define TR_OBSERVABILITY_VALID_FLAGS TR_OBSERVABILITY_TIMING
 
 #define TR_LATENCY_HISTOGRAM_BUCKETS 64U
 
-/*
- * Fixed log2 nanosecond histogram.
+/* 固定的以 2 为底的纳秒对数直方图。
  *
- * bucket[0] contains 0..1 ns.
- * bucket[i] (1 <= i < 63) contains 2^i .. 2^(i+1)-1 ns.
- * bucket[63] contains values >= 2^63 ns.
+ * bucket[0] 包含 0..1 ns。
+ * bucket[i]（1 <= i < 63）包含 2^i .. 2^(i+1)-1 ns。
+ * bucket[63] 包含 >= 2^63 ns 的值。
  */
 struct tr_latency_histogram {
 	uint64_t samples;
@@ -30,7 +28,7 @@ struct tr_latency_histogram {
 	uint64_t buckets[TR_LATENCY_HISTOGRAM_BUCKETS];
 };
 
-/* Common bounded-queue snapshot semantics used across runtime diagnostics. */
+/* 运行时诊断共用的有界队列快照语义。 */
 struct tr_queue_observation {
 	uint32_t capacity;
 	uint32_t current;
@@ -38,7 +36,7 @@ struct tr_queue_observation {
 	uint64_t full_events;
 };
 
-/* Common bounded-pool snapshot semantics. */
+/* 通用的有界池快照语义。 */
 struct tr_pool_observation {
 	uint32_t capacity;
 	uint32_t current;
