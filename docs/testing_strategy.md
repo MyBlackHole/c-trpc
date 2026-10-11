@@ -78,6 +78,19 @@ CRC 后端单独验证：
 
 这样直接验证后端选择，而不是把无关 RPC/Channel 测试翻倍。
 
+## Echo 独立进程冒烟测试
+
+安装与构建检查保留原有的服务端就绪探测、客户端 20 秒超时及响应内容断言。
+请求成功后，正常路径显式发送 `SIGTERM`，最多等待 10 秒，并检查服务端退出状态
+必须为 0；退出失败或超时均使该步骤失败并输出服务端日志。`EXIT` trap 仅在失败
+路径强制清理剩余服务端，不再承担正常退出验证。
+
+`scripts/echo_smoke_shutdown.sh` 使用 Ubuntu 既有的 Bash、GNU `timeout` 与
+`tail --pid`，最后由父 shell 的 `wait` 取得真实退出状态。
+`python3 scripts/test_echo_smoke_shutdown.py` 通过独立替身进程验证正常退出、
+非零退出和忽略 `SIGTERM` 的挂起，检查失败能传递给调用 shell，且不会遗留替身。
+这项自测只覆盖 CI 判定逻辑，不替代库的功能测试。
+
 <a id="rpc-benchmark-smoke"></a>
 
 ## RPC 基准冒烟测试
