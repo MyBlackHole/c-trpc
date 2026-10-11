@@ -5,9 +5,9 @@
 #include <sys/epoll.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "execution/buffer.h"
+#include "execution/deadline_internal.h"
 #include "transport/channel/channel.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
@@ -265,16 +265,6 @@ int tr_connection_group_message_release(
 	if (buffer)
 		tr_buffer_release(buffer);
 	return TR_OK;
-}
-
-static uint64_t tr_server_now_ms(void)
-{
-	struct timespec ts;
-
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
-		return 0;
-	return (uint64_t)ts.tv_sec * UINT64_C(1000) +
-	       (uint64_t)ts.tv_nsec / UINT64_C(1000000);
 }
 
 static void tr_server_merge_channel_stats(
@@ -1693,7 +1683,8 @@ static int tr_server_stop_accepting(struct tr_server *server)
 
 int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 {
-	uint64_t start;
+	struct tr_deadline deadline;
+	const struct tr_deadline *wait_deadline = NULL;
 	uint32_t shard_index;
 	int final = TR_OK;
 
@@ -1748,7 +1739,18 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 		}
 	}
 
-	start = tr_server_now_ms();
+	/*
+	 * 所有 GOAWAY admission 已完成，排空等待从这里开始计时一次。
+	 * 非零超时的每个 Channel 共用相同的 CLOCK_MONOTONIC 绝对期限，
+	 * 不再按 peer 舍入/重建剩余毫秒预算。0ms 仍逐个立即检查。
+	 */
+	if (timeout_ms != 0U) {
+		int ret = tr_deadline_init_ms(&deadline, timeout_ms);
+
+		if (ret != TR_OK)
+			return ret;
+		wait_deadline = &deadline;
+	}
 	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
 		struct tr_server_shard *shard = &server->shards[shard_index];
 		uint32_t i;
@@ -1756,19 +1758,22 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 		for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 			struct tr_runtime_peer *peer =
 				tr_server_shard_peer_at(shard, i);
-			uint32_t remaining = timeout_ms;
 			int ret;
 
 			if (!peer || !peer->used)
 				continue;
-			if (timeout_ms != 0U) {
-				uint64_t elapsed = tr_server_now_ms() - start;
+			if (wait_deadline) {
+				int expired;
 
-				if (elapsed >= timeout_ms)
+				ret = tr_deadline_expired(wait_deadline,
+							  &expired);
+				if (ret != TR_OK)
+					return ret;
+				if (expired)
 					return TR_ERR_TIMEOUT;
-				remaining = (uint32_t)(timeout_ms - elapsed);
 			}
-			ret = tr_channel_wait_drained(peer->channel, remaining);
+			ret = tr_channel_wait_drained_deadline(
+				peer->channel, wait_deadline);
 			if (ret != TR_OK && final == TR_OK)
 				final = ret;
 		}

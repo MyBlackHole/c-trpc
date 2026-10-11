@@ -78,6 +78,14 @@ int tr_channel_wait_ready_deadline(
 	struct tr_channel *channel, enum tr_lane lane,
 	const struct tr_deadline *deadline);
 
+/*
+ * 在已启动 drain barrier 的 Channel 上等待。deadline 为同一操作共享的
+ * 有限 CLOCK_MONOTONIC 绝对截止时间；NULL 表示只检查当前状态、不阻塞。
+ * 到期时仍返回 TR_AGAIN，与公开 wait_drained 的返回码契约一致。
+ */
+int tr_channel_wait_drained_deadline(
+	struct tr_channel *channel, const struct tr_deadline *deadline);
+
 int tr_channel_start(struct tr_channel *channel);
 
 #endif
