@@ -87,11 +87,10 @@ int tr_pipeline_control_create(
 	if (ret != TR_OK)
 		goto fail;
 
-	/*
-	 * CONTROL bind 与 registry publication 必须属于同一个 owner transaction。
-	 * registry helper 会在任何 Pipeline mutation 之前完成 duplicate/capacity
-	 * 校验；成功 bind 后只剩不可失败的 owner-local registry commit，因此这里
-	 * 不再需要第二个 fallible clear_control() rollback。
+	/* CONTROL 绑定与注册表发布必须属于同一个所有者事务。
+	 * 注册表辅助函数会在任何 Pipeline 修改之前完成重复与容量
+	 * 校验；成功绑定后只剩不会失败的所有者本地注册表提交，因此这里
+	 * 不再需要第二个可能失败的 clear_control() 回滚。
 	 */
 	ret = tr_pipeline_registry_register_control(
 		config->registry, control->pipeline, control_connection);
@@ -222,9 +221,8 @@ static int tr_pipeline_control_reserve_data_wire_on_owner(void *arg)
 
 	ret = tr_pipeline_control_wire_encode(request->out, &message);
 	if (ret != TR_OK) {
-		/*
-		 * reserve 与 encode 都在同一个 owner turn。这里 rollback exact
-		 * generation，不允许 Reactor stop 插入两个状态转换之间。
+		/* 预留与编码都在同一个所有者处理轮次。这里回滚精确
+		 * 代次，不允许反应器停止插入两个状态转换之间。
 		 */
 		rollback_ret = tr_pipeline_control_cancel_data(control, &offer);
 		return rollback_ret != TR_OK ? rollback_ret : ret;
@@ -364,10 +362,9 @@ static int tr_pipeline_control_abort_on_owner(void *arg)
 	uint32_t i;
 	int ret;
 
-	/*
-	 * Fatal teardown 必须在一个 Reactor owner turn 内完成。先取得 ATTACHED
-	 * membership 的一致快照，再逐个失效；remove_data() 同时清除指向对应
-	 * generation 的 Stream affinity。
+	/* 致命拆除必须在一个反应器所有者处理轮次内完成。先取得 ATTACHED
+	 * 成员关系的一致快照，再逐个失效；remove_data() 同时清除指向对应
+	 * 代次的流亲和绑定。
 	 */
 	ret = tr_pipeline_attached_data_snapshot(
 		control->pipeline, control->abort_data,
@@ -382,10 +379,9 @@ static int tr_pipeline_control_abort_on_owner(void *arg)
 			return ret;
 	}
 
-	/*
-	 * registry helper 把“clear CONTROL + cancel RESERVED + unregister”
-	 * 合并为同一个 owner-side commit。成功后 Pipeline 已经不可被 routing
-	 * 或 CONTROL 再次发现，可以安全释放 soft-state。
+	/* 注册表辅助函数把“清除 CONTROL、取消 RESERVED、注销”
+	 * 合并为同一个所有者侧提交。成功后 Pipeline 已经不可被路由
+	 * 或 CONTROL 再次发现，可以安全释放软状态。
 	 */
 	ret = tr_pipeline_registry_close_control(
 		control->registry, control->pipeline,
@@ -397,9 +393,8 @@ static int tr_pipeline_control_abort_on_owner(void *arg)
 	control->pipeline = NULL;
 	control->registry = NULL;
 
-	/*
-	 * membership 已经先于 socket callback 失效。STALE 仅表示 close callback
-	 * 已经先一步回收该 exact connection generation，不需要恢复任何状态。
+	/* 成员关系已经先于套接字回调失效。STALE 仅表示关闭回调
+	 * 已经先一步回收该精确连接代次，不需要恢复任何状态。
 	 */
 	for (i = 0; i < count; ++i) {
 		ret = tr_reactor_close_on_owner(
@@ -442,10 +437,9 @@ static int tr_pipeline_control_close_on_owner(void *arg)
 	struct tr_pipeline_control *control = request->control;
 	int ret;
 
-	/*
-	 * Graceful close 不允许 ATTACHED DATA/Stream affinity 存活；
-	 * registry helper 在任何不可逆修改之前完成这项校验。RESERVED capability
-	 * 属于 CONTROL，可在 commit 时一并取消。
+	/* 优雅关闭不允许 ATTACHED DATA 或流亲和绑定存活；
+	 * 注册表辅助函数在任何不可逆修改之前完成这项校验。RESERVED 能力凭证
+	 * 属于 CONTROL，可在提交时一并取消。
 	 */
 	ret = tr_pipeline_registry_close_control(
 		control->registry, control->pipeline,

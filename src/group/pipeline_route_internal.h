@@ -27,13 +27,10 @@ enum tr_pipeline_route_role {
 	TR_PIPELINE_ROUTE_DATA = 2
 };
 
-/*
- * Fixed routing identity sent before normal Transport framing on a physical
- * connection that joins a Pipeline.
+/* 加入 Pipeline 的物理连接在正常传输分帧前发送的固定路由标识。
  *
- * member_generation is a Pipeline membership generation issued by the
- * CONTROL-plane. It is deliberately unrelated to Reactor connection slot
- * generation.
+ * member_generation 是 CONTROL 平面签发的 Pipeline 成员关系代次。
+ * 它有意与反应器连接槽位代次无关。
  */
 struct tr_pipeline_route_preface {
 	uint16_t version;
@@ -60,16 +57,14 @@ int tr_pipeline_route_preface_validate(
 	const uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE],
 	const struct tr_pipeline_route_preface *preface);
 
-/*
- * Incremental parser for TCP fragmentation/coalescing.
+/* 用于 TCP 分片与合并的增量解析器。
  *
- * feed() consumes at most the remaining preface bytes. If input also contains
- * bytes for the following Transport HELLO/frame, *consumed stops exactly at
- * TR_PIPELINE_ROUTE_PREFACE_SIZE so the caller can pass the tail onward.
+ * feed() 最多消耗剩余前导字节。如果输入还包含后续传输 HELLO 或帧的
+ * 字节，*consumed 恰好停在 TR_PIPELINE_ROUTE_PREFACE_SIZE，
+ * 以便调用者继续传递尾部。
  *
- * Invalid complete prefaces are terminal for this parser; subsequent feed()
- * returns TR_ERR_STATE. *out is changed only for a successfully validated
- * complete preface.
+ * 无效完整前导使解析器进入终态；后续 feed() 返回 TR_ERR_STATE。
+ * 只有完整前导成功通过验证时才修改 *out。
  */
 struct tr_pipeline_route_parser {
 	uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];

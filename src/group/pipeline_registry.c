@@ -117,11 +117,10 @@ void tr_pipeline_registry_destroy(struct tr_pipeline_registry *registry)
 	if (!registry)
 		return;
 
-	/*
-	 * Registry 不拥有 Pipeline lifetime。destroy 前必须由 owner 将所有
-	 * Pipeline 注销；否则 entries 中仍保存裸指针，直接释放 registry 会隐藏
-	 * teardown 顺序错误。
-	 */
+		/* 注册表不拥有 Pipeline 生命周期。销毁前必须由所有者将所有
+		 * Pipeline 注销；否则 entries
+		 * 中仍保存裸指针，直接释放注册表会隐藏 拆除顺序错误。
+		 */
 #ifndef NDEBUG
 	assert(registry->count == 0U);
 #endif
@@ -208,10 +207,9 @@ static int tr_pipeline_registry_register_control_on_owner(void *arg)
 	uint32_t insert = UINT32_MAX;
 	int ret;
 
-	/*
-	 * Complete every failure-capable registry check before publishing CONTROL.
-	 * After set_control() succeeds, the remaining registry writes are an
-	 * owner-local commit and cannot require a compensating lifecycle call.
+	/* 发布 CONTROL 前完成所有可能失败的注册表检查。
+	 * set_control() 成功后，剩余注册表写入是所有者本地提交，
+	 * 不能再要求补偿性的生命周期调用。
 	 */
 	if (tr_pipeline_owner(pipeline) != registry->owner ||
 	    tr_pipeline_owner_shard_id(pipeline) != registry->owner_shard_id ||
@@ -315,9 +313,8 @@ static int tr_pipeline_registry_close_control_on_owner(void *arg)
 	uint32_t found = UINT32_MAX;
 	int ret;
 
-	/*
-	 * 先完成全部可失败校验，再进入不可逆 commit 区间。这样 CONTROL clear
-	 * 取消 RESERVED capability 后，不再需要通过重新 set CONTROL 伪造回滚。
+	/* 先完成全部可失败校验，再进入不可逆提交区间。这样清除 CONTROL
+	 * 取消 RESERVED 能力凭证后，不再需要通过重新设置 CONTROL 伪造回滚。
 	 */
 	if (!tr_pipeline_registry_find(
 		    registry, tr_pipeline_id(pipeline), &found, NULL))
@@ -334,10 +331,9 @@ static int tr_pipeline_registry_close_control_on_owner(void *arg)
 	if (stats.data_count != 0U || stats.stream_affinity_count != 0U)
 		return TR_ERR_STATE;
 
-	/*
-	 * commit point：clear_control() 只有 expected CONTROL 精确匹配时才会
-	 * 修改状态，并同时取消所有 RESERVED capability。成功后 registry entry
-	 * 在同一个 owner turn 内直接摘除，不再执行可能失败的第二阶段操作。
+	/* 提交点：clear_control() 只有预期 CONTROL 精确匹配时才会
+	 * 修改状态，并同时取消所有 RESERVED 能力凭证。成功后注册表条目
+	 * 在同一个所有者处理轮次内直接摘除，不再执行可能失败的第二阶段操作。
 	 */
 	ret = tr_pipeline_clear_control(pipeline, request->expected_control);
 	if (ret != TR_OK)

@@ -52,9 +52,8 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		return TR_OK;
 
 	/*
-	 * Terminal admission sources may be closed eagerly. If retained RX payload
-	 * keeps Reactor alive, leave shard storage/budget intact so release can be
-	 * retried after the application returns that payload.
+	 * 终止准入源可以提前关闭。如果保留的接收负载使反应器继续存活，
+	 * 保持分片存储与预算不变，以便应用归还该负载后重试释放。
 	 */
 	ret = tr_runtime_shard_close_listener(shard);
 	if (ret != TR_OK)
@@ -126,9 +125,9 @@ static int tr_runtime_create_rollback(
 	}
 
 	/*
-	 * constructor rollback 自身失败时，partial Runtime 必须继续有 owner。
-	 * Client/Server constructor 会接住非空 *out，并继续自己的 terminal
-	 * rollback；若仍失败，最终 ownership 继续向最外层调用方传播。
+	 * 构造回滚自身失败时，部分构造的运行时必须继续有所有者。
+	 * 客户端与服务端构造函数会接住非空 *out，并继续自己的终止
+	 * 回滚；若仍失败，最终所有权继续向最外层调用方传播。
 	 */
 	*out = runtime;
 	return rollback_ret;
@@ -162,8 +161,8 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	runtime->shard_count = config->shard_count;
 
 	/*
-	 * 先初始化所有 shard 的 fd sentinel，使 partial Runtime 在任意构造点都能
-	 * 安全进入正式 destroy()；未访问 shard 保持其他字段为 calloc 零值。
+	 * 先初始化所有分片的 fd 哨兵值，使部分构造的运行时在任意构造点都能
+	 * 安全进入正式 destroy()；未访问分片的其他字段保持 calloc 零值。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
 		runtime->shards[i].listen_fd = -1;
@@ -238,9 +237,9 @@ static int tr_runtime_shard_stop_execution(
 		return TR_OK;
 
 	/*
-	 * 保持既有顺序：先收敛 Reactor owner，再 join shard executor worker。
-	 * worker 在 Reactor 已停止时已有本地 completion fallback，不会把 join
-	 * barrier 变成对 Reactor progress 的依赖。
+	 * 保持既有顺序：先收敛反应器所有者，再等待分片执行器工作线程退出并回收。
+	 * 工作线程在反应器已停止时已有本地完成回退，不会把线程回收
+	 * 屏障变成对反应器进展的依赖。
 	 */
 	if (shard->started) {
 		ret = tr_reactor_stop(shard->reactor);
@@ -268,9 +267,9 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		return TR_ERR_STATE;
 
 	/*
-	 * 新 epoch 必须在任何 pthread_create 之前验证所有 shard 都已从上一次
-	 * stop/rollback 完整收敛。否则后面的 shard 仍处于 stopping 时，前面的
-	 * shard 会先被重新启动，重新制造 partial epoch。
+	 * 新轮次必须在任何 pthread_create 之前验证所有分片都已从上一次
+	 * 停止或回滚完整收敛。否则后面的分片仍处于停止中时，前面的
+	 * 分片会先被重新启动，重新制造部分启动的轮次。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
 		struct tr_runtime_shard *shard = &runtime->shards[i];
@@ -287,8 +286,8 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		int ret;
 
 		/*
-		 * worker epoch 在 Runtime 已经由调用方拥有之后才启动。若部分
-		 * pthread_create 或 rollback join 失败，group storage 留在 shard 中，
+		 * 工作线程轮次在运行时已经由调用方拥有之后才启动。若部分
+		 * pthread_create 或回滚时的线程回收失败，组存储留在分片中，
 		 * runtime_stop()/destroy() 可以继续收敛。
 		 */
 		if (shard->rpc_executor) {
@@ -303,27 +302,26 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		shard->started = 1;
 		continue;
 
-rollback:
-		{
-			int cause = ret;
-			int rollback_ret = TR_OK;
-			uint32_t j = i + 1U;
+	rollback: {
+		int cause = ret;
+		int rollback_ret = TR_OK;
+		uint32_t j = i + 1U;
 
-			/*
-			 * 包含当前 shard：group 可能已经启动而 Reactor 尚未成功。
-			 * 每个 shard 的 stop 都是幂等且可重试的。
-			 */
-			while (j != 0U) {
-				int stop_ret;
+		/*
+		 * 包含当前分片：组可能已经启动而反应器尚未成功。
+		 * 每个分片的停止都是幂等且可重试的。
+		 */
+		while (j != 0U) {
+			int stop_ret;
 
-				--j;
-				stop_ret =
-					tr_runtime_shard_stop_execution(&runtime->shards[j]);
-				if (stop_ret != TR_OK && rollback_ret == TR_OK)
-					rollback_ret = stop_ret;
-			}
-			return rollback_ret != TR_OK ? rollback_ret : cause;
+			--j;
+			stop_ret = tr_runtime_shard_stop_execution(
+			        &runtime->shards[j]);
+			if (stop_ret != TR_OK && rollback_ret == TR_OK)
+				rollback_ret = stop_ret;
 		}
+		return rollback_ret != TR_OK ? rollback_ret : cause;
+	}
 	}
 
 	runtime->started = 1;
@@ -339,8 +337,8 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 		return TR_ERR_INVALID;
 
 	/*
-	 * 即使 aggregate runtime->started 为 false，也可能存在 failed-start
-	 * 留下的 partial executor epoch，因此不能只根据 Reactor started 早退。
+	 * 即使总状态 runtime->started 为 false，也可能存在启动失败
+	 * 留下的部分执行器轮次，因此不能只根据反应器 started 早退。
 	 */
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return TR_ERR_STATE;
@@ -691,8 +689,8 @@ void tr_runtime_shard_signal_peer_event(struct tr_runtime_shard *shard)
 	} while (written < 0 && errno == EINTR);
 
 	/*
-	 * EAGAIN means the eventfd counter is already saturated; a wake is
-	 * necessarily pending, so no additional action is required.
+	 * EAGAIN 表示 eventfd 计数器已经饱和；必然已有待处理唤醒，
+	 * 因此无需额外操作。
 	 */
 }
 

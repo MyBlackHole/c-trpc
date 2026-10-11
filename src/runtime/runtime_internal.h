@@ -15,7 +15,7 @@ struct tr_rpc_endpoint;
 
 struct tr_runtime_peer {
 	int used;
-	/* 握手租约和就绪标记只由所属 Reactor 修改。 */
+	/* 握手租约和就绪标记只由所属反应器修改。 */
 	int ready;
 	struct tr_deadline handshake_deadline;
 	void *finalize_ctx;
@@ -34,10 +34,8 @@ struct tr_runtime_peer_stats {
 	uint64_t capacity_rejections;
 };
 
-/*
- * Runtime owns one independent resource domain per shard. Configuration is
- * explicit per shard so enabling N shards never multiplies a Server-wide
- * budget implicitly.
+/* 运行时为每个分片拥有一个独立资源域。每个分片显式配置，
+ * 因此启用 N 个分片绝不会隐式地将服务端总预算放大 N 倍。
  */
 struct tr_runtime_rpc_executor_config {
 	uint32_t endpoint_capacity;
@@ -49,9 +47,8 @@ struct tr_runtime_shard_config {
 	struct tr_reactor_config reactor;
 	uint32_t peer_capacity;
 
-	/*
-	 * Internal Phase-7 shard memory budget. 0 means accounting-only/unbounded
-	 * until all major shard-local consumers participate in this capability.
+	/* 内部第七阶段分片内存预算。在所有主要分片本地使用方参与
+	 * 此能力之前，0 表示仅记账、不设上限。
 	 */
 	uint64_t memory_budget_bytes;
 
@@ -63,22 +60,19 @@ struct tr_runtime_config {
 	const struct tr_runtime_shard_config *shards;
 };
 
-/*
- * 正常失败时 *out 保持 NULL。若 constructor rollback 本身失败，函数返回
- * lifecycle error，同时 *out 保留 partial Runtime ownership；调用方必须
+/* 正常失败时 *out 保持 NULL。若构造回滚本身失败，函数返回
+ * 生命周期错误，同时 *out 保留部分构造的运行时所有权；调用方必须
  * 继续 tr_runtime_destroy() 重试，不能丢弃该对象。
  */
 int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out);
-/*
- * start() is all-shards-or-error. If rollback itself hits a lifecycle barrier
- * failure, the exact shard remains marked started and a new start is rejected
- * until stop() converges that partial epoch.
+/* start() 要么启动全部分片，要么返回错误。若回滚本身遇到生命周期屏障
+ * 失败，对应分片仍标记为已启动，且拒绝新的启动，
+ * 直到 stop() 收敛该部分轮次。
  */
 int tr_runtime_start(struct tr_runtime *runtime);
-/*
- * stop() also converges partial shards left by a failed start rollback even
- * when the aggregate Runtime was never published as started.
+/* stop() 也会收敛启动回滚失败留下的部分分片，
+ * 即使整个运行时从未发布为已启动。
  */
 int tr_runtime_stop(struct tr_runtime *runtime);
 int tr_runtime_destroy(struct tr_runtime *runtime);
@@ -94,9 +88,8 @@ int tr_runtime_shard_call(struct tr_runtime_shard *shard,
 struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
 
-/*
- * Internal shard memory-budget capability. Consumers must reserve before
- * allocating budgeted bytes and release the exact reservation on teardown.
+/* 内部分片内存预算能力。使用方必须在分配预算内字节前预留，
+ * 并在拆除时释放精确的预留额度。
  */
 struct tr_memory_budget *
 tr_runtime_shard_memory_budget(struct tr_runtime_shard *shard);
@@ -104,10 +97,8 @@ void tr_runtime_shard_memory_stats(
 	const struct tr_runtime_shard *shard,
 	struct tr_memory_budget_stats *out);
 
-/*
- * Listener lifetime is shard-owned. The listener event source is registered
- * with that shard's Reactor; close first unregisters the owner event source,
- * then closes the fd.
+/* 监听器生命周期由分片拥有。监听器事件源注册到该分片的反应器；
+ * 关闭时先注销所有者事件源，再关闭 fd。
  */
 int tr_runtime_shard_listen_ipv4(struct tr_runtime_shard *shard,
 				 const char *address, uint16_t port,
@@ -126,10 +117,9 @@ int tr_runtime_shard_enable_listener_events(struct tr_runtime_shard *shard,
 int tr_runtime_shard_disable_listener_events(struct tr_runtime_shard *shard);
 int tr_runtime_shard_close_listener(struct tr_runtime_shard *shard);
 
-/*
- * Peer storage is shard-owned. Accept, publish, lifecycle detach and live
- * snapshot all run on the Reactor owner. Runtime owns storage/counters; only
- * detached-finalizer retirement counters may be updated off-owner.
+/* 对端存储由分片拥有。接受、发布、生命周期解绑与存活快照均在反应器
+ * 所有者上运行。运行时拥有存储与计数器；只有已解绑收尾器的退役计数器
+ * 可以在所有者之外更新。
  */
 uint32_t tr_runtime_shard_peer_capacity(const struct tr_runtime_shard *shard);
 struct tr_runtime_peer *
@@ -145,10 +135,9 @@ void tr_runtime_shard_peer_note_capacity_rejection(
 void tr_runtime_shard_peer_stats(const struct tr_runtime_shard *shard,
 				 struct tr_runtime_peer_stats *out);
 
-/*
- * Shard-local deferred peer lifecycle event source. Channel callbacks signal
- * it from the Reactor owner; epoll dispatches it on a later Reactor turn so
- * shared-connection DOWN notifications finish before detach begins.
+/* 分片本地的延后对端生命周期事件源。通道回调从反应器所有者上通知它；
+ * epoll 在后续反应器处理轮次分派它，确保共享连接的 DOWN 通知
+ * 在开始解绑前完成。
  */
 typedef void (*tr_runtime_peer_event_cb)(int fd, uint32_t events, void *arg);
 
