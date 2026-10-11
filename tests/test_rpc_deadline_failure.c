@@ -24,6 +24,32 @@ static _Atomic int capture_rpc_timer;
 static _Atomic uint32_t rpc_timer_slot = UINT32_MAX;
 static _Atomic int fail_arm;
 static _Atomic unsigned failed_arms;
+static _Atomic int inject_response_clock;
+static _Atomic int response_clock_failure;
+static _Atomic uint64_t response_now;
+static _Atomic unsigned response_clock_reads;
+static _Thread_local int next_clock_failure;
+static _Thread_local uint64_t next_clock_now;
+
+int __real_tr_rpc_wire_decode_ex(const uint8_t *data, uint32_t len,
+	struct tr_rpc_wire_header *header, const uint8_t **metadata,
+	uint16_t *metadata_len, const uint8_t **payload);
+
+int __wrap_tr_rpc_wire_decode_ex(const uint8_t *data, uint32_t len,
+	struct tr_rpc_wire_header *header, const uint8_t **metadata,
+	uint16_t *metadata_len, const uint8_t **payload)
+{
+	int ret = __real_tr_rpc_wire_decode_ex(data, len, header, metadata,
+		metadata_len, payload);
+
+	if (ret == TR_OK && tr_reactor_in_owner_context() &&
+	    (header->type == TR_RPC_WIRE_RESPONSE || header->type == TR_RPC_WIRE_STATUS) &&
+	    atomic_exchange(&inject_response_clock, 0)) {
+		next_clock_failure = atomic_load(&response_clock_failure);
+		next_clock_now = atomic_load(&response_now);
+	}
+	return ret;
+}
 
 int __real_clock_gettime(clockid_t clock_id, struct timespec *ts);
 int __real_tr_reactor_timer_register(struct tr_reactor *reactor,
@@ -35,6 +61,21 @@ int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
 int __wrap_clock_gettime(clockid_t clock_id, struct timespec *ts)
 {
 	if (clock_id == CLOCK_MONOTONIC) {
+		if (next_clock_failure || next_clock_now != 0U) {
+			uint64_t now = next_clock_now;
+			int failure = next_clock_failure;
+
+			next_clock_now = 0U;
+			next_clock_failure = 0;
+			atomic_fetch_add(&response_clock_reads, 1U);
+			if (failure) {
+				errno = EIO;
+				return -1;
+			}
+			ts->tv_sec = (time_t)(now / UINT64_C(1000000000));
+			ts->tv_nsec = (long)(now % UINT64_C(1000000000));
+			return 0;
+		}
 		if (fail_clock) {
 			errno = EIO;
 			return -1;
@@ -84,10 +125,12 @@ struct fixture {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	unsigned opened;
+	unsigned remote_closed;
 	unsigned terminal;
 	unsigned terminal_once[3];
 	int status[3];
 	unsigned requests;
+	int respond;
 	uint64_t wire_timeout_ms;
 	struct callback_arg args[3];
 	struct tr_rpc_call_handle calls[3];
@@ -103,6 +146,8 @@ static void on_call_event(struct tr_rpc_call_handle call,
 	pthread_mutex_lock(&f->lock);
 	if (event == TR_RPC_CALL_EVENT_OPENED) {
 		f->opened++;
+	} else if (event == TR_RPC_CALL_EVENT_REMOTE_CLOSED) {
+		f->remote_closed++;
 	} else if (event == TR_RPC_CALL_EVENT_ERROR ||
 		   event == TR_RPC_CALL_EVENT_FINISHED) {
 		assert(f->terminal_once[cb->index]++ == 0U);
@@ -149,6 +194,20 @@ static enum tr_stream_data_disposition on_peer_data(
 		assert(tr_get_le16(metadata + 1U) == 8U);
 		assert(memcmp(metadata + 3U, key, key_len) == 0);
 		timeout_ms = tr_get_le64(metadata + 3U + key_len);
+	}
+	if (f->respond == 3) {
+		assert(tr_stream_close(stream) == TR_OK);
+	} else if (f->respond) {
+		struct tr_buffer *reply;
+
+		wire.type = f->respond == 1 ? TR_RPC_WIRE_RESPONSE : TR_RPC_WIRE_STATUS;
+		wire.flags = 0U;
+		wire.status = TR_RPC_STATUS_OK;
+		wire.payload_len = 0U;
+		assert(tr_buffer_acquire(&f->pool, TR_RPC_WIRE_HEADER_SIZE, &reply) == TR_OK);
+		assert(tr_rpc_wire_encode(reply->data, &wire) == TR_OK);
+		reply->len = TR_RPC_WIRE_HEADER_SIZE;
+		assert(tr_stream_send(stream, reply) == TR_OK);
 	}
 	pthread_mutex_lock(&f->lock);
 	f->requests++;
@@ -210,7 +269,7 @@ static void fixture_init(struct fixture *f)
 	assert(tr_channel_wait_ready(f->server, TR_LANE_CONTROL, 5000U) == TR_OK);
 	assert(tr_buffer_pool_init(&f->pool, 32U, 4096U) == TR_OK);
 	ec.role = TR_RPC_CLIENT;
-	ec.max_methods = 1U;
+	ec.max_methods = 2U;
 	ec.max_calls = 3U;
 	ec.executor_threads = 1U;
 	ec.executor_queue_capacity = 16U;
@@ -228,6 +287,9 @@ static void fixture_init(struct fixture *f)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 64U;
 	method.max_response_bytes = 64U;
+	assert(tr_rpc_register_method(f->rpc, &method, NULL, NULL) == TR_OK);
+	method.method_id = 2U;
+	method.response_cardinality = TR_RPC_MANY;
 	assert(tr_rpc_register_method(f->rpc, &method, NULL, NULL) == TR_OK);
 }
 
@@ -475,6 +537,107 @@ static void test_saturated_rounding(void)
 	fixture_destroy(&f);
 }
 
+static void on_unary_result(struct tr_rpc_call_handle call, int status,
+	const struct tr_rpc_bytes *response, void *arg)
+{
+	(void)response;
+	on_call_event(call, TR_RPC_CALL_EVENT_FINISHED, status, arg);
+}
+
+static int send_and_close_on_owner(void *arg)
+{
+	struct fixture *f = arg;
+	struct tr_rpc_bytes request = { (const uint8_t *)"x", 1U };
+
+	assert(tr_rpc_call_send(f->calls[0], &request) == TR_OK);
+	assert(tr_rpc_call_close_send(f->calls[0]) == TR_OK);
+	return TR_OK;
+}
+
+static void test_response_deadline(int unary, int offset, int clock_failure)
+{
+	struct fixture f;
+	struct tr_rpc_call_options options = { 0 };
+	struct tr_rpc_call_callbacks callbacks = { 0 };
+	struct tr_rpc_bytes request = { (const uint8_t *)"x", 1U };
+	struct tr_rpc_semantic_stats stats;
+	const uint64_t base = UINT64_MAX / 2U;
+	const uint64_t deadline = base + UINT64_C(5000000000);
+	int expected = clock_failure ? TR_RPC_STATUS_UNAVAILABLE :
+		(offset < 0 ? TR_RPC_STATUS_OK : TR_RPC_STATUS_DEADLINE_EXCEEDED);
+
+	fixture_init(&f);
+	f.respond = unary ? 1 : 2;
+	options.timeout_ms = 5000U;
+	atomic_store(&response_clock_reads, 0U);
+	atomic_store(&response_clock_failure, clock_failure);
+	atomic_store(&response_now, offset < 0 ? deadline - 1U :
+		deadline + (uint64_t)offset);
+	atomic_store(&inject_response_clock, 1);
+	fake_now_ns = base;
+	if (unary) {
+		assert(tr_rpc_unary_call_ex(f.rpc, 1U, 1U, &request, &options,
+			on_unary_result, &f.args[0], &f.calls[0]) == TR_OK);
+	} else {
+		callbacks.on_event = on_call_event;
+		callbacks.arg = &f.args[0];
+		assert(tr_rpc_call_start_ex(f.rpc, 1U, 2U, &options, &callbacks,
+			&f.calls[0]) == TR_OK);
+	}
+	fake_now_ns = 0U;
+	if (!unary) {
+		wait_count(&f, &f.opened, 1U);
+		assert(tr_reactor_call(f.reactor, send_and_close_on_owner, &f) == TR_OK);
+	}
+	wait_count(&f, &f.terminal, 1U);
+	if (f.status[0] != expected)
+		fprintf(stderr, "response unary=%d offset=%d clock_failure=%d: got=%d expected=%d\n",
+			unary, offset, clock_failure, f.status[0], expected);
+	assert(f.status[0] == expected);
+	assert(atomic_load(&response_clock_reads) == 1U);
+	assert(tr_rpc_endpoint_get_semantic_stats(f.rpc, &stats) == TR_OK);
+	assert(stats.calls_started == 1U && stats.calls_finished == 1U);
+	assert(stats.final_status[expected] == 1U);
+	assert_heap_count(&f, 0U);
+	fixture_destroy(&f);
+}
+
+static void test_half_close_order(int remote_first)
+{
+	struct fixture f;
+	struct tr_rpc_call_callbacks callbacks = { 0 };
+	struct tr_rpc_bytes request = { (const uint8_t *)"x", 1U };
+	struct tr_rpc_semantic_stats stats;
+	unsigned i;
+
+	fixture_init(&f);
+	f.respond = 3;
+	callbacks.on_event = on_call_event;
+	/* 不设置 deadline，证明终态由半关闭本身产生，不由定时器兜底。 */
+	for (i = 0; i < 3U; ++i) {
+		callbacks.arg = &f.args[i];
+		assert(tr_rpc_call_start(f.rpc, 1U, 2U, &callbacks, &f.calls[0]) == TR_OK);
+		wait_count(&f, &f.opened, i + 1U);
+		if (remote_first) {
+			assert(tr_rpc_call_send(f.calls[0], &request) == TR_OK);
+			wait_count(&f, &f.remote_closed, i + 1U);
+			pthread_mutex_lock(&f.lock);
+			assert(f.terminal == i);
+			pthread_mutex_unlock(&f.lock);
+			assert(tr_rpc_call_close_send(f.calls[0]) == TR_OK);
+		} else {
+			assert(tr_reactor_call(f.reactor, send_and_close_on_owner, &f) == TR_OK);
+		}
+		wait_count(&f, &f.terminal, i + 1U);
+		assert(f.status[i] == TR_RPC_STATUS_UNAVAILABLE);
+		assert(tr_rpc_endpoint_get_semantic_stats(f.rpc, &stats) == TR_OK);
+		assert(stats.calls_started == i + 1U && stats.calls_finished == i + 1U);
+		assert(stats.final_status[TR_RPC_STATUS_UNAVAILABLE] == i + 1U);
+		assert(stats.final_status[TR_RPC_STATUS_OK] == 0U);
+	}
+	fixture_destroy(&f);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 1 || strcmp(argv[1], "clock") == 0)
@@ -489,6 +652,20 @@ int main(int argc, char **argv)
 		test_cleanup_and_callback_progress(0);
 	if (argc == 1 || strcmp(argv[1], "rounding") == 0)
 		test_saturated_rounding();
+	if (argc == 1 || strcmp(argv[1], "response") == 0) {
+		int unary;
+
+		for (unary = 0; unary <= 1; ++unary) {
+			test_response_deadline(unary, -1, 0);
+			test_response_deadline(unary, 0, 0);
+			test_response_deadline(unary, 1, 0);
+			test_response_deadline(unary, 0, 1);
+		}
+	}
+	if (argc == 1 || strcmp(argv[1], "halfclose") == 0) {
+		test_half_close_order(1);
+		test_half_close_order(0);
+	}
 	puts("test_rpc_deadline_failure: ok");
 	return 0;
 }

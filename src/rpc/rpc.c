@@ -915,23 +915,44 @@ static int tr_rpc_deadline_rearm_locked(struct tr_rpc_endpoint *endpoint)
  * existing owner timer, not from an unbounded worker or client flush.
  */
 static int tr_rpc_schedule_final_close_retry_locked(
-	struct tr_rpc_endpoint *endpoint)
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_slot *call)
 {
 	uint64_t now;
 	uint64_t candidate;
+	enum tr_lane lane = (enum tr_lane)call->method->desc.lane;
+	int ret;
+	int abort_ret;
 
 	if (endpoint->deadline_stopping ||
-	    !endpoint->deadline_timer_registered)
-		return TR_ERR_CLOSED;
+	    !endpoint->deadline_timer_registered) {
+		ret = TR_ERR_CLOSED;
+		goto fail;
+	}
 	now = tr_rpc_now_ns();
-	if (now == 0U)
-		return TR_ERR_SYS;
+	if (now == 0U) {
+		ret = TR_ERR_SYS;
+		goto fail;
+	}
 	candidate = UINT64_MAX - now < TR_RPC_FINAL_CLOSE_RETRY_NS ?
 			UINT64_MAX : now + TR_RPC_FINAL_CLOSE_RETRY_NS;
 	if (endpoint->final_close_retry_deadline_ns == 0U ||
 	    candidate < endpoint->final_close_retry_deadline_ns)
 		endpoint->final_close_retry_deadline_ns = candidate;
-	return tr_rpc_deadline_rearm_locked(endpoint);
+	ret = tr_rpc_deadline_rearm_locked(endpoint);
+	if (ret == TR_OK)
+		return TR_OK;
+
+fail:
+	/*
+	 * STATUS/Unary 失败已经锁存，调用者无法回滚，也不能依赖后续可写通知
+	 * 退休 Stream。释放协议锁后同步中止精确 lane，通过已有连接错误回调
+	 * 收敛义务。这些回调可能退休 Call；返回错误后不得继续原协议转换。
+	 */
+	pthread_mutex_unlock(&endpoint->lock);
+	abort_ret = tr_channel_abort_lane_on_owner(
+		endpoint->channel, lane, ret < 0 ? ret : TR_ERR_SYS);
+	pthread_mutex_lock(&endpoint->lock);
+	return abort_ret == TR_OK || abort_ret == TR_ERR_STALE ? ret : abort_ret;
 }
 
 static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
@@ -1663,6 +1684,8 @@ static int tr_rpc_try_unary_send_locked(struct tr_rpc_endpoint *endpoint,
 			}
 			return TR_OK;
 		}
+		if (ret == TR_AGAIN && endpoint->config.role == TR_RPC_SERVER)
+			return tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 	}
 	return ret;
 }
@@ -1743,6 +1766,9 @@ static int tr_rpc_fail_server_unary_locked(struct tr_rpc_endpoint *endpoint,
 		call->need_local_close = 1;
 
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
+	/* 重试调度失败可能已经同步退休 lane/Call。 */
+	if (call->state == TR_RPC_CALL_FREE || call->state == TR_RPC_CALL_TERMINAL)
+		return ret;
 	if (ret == TR_OK)
 		return TR_OK;
 	if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
@@ -1752,7 +1778,7 @@ static int tr_rpc_fail_server_unary_locked(struct tr_rpc_endpoint *endpoint,
 		return TR_OK;
 	}
 	if (ret == TR_AGAIN)
-		return tr_rpc_schedule_final_close_retry_locked(endpoint);
+		return tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 
 	/*
 	 * If the error envelope cannot be admitted for a non-backpressure
@@ -1763,6 +1789,9 @@ static int tr_rpc_fail_server_unary_locked(struct tr_rpc_endpoint *endpoint,
 		tr_buffer_release(tr_buffer_take(&call->pending_tx));
 	call->need_local_close = 1;
 	ret = tr_rpc_try_unary_send_locked(endpoint, call);
+	/* 重试调度失败可能已经同步退休 lane/Call。 */
+	if (call->state == TR_RPC_CALL_FREE || call->state == TR_RPC_CALL_TERMINAL)
+		return ret;
 	if (ret == TR_OK)
 		return TR_OK;
 	if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
@@ -1771,7 +1800,7 @@ static int tr_rpc_fail_server_unary_locked(struct tr_rpc_endpoint *endpoint,
 		tr_rpc_maybe_free_call_locked(endpoint, call);
 		return TR_OK;
 	}
-	return tr_rpc_schedule_final_close_retry_locked(endpoint);
+	return tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 }
 
 /*
@@ -1822,7 +1851,7 @@ tr_rpc_reject_stream_admission_locked(struct tr_rpc_endpoint *endpoint,
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
 			call->need_local_close = 1;
-			ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
+			ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 		}
 	} else if (ret == TR_AGAIN) {
 		call->pending_control = tr_buffer_take(&encoded);
@@ -1892,7 +1921,7 @@ tr_rpc_fail_stream_midstream_overload_locked(
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN) {
 			call->need_local_close = 1;
-			ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
+			ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 		}
 	} else if (ret == TR_AGAIN) {
 		call->pending_control = tr_buffer_take(&encoded);
@@ -3840,7 +3869,7 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
 		} else if (ret == TR_AGAIN && call->final_status_sent) {
-			ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
+			ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 		}
 	}
 	return ret;
@@ -3987,9 +4016,17 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 
 			if (call->state == TR_RPC_CALL_FREE)
 				continue;
-			if (call->unary_failure_pending &&
+			if (call->is_unary &&
+			    (call->unary_failure_pending || call->need_local_close) &&
 			    (call->pending_tx || call->need_local_close)) {
+				struct tr_rpc_call_handle handle =
+					tr_rpc_make_call_handle(endpoint, i, call);
+
 				ret = tr_rpc_try_unary_send_locked(endpoint, call);
+				/* 同步 abort 的回调可能退休并复用槽；重新校验代次。 */
+				call = tr_rpc_lookup_call_handle_locked(handle);
+				if (!call)
+					continue;
 				if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
 					call->need_local_close = 0;
 					call->state = TR_RPC_CALL_TERMINAL;
@@ -4108,6 +4145,30 @@ static int tr_rpc_deadline_destroy(struct tr_rpc_endpoint *endpoint)
 	return TR_OK;
 }
 
+/* RX 处理可能跨越期限，而本轮 timer 预算尚未再次执行。 */
+static int tr_rpc_response_deadline_locked(const struct tr_rpc_call_slot *call)
+{
+	uint64_t now;
+
+	if (call->deadline_ns == 0U)
+		return TR_OK;
+	now = tr_rpc_now_ns();
+	if (now == 0U)
+		return TR_ERR_SYS;
+	return now >= call->deadline_ns ? TR_ERR_TIMEOUT : TR_OK;
+}
+
+static void tr_rpc_reject_response_deadline_on_owner(
+	struct tr_rpc_endpoint *endpoint, struct tr_rpc_call_handle handle,
+	enum tr_lane lane, int error)
+{
+	if (error == TR_ERR_TIMEOUT)
+		(void)tr_rpc_cancel_internal(handle, TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	else
+		/* 时钟不可靠时，复用已有 UNAVAILABLE 连接错误路径。 */
+		(void)tr_channel_abort_lane_on_owner(endpoint->channel, lane, error);
+}
+
 static enum tr_stream_data_disposition
 tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	       struct tr_buffer *payload, void *arg)
@@ -4168,10 +4229,14 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 		}
 
 		if (!call) {
+			enum tr_lane actual_lane;
+
 			method = tr_rpc_find_method_locked(
 				endpoint, wire.service_id, wire.method_id);
 			if (!method ||
 			    method->handler_kind == TR_RPC_HANDLER_NONE ||
+			    tr_stream_get_lane_internal(stream, &actual_lane) != TR_OK ||
+			    (uint32_t)actual_lane != method->desc.lane ||
 			    tr_rpc_allocate_call_locked(endpoint, &call,
 							&slot) != TR_OK) {
 				pthread_mutex_unlock(&endpoint->lock);
@@ -4352,6 +4417,16 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			(void)tr_stream_close(stream);
 			return TR_STREAM_DATA_RELEASE;
 		}
+		ret = tr_rpc_response_deadline_locked(call);
+		if (ret != TR_OK) {
+			struct tr_rpc_call_handle handle =
+				tr_rpc_make_call_handle(endpoint, slot, call);
+			enum tr_lane lane = (enum tr_lane)call->method->desc.lane;
+
+			pthread_mutex_unlock(&endpoint->lock);
+			tr_rpc_reject_response_deadline_on_owner(endpoint, handle, lane, ret);
+			return TR_STREAM_DATA_RELEASE;
+		}
 		call->rx_count++;
 
 		task.call = tr_rpc_make_call_handle(endpoint, slot, call);
@@ -4420,6 +4495,16 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			return TR_STREAM_DATA_RELEASE;
 		}
 
+		ret = tr_rpc_response_deadline_locked(call);
+		if (ret != TR_OK) {
+			struct tr_rpc_call_handle handle =
+				tr_rpc_make_call_handle(endpoint, slot, call);
+			enum tr_lane lane = (enum tr_lane)call->method->desc.lane;
+
+			pthread_mutex_unlock(&endpoint->lock);
+			tr_rpc_reject_response_deadline_on_owner(endpoint, handle, lane, ret);
+			return TR_STREAM_DATA_RELEASE;
+		}
 		call->final_status_seen = 1;
 		call->final_status = wire.status;
 		(void)tr_rpc_deadline_set_locked(endpoint, call, 0U);
@@ -4536,7 +4621,7 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 		if (call->final_status_sent && call->need_local_close) {
 			ret = tr_rpc_try_final_close_locked(endpoint, slot, call);
 			if (ret == TR_AGAIN)
-				ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
+				ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			(void)ret;
 			return;
@@ -4638,6 +4723,12 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 					      (status == TR_OK ?
 						       TR_RPC_STATUS_OK :
 						       TR_RPC_STATUS_UNAVAILABLE);
+
+		/* 没有完整 RPC 结果的正常传输 EOF 仍是 UNAVAILABLE。 */
+		if (endpoint->config.role == TR_RPC_CLIENT &&
+		    ((call->is_unary && !call->result_delivered) ||
+		     (!call->is_unary && !call->final_status_seen)))
+			terminal_status = TR_RPC_STATUS_UNAVAILABLE;
 
 		/*
 		 * Stream lifetime ends here even when Call lifetime continues while
@@ -5837,6 +5928,8 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 	struct tr_rpc_endpoint *endpoint = tr_rpc_call_handle_endpoint(handle);
 	struct tr_rpc_call_slot *call;
 	enum tr_rpc_cardinality cardinality;
+	struct tr_stream_handle completed_stream = { 0 };
+	int completed = 0;
 	int ret;
 
 	pthread_mutex_lock(&endpoint->lock);
@@ -5882,12 +5975,25 @@ static int tr_rpc_call_close_send_on_owner(void *arg)
 
 	ret = tr_stream_close(call->stream);
 	if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-		tr_rpc_mark_local_closed_locked(endpoint, call);
+		if (call->remote_closed) {
+			/*
+			 * Channel 已退休最后半关闭的 Stream，但不会再次上报 CLOSED。
+			 * 保留索引直到下方共同终态路径执行，避免留下无事件源的 Call。
+			 */
+			call->local_closed = 1;
+			completed_stream = call->stream;
+			completed = 1;
+		} else {
+			tr_rpc_mark_local_closed_locked(endpoint, call);
+		}
 		ret = TR_OK;
 	}
 
 out:
 	pthread_mutex_unlock(&endpoint->lock);
+	if (completed)
+		tr_rpc_on_stream_event(completed_stream, TR_STREAM_EVENT_CLOSED,
+				       TR_OK, endpoint);
 	return ret;
 }
 
@@ -5993,7 +6099,7 @@ static int tr_rpc_call_finish_on_owner(void *arg)
 			} else if (ret == TR_AGAIN) {
 				/* STATUS committed: schedule the remaining half-close. */
 				call->need_local_close = 1;
-				ret = tr_rpc_schedule_final_close_retry_locked(endpoint);
+				ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 			}
 		}
 	}

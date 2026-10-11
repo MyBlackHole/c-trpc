@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/buffer.h"
-#include "../src/execution/reactor.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/rpc/rpc_internal.h"
 #include "../src/transport/channel/channel.h"
 #include "../src/transport/protocol/wire.h"
@@ -9,6 +9,7 @@
 
 #include <assert.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -27,6 +28,38 @@
 static _Atomic uint32_t server_connection_slot = UINT32_MAX;
 static _Atomic uint32_t fail_server_close;
 static _Atomic uint32_t close_attempts;
+static _Atomic int scheduling_fault;
+static _Atomic unsigned scheduling_failures;
+static _Thread_local int fail_next_clock;
+static _Thread_local int fail_next_arm;
+
+int __real_clock_gettime(clockid_t id, struct timespec *ts);
+int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
+                               uint64_t deadline_ns);
+
+int __wrap_clock_gettime(clockid_t id, struct timespec *ts)
+{
+	if (id == CLOCK_MONOTONIC && fail_next_clock) {
+		fail_next_clock = 0;
+		atomic_fetch_add(&scheduling_failures, 1U);
+		errno = EIO;
+		return -1;
+	}
+	return __real_clock_gettime(id, ts);
+}
+
+int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
+                               uint64_t deadline_ns)
+{
+	if (fail_next_arm) {
+		int ret = fail_next_arm == 3 ? TR_ERR_STALE : TR_ERR_SYS;
+
+		fail_next_arm = 0;
+		atomic_fetch_add(&scheduling_failures, 1U);
+		return ret;
+	}
+	return __real_tr_reactor_timer_arm(timer, deadline_ns);
+}
 
 int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 			   uint32_t flags, uint32_t stream_id,
@@ -47,8 +80,12 @@ int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 		while (left != 0U) {
 			if (atomic_compare_exchange_weak_explicit(
 				    &fail_server_close, &left, left - 1U,
-				    memory_order_relaxed, memory_order_relaxed))
+				    memory_order_relaxed, memory_order_relaxed)) {
+				fail_next_clock = atomic_load(&scheduling_fault) == 1;
+				fail_next_arm = atomic_load(&scheduling_fault) >= 2 ?
+					atomic_load(&scheduling_fault) : 0;
 				return TR_AGAIN;
+			}
 		}
 	}
 	return __real_tr_reactor_send(connection, type, flags, stream_id,
@@ -56,6 +93,7 @@ int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 }
 
 struct test_context {
+	struct tr_reactor *reactor;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	unsigned opened;
@@ -176,7 +214,9 @@ on_server_message(struct tr_rpc_call_handle call,
 	assert(message && message->bytes.len == 4U);
 	assert(memcmp(message->bytes.data, "work", 4U) == 0);
 	/* This must return success even when the following close is congested. */
-	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
+	assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) ==
+	       (atomic_load(&scheduling_fault) == 3 ? TR_ERR_STALE :
+		(atomic_load(&scheduling_fault) ? TR_ERR_SYS : TR_OK)));
 	pthread_mutex_lock(&ctx->lock);
 	ctx->messages++;
 	pthread_cond_broadcast(&ctx->cond);
@@ -214,30 +254,43 @@ static void on_client_event(struct tr_rpc_call_handle call,
 		ctx->finished_status[cb->index] = status;
 		ctx->finished++;
 	} else if (event == TR_RPC_CALL_EVENT_ERROR) {
-		assert(!"transport failure must not replace an accepted final STATUS");
+		assert(atomic_load(&scheduling_fault));
+		assert(status == TR_RPC_STATUS_UNAVAILABLE);
+		assert(ctx->finished_once[cb->index] == 0U);
+		ctx->finished_once[cb->index] = 1U;
+		ctx->finished_status[cb->index] = status;
+		ctx->finished++;
 	}
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static int send_and_close(void *arg)
+{
+	struct tr_rpc_call_handle *call = arg;
+	const struct tr_rpc_bytes request = { (const uint8_t *)"work", 4U };
+
+	assert(tr_rpc_call_send(*call, &request) == TR_OK);
+	assert(tr_rpc_call_close_send(*call) == TR_OK);
+	return TR_OK;
+}
+
 static void start_and_finish(struct tr_rpc_endpoint *endpoint,
 			     struct client_arg *arg,
-			     struct tr_rpc_call_handle *out)
+			     struct tr_rpc_call_handle *out, uint32_t method_id)
 {
 	struct tr_rpc_call_callbacks callbacks;
-	static const uint8_t request_data[] = "work";
-	const struct tr_rpc_bytes request = { request_data, 4U };
 
 	memset(&callbacks, 0, sizeof(callbacks));
 	callbacks.on_event = on_client_event;
 	callbacks.arg = arg;
-	assert(tr_rpc_call_start(endpoint, 1U, 1U, &callbacks, out) == TR_OK);
+	assert(tr_rpc_call_start(endpoint, 1U, method_id, &callbacks, out) == TR_OK);
 	wait_count(arg->ctx, &arg->ctx->opened, arg->index + 1U);
-	assert(tr_rpc_call_send(*out, &request) == TR_OK);
-	assert(tr_rpc_call_close_send(*out) == TR_OK);
+	/* 同一 owner turn 提交请求与半关闭，隔离本测试的准入/重试边界。 */
+	assert(tr_reactor_call(arg->ctx->reactor, send_and_close, out) == TR_OK);
 }
 
-int main(void)
+static void run_case(int fault)
 {
 	struct tr_reactor_config reactor_config;
 	struct tr_channel_config channel_config;
@@ -251,6 +304,8 @@ int main(void)
 	struct tr_rpc_endpoint *server_rpc = NULL;
 	struct tr_conn_handle client_conn;
 	struct tr_conn_handle server_conn;
+	struct tr_conn_handle client_bulk;
+	struct tr_conn_handle server_bulk;
 	struct tr_rpc_call_handle calls[CALL_COUNT];
 	struct client_arg args[CALL_COUNT];
 	struct tr_buffer_pool rpc_pool;
@@ -261,6 +316,10 @@ int main(void)
 	int server_fd;
 	unsigned i;
 
+	atomic_store(&scheduling_fault, 0);
+	atomic_store(&scheduling_failures, 0U);
+	atomic_store(&close_attempts, 0U);
+	atomic_store(&fail_server_close, 0U);
 	memset(&ctx, 0, sizeof(ctx));
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
@@ -276,23 +335,32 @@ int main(void)
 	reactor_config.max_payload_len = 4096U;
 	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
 	       TR_OK);
+	ctx.reactor = reactor;
 	assert(tr_reactor_start(reactor) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+	client_bulk = client_conn;
+	server_bulk = server_conn;
+	if (fault >= 4) {
+		make_nonblocking_pair(&client_fd, &server_fd);
+		assert(tr_reactor_adopt_fd(reactor, client_fd, &client_bulk) == TR_OK);
+		assert(tr_reactor_adopt_fd(reactor, server_fd, &server_bulk) == TR_OK);
+	}
 	atomic_store_explicit(&server_connection_slot, server_conn.slot,
 			      memory_order_relaxed);
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
-	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.mode = fault >= 4 ? TR_CHANNEL_SPLIT_CONNECTIONS :
+		TR_CHANNEL_SHARED_CONNECTION;
 	channel_config.max_streams = 2U;
 	channel_config.initial_window_bytes = 4096U;
 	channel_config.window_update_threshold_bytes = 1024U;
-	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+	assert(tr_channel_create(&channel_config, client_conn, client_bulk,
 				 NULL, NULL, NULL, NULL, &client_channel) ==
 	       TR_OK);
 	channel_config.role = TR_CHANNEL_SERVER;
-	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+	assert(tr_channel_create(&channel_config, server_conn, server_bulk,
 				 NULL, NULL, NULL, NULL, &server_channel) ==
 	       TR_OK);
 	assert(tr_channel_wait_ready(client_channel, TR_LANE_CONTROL, 5000U) ==
@@ -300,6 +368,8 @@ int main(void)
 	assert(tr_channel_wait_ready(server_channel, TR_LANE_CONTROL, 5000U) ==
 	       TR_OK);
 
+	assert(tr_channel_wait_ready(client_channel, TR_LANE_BULK, 5000U) == TR_OK);
+	assert(tr_channel_wait_ready(server_channel, TR_LANE_BULK, 5000U) == TR_OK);
 	assert(tr_buffer_pool_init(&rpc_pool, 128U, 4096U) == TR_OK);
 	memset(&rpc_config, 0, sizeof(rpc_config));
 	rpc_config.role = TR_RPC_CLIENT;
@@ -321,10 +391,12 @@ int main(void)
 	method.response_cardinality = TR_RPC_MANY;
 	method.request_codec_id = TR_RPC_CODEC_RAW;
 	method.response_codec_id = TR_RPC_CODEC_RAW;
-	method.lane = TR_LANE_CONTROL;
+	method.lane = fault == 5 ? TR_LANE_BULK : TR_LANE_CONTROL;
 	method.max_request_bytes = 64U;
 	method.max_response_bytes = 64U;
 	assert(tr_rpc_register_method(client_rpc, &method, NULL, NULL) == TR_OK);
+	if (fault >= 4)
+		method.lane = method.lane == TR_LANE_CONTROL ? TR_LANE_BULK : TR_LANE_CONTROL;
 	memset(&handlers, 0, sizeof(handlers));
 	handlers.on_open = on_server_open;
 	handlers.on_message = on_server_message;
@@ -337,9 +409,66 @@ int main(void)
 		args[i].index = i;
 	}
 
+	if (fault >= 4) {
+		struct tr_rpc_semantic_stats stats;
+		enum tr_channel_lane_state state;
+		unsigned lane;
+
+		/* 两条物理连接均存活；错 lane 的首个 REQUEST 不得创建 Call。 */
+		atomic_store(&scheduling_fault, fault);
+		start_and_finish(client_rpc, &args[0], &calls[0], 1U);
+		wait_count(&ctx, &ctx.finished, 1U);
+		wait_empty(client_channel, server_channel);
+		assert(ctx.messages == 0U && ctx.server_closed == 0U);
+		assert(tr_rpc_endpoint_get_semantic_stats(server_rpc, &stats) == TR_OK);
+		assert(stats.calls_started == 0U && stats.calls_finished == 0U);
+		for (lane = TR_LANE_CONTROL; lane <= TR_LANE_BULK; ++lane) {
+			assert(tr_channel_get_lane_state(server_channel, (enum tr_lane)lane,
+				&state) == TR_OK && state == TR_CHANNEL_LANE_UP);
+			assert(tr_channel_get_lane_state(client_channel, (enum tr_lane)lane,
+				&state) == TR_OK && state == TR_CHANNEL_LANE_UP);
+		}
+		/* 在服务端声明的另一条 lane 发起匹配方法，证明未被误关。 */
+		method.method_id = 2U;
+		assert(tr_rpc_register_method(client_rpc, &method, NULL, NULL) == TR_OK);
+		assert(tr_rpc_register_stream_method(server_rpc, &method, &handlers, &ctx) == TR_OK);
+		atomic_store(&scheduling_fault, 0);
+		start_and_finish(client_rpc, &args[1], &calls[1], 2U);
+		wait_count(&ctx, &ctx.finished, 2U);
+		wait_count(&ctx, &ctx.server_closed, 1U);
+		wait_empty(client_channel, server_channel);
+		assert(ctx.finished_status[0] == TR_RPC_STATUS_UNAVAILABLE);
+		assert(ctx.finished_status[1] == TR_RPC_STATUS_OK);
+		goto cleanup;
+	}
+
+	if (fault) {
+		struct tr_rpc_semantic_stats stats;
+		enum tr_channel_lane_state lane_state;
+
+		/* STATUS 已提交后的调度失败必须退休所属 lane。 */
+		atomic_store(&scheduling_fault, fault);
+		atomic_store(&fail_server_close, 1U);
+		start_and_finish(client_rpc, &args[0], &calls[0], 1U);
+		wait_count(&ctx, &ctx.messages, 1U);
+		wait_count(&ctx, &ctx.server_closed, 1U);
+		wait_count(&ctx, &ctx.finished, 1U);
+		wait_empty(client_channel, server_channel);
+		assert(atomic_load(&scheduling_failures) == 1U);
+		assert(atomic_load(&close_attempts) == 1U);
+		assert(tr_channel_get_lane_state(server_channel, TR_LANE_CONTROL,
+			&lane_state) == TR_OK);
+		assert(lane_state == TR_CHANNEL_LANE_DOWN);
+		assert(tr_rpc_endpoint_get_semantic_stats(server_rpc, &stats) == TR_OK);
+		assert(stats.calls_started == 1U && stats.calls_finished == 1U);
+		assert(stats.final_status[TR_RPC_STATUS_OK] == 1U);
+		assert(ctx.finished_once[0] == 1U);
+		goto cleanup;
+	}
+
 	/* Normal completion: four failed close admissions, then auto recovery. */
 	atomic_store_explicit(&fail_server_close, 4U, memory_order_relaxed);
-	start_and_finish(client_rpc, &args[0], &calls[0]);
+	start_and_finish(client_rpc, &args[0], &calls[0], 1U);
 	wait_count(&ctx, &ctx.messages, 1U);
 	wait_count(&ctx, &ctx.finished, 1U);
 	wait_attempts(5U);
@@ -351,7 +480,7 @@ int main(void)
 	atomic_store_explicit(&fail_server_close, 100U, memory_order_relaxed);
 	attempts_before = atomic_load_explicit(&close_attempts,
 					      memory_order_relaxed);
-	start_and_finish(client_rpc, &args[1], &calls[1]);
+	start_and_finish(client_rpc, &args[1], &calls[1], 1U);
 	wait_count(&ctx, &ctx.messages, 2U);
 	wait_count(&ctx, &ctx.finished, 2U);
 	wait_attempts(attempts_before + 3U);
@@ -372,7 +501,7 @@ int main(void)
 	atomic_store_explicit(&fail_server_close, 100U, memory_order_relaxed);
 	attempts_before = atomic_load_explicit(&close_attempts,
 					      memory_order_relaxed);
-	start_and_finish(client_rpc, &args[2], &calls[2]);
+	start_and_finish(client_rpc, &args[2], &calls[2], 1U);
 	wait_count(&ctx, &ctx.messages, 3U);
 	wait_count(&ctx, &ctx.finished, 3U);
 	wait_attempts(attempts_before + 2U);
@@ -388,6 +517,7 @@ int main(void)
 	assert(ctx.server_closed == CALL_COUNT);
 	pthread_mutex_unlock(&ctx.lock);
 
+cleanup:
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_rpc_endpoint_destroy(client_rpc) == TR_OK);
 	assert(tr_rpc_endpoint_destroy(server_rpc) == TR_OK);
@@ -398,5 +528,16 @@ int main(void)
 	assert(tr_buffer_pool_destroy(&rpc_pool) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
+
+}
+
+int main(void)
+{
+	run_case(0);
+	run_case(1);
+	run_case(2);
+	run_case(3);
+	run_case(4);
+	run_case(5);
 	return 0;
 }

@@ -7,6 +7,17 @@
 /* Channel 创建后所属 Reactor 不再变化，仅供内部 owner routing 使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
 
+/*
+ * 仅供 owner 处理上层生命周期失败：无需命令准入，同步退休当前 lane 的
+ * 精确 connection。回调内联执行；调用时不得持有 Channel 或上层协议锁。
+ */
+int tr_channel_abort_lane_on_owner(struct tr_channel *channel,
+                                  enum tr_lane lane, int status);
+
+/* 返回精确 Stream 代次的逻辑 lane，供 RPC 入站方法校验。 */
+int tr_stream_get_lane_internal(struct tr_stream_handle stream,
+                               enum tr_lane *out);
+
 /* Stream wire-id hash shared by the bounded Channel index and its tests. */
 static inline uint32_t tr_channel_stream_id_hash(uint32_t stream_id)
 {
