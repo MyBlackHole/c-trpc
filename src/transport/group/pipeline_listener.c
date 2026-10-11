@@ -31,6 +31,7 @@ struct tr_pipeline_listener_connection {
 	struct tr_pipeline_listener *listener;
 	struct tr_conn_handle handle;
 	struct tr_pipeline_route_preface route;
+	struct tr_deadline handshake_deadline;
 	uint32_t generation;
 	enum tr_pipeline_listener_connection_role role;
 	int used;
@@ -61,6 +62,8 @@ struct tr_pipeline_listener {
 	uint16_t bound_port;
 	int listener_registered;
 	int draining;
+	struct tr_reactor_timer_handle handshake_timer;
+	int handshake_timer_registered;
 
 	/*
 	 * Listener/Pipeline counters remain Reactor-owner only. This lock publishes
@@ -417,7 +420,6 @@ static int tr_pipeline_listener_accept_control(
 	listener->pipelines_current++;
 	if (listener->pipelines_current > listener->pipelines_peak)
 		listener->pipelines_peak = listener->pipelines_current;
-	listener->control_accepts++;
 	return TR_OK;
 }
 
@@ -443,8 +445,72 @@ static int tr_pipeline_listener_accept_data(
 
 	tracked->route = *route;
 	tracked->role = TR_PIPELINE_LISTENER_CONN_DATA;
-	listener->data_accepts++;
 	return TR_OK;
+}
+
+/* 单个 owner timer 扫描有界连接表；成功交接的 CONTROL/DATA 不再占租约。 */
+static uint64_t tr_pipeline_listener_handshake_timer_main(void *arg,
+							  uint64_t now_ns)
+{
+	struct tr_pipeline_listener *listener = arg;
+	uint64_t next = 0U;
+	uint32_t i;
+
+	for (i = 0; i < listener->config.connection_capacity; ++i) {
+		struct tr_pipeline_listener_connection *tracked =
+			&listener->connections[i];
+		uint64_t deadline;
+		int ret;
+
+		if (!tracked->used ||
+		    tracked->role != TR_PIPELINE_LISTENER_CONN_PENDING)
+			continue;
+		deadline = tr_deadline_to_ns(&tracked->handshake_deadline);
+		if (deadline <= now_ns) {
+			ret = tr_reactor_abort_on_owner(tracked->handle,
+							TR_ERR_TIMEOUT);
+			if (ret == TR_OK || ret == TR_ERR_STALE) {
+				listener->route_rejections++;
+				tr_pipeline_listener_connection_clear(tracked);
+				continue;
+			}
+			deadline = now_ns == UINT64_MAX ? now_ns : now_ns + 1U;
+		}
+		if (next == 0U || deadline < next)
+			next = deadline;
+	}
+	return next;
+}
+
+static int tr_pipeline_listener_arm_handshake_on_owner(
+	struct tr_pipeline_listener *listener)
+{
+	uint64_t next = 0U;
+	uint32_t i;
+	int ret;
+
+	if (!listener->handshake_timer_registered) {
+		ret = tr_reactor_timer_register(
+			listener->config.owner,
+			tr_pipeline_listener_handshake_timer_main, listener,
+			&listener->handshake_timer);
+		if (ret != TR_OK)
+			return ret;
+		listener->handshake_timer_registered = 1;
+	}
+	for (i = 0; i < listener->config.connection_capacity; ++i) {
+		struct tr_pipeline_listener_connection *tracked =
+			&listener->connections[i];
+		uint64_t deadline;
+
+		if (!tracked->used ||
+		    tracked->role != TR_PIPELINE_LISTENER_CONN_PENDING)
+			continue;
+		deadline = tr_deadline_to_ns(&tracked->handshake_deadline);
+		if (next == 0U || deadline < next)
+			next = deadline;
+	}
+	return tr_reactor_timer_arm(listener->handshake_timer, next);
 }
 
 static int tr_pipeline_listener_preface_feed(
@@ -470,6 +536,18 @@ static int tr_pipeline_listener_preface_feed(
 	if (!tracked)
 		return TR_ERR_STALE;
 
+	{
+		int expired;
+
+		/* 即使同一轮先分发 RX，过期的最后一个字节也不能完成交接。 */
+		ret = tr_deadline_expired(&tracked->handshake_deadline,
+					  &expired);
+		if (ret != TR_OK || expired) {
+			if (ret == TR_OK)
+				ret = TR_ERR_TIMEOUT;
+			goto reject;
+		}
+	}
 	memset(&route, 0, sizeof(route));
 	ret = tr_pipeline_route_parser_feed(
 		&preface->parser, data, len, &consumed, &route, &ready);
@@ -497,7 +575,27 @@ static int tr_pipeline_listener_preface_feed(
 		goto reject;
 	}
 
+	/*
+	 * 协议 handler 已拥有连接的终止清理。即使下面的最终期限检查失败，
+	 * preface_release 也不能先清空 tracked，否则 DATA/CONTROL 的关闭回调
+	 * 会失去精确路由与会话所有权。返回错误后由 Reactor 统一关闭连接。
+	 */
 	preface->handed_off = 1;
+	{
+		int expired;
+
+		ret = tr_deadline_expired(&tracked->handshake_deadline,
+		                          &expired);
+		if (ret != TR_OK || expired) {
+			if (ret == TR_OK)
+				ret = TR_ERR_TIMEOUT;
+			goto reject;
+		}
+	}
+	if (route.role == TR_PIPELINE_ROUTE_CONTROL)
+		listener->control_accepts++;
+	else
+		listener->data_accepts++;
 	*done = 1;
 	return TR_OK;
 
@@ -538,6 +636,15 @@ static int tr_pipeline_listener_adopt_fd(
 	if (!tracked)
 		return TR_AGAIN;
 
+	ret = tr_deadline_init_ms(&tracked->handshake_deadline,
+				  listener->config.handshake_timeout_ms);
+	if (ret == TR_OK)
+		ret = tr_pipeline_listener_arm_handshake_on_owner(listener);
+	if (ret != TR_OK) {
+		/* fd 尚未交给 Reactor；调用者关闭它，不能留下无到期唤醒的槽位。 */
+		tr_pipeline_listener_connection_clear(tracked);
+		return ret;
+	}
 	preface = (struct tr_pipeline_listener_preface *)calloc(
 		1, sizeof(*preface));
 	if (!preface) {
@@ -623,6 +730,8 @@ int tr_pipeline_listener_create(
 	listener->listen_fd = -1;
 	listener->retained_listen_fd = -1;
 	listener->config = *config;
+	if (listener->config.handshake_timeout_ms == 0U)
+		listener->config.handshake_timeout_ms = 10000U;
 
 	if (pthread_mutex_init(&listener->drain_wait_lock, NULL) != 0) {
 		ret = TR_ERR_SYS;
@@ -1058,6 +1167,13 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 	if (ret != TR_OK)
 		return ret;
 
+	/* verify_destroy 已在 owner 上关闭准入；先解绑 timer 才能释放回调参数。 */
+	if (listener->handshake_timer_registered) {
+		ret = tr_reactor_timer_unregister(listener->handshake_timer);
+		if (ret != TR_OK)
+			return ret;
+		listener->handshake_timer_registered = 0;
+	}
 	if (listener->message_pool_ready) {
 		ret = tr_buffer_pool_destroy(&listener->message_pool);
 		if (ret != TR_OK)

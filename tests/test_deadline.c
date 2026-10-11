@@ -264,6 +264,30 @@ static void test_poll_error(void)
 	check_consumed();
 }
 
+static void test_reactor_nanoseconds(void)
+{
+	struct tr_deadline deadline;
+
+	set_now(0, 0);
+	assert(tr_deadline_init_ms(&deadline, 0U) == TR_OK);
+	assert(tr_deadline_to_ns(&deadline) == 0U);
+	assert(tr_deadline_init_ms(&deadline, UINT32_MAX) == TR_OK);
+	assert(tr_deadline_to_ns(&deadline) == (uint64_t)UINT32_MAX * 1000000U);
+	tr_deadline_init_infinite(&deadline);
+	assert(tr_deadline_to_ns(&deadline) == 0U);
+	set_now(-1, 0);
+	assert(tr_deadline_init_ms(&deadline, 1U) == TR_ERR_SYS);
+	if (sizeof(time_t) >= sizeof(int64_t)) {
+		set_now((time_t)(UINT64_MAX / UINT64_C(1000000000)),
+			999999999L);
+		assert(tr_deadline_init_ms(&deadline, 1U) == TR_OK);
+		assert(tr_deadline_to_ns(&deadline) == UINT64_MAX);
+		set_now((time_t)(UINT64_MAX / UINT64_C(1000000000) + 1U), 0);
+		assert(tr_deadline_init_ms(&deadline, 1U) == TR_OK);
+		assert(tr_deadline_to_ns(&deadline) == UINT64_MAX);
+	}
+}
+
 int main(void)
 {
 	test_zero_and_infinite();
@@ -272,6 +296,7 @@ int main(void)
 	test_large_timeouts();
 	test_saturation_and_failure();
 	test_poll_error();
+	test_reactor_nanoseconds();
 	puts("deadline tests passed");
 	return 0;
 }

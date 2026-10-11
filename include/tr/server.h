@@ -44,6 +44,13 @@ struct tr_server_config {
 
 	/* RPC Call-level owner interceptor；fn==NULL 表示禁用。 */
 	struct tr_rpc_interceptor interceptor;
+
+	/*
+	 * 入站 TCP 接受后完成 HELLO 或连接组 TRR1 前导的总期限。
+	 * 默认 10000ms；0 也采用默认值，不禁用资源回收。收到部分字节不续期。
+	 * 与仅在 Channel 就绪后运行的 keepalive 相互独立。
+	 */
+	uint32_t handshake_timeout_ms;
 };
 
 void tr_server_config_init(struct tr_server_config *config);

@@ -29,6 +29,8 @@ struct tr_pipeline_listener_config {
 	uint32_t data_capacity_per_pipeline;
 	uint32_t stream_affinity_capacity_per_pipeline;
 	uint32_t control_message_count;
+	/* TRR1 的绝对总期限；0 采用 10000ms 默认值，不随字节到达续期。 */
+	uint32_t handshake_timeout_ms;
 
 	/*
 	 * 必须提供的 CONTROL admission/fencing hook。
