@@ -75,6 +75,10 @@ int tr_reactor_in_owner_context(void)
 /* 每个外层循环一个实例，由所有分派入口共享。 */
 struct tr_reactor_turn {
 	struct tr_reactor_work left;
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	/* 缓存复制额度独立于网络字节，跨连接共享且每轮重置。 */
+	uint64_t scratch_bytes;
+#endif
 	uint64_t timer_lateness_ns;
 	uint64_t start_ns;
 	uint64_t poll_start_ns;
@@ -1404,7 +1408,24 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 	size_t budget = turn->left.rx_bytes < TR_IO_QUANTUM ?
 		(size_t)turn->left.rx_bytes : TR_IO_QUANTUM;
 
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	size_t scratch_budget = turn->scratch_bytes < TR_IO_QUANTUM
+	                                ? (size_t)turn->scratch_bytes
+	                                : TR_IO_QUANTUM;
+
+	while (connection->state == TR_CONN_ACTIVE &&
+	       !__atomic_load_n(&connection->rx_paused, __ATOMIC_RELAXED)) {
+		struct tr_parser *parser = &connection->parser;
+
+		if (parser->scratch_begin != parser->scratch_end) {
+			if (scratch_budget == 0)
+				break;
+		} else if (budget == 0) {
+			break;
+		}
+#else
 	while (budget != 0 && connection->state == TR_CONN_ACTIVE) {
+#endif
 		struct tr_frame frame;
 
 		if (connection->preface_remaining != 0U) {
@@ -1460,6 +1481,37 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 			return;
 		}
 
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+		if (parser->scratch_begin != parser->scratch_end) {
+			size_t available =
+			        parser->scratch_end - parser->scratch_begin;
+
+			if (writable > available)
+				writable = available;
+			if (writable > scratch_budget)
+				writable = scratch_budget;
+			memcpy(dst, parser->scratch + parser->scratch_begin,
+			       writable);
+			parser->scratch_begin += (uint32_t)writable;
+			if (parser->scratch_begin == parser->scratch_end) {
+				parser->scratch_begin = 0;
+				parser->scratch_end = 0;
+			}
+			scratch_budget -= writable;
+			turn->scratch_bytes -= writable;
+			n = (ssize_t)writable;
+			goto produced;
+		}
+		/* 大载荷只复制已有前缀；余下部分仍直收至最终缓冲区。 */
+		int read_ahead =
+		        parser->state == TR_PARSER_HEADER ||
+		        parser->header.payload_len <= TR_PARSER_READAHEAD_SMALL;
+
+		if (read_ahead) {
+			dst = parser->scratch;
+			writable = sizeof(parser->scratch);
+		}
+#endif
 		if (writable > budget)
 			writable = budget;
 
@@ -1469,10 +1521,19 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 						 (uint64_t)n, __ATOMIC_RELAXED);
 			__atomic_store_n(&connection->last_rx_activity_ns,
 					 tr_reactor_now_ns(), __ATOMIC_RELAXED);
+#ifndef TR_EXPERIMENTAL_BOUNDED_READAHEAD
 			tr_frame_init(&frame);
+#endif
 			budget -= (size_t)n;
 			turn->left.rx_bytes -= (uint64_t)n;
-
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+			if (read_ahead) {
+				parser->scratch_end = (uint32_t)n;
+				continue;
+			}
+		produced:
+			tr_frame_init(&frame);
+#endif
 			ret = tr_parser_produce(&connection->parser, (size_t)n,
 						&frame);
 			if (ret == TR_FRAME_READY) {
@@ -1720,14 +1781,20 @@ static void tr_process_resume_rx(struct tr_reactor *reactor,
 		return;
 	if (ret != TR_OK) {
 		tr_connection_close_internal(reactor, connection,
-					     TR_CONN_EVENT_ERROR, ret);
+		                             TR_CONN_EVENT_ERROR, ret);
 		return;
 	}
 
 	__atomic_store_n(&connection->rx_paused, 0, __ATOMIC_RELAXED);
 	if (tr_connection_update_interest(reactor, connection) != TR_OK)
 		tr_connection_close_internal(reactor, connection,
-					     TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+		                             TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	/* 内核可能已读空；余数恢复不能依赖新的 EPOLLIN。 */
+	else if (connection->parser.scratch_begin !=
+	         connection->parser.scratch_end)
+		tr_schedule_rx(reactor, connection);
+#endif
 }
 
 static void tr_process_close(struct tr_reactor *reactor,
@@ -2166,6 +2233,9 @@ static void *tr_reactor_thread_main(void *arg)
 
 	while (!reactor->stopping) {
 		struct tr_reactor_turn turn = { .left = reactor->stats.limits };
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+		turn.scratch_bytes = reactor->config.rx_budget_bytes;
+#endif
 		int commands_pending;
 
 		if (reactor->config.observability_flags & TR_OBSERVABILITY_TIMING)

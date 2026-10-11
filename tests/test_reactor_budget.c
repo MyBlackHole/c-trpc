@@ -43,6 +43,9 @@ struct test_ctx {
 	unsigned turn_timers;
 	unsigned turn_completions;
 	size_t turn_rx;
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	size_t turn_produced;
+#endif
 	size_t turn_tx;
 	uint64_t observed_rx;
 	uint64_t observed_tx;
@@ -86,6 +89,11 @@ static void check_turn(struct test_ctx *ctx)
 	ctx->checked_turns++;
 	ctx->turn_completions = 0;
 	ctx->turn_timers = 0;
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	/* 网络直收与缓存消费各有一个预算，不再把 produce 当成 recv。 */
+	assert(ctx->turn_produced <= 2U * ctx->byte_budget);
+	ctx->turn_produced = 0;
+#endif
 	ctx->turn_rx = 0;
 	ctx->turn_tx = 0;
 }
@@ -125,7 +133,17 @@ ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
 {
 	if (active && active->monitor)
 		assert(len <= active->byte_budget - active->turn_rx);
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	ssize_t n = __real_recv(fd, buffer, len, flags);
+
+	if (active && active->monitor && n > 0) {
+		active->turn_rx += (size_t)n;
+		active->observed_rx += (uint64_t)n;
+	}
+	return n;
+#else
 	return __real_recv(fd, buffer, len, flags);
+#endif
 }
 
 /* 此库边界接收精确的正 recv 结果。独立于 libc 或 Sanitizer 符号插入进行观察；
@@ -134,11 +152,16 @@ ssize_t __wrap_recv(int fd, void *buffer, size_t len, int flags)
 int __wrap_tr_parser_produce(struct tr_parser *parser, size_t produced,
 			     struct tr_frame *frame)
 {
+#ifdef TR_EXPERIMENTAL_BOUNDED_READAHEAD
+	if (active && active->monitor)
+		active->turn_produced += produced;
+#else
 	if (active && active->monitor) {
 		assert(produced <= active->byte_budget - active->turn_rx);
 		active->turn_rx += produced;
 		active->observed_rx += produced;
 	}
+#endif
 	if (active && produced != 0 && active->gate_first_rx && !active->first_rx_seen) {
 		active->first_rx_seen = 1;
 		assert(pthread_mutex_lock(&active->lock) == 0);
