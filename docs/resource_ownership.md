@@ -61,7 +61,7 @@ return TR_OK;
 3. 可行时把变量恢复为空状态；
 4. 清理函数自身不能偷偷取得新的所有权；
 5. 清理过程必须是语义上不可失败的，不能隐藏需要返回状态的生命周期屏障；
-6. `detach`、`unregister`、`join`、terminal `destroy` 等失败后必须保留 ownership
+6. `detach`、`unregister`、`join`、终局 `destroy` 等失败后必须保留所有权
    以便重试的操作，禁止放进 `void cleanup`。
 
 ## 4. 清理顺序
@@ -99,9 +99,9 @@ struct child *child TR_AUTO(child_cleanup) = NULL;
 - 新增初始化步骤后忘记修改某个 `goto fail_*` 路径。
 
 构造保护只能自动清理由当前词法作用域独占、且释放不会失败的本地资源。
-一旦对象地址已经发布给 Reactor handler、timer、worker 或其他异步 source，
-后续失败必须先通过显式、可返回状态的生命周期事务解除 publication，
-确认 source 已静默后，才能回到构造保护释放 storage。
+一旦对象地址已经发布给 Reactor 处理器、定时器、工作线程或其他异步事件源，
+后续失败必须先通过显式、可返回状态的生命周期事务解除发布状态，
+确认事件源已静默后，才能回到构造保护释放存储。
 
 推荐顺序：
 
@@ -110,22 +110,22 @@ struct child *child TR_AUTO(child_cleanup) = NULL;
     ->
 完成所有可失败预检
     ->
-单 owner / 单事务发布 callback source
+单所有者 / 单事务发布回调源
     ->
-后续失败在同一事务内收敛 publication
+后续失败在同一事务内收敛发布状态
     ->
 确认不可再触达对象
     ->
-词法 cleanup 释放本地 storage
+词法作用域清理释放本地存储
 ```
 
-如果可以通过“先预检、后提交”或调整 publication 顺序消除 rollback，
-应优先消除 rollback，而不是给 `void cleanup` 增加更多补偿逻辑。
+如果可以通过“先预检、后提交”或调整发布顺序消除回滚，
+应优先消除回滚，而不是给 `void cleanup` 增加更多补偿逻辑。
 
-对于 facade constructor，如果对象已经跨过可失败的 terminal lifecycle 边界，
-普通错误仍应尽量 rollback 到 `*out == NULL`。只有 rollback barrier 自身失败时，
-允许“错误返回 + 非空 `*out`”作为显式 ownership 逃生口；调用方此时不得继续
-业务操作，只能持有该 partial owner 并重复调用对应 `destroy()` 直到收敛。
+对于门面构造函数，如果对象已经跨过可失败的终局生命周期边界，
+普通错误仍应尽量回滚到 `*out == NULL`。只有回滚屏障自身失败时，
+允许“错误返回 + 非空 `*out`”作为显式交还所有权的出口；调用方此时不得继续
+业务操作，只能持有该部分构造对象的所有权并重复调用对应 `destroy()` 直到收敛。
 这比在 `void cleanup` 中吞掉错误或制造无主泄漏更安全。
 
 成功构造完成后，必须显式解除构造保护，把完整对象交给新的所有者。
@@ -137,9 +137,9 @@ struct child *child TR_AUTO(child_cleanup) = NULL;
 
 典型的安全场景是纯内存状态恢复、释放未发布 Buffer、关闭仍由当前作用域独占的 fd。
 
-一旦回滚包含 callback detach、timer unregister、线程 join、owner barrier 或
-terminal destroy，就必须改成显式返回状态的事务函数。失败时保留原 ownership /
-publication 以便重试，不能因为离开 C 作用域而强行继续释放对象。
+一旦回滚包含回调解除关联、定时器注销、等待线程退出、所有者屏障或
+终局销毁，就必须改成显式返回状态的事务函数。失败时保留原所有权 /
+发布状态以便重试，不能因为离开 C 作用域而强行继续释放对象。
 
 成功后必须显式解除回滚保护。
 
@@ -174,10 +174,12 @@ src = NULL;   /* 难以判断这是普通赋值还是所有权转移 */
 
 禁止先把指针发布给其他线程，再补 `get()`。
 
-### 7.1 Buffer Pool 终局所有权
+<a id="71-buffer-pool-终局所有权"></a>
 
-Buffer descriptor 可以通过 Reactor/RPC/应用回调跨异步边界。Pool destroy
-不能假设调用时所有 descriptor 已自动归还。
+### 7.1 Buffer 资源池终局所有权
+
+Buffer 描述符可以通过 Reactor/RPC/应用回调跨异步边界。资源池销毁
+不能假设调用时所有描述符已自动归还。
 
 终局顺序：
 
@@ -188,26 +190,26 @@ pool.closed = 1
       ->
 检查每个 descriptor.checked_out
       |
-      +-- 仍有 holder：TR_ERR_STATE，父对象保持存活
+      +-- 仍有持有者：TR_ERR_STATE，父对象保持存活
       |
-      +-- 全部归还：释放 pool storage
+      +-- 全部归还：释放资源池存储
 ```
 
-失败后的 Pool 继续允许已有 holder 调用 `tr_buffer_release()`，但拒绝新的
-`tr_buffer_acquire()`。holder 归还后由父对象重试 destroy。
+失败后的资源池继续允许已有持有者调用 `tr_buffer_release()`，但拒绝新的
+`tr_buffer_acquire()`。持有者归还后由父对象重试销毁。
 
-Reactor RX payload 可以通过 `TR_FRAME_TAKE_OWNERSHIP` 逃逸 callback，因此
-该 terminal barrier 必须向上传播：
+Reactor RX 载荷可以通过 `TR_FRAME_TAKE_OWNERSHIP` 保留到回调之外，因此
+该终局屏障必须向上传播：
 
 ```text
-retained RX payload
+保留的 RX 载荷
     -> Reactor rx_pool
     -> RuntimeShard
     -> Runtime
     -> Client/Server
 ```
 
-任何一层看到下层 destroy 失败，都不能继续 free 自己的 storage。
+任何一层看到下层销毁失败，都不能继续释放自己的存储。
 
 ## 8. 强引用计数
 
@@ -228,9 +230,11 @@ retained RX payload
 不要因为存在引用计数原语就给所有对象增加引用计数。
 能用唯一所有权或静默屏障解决时，应优先使用更简单的模型。
 
-## 8.1 Graceful shutdown 与 terminal destroy 分离
+<a id="81-graceful-shutdown-与-terminal-destroy-分离"></a>
 
-Facade 不再把 graceful policy 隐藏在 destroy 中。
+## 8.1 优雅关闭与终局销毁分离
+
+门面不再把优雅关闭策略隐藏在销毁中。
 
 ```text
 需要优雅关闭：
@@ -242,15 +246,15 @@ Facade 不再把 graceful policy 隐藏在 destroy 中。
     destroy()
 ```
 
-`tr_client_destroy()` / `tr_server_destroy()` 只负责 terminal ownership
+`tr_client_destroy()` / `tr_server_destroy()` 只负责终局所有权
 收敛，不选择 1 秒或其他魔法超时，也不替调用方决定是否等待业务 Stream。
 
-所有 terminal destroy 返回状态：
+所有终局销毁返回状态：
 
-- `TR_OK`：对象 storage 已释放，旧指针失效；
-- 非 `TR_OK`：对象仍由调用方拥有，可能已经关闭部分 admission/source，
-  调用方解决 outstanding holder/waiter 后重试；
-- execution owner / worker callback 中调用同步 destroy 返回
+- `TR_OK`：对象存储已释放，旧指针失效；
+- 非 `TR_OK`：对象仍由调用方拥有，可能已经关闭部分准入/事件源，
+  调用方解决尚未退出的持有者/等待者后重试；
+- 执行所有者/工作线程回调中调用同步销毁返回
   `TR_ERR_STATE`，不会静默失败。
 
 因此调用方不得写：
@@ -301,25 +305,25 @@ RPC 工作线程完成；从被等待的执行上下文内同步销毁会形成�
 底层生命周期同样遵守失败即关闭原则：`tr_reactor_stop()` 在所有者上下文返回
 `TR_ERR_STATE`，而 Reactor/Runtime 销毁如果无法完成停止，不得继续释放内存。
 
-同样的约束适用于**同步 lifecycle wait**，不仅是 destroy。任何需要等待
-Reactor/RPC executor 继续推进才能满足的条件，都不能从对应 execution context
+同样的约束适用于**同步生命周期等待**，不仅是销毁。任何需要等待
+Reactor/RPC 执行器继续推进才能满足的条件，都不能从对应执行上下文
 内部等待：
 
 ```text
-callback / handler
-    -> begin_drain / publish shutdown intent
-    -> return
+回调 / 处理器
+    -> begin_drain / 发布关闭意图
+    -> 返回
 
-external control thread
+外部控制线程
     -> wait_ready / wait_drained / server_drain
     -> destroy
 ```
 
-当前 facade 对 Reactor owner callback、interceptor 和 RPC worker callback
-执行阻塞 wait 时返回 `TR_ERR_STATE`。其中 `tr_server_drain()` 必须在
-停止 listener/peer admission 之前完成该 context 检查，避免“报错但已经部分
-进入 drain”的半状态。Transport 层 `tr_channel_wait_drained()` 也直接拒绝
-Reactor owner context，使该规则不会依赖 facade 调用者自觉遵守。
+当前门面对 Reactor 所有者回调、拦截器和 RPC 工作线程回调
+执行阻塞等待时返回 `TR_ERR_STATE`。其中 `tr_server_drain()` 必须在
+停止监听器/对端准入之前完成该上下文检查，避免“报错但已经部分
+进入排空”的半状态。传输层 `tr_channel_wait_drained()` 也直接拒绝
+Reactor 所有者上下文，使该规则不会依赖门面调用者自觉遵守。
 
 Client/直接所有者使用同步销毁时，Endpoint 只是借用 Channel，因此函数
 返回后必须允许调用方立即安全销毁 Channel：
@@ -345,25 +349,25 @@ refs == 0 -> 释放 Endpoint
 
 这里允许等待，因为 API 契约明确要求“销毁函数返回即完全释放”。
 
-Endpoint teardown 是事务式 lifetime barrier，不是 best effort：
+Endpoint 拆除是事务式生命周期屏障，不是尽力而为的清理：
 
-- Channel handler detach 失败：旧 callback_arg 仍可能引用 Endpoint，禁止 free；
-- deadline timer unregister 失败：timer source 仍可能引用 Endpoint，禁止 free；
-- Server detached 模式只有在 handler/timer 全部静默、executor admission 关闭后，
+- Channel 处理器解除关联失败：旧 callback_arg 仍可能引用 Endpoint，禁止释放；
+- 截止时间定时器注销失败：定时器事件源仍可能引用 Endpoint，禁止释放；
+- 服务端已解除关联模式只有在处理器/定时器全部静默、执行器准入关闭后，
   才发布 `teardown_detached=1`；
-- Endpoint 构造不再让 `TR_AUTO` cleanup 承担 callback/timer/worker teardown：
-  本地 soft-state 先完成，deadline timer + Channel handler 在同一 Reactor owner
-  transaction 中发布；transaction 失败必须在返回前自行收敛；
-- standalone worker 只有在 Endpoint ownership 已经先转移到 `*out` 后才启动。
-  worker startup 失败时会立即尝试 terminal rollback；如果 rollback join 自身失败，
-  `*out` 保留 partial Endpoint ownership，调用方继续 `destroy()` 重试，禁止形成
+- Endpoint 构造不再让 `TR_AUTO` 清理承担回调/定时器/工作线程拆除：
+  本地临时状态先完成，截止时间定时器 + Channel 处理器在同一 Reactor 所有者
+  事务中发布；事务失败必须在返回前自行收敛；
+- 独立工作线程只有在 Endpoint 所有权已经先转移到 `*out` 后才启动。
+  工作线程启动失败时会立即尝试终局回滚；如果回滚时等待线程退出自身失败，
+  `*out` 保留部分构造 Endpoint 的所有权，调用方继续 `destroy()` 重试，禁止形成
   无主泄漏；
-- shard executor group 同样只在 Runtime 已经归调用方所有之后由
-  `runtime_start()` 启动，`runtime_stop()` 负责可重试 join barrier。
+- 分片执行器组同样只在 Runtime 已经归调用方所有之后由
+  `runtime_start()` 启动，`runtime_stop()` 负责可重试的线程退出等待屏障。
 
-Client connect 失败回滚同样使用同步 owner close。物理 Connection 只有在
-owner 确认 close/stale 后，才允许解绑 RPC/Channel 并清空 Client handle；
-否则保持现有 ownership 以便重试。
+客户端连接失败回滚同样使用同步所有者关闭操作。物理 Connection 只有在
+所有者确认关闭或句柄已失效后，才允许解绑 RPC/Channel 并清空 Client 句柄；
+否则保持现有所有权以便重试。
 
 客户端门面还额外保证销毁顺序：
 
@@ -480,7 +484,7 @@ Pipeline 注册表只保存所有者本地索引，不拥有 Pipeline 生命周�
 data_reserved == 0
 data_attached == 0
 stream_affinity == 0
-control unbound
+control 已解除绑定
    ->
 从注册表注销
    ->
@@ -539,7 +543,7 @@ struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
 if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
     return TR_ERR_SYS;
 
-/* 任意 return 都会自动 unlock */
+/* 任意 return 都会自动解锁 */
 ```
 
 需要提前解锁时调用 `tr_mutex_guard_unlock()`；

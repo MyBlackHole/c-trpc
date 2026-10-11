@@ -266,9 +266,9 @@ c-trpc 核心阶段目标。
 - SDK 头文件从通配发布改为显式白名单；
 - CI 精确校验安装头文件集合；
 - 外部安装后消费程序只使用稳定 `tr/trpc.h` 门面；
-- `rpc.h` 已经分离应用 Method/Call/Streaming 契约与内部 Endpoint 引擎；
+- `rpc.h` 已经分离应用 Method/Call/流式调用契约与内部 Endpoint 引擎；
 - 已解除 `rpc.h -> channel.h -> reactor.h` 的公开依赖；
-- buffer/channel/reactor/frame/wire 以及 queue/parser/socket/wire codec 辅助接口均退出安装 SDK；
+- buffer/channel/reactor/frame/wire 以及 queue/parser/socket/wire 编解码辅助接口均退出安装 SDK；
 - 详细 Reactor/Channel/Endpoint 诊断已经移入内部诊断接口；
 - 保留的 RPC 消息使用固定不透明释放令牌，没有增加分配/复制；
 - `tr_rpc_call_handle` 已经改为 16 字节不透明能力，不再公开 Endpoint 指针 + 槽位/代次，陈旧代次隔离语义保持不变；

@@ -12,12 +12,12 @@
 
 真实路径为：
 独立 Client 进程 → IPv4 TCP → Channel → RPC 工作线程 → 一元响应 → Client 结果回调。
-方法 1 是 CONTROL 通道的小型一元 Echo，
-方法 2 是 BULK 通道的大型一元 Echo；
+方法 1 是 CONTROL 通道的小型一元回显，
+方法 2 是 BULK 通道的大型一元回显；
 二者共享同一个门面 TCP 连接。
 BULK 不是原始 TCP 测试，也不是长期流式调用 / `send_buffer()` 零复制吞吐测试。
 默认大消息 64 KiB、帧上限 16 KiB，
-真实执行 RPC 信封、分帧、CRC 和接收重组。
+真实执行 RPC 消息封装、分帧、CRC 和接收重组。
 请求前 8 字节携带序号，
 成功响应必须与请求长度、所有字节完全一致。
 
@@ -101,7 +101,7 @@ Server 使用 2 个共享业务工作线程；
   对应样本数为零时数值为 0，只是占位，不表示零延迟。
 - **速率**：`ok_rps` 只计算经过内容验证的成功响应。
   `payload_MiB_s` 计算成功请求 + 成功响应的应用字节总和，
-  即 Echo 情况为 2×载荷；
+  即回显情况为 2×载荷；
   不是单向链路线速，不包含帧/RPC/TCP 头、ACK、重传，
   也不是备份落盘速度。
 - **失败**：`submit_again`、其他提交错误、RPC 截止时间/错误、内容错误分开计数。
@@ -319,61 +319,61 @@ GCC `release` CI 任务使用正常运行时 CRC 分派记录一份完整矩阵�
 速率：                  10k / 20k / 40k RPS
 
 baseline:
-  RX buffers:           基准推导值（capacity=128 时为 272）
-  executor queue:       64
+  RX 缓冲区：           基准推导值（capacity=128 时为 272）
+  执行器队列：          64
 
 rx_headroom:
-  RX buffers:           1024
-  executor queue:       64
+  RX 缓冲区：           1024
+  执行器队列：          64
 
 rx_executor_headroom:
-  RX buffers:           1024
-  executor queue:       256
-  CONTROL TX items:     基准默认值（128）
+  RX 缓冲区：           1024
+  执行器队列：          256
+  CONTROL TX 项：       基准默认值（128）
 
 rx_executor_control_headroom:
-  RX buffers:           1024
-  executor queue:       256
-  CONTROL TX items:     2048
+  RX 缓冲区：           1024
+  执行器队列：          256
+  CONTROL TX 项：       2048
 
 full_headroom:
-  RX buffers:           4096
-  executor queue:       256
-  CONTROL TX items:     2048
-  command queue:        基准默认值（1024）
+  RX 缓冲区：           4096
+  执行器队列：          256
+  CONTROL TX 项：       2048
+  命令队列：            基准默认值（1024）
 
 rx_ceiling_headroom:
-  RX buffers:           8192
-  executor queue:       256
-  CONTROL TX items:     2048
-  command queue:        基准默认值（1024）
+  RX 缓冲区：           8192
+  执行器队列：          256
+  CONTROL TX 项：       2048
+  命令队列：            基准默认值（1024）
 
 command_headroom:
-  RX buffers:           8192
-  executor queue:       256
-  CONTROL TX items:     2048
-  command queue:        4096
+  RX 缓冲区：           8192
+  执行器队列：          256
+  CONTROL TX 项：       2048
+  命令队列：            4096
 
 control_ceiling_headroom:
-  RX buffers:           8192
-  executor queue:       256
-  CONTROL TX items:     8192
-  command queue:        4096
+  RX 缓冲区：           8192
+  执行器队列：          256
+  CONTROL TX 项：       8192
+  命令队列：            4096
 
 executor_ceiling_headroom:
-  RX buffers:           8192
-  executor queue:       1024
-  CONTROL TX items:     8192
-  command queue:        4096
+  RX 缓冲区：           8192
+  执行器队列：          1024
+  CONTROL TX 项：       8192
+  命令队列：            4096
 
 command_ceiling_headroom:
-  RX buffers:           8192
-  executor queue:       1024
-  CONTROL TX items:     8192
-  command queue:        16384
+  RX 缓冲区：           8192
+  执行器队列：          1024
+  CONTROL TX 项：       8192
+  命令队列：            16384
 
-RPC message pool:       各阶段保持不变
-reassembly pool:        各阶段保持不变
+RPC 消息资源池：        各阶段保持不变
+重组资源池：            各阶段保持不变
 ```
 
 ```sh
@@ -534,10 +534,10 @@ Reactor 忙碌比例约 0.267--0.289。
 发生器总槽位：          所有场景均为 1024
 每发生器槽位：          256 / 128 / 64 / 32
 发生器工作线程：        1
-RX buffers:             8192
-executor queue:         1024
-CONTROL TX items:       8192
-command queue:          16384
+RX 缓冲区：             8192
+执行器队列：            1024
+CONTROL TX 项：         8192
+命令队列：              16384
 ```
 
 发生器窗口和容量都使用同一个每发生器槽位数。
@@ -623,10 +623,10 @@ PR #49 把发生器总容量固定为 1024 槽位，
 发生器总槽位：          1024 / 2048 / 4096 / 8192
 每发生器槽位：          32 / 64 / 128 / 256
 发生器工作线程：        1
-RX buffers:             8192
-executor queue:         1024
-CONTROL TX items:       8192
-command queue:          16384
+RX 缓冲区：             8192
+执行器队列：            1024
+CONTROL TX 项：         8192
+命令队列：              16384
 ```
 
 两次试验以相反顺序运行不同槽位容量。

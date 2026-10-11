@@ -45,39 +45,41 @@ accepting = false
 这样可以保证 `STOP` 之后不会再出现“命令/完成事件已经取得资源所有权，
 但所有者已经退出”的悬空工作。
 
-### Reactor 运行 epoch
+<a id="reactor-运行-epoch"></a>
 
-`stop()` 不是 Reactor storage 的销毁操作。同一个 Reactor 在成功 stop 后允许
-再次 `start()`，因此每次 start/stop 都必须形成独立的运行 epoch：
+### Reactor 运行轮次
+
+`stop()` 不是 Reactor 存储的销毁操作。同一个 Reactor 在成功停止后允许
+再次 `start()`，因此每次启动/停止都必须形成独立的运行轮次：
 
 ```text
 CREATED / STOPPED
   accepting = 0
-  no owner thread
+  没有所有者线程
         |
-        | start() under ctl_lock
+        | 在 ctl_lock 下执行 start()
         v
   stopping = 0
-  create owner pthread
-  owner waits on ctl_lock startup gate
-  reopen completion admission generation
-  reopen command-wait generation
+  创建所有者 pthread
+  所有者等待 ctl_lock 启动门禁
+  重新开放完成事件准入代次
+  重新开放命令等待代次
   started = 1
   accepting = 1
         |
-        | unlock ctl_lock
+        | 解锁 ctl_lock
         v
 RUNNING
         |
         | stop()
         v
   accepting = 0
-  close completion admission + advance generation
-  close command waiter admission + advance generation
-  enqueue STOP after all previously admitted commands
-  owner drains accepted completions
-  owner closes live connections
-  join owner
+  关闭完成事件准入 + 推进代次
+  关闭命令等待者准入 + 推进代次
+  在此前所有已准入命令之后加入 STOP
+  所有者排空已接受的完成事件
+  所有者关闭存活连接
+  等待所有者线程退出
   started = 0
         v
 STOPPED
@@ -85,19 +87,19 @@ STOPPED
 
 关键不变量：
 
-- `create()` 本身不开放 producer admission；
-- restart 的新 owner thread 在 `start()` 完整发布新 epoch 前不能 dispatch
-  已保留的 timer/listener/aux source；
-- completion producer 不取得 `ctl_lock`；一次 handoff 开始时先在
-  completion queue 锁下取得明确的 admission generation，并把同一 generation
-  带到最终 `push_wait`，因此即使 producer 在入队前跨越完整 stop/restart，
-  也不能重新认领新 epoch；
-- command/completion queue 的 generation 每轮重新开放，旧 epoch waiter 或
-  延迟 producer 即使在 restart 后才继续执行，也只能返回 `TR_ERR_CLOSED`；
-- stop 会回收所有 live Connection，旧 `tr_conn_handle` 不跨 epoch 存活；
-- timer/listener/aux registration 属于 Reactor 对象，而不是某个运行 epoch；
-  未显式 unregister 的 source 会保留到下一轮 start，并且只能在 startup gate
-  之后恢复 dispatch。
+- `create()` 本身不开放生产者准入；
+- 重新启动的新所有者线程在 `start()` 完整发布新运行轮次前不能分发
+  已保留的定时器/监听器/辅助事件源；
+- 完成事件生产者不取得 `ctl_lock`；一次移交开始时先在
+  完成队列锁下取得明确的准入代次，并把同一代次
+  带到最终 `push_wait`，因此即使生产者在入队前跨越完整的停止/重新启动过程，
+  也不能重新认领新运行轮次；
+- 命令/完成队列的代次每轮重新开放，旧运行轮次等待者或
+  延迟生产者即使在重新启动后才继续执行，也只能返回 `TR_ERR_CLOSED`；
+- 停止会回收所有存活的 Connection，旧 `tr_conn_handle` 不跨运行轮次存活；
+- 定时器/监听器/辅助事件源注册属于 Reactor 对象，而不是某个运行轮次；
+  未显式注销的事件源会保留到下一轮启动，并且只能在启动门禁
+  之后恢复分发。
 
 ### 命令队列/完成队列锁
 
@@ -113,19 +115,19 @@ STOPPED
 
 完成队列与命令队列相互独立，工作线程完成事件不会占用控制命令容量。
 
-completion handoff 与 command wait 一样绑定明确的 epoch token：
+完成事件移交与命令等待一样绑定明确的运行轮次令牌：
 
 ```text
-producer
-  -> snapshot completion admission_generation
-  -> work may block / be preempted
+生产者
+  -> 获取完成事件 admission_generation 快照
+  -> 工作可能阻塞 / 被抢占
   -> push_wait(expected_generation)
-       current generation changed -> CLOSED
-       same generation           -> enqueue
+       当前代次已变化 -> CLOSED
+       代次相同                   -> 入队
 ```
 
-generation 必须在 handoff 开始时取得，不能等到真正进入 `push_wait()` 后才
-读取“当前 generation”；否则一个旧 producer 可以在 stop/restart 后误投到新 epoch。
+代次必须在移交开始时取得，不能等到真正进入 `push_wait()` 后才
+读取“当前代次”；否则一个旧生产者可以在停止/重新启动后误投到新运行轮次。
 
 两类队列的满载策略不同，但都不使用 `sched_yield()`：
 
@@ -146,27 +148,27 @@ generation 必须在 handoff 开始时取得，不能等到真正进入 `push_wa
 每所有者/每线程缓存，而不是先改变所有权模型。
 
 GOAWAY 是例外的终局生命周期控制帧，不再与普通 `control_tx_pool` 竞争。
-每个物理 Connection 内嵌一个 header-only `lifecycle_tx` slot：
+每个物理 Connection 内嵌一个仅含帧头的 `lifecycle_tx` 槽位：
 
 ```text
 普通 CONTROL
     -> control_tx_pool
-    -> command ring
-    -> connection TX FIFO
+    -> 命令环
+    -> Connection TX FIFO
 
 GOAWAY
     -> connection.lifecycle_tx
-    -> 等待 barrier 前 command sequence 全部处理
-    -> connection TX FIFO
+    -> 等待屏障前的命令序列全部处理
+    -> Connection TX FIFO
 ```
 
-GOAWAY 不占普通 TX pool，也不占新的 command ring slot，但不能越过 barrier 前
-已经成功提交的 command。Command queue 在现有锁下为每个入队 command 分配单调
-sequence；Channel drain 记录当前 FIFO frontier，Reactor 只在
+GOAWAY 不占普通 TX 资源池，也不占新的命令环槽位，但不能越过屏障前
+已经成功提交的命令。命令队列在现有锁下为每个入队命令分配单调
+序列；Channel 排空操作记录当前 FIFO 边界，Reactor 只在
 `last_processed_sequence >= lifecycle_after_sequence` 时把内嵌 GOAWAY
-挂到 TX tail。这样 terminal reserve 不会把 shutdown 资源竞争转化成 FIFO 破坏。
+挂到 TX 队尾。这样终局预留不会把关闭资源竞争转化成 FIFO 破坏。
 
-平时没有 pending lifecycle TX 时，Reactor 不扫描 Connection；只有
+平时没有待处理的生命周期 TX 时，Reactor 不扫描 Connection；只有
 `lifecycle_tx_pending_count != 0` 才执行冷路径扫描。
 
 ### Connection 可变状态
@@ -198,25 +200,27 @@ RPC 截止时间、Channel 保活已经使用 Reactor 本地有界定时器队�
 截止时间/保活/重连线程。客户端自动重连的退避与连接超时分别由
 Reactor 本地定时器和共享非阻塞连接器驱动。
 
-## 2.1 Connector callback source ownership
+<a id="21-connector-callback-source-ownership"></a>
 
-Connector 的可变 attempt 状态仍由 Reactor owner 单写，但它同时持有两类
-异步 callback source：
+## 2.1 Connector 回调源所有权
 
-- aux fd source（EPOLLOUT）；
-- connector timeout timer。
+Connector 的可变连接尝试状态仍由 Reactor 所有者单写，但它同时持有两类
+异步回调源：
 
-因此 `watched` / `timer_registered` 不是普通布尔缓存，而是 callback
-ownership publication。状态清除必须发生在 source detach barrier 之后：
+- 辅助 fd 事件源（EPOLLOUT）；
+- 连接器超时定时器。
+
+因此 `watched` / `timer_registered` 不是普通布尔缓存，而是回调
+所有权发布。状态清除必须发生在事件源解除关联屏障之后：
 
 ```text
-aux/timer source published
+辅助 fd/定时器事件源已发布
         ->
 unregister/disarm
         ->
-TR_OK 或 STALE（已确认 source 不存在）
+TR_OK 或 STALE（已确认事件源不存在）
         ->
-clear watched / timer_registered
+清除 watched / timer_registered
 ```
 
 禁止：
@@ -226,26 +230,26 @@ watched = 0
         ->
 尝试 unregister
         ->
-失败后 free Connector
+失败后释放 Connector
 ```
 
-Connector completion 也必须先完成 source detach，再把 fd/status 发布给上层
-callback。completion callback 允许同步销毁 Connector，因此 callback 返回后
+Connector 完成处理也必须先完成事件源解除关联，再把 fd/状态发布给上层
+回调。完成回调允许同步销毁 Connector，因此回调返回后
 Connector 栈帧不得再次解引用 Connector。
 
 父对象遵守相同的两阶段提交：
 
 ```text
-disable reconnect / stop DATA
+禁用重连 / 停止 DATA
         ->
-teardown Connector/Timer
+拆除 Connector/定时器
         ->
 成功后
         ->
-clear parent connector pointer / slot / reservation
+清除父对象中的连接器指针 / 槽位 / 预留
 ```
 
-任何 teardown barrier 失败都保留精确的 owner handle/pointer，使 terminal
+任何拆除屏障失败都保留精确的所有者句柄/指针，使终局
 操作可以重试；不能通过先清本地状态来“伪造已解绑”。
 
 ## 3. Buffer 资源池
@@ -257,25 +261,25 @@ clear parent connector pointer / slot / reservation
 通用 Buffer 资源池中的缓冲区可以跨 Reactor、工作线程和应用回调转移所有权，
 因此空闲链表是真共享状态。
 
-Pool 还承担终局生命周期门禁：
+资源池还承担终局生命周期门禁：
 
 ```text
 OPEN
   -> acquire: descriptor.checked_out = 1
   -> destroy:
        closed = 1
-       outstanding != 0 -> TR_ERR_STATE，保留 storage/lock
+       outstanding != 0 -> TR_ERR_STATE，保留存储/锁
        outstanding == 0 -> DEAD
 CLOSED
   -> 新 acquire: TR_ERR_CLOSED
-  -> 已有 holder release: 允许
-  -> retry destroy
+  -> 已有持有者 release: 允许
+  -> 重试 destroy
 ```
 
-每个 descriptor 的 `checked_out` 位是 destroy 证明的一部分；仅依赖
-`free_count == capacity` 不足以抵御 double-release 伪造空闲计数。
-destroy 仍要求终局调用方先停止新的 API entrant；`closed` 解决的是已经持有
-descriptor 的异步所有权收敛，不替代父对象的 external lifetime contract。
+每个描述符的 `checked_out` 位是销毁条件验证的一部分；仅依赖
+`free_count == capacity` 不足以抵御重复释放伪造空闲计数。
+销毁仍要求终局调用方先阻止新的 API 调用进入；`closed` 解决的是已经持有
+描述符的异步所有权收敛，不替代父对象的外部生命周期契约。
 
 如果未来某个资源池被证明严格属于一个分片/所有者，可以新增所有者本地快速资源池，
 不能直接改变通用资源池的同步契约。
@@ -286,56 +290,56 @@ descriptor 的异步所有权收敛，不替代父对象的 external lifetime co
 
 **结论：当前保留，职责已经开始拆分。**
 
-Channel drain 使用单调 admission barrier。进入 `local_draining` 后：
+Channel 排空使用单调准入屏障。进入 `local_draining` 后：
 
 - 本地 `tr_stream_open()` 不再分配 Stream；
-- 在 peer 收到 GOAWAY 前已发出、但 barrier 之后才到达的
+- 在对端收到 GOAWAY 前已发出、但屏障之后才到达的
   `STREAM_OPEN` 不再创建本地 Stream，而是直接以 `STREAM_CLOSE` 拒绝；
-- 该拒绝的 reciprocal peer-local `STREAM_CLOSE` 在 drain 期间作为尾包吸收；
-- 因而 `active_streams` 在 barrier 后只减不增，`DRAINED` 是终态而不是
+- 对端本地针对该拒绝回应的 `STREAM_CLOSE` 在排空期间作为尾包吸收；
+- 因而 `active_streams` 在屏障后只减不增，`DRAINED` 是终态而不是
   一个可能被延迟 OPEN 推翻的瞬时快照。
 
 Channel 的阻塞状态观察统一使用 `channel->lock + state_cond`。
-同一个 waitqueue 可以服务多个 predicate，但每个 waiter 必须在循环中重新检查
+同一个等待队列可以服务多个判断条件，但每个等待者必须在循环中重新检查
 自己的条件：
 
-- `wait_ready(lane)`：对应 lane 的 `*_ready == 1`；
+- `wait_ready(lane)`：对应通道的 `*_ready == 1`；
 - `wait_drained()`：`active_streams == 0`。
 
-状态 waitqueue 不是协议 owner。ready/drained waiter 都不发送帧、不推进握手、
-重连或排空状态；owner 只在真实状态边沿 broadcast。这样避免为每个 predicate
-增加一套 condvar/teardown accounting。
+状态等待队列不是协议所有者。就绪/排空等待者都不发送帧、不推进握手、
+重连或排空状态；所有者只在真实状态边沿广播唤醒。这样避免为每个判断条件
+增加一套条件变量/拆除记账。
 
-`wait_drained` 使用 `channel->lock + state_cond` 作为 waitqueue-like
+`wait_drained` 使用 `channel->lock + state_cond` 作为类似等待队列的
 同步原语：
 
-- predicate 只有 `active_streams == 0`；
-- 最后一个 active Stream 释放时 broadcast；
-- waiter 只等待状态，不发送帧、不重试 GOAWAY、不修改协议状态；
-- 正常等待直接睡到状态变化或总 deadline，不再每 1 ms 轮询 Stream 数。
+- 判断条件只有 `active_streams == 0`；
+- 最后一个活跃 Stream 释放时广播唤醒；
+- 等待者只等待状态，不发送帧、不重试 GOAWAY、不修改协议状态；
+- 正常等待直接睡到状态变化或总截止时间，不再每 1 ms 轮询 Stream 数。
 
-GOAWAY admission 属于 `begin_drain()` 的 Reactor-owner 协议动作。
-它使用 Connection 内嵌 lifecycle TX slot，并以 command sequence barrier 保留
-drain 线性化点之前已经成功提交的命令顺序，因此不再向 facade 暴露普通
-CONTROL TX pool / command ring 的 `TR_AGAIN`。Server one-shot drain 在
-peer table 经过 listener/peer-event owner barrier 冻结后只需发布一次
+GOAWAY 准入属于 `begin_drain()` 的 Reactor 所有者协议动作。
+它使用 Connection 内嵌生命周期 TX 槽位，并以命令序列屏障保留
+排空线性化点之前已经成功提交的命令顺序，因此不再向门面暴露普通
+CONTROL TX 资源池/命令环的 `TR_AGAIN`。服务端一次性排空在
+对端表经过监听器/对端事件所有者屏障冻结后只需发布一次
 `begin_drain()`，随后进入纯 `wait_drained()`。
 
-条件变量使用 `CLOCK_MONOTONIC`，与原先 drain timeout 的时钟语义一致。
-Channel destroy 与 waiter 不是并发安全组合。Channel 用
-`state_wait_closed + state_waiters` 显式管理 waiter admission/ownership：
-waiter 在同一把 lock 下登记后才能睡眠；destroy 先关闭新的 waiter admission，
-若已有 waiter 尚未退出则 fail-closed，不开始 callback/timer/storage teardown。
-只有 waiter 计数归零后才销毁 condvar/Stream/Pool/mutex。
+条件变量使用 `CLOCK_MONOTONIC`，与原先排空超时的时钟语义一致。
+Channel 销毁与等待操作不是并发安全组合。Channel 用
+`state_wait_closed + state_waiters` 显式管理等待者准入/所有权：
+等待者在同一把锁下登记后才能睡眠；销毁先关闭新的等待者准入，
+若已有等待者尚未退出则按失败即关闭原则处理，不开始回调/定时器/存储拆除。
+只有等待者计数归零后才销毁条件变量/Stream/资源池/互斥锁。
 
-普通 `tr_channel_destroy()` 是可失败 teardown barrier，而不是无条件
+普通 `tr_channel_destroy()` 是可能失败的拆除屏障，而不是无条件
 `void free()`。上层 Client/Server 只有看到 `TR_OK` 才能清空 Channel
 指针并继续停止 Runtime；否则保持所有权不变，禁止把生命周期错误升级成 UAF。
 
-Server detached 路径更严格：waiter admission 关闭与 `state_waiters == 0`
-验证在 Reactor owner detach 阶段完成，此时对象仍在 peer table，失败就拒绝
-ownership transfer。只有 barrier 已经收敛才设置 `teardown_detached` 并把
-对象交给最后引用 finalizer；因此 detached finalizer 不再执行可失败同步，
+服务端已解除关联路径更严格：等待者准入关闭与 `state_waiters == 0`
+验证在 Reactor 所有者解除关联阶段完成，此时对象仍在对端表，失败就拒绝
+所有权转移。只有屏障已经收敛才设置 `teardown_detached` 并把
+对象交给最后引用的最终清理器；因此已解除关联最终清理器不再执行可失败同步，
 只负责纯资源释放。
 
 Channel 仍同时服务 Reactor 回调/所有者调用与部分应用 API，因此
@@ -417,7 +421,7 @@ Method/Call 创建写入者。Method 注册表与入站 `REQUEST` 现在由同�
 
 保护分片本地共享工作线程池的就绪 Endpoint 队列。
 
-RPC 工作线程使用线程本地执行上下文标记。同步 Endpoint/Facade 销毁
+RPC 工作线程使用线程本地执行上下文标记。同步 Endpoint/门面销毁
 不得从工作线程处理器/结果/事件回调中进入，因为销毁需要等待工作线程强引用
 或等待工作线程退出；回调必须先返回，再由外部生命周期所有者执行销毁。
 
@@ -473,11 +477,11 @@ Pipeline 所有者 Reactor
 跨线程调用必须通过所有者调用/命令；注册表不拥有 Pipeline 生命周期。
 
 Pipeline Listener 的运行期状态同样属于 Reactor 所有者，包括
-`draining`、监听源注册状态、当前连接数与当前 Pipeline 数。外部 lifecycle
-线程执行 `listen/begin_drain/stop` 时，不能在同步 owner 调用前后直接
+`draining`、监听源注册状态、当前连接数与当前 Pipeline 数。外部生命周期
+线程执行 `listen/begin_drain/stop` 时，不能在同步所有者调用前后直接
 读取或修改这些字段。
 
-监听 source 与 Listener 状态发布使用同一个生命周期事务：
+监听事件源与 Listener 状态发布使用同一个生命周期事务：
 
 ```text
 listen:
@@ -485,7 +489,7 @@ epoll ADD
       ->
 发布 listen_fd / bound_port / registered / !draining
       ->
-允许下一次 dispatch
+允许下一次分发
 
 drain:
 epoll DEL
@@ -495,93 +499,93 @@ epoll DEL
 返回调用方
 ```
 
-运行中，上述步骤在同一个 owner turn 完成；构造阶段允许“先 listen、后
-start Reactor”，此时整个事务在 `ctl_lock` 排他区间完成，`start()`
-不能插入 registration 与状态发布之间。正在 stop 的 Reactor 返回
-`TR_ERR_CLOSED`，不能越过 teardown barrier 直接发布或释放 Listener。
+运行中，上述步骤在同一个所有者执行轮次内完成；构造阶段允许“先监听、后
+启动 Reactor”，此时整个事务在 `ctl_lock` 排他区间完成，`start()`
+不能插入注册与状态发布之间。正在停止的 Reactor 返回
+`TR_ERR_CLOSED`，不能越过拆除屏障直接发布或释放 Listener。
 
-Pipeline Listener 的 `connections_current/pipelines_current` 继续只由 owner
-修改。Server Group `wait_drained` 不再每 1 ms 读取统计，而只等待单独发布的
-drain generation：
+Pipeline Listener 的 `connections_current/pipelines_current` 继续只由所有者
+修改。服务端连接组 `wait_drained` 不再每 1 ms 读取统计，而只等待单独发布的
+排空代次：
 
 ```text
-owner begin_drain
-    -> listener source detach
+所有者执行 begin_drain
+    -> 监听事件源解除关联
     -> draining = 1
     -> drain_generation++
 
-owner connection/session teardown
+所有者拆除连接/会话
     -> connections_current-- / pipelines_current--
     -> 两者都为 0
-    -> publish drained_generation
-    -> cond broadcast
+    -> 发布 drained_generation
+    -> 条件变量广播唤醒
 
-external waiter
-    -> 只比较 generation
-    -> 不读取 owner counters
+外部等待者
+    -> 只比较代次
+    -> 不读取所有者计数器
 ```
 
-Listener destroy 也不再是静默的 `void` 析构。它先通过
-`tr_reactor_call_or_stopped()` 在 owner/stopped 串行化域验证 source 已 detach、
-fd 已关闭、connection/pipeline 计数归零，再关闭 waiter admission。只有验证成功
-才释放 registry/session/cond/mutex；正在 stop 或 waiter 尚未退出时 fail-closed。
+Listener 销毁也不再是静默的 `void` 析构。它先通过
+`tr_reactor_call_or_stopped()` 在所有者/已停止状态串行化域验证事件源已解除关联、
+fd 已关闭、连接/Pipeline 计数归零，再关闭等待者准入。只有验证成功
+才释放注册表/会话/条件变量/互斥锁；正在停止或等待者尚未退出时按失败即关闭原则处理。
 
-Client Connection Group 也遵守同一 owner 原则。以下状态只允许 Reactor
+客户端连接组也遵守同一所有者原则。以下状态只允许 Reactor
 所有者修改：
 
-- CONTROL handle / route / generation；
-- CONTROL connect reservation；
-- remote address / port；
+- CONTROL 句柄/路由/代次；
+- CONTROL 连接预留；
+- 远端地址/端口；
 - `closing / draining`；
-- DATA connection/transfer/connector scheduling 状态；
-- `transfer_count / send_bytes_inflight` 等 drain predicate 原始状态。
+- DATA 连接/传输/连接器调度状态；
+- `transfer_count / send_bytes_inflight` 等排空判断条件原始状态。
 
-外部 `wait_drained` 不再每 1 ms 通过同步 owner stats 命令轮询这些字段。
-Group 只额外发布一个独立的 lifecycle generation：
+外部 `wait_drained` 不再每 1 ms 通过同步所有者统计命令轮询这些字段。
+Group 只额外发布一个独立的生命周期代次：
 
 ```text
-owner begin_drain
+所有者执行 begin_drain
     -> drain_generation++
 
-owner transfer/TX completion
-    -> predicate 成立
-    -> publish drained_generation
-    -> cond broadcast
+所有者处理传输/TX 完成事件
+    -> 判断条件成立
+    -> 发布 drained_generation
+    -> 条件变量广播唤醒
 
-external waiter
-    -> 只比较 generation
-    -> 不读取/修改 owner protocol state
+外部等待者
+    -> 只比较代次
+    -> 不读取/修改所有者协议状态
 ```
 
-因此 wait metadata lock 不是第二把协议状态锁，不进入正常 DATA send/transfer
-热路径；只有 drain lifecycle 的开始/完成边沿会取得它。
+因此等待元数据锁不是第二把协议状态锁，不进入正常 DATA 发送/传输
+热路径；只有排空生命周期的开始/完成边沿会取得它。
 
 CONTROL 建立分为两个阶段：
 
 ```text
-owner: IDLE -> CONTROL_CONNECTING
-            -> 分配 generation
-external:   blocking connect + preface
-owner:      adopt fd + install handler + publish route/address/state
+所有者：IDLE -> CONTROL_CONNECTING
+            -> 分配代次
+外部：  阻塞连接 + 前导信息
+所有者：接管 fd + 安装处理器 + 发布路由/地址/状态
             -> CONNECTED
 ```
 
-这样既不把阻塞 connect 放进 Reactor，也不会让外部线程在旧 CONTROL
-callback 尚未退出时修改同一组状态。Client Group destroy 不允许通过
-读取 `control.reactor` 判断“是否还需要同步”；无论 handle 是否已经被
-close callback 清空，都必须先执行一次 owner barrier，确认所有可能引用
-Group 的 callback 已退出，再释放 Group/Connector/Buffer storage。
+这样既不把阻塞连接放进 Reactor，也不会让外部线程在旧 CONTROL
+回调尚未退出时修改同一组状态。客户端连接组销毁不允许通过
+读取 `control.reactor` 判断“是否还需要同步”；无论句柄是否已经被
+关闭回调清空，都必须先执行一次所有者屏障，确认所有可能引用
+Group 的回调已退出，再释放 Group/Connector/Buffer 存储。
 
-Client Group DATA send buffer 的 release callback 会保存裸 `group *`，
-因此 destroy 还必须满足 `send_bytes_inflight == 0`。Reactor connection
-close 会先同步释放 TX queue，再分发 connection event；Group teardown
-关闭全部 DATA connection 后检查该不变量，未归零时 fail-closed，禁止释放
-仍可能被 buffer release callback 引用的 Group。
+客户端连接组 DATA 发送缓冲区的释放回调会保存裸 `group *`，
+因此销毁还必须满足 `send_bytes_inflight == 0`。Reactor 连接
+关闭会先同步释放 TX 队列，再分发连接事件；Group 拆除
+关闭全部 DATA 连接后检查该不变量，未归零时按失败即关闭原则处理，禁止释放
+仍可能被缓冲区释放回调引用的 Group。
 
-Client Group destroy 同时关闭 drain waiter admission。已有 waiter 尚未退出时
-destroy 返回生命周期错误并保持 Group/Runtime 存活；waiter 会被 terminal
-broadcast 唤醒并返回，调用方之后才能重试终局销毁。这与 Channel waiter
-规则相同：对象释放不能与仍持有裸对象能力的阻塞 waiter 并发。
+客户端连接组销毁同时关闭排空等待者准入。已有等待者尚未退出时
+销毁返回生命周期错误并保持 Group/Runtime 存活；等待者会被终局
+广播唤醒并返回，调用方之后才能重试终局销毁。这与 Channel 等待者
+规则相同：对象释放不能与仍持有裸对象能力的阻塞等待者并发。
 
 销毁顺序要求：
 

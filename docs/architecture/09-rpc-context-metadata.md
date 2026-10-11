@@ -119,9 +119,9 @@ cancelled == 1 -> cancel_status = CANCELLED / DEADLINE_EXCEEDED
 ```text
 tr_rpc_endpoint *
 tr_stream_handle
-Call slot/generation
-Reactor pointer
-executor internals
+Call 槽位/代次
+Reactor 指针
+执行器内部实现
 ```
 
 它的稳定输入应建立在：

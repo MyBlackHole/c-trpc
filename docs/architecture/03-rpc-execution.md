@@ -51,7 +51,7 @@ struct tr_rpc_call *
 struct tr_channel *
 ```
 
-当前实现已经在任务入队时复制 Stream 句柄、Method Descriptor、
+当前实现已经在任务入队时复制 Stream 句柄、Method 描述符、
 服务端处理器、客户端回调以及处理器/回调参数；执行器工作线程
 本身不再通过 `endpoint->lock` 回读存活 Call。
 

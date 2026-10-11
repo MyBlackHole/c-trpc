@@ -189,10 +189,10 @@ Stream 亲和关系 = 0
 新 `epoch` 不能以同一 `pipeline_id` 并存：
 
 ```text
-register pipeline_id=P epoch=9  -> OK
-register pipeline_id=P epoch=10 -> reject
-unregister epoch=9
-register epoch=10               -> OK
+注册 pipeline_id=P epoch=9  -> OK
+注册 pipeline_id=P epoch=10 -> 拒绝
+注销 epoch=9
+注册 epoch=10               -> OK
 ```
 
 这样可以保证 `epoch` 隔离不会退化成“同一个标识的多个版本都能被路由”。
@@ -201,11 +201,11 @@ DATA 成员关系已经从一次性添加拆成：
 
 ```text
 FREE
-  -> reserve
+  -> 预留
 RESERVED(index,generation)
-  -> attach exact capability
+  -> 按精确能力附着
 ATTACHED(connection)
-  -> remove
+  -> 移除
 FREE
 ```
 
@@ -268,7 +268,7 @@ Reactor 也不会过读。TRR1 完成并成功附着后，
 
 ```text
 CLOSED / ERROR
-  -> 注册表精确解除附着（connection + route capability）
+  -> 注册表精确解除附着（connection + 路由能力）
   -> tr_pipeline_remove_data()
   -> 失效绑定的 Stream 亲和关系
   -> 下游连接事件
@@ -288,7 +288,7 @@ CLOSED / ERROR
 CONTROL 会话创建顺序固定为：
 
 ```text
-创建 Pipeline(owner shard, pipeline_id, epoch)
+创建 Pipeline(所有者分片, pipeline_id, epoch)
   -> 绑定 CONTROL 连接
   -> 在分片注册表注册 Pipeline
 ```
@@ -332,8 +332,8 @@ Stream 亲和关系建立和 DATA 选择在同一个 Reactor 所有者操作内�
 CONTROL 会话关闭也有明确的静默门禁：
 
 ```text
-attached DATA != 0      -> 拒绝关闭
-Stream affinity != 0    -> 拒绝关闭
+已附着 DATA != 0      -> 拒绝关闭
+Stream 亲和关系 != 0    -> 拒绝关闭
 只剩 RESERVED           -> 清除 CONTROL 并取消预留
                         -> 从注册表注销
                         -> 销毁 Pipeline

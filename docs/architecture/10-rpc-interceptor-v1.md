@@ -33,7 +33,7 @@ V1 不建立动态中间件列表。需要组合认证/链路追踪/指标时，
 
 - 钩子必须短小、非阻塞；
 - 不允许磁盘、网络、KMS、数据库等待；
-- 不允许等待依赖同一 Reactor 前进的 future/condition；
+- 不允许等待依赖同一 Reactor 前进的异步结果/条件；
 - 钩子运行时不会持有 `endpoint->lock`。
 
 最后一条很重要：钩子可以安全调用所有者安全的上下文/元数据 API，而不会死锁。
@@ -167,7 +167,7 @@ SERVER_PRE_HANDLER
   -> 认证 / 开始链路追踪
 
 SERVER_POST_HANDLER
-  -> 设置尾部元数据：server-id / retry-after / trace result
+  -> 设置尾部元数据：server-id / retry-after / 链路追踪结果
 
 CLIENT_POST_CALL
   -> 读取对端尾部元数据
@@ -185,9 +185,9 @@ CLIENT_POST_CALL
 ```text
 tr_rpc_endpoint *
 tr_stream_handle
-Reactor pointer
-slot/generation
-executor queue/node
+Reactor 指针
+槽位/代次
+执行器队列/节点
 ```
 
 Call 可变协议状态仍然只有 Reactor 所有者可以修改。
