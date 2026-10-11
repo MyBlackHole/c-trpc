@@ -635,7 +635,8 @@ static int tr_rpc_build_outbound_metadata_locked(
 		remaining_ns =
 			call->deadline_ns > now ? call->deadline_ns - now : 0;
 		remaining_ms =
-			(remaining_ns + UINT64_C(999999)) / UINT64_C(1000000);
+			remaining_ns / UINT64_C(1000000) +
+			(remaining_ns % UINT64_C(1000000) != 0U);
 		if (remaining_ms == 0)
 			remaining_ms = 1;
 		tr_put_le64(value, remaining_ms);
@@ -6319,7 +6320,8 @@ static int tr_rpc_call_get_context_on_owner(void *arg)
 		remaining_ns =
 			call->deadline_ns > now ? call->deadline_ns - now : 0U;
 		context.deadline_remaining_ms =
-			(remaining_ns + UINT64_C(999999)) / UINT64_C(1000000);
+			remaining_ns / UINT64_C(1000000) +
+			(remaining_ns % UINT64_C(1000000) != 0U);
 	}
 	*request->out = context;
 

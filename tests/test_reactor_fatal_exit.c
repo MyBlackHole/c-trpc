@@ -233,6 +233,19 @@ static void on_completion(void *arg)
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+/* 触发完成回调执行后才开启 poll 闸门；若由调用线程提前开启，
+ * 所有者可能在完成事件入队前停住。 */
+static void on_trigger_completion(void *arg)
+{
+	struct fatal_ctx *ctx = arg;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->completed++;
+	ctx->trap_poll = 1;
+	notify(ctx);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
 static void on_connection(struct tr_conn_handle connection,
 			  enum tr_connection_event event, int status, void *arg)
 {
@@ -348,10 +361,8 @@ static void test_fatal_epoch(int concurrent_stop)
 	assert(tr_reactor_quiesce(ctx.reactor) == TR_OK);
 
 	/* Force next owner poll to fail only after we have filled both queues. */
-	pthread_mutex_lock(&ctx.lock);
-	ctx.trap_poll = 1;
-	pthread_mutex_unlock(&ctx.lock);
-	assert(tr_reactor_complete(ctx.reactor, on_completion, &ctx) == TR_OK);
+	assert(tr_reactor_complete(ctx.reactor, on_trigger_completion, &ctx) ==
+	       TR_OK);
 	wait_value(&ctx, &ctx.gate_entered, 1, "owner poll gate");
 	wait_value(&ctx, &ctx.completed, 1, "trigger completion");
 
