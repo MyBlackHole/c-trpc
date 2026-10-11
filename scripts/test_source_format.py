@@ -114,6 +114,22 @@ class FormatGate(unittest.TestCase):
     def test_missing_base_fails(self):
         self.gate(2, base="deadbeef")
 
+    def test_all_zero_base_fails(self):
+        self.gate(2, base="0" * 40)
+
+    def test_no_common_ancestor_fails(self):
+        self.git("checkout", "--orphan", "unrelated")
+        self.git("rm", "-rf", ".")
+        self.write(".clang-format", "BasedOnStyle: LLVM\n")
+        self.write("unrelated.c", "int unrelated;\n")
+        self.commit()
+        self.gate(2)
+
+    def test_invalid_config_fails_on_empty_diff(self):
+        self.write(".clang-format", "NotAClangFormatOption: true\n")
+        self.base = self.commit()
+        self.gate(2)
+
     def test_dirty_tracked_tree_fails(self):
         self.write("debt.c", "int changed;\n")
         self.gate(2)
