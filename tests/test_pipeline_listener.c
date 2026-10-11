@@ -1,4 +1,5 @@
 #include "../src/group/pipeline_control_wire_internal.h"
+#include "drain_deadline_probe.h"
 #include "../src/transport/group/pipeline_listener_internal.h"
 #include "../src/group/pipeline_route_internal.h"
 
@@ -411,6 +412,7 @@ static int wait_offer_retry(
 
 static void test_pipeline_listener_control_and_data(void)
 {
+	struct tr_test_drain_deadline_probe deadline_probe;
 	struct tr_reactor *reactor = NULL;
 	struct tr_pipeline_listener_config config;
 	struct tr_pipeline_listener *listener = NULL;
@@ -583,10 +585,37 @@ static void test_pipeline_listener_control_and_data(void)
 	wait_listener_counts(listener, 1U, 1U);
 
 	/*
+	 * 保留真实 CONTROL session 进入 drain。限时等待必须使用公共
+	 * CLOCK_MONOTONIC 绝对期限，不得再次进行 uint64 纳秒转换。
+	 */
+	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
+	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 0);
+	assert(tr_pipeline_listener_wait_drained(listener, 10U) ==
+	       TR_ERR_TIMEOUT);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
+
+	/* 超大有限期限不能被有符号 time_t 转换误认为无限等待。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, UINT32_MAX, 0);
+	assert(tr_pipeline_listener_wait_drained(listener, UINT32_MAX) ==
+	       TR_ERR_TIMEOUT);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
+
+	/* 截止时间初始化失败不进入条件等待，也不能清除 session 所有权。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 1);
+	assert(tr_pipeline_listener_wait_drained(listener, 10U) ==
+	       TR_ERR_SYS);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 0U);
+
+	/*
 	 * stop() 本身必须完成 live CONTROL session 的 fatal teardown，而不是要求
 	 * 调用方先关闭 peer socket。成功返回后 destroy 只能做纯资源释放。
 	 */
 	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+
+	/* 0ms 仍为无限等待；排空完成后无需创建 deadline/调用 condwait。 */
+	tr_test_drain_deadline_probe_begin(&deadline_probe, 0U, 0);
+	assert(tr_pipeline_listener_wait_drained(listener, 0U) == TR_OK);
+	tr_test_drain_deadline_probe_end(&deadline_probe, 0U, 0U);
 	wait_peer_close(control2);
 	close(control2);
 	control2 = -1;

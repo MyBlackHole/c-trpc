@@ -141,8 +141,10 @@ for _, name in ipairs({"test_server_drain_deadline", "test_deadline", "test_tran
             add_ldflags("-Wl,--wrap=setsockopt", {force = true})
             add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_connection_group_facade" then
-            -- 注入 CONTROL close 失败，验证 Group terminal destroy 保留能力句柄。
-            add_ldflags("-Wl,--wrap=tr_reactor_close_on_owner", {force = true})
+            -- CONTROL 失败与 Client Group 截止时间/condwait 测试链接期注入。
+            add_ldflags("-Wl,--wrap=tr_reactor_close_on_owner",
+                        "-Wl,--wrap=tr_deadline_init_ms",
+                        "-Wl,--wrap=pthread_cond_timedwait", {force = true})
         elseif name == "test_channel_reconnect_teardown" then
             -- Deterministic in-flight Connector cancellation and aux source
             -- detach failure while Channel destroy owns callback storage.
@@ -159,10 +161,12 @@ for _, name in ipairs({"test_server_drain_deadline", "test_deadline", "test_tran
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
         elseif name == "test_pipeline_listener" then
-            -- 注入发布失败和 listener DEL 错误，验证失败回滚期间的 fd 所有权。
+            -- epoll/source 回滚和 MONOTONIC condwait 的测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
                         "-Wl,--wrap=tr_reactor_listener_register_publish",
-                        "-Wl,--wrap=epoll_ctl", {force = true})
+                        "-Wl,--wrap=epoll_ctl",
+                        "-Wl,--wrap=tr_deadline_init_ms",
+                        "-Wl,--wrap=pthread_cond_timedwait", {force = true})
         elseif name == "test_pipeline_ingress" then
             -- 仅在测试中注入 terminal DATA membership detach 失败，不污染生产代码。
             add_ldflags("-Wl,--wrap=tr_pipeline_registry_detach_data_route", {force = true})
