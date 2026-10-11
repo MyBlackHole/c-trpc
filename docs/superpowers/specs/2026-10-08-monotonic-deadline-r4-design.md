@@ -68,7 +68,7 @@ Channel 就绪、Channel 排空、客户端连接组排空和 Pipeline Listener 
 
 - `tr_channel_wait_ready(..., 0)`、`tr_client_group_wait_drained(..., 0)` 和 `tr_pipeline_listener_wait_drained(..., 0)` 继续无限等待。
 - `tr_channel_wait_drained(..., 0)` 继续只检查当前状态；未排空时返回 `TR_AGAIN`，不阻塞。
-- 有限就绪等待超时继续返回 `TR_ERR_TIMEOUT`；排空等待的超时继续返回 `TR_AGAIN`。
+- 有限就绪等待、客户端连接组排空等待和 Pipeline Listener 排空等待超时返回 `TR_ERR_TIMEOUT`；Channel 排空等待（包括 Client 的对应封装）超时返回 `TR_AGAIN`。
 - 关闭、状态不匹配、等待上下文错误和条件变量系统错误继续返回各自现有状态码。
 
 ## 测试设计
