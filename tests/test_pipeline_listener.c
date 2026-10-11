@@ -38,10 +38,9 @@ struct data_test_ctx {
 	uint16_t last_type;
 };
 
-/*
- * 只在该测试目标通过 --wrap=tr_command_queue_push 生效。强制下一次 SEND
- * admission 返回 TR_AGAIN，验证 Pipeline soft-state rollback；生产库不包含
- * fault injection hook。
+/* 只在该测试目标通过 --wrap=tr_command_queue_push 生效。强制下一次 SEND
+ * 准入返回 TR_AGAIN，验证 Pipeline 软状态回滚；生产库不包含
+ * 故障注入钩子。
  */
 static atomic_int fail_next_send_push;
 static atomic_uint injected_send_push_failures;
@@ -458,7 +457,7 @@ static void test_pipeline_listener_control_and_data(void)
 		       listener, "127.0.0.1", 0U, 16, &port) == TR_OK);
 	assert(port != 0U);
 
-	/* Authorization, not client-provided identity alone, admits CONTROL. */
+	/* 由授权接纳 CONTROL，而非只靠客户端提供的标识。 */
 	route = control_route(TEST_EPOCH_1);
 	route.member_generation++;
 	bad_control = connect_loopback(port);
@@ -468,13 +467,13 @@ static void test_pipeline_listener_control_and_data(void)
 	bad_control = -1;
 	wait_listener_counts(listener, 0U, 0U);
 
-	/* Establish one real CONTROL connection through TRR1. */
+	/* 通过 TRR1 建立一个真实 CONTROL 连接。 */
 	route = control_route(TEST_EPOCH_1);
 	control = connect_loopback(port);
 	send_route(control, &route);
 	wait_listener_counts(listener, 1U, 1U);
 
-	/* Server reserves DATA and emits the exact capability over TRP1/TRC1. */
+	/* 服务端预留 DATA，并通过 TRP1/TRC1 发出精确能力凭证。 */
 	memset(&offer_route, 0, sizeof(offer_route));
 	assert(tr_pipeline_listener_send_data_offer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
@@ -488,12 +487,12 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(offer.data_index == offer_route.member_index);
 	assert(offer.data_generation == offer_route.member_generation);
 
-	/* A RESERVED capability alone is never enough to publish READY. */
+	/* 仅有 RESERVED 能力凭证绝不足以发布 READY。 */
 	assert(tr_pipeline_listener_send_transfer_ready(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3000U,
 		       UINT64_C(999)) == TR_AGAIN);
 
-	/* Exact DATA socket joins the same listener and normal TRP1 begins after TRR1. */
+	/* 精确 DATA 套接字加入同一监听器，TRR1 后开始正常 TRP1。 */
 	data = connect_loopback(port);
 	send_route(data, &offer_route);
 	build_ping(ping);
@@ -504,10 +503,9 @@ static void test_pipeline_listener_control_and_data(void)
 	pthread_mutex_unlock(&data_ctx.lock);
 	wait_listener_counts(listener, 1U, 2U);
 
-	/*
-	 * Replaying an already-ATTACHED DATA capability must reject only the new
-	 * socket. Failure cleanup exact-cancels RESERVED state, so it cannot retire
-	 * the live membership that already consumed this generation.
+	/* 重放已为 ATTACHED 的 DATA 能力凭证必须只拒绝新套接字。
+	 * 失败清理精确取消 RESERVED 状态，因此不能退役
+	 * 已消耗该代次的存活成员关系。
 	 */
 	duplicate_data = connect_loopback(port);
 	send_route(duplicate_data, &offer_route);
@@ -519,7 +517,7 @@ static void test_pipeline_listener_control_and_data(void)
 	send_all(data, ping, sizeof(ping));
 	wait_data_frames(&data_ctx, 2U);
 
-	/* TRANSFER_READY cannot be emitted until the DATA capability is ATTACHED. */
+	/* DATA 能力凭证成为 ATTACHED 前不能发出 TRANSFER_READY。 */
 	assert(tr_pipeline_listener_send_transfer_ready(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3001U,
 		       UINT64_C(1002)) == TR_OK);
@@ -532,7 +530,7 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(tr_pipeline_listener_release_transfer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 3001U) == TR_OK);
 
-	/* A client DATA_CANCEL is handled by the real CONTROL frame callback. */
+	/* 客户端 DATA_CANCEL 由真实 CONTROL 帧回调处理。 */
 	memset(&offer_route2, 0, sizeof(offer_route2));
 	assert(tr_pipeline_listener_send_data_offer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
@@ -543,10 +541,8 @@ static void test_pipeline_listener_control_and_data(void)
 	cancel.type = TR_PIPELINE_CONTROL_DATA_CANCEL;
 	send_control_message(control, UINT64_C(2001), &cancel);
 
-	/*
-	 * With one DATA attached and one reservation, another offer is full until
-	 * the cancel frame is actually consumed. Retry proves the handler released
-	 * only that exact reservation.
+	/* 一个 DATA 已附接且另有一个预留时，取消帧被实际消耗前，
+	 * 另一提议会因容量满而失败。重试证明处理函数只释放该精确预留。
 	 */
 	memset(&offer_route2, 0, sizeof(offer_route2));
 	assert(wait_offer_retry(
@@ -556,10 +552,9 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(offer3.data_index == offer2.data_index);
 	assert(offer3.data_generation != offer2.data_generation);
 
-	/*
-	 * Fatal CONTROL loss invalidates the whole soft-state group: outstanding
-	 * reservations are cancelled, attached DATA is closed, registry entry is
-	 * removed, and the same pipeline_id can later start a new epoch.
+	/* 致命 CONTROL 丢失使整个软状态组失效：未完成预留被取消，
+	 * 已附接 DATA 被关闭，注册表条目被移除，
+	 * 之后相同 pipeline_id 可以开始新轮次。
 	 */
 	shutdown(control, SHUT_RDWR);
 	close(control);
@@ -578,14 +573,13 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(stats.pipelines_peak == 1U);
 	assert(stats.connections_peak >= 2U);
 
-	/* New epoch with the same pipeline_id is admitted after old teardown. */
+	/* 旧拆除完成后，接纳相同 pipeline_id 的新轮次。 */
 	route = control_route(TEST_EPOCH_2);
 	control2 = connect_loopback(port);
 	send_route(control2, &route);
 	wait_listener_counts(listener, 1U, 1U);
 
-	/*
-	 * 保留真实 CONTROL session 进入 drain。限时等待必须使用公共
+	/* 保留真实 CONTROL 会话进入排空。限时等待必须使用公共
 	 * CLOCK_MONOTONIC 绝对期限，不得再次进行 uint64 纳秒转换。
 	 */
 	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
@@ -600,19 +594,18 @@ static void test_pipeline_listener_control_and_data(void)
 	       TR_ERR_TIMEOUT);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
 
-	/* 截止时间初始化失败不进入条件等待，也不能清除 session 所有权。 */
+	/* 截止时间初始化失败不进入条件等待，也不能清除会话所有权。 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 1);
 	assert(tr_pipeline_listener_wait_drained(listener, 10U) ==
 	       TR_ERR_SYS);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 0U);
 
-	/*
-	 * stop() 本身必须完成 live CONTROL session 的 fatal teardown，而不是要求
-	 * 调用方先关闭 peer socket。成功返回后 destroy 只能做纯资源释放。
+	/* stop() 本身必须完成存活 CONTROL 会话的致命拆除，而不是要求
+	 * 调用方先关闭对端套接字。成功返回后销毁只能做纯资源释放。
 	 */
 	assert(tr_pipeline_listener_stop(listener) == TR_OK);
 
-	/* 0ms 仍为无限等待；排空完成后无需创建 deadline/调用 condwait。 */
+	/* 0ms 仍为无限等待；排空完成后无需创建截止时间或调用条件等待。 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 0U, 0);
 	assert(tr_pipeline_listener_wait_drained(listener, 0U) == TR_OK);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 0U, 0U);
@@ -685,10 +678,8 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	send_route(data, &data_route);
 	wait_listener_counts(listener, 1U, 2U);
 
-	/*
-	 * Physical DATA membership is not transfer authorization. DATA before
-	 * TRANSFER_READY is a protocol violation: no application callback and the
-	 * offending DATA lane is retired.
+	/* 物理 DATA 成员关系不是传输授权。TRANSFER_READY 前的 DATA
+	 * 是协议违规：不调用应用回调，违规 DATA 通道被退役。
 	 */
 	send_empty_data(data, 7001U, UINT64_C(6001));
 	wait_peer_close(data);
@@ -700,7 +691,7 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(data_ctx.frames == 0U);
 	pthread_mutex_unlock(&data_ctx.lock);
 
-	/* Re-establish DATA, publish READY, then the same stream is admitted. */
+	/* 重新建立 DATA、发布 READY，然后接纳同一流。 */
 	memset(&data_route, 0, sizeof(data_route));
 	assert(tr_pipeline_listener_send_data_offer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
@@ -720,10 +711,8 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(ready.data_index == offer.data_index);
 	assert(ready.data_generation == offer.data_generation);
 
-	/*
-	 * Add a second DATA membership after READY. The stream is pinned to the
-	 * first exact generation, so replaying it on another live lane is also
-	 * connection-fatal and must not reach the application.
+	/* READY 后增加第二个 DATA 成员关系。该流固定绑定到第一个精确代次，
+	 * 因此在另一存活通道上重放它同样对连接致命，不得到达应用。
 	 */
 	memset(&data_route2, 0, sizeof(data_route2));
 	assert(tr_pipeline_listener_send_data_offer(
@@ -745,7 +734,7 @@ static void test_pipeline_listener_ready_ingress_barrier(void)
 	assert(data_ctx.frames == 0U);
 	pthread_mutex_unlock(&data_ctx.lock);
 
-	/* The READY stream remains valid on its originally selected DATA lane. */
+	/* READY 流在其最初选择的 DATA 通道上仍有效。 */
 	send_empty_data(data, 7001U, UINT64_C(6003));
 	wait_data_frames(&data_ctx, 1U);
 	pthread_mutex_lock(&data_ctx.lock);
@@ -793,9 +782,8 @@ static void test_pipeline_send_failure_rolls_back_soft_state(void)
 	config.owner_shard_id = 0U;
 	config.pipeline_capacity = 1U;
 	config.connection_capacity = 3U;
-	/*
-	 * Capacity=1 makes a leaked failed offer immediately observable: the next
-	 * offer could not succeed if rollback left one RESERVED capability behind.
+	/* capacity=1 使失败提议的泄漏立即可见：
+	 * 若回滚留下一个 RESERVED 能力凭证，下一个提议就不可能成功。
 	 */
 	config.data_capacity_per_pipeline = 1U;
 	config.stream_affinity_capacity_per_pipeline = 1U;
@@ -820,9 +808,8 @@ static void test_pipeline_send_failure_rolls_back_soft_state(void)
 	       failures_before + 1U);
 	assert(data_route.member_generation == 0U);
 
-	/*
-	 * The failed SEND must have cancelled the exact reservation. With only one
-	 * DATA slot, immediate success proves the slot returned to FREE.
+	/* 失败 SEND 必须已取消精确预留。只有一个 DATA 槽位时，
+	 * 立即成功证明槽位已回到 FREE。
 	 */
 	memset(&data_route, 0, sizeof(data_route));
 	assert(tr_pipeline_listener_send_data_offer(
@@ -845,9 +832,8 @@ static void test_pipeline_send_failure_rolls_back_soft_state(void)
 	assert(atomic_load(&injected_send_push_failures) ==
 	       failures_before + 1U);
 
-	/*
-	 * prepare_transfer() installed stream affinity before SEND admission. A
-	 * successful retry for the same stream proves failed SEND removed it.
+	/* prepare_transfer() 在 SEND 准入前安装了流亲和绑定。
+	 * 同一流的重试成功证明失败 SEND 已移除该绑定。
 	 */
 	assert(tr_pipeline_listener_send_transfer_ready(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 9101U,
@@ -860,10 +846,8 @@ static void test_pipeline_send_failure_rolls_back_soft_state(void)
 	assert(tr_pipeline_listener_release_transfer(
 		       listener, TEST_PIPELINE_ID, TEST_EPOCH_1, 9101U) == TR_OK);
 
-	/*
-	 * CONTROL close is the normal transport terminal edge. It invalidates the
-	 * attached DATA membership and closes that DATA connection before Listener
-	 * storage is destroyed.
+	/* CONTROL 关闭是正常传输终止边界。它使已附接 DATA 成员关系失效，
+	 * 并在监听器存储销毁前关闭该 DATA 连接。
 	 */
 	shutdown(control, SHUT_RDWR);
 	close(control);
@@ -886,10 +870,9 @@ static void test_pipeline_listener_prestart_teardown(void)
 	struct tr_pipeline_listener *listener = NULL;
 	uint16_t port = 0U;
 
-	/*
-	 * Server 允许先 listen 再 start Runtime。这个构造阶段没有 owner thread，
-	 * 但 listener source 已经注册进 epoll；begin_drain/stop 必须能够在不启动
-	 * Reactor 的情况下完整撤销注册并完成纯内存析构。
+	/* 服务端允许先监听再启动 Runtime。此构造阶段没有所有者线程，
+	 * 但监听器事件源已经注册进 epoll；begin_drain/stop 必须能够在不启动
+	 * 反应器的情况下完整撤销注册并完成纯内存析构。
 	 */
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
 
@@ -943,7 +926,7 @@ static void test_listener_publish_rollback_keeps_fd_until_drain(void)
 	assert(fail_listener_del_fd == -1);
 	assert(fcntl(injected_listener_fd, F_GETFD) >= 0);
 
-	/* Reactor 仍发布 source 时，listener 必须保留 fd，直到 drain 成功。 */
+	/* 反应器仍发布事件源时，监听器必须保留 fd，直到排空成功。 */
 	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
 	errno = 0;
 	assert(fcntl(injected_listener_fd, F_GETFD) < 0 && errno == EBADF);

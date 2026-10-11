@@ -61,7 +61,7 @@ static void test_pipeline_control_session(void)
 		       &control_config, control_connection, &control) == TR_OK);
 	assert(control != NULL);
 
-	/* Registry uniqueness fences a second runtime epoch/session with same id. */
+	/* 注册表唯一性隔断同标识的第二个运行时轮次或会话。 */
 	{
 		struct tr_pipeline_control_config duplicate_config = control_config;
 
@@ -76,9 +76,8 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_registry_get_stats(registry, &registry_stats) == TR_OK);
 	assert(registry_stats.count == 1U);
 
-	/*
-	 * A reservation is an offer only. TRANSFER_READY is forbidden until an
-	 * exact DATA connection has consumed the capability.
+	/* 预留只是提议。精确 DATA 连接消耗能力凭证之前，
+	 * 禁止 TRANSFER_READY。
 	 */
 	memset(&offer0, 0, sizeof(offer0));
 	assert(tr_pipeline_control_reserve_data(control, &offer0) == TR_OK);
@@ -94,16 +93,15 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_control_prepare_transfer(
 		       control, 1001U, &ready0) == TR_AGAIN);
 
-	/* A forged cancellation must not consume the real capability. */
+	/* 伪造取消不得消耗真实能力凭证。 */
 	stale = offer0;
 	stale.data.generation++;
 	stale.route.member_generation++;
 	assert(tr_pipeline_control_cancel_data(control, &stale) ==
 	       TR_ERR_STALE);
 
-	/*
-	 * Keep offer0 RESERVED while offer1 becomes ATTACHED. TRANSFER_READY must
-	 * skip the reservation even if round-robin encounters that slot first.
+	/* offer1 成为 ATTACHED 时保持 offer0 为 RESERVED。
+	 * 即使轮询先遇到该槽位，TRANSFER_READY 也必须跳过预留。
 	 */
 	memset(&offer1, 0, sizeof(offer1));
 	assert(tr_pipeline_control_reserve_data(control, &offer1) == TR_OK);
@@ -111,10 +109,9 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &offer1.route, data1, NULL) == TR_OK);
 
-	/*
-	 * Exact peer cancellation is idempotent across handoff ambiguity.
-	 * Once this generation is ATTACHED it is a successful no-op and must not
-	 * retire the live membership.
+	/* 精确对端取消在交接不确定性下保持幂等。
+	 * 一旦该代次为 ATTACHED，就成功返回且不做操作，
+	 * 不得退役存活成员关系。
 	 */
 	assert(tr_pipeline_control_cancel_data(control, &offer1) == TR_OK);
 
@@ -125,11 +122,11 @@ static void test_pipeline_control_session(void)
 	assert(ready0.data.index == offer1.data.index);
 	assert(ready0.data.generation == offer1.data.generation);
 
-	/* Stream affinity is established exactly once. */
+	/* 流亲和绑定恰好建立一次。 */
 	assert(tr_pipeline_control_prepare_transfer(
 		       control, 1001U, &ready1) == TR_ERR_STATE);
 
-	/* Attach the previously RESERVED offer0; next stream can now use it. */
+	/* 附接先前 RESERVED 的 offer0；下一个流现在可以使用它。 */
 	data0 = fake_connection(owner, 20U, 1U);
 	assert(tr_pipeline_registry_attach_data_route(
 		       registry, &offer0.route, data0, NULL) == TR_OK);
@@ -141,7 +138,7 @@ static void test_pipeline_control_session(void)
 	assert(ready1.data.index == offer0.data.index);
 	assert(ready1.data.generation == offer0.data.generation);
 
-	/* CONTROL cannot disappear while attached DATA/Stream lifetime remains. */
+	/* 已附接 DATA 或流生命周期仍存在时，CONTROL 不能消失。 */
 	assert(tr_pipeline_control_close(control, control_connection) ==
 	       TR_ERR_STATE);
 
@@ -155,7 +152,7 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_registry_detach_data_route(
 		       registry, &offer1.route, data1) == TR_OK);
 
-	/* Same exact generation already FREE is also an idempotent no-op. */
+	/* 同一精确代次已为 FREE 时也是幂等的无操作。 */
 	assert(tr_pipeline_control_cancel_data(control, &offer1) == TR_OK);
 	stale = offer1;
 	stale.data.generation++;
@@ -163,9 +160,8 @@ static void test_pipeline_control_session(void)
 	assert(tr_pipeline_control_cancel_data(control, &stale) ==
 	       TR_ERR_STALE);
 
-	/*
-	 * RESERVED capability 属于 CONTROL。错误 CONTROL generation 的 close
-	 * 必须在 commit 前失败，不能先取消 reservation 再尝试恢复 CONTROL。
+	/* RESERVED 能力凭证属于 CONTROL。错误 CONTROL 代次的关闭
+	 * 必须在提交前失败，不能先取消预留再尝试恢复 CONTROL。
 	 */
 	assert(tr_pipeline_control_reserve_data(control, &offer0) == TR_OK);
 	{
@@ -226,10 +222,8 @@ static void test_pipeline_control_registry_capacity_failure_is_precommit(void)
 		       &config, first_connection, &first) == TR_OK);
 	assert(first != NULL);
 
-	/*
-	 * Capacity rejection must happen before CONTROL is bound on the candidate
-	 * Pipeline. The failed create therefore needs no lifecycle rollback and can
-	 * destroy its private soft-state immediately.
+	/* 容量拒绝必须在候选 Pipeline 绑定 CONTROL 前发生。
+	 * 因此创建失败不需要生命周期回滚，可以立即销毁其私有软状态。
 	 */
 	config.pipeline_id = UINT64_C(0x7002);
 	second_connection = fake_connection(owner, 31U, 1U);

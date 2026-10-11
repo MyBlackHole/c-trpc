@@ -188,7 +188,7 @@ static void test_control_wire_state_machine(void)
 	assert(tr_pipeline_control_create(
 		       &control_config, control_connection, &control) == TR_OK);
 
-	/* DATA_OFFER is created by the same operation that reserves capability. */
+	/* DATA_OFFER 由预留能力凭证的同一操作创建。 */
 	memset(offer_raw, 0, sizeof(offer_raw));
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
@@ -199,9 +199,8 @@ static void test_control_wire_state_machine(void)
 	assert(offer.pipeline_id == UINT64_C(0x7001));
 	assert(offer.epoch == UINT64_C(51));
 
-	/*
-	 * Reservation is not readiness. The adapter must not emit any wire token
-	 * until the exact DATA offer is attached through the registry.
+	/* 预留不是就绪。精确 DATA 提议通过注册表附接前，
+	 * 适配器不得发出任何线协议令牌。
 	 */
 	memset(ready_raw, 0xa5, sizeof(ready_raw));
 	assert(tr_pipeline_control_prepare_transfer_wire(
@@ -230,9 +229,8 @@ static void test_control_wire_state_machine(void)
 	assert(tr_pipeline_registry_detach_data_route(
 		       registry, &route, data_connection) == TR_OK);
 
-	/*
-	 * DATA_CANCEL is exact-generation idempotent. The first message consumes
-	 * RESERVED -> FREE; repeating the same generation is a successful no-op.
+	/* DATA_CANCEL 对精确代次幂等。首条消息消耗 RESERVED -> FREE；
+	 * 重复相同代次成功返回，不做操作。
 	 */
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
@@ -246,16 +244,13 @@ static void test_control_wire_state_machine(void)
 	assert(tr_pipeline_control_cancel_data_wire(
 		       control, cancel_raw, sizeof(cancel_raw)) == TR_OK);
 
-	/*
-	 * Reusing the slot advances generation, so an old idempotent cancel cannot
-	 * affect the replacement reservation.
-	 */
+	/* 槽位复用推进代次，因此旧幂等取消不能影响替代预留。 */
 	assert(tr_pipeline_control_reserve_data_wire(
 		       control, offer_raw) == TR_OK);
 	assert(tr_pipeline_control_cancel_data_wire(
 		       control, cancel_raw, sizeof(cancel_raw)) == TR_ERR_STALE);
 
-	/* Forged epoch cannot cancel the real reservation. */
+	/* 伪造轮次不能取消真实预留。 */
 	assert(tr_pipeline_control_wire_decode(
 		       offer_raw, sizeof(offer_raw), &offer) == TR_OK);
 	cancel = offer;

@@ -150,9 +150,8 @@ static void test_route_corruption_validation(void)
 	assert(tr_pipeline_route_preface_encode(raw, &preface) == TR_OK);
 	raw[TR_PIPELINE_ROUTE_OFF_MAGIC] = 'X';
 	assert(tr_pipeline_route_preface_decode(raw, &decoded) == TR_OK);
-	/*
-	 * Validation intentionally checks magic before CRC so completely unrelated
-	 * protocols are rejected as BAD_MAGIC rather than corruption.
+	/* 验证有意在 CRC 前检查魔数，
+	 * 使完全无关协议以 BAD_MAGIC 被拒绝，而不是被视为数据损坏。
 	 */
 	assert(tr_pipeline_route_preface_validate(raw, &decoded) ==
 	       TR_ERR_BAD_MAGIC);

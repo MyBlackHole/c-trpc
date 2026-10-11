@@ -20,7 +20,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* 只在测试链接期捕获真实 owner timer；人工推进仍在原 Reactor 上执行。 */
+/* 只在测试链接期捕获真实所有者定时器；人工推进仍在原反应器上执行。 */
 static pthread_mutex_t probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static tr_reactor_timer_cb probe_callback;
 static void *probe_arg;
@@ -80,7 +80,7 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *out)
 
 int __wrap_tr_deadline_init_ms(struct tr_deadline *deadline, uint32_t timeout)
 {
-	/* 当前 fixture 只有服务端 accept 在 owner 上建立这些期限。 */
+	/* 当前夹具只有服务端接受连接时在所有者上建立这些期限。 */
 	if (tr_reactor_in_owner_context() &&
 	    (timeout == 10000U || timeout == 80U || timeout == 1000U)) {
 		atomic_fetch_add(&handshake_inits, 1U);
@@ -443,7 +443,7 @@ static void normal_client(struct fixture *f)
 		assert(tr_server_get_stats(f->server, &stats) == TR_OK);
 		assert(stats.peers_ready_total == 1U);
 	}
-	/* 真正就绪后旧租约失效，迟到的 timer 不得关闭新槽位/活动连接。 */
+	/* 真正就绪后旧租约失效，迟到的定时器不得关闭新槽位或活动连接。 */
 	assert(tick(UINT64_MAX) == 0U);
 	wait_counts(f, 1U, 1U);
 	assert(tr_client_destroy(client) == TR_OK);
@@ -467,7 +467,7 @@ static void test_exact_deadline(int group, int partial)
 	{
 		int extra = raw_connect(f.port);
 
-		/* 满槽拒绝不能重置原连接的期限，也不能偷占 ready 计数。 */
+		/* 满槽拒绝不能重置原连接的期限，也不能偷占就绪计数。 */
 		wait_eof(extra);
 		assert(close(extra) == 0);
 		wait_counts(&f, 1U, 0U);
@@ -582,7 +582,7 @@ static void test_late_handshake(int group, int clock_error)
 	fixture_init(&f, group, 0U);
 	fd = raw_connect(f.port);
 	wait_counts(&f, 1U, 0U);
-	/* 只在完成期限判定时推进时间，让 RX 确定性先于到期 timer 分发。 */
+	/* 只在完成期限判定时推进时间，让接收事件确定性先于到期定时器分发。 */
 	if (clock_error)
 		atomic_store(&fail_expiry_clock, 1);
 	else
@@ -648,7 +648,7 @@ static void test_existing_timer_arm_failure(int group)
 	wait_eof(second);
 	assert(atomic_load(&arm_failures) == before + 1U);
 	assert(captured_deadline() == deadline);
-	/* 不人工推进：第二次 arm 失败后，第一条连接仍由原真实 timer 唤醒。 */
+	/* 不人工推进：第二次设置定时失败后，第一条连接仍由原真实定时器唤醒。 */
 	wait_eof(first);
 	wait_counts(&f, 0U, 0U);
 	assert(close(first) == 0);
@@ -738,7 +738,7 @@ static void test_listener_restart(void)
 	assert(close(fd) == 0);
 	assert(tick(deadline) == 0U);
 
-	/* stop/listen 新周期继续复用有界表，旧到期通知不得清除新连接。 */
+	/* 停止或监听的新周期继续复用有界表，旧到期通知不得清除新连接。 */
 	assert(tr_pipeline_listener_listen_ipv4(listener, "127.0.0.1", 0U, 4,
 	                                        &port) == TR_OK);
 	fd = raw_connect(port);
@@ -751,7 +751,7 @@ static void test_listener_restart(void)
 	wait_eof(fd);
 	assert(close(fd) == 0);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	/* stopped 路径仍须保留失败的 timer 解绑能力，允许再次 destroy。 */
+	/* 已停止路径仍须保留失败的定时器解绑能力，允许再次销毁。 */
 	atomic_store(&fail_unregister, 1);
 	assert(tr_pipeline_listener_destroy(listener) == TR_ERR_SYS);
 	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
@@ -773,8 +773,7 @@ record_data_handoff_event(const struct tr_pipeline_route_preface *route,
 
 	(void)connection;
 	(void)event;
-	/* preface_release 必须保留 tracked，terminal handler 才能看到精确路由。
-	 */
+	/* preface_release 必须保留 tracked，终止处理函数才能看到精确路由。 */
 	assert(route->role == TR_PIPELINE_ROUTE_DATA);
 	assert(route->pipeline_id == 42U && route->epoch == 1U);
 	atomic_store(&probe->last_status, status);
@@ -850,7 +849,7 @@ static void test_data_handoff_crosses_deadline(int mode)
 	assert(close(data) == 0);
 	atomic_store(&expired_clock, 0U);
 
-	/* 容量为 1：新 offer 成功证明失败交接的 ATTACHED membership 已退休。 */
+	/* 容量为 1：新提议成功证明失败交接的 ATTACHED 成员关系已退役。 */
 	assert(tr_pipeline_listener_send_data_offer(listener, 42U, 1U, 2U,
 	                                            &next_route) == TR_OK);
 	assert(next_route.member_index == route.member_index);
@@ -911,7 +910,7 @@ static void test_real_timeout(int group)
 
 	fixture_init(&f, group, 80U);
 	fd = raw_connect(f.port);
-	/* 原始 fd 保持打开，由真实 Reactor 时钟与定时器独立回收。 */
+	/* 原始 fd 保持打开，由真实反应器时钟与定时器独立回收。 */
 	wait_eof(fd);
 	wait_counts(&f, 0U, 0U);
 	assert(atomic_load(&timeout_aborts) == before + 1U);

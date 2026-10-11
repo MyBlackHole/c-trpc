@@ -449,10 +449,9 @@ static void test_public_connection_group_server(void)
 	send_route(data, &data_route);
 	wait_data_accepts(server, 1U);
 
-	/*
-	 * 物理 DATA membership 本身不是 transfer authorization。Server 必须先在
-	 * owner 上建立 Stream -> exact DATA generation affinity，并通过
-	 * TRANSFER_READY 把该 barrier 告知 peer，之后 DATA frame 才允许进入业务回调。
+	/* 物理 DATA 成员关系本身不是传输授权。服务端必须先在
+	 * 所有者上建立流到精确 DATA 代次的亲和绑定，并通过
+	 * TRANSFER_READY 把该屏障告知对端，之后 DATA 帧才允许进入业务回调。
 	 */
 	assert(tr_server_connection_group_send_transfer_ready(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 3001U,
@@ -485,16 +484,15 @@ static void test_public_connection_group_server(void)
 	control = -1;
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
-	/*
-	 * Retained DATA payload still owns one Runtime Reactor RX buffer. Terminal
-	 * destroy must stop/close admission but keep Runtime/Server storage alive.
+	/* 保留的 DATA 负载仍拥有一个运行时反应器接收缓冲区。
+	 * 终止销毁必须停止或关闭准入，但保持 Runtime/Server 存储存活。
 	 */
 	assert(tr_server_destroy(server) == TR_ERR_STATE);
 	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
 	assert(tr_connection_group_message_release(&ctx.retained) ==
 	       TR_ERR_INVALID);
 
-	/* The same terminal operation is retryable after the final holder returns. */
+	/* 最终持有者归还后，同一终止操作可重试。 */
 	assert(tr_server_destroy(server) == TR_OK);
 
 	pthread_cond_destroy(&ctx.cond);
@@ -550,10 +548,9 @@ static void test_public_connection_group_client_control(void)
 	       TR_ERR_STATE);
 	wait_counter(&ctx, &ctx.authorized, 1U);
 
-	/*
-	 * This slice owns only CONTROL. An offered DATA reservation is returned
-	 * internally with DATA_CANCEL; once that cancellation reaches the Server,
-	 * capacity=1 permits a new offer without exposing index/generation.
+	/* 此部分仅拥有 CONTROL。提供的 DATA 预留通过 DATA_CANCEL
+	 * 在内部归还；取消到达服务端后，capacity=1 允许新的提议，
+	 * 无需暴露索引或代次。
 	 */
 	assert(wait_data_offer(server, UINT64_C(3001)) == TR_OK);
 	assert(wait_data_offer(server, UINT64_C(3002)) == TR_OK);
@@ -613,7 +610,7 @@ static void test_client_group_destroy_retry_preserves_control(void)
 	atomic_store(&fail_group_control_close_once, 1);
 	assert(tr_client_destroy(client) == TR_ERR_SYS);
 
-	/* 失败的终局屏障不能清空 CONTROL capability，销毁必须可重试。 */
+	/* 失败的终局屏障不能清空 CONTROL 能力凭证，销毁必须可重试。 */
 	memset(&client_stats, 0, sizeof(client_stats));
 	assert(tr_client_connection_group_get_stats(client, &client_stats) ==
 	       TR_OK);
@@ -675,7 +672,7 @@ static void test_client_group_close_retry_preserves_control(void)
 	atomic_store(&fail_group_control_close_once, 1);
 	assert(tr_client_connection_group_close(client) == TR_ERR_SYS);
 
-	/* 失败的显式 close 必须保留 CONTROL capability，后续调用才能重试。 */
+	/* 失败的显式关闭必须保留 CONTROL 能力凭证，后续调用才能重试。 */
 	memset(&client_stats, 0, sizeof(client_stats));
 	assert(tr_client_connection_group_get_stats(client, &client_stats) ==
 	       TR_OK);
@@ -937,7 +934,7 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_server_connection_group_release_transfer(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
 
-	/* release makes the semantic stream id reusable on both sides. */
+	/* 释放使语义流标识在两端均可复用。 */
 	assert(tr_server_connection_group_send_transfer_ready(
 		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
 		       UINT64_C(4102)) == TR_OK);
@@ -963,10 +960,9 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(tr_client_connection_group_wait_drained(
 		       client, 1U) == TR_ERR_STATE);
 
-	/*
-	 * Client drain is a monotonic local admission barrier. Existing READY work
-	 * remains usable, but a READY observed after begin_drain() must not create
-	 * a new local affinity. The Server owns that late affinity independently.
+	/* 客户端排空是单调的本地准入屏障。已有 READY 工作仍可用，
+	 * 但 begin_drain() 后观察到的 READY 不得创建新本地亲和绑定。
+	 * 服务端独立拥有该迟到亲和绑定。
 	 */
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
@@ -975,36 +971,34 @@ static void test_public_connection_group_client_data_offer(void)
 		       client, &client_stats) == TR_OK);
 	assert(client_stats.draining == 1U);
 	assert(client_stats.active_transfers == 1U);
-	/*
-	 * 真实 Client Group 仍有 active transfer：定点拦截有限 condwait，
-	 * 确认超时由公共 helper 计算且原始 CLOCK_MONOTONIC timespec 直传。
+	/* 真实客户端组仍有活跃传输：定点拦截有限条件等待，
+	 * 确认超时由公共辅助函数计算且原始 CLOCK_MONOTONIC timespec 直传。
 	 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 0);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 10U) == TR_ERR_TIMEOUT);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
 
-	/* UINT32_MAX 毫秒也必须保持有限，且原绝对 deadline 不可重算。 */
+	/* UINT32_MAX 毫秒也必须保持有限，且原绝对截止时间不可重算。 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, UINT32_MAX, 0);
 	assert(tr_client_connection_group_wait_drained(
 		       client, UINT32_MAX) == TR_ERR_TIMEOUT);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 1U);
 
-	/* clock/deadline 初始化失败必须显式返回；不能误入 condwait。 */
+	/* 时钟或截止时间初始化失败必须显式返回；不能误入条件等待。 */
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 1);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 10U) == TR_ERR_SYS);
 	tr_test_drain_deadline_probe_end(&deadline_probe, 1U, 0U);
 
-	/*
-	 * Race waiter registration against release_transfer(). The earlier timed
-	 * wait already proves the blocking condvar path; here both orderings are
-	 * intentional and must be safe:
+	/* 让等待者注册与 release_transfer()
+	 * 竞争。此前的限时等待已证明阻塞条件变量路径；
+	 * 这里两种顺序都是有意的，且必须安全：
 	 *
-	 *   waiter registers -> release publishes + wakes
-	 *   release publishes -> waiter observes completed generation
+	 *   等待者注册 -> 释放发布并唤醒
+	 *   释放发布 -> 等待者观察已完成代次
 	 *
-	 * Either way there must be no lost wakeup.
+	 * 两种顺序都不得丢失唤醒。
 	 */
 	memset(&wait_probe, 0, sizeof(wait_probe));
 	wait_probe.client = client;
@@ -1051,7 +1045,7 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(server_stats.groups_current == 1U);
 	assert(server_stats.connections_current == 2U);
 	assert(server_stats.active_transfers == 2U);
-	/* Active group/connections keep the event-driven waiter blocked. */
+	/* 活跃组与连接使事件驱动的等待者保持阻塞。 */
 	assert(tr_server_connection_group_wait_drained(
 		       server, 10U) == TR_ERR_TIMEOUT);
 
@@ -1076,10 +1070,8 @@ static void test_public_connection_group_client_data_offer(void)
 	assert(client_stats.send_bytes_inflight == 0U);
 	assert(client_stats.data_connections == 1U);
 
-	/*
-	 * Race waiter registration against the terminal Client close. Either
-	 * ordering is valid: a registered waiter must be broadcast, while a late
-	 * waiter must observe the already-completed generation. No lost wakeup.
+	/* 让等待者注册与客户端终止关闭竞争。两种顺序都有效：
+	 * 已注册等待者必须被广播唤醒，迟到等待者必须观察到已完成代次。不得丢失唤醒。
 	 */
 	memset(&server_wait, 0, sizeof(server_wait));
 	server_wait.server = server;
@@ -1151,7 +1143,7 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connection_groups.max_data_connections = 1U;
-	/* max_active_transfers == 0 inherits the existing max_streams default. */
+	/* max_active_transfers == 0 继承现有 max_streams 默认值。 */
 	assert(client_config.connection_groups.max_active_transfers == 0U);
 	assert(tr_client_create(&client_config, &client) == TR_OK);
 
@@ -1163,9 +1155,8 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(wait_data_offer(server, UINT64_C(4401)) == TR_OK);
-	/*
-	 * The second offer can be issued only after the first exact reservation
-	 * has been returned by the draining Client. No DATA socket is created.
+	/* 只有排空中的客户端归还第一个精确预留后，才能签发第二个提议。
+	 * 不创建 DATA 套接字。
 	 */
 	assert(wait_data_offer(server, UINT64_C(4402)) == TR_OK);
 
@@ -1214,11 +1205,10 @@ static void test_client_group_destroy_after_remote_control_close(void)
 	uint16_t group_port = 0U;
 	unsigned i;
 
-	/*
-	 * 反复覆盖 CONTROL peer close 与 Client destroy 的交叠窗口。
-	 * destroy 不能通过外部线程读取 group->control.reactor 来判断是否需要
-	 * owner barrier；即使 close callback 已经清空 handle 但尚未返回，
-	 * Client Group storage 也必须继续存活到 callback quiescence。
+	/* 反复覆盖 CONTROL 对端关闭与客户端销毁的交叠窗口。
+	 * 销毁不能通过外部线程读取 group->control.reactor 来判断是否需要
+	 * 所有者屏障；即使关闭回调已经清空句柄但尚未返回，
+	 * 客户端组存储也必须继续存活到回调静止。
 	 */
 	for (i = 0; i < 16U; ++i) {
 		memset(&ctx, 0, sizeof(ctx));
@@ -1249,7 +1239,7 @@ static void test_client_group_destroy_after_remote_control_close(void)
 			       client, "127.0.0.1", group_port, &group) == TR_OK);
 		wait_counter(&ctx, &ctx.authorized, 1U);
 
-		/* Remote close is asynchronous from the Client Reactor's perspective. */
+		/* 从客户端反应器角度看，远端关闭是异步的。 */
 		assert(tr_server_connection_group_stop(server) == TR_OK);
 		assert(tr_client_destroy(client) == TR_OK);
 		client = NULL;

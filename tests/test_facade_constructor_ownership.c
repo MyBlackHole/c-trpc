@@ -98,9 +98,8 @@ static void test_client_normal_constructor_rollback_clears_out(void)
 	struct tr_client *client = NULL;
 
 	reset_faults();
-	/*
-	 * real runtime_start 已经成功建立 Reactor epoch，然后人为把 create 后续结果
-	 * 改成失败。rollback 正常收敛时仍保持传统 create 契约：out == NULL。
+	/* 真实 runtime_start 已经成功建立反应器轮次，然后人为把创建后续结果
+	 * 改成失败。回滚正常收敛时仍保持传统创建契约：out == NULL。
 	 */
 	atomic_store(&force_runtime_start_error, 1);
 	assert(tr_client_create(NULL, &client) == TR_ERR_BAD_LENGTH);
@@ -117,16 +116,15 @@ static void test_client_rollback_failure_keeps_owner(void)
 	atomic_store(&force_runtime_start_error, 1);
 	atomic_store(&fail_runtime_stop_once, 1);
 
-	/*
-	 * 原始 constructor cause 是 BAD_LENGTH，但 terminal rollback 的 stop barrier
-	 * 再失败一次。生命周期错误必须优先，并把 partial Client 留在 out 中。
+	/* 原始构造原因是 BAD_LENGTH，但终止回滚的停止屏障
+	 * 再失败一次。生命周期错误必须优先，并把部分构造的 Client 留在 out 中。
 	 */
 	assert(tr_client_create(NULL, &client) == TR_ERR_SYS);
 	assert(client != NULL);
 	assert(atomic_load(&runtime_start_attempts) == 1U);
 	assert(atomic_load(&runtime_stop_attempts) == 1U);
 
-	/* fault 已消费，caller 使用保留 ownership 继续 destroy 即可完成收敛。 */
+	/* 故障已消耗，调用者使用保留的所有权继续销毁即可完成收敛。 */
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 	assert(atomic_load(&runtime_stop_attempts) >= 2U);
@@ -158,9 +156,8 @@ static void test_server_rollback_failure_keeps_owner(void)
 	atomic_store(&fail_server_rpc_pool_once, 1);
 	atomic_store(&fail_runtime_destroy_once, 1);
 
-	/*
-	 * pool init 是原始 constructor failure；随后 Runtime terminal destroy
-	 * 再失败一次。Server storage 不得由 void cleanup 丢失，而必须留在 out。
+	/* 池初始化是原始构造失败；随后 Runtime 终止销毁
+	 * 再失败一次。Server 存储不得由无返回值清理丢失，而必须留在 out。
 	 */
 	assert(tr_server_create(&config, &server) == TR_ERR_SYS);
 	assert(server != NULL);
