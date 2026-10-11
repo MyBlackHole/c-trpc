@@ -171,3 +171,17 @@ Reactor 快照也暴露已有的每轮命令公平性数据：
 
 可观测性计数器提供的是证据，不是自动策略。
 CI 应继续以确定性不变量作为门槛，而不是固定 QPS 或延迟阈值。
+
+### Server peer 回收期间的累计值
+
+Server 按 shard 在 owner 上统一收集 live peer、detached peer 的最后快照及已回收累计值。
+Detached peer 的快照保持可见，直到 finalizer 在同一锁下以归档快照替换它。
+此修复保证已采集累计值在 peer-table 移除、detached 等待及归档替换期间不回退、
+不重复。归档内容来自 endpoint finalizer 提供的快照，并不保证覆盖 worker 的全部
+晚到观测。当前资源 gauge 仍只表示 live peer，`peers_reaping_current` 单独表示等待
+回收的 peer。多 shard 聚合不是全局同一时刻的快照。
+
+已复现的既存限制：开启 timing 时，unary completion 可先于 handler histogram
+发布，旧 endpoint 归档可能漏掉 handler timing 样本；该问题未在本次修复中解决，
+仍是发布阻断及待审查事项。语义 call 计数与状态分布的定向回归通过，不等于所有
+内部观测完整，也不解除该发布阻断。

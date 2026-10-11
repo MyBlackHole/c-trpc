@@ -34,13 +34,12 @@ static int tr_set_nonblock_cloexec(int fd)
 
 static int tr_socket_ipv4(void)
 {
-	int fd TR_AUTO(tr_fd_cleanup) = socket(AF_INET, SOCK_STREAM, 0);
+	int fd TR_AUTO(tr_fd_cleanup) =
+	        socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 
 	if (fd < 0)
 		return -1;
 
-	if (tr_set_nonblock_cloexec(fd) != TR_OK)
-		return -1;
 
 	return tr_fd_take(&fd);
 }
