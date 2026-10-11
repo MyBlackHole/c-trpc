@@ -19,7 +19,7 @@ int tr_tcp_finish_connect(int fd);
 int tr_tcp_accept(int listen_fd, int *out_fd);
 void tr_socket_close(int *fd);
 
-/* 作用域自动管理的 fd；-1 表示已经 disarm，不再拥有资源。 */
+/* 作用域自动管理的 fd；-1 表示已经解除管理，不再拥有资源。 */
 static inline void tr_fd_cleanup(int *fd)
 {
 	tr_socket_close(fd);

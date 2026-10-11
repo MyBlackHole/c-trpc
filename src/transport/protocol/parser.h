@@ -37,19 +37,17 @@ int tr_parser_init(struct tr_parser *parser, struct tr_buffer_pool *pool,
 		   const struct tr_wire_limits *limits);
 void tr_parser_reset(struct tr_parser *parser);
 
-/*
- * 确保 parser 已准备好下一次 receive 所需的全部资源。
- * payload buffer pool 暂时耗尽时返回 TR_AGAIN。
+/* 确保解析器已准备好下一次接收所需的全部资源。
+ * 负载缓冲池暂时耗尽时返回 TR_AGAIN。
  */
 int tr_parser_prepare(struct tr_parser *parser);
 
-/* direct-receive API：recv() 可以直接写入该 span。 */
+/* 直接接收 API：recv() 可以直接写入该区间。 */
 void *tr_parser_write_ptr(struct tr_parser *parser);
 size_t tr_parser_write_len(const struct tr_parser *parser);
 
-/*
- * 上报写入 tr_parser_write_ptr() 返回 span 的字节数。
- * 返回 TR_FRAME_READY 时 payload ownership 转移给 out_frame。
+/* 上报写入 tr_parser_write_ptr() 返回区间的字节数。
+ * 返回 TR_FRAME_READY 时负载所有权转移给 out_frame。
  */
 int tr_parser_produce(struct tr_parser *parser, size_t produced,
 		      struct tr_frame *out_frame);
