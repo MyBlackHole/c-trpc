@@ -391,6 +391,9 @@ static uint64_t tr_rpc_timeout_deadline_ns(uint32_t timeout_ms)
 	if (timeout_ms == 0)
 		return 0;
 	now = tr_rpc_now_ns();
+	/* 0 是时钟读取失败的哨兵，不能当作正常的 epoch 起点。 */
+	if (now == 0U)
+		return 0;
 	delta = (uint64_t)timeout_ms * UINT64_C(1000000);
 	if (UINT64_MAX - now < delta)
 		return UINT64_MAX;
@@ -693,8 +696,10 @@ static int tr_rpc_import_peer_metadata_locked(
 				uint64_t deadline_ns;
 				uint64_t delta;
 
-				if (timeout_ms == 0 || now == 0)
+				if (timeout_ms == 0)
 					return TR_ERR_BAD_LENGTH;
+				if (now == 0U)
+					return TR_ERR_SYS;
 				if (timeout_ms > UINT64_MAX / UINT64_C(1000000))
 					deadline_ns = UINT64_MAX;
 				else {
@@ -932,10 +937,34 @@ static int tr_rpc_deadline_set_locked(struct tr_rpc_endpoint *endpoint,
 				      struct tr_rpc_call_slot *call,
 				      uint64_t deadline_ns)
 {
-	int ret = tr_rpc_deadline_update_locked(endpoint, call, deadline_ns);
+	uint64_t old_deadline_ns;
+	int ret;
 
-	if (ret == TR_OK)
-		(void)tr_rpc_deadline_rearm_locked(endpoint);
+	if (!endpoint || !call)
+		return TR_ERR_INVALID;
+	old_deadline_ns = call->deadline_ns;
+	ret = tr_rpc_deadline_update_locked(endpoint, call, deadline_ns);
+	if (ret != TR_OK)
+		return ret;
+
+	ret = tr_rpc_deadline_rearm_locked(endpoint);
+	if (ret != TR_OK && deadline_ns != 0U) {
+		int rollback_ret;
+
+		/*
+		 * 新 Call 只在 timer arm 也成功后才可发布。否则该 Call
+		 * 虽已入 heap，却可能永远没有超时回调。旧 heap deadline
+		 * 恢复后，先前成功 arm 的 timer 仍负责其原有 Call。
+		 */
+		rollback_ret = tr_rpc_deadline_update_locked(
+			endpoint, call, old_deadline_ns);
+		return rollback_ret == TR_OK ? ret : rollback_ret;
+	}
+	/*
+	 * 终态删除不能反向复活已完成的 Call。即使 rearm 失败，
+	 * 也继续从 heap 移除并报告错误；原 timer 仍能触发下一轮，
+	 * timer callback 自己使用返回值执行后继重排。
+	 */
 	return ret;
 }
 
@@ -3934,6 +3963,7 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 	struct tr_rpc_call_handle expired_handle = { 0 };
 	struct tr_rpc_cancel_request request;
+	uint64_t next_deadline_ns = 0U;
 	uint32_t i;
 	int expired = 0;
 	int retry = 0;
@@ -4003,7 +4033,23 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 			}
 		}
 	}
-	(void)tr_rpc_deadline_rearm_locked(endpoint);
+	/*
+	 * Reactor 的 timer queue 已经从 heap 摘下当前到期条目。
+	 * callback 直接返回下一绝对期限，由 timer_queue_run_due()
+	 * 自动重排。不能只调用 tr_reactor_timer_arm() 并丢弃其错误：
+	 * 一次注入的 arm 失败会使剩余 Call 永远无人唤醒。
+	 *
+	 * 后续 cancel 若自行成功 arm/unregister，timer queue 的
+	 * version fence 会忽略此返回值；若它的 rearm 失败，当前
+	 * callback 的返回值仍可安全恢复后继 deadline。
+	 */
+	if (endpoint->deadline_heap_count != 0U)
+		next_deadline_ns =
+			endpoint->calls[endpoint->deadline_heap[0]].deadline_ns;
+	if (endpoint->final_close_retry_deadline_ns != 0U &&
+	    (next_deadline_ns == 0U ||
+	     endpoint->final_close_retry_deadline_ns < next_deadline_ns))
+		next_deadline_ns = endpoint->final_close_retry_deadline_ns;
 	pthread_mutex_unlock(&endpoint->lock);
 
 	if (expired) {
@@ -4011,7 +4057,7 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 		request.status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
 		(void)tr_rpc_cancel_on_owner(&request);
 	}
-	return 0;
+	return next_deadline_ns;
 }
 
 static int tr_rpc_deadline_init(struct tr_rpc_endpoint *endpoint)
@@ -5471,9 +5517,12 @@ int tr_rpc_unary_call_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 	if (options) {
 		owner_request.options = *options;
 		owner_request.has_options = 1;
-		if (options->timeout_ms)
+		if (options->timeout_ms) {
 			owner_request.deadline_ns =
 				tr_rpc_timeout_deadline_ns(options->timeout_ms);
+			if (owner_request.deadline_ns == 0U)
+				return TR_ERR_SYS;
+		}
 	}
 
 	return tr_rpc_owner_call(endpoint, tr_rpc_unary_call_on_owner,
@@ -5598,9 +5647,12 @@ int tr_rpc_call_start_ex(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 	if (options) {
 		owner_request.options = *options;
 		owner_request.has_options = 1;
-		if (options->timeout_ms)
+		if (options->timeout_ms) {
 			owner_request.deadline_ns =
 				tr_rpc_timeout_deadline_ns(options->timeout_ms);
+			if (owner_request.deadline_ns == 0U)
+				return TR_ERR_SYS;
+		}
 	}
 	if (callbacks) {
 		owner_request.callbacks = *callbacks;
