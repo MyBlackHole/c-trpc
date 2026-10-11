@@ -72,17 +72,31 @@ socketpair，仅模拟非阻塞 TCP 返回与耗时以及 HELLO 条件等待超�
 初始时钟失败；校验 fd 已关闭，且同一 Client 的后续连接不被残留 session 拒绝。
 该测试证明实际模块间期限传递，不声称测试了真实 TCP 网络延迟。
 
-## 尚需独立处理的异步路径
+## 异步路径整改进度
 
-1. `src/io/connector.c`：前导发送在 `EINTR` 后直接循环；同一所有者定时器
-   无法中断正在执行的循环。需要确定性验证持续中断时的进展及 I/O 就绪与
-   期限同时到达的终态顺序。不能仅因“已经注册定时器”就视为总期限已证明。
-2. `src/rpc/rpc.c`：`tr_rpc_timeout_deadline_ns()` 没有单独处理
+### Connector：已在 PR #193 处理
+
+`src/io/connector.c` 的前导数据发送此前在 `EINTR` 后立即循环，可能长时间
+占住 Reactor owner，让已注册的超时定时器得不到调度。本次调整为与
+`EAGAIN/EWOULDBLOCK` 相同：注册或复用 `EPOLLOUT` aux source 后立即返回
+owner，下一次可写事件再恢复 `preface_sent` 偏移。使用原来的同一个定时器，
+不创建新的 worker、无界队列或并行 callback。
+
+单次 attempt 保存 timer arm 时产生的 `deadline_ns`。每轮推进及每段发送后
+都重新检查它：I/O 刚好到期不得在 timer callback 运行之前抢先报告 `TR_OK`；
+时钟读取失败使用 `TR_ERR_SYS` 结束 attempt，仍按原顺序完成 fd/source detach。
+`test_connector` 使用仅限测试的可写 socketpair、`send`/单调时钟链接包装，
+覆盖多次 `EINTR`、到期瞬间发送成功、两字节部分发送后恢复剩余内容；
+原有 cancel-vs-complete 终态锁存与注销失败重试测试继续保留。
+
+### 尚未完成：RPC 与极端换算边界
+
+1. `src/rpc/rpc.c`：`tr_rpc_timeout_deadline_ns()` 没有单独处理
    `tr_rpc_now_ns()==0` 的读取失败哨兵；`tr_rpc_deadline_set_locked()`
    丢弃重设定时器的错误。需要按调用准入、既有 Call 和回收分别设计失败语义。
-3. Reactor / RPC 仍有 `(delta_ns + 999999) / 1000000` 形式的向上取整。
+2. Reactor / RPC 仍有 `(delta_ns + 999999) / 1000000` 形式的向上取整。
    极端 `uint64_t` 边界可能先加法回绕，需专门的边界回归；不将这种极端
    算术边界描述为普通运行时已经复现的故障。
 
-以上项目未在本 PR 修改。异步连接的单一定时器、终态锁存和回调撤销屏障应
-保持；下一轮不能通过新增无界工作队列、独立线程或削弱断言规避问题。
+以上剩余项不在 PR #193 中修改；不能通过新增无界工作队列或削弱
+终态锁存、回调撤销屏障来规避问题。

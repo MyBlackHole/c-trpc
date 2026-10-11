@@ -35,6 +35,8 @@ struct tr_connector {
 	int connecting;
 	int watched;
 	int socket_ready;
+	/* 单次 attempt 的 timer 与 I/O 共用此绝对时间，0 表示未成功 arm。 */
+	uint64_t deadline_ns;
 
 	uint8_t preface[TR_CONNECTOR_MAX_PREFACE_BYTES];
 	uint32_t preface_len;
@@ -99,6 +101,7 @@ static void tr_connector_reset_state(struct tr_connector *connector)
 	connector->connecting = 0;
 	connector->watched = 0;
 	connector->socket_ready = 0;
+	connector->deadline_ns = 0U;
 	connector->port = 0U;
 	connector->preface_len = 0U;
 	connector->preface_sent = 0U;
@@ -171,25 +174,56 @@ static int tr_connector_cancel_cleanup_on_owner(
 
 static int tr_connector_watch_on_owner(struct tr_connector *connector);
 
+/*
+ * Reactor timer callback 与可写 I/O callback 都在同一 owner 上执行，但
+ * EPOLLOUT 可以在同一轮 timer dispatch 前完成。成功也必须确认 deadline
+ * 尚未到期，不能仅依赖稍后才得到执行的 timer callback。
+ */
+static int tr_connector_deadline_status_on_owner(
+	const struct tr_connector *connector)
+{
+	uint64_t now_ns;
+
+	if (connector->deadline_ns == 0U)
+		return TR_ERR_STATE;
+	now_ns = tr_connector_now_ns();
+	if (now_ns == 0U)
+		return TR_ERR_SYS;
+	return now_ns >= connector->deadline_ns ? TR_ERR_TIMEOUT : TR_OK;
+}
+
 static int tr_connector_send_preface_on_owner(
 	struct tr_connector *connector)
 {
-	while (connector->preface_sent < connector->preface_len) {
-		ssize_t n = send(
-			connector->fd,
-			connector->preface + connector->preface_sent,
-			connector->preface_len - connector->preface_sent,
-			MSG_NOSIGNAL);
+	for (;;) {
+		ssize_t n;
+		int ret = tr_connector_deadline_status_on_owner(connector);
 
+		if (ret != TR_OK)
+			return tr_connector_complete_on_owner(connector, ret);
+		/*
+		 * 每段发送后在下一轮先校验期限，避免发送已完成但跨越
+		 * 截止时间时误把 attempt 提交为成功。
+		 */
+		if (connector->preface_sent == connector->preface_len)
+			return tr_connector_complete_on_owner(connector, TR_OK);
+
+		n = send(connector->fd,
+			 connector->preface + connector->preface_sent,
+			 connector->preface_len - connector->preface_sent,
+			 MSG_NOSIGNAL);
 		if (n > 0) {
 			connector->preface_sent += (uint32_t)n;
 			continue;
 		}
-		if (n < 0 && errno == EINTR)
-			continue;
-		if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-			int ret = tr_connector_watch_on_owner(connector);
-
+		if (n < 0 && (errno == EINTR || errno == EAGAIN ||
+			      errno == EWOULDBLOCK)) {
+			/*
+			 * EINTR 同 EAGAIN 一样让出本次 owner turn，依赖 EPOLLOUT
+			 * 继续，而不是无限重试使 timeout/命令无法被调度。
+			 * 已注册的 aux source 保持不变，无额外 worker/timer。
+			 */
+			ret = tr_connector_watch_on_owner(connector);
 			if (ret == TR_OK)
 				return TR_OK;
 			return tr_connector_complete_on_owner(connector, ret);
@@ -201,8 +235,6 @@ static int tr_connector_send_preface_on_owner(
 		 */
 		return tr_connector_complete_on_owner(connector, TR_ERR_SYS);
 	}
-
-	return tr_connector_complete_on_owner(connector, TR_OK);
 }
 
 static int tr_connector_progress_on_owner(struct tr_connector *connector)
@@ -211,6 +243,11 @@ static int tr_connector_progress_on_owner(struct tr_connector *connector)
 
 	if (!connector->active || connector->fd < 0)
 		return TR_ERR_STATE;
+
+	/* 到期的可写事件不得早于本轮仍待调度的 timer 提交成功。 */
+	ret = tr_connector_deadline_status_on_owner(connector);
+	if (ret != TR_OK)
+		return tr_connector_complete_on_owner(connector, ret);
 
 	if (connector->connecting) {
 		ret = tr_tcp_finish_connect(connector->fd);
@@ -307,7 +344,13 @@ static int tr_connector_arm_timeout_on_owner(struct tr_connector *connector)
 		(uint64_t)connector->config.timeout_ms * UINT64_C(1000000);
 	deadline_ns = UINT64_MAX - now_ns < delay_ns ?
 			      UINT64_MAX : now_ns + delay_ns;
-	return tr_reactor_timer_arm(connector->timer, deadline_ns);
+	{
+		int ret = tr_reactor_timer_arm(connector->timer, deadline_ns);
+
+		if (ret == TR_OK)
+			connector->deadline_ns = deadline_ns;
+		return ret;
+	}
 }
 
 struct tr_connector_start_request {
