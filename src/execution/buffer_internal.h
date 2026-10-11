@@ -6,10 +6,9 @@
 
 struct tr_memory_budget;
 
-/*
- * Internal bounded on-demand pool: buffer_count bounds concurrent ownership.
- * Checked-out descriptors grow lazily up to max_buffer_size and retain capacity
- * for steady-state reuse.
+/* 内部有界按需池：buffer_count 限制并发所有权数量。
+ * 取出的描述符按需增长，最多达到 max_buffer_size，并保留容量
+ * 用于稳态复用。
  */
 int tr_buffer_pool_init_budgeted(
 	struct tr_buffer_pool *pool, uint32_t buffer_count,

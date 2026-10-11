@@ -229,7 +229,7 @@ int tr_timer_queue_unregister(struct tr_timer_queue *queue,
 	entry->running = 0;
 	entry->callback = NULL;
 	entry->arg = NULL;
-	/* Generation survives reuse; stale tokens cannot release this slot twice. */
+	/* 代次在复用后保留；陈旧令牌不能二次释放此槽位。 */
 	entry->next_free = queue->free_head;
 	queue->free_head = token.slot;
 	return TR_OK;
@@ -282,9 +282,8 @@ size_t tr_timer_queue_run_due(struct tr_timer_queue *queue, uint64_t now_ns,
 		entry = &queue->entries[slot];
 		if (entry->used && entry->generation == generation) {
 			entry->running = 0;
-			/*
-			 * callback 内显式 arm/unregister 会改变 version 或
-			 * generation，此时 callback 返回值不能覆盖该操作。
+			/* 回调内显式设置或注销定时器会改变 version 或
+			 * generation，此时回调返回值不能覆盖该操作。
 			 */
 			if (entry->version == version && next_ns != 0)
 				(void)tr_timer_queue_arm(queue, token, next_ns);

@@ -261,9 +261,8 @@ int tr_command_queue_push_wait_force(
 		return TR_ERR_STATE;
 	}
 
-	/*
-	 * STOP 不竞争普通 ring 容量。固定槽位已包含在 Reactor 对象及其
-	 * sizeof 内存预算中；压力下无需分配，也不等待 consumer 提供空位。
+	/* STOP 不竞争普通环形队列容量。固定槽位已包含在反应器对象及其
+	 * sizeof 内存预算中；压力下无需分配，也不等待消费者提供空位。
 	 * 与普通入队共用 lock/sequence，保留已接受命令的 FIFO 边界。
 	 */
 	queue->stop_command = *command;
@@ -329,7 +328,7 @@ size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 		queue->count--;
 	}
 
-	/* STOP 不能越过 ring 中的前驱，也不能突破本轮 max_commands。 */
+	/* STOP 不能越过环形队列中的前驱，也不能突破本轮 max_commands。 */
 	if (queue->count == 0 && queue->stop_pending && count < max_commands) {
 		out[count++] = queue->stop_command;
 		memset(&queue->stop_command, 0, sizeof(queue->stop_command));
@@ -339,9 +338,8 @@ size_t tr_command_queue_pop_batch(struct tr_command_queue *queue,
 	if (queue->count == 0 && !queue->stop_pending)
 		queue->wake_pending = 0;
 
-	/*
-	 * 一个 Reactor batch 可能释放多个 command slot。broadcast 让所有同步
-	 * waiter 重新竞争实际空位；STOP 使用独立固定槽位，不属于容量 waiter。
+	/* 一个反应器批次可能释放多个命令槽位。广播让所有同步等待者
+	 * 重新竞争实际空位；STOP 使用独立固定槽位，不属于容量等待者。
 	 */
 	if (count != 0U && queue->waiters != 0U)
 		pthread_cond_broadcast(&queue->not_full);
