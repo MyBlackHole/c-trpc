@@ -3172,7 +3172,7 @@ int tr_channel_replace_connection(struct tr_channel *channel, enum tr_lane lane,
 	request.lane = lane;
 	request.connection = connection;
 	ret = tr_reactor_call(channel->reactor,
-			      tr_channel_replace_connection_on_owner, &request);
+				      tr_channel_replace_connection_on_owner, &request);
 	if (ret != TR_OK)
 		return ret;
 
@@ -3518,7 +3518,7 @@ int tr_channel_disable_keepalive(struct tr_channel *channel)
 }
 
 int tr_channel_get_lane_state(struct tr_channel *channel, enum tr_lane lane,
-			      enum tr_channel_lane_state *out)
+				      enum tr_channel_lane_state *out)
 {
 	if (!channel || !out ||
 	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
@@ -3647,8 +3647,14 @@ int tr_channel_wait_ready_deadline(
 	}
 	if ((lane == TR_LANE_CONTROL && channel->control_ready) ||
 	    (lane == TR_LANE_BULK && channel->bulk_ready)) {
+		/* 等待锁可能耗尽期限；就绪成功必须在持锁观察时再次判定。 */
+		if (timed) {
+			result = tr_deadline_expired(deadline, &expired);
+			if (result == TR_OK && expired)
+				result = TR_ERR_TIMEOUT;
+		}
 		pthread_mutex_unlock(&channel->lock);
-		return TR_OK;
+		return result;
 	}
 	if (channel->state_waiters == UINT32_MAX) {
 		pthread_mutex_unlock(&channel->lock);
