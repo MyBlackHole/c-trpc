@@ -35,7 +35,7 @@ struct tr_connector {
 	int connecting;
 	int watched;
 	int socket_ready;
-	/* 单次 attempt 的 timer 与 I/O 共用此绝对时间，0 表示未成功 arm。 */
+	/* 单次尝试的定时器与 I/O 共用此绝对时间，0 表示未成功设置定时。 */
 	uint64_t deadline_ns;
 
 	uint8_t preface[TR_CONNECTOR_MAX_PREFACE_BYTES];
@@ -65,9 +65,8 @@ static int tr_connector_unwatch_on_owner(struct tr_connector *connector)
 
 	ret = tr_reactor_aux_event_unregister(
 		connector->config.owner, connector->fd);
-	/*
-	 * STALE 表示此 fd 已从 aux source 表移除，足以保证 Connector 生命周期安全。
-	 */
+	/* STALE 表示此 fd 已从辅助事件源表移除，足以保证 Connector
+	 * 生命周期安全。 */
 	if (ret != TR_OK && ret != TR_ERR_STALE)
 		return ret;
 
@@ -84,7 +83,7 @@ static int tr_connector_disarm_on_owner(struct tr_connector *connector)
 
 	ret = tr_reactor_timer_arm(connector->timer, 0U);
 	if (ret == TR_ERR_STALE) {
-		/* timer source 已不存在，在本地同步记录该状态。 */
+		/* 定时器事件源已不存在，在本地同步记录该状态。 */
 		connector->timer_registered = 0;
 		memset(&connector->timer, 0, sizeof(connector->timer));
 		return TR_OK;
@@ -127,9 +126,8 @@ static int tr_connector_complete_on_owner(
 	}
 	status = connector->terminal_status;
 
-	/*
-	 * 只有拆除所有仍持有 Connector 指针的回调源后，才能向上层移交 fd 所有权。
-	 */
+	/* 只有拆除所有仍持有 Connector 指针的回调源后，才能向上层移交 fd
+	 * 所有权。 */
 	ret = tr_connector_unwatch_on_owner(connector);
 	if (ret != TR_OK)
 		return ret;
@@ -147,9 +145,8 @@ static int tr_connector_complete_on_owner(
 	}
 	tr_connector_reset_state(connector);
 
-	/*
-	 * TR_OK 时 fd ownership 从 connector 转移给 callback。callback 可以在
-	 * 返回前 adopt/close fd，甚至销毁上层对象，因此之后不能再访问 connector。
+	/* TR_OK 时 fd 所有权从 connector 转移给回调。回调可以在
+	 * 返回前接管或关闭 fd，甚至销毁上层对象，因此之后不能再访问 connector。
 	 */
 	callback(status, fd, callback_arg);
 	return TR_OK;
@@ -174,10 +171,9 @@ static int tr_connector_cancel_cleanup_on_owner(
 
 static int tr_connector_watch_on_owner(struct tr_connector *connector);
 
-/*
- * Reactor timer callback 与可写 I/O callback 都在同一 owner 上执行，但
- * EPOLLOUT 可以在同一轮 timer dispatch 前完成。成功也必须确认 deadline
- * 尚未到期，不能仅依赖稍后才得到执行的 timer callback。
+/* 反应器定时器回调与可写 I/O 回调都在同一所有者上执行，但
+ * EPOLLOUT 可以在同一轮定时器分派前完成。成功也必须确认截止时间
+ * 尚未到期，不能仅依赖稍后才得到执行的定时器回调。
  */
 static int tr_connector_deadline_status_on_owner(
 	const struct tr_connector *connector)
@@ -201,9 +197,8 @@ static int tr_connector_send_preface_on_owner(
 
 		if (ret != TR_OK)
 			return tr_connector_complete_on_owner(connector, ret);
-		/*
-		 * 每段发送后在下一轮先校验期限，避免发送已完成但跨越
-		 * 截止时间时误把 attempt 提交为成功。
+		/* 每段发送后在下一轮先校验期限，避免发送已完成但跨越
+		 * 截止时间时误把本次尝试提交为成功。
 		 */
 		if (connector->preface_sent == connector->preface_len)
 			return tr_connector_complete_on_owner(connector, TR_OK);
@@ -218,10 +213,9 @@ static int tr_connector_send_preface_on_owner(
 		}
 		if (n < 0 && (errno == EINTR || errno == EAGAIN ||
 			      errno == EWOULDBLOCK)) {
-			/*
-			 * EINTR 同 EAGAIN 一样让出本次 owner turn，依赖 EPOLLOUT
-			 * 继续，而不是无限重试使 timeout/命令无法被调度。
-			 * 已注册的 aux source 保持不变，无额外 worker/timer。
+			/* EINTR 同 EAGAIN 一样让出本次所有者处理轮次，依赖
+			 * EPOLLOUT 继续，而不是无限重试使超时或命令无法被调度。
+			 * 已注册的辅助事件源保持不变，无额外工作线程或定时器。
 			 */
 			ret = tr_connector_watch_on_owner(connector);
 			if (ret == TR_OK)
@@ -229,8 +223,7 @@ static int tr_connector_send_preface_on_owner(
 			return tr_connector_complete_on_owner(connector, ret);
 		}
 
-		/*
-		 * attempt 已经接管。若 completion 能完成发布，start/progress 本身仍返回成功；
+		/* 本次尝试已经接管。若完成结果能成功发布，启动或推进操作本身仍返回成功；
 		 * 网络错误通过 complete_cb 恰好报告一次。
 		 */
 		return tr_connector_complete_on_owner(connector, TR_ERR_SYS);
@@ -244,7 +237,7 @@ static int tr_connector_progress_on_owner(struct tr_connector *connector)
 	if (!connector->active || connector->fd < 0)
 		return TR_ERR_STATE;
 
-	/* 到期的可写事件不得早于本轮仍待调度的 timer 提交成功。 */
+	/* 到期的可写事件不得早于本轮仍待调度的定时器提交成功。 */
 	ret = tr_connector_deadline_status_on_owner(connector);
 	if (ret != TR_OK)
 		return tr_connector_complete_on_owner(connector, ret);
@@ -321,9 +314,8 @@ static uint64_t tr_connector_timeout(void *arg, uint64_t now_ns)
 	if (ret == TR_OK)
 		return 0U;
 
-	/*
-	 * 首次终态已经锁存，但 callback source detach 仍可能暂时失败。保持现有
-	 * publication 不变，用同一个 timer 短暂延迟重试，直到终态清理完成。
+	/* 首次终态已经锁存，但回调源解绑仍可能暂时失败。保持现有
+	 * 发布不变，用同一个定时器短暂延迟重试，直到终态清理完成。
 	 */
 	if (UINT64_MAX - now_ns < TR_CONNECTOR_TEARDOWN_RETRY_NS)
 		return UINT64_MAX;
@@ -408,9 +400,8 @@ static int tr_connector_start_on_owner(void *arg)
 		return TR_OK;
 	}
 
-	/*
-	 * 从 active=1 开始，attempt ownership 已经转移给 connector。
-	 * progress 可能同步 completion，且 callback 允许销毁上层/Connector；
+	/* 从 active=1 开始，尝试的所有权已经转移给 connector。
+	 * 推进操作可能同步完成，且回调允许销毁上层或 Connector；
 	 * 因此本调用返回后绝不能再解引用 connector。
 	 */
 	return tr_connector_progress_on_owner(connector);
@@ -434,7 +425,7 @@ static int tr_connector_cancel_on_owner(void *arg)
 			connector->terminal_action = TR_CONNECTOR_TERMINAL_CANCEL;
 	}
 
-	/* 即使 attempt 已 inactive，也必须确认不会遗留任何 Reactor 回调源。 */
+	/* 即使尝试已不活跃，也必须确认不会遗留任何反应器回调源。 */
 	return tr_connector_cancel_cleanup_on_owner(connector);
 }
 
@@ -500,8 +491,8 @@ int tr_connector_destroy(struct tr_connector *connector)
 	if (!connector)
 		return TR_OK;
 
-	/*
-	 * Connector 生命周期依附于 Reactor。父对象必须在 Reactor stop 前销毁它；owner
+	/* Connector
+	 * 生命周期依附于反应器。父对象必须在反应器停止前销毁它；所有者
 	 * 正在停止或已经停止时保守返回错误，不提前释放 callback_arg 所属存储。
 	 */
 	ret = tr_reactor_call(

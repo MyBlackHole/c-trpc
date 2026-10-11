@@ -164,11 +164,10 @@ void tr_pipeline_destroy(struct tr_pipeline *pipeline)
 	if (!pipeline)
 		return;
 
-	/*
-	 * Pipeline 不拥有底层 socket；因此真正释放 soft-state 前，所有
-	 * membership/affinity 必须已经由 owner 完成解除。这里把架构约束变成
-	 * debug invariant，避免 teardown 顺序错误静默演化成 UAF。
-	 */
+		/* Pipeline 不拥有底层套接字；因此真正释放软状态前，所有
+		 * 成员关系与亲和绑定必须已经由所有者解除。这里把架构约束变成
+		 * 调试不变量，避免拆除顺序错误静默演化成释放后使用。
+		 */
 #ifndef NDEBUG
 	assert(!pipeline->control_bound);
 	assert(pipeline->data_reserved_count == 0U);
@@ -249,9 +248,8 @@ static int tr_pipeline_clear_control_on_owner(void *arg)
 	memset(&pipeline->control, 0, sizeof(pipeline->control));
 	pipeline->control_bound = 0;
 
-	/*
-	 * CONTROL owns issuance of DATA capabilities. Once CONTROL leaves, any
-	 * not-yet-attached capability must become unusable immediately.
+	/* CONTROL 拥有 DATA 能力凭证的签发权。一旦 CONTROL 离开，
+	 * 任何尚未附接的能力凭证都必须立即失效。
 	 */
 	if (pipeline->data_reserved_count != 0U) {
 		uint32_t i;
@@ -572,9 +570,8 @@ static int tr_pipeline_remove_data_on_owner(void *arg)
 	memset(&slot->connection, 0, sizeof(slot->connection));
 	pipeline->data_count--;
 
-	/*
-	 * Stream 生命周期不能跨 DATA replacement 存活。删除 connection 时直接
-	 * 使所有指向该 slot generation 的 affinity 失效。
+	/* 流生命周期不能跨 DATA 替换存活。删除连接时直接
+	 * 使所有指向该槽位代次的亲和绑定失效。
 	 */
 	for (i = 0; i < pipeline->affinity_capacity; ++i) {
 		struct tr_pipeline_affinity_entry *entry =

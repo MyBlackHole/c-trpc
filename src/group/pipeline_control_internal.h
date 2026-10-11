@@ -23,16 +23,15 @@ struct tr_pipeline_data_offer {
 	struct tr_pipeline_route_preface route;
 };
 
-/*
- * 一个 CONTROL session ownership 对应一个已注册的 Pipeline 运行期对象。
+/* 一个 CONTROL 会话所有权对应一个已注册的 Pipeline 运行期对象。
  *
- * create：
- *   create Pipeline -> bind CONTROL -> register 到 shard-local registry
+ * 创建：
+ *   创建 Pipeline -> 绑定 CONTROL -> 注册到分片本地注册表
  *
- * close：
- *   只有 ATTACHED DATA 和 Stream affinity 都已清空后才允许 graceful close。
- *   CONTROL clear 会取消尚未 attach 的 RESERVED capability，并与 registry
- *   unregister 在同一个 Reactor owner transaction 内完成。
+ * 关闭：
+ *   只有 ATTACHED DATA 和流亲和绑定都已清空后才允许优雅关闭。
+ *   清除 CONTROL 会取消尚未附接的 RESERVED 能力凭证，并与注册表
+ *   注销在同一个反应器所有者事务内完成。
  */
 int tr_pipeline_control_create(
 	const struct tr_pipeline_control_config *config,
@@ -55,16 +54,14 @@ int tr_pipeline_control_get_stats(
 	struct tr_pipeline_control *control,
 	struct tr_pipeline_stats *out);
 
-/*
- * CONTROL wire adapter 把运行期状态转换与 wire identity 编码收敛在同一层。
- * reserve/prepare 如果固定长度消息编码失败，会回滚本次新建的 soft-state。
+/* CONTROL 线协议适配器把运行期状态转换与线协议标识编码收敛在同一层。
+ * 预留或准备时如果固定长度消息编码失败，会回滚本次新建的软状态。
  */
 int tr_pipeline_control_reserve_data_wire(
 	struct tr_pipeline_control *control,
 	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE]);
-/*
- * 同一 owner transaction 内返回刚创建的 exact DATA capability，供 transport
- * 在 wire enqueue 失败时执行精确 rollback，避免再从刚编码的 wire 反向解析。
+/* 同一所有者事务内返回刚创建的精确 DATA 能力凭证，供传输层
+ * 在线协议入队失败时执行精确回滚，避免再从刚编码的线协议反向解析。
  */
 int tr_pipeline_control_reserve_data_wire_ex(
 	struct tr_pipeline_control *control,
@@ -76,12 +73,11 @@ int tr_pipeline_control_prepare_transfer_wire(
 	struct tr_pipeline_control *control, uint32_t stream_id,
 	uint8_t out[TR_PIPELINE_CONTROL_WIRE_SIZE]);
 
-/*
- * Fatal CONTROL teardown：
- * - 先使全部 ATTACHED DATA membership 与对应 Stream affinity 失效；
- * - 取消 RESERVED capability；
- * - 从 shard-local registry 注销 Pipeline；
- * - 最后由 Reactor owner 同步关闭 DATA socket 并释放 Pipeline soft-state。
+/* 致命 CONTROL 拆除：
+ * - 先使全部 ATTACHED DATA 成员关系与对应流亲和绑定失效；
+ * - 取消 RESERVED 能力凭证；
+ * - 从分片本地注册表注销 Pipeline；
+ * - 最后由反应器所有者同步关闭 DATA 套接字并释放 Pipeline 软状态。
  */
 int tr_pipeline_control_abort(
 	struct tr_pipeline_control *control,

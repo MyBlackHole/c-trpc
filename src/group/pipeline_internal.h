@@ -43,11 +43,10 @@ struct tr_pipeline_stats {
 	int control_bound;
 };
 
-/*
- * Pipeline 是单 Reactor owner 的 soft-state connection group。
+/* Pipeline 是由单个反应器所有者管理的软状态连接组。
  *
- * 本层只管理 membership/affinity，不拥有底层 connection fd 生命周期，也不定义
- * wire routing preface。所有 mutable 操作通过 owner Reactor 串行化。
+ * 本层只管理成员关系与亲和绑定，不拥有底层连接 fd 生命周期，也不定义
+ * 线协议路由前导。所有修改操作通过所属反应器串行化。
  */
 int tr_pipeline_create(const struct tr_pipeline_config *config,
 		       struct tr_pipeline **out);
@@ -65,23 +64,20 @@ int tr_pipeline_clear_control(struct tr_pipeline *pipeline,
 int tr_pipeline_control(struct tr_pipeline *pipeline,
 			struct tr_conn_handle *out);
 
-/*
- * CONTROL-plane membership capability:
- * reserve returns an index/generation before a DATA socket exists.
- * attach consumes only the exact RESERVED capability.
+/* CONTROL 平面的成员关系能力凭证：
+ * 预留操作在 DATA 套接字存在前返回索引与代次。
+ * 附接只消耗精确匹配的 RESERVED 能力凭证。
  */
 int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
 			     struct tr_pipeline_data_ref *out);
 int tr_pipeline_cancel_data_reservation(
 	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
 
-/*
- * Idempotent peer cancellation for one exact issued generation.
+/* 针对一个精确签发代次的幂等对端取消。
  *
- * RESERVED -> FREE is the only state mutation. The same generation already
- * ATTACHED or already FREE returns TR_OK as a no-op; a reused generation is
- * TR_ERR_STALE. This lets a peer converge after DATA preface handoff without
- * needing an attach ACK and without risking ABA cancellation.
+ * RESERVED -> FREE 是唯一状态修改。同代次已为 ATTACHED 或 FREE 时
+ * 返回 TR_OK，不做操作；已复用的代次返回 TR_ERR_STALE。
+ * 这允许对端在 DATA 前导交接后收敛，无需附接确认，也不冒 ABA 取消风险。
  */
 int tr_pipeline_cancel_data_offer(
 	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
@@ -90,7 +86,7 @@ int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref data,
 			    struct tr_conn_handle connection);
 
-/* Compatibility helper: atomically reserve + attach one DATA membership. */
+/* 兼容辅助函数：原子地预留并附接一个 DATA 成员关系。 */
 int tr_pipeline_add_data(struct tr_pipeline *pipeline,
 			 struct tr_conn_handle connection,
 			 struct tr_pipeline_data_ref *out);
@@ -100,26 +96,22 @@ int tr_pipeline_data_connection(struct tr_pipeline *pipeline,
 				struct tr_pipeline_data_ref data,
 				struct tr_conn_handle *out);
 
-/*
- * Owner-coherent snapshot of ATTACHED DATA memberships. Callers provide a
- * bounded array; capacity smaller than the current attached count is rejected.
+/* 所有者侧一致的 ATTACHED DATA 成员关系快照。调用者提供
+ * 有界数组；容量小于当前已附接数量时被拒绝。
  */
 int tr_pipeline_attached_data_snapshot(
 	struct tr_pipeline *pipeline, struct tr_pipeline_attached_data *out,
 	uint32_t capacity, uint32_t *count_out);
 
-/*
- * Round-robin 只在 live DATA slot 间选择。调用方在新 Stream 建立时 select 一次，
- * 随后必须通过 bind_stream 固定 affinity，禁止 frame-by-frame 重新选择。
+/* 轮询只在存活 DATA 槽位间选择。调用方在新流建立时选择一次，
+ * 随后必须通过 bind_stream 固定亲和绑定，禁止逐帧重新选择。
  */
 int tr_pipeline_select_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref *out);
 
-/*
- * CONTROL barrier primitive: select one currently ATTACHED DATA membership and
- * bind stream affinity atomically on the owner. RESERVED slots are never
- * eligible. TR_OK means the returned token is safe to advertise as
- * TRANSFER_READY; TR_AGAIN means no attached DATA is currently available.
+/* CONTROL 屏障原语：在所有者上原子地选择一个当前 ATTACHED DATA 成员关系
+ * 并绑定流亲和关系。RESERVED 槽位绝无资格。TR_OK 表示返回令牌
+ * 可安全通告为 TRANSFER_READY；TR_AGAIN 表示当前没有已附接的 DATA。
  */
 int tr_pipeline_prepare_transfer(
 	struct tr_pipeline *pipeline, uint32_t stream_id,
