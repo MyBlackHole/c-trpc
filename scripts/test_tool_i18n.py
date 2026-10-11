@@ -106,7 +106,7 @@ class LanguageTests(unittest.TestCase):
 class CatalogTests(unittest.TestCase):
     def test_complete_project_messages(self):
         translator = i18n.translation("zh_CN")
-        for filename in ("check_source_format.py", "tool_i18n.py", "compile_tool_catalog.py"):
+        for filename in ("check_source_format.py", "check_compile_commands.py", "tool_i18n.py", "compile_tool_catalog.py"):
             tree = ast.parse(SCRIPT.with_name(filename).read_text())
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

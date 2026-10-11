@@ -76,3 +76,73 @@ msgstr "无法编译翻译目录：{error}"
 
 msgid "Translation placeholders differ"
 msgstr "译文占位符与原文不一致"
+
+#, python-brace-format
+msgid "Configuration mismatch: {key}: expected {expected!r}, found {actual!r}"
+msgstr "配置不一致：{key}：预期 {expected!r}，实际 {actual!r}"
+
+msgid "Xmake project directory does not match this checkout"
+msgstr "Xmake 项目目录与当前检出不一致"
+
+#, python-brace-format
+msgid "Current Linux production sources differ from the Xmake trcore target: {files}"
+msgstr "当前 Linux 生产源码与 Xmake trcore 目标不一致：{files}"
+
+msgid "Compilation database must be a nonempty JSON array"
+msgstr "编译数据库必须是非空 JSON 数组"
+
+msgid "Invalid Xmake compilation database entry"
+msgstr "Xmake 编译数据库条目无效"
+
+#, python-brace-format
+msgid "Unexpected production entry: {file}"
+msgstr "出现额外生产条目：{file}"
+
+#, python-brace-format
+msgid "Duplicate production entry: {file}"
+msgstr "生产条目重复：{file}"
+
+#, python-brace-format
+msgid "Wrong working directory: {file}"
+msgstr "编译工作目录错误：{file}"
+
+#, python-brace-format
+msgid "Arguments differ from the current Xmake build: {file}"
+msgstr "参数与当前 Xmake 构建不一致：{file}"
+
+#, python-brace-format
+msgid "Production C11, include, macro or warning contract failed: {file}"
+msgstr "生产 C11、包含路径、宏或警告约定不满足：{file}"
+
+#, python-brace-format
+msgid "Missing production entries: {files}"
+msgstr "缺少生产条目：{files}"
+
+msgid "Compilation database configuration is stale; export it again"
+msgstr "编译数据库配置已过期；请重新导出"
+
+msgid "Compilation database digest does not match its configuration"
+msgstr "编译数据库摘要与配置记录不一致"
+
+msgid "Xmake configuration changed during export"
+msgstr "导出期间 Xmake 配置发生变化"
+
+#, python-brace-format
+msgid "Verified {count} production compilation commands: {directory}"
+msgstr "已验证 {count} 个生产编译命令：{directory}"
+
+msgid "Export and verify the real Xmake production compilation database without running analyzers."
+msgstr "导出并校验真实 Xmake 生产编译数据库，不运行分析器。"
+
+msgid "Path to the Xmake executable"
+msgstr "Xmake 可执行文件路径"
+
+msgid "Directory for the database and configuration identity"
+msgstr "数据库与配置身份的保存目录"
+
+msgid "Verify an existing export against the current Xmake configuration"
+msgstr "对照当前 Xmake 配置验证已有导出"
+
+#, python-brace-format
+msgid "Compilation database check failed: {error}"
+msgstr "编译数据库检查失败：{error}"
