@@ -175,7 +175,13 @@ CI 应继续以确定性不变量作为门槛，而不是固定 QPS 或延迟阈
 ### Server peer 回收期间的累计值
 
 Server 按 shard 在 owner 上统一收集 live peer、detached peer 的最后快照及已回收累计值。
-Detached peer 的快照保持可见，直到 finalizer 在同一锁下以最终统计替换它；worker
-退出期间新增的累计值可能延迟到最终回收才可见，但不会因 peer-table slot 释放而回退，
-也不会在最终归档时重复累计。当前资源 gauge 仍只表示 live peer，`peers_reaping_current`
-单独表示等待回收的 peer。多 shard 聚合不是全局同一时刻的快照。
+Detached peer 的快照保持可见，直到 finalizer 在同一锁下以归档快照替换它。
+此修复保证已采集累计值在 peer-table 移除、detached 等待及归档替换期间不回退、
+不重复。归档内容来自 endpoint finalizer 提供的快照，并不保证覆盖 worker 的全部
+晚到观测。当前资源 gauge 仍只表示 live peer，`peers_reaping_current` 单独表示等待
+回收的 peer。多 shard 聚合不是全局同一时刻的快照。
+
+已复现的既存限制：开启 timing 时，unary completion 可先于 handler histogram
+发布，旧 endpoint 归档可能漏掉 handler timing 样本；该问题未在本次修复中解决，
+仍是发布阻断及待审查事项。语义 call 计数与状态分布的定向回归通过，不等于所有
+内部观测完整，也不解除该发布阻断。
