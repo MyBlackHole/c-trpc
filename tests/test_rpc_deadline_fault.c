@@ -251,6 +251,13 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	assert(start_stream(f, 5000U, &arg, &failed) == TR_ERR_SYS);
 	assert(atomic_load(&fail_next_timer_arm) == 0U);
 	verify_heap(f, 0U, NULL, NULL);
+
+	/* Unary 入口使用相同的期限提交屏障，arm 失败也必须撤回。 */
+	atomic_store(&fail_next_timer_arm, 1U);
+	assert(tr_rpc_unary_call_ex(f->client_rpc, 92U, 2U, &request,
+				    &options, NULL, NULL, &failed) == TR_ERR_SYS);
+	assert(atomic_load(&fail_next_timer_arm) == 0U);
+	verify_heap(f, 0U, NULL, NULL);
 	assert(tr_rpc_endpoint_get_stats(f->client_rpc, &stats) == TR_OK);
 	assert(stats.semantic.calls_inflight == 0U);
 
@@ -272,7 +279,7 @@ static void test_clock_and_arm_admission(struct fixture *f)
 	verify_heap(f, 0U, NULL, NULL);
 	wait_finished(&f->ctx, 0U, TR_RPC_STATUS_CANCELLED);
 	wait_finished(&f->ctx, 3U, TR_RPC_STATUS_CANCELLED);
-	assert(atomic_load(&injected_arm_failures) == 2U);
+	assert(atomic_load(&injected_arm_failures) == 3U);
 }
 
 static void test_callback_rearm_failure(struct fixture *f)
@@ -293,7 +300,7 @@ static void test_callback_rearm_failure(struct fixture *f)
 	wait_finished(&f->ctx, 1U, TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	wait_finished(&f->ctx, 2U, TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	assert(atomic_load(&fail_next_timer_arm) == 0U);
-	assert(atomic_load(&injected_arm_failures) == 3U);
+	assert(atomic_load(&injected_arm_failures) == 4U);
 	verify_heap(f, 0U, NULL, NULL);
 }
 
