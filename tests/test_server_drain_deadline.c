@@ -3,6 +3,7 @@
 #include "tr/status.h"
 
 #include "../src/execution/deadline_internal.h"
+#include "../src/facade_diagnostics_internal.h"
 #include "../src/transport/channel/channel_internal.h"
 
 #include <arpa/inet.h>
