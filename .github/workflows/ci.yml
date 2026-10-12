@@ -116,6 +116,12 @@ jobs:
             --report-dir build/static-analysis/clang-14 \
             --mode release --toolchain clang --crc32c-portable n --arch x86_64 \
             --analyzer clang-tidy-14 --expected-major 14
+      - name: 核对完整告警位置并阻断新增或漂移的诊断
+        run: |
+          python3 scripts/test_static_analysis_baseline.py -v
+          python3 scripts/check_static_analysis_baseline.py \
+            --report-dir build/static-analysis/clang-14 \
+            --baseline docs/static_analysis_known_warnings.json
       - name: 保留分析诊断与数据库身份
         if: always()
         uses: actions/upload-artifact@v4
