@@ -138,9 +138,12 @@ Xmake 原生导出所附的测试翻译单元算作生产覆盖。
 保留 7 天。真实分析报错、非零退出、超时、工具缺失或配置身份失配均导致 CI 失败，
 不把跳过分析伪装为成功。
 
-本阶段**尚未添加** `--strict`：即使分析器返回 0，发现的警告也仅作为
-诊断报告，不计为静态分析告警合格。警告数量是按日志行匹配的辅助统计，不等于
-分类去重后的缺陷数，也不能证明头文件全部预处理配置已覆盖。命令复现：
+本阶段尚未启用 `--strict` 零告警模式：已记录的 11 条潜在泄漏尚待独立验证。
+但现在额外运行**精确诊断回归门禁**：逐行比较原始告警的生产翻译单元、位置、
+检查项与完整文字，新增、消失或无法解析的告警均阻断 CI。记录文件不是误报豁免，
+也不能证明全部头文件配置或所有生命周期边界已覆盖。
+另有最小 C 程序验证实际 `cleanup` 编译执行与 Clang 14 Malloc 分析器模型差异。
+命令复现：
 
 ```sh
 xmake f -c -y -m release --toolchain=clang --crc32c_portable=n
@@ -152,11 +155,18 @@ python3 scripts/run_static_analysis.py \
     --report-dir build/static-analysis/clang-14 \
     --mode release --toolchain clang --crc32c-portable n --arch x86_64 \
     --analyzer clang-tidy-14 --expected-major 14
+python3 scripts/probe_clang_cleanup_analyzer.py \
+    --clang clang-14 --major 14 --report-dir build/static-analysis/clang-14
+python3 scripts/test_static_analysis_baseline.py -v
+python3 scripts/check_static_analysis_baseline.py \
+    --report-dir build/static-analysis/clang-14 \
+    --baseline docs/static_analysis_known_warnings.json
 ```
 
-只有在审查并处理或正式批准告警基线后，才能将 `--strict` 加入合并门禁。
-首轮 31 个生产单元报告 11 条潜在泄漏诊断，初步定位及未完成的复核义务详见
-[静态分析首轮诊断基线](static_analysis_baseline.md)。
+只有在逐项审查并处理全部未解决告警后，才能将 `--strict` 升级为零告警门禁。
+当前新增/变更告警已经阻断；首次 31 个生产单元报告的 11 条警告仍保持显式未验收状态。
+初步失败路径分析、可复现的分析器限制及下一轮故障注入义务见
+[静态分析告警基线](static_analysis_baseline.md)。
 
 当前未接入 GCC `-fanalyzer`、其他 Clang analyzer 配置或跨架构分析，
 **issue #154 的 P1-4 / D1 仍未完成验收**。
