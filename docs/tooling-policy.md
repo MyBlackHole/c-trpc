@@ -44,16 +44,17 @@ merge-base、空 diff、仅文档、删除、改名及特殊路径、UTF-8 字�
 
 ## clang-tidy 的实际覆盖边界
 
-`.clang-tidy` 是供后续试运行的 **C 语言可选配置**，不是已接入的 CI 安全门。
+`.clang-tidy` 已供 CI 的生产源码分析预运行使用；目前仍不是零告警的安全门。
 `FormatStyle: file` 复用 `.clang-format`；仅保留 clang 编译诊断与 analyzer 的
 core/unix/security 范围，移除 C++ modernize/google/performance 等宽泛选择；
 项目头过滤范围明确为 include/src 下的 `.h`。WarningsAsErrors 暂为空，不把未经
 建立基线的告警直接升为阻断。insecureAPI 家族沿用排除，须人工复核 API 契约。
 
-本轮没有运行 clang-tidy，配置存在、格式门禁通过均不表示静态分析通过。
-可靠接入前必须固定 analyzer 版本、生成真实 compile_commands.json、列明生产/测试
-宏与平台组合、验证选中的检查及头文件覆盖，并为抑制项给出理由。禁止自动 `--fix`
-制造大面积改动；格式工具也不证明线程安全、ownership、ABI 或所有故障路径正确。
+当前预运行固定 Clang 14、复查真实生产编译数据库并检查启用项；是否产生告警以
+远端实际分析证据为准。告警暂只归档、不作阻断，不能称为完整静态分析门禁。
+后续仍须审查全部告警、建立有理由且可审计的基线，并验证头文件覆盖、工具链与
+平台组合。禁止自动 `--fix` 制造大面积改动；格式工具也不证明线程安全、
+所有权、ABI 或所有故障路径正确。
 
 ## 真实编译数据库：仅完成分析输入准备
 
@@ -120,6 +121,42 @@ GCC 作业内运行从真实导出派生的正负例，包含实际 debug/portab
 构建/测试及后续单独验收为准。未改变 `.clang-tidy` 的可选状态或告警升级策略。
 
 数据库字段遵循 [Clang 编译数据库规范](https://clang.llvm.org/docs/JSONCompilationDatabase.html)。
+
+## 生产静态分析预运行：诊断收集阶段
+
+在原有五类功能/运行时 CI 门禁之外，新增独立的
+`static-analysis (clang-14)` 检查。不改已有检查名称，固定 Ubuntu 22.04
+的 `clang-tidy-14`，按 Clang release / Linux x86_64 / 自动 CRC 选项使用
+真实 `trcore` 编译命令。只选择当前仓库 `src/**/*.c` 生产翻译单元，不将
+Xmake 原生导出所附的测试翻译单元算作生产覆盖。
+
+`scripts/run_static_analysis.py` 在运行前重新解析 Xmake 构建图，复核数据库
+完整性、数据库/配置摘要、Git 提交身份、工具链/架构/宏配置，禁止把旧配置、
+遗漏源码或重复条目当作通过。还检查分析器主版本为 14，并校验
+`clang-analyzer-core.CallAndMessage` 与 `clang-analyzer-unix.Malloc` 确实启用。
+每个生产源文件单独运行，生成逐文件日志和 JSON 汇总；完整报告与对应编译数据库
+保留 7 天。真实分析报错、非零退出、超时、工具缺失或配置身份失配均导致 CI 失败，
+不把跳过分析伪装为成功。
+
+本阶段**尚未添加** `--strict`：即使分析器返回 0，发现的警告也仅作为
+诊断报告，不计为静态分析告警合格。警告数量是按日志行匹配的辅助统计，不等于
+分类去重后的缺陷数，也不能证明头文件全部预处理配置已覆盖。命令复现：
+
+```sh
+xmake f -c -y -m release --toolchain=clang --crc32c_portable=n
+python3 scripts/check_compile_commands.py --output-dir build/compdb/clang-release \
+    --mode release --toolchain clang --crc32c-portable n --arch x86_64
+python3 scripts/test_static_analysis.py -v
+python3 scripts/run_static_analysis.py \
+    --database-dir build/compdb/clang-release \
+    --report-dir build/static-analysis/clang-14 \
+    --mode release --toolchain clang --crc32c-portable n --arch x86_64 \
+    --analyzer clang-tidy-14 --expected-major 14
+```
+
+只有在审查并处理或正式批准告警基线后，才能将 `--strict` 加入合并门禁。
+当前未接入 GCC `-fanalyzer`、其他 Clang analyzer 配置或跨架构分析，
+**issue #154 的 P1-4 / D1 仍未完成验收**。
 
 ## 历史来源边界
 
