@@ -58,7 +58,8 @@ def analyze(sources, directory, report_dir, analyzer, strict, timeout, version, 
     root = compdb.ROOT.resolve()
     for source in sources:
         relative = source.relative_to(root).as_posix()
-        log = log_dir / (relative.replace("/", "__") + ".log")
+        log = log_dir / (relative + ".log")
+        log.parent.mkdir(parents=True, exist_ok=True)
         command = [analyzer, "--quiet", "-p=" + str(directory),
                    "--config-file=" + str(root / ".clang-tidy")]
         if strict:
