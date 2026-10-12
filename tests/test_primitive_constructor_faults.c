@@ -1,5 +1,6 @@
 /* 针对四种基础资源构造器的真实分配与同步初始化失败注入。
- * 仅本测试的链接器 --wrap 截获 libc/pthread 边界；生产对象与 API 不添加测试钩子。
+ * 仅本测试的链接器 --wrap 截获 libc/pthread 边界；生产对象与 API
+ * 不添加测试钩子。
  */
 #include "../src/execution/buffer.h"
 #include "../src/execution/buffer_internal.h"
@@ -43,10 +44,10 @@ void *__real_calloc(size_t count, size_t size);
 void *__real_malloc(size_t size);
 void __real_free(void *ptr);
 int __real_pthread_mutex_init(pthread_mutex_t *lock,
-			      const pthread_mutexattr_t *attr);
+                              const pthread_mutexattr_t *attr);
 int __real_pthread_mutex_destroy(pthread_mutex_t *lock);
 int __real_pthread_cond_init(pthread_cond_t *cond,
-			     const pthread_condattr_t *attr);
+                             const pthread_condattr_t *attr);
 int __real_pthread_cond_destroy(pthread_cond_t *cond);
 
 static void track_allocation(void *ptr)
@@ -110,7 +111,7 @@ void __wrap_free(void *ptr)
 }
 
 int __wrap_pthread_mutex_init(pthread_mutex_t *lock,
-			      const pthread_mutexattr_t *attr)
+                              const pthread_mutexattr_t *attr)
 {
 	int ret;
 
@@ -132,7 +133,7 @@ int __wrap_pthread_mutex_destroy(pthread_mutex_t *lock)
 }
 
 int __wrap_pthread_cond_init(pthread_cond_t *cond,
-			     const pthread_condattr_t *attr)
+                             const pthread_condattr_t *attr)
 {
 	int ret;
 
@@ -153,8 +154,7 @@ int __wrap_pthread_cond_destroy(pthread_cond_t *cond)
 	return ret;
 }
 
-static void start_fault(unsigned alloc_at, unsigned mutex_at,
-			unsigned cond_at)
+static void start_fault(unsigned alloc_at, unsigned mutex_at, unsigned cond_at)
 {
 	assert(!fault.active);
 	memset(&fault, 0, sizeof(fault));
@@ -165,18 +165,20 @@ static void start_fault(unsigned alloc_at, unsigned mutex_at,
 	fault.active = 1;
 }
 
-static void finish_fault(unsigned allocations, unsigned mutexes,
-			 unsigned conds)
+static void finish_fault(unsigned allocations, unsigned mutexes, unsigned conds)
 {
 	unsigned i;
 
 	assert(fault.active);
 	if (fault.alloc_calls != allocations || fault.mutex_calls != mutexes ||
 	    fault.cond_calls != conds)
-		fprintf(stderr, "scenario %u: alloc %u/%u, mutex %u/%u, cond %u/%u, injected %u/%u/%u\n",
-			fault_sequence, fault.alloc_calls, allocations,
-			fault.mutex_calls, mutexes, fault.cond_calls, conds,
-			fault.fail_alloc_at, fault.fail_mutex_at, fault.fail_cond_at);
+		fprintf(stderr,
+		        "scenario %u: alloc %u/%u, mutex %u/%u, cond %u/%u, "
+		        "injected %u/%u/%u\n",
+		        fault_sequence, fault.alloc_calls, allocations,
+		        fault.mutex_calls, mutexes, fault.cond_calls, conds,
+		        fault.fail_alloc_at, fault.fail_mutex_at,
+		        fault.fail_cond_at);
 	assert(fault.alloc_calls == allocations);
 	assert(fault.mutex_calls == mutexes);
 	assert(fault.cond_calls == conds);
@@ -189,7 +191,7 @@ static void finish_fault(unsigned allocations, unsigned mutexes,
 }
 
 static void assert_budget_empty(const struct tr_memory_budget *budget,
-				uint64_t rejection_events)
+                                uint64_t rejection_events)
 {
 	struct tr_memory_budget_stats stats;
 
@@ -199,8 +201,8 @@ static void assert_budget_empty(const struct tr_memory_budget *budget,
 }
 
 static void test_fixed_buffer_case(unsigned fail_alloc, unsigned fail_mutex,
-				   int expected, unsigned alloc_calls,
-				   unsigned mutex_calls)
+                                   int expected, unsigned alloc_calls,
+                                   unsigned mutex_calls)
 {
 	struct tr_buffer_pool pool;
 	struct tr_memory_budget budget;
@@ -228,8 +230,8 @@ static void test_fixed_buffer_case(unsigned fail_alloc, unsigned fail_mutex,
 	if (ret != TR_OK) {
 		/* 同一个池对象和预算实例可以在完整回滚后重新构造。 */
 		start_fault(0U, 0U, 0U);
-		assert(tr_buffer_pool_init_budgeted(&pool, 2U, 128U,
-						    &budget) == TR_OK);
+		assert(tr_buffer_pool_init_budgeted(&pool, 2U, 128U, &budget) ==
+		       TR_OK);
 		assert(tr_buffer_pool_destroy(&pool) == TR_OK);
 		assert_budget_empty(&budget, 0U);
 		finish_fault(2U, 1U, 0U);
@@ -244,13 +246,13 @@ static void test_fixed_buffer_budget_rejections(void)
 	unsigned i;
 
 	for (i = 0U; i < 2U; ++i) {
-		uint64_t limit = i == 0U ? descriptors - 1U :
-				 descriptors + 2U * 128U - 1U;
+		uint64_t limit = i == 0U ? descriptors - 1U
+		                         : descriptors + 2U * 128U - 1U;
 
 		tr_memory_budget_init(&budget, limit);
 		start_fault(0U, 0U, 0U);
-		assert(tr_buffer_pool_init_budgeted(&pool, 2U, 128U,
-						    &budget) == TR_AGAIN);
+		assert(tr_buffer_pool_init_budgeted(&pool, 2U, 128U, &budget) ==
+		       TR_AGAIN);
 		assert(pool.buffers == NULL && pool.storage == NULL);
 		assert(tr_buffer_pool_destroy(&pool) == TR_OK);
 		assert_budget_empty(&budget, 1U);
@@ -259,17 +261,17 @@ static void test_fixed_buffer_budget_rejections(void)
 		/* 预算拒绝不留下内存或锁；重新放宽限制即可复用同一对象。 */
 		tr_memory_budget_init(&budget, 0U);
 		start_fault(0U, 0U, 0U);
-		assert(tr_buffer_pool_init_budgeted(&pool, 2U, 128U,
-						    &budget) == TR_OK);
+		assert(tr_buffer_pool_init_budgeted(&pool, 2U, 128U, &budget) ==
+		       TR_OK);
 		assert(tr_buffer_pool_destroy(&pool) == TR_OK);
 		assert_budget_empty(&budget, 0U);
 		finish_fault(2U, 1U, 0U);
 	}
 }
 
-static void test_dynamic_buffer_case(unsigned fail_alloc,
-				     unsigned fail_mutex, int expected,
-				     unsigned alloc_calls, unsigned mutex_calls)
+static void test_dynamic_buffer_case(unsigned fail_alloc, unsigned fail_mutex,
+                                     int expected, unsigned alloc_calls,
+                                     unsigned mutex_calls)
 {
 	struct tr_buffer_pool pool;
 	struct tr_memory_budget budget;
@@ -277,8 +279,7 @@ static void test_dynamic_buffer_case(unsigned fail_alloc,
 
 	tr_memory_budget_init(&budget, 0U);
 	start_fault(fail_alloc, fail_mutex, 0U);
-	ret = tr_buffer_pool_init_dynamic_budgeted(
-		&pool, 2U, 4096U, &budget);
+	ret = tr_buffer_pool_init_dynamic_budgeted(&pool, 2U, 4096U, &budget);
 	assert(ret == expected);
 	if (ret != TR_OK) {
 		assert(pool.buffers == NULL && pool.buffer_count == 0U);
@@ -292,21 +293,21 @@ static void test_dynamic_buffer_case(unsigned fail_alloc,
 
 	if (ret != TR_OK) {
 		start_fault(0U, 0U, 0U);
-		assert(tr_buffer_pool_init_dynamic_budgeted(
-			       &pool, 2U, 4096U, &budget) == TR_OK);
+		assert(tr_buffer_pool_init_dynamic_budgeted(&pool, 2U, 4096U,
+		                                            &budget) == TR_OK);
 		assert(tr_buffer_pool_destroy(&pool) == TR_OK);
 		assert_budget_empty(&budget, 0U);
 		finish_fault(1U, 1U, 0U);
 	}
 }
 
-static void test_command_queue_case(unsigned fail_alloc,
-				    unsigned fail_mutex, unsigned fail_cond,
-				    int expected, unsigned allocations,
-				    unsigned mutexes, unsigned conds)
+static void test_command_queue_case(unsigned fail_alloc, unsigned fail_mutex,
+                                    unsigned fail_cond, int expected,
+                                    unsigned allocations, unsigned mutexes,
+                                    unsigned conds)
 {
 	struct tr_command_queue queue;
-	struct tr_command command = { .type = TR_CMD_RESUME_RX };
+	struct tr_command command = {.type = TR_CMD_RESUME_RX};
 	struct tr_command out;
 
 	start_fault(fail_alloc, fail_mutex, fail_cond);
@@ -336,13 +337,13 @@ static void noop_completion(void *arg)
 	(void)arg;
 }
 
-static void test_completion_queue_case(unsigned fail_alloc,
-				       unsigned fail_mutex, unsigned fail_cond,
-				       int expected, unsigned allocations,
-				       unsigned mutexes, unsigned conds)
+static void test_completion_queue_case(unsigned fail_alloc, unsigned fail_mutex,
+                                       unsigned fail_cond, int expected,
+                                       unsigned allocations, unsigned mutexes,
+                                       unsigned conds)
 {
 	struct tr_completion_queue queue;
-	struct tr_completion item = { noop_completion, NULL };
+	struct tr_completion item = {noop_completion, NULL};
 	struct tr_completion out;
 
 	start_fault(fail_alloc, fail_mutex, fail_cond);
@@ -350,8 +351,8 @@ static void test_completion_queue_case(unsigned fail_alloc,
 	if (expected == TR_OK) {
 		assert(tr_completion_queue_open(&queue) == TR_OK);
 		assert(tr_completion_queue_push(&queue, &item, NULL) == TR_OK);
-		assert(tr_completion_queue_pop_batch(&queue, &out, 1U,
-						     NULL) == 1U);
+		assert(tr_completion_queue_pop_batch(&queue, &out, 1U, NULL) ==
+		       1U);
 		tr_completion_queue_close(&queue);
 		tr_completion_queue_destroy(&queue);
 	} else {
@@ -364,8 +365,8 @@ static void test_completion_queue_case(unsigned fail_alloc,
 		assert(tr_completion_queue_init(&queue, 2U) == TR_OK);
 		assert(tr_completion_queue_open(&queue) == TR_OK);
 		assert(tr_completion_queue_push(&queue, &item, NULL) == TR_OK);
-		assert(tr_completion_queue_pop_batch(&queue, &out, 1U,
-						     NULL) == 1U);
+		assert(tr_completion_queue_pop_batch(&queue, &out, 1U, NULL) ==
+		       1U);
 		tr_completion_queue_close(&queue);
 		tr_completion_queue_destroy(&queue);
 		finish_fault(1U, 1U, 1U);
@@ -380,7 +381,7 @@ static uint64_t noop_timer(void *arg, uint64_t now)
 }
 
 static void test_timer_queue_case(unsigned fail_alloc, int expected,
-				  unsigned allocations)
+                                  unsigned allocations)
 {
 	struct tr_timer_queue queue;
 	struct tr_timer_token token;
@@ -389,7 +390,7 @@ static void test_timer_queue_case(unsigned fail_alloc, int expected,
 	assert(tr_timer_queue_init(&queue, 2U) == expected);
 	if (expected == TR_OK) {
 		assert(tr_timer_queue_register(&queue, noop_timer, NULL,
-					       &token) == TR_OK);
+		                               &token) == TR_OK);
 		assert(tr_timer_queue_unregister(&queue, token) == TR_OK);
 	} else {
 		assert(queue.entries == NULL && queue.heap == NULL);
@@ -401,7 +402,7 @@ static void test_timer_queue_case(unsigned fail_alloc, int expected,
 		start_fault(0U, 0U, 0U);
 		assert(tr_timer_queue_init(&queue, 2U) == TR_OK);
 		assert(tr_timer_queue_register(&queue, noop_timer, NULL,
-					       &token) == TR_OK);
+		                               &token) == TR_OK);
 		assert(tr_timer_queue_unregister(&queue, token) == TR_OK);
 		tr_timer_queue_destroy(&queue);
 		finish_fault(2U, 0U, 0U);
