@@ -102,6 +102,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-tidy-14
           clang-tidy-14 --version
+      - name: 验证 Clang 自动清理执行与分析器模型差异
+        run: |
+          python3 scripts/probe_clang_cleanup_analyzer.py \
+            --clang clang-14 --major 14 \
+            --report-dir build/static-analysis/clang-14
       - name: 验证静态分析驱动器的失败与覆盖判定
         run: python3 scripts/test_static_analysis.py -v
       - name: 按真实生产编译命令执行静态分析并记录告警
