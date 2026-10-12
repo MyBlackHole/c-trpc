@@ -431,7 +431,7 @@ int main(void)
 	test_completion_queue_case(0U, 0U, 1U, TR_ERR_INVALID, 1U, 1U, 1U);
 	test_completion_queue_case(0U, 0U, 0U, TR_OK, 1U, 1U, 1U);
 
-	test_timer_queue_case(1U, TR_ERR_NOMEM, 1U);
+	test_timer_queue_case(1U, TR_ERR_NOMEM, 2U);
 	test_timer_queue_case(2U, TR_ERR_NOMEM, 2U);
 	test_timer_queue_case(0U, TR_OK, 2U);
 	puts("primitive constructor fault injection: ok");
