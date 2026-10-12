@@ -71,6 +71,39 @@ Clang 14 分析器对 GCC/Clang `cleanup` 属性的处理能力可能影响这�
 真实性豁免；未来确认所有告警处理完成后，才可删除临时基线并启用 `--strict`。
 这项门禁不改变生产分配/清理代码，也不关闭 `clang-analyzer-unix.Malloc`。
 
+## 基础构造器的确定性故障注入（#225）
+
+上一轮 11 条中有 7 条集中在 Buffer、Command Queue、Completion Queue 和
+Timer Queue 的构造失败路径。新增
+`tests/test_primitive_constructor_faults.c`，使用 **仅测试目标**的链接期
+`--wrap` 包装真实 `malloc/calloc/free/pthread_mutex_init/`
+`pthread_mutex_destroy/pthread_cond_init/pthread_cond_destroy` 调用；不向生产库
+加入注入开关，也不修改资源所有权语义。
+
+| 诊断位置 | 真实故障注入 | 失败后核对 |
+|---|---|---|
+| `buffer.c:67、75` | 首次/第二次分配失败、互斥锁初始化失败；同时校验两档预算拒绝 | 已获分配只释放一次、预算归零、失败池可重新初始化 |
+| `buffer.c:139` | 动态池描述符分配及互斥锁初始化失败 | 未发布的描述符按作用域释放、预算归零 |
+| `command_queue.c:26` | 描述符分配、互斥锁和条件变量初始化失败 | 分配及同步资源各自配平，失败后重新初始化可用 |
+| `completion_queue.c:27` | 描述符分配、互斥锁和条件变量初始化失败 | 同上，重新初始化后完成项仍可准入/消费 |
+| `timer_queue.c:123`（两条） | 两次独立分配各自失败，包括第一失败但第二仍执行 | 已成功分配的另一份内存被释放、重建后定时器可注册/注销 |
+
+测试包含各构造器正常成功/销毁和失败后的原对象重建，共 20 个顶层场景
+（35 轮定向注入/重建计数验证）；失败路径不可对尚未初始化的队列同步对象
+强行调用完整销毁。对每轮校验成功分配与释放数相等、每个地址只释放一次，
+每个成功初始化的互斥锁/条件变量恰好销毁一次，Buffer 预算在失败或销毁后为零。
+地址和线程检查器矩阵也执行相同测试，而不替代上述定向故障证据。
+
+[PR #225](https://github.com/MyBlackHole/c-trpc/pull/225) 对应的 CI
+[首次完整通过记录](https://github.com/MyBlackHole/c-trpc/actions/runs/38214487924)
+覆盖 GCC（debug/release）、Clang（release）、ASan+UBSan、TSan，以及兼容安装、
+CRC 和原有 Clang 14 静态分析回归门禁；实际发布前应以最终合并提交的 CI 为准。
+
+**这属于这 7 条告警所指向的特定构造失败边界的运行时证据，不等于 Clang
+误报的形式化证明。** 不修改现有 11 条 `review_state=unverified` 跟踪状态，
+不关闭 `clang-analyzer-unix.Malloc`，也不因此宣布零告警。
+另外 4 条 Reactor/RPC/Channel 生命周期风险继续等待下轮审查。
+
 ## 下一轮验收
 
 1. 对每条告警还原错误分支以及对应 `cleanup` 释放或 `take()` 转移边界。
