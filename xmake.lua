@@ -129,7 +129,7 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "test_server_stats_retiring", "test_reactor_timer_deadline", "test_rpc_deadline_failure", "test_connector_deadline", "test_inbound_handshake_deadline", "test_rpc_deadline_fault", "test_reactor_tokens", "test_channel_ready_deadline", "test_client_connect_deadline", "test_server_drain_deadline", "test_deadline", "test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_protocol_error", "test_channel_reconnect_teardown", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_unary_failure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "test_server_stats_retiring", "test_reactor_timer_deadline", "test_rpc_deadline_failure", "test_connector_deadline", "test_inbound_handshake_deadline", "test_rpc_deadline_fault", "test_reactor_tokens", "test_channel_ready_deadline", "test_client_connect_deadline", "test_server_drain_deadline", "test_deadline", "test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_primitive_constructor_faults", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_protocol_error", "test_channel_reconnect_teardown", "test_channel_create_transaction", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_unary_failure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
@@ -138,6 +138,14 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         add_undefines("NDEBUG")
         if name == "test_echo_client_i18n" then
             after_build(copy_echo_catalog)
+        elseif name == "test_primitive_constructor_faults" then
+            -- 仅测试二进制按链接符号故障注入，不向生产库插入分配钩子。
+            add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=malloc",
+                        "-Wl,--wrap=free",
+                        "-Wl,--wrap=pthread_mutex_init",
+                        "-Wl,--wrap=pthread_mutex_destroy",
+                        "-Wl,--wrap=pthread_cond_init",
+                        "-Wl,--wrap=pthread_cond_destroy", {force = true})
         elseif name == "test_inbound_handshake_deadline" then
             -- 真实 TCP 与 owner timer 精确推进；故障注入只存在于本测试目标。
             add_ldflags("-Wl,--wrap=clock_gettime",
