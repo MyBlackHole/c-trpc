@@ -150,7 +150,7 @@ def compare(report_dir, baseline_file):
     expected = Counter(key(item) for item in permitted)
     # 按出现次数比较，不能靠相同文件/行/检查项吞掉第二条不同告警。
     added, removed = actual - expected, expected - actual
-    evidence = {"schema": 1, "policy": "exact-reviewed-warning-set",
+    evidence = {"schema": 1, "policy": "exact-tracked-warning-set",
                 "analyzer_major": base["analyzer_major"], "profile": base["profile"],
                 "review_state": base["review_state"],
                 "production_units": len(results), "observed_warnings": len(observed),
@@ -167,7 +167,7 @@ def compare(report_dir, baseline_file):
 
 
 def main():
-    parser, _ = parser_for("Compare actual production static analysis warnings with an exact review ledger.")
+    parser, _ = parser_for("Compare actual production static analysis warnings with an exact tracked-warning ledger.")
     parser.add_argument("--report-dir", type=Path, required=True)
     parser.add_argument("--baseline", type=Path, required=True)
     args = parser.parse_args()
@@ -177,7 +177,7 @@ def main():
         print(_("Static analysis warning regression gate failed: {error}")
               .format(error=error), file=sys.stderr)
         return 1
-    print(_("Verified {units} production units and {warnings} exact reviewed warning locations")
+    print(_("Verified {units} production units and {warnings} exact tracked warning locations")
           .format(units=result["production_units"], warnings=result["observed_warnings"]))
     return 0
 
