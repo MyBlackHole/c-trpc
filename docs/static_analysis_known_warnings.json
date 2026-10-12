@@ -1,0 +1,102 @@
+{
+  "schema": 1,
+  "analyzer_major": 14,
+  "profile": {
+    "mode": "release",
+    "toolchain": "clang",
+    "plat": "linux",
+    "arch": "x86_64",
+    "crc32c_portable": false
+  },
+  "review_state": "unverified",
+  "warnings": [
+    {
+      "source": "src/execution/buffer.c",
+      "file": "src/execution/buffer.c",
+      "line": 67,
+      "column": 9,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'buffers'"
+    },
+    {
+      "source": "src/execution/buffer.c",
+      "file": "src/execution/buffer.c",
+      "line": 75,
+      "column": 9,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'storage'"
+    },
+    {
+      "source": "src/execution/buffer.c",
+      "file": "src/execution/buffer.c",
+      "line": 139,
+      "column": 3,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'buffers'"
+    },
+    {
+      "source": "src/execution/command_queue.c",
+      "file": "src/execution/command_queue.c",
+      "line": 26,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'items'"
+    },
+    {
+      "source": "src/execution/completion_queue.c",
+      "file": "src/execution/completion_queue.c",
+      "line": 27,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'items'"
+    },
+    {
+      "source": "src/execution/reactor.c",
+      "file": "src/execution/reactor.c",
+      "line": 305,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'items'"
+    },
+    {
+      "source": "src/execution/timer_queue.c",
+      "file": "src/execution/timer_queue.c",
+      "line": 123,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'entries'"
+    },
+    {
+      "source": "src/execution/timer_queue.c",
+      "file": "src/execution/timer_queue.c",
+      "line": 123,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'heap'"
+    },
+    {
+      "source": "src/rpc/rpc.c",
+      "file": "src/rpc/rpc.c",
+      "line": 3539,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'group_mem'"
+    },
+    {
+      "source": "src/rpc/rpc.c",
+      "file": "src/rpc/rpc.c",
+      "line": 3542,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'threads'"
+    },
+    {
+      "source": "src/transport/channel/channel.c",
+      "file": "src/transport/channel/channel.c",
+      "line": 2602,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "message": "Potential leak of memory pointed to by 'build.channel'"
+    }
+  ]
+}
