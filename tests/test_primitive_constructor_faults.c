@@ -37,6 +37,7 @@ struct fault_state {
 };
 
 static struct fault_state fault;
+static unsigned fault_sequence;
 
 void *__real_calloc(size_t count, size_t size);
 void *__real_malloc(size_t size);
@@ -157,6 +158,7 @@ static void start_fault(unsigned alloc_at, unsigned mutex_at,
 {
 	assert(!fault.active);
 	memset(&fault, 0, sizeof(fault));
+	fault_sequence++;
 	fault.fail_alloc_at = alloc_at;
 	fault.fail_mutex_at = mutex_at;
 	fault.fail_cond_at = cond_at;
@@ -169,6 +171,12 @@ static void finish_fault(unsigned allocations, unsigned mutexes,
 	unsigned i;
 
 	assert(fault.active);
+	if (fault.alloc_calls != allocations || fault.mutex_calls != mutexes ||
+	    fault.cond_calls != conds)
+		fprintf(stderr, "scenario %u: alloc %u/%u, mutex %u/%u, cond %u/%u, injected %u/%u/%u\n",
+			fault_sequence, fault.alloc_calls, allocations,
+			fault.mutex_calls, mutexes, fault.cond_calls, conds,
+			fault.fail_alloc_at, fault.fail_mutex_at, fault.fail_cond_at);
 	assert(fault.alloc_calls == allocations);
 	assert(fault.mutex_calls == mutexes);
 	assert(fault.cond_calls == conds);
