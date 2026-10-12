@@ -155,6 +155,9 @@ python3 scripts/run_static_analysis.py \
 ```
 
 只有在审查并处理或正式批准告警基线后，才能将 `--strict` 加入合并门禁。
+首轮 31 个生产单元报告 11 条潜在泄漏诊断，初步定位及未完成的复核义务详见
+[静态分析首轮诊断基线](static_analysis_baseline.md)。
+
 当前未接入 GCC `-fanalyzer`、其他 Clang analyzer 配置或跨架构分析，
 **issue #154 的 P1-4 / D1 仍未完成验收**。
 
