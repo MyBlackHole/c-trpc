@@ -86,6 +86,47 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  static-analysis-clang:
+    name: static-analysis (clang-14)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: 固定 Clang 静态分析工具版本
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy-14
+          clang-tidy-14 --version
+      - name: 验证静态分析驱动器的失败与覆盖判定
+        run: python3 scripts/test_static_analysis.py -v
+      - name: 按真实生产编译命令执行静态分析并记录告警
+        run: |
+          set -euo pipefail
+          xmake f -c -y -m release --toolchain=clang --crc32c_portable=n
+          python3 scripts/check_compile_commands.py \
+            --output-dir build/compdb/clang-release \
+            --mode release --toolchain clang --crc32c-portable n --arch x86_64
+          python3 scripts/run_static_analysis.py \
+            --database-dir build/compdb/clang-release \
+            --report-dir build/static-analysis/clang-14 \
+            --mode release --toolchain clang --crc32c-portable n --arch x86_64 \
+            --analyzer clang-tidy-14 --expected-major 14
+      - name: 保留分析诊断与数据库身份
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-clang-14
+          path: |
+            build/static-analysis/clang-14/
+            build/compdb/clang-release/
+          if-no-files-found: ignore
+          retention-days: 7
+
   asan-ubsan:
     name: ASan + UBSan
     runs-on: ubuntu-22.04
