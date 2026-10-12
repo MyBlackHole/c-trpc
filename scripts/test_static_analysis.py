@@ -117,6 +117,20 @@ class StaticAnalysisTests(unittest.TestCase):
         self.assertIn("--warnings-as-errors=*", commands[0])
         self.assertEqual(len(report["results"]), 2)
 
+    def test_distinct_nested_sources_keep_distinct_logs(self):
+        first = self.root / "src/a__b.c"
+        second = self.root / "src/a/b.c"
+        second.parent.mkdir(parents=True, exist_ok=True)
+        for source in (first, second):
+            source.write_text("int n(void) { return 0; }\n")
+        with patch.object(target.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 0, "", "")):
+            report = target.analyze([first, second], self.database, self.root / "build/report",
+                                    "clang-tidy-14", False, 5, "LLVM version 14", [], self.manifest)
+        logs = [record["log"] for record in report["results"]]
+        self.assertEqual(len(set(logs)), 2)
+        self.assertTrue(all((self.root / "build/report" / item).is_file() for item in logs))
+
     def test_timeout_is_failure_not_success(self):
         def fail(*_, **__):
             raise subprocess.TimeoutExpired("clang-tidy", 5, output=b"partial warning:\n")
@@ -125,7 +139,7 @@ class StaticAnalysisTests(unittest.TestCase):
                                     False, 5, "LLVM version 14", [], self.manifest)
         self.assertEqual(len(report["failed_sources"]), 2)
         self.assertTrue(all(result["returncode"] == 124 for result in report["results"]))
-        self.assertIn("Analysis timed out", (self.root / "build/report/logs/src__a.c.log").read_text())
+        self.assertIn("Analysis timed out", (self.root / "build/report/logs/src/a.c.log").read_text())
 
 
 if __name__ == "__main__":
