@@ -21,18 +21,6 @@ jobs:
           python-version: '3.12'
       - name: 安装固定版本格式工具
         run: python -m pip install 'clang-format==18.1.8'
-      - name: 临时输出固定版本格式化结果供本轮修订
-        if: github.event_name == 'pull_request'
-        run: |
-          python3 - <<'PY'
-          import json
-          import subprocess
-          formatted = subprocess.check_output(
-              ["clang-format", "--style=file", "tests/test_primitive_constructor_faults.c"],
-              text=True)
-          print("TRPC_FORMAT_JSON_START" + json.dumps(formatted, ensure_ascii=True) +
-                "TRPC_FORMAT_JSON_END")
-          PY
       - name: 校验 gettext 翻译目录与语言回归
         run: |
           sudo apt-get update
