@@ -47,10 +47,10 @@ void *__real_calloc(size_t count, size_t size);
 void *__real_malloc(size_t size);
 void __real_free(void *ptr);
 int __real_pthread_mutex_init(pthread_mutex_t *lock,
-			     const pthread_mutexattr_t *attr);
+                              const pthread_mutexattr_t *attr);
 int __real_pthread_mutex_destroy(pthread_mutex_t *lock);
 int __real_pthread_cond_init(pthread_cond_t *cond,
-			    const pthread_condattr_t *attr);
+                             const pthread_condattr_t *attr);
 int __real_pthread_cond_destroy(pthread_cond_t *cond);
 
 static void track_alloc(void *ptr)
@@ -120,7 +120,7 @@ void __wrap_free(void *ptr)
 }
 
 int __wrap_pthread_mutex_init(pthread_mutex_t *lock,
-			      const pthread_mutexattr_t *attr)
+                              const pthread_mutexattr_t *attr)
 {
 	int ret;
 
@@ -144,7 +144,7 @@ int __wrap_pthread_mutex_destroy(pthread_mutex_t *lock)
 }
 
 int __wrap_pthread_cond_init(pthread_cond_t *cond,
-			     const pthread_condattr_t *attr)
+                             const pthread_condattr_t *attr)
 {
 	int ret;
 
@@ -167,8 +167,7 @@ int __wrap_pthread_cond_destroy(pthread_cond_t *cond)
 	return ret;
 }
 
-static void begin_fault(unsigned alloc_at, unsigned mutex_at,
-			unsigned cond_at)
+static void begin_fault(unsigned alloc_at, unsigned mutex_at, unsigned cond_at)
 {
 	assert(!probe.active);
 	memset(&probe, 0, sizeof(probe));
@@ -222,10 +221,10 @@ static void assert_budget_empty(struct tr_memory_budget *budget)
  * 两个 TX 池分别是第 4、5 次 mutex_init；第 8、9 次分配对应
  * 两个池的实际存储。故障改变上述顺序时测试必须显式失败。
  */
-static void test_reactor_tx_pool_case(unsigned fail_alloc,
-				      unsigned fail_mutex, int expected)
+static void test_reactor_tx_pool_case(unsigned fail_alloc, unsigned fail_mutex,
+                                      int expected)
 {
-	struct tr_reactor_config config = { 0 };
+	struct tr_reactor_config config = {0};
 	struct tr_memory_budget budget;
 	struct tr_reactor *reactor = NULL;
 	unsigned before = fd_count();
@@ -260,7 +259,7 @@ static void test_reactor_tx_pool_case(unsigned fail_alloc,
 }
 
 static void test_rpc_group_case(unsigned fail_alloc, unsigned fail_mutex,
-				unsigned fail_cond, int expected)
+                                unsigned fail_cond, int expected)
 {
 	struct tr_rpc_executor_group *group = NULL;
 	int ret;
@@ -298,12 +297,12 @@ static void channel_fixture_create(struct channel_fixture *fixture)
 	memset(fixture, 0, sizeof(*fixture));
 	fixture->peer_fd = -1;
 	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
-			  0, sockets) == 0);
+	                  0, sockets) == 0);
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &fixture->reactor) ==
 	       TR_OK);
 	assert(tr_reactor_start(fixture->reactor) == TR_OK);
 	assert(tr_reactor_adopt_fd(fixture->reactor, sockets[0],
-				   &fixture->connection) == TR_OK);
+	                           &fixture->connection) == TR_OK);
 	fixture->peer_fd = sockets[1];
 	/* 只有确认 owner 已处理接管请求后，才能检查是否被错误发布。 */
 	assert(tr_reactor_quiesce(fixture->reactor) == TR_OK);
@@ -329,7 +328,7 @@ static void channel_fixture_destroy(struct channel_fixture *fixture)
 
 static struct tr_channel_config channel_config(void)
 {
-	struct tr_channel_config config = { 0 };
+	struct tr_channel_config config = {0};
 
 	config.role = TR_CHANNEL_SERVER;
 	config.mode = TR_CHANNEL_SHARED_CONNECTION;
@@ -340,17 +339,17 @@ static struct tr_channel_config channel_config(void)
 }
 
 static void channel_reject(struct channel_fixture *fixture,
-			   const struct tr_channel_config *config,
-			   unsigned fail_alloc, unsigned fail_mutex,
-			   unsigned fail_cond, int expected)
+                           const struct tr_channel_config *config,
+                           unsigned fail_alloc, unsigned fail_mutex,
+                           unsigned fail_cond, int expected)
 {
 	struct tr_channel *channel = NULL;
 	int ret;
 
 	begin_fault(fail_alloc, fail_mutex, fail_cond);
 	ret = tr_channel_create_deferred(config, fixture->connection,
-					 fixture->connection, NULL, NULL,
-					 NULL, NULL, &channel);
+	                                 fixture->connection, NULL, NULL, NULL,
+	                                 NULL, &channel);
 	assert(ret == expected);
 	assert(channel == NULL);
 	finish_fault();
@@ -361,7 +360,7 @@ static void test_channel_early_rollback(void)
 {
 	struct channel_fixture fixture;
 	struct tr_channel_config config = channel_config();
-	struct tr_buffer_pool reassembly = { 0 };
+	struct tr_buffer_pool reassembly = {0};
 	struct tr_channel *channel = NULL;
 
 	channel_fixture_create(&fixture);
@@ -390,8 +389,8 @@ static void test_channel_early_rollback(void)
 
 	/* 早期失败没有影响连接能力，随后可以发布并正常拆除 Channel。 */
 	assert(tr_channel_create_deferred(&config, fixture.connection,
-					  fixture.connection, NULL, NULL,
-					  NULL, NULL, &channel) == TR_OK);
+	                                  fixture.connection, NULL, NULL, NULL,
+	                                  NULL, &channel) == TR_OK);
 	assert(channel != NULL);
 	assert(tr_channel_destroy(channel) == TR_OK);
 	assert_connection_active(&fixture);
