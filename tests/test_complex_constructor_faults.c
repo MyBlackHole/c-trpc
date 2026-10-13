@@ -177,6 +177,14 @@ static void begin_fault(unsigned alloc_at, unsigned mutex_at, unsigned cond_at)
 	probe.active = 1;
 }
 
+static void expect_calls(unsigned allocations, unsigned mutexes,
+			 unsigned conds)
+{
+	assert(probe.alloc_calls == allocations);
+	assert(probe.mutex_calls == mutexes);
+	assert(probe.cond_calls == conds);
+}
+
 static void finish_fault(void)
 {
 	unsigned i;
@@ -242,6 +250,17 @@ static void test_reactor_tx_pool_case(unsigned fail_alloc, unsigned fail_mutex,
 	} else {
 		assert(reactor == NULL);
 	}
+	/* 固定注入位置必须确实对应目标 TX 池，避免新增分配改变序号后假绿。 */
+	if (fail_alloc == 8U)
+		expect_calls(8U, 3U, 2U);
+	else if (fail_alloc == 9U)
+		expect_calls(9U, 4U, 2U);
+	else if (fail_mutex == 4U)
+		expect_calls(8U, 4U, 2U);
+	else if (fail_mutex == 5U)
+		expect_calls(9U, 5U, 2U);
+	else
+		expect_calls(11U, 6U, 2U);
 	finish_fault();
 	assert_budget_empty(&budget);
 	assert(fd_count() == before);
@@ -273,6 +292,9 @@ static void test_rpc_group_case(unsigned fail_alloc, unsigned fail_mutex,
 	} else {
 		assert(group == NULL);
 	}
+	expect_calls(fail_alloc ? fail_alloc : 2U,
+		     fail_alloc ? 0U : 1U,
+		     (fail_alloc || fail_mutex) ? 0U : 1U);
 	finish_fault();
 
 	if (ret != TR_OK) {
@@ -352,6 +374,16 @@ static void channel_reject(struct channel_fixture *fixture,
 	                                 NULL, &channel);
 	assert(ret == expected);
 	assert(channel == NULL);
+	if (fail_alloc >= 2U)
+		expect_calls(3U, 1U, 1U);
+	else if (fail_alloc == 1U)
+		expect_calls(1U, 0U, 0U);
+	else if (fail_mutex)
+		expect_calls(1U, 1U, 0U);
+	else if (fail_cond)
+		expect_calls(1U, 1U, 1U);
+	else
+		expect_calls(1U, 0U, 0U);
 	finish_fault();
 	assert_connection_active(fixture);
 }
