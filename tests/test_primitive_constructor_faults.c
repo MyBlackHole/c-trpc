@@ -26,18 +26,21 @@ struct fault_state {
 	unsigned fail_mutex_at;
 	unsigned fail_cond_at;
 	unsigned alloc_calls;
+	unsigned alloc_failures;
 	unsigned alloc_successes;
 	unsigned free_calls;
 	unsigned mutex_calls;
+	unsigned mutex_failures;
 	unsigned mutex_successes;
 	unsigned mutex_destroys;
 	unsigned cond_calls;
+	unsigned cond_failures;
 	unsigned cond_successes;
 	unsigned cond_destroys;
 	void *tracked[MAX_TRACKED];
 };
 
-static struct fault_state fault;
+static _Thread_local struct fault_state fault;
 static unsigned fault_sequence;
 
 void *__real_calloc(size_t count, size_t size);
@@ -86,8 +89,10 @@ void *__wrap_calloc(size_t count, size_t size)
 {
 	void *ptr;
 
-	if (fault.active && ++fault.alloc_calls == fault.fail_alloc_at)
+	if (fault.active && ++fault.alloc_calls == fault.fail_alloc_at) {
+		fault.alloc_failures++;
 		return NULL;
+	}
 	ptr = __real_calloc(count, size);
 	track_allocation(ptr);
 	return ptr;
@@ -97,8 +102,10 @@ void *__wrap_malloc(size_t size)
 {
 	void *ptr;
 
-	if (fault.active && ++fault.alloc_calls == fault.fail_alloc_at)
+	if (fault.active && ++fault.alloc_calls == fault.fail_alloc_at) {
+		fault.alloc_failures++;
 		return NULL;
+	}
 	ptr = __real_malloc(size);
 	track_allocation(ptr);
 	return ptr;
@@ -115,8 +122,10 @@ int __wrap_pthread_mutex_init(pthread_mutex_t *lock,
 {
 	int ret;
 
-	if (fault.active && ++fault.mutex_calls == fault.fail_mutex_at)
+	if (fault.active && ++fault.mutex_calls == fault.fail_mutex_at) {
+		fault.mutex_failures++;
 		return EAGAIN;
+	}
 	ret = __real_pthread_mutex_init(lock, attr);
 	if (fault.active && ret == 0)
 		fault.mutex_successes++;
@@ -137,8 +146,10 @@ int __wrap_pthread_cond_init(pthread_cond_t *cond,
 {
 	int ret;
 
-	if (fault.active && ++fault.cond_calls == fault.fail_cond_at)
+	if (fault.active && ++fault.cond_calls == fault.fail_cond_at) {
+		fault.cond_failures++;
 		return EAGAIN;
+	}
 	ret = __real_pthread_cond_init(cond, attr);
 	if (fault.active && ret == 0)
 		fault.cond_successes++;
@@ -182,6 +193,10 @@ static void finish_fault(unsigned allocations, unsigned mutexes, unsigned conds)
 	assert(fault.alloc_calls == allocations);
 	assert(fault.mutex_calls == mutexes);
 	assert(fault.cond_calls == conds);
+	/* 必须真正触发预期故障；未触发的注入不是成功的测试。 */
+	assert(fault.alloc_failures == (fault.fail_alloc_at != 0U));
+	assert(fault.mutex_failures == (fault.fail_mutex_at != 0U));
+	assert(fault.cond_failures == (fault.fail_cond_at != 0U));
 	assert(fault.alloc_successes == fault.free_calls);
 	assert(fault.mutex_successes == fault.mutex_destroys);
 	assert(fault.cond_successes == fault.cond_destroys);
