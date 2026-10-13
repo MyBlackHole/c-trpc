@@ -177,10 +177,9 @@ static void begin_fault(unsigned alloc_at, unsigned mutex_at, unsigned cond_at)
 	probe.active = 1;
 }
 
-static void expect_calls(unsigned allocations, unsigned mutexes,
-			 unsigned conds)
+static void expect_calls(unsigned allocs, unsigned mutexes, unsigned conds)
 {
-	assert(probe.alloc_calls == allocations);
+	assert(probe.alloc_calls == allocs);
 	assert(probe.mutex_calls == mutexes);
 	assert(probe.cond_calls == conds);
 }
@@ -281,6 +280,9 @@ static void test_rpc_group_case(unsigned fail_alloc, unsigned fail_mutex,
                                 unsigned fail_cond, int expected)
 {
 	struct tr_rpc_executor_group *group = NULL;
+	unsigned alloc_calls = fail_alloc ? fail_alloc : 2U;
+	unsigned mutex_calls = fail_alloc ? 0U : 1U;
+	unsigned cond_calls = (fail_alloc || fail_mutex) ? 0U : 1U;
 	int ret;
 
 	begin_fault(fail_alloc, fail_mutex, fail_cond);
@@ -292,9 +294,7 @@ static void test_rpc_group_case(unsigned fail_alloc, unsigned fail_mutex,
 	} else {
 		assert(group == NULL);
 	}
-	expect_calls(fail_alloc ? fail_alloc : 2U,
-		     fail_alloc ? 0U : 1U,
-		     (fail_alloc || fail_mutex) ? 0U : 1U);
+	expect_calls(alloc_calls, mutex_calls, cond_calls);
 	finish_fault();
 
 	if (ret != TR_OK) {
