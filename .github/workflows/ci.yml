@@ -153,6 +153,7 @@ jobs:
         run: |
           gcc --version
           python3 scripts/test_gcc_analyzer.py -v
+          python3 scripts/test_gcc_analyzer_baseline.py -v
       - name: 使用真实 Xmake 生产命令编译并运行 GCC 静态分析
         run: |
           set -euo pipefail
@@ -163,6 +164,7 @@ jobs:
           python3 scripts/run_gcc_analyzer.py \
             --database-dir build/compdb/gcc-release \
             --report-dir build/gcc-static-analysis/release \
+            --baseline docs/gcc_analyzer_known_warnings.json \
             --expected-major 11 --timeout 150
       - name: 归档独立分析日志与实际编译配置
         if: always()
@@ -171,6 +173,7 @@ jobs:
           name: static-analysis-gcc-11
           path: |
             build/gcc-static-analysis/release/summary.json
+            build/gcc-static-analysis/release/warning-gate.json
             build/gcc-static-analysis/release/logs/
             build/gcc-static-analysis/release/controls/
             build/compdb/gcc-release/
