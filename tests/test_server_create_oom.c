@@ -3,6 +3,7 @@
 #include "tr/status.h"
 
 #include "../src/facade_tuning_internal.h"
+#include "../src/facade_diagnostics_internal.h"
 #include "../src/runtime/runtime_internal.h"
 
 #include <assert.h>
@@ -168,9 +169,18 @@ static void test_failure(uint32_t shards, size_t fail_at,
 	assert(probe.destroy_attempts == 1U);
 
 	if (fail_destroy) {
+		struct tr_server_stats stats;
+		struct tr_rpc_semantic_stats semantic;
+
 		assert(ret == TR_ERR_SYS);
 		assert(server != NULL);
 		assert(probe.destroy_failures == 1U);
+		/* 构造回滚失败后只能继续销毁；不能把部分 Server 当成
+		 * 已发布分片集合来读取 RPC 或内存池状态。
+		 */
+		assert(tr_server_get_stats(server, &stats) == TR_ERR_STATE);
+		assert(tr_server_get_rpc_semantic_stats(server, &semantic) ==
+		       TR_ERR_STATE);
 		assert(tr_server_destroy(server) == TR_OK);
 		assert(probe.destroy_attempts == 2U);
 	} else {

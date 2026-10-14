@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/buffer.h"
 #include "../src/execution/reactor.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/rpc/rpc_internal.h"
 #include "../src/transport/channel/channel.h"
 #include "tr/rpc.h"
@@ -35,6 +36,7 @@ struct test_context {
 	unsigned delivered;
 	unsigned callback_count[CALL_COUNT];
 	int statuses[CALL_COUNT];
+	struct tr_rpc_endpoint *client_rpc;
 };
 
 struct callback_arg {
@@ -210,6 +212,11 @@ static void result_callback(struct tr_rpc_call_handle call, int status,
 
 	pthread_mutex_lock(&ctx->lock);
 	if (cb->index == 0U) {
+		/* Endpoint 的回调正在执行时，不能从执行器线程销毁自己。
+		 * 失败必须保持对象和外层强引用，后续所有者仍可正常销毁。
+		 */
+		assert(tr_rpc_endpoint_destroy(ctx->client_rpc) ==
+		       TR_ERR_STATE);
 		ctx->first_callback_entered = 1;
 		pthread_cond_broadcast(&ctx->cond);
 		while (!ctx->release_first_callback)
@@ -235,6 +242,11 @@ static void start_unary(struct tr_rpc_endpoint *endpoint, uint32_t method_id,
 				 result_callback, cb, out) == TR_OK);
 }
 
+static int reject_destroy(void *arg)
+{
+	return tr_rpc_endpoint_destroy((struct tr_rpc_endpoint *)arg);
+}
+
 int main(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -254,6 +266,7 @@ int main(void)
 	struct test_context ctx;
 	int client_fd;
 	int server_fd;
+	int destroy_status;
 	unsigned i;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -303,6 +316,10 @@ int main(void)
 	rpc_config.executor_queue_capacity = QUEUE_CAPACITY;
 	assert(tr_rpc_endpoint_create(client_channel, &rpc_config,
 				      &client_rpc) == TR_OK);
+	ctx.client_rpc = client_rpc;
+	/* Reactor 所有者回调内同样不得同步回收仍被事件分派使用的 Endpoint。 */
+	destroy_status = tr_reactor_call(reactor, reject_destroy, client_rpc);
+	assert(destroy_status == TR_ERR_STATE);
 
 	rpc_config.role = TR_RPC_SERVER;
 	rpc_config.executor_threads = 2U;

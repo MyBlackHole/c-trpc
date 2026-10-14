@@ -27,14 +27,6 @@
       "unit": "src/rpc/rpc.c"
     },
     {
-      "file": "src/server.c",
-      "line": 2067,
-      "column": 23,
-      "check": "analyzer-null-dereference",
-      "message": "dereference of NULL ‘shard’ [CWE-476]",
-      "unit": "src/server.c"
-    },
-    {
       "file": "src/transport/channel/channel.c",
       "line": 581,
       "column": 9,

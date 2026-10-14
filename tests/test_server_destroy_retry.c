@@ -91,6 +91,8 @@ int main(void)
 {
 	struct tr_server_config config;
 	struct tr_server *server = NULL;
+	struct tr_server_stats stats;
+	struct tr_rpc_semantic_stats semantic;
 	uint16_t port = 0U;
 	int client_fd;
 
@@ -116,6 +118,12 @@ int main(void)
 	assert(tr_server_destroy(server) == TR_ERR_SYS);
 	assert(atomic_load(&rpc_destroy_attempts) == 1U);
 	assert(atomic_load(&channel_destroy_attempts) == 0U);
+	/* 进入终止销毁后，即使屏障失败并保留对象也不得读取
+	 * 已可能拆除部分事件源的跨分片统计。
+	 */
+	assert(tr_server_get_stats(server, &stats) == TR_ERR_STATE);
+	assert(tr_server_get_rpc_semantic_stats(server, &semantic) ==
+	       TR_ERR_STATE);
 
 	/* 第二次重试让 RPC 正常收敛，再在 Channel 销毁处失败。
 	 * peer->rpc 已清空，但 peer->channel 与 Server 存储必须继续保留。
@@ -124,6 +132,7 @@ int main(void)
 	assert(tr_server_destroy(server) == TR_ERR_SYS);
 	assert(atomic_load(&rpc_destroy_attempts) == 2U);
 	assert(atomic_load(&channel_destroy_attempts) == 1U);
+	assert(tr_server_get_stats(server, &stats) == TR_ERR_STATE);
 
 	/* 第三次从剩余 Channel 所有权继续，最终完整释放 Server。 */
 	assert(tr_server_destroy(server) == TR_OK);
