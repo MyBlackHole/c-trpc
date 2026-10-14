@@ -438,8 +438,8 @@ static void test_older_control_fifo(void)
 	puts("older-CONTROL-FIFO/streak-saturation: ok");
 }
 
-static void tx_failure_event(struct tr_conn_handle connection,
-			     enum tr_connection_event event, int status, void *arg)
+static void on_connection(struct tr_conn_handle connection,
+			  enum tr_connection_event event, int status, void *arg)
 {
 	struct fixture *f = arg;
 
@@ -460,10 +460,12 @@ static void test_partial_tx_fatal_send_reuse(void)
 	struct tr_conn_handle old;
 	enum tr_connection_state state = TR_CONN_ERROR;
 	pthread_t gate_id;
+	int ret;
 
 	init_fixture(&f, 1U, 1U, 0, 0);
 	old = f.handle;
-	assert(tr_reactor_set_handler(old, NULL, tx_failure_event, &f) == TR_OK);
+	ret = tr_reactor_set_handler(old, NULL, on_connection, &f);
+	assert(ret == TR_OK);
 	gate_id = hold_owner(&f);
 	send_data(&f, 1U, 4U);
 	release_owner(&f, gate_id);
