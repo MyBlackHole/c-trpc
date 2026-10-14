@@ -46,8 +46,8 @@ class GCCAnalyzerTests(unittest.TestCase):
         self.assertIn("-c", actual)
         self.assertNotIn("-fsyntax-only", actual)
         self.assertEqual(actual[-3:-2], ["src/a.c"])
-        self.assertEqual(self.args[-3:], ["build/production/a.o", "src/a.c"][-3:] if False
-                         else ["-o", "build/production/a.o", "src/a.c"])
+        self.assertEqual(self.args[-3:],
+                         ["-o", "build/production/a.o", "src/a.c"])
 
     def test_rejects_syntax_only_or_missing_production_compile(self):
         for mutation in (lambda a: a.append("-fsyntax-only"),
@@ -66,9 +66,6 @@ class GCCAnalyzerTests(unittest.TestCase):
                          lambda a: a.__setitem__(0, "")):
             args = list(self.args)
             mutation(args)
-            if not args[0]:
-                # Empty executable is rejected when fetching and checking GCC version.
-                continue
             with self.assertRaises(ValueError):
                 target.analysis_command(args, "src/a.c", self.root / "test.o")
 
