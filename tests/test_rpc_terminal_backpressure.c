@@ -48,7 +48,7 @@ struct callback_arg {
 /* 只在当前测试二进制的链接阶段拦截 RPC 待重试调度边界。
  * arg 等于 Endpoint 指针时，是 retry 回调，而不是独立完成项描述符。
  */
-typedef void (*completion_fn)(void *);
+typedef void (*complete_cb)(void *);
 
 static _Atomic(uintptr_t) retry_target;
 static atomic_int fail_retry_once;
@@ -56,16 +56,15 @@ static atomic_uint retry_attempts;
 static atomic_uint retry_failures;
 static atomic_uint retry_successes;
 
-int __real_tr_reactor_complete(struct tr_reactor *, completion_fn, void *);
+int __real_tr_reactor_complete(struct tr_reactor *, complete_cb, void *);
 
-int __wrap_tr_reactor_complete(struct tr_reactor *reactor, completion_fn fn,
-			       void *arg)
+int __wrap_tr_reactor_complete(struct tr_reactor *r, complete_cb fn, void *arg)
 {
 	int ret;
 
 	if (atomic_load(&retry_target) == 0U ||
 	    (uintptr_t)arg != atomic_load(&retry_target))
-		return __real_tr_reactor_complete(reactor, fn, arg);
+		return __real_tr_reactor_complete(r, fn, arg);
 
 	atomic_fetch_add(&retry_attempts, 1U);
 	if (atomic_exchange(&fail_retry_once, 0)) {
@@ -73,7 +72,7 @@ int __wrap_tr_reactor_complete(struct tr_reactor *reactor, completion_fn fn,
 		return TR_ERR_SYS;
 	}
 
-	ret = __real_tr_reactor_complete(reactor, fn, arg);
+	ret = __real_tr_reactor_complete(r, fn, arg);
 	if (ret == TR_OK)
 		atomic_fetch_add(&retry_successes, 1U);
 	return ret;
