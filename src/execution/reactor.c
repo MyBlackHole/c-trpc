@@ -1190,6 +1190,16 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		ssize_t n;
 		int iov_count;
 
+		/* FIFO 非空时必须选出有效 TX 项。若内部链表状态失配，
+		 * 不在可能为空的项上继续发送，关闭本连接并归还整条 TX 队列。
+		 */
+		if (!item) {
+			tr_connection_close_internal(reactor, connection,
+						     TR_CONN_EVENT_ERROR,
+						     TR_ERR_STATE);
+			return;
+		}
+
 		/* 仅在被选中时准备延续帧，不要提前到 CONTROL 之前。 */
 		if (item->wire_len == 0) {
 			int ret = tr_tx_prepare_frame(reactor, item);
