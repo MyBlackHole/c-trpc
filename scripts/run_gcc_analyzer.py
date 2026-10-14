@@ -12,7 +12,7 @@ from tool_i18n import parser_for
 
 VERSION = re.compile(r"^(\d+)(?:\.\d+)*$")
 ANALYZER_DIAGNOSTIC = re.compile(
-    r"(?m)^.*:\d+:\d+: (?:warning|error): .+\[-W(?:error=)?analyzer-[^\]]+\]")
+    r"(?m)^.*:\d+(?::\d+)?: (?:warning|error): .+\[-W(?:error=)?analyzer-[^\]]+\]")
 
 CLEAN_CONTROL = """#include <stdlib.h>
 static void release(void *address)
@@ -78,7 +78,7 @@ def check_gcc(compiler, expected_major):
 
 def analysis_command(original, source, output):
     """不重建生产选项，仅换输出位置并附加 GCC 分析器；必须实际执行 -c。"""
-    if (not isinstance(original, list) or not original
+    if (not isinstance(original, list) or not original or not original[0]
             or original.count("-c") != 1 or original.count("-o") != 1
             or "-fsyntax-only" in original or "-fanalyzer" in original):
         raise ValueError("GCC production argv lacks one real compile and output")
