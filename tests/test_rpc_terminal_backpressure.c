@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -43,6 +44,40 @@ struct callback_arg {
 	struct test_context *context;
 	unsigned index;
 };
+
+/* 只在当前测试二进制的链接阶段拦截 RPC 待重试调度边界。
+ * arg 等于 Endpoint 指针时，是 retry 回调，而不是独立完成项描述符。
+ */
+typedef void (*completion_fn)(void *);
+
+static _Atomic(uintptr_t) retry_target;
+static atomic_int fail_retry_once;
+static atomic_uint retry_attempts;
+static atomic_uint retry_failures;
+static atomic_uint retry_successes;
+
+int __real_tr_reactor_complete(struct tr_reactor *, completion_fn, void *);
+
+int __wrap_tr_reactor_complete(struct tr_reactor *reactor, completion_fn fn,
+			       void *arg)
+{
+	int ret;
+
+	if (atomic_load(&retry_target) == 0U ||
+	    (uintptr_t)arg != atomic_load(&retry_target))
+		return __real_tr_reactor_complete(reactor, fn, arg);
+
+	atomic_fetch_add(&retry_attempts, 1U);
+	if (atomic_exchange(&fail_retry_once, 0)) {
+		atomic_fetch_add(&retry_failures, 1U);
+		return TR_ERR_SYS;
+	}
+
+	ret = __real_tr_reactor_complete(reactor, fn, arg);
+	if (ret == TR_OK)
+		atomic_fetch_add(&retry_successes, 1U);
+	return ret;
+}
 
 static void pause_1ms(void)
 {
@@ -382,12 +417,25 @@ int main(void)
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
 
+	/* 工作线程 take() 会为 Endpoint 提交重试回调。第一次强制返回
+	 * TR_ERR_SYS，验证 scheduler 归还这一次回调强引用，下一次 take()
+	 * 仍能重新调度，且不会因此遗失 terminal task 或产生双重回调。
+	 * 被阻塞的客户端只有一个工作线程，设置后才让它继续 take()，
+	 * 因此注入点不依赖睡眠或系统调度时序。
+	 */
+	atomic_store(&retry_target, (uintptr_t)client_rpc);
+	atomic_store(&fail_retry_once, 1);
+
 	/* 工作线程 take() 必须重新调度两个待处理的 Call 本地终止槽位。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release_first_callback = 1;
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
 	wait_deliveries(&ctx, CALL_COUNT);
+	assert(atomic_load(&retry_failures) == 1U);
+	assert(atomic_load(&retry_attempts) >= 2U);
+	assert(atomic_load(&retry_successes) >= 1U);
+	atomic_store(&retry_target, (uintptr_t)0U);
 
 	pthread_mutex_lock(&ctx.lock);
 	for (i = 0; i < CALL_COUNT; ++i) {
