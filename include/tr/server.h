@@ -92,6 +92,9 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
 
 /*
  * 获取该 Server 所有存活及已退役对端的稳定聚合 RPC 语义生命周期快照。
+ * 构造回滚失败后保留的部分 Server、已经进入终局销毁的 Server
+ * 不能再读取跨分片统计，此时返回 TR_ERR_STATE。
+ * 与其他 Server API 一样，调用方不得与 tr_server_destroy() 并发调用。
  */
 int tr_server_get_rpc_semantic_stats(
 	struct tr_server *server, struct tr_rpc_semantic_stats *out);
