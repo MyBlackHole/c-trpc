@@ -46,6 +46,30 @@
 当前既有 Clang 14 精确基线（11 条）与 GCC 11 基线（4 条）互不替代，
 不得相加得出唯一缺陷数量，也不得由任何一个分析器结果推断运行时无缺陷。
 
+## Server 统计访问边界修复后的再验证
+
+在 `fix/server-partial-owner-stats-20261014` 分支增加了私有 `published`
+生命周期准入：只有成功构造并完成全部分片绑定后，Server 才允许跨分片统计；
+构造失败后的部分所有权对象以及已经进入终局销毁（即使销毁屏障失败）的
+对象，`tr_server_get_stats()` 和 `tr_server_get_rpc_semantic_stats()`
+均返回 `TR_ERR_STATE`，不会继续读取分片指针。
+逐分片还检查 Runtime 绑定；不会释放、替换或延长任何资源的所有权。
+
+现有 `test_server_create_oom` 的逐分配失败与回滚保留所有权矩阵、
+`test_server_destroy_retry` 的多次销毁屏障失败矩阵现均加入了禁止读取
+部分对象的断言。该状态标志属于 Server 私有实现，不修改公开结构体、
+API 或协议。
+
+在修改生产代码、但尚未修订诊断基线的首次远端运行中，GCC 分析器报告
+`added=0, removed=1`；消失的就是 `server.c:2067` 的历史空指针诊断。
+见 [首次修复后 GCC 门禁](https://github.com/MyBlackHole/c-trpc/actions/runs/38520248407)。
+据此将 Server 项**单独**从精确告警文件移除；其余三条 GCC 诊断仍为
+`unverified`，Clang 既有 11 条记录完全不变。
+
+这一证据证明新增准入让 GCC 不再报告这条路径，并且针对已测试的
+构造失败和终局销毁拒绝统计查询；不证明任意错误并发访问是合法的，
+也不意味着全部其他生命周期路径已经验收。
+
 ## 后续收敛顺序
 
 1. 优先复核 RPC 引用计数与 Server 部分构造的生命周期交错。
