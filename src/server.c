@@ -95,6 +95,8 @@ struct tr_server {
 	pthread_cond_t finalizer_cond;
 	int finalizer_cond_ready;
 	int started;
+	/* 只有构造完成并发布后才允许读取跨分片统计；终止销毁开始后关闭。 */
+	int published;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
@@ -1394,6 +1396,8 @@ int tr_server_create_with_tuning(
 			return tr_server_create_rollback(out, server, ret);
 	}
 
+	/* 全部分片和可选监听器均已构造完成后才发布可读状态。 */
+	server->published = 1;
 	*out = server;
 	return TR_OK;
 }
@@ -2025,8 +2029,14 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	uint32_t i;
 	int ret;
 
-	if (!server || !out || server->shard_count == 0U)
+	if (!server || !out)
 		return TR_ERR_INVALID;
+	/* 回滚失败时 *out 可能保留部分构造对象；调用方只能继续销毁，
+	 * 不允许统计遍历未发布或已经开始终止拆除的分片数组。
+	 */
+	if (!server->published || !server->runtime || !server->shards ||
+	    server->shard_count == 0U)
+		return TR_ERR_STATE;
 
 	memset(&stats, 0, sizeof(stats));
 	stats.shard_count = server->shard_count;
@@ -2039,6 +2049,8 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 		struct tr_reactor_stats reactor_stats;
 		struct tr_pool_observation pool_stats;
 
+		if (!shard->runtime)
+			return TR_ERR_STATE;
 		memset(&reactor_stats, 0, sizeof(reactor_stats));
 		ret = tr_reactor_get_stats(tr_server_shard_reactor(shard),
 					   &reactor_stats);
@@ -2118,6 +2130,8 @@ int tr_server_destroy(struct tr_server *server)
 	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
 		return TR_ERR_STATE;
 
+	/* 销毁即使稍后需要重试也不再允许读取跨分片统计。 */
+	server->published = 0;
 	if (server->shards) {
 		ret = tr_server_stop_accepting(server);
 		if (ret != TR_OK)
