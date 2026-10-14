@@ -45,3 +45,5 @@ c-trpc 核心的范围是通用运行时、传输、连接组和 RPC。
 
 详细规则见 [07-layer-module-api-boundaries.md](07-layer-module-api-boundaries.md) 与
 [ADR-007](decisions/ADR-007-layering-performance.md)。
+
+- [ADR-008：独立消息层与传输层边界](decisions/ADR-008-message-layer.md)（提议，未实现）。
