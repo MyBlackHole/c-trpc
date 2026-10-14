@@ -47,8 +47,11 @@ EAGAIN、部分头部/载荷写入、强制关闭后复用。
 
 ## 告警边界与门禁
 
-- `reactor.c:1194` 旧告警先保持 `unverified`，直到真实 GCC 11 的完整
-  生产编译数据库证明其消失；届时只移除这个**已消失的**精确记录。
+- 修复后的真实 GCC 11 生产静态分析报告
+  `added=0, removed=1`（[首次精确基线拒绝运行](https://github.com/MyBlackHole/c-trpc/actions/runs/38576830969)）。
+  本 PR 只从 GCC 精确基线删除原 `reactor.c:1194`
+  `analyzer-null-dereference`，其余两条 GCC 仍为 `unverified`。
+  **诊断消失不等于证明所有内部 FIFO 损坏状态都可恢复。**
 - 其他 GCC/Clang 告警不能据此分类或移除。
 - 每次更改后的精确提交必须通过 GCC/Clang、ASan+UBSan、TSan、
   两套静态分析、格式、SDK/CRC 与 RPC 冒烟。
