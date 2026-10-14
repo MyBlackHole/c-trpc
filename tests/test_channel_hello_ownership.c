@@ -88,8 +88,8 @@ int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 
 	if (injected != TR_OK)
 		return injected;
-	return __real_tr_reactor_send(
-		connection, type, flags, stream_id, message_id, payload);
+	return __real_tr_reactor_send(connection, type, flags, stream_id,
+	                              message_id, payload);
 }
 
 static void reset_tracking(void)
@@ -141,6 +141,7 @@ static void test_hello_failed_admission(int status)
 	struct tr_channel_config config = channel_config(TR_CHANNEL_CLIENT);
 	int sockets[2];
 	int flags = SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
+	int ret;
 
 	reset_tracking();
 	assert(socketpair(AF_UNIX, flags, 0, sockets) == 0);
@@ -150,9 +151,9 @@ static void test_hello_failed_admission(int status)
 	assert(tr_reactor_quiesce(reactor) == TR_OK);
 	atomic_store(&fail_hello_status, status);
 
-	assert(tr_channel_create(
-		       &config, connection, connection, NULL, NULL, NULL, NULL,
-		       &channel) == status);
+	ret = tr_channel_create(&config, connection, connection, NULL, NULL,
+	                        NULL, NULL, &channel);
+	assert(ret == status);
 	assert(channel == NULL);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_reactor_destroy(reactor) == TR_OK);
@@ -179,21 +180,24 @@ static void create_pair(struct pair *pair, int inject_ack_failure)
 	ret = tr_reactor_create(NULL, NULL, NULL, NULL, &pair->reactor);
 	assert(ret == TR_OK);
 	assert(tr_reactor_start(pair->reactor) == TR_OK);
-	ret = tr_reactor_adopt_fd(pair->reactor, sockets[0], &client_connection);
+	ret = tr_reactor_adopt_fd(pair->reactor, sockets[0],
+	                          &client_connection);
 	assert(ret == TR_OK);
-	ret = tr_reactor_adopt_fd(pair->reactor, sockets[1], &server_connection);
+	ret = tr_reactor_adopt_fd(pair->reactor, sockets[1],
+	                          &server_connection);
 	assert(ret == TR_OK);
 
 	/* 服务端先发布回调但延后握手，排除 HELLO 到达时尚未安装处理函数。 */
 	config = channel_config(TR_CHANNEL_SERVER);
-	assert(tr_channel_create_deferred(
-		       &config, server_connection, server_connection, NULL, NULL,
-		       NULL, NULL, &pair->server) == TR_OK);
+	ret = tr_channel_create_deferred(&config, server_connection,
+	                                 server_connection, NULL, NULL, NULL,
+	                                 NULL, &pair->server);
+	assert(ret == TR_OK);
 	atomic_store(&fail_first_ack, inject_ack_failure);
 	config = channel_config(TR_CHANNEL_CLIENT);
-	assert(tr_channel_create(
-		       &config, client_connection, client_connection, NULL, NULL,
-		       NULL, NULL, &pair->client) == TR_OK);
+	ret = tr_channel_create(&config, client_connection, client_connection,
+	                        NULL, NULL, NULL, NULL, &pair->client);
+	assert(ret == TR_OK);
 	assert(tr_channel_start(pair->server) == TR_OK);
 }
 
@@ -223,10 +227,10 @@ static void wait_injected_ack(void)
 static void test_successful_handshake(void)
 {
 	struct pair pair;
+	int ret;
 
 	reset_tracking();
 	create_pair(&pair, 0);
-	int ret;
 
 	ret = tr_channel_wait_ready(pair.client, TR_LANE_CONTROL, 5000U);
 	assert(ret == TR_OK);
