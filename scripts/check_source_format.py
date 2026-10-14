@@ -102,7 +102,8 @@ def check(base_ref, head_ref, formatter, _=lambda message: message):
             failures += 1
             print(_("{path!r}: changed lines need formatting: {lines}").format(path=path, lines=','.join(map(str, sorted(bad)))))
             formatted = run(formatter, "--style=file", "--fallback-style=none",
-                            "--assume-filename=" + str(Path(path).absolute()), data=new)
+                            "--assume-filename=" + str(Path(path).absolute()),
+                            *("--lines={0}:{0}".format(line) for line in sorted(bad)), data=new)
             print("FORMAT_PROBE_START", path)
             print("".join(difflib.unified_diff(new.decode().splitlines(True),
                                                formatted.decode().splitlines(True),
