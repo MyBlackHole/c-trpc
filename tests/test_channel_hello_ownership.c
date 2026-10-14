@@ -35,6 +35,11 @@ int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
                            uint64_t message_id, struct tr_buffer *payload);
 void __real_free(void *ptr);
 
+static int tracked_release(unsigned slot, uintptr_t address)
+{
+	return atomic_compare_exchange_strong(&tracked[slot], &address, 0U);
+}
+
 void __wrap_free(void *ptr)
 {
 	uintptr_t addr = (uintptr_t)ptr;
@@ -42,10 +47,7 @@ void __wrap_free(void *ptr)
 
 	if (addr != 0U) {
 		for (i = 0U; i < TRACKED_PROTOCOL_BUFFERS; ++i) {
-			uintptr_t expected = addr;
-
-			if (atomic_compare_exchange_strong(&tracked[i], &expected,
-							     (uintptr_t)0)) {
+			if (tracked_release(i, addr)) {
 				atomic_fetch_add(&released_count, 1U);
 				break;
 			}
@@ -62,11 +64,13 @@ int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 
 	if (type == TR_FRAME_HELLO || type == TR_FRAME_HELLO_ACK) {
 		unsigned slot = atomic_fetch_add(&tracked_count, 1U);
+		uintptr_t prior;
 
 		assert(slot < TRACKED_PROTOCOL_BUFFERS);
 		assert(payload != NULL);
 		assert(payload->pool == NULL && payload->release_cb != NULL);
-		assert(atomic_exchange(&tracked[slot], (uintptr_t)payload) == 0U);
+		prior = atomic_exchange(&tracked[slot], (uintptr_t)payload);
+		assert(prior == 0U);
 		if (type == TR_FRAME_HELLO) {
 			atomic_fetch_add(&hello_count, 1U);
 			injected = atomic_exchange(&fail_hello_status, TR_OK);
@@ -84,8 +88,8 @@ int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 
 	if (injected != TR_OK)
 		return injected;
-	return __real_tr_reactor_send(connection, type, flags, stream_id,
-				      message_id, payload);
+	return __real_tr_reactor_send(
+		connection, type, flags, stream_id, message_id, payload);
 }
 
 static void reset_tracking(void)
@@ -111,8 +115,7 @@ static void check_released(unsigned hellos, int expect_acks)
 	assert(atomic_load(&hello_count) == hellos);
 	if (expect_acks >= 0)
 		assert(atomic_load(&ack_count) == (unsigned)expect_acks);
-	assert(count == atomic_load(&hello_count) +
-			atomic_load(&ack_count));
+	assert(count == atomic_load(&hello_count) + atomic_load(&ack_count));
 	assert(atomic_load(&released_count) == count);
 	for (i = 0U; i < TRACKED_PROTOCOL_BUFFERS; ++i)
 		assert(atomic_load(&tracked[i]) == 0U);
@@ -120,7 +123,7 @@ static void check_released(unsigned hellos, int expect_acks)
 
 static struct tr_channel_config channel_config(enum tr_channel_role role)
 {
-	struct tr_channel_config config = { 0 };
+	struct tr_channel_config config = {0};
 
 	config.role = role;
 	config.mode = TR_CHANNEL_SHARED_CONNECTION;
@@ -137,18 +140,19 @@ static void test_hello_failed_admission(int status)
 	struct tr_conn_handle connection;
 	struct tr_channel_config config = channel_config(TR_CHANNEL_CLIENT);
 	int sockets[2];
+	int flags = SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
 
 	reset_tracking();
-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
-			  0, sockets) == 0);
+	assert(socketpair(AF_UNIX, flags, 0, sockets) == 0);
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
 	assert(tr_reactor_start(reactor) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, sockets[0], &connection) == TR_OK);
 	assert(tr_reactor_quiesce(reactor) == TR_OK);
 	atomic_store(&fail_hello_status, status);
 
-	assert(tr_channel_create(&config, connection, connection, NULL, NULL,
-				 NULL, NULL, &channel) == status);
+	assert(tr_channel_create(
+		       &config, connection, connection, NULL, NULL, NULL, NULL,
+		       &channel) == status);
 	assert(channel == NULL);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_reactor_destroy(reactor) == TR_OK);
@@ -167,26 +171,29 @@ static void create_pair(struct pair *pair, int inject_ack_failure)
 	struct tr_channel_config config;
 	struct tr_conn_handle client_connection, server_connection;
 	int sockets[2];
+	int flags = SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC;
+	int ret;
 
 	memset(pair, 0, sizeof(*pair));
-	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
-			  0, sockets) == 0);
-	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &pair->reactor) == TR_OK);
+	assert(socketpair(AF_UNIX, flags, 0, sockets) == 0);
+	ret = tr_reactor_create(NULL, NULL, NULL, NULL, &pair->reactor);
+	assert(ret == TR_OK);
 	assert(tr_reactor_start(pair->reactor) == TR_OK);
-	assert(tr_reactor_adopt_fd(pair->reactor, sockets[0],
-				  &client_connection) == TR_OK);
-	assert(tr_reactor_adopt_fd(pair->reactor, sockets[1],
-				  &server_connection) == TR_OK);
+	ret = tr_reactor_adopt_fd(pair->reactor, sockets[0], &client_connection);
+	assert(ret == TR_OK);
+	ret = tr_reactor_adopt_fd(pair->reactor, sockets[1], &server_connection);
+	assert(ret == TR_OK);
 
 	/* 服务端先发布回调但延后握手，排除 HELLO 到达时尚未安装处理函数。 */
 	config = channel_config(TR_CHANNEL_SERVER);
-	assert(tr_channel_create_deferred(&config, server_connection,
-			server_connection, NULL, NULL, NULL, NULL,
-			&pair->server) == TR_OK);
+	assert(tr_channel_create_deferred(
+		       &config, server_connection, server_connection, NULL, NULL,
+		       NULL, NULL, &pair->server) == TR_OK);
 	atomic_store(&fail_first_ack, inject_ack_failure);
 	config = channel_config(TR_CHANNEL_CLIENT);
-	assert(tr_channel_create(&config, client_connection, client_connection,
-				 NULL, NULL, NULL, NULL, &pair->client) == TR_OK);
+	assert(tr_channel_create(
+		       &config, client_connection, client_connection, NULL, NULL,
+		       NULL, NULL, &pair->client) == TR_OK);
 	assert(tr_channel_start(pair->server) == TR_OK);
 }
 
@@ -201,12 +208,15 @@ static void destroy_pair(struct pair *pair)
 static void wait_injected_ack(void)
 {
 	struct timespec deadline;
+	int ret;
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 5;
 	assert(pthread_mutex_lock(&ack_lock) == 0);
-	while (atomic_load(&failed_ack_count) == 0U)
-		assert(pthread_cond_timedwait(&ack_cond, &ack_lock, &deadline) == 0);
+	while (atomic_load(&failed_ack_count) == 0U) {
+		ret = pthread_cond_timedwait(&ack_cond, &ack_lock, &deadline);
+		assert(ret == 0);
+	}
 	assert(pthread_mutex_unlock(&ack_lock) == 0);
 }
 
@@ -216,10 +226,12 @@ static void test_successful_handshake(void)
 
 	reset_tracking();
 	create_pair(&pair, 0);
-	assert(tr_channel_wait_ready(pair.client, TR_LANE_CONTROL,
-				     5000U) == TR_OK);
-	assert(tr_channel_wait_ready(pair.server, TR_LANE_CONTROL,
-				     5000U) == TR_OK);
+	int ret;
+
+	ret = tr_channel_wait_ready(pair.client, TR_LANE_CONTROL, 5000U);
+	assert(ret == TR_OK);
+	ret = tr_channel_wait_ready(pair.server, TR_LANE_CONTROL, 5000U);
+	assert(ret == TR_OK);
 	destroy_pair(&pair);
 	assert(atomic_load(&failed_ack_count) == 0U);
 	check_released(2U, 2);
@@ -237,7 +249,10 @@ static void test_hello_ack_failed_admission(void)
 	destroy_pair(&pair);
 	assert(atomic_load(&failed_ack_count) == 1U);
 	assert(atomic_load(&ack_count) >= 1U);
-	check_released(2U, -1);
+	/* 错误可在服务端发出自己的 HELLO 之前发生。 */
+	assert(atomic_load(&hello_count) >= 1U);
+	assert(atomic_load(&hello_count) <= 2U);
+	check_released(atomic_load(&hello_count), -1);
 }
 
 int main(void)
