@@ -101,14 +101,6 @@ def check(base_ref, head_ref, formatter, _=lambda message: message):
         if bad:
             failures += 1
             print(_("{path!r}: changed lines need formatting: {lines}").format(path=path, lines=','.join(map(str, sorted(bad)))))
-            formatted = run(formatter, "--style=file", "--fallback-style=none",
-                            "--assume-filename=" + str(Path(path).absolute()),
-                            *("--lines={0}:{0}".format(line) for line in sorted(bad)), data=new)
-            print("FORMAT_PROBE_START", path)
-            print("".join(difflib.unified_diff(new.decode().splitlines(True),
-                                               formatted.decode().splitlines(True),
-                                               fromfile="current", tofile="clang-format"))[:9000])
-            print("FORMAT_PROBE_END", path)
     print(_("clang-format {version}: checked {checked} changed source files, {failures} failed; merge base {base}").format(version=VERSION, checked=checked, failures=failures, base=base))
     return bool(failures)
 
