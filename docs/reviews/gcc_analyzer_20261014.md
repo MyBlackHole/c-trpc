@@ -70,6 +70,33 @@ API 或协议。
 构造失败和终局销毁拒绝统计查询；不证明任意错误并发访问是合法的，
 也不意味着全部其他生命周期路径已经验收。
 
+## RPC 重试回调的强引用路径审查与新增回归
+
+针对 `rpc.c:2698` 的 GCC 释放后使用诊断，分析器路径从
+`tr_rpc_retry_pending_executor_on_owner()` 中的 `tr_rpc_queue_task_locked()`
+追踪到入队失败后 `tr_rpc_endpoint_put()`，假设这次释放会成为最后一次
+引用归还，进而推断后续重试状态写入发生在对象释放之后。
+
+需要分清两条独立的引用：`tr_rpc_schedule_pending_executor_retry()`
+在提交 Reactor 完成回调前先通过 `tr_rpc_endpoint_get()` 获取一份
+**覆盖整段待重试回调执行期**的强引用；`tr_rpc_queue_task_locked()`
+尝试入队时再获取一份临时任务引用，失败时仅归还后者。
+重试回调在释放 `endpoint->lock` 后才归还第一份引用。
+终局 `tr_rpc_endpoint_destroy_with_stats()` 又必须在解绑事件源、关闭
+执行器后等待引用数收敛到仅剩所有者引用。这一套引用关系表明
+GCC 首轮路径未完整建模外层引用是合理怀疑，但**尚不是彻底的并发正确性证明**。
+
+现有 `test_rpc_terminal_backpressure` 以真实一元 RPC、满执行器队列、
+取消与响应回调重试覆盖后者的可达场景。新增加两种负向检查：
+- 第一条工作线程结果回调仍在运行时调用 Endpoint 销毁，必须
+  返回 `TR_ERR_STATE` 且不能改变后续回调、连接与资源的回收结果。
+- 在 Reactor 所有者回调内尝试 Endpoint 销毁，同样必须拒绝，
+  防止等待自己的事件处理轮次。
+
+运行时负向测试通过后，仍需覆盖异常执行器准入错误、终止强引用交错、
+以及错误销毁重试路径；`rpc.c:2698` 继续保留
+`review_state=unverified`，**不允许因这两项新增断言就删掉 GCC 告警基线**。
+
 ## 后续收敛顺序
 
 1. 优先复核 RPC 引用计数与 Server 部分构造的生命周期交错。
