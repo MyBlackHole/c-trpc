@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -34,6 +35,10 @@ struct fixture {
 	size_t pause_after;
 	int inject_eagain;
 	unsigned eagain_count;
+	atomic_int fail_next_send;
+	atomic_uint fatal_send_count;
+	int error_notified;
+	int error_status;
 	unsigned refill_left;
 	uint64_t next_ping;
 	unsigned char observed[OBSERVED_CAPACITY];
@@ -83,6 +88,12 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 	struct fixture *f = active;
 	ssize_t n;
 
+	/* EIO 仅注入一次：部分写入之后的剩余帧仍由真实 Reactor 收尾。 */
+	if (f && atomic_exchange(&f->fail_next_send, 0)) {
+		atomic_fetch_add(&f->fatal_send_count, 1U);
+		errno = EIO;
+		return -1;
+	}
 	/* 仅注入故障：保留真实套接字与 EPOLLOUT 恢复路径。 */
 	if (f && f->inject_eagain && f->observed_len == 1U && !f->eagain_count) {
 		f->eagain_count++;
@@ -190,6 +201,8 @@ static void init_fixture(struct fixture *f, uint32_t budget, size_t pause_after,
 	memset(f, 0, sizeof(*f));
 	f->pause_after = pause_after;
 	f->inject_eagain = inject_eagain;
+	atomic_init(&f->fail_next_send, 0);
+	atomic_init(&f->fatal_send_count, 0U);
 	f->refill_left = refill;
 	f->next_ping = BURST + 1U;
 	assert(pthread_mutex_init(&f->lock, NULL) == 0);
@@ -425,6 +438,73 @@ static void test_older_control_fifo(void)
 	puts("older-CONTROL-FIFO/streak-saturation: ok");
 }
 
+static void tx_failure_event(struct tr_conn_handle connection,
+			     enum tr_connection_event event, int status, void *arg)
+{
+	struct fixture *f = arg;
+
+	assert(connection.slot == f->handle.slot);
+	assert(connection.generation == f->handle.generation);
+	assert(event == TR_CONN_EVENT_ERROR);
+	assert(status == TR_ERR_SYS);
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	f->error_notified++;
+	f->error_status = status;
+	assert(pthread_cond_broadcast(&f->cond) == 0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+}
+
+static void test_partial_tx_fatal_send_reuse(void)
+{
+	struct fixture f;
+	struct tr_conn_handle old;
+	enum tr_connection_state state = TR_CONN_ERROR;
+	pthread_t gate_id;
+
+	init_fixture(&f, 1U, 1U, 0, 0);
+	old = f.handle;
+	assert(tr_reactor_set_handler(old, NULL, tx_failure_event, &f) == TR_OK);
+	gate_id = hold_owner(&f);
+	send_data(&f, 1U, 4U);
+	release_owner(&f, gate_id);
+
+	/* 确认真实 socket 已写 1 字节而 owner 尚未更新部分帧游标。 */
+	wait_flag(&f, &f.tx_entered);
+	send_item(&f, TR_FRAME_PING, 0, 0, 2U, 0);
+	send_item(&f, TR_FRAME_WINDOW_UPDATE, 0, 1U, 3U, 0);
+	send_data(&f, 4U, 1U);
+	atomic_store(&f.fail_next_send, 1);
+	release_tx(&f);
+
+	/* 由错误回调证明队列已拆除，不用休眠猜测调度轮次。 */
+	wait_flag(&f, &f.error_notified);
+	assert(f.error_notified == 1);
+	assert(f.error_status == TR_ERR_SYS);
+	assert(tr_reactor_quiesce(f.reactor) == TR_OK);
+	assert(atomic_load(&f.fatal_send_count) == 1U);
+	assert(f.observed_len == 1U);
+	assert(tr_reactor_get_connection_state(old, &state) == TR_OK);
+	assert(state == TR_CONN_FREE);
+	assert(tr_buffer_pool_free_count(&f.pool) == 48U);
+	assert(tr_reactor_send(old, TR_FRAME_PING, 0, 0, 5U, NULL) ==
+	       TR_ERR_STALE);
+
+	assert(close(f.peer) == 0);
+	adopt_pair(&f);
+	assert(f.handle.slot == old.slot);
+	assert(f.handle.generation != old.generation);
+
+	/* 旧连接仅留下被截断的首字节；新连接不能继承旧 TX 队列。 */
+	gate_id = hold_owner(&f);
+	f.parsed_len = f.observed_len;
+	send_data(&f, 6U, 1U);
+	release_owner(&f, gate_id);
+	expect_data(&f, 6U, 0, 1U);
+	destroy_fixture(&f);
+	assert(atomic_load(&f.fatal_send_count) == 1U);
+	puts("partial-TX/EIO/queued-control/payload-return/slot-reuse: ok");
+}
+
 static void test_close_reuse(void)
 {
 	struct fixture f;
@@ -482,6 +562,7 @@ int main(void)
 	test_mid_frame(1U, 1);
 	test_refill_fairness();
 	test_older_control_fifo();
+	test_partial_tx_fatal_send_reuse();
 	test_close_reuse();
 	alarm(0U);
 	return 0;
