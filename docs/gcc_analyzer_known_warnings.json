@@ -11,14 +11,6 @@
   },
   "warnings": [
     {
-      "file": "src/execution/reactor.c",
-      "line": 1194,
-      "column": 25,
-      "check": "analyzer-null-dereference",
-      "message": "dereference of NULL ‘item’ [CWE-476]",
-      "unit": "src/execution/reactor.c"
-    },
-    {
       "file": "src/rpc/rpc.c",
       "line": 2698,
       "column": 65,
