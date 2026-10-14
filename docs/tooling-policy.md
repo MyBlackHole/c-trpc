@@ -184,6 +184,12 @@ GCC release 模式和 Xmake 原生 `compile_commands.json`。
 `-fanalyzer`。每个生产翻译单元仍执行真正的 `-c` 编译；
 **不得改用 `-fsyntax-only`，因为它可能跳过 GCC 静态分析阶段。**
 只有分析器进程返回 0 且实际产生目标对象文件才算该单元完成。
+与 Clang 的已有告警处理相同，首轮 GCC 分析也发现了 4 条尚未验收诊断。
+为保留其完整诊断、实施独立增量门禁，分析**专用**命令仅对三个已经出现的
+GCC analyzer 告警类别附加对应 `-Wno-error=analyzer-...`，
+不使用 `-Wno-analyzer-...` 关闭任何检查。生产构建的 `-Werror` 原样保留。
+所有同类别新告警或已知位置、文本、数量漂移都会被原始日志精确比较阻断；
+其他 GCC 检查项仍由生产 `-Werror` 处理。
 
 在运行生产分析前，使用两个受控 C 程序验证工具自身：
 带 `__attribute__((cleanup))` 的正确清理路径必须成功编译，
@@ -203,13 +209,18 @@ python3 scripts/check_compile_commands.py \
     --output-dir build/compdb/gcc-release \
     --mode release --toolchain gcc --crc32c-portable n --arch x86_64
 python3 scripts/test_gcc_analyzer.py -v
+python3 scripts/test_gcc_analyzer_baseline.py -v
 python3 scripts/run_gcc_analyzer.py \
     --database-dir build/compdb/gcc-release \
-    --report-dir build/gcc-static-analysis/release --expected-major 11
+    --report-dir build/gcc-static-analysis/release \
+    --baseline docs/gcc_analyzer_known_warnings.json --expected-major 11
 ```
 
 GCC 分析与 Clang 告警基线是**相互独立**的工程证据；某个 GCC 检查项未发出
 警告不自动证明 Clang 的 11 条告警全部为误报，也不构成形式化安全证明。
+GCC 11 的 4 条独立诊断及后续复核范围见
+[2026-10-14 GCC 诊断审查](reviews/gcc_analyzer_20261014.md)。
+两个分析器的历史待复核诊断均不允许自动登记为已解决。
 issue #154 的其他平台、失败路径、代码审查和发布验收仍需独立完成。
 
 ## 历史来源边界
