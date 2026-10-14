@@ -168,8 +168,60 @@ python3 scripts/check_static_analysis_baseline.py \
 初步失败路径分析、可复现的分析器限制及下一轮故障注入义务见
 [静态分析告警基线](static_analysis_baseline.md)。
 
-当前未接入 GCC `-fanalyzer`、其他 Clang analyzer 配置或跨架构分析，
+本节此前未包含 GCC `-fanalyzer`；现已在独立章节加入 GCC 11 分析。
+其他 Clang analyzer 配置与跨架构分析仍未完成，
 **issue #154 的 P1-4 / D1 仍未完成验收**。
+
+## GCC 11 独立静态分析：真实编译与泄漏正反例
+
+在 Clang 14 已有的 31 个生产翻译单元分析之外，新建独立
+`static-analysis (gcc-11)` 作业，使用 Ubuntu 22.04 的 GCC 11、
+GCC release 模式和 Xmake 原生 `compile_commands.json`。
+
+`scripts/run_gcc_analyzer.py` 先从当前构建图重新提取并验证生产命令、配置、
+数据库摘要和 Git 提交身份，再保留原始 `-O2`、`-std=c11`、宏、
+包含路径及 `-Werror`，仅将 `-o` 指向独立分析对象目录并添加
+`-fanalyzer`。每个生产翻译单元仍执行真正的 `-c` 编译；
+**不得改用 `-fsyntax-only`，因为它可能跳过 GCC 静态分析阶段。**
+只有分析器进程返回 0 且实际产生目标对象文件才算该单元完成。
+与 Clang 的已有告警处理相同，首轮 GCC 分析也发现了 4 条尚未验收诊断。
+为保留其完整诊断、实施独立增量门禁，分析**专用**命令仅对三个已经出现的
+GCC analyzer 告警类别附加对应 `-Wno-error=analyzer-...`，
+不使用 `-Wno-analyzer-...` 关闭任何检查。生产构建的 `-Werror` 原样保留。
+所有同类别新告警或已知位置、文本、数量漂移都会被原始日志精确比较阻断；
+其他 GCC 检查项仍由生产 `-Werror` 处理。
+
+在运行生产分析前，使用两个受控 C 程序验证工具自身：
+带 `__attribute__((cleanup))` 的正确清理路径必须成功编译，
+真实遗失分配的反例必须被 `-Wanalyzer-malloc-leak` 检出，并因
+生产保留的 `-Werror` 返回非零。分析若失效、工具版本错误、
+生产单元缺失、分析超时或对象文件未生成，均视为失败，而不是跳过检查。
+
+每个单元保留独立的诊断日志，汇总写入 `summary.json`，
+与正反例日志、真实编译数据库一起归档；不对程序源码插入分析专用宏、
+不关闭分析检查项、不采用手写编译命令。
+
+复现命令：
+
+```sh
+xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
+python3 scripts/check_compile_commands.py \
+    --output-dir build/compdb/gcc-release \
+    --mode release --toolchain gcc --crc32c-portable n --arch x86_64
+python3 scripts/test_gcc_analyzer.py -v
+python3 scripts/test_gcc_analyzer_baseline.py -v
+python3 scripts/run_gcc_analyzer.py \
+    --database-dir build/compdb/gcc-release \
+    --report-dir build/gcc-static-analysis/release \
+    --baseline docs/gcc_analyzer_known_warnings.json --expected-major 11
+```
+
+GCC 分析与 Clang 告警基线是**相互独立**的工程证据；某个 GCC 检查项未发出
+警告不自动证明 Clang 的 11 条告警全部为误报，也不构成形式化安全证明。
+GCC 11 的 4 条独立诊断及后续复核范围见
+[2026-10-14 GCC 诊断审查](reviews/gcc_analyzer_20261014.md)。
+两个分析器的历史待复核诊断均不允许自动登记为已解决。
+issue #154 的其他平台、失败路径、代码审查和发布验收仍需独立完成。
 
 ## 历史来源边界
 

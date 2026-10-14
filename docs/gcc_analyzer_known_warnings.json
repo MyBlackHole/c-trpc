@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "gcc_major": 11,
+  "review_state": "unverified",
+  "profile": {
+    "mode": "release",
+    "toolchain": "gcc",
+    "plat": "linux",
+    "arch": "x86_64",
+    "crc32c_portable": false
+  },
+  "warnings": [
+    {
+      "file": "src/execution/reactor.c",
+      "line": 1194,
+      "column": 25,
+      "check": "analyzer-null-dereference",
+      "message": "dereference of NULL ‘item’ [CWE-476]",
+      "unit": "src/execution/reactor.c"
+    },
+    {
+      "file": "src/rpc/rpc.c",
+      "line": 2698,
+      "column": 65,
+      "check": "analyzer-use-after-free",
+      "message": "use after ‘free’ of ‘arg’ [CWE-416]",
+      "unit": "src/rpc/rpc.c"
+    },
+    {
+      "file": "src/server.c",
+      "line": 2067,
+      "column": 23,
+      "check": "analyzer-null-dereference",
+      "message": "dereference of NULL ‘shard’ [CWE-476]",
+      "unit": "src/server.c"
+    },
+    {
+      "file": "src/transport/channel/channel.c",
+      "line": 581,
+      "column": 9,
+      "check": "analyzer-malloc-leak",
+      "message": "leak of ‘owned’ [CWE-401]",
+      "unit": "src/transport/channel/channel.c"
+    }
+  ]
+}

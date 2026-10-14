@@ -138,6 +138,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  static-analysis-gcc:
+    name: static-analysis (gcc-11)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: 验证固定 GCC 版本及分析执行器失败语义
+        run: |
+          gcc --version
+          python3 scripts/test_gcc_analyzer.py -v
+          python3 scripts/test_gcc_analyzer_baseline.py -v
+      - name: 使用真实 Xmake 生产命令编译并运行 GCC 静态分析
+        run: |
+          set -euo pipefail
+          xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
+          python3 scripts/check_compile_commands.py \
+            --output-dir build/compdb/gcc-release \
+            --mode release --toolchain gcc --crc32c-portable n --arch x86_64
+          python3 scripts/run_gcc_analyzer.py \
+            --database-dir build/compdb/gcc-release \
+            --report-dir build/gcc-static-analysis/release \
+            --baseline docs/gcc_analyzer_known_warnings.json \
+            --expected-major 11 --timeout 150
+      - name: 归档独立分析日志与实际编译配置
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-analysis-gcc-11
+          path: |
+            build/gcc-static-analysis/release/summary.json
+            build/gcc-static-analysis/release/warning-gate.json
+            build/gcc-static-analysis/release/logs/
+            build/gcc-static-analysis/release/controls/
+            build/compdb/gcc-release/
+          if-no-files-found: ignore
+          retention-days: 7
+
   asan-ubsan:
     name: ASan + UBSan
     runs-on: ubuntu-22.04
