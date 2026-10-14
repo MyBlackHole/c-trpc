@@ -15,8 +15,9 @@ c-trpc 核心的范围是通用运行时、传输、连接组和 RPC。
 6. [08-rpc-streaming-conformance.md](08-rpc-streaming-conformance.md)：四种 RPC 基数关系、半关闭、最终 `STATUS` 与终止回调契约。
 7. [09-rpc-context-metadata.md](09-rpc-context-metadata.md)：调用上下文、初始元数据与尾部元数据。
 8. [10-rpc-interceptor-v1.md](10-rpc-interceptor-v1.md)：固定的调用级拦截器阶段、所有者执行、拒绝与重入契约。
-9. [04-backup-pipeline.md](04-backup-pipeline.md)：当前保留的旧文件名；其中 Pipeline/Connection Group 基础能力属于核心，备份持久化语义只作为上层映射参考。
-10. [06-evolution.md](06-evolution.md)：c-trpc 核心演进路线。
+9. [11-compression-tls-requirements.md](11-compression-tls-requirements.md)：未来消息压缩与 TLS 的分层、资源安全、攻击面和验收要求（目前未实现）。
+10. [04-backup-pipeline.md](04-backup-pipeline.md)：当前保留的旧文件名；其中 Pipeline/Connection Group 基础能力属于核心，备份持久化语义只作为上层映射参考。
+11. [06-evolution.md](06-evolution.md)：c-trpc 核心演进路线。
 
 ## 业务层参考（非核心）
 
