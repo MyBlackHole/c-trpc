@@ -439,7 +439,7 @@ static void test_older_control_fifo(void)
 }
 
 static void on_connection(struct tr_conn_handle connection,
-			  enum tr_connection_event event, int status, void *arg)
+                          enum tr_connection_event event, int status, void *arg)
 {
 	struct fixture *f = arg;
 
