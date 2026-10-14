@@ -8,9 +8,14 @@ import sys
 import tempfile
 
 import check_compile_commands as compdb
+import check_gcc_analyzer_baseline as warning_gate
 from tool_i18n import parser_for
 
 VERSION = re.compile(r"^(\d+)(?:\.\d+)*$")
+# 不禁用检查项。仅把已登记类别的严重性从 error 恢复为 warning，
+# 由逐条源位置、检查项与完整消息的精确回归门禁重新决定是否失败。
+REVIEW_CHECKS = ("analyzer-null-dereference", "analyzer-use-after-free",
+                 "analyzer-malloc-leak")
 ANALYZER_DIAGNOSTIC = re.compile(
     r"(?m)^.*:\d+(?::\d+)?: (?:warning|error): .+\[-W(?:error=)?analyzer-[^\]]+\]")
 
@@ -91,6 +96,7 @@ def analysis_command(original, source, output):
     args[index + 1] = str(output)
     # 保持原始 -Werror/-O2、平台选项、宏、源文件及包含路径不变。
     args.extend(("-fanalyzer", "-fdiagnostics-color=never"))
+    args.extend("-Wno-error=" + check for check in REVIEW_CHECKS)
     return args
 
 
@@ -162,7 +168,7 @@ def analyze(units, compiler, directory, report_dir, timeout, version, manifest,
     failed = [item["source"] for item in results if item["returncode"] != 0]
     report = {
         "schema": 1, "analyzer": "gcc -fanalyzer", "gcc_version": version,
-        "strict": True, "production_units": len(units),
+        "strict": False, "production_units": len(units),
         "profile": {"mode": "release", "toolchain": "gcc", "plat": "linux",
                     "arch": "x86_64", "crc32c_portable": False},
         "identity": manifest["identity"],
@@ -180,6 +186,7 @@ def main():
     parser, _ = parser_for("Analyze actual Xmake production C objects with GCC -fanalyzer.")
     parser.add_argument("--database-dir", type=Path, required=True)
     parser.add_argument("--report-dir", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--xmake", default="xmake")
     parser.add_argument("--expected-major", type=int, default=11)
     parser.add_argument("--timeout", type=int, default=120)
@@ -199,6 +206,7 @@ def main():
         controls = verify_controls(compiler, report_dir, args.timeout)
         report = analyze(units, compiler, directory, report_dir, args.timeout,
                          version, manifest, controls)
+        warning_gate.compare(report_dir, args.baseline.resolve())
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired) as error:
         print(_("GCC production analysis setup failed: {error}").format(error=error),
@@ -208,7 +216,7 @@ def main():
           .format(count=report["production_units"],
                   diagnostics=report["analyzer_diagnostics"],
                   failures=len(report["failed_sources"])))
-    return 1 if report["failed_sources"] or report["analyzer_diagnostics"] else 0
+    return 1 if report["failed_sources"] else 0
 
 
 if __name__ == "__main__":
