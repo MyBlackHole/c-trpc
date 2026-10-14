@@ -1194,9 +1194,9 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		 * 不在可能为空的项上继续发送，关闭本连接并归还整条 TX 队列。
 		 */
 		if (!item) {
-			tr_connection_close_internal(reactor, connection,
-						     TR_CONN_EVENT_ERROR,
-						     TR_ERR_STATE);
+			tr_connection_close_internal(
+				reactor, connection, TR_CONN_EVENT_ERROR,
+				TR_ERR_STATE);
 			return;
 		}
 
