@@ -45,7 +45,10 @@ class GCCAnalyzerTests(unittest.TestCase):
         self.assertIn("-O2", actual)
         self.assertIn("-c", actual)
         self.assertNotIn("-fsyntax-only", actual)
-        self.assertEqual(actual[-3:-2], ["src/a.c"])
+        self.assertEqual(actual[self.args.index("src/a.c")], "src/a.c")
+        for check in target.REVIEW_CHECKS:
+            self.assertIn("-Wno-error=" + check, actual)
+            self.assertNotIn("-Wno-" + check, actual)
         self.assertEqual(self.args[-3:],
                          ["-o", "build/production/a.o", "src/a.c"])
 
