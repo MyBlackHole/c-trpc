@@ -1,0 +1,29 @@
+name: Runtime regression source snapshot
+on:
+  push:
+    branches: ["diag/runtime-regression-source-20261015"]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 511e691407826939fcfabe19a12532462909f584
+          persist-credentials: false
+      - name: 仅归档固定提交源码，不包含工作目录凭证或环境
+        run: |
+          mkdir -p "$RUNNER_TEMP/source-snapshot"
+          git archive --format=tar HEAD | gzip -n > "$RUNNER_TEMP/source-snapshot/c-trpc.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/source-snapshot/commit.txt"
+          git ls-tree -r HEAD > "$RUNNER_TEMP/source-snapshot/tree.txt"
+          cd "$RUNNER_TEMP/source-snapshot"
+          sha256sum c-trpc.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-regression-source-511e6914
+          path: ${{ runner.temp }}/source-snapshot/
+          retention-days: 3
+          if-no-files-found: error
