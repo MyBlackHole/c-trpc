@@ -71,10 +71,19 @@ int tr_runtime_create(const struct tr_runtime_config *config,
  * 直到 stop() 收敛该部分轮次。
  */
 int tr_runtime_start(struct tr_runtime *runtime);
-/* stop() 也会收敛启动回滚失败留下的部分分片，
- * 即使整个运行时从未发布为已启动。
+/* 生命周期 API 由外部串行调用，禁止和 shard 业务 API 并发销毁。
+ * stop() 也会收敛启动回滚失败留下的部分分片。
+ * 启用消息服务后，先在原 owner 关闭服务，未静默或解绑失败返回 AGAIN/错误，
+ * 保留父 Reactor 供重试；不可绕过 Runtime 先停止父 Reactor。
+ * 正常 stop 成功后可重启，但新轮次须显式重新启用消息服务。
  */
 int tr_runtime_stop(struct tr_runtime *runtime);
+/* destroy 可能已销毁部分资源后因外部持有预算返回 AGAIN。此时对象仍由
+ * 调用方持有，只能释放外部消息/令牌并重试 destroy，不能重新 start。
+ * 各分片预算归零后才释放分片存储；重试前须确认最后 release 已返回，
+ * 并排除并发释放/业务调用，零计数本身不是线程静默屏障。
+ * 不支持父 Reactor 先行异常退出的接管。
+ */
 int tr_runtime_destroy(struct tr_runtime *runtime);
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime);

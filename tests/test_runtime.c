@@ -181,7 +181,7 @@ static void test_runtime_shard_listener_ownership(void)
 
 	/* 重新打开证明显式关闭完整释放了分片拥有的资源。 */
 	assert(tr_runtime_shard_listen_ipv4(
-		       shard, "127.0.0.1", 0U, 8, &bound) == TR_OK);
+		       shard, "127.0.0.1", 0U, 8, NULL) == TR_OK);
 	listener = tr_runtime_shard_listener_fd(shard);
 	assert(listener >= 0);
 
@@ -594,6 +594,8 @@ static void test_runtime_lifecycle(void)
 	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
+#include "runtime_message_cases.h"
+
 #define RUN_TEST(fn) do { fn(); puts(#fn ": ok"); } while (0)
 
 int main(void)
@@ -611,5 +613,8 @@ int main(void)
 	RUN_TEST(test_runtime_shard_memory_budget);
 	RUN_TEST(test_runtime_self_stop_context_guards);
 	RUN_TEST(test_runtime_lifecycle);
+	RUN_TEST(test_runtime_messages_owned_lifecycle);
+	RUN_TEST(test_runtime_messages_budget_retry);
+	RUN_TEST(test_runtime_messages_retained_failure);
 	return 0;
 }
