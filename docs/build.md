@@ -4,7 +4,8 @@
 
 项目要求 Linux、GCC 或 Clang，以及 Xmake 3.1.1 或更新版本。
 CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/guide/quick-start.html)。
-库本身不新增第三方包依赖，语言基线仍为 ISO C11，并使用 GCC/Clang
+消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩仍未接入，
+新增编译依赖不表示默认启用压缩。语言基线仍为 ISO C11，并使用 GCC/Clang
 支持的 `cleanup` 属性。编译保持 `-Wall -Wextra -Werror -pedantic`
 和 `-pthread`，链接也显式使用 `-pthread`。
 
@@ -179,3 +180,28 @@ Make 兼容检查还使用包含空格/单引号的工具路径、强制包含�
 
 冒烟检查的构建、安装和示例日志作为 CI 构建产物保留 7 天；
 日志截取只限制控制台输出，不改变测试退出码，完整日志仍可用于复现失败。
+
+
+## 消息变换后端的固定依赖
+
+`xmake.lua` 固定 `zstd 1.5.7`，设置 `system = false` 和 `shared = false`，
+使用官方包配方的 Xmake 源码构建路径，不自动复用系统动态库。
+本后端使用 `ZSTD_STATIC_LINKING_ONLY` 的自定义分配器及帧头接口，
+编译期检查头文件版本，运行前核对库版本；升级必须单独验证这些接口。
+版本固定不是完整的包配方/工具链供应链锁定。首次配置需要获取第三方源码，
+包校验或构建失败必须报错，不能悄悄删除后端或跳过测试。
+
+```sh
+xmake f -c -y -m release --toolchain=gcc
+xmake test -v -j1 'test_message_transform/*'
+```
+
+该目标只复用三个实际生产对象 `message.c`、`transform.c`、`zstd.c` 和静态
+Zstandard；不链接整个 `trcore`，不重复注册生产源，也不修改编译数据库覆盖规则。
+既有测试和已安装 SDK 头文件清单不变。测试故障注入只在此目标链接时启用。
+
+`libtrcore.a` 不合并第三方静态库内容。仓库内 Xmake 目标继承其链接依赖；
+未来将此内部模块接入公开网络入口时，还须完成安装后消费者的依赖分发、
+静态链接验证和第三方许可归档，不能用目前未引用后端的 SDK 冒烟替代。
+当前不安装新的 Message 内部头文件，也不宣称压缩/TLS 已供 SDK 使用。
+第三方来源与实际验证限制见 [MSG-B 实现审查](reviews/message_transform_zstd_20261015.md)。
