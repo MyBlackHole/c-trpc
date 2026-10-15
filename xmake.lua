@@ -118,6 +118,7 @@ target("trcore")
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc_record_router.c",
+        "src/rpc/rpc_record_dispatch.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -592,5 +593,16 @@ target("test_rpc_record_router")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
                 "-Wl,--wrap=tr_reactor_recovery_acquire", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 有界业务工作派发、拥有型输入/回复及真实 TCP 终局发送。
+target("test_rpc_record_dispatch")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_dispatch.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=tr_stream_sendv", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
