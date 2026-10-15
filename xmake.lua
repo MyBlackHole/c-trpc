@@ -4,6 +4,9 @@ set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
 set_defaultmode("release")
 
+-- 消息后端使用静态接口：固定版本、源码校验和静态链接，禁止系统库替代。
+add_requires("zstd 1.5.7", {system = false, configs = {shared = false, cmake = false}})
+
 option("crc32c_portable")
     set_default(false)
     set_showmenu(true)
@@ -62,6 +65,7 @@ end
 
 target("trcore")
     set_kind("static")
+    add_packages("zstd", {public = true})
     -- 源码与已安装 SDK 同时携带许可和适用署名。
     add_installfiles("LICENSE", "NOTICE", "docs/licensing.md", {prefixdir = "share/doc/c-trpc"})
     add_includedirs("include", {public = true})
@@ -80,6 +84,8 @@ target("trcore")
         "src/status.c",
         "src/crc32c.c",
         "src/message/message.c",
+        "src/message/transform.c",
+        "src/message/zstd.c",
         "src/execution/buffer.c",
         "src/transport/protocol/wire.c",
         "src/transport/protocol/frame.c",
@@ -392,4 +398,37 @@ target("bench_rpc")
     set_default(false)
     add_files("bench/bench_rpc.c")
     add_deps("trcore")
+target_end()
+
+-- 同一生产对象仅注册一次；变换测试不借完整 trcore 补齐跨模块依赖。
+target("test_message_transform")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_transform.c")
+    add_includedirs("include")
+    add_packages("zstd")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=ZSTD_compressStream2",
+                "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+    on_config(function (target)
+        local expected = {
+            [path.absolute("src/message/message.c")] = 0,
+            [path.absolute("src/message/transform.c")] = 0,
+            [path.absolute("src/message/zstd.c")] = 0
+        }
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                local key = path.absolute(source)
+                if expected[key] ~= nil then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    expected[key] = expected[key] + 1
+                end
+            end
+        end
+        for source, count in pairs(expected) do
+            assert(count == 1, "生产消息对象必须唯一: " .. source)
+        end
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
