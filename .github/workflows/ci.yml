@@ -343,12 +343,17 @@ jobs:
             cmp "$legal_file" "$prefix/share/doc/c-trpc/$legal_file"
           done
           cmp docs/licensing.md "$prefix/share/doc/c-trpc/licensing.md"
+          cmp third_party/zstd/LICENSE "$prefix/share/doc/c-trpc/third_party/zstd/LICENSE"
+          # 原外部链接方式不额外传 -lzstd；符号必须来自安装的静态 SDK。
+          nm --defined-only "$prefix/lib/libtrcore.a" > "$RUNNER_TEMP/sdk-symbols.txt"
+          test "$(awk '$NF == "ZSTD_versionNumber" { n++ } END { print n+0 }' "$RUNNER_TEMP/sdk-symbols.txt")" = 1
           archive_dir="$RUNNER_TEMP/trpc-source-license"
           mkdir -p "$archive_dir"
           git archive --format=tar HEAD | tar -xf - -C "$archive_dir"
           cmp LICENSE "$archive_dir/LICENSE"
           cmp NOTICE "$archive_dir/NOTICE"
           cmp docs/licensing.md "$archive_dir/docs/licensing.md"
+          cmp third_party/zstd/LICENSE "$archive_dir/third_party/zstd/LICENSE"
 
           cat > "$RUNNER_TEMP/expected-headers.txt" <<'EOF'
           client.h

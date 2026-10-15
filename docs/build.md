@@ -200,8 +200,18 @@ xmake test -v -j1 'test_message_transform/*'
 Zstandard；不链接整个 `trcore`，不重复注册生产源，也不修改编译数据库覆盖规则。
 既有测试和已安装 SDK 头文件清单不变。测试故障注入只在此目标链接时启用。
 
-`libtrcore.a` 不合并第三方静态库内容。仓库内 Xmake 目标继承其链接依赖；
-未来将此内部模块接入公开网络入口时，还须完成安装后消费者的依赖分发、
-静态链接验证和第三方许可归档，不能用目前未引用后端的 SDK 冒烟替代。
+Runtime 已直接引用消息服务，静态链接即会带入 Zstandard 符号，不能再依赖仓库内
+Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
+`build.merge_archive` 合并固定包的静态对象；安装后的 `libtrcore.a` 自包含该后端。
+外部 C/C++ 消费端仍使用 `-L<SDK>/lib -ltrcore -pthread`，不需要系统 Zstandard
+或 Xmake 包缓存路径。构建和安装均不得静默切换到其他版本的动态库。
+
+安装与源码归档同时保留 `third_party/zstd/LICENSE` 上游原始许可；SDK 路径为
+`share/doc/c-trpc/third_party/zstd/LICENSE`。CI 不增加 `-lzstd` 来掩盖不完整 SDK，
+而是检查安装归档内确有 Zstandard 的唯一符号定义，并按原外部消费方式运行程序。
+
+合并归档不等于做了符号隔离；同时链接另一个 Zstandard 实现可能产生符号冲突或
+版本选择问题，不属于当前保证范围。升级、符号命名/隔离及依赖锁定仍须独立验证。
 当前不安装新的 Message 内部头文件，也不宣称压缩/TLS 已供 SDK 使用。
-第三方来源与实际验证限制见 [MSG-B 实现审查](reviews/message_transform_zstd_20261015.md)。
+第三方来源与 MSG-B 阶段范围见 [MSG-B 实现审查](reviews/message_transform_zstd_20261015.md)，
+实际 Runtime 接入及本次 SDK 修复见 [MSG-D 审查](reviews/runtime_message_recovery_20261015.md)。

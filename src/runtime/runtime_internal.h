@@ -6,6 +6,7 @@
 #include "../execution/reactor.h"
 #include "../execution/deadline_internal.h"
 #include "../memory_budget.h"
+#include "message_service.h"
 
 struct tr_runtime;
 struct tr_runtime_shard;
@@ -53,6 +54,9 @@ struct tr_runtime_shard_config {
 	uint64_t memory_budget_bytes;
 
 	struct tr_runtime_rpc_executor_config rpc_executor;
+	/* capacity==0 明确关闭消息服务，保持无消息变换时不创建额外线程。
+	 * 启用时要求非零分片硬预算；由 Runtime 创建、停止并回收。 */
+	struct tr_message_service_config messages;
 };
 
 struct tr_runtime_config {
@@ -76,6 +80,18 @@ int tr_runtime_start(struct tr_runtime *runtime);
  */
 int tr_runtime_stop(struct tr_runtime *runtime);
 int tr_runtime_destroy(struct tr_runtime *runtime);
+
+/* 库内真实分片入口，借用 input，只有 TR_OK 消费输入并承担一次完成。
+ * 运行中由所属 owner 提交，未启用返回 UNSUPPORTED，停止中返回 CLOSED。
+ * 与 start/stop/destroy 的生命周期操作须由外部串行化，不能把弱句柄当引用。
+ * stop 取消残留消息；旧 owner 已 join 后可能由 stop 调用线程交付明确的
+ * OWNER_STOPPED 终局。destroy 在输出/输入仍占分片预算时返回 AGAIN，保留
+ * Runtime 预算外壳直到应用释放引用后重试。启用不等于 RPC 网络压缩。 */
+int tr_runtime_shard_message_submit(
+        struct tr_runtime_shard *shard, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle);
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime);
 struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,

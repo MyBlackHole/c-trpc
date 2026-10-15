@@ -2,3 +2,8 @@ c-trpc
 Copyright 2026 Black Hole
 
 This product includes software developed by Black Hole.
+
+The static SDK includes Zstandard 1.5.7, developed by Meta Platforms, Inc.
+and affiliates. The original BSD license is distributed at
+share/doc/c-trpc/third_party/zstd/LICENSE (source: third_party/zstd/LICENSE).
+This notice does not modify that license or imply endorsement.
