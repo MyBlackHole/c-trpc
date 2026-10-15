@@ -65,6 +65,11 @@ int tr_reactor_in_owner_context(void)
 	return tr_current_reactor_owner != NULL;
 }
 
+int tr_reactor_is_current_owner(const struct tr_reactor *reactor)
+{
+	return tr_reactor_is_owner_thread(reactor);
+}
+
 #ifndef NDEBUG
 #define TR_ASSERT_REACTOR_OWNER(reactor) \
 	assert(tr_reactor_is_owner_thread((reactor)))

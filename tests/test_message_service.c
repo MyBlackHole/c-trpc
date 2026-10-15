@@ -811,8 +811,53 @@ static void test_submit_and_final_destroy_failure(void)
 	destroy_fixture(&f);
 }
 
+/* 不同 Reactor 的 owner 不得互相操作生命周期；拒绝不能改变预算。 */
+struct foreign_owner_request {
+	struct fixture *fixture;
+	struct tr_reactor *other;
+};
+
+static int foreign_owner_create(void *arg)
+{
+	struct foreign_owner_request *request = arg;
+	struct tr_message_service *unexpected = NULL;
+	int ret = tr_message_service_create_on_owner(
+	        request->other, &request->fixture->config,
+	        &request->fixture->budget, &unexpected);
+
+	CHECK(unexpected == NULL);
+	return ret;
+}
+
+static void test_reactor_identity(void)
+{
+	struct fixture f;
+	struct tr_reactor *other = NULL;
+	struct foreign_owner_request request;
+	uint64_t before;
+
+	init_fixture(&f);
+	CHECK(tr_reactor_create(NULL, NULL, NULL, NULL, &other) == TR_OK);
+	CHECK(tr_reactor_start(other) == TR_OK);
+	CHECK(tr_reactor_call(f.reactor, create_service, &f) == TR_OK);
+	CHECK(tr_reactor_call(f.reactor, get_stats, &f) == TR_OK);
+	before = atomic_load(&f.budget.current_bytes);
+	request = (struct foreign_owner_request){&f, other};
+	CHECK(tr_reactor_call(f.reactor, foreign_owner_create, &request) ==
+	      TR_ERR_STATE);
+	CHECK(tr_reactor_call(other, get_stats, &f) == TR_ERR_STATE);
+	CHECK(tr_reactor_call(other, close_service, &f) == TR_ERR_STATE);
+	CHECK(tr_reactor_call(f.reactor, get_stats, &f) == TR_OK);
+	CHECK(f.stats.accepting && f.stats.held_jobs == 0);
+	CHECK(atomic_load(&f.budget.current_bytes) == before);
+	CHECK(tr_reactor_stop(other) == TR_OK);
+	CHECK(tr_reactor_destroy(other) == TR_OK);
+	destroy_fixture(&f);
+}
+
 int main(void)
 {
+	test_reactor_identity();
 	test_allocation_and_thread_failure();
 	test_submit_and_final_destroy_failure();
 	for (unsigned stage = 0; stage < 4; ++stage)
