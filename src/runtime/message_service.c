@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "message_service.h"
+#include "runtime_message.h"
+#include "runtime_message_internal.h"
 #include "../execution/reactor_internal.h"
 #include "../memory_budget.h"
 #include "tr/status.h"
@@ -489,4 +491,72 @@ int tr_message_service_close_on_owner(struct tr_message_service **pointer)
 	if (tr_memory_budget_release(budget, bytes) != TR_OK)
 		return TR_ERR_STATE;
 	return ret != TR_OK ? ret : (close_ret == 0 ? TR_OK : TR_ERR_SYS);
+}
+
+/* 该适配与消息实现同属一个对象文件，普通 Runtime 只持有类型化生命周期
+ * 契约，不对消息算法产生静态链接依赖。默认门面没有调用此可选入口。
+ */
+static int
+tr_runtime_message_open(struct tr_reactor *reactor,
+                        const struct tr_message_service_config *config,
+                        struct tr_memory_budget *budget,
+                        struct tr_message_service **out)
+{
+	int ret = tr_message_service_create_on_owner(reactor, config, budget,
+	                                             out);
+
+	return ret == TR_OK ? tr_message_service_start_on_owner(*out) : ret;
+}
+
+static const struct tr_runtime_message_ops tr_runtime_message_binding = {
+        .open_on_owner = tr_runtime_message_open,
+        .close_on_owner = tr_message_service_close_on_owner,
+};
+
+int tr_runtime_shard_message_enable_on_owner(
+        struct tr_runtime_shard *shard,
+        const struct tr_message_service_config *config)
+{
+	return tr_runtime_shard_message_open_owned_on_owner(
+	        shard, config, &tr_runtime_message_binding);
+}
+
+int tr_runtime_shard_message_disable_on_owner(struct tr_runtime_shard *shard)
+{
+	return tr_runtime_shard_message_close_owned_on_owner(shard);
+}
+
+int tr_runtime_shard_message_submit_on_owner(
+        struct tr_runtime_shard *shard, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle)
+{
+	struct tr_message_service *service = NULL;
+	int ret = tr_runtime_shard_message_borrow_on_owner(shard, &service);
+
+	if (ret != TR_OK)
+		return ret;
+	return tr_message_service_submit_on_owner(service, input, config, done,
+	                                          arg, handle);
+}
+
+int tr_runtime_shard_message_cancel_on_owner(struct tr_runtime_shard *shard,
+                                             struct tr_task_handle handle)
+{
+	struct tr_message_service *service = NULL;
+	int ret = tr_runtime_shard_message_borrow_on_owner(shard, &service);
+
+	return ret == TR_OK ? tr_message_service_cancel(service, handle) : ret;
+}
+
+int tr_runtime_shard_message_stats_on_owner(
+        struct tr_runtime_shard *shard, struct tr_message_service_stats *out)
+{
+	struct tr_message_service *service = NULL;
+	int ret = tr_runtime_shard_message_borrow_on_owner(shard, &service);
+
+	return ret == TR_OK
+	               ? tr_message_service_get_stats_on_owner(service, out)
+	               : ret;
 }
