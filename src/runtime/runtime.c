@@ -419,6 +419,7 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 int tr_runtime_destroy(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int result = TR_OK;
 	int ret;
 
 	if (!runtime)
@@ -428,11 +429,18 @@ int tr_runtime_destroy(struct tr_runtime *runtime)
 	if (ret != TR_OK)
 		return ret;
 
+	/* 所有分片已停止，资源域相互独立。某个输出仍持有预算，或某个
+	 * 分片解绑失败，不应使后续分片的已静默资源一直被保留。
+	 * 外壳必须整体存活供重试；严重错误不能被较早的 AGAIN 掩盖。
+	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
 		ret = tr_runtime_shard_release(&runtime->shards[i]);
-		if (ret != TR_OK)
-			return ret;
+		if (ret != TR_OK && (result == TR_OK ||
+		                     (result == TR_AGAIN && ret != TR_AGAIN)))
+			result = ret;
 	}
+	if (result != TR_OK)
+		return result;
 	free(runtime->shards);
 	runtime->shards = NULL;
 	free(runtime);
@@ -772,6 +780,26 @@ void tr_runtime_shard_drain_peer_event(struct tr_runtime_shard *shard)
 	}
 }
 
+/* 普通调用线程可同步切到目标所有者；另一个所有者或工作线程不得
+ * 等待它，否则两个执行域可能相互等待。服务指针只在目标所有者读取，
+ * 此门禁不替代外层 start/stop/destroy 的生命周期串行化。
+ */
+static int tr_runtime_message_call(struct tr_runtime_shard *shard,
+                                   int (*fn)(void *), void *arg)
+{
+	if (!shard)
+		return TR_ERR_INVALID;
+	if (!shard->message_config.tasks.capacity)
+		return TR_ERR_UNSUPPORTED;
+	if (!shard->reactor)
+		return TR_ERR_CLOSED;
+	if (tr_task_in_worker_context() || tr_rpc_in_worker_context() ||
+	    (tr_reactor_in_owner_context() &&
+	     !tr_reactor_in_owner_context_for(shard->reactor)))
+		return TR_ERR_STATE;
+	return tr_reactor_call(shard->reactor, fn, arg);
+}
+
 struct tr_runtime_message_request {
 	struct tr_runtime_shard *shard;
 	struct tr_message *input;
@@ -804,8 +832,64 @@ int tr_runtime_shard_message_submit(
 
 	if (!shard || !input || !config || !done || !handle)
 		return TR_ERR_INVALID;
-	if (!shard->message_config.tasks.capacity)
-		return TR_ERR_UNSUPPORTED;
-	return tr_reactor_call(shard->reactor,
-	                       tr_runtime_message_submit_on_owner, &request);
+	return tr_runtime_message_call(
+	        shard, tr_runtime_message_submit_on_owner, &request);
+}
+
+struct tr_runtime_message_cancel_request {
+	struct tr_runtime_shard *shard;
+	struct tr_task_handle handle;
+};
+
+static int tr_runtime_message_cancel_on_owner(void *arg)
+{
+	struct tr_runtime_message_cancel_request *request = arg;
+	struct tr_message_service *service = request->shard->messages;
+
+	if (!service)
+		return TR_ERR_CLOSED;
+	return tr_message_service_cancel(service, request->handle);
+}
+
+int tr_runtime_shard_message_cancel(struct tr_runtime_shard *shard,
+                                    struct tr_task_handle handle)
+{
+	struct tr_runtime_message_cancel_request request = {shard, handle};
+
+	return tr_runtime_message_call(
+	        shard, tr_runtime_message_cancel_on_owner, &request);
+}
+
+struct tr_runtime_message_stats_request {
+	struct tr_runtime_shard *shard;
+	struct tr_message_service_stats *out;
+};
+
+static int tr_runtime_message_stats_on_owner(void *arg)
+{
+	struct tr_runtime_message_stats_request *request = arg;
+	struct tr_message_service *service = request->shard->messages;
+	struct tr_message_service_stats snapshot = {0};
+	int ret;
+
+	if (!service)
+		return TR_ERR_CLOSED;
+	ret = tr_message_service_get_stats_on_owner(service, &snapshot);
+	/* 查询失败不发布半份快照；任务计数仍是其各自锁内的瞬时观察，
+	 * 不是跨执行域的静默证明或预算销毁授权。
+	 */
+	if (ret == TR_OK)
+		*request->out = snapshot;
+	return ret;
+}
+
+int tr_runtime_shard_message_get_stats(struct tr_runtime_shard *shard,
+                                       struct tr_message_service_stats *out)
+{
+	struct tr_runtime_message_stats_request request = {shard, out};
+
+	if (!out)
+		return TR_ERR_INVALID;
+	return tr_runtime_message_call(shard, tr_runtime_message_stats_on_owner,
+	                               &request);
 }

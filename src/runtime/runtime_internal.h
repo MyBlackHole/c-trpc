@@ -81,8 +81,15 @@ int tr_runtime_start(struct tr_runtime *runtime);
 int tr_runtime_stop(struct tr_runtime *runtime);
 int tr_runtime_destroy(struct tr_runtime *runtime);
 
-/* 库内真实分片入口，借用 input，只有 TR_OK 消费输入并承担一次完成。
- * 运行中由所属 owner 提交，未启用返回 UNSUPPORTED，停止中返回 CLOSED。
+/* 库内分片消息操作，不暴露可自行销毁的服务指针。普通调用线程同步
+ * 切到所属 owner；所属 owner 内直接执行。其他 Reactor owner、通用任务
+ * 和 RPC 工作线程返回 STATE，避免跨执行域同步等待。命令队列满时可以
+ * 等待容量；这些不是实时/信号安全接口。未启用返回 UNSUPPORTED，
+ * 尚未启动、停止中或父资源已释放返回 CLOSED。
+ *
+ * submit 借用 input，只有 TR_OK 消费输入、写 handle 并承担一次完成；
+ * 失败保留 input/handle，不调用 done。普通线程收到 TR_OK 前，原 owner
+ * 可能已交付 done；arg 须提前准备，handle 输出存储不能依赖 arg 存活。
  * 与 start/stop/destroy 的生命周期操作须由外部串行化，不能把弱句柄当引用。
  * stop 取消残留消息；旧 owner 已 join 后可能由 stop 调用线程交付明确的
  * OWNER_STOPPED 终局。destroy 在输出/输入仍占分片预算时返回 AGAIN，保留
@@ -92,6 +99,19 @@ int tr_runtime_shard_message_submit(
         const struct tr_message_transform_config *config,
         tr_message_service_done_fn done, void *arg,
         struct tr_task_handle *handle);
+
+/* 只提交取消意图，不释放输入/输出/arg，也不从调用线程交付完成。
+ * 终局已提交返回 STATE，过期或其他分片/实例能力返回 STALE。取消成功
+ * 后仍须等待原完成责任收敛；stop 保留既有 OWNER_STOPPED 清理域契约。
+ */
+int tr_runtime_shard_message_cancel(struct tr_runtime_shard *shard,
+                                    struct tr_task_handle handle);
+
+/* 仅 TR_OK 发布完整快照，任何失败均保留 *out。统计不是引用、准入
+ * 预约或销毁屏障；服务重启后从新实例统计，不累计旧实例数据。
+ */
+int tr_runtime_shard_message_get_stats(struct tr_runtime_shard *shard,
+                                       struct tr_message_service_stats *out);
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime);
 struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,

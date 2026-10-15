@@ -508,6 +508,13 @@ target("test_runtime_message_recovery")
     add_files("tests/test_runtime_message_recovery.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=epoll_wait", "-Wl,--wrap=write",
+                "-Wl,--wrap=tr_message_service_create_on_owner",
+                "-Wl,--wrap=tr_reactor_destroy",
+                "-Wl,--wrap=pthread_cond_destroy",
+                "-Wl,--wrap=pthread_mutex_destroy",
+                "-Wl,--wrap=pthread_cond_broadcast",
+                "-Wl,--wrap=pthread_cond_signal",
+                "-Wl,--wrap=pthread_cond_wait",
                 "-Wl,--wrap=pthread_join",
                 "-Wl,--wrap=pthread_create", "-Wl,--wrap=close",
                 "-Wl,--wrap=tr_reactor_aux_event_register",
@@ -515,6 +522,17 @@ target("test_runtime_message_recovery")
                 "-Wl,--wrap=tr_reactor_timer_register",
                 "-Wl,--wrap=tr_reactor_timer_unregister",
                 "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=ZSTD_compressStream2", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 分片消息操作及执行域边界，使用真实 Runtime/Reactor/任务执行器。
+target("test_runtime_message_api")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_runtime_message_api.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_reactor_call",
                 "-Wl,--wrap=ZSTD_compressStream2", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
