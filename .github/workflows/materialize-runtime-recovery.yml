@@ -1,0 +1,31 @@
+name: Materialize verified runtime recovery patch
+on:
+  push:
+    branches: ["feat/runtime-message-recovery-20261015"]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 核对补丁与最终源码树，再提交同一功能分支
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REF}" = 'refs/heads/feat/runtime-message-recovery-20261015'
+          test "$(git rev-parse HEAD^)" = '13883aeed58d3d9f76b5ac4969e64b5bf34e7fda'
+          cat .msgd-patch/00 .msgd-patch/01 .msgd-patch/02 .msgd-patch/03 .msgd-patch/04 .msgd-patch/05 .msgd-patch/06 .msgd-patch/07 > "$RUNNER_TEMP/change.patch.gz"
+          echo '0436e853b563381810252da51bce28e6e8e69644daf4d31a980a79d88d5b88ea  '"$RUNNER_TEMP/change.patch.gz" | sha256sum -c -
+          gzip -dc "$RUNNER_TEMP/change.patch.gz" > "$RUNNER_TEMP/change.patch"
+          echo 'd38b1ebca40df05ae4411365d591de267c37a89c5070bfbb04cd01ae0049a0e2  '"$RUNNER_TEMP/change.patch" | sha256sum -c -
+          git apply --index "$RUNNER_TEMP/change.patch"
+          git rm -r .msgd-patch .github/workflows/materialize-runtime-recovery.yml
+          test "$(git write-tree)" = '7e06ebba40b3ae99b6966391097dc5fd0315d711'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(runtime): 实现消息服务停止后接管与 Runtime 生命周期集成（MSG-D）' -m '基于 #255。已核对补丁 SHA-256 及完整 Git 树；移除本次临时补丁传输文件和工作流。新提交的正式 CI 由草稿 PR 触发并单独验收。'
+          git push origin HEAD:refs/heads/feat/runtime-message-recovery-20261015
