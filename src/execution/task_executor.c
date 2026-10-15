@@ -523,3 +523,14 @@ int tr_task_executor_adopt_cleanup(struct tr_task_executor *executor)
 	(void)pthread_mutex_unlock(&executor->lock);
 	return ret;
 }
+
+int tr_task_executor_is_current_owner(struct tr_task_executor *executor)
+{
+	int matches;
+	if (!executor)
+		return 0;
+	(void)pthread_mutex_lock(&executor->lock);
+	matches = pthread_equal(pthread_self(), executor->owner);
+	(void)pthread_mutex_unlock(&executor->lock);
+	return matches;
+}

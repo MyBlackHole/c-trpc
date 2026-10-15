@@ -139,4 +139,7 @@ int tr_task_executor_destroy(struct tr_task_executor **executor);
 int tr_task_executor_adopt_cleanup(struct tr_task_executor *executor);
 int tr_task_in_worker_context(void);
 
+/* 只观察完成所有者身份，不取得生命周期引用；不得在notify锁内调用。 */
+int tr_task_executor_is_current_owner(struct tr_task_executor *executor);
+
 #endif
