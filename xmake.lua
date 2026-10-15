@@ -90,6 +90,7 @@ target("trcore")
         "src/transport/protocol/wire.c",
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",
+        "src/execution/task_executor.c",
         "src/execution/command_queue.c",
         "src/execution/completion_queue.c",
         "src/execution/timer_queue.c",
@@ -432,3 +433,46 @@ target("test_message_transform")
     end)
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
+
+-- 独立验证执行底座及 Message 组合，只复用真实生产对象，不链接整个库。
+for _, name in ipairs({"test_task_executor", "test_task_message"}) do
+    target(name)
+        set_kind("binary")
+        set_default(false)
+        add_files("tests/" .. name .. ".c")
+        add_includedirs("include")
+        add_deps("trcore", {inherit = false})
+        if name == "test_task_executor" then
+            add_ldflags("-Wl,--wrap=calloc",
+                        "-Wl,--wrap=pthread_mutex_init",
+                        "-Wl,--wrap=pthread_cond_init",
+                        "-Wl,--wrap=pthread_create",
+                        "-Wl,--wrap=pthread_join",
+                        "-Wl,--wrap=pthread_cond_destroy",
+                        "-Wl,--wrap=pthread_mutex_destroy", {force = true})
+        else
+            add_packages("zstd")
+        end
+        on_config(function (target)
+            local expected = {[path.absolute("src/execution/task_executor.c")] = 0}
+            if target:name() == "test_task_message" then
+                expected[path.absolute("src/message/message.c")] = 0
+                expected[path.absolute("src/message/transform.c")] = 0
+                expected[path.absolute("src/message/zstd.c")] = 0
+            end
+            for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+                for index, source in ipairs(batch.sourcefiles) do
+                    local key = path.absolute(source)
+                    if expected[key] ~= nil then
+                        table.insert(target:objectfiles(), batch.objectfiles[index])
+                        expected[key] = expected[key] + 1
+                    end
+                end
+            end
+            for source, count in pairs(expected) do
+                assert(count == 1, "生产测试对象必须唯一: " .. source)
+            end
+        end)
+        add_tests("default", {run_timeout = 120000, realtime_output = true})
+    target_end()
+end
