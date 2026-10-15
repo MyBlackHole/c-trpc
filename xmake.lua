@@ -115,6 +115,7 @@ target("trcore")
         "src/transport/channel/channel.c",
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_wire.c",
+        "src/rpc/rpc_record.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -534,5 +535,39 @@ target("test_runtime_message_api")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_reactor_call",
                 "-Wl,--wrap=ZSTD_compressStream2", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 新调用记录只链接真实记录/消息对象，防止整库补齐意外依赖。
+target("test_rpc_record")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record.c")
+    add_includedirs("include")
+    add_packages("zstd")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=realloc", {force = true})
+    on_config(function (target)
+        local expected = {
+            [path.absolute("src/rpc/rpc_record.c")] = 0,
+            [path.absolute("src/rpc/rpc_wire.c")] = 0,
+            [path.absolute("src/message/message.c")] = 0,
+            [path.absolute("src/message/transform.c")] = 0,
+            [path.absolute("src/message/zstd.c")] = 0
+        }
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                local key = path.absolute(source)
+                if expected[key] ~= nil then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    expected[key] = expected[key] + 1
+                end
+            end
+        end
+        for source, count in pairs(expected) do
+            assert(count == 1, "调用记录生产对象必须唯一: " .. source)
+        end
+    end)
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
