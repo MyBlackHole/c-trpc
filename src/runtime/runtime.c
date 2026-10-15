@@ -419,6 +419,7 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 int tr_runtime_destroy(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int result = TR_OK;
 	int ret;
 
 	if (!runtime)
@@ -428,11 +429,18 @@ int tr_runtime_destroy(struct tr_runtime *runtime)
 	if (ret != TR_OK)
 		return ret;
 
+	/* 所有分片已停止，资源域相互独立。某个输出仍持有预算，或某个
+	 * 分片解绑失败，不应使后续分片的已静默资源一直被保留。
+	 * 外壳必须整体存活供重试；严重错误不能被较早的 AGAIN 掩盖。
+	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
 		ret = tr_runtime_shard_release(&runtime->shards[i]);
-		if (ret != TR_OK)
-			return ret;
+		if (ret != TR_OK && (result == TR_OK ||
+		                     (result == TR_AGAIN && ret != TR_AGAIN)))
+			result = ret;
 	}
+	if (result != TR_OK)
+		return result;
 	free(runtime->shards);
 	runtime->shards = NULL;
 	free(runtime);

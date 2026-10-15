@@ -508,6 +508,13 @@ target("test_runtime_message_recovery")
     add_files("tests/test_runtime_message_recovery.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=epoll_wait", "-Wl,--wrap=write",
+                "-Wl,--wrap=tr_message_service_create_on_owner",
+                "-Wl,--wrap=tr_reactor_destroy",
+                "-Wl,--wrap=pthread_cond_destroy",
+                "-Wl,--wrap=pthread_mutex_destroy",
+                "-Wl,--wrap=pthread_cond_broadcast",
+                "-Wl,--wrap=pthread_cond_signal",
+                "-Wl,--wrap=pthread_cond_wait",
                 "-Wl,--wrap=pthread_join",
                 "-Wl,--wrap=pthread_create", "-Wl,--wrap=close",
                 "-Wl,--wrap=tr_reactor_aux_event_register",

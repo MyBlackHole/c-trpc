@@ -95,6 +95,95 @@ static _Atomic unsigned completion_signals;
 static tr_reactor_timer_cb timer_callback;
 static void *timer_argument;
 
+/* 只在目标执行器真实销毁调用内定位同步对象，不读取私有结构布局。 */
+static struct tr_message_service *captured_service;
+static _Thread_local bool inside_task_destroy;
+static _Atomic bool inspect_partial_destroy, fail_real_mutex_destroy;
+static _Atomic(pthread_cond_t *) destroyed_condition;
+static _Atomic unsigned condition_destroys, mutex_destroy_failures;
+static _Atomic(struct tr_reactor *) fail_destroy_reactor;
+
+int __real_tr_reactor_destroy(struct tr_reactor *);
+int __wrap_tr_reactor_destroy(struct tr_reactor *reactor)
+{
+	struct tr_reactor *expected = reactor;
+	if (reactor && atomic_compare_exchange_strong(&fail_destroy_reactor,
+	                                              &expected, NULL))
+		return TR_ERR_SYS;
+	return __real_tr_reactor_destroy(reactor);
+}
+
+int __real_tr_message_service_create_on_owner(
+        struct tr_reactor *, const struct tr_message_service_config *,
+        struct tr_memory_budget *, struct tr_message_service **);
+int __real_pthread_cond_destroy(pthread_cond_t *);
+int __real_pthread_mutex_destroy(pthread_mutex_t *);
+int __real_pthread_cond_broadcast(pthread_cond_t *);
+int __real_pthread_cond_signal(pthread_cond_t *);
+int __real_pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+
+int __wrap_tr_message_service_create_on_owner(
+        struct tr_reactor *reactor,
+        const struct tr_message_service_config *config,
+        struct tr_memory_budget *budget, struct tr_message_service **out)
+{
+	int ret = __real_tr_message_service_create_on_owner(reactor, config,
+	                                                    budget, out);
+	if (ret == TR_OK && reactor == atomic_load(&target))
+		captured_service = *out;
+	return ret;
+}
+
+int __wrap_pthread_cond_destroy(pthread_cond_t *condition)
+{
+	int ret;
+	if (!inside_task_destroy || !atomic_load(&inspect_partial_destroy))
+		return __real_pthread_cond_destroy(condition);
+	CHECK(atomic_load(&destroyed_condition) == NULL);
+	ret = __real_pthread_cond_destroy(condition);
+	if (ret == 0) {
+		atomic_store(&destroyed_condition, condition);
+		atomic_fetch_add(&condition_destroys, 1);
+	}
+	return ret;
+}
+
+int __wrap_pthread_mutex_destroy(pthread_mutex_t *mutex)
+{
+	if (inside_task_destroy && atomic_load(&inspect_partial_destroy) &&
+	    atomic_exchange(&fail_real_mutex_destroy, false)) {
+		/* 条件变量已经真实销毁，不是从组合函数入口直接返回错误。 */
+		CHECK(atomic_load(&destroyed_condition) != NULL);
+		atomic_fetch_add(&mutex_destroy_failures, 1);
+		return EBUSY;
+	}
+	return __real_pthread_mutex_destroy(mutex);
+}
+
+static void check_live_condition(pthread_cond_t *condition)
+{
+	/* 先断言再进入 pthread，避免让负向用例真的执行未定义行为。 */
+	CHECK(condition != atomic_load(&destroyed_condition));
+}
+
+int __wrap_pthread_cond_broadcast(pthread_cond_t *condition)
+{
+	check_live_condition(condition);
+	return __real_pthread_cond_broadcast(condition);
+}
+
+int __wrap_pthread_cond_signal(pthread_cond_t *condition)
+{
+	check_live_condition(condition);
+	return __real_pthread_cond_signal(condition);
+}
+
+int __wrap_pthread_cond_wait(pthread_cond_t *condition, pthread_mutex_t *mutex)
+{
+	check_live_condition(condition);
+	return __real_pthread_cond_wait(condition, mutex);
+}
+
 static uint64_t observed_timer(void *arg, uint64_t now)
 {
 	(void)arg;
@@ -222,9 +311,14 @@ int __wrap_tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle)
 
 int __wrap_tr_task_executor_destroy(struct tr_task_executor **executor)
 {
+	int ret;
 	if (atomic_exchange(&fail_final_destroy, false))
 		return TR_ERR_SYS;
-	return __real_tr_task_executor_destroy(executor);
+	CHECK(!inside_task_destroy);
+	inside_task_destroy = true;
+	ret = __real_tr_task_executor_destroy(executor);
+	inside_task_destroy = false;
+	return ret;
 }
 
 int __wrap_close(int fd)
@@ -603,8 +697,289 @@ static void test_completed_result_recovery(void)
 	gate_destroy(&held_owner);
 }
 
+/* 原 owner 已经拆掉一部分同步对象后退出，恢复只可继续尚未完成的步骤。 */
+static int close_captured_service(void *arg)
+{
+	struct tr_message_service *copy = captured_service;
+	int ret;
+	(void)arg;
+	ret = tr_message_service_close_on_owner(&copy);
+	CHECK(copy == captured_service);
+	return ret;
+}
+
+static void test_partial_destroy_owner_exit(void)
+{
+	struct fixture f;
+	int ret;
+	int fd;
+	uint64_t until = now_seconds() + 15;
+
+	init_fixture(&f, true);
+	start_fixture(&f);
+	CHECK(captured_service);
+	atomic_store(&condition_destroys, 0);
+	atomic_store(&mutex_destroy_failures, 0);
+	atomic_store(&destroyed_condition, NULL);
+	atomic_store(&inspect_partial_destroy, true);
+	atomic_store(&fail_real_mutex_destroy, true);
+	while ((ret = tr_runtime_shard_call(f.shard, close_captured_service,
+	                                    NULL)) == TR_AGAIN) {
+		CHECK(now_seconds() <= until);
+		sched_yield();
+	}
+	CHECK(ret == TR_ERR_SYS);
+	CHECK(atomic_load(&condition_destroys) == 1);
+	CHECK(atomic_load(&mutex_destroy_failures) == 1);
+	CHECK(!atomic_load(&event_live) && !atomic_load(&timer_live));
+	fd = atomic_load(&message_fd);
+	CHECK(fcntl(fd, F_GETFD) >= 0 && atomic_load(&message_closes) == 0);
+
+	CHECK(tr_reactor_call(f.reactor, arm_fatal, NULL) == TR_OK);
+	while (!atomic_load(&poll_failures)) {
+		CHECK(now_seconds() <= until);
+		sched_yield();
+	}
+	/* 接管之后再失败一次，验证租约与部分销毁进度均保留。 */
+	atomic_store(&fail_real_mutex_destroy, true);
+	CHECK(stop_until(&f) == TR_ERR_SYS);
+	CHECK(atomic_load(&successful_owner_joins) == 1);
+	CHECK(atomic_load(&condition_destroys) == 1);
+	CHECK(atomic_load(&mutex_destroy_failures) == 2);
+	CHECK(tr_reactor_start(f.reactor) == TR_ERR_STATE);
+	CHECK(tr_reactor_destroy(f.reactor) == TR_ERR_STATE);
+	CHECK(fcntl(fd, F_GETFD) >= 0 && atomic_load(&message_closes) == 0);
+	CHECK(stop_until(&f) == TR_OK);
+	CHECK(atomic_load(&condition_destroys) == 1);
+	CHECK(atomic_load(&message_closes) == 1);
+	atomic_store(&inspect_partial_destroy, false);
+	atomic_store(&destroyed_condition, NULL);
+	captured_service = NULL;
+	atomic_store(&message_fd, -1);
+	CHECK(tr_runtime_destroy(f.runtime) == TR_OK);
+	atomic_store(&target, NULL);
+}
+
+static uint64_t shard_bytes(struct tr_runtime_shard *shard)
+{
+	struct tr_memory_budget_stats stats;
+	tr_runtime_shard_memory_stats(shard, &stats);
+	CHECK(stats.current_bytes <= stats.limit_bytes);
+	return stats.current_bytes;
+}
+
+static void wait_sample(struct sample *sample)
+{
+	uint64_t until = now_seconds() + 15;
+	while (!atomic_load(&sample->completions)) {
+		CHECK(now_seconds() <= until);
+		sched_yield();
+	}
+}
+
+static void *release_message_thread(void *arg)
+{
+	CHECK(tr_message_release(arg) == TR_OK);
+	return NULL;
+}
+
+static void release_elsewhere(struct tr_message *message)
+{
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, release_message_thread, message) ==
+	      0);
+	CHECK(pthread_join(thread, NULL) == 0);
+}
+
+static void test_multishard_retained_outputs(unsigned first)
+{
+	struct tr_runtime_shard_config shards[2] = {0};
+	struct tr_runtime_config config = {2, shards};
+	struct tr_runtime *runtime = NULL;
+	struct fixture f[2] = {0};
+	struct sample s[2];
+	struct tr_message slices[2] = {0};
+	struct tr_message_view views[2];
+	uint64_t held[2];
+	uint8_t expected[2];
+	const char *payloads[2] = {"first shard retained data",
+	                           "second shard retained data"};
+	unsigned second = first ^ 1U;
+
+	/* 单分片故障包装在本用例禁用，完成回调按各自具体 Reactor 校验。 */
+	atomic_store(&target, NULL);
+	atomic_store(&message_fd, -1);
+	atomic_store(&owner_id_valid, false);
+	for (size_t i = 0; i < 2; ++i) {
+		shards[i].memory_budget_bytes = 128 * MIB;
+		shards[i].reactor.max_connections = 4;
+		shards[i].reactor.rx_buffer_count = 4;
+		shards[i].reactor.rx_buffer_size = 4096;
+		shards[i].reactor.max_payload_len = 4096;
+		shards[i].reactor.tx_item_capacity = 8;
+		shards[i].reactor.control_tx_item_capacity = 8;
+		shards[i].messages =
+		        (struct tr_message_service_config){{1, 4}, 1, 10000000};
+	}
+	CHECK(tr_runtime_create(&config, &runtime) == TR_OK);
+	CHECK(tr_runtime_start(runtime) == TR_OK);
+	for (size_t i = 0; i < 2; ++i) {
+		f[i].runtime = runtime;
+		f[i].shard = tr_runtime_shard_at(runtime, (uint32_t)i);
+		f[i].reactor = tr_runtime_shard_reactor(f[i].shard);
+		init_sample(&s[i], &f[i], payloads[i], strlen(payloads[i]),
+		            false);
+		CHECK(submit_sample(&s[i]) == TR_OK);
+	}
+	for (size_t i = 0; i < 2; ++i) {
+		wait_sample(&s[i]);
+		CHECK(tr_message_view(&s[i].retained, &views[i]) == TR_OK);
+		CHECK(views[i].len > 0);
+		expected[i] = views[i].data[views[i].len - 1];
+		CHECK(tr_message_slice(&s[i].retained, views[i].len - 1, 1,
+		                       &slices[i]) == TR_OK);
+	}
+	CHECK(stop_until(&f[0]) == TR_OK);
+	/* 错误可以在首个或第二个分片出现；仍释放另一分片，且 SYS 不被
+	 * 较早或较晚的 AGAIN 掩盖。故障只注入一次，随后继续相同对象重试。 */
+	atomic_store(&fail_destroy_reactor, f[first].reactor);
+	CHECK(tr_runtime_destroy(runtime) == TR_ERR_SYS);
+	CHECK(tr_runtime_shard_reactor(f[first].shard) == f[first].reactor);
+	CHECK(tr_runtime_shard_reactor(f[second].shard) == NULL);
+	CHECK(tr_runtime_start(runtime) == TR_ERR_STATE);
+	CHECK(tr_runtime_destroy(runtime) == TR_AGAIN);
+	CHECK(tr_runtime_start(runtime) == TR_ERR_STATE);
+	for (size_t i = 0; i < 2; ++i) {
+		/* 一个预算外壳被保留，不应阻碍另一分片已静默资源释放。 */
+		CHECK(tr_runtime_shard_reactor(f[i].shard) == NULL);
+		held[i] = shard_bytes(f[i].shard);
+		CHECK(held[i] > 0);
+		CHECK(tr_message_view(&slices[i], &views[i]) == TR_OK);
+		CHECK(views[i].len == 1 && views[i].data[0] == expected[i]);
+	}
+	release_elsewhere(&s[first].retained);
+	CHECK(shard_bytes(f[first].shard) == held[first]);
+	CHECK(tr_message_release(&slices[first]) == TR_OK);
+	CHECK(shard_bytes(f[first].shard) == 0);
+	CHECK(shard_bytes(f[second].shard) == held[second]);
+	CHECK(tr_runtime_destroy(runtime) == TR_AGAIN);
+	CHECK(tr_runtime_start(runtime) == TR_ERR_STATE);
+	CHECK(tr_message_release(&s[second].retained) == TR_OK);
+	CHECK(shard_bytes(f[second].shard) == held[second]);
+	release_elsewhere(&slices[second]);
+	CHECK(shard_bytes(f[0].shard) == 0 && shard_bytes(f[1].shard) == 0);
+	CHECK(tr_runtime_destroy(runtime) == TR_OK);
+}
+
+struct mixed_submission {
+	struct sample *completed;
+	struct sample *running;
+	struct sample *queued;
+	struct gate *owner_gate;
+};
+
+static int submit_mixed_and_hold(void *arg)
+{
+	struct mixed_submission *mixed = arg;
+	unsigned signals = atomic_load(&completion_signals);
+	uint64_t until = now_seconds() + 15;
+	CHECK(submit_sample(mixed->completed) == TR_OK);
+	while (atomic_load(&completion_signals) == signals) {
+		CHECK(now_seconds() <= until);
+		sched_yield();
+	}
+	atomic_store(&trap_algorithm, true);
+	CHECK(submit_sample(mixed->running) == TR_OK);
+	CHECK(submit_sample(mixed->queued) == TR_OK);
+	gate_wait(mixed->owner_gate, true);
+	atomic_store(&fail_poll, true);
+	return TR_OK;
+}
+
+static void *mixed_submitter(void *arg)
+{
+	struct mixed_submission *mixed = arg;
+	CHECK(tr_runtime_shard_call(mixed->completed->fixture->shard,
+	                            submit_mixed_and_hold, mixed) == TR_OK);
+	return NULL;
+}
+
+static void test_mixed_result_domains(void)
+{
+	struct fixture f;
+	struct sample retained, completed, running, queued;
+	struct gate owner_gate, worker_gate;
+	struct mixed_submission mixed = {&completed, &running, &queued,
+	                                 &owner_gate};
+	struct tr_message_view view;
+	const uint8_t initial[] = "owner result must survive recovery";
+	uint8_t decoded[sizeof(initial)];
+	uint8_t *large = calloc(1, MIB);
+	pthread_t submitter;
+	uint64_t until = now_seconds() + 15;
+	CHECK(large);
+	init_fixture(&f, true);
+	start_fixture(&f);
+	init_sample(&retained, &f, initial, sizeof(initial), false);
+	CHECK(submit_sample(&retained) == TR_OK);
+	wait_sample(&retained);
+	init_sample(&completed, &f, initial, sizeof(initial), true);
+	init_sample(&running, &f, large, MIB, true);
+	init_sample(&queued, &f, large, 1, true);
+	gate_init(&owner_gate);
+	gate_init(&worker_gate);
+	atomic_store(&algorithm_gate, &worker_gate);
+	atomic_store(&suppress_timer, true);
+	CHECK(pthread_create(&submitter, NULL, mixed_submitter, &mixed) == 0);
+	gate_wait(&owner_gate, false);
+	gate_wait(&worker_gate, false);
+	CHECK(atomic_load(&retained.completions) == 1);
+	CHECK(atomic_load(&completed.releases) == 1 &&
+	      atomic_load(&completed.completions) == 0);
+	CHECK(atomic_load(&running.releases) == 0 &&
+	      atomic_load(&queued.releases) == 0);
+	gate_open(&owner_gate);
+	CHECK(pthread_join(submitter, NULL) == 0);
+	while (!atomic_load(&poll_failures)) {
+		CHECK(now_seconds() <= until);
+		sched_yield();
+	}
+	CHECK(tr_runtime_stop(f.runtime) == TR_AGAIN);
+	CHECK(atomic_load(&successful_owner_joins) == 1);
+	CHECK(atomic_load(&retained.completions) == 1);
+	CHECK(tr_message_view(&retained.retained, &view) == TR_OK);
+	CHECK(ZSTD_decompress(decoded, sizeof(decoded), view.data, view.len) ==
+	      sizeof(initial));
+	CHECK(memcmp(decoded, initial, sizeof(initial)) == 0);
+	gate_open(&worker_gate);
+	CHECK(stop_until(&f) == TR_OK);
+	CHECK(atomic_load(&retained.completions) == 1);
+	CHECK(atomic_load(&completed.completions) == 1 &&
+	      atomic_load(&running.completions) == 1 &&
+	      atomic_load(&queued.completions) == 1);
+	CHECK(atomic_load(&callback_count) == 4);
+	atomic_store(&algorithm_gate, NULL);
+	atomic_store(&suppress_timer, false);
+	atomic_store(&message_fd, -1);
+	CHECK(tr_runtime_destroy(f.runtime) == TR_AGAIN);
+	CHECK(tr_message_view(&retained.retained, &view) == TR_OK);
+	CHECK(ZSTD_decompress(decoded, sizeof(decoded), view.data, view.len) ==
+	      sizeof(initial));
+	CHECK(memcmp(decoded, initial, sizeof(initial)) == 0);
+	CHECK(tr_message_release(&retained.retained) == TR_OK);
+	CHECK(tr_runtime_destroy(f.runtime) == TR_OK);
+	atomic_store(&target, NULL);
+	gate_destroy(&owner_gate);
+	gate_destroy(&worker_gate);
+	free(large);
+}
+
 int main(void)
 {
+	test_partial_destroy_owner_exit();
+	test_mixed_result_domains();
+	test_multishard_retained_outputs(0);
+	test_multishard_retained_outputs(1);
 	test_completed_result_recovery();
 	test_success_and_retained_budget();
 	test_disabled_and_start_failure();
