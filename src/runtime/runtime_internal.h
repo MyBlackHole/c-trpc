@@ -86,12 +86,22 @@ int tr_runtime_destroy(struct tr_runtime *runtime);
  * 与 start/stop/destroy 的生命周期操作须由外部串行化，不能把弱句柄当引用。
  * stop 取消残留消息；旧 owner 已 join 后可能由 stop 调用线程交付明确的
  * OWNER_STOPPED 终局。destroy 在输出/输入仍占分片预算时返回 AGAIN，保留
- * Runtime 预算外壳直到应用释放引用后重试。启用不等于 RPC 网络压缩。 */
+ * Runtime 预算外壳直到应用释放引用后重试。部分销毁后返回 CLOSED。
+ * 普通线程或本分片 owner 可调用；另一 Reactor 的 owner 返回 STATE，
+ * 不执行跨分片同步等待。启用不等于 RPC 网络压缩。 */
 int tr_runtime_shard_message_submit(
         struct tr_runtime_shard *shard, struct tr_message *input,
         const struct tr_message_transform_config *config,
         tr_message_service_done_fn done, void *arg,
         struct tr_task_handle *handle);
+
+/* 与 submit 相同的生命周期及执行上下文限制。运行中按实例/槽位代次
+ * 校验，错误分片/旧实例返回 STALE；终局已提交返回 STATE，已退役返回
+ * STALE。未配置消息服务返回 UNSUPPORTED，父已停止/部分销毁返回 CLOSED。
+ * TR_OK 仅接受取消意图，仍须等待原 done 交付，不能提前释放 arg/载荷。
+ * 不取得任务或分片强引用，不与 Runtime 生命周期操作并发。 */
+int tr_runtime_shard_message_cancel(struct tr_runtime_shard *shard,
+                                    struct tr_task_handle handle);
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime);
 struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,

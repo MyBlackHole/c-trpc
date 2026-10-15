@@ -806,6 +806,47 @@ int tr_runtime_shard_message_submit(
 		return TR_ERR_INVALID;
 	if (!shard->message_config.tasks.capacity)
 		return TR_ERR_UNSUPPORTED;
+	if (!shard->reactor)
+		return TR_ERR_CLOSED;
+	/* 不把同步消息调用嵌套进另一分片的 owner，防止 A -> B -> A 自等待。 */
+	if (tr_reactor_in_owner_context() &&
+	    !tr_reactor_in_owner_context_for(shard->reactor))
+		return TR_ERR_STATE;
 	return tr_reactor_call(shard->reactor,
 	                       tr_runtime_message_submit_on_owner, &request);
+}
+
+struct tr_runtime_message_cancel_request {
+	struct tr_runtime_shard *shard;
+	struct tr_task_handle handle;
+};
+
+static int tr_runtime_message_cancel_on_owner(void *arg)
+{
+	struct tr_runtime_message_cancel_request *request = arg;
+	struct tr_message_service *service = request->shard->messages;
+
+	if (!service)
+		return TR_ERR_CLOSED;
+	return tr_message_service_cancel(service, request->handle);
+}
+
+int tr_runtime_shard_message_cancel(struct tr_runtime_shard *shard,
+                                    struct tr_task_handle handle)
+{
+	struct tr_runtime_message_cancel_request request = {shard, handle};
+
+	if (!shard)
+		return TR_ERR_INVALID;
+	if (!shard->message_config.tasks.capacity)
+		return TR_ERR_UNSUPPORTED;
+	if (!shard->reactor)
+		return TR_ERR_CLOSED;
+	if (tr_reactor_in_owner_context() &&
+	    !tr_reactor_in_owner_context_for(shard->reactor))
+		return TR_ERR_STATE;
+	/* 只在所属 owner 借用服务；不向调用方暴露可跨生命周期悬空的指针。
+	 * 任务的实例和代次由服务/执行器校验，不能只按槽位取消。 */
+	return tr_reactor_call(shard->reactor,
+	                       tr_runtime_message_cancel_on_owner, &request);
 }

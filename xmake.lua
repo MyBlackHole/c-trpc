@@ -518,3 +518,27 @@ target("test_runtime_message_recovery")
                 "-Wl,--wrap=ZSTD_compressStream2", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
+
+-- Runtime 消息取消及真实 pthread 半销毁状态，复用同一生产库验证组合边界。
+for _, name in ipairs({"test_runtime_message_control", "test_message_service_partial_destroy"}) do
+    target(name)
+        set_kind("binary")
+        set_default(false)
+        add_files("tests/" .. name .. ".c")
+        add_deps("trcore")
+        if name == "test_runtime_message_control" then
+            add_ldflags("-Wl,--wrap=pthread_create",
+                        "-Wl,--wrap=ZSTD_compressStream2",
+                        "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+        else
+            add_ldflags("-Wl,--wrap=eventfd",
+                        "-Wl,--wrap=tr_task_executor_destroy",
+                        "-Wl,--wrap=pthread_cond_destroy",
+                        "-Wl,--wrap=pthread_mutex_destroy",
+                        "-Wl,--wrap=pthread_cond_signal",
+                        "-Wl,--wrap=pthread_cond_broadcast",
+                        "-Wl,--wrap=pthread_cond_wait", {force = true})
+        end
+        add_tests("default", {run_timeout = 120000, realtime_output = true})
+    target_end()
+end
