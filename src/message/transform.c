@@ -131,17 +131,27 @@ fail:
 	return ret;
 }
 
+struct tr_transform_run {
+	struct tr_message_transform *operation;
+	tr_message_cancel_check_fn check;
+	void *arg;
+};
+
 static bool tr_transform_cancelled(void *arg)
 {
-	struct tr_message_transform *operation = arg;
+	struct tr_transform_run *run = arg;
 
-	return (atomic_load_explicit(&operation->state, memory_order_acquire) &
+	if (run->check && run->check(run->arg))
+		(void)tr_message_transform_cancel(run->operation);
+	return (atomic_load_explicit(&run->operation->state,
+	                             memory_order_acquire) &
 	        TR_TRANSFORM_CANCEL) != 0;
 }
 
 static enum tr_message_transform_outcome
-tr_transform_execute(struct tr_message_transform *operation)
+tr_transform_execute(struct tr_transform_run *run)
 {
+	struct tr_message_transform *operation = run->operation;
 	struct tr_transform_output *output = operation->reserved_output;
 	struct tr_message_view view;
 	enum tr_message_transform_outcome outcome;
@@ -149,7 +159,7 @@ tr_transform_execute(struct tr_message_transform *operation)
 	size_t length = 0;
 	int ret;
 
-	if (tr_transform_cancelled(operation))
+	if (tr_transform_cancelled(run))
 		return TR_MESSAGE_TRANSFORM_CANCELLED;
 	ret = tr_message_view(&operation->input, &view);
 	if (ret != TR_OK)
@@ -161,7 +171,7 @@ tr_transform_execute(struct tr_message_transform *operation)
 		return TR_MESSAGE_TRANSFORM_NOMEM;
 	outcome = tr_message_zstd_run(&operation->config, &view, data,
 	                              operation->output_capacity, &length,
-	                              tr_transform_cancelled, operation);
+	                              tr_transform_cancelled, run);
 	if (outcome != TR_MESSAGE_TRANSFORM_OK) {
 		free(data);
 		return outcome;
@@ -183,6 +193,14 @@ tr_transform_execute(struct tr_message_transform *operation)
 
 int tr_message_transform_run(struct tr_message_transform *operation)
 {
+	return tr_message_transform_run_checked(operation, NULL, NULL);
+}
+
+int tr_message_transform_run_checked(struct tr_message_transform *operation,
+                                     tr_message_cancel_check_fn check,
+                                     void *arg)
+{
+	struct tr_transform_run run = {operation, check, arg};
 	unsigned state;
 	enum tr_message_transform_outcome outcome;
 	int ret;
@@ -200,7 +218,7 @@ int tr_message_transform_run(struct tr_message_transform *operation)
 		            memory_order_acq_rel, memory_order_acquire))
 			break;
 	}
-	outcome = tr_transform_execute(operation);
+	outcome = tr_transform_execute(&run);
 	ret = tr_transform_output_discard(operation);
 	if (ret != TR_OK)
 		outcome = TR_MESSAGE_TRANSFORM_INTERNAL;
@@ -212,6 +230,7 @@ int tr_message_transform_run(struct tr_message_transform *operation)
 	if (ret != TR_OK)
 		outcome = TR_MESSAGE_TRANSFORM_INTERNAL;
 
+	(void)tr_transform_cancelled(&run);
 	operation->outcome = outcome;
 	state = TR_TRANSFORM_RUNNING;
 	if (atomic_compare_exchange_strong_explicit(

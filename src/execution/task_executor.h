@@ -71,6 +71,16 @@ int tr_task_executor_create(const struct tr_task_executor_config *config,
  */
 int tr_task_executor_start(struct tr_task_executor *executor);
 
+/* 库内完成通知适配。仅创建者在 start 之前设置，或在 join 且全部完成
+ * 已交付后清除。通知在完成入队之后、执行器锁内同步调用，必须短小、
+ * 不阻塞、不分配，不得重新调用执行器/应用代码；仅用于唤醒事件源。
+ * 通知不是结果所有权转移，也不是一条消息一个事件；失败不能丢弃完成。
+ * arg 必须存活至 join 后清除通知或销毁执行器，外部 fd 的解绑另行负责。
+ */
+typedef void (*tr_task_notify_fn)(void *arg);
+int tr_task_executor_set_notify(struct tr_task_executor *executor,
+                                tr_task_notify_fn notify, void *arg);
+
 /* 成功时复制 spec，接管一次 work 和一次 done 的执行责任；失败不调用
  * 用户代码、不接管 arg、不改 out。提交本身不分配、不等待队列容量。
  * 满载返回 TR_AGAIN；停机返回 TR_ERR_CLOSED；代次耗尽明确失败不回绕。
