@@ -138,3 +138,28 @@ Clang analyzer 无诊断；Reactor 保留既有 `items` 的潜在泄漏诊断。
 下一有限阶段是公开门面配置／取消接入及网络消息信封、方向性协商和信用适配。
 本轮已经是 Runtime 拥有和调用的实现，不是仅测试自建服务，但仍不宣称 RPC
 请求/响应已经经过压缩或已经支持 TLS；旧 RPC 线程执行模型也没有全部迁移。
+
+## 首轮远端 SDK 失败与依赖分发修复
+
+初始 head `60421db95f760fae468a6da7944f958f4d81d500` 的真实 Runtime 回收测试、
+ASan/UBSan、TSan、格式和 RPC 冒烟通过，但 CI 的 Make/安装作业失败：
+Runtime 开始引用 MessageService 后，已安装 `libtrcore.a` 需要 Zstandard 定义；
+仓库内 Xmake 传递包链接参数不等于外部 SDK 消费者也拥有这些参数或静态库。
+这是实际集成缺口，不归为环境偶发，不重跑到绿色，也不跳过安装检查。
+
+修复采用 Xmake 3.1.1 的原生 `build.merge_archive`，将固定 Zstandard 静态包对象
+合入 `libtrcore.a`，不新增第二套归档构建命令。核对的上游实现为
+`xmake/rules/utils/merge_archive/xmake.lua@v3.1.1`，Git blob
+`4560081825936b8b791b5f086cc97bb91fa6a471`；其合并范围明确包含静态 package。
+
+同时保留上游 v1.5.7 的完整 BSD 许可、更新来源说明和 NOTICE，安装及源码归档均
+逐字节核对许可；CI 进一步检查安装归档中 `ZSTD_versionNumber` 恰有一个定义。
+外部 C/C++ 消费测试继续只用 SDK 的 `-ltrcore -pthread`，不借系统 `-lzstd` 或
+包缓存目录补齐，也不修改测试退出码判定。
+
+本地以相同生产对象及静态 Zstandard 合并归档，独立 C11/C++11 消费端用 GCC/
+Clang 工具链分别链接运行；这仅验证归档链接语义，不冒充无 Xmake 环境已跑过
+正式合并策略。最终 Xmake 合并、安装及完整矩阵以修复后精确提交的远端结果为准。
+
+合并对象不提供对另一个已链接 Zstandard 的符号隔离，不把依赖更新/安全评估
+或全部许可审查标作完成。首轮失败证据保留在 PR，不能用新 head 成功覆盖它。

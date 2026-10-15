@@ -65,9 +65,13 @@ end
 
 target("trcore")
     set_kind("static")
+    -- Runtime 已引用消息后端；安装后的 .a 必须包含静态包，不能依赖
+    -- 消费方的 Xmake 环境或系统 libzstd。3.1.1 原生支持合并 package。
+    set_policy("build.merge_archive", true)
     add_packages("zstd", {public = true})
     -- 源码与已安装 SDK 同时携带许可和适用署名。
     add_installfiles("LICENSE", "NOTICE", "docs/licensing.md", {prefixdir = "share/doc/c-trpc"})
+    add_installfiles("third_party/zstd/LICENSE", {prefixdir = "share/doc/c-trpc/third_party/zstd"})
     add_includedirs("include", {public = true})
     -- Stable SDK compatibility boundary. Runtime/Transport engine headers
     -- stay repository-internal; internal tests include them from the source tree.
