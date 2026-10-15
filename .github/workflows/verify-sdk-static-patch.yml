@@ -1,0 +1,31 @@
+name: Verify SDK static dependency patch
+on:
+  push:
+    branches: ["diag/sdk-static-archive-20261015"]
+permissions:
+  contents: write
+jobs:
+  materialize:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 只向诊断结果分支发布已核对的源码树
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/diag/sdk-static-archive-20261015'
+          cat .sdk-patch/0 .sdk-patch/1 .sdk-patch/2 .sdk-patch/3 .sdk-patch/4 .sdk-patch/5 > "$RUNNER_TEMP/sdk.patch.gz"
+          echo '5528a0423fdf627bc3987cd0bd47d21bc5328e79f0fe4e531754ef8e0787b677  '"$RUNNER_TEMP/sdk.patch.gz" | sha256sum -c -
+          gzip -dc "$RUNNER_TEMP/sdk.patch.gz" > "$RUNNER_TEMP/sdk.patch"
+          echo '5e79d3a6afce3ee60848ce872af2d39eaff20cfdff0e7fbbdfca94a753b054cc  '"$RUNNER_TEMP/sdk.patch" | sha256sum -c -
+          git checkout --detach 60421db95f760fae468a6da7944f958f4d81d500
+          test -z "$(git status --porcelain)"
+          git apply --index "$RUNNER_TEMP/sdk.patch"
+          test "$(git write-tree)" = 'c23f5105741ba6629e2d17da8cae5040f7d7f1dd'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'diag: 验证自包含 SDK 及 Zstandard 许可分发补丁'
+          git push origin HEAD:refs/heads/diag/sdk-static-archive-20261015-result
