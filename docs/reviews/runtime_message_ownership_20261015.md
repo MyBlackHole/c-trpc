@@ -68,7 +68,7 @@ Reactor 的对象重新 start。正常 stop 不设置这个终局标记，仍允
 
 复用真实 `test_runtime` 目标，不增加测试二进制数量、不重复登记生产源。
 新场景位于仅该测试包含的 `runtime_message_cases.h`，保持普通生产头的闭包。
-旧场景全部保留；监听器重新打开的现有场景使用已支持的可选 NULL 端口输出。
+旧场景全部保留，原监听器重开调用和既有断言不变。
 
 1. **真实双分片消息生命周期**：每个分片启用实际 MessageService，提交真实
    Zstandard 编码，直接调用 Runtime stop 而不手动关闭服务或轮询结果。
@@ -93,9 +93,13 @@ Reactor 的对象重新 start。正常 stop 不设置这个终局标记，仍允
 检查器或整库测试，不能继承先前切片的本地或远端绿色结果。
 
 已逐字节核对原 runtime.c、runtime_internal.h、message_service.c、test_runtime.c
-与 GitHub blob 后再编辑；上传文件也核对其返回 blob。固定 clang-format 18.1.8、
-真实 Xmake、完整静态分析基线、ASan/UBSan、TSan、SDK 安装及新子场景的实际
-执行结果，必须以本切片 PR 的远端运行和原始日志为准，提交时不预写通过。
+与 GitHub blob 后再编辑；上传文件也核对其返回 blob。初始提交的源码格式门禁
+报告旧测试监听器重开调用的改动行需格式化；已直接撤销这项不必要的参数变动，
+恢复原有测试，未放宽格式检查，也未更改新生产实现。
+
+固定 clang-format 18.1.8、真实 Xmake、完整静态分析基线、ASan/UBSan、TSan、
+SDK 安装及新子场景的实际执行结果，必须以最终提交的远端运行和原始日志为准，
+提交时不预写通过。运行链接与日志证据在 PR 中更新，不把旧提交结果冒作新结果。
 
 ## 未完成的边界
 

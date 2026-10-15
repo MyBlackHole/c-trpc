@@ -181,7 +181,7 @@ static void test_runtime_shard_listener_ownership(void)
 
 	/* 重新打开证明显式关闭完整释放了分片拥有的资源。 */
 	assert(tr_runtime_shard_listen_ipv4(
-		       shard, "127.0.0.1", 0U, 8, NULL) == TR_OK);
+		       shard, "127.0.0.1", 0U, 8, &bound) == TR_OK);
 	listener = tr_runtime_shard_listener_fd(shard);
 	assert(listener >= 0);
 
