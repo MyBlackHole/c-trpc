@@ -79,6 +79,7 @@ target("trcore")
     add_files(
         "src/status.c",
         "src/crc32c.c",
+        "src/message/message.c",
         "src/execution/buffer.c",
         "src/transport/protocol/wire.c",
         "src/transport/protocol/frame.c",
@@ -351,6 +352,31 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()
 end
+
+-- 使用生产编译对象，但不链接 trcore，避免其他模块补齐隐藏依赖。
+-- 不把相同生产源再次注册到测试目标，保持编译数据库中生产条目唯一。
+target("test_message")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=realloc", {force = true})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/message/message.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "test_message requires exactly one production message object")
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
 
 -- Opt-in microbenchmark; never a CI timing gate or a default build target.
 target("bench_crc32c")
