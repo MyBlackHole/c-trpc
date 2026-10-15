@@ -117,6 +117,7 @@ target("trcore")
         "src/rpc/rpc_wire.c",
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
+        "src/rpc/rpc_record_router.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -580,5 +581,16 @@ target("test_rpc_record_stream")
     add_files("tests/test_rpc_record_stream.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=tr_stream_sendv", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 方法注册、完整 OPEN 准入与多流派发，使用真实 TCP/Channel/绑定。
+target("test_rpc_record_router")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_router.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=tr_reactor_recovery_acquire", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
