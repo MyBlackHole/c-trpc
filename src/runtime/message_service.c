@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "message_service.h"
 #include "../execution/reactor_internal.h"
+#include "../execution/task_executor_recovery.h"
 #include "../memory_budget.h"
 #include "tr/status.h"
 
@@ -38,6 +39,8 @@ struct tr_message_service {
 	bool event_attached;
 	bool timer_attached;
 	bool executor_retiring;
+	bool recovery_owned;
+	tr_message_service_abandon_fn abandon;
 	struct tr_message_service_job *free_jobs;
 	struct tr_message_service_job jobs[];
 };
@@ -46,8 +49,8 @@ static int tr_service_owner(struct tr_message_service *service)
 {
 	if (!service)
 		return TR_ERR_INVALID;
-	if (!pthread_equal(pthread_self(), service->owner) ||
-	    !tr_reactor_in_owner_context())
+	if (!tr_reactor_in_owner_context() || service->recovery_owned ||
+	    !pthread_equal(pthread_self(), service->owner))
 		return TR_ERR_STATE;
 	return TR_OK;
 }
@@ -139,12 +142,15 @@ static void tr_service_done(void *arg, struct tr_task_handle handle,
 		outcome = TR_MESSAGE_TRANSFORM_INTERNAL;
 	}
 	/* 即使后端最终检查之后才取消，也不能越过执行器的终局提交点。 */
-	if (result.cancelled)
+	if (result.cancelled || service->recovery_owned)
 		outcome = TR_MESSAGE_TRANSFORM_CANCELLED;
 	if (outcome != TR_MESSAGE_TRANSFORM_OK &&
 	    tr_message_view(&output, &view) == TR_OK)
 		(void)tr_message_release(&output);
-	job->done(job->arg, handle, outcome, &output);
+	if (service->recovery_owned)
+		service->abandon(job->arg, handle);
+	else
+		job->done(job->arg, handle, outcome, &output);
 	if (tr_message_view(&output, &view) == TR_OK)
 		(void)tr_message_release(&output);
 	job->done = NULL;
@@ -165,7 +171,8 @@ static int tr_service_pump(struct tr_message_service *service)
 	size_t delivered;
 	int ret;
 
-	if (service->depth || service->executor_retiring)
+	if (service->depth || service->executor_retiring ||
+	    service->recovery_owned)
 		return TR_ERR_STATE;
 	++service->depth;
 	/* 必须先清通知再读完成队列。先交付再清通知可能吞掉其间的新完成。
@@ -423,14 +430,35 @@ int tr_message_service_get_stats_on_owner(struct tr_message_service *service,
 	return TR_OK;
 }
 
-int tr_message_service_close_on_owner(struct tr_message_service **pointer)
+static int tr_service_finalize(struct tr_message_service **pointer)
 {
-	struct tr_message_service *service;
-	struct tr_task_executor_stats stats;
+	struct tr_message_service *service = *pointer;
 	struct tr_memory_budget *budget;
 	size_t bytes;
 	int ret;
 	int close_ret;
+
+	ret = tr_task_executor_destroy(&service->executor);
+	if (service->executor)
+		return ret;
+	/* 两个事件源已跨过解绑屏障，工作线程已 join，不再有 fd/arg 使用者。
+	 * Linux close 的错误不能通过重试相同数字解决，避免误关被复用的 fd。
+	 */
+	close_ret = close(service->fd);
+	budget = service->budget;
+	bytes = service->bytes;
+	*pointer = NULL;
+	free(service);
+	if (tr_memory_budget_release(budget, bytes) != TR_OK)
+		return TR_ERR_STATE;
+	return ret != TR_OK ? ret : (close_ret == 0 ? TR_OK : TR_ERR_SYS);
+}
+
+int tr_message_service_close_on_owner(struct tr_message_service **pointer)
+{
+	struct tr_message_service *service;
+	struct tr_task_executor_stats stats;
+	int ret;
 
 	if (!pointer)
 		return TR_ERR_INVALID;
@@ -475,18 +503,99 @@ int tr_message_service_close_on_owner(struct tr_message_service **pointer)
 			return ret;
 		service->executor_retiring = true;
 	}
-	ret = tr_task_executor_destroy(&service->executor);
-	if (service->executor)
-		return ret;
-	/* 两个事件源已跨过解绑屏障，工作线程已 join，不再有 fd/arg 使用者。
-	 * Linux close 的错误不能通过重试相同数字解决，避免误关被复用的 fd。
+	return tr_service_finalize(pointer);
+}
+
+static int tr_service_claim_stopped(void *arg)
+{
+	struct tr_message_service *service = arg;
+	int ret;
+
+	/* call_or_stopped 在运行态会把此函数送回原 owner；该路径必须无副作用。
+	 * 仅 !started 的 ctl_lock 串行区才许可首次接管。停止中/未 join 时
+	 * call_or_stopped 返回 CLOSED，不能用接受标志替代 join 静默屏障。
 	 */
-	close_ret = close(service->fd);
-	budget = service->budget;
-	bytes = service->bytes;
-	*pointer = NULL;
-	free(service);
-	if (tr_memory_budget_release(budget, bytes) != TR_OK)
+	if (tr_reactor_in_owner_context() || service->depth)
 		return TR_ERR_STATE;
-	return ret != TR_OK ? ret : (close_ret == 0 ? TR_OK : TR_ERR_SYS);
+	if (service->recovery_owned)
+		return pthread_equal(pthread_self(), service->owner)
+		               ? TR_OK
+		               : TR_ERR_STATE;
+	if (!service->executor_retiring) {
+		ret = tr_task_executor_stop(service->executor, TR_TASK_CANCEL);
+		if (ret != TR_OK)
+			return ret;
+	}
+	ret = tr_task_executor_takeover_quiesced(service->executor);
+	if (ret != TR_OK)
+		return ret;
+	service->owner = pthread_self();
+	service->recovery_owned = true;
+	service->accepting = false;
+	return TR_OK;
+}
+
+int tr_message_service_reap_stopped(struct tr_message_service **pointer,
+                                    tr_message_service_abandon_fn abandon)
+{
+	struct tr_message_service *service;
+	struct tr_task_executor_stats stats;
+	size_t delivered;
+	int ret;
+
+	if (!pointer || !*pointer || !abandon)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+	service = *pointer;
+	/* 除不可变的 reactor 指针外，旧 owner 是否静默确认前不读取服务状态。
+	 * 该短回调只接管控制权，不重入 Reactor 生命周期或调用用户清理函数。
+	 */
+	ret = tr_reactor_call_or_stopped(service->reactor,
+	                                 tr_service_claim_stopped, service);
+	if (ret != TR_OK)
+		return ret;
+	if (service->executor_retiring)
+		return tr_service_finalize(pointer);
+
+	/* 父生命周期由调用方独占到最终成功。不能在 ctl_lock 回调中嵌套
+	 * 注销 API：它们在已停止路径也会取 ctl_lock。失败保留发布及 fd。
+	 */
+	if (service->event_attached) {
+		ret = tr_reactor_aux_event_unregister(service->reactor,
+		                                      service->fd);
+		if (ret != TR_OK)
+			return ret;
+		service->event_attached = false;
+	}
+	if (service->timer_attached) {
+		ret = tr_reactor_timer_unregister(service->timer);
+		if (ret != TR_OK)
+			return ret;
+		service->timer_attached = false;
+	}
+
+	/* 没有旧 owner 回调，也不在父锁内。只借用本次调用的清理函数；
+	 * 某个工作不合作时，仍可回收其他已经完成的工作，不等待全部 join。
+	 */
+	service->abandon = abandon;
+	++service->depth;
+	ret = tr_task_executor_dispatch(
+	        service->executor, service->config.dispatch_limit, &delivered);
+	--service->depth;
+	service->abandon = NULL;
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_task_executor_join(service->executor);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_task_executor_get_stats(service->executor, &stats);
+	if (ret != TR_OK)
+		return ret;
+	if (stats.outstanding)
+		return TR_AGAIN;
+	if (service->held_jobs)
+		return TR_ERR_STATE;
+	service->executor_retiring = true;
+	return tr_service_finalize(pointer);
 }

@@ -1,5 +1,6 @@
 #include "task_executor.h"
 #include "task_executor_internal.h"
+#include "task_executor_recovery.h"
 #include "../memory_budget.h"
 #include "tr/status.h"
 
@@ -60,6 +61,7 @@ struct tr_task_executor {
 	/* 开始最终销毁后只准所有者重试 destroy，不再接受其他 API。 */
 	bool retiring;
 	bool condition_destroyed;
+	bool recovery_owned;
 	tr_task_notify_fn notify;
 	void *notify_arg;
 };
@@ -211,6 +213,33 @@ fail:
 	free(executor->slots);
 	free(executor);
 	(void)tr_memory_budget_release(budget, bytes);
+	return ret;
+}
+
+int tr_task_executor_takeover_quiesced(struct tr_task_executor *executor)
+{
+	int ret = TR_OK;
+
+	if (!executor)
+		return TR_ERR_INVALID;
+	(void)pthread_mutex_lock(&executor->lock);
+	if (executor->dispatching ||
+	    (!executor->retiring && executor->state != TR_EXECUTOR_STOPPING &&
+	     executor->state != TR_EXECUTOR_JOINED) ||
+	    (executor->recovery_owned &&
+	     !pthread_equal(pthread_self(), executor->owner))) {
+		ret = TR_ERR_STATE;
+	} else {
+		/* 旧 owner 已由组合层证明静默，不读取可能失效的 pthread_t。
+		 * 通知也使用此锁，清除后可安全撤销其 fd/参数的外部发布。
+		 * retiring 时条件变量可能已销毁，不能广播或再次 stop。
+		 */
+		executor->owner = pthread_self();
+		executor->recovery_owned = true;
+		executor->notify = NULL;
+		executor->notify_arg = NULL;
+	}
+	(void)pthread_mutex_unlock(&executor->lock);
 	return ret;
 }
 

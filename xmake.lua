@@ -496,3 +496,42 @@ target("test_message_service")
                 "-Wl,--wrap=ZSTD_decompressStream", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
+
+-- 接管原语独立链接；真实父循环退出另由集成目标验证。
+target("test_task_executor_recovery")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_task_executor_recovery.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=pthread_join", "-Wl,--wrap=pthread_mutex_destroy", {force = true})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/execution/task_executor.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "回收测试需要唯一的生产执行器对象")
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_message_service_recovery")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_service_recovery.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=eventfd", "-Wl,--wrap=write", "-Wl,--wrap=close",
+                "-Wl,--wrap=epoll_wait", "-Wl,--wrap=pthread_join",
+                "-Wl,--wrap=pthread_mutex_destroy", "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=tr_reactor_aux_event_register",
+                "-Wl,--wrap=tr_reactor_aux_event_unregister",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=ZSTD_compressStream2", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
