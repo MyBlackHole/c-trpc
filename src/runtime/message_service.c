@@ -47,7 +47,7 @@ static int tr_service_owner(struct tr_message_service *service)
 	if (!service)
 		return TR_ERR_INVALID;
 	if (!pthread_equal(pthread_self(), service->owner) ||
-	    !tr_reactor_in_owner_context())
+	    !tr_reactor_is_current_owner(service->reactor))
 		return TR_ERR_STATE;
 	return TR_OK;
 }
@@ -225,7 +225,7 @@ int tr_message_service_create_on_owner(
 	    !config->dispatch_limit || config->watchdog_ns < 1000000 ||
 	    config->watchdog_ns > 1000000000 || !config->tasks.capacity)
 		return TR_ERR_INVALID;
-	if (*out || !tr_reactor_in_owner_context())
+	if (*out || !tr_reactor_is_current_owner(reactor))
 		return TR_ERR_STATE;
 	if (config->tasks.capacity >
 	    (SIZE_MAX - sizeof(*service)) / sizeof(service->jobs[0]))

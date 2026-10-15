@@ -40,6 +40,11 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
  */
 int tr_reactor_in_owner_context(void);
 
+/* 检查指定 Reactor 的当前所有者，其他 Reactor 的 owner 不构成授权。
+ * 仅读取当前线程 TLS，不延长 Reactor 的生命周期。
+ */
+int tr_reactor_is_current_owner(const struct tr_reactor *reactor);
+
 /* 可选的原始连接前导门禁。反应器在允许正常 TRP1 解析器输入前，
  * 精确读取 byte_count 字节，因此前导之后的字节保留在套接字接收队列，
  * 绝不超读。
