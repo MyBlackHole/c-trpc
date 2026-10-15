@@ -436,15 +436,17 @@ static void init_sample(struct sample *s, struct fixture *f,
 }
 
 static void done(void *arg, struct tr_task_handle handle,
-                 enum tr_message_transform_outcome outcome,
+                 struct tr_message_service_result result,
                  struct tr_message *message)
 {
+	enum tr_message_transform_outcome outcome = result.outcome;
 	struct sample *s = arg;
 	struct fixture *f = s->fixture;
 	struct tr_message_service *same = f->service;
 	struct tr_message_limits limits = {SIZE_MAX, SIZE_MAX};
 	struct tr_message_view view;
 
+	CHECK(result.delivery == TR_MESSAGE_SERVICE_ON_OWNER);
 	CHECK(pthread_equal(pthread_self(), f->owner));
 	CHECK(handle.instance == s->handle.instance &&
 	      handle.generation == s->handle.generation &&

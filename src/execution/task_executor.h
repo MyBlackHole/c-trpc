@@ -131,4 +131,12 @@ int tr_task_executor_get_stats(struct tr_task_executor *executor,
  */
 int tr_task_executor_destroy(struct tr_task_executor **executor);
 
+/* 停机回收专用，不是正常调度迁移。外层须先完成旧所有者的 join 或等价
+ * 永久静默证明，并排除所有生命周期/dispatch 并发；仅 stop 后可调用。
+ * 新线程仅取得 join/完成清理/destroy 责任，不能重新开放提交。由该线程
+ * 执行的 done 必须有事先约定的终止清理语义，不能假装原 owner 回调。
+ * 失败不改变 owner；工作线程不允许接管自身执行器。 */
+int tr_task_executor_adopt_cleanup(struct tr_task_executor *executor);
+int tr_task_in_worker_context(void);
+
 #endif

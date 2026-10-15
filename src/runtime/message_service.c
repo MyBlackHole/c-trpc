@@ -38,6 +38,8 @@ struct tr_message_service {
 	bool event_attached;
 	bool timer_attached;
 	bool executor_retiring;
+	bool recovering;
+	struct tr_reactor_recovery_guard recovery_guard;
 	struct tr_message_service_job *free_jobs;
 	struct tr_message_service_job jobs[];
 };
@@ -46,8 +48,9 @@ static int tr_service_owner(struct tr_message_service *service)
 {
 	if (!service)
 		return TR_ERR_INVALID;
-	if (!pthread_equal(pthread_self(), service->owner) ||
-	    !tr_reactor_in_owner_context())
+	if (service->recovering ||
+	    !tr_reactor_in_owner_context_for(service->reactor) ||
+	    !pthread_equal(pthread_self(), service->owner))
 		return TR_ERR_STATE;
 	return TR_OK;
 }
@@ -139,12 +142,17 @@ static void tr_service_done(void *arg, struct tr_task_handle handle,
 		outcome = TR_MESSAGE_TRANSFORM_INTERNAL;
 	}
 	/* 即使后端最终检查之后才取消，也不能越过执行器的终局提交点。 */
-	if (result.cancelled)
+	if (result.cancelled || service->recovering)
 		outcome = TR_MESSAGE_TRANSFORM_CANCELLED;
 	if (outcome != TR_MESSAGE_TRANSFORM_OK &&
 	    tr_message_view(&output, &view) == TR_OK)
 		(void)tr_message_release(&output);
-	job->done(job->arg, handle, outcome, &output);
+	job->done(job->arg, handle,
+	          (struct tr_message_service_result){
+	                  outcome, service->recovering
+	                                   ? TR_MESSAGE_SERVICE_OWNER_STOPPED
+	                                   : TR_MESSAGE_SERVICE_ON_OWNER},
+	          &output);
 	if (tr_message_view(&output, &view) == TR_OK)
 		(void)tr_message_release(&output);
 	job->done = NULL;
@@ -225,7 +233,7 @@ int tr_message_service_create_on_owner(
 	    !config->dispatch_limit || config->watchdog_ns < 1000000 ||
 	    config->watchdog_ns > 1000000000 || !config->tasks.capacity)
 		return TR_ERR_INVALID;
-	if (*out || !tr_reactor_in_owner_context())
+	if (*out || !tr_reactor_in_owner_context_for(reactor))
 		return TR_ERR_STATE;
 	if (config->tasks.capacity >
 	    (SIZE_MAX - sizeof(*service)) / sizeof(service->jobs[0]))
@@ -423,7 +431,7 @@ int tr_message_service_get_stats_on_owner(struct tr_message_service *service,
 	return TR_OK;
 }
 
-int tr_message_service_close_on_owner(struct tr_message_service **pointer)
+static int tr_service_close(struct tr_message_service **pointer)
 {
 	struct tr_message_service *service;
 	struct tr_task_executor_stats stats;
@@ -435,9 +443,8 @@ int tr_message_service_close_on_owner(struct tr_message_service **pointer)
 	if (!pointer)
 		return TR_ERR_INVALID;
 	service = *pointer;
-	ret = tr_service_owner(service);
-	if (ret != TR_OK)
-		return ret;
+	if (!service)
+		return TR_ERR_INVALID;
 	if (service->depth)
 		return TR_ERR_STATE;
 	if (!service->executor_retiring) {
@@ -484,9 +491,54 @@ int tr_message_service_close_on_owner(struct tr_message_service **pointer)
 	close_ret = close(service->fd);
 	budget = service->budget;
 	bytes = service->bytes;
+	if (service->recovery_guard.reactor) {
+		int release_ret =
+		        tr_reactor_recovery_release(&service->recovery_guard);
+		/* 该租约由本服务独占，正确的生命周期调用不可能失配。 */
+		if (release_ret != TR_OK)
+			return release_ret;
+	}
 	*pointer = NULL;
 	free(service);
 	if (tr_memory_budget_release(budget, bytes) != TR_OK)
 		return TR_ERR_STATE;
 	return ret != TR_OK ? ret : (close_ret == 0 ? TR_OK : TR_ERR_SYS);
+}
+
+int tr_message_service_close_on_owner(struct tr_message_service **pointer)
+{
+	int ret;
+
+	if (!pointer)
+		return TR_ERR_INVALID;
+	ret = tr_service_owner(*pointer);
+	return ret == TR_OK ? tr_service_close(pointer) : ret;
+}
+
+int tr_message_service_reap_stopped(struct tr_message_service **pointer)
+{
+	struct tr_message_service *service;
+	int ret;
+
+	if (!pointer || !*pointer)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context() || tr_task_in_worker_context())
+		return TR_ERR_STATE;
+	service = *pointer;
+	if (service->depth)
+		return TR_ERR_STATE;
+	ret = tr_reactor_recovery_acquire(service->reactor,
+	                                  &service->recovery_guard);
+	if (ret != TR_OK)
+		return ret;
+	service->recovering = true;
+	service->accepting = false;
+	if (!service->executor_retiring)
+		(void)tr_task_executor_stop(service->executor, TR_TASK_CANCEL);
+	/* 租约先证明旧 owner 已 join，才能将完成清理移交当前线程。
+	 * 不持 Reactor 的 ctl_lock 调用用户完成，避免回调重入死锁。 */
+	ret = tr_task_executor_adopt_cleanup(service->executor);
+	if (ret != TR_OK)
+		return ret;
+	return tr_service_close(pointer);
 }

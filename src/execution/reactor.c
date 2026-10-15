@@ -223,6 +223,8 @@ struct tr_reactor {
 
 	pthread_mutex_t ctl_lock;
 	int started;
+	/* 停止后的子资源回收持有租约，清理完成前禁止重启或销毁。 */
+	struct tr_reactor_recovery_guard *recovery_guard;
 	_Atomic int accepting;
 	/* 由 ctl_lock 保护的终止边界。一旦 STOP 被接受或所有者进入致命退出，
 	 * stop() 就只能等待并回收原所有者。epoll_wait 失败后再提交
@@ -3138,7 +3140,7 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
-	if (reactor->started) {
+	if (reactor->started || reactor->recovery_guard) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_STATE;
 	}
@@ -4228,6 +4230,13 @@ int tr_reactor_destroy(struct tr_reactor *reactor)
 
 	if (!reactor)
 		return TR_OK;
+	/* 生命周期调用仍须由外层串行化；租约使分阶段子资源回收不可被
+	 * 合法的 start/destroy 越过。此处不等待持有者，避免回调自等待。 */
+	pthread_mutex_lock(&reactor->ctl_lock);
+	ret = reactor->recovery_guard ? TR_ERR_STATE : TR_OK;
+	pthread_mutex_unlock(&reactor->ctl_lock);
+	if (ret != TR_OK)
+		return ret;
 
 	if (reactor->started) {
 		/* stop()/pthread_join 是显式可重试生命周期屏障。失败时反应器
@@ -4274,5 +4283,54 @@ int tr_reactor_destroy(struct tr_reactor *reactor)
 		(void)tr_memory_budget_release(
 			reactor->config.memory_budget, reactor->memory_bytes);
 	free(reactor);
+	return TR_OK;
+}
+
+/* 与 call_or_stopped 不同，租约跨多次非阻塞回收调用持有；不在用户
+ * 回调期间持 ctl_lock，也不伪造 tr_current_reactor_owner。 */
+int tr_reactor_in_owner_context_for(const struct tr_reactor *reactor)
+{
+	return tr_reactor_is_owner_thread(reactor);
+}
+
+int tr_reactor_recovery_acquire(struct tr_reactor *reactor,
+                                struct tr_reactor_recovery_guard *guard)
+{
+	int ret = TR_OK;
+
+	if (!reactor || !guard)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context())
+		return TR_ERR_STATE;
+	pthread_mutex_lock(&reactor->ctl_lock);
+	/* started 只能由成功的 stop/join 清除。致命退出或线程自认为结束，
+	 * 但 join 尚未成功时，同样不允许移交。 */
+	if (reactor->started ||
+	    (reactor->recovery_guard && reactor->recovery_guard != guard) ||
+	    (guard->reactor && guard->reactor != reactor)) {
+		ret = TR_ERR_STATE;
+	} else {
+		reactor->recovery_guard = guard;
+		guard->reactor = reactor;
+	}
+	pthread_mutex_unlock(&reactor->ctl_lock);
+	return ret;
+}
+
+int tr_reactor_recovery_release(struct tr_reactor_recovery_guard *guard)
+{
+	struct tr_reactor *reactor;
+
+	if (!guard || !guard->reactor)
+		return TR_ERR_INVALID;
+	reactor = guard->reactor;
+	pthread_mutex_lock(&reactor->ctl_lock);
+	if (reactor->recovery_guard != guard || reactor->started) {
+		pthread_mutex_unlock(&reactor->ctl_lock);
+		return TR_ERR_STATE;
+	}
+	reactor->recovery_guard = NULL;
+	guard->reactor = NULL;
+	pthread_mutex_unlock(&reactor->ctl_lock);
 	return TR_OK;
 }

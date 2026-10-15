@@ -172,4 +172,18 @@ int tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
 			 uint64_t deadline_ns);
 int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle);
 
+/* 精确检查所属反应器，不能仅用“当前是某个 owner”代替。 */
+int tr_reactor_in_owner_context_for(const struct tr_reactor *reactor);
+
+/* 库内停止回收租约，零初始化、不可复制。成功取得要求 stop/join 已成功，
+ * 并阻止 start/destroy，直到 release。允许相同租约重试；不延长 Reactor
+ * 存储寿命，不允许并发外层生命周期/释放。回收线程不被伪装为协议 owner。
+ * 子源必须成功解绑、通知者/回调已静默后才能释放租约。 */
+struct tr_reactor_recovery_guard {
+	struct tr_reactor *reactor;
+};
+int tr_reactor_recovery_acquire(struct tr_reactor *reactor,
+                                struct tr_reactor_recovery_guard *guard);
+int tr_reactor_recovery_release(struct tr_reactor_recovery_guard *guard);
+
 #endif
