@@ -13,14 +13,15 @@ jobs:
         with:
           ref: 13883aeed58d3d9f76b5ac4969e64b5bf34e7fda
           persist-credentials: false
-      - name: 仅归档固定提交的受版本控制源码
+      - name: 归档固定源码和项目规定的格式工具
         run: |
           mkdir -p "$RUNNER_TEMP/source-snapshot"
           git archive --format=tar HEAD | gzip -n > "$RUNNER_TEMP/source-snapshot/c-trpc.tar.gz"
           git rev-parse HEAD > "$RUNNER_TEMP/source-snapshot/commit.txt"
           git ls-tree -r HEAD > "$RUNNER_TEMP/source-snapshot/tree.txt"
+          python3 -m pip download --only-binary=:all: --no-deps 'clang-format==18.1.8' -d "$RUNNER_TEMP/source-snapshot"
           cd "$RUNNER_TEMP/source-snapshot"
-          sha256sum c-trpc.tar.gz > SHA256SUMS
+          sha256sum c-trpc.tar.gz *.whl > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: message-recovery-source-13883aee
