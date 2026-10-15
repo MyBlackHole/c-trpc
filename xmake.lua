@@ -116,6 +116,7 @@ target("trcore")
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_wire.c",
         "src/rpc/rpc_record.c",
+        "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -569,5 +570,15 @@ target("test_rpc_record")
             assert(count == 1, "调用记录生产对象必须唯一: " .. source)
         end
     end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- V2 调用记录在真实 TCP/Channel/Stream 上的绑定与背压、增量接收。
+target("test_rpc_record_stream")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_stream.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=tr_stream_sendv", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
