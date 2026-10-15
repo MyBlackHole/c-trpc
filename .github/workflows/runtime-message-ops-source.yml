@@ -1,0 +1,30 @@
+name: Runtime 消息操作源码快照
+on:
+  push:
+    branches: [diag/runtime-message-ops-source-20261016]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 341fdad9c95309795e596f3eaa0569f464d914aa
+          persist-credentials: false
+      - name: 归档固定源码及对象清单
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          git rev-parse HEAD > snapshot/commit.txt
+          git archive --format=tar.gz HEAD > snapshot/source.tar.gz
+          git ls-tree -r HEAD > snapshot/tree.txt
+          git cat-file -p HEAD > snapshot/commit-object.txt
+          python3 -m pip download --no-deps --dest snapshot 'clang-format==18.1.8'
+          cd snapshot
+          sha256sum source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-message-ops-source-341fdad9
+          path: snapshot/
+          retention-days: 3
