@@ -1,6 +1,7 @@
 #ifndef TR_MESSAGE_TRANSFORM_H
 #define TR_MESSAGE_TRANSFORM_H
 
+#include <stdbool.h>
 #include "message.h"
 
 struct tr_memory_budget;
@@ -60,6 +61,17 @@ int tr_message_transform_prepare(
  * 取消为协作式，在有界字节块之间检查；不承诺实时抢占单次算法/分配调用。
  */
 int tr_message_transform_run(struct tr_message_transform *operation);
+
+/* 组合方提供的单调取消查询，仅在本次 run_checked 调用栈内借用。
+ * 查询必须短小、不可失败、不能重入操作或销毁参数；不在操作中保留指针。
+ * 每个后端检查点都能观察执行器取消，观察到 true 后锁存为本操作取消。
+ * 仍不保证实时抢占；上层终局提交晚于算法结束时还必须再次裁决取消。
+ * check == NULL 等价于普通 run，arg 不被访问。
+ */
+typedef bool (*tr_message_cancel_check_fn)(void *arg);
+int tr_message_transform_run_checked(struct tr_message_transform *operation,
+                                     tr_message_cancel_check_fn check,
+                                     void *arg);
 
 /* 可与 run 并发。TR_OK 表示取消在终局提交之前获胜（重复请求也成功），
  * 不释放任何资源，不构成静默屏障；终局已提交时返回 TR_ERR_STATE。

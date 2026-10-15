@@ -60,6 +60,8 @@ struct tr_task_executor {
 	/* 开始最终销毁后只准所有者重试 destroy，不再接受其他 API。 */
 	bool retiring;
 	bool condition_destroyed;
+	tr_task_notify_fn notify;
+	void *notify_arg;
 };
 
 static _Atomic uint64_t tr_task_instances;
@@ -127,6 +129,9 @@ static void *tr_task_worker(void *arg)
 		++executor->stats.completed;
 		tr_task_enqueue(executor, &executor->complete_head,
 		                &executor->complete_tail, index);
+		/* 先发布完成，再唤醒；通知不接管槽位，失败仍由完成队列持有。 */
+		if (executor->notify)
+			executor->notify(executor->notify_arg);
 	}
 	--executor->stats.workers_alive;
 	(void)pthread_mutex_unlock(&executor->lock);
@@ -206,6 +211,29 @@ fail:
 	free(executor->slots);
 	free(executor);
 	(void)tr_memory_budget_release(budget, bytes);
+	return ret;
+}
+
+int tr_task_executor_set_notify(struct tr_task_executor *executor,
+                                tr_task_notify_fn notify, void *arg)
+{
+	int ret = TR_OK;
+
+	if (!executor || (!notify && arg))
+		return TR_ERR_INVALID;
+	if (!pthread_equal(pthread_self(), executor->owner))
+		return TR_ERR_STATE;
+	(void)pthread_mutex_lock(&executor->lock);
+	if (executor->dispatching ||
+	    (executor->state != TR_EXECUTOR_NEW &&
+	     !(executor->state == TR_EXECUTOR_JOINED && !notify &&
+	       executor->stats.outstanding == 0))) {
+		ret = TR_ERR_STATE;
+	} else {
+		executor->notify = notify;
+		executor->notify_arg = arg;
+	}
+	(void)pthread_mutex_unlock(&executor->lock);
 	return ret;
 }
 

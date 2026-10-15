@@ -99,6 +99,7 @@ target("trcore")
         "src/io/connector.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
+        "src/runtime/message_service.c",
         "src/group/pipeline.c",
         "src/group/pipeline_route.c",
         "src/group/pipeline_registry.c",
@@ -335,8 +336,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=tr_reactor_create",
                         "-Wl,--wrap=tr_reactor_destroy",
                         "-Wl,--wrap=tr_connector_create",
-                        "-Wl,--wrap=tr_buffer_pool_destroy",
-                        {force = true})
+                        "-Wl,--wrap=tr_buffer_pool_destroy", {force = true})
         elseif name == "test_server_destroy_retry" then
             -- 注入 RPC/Channel terminal destroy 失败，验证 Server ownership 可重试。
             add_ldflags("-Wl,--wrap=tr_rpc_endpoint_destroy",
@@ -476,3 +476,23 @@ for _, name in ipairs({"test_task_executor", "test_task_message"}) do
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()
 end
+
+-- 真实 Reactor 集成，不把事件循环替身作为生产接入证据。
+target("test_message_service")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_service.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=pthread_create",
+                "-Wl,--wrap=eventfd", "-Wl,--wrap=read", "-Wl,--wrap=write",
+                "-Wl,--wrap=close", "-Wl,--wrap=tr_task_executor_submit",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=tr_reactor_aux_event_register",
+                "-Wl,--wrap=tr_reactor_aux_event_unregister",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_arm",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=ZSTD_compressStream2",
+                "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
