@@ -486,6 +486,9 @@ static void test_inline_data_is_not_silent_success(void)
 	request(&f, s, 0);
 	tick(&f, 12);
 	CHECK(f.receive_calls == 1 && f.done_calls == 1 && f.reports == 1);
+	fprintf(stderr, "inline-data: status=%d accepted=%d sends=%u reports=%u\n",
+	        (int)f.last.status, (int)f.last.final_accepted, f.sends,
+	        f.reports);
 	CHECK(f.last.status == TR_RPC_STATUS_UNAVAILABLE &&
 	      f.last.final_accepted);
 	close_all(&f);
