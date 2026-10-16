@@ -267,8 +267,10 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 			 * 该字节并继续报告原请求成功。 */
 			if (d->f->inline_data) {
 				uint8_t nested = 0;
-				struct tr_buffer b = {.data = &nested, .len = 1,
-				                      .capacity = 1};
+				struct tr_buffer b = {0};
+				b.data = &nested;
+				b.len = 1;
+				b.capacity = 1;
 				d->f->inline_data = false;
 				CHECK(d->f->data(s, 2, &b, d->f->handler_arg) ==
 				      TR_STREAM_DATA_RELEASE);
