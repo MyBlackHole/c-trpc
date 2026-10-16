@@ -63,6 +63,9 @@ struct fixture {
 	bool guard, hold_work, fail_detach, fail_unreg, fail_register, fail_arm,
 	        fail_install;
 	bool inline_closed, inline_data;
+	struct tr_stream_handle nested_streams[CAP];
+	unsigned nested_count;
+	struct tr_rpc_endpoint_result results[CAP];
 	unsigned send_rejects, close_rejects, sends, closes, receive_calls,
 	        done_calls;
 	unsigned executor_dispatches, dispatch_pumps, reports, retire_calls;
@@ -275,6 +278,22 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 				CHECK(d->f->data(s, 2, &b, d->f->handler_arg) ==
 				      TR_STREAM_DATA_RELEASE);
 			}
+			unsigned nested_count = d->f->nested_count;
+			d->f->nested_count = 0;
+			for (unsigned j = 0; j < nested_count; ++j) {
+				uint8_t nested = 0;
+				struct tr_buffer b = {0};
+				b.data = &nested;
+				b.len = b.capacity = 1;
+				/* 重复登记同一槽位必须合并，不能耗尽事件容量。
+				 */
+				for (unsigned n = 0; n < 2; ++n)
+					CHECK(d->f->data(
+					              d->f->nested_streams[j],
+					              2, &b,
+					              d->f->handler_arg) ==
+					      TR_STREAM_DATA_RELEASE);
+			}
 			c->status = data[0] ? TR_RPC_STATUS_UNIMPLEMENTED
 			                    : TR_RPC_STATUS_OK;
 			c->wire_final = !data[0];
@@ -379,6 +398,7 @@ static void on_terminal(struct tr_stream_handle stream,
 	CHECK(p == f->ep);
 	++f->reports;
 	f->last = r;
+	f->results[stream.slot] = r;
 }
 static struct tr_rpc_record_endpoint_config configuration(void)
 {
@@ -486,11 +506,31 @@ static void test_inline_data_is_not_silent_success(void)
 	request(&f, s, 0);
 	tick(&f, 12);
 	CHECK(f.receive_calls == 1 && f.done_calls == 1 && f.reports == 1);
-	fprintf(stderr, "inline-data: status=%d accepted=%d sends=%u reports=%u\n",
-	        (int)f.last.status, (int)f.last.final_accepted, f.sends,
-	        f.reports);
 	CHECK(f.last.status == TR_RPC_STATUS_UNAVAILABLE &&
 	      f.last.final_accepted);
+	close_all(&f);
+}
+static void test_deferred_events_exceed_turn_budget(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.hold_work = true;
+	/* 4 条流超过每轮 2 个事件预算，且公平 cursor 已经被多次推进。 */
+	for (unsigned i = 0; i < CAP; ++i) {
+		f.nested_streams[i] = open_stream(&f, i, 1);
+		request(&f, f.nested_streams[i], 0);
+	}
+	unsigned prior_pumps = f.dispatch_pumps;
+	f.nested_count = CAP;
+	f.hold_work = false;
+	request(&f, f.nested_streams[CAP - 1], 0);
+	CHECK(!f.reports && f.dispatch_pumps == prior_pumps);
+	tick(&f, 20);
+	CHECK(f.done_calls == CAP && f.reports == CAP && f.sends == CAP);
+	for (unsigned i = 0; i < CAP; ++i)
+		CHECK(f.results[i].status == TR_RPC_STATUS_UNAVAILABLE &&
+		      f.results[i].final_accepted);
 	close_all(&f);
 }
 static void test_deadline(void)
@@ -688,6 +728,7 @@ int main(void)
 {
 	test_order_and_backpressure();
 	test_inline_data_is_not_silent_success();
+	test_deferred_events_exceed_turn_budget();
 	test_deadline();
 	test_tx_outlives_host();
 	test_success_and_inline_event();

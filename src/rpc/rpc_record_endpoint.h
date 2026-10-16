@@ -46,6 +46,8 @@ int tr_rpc_record_endpoint_create_on_owner(
 int tr_rpc_record_endpoint_start_on_owner(struct tr_rpc_record_endpoint *ep);
 
 /* 同时由数据、可写及定时器驱动；每次工作量受显式数量配置限制。
+ * 重入错误以预分配槽位形成有界待处理队列，先于业务完成/发送处理；
+ * 事件预算用尽时保留队列至下一处理轮次，不能让成功终局越过既知错误。
  * 本地拒绝自动尝试错误 FINAL，接受后再关流。发送失败保留同一帧，不能
  * 因为重试再次执行业务。到期或不可用时可只关流，因此不能承诺错误必达。
  */

@@ -630,3 +630,18 @@ target("test_rpc_record_endpoint_contract")
     end)
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
+
+
+-- V2 宿主真实 TCP：不由测试额外定时驱动派发器，验证自动错误和关闭。
+target("test_rpc_record_endpoint_tcp")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_endpoint_tcp.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=tr_stream_close",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=epoll_wait", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
