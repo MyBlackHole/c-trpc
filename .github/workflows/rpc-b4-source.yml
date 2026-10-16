@@ -1,0 +1,29 @@
+name: RPC B4 固定源码快照
+on:
+  push:
+    branches: [diag/rpc-b4-source-20261016]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 52c55de06c3abb29800aca41f4b10801949eea19
+          persist-credentials: false
+      - name: 归档精确源码和对象清单
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          git rev-parse HEAD > snapshot/commit.txt
+          git cat-file -p HEAD > snapshot/commit-object.txt
+          git ls-tree -r HEAD > snapshot/tree.txt
+          git archive --format=tar.gz HEAD > snapshot/source.tar.gz
+          cd snapshot
+          sha256sum source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpc-b4-source-52c55de0
+          path: snapshot/
+          retention-days: 3
