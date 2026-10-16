@@ -119,6 +119,7 @@ target("trcore")
         "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc_record_router.c",
         "src/rpc/rpc_record_dispatch.c",
+        "src/rpc/rpc_record_endpoint.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -604,5 +605,21 @@ target("test_rpc_record_dispatch")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
                 "-Wl,--wrap=tr_stream_sendv", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- V2端点自动路由/回复终止及源生命周期，真实TCP，无测试侧pump驱动。
+target("test_rpc_record_endpoint")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_endpoint.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=tr_stream_send",
+                "-Wl,--wrap=tr_stream_close",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_arm",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_rpc_record_dispatch_admit_on_owner", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
