@@ -1,0 +1,29 @@
+name: 端点集成固定源码快照
+on:
+  push:
+    branches: [diag/endpoint-source-e2f47413-20261017]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e2f47413b15c39ac8df3f6948f897694af25e4b0
+          persist-credentials: false
+      - name: 归档固定版本的源码与对象清单
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          git rev-parse HEAD > snapshot/commit.txt
+          git archive --format=tar.gz HEAD > snapshot/source.tar.gz
+          git ls-tree -r HEAD > snapshot/tree.txt
+          git cat-file -p HEAD > snapshot/commit-object.txt
+          cd snapshot
+          sha256sum source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endpoint-source-e2f47413
+          path: snapshot/
+          retention-days: 3
