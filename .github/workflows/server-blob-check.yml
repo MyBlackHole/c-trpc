@@ -1,0 +1,24 @@
+name: 服务端提交字节核对
+on:
+  push:
+    branches: [diag/server-blob-check-20261016]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 归档源文件供逐字节比较
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          cp src/server.c snapshot/server.c
+          git hash-object src/server.c > snapshot/blob.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-blob-check
+          path: snapshot/
+          retention-days: 3
