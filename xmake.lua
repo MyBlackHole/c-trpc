@@ -119,6 +119,7 @@ target("trcore")
         "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc_record_router.c",
         "src/rpc/rpc_record_dispatch.c",
+        "src/rpc/rpc_record_endpoint.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -604,5 +605,43 @@ target("test_rpc_record_dispatch")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
                 "-Wl,--wrap=tr_stream_sendv", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 宿主契约测试使用明确下层替身，只复用实际宿主对象；不能当成真实 TCP 验收。
+target("test_rpc_record_endpoint_contract")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_endpoint_contract.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=clock_gettime", {force = true})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/rpc/rpc_record_endpoint.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "端点宿主生产对象必须唯一")
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+
+-- V2 宿主真实 TCP：不由测试额外定时驱动派发器，验证自动错误和关闭。
+target("test_rpc_record_endpoint_tcp")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_endpoint_tcp.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=tr_stream_close",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=epoll_wait", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
