@@ -1,0 +1,29 @@
+name: Server V2 固定源码快照
+on:
+  push:
+    branches: [diag/server-v2-source-20261016]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: bb368f4fc01a3bf6cca80e7ec8c8986e865ad3d4
+          persist-credentials: false
+      - name: 归档精确源码
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          git rev-parse HEAD > snapshot/commit.txt
+          git archive --format=tar.gz HEAD > snapshot/source.tar.gz
+          git ls-tree -r HEAD > snapshot/tree.txt
+          git cat-file -p HEAD > snapshot/commit-object.txt
+          cd snapshot
+          sha256sum source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-v2-source-bb368f4f
+          path: snapshot/
+          retention-days: 3
