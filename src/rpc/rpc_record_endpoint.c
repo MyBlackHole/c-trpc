@@ -276,6 +276,14 @@ tr_endpoint_data(struct tr_stream_handle stream, uint64_t message_id,
 	struct tr_rpc_record_endpoint *ep = arg;
 	struct tr_endpoint_slot *slot = tr_endpoint_find(ep, stream);
 	(void)message_id;
+	/* DATA 与控制事件一样可能在下层发送栈内联重入。接收字节
+	 * 只借用到本回调结束，不能在重入时直接丢弃并报告成功。
+	 * 当前不建立第二条 RX 队列：将该流标记为协议失败，在下一次
+	 * owner pump 中终止它。不得误影响同 Channel 的其他流。 */
+	if (ep->depth && slot && !slot->terminal) {
+		slot->pending_event = TR_STREAM_EVENT_ERROR;
+		return TR_STREAM_DATA_RELEASE;
+	}
 	if (!ep->depth && slot && slot->call.dispatch && !slot->terminal) {
 		++ep->depth;
 		(void)tr_rpc_record_dispatch_receive_on_owner(

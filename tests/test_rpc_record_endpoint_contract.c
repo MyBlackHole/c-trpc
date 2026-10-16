@@ -62,7 +62,7 @@ struct fixture {
 	void *timer_arg;
 	bool guard, hold_work, fail_detach, fail_unreg, fail_register, fail_arm,
 	        fail_install;
-	bool inline_closed;
+	bool inline_closed, inline_data;
 	unsigned send_rejects, close_rejects, sends, closes, receive_calls,
 	        done_calls;
 	unsigned executor_dispatches, dispatch_pumps, reports, retire_calls;
@@ -263,6 +263,16 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 		    d->calls[i].stream.generation == s.generation) {
 			struct fake_call *c = &d->calls[i];
 			c->pending = true;
+			/* 模拟下层在接收回调栈内再次投递同流 DATA。不能静默丢弃
+			 * 该字节并继续报告原请求成功。 */
+			if (d->f->inline_data) {
+				uint8_t nested = 0;
+				struct tr_buffer b = {
+				        .data = &nested, .len = 1, .capacity = 1};
+				d->f->inline_data = false;
+				CHECK(d->f->data(s, 2, &b, d->f->handler_arg) ==
+				      TR_STREAM_DATA_RELEASE);
+			}
 			c->status = data[0] ? TR_RPC_STATUS_UNIMPLEMENTED
 			                    : TR_RPC_STATUS_OK;
 			c->wire_final = !data[0];
@@ -464,6 +474,21 @@ static void test_order_and_backpressure(void)
 	CHECK(f.retire_calls == 1);
 	close_all(&f);
 }
+static void test_inline_data_is_not_silent_success(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.inline_data = true;
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	request(&f, s, 0);
+	tick(&f, 12);
+	CHECK(f.receive_calls == 1 && f.done_calls == 1 &&
+	      f.reports == 1);
+	CHECK(f.last.status == TR_RPC_STATUS_UNAVAILABLE &&
+	      f.last.final_accepted);
+	close_all(&f);
+}
 static void test_deadline(void)
 {
 	struct fixture f;
@@ -658,6 +683,7 @@ static void test_generations_under_load(void)
 int main(void)
 {
 	test_order_and_backpressure();
+	test_inline_data_is_not_silent_success();
 	test_deadline();
 	test_tx_outlives_host();
 	test_success_and_inline_event();
