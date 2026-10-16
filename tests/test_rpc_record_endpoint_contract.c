@@ -267,8 +267,8 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 			 * 该字节并继续报告原请求成功。 */
 			if (d->f->inline_data) {
 				uint8_t nested = 0;
-				struct tr_buffer b = {
-				        .data = &nested, .len = 1, .capacity = 1};
+				struct tr_buffer b = {.data = &nested, .len = 1,
+				                      .capacity = 1};
 				d->f->inline_data = false;
 				CHECK(d->f->data(s, 2, &b, d->f->handler_arg) ==
 				      TR_STREAM_DATA_RELEASE);
@@ -483,8 +483,7 @@ static void test_inline_data_is_not_silent_success(void)
 	struct tr_stream_handle s = open_stream(&f, 0, 1);
 	request(&f, s, 0);
 	tick(&f, 12);
-	CHECK(f.receive_calls == 1 && f.done_calls == 1 &&
-	      f.reports == 1);
+	CHECK(f.receive_calls == 1 && f.done_calls == 1 && f.reports == 1);
 	CHECK(f.last.status == TR_RPC_STATUS_UNAVAILABLE &&
 	      f.last.final_accepted);
 	close_all(&f);
