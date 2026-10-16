@@ -1,0 +1,29 @@
+name: RPC 后续验证固定源码快照
+on:
+  push:
+    branches: [diag/rpc-next-source-8e2d0cc2-20261017]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 8e2d0cc206e0deb9b60c5f3d0ae5b3e9d1a92880
+          persist-credentials: false
+      - name: 归档已跟踪源码与完整对象清单
+        run: |
+          set -euo pipefail
+          mkdir snapshot
+          git rev-parse HEAD > snapshot/commit.txt
+          git cat-file -p HEAD > snapshot/commit-object.txt
+          git ls-tree -r HEAD > snapshot/tree.txt
+          git archive --format=tar.gz HEAD > snapshot/source.tar.gz
+          cd snapshot
+          sha256sum source.tar.gz > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpc-next-source-8e2d0cc2
+          path: snapshot/
+          retention-days: 3
