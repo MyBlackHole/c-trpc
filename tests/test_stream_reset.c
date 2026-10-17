@@ -649,6 +649,8 @@ static void test_opening_local_close(void)
 	assert(count(&f, &f.resets) == 0);
 	send_frame(&f, 0, TR_FRAME_STREAM_CLOSE, 0, id, 0, NULL, 0);
 	wait_count(&f, &f.closed, 1);
+	/* 普通 CLOSE 的回调返回后才退役槽；PONG 证明该 RX 回调已退出。 */
+	barrier(&f, 0);
 	assert(tr_channel_active_streams(f.channel) == 0);
 	destroy_fixture(&f);
 }
