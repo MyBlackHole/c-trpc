@@ -2,9 +2,10 @@
 
 ## 本阶段范围
 
-本阶段接续 [V2 Client 入口集成](client_record_integration_20261017.md) 的实现
-检查点 `52304cfb580a055482e9eeb9489914873618a584`，让已接入真实 Server 的
-V2 分发器执行 OPEN 携带的剩余期限。显式 V2 入口和 V1 默认入口保持各自契约；
+本阶段接续 [V2 Client 入口集成](client_record_integration_20261017.md)，分支
+基于 [PR #271](https://github.com/MyBlackHole/c-trpc/pull/271) 的
+`4167abcf8ca0f32f77e99f880a3187c7416f0603`，让已接入真实 Server 的 V2
+分发器执行 OPEN 携带的剩余期限。显式 V2 入口和 V1 默认入口保持各自契约；
 本阶段不发布稳定 SDK，也不把整体 RPC 迁移标记为完成。
 
 期限事实保存在现有分发槽和已提交任务内；原路由仍负责选择终局，原任务执行器
@@ -109,5 +110,51 @@ GCC 13.3 debug 定向构建成功。含元数据 OPEN 加强版与 Client 夹具
 真实 TCP Endpoint 及 Server 16 场景也通过；首次旧 Client 超时夹具失败和
 精确定位日志均保留在 `build/validation-server-record-deadline/initial/`。
 
-完整构建测试矩阵与固定版本静态分析仍在收口。未运行、被中断或尚未完成的
-检查不计为通过。
+实现冻结检查点为 `26418d4bcad4320e9e062ab30a8006df6ae2c832`，代码树为
+`33fb9db280ae1a05ad02518f7e1b23ebbe2dd375`。所有完整运行都针对该版本，
+使用 Xmake 3.1.1 的真实构建图，不手写编译命令：
+
+```sh
+xmake f -c -y -m <mode> --toolchain=<compiler> --crc32c_portable=n -o <output>
+xmake build --all -v
+xmake test -v -j1
+```
+
+| 模式 | 实际编译器 | 全部测试 | Xmake 测试耗时 |
+|---|---|---:|---:|
+| debug | GCC 13.3.0 | 77/77 | 30.054 秒 |
+| release | GCC 13.3.0 | 77/77 | 28.590 秒 |
+| release | Clang 18.1.3 | 77/77 | 28.650 秒 |
+| ASan + UBSan | GCC 13.3.0 | 77/77 | 31.073 秒 |
+| TSan | GCC 13.3.0 | 77/77 | 36.526 秒 |
+
+五组配置、全目标构建和全测的退出码均为 0。每组实际构建日志包含 42 个
+生产编译命令，77 个唯一注册测试均通过；GCC debug 还重新导出并验证真实
+编译数据库。ASan 启用 `detect_leaks=1:halt_on_error=1`，UBSan 启用
+`halt_on_error=1:print_stacktrace=1`，TSan 启用
+`halt_on_error=1:second_deadlock_stack=1`。核对了真实插桩选项，完整运行
+没有编译、内存、泄漏、未定义行为、竞争或死锁诊断。
+
+源码格式门禁固定 clang-format 18.1.8，针对 Client 修订基准检查本阶段
+7 个变化 C/头文件，0 失败。其余 C/头文件没有为通过门禁而整库重排。
+
+固定静态分析也使用两个独立的冻结检出，重新导出并核对 Xmake 生产数据库：
+
+| 分析器 | 生产单元 | 精确保留的旧告警 | 正式结果 |
+|---|---:|---:|---|
+| Clang / clang-tidy 14.0.0 | 42/42 | 11 | 分析退出 0、精确告警门禁退出 0；分析耗时 84.122 秒。 |
+| GCC 11.4.0 | 42/42 | 2 | 每个单元实际生成生产对象，分析与门禁退出 0；耗时 31.397 秒。 |
+
+分发器和 Client 宿主的 Clang 诊断日志均为空。两套分析的原告警记录未再修改，
+`review_state` 仍是 `unverified`；门禁通过不表示历史告警已经解决。分析器
+驱动/门禁自测、Clang 自动清理对照和 GCC 真实泄漏正反例继续通过。
+
+日志位于 `build/validation-server-record-deadline/`，完整运行分别在
+`matrix/` 和 `static-analysis/`。每种模式保留命令、源码与编译器身份、
+实际退出码、耗时和日志 SHA-256；`matrix/four-mode-summary.json` 汇总
+GCC release、Clang release 和两类运行时检查器，GCC debug 独立保留
+`matrix/gcc-debug/result.json`，静态汇总为 `static-analysis/static-summary.json`。
+
+随后衔接 Client 最终远端提交仅带入上一阶段验证文档，逐文件核对源码与测试
+均和冻结检查点一致。本记录再补充实测结果；最终远端 CI 仍按实际提交构建
+全部目标并运行完整测试。上述证据不扩大为实时性、跨平台或所有并发调度的保证。
