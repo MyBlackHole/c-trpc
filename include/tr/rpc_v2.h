@@ -27,7 +27,8 @@ extern "C" {
  *
  * 方法表在构造期间复制并冻结。方法数受 max_methods 约束。
  * V2 不支持连接组、拦截器和 Client 自动重连；配置这些能力返回
- * TR_ERR_UNSUPPORTED。V1 方法注册、调用和语义统计接口同样不适用。
+ * TR_ERR_UNSUPPORTED。V1 方法注册和调用接口同样不适用；语义统计复用
+ * tr_client_get_rpc_semantic_stats/tr_server_get_rpc_semantic_stats。
  * 构造失败的所有权规则与 tr_client_create/tr_server_create 相同：
  * 错误返回但 *out 非空时，调用方仍拥有部分对象，只能重试 destroy。
  */
@@ -159,13 +160,45 @@ int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel);
 /* append 在回调内预约有界存储并复制正文，成功后可立即复用源字节。
  * 一个事件当前最多生成 16 条回复，正文总额最多为该 Server 的最大方法
  * 响应正文上限的 16 倍，并与其他调用共享有限的实例资源。
- * append 的任何失败都会锁存整批错误，忽略错误后返回 OK 不能交付截断
- * 的成功批次。网络背压由库保留已生成批次并继续发送，不重复调用 work。
+ * append 的任何失败都会锁存整批错误，丢弃本批正文和全部元数据；忽略
+ * 错误后返回 OK 不能交付截断的成功批次。网络背压由库保留已生成批次
+ * 并继续发送，不重复调用 work。已被接受的前批记录不受后批错误影响。
  * finish 选择当前批次的终局，之后不能 append；非 OK 终局丢弃本批正文。
- * 当前不提供回调外长期持有回复能力、异步生产者或响应元数据写入。
+ * 当前不提供回调外长期持有回复能力或异步生产者。
  */
 int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
                            const struct tr_rpc_bytes *body);
+
+/* 设置当前批次一个阶段的元数据，每阶段最多调用一次，包括空列表。
+ * 输入数组、键和值在成功返回前复制，随后可立即复用。键是以 NUL 结尾
+ * 的 1..63 字节小写 ASCII [a-z0-9_.-]，同一阶段不允许重复键；值可为
+ * 任意字节，零长度可用 NULL。每阶段编码总额最多 512 字节（每项另占
+ * 3 字节长度字段），count 为 0 时 entries 可为 NULL。两阶段存储另计入
+ * 实例的共享有限预算，不占正文条数和正文批次额度。
+ *
+ * INITIAL 可在任意事件中设置，但调用此前不得已经发送初始元数据；
+ * 无论与本批 append 的调用次序如何，总是先发送 INITIAL 再发送正文。
+ * 空列表也显式发送一次空 INITIAL。TRAILING 只属于当前终局批次，须在
+ * finish 前设置；HALF_CLOSE 的默认完成或 work 返回非 OK 也构成终局。
+ * 设置 TRAILING 后以普通非终局批次返回会锁存 FAILED_PRECONDITION。
+ *
+ * finish 后设置、重复设置或 INITIAL 阶段已关闭返回 TR_ERR_STATE，无
+ * 既有错误时锁存 FAILED_PRECONDITION；无效 phase/数组/指针或 count
+ * 超过 128 返回 TR_ERR_INVALID，
+ * 键或总额长度错误返回 TR_ERR_BAD_LENGTH，非法字符或重复键返回
+ * TR_ERR_BAD_FLAGS，均锁存 INVALID_ARGUMENT。分配失败返回 TR_ERR_NOMEM
+ * 并锁存 RESOURCE_EXHAUSTED。首次失败不可被后续 OK 或业务状态覆盖，
+ * 本批全部正文和元数据均丢弃；NULL 或回调外的无效能力不触及任何批次。
+ *
+ * 显式 finish(non-OK) 或 work 返回非 OK 会保留有效初始和尾部元数据，
+ * 仅丢弃本批正文；尾部随错误 FINAL 发送。成功只表示本批复制受理，
+ * 不表示对端收到。网络背压保留副本重试；即使已观察取消，仍有效的
+ * 回调能力可复制成功，但取消、期限或停机可丢弃尚未交付的整个批次。
+ */
+int tr_rpc_v2_reply_set_metadata(struct tr_rpc_v2_reply *reply,
+                                 enum tr_rpc_v2_metadata_phase phase,
+                                 const struct tr_rpc_metadata *entries,
+                                 size_t count);
 int tr_rpc_v2_reply_finish(struct tr_rpc_v2_reply *reply,
                            enum tr_rpc_status status);
 

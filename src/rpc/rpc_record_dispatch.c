@@ -18,13 +18,19 @@ struct tr_reply_body {
 	size_t bytes;
 	uint8_t data[];
 };
+struct tr_reply_metadata {
+	uint8_t *data;
+	uint32_t size;
+	bool set;
+};
 struct tr_rpc_record_reply {
 	struct tr_memory_budget *budget;
 	struct tr_reply_body *head, *tail;
+	struct tr_reply_metadata initial, trailing;
 	size_t used, limit;
 	uint32_t count, max_count, max_message;
 	enum tr_rpc_status status;
-	bool finished;
+	bool finished, failed, headers_sent;
 };
 struct tr_rpc_v2_cancel {
 	const struct tr_task_cancel *task;
@@ -40,6 +46,17 @@ static _Thread_local const struct tr_rpc_v2_cancel *tr_v2_active_cancel;
 static _Thread_local struct tr_rpc_v2_reply *tr_v2_active_reply;
 static _Thread_local unsigned tr_v2_callback_depth;
 static _Atomic uint64_t tr_dispatch_instances;
+
+/* API 失败锁存整批；业务显式选择的非 OK 则仍可携带有效元数据。
+ * 保留第一个错误，后续返回 OK 或另一个业务状态都不能解除失败。 */
+static int tr_reply_fail(struct tr_rpc_record_reply *reply, int error,
+                         enum tr_rpc_status status)
+{
+	reply->failed = true;
+	if (reply->status == TR_RPC_STATUS_OK)
+		reply->status = status;
+	return error;
+}
 
 int tr_rpc_record_dispatch_in_callback(void)
 {
@@ -63,18 +80,27 @@ int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
 	if (reply != tr_v2_active_reply)
 		return TR_ERR_STATE;
 	if (reply->record->finished ||
-	    reply->record->status != TR_RPC_STATUS_OK) {
-		if (reply->record->status == TR_RPC_STATUS_OK)
-			reply->record->status =
-			        TR_RPC_STATUS_FAILED_PRECONDITION;
-		return TR_ERR_STATE;
-	}
-	if (!message) {
-		reply->record->status = TR_RPC_STATUS_INVALID_ARGUMENT;
-		return TR_ERR_INVALID;
-	}
+	    reply->record->status != TR_RPC_STATUS_OK)
+		return tr_reply_fail(reply->record, TR_ERR_STATE,
+		                     TR_RPC_STATUS_FAILED_PRECONDITION);
+	if (!message)
+		return tr_reply_fail(reply->record, TR_ERR_INVALID,
+		                     TR_RPC_STATUS_INVALID_ARGUMENT);
 	return tr_rpc_record_reply_append(reply->record, message->data,
 	                                  message->len);
+}
+
+int tr_rpc_v2_reply_set_metadata(struct tr_rpc_v2_reply *reply,
+                                 enum tr_rpc_v2_metadata_phase phase,
+                                 const struct tr_rpc_metadata *entries,
+                                 size_t count)
+{
+	if (!reply)
+		return TR_ERR_INVALID;
+	if (reply != tr_v2_active_reply)
+		return TR_ERR_STATE;
+	return tr_rpc_record_reply_set_metadata(reply->record, phase, entries,
+	                                        count);
 }
 
 int tr_rpc_v2_reply_finish(struct tr_rpc_v2_reply *reply,
@@ -138,6 +164,7 @@ struct tr_dispatch_slot {
 	enum tr_rpc_record_delivery delivery;
 	bool active, terminal, notified, headers_sent, final_accepted;
 	bool admission_failed;
+	bool semantic_started;
 };
 struct tr_rpc_record_dispatch {
 	struct tr_reactor *reactor;
@@ -147,6 +174,8 @@ struct tr_rpc_record_dispatch {
 	struct tr_dispatch_slot *slots;
 	struct tr_dispatch_method *methods;
 	struct tr_rpc_record_dispatch_config config;
+	struct tr_rpc_record_semantic_counters local_semantic;
+	struct tr_rpc_record_semantic_counters *semantic;
 	tr_rpc_dispatch_terminal_fn terminal;
 	void *arg;
 	size_t bytes;
@@ -220,7 +249,7 @@ static void tr_reply_body_release(struct tr_buffer *buffer)
 	free(b);
 	(void)tr_memory_budget_release(budget, bytes);
 }
-static void tr_reply_clear(struct tr_rpc_record_reply *reply)
+static void tr_reply_clear_bodies(struct tr_rpc_record_reply *reply)
 {
 	while (reply->head) {
 		struct tr_reply_body *b = reply->head;
@@ -228,6 +257,21 @@ static void tr_reply_clear(struct tr_rpc_record_reply *reply)
 		tr_buffer_release(&b->buffer);
 	}
 	reply->tail = NULL;
+}
+static void tr_reply_clear_metadata(struct tr_rpc_record_reply *reply,
+                                    struct tr_reply_metadata *metadata)
+{
+	if (metadata->data) {
+		free(metadata->data);
+		(void)tr_memory_budget_release(reply->budget, metadata->size);
+	}
+	*metadata = (struct tr_reply_metadata){0};
+}
+static void tr_reply_clear(struct tr_rpc_record_reply *reply)
+{
+	tr_reply_clear_bodies(reply);
+	tr_reply_clear_metadata(reply, &reply->initial);
+	tr_reply_clear_metadata(reply, &reply->trailing);
 }
 int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
                                size_t size)
@@ -238,24 +282,23 @@ int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
 	if (!r)
 		return TR_ERR_INVALID;
 	if (r->finished || r->status != TR_RPC_STATUS_OK)
-		return TR_ERR_STATE;
+		return tr_reply_fail(r, TR_ERR_STATE,
+		                     TR_RPC_STATUS_FAILED_PRECONDITION);
 	if ((!data && size) || size > r->max_message ||
 	    r->count == r->max_count || size > r->limit - r->used ||
-	    size > SIZE_MAX - sizeof(*b)) {
-		r->status = TR_RPC_STATUS_RESOURCE_EXHAUSTED;
-		return TR_ERR_BAD_LENGTH;
-	}
+	    size > SIZE_MAX - sizeof(*b))
+		return tr_reply_fail(r, TR_ERR_BAD_LENGTH,
+		                     TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 	bytes = sizeof(*b) + size;
 	ret = tr_memory_budget_reserve(r->budget, bytes);
-	if (ret != TR_OK) {
-		r->status = TR_RPC_STATUS_RESOURCE_EXHAUSTED;
-		return TR_ERR_NOMEM;
-	}
+	if (ret != TR_OK)
+		return tr_reply_fail(r, TR_ERR_NOMEM,
+		                     TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 	b = malloc(bytes);
 	if (!b) {
 		(void)tr_memory_budget_release(r->budget, bytes);
-		r->status = TR_RPC_STATUS_RESOURCE_EXHAUSTED;
-		return TR_ERR_NOMEM;
+		return tr_reply_fail(r, TR_ERR_NOMEM,
+		                     TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 	}
 	*b = (struct tr_reply_body){
 	        .buffer = {.data = b->data,
@@ -273,6 +316,53 @@ int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
 	r->tail = b;
 	r->used += size;
 	++r->count;
+	return TR_OK;
+}
+int tr_rpc_record_reply_set_metadata(struct tr_rpc_record_reply *reply,
+                                     enum tr_rpc_v2_metadata_phase phase,
+                                     const struct tr_rpc_metadata *entries,
+                                     size_t count)
+{
+	uint8_t encoded[TR_RPC_METADATA_MAX_BYTES];
+	struct tr_reply_metadata *metadata;
+	uint8_t *copy = NULL;
+	uint32_t size;
+	int ret;
+	if (!reply)
+		return TR_ERR_INVALID;
+	if (reply->finished || reply->status != TR_RPC_STATUS_OK)
+		return tr_reply_fail(reply, TR_ERR_STATE,
+		                     TR_RPC_STATUS_FAILED_PRECONDITION);
+	if (phase != TR_RPC_V2_METADATA_INITIAL &&
+	    phase != TR_RPC_V2_METADATA_TRAILING)
+		return tr_reply_fail(reply, TR_ERR_INVALID,
+		                     TR_RPC_STATUS_INVALID_ARGUMENT);
+	metadata = phase == TR_RPC_V2_METADATA_INITIAL ? &reply->initial
+	                                               : &reply->trailing;
+	if (metadata->set ||
+	    (phase == TR_RPC_V2_METADATA_INITIAL && reply->headers_sent))
+		return tr_reply_fail(reply, TR_ERR_STATE,
+		                     TR_RPC_STATUS_FAILED_PRECONDITION);
+	ret = tr_rpc_v2_metadata_encode(entries, count, encoded, &size);
+	if (ret != TR_OK)
+		return tr_reply_fail(reply, ret,
+		                     TR_RPC_STATUS_INVALID_ARGUMENT);
+	/* 编码先在有界栈上完成，验证失败不产生部分分配。每阶段至多一个
+	 * 精确大小副本；空列表仍关闭该阶段，但无需分配零字节存储。 */
+	if (size) {
+		ret = tr_memory_budget_reserve(reply->budget, size);
+		if (ret != TR_OK)
+			return tr_reply_fail(reply, TR_ERR_NOMEM,
+			                     TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+		copy = malloc(size);
+		if (!copy) {
+			(void)tr_memory_budget_release(reply->budget, size);
+			return tr_reply_fail(reply, TR_ERR_NOMEM,
+			                     TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+		}
+		memcpy(copy, encoded, size);
+	}
+	*metadata = (struct tr_reply_metadata){copy, size, true};
 	return TR_OK;
 }
 int tr_rpc_record_reply_finish(struct tr_rpc_record_reply *r,
@@ -332,6 +422,10 @@ static void tr_dispatch_settle(struct tr_dispatch_slot *s)
 	}
 	if (!s->notified) {
 		s->notified = true;
+		/* 网络终局可早于原工作线程退出，只有此收口兑现业务结果。
+		 * 未经完整 OPEN 准入的拒绝只清理路由，不伪造一次 RPC。 */
+		if (s->semantic_started)
+			tr_rpc_record_semantic_finish(d->semantic, s->status);
 		++d->depth;
 		if (s->v2_method && s->v2_method->v2_terminal) {
 			++tr_v2_callback_depth;
@@ -444,14 +538,23 @@ static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 	}
 	if (status < TR_RPC_STATUS_OK || status >= (int)TR_RPC_STATUS_COUNT)
 		status = TR_RPC_STATUS_INTERNAL;
-	if (status != TR_RPC_STATUS_OK)
+	if (status != TR_RPC_STATUS_OK && !reply->failed)
 		reply->status = status;
-	if (reply->status != TR_RPC_STATUS_OK) {
-		reply->finished = true;
-		tr_reply_clear(reply);
-	}
 	if (job->view.header.kind == TR_RPC_RECORD_HALF_CLOSE)
 		reply->finished = true;
+	/* 尾部仅属于当前终局批次，不能静默丢弃或跨事件长期借用。显式
+	 * 业务错误同样形成终局，允许它携带此前设置的有效尾部元数据。 */
+	if (reply->trailing.set && !reply->finished &&
+	    reply->status == TR_RPC_STATUS_OK)
+		(void)tr_reply_fail(reply, TR_ERR_STATE,
+		                    TR_RPC_STATUS_FAILED_PRECONDITION);
+	if (reply->status != TR_RPC_STATUS_OK) {
+		reply->finished = true;
+		if (reply->failed)
+			tr_reply_clear(reply);
+		else
+			tr_reply_clear_bodies(reply);
+	}
 	return TR_OK;
 }
 static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
@@ -517,8 +620,14 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	}
 	if (!tr_dispatch_live(s))
 		return;
-	if (view->header.kind == TR_RPC_RECORD_OPEN && m->method.v2_work)
-		s->v2_method = &m->method;
+	if (view->header.kind == TR_RPC_RECORD_OPEN) {
+		if (!s->semantic_started) {
+			s->semantic_started = true;
+			tr_rpc_record_semantic_start(d->semantic);
+		}
+		if (m->method.v2_work)
+			s->v2_method = &m->method;
+	}
 	if (s->pending >= d->config.max_pending_per_call) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 		return;
@@ -588,6 +697,9 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 		if (s->submitted || !s->head || d->stopping)
 			return;
 		job = s->head;
+		/* 前一批可能在本事件排队后才发送 INITIAL；只在实际提交时
+		 * 固定阶段状态，worker 不读取 owner 的可变槽位。 */
+		job->reply.headers_sent = s->headers_sent;
 		spec = (struct tr_task_spec){tr_dispatch_work, tr_dispatch_done,
 		                             job};
 		ret = tr_task_executor_submit(d->executor, &spec, &s->task);
@@ -608,8 +720,11 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 	struct tr_reply_body *b = reply->head;
 	struct tr_reply_body *next = b ? b->next : NULL;
 	struct tr_buffer *body = b ? &b->buffer : NULL;
-	if (b && !s->headers_sent) {
+	const uint8_t *metadata = NULL;
+	if (!s->headers_sent && (b || reply->initial.set)) {
 		h.kind = TR_RPC_RECORD_INITIAL_METADATA;
+		h.metadata_size = reply->initial.size;
+		metadata = reply->initial.data;
 		body = NULL;
 	} else if (b) {
 		h.kind = TR_RPC_RECORD_MESSAGE;
@@ -618,16 +733,19 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 	} else if (reply->finished) {
 		h.kind = TR_RPC_RECORD_FINAL_STATUS;
 		h.status = reply->status;
+		h.metadata_size = reply->trailing.size;
+		metadata = reply->trailing.data;
 	} else {
 		s->ready = NULL;
 		tr_dispatch_free_job(job);
 		return;
 	}
-	ret = tr_rpc_record_router_send_on_owner(s->route, &h, NULL, &body);
+	ret = tr_rpc_record_router_send_on_owner(s->route, &h, metadata, &body);
 	if (ret == TR_OK) {
-		if (h.kind == TR_RPC_RECORD_INITIAL_METADATA)
+		if (h.kind == TR_RPC_RECORD_INITIAL_METADATA) {
 			s->headers_sent = true;
-		else if (h.kind == TR_RPC_RECORD_MESSAGE) {
+			tr_reply_clear_metadata(reply, &reply->initial);
+		} else if (h.kind == TR_RPC_RECORD_MESSAGE) {
 			/* b可以已经由传输释放；next在接受前取得，之后不再读b。
 			 */
 			reply->head = next;
@@ -635,6 +753,7 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 				reply->tail = NULL;
 		} else {
 			s->final_accepted = true;
+			tr_reply_clear_metadata(reply, &reply->trailing);
 		}
 	} else if (ret != TR_AGAIN) {
 		/* 非背压失败不能伪装成成功；停止重试坏回复。若是业务基数
@@ -642,7 +761,7 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 		if (ret == TR_ERR_STATE && !s->terminal &&
 		    !(reply->finished &&
 		      reply->status == TR_RPC_STATUS_INTERNAL)) {
-			tr_reply_clear(reply);
+			tr_reply_clear_bodies(reply);
 			reply->finished = true;
 			reply->status = TR_RPC_STATUS_INTERNAL;
 			tr_dispatch_drop_queued(s);
@@ -723,6 +842,7 @@ int tr_rpc_record_dispatch_create_on_owner(
 	d->bytes = bytes;
 	d->instance = instance;
 	d->config = *config;
+	d->semantic = &d->local_semantic;
 	d->terminal = terminal;
 	d->arg = arg;
 	for (size_t i = 0; i < method_count; ++i) {
@@ -749,6 +869,32 @@ fail:
 	free(d);
 	(void)tr_memory_budget_release(budget, bytes + temporary);
 	return ret;
+}
+int tr_rpc_record_dispatch_bind_semantic_stats_on_owner(
+        struct tr_rpc_record_dispatch *d,
+        struct tr_rpc_record_semantic_counters *counters)
+{
+	int ret = tr_dispatch_owner(d);
+	if (ret != TR_OK)
+		return ret;
+	if (!counters)
+		return TR_ERR_INVALID;
+	if (d->depth || d->stopping || d->semantic != &d->local_semantic ||
+	    d->local_semantic.value.calls_started || d->local_semantic.overflow)
+		return TR_ERR_STATE;
+	for (uint32_t i = 0; i < d->config.capacity; ++i)
+		if (d->slots[i].active)
+			return TR_ERR_STATE;
+	d->semantic = counters;
+	return TR_OK;
+}
+int tr_rpc_record_dispatch_get_semantic_stats_on_owner(
+        struct tr_rpc_record_dispatch *d, struct tr_rpc_semantic_stats *out)
+{
+	int ret = tr_dispatch_owner(d);
+	if (ret != TR_OK)
+		return ret;
+	return tr_rpc_record_semantic_stats_read(d->semantic, out);
 }
 int tr_rpc_record_dispatch_admit_on_owner(struct tr_rpc_record_dispatch *d,
                                           struct tr_stream_handle stream,

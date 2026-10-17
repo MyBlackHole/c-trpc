@@ -855,9 +855,8 @@ static void test_shapes_and_reuse(void)
 	                                NULL) == TR_ERR_UNSUPPORTED);
 	struct tr_rpc_semantic_stats stats, sentinel;
 	memset(&stats, 0xa5, sizeof(stats));
-	sentinel = stats;
-	CHECK(tr_server_get_rpc_semantic_stats(f.server, &stats) ==
-	      TR_ERR_UNSUPPORTED);
+	memset(&sentinel, 0, sizeof(sentinel));
+	CHECK(tr_server_get_rpc_semantic_stats(f.server, &stats) == TR_OK);
 	CHECK(!memcmp(&stats, &sentinel, sizeof(stats)));
 	CHECK(fixture_start(&f) == TR_OK);
 	for (unsigned round = 0; round < 6; ++round) {
@@ -878,6 +877,15 @@ static void test_shapes_and_reuse(void)
 		echo(&f, &p, BODY);
 		peer_destroy(&p);
 		wait_peers(&f, 0, round + 1);
+		CHECK(tr_server_get_rpc_semantic_stats(f.server, &stats) ==
+		      TR_OK);
+		CHECK(stats.calls_started == round + 3);
+		CHECK(stats.calls_finished == round + 3);
+		CHECK(stats.calls_inflight == 0);
+		for (unsigned status = 0; status < TR_RPC_STATUS_COUNT;
+		     ++status)
+			CHECK(stats.final_status[status] ==
+			      (status == TR_RPC_STATUS_OK ? round + 3 : 0));
 	}
 	CHECK(atomic_load(&executor_creates) == 1);
 	CHECK(atomic_load(&worker_total) == 2);

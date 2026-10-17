@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/rpc/rpc_record_dispatch.h"
+#include "../src/rpc/rpc_v2_internal.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
@@ -182,7 +183,9 @@ struct peer {
 	struct tr_rpc_record_stream *calls[CAP];
 	struct tr_rpc_dispatch_handle handles[CAP];
 	_Atomic unsigned opened, packets, terminals[CAP], messages[CAP],
-	        initial[CAP];
+	        initial[CAP], trailing[CAP];
+	uint8_t metadata[CAP][2][TR_RPC_METADATA_MAX_BYTES];
+	uint32_t metadata_size[CAP][2];
 	uint32_t status[CAP];
 	size_t received_bytes[CAP];
 	enum tr_rpc_record_delivery delivery[CAP];
@@ -190,6 +193,21 @@ struct peer {
 	bool server, disabled, hold;
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
+};
+enum metadata_mode {
+	METADATA_NONE,
+	METADATA_BOTH,
+	METADATA_FINISH_ERROR,
+	METADATA_RETURN_ERROR,
+	METADATA_BAD_INITIAL,
+	METADATA_BAD_TRAILING,
+	METADATA_ALLOC_INITIAL,
+	METADATA_ALLOC_TRAILING,
+	METADATA_BUDGET_INITIAL,
+	METADATA_BUDGET_TRAILING,
+	METADATA_BAD_APPEND,
+	METADATA_SNAPSHOT,
+	METADATA_CANCEL,
 };
 struct fixture {
 	struct peer client, server;
@@ -206,10 +224,102 @@ struct fixture {
 	struct tr_rpc_record_dispatch_stats stats;
 	bool timer_registered, driving;
 	_Atomic bool bad_reply, oversized_reply;
+	_Atomic enum metadata_mode metadata_mode;
+	uint64_t metadata_reserved;
 	_Atomic unsigned drive_turns;
 	unsigned batch;
 	uint64_t open_due;
 };
+static uint8_t metadata_byte(unsigned phase, size_t index)
+{
+	return (uint8_t)(index * 13U + phase * 17U + 3U);
+}
+static int set_metadata(struct tr_rpc_record_reply *reply, unsigned phase)
+{
+	char key[] = "k";
+	uint8_t value[TR_RPC_METADATA_MAX_BYTES - 4U];
+	struct tr_rpc_metadata entry = {key, value, sizeof(value)};
+	for (size_t i = 0; i < sizeof(value); ++i)
+		value[i] = metadata_byte(phase, i);
+	int ret = tr_rpc_record_reply_set_metadata(
+	        reply, (enum tr_rpc_v2_metadata_phase)phase, &entry, 1);
+	/* 数组、键和值全是当前栈存储；setter 返回后立即破坏源，发送重试
+	 * 只能依赖拥有型副本，不能借用任何一种输入地址。 */
+	memset(value, 0xdd, sizeof(value));
+	memset(key, 0xdd, sizeof(key));
+	memset(&entry, 0xdd, sizeof(entry));
+	return ret;
+}
+static enum tr_rpc_status metadata_work(struct fixture *f, unsigned kind,
+                                        struct tr_rpc_record_reply *reply)
+{
+	enum metadata_mode mode = atomic_load(&f->metadata_mode);
+	if (mode == METADATA_NONE)
+		return TR_RPC_STATUS_OK;
+	if (mode == METADATA_SNAPSHOT) {
+		if (kind == TR_RPC_RECORD_OPEN)
+			CHECK(set_metadata(reply, TR_RPC_V2_METADATA_INITIAL) ==
+			      TR_OK);
+		else if (kind == TR_RPC_RECORD_HALF_CLOSE)
+			CHECK(set_metadata(reply, TR_RPC_V2_METADATA_INITIAL) ==
+			      TR_ERR_STATE);
+		return TR_RPC_STATUS_OK;
+	}
+	if (kind != (mode == METADATA_CANCEL ? TR_RPC_RECORD_MESSAGE
+	                                     : TR_RPC_RECORD_HALF_CLOSE))
+		return TR_RPC_STATUS_OK;
+	for (unsigned phase = 0; phase < 2; ++phase) {
+		bool invalid = (mode == METADATA_BAD_INITIAL && phase == 0) ||
+		               (mode == METADATA_BAD_TRAILING && phase == 1);
+		bool allocation =
+		        (mode == METADATA_ALLOC_INITIAL && phase == 0) ||
+		        (mode == METADATA_ALLOC_TRAILING && phase == 1);
+		bool budget = (mode == METADATA_BUDGET_INITIAL && phase == 0) ||
+		              (mode == METADATA_BUDGET_TRAILING && phase == 1);
+		if (invalid) {
+			const struct tr_rpc_metadata duplicate[] = {
+			        {"dup", NULL, 0}, {"dup", NULL, 0}};
+			CHECK(tr_rpc_record_reply_set_metadata(
+			              reply,
+			              (enum tr_rpc_v2_metadata_phase)phase,
+			              duplicate, 2) == TR_ERR_BAD_FLAGS);
+			return TR_RPC_STATUS_OK;
+		}
+		if (allocation || budget) {
+			gate_wait(&f->gate, true);
+			uint64_t before =
+			        atomic_load(&f->server.budget.current_bytes);
+			if (allocation)
+				atomic_store(&fail_worker_malloc, true);
+			CHECK(set_metadata(reply, phase) == TR_ERR_NOMEM);
+			CHECK(atomic_load(&f->server.budget.current_bytes) ==
+			      before);
+			if (budget) {
+				CHECK(f->metadata_reserved != 0);
+				CHECK(tr_memory_budget_release(
+				              &f->server.budget,
+				              f->metadata_reserved) == TR_OK);
+			}
+			return TR_RPC_STATUS_OK;
+		}
+		CHECK(set_metadata(reply, phase) == TR_OK);
+	}
+	if (mode == METADATA_BAD_APPEND) {
+		CHECK(tr_rpc_record_reply_append(reply, NULL, BODY + 1U) ==
+		      TR_ERR_BAD_LENGTH);
+		/* 首次 API 错误不能被随后另一个非 OK 业务状态覆盖。 */
+		return TR_RPC_STATUS_PERMISSION_DENIED;
+	}
+	if (mode == METADATA_FINISH_ERROR)
+		CHECK(tr_rpc_record_reply_finish(
+		              reply, TR_RPC_STATUS_PERMISSION_DENIED) == TR_OK);
+	if (mode == METADATA_RETURN_ERROR)
+		return TR_RPC_STATUS_PERMISSION_DENIED;
+	if (mode == METADATA_CANCEL)
+		CHECK(tr_rpc_record_reply_finish(reply, TR_RPC_STATUS_OK) ==
+		      TR_OK);
+	return TR_RPC_STATUS_OK;
+}
 static enum tr_rpc_status handler(struct tr_rpc_dispatch_id id,
                                   const struct tr_rpc_record_view *view,
                                   const struct tr_task_cancel *cancel,
@@ -281,6 +391,8 @@ static enum tr_rpc_status handler(struct tr_rpc_dispatch_id id,
 		CHECK(tr_rpc_record_reply_append(reply, NULL, 0) ==
 		      TR_ERR_STATE);
 	}
+	if (atomic_load(&f->metadata_mode) != METADATA_NONE)
+		status = metadata_work(f, kind, reply);
 	/* 测试允许不合作业务返回成功，取消后的私有结果仍必须被引擎丢弃。 */
 	(void)cancel;
 	atomic_fetch_add(&s->seen[kind], 1);
@@ -336,12 +448,32 @@ static void client_received(struct tr_rpc_record_stream *call,
 	struct peer *p = arg;
 	unsigned i = client_slot(p, call);
 	if (view->header.kind == TR_RPC_RECORD_MESSAGE) {
+		CHECK(atomic_load(&p->initial[i]) == 1 &&
+		      !atomic_load(&p->trailing[i]));
 		for (size_t j = 0; j < view->header.decoded_size; ++j)
 			CHECK(view->body[j] == (uint8_t)(j * 7 + 3));
 		p->received_bytes[i] += view->header.decoded_size;
 		atomic_fetch_add(&p->messages[i], 1);
-	} else if (view->header.kind == TR_RPC_RECORD_INITIAL_METADATA) {
-		atomic_fetch_add(&p->initial[i], 1);
+	} else {
+		CHECK(view->header.kind == TR_RPC_RECORD_INITIAL_METADATA ||
+		      view->header.kind == TR_RPC_RECORD_FINAL_STATUS);
+		unsigned phase =
+		        view->header.kind == TR_RPC_RECORD_INITIAL_METADATA
+		                ? 0U
+		                : 1U;
+		CHECK(view->header.metadata_size <= TR_RPC_METADATA_MAX_BYTES);
+		p->metadata_size[i][phase] = view->header.metadata_size;
+		if (view->header.metadata_size)
+			memcpy(p->metadata[i][phase], view->metadata,
+			       view->header.metadata_size);
+		if (phase == 0) {
+			CHECK(!atomic_load(&p->messages[i]) &&
+			      !atomic_load(&p->trailing[i]));
+			CHECK(atomic_fetch_add(&p->initial[i], 1) == 0);
+		} else {
+			CHECK(!atomic_load(&p->terminals[i]));
+			CHECK(atomic_fetch_add(&p->trailing[i], 1) == 0);
+		}
 	}
 }
 static void client_terminal(struct tr_rpc_record_stream *call,
@@ -459,6 +591,7 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 		atomic_init(&p->terminals[i], 0);
 		atomic_init(&p->messages[i], 0);
 		atomic_init(&p->initial[i], 0);
+		atomic_init(&p->trailing[i], 0);
 	}
 	tr_memory_budget_init(&p->budget, 16 * 1024 * 1024);
 	CHECK(tr_buffer_pool_init(&p->pool, CAP, BODY + 1024) == TR_OK);
@@ -516,6 +649,7 @@ static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
 	atomic_init(&f->reject_method, 0);
 	atomic_init(&f->bad_reply, false);
 	atomic_init(&f->oversized_reply, false);
+	atomic_init(&f->metadata_mode, METADATA_NONE);
 	atomic_init(&f->drive_turns, 0);
 	for (unsigned i = 0; i < CAP; ++i) {
 		atomic_init(&f->business[i].active, 0);
@@ -719,6 +853,153 @@ static void fixture_destroy(struct fixture *f, bool stopped)
 	}
 	gate_destroy(&f->gate);
 }
+static void check_metadata(struct peer *peer, unsigned slot, unsigned phase,
+                           bool populated)
+{
+	CHECK(peer->metadata_size[slot][phase] ==
+	      (populated ? TR_RPC_METADATA_MAX_BYTES : 0U));
+	if (!populated)
+		return;
+	const uint8_t *data = peer->metadata[slot][phase];
+	CHECK(data[0] == 1 && data[1] == 0xfc && data[2] == 1 &&
+	      data[3] == 'k');
+	for (size_t i = 4; i < TR_RPC_METADATA_MAX_BYTES; ++i)
+		CHECK(data[i] == metadata_byte(phase, i - 4));
+}
+static void test_metadata_encoding(void)
+{
+	uint8_t out[TR_RPC_METADATA_MAX_BYTES], value[509] = {0};
+	uint32_t size = 99;
+	const uint8_t binary[] = {0, 0xff, 1};
+	const struct tr_rpc_metadata entries[] = {{"empty", NULL, 0},
+	                                          {"b", binary, 3}};
+	const uint8_t expected[] = {5, 0, 0, 'e', 'm', 'p',  't', 'y',
+	                            1, 3, 0, 'b', 0,   0xff, 1};
+	CHECK(tr_rpc_v2_metadata_encode(NULL, 0, out, &size) == TR_OK &&
+	      size == 0);
+	CHECK(tr_rpc_v2_metadata_encode(entries, 2, out, &size) == TR_OK &&
+	      size == sizeof(expected) &&
+	      memcmp(out, expected, sizeof(expected)) == 0);
+	struct tr_rpc_metadata boundary = {"k", value, 508};
+	CHECK(tr_rpc_v2_metadata_encode(&boundary, 1, out, &size) == TR_OK &&
+	      size == sizeof(out));
+	boundary.value_len = 509;
+	size = 99;
+	CHECK(tr_rpc_v2_metadata_encode(&boundary, 1, out, &size) ==
+	      TR_ERR_BAD_LENGTH);
+	CHECK(size == 99);
+	const struct tr_rpc_metadata duplicate[] = {{"k", NULL, 0},
+	                                            {"k", NULL, 0}};
+	CHECK(tr_rpc_v2_metadata_encode(duplicate, 2, out, &size) ==
+	      TR_ERR_BAD_FLAGS);
+	const struct tr_rpc_metadata invalid[] = {{NULL, NULL, 0},
+	                                          {"k", NULL, 1},
+	                                          {"", NULL, 0},
+	                                          {"Upper", NULL, 0},
+	                                          {":reserved", NULL, 0}};
+	const int errors[] = {TR_ERR_INVALID, TR_ERR_INVALID, TR_ERR_BAD_LENGTH,
+	                      TR_ERR_BAD_FLAGS, TR_ERR_BAD_FLAGS};
+	for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+		CHECK(tr_rpc_v2_metadata_encode(&invalid[i], 1, out, &size) ==
+		      errors[i]);
+		CHECK(size == 99);
+	}
+	CHECK(tr_rpc_v2_metadata_encode(NULL, 1, out, &size) == TR_ERR_INVALID);
+	CHECK(tr_rpc_v2_metadata_encode(entries, 129, out, &size) ==
+	      TR_ERR_INVALID);
+	CHECK(size == 99);
+}
+static int reserve_metadata_budget(void *arg)
+{
+	struct fixture *f = arg;
+	CHECK(snapshot(f) == TR_OK && f->stats.submitted_calls == 1);
+	uint64_t current = atomic_load(&f->server.budget.current_bytes);
+	CHECK(current < f->server.budget.limit_bytes);
+	f->metadata_reserved = f->server.budget.limit_bytes - current;
+	CHECK(tr_memory_budget_reserve(&f->server.budget,
+	                               f->metadata_reserved) == TR_OK);
+	return TR_OK;
+}
+static void test_metadata_error(enum metadata_mode mode)
+{
+	struct fixture f;
+	fixture_init(&f, 1024 * 1024, 8);
+	atomic_store(&f.metadata_mode, mode);
+	if (mode == METADATA_BOTH)
+		atomic_store(&f.bad_reply, true);
+	unsigned slot = open_call(&f, 0);
+	request(&f, slot, 0, 1, 40);
+	bool budget = mode == METADATA_BUDGET_INITIAL ||
+	              mode == METADATA_BUDGET_TRAILING;
+	bool allocation = mode == METADATA_ALLOC_INITIAL ||
+	                  mode == METADATA_ALLOC_TRAILING;
+	if (budget || allocation) {
+		gate_wait(&f.gate, false);
+		/* owner 屏障确保 RX/入队清理已经完成；只对正在运行的批次
+		 * 施加资源故障，不让 FINAL 的前缀分配误中故障。 */
+		CHECK(tr_reactor_call(f.server.reactor,
+		                      budget ? reserve_metadata_budget
+		                             : snapshot,
+		                      &f) == TR_OK);
+		gate_open(&f.gate);
+	}
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&f.server.terminals[slot], 1);
+	bool populated = mode == METADATA_FINISH_ERROR ||
+	                 mode == METADATA_RETURN_ERROR || mode == METADATA_BOTH;
+	uint32_t expected = mode == METADATA_BOTH ? TR_RPC_STATUS_INTERNAL
+	                    : populated ? TR_RPC_STATUS_PERMISSION_DENIED
+	                    : (mode == METADATA_BAD_INITIAL ||
+	                       mode == METADATA_BAD_TRAILING)
+	                            ? TR_RPC_STATUS_INVALID_ARGUMENT
+	                            : TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+	CHECK(f.client.status[slot] == expected &&
+	      f.server.status[slot] == expected &&
+	      f.server.final_accepted[slot]);
+	CHECK(!atomic_load(&f.client.messages[slot]) &&
+	      atomic_load(&f.client.initial[slot]) == (populated ? 1U : 0U) &&
+	      atomic_load(&f.client.trailing[slot]) == 1);
+	check_metadata(&f.client, slot, 0, populated);
+	check_metadata(&f.client, slot, 1, populated);
+	if (budget)
+		CHECK(atomic_load(&f.server.budget.rejection_events) != 0);
+	fixture_destroy(&f, false);
+}
+static void test_metadata_queued_phase(void)
+{
+	struct fixture f;
+	fixture_init(&f, 1024 * 1024, 8);
+	atomic_store(&f.metadata_mode, METADATA_SNAPSHOT);
+	unsigned slot = open_call(&f, 0);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_INITIAL_METADATA);
+	request(&f, slot, 0, 1, 40);
+	wait_count(&send_attempts[TR_RPC_RECORD_INITIAL_METADATA], 10);
+	uint64_t until = now_ms() + 15000;
+	do {
+		CHECK(now_ms() < until);
+		CHECK(tr_reactor_call(f.server.reactor, snapshot, &f) == TR_OK);
+	} while (f.stats.held_events != 3);
+	unsigned route = f.server.handles[slot].id.slot;
+	CHECK(f.stats.reply_calls == 1 &&
+	      atomic_load(&f.business[route].seen[TR_RPC_RECORD_OPEN]) == 1 &&
+	      !atomic_load(&f.business[route].seen[TR_RPC_RECORD_MESSAGE]) &&
+	      !atomic_load(&f.business[route].seen[TR_RPC_RECORD_HALF_CLOSE]) &&
+	      !atomic_load(&f.client.initial[slot]));
+	/* HALF_CLOSE 在 INITIAL 被接受之前就已入队，但必须在真正执行时
+	 * 看到阶段关闭，不能沿用接收时的旧状态重新设置 INITIAL。 */
+	atomic_store(&blocked_kind, 0);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&f.server.terminals[slot], 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_FAILED_PRECONDITION &&
+	      f.server.status[slot] == TR_RPC_STATUS_FAILED_PRECONDITION &&
+	      f.server.final_accepted[slot]);
+	CHECK(atomic_load(&f.client.initial[slot]) == 1 &&
+	      !atomic_load(&f.client.messages[slot]) &&
+	      atomic_load(&f.client.trailing[slot]) == 1);
+	check_metadata(&f.client, slot, 0, true);
+	check_metadata(&f.client, slot, 1, false);
+	fixture_destroy(&f, false);
+}
 static void test_shapes(void)
 {
 	struct fixture f;
@@ -773,6 +1054,7 @@ static void test_send_retry(unsigned kind)
 {
 	struct fixture f;
 	fixture_init(&f, 1024 * 1024, 8);
+	atomic_store(&f.metadata_mode, METADATA_BOTH);
 	unsigned slot = open_call(&f, 0);
 	atomic_store(&blocked_kind, kind);
 	request(&f, slot, 0, 1, 80);
@@ -790,6 +1072,9 @@ static void test_send_retry(unsigned kind)
 	CHECK(atomic_load(&f.client.messages[slot]) == 1 &&
 	      f.client.received_bytes[slot] == 80);
 	CHECK(atomic_load(&f.client.initial[slot]) == 1);
+	CHECK(atomic_load(&f.client.trailing[slot]) == 1);
+	check_metadata(&f.client, slot, 0, true);
+	check_metadata(&f.client, slot, 1, true);
 	CHECK(atomic_load(&f.business[route].seen[TR_RPC_RECORD_HALF_CLOSE]) ==
 	      1);
 	fixture_destroy(&f, false);
@@ -874,6 +1159,7 @@ static void test_cancel_and_stop(unsigned mode)
 	bool stopped = mode != 0;
 	struct fixture f;
 	fixture_init(&f, 1024 * 1024, 8);
+	atomic_store(&f.metadata_mode, METADATA_CANCEL);
 	unsigned slot = open_call(&f, 3);
 	CHECK(slot == 0);
 	atomic_store(&f.use_gate, true);
@@ -1363,6 +1649,11 @@ static void test_shared_executor_backpressure(void)
 
 int main(void)
 {
+	test_metadata_encoding();
+	test_metadata_queued_phase();
+	for (enum metadata_mode mode = METADATA_BOTH;
+	     mode <= METADATA_BAD_APPEND; ++mode)
+		test_metadata_error(mode);
 	test_open_admission_partial_and_timer();
 	test_open_admission_validation_boundary();
 	test_open_admission_clock_failure();

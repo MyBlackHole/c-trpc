@@ -14,8 +14,8 @@
 #include <string.h>
 #include <time.h>
 
-#define CALLS 7U
-#define METHODS 5U
+#define CALLS 12U
+#define METHODS 10U
 #define WAIT_SECONDS 15
 
 /* 故障只发生在真实 OPEN 已进入绑定接收后创建工作事件的 calloc。
@@ -58,7 +58,18 @@ int __wrap_tr_rpc_record_stream_receive_on_owner(
 	return ret;
 }
 
-enum business_mode { ECHO, BAD_BATCH, FINISHED_BATCH, BLOCKED, NO_JOB };
+enum business_mode {
+	ECHO,
+	BAD_BATCH,
+	FINISHED_BATCH,
+	BLOCKED,
+	NO_JOB,
+	DOUBLE_INITIAL,
+	INITIAL_CLOSED,
+	TRAILING_OPEN,
+	DUPLICATE_KEY,
+	BUSINESS_ERROR
+};
 struct fixture;
 struct method_context {
 	struct fixture *fixture;
@@ -70,6 +81,8 @@ struct call {
 	struct tr_rpc_v2_call_id identity;
 	unsigned index, opened, messages, halves, terminals;
 	unsigned writable, received, client_terminals;
+	unsigned initial, trailing;
+	enum business_mode mode;
 	enum tr_rpc_status status, client_status;
 	enum tr_rpc_v2_delivery delivery;
 	bool identified, entered, release, exited, cancelled;
@@ -177,12 +190,59 @@ static struct call *find_call(struct fixture *f, struct tr_rpc_v2_call_id id)
 static void check_lifecycle_reentry(struct fixture *f)
 {
 	struct tr_server *extra = NULL;
+	struct tr_rpc_semantic_stats before, stats;
 	assert(tr_server_start(f->server) == TR_ERR_STATE);
 	assert(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	assert(tr_server_destroy(f->server) == TR_ERR_STATE);
 	assert(tr_server_create_v2(NULL, NULL, 0, &extra) == TR_ERR_STATE);
 	assert(!extra);
 	assert(tr_client_destroy(f->clients[0]) == TR_ERR_STATE);
+	memset(&before, 0xa5, sizeof(before));
+	memcpy(&stats, &before, sizeof(stats));
+	assert(tr_server_get_rpc_semantic_stats(f->server, &stats) ==
+	       TR_ERR_STATE);
+	assert(!memcmp(&stats, &before, sizeof(stats)));
+	assert(tr_client_get_rpc_semantic_stats(f->clients[0], &stats) ==
+	       TR_ERR_STATE);
+	assert(!memcmp(&stats, &before, sizeof(stats)));
+}
+
+/* 只在外部控制线程的确定性屏障调用；已观察的业务终局独立于库计数。 */
+static void check_server_totals(struct fixture *f, uint64_t started)
+{
+	struct tr_rpc_semantic_stats expected = {0}, actual;
+	expected.calls_started = started;
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	for (unsigned i = 0; i < CALLS; ++i) {
+		const struct call *call = &f->calls[i];
+		if (!call->terminals)
+			continue;
+		assert(call->terminals == 1);
+		assert((unsigned)call->status < TR_RPC_STATUS_COUNT);
+		++expected.calls_finished;
+		++expected.final_status[call->status];
+	}
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+	assert(expected.calls_started >= expected.calls_finished);
+	expected.calls_inflight = started - expected.calls_finished;
+	assert(tr_server_get_rpc_semantic_stats(f->server, &actual) == TR_OK);
+	assert(actual.calls_started == expected.calls_started);
+	assert(actual.calls_finished == expected.calls_finished);
+	assert(actual.calls_inflight == expected.calls_inflight);
+	for (unsigned i = 0; i < TR_RPC_STATUS_COUNT; ++i)
+		assert(actual.final_status[i] == expected.final_status[i]);
+}
+
+static void set_metadata(struct tr_rpc_v2_reply *reply,
+                         enum tr_rpc_v2_metadata_phase phase)
+{
+	char key[] = "bin";
+	uint8_t value[] = {0, 255, (uint8_t)phase};
+	struct tr_rpc_metadata entry = {key, value, sizeof(value)};
+	assert(tr_rpc_v2_reply_set_metadata(reply, phase, &entry, 1) == TR_OK);
+	memset(key, 'q', sizeof(key));
+	memset(value, 0x55, sizeof(value));
+	memset(&entry, 0, sizeof(entry));
 }
 
 static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
@@ -212,6 +272,15 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 		++call->opened;
 		assert(pthread_cond_broadcast(&f->changed) == 0);
 		assert(pthread_mutex_unlock(&f->lock) == 0);
+		if (method->mode == INITIAL_CLOSED) {
+			assert(tr_rpc_v2_reply_set_metadata(
+			               reply, TR_RPC_V2_METADATA_INITIAL, NULL,
+			               0) == TR_OK);
+		} else if (method->mode == TRAILING_OPEN) {
+			/* OPEN
+			 * 普通批不选择终局，已设置的尾部不能悄悄跨事件保存。 */
+			set_metadata(reply, TR_RPC_V2_METADATA_TRAILING);
+		}
 		return TR_RPC_STATUS_OK;
 	}
 	call = find_call(f, id);
@@ -247,14 +316,52 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 	/* append 接管的是副本；业务仍拥有原存储，可以立即覆盖。 */
 	memset(copied, 0xcc, sizeof(copied));
 	if (method->mode == BAD_BATCH) {
+		set_metadata(reply, TR_RPC_V2_METADATA_INITIAL);
+		set_metadata(reply, TR_RPC_V2_METADATA_TRAILING);
 		response.len = 17;
 		assert(tr_rpc_v2_reply_append(reply, &response) ==
 		       TR_ERR_BAD_LENGTH);
 	} else if (method->mode == FINISHED_BATCH) {
+		set_metadata(reply, TR_RPC_V2_METADATA_INITIAL);
 		assert(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) ==
 		       TR_OK);
+		assert(tr_rpc_v2_reply_set_metadata(reply,
+		                                    TR_RPC_V2_METADATA_TRAILING,
+		                                    NULL, 0) == TR_ERR_STATE);
 		assert(tr_rpc_v2_reply_append(reply, &response) ==
 		       TR_ERR_STATE);
+	} else if (method->mode == DOUBLE_INITIAL) {
+		assert(tr_rpc_v2_reply_set_metadata(reply,
+		                                    TR_RPC_V2_METADATA_INITIAL,
+		                                    NULL, 0) == TR_OK);
+		/* 空列表也消费本批阶段；忽略第二次错误不能发布已有正文。 */
+		assert(tr_rpc_v2_reply_set_metadata(reply,
+		                                    TR_RPC_V2_METADATA_INITIAL,
+		                                    NULL, 0) == TR_ERR_STATE);
+	} else if (method->mode == INITIAL_CLOSED) {
+		assert(tr_rpc_v2_reply_set_metadata(reply,
+		                                    TR_RPC_V2_METADATA_INITIAL,
+		                                    NULL, 0) == TR_ERR_STATE);
+	} else if (method->mode == DUPLICATE_KEY) {
+		const struct tr_rpc_metadata entries[] = {{"same", NULL, 0},
+		                                          {"same", NULL, 0}};
+		assert(tr_rpc_v2_reply_set_metadata(
+		               reply, TR_RPC_V2_METADATA_INITIAL, entries, 2) ==
+		       TR_ERR_BAD_FLAGS);
+		assert(tr_rpc_v2_reply_set_metadata(reply,
+		                                    TR_RPC_V2_METADATA_TRAILING,
+		                                    NULL, 0) == TR_ERR_STATE);
+		/* 首个参数错误不能被后续业务错误改写。 */
+		return TR_RPC_STATUS_UNAVAILABLE;
+	} else if (method->mode == BUSINESS_ERROR) {
+		set_metadata(reply, TR_RPC_V2_METADATA_INITIAL);
+		set_metadata(reply, TR_RPC_V2_METADATA_TRAILING);
+		assert(tr_rpc_v2_reply_finish(
+		               reply, TR_RPC_STATUS_INVALID_ARGUMENT) == TR_OK);
+	} else if (method->mode == BLOCKED) {
+		assert(tr_rpc_v2_cancel_requested(cancel) == 1);
+		set_metadata(reply, TR_RPC_V2_METADATA_INITIAL);
+		set_metadata(reply, TR_RPC_V2_METADATA_TRAILING);
 	}
 	return TR_RPC_STATUS_OK;
 }
@@ -294,9 +401,41 @@ static void client_message(struct tr_rpc_v2_call handle,
 	(void)handle;
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	assert(!call->client_terminals && body->len <= sizeof(call->response));
+	assert(call->initial == 1 && !call->trailing);
 	memcpy(call->response, body->data, body->len);
 	call->response_size = body->len;
 	++call->received;
+	assert(pthread_cond_broadcast(&f->changed) == 0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+}
+
+static void client_metadata(struct tr_rpc_v2_call handle,
+                            enum tr_rpc_v2_metadata_phase phase,
+                            const struct tr_rpc_v2_metadata_view *view,
+                            void *arg)
+{
+	struct call *call = arg;
+	struct fixture *f = call->fixture;
+	(void)handle;
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	assert(!call->client_terminals);
+	if (call->mode == BUSINESS_ERROR) {
+		struct tr_rpc_bytes value;
+		const uint8_t expected[] = {0, 255, (uint8_t)phase};
+		assert(tr_rpc_v2_metadata_count(view) == 1);
+		assert(tr_rpc_v2_metadata_find(view, "bin", &value) == TR_OK);
+		assert(value.len == sizeof(expected));
+		assert(!memcmp(value.data, expected, sizeof(expected)));
+	} else {
+		assert(tr_rpc_v2_metadata_count(view) == 0);
+	}
+	if (phase == TR_RPC_V2_METADATA_INITIAL) {
+		assert(!call->initial && !call->received && !call->trailing);
+		++call->initial;
+	} else {
+		assert(phase == TR_RPC_V2_METADATA_TRAILING && !call->trailing);
+		++call->trailing;
+	}
 	assert(pthread_cond_broadcast(&f->changed) == 0);
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
@@ -398,9 +537,11 @@ static void call_start(struct fixture *f, unsigned index, unsigned client,
 	                                            .metadata_count = 1};
 	const struct tr_rpc_v2_client_callbacks callbacks = {
 	        .message = client_message,
+	        .metadata = client_metadata,
 	        .writable = client_writable,
 	        .terminal = client_terminal,
 	        .arg = call};
+	call->mode = method;
 	assert(tr_client_v2_call_start(f->clients[client], 7, method + 1,
 	                               method == NO_JOB ? NULL : &options,
 	                               &callbacks, &call->handle) == TR_OK);
@@ -433,6 +574,7 @@ static void check_result(struct call *call, enum tr_rpc_status status,
                          unsigned received)
 {
 	struct fixture *f = call->fixture;
+	unsigned expected_trailing = call->mode == BLOCKED ? 0U : 1U;
 	wait_counter(f, &call->terminals, 1);
 	wait_counter(f, &call->client_terminals, 1);
 	assert(pthread_mutex_lock(&f->lock) == 0);
@@ -440,6 +582,20 @@ static void check_result(struct call *call, enum tr_rpc_status status,
 	assert(call->status == status && call->client_status == status);
 	assert(call->delivery == TR_RPC_V2_DELIVERY_LIVE);
 	assert(call->received == received);
+	assert(call->initial ==
+	       (unsigned)(received || call->mode == INITIAL_CLOSED ||
+	                  call->mode == BUSINESS_ERROR));
+	/* NO_JOB 没有待清理的工作借用；正常连接以空错误 FINAL 交付资源
+	 * 拒绝。仍阻塞的取消调用先结束网络，不交付尾部元数据。 */
+	if (call->trailing != expected_trailing)
+		fprintf(stderr,
+		        "test_rpc_v2_server: index=%u mode=%u status=%u "
+		        "initial=%u "
+		        "trailing=%u expected_trailing=%u received=%u\n",
+		        call->index, (unsigned)call->mode,
+		        (unsigned)call->status, call->initial, call->trailing,
+		        expected_trailing, call->received);
+	assert(call->trailing == expected_trailing);
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
@@ -498,6 +654,26 @@ static void test_public_server(void)
 	check_result(&f.calls[4], TR_RPC_STATUS_RESOURCE_EXHAUSTED, 0);
 	assert(atomic_load(&failed_open_jobs) == 1);
 	assert(!f.calls[4].opened && !f.calls[4].messages);
+	check_server_totals(&f, 5);
+
+	static const struct {
+		enum business_mode mode;
+		enum tr_rpc_status status;
+	} metadata_cases[] = {
+	        {DOUBLE_INITIAL, TR_RPC_STATUS_FAILED_PRECONDITION},
+	        {INITIAL_CLOSED, TR_RPC_STATUS_FAILED_PRECONDITION},
+	        {TRAILING_OPEN, TR_RPC_STATUS_FAILED_PRECONDITION},
+	        {DUPLICATE_KEY, TR_RPC_STATUS_INVALID_ARGUMENT},
+	        {BUSINESS_ERROR, TR_RPC_STATUS_INVALID_ARGUMENT}};
+	for (unsigned i = 0;
+	     i < sizeof(metadata_cases) / sizeof(metadata_cases[0]); ++i) {
+		struct call *call = &f.calls[7U + i];
+		call_start(&f, call->index, 0, metadata_cases[i].mode);
+		if (metadata_cases[i].mode != TRAILING_OPEN)
+			send_or_half_close(call, &body);
+		check_result(call, metadata_cases[i].status, 0);
+	}
+	check_server_totals(&f, 10);
 
 	call_start(&f, 5, 0, BLOCKED);
 	send_or_half_close(&f.calls[5], &body);
@@ -505,20 +681,34 @@ static void test_public_server(void)
 	send_or_half_close(&f.calls[5], NULL);
 	assert(tr_rpc_v2_call_cancel(f.calls[5].handle) == TR_OK);
 	wait_counter(&f, &f.calls[5].client_terminals, 1);
+	/* 取消已经结束 Client，仍借用 request/reply 的 work 继续占据
+	 * 一次服务端 inflight；服务端计数在业务终局实际交付前不能完成。 */
+	check_server_totals(&f, 11);
 	release_work(&f.calls[5]);
 	check_result(&f.calls[5], TR_RPC_STATUS_CANCELLED, 0);
 	assert(f.calls[5].cancelled && !f.calls[5].halves);
+	check_server_totals(&f, 11);
 
 	call_start(&f, 6, 1, BLOCKED);
 	send_or_half_close(&f.calls[6], &body);
 	wait_entered(&f.calls[6]);
+	check_server_totals(&f, 12);
 	assert(tr_server_destroy(f.server) == TR_AGAIN);
+	struct tr_rpc_semantic_stats before, stats;
+	memset(&before, 0xa5, sizeof(before));
+	memcpy(&stats, &before, sizeof(stats));
+	assert(tr_server_get_rpc_semantic_stats(f.server, &stats) ==
+	       TR_ERR_STATE);
+	assert(!memcmp(&stats, &before, sizeof(stats)));
 	release_work(&f.calls[6]);
 	retry_destroy(&f, true);
+	assert(pthread_mutex_lock(&f.lock) == 0);
 	assert(f.calls[6].terminals == 1 && f.calls[6].cancelled);
 	assert(f.calls[6].status == TR_RPC_STATUS_CANCELLED);
 	assert(f.calls[6].delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
 	assert(f.calls[6].received == 0);
+	assert(f.calls[6].initial == 0 && f.calls[6].trailing == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
 	retry_destroy(&f, false);
 	f.clients[0] = f.clients[1];
 	f.clients[1] = NULL;
@@ -535,6 +725,8 @@ static void test_configuration(void)
 	        .descriptor = {7, 1, TR_RPC_MANY, TR_RPC_MANY, TR_RPC_CODEC_RAW,
 	                       TR_RPC_CODEC_RAW, TR_RPC_LANE_CONTROL, 33, 33},
 	        .work = work};
+	assert(tr_rpc_v2_reply_set_metadata(NULL, TR_RPC_V2_METADATA_INITIAL,
+	                                    NULL, 0) == TR_ERR_INVALID);
 	tr_server_config_init(&config);
 	config.limits.max_message_bytes = 32;
 	assert(tr_server_create_v2(&config, &method, 1, &server) ==

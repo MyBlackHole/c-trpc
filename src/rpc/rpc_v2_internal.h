@@ -15,4 +15,9 @@ int tr_rpc_v2_memory_limit(const struct tr_facade_limits *limits,
 void tr_rpc_v2_metadata_view_init(struct tr_rpc_v2_metadata_view *out,
                                   const uint8_t *data, size_t size);
 
+/* 编码到调用方提供的 512 字节暂存区；失败时不发布 size，暂存区内容
+ * 未定义。Client OPEN 与 Server 回复使用同一键名、重复项和长度规则。 */
+int tr_rpc_v2_metadata_encode(const struct tr_rpc_metadata *entries,
+                              size_t count, uint8_t *out, uint32_t *size);
+
 #endif

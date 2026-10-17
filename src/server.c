@@ -29,6 +29,7 @@
 #include "transport/group/pipeline_listener_internal.h"
 #include "server_record_internal.h"
 #include "rpc/rpc_record_client.h"
+#include "rpc/rpc_record_stats.h"
 #include "rpc/rpc_v2_internal.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
@@ -73,6 +74,9 @@ struct tr_server_shard {
 	struct tr_server_detached_peer *detached_peers;
 	struct tr_server_channel_stats retired_channel_stats;
 	struct tr_server_rpc_stats retired_rpc_stats;
+	/* 所属 owner 直接记账，寿命长于全部 peer。退役无需搬移快照；
+	 * 停止后的写入只发生在父线程 join 且统计入口关闭的清理域。 */
+	struct tr_rpc_record_semantic_counters record_semantic;
 };
 
 struct tr_server_detached_peer {
@@ -1536,6 +1540,9 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		        tr_runtime_shard_memory_budget(shard->runtime),
 		        &peer->record_rpc);
 		if (ret == TR_OK)
+			ret = tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+			        peer->record_rpc, &shard->record_semantic);
+		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_start_on_owner(
 			        peer->record_rpc);
 	} else {
@@ -2729,6 +2736,15 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 		stats->rpc.executor_queued_tasks_current += tasks.queued;
 		stats->rpc.executor_running_tasks_current += tasks.running;
 	}
+	if (shard->server->record_mode) {
+		struct tr_rpc_semantic_stats semantic;
+		int ret = tr_rpc_record_semantic_stats_read(
+		        &shard->record_semantic, &semantic);
+		if (ret != TR_OK)
+			return ret;
+		return tr_rpc_record_semantic_stats_merge(&stats->rpc.semantic,
+		                                          &semantic);
+	}
 
 	return TR_OK;
 }
@@ -2801,6 +2817,52 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	return TR_OK;
 }
 
+struct tr_server_record_semantic_request {
+	struct tr_server_shard *shard;
+	struct tr_rpc_semantic_stats *out;
+};
+
+static int tr_server_record_semantic_on_owner(void *arg)
+{
+	struct tr_server_record_semantic_request *request = arg;
+	/* 构造后的未启动分片由 call_or_stopped 的父锁串行化；运行中
+	 * 只在 owner 复制值，不采集队列、资源池或工作线程诊断。 */
+	return tr_rpc_record_semantic_stats_read(
+	        &request->shard->record_semantic, request->out);
+}
+
+static int tr_server_record_semantic_stats(struct tr_server *server,
+                                           struct tr_rpc_semantic_stats *out)
+{
+	struct tr_rpc_semantic_stats total = {0};
+	/* destroy 可先关闭 published，再等待已有工作退出。被禁止的
+	 * 回调查询必须只读 TLS 就返回，不能先触碰生命周期可变字段。 */
+	if (tr_server_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (!server->published || !server->runtime || !server->shards ||
+	    !server->shard_count)
+		return TR_ERR_STATE;
+	/* 全 Server 快照需要依次进入所有分片。统一限制到外部控制线程，
+	 * 不随 shard_count 改变回调合同；任一失败保持调用方 out 不变。 */
+	for (uint32_t i = 0; i < server->shard_count; ++i) {
+		struct tr_rpc_semantic_stats part;
+		struct tr_server_shard *shard = &server->shards[i];
+		struct tr_server_record_semantic_request request = {shard,
+		                                                    &part};
+		if (!shard->runtime)
+			return TR_ERR_STATE;
+		int ret = tr_reactor_call_or_stopped(
+		        tr_server_shard_reactor(shard),
+		        tr_server_record_semantic_on_owner, &request);
+		if (ret == TR_OK)
+			ret = tr_rpc_record_semantic_stats_merge(&total, &part);
+		if (ret != TR_OK)
+			return ret;
+	}
+	*out = total;
+	return TR_OK;
+}
+
 int tr_server_get_rpc_semantic_stats(
 	struct tr_server *server, struct tr_rpc_semantic_stats *out)
 {
@@ -2810,7 +2872,7 @@ int tr_server_get_rpc_semantic_stats(
 	if (!server || !out)
 		return TR_ERR_INVALID;
 	if (server->record_mode)
-		return TR_ERR_UNSUPPORTED;
+		return tr_server_record_semantic_stats(server, out);
 
 	memset(&stats, 0, sizeof(stats));
 	ret = tr_server_get_stats(server, &stats);

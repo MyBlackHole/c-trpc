@@ -2,6 +2,7 @@
 #define TR_RPC_RECORD_DISPATCH_H
 
 #include "rpc_record_router.h"
+#include "rpc_record_stats.h"
 #include "../execution/task_executor.h"
 #include "tr/rpc_v2.h"
 
@@ -76,6 +77,13 @@ struct tr_rpc_record_dispatch_stats {
  */
 int tr_rpc_record_reply_append(struct tr_rpc_record_reply *reply,
                                const void *data, size_t size);
+/* 与公共 reply_set_metadata 相同的有界复制、阶段与整批错误合同。
+ * INITIAL 的阶段状态在任务提交时固定；TRAILING 必须属于本次终局。
+ * 每阶段最多 512 字节，单独计入共享预算；不扩大正文限额。 */
+int tr_rpc_record_reply_set_metadata(struct tr_rpc_record_reply *reply,
+                                     enum tr_rpc_v2_metadata_phase phase,
+                                     const struct tr_rpc_metadata *entries,
+                                     size_t count);
 /* 选择本次回复的最终状态，重复选择返回STATE；不允许随后再追加正文。
  * 非OK终局丢弃本次正文。所有记录仍由原绑定验证基数及发送接受点。
  */
@@ -110,6 +118,18 @@ int tr_rpc_record_dispatch_create_on_owner(
         const struct tr_rpc_record_dispatch_config *config,
         tr_rpc_dispatch_terminal_fn terminal, void *arg,
         struct tr_memory_budget *budget, struct tr_rpc_record_dispatch **out);
+/* 默认在派发器内累计完整 OPEN 准入及业务终局。首次准入前可一次绑定
+ * 同 owner 的长寿命记账，不清零或搬移历史；停止清理仍写入借用对象。
+ * 未完成 OPEN/未知方法/准入期限拒绝不计。已经建立业务终局责任后，
+ * 调度或分配失败也计；finished 等原任务退出后在唯一终局通知前记录。
+ * get 只读取 owner 快照，不把提前网络终局或尚未退役的槽位当作完成。
+ */
+int tr_rpc_record_dispatch_bind_semantic_stats_on_owner(
+        struct tr_rpc_record_dispatch *dispatch,
+        struct tr_rpc_record_semantic_counters *counters);
+int tr_rpc_record_dispatch_get_semantic_stats_on_owner(
+        struct tr_rpc_record_dispatch *dispatch,
+        struct tr_rpc_semantic_stats *out);
 int tr_rpc_record_dispatch_admit_on_owner(
         struct tr_rpc_record_dispatch *dispatch, struct tr_stream_handle stream,
         struct tr_rpc_dispatch_handle *out);
