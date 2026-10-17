@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rpc_record_dispatch.h"
+#include "rpc_record_producer.h"
 #include "rpc_v2_internal.h"
 #include "../execution/reactor_internal.h"
 #include "../transport/channel/channel_internal.h"
@@ -25,12 +26,16 @@ struct tr_reply_metadata {
 };
 struct tr_rpc_record_reply {
 	struct tr_memory_budget *budget;
+	struct tr_rpc_record_producer_domain *producer_domain;
+	/* 只由当前 worker 创建/拥有，done 后移交调用；owner 在此之前
+	 * 不读取本字段。失败清理仍须关闭并归还这一份库内引用。 */
+	struct tr_rpc_v2_producer *producer;
 	struct tr_reply_body *head, *tail;
 	struct tr_reply_metadata initial, trailing;
 	size_t used, limit;
 	uint32_t count, max_count, max_message;
 	enum tr_rpc_status status;
-	bool finished, failed, headers_sent;
+	bool finished, failed, headers_sent, asynchronous;
 };
 struct tr_rpc_v2_cancel {
 	const struct tr_task_cancel *task;
@@ -79,7 +84,7 @@ int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
 		return TR_ERR_INVALID;
 	if (reply != tr_v2_active_reply)
 		return TR_ERR_STATE;
-	if (reply->record->finished ||
+	if (reply->record->asynchronous || reply->record->finished ||
 	    reply->record->status != TR_RPC_STATUS_OK)
 		return tr_reply_fail(reply->record, TR_ERR_STATE,
 		                     TR_RPC_STATUS_FAILED_PRECONDITION);
@@ -111,6 +116,36 @@ int tr_rpc_v2_reply_finish(struct tr_rpc_v2_reply *reply,
 	if (reply != tr_v2_active_reply)
 		return TR_ERR_STATE;
 	return tr_rpc_record_reply_finish(reply->record, status);
+}
+
+int tr_rpc_v2_reply_acquire_producer(struct tr_rpc_v2_reply *reply,
+                                     struct tr_rpc_v2_producer **out)
+{
+	struct tr_rpc_record_reply *record;
+	struct tr_rpc_v2_producer *producer = NULL;
+	int ret;
+	if (!reply || !out)
+		return TR_ERR_INVALID;
+	if (reply != tr_v2_active_reply)
+		return TR_ERR_STATE;
+	record = reply->record;
+	/* 导出是独占输出权的一次交接，失败不锁存当前 work。不能把已经
+	 * 生成的同步批次与来自其他线程的新命令混排。 */
+	if (record->asynchronous || record->finished || record->failed ||
+	    record->status != TR_RPC_STATUS_OK || record->count ||
+	    record->initial.set || record->trailing.set)
+		return TR_ERR_STATE;
+	if (!record->producer_domain)
+		return TR_ERR_UNSUPPORTED;
+	ret = tr_rpc_record_producer_create(record->producer_domain,
+	                                    record->max_message,
+	                                    record->headers_sent, &producer);
+	if (ret != TR_OK)
+		return ret;
+	record->producer = producer;
+	record->asynchronous = true;
+	*out = producer;
+	return TR_OK;
 }
 
 static int tr_dispatch_instance(uint64_t *out)
@@ -152,6 +187,7 @@ struct tr_dispatch_slot {
 	struct tr_rpc_route_handle route;
 	struct tr_stream_handle stream;
 	struct tr_dispatch_job *head, *tail, *submitted, *ready;
+	struct tr_rpc_v2_producer *producer;
 	struct tr_task_handle task;
 	/* 只在完整合法 OPEN 的准入和期限检查通过后设置。即使后续
 	 * job 分配失败，也已承担该方法的一次公共终局通知责任。 */
@@ -165,12 +201,19 @@ struct tr_dispatch_slot {
 	bool active, terminal, notified, headers_sent, final_accepted;
 	bool admission_failed;
 	bool semantic_started;
+	/* 单向切换后不因生产者关闭而恢复同步回复。公平轮转让回复背压
+	 * 与请求 work 的 FIFO 各自推进，不占用工作线程等待邮箱。 */
+	bool asynchronous, producer_turn;
+	/* owner 已观察到非法输出并锁定错误 FINAL；不能让新输入启动
+	 * work，或让已在运行的 work 改写该失败及其合法尾部。 */
+	bool producer_failed;
 };
 struct tr_rpc_record_dispatch {
 	struct tr_reactor *reactor;
 	struct tr_task_executor *executor;
 	struct tr_rpc_record_router *router;
 	struct tr_memory_budget *budget;
+	struct tr_rpc_record_producer_domain *producer_domain;
 	struct tr_dispatch_slot *slots;
 	struct tr_dispatch_method *methods;
 	struct tr_rpc_record_dispatch_config config;
@@ -182,7 +225,7 @@ struct tr_rpc_record_dispatch {
 	uint64_t instance;
 	uint32_t cursor;
 	unsigned depth;
-	bool stopping, cleanup;
+	bool stopping, cleanup, admitted;
 };
 
 static int tr_dispatch_owner(struct tr_rpc_record_dispatch *d)
@@ -281,7 +324,7 @@ int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
 	int ret;
 	if (!r)
 		return TR_ERR_INVALID;
-	if (r->finished || r->status != TR_RPC_STATUS_OK)
+	if (r->asynchronous || r->finished || r->status != TR_RPC_STATUS_OK)
 		return tr_reply_fail(r, TR_ERR_STATE,
 		                     TR_RPC_STATUS_FAILED_PRECONDITION);
 	if ((!data && size) || size > r->max_message ||
@@ -330,7 +373,8 @@ int tr_rpc_record_reply_set_metadata(struct tr_rpc_record_reply *reply,
 	int ret;
 	if (!reply)
 		return TR_ERR_INVALID;
-	if (reply->finished || reply->status != TR_RPC_STATUS_OK)
+	if (reply->asynchronous || reply->finished ||
+	    reply->status != TR_RPC_STATUS_OK)
 		return tr_reply_fail(reply, TR_ERR_STATE,
 		                     TR_RPC_STATUS_FAILED_PRECONDITION);
 	if (phase != TR_RPC_V2_METADATA_INITIAL &&
@@ -368,6 +412,9 @@ int tr_rpc_record_reply_set_metadata(struct tr_rpc_record_reply *reply,
 int tr_rpc_record_reply_finish(struct tr_rpc_record_reply *r,
                                enum tr_rpc_status status)
 {
+	if (r && r->asynchronous)
+		return tr_reply_fail(r, TR_ERR_STATE,
+		                     TR_RPC_STATUS_FAILED_PRECONDITION);
 	if (!r || status < TR_RPC_STATUS_OK ||
 	    status >= (int)TR_RPC_STATUS_COUNT)
 		return TR_ERR_INVALID;
@@ -397,6 +444,19 @@ static void tr_dispatch_drop_queued(struct tr_dispatch_slot *s)
 	}
 	s->tail = NULL;
 }
+
+static bool tr_dispatch_close_producer(struct tr_dispatch_slot *s)
+{
+	if (!s->producer)
+		return true;
+	/* 发送借用只持续到当前 step 的 complete。保留失败时的库内引用，
+	 * 不能在下层发送尚未返回时释放其邮箱。 */
+	if (tr_rpc_record_producer_close(s->producer) != TR_OK)
+		return false;
+	tr_rpc_record_producer_put(s->producer);
+	s->producer = NULL;
+	return true;
+}
 /* 路由已经终局不等于工作线程已经停止。只释放未提交/已交付的对象；
  * submitted 直到原执行器的 done 返回这里后才可以释放和通知用户。 */
 static void tr_dispatch_settle(struct tr_dispatch_slot *s)
@@ -411,6 +471,8 @@ static void tr_dispatch_settle(struct tr_dispatch_slot *s)
 		s->delivery = TR_RPC_RECORD_OWNER_STOPPED;
 		s->final_accepted = false;
 	}
+	if (!tr_dispatch_close_producer(s))
+		return;
 	tr_dispatch_drop_queued(s);
 	if (s->ready) {
 		tr_dispatch_free_job(s->ready);
@@ -540,7 +602,8 @@ static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 		status = TR_RPC_STATUS_INTERNAL;
 	if (status != TR_RPC_STATUS_OK && !reply->failed)
 		reply->status = status;
-	if (job->view.header.kind == TR_RPC_RECORD_HALF_CLOSE)
+	if (job->view.header.kind == TR_RPC_RECORD_HALF_CLOSE &&
+	    !reply->asynchronous)
 		reply->finished = true;
 	/* 尾部仅属于当前终局批次，不能静默丢弃或跨事件长期借用。显式
 	 * 业务错误同样形成终局，允许它携带此前设置的有效尾部元数据。 */
@@ -563,12 +626,26 @@ static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
 	struct tr_dispatch_job *job = arg;
 	struct tr_dispatch_slot *s = job->slot;
 	struct tr_rpc_record_dispatch *d = s->dispatch;
+	bool acquired = job->reply.producer != NULL;
 	(void)handle;
 	/* executor完成与本调用的submitted存储一一对应，路由在此之前不能退役。
 	 * 清理域须由reap先授权；外层不能先换owner交付，再追认授权。 */
 	s->submitted = NULL;
+	if (job->reply.producer) {
+		/* work 返回后才读取其可变结果。此前库内引用始终归 job；
+		 * 即使应用已归还自身引用，胶囊也能在此安全关闭或激活。 */
+		s->producer = job->reply.producer;
+		job->reply.producer = NULL;
+		s->asynchronous = true;
+	}
 	if (d->cleanup || s->terminal || d->stopping) {
+		(void)tr_dispatch_close_producer(s);
 		tr_dispatch_free_job(job);
+	} else if (s->producer_failed) {
+		/* 错误 FINAL 已由发送边界先选定。迟到的业务结果只清理，
+		 * 仍在本次完成边界检查期限，终局通知仍须等待这个 done。 */
+		tr_dispatch_free_job(job);
+		(void)tr_dispatch_live(s);
 	} else if (result.cancelled || result.work_status != TR_OK) {
 		enum tr_rpc_status status = TR_RPC_STATUS_INTERNAL;
 		if (result.cancelled)
@@ -580,7 +657,15 @@ static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
 	} else if (!tr_dispatch_live(s)) {
 		/* 工作完成不等于回复已经被接受；迟到成功只释放其拥有型结果。 */
 		tr_dispatch_free_job(job);
+	} else if (s->asynchronous && job->reply.status == TR_RPC_STATUS_OK) {
+		if (acquired && s->producer)
+			tr_rpc_record_producer_activate(s->producer);
+		/* 异步输出不占用已完成的输入事件，也不让邮箱背压阻塞
+		 * 后续请求。仍只在 done 后提交同调用的下一次 work。 */
+		tr_dispatch_free_job(job);
 	} else {
+		if (s->asynchronous)
+			(void)tr_dispatch_close_producer(s);
 		s->ready = job;
 		if (job->reply.finished)
 			tr_dispatch_drop_queued(s);
@@ -596,7 +681,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	struct tr_dispatch_slot *s = &d->slots[route.slot];
 	struct tr_dispatch_job *job;
 	size_t bytes, payload;
-	if (s->terminal || d->stopping ||
+	if (s->terminal || s->producer_failed || d->stopping ||
 	    (s->ready && s->ready->reply.finished))
 		return;
 	/* 解码和元数据验证可能跨过外层接收入口的取时边界。完整有效 OPEN
@@ -660,6 +745,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	job->bytes = bytes;
 	job->reply = (struct tr_rpc_record_reply){
 	        .budget = d->budget,
+	        .producer_domain = d->producer_domain,
 	        .limit = d->config.max_reply_bytes,
 	        .max_count = d->config.max_replies_per_event,
 	        .max_message = m->method.descriptor.max_response_bytes};
@@ -681,38 +767,141 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	s->tail = job;
 	++s->pending;
 }
-/* 一步只投递任务或发一条记录。结果背压期间不启动下一业务事件，因而
- * 每调用的输入与输出次序都可证明；不同调用仍可独立前进。 */
-static void tr_dispatch_step(struct tr_dispatch_slot *s)
+static bool tr_dispatch_submit(struct tr_dispatch_slot *s)
 {
 	struct tr_rpc_record_dispatch *d = s->dispatch;
+	struct tr_dispatch_job *job;
+	struct tr_task_spec spec;
+	int ret;
+	if (s->terminal || s->producer_failed || s->submitted || !s->head ||
+	    d->stopping)
+		return false;
+	job = s->head;
+	/* 排队期间前批可能已发 INITIAL 或导出生产者，只在实际提交时
+	 * 固定 worker 的快照。worker 不读取 owner 的可变槽位。 */
+	job->reply.headers_sent = s->headers_sent;
+	job->reply.asynchronous = s->asynchronous;
+	spec = (struct tr_task_spec){tr_dispatch_work, tr_dispatch_done, job};
+	ret = tr_task_executor_submit(d->executor, &spec, &s->task);
+	if (ret == TR_OK) {
+		s->head = job->next;
+		if (!s->head)
+			s->tail = NULL;
+		job->next = NULL;
+		s->submitted = job;
+		return true;
+	}
+	if (ret != TR_AGAIN) {
+		tr_dispatch_local_abort(s, TR_RPC_STATUS_UNAVAILABLE);
+		tr_dispatch_settle(s);
+		return true;
+	}
+	return false;
+}
+
+/* 返回 true 表示发送/终局状态已经前进。take 只借用一个邮箱命令；补
+ * 空 INITIAL 或传输 AGAIN 都不会提前归还消息容量。发送栈外 complete
+ * 后才可能关闭胶囊，避免路由终局重入释放仍在使用的正文或元数据。 */
+static bool tr_dispatch_producer_step(struct tr_dispatch_slot *s)
+{
+	struct tr_rpc_v2_producer *producer = s->producer;
+	struct tr_rpc_record_producer_command command;
+	struct tr_rpc_record_header header = {0};
+	struct tr_buffer *body;
+	const uint8_t *metadata;
+	int ret = tr_rpc_record_producer_take(producer, &command);
+	if (ret == TR_AGAIN)
+		return false;
+	if (ret != TR_OK) {
+		tr_dispatch_local_abort(s, ret == TR_ERR_CLOSED
+		                                   ? TR_RPC_STATUS_CANCELLED
+		                                   : TR_RPC_STATUS_INTERNAL);
+		tr_dispatch_settle(s);
+		return true;
+	}
+	header.kind = command.kind;
+	header.status = command.status;
+	header.metadata_size = command.metadata_size;
+	metadata = command.metadata;
+	body = command.body;
+	if (command.kind == TR_RPC_RECORD_MESSAGE) {
+		if (!s->headers_sent) {
+			header.kind = TR_RPC_RECORD_INITIAL_METADATA;
+			body = NULL;
+		} else {
+			header.codec_id = s->response_codec;
+			header.encoded_size = header.decoded_size =
+			        body ? body->len : 0;
+		}
+	}
+	ret = tr_rpc_record_router_send_on_owner(s->route, &header, metadata,
+	                                         &body);
+	tr_rpc_record_producer_complete(
+	        producer, ret == TR_OK && header.kind == command.kind);
+	if (ret == TR_OK) {
+		if (header.kind == TR_RPC_RECORD_INITIAL_METADATA)
+			s->headers_sent = true;
+		else if (header.kind == TR_RPC_RECORD_FINAL_STATUS)
+			s->final_accepted = true;
+	} else if (ret != TR_AGAIN) {
+		/* 与同步回复相同，基数失败转为合法错误 FINAL；原 FINAL
+		 * 已验证的尾部保留，失败的 MESSAGE/INITIAL 则不再发送。 */
+		if (ret == TR_ERR_STATE && !s->terminal &&
+		    !(command.kind == TR_RPC_RECORD_FINAL_STATUS &&
+		      command.status == TR_RPC_STATUS_INTERNAL)) {
+			int fail_ret = tr_rpc_record_producer_fail(
+			        producer, TR_RPC_STATUS_INTERNAL);
+			if (fail_ret == TR_OK)
+				s->producer_failed = true;
+			else
+				tr_dispatch_local_abort(
+				        s, fail_ret == TR_ERR_CLOSED
+				                   ? TR_RPC_STATUS_CANCELLED
+				                   : TR_RPC_STATUS_INTERNAL);
+			tr_dispatch_drop_queued(s);
+		} else {
+			tr_dispatch_local_abort(
+			        s, ret == TR_ERR_NOMEM
+			                   ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
+			                   : TR_RPC_STATUS_UNAVAILABLE);
+		}
+	}
+	tr_dispatch_settle(s);
+	return ret != TR_AGAIN || s->terminal;
+}
+
+/* 同步批次仍阻止下一 work 越过其回复；导出后，请求任务和生产者输出
+ * 公平交替。各方向内部保持 FIFO，任一侧的背压不阻止另一侧前进。 */
+static void tr_dispatch_step(struct tr_dispatch_slot *s)
+{
 	struct tr_dispatch_job *job = s->ready;
 	int ret;
 	if (!tr_dispatch_live(s)) {
 		tr_dispatch_settle(s);
 		return;
 	}
+	if (s->producer && tr_rpc_record_producer_abandoned(s->producer)) {
+		tr_dispatch_local_abort(s, TR_RPC_STATUS_CANCELLED);
+		tr_dispatch_settle(s);
+		return;
+	}
 	if (!job) {
-		struct tr_task_spec spec;
-		if (s->submitted || !s->head || d->stopping)
-			return;
-		job = s->head;
-		/* 前一批可能在本事件排队后才发送 INITIAL；只在实际提交时
-		 * 固定阶段状态，worker 不读取 owner 的可变槽位。 */
-		job->reply.headers_sent = s->headers_sent;
-		spec = (struct tr_task_spec){tr_dispatch_work, tr_dispatch_done,
-		                             job};
-		ret = tr_task_executor_submit(d->executor, &spec, &s->task);
-		if (ret == TR_OK) {
-			s->head = job->next;
-			if (!s->head)
-				s->tail = NULL;
-			job->next = NULL;
-			s->submitted = job;
-		} else if (ret != TR_AGAIN) {
-			tr_dispatch_local_abort(s, TR_RPC_STATUS_UNAVAILABLE);
-			tr_dispatch_settle(s);
+		bool tried_producer = false;
+		if (s->producer &&
+		    (s->producer_turn || s->submitted || !s->head)) {
+			tried_producer = true;
+			if (tr_dispatch_producer_step(s)) {
+				s->producer_turn = false;
+				return;
+			}
 		}
+		if (tr_dispatch_submit(s)) {
+			s->producer_turn = true;
+			return;
+		}
+		if (s->producer && !tried_producer)
+			(void)tr_dispatch_producer_step(s);
+		s->producer_turn = false;
 		return;
 	}
 	struct tr_rpc_record_reply *reply = &job->reply;
@@ -870,6 +1059,20 @@ fail:
 	(void)tr_memory_budget_release(budget, bytes + temporary);
 	return ret;
 }
+int tr_rpc_record_dispatch_bind_producers_on_owner(
+        struct tr_rpc_record_dispatch *d,
+        struct tr_rpc_record_producer_domain *domain)
+{
+	int ret = tr_dispatch_owner(d);
+	if (ret != TR_OK)
+		return ret;
+	if (!domain)
+		return TR_ERR_INVALID;
+	if (d->depth || d->stopping || d->producer_domain || d->admitted)
+		return TR_ERR_STATE;
+	d->producer_domain = domain;
+	return TR_OK;
+}
 int tr_rpc_record_dispatch_bind_semantic_stats_on_owner(
         struct tr_rpc_record_dispatch *d,
         struct tr_rpc_record_semantic_counters *counters)
@@ -917,6 +1120,7 @@ int tr_rpc_record_dispatch_admit_until_on_owner(
 	ret = tr_rpc_record_router_admit_on_owner(d->router, stream, &route);
 	if (ret != TR_OK)
 		return ret;
+	d->admitted = true;
 	struct tr_dispatch_slot *s = &d->slots[route.slot];
 	*s = (struct tr_dispatch_slot){.dispatch = d,
 	                               .route = route,
@@ -1055,10 +1259,10 @@ int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
 		return ret;
 	if (!out)
 		return TR_ERR_INVALID;
-	*out = (struct tr_rpc_dispatch_result){.status = s->status,
-	                                       .terminal = s->terminal,
-	        .final_accepted = s->final_accepted,
-	        .admission_failed = s->admission_failed};
+	out->status = s->status;
+	out->terminal = s->terminal;
+	out->final_accepted = s->final_accepted;
+	out->admission_failed = s->admission_failed;
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)
@@ -1067,7 +1271,7 @@ int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)
 	int ret = tr_dispatch_lookup(handle, &s);
 	if (ret != TR_OK)
 		return ret;
-	if (handle.dispatch->depth || !s->notified || s->pending)
+	if (handle.dispatch->depth || !s->notified || s->pending || s->producer)
 		return TR_ERR_STATE;
 	ret = tr_rpc_record_router_retire_on_owner(s->route);
 	if (ret == TR_OK)
@@ -1106,7 +1310,7 @@ int tr_rpc_record_dispatch_destroy_on_owner(struct tr_rpc_record_dispatch **p)
 			continue;
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_CANCELLED);
 		tr_dispatch_settle(s);
-		busy |= s->pending != 0;
+		busy |= s->pending != 0 || s->producer != NULL;
 	}
 	if (busy) {
 		--d->depth;
@@ -1135,6 +1339,10 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	d->cleanup = d->stopping = true;
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
 		struct tr_dispatch_slot *s = &d->slots[i];
+		/* 已激活胶囊立即关闭，不等原任务退出。尚在 work 内创建的
+		 * STAGED 对象仍只由 job 持有，交接前不能跨线程读取。 */
+		if (!tr_dispatch_close_producer(s))
+			busy = true;
 		tr_dispatch_drop_queued(s);
 		if (s->ready) {
 			tr_dispatch_free_job(s->ready);
@@ -1150,9 +1358,14 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 		return ret != TR_OK ? ret : TR_AGAIN;
 	++d->depth;
 	ret = tr_rpc_record_router_reap_stopped(&d->router);
-	for (uint32_t i = 0; i < d->config.capacity; ++i)
-		if (d->slots[i].active)
-			tr_dispatch_settle(&d->slots[i]);
+	for (uint32_t i = 0; i < d->config.capacity; ++i) {
+		struct tr_dispatch_slot *s = &d->slots[i];
+		if (s->active)
+			tr_dispatch_settle(s);
+		busy |= s->pending != 0 || s->producer != NULL;
+	}
 	--d->depth;
-	return ret == TR_OK ? tr_dispatch_free(p) : ret;
+	if (ret != TR_OK || busy)
+		return ret != TR_OK ? ret : TR_AGAIN;
+	return tr_dispatch_free(p);
 }

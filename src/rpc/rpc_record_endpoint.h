@@ -60,6 +60,11 @@ int tr_rpc_record_endpoint_start_on_owner(struct tr_rpc_record_endpoint *ep);
 int tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
         struct tr_rpc_record_endpoint *ep,
         struct tr_rpc_record_semantic_counters *counters);
+/* 首次 start 前一次借用宿主的共享 producer 域；所有绑定 Endpoint/TX
+ * 退出后宿主才可关闭该域，不能在对端退役时重置有限句柄配额。 */
+int tr_rpc_record_endpoint_bind_producers_on_owner(
+        struct tr_rpc_record_endpoint *ep,
+        struct tr_rpc_record_producer_domain *domain);
 
 /* 同时由数据、可写及定时器驱动；每次工作量受显式数量配置限制。
  * 重入错误以预分配槽位形成有界待处理队列，先于业务完成/发送处理；

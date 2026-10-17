@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/rpc/rpc_record_dispatch.h"
+#include "../src/rpc/rpc_record_producer.h"
 #include "../src/rpc/rpc_v2_internal.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/io/socket.h"
@@ -66,33 +67,56 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *out)
 	return 0;
 }
 static _Thread_local unsigned fail_at, allocations;
+struct gate;
+static void gate_wait(struct gate *g, bool worker);
+static _Thread_local struct gate *allocation_gate;
 static _Atomic bool fail_worker_malloc;
 static _Atomic(struct tr_channel *) observed_channel;
 static _Atomic unsigned blocked_kind, send_attempts[6];
+static _Atomic unsigned final_status_attempts[TR_RPC_STATUS_COUNT];
 static _Atomic uintptr_t retry_body;
+static _Atomic bool observe_real_retry;
 void *__wrap_malloc(size_t size)
 {
 	if ((fail_at && ++allocations == fail_at) ||
 	    (tr_task_in_worker_context() &&
 	     atomic_exchange(&fail_worker_malloc, false)))
 		return NULL;
+	if (allocation_gate) {
+		struct gate *gate = allocation_gate;
+		allocation_gate = NULL;
+		gate_wait(gate, true);
+	}
 	return __real_malloc(size);
 }
 void *__wrap_calloc(size_t n, size_t size)
 {
 	if (fail_at && ++allocations == fail_at)
 		return NULL;
+	if (allocation_gate) {
+		struct gate *gate = allocation_gate;
+		allocation_gate = NULL;
+		gate_wait(gate, true);
+	}
 	return __real_calloc(n, size);
 }
 int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
                            struct tr_buffer *const *buffers, uint32_t count)
 {
+	uintptr_t body = 0;
 	if (stream.channel == atomic_load(&observed_channel) && count &&
 	    buffers[0]->len >= TR_RPC_RECORD_HEADER_SIZE &&
 	    !memcmp(buffers[0]->data, "TRPC", 4)) {
 		unsigned kind = tr_get_le16(buffers[0]->data + 6);
 		CHECK(kind >= 1 && kind <= 5);
 		atomic_fetch_add(&send_attempts[kind], 1);
+		if (kind == TR_RPC_RECORD_FINAL_STATUS) {
+			uint32_t status = tr_get_le32(buffers[0]->data + 36);
+			CHECK(status < TR_RPC_STATUS_COUNT);
+			atomic_fetch_add(&final_status_attempts[status], 1);
+		}
+		if (kind == TR_RPC_RECORD_MESSAGE && count == 2)
+			body = (uintptr_t)buffers[1];
 		if (kind == atomic_load(&blocked_kind)) {
 			if (kind == TR_RPC_RECORD_MESSAGE && count == 2) {
 				uintptr_t prior = atomic_exchange(
@@ -103,7 +127,12 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 			return TR_AGAIN;
 		}
 	}
-	return __real_tr_stream_sendv(stream, buffers, count);
+	int ret = __real_tr_stream_sendv(stream, buffers, count);
+	if (ret == TR_AGAIN && body && atomic_load(&observe_real_retry)) {
+		uintptr_t prior = atomic_exchange(&retry_body, body);
+		CHECK(prior == 0 || prior == body);
+	}
+	return ret;
 }
 struct gate {
 	pthread_mutex_t lock;
@@ -161,6 +190,17 @@ static void gate_destroy(struct gate *g)
 	CHECK(pthread_mutex_destroy(&g->lock) == 0);
 }
 struct fixture;
+struct producer_case {
+	struct fixture *fixture;
+	struct tr_rpc_v2_producer *producer;
+	struct tr_rpc_v2_call_id id;
+	_Atomic unsigned active, acquired, seen[3], terminals;
+	int acquire_status, expected_acquire;
+	enum tr_rpc_status status;
+	enum tr_rpc_status message_status;
+	enum tr_rpc_v2_delivery delivery;
+	bool block_open, block_message, sync_after_acquire, zero_response;
+};
 struct method_context {
 	struct fixture *fixture;
 	unsigned index;
@@ -229,7 +269,71 @@ struct fixture {
 	_Atomic unsigned drive_turns;
 	unsigned batch;
 	uint64_t open_due;
+	uint64_t call_timeout;
+	struct producer_case *producer_case;
+	struct tr_rpc_record_producer_domain *producer_domain;
 };
+static enum tr_rpc_status producer_work(struct tr_rpc_v2_call_id call,
+                                        const struct tr_rpc_v2_request *request,
+                                        const struct tr_rpc_v2_cancel *cancel,
+                                        struct tr_rpc_v2_reply *reply,
+                                        void *arg)
+{
+	struct producer_case *c = arg;
+	enum tr_rpc_status result = TR_RPC_STATUS_OK;
+	CHECK(tr_task_in_worker_context());
+	CHECK(tr_rpc_record_dispatch_in_callback());
+	CHECK(atomic_fetch_add(&c->active, 1) == 0);
+	CHECK(request->kind <= TR_RPC_V2_REQUEST_HALF_CLOSE);
+	if (request->kind == TR_RPC_V2_REQUEST_OPEN) {
+		c->id = call;
+		c->acquire_status =
+		        tr_rpc_v2_reply_acquire_producer(reply, &c->producer);
+		CHECK(c->acquire_status == c->expected_acquire);
+		if (c->acquire_status == TR_OK) {
+			CHECK(c->producer);
+			CHECK(tr_rpc_v2_producer_wait_writable(
+			              c->producer, 1) == TR_ERR_STATE);
+		} else {
+			CHECK(!c->producer);
+			result = TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+		}
+		atomic_store(&c->acquired, 1);
+		if (c->block_open)
+			gate_wait(&c->fixture->gate, true);
+		if (c->sync_after_acquire) {
+			const struct tr_rpc_bytes empty = {NULL, 0};
+			CHECK(tr_rpc_v2_reply_append(reply, &empty) ==
+			      TR_ERR_STATE);
+		}
+	} else {
+		CHECK(!memcmp(&call, &c->id, sizeof(call)));
+		if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
+			for (size_t i = 0; i < request->body.len; ++i)
+				CHECK(request->body.data[i] ==
+				      (uint8_t)(i * 7 + 3));
+			if (c->block_message)
+				gate_wait(&c->fixture->gate, true);
+			result = c->message_status;
+		}
+	}
+	/* 取消沿用原 work 令牌；故意不合作返回，检验迟到结果只清理。 */
+	(void)cancel;
+	atomic_fetch_add(&c->seen[request->kind], 1);
+	CHECK(atomic_fetch_sub(&c->active, 1) == 1);
+	return result;
+}
+static void producer_terminal(struct tr_rpc_v2_call_id call,
+                              enum tr_rpc_status status,
+                              enum tr_rpc_v2_delivery delivery, void *arg)
+{
+	struct producer_case *c = arg;
+	CHECK(!memcmp(&call, &c->id, sizeof(call)));
+	CHECK(!atomic_load(&c->active));
+	c->status = status;
+	c->delivery = delivery;
+	CHECK(atomic_fetch_add(&c->terminals, 1) == 0);
+}
 static uint8_t metadata_byte(unsigned phase, size_t index)
 {
 	return (uint8_t)(index * 13U + phase * 17U + 3U);
@@ -410,7 +514,9 @@ static void server_terminal(struct tr_rpc_dispatch_handle handle,
 	CHECK(stream.slot < CAP && handle.dispatch == f->dispatch);
 	CHECK(handle.id.generation ==
 	      f->server.handles[stream.slot].id.generation);
-	CHECK(atomic_load(&f->business[handle.id.slot].active) == 0);
+	CHECK(atomic_load(f->producer_case
+	                          ? &f->producer_case->active
+	                          : &f->business[handle.id.slot].active) == 0);
 	CHECK((delivery == TR_RPC_RECORD_ON_OWNER) ==
 	      !!tr_reactor_in_owner_context_for(f->server.reactor));
 	if (delivery == TR_RPC_RECORD_ON_OWNER) {
@@ -619,9 +725,13 @@ static uint64_t drive(void *arg, uint64_t now)
 static int create_dispatch(void *arg)
 {
 	struct fixture *f = arg;
-	return tr_rpc_record_dispatch_create_on_owner(
+	int ret = tr_rpc_record_dispatch_create_on_owner(
 	        f->server.channel, f->executor, f->methods, 4, &f->config,
 	        server_terminal, f, &f->server.budget, &f->dispatch);
+	if (ret == TR_OK && f->producer_domain)
+		ret = tr_rpc_record_dispatch_bind_producers_on_owner(
+		        f->dispatch, f->producer_domain);
+	return ret;
 }
 static int start_server(void *arg)
 {
@@ -639,11 +749,16 @@ static int start_server(void *arg)
 	      TR_OK);
 	return TR_OK;
 }
-static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
+static void fixture_init_mode(struct fixture *f, uint64_t window,
+                              uint32_t pending, struct producer_case *producer,
+                              size_t producer_capacity)
 {
 	int a = -1, b = -1;
 	*f = (struct fixture){.config = {CAP, pending, 4, BODY * 4},
-	                      .batch = 2};
+	                      .batch = 2,
+	                      .producer_case = producer};
+	if (producer)
+		producer->fixture = f;
 	gate_init(&f->gate);
 	atomic_init(&f->use_gate, false);
 	atomic_init(&f->reject_method, 0);
@@ -664,12 +779,20 @@ static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
 		                       (i & 1) ? TR_RPC_MANY : TR_RPC_ONE,
 		                       TR_RPC_CODEC_RAW, TR_RPC_CODEC_RAW,
 		                       TR_LANE_BULK, BODY, BODY},
-		        .work = handler,
-		        .arg = &f->contexts[i]};
+		        .work = producer ? NULL : handler,
+		        .arg = producer ? (void *)producer : &f->contexts[i],
+		        .v2_work = producer ? producer_work : NULL,
+		        .v2_terminal = producer ? producer_terminal : NULL};
+		if (producer && producer->zero_response)
+			f->methods[i].descriptor.max_response_bytes = 0;
 	}
 	tcp_pair(&a, &b);
 	peer_init(&f->client, f, a, false, window);
 	peer_init(&f->server, f, b, true, window);
+	if (producer)
+		CHECK(tr_rpc_record_producer_domain_create(
+		              producer_capacity, &f->server.budget,
+		              &f->producer_domain) == TR_OK);
 	CHECK(tr_channel_wait_ready(f->client.channel, TR_LANE_BULK, 10000) ==
 	      TR_OK);
 	CHECK(tr_channel_wait_ready(f->server.channel, TR_LANE_BULK, 10000) ==
@@ -678,8 +801,15 @@ static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
 	atomic_store(&observed_channel, f->server.channel);
 	atomic_store(&blocked_kind, 0);
 	atomic_store(&retry_body, 0);
+	atomic_store(&observe_real_retry, false);
 	for (unsigned i = 0; i < 6; ++i)
 		atomic_store(&send_attempts[i], 0);
+	for (unsigned i = 0; i < TR_RPC_STATUS_COUNT; ++i)
+		atomic_store(&final_status_attempts[i], 0);
+}
+static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
+{
+	fixture_init_mode(f, window, pending, NULL, 0);
 }
 struct client_create {
 	struct fixture *f;
@@ -753,6 +883,7 @@ static void send_record(struct fixture *f, unsigned slot, unsigned method,
 		r.h.service_id = 7;
 		r.h.method_id = 9 + method;
 		r.h.metadata_size = 7;
+		r.h.remaining_timeout_ns = f->call_timeout;
 	} else if (kind == TR_RPC_RECORD_MESSAGE) {
 		r.h.codec_id = TR_RPC_CODEC_RAW;
 		r.h.encoded_size = r.h.decoded_size = (uint32_t)size;
@@ -849,6 +980,9 @@ static void fixture_destroy(struct fixture *f, bool stopped)
 		CHECK(tr_channel_destroy(peers[i]->channel) == TR_OK);
 		CHECK(tr_reactor_destroy(peers[i]->reactor) == TR_OK);
 		CHECK(tr_buffer_pool_destroy(&peers[i]->pool) == TR_OK);
+		if (peers[i]->server && f->producer_domain)
+			CHECK(tr_rpc_record_producer_domain_close(
+			              &f->producer_domain) == TR_OK);
 		CHECK(atomic_load(&peers[i]->budget.current_bytes) == 0);
 	}
 	gate_destroy(&f->gate);
@@ -1647,8 +1781,691 @@ static void test_shared_executor_backpressure(void)
 	fixture_destroy(&f, false);
 }
 
+static void producer_case_init(struct producer_case *c)
+{
+	*c = (struct producer_case){0};
+	atomic_init(&c->active, 0);
+	atomic_init(&c->acquired, 0);
+	atomic_init(&c->terminals, 0);
+	for (unsigned i = 0; i < 3; ++i)
+		atomic_init(&c->seen[i], 0);
+}
+static unsigned producer_open_method(struct fixture *f, struct producer_case *c,
+                                     unsigned method)
+{
+	unsigned slot = open_call(f, method);
+	send_record(f, slot, method, TR_RPC_RECORD_OPEN, 0);
+	wait_count(&c->acquired, 1);
+	return slot;
+}
+static unsigned producer_open(struct fixture *f, struct producer_case *c)
+{
+	return producer_open_method(f, c, 3);
+}
+static void producer_writable(struct tr_rpc_v2_producer *p)
+{
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 15000) == TR_OK);
+}
+static int producer_send_body(struct tr_rpc_v2_producer *p, uint32_t size)
+{
+	uint8_t data[BODY];
+	CHECK(size <= sizeof(data));
+	for (uint32_t i = 0; i < size; ++i)
+		data[i] = (uint8_t)(i * 7 + 3);
+	const struct tr_rpc_bytes body = {data, size};
+	int ret = tr_rpc_v2_producer_send(p, &body);
+	memset(data, 0xdd, sizeof(data));
+	return ret;
+}
+static int producer_metadata(struct tr_rpc_v2_producer *p, unsigned phase,
+                             enum tr_rpc_status status)
+{
+	char key[] = "k";
+	uint8_t value[TR_RPC_METADATA_MAX_BYTES - 4U];
+	struct tr_rpc_metadata entry = {key, value, sizeof(value)};
+	for (size_t i = 0; i < sizeof(value); ++i)
+		value[i] = metadata_byte(phase, i);
+	int ret =
+	        phase == 0
+	                ? tr_rpc_v2_producer_send_initial_metadata(p, &entry, 1)
+	                : tr_rpc_v2_producer_finish(p, status, &entry, 1);
+	memset(value, 0xdd, sizeof(value));
+	memset(key, 0xdd, sizeof(key));
+	memset(&entry, 0xdd, sizeof(entry));
+	return ret;
+}
+struct producer_semantic_snapshot {
+	struct fixture *fixture;
+	struct tr_rpc_semantic_stats value;
+};
+static int producer_semantic_on_owner(void *arg)
+{
+	struct producer_semantic_snapshot *s = arg;
+	return tr_rpc_record_dispatch_get_semantic_stats_on_owner(
+	        s->fixture->dispatch, &s->value);
+}
+static void producer_semantic(struct fixture *f, bool finished,
+                              enum tr_rpc_status status)
+{
+	struct producer_semantic_snapshot s = {.fixture = f};
+	CHECK(tr_reactor_call(f->server.reactor, producer_semantic_on_owner,
+	                      &s) == TR_OK);
+	CHECK(s.value.calls_started == 1 &&
+	      s.value.calls_finished == (uint64_t)finished &&
+	      s.value.calls_inflight == (uint64_t)!finished);
+	for (unsigned i = 0; i < TR_RPC_STATUS_COUNT; ++i)
+		CHECK(s.value.final_status[i] ==
+		      (uint64_t)(finished && i == (unsigned)status));
+}
+static int producer_owner_wait(void *arg)
+{
+	CHECK(tr_rpc_v2_producer_wait_writable(arg, 0) == TR_ERR_STATE);
+	return TR_OK;
+}
+static int resume_driver(void *arg)
+{
+	((struct fixture *)arg)->driving = true;
+	return TR_OK;
+}
+static int release_reserved_budget(void *arg)
+{
+	struct fixture *f = arg;
+	int ret = tr_memory_budget_release(&f->server.budget,
+	                                   f->metadata_reserved);
+	f->metadata_reserved = 0;
+	return ret;
+}
+static int reserve_producer_budget(void *arg)
+{
+	struct fixture *f = arg;
+	/* 与同步 metadata 故障夹具不同，此时创建 work 已完成交接，
+	 * owner 驱动已暂停，没有可替调用方消费预算的在途输入任务。 */
+	CHECK(!f->driving && snapshot(f) == TR_OK &&
+	      f->stats.active_calls == 1 && !f->stats.submitted_calls &&
+	      !f->stats.held_events && !f->stats.reply_calls);
+	uint64_t current = atomic_load(&f->server.budget.current_bytes);
+	CHECK(current < f->server.budget.limit_bytes);
+	f->metadata_reserved = f->server.budget.limit_bytes - current;
+	CHECK(tr_memory_budget_reserve(&f->server.budget,
+	                               f->metadata_reserved) == TR_OK);
+	return TR_OK;
+}
+static void producer_finished(struct fixture *f, struct producer_case *c,
+                              unsigned slot, enum tr_rpc_status status)
+{
+	wait_count(&f->client.terminals[slot], 1);
+	wait_count(&f->server.terminals[slot], 1);
+	wait_count(&c->terminals, 1);
+	CHECK(f->client.status[slot] == (uint32_t)status &&
+	      f->server.status[slot] == (uint32_t)status &&
+	      c->status == status);
+	CHECK(c->delivery == TR_RPC_V2_DELIVERY_LIVE);
+}
+static void test_producer_staged_and_retry(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.block_open = true;
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	gate_wait(&f.gate, false);
+	struct tr_rpc_v2_producer *p = c.producer;
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 0);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_ERR_TIMEOUT);
+	CHECK(tr_reactor_call(f.server.reactor, producer_owner_wait, p) ==
+	      TR_OK);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_INITIAL_METADATA);
+	CHECK(producer_metadata(p, 0, TR_RPC_STATUS_OK) == TR_OK);
+	CHECK(producer_send_body(p, 80) == TR_AGAIN);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_AGAIN);
+	producer_semantic(&f, false, TR_RPC_STATUS_OK);
+	CHECK(!atomic_load(&send_attempts[TR_RPC_RECORD_INITIAL_METADATA]));
+	gate_open(&f.gate);
+	wait_count(&send_attempts[TR_RPC_RECORD_INITIAL_METADATA], 10);
+	/* 邮箱在真实 work/done 交接后仍有背压，后续输入照常 FIFO 执行。
+	 * HALF_CLOSE 返回不再隐式结束异步响应。 */
+	send_record(&f, slot, 3, TR_RPC_RECORD_MESSAGE, 80);
+	send_record(&f, slot, 3, TR_RPC_RECORD_HALF_CLOSE, 0);
+	wait_count(&c.seen[TR_RPC_V2_REQUEST_MESSAGE], 1);
+	wait_count(&c.seen[TR_RPC_V2_REQUEST_HALF_CLOSE], 1);
+	CHECK(!atomic_load(&c.terminals));
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_ERR_TIMEOUT);
+	atomic_store(&blocked_kind, 0);
+	producer_writable(p);
+	wait_count(&f.client.initial[slot], 1);
+	CHECK(producer_metadata(p, 0, TR_RPC_STATUS_OK) == TR_ERR_STATE);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_MESSAGE);
+	CHECK(producer_send_body(p, 80) == TR_OK);
+	wait_count(&send_attempts[TR_RPC_RECORD_MESSAGE], 10);
+	CHECK(atomic_load(&retry_body) != 0);
+	CHECK(producer_send_body(p, 0) == TR_AGAIN);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_AGAIN);
+	atomic_store(&blocked_kind, 0);
+	producer_writable(p);
+	wait_count(&f.client.messages[slot], 1);
+	CHECK(producer_send_body(p, 0) == TR_OK);
+	producer_writable(p);
+	wait_count(&f.client.messages[slot], 2);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_FINAL_STATUS);
+	CHECK(producer_metadata(p, 1, TR_RPC_STATUS_PERMISSION_DENIED) ==
+	      TR_OK);
+	wait_count(&send_attempts[TR_RPC_RECORD_FINAL_STATUS], 10);
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 0);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_ERR_STATE);
+	CHECK(producer_send_body(p, 80) == TR_ERR_STATE);
+	atomic_store(&blocked_kind, 0);
+	producer_finished(&f, &c, slot, TR_RPC_STATUS_PERMISSION_DENIED);
+	CHECK(f.client.received_bytes[slot] == 80 &&
+	      atomic_load(&f.client.messages[slot]) == 2);
+	check_metadata(&f.client, slot, 0, true);
+	check_metadata(&f.client, slot, 1, true);
+	producer_semantic(&f, true, TR_RPC_STATUS_PERMISSION_DENIED);
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 1);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_ERR_CLOSED);
+	CHECK(producer_send_body(p, 0) == TR_ERR_CLOSED);
+	CHECK(tr_rpc_v2_producer_retain(p) == TR_OK);
+	tr_rpc_v2_producer_release(p);
+	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+static void test_producer_real_window(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	fixture_init_mode(&f, 128, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	CHECK(tr_reactor_call(f.client.reactor, hold_client, &f) == TR_OK);
+	atomic_store(&observe_real_retry, true);
+	CHECK(producer_send_body(p, 80) == TR_OK);
+	wait_count(&f.client.initial[slot], 1);
+	wait_count(&send_attempts[TR_RPC_RECORD_MESSAGE], 10);
+	CHECK(atomic_load(&blocked_kind) == 0 && atomic_load(&retry_body) != 0);
+	CHECK(!atomic_load(&f.client.messages[slot]));
+	CHECK(producer_send_body(p, 0) == TR_AGAIN);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_AGAIN);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_ERR_TIMEOUT);
+	CHECK(tr_reactor_call(f.client.reactor, release_client, &f) == TR_OK);
+	producer_writable(p);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) == TR_OK);
+	producer_finished(&f, &c, slot, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.messages[slot]) == 1 &&
+	      f.client.received_bytes[slot] == 80);
+	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+static void test_producer_failure_preserves_phase(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	CHECK(tr_reactor_call(f.server.reactor, pause_driver, &f) == TR_OK);
+	const struct tr_rpc_metadata bad[] = {{"same", NULL, 0},
+	                                      {"same", NULL, 0}};
+	CHECK(tr_rpc_v2_producer_send_initial_metadata(p, bad, 2) ==
+	      TR_ERR_BAD_FLAGS);
+	CHECK(tr_rpc_v2_producer_send(p, NULL) == TR_ERR_INVALID);
+	const struct tr_rpc_bytes invalid = {NULL, 1};
+	CHECK(tr_rpc_v2_producer_send(p, &invalid) == TR_ERR_INVALID);
+	uint8_t byte = 0;
+	const struct tr_rpc_bytes too_large = {&byte, BODY + 1};
+	CHECK(tr_rpc_v2_producer_send(p, &too_large) == TR_ERR_BAD_LENGTH);
+	allocations = 0;
+	fail_at = 1;
+	CHECK(producer_send_body(p, 80) == TR_ERR_NOMEM);
+	fail_at = 0;
+	CHECK(allocations != 0);
+	CHECK(tr_reactor_call(f.server.reactor, reserve_producer_budget, &f) ==
+	      TR_OK);
+	CHECK(producer_send_body(p, 80) == TR_ERR_NOMEM);
+	CHECK(atomic_load(&f.server.budget.current_bytes) ==
+	      f.server.budget.limit_bytes);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_OK);
+	CHECK(tr_reactor_call(f.server.reactor, release_reserved_budget, &f) ==
+	      TR_OK);
+	/* 分配/预算失败均未接受 MESSAGE，因此 INITIAL 仍可设置。 */
+	CHECK(producer_metadata(p, 0, TR_RPC_STATUS_OK) == TR_OK);
+	CHECK(tr_reactor_call(f.server.reactor, resume_driver, &f) == TR_OK);
+	producer_writable(p);
+	CHECK(producer_send_body(p, 80) == TR_OK);
+	producer_writable(p);
+	CHECK(tr_rpc_v2_producer_finish(p,
+	                                (enum tr_rpc_status)TR_RPC_STATUS_COUNT,
+	                                NULL, 0) == TR_ERR_INVALID);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, bad, 2) ==
+	      TR_ERR_BAD_FLAGS);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_OK);
+	CHECK(producer_metadata(p, 1, TR_RPC_STATUS_OK) == TR_OK);
+	producer_finished(&f, &c, slot, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.messages[slot]) == 1);
+	check_metadata(&f.client, slot, 0, true);
+	check_metadata(&f.client, slot, 1, true);
+	producer_semantic(&f, true, TR_RPC_STATUS_OK);
+	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+
+struct producer_waiter {
+	struct tr_rpc_v2_producer *producer;
+	_Atomic unsigned entered;
+	int result;
+};
+static void *producer_wait_thread(void *arg)
+{
+	struct producer_waiter *waiter = arg;
+	atomic_store(&waiter->entered, 1);
+	waiter->result =
+	        tr_rpc_v2_producer_wait_writable(waiter->producer, 15000);
+	tr_rpc_v2_producer_release(waiter->producer);
+	return NULL;
+}
+static void test_producer_cancel_or_stop(bool stopped)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.block_open = true;
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	CHECK(slot == 0);
+	gate_wait(&f.gate, false);
+	struct tr_rpc_v2_producer *p = c.producer;
+	CHECK(producer_send_body(p, 80) == TR_OK);
+	CHECK(tr_rpc_v2_producer_retain(p) == TR_OK);
+	struct producer_waiter waiter = {.producer = p};
+	atomic_init(&waiter.entered, 0);
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, producer_wait_thread, &waiter) ==
+	      0);
+	wait_count(&waiter.entered, 1);
+	if (!stopped) {
+		CHECK(tr_reactor_call(f.server.reactor, cancel_first, &f) ==
+		      TR_OK);
+		CHECK(!atomic_load(&c.terminals));
+		producer_semantic(&f, false, TR_RPC_STATUS_CANCELLED);
+		gate_open(&f.gate);
+		wait_count(&c.terminals, 1);
+		wait_count(&f.server.terminals[slot], 1);
+		CHECK(c.status == TR_RPC_STATUS_CANCELLED &&
+		      c.delivery == TR_RPC_V2_DELIVERY_LIVE);
+		producer_semantic(&f, true, TR_RPC_STATUS_CANCELLED);
+	} else {
+		CHECK(tr_reactor_call(f.server.reactor, disable_peer,
+		                      &f.server) == TR_OK);
+		CHECK(tr_reactor_call(f.server.reactor, disable_driver, &f) ==
+		      TR_OK);
+		CHECK(tr_reactor_stop(f.server.reactor) == TR_OK);
+		CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) ==
+		      TR_AGAIN);
+		CHECK(!atomic_load(&c.terminals));
+		CHECK(tr_task_executor_stop(f.executor, TR_TASK_CANCEL) ==
+		      TR_OK);
+		CHECK(tr_task_executor_adopt_cleanup(f.executor) == TR_OK);
+		gate_open(&f.gate);
+		uint64_t until = now_ms() + 15000;
+		int ret;
+		while ((ret = tr_task_executor_join(f.executor)) == TR_AGAIN) {
+			CHECK(now_ms() < until);
+			sched_yield();
+		}
+		CHECK(ret == TR_OK);
+		size_t delivered;
+		CHECK(tr_task_executor_dispatch(f.executor, 8, &delivered) ==
+		      TR_OK);
+		CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) ==
+		      TR_OK);
+		CHECK(tr_task_executor_destroy(&f.executor) == TR_OK);
+		CHECK(atomic_load(&c.terminals) == 1 &&
+		      c.status == TR_RPC_STATUS_CANCELLED &&
+		      c.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	}
+	CHECK(pthread_join(thread, NULL) == 0);
+	CHECK(waiter.result == TR_ERR_CLOSED);
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 1);
+	CHECK(!atomic_load(&send_attempts[TR_RPC_RECORD_MESSAGE]));
+	fixture_destroy(&f, stopped);
+	CHECK(tr_rpc_v2_producer_wait_writable(p, 0) == TR_ERR_CLOSED);
+	CHECK(producer_send_body(p, 80) == TR_ERR_CLOSED);
+	tr_rpc_v2_producer_release(p);
+}
+static int producer_idle_on_owner(void *arg)
+{
+	struct fixture *f = arg;
+	struct tr_task_executor_stats stats;
+	size_t delivered;
+	CHECK(tr_task_executor_dispatch(f->executor, 8, &delivered) == TR_OK);
+	CHECK(tr_rpc_record_dispatch_pump_on_owner(f->dispatch, CAP) == TR_OK);
+	CHECK(tr_task_executor_get_stats(f->executor, &stats) == TR_OK);
+	return stats.outstanding ? TR_AGAIN : TR_OK;
+}
+static void producer_idle(struct fixture *f)
+{
+	uint64_t until = now_ms() + 15000;
+	int ret;
+	while ((ret = tr_reactor_call(f->server.reactor, producer_idle_on_owner,
+	                              f)) == TR_AGAIN) {
+		CHECK(now_ms() < until);
+		sched_yield();
+	}
+	CHECK(ret == TR_OK);
+}
+static void test_producer_work_terminal_race(bool work_first)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.block_message = !work_first;
+	c.message_status = TR_RPC_STATUS_PERMISSION_DENIED;
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	if (work_first)
+		atomic_store(&blocked_kind, TR_RPC_RECORD_FINAL_STATUS);
+	if (!work_first) {
+		send_record(&f, slot, 3, TR_RPC_RECORD_MESSAGE, 80);
+		gate_wait(&f.gate, false);
+	}
+	CHECK(producer_metadata(p, 1, TR_RPC_STATUS_OK) == TR_OK);
+	if (work_first) {
+		wait_count(&send_attempts[TR_RPC_RECORD_FINAL_STATUS], 10);
+		send_record(&f, slot, 3, TR_RPC_RECORD_MESSAGE, 80);
+		wait_count(&c.seen[TR_RPC_V2_REQUEST_MESSAGE], 1);
+		/* 等原生 executor outstanding==0，证明 work/done 的错误已经
+		 * 收敛；不能用 work 返回前的 seen 标志抢跑释放 FINAL 背压。 */
+		producer_idle(&f);
+		CHECK(!atomic_load(&c.terminals));
+		atomic_store(&blocked_kind, 0);
+	} else {
+		wait_count(&f.client.terminals[slot], 1);
+		CHECK(!atomic_load(&c.terminals) &&
+		      atomic_load(&c.active) == 1);
+		producer_semantic(&f, false, TR_RPC_STATUS_OK);
+		gate_open(&f.gate);
+	}
+	enum tr_rpc_status status =
+	        work_first ? TR_RPC_STATUS_PERMISSION_DENIED : TR_RPC_STATUS_OK;
+	producer_finished(&f, &c, slot, status);
+	check_metadata(&f.client, slot, 1, !work_first);
+	producer_semantic(&f, true, status);
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 1);
+	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+static void test_producer_release(bool finished)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	if (finished) {
+		atomic_store(&blocked_kind, TR_RPC_RECORD_FINAL_STATUS);
+		CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+		      TR_OK);
+		wait_count(&send_attempts[TR_RPC_RECORD_FINAL_STATUS], 10);
+	} else {
+		CHECK(tr_reactor_call(f.server.reactor, pause_driver, &f) ==
+		      TR_OK);
+		CHECK(producer_send_body(p, 80) == TR_OK);
+		CHECK(tr_rpc_v2_producer_retain(p) == TR_OK);
+		tr_rpc_v2_producer_release(p);
+		CHECK(tr_rpc_v2_producer_is_closed(p) == 0);
+	}
+	tr_rpc_v2_producer_release(p);
+	c.producer = NULL;
+	if (finished) {
+		producer_semantic(&f, false, TR_RPC_STATUS_OK);
+		atomic_store(&blocked_kind, 0);
+		producer_finished(&f, &c, slot, TR_RPC_STATUS_OK);
+		producer_semantic(&f, true, TR_RPC_STATUS_OK);
+	} else {
+		CHECK(tr_reactor_call(f.server.reactor, resume_driver, &f) ==
+		      TR_OK);
+		wait_count(&c.terminals, 1);
+		wait_count(&f.server.terminals[slot], 1);
+		CHECK(c.status == TR_RPC_STATUS_CANCELLED);
+		CHECK(!atomic_load(&send_attempts[TR_RPC_RECORD_MESSAGE]));
+		producer_semantic(&f, true, TR_RPC_STATUS_CANCELLED);
+	}
+	fixture_destroy(&f, false);
+}
+struct producer_replacement {
+	struct fixture *fixture;
+	struct producer_case *next;
+};
+static int producer_replace_dispatch(void *arg)
+{
+	struct producer_replacement *r = arg;
+	struct fixture *f = r->fixture;
+	CHECK(tr_rpc_record_dispatch_destroy_on_owner(&f->dispatch) == TR_OK);
+	memset(f->server.handles, 0, sizeof(f->server.handles));
+	f->producer_case = r->next;
+	r->next->fixture = f;
+	for (unsigned i = 0; i < 4; ++i) {
+		f->methods[i].arg = r->next;
+		f->methods[i].descriptor.max_response_bytes =
+		        r->next->zero_response ? 0 : BODY;
+	}
+	return create_dispatch(f);
+}
+static void test_producer_quota_survives_dispatch(void)
+{
+	struct fixture f;
+	struct producer_case cases[3];
+	for (unsigned i = 0; i < 3; ++i)
+		producer_case_init(&cases[i]);
+	cases[1].expected_acquire = TR_AGAIN;
+	cases[2].zero_response = true;
+	fixture_init_mode(&f, 1024 * 1024, 8, &cases[0], 1);
+	unsigned slot = producer_open(&f, &cases[0]);
+	struct tr_rpc_v2_producer *retained = cases[0].producer;
+	producer_writable(retained);
+	CHECK(tr_rpc_v2_producer_finish(retained, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_OK);
+	producer_finished(&f, &cases[0], slot, TR_RPC_STATUS_OK);
+	CHECK(tr_rpc_v2_producer_is_closed(retained) == 1);
+	for (unsigned i = 1; i < 3; ++i) {
+		struct producer_replacement r = {&f, &cases[i]};
+		CHECK(tr_reactor_call(f.server.reactor,
+		                      producer_replace_dispatch, &r) == TR_OK);
+		slot = producer_open(&f, &cases[i]);
+		if (i == 1) {
+			CHECK(cases[i].acquire_status == TR_AGAIN &&
+			      !cases[i].producer);
+			producer_finished(&f, &cases[i], slot,
+			                  TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+			/* 新 dispatch 不重置共享租约；归还旧 closed
+			 * 句柄才恢复。 */
+			tr_rpc_v2_producer_release(retained);
+		} else {
+			producer_writable(cases[i].producer);
+			CHECK(producer_send_body(cases[i].producer, 1) ==
+			      TR_ERR_BAD_LENGTH);
+			CHECK(producer_send_body(cases[i].producer, 0) ==
+			      TR_OK);
+			producer_writable(cases[i].producer);
+			CHECK(tr_rpc_v2_producer_finish(cases[i].producer,
+			                                TR_RPC_STATUS_OK, NULL,
+			                                0) == TR_OK);
+			producer_finished(&f, &cases[i], slot,
+			                  TR_RPC_STATUS_OK);
+			CHECK(atomic_load(&f.client.messages[slot]) == 1 &&
+			      f.client.received_bytes[slot] == 0);
+			tr_rpc_v2_producer_release(cases[i].producer);
+		}
+	}
+	fixture_destroy(&f, false);
+}
+struct producer_copy {
+	struct tr_rpc_v2_producer *producer;
+	struct gate *gate;
+	int result;
+};
+static void *producer_copy_thread(void *arg)
+{
+	struct producer_copy *copy = arg;
+	allocation_gate = copy->gate;
+	copy->result = producer_send_body(copy->producer, BODY);
+	allocation_gate = NULL;
+	tr_rpc_v2_producer_release(copy->producer);
+	return NULL;
+}
+static void test_producer_copy_outlives_domain_close(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	struct gate copy_gate;
+	producer_case_init(&c);
+	gate_init(&copy_gate);
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	CHECK(tr_reactor_call(f.server.reactor, pause_driver, &f) == TR_OK);
+	uint64_t baseline = atomic_load(&f.server.budget.current_bytes);
+	CHECK(tr_rpc_v2_producer_retain(p) == TR_OK);
+	struct producer_copy copy = {p, &copy_gate, 0};
+	pthread_t thread;
+	CHECK(pthread_create(&thread, NULL, producer_copy_thread, &copy) == 0);
+	gate_wait(&copy_gate, false);
+	CHECK(atomic_load(&f.server.budget.current_bytes) >= baseline + BODY);
+	CHECK(producer_send_body(p, 0) == TR_AGAIN);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_AGAIN);
+	/* malloc 屏障位于已占 building/预算之后、复制之前。销毁不能等
+	 * 此应用线程，迟到分配及复制只能访问独立 domain 和应用引用。 */
+	fixture_destroy(&f, false);
+	CHECK(atomic_load(&c.terminals) == 1 &&
+	      f.server.status[slot] == TR_RPC_STATUS_CANCELLED);
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 1);
+	/* 立即复用原预算存储；错误的迟到 upstream release 会改动新账。 */
+	uint64_t reused = f.server.budget.limit_bytes;
+	CHECK(tr_memory_budget_reserve(&f.server.budget, reused) == TR_OK);
+	gate_open(&copy_gate);
+	CHECK(pthread_join(thread, NULL) == 0);
+	CHECK(copy.result == TR_ERR_CLOSED);
+	tr_rpc_v2_producer_release(p);
+	CHECK(atomic_load(&f.server.budget.current_bytes) == reused);
+	CHECK(tr_memory_budget_release(&f.server.budget, reused) == TR_OK);
+	gate_destroy(&copy_gate);
+}
+static void test_producer_deadline(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	f.call_timeout = UINT64_C(60000000000);
+	unsigned slot = producer_open(&f, &c);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_MESSAGE);
+	CHECK(producer_send_body(p, 80) == TR_OK);
+	wait_count(&send_attempts[TR_RPC_RECORD_MESSAGE], 10);
+	CHECK(tr_reactor_call(f.server.reactor, pause_driver, &f) == TR_OK);
+	struct admission_step step = {
+	        .fixture = &f,
+	        .slot = slot,
+	        .pump = true,
+	        .clock = {.now = (now_ms() + 120000) * UINT64_C(1000000)}};
+	admission_step(&step);
+	CHECK(step.result.terminal &&
+	      step.result.status == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      !step.result.final_accepted);
+	wait_count(&c.terminals, 1);
+	CHECK(c.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	CHECK(tr_rpc_v2_producer_is_closed(p) == 1);
+	producer_semantic(&f, true, TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	atomic_store(&blocked_kind, 0);
+	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+static void test_producer_rejects_sync_write(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.sync_after_acquire = true;
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	producer_finished(&f, &c, slot, TR_RPC_STATUS_FAILED_PRECONDITION);
+	CHECK(tr_rpc_v2_producer_is_closed(c.producer) == 1);
+	CHECK(!atomic_load(&f.client.messages[slot]));
+	producer_semantic(&f, true, TR_RPC_STATUS_FAILED_PRECONDITION);
+	tr_rpc_v2_producer_release(c.producer);
+	fixture_destroy(&f, false);
+}
+static void test_producer_cardinality_fallback_stops_work(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.block_message = true;
+	c.message_status = TR_RPC_STATUS_PERMISSION_DENIED;
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	/* 方法 2 是 MANY 请求 / ONE 响应；零 MESSAGE 的 OK FINAL 非法。 */
+	unsigned slot = producer_open_method(&f, &c, 2);
+	struct tr_rpc_v2_producer *p = c.producer;
+	producer_writable(p);
+	send_record(&f, slot, 2, TR_RPC_RECORD_MESSAGE, 80);
+	gate_wait(&f.gate, false);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_FINAL_STATUS);
+	CHECK(producer_metadata(p, 1, TR_RPC_STATUS_OK) == TR_OK);
+	/* wrapper 观察实际送入 transport 的状态，证明 owner 已经把
+	 * 非法 OK 改成 INTERNAL；不以 sleep 或发布 finish 代替该屏障。 */
+	wait_count(&final_status_attempts[TR_RPC_STATUS_INTERNAL], 10);
+	CHECK(!atomic_load(&final_status_attempts[TR_RPC_STATUS_OK]));
+	unsigned packets = atomic_load(&f.server.packets);
+	send_record(&f, slot, 2, TR_RPC_RECORD_MESSAGE, 80);
+	send_record(&f, slot, 2, TR_RPC_RECORD_HALF_CLOSE, 0);
+	wait_count(&f.server.packets, packets + 2);
+	CHECK(atomic_load(&c.active) == 1 && !atomic_load(&c.terminals));
+	producer_semantic(&f, false, TR_RPC_STATUS_INTERNAL);
+	gate_open(&f.gate);
+	wait_count(&c.seen[TR_RPC_V2_REQUEST_MESSAGE], 1);
+	producer_idle(&f);
+	CHECK(atomic_load(&c.seen[TR_RPC_V2_REQUEST_MESSAGE]) == 1 &&
+	      !atomic_load(&c.seen[TR_RPC_V2_REQUEST_HALF_CLOSE]));
+	CHECK(!atomic_load(
+	        &final_status_attempts[TR_RPC_STATUS_PERMISSION_DENIED]));
+	CHECK(!atomic_load(&c.terminals));
+	atomic_store(&blocked_kind, 0);
+	producer_finished(&f, &c, slot, TR_RPC_STATUS_INTERNAL);
+	check_metadata(&f.client, slot, 1, true);
+	producer_semantic(&f, true, TR_RPC_STATUS_INTERNAL);
+	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+
 int main(void)
 {
+	test_producer_staged_and_retry();
+	test_producer_real_window();
+	test_producer_failure_preserves_phase();
+	test_producer_cancel_or_stop(false);
+	test_producer_cancel_or_stop(true);
+	test_producer_work_terminal_race(false);
+	test_producer_work_terminal_race(true);
+	test_producer_release(false);
+	test_producer_release(true);
+	test_producer_quota_survives_dispatch();
+	test_producer_copy_outlives_domain_close();
+	test_producer_deadline();
+	test_producer_rejects_sync_write();
+	test_producer_cardinality_fallback_stops_work();
 	test_metadata_encoding();
 	test_metadata_queued_phase();
 	for (enum metadata_mode mode = METADATA_BOTH;
