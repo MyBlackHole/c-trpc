@@ -645,3 +645,27 @@ target("test_rpc_record_endpoint_tcp")
                 "-Wl,--wrap=epoll_wait", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
+
+target("test_server_record")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_server_record.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_reactor_start",
+                "-Wl,--wrap=tr_reactor_timer_arm",
+                "-Wl,--wrap=tr_task_executor_create",
+                "-Wl,--wrap=tr_task_executor_start",
+                "-Wl,--wrap=tr_task_executor_join",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=tr_task_executor_cancel",
+                "-Wl,--wrap=tr_task_executor_dispatch",
+                "-Wl,--wrap=tr_rpc_executor_group_create",
+                "-Wl,--wrap=tr_rpc_record_endpoint_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_endpoint_start_on_owner",
+                "-Wl,--wrap=tr_rpc_record_endpoint_close_on_owner",
+                "-Wl,--wrap=tr_rpc_record_endpoint_reap_stopped",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=pthread_create", "-Wl,--wrap=epoll_wait",
+                {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()

@@ -13,6 +13,7 @@ struct tr_runtime_shard;
 struct tr_rpc_executor_group;
 struct tr_channel;
 struct tr_rpc_endpoint;
+struct tr_rpc_record_endpoint;
 
 struct tr_runtime_peer {
 	int used;
@@ -23,6 +24,9 @@ struct tr_runtime_peer {
 	struct tr_conn_handle connection;
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
+	/* 显式 V2 Server 独占此分支；回滚关闭失败仍保留精确连接供重试。 */
+	struct tr_rpc_record_endpoint *record_rpc;
+	int record_closing;
 };
 
 struct tr_runtime_peer_stats {
