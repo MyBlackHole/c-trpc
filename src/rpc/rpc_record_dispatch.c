@@ -1259,10 +1259,10 @@ int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
 		return ret;
 	if (!out)
 		return TR_ERR_INVALID;
-	*out = (struct tr_rpc_dispatch_result){.status = s->status,
-	                                       .terminal = s->terminal,
-	        .final_accepted = s->final_accepted,
-	        .admission_failed = s->admission_failed};
+	out->status = s->status;
+	out->terminal = s->terminal;
+	out->final_accepted = s->final_accepted;
+	out->admission_failed = s->admission_failed;
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)
