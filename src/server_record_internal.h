@@ -15,6 +15,8 @@
  * limits.max_message_bytes 是整条传输记录的上限；本阶段要求它和初始
  * 窗口至少容纳 48 字节固定头及最大控制元数据，并容纳每个方法最大
  * 正文加固定头。对端另有自身接收限制；未解决任意 L>W 的发送活性。
+ * 更新阈值 T 还须满足 T <= W-min(W,max_message_bytes)+1，W 为初始
+ * 窗口，避免已消费但尚未通告的信用卡住下一条完整记录。
  */
 struct tr_server_record_config {
 	struct tr_rpc_record_endpoint_config endpoint;

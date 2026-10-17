@@ -117,6 +117,8 @@ int tr_rpc_record_state_init(struct tr_rpc_record_state *state,
  * 字节数计数；ONE恰好一条，MANY可为零。响应MESSAGE前必须有INITIAL；
  * FINAL_STATUS错误可以提前结束，成功必须满足ONE基数。请求半关闭不是
  * 调用终局；仅收到响应数据也不是成功。终局后任何记录都不得复活调用。
+ * OPEN前仅允许响应方向的非OK FINAL_STATUS，以接收Stream准入拒绝；
+ * 不改opened、消息计数或半关闭状态，不能据此声称请求已被对端接纳。
  *
  * 此检查不代表网络接受：发送方应对本地副本预检，下游接受后才提交副本；
  * 两者之间必须保持owner串行且无重入修改。下游拒绝不得推进真实状态。

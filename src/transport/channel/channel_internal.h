@@ -17,6 +17,14 @@ int tr_channel_abort_lane_on_owner(struct tr_channel *channel,
 int tr_stream_get_lane_internal(struct tr_stream_handle stream,
                                enum tr_lane *out);
 
+/* 仅供协议终局回收：在 STREAM_CLOSE 前单调停止新增 RX 信用。
+ * 必须在 Channel 所有者上调用，精确活代次的 OPENING/OPEN 均可，重复幂等。
+ * 不改变双向开闭状态、已广告额度或 TX 信用；后续释放仍记入真实 consumed，
+ * 但不再发送/重试 WINDOW_UPDATE。普通半关闭仍须保留接收信用，不调用本函数。
+ * NULL 返回 INVALID，非所有者返回 STATE，过期句柄返回 STALE；不转移所有权。
+ */
+int tr_stream_stop_credit_on_owner(struct tr_stream_handle stream);
+
 /* 有界 Channel 索引与其测试共用的流线协议标识哈希。 */
 static inline uint32_t tr_channel_stream_id_hash(uint32_t stream_id)
 {

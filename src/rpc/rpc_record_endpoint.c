@@ -239,9 +239,12 @@ static int tr_endpoint_progress(struct tr_rpc_record_endpoint *ep,
 			    ret != TR_ERR_STALE)
 				slot->final_due = 0;
 		}
-		/* Reactor 的 STREAM_CLOSE 是 FIFO 屏障，不得越过已接受 DATA。
-		 * 这里仍须保留关闭准入阶段，失败不冒充已经关闭。 */
-		ret = tr_stream_close(slot->stream);
+		/* 终局后先停止新增信用，避免延迟 DATA/负载释放在 CLOSE 后
+		 * 再排 WINDOW_UPDATE。已接受 DATA/信用仍由 FIFO 保证在前。
+		 * 两个阶段失败均保留本槽位责任，不能冒充已经关闭。 */
+		ret = tr_stream_stop_credit_on_owner(slot->stream);
+		if (ret == TR_OK)
+			ret = tr_stream_close(slot->stream);
 		if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
 			slot->dead = true;
 		} else if (ret == TR_OK) {
@@ -342,8 +345,9 @@ tr_endpoint_data(struct tr_stream_handle stream, uint64_t message_id,
 		(void)tr_rpc_record_dispatch_receive_on_owner(
 		        ep->dispatch, stream, payload->data, payload->len);
 		--ep->depth;
-		(void)tr_rpc_record_endpoint_pump_on_owner(ep);
 	}
+	/* Channel 在返回 RELEASE 后才归还本次 RX 信用；由既有定时器
+	 * 继续派发与退役，避免在借用 DATA 的回调栈内开始关闭流。 */
 	return TR_STREAM_DATA_RELEASE;
 }
 static void tr_endpoint_event(struct tr_stream_handle stream,

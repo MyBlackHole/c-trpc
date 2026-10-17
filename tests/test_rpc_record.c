@@ -315,6 +315,76 @@ static void test_cardinality_and_terminal(void)
 	}
 }
 
+static void test_preopen_rejection(void)
+{
+	for (int request = TR_RPC_ONE; request <= TR_RPC_MANY; ++request) {
+		for (int response = TR_RPC_ONE; response <= TR_RPC_MANY;
+		     ++response) {
+			struct tr_rpc_record_state s, pending, unopened;
+			struct tr_rpc_record_header invalid = denied;
+			CHECK(tr_rpc_record_state_init(&s, request, response) ==
+			      TR_OK);
+			unopened = s;
+			/* 早拒绝只放宽响应错误终局，不放宽其他记录或字段。 */
+			apply(&s, REQ, &initial, TR_ERR_STATE);
+			apply(&s, REQ, &empty_message, TR_ERR_STATE);
+			apply(&s, REQ, &half, TR_ERR_STATE);
+			apply(&s, REQ, &ok, TR_ERR_STATE);
+			apply(&s, RESP, &open_record, TR_ERR_STATE);
+			apply(&s, RESP, &initial, TR_ERR_STATE);
+			apply(&s, RESP, &empty_message, TR_ERR_STATE);
+			apply(&s, RESP, &half, TR_ERR_STATE);
+			apply(&s, RESP, &ok, TR_ERR_STATE);
+			invalid.status = TR_RPC_STATUS_COUNT;
+			apply(&s, RESP, &invalid, TR_ERR_BAD_TYPE);
+			invalid = denied;
+			invalid.service_id = 1;
+			apply(&s, RESP, &invalid, TR_ERR_BAD_FLAGS);
+			invalid = denied;
+			invalid.metadata_size = TR_RPC_METADATA_MAX_BYTES + 1;
+			apply(&s, RESP, &invalid, TR_ERR_BAD_LENGTH);
+			/* OPEN预检成功但下游尚未接受：真实状态仍可收到拒绝。 */
+			pending = s;
+			apply(&pending, REQ, &open_record, TR_OK);
+			CHECK(pending.opened && !s.opened);
+			CHECK(!memcmp(&s, &unopened, sizeof(s)));
+			for (unsigned status = 1; status < TR_RPC_STATUS_COUNT;
+			     ++status) {
+				struct tr_rpc_record_header error = denied;
+				error.status = status;
+				s = unopened;
+				apply(&s, REQ, &error, TR_ERR_STATE);
+				apply(&s, RESP, &error, TR_OK);
+				CHECK(s.terminal && s.final_status == status);
+				CHECK(!s.opened && !s.request_messages &&
+				      !s.response_messages &&
+				      !s.request_closed && !s.response_headers);
+				CHECK(s.initialized);
+				CHECK(s.request_cardinality ==
+				      unopened.request_cardinality);
+				CHECK(s.response_cardinality ==
+				      unopened.response_cardinality);
+				apply(&s, RESP, &error, TR_ERR_STATE);
+				apply(&s, RESP, &ok, TR_ERR_STATE);
+				apply(&s, REQ, &open_record, TR_ERR_STATE);
+				CHECK(tr_rpc_record_state_abort(
+				              &s, TR_RPC_STATUS_CANCELLED) ==
+				      TR_ERR_STATE);
+				CHECK(s.final_status == status && !s.opened);
+				/* 取消先选终局，迟到拒绝不能覆盖它。 */
+				s = unopened;
+				CHECK(tr_rpc_record_state_abort(
+				              &s, TR_RPC_STATUS_CANCELLED) ==
+				      TR_OK);
+				apply(&s, RESP, &error, TR_ERR_STATE);
+				CHECK(s.final_status ==
+				              TR_RPC_STATUS_CANCELLED &&
+				      !s.opened);
+			}
+		}
+	}
+}
+
 static unsigned long explored;
 static void explore(struct tr_rpc_record_state state, unsigned depth)
 {
@@ -346,7 +416,20 @@ static void explore(struct tr_rpc_record_state state, unsigned depth)
 				continue;
 			}
 			CHECK(!state.terminal);
-			CHECK(next.opened);
+			CHECK(next.opened ==
+			      (state.opened ||
+			       (direction == REQ &&
+			        events[i]->kind == TR_RPC_RECORD_OPEN)));
+			if (!next.opened) {
+				CHECK(next.terminal && direction == RESP &&
+				      events[i]->kind ==
+				              TR_RPC_RECORD_FINAL_STATUS &&
+				      next.final_status != TR_RPC_STATUS_OK);
+				CHECK(!next.request_messages &&
+				      !next.response_messages &&
+				      !next.request_closed &&
+				      !next.response_headers);
+			}
 			CHECK(next.request_messages >= state.request_messages);
 			CHECK(next.response_messages >=
 			      state.response_messages);
@@ -515,6 +598,7 @@ int main(void)
 	test_golden_and_framing();
 	test_bad_headers();
 	test_cardinality_and_terminal();
+	test_preopen_rejection();
 	test_bounded_sequences();
 	test_mutated_headers();
 	forbid_allocations = false;

@@ -153,6 +153,16 @@ V2 的回复能力只在当前工作回调内有效，旧方法注册及稳定 R
 不支持。大小/窗口限制、失败回滚与实际测试范围见
 [V2 Server 入口集成记录](docs/reviews/server_record_integration_20261017.md)。
 
+对应的库内 [`tr_client_create_record()`](src/client_record_internal.h) 复用既有
+`tr_client` 与单分片 Reactor，冻结客户端方法表，通过有界调用宿主连接上述 V2
+Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚未发出的情况；发送
+仅在成功时接管正文，旧句柄按调用代次失效。它支持本地单调期限、有界 OPEN
+元数据和本地取消；取消或超时不证明服务端已停止执行。请求半关闭后的本地终局
+保留固定槽排空晚到响应，直到对端关闭、断连或本地销毁才回收。
+自动重连因连接器尚缺停止域回收而明确拒绝，旧公开调用接口不用于此显式入口。
+连接装配、对端窗口限制及实际验证范围见
+[V2 Client 入口集成记录](docs/reviews/client_record_integration_20261017.md)。
+
 稳定 SDK 还在 `tr/transport.h` 中包含第一版通用连接组传输能力。
 该能力按需启用，默认关闭：
 
