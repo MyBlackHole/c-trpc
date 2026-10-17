@@ -37,7 +37,8 @@ enum tr_frame_type {
 	TR_FRAME_GOAWAY = 10,
 	TR_FRAME_BIND = 11,
 	TR_FRAME_BIND_ACK = 12,
-	TR_FRAME_PIPELINE_CONTROL = 13
+	TR_FRAME_PIPELINE_CONTROL = 13,
+	TR_FRAME_STREAM_RESET = 14
 };
 
 struct tr_frame_header {
@@ -57,6 +58,9 @@ struct tr_wire_limits {
 };
 
 int tr_frame_type_valid(uint16_t type);
+
+/* RESET 仅承载传输失败原因；不依赖 RPC 状态或应用数据格式。 */
+int tr_wire_stream_reset_status_valid(int status);
 
 int tr_wire_header_encode(uint8_t out[TR_WIRE_HEADER_SIZE],
 			  const struct tr_frame_header *header);

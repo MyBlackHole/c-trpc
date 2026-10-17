@@ -72,11 +72,12 @@ int tr_client_record_send(struct tr_rpc_record_client_handle handle,
                           struct tr_buffer **body);
 int tr_client_record_half_close(struct tr_rpc_record_client_handle handle);
 
-/* 只选择本地 CANCELLED；现有 V2 没有取消/重置帧，不能撤销服务端已受理
- * 的工作。请求尚未 HALF_CLOSE 时重试传输半关闭；已经 HALF_CLOSE 的调用
- * 则先交付终局、停止用户回调，保留固定槽排空晚到响应并归还信用，直到
- * 对端关闭后再退役。不合作的远端可占用该槽至断连或本地 destroy，不保证
- * 限时回收；不会因此关闭整个连接或把旧响应交付给槽位复用后的调用。
+/* 选择本地 CANCELLED，并在安全所有者边界将 RESET 责任交给 Channel；
+ * 请求已 RPC HALF_CLOSE 也可以取消。远端把 RESET 传到原任务取消令牌，
+ * 已执行业务仍须合作退出，不撤销副作用。未接管的重置由本宿主重试；
+ * 接管后可退役客户端调用，Channel 独立保留网络确认与迟到帧校验责任。
+ * 已被绑定接纳的 FINAL 优先，后续取消不覆盖它。单个取消不关闭整连接；
+ * 不合作的对端仍可占有界网络流槽至断连或销毁，不保证确认的时间上限。
  */
 int tr_client_record_cancel(struct tr_rpc_record_client_handle handle);
 

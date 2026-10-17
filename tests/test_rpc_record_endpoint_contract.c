@@ -37,7 +37,7 @@ struct tr_task_executor {
 struct fake_call {
 	struct tr_stream_handle stream;
 	struct tr_rpc_dispatch_handle handle;
-	bool active, pending, signalled, wire_final;
+	bool active, pending, terminal, signalled, wire_final;
 	enum tr_rpc_status status;
 };
 struct tr_rpc_record_dispatch {
@@ -68,6 +68,9 @@ struct fixture {
 	struct tr_rpc_endpoint_result results[CAP];
 	unsigned send_rejects, close_rejects, credit_stop_rejects, credit_stops,
 	        sends, closes, receive_calls, done_calls;
+	unsigned reset_rejects, reset_attempts, resets;
+	int reset_reason;
+	struct tr_stream_handle reset_stream;
 	unsigned executor_dispatches, dispatch_pumps, reports, retire_calls;
 	unsigned sequence, last_send_sequence, last_close_sequence,
 	        last_credit_stop_sequence;
@@ -230,6 +233,26 @@ int tr_stream_close(struct tr_stream_handle s)
 	f->last_close_sequence = ++f->sequence;
 	return TR_OK;
 }
+int tr_stream_reset_on_owner(struct tr_stream_handle s, int status)
+{
+	struct fixture *f = s.channel->reactor->f;
+	CHECK(owner == s.channel->reactor);
+	CHECK(status == TR_ERR_CLOSED || status == TR_ERR_TIMEOUT ||
+	      status == TR_ERR_NOMEM || status == TR_ERR_STATE ||
+	      status == TR_ERR_SYS);
+	++f->reset_attempts;
+	if (f->reset_rejects) {
+		--f->reset_rejects;
+		return TR_AGAIN;
+	}
+	++f->resets;
+	f->reset_reason = status;
+	f->reset_stream = s;
+	/* 与 Channel 一样，准入成功可在同一 owner 栈中通知 RESET；
+	 * 这里只模拟承担网络退役，不替业务完成或伪造 CLOSED 确认。 */
+	f->event(s, TR_STREAM_EVENT_RESET, status, f->handler_arg);
+	return TR_OK;
+}
 static struct fake_call *lookup(struct tr_rpc_dispatch_handle h)
 {
 	CHECK(h.dispatch && h.id.slot < CAP);
@@ -284,6 +307,8 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 		if (d->calls[i].active && d->calls[i].stream.slot == s.slot &&
 		    d->calls[i].stream.generation == s.generation) {
 			struct fake_call *c = &d->calls[i];
+			if (c->terminal)
+				return TR_ERR_STATE;
 			c->pending = true;
 			/* 模拟下层在接收回调栈内再次投递同流 DATA。不能静默丢弃
 			 * 该字节并继续报告原请求成功。 */
@@ -337,6 +362,7 @@ int tr_rpc_record_dispatch_pump_on_owner(struct tr_rpc_record_dispatch *d,
 		for (unsigned i = 0; i < CAP; ++i) {
 			struct fake_call *c = &d->calls[i];
 			if (c->active && c->pending && !c->signalled) {
+				c->terminal = true;
 				c->signalled = true;
 				++d->f->done_calls;
 				d->terminal(c->handle, c->stream, c->status,
@@ -350,24 +376,66 @@ int tr_rpc_record_dispatch_abort_on_owner(struct tr_rpc_dispatch_handle h,
                                           enum tr_rpc_status st)
 {
 	struct fake_call *c = lookup(h);
-	if (c->signalled)
+	if (c->terminal)
 		return TR_ERR_STATE;
 	c->pending = true;
+	c->terminal = true;
 	c->wire_final = false;
 	c->status = st;
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_event_on_owner(struct tr_rpc_record_dispatch *d,
                                           struct tr_stream_handle s,
-                                          enum tr_stream_event event)
+                                          enum tr_stream_event event,
+                                          int status)
 {
-	if (event == TR_STREAM_EVENT_WRITABLE)
+	enum tr_rpc_status result = TR_RPC_STATUS_UNAVAILABLE;
+	if (event == TR_STREAM_EVENT_WRITABLE ||
+	    event == TR_STREAM_EVENT_OPENED)
 		return TR_OK;
+	if (event == TR_STREAM_EVENT_RESET) {
+		switch (status) {
+		case TR_ERR_CLOSED:
+			result = TR_RPC_STATUS_CANCELLED;
+			break;
+		case TR_ERR_TIMEOUT:
+			result = TR_RPC_STATUS_DEADLINE_EXCEEDED;
+			break;
+		case TR_ERR_NOMEM:
+			result = TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+			break;
+		case TR_ERR_STATE:
+			result = TR_RPC_STATUS_INVALID_ARGUMENT;
+			break;
+		case TR_ERR_SYS:
+			result = TR_RPC_STATUS_INTERNAL;
+			break;
+		default:
+			return TR_ERR_INVALID;
+		}
+	}
 	for (unsigned i = 0; i < CAP; ++i)
 		if (d->calls[i].active && d->calls[i].stream.slot == s.slot &&
 		    d->calls[i].stream.generation == s.generation)
 			(void)tr_rpc_record_dispatch_abort_on_owner(
-			        d->calls[i].handle, TR_RPC_STATUS_UNAVAILABLE);
+			        d->calls[i].handle, result);
+	return TR_OK;
+}
+int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
+                                           struct tr_rpc_dispatch_result *out)
+{
+	if (!handle.dispatch || !out)
+		return TR_ERR_INVALID;
+	CHECK(owner == &handle.dispatch->f->reactor);
+	if (handle.id.slot >= CAP)
+		return TR_ERR_STALE;
+	struct fake_call *call = &handle.dispatch->calls[handle.id.slot];
+	if (!call->active || call->handle.id.generation != handle.id.generation)
+		return TR_ERR_STALE;
+	*out = (struct tr_rpc_dispatch_result){
+	        .status = call->status,
+	        .terminal = call->terminal,
+	        .final_accepted = call->terminal && call->wire_final};
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle h)
@@ -583,8 +651,10 @@ static void test_deadline(void)
 	struct tr_stream_handle s = open_stream(&f, 0, 1);
 	request(&f, s, 1);
 	tick(&f, 125);
-	CHECK(f.sends > 0 && f.sends < 100 && f.closes == 1 && f.reports == 1 &&
-	      !f.last.final_accepted);
+	CHECK(f.sends > 0 && f.sends < 100 && !f.closes && f.resets == 1 &&
+	      f.reports == 1 && f.retire_calls == 1 && !f.last.final_accepted);
+	CHECK(f.reset_reason == TR_ERR_SYS &&
+	      f.last.status == TR_RPC_STATUS_UNIMPLEMENTED);
 	close_all(&f);
 }
 static void *release_tx_elsewhere(void *arg)
@@ -644,10 +714,87 @@ static void test_close_while_worker_pending(void)
 	request(&f, s, 0);
 	CHECK(tr_rpc_record_endpoint_close_on_owner(&f.ep) == TR_AGAIN &&
 	      f.ep && f.data && f.tick);
-	CHECK(!f.reports);
+	/* close 只推进有界的公平扫描；让 cursor 覆盖当前调用，worker
+	 * 保持未退出，不能靠完成回调触发下面的 RESET 断言。 */
+	tick(&f, 8);
+	CHECK(f.resets == 1 && f.reset_reason == TR_ERR_CLOSED && !f.reports &&
+	      !f.done_calls && !f.retire_calls && !f.closes && !f.sends);
 	f.hold_work = false;
 	tick(&f, 12);
 	CHECK(f.reports == 1 && f.last.status == TR_RPC_STATUS_CANCELLED);
+	close_all(&f);
+}
+static void test_reset_before_worker_quiescent(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.hold_work = true;
+	f.reset_rejects = 2;
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	request(&f, s, 0);
+	struct tr_rpc_dispatch_handle call = f.dispatch->calls[0].handle;
+	CHECK(tr_rpc_record_dispatch_abort_on_owner(
+	              call, TR_RPC_STATUS_DEADLINE_EXCEEDED) == TR_OK);
+	tick(&f, 20);
+	CHECK(f.reset_attempts == 3 && f.resets == 1 &&
+	      f.reset_reason == TR_ERR_TIMEOUT &&
+	      f.reset_stream.generation == s.generation);
+	CHECK(f.dispatch->calls[0].active && f.dispatch->calls[0].terminal &&
+	      !f.dispatch->calls[0].signalled && !f.done_calls && !f.reports &&
+	      !f.retire_calls && !f.sends && !f.closes);
+	tick(&f, 8);
+	CHECK(f.reset_attempts == 3 && !f.reports && !f.retire_calls);
+	/* 不投递 CLOSED/确认，证明网络责任已交给 Channel 后，RPC 只等
+	 * 自己的 worker 完成；完成之前仍保留原调用和业务参数。 */
+	f.hold_work = false;
+	tick(&f, 12);
+	CHECK(f.done_calls == 1 && f.reports == 1 && f.retire_calls == 1 &&
+	      !f.dispatch->calls[0].active && !f.last.final_accepted &&
+	      f.last.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	CHECK(f.resets == 1 && !f.sends && !f.closes);
+	close_all(&f);
+}
+static void test_peer_reset_while_worker_pending(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.hold_work = true;
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	request(&f, s, 0);
+	f.event(s, TR_STREAM_EVENT_RESET, TR_ERR_TIMEOUT, f.handler_arg);
+	CHECK(f.dispatch->calls[0].terminal &&
+	      f.dispatch->calls[0].status == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      !f.dispatch->calls[0].signalled && !f.reports && !f.retire_calls);
+	/* 后到断连不得覆盖先前 RESET 原因，也不能代替 worker done。 */
+	f.event(s, TR_STREAM_EVENT_ERROR, TR_ERR_SYS, f.handler_arg);
+	tick(&f, 8);
+	CHECK(!f.reports && !f.retire_calls && !f.resets && !f.sends &&
+	      f.dispatch->calls[0].status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	f.hold_work = false;
+	tick(&f, 12);
+	CHECK(f.done_calls == 1 && f.reports == 1 && f.retire_calls == 1 &&
+	      f.last.status == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      !f.last.final_accepted && !f.resets && !f.closes && !f.sends);
+	close_all(&f);
+}
+static void test_reset_preserves_accepted_final(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	request(&f, s, 0);
+	tick(&f, 8);
+	CHECK(f.reports == 1 && f.closes == 1 && !f.resets &&
+	      f.last.status == TR_RPC_STATUS_OK && f.last.final_accepted &&
+	      !f.retire_calls);
+	f.event(s, TR_STREAM_EVENT_RESET, TR_ERR_TIMEOUT, f.handler_arg);
+	tick(&f, 8);
+	CHECK(f.reports == 1 && f.done_calls == 1 && f.retire_calls == 1 &&
+	      f.last.status == TR_RPC_STATUS_OK && f.last.final_accepted &&
+	      f.closes == 1 && !f.resets && !f.sends);
 	close_all(&f);
 }
 static void test_failures(void)
@@ -775,6 +922,9 @@ int main(void)
 	test_tx_outlives_host();
 	test_success_and_inline_event();
 	test_close_while_worker_pending();
+	test_reset_before_worker_quiescent();
+	test_peer_reset_while_worker_pending();
+	test_reset_preserves_accepted_final();
 	test_failures();
 	test_stopped_cleanup();
 	test_frame_slot_reuse();

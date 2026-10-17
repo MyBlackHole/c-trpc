@@ -1405,6 +1405,11 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	channel_config.max_message_bytes =
 		server->config.limits.max_message_bytes;
 	channel_config.reassembly_pool = &shard->reassembly_pool;
+	if (server->record_mode) {
+		channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
+		channel_config.required_feature_bits =
+		        TR_CHANNEL_FEATURE_STREAM_RESET;
+	}
 
 	/* 服务端必须先完成 RPC Endpoint/Method 安装，再启动 HELLO。
 	 * 否则客户端可能先观察到 Channel UP，并在服务端服务就绪前

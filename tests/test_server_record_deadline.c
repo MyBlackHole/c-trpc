@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 /* 期限证据来自真实两端门面的线协议。Client 始终没有本地 timeout；
- * 测试只替换其 OPEN 前缀中的剩余期限，观察 Server 实际发送的 FINAL。
+ * 测试只替换其 OPEN 前缀中的剩余期限，观察 Server 实际发送的 FINAL/RESET。
  * 精确时刻只作用于 RPC 入口，Reactor、传输、等待和业务回调保持真实时钟。 */
 #include "../src/client_record_internal.h"
 #include "../src/server_record_internal.h"
@@ -268,6 +268,9 @@ int __wrap_tr_channel_create_deferred(const struct tr_channel_config *cfg,
                                       tr_channel_event_cb channel_event,
                                       void *arg, struct tr_channel **out)
 {
+	CHECK((cfg->feature_bits & TR_CHANNEL_FEATURE_STREAM_RESET) != 0);
+	CHECK((cfg->required_feature_bits & TR_CHANNEL_FEATURE_STREAM_RESET) !=
+	      0);
 	int ret = __real_tr_channel_create_deferred(
 	        cfg, control, bulk, data, event, channel_event, arg, out);
 	if (ret == TR_OK && active) {
@@ -825,16 +828,21 @@ static void call_half_close(struct call *c)
 	}
 	CHECK(ret == TR_OK);
 }
-static void call_finish(struct call *c, enum tr_rpc_status status,
-                        unsigned messages)
+static void call_finish_records(struct call *c, enum tr_rpc_status status,
+                                unsigned messages, unsigned finals)
 {
 	wait_count(&c->terminals, 1);
 	if (c->status != status)
 		fprintf(stderr, "deadline: status=%d expected=%d\n", c->status,
 		        status);
 	CHECK(c->status == status && atomic_load(&c->terminals) == 1);
-	CHECK(atomic_load(&c->finals) == 1);
+	CHECK(atomic_load(&c->finals) == finals);
 	CHECK(atomic_load(&c->messages) == messages);
+}
+static void call_finish(struct call *c, enum tr_rpc_status status,
+                        unsigned messages)
+{
+	call_finish_records(c, status, messages, 1);
 }
 static void call_retired(struct call *c)
 {
@@ -883,8 +891,8 @@ static void wait_no_events(struct fixture *f)
 	}
 }
 
-/* 真实时钟与真实最终状态共同证明服务端期限，且业务停下之前不释放
- * 已受理责任。业务故意在观察到取消后仍追加三条跨窗口正文。 */
+/* 真实时钟与真实 RESET 共同证明服务端期限。网络先停，业务停下之前
+ * 不释放已受理责任；业务故意在取消后仍追加三条跨窗口正文。 */
 static void test_running_server_deadline(void)
 {
 	struct fixture f;
@@ -898,15 +906,24 @@ static void test_running_server_deadline(void)
 	call_half_close(&c);
 	wait_count(&f.business[0].cancelled, 1);
 	gate_wait(&f.business[0].gate, false);
-	CHECK(!atomic_load(&c.terminals));
+	call_finish_records(&c, TR_RPC_STATUS_DEADLINE_EXCEEDED, 0, 0);
 	CHECK(!atomic_load(&f.business[0].terminals));
+	struct snapshot pending = {.fixture = &f};
+	CHECK(tr_reactor_call(server_owner(&f), snapshot_on_owner, &pending) ==
+	      TR_OK);
+	CHECK(pending.stats.held_events > 0 &&
+	      pending.stats.submitted_calls == 1 &&
+	      pending.stats.terminal_calls == 1);
 	gate_release(&f.business[0].gate);
-	call_finish(&c, TR_RPC_STATUS_DEADLINE_EXCEEDED, 0);
+	wait_count(&f.business[0].terminals, 1);
+	call_finish_records(&c, TR_RPC_STATUS_DEADLINE_EXCEEDED, 0, 0);
 	call_retired(&c);
 	CHECK(atomic_load(&f.business[0].seen[TR_RPC_RECORD_OPEN]) == 1);
 	CHECK(atomic_load(&f.business[0].seen[TR_RPC_RECORD_MESSAGE]) == 1);
 	CHECK(!atomic_load(&f.business[0].seen[TR_RPC_RECORD_HALF_CLOSE]));
 	CHECK(!atomic_load(&f.business[0].messages_sent));
+	CHECK(!atomic_load(&f.business[0].finals_sent));
+	CHECK(f.business[0].terminal_status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	CHECK(atomic_load(&f.business[0].terminals) == 1);
 	fixture_destroy(&f);
 }

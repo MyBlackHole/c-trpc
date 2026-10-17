@@ -118,13 +118,16 @@ static _Atomic bool fail_client_create, fail_client_destroy, hold_credit;
 static _Atomic unsigned held_published, client_creates, client_destroys;
 static _Atomic unsigned create_failures, destroy_failures;
 static _Atomic unsigned attempts[6], accepted[6], fake_again, real_again;
-static _Atomic unsigned server_messages_accepted, server_half_closes_received;
+static _Atomic unsigned server_messages_accepted, server_half_closes_received,
+        server_resets_received;
 static _Atomic uint64_t server_message_bytes;
 static _Atomic int fail_kind, block_kind;
 static _Atomic unsigned clock_failures;
 static _Atomic bool clear_open_deadline;
 static _Atomic unsigned deadline_prefixes, deadline_prefixes_accepted,
         deadline_prefixes_released;
+static _Atomic bool inline_client_data_once;
+static _Atomic unsigned inline_client_data_calls;
 static _Thread_local bool fail_clock_once;
 
 int __real_clock_gettime(clockid_t, struct timespec *);
@@ -170,6 +173,7 @@ static void reset_observation(void)
 	atomic_store(&real_again, 0);
 	atomic_store(&server_messages_accepted, 0);
 	atomic_store(&server_half_closes_received, 0);
+	atomic_store(&server_resets_received, 0);
 	atomic_store(&server_message_bytes, 0);
 	atomic_store(&fail_kind, 0);
 	atomic_store(&block_kind, 0);
@@ -178,6 +182,8 @@ static void reset_observation(void)
 	atomic_store(&deadline_prefixes, 0);
 	atomic_store(&deadline_prefixes_accepted, 0);
 	atomic_store(&deadline_prefixes_released, 0);
+	atomic_store(&inline_client_data_once, false);
+	atomic_store(&inline_client_data_calls, 0);
 	for (unsigned i = 0; i < 6; ++i) {
 		atomic_store(&attempts[i], 0);
 		atomic_store(&accepted[i], 0);
@@ -249,6 +255,34 @@ static void release_open_deadline_prefix(struct tr_buffer *buffer)
 	free(buffer);
 }
 
+static void inject_inline_client_data(struct tr_stream_handle stream)
+{
+	struct channel_observation observed = {0};
+	uint8_t bytes[TR_RPC_RECORD_HEADER_SIZE];
+	struct tr_rpc_record_header header = {
+	        .kind = TR_RPC_RECORD_INITIAL_METADATA};
+	struct tr_rpc_record_limits limits = {WIRE_LIMIT, WIRE_LIMIT,
+	                                      TR_RPC_METADATA_MAX_BYTES,
+	                                      TR_RPC_RECORD_ACCEPT_NONE};
+	struct tr_buffer payload = {
+	        .data = bytes, .len = sizeof(bytes), .capacity = sizeof(bytes)};
+	CHECK(tr_reactor_in_owner_context_for(
+	        tr_channel_reactor(stream.channel)));
+	CHECK(pthread_mutex_lock(&observation_lock) == 0);
+	for (unsigned i = 0; i < observation_count; ++i)
+		if (observations[i].channel == stream.channel)
+			observed = observations[i];
+	CHECK(pthread_mutex_unlock(&observation_lock) == 0);
+	CHECK(observed.shimmed && observed.data);
+	CHECK(tr_rpc_record_encode_header(bytes, sizeof(bytes), &header,
+	                                  &limits) == TR_OK);
+	/* 真实发送仍在 Client 的 owner 栈内；借用一次完整控制记录触发
+	 * 重入 DATA 防线，不伪造连接关闭事实，也不修改生产槽的布局。 */
+	CHECK(observed.data(stream, 1, &payload, observed.arg) ==
+	      TR_STREAM_DATA_RELEASE);
+	atomic_fetch_add(&inline_client_data_calls, 1);
+}
+
 int __real_tr_stream_sendv(struct tr_stream_handle, struct tr_buffer *const *,
                            uint32_t);
 int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
@@ -277,9 +311,9 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 	struct open_deadline_prefix *replacement = NULL;
 	struct tr_buffer *patched[1];
 	if (kind == TR_RPC_RECORD_OPEN && atomic_load(&clear_open_deadline)) {
-		/* 仅用于本地超时后的晚响应排空场景：模拟不执行 OPEN 期限的
-		 * 对端，保留真实 Client 本地计时。不能修改已交给传输的存储，
-		 * 也不能在发送失败时释放原前缀。 */
+		/* 仅用于本地超时后的 RESET 场景：保留真实 Client 本地计时，
+		 * 排除服务端自己执行 OPEN 期限的干扰。不能修改已交给传输的
+		 * 存储，也不能在发送失败时释放原前缀。 */
 		CHECK(count == 1 && tr_get_le64(buffers[0]->data + 40) > 0);
 		size_t size = buffers[0]->len;
 		replacement = malloc(sizeof(*replacement) + size);
@@ -317,6 +351,9 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 	} else if (kind && ret == TR_AGAIN) {
 		atomic_fetch_add(&real_again, 1);
 	}
+	if (kind == TR_RPC_RECORD_MESSAGE && ret == TR_OK &&
+	    atomic_exchange(&inline_client_data_once, false))
+		inject_inline_client_data(stream);
 	return ret;
 }
 
@@ -355,6 +392,9 @@ static void observed_stream_event(struct tr_stream_handle stream,
 	struct channel_observation *o = arg;
 	if (o->stream_event)
 		o->stream_event(stream, event, status, o->arg);
+	if (stream.channel == atomic_load(&server_channel) &&
+	    event == TR_STREAM_EVENT_RESET)
+		atomic_fetch_add(&server_resets_received, 1);
 }
 
 static void observed_channel_event(struct tr_channel *channel,
@@ -374,7 +414,9 @@ int __wrap_tr_channel_set_handler(struct tr_channel *channel,
                                   tr_stream_event_cb stream_event,
                                   tr_channel_event_cb channel_event, void *arg)
 {
-	if (channel != atomic_load(&server_channel) || !data)
+	if ((channel != atomic_load(&server_channel) &&
+	     channel != atomic_load(&client_channel)) ||
+	    !data)
 		return __real_tr_channel_set_handler(
 		        channel, data, stream_event, channel_event, arg);
 	CHECK(tr_reactor_in_owner_context_for(tr_channel_reactor(channel)));
@@ -440,7 +482,8 @@ struct fixture {
 	struct gate gate;
 	_Atomic bool block_work;
 	_Atomic unsigned reply_copies;
-	_Atomic unsigned calls, messages, half_closes, bodies_released;
+	_Atomic unsigned calls, messages, half_closes, bodies_released,
+	        cancelled;
 	uint8_t expected_metadata[32];
 	unsigned expected_metadata_size;
 	uint16_t port;
@@ -453,7 +496,6 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 {
 	struct fixture *f = arg;
 	(void)id;
-	(void)cancel;
 	CHECK(tr_task_in_worker_context() && !tr_reactor_in_owner_context());
 	if (view->header.kind == TR_RPC_RECORD_OPEN) {
 		CHECK(view->header.metadata_size == f->expected_metadata_size);
@@ -467,7 +509,9 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 		unsigned copies = atomic_load(&f->reply_copies);
 		if (atomic_load(&f->block_work))
 			gate_wait(&f->gate, 0, true);
-		/* 本地取消不承诺撤销远端工作，故主动产生迟到的正常结果。 */
+		if (tr_task_cancel_requested(cancel))
+			atomic_fetch_add(&f->cancelled, 1);
+		/* 故意忽略已经观察的取消并生成晚结果，完成路径必须负责丢弃。 */
 		for (unsigned i = 0; i < copies; ++i)
 			CHECK(tr_rpc_record_reply_append(
 			              reply, view->body,
@@ -490,6 +534,7 @@ static void fixture_init(struct fixture *f)
 	atomic_init(&f->messages, 0);
 	atomic_init(&f->half_closes, 0);
 	atomic_init(&f->bodies_released, 0);
+	atomic_init(&f->cancelled, 0);
 	tr_server_config_init(&f->server_config);
 	f->server_config.shard_count = 1;
 	f->server_config.max_peers = 4;
@@ -1267,6 +1312,64 @@ static void test_backpressure(void)
 	test_peer_window();
 }
 
+static void test_inline_data_failure(void)
+{
+	struct fixture f;
+	struct call failed, following;
+	fixture_init(&f);
+	fixture_create(&f);
+	fixture_connect(&f);
+	call_init(&failed, &f);
+	call_init(&following, &f);
+	call_start(&failed, 2, NULL);
+	call_ready(&failed);
+	wait_count(&f.calls, 1);
+	struct tr_channel *client = atomic_load(&client_channel);
+	struct tr_channel *server = atomic_load(&server_channel);
+	atomic_store(&inline_client_data_once, true);
+	send_body(&failed, 53, 43);
+	call_finish(&failed, TR_RPC_STATUS_UNAVAILABLE, TR_RPC_RECORD_ON_OWNER);
+	CHECK(atomic_load(&inline_client_data_calls) == 1);
+	CHECK(!atomic_load(&inline_client_data_once));
+	CHECK(!atomic_load(&failed.result.final_records));
+	/* 本地合成 ERROR 不能证明 Channel 已死。真实 RESET 必须到达
+	 * Server，双方网络槽也必须完成确认，不能依赖最终销毁兜底。 */
+	wait_count(&server_resets_received, 1);
+	call_retired(&failed);
+	uint64_t end = now_ms() + WAIT_MS;
+	for (;;) {
+		struct tr_channel_stats client_stats, server_stats;
+		CHECK(tr_channel_get_stats(client, &client_stats) == TR_OK);
+		CHECK(tr_channel_get_stats(server, &server_stats) == TR_OK);
+		if (!client_stats.active_streams &&
+		    !server_stats.active_streams)
+			break;
+		CHECK(now_ms() < end);
+		pause_once();
+	}
+	expect_message(&following, 61, 44);
+	call_start(&following, 1, NULL);
+	call_ready(&following);
+	CHECK(following.handle.client == failed.handle.client);
+	CHECK(following.handle.slot == failed.handle.slot);
+	CHECK(following.handle.generation != failed.handle.generation);
+	CHECK(tr_client_record_cancel(failed.handle) == TR_ERR_STALE);
+	send_body(&following, 61, 44);
+	half_close(&following);
+	call_finish(&following, TR_RPC_STATUS_OK, TR_RPC_RECORD_ON_OWNER);
+	call_retired(&following);
+	CHECK(atomic_load(&client_channel) == client);
+	CHECK(atomic_load(&server_channel) == server);
+	CHECK(atomic_load(&client_creates) == 1);
+	CHECK(!atomic_load(&client_destroys));
+	CHECK(atomic_load(&server_resets_received) == 1);
+	CHECK(atomic_load(&failed.result.terminals) == 1);
+	fixture_destroy(&f);
+	CHECK(atomic_load(&failed.result.terminals) == 1);
+	CHECK(atomic_load(&following.result.terminals) == 1);
+	CHECK(atomic_load(&f.bodies_released) == 2);
+}
+
 static void test_owner_callbacks(void)
 {
 	struct fixture f;
@@ -1312,6 +1415,7 @@ static void test_owner_callbacks(void)
 	CHECK(atomic_load(&followup.result.terminals) == 1);
 	CHECK(atomic_load(&cancelled.result.terminals) == 1);
 	CHECK(atomic_load(&freed.result.terminals) == 1);
+	test_inline_data_failure();
 }
 
 static int close_connection_on_owner(void *arg)
@@ -1449,7 +1553,7 @@ static void test_running_deadline(void)
 static void test_late_responses_after_half_close(bool deadline)
 {
 	struct fixture f;
-	struct call late, following[2], unaccepted;
+	struct call late, following[2];
 	fixture_init(&f);
 	f.client_config.limits.max_calls = 1;
 	f.client_config.limits.max_streams = 1;
@@ -1462,12 +1566,11 @@ static void test_late_responses_after_half_close(bool deadline)
 	fixture_create(&f);
 	fixture_connect(&f);
 	call_init(&late, &f);
-	call_init(&unaccepted, &f);
 	for (unsigned i = 0; i < 2; ++i)
 		call_init(&following[i], &f);
 	struct tr_rpc_call_options options = {.timeout_ms = 1000};
-	/* 服务端现在会执行 OPEN 期限；本场景仍须独立保护 Client 面对
-	 * 不执行该期限的对端时，排空多个窗口晚响应的原有责任。 */
+	/* 服务端线上期限为无限，取消必须由真实 Client RESET 到达；保留
+	 * 真实 Client 本地一秒 timeout，而非由服务端自己的时钟取消任务。 */
 	atomic_store(&clear_open_deadline, deadline);
 	call_start(&late, 2, deadline ? &options : NULL);
 	call_ready(&late);
@@ -1476,8 +1579,8 @@ static void test_late_responses_after_half_close(bool deadline)
 	send_body(&late, BODY, 70);
 	half_close(&late);
 	gate_wait(&f.gate, 1, false);
-	/* 发送接受不代表对端已解析；必须等原 Server data 回调处理完
-	 * HALF_CLOSE，才选择这个不能撤销远端工作的本地终局。 */
+	/* 发送接受不代表对端已解析；在原 Server data 回调处理完
+	 * HALF_CLOSE 后取消，不能用尚未半关闭的路径代替本回归。 */
 	wait_count(&server_half_closes_received, 1);
 	atomic_store(&f.reply_copies, 1);
 	if (!deadline)
@@ -1486,23 +1589,12 @@ static void test_late_responses_after_half_close(bool deadline)
 	                                     : TR_RPC_STATUS_CANCELLED;
 	call_finish(&late, status, TR_RPC_RECORD_ON_OWNER);
 	CHECK(!atomic_load(&server_messages_accepted));
-	CHECK(tr_client_record_cancel(late.handle) == TR_ERR_STATE);
-	struct tr_rpc_record_client_handle untouched, sentinel;
-	memset(&untouched, 0xa5, sizeof(untouched));
-	sentinel = untouched;
-	struct tr_rpc_record_client_callbacks cb =
-	        callbacks(&unaccepted.context);
-	CHECK(tr_client_record_call_start(f.client, 17, 1, NULL, &cb,
-	                                  &untouched) == TR_AGAIN);
-	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
-	CHECK(!atomic_load(&unaccepted.result.terminals));
-	CHECK(!atomic_load(&unaccepted.result.writable));
-	gate_release(&f.gate);
-	/* 三条4145字节记录总计12435，超过8192字节初始窗口。终局后
-	 * 仍须排空并归还信用，才能让远端发送完结果与CLOSE；晚到内容
-	 * 不进入应用 received，也不能把本地终局改写为远端成功。 */
-	wait_count(&server_messages_accepted, 3);
+	wait_count(&server_resets_received, 1);
+	CHECK(atomic_load(&server_resets_received) == 1);
+	/* RESET 接管网络收尾，Client 不再为不合作业务占住唯一调用槽。
+	 * 原业务仍在门闩中借用输入；第二个 worker 可继续服务新调用。 */
 	call_retired(&late);
+	atomic_store(&f.block_work, false);
 	expect_message(&following[0], 63, 71);
 	call_start(&following[0], 1, NULL);
 	call_ready(&following[0]);
@@ -1512,19 +1604,27 @@ static void test_late_responses_after_half_close(bool deadline)
 	half_close(&following[0]);
 	call_finish(&following[0], TR_RPC_STATUS_OK, TR_RPC_RECORD_ON_OWNER);
 	call_retired(&following[0]);
+	CHECK(atomic_load(&f.messages) == 1);
+	CHECK(!atomic_load(&f.cancelled));
+	gate_release(&f.gate);
+	wait_count(&f.messages, 2);
+	wait_count(&f.cancelled, 1);
+	/* 原业务仍生成三条 4145 字节的回复，共 12435 > 8192。它们尚未
+	 * 被发送接受，全部由取消完成路径释放，不再要求远端把废弃批次发完。 */
+	CHECK(3 * (BODY + TR_RPC_RECORD_HEADER_SIZE) > WIRE_LIMIT);
 	echo(&following[1], 1, 63, 72);
 	fixture_destroy(&f);
 	call_finish(&late, status, TR_RPC_RECORD_ON_OWNER);
 	CHECK(!atomic_load(&late.result.final_records));
-	CHECK(!atomic_load(&unaccepted.result.terminals));
-	CHECK(atomic_load(&server_messages_accepted) == 5);
+	CHECK(atomic_load(&server_messages_accepted) == 2);
 	CHECK(atomic_load(&server_message_bytes) ==
-	      3 * (BODY + TR_RPC_RECORD_HEADER_SIZE) +
-	              2 * (63 + TR_RPC_RECORD_HEADER_SIZE));
+	      2 * (63 + TR_RPC_RECORD_HEADER_SIZE));
 	CHECK(atomic_load(&server_half_closes_received) == 3);
+	CHECK(atomic_load(&server_resets_received) == 1);
 	CHECK(atomic_load(&f.calls) == 3);
 	CHECK(atomic_load(&f.messages) == 3);
-	CHECK(atomic_load(&f.half_closes) == 3);
+	CHECK(atomic_load(&f.half_closes) == 2);
+	CHECK(atomic_load(&f.cancelled) == 1);
 	CHECK(atomic_load(&f.bodies_released) == 3);
 	CHECK(atomic_load(&deadline_prefixes_accepted) == (deadline ? 1U : 0U));
 	CHECK(atomic_load(&deadline_prefixes) >=

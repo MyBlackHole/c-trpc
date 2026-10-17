@@ -184,7 +184,6 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event e,
 {
 	struct peer *p = arg;
 	struct call_context *c;
-	(void)status;
 	CHECK(s.slot < CALLS);
 	c = &p->calls[s.slot];
 	if (p->route_disabled)
@@ -199,8 +198,8 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event e,
 		              &c->call) == TR_OK);
 		atomic_fetch_add(&p->opened, 1);
 	} else if (c->call) {
-		CHECK(tr_rpc_record_stream_event_on_owner(c->call, s, e) ==
-		      TR_OK);
+		CHECK(tr_rpc_record_stream_event_on_owner(c->call, s, e,
+		                                          status) == TR_OK);
 	}
 }
 static void tcp_pair(int *client, int *server)
@@ -239,13 +238,14 @@ static void init_peer(struct peer *p, int fd, int client,
 	                               .rx_buffer_count = 16,
 	                               .rx_buffer_size = 256,
 	                               .max_payload_len = 256};
-	struct tr_channel_config cc = {.role = client ? TR_CHANNEL_CLIENT
-	                                              : TR_CHANNEL_SERVER,
-	                               .mode = TR_CHANNEL_SHARED_CONNECTION,
-	                               .max_streams = CALLS,
-	                               .initial_window_bytes = window,
-	                               .window_update_threshold_bytes = 1,
-	                               .max_message_bytes = BODY_MAX + 1024};
+	struct tr_channel_config cc = {
+	        .role = client ? TR_CHANNEL_CLIENT : TR_CHANNEL_SERVER,
+	        .mode = TR_CHANNEL_SHARED_CONNECTION,
+	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET,
+	        .max_streams = CALLS,
+	        .initial_window_bytes = window,
+	        .window_update_threshold_bytes = 1,
+	        .max_message_bytes = BODY_MAX + 1024};
 	struct tr_conn_handle conn;
 	*p = (struct peer){0};
 	atomic_init(&p->opened, 0);
@@ -727,6 +727,122 @@ static void test_partial_cancel(void)
 	destroy_fixture(&f);
 }
 
+struct reset_event_request {
+	struct call_context *call;
+	int reason;
+};
+static int reset_event_on_owner(void *arg)
+{
+	struct reset_event_request *r = arg;
+	return tr_rpc_record_stream_event_on_owner(
+	        r->call->call, r->call->stream, TR_STREAM_EVENT_RESET,
+	        r->reason);
+}
+static void reject_invalid_reset(struct call_context *call)
+{
+	const int reasons[] = {TR_OK, TR_AGAIN, TR_ERR_INVALID,
+	                       TR_ERR_UNSUPPORTED};
+	struct snapshot before = snapshot(call);
+	uint64_t bytes = atomic_load(&call->peer->budget.current_bytes);
+	CHECK(!before.state.terminal);
+	for (size_t i = 0; i < sizeof(reasons) / sizeof(reasons[0]); ++i) {
+		struct reset_event_request r = {call, reasons[i]};
+		CHECK(tr_reactor_call(call->peer->reactor, reset_event_on_owner,
+		                      &r) == TR_ERR_INVALID);
+		struct snapshot after = snapshot(call);
+		CHECK(!memcmp(&before.state, &after.state,
+		              sizeof(before.state)));
+		CHECK(after.cached == before.cached &&
+		      atomic_load(&call->peer->budget.current_bytes) == bytes &&
+		      !atomic_load(&call->terminals));
+	}
+}
+static int half_close_event_on_owner(void *arg)
+{
+	struct call_context *call = arg;
+	return tr_rpc_record_stream_event_on_owner(
+	        call->call, call->stream, TR_STREAM_EVENT_REMOTE_CLOSED, TR_OK);
+}
+static void test_reset_after_half_close(void)
+{
+	struct fixture f;
+	init_fixture(&f, TR_RPC_MANY, TR_RPC_MANY, 4096);
+	open_call(&f, 1);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	struct call_context *call = &f.server.calls[0];
+	CHECK(snapshot(call).state.request_closed);
+	CHECK(tr_reactor_call(f.server.reactor, half_close_event_on_owner,
+	                      call) == TR_OK);
+	CHECK(!atomic_load(&call->terminals));
+	reject_invalid_reset(call);
+	struct reset_event_request r = {call, TR_ERR_TIMEOUT};
+	CHECK(tr_reactor_call(f.server.reactor, reset_event_on_owner, &r) ==
+	      TR_OK);
+	CHECK(snapshot(call).state.terminal && snapshot(call).cached == 0 &&
+	      call->final_status == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      atomic_load(&call->terminals) == 1);
+	CHECK(tr_reactor_call(f.server.reactor, reset_event_on_owner, &r) ==
+	      TR_OK);
+	CHECK(atomic_load(&call->terminals) == 1);
+	destroy_fixture(&f);
+}
+static void test_reset_partial_open(void)
+{
+	struct fixture f;
+	uint8_t bytes[64];
+	const uint8_t metadata[] = {1, 0, 0, 'k'};
+	struct tr_rpc_record_header h = head(TR_RPC_RECORD_OPEN);
+	init_fixture(&f, TR_RPC_MANY, TR_RPC_MANY, 4096);
+	open_call(&f, 1);
+	h.metadata_size = sizeof(metadata);
+	(void)encode(bytes, h, metadata, NULL);
+	raw_send(&f.client.calls[0], bytes, TR_RPC_RECORD_HEADER_SIZE + 1);
+	struct call_context *call = &f.server.calls[0];
+	uint64_t until = monotonic_ms() + 15000;
+	while (!snapshot(call).cached) {
+		CHECK(monotonic_ms() < until);
+		sched_yield();
+	}
+	CHECK(!atomic_load(&call->seen[TR_RPC_RECORD_OPEN]));
+	reject_invalid_reset(call);
+	struct reset_event_request r = {call, TR_ERR_CLOSED};
+	CHECK(tr_reactor_call(f.server.reactor, reset_event_on_owner, &r) ==
+	      TR_OK);
+	CHECK(snapshot(call).cached == 0 &&
+	      call->final_status == TR_RPC_STATUS_CANCELLED &&
+	      atomic_load(&call->terminals) == 1 &&
+	      !atomic_load(&call->seen[TR_RPC_RECORD_OPEN]));
+	destroy_fixture(&f);
+}
+static void test_reset_preserves_final(void)
+{
+	struct fixture f;
+	init_fixture(&f, TR_RPC_MANY, TR_RPC_MANY, 4096);
+	open_call(&f, 1);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	send_kind(&f.server.calls[0], TR_RPC_RECORD_INITIAL_METADATA);
+	send_kind(&f.server.calls[0], TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&f.client.calls[0].terminals, 1);
+	wait_counter(&f.server.calls[0].terminals, 1);
+	struct call_context *calls[] = {&f.client.calls[0], &f.server.calls[0]};
+	for (size_t i = 0; i < sizeof(calls) / sizeof(calls[0]); ++i) {
+		struct snapshot before = snapshot(calls[i]);
+		struct reset_event_request r = {calls[i], TR_ERR_TIMEOUT};
+		CHECK(tr_reactor_call(calls[i]->peer->reactor,
+		                      reset_event_on_owner, &r) == TR_OK);
+		struct snapshot after = snapshot(calls[i]);
+		CHECK(!memcmp(&before.state, &after.state,
+		              sizeof(before.state)));
+		CHECK(calls[i]->final_status == TR_RPC_STATUS_OK &&
+		      atomic_load(&calls[i]->terminals) == 1);
+	}
+	destroy_fixture(&f);
+}
+
 static int identity_owner(void *arg)
 {
 	struct call_context *c = arg;
@@ -739,7 +855,8 @@ static int identity_owner(void *arg)
 	CHECK(tr_rpc_record_stream_receive_on_owner(c->call, stale, NULL, 0) ==
 	      TR_ERR_STALE);
 	CHECK(tr_rpc_record_stream_event_on_owner(
-	              c->call, stale, TR_STREAM_EVENT_ERROR) == TR_ERR_STALE);
+	              c->call, stale, TR_STREAM_EVENT_ERROR, TR_ERR_CLOSED) ==
+	      TR_ERR_STALE);
 	CHECK(tr_rpc_record_stream_snapshot_on_owner(c->call, &after,
 	                                             &cached) == TR_OK);
 	CHECK(!memcmp(&before, &after, sizeof(before)));
@@ -878,6 +995,9 @@ int main(void)
 	test_error_isolation();
 	test_receive_quota();
 	test_partial_cancel();
+	test_reset_after_half_close();
+	test_reset_partial_open();
+	test_reset_preserves_final();
 	test_owner_identity();
 	test_truncation();
 	test_stopped_reaping();

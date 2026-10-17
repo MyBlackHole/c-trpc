@@ -15,6 +15,8 @@ struct tr_channel;
 #define TR_CHANNEL_PROTOCOL_VERSION 1U
 #define TR_CHANNEL_LANE_MASK_CONTROL (1U << 0)
 #define TR_CHANNEL_LANE_MASK_BULK (1U << 1)
+/* 只有显式协商此能力的专用 Channel 才发送或接收单流 RESET。 */
+#define TR_CHANNEL_FEATURE_STREAM_RESET UINT64_C(1)
 
 struct tr_channel_capabilities {
 	uint16_t protocol_version;
@@ -84,7 +86,9 @@ enum tr_stream_event {
 	TR_STREAM_EVENT_REMOTE_CLOSED = 2,
 	TR_STREAM_EVENT_CLOSED = 3,
 	TR_STREAM_EVENT_ERROR = 4,
-	TR_STREAM_EVENT_WRITABLE = 5
+	TR_STREAM_EVENT_WRITABLE = 5,
+	/* 双向停止已选定；任务退出与网络静默分别由上层及 CLOSED 证明。 */
+	TR_STREAM_EVENT_RESET = 6
 };
 
 enum tr_stream_data_disposition {
@@ -123,6 +127,9 @@ struct tr_channel_config {
 	uint16_t min_protocol_version;
 	uint16_t max_protocol_version;
 	uint64_t feature_bits;
+	/* 必需能力必须同时被本地声明和对端协商；缺失时握手失败，
+	 * 不能先发布 READY 再在终止路径静默降级。0 保持旧 Channel 配置。 */
+	uint64_t required_feature_bits;
 };
 
 typedef enum tr_stream_data_disposition (*tr_stream_data_cb)(

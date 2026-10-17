@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/rpc/rpc_record_endpoint.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/transport/channel/channel_internal.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
 #include "../src/endian.h"
@@ -375,7 +376,6 @@ static void on_event(struct tr_stream_handle stream, enum tr_stream_event event,
                      int status, void *arg)
 {
 	struct peer *p = arg;
-	(void)status;
 	CHECK(!p->server);
 	if (p->disabled)
 		return;
@@ -396,8 +396,9 @@ static void on_event(struct tr_stream_handle stream, enum tr_stream_event event,
 		                                         NULL) == TR_OK);
 		atomic_fetch_add(&p->opened, 1);
 	} else if (p->calls[stream.slot]) {
-		CHECK(tr_rpc_record_stream_event_on_owner(
-		              p->calls[stream.slot], stream, event) == TR_OK);
+		CHECK(tr_rpc_record_stream_event_on_owner(p->calls[stream.slot],
+		                                          stream, event,
+		                                          status) == TR_OK);
 	}
 }
 static void tcp_pair(int *a, int *b)
@@ -430,13 +431,14 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 	                               .rx_buffer_count = 16,
 	                               .rx_buffer_size = 256,
 	                               .max_payload_len = 256};
-	struct tr_channel_config cc = {.role = server ? TR_CHANNEL_SERVER
-	                                              : TR_CHANNEL_CLIENT,
-	                               .mode = TR_CHANNEL_SHARED_CONNECTION,
-	                               .max_streams = CAP,
-	                               .initial_window_bytes = window,
-	                               .window_update_threshold_bytes = 1,
-	                               .max_message_bytes = BODY + 1024};
+	struct tr_channel_config cc = {
+	        .role = server ? TR_CHANNEL_SERVER : TR_CHANNEL_CLIENT,
+	        .mode = TR_CHANNEL_SHARED_CONNECTION,
+	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET,
+	        .max_streams = CAP,
+	        .initial_window_bytes = window,
+	        .window_update_threshold_bytes = 1,
+	        .max_message_bytes = BODY + 1024};
 	struct tr_conn_handle conn;
 	*p = (struct peer){.fixture = f, .server = server};
 	atomic_init(&p->opened, 0);
@@ -791,6 +793,72 @@ static void test_real_window(void)
 	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK);
 	fixture_destroy(&f, false);
 }
+struct peer_reset_request {
+	struct tr_stream_handle stream;
+	int reason;
+};
+static int reset_peer_on_owner(void *arg)
+{
+	struct peer_reset_request *r = arg;
+	return tr_stream_reset_on_owner(r->stream, r->reason);
+}
+static void wait_network_retired(struct fixture *f)
+{
+	uint64_t end = now_ms() + 15000;
+	while (tr_channel_active_streams(f->client.channel) ||
+	       tr_channel_active_streams(f->server.channel)) {
+		CHECK(now_ms() < end);
+		sched_yield();
+	}
+}
+static void test_peer_reset(bool after_final)
+{
+	struct fixture f;
+	fixture_init(&f, 1024 * 1024, 8);
+	unsigned method = after_final ? 0 : 3;
+	unsigned slot = open_call(&f, method);
+	CHECK(slot == 0);
+	atomic_store(&f.use_gate, !after_final);
+	request(&f, slot, method, 1, 80);
+	if (after_final) {
+		check_final(&f, slot, TR_RPC_STATUS_OK);
+	} else {
+		gate_wait(&f.gate, false);
+		CHECK(atomic_load(&f.business[0].active) == 1 &&
+		      !atomic_load(&f.server.terminals[slot]));
+	}
+	struct peer_reset_request reset = {f.client.streams[slot],
+	                                   TR_ERR_TIMEOUT};
+	CHECK(tr_reactor_call(f.client.reactor, reset_peer_on_owner, &reset) ==
+	      TR_OK);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_network_retired(&f);
+	if (!after_final) {
+		/* 两端真实 RESET 已完成，业务仍在 gate 中使用拥有型正文。
+		 * Endpoint 不得把 Channel 静默冒充 worker done。 */
+		CHECK(!atomic_load(&f.server.terminals[slot]) &&
+		      atomic_load(&f.business[0].active) == 1);
+		CHECK(f.client.status[slot] ==
+		              TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+		      !atomic_load(&f.client.messages[slot]));
+		gate_open(&f.gate);
+		wait_count(&f.server.terminals[slot], 1);
+		CHECK(f.server.status[slot] ==
+		              TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+		      !f.server.final_accepted[slot] &&
+		      !atomic_load(&f.business[0].active) &&
+		      !atomic_load(&f.client.messages[slot]));
+	} else {
+		/* Server 的 FINAL+CLOSE 已接受；后到 RESET 仍应对称响应，
+		 * 已有的两端 OK 终局与 FINAL 接受证据保持不变。 */
+		CHECK(f.client.status[slot] == TR_RPC_STATUS_OK &&
+		      f.server.status[slot] == TR_RPC_STATUS_OK &&
+		      f.server.final_accepted[slot]);
+	}
+	CHECK(atomic_load(&f.client.terminals[slot]) == 1 &&
+	      atomic_load(&f.server.terminals[slot]) == 1);
+	fixture_destroy(&f, false);
+}
 static void test_shutdown_failure(unsigned stage)
 {
 	struct fixture f;
@@ -863,6 +931,8 @@ int main(void)
 	test_business_error(true);
 	test_error_final_backpressure();
 	test_real_window();
+	test_peer_reset(false);
+	test_peer_reset(true);
 	test_shutdown_failure(0);
 	test_shutdown_failure(1);
 	test_stopped_recovery(false);

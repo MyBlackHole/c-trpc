@@ -25,6 +25,21 @@ int tr_stream_get_lane_internal(struct tr_stream_handle stream,
  */
 int tr_stream_stop_credit_on_owner(struct tr_stream_handle stream);
 
+/* 调用级双向终止。仅所属 owner、精确活代次及已协商 RESET 能力可用。
+ * status 仅允许 CLOSED（取消）、TIMEOUT、NOMEM、STATE、SYS；不接受 RPC
+ * 状态。TR_OK 后由 Channel 保持固定状态并承担发送/重试/网络退役责任，
+ * 不要求 RESET 已经写入套接字。重复请求幂等，第一次原因不被覆盖。
+ *
+ * 立即停止新的数据与信用并至多通知一次 RESET；收到对端 FIFO RESET
+ * 后以 CLOSED 通知网络静默。上层仍独立等待自己的工作与持有引用退出。
+ * 已接受普通本地 STREAM_CLOSE 后不能主动 RESET，返回 CLOSED；RPC
+ * HALF_CLOSE 不属于传输半关闭。远端 RESET 仍可终止本地已半关闭的流。
+ * 尚未收到初始 WINDOW_UPDATE 的 OPENING 返回 AGAIN 且不改变状态，
+ * 上层保留责任，等待准入确认或对端的普通 CLOSE 拒绝。
+ * 不转移应用载荷所有权；未成功取得维护定时器责任时返回错误且不选终局。
+ */
+int tr_stream_reset_on_owner(struct tr_stream_handle stream, int status);
+
 /* 有界 Channel 索引与其测试共用的流线协议标识哈希。 */
 static inline uint32_t tr_channel_stream_id_hash(uint32_t stream_id)
 {

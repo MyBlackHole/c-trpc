@@ -250,7 +250,6 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event event,
                      int status, void *arg)
 {
 	struct peer *p = arg;
-	(void)status;
 	if (p->disabled)
 		return;
 	CHECK(s.slot < CAP);
@@ -264,11 +263,11 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event event,
 		atomic_fetch_add(&p->opened, 1);
 	} else if (p->server && p->routes[s.slot].router) {
 		int ret = tr_rpc_record_router_event_on_owner(
-		        p->fixture->router, s, event);
+		        p->fixture->router, s, event, status);
 		CHECK(ret == TR_OK || ret == TR_ERR_STALE);
 	} else if (!p->server && p->calls[s.slot]) {
-		CHECK(tr_rpc_record_stream_event_on_owner(p->calls[s.slot], s,
-		                                          event) == TR_OK);
+		CHECK(tr_rpc_record_stream_event_on_owner(
+		              p->calls[s.slot], s, event, status) == TR_OK);
 	}
 }
 static void tcp_pair(int *a, int *b)
@@ -301,13 +300,14 @@ static void init_peer(struct peer *p, struct fixture *f, int fd, int server)
 	                               .rx_buffer_count = 16,
 	                               .rx_buffer_size = 256,
 	                               .max_payload_len = 256};
-	struct tr_channel_config cc = {.role = server ? TR_CHANNEL_SERVER
-	                                              : TR_CHANNEL_CLIENT,
-	                               .mode = TR_CHANNEL_SHARED_CONNECTION,
-	                               .max_streams = CAP,
-	                               .initial_window_bytes = 65536,
-	                               .window_update_threshold_bytes = 1,
-	                               .max_message_bytes = BODY + 1024};
+	struct tr_channel_config cc = {
+	        .role = server ? TR_CHANNEL_SERVER : TR_CHANNEL_CLIENT,
+	        .mode = TR_CHANNEL_SHARED_CONNECTION,
+	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET,
+	        .max_streams = CAP,
+	        .initial_window_bytes = 65536,
+	        .window_update_threshold_bytes = 1,
+	        .max_message_bytes = BODY + 1024};
 	struct tr_conn_handle conn;
 	*p = (struct peer){.fixture = f, .server = server};
 	atomic_init(&p->opened, 0);
@@ -695,6 +695,65 @@ static void test_open_failures(void)
 	CHECK(f.server.delivery[5] == TR_RPC_RECORD_OWNER_STOPPED);
 }
 
+struct reset_injection {
+	struct fixture *fixture;
+	unsigned index;
+	int reason;
+};
+static int inject_reset_on_owner(void *arg)
+{
+	struct reset_injection *r = arg;
+	return tr_rpc_record_router_event_on_owner(
+	        r->fixture->router, r->fixture->server.streams[r->index],
+	        TR_STREAM_EVENT_RESET, r->reason);
+}
+static void test_reset_partial_open(void)
+{
+	const size_t pieces[] = {3, TR_RPC_RECORD_HEADER_SIZE + 1};
+	for (size_t i = 0; i < sizeof(pieces) / sizeof(pieces[0]); ++i) {
+		struct fixture f;
+		struct injection x = {.f = &f};
+		struct tr_rpc_record_limits l = limits();
+		struct tr_rpc_record_header h = {.kind = TR_RPC_RECORD_OPEN,
+		                                 .service_id = 9,
+		                                 .method_id = 4,
+		                                 .metadata_size = 4};
+		init_fixture(&f, CAP);
+		CHECK(tr_reactor_call(f.server.reactor, create_router, &f) ==
+		      TR_OK);
+		open_stream(&f, 1);
+		CHECK(tr_rpc_record_encode_header(x.data, sizeof(x.data), &h,
+		                                  &l) == TR_OK);
+		memcpy(x.data + TR_RPC_RECORD_HEADER_SIZE, "\1\0\0k", 4);
+		x.size = pieces[i];
+		CHECK(tr_reactor_call(f.server.reactor, inject, &x) == TR_OK &&
+		      x.result == TR_OK);
+		CHECK(!atomic_load(&f.server.received[0][TR_RPC_RECORD_OPEN]) &&
+		      !atomic_load(&f.server.terminals[0]));
+		uint64_t bytes = atomic_load(&f.server.budget.current_bytes);
+		struct reset_injection reset = {&f, 0, TR_OK};
+		CHECK(tr_reactor_call(f.server.reactor, inject_reset_on_owner,
+		                      &reset) == TR_ERR_INVALID);
+		reset.reason = TR_AGAIN;
+		CHECK(tr_reactor_call(f.server.reactor, inject_reset_on_owner,
+		                      &reset) == TR_ERR_INVALID);
+		CHECK(!atomic_load(&f.server.terminals[0]) &&
+		      atomic_load(&f.server.budget.current_bytes) == bytes);
+		reset.reason = i ? TR_ERR_TIMEOUT : TR_ERR_CLOSED;
+		CHECK(tr_reactor_call(f.server.reactor, inject_reset_on_owner,
+		                      &reset) == TR_OK);
+		CHECK(f.server.status[0] ==
+		              (uint32_t)(i ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+		                           : TR_RPC_STATUS_CANCELLED) &&
+		      atomic_load(&f.server.terminals[0]) == 1 &&
+		      !atomic_load(&f.server.received[0][TR_RPC_RECORD_OPEN]));
+		CHECK(tr_reactor_call(f.server.reactor, inject_reset_on_owner,
+		                      &reset) == TR_OK);
+		CHECK(atomic_load(&f.server.terminals[0]) == 1);
+		cleanup(&f, 0);
+	}
+}
+
 static void test_pipelined_and_eof(void)
 {
 	struct fixture f;
@@ -740,6 +799,7 @@ static void test_pipelined_and_eof(void)
 
 int main(void)
 {
+	test_reset_partial_open();
 	test_method_dispatch();
 	test_pipelined_and_eof();
 	test_registry_and_capacity();

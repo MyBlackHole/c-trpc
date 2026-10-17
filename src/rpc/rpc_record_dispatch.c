@@ -650,7 +650,8 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 }
 int tr_rpc_record_dispatch_event_on_owner(struct tr_rpc_record_dispatch *d,
                                           struct tr_stream_handle stream,
-                                          enum tr_stream_event event)
+                                          enum tr_stream_event event,
+                                          int status)
 {
 	struct tr_dispatch_slot *s;
 	int ret = tr_dispatch_owner(d);
@@ -662,7 +663,8 @@ int tr_rpc_record_dispatch_event_on_owner(struct tr_rpc_record_dispatch *d,
 	if (!s)
 		return TR_ERR_STALE;
 	++d->depth;
-	ret = tr_rpc_record_router_event_on_owner(d->router, stream, event);
+	ret = tr_rpc_record_router_event_on_owner(d->router, stream, event,
+	                                          status);
 	tr_dispatch_settle(s);
 	--d->depth;
 	return ret;
@@ -717,13 +719,32 @@ int tr_rpc_record_dispatch_get_stats_on_owner(
 		return TR_ERR_INVALID;
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
 		struct tr_dispatch_slot *s = &d->slots[i];
-		stats.active_calls += s->active;
+		/* 退役只撤销 active；旧终局字段留到下次准入重置，不能算作
+		 * 仍占用资源的调用。以下字段描述当前活跃调用，均按此过滤。 */
+		if (!s->active)
+			continue;
+		++stats.active_calls;
 		stats.held_events += s->pending;
 		stats.submitted_calls += s->submitted != NULL;
 		stats.reply_calls += s->ready != NULL;
 		stats.terminal_calls += s->terminal;
 	}
 	*out = stats;
+	return TR_OK;
+}
+int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
+                                           struct tr_rpc_dispatch_result *out)
+{
+	struct tr_dispatch_slot *s;
+	int ret = tr_dispatch_lookup(handle, &s);
+	if (ret != TR_OK)
+		return ret;
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = (struct tr_rpc_dispatch_result){.status = s->status,
+	                                       .terminal = s->terminal,
+	                                       .final_accepted =
+	                                               s->final_accepted};
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)

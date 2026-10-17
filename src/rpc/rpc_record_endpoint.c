@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rpc_record_endpoint.h"
+#include "rpc_record_transport_internal.h"
 #include "../execution/reactor_internal.h"
 #include "../transport/channel/channel_internal.h"
 #include "../memory_budget.h"
@@ -30,8 +31,10 @@ struct tr_endpoint_slot {
 	struct tr_rpc_endpoint_result result;
 	uint64_t final_due;
 	enum tr_stream_event pending_event;
+	int pending_status;
 	size_t pending_next;
 	bool active, terminal, reported, peer_closed, dead, close_accepted;
+	bool reset_accepted;
 };
 struct tr_rpc_record_endpoint {
 	struct tr_reactor *reactor;
@@ -110,14 +113,17 @@ tr_endpoint_find(struct tr_rpc_record_endpoint *ep,
  */
 static void tr_endpoint_defer(struct tr_rpc_record_endpoint *ep,
                               struct tr_endpoint_slot *slot,
-                              enum tr_stream_event event)
+                              enum tr_stream_event event, int status)
 {
 	if (slot->pending_event) {
-		if (event > slot->pending_event)
+		if (slot->pending_event == TR_STREAM_EVENT_REMOTE_CLOSED) {
 			slot->pending_event = event;
+			slot->pending_status = status;
+		}
 		return;
 	}
 	slot->pending_event = event;
+	slot->pending_status = status;
 	slot->pending_next = TR_ENDPOINT_NO_SLOT;
 	size_t index = (size_t)(slot - ep->slots);
 	if (ep->pending_tail != TR_ENDPOINT_NO_SLOT)
@@ -137,6 +143,7 @@ static void tr_endpoint_apply_deferred(struct tr_rpc_record_endpoint *ep,
 	while (*remaining && ep->pending_head != TR_ENDPOINT_NO_SLOT) {
 		struct tr_endpoint_slot *slot = &ep->slots[ep->pending_head];
 		enum tr_stream_event event = slot->pending_event;
+		int status = slot->pending_status;
 		ep->pending_head = slot->pending_next;
 		if (ep->pending_head == TR_ENDPOINT_NO_SLOT)
 			ep->pending_tail = TR_ENDPOINT_NO_SLOT;
@@ -145,7 +152,7 @@ static void tr_endpoint_apply_deferred(struct tr_rpc_record_endpoint *ep,
 		--*remaining;
 		if (ep->dispatch && slot->call.dispatch && !slot->terminal)
 			(void)tr_rpc_record_dispatch_event_on_owner(
-			        ep->dispatch, slot->stream, event);
+			        ep->dispatch, slot->stream, event, status);
 	}
 }
 
@@ -222,13 +229,41 @@ static void tr_endpoint_report(struct tr_rpc_record_endpoint *ep,
 	slot->reported = true;
 	ep->terminal(slot->stream, slot->result, ep->arg);
 }
+static int tr_endpoint_reset(struct tr_endpoint_slot *slot,
+                             enum tr_rpc_status status)
+{
+	int ret = tr_stream_reset_on_owner(slot->stream,
+	                                   tr_rpc_record_reset_reason(status));
+	if (ret == TR_OK)
+		slot->reset_accepted = true;
+	else if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
+		slot->dead = true;
+		ret = TR_OK;
+	}
+	return ret;
+}
 static int tr_endpoint_progress(struct tr_rpc_record_endpoint *ep,
                                 struct tr_endpoint_slot *slot, uint64_t now)
 {
 	int ret;
-	if (!slot->active || !slot->terminal)
+	if (!slot->active)
 		return TR_OK;
-	if (!slot->dead && !slot->close_accepted) {
+	if (!slot->terminal) {
+		/* 已选终局可先结束网络，工作线程仍由派发器持有。只读快照
+		 * 不替代静默后的 terminal 回调，不能据它报告或释放业务。 */
+		if (ep->dispatch && slot->call.dispatch && !slot->dead &&
+		    !slot->reset_accepted && !slot->close_accepted) {
+			struct tr_rpc_dispatch_result result;
+			ret = tr_rpc_record_dispatch_result_on_owner(slot->call,
+			                                             &result);
+			if (ret != TR_OK)
+				return ret;
+			if (result.terminal && !result.final_accepted)
+				return tr_endpoint_reset(slot, result.status);
+		}
+		return TR_OK;
+	}
+	if (!slot->dead && !slot->close_accepted && !slot->reset_accepted) {
 		if (!slot->result.final_accepted &&
 		    slot->result.status != TR_RPC_STATUS_OK &&
 		    now < slot->final_due) {
@@ -239,22 +274,31 @@ static int tr_endpoint_progress(struct tr_rpc_record_endpoint *ep,
 			    ret != TR_ERR_STALE)
 				slot->final_due = 0;
 		}
-		/* 终局后先停止新增信用，避免延迟 DATA/负载释放在 CLOSE 后
-		 * 再排 WINDOW_UPDATE。已接受 DATA/信用仍由 FIFO 保证在前。
-		 * 两个阶段失败均保留本槽位责任，不能冒充已经关闭。 */
-		ret = tr_stream_stop_credit_on_owner(slot->stream);
-		if (ret == TR_OK)
-			ret = tr_stream_close(slot->stream);
-		if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE) {
-			slot->dead = true;
-		} else if (ret == TR_OK) {
-			slot->close_accepted = true;
-		} else {
-			return ret;
+		if (!slot->dead && !slot->reset_accepted) {
+			if (!slot->result.final_accepted) {
+				/* 错误 FINAL 未能被接受时，预留 RESET 路径负责
+				 * 停止对端；不继续等普通 DATA 信用恢复。 */
+				ret = tr_endpoint_reset(slot,
+				                        slot->result.status);
+				if (ret != TR_OK)
+					return ret;
+			} else {
+				ret = tr_stream_stop_credit_on_owner(
+				        slot->stream);
+				if (ret == TR_OK)
+					ret = tr_stream_close(slot->stream);
+				if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE)
+					slot->dead = true;
+				else if (ret == TR_OK)
+					slot->close_accepted = true;
+				else
+					return ret;
+			}
 		}
 	}
 	tr_endpoint_report(ep, slot);
-	if ((slot->dead || (slot->close_accepted && slot->peer_closed)) &&
+	if ((slot->dead || slot->reset_accepted ||
+	     (slot->close_accepted && slot->peer_closed)) &&
 	    !ep->stopping && !slot->pending_event) {
 		if (slot->call.dispatch) {
 			ret = tr_rpc_record_dispatch_retire_on_owner(
@@ -337,7 +381,8 @@ tr_endpoint_data(struct tr_stream_handle stream, uint64_t message_id,
 	 * 当前不建立第二条 RX 队列：将该流标记为协议失败，在下一次
 	 * owner pump 中终止它。不得误影响同 Channel 的其他流。 */
 	if (ep->depth && slot && !slot->terminal) {
-		tr_endpoint_defer(ep, slot, TR_STREAM_EVENT_ERROR);
+		tr_endpoint_defer(ep, slot, TR_STREAM_EVENT_ERROR,
+		                  TR_ERR_STATE);
 		return TR_STREAM_DATA_RELEASE;
 	}
 	if (!ep->depth && slot && slot->call.dispatch && !slot->terminal) {
@@ -356,7 +401,6 @@ static void tr_endpoint_event(struct tr_stream_handle stream,
 	struct tr_rpc_record_endpoint *ep = arg;
 	struct tr_endpoint_slot *slot = tr_endpoint_find(ep, stream);
 	int ret;
-	(void)status;
 	if (ep->depth) {
 		if (slot) {
 			if (event == TR_STREAM_EVENT_REMOTE_CLOSED)
@@ -364,9 +408,10 @@ static void tr_endpoint_event(struct tr_stream_handle stream,
 			if (event == TR_STREAM_EVENT_CLOSED ||
 			    event == TR_STREAM_EVENT_ERROR)
 				slot->dead = true;
-			if (event >= TR_STREAM_EVENT_REMOTE_CLOSED &&
-			    event <= TR_STREAM_EVENT_ERROR)
-				tr_endpoint_defer(ep, slot, event);
+			if (event == TR_STREAM_EVENT_RESET)
+				slot->reset_accepted = true;
+			if (tr_rpc_record_is_terminal_event(event))
+				tr_endpoint_defer(ep, slot, event, status);
 		}
 		return;
 	}
@@ -417,9 +462,11 @@ static void tr_endpoint_event(struct tr_stream_handle stream,
 		if (event == TR_STREAM_EVENT_CLOSED ||
 		    event == TR_STREAM_EVENT_ERROR)
 			slot->dead = true;
+		if (event == TR_STREAM_EVENT_RESET)
+			slot->reset_accepted = true;
 		if (slot->call.dispatch && !slot->terminal)
 			(void)tr_rpc_record_dispatch_event_on_owner(
-			        ep->dispatch, stream, event);
+			        ep->dispatch, stream, event, status);
 	}
 	--ep->depth;
 	(void)tr_rpc_record_endpoint_pump_on_owner(ep);
@@ -592,7 +639,8 @@ int tr_rpc_record_endpoint_close_on_owner(
 	for (size_t i = 0; i < ep->capacity; ++i) {
 		struct tr_endpoint_slot *slot = &ep->slots[i];
 		if (slot->active &&
-		    (!slot->terminal || (!slot->dead && !slot->close_accepted)))
+		    (!slot->terminal || (!slot->dead && !slot->close_accepted &&
+		                         !slot->reset_accepted)))
 			return TR_AGAIN;
 	}
 	if (ep->dispatch) {

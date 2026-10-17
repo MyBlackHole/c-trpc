@@ -79,9 +79,11 @@ int tr_rpc_record_stream_send_on_owner(
 int tr_rpc_record_stream_receive_on_owner(struct tr_rpc_record_stream *call,
                                           struct tr_stream_handle stream,
                                           const uint8_t *data, size_t size);
+/* status 原样来自 Channel。RESET 的传输原因在此映射为 RPC 终局，已接纳
+ * 的 FINAL 保持不变；本模块不承担网络 RESET 发送或确认责任。 */
 int tr_rpc_record_stream_event_on_owner(struct tr_rpc_record_stream *call,
                                         struct tr_stream_handle stream,
-                                        enum tr_stream_event event);
+                                        enum tr_stream_event event, int status);
 int tr_rpc_record_stream_abort_on_owner(struct tr_rpc_record_stream *call,
                                         enum tr_rpc_status status);
 int tr_rpc_record_stream_snapshot_on_owner(struct tr_rpc_record_stream *call,

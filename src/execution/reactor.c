@@ -153,6 +153,13 @@ struct tr_connection {
 	uint64_t lifecycle_after_sequence;
 	int lifecycle_tx_busy;
 	int lifecycle_tx_enqueued;
+	/* 单流终止与 GOAWAY 各有一个固定预留，普通控制流量不能抢占。
+	 * 两项都等待接受时固定的命令前沿；同前沿仍保留发布先后次序。 */
+	struct tr_tx_item stream_reset_tx;
+	uint64_t stream_reset_after_sequence;
+	int stream_reset_tx_busy;
+	int stream_reset_tx_enqueued;
+	int stream_reset_before_lifecycle;
 
 	uint32_t epoll_events;
 	int tx_scheduled;
@@ -580,6 +587,7 @@ static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
 			   uint32_t *generation_out)
 {
 	uint32_t slot;
+	int reusable = 0;
 
 	for (slot = 0; slot < reactor->config.max_connections; ++slot) {
 		uint64_t old = atomic_load_explicit(&reactor->slots[slot].meta,
@@ -587,11 +595,13 @@ static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
 		uint32_t generation;
 		uint64_t desired;
 
+		generation = tr_reactor_connection_next_generation(
+		        tr_slot_meta_generation(old));
+		if (generation == 0U)
+			continue;
+		reusable = 1;
 		if (tr_slot_meta_state(old) != TR_CONN_FREE)
 			continue;
-
-		generation = tr_reactor_connection_next_generation(
-			tr_slot_meta_generation(old));
 		desired = tr_slot_meta_make(generation, TR_CONN_RESERVED);
 
 		if (!atomic_compare_exchange_strong_explicit(
@@ -604,7 +614,9 @@ static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
 		return TR_OK;
 	}
 
-	return TR_AGAIN;
+	/* 暂时占用仍可等归还；全部槽位代次耗尽是永久容量损失，
+	 * 不能要求调用者对永远不会出现的空闲能力反复重试。 */
+	return reusable ? TR_AGAIN : TR_ERR_STATE;
 }
 
 static uint32_t tr_connection_interest(const struct tr_connection *connection)
@@ -766,6 +778,11 @@ static void tr_release_tx_queue(struct tr_reactor *reactor,
 			connection->lifecycle_after_sequence = 0U;
 			connection->lifecycle_tx_busy = 0;
 			connection->lifecycle_tx_enqueued = 0;
+		} else if (item == &connection->stream_reset_tx) {
+			memset(item, 0, sizeof(*item));
+			connection->stream_reset_after_sequence = 0U;
+			connection->stream_reset_tx_busy = 0;
+			connection->stream_reset_tx_enqueued = 0;
 		} else {
 			tr_tx_pool_release(item->owner_pool, item);
 		}
@@ -843,6 +860,15 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 		       sizeof(connection->lifecycle_tx));
 		connection->lifecycle_after_sequence = 0U;
 		connection->lifecycle_tx_busy = 0;
+	}
+	if (connection->stream_reset_tx_busy &&
+	    !connection->stream_reset_tx_enqueued) {
+		assert(reactor->lifecycle_tx_pending_count != 0U);
+		reactor->lifecycle_tx_pending_count--;
+		memset(&connection->stream_reset_tx, 0,
+		       sizeof(connection->stream_reset_tx));
+		connection->stream_reset_after_sequence = 0U;
+		connection->stream_reset_tx_busy = 0;
 	}
 
 	__atomic_store_n(&connection->tx_wait_writable, 0, __ATOMIC_RELAXED);
@@ -1169,6 +1195,11 @@ static void tr_connection_complete_tx(struct tr_connection *connection,
 		connection->lifecycle_after_sequence = 0U;
 		connection->lifecycle_tx_busy = 0;
 		connection->lifecycle_tx_enqueued = 0;
+	} else if (item == &connection->stream_reset_tx) {
+		memset(item, 0, sizeof(*item));
+		connection->stream_reset_after_sequence = 0U;
+		connection->stream_reset_tx_busy = 0;
+		connection->stream_reset_tx_enqueued = 0;
 	} else {
 		tr_tx_pool_release(item->owner_pool, item);
 	}
@@ -1642,27 +1673,49 @@ static void tr_enqueue_tx_item_owner(struct tr_reactor *reactor,
 	tr_schedule_tx(reactor, connection);
 }
 
-static void tr_connection_try_enqueue_lifecycle_tx(
-	struct tr_reactor *reactor, struct tr_connection *connection)
+static void tr_connection_try_enqueue_reserved_tx(
+        struct tr_reactor *reactor, struct tr_connection *connection,
+        struct tr_tx_item *item, uint64_t after_sequence, int busy,
+        int *enqueued)
 {
-	if (!connection || connection->state != TR_CONN_ACTIVE ||
-	    !connection->lifecycle_tx_busy ||
-	    connection->lifecycle_tx_enqueued)
+	if (!connection || connection->state != TR_CONN_ACTIVE || !busy ||
+	    *enqueued)
 		return;
 #ifndef NDEBUG
-	assert(connection->lifecycle_after_sequence != 0U ||
+	assert(after_sequence != 0U ||
 	       reactor->last_processed_command_sequence == 0U);
 #endif
 	if (!tr_command_sequence_after_eq(
-		    reactor->last_processed_command_sequence,
-		    connection->lifecycle_after_sequence))
+	            reactor->last_processed_command_sequence, after_sequence))
 		return;
 
 	assert(reactor->lifecycle_tx_pending_count != 0U);
 	reactor->lifecycle_tx_pending_count--;
-	connection->lifecycle_tx_enqueued = 1;
-	tr_enqueue_tx_item_owner(
-		reactor, connection, &connection->lifecycle_tx);
+	*enqueued = 1;
+	tr_enqueue_tx_item_owner(reactor, connection, item);
+}
+
+static void
+tr_connection_try_enqueue_lifecycle_tx(struct tr_reactor *reactor,
+                                       struct tr_connection *connection)
+{
+	if (connection->stream_reset_before_lifecycle)
+		tr_connection_try_enqueue_reserved_tx(
+		        reactor, connection, &connection->stream_reset_tx,
+		        connection->stream_reset_after_sequence,
+		        connection->stream_reset_tx_busy,
+		        &connection->stream_reset_tx_enqueued);
+	tr_connection_try_enqueue_reserved_tx(
+	        reactor, connection, &connection->lifecycle_tx,
+	        connection->lifecycle_after_sequence,
+	        connection->lifecycle_tx_busy,
+	        &connection->lifecycle_tx_enqueued);
+	if (!connection->stream_reset_before_lifecycle)
+		tr_connection_try_enqueue_reserved_tx(
+		        reactor, connection, &connection->stream_reset_tx,
+		        connection->stream_reset_after_sequence,
+		        connection->stream_reset_tx_busy,
+		        &connection->stream_reset_tx_enqueued);
 }
 
 static void tr_reactor_flush_lifecycle_tx(struct tr_reactor *reactor)
@@ -1881,9 +1934,16 @@ static int tr_process_commands(struct tr_reactor *reactor,
 		}
 		reactor->last_processed_command_sequence =
 			command->sequence;
+		/* 预留终止项必须恰在固定前驱完成后进入主 FIFO。
+		 * 只在整批末尾检查会让同批更晚的 SEND/OPEN 越过 RESET；
+		 * 对端尚未退役旧槽时就可能先看到复用容量的新 OPEN。
+		 * 每次重新遍历当前 Connection 状态，不持有 CLOSE/ADOPT
+		 * 跨命令留下的旧连接指针或代次。 */
+		tr_reactor_flush_lifecycle_tx(reactor);
 	}
 	reactor->command_dispatching = 0;
-	tr_reactor_flush_lifecycle_tx(reactor);
+	if (count == 0U)
+		tr_reactor_flush_lifecycle_tx(reactor);
 
 	/* 完整批次可能留下唤醒已被消耗的工作。即使本批次恰好排空环形队列，
 	 * 也保守地再进行一次非阻塞轮询。短批次在 queue->lock 下排空队列；
@@ -3307,10 +3367,57 @@ int tr_reactor_send_goaway_on_owner(struct tr_conn_handle handle)
 	 */
 	connection->lifecycle_after_sequence =
 		tr_command_queue_last_sequence(&reactor->commands);
+	/* 旧 GOAWAY 可能已经完成，而更晚的 RESET 仍在等命令前驱。
+	 * 新 GOAWAY 必须重新记录与当前 RESET 的接受次序，不能沿用旧位。 */
+	connection->stream_reset_before_lifecycle =
+	        connection->stream_reset_tx_busy &&
+	        !connection->stream_reset_tx_enqueued;
 	connection->lifecycle_tx_busy = 1;
 	connection->lifecycle_tx_enqueued = 0;
 	reactor->lifecycle_tx_pending_count++;
 
+	tr_connection_try_enqueue_lifecycle_tx(reactor, connection);
+	return TR_OK;
+}
+
+int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle handle,
+                                          uint32_t stream_id, int status)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+	struct tr_tx_item *item;
+
+	if (!reactor || handle.slot >= reactor->config.max_connections ||
+	    stream_id == 0 || !tr_wire_stream_reset_status_valid(status))
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection =
+	        tr_lookup_connection(reactor, handle.slot, handle.generation);
+	if (!connection)
+		return TR_ERR_STALE;
+	item = &connection->stream_reset_tx;
+	if (connection->stream_reset_tx_busy)
+		return item->stream_id == stream_id &&
+		                       item->message_id == (uint64_t)(-status)
+		               ? TR_OK
+		               : TR_AGAIN;
+
+	memset(item, 0, sizeof(*item));
+	item->type = TR_FRAME_STREAM_RESET;
+	item->stream_id = stream_id;
+	item->message_id = (uint64_t)(-status);
+	item->max_frame_payload_len = reactor->config.max_payload_len;
+	/* 后续重试只观察既有项，绝不刷新此 FIFO 前沿。RESET 不进入
+	 * 可越过 DATA 的白名单，因而对端收到它就是该方向的静默屏障。 */
+	connection->stream_reset_after_sequence =
+	        tr_command_queue_last_sequence(&reactor->commands);
+	connection->stream_reset_before_lifecycle =
+	        !connection->lifecycle_tx_busy ||
+	        connection->lifecycle_tx_enqueued;
+	connection->stream_reset_tx_busy = 1;
+	connection->stream_reset_tx_enqueued = 0;
+	reactor->lifecycle_tx_pending_count++;
 	tr_connection_try_enqueue_lifecycle_tx(reactor, connection);
 	return TR_OK;
 }

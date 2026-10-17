@@ -77,6 +77,13 @@ int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
  */
 int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection);
 
+/* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
+ * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，
+ * 相同在途项幂等，其他流返回 AGAIN。帧前保留全部已接受命令和 DATA。
+ */
+int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle connection,
+                                          uint32_t stream_id, int status);
+
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 
