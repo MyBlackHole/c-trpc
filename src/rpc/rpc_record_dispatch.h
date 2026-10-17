@@ -3,6 +3,7 @@
 
 #include "rpc_record_router.h"
 #include "../execution/task_executor.h"
+#include "tr/rpc_v2.h"
 
 struct tr_rpc_record_dispatch;
 struct tr_rpc_record_reply;
@@ -43,7 +44,15 @@ struct tr_rpc_dispatch_method {
 	struct tr_rpc_method_desc descriptor;
 	tr_rpc_record_work_fn work;
 	void *arg;
+	/* 公共适配与库内 work 恰一启用；沿用同一冻结描述和参数，
+	 * 不为每个对端或调用建立额外的业务桥接对象。 */
+	tr_rpc_v2_work_fn v2_work;
+	tr_rpc_v2_server_terminal_fn v2_terminal;
 };
+
+/* 包含停止清理线程上的公共终局回调；门面须据此拒绝同步生命周期
+ * 重入。查询本线程上下文，不取得任何对象的生命周期引用。 */
+int tr_rpc_record_dispatch_in_callback(void);
 struct tr_rpc_record_dispatch_config {
 	uint32_t capacity;
 	/* 含排队、已投递、已完成待发送的全部事件；超限终止该调用而非

@@ -5,7 +5,8 @@
 #include "facade_tuning_internal.h"
 #include "rpc/rpc_record_endpoint.h"
 
-/* 库内显式 V2 入口，返回既有 Server；不安装为 SDK，不协商或回退到 V1。
+/* 库内显式 V2 调优入口，返回既有 Server；不安装为 SDK，不协商或回退到 V1。
+ * 公开 tr_server_create_v2 在组合根推导本配置，不公开这些资源布局。
  * endpoint 是每对端的有界记录宿主配置；tasks 与 memory_budget_bytes 是
  * 全 Server 总额，按分片确定分摊，不因增加分片隐式放大。每个分片至少
  * 一个工作线程，所有对端共享该分片的既有 task_executor。
@@ -27,6 +28,8 @@ struct tr_server_record_config {
 /* 方法描述与工作函数表在创建时复制并冻结，arg 借用至 destroy 成功。
  * 业务契约沿用 tr_rpc_record_work_fn：每调用 FIFO、跨调用可并发，reply
  * 仅在当前工作回调内有效；不提供旧 Call 弱句柄或长期异步回复能力。
+ * work 与 v2_work 恰一启用；后者复用相同派发状态，并在完整有效 OPEN
+ * 准入后承担可选 v2_terminal 的一次通知，通知等待已提交工作实际退出。
  *
  * 成功后使用 tr_server_listen/start/drain/destroy。创建失败的所有权沿用
  * tr_server_create；start 仅尝试一次，失败后只允许 destroy 重试。destroy

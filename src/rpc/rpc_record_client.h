@@ -2,6 +2,7 @@
 #define TR_RPC_RECORD_CLIENT_H
 
 #include "rpc_record_stream.h"
+#include "tr/rpc_v2.h"
 
 #include <stdbool.h>
 
@@ -22,6 +23,27 @@ struct tr_rpc_record_client_handle {
 	uint64_t generation;
 	uint32_t slot;
 };
+
+/* 公共能力只保存不可检查的值；不能把完整代次压入旧 V1 的 32 位布局。 */
+static inline struct tr_rpc_v2_call
+tr_rpc_record_client_public_handle(struct tr_rpc_record_client_handle handle)
+{
+	return (struct tr_rpc_v2_call){
+	        ._private = {(uint64_t)(uintptr_t)handle.client,
+	                     handle.generation, handle.slot}};
+}
+
+static inline struct tr_rpc_record_client_handle
+tr_rpc_record_client_private_handle(struct tr_rpc_v2_call handle)
+{
+	if (handle._private[2] > UINT32_MAX)
+		return (struct tr_rpc_record_client_handle){0};
+	return (struct tr_rpc_record_client_handle){
+	        .client = (struct tr_rpc_record_client *)(uintptr_t)
+	                          handle._private[0],
+	        .generation = handle._private[1],
+	        .slot = (uint32_t)handle._private[2]};
+}
 
 typedef void (*tr_rpc_record_client_received_fn)(
         struct tr_rpc_record_client_handle handle,
@@ -60,6 +82,11 @@ int tr_rpc_record_client_create_on_owner(
         struct tr_memory_budget *budget, struct tr_rpc_record_client **out);
 int tr_rpc_record_client_start_on_owner(struct tr_rpc_record_client *client);
 
+/* 公共发送桥借用 Client 的有界复制池；启动前绑定，宿主退役不销毁池。
+ * 已接受 TX 可晚于调用和宿主释放，池必须保持到 Channel/TX 静默之后。 */
+int tr_rpc_record_client_set_send_pool_on_owner(
+        struct tr_rpc_record_client *client, struct tr_buffer_pool *pool);
+
 /* 门面排空桥。通知只在 owner 的最外层进度边界、全部用户回调返回后
  * 发布本层静默状态；未发送的 OPEN、未报告终局及尚未退役的绑定都为
  * busy，不包含 Channel 持有的网络确认和 TX。观察者只发布状态，不得
@@ -92,6 +119,16 @@ int tr_rpc_record_client_call_start_on_owner(
         uint32_t method_id, const struct tr_rpc_call_options *options,
         const struct tr_rpc_record_client_callbacks *callbacks,
         struct tr_rpc_record_client_handle *out);
+
+/* 公共回调在既有固定调用槽内发布，不另建调用表或桥接堆对象。 */
+int tr_rpc_record_client_call_start_public_on_owner(
+        struct tr_rpc_record_client *client, uint32_t service_id,
+        uint32_t method_id, const struct tr_rpc_call_options *options,
+        const struct tr_rpc_v2_client_callbacks *callbacks,
+        struct tr_rpc_v2_call *out);
+int tr_rpc_record_client_send_bytes_on_owner(
+        struct tr_rpc_record_client_handle handle,
+        const struct tr_rpc_bytes *message);
 
 /* 仅 TR_OK 接管并清空 *body，失败保留正文及本次发送语义。允许 NULL
  * 正文发送一条空 MESSAGE；不隐式排队。OPEN 尚未接受返回 AGAIN。
