@@ -4,6 +4,7 @@
 #include "rpc_record_dispatch.h"
 
 struct tr_rpc_record_endpoint;
+struct tr_rpc_record_semantic_counters;
 
 #define TR_RPC_RECORD_OPEN_TIMEOUT_DEFAULT_NS UINT64_C(10000000000)
 
@@ -53,6 +54,12 @@ int tr_rpc_record_endpoint_create_on_owner(
         tr_rpc_endpoint_terminal_fn terminal, void *arg,
         struct tr_memory_budget *budget, struct tr_rpc_record_endpoint **out);
 int tr_rpc_record_endpoint_start_on_owner(struct tr_rpc_record_endpoint *ep);
+
+/* 只在 start 前绑定同 owner 的累计记账。借用对象必须长于所有绑定宿主，
+ * 包括停止后任务完成交付；关闭宿主不会清空或再次归档此累计值。 */
+int tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+        struct tr_rpc_record_endpoint *ep,
+        struct tr_rpc_record_semantic_counters *counters);
 
 /* 同时由数据、可写及定时器驱动；每次工作量受显式数量配置限制。
  * 重入错误以预分配槽位形成有界待处理队列，先于业务完成/发送处理；

@@ -54,8 +54,9 @@ tr_server_get_rpc_semantic_stats(server, &stats);
 
 该契约不依赖 Endpoint 槽位、执行器工作线程和传输连接：
 
-- 客户端 `calls_started`：Call API 返回 `TR_OK` 并发布一个 Call 能力句柄；
-- 服务端 `calls_started`：已注册 Method 接受第一条有效 `REQUEST`，包括随后被拦截器/准入拒绝的 Call；
+- 客户端 `calls_started`：本地已接受 Call 并发布能力，外部 API 将返回 `TR_OK`；
+- V1 服务端 `calls_started`：已注册 Method 接受第一条有效 `REQUEST`，包括随后被拦截器/准入拒绝的 Call；
+- V2 服务端 `calls_started`：完整合法 OPEN 匹配方法并通过期限准入，包含随后发生的工作对象分配失败或执行器拒绝；
 - `calls_finished`：一次最终应用可见 RPC 结果已经提交；
 - `calls_inflight`：快照值 `started - finished`；
 - `final_status[status]`：终止状态恰好一次分类；所有桶之和等于 `calls_finished`。
@@ -71,6 +72,42 @@ tr_server_get_rpc_semantic_stats(server, &stats);
 
 V1 仅提供聚合 RPC 可观测性。未来可以使用分片本地记账增加每服务/方法语义拆分，
 但不能引入跨分片共享热计数器。
+
+### V2 的提交点与执行域
+
+V2 复用同一份公共结构和两端读取函数，不增加工作线程、队列、资源池或协议
+槽位字段。未知方法、无效或不完整 OPEN、尚未通过期限准入的 OPEN 不计入
+服务端开始数；客户端已经受理的调用即使 OPEN 尚被背压阻挡，也计入客户端。
+因此两端总数和状态分布可以不同，不能用客户端终局推断服务端业务已退出。
+
+Client 在发布能力前记录开始，在唯一 terminal 回调调用前记录结束。
+回调可以早于外部 start 返回，也可以在其中读取已包含自身终局的快照。
+Server 在承担业务终局责任时记录开始，等待已提交工作返回及完成交付后，
+在业务 terminal 提交前记录结束；没有安装 terminal 函数也在相同位置记账。
+RESET 已交给网络而业务仍在运行时，Server 的 `calls_inflight` 仍包含该调用。
+结束计数不表示 terminal 回调已返回，也不证明对端已收到结果或 TX 已归还。
+
+| 读取入口 | V2 允许的上下文 | 失败时输出 |
+|---|---|---|
+| Client | 普通线程；同一 Client 的 LIVE 所有者回调 | 保留原值 |
+| Server | 外部控制线程，依次同步复制各分片 | 保留原值 |
+
+Client 的工作线程、其他所有者及 SHUTDOWN 回调读取返回 `TR_ERR_STATE`。
+Server 的所有 c-trpc 回调和工作线程读取均返回 `TR_ERR_STATE`，不因分片数为 1
+而改变合同。成功构造但尚未连接的 Client、尚未 start 的 Server 返回全零。
+首次 destroy 开始或构造/连接回滚未收敛后不再允许普通读取；调用方必须按门面
+生命周期合同排除并发销毁。读取会等待所有者命令，不承诺硬实时或信号安全。
+
+服务端每分片持有一个累计记账对象，寿命长于所有对端。调用只由所属 owner
+记账；工作线程通过既有完成交付返回该域。停止后的残留完成在父线程 join 且
+公共统计入口关闭后处理。对端回收只结束借用，不搬移或再次累计统计，避免
+live/退役替换的空窗和重复。热路径没有新增全局原子变量、计时读取或堆分配。
+
+每个成功快照保持 `calls_started - calls_finished == calls_inflight`，并且
+所有 `final_status` 之和等于 `calls_finished`。本地累计或跨分片求和不能以
+`uint64_t` 表示时，读取返回 `TR_ERR_BAD_LENGTH`，输出保持原值；本地溢出状态
+会保留至实例销毁。不独立饱和各字段，不回绕计数，也不因统计溢出拒绝正常 RPC。
+跨分片读取仍不是全局同一时刻的快照；语义关系保持完整，排空后累计值稳定。
 
 ## Reactor 瓶颈归因
 

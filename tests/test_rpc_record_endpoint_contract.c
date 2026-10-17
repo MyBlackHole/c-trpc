@@ -46,6 +46,8 @@ struct tr_rpc_record_dispatch {
 	struct fixture *f;
 	tr_rpc_dispatch_terminal_fn terminal;
 	void *arg;
+	struct tr_rpc_record_semantic_counters *semantic;
+	unsigned semantic_binds;
 	struct fake_call calls[CAP];
 	uint64_t generation;
 	bool cleanup;
@@ -301,6 +303,20 @@ int tr_rpc_record_dispatch_create_on_owner(
 	d->arg = arg;
 	*out = d;
 	d->f->dispatch = d;
+	return TR_OK;
+}
+/* 仅观察宿主向下层透传的对象和状态，不模拟真实 RPC 语义记账。 */
+int tr_rpc_record_dispatch_bind_semantic_stats_on_owner(
+        struct tr_rpc_record_dispatch *d,
+        struct tr_rpc_record_semantic_counters *counters)
+{
+	CHECK(d && owner == &d->f->reactor);
+	++d->semantic_binds;
+	if (!counters)
+		return TR_ERR_INVALID;
+	if (d->semantic)
+		return TR_ERR_STATE;
+	d->semantic = counters;
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_admit_on_owner(struct tr_rpc_record_dispatch *d,
@@ -714,8 +730,38 @@ static void test_admission_failure_skips_final_wait(void)
 static void test_progress_observer(void)
 {
 	struct fixture f;
+	const struct tr_rpc_semantic_stats expected = {
+	        .calls_started = 9,
+	        .calls_finished = 7,
+	        .calls_inflight = 2,
+	        .final_status = {[TR_RPC_STATUS_OK] = 7}};
+	struct tr_rpc_record_semantic_counters counters = {.value = expected};
 	init(&f);
-	start(&f);
+	CHECK(create(&f) == TR_OK);
+	/* owner/启动屏障由真实 Endpoint 拒绝；下层只负责绑定参数和返回值。
+	 * 已有分片累计必须原样借用，关闭宿主不能清空该对象。 */
+	owner = NULL;
+	CHECK(tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+	              f.ep, &counters) == TR_ERR_STATE);
+	owner = &f.reactor;
+	CHECK(!f.dispatch->semantic_binds);
+	CHECK(tr_rpc_record_endpoint_bind_semantic_stats_on_owner(f.ep, NULL) ==
+	      TR_ERR_INVALID);
+	CHECK(f.dispatch->semantic_binds == 1 && !f.dispatch->semantic);
+	CHECK(tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+	              f.ep, &counters) == TR_OK);
+	CHECK(f.dispatch->semantic_binds == 2 &&
+	      f.dispatch->semantic == &counters);
+	CHECK(tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+	              f.ep, &counters) == TR_ERR_STATE);
+	CHECK(f.dispatch->semantic_binds == 3);
+	CHECK(tr_rpc_record_endpoint_start_on_owner(f.ep) == TR_OK);
+	CHECK(tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+	              f.ep, &counters) == TR_ERR_STATE);
+	CHECK(f.dispatch->semantic_binds == 3 &&
+	      f.dispatch->semantic == &counters);
+	CHECK(!memcmp(&counters.value, &expected, sizeof(expected)) &&
+	      !counters.overflow);
 	observe(&f);
 	CHECK(f.notifications == 1 && f.notified_drained[0]);
 	struct tr_stream_handle s = open_stream(&f, 0, 1);
@@ -732,6 +778,8 @@ static void test_progress_observer(void)
 	(void)open_stream(&f, 0, 2);
 	close_all(&f);
 	CHECK(f.notifications == 3);
+	CHECK(!memcmp(&counters.value, &expected, sizeof(expected)) &&
+	      !counters.overflow);
 }
 static void test_stopping_quiet_retains_storage(void)
 {

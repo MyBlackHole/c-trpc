@@ -43,6 +43,7 @@ struct tr_rpc_record_client {
 	struct tr_memory_budget *budget;
 	struct tr_buffer_pool *send_pool;
 	struct tr_rpc_record_client_config config;
+	struct tr_rpc_record_semantic_counters semantic;
 	struct tr_reactor_timer_handle timer;
 	uint32_t *routes;
 	uint32_t route_capacity;
@@ -225,6 +226,8 @@ static void tr_record_client_report(struct tr_record_client_slot *slot)
 	    client->callback_depth)
 		return;
 	slot->reported = true;
+	/* 终局回调内的快照已经包含本次结果；后续网络退役不再记账。 */
+	tr_rpc_record_semantic_finish(&client->semantic, slot->status);
 	tr_record_client_callback_enter(client);
 	if (slot->public_mode) {
 		slot->public_callbacks.terminal(
@@ -615,48 +618,9 @@ static void tr_record_client_event(struct tr_stream_handle stream,
 static int tr_record_client_metadata(const struct tr_rpc_call_options *options,
                                      uint8_t *out, uint32_t *size)
 {
-	size_t used = 0;
-	if (!options || !options->metadata_count) {
-		*size = 0;
-		return TR_OK;
-	}
-	if (!options->metadata ||
-	    options->metadata_count > TR_RPC_METADATA_MAX_BYTES / 4)
-		return TR_ERR_INVALID;
-	for (uint16_t i = 0; i < options->metadata_count; ++i) {
-		const struct tr_rpc_metadata *entry = &options->metadata[i];
-		size_t key_size, entry_size;
-		if (!entry->key || (entry->value_len && !entry->value))
-			return TR_ERR_INVALID;
-		key_size = strnlen(entry->key, TR_RPC_METADATA_MAX_KEY_LEN + 1);
-		entry_size = 3 + key_size + entry->value_len;
-		if (!key_size || key_size > TR_RPC_METADATA_MAX_KEY_LEN ||
-		    entry_size > TR_RPC_METADATA_MAX_BYTES - used)
-			return TR_ERR_BAD_LENGTH;
-		for (size_t j = 0; j < key_size; ++j) {
-			unsigned char ch = (unsigned char)entry->key[j];
-			if (!((ch >= 'a' && ch <= 'z') ||
-			      (ch >= '0' && ch <= '9') || ch == '_' ||
-			      ch == '.' || ch == '-'))
-				return TR_ERR_BAD_FLAGS;
-		}
-		for (size_t prior = 0; prior < used;) {
-			size_t n = out[prior];
-			if (n == key_size &&
-			    !memcmp(out + prior + 3, entry->key, n))
-				return TR_ERR_BAD_FLAGS;
-			prior += 3 + n + tr_get_le16(out + prior + 1);
-		}
-		out[used] = (uint8_t)key_size;
-		tr_put_le16(out + used + 1, entry->value_len);
-		memcpy(out + used + 3, entry->key, key_size);
-		if (entry->value_len)
-			memcpy(out + used + 3 + key_size, entry->value,
-			       entry->value_len);
-		used += entry_size;
-	}
-	*size = (uint32_t)used;
-	return TR_OK;
+	return tr_rpc_v2_metadata_encode(options ? options->metadata : NULL,
+	                                 options ? options->metadata_count : 0,
+	                                 out, size);
 }
 
 static int tr_record_client_call_start(
@@ -759,6 +723,7 @@ static int tr_record_client_call_start(
 			slot->callbacks = *callbacks;
 		}
 		slot->accepted = true;
+		tr_rpc_record_semantic_start(&client->semantic);
 		if (public_callbacks)
 			*public_out = tr_rpc_record_client_public_handle(
 			        tr_record_client_handle(slot));
@@ -977,6 +942,15 @@ int tr_rpc_record_client_create_on_owner(
 	client->bytes = bytes;
 	*out = client;
 	return TR_OK;
+}
+
+int tr_rpc_record_client_get_semantic_stats_on_owner(
+        struct tr_rpc_record_client *client, struct tr_rpc_semantic_stats *out)
+{
+	int ret = tr_record_client_owner(client);
+	if (ret != TR_OK)
+		return ret;
+	return tr_rpc_record_semantic_stats_read(&client->semantic, out);
 }
 
 int tr_rpc_record_client_set_send_pool_on_owner(

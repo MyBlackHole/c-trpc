@@ -1302,13 +1302,43 @@ int tr_client_get_rpc_stats(struct tr_client *client,
 	return tr_rpc_endpoint_get_stats(client->rpc, out);
 }
 
+struct tr_client_record_semantic_request {
+	struct tr_rpc_record_client *client;
+	struct tr_rpc_semantic_stats *out;
+};
+
+static int tr_client_record_semantic_on_owner(void *arg)
+{
+	struct tr_client_record_semantic_request *request = arg;
+	return tr_rpc_record_client_get_semantic_stats_on_owner(request->client,
+	                                                        request->out);
+}
+
 int tr_client_get_rpc_semantic_stats(
 	struct tr_client *client, struct tr_rpc_semantic_stats *out)
 {
 	if (!client || !out)
 		return TR_ERR_INVALID;
-	if (client->record_mode)
-		return TR_ERR_UNSUPPORTED;
+	if (client->record_mode) {
+		struct tr_reactor *owner = tr_client_reactor(client);
+		if (atomic_load_explicit(&client->record_stopping,
+		                         memory_order_acquire) ||
+		    client->record_connect_failed || !owner)
+			return TR_ERR_STATE;
+		/* 同一 Client 的 LIVE 回调可在 owner 上直接读取；工作线程、
+		 * 停止清理域及其他 owner 不能同步等待此 owner 的进度。 */
+		if (tr_client_blocking_lifecycle_context() &&
+		    !tr_reactor_in_owner_context_for(owner))
+			return TR_ERR_STATE;
+		if (!client->record_rpc) {
+			*out = (struct tr_rpc_semantic_stats){0};
+			return TR_OK;
+		}
+		struct tr_client_record_semantic_request request = {
+		        client->record_rpc, out};
+		return tr_reactor_call(
+		        owner, tr_client_record_semantic_on_owner, &request);
+	}
 
 	memset(out, 0, sizeof(*out));
 	if (!client->rpc)

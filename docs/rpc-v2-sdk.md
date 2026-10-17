@@ -58,6 +58,7 @@ static enum tr_rpc_status echo_work(
 | Client 消息、元数据回调 | 所有字节只借用至回调返回，零字节消息仍交付一次 |
 | Server 请求事件 | 正文及 OPEN 元数据是当前工作事件的有界副本，只借用至 work 返回 |
 | `reply_append()` | 成功后已复制；任一追加失败锁存整批错误，不能忽略错误交付部分成功 |
+| `reply_set_metadata()` | 成功后已复制键值；每批每阶段只能设置一次，失败锁存整批错误 |
 | Server 方法参数 | 指针被复制，所指对象由业务拥有并保持到 Server 销毁成功 |
 | Client 调用参数 | start 受理后借用到唯一 terminal；终局函数可释放它 |
 | Client 调用句柄 | 可复制的弱能力，保留完整调用代次，不延长 Client 寿命 |
@@ -67,7 +68,47 @@ static enum tr_rpc_status echo_work(
 键访问。键没有 NUL 终止符，值可含零字节。返回值继续借用原回调视图，不能把其中
 的地址保留到回调之后。按索引越界或查找不存在的键返回 `TR_ERR_STALE`，失败不改
 输出对象。请求元数据仍通过 `tr_rpc_call_options` 输入；初始和尾部响应元数据由
-Client 回调读取，当前 Server SDK 尚无设置响应元数据的业务接口。
+Client 回调读取。
+
+### 设置响应元数据
+
+Server 在当前 work 内通过 `tr_rpc_v2_reply_set_metadata(reply, phase, entries, count)`
+复制设置响应元数据。输入复用 `tr_rpc_metadata` 数组；键为 NUL 终止字符串，
+长度 1～63，只允许小写 ASCII `[a-z0-9_.-]`，同一列表不得重复键。值是二进制字节，
+零长度可用 NULL；每阶段编码后的总长度最多为 `TR_RPC_METADATA_MAX_BYTES`（512）。
+`TR_OK` 后可以立即复用数组、键和值，库只持有按实际编码大小预约的有界副本。
+
+| 阶段 | 设置条件与发送时机 |
+|---|---|
+| INITIAL | 尚未发送初始元数据时可在当前 work 设置；始终先于本批正文发送，与 setter 和 append 的调用先后无关 |
+| TRAILING | 必须属于同一批的终局；在 finish 之前设置，或由 HALF_CLOSE 的默认终局携带；只随 FINAL 发送 |
+
+每批每阶段只能设置一次，空列表同样消耗这一次设置。尾部元数据不跨工作事件保存：
+普通非终局批次设置 TRAILING 后返回 OK 会使该批以 `FAILED_PRECONDITION` 失败。
+finish 之后不能再设置元数据或追加正文。有效的初始和尾部元数据可以随显式业务
+错误终局发送，包括 `reply_finish(non_OK)` 和 work 返回合法非 OK 状态；本批正文丢弃。
+
+没有既有错误时，无效键、重复键、参数或长度产生 `INVALID_ARGUMENT`；重复设置阶段、
+阶段顺序错误产生 `FAILED_PRECONDITION`；资源分配失败产生 `RESOURCE_EXHAUSTED`。
+这些错误与 append 失败一样锁存，已有非 OK 状态保持不变，丢弃本批全部正文和
+元数据，不能忽略返回值产生截断成功。NULL 或回调外无效能力不会触及任何批次。
+已经由前一批传输接受的内容不能撤销；Client 仍须用终局状态判断调用结果。
+
+网络背压由库保存当前批次和发送进度，不重复执行 work。取消或期限先取得终局时，
+仍在 work 中生成的结果会在完成交付时丢弃；setter 成功不承诺该元数据一定被发送
+或被对端收到。回复能力仍只能在当前 work 中使用。
+
+## 稳定调用统计
+
+`tr_client_get_rpc_semantic_stats()`、`tr_server_get_rpc_semantic_stats()` 同样支持 V2，
+读取开始、结束、进行中调用数及最终状态分布。Client 自身 LIVE 回调内可读本地
+快照；Server 聚合快照必须从外部控制线程读取，所有 c-trpc 回调中返回 `TR_ERR_STATE`。
+失败保留输出，累计溢出返回 `TR_ERR_BAD_LENGTH`，不影响正常调用。
+
+Client 在调用受理时记开始，在 terminal 调用前记结束；Server 在完整合法 OPEN
+准入后记开始，等待工作和完成交付收敛后记结束。Client 取消已结束而 Server 工作
+仍未退出时，两端 `calls_inflight` 可以不同。断连和对端回收不清空 Server 累计值。
+计数不替代回调返回、发送完成或排空屏障；详细口径见[运行时可观测性](observability.md)。
 
 ## 回调与终局
 
@@ -123,9 +164,9 @@ Server 当前每调用最多保留 16 个未收敛输入事件，包含排队、
 
 ## 当前边界
 
-本接口覆盖 ONE/MANY 四种组合、请求元数据、响应元数据读取、有界回复、可写通知、
-取消、期限及分层排空。它尚未提供 NONE 基数、回调外长期异步生产者、响应元数据
-写入、V2 语义统计、自动重连、连接组、网络压缩或 TLS。配置不支持的已有功能会
+本接口覆盖 ONE/MANY 四种组合、请求与响应元数据、有界回复、可写通知、
+取消、期限、分层排空及调用语义统计。它尚未提供 NONE 基数、回调外长期异步生产者、
+自动重连、连接组、网络压缩或 TLS。配置不支持的已有功能会
 明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
 
 验证入口是 Xmake：

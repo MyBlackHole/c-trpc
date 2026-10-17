@@ -665,6 +665,83 @@ static void fixture_destroy(struct fixture *f)
 	CHECK(pthread_mutex_destroy(&f->gate.lock) == 0);
 }
 
+static void check_client_semantic(struct tr_client *client, uint64_t started,
+                                  uint64_t finished, enum tr_rpc_status status)
+{
+	struct tr_rpc_semantic_stats actual;
+	struct tr_rpc_semantic_stats expected = {.calls_started = started,
+	                                         .calls_finished = finished,
+	                                         .calls_inflight =
+	                                                 started - finished};
+	expected.final_status[status] = finished;
+	memset(&actual, 0xa5, sizeof(actual));
+	CHECK(tr_client_get_rpc_semantic_stats(client, &actual) == TR_OK);
+	CHECK(!memcmp(&actual, &expected, sizeof(actual)));
+}
+
+static void check_client_semantic_rejected(struct tr_client *client)
+{
+	struct tr_rpc_semantic_stats actual, sentinel;
+	memset(&actual, 0xa5, sizeof(actual));
+	sentinel = actual;
+	CHECK(tr_client_get_rpc_semantic_stats(client, &actual) ==
+	      TR_ERR_STATE);
+	CHECK(!memcmp(&actual, &sentinel, sizeof(actual)));
+}
+
+/* 统计溢出必须可辨认，但不得变成 RPC 准入失败或各字段独立饱和。
+ * 先精确达到边界，再模拟下一次受理/终局；失败读取不能改写旧快照。
+ * 合并使用两份仍满足生命周期恒等式的分片快照验证边界和原文保留。 */
+static void test_semantic_overflow(void)
+{
+	struct tr_rpc_record_semantic_counters counters = {
+	        .value = {
+	                .calls_started = UINT64_MAX - 1,
+	                .calls_finished = UINT64_MAX - 2,
+	                .final_status = {[TR_RPC_STATUS_OK] = UINT64_MAX - 2}}};
+	struct tr_rpc_semantic_stats actual,
+	        expected = {
+	                .calls_started = UINT64_MAX,
+	                .calls_finished = UINT64_MAX,
+	                .final_status = {[TR_RPC_STATUS_OK] = UINT64_MAX - 2,
+	                                 [TR_RPC_STATUS_CANCELLED] = 1,
+	                                 [TR_RPC_STATUS_INTERNAL] = 1}};
+	tr_rpc_record_semantic_start(&counters);
+	tr_rpc_record_semantic_finish(&counters, TR_RPC_STATUS_CANCELLED);
+	tr_rpc_record_semantic_finish(&counters,
+	                              (enum tr_rpc_status)TR_RPC_STATUS_COUNT);
+	CHECK(tr_rpc_record_semantic_stats_read(&counters, &actual) == TR_OK);
+	CHECK(!memcmp(&actual, &expected, sizeof(actual)));
+	tr_rpc_record_semantic_start(&counters);
+	tr_rpc_record_semantic_finish(&counters, TR_RPC_STATUS_OK);
+	CHECK(tr_rpc_record_semantic_stats_read(&counters, &actual) ==
+	      TR_ERR_BAD_LENGTH);
+	CHECK(!memcmp(&actual, &expected, sizeof(actual)));
+	CHECK(counters.overflow);
+
+	struct tr_rpc_semantic_stats total = {
+	        .calls_started = UINT64_MAX - 2,
+	        .calls_finished = UINT64_MAX - 3,
+	        .calls_inflight = 1,
+	        .final_status = {[TR_RPC_STATUS_OK] = UINT64_MAX - 3}};
+	const struct tr_rpc_semantic_stats shard = {
+	        .calls_started = 2,
+	        .calls_finished = 1,
+	        .calls_inflight = 1,
+	        .final_status = {[TR_RPC_STATUS_INTERNAL] = 1}};
+	expected = (struct tr_rpc_semantic_stats){
+	        .calls_started = UINT64_MAX,
+	        .calls_finished = UINT64_MAX - 2,
+	        .calls_inflight = 2,
+	        .final_status = {[TR_RPC_STATUS_OK] = UINT64_MAX - 3,
+	                         [TR_RPC_STATUS_INTERNAL] = 1}};
+	CHECK(tr_rpc_record_semantic_stats_merge(&total, &shard) == TR_OK);
+	CHECK(!memcmp(&total, &expected, sizeof(total)));
+	CHECK(tr_rpc_record_semantic_stats_merge(&total, &shard) ==
+	      TR_ERR_BAD_LENGTH);
+	CHECK(!memcmp(&total, &expected, sizeof(total)));
+}
+
 struct owned_body {
 	struct tr_buffer buffer;
 	_Atomic unsigned *released;
@@ -847,6 +924,7 @@ static void terminal(struct tr_rpc_record_client_handle handle,
 	} else {
 		CHECK(delivery == TR_RPC_RECORD_OWNER_STOPPED);
 		CHECK(!tr_reactor_in_owner_context());
+		check_client_semantic_rejected(context->fixture->client);
 		callback_self_checks(context);
 	}
 	result->status = status;
@@ -1060,20 +1138,17 @@ static void test_configuration_and_rollback(void)
 	fixture_create(&f);
 	CHECK(tr_client_register_method(f.client, &f.client_methods[0]) ==
 	      TR_ERR_UNSUPPORTED);
-	struct tr_rpc_semantic_stats stats, sentinel;
-	memset(&stats, 0xa5, sizeof(stats));
-	sentinel = stats;
-	CHECK(tr_client_get_rpc_semantic_stats(f.client, &stats) ==
-	      TR_ERR_UNSUPPORTED);
-	CHECK(!memcmp(&stats, &sentinel, sizeof(stats)));
+	check_client_semantic(f.client, 0, 0, TR_RPC_STATUS_OK);
 	atomic_store(&fail_client_create, true);
 	CHECK(tr_client_connect(f.client, "127.0.0.1", f.port) == TR_ERR_NOMEM);
 	CHECK(atomic_load(&create_failures) == 1);
 	CHECK(!atomic_load(&client_creates));
+	check_client_semantic(f.client, 0, 0, TR_RPC_STATUS_OK);
 	fixture_connect(&f);
 	struct call call;
 	call_init(&call, &f);
 	echo(&call, 1, 31, 1);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_OK);
 	fixture_destroy(&f);
 	CHECK(atomic_load(&call.result.terminals) == 1);
 }
@@ -1100,6 +1175,7 @@ static void test_metadata_copy(void)
 	call_start(&call, 1, &options);
 	wait_count(&fake_again, 1);
 	CHECK(!atomic_load(&f.calls));
+	check_client_semantic(f.client, 1, 0, TR_RPC_STATUS_OK);
 	/* OPEN 尚未接受时销毁原元数据内容，后续重试仍须使用有界副本。 */
 	memset(key, 'x', sizeof(key));
 	memset(value, 'y', sizeof(value));
@@ -1110,6 +1186,7 @@ static void test_metadata_copy(void)
 	send_body(&call, 32, 9);
 	half_close(&call);
 	call_finish(&call, TR_RPC_STATUS_OK, TR_RPC_RECORD_ON_OWNER);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_OK);
 	fixture_destroy(&f);
 	CHECK(atomic_load(&f.calls) == 1);
 }
@@ -1164,6 +1241,7 @@ static void test_unknown_method(void)
 	            TR_RPC_RECORD_ON_OWNER);
 	CHECK(!atomic_load(&f.calls));
 	CHECK(atomic_load(&rejected.result.final_records) == 1);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_UNIMPLEMENTED);
 	call_retired(&rejected);
 	echo(&following, 1, 63, 10);
 	fixture_destroy(&f);
@@ -1403,6 +1481,16 @@ static void test_inline_data_failure(void)
 	CHECK(atomic_load(&f.bodies_released) == 2);
 }
 
+static int reject_cross_owner_semantic(void *arg)
+{
+	struct fixture *f = arg;
+	CHECK(tr_reactor_in_owner_context());
+	CHECK(!tr_reactor_in_owner_context_for(
+	        tr_channel_reactor(atomic_load(&client_channel))));
+	check_client_semantic_rejected(f->client);
+	return TR_OK;
+}
+
 static void test_owner_callbacks(void)
 {
 	struct fixture f;
@@ -1410,6 +1498,11 @@ static void test_owner_callbacks(void)
 	fixture_init(&f);
 	fixture_create(&f);
 	fixture_connect(&f);
+	/* 另一 owner 的同步快照不能等待 Client owner，out 保持原文。 */
+	struct tr_channel *other = atomic_load(&server_channel);
+	CHECK(other);
+	CHECK(tr_reactor_call(tr_channel_reactor(other),
+	                      reject_cross_owner_semantic, &f) == TR_OK);
 	call_init(&followup, &f);
 	call_init(&cancelled, &f);
 	call_init(&freed, &f);
@@ -1482,6 +1575,7 @@ static void test_disconnect(void)
 	CHECK(tr_reactor_call(connection.reactor, close_connection_on_owner,
 	                      &connection) == TR_OK);
 	call_finish(&call, TR_RPC_STATUS_UNAVAILABLE, TR_RPC_RECORD_ON_OWNER);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_UNAVAILABLE);
 	gate_release(&f.gate);
 	wait_count(&f.messages, 1);
 	fixture_destroy(&f);
@@ -1744,6 +1838,7 @@ static void test_destroy_retry(bool stopped_residual)
 		CHECK(!atomic_load(&call.result.self_checks));
 	}
 	CHECK(tr_client_connect(f.client, "127.0.0.1", f.port) == TR_ERR_STATE);
+	check_client_semantic_rejected(f.client);
 	/* 第一次拆除后宿主可能已释放，不再访问其借用句柄；只重试仍由
 	 * 调用方拥有的 Client，残留终局不得重复交付。 */
 	CHECK(tr_client_destroy(f.client) == TR_OK);
@@ -1771,6 +1866,7 @@ static void test_deadlines_and_lifecycle(void)
 
 struct public_result {
 	struct fixture *fixture;
+	bool check_semantic;
 	struct expected_message expected[2];
 	unsigned expected_count;
 	_Atomic unsigned messages, initial, trailing, writable, terminal;
@@ -1844,6 +1940,8 @@ static void public_terminal(struct tr_rpc_v2_call call,
 	CHECK(tr_client_destroy(result->fixture->client) == TR_ERR_STATE);
 	CHECK(tr_client_wait_drained(result->fixture->client, 1) ==
 	      TR_ERR_STATE);
+	if (result->check_semantic)
+		check_client_semantic(result->fixture->client, 1, 1, status);
 	result->status = status;
 	result->delivery = delivery;
 	if (context->free_on_terminal) {
@@ -1994,13 +2092,15 @@ static int public_early_start_on_owner(void *arg)
 	CHECK(atomic_load(&request->result->arg_freed) == 1);
 	CHECK(request->result->status == TR_RPC_STATUS_INTERNAL);
 	CHECK(request->result->delivery == TR_RPC_V2_DELIVERY_LIVE);
+	check_client_semantic(request->fixture->client, 1, 1,
+	                      TR_RPC_STATUS_INTERNAL);
 	return TR_OK;
 }
 
 static void test_public_early_terminal(void)
 {
 	struct fixture f;
-	struct public_result result = {.fixture = &f};
+	struct public_result result = {.fixture = &f, .check_semantic = true};
 	struct public_early_request request = {&f, &result, {{0}}};
 	public_fixture_init(&f);
 	struct tr_reactor *owner =
@@ -2017,6 +2117,8 @@ static void test_public_early_terminal(void)
 int main(void)
 {
 	CHECK(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
+	test_semantic_overflow();
+	puts("test_client_record: semantic overflow passed");
 	test_configuration_and_rollback();
 	puts("test_client_record: configuration and rollback passed");
 	test_shapes_and_metadata();
@@ -2037,6 +2139,6 @@ int main(void)
 	puts("test_client_record: public copy and pool passed");
 	test_public_early_terminal();
 	puts("test_client_record: public early terminal passed");
-	puts("test_client_record: 10 groups passed");
+	puts("test_client_record: 11 groups passed");
 	return 0;
 }

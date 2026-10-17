@@ -26,6 +26,15 @@
 
 struct fixture;
 
+enum response_metadata { METADATA_NONE, METADATA_VALUES, METADATA_EMPTY };
+
+struct observed_client {
+	struct tr_client *handle;
+	uint64_t terminals;
+	uint64_t final_status[TR_RPC_STATUS_COUNT];
+	int destroying;
+};
+
 struct method_state {
 	struct fixture *fixture;
 	unsigned index;
@@ -40,13 +49,16 @@ struct method_state {
 	unsigned exited;
 	unsigned released;
 	int expect_metadata;
+	enum response_metadata response_metadata;
 	enum tr_rpc_status status;
 	struct tr_rpc_v2_call_id id;
 };
 
 struct fixture {
-	struct tr_client *client;
+	struct observed_client client;
 	struct tr_server *server;
+	struct tr_client_config client_config;
+	uint16_t port;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct method_state methods[METHOD_COUNT];
@@ -59,6 +71,7 @@ struct message_spec {
 
 struct call_state {
 	struct fixture *fixture;
+	struct observed_client *client;
 	struct tr_rpc_v2_call handle;
 	struct message_spec requests[MAX_MESSAGES];
 	struct message_spec responses[MAX_MESSAGES];
@@ -78,6 +91,7 @@ struct call_state {
 	int manual;
 	int checked_context;
 	int check_length;
+	enum response_metadata response_metadata;
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
 };
@@ -124,6 +138,75 @@ static void wait_count(struct fixture *f, const unsigned *value,
 static void publish(struct fixture *f)
 {
 	CHECK(pthread_cond_broadcast(&f->cond) == 0);
+}
+
+static void check_stats_invariants(const struct tr_rpc_semantic_stats *stats)
+{
+	uint64_t finished = 0;
+	CHECK(stats->calls_started >= stats->calls_finished);
+	CHECK(stats->calls_inflight ==
+	      stats->calls_started - stats->calls_finished);
+	for (unsigned i = 0; i < TR_RPC_STATUS_COUNT; ++i)
+		finished += stats->final_status[i];
+	CHECK(finished == stats->calls_finished);
+}
+
+static void check_totals(const struct tr_rpc_semantic_stats *stats,
+                         uint64_t started, uint64_t finished,
+                         enum tr_rpc_status other, uint64_t other_count)
+{
+	check_stats_invariants(stats);
+	CHECK(stats->calls_started == started);
+	CHECK(stats->calls_finished == finished);
+	CHECK(finished >= other_count);
+	for (unsigned i = 0; i < TR_RPC_STATUS_COUNT; ++i) {
+		uint64_t wanted =
+		        i == TR_RPC_STATUS_OK ? finished - other_count : 0;
+		if (i == (unsigned)other)
+			wanted += other_count;
+		CHECK(stats->final_status[i] == wanted);
+	}
+}
+
+static void check_server_totals(struct fixture *f, uint64_t started,
+                                uint64_t finished, enum tr_rpc_status other,
+                                uint64_t other_count)
+{
+	struct tr_rpc_semantic_stats stats;
+	CHECK(tr_server_get_rpc_semantic_stats(f->server, &stats) == TR_OK);
+	check_totals(&stats, started, finished, other, other_count);
+}
+
+static void check_client_totals(struct observed_client *client,
+                                uint64_t started, uint64_t finished,
+                                enum tr_rpc_status other, uint64_t other_count)
+{
+	struct tr_rpc_semantic_stats stats;
+	CHECK(tr_client_get_rpc_semantic_stats(client->handle, &stats) ==
+	      TR_OK);
+	check_totals(&stats, started, finished, other, other_count);
+}
+
+static void check_stats_rejected(struct fixture *f, int foreign_client)
+{
+	struct tr_rpc_semantic_stats before, stats;
+	memset(&before, 0xa5, sizeof(before));
+	memcpy(&stats, &before, sizeof(stats));
+	CHECK(tr_server_get_rpc_semantic_stats(f->server, &stats) ==
+	      TR_ERR_STATE);
+	CHECK(memcmp(&stats, &before, sizeof(stats)) == 0);
+	if (foreign_client) {
+		/* 销毁前先在相同锁下撤销借用，避免跨实例检查碰到已释放 Client。
+		 */
+		lock(f);
+		if (!f->client.destroying && f->client.handle) {
+			CHECK(tr_client_get_rpc_semantic_stats(f->client.handle,
+			                                       &stats) ==
+			      TR_ERR_STATE);
+			CHECK(memcmp(&stats, &before, sizeof(stats)) == 0);
+		}
+		unlock(f);
+	}
 }
 
 static uint8_t pattern(unsigned tag, unsigned offset)
@@ -201,6 +284,68 @@ static void check_request_metadata(const struct tr_rpc_v2_metadata_view *view,
 	CHECK(found == 3U);
 }
 
+static void set_response_metadata(struct tr_rpc_v2_reply *reply,
+                                  enum tr_rpc_v2_metadata_phase phase,
+                                  enum response_metadata mode)
+{
+	char key[] = "bin";
+	char empty_key[] = "empty";
+	uint8_t value[] = {0, 255, (uint8_t)phase, 0};
+	struct tr_rpc_metadata entries[2];
+	if (mode == METADATA_NONE)
+		return;
+	if (mode == METADATA_EMPTY) {
+		CHECK(tr_rpc_v2_reply_set_metadata(reply, phase, NULL, 0) ==
+		      TR_OK);
+		return;
+	}
+	entries[0].key = key;
+	entries[0].value = value;
+	entries[0].value_len = sizeof(value);
+	entries[1].key = empty_key;
+	entries[1].value = NULL;
+	entries[1].value_len = 0;
+	CHECK(tr_rpc_v2_reply_set_metadata(reply, phase, entries, 2) == TR_OK);
+	/* 两阶段都复制数组、键与二进制值；同名键可分别属于两个阶段。 */
+	memset(key, 'q', sizeof(key));
+	memset(empty_key, 'q', sizeof(empty_key));
+	memset(value, 0x55, sizeof(value));
+	memset(entries, 0, sizeof(entries));
+}
+
+static void check_response_metadata(const struct tr_rpc_v2_metadata_view *view,
+                                    enum tr_rpc_v2_metadata_phase phase,
+                                    enum response_metadata mode)
+{
+	struct tr_rpc_bytes value;
+	const uint8_t expected[] = {0, 255, (uint8_t)phase, 0};
+	CHECK(tr_rpc_v2_metadata_count(view) ==
+	      (mode == METADATA_VALUES ? 2U : 0U));
+	check_missing_metadata(view);
+	if (mode != METADATA_VALUES)
+		return;
+	CHECK(tr_rpc_v2_metadata_find(view, "bin", &value) == TR_OK);
+	CHECK(value.len == sizeof(expected));
+	CHECK(memcmp(value.data, expected, sizeof(expected)) == 0);
+	CHECK(tr_rpc_v2_metadata_find(view, "empty", &value) == TR_OK);
+	CHECK(value.len == 0U);
+	for (size_t i = 0; i < 2U; ++i) {
+		struct tr_rpc_v2_metadata_entry entry;
+		CHECK(tr_rpc_v2_metadata_at(view, i, &entry) == TR_OK);
+		if (i == 0U) {
+			CHECK(entry.key.len == 3U &&
+			      memcmp(entry.key.data, "bin", 3U) == 0);
+			CHECK(entry.value.len == sizeof(expected));
+			CHECK(memcmp(entry.value.data, expected,
+			             sizeof(expected)) == 0);
+		} else {
+			CHECK(entry.key.len == 5U &&
+			      memcmp(entry.key.data, "empty", 5U) == 0);
+			CHECK(entry.value.len == 0U);
+		}
+	}
+}
+
 static void append_response(struct tr_rpc_v2_reply *reply, unsigned size,
                             unsigned tag)
 {
@@ -249,8 +394,11 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	struct method_state *m = (struct method_state *)arg;
 	struct fixture *f = m->fixture;
 	unsigned sum = 0;
+	unsigned requests;
+	enum response_metadata metadata;
 	CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
+	check_stats_rejected(f, 1);
 	lock(f);
 	CHECK(m->running == 0U);
 	++m->running;
@@ -275,22 +423,43 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 			sum = m->sum;
 		}
 	}
+	requests = m->requests;
+	metadata = m->response_metadata;
 	publish(f);
 	unlock(f);
 
-	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
+	if (request->kind == TR_RPC_V2_REQUEST_OPEN && m->index == 1U) {
+		set_response_metadata(reply, TR_RPC_V2_METADATA_INITIAL,
+		                      metadata);
+	} else if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
 		unsigned tag = request->body.len ? request->body.data[0] : 0U;
 		if (m->index == 4U) {
 			cooperate(m, cancel);
+			CHECK(tr_rpc_v2_cancel_requested(cancel) == 1);
+			set_response_metadata(reply, TR_RPC_V2_METADATA_INITIAL,
+			                      metadata);
+			set_response_metadata(
+			        reply, TR_RPC_V2_METADATA_TRAILING, metadata);
 		} else if (m->index != 2U) {
 			unsigned copies = m->index == 1U ? 3U : 1U;
 			for (unsigned i = 0; i < copies; ++i)
 				append_response(reply, request->body.len,
 				                tag + i);
+			if (requests == 1U && m->index != 1U)
+				set_response_metadata(
+				        reply, TR_RPC_V2_METADATA_INITIAL,
+				        metadata);
 		}
 	} else if (request->kind == TR_RPC_V2_REQUEST_HALF_CLOSE) {
 		if (m->index == 2U)
 			append_response(reply, 8U, sum);
+		/* INITIAL 的发送次序不依赖 setter 与同批 append 的调用次序。
+		 * 空 MANY 也显式交付一个空 INITIAL，随后才交付尾部。 */
+		if (m->index == 2U || (m->index == 3U && !requests))
+			set_response_metadata(reply, TR_RPC_V2_METADATA_INITIAL,
+			                      metadata);
+		set_response_metadata(reply, TR_RPC_V2_METADATA_TRAILING,
+		                      metadata);
 		CHECK(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) == TR_OK);
 	}
 	lock(f);
@@ -312,6 +481,7 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 	CHECK(delivery == TR_RPC_V2_DELIVERY_LIVE ||
 	      delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
 	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
+	check_stats_rejected(f, 1);
 	lock(f);
 	CHECK(m->running == 0U);
 	CHECK(m->terminals < m->opens);
@@ -322,38 +492,10 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 	unlock(f);
 }
 
-static void fixture_create(struct fixture *f)
+static void describe_methods(struct tr_rpc_method_desc *descriptors)
 {
-	struct tr_client_config client;
-	struct tr_server_config server;
-	struct tr_rpc_v2_method methods[METHOD_COUNT];
-	struct tr_rpc_method_desc descriptors[METHOD_COUNT + 1U];
-	pthread_condattr_t attr;
-	uint16_t port = 0;
-	memset(f, 0, sizeof(*f));
-	CHECK(pthread_mutex_init(&f->lock, NULL) == 0);
-	CHECK(pthread_condattr_init(&attr) == 0);
-	CHECK(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0);
-	CHECK(pthread_cond_init(&f->cond, &attr) == 0);
-	CHECK(pthread_condattr_destroy(&attr) == 0);
-	tr_client_config_init(&client);
-	tr_server_config_init(&server);
-	server.max_peers = 2;
-	server.limits.max_calls = 4;
-	server.limits.max_streams = 4;
-	server.limits.max_methods = METHOD_COUNT + 1U;
-	server.limits.max_message_bytes = MAX_BODY;
-	server.limits.max_frame_payload_bytes = 256;
-	server.limits.initial_window_bytes = MAX_BODY;
-	/* 故意保留较大的公开默认阈值，由 V2 门面推导可推进的内部值。 */
-	client.limits = server.limits;
-	client.connect_timeout_ms = 2000;
-	server.handshake_timeout_ms = 2000;
-	memset(methods, 0, sizeof(methods));
-	memset(descriptors, 0, sizeof(descriptors));
+	memset(descriptors, 0, (METHOD_COUNT + 1U) * sizeof(*descriptors));
 	for (unsigned i = 0; i < METHOD_COUNT; ++i) {
-		f->methods[i].fixture = f;
-		f->methods[i].index = i;
 		descriptors[i].service_id = 23;
 		descriptors[i].method_id = i + 1U;
 		descriptors[i].request_cardinality =
@@ -365,25 +507,76 @@ static void fixture_create(struct fixture *f)
 		descriptors[i].lane = TR_RPC_LANE_CONTROL;
 		descriptors[i].max_request_bytes = MAX_BODY;
 		descriptors[i].max_response_bytes = MAX_BODY;
+	}
+	descriptors[METHOD_COUNT] = descriptors[0];
+	descriptors[METHOD_COUNT].method_id = 99;
+}
+
+static void create_client(struct fixture *f, struct observed_client *client)
+{
+	struct tr_rpc_method_desc descriptors[METHOD_COUNT + 1U];
+	memset(client, 0, sizeof(*client));
+	describe_methods(descriptors);
+	CHECK(tr_client_create_v2(&f->client_config, descriptors,
+	                          METHOD_COUNT + 1U, &client->handle) == TR_OK);
+	memset(descriptors, 0, sizeof(descriptors));
+	check_client_totals(client, 0, 0, TR_RPC_STATUS_OK, 0);
+	CHECK(tr_client_connect(client->handle, "127.0.0.1", f->port) == TR_OK);
+	CHECK(tr_client_wait_ready(client->handle, WAIT_MS) == TR_OK);
+}
+
+static void fixture_create_shards(struct fixture *f, unsigned shards)
+{
+	struct tr_server_config server;
+	struct tr_rpc_v2_method methods[METHOD_COUNT];
+	struct tr_rpc_method_desc descriptors[METHOD_COUNT + 1U];
+	pthread_condattr_t attr;
+	memset(f, 0, sizeof(*f));
+	CHECK(pthread_mutex_init(&f->lock, NULL) == 0);
+	CHECK(pthread_condattr_init(&attr) == 0);
+	CHECK(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0);
+	CHECK(pthread_cond_init(&f->cond, &attr) == 0);
+	CHECK(pthread_condattr_destroy(&attr) == 0);
+	tr_client_config_init(&f->client_config);
+	tr_server_config_init(&server);
+	server.shard_count = shards;
+	server.max_peers = 2U * shards;
+	server.limits.max_calls = 4;
+	server.limits.max_streams = 4;
+	server.limits.max_methods = METHOD_COUNT + 1U;
+	server.limits.max_message_bytes = MAX_BODY;
+	server.limits.max_frame_payload_bytes = 256;
+	server.limits.initial_window_bytes = MAX_BODY;
+	/* 故意保留较大的公开默认阈值，由 V2 门面推导可推进的内部值。 */
+	f->client_config.limits = server.limits;
+	f->client_config.connect_timeout_ms = 2000;
+	server.handshake_timeout_ms = 2000;
+	memset(methods, 0, sizeof(methods));
+	describe_methods(descriptors);
+	for (unsigned i = 0; i < METHOD_COUNT; ++i) {
+		f->methods[i].fixture = f;
+		f->methods[i].index = i;
+		f->methods[i].response_metadata = METADATA_VALUES;
 		methods[i].descriptor = descriptors[i];
 		methods[i].work = server_work;
 		methods[i].terminal = server_terminal;
 		methods[i].arg = &f->methods[i];
 	}
-	descriptors[METHOD_COUNT] = descriptors[0];
-	descriptors[METHOD_COUNT].method_id = 99;
 	CHECK(tr_server_create_v2(&server, methods, METHOD_COUNT, &f->server) ==
 	      TR_OK);
-	CHECK(tr_client_create_v2(&client, descriptors, METHOD_COUNT + 1U,
-	                          &f->client) == TR_OK);
-	/* 工厂冻结两种方法表；后续连接不能继续借用这些构造期数组。 */
+	/* 工厂冻结方法表；后续连接不能继续借用这些构造期数组。 */
 	memset(methods, 0, sizeof(methods));
 	memset(descriptors, 0, sizeof(descriptors));
-	CHECK(tr_server_listen(f->server, "127.0.0.1", 0, &port) == TR_OK);
-	CHECK(port != 0);
+	check_server_totals(f, 0, 0, TR_RPC_STATUS_OK, 0);
+	CHECK(tr_server_listen(f->server, "127.0.0.1", 0, &f->port) == TR_OK);
+	CHECK(f->port != 0);
 	CHECK(tr_server_start(f->server) == TR_OK);
-	CHECK(tr_client_connect(f->client, "127.0.0.1", port) == TR_OK);
-	CHECK(tr_client_wait_ready(f->client, WAIT_MS) == TR_OK);
+	create_client(f, &f->client);
+}
+
+static void fixture_create(struct fixture *f)
+{
+	fixture_create_shards(f, 1);
 }
 
 static void destroy_server(struct fixture *f)
@@ -402,12 +595,21 @@ static void destroy_server(struct fixture *f)
 	f->server = NULL;
 }
 
+static void destroy_client(struct fixture *f, struct observed_client *client)
+{
+	lock(f);
+	client->destroying = 1;
+	unlock(f);
+	CHECK(tr_client_destroy(client->handle) == TR_OK);
+	lock(f);
+	client->handle = NULL;
+	unlock(f);
+}
+
 static void fixture_destroy(struct fixture *f)
 {
-	if (f->client) {
-		CHECK(tr_client_destroy(f->client) == TR_OK);
-		f->client = NULL;
-	}
+	if (f->client.handle)
+		destroy_client(f, &f->client);
 	destroy_server(f);
 	CHECK(pthread_cond_destroy(&f->cond) == 0);
 	CHECK(pthread_mutex_destroy(&f->lock) == 0);
@@ -416,11 +618,12 @@ static void fixture_destroy(struct fixture *f)
 static void callback_context_checks(struct call_state *c)
 {
 	struct fixture *f = c->fixture;
-	CHECK(tr_client_wait_ready(f->client, 0) == TR_ERR_STATE);
-	CHECK(tr_client_wait_drained(f->client, 0) == TR_ERR_STATE);
-	CHECK(tr_client_destroy(f->client) == TR_ERR_STATE);
+	CHECK(tr_client_wait_ready(c->client->handle, 0) == TR_ERR_STATE);
+	CHECK(tr_client_wait_drained(c->client->handle, 0) == TR_ERR_STATE);
+	CHECK(tr_client_destroy(c->client->handle) == TR_ERR_STATE);
 	CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
+	check_stats_rejected(f, 0);
 }
 
 static void client_message(struct tr_rpc_v2_call call,
@@ -453,8 +656,7 @@ static void client_metadata(struct tr_rpc_v2_call call,
 	lock(f);
 	CHECK(!c->terminals && c->callback_depth == 0U);
 	++c->callback_depth;
-	CHECK(tr_rpc_v2_metadata_count(view) == 0U);
-	check_missing_metadata(view);
+	check_response_metadata(view, phase, c->response_metadata);
 	if (phase == TR_RPC_V2_METADATA_INITIAL) {
 		CHECK(!c->initial && !c->received && !c->trailing);
 		++c->initial;
@@ -476,7 +678,12 @@ static void client_writable(struct tr_rpc_v2_call call, void *arg)
 	++c->callback_depth;
 	unlock(f);
 	if (!c->checked_context) {
+		struct tr_rpc_semantic_stats stats;
 		callback_context_checks(c);
+		CHECK(tr_client_get_rpc_semantic_stats(c->client->handle,
+		                                       &stats) == TR_OK);
+		check_stats_invariants(&stats);
+		CHECK(stats.calls_started > stats.calls_finished);
 		c->checked_context = 1;
 	}
 	if (!c->manual) {
@@ -531,10 +738,35 @@ static void client_terminal(struct tr_rpc_v2_call call,
 {
 	struct call_state *c = (struct call_state *)arg;
 	struct fixture *f = c->fixture;
+	struct tr_rpc_semantic_stats before, stats;
+	int destroying;
 	(void)call;
 	callback_context_checks(c);
 	lock(f);
+	destroying = c->client->destroying;
+	unlock(f);
+	memset(&before, 0xa5, sizeof(before));
+	memcpy(&stats, &before, sizeof(stats));
+	int ret = tr_client_get_rpc_semantic_stats(c->client->handle, &stats);
+	if (destroying || delivery == TR_RPC_V2_DELIVERY_SHUTDOWN) {
+		CHECK(ret == TR_ERR_STATE);
+		CHECK(memcmp(&stats, &before, sizeof(stats)) == 0);
+	} else {
+		CHECK(ret == TR_OK);
+		check_stats_invariants(&stats);
+	}
+	lock(f);
 	CHECK(!c->terminals && c->callback_depth == 0U);
+	CHECK((unsigned)status < TR_RPC_STATUS_COUNT);
+	++c->client->terminals;
+	++c->client->final_status[status];
+	if (ret == TR_OK) {
+		/* 终局记账先于通知；调用者无需等网络对象退役再观察完成。 */
+		CHECK(stats.calls_finished == c->client->terminals);
+		for (unsigned i = 0; i < TR_RPC_STATUS_COUNT; ++i)
+			CHECK(stats.final_status[i] ==
+			      c->client->final_status[i]);
+	}
 	c->status = status;
 	c->delivery = delivery;
 	++c->terminals;
@@ -547,6 +779,7 @@ static void call_init(struct call_state *c, struct fixture *f, unsigned method,
 {
 	memset(c, 0, sizeof(*c));
 	c->fixture = f;
+	c->client = &f->client;
 	c->method = method;
 	c->request_count = count;
 	CHECK(count <= MAX_MESSAGES);
@@ -555,6 +788,7 @@ static void call_init(struct call_state *c, struct fixture *f, unsigned method,
 	if (method < METHOD_COUNT) {
 		lock(f);
 		c->server_terminal_target = f->methods[method].terminals + 1U;
+		c->response_metadata = f->methods[method].response_metadata;
 		unlock(f);
 	}
 }
@@ -577,7 +811,7 @@ static int call_start(struct call_state *c,
 	callbacks.writable = client_writable;
 	callbacks.terminal = client_terminal;
 	callbacks.arg = c;
-	return tr_client_v2_call_start(c->fixture->client, 23,
+	return tr_client_v2_call_start(c->client->handle, 23,
 	                               c->method < METHOD_COUNT ? c->method + 1U
 	                                                        : 99U,
 	                               options, &callbacks, &c->handle);
@@ -597,7 +831,11 @@ static void call_done(struct call_state *c, enum tr_rpc_status status)
 	if (status == TR_RPC_STATUS_OK) {
 		CHECK(c->sent == c->request_count && c->half_closed);
 		CHECK(c->trailing == 1U);
-		CHECK(c->initial == (c->response_count ? 1U : 0U));
+		CHECK(c->initial ==
+		      (c->response_count ||
+		                       c->response_metadata != METADATA_NONE
+		               ? 1U
+		               : 0U));
 		CHECK(f->methods[c->method].status == TR_RPC_STATUS_OK);
 	}
 	unlock(f);
@@ -605,8 +843,8 @@ static void call_done(struct call_state *c, enum tr_rpc_status status)
 
 static void drain(struct fixture *f)
 {
-	CHECK(tr_client_begin_drain(f->client) == TR_OK);
-	CHECK(tr_client_wait_drained(f->client, WAIT_MS) == TR_OK);
+	CHECK(tr_client_begin_drain(f->client.handle) == TR_OK);
+	CHECK(tr_client_wait_drained(f->client.handle, WAIT_MS) == TR_OK);
 	CHECK(tr_server_drain(f->server, WAIT_MS) == TR_OK);
 }
 
@@ -680,6 +918,9 @@ static void test_shapes_and_copy(void)
 	call_done(&bidi, TR_RPC_STATUS_OK);
 	CHECK(bidi.again > 0U);
 
+	lock(&f);
+	f.methods[3].response_metadata = METADATA_EMPTY;
+	unlock(&f);
 	call_init(&empty, &f, 3, NULL, 0);
 	CHECK(call_start(&empty, NULL) == TR_OK);
 	call_done(&empty, TR_RPC_STATUS_OK);
@@ -701,6 +942,9 @@ static void test_shapes_and_copy(void)
 	unknown.manual = 1;
 	CHECK(call_start(&unknown, NULL) == TR_OK);
 	call_done(&unknown, TR_RPC_STATUS_UNIMPLEMENTED);
+	check_client_totals(&f.client, 7, 7, TR_RPC_STATUS_UNIMPLEMENTED, 1);
+	/* 未知方法不建立服务端业务终局责任；两端准入数有意不同。 */
+	check_server_totals(&f, 6, 6, TR_RPC_STATUS_OK, 0);
 	drain(&f);
 	/* 静默屏障之后才要求旧能力已经退役；不查看私有代次或槽号。 */
 	CHECK(tr_rpc_v2_call_cancel(one.handle) == TR_ERR_STALE);
@@ -711,6 +955,8 @@ static void test_shapes_and_copy(void)
 	call_init(&rejected, &f, 0, request, 1);
 	CHECK(call_start(&rejected, NULL) == TR_ERR_CLOSED);
 	CHECK(rejected.terminals == 0U);
+	check_client_totals(&f.client, 7, 7, TR_RPC_STATUS_UNIMPLEMENTED, 1);
+	check_server_totals(&f, 6, 6, TR_RPC_STATUS_OK, 0);
 	fixture_destroy(&f);
 	CHECK(one.terminals == 1U && bidi.terminals == 1U &&
 	      unknown.terminals == 1U);
@@ -743,8 +989,12 @@ static void test_cancel_or_deadline(int deadline)
 	wait_count(&f, &f.methods[4].cancelled, 1);
 	lock(&f);
 	CHECK(blocked.status == expected && blocked.received == 0U);
+	CHECK(blocked.initial == 0U && blocked.trailing == 0U);
 	CHECK(f.methods[4].exited == 0U && f.methods[4].terminals == 0U);
 	unlock(&f);
+	call_done(&healthy, TR_RPC_STATUS_OK);
+	check_client_totals(&f.client, 2, 2, expected, 1);
+	check_server_totals(&f, 2, 1, TR_RPC_STATUS_OK, 0);
 	/* 客户端已终局也不能跨过仍借用 request/reply 的服务端工作。 */
 	CHECK(tr_server_drain(f.server, 0) == TR_AGAIN);
 	lock(&f);
@@ -752,12 +1002,15 @@ static void test_cancel_or_deadline(int deadline)
 	publish(&f);
 	unlock(&f);
 	call_done(&blocked, expected);
-	call_done(&healthy, TR_RPC_STATUS_OK);
 	lock(&f);
 	CHECK(f.methods[4].exited == 1U && f.methods[4].terminals == 1U);
 	CHECK(f.methods[4].status == expected);
+	CHECK(blocked.initial == 0U && blocked.trailing == 0U);
 	unlock(&f);
+	check_server_totals(&f, 2, 2, expected, 1);
 	drain(&f);
+	check_client_totals(&f.client, 2, 2, expected, 1);
+	check_server_totals(&f, 2, 2, expected, 1);
 	fixture_destroy(&f);
 	CHECK(blocked.terminals == 1U && healthy.terminals == 1U);
 	puts(deadline ? "sdk-v2: case=deadline-drain result=pass"
@@ -774,8 +1027,7 @@ static void test_destroy_live_terminal(void)
 	CHECK(call_start(&pending, NULL) == TR_OK);
 	wait_count(&f, &pending.writable_returns, 1);
 	wait_count(&f, &f.methods[0].opens, 1);
-	CHECK(tr_client_destroy(f.client) == TR_OK);
-	f.client = NULL;
+	destroy_client(&f, &f.client);
 	CHECK(pending.terminals == 1U);
 	/* 已发布且仍活跃的连接先由 owner 的正常停止路径关闭。其
 	 * UNAVAILABLE/LIVE 终局已经获胜，随后清理不能改成残留取消。
@@ -788,11 +1040,61 @@ static void test_destroy_live_terminal(void)
 	puts("sdk-v2: case=destroy-live-terminal result=pass");
 }
 
+static void test_stats_peer_retirement(void)
+{
+	struct fixture f;
+	struct observed_client peer;
+	struct call_state first, second, surviving;
+	struct message_spec request;
+	/* 配置两个分片并从公开入口聚合；连接分配由 SO_REUSEPORT 决定，
+	 * 此场景只断言真实跨 peer 及断连累计，不推断实际分片分布。 */
+	fixture_create_shards(&f, 2);
+	create_client(&f, &peer);
+	request.size = 17;
+	request.tag = 91;
+	call_init(&first, &f, 0, &request, 1);
+	expect(&first, request.size, request.tag);
+	CHECK(call_start(&first, NULL) == TR_OK);
+	call_done(&first, TR_RPC_STATUS_OK);
+	check_client_totals(&f.client, 1, 1, TR_RPC_STATUS_OK, 0);
+
+	request.tag = 101;
+	call_init(&second, &f, 1, &request, 1);
+	second.client = &peer;
+	for (unsigned i = 0; i < 3U; ++i)
+		expect(&second, request.size, request.tag + i);
+	CHECK(call_start(&second, NULL) == TR_OK);
+	call_done(&second, TR_RPC_STATUS_OK);
+	check_client_totals(&peer, 1, 1, TR_RPC_STATUS_OK, 0);
+	check_server_totals(&f, 2, 2, TR_RPC_STATUS_OK, 0);
+	CHECK(memcmp(&f.methods[0].id, &f.methods[1].id,
+	             sizeof(f.methods[0].id)) != 0);
+
+	destroy_client(&f, &f.client);
+	check_server_totals(&f, 2, 2, TR_RPC_STATUS_OK, 0);
+	request.tag = 111;
+	call_init(&surviving, &f, 0, &request, 1);
+	surviving.client = &peer;
+	expect(&surviving, request.size, request.tag);
+	CHECK(call_start(&surviving, NULL) == TR_OK);
+	call_done(&surviving, TR_RPC_STATUS_OK);
+	check_client_totals(&peer, 2, 2, TR_RPC_STATUS_OK, 0);
+	check_server_totals(&f, 3, 3, TR_RPC_STATUS_OK, 0);
+	CHECK(tr_client_begin_drain(peer.handle) == TR_OK);
+	CHECK(tr_client_wait_drained(peer.handle, WAIT_MS) == TR_OK);
+	CHECK(tr_server_drain(f.server, WAIT_MS) == TR_OK);
+	destroy_client(&f, &peer);
+	check_server_totals(&f, 3, 3, TR_RPC_STATUS_OK, 0);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=stats-peer-retirement result=pass");
+}
+
 int main(void)
 {
 	test_shapes_and_copy();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);
 	test_destroy_live_terminal();
+	test_stats_peer_retirement();
 	return 0;
 }

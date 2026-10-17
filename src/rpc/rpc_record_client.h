@@ -2,6 +2,7 @@
 #define TR_RPC_RECORD_CLIENT_H
 
 #include "rpc_record_stream.h"
+#include "rpc_record_stats.h"
 #include "tr/rpc_v2.h"
 
 #include <stdbool.h>
@@ -81,6 +82,12 @@ int tr_rpc_record_client_create_on_owner(
         size_t method_count, const struct tr_rpc_record_client_config *config,
         struct tr_memory_budget *budget, struct tr_rpc_record_client **out);
 int tr_rpc_record_client_start_on_owner(struct tr_rpc_record_client *client);
+
+/* 统计在宿主内累计；允许同宿主的正常 owner 回调只读快照。
+ * 受理在发布 out 前计数，完成在唯一终局回调前计数，网络退役不重计。
+ */
+int tr_rpc_record_client_get_semantic_stats_on_owner(
+        struct tr_rpc_record_client *client, struct tr_rpc_semantic_stats *out);
 
 /* 公共发送桥借用 Client 的有界复制池；启动前绑定，宿主退役不销毁池。
  * 已接受 TX 可晚于调用和宿主释放，池必须保持到 Channel/TX 静默之后。 */

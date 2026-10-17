@@ -707,6 +707,19 @@ int tr_rpc_record_endpoint_create_on_owner(
 	*out = ep;
 	return TR_OK;
 }
+int tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
+        struct tr_rpc_record_endpoint *ep,
+        struct tr_rpc_record_semantic_counters *counters)
+{
+	int ret = tr_endpoint_owner(ep);
+	if (ret != TR_OK)
+		return ret;
+	if (ep->started || ep->stopping || ep->depth || ep->notifying)
+		return TR_ERR_STATE;
+	return tr_rpc_record_dispatch_bind_semantic_stats_on_owner(ep->dispatch,
+	                                                           counters);
+}
+
 int tr_rpc_record_endpoint_start_on_owner(struct tr_rpc_record_endpoint *ep)
 {
 	uint64_t now;

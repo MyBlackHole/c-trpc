@@ -1,10 +1,56 @@
 #include "rpc_v2_internal.h"
 #include "rpc_record.h"
+#include "../endian.h"
 #include "../facade_tuning_internal.h"
 #include "tr/status.h"
 
 #include <stdbool.h>
 #include <string.h>
+
+int tr_rpc_v2_metadata_encode(const struct tr_rpc_metadata *entries,
+                              size_t count, uint8_t *out, uint32_t *size)
+{
+	size_t used = 0;
+	if (!out || !size || (count && !entries) ||
+	    count > TR_RPC_METADATA_MAX_BYTES / 4U)
+		return TR_ERR_INVALID;
+	for (size_t i = 0; i < count; ++i) {
+		const struct tr_rpc_metadata *entry = &entries[i];
+		size_t key_size = 0, entry_size;
+		if (!entry->key || (entry->value_len && !entry->value))
+			return TR_ERR_INVALID;
+		while (key_size <= TR_RPC_METADATA_MAX_KEY_LEN &&
+		       entry->key[key_size])
+			++key_size;
+		entry_size = 3U + key_size + entry->value_len;
+		if (!key_size || key_size > TR_RPC_METADATA_MAX_KEY_LEN ||
+		    entry_size > TR_RPC_METADATA_MAX_BYTES - used)
+			return TR_ERR_BAD_LENGTH;
+		for (size_t j = 0; j < key_size; ++j) {
+			unsigned char ch = (unsigned char)entry->key[j];
+			if (!((ch >= 'a' && ch <= 'z') ||
+			      (ch >= '0' && ch <= '9') || ch == '_' ||
+			      ch == '.' || ch == '-'))
+				return TR_ERR_BAD_FLAGS;
+		}
+		for (size_t prior = 0; prior < used;) {
+			size_t n = out[prior];
+			if (n == key_size &&
+			    !memcmp(out + prior + 3U, entry->key, n))
+				return TR_ERR_BAD_FLAGS;
+			prior += 3U + n + tr_get_le16(out + prior + 1U);
+		}
+		out[used] = (uint8_t)key_size;
+		tr_put_le16(out + used + 1U, entry->value_len);
+		memcpy(out + used + 3U, entry->key, key_size);
+		if (entry->value_len)
+			memcpy(out + used + 3U + key_size, entry->value,
+			       entry->value_len);
+		used += entry_size;
+	}
+	*size = (uint32_t)used;
+	return TR_OK;
+}
 
 void tr_rpc_v2_metadata_view_init(struct tr_rpc_v2_metadata_view *out,
                                   const uint8_t *data, size_t size)

@@ -25,8 +25,9 @@ struct tr_client_record_config {
  * 元数据，并容纳每个方法的最大正文加固定头。对端限制另行校验；本入口
  * 要求更新阈值 T <= W-min(W,max_message_bytes)+1，防止已消费但尚未
  * 通告的信用卡住下一条完整记录；W 是本地初始窗口。
- * 没有解决任意 L>W 的发送活性。仅支持 NONE，拒绝自动重连、interceptor、
- * 连接组配置和旧方法注册/调用/稳定 RPC 统计，不把 V1 字段解释成 V2 能力。
+ * 没有解决任意 L>W 的发送活性。仅支持 NONE 消息变换，拒绝自动重连、
+ * interceptor、连接组配置和旧方法注册/调用。稳定 RPC 语义统计使用
+ * 公共读取入口，内部 V1 Endpoint 诊断布局不解释为 V2 能力。
  * tuning 的 executor_* 与 rpc_message_pool_count 在本入口不使用。
  *
  * begin_drain 在同一 owner 事务关闭 CALL 与传输新流准入，原有调用继续
