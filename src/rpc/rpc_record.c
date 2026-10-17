@@ -211,10 +211,19 @@ int tr_rpc_record_state_apply(struct tr_rpc_record_state *state,
 		return ret;
 	next = *state;
 	if (!next.opened) {
-		if (record->kind != TR_RPC_RECORD_OPEN ||
-		    direction != TR_RPC_RECORD_REQUEST_DIRECTION)
+		if (record->kind == TR_RPC_RECORD_OPEN &&
+		    direction == TR_RPC_RECORD_REQUEST_DIRECTION) {
+			next.opened = 1;
+		} else if (record->kind == TR_RPC_RECORD_FINAL_STATUS &&
+		           direction == TR_RPC_RECORD_RESPONSE_DIRECTION &&
+		           record->status != TR_RPC_STATUS_OK) {
+			/* Stream准入可先于OPEN拒绝；不把错误终局伪装成
+			 * 请求已被发送或接收，后续OPEN也不能复活调用。 */
+			next.terminal = 1;
+			next.final_status = record->status;
+		} else {
 			return TR_ERR_STATE;
-		next.opened = 1;
+		}
 	} else if (direction == TR_RPC_RECORD_REQUEST_DIRECTION) {
 		if (next.request_closed)
 			return TR_ERR_STATE;

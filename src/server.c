@@ -26,6 +26,7 @@
 #include "observability_internal.h"
 #include "transport/group/pipeline_listener_internal.h"
 #include "server_record_internal.h"
+#include "rpc/rpc_record_client.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
 
@@ -83,7 +84,8 @@ static int tr_server_blocking_lifecycle_context(void)
 	 * 返回后才可能取得的进展。
 	 */
 	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
-	       tr_task_in_worker_context();
+	       tr_task_in_worker_context() ||
+	       tr_rpc_record_client_in_callback();
 }
 
 struct tr_server {
@@ -572,6 +574,14 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 	        &record->endpoint;
 	const struct tr_connection_group_server_config *groups =
 	        &config->connection_groups;
+	uint64_t window = config->limits.initial_window_bytes;
+	uint64_t record_limit = config->limits.max_message_bytes;
+
+	/* 方法限额不在线协商，按传输允许上界约束信用更新阈值，
+	 * 保证不足 threshold 的已消费字节不会卡住下一条完整记录。
+	 */
+	if (record_limit > window)
+		record_limit = window;
 
 	if (config->interceptor.fn || config->interceptor.arg ||
 	    groups->max_groups || groups->max_connections ||
@@ -598,7 +608,9 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 	    config->limits.max_message_bytes <
 	            TR_RPC_RECORD_HEADER_SIZE + TR_RPC_METADATA_MAX_BYTES ||
 	    config->limits.initial_window_bytes <
-	            TR_RPC_RECORD_HEADER_SIZE + TR_RPC_METADATA_MAX_BYTES)
+	            TR_RPC_RECORD_HEADER_SIZE + TR_RPC_METADATA_MAX_BYTES ||
+	    config->limits.window_update_threshold_bytes >
+	            window - record_limit + 1)
 		return TR_ERR_INVALID;
 	for (size_t i = 0; i < method_count; ++i) {
 		const struct tr_rpc_method_desc *method =

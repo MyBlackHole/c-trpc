@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -13,6 +14,7 @@
 #include "transport/channel/channel.h"
 #include "execution/reactor.h"
 #include "execution/reactor_internal.h"
+#include "execution/task_executor.h"
 #include "rpc/rpc_wire.h"
 #include "io/socket.h"
 #include "tr/status.h"
@@ -25,7 +27,7 @@
 #include "rpc/rpc_internal.h"
 #include "runtime/runtime_internal.h"
 #include "io/socket_internal.h"
-
+#include "client_record_internal.h"
 
 static int tr_client_blocking_lifecycle_context(void)
 {
@@ -33,7 +35,9 @@ static int tr_client_blocking_lifecycle_context(void)
 	 * 反应器所有者回调必须返回，I/O 与定时器才能推进；
 	 * RPC 工作线程必须返回，当前 Call 才能发布完成结果。
 	 */
-	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context();
+	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
+	       tr_task_in_worker_context() ||
+	       tr_rpc_record_client_in_callback();
 }
 
 struct tr_client {
@@ -45,6 +49,15 @@ struct tr_client {
 	struct tr_channel *channel;
 	struct tr_rpc_endpoint *rpc;
 	struct tr_conn_handle connection;
+	struct tr_rpc_record_client *record_rpc;
+	struct tr_client_record_config record_config;
+	struct tr_rpc_method_desc *record_methods;
+	size_t record_method_count;
+	size_t record_method_bytes;
+	int record_mode;
+	int record_connect_failed;
+	_Atomic int record_stopping;
+	int destroy_active;
 
 	struct tr_client_group *connection_group;
 
@@ -174,10 +187,80 @@ static int tr_client_connect_fd(const char *address, uint16_t port,
 	return TR_OK;
 }
 
-int tr_client_create_with_tuning(
-	const struct tr_client_config *config,
-	const struct tr_facade_tuning *tuning,
-	struct tr_client **out)
+static int
+tr_client_record_config_valid(const struct tr_client_config *config,
+                              const struct tr_client_record_config *record,
+                              const struct tr_rpc_method_desc *methods,
+                              size_t method_count)
+{
+	const struct tr_connection_group_client_config *groups =
+	        &config->connection_groups;
+	uint64_t window = config->limits.initial_window_bytes;
+	uint64_t record_limit = config->limits.max_message_bytes;
+
+	/* 未通告的已消费信用最多为 threshold-1。整记录原子准入要求
+	 * 剩余窗口仍容纳传输允许的最大记录，不能只按未协商的方法限额算。
+	 */
+	if (record_limit > window)
+		record_limit = window;
+
+	if (config->enable_reconnect || config->interceptor.fn ||
+	    config->interceptor.arg || groups->max_data_connections ||
+	    groups->max_active_transfers || groups->on_transfer_ready ||
+	    groups->callback_arg)
+		return TR_ERR_UNSUPPORTED;
+	if (!methods || !method_count ||
+	    method_count > config->limits.max_methods ||
+	    method_count > SIZE_MAX / sizeof(*methods) ||
+	    !record->memory_budget_bytes || !record->calls.capacity ||
+	    record->calls.capacity > config->limits.max_calls ||
+	    record->calls.capacity > config->limits.max_streams ||
+	    !record->calls.progress_limit ||
+	    record->calls.progress_period_ns < UINT64_C(1000000) ||
+	    record->calls.progress_period_ns > UINT64_C(1000000000) ||
+	    config->limits.max_message_bytes <
+	            TR_RPC_RECORD_HEADER_SIZE + TR_RPC_METADATA_MAX_BYTES ||
+	    config->limits.initial_window_bytes <
+	            TR_RPC_RECORD_HEADER_SIZE + TR_RPC_METADATA_MAX_BYTES ||
+	    config->limits.window_update_threshold_bytes >
+	            window - record_limit + 1)
+		return TR_ERR_INVALID;
+	for (size_t i = 0; i < method_count; ++i) {
+		const struct tr_rpc_method_desc *method = &methods[i];
+		struct tr_rpc_record_state state;
+
+		if (!method->request_codec_id || !method->response_codec_id ||
+		    method->lane > TR_RPC_LANE_BULK ||
+		    (uint64_t)method->max_request_bytes +
+		                    TR_RPC_RECORD_HEADER_SIZE >
+		            config->limits.max_message_bytes ||
+		    (uint64_t)method->max_response_bytes +
+		                    TR_RPC_RECORD_HEADER_SIZE >
+		            config->limits.max_message_bytes ||
+		    (uint64_t)method->max_request_bytes +
+		                    TR_RPC_RECORD_HEADER_SIZE >
+		            config->limits.initial_window_bytes ||
+		    (uint64_t)method->max_response_bytes +
+		                    TR_RPC_RECORD_HEADER_SIZE >
+		            config->limits.initial_window_bytes ||
+		    tr_rpc_record_state_init(
+		            &state, method->request_cardinality,
+		            method->response_cardinality) != TR_OK)
+			return TR_ERR_INVALID;
+		for (size_t j = 0; j < i; ++j)
+			if (methods[j].service_id == method->service_id &&
+			    methods[j].method_id == method->method_id)
+				return TR_ERR_INVALID;
+	}
+	return TR_OK;
+}
+
+static int
+tr_client_create_internal(const struct tr_client_config *config,
+                          const struct tr_facade_tuning *tuning,
+                          const struct tr_client_record_config *record,
+                          const struct tr_rpc_method_desc *methods,
+                          size_t method_count, struct tr_client **out)
 {
 	struct tr_client_config effective;
 	struct tr_facade_tuning effective_tuning;
@@ -211,31 +294,48 @@ int tr_client_create_with_tuning(
 	    effective.limits.max_message_bytes <
 		    effective.limits.max_frame_payload_bytes)
 		return TR_ERR_INVALID;
+	if (record) {
+		ret = tr_client_record_config_valid(&effective, record, methods,
+		                                    method_count);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	client = (struct tr_client *)calloc(1, sizeof(*client));
 	if (!client)
 		return TR_ERR_NOMEM;
 	client->config = effective;
 	client->tuning = effective_tuning;
+	atomic_init(&client->record_stopping, 0);
+	if (record) {
+		client->record_mode = 1;
+		client->record_config = *record;
+	}
 
-	ret = tr_buffer_pool_init_dynamic(&client->rpc_message_pool,
-					  effective_tuning.rpc_message_pool_count,
-					  effective.limits.max_message_bytes);
-	if (ret != TR_OK)
-		return tr_client_create_rollback(out, client, ret);
-	client->rpc_pool_ready = 1;
+	if (!record) {
+		ret = tr_buffer_pool_init_dynamic(
+		        &client->rpc_message_pool,
+		        effective_tuning.rpc_message_pool_count,
+		        effective.limits.max_message_bytes);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->rpc_pool_ready = 1;
 
-	ret = tr_buffer_pool_init(&client->reassembly_pool,
-				  effective_tuning.reassembly_pool_count,
-				  effective.limits.max_message_bytes);
-	if (ret != TR_OK)
-		return tr_client_create_rollback(out, client, ret);
-	client->reassembly_pool_ready = 1;
+		ret = tr_buffer_pool_init(
+		        &client->reassembly_pool,
+		        effective_tuning.reassembly_pool_count,
+		        effective.limits.max_message_bytes);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->reassembly_pool_ready = 1;
+	}
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
 	memset(&shard_config, 0, sizeof(shard_config));
 	runtime_config.shard_count = 1U;
 	runtime_config.shards = &shard_config;
+	if (record)
+		shard_config.memory_budget_bytes = record->memory_budget_bytes;
 	reactor_config = &shard_config.reactor;
 	if (effective.connection_groups.max_data_connections > UINT32_MAX - 2U)
 		return tr_client_create_rollback(
@@ -267,6 +367,29 @@ int tr_client_create_with_tuning(
 	client->shard = tr_runtime_shard_at(client->runtime, 0U);
 	if (!client->shard)
 		return tr_client_create_rollback(out, client, TR_ERR_STATE);
+	if (record) {
+		struct tr_memory_budget *budget =
+		        tr_runtime_shard_memory_budget(client->shard);
+		size_t bytes = method_count * sizeof(*methods);
+
+		ret = tr_buffer_pool_init_budgeted(
+		        &client->reassembly_pool,
+		        effective_tuning.reassembly_pool_count,
+		        effective.limits.max_message_bytes, budget);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->reassembly_pool_ready = 1;
+		ret = tr_memory_budget_reserve(budget, bytes);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->record_method_bytes = bytes;
+		client->record_methods = malloc(bytes);
+		if (!client->record_methods)
+			return tr_client_create_rollback(out, client,
+			                                 TR_ERR_NOMEM);
+		memcpy(client->record_methods, methods, bytes);
+		client->record_method_count = method_count;
+	}
 	ret = tr_runtime_start(client->runtime);
 	if (ret != TR_OK)
 		return tr_client_create_rollback(out, client, ret);
@@ -276,6 +399,28 @@ int tr_client_create_with_tuning(
 	 */
 	*out = client;
 	return TR_OK;
+}
+
+int tr_client_create_with_tuning(const struct tr_client_config *config,
+                                 const struct tr_facade_tuning *tuning,
+                                 struct tr_client **out)
+{
+	return tr_client_create_internal(config, tuning, NULL, NULL, 0, out);
+}
+
+int tr_client_create_record(const struct tr_client_config *config,
+                            const struct tr_facade_tuning *tuning,
+                            const struct tr_client_record_config *record,
+                            const struct tr_rpc_method_desc *methods,
+                            size_t method_count, struct tr_client **out)
+{
+	if (!record) {
+		if (out)
+			*out = NULL;
+		return TR_ERR_INVALID;
+	}
+	return tr_client_create_internal(config, tuning, record, methods,
+	                                 method_count, out);
 }
 
 int tr_client_create(const struct tr_client_config *config,
@@ -309,6 +454,13 @@ static int tr_client_close_connection_sync(struct tr_conn_handle connection)
 		connection.reactor, tr_client_close_connection_on_owner, &request);
 }
 
+static int tr_client_record_close_on_owner(void *arg)
+{
+	struct tr_client *client = arg;
+
+	return tr_rpc_record_client_close_on_owner(&client->record_rpc);
+}
+
 static int tr_client_reset_session(struct tr_client *client)
 {
 	if (!client)
@@ -316,6 +468,14 @@ static int tr_client_reset_session(struct tr_client *client)
 
 	if (client->connection.reactor) {
 		int ret = tr_client_close_connection_sync(client->connection);
+
+		if (ret != TR_OK)
+			return ret;
+	}
+	if (client->record_rpc) {
+		int ret = tr_reactor_call(tr_client_reactor(client),
+		                          tr_client_record_close_on_owner,
+		                          client);
 
 		if (ret != TR_OK)
 			return ret;
@@ -351,7 +511,47 @@ static int tr_client_connect_rollback(
 	 * 把原连接错误返回给调用方；回滚自身失败时生命周期错误优先。
 	 */
 	rollback_ret = tr_client_reset_session(client);
+	if (rollback_ret != TR_OK && client->record_mode)
+		client->record_connect_failed = 1;
 	return rollback_ret != TR_OK ? rollback_ret : cause;
+}
+
+struct tr_client_record_assemble_request {
+	struct tr_client *client;
+	const struct tr_channel_config *config;
+	int *fd;
+};
+
+static int tr_client_record_assemble_on_owner(void *arg)
+{
+	struct tr_client_record_assemble_request *request = arg;
+	struct tr_client *client = request->client;
+	int ret;
+
+	/* 接管与发布不得分成两个 owner 命令：对端可能在其间关闭，
+	 * 导致后续 Channel 绑定失效连接，或向尚未安装 RPC 的层交付事件。
+	 */
+	ret = tr_reactor_adopt_fd(tr_client_reactor(client), *request->fd,
+	                          &client->connection);
+	if (ret != TR_OK)
+		return ret;
+	(void)tr_fd_take(request->fd);
+	ret = tr_channel_create_deferred(request->config, client->connection,
+	                                 client->connection, NULL, NULL, NULL,
+	                                 NULL, &client->channel);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_rpc_record_client_create_on_owner(
+	        client->channel, client->record_methods,
+	        client->record_method_count, &client->record_config.calls,
+	        tr_runtime_shard_memory_budget(client->shard),
+	        &client->record_rpc);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_rpc_record_client_start_on_owner(client->record_rpc);
+	if (ret != TR_OK)
+		return ret;
+	return tr_channel_start(client->channel);
 }
 
 int tr_client_connect(struct tr_client *client, const char *ipv4_address,
@@ -367,7 +567,10 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 
 	if (!client || !ipv4_address || port == 0)
 		return TR_ERR_INVALID;
-	if (client->channel || client->rpc ||
+	if (client->channel || client->rpc || client->record_rpc ||
+	    client->record_connect_failed ||
+	    atomic_load_explicit(&client->record_stopping,
+	                         memory_order_acquire) ||
 	    tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
@@ -386,11 +589,6 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 			return ret;
 	}
 
-	ret = tr_reactor_adopt_fd(tr_client_reactor(client), fd, &client->connection);
-	if (ret != TR_OK)
-		return ret;
-	(void)tr_fd_take(&fd);
-
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
 	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
@@ -402,6 +600,24 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	channel_config.max_message_bytes =
 		client->config.limits.max_message_bytes;
 	channel_config.reassembly_pool = &client->reassembly_pool;
+
+	if (client->record_mode) {
+		struct tr_client_record_assemble_request request = {
+		        client, &channel_config, &fd};
+
+		ret = tr_reactor_call(tr_client_reactor(client),
+		                      tr_client_record_assemble_on_owner,
+		                      &request);
+		if (ret != TR_OK)
+			goto rollback;
+		goto wait_ready;
+	}
+
+	ret = tr_reactor_adopt_fd(tr_client_reactor(client), fd,
+	                          &client->connection);
+	if (ret != TR_OK)
+		return ret;
+	(void)tr_fd_take(&fd);
 
 	ret = tr_channel_create(&channel_config, client->connection,
 				client->connection, NULL, NULL, NULL, NULL,
@@ -429,6 +645,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	/* 先完成初始 HELLO 握手，再允许后续重连策略接管。
 	 * 这样连接失败时回滚不会与连接替换竞争。
 	 */
+wait_ready:
 	ret = tr_channel_wait_ready_deadline(
 		client->channel, TR_LANE_CONTROL, &connect_deadline);
 	if (ret != TR_OK)
@@ -482,6 +699,8 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 
 	if (!client)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (client->connection_group)
 		return TR_OK;
 
@@ -528,6 +747,8 @@ int tr_client_connection_group_close(struct tr_client *client)
 {
 	if (!client)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 	return tr_client_group_close(client->connection_group);
@@ -537,6 +758,8 @@ int tr_client_connection_group_begin_drain(struct tr_client *client)
 {
 	if (!client)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 	return tr_client_group_begin_drain(client->connection_group);
@@ -548,6 +771,8 @@ int tr_client_connection_group_get_stats(
 {
 	if (!client || !out)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 	return tr_client_group_get_stats(client->connection_group, out);
@@ -558,6 +783,8 @@ int tr_client_connection_group_wait_drained(
 {
 	if (!client)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 	if (!client->connection_group)
@@ -572,6 +799,8 @@ int tr_client_connection_group_release_transfer(
 {
 	if (!client || stream_id == 0U)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 	return tr_client_group_release_transfer(
@@ -585,6 +814,8 @@ int tr_client_connection_group_send(
 	if (!client || stream_id == 0U || !bytes ||
 	    (bytes->len != 0U && !bytes->data))
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
 	return tr_client_group_send(
@@ -606,6 +837,8 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 int tr_client_register_method(struct tr_client *client,
 			      const struct tr_rpc_method_desc *method)
 {
+	if (client && client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
 	return tr_rpc_register_method(client->rpc, method, NULL, NULL);
@@ -618,6 +851,8 @@ int tr_client_unary_call_ex(struct tr_client *client, uint32_t service_id,
 			    tr_rpc_unary_result_cb result_cb, void *result_arg,
 			    struct tr_rpc_call_handle *out)
 {
+	if (client && client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
 	return tr_rpc_unary_call_ex(client->rpc, service_id, method_id, request,
@@ -639,6 +874,8 @@ int tr_client_call_start_ex(struct tr_client *client, uint32_t service_id,
 			    const struct tr_rpc_call_callbacks *callbacks,
 			    struct tr_rpc_call_handle *out)
 {
+	if (client && client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
 	return tr_rpc_call_start_ex(client->rpc, service_id, method_id, options,
@@ -654,9 +891,129 @@ int tr_client_call_start(struct tr_client *client, uint32_t service_id,
 				       callbacks, out);
 }
 
+static int tr_client_record_sync(struct tr_rpc_record_client *client,
+                                 int (*fn)(void *arg), void *arg)
+{
+	struct tr_reactor *owner;
+
+	if (!client)
+		return TR_ERR_INVALID;
+	owner = tr_rpc_record_client_reactor(client);
+	if (!owner)
+		return TR_ERR_STATE;
+	if ((tr_reactor_in_owner_context() ||
+	     tr_rpc_record_client_in_callback()) &&
+	    !tr_reactor_in_owner_context_for(owner))
+		return TR_ERR_STATE;
+	return tr_reactor_call(owner, fn, arg);
+}
+
+struct tr_client_record_start_request {
+	struct tr_rpc_record_client *client;
+	uint32_t service_id;
+	uint32_t method_id;
+	const struct tr_rpc_call_options *options;
+	const struct tr_rpc_record_client_callbacks *callbacks;
+	struct tr_rpc_record_client_handle *out;
+};
+
+static int tr_client_record_start_on_owner(void *arg)
+{
+	struct tr_client_record_start_request *request = arg;
+
+	return tr_rpc_record_client_call_start_on_owner(
+	        request->client, request->service_id, request->method_id,
+	        request->options, request->callbacks, request->out);
+}
+
+int tr_client_record_call_start(
+        struct tr_client *client, uint32_t service_id, uint32_t method_id,
+        const struct tr_rpc_call_options *options,
+        const struct tr_rpc_record_client_callbacks *callbacks,
+        struct tr_rpc_record_client_handle *out)
+{
+	struct tr_client_record_start_request request;
+
+	if (!client)
+		return TR_ERR_INVALID;
+	if (!client->record_mode)
+		return TR_ERR_UNSUPPORTED;
+	if (atomic_load_explicit(&client->record_stopping,
+	                         memory_order_acquire) ||
+	    client->record_connect_failed || !client->connected ||
+	    !client->record_rpc)
+		return TR_ERR_STATE;
+	request = (struct tr_client_record_start_request){
+	        client->record_rpc, service_id, method_id, options,
+	        callbacks,          out};
+	return tr_client_record_sync(client->record_rpc,
+	                             tr_client_record_start_on_owner, &request);
+}
+
+enum tr_client_record_operation {
+	TR_CLIENT_RECORD_SEND,
+	TR_CLIENT_RECORD_HALF_CLOSE,
+	TR_CLIENT_RECORD_CANCEL
+};
+
+struct tr_client_record_operation_request {
+	struct tr_rpc_record_client_handle handle;
+	struct tr_buffer **body;
+	enum tr_client_record_operation operation;
+};
+
+static int tr_client_record_operation_on_owner(void *arg)
+{
+	struct tr_client_record_operation_request *request = arg;
+
+	switch (request->operation) {
+	case TR_CLIENT_RECORD_SEND:
+		return tr_rpc_record_client_send_on_owner(request->handle,
+		                                          request->body);
+	case TR_CLIENT_RECORD_HALF_CLOSE:
+		return tr_rpc_record_client_half_close_on_owner(
+		        request->handle);
+	case TR_CLIENT_RECORD_CANCEL:
+		return tr_rpc_record_client_cancel_on_owner(request->handle);
+	}
+	return TR_ERR_INVALID;
+}
+
+int tr_client_record_send(struct tr_rpc_record_client_handle handle,
+                          struct tr_buffer **body)
+{
+	struct tr_client_record_operation_request request = {
+	        handle, body, TR_CLIENT_RECORD_SEND};
+
+	return tr_client_record_sync(
+	        handle.client, tr_client_record_operation_on_owner, &request);
+}
+
+int tr_client_record_half_close(struct tr_rpc_record_client_handle handle)
+{
+	struct tr_client_record_operation_request request = {
+	        handle, NULL, TR_CLIENT_RECORD_HALF_CLOSE};
+
+	return tr_client_record_sync(
+	        handle.client, tr_client_record_operation_on_owner, &request);
+}
+
+int tr_client_record_cancel(struct tr_rpc_record_client_handle handle)
+{
+	struct tr_client_record_operation_request request = {
+	        handle, NULL, TR_CLIENT_RECORD_CANCEL};
+
+	return tr_client_record_sync(
+	        handle.client, tr_client_record_operation_on_owner, &request);
+}
+
 int tr_client_begin_drain(struct tr_client *client)
 {
 	if (!client || !client->channel)
+		return TR_ERR_STATE;
+	if (atomic_load_explicit(&client->record_stopping,
+	                         memory_order_acquire) ||
+	    client->record_connect_failed)
 		return TR_ERR_STATE;
 	return tr_channel_begin_drain(client->channel);
 }
@@ -683,6 +1040,8 @@ int tr_client_get_channel_stats(struct tr_client *client,
 int tr_client_get_rpc_stats(struct tr_client *client,
 			    struct tr_rpc_endpoint_stats *out)
 {
+	if (client && client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
 	return tr_rpc_endpoint_get_stats(client->rpc, out);
@@ -693,6 +1052,8 @@ int tr_client_get_rpc_semantic_stats(
 {
 	if (!client || !out)
 		return TR_ERR_INVALID;
+	if (client->record_mode)
+		return TR_ERR_UNSUPPORTED;
 
 	memset(out, 0, sizeof(*out));
 	if (!client->rpc)
@@ -700,24 +1061,34 @@ int tr_client_get_rpc_semantic_stats(
 	return tr_rpc_endpoint_get_semantic_stats(client->rpc, out);
 }
 
-int tr_client_destroy(struct tr_client *client)
+static int tr_client_destroy_internal(struct tr_client *client)
 {
 	int ret;
 
-	if (!client)
-		return TR_OK;
-
-	/* 销毁是外部终止操作。从反应器回调或 RPC 工作线程调用它，
-	 * 会使同步拆除等待自身。公开契约禁止此上下文；
-	 * 防御性地保持所有权不变，而不是部分销毁客户端。
-	 */
-	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
-		return TR_ERR_STATE;
+	if (client->record_mode) {
+		atomic_store_explicit(&client->record_stopping, 1,
+		                      memory_order_release);
+		/* 父 owner 必须先 join，才能从清理域交付残留终局。
+		 * 包括 fatal exit 与 OPEN 尚未提交时的已受理责任。
+		 */
+		if (client->runtime) {
+			ret = tr_runtime_stop(client->runtime);
+			if (ret != TR_OK)
+				return ret;
+		}
+		if (client->record_rpc) {
+			ret = tr_rpc_record_client_reap_stopped(
+			        &client->record_rpc);
+			if (ret != TR_OK)
+				return ret;
+		}
+	}
 
 	/* 销毁是纯终止拆除，不内置优雅排空策略或隐含超时。
 	 * 需要优雅排空时，调用方必须在此之前显式调用 begin_drain/wait_drained。
 	 *
-	 * 所有回调源与上层所有者屏障仍必须在运行时停止前收敛。
+	 * V1 保留原有先解绑回调源再停止运行时的顺序；V2 已在上面
+	 * 完成父 join，随后释放依赖停止恢复租约的宿主与 Channel。
 	 */
 	if (client->connection_group) {
 		ret = tr_client_group_destroy(client->connection_group);
@@ -739,7 +1110,7 @@ int tr_client_destroy(struct tr_client *client)
 		client->channel = NULL;
 	}
 
-	if (client->runtime) {
+	if (client->runtime && !client->record_mode) {
 		ret = tr_runtime_stop(client->runtime);
 		/* 生命周期屏障失败意味着所有权尚未收敛。
 		 * 保持剩余 Client/Runtime 存储存活。
@@ -764,6 +1135,24 @@ int tr_client_destroy(struct tr_client *client)
 			return ret;
 		client->rpc_pool_ready = 0;
 	}
+	if (client->record_method_bytes) {
+		struct tr_memory_budget *budget;
+		size_t bytes = client->record_method_bytes;
+
+		/* 构造只有在分片已绑定后才预约方法表。缺少预算所有者
+		 * 时不能跳过归还责任，亦不能继续释放 Runtime 外壳。
+		 */
+		if (!client->runtime || !client->shard)
+			return TR_ERR_STATE;
+		budget = tr_runtime_shard_memory_budget(client->shard);
+		free(client->record_methods);
+		client->record_methods = NULL;
+		client->record_method_bytes = 0;
+		client->record_method_count = 0;
+		ret = tr_memory_budget_release(budget, bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
 
 	if (client->runtime) {
 		ret = tr_runtime_destroy(client->runtime);
@@ -775,4 +1164,19 @@ int tr_client_destroy(struct tr_client *client)
 
 	free(client);
 	return TR_OK;
+}
+
+int tr_client_destroy(struct tr_client *client)
+{
+	int ret;
+
+	if (!client)
+		return TR_OK;
+	if (tr_client_blocking_lifecycle_context() || client->destroy_active)
+		return TR_ERR_STATE;
+	client->destroy_active = 1;
+	ret = tr_client_destroy_internal(client);
+	if (ret != TR_OK)
+		client->destroy_active = 0;
+	return ret;
 }

@@ -66,10 +66,12 @@ struct fixture {
 	struct tr_stream_handle nested_streams[CAP];
 	unsigned nested_count;
 	struct tr_rpc_endpoint_result results[CAP];
-	unsigned send_rejects, close_rejects, sends, closes, receive_calls,
-	        done_calls;
+	unsigned send_rejects, close_rejects, credit_stop_rejects, credit_stops,
+	        sends, closes, receive_calls, done_calls;
 	unsigned executor_dispatches, dispatch_pumps, reports, retire_calls;
-	unsigned sequence, last_send_sequence, last_close_sequence;
+	unsigned sequence, last_send_sequence, last_close_sequence,
+	        last_credit_stop_sequence;
+	struct tr_stream_handle last_credit_stop_stream;
 	unsigned fail_alloc, allocations;
 	uint32_t wire_status;
 	struct tr_rpc_endpoint_result last;
@@ -199,10 +201,27 @@ int tr_stream_sendv(struct tr_stream_handle s, struct tr_buffer *const *bs,
 		         f->handler_arg);
 	return TR_OK;
 }
+int tr_stream_stop_credit_on_owner(struct tr_stream_handle s)
+{
+	struct fixture *f = s.channel->reactor->f;
+	CHECK(owner == s.channel->reactor);
+	++f->credit_stops;
+	if (f->credit_stop_rejects) {
+		--f->credit_stop_rejects;
+		return TR_ERR_SYS;
+	}
+	f->last_credit_stop_sequence = ++f->sequence;
+	f->last_credit_stop_stream = s;
+	return TR_OK;
+}
 int tr_stream_close(struct tr_stream_handle s)
 {
 	struct fixture *f = s.channel->reactor->f;
 	CHECK(owner == s.channel->reactor);
+	CHECK(f->last_credit_stop_sequence > f->last_close_sequence &&
+	      f->last_credit_stop_stream.channel == s.channel &&
+	      f->last_credit_stop_stream.slot == s.slot &&
+	      f->last_credit_stop_stream.generation == s.generation);
 	++f->closes;
 	if (f->close_rejects) {
 		--f->close_rejects;
@@ -484,13 +503,35 @@ static void test_order_and_backpressure(void)
 	f.close_rejects = 2;
 	struct tr_stream_handle s = open_stream(&f, 0, 1);
 	request(&f, s, 1);
-	CHECK(!f.closes);
+	CHECK(!f.closes && !f.sends && !f.done_calls);
 	tick(&f, 30);
 	CHECK(f.sends == 4 && f.closes == 3 && f.reports == 1 &&
 	      f.receive_calls == 1 && f.done_calls == 1);
 	CHECK(f.wire_status == TR_RPC_STATUS_UNIMPLEMENTED &&
 	      f.last.final_accepted);
 	CHECK(f.last_close_sequence > f.last_send_sequence);
+	f.event(s, TR_STREAM_EVENT_REMOTE_CLOSED, TR_OK, f.handler_arg);
+	tick(&f, 8);
+	CHECK(f.retire_calls == 1);
+	close_all(&f);
+}
+static void test_credit_stop_failure_retains_close(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.credit_stop_rejects = 100;
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	request(&f, s, 1);
+	tick(&f, 8);
+	CHECK(f.sends == 1 && f.credit_stops > 0 && !f.closes && !f.reports &&
+	      !f.retire_calls && f.ep && f.dispatch);
+	f.credit_stop_rejects = 0;
+	tick(&f, 8);
+	CHECK(f.sends == 1 && f.closes == 1 && f.reports == 1 &&
+	      f.last.final_accepted);
+	CHECK(f.last_credit_stop_sequence > f.last_send_sequence &&
+	      f.last_close_sequence > f.last_credit_stop_sequence);
 	f.event(s, TR_STREAM_EVENT_REMOTE_CLOSED, TR_OK, f.handler_arg);
 	tick(&f, 8);
 	CHECK(f.retire_calls == 1);
@@ -727,6 +768,7 @@ static void test_generations_under_load(void)
 int main(void)
 {
 	test_order_and_backpressure();
+	test_credit_stop_failure_retains_close();
 	test_inline_data_is_not_silent_success();
 	test_deferred_events_exceed_turn_budget();
 	test_deadline();

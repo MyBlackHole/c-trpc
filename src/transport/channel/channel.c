@@ -63,6 +63,7 @@ struct tr_stream_slot {
 	uint64_t rx_consumed_bytes;
 	uint64_t rx_advertised_limit;
 	uint64_t pending_advertised_limit;
+	int rx_credit_stopped;
 
 	struct tr_buffer *rx_reassembly;
 	uint64_t rx_reassembly_message_id;
@@ -996,6 +997,10 @@ static int tr_send_window_update_locked(struct tr_channel *channel,
 	uint64_t target;
 	int ret;
 
+	if (stream->rx_credit_stopped) {
+		stream->pending_advertised_limit = 0;
+		return TR_OK;
+	}
 	target = tr_add_sat_u64(stream->rx_consumed_bytes,
 				channel->config.initial_window_bytes);
 	if (target <= stream->rx_advertised_limit) {
@@ -3937,6 +3942,30 @@ int tr_stream_send(struct tr_stream_handle handle, struct tr_buffer *payload)
 		return TR_ERR_INVALID;
 	payloads[0] = payload;
 	return tr_stream_sendv(handle, payloads, 1);
+}
+
+int tr_stream_stop_credit_on_owner(struct tr_stream_handle handle)
+{
+	struct tr_channel *channel = handle.channel;
+	struct tr_stream_slot *stream;
+
+	if (!channel)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_handle(handle);
+	if (!stream) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STALE;
+	}
+	/* 已排队的信用仍先于后续 CLOSE；不撤销对端已经取得的发送额度。
+	 * 延迟 DATA 或保留负载仍可释放并计入 consumed，但不得在 CLOSE 后
+	 * 产生新的 WINDOW_UPDATE。普通半关闭不调用此终局能力。 */
+	stream->rx_credit_stopped = 1;
+	stream->pending_advertised_limit = 0;
+	pthread_mutex_unlock(&channel->lock);
+	return TR_OK;
 }
 
 int tr_stream_close(struct tr_stream_handle handle)

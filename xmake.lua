@@ -120,6 +120,7 @@ target("trcore")
         "src/rpc/rpc_record_router.c",
         "src/rpc/rpc_record_dispatch.c",
         "src/rpc/rpc_record_endpoint.c",
+        "src/rpc/rpc_record_client.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -667,5 +668,20 @@ target("test_server_record")
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=pthread_create", "-Wl,--wrap=epoll_wait",
                 {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 使用真实 Client 与 Server 门面，保护 V2 调用受理、背压和停止回收。
+target("test_client_record")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_client_record.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_channel_create_deferred",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_channel_destroy",
+                "-Wl,--wrap=tr_stream_release_payload",
+                "-Wl,--wrap=clock_gettime", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
