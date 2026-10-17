@@ -35,9 +35,10 @@ RPC 生命周期统计。完整使用合同见[公共 V2 SDK](../rpc-v2-sdk.md)�
 不重新执行 work。传输接受元数据记录并复制前缀后，工作批次立即释放相应副本。
 
 正文追加或元数据设置失败会锁存整批错误，丢弃该批全部正文和元数据。
-既有非 OK 状态不被后续错误或业务返回值覆盖。非法参数、键或长度对应
-INVALID_ARGUMENT，阶段顺序或重复设置对应 FAILED_PRECONDITION，资源不足对应
-RESOURCE_EXHAUSTED。NULL 或回调外无效能力不触及批次。
+既有非 OK 状态不被后续错误或业务返回值覆盖。元数据设置的非法参数、键或
+编码长度对应 INVALID_ARGUMENT；阶段顺序或重复设置对应 FAILED_PRECONDITION。
+正文追加超过消息或批次额度、任一接口资源不足，对应 RESOURCE_EXHAUSTED。
+NULL 或回调外无效能力不触及批次。
 
 显式 `reply_finish(non_OK)` 或 work 返回合法非 OK 状态可以保留有效元数据，
 只丢弃本批正文。普通非终局批次设置 TRAILING 后返回 OK，则锁存阶段错误。
