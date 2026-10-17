@@ -594,6 +594,28 @@ static void on_event(struct tr_stream_handle stream, enum tr_stream_event event,
 	}
 }
 
+struct peer_adopt_request {
+	struct peer *peer;
+	const struct tr_channel_config *config;
+	int fd;
+};
+
+static int peer_adopt_on_owner(void *arg)
+{
+	struct peer_adopt_request *r = arg;
+	struct peer *p = r->peer;
+	int ret;
+
+	/* 接纳失败时服务端可以立即关闭连接。接管与 Channel 发布必须在
+	 * 同一所有者轮次完成，使关闭事件在处理函数安装后才被分派。 */
+	ret = tr_reactor_adopt_fd(p->reactor, r->fd, &p->connection);
+	if (ret != TR_OK)
+		return ret;
+	r->fd = -1;
+	return tr_channel_create(r->config, p->connection, p->connection,
+	                         on_data, on_event, NULL, p, &p->channel);
+}
+
 static void peer_connect(struct peer *p, uint16_t port, bool ready)
 {
 	struct tr_reactor_config rc = {.max_connections = 2,
@@ -628,9 +650,10 @@ static void peer_connect(struct peer *p, uint16_t port, bool ready)
 		CHECK(poll(&pollfd, 1, WAIT_MS) == 1);
 		CHECK(tr_tcp_finish_connect(fd) == TR_OK);
 	}
-	CHECK(tr_reactor_adopt_fd(p->reactor, fd, &p->connection) == TR_OK);
-	CHECK(tr_channel_create(&cc, p->connection, p->connection, on_data,
-	                        on_event, NULL, p, &p->channel) == TR_OK);
+	struct peer_adopt_request request = {p, &cc, fd};
+	CHECK(tr_reactor_call(p->reactor, peer_adopt_on_owner, &request) ==
+	      TR_OK);
+	CHECK(request.fd == -1);
 	if (ready)
 		CHECK(tr_channel_wait_ready(p->channel, TR_LANE_CONTROL,
 		                            WAIT_MS) == TR_OK);
