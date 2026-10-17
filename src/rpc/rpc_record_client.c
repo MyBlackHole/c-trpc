@@ -739,6 +739,9 @@ int tr_rpc_record_client_create_on_owner(
 	if (route_capacity > (SIZE_MAX - bytes) / sizeof(client->routes[0]))
 		return TR_ERR_BAD_LENGTH;
 	bytes += route_capacity * sizeof(client->routes[0]);
+	/* 聚合槽位和路由后再次验证总长，分配必须容纳完整控制块。 */
+	if (bytes < sizeof(*client))
+		return TR_ERR_BAD_LENGTH;
 	ret = tr_memory_budget_reserve(budget, bytes);
 	if (ret != TR_OK)
 		return ret;
