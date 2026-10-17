@@ -60,7 +60,7 @@ int tr_rpc_record_router_receive_on_owner(struct tr_rpc_record_router *router,
                                           const uint8_t *data, size_t size);
 int tr_rpc_record_router_event_on_owner(struct tr_rpc_record_router *router,
                                         struct tr_stream_handle stream,
-                                        enum tr_stream_event event);
+                                        enum tr_stream_event event, int status);
 
 /* 收到完整且有效 OPEN 才触发对应方法回调。终局后收到字节返回 STATE，
  * 不重新查表或重复回调。期限/鉴权仍属后续调度层，不在此隐式放宽约束。

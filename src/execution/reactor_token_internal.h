@@ -21,11 +21,11 @@
 static inline uint32_t
 tr_reactor_connection_next_generation(uint32_t generation)
 {
-	generation++;
-	if (generation == 0U ||
-	    generation > TR_REACTOR_CONNECTION_GENERATION_MAX)
-		generation = 1U;
-	return generation;
+	/* 连接代次也是跨模块持有能力凭证的一部分。耗尽后返回无效值，
+	 * 真实槽位永久停止复用，不能让旧连接/RESET 墓碑重新匹配新连接。 */
+	if (generation >= TR_REACTOR_CONNECTION_GENERATION_MAX)
+		return 0U;
+	return generation + 1U;
 }
 
 static inline uint32_t

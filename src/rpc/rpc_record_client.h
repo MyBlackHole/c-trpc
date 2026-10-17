@@ -41,8 +41,8 @@ struct tr_rpc_record_client_callbacks {
 	/* 必需。成功受理后恰好一次，包括 OPEN 尚未接受时停止的调用。
 	 * 延后到当前应用回调退出；可释放 arg。OWNER_STOPPED 表示在已
 	 * join 的外部清理线程交付；保留已选终局，尚未终局者选 CANCELLED。
-	 * 该回调域不允许重入 Client 生命周期。回调不表示槽已退役；本地
-	 * 终局后的响应排空仍可能占用固定槽，但不会再访问用户 arg。 */
+	 * 该回调域不允许重入 Client 生命周期。回调不表示槽已退役；在
+	 * Channel 接管 RESET 或关闭之前仍保留固定槽，不再访问用户 arg。 */
 	tr_rpc_record_client_terminal_fn terminal;
 	void *arg;
 };
@@ -86,21 +86,21 @@ int tr_rpc_record_client_send_on_owner(
         struct tr_rpc_record_client_handle handle, struct tr_buffer **body);
 int tr_rpc_record_client_half_close_on_owner(
         struct tr_rpc_record_client_handle handle);
-/* 本地选择 CANCELLED；本地超时/错误也遵循同一排空责任。请求尚未
- * 成功 HALF_CLOSE 时停止新增信用并重试传输关闭。请求已 HALF_CLOSE
- * 且尚无绑定接纳的 peer FINAL 时，保留固定槽和路由，丢弃晚到 DATA
- * 并归信用，直至精确 peer REMOTE_CLOSED/CLOSED/ERROR 后再退役。
- * 已本地终局的绑定不再解析晚 FINAL，不能把其字节当成排空完成证明。
- * 没有 wire CANCEL/RESET，不承诺停止远端执行；不合作对端可占槽到
- * 断连或 Client 销毁。内存容量有界，排空等待时间没有额外本地上限。
+/* 本地选择 CANCELLED；本地超时/错误共用 RESET 退役路径，RPC HALF_CLOSE
+ * 不屏蔽整调用取消。先通知唯一终局，安全边界上将发送/确认责任交给
+ * Channel，只有其返回 TR_OK 或精确流已关闭后才移除 RPC 路由/绑定。
+ * 失败保留原责任并由进度定时器重试，不重放业务，不重解析晚 FINAL。
+ * 已接纳 peer FINAL 的调用沿普通 CLOSE 完成；CLOSE 一经接受不再主动
+ * 改为 RESET。Channel 独立持有确认状态，不合作 peer 可占有界网络槽到
+ * 断连或销毁。取消不抢占远端线程，也不撤销已发生的业务副作用。
  */
 int tr_rpc_record_client_cancel_on_owner(
         struct tr_rpc_record_client_handle handle);
 int tr_rpc_record_client_pump_on_owner(struct tr_rpc_record_client *client);
 
-/* close 用于仍在 owner 上的装配回滚：停止受理并取消调用；关流前停止
- * 新增接收信用，已有载荷仍消费/释放。待本地 STREAM_CLOSE 接受或流
- * 死亡后释放绑定，再解绑 handler/注销 timer。
+/* close 用于仍在 owner 上的装配回滚：停止受理并取消调用；待 Channel
+ * 接管 RESET、普通 STREAM_CLOSE 被接受或精确流死亡后释放绑定，再
+ * 解绑 handler/注销 timer。网络控制状态不引用已退役的 RPC 存储。
  * AGAIN 或硬错误保留未解除的责任，须继续驱动并重试；晚到旧流字节
  * 仅释放，不匹配新的代次。成功后原 Channel 应销毁，不换绑新宿主。
  */

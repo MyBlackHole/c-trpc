@@ -1,4 +1,5 @@
 #include "rpc_record_stream.h"
+#include "rpc_record_transport_internal.h"
 #include "../endian.h"
 #include "../memory_budget.h"
 #include "../execution/reactor_internal.h"
@@ -472,7 +473,7 @@ int tr_rpc_record_stream_abort_on_owner(struct tr_rpc_record_stream *call,
 
 int tr_rpc_record_stream_event_on_owner(struct tr_rpc_record_stream *call,
                                         struct tr_stream_handle stream,
-                                        enum tr_stream_event event)
+                                        enum tr_stream_event event, int status)
 {
 	int ret = tr_record_owner(call);
 	if (ret != TR_OK)
@@ -486,6 +487,15 @@ int tr_rpc_record_stream_event_on_owner(struct tr_rpc_record_stream *call,
 	if (event == TR_STREAM_EVENT_OPENED ||
 	    event == TR_STREAM_EVENT_WRITABLE)
 		return TR_OK;
+	if (event == TR_STREAM_EVENT_RESET) {
+		enum tr_rpc_status result =
+		        tr_rpc_record_status_from_reset(status);
+		if (result == (enum tr_rpc_status)TR_RPC_STATUS_COUNT)
+			return TR_ERR_INVALID;
+		/* RESET 取消整个调用，合法的 RPC HALF_CLOSE 不屏蔽它。
+		 * state_abort 保留先前已接纳的 FINAL，且缓存只释放一次。 */
+		return tr_rpc_record_stream_abort_on_owner(call, result);
+	}
 	if (event != TR_STREAM_EVENT_REMOTE_CLOSED &&
 	    event != TR_STREAM_EVENT_CLOSED && event != TR_STREAM_EVENT_ERROR)
 		return TR_ERR_INVALID;

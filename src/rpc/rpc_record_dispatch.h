@@ -53,6 +53,7 @@ struct tr_rpc_record_dispatch_config {
 	size_t max_reply_bytes;
 };
 struct tr_rpc_record_dispatch_stats {
+	/* 均为当前活跃调用的占用，退役槽的历史字段不计入。 */
 	size_t active_calls;
 	size_t held_events;
 	size_t submitted_calls;
@@ -110,7 +111,17 @@ int tr_rpc_record_dispatch_receive_on_owner(
         const uint8_t *data, size_t size);
 int tr_rpc_record_dispatch_event_on_owner(
         struct tr_rpc_record_dispatch *dispatch, struct tr_stream_handle stream,
-        enum tr_stream_event event);
+        enum tr_stream_event event, int status);
+
+struct tr_rpc_dispatch_result {
+	enum tr_rpc_status status;
+	bool terminal;
+	bool final_accepted;
+};
+/* 只读复制已选终局，不暴露可变槽位。terminal 不代表任务已退出；外层可
+ * 据此停止网络，但仍须等原 terminal 回调后才退役或释放业务参数。 */
+int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
+                                           struct tr_rpc_dispatch_result *out);
 
 /* 每次最多访问 min(limit,capacity) 个调用，轮转推进；每调用最多发一条
  * 记录或投递一次任务。背压只保留结果并重试发送，绝不重跑业务函数。

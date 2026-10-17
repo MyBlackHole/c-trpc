@@ -577,6 +577,16 @@ target("test_rpc_record")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 单流 RESET 的真实传输：预留容量、FIFO、短写、迟到帧和错误隔离。
+target("test_stream_reset")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_stream_reset.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- V2 调用记录在真实 TCP/Channel/Stream 上的绑定与背压、增量接收。
 target("test_rpc_record_stream")
     set_kind("binary")
@@ -687,6 +697,21 @@ target("test_server_record_deadline")
                 "-Wl,--wrap=tr_rpc_record_dispatch_pump_on_owner",
                 "-Wl,--wrap=tr_task_executor_submit",
                 "-Wl,--wrap=tr_task_executor_dispatch", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 真实 V2 两端：半关闭后取消、并行流隔离、迟到 FINAL 与安全槽位复用。
+target("test_rpc_record_cancel")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_cancel.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_rpc_record_client_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_receive_on_owner",
+                "-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_stream_close",
+                "-Wl,--wrap=tr_stream_reset_on_owner", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

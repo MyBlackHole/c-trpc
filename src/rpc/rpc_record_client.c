@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rpc_record_client.h"
+#include "rpc_record_transport_internal.h"
 #include "../endian.h"
 #include "../execution/reactor_internal.h"
 #include "../memory_budget.h"
@@ -21,11 +22,13 @@ struct tr_record_client_slot {
 	enum tr_rpc_status status;
 	enum tr_rpc_record_delivery delivery;
 	enum tr_stream_event pending_event;
+	int pending_status;
 	uint32_t metadata_size;
 	unsigned receiving, sending;
 	bool active, routed, accepted, open_pending, writable,
 	        peer_window_known;
 	bool terminal, reported, peer_final, peer_closed, dead, close_accepted;
+	bool reset_accepted;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 };
 
@@ -188,15 +191,16 @@ static void tr_record_client_terminal(struct tr_rpc_record_stream *binding,
  * 对该调用做任何后续语义操作前先应用它；内联发送期间不能改绑定，
  * 返回安全边界后才终止，禁止已知错误被同批后续 FINAL 越过。 */
 static void tr_record_client_defer(struct tr_record_client_slot *slot,
-                                   enum tr_stream_event event)
+                                   enum tr_stream_event event, int status)
 {
-	if (event == TR_STREAM_EVENT_REMOTE_CLOSED)
-		slot->peer_closed = true;
-	if (event == TR_STREAM_EVENT_CLOSED || event == TR_STREAM_EVENT_ERROR)
-		slot->dead = true;
-	if (event >= TR_STREAM_EVENT_REMOTE_CLOSED &&
-	    event <= TR_STREAM_EVENT_ERROR && event > slot->pending_event)
+	/* 普通半关闭尚不一定是调用终局；真正停止一旦观察便保留最先原因，
+	 * 后来的连接错误不能覆盖已到达的远端取消。 */
+	if (tr_rpc_record_is_terminal_event(event) &&
+	    (!slot->pending_event ||
+	     slot->pending_event == TR_STREAM_EVENT_REMOTE_CLOSED)) {
 		slot->pending_event = event;
+		slot->pending_status = status;
+	}
 }
 
 static void tr_record_client_apply_pending(struct tr_record_client_slot *slot)
@@ -213,9 +217,14 @@ static void tr_record_client_apply_pending(struct tr_record_client_slot *slot)
 	 * 这里已有关闭/错误事实，不排队重放剩余借用字节来争取成功终局。 */
 	ret = slot->receiving
 	              ? tr_rpc_record_stream_abort_on_owner(
-	                        slot->binding, TR_RPC_STATUS_UNAVAILABLE)
+	                        slot->binding,
+	                        event == TR_STREAM_EVENT_RESET
+	                                ? tr_rpc_record_status_from_reset(
+	                                          slot->pending_status)
+	                                : TR_RPC_STATUS_UNAVAILABLE)
 	              : tr_rpc_record_stream_event_on_owner(
-	                        slot->binding, slot->stream, event);
+	                        slot->binding, slot->stream, event,
+	                        slot->pending_status);
 	if (ret == TR_OK || ret == TR_ERR_STATE)
 		slot->pending_event = 0;
 }
@@ -280,36 +289,37 @@ static int tr_record_client_retire(struct tr_record_client_slot *slot)
 	int ret;
 	if (slot->accepted && (!slot->terminal || !slot->reported))
 		return TR_AGAIN;
-	if (slot->accepted && slot->binding && !slot->peer_final &&
-	    !slot->peer_closed && !slot->dead && !slot->close_accepted) {
-		struct tr_rpc_record_state state;
-		size_t cached_bytes;
-		ret = tr_rpc_record_stream_snapshot_on_owner(
-		        slot->binding, &state, &cached_bytes);
-		if (ret != TR_OK)
-			return ret;
-		/* 请求 HALF_CLOSE 已被接受时，干净的传输半关闭不能取消
-		 * 服务端响应。保留固定槽/路由，丢弃晚 DATA 并继续归信用，
-		 * 否则响应可永久卡在窗口上。只有精确传输关闭才能结束该
-		 * 排空；不能旁路解析已终局绑定之后的字节来寻找 FINAL。 */
-		if (state.request_closed)
-			return TR_AGAIN;
-	}
-	if (!slot->dead && !slot->close_accepted) {
-		/* 已排队信用保持在 CLOSE 前；未接受和迟到 DATA 产生的信用
-		 * 不再发送，不能在对端已经退役该流后补发 WINDOW_UPDATE。 */
-		ret = tr_stream_stop_credit_on_owner(slot->stream);
-		if (ret == TR_OK)
-			ret = tr_stream_close(slot->stream);
-		if (ret == TR_OK)
-			slot->close_accepted = true;
-		else if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE)
+	if (!slot->dead && !slot->close_accepted && !slot->reset_accepted) {
+		if (!slot->peer_final &&
+		    !(slot->peer_closed && !slot->peer_window_known)) {
+			/* RPC HALF_CLOSE 只结束请求事件，不妨碍取消整个调用。
+			 * TR_OK 后传输持有独立的有界重置/确认责任，上层可以
+			 * 退役，晚帧不再需要本调用或其用户参数参与排空。 */
+			ret = tr_stream_reset_on_owner(
+			        slot->stream,
+			        slot->accepted ? tr_rpc_record_reset_reason(
+			                                 slot->status)
+			                       : TR_ERR_CLOSED);
+			if (ret == TR_OK)
+				slot->reset_accepted = true;
+		} else {
+			/* 合法 FINAL 或传输 OPEN 被提前拒绝，均以普通关闭确认。
+			 * 后者对端没有准入槽，不能用 RESET 新建取消责任。
+			 * CLOSE 固定在先前 DATA/信用之后，接受后不再主动
+			 * RESET。 */
+			ret = tr_stream_stop_credit_on_owner(slot->stream);
+			if (ret == TR_OK)
+				ret = tr_stream_close(slot->stream);
+			if (ret == TR_OK)
+				slot->close_accepted = true;
+		}
+		if (ret == TR_ERR_CLOSED || ret == TR_ERR_STALE)
 			slot->dead = true;
-		else
+		else if (ret != TR_OK)
 			return ret;
 	}
-	/* 本地 CLOSE 是已接受 DATA 的 FIFO 屏障。没有工作线程借用绑定，
-	 * 不必等远端确认；Channel 继续保留旧流并释放晚到载荷。 */
+	/* 没有工作线程借用客户端绑定；Channel 的关闭/RESET 屏障和存储
+	 * 不引用本槽位，网络确认可以晚于 RPC 弱句柄失效。 */
 	tr_record_client_unroute(slot);
 	if (slot->binding) {
 		ret = tr_rpc_record_stream_destroy_on_owner(&slot->binding);
@@ -430,7 +440,8 @@ tr_record_client_data(struct tr_stream_handle stream, uint64_t message_id,
 	if (!slot || !slot->binding || !slot->accepted || slot->terminal)
 		return TR_STREAM_DATA_RELEASE;
 	if (client->depth) {
-		tr_record_client_defer(slot, TR_STREAM_EVENT_ERROR);
+		tr_record_client_defer(slot, TR_STREAM_EVENT_ERROR,
+		                       TR_ERR_STATE);
 		return TR_STREAM_DATA_RELEASE;
 	}
 	++client->depth;
@@ -460,19 +471,28 @@ static void tr_record_client_event(struct tr_stream_handle stream,
 	struct tr_rpc_record_client *client = arg;
 	struct tr_record_client_slot *slot =
 	        tr_record_client_find(client, stream);
-	(void)status;
 	if (!slot)
 		return;
+	/* 只有真实传输事件能证明网络关闭或 RESET 已接管。重入 DATA 和
+	 * 流状态查询失败也会登记本地 ERROR，但仍须通过 RESET 结束活流。 */
+	if (event == TR_STREAM_EVENT_REMOTE_CLOSED ||
+	    event == TR_STREAM_EVENT_CLOSED)
+		slot->peer_closed = true;
+	if (event == TR_STREAM_EVENT_CLOSED || event == TR_STREAM_EVENT_ERROR)
+		slot->dead = true;
+	if (event == TR_STREAM_EVENT_RESET)
+		slot->reset_accepted = true;
 	if (event == TR_STREAM_EVENT_OPENED && !slot->peer_window_known) {
 		struct tr_stream_flow_state flow;
 		if (tr_stream_get_flow_state(stream, &flow) == TR_OK) {
 			slot->peer_window = flow.tx_send_limit;
 			slot->peer_window_known = true;
 		} else {
-			tr_record_client_defer(slot, TR_STREAM_EVENT_ERROR);
+			tr_record_client_defer(slot, TR_STREAM_EVENT_ERROR,
+			                       TR_ERR_STATE);
 		}
 	}
-	tr_record_client_defer(slot, event);
+	tr_record_client_defer(slot, event, status);
 	if (event == TR_STREAM_EVENT_WRITABLE)
 		slot->writable = true;
 	if (client->depth)

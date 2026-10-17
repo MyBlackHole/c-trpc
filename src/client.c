@@ -600,6 +600,11 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	channel_config.max_message_bytes =
 		client->config.limits.max_message_bytes;
 	channel_config.reassembly_pool = &client->reassembly_pool;
+	if (client->record_mode) {
+		channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
+		channel_config.required_feature_bits =
+		        TR_CHANNEL_FEATURE_STREAM_RESET;
+	}
 
 	if (client->record_mode) {
 		struct tr_client_record_assemble_request request = {

@@ -597,7 +597,6 @@ static void on_event(struct tr_stream_handle stream, enum tr_stream_event event,
                      int status, void *arg)
 {
 	struct peer *p = arg;
-	(void)status;
 	CHECK(stream.slot < CALLS);
 	if (event == TR_STREAM_EVENT_OPENED) {
 		CHECK(p->calls[stream.slot]);
@@ -610,8 +609,9 @@ static void on_event(struct tr_stream_handle stream, enum tr_stream_event event,
 		              p->calls[stream.slot], &h, NULL, NULL) == TR_OK);
 		atomic_fetch_add(&p->opened, 1);
 	} else if (p->calls[stream.slot]) {
-		CHECK(tr_rpc_record_stream_event_on_owner(
-		              p->calls[stream.slot], stream, event) == TR_OK);
+		CHECK(tr_rpc_record_stream_event_on_owner(p->calls[stream.slot],
+		                                          stream, event,
+		                                          status) == TR_OK);
 	}
 }
 
@@ -648,6 +648,8 @@ static void peer_connect(struct peer *p, uint16_t port, bool ready)
 	                               .max_payload_len = 256};
 	struct tr_channel_config cc = {.role = TR_CHANNEL_CLIENT,
 	                               .mode = TR_CHANNEL_SHARED_CONNECTION,
+	                               .feature_bits =
+	                                       TR_CHANNEL_FEATURE_STREAM_RESET,
 	                               .max_streams = CALLS,
 	                               .initial_window_bytes = WIRE_LIMIT * 4,
 	                               .window_update_threshold_bytes = 1,

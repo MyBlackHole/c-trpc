@@ -24,10 +24,18 @@ int tr_frame_type_valid(uint16_t type)
 	case TR_FRAME_BIND:
 	case TR_FRAME_BIND_ACK:
 	case TR_FRAME_PIPELINE_CONTROL:
+	case TR_FRAME_STREAM_RESET:
 		return 1;
 	default:
 		return 0;
 	}
+}
+
+int tr_wire_stream_reset_status_valid(int status)
+{
+	return status == TR_ERR_CLOSED || status == TR_ERR_TIMEOUT ||
+	       status == TR_ERR_NOMEM || status == TR_ERR_STATE ||
+	       status == TR_ERR_SYS;
 }
 
 static uint32_t tr_header_crc(const uint8_t raw[TR_WIRE_HEADER_SIZE])
@@ -120,6 +128,17 @@ int tr_wire_header_validate(const uint8_t raw[TR_WIRE_HEADER_SIZE],
 
 	if (header->payload_len > max_payload)
 		return TR_ERR_BAD_LENGTH;
+
+	if (header->type == TR_FRAME_STREAM_RESET) {
+		if (header->flags != 0)
+			return TR_ERR_BAD_FLAGS;
+		if (header->payload_len != 0)
+			return TR_ERR_BAD_LENGTH;
+		if (header->stream_id == 0 || header->message_id > INT32_MAX ||
+		    !tr_wire_stream_reset_status_valid(
+		            -(int)header->message_id))
+			return TR_ERR_INVALID;
+	}
 
 	return TR_OK;
 }

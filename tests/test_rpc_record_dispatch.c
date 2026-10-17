@@ -269,6 +269,11 @@ static void server_terminal(struct tr_rpc_dispatch_handle handle,
 	CHECK((delivery == TR_RPC_RECORD_ON_OWNER) ==
 	      !!tr_reactor_in_owner_context_for(f->server.reactor));
 	if (delivery == TR_RPC_RECORD_ON_OWNER) {
+		struct tr_rpc_dispatch_result result;
+		CHECK(tr_rpc_record_dispatch_result_on_owner(handle, &result) ==
+		      TR_OK);
+		CHECK(result.terminal && result.status == status &&
+		      result.final_accepted == final_accepted);
 		CHECK(tr_rpc_record_dispatch_destroy_on_owner(&same) ==
 		      TR_ERR_STATE);
 		CHECK(tr_rpc_record_dispatch_retire_on_owner(handle) ==
@@ -349,7 +354,6 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event e,
                      int status, void *arg)
 {
 	struct peer *p = arg;
-	(void)status;
 	if (p->disabled)
 		return;
 	CHECK(s.slot < CAP);
@@ -362,10 +366,10 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event e,
 		atomic_fetch_add(&p->opened, 1);
 	} else if (p->server && p->handles[s.slot].dispatch) {
 		CHECK(tr_rpc_record_dispatch_event_on_owner(
-		              p->fixture->dispatch, s, e) == TR_OK);
+		              p->fixture->dispatch, s, e, status) == TR_OK);
 	} else if (!p->server && p->calls[s.slot]) {
 		CHECK(tr_rpc_record_stream_event_on_owner(p->calls[s.slot], s,
-		                                          e) == TR_OK);
+		                                          e, status) == TR_OK);
 	}
 }
 static void tcp_pair(int *a, int *b)
@@ -398,13 +402,14 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 	                               .rx_buffer_count = 16,
 	                               .rx_buffer_size = 256,
 	                               .max_payload_len = 256};
-	struct tr_channel_config cc = {.role = server ? TR_CHANNEL_SERVER
-	                                              : TR_CHANNEL_CLIENT,
-	                               .mode = TR_CHANNEL_SHARED_CONNECTION,
-	                               .max_streams = CAP,
-	                               .initial_window_bytes = window,
-	                               .window_update_threshold_bytes = 1,
-	                               .max_message_bytes = BODY + 1024};
+	struct tr_channel_config cc = {
+	        .role = server ? TR_CHANNEL_SERVER : TR_CHANNEL_CLIENT,
+	        .mode = TR_CHANNEL_SHARED_CONNECTION,
+	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET,
+	        .max_streams = CAP,
+	        .initial_window_bytes = window,
+	        .window_update_threshold_bytes = 1,
+	        .max_message_bytes = BODY + 1024};
 	struct tr_conn_handle conn;
 	*p = (struct peer){.fixture = f, .server = server};
 	atomic_init(&p->opened, 0);
@@ -784,6 +789,43 @@ static int cancel_first(void *arg)
 	return tr_rpc_record_dispatch_abort_on_owner(f->server.handles[0],
 	                                             TR_RPC_STATUS_CANCELLED);
 }
+static int reset_first(void *arg)
+{
+	struct fixture *f = arg;
+	struct tr_rpc_dispatch_handle handle = f->server.handles[0];
+	struct tr_rpc_dispatch_result before, after;
+	struct tr_rpc_record_dispatch_stats stats_before, stats_after;
+	CHECK(tr_rpc_record_dispatch_result_on_owner(handle, &before) == TR_OK);
+	CHECK(!before.terminal && !before.final_accepted);
+	CHECK(tr_rpc_record_dispatch_get_stats_on_owner(
+	              f->dispatch, &stats_before) == TR_OK);
+	CHECK(tr_rpc_record_dispatch_event_on_owner(
+	              f->dispatch, f->server.streams[0], TR_STREAM_EVENT_RESET,
+	              TR_AGAIN) == TR_ERR_INVALID);
+	CHECK(tr_rpc_record_dispatch_result_on_owner(handle, &after) == TR_OK);
+	CHECK(after.status == before.status &&
+	      after.terminal == before.terminal &&
+	      after.final_accepted == before.final_accepted);
+	CHECK(tr_rpc_record_dispatch_get_stats_on_owner(f->dispatch,
+	                                                &stats_after) == TR_OK);
+	CHECK(stats_after.held_events == stats_before.held_events &&
+	      stats_after.terminal_calls == stats_before.terminal_calls);
+	CHECK(tr_rpc_record_dispatch_event_on_owner(
+	              f->dispatch, f->server.streams[0], TR_STREAM_EVENT_RESET,
+	              TR_ERR_CLOSED) == TR_OK);
+	CHECK(tr_rpc_record_dispatch_result_on_owner(handle, &after) == TR_OK);
+	CHECK(after.terminal && after.status == TR_RPC_STATUS_CANCELLED &&
+	      !after.final_accepted);
+	CHECK(!atomic_load(&f->server.terminals[0]) &&
+	      atomic_load(&f->business[handle.id.slot].active) == 1);
+	CHECK(tr_rpc_record_dispatch_retire_on_owner(handle) == TR_ERR_STATE);
+	CHECK(tr_rpc_record_dispatch_result_on_owner(handle, NULL) ==
+	      TR_ERR_INVALID);
+	++handle.id.generation;
+	CHECK(tr_rpc_record_dispatch_result_on_owner(handle, &before) ==
+	      TR_ERR_STALE);
+	return TR_OK;
+}
 static void test_cancel_and_stop(unsigned mode)
 {
 	bool stopped = mode != 0;
@@ -794,7 +836,13 @@ static void test_cancel_and_stop(unsigned mode)
 	atomic_store(&f.use_gate, true);
 	request(&f, slot, 3, 2, 80);
 	gate_wait(&f.gate, false);
-	if (mode != 2)
+	if (mode == 0) {
+		struct tr_rpc_dispatch_result result = {0};
+		CHECK(tr_rpc_record_dispatch_result_on_owner(
+		              f.server.handles[slot], &result) == TR_ERR_STATE);
+		CHECK(tr_reactor_call(f.server.reactor, reset_first, &f) ==
+		      TR_OK);
+	} else if (mode != 2)
 		CHECK(tr_reactor_call(f.server.reactor, cancel_first, &f) ==
 		      TR_OK);
 	CHECK(!atomic_load(&f.server.terminals[slot]));
@@ -805,6 +853,7 @@ static void test_cancel_and_stop(unsigned mode)
 		gate_open(&f.gate);
 		wait_count(&f.server.terminals[slot], 1);
 		CHECK(f.server.delivery[slot] == TR_RPC_RECORD_ON_OWNER);
+		CHECK(f.server.status[slot] == TR_RPC_STATUS_CANCELLED);
 		CHECK(!f.server.final_accepted[slot]);
 		fixture_destroy(&f, false);
 		return;

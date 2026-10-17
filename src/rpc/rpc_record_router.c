@@ -1,4 +1,5 @@
 #include "rpc_record_router.h"
+#include "rpc_record_transport_internal.h"
 #include "../execution/reactor_internal.h"
 #include "../transport/channel/channel_internal.h"
 #include "../memory_budget.h"
@@ -256,7 +257,10 @@ int tr_rpc_record_router_admit_on_owner(struct tr_rpc_record_router *router,
 		return ret;
 	for (uint32_t i = 0; i < router->capacity; ++i) {
 		struct tr_rpc_route *r = &router->routes[i];
-		if (r->active && r->stream.slot == stream.slot)
+		/* RESET 可以先释放传输槽，旧任务仍持有不同代次的路由。
+		 * 只拒绝同一条流重复准入，不能让旧任务阻塞新流的空闲路由。 */
+		if (r->active && r->stream.slot == stream.slot &&
+		    r->stream.generation == stream.generation)
 			return TR_ERR_STATE;
 		if (!r->active && !free_route)
 			free_route = r;
@@ -360,7 +364,7 @@ out:
 
 int tr_rpc_record_router_event_on_owner(struct tr_rpc_record_router *router,
                                         struct tr_stream_handle stream,
-                                        enum tr_stream_event event)
+                                        enum tr_stream_event event, int status)
 {
 	struct tr_rpc_route *route;
 	int ret = tr_router_owner(router);
@@ -371,14 +375,22 @@ int tr_rpc_record_router_event_on_owner(struct tr_rpc_record_router *router,
 	route = tr_router_find(router, stream);
 	if (!route)
 		return TR_ERR_STALE;
-	if (event < TR_STREAM_EVENT_OPENED || event > TR_STREAM_EVENT_WRITABLE)
+	if (event < TR_STREAM_EVENT_OPENED || event > TR_STREAM_EVENT_RESET)
+		return TR_ERR_INVALID;
+	if (event == TR_STREAM_EVENT_RESET &&
+	    tr_rpc_record_status_from_reset(status) ==
+	            (enum tr_rpc_status)TR_RPC_STATUS_COUNT)
 		return TR_ERR_INVALID;
 	if (route->terminal)
 		return TR_OK;
 	++router->depth;
 	if (route->binding)
-		ret = tr_rpc_record_stream_event_on_owner(route->binding,
-		                                          stream, event);
+		ret = tr_rpc_record_stream_event_on_owner(
+		        route->binding, stream, event, status);
+	else if (event == TR_STREAM_EVENT_RESET)
+		tr_router_terminal(route,
+		                   tr_rpc_record_status_from_reset(status),
+		                   TR_RPC_RECORD_ON_OWNER);
 	else if (event != TR_STREAM_EVENT_OPENED &&
 	         event != TR_STREAM_EVENT_WRITABLE)
 		tr_router_terminal(route,

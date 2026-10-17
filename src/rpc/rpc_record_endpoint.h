@@ -13,7 +13,8 @@ struct tr_rpc_record_endpoint_config {
 	 * 显式周期 1ms..1s；不承诺零轮询成本或单回调的 CPU 时间上限。 */
 	uint64_t progress_period_ns;
 	/* 本地终局选择后等待 FINAL 接受的最长时间。到期停止重试正文，
-	 * 转而只重试传输半关闭；不是业务执行期限，也不保证实时抢占。 */
+	 * 转向预留 RESET 路径；不是业务执行期限，也不保证实时抢占。
+	 * 业务尚未退出的本地终局可直接 RESET，通知仍等待真实退出。 */
 	uint64_t final_wait_ns;
 };
 
@@ -48,8 +49,10 @@ int tr_rpc_record_endpoint_start_on_owner(struct tr_rpc_record_endpoint *ep);
 /* 同时由数据、可写及定时器驱动；每次工作量受显式数量配置限制。
  * 重入错误以预分配槽位形成有界待处理队列，先于业务完成/发送处理；
  * 事件预算用尽时保留队列至下一处理轮次，不能让成功终局越过既知错误。
- * 本地拒绝自动尝试错误 FINAL，接受后再关流。发送失败保留同一帧，不能
- * 因为重试再次执行业务。到期或不可用时可只关流，因此不能承诺错误必达。
+ * 本地拒绝自动尝试错误 FINAL，接受后再关流；期限耗尽转 RESET。发送
+ * 失败保留同一帧，不能因为重试再次执行业务。已选终局但任务尚未退出时，
+ * 通过只读结果先停止网络；终局通知和业务释放仍等原任务完成。
+ * RESET 接管后 Channel 独立处理确认和晚帧，不需要 RPC 保留第二条路由。
  */
 int tr_rpc_record_endpoint_pump_on_owner(struct tr_rpc_record_endpoint *ep);
 
