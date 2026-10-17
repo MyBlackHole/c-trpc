@@ -52,8 +52,9 @@ int tr_client_create_record(const struct tr_client_config *config,
  * 和本地 cancel，但不能在回调内递归 start。终局延后当前 received 返回。
  *
  * options 元数据复制到有界 OPEN 存储；timeout_ms 从调用受理开始使用
- * 本地单调期限，重试 OPEN 传递实际剩余值。服务端截止时间调度尚未迁移，
- * 本地超时不证明服务端停止执行。断线终止旧调用，不透明重放。连接器的
+ * 本地单调期限，重试 OPEN 传递实际剩余值。配套 V2 Server 从完整 OPEN
+ * 接收时建立自身期限并合作取消任务；本地超时不证明服务端已停止执行，
+ * 也不证明任意对端实现此契约。断线终止旧调用，不透明重放。连接器的
  * 停止域回收尚未接入，所以 enable_reconnect 非零明确返回 UNSUPPORTED。
  */
 int tr_client_record_call_start(

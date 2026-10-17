@@ -26,6 +26,13 @@ struct tr_rpc_dispatch_handle {
  * 回调可以不执行，但已接受的执行器任务仍由完成路径收敛。非OK返回值
  * 丢弃本次生成的正文并尝试发送错误 FINAL；HALF_CLOSE 默认选择最终OK。
  * 不支持从回调返回后继续使用 reply；长期异步生产者另需后续持有接口。
+ *
+ * 有限期限从 owner 接收完整有效 OPEN 时起算，包含派发队列、共享执行器
+ * 排队、业务执行和回复背压。任务开始前再查不可变期限，已经过期不调用
+ * 业务；执行中的取消通过 cancel 合作观察，不抢占工作线程。业务可以
+ * 不合作，但其退出与 done 交付完成前不能释放调用或通知终局。
+ * view 保留收到的线协议字段；OPEN.remaining_timeout_ns 不是工作函数
+ * 开始时的实时剩余预算，不得按该值重新计时。
  */
 typedef enum tr_rpc_status (*tr_rpc_record_work_fn)(
         struct tr_rpc_dispatch_id id, const struct tr_rpc_record_view *view,
@@ -79,6 +86,13 @@ typedef void (*tr_rpc_dispatch_terminal_fn)(
  * terminal 在该调用所有任务完成清理后至多一次。final_accepted 仅说明
  * FINAL已被传输接受，不说明已写入或对端已收到；路由拒绝/本地取消仍可能
  * 是未通知对端的本地终局。回调可做资源清理/快照，不可重入生命周期操作。
+ *
+ * OPEN.remaining_timeout_ns 为0时无限且不读取时钟；非0时在完整记录通过
+ * 验证的 owner 回调内建立本机单调绝对期限，加法溢出饱和不回绕。OPEN
+ * 分段尚未收齐的等待不在该期限内，慢 OPEN 须由外层单独限制。接收准入、
+ * 任务开始、完成交付及每次发送前都重新检查；到期选择 DEADLINE_EXCEEDED，
+ * 取时失败选择 INTERNAL。正常运行的已选终局保持原状态，未接受的成功回复
+ * 不得越过已观察的到期；不保证实时抢占或错误 FINAL 一定送达。
  */
 int tr_rpc_record_dispatch_create_on_owner(
         struct tr_channel *channel, struct tr_task_executor *executor,
@@ -89,6 +103,8 @@ int tr_rpc_record_dispatch_create_on_owner(
 int tr_rpc_record_dispatch_admit_on_owner(
         struct tr_rpc_record_dispatch *dispatch, struct tr_stream_handle stream,
         struct tr_rpc_dispatch_handle *out);
+/* 接收入口发现已有期限到期或取时失败时先选择本地终局，返回 STATE；
+ * 不再预约分段缓存，也不返回表示已吸收网络字节可以重放的 AGAIN。 */
 int tr_rpc_record_dispatch_receive_on_owner(
         struct tr_rpc_record_dispatch *dispatch, struct tr_stream_handle stream,
         const uint8_t *data, size_t size);

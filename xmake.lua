@@ -666,8 +666,27 @@ target("test_server_record")
                 "-Wl,--wrap=tr_rpc_record_endpoint_close_on_owner",
                 "-Wl,--wrap=tr_rpc_record_endpoint_reap_stopped",
                 "-Wl,--wrap=tr_channel_set_handler",
-                "-Wl,--wrap=pthread_create", "-Wl,--wrap=epoll_wait",
+                "-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join",
+                "-Wl,--wrap=epoll_wait",
                 {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 真实 V2 两端门面：服务端期限、执行器排队、迟到完成及背压回收。
+target("test_server_record_deadline")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_server_record_deadline.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=clock_gettime",
+                "-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_channel_create_deferred",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_rpc_record_dispatch_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_receive_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_pump_on_owner",
+                "-Wl,--wrap=tr_task_executor_submit",
+                "-Wl,--wrap=tr_task_executor_dispatch", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
