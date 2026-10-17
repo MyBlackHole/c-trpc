@@ -119,7 +119,7 @@ Linux 6.18.55、x86_64、glibc 2.39；工具包版本不代表本机运行 Ubunt
 
 | 最终模式 | 实际生产编译单元 | 唯一测试通过数 | Xmake 测试耗时 |
 | --- | --- | --- | --- |
-| GCC 11 debug | 43/43 | 84/84 | 53.735 秒 |
+| GCC 11 debug | 43/43 | 84/84 | 54.262 秒 |
 | GCC 11 release | 43/43 | 84/84 | 50.303 秒 |
 | Clang 14 release | 43/43 | 84/84 | 51.629 秒 |
 | GCC 11 ASan + UBSan | 43/43 | 84/84 | 55.864 秒 |
@@ -173,8 +173,22 @@ FINAL，Client 因此收到一次空 TRAILING；本地 abort 不等于必然网�
 退出 0，汇总为 1/1 通过、120.104 秒。较长收尾的原因未确定，没有据此修改
 产品或发送终止信号，完整功能验收以新的冻结矩阵为准。
 
+首次本地聚合发现 `matrix/final/gcc11-debug/build.log` 与该轮 driver 记录的
+SHA-256 不一致：现存文件为 107074 字节，结束于 71% 链接输出，缺少完整构建
+收尾；原测试日志仍与摘要一致，84/84、53.735 秒的测试结果完整。未找到能按
+原摘要验证的完整构建副本，日志尾部变化原因尚未确定。因此保留原失败聚合、
+日志及身份记录，不把该轮作为最终完整构建证据。
+
+只对相同功能冻结补跑 GCC 11 debug，其他四个模式未重跑。补跑的产品命令和
+测试集合保持不变，driver 仅增加身份与原始日志副本采集；五个步骤各自的主
+日志、独立副本、字节数和摘要均一致。新构建日志为 111063 字节，含完整收尾，
+测试为 84/84、54.262 秒。本节最终表格采用该次恢复结果；420 次表示五个最终
+采用模式的通过总数，不包括为开发诊断或证据恢复额外执行的测试。
+
 证据根为 `build/validation-record-metadata-stats/`。最终矩阵在
-`matrix/final/<label>/`，原构建失败在 `matrix/initial/`，双静态在
+`matrix/final/<label>/`，其中 GCC debug 采用
+`matrix/evidence-recovery/gcc11-debug/`；原构建失败在 `matrix/initial/`，
+首轮聚合失败及原日志完整性记录在 `audit-history/local-initial/`，双静态在
 `static-analysis/dc550d5a8dd0668bb71d1d1330ffa4e3299e61e8/initial/`，安装在
 `install/initial/`，开发记录在 `development/`。`local-acceptance.json`
 记录冻结身份、完整命令、原日志、制品与 SHA-256；测试注册清单使用 Xmake
