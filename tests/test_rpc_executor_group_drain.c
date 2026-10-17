@@ -188,7 +188,8 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 {
 	struct drain_context context;
 	struct tr_memory_budget budget;
-	struct tr_task_executor_config task_config = {.workers = 1, .capacity = 1};
+	struct tr_task_executor_config task_config = {.workers = 1,
+	                                              .capacity = 1};
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
@@ -310,14 +311,13 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	pthread_mutex_destroy(&context.lock);
 }
 
-
 struct worker_probe {
 	struct tr_rpc_executor_group *legacy;
 	unsigned done;
 };
 
-static int
-reject_legacy_lifecycle(void *arg, const struct tr_task_cancel *cancel)
+static int reject_legacy_lifecycle(void *arg,
+                                   const struct tr_task_cancel *cancel)
 {
 	struct worker_probe *probe = arg;
 
@@ -349,7 +349,8 @@ static void test_generic_worker_rejects_legacy_lifecycle(void)
 	struct tr_memory_budget budget;
 	struct tr_task_executor *executor = NULL;
 	struct tr_task_executor_config config = {.workers = 1, .capacity = 1};
-	struct tr_task_spec spec = {reject_legacy_lifecycle, probe_done, &probe};
+	struct tr_task_spec spec = {reject_legacy_lifecycle, probe_done,
+	                            &probe};
 	struct tr_task_handle handle;
 	struct timespec deadline, now, pause = {0, 1000000};
 	int ret;

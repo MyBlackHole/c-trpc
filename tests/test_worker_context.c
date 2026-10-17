@@ -9,7 +9,8 @@
 #define CHECK(x)                                                               \
 	do {                                                                   \
 		if (!(x)) {                                                    \
-			fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x);  \
+			fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__,     \
+			        #x);                                           \
 			abort();                                               \
 		}                                                              \
 	} while (0)
