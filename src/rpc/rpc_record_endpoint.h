@@ -5,6 +5,8 @@
 
 struct tr_rpc_record_endpoint;
 
+#define TR_RPC_RECORD_OPEN_TIMEOUT_DEFAULT_NS UINT64_C(10000000000)
+
 struct tr_rpc_record_endpoint_config {
 	struct tr_rpc_record_dispatch_config dispatch;
 	size_t completion_limit;
@@ -16,6 +18,10 @@ struct tr_rpc_record_endpoint_config {
 	 * 转向预留 RESET 路径；不是业务执行期限，也不保证实时抢占。
 	 * 业务尚未退出的本地终局可直接 RESET，通知仍等待真实退出。 */
 	uint64_t final_wait_ns;
+	/* transport OPENED 到完整有效 RPC OPEN 的本机总期限。0 采用固定
+	 * 10s 默认值；非0为有限纳秒预算，分段字节和重试均不能续期。
+	 * 到期直接 RESET；对端不确认时网络槽仍由 Channel 有界保留。 */
+	uint64_t open_timeout_ns;
 };
 
 struct tr_rpc_endpoint_result {
@@ -27,6 +33,8 @@ struct tr_rpc_endpoint_result {
 typedef void (*tr_rpc_endpoint_terminal_fn)(
         struct tr_stream_handle stream, struct tr_rpc_endpoint_result result,
         void *arg);
+
+typedef void (*tr_rpc_endpoint_progress_fn)(bool drained, void *arg);
 
 /* 库内 V2 服务端宿主，尚未替换旧公开 Endpoint。只能绑定专用且尚未开始
  * 交付流事件的 Channel（例如 deferred Channel）。start 安装其唯一处理器，
@@ -55,6 +63,22 @@ int tr_rpc_record_endpoint_start_on_owner(struct tr_rpc_record_endpoint *ep);
  * RESET 接管后 Channel 独立处理确认和晚帧，不需要 RPC 保留第二条路由。
  */
 int tr_rpc_record_endpoint_pump_on_owner(struct tr_rpc_record_endpoint *ep);
+
+/* 只读所有者快照。正常宿主须已退役全部绑定；停止对象可保留固定槽，
+ * 但必须已交付所有任务和终局，且终止责任已经移交 Channel。回调/进度
+ * 栈或待处理事件尚未退出时返回 TR_OK 和 false，不把局部静默当成完成。
+ * 不等待已转交 Channel 的网络确认或 Reactor 的 TX 引用。
+ */
+int tr_rpc_record_endpoint_is_drained_on_owner(
+        struct tr_rpc_record_endpoint *ep, bool *out);
+/* 注册立即发布一次，此后仅在静默谓词变化时发布。通知只在安全最外层
+ * owner 边界执行，回调可查询，不能重入 pump/close/start 或修改观察者。
+ * NULL 注销且不回调；arg 借用到注销或正常 close 的最后通知返回。
+ * stopped reap 只注销，不在清理线程伪装正常 owner 进度通知。
+ */
+int tr_rpc_record_endpoint_set_progress_notify_on_owner(
+        struct tr_rpc_record_endpoint *ep, tr_rpc_endpoint_progress_fn fn,
+        void *arg);
 
 /* 停止新准入，取消在途业务，交付已接受任务并尝试终止流。任务未静默、
  * 终止尚未接受时返回 AGAIN；外层必须继续驱动共享执行器和 Reactor。

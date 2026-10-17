@@ -112,7 +112,12 @@ struct tr_reactor_stats {
 
 enum tr_frame_disposition { TR_FRAME_RELEASE = 0, TR_FRAME_TAKE_OWNERSHIP = 1 };
 
-enum tr_connection_event { TR_CONN_EVENT_CLOSED = 1, TR_CONN_EVENT_ERROR = 2 };
+enum tr_connection_event {
+	TR_CONN_EVENT_CLOSED = 1,
+	TR_CONN_EVENT_ERROR = 2,
+	/* 仅显式登记发送排空观察的内部使用者收到；连接仍然存活。 */
+	TR_CONN_EVENT_TX_DRAINED = 3
+};
 
 typedef enum tr_frame_disposition (*tr_reactor_frame_cb)(
 	struct tr_conn_handle connection, struct tr_frame *frame, void *arg);

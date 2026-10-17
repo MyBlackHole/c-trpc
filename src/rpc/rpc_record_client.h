@@ -3,6 +3,8 @@
 
 #include "rpc_record_stream.h"
 
+#include <stdbool.h>
+
 struct tr_rpc_record_client;
 
 struct tr_rpc_record_client_config {
@@ -57,6 +59,21 @@ int tr_rpc_record_client_create_on_owner(
         size_t method_count, const struct tr_rpc_record_client_config *config,
         struct tr_memory_budget *budget, struct tr_rpc_record_client **out);
 int tr_rpc_record_client_start_on_owner(struct tr_rpc_record_client *client);
+
+/* 门面排空桥。通知只在 owner 的最外层进度边界、全部用户回调返回后
+ * 发布本层静默状态；未发送的 OPEN、未报告终局及尚未退役的绑定都为
+ * busy，不包含 Channel 持有的网络确认和 TX。观察者只发布状态，不得
+ * 重入本宿主。设置不推进业务；begin_drain 后立即发布或延至当前回调
+ * 返回，随后仅在谓词变化时通知。NULL 注销，停止域回收不调用观察者。
+ */
+typedef void (*tr_rpc_record_client_progress_fn)(bool drained, void *arg);
+int tr_rpc_record_client_set_progress_notify_on_owner(
+        struct tr_rpc_record_client *client,
+        tr_rpc_record_client_progress_fn notify, void *arg);
+/* 单调关闭新 CALL 准入，已有调用继续推进；允许从用户回调内发布意图。
+ * 外层须在同一 owner 事务发布 Channel GOAWAY，网络等待由外层承担。 */
+int tr_rpc_record_client_begin_drain_on_owner(
+        struct tr_rpc_record_client *client);
 
 /* 不延长对象寿命，只供既有 Client 将弱句柄路由到精确所属 Reactor。
  * in_callback 是当前线程的回调域查询，不读取其他 owner 的可变字段。 */

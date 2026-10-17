@@ -8,6 +8,7 @@
 #include "tr/status.h"
 
 #include <poll.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -32,6 +33,37 @@ void *__real_malloc(size_t);
 void *__real_calloc(size_t, size_t);
 int __real_tr_stream_sendv(struct tr_stream_handle, struct tr_buffer *const *,
                            uint32_t);
+int __real_clock_gettime(clockid_t, struct timespec *);
+struct admission_clock {
+	uint64_t now, advanced;
+	unsigned reads, advance_at, fail_at, invalid;
+};
+static _Thread_local struct admission_clock *admission_clock;
+int __wrap_clock_gettime(clockid_t id, struct timespec *out)
+{
+	struct admission_clock *clock = admission_clock;
+	if (!clock)
+		return __real_clock_gettime(id, out);
+	CHECK(id == CLOCK_MONOTONIC);
+	++clock->reads;
+	if (clock->reads == clock->fail_at) {
+		errno = EIO;
+		return -1;
+	}
+	if (clock->reads == clock->advance_at)
+		clock->now = clock->advanced;
+	out->tv_sec = (time_t)(clock->now / UINT64_C(1000000000));
+	out->tv_nsec = (long)(clock->now % UINT64_C(1000000000));
+	if (clock->invalid == 1)
+		out->tv_sec = -1;
+	if (clock->invalid == 2)
+		out->tv_nsec = -1;
+	if (clock->invalid == 3)
+		out->tv_nsec = 1000000000L;
+	if (clock->invalid == 4)
+		out->tv_sec = (time_t)(UINT64_MAX / UINT64_C(1000000000) + 1);
+	return 0;
+}
 static _Thread_local unsigned fail_at, allocations;
 static _Atomic bool fail_worker_malloc;
 static _Atomic(struct tr_channel *) observed_channel;
@@ -176,6 +208,7 @@ struct fixture {
 	_Atomic bool bad_reply, oversized_reply;
 	_Atomic unsigned drive_turns;
 	unsigned batch;
+	uint64_t open_due;
 };
 static enum tr_rpc_status handler(struct tr_rpc_dispatch_id id,
                                   const struct tr_rpc_record_view *view,
@@ -359,10 +392,18 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event e,
 	CHECK(s.slot < CAP);
 	if (e == TR_STREAM_EVENT_OPENED) {
 		p->streams[s.slot] = s;
-		if (p->server)
-			CHECK(tr_rpc_record_dispatch_admit_on_owner(
-			              p->fixture->dispatch, s,
-			              &p->handles[s.slot]) == TR_OK);
+		if (p->server) {
+			int ret =
+			        p->fixture->open_due
+			                ? tr_rpc_record_dispatch_admit_until_on_owner(
+			                          p->fixture->dispatch, s,
+			                          p->fixture->open_due,
+			                          &p->handles[s.slot])
+			                : tr_rpc_record_dispatch_admit_on_owner(
+			                          p->fixture->dispatch, s,
+			                          &p->handles[s.slot]);
+			CHECK(ret == TR_OK);
+		}
 		atomic_fetch_add(&p->opened, 1);
 	} else if (p->server && p->handles[s.slot].dispatch) {
 		CHECK(tr_rpc_record_dispatch_event_on_owner(
@@ -916,6 +957,267 @@ static int pause_driver(void *arg)
 	((struct fixture *)arg)->driving = false;
 	return TR_OK;
 }
+struct admission_setup {
+	struct fixture *fixture;
+	uint64_t due;
+};
+static int prepare_admission(void *arg)
+{
+	struct admission_setup *setup = arg;
+	setup->fixture->driving = false;
+	setup->fixture->open_due = setup->due;
+	return TR_OK;
+}
+struct admission_step {
+	struct fixture *fixture;
+	unsigned slot;
+	const uint8_t *data;
+	size_t size;
+	struct admission_clock clock;
+	struct tr_rpc_dispatch_result result;
+	struct tr_rpc_record_dispatch_stats stats;
+	uint64_t before, after;
+	int status;
+	bool pump;
+};
+static int run_admission_step(void *arg)
+{
+	struct admission_step *step = arg;
+	struct fixture *f = step->fixture;
+	CHECK(!admission_clock);
+	step->clock.reads = 0;
+	step->before = atomic_load(&f->server.budget.current_bytes);
+	/* 只包住实际派发入口；Reactor 定时器和真实业务线程仍使用本机时钟。
+	 * 本组暂停自动派发，因此固定 due 不会被另一个 owner turn 抢先观察。 */
+	admission_clock = &step->clock;
+	step->status =
+	        step->pump
+	                ? tr_rpc_record_dispatch_pump_on_owner(f->dispatch, CAP)
+	                : tr_rpc_record_dispatch_receive_on_owner(
+	                          f->dispatch, f->server.streams[step->slot],
+	                          step->data, step->size);
+	admission_clock = NULL;
+	step->after = atomic_load(&f->server.budget.current_bytes);
+	CHECK(tr_rpc_record_dispatch_result_on_owner(
+	              f->server.handles[step->slot], &step->result) == TR_OK);
+	CHECK(tr_rpc_record_dispatch_get_stats_on_owner(f->dispatch,
+	                                                &step->stats) == TR_OK);
+	return TR_OK;
+}
+static void admission_step(struct admission_step *step)
+{
+	CHECK(tr_reactor_call(step->fixture->server.reactor, run_admission_step,
+	                      step) == TR_OK);
+}
+static int retire_admission(void *arg)
+{
+	struct admission_step *step = arg;
+	struct peer *peer = &step->fixture->server;
+	CHECK(tr_rpc_record_dispatch_retire_on_owner(
+	              peer->handles[step->slot]) == TR_OK);
+	peer->handles[step->slot] = (struct tr_rpc_dispatch_handle){0};
+	step->after = atomic_load(&peer->budget.current_bytes);
+	return TR_OK;
+}
+static unsigned admission_begin(struct fixture *f, uint64_t due)
+{
+	fixture_init(f, 1024 * 1024, 8);
+	struct admission_setup setup = {f, due};
+	CHECK(tr_reactor_call(f->server.reactor, prepare_admission, &setup) ==
+	      TR_OK);
+	return open_call(f, 0);
+}
+static void admission_open(uint8_t out[TR_RPC_RECORD_HEADER_SIZE + 7],
+                           uint64_t call_timeout)
+{
+	const struct tr_rpc_record_header header = {.kind = TR_RPC_RECORD_OPEN,
+	                                            .service_id = 7,
+	                                            .method_id = 9,
+	                                            .metadata_size = 7,
+	                                            .remaining_timeout_ns =
+	                                                    call_timeout};
+	const struct tr_rpc_record_limits limits = {BODY, BODY, 7,
+	                                            TR_RPC_RECORD_ACCEPT_NONE};
+	const uint8_t metadata[] = {1, 3, 0, 'k', 'a', 'b', 'c'};
+	CHECK(tr_rpc_record_encode_header(out, TR_RPC_RECORD_HEADER_SIZE,
+	                                  &header, &limits) == TR_OK);
+	memcpy(out + TR_RPC_RECORD_HEADER_SIZE, metadata, sizeof(metadata));
+}
+static void admission_terminal(struct admission_step *step,
+                               enum tr_rpc_status expected, bool admission)
+{
+	CHECK(step->result.terminal && step->result.status == expected &&
+	      !step->result.final_accepted &&
+	      step->result.admission_failed == admission);
+	CHECK(step->stats.held_events == 0 && !step->stats.submitted_calls &&
+	      !step->stats.reply_calls);
+	CHECK(atomic_load(&step->fixture->server.terminals[step->slot]) == 1);
+	for (unsigned slot = 0; slot < CAP; ++slot)
+		for (unsigned kind = 1; kind <= 5; ++kind)
+			CHECK(!atomic_load(
+			        &step->fixture->business[slot].seen[kind]));
+}
+static void test_open_admission_partial_and_timer(void)
+{
+	const uint64_t due = UINT64_C(10000000000);
+	uint8_t open[TR_RPC_RECORD_HEADER_SIZE + 7];
+	/* 未验证固定头即便声称无限大的 CALL 预算，也不能解除本机准入期限。 */
+	admission_open(open, UINT64_MAX);
+	for (unsigned partial = 0; partial < 2; ++partial) {
+		struct fixture f;
+		unsigned slot = admission_begin(&f, due);
+		struct admission_step step = {.fixture = &f,
+		                              .slot = slot,
+		                              .clock = {.now = due - 100},
+		                              .pump = !partial,
+		                              .data = open,
+		                              .size = 7};
+		admission_step(&step);
+		uint64_t baseline = step.before;
+		uint64_t partial_bytes = 0;
+		CHECK(step.status == TR_OK && !step.result.terminal &&
+		      step.clock.reads == 1 && !step.stats.held_events);
+		if (partial) {
+			step.data = open + 7;
+			step.size = sizeof(open) - 8;
+			step.clock.now = due - 1;
+			admission_step(&step);
+			CHECK(step.status == TR_OK && !step.result.terminal &&
+			      step.clock.reads == 1 && step.after > baseline &&
+			      !step.stats.held_events);
+			partial_bytes = step.after;
+			step.data = open + sizeof(open) - 1;
+			step.size = 1;
+		}
+		step.clock.now = due;
+		admission_step(&step);
+		CHECK(step.status == (partial ? TR_ERR_STATE : TR_OK) &&
+		      step.clock.reads == 1);
+		CHECK(partial ? partial_bytes - step.after == sizeof(open)
+		              : step.after == baseline);
+		admission_terminal(&step, TR_RPC_STATUS_DEADLINE_EXCEEDED,
+		                   true);
+		/* 已知终局不重读故障时钟，也不在重复输入时重选 INTERNAL。 */
+		step.clock.fail_at = 1;
+		admission_step(&step);
+		CHECK(step.clock.reads == 0);
+		admission_terminal(&step, TR_RPC_STATUS_DEADLINE_EXCEEDED,
+		                   true);
+		CHECK(tr_reactor_call(f.server.reactor, retire_admission,
+		                      &step) == TR_OK);
+		CHECK(step.after == baseline);
+		fixture_destroy(&f, false);
+	}
+}
+static void test_open_admission_validation_boundary(void)
+{
+	const uint64_t due = UINT64_C(10000000000);
+	uint8_t open[TR_RPC_RECORD_HEADER_SIZE + 7];
+	admission_open(open, 0);
+	for (unsigned fault = 0; fault < 2; ++fault) {
+		struct fixture f;
+		unsigned slot = admission_begin(&f, due);
+		struct admission_step step = {
+		        .fixture = &f,
+		        .slot = slot,
+		        .data = open,
+		        .size = sizeof(open),
+		        .clock = {.now = due - 1,
+		                  .advanced = due,
+		                  .advance_at = 2,
+		                  .fail_at = fault ? 2 : 0}};
+		admission_step(&step);
+		/* 输入已被真正解码吸收，所以返回 OK；内部回调仍须拒绝准入。
+		 * 仅保留外层 receive 检查会使这个 OPEN 进入业务队列。 */
+		CHECK(step.status == TR_OK && step.clock.reads == 2 &&
+		      step.after > step.before);
+		admission_terminal(&step,
+		                   fault ? TR_RPC_STATUS_INTERNAL
+		                         : TR_RPC_STATUS_DEADLINE_EXCEEDED,
+		                   true);
+		CHECK(tr_reactor_call(f.server.reactor, retire_admission,
+		                      &step) == TR_OK);
+		CHECK(step.after == step.before);
+		fixture_destroy(&f, false);
+	}
+}
+static void test_open_admission_clock_failure(void)
+{
+	uint8_t partial[] = {'T', 'R', 'P', 'C', 2, 0, 1};
+	for (unsigned fault = 0; fault < 6; ++fault) {
+		struct fixture f;
+		unsigned slot = admission_begin(&f, UINT64_C(10000000000));
+		struct admission_step step = {
+		        .fixture = &f,
+		        .slot = slot,
+		        .data = partial,
+		        .size = sizeof(partial),
+		        .pump = fault == 5,
+		        .clock = {.now = 1,
+		                  .fail_at = (fault == 0 || fault == 5) ? 1 : 0,
+		                  .invalid = fault < 5 ? fault : 0}};
+		admission_step(&step);
+		CHECK(step.status == (step.pump ? TR_OK : TR_ERR_STATE) &&
+		      step.clock.reads == 1 && step.after == step.before);
+		admission_terminal(&step, TR_RPC_STATUS_INTERNAL, true);
+		fixture_destroy(&f, false);
+	}
+}
+static void test_open_admission_handoff(void)
+{
+	const uint64_t due = UINT64_C(10000000000);
+	uint8_t open[TR_RPC_RECORD_HEADER_SIZE + 7];
+	const uint8_t message[] = {'T', 'R', 'P', 'C', 2, 0, 3};
+	for (unsigned finite = 0; finite < 2; ++finite) {
+		struct fixture f;
+		unsigned slot = admission_begin(&f, due);
+		admission_open(open, finite ? 1000 : 0);
+		struct admission_step step = {.fixture = &f,
+		                              .slot = slot,
+		                              .data = open,
+		                              .size = sizeof(open) - 1,
+		                              .clock = {.now = due - 800}};
+		admission_step(&step);
+		CHECK(step.status == TR_OK && step.clock.reads == 1 &&
+		      !step.stats.held_events);
+		step.data = open + sizeof(open) - 1;
+		step.size = 1;
+		step.clock.now = due - 100;
+		admission_step(&step);
+		CHECK(step.status == TR_OK && !step.result.terminal &&
+		      step.clock.reads == (finite ? 4U : 2U) &&
+		      step.stats.held_events == 1);
+		step.data = message;
+		step.size = sizeof(message);
+		step.clock.now = due + 899;
+		step.clock.fail_at = finite ? 0 : 1;
+		admission_step(&step);
+		CHECK(step.status == TR_OK && !step.result.terminal &&
+		      step.clock.reads == (finite ? 1U : 0U));
+		if (finite) {
+			step.clock.now = due + 900;
+			admission_step(&step);
+			CHECK(step.status == TR_ERR_STATE &&
+			      step.clock.reads == 1);
+			admission_terminal(
+			        &step, TR_RPC_STATUS_DEADLINE_EXCEEDED, false);
+		}
+		fixture_destroy(&f, false);
+	}
+	/* 保留低层旧入口：0 不启用 OPEN 期限，完整无限 CALL 不读取时钟。 */
+	struct fixture f;
+	unsigned slot = admission_begin(&f, 0);
+	admission_open(open, 0);
+	struct admission_step step = {.fixture = &f,
+	                              .slot = slot,
+	                              .data = open,
+	                              .size = sizeof(open),
+	                              .clock = {.now = due, .fail_at = 1}};
+	admission_step(&step);
+	CHECK(step.status == TR_OK && !step.result.terminal &&
+	      !step.clock.reads && step.stats.held_events == 1);
+	fixture_destroy(&f, false);
+}
 static void test_pending_limit(void)
 {
 	struct fixture f;
@@ -1059,6 +1361,10 @@ static void test_shared_executor_backpressure(void)
 
 int main(void)
 {
+	test_open_admission_partial_and_timer();
+	test_open_admission_validation_boundary();
+	test_open_admission_clock_failure();
+	test_open_admission_handoff();
 	test_shared_executor_backpressure();
 	test_constructor();
 	test_shapes();

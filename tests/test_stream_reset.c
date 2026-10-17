@@ -35,10 +35,11 @@ struct fixture {
 	struct tr_buffer_pool assembly;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
-	unsigned opened, resets, closed, received, down, writable,
+	unsigned opened, resets, closed, errors, received, down, writable,
 	        remote_closed;
 	unsigned reopened_count;
 	int down_status;
+	int error_status;
 	struct tr_stream_handle stream[32];
 	int reset_status[32];
 	struct tr_buffer *held;
@@ -190,6 +191,9 @@ static void on_stream(struct tr_stream_handle stream,
 		++f->closed;
 		reopen = f->reopen_on_closed;
 		f->reopen_on_closed = 0;
+	} else if (event == TR_STREAM_EVENT_ERROR) {
+		++f->errors;
+		f->error_status = status;
 	} else if (event == TR_STREAM_EVENT_WRITABLE) {
 		++f->writable;
 	} else if (event == TR_STREAM_EVENT_REMOTE_CLOSED) {
@@ -297,9 +301,9 @@ static void barrier(struct fixture *f, unsigned lane)
 static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
 {
 	uint8_t bytes[32] = {0};
-	tr_put_le16(bytes, 1);
+	tr_put_le16(bytes, TR_CHANNEL_PROTOCOL_VERSION);
 	if (!ack)
-		tr_put_le16(bytes + 2, 1);
+		tr_put_le16(bytes + 2, TR_CHANNEL_PROTOCOL_VERSION);
 	tr_put_le32(bytes + 4, f->split ? (1U << lane) : 3U);
 	tr_put_le32(bytes + 8, FRAME);
 	tr_put_le32(bytes + 12, WINDOW);
@@ -534,7 +538,7 @@ static int pressure_owner(void *arg)
 	/* 普通控制池、命令环和目标流 DATA 信用均耗尽，两个终止预留
 	 * 仍独立接受。第二条流必须由既有维护定时器公平取得 RESET 槽。 */
 	assert(tr_stream_reset_on_owner(f->stream[0], TR_ERR_CLOSED) == TR_OK);
-	assert(tr_reactor_send_goaway_on_owner(f->connection[0]) == TR_OK);
+	assert(tr_reactor_send_goaway_on_owner(f->connection[0], 0) == TR_OK);
 	assert(tr_stream_reset_on_owner(f->stream[1], TR_ERR_TIMEOUT) == TR_OK);
 	return TR_OK;
 }
@@ -592,16 +596,25 @@ static void test_opening_and_refusal(void)
 	assert(tr_stream_get_flow_state(stream, &flow) == TR_OK);
 	assert(flow.tx_send_limit == 0 &&
 	       tr_channel_active_streams(f.channel) == 1);
-	send_frame(&f, 0, TR_FRAME_STREAM_CLOSE, 0, id, 0, NULL, 0);
-	wait_count(&f, &f.remote_closed, 1);
-	assert(tr_reactor_call(f.reactor, close_owner, &stream) == TR_OK);
+	send_frame(&f, 0, TR_FRAME_GOAWAY, 0, 0, 0, NULL, 0);
+	wait_count(&f, &f.errors, 1);
+	assert(count(&f, &f.errors) == 1 && f.error_status == TR_ERR_CLOSED);
+	assert(count(&f, &f.remote_closed) == 0 && count(&f, &f.closed) == 0);
+	assert(tr_reactor_call(f.reactor, close_owner, &stream) ==
+	       TR_ERR_STALE);
 	h = receive_frame(&f, 0);
-	assert(h.type == TR_FRAME_STREAM_CLOSE && h.stream_id == id);
+	assert(h.type == TR_FRAME_GOAWAY && h.message_id == 0);
 	assert(tr_channel_active_streams(f.channel) == 0);
 	assert(reset(&f, stream, TR_ERR_CLOSED) == TR_ERR_STALE);
+	assert(tr_stream_open(f.channel, TR_LANE_CONTROL, &stream) ==
+	       TR_ERR_CLOSED);
+	destroy_fixture(&f);
+
+	/* GOAWAY 后不重开原连接；独立会话证明准入后仍能选择 RESET。 */
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
 	assert(tr_stream_open(f.channel, TR_LANE_CONTROL, &stream) == TR_OK);
 	h = receive_frame(&f, 0);
-	assert(h.type == TR_FRAME_STREAM_OPEN && h.stream_id > id);
+	assert(h.type == TR_FRAME_STREAM_OPEN && h.stream_id == id);
 	send_frame(&f, 0, TR_FRAME_WINDOW_UPDATE, 0, h.stream_id, WINDOW, NULL,
 	           0);
 	wait_count(&f, &f.opened, 1);
@@ -620,14 +633,24 @@ static void test_opening_local_close(void)
 	struct tr_frame_header h = receive_frame(&f, 0);
 	assert(h.type == TR_FRAME_STREAM_OPEN);
 	uint32_t id = h.stream_id;
+	assert(tr_reactor_call(f.reactor, close_owner, &stream) == TR_AGAIN);
+	assert(reset(&f, stream, TR_ERR_CLOSED) == TR_AGAIN);
+	/* PONG 是真实 RX/FIFO 屏障，前面不能出现未获准流的 CLOSE。 */
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 999, NULL, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 999);
+	send_frame(&f, 0, TR_FRAME_WINDOW_UPDATE, 0, id, WINDOW, NULL, 0);
+	wait_count(&f, &f.opened, 1);
 	assert(tr_reactor_call(f.reactor, close_owner, &stream) == TR_OK);
 	h = receive_frame(&f, 0);
 	assert(h.type == TR_FRAME_STREAM_CLOSE && h.stream_id == id);
-	/* 尚未准入也不能推翻已经接受的本地普通 CLOSE。 */
+	/* 准入后已经接受的本地普通 CLOSE 仍不能改成主动 RESET。 */
 	assert(reset(&f, stream, TR_ERR_CLOSED) == TR_ERR_CLOSED);
 	assert(count(&f, &f.resets) == 0);
 	send_frame(&f, 0, TR_FRAME_STREAM_CLOSE, 0, id, 0, NULL, 0);
 	wait_count(&f, &f.closed, 1);
+	/* 普通 CLOSE 的回调返回后才退役槽；PONG 证明该 RX 回调已退出。 */
+	barrier(&f, 0);
 	assert(tr_channel_active_streams(f.channel) == 0);
 	destroy_fixture(&f);
 }
@@ -789,7 +812,7 @@ static uint64_t repeat_goaway(void *arg, uint64_t now_ns)
 	struct fixture *f = arg;
 	(void)now_ns;
 	assert(atomic_load(&repeat_goaway_phase) == 2);
-	assert(tr_reactor_send_goaway_on_owner(f->connection[0]) == TR_OK);
+	assert(tr_reactor_send_goaway_on_owner(f->connection[0], 0) == TR_OK);
 	atomic_store(&repeat_goaway_phase, 3);
 	return 0;
 }
@@ -798,7 +821,7 @@ static int repeat_goaway_owner(void *arg)
 {
 	struct fixture *f = arg;
 	assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
-	assert(tr_reactor_send_goaway_on_owner(f->connection[0]) == TR_OK);
+	assert(tr_reactor_send_goaway_on_owner(f->connection[0], 0) == TR_OK);
 	for (unsigned i = 1; i < 256; ++i)
 		assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
 	assert(tr_reactor_send_stream_reset_on_owner(f->connection[0], 1,

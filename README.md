@@ -170,8 +170,16 @@ V2 Server 从完整有效 OPEN 中的非零剩余预算建立本机单调期限�
 合作取消业务，丢弃尚未接受的迟到成功。已选本地终局可先通过 RESET 停止网络，
 正在执行的业务退出后才通知服务端终局并回收其持有资源。
 零预算仍表示无限期限。该行为不提供跨主机绝对时钟、线程抢占或错误 FINAL 必达，
-也不包含尚未完整验证的分段 OPEN 等待。实现与验证边界见
+调用预算只在完整 OPEN 验证后开始。实现与验证边界见
 [V2 Server 截止时间记录](docs/reviews/server_record_deadline_20261017.md)。
+
+尚未完成的 RPC OPEN 另有本机准入期限：从传输流 `OPENED` 起固定计时，
+默认 10 秒；分段字节、可写通知或重试都不会续期。到期选择
+`DEADLINE_EXCEEDED` 并直接进入 RESET，取时失败选择 `INTERNAL`。
+该期限不借用尚未验证的 RPC 元数据，也不承诺强制回收不合作对端的网络槽。
+V2 门面排空同时等待业务任务、完成交付、终局回调、网络流和发送资源；
+所有等待共用一个本机单调绝对截止时间。合同及验收见
+[OPEN 准入与分层排空记录](docs/reviews/rpc_record_admission_drain_20261017.md)。
 
 单流终止使用双方各一次的对称 RESET，沿原发送 FIFO 形成双向停止屏障；
 每个连接独立预留 RESET 发送项，普通 DATA/控制池压力不占用该名额。流 ID、流槽和
@@ -339,7 +347,7 @@ xmake run echo_client 127.0.0.1 9000 hello
 
 - 逻辑 `Channel` 位于物理 TCP 连接之上；
 - 每个连接在通道可用前执行对称 `HELLO / HELLO_ACK` 能力握手；
-- 协议版本范围协商（V1 当前实现版本 1）；
+- Channel 握手协议版本 2；与帧封装版本 1、RPC V1/V2 分别管理；
 - 对端接收能力协商，包括帧载荷、逻辑消息大小、特性位和通道映射；
 - 通道状态区分 `DOWN / RECONNECTING / HANDSHAKING / UP`；只有 `UP` 后才允许新 Stream；
 - 协商后的帧上限由 `tr_reactor_sendv_limited()` 强制执行，因此能力不对称的对端实际按较小接收上限发送；
@@ -374,6 +382,9 @@ xmake run echo_client 127.0.0.1 9000 hello
 物理 TCP 连接不会在接管后立即被视为 Channel 可用。双方都会发送固定大小的
 `HELLO`，声明自身接收能力：
 
+当前 Channel 协议版本为 **2**，仅接受该版本，拒绝旧版无受理边界的 GOAWAY。
+它与仍为 1 的帧封装版本、RPC V1/V2 记录版本属于不同层次。
+
 ```text
 TCP 已接管
    |
@@ -401,23 +412,32 @@ tr_channel_begin_drain(channel);
 tr_channel_wait_drained(channel, timeout_ms);
 ```
 
-`begin_drain()` 是幂等操作，会禁用重连、拒绝新的本地 Stream，并在每个就绪通道上
-发送 `GOAWAY`。收到 `GOAWAY` 后禁止向该对端打开新 Stream。
-已有 Stream 可以继续完整运行，直到自然关闭/取消：
+`begin_drain()` 是幂等操作，会禁用重连、冻结新 Stream 准入，并在每条存活且已就绪
+的物理连接上接管 `GOAWAY`；尚在握手中的连接待就绪后推进。帧的 `message_id`
+携带最后受理的对端流 ID，0 表示未受理过流；
+边界在首次排空时冻结。初始 `WINDOW_UPDATE` 必须先于对应的 GOAWAY，接收方据此
+校验边界恰好等于该连接此前确认过的最高本地流 ID，重复 GOAWAY 只能保留原边界。
 
-```text
-RUNNING
-   |
-   | begin_drain + GOAWAY
-   v
-DRAINING  -- 已有 Stream 继续 -->
-   |
-   | active_streams == 0
-   v
-DRAINED
-```
+收到 GOAWAY 后，同一物理连接停止双向新建流并回复自己的 GOAWAY；拆分模式的
+另一条物理连接可继续工作，只有显式 `begin_drain()` 才冻结整个 Channel。
+边界外仍在 `OPENING` 的本地流直接以 `TR_ERR_CLOSED` 失败并退役。
+本地尚未取得初始确认的 Stream 不能发送 CLOSE，`tr_stream_close()` 返回 `TR_AGAIN`；
+调用者必须保留重试责任，直到确认、GOAWAY 拒绝或连接失败。
 
-排空过程中传输层不会强制取消应用工作；RPC/应用截止时间决定未完成操作最多存活多久。
+已经受理的 Stream 可以继续运行，直到自然关闭或取消。排空完成分为以下责任：
+
+| 层次 | 完成条件 |
+| --- | --- |
+| Channel | 已显式开始排空，活跃流为零，存活连接已接管本方 GOAWAY 并收到对方 GOAWAY |
+| Reactor 发送 | 观察前已接受的命令全部处理，普通发送项与 GOAWAY、RESET 预留项全部归还 |
+| V2 RPC 宿主 | 原业务任务已完成交付，终局回调已返回，绑定已退役或停止责任已交给 Channel |
+| V2 Client/Server 门面 | RPC 与 Channel 条件共同满足，使用同一个单调绝对截止时间等待 |
+
+Channel 的 `DRAINED` 同时要求网络和 Reactor 发送条件，单独观察流数量为零不够。
+发送排空证明本机发送资源已归还，成功发送的字节已交给内核，不证明对端应用收到或处理。
+等待超时不会撤销排空，也不延长原期限；`timeout_ms == 0` 只立即检查。
+业务工作仍使用合作取消，停止网络不代表工作线程已退出；不合作的任务或对端会使
+有限等待返回未完成，调用者可随后重试等待或按生命周期规则关闭。
 
 ### 保活/存活检测
 

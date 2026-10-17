@@ -6,6 +6,7 @@
 #include "../src/endian.h"
 #include "../src/crc32c.h"
 #include "../src/transport/group/pipeline_ingress_internal.h"
+#include "../src/transport/channel/channel.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
@@ -559,8 +560,8 @@ static void send_valid_handshake(int fd, int group)
 		struct tr_frame_header header = {0};
 		uint8_t *hello = bytes + TR_WIRE_HEADER_SIZE;
 
-		tr_put_le16(hello, 1U);
-		tr_put_le16(hello + 2U, 1U);
+		tr_put_le16(hello, TR_CHANNEL_PROTOCOL_VERSION);
+		tr_put_le16(hello + 2U, TR_CHANNEL_PROTOCOL_VERSION);
 		tr_put_le32(hello + 4U, 3U);
 		tr_put_le32(hello + 8U, 1024U);
 		tr_put_le32(hello + 12U, 4096U);

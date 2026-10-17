@@ -451,9 +451,15 @@ static int arm_many_on_owner(void *arg)
 {
 	struct fixture *f = arg;
 
-	assert(start(f, 0U, 20U) == TR_OK);
-	assert(start(f, 1U, 40U) == TR_OK);
-	assert(start(f, 2U, 60U) == TR_OK);
+	assert(start(f, 0U, 200U) == TR_OK);
+	assert(start(f, 1U, 400U) == TR_OK);
+	assert(start(f, 2U, 600U) == TR_OK);
+	return TR_OK;
+}
+
+static int fail_rearm_on_owner(void *arg)
+{
+	(void)arg;
 	atomic_store(&fail_arm, 1);
 	return TR_OK;
 }
@@ -462,7 +468,7 @@ static int cancel_root_on_owner(void *arg)
 {
 	struct fixture *f = arg;
 
-	assert(arm_many_on_owner(f) == TR_OK);
+	atomic_store(&fail_arm, 1);
 	assert(tr_rpc_call_cancel(f->calls[0]) == TR_OK);
 	return TR_OK;
 }
@@ -473,8 +479,15 @@ static void test_cleanup_and_callback_progress(int cancel_root)
 	unsigned i;
 
 	fixture_init(&f);
+	assert(tr_reactor_call(f.reactor, arm_many_on_owner, &f) == TR_OK);
+	/* 本场景保护已确认调用的堆删除/回调重排故障。先等三个 OPENED，
+	 * 隔离尚未确认 OPEN 取消所需的新关闭重试；后者的调度失败必须
+	 * 中止连接，已由 final_close_retry 的早取消故障场景单独覆盖。 */
+	wait_count(&f, &f.opened, 3U);
 	assert(tr_reactor_call(f.reactor,
-		cancel_root ? cancel_root_on_owner : arm_many_on_owner, &f) == TR_OK);
+	                       cancel_root ? cancel_root_on_owner
+	                                   : fail_rearm_on_owner,
+	                       &f) == TR_OK);
 	wait_count(&f, &f.terminal, 3U);
 	for (i = 0; i < 3U; ++i)
 		assert(f.status[i] == (cancel_root && i == 0U ?

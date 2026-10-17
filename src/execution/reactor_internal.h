@@ -75,7 +75,19 @@ int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
 /* 仅限所有者的终止控制发送。GOAWAY 使用一个 Connection 内嵌的
  * 仅含头部发送槽位，独立于普通控制发送池或命令容量。
  */
-int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection);
+int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection,
+                                    uint32_t last_accepted_peer_stream_id);
+
+/* 所有者登记一次发送排空观察，不分配发送项或命令。TR_OK 固定当前命令
+ * 前沿；此前命令全部处理、该精确连接的 TX 队列及两个终止预留都为空后，
+ * 由原 event_cb 收到一次 TX_DRAINED。重复待办登记不延后前沿。连接关闭
+ * 则由原 CLOSED/ERROR 完成通知，不再另发 TX_DRAINED。
+ *
+ * 此事件只证明本机发送资源已归还及字节已交给内核，不证明对端已收到。
+ * 使用者须先停止新的业务发送并保持处理器发布，直到事件或显式解绑。
+ * 回调不会在本次登记栈内执行，不建立新线程或轮询定时器。
+ */
+int tr_reactor_notify_tx_drained_on_owner(struct tr_conn_handle connection);
 
 /* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
  * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，

@@ -97,6 +97,8 @@ struct fixture {
 	_Atomic unsigned prefixes, prefixes_released, bodies, bodies_released;
 	_Atomic unsigned held_count;
 	_Atomic unsigned partial_rejections, split_opens;
+	_Atomic unsigned client_resets;
+	_Atomic int client_reset_reason;
 	struct tr_stream_handle held_stream;
 	struct tr_buffer *held;
 	unsigned stream_method[CAP];
@@ -320,6 +322,12 @@ static void observed_event(struct tr_stream_handle stream,
                            enum tr_stream_event event, int status, void *arg)
 {
 	struct channel_observation *o = arg;
+	struct fixture *f = active;
+	if (f && stream.channel == atomic_load(&f->client_channel) &&
+	    event == TR_STREAM_EVENT_RESET) {
+		atomic_store(&f->client_reset_reason, status);
+		atomic_fetch_add(&f->client_resets, 1);
+	}
 	if (o->event)
 		o->event(stream, event, status, o->arg);
 }
@@ -1123,7 +1131,15 @@ static void test_clock_failure(enum clock_domain domain)
 		atomic_store(&f.fail_domain, domain);
 		atomic_store(&f.pause_pump, false);
 	}
-	call_finish(&c, TR_RPC_STATUS_INTERNAL, 0);
+	/* 第一次 receive 取时失败现在属于完整 OPEN 准入故障：直接 RESET，
+	 * 不等待普通 FINAL。其余阶段仍是已准入 CALL 的既有错误 FINAL。 */
+	call_finish_records(&c, TR_RPC_STATUS_INTERNAL, 0,
+	                    domain == CLOCK_RECEIVE ? 0 : 1);
+	if (domain == CLOCK_RECEIVE) {
+		CHECK(atomic_load(&f.client_resets) == 1 &&
+		      atomic_load(&f.client_reset_reason) == TR_ERR_SYS &&
+		      !atomic_load(&f.business[0].finals_sent));
+	}
 	CHECK(atomic_load(&f.clock_failures) == 1);
 	CHECK(atomic_load(&f.fail_domain) == CLOCK_REAL);
 	CHECK(!atomic_load(&f.business[0].messages_sent));

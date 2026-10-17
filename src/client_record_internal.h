@@ -29,6 +29,12 @@ struct tr_client_record_config {
  * 连接组配置和旧方法注册/调用/稳定 RPC 统计，不把 V1 字段解释成 V2 能力。
  * tuning 的 executor_* 与 rpc_message_pool_count 在本入口不使用。
  *
+ * begin_drain 在同一 owner 事务关闭 CALL 与传输新流准入，原有调用继续
+ * 推进，包括尚未获得初始窗口或 RPC OPEN 仍受背压的调用。wait_drained
+ * 先等全部调用、终局回调和绑定静默，再等 Channel 的双 GOAWAY、流与
+ * TX 排空；两个阶段复用同一单调绝对期限，0ms 为立即检查。等待由 owner
+ * 发布状态和条件变量驱动，不停止线程池，也不取消正常的在途业务。
+ *
  * destroy 先停止并 join 父 Reactor，再交付残留调用的 OWNER_STOPPED
  * 终局、解绑宿主和 Channel，最后释放预算依赖；错误保留对象以便重试。
  * 生命周期由外部控制线程串行执行，owner、旧 RPC 或通用任务工作回调

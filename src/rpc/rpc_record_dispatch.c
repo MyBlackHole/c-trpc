@@ -48,11 +48,13 @@ struct tr_dispatch_slot {
 	struct tr_dispatch_job *head, *tail, *submitted, *ready;
 	struct tr_task_handle task;
 	uint64_t deadline;
+	uint64_t open_due;
 	uint32_t response_codec;
 	size_t pending;
 	enum tr_rpc_status status;
 	enum tr_rpc_record_delivery delivery;
 	bool active, terminal, notified, headers_sent, final_accepted;
+	bool admission_failed;
 };
 struct tr_rpc_record_dispatch {
 	struct tr_reactor *reactor;
@@ -276,9 +278,12 @@ static bool tr_dispatch_live(struct tr_dispatch_slot *s)
 	int ret;
 	if (s->terminal)
 		return false;
-	ret = tr_dispatch_deadline_check(s->deadline);
+	ret = tr_dispatch_deadline_check(s->open_due ? s->open_due
+	                                             : s->deadline);
 	if (ret == TR_OK)
 		return true;
+	if (s->open_due)
+		s->admission_failed = true;
 	tr_dispatch_local_abort(s, ret == TR_ERR_TIMEOUT
 	                                   ? TR_RPC_STATUS_DEADLINE_EXCEEDED
 	                                   : TR_RPC_STATUS_INTERNAL);
@@ -353,18 +358,24 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	if (s->terminal || d->stopping ||
 	    (s->ready && s->ready->reply.finished))
 		return;
-	/* 完整 OPEN 已经过绑定校验后才建立一次本机期限。固定头/元数据
-	 * 尚未到齐时没有业务准入；后续事件和任何重试都不能重新计时。 */
-	if (view->header.kind == TR_RPC_RECORD_OPEN &&
-	    view->header.remaining_timeout_ns) {
-		uint64_t now;
-		if (tr_dispatch_now(&now) != TR_OK) {
-			tr_dispatch_local_abort(s, TR_RPC_STATUS_INTERNAL);
+	/* 解码和元数据验证可能跨过外层接收入口的取时边界。完整有效 OPEN
+	 * 再次检查固定准入期限，然后才清除它并建立远端相对 CALL 期限。
+	 * 两种期限不能互相续期；工作任务只继承完整准入后的 CALL 期限。 */
+	if (view->header.kind == TR_RPC_RECORD_OPEN) {
+		if (!tr_dispatch_live(s))
 			return;
+		s->open_due = 0;
+		if (view->header.remaining_timeout_ns) {
+			uint64_t now;
+			if (tr_dispatch_now(&now) != TR_OK) {
+				tr_dispatch_local_abort(s,
+				                        TR_RPC_STATUS_INTERNAL);
+				return;
+			}
+			uint64_t delta = view->header.remaining_timeout_ns;
+			s->deadline = delta > UINT64_MAX - now ? UINT64_MAX
+			                                       : now + delta;
 		}
-		uint64_t delta = view->header.remaining_timeout_ns;
-		s->deadline =
-		        delta > UINT64_MAX - now ? UINT64_MAX : now + delta;
 	}
 	if (!tr_dispatch_live(s))
 		return;
@@ -593,6 +604,12 @@ int tr_rpc_record_dispatch_admit_on_owner(struct tr_rpc_record_dispatch *d,
                                           struct tr_stream_handle stream,
                                           struct tr_rpc_dispatch_handle *out)
 {
+	return tr_rpc_record_dispatch_admit_until_on_owner(d, stream, 0, out);
+}
+int tr_rpc_record_dispatch_admit_until_on_owner(
+        struct tr_rpc_record_dispatch *d, struct tr_stream_handle stream,
+        uint64_t open_due_ns, struct tr_rpc_dispatch_handle *out)
+{
 	struct tr_rpc_route_handle route;
 	int ret = tr_dispatch_owner(d);
 	if (ret != TR_OK)
@@ -608,6 +625,7 @@ int tr_rpc_record_dispatch_admit_on_owner(struct tr_rpc_record_dispatch *d,
 	*s = (struct tr_dispatch_slot){.dispatch = d,
 	                               .route = route,
 	                               .stream = stream,
+	                               .open_due = open_due_ns,
 	                               .active = true};
 	*out = tr_dispatch_handle(s);
 	return TR_OK;
@@ -743,8 +761,8 @@ int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
 		return TR_ERR_INVALID;
 	*out = (struct tr_rpc_dispatch_result){.status = s->status,
 	                                       .terminal = s->terminal,
-	                                       .final_accepted =
-	                                               s->final_accepted};
+	        .final_accepted = s->final_accepted,
+	        .admission_failed = s->admission_failed};
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)

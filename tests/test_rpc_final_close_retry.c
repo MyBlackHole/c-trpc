@@ -19,7 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* 只在服务端传输 STREAM_CLOSE 上注入失败。其最终 RPC STATUS
+/* 只在选定连接的 STREAM_CLOSE 上注入失败。RPC 终局控制帧
  * 以及所有无关控制帧都必须继续正常流动。
  */
 #define CALL_COUNT 3U
@@ -289,6 +289,26 @@ static void start_and_finish(struct tr_rpc_endpoint *endpoint,
 	assert(tr_reactor_call(arg->ctx->reactor, send_and_close, out) == TR_OK);
 }
 
+struct early_cancel_request {
+	struct tr_rpc_endpoint *endpoint;
+	struct client_arg *arg;
+	struct tr_rpc_call_handle *out;
+};
+
+static int start_and_cancel_before_ack(void *arg)
+{
+	struct early_cancel_request *request = arg;
+	struct tr_rpc_call_callbacks callbacks = {0};
+
+	callbacks.on_event = on_client_event;
+	callbacks.arg = request->arg;
+	assert(tr_rpc_call_start(request->endpoint, 1U, 1U, &callbacks,
+	                         request->out) == TR_OK);
+	/* 同一所有者调用内取消，网络 OPEN 的确认尚未得到处理。 */
+	assert(tr_rpc_call_cancel(*request->out) == TR_OK);
+	return TR_OK;
+}
+
 static void run_case(int fault)
 {
 	struct tr_reactor_config reactor_config;
@@ -313,6 +333,7 @@ static void run_case(int fault)
 	uint32_t attempts_after;
 	int client_fd;
 	int server_fd;
+	int split = fault == 4 || fault == 5;
 	unsigned i;
 
 	atomic_store(&scheduling_fault, 0);
@@ -340,7 +361,7 @@ static void run_case(int fault)
 	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
 	client_bulk = client_conn;
 	server_bulk = server_conn;
-	if (fault >= 4) {
+	if (split) {
 		make_nonblocking_pair(&client_fd, &server_fd);
 		assert(tr_reactor_adopt_fd(reactor, client_fd, &client_bulk) == TR_OK);
 		assert(tr_reactor_adopt_fd(reactor, server_fd, &server_bulk) == TR_OK);
@@ -350,8 +371,8 @@ static void run_case(int fault)
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
-	channel_config.mode = fault >= 4 ? TR_CHANNEL_SPLIT_CONNECTIONS :
-		TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.mode = split ? TR_CHANNEL_SPLIT_CONNECTIONS
+	                            : TR_CHANNEL_SHARED_CONNECTION;
 	channel_config.max_streams = 2U;
 	channel_config.initial_window_bytes = 4096U;
 	channel_config.window_update_threshold_bytes = 1024U;
@@ -394,7 +415,7 @@ static void run_case(int fault)
 	method.max_request_bytes = 64U;
 	method.max_response_bytes = 64U;
 	assert(tr_rpc_register_method(client_rpc, &method, NULL, NULL) == TR_OK);
-	if (fault >= 4)
+	if (split)
 		method.lane = method.lane == TR_LANE_CONTROL ? TR_LANE_BULK : TR_LANE_CONTROL;
 	memset(&handlers, 0, sizeof(handlers));
 	handlers.on_open = on_server_open;
@@ -408,7 +429,53 @@ static void run_case(int fault)
 		args[i].index = i;
 	}
 
-	if (fault >= 4) {
+	if (fault >= 6) {
+		struct early_cancel_request request = {client_rpc, &args[0],
+		                                       &calls[0]};
+		struct tr_rpc_call_callbacks callbacks = {0};
+		enum tr_channel_lane_state state;
+
+		atomic_store(&server_connection_slot, client_conn.slot);
+		atomic_store(&fail_server_close, fault == 6 ? 4U : 1U);
+		atomic_store(&scheduling_fault, fault == 6   ? 0
+		                                : fault == 7 ? 1
+		                                             : 3);
+		assert(tr_reactor_call(reactor, start_and_cancel_before_ack,
+		                       &request) == TR_OK);
+		wait_count(&ctx, &ctx.finished, 1U);
+		wait_attempts(fault == 6 ? 5U : 1U);
+		wait_empty(client_channel, server_channel);
+		assert(ctx.opened == 0U && ctx.messages == 0U &&
+		       ctx.server_closed == 0U);
+		assert(ctx.finished_once[0] == 1U);
+		assert(ctx.finished_status[0] == TR_RPC_STATUS_CANCELLED);
+		assert(tr_channel_get_lane_state(client_channel,
+		                                 TR_LANE_CONTROL,
+		                                 &state) == TR_OK);
+		assert(state == (fault == 6 ? TR_CHANNEL_LANE_UP
+		                            : TR_CHANNEL_LANE_DOWN));
+		if (fault != 6) {
+			assert(atomic_load(&scheduling_failures) == 1U);
+			goto cleanup;
+		}
+		/* 取消前未发布
+		 * REQUEST；全部责任回收后，相同容量可再次接纳正常调用。 */
+		atomic_store(&server_connection_slot, server_conn.slot);
+		callbacks.on_event = on_client_event;
+		callbacks.arg = &args[1];
+		assert(tr_rpc_call_start(client_rpc, 1U, 1U, &callbacks,
+		                         &calls[1]) == TR_OK);
+		wait_count(&ctx, &ctx.opened, 1U);
+		assert(tr_reactor_call(reactor, send_and_close, &calls[1]) ==
+		       TR_OK);
+		wait_count(&ctx, &ctx.finished, 2U);
+		wait_count(&ctx, &ctx.server_closed, 1U);
+		wait_empty(client_channel, server_channel);
+		assert(ctx.finished_status[1] == TR_RPC_STATUS_OK);
+		goto cleanup;
+	}
+
+	if (split) {
 		struct tr_rpc_semantic_stats stats;
 		enum tr_channel_lane_state state;
 		unsigned lane;
@@ -537,5 +604,8 @@ int main(void)
 	run_case(3);
 	run_case(4);
 	run_case(5);
+	run_case(6);
+	run_case(7);
+	run_case(8);
 	return 0;
 }

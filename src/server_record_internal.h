@@ -36,6 +36,12 @@ struct tr_server_record_config {
  * destroy 及后续重试须在同一外部控制线程执行，保持执行器最终销毁
  * 失败后的完成所有者身份；不能在同步原语部分销毁后重新转移该责任。
  *
+ * drain 先冻结对端表及新流准入，再等原调用的 worker、完成交付、终局
+ * 通知和绑定静默，最后等待 Channel 的双 GOAWAY、流与 TX 排空。RESET
+ * 已归还网络槽不代表业务已经退出；不合作任务会保留借用存储至等待
+ * 超时。所有分片和等待层共享一个单调绝对期限，0ms 仅立即检查。
+ * owner 主动发布静默状态并唤醒外部条件变量，不由等待线程轮询任务。
+ *
  * 不接受 interceptor 或连接组配置；旧方法注册与稳定 RPC 语义统计返回
  * UNSUPPORTED。内部诊断仅报告真实 peer/Channel/池与共享任务资源，V1
  * RPC 生命周期字段无 V2 含义。tuning 的 executor_* 与

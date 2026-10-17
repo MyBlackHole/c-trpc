@@ -898,8 +898,8 @@ static int tr_rpc_deadline_rearm_locked(struct tr_rpc_endpoint *endpoint)
 	return tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
 }
 
-/* 最终 STATUS 被传输层接受后，STREAM_CLOSE 是在控制发送背压下
- * 仍须履行的协议义务。由现有所有者定时器驱动，
+/* 终局控制帧以及取消后的 STREAM_CLOSE 在控制发送背压下
+ * 仍是必须履行的协议义务。由现有所有者定时器驱动，
  * 而不是由无界工作线程或客户端刷新驱动。
  */
 static int tr_rpc_schedule_final_close_retry_locked(
@@ -931,7 +931,7 @@ static int tr_rpc_schedule_final_close_retry_locked(
 		return TR_OK;
 
 fail:
-	/* STATUS 或一元调用失败已经锁存，调用者无法回滚，也不能依赖后续可写通知
+	/* STATUS、取消或一元调用失败已经锁存，调用者无法回滚，也不能依赖后续可写通知
 	 * 退役流。释放协议锁后同步中止精确通道，通过已有连接错误回调
 	 * 收敛义务。这些回调可能退役 Call；返回错误后不得继续原协议转换。
 	 */
@@ -3797,7 +3797,8 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 			call->pending_control_is_final_status = 0;
 			call->need_local_close = 1;
 		} else {
-			return ret;
+			return tr_rpc_schedule_final_close_retry_locked(
+			        endpoint, call);
 		}
 	}
 
@@ -3809,7 +3810,7 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 			if (call->admission_rejected && call->remote_closed)
 				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
-		} else if (ret == TR_AGAIN && call->final_status_sent) {
+		} else if (ret == TR_AGAIN) {
 			ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 		}
 	}
@@ -3883,7 +3884,9 @@ static int tr_rpc_cancel_on_owner(void *arg)
 
 	call->need_local_close = 1;
 	(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-	tr_rpc_maybe_free_call_locked(endpoint, call);
+	call = tr_rpc_lookup_call_handle_locked(handle);
+	if (call)
+		tr_rpc_maybe_free_call_locked(endpoint, call);
 	pthread_mutex_unlock(&endpoint->lock);
 
 	return TR_OK;
@@ -3954,9 +3957,31 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 
 			if (call->state == TR_RPC_CALL_FREE)
 				continue;
-			if (call->is_unary &&
-			    (call->unary_failure_pending || call->need_local_close) &&
-			    (call->pending_tx || call->need_local_close)) {
+			if ((call->cancelled || call->pending_control) &&
+			    (call->pending_control || call->need_local_close)) {
+				struct tr_rpc_call_handle handle =
+				        tr_rpc_make_call_handle(endpoint, i,
+				                                call);
+
+				ret = tr_rpc_try_cancel_send_locked(endpoint,
+				                                    call);
+				call = tr_rpc_lookup_call_handle_locked(handle);
+				if (!call)
+					continue;
+				if (call->executor_overloaded &&
+				    call->local_closed && call->remote_closed &&
+				    call->state != TR_RPC_CALL_TERMINAL) {
+					call->state = TR_RPC_CALL_TERMINAL;
+					(void)tr_rpc_notify_terminal_locked(
+					        endpoint, i, call,
+					        call->final_status);
+				}
+				tr_rpc_maybe_free_call_locked(endpoint, call);
+			} else if (call->is_unary &&
+			           (call->unary_failure_pending ||
+			            call->need_local_close) &&
+			           (call->pending_tx ||
+			            call->need_local_close)) {
 				struct tr_rpc_call_handle handle =
 					tr_rpc_make_call_handle(endpoint, i, call);
 
@@ -4453,6 +4478,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 	if (wire.type == TR_RPC_WIRE_CANCEL) {
 		int cancel_status = wire.status;
+		struct tr_rpc_call_handle handle;
 
 		if (!call || !call->method || metadata_len != 0 ||
 		    wire.payload_len != 0 ||
@@ -4481,9 +4507,12 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			(void)tr_rpc_notify_terminal_locked(
 				endpoint, slot, call, cancel_status);
 		}
+		handle = tr_rpc_make_call_handle(endpoint, slot, call);
 		call->need_local_close = 1;
 		(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-		tr_rpc_maybe_free_call_locked(endpoint, call);
+		call = tr_rpc_lookup_call_handle_locked(handle);
+		if (call)
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_STREAM_DATA_RELEASE;
 	}
@@ -4524,8 +4553,13 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 	if (event == TR_STREAM_EVENT_OPENED) {
 		if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL) {
+			struct tr_rpc_call_handle handle =
+			        tr_rpc_make_call_handle(endpoint, slot, call);
+
 			(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-			tr_rpc_maybe_free_call_locked(endpoint, call);
+			call = tr_rpc_lookup_call_handle_locked(handle);
+			if (call)
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
@@ -4553,12 +4587,21 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			(void)ret;
 			return;
 		}
-		if (call->final_status_seen || call->final_status_sent) {
+		if ((call->final_status_seen || call->final_status_sent) &&
+		    !call->cancelled && !call->pending_control) {
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
 		if (call->cancelled || call->pending_control) {
+			struct tr_rpc_call_handle handle =
+			        tr_rpc_make_call_handle(endpoint, slot, call);
+
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
+			call = tr_rpc_lookup_call_handle_locked(handle);
+			if (!call) {
+				pthread_mutex_unlock(&endpoint->lock);
+				return;
+			}
 			if (call->executor_overloaded && call->local_closed &&
 			    call->remote_closed &&
 			    call->state != TR_RPC_CALL_TERMINAL) {
@@ -5482,11 +5525,14 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 	}
 	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
 	if (ret != TR_OK) {
-		struct tr_stream_handle stream = call->stream;
+		enum tr_lane lane = (enum tr_lane)method->desc.lane;
 
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
-		(void)tr_stream_close(stream);
+		/* 未确认的 OPEN 无法单向关闭；绑定失败后已没有 Call 承接重试。
+		 */
+		(void)tr_channel_abort_lane_on_owner(
+		        endpoint->channel, lane, ret < 0 ? ret : TR_ERR_STATE);
 		return ret;
 	}
 
@@ -5617,11 +5663,14 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	}
 	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
 	if (ret != TR_OK) {
-		struct tr_stream_handle stream = call->stream;
+		enum tr_lane lane = (enum tr_lane)method->desc.lane;
 
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
-		(void)tr_stream_close(stream);
+		/* 未确认的 OPEN 无法单向关闭；绑定失败后已没有 Call 承接重试。
+		 */
+		(void)tr_channel_abort_lane_on_owner(
+		        endpoint->channel, lane, ret < 0 ? ret : TR_ERR_STATE);
 		return ret;
 	}
 
@@ -6406,20 +6455,28 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 		if (call->state == TR_RPC_CALL_FREE)
 			continue;
 
-		if (call->is_unary &&
-		    (call->pending_tx || call->need_local_close))
-			ret = tr_rpc_try_unary_send_locked(endpoint, call);
-		else if (!call->is_unary && call->pending_control) {
+		if (call->cancelled ||
+		    (!call->is_unary && call->pending_control)) {
+			struct tr_rpc_call_handle handle =
+			        tr_rpc_make_call_handle(endpoint, i, call);
+
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
-			if (call->executor_overloaded && call->local_closed &&
-			    call->remote_closed &&
-			    call->state != TR_RPC_CALL_TERMINAL) {
-				call->state = TR_RPC_CALL_TERMINAL;
-				(void)tr_rpc_notify_terminal_locked(
-					endpoint, i, call, call->final_status);
+			call = tr_rpc_lookup_call_handle_locked(handle);
+			if (call) {
+				if (call->executor_overloaded &&
+				    call->local_closed && call->remote_closed &&
+				    call->state != TR_RPC_CALL_TERMINAL) {
+					call->state = TR_RPC_CALL_TERMINAL;
+					(void)tr_rpc_notify_terminal_locked(
+					        endpoint, i, call,
+					        call->final_status);
+				}
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 			}
-			tr_rpc_maybe_free_call_locked(endpoint, call);
-		} else if (!call->is_unary && call->need_local_close) {
+		} else if (call->is_unary &&
+		           (call->pending_tx || call->need_local_close))
+			ret = tr_rpc_try_unary_send_locked(endpoint, call);
+		else if (!call->is_unary && call->need_local_close) {
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				call->need_local_close = 0;

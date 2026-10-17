@@ -104,6 +104,14 @@ int tr_rpc_record_dispatch_create_on_owner(
 int tr_rpc_record_dispatch_admit_on_owner(
         struct tr_rpc_record_dispatch *dispatch, struct tr_stream_handle stream,
         struct tr_rpc_dispatch_handle *out);
+/* 外层在 transport OPENED 时固定本机绝对准入期限，0 保留低层无限等待。
+ * 该期限覆盖完整有效 RPC OPEN 之前的接收、分段缓存和排队等待；不能从
+ * 尚未验证的远端固定头取值，也不能在后续字节或重试到达时重新设置。
+ * 完整 OPEN 通过再次取时检查后才解除准入期限并建立原 CALL 期限。
+ */
+int tr_rpc_record_dispatch_admit_until_on_owner(
+        struct tr_rpc_record_dispatch *dispatch, struct tr_stream_handle stream,
+        uint64_t open_due_ns, struct tr_rpc_dispatch_handle *out);
 /* 接收入口发现已有期限到期或取时失败时先选择本地终局，返回 STATE；
  * 不再预约分段缓存，也不返回表示已吸收网络字节可以重放的 AGAIN。 */
 int tr_rpc_record_dispatch_receive_on_owner(
@@ -117,6 +125,8 @@ struct tr_rpc_dispatch_result {
 	enum tr_rpc_status status;
 	bool terminal;
 	bool final_accepted;
+	/* 本地 OPEN 准入期限到期或取时失败；宿主应直接 RESET，不等待 FINAL。 */
+	bool admission_failed;
 };
 /* 只读复制已选终局，不暴露可变槽位。terminal 不代表任务已退出；外层可
  * 据此停止网络，但仍须等原 terminal 回调后才退役或释放业务参数。 */

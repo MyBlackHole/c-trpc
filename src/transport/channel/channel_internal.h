@@ -35,7 +35,7 @@ int tr_stream_stop_credit_on_owner(struct tr_stream_handle stream);
  * 已接受普通本地 STREAM_CLOSE 后不能主动 RESET，返回 CLOSED；RPC
  * HALF_CLOSE 不属于传输半关闭。远端 RESET 仍可终止本地已半关闭的流。
  * 尚未收到初始 WINDOW_UPDATE 的 OPENING 返回 AGAIN 且不改变状态，
- * 上层保留责任，等待准入确认或对端的普通 CLOSE 拒绝。
+ * 上层保留责任，等待准入确认或 GOAWAY 受理边界/连接故障使流退役。
  * 不转移应用载荷所有权；未成功取得维护定时器责任时返回错误且不选终局。
  */
 int tr_stream_reset_on_owner(struct tr_stream_handle stream, int status);
