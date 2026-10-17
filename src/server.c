@@ -30,6 +30,7 @@
 #include "server_record_internal.h"
 #include "rpc/rpc_record_client.h"
 #include "rpc/rpc_record_stats.h"
+#include "rpc/rpc_record_producer.h"
 #include "rpc/rpc_v2_internal.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
@@ -63,6 +64,7 @@ struct tr_server_shard {
 	struct tr_reactor_timer_handle handshake_timer;
 	int handshake_timer_registered;
 	struct tr_task_executor *record_tasks;
+	struct tr_rpc_record_producer_domain *record_producers;
 	struct tr_reactor_timer_handle record_cleanup_timer;
 	int record_cleanup_timer_registered;
 	/* 只在 owner 或父线程 join 后修改，排空时与对端事件一起冻结。 */
@@ -1003,6 +1005,14 @@ static int tr_server_record_start_on_owner(void *arg)
 	uint64_t deadline;
 	int ret;
 
+	/* 生产者租约跨本分片的对端退役共享；应用保留已关闭句柄也不能
+	 * 通过重新连接绕过有限配额。域本身与执行器使用同一字节预算。
+	 */
+	ret = tr_rpc_record_producer_domain_create(
+	        tasks.capacity, tr_runtime_shard_memory_budget(shard->runtime),
+	        &shard->record_producers);
+	if (ret != TR_OK)
+		return ret;
 	ret = tr_task_executor_create(
 	        &tasks, tr_runtime_shard_memory_budget(shard->runtime),
 	        &shard->record_tasks);
@@ -1542,6 +1552,9 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
 			        peer->record_rpc, &shard->record_semantic);
+		if (ret == TR_OK)
+			ret = tr_rpc_record_endpoint_bind_producers_on_owner(
+			        peer->record_rpc, shard->record_producers);
 		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_start_on_owner(
 			        peer->record_rpc);
@@ -2999,6 +3012,20 @@ int tr_server_destroy(struct tr_server *server)
 	}
 
 	tr_server_wait_peer_finalizers(server);
+
+	/* 所有 Endpoint 和传输引用已经退役。剩余 producer 只由应用
+	 * 持有，或正在结束锁外复制；先切断其预算依赖再销毁 Runtime。
+	 * 域关闭不等待应用归还句柄，晚 release 只修改独立计费存储。
+	 */
+	if (server->record_mode && server->shards) {
+		for (shard_index = 0; shard_index < server->shard_count;
+		     ++shard_index) {
+			ret = tr_rpc_record_producer_domain_close(
+			        &server->shards[shard_index].record_producers);
+			if (ret != TR_OK)
+				return ret;
+		}
+	}
 
 	/* 分片池是预算使用方；RuntimeShard 拥有预算本身。
 	 * 销毁 Runtime 或预算所有者前，释放每个池的预留额度。

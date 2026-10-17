@@ -14,8 +14,8 @@
 #include <string.h>
 #include <time.h>
 
-#define CALLS 12U
-#define METHODS 10U
+#define CALLS 16U
+#define METHODS 14U
 #define WAIT_SECONDS 15
 
 /* 故障只发生在真实 OPEN 已进入绑定接收后创建工作事件的 calloc。
@@ -68,7 +68,11 @@ enum business_mode {
 	INITIAL_CLOSED,
 	TRAILING_OPEN,
 	DUPLICATE_KEY,
-	BUSINESS_ERROR
+	BUSINESS_ERROR,
+	ASYNC_SYNC_WRITE,
+	ASYNC_ABANDON,
+	ASYNC_WORK_ERROR,
+	ASYNC_SEALED
 };
 struct fixture;
 struct method_context {
@@ -82,6 +86,8 @@ struct call {
 	unsigned index, opened, messages, halves, terminals;
 	unsigned writable, received, client_terminals;
 	unsigned initial, trailing;
+	unsigned producer_ready;
+	struct tr_rpc_v2_producer *producer;
 	enum business_mode mode;
 	enum tr_rpc_status status, client_status;
 	enum tr_rpc_v2_delivery delivery;
@@ -245,6 +251,72 @@ static void set_metadata(struct tr_rpc_v2_reply *reply,
 	memset(&entry, 0, sizeof(entry));
 }
 
+static enum tr_rpc_status async_open(struct call *call,
+                                     struct tr_rpc_v2_reply *reply)
+{
+	struct fixture *f = call->fixture;
+	struct tr_rpc_v2_producer *producer = NULL;
+	const struct tr_rpc_bytes empty = {0};
+	assert(tr_rpc_v2_reply_acquire_producer(reply, NULL) == TR_ERR_INVALID);
+	assert(tr_rpc_v2_reply_acquire_producer(reply, &producer) == TR_OK);
+	assert(producer);
+	assert(tr_rpc_v2_producer_wait_writable(producer, 0) == TR_ERR_STATE);
+	if (call->mode == ASYNC_SEALED) {
+		struct tr_rpc_v2_producer *unchanged = producer;
+		const struct tr_rpc_metadata duplicate[] = {{"same", NULL, 0},
+		                                            {"same", NULL, 0}};
+		assert(tr_rpc_v2_reply_acquire_producer(reply, &unchanged) ==
+		       TR_ERR_STATE);
+		assert(unchanged == producer);
+		assert(tr_rpc_v2_producer_finish(producer, TR_RPC_STATUS_OK,
+		                                 duplicate,
+		                                 2) == TR_ERR_BAD_FLAGS);
+		/* acquire 和 producer 提交失败均不锁存工作错误，也不提前
+		 * 消费结束阶段；创建 work 未返回时能精确区分 sealed/closed。 */
+		assert(tr_rpc_v2_producer_finish(producer, TR_RPC_STATUS_OK,
+		                                 NULL, 0) == TR_OK);
+		assert(tr_rpc_v2_producer_is_closed(producer) == 0);
+		assert(tr_rpc_v2_producer_send(producer, &empty) ==
+		       TR_ERR_STATE);
+		assert(tr_rpc_v2_producer_send_initial_metadata(
+		               producer, NULL, 0) == TR_ERR_STATE);
+		assert(tr_rpc_v2_producer_finish(producer, TR_RPC_STATUS_OK,
+		                                 NULL, 0) == TR_ERR_STATE);
+		struct timespec end = wait_deadline();
+		assert(pthread_mutex_lock(&f->lock) == 0);
+		call->producer = producer;
+		++call->producer_ready;
+		call->entered = true;
+		assert(pthread_cond_broadcast(&f->changed) == 0);
+		while (!call->release)
+			assert(pthread_cond_timedwait(&f->changed, &f->lock,
+			                              &end) == 0);
+		call->exited = true;
+		assert(pthread_mutex_unlock(&f->lock) == 0);
+		return TR_RPC_STATUS_OK;
+	}
+	if (call->mode == ASYNC_SYNC_WRITE) {
+		assert(tr_rpc_v2_reply_append(reply, &empty) == TR_ERR_STATE);
+		assert(tr_rpc_v2_reply_set_metadata(reply,
+		                                    TR_RPC_V2_METADATA_INITIAL,
+		                                    NULL, 0) == TR_ERR_STATE);
+		assert(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) ==
+		       TR_ERR_STATE);
+	} else if (call->mode == ASYNC_WORK_ERROR) {
+		uint8_t source[] = {0, 255, 17, 0};
+		struct tr_rpc_bytes body = {source, sizeof(source)};
+		assert(tr_rpc_v2_producer_send(producer, &body) == TR_OK);
+		memset(source, 0xcc, sizeof(source));
+	}
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	call->producer = producer;
+	++call->producer_ready;
+	assert(pthread_cond_broadcast(&f->changed) == 0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+	return call->mode == ASYNC_WORK_ERROR ? TR_RPC_STATUS_INVALID_ARGUMENT
+	                                      : TR_RPC_STATUS_OK;
+}
+
 static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
                                const struct tr_rpc_v2_request *request,
                                const struct tr_rpc_v2_cancel *cancel,
@@ -280,6 +352,8 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 			/* OPEN
 			 * 普通批不选择终局，已设置的尾部不能悄悄跨事件保存。 */
 			set_metadata(reply, TR_RPC_V2_METADATA_TRAILING);
+		} else if (method->mode >= ASYNC_SYNC_WRITE) {
+			return async_open(call, reply);
 		}
 		return TR_RPC_STATUS_OK;
 	}
@@ -386,6 +460,12 @@ static void server_terminal(struct tr_rpc_v2_call_id id,
 	}
 	assert(call && !call->terminals);
 	assert(!call->entered || call->exited);
+	if (call->producer) {
+		/* 终局已解除库内运行时依赖；这里只借用应用仍持有的引用。 */
+		assert(tr_rpc_v2_producer_is_closed(call->producer) == 1);
+		assert(tr_rpc_v2_producer_wait_writable(call->producer, 0) ==
+		       TR_ERR_STATE);
+	}
 	call->status = status;
 	call->delivery = delivery;
 	++call->terminals;
@@ -585,8 +665,9 @@ static void check_result(struct call *call, enum tr_rpc_status status,
 	assert(call->initial ==
 	       (unsigned)(received || call->mode == INITIAL_CLOSED ||
 	                  call->mode == BUSINESS_ERROR));
-	/* NO_JOB 没有待清理的工作借用；正常连接以空错误 FINAL 交付资源
-	 * 拒绝。仍阻塞的取消调用先结束网络，不交付尾部元数据。 */
+	/* NO_JOB 和 ASYNC_ABANDON 没有待清理的工作借用；Endpoint 已收到
+	 * 完整终局通知，正常连接以空错误 FINAL 交付拒绝或本地取消。
+	 * BLOCKED 的工作仍未退出，网络先由 RESET 结束，不交付尾部。 */
 	if (call->trailing != expected_trailing)
 		fprintf(stderr,
 		        "test_rpc_v2_server: index=%u mode=%u status=%u "
@@ -675,6 +756,65 @@ static void test_public_server(void)
 	}
 	check_server_totals(&f, 10);
 
+	static const struct {
+		enum business_mode mode;
+		enum tr_rpc_status status;
+	} async_cases[] = {
+	        {ASYNC_SYNC_WRITE, TR_RPC_STATUS_FAILED_PRECONDITION},
+	        {ASYNC_ABANDON, TR_RPC_STATUS_CANCELLED},
+	        {ASYNC_WORK_ERROR, TR_RPC_STATUS_INVALID_ARGUMENT},
+	        {ASYNC_SEALED, TR_RPC_STATUS_OK}};
+	for (unsigned i = 0; i < sizeof(async_cases) / sizeof(async_cases[0]);
+	     ++i) {
+		struct call *call = &f.calls[12U + i];
+		call_start(&f, call->index, 0, async_cases[i].mode);
+		if (call->mode == ASYNC_ABANDON || call->mode == ASYNC_SEALED) {
+			wait_counter(&f, &call->producer_ready, 1);
+			struct tr_rpc_v2_producer *producer = call->producer;
+			if (call->mode == ASYNC_ABANDON) {
+				/* 先证明 work/done 已交接，唯一原因才是最后应用
+				 * 引用未 finish 的主动归还。 */
+				assert(tr_rpc_v2_producer_wait_writable(
+				               producer,
+				               WAIT_SECONDS * 1000U) == TR_OK);
+			} else {
+				assert(tr_rpc_v2_producer_is_closed(producer) ==
+				       0);
+				/* 普通线程确认已封闭发送而尚未 CLOSED；这个
+				 * STATE 不来自 work/owner 的禁止等待规则。 */
+				assert(tr_rpc_v2_producer_wait_writable(
+				               producer, 0) == TR_ERR_STATE);
+			}
+			check_server_totals(&f, 11U + i);
+			assert(pthread_mutex_lock(&f.lock) == 0);
+			assert(call->opened == 1 && !call->messages &&
+			       !call->halves && !call->terminals);
+			call->producer = NULL;
+			assert(pthread_mutex_unlock(&f.lock) == 0);
+			tr_rpc_v2_producer_release(producer);
+			if (call->mode == ASYNC_SEALED) {
+				assert(pthread_mutex_lock(&f.lock) == 0);
+				call->release = true;
+				assert(pthread_cond_broadcast(&f.changed) == 0);
+				assert(pthread_mutex_unlock(&f.lock) == 0);
+			}
+		}
+		check_result(call, async_cases[i].status, 0);
+		assert(call->opened == 1 && !call->messages && !call->halves);
+		if (call->producer) {
+			struct tr_rpc_v2_producer *producer = call->producer;
+			assert(tr_rpc_v2_producer_is_closed(producer) == 1);
+			assert(tr_rpc_v2_producer_wait_writable(producer, 0) ==
+			       TR_ERR_CLOSED);
+			assert(pthread_mutex_lock(&f.lock) == 0);
+			call->producer = NULL;
+			assert(pthread_mutex_unlock(&f.lock) == 0);
+			tr_rpc_v2_producer_release(producer);
+		}
+		check_server_totals(&f, 11U + i);
+	}
+	check_server_totals(&f, 14);
+
 	call_start(&f, 5, 0, BLOCKED);
 	send_or_half_close(&f.calls[5], &body);
 	wait_entered(&f.calls[5]);
@@ -683,16 +823,16 @@ static void test_public_server(void)
 	wait_counter(&f, &f.calls[5].client_terminals, 1);
 	/* 取消已经结束 Client，仍借用 request/reply 的 work 继续占据
 	 * 一次服务端 inflight；服务端计数在业务终局实际交付前不能完成。 */
-	check_server_totals(&f, 11);
+	check_server_totals(&f, 15);
 	release_work(&f.calls[5]);
 	check_result(&f.calls[5], TR_RPC_STATUS_CANCELLED, 0);
 	assert(f.calls[5].cancelled && !f.calls[5].halves);
-	check_server_totals(&f, 11);
+	check_server_totals(&f, 15);
 
 	call_start(&f, 6, 1, BLOCKED);
 	send_or_half_close(&f.calls[6], &body);
 	wait_entered(&f.calls[6]);
-	check_server_totals(&f, 12);
+	check_server_totals(&f, 16);
 	assert(tr_server_destroy(f.server) == TR_AGAIN);
 	struct tr_rpc_semantic_stats before, stats;
 	memset(&before, 0xa5, sizeof(before));

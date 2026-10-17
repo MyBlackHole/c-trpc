@@ -48,6 +48,7 @@ struct tr_rpc_record_dispatch {
 	void *arg;
 	struct tr_rpc_record_semantic_counters *semantic;
 	unsigned semantic_binds;
+	struct tr_rpc_record_producer_domain *producers;
 	struct fake_call calls[CAP];
 	uint64_t generation;
 	bool cleanup;
@@ -317,6 +318,18 @@ int tr_rpc_record_dispatch_bind_semantic_stats_on_owner(
 	if (d->semantic)
 		return TR_ERR_STATE;
 	d->semantic = counters;
+	return TR_OK;
+}
+int tr_rpc_record_dispatch_bind_producers_on_owner(
+        struct tr_rpc_record_dispatch *d,
+        struct tr_rpc_record_producer_domain *domain)
+{
+	CHECK(d && owner == &d->f->reactor);
+	if (!domain)
+		return TR_ERR_INVALID;
+	if (d->producers)
+		return TR_ERR_STATE;
+	d->producers = domain;
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_admit_on_owner(struct tr_rpc_record_dispatch *d,

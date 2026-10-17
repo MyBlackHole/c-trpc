@@ -8,6 +8,7 @@
 
 struct tr_rpc_record_dispatch;
 struct tr_rpc_record_reply;
+struct tr_rpc_record_producer_domain;
 
 /* 弱能力，不能自行改写或在派发器销毁后使用。业务工作函数只取得该
  * 调用的数值身份，不取得路由器/Stream/可变调用结构。 */
@@ -27,7 +28,8 @@ struct tr_rpc_dispatch_handle {
  * 每个 OPEN/MESSAGE/HALF_CLOSE 最多执行一次；尚未开始就被取消的业务
  * 回调可以不执行，但已接受的执行器任务仍由完成路径收敛。非OK返回值
  * 丢弃本次生成的正文并尝试发送错误 FINAL；HALF_CLOSE 默认选择最终OK。
- * 不支持从回调返回后继续使用 reply；长期异步生产者另需后续持有接口。
+ * 此库内 work 的 reply 不能在回调返回后使用；公共 v2_work 可从当前
+ * 空批次取得独立生产者，取得后不再自动完成或允许同步 reply 写入。
  *
  * 有限期限从 owner 接收完整有效 OPEN 时起算，包含派发队列、共享执行器
  * 排队、业务执行和回复背压。任务开始前再查不可变期限，已经过期不调用
@@ -101,7 +103,8 @@ typedef void (*tr_rpc_dispatch_terminal_fn)(
  * 可以共享同owner的执行器；不能在notify的执行器锁内调用pump。
  * 方法表复制，参数指针借用；外层转发OPENED/数据/流事件，RX信用仍归外层。
  *
- * terminal 在该调用所有任务完成清理后至多一次。final_accepted 仅说明
+ * terminal 在该调用所有任务完成清理且库内生产者关闭后至多一次；不等
+ * 应用引用或应用自建线程退出。final_accepted 仅说明
  * FINAL已被传输接受，不说明已写入或对端已收到；路由拒绝/本地取消仍可能
  * 是未通知对端的本地终局。回调可做资源清理/快照，不可重入生命周期操作。
  *
@@ -118,6 +121,12 @@ int tr_rpc_record_dispatch_create_on_owner(
         const struct tr_rpc_record_dispatch_config *config,
         tr_rpc_dispatch_terminal_fn terminal, void *arg,
         struct tr_memory_budget *budget, struct tr_rpc_record_dispatch **out);
+/* 首次流准入前一次绑定分片共享的有界生产者域；本派发器只借用，域须
+ * 存活至所有绑定派发器和传输完成关闭。未绑定仍可使用原同步 work，
+ * 但不能从公共 work 取得长期生产者。 */
+int tr_rpc_record_dispatch_bind_producers_on_owner(
+        struct tr_rpc_record_dispatch *dispatch,
+        struct tr_rpc_record_producer_domain *domain);
 /* 默认在派发器内累计完整 OPEN 准入及业务终局。首次准入前可一次绑定
  * 同 owner 的长寿命记账，不清零或搬移历史；停止清理仍写入借用对象。
  * 未完成 OPEN/未知方法/准入期限拒绝不计。已经建立业务终局责任后，
@@ -162,8 +171,9 @@ struct tr_rpc_dispatch_result {
 int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
                                            struct tr_rpc_dispatch_result *out);
 
-/* 每次最多访问 min(limit,capacity) 个调用，轮转推进；每调用最多发一条
- * 记录或投递一次任务。背压只保留结果并重试发送，绝不重跑业务函数。
+/* 每次最多访问 min(limit,capacity) 个调用，轮转推进；每调用最多接受
+ * 一条记录或投递一次任务。异步邮箱背压不阻止后续请求 work 的 FIFO；
+ * 同步批次背压仍保留结果并重试发送，绝不重跑业务函数。
  * pump 的成功不保证所有待办已结束；外层事件循环须保证公平重复推进。
  */
 int tr_rpc_record_dispatch_pump_on_owner(
@@ -173,12 +183,14 @@ int tr_rpc_record_dispatch_abort_on_owner(struct tr_rpc_dispatch_handle handle,
 int tr_rpc_record_dispatch_get_stats_on_owner(
         struct tr_rpc_record_dispatch *dispatch,
         struct tr_rpc_record_dispatch_stats *out);
-/* 先移除外层流路由；仅终局已通知、全部事件已释放后退役，失败保持句柄。 */
+/* 先移除外层流路由；仅终局已通知、全部事件与库内生产者引用已释放后
+ * 退役，失败保持句柄。残留的应用 producer 引用不再依赖派发器。 */
 int tr_rpc_record_dispatch_retire_on_owner(
         struct tr_rpc_dispatch_handle handle);
 
-/* 销毁停止准入并本地取消路由；在途任务存在返回AGAIN，保留派发器和
- * 参数，外层继续交付执行器完成再重试。不停止/销毁借用的执行器，不自动
+/* 销毁停止准入并本地取消路由，关闭已交接的生产者；在途任务或生产者
+ * 发送借用存在返回AGAIN，保留派发器和参数，外层继续完成交付再重试。
+ * 不等待应用归还 producer 引用。不停止/销毁借用的执行器，不自动
  * close/RESET流；TX正文及前缀可能比派发器存活更久，预算域须继续有效。
  */
 int tr_rpc_record_dispatch_destroy_on_owner(struct tr_rpc_record_dispatch **p);

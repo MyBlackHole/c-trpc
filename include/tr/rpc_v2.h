@@ -149,6 +149,7 @@ struct tr_rpc_v2_request {
 
 struct tr_rpc_v2_cancel;
 struct tr_rpc_v2_reply;
+struct tr_rpc_v2_producer;
 
 /* 取消令牌和回复能力仅借用至当前 work 返回，不得保存、跨线程使用，
  * 或在回调外访问。取消查询正常返回 0/1；无效参数/执行域返回负错误码。
@@ -164,7 +165,7 @@ int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel);
  * 错误后返回 OK 不能交付截断的成功批次。网络背压由库保留已生成批次
  * 并继续发送，不重复调用 work。已被接受的前批记录不受后批错误影响。
  * finish 选择当前批次的终局，之后不能 append；非 OK 终局丢弃本批正文。
- * 当前不提供回调外长期持有回复能力或异步生产者。
+ * 需要回调外继续回复时，在当前空批次中取得独立 producer。
  */
 int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
                            const struct tr_rpc_bytes *body);
@@ -202,13 +203,94 @@ int tr_rpc_v2_reply_set_metadata(struct tr_rpc_v2_reply *reply,
 int tr_rpc_v2_reply_finish(struct tr_rpc_v2_reply *reply,
                            enum tr_rpc_status status);
 
-/* 同一调用的事件 FIFO 执行，前一事件生成的回复被接受后才执行下一事件。
+/* 只在当前 work 内、当前批次尚无正文/元数据/finish/错误时取得异步
+ * 生产者；OPEN/MESSAGE/HALF_CLOSE 都可以取得，每个调用最多一次。
+ * 仅 TR_OK 写 out 并授予一个应用拥有的引用。失败不改变当前批次；
+ * 有限共享句柄配额用尽返回 TR_AGAIN，分配/字节预算不足返回 NOMEM。
+ * 已关闭但未 release 的句柄仍占该 Server 分片跨对端共享的有限配额。
+ *
+ * 成功后，当前及后续 work 的同步 reply 写接口返回 STATE 并锁存当前
+ * 批次的 FAILED_PRECONDITION；不能恢复同步模式。HALF_CLOSE 不再默认
+ * 完成回复，必须 producer_finish 或放弃最后一个应用引用。后续请求
+ * 事件仍 FIFO 执行，不等待异步发送背压解除；业务负责跨线程同步。
+ * work 返回非 OK 仍选择错误终局，尚未接受的异步记录可以被丢弃。
+ *
+ * 句柄可在创建它的 work 返回前发布给别的线程，最多暂存一条记录；
+ * 真正发送与首次 wait_writable 成功都等待该 work 返回及完成交接。
+ * 交接前取消仍由原 work 的 cancel 令牌合作观察，暂存可复制成功后被
+ * 丢弃，producer 不承诺在交接前立即报告关闭。work 不得等待依赖此
+ * 句柄被消费、激活或关闭的外部线程。借用的 reply/cancel 仍不能保留。
+ */
+int tr_rpc_v2_reply_acquire_producer(struct tr_rpc_v2_reply *reply,
+                                     struct tr_rpc_v2_producer **out);
+
+/* 每个并发使用者须预先拥有自己的引用，发布前 retain；不能在另一
+ * 线程释放同一引用时尝试借用或复活它。retain 成功增加一个引用，引用
+ * 计数耗尽返回 STATE；已关闭但仍持有的句柄也可 retain/release。
+ * release(NULL) 无操作。最后应用引用在 finish 尚未受理时归还，会
+ * 请求 CANCELLED；finish 受理后归还不取消已选回复。实际终局仍遵循
+ * 取消、期限、工作错误和网络终局的先到者规则。
+ *
+ * terminal 和 Server destroy 不等待应用引用归零。库关闭句柄并解除
+ * 运行时依赖后，应用持有的句柄可长于 Server，仍可查询和释放；其
+ * 外部线程及私有状态由应用管理，terminal 不证明这些线程已经退出。
+ */
+int tr_rpc_v2_producer_retain(struct tr_rpc_v2_producer *producer);
+void tr_rpc_v2_producer_release(struct tr_rpc_v2_producer *producer);
+
+/* 三个提交入口可跨线程调用。每个 producer 只有一个待发送记录槽，
+ * INITIAL、MESSAGE 和 FINAL 共用；正在复制或传输拒绝的记录仍占槽。
+ * 槽忙返回 TR_AGAIN，不保留本次输入、不消耗元数据阶段或结束发送。
+ * 字节预算/分配失败返回 TR_ERR_NOMEM。失败不锁存调用错误，应用可
+ * 修正参数或恢复资源后重试。仅 TR_OK 表示已经复制并接受，源数据可
+ * 立即复用；不表示对端收到。取消/期限/停机可丢弃尚未被传输接受的记录。
+ *
+ * INITIAL 的键名、重复项和 512 字节编码限制与 reply_set_metadata
+ * 相同。首次 INITIAL 或 MESSAGE 受理即关闭初始元数据阶段；之前同步
+ * 批次已发送 INITIAL 时同样不能再发。槽忙时先返回 AGAIN，槽空后
+ * 重复初始阶段返回 STATE。
+ * send 复制一条正文（零字节也是一条），受方法的响应正文上限约束。
+ * finish 原子复制尾部元数据并结束发送入口，尾部只属于这一条 FINAL；
+ * count==0 时 trailing 可为 NULL。槽忙的 finish 仍返回 AGAIN，须重试。
+ * 非 OK finish 不撤销先前已接受的记录。finish 成功后提交返回 STATE；
+ * 调用真正关闭后返回 CLOSED。无效指针/状态返回 INVALID，正文超限
+ * 返回 BAD_LENGTH，元数据验证错误沿用 reply_set_metadata 的错误码。
+ */
+int tr_rpc_v2_producer_send_initial_metadata(
+        struct tr_rpc_v2_producer *producer,
+        const struct tr_rpc_metadata *entries, size_t count);
+int tr_rpc_v2_producer_send(struct tr_rpc_v2_producer *producer,
+                            const struct tr_rpc_bytes *body);
+int tr_rpc_v2_producer_finish(struct tr_rpc_v2_producer *producer,
+                              enum tr_rpc_status status,
+                              const struct tr_rpc_metadata *trailing,
+                              size_t count);
+
+/* 仅普通外部线程可等待，I/O 域、业务 work 和终局回调返回 STATE。
+ * 以 CLOCK_MONOTONIC 作一次有限总等待，0ms 只探测；超时返回 TIMEOUT。
+ * 只有已完成 work 交接且单槽空闲才返回 OK；不预约容量或字节预算，
+ * 竞争发送者仍可让重试 AGAIN，共享预算不足仍可 NOMEM。finish 已受理
+ * 返回 STATE，调用关闭返回 CLOSED。激活、单槽释放和关闭会唤醒等待者；
+ * 正常发送仍由已有有界 I/O 进度泵驱动，不承诺硬实时或信号安全。
+ * 禁止用 pthread_cancel 中断正在调用库接口的线程。
+ */
+int tr_rpc_v2_producer_wait_writable(struct tr_rpc_v2_producer *producer,
+                                     uint32_t timeout_ms);
+/* 返回 0/1；NULL 返回 INVALID。只报告库已关闭生产入口，不等同于业务
+ * terminal 已交付或对端已经收到 FINAL。finish 受理本身尚不是关闭。
+ */
+int tr_rpc_v2_producer_is_closed(struct tr_rpc_v2_producer *producer);
+
+/* 同一调用的事件 FIFO 执行，同步模式下前一事件生成的回复被接受后
+ * 才执行下一事件；异步模式的单槽背压不阻塞后续请求事件。
  * 不同调用可并发使用同一 arg，业务负责同步。OPEN/MESSAGE/HALF_CLOSE
  * 各事件最多执行一次；已取消但尚未运行的事件可被跳过。
  * 工作和终局回调中不能同步调用 Client V2 的 start/send/half_close/cancel
  * 或阻塞生命周期接口；跨 I/O 执行域的同步调用会返回 TR_ERR_STATE。
  * 非 OK 返回丢弃当前事件的全部正文，并选择错误终局；HALF_CLOSE 在未
- * 显式 finish 时默认选择 OK，仍须满足方法的 ONE/MANY 基数合同。
+ * 显式 finish 且未取得 producer 时默认选择 OK，仍须满足方法的 ONE/MANY
+ * 基数合同。异步 FINAL 可先于仍在执行的后续 work 被接受并请求取消，
+ * 终局通知仍等待该 work 返回，已经选定的终局不被迟到结果改写。
  */
 typedef enum tr_rpc_status (*tr_rpc_v2_work_fn)(
         struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
@@ -218,7 +300,8 @@ typedef enum tr_rpc_status (*tr_rpc_v2_work_fn)(
 /* 完整合法 OPEN 匹配方法并通过期限准入后，承担一次 terminal 责任，
  * 即使 OPEN work 尚未开始就因资源不足/取消终止，也会交付。未知方法、
  * 无效或不完整 OPEN 不进入业务。终局等待所有工作返回及完成交付，不能
- * 提前释放业务状态；正常或停机终局回调中均禁止阻塞生命周期操作。
+ * 提前释放业务状态；应用持有 producer 的外部线程需自行同步退出。
+ * 正常或停机终局回调中均禁止阻塞生命周期操作。
  */
 typedef void (*tr_rpc_v2_server_terminal_fn)(struct tr_rpc_v2_call_id call,
                                              enum tr_rpc_status status,

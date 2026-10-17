@@ -120,6 +120,7 @@ target("trcore")
         "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc_record_router.c",
         "src/rpc/rpc_record_dispatch.c",
+        "src/rpc/rpc_record_producer.c",
         "src/rpc/rpc_record_endpoint.c",
         "src/rpc/rpc_record_client.c",
         "src/rpc/rpc_v2.c",

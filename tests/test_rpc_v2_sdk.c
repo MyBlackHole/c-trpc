@@ -19,7 +19,8 @@
 		}                                                              \
 	} while (0)
 
-#define METHOD_COUNT 5U
+#define METHOD_COUNT 6U
+#define ASYNC_METHOD 5U
 #define MAX_BODY 4096U
 #define MAX_MESSAGES 3U
 #define WAIT_MS 15000U
@@ -27,6 +28,21 @@
 struct fixture;
 
 enum response_metadata { METADATA_NONE, METADATA_VALUES, METADATA_EMPTY };
+
+enum async_mode { ASYNC_COMPLETE, ASYNC_CANCEL, ASYNC_DEADLINE, ASYNC_DESTROY };
+
+struct async_state {
+	struct fixture *fixture;
+	struct tr_rpc_v2_producer *producer;
+	enum async_mode mode;
+	unsigned acquired;
+	unsigned work_release;
+	unsigned cancelled;
+	unsigned staged;
+	unsigned produced;
+	unsigned finish_release;
+	unsigned thread_done;
+};
 
 struct observed_client {
 	struct tr_client *handle;
@@ -51,7 +67,9 @@ struct method_state {
 	int expect_metadata;
 	enum response_metadata response_metadata;
 	enum tr_rpc_status status;
+	enum tr_rpc_v2_delivery delivery;
 	struct tr_rpc_v2_call_id id;
+	struct async_state *async;
 };
 
 struct fixture {
@@ -61,6 +79,7 @@ struct fixture {
 	uint16_t port;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
+	int server_destroying;
 	struct method_state methods[METHOD_COUNT];
 };
 
@@ -192,21 +211,24 @@ static void check_stats_rejected(struct fixture *f, int foreign_client)
 	struct tr_rpc_semantic_stats before, stats;
 	memset(&before, 0xa5, sizeof(before));
 	memcpy(&stats, &before, sizeof(stats));
-	CHECK(tr_server_get_rpc_semantic_stats(f->server, &stats) ==
-	      TR_ERR_STATE);
-	CHECK(memcmp(&stats, &before, sizeof(stats)) == 0);
+	lock(f);
+	/* 外部销毁 Server 前撤销 Client 回调的跨实例借用。 */
+	if (!f->server_destroying) {
+		CHECK(tr_server_get_rpc_semantic_stats(f->server, &stats) ==
+		      TR_ERR_STATE);
+		CHECK(memcmp(&stats, &before, sizeof(stats)) == 0);
+	}
 	if (foreign_client) {
 		/* 销毁前先在相同锁下撤销借用，避免跨实例检查碰到已释放 Client。
 		 */
-		lock(f);
 		if (!f->client.destroying && f->client.handle) {
 			CHECK(tr_client_get_rpc_semantic_stats(f->client.handle,
 			                                       &stats) ==
 			      TR_ERR_STATE);
 			CHECK(memcmp(&stats, &before, sizeof(stats)) == 0);
 		}
-		unlock(f);
 	}
+	unlock(f);
 }
 
 static uint8_t pattern(unsigned tag, unsigned offset)
@@ -386,6 +408,38 @@ static void cooperate(struct method_state *m,
 	unlock(f);
 }
 
+static void acquire_async(struct async_state *a,
+                          const struct tr_rpc_v2_cancel *cancel,
+                          struct tr_rpc_v2_reply *reply)
+{
+	struct fixture *f = a->fixture;
+	struct tr_rpc_v2_producer *producer = NULL;
+	struct timespec limit = deadline_after(WAIT_MS);
+	CHECK(tr_rpc_v2_reply_acquire_producer(reply, &producer) == TR_OK);
+	CHECK(producer);
+	CHECK(tr_rpc_v2_producer_wait_writable(producer, 0) == TR_ERR_STATE);
+	/* 发布前各取得一份应用引用：生产线程与控制线程独立归还。 */
+	CHECK(tr_rpc_v2_producer_retain(producer) == TR_OK);
+	lock(f);
+	CHECK(!a->acquired);
+	a->producer = producer;
+	++a->acquired;
+	publish(f);
+	while (!a->work_release) {
+		struct timespec due = deadline_after(10);
+		int requested = tr_rpc_v2_cancel_requested(cancel);
+		CHECK(requested == 0 || requested == 1);
+		if (requested && !a->cancelled) {
+			++a->cancelled;
+			publish(f);
+		}
+		CHECK(before(&due, &limit));
+		int ret = pthread_cond_timedwait(&f->cond, &f->lock, &due);
+		CHECK(ret == 0 || ret == ETIMEDOUT);
+	}
+	unlock(f);
+}
+
 static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
                                       const struct tr_rpc_v2_request *request,
                                       const struct tr_rpc_v2_cancel *cancel,
@@ -396,6 +450,7 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	unsigned sum = 0;
 	unsigned requests;
 	enum response_metadata metadata;
+	struct async_state *async;
 	CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
 	check_stats_rejected(f, 1);
@@ -425,10 +480,15 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	}
 	requests = m->requests;
 	metadata = m->response_metadata;
+	async = m->async;
 	publish(f);
 	unlock(f);
 
-	if (request->kind == TR_RPC_V2_REQUEST_OPEN && m->index == 1U) {
+	if (async) {
+		if (request->kind == TR_RPC_V2_REQUEST_OPEN)
+			acquire_async(async, cancel, reply);
+		/* 取得 producer 后继续消费请求，HALF_CLOSE 不再同步完成。 */
+	} else if (request->kind == TR_RPC_V2_REQUEST_OPEN && m->index == 1U) {
 		set_response_metadata(reply, TR_RPC_V2_METADATA_INITIAL,
 		                      metadata);
 	} else if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
@@ -488,6 +548,7 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 	CHECK(memcmp(&m->id, &call, sizeof(call)) == 0);
 	++m->terminals;
 	m->status = status;
+	m->delivery = delivery;
 	publish(f);
 	unlock(f);
 }
@@ -583,6 +644,9 @@ static void destroy_server(struct fixture *f)
 {
 	struct timespec limit = deadline_after(WAIT_MS);
 	int ret;
+	lock(f);
+	f->server_destroying = 1;
+	unlock(f);
 	while ((ret = tr_server_destroy(f->server)) == TR_AGAIN) {
 		struct timespec now = deadline_after(0);
 		struct timespec pause;
@@ -610,7 +674,8 @@ static void fixture_destroy(struct fixture *f)
 {
 	if (f->client.handle)
 		destroy_client(f, &f->client);
-	destroy_server(f);
+	if (f->server)
+		destroy_server(f);
 	CHECK(pthread_cond_destroy(&f->cond) == 0);
 	CHECK(pthread_mutex_destroy(&f->lock) == 0);
 }
@@ -621,8 +686,12 @@ static void callback_context_checks(struct call_state *c)
 	CHECK(tr_client_wait_ready(c->client->handle, 0) == TR_ERR_STATE);
 	CHECK(tr_client_wait_drained(c->client->handle, 0) == TR_ERR_STATE);
 	CHECK(tr_client_destroy(c->client->handle) == TR_ERR_STATE);
-	CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
-	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
+	lock(f);
+	if (!f->server_destroying) {
+		CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
+		CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
+	}
+	unlock(f);
 	check_stats_rejected(f, 0);
 }
 
@@ -1089,6 +1158,267 @@ static void test_stats_peer_retirement(void)
 	puts("sdk-v2: case=stats-peer-retirement result=pass");
 }
 
+static int producer_metadata(struct tr_rpc_v2_producer *producer,
+                             enum tr_rpc_v2_metadata_phase phase)
+{
+	char key[] = "bin";
+	char empty_key[] = "empty";
+	uint8_t value[] = {0, 255, (uint8_t)phase, 0};
+	struct tr_rpc_metadata entries[2];
+	entries[0].key = key;
+	entries[0].value = value;
+	entries[0].value_len = sizeof(value);
+	entries[1].key = empty_key;
+	entries[1].value = NULL;
+	entries[1].value_len = 0;
+	int ret = phase == TR_RPC_V2_METADATA_INITIAL
+	                  ? tr_rpc_v2_producer_send_initial_metadata(producer,
+	                                                             entries, 2)
+	                  : tr_rpc_v2_producer_finish(
+	                            producer, TR_RPC_STATUS_OK, entries, 2);
+	/* 成功已复制，AGAIN 没有保存；两种返回都立即复用所有输入。 */
+	memset(key, 'q', sizeof(key));
+	memset(empty_key, 'q', sizeof(empty_key));
+	memset(value, 0x55, sizeof(value));
+	memset(entries, 0, sizeof(entries));
+	return ret;
+}
+
+static int producer_wait_until(struct tr_rpc_v2_producer *producer,
+                               const struct timespec *limit)
+{
+	struct timespec now = deadline_after(0);
+	CHECK(before(&now, limit));
+	int64_t ns = (int64_t)(limit->tv_sec - now.tv_sec) * 1000000000LL +
+	             limit->tv_nsec - now.tv_nsec;
+	uint32_t ms = (uint32_t)((ns + 999999LL) / 1000000LL);
+	CHECK(ms > 0U && ms <= WAIT_MS);
+	return tr_rpc_v2_producer_wait_writable(producer, ms);
+}
+
+static void producer_send_copy(struct tr_rpc_v2_producer *producer,
+                               unsigned size, unsigned tag)
+{
+	struct timespec limit = deadline_after(WAIT_MS);
+	uint8_t storage[MAX_BODY];
+	struct tr_rpc_bytes body;
+	CHECK(size <= sizeof(storage));
+	for (;;) {
+		fill(storage, size, tag);
+		body.data = size ? storage : NULL;
+		body.len = size;
+		int ret = tr_rpc_v2_producer_send(producer, &body);
+		memset(storage, 0xe7, sizeof(storage));
+		if (ret == TR_OK)
+			return;
+		CHECK(ret == TR_AGAIN);
+		CHECK(producer_wait_until(producer, &limit) == TR_OK);
+	}
+}
+
+static void producer_finish_copy(struct tr_rpc_v2_producer *producer)
+{
+	struct timespec limit = deadline_after(WAIT_MS);
+	for (;;) {
+		int ret = producer_metadata(producer,
+		                            TR_RPC_V2_METADATA_TRAILING);
+		if (ret == TR_OK)
+			return;
+		CHECK(ret == TR_AGAIN);
+		CHECK(producer_wait_until(producer, &limit) == TR_OK);
+	}
+}
+
+static void check_producer_closed(struct tr_rpc_v2_producer *producer)
+{
+	struct tr_rpc_bytes empty;
+	empty.data = NULL;
+	empty.len = 0;
+	CHECK(tr_rpc_v2_producer_is_closed(producer) == 1);
+	CHECK(tr_rpc_v2_producer_wait_writable(producer, 0) == TR_ERR_CLOSED);
+	CHECK(tr_rpc_v2_producer_send(producer, &empty) == TR_ERR_CLOSED);
+	CHECK(tr_rpc_v2_producer_send_initial_metadata(producer, NULL, 0) ==
+	      TR_ERR_CLOSED);
+	CHECK(tr_rpc_v2_producer_finish(producer, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_ERR_CLOSED);
+}
+
+static void *produce_async(void *arg)
+{
+	struct async_state *a = (struct async_state *)arg;
+	struct fixture *f = a->fixture;
+	uint8_t rejected[MAX_BODY];
+	struct tr_rpc_bytes body;
+	wait_count(f, &a->acquired, 1);
+	struct tr_rpc_v2_producer *producer = a->producer;
+	CHECK(tr_rpc_v2_producer_is_closed(producer) == 0);
+	CHECK(producer_metadata(producer, TR_RPC_V2_METADATA_INITIAL) == TR_OK);
+	fill(rejected, sizeof(rejected), 211);
+	body.data = rejected;
+	body.len = sizeof(rejected);
+	/* 创建 work 仍由应用门闩阻塞，唯一槽不可能被 owner 提前消费。 */
+	CHECK(tr_rpc_v2_producer_send(producer, &body) == TR_AGAIN);
+	memset(rejected, 0x33, sizeof(rejected));
+	CHECK(producer_metadata(producer, TR_RPC_V2_METADATA_TRAILING) ==
+	      TR_AGAIN);
+	CHECK(tr_rpc_v2_producer_wait_writable(producer, 0) == TR_ERR_TIMEOUT);
+	CHECK(tr_rpc_v2_producer_wait_writable(producer, 1) == TR_ERR_TIMEOUT);
+	lock(f);
+	++a->staged;
+	publish(f);
+	unlock(f);
+	if (a->mode == ASYNC_COMPLETE) {
+		wait_count(f, &a->work_release, 1);
+		/* 这个成功只会出现在创建 work 返回且 done 交接之后；不用
+		 * 回调尾部标志或 sleep 冒充已经跨出借用期的证据。 */
+		CHECK(tr_rpc_v2_producer_wait_writable(producer, WAIT_MS) ==
+		      TR_OK);
+		producer_send_copy(producer, MAX_BODY, 137);
+		producer_send_copy(producer, 0, 0);
+		lock(f);
+		++a->produced;
+		publish(f);
+		unlock(f);
+		wait_count(f, &a->finish_release, 1);
+		producer_finish_copy(producer);
+	} else {
+		/* 取消发生在实际阻塞等待之前或之后，都必须观察同一关闭
+		 * 谓词；这里没有依赖一次可丢失的应用通知。 */
+		CHECK(tr_rpc_v2_producer_wait_writable(producer, WAIT_MS) ==
+		      TR_ERR_CLOSED);
+	}
+	tr_rpc_v2_producer_release(producer);
+	lock(f);
+	++a->thread_done;
+	publish(f);
+	unlock(f);
+	return NULL;
+}
+
+static void test_async_case(enum async_mode mode)
+{
+	struct fixture f;
+	struct async_state a;
+	struct call_state call;
+	struct message_spec request;
+	struct tr_rpc_call_options options;
+	pthread_t thread;
+	fixture_create(&f);
+	memset(&a, 0, sizeof(a));
+	a.fixture = &f;
+	a.mode = mode;
+	lock(&f);
+	f.methods[ASYNC_METHOD].async = &a;
+	unlock(&f);
+	request.size = 17;
+	request.tag = 121;
+	call_init(&call, &f, ASYNC_METHOD, &request, 1);
+	if (mode == ASYNC_COMPLETE) {
+		expect(&call, MAX_BODY, 137);
+		expect(&call, 0, 0);
+	}
+	memset(&options, 0, sizeof(options));
+	options.timeout_ms = mode == ASYNC_DEADLINE ? 2000U : 0U;
+	CHECK(pthread_create(&thread, NULL, produce_async, &a) == 0);
+	CHECK(call_start(&call, &options) == TR_OK);
+	wait_count(&f, &a.staged, 1);
+	check_client_totals(&f.client, 1, 0, TR_RPC_STATUS_OK, 0);
+	check_server_totals(&f, 1, 0, TR_RPC_STATUS_OK, 0);
+	lock(&f);
+	CHECK(f.methods[ASYNC_METHOD].running == 1U);
+	CHECK(!call.initial && !call.received && !call.trailing &&
+	      !call.terminals);
+	unlock(&f);
+	if (mode == ASYNC_COMPLETE) {
+		lock(&f);
+		a.work_release = 1;
+		publish(&f);
+		unlock(&f);
+		wait_count(&f, &a.produced, 1);
+		wait_count(&f, &call.received, 2);
+		wait_count(&f, &f.methods[ASYNC_METHOD].half_closes, 1);
+		/* HALF_CLOSE 已继续执行，但活跃 producer 尚未选择终局。 */
+		check_client_totals(&f.client, 1, 0, TR_RPC_STATUS_OK, 0);
+		check_server_totals(&f, 1, 0, TR_RPC_STATUS_OK, 0);
+		CHECK(tr_server_drain(f.server, 0) == TR_AGAIN);
+		lock(&f);
+		a.finish_release = 1;
+		publish(&f);
+		unlock(&f);
+		call_done(&call, TR_RPC_STATUS_OK);
+		check_client_totals(&f.client, 1, 1, TR_RPC_STATUS_OK, 0);
+		check_server_totals(&f, 1, 1, TR_RPC_STATUS_OK, 0);
+		drain(&f);
+	} else {
+		enum tr_rpc_status expected =
+		        mode == ASYNC_DEADLINE ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+		                               : TR_RPC_STATUS_CANCELLED;
+		if (mode == ASYNC_DESTROY) {
+			lock(&f);
+			f.server_destroying = 1;
+			unlock(&f);
+			CHECK(tr_server_destroy(f.server) == TR_AGAIN);
+		} else {
+			if (mode == ASYNC_CANCEL)
+				CHECK(tr_rpc_v2_call_cancel(call.handle) ==
+				      TR_OK);
+			wait_count(&f, &call.terminals, 1);
+			CHECK(call.status == expected);
+			check_client_totals(&f.client, 1, 1, expected, 1);
+			check_server_totals(&f, 1, 0, TR_RPC_STATUS_OK, 0);
+			CHECK(tr_server_drain(f.server, 0) == TR_AGAIN);
+		}
+		/* STAGED 期间仅借用的原 work 令牌承诺及时观察取消；
+		 * Client terminal 不是 producer 已关闭的屏障。 */
+		wait_count(&f, &a.cancelled, 1);
+		lock(&f);
+		CHECK(!f.methods[ASYNC_METHOD].terminals);
+		a.work_release = 1;
+		publish(&f);
+		unlock(&f);
+		if (mode == ASYNC_DESTROY) {
+			destroy_server(&f);
+			wait_count(&f, &call.terminals, 1);
+			CHECK(f.methods[ASYNC_METHOD].terminals == 1U);
+			CHECK(f.methods[ASYNC_METHOD].status ==
+			      TR_RPC_STATUS_CANCELLED);
+			CHECK(f.methods[ASYNC_METHOD].delivery ==
+			      TR_RPC_V2_DELIVERY_SHUTDOWN);
+			CHECK(call.status == TR_RPC_STATUS_UNAVAILABLE);
+			CHECK(call.delivery == TR_RPC_V2_DELIVERY_LIVE);
+			check_client_totals(&f.client, 1, 1,
+			                    TR_RPC_STATUS_UNAVAILABLE, 1);
+		} else {
+			call_done(&call, expected);
+			CHECK(f.methods[ASYNC_METHOD].status == expected);
+			check_server_totals(&f, 1, 1, expected, 1);
+			drain(&f);
+		}
+		CHECK(call.initial == 0U && call.trailing == 0U &&
+		      call.received == 0U);
+	}
+	/* terminal/排空不等这个控制线程的引用，更不负责 join 应用线程。 */
+	wait_count(&f, &a.thread_done, 1);
+	CHECK(pthread_join(thread, NULL) == 0);
+	struct tr_rpc_v2_producer *retained = a.producer;
+	check_producer_closed(retained);
+	CHECK(tr_rpc_v2_producer_retain(retained) == TR_OK);
+	tr_rpc_v2_producer_release(retained);
+	fixture_destroy(&f);
+	/* 最后一份应用引用仍有效，已成功销毁 Server 不能留下运行时借用。 */
+	check_producer_closed(retained);
+	tr_rpc_v2_producer_release(retained);
+}
+
+static void test_async_producer(void)
+{
+	test_async_case(ASYNC_COMPLETE);
+	test_async_case(ASYNC_CANCEL);
+	test_async_case(ASYNC_DEADLINE);
+	test_async_case(ASYNC_DESTROY);
+	puts("sdk-v2: case=async-producer-copy-stop result=pass");
+}
+
 int main(void)
 {
 	test_shapes_and_copy();
@@ -1096,5 +1426,6 @@ int main(void)
 	test_cancel_or_deadline(1);
 	test_destroy_live_terminal();
 	test_stats_peer_retirement();
+	test_async_producer();
 	return 0;
 }
