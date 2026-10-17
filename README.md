@@ -145,6 +145,14 @@ RPC 编码消息所有权使用有界内部槽位池，其缓冲区按需增长�
 `tr_client_call_start*()` 在不暴露 Reactor/Connection 内部结构的前提下提供流式 Call。
 返回的 Call 句柄继续使用现有 `tr_rpc_call_*()` API 完成调用级发送/取消/元数据操作。
 
+库内显式迁移入口 [`tr_server_create_record()`](src/server_record_internal.h)
+已将 V2 记录宿主接入同一 `tr_server` 的监听、接纳、排空与销毁。它冻结业务方法表，
+按全 Server 总额分摊硬预算、线程数和任务容量，每分片由所有对端共享一个通用执行器。
+该入口不安装为 SDK；默认 Server 和公开 Client 仍使用 V1，旧 Call 句柄尚未迁移。
+V2 的回复能力只在当前工作回调内有效，旧方法注册及稳定 RPC 语义统计明确返回
+不支持。大小/窗口限制、失败回滚与实际测试范围见
+[V2 Server 入口集成记录](docs/reviews/server_record_integration_20261017.md)。
+
 稳定 SDK 还在 `tr/transport.h` 中包含第一版通用连接组传输能力。
 该能力按需启用，默认关闭：
 
