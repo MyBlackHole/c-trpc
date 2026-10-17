@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "tr/client.h"
 
 #include <assert.h>
@@ -58,6 +59,11 @@ struct tr_client {
 	int record_connect_failed;
 	_Atomic int record_stopping;
 	int destroy_active;
+	/* owner 只发布谓词；外部等待不读取调用槽或回调中的可变字段。 */
+	pthread_mutex_t record_drain_lock;
+	pthread_cond_t record_drain_cond;
+	int record_drain_lock_ready, record_drain_cond_ready;
+	int record_draining, record_drained;
 
 	struct tr_client_group *connection_group;
 
@@ -94,6 +100,35 @@ static int tr_client_create_rollback(
 static struct tr_reactor *tr_client_reactor(struct tr_client *client)
 {
 	return client ? tr_runtime_shard_reactor(client->shard) : NULL;
+}
+
+static int tr_client_record_wait_init(struct tr_client *client)
+{
+	pthread_condattr_t attr;
+	int ret;
+	if (pthread_mutex_init(&client->record_drain_lock, NULL) != 0)
+		return TR_ERR_SYS;
+	client->record_drain_lock_ready = 1;
+	if (pthread_condattr_init(&attr) != 0)
+		return TR_ERR_SYS;
+	ret = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+	if (ret == 0)
+		ret = pthread_cond_init(&client->record_drain_cond, &attr);
+	if (ret == 0)
+		client->record_drain_cond_ready = 1;
+	int cleanup_ret = pthread_condattr_destroy(&attr);
+	return ret == 0 && cleanup_ret == 0 ? TR_OK : TR_ERR_SYS;
+}
+
+static void tr_client_record_progress(bool drained, void *arg)
+{
+	struct tr_client *client = arg;
+	pthread_mutex_lock(&client->record_drain_lock);
+	if (client->record_drained != (int)drained) {
+		client->record_drained = drained;
+		pthread_cond_broadcast(&client->record_drain_cond);
+	}
+	pthread_mutex_unlock(&client->record_drain_lock);
 }
 
 static void tr_client_normalize_config(struct tr_client_config *config)
@@ -310,6 +345,9 @@ tr_client_create_internal(const struct tr_client_config *config,
 	if (record) {
 		client->record_mode = 1;
 		client->record_config = *record;
+		ret = tr_client_record_wait_init(client);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
 	}
 
 	if (!record) {
@@ -546,6 +584,10 @@ static int tr_client_record_assemble_on_owner(void *arg)
 	        client->record_method_count, &client->record_config.calls,
 	        tr_runtime_shard_memory_budget(client->shard),
 	        &client->record_rpc);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_rpc_record_client_set_progress_notify_on_owner(
+	        client->record_rpc, tr_client_record_progress, client);
 	if (ret != TR_OK)
 		return ret;
 	ret = tr_rpc_record_client_start_on_owner(client->record_rpc);
@@ -1012,6 +1054,21 @@ int tr_client_record_cancel(struct tr_rpc_record_client_handle handle)
 	        handle.client, tr_client_record_operation_on_owner, &request);
 }
 
+static int tr_client_record_begin_drain_on_owner(void *arg)
+{
+	struct tr_client *client = arg;
+	/* 回调中也可发布排空意图。先关闭 RPC 准入，再由同一 owner
+	 * 事务冻结 Channel；静默发布要等当前用户回调和绑定操作返回。 */
+	pthread_mutex_lock(&client->record_drain_lock);
+	if (!client->record_draining) {
+		client->record_draining = 1;
+		client->record_drained = 0;
+	}
+	pthread_mutex_unlock(&client->record_drain_lock);
+	int ret = tr_rpc_record_client_begin_drain_on_owner(client->record_rpc);
+	return ret == TR_OK ? tr_channel_begin_drain(client->channel) : ret;
+}
+
 int tr_client_begin_drain(struct tr_client *client)
 {
 	if (!client || !client->channel)
@@ -1020,7 +1077,38 @@ int tr_client_begin_drain(struct tr_client *client)
 	                         memory_order_acquire) ||
 	    client->record_connect_failed)
 		return TR_ERR_STATE;
+	if (client->record_mode)
+		return tr_client_record_sync(
+		        client->record_rpc,
+		        tr_client_record_begin_drain_on_owner, client);
 	return tr_channel_begin_drain(client->channel);
+}
+
+static int tr_client_record_wait_drained(struct tr_client *client,
+                                         const struct tr_deadline *deadline)
+{
+	int ret = TR_OK;
+	pthread_mutex_lock(&client->record_drain_lock);
+	if (!client->record_draining) {
+		ret = TR_ERR_STATE;
+		goto out;
+	}
+	while (!client->record_drained) {
+		if (!deadline) {
+			ret = TR_AGAIN;
+			break;
+		}
+		int wait_ret = pthread_cond_timedwait(
+		        &client->record_drain_cond, &client->record_drain_lock,
+		        &deadline->absolute);
+		if (wait_ret != 0) {
+			ret = wait_ret == ETIMEDOUT ? TR_AGAIN : TR_ERR_SYS;
+			break;
+		}
+	}
+out:
+	pthread_mutex_unlock(&client->record_drain_lock);
+	return ret;
 }
 
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
@@ -1031,6 +1119,25 @@ int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
 		return TR_ERR_STATE;
 	if (!client->channel)
 		return TR_ERR_STATE;
+	if (client->record_mode) {
+		struct tr_deadline deadline;
+		const struct tr_deadline *wait_deadline = NULL;
+		int ret;
+		if (atomic_load_explicit(&client->record_stopping,
+		                         memory_order_acquire) ||
+		    client->record_connect_failed)
+			return TR_ERR_STATE;
+		if (timeout_ms) {
+			ret = tr_deadline_init_ms(&deadline, timeout_ms);
+			if (ret != TR_OK)
+				return ret;
+			wait_deadline = &deadline;
+		}
+		ret = tr_client_record_wait_drained(client, wait_deadline);
+		return ret == TR_OK ? tr_channel_wait_drained_deadline(
+		                              client->channel, wait_deadline)
+		                    : ret;
+	}
 	return tr_channel_wait_drained(client->channel, timeout_ms);
 }
 
@@ -1159,6 +1266,18 @@ static int tr_client_destroy_internal(struct tr_client *client)
 			return ret;
 	}
 
+	/* 生命周期由外部串行化；宿主和父 owner 静默后再拆通知同步原语。
+	 * 失败保留剩余原语和 Client，销毁重试不会再次销毁已完成的部分。 */
+	if (client->record_drain_cond_ready) {
+		if (pthread_cond_destroy(&client->record_drain_cond) != 0)
+			return TR_ERR_SYS;
+		client->record_drain_cond_ready = 0;
+	}
+	if (client->record_drain_lock_ready) {
+		if (pthread_mutex_destroy(&client->record_drain_lock) != 0)
+			return TR_ERR_SYS;
+		client->record_drain_lock_ready = 0;
+	}
 	if (client->runtime) {
 		ret = tr_runtime_destroy(client->runtime);
 		if (ret != TR_OK)

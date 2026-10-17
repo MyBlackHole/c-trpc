@@ -37,7 +37,9 @@ struct tr_task_executor {
 struct fake_call {
 	struct tr_stream_handle stream;
 	struct tr_rpc_dispatch_handle handle;
+	uint64_t open_due;
 	bool active, pending, terminal, signalled, wire_final;
+	bool admission_failed;
 	enum tr_rpc_status status;
 };
 struct tr_rpc_record_dispatch {
@@ -63,6 +65,13 @@ struct fixture {
 	bool guard, hold_work, fail_detach, fail_unreg, fail_register, fail_arm,
 	        fail_install;
 	bool inline_closed, inline_data;
+	bool inline_open;
+	struct tr_stream_handle nested_open;
+	uint64_t nested_open_delay_ns, open_timeout_ns;
+	unsigned clock_mode, clock_reads;
+	unsigned notifications;
+	bool notified_drained[8];
+	unsigned notified_reports[8];
 	struct tr_stream_handle nested_streams[CAP];
 	unsigned nested_count;
 	struct tr_rpc_endpoint_result results[CAP];
@@ -96,8 +105,20 @@ void *__wrap_calloc(size_t n, size_t z)
 int __wrap_clock_gettime(clockid_t id, struct timespec *ts)
 {
 	CHECK(id == CLOCK_MONOTONIC);
+	if (active)
+		++active->clock_reads;
+	if (active && active->clock_mode == 1)
+		return -1;
 	ts->tv_sec = (time_t)(now_ns / 1000000000);
 	ts->tv_nsec = (long)(now_ns % 1000000000);
+	if (active && active->clock_mode == 2)
+		ts->tv_nsec = -1;
+	if (active && active->clock_mode == 3)
+		ts->tv_nsec = 1000000000L;
+	if (active && active->clock_mode == 4)
+		ts->tv_sec = -1;
+	if (active && active->clock_mode == 5)
+		ts->tv_sec = (time_t)(UINT64_MAX / UINT64_C(1000000000) + 1);
 	return 0;
 }
 int tr_reactor_in_owner_context_for(const struct tr_reactor *r)
@@ -286,10 +307,18 @@ int tr_rpc_record_dispatch_admit_on_owner(struct tr_rpc_record_dispatch *d,
                                           struct tr_stream_handle s,
                                           struct tr_rpc_dispatch_handle *out)
 {
+	return tr_rpc_record_dispatch_admit_until_on_owner(d, s, 0, out);
+}
+int tr_rpc_record_dispatch_admit_until_on_owner(
+        struct tr_rpc_record_dispatch *d, struct tr_stream_handle s,
+        uint64_t open_due_ns, struct tr_rpc_dispatch_handle *out)
+{
 	for (unsigned i = 0; i < CAP; ++i)
 		if (!d->calls[i].active) {
 			struct fake_call *c = &d->calls[i];
-			*c = (struct fake_call){.stream = s, .active = true};
+			*c = (struct fake_call){.stream = s,
+			                        .active = true,
+			                        .open_due = open_due_ns};
 			c->handle = (struct tr_rpc_dispatch_handle){
 			        d, {++d->generation, i}};
 			*out = c->handle;
@@ -310,6 +339,14 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 			if (c->terminal)
 				return TR_ERR_STATE;
 			c->pending = true;
+			if (d->f->inline_open) {
+				d->f->inline_open = false;
+				d->f->event(d->f->nested_open,
+				            TR_STREAM_EVENT_OPENED, TR_OK,
+				            d->f->handler_arg);
+				/* 延后队列未推进之前，模拟外层下层调用耗时。 */
+				now_ns += d->f->nested_open_delay_ns;
+			}
 			/* 模拟下层在接收回调栈内再次投递同流 DATA。不能静默丢弃
 			 * 该字节并继续报告原请求成功。 */
 			if (d->f->inline_data) {
@@ -435,7 +472,8 @@ int tr_rpc_record_dispatch_result_on_owner(struct tr_rpc_dispatch_handle handle,
 	*out = (struct tr_rpc_dispatch_result){
 	        .status = call->status,
 	        .terminal = call->terminal,
-	        .final_accepted = call->terminal && call->wire_final};
+	        .final_accepted = call->terminal && call->wire_final,
+	        .admission_failed = call->admission_failed};
 	return TR_OK;
 }
 int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle h)
@@ -483,6 +521,12 @@ static void on_terminal(struct tr_stream_handle stream,
 	CHECK(stream.channel == &f->channel);
 	CHECK(tr_rpc_record_endpoint_close_on_owner(&p) == TR_ERR_STATE);
 	CHECK(p == f->ep);
+	if (owner) {
+		bool quiet = true;
+		CHECK(tr_rpc_record_endpoint_is_drained_on_owner(
+		              f->ep, &quiet) == TR_OK &&
+		      !quiet);
+	}
 	++f->reports;
 	f->last = r;
 	f->results[stream.slot] = r;
@@ -510,6 +554,7 @@ static void init(struct fixture *f)
 static int create(struct fixture *f)
 {
 	struct tr_rpc_record_endpoint_config cfg = configuration();
+	cfg.open_timeout_ns = f->open_timeout_ns;
 	const struct tr_rpc_dispatch_method m = {0};
 	return tr_rpc_record_endpoint_create_on_owner(&f->channel, &f->executor,
 	                                              &m, 1, &cfg, on_terminal,
@@ -561,6 +606,179 @@ static void close_all(struct fixture *f)
 	owner = NULL;
 	active = NULL;
 	++cases;
+}
+static void on_progress(bool drained, void *arg)
+{
+	struct fixture *f = arg;
+	struct tr_rpc_record_endpoint *pointer = f->ep;
+	bool observed = !drained;
+	CHECK(owner == &f->reactor && f->notifications < 8);
+	CHECK(tr_rpc_record_endpoint_is_drained_on_owner(f->ep, &observed) ==
+	              TR_OK &&
+	      observed == drained);
+	CHECK(tr_rpc_record_endpoint_pump_on_owner(f->ep) == TR_ERR_STATE);
+	CHECK(tr_rpc_record_endpoint_close_on_owner(&pointer) == TR_ERR_STATE &&
+	      pointer == f->ep);
+	CHECK(tr_rpc_record_endpoint_start_on_owner(f->ep) == TR_ERR_STATE);
+	CHECK(tr_rpc_record_endpoint_set_progress_notify_on_owner(
+	              f->ep, NULL, NULL) == TR_ERR_STATE);
+	f->notified_drained[f->notifications] = drained;
+	f->notified_reports[f->notifications] = f->reports;
+	++f->notifications;
+}
+static void observe(struct fixture *f)
+{
+	CHECK(tr_rpc_record_endpoint_set_progress_notify_on_owner(
+	              f->ep, on_progress, f) == TR_OK);
+}
+static void test_open_budget_handoff(void)
+{
+	for (unsigned mode = 0; mode < 3; ++mode) {
+		struct fixture f;
+		init(&f);
+		f.open_timeout_ns = mode == 1   ? UINT64_C(17000000)
+		                    : mode == 2 ? UINT64_C(1000)
+		                                : 0;
+		start(&f);
+		if (mode == 2)
+			now_ns = UINT64_MAX - 20;
+		uint64_t opened_at = now_ns;
+		(void)open_stream(&f, 0, 1);
+		CHECK(f.dispatch->calls[0].active);
+		CHECK(f.dispatch->calls[0].open_due ==
+		      (mode == 2
+		               ? UINT64_MAX
+		               : opened_at +
+		                         (mode == 1
+		                                  ? f.open_timeout_ns
+		                                  : TR_RPC_RECORD_OPEN_TIMEOUT_DEFAULT_NS)));
+		/* 极值只验证准入期限，恢复时间后清理不让夹具计数回绕。 */
+		now_ns = UINT64_C(1000000000);
+		close_all(&f);
+	}
+	struct fixture f;
+	init(&f);
+	f.open_timeout_ns = UINT64_C(10000000);
+	start(&f);
+	struct tr_stream_handle first = open_stream(&f, 0, 1);
+	f.inline_open = true;
+	f.nested_open = (struct tr_stream_handle){&f.channel, 1, 1};
+	f.nested_open_delay_ns = UINT64_C(20000000);
+	uint64_t nested_due = now_ns + f.open_timeout_ns;
+	request(&f, first, 0);
+	CHECK(!f.dispatch->calls[1].active);
+	tick(&f, 1);
+	CHECK(f.dispatch->calls[1].active &&
+	      f.dispatch->calls[1].open_due == nested_due &&
+	      f.dispatch->calls[1].open_due < now_ns);
+	close_all(&f);
+}
+static void test_open_clock_failure_resets(void)
+{
+	for (unsigned mode = 1; mode <= 5; ++mode) {
+		struct fixture f;
+		init(&f);
+		start(&f);
+		f.clock_mode = mode;
+		(void)open_stream(&f, 0, 1);
+		tick(&f, 8);
+		CHECK(f.reports == 1 && !f.last.final_accepted &&
+		      f.last.status == TR_RPC_STATUS_INTERNAL &&
+		      f.resets == 1 && f.reset_reason == TR_ERR_SYS &&
+		      !f.sends && !f.closes && !f.done_calls &&
+		      !f.receive_calls && !f.dispatch->calls[0].active);
+		f.clock_mode = 0;
+		close_all(&f);
+	}
+}
+static void test_admission_failure_skips_final_wait(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.reset_rejects = 2;
+	(void)open_stream(&f, 0, 1);
+	/* 派发器替身只提供明确结果，宿主必须据此跳过普通 FINAL 等待。 */
+	struct fake_call *call = &f.dispatch->calls[0];
+	call->admission_failed = true;
+	call->pending = true;
+	call->status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
+	tick(&f, 20);
+	CHECK(f.reset_attempts == 3 && f.resets == 1 &&
+	      f.reset_reason == TR_ERR_TIMEOUT && f.reports == 1 &&
+	      f.retire_calls == 1 && !f.sends && !f.closes &&
+	      !f.last.final_accepted &&
+	      f.last.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	close_all(&f);
+}
+static void test_progress_observer(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	observe(&f);
+	CHECK(f.notifications == 1 && f.notified_drained[0]);
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	CHECK(f.notifications == 2 && !f.notified_drained[1]);
+	request(&f, s, 0);
+	tick(&f, 12);
+	CHECK(f.reports == 1 && !f.retire_calls && f.notifications == 2);
+	f.event(s, TR_STREAM_EVENT_REMOTE_CLOSED, TR_OK, f.handler_arg);
+	tick(&f, 8);
+	CHECK(f.retire_calls == 1 && f.notifications == 3 &&
+	      f.notified_drained[2] && f.notified_reports[2] == 1);
+	CHECK(tr_rpc_record_endpoint_set_progress_notify_on_owner(
+	              f.ep, NULL, NULL) == TR_OK);
+	(void)open_stream(&f, 0, 2);
+	close_all(&f);
+	CHECK(f.notifications == 3);
+}
+static void test_stopping_quiet_retains_storage(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	observe(&f);
+	f.hold_work = true;
+	struct tr_stream_handle s = open_stream(&f, 0, 1);
+	request(&f, s, 0);
+	CHECK(tr_rpc_record_endpoint_close_on_owner(&f.ep) == TR_AGAIN);
+	tick(&f, 8);
+	bool quiet = true;
+	CHECK(tr_rpc_record_endpoint_is_drained_on_owner(f.ep, &quiet) ==
+	              TR_OK &&
+	      !quiet);
+	CHECK(f.notifications == 2 && f.resets == 1 && !f.reports);
+	f.hold_work = false;
+	tick(&f, 12);
+	CHECK(tr_rpc_record_endpoint_is_drained_on_owner(f.ep, &quiet) ==
+	              TR_OK &&
+	      quiet);
+	CHECK(f.dispatch->calls[0].active && !f.retire_calls &&
+	      f.notifications == 3 && f.notified_drained[2] &&
+	      f.notified_reports[2] == 1);
+	close_all(&f);
+	CHECK(f.notifications == 3);
+}
+static void test_close_waits_for_all_reports(void)
+{
+	struct fixture f;
+	init(&f);
+	start(&f);
+	f.hold_work = true;
+	for (unsigned i = 0; i < CAP; ++i) {
+		struct tr_stream_handle s = open_stream(&f, i, 1);
+		request(&f, s, 0);
+		f.event(s, TR_STREAM_EVENT_CLOSED, TR_ERR_CLOSED,
+		        f.handler_arg);
+	}
+	f.hold_work = false;
+	/* 一轮完成全部4个任务，但宿主公平扫描只能报告其中2个。
+	 * 已死的网络不能替代余下终局回调返回这一释放条件。 */
+	CHECK(tr_rpc_record_endpoint_close_on_owner(&f.ep) == TR_AGAIN && f.ep);
+	CHECK(f.done_calls == CAP && f.reports == 2);
+	close_all(&f);
+	CHECK(f.reports == CAP);
 }
 static void test_order_and_backpressure(void)
 {
@@ -807,17 +1025,19 @@ static void test_failures(void)
 		CHECK(!atomic_load(&f.budget.current_bytes));
 		++cases;
 	}
-	for (unsigned stage = 0; stage < 3; ++stage) {
+	for (unsigned stage = 0; stage < 4; ++stage) {
 		struct fixture f;
 		init(&f);
 		CHECK(create(&f) == TR_OK);
 		f.fail_register = stage == 0;
 		f.fail_arm = stage == 1;
 		f.fail_install = stage == 2;
+		f.clock_mode = stage == 3 ? 1 : 0;
 		CHECK(tr_rpc_record_endpoint_start_on_owner(f.ep) ==
 		              TR_ERR_SYS &&
 		      f.ep);
 		f.fail_register = f.fail_arm = f.fail_install = false;
+		f.clock_mode = 0;
 		close_all(&f);
 	}
 	struct fixture f;
@@ -846,6 +1066,7 @@ static void test_stopped_cleanup(void)
 	struct fixture f;
 	init(&f);
 	start(&f);
+	observe(&f);
 	f.hold_work = true;
 	struct tr_stream_handle s = open_stream(&f, 0, 1);
 	request(&f, s, 0);
@@ -863,6 +1084,8 @@ static void test_stopped_cleanup(void)
 	CHECK(tr_rpc_record_endpoint_reap_stopped(&f.ep) == TR_OK && !f.ep);
 	CHECK(f.reports == 1 && !f.tick && !f.event &&
 	      !atomic_load(&f.budget.current_bytes));
+	CHECK(f.notifications == 2 && f.notified_drained[0] &&
+	      !f.notified_drained[1]);
 	active = NULL;
 	++cases;
 }
@@ -914,6 +1137,12 @@ static void test_generations_under_load(void)
 
 int main(void)
 {
+	test_open_budget_handoff();
+	test_open_clock_failure_resets();
+	test_admission_failure_skips_final_wait();
+	test_progress_observer();
+	test_stopping_quiet_retains_storage();
+	test_close_waits_for_all_reports();
 	test_order_and_backpressure();
 	test_credit_stop_failure_retains_close();
 	test_inline_data_is_not_silent_success();

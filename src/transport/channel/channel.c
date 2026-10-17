@@ -51,6 +51,22 @@ struct tr_stream_reset_tombstone {
 	int peer_status;
 };
 
+/* 每个物理连接独立记录两个方向的受理边界。已见 OPEN 与已受理 OPEN
+ * 不能共用前沿：本地排空后仍会收到对端尚未观察 GOAWAY 时发出的 OPEN。
+ * 这些帧只推进去重前沿，不再取得本地流或逐流拒绝责任。 */
+struct tr_channel_drain {
+	uint32_t active_streams;
+	uint32_t last_peer_admitted;
+	uint32_t last_local_accepted;
+	uint32_t local_cutoff;
+	uint32_t peer_cutoff;
+	int local_started;
+	int peer_started;
+	int goaway_accepted;
+	int tx_wait_requested;
+	int tx_drained;
+};
+
 struct tr_stream_slot {
 	uint32_t generation;
 	uint32_t free_next;
@@ -106,8 +122,9 @@ struct tr_channel {
 	int local_draining;
 	int control_peer_draining;
 	int bulk_peer_draining;
-	int control_goaway_sent;
-	int bulk_goaway_sent;
+	struct tr_channel_drain drain[2];
+	int drain_retry_pending;
+	int drain_progressing;
 	struct tr_channel_capabilities control_caps;
 	struct tr_channel_capabilities bulk_caps;
 
@@ -266,6 +283,57 @@ tr_channel_connection_alive_locked(const struct tr_channel *channel,
 	return 0;
 }
 
+static int tr_channel_connection_idle_locked(const struct tr_channel *channel,
+                                             struct tr_conn_handle connection)
+{
+	int idx =
+	        tr_channel_keepalive_index_for_connection(channel, connection);
+	return idx >= 0 && channel->drain[idx].local_started &&
+	       channel->drain[idx].peer_started &&
+	       channel->drain[idx].active_streams == 0U;
+}
+
+static int tr_channel_drained_locked(const struct tr_channel *channel)
+{
+	if (!channel->local_draining || channel->active_streams != 0U)
+		return 0;
+	for (int i = 0; i < 2; ++i) {
+		struct tr_conn_handle connection = tr_channel_connection(
+		        channel, i == 0 ? TR_LANE_CONTROL : TR_LANE_BULK);
+		const struct tr_channel_drain *drain = &channel->drain[i];
+		if ((i == 1 &&
+		     tr_conn_equal(connection, channel->control_connection)) ||
+		    !tr_channel_connection_alive_locked(channel, connection))
+			continue;
+		if (!drain->local_started || !drain->peer_started ||
+		    !drain->goaway_accepted || !drain->tx_drained)
+			return 0;
+	}
+	return 1;
+}
+
+static int tr_channel_keepalive_needed_locked(const struct tr_channel *channel)
+{
+	if (!channel->keepalive_enabled)
+		return 0;
+	for (int i = 0; i < 2; ++i) {
+		struct tr_conn_handle connection = tr_channel_connection(
+		        channel, i == 0 ? TR_LANE_CONTROL : TR_LANE_BULK);
+		if (i == 1 &&
+		    tr_conn_equal(connection, channel->control_connection))
+			continue;
+		if (!tr_channel_connection_alive_locked(channel, connection)) {
+			if (!channel->local_draining &&
+			    !channel->drain[i].local_started)
+				return 1;
+			continue;
+		}
+		if (!tr_channel_connection_idle_locked(channel, connection))
+			return 1;
+	}
+	return 0;
+}
+
 static void tr_channel_keepalive_reset_locked(struct tr_channel *channel,
 					      enum tr_lane lane)
 {
@@ -293,8 +361,10 @@ static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 
 	pthread_mutex_lock(&channel->lock);
 	if (!channel->keepalive_enabled ||
+	    tr_channel_connection_idle_locked(
+	            channel, tr_channel_connection(channel, lane)) ||
 	    (lane == TR_LANE_BULK && tr_conn_equal(channel->control_connection,
-						   channel->bulk_connection))) {
+	                                           channel->bulk_connection))) {
 		pthread_mutex_unlock(&channel->lock);
 		return;
 	}
@@ -359,6 +429,7 @@ static void tr_channel_keepalive_check_lane(struct tr_channel *channel,
 
 	pthread_mutex_lock(&channel->lock);
 	if (!channel->keepalive_enabled ||
+	    tr_channel_connection_idle_locked(channel, connection) ||
 	    !tr_channel_lane_alive(channel, lane) ||
 	    channel->keepalive_ping_outstanding[idx] ||
 	    !tr_conn_equal(connection, tr_channel_connection(channel, lane))) {
@@ -401,6 +472,10 @@ tr_channel_keepalive_tick_ms_locked(const struct tr_channel *channel)
 static int tr_send_window_update_locked(struct tr_channel *channel,
 					struct tr_stream_slot *stream);
 static void tr_channel_reset_progress_on_owner(struct tr_channel *channel);
+static int tr_channel_drain_progress_on_owner(struct tr_channel *channel);
+static int tr_channel_protocol_error(struct tr_channel *channel,
+                                     struct tr_conn_handle connection,
+                                     int status);
 
 static uint64_t
 tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
@@ -415,7 +490,7 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 
 	tr_channel_reset_progress_on_owner(channel);
 
-	/* 一个已注册、由反应器拥有的定时器承担两个独立职责。
+	/* 既有维护定时器同时推进信用/RESET 重试及排空。
 	 * 失败的 WINDOW_UPDATE 无需另一接收事件或应用刷新即可重试。
 	 * 只扫描当前流槽位：旧 stream_id/generation 不能在槽位复用后存活。
 	 */
@@ -437,19 +512,21 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 				channel->window_retry_pending = 1;
 		}
 	}
-	enabled = channel->keepalive_enabled;
+	enabled = tr_channel_keepalive_needed_locked(channel);
 	pthread_mutex_unlock(&channel->lock);
 
 	if (enabled) {
 		tr_channel_keepalive_check_lane(channel, TR_LANE_CONTROL);
 		tr_channel_keepalive_check_lane(channel, TR_LANE_BULK);
 	}
+	(void)tr_channel_drain_progress_on_owner(channel);
 
 	pthread_mutex_lock(&channel->lock);
-	enabled = channel->keepalive_enabled;
+	enabled = tr_channel_keepalive_needed_locked(channel);
 	tick_ms = enabled ? tr_channel_keepalive_tick_ms_locked(channel) : 0U;
-	retry_pending =
-	        channel->window_retry_pending || channel->reset_retry_pending;
+	retry_pending = channel->window_retry_pending ||
+	                channel->reset_retry_pending ||
+	                channel->drain_retry_pending;
 	if (retry_pending)
 		channel->window_retry_scheduled = 1;
 	pthread_mutex_unlock(&channel->lock);
@@ -747,62 +824,102 @@ tr_channel_active_streams_locked(const struct tr_channel *channel)
 	return channel->active_streams;
 }
 
-static int tr_channel_send_pending_goaway_on_owner(void *arg)
+static int tr_channel_drain_progress_on_owner(struct tr_channel *channel)
 {
-	struct tr_channel *channel = (struct tr_channel *)arg;
-	struct tr_conn_handle control_connection;
-	struct tr_conn_handle bulk_connection;
-	int send_control = 0;
-	int send_bulk = 0;
-	int ret = TR_OK;
-	int tmp;
+	int result = TR_OK;
 
 	pthread_mutex_lock(&channel->lock);
-	if (!channel->local_draining) {
+	if (channel->drain_progressing || channel->teardown_detached) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_OK;
 	}
-
-	control_connection = channel->control_connection;
-	bulk_connection = channel->bulk_connection;
-	if (channel->control_alive && channel->control_ready &&
-	    !channel->control_goaway_sent)
-		send_control = 1;
-	if (channel->bulk_alive && channel->bulk_ready &&
-	    !channel->bulk_goaway_sent)
-		send_bulk = 1;
+	channel->drain_progressing = 1;
 	pthread_mutex_unlock(&channel->lock);
 
-	if (send_control) {
-		tmp = tr_reactor_send_goaway_on_owner(control_connection);
-		if (tmp == TR_OK) {
-			pthread_mutex_lock(&channel->lock);
-			if (tr_conn_equal(channel->control_connection,
-					  control_connection))
-				channel->control_goaway_sent = 1;
-			if (tr_conn_equal(channel->bulk_connection,
-					  control_connection))
-				channel->bulk_goaway_sent = 1;
+	for (int i = 0; i < 2; ++i) {
+		struct tr_conn_handle connection;
+		struct tr_channel_drain *drain;
+		uint32_t cutoff;
+		int send_goaway;
+		int request_tx = 0;
+		int ret = TR_OK;
+
+		pthread_mutex_lock(&channel->lock);
+		connection = tr_channel_connection(
+		        channel, i == 0 ? TR_LANE_CONTROL : TR_LANE_BULK);
+		drain = &channel->drain[i];
+		if ((i == 1 &&
+		     tr_conn_equal(connection, channel->control_connection)) ||
+		    !drain->local_started ||
+		    !tr_channel_connection_alive_locked(channel, connection)) {
 			pthread_mutex_unlock(&channel->lock);
-		} else {
-			ret = tmp;
+			continue;
+		}
+		cutoff = drain->local_cutoff;
+		send_goaway =
+		        !drain->goaway_accepted &&
+		        tr_channel_connection_ready_locked(channel, connection);
+		pthread_mutex_unlock(&channel->lock);
+		if (send_goaway) {
+			ret = tr_reactor_send_goaway_on_owner(connection,
+			                                      cutoff);
+			pthread_mutex_lock(&channel->lock);
+			if (ret == TR_OK)
+				drain->goaway_accepted = 1;
+			pthread_mutex_unlock(&channel->lock);
+		}
+		if (ret == TR_OK) {
+			pthread_mutex_lock(&channel->lock);
+			if (drain->goaway_accepted && drain->peer_started &&
+			    drain->active_streams == 0U &&
+			    !drain->tx_wait_requested &&
+			    tr_channel_connection_alive_locked(channel,
+			                                       connection)) {
+				/* 先发布等待责任，再调用可能内联通知的 owner
+				 * 能力。 无流与双 GOAWAY 后不会再产生新的应用
+				 * DATA/CLOSE。 */
+				drain->tx_wait_requested = 1;
+				request_tx = 1;
+			}
+			pthread_mutex_unlock(&channel->lock);
+			if (request_tx)
+				ret = tr_reactor_notify_tx_drained_on_owner(
+				        connection);
+		}
+		if (ret != TR_OK) {
+			/* 终局责任不能静默丢失。失败时同步退役精确连接；
+			 * 对端/发送故障仍按原连接 ERROR 通知，不伪装完成事件。
+			 */
+			if (result == TR_OK)
+				result = ret;
+			(void)tr_channel_protocol_error(channel, connection,
+			                                ret);
 		}
 	}
 
-	if (send_bulk && !tr_conn_equal(bulk_connection, control_connection)) {
-		tmp = tr_reactor_send_goaway_on_owner(bulk_connection);
-		if (tmp == TR_OK) {
-			pthread_mutex_lock(&channel->lock);
-			if (tr_conn_equal(channel->bulk_connection,
-					  bulk_connection))
-				channel->bulk_goaway_sent = 1;
-			pthread_mutex_unlock(&channel->lock);
-		} else if (ret == TR_OK) {
-			ret = tmp;
-		}
+	pthread_mutex_lock(&channel->lock);
+	channel->drain_retry_pending = 0;
+	for (int i = 0; i < 2; ++i) {
+		struct tr_conn_handle connection = tr_channel_connection(
+		        channel, i == 0 ? TR_LANE_CONTROL : TR_LANE_BULK);
+		struct tr_channel_drain *drain = &channel->drain[i];
+		if ((i == 1 &&
+		     tr_conn_equal(connection, channel->control_connection)) ||
+		    !tr_channel_connection_alive_locked(channel, connection))
+			continue;
+		if (drain->local_started && !drain->tx_drained)
+			channel->drain_retry_pending = 1;
 	}
+	channel->drain_progressing = 0;
+	if (tr_channel_drained_locked(channel))
+		pthread_cond_broadcast(&channel->state_cond);
+	pthread_mutex_unlock(&channel->lock);
+	return result;
+}
 
-	return ret;
+static int tr_channel_send_pending_goaway_on_owner(void *arg)
+{
+	return tr_channel_drain_progress_on_owner(arg);
 }
 
 static int tr_stream_id_is_local(const struct tr_channel *channel,
@@ -994,6 +1111,13 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 	if (stream->state == TR_STREAM_SLOT_FREE)
 		return;
 
+	{
+		int idx = channel->config.mode == TR_CHANNEL_SHARED_CONNECTION
+		                  ? 0
+		                  : tr_lane_index(stream->lane);
+		assert(channel->drain[idx].active_streams != 0U);
+		channel->drain[idx].active_streams--;
+	}
 	generation = stream->generation;
 	(void)tr_stream_index_remove_locked(channel, stream->stream_id);
 	if (stream->rx_reassembly)
@@ -1303,6 +1427,10 @@ static int tr_stream_allocate_locked(struct tr_channel *channel,
 	if (out)
 		*out = tr_stream_make_handle(channel, slot, stream);
 	channel->active_streams++;
+	channel->drain[channel->config.mode == TR_CHANNEL_SHARED_CONNECTION
+	                       ? 0
+	                       : tr_lane_index(lane)]
+	        .active_streams++;
 	channel->stat_streams_opened++;
 	return TR_OK;
 }
@@ -1549,6 +1677,15 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	            channel->config.required_feature_bits)
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_UNSUPPORTED);
+	pthread_mutex_lock(&channel->lock);
+	int connection_index =
+	        tr_channel_keepalive_index_for_connection(channel, connection);
+	int after_goaway = connection_index >= 0 &&
+	                   channel->drain[connection_index].goaway_accepted;
+	pthread_mutex_unlock(&channel->lock);
+	if (after_goaway)
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
 
 	/* ACK 把本地接收上限返回给对端。 */
 	ack_caps = local;
@@ -1705,16 +1842,66 @@ static int tr_channel_handle_goaway(struct tr_channel *channel,
 				    const struct tr_frame *frame)
 {
 	uint32_t mask;
+	uint32_t cutoff;
+	int idx;
+	int ret;
 	int control_event = 0;
 	int bulk_event = 0;
 
 	if (frame->payload || frame->header.payload_len != 0 ||
-	    frame->header.stream_id != 0 || frame->header.message_id != 0 ||
-	    frame->header.flags != 0)
+	    frame->header.stream_id != 0 ||
+	    frame->header.message_id > UINT32_MAX || frame->header.flags != 0)
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_STATE);
+	cutoff = (uint32_t)frame->header.message_id;
 
 	pthread_mutex_lock(&channel->lock);
+	idx = tr_channel_keepalive_index_for_connection(channel, connection);
+	if (idx < 0 || (cutoff && !tr_stream_id_is_local(channel, cutoff)) ||
+	    cutoff != channel->drain[idx].last_local_accepted ||
+	    (channel->drain[idx].peer_started &&
+	     cutoff != channel->drain[idx].peer_cutoff)) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	if (channel->drain[idx].peer_started) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_drain_progress_on_owner(channel);
+	}
+	/* 接收方在初始 WINDOW_UPDATE 获得发送责任后才推进受理边界，
+	 * GOAWAY 的固定命令前沿与 TX FIFO 保留该 WU 为前驱。因此 cutoff
+	 * 必须恰好等于本连接已确认的持久高水位，不能否定历史准入，也不能
+	 * 声称尚未确认、另一连接或未发布空洞中的 ID 已被准入。
+	 * 同一 FIFO 内被边界覆盖的更早 OPEN 也不能仍缺初始 WU。 */
+	for (uint32_t i = 0; i < channel->config.max_streams; ++i) {
+		struct tr_stream_slot *stream = &channel->streams[i];
+		if (stream->state != TR_STREAM_SLOT_FREE &&
+		    tr_stream_connection_matches(channel, stream, connection) &&
+		    tr_stream_id_is_local(channel, stream->stream_id) &&
+		    ((stream->stream_id > cutoff &&
+		      stream->state != TR_STREAM_SLOT_OPENING) ||
+		     (stream->stream_id <= cutoff &&
+		      stream->state == TR_STREAM_SLOT_OPENING))) {
+			pthread_mutex_unlock(&channel->lock);
+			return tr_channel_protocol_error(channel, connection,
+			                                 TR_ERR_STATE);
+		}
+	}
+	pthread_mutex_unlock(&channel->lock);
+	ret = tr_channel_reset_timer_on_owner(channel);
+	if (ret != TR_OK)
+		return tr_channel_protocol_error(channel, connection, ret);
+
+	pthread_mutex_lock(&channel->lock);
+	channel->drain[idx].peer_started = 1;
+	channel->drain[idx].peer_cutoff = cutoff;
+	if (!channel->drain[idx].local_started) {
+		channel->drain[idx].local_started = 1;
+		channel->drain[idx].local_cutoff =
+		        channel->drain[idx].last_peer_admitted;
+	}
+	channel->drain_retry_pending = 1;
 	mask = tr_channel_connection_lane_mask_locked(channel, connection);
 	if ((mask & TR_CHANNEL_LANE_MASK_CONTROL) &&
 	    !channel->control_peer_draining) {
@@ -1727,13 +1914,38 @@ static int tr_channel_handle_goaway(struct tr_channel *channel,
 		bulk_event = 1;
 	}
 	pthread_mutex_unlock(&channel->lock);
+	ret = tr_channel_drain_progress_on_owner(channel);
+	if (ret != TR_OK)
+		return ret;
+
+	for (uint32_t i = 0; i < channel->config.max_streams; ++i) {
+		struct tr_stream_handle handle = {0};
+		pthread_mutex_lock(&channel->lock);
+		struct tr_stream_slot *stream = &channel->streams[i];
+		if (stream->state == TR_STREAM_SLOT_OPENING &&
+		    tr_stream_connection_matches(channel, stream, connection) &&
+		    tr_stream_id_is_local(channel, stream->stream_id) &&
+		    stream->stream_id > cutoff) {
+			handle = tr_stream_make_handle(channel, i, stream);
+			tr_stream_free_locked(channel, i);
+			channel->stat_stream_errors++;
+			channel->stat_streams_closed++;
+		}
+		pthread_mutex_unlock(&channel->lock);
+		if (handle.channel) {
+			/* 拒绝本身已证明对端没有取得流；没有 CLOSE/RESET 回包，
+			 * 也不留下逐流拒绝表。先失效精确代次再通知上层。 */
+			tr_stream_notify(channel, handle, TR_STREAM_EVENT_ERROR,
+			                 TR_ERR_CLOSED);
+		}
+	}
 
 	if (control_event)
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_CONTROL_GOAWAY,
 				  TR_OK);
 	if (bulk_event)
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_BULK_GOAWAY, TR_OK);
-	return TR_OK;
+	return tr_channel_drain_progress_on_owner(channel);
 }
 
 static int tr_channel_handle_stream_open(struct tr_channel *channel,
@@ -1764,12 +1976,12 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 	pthread_mutex_lock(&channel->lock);
 	connection_index =
 	        tr_channel_keepalive_index_for_connection(channel, connection);
-	/* RESET 依赖同一物理连接上不重复的 wire ID。拆分连接各自有
+	/* 同一物理连接上的 wire ID 不重复。拆分连接各自有
 	 * FIFO 前沿，不能用另一个 TCP 先到的较大 ID 拒绝合法 OPEN。 */
 	if (connection_index < 0 ||
-	    (tr_stream_reset_supported_locked(channel, lane) &&
-	     frame->header.stream_id <=
-	             channel->peer_stream_frontier[connection_index])) {
+	    channel->drain[connection_index].peer_started ||
+	    frame->header.stream_id <=
+	            channel->peer_stream_frontier[connection_index]) {
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection,
 		                                 TR_ERR_STATE);
@@ -1779,26 +1991,22 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_STATE);
 	}
-	if (tr_stream_reset_supported_locked(channel, lane))
-		channel->peer_stream_frontier[connection_index] =
-		        frame->header.stream_id;
+	channel->peer_stream_frontier[connection_index] =
+	        frame->header.stream_id;
 
 	/* begin_drain() 是单向准入屏障。对端可能在收到我们的 GOAWAY 前
 	 * 刚发出 STREAM_OPEN；若在 local_draining 可见后接受该延迟帧，
 	 * active_streams 可能在 wait_drained() 已观察到零后再次增加。
 	 *
-	 * 拒绝时不分配本地流状态。对端已拥有其发起流的槽位，
-	 * 因此 STREAM_CLOSE 向它提供普通远端关闭信号。
-	 * 如果连此有界控制帧也无法获准，则关闭连接，
-	 * 而不是让两端的流所有权不一致。
+	 * 拒绝时不分配本地流或发送逐流 CLOSE。GOAWAY 的冻结边界直接
+	 * 终结对端未获初始 WINDOW_UPDATE 的槽位；对端自己的 GOAWAY
+	 * 则是最后一个可能的 OPEN 的 FIFO 屏障。未确认流禁止发送 CLOSE，
+	 * 因而无需吸收未知 ID 或保留无界拒绝表。
 	 */
-	if (channel->local_draining) {
+	if (channel->local_draining ||
+	    channel->drain[connection_index].local_started) {
 		pthread_mutex_unlock(&channel->lock);
-		ret = tr_reactor_send(connection, TR_FRAME_STREAM_CLOSE, 0,
-				      frame->header.stream_id, 0, NULL);
-		if (ret != TR_OK)
-			(void)tr_reactor_close_on_owner(connection);
-		return ret;
+		return TR_OK;
 	}
 
 	ret = tr_stream_allocate_locked(channel, frame->header.stream_id, lane,
@@ -1826,6 +2034,7 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 		return tr_channel_protocol_error(channel, connection, ret);
 	}
 	channel->stat_window_updates_tx++;
+	channel->drain[connection_index].last_peer_admitted = stream->stream_id;
 
 	handle = tr_stream_make_handle(channel, slot, stream);
 	pthread_mutex_unlock(&channel->lock);
@@ -1862,6 +2071,14 @@ static int tr_channel_handle_window_update(struct tr_channel *channel,
 
 	old_limit = stream->tx_send_limit;
 	stream->tx_send_limit = frame->header.message_id;
+	if (tr_stream_id_is_local(channel, stream->stream_id)) {
+		int idx = tr_channel_keepalive_index_for_connection(channel,
+		                                                    connection);
+		assert(idx >= 0);
+		if (stream->stream_id > channel->drain[idx].last_local_accepted)
+			channel->drain[idx].last_local_accepted =
+			        stream->stream_id;
+	}
 	channel->stat_window_updates_rx++;
 	if (stream->state == TR_STREAM_SLOT_RESETTING) {
 		int received = stream->reset_received;
@@ -2172,23 +2389,14 @@ static int tr_channel_handle_stream_close(struct tr_channel *channel,
 	int free_after = 0;
 
 	if (frame->payload || frame->header.payload_len != 0 ||
-	    frame->header.flags != 0)
+	    frame->header.flags != 0 || frame->header.stream_id == 0 ||
+	    frame->header.message_id != 0)
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_BAD_FLAGS);
 
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
-	if (!stream) {
-		/* 在排空屏障后被拒绝的 STREAM_OPEN 没有本地流槽位。
-		 * 其发起方在关闭自身半侧时，仍可能用 STREAM_CLOSE
-		 * 回复我们的拒绝。
-		 * 排空期间仅吸收对端拥有的标识；未知的本地拥有标识仍为协议错误。
-		 */
-		if (channel->local_draining &&
-		    !tr_stream_id_is_local(channel, frame->header.stream_id)) {
-			pthread_mutex_unlock(&channel->lock);
-			return TR_OK;
-		}
+	if (!stream || stream->state == TR_STREAM_SLOT_OPENING) {
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_STATE);
@@ -2230,7 +2438,7 @@ static int tr_channel_handle_stream_close(struct tr_channel *channel,
 		}
 		pthread_mutex_unlock(&channel->lock);
 	}
-	return TR_OK;
+	return tr_channel_drain_progress_on_owner(channel);
 }
 
 static enum tr_frame_disposition
@@ -2289,10 +2497,24 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	case TR_FRAME_DATA:
 		ret = tr_channel_handle_data(channel, connection, frame);
 		break;
-	case TR_FRAME_PING:
-		(void)tr_reactor_send(connection, TR_FRAME_PONG, 0, 0,
-				      frame->header.message_id, NULL);
+	case TR_FRAME_PING: {
+		if (frame->payload || frame->header.payload_len != 0 ||
+		    frame->header.flags != 0 || frame->header.stream_id != 0) {
+			ret = tr_channel_protocol_error(channel, connection,
+			                                TR_ERR_STATE);
+			break;
+		}
+		pthread_mutex_lock(&channel->lock);
+		int idle =
+		        tr_channel_connection_idle_locked(channel, connection);
+		pthread_mutex_unlock(&channel->lock);
+		/* 双 GOAWAY 且无流后停止生成保活回包，使发送排空成为
+		 * 稳定边界；这不放宽 DATA、CLOSE 或 RESET 的身份验证。 */
+		if (!idle)
+			(void)tr_reactor_send(connection, TR_FRAME_PONG, 0, 0,
+			                      frame->header.message_id, NULL);
 		break;
+	}
 	case TR_FRAME_PONG: {
 		uint64_t now = tr_channel_now_ns();
 		int idx;
@@ -2322,6 +2544,7 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	}
 
 	(void)ret;
+	(void)tr_channel_drain_progress_on_owner(channel);
 	return TR_FRAME_RELEASE;
 }
 
@@ -2336,8 +2559,20 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 	int bulk_down = 0;
 	int stream_status = status == TR_OK ? TR_ERR_CLOSED : status;
 
-	(void)event;
 	pthread_mutex_lock(&channel->lock);
+	if (event == TR_CONN_EVENT_TX_DRAINED) {
+		int idx = tr_channel_keepalive_index_for_connection(channel,
+		                                                    connection);
+		if (idx >= 0 && channel->drain[idx].tx_wait_requested &&
+		    channel->drain[idx].goaway_accepted &&
+		    tr_channel_connection_alive_locked(channel, connection) &&
+		    tr_channel_connection_idle_locked(channel, connection)) {
+			channel->drain[idx].tx_drained = 1;
+			pthread_cond_broadcast(&channel->state_cond);
+		}
+		pthread_mutex_unlock(&channel->lock);
+		return;
+	}
 	if (tr_conn_equal(channel->control_connection, connection) &&
 	    channel->control_alive) {
 		channel->control_alive = 0;
@@ -2376,6 +2611,7 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 	if (bulk_down)
 		tr_channel_fail_lane_streams(channel, TR_LANE_BULK,
 					     stream_status);
+	(void)tr_channel_drain_progress_on_owner(channel);
 
 	if (control_down)
 		tr_channel_notify(channel, TR_CHANNEL_EVENT_CONTROL_DOWN,
@@ -2397,6 +2633,8 @@ static int tr_channel_reconnect_pick_locked(struct tr_channel *channel,
 
 	if (channel->config.mode == TR_CHANNEL_SHARED_CONNECTION) {
 		if ((!channel->control_alive || !channel->bulk_alive) &&
+		    !channel->control_peer_draining &&
+		    !channel->bulk_peer_draining &&
 		    !channel->control_reconnecting &&
 		    !channel->bulk_reconnecting) {
 			channel->control_reconnecting = 1;
@@ -2990,10 +3228,10 @@ static int tr_channel_create_common(
 	     channel->config.role != TR_CHANNEL_SERVER) ||
 	    (channel->config.mode != TR_CHANNEL_SHARED_CONNECTION &&
 	     channel->config.mode != TR_CHANNEL_SPLIT_CONNECTIONS) ||
-	    channel->config.min_protocol_version == 0 ||
-	    channel->config.max_protocol_version == 0 ||
-	    channel->config.min_protocol_version >
-	            channel->config.max_protocol_version ||
+	    channel->config.min_protocol_version !=
+	            TR_CHANNEL_PROTOCOL_VERSION ||
+	    channel->config.max_protocol_version !=
+	            TR_CHANNEL_PROTOCOL_VERSION ||
 	    (channel->config.required_feature_bits &
 	     ~channel->config.feature_bits))
 		return TR_ERR_INVALID;
@@ -3498,6 +3736,7 @@ static int tr_channel_replace_connection_on_owner(void *arg)
 		channel->bulk_connection = connection;
 		channel->peer_stream_frontier[0] = 0;
 		channel->peer_stream_frontier[1] = 0;
+		memset(channel->drain, 0, sizeof(channel->drain));
 		channel->control_alive = 1;
 		channel->bulk_alive = 1;
 		channel->control_ready = 0;
@@ -3512,6 +3751,7 @@ static int tr_channel_replace_connection_on_owner(void *arg)
 	} else if (lane == TR_LANE_BULK) {
 		channel->bulk_connection = connection;
 		channel->peer_stream_frontier[1] = 0;
+		memset(&channel->drain[1], 0, sizeof(channel->drain[1]));
 		channel->bulk_alive = 1;
 		channel->bulk_ready = 0;
 		memset(&channel->bulk_caps, 0, sizeof(channel->bulk_caps));
@@ -3520,6 +3760,7 @@ static int tr_channel_replace_connection_on_owner(void *arg)
 	} else {
 		channel->control_connection = connection;
 		channel->peer_stream_frontier[0] = 0;
+		memset(&channel->drain[0], 0, sizeof(channel->drain[0]));
 		channel->control_alive = 1;
 		channel->control_ready = 0;
 		memset(&channel->control_caps, 0,
@@ -3950,15 +4191,12 @@ uint32_t tr_channel_active_streams(struct tr_channel *channel)
 
 int tr_channel_get_state(struct tr_channel *channel, enum tr_channel_state *out)
 {
-	uint32_t active;
-
 	if (!channel || !out)
 		return TR_ERR_INVALID;
 	pthread_mutex_lock(&channel->lock);
-	active = tr_channel_active_streams_locked(channel);
 	if (!channel->local_draining)
 		*out = TR_CHANNEL_RUNNING;
-	else if (active == 0)
+	else if (tr_channel_drained_locked(channel))
 		*out = TR_CHANNEL_DRAINED;
 	else
 		*out = TR_CHANNEL_DRAINING;
@@ -3970,6 +4208,24 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	int ret;
+	int progress_ret;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->state_wait_closed || channel->teardown_detached) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_CLOSED;
+	}
+	if (tr_channel_drained_locked(channel)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+	pthread_mutex_unlock(&channel->lock);
+	/* 外部最后一次 CLOSE 可在持锁状态释放流，不能在那里同步调用 owner。
+	 * 先取得既有维护定时器的责任，由后续 25ms 维护轮次观察该次释放；
+	 * 该周期不承诺所有者被阻塞或调度延迟时的实时上限。 */
+	ret = tr_channel_reset_timer_on_owner(channel);
+	if (ret != TR_OK)
+		return ret;
 
 	/* 排空屏障与禁用重连必须在同一个所有者处理轮次内完成。
 	 * 否则应用线程可能在“禁用重连”返回后、设置
@@ -3977,12 +4233,19 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 	 */
 	pthread_mutex_lock(&channel->lock);
 	channel->local_draining = 1;
+	for (int i = 0; i < 2; ++i) {
+		struct tr_channel_drain *drain = &channel->drain[i];
+		if (!drain->local_started) {
+			drain->local_started = 1;
+			drain->local_cutoff = drain->last_peer_admitted;
+		}
+	}
+	channel->drain_retry_pending = 1;
 	pthread_mutex_unlock(&channel->lock);
 
 	ret = tr_channel_disable_client_reconnect_on_owner(channel);
-	if (ret != TR_OK)
-		return ret;
-	return tr_channel_send_pending_goaway_on_owner(channel);
+	progress_ret = tr_channel_drain_progress_on_owner(channel);
+	return ret != TR_OK ? ret : progress_ret;
 }
 
 int tr_channel_wait_ready_deadline(
@@ -4136,7 +4399,7 @@ int tr_channel_wait_drained_deadline(
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
-	if (channel->active_streams == 0U) {
+	if (tr_channel_drained_locked(channel)) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_OK;
 	}
@@ -4150,7 +4413,7 @@ int tr_channel_wait_drained_deadline(
 	}
 	channel->state_waiters++;
 
-	while (channel->active_streams != 0U) {
+	while (!tr_channel_drained_locked(channel)) {
 		int ret;
 
 		if (channel->state_wait_closed) {
@@ -4260,7 +4523,6 @@ int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
-
 	*out = handle;
 	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
@@ -4402,7 +4664,7 @@ int tr_stream_reset_on_owner(struct tr_stream_handle handle, int status)
 		return TR_ERR_CLOSED;
 	}
 	if (stream->state == TR_STREAM_SLOT_OPENING) {
-		/* 对端尚未确认有槽；它可能已用普通 CLOSE 拒绝 OPEN。
+		/* 对端尚未确认有槽；它可能用 GOAWAY 受理边界拒绝 OPEN。
 		 * 不能向尚未取得责任的对端发送 RESET。 */
 		pthread_mutex_unlock(&channel->lock);
 		return TR_AGAIN;
@@ -4453,6 +4715,12 @@ int tr_stream_close(struct tr_stream_handle handle)
 	if (!stream) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STALE;
+	}
+	if (stream->state == TR_STREAM_SLOT_OPENING) {
+		/* 未获初始信用就不向对端发送 CLOSE，避免它拒绝 OPEN 后
+		 * 还必须持有逐流记录来辨认迟到关闭。调用方保留重试责任。 */
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
 	}
 	if (stream->state == TR_STREAM_SLOT_RESETTING) {
 		pthread_mutex_unlock(&channel->lock);
@@ -4660,7 +4928,7 @@ int tr_channel_get_stats(struct tr_channel *channel,
 	out->active_streams = active;
 	if (!channel->local_draining)
 		out->state = TR_CHANNEL_RUNNING;
-	else if (active == 0)
+	else if (tr_channel_drained_locked(channel))
 		out->state = TR_CHANNEL_DRAINED;
 	else
 		out->state = TR_CHANNEL_DRAINING;

@@ -577,6 +577,43 @@ target("test_rpc_record")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 发送排空必须跨过已接受命令、两种预留和部分写入，通知可重入登记。
+target("test_reactor_tx_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_reactor_tx_drain.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 分层排空：网络静默不能越过业务完成、终局回调和已受理的 OPEN。
+target("test_rpc_record_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_drain.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_rpc_record_endpoint_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_client_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_receive_on_owner",
+                "-Wl,--wrap=tr_task_executor_dispatch",
+                "-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_deadline_init_ms",
+                "-Wl,--wrap=tr_channel_wait_drained_deadline",
+                "-Wl,--wrap=pthread_cond_timedwait", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- GOAWAY 精确边界、交叉 OPEN、共享/拆分物理连接及完整网络排空。
+target("test_channel_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_channel_drain.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- 单流 RESET 的真实传输：预留容量、FIFO、短写、迟到帧和错误隔离。
 target("test_stream_reset")
     set_kind("binary")
@@ -615,7 +652,7 @@ target("test_rpc_record_dispatch")
     add_files("tests/test_rpc_record_dispatch.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
-                "-Wl,--wrap=tr_stream_sendv", {force = true})
+                "-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=clock_gettime", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

@@ -41,6 +41,7 @@ static _Atomic unsigned close_attempts, premature_close, fatal_polls;
 static _Atomic(struct tr_reactor *) fatal_reactor;
 static _Atomic bool fail_poll;
 static _Thread_local bool capture_timer;
+static _Thread_local struct fixture *capture_endpoint;
 static struct tr_reactor_timer_handle endpoint_timer;
 
 int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
@@ -144,12 +145,13 @@ struct peer {
 	struct tr_rpc_record_stream *calls[CAP];
 	unsigned method[CAP];
 	_Atomic unsigned opened, packets, terminals[CAP], messages[CAP],
-	        initial[CAP];
+	        initial[CAP], ingress_bytes[CAP];
 	uint32_t status[CAP];
 	size_t received_bytes[CAP];
 	enum tr_rpc_record_delivery delivery[CAP];
 	bool final_accepted[CAP];
 	bool server, disabled, hold;
+	bool withhold_open[CAP];
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
 };
@@ -166,6 +168,10 @@ struct fixture {
 	_Atomic unsigned reject_method;
 	_Atomic bool bad_reply;
 	unsigned batch;
+	uint64_t open_timeout_ns;
+	tr_stream_data_cb endpoint_data;
+	tr_stream_event_cb endpoint_event;
+	void *endpoint_arg;
 };
 static enum tr_rpc_status handler(struct tr_rpc_dispatch_id id,
                                   const struct tr_rpc_record_view *view,
@@ -253,6 +259,28 @@ int __wrap_tr_stream_close(struct tr_stream_handle stream)
 int __real_tr_channel_set_handler(struct tr_channel *, tr_stream_data_cb,
                                   tr_stream_event_cb, tr_channel_event_cb,
                                   void *);
+static enum tr_stream_data_disposition
+observe_endpoint_data(struct tr_stream_handle stream, uint64_t id,
+                      struct tr_buffer *payload, void *arg)
+{
+	struct fixture *f = arg;
+	CHECK(stream.slot < CAP);
+	enum tr_stream_data_disposition ret =
+	        f->endpoint_data(stream, id, payload, f->endpoint_arg);
+	atomic_fetch_add(&f->server.ingress_bytes[stream.slot], payload->len);
+	return ret;
+}
+static void observe_endpoint_event(struct tr_stream_handle stream,
+                                   enum tr_stream_event event, int status,
+                                   void *arg)
+{
+	struct fixture *f = arg;
+	if (event == TR_STREAM_EVENT_OPENED)
+		f->server.streams[stream.slot] = stream;
+	f->endpoint_event(stream, event, status, f->endpoint_arg);
+	if (event == TR_STREAM_EVENT_OPENED)
+		atomic_fetch_add(&f->server.opened, 1);
+}
 int __wrap_tr_channel_set_handler(struct tr_channel *c, tr_stream_data_cb data,
                                   tr_stream_event_cb event,
                                   tr_channel_event_cb changed, void *arg)
@@ -260,6 +288,16 @@ int __wrap_tr_channel_set_handler(struct tr_channel *c, tr_stream_data_cb data,
 	if (c == atomic_load(&observed_channel) && !data && !event &&
 	    atomic_exchange(&fail_detach, false))
 		return TR_ERR_SYS;
+	if (capture_endpoint && capture_endpoint->open_timeout_ns && data &&
+	    event) {
+		struct fixture *f = capture_endpoint;
+		f->endpoint_data = data;
+		f->endpoint_event = event;
+		f->endpoint_arg = arg;
+		return __real_tr_channel_set_handler(c, observe_endpoint_data,
+		                                     observe_endpoint_event,
+		                                     changed, f);
+	}
 	return __real_tr_channel_set_handler(c, data, event, changed, arg);
 }
 int __real_tr_reactor_timer_register(struct tr_reactor *, tr_reactor_timer_cb,
@@ -304,10 +342,14 @@ static void server_terminal(struct tr_stream_handle stream,
 	CHECK(stream.slot < CAP);
 	CHECK((result.delivery == TR_RPC_RECORD_ON_OWNER) ==
 	      !!tr_reactor_in_owner_context_for(f->server.reactor));
-	if (result.delivery == TR_RPC_RECORD_ON_OWNER)
+	if (result.delivery == TR_RPC_RECORD_ON_OWNER) {
 		CHECK(tr_rpc_record_endpoint_close_on_owner(&same) ==
 		      TR_ERR_STATE);
-	else {
+		bool drained = true;
+		CHECK(tr_rpc_record_endpoint_is_drained_on_owner(
+		              f->endpoint, &drained) == TR_OK &&
+		      !drained);
+	} else {
 		CHECK(result.status == TR_RPC_STATUS_CANCELLED &&
 		      !result.final_accepted);
 		CHECK(tr_rpc_record_endpoint_reap_stopped(&same) ==
@@ -391,9 +433,10 @@ static void on_event(struct tr_stream_handle stream, enum tr_stream_event event,
 		        .metadata_size = 7};
 		/* STREAM_OPEN_ACK 的 owner 回调中立即提交 OPEN；不能在 OPENING
 		 * 阶段发送，也不能等到后续独立命令才建立本地调用语义。 */
-		CHECK(tr_rpc_record_stream_send_on_owner(p->calls[stream.slot],
-		                                         &h, metadata,
-		                                         NULL) == TR_OK);
+		if (!p->withhold_open[stream.slot])
+			CHECK(tr_rpc_record_stream_send_on_owner(
+			              p->calls[stream.slot], &h, metadata,
+			              NULL) == TR_OK);
 		atomic_fetch_add(&p->opened, 1);
 	} else if (p->calls[stream.slot]) {
 		CHECK(tr_rpc_record_stream_event_on_owner(p->calls[stream.slot],
@@ -447,6 +490,7 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 		atomic_init(&p->terminals[i], 0);
 		atomic_init(&p->messages[i], 0);
 		atomic_init(&p->initial[i], 0);
+		atomic_init(&p->ingress_bytes[i], 0);
 	}
 	tr_memory_budget_init(&p->budget, 16 * 1024 * 1024);
 	CHECK(tr_buffer_pool_init(&p->pool, CAP, BODY + 1024) == TR_OK);
@@ -467,7 +511,8 @@ static int start_server(void *arg)
 	        .completion_limit = 2,
 	        .progress_limit = 2,
 	        .progress_period_ns = 1000000,
-	        .final_wait_ns = UINT64_C(30000000000)};
+	        .final_wait_ns = UINT64_C(30000000000),
+	        .open_timeout_ns = f->open_timeout_ns};
 	CHECK(tr_task_executor_create(&cfg, &f->server.budget, &f->executor) ==
 	      TR_OK);
 	CHECK(tr_task_executor_start(f->executor) == TR_OK);
@@ -476,15 +521,20 @@ static int start_server(void *arg)
 	              server_terminal, f, &f->server.budget,
 	              &f->endpoint) == TR_OK);
 	capture_timer = true;
+	capture_endpoint = f;
 	CHECK(tr_rpc_record_endpoint_start_on_owner(f->endpoint) == TR_OK);
+	capture_endpoint = NULL;
 	capture_timer = false;
 	return TR_OK;
 }
-static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
+static void fixture_init_open_timeout(struct fixture *f, uint64_t window,
+                                      uint32_t pending,
+                                      uint64_t open_timeout_ns)
 {
 	int a = -1, b = -1;
 	*f = (struct fixture){.config = {CAP, pending, 4, BODY * 4},
-	                      .batch = 2};
+	                      .batch = 2,
+	                      .open_timeout_ns = open_timeout_ns};
 	gate_init(&f->gate);
 	atomic_init(&f->use_gate, false);
 	atomic_init(&f->reject_method, 0);
@@ -527,10 +577,15 @@ static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
 	for (unsigned i = 0; i < 6; ++i)
 		atomic_store(&send_attempts[i], 0);
 }
+static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
+{
+	fixture_init_open_timeout(f, window, pending, 0);
+}
 struct client_create {
 	struct fixture *f;
 	struct tr_stream_handle stream;
 	unsigned method;
+	bool withhold_open;
 };
 static int client_open(void *arg)
 {
@@ -547,15 +602,22 @@ static int client_open(void *arg)
 	              r->stream, &cfg, &cb, &p->budget,
 	              &p->calls[r->stream.slot]) == TR_OK);
 	p->method[r->stream.slot] = r->method;
+	p->withhold_open[r->stream.slot] = r->withhold_open;
 	return TR_OK;
 }
-static unsigned open_call(struct fixture *f, unsigned method)
+static unsigned open_call_mode(struct fixture *f, unsigned method,
+                               bool withhold_open)
 {
 	unsigned opened = atomic_load(&f->client.opened);
-	struct client_create r = {.f = f, .method = method};
+	struct client_create r = {
+	        .f = f, .method = method, .withhold_open = withhold_open};
 	CHECK(tr_reactor_call(f->client.reactor, client_open, &r) == TR_OK);
 	wait_count(&f->client.opened, opened + 1);
 	return r.stream.slot;
+}
+static unsigned open_call(struct fixture *f, unsigned method)
+{
+	return open_call_mode(f, method, false);
 }
 struct bytes {
 	struct tr_buffer b;
@@ -811,6 +873,146 @@ static void wait_network_retired(struct fixture *f)
 		sched_yield();
 	}
 }
+struct fragment_request {
+	struct tr_stream_handle stream;
+	struct tr_buffer *payload;
+};
+static int send_fragment_on_owner(void *arg)
+{
+	struct fragment_request *r = arg;
+	int ret = tr_stream_send(r->stream, r->payload);
+	if (ret == TR_OK)
+		r->payload = NULL;
+	return ret;
+}
+static void send_fragment(struct fixture *f, unsigned slot, const uint8_t *data,
+                          size_t size)
+{
+	struct fragment_request r = {f->client.streams[slot], body_new(size)};
+	memcpy(r.payload->data, data, size);
+	uint64_t end = now_ms() + 15000;
+	int ret;
+	while ((ret = tr_reactor_call(f->client.reactor, send_fragment_on_owner,
+	                              &r)) == TR_AGAIN) {
+		CHECK(r.payload && now_ms() < end);
+		sched_yield();
+	}
+	CHECK(ret == TR_OK && !r.payload);
+}
+static int endpoint_quiet(void *arg)
+{
+	struct fixture *f = arg;
+	bool quiet;
+	int ret =
+	        tr_rpc_record_endpoint_is_drained_on_owner(f->endpoint, &quiet);
+	return ret == TR_OK ? quiet ? TR_OK : TR_AGAIN : ret;
+}
+static int prepare_server_reuse(void *arg)
+{
+	struct fixture *f = arg;
+	CHECK(endpoint_quiet(f) == TR_OK);
+	for (unsigned i = 0; i < CAP; ++i)
+		atomic_store(&f->server.terminals[i], 0);
+	return TR_OK;
+}
+static int prepare_client_reuse(void *arg)
+{
+	struct fixture *f = arg;
+	for (unsigned i = 0; i < CAP; ++i) {
+		if (f->client.calls[i])
+			CHECK(tr_rpc_record_stream_destroy_on_owner(
+			              &f->client.calls[i]) == TR_OK);
+		atomic_store(&f->client.terminals[i], 0);
+		atomic_store(&f->client.messages[i], 0);
+		atomic_store(&f->client.initial[i], 0);
+	}
+	return TR_OK;
+}
+static void test_slow_open(unsigned partial)
+{
+	struct fixture f;
+	/* 真实 timer 驱动总期限；宽裕时间只避免调度抖动影响造包阶段。
+	 * 纳秒级精确边界和不续期由派发器专测独立核验。final_wait 仍为30s。 */
+	fixture_init_open_timeout(&f, 1024 * 1024, 8, UINT64_C(2000000000));
+	uint64_t baseline = atomic_load(&f.server.budget.current_bytes);
+	unsigned healthy = open_call(&f, 3);
+	atomic_store(&f.use_gate, true);
+	request(&f, healthy, 3, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[0].active) == 1);
+	unsigned slow = open_call_mode(&f, 0, true);
+	CHECK(slow != healthy);
+	wait_count(&f.server.opened, 2);
+	struct tr_stream_handle old = f.client.streams[slow];
+	if (partial) {
+		uint8_t open[TR_RPC_RECORD_HEADER_SIZE + 7];
+		const struct tr_rpc_record_header header = {
+		        .kind = TR_RPC_RECORD_OPEN,
+		        .service_id = 7,
+		        .method_id = 9,
+		        .metadata_size = 7,
+		        .remaining_timeout_ns = UINT64_MAX};
+		const struct tr_rpc_record_limits limits = {
+		        BODY, BODY, 7, TR_RPC_RECORD_ACCEPT_NONE};
+		const uint8_t metadata[] = {1, 3, 0, 'k', 'a', 'b', 'c'};
+		CHECK(tr_rpc_record_encode_header(open, sizeof(open), &header,
+		                                  &limits) == TR_OK);
+		memcpy(open + TR_RPC_RECORD_HEADER_SIZE, metadata,
+		       sizeof(metadata));
+		/* 每段都是实际传输消息，Endpoint 的记录解析器跨消息持有前缀。
+		 */
+		send_fragment(&f, slow, open, 7);
+		wait_count(&f.server.ingress_bytes[slow], 7);
+		if (partial == 2) {
+			send_fragment(&f, slow, open + 7, sizeof(open) - 8);
+			wait_count(&f.server.ingress_bytes[slow],
+			           sizeof(open) - 1);
+		}
+	}
+	wait_count(&f.client.terminals[slow], 1);
+	wait_count(&f.server.terminals[slow], 1);
+	CHECK(f.client.status[slow] == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      f.server.status[slow] == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      !f.server.final_accepted[slow]);
+	CHECK(!atomic_load(&f.client.initial[slow]) &&
+	      !atomic_load(&f.client.messages[slow]) &&
+	      !atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) &&
+	      !atomic_load(&close_attempts));
+	CHECK(!atomic_load(&f.business[1].seen[TR_RPC_RECORD_OPEN]) &&
+	      atomic_load(&f.business[0].active) == 1 &&
+	      !atomic_load(&f.client.terminals[healthy]) &&
+	      !atomic_load(&f.server.terminals[healthy]));
+	/* 另一流的工作仍在真实 gate 内。两端从2条网络流收敛到1条，证明
+	 * 慢 OPEN 走了对称 RESET，不以关闭连接或伪造 worker done 回收。 */
+	uint64_t end = now_ms() + 15000;
+	while (tr_channel_active_streams(f.client.channel) != 1 ||
+	       tr_channel_active_streams(f.server.channel) != 1) {
+		CHECK(now_ms() < end);
+		sched_yield();
+	}
+	gate_open(&f.gate);
+	check_final(&f, healthy, TR_RPC_STATUS_OK);
+	CHECK(tr_stream_close(f.client.streams[healthy]) == TR_OK);
+	wait_network_retired(&f);
+	CHECK(until_owner(&f, endpoint_quiet) == TR_OK);
+	CHECK(atomic_load(&f.server.budget.current_bytes) == baseline);
+	CHECK(tr_reactor_call(f.server.reactor, prepare_server_reuse, &f) ==
+	      TR_OK);
+	CHECK(tr_reactor_call(f.client.reactor, prepare_client_reuse, &f) ==
+	      TR_OK);
+	unsigned filler = open_call(&f, 0);
+	unsigned reused = open_call(&f, 0);
+	CHECK(filler == healthy && reused == slow &&
+	      f.client.streams[reused].generation != old.generation);
+	struct peer_reset_request stale = {old, TR_ERR_TIMEOUT};
+	CHECK(tr_reactor_call(f.client.reactor, reset_peer_on_owner, &stale) ==
+	      TR_ERR_STALE);
+	request(&f, filler, 0, 1, 80);
+	request(&f, reused, 0, 1, 80);
+	check_final(&f, filler, TR_RPC_STATUS_OK);
+	check_final(&f, reused, TR_RPC_STATUS_OK);
+	fixture_destroy(&f, false);
+}
 static void test_peer_reset(bool after_final)
 {
 	struct fixture f;
@@ -924,6 +1126,9 @@ static void test_stopped_recovery(bool fatal)
 }
 int main(void)
 {
+	for (unsigned partial = 0; partial < 3; ++partial)
+		test_slow_open(partial);
+	puts("rpc_record_endpoint_tcp: 3 slow OPEN cases passed");
 	test_shapes();
 	test_rejection(false);
 	test_rejection(true);

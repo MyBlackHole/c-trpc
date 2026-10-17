@@ -46,6 +46,9 @@ struct tr_rpc_record_client {
 	uint64_t generation;
 	unsigned depth, callback_depth;
 	bool started, stopping, cleanup, handler_live, timer_live;
+	tr_rpc_record_client_progress_fn progress;
+	void *progress_arg;
+	bool draining, progress_valid, progress_drained, progress_active;
 	struct tr_record_client_slot slots[];
 };
 
@@ -55,7 +58,7 @@ static int tr_record_client_owner(struct tr_rpc_record_client *client)
 {
 	if (!client)
 		return TR_ERR_INVALID;
-	return !client->cleanup &&
+	return !client->cleanup && !client->progress_active &&
 	                       tr_reactor_in_owner_context_for(client->reactor)
 	               ? TR_OK
 	               : TR_ERR_STATE;
@@ -70,6 +73,57 @@ tr_rpc_record_client_reactor(struct tr_rpc_record_client *client)
 int tr_rpc_record_client_in_callback(void)
 {
 	return tr_record_client_callback_depth != 0;
+}
+
+static void
+tr_record_client_publish_progress(struct tr_rpc_record_client *client)
+{
+	bool drained = true;
+	if (!client->progress || !client->draining || client->cleanup ||
+	    client->depth || client->callback_depth || client->progress_active)
+		return;
+	for (uint32_t i = 0; i < client->config.capacity; ++i) {
+		if (client->slots[i].active) {
+			drained = false;
+			break;
+		}
+	}
+	if (client->progress_valid && client->progress_drained == drained)
+		return;
+	client->progress_valid = true;
+	client->progress_drained = drained;
+	client->progress_active = true;
+	client->progress(drained, client->progress_arg);
+	client->progress_active = false;
+}
+
+int tr_rpc_record_client_set_progress_notify_on_owner(
+        struct tr_rpc_record_client *client,
+        tr_rpc_record_client_progress_fn notify, void *arg)
+{
+	int ret = tr_record_client_owner(client);
+	if (ret != TR_OK)
+		return ret;
+	if (client->depth || client->callback_depth)
+		return TR_ERR_STATE;
+	client->progress = notify;
+	client->progress_arg = arg;
+	client->progress_valid = false;
+	tr_record_client_publish_progress(client);
+	return TR_OK;
+}
+
+int tr_rpc_record_client_begin_drain_on_owner(
+        struct tr_rpc_record_client *client)
+{
+	int ret = tr_record_client_owner(client);
+	if (ret != TR_OK)
+		return ret;
+	if (!client->started || client->stopping)
+		return TR_ERR_STATE;
+	client->draining = true;
+	tr_record_client_publish_progress(client);
+	return TR_OK;
 }
 
 static int tr_record_client_now(uint64_t *out)
@@ -290,8 +344,7 @@ static int tr_record_client_retire(struct tr_record_client_slot *slot)
 	if (slot->accepted && (!slot->terminal || !slot->reported))
 		return TR_AGAIN;
 	if (!slot->dead && !slot->close_accepted && !slot->reset_accepted) {
-		if (!slot->peer_final &&
-		    !(slot->peer_closed && !slot->peer_window_known)) {
+		if (!slot->peer_final) {
 			/* RPC HALF_CLOSE 只结束请求事件，不妨碍取消整个调用。
 			 * TR_OK 后传输持有独立的有界重置/确认责任，上层可以
 			 * 退役，晚帧不再需要本调用或其用户参数参与排空。 */
@@ -303,10 +356,9 @@ static int tr_record_client_retire(struct tr_record_client_slot *slot)
 			if (ret == TR_OK)
 				slot->reset_accepted = true;
 		} else {
-			/* 合法 FINAL 或传输 OPEN 被提前拒绝，均以普通关闭确认。
-			 * 后者对端没有准入槽，不能用 RESET 新建取消责任。
-			 * CLOSE 固定在先前 DATA/信用之后，接受后不再主动
-			 * RESET。 */
+			/* 已接纳 FINAL 后以普通关闭确认。GOAWAY 拒绝尚未
+			 * 建立的流会交付精确 ERROR 并退役，不走本分支。
+			 * CLOSE 固定在先前 DATA/信用之后，接受后不再 RESET。 */
 			ret = tr_stream_stop_credit_on_owner(slot->stream);
 			if (ret == TR_OK)
 				ret = tr_stream_close(slot->stream);
@@ -416,6 +468,7 @@ int tr_rpc_record_client_pump_on_owner(struct tr_rpc_record_client *client)
 			ret = progress_ret;
 	}
 	--client->depth;
+	tr_record_client_publish_progress(client);
 	return ret;
 }
 
@@ -461,6 +514,7 @@ tr_record_client_data(struct tr_stream_handle stream, uint64_t message_id,
 	 * CLOSE 必须等下一 owner 轮次，否则它会越过本条接收信用，
 	 * 让对端退役流后再收到未知流的 WINDOW_UPDATE。终局可先报告，
 	 * 绑定与关闭责任交给既有进度定时器或后续安全 owner 操作。 */
+	tr_record_client_publish_progress(client);
 	return TR_STREAM_DATA_RELEASE;
 }
 
@@ -502,6 +556,7 @@ static void tr_record_client_event(struct tr_stream_handle stream,
 	 * 暂无容量时交给定时器，早拒绝仍经原绑定的 FINAL 规则处理。 */
 	(void)tr_record_client_progress(slot);
 	--client->depth;
+	tr_record_client_publish_progress(client);
 }
 
 static int tr_record_client_metadata(const struct tr_rpc_call_options *options,
@@ -570,6 +625,8 @@ int tr_rpc_record_client_call_start_on_owner(
 	if (!client->started || client->stopping || client->depth ||
 	    client->callback_depth || client->generation == UINT64_MAX)
 		return TR_ERR_STATE;
+	if (client->draining)
+		return TR_ERR_CLOSED;
 	for (size_t i = 0; i < client->method_count; ++i) {
 		if (client->methods[i].service_id == service_id &&
 		    client->methods[i].method_id == method_id) {
@@ -897,6 +954,9 @@ int tr_rpc_record_client_reap_stopped(struct tr_rpc_record_client **pointer)
 		return TR_ERR_STATE;
 	}
 	client->cleanup = client->stopping = true;
+	/* 父 owner 已静默；正常排空观察者不能在清理线程伪装进度通知。 */
+	client->progress = NULL;
+	client->progress_arg = NULL;
 	ret = tr_reactor_recovery_release(&guard);
 	if (ret != TR_OK)
 		return ret;

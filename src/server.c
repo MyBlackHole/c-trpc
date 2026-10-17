@@ -1,6 +1,8 @@
+#define _POSIX_C_SOURCE 200809L
 #include "tr/server.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <stdlib.h>
@@ -64,6 +66,9 @@ struct tr_server_shard {
 	/* 只在 owner 或父线程 join 后修改，排空时与对端事件一起冻结。 */
 	int record_cleanup_enabled;
 	int record_tasks_retiring;
+	/* observing 仅由 owner 修改；其余谓词在 finalizer_lock 下发布/读取。 */
+	int record_drain_observing;
+	int record_drained, record_drain_status;
 	struct tr_server_detached_peer *detached_peers;
 	struct tr_server_channel_stats retired_channel_stats;
 	struct tr_server_rpc_stats retired_rpc_stats;
@@ -111,6 +116,9 @@ struct tr_server {
 	pthread_mutex_t finalizer_lock;
 	pthread_cond_t finalizer_cond;
 	int finalizer_cond_ready;
+	/* V1 finalizer_cond 使用默认时钟；V2 限时等待另用单调条件变量。 */
+	pthread_cond_t record_drain_cond;
+	int record_drain_cond_ready;
 	int started;
 	/* 只有构造完成并发布后才允许读取跨分片统计；终止销毁开始后关闭。 */
 	int published;
@@ -826,6 +834,96 @@ static void tr_server_record_terminal(struct tr_stream_handle stream,
 	(void)stream;
 	(void)result;
 	tr_runtime_shard_signal_peer_event(arg);
+}
+
+static void tr_server_record_progress(bool endpoint_drained, void *arg)
+{
+	struct tr_server_shard *shard = arg;
+	struct tr_server *server = shard->server;
+	int drained = 1, status = TR_OK;
+	(void)endpoint_drained;
+	if (!shard->record_drain_observing)
+		return;
+	/* 此时对端表已冻结，查询只在所属 owner 执行。共享执行器的
+	 * outstanding 不等同于本分片终局已通知，不能由 worker 直接发布。 */
+	for (uint32_t i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+		struct tr_runtime_peer *peer =
+		        tr_server_shard_peer_at(shard, i);
+		bool quiet;
+		if (!peer || !peer->used || !peer->record_rpc)
+			continue;
+		int ret = tr_rpc_record_endpoint_is_drained_on_owner(
+		        peer->record_rpc, &quiet);
+		if (ret != TR_OK) {
+			status = ret;
+			drained = 0;
+			break;
+		}
+		if (!quiet)
+			drained = 0;
+	}
+	pthread_mutex_lock(&server->finalizer_lock);
+	if (shard->record_drained != drained ||
+	    shard->record_drain_status != status) {
+		shard->record_drained = drained;
+		shard->record_drain_status = status;
+		pthread_cond_broadcast(&server->record_drain_cond);
+	}
+	pthread_mutex_unlock(&server->finalizer_lock);
+}
+
+static int tr_server_record_watch_drain_on_owner(void *arg)
+{
+	struct tr_server_shard *shard = arg;
+	shard->record_drain_observing = 1;
+	for (uint32_t i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
+		struct tr_runtime_peer *peer =
+		        tr_server_shard_peer_at(shard, i);
+		if (!peer || !peer->used || !peer->record_rpc)
+			continue;
+		int ret = tr_rpc_record_endpoint_set_progress_notify_on_owner(
+		        peer->record_rpc, tr_server_record_progress, shard);
+		if (ret != TR_OK)
+			return ret;
+	}
+	/* 空分片也须发布；注册与随后检查共享同一锁，完成先到不会失唤醒。 */
+	tr_server_record_progress(false, shard);
+	return TR_OK;
+}
+
+static int tr_server_record_wait_drained(struct tr_server *server,
+                                         const struct tr_deadline *deadline)
+{
+	int ret = TR_OK;
+	pthread_mutex_lock(&server->finalizer_lock);
+	for (;;) {
+		int drained = 1;
+		for (uint32_t i = 0; i < server->shard_count; ++i) {
+			struct tr_server_shard *shard = &server->shards[i];
+			if (shard->record_drain_status != TR_OK) {
+				ret = shard->record_drain_status;
+				goto out;
+			}
+			if (!shard->record_drained)
+				drained = 0;
+		}
+		if (drained)
+			break;
+		if (!deadline) {
+			ret = TR_AGAIN;
+			break;
+		}
+		int wait_ret = pthread_cond_timedwait(
+		        &server->record_drain_cond, &server->finalizer_lock,
+		        &deadline->absolute);
+		if (wait_ret != 0) {
+			ret = wait_ret == ETIMEDOUT ? TR_AGAIN : TR_ERR_SYS;
+			break;
+		}
+	}
+out:
+	pthread_mutex_unlock(&server->finalizer_lock);
+	return ret;
 }
 
 static void
@@ -1592,6 +1690,22 @@ tr_server_create_internal(const struct tr_server_config *config,
 	if (pthread_cond_init(&server->finalizer_cond, NULL) != 0)
 		return tr_server_create_rollback(out, server, TR_ERR_SYS);
 	server->finalizer_cond_ready = 1;
+	if (record) {
+		pthread_condattr_t attr;
+		if (pthread_condattr_init(&attr) != 0)
+			return tr_server_create_rollback(out, server,
+			                                 TR_ERR_SYS);
+		ret = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+		if (ret == 0)
+			ret = pthread_cond_init(&server->record_drain_cond,
+			                        &attr);
+		if (ret == 0)
+			server->record_drain_cond_ready = 1;
+		int cleanup_ret = pthread_condattr_destroy(&attr);
+		if (ret != 0 || cleanup_ret != 0)
+			return tr_server_create_rollback(out, server,
+			                                 TR_ERR_SYS);
+	}
 
 	if (!record) {
 		server->methods = (struct tr_server_method *)calloc(
@@ -2320,6 +2434,19 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 		}
 	}
 
+	if (server->record_mode) {
+		for (shard_index = 0; shard_index < server->shard_count;
+		     ++shard_index) {
+			struct tr_server_shard *shard =
+			        &server->shards[shard_index];
+			int ret = tr_reactor_call(
+			        tr_server_shard_reactor(shard),
+			        tr_server_record_watch_drain_on_owner, shard);
+			if (ret != TR_OK)
+				return ret;
+		}
+	}
+
 	/* 所有 GOAWAY 准入已完成，排空等待从这里开始计时一次。
 	 * 非零超时的每个 Channel 共用相同的 CLOCK_MONOTONIC 绝对期限，
 	 * 不再按对端舍入或重建剩余毫秒预算。0ms 仍逐个立即检查。
@@ -2330,6 +2457,13 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 		if (ret != TR_OK)
 			return ret;
 		wait_deadline = &deadline;
+	}
+	if (server->record_mode) {
+		/* RESET 可先归还全部网络槽，原 worker、待交付完成和终局
+		 * 回调仍须真正静默。先等本层，再以同一期限等网络和 TX。 */
+		int ret = tr_server_record_wait_drained(server, wait_deadline);
+		if (ret != TR_OK)
+			return ret;
 	}
 	for (shard_index = 0; shard_index < server->shard_count; ++shard_index) {
 		struct tr_server_shard *shard = &server->shards[shard_index];
@@ -2757,6 +2891,11 @@ int tr_server_destroy(struct tr_server *server)
 			return ret;
 	}
 
+	if (server->record_drain_cond_ready) {
+		if (pthread_cond_destroy(&server->record_drain_cond) != 0)
+			return TR_ERR_SYS;
+		server->record_drain_cond_ready = 0;
+	}
 	if (server->runtime) {
 		ret = tr_runtime_destroy(server->runtime);
 		if (ret != TR_OK)
