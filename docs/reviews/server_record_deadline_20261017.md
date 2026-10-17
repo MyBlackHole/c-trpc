@@ -111,7 +111,7 @@ GCC 13.3 debug 定向构建成功。含元数据 OPEN 加强版与 Client 夹具
 精确定位日志均保留在 `build/validation-server-record-deadline/initial/`。
 
 实现冻结检查点为 `26418d4bcad4320e9e062ab30a8006df6ae2c832`，代码树为
-`33fb9db280ae1a05ad02518f7e1b23ebbe2dd375`。所有完整运行都针对该版本，
+`33fb9db280ae1a05ad02518f7e1b23ebbe2dd375`。以下五组本地完整运行都针对该版本，
 使用 Xmake 3.1.1 的真实构建图，不手写编译命令：
 
 ```sh
@@ -155,6 +155,67 @@ xmake test -v -j1
 GCC release、Clang release 和两类运行时检查器，GCC debug 独立保留
 `matrix/gcc-debug/result.json`，静态汇总为 `static-analysis/static-summary.json`。
 
-随后衔接 Client 最终远端提交仅带入上一阶段验证文档，逐文件核对源码与测试
-均和冻结检查点一致。本记录再补充实测结果；最终远端 CI 仍按实际提交构建
-全部目标并运行完整测试。上述证据不扩大为实时性、跨平台或所有并发调度的保证。
+随后衔接 Client 最终远端提交仅带入上一阶段验证文档。首轮远端提交
+`e51e0bd24289c49966ab6119071f5d364811391c` 的代码树为
+`d547b940a43f939870a5fe42ba777d2e5e92b768`，逐文件核对源码与测试均和上述
+冻结检查点一致，差异仅为两份验证文档。下面单独记录此后远端暴露的测试问题
+及修订，不能将原检查点的测试结果直接视为修订版本的结果。
+
+## 首轮远端失败与 join 故障注入修订
+
+[首轮 CI](https://github.com/MyBlackHole/c-trpc/actions/runs/39008822802)
+与格式、RPC smoke 共 14 个预期作业，13 个成功、1 个失败。唯一失败是
+ThreadSanitizer 作业的旧 `test_server_record/default`：
+`test_join_retry()` 中 `destroy_until_stable(&f) == TR_ERR_SYS` 断言不成立。
+该作业全测结果为 76/77，新增的 `test_server_record_deadline` 七组已全部
+通过；日志没有 ThreadSanitizer 数据竞争诊断。
+
+根因在测试包装器：它先通过 `get_stats` 单独观察 `workers_alive`，仅在观察
+为零时注入 join 失败。如果观察时工作线程仍存活，但线程在真实 join 再次取锁
+之前退出，真实 join 就会合法成功，Server 随之成功销毁，测试故障开关却从未
+消费。两个观察各自正确加锁，仍存在检查与使用之间的时序竞态。
+
+修订只修改旧 Server 测试及它的 Xmake 链接配置，生产实现没有变化。执行器
+join 包装器进入并恢复线程局部作用域，故障移动到这个作用域内真实调用
+`pthread_join` 的边界，在实际回收线程之前一次返回 `EINVAL`。执行器原实现
+将它映射为 `TR_ERR_SYS` 并保留未完成的 join 状态；Reactor 及其他线程的
+join 原样透传，不消费故障。
+
+原有系统错误、Server 对象保留、执行器尚未销毁和重试成功断言全部保留。
+新增断言要求故障恰好命中一次，第一次失败时实际成功回收工作线程数为零，
+重试后成功回收数等于创建的工作线程数。没有放宽断言、删除场景或通过重复
+旧提交的 CI 来掩盖失败。
+
+修订冻结检查点为 `df0ced4708f8fcd04560717743790a47c884f04c`，代码树为
+`fd5103fdec55a6c77548baa135a91a77f05941ae`。固定 clang-format 18.1.8
+针对本阶段基准重新检查 8 个变化 C/头文件，0 失败。
+
+两个独立干净检出对该修订运行 Xmake 定向验证：GCC 13.3 debug 的 Server
+16 场景通过，测试耗时 1.343 秒；GCC 11.4 TSan 构建以下四个测试目标，并
+使用 `halt_on_error=1:second_deadlock_stack=1` 执行六次测试：
+
+| GCC 11.4 TSan 测试 | 次数 | 每次结果 | Xmake 测试耗时 |
+|---|---:|---|---|
+| `test_server_record` | 3 | 16 场景通过；新增注入和真实 join 计数断言生效。 | 1.212、1.042、1.012 秒 |
+| `test_server_record_deadline` | 1 | 七组服务端期限场景通过。 | 1.288 秒 |
+| `test_task_executor` | 1 | 通过。 | 0.050 秒 |
+| `test_server_destroy_retry` | 1 | 通过。 | 0.015 秒 |
+
+两套配置、构建和所有测试退出码均为 0。真实链接命令包含新增的
+`--wrap=pthread_join`；GCC 11 版本同时确认 `-fsanitize=thread` 和对应
+`libtsan.so.0`，六次运行均无 TSan 诊断。编译器与运行库来自同版本的
+Ubuntu 11.4.0-1ubuntu1~22.04.3 软件包，恢复时核对官方签名索引和软件包
+SHA-256。本地宿主仍是 glibc 2.39、binutils 2.42，不能将其称为完整复刻
+ubuntu-22.04 CI 环境；远端仍按 PR 的实际提交重新构建和运行全量矩阵。
+
+修订的格式和 debug 日志位于 `join-injection-revision/`，GCC 11 TSan 的
+源码、编译器、运行库、实际命令、退出码及原始日志 SHA-256 汇总在
+`gcc11-tsan-join-fix-df0ced47/result.json`。两者均位于上述阶段验证目录。
+该修订之后补充的文件仅为本评审记录，测试及生产源码保持冻结。
+
+首轮全部 14 个作业的完整日志、归档和源码身份保留在
+`build/validation-server-record-deadline/remote-initial-failure/`；汇总文件
+`remote-initial-ci.json` 明确保留失败结论。该次 CI/RPC 实际检出合并提交
+`4ad8ecb3c62944d50a9441ceae65a6610fa73501`，其代码树与首轮 head 相同，
+格式检查直接检出首轮 head。验证证据不扩大为实时性、跨平台或所有并发调度
+均已覆盖的保证。

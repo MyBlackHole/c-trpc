@@ -43,10 +43,12 @@ static _Atomic unsigned reactor_count, fatal_polls, detach_failures;
 static _Atomic unsigned cancel_requests;
 static _Atomic unsigned observation_count, stopped_reaps, fail_stopped_reap_at;
 static _Atomic unsigned cleanup_dispatches;
+static _Atomic unsigned executor_join_failures, workers_joined;
 static _Atomic bool fail_poll, fail_handler_detach, fail_executor_join;
 static _Atomic(struct tr_reactor *) reactors[4];
 static _Atomic(struct tr_channel *) observed_channel;
 static _Thread_local bool starting_tasks;
+static _Thread_local bool joining_tasks;
 static _Thread_local bool failing_endpoint_start;
 static struct {
 	_Atomic(struct tr_rpc_record_endpoint *) endpoint;
@@ -114,11 +116,28 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 int __real_tr_task_executor_join(struct tr_task_executor *);
 int __wrap_tr_task_executor_join(struct tr_task_executor *e)
 {
-	struct tr_task_executor_stats stats;
-	CHECK(tr_task_executor_get_stats(e, &stats) == TR_OK);
-	if (!stats.workers_alive && atomic_exchange(&fail_executor_join, false))
-		return TR_ERR_SYS;
-	return __real_tr_task_executor_join(e);
+	bool prior = joining_tasks;
+	joining_tasks = true;
+	int ret = __real_tr_task_executor_join(e);
+	joining_tasks = prior;
+	return ret;
+}
+
+int __real_pthread_join(pthread_t, void **);
+int __wrap_pthread_join(pthread_t thread, void **result)
+{
+	/* 先观察 workers_alive 再调用 join 存在检查与使用之间的竞态：
+	 * worker 可在两次加锁间退出，真实 join 成功而故障从未注入。
+	 * 只在真实执行器已经准入 pthread_join 的边界失败；父 Reactor
+	 * 和其他线程的 join 原样透传，不依赖工作线程退出的调度时机。 */
+	if (joining_tasks && atomic_exchange(&fail_executor_join, false)) {
+		atomic_fetch_add(&executor_join_failures, 1);
+		return EINVAL;
+	}
+	int ret = __real_pthread_join(thread, result);
+	if (joining_tasks && ret == 0)
+		atomic_fetch_add(&workers_joined, 1);
+	return ret;
 }
 
 int __real_tr_task_executor_destroy(struct tr_task_executor **);
@@ -406,6 +425,8 @@ static void reset_observation(void)
 	atomic_store(&stopped_reaps, 0);
 	atomic_store(&fail_stopped_reap_at, 0);
 	atomic_store(&cleanup_dispatches, 0);
+	atomic_store(&executor_join_failures, 0);
+	atomic_store(&workers_joined, 0);
 	atomic_store(&fail_poll, false);
 	atomic_store(&fail_handler_detach, false);
 	atomic_store(&fail_executor_join, false);
@@ -1040,7 +1061,12 @@ static void test_join_retry(void)
 	atomic_store(&fail_executor_join, true);
 	CHECK(destroy_until_stable(&f) == TR_ERR_SYS);
 	CHECK(f.server && atomic_load(&executor_destroys) == 0);
+	CHECK(!atomic_load(&fail_executor_join));
+	CHECK(atomic_load(&executor_join_failures) == 1);
+	CHECK(atomic_load(&workers_joined) == 0);
 	fixture_destroy(&f);
+	CHECK(atomic_load(&executor_join_failures) == 1);
+	CHECK(atomic_load(&workers_joined) == atomic_load(&worker_total));
 }
 
 static void test_configuration(void)

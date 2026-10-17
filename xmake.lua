@@ -666,7 +666,8 @@ target("test_server_record")
                 "-Wl,--wrap=tr_rpc_record_endpoint_close_on_owner",
                 "-Wl,--wrap=tr_rpc_record_endpoint_reap_stopped",
                 "-Wl,--wrap=tr_channel_set_handler",
-                "-Wl,--wrap=pthread_create", "-Wl,--wrap=epoll_wait",
+                "-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join",
+                "-Wl,--wrap=epoll_wait",
                 {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
