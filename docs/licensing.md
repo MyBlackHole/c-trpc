@@ -9,15 +9,22 @@ Copyright 2026 Black Hole
 
 ## 当前分发内容
 
-当前源码树未包含随源码分发的第三方库或 Git 子模块。构建依赖操作系统的
-POSIX/Linux 接口、C/POSIX 运行库和编译器；Xmake、编译器、格式检查器及 CI
-Actions 是外部工具，不因本项目许可而被重新授权。重新分发这些工具或系统库时，
-应另行遵守其各自许可。
+源码树没有内嵌第三方库的实现或 Git 子模块，但包含固定版本 Zstandard 的
+原始许可文本 `third_party/zstd/LICENSE`，不能将它归为项目独立编写的 Apache 内容。
+构建从 Xmake 包来源取得静态 Zstandard 1.5.7，并合入 `libtrcore.a`；安装包同时
+在 `share/doc/c-trpc/third_party/zstd/LICENSE` 携带原始 BSD 许可。
+该文本直接来自 [上游 v1.5.7 LICENSE](https://github.com/facebook/zstd/blob/v1.5.7/LICENSE)，
+Git blob 为 `75800288cc243f164b9d130f125e2ffae28f8e39`；保留上游版权、条件与免责声明。
+
+操作系统 POSIX/Linux 接口、C/POSIX 运行库、Xmake、编译器、格式检查器及 CI
+Actions 仍是外部接口或工具，不因本项目许可而被重新授权。重新分发这些工具或
+系统库时，应另行遵守其各自许可。
 
 源码归档须包含根目录 `LICENSE`、`NOTICE` 和本说明。安装的静态 SDK 在
 `share/doc/c-trpc/` 携带这三份文件。下游分发应遵守 Apache-2.0 的相关条件，
 包括随附许可、保留适用署名，以及对修改作出说明；实际条款以 LICENSE 为准。
-新增第三方内容必须保留其独立许可和署名，并重新核对分发范围。
+Zstandard 原始许可也必须随源码归档和静态 SDK 保留，不能只分发 `.a` 而省略
+随包法律材料。新增或升级第三方内容时重新核对独立许可、署名与分发范围。
 
 ## Git 历史中的 Linux 配置
 

@@ -1,7 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/buffer.h"
 #include "../src/execution/reactor.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/transport/channel/channel.h"
+#include "../src/transport/channel/channel_internal.h"
 #include "../src/transport/protocol/wire.h"
 #include "tr/status.h"
 
@@ -17,7 +19,7 @@
 #include <unistd.h>
 
 #define WINDOW_BYTES 256U
-#define MAX_HELD 8U
+#define MAX_HELD 16U
 
 static _Atomic uint32_t fail_window_updates;
 static _Atomic uint32_t window_attempts;
@@ -54,6 +56,7 @@ struct callback_context {
 	pthread_cond_t cond;
 	unsigned opened;
 	unsigned received;
+	unsigned remote_closed;
 	struct tr_stream_handle last_stream;
 	struct tr_stream_handle incoming[MAX_HELD];
 	struct tr_buffer *held[MAX_HELD];
@@ -132,6 +135,8 @@ static void on_stream_event(struct tr_stream_handle stream,
 		ctx->opened++;
 		ctx->last_stream = stream;
 	}
+	if (event == TR_STREAM_EVENT_REMOTE_CLOSED)
+		ctx->remote_closed++;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
 }
@@ -185,6 +190,36 @@ static void wait_attempts(uint32_t minimum)
 		sleep_ms(1);
 	}
 	assert(!"expected injected WINDOW_UPDATE retry was not observed");
+}
+
+static void wait_consumed(struct tr_stream_handle stream, uint64_t bytes)
+{
+	for (unsigned i = 0; i < 10000U; ++i) {
+		struct tr_stream_flow_state flow;
+		assert(tr_stream_get_flow_state(stream, &flow) == TR_OK);
+		if (flow.rx_consumed_bytes == bytes)
+			return;
+		sleep_ms(1);
+	}
+	assert(!"released DATA was not consumed");
+}
+
+static int stop_credit_on_owner(void *arg)
+{
+	return tr_stream_stop_credit_on_owner(*(struct tr_stream_handle *)arg);
+}
+
+static int open_stopped_on_owner(void *arg)
+{
+	struct tr_stream_handle *stream = arg;
+	struct tr_stream_flow_state flow;
+	int ret = tr_stream_open(stream->channel, TR_LANE_CONTROL, stream);
+	if (ret != TR_OK)
+		return ret;
+	/* 同一所有者轮次尚未读取对端 ACK，确实覆盖 OPENING 状态。 */
+	assert(tr_stream_get_flow_state(*stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit == 0);
+	return tr_stream_stop_credit_on_owner(*stream);
 }
 
 static void wait_closed(struct tr_channel *client, struct tr_channel *server)
@@ -259,6 +294,7 @@ int main(void)
 	struct tr_channel_config channel_config;
 	struct tr_channel_keepalive_config keepalive;
 	struct tr_reactor *reactor = NULL;
+	struct tr_reactor *other_reactor = NULL;
 	struct tr_channel *client = NULL;
 	struct tr_channel *server = NULL;
 	struct tr_conn_handle client_conn;
@@ -268,6 +304,11 @@ int main(void)
 	struct tr_stream_handle third;
 	struct tr_stream_handle fourth;
 	struct tr_stream_handle fifth;
+	struct tr_stream_handle stopped;
+	struct tr_stream_handle stale;
+	struct tr_stream_handle half_closed;
+	struct tr_stream_handle opening;
+	struct tr_stream_handle server_stream;
 	struct tr_stream_flow_state flow;
 	struct tr_channel_stats stats;
 	struct tr_buffer_pool pool;
@@ -276,6 +317,7 @@ int main(void)
 	uint64_t updates_before;
 	uint32_t attempts_before;
 	uint32_t before;
+	unsigned remote_closed_before;
 	int fd_client;
 	int fd_server;
 
@@ -304,8 +346,8 @@ int main(void)
 	channel_config.initial_window_bytes = WINDOW_BYTES;
 	channel_config.window_update_threshold_bytes = 128U;
 	assert(tr_channel_create(&channel_config, client_conn, client_conn,
-				 NULL, on_stream_event, NULL, &client_ctx,
-				 &client) == TR_OK);
+	                         on_data, on_stream_event, NULL, &client_ctx,
+	                         &client) == TR_OK);
 	channel_config.role = TR_CHANNEL_SERVER;
 	assert(tr_channel_create(&channel_config, server_conn, server_conn,
 				 on_data, on_stream_event, NULL, &server_ctx,
@@ -390,14 +432,125 @@ int main(void)
 	atomic_store_explicit(&auto_release_data, 0, memory_order_relaxed);
 	close_stream(fourth, &server_ctx, client, server);
 
+	/* 已 TAKE 的负载和失败信用同时存在时停止新增信用。精确 owner/
+	 * 代次检查不能误作用于当前流，释放仍须记入 consumed 并释放负载。 */
+	stopped = open_stream(client, &client_ctx, &server_ctx, 5U);
+	pthread_mutex_lock(&server_ctx.lock);
+	server_stream = server_ctx.last_stream;
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_stream_stop_credit_on_owner((struct tr_stream_handle){0}) ==
+	       TR_ERR_INVALID);
+	assert(tr_stream_stop_credit_on_owner(server_stream) == TR_ERR_STATE);
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
+	                         &other_reactor) == TR_OK);
+	assert(tr_reactor_start(other_reactor) == TR_OK);
+	assert(tr_reactor_call(other_reactor, stop_credit_on_owner,
+	                       &server_stream) == TR_ERR_STATE);
+	assert(tr_reactor_stop(other_reactor) == TR_OK);
+	assert(tr_reactor_destroy(other_reactor) == TR_OK);
+	stale = server_stream;
+	++stale.generation;
+	assert(tr_reactor_call(reactor, stop_credit_on_owner, &stale) ==
+	       TR_ERR_STALE);
+	send_bytes(stopped, &pool, WINDOW_BYTES / 2);
+	send_bytes(stopped, &pool, WINDOW_BYTES / 2);
+	wait_count(&server_ctx, &server_ctx.received, 8U);
+	atomic_store_explicit(&fail_window_updates, UINT32_MAX,
+	                      memory_order_relaxed);
+	assert(release_message(&server_ctx, 6U) == TR_AGAIN);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW_BYTES &&
+	       flow.rx_consumed_bytes == WINDOW_BYTES / 2 &&
+	       flow.rx_advertised_limit == WINDOW_BYTES);
+	assert(tr_reactor_call(reactor, stop_credit_on_owner, &server_stream) ==
+	       TR_OK);
+	assert(tr_reactor_call(reactor, stop_credit_on_owner, &server_stream) ==
+	       TR_OK);
+	before = atomic_load_explicit(&window_attempts, memory_order_relaxed);
+	assert(tr_channel_get_stats(server, &stats) == TR_OK);
+	updates_before = stats.window_updates_tx;
+	assert(release_message(&server_ctx, 7U) == TR_OK);
+	assert(tr_channel_flush(server) == TR_OK);
+	assert(atomic_load_explicit(&window_attempts, memory_order_relaxed) ==
+	       before);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW_BYTES &&
+	       flow.rx_consumed_bytes == WINDOW_BYTES &&
+	       flow.rx_advertised_limit == WINDOW_BYTES);
+	assert(tr_channel_get_stats(server, &stats) == TR_OK);
+	assert(stats.window_updates_tx == updates_before);
+	assert(tr_stream_get_flow_state(stopped, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == WINDOW_BYTES &&
+	       flow.tx_send_limit == WINDOW_BYTES);
+	atomic_store_explicit(&fail_window_updates, 0U, memory_order_relaxed);
+	close_stream(stopped, &server_ctx, client, server);
+	assert(tr_reactor_call(reactor, stop_credit_on_owner, &server_stream) ==
+	       TR_ERR_STALE);
+
+	/* 普通半关闭不调用终局能力：本地发送侧已关，接收侧仍须通过
+	 * WINDOW_UPDATE 接收超过初始窗口的回复，不能一律停用信用。 */
+	half_closed = open_stream(client, &client_ctx, &server_ctx, 6U);
+	assert(half_closed.slot == stopped.slot &&
+	       half_closed.generation != stopped.generation);
+	pthread_mutex_lock(&server_ctx.lock);
+	server_stream = server_ctx.last_stream;
+	remote_closed_before = server_ctx.remote_closed;
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_stream_close(half_closed) == TR_OK);
+	wait_count(&server_ctx, &server_ctx.remote_closed,
+	           remote_closed_before + 1);
+	assert(tr_stream_close(half_closed) == TR_ERR_CLOSED);
+	send_bytes(server_stream, &pool, WINDOW_BYTES);
+	wait_count(&client_ctx, &client_ctx.received, 1U);
+	assert(release_message(&client_ctx, 0U) == TR_OK);
+	wait_flow(server_stream, WINDOW_BYTES * 2U);
+	send_bytes(server_stream, &pool, WINDOW_BYTES);
+	wait_count(&client_ctx, &client_ctx.received, 2U);
+	assert(release_message(&client_ctx, 1U) == TR_OK);
+	wait_flow(server_stream, WINDOW_BYTES * 3U);
+	assert(tr_stream_get_flow_state(half_closed, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW_BYTES * 2U &&
+	       flow.rx_consumed_bytes == WINDOW_BYTES * 2U &&
+	       flow.rx_advertised_limit == WINDOW_BYTES * 3U);
+	assert(tr_stream_close(server_stream) == TR_OK);
+	wait_closed(client, server);
+
+	/* OPENING 同样可停止接收信用。ACK 及既有 TX 信用仍有效；自动
+	 * RELEASE 路径只累计 consumed，不再产生 WINDOW_UPDATE。 */
+	opening = (struct tr_stream_handle){.channel = client};
+	assert(tr_reactor_call(reactor, open_stopped_on_owner, &opening) ==
+	       TR_OK);
+	wait_count(&client_ctx, &client_ctx.opened, 7U);
+	wait_count(&server_ctx, &server_ctx.opened, 7U);
+	pthread_mutex_lock(&server_ctx.lock);
+	server_stream = server_ctx.last_stream;
+	pthread_mutex_unlock(&server_ctx.lock);
+	before = atomic_load_explicit(&window_attempts, memory_order_relaxed);
+	atomic_store_explicit(&auto_release_data, 1, memory_order_relaxed);
+	send_bytes(server_stream, &pool, WINDOW_BYTES / 2);
+	wait_count(&client_ctx, &client_ctx.received, 3U);
+	wait_consumed(opening, WINDOW_BYTES / 2);
+	assert(tr_channel_flush(client) == TR_OK);
+	assert(atomic_load_explicit(&window_attempts, memory_order_relaxed) ==
+	       before);
+	assert(tr_stream_get_flow_state(opening, &flow) == TR_OK);
+	assert(flow.rx_advertised_limit == WINDOW_BYTES &&
+	       flow.tx_send_limit == WINDOW_BYTES);
+	atomic_store_explicit(&auto_release_data, 0, memory_order_relaxed);
+	send_bytes(opening, &pool, WINDOW_BYTES);
+	wait_count(&server_ctx, &server_ctx.received, 9U);
+	assert(release_message(&server_ctx, 8U) == TR_OK);
+	wait_flow(opening, WINDOW_BYTES * 2U);
+	close_stream(opening, &server_ctx, client, server);
+
 	/* 真实 WINDOW_UPDATE 义务仍处于定时状态时停止反应器。
 	 * Channel 销毁必须在释放存储前注销其回调。
 	 */
-	fifth = open_stream(client, &client_ctx, &server_ctx, 5U);
+	fifth = open_stream(client, &client_ctx, &server_ctx, 8U);
 	send_bytes(fifth, &pool, WINDOW_BYTES);
-	wait_count(&server_ctx, &server_ctx.received, 7U);
+	wait_count(&server_ctx, &server_ctx.received, 10U);
 	atomic_store_explicit(&fail_window_updates, 100U, memory_order_relaxed);
-	assert(release_message(&server_ctx, 6U) == TR_AGAIN);
+	assert(release_message(&server_ctx, 9U) == TR_AGAIN);
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client) == TR_OK);
 	assert(tr_channel_destroy(server) == TR_OK);

@@ -3,6 +3,7 @@
 
 #include "tr/status.h"
 #include "tr/rpc.h"
+#include "tr/rpc_v2.h"
 #include "tr/facade.h"
 #include "tr/client.h"
 #include "tr/server.h"

@@ -2812,14 +2812,14 @@ static void test_channel_graceful_drain(void)
 
 	/* 在对端能观察到 GOAWAY 前，并发对端 OPEN 已被提交。
 	 * 排空中的端点必须拒绝它，不分配本地流；
-	 * 对端为其本地槽位收到普通远端关闭通知。
+	 * 对端按 GOAWAY cutoff 直接退役其 OPENING 槽位。
 	 */
-	wait_channel_counter(&server_ctx, &server_ctx.remote_closed, 1U);
+	wait_channel_counter(&server_ctx, &server_ctx.stream_errors, 1U);
 	assert(tr_channel_active_streams(client_channel) == 1U);
 	pthread_mutex_lock(&client_ctx.lock);
 	assert(client_ctx.opened == 1U);
 	pthread_mutex_unlock(&client_ctx.lock);
-	assert(tr_stream_close(race_probe.raced_stream) == TR_OK);
+	assert(tr_stream_close(race_probe.raced_stream) == TR_ERR_STALE);
 	wait_channel_active_streams(server_channel, 1U);
 
 	memset(&wait_probe, 0, sizeof(wait_probe));
@@ -4576,10 +4576,11 @@ static void test_channel_version_negotiation_failure(void)
 	struct tr_channel_config channel_config;
 	struct tr_reactor *reactor = NULL;
 	struct tr_channel *client_channel = NULL;
-	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle client_conn;
 	struct tr_conn_handle server_conn;
 	struct tr_stream_handle stream;
+	struct tr_buffer_pool pool;
+	struct tr_buffer *hello;
 	int client_fd;
 	int server_fd;
 
@@ -4607,28 +4608,41 @@ static void test_channel_version_negotiation_failure(void)
 	channel_config.max_streams = 8;
 	channel_config.min_protocol_version = 1;
 	channel_config.max_protocol_version = 1;
+	/* 本地配置不再启用旧 GOAWAY 语义；版本 1 必须在发布处理函数前拒绝。 */
 	assert(tr_channel_create(&channel_config, client_conn, client_conn,
-				 NULL, NULL, NULL, NULL,
-				 &client_channel) == TR_OK);
+	                         NULL, NULL, NULL, NULL,
+	                         &client_channel) == TR_ERR_INVALID);
+	assert(client_channel == NULL);
 
-	channel_config.role = TR_CHANNEL_SERVER;
-	channel_config.min_protocol_version = 2;
-	channel_config.max_protocol_version = 2;
-	assert(tr_channel_create(&channel_config, server_conn, server_conn,
-				 NULL, NULL, NULL, NULL,
-				 &server_channel) == TR_OK);
+	channel_config.min_protocol_version = TR_CHANNEL_PROTOCOL_VERSION;
+	channel_config.max_protocol_version = TR_CHANNEL_PROTOCOL_VERSION;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+	                         NULL, NULL, NULL, NULL,
+	                         &client_channel) == TR_OK);
+
+	/* 原始对端仍用合法 envelope 1 发送 HELLO 1，协商必须失败。 */
+	assert(tr_buffer_pool_init(&pool, 1, 32) == TR_OK);
+	assert(tr_buffer_acquire(&pool, 32, &hello) == TR_OK);
+	memset(hello->data, 0, 32);
+	tr_put_le16(hello->data, 1);
+	tr_put_le16(hello->data + 2, 1);
+	tr_put_le32(hello->data + 4,
+	            TR_CHANNEL_LANE_MASK_CONTROL | TR_CHANNEL_LANE_MASK_BULK);
+	tr_put_le32(hello->data + 8, 4096);
+	tr_put_le32(hello->data + 12, 4096);
+	hello->len = 32;
+	assert(tr_reactor_send(server_conn, TR_FRAME_HELLO, 0, 0, 0, hello) ==
+	       TR_OK);
 
 	wait_channel_lane_down(client_channel, TR_LANE_CONTROL);
-	wait_channel_lane_down(server_channel, TR_LANE_CONTROL);
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &stream) ==
-	       TR_ERR_CLOSED);
-	assert(tr_stream_open(server_channel, TR_LANE_CONTROL, &stream) ==
 	       TR_ERR_CLOSED);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
-	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
+	assert(tr_buffer_pool_free_count(&pool) == 1);
+	tr_buffer_pool_destroy(&pool);
 }
 
 static void test_rpc_connection_replacement_semantics(void)

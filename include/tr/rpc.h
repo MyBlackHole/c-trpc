@@ -118,15 +118,23 @@ enum tr_rpc_status {
 /*
  * 稳定且与布局无关的 RPC 生命周期快照。
  *
- * 客户端开始：本地 Call API 返回 TR_OK 并发布 Call 能力句柄。
- * 服务端开始：已注册 Method 的首条合法 REQUEST 被接受
- * （包括随后被拦截器或准入机制拒绝的情况）。
+ * 客户端开始：本地 Call 已被接受并发布能力，外部 API 将返回 TR_OK；
+ * V2 回调可能早于外部 start 返回，计数在发布能力时已经生效。
+ * V1 服务端开始：已注册 Method 的首条合法 REQUEST 被接受
+ * （包括随后被拦截器或准入机制拒绝的情况）。V2 服务端开始：完整合法
+ * OPEN 匹配方法并通过期限准入，包含随后发生的工作分配或执行器拒绝；
+ * 未知方法、无效或不完整 OPEN 不计入服务端调用数。
  *
  * 当此端点提交最终的应用可见 RPC 结果时，恰好记录一次结束。
+ * V2 在调用唯一 terminal 回调之前计数；服务端仍须先等待工作返回和
+ * 完成交付，无 terminal 函数时在相同提交点计数。该计数不证明回调
+ * 已返回、对端收到回复或传输资源已收敛。
  * final_status[] 以枚举 tr_rpc_status 为索引，其总和等于 calls_finished。
  *
  * calls_inflight 是快照计量值（开始数减结束数），不是 Runtime 槽位、
  * 执行器或传输层计数。
+ * V2 无法用 uint64_t 表示累计值时读取返回 TR_ERR_BAD_LENGTH，
+ * 不回绕、不返回截断快照，也不因此拒绝正常 RPC 调用。
  */
 struct tr_rpc_semantic_stats {
 	uint64_t calls_started;

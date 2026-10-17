@@ -17,7 +17,10 @@ static void test_connection_generation_skips_internal_namespace(void)
 		       TR_REACTOR_CONNECTION_GENERATION_MAX - 1U) ==
 	       TR_REACTOR_CONNECTION_GENERATION_MAX);
 	assert(tr_reactor_connection_next_generation(
-		       TR_REACTOR_CONNECTION_GENERATION_MAX) == 1U);
+	               TR_REACTOR_CONNECTION_GENERATION_MAX) == 0U);
+	assert(tr_reactor_connection_next_generation(
+	               TR_REACTOR_CONNECTION_GENERATION_MAX + 1U) == 0U);
+	assert(tr_reactor_connection_next_generation(UINT32_MAX) == 0U);
 
 	/* 所有合法连接令牌的高 16 位都不能进入 0xFFFF 命名空间。 */
 	assert((uint16_t)(

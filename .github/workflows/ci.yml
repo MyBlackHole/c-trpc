@@ -343,18 +343,24 @@ jobs:
             cmp "$legal_file" "$prefix/share/doc/c-trpc/$legal_file"
           done
           cmp docs/licensing.md "$prefix/share/doc/c-trpc/licensing.md"
+          cmp third_party/zstd/LICENSE "$prefix/share/doc/c-trpc/third_party/zstd/LICENSE"
+          # 原外部链接方式不额外传 -lzstd；符号必须来自安装的静态 SDK。
+          nm --defined-only "$prefix/lib/libtrcore.a" > "$RUNNER_TEMP/sdk-symbols.txt"
+          test "$(awk '$NF == "ZSTD_versionNumber" { n++ } END { print n+0 }' "$RUNNER_TEMP/sdk-symbols.txt")" = 1
           archive_dir="$RUNNER_TEMP/trpc-source-license"
           mkdir -p "$archive_dir"
           git archive --format=tar HEAD | tar -xf - -C "$archive_dir"
           cmp LICENSE "$archive_dir/LICENSE"
           cmp NOTICE "$archive_dir/NOTICE"
           cmp docs/licensing.md "$archive_dir/docs/licensing.md"
+          cmp third_party/zstd/LICENSE "$archive_dir/third_party/zstd/LICENSE"
 
           cat > "$RUNNER_TEMP/expected-headers.txt" <<'EOF'
           client.h
           facade.h
           rpc.h
           rpc_codec.h
+          rpc_v2.h
           server.h
           status.h
           transport.h
@@ -410,6 +416,27 @@ jobs:
               -L"$prefix/lib" -ltrcore -o "$RUNNER_TEMP/consumer-$cxx"
             timeout 10s "$RUNNER_TEMP/consumer-$cxx"
             echo "$cxx: explicit SDK headers and public facade consumer passed"
+          done
+
+          # 公共 V2 的真实两端从仓库外编译；不能由源码相对路径或包缓存
+          # 补齐未安装头文件、内部符号或第三方静态依赖。
+          consumer_dir="$RUNNER_TEMP/v2 sdk consumer"
+          mkdir -p "$consumer_dir"
+          cp tests/test_rpc_v2_sdk.c "$consumer_dir/consumer.c"
+          for consumer_compiler in gcc clang g++ clang++; do
+            case "$consumer_compiler" in
+              gcc|clang) language=(-std=c11 -x c) ;;
+              *) language=(-std=c++11 -x c++) ;;
+            esac
+            (
+              cd "$consumer_dir"
+              "$consumer_compiler" "${language[@]}" \
+                -Wall -Wextra -Werror -pedantic -pthread \
+                -I"$prefix/include" consumer.c -x none \
+                -L"$prefix/lib" -ltrcore -o "consumer-$consumer_compiler"
+              timeout 30s "./consumer-$consumer_compiler"
+            )
+            printf 'sdk-v2: compiler=%s result=pass\n' "$consumer_compiler"
           done
           test -z "$(git status --porcelain --untracked-files=all)"
       - name: 验证 Echo 停止判定不会漏报失败

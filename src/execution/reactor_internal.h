@@ -75,7 +75,26 @@ int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
 /* 仅限所有者的终止控制发送。GOAWAY 使用一个 Connection 内嵌的
  * 仅含头部发送槽位，独立于普通控制发送池或命令容量。
  */
-int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection);
+int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection,
+                                    uint32_t last_accepted_peer_stream_id);
+
+/* 所有者登记一次发送排空观察，不分配发送项或命令。TR_OK 固定当前命令
+ * 前沿；此前命令全部处理、该精确连接的 TX 队列及两个终止预留都为空后，
+ * 由原 event_cb 收到一次 TX_DRAINED。重复待办登记不延后前沿。连接关闭
+ * 则由原 CLOSED/ERROR 完成通知，不再另发 TX_DRAINED。
+ *
+ * 此事件只证明本机发送资源已归还及字节已交给内核，不证明对端已收到。
+ * 使用者须先停止新的业务发送并保持处理器发布，直到事件或显式解绑。
+ * 回调不会在本次登记栈内执行，不建立新线程或轮询定时器。
+ */
+int tr_reactor_notify_tx_drained_on_owner(struct tr_conn_handle connection);
+
+/* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
+ * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，
+ * 相同在途项幂等，其他流返回 AGAIN。帧前保留全部已接受命令和 DATA。
+ */
+int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle connection,
+                                          uint32_t stream_id, int status);
 
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
@@ -171,5 +190,19 @@ int tr_reactor_timer_register(struct tr_reactor *reactor,
 int tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
 			 uint64_t deadline_ns);
 int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle);
+
+/* 精确检查所属反应器，不能仅用“当前是某个 owner”代替。 */
+int tr_reactor_in_owner_context_for(const struct tr_reactor *reactor);
+
+/* 库内停止回收租约，零初始化、不可复制。成功取得要求 stop/join 已成功，
+ * 并阻止 start/destroy，直到 release。允许相同租约重试；不延长 Reactor
+ * 存储寿命，不允许并发外层生命周期/释放。回收线程不被伪装为协议 owner。
+ * 子源必须成功解绑、通知者/回调已静默后才能释放租约。 */
+struct tr_reactor_recovery_guard {
+	struct tr_reactor *reactor;
+};
+int tr_reactor_recovery_acquire(struct tr_reactor *reactor,
+                                struct tr_reactor_recovery_guard *guard);
+int tr_reactor_recovery_release(struct tr_reactor_recovery_guard *guard);
 
 #endif

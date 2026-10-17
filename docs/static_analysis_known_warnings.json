@@ -53,7 +53,7 @@
     {
       "source": "src/execution/reactor.c",
       "file": "src/execution/reactor.c",
-      "line": 305,
+      "line": 320,
       "column": 10,
       "check": "clang-analyzer-unix.Malloc",
       "message": "Potential leak of memory pointed to by 'items'"
@@ -93,7 +93,7 @@
     {
       "source": "src/transport/channel/channel.c",
       "file": "src/transport/channel/channel.c",
-      "line": 2602,
+      "line": 3237,
       "column": 10,
       "check": "clang-analyzer-unix.Malloc",
       "message": "Potential leak of memory pointed to by 'build.channel'"

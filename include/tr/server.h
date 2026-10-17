@@ -56,6 +56,7 @@ struct tr_server_config {
 void tr_server_config_init(struct tr_server_config *config);
 
 /*
+ * 默认选择 V1；显式 V2 构造见 tr/rpc_v2.h。
  * 正常成功时返回 TR_OK，并通过 *out 向调用方转移 Server 所有权。
  * 正常构造失败且回滚完整收敛时，*out 保持 NULL。
  *
@@ -75,7 +76,7 @@ int tr_server_register_stream_method(
 	struct tr_server *server, const struct tr_rpc_method_desc *method,
 	const struct tr_rpc_stream_handlers *handlers, void *handler_arg);
 
-/* V1 门面仅接受数字形式的 IPv4 地址；port=0 表示申请临时端口。 */
+/* 门面仅接受数字形式的 IPv4 地址；port=0 表示申请临时端口。 */
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port);
 
@@ -94,6 +95,11 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms);
  * 获取该 Server 所有存活及已退役对端的稳定聚合 RPC 语义生命周期快照。
  * 构造回滚失败后保留的部分 Server、已经进入终局销毁的 Server
  * 不能再读取跨分片统计，此时返回 TR_ERR_STATE。
+ * V1/V2 共用此入口。V2 在外部控制线程同步读取各分片；所有 c-trpc
+ * 回调及工作线程均返回 TR_ERR_STATE，避免跨 owner 自等待。
+ * 成功构造但尚未 start 的 V2 Server 返回全零。跨分片采集不是全局同一
+ * 时刻的原子快照，各字段仍满足调用记账等式。只有 TR_OK 修改 out；
+ * V2 累计值或分片求和不能表示时返回 TR_ERR_BAD_LENGTH。
  * 与其他 Server API 一样，调用方不得与 tr_server_destroy() 并发调用。
  */
 int tr_server_get_rpc_semantic_stats(
