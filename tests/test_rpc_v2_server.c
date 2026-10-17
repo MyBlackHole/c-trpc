@@ -119,11 +119,45 @@ static void wait_entered(struct call *call)
 static void release_work(struct call *call)
 {
 	struct fixture *f = call->fixture;
+	struct timespec end = wait_deadline();
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	assert(call->entered && !call->exited && !call->terminals);
+	while (!call->cancelled)
+		assert(pthread_cond_timedwait(&f->changed, &f->lock, &end) ==
+		       0);
+	assert(!call->exited && !call->terminals);
 	call->release = true;
 	assert(pthread_cond_broadcast(&f->changed) == 0);
 	assert(pthread_mutex_unlock(&f->lock) == 0);
+}
+
+/* 调用者持有 fixture.lock。Client 本地终局不能证明远端已收到取消；
+ * 公共令牌没有条件变量通知，在固定总期限内等待并由 worker 实际查询。 */
+static void wait_worker_cancel(struct fixture *f,
+                               const struct tr_rpc_v2_cancel *cancel)
+{
+	struct timespec end = wait_deadline();
+	for (;;) {
+		int requested = tr_rpc_v2_cancel_requested(cancel);
+		assert(requested == 0 || requested == 1);
+		if (requested)
+			return;
+		struct timespec wake;
+		assert(clock_gettime(CLOCK_REALTIME, &wake) == 0);
+		assert(wake.tv_sec < end.tv_sec ||
+		       (wake.tv_sec == end.tv_sec &&
+		        wake.tv_nsec < end.tv_nsec));
+		wake.tv_nsec += 1000000L;
+		if (wake.tv_nsec >= 1000000000L) {
+			++wake.tv_sec;
+			wake.tv_nsec -= 1000000000L;
+		}
+		if (wake.tv_sec > end.tv_sec ||
+		    (wake.tv_sec == end.tv_sec && wake.tv_nsec > end.tv_nsec))
+			wake = end;
+		int ret = pthread_cond_timedwait(&f->changed, &f->lock, &wake);
+		assert(ret == 0 || ret == ETIMEDOUT);
+	}
 }
 
 static bool same_id(struct tr_rpc_v2_call_id a, struct tr_rpc_v2_call_id b)
@@ -194,10 +228,14 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 	if (method->mode == BLOCKED) {
 		call->entered = true;
 		assert(pthread_cond_broadcast(&f->changed) == 0);
+		wait_worker_cancel(f, cancel);
+		call->cancelled = true;
+		assert(!call->release && !call->terminals);
+		assert(pthread_cond_broadcast(&f->changed) == 0);
 		while (!call->release)
 			assert(pthread_cond_wait(&f->changed, &f->lock) == 0);
 		assert(tr_rpc_v2_cancel_requested(cancel) == 1);
-		call->cancelled = true;
+		assert(!call->terminals);
 		call->exited = true;
 		assert(pthread_cond_broadcast(&f->changed) == 0);
 	}
