@@ -4,8 +4,8 @@
 
 - 主要实现是 Linux 专用的 C11 静态库，使用 pthread、epoll、eventfd、accept4、TCP 等接口，以及 GCC/Clang 的 cleanup 属性。
 - CI 使用 Ubuntu 22.04 的 x86_64 执行环境；GCC 的 `debug/release` 模式、Clang 的 `release` 模式、ASan+UBSan、TSan、安装消费端与真实 RPC 冒烟测试是现有门禁。
-- 公开安装头文件为 trpc.h、status.h、facade.h、client.h、server.h、transport.h、rpc.h、rpc_codec.h。内部头文件不属于 SDK。
-- C++11 消费端仅验证公开头可独立包含、C 链接约定和门面配置/状态调用，不承诺内部 C 实现可按 C++ 编译。
+- 公开安装头文件为 trpc.h、status.h、facade.h、client.h、server.h、transport.h、rpc.h、rpc_codec.h、rpc_v2.h。内部头文件不属于 SDK。
+- C++11 消费端验证公开头可独立包含、C 链接约定、门面配置/状态调用和真实 V2 Client/Server 业务；内部实现仍按 C11 编译。
 
 主动连接及监听 socket 使用 Linux 的 `SOCK_NONBLOCK | SOCK_CLOEXEC` 原子创建；
 不回退到创建后 `fcntl` 设置，避免并发 fork/exec 继承窗口。该保证针对

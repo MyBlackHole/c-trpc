@@ -129,11 +129,18 @@ static _Atomic unsigned deadline_prefixes, deadline_prefixes_accepted,
 static _Atomic bool inline_client_data_once;
 static _Atomic unsigned inline_client_data_calls;
 static _Thread_local bool fail_clock_once;
+static _Thread_local unsigned fail_clock_after;
+static _Atomic(struct tr_buffer_pool *) public_send_pool;
+static _Atomic bool hold_public_send, public_send_held;
+static struct tr_stream_handle public_held_stream;
+static struct tr_buffer *public_held_buffers[2];
 
 int __real_clock_gettime(clockid_t, struct timespec *);
 int __wrap_clock_gettime(clockid_t clock, struct timespec *time)
 {
-	if (clock == CLOCK_MONOTONIC && fail_clock_once) {
+	if (clock == CLOCK_MONOTONIC &&
+	    (fail_clock_once ||
+	     (fail_clock_after && --fail_clock_after == 0))) {
 		fail_clock_once = false;
 		atomic_fetch_add(&clock_failures, 1);
 		errno = EIO;
@@ -155,6 +162,7 @@ static void reset_observation(void)
 {
 	CHECK(pthread_mutex_lock(&observation_lock) == 0);
 	CHECK(!held_count);
+	CHECK(!atomic_load(&public_send_held));
 	memset(observations, 0, sizeof(observations));
 	observation_count = 0;
 	last_client_stream = (struct tr_stream_handle){0};
@@ -184,6 +192,9 @@ static void reset_observation(void)
 	atomic_store(&deadline_prefixes_released, 0);
 	atomic_store(&inline_client_data_once, false);
 	atomic_store(&inline_client_data_calls, 0);
+	atomic_store(&public_send_pool, NULL);
+	atomic_store(&hold_public_send, false);
+	atomic_store(&public_send_held, false);
 	for (unsigned i = 0; i < 6; ++i) {
 		atomic_store(&attempts[i], 0);
 		atomic_store(&accepted[i], 0);
@@ -328,8 +339,25 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 		patched[0] = &replacement->buffer;
 		atomic_fetch_add(&deadline_prefixes, 1);
 	}
-	int ret = __real_tr_stream_sendv(
-	        stream, replacement ? patched : buffers, count);
+	int ret;
+	if (kind == TR_RPC_RECORD_MESSAGE && count == 2 && buffers[1]->pool)
+		atomic_store(&public_send_pool, buffers[1]->pool);
+	if (kind == TR_RPC_RECORD_MESSAGE &&
+	    atomic_exchange(&hold_public_send, false)) {
+		/* 下游接管后延后实际发送，应用先覆写原字节；恢复时仍通过
+		 * 真实 Channel/TCP 检查复制所有权，不用立即送达掩盖借用错误。
+		 */
+		CHECK(!replacement && count == 2 && buffers[1]->pool);
+		CHECK(!atomic_load(&public_send_held));
+		public_held_stream = stream;
+		public_held_buffers[0] = buffers[0];
+		public_held_buffers[1] = buffers[1];
+		atomic_store(&public_send_held, true);
+		ret = TR_OK;
+	} else {
+		ret = __real_tr_stream_sendv(
+		        stream, replacement ? patched : buffers, count);
+	}
 	if (replacement) {
 		if (ret == TR_OK) {
 			atomic_store(&clear_open_deadline, false);
@@ -487,6 +515,7 @@ struct fixture {
 	uint8_t expected_metadata[32];
 	unsigned expected_metadata_size;
 	uint16_t port;
+	bool public_client;
 };
 
 static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
@@ -591,9 +620,13 @@ static void fixture_create(struct fixture *f)
 	CHECK(tr_server_create_record(&f->server_config, &f->tuning,
 	                              &f->server_record, server_copy, 2,
 	                              &f->server) == TR_OK);
-	CHECK(tr_client_create_record(&f->client_config, &f->tuning,
-	                              &f->client_record, client_copy, 3,
-	                              &f->client) == TR_OK);
+	if (f->public_client)
+		CHECK(tr_client_create_v2(&f->client_config, client_copy, 3,
+		                          &f->client) == TR_OK);
+	else
+		CHECK(tr_client_create_record(&f->client_config, &f->tuning,
+		                              &f->client_record, client_copy, 3,
+		                              &f->client) == TR_OK);
 	/* 两端均须冻结输入表，连接之后不再借用构造时的栈存储。 */
 	memset(server_copy, 0, sizeof(server_copy));
 	memset(client_copy, 0, sizeof(client_copy));
@@ -1736,6 +1769,251 @@ static void test_deadlines_and_lifecycle(void)
 	test_destroy_retry(true);
 }
 
+struct public_result {
+	struct fixture *fixture;
+	struct expected_message expected[2];
+	unsigned expected_count;
+	_Atomic unsigned messages, initial, trailing, writable, terminal;
+	_Atomic unsigned depth, arg_freed;
+	enum tr_rpc_status status;
+	enum tr_rpc_v2_delivery delivery;
+};
+
+struct public_context {
+	struct public_result *result;
+	bool free_on_terminal;
+};
+
+static void public_message(struct tr_rpc_v2_call call,
+                           const struct tr_rpc_bytes *message, void *arg)
+{
+	struct public_result *result = ((struct public_context *)arg)->result;
+	(void)call;
+	CHECK(tr_reactor_in_owner_context());
+	CHECK(!atomic_load(&result->terminal));
+	CHECK(atomic_fetch_add(&result->depth, 1) == 0);
+	unsigned index = atomic_load(&result->messages);
+	CHECK(index < result->expected_count);
+	CHECK(message->len == result->expected[index].size);
+	for (unsigned i = 0; i < message->len; ++i)
+		CHECK(message->data[i] ==
+		      pattern(result->expected[index].tag, i));
+	CHECK(atomic_fetch_sub(&result->depth, 1) == 1);
+	atomic_fetch_add(&result->messages, 1);
+}
+
+static void public_metadata(struct tr_rpc_v2_call call,
+                            enum tr_rpc_v2_metadata_phase phase,
+                            const struct tr_rpc_v2_metadata_view *metadata,
+                            void *arg)
+{
+	struct public_result *result = ((struct public_context *)arg)->result;
+	(void)call;
+	CHECK(tr_reactor_in_owner_context());
+	CHECK(!atomic_load(&result->terminal));
+	CHECK(tr_rpc_v2_metadata_count(metadata) == 0);
+	if (phase == TR_RPC_V2_METADATA_INITIAL)
+		CHECK(atomic_fetch_add(&result->initial, 1) == 0);
+	else {
+		CHECK(phase == TR_RPC_V2_METADATA_TRAILING);
+		CHECK(atomic_fetch_add(&result->trailing, 1) == 0);
+	}
+}
+
+static void public_writable(struct tr_rpc_v2_call call, void *arg)
+{
+	struct public_result *result = ((struct public_context *)arg)->result;
+	(void)call;
+	CHECK(tr_reactor_in_owner_context());
+	CHECK(!atomic_load(&result->terminal));
+	atomic_fetch_add(&result->writable, 1);
+}
+
+static void public_terminal(struct tr_rpc_v2_call call,
+                            enum tr_rpc_status status,
+                            enum tr_rpc_v2_delivery delivery, void *arg)
+{
+	struct public_context *context = arg;
+	struct public_result *result = context->result;
+	(void)call;
+	CHECK(!atomic_load(&result->depth));
+	CHECK(!atomic_load(&result->terminal));
+	CHECK(delivery == TR_RPC_V2_DELIVERY_LIVE
+	              ? tr_reactor_in_owner_context()
+	              : !tr_reactor_in_owner_context());
+	CHECK(tr_client_destroy(result->fixture->client) == TR_ERR_STATE);
+	CHECK(tr_client_wait_drained(result->fixture->client, 1) ==
+	      TR_ERR_STATE);
+	result->status = status;
+	result->delivery = delivery;
+	if (context->free_on_terminal) {
+		free(context);
+		atomic_store(&result->arg_freed, 1);
+	}
+	CHECK(atomic_fetch_add(&result->terminal, 1) == 0);
+}
+
+static struct tr_rpc_v2_client_callbacks
+public_callbacks(struct public_context *context)
+{
+	return (struct tr_rpc_v2_client_callbacks){.message = public_message,
+	                                           .metadata = public_metadata,
+	                                           .writable = public_writable,
+	                                           .terminal = public_terminal,
+	                                           .arg = context};
+}
+
+static void public_fixture_init(struct fixture *f)
+{
+	fixture_init(f);
+	f->public_client = true;
+	f->client_config.limits.max_message_bytes = BODY;
+	fixture_create(f);
+	fixture_connect(f);
+}
+
+static int resume_public_send_on_owner(void *arg)
+{
+	(void)arg;
+	CHECK(atomic_load(&public_send_held));
+	CHECK(tr_reactor_in_owner_context_for(
+	        tr_channel_reactor(public_held_stream.channel)));
+	int ret = __real_tr_stream_sendv(public_held_stream,
+	                                 public_held_buffers, 2);
+	if (ret == TR_OK) {
+		public_held_buffers[0] = public_held_buffers[1] = NULL;
+		atomic_store(&public_send_held, false);
+	}
+	return ret;
+}
+
+static int pump_public_call_on_owner(void *arg)
+{
+	struct tr_rpc_record_client_handle handle =
+	        tr_rpc_record_client_private_handle(
+	                *(struct tr_rpc_v2_call *)arg);
+	return tr_rpc_record_client_pump_on_owner(handle.client);
+}
+
+static void test_public_copy_and_pool(void)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f,
+	                               .expected = {{257, 70}, {263, 71}},
+	                               .expected_count = 2};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t source[263];
+	public_fixture_init(&f);
+	CHECK(tr_client_v2_call_start(f.client, 17, 2, NULL, &cb, &call) ==
+	      TR_OK);
+	wait_count(&result.writable, 1);
+	for (unsigned i = 0; i < 257; ++i)
+		source[i] = pattern(70, i);
+	struct tr_rpc_bytes message = {source, 257};
+	atomic_store(&hold_public_send, true);
+	CHECK(tr_rpc_v2_call_send(call, &message) == TR_OK);
+	CHECK(atomic_load(&public_send_held));
+	CHECK(public_held_buffers[1]->data != source);
+	memset(source, 0xee, sizeof(source));
+	struct tr_reactor *owner =
+	        tr_channel_reactor(atomic_load(&client_channel));
+	CHECK(tr_reactor_call(owner, resume_public_send_on_owner, NULL) ==
+	      TR_OK);
+	wait_count(&result.messages, 1);
+
+	/* 占满真实复制池，保持普通 TX/信用充足，区分两种准入压力。 */
+	struct tr_buffer_pool *pool = atomic_load(&public_send_pool);
+	CHECK(pool && pool->buffer_count);
+	uint32_t count = pool->buffer_count;
+	struct tr_buffer **owned = calloc(count, sizeof(*owned));
+	CHECK(owned);
+	for (uint32_t i = 0; i < count; ++i)
+		CHECK(tr_buffer_acquire(pool, 1, &owned[i]) == TR_OK);
+	CHECK(tr_buffer_pool_free_count(pool) == 0);
+	unsigned attempts_before =
+	        atomic_load(&attempts[TR_RPC_RECORD_MESSAGE]);
+	message.len = BODY + 1;
+	CHECK(tr_rpc_v2_call_send(call, &message) == TR_ERR_BAD_LENGTH);
+	message.len = 263;
+	for (unsigned i = 0; i < message.len; ++i)
+		source[i] = pattern(71, i);
+	CHECK(tr_rpc_v2_call_send(call, &message) == TR_AGAIN);
+	CHECK(atomic_load(&attempts[TR_RPC_RECORD_MESSAGE]) == attempts_before);
+	unsigned writable_before = atomic_load(&result.writable);
+	CHECK(tr_reactor_call(owner, pump_public_call_on_owner, &call) ==
+	      TR_OK);
+	CHECK(atomic_load(&result.writable) == writable_before);
+	tr_buffer_release(owned[0]);
+	owned[0] = NULL;
+	wait_count(&result.writable, writable_before + 1);
+	CHECK(tr_rpc_v2_call_send(call, &message) == TR_OK);
+	memset(source, 0xff, sizeof(source));
+	wait_count(&result.messages, 2);
+	CHECK(tr_rpc_v2_call_half_close(call) == TR_OK);
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == TR_RPC_STATUS_OK);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	CHECK(atomic_load(&result.initial) == 1);
+	CHECK(atomic_load(&result.trailing) == 1);
+	/* 新增复制池仍有外部测试持有者时，销毁必须保留预算依赖并可重试。 */
+	CHECK(count > 1);
+	for (uint32_t i = 2; i < count; ++i)
+		tr_buffer_release(owned[i]);
+	CHECK(tr_client_destroy(f.client) == TR_ERR_STATE);
+	tr_buffer_release(owned[1]);
+	free(owned);
+	CHECK(tr_client_destroy(f.client) == TR_OK);
+	f.client = NULL;
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+}
+
+struct public_early_request {
+	struct fixture *fixture;
+	struct public_result *result;
+	struct tr_rpc_v2_call call;
+};
+
+static int public_early_start_on_owner(void *arg)
+{
+	struct public_early_request *request = arg;
+	struct public_context *context = malloc(sizeof(*context));
+	CHECK(context);
+	*context = (struct public_context){request->result, true};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(context);
+	/* 同一 owner 事务：受理时的时钟成功，受理后首次 pump 的时钟
+	 * 失败。终局在 start 返回前释放 arg，out 则放在独立存储中。 */
+	fail_clock_after = 2;
+	int ret = tr_client_v2_call_start(request->fixture->client, 17, 2, NULL,
+	                                  &cb, &request->call);
+	CHECK(!fail_clock_after);
+	CHECK(ret == TR_OK);
+	CHECK(atomic_load(&request->result->terminal) == 1);
+	CHECK(atomic_load(&request->result->arg_freed) == 1);
+	CHECK(request->result->status == TR_RPC_STATUS_INTERNAL);
+	CHECK(request->result->delivery == TR_RPC_V2_DELIVERY_LIVE);
+	return TR_OK;
+}
+
+static void test_public_early_terminal(void)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f};
+	struct public_early_request request = {&f, &result, {{0}}};
+	public_fixture_init(&f);
+	struct tr_reactor *owner =
+	        tr_channel_reactor(atomic_load(&client_channel));
+	CHECK(tr_reactor_call(owner, public_early_start_on_owner, &request) ==
+	      TR_OK);
+	CHECK(atomic_load(&clock_failures) == 1);
+	CHECK(!atomic_load(&result.messages));
+	CHECK(!atomic_load(&result.writable));
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+}
+
 int main(void)
 {
 	CHECK(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
@@ -1755,6 +2033,10 @@ int main(void)
 	puts("test_client_record: disconnect passed");
 	test_deadlines_and_lifecycle();
 	puts("test_client_record: deadlines and lifecycle passed");
-	puts("test_client_record: 8 groups passed");
+	test_public_copy_and_pool();
+	puts("test_client_record: public copy and pool passed");
+	test_public_early_terminal();
+	puts("test_client_record: public early terminal passed");
+	puts("test_client_record: 10 groups passed");
 	return 0;
 }

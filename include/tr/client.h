@@ -41,6 +41,7 @@ struct tr_client_config {
 void tr_client_config_init(struct tr_client_config *config);
 
 /*
+ * 默认选择 V1；显式 V2 构造见 tr/rpc_v2.h。
  * 正常成功时返回 TR_OK，并通过 *out 向调用方转移 Client 所有权。
  * 正常构造失败且回滚完整收敛时，*out 保持 NULL。
  *
@@ -52,7 +53,7 @@ int tr_client_create(const struct tr_client_config *config,
 		     struct tr_client **out);
 
 /*
- * V1 门面仅接受数字形式的 IPv4 地址。
+ * 门面仅接受数字形式的 IPv4 地址。
  *
  * fd 被 Reactor 接管后，后续 Channel/RPC/保活/重连任一步失败都会
  * 同步执行会话回滚。只有回滚完整收敛时才返回原连接错误；

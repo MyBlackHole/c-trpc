@@ -525,11 +525,13 @@ static void fixture_init(struct fixture *f, uint64_t window, uint32_t pending)
 	for (unsigned i = 0; i < 4; ++i) {
 		f->contexts[i] = (struct method_context){f, i};
 		f->methods[i] = (struct tr_rpc_dispatch_method){
-		        {7, 9 + i, i < 2 ? TR_RPC_ONE : TR_RPC_MANY,
-		         (i & 1) ? TR_RPC_MANY : TR_RPC_ONE, TR_RPC_CODEC_RAW,
-		         TR_RPC_CODEC_RAW, TR_LANE_BULK, BODY, BODY},
-		        handler,
-		        &f->contexts[i]};
+		        .descriptor = {7, 9 + i,
+		                       i < 2 ? TR_RPC_ONE : TR_RPC_MANY,
+		                       (i & 1) ? TR_RPC_MANY : TR_RPC_ONE,
+		                       TR_RPC_CODEC_RAW, TR_RPC_CODEC_RAW,
+		                       TR_LANE_BULK, BODY, BODY},
+		        .work = handler,
+		        .arg = &f->contexts[i]};
 	}
 	tcp_pair(&a, &b);
 	peer_init(&f->client, f, a, false, window);

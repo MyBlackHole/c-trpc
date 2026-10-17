@@ -56,6 +56,7 @@ struct tr_server_config {
 void tr_server_config_init(struct tr_server_config *config);
 
 /*
+ * 默认选择 V1；显式 V2 构造见 tr/rpc_v2.h。
  * 正常成功时返回 TR_OK，并通过 *out 向调用方转移 Server 所有权。
  * 正常构造失败且回滚完整收敛时，*out 保持 NULL。
  *
@@ -75,7 +76,7 @@ int tr_server_register_stream_method(
 	struct tr_server *server, const struct tr_rpc_method_desc *method,
 	const struct tr_rpc_stream_handlers *handlers, void *handler_arg);
 
-/* V1 门面仅接受数字形式的 IPv4 地址；port=0 表示申请临时端口。 */
+/* 门面仅接受数字形式的 IPv4 地址；port=0 表示申请临时端口。 */
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port);
 

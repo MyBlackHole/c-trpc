@@ -29,6 +29,8 @@
 #include "runtime/runtime_internal.h"
 #include "io/socket_internal.h"
 #include "client_record_internal.h"
+#include "rpc/rpc_record_dispatch.h"
+#include "rpc/rpc_v2_internal.h"
 
 static int tr_client_blocking_lifecycle_context(void)
 {
@@ -38,7 +40,8 @@ static int tr_client_blocking_lifecycle_context(void)
 	 */
 	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
 	       tr_task_in_worker_context() ||
-	       tr_rpc_record_client_in_callback();
+	       tr_rpc_record_client_in_callback() ||
+	       tr_rpc_record_dispatch_in_callback();
 }
 
 struct tr_client {
@@ -56,6 +59,7 @@ struct tr_client {
 	size_t record_method_count;
 	size_t record_method_bytes;
 	int record_mode;
+	int record_sdk_mode;
 	int record_connect_failed;
 	_Atomic int record_stopping;
 	int destroy_active;
@@ -295,7 +299,8 @@ tr_client_create_internal(const struct tr_client_config *config,
                           const struct tr_facade_tuning *tuning,
                           const struct tr_client_record_config *record,
                           const struct tr_rpc_method_desc *methods,
-                          size_t method_count, struct tr_client **out)
+                          size_t method_count, int public_v2,
+                          struct tr_client **out)
 {
 	struct tr_client_config effective;
 	struct tr_facade_tuning effective_tuning;
@@ -344,6 +349,7 @@ tr_client_create_internal(const struct tr_client_config *config,
 	atomic_init(&client->record_stopping, 0);
 	if (record) {
 		client->record_mode = 1;
+		client->record_sdk_mode = public_v2;
 		client->record_config = *record;
 		ret = tr_client_record_wait_init(client);
 		if (ret != TR_OK)
@@ -417,6 +423,16 @@ tr_client_create_internal(const struct tr_client_config *config,
 		if (ret != TR_OK)
 			return tr_client_create_rollback(out, client, ret);
 		client->reassembly_pool_ready = 1;
+		if (public_v2) {
+			ret = tr_buffer_pool_init_dynamic_budgeted(
+			        &client->rpc_message_pool,
+			        effective_tuning.rpc_message_pool_count,
+			        effective.limits.max_message_bytes, budget);
+			if (ret != TR_OK)
+				return tr_client_create_rollback(out, client,
+				                                 ret);
+			client->rpc_pool_ready = 1;
+		}
 		ret = tr_memory_budget_reserve(budget, bytes);
 		if (ret != TR_OK)
 			return tr_client_create_rollback(out, client, ret);
@@ -443,7 +459,7 @@ int tr_client_create_with_tuning(const struct tr_client_config *config,
                                  const struct tr_facade_tuning *tuning,
                                  struct tr_client **out)
 {
-	return tr_client_create_internal(config, tuning, NULL, NULL, 0, out);
+	return tr_client_create_internal(config, tuning, NULL, NULL, 0, 0, out);
 }
 
 int tr_client_create_record(const struct tr_client_config *config,
@@ -458,7 +474,57 @@ int tr_client_create_record(const struct tr_client_config *config,
 		return TR_ERR_INVALID;
 	}
 	return tr_client_create_internal(config, tuning, record, methods,
-	                                 method_count, out);
+	                                 method_count, 0, out);
+}
+
+int tr_client_create_v2(const struct tr_client_config *config,
+                        const struct tr_rpc_method_desc *methods,
+                        size_t method_count, struct tr_client **out)
+{
+	struct tr_client_config effective;
+	struct tr_facade_tuning tuning;
+	struct tr_client_record_config record = {0};
+	int ret;
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (config)
+		effective = *config;
+	else
+		tr_client_config_init(&effective);
+	tr_client_normalize_config(&effective);
+	if (!methods || !method_count ||
+	    method_count > effective.limits.max_methods ||
+	    method_count > SIZE_MAX / sizeof(*methods))
+		return TR_ERR_INVALID;
+	/* 公共上限描述正文。内部为控制记录留出的空间不能放宽此约束。 */
+	for (size_t i = 0; i < method_count; ++i)
+		if (methods[i].max_request_bytes >
+		            effective.limits.max_message_bytes ||
+		    methods[i].max_response_bytes >
+		            effective.limits.max_message_bytes ||
+		    methods[i].max_request_bytes >
+		            effective.limits.initial_window_bytes ||
+		    methods[i].max_response_bytes >
+		            effective.limits.initial_window_bytes)
+			return TR_ERR_INVALID;
+	ret = tr_rpc_v2_prepare_limits(&effective.limits);
+	if (ret != TR_OK)
+		return ret;
+	tr_facade_tuning_init(&tuning);
+	ret = tr_rpc_v2_memory_limit(&effective.limits, &tuning, 1,
+	                             &record.memory_budget_bytes);
+	if (ret != TR_OK)
+		return ret;
+	record.calls.capacity = effective.limits.max_calls;
+	if (record.calls.capacity > effective.limits.max_streams)
+		record.calls.capacity = effective.limits.max_streams;
+	record.calls.progress_limit = 64;
+	record.calls.progress_period_ns = 1000000;
+	return tr_client_create_internal(&effective, &tuning, &record, methods,
+	                                 method_count, 1, out);
 }
 
 int tr_client_create(const struct tr_client_config *config,
@@ -586,6 +652,12 @@ static int tr_client_record_assemble_on_owner(void *arg)
 	        &client->record_rpc);
 	if (ret != TR_OK)
 		return ret;
+	if (client->record_sdk_mode) {
+		ret = tr_rpc_record_client_set_send_pool_on_owner(
+		        client->record_rpc, &client->rpc_message_pool);
+		if (ret != TR_OK)
+			return ret;
+	}
 	ret = tr_rpc_record_client_set_progress_notify_on_owner(
 	        client->record_rpc, tr_client_record_progress, client);
 	if (ret != TR_OK)
@@ -949,7 +1021,8 @@ static int tr_client_record_sync(struct tr_rpc_record_client *client,
 	if (!owner)
 		return TR_ERR_STATE;
 	if ((tr_reactor_in_owner_context() ||
-	     tr_rpc_record_client_in_callback()) &&
+	     tr_rpc_record_client_in_callback() ||
+	     tr_rpc_record_dispatch_in_callback()) &&
 	    !tr_reactor_in_owner_context_for(owner))
 		return TR_ERR_STATE;
 	return tr_reactor_call(owner, fn, arg);
@@ -997,8 +1070,47 @@ int tr_client_record_call_start(
 	                             tr_client_record_start_on_owner, &request);
 }
 
+struct tr_client_v2_start_request {
+	struct tr_rpc_record_client *client;
+	uint32_t service_id, method_id;
+	const struct tr_rpc_call_options *options;
+	const struct tr_rpc_v2_client_callbacks *callbacks;
+	struct tr_rpc_v2_call *out;
+};
+
+static int tr_client_v2_start_on_owner(void *arg)
+{
+	struct tr_client_v2_start_request *request = arg;
+	return tr_rpc_record_client_call_start_public_on_owner(
+	        request->client, request->service_id, request->method_id,
+	        request->options, request->callbacks, request->out);
+}
+
+int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
+                            uint32_t method_id,
+                            const struct tr_rpc_call_options *options,
+                            const struct tr_rpc_v2_client_callbacks *callbacks,
+                            struct tr_rpc_v2_call *out)
+{
+	if (!client)
+		return TR_ERR_INVALID;
+	if (!client->record_sdk_mode)
+		return TR_ERR_UNSUPPORTED;
+	if (atomic_load_explicit(&client->record_stopping,
+	                         memory_order_acquire) ||
+	    client->record_connect_failed || !client->connected ||
+	    !client->record_rpc)
+		return TR_ERR_STATE;
+	struct tr_client_v2_start_request request = {
+	        client->record_rpc, service_id, method_id, options,
+	        callbacks,          out};
+	return tr_client_record_sync(client->record_rpc,
+	                             tr_client_v2_start_on_owner, &request);
+}
+
 enum tr_client_record_operation {
 	TR_CLIENT_RECORD_SEND,
+	TR_CLIENT_RECORD_SEND_BYTES,
 	TR_CLIENT_RECORD_HALF_CLOSE,
 	TR_CLIENT_RECORD_CANCEL
 };
@@ -1007,6 +1119,7 @@ struct tr_client_record_operation_request {
 	struct tr_rpc_record_client_handle handle;
 	struct tr_buffer **body;
 	enum tr_client_record_operation operation;
+	const struct tr_rpc_bytes *message;
 };
 
 static int tr_client_record_operation_on_owner(void *arg)
@@ -1017,6 +1130,9 @@ static int tr_client_record_operation_on_owner(void *arg)
 	case TR_CLIENT_RECORD_SEND:
 		return tr_rpc_record_client_send_on_owner(request->handle,
 		                                          request->body);
+	case TR_CLIENT_RECORD_SEND_BYTES:
+		return tr_rpc_record_client_send_bytes_on_owner(
+		        request->handle, request->message);
 	case TR_CLIENT_RECORD_HALF_CLOSE:
 		return tr_rpc_record_client_half_close_on_owner(
 		        request->handle);
@@ -1030,7 +1146,9 @@ int tr_client_record_send(struct tr_rpc_record_client_handle handle,
                           struct tr_buffer **body)
 {
 	struct tr_client_record_operation_request request = {
-	        handle, body, TR_CLIENT_RECORD_SEND};
+	        .handle = handle,
+	        .body = body,
+	        .operation = TR_CLIENT_RECORD_SEND};
 
 	return tr_client_record_sync(
 	        handle.client, tr_client_record_operation_on_owner, &request);
@@ -1039,7 +1157,7 @@ int tr_client_record_send(struct tr_rpc_record_client_handle handle,
 int tr_client_record_half_close(struct tr_rpc_record_client_handle handle)
 {
 	struct tr_client_record_operation_request request = {
-	        handle, NULL, TR_CLIENT_RECORD_HALF_CLOSE};
+	        .handle = handle, .operation = TR_CLIENT_RECORD_HALF_CLOSE};
 
 	return tr_client_record_sync(
 	        handle.client, tr_client_record_operation_on_owner, &request);
@@ -1048,10 +1166,35 @@ int tr_client_record_half_close(struct tr_rpc_record_client_handle handle)
 int tr_client_record_cancel(struct tr_rpc_record_client_handle handle)
 {
 	struct tr_client_record_operation_request request = {
-	        handle, NULL, TR_CLIENT_RECORD_CANCEL};
+	        .handle = handle, .operation = TR_CLIENT_RECORD_CANCEL};
 
 	return tr_client_record_sync(
 	        handle.client, tr_client_record_operation_on_owner, &request);
+}
+
+int tr_rpc_v2_call_send(struct tr_rpc_v2_call call,
+                        const struct tr_rpc_bytes *message)
+{
+	struct tr_rpc_record_client_handle handle =
+	        tr_rpc_record_client_private_handle(call);
+	struct tr_client_record_operation_request request = {
+	        .handle = handle,
+	        .operation = TR_CLIENT_RECORD_SEND_BYTES,
+	        .message = message};
+	return tr_client_record_sync(
+	        handle.client, tr_client_record_operation_on_owner, &request);
+}
+
+int tr_rpc_v2_call_half_close(struct tr_rpc_v2_call call)
+{
+	return tr_client_record_half_close(
+	        tr_rpc_record_client_private_handle(call));
+}
+
+int tr_rpc_v2_call_cancel(struct tr_rpc_v2_call call)
+{
+	return tr_client_record_cancel(
+	        tr_rpc_record_client_private_handle(call));
 }
 
 static int tr_client_record_begin_drain_on_owner(void *arg)

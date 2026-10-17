@@ -1,11 +1,13 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rpc_record_dispatch.h"
+#include "rpc_v2_internal.h"
 #include "../execution/reactor_internal.h"
 #include "../transport/channel/channel_internal.h"
 #include "../memory_budget.h"
 #include "tr/status.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
 
@@ -24,6 +26,82 @@ struct tr_rpc_record_reply {
 	enum tr_rpc_status status;
 	bool finished;
 };
+struct tr_rpc_v2_cancel {
+	const struct tr_task_cancel *task;
+};
+struct tr_rpc_v2_reply {
+	struct tr_rpc_record_reply *record;
+};
+
+/* 公共能力仅在当前工作回调的栈上有效。先比较地址再解引用，使
+ * 跨线程或回调外误用不会读取已经失效的包装存储。终局回调也计入
+ * 深度，尤其不能在停止清理线程中递归调用门面 destroy。 */
+static _Thread_local const struct tr_rpc_v2_cancel *tr_v2_active_cancel;
+static _Thread_local struct tr_rpc_v2_reply *tr_v2_active_reply;
+static _Thread_local unsigned tr_v2_callback_depth;
+static _Atomic uint64_t tr_dispatch_instances;
+
+int tr_rpc_record_dispatch_in_callback(void)
+{
+	return tr_v2_callback_depth != 0;
+}
+
+int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel)
+{
+	if (!cancel)
+		return TR_ERR_INVALID;
+	if (cancel != tr_v2_active_cancel)
+		return TR_ERR_STATE;
+	return tr_task_cancel_requested(cancel->task);
+}
+
+int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
+                           const struct tr_rpc_bytes *message)
+{
+	if (!reply)
+		return TR_ERR_INVALID;
+	if (reply != tr_v2_active_reply)
+		return TR_ERR_STATE;
+	if (reply->record->finished ||
+	    reply->record->status != TR_RPC_STATUS_OK) {
+		if (reply->record->status == TR_RPC_STATUS_OK)
+			reply->record->status =
+			        TR_RPC_STATUS_FAILED_PRECONDITION;
+		return TR_ERR_STATE;
+	}
+	if (!message) {
+		reply->record->status = TR_RPC_STATUS_INVALID_ARGUMENT;
+		return TR_ERR_INVALID;
+	}
+	return tr_rpc_record_reply_append(reply->record, message->data,
+	                                  message->len);
+}
+
+int tr_rpc_v2_reply_finish(struct tr_rpc_v2_reply *reply,
+                           enum tr_rpc_status status)
+{
+	if (!reply)
+		return TR_ERR_INVALID;
+	if (reply != tr_v2_active_reply)
+		return TR_ERR_STATE;
+	return tr_rpc_record_reply_finish(reply->record, status);
+}
+
+static int tr_dispatch_instance(uint64_t *out)
+{
+	uint64_t value = atomic_load_explicit(&tr_dispatch_instances,
+	                                      memory_order_relaxed);
+	for (;;) {
+		if (value == UINT64_MAX)
+			return TR_ERR_STATE;
+		if (atomic_compare_exchange_weak_explicit(
+		            &tr_dispatch_instances, &value, value + 1,
+		            memory_order_relaxed, memory_order_relaxed)) {
+			*out = value + 1;
+			return TR_OK;
+		}
+	}
+}
 struct tr_dispatch_slot;
 struct tr_dispatch_job {
 	struct tr_dispatch_job *next;
@@ -31,6 +109,8 @@ struct tr_dispatch_job {
 	struct tr_rpc_dispatch_id id;
 	struct tr_rpc_record_view view;
 	tr_rpc_record_work_fn work;
+	tr_rpc_v2_work_fn v2_work;
+	struct tr_rpc_v2_call_id v2_id;
 	void *arg;
 	struct tr_rpc_record_reply reply;
 	uint64_t deadline;
@@ -47,6 +127,9 @@ struct tr_dispatch_slot {
 	struct tr_stream_handle stream;
 	struct tr_dispatch_job *head, *tail, *submitted, *ready;
 	struct tr_task_handle task;
+	/* 只在完整合法 OPEN 的准入和期限检查通过后设置。即使后续
+	 * job 分配失败，也已承担该方法的一次公共终局通知责任。 */
+	const struct tr_rpc_dispatch_method *v2_method;
 	uint64_t deadline;
 	uint64_t open_due;
 	uint32_t response_codec;
@@ -67,6 +150,7 @@ struct tr_rpc_record_dispatch {
 	tr_rpc_dispatch_terminal_fn terminal;
 	void *arg;
 	size_t bytes;
+	uint64_t instance;
 	uint32_t cursor;
 	unsigned depth;
 	bool stopping, cleanup;
@@ -108,6 +192,11 @@ tr_dispatch_handle(struct tr_dispatch_slot *s)
 {
 	return (struct tr_rpc_dispatch_handle){
 	        s->dispatch, {s->route.generation, s->route.slot}};
+}
+static struct tr_rpc_v2_call_id tr_dispatch_v2_id(struct tr_dispatch_slot *s)
+{
+	return (struct tr_rpc_v2_call_id){
+	        {s->dispatch->instance, s->route.generation}};
 }
 static int tr_dispatch_lookup(struct tr_rpc_dispatch_handle h,
                               struct tr_dispatch_slot **out)
@@ -244,6 +333,16 @@ static void tr_dispatch_settle(struct tr_dispatch_slot *s)
 	if (!s->notified) {
 		s->notified = true;
 		++d->depth;
+		if (s->v2_method && s->v2_method->v2_terminal) {
+			++tr_v2_callback_depth;
+			s->v2_method->v2_terminal(
+			        tr_dispatch_v2_id(s), s->status,
+			        s->delivery == TR_RPC_RECORD_OWNER_STOPPED
+			                ? TR_RPC_V2_DELIVERY_SHUTDOWN
+			                : TR_RPC_V2_DELIVERY_LIVE,
+			        s->v2_method->arg);
+			--tr_v2_callback_depth;
+		}
 		d->terminal(tr_dispatch_handle(s), s->stream, s->status,
 		            s->delivery, s->final_accepted, d->arg);
 		--d->depth;
@@ -289,6 +388,44 @@ static bool tr_dispatch_live(struct tr_dispatch_slot *s)
 	                                   : TR_RPC_STATUS_INTERNAL);
 	return false;
 }
+static enum tr_rpc_status
+tr_dispatch_v2_work(struct tr_dispatch_job *job,
+                    const struct tr_task_cancel *cancel)
+{
+	struct tr_rpc_v2_request request = {0};
+	struct tr_rpc_v2_cancel public_cancel = {cancel};
+	struct tr_rpc_v2_reply public_reply = {&job->reply};
+	const struct tr_rpc_v2_cancel *prior_cancel = tr_v2_active_cancel;
+	struct tr_rpc_v2_reply *prior_reply = tr_v2_active_reply;
+	enum tr_rpc_status result;
+
+	switch (job->view.header.kind) {
+	case TR_RPC_RECORD_OPEN:
+		request.kind = TR_RPC_V2_REQUEST_OPEN;
+		break;
+	case TR_RPC_RECORD_MESSAGE:
+		request.kind = TR_RPC_V2_REQUEST_MESSAGE;
+		break;
+	case TR_RPC_RECORD_HALF_CLOSE:
+		request.kind = TR_RPC_V2_REQUEST_HALF_CLOSE;
+		break;
+	default:
+		return TR_RPC_STATUS_INTERNAL;
+	}
+	request.body = (struct tr_rpc_bytes){job->view.body,
+	                                     job->view.header.decoded_size};
+	tr_rpc_v2_metadata_view_init(&request.metadata, job->view.metadata,
+	                             job->view.header.metadata_size);
+	tr_v2_active_cancel = &public_cancel;
+	tr_v2_active_reply = &public_reply;
+	++tr_v2_callback_depth;
+	result = job->v2_work(job->v2_id, &request, &public_cancel,
+	                      &public_reply, job->arg);
+	--tr_v2_callback_depth;
+	tr_v2_active_cancel = prior_cancel;
+	tr_v2_active_reply = prior_reply;
+	return result;
+}
 static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 {
 	struct tr_dispatch_job *job = arg;
@@ -301,8 +438,9 @@ static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 		int ret = tr_dispatch_deadline_check(job->deadline);
 		if (ret != TR_OK)
 			return ret;
-		status =
-		        job->work(job->id, &job->view, cancel, reply, job->arg);
+		status = job->v2_work ? tr_dispatch_v2_work(job, cancel)
+		                      : job->work(job->id, &job->view, cancel,
+		                                  reply, job->arg);
 	}
 	if (status < TR_RPC_STATUS_OK || status >= (int)TR_RPC_STATUS_COUNT)
 		status = TR_RPC_STATUS_INTERNAL;
@@ -379,6 +517,8 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	}
 	if (!tr_dispatch_live(s))
 		return;
+	if (view->header.kind == TR_RPC_RECORD_OPEN && m->method.v2_work)
+		s->v2_method = &m->method;
 	if (s->pending >= d->config.max_pending_per_call) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 		return;
@@ -405,6 +545,8 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	job->id = tr_dispatch_handle(s).id;
 	job->view.header = view->header;
 	job->work = m->method.work;
+	job->v2_work = m->method.v2_work;
+	job->v2_id = tr_dispatch_v2_id(s);
 	job->arg = m->method.arg;
 	job->bytes = bytes;
 	job->reply = (struct tr_rpc_record_reply){
@@ -524,6 +666,7 @@ int tr_rpc_record_dispatch_create_on_owner(
 	struct tr_rpc_record_dispatch *d;
 	struct tr_rpc_record_method *routes;
 	size_t bytes, method_bytes, temporary;
+	uint64_t instance;
 	int ret;
 	if (!channel || !executor || !methods || !method_count || !config ||
 	    !config->capacity || !config->max_pending_per_call ||
@@ -549,8 +692,14 @@ int tr_rpc_record_dispatch_create_on_owner(
 		return TR_ERR_BAD_LENGTH;
 	temporary = method_count * sizeof(*routes);
 	for (size_t i = 0; i < method_count; ++i)
-		if (!methods[i].work)
+		if ((methods[i].work == NULL) == (methods[i].v2_work == NULL) ||
+		    (methods[i].v2_terminal && !methods[i].v2_work))
 			return TR_ERR_INVALID;
+	/* 实例编号与路由代次共同形成公共身份。即使创建失败也不复用
+	 * 已领取编号，避免对象地址复用使不同对端的调用身份发生碰撞。 */
+	ret = tr_dispatch_instance(&instance);
+	if (ret != TR_OK)
+		return ret;
 	ret = tr_memory_budget_reserve(budget, bytes + temporary);
 	if (ret != TR_OK)
 		return ret;
@@ -572,6 +721,7 @@ int tr_rpc_record_dispatch_create_on_owner(
 	d->executor = executor;
 	d->budget = budget;
 	d->bytes = bytes;
+	d->instance = instance;
 	d->config = *config;
 	d->terminal = terminal;
 	d->arg = arg;

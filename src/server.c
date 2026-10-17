@@ -29,6 +29,7 @@
 #include "transport/group/pipeline_listener_internal.h"
 #include "server_record_internal.h"
 #include "rpc/rpc_record_client.h"
+#include "rpc/rpc_v2_internal.h"
 
 #define TR_SERVER_ACCEPT_BATCH 16U
 
@@ -90,7 +91,8 @@ static int tr_server_blocking_lifecycle_context(void)
 	 */
 	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
 	       tr_task_in_worker_context() ||
-	       tr_rpc_record_client_in_callback();
+	       tr_rpc_record_client_in_callback() ||
+	       tr_rpc_record_dispatch_in_callback();
 }
 
 struct tr_server {
@@ -626,8 +628,9 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 		struct tr_rpc_record_state state;
 
 		/* 复用记录基数校验；codec 与方法编号仍是 V2 不透明数字。 */
-		if (!methods[i].work || !method->request_codec_id ||
-		    !method->response_codec_id ||
+		if ((methods[i].work == NULL) == (methods[i].v2_work == NULL) ||
+		    (methods[i].v2_terminal && !methods[i].v2_work) ||
+		    !method->request_codec_id || !method->response_codec_id ||
 		    method->lane > TR_RPC_LANE_BULK ||
 		    (uint64_t)method->max_request_bytes +
 		                    TR_RPC_RECORD_HEADER_SIZE >
@@ -1946,6 +1949,97 @@ int tr_server_create(const struct tr_server_config *config,
 		     struct tr_server **out)
 {
 	return tr_server_create_with_tuning(config, NULL, out);
+}
+
+int tr_server_create_v2(const struct tr_server_config *config,
+                        const struct tr_rpc_v2_method *methods,
+                        size_t method_count, struct tr_server **out)
+{
+	struct tr_server_config effective;
+	struct tr_facade_tuning tuning;
+	struct tr_server_record_config record = {0};
+	struct tr_rpc_dispatch_method *frozen;
+	size_t max_reply = 0;
+	int ret;
+
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (tr_server_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (config)
+		effective = *config;
+	else
+		tr_server_config_init(&effective);
+	tr_server_normalize_config(&effective);
+	if (!methods || !method_count ||
+	    method_count > effective.limits.max_methods ||
+	    method_count > SIZE_MAX / sizeof(*frozen))
+		return TR_ERR_INVALID;
+	for (size_t i = 0; i < method_count; ++i) {
+		const struct tr_rpc_method_desc *method =
+		        &methods[i].descriptor;
+		/* 公共大小限制描述业务正文。控制记录的内部最小空间
+		 * 不能反过来扩大应用声明的方法正文准入上限。 */
+		if (!methods[i].work ||
+		    method->max_request_bytes >
+		            effective.limits.max_message_bytes ||
+		    method->max_response_bytes >
+		            effective.limits.max_message_bytes ||
+		    method->max_request_bytes >
+		            effective.limits.initial_window_bytes ||
+		    method->max_response_bytes >
+		            effective.limits.initial_window_bytes)
+			return TR_ERR_INVALID;
+		if (method->max_response_bytes > max_reply)
+			max_reply = method->max_response_bytes;
+	}
+	if (max_reply > SIZE_MAX / 16U)
+		return TR_ERR_BAD_LENGTH;
+	ret = tr_rpc_v2_prepare_limits(&effective.limits);
+	if (ret != TR_OK)
+		return ret;
+	tr_facade_tuning_init(&tuning);
+	tr_server_tuning_ensure_shard_minimums(&tuning, effective.shard_count);
+	ret = tr_rpc_v2_memory_limit(&effective.limits, &tuning,
+	                             effective.shard_count,
+	                             &record.memory_budget_bytes);
+	if (ret != TR_OK)
+		return ret;
+	/* 一个回调生成有限回复批次；网络背压只保留该批次，不会
+	 * 重新执行工作函数。池与任务容量由门面推导，不暴露实现布局。 */
+	record.endpoint = (struct tr_rpc_record_endpoint_config){
+	        .dispatch = {.capacity = effective.limits.max_calls <
+	                                                 effective.limits
+	                                                         .max_streams
+	                                         ? effective.limits.max_calls
+	                                         : effective.limits.max_streams,
+	                     .max_pending_per_call = 16U,
+	                     .max_replies_per_event = 16U,
+	                     .max_reply_bytes = max_reply * 16U},
+	        .completion_limit = 64U,
+	        .progress_limit = 64U,
+	        .progress_period_ns = UINT64_C(1000000),
+	        .final_wait_ns = UINT64_C(1000000000)};
+	record.tasks.workers =
+	        effective.shard_count > 4U ? effective.shard_count : 4U;
+	record.tasks.capacity =
+	        record.tasks.workers > 256U ? record.tasks.workers : 256U;
+	frozen = calloc(method_count, sizeof(*frozen));
+	if (!frozen)
+		return TR_ERR_NOMEM;
+	for (size_t i = 0; i < method_count; ++i) {
+		frozen[i].descriptor = methods[i].descriptor;
+		frozen[i].arg = methods[i].arg;
+		frozen[i].v2_work = methods[i].work;
+		frozen[i].v2_terminal = methods[i].terminal;
+	}
+	/* create_internal 复制并记账。临时表无回调参数所有权；即使
+	 * 回滚失败把部分 Server 交还调用者，也不再借用此数组。 */
+	ret = tr_server_create_internal(&effective, &tuning, &record, frozen,
+	                                method_count, out);
+	free(frozen);
+	return ret;
 }
 
 static int tr_server_validate_method(const struct tr_rpc_method_desc *method,

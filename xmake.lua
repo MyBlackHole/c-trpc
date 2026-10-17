@@ -83,6 +83,7 @@ target("trcore")
         "include/(tr/server.h)",
         "include/(tr/transport.h)",
         "include/(tr/rpc.h)",
+        "include/(tr/rpc_v2.h)",
         "include/(tr/rpc_codec.h)")
     add_files(
         "src/status.c",
@@ -121,6 +122,7 @@ target("trcore")
         "src/rpc/rpc_record_dispatch.c",
         "src/rpc/rpc_record_endpoint.c",
         "src/rpc/rpc_record_client.c",
+        "src/rpc/rpc_v2.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -764,5 +766,27 @@ target("test_client_record")
                 "-Wl,--wrap=tr_channel_destroy",
                 "-Wl,--wrap=tr_stream_release_payload",
                 "-Wl,--wrap=clock_gettime", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 仅使用公开 SDK 的真实 V2 两端；同一源码还在安装目录外作为 C/C++ 消费端。
+target("test_rpc_v2_sdk")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_sdk.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 公共 V2 Server 的回调身份和故障收尾；注入仅限本测试二进制。
+target("test_rpc_v2_server")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_server.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=tr_rpc_record_stream_receive_on_owner",
+                "-Wl,--wrap=calloc", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
