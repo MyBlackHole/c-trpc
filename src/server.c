@@ -2720,11 +2720,17 @@ int tr_server_destroy(struct tr_server *server)
 	}
 
 	if (server->record_method_bytes) {
-		struct tr_memory_budget *budget =
-		        tr_runtime_shard_memory_budget(
-		                server->shards[0].runtime);
+		struct tr_memory_budget *budget;
 		size_t bytes = server->record_method_bytes;
 
+		/* 方法表预留只在分片绑定后发布；回滚必须保留有效预算
+		 * 所有者，不能在缺失该依赖时跳过尚未归还的额度。
+		 */
+		if (!server->shards || server->shard_count == 0U ||
+		    !server->shards[0].runtime)
+			return TR_ERR_STATE;
+		budget = tr_runtime_shard_memory_budget(
+		        server->shards[0].runtime);
 		free(server->record_methods);
 		server->record_methods = NULL;
 		server->record_method_bytes = 0;
