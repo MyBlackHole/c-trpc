@@ -163,6 +163,13 @@ Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚�
 连接装配、对端窗口限制及实际验证范围见
 [V2 Client 入口集成记录](docs/reviews/client_record_integration_20261017.md)。
 
+V2 Server 从完整有效 OPEN 中的非零剩余预算建立本机单调期限，检查接收准入、
+任务开始、完成交付和每次回复。到期后选择 `DEADLINE_EXCEEDED`，通过原任务令牌
+合作取消业务，丢弃尚未接受的迟到成功；正在执行的业务退出后才通知终局并回收。
+零预算仍表示无限期限。该行为不提供跨主机绝对时钟、线程抢占或错误 FINAL 必达，
+也不包含尚未完整验证的分段 OPEN 等待。实现与验证边界见
+[V2 Server 截止时间记录](docs/reviews/server_record_deadline_20261017.md)。
+
 稳定 SDK 还在 `tr/transport.h` 中包含第一版通用连接组传输能力。
 该能力按需启用，默认关闭：
 

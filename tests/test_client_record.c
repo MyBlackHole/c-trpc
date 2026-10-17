@@ -122,6 +122,9 @@ static _Atomic unsigned server_messages_accepted, server_half_closes_received;
 static _Atomic uint64_t server_message_bytes;
 static _Atomic int fail_kind, block_kind;
 static _Atomic unsigned clock_failures;
+static _Atomic bool clear_open_deadline;
+static _Atomic unsigned deadline_prefixes, deadline_prefixes_accepted,
+        deadline_prefixes_released;
 static _Thread_local bool fail_clock_once;
 
 int __real_clock_gettime(clockid_t, struct timespec *);
@@ -171,6 +174,10 @@ static void reset_observation(void)
 	atomic_store(&fail_kind, 0);
 	atomic_store(&block_kind, 0);
 	atomic_store(&clock_failures, 0);
+	atomic_store(&clear_open_deadline, false);
+	atomic_store(&deadline_prefixes, 0);
+	atomic_store(&deadline_prefixes_accepted, 0);
+	atomic_store(&deadline_prefixes_released, 0);
 	for (unsigned i = 0; i < 6; ++i) {
 		atomic_store(&attempts[i], 0);
 		atomic_store(&accepted[i], 0);
@@ -231,6 +238,17 @@ int __wrap_tr_channel_destroy(struct tr_channel *channel)
 	return ret;
 }
 
+struct open_deadline_prefix {
+	struct tr_buffer buffer;
+	uint8_t bytes[];
+};
+
+static void release_open_deadline_prefix(struct tr_buffer *buffer)
+{
+	atomic_fetch_add(&deadline_prefixes_released, 1);
+	free(buffer);
+}
+
 int __real_tr_stream_sendv(struct tr_stream_handle, struct tr_buffer *const *,
                            uint32_t);
 int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
@@ -256,7 +274,37 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 			return TR_AGAIN;
 		}
 	}
-	int ret = __real_tr_stream_sendv(stream, buffers, count);
+	struct open_deadline_prefix *replacement = NULL;
+	struct tr_buffer *patched[1];
+	if (kind == TR_RPC_RECORD_OPEN && atomic_load(&clear_open_deadline)) {
+		/* 仅用于本地超时后的晚响应排空场景：模拟不执行 OPEN 期限的
+		 * 对端，保留真实 Client 本地计时。不能修改已交给传输的存储，
+		 * 也不能在发送失败时释放原前缀。 */
+		CHECK(count == 1 && tr_get_le64(buffers[0]->data + 40) > 0);
+		size_t size = buffers[0]->len;
+		replacement = malloc(sizeof(*replacement) + size);
+		CHECK(replacement);
+		replacement->buffer = (struct tr_buffer){
+		        .data = replacement->bytes,
+		        .len = (uint32_t)size,
+		        .capacity = (uint32_t)size,
+		        .release_cb = release_open_deadline_prefix};
+		memcpy(replacement->bytes, buffers[0]->data, size);
+		tr_put_le64(replacement->bytes + 40, 0);
+		patched[0] = &replacement->buffer;
+		atomic_fetch_add(&deadline_prefixes, 1);
+	}
+	int ret = __real_tr_stream_sendv(
+	        stream, replacement ? patched : buffers, count);
+	if (replacement) {
+		if (ret == TR_OK) {
+			atomic_store(&clear_open_deadline, false);
+			atomic_fetch_add(&deadline_prefixes_accepted, 1);
+			tr_buffer_release(buffers[0]);
+		} else {
+			tr_buffer_release(&replacement->buffer);
+		}
+	}
 	if (server_kind == TR_RPC_RECORD_MESSAGE && ret == TR_OK) {
 		atomic_fetch_add(&server_messages_accepted, 1);
 		atomic_fetch_add(&server_message_bytes, server_bytes);
@@ -533,6 +581,8 @@ static void fixture_destroy(struct fixture *f)
 		f->server = NULL;
 	}
 	CHECK(atomic_load(&client_creates) == atomic_load(&client_destroys));
+	CHECK(atomic_load(&deadline_prefixes) ==
+	      atomic_load(&deadline_prefixes_released));
 	CHECK(pthread_cond_destroy(&f->gate.cond) == 0);
 	CHECK(pthread_mutex_destroy(&f->gate.lock) == 0);
 }
@@ -1416,8 +1466,13 @@ static void test_late_responses_after_half_close(bool deadline)
 	for (unsigned i = 0; i < 2; ++i)
 		call_init(&following[i], &f);
 	struct tr_rpc_call_options options = {.timeout_ms = 1000};
+	/* 服务端现在会执行 OPEN 期限；本场景仍须独立保护 Client 面对
+	 * 不执行该期限的对端时，排空多个窗口晚响应的原有责任。 */
+	atomic_store(&clear_open_deadline, deadline);
 	call_start(&late, 2, deadline ? &options : NULL);
 	call_ready(&late);
+	CHECK(!atomic_load(&clear_open_deadline));
+	CHECK(atomic_load(&deadline_prefixes_accepted) == (deadline ? 1U : 0U));
 	send_body(&late, BODY, 70);
 	half_close(&late);
 	gate_wait(&f.gate, 1, false);
@@ -1471,6 +1526,9 @@ static void test_late_responses_after_half_close(bool deadline)
 	CHECK(atomic_load(&f.messages) == 3);
 	CHECK(atomic_load(&f.half_closes) == 3);
 	CHECK(atomic_load(&f.bodies_released) == 3);
+	CHECK(atomic_load(&deadline_prefixes_accepted) == (deadline ? 1U : 0U));
+	CHECK(atomic_load(&deadline_prefixes) >=
+	      atomic_load(&deadline_prefixes_accepted));
 }
 
 static void test_drain(void)

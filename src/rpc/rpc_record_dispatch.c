@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "rpc_record_dispatch.h"
 #include "../execution/reactor_internal.h"
 #include "../transport/channel/channel_internal.h"
@@ -6,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 struct tr_reply_body {
 	struct tr_buffer buffer;
@@ -31,6 +33,7 @@ struct tr_dispatch_job {
 	tr_rpc_record_work_fn work;
 	void *arg;
 	struct tr_rpc_record_reply reply;
+	uint64_t deadline;
 	size_t bytes;
 	uint8_t data[];
 };
@@ -44,6 +47,7 @@ struct tr_dispatch_slot {
 	struct tr_stream_handle stream;
 	struct tr_dispatch_job *head, *tail, *submitted, *ready;
 	struct tr_task_handle task;
+	uint64_t deadline;
 	uint32_t response_codec;
 	size_t pending;
 	enum tr_rpc_status status;
@@ -73,6 +77,29 @@ static int tr_dispatch_owner(struct tr_rpc_record_dispatch *d)
 	if (!tr_reactor_in_owner_context_for(d->reactor) || d->cleanup)
 		return TR_ERR_STATE;
 	return TR_OK;
+}
+static int tr_dispatch_now(uint64_t *out)
+{
+	struct timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
+	    now.tv_nsec < 0 || now.tv_nsec >= 1000000000L ||
+	    (uint64_t)now.tv_sec >
+	            (UINT64_MAX - (uint64_t)now.tv_nsec) / UINT64_C(1000000000))
+		return TR_ERR_SYS;
+	*out = (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)now.tv_nsec;
+	return TR_OK;
+}
+static int tr_dispatch_deadline_check(uint64_t deadline)
+{
+	uint64_t now;
+	int ret;
+	if (!deadline)
+		return TR_OK;
+	ret = tr_dispatch_now(&now);
+	if (ret != TR_OK)
+		return ret;
+	return now >= deadline ? TR_ERR_TIMEOUT : TR_OK;
 }
 static struct tr_rpc_dispatch_handle
 tr_dispatch_handle(struct tr_dispatch_slot *s)
@@ -242,14 +269,36 @@ static void tr_dispatch_local_abort(struct tr_dispatch_slot *s,
 	if (!s->terminal)
 		(void)tr_rpc_record_router_abort_on_owner(s->route, status);
 }
+/* 期限仅由 owner 提交到原有终局状态；时钟失败不能冒充超时。每个
+ * 任务准入/完成/发送边界重新取时，不能把一轮 pump 的旧时间用于其他调用。 */
+static bool tr_dispatch_live(struct tr_dispatch_slot *s)
+{
+	int ret;
+	if (s->terminal)
+		return false;
+	ret = tr_dispatch_deadline_check(s->deadline);
+	if (ret == TR_OK)
+		return true;
+	tr_dispatch_local_abort(s, ret == TR_ERR_TIMEOUT
+	                                   ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                                   : TR_RPC_STATUS_INTERNAL);
+	return false;
+}
 static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 {
 	struct tr_dispatch_job *job = arg;
 	struct tr_rpc_record_reply *reply = &job->reply;
 	enum tr_rpc_status status = TR_RPC_STATUS_CANCELLED;
-	if (!tr_task_cancel_requested(cancel))
+	if (!tr_task_cancel_requested(cancel)) {
+		/* 任务可能在共享执行器排队到期限之后才开始。这里只读取
+		 * 提交前固定的期限并返回私有结果，绝不触碰 owner 槽位/路由。
+		 * 业务执行中的取消仍通过原执行器令牌合作观察。 */
+		int ret = tr_dispatch_deadline_check(job->deadline);
+		if (ret != TR_OK)
+			return ret;
 		status =
 		        job->work(job->id, &job->view, cancel, reply, job->arg);
+	}
 	if (status < TR_RPC_STATUS_OK || status >= (int)TR_RPC_STATUS_COUNT)
 		status = TR_RPC_STATUS_INTERNAL;
 	if (status != TR_RPC_STATUS_OK)
@@ -275,10 +324,16 @@ static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
 	if (d->cleanup || s->terminal || d->stopping) {
 		tr_dispatch_free_job(job);
 	} else if (result.cancelled || result.work_status != TR_OK) {
+		enum tr_rpc_status status = TR_RPC_STATUS_INTERNAL;
+		if (result.cancelled)
+			status = TR_RPC_STATUS_CANCELLED;
+		else if (result.work_status == TR_ERR_TIMEOUT)
+			status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
 		tr_dispatch_free_job(job);
-		tr_dispatch_local_abort(s, result.cancelled
-		                                   ? TR_RPC_STATUS_CANCELLED
-		                                   : TR_RPC_STATUS_INTERNAL);
+		tr_dispatch_local_abort(s, status);
+	} else if (!tr_dispatch_live(s)) {
+		/* 工作完成不等于回复已经被接受；迟到成功只释放其拥有型结果。 */
+		tr_dispatch_free_job(job);
 	} else {
 		s->ready = job;
 		if (job->reply.finished)
@@ -297,6 +352,21 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	size_t bytes, payload;
 	if (s->terminal || d->stopping ||
 	    (s->ready && s->ready->reply.finished))
+		return;
+	/* 完整 OPEN 已经过绑定校验后才建立一次本机期限。固定头/元数据
+	 * 尚未到齐时没有业务准入；后续事件和任何重试都不能重新计时。 */
+	if (view->header.kind == TR_RPC_RECORD_OPEN &&
+	    view->header.remaining_timeout_ns) {
+		uint64_t now;
+		if (tr_dispatch_now(&now) != TR_OK) {
+			tr_dispatch_local_abort(s, TR_RPC_STATUS_INTERNAL);
+			return;
+		}
+		uint64_t delta = view->header.remaining_timeout_ns;
+		s->deadline =
+		        delta > UINT64_MAX - now ? UINT64_MAX : now + delta;
+	}
+	if (!tr_dispatch_live(s))
 		return;
 	if (s->pending >= d->config.max_pending_per_call) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
@@ -331,6 +401,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	        .limit = d->config.max_reply_bytes,
 	        .max_count = d->config.max_replies_per_event,
 	        .max_message = m->method.descriptor.max_response_bytes};
+	job->deadline = s->deadline;
 	if (view->header.metadata_size) {
 		memcpy(job->data, view->metadata, view->header.metadata_size);
 		job->view.metadata = job->data;
@@ -355,7 +426,7 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 	struct tr_rpc_record_dispatch *d = s->dispatch;
 	struct tr_dispatch_job *job = s->ready;
 	int ret;
-	if (s->terminal) {
+	if (!tr_dispatch_live(s)) {
 		tr_dispatch_settle(s);
 		return;
 	}
@@ -568,8 +639,11 @@ int tr_rpc_record_dispatch_receive_on_owner(struct tr_rpc_record_dispatch *d,
 	if (!s)
 		return TR_ERR_STALE;
 	++d->depth;
-	ret = tr_rpc_record_router_receive_on_owner(d->router, stream, data,
-	                                            size);
+	/* 已建立的期限先于分段缓存准入检查；到期或取时失败已经选定
+	 * 本地终局，返回 STATE 而非可重放已吸收网络字节的 AGAIN。 */
+	ret = tr_dispatch_live(s) ? tr_rpc_record_router_receive_on_owner(
+	                                    d->router, stream, data, size)
+	                          : TR_ERR_STATE;
 	tr_dispatch_settle(s);
 	--d->depth;
 	return ret;

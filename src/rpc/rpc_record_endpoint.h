@@ -9,7 +9,7 @@ struct tr_rpc_record_endpoint_config {
 	struct tr_rpc_record_dispatch_config dispatch;
 	size_t completion_limit;
 	size_t progress_limit;
-	/* 单个已有 Reactor 定时器同时推进完成、发送和资源压力恢复。
+	/* 单个已有 Reactor 定时器同时推进期限检查、完成、发送和资源压力恢复。
 	 * 显式周期 1ms..1s；不承诺零轮询成本或单回调的 CPU 时间上限。 */
 	uint64_t progress_period_ns;
 	/* 本地终局选择后等待 FINAL 接受的最长时间。到期停止重试正文，
