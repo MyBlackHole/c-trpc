@@ -1,9 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../execution/worker_context.h"
 #include "rpc_record_producer.h"
 #include "rpc_record.h"
 #include "rpc_record_client.h"
 #include "rpc_record_dispatch.h"
-#include "rpc_internal.h"
 #include "rpc_v2_internal.h"
 #include "../execution/deadline_internal.h"
 #include "../execution/reactor_internal.h"
@@ -398,8 +398,8 @@ int tr_rpc_v2_producer_wait_writable(struct tr_rpc_v2_producer *p,
 	int ret;
 	if (!p)
 		return TR_ERR_INVALID;
-	if (tr_reactor_in_owner_context() || tr_task_in_worker_context() ||
-	    tr_rpc_in_worker_context() || tr_rpc_record_client_in_callback() ||
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context() ||
+	    tr_rpc_record_client_in_callback() ||
 	    tr_rpc_record_dispatch_in_callback())
 		return TR_ERR_STATE;
 	ret = tr_deadline_init_ms(&deadline, timeout_ms);

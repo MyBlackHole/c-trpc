@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 /* V2 门面分层排空：网络槽、任务、完成交付与用户回调分别设置真实门闩。
  * 只在公开模块边界观察或暂停；全部套接字、记录流和时钟均为真实实现。 */
+#include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
 #include "../src/server_record_internal.h"
 #include "../src/endian.h"
@@ -322,7 +323,8 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 	struct fixture *f = arg;
 	unsigned kind = view->header.kind;
 	(void)id;
-	CHECK(tr_task_in_worker_context() && !tr_reactor_in_owner_context());
+	CHECK(tr_execution_in_worker_context() &&
+	      !tr_reactor_in_owner_context());
 	if (kind == TR_RPC_RECORD_MESSAGE) {
 		CHECK(view->header.decoded_size == BODY);
 		atomic_fetch_add(&f->work_entered, 1);

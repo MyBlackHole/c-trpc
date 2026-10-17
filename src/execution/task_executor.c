@@ -1,3 +1,4 @@
+#include "worker_context.h"
 #include "task_executor.h"
 #include "task_executor_internal.h"
 #include "../memory_budget.h"
@@ -65,7 +66,6 @@ struct tr_task_executor {
 };
 
 static _Atomic uint64_t tr_task_instances;
-static _Thread_local bool tr_task_worker_context;
 
 /* 所有正常同步对象均为成功初始化且未销毁的非 robust pthread 原语。
  * 队列、槽位、代次和统计由 lock 保护，工作线程只无锁读取取消令牌。
@@ -96,7 +96,7 @@ static void *tr_task_worker(void *arg)
 {
 	struct tr_task_executor *executor = arg;
 
-	tr_task_worker_context = true;
+	struct tr_worker_context worker = tr_execution_enter_worker();
 	(void)pthread_mutex_lock(&executor->lock);
 	for (;;) {
 		struct tr_task_slot *slot;
@@ -137,7 +137,7 @@ static void *tr_task_worker(void *arg)
 	}
 	--executor->stats.workers_alive;
 	(void)pthread_mutex_unlock(&executor->lock);
-	tr_task_worker_context = false;
+	tr_execution_leave_worker(worker);
 	return NULL;
 }
 
@@ -500,18 +500,13 @@ int tr_task_executor_destroy(struct tr_task_executor **executor)
 	return tr_memory_budget_release(budget, bytes);
 }
 
-int tr_task_in_worker_context(void)
-{
-	return tr_task_worker_context;
-}
-
 int tr_task_executor_adopt_cleanup(struct tr_task_executor *executor)
 {
 	int ret = TR_OK;
 
 	if (!executor)
 		return TR_ERR_INVALID;
-	if (tr_task_worker_context)
+	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 	/* 外层必须已证明旧 owner 永久静默，排除与其无锁的 owner 校验并发。
 	 * 工作线程不访问 owner，仅操作槽位与取消令牌，可以继续收敛。 */

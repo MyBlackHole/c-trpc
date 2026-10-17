@@ -10,11 +10,6 @@
 
 struct tr_rpc_endpoint;
 
-/* 当前线程为 c-trpc 的 RPC 执行器工作线程之一时为真。
- * 同步销毁不得回收或等待正在执行销毁的工作线程。
- */
-int tr_rpc_in_worker_context(void);
-
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };
 
 struct tr_rpc_endpoint_config {

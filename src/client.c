@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "execution/worker_context.h"
 #include "tr/client.h"
 
 #include <assert.h>
@@ -38,8 +39,8 @@ static int tr_client_blocking_lifecycle_context(void)
 	 * 反应器所有者回调必须返回，I/O 与定时器才能推进；
 	 * RPC 工作线程必须返回，当前 Call 才能发布完成结果。
 	 */
-	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
-	       tr_task_in_worker_context() ||
+	return tr_reactor_in_owner_context() ||
+	       tr_execution_in_worker_context() ||
 	       tr_rpc_record_client_in_callback() ||
 	       tr_rpc_record_dispatch_in_callback();
 }

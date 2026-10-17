@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "execution/worker_context.h"
 #include "tr/server.h"
 
 #include <assert.h>
@@ -95,8 +96,8 @@ static int tr_server_blocking_lifecycle_context(void)
 	 * 从任一执行域进入等待，都会等待当前回调或任务
 	 * 返回后才可能取得的进展。
 	 */
-	return tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
-	       tr_task_in_worker_context() ||
+	return tr_reactor_in_owner_context() ||
+	       tr_execution_in_worker_context() ||
 	       tr_rpc_record_client_in_callback() ||
 	       tr_rpc_record_dispatch_in_callback();
 }

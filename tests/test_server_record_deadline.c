@@ -2,6 +2,7 @@
 /* 期限证据来自真实两端门面的线协议。Client 始终没有本地 timeout；
  * 测试只替换其 OPEN 前缀中的剩余期限，观察 Server 实际发送的 FINAL/RESET。
  * 精确时刻只作用于 RPC 入口，Reactor、传输、等待和业务回调保持真实时钟。 */
+#include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
 #include "../src/server_record_internal.h"
 #include "../src/endian.h"
@@ -559,7 +560,8 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 	unsigned kind = view->header.kind;
 	enum clock_domain prior = clock_scope;
 	clock_scope = CLOCK_REAL;
-	CHECK(tr_task_in_worker_context() && !tr_reactor_in_owner_context());
+	CHECK(tr_execution_in_worker_context() &&
+	      !tr_reactor_in_owner_context());
 	if (kind == TR_RPC_RECORD_OPEN) {
 		m->id = id;
 		if (atomic_load(&m->fixture->split_opens)) {

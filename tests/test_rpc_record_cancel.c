@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 /* 真实两端 V2 门面上的调用级 RESET。没有直接取消服务端任务；令牌变化
  * 必须来自 TCP 上的对端重置。所有门闩与等待使用真实单调时钟。 */
+#include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
 #include "../src/server_record_internal.h"
 #include "../src/endian.h"
@@ -327,7 +328,8 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 {
 	struct method *m = arg;
 	unsigned kind = view->header.kind;
-	CHECK(tr_task_in_worker_context() && !tr_reactor_in_owner_context());
+	CHECK(tr_execution_in_worker_context() &&
+	      !tr_reactor_in_owner_context());
 	if (kind == TR_RPC_RECORD_OPEN)
 		m->id = id;
 	if (kind == TR_RPC_RECORD_MESSAGE) {

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/execution/worker_context.h"
 #include "../src/rpc/rpc_record_endpoint.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/transport/channel/channel_internal.h"
@@ -183,7 +184,7 @@ static enum tr_rpc_status handler(struct tr_rpc_dispatch_id id,
 	struct business_state *s = &f->business[id.slot];
 	unsigned kind = view->header.kind;
 	enum tr_rpc_status status = TR_RPC_STATUS_OK;
-	CHECK(tr_task_in_worker_context());
+	CHECK(tr_execution_in_worker_context());
 	CHECK(!tr_reactor_in_owner_context());
 	CHECK(atomic_fetch_add(&s->active, 1) == 0);
 	if (kind == TR_RPC_RECORD_OPEN) {

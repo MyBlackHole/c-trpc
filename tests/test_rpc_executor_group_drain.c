@@ -1,5 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "../src/execution/task_executor.h"
+#include "../src/execution/worker_context.h"
+#include "../src/memory_budget.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
 #include "tr/trpc.h"
@@ -15,6 +18,7 @@ struct drain_context {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct tr_server *server;
+	struct tr_task_executor *cleanup_probe;
 	unsigned messages[256];
 	int first_entered;
 	int release_first;
@@ -128,6 +132,10 @@ server_message(struct tr_rpc_call_handle call,
 	unsigned char tag;
 	(void)call;
 
+	assert(tr_execution_in_worker_context());
+	/* 真实 V1 业务线程不能接管通用执行器，拒绝必须发生在改写 owner 前。 */
+	assert(tr_task_executor_adopt_cleanup(context->cleanup_probe) ==
+	       TR_ERR_STATE);
 	assert(message != NULL);
 	assert(message->bytes.data != NULL);
 	assert(message->bytes.len == 1U);
@@ -179,6 +187,8 @@ static void send_message(struct tr_rpc_call_handle call, unsigned char tag)
 static void test_server_destroy_drains_accepted_group_tasks(void)
 {
 	struct drain_context context;
+	struct tr_memory_budget budget;
+	struct tr_task_executor_config task_config = {.workers = 1, .capacity = 1};
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
@@ -196,6 +206,11 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	memset(&context, 0, sizeof(context));
 	assert(pthread_mutex_init(&context.lock, NULL) == 0);
 	assert(pthread_cond_init(&context.cond, NULL) == 0);
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_task_executor_create(&task_config, &budget,
+	                               &context.cleanup_probe) == TR_OK);
+	assert(tr_task_executor_stop(context.cleanup_probe, TR_TASK_DRAIN) ==
+	       TR_OK);
 
 	tr_server_config_init(&server_config);
 	server_config.max_peers = 2U;
@@ -287,12 +302,96 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	context.server = NULL;
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
+	assert(tr_task_executor_is_current_owner(context.cleanup_probe));
+	assert(tr_task_executor_join(context.cleanup_probe) == TR_OK);
+	assert(tr_task_executor_destroy(&context.cleanup_probe) == TR_OK);
+	assert(atomic_load(&budget.current_bytes) == 0);
 	pthread_cond_destroy(&context.cond);
 	pthread_mutex_destroy(&context.lock);
 }
 
+
+struct worker_probe {
+	struct tr_rpc_executor_group *legacy;
+	unsigned done;
+};
+
+static int
+reject_legacy_lifecycle(void *arg, const struct tr_task_cancel *cancel)
+{
+	struct worker_probe *probe = arg;
+
+	(void)cancel;
+	assert(tr_execution_in_worker_context());
+	/* 使用真实通用执行器线程，不伪造 TLS，也不进入可能自等待的旧路径。 */
+	assert(tr_rpc_executor_group_can_start(probe->legacy) == TR_ERR_STATE);
+	assert(tr_rpc_executor_group_start(probe->legacy) == TR_ERR_STATE);
+	assert(tr_rpc_executor_group_stop(probe->legacy) == TR_ERR_STATE);
+	assert(tr_rpc_executor_group_destroy_checked(probe->legacy) ==
+	       TR_ERR_STATE);
+	return TR_OK;
+}
+
+static void probe_done(void *arg, struct tr_task_handle handle,
+                       struct tr_task_result result)
+{
+	struct worker_probe *probe = arg;
+
+	assert(!tr_execution_in_worker_context());
+	assert(handle.generation != 0 && !result.cancelled);
+	assert(result.work_status == TR_OK);
+	++probe->done;
+}
+
+static void test_generic_worker_rejects_legacy_lifecycle(void)
+{
+	struct worker_probe probe = {0};
+	struct tr_memory_budget budget;
+	struct tr_task_executor *executor = NULL;
+	struct tr_task_executor_config config = {.workers = 1, .capacity = 1};
+	struct tr_task_spec spec = {reject_legacy_lifecycle, probe_done, &probe};
+	struct tr_task_handle handle;
+	struct timespec deadline, now, pause = {0, 1000000};
+	int ret;
+
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_rpc_executor_group_create(1, 1, 1, &probe.legacy) == TR_OK);
+	assert(tr_task_executor_create(&config, &budget, &executor) == TR_OK);
+	assert(tr_task_executor_start(executor) == TR_OK);
+	assert(tr_task_executor_submit(executor, &spec, &handle) == TR_OK);
+	assert(clock_gettime(CLOCK_MONOTONIC, &deadline) == 0);
+	deadline.tv_sec += 15;
+	while (!probe.done) {
+		size_t count;
+		assert(tr_task_executor_dispatch(executor, 1, &count) == TR_OK);
+		assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+		assert(now.tv_sec < deadline.tv_sec ||
+		       (now.tv_sec == deadline.tv_sec &&
+		        now.tv_nsec < deadline.tv_nsec));
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(probe.done == 1);
+	assert(tr_task_executor_stop(executor, TR_TASK_DRAIN) == TR_OK);
+	while ((ret = tr_task_executor_join(executor)) == TR_AGAIN) {
+		assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+		assert(now.tv_sec < deadline.tv_sec ||
+		       (now.tv_sec == deadline.tv_sec &&
+		        now.tv_nsec < deadline.tv_nsec));
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(ret == TR_OK);
+	assert(tr_task_executor_destroy(&executor) == TR_OK);
+	assert(atomic_load(&budget.current_bytes) == 0);
+	/* 工作线程的拒绝没有改变旧组状态；外部控制线程仍能启动和完整回收。 */
+	assert(tr_rpc_executor_group_can_start(probe.legacy) == TR_OK);
+	assert(tr_rpc_executor_group_start(probe.legacy) == TR_OK);
+	assert(tr_rpc_executor_group_stop(probe.legacy) == TR_OK);
+	assert(tr_rpc_executor_group_destroy_checked(probe.legacy) == TR_OK);
+}
+
 int main(void)
 {
+	test_generic_worker_rejects_legacy_lifecycle();
 	test_server_destroy_drains_accepted_group_tasks();
 	return 0;
 }

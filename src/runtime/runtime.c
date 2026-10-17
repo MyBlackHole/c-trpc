@@ -1,3 +1,4 @@
+#include "../execution/worker_context.h"
 #include "runtime_internal.h"
 
 #include <assert.h>
@@ -397,8 +398,7 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 	 * 即使总状态 runtime->started 为 false，也可能存在启动失败
 	 * 留下的部分执行器轮次，因此不能只根据反应器 started 早退。
 	 */
-	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context() ||
-	    tr_task_in_worker_context())
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	i = runtime->shard_count;
@@ -793,7 +793,7 @@ static int tr_runtime_message_call(struct tr_runtime_shard *shard,
 		return TR_ERR_UNSUPPORTED;
 	if (!shard->reactor)
 		return TR_ERR_CLOSED;
-	if (tr_task_in_worker_context() || tr_rpc_in_worker_context() ||
+	if (tr_execution_in_worker_context() ||
 	    (tr_reactor_in_owner_context() &&
 	     !tr_reactor_in_owner_context_for(shard->reactor)))
 		return TR_ERR_STATE;

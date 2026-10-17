@@ -12,7 +12,7 @@
   "warnings": [
     {
       "file": "src/rpc/rpc.c",
-      "line": 2698,
+      "line": 2692,
       "column": 65,
       "check": "analyzer-use-after-free",
       "message": "use after ‘free’ of ‘arg’ [CWE-416]",

@@ -137,7 +137,6 @@ int tr_task_executor_destroy(struct tr_task_executor **executor);
  * 执行的 done 必须有事先约定的终止清理语义，不能假装原 owner 回调。
  * 失败不改变 owner；工作线程不允许接管自身执行器。 */
 int tr_task_executor_adopt_cleanup(struct tr_task_executor *executor);
-int tr_task_in_worker_context(void);
 
 /* 只观察完成所有者身份，不取得生命周期引用；不得在notify锁内调用。 */
 int tr_task_executor_is_current_owner(struct tr_task_executor *executor);

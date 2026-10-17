@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/task_executor.h"
+#include "../src/execution/worker_context.h"
 #include "../src/execution/task_executor_internal.h"
 #include "../src/memory_budget.h"
 #include "tr/status.h"
@@ -250,6 +251,8 @@ static int work(void *arg, const struct tr_task_cancel *cancel)
 	struct job *job = arg;
 	size_t count = 777;
 
+	CHECK(tr_execution_in_worker_context());
+	CHECK(tr_task_executor_adopt_cleanup(job->executor) == TR_ERR_STATE);
 	CHECK(!pthread_equal(pthread_self(), job->owner));
 	CHECK(tr_task_executor_dispatch(job->executor, 1, &count) ==
 	      TR_ERR_STATE);
@@ -271,6 +274,7 @@ static void done(void *arg, struct tr_task_handle handle,
 	struct tr_task_spec spec = {work, done, job};
 	size_t count = 888;
 
+	CHECK(!tr_execution_in_worker_context());
 	CHECK(pthread_equal(pthread_self(), job->owner));
 	CHECK(atomic_load(&job->works) == 1);
 	CHECK(snapshot(job->executor).delivering == 1);
@@ -580,6 +584,7 @@ static int owned_work(void *arg, const struct tr_task_cancel *cancel)
 {
 	(void)arg;
 	(void)cancel;
+	CHECK(tr_execution_in_worker_context());
 	return 9;
 }
 

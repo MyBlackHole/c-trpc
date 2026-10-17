@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../execution/worker_context.h"
 #include "message_service.h"
 #include "../execution/reactor_internal.h"
 #include "../memory_budget.h"
@@ -522,7 +523,7 @@ int tr_message_service_reap_stopped(struct tr_message_service **pointer)
 
 	if (!pointer || !*pointer)
 		return TR_ERR_INVALID;
-	if (tr_reactor_in_owner_context() || tr_task_in_worker_context())
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 	service = *pointer;
 	if (service->depth)

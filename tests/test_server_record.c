@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/execution/worker_context.h"
 #include "../src/server_record_internal.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
@@ -383,7 +384,8 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 {
 	struct fixture *f = arg;
 	(void)id;
-	CHECK(tr_task_in_worker_context() && !tr_reactor_in_owner_context());
+	CHECK(tr_execution_in_worker_context() &&
+	      !tr_reactor_in_owner_context());
 	if (view->header.kind == TR_RPC_RECORD_OPEN)
 		atomic_fetch_add(&f->calls, 1);
 	if (view->header.kind != TR_RPC_RECORD_MESSAGE)

@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/execution/worker_context.h"
 #include "../src/runtime/runtime_internal.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/message/storage.h"
@@ -251,7 +252,7 @@ static int forbidden_context(void *arg)
 static int worker_probe(void *arg, const struct tr_task_cancel *cancel)
 {
 	(void)cancel;
-	CHECK(tr_task_in_worker_context());
+	CHECK(tr_execution_in_worker_context());
 	return forbidden_context(arg);
 }
 

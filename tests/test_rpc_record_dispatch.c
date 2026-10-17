@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/execution/worker_context.h"
 #include "../src/rpc/rpc_record_dispatch.h"
 #include "../src/rpc/rpc_record_producer.h"
 #include "../src/rpc/rpc_v2_internal.h"
@@ -79,7 +80,7 @@ static _Atomic bool observe_real_retry;
 void *__wrap_malloc(size_t size)
 {
 	if ((fail_at && ++allocations == fail_at) ||
-	    (tr_task_in_worker_context() &&
+	    (tr_execution_in_worker_context() &&
 	     atomic_exchange(&fail_worker_malloc, false)))
 		return NULL;
 	if (allocation_gate) {
@@ -281,7 +282,7 @@ static enum tr_rpc_status producer_work(struct tr_rpc_v2_call_id call,
 {
 	struct producer_case *c = arg;
 	enum tr_rpc_status result = TR_RPC_STATUS_OK;
-	CHECK(tr_task_in_worker_context());
+	CHECK(tr_execution_in_worker_context());
 	CHECK(tr_rpc_record_dispatch_in_callback());
 	CHECK(atomic_fetch_add(&c->active, 1) == 0);
 	CHECK(request->kind <= TR_RPC_V2_REQUEST_HALF_CLOSE);
@@ -434,7 +435,7 @@ static enum tr_rpc_status handler(struct tr_rpc_dispatch_id id,
 	struct business_state *s = &f->business[id.slot];
 	unsigned kind = view->header.kind;
 	enum tr_rpc_status status = TR_RPC_STATUS_OK;
-	CHECK(tr_task_in_worker_context());
+	CHECK(tr_execution_in_worker_context());
 	CHECK(!tr_reactor_in_owner_context());
 	CHECK(atomic_fetch_add(&s->active, 1) == 0);
 	if (kind == TR_RPC_RECORD_OPEN) {

@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../execution/worker_context.h"
 #include "tr/rpc.h"
 
 #include "rpc_wire.h"
@@ -20,13 +21,6 @@
 
 _Static_assert(sizeof(uintptr_t) <= sizeof(uint64_t),
 	       "RPC Call capability requires pointers no wider than 64 bits");
-
-static _Thread_local unsigned tr_rpc_worker_depth;
-
-int tr_rpc_in_worker_context(void)
-{
-	return tr_rpc_worker_depth != 0U;
-}
 
 static inline struct tr_rpc_endpoint *
 tr_rpc_call_handle_endpoint(struct tr_rpc_call_handle handle)
@@ -3247,7 +3241,7 @@ static void *tr_rpc_executor_main(void *arg)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 
-	tr_rpc_worker_depth++;
+	struct tr_worker_context worker = tr_execution_enter_worker();
 	for (;;) {
 		struct tr_rpc_task task;
 		int ret = tr_rpc_executor_take(endpoint, &task, 1);
@@ -3275,7 +3269,7 @@ static void *tr_rpc_executor_main(void *arg)
 		}
 	}
 
-	tr_rpc_worker_depth--;
+	tr_execution_leave_worker(worker);
 	return NULL;
 }
 
@@ -3310,7 +3304,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 	struct tr_rpc_executor_group *group =
 		(struct tr_rpc_executor_group *)arg;
 
-	tr_rpc_worker_depth++;
+	struct tr_worker_context worker = tr_execution_enter_worker();
 	for (;;) {
 		struct tr_rpc_endpoint *endpoint =
 			tr_rpc_executor_group_take(group);
@@ -3340,7 +3334,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 		}
 	}
 
-	tr_rpc_worker_depth--;
+	tr_execution_leave_worker(worker);
 	return NULL;
 }
 
@@ -3560,7 +3554,7 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 {
 	if (!group)
 		return TR_OK;
-	if (tr_rpc_in_worker_context())
+	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
@@ -3618,7 +3612,7 @@ int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
 
 	if (!group)
 		return TR_OK;
-	if (tr_rpc_in_worker_context())
+	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
@@ -3637,7 +3631,7 @@ int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
 
 	if (!group || !group->threads || group->thread_count == 0U)
 		return TR_ERR_INVALID;
-	if (tr_rpc_in_worker_context())
+	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
@@ -5255,7 +5249,7 @@ int tr_rpc_endpoint_destroy_with_stats(
 	if (!endpoint)
 		return TR_OK;
 
-	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	/* 每个异步事件源必须在执行器或引用拆除前同步解绑。

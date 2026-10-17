@@ -96,6 +96,7 @@ target("trcore")
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",
         "src/execution/task_executor.c",
+        "src/execution/worker_context.c",
         "src/execution/command_queue.c",
         "src/execution/completion_queue.c",
         "src/execution/timer_queue.c",
@@ -467,7 +468,10 @@ for _, name in ipairs({"test_task_executor", "test_task_message"}) do
             add_packages("zstd")
         end
         on_config(function (target)
-            local expected = {[path.absolute("src/execution/task_executor.c")] = 0}
+            local expected = {
+                [path.absolute("src/execution/task_executor.c")] = 0,
+                [path.absolute("src/execution/worker_context.c")] = 0
+            }
             if target:name() == "test_task_message" then
                 expected[path.absolute("src/message/message.c")] = 0
                 expected[path.absolute("src/message/transform.c")] = 0
@@ -688,7 +692,65 @@ target("test_rpc_record_endpoint_tcp")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_rpc_record_endpoint_tcp.c")
-    add_deps("trcore")
+    add_deps("trcore", {inherit = false})
+    add_includedirs("include")
+    on_config(function (target)
+        local sources = {
+            "src/crc32c.c",
+            "src/execution/buffer.c",
+            "src/execution/worker_context.c",
+            "src/execution/task_executor.c",
+            "src/execution/command_queue.c",
+            "src/execution/completion_queue.c",
+            "src/execution/timer_queue.c",
+            "src/execution/deadline.c",
+            "src/execution/reactor.c",
+            "src/io/socket.c",
+            "src/io/connector.c",
+            "src/transport/protocol/wire.c",
+            "src/transport/protocol/frame.c",
+            "src/transport/protocol/parser.c",
+            "src/transport/channel/channel.c",
+            "src/rpc/rpc_record.c",
+            "src/rpc/rpc_record_stream.c",
+            "src/rpc/rpc_record_router.c",
+            "src/rpc/rpc_record_dispatch.c",
+            "src/rpc/rpc_record_producer.c",
+            "src/rpc/rpc_record_endpoint.c",
+            "src/rpc/rpc_record_client.c",
+            "src/rpc/rpc_v2.c"
+        }
+        local expected = {}
+        for _, source in ipairs(sources) do
+            expected[path.absolute(source)] = 0
+        end
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                local key = path.absolute(source)
+                if expected[key] ~= nil then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    expected[key] = expected[key] + 1
+                end
+            end
+        end
+        for source, count in pairs(expected) do
+            assert(count == 1, "V2 独立网络验证的生产对象必须唯一: " .. source)
+        end
+    end)
+    after_link(function (target)
+        -- 防止以后重新继承 trcore 后把旧 RPC 实现悄悄带回这个证明目标。
+        local symbols = os.iorunv("nm", {"--defined-only", "--extern-only", target:targetfile()})
+        for symbol in symbols:gmatch("[^\n]+") do
+            local name = symbol:match("([%w_]+)%s*$") or ""
+            assert(not name:match("^tr_rpc_endpoint_") and
+                   not name:match("^tr_rpc_executor_group_") and
+                   not name:match("^tr_rpc_wire_") and
+                   name ~= "tr_rpc_in_worker_context" and
+                   name ~= "tr_rpc_unary_call" and
+                   name ~= "tr_rpc_call_start",
+                   "V2 独立网络验证不允许 V1 定义: " .. name)
+        end
+    end)
     add_ldflags("-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=tr_stream_close",
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=tr_reactor_timer_register",
@@ -789,5 +851,27 @@ target("test_rpc_v2_server")
     add_undefines("NDEBUG")
     add_ldflags("-Wl,--wrap=tr_rpc_record_stream_receive_on_owner",
                 "-Wl,--wrap=calloc", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 工作域只链接一个执行层对象，验证嵌套恢复和真正的线程局部隔离。
+target("test_worker_context")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_worker_context.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/execution/worker_context.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "工作域测试必须只复用一个生产工作域对象")
+    end)
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
