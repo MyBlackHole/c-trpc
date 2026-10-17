@@ -20,7 +20,7 @@
     },
     {
       "file": "src/transport/channel/channel.c",
-      "line": 582,
+      "line": 609,
       "column": 9,
       "check": "analyzer-malloc-leak",
       "message": "leak of ‘owned’ [CWE-401]",
