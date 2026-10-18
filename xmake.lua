@@ -755,7 +755,7 @@ target("test_rpc_record_endpoint_tcp")
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=tr_reactor_timer_register",
                 "-Wl,--wrap=tr_reactor_timer_unregister",
-                "-Wl,--wrap=epoll_wait", {force = true})
+                "-Wl,--wrap=epoll_wait", "-Wl,--wrap=sendmsg", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
