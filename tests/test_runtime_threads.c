@@ -1,3 +1,4 @@
+#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "../src/execution/reactor.h"
 #include "tr/server.h"
@@ -152,7 +153,7 @@ static void test_client_create_destroy_threads(void)
 		config.keepalive_interval_ms = iteration % 2U ? 10U : 0U;
 		config.keepalive_timeout_ms = 50U;
 		reset_probe(0U);
-		assert(tr_client_create(&config, &client) == TR_OK);
+		assert(tr_client_legacy_create(&config, &client) == TR_OK);
 		assert(client != NULL);
 		/* 未连接时只有反应器，没有闲置的维护线程。 */
 		expect_threads(1U, 0U);
@@ -323,7 +324,7 @@ static void test_server_internal_tuning_respects_shard_minimum(void)
 	/* 公开创建拥有隐藏调优默认值；对于相同的有效语义配置，
 	 * 不得暴露此实现容量失败。
 	 */
-	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(tr_server_legacy_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 	expect_threads(0U, 0U);
 	listen_loopback(server);
@@ -687,7 +688,7 @@ static void test_client_thread_start_failure(void)
 	tr_client_config_init(&config);
 	small_limits(&config.limits);
 	reset_probe(1U);
-	assert(tr_client_create(&config, &client) == TR_ERR_SYS);
+	assert(tr_client_legacy_create(&config, &client) == TR_ERR_SYS);
 	assert(client == NULL);
 	assert(atomic_load(&create_attempts) == 1U);
 	expect_threads(0U, 0U);

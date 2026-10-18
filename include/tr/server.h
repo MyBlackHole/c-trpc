@@ -42,7 +42,7 @@ struct tr_server_config {
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
-	/* RPC Call 级所有者拦截器；fn==NULL 表示禁用。 */
+	/* 遗留配置位：当前公开工厂要求 fn/arg 均为 NULL，否则 UNSUPPORTED。 */
 	struct tr_rpc_interceptor interceptor;
 
 	/*
@@ -56,7 +56,9 @@ struct tr_server_config {
 void tr_server_config_init(struct tr_server_config *config);
 
 /*
- * 默认选择 V1；显式 V2 构造见 tr/rpc_v2.h。
+ * 只构造 V2；方法表在构造期间复制冻结，不能为空或零条。
+ * 不协商、不回退 V1。此接口取代旧的两参数构造，须重新编译调用者。
+ * 业务处理器使用 tr/rpc_v2.h 的统一 OPEN/MESSAGE/HALF_CLOSE 契约。
  * 正常成功时返回 TR_OK，并通过 *out 向调用方转移 Server 所有权。
  * 正常构造失败且回滚完整收敛时，*out 保持 NULL。
  *
@@ -64,17 +66,17 @@ void tr_server_config_init(struct tr_server_config *config);
  * 保留部分构造的 Server 的所有权；调用方不得继续 start/listen/register，
  * 应直接通过 tr_server_destroy() 重试终止收敛。
  */
+struct tr_rpc_v2_method;
 int tr_server_create(const struct tr_server_config *config,
-		     struct tr_server **out);
+                     const struct tr_rpc_v2_method *methods,
+                     size_t method_count, struct tr_server **out);
 
-/* V1 有意限制只能在服务端启动之前注册方法。 */
-int tr_server_register_method(struct tr_server *server,
-			      const struct tr_rpc_method_desc *method,
-			      tr_rpc_unary_handler handler, void *handler_arg);
-
-int tr_server_register_stream_method(
-	struct tr_server *server, const struct tr_rpc_method_desc *method,
-	const struct tr_rpc_stream_handlers *handlers, void *handler_arg);
+/* 仅创建连接组传输门面。使用 connection_group_listen/start 等接口，
+ * tr_server_listen 返回 UNSUPPORTED，不能借此打开旧 RPC 监听端口。
+ * 不接受 RPC 拦截器；复用普通构造的执行域和失败所有权规则。
+ */
+int tr_server_create_transport(const struct tr_server_config *config,
+                               struct tr_server **out);
 
 /* 门面仅接受数字形式的 IPv4 地址；port=0 表示申请临时端口。 */
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,

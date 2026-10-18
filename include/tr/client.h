@@ -29,10 +29,10 @@ struct tr_client_config {
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
-	/* RPC Call 级所有者拦截器；fn==NULL 表示禁用。 */
+	/* 遗留配置位：当前公开工厂要求 fn/arg 均为 NULL，否则 UNSUPPORTED。 */
 	struct tr_rpc_interceptor interceptor;
 
-	/* 可选的连接级重连；进行中的 Call 永远不会透明重放。 */
+	/* 遗留配置位：当前公开工厂要求 enable_reconnect==0，不透明重放。 */
 	int enable_reconnect;
 	uint32_t reconnect_initial_delay_ms;
 	uint32_t reconnect_max_delay_ms;
@@ -41,7 +41,9 @@ struct tr_client_config {
 void tr_client_config_init(struct tr_client_config *config);
 
 /*
- * 默认选择 V1；显式 V2 构造见 tr/rpc_v2.h。
+ * 只构造 V2；方法表在构造期间复制冻结，不能为空或零条。
+ * 不协商、不回退 V1。此接口取代旧的两参数构造，须重新编译调用者。
+ * 正文上限、执行域与回调契约见 tr/rpc_v2.h。
  * 正常成功时返回 TR_OK，并通过 *out 向调用方转移 Client 所有权。
  * 正常构造失败且回滚完整收敛时，*out 保持 NULL。
  *
@@ -50,7 +52,15 @@ void tr_client_config_init(struct tr_client_config *config);
  * 停止继续使用业务 API，并通过 tr_client_destroy() 重试收敛。
  */
 int tr_client_create(const struct tr_client_config *config,
-		     struct tr_client **out);
+                     const struct tr_rpc_method_desc *methods,
+                     size_t method_count, struct tr_client **out);
+
+/* 仅创建连接组传输门面，不启用 RPC。使用 connection_group_* 接口，
+ * tr_client_connect 返回 UNSUPPORTED；RPC 重连/拦截器配置也不适用。
+ * 复用 config_init/destroy 的参数、执行域与失败所有权规则。
+ */
+int tr_client_create_transport(const struct tr_client_config *config,
+                               struct tr_client **out);
 
 /*
  * 门面仅接受数字形式的 IPv4 地址。
@@ -70,31 +80,21 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
  */
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms);
 
-int tr_client_register_method(struct tr_client *client,
-			      const struct tr_rpc_method_desc *method);
-
-int tr_client_unary_call_ex(struct tr_client *client, uint32_t service_id,
-			    uint32_t method_id,
-			    const struct tr_rpc_bytes *request,
-			    const struct tr_rpc_call_options *options,
-			    tr_rpc_unary_result_cb result_cb, void *result_arg,
-			    struct tr_rpc_call_handle *out);
-
-int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
-			 uint32_t method_id, const struct tr_rpc_bytes *request,
-			 tr_rpc_unary_result_cb result_cb, void *result_arg,
-			 struct tr_rpc_call_handle *out);
-
-int tr_client_call_start_ex(struct tr_client *client, uint32_t service_id,
-			    uint32_t method_id,
-			    const struct tr_rpc_call_options *options,
-			    const struct tr_rpc_call_callbacks *callbacks,
-			    struct tr_rpc_call_handle *out);
-
+/* 调用能力与回调的完整定义及消息/终局契约见 tr/rpc_v2.h。
+ * 方法表已经由 create 复制冻结，不再提供运行时旧方法注册。
+ */
+struct tr_rpc_v2_call;
+struct tr_rpc_v2_client_callbacks;
 int tr_client_call_start(struct tr_client *client, uint32_t service_id,
-			 uint32_t method_id,
-			 const struct tr_rpc_call_callbacks *callbacks,
-			 struct tr_rpc_call_handle *out);
+                         uint32_t method_id,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out);
+int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
+                         uint32_t method_id, const struct tr_rpc_bytes *request,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out);
 
 /*
  * begin_drain() 只发布单调的排空意图，可从回调内调用。

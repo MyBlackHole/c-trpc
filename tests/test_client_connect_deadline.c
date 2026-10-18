@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "tr/status.h"
 #include "../src/execution/reactor_internal.h"
@@ -190,7 +191,7 @@ int main(void)
 	config.connect_timeout_ms = TEST_TIMEOUT_MS;
 	config.keepalive_interval_ms = 0U;
 	config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
-	assert(tr_client_create(&config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&config, &client) == TR_OK);
 	/* 同一个 Client 重复连接，证明各失败路径没有留下部分会话。 */
 	run_case(client, 80U, 0U, 0);
 	run_case(client, 80U, 3U, 0);

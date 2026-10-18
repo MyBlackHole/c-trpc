@@ -1,7 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
-#include "tr/client.h"
+#include "tr/rpc_v2.h"
 #include "tr/status.h"
 
+#include <errno.h>
 #include <libintl.h>
 #include <limits.h>
 #include <locale.h>
@@ -70,29 +71,72 @@ struct result_ctx {
 	pthread_cond_t cond;
 	int done;
 	int status;
+	int copy_status;
+	int messages;
 	char response[1024];
 	uint32_t response_len;
 };
 
-static void on_result(struct tr_rpc_call_handle call, int status,
-		      const struct tr_rpc_bytes *response, void *arg)
+/* 正文只借用至回调返回，复制到有界应用存储；不能把正文当作终局。 */
+static void on_message(struct tr_rpc_v2_call call,
+                       const struct tr_rpc_bytes *response, void *arg)
 {
-	struct result_ctx *ctx = (struct result_ctx *)arg;
+	struct result_ctx *ctx = arg;
 	(void)call;
 
 	pthread_mutex_lock(&ctx->lock);
-	ctx->status = status;
-	if (response) {
-		ctx->response_len =
-			response->len < sizeof(ctx->response) - 1U ?
-				response->len :
-				(uint32_t)sizeof(ctx->response) - 1U;
-		memcpy(ctx->response, response->data, ctx->response_len);
-		ctx->response[ctx->response_len] = '\0';
+	if (ctx->messages++ || response->len >= sizeof(ctx->response)) {
+		ctx->copy_status = TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+	} else {
+		ctx->response_len = response->len;
+		if (response->len)
+			memcpy(ctx->response, response->data, response->len);
+		ctx->response[response->len] = '\0';
 	}
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void on_terminal(struct tr_rpc_v2_call call, enum tr_rpc_status status,
+                        enum tr_rpc_v2_delivery delivery, void *arg)
+{
+	struct result_ctx *ctx = arg;
+	(void)call;
+	(void)delivery;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->status = status == TR_RPC_STATUS_OK && ctx->copy_status
+	                      ? ctx->copy_status
+	                      : (int)status;
 	ctx->done = 1;
 	pthread_cond_signal(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
+}
+
+/* 只由外部控制线程收敛；AGAIN 不是成功，也不能先销毁回调存储。 */
+static int destroy_client(struct tr_client *client)
+{
+	struct timespec deadline, now;
+	const struct timespec pause_time = {0, 1000000L};
+	int ret = tr_client_destroy(client);
+
+	if (ret != TR_AGAIN)
+		return ret;
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+		return TR_ERR_SYS;
+	deadline.tv_sec += 5;
+	for (;;) {
+		if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+			return TR_ERR_SYS;
+		if (now.tv_sec > deadline.tv_sec ||
+		    (now.tv_sec == deadline.tv_sec &&
+		     now.tv_nsec >= deadline.tv_nsec))
+			return TR_ERR_TIMEOUT;
+		if (nanosleep(&pause_time, NULL) != 0 && errno != EINTR)
+			return TR_ERR_SYS;
+		ret = tr_client_destroy(client);
+		if (ret != TR_AGAIN)
+			return ret;
+	}
 }
 
 int main(int argc, char **argv)
@@ -101,8 +145,9 @@ int main(int argc, char **argv)
 	struct tr_client *client = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
-	struct tr_rpc_call_handle call;
-	struct result_ctx result;
+	struct tr_rpc_v2_call call;
+	struct tr_rpc_v2_client_callbacks callbacks;
+	static struct result_ctx result;
 	struct timespec deadline;
 	const char *language = getenv("CTRPC_LANG");
 	const char *address;
@@ -134,16 +179,6 @@ int main(int argc, char **argv)
 	pthread_mutex_init(&result.lock, NULL);
 	pthread_cond_init(&result.cond, NULL);
 
-	tr_client_config_init(&config);
-	if (tr_client_create(&config, &client) != TR_OK ||
-	    tr_client_connect(client, address, port) != TR_OK) {
-		fputs(dgettext(ECHO_DOMAIN, "connect failed\n"), stderr);
-		if (tr_client_destroy(client) != TR_OK)
-			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
-			      stderr);
-		return 1;
-	}
-
 	memset(&method, 0, sizeof(method));
 	method.service_id = 1U;
 	method.method_id = 1U;
@@ -155,18 +190,31 @@ int main(int argc, char **argv)
 	method.max_request_bytes = 64U * 1024U;
 	method.max_response_bytes = 64U * 1024U;
 
-	if (tr_client_register_method(client, &method) != TR_OK) {
-		if (tr_client_destroy(client) != TR_OK)
+	tr_client_config_init(&config);
+	if (tr_client_create(&config, &method, 1, &client) != TR_OK ||
+	    tr_client_connect(client, address, port) != TR_OK) {
+		fputs(dgettext(ECHO_DOMAIN, "connect failed\n"), stderr);
+		if (destroy_client(client) != TR_OK)
 			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
 			      stderr);
 		return 1;
 	}
+	if (tr_client_wait_ready(client, 5000) != TR_OK) {
+		if (destroy_client(client) != TR_OK)
+			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
+			      stderr);
+		return 1;
+	}
+	memset(&callbacks, 0, sizeof(callbacks));
+	callbacks.message = on_message;
+	callbacks.terminal = on_terminal;
+	callbacks.arg = &result;
 
 	request.data = (const uint8_t *)text;
 	request.len = (uint32_t)strlen(text);
-	if (tr_client_unary_call(client, 1U, 1U, &request, on_result, &result,
-				 &call) != TR_OK) {
-		if (tr_client_destroy(client) != TR_OK)
+	if (tr_client_unary_call(client, 1U, 1U, &request, NULL, &callbacks,
+	                         &call) != TR_OK) {
+		if (destroy_client(client) != TR_OK)
 			fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"),
 			      stderr);
 		return 1;
@@ -177,7 +225,7 @@ int main(int argc, char **argv)
 	pthread_mutex_lock(&result.lock);
 	while (!result.done && wait_ret == 0)
 		wait_ret = pthread_cond_timedwait(&result.cond, &result.lock,
-						  &deadline);
+		                                  &deadline);
 	if (result.done && result.status == TR_RPC_STATUS_OK)
 		printf("response: %s\n", result.response);
 	else
@@ -185,10 +233,10 @@ int main(int argc, char **argv)
 		        result.done ? result.status : wait_ret);
 	pthread_mutex_unlock(&result.lock);
 
-	if (tr_client_destroy(client) != TR_OK) {
+	if (destroy_client(client) != TR_OK) {
 		fputs(dgettext(ECHO_DOMAIN, "client destroy failed\n"), stderr);
-		pthread_cond_destroy(&result.cond);
-		pthread_mutex_destroy(&result.lock);
+		/* 销毁失败尚未证明回调退出。进程退出前保留静态回调存储及同步对象。
+		 */
 		return 1;
 	}
 	pthread_cond_destroy(&result.cond);

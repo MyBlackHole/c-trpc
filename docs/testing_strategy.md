@@ -50,6 +50,14 @@ Transport/RPC 集成测试只验证跨模块契约。
 
 ### 公共 V2 SDK
 
+普通 `tr_client_create/tr_server_create` 和 `tr_client_unary_call/call_start` 现为
+V2 入口，原 `test_rpc_v2_sdk`、`test_rpc_v2_server` 与 Echo 示例已经直接使用它们。
+SDK 测试验证空方法表不会回退 V1；连接组专测使用显式传输工厂，并验证 RPC 监听
+和连接被拒绝、失败不改端口，以及配置中的 RPC 重连/拦截器不被静默忽略。
+尚未迁移的旧 Endpoint 故障与性能回归显式调用 `src/facade_legacy_internal.h`；
+这些结果只证明旧引擎没有回归，不能计为默认 V2 路径覆盖。该头不安装、不以宏
+覆盖公开函数。剩余旧内核的删除必须连同其仍有价值的故障覆盖逐项迁移。
+
 `test_rpc_v2_sdk` 只使用安装范围内的公共头与 C/POSIX 接口。真实回环 TCP
 覆盖 ONE→ONE、ONE→MANY、MANY→ONE、MANY→MANY，区分零条 MANY 和零字节消息，
 并验证请求与响应元数据、成功复制后的源内存复用、真实发送背压、取消、期限和排空。
@@ -63,7 +71,7 @@ Transport/RPC 集成测试只验证跨模块契约。
 分别背压，零字节和最大正文、复制准入失败不发布调用、消息后错误 FINAL、
 回调内取消、早终局释放用户参数，以及待发送请求在期限、断连、停止域重试中
 归还。它复用原测试目标与超时，不建立另一套 CI 作业。公开 SDK 消费端的
-ONE→ONE 最大正文、元数据和零字节场景使用 `tr_client_v2_unary_call`，从而在
+ONE→ONE 最大正文、元数据和零字节场景使用 `tr_client_unary_call`，从而在
 原安装后 C11/C++11 四编译器检查中覆盖新符号与自动发送路径。
 
 `test_rpc_v2_server` 独立验证服务端业务身份、冻结方法表、终局责任与回调生命周期。

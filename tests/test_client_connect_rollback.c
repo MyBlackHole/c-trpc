@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "../src/io/socket.h"
 #include "../src/rpc/rpc_internal.h"
@@ -70,7 +71,7 @@ static struct tr_client *create_client(void)
 	tr_client_config_init(&config);
 	config.keepalive_interval_ms = 0U;
 	config.enable_reconnect = 0;
-	assert(tr_client_create(&config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&config, &client) == TR_OK);
 	assert(client != NULL);
 	return client;
 }

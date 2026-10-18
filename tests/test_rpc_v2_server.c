@@ -200,7 +200,7 @@ static void check_lifecycle_reentry(struct fixture *f)
 	assert(tr_server_start(f->server) == TR_ERR_STATE);
 	assert(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	assert(tr_server_destroy(f->server) == TR_ERR_STATE);
-	assert(tr_server_create_v2(NULL, NULL, 0, &extra) == TR_ERR_STATE);
+	assert(tr_server_create(NULL, NULL, 0, &extra) == TR_ERR_STATE);
 	assert(!extra);
 	assert(tr_client_destroy(f->clients[0]) == TR_ERR_STATE);
 	memset(&before, 0xa5, sizeof(before));
@@ -588,8 +588,8 @@ static void fixture_init(struct fixture *f)
 		methods[i] = (struct tr_rpc_v2_method){
 		        descriptions[i], work, server_terminal, &f->methods[i]};
 	}
-	assert(tr_server_create_v2(&server_config, methods, METHODS,
-	                           &f->server) == TR_OK);
+	assert(tr_server_create(&server_config, methods, METHODS, &f->server) ==
+	       TR_OK);
 	/* 整个原数组已不再借用，包括 terminal 和 arg 指针。 */
 	memset(methods, 0, sizeof(methods));
 	assert(tr_server_listen(f->server, "127.0.0.1", 0, &port) == TR_OK);
@@ -598,8 +598,8 @@ static void fixture_init(struct fixture *f)
 	client_config.limits = server_config.limits;
 	client_config.keepalive_interval_ms = 0;
 	for (unsigned i = 0; i < 2; ++i) {
-		assert(tr_client_create_v2(&client_config, descriptions,
-		                           METHODS, &f->clients[i]) == TR_OK);
+		assert(tr_client_create(&client_config, descriptions, METHODS,
+		                        &f->clients[i]) == TR_OK);
 		assert(tr_client_connect(f->clients[i], "127.0.0.1", port) ==
 		       TR_OK);
 		assert(tr_client_wait_ready(f->clients[i],
@@ -622,9 +622,9 @@ static void call_start(struct fixture *f, unsigned index, unsigned client,
 	        .terminal = client_terminal,
 	        .arg = call};
 	call->mode = method;
-	assert(tr_client_v2_call_start(f->clients[client], 7, method + 1,
-	                               method == NO_JOB ? NULL : &options,
-	                               &callbacks, &call->handle) == TR_OK);
+	assert(tr_client_call_start(f->clients[client], 7, method + 1,
+	                            method == NO_JOB ? NULL : &options,
+	                            &callbacks, &call->handle) == TR_OK);
 }
 
 static void send_or_half_close(struct call *call,
@@ -869,18 +869,18 @@ static void test_configuration(void)
 	                                    NULL, 0) == TR_ERR_INVALID);
 	tr_server_config_init(&config);
 	config.limits.max_message_bytes = 32;
-	assert(tr_server_create_v2(&config, &method, 1, &server) ==
+	assert(tr_server_create(&config, &method, 1, &server) ==
 	       TR_ERR_INVALID);
 	assert(!server);
 	config.limits.max_message_bytes = 64;
 	config.limits.initial_window_bytes = 32;
-	assert(tr_server_create_v2(&config, &method, 1, &server) ==
+	assert(tr_server_create(&config, &method, 1, &server) ==
 	       TR_ERR_INVALID);
 	assert(!server);
 	config.limits.initial_window_bytes = 64;
 	config.limits.max_frame_payload_bytes = 64;
 	/* 没有业务调用时允许不提供可选终局函数，且可正常回收。 */
-	assert(tr_server_create_v2(&config, &method, 1, &server) == TR_OK);
+	assert(tr_server_create(&config, &method, 1, &server) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 }
 

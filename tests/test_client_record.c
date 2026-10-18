@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/facade_legacy_internal.h"
 #include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
 #include "../src/server_record_internal.h"
@@ -626,8 +627,8 @@ static void fixture_create(struct fixture *f)
 	                              &f->server_record, server_copy, 2,
 	                              &f->server) == TR_OK);
 	if (f->public_client)
-		CHECK(tr_client_create_v2(&f->client_config, client_copy, 3,
-		                          &f->client) == TR_OK);
+		CHECK(tr_client_create(&f->client_config, client_copy, 3,
+		                       &f->client) == TR_OK);
 	else
 		CHECK(tr_client_create_record(&f->client_config, &f->tuning,
 		                              &f->client_record, client_copy, 3,
@@ -1141,8 +1142,8 @@ static void test_configuration_and_rollback(void)
 	CHECK(!out);
 	f.client_config.enable_reconnect = 0;
 	fixture_create(&f);
-	CHECK(tr_client_register_method(f.client, &f.client_methods[0]) ==
-	      TR_ERR_UNSUPPORTED);
+	CHECK(tr_client_legacy_register_method(
+	              f.client, &f.client_methods[0]) == TR_ERR_UNSUPPORTED);
 	check_client_semantic(f.client, 0, 0, TR_RPC_STATUS_OK);
 	atomic_store(&fail_client_create, true);
 	CHECK(tr_client_connect(f.client, "127.0.0.1", f.port) == TR_ERR_NOMEM);
@@ -2014,8 +2015,7 @@ static void test_public_copy_and_pool(void)
 	struct tr_rpc_v2_call call;
 	uint8_t source[263];
 	public_fixture_init(&f);
-	CHECK(tr_client_v2_call_start(f.client, 17, 2, NULL, &cb, &call) ==
-	      TR_OK);
+	CHECK(tr_client_call_start(f.client, 17, 2, NULL, &cb, &call) == TR_OK);
 	wait_count(&result.writable, 1);
 	for (unsigned i = 0; i < 257; ++i)
 		source[i] = pattern(70, i);
@@ -2094,8 +2094,8 @@ static void test_public_unary_progress(unsigned size, enum tr_rpc_status status)
 	public_fixture_init(&f);
 	atomic_store(&f.final_status, status);
 	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &call) == TR_OK);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
 	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
 	memset(source, 0xee, sizeof(source));
 	CHECK(tr_rpc_v2_call_send(call, &request) == TR_ERR_STATE);
@@ -2117,8 +2117,8 @@ static void test_public_unary_progress(unsigned size, enum tr_rpc_status status)
 	CHECK(tr_client_wait_drained(f.client, 0) == TR_AGAIN);
 	memset(&untouched, 0xa5, sizeof(untouched));
 	sentinel = untouched;
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &untouched) == TR_ERR_CLOSED);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &untouched) == TR_ERR_CLOSED);
 	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
 	atomic_store(&block_kind, 0);
 	wait_count(&result.terminal, 1);
@@ -2150,8 +2150,8 @@ static void test_public_unary_callback_cancel(void)
 	struct tr_rpc_bytes request = {&byte, 1};
 	public_fixture_init(&f);
 	atomic_store(&block_kind, TR_RPC_RECORD_HALF_CLOSE);
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &call) == TR_OK);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
 	wait_count(&result.terminal, 1);
 	CHECK(result.status == TR_RPC_STATUS_CANCELLED);
 	CHECK(atomic_load(&result.messages) == 1);
@@ -2175,22 +2175,22 @@ static void test_public_unary_admission(void)
 	public_fixture_init(&f);
 	memset(&untouched, 0xa5, sizeof(untouched));
 	sentinel = untouched;
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, NULL, NULL, &cb,
-	                              &untouched) == TR_ERR_INVALID);
-	CHECK(tr_client_v2_unary_call(f.client, 17, 2, &request, NULL, &cb,
-	                              &untouched) == TR_ERR_UNSUPPORTED);
-	CHECK(tr_client_v2_unary_call(f.client, 17, 100, &request, NULL, &cb,
-	                              &untouched) == TR_ERR_UNSUPPORTED);
+	CHECK(tr_client_unary_call(f.client, 17, 1, NULL, NULL, &cb,
+	                           &untouched) == TR_ERR_INVALID);
+	CHECK(tr_client_unary_call(f.client, 17, 2, &request, NULL, &cb,
+	                           &untouched) == TR_ERR_UNSUPPORTED);
+	CHECK(tr_client_unary_call(f.client, 17, 100, &request, NULL, &cb,
+	                           &untouched) == TR_ERR_UNSUPPORTED);
 	request.len = BODY + 1;
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &untouched) == TR_ERR_BAD_LENGTH);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &untouched) == TR_ERR_BAD_LENGTH);
 	request.len = 1;
 	request.data = NULL;
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &untouched) == TR_ERR_INVALID);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &untouched) == TR_ERR_INVALID);
 	request.data = source;
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, NULL,
-	                              &untouched) == TR_ERR_INVALID);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, NULL,
+	                           &untouched) == TR_ERR_INVALID);
 	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
 	check_client_semantic(f.client, 0, 0, TR_RPC_STATUS_OK);
 	CHECK(!atomic_load(&attempts[TR_RPC_RECORD_OPEN]));
@@ -2198,8 +2198,8 @@ static void test_public_unary_admission(void)
 
 	/* 先走一次真实发送取得复制池，再耗尽它；失败不得打开传输流或
 	 * 改写 out，释放容量后同一请求可以重新受理，不能悄悄后台排队。 */
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &call) == TR_OK);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
 	wait_count(&result.terminal, 1);
 	CHECK(result.status == TR_RPC_STATUS_OK);
 	struct tr_buffer_pool *pool = atomic_load(&public_send_pool);
@@ -2214,8 +2214,8 @@ static void test_public_unary_admission(void)
 	for (uint32_t i = 0; i < pool->buffer_count; ++i)
 		CHECK(tr_buffer_acquire(pool, 1, &owned[i]) == TR_OK);
 	unsigned opens = atomic_load(&attempts[TR_RPC_RECORD_OPEN]);
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &untouched) == TR_AGAIN);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &untouched) == TR_AGAIN);
 	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
 	CHECK(atomic_load(&attempts[TR_RPC_RECORD_OPEN]) == opens);
 	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_OK);
@@ -2227,8 +2227,8 @@ static void test_public_unary_admission(void)
 	        .fixture = &f, .expected = {{1, 80}}, .expected_count = 1};
 	struct public_context retry_context = {&retry, false};
 	cb = public_callbacks(&retry_context);
-	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
-	                              &call) == TR_OK);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
 	wait_count(&retry.terminal, 1);
 	CHECK(retry.status == TR_RPC_STATUS_OK);
 	check_client_semantic(f.client, 2, 2, TR_RPC_STATUS_OK);
@@ -2253,8 +2253,8 @@ static void test_public_unary_terminal(unsigned mode)
 	public_fixture_init(&f);
 	atomic_store(&block_kind, mode >= 4 ? 0 : TR_RPC_RECORD_OPEN);
 	atomic_store(&inline_client_data_once, mode == 5);
-	CHECK(tr_client_v2_unary_call(f.client, 17, mode == 4 ? 99 : 1,
-	                              &request, &options, &cb, &call) == TR_OK);
+	CHECK(tr_client_unary_call(f.client, 17, mode == 4 ? 99 : 1, &request,
+	                           &options, &cb, &call) == TR_OK);
 	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
 	enum tr_rpc_status status = TR_RPC_STATUS_CANCELLED;
 	enum tr_rpc_v2_delivery delivery = TR_RPC_V2_DELIVERY_LIVE;
@@ -2323,11 +2323,10 @@ static int public_early_start_on_owner(void *arg)
 	struct tr_rpc_bytes body = {&byte, 1};
 	int ret =
 	        request->unary
-	                ? tr_client_v2_unary_call(request->fixture->client, 17,
-	                                          1, &body, NULL, &cb,
-	                                          &request->call)
-	                : tr_client_v2_call_start(request->fixture->client, 17,
-	                                          2, NULL, &cb, &request->call);
+	                ? tr_client_unary_call(request->fixture->client, 17, 1,
+	                                       &body, NULL, &cb, &request->call)
+	                : tr_client_call_start(request->fixture->client, 17, 2,
+	                                       NULL, &cb, &request->call);
 	CHECK(!fail_clock_after);
 	CHECK(ret == TR_OK);
 	CHECK(atomic_load(&request->result->terminal) == 1);

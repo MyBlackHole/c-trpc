@@ -1,8 +1,18 @@
-# trpc_transport_v1
+# c-trpc
 
 面向 Linux 的 C 传输/RPC 库，重点关注有界资源、显式所有权、高吞吐批量数据流，以及通用传输/RPC 与备份业务语义之间的清晰分离。
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
+
+**接口迁移状态**：普通 `tr_client_create(config, methods, count, out)` 与
+`tr_server_create(config, methods, count, out)` 现在只创建 V2；方法在创建时冻结。
+一元调用使用 `tr_client_unary_call(..., options, callbacks, out)`，正文回调与
+唯一终局分离。旧两参数构造、运行时注册和 V1 一元回调不再是公开门面；不兼容
+旧调用签名，须重新编译。连接组改用 `*_create_transport()`。完整接入合同以
+[公共 SDK 文档](docs/rpc-v2-sdk.md)及两个 Echo 示例为准。
+
+V1 引擎、部分低层类型及旧故障/基准测试尚未删除。下文标为 V1 的机制只描述
+遗留内部实现，不是普通门面的可选协议；历史审查和基准数据不视作 V2 验收。
 
 ## 架构
 
@@ -102,56 +112,22 @@ Channel 构造或已接收套接字接管的应用：
                                   TCP
 ```
 
-客户端生命周期：
+客户端使用 `tr_client_config_init()` 初始化配置，并准备非空方法描述数组。
+创建时调用 `tr_client_create(&cfg, methods, method_count, &client)`，然后
+`connect()` / `wait_ready()`；`tr_client_unary_call()` 自动发送一元请求，
+流式使用 `tr_client_call_start()` 与 `tr_rpc_v2_call_*()`。两者共用同一个
+V2 调用和终局内核，不再在连接后注册旧方法。
 
-```c
-struct tr_client_config cfg;
-struct tr_client *client;
-
-tr_client_config_init(&cfg);
-tr_client_create(&cfg, &client);
-tr_client_connect(client, "127.0.0.1", 9000);
-tr_client_register_method(client, &method);
-tr_client_unary_call(client, ...);
-assert(tr_client_destroy(client) == TR_OK);
-```
-
-服务端生命周期：
-
-```c
-struct tr_server_config cfg;
-struct tr_server *server;
-uint16_t bound_port;
-
-tr_server_config_init(&cfg);
-tr_server_create(&cfg, &server);
-tr_server_register_method(server, &method, handler, arg);
-tr_server_listen(server, "0.0.0.0", 9000, &bound_port);
-tr_server_start(server);
-...
-tr_server_drain(server, 5000);
-assert(tr_server_destroy(server) == TR_OK);
-```
-
-门面拥有 Reactor、RPC 消息资源池和 Channel 重组资源池。
-稳定的 `tr_facade_limits` 描述应用可见的协议/并发语义，而不是当前
-Reactor/资源池/执行器布局。命令/TX/RX、资源池数量、工作线程数量、
-执行器节点容量和续处理预留都在内部推导；仓库基准测试/架构测试只能通过
-不安装为 SDK API 的内部调优入口覆盖它们。
-
-RPC 编码消息所有权使用有界内部槽位池，其缓冲区按需增长到语义
-`max_message_bytes` 上限；安装后的 SDK 不暴露编码消息存储大小。
-
-`tr_server_register_method()` / `tr_server_register_stream_method()`
-在 V1 中属于启动前操作；每个已接收对端都会获得包含已注册方法表的 RPC Endpoint。
-`tr_client_call_start*()` 在不暴露 Reactor/Connection 内部结构的前提下提供流式 Call。
-返回的 Call 句柄继续使用现有 `tr_rpc_call_*()` API 完成调用级发送/取消/元数据操作。
+服务端准备 `tr_rpc_v2_method` 数组，在 `tr_server_create()` 中复制冻结工作
+函数、终局函数及方法描述，然后监听、启动、排空和销毁。默认门面的完整可运行
+示例为 `examples/echo_client.c` 和 `examples/echo_server.c`，程序诊断继续使用
+原国际化机制。门面持有运行时、有限任务/调用槽及缓冲预算；内部布局不进入 SDK。
 
 库内显式迁移入口 [`tr_server_create_record()`](src/server_record_internal.h)
 已将 V2 记录宿主接入同一 `tr_server` 的监听、接纳、排空与销毁。它冻结业务方法表，
 按全 Server 总额分摊硬预算、线程数和任务容量，每分片由所有对端共享一个通用执行器。
-该内部调优入口不安装为 SDK。默认构造仍选择 V1，公开的 V2 构造入口见下文；
-两种调用句柄各自绑定明确的协议合同。
+该内部调优入口不安装为 SDK。普通公开构造同样只选择 V2，不提供 V1 协商；
+尚未迁移的旧测试显式使用内部 legacy 入口，其句柄不适用于默认门面。
 V2 的回复能力只在当前工作回调内有效，旧方法注册明确返回不支持；
 稳定 RPC 语义统计与 V1 共用公开读取入口。大小/窗口限制、失败回滚与实际测试范围见
 [V2 Server 入口集成记录](docs/reviews/server_record_integration_20261017.md)。
@@ -171,11 +147,11 @@ Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚�
 ### 公共 V2 SDK
 
 安装后的 [`tr/rpc_v2.h`](include/tr/rpc_v2.h) 提供
-`tr_client_create_v2()`、`tr_server_create_v2()`，复用原有连接、监听、就绪、
+`tr_client_create()`、`tr_server_create()`，复用原有连接、监听、就绪、
 排空和销毁操作。方法表在创建时复制冻结，业务无需包含内部记录、缓冲区或任务头。
-接口显式选择 V2，不自动协商或回退到 V1。
+普通接口只选择 V2，不自动协商或回退到 V1。
 
-- Client 通过 `tr_client_v2_call_start()` 取得弱调用能力，使用
+- Client 通过 `tr_client_call_start()` 取得弱调用能力，使用
   `tr_rpc_v2_call_send()`、`half_close()`、`cancel()` 推进调用。发送仅借用正文，
   `TR_OK` 后已经复制并接受，应用可立即复用原内存；`TR_AGAIN` 不隐式保存消息，
   后续可写通知负责提示重试，包括复制池满后的恢复。
@@ -198,7 +174,7 @@ Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚�
 - 两端通过既有语义统计入口读取开始、结束、进行中调用数及最终状态分布。
   Client 自身 LIVE 回调可读取本地快照；Server 聚合快照由外部控制线程读取。
 
-公共 V2 接口尚未提供重连、连接组、压缩或 TLS。所有权、资源限制和接入顺序见
+普通 RPC 接口尚未提供重连、压缩或 TLS；连接组是独立的传输工厂，不是 RPC 协议回退。所有权、资源限制和接入顺序见
 [V2 SDK 使用合同](docs/rpc-v2-sdk.md)。完整的可编译运行消费端见
 [`tests/test_rpc_v2_sdk.c`](tests/test_rpc_v2_sdk.c)；CI 将同一源码复制到仓库外，
 仅用安装头文件与静态库，分别以 C11/C++11 的 GCC、Clang 编译运行。
@@ -239,7 +215,7 @@ cfg.connection_groups.authorize = authorize_group;
 cfg.connection_groups.on_message = on_group_data;
 cfg.connection_groups.callback_arg = app;
 
-tr_server_create(&cfg, &server);
+tr_server_create_transport(&cfg, &server);
 tr_server_connection_group_listen(
     server, "0.0.0.0", 9100, 128, &group_port);
 tr_server_start(server);
@@ -258,7 +234,7 @@ tr_client_config_init(&client_cfg);
 client_cfg.connection_groups.max_data_connections = 4;
 /* 0 继承 client_cfg.limits.max_streams，保持向后兼容行为。 */
 client_cfg.connection_groups.max_active_transfers = 256;
-tr_client_create(&client_cfg, &client);
+tr_client_create_transport(&client_cfg, &client);
 tr_client_connection_group_connect(
     client, "127.0.0.1", group_port, &group);
 ...

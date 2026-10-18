@@ -6,7 +6,7 @@
 #include "rpc/rpc_record_endpoint.h"
 
 /* 库内显式 V2 调优入口，返回既有 Server；不安装为 SDK，不协商或回退到 V1。
- * 公开 tr_server_create_v2 在组合根推导本配置，不公开这些资源布局。
+ * 公开 tr_server_create 在组合根推导本配置，不公开这些资源布局。
  * endpoint 是每对端的有界记录宿主配置；tasks 与 memory_budget_bytes 是
  * 全 Server 总额，按分片确定分摊，不因增加分片隐式放大。每个分片至少
  * 一个工作线程，所有对端共享该分片的既有 task_executor。

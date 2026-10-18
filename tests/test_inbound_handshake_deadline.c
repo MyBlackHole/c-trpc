@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/trpc.h"
 #include "../src/execution/deadline_internal.h"
 #include "../src/execution/reactor_internal.h"
@@ -280,7 +281,7 @@ static void fixture_init_capacity(struct fixture *f, int group,
 		f->config.connection_groups.max_streams_per_group = 4U;
 		f->config.connection_groups.authorize = authorize_group;
 	}
-	assert(tr_server_create(&f->config, &f->server) == TR_OK);
+	assert(tr_server_legacy_create(&f->config, &f->server) == TR_OK);
 	if (group)
 		assert(tr_server_connection_group_listen(f->server, "127.0.0.1",
 		                                         0U, 4,
@@ -430,7 +431,7 @@ static void normal_client(struct fixture *f)
 	tr_client_config_init(&config);
 	config.limits = f->config.limits;
 	config.keepalive_interval_ms = 0U;
-	assert(tr_client_create(&config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&config, &client) == TR_OK);
 	if (f->group)
 		assert(tr_client_connection_group_connect(
 		               client, "127.0.0.1", f->port, &group) == TR_OK);

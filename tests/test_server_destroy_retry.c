@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/server.h"
 #include "tr/status.h"
 
@@ -102,7 +103,7 @@ int main(void)
 	atomic_store(&rpc_destroy_attempts, 0U);
 	atomic_store(&channel_destroy_attempts, 0U);
 
-	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(tr_server_legacy_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);

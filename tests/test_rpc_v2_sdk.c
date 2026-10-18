@@ -578,8 +578,8 @@ static void create_client(struct fixture *f, struct observed_client *client)
 	struct tr_rpc_method_desc descriptors[METHOD_COUNT + 1U];
 	memset(client, 0, sizeof(*client));
 	describe_methods(descriptors);
-	CHECK(tr_client_create_v2(&f->client_config, descriptors,
-	                          METHOD_COUNT + 1U, &client->handle) == TR_OK);
+	CHECK(tr_client_create(&f->client_config, descriptors,
+	                       METHOD_COUNT + 1U, &client->handle) == TR_OK);
 	memset(descriptors, 0, sizeof(descriptors));
 	check_client_totals(client, 0, 0, TR_RPC_STATUS_OK, 0);
 	CHECK(tr_client_connect(client->handle, "127.0.0.1", f->port) == TR_OK);
@@ -623,7 +623,7 @@ static void fixture_create_shards(struct fixture *f, unsigned shards)
 		methods[i].terminal = server_terminal;
 		methods[i].arg = &f->methods[i];
 	}
-	CHECK(tr_server_create_v2(&server, methods, METHOD_COUNT, &f->server) ==
+	CHECK(tr_server_create(&server, methods, METHOD_COUNT, &f->server) ==
 	      TR_OK);
 	/* 工厂冻结方法表；后续连接不能继续借用这些构造期数组。 */
 	memset(methods, 0, sizeof(methods));
@@ -880,10 +880,10 @@ static int call_start(struct call_state *c,
 	callbacks.writable = client_writable;
 	callbacks.terminal = client_terminal;
 	callbacks.arg = c;
-	return tr_client_v2_call_start(c->client->handle, 23,
-	                               c->method < METHOD_COUNT ? c->method + 1U
-	                                                        : 99U,
-	                               options, &callbacks, &c->handle);
+	return tr_client_call_start(c->client->handle, 23,
+	                            c->method < METHOD_COUNT ? c->method + 1U
+	                                                     : 99U,
+	                            options, &callbacks, &c->handle);
 }
 
 /* 安装后的同一 C11/C++11 消费端验证一元自动发送；正文仍只借用
@@ -911,15 +911,15 @@ static int unary_start(struct call_state *c,
 		sentinel = untouched;
 		oversized.data = storage;
 		oversized.len = sizeof(storage);
-		CHECK(tr_client_v2_unary_call(c->client->handle, 23,
-		                              c->method + 1U, &oversized,
-		                              options, &callbacks,
-		                              &untouched) == TR_ERR_BAD_LENGTH);
+		CHECK(tr_client_unary_call(c->client->handle, 23,
+		                           c->method + 1U, &oversized, options,
+		                           &callbacks,
+		                           &untouched) == TR_ERR_BAD_LENGTH);
 		CHECK(memcmp(&untouched, &sentinel, sizeof(untouched)) == 0);
 	}
-	int ret = tr_client_v2_unary_call(c->client->handle, 23, c->method + 1U,
-	                                  &request, options, &callbacks,
-	                                  &c->handle);
+	int ret =
+	        tr_client_unary_call(c->client->handle, 23, c->method + 1U,
+	                             &request, options, &callbacks, &c->handle);
 	memset(storage, 0xd3, sizeof(storage));
 	if (ret == TR_OK) {
 		lock(c->fixture);
@@ -1465,8 +1465,22 @@ static void test_async_producer(void)
 	puts("sdk-v2: case=async-producer-copy-stop result=pass");
 }
 
+static void test_default_factory_requires_methods(void)
+{
+	struct tr_client *client = NULL;
+	struct tr_server *server = NULL;
+
+	CHECK(tr_client_create(NULL, NULL, 0, &client) == TR_ERR_INVALID);
+	CHECK(!client);
+	CHECK(tr_server_create(NULL, NULL, 0, &server) == TR_ERR_INVALID);
+	CHECK(!server);
+	CHECK(tr_client_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
+	CHECK(tr_server_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
+}
+
 int main(void)
 {
+	test_default_factory_requires_methods();
 	test_shapes_and_copy();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);

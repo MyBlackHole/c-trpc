@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "facade_legacy_internal.h"
 #include "execution/worker_context.h"
 #include "tr/client.h"
 
@@ -60,6 +61,7 @@ struct tr_client {
 	size_t record_method_count;
 	size_t record_method_bytes;
 	int record_mode;
+	int transport_only;
 	int record_sdk_mode;
 	int record_connect_failed;
 	_Atomic int record_stopping;
@@ -478,9 +480,9 @@ int tr_client_create_record(const struct tr_client_config *config,
 	                                 method_count, 0, out);
 }
 
-int tr_client_create_v2(const struct tr_client_config *config,
-                        const struct tr_rpc_method_desc *methods,
-                        size_t method_count, struct tr_client **out)
+int tr_client_create(const struct tr_client_config *config,
+                     const struct tr_rpc_method_desc *methods,
+                     size_t method_count, struct tr_client **out)
 {
 	struct tr_client_config effective;
 	struct tr_facade_tuning tuning;
@@ -528,8 +530,27 @@ int tr_client_create_v2(const struct tr_client_config *config,
 	                                 method_count, 1, out);
 }
 
-int tr_client_create(const struct tr_client_config *config,
-		     struct tr_client **out)
+int tr_client_create_transport(const struct tr_client_config *config,
+                               struct tr_client **out)
+{
+	int ret;
+
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (config && (config->interceptor.fn || config->interceptor.arg ||
+	               config->enable_reconnect))
+		return TR_ERR_UNSUPPORTED;
+	ret = tr_client_create_with_tuning(config, NULL, out);
+	if (ret == TR_OK)
+		(*out)->transport_only = 1;
+	return ret;
+}
+
+int tr_client_legacy_create(const struct tr_client_config *config,
+                            struct tr_client **out)
 {
 	return tr_client_create_with_tuning(config, NULL, out);
 }
@@ -682,6 +703,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 
 	if (!client || !ipv4_address || port == 0)
 		return TR_ERR_INVALID;
+	if (client->transport_only)
+		return TR_ERR_UNSUPPORTED;
 	if (client->channel || client->rpc || client->record_rpc ||
 	    client->record_connect_failed ||
 	    atomic_load_explicit(&client->record_stopping,
@@ -954,24 +977,25 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 	return tr_channel_wait_ready(
 		client->channel, TR_LANE_CONTROL, timeout_ms);
 }
-int tr_client_register_method(struct tr_client *client,
-			      const struct tr_rpc_method_desc *method)
+int tr_client_legacy_register_method(struct tr_client *client,
+                                     const struct tr_rpc_method_desc *method)
 {
-	if (client && client->record_mode)
+	if (client && (client->record_mode || client->transport_only))
 		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
 	return tr_rpc_register_method(client->rpc, method, NULL, NULL);
 }
 
-int tr_client_unary_call_ex(struct tr_client *client, uint32_t service_id,
-			    uint32_t method_id,
-			    const struct tr_rpc_bytes *request,
-			    const struct tr_rpc_call_options *options,
-			    tr_rpc_unary_result_cb result_cb, void *result_arg,
-			    struct tr_rpc_call_handle *out)
+int tr_client_legacy_unary_call_ex(struct tr_client *client,
+                                   uint32_t service_id, uint32_t method_id,
+                                   const struct tr_rpc_bytes *request,
+                                   const struct tr_rpc_call_options *options,
+                                   tr_rpc_unary_result_cb result_cb,
+                                   void *result_arg,
+                                   struct tr_rpc_call_handle *out)
 {
-	if (client && client->record_mode)
+	if (client && (client->record_mode || client->transport_only))
 		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
@@ -979,22 +1003,25 @@ int tr_client_unary_call_ex(struct tr_client *client, uint32_t service_id,
 				    options, result_cb, result_arg, out);
 }
 
-int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
-			 uint32_t method_id, const struct tr_rpc_bytes *request,
-			 tr_rpc_unary_result_cb result_cb, void *result_arg,
-			 struct tr_rpc_call_handle *out)
+int tr_client_legacy_unary_call(struct tr_client *client, uint32_t service_id,
+                                uint32_t method_id,
+                                const struct tr_rpc_bytes *request,
+                                tr_rpc_unary_result_cb result_cb,
+                                void *result_arg,
+                                struct tr_rpc_call_handle *out)
 {
-	return tr_client_unary_call_ex(client, service_id, method_id, request,
-				       NULL, result_cb, result_arg, out);
+	return tr_client_legacy_unary_call_ex(client, service_id, method_id,
+	                                      request, NULL, result_cb,
+	                                      result_arg, out);
 }
 
-int tr_client_call_start_ex(struct tr_client *client, uint32_t service_id,
-			    uint32_t method_id,
-			    const struct tr_rpc_call_options *options,
-			    const struct tr_rpc_call_callbacks *callbacks,
-			    struct tr_rpc_call_handle *out)
+int tr_client_legacy_call_start_ex(
+        struct tr_client *client, uint32_t service_id, uint32_t method_id,
+        const struct tr_rpc_call_options *options,
+        const struct tr_rpc_call_callbacks *callbacks,
+        struct tr_rpc_call_handle *out)
 {
-	if (client && client->record_mode)
+	if (client && (client->record_mode || client->transport_only))
 		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;
@@ -1002,13 +1029,13 @@ int tr_client_call_start_ex(struct tr_client *client, uint32_t service_id,
 				    callbacks, out);
 }
 
-int tr_client_call_start(struct tr_client *client, uint32_t service_id,
-			 uint32_t method_id,
-			 const struct tr_rpc_call_callbacks *callbacks,
-			 struct tr_rpc_call_handle *out)
+int tr_client_legacy_call_start(struct tr_client *client, uint32_t service_id,
+                                uint32_t method_id,
+                                const struct tr_rpc_call_callbacks *callbacks,
+                                struct tr_rpc_call_handle *out)
 {
-	return tr_client_call_start_ex(client, service_id, method_id, NULL,
-				       callbacks, out);
+	return tr_client_legacy_call_start_ex(client, service_id, method_id,
+	                                      NULL, callbacks, out);
 }
 
 static int tr_client_record_sync(struct tr_rpc_record_client *client,
@@ -1115,22 +1142,21 @@ static int tr_client_v2_start(
 	                             tr_client_v2_start_on_owner, &request);
 }
 
-int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
-                            uint32_t method_id,
-                            const struct tr_rpc_call_options *options,
-                            const struct tr_rpc_v2_client_callbacks *callbacks,
-                            struct tr_rpc_v2_call *out)
+int tr_client_call_start(struct tr_client *client, uint32_t service_id,
+                         uint32_t method_id,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out)
 {
 	return tr_client_v2_start(client, service_id, method_id, options,
 	                          callbacks, out, NULL);
 }
 
-int tr_client_v2_unary_call(struct tr_client *client, uint32_t service_id,
-                            uint32_t method_id,
-                            const struct tr_rpc_bytes *request,
-                            const struct tr_rpc_call_options *options,
-                            const struct tr_rpc_v2_client_callbacks *callbacks,
-                            struct tr_rpc_v2_call *out)
+int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
+                         uint32_t method_id, const struct tr_rpc_bytes *request,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out)
 {
 	if (!request || (request->len && !request->data))
 		return TR_ERR_INVALID;
@@ -1325,7 +1351,7 @@ int tr_client_get_channel_stats(struct tr_client *client,
 int tr_client_get_rpc_stats(struct tr_client *client,
 			    struct tr_rpc_endpoint_stats *out)
 {
-	if (client && client->record_mode)
+	if (client && (client->record_mode || client->transport_only))
 		return TR_ERR_UNSUPPORTED;
 	if (!client || !client->rpc)
 		return TR_ERR_STATE;

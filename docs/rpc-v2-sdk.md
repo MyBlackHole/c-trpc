@@ -1,19 +1,23 @@
 # 公共 V2 SDK 使用合同
 
-`tr/rpc_v2.h` 是显式 V2 业务入口，`tr/trpc.h` 同样包含它。
+`tr/rpc_v2.h` 定义普通 RPC 门面使用的 V2 业务契约，`tr/trpc.h` 同样包含它。
 应用使用安装后的头文件及 `libtrcore.a`，不需要记录层、Buffer、Reactor 或执行器头。
-默认的 `tr_client_create()`、`tr_server_create()` 仍选择 V1；V2 构造和调用不自动回退。
+`tr_client_create(config, methods, count, out)`、`tr_server_create(config, methods,
+count, out)` 只构造 V2。旧两参数构造、旧注册及旧一元回调接口已从普通门面移除；
+调用者必须重新编译，不提供 `_create_v2` 别名或 V1 回退。
+连接组传输使用 `tr_client_create_transport()` / `tr_server_create_transport()`，
+它们不允许 RPC `connect/listen`，不能借传输入口重新激活旧 RPC。
 
 ## 接入顺序
 
 1. 准备 `tr_rpc_method_desc`。请求和响应分别选择 `TR_RPC_ONE` 或 `TR_RPC_MANY`，
    指定双方约定的非零 codec 编号与正文上限。当前 SDK 传递原始字节，不自动编解码。
 2. 服务端用 `tr_rpc_v2_method` 绑定工作函数、可选终局函数和业务参数，调用
-   `tr_server_create_v2()`，再执行 `listen()`、`start()`。
-3. 客户端用相同描述创建 `tr_client_create_v2()`，执行 `connect()`、`wait_ready()`。
+   `tr_server_create()`，再执行 `listen()`、`start()`。
+3. 客户端用相同描述创建 `tr_client_create()`，执行 `connect()`、`wait_ready()`。
    两端在构造时复制冻结方法表，调用方随后可以释放或改写原数组。
 4. 在调用开始前准备独立的回调参数和输出句柄存储，再调用
-   `tr_client_v2_call_start()`。只有 `TR_OK` 修改输出句柄并承担唯一终局责任。
+   `tr_client_call_start()`。只有 `TR_OK` 修改输出句柄并承担唯一终局责任。
 5. 首次可写提示表示 OPEN 已被本地传输接受。按方法基数发送请求，最后半关闭。
    `TR_AGAIN` 时返回事件循环并等待后续提示，不能在回调中忙等。
 6. 以终局状态判断调用结果。单独收到响应正文或尾部元数据不等于调用成功。
@@ -51,7 +55,7 @@ static enum tr_rpc_status echo_work(
 
 ## 一元请求的自动发送
 
-ONE→ONE 方法可以改用 `tr_client_v2_unary_call(client, service, method,
+ONE→ONE 方法可以改用 `tr_client_unary_call(client, service, method,
 &request, options, &callbacks, &call)`。它一次承担 OPEN、一条 MESSAGE 和
 HALF_CLOSE 的发送责任，不要求应用编写发送重试回调。`request` 必须非 NULL；
 `{NULL, 0}` 表示一条零字节请求，不是零消息流。其他基数组合仍使用 `call_start()`。

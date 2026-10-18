@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "facade_legacy_internal.h"
 #include "execution/worker_context.h"
 #include "tr/server.h"
 
@@ -118,6 +119,7 @@ struct tr_server {
 	size_t record_method_count;
 	size_t record_method_bytes;
 	int record_mode;
+	int transport_only;
 	int record_start_attempted;
 
 	struct tr_pipeline_listener *connection_group_listener;
@@ -1966,15 +1968,33 @@ int tr_server_create_record(const struct tr_server_config *config,
 	                                 method_count, out);
 }
 
-int tr_server_create(const struct tr_server_config *config,
-		     struct tr_server **out)
+int tr_server_create_transport(const struct tr_server_config *config,
+                               struct tr_server **out)
+{
+	int ret;
+
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (tr_server_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (config && (config->interceptor.fn || config->interceptor.arg))
+		return TR_ERR_UNSUPPORTED;
+	ret = tr_server_create_with_tuning(config, NULL, out);
+	if (ret == TR_OK)
+		(*out)->transport_only = 1;
+	return ret;
+}
+
+int tr_server_legacy_create(const struct tr_server_config *config,
+                            struct tr_server **out)
 {
 	return tr_server_create_with_tuning(config, NULL, out);
 }
 
-int tr_server_create_v2(const struct tr_server_config *config,
-                        const struct tr_rpc_v2_method *methods,
-                        size_t method_count, struct tr_server **out)
+int tr_server_create(const struct tr_server_config *config,
+                     const struct tr_rpc_v2_method *methods,
+                     size_t method_count, struct tr_server **out)
 {
 	struct tr_server_config effective;
 	struct tr_facade_tuning tuning;
@@ -2096,13 +2116,14 @@ static int tr_server_method_exists(struct tr_server *server,
 	return 0;
 }
 
-int tr_server_register_method(struct tr_server *server,
-			      const struct tr_rpc_method_desc *method,
-			      tr_rpc_unary_handler handler, void *handler_arg)
+int tr_server_legacy_register_method(struct tr_server *server,
+                                     const struct tr_rpc_method_desc *method,
+                                     tr_rpc_unary_handler handler,
+                                     void *handler_arg)
 {
 	struct tr_server_method *entry;
 
-	if (server && server->record_mode)
+	if (server && (server->record_mode || server->transport_only))
 		return TR_ERR_UNSUPPORTED;
 	if (!server || !handler ||
 	    tr_server_validate_method(method, 1) != TR_OK)
@@ -2125,13 +2146,13 @@ int tr_server_register_method(struct tr_server *server,
 	return TR_OK;
 }
 
-int tr_server_register_stream_method(
-	struct tr_server *server, const struct tr_rpc_method_desc *method,
-	const struct tr_rpc_stream_handlers *handlers, void *handler_arg)
+int tr_server_legacy_register_stream_method(
+        struct tr_server *server, const struct tr_rpc_method_desc *method,
+        const struct tr_rpc_stream_handlers *handlers, void *handler_arg)
 {
 	struct tr_server_method *entry;
 
-	if (server && server->record_mode)
+	if (server && (server->record_mode || server->transport_only))
 		return TR_ERR_UNSUPPORTED;
 	if (!server || !handlers ||
 	    tr_server_validate_method(method, 0) != TR_OK)
@@ -2164,6 +2185,8 @@ int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 
 	if (!server || !ipv4_address || server->shard_count == 0U)
 		return TR_ERR_INVALID;
+	if (server->transport_only)
+		return TR_ERR_UNSUPPORTED;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 	if (!server->published)

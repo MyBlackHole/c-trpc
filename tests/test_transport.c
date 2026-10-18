@@ -1,3 +1,4 @@
+#include "../src/facade_legacy_internal.h"
 #include "../src/execution/worker_context.h"
 #include "../src/execution/buffer.h"
 #include "../src/crc32c.h"
@@ -7032,9 +7033,9 @@ static void test_client_server_facade_unary(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 facade_test_unary_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        facade_test_unary_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
@@ -7047,17 +7048,18 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.interceptor.fn = facade_test_interceptor;
 	client_config.interceptor.arg = &ctx;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	ctx.client = client;
 	nodelay_before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tcp_nodelay_probe_read() == nodelay_before + 2U);
-	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
 
 	request.data = (const uint8_t *)"facade-ping";
 	request.len = 11U;
-	assert(tr_client_unary_call(client, 77U, 1U, &request,
-				    facade_test_result, &ctx, &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 77U, 1U, &request,
+	                                   facade_test_result, &ctx,
+	                                   &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7085,7 +7087,7 @@ static void test_client_server_facade_unary(void)
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 	ctx.client = NULL;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	ctx.client = client;
 	{
 		unsigned attempt;
@@ -7103,9 +7105,10 @@ static void test_client_server_facade_unary(void)
 		}
 		assert(ret == TR_OK);
 	}
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_unary_call(client, 77U, 1U, &request,
-				    facade_test_result, &ctx, &call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 77U, 1U, &request,
+	                                   facade_test_result, &ctx,
+	                                   &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7229,8 +7232,9 @@ static void test_server_multi_shard_reuseport_facade(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 facade_test_unary_handler, &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        facade_test_unary_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
@@ -7245,12 +7249,14 @@ static void test_server_multi_shard_reuseport_facade(void)
 	request.len = 11U;
 
 	for (i = 0; i < 4U; ++i) {
-		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
+		assert(tr_client_legacy_create(&client_config, &clients[i]) ==
+		       TR_OK);
 		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
-		assert(tr_client_register_method(clients[i], &method) == TR_OK);
-		assert(tr_client_unary_call(
-			       clients[i], 78U, 1U, &request,
-			       facade_test_result, &ctx, &calls[i]) == TR_OK);
+		assert(tr_client_legacy_register_method(clients[i], &method) ==
+		       TR_OK);
+		assert(tr_client_legacy_unary_call(clients[i], 78U, 1U,
+		                                   &request, facade_test_result,
+		                                   &ctx, &calls[i]) == TR_OK);
 	}
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
@@ -7309,7 +7315,7 @@ static void test_client_server_facade_nodelay_policy(void)
 	server_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_legacy_create(&server_config, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7319,7 +7325,7 @@ static void test_client_server_facade_nodelay_policy(void)
 	client_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 
 	before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
@@ -7332,12 +7338,14 @@ static void test_client_server_facade_nodelay_policy(void)
 
 	tr_client_config_init(&client_config);
 	client_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_client_create(&client_config, &client) == TR_ERR_INVALID);
+	assert(tr_client_legacy_create(&client_config, &client) ==
+	       TR_ERR_INVALID);
 	assert(client == NULL);
 
 	tr_server_config_init(&server_config);
 	server_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_server_create(&server_config, &server) == TR_ERR_INVALID);
+	assert(tr_server_legacy_create(&server_config, &server) ==
+	       TR_ERR_INVALID);
 	assert(server == NULL);
 }
 
@@ -7659,9 +7667,9 @@ static void test_server_shared_rpc_executor(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 shared_executor_test_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        shared_executor_test_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7672,17 +7680,20 @@ static void test_server_shared_rpc_executor(void)
 	client_config.limits.max_message_bytes = 16384U;
 
 	for (i = 0; i < 4U; ++i) {
-		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
+		assert(tr_client_legacy_create(&client_config, &clients[i]) ==
+		       TR_OK);
 		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
-		assert(tr_client_register_method(clients[i], &method) == TR_OK);
+		assert(tr_client_legacy_register_method(clients[i], &method) ==
+		       TR_OK);
 	}
 
 	request.data = (const uint8_t *)"work";
 	request.len = 4U;
 	for (i = 0; i < 4U; ++i)
-		assert(tr_client_unary_call(clients[i], 88U, 1U, &request,
-					    shared_executor_test_result, &ctx,
-					    &calls[i]) == TR_OK);
+		assert(tr_client_legacy_unary_call(clients[i], 88U, 1U,
+		                                   &request,
+		                                   shared_executor_test_result,
+		                                   &ctx, &calls[i]) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7808,8 +7819,8 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 
 	memset(&handlers, 0, sizeof(handlers));
 	handlers.on_message = retained_rpc_server_message;
-	assert(tr_server_register_stream_method(
-		       server, &method, &handlers, &ctx) == TR_OK);
+	assert(tr_server_legacy_register_stream_method(
+	               server, &method, &handlers, &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7818,10 +7829,11 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	client_config.connect_timeout_ms = 500U;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_call_start(client, 90U, 1U, NULL, &call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_call_start(client, 90U, 1U, NULL, &call) ==
+	       TR_OK);
 
 	bytes.data = (const uint8_t *)"retain";
 	bytes.len = 6U;
@@ -7925,9 +7937,9 @@ static void test_server_reaping_budget_defers_detach(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 shared_executor_test_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        shared_executor_test_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7937,13 +7949,13 @@ static void test_server_reaping_budget_defers_detach(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 
-	assert(tr_client_create(&client_config, &first) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &first) == TR_OK);
 	assert(tr_client_connect(first, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(first, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(first, &method) == TR_OK);
 	request.data = (const uint8_t *)"hold";
 	request.len = 4U;
-	assert(tr_client_unary_call(
-		       first, 91U, 1U, &request, NULL, NULL, &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(first, 91U, 1U, &request, NULL, NULL,
+	                                   &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 10;
@@ -7973,9 +7985,9 @@ static void test_server_reaping_budget_defers_detach(void)
 	/* 首个 Endpoint 退役期间仍允许槽位复用。第二个断开的对端
 	 * 必须保持发布，因为分片已用掉唯一退役对象槽位。
 	 */
-	assert(tr_client_create(&client_config, &second) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &second) == TR_OK);
 	assert(tr_client_connect(second, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(second, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(second, &method) == TR_OK);
 	assert(tr_client_destroy(second) == TR_OK);
 	second = NULL;
 
@@ -8061,9 +8073,9 @@ static void test_server_peer_refcount_drain(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 shared_executor_test_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        shared_executor_test_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 	stats_poll.server = server;
@@ -8079,14 +8091,14 @@ static void test_server_peer_refcount_drain(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
 
 	request.data = (const uint8_t *)"hold";
 	request.len = 4U;
-	assert(tr_client_unary_call(client, 89U, 1U, &request, NULL, NULL,
-				    &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 89U, 1U, &request, NULL,
+	                                   NULL, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -8104,7 +8116,7 @@ static void test_server_peer_refcount_drain(void)
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	for (attempt = 0; attempt < 100U; ++attempt) {
 		ret = tr_client_connect(client, "127.0.0.1", port);
 		if (ret == TR_OK)
@@ -8118,10 +8130,10 @@ static void test_server_peer_refcount_drain(void)
 		}
 	}
 	assert(ret == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_unary_call(client, 89U, 1U, &request,
-				    shared_executor_test_result, &ctx,
-				    &call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 89U, 1U, &request,
+	                                   shared_executor_test_result, &ctx,
+	                                   &call) == TR_OK);
 
 	/* 唯一共享工作线程仍被已退役对端任务占据。 */
 	{

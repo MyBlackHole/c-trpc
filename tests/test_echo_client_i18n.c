@@ -25,6 +25,7 @@ struct tr_client {
 };
 static struct tr_client instance;
 static int scenario;
+static int destroy_attempts;
 static const char *expected_address = "127.0.0.1";
 static uint16_t expected_port = 9000U;
 
@@ -34,9 +35,12 @@ void tr_client_config_init(struct tr_client_config *config)
 }
 
 int tr_client_create(const struct tr_client_config *config,
+                     const struct tr_rpc_method_desc *methods, size_t count,
                      struct tr_client **out)
 {
 	(void)config;
+	assert(methods && count == 1);
+	assert(methods[0].request_cardinality == TR_RPC_ONE);
 	*out = &instance;
 	return TR_OK;
 }
@@ -50,32 +54,39 @@ int tr_client_connect(struct tr_client *client, const char *address,
 	return scenario == 1 || scenario == 2 ? TR_ERR_STATE : TR_OK;
 }
 
-int tr_client_register_method(struct tr_client *client,
-                              const struct tr_rpc_method_desc *method)
+int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 {
 	(void)client;
-	(void)method;
+	(void)timeout_ms;
 	return scenario == 3 ? TR_ERR_STATE : TR_OK;
 }
 
 int tr_client_unary_call(struct tr_client *client, uint32_t service,
                          uint32_t method, const struct tr_rpc_bytes *request,
-                         tr_rpc_unary_result_cb callback, void *arg,
-                         struct tr_rpc_call_handle *out)
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out)
 {
 	(void)client;
 	(void)service;
 	(void)method;
+	(void)options;
 	if (scenario == 4)
 		return TR_ERR_STATE;
 	memset(out, 0, sizeof(*out));
-	callback(*out, scenario == 5 ? 17 : TR_RPC_STATUS_OK, request, arg);
+	callbacks->message(*out, request, callbacks->arg);
+	/* 即使正文到达，错误终局也不能打印成功响应。 */
+	callbacks->terminal(
+	        *out, scenario == 5 ? (enum tr_rpc_status)17 : TR_RPC_STATUS_OK,
+	        TR_RPC_V2_DELIVERY_LIVE, callbacks->arg);
 	return TR_OK;
 }
 
 int tr_client_destroy(struct tr_client *client)
 {
 	(void)client;
+	if (scenario == 7 && destroy_attempts++ == 0)
+		return TR_AGAIN;
 	return scenario == 2 || scenario == 3 || scenario == 4 || scenario == 6
 	               ? TR_ERR_STATE
 	               : TR_OK;
@@ -111,6 +122,8 @@ static void check_output(int argc, char **argv, int code, const char *output,
 		assert(dup2(fileno(out), STDOUT_FILENO) >= 0);
 		assert(dup2(fileno(err), STDERR_FILENO) >= 0);
 		result = echo_client_main(argc, argv);
+		if (scenario == 7)
+			assert(destroy_attempts == 2);
 		assert(strcmp(setlocale(LC_NUMERIC, NULL), "C") == 0);
 		assert(strcmp(setlocale(LC_CTYPE, NULL), "C") == 0);
 		assert(fflush(NULL) == 0);
@@ -238,6 +251,8 @@ int main(void)
 	expected_address = "--lang=literal";
 	check_output(5, escaped, 0, "response: 你好 %s\n", "");
 	expected_address = "127.0.0.1";
+	check_output(1, defaults, 0, "response: hello\n", "");
+	scenario = 7;
 	check_output(1, defaults, 0, "response: hello\n", "");
 	assert(strcmp(setlocale(LC_NUMERIC, NULL), "C") == 0);
 	assert(strcmp(setlocale(LC_CTYPE, NULL), "C") == 0);

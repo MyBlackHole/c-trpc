@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "../src/facade_legacy_internal.h"
 #include "../src/execution/task_executor.h"
 #include "../src/execution/worker_context.h"
 #include "../src/memory_budget.h"
@@ -236,8 +237,8 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	method.max_response_bytes = 16U;
 	memset(&handlers, 0, sizeof(handlers));
 	handlers.on_message = server_message;
-	assert(tr_server_register_stream_method(
-		       server, &method, &handlers, &context) == TR_OK);
+	assert(tr_server_legacy_register_stream_method(
+	               server, &method, &handlers, &context) == TR_OK);
 	ret = tr_server_listen(server, "127.0.0.1", 0U, &port);
 	if (ret != TR_OK)
 		fprintf(stderr, "监听初始化失败: status=%d\n", ret);
@@ -248,11 +249,12 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connect_timeout_ms = 1000U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tr_client_wait_ready(client, 5000U) == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_call_start(client, 91U, 1U, NULL, &first_call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_call_start(client, 91U, 1U, NULL,
+	                                   &first_call) == TR_OK);
 	send_message(first_call, (unsigned char)'a');
 	wait_for_flag(&context, &context.first_entered);
 
@@ -263,7 +265,8 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	wait_for_cancelled_executor_state(&context, 2U, 1U, 0U);
 
 	/* 另一条调用就绪，用于覆盖端点中多个就绪调用的重调度。 */
-	assert(tr_client_call_start(client, 91U, 1U, NULL, &second_call) == TR_OK);
+	assert(tr_client_legacy_call_start(client, 91U, 1U, NULL,
+	                                   &second_call) == TR_OK);
 	send_message(second_call, (unsigned char)'c');
 	wait_for_executor_state(&context, 3U, 1U, 1U);
 

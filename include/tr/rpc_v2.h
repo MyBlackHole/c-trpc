@@ -13,13 +13,13 @@ extern "C" {
 #endif
 
 /*
- * 显式选择 RPC V2 的业务接口，不协商或回退到 V1。
+ * 普通 RPC 门面唯一使用 V2，不协商或回退到 V1。
  * 方法使用 ONE/MANY 的四种组合；ONE 恰好一条，MANY 允许零到多条。
  * 零字节 MESSAGE 仍是一条消息。TR_RPC_NONE 基数尚不支持。
  * codec_id 是应用约定的非零编号；这里传递原始正文，不自动编解码或压缩。
  *
  * 两个构造入口复用 Client/Server 配置及连接、就绪、排空、销毁操作。
- * config==NULL 或上限字段为零采用原配置默认值。仅在 V2 构造入口中，
+ * config==NULL 或上限字段为零采用原配置默认值。在 RPC 构造入口中，
  * limits.max_message_bytes 是业务正文上限，initial_window_bytes 是正文
  * 信用窗口；库补入记录开销和必要控制空间，并限制信用更新阈值以保证
  * 整条消息可继续发送。方法正文上限须同时不超过这两个公开上限。
@@ -27,14 +27,15 @@ extern "C" {
  *
  * 方法表在构造期间复制并冻结。方法数受 max_methods 约束。
  * V2 不支持连接组、拦截器和 Client 自动重连；配置这些能力返回
- * TR_ERR_UNSUPPORTED。V1 方法注册和调用接口同样不适用；语义统计复用
+ * TR_ERR_UNSUPPORTED。连接组改用 create_transport；旧方法注册不属于公开门面；
+ * 语义统计复用
  * tr_client_get_rpc_semantic_stats/tr_server_get_rpc_semantic_stats。
  * 构造失败的所有权规则与 tr_client_create/tr_server_create 相同：
  * 错误返回但 *out 非空时，调用方仍拥有部分对象，只能重试 destroy。
  */
-int tr_client_create_v2(const struct tr_client_config *config,
-                        const struct tr_rpc_method_desc *methods,
-                        size_t method_count, struct tr_client **out);
+int tr_client_create(const struct tr_client_config *config,
+                     const struct tr_rpc_method_desc *methods,
+                     size_t method_count, struct tr_client **out);
 
 /* 值类型弱能力，可复制，零值无效，不延长 Client 生命周期。
  * 不得读取、修改或推导私有字。首次 destroy 尝试开始前，调用方必须
@@ -116,11 +117,11 @@ struct tr_rpc_v2_client_callbacks {
  * Client 回调可发送、半关闭、取消及 begin_drain；禁止递归 start、阻塞
  * wait 或 destroy，也不能同步跨到另一 I/O 所有者。生命周期由外部串行化。
  */
-int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
-                            uint32_t method_id,
-                            const struct tr_rpc_call_options *options,
-                            const struct tr_rpc_v2_client_callbacks *callbacks,
-                            struct tr_rpc_v2_call *out);
+int tr_client_call_start(struct tr_client *client, uint32_t service_id,
+                         uint32_t method_id,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out);
 
 /* ONE→ONE 一元便捷入口：一次受理 OPEN、一条 MESSAGE（可为零字节）
  * 和 HALF_CLOSE 的发送责任，复用 call_start 的同一调用及唯一终局内核。
@@ -137,12 +138,11 @@ int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
  * ONE/MANY 等非 ONE→ONE 方法返回 UNSUPPORTED，不静默切换请求模式。
  * 回调可能早于返回，arg/out 的寿命及回调执行域沿用 call_start 契约。
  */
-int tr_client_v2_unary_call(struct tr_client *client, uint32_t service_id,
-                            uint32_t method_id,
-                            const struct tr_rpc_bytes *request,
-                            const struct tr_rpc_call_options *options,
-                            const struct tr_rpc_v2_client_callbacks *callbacks,
-                            struct tr_rpc_v2_call *out);
+int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
+                         uint32_t method_id, const struct tr_rpc_bytes *request,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out);
 
 /* 只在本次调用期间借用 body 及其字节；TR_OK 表示已经复制并接受一条
  * MESSAGE，返回后原字节可立即复用。失败不接受、不保留本条正文。
@@ -338,9 +338,9 @@ struct tr_rpc_v2_method {
 	void *arg;
 };
 
-int tr_server_create_v2(const struct tr_server_config *config,
-                        const struct tr_rpc_v2_method *methods,
-                        size_t method_count, struct tr_server **out);
+int tr_server_create(const struct tr_server_config *config,
+                     const struct tr_rpc_v2_method *methods,
+                     size_t method_count, struct tr_server **out);
 
 #ifdef __cplusplus
 }
