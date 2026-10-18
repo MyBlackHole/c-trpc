@@ -2889,11 +2889,50 @@ static void test_channel_graceful_drain(void)
 	destroy_channel_test_ctx(&client_ctx);
 }
 
+
+/* 在给定截止窗口等待 HELLO 真实离开发送队列；这只用于测试编排。 */
+static void wait_channel_hello_tx(struct tr_conn_handle connection)
+{
+	unsigned i;
+	for (i = 0; i < 5000U; ++i) {
+		struct tr_connection_stats stats;
+		assert(tr_reactor_get_connection_stats(connection, &stats) == TR_OK);
+		if (stats.tx_frames >= 1U)
+			return;
+		{
+			struct timespec pause = {0, 1000000L};
+			nanosleep(&pause, NULL);
+		}
+	}
+	assert(!"HELLO was not sent");
+}
+
+/* 所有者同步读取资源统计，不扩大客户端的控制发送项容量。 */
+static void wait_channel_control_pool_empty(struct tr_reactor *reactor,
+                                            uint32_t capacity)
+{
+	unsigned i;
+	for (i = 0; i < 5000U; ++i) {
+		struct tr_reactor_stats stats;
+		assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
+		assert(stats.control_tx_item_pool.capacity == capacity);
+		if (stats.control_tx_item_pool.current == 0U)
+			return;
+		{
+			struct timespec pause = {0, 1000000L};
+			nanosleep(&pause, NULL);
+		}
+	}
+	assert(!"CONTROL TX items were not reclaimed");
+}
+
 static void test_channel_drain_goaway_backpressure(void)
 {
 	struct tr_reactor_config reactor_config;
+	struct tr_reactor_config peer_config;
 	struct tr_channel_config channel_config;
 	struct tr_reactor *reactor = NULL;
+	struct tr_reactor *peer_reactor = NULL;
 	struct tr_channel *client_channel = NULL;
 	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle client_conn;
@@ -2915,8 +2954,8 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
-	/* 两个槽位使设置过程可以接管两个 fd。
-	 * 下方受门禁控制的阶段在排空前确定性填满两个槽位。
+	/* 被测客户端仍仅有两个命令槽位和一个 CONTROL 发送项。
+	 * 对端使用另一 Reactor，使握手阶段不耗尽被测池。
 	 */
 	reactor_config.command_capacity = 2U;
 	reactor_config.tx_item_capacity = 8U;
@@ -2928,9 +2967,16 @@ static void test_channel_drain_goaway_backpressure(void)
 	reactor_config.tx_budget_bytes = 64U * 1024U;
 	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
 	       TR_OK);
+	/* 对端的两项只用于 HELLO 重放、ACK 和发送自己的 HELLO。 */
+	peer_config = reactor_config;
+	peer_config.control_tx_item_capacity = 2U;
+	assert(tr_reactor_create(&peer_config, NULL, NULL, NULL,
+	                         &peer_reactor) == TR_OK);
 	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_start(peer_reactor) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
-	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(peer_reactor, server_fd, &server_conn) ==
+	       TR_OK);
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
@@ -2938,19 +2984,28 @@ static void test_channel_drain_goaway_backpressure(void)
 	channel_config.max_streams = 4U;
 	channel_config.initial_window_bytes = 4096U;
 	channel_config.window_update_threshold_bytes = 1024U;
-	assert(tr_channel_create(
+	assert(tr_channel_create_deferred(
 		       &channel_config, client_conn, client_conn,
 		       channel_test_on_data, channel_test_on_stream_event,
 		       channel_test_on_channel_event, &client_ctx,
 		       &client_channel) == TR_OK);
 	channel_config.role = TR_CHANNEL_SERVER;
-	assert(tr_channel_create(
+	assert(tr_channel_create_deferred(
 		       &channel_config, server_conn, server_conn,
 		       channel_test_on_data, channel_test_on_stream_event,
 		       channel_test_on_channel_event, &server_ctx,
 		       &server_channel) == TR_OK);
+	/* 双端处理函数均已发布。先完成客户端 HELLO 并释放唯一项，
+	 * 对端才重放提前到达的 HELLO 并发送自己的 HELLO 和 ACK。
+	 */
+	assert(tr_channel_start(client_channel) == TR_OK);
+	wait_channel_hello_tx(client_conn);
+	wait_channel_control_pool_empty(reactor, 1U);
+	assert(tr_channel_start(server_channel) == TR_OK);
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	wait_channel_control_pool_empty(reactor, 1U);
+	wait_channel_control_pool_empty(peer_reactor, 2U);
 
 	probe.channel = client_channel;
 	assert(pthread_create(
@@ -2996,9 +3051,11 @@ static void test_channel_drain_goaway_backpressure(void)
 	 * 由反应器强制拆除负责剩余流与连接清理。
 	 */
 	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_stop(peer_reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
+	tr_reactor_destroy(peer_reactor);
 	pthread_cond_destroy(&probe.cond);
 	pthread_mutex_destroy(&probe.lock);
 	destroy_channel_test_ctx(&server_ctx);
