@@ -1855,7 +1855,6 @@ static void test_channel_split_create_tx_exhaustion_rollback(void)
 	assert(close(bulk_fds[1]) == 0);
 }
 
-
 /* 同一所有者轮次里不会执行 I/O 分派。两个独立 Channel 若共用
  * 唯一普通 CONTROL 发送项，第二个 HELLO 应当明确返回容量背压。
  * 这验证构造失败的真实路径，与下面的 GOAWAY 专用保留不变量区分。
