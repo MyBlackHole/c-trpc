@@ -1882,8 +1882,8 @@ static int channel_failed_start_on_owner(void *arg)
 	                                  NULL, &p->first) == TR_OK);
 	config.role = TR_CHANNEL_SERVER;
 	assert(tr_channel_create_deferred(&config, p->second_connection,
-	                                  p->second_connection, NULL, NULL, NULL,
-	                                  NULL, &p->second) == TR_OK);
+	                                  p->second_connection, NULL, NULL,
+	                                  NULL, NULL, &p->second) == TR_OK);
 	p->first_ret = tr_channel_start(p->first);
 	p->second_ret = tr_channel_start(p->second);
 	p->retry_ret = tr_channel_start(p->second);
@@ -1927,7 +1927,7 @@ static void test_channel_failed_hello_start_is_sticky(void)
 	assert(close(b[1]) == 0);
 }
 
- static void test_channel_deferred_hello_gate(void)
+static void test_channel_deferred_hello_gate(void)
 {
 	struct tr_reactor_config reactor_config;
 	struct tr_channel_config channel_config;
