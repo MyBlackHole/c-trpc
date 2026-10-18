@@ -122,6 +122,27 @@ int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
                             const struct tr_rpc_v2_client_callbacks *callbacks,
                             struct tr_rpc_v2_call *out);
 
+/* ONE→ONE 的异步一元入口，与流式入口共用调用槽、期限和唯一终局。
+ * request 必需，零长度可使用 {NULL, 0}，仍发送一条 MESSAGE。受理前
+ * 复制正文和 options 元数据；仅 TR_OK 写 out、承担一次 terminal 责任，
+ * 源存储随后可立即复用。失败（包括 TR_AGAIN）不受理、不回调、不改 out。
+ * 方法不是 ONE→ONE 返回 UNSUPPORTED，正文超过方法上限返回 BAD_LENGTH；
+ * 调用槽或复制池满返回 AGAIN，字节预算/分配失败返回 NOMEM。
+ *
+ * 库按 OPEN、MESSAGE、HALF_CLOSE 顺序推进；背压保留已复制的一条请求，
+ * 不重复已接受的事件、不要求应用重试发送。writable 不调用，返回能力
+ * 仅可取消，不可手工 send/half_close（活调用返回 STATE，退役后 STALE）。
+ * message 和 metadata 仍是回调内借用；收到响应正文不代表成功，必须等待
+ * FINAL_STATUS 选择的 terminal。终局可能先于本函数返回，执行域、arg/out
+ * 寿命、排空和销毁限制与 call_start 相同；不添加同步等待或独立调用内核。
+ */
+int tr_client_v2_unary_call(struct tr_client *client, uint32_t service_id,
+                            uint32_t method_id,
+                            const struct tr_rpc_bytes *request,
+                            const struct tr_rpc_call_options *options,
+                            const struct tr_rpc_v2_client_callbacks *callbacks,
+                            struct tr_rpc_v2_call *out);
+
 /* 只在本次调用期间借用 body 及其字节；TR_OK 表示已经复制并接受一条
  * MESSAGE，返回后原字节可立即复用。失败不接受、不保留本条正文。
  * TR_AGAIN 不隐式排队，由应用保留正文并在 writable 提示后重试。

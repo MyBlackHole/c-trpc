@@ -49,6 +49,44 @@ static enum tr_rpc_status echo_work(
 终局时默认以 OK 完成，仍由记录状态机检查响应基数。ONE→MANY 或 MANY→ONE 的业务须在
 对应工作事件中按自己的业务规则生成多条或聚合后的单条响应。
 
+## 一元调用
+
+ONE→ONE 方法可使用 `tr_client_v2_unary_call()` 一次提交请求，无需业务自行在
+可写回调中拆分 start、send 和 half_close。它是同一 V2 调用内核的发送便利入口，
+不是另一个协议、同步等待器或兼容 V1 的适配层。
+
+```c
+struct tr_rpc_bytes request = {request_bytes, request_size};
+struct tr_rpc_v2_call call = {{0}};
+int ret = tr_client_v2_unary_call(client, service_id, method_id,
+                                 &request, &options, &callbacks, &call);
+```
+
+这里的 Client 已按前述步骤连接就绪，`callbacks` 使用现有
+`tr_rpc_v2_client_callbacks`：message 接收借用正文、metadata 接收初始及尾部元数据，
+terminal 决定最终结果。writable 不调用；库自动重试已受理请求，应用不能再手工
+send 或 half_close，仍可通过返回的弱能力 cancel。
+
+只有 `TR_OK` 表示正文和 OPEN 元数据已经复制且承担一次终局责任，返回后原存储
+可以立即复用。调用槽或复制池满返回 `TR_AGAIN`，没有受理、没有保存输入、没有
+回调且不改输出句柄；应用只能重试整个一元入口。方法非 ONE→ONE 返回
+`TR_ERR_UNSUPPORTED`，正文超过方法上限返回 `TR_ERR_BAD_LENGTH`，参数或元数据
+非法沿用原验证错误。零长度使用 `{NULL, 0}`，它仍是一条 MESSAGE，不是零条请求。
+
+受理后的 OPEN、MESSAGE、HALF_CLOSE 由原有进度泵按顺序发送；每一阶段只有下游
+真正接管后才前进，背压不重复已经接受的阶段。尚未发送的单条正文占用原实例的
+有界复制池，不新增正文队列、调用表、工作线程、定时器或第二套终止状态机。
+取消、期限、发送错误、断连和销毁均经原绑定选择唯一终局；已接管的 TX 资源仍由
+网络静默屏障保证寿命，不能因为终局通知已交付而提前释放。
+
+**响应 MESSAGE 不等于调用成功。** 一元与流式一样等待 FINAL_STATUS，允许
+错误没有响应正文；初始/尾部元数据也不单独构成成功。回调可能先于本函数返回，
+因此 `arg` 必须预先准备，输出句柄不能存放在可能被早终局释放的参数对象中。
+执行域、禁止阻塞等待、销毁串行化和弱能力寿命与流式 start 相同。
+
+本入口只适用于显式 V2 Client。普通工厂、旧 `tr_client_unary_call[_ex]()` 和
+旧调用句柄仍未迁移；没有自动协商、回退或删除旧协议。
+
 ## 消息、元数据与所有权
 
 | 对象或操作 | 应用获得的保证 |

@@ -108,6 +108,7 @@ struct call_state {
 	unsigned method;
 	int half_closed;
 	int manual;
+	int unary;
 	int checked_context;
 	int check_length;
 	enum response_metadata response_metadata;
@@ -898,7 +899,12 @@ static void call_done(struct call_state *c, enum tr_rpc_status status)
 	CHECK(c->delivery == TR_RPC_V2_DELIVERY_LIVE);
 	CHECK(c->received == c->response_count);
 	if (status == TR_RPC_STATUS_OK) {
-		CHECK(c->sent == c->request_count && c->half_closed);
+		if (c->unary) {
+			CHECK(c->writable_returns == 0U);
+			CHECK(f->methods[c->method].requests == 1U);
+		} else {
+			CHECK(c->sent == c->request_count && c->half_closed);
+		}
 		CHECK(c->trailing == 1U);
 		CHECK(c->initial ==
 		      (c->response_count ||
@@ -1419,8 +1425,59 @@ static void test_async_producer(void)
 	puts("sdk-v2: case=async-producer-copy-stop result=pass");
 }
 
+static void test_unary(void)
+{
+	struct fixture f;
+	struct call_state calls[3], rejected;
+	struct tr_rpc_v2_client_callbacks callbacks;
+	uint8_t source[MAX_BODY];
+	fixture_create(&f);
+	memset(&callbacks, 0, sizeof(callbacks));
+	callbacks.message = client_message;
+	callbacks.metadata = client_metadata;
+	callbacks.writable = client_writable;
+	callbacks.terminal = client_terminal;
+	for (unsigned i = 0; i < 3U; ++i) {
+		struct message_spec spec;
+		struct tr_rpc_bytes body;
+		spec.size = i == 1U ? 0U : MAX_BODY;
+		spec.tag = i == 1U ? 0U : 91U;
+		call_init(&calls[i], &f, i == 2U ? METHOD_COUNT : 0U, &spec, 1);
+		calls[i].manual = calls[i].unary = 1;
+		if (i != 2U)
+			expect(&calls[i], spec.size, spec.tag);
+		fill(source, spec.size, spec.tag);
+		body.data = spec.size ? source : NULL;
+		body.len = spec.size;
+		callbacks.arg = &calls[i];
+		CHECK(tr_client_v2_unary_call(
+		              f.client.handle, 23, i == 2U ? 99U : 1U, &body,
+		              NULL, &callbacks, &calls[i].handle) == TR_OK);
+		memset(source, 0xd3, sizeof(source));
+		call_done(&calls[i], i == 2U ? TR_RPC_STATUS_UNIMPLEMENTED
+		                             : TR_RPC_STATUS_OK);
+		CHECK(calls[i].writable_returns == 0U);
+	}
+	call_init(&rejected, &f, 1, NULL, 0);
+	callbacks.arg = &rejected;
+	struct tr_rpc_bytes empty;
+	empty.data = NULL;
+	empty.len = 0;
+	CHECK(tr_client_v2_unary_call(f.client.handle, 23, 2, &empty, NULL,
+	                              &callbacks,
+	                              &rejected.handle) == TR_ERR_UNSUPPORTED);
+	CHECK(rejected.terminals == 0U);
+	check_client_totals(&f.client, 3, 3, TR_RPC_STATUS_UNIMPLEMENTED, 1);
+	check_server_totals(&f, 2, 2, TR_RPC_STATUS_OK, 0);
+	drain(&f);
+	CHECK(tr_rpc_v2_call_cancel(calls[0].handle) == TR_ERR_STALE);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=unary-common-terminal result=pass");
+}
+
 int main(void)
 {
+	test_unary();
 	test_shapes_and_copy();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);

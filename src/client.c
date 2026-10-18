@@ -1073,6 +1073,7 @@ int tr_client_record_call_start(
 
 struct tr_client_v2_start_request {
 	struct tr_rpc_record_client *client;
+	const struct tr_rpc_bytes *unary_request;
 	uint32_t service_id, method_id;
 	const struct tr_rpc_call_options *options;
 	const struct tr_rpc_v2_client_callbacks *callbacks;
@@ -1084,14 +1085,15 @@ static int tr_client_v2_start_on_owner(void *arg)
 	struct tr_client_v2_start_request *request = arg;
 	return tr_rpc_record_client_call_start_public_on_owner(
 	        request->client, request->service_id, request->method_id,
-	        request->options, request->callbacks, request->out);
+	        request->options, request->callbacks, request->out,
+	        request->unary_request);
 }
 
-int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
-                            uint32_t method_id,
-                            const struct tr_rpc_call_options *options,
-                            const struct tr_rpc_v2_client_callbacks *callbacks,
-                            struct tr_rpc_v2_call *out)
+static int tr_client_v2_start(
+        struct tr_client *client, uint32_t service_id, uint32_t method_id,
+        const struct tr_rpc_call_options *options,
+        const struct tr_rpc_v2_client_callbacks *callbacks,
+        struct tr_rpc_v2_call *out, const struct tr_rpc_bytes *unary_request)
 {
 	if (!client)
 		return TR_ERR_INVALID;
@@ -1103,10 +1105,38 @@ int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
 	    !client->record_rpc)
 		return TR_ERR_STATE;
 	struct tr_client_v2_start_request request = {
-	        client->record_rpc, service_id, method_id, options,
-	        callbacks,          out};
+	        .client = client->record_rpc,
+	        .unary_request = unary_request,
+	        .service_id = service_id,
+	        .method_id = method_id,
+	        .options = options,
+	        .callbacks = callbacks,
+	        .out = out};
 	return tr_client_record_sync(client->record_rpc,
 	                             tr_client_v2_start_on_owner, &request);
+}
+
+int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
+                            uint32_t method_id,
+                            const struct tr_rpc_call_options *options,
+                            const struct tr_rpc_v2_client_callbacks *callbacks,
+                            struct tr_rpc_v2_call *out)
+{
+	return tr_client_v2_start(client, service_id, method_id, options,
+	                          callbacks, out, NULL);
+}
+
+int tr_client_v2_unary_call(struct tr_client *client, uint32_t service_id,
+                            uint32_t method_id,
+                            const struct tr_rpc_bytes *request,
+                            const struct tr_rpc_call_options *options,
+                            const struct tr_rpc_v2_client_callbacks *callbacks,
+                            struct tr_rpc_v2_call *out)
+{
+	if (!request || (request->len && !request->data))
+		return TR_ERR_INVALID;
+	return tr_client_v2_start(client, service_id, method_id, options,
+	                          callbacks, out, request);
 }
 
 enum tr_client_record_operation {
