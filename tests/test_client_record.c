@@ -511,6 +511,7 @@ struct fixture {
 	struct gate gate;
 	_Atomic bool block_work;
 	_Atomic unsigned reply_copies;
+	_Atomic int final_status;
 	_Atomic unsigned calls, messages, half_closes, bodies_released,
 	        cancelled;
 	uint8_t expected_metadata[32];
@@ -550,6 +551,7 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 		atomic_fetch_add(&f->messages, 1);
 	} else if (view->header.kind == TR_RPC_RECORD_HALF_CLOSE) {
 		atomic_fetch_add(&f->half_closes, 1);
+		return (enum tr_rpc_status)atomic_load(&f->final_status);
 	}
 	return TR_RPC_STATUS_OK;
 }
@@ -561,6 +563,7 @@ static void fixture_init(struct fixture *f)
 	gate_init(&f->gate);
 	atomic_init(&f->block_work, false);
 	atomic_init(&f->reply_copies, 1);
+	atomic_init(&f->final_status, TR_RPC_STATUS_OK);
 	atomic_init(&f->calls, 0);
 	atomic_init(&f->messages, 0);
 	atomic_init(&f->half_closes, 0);
@@ -1869,6 +1872,7 @@ static void test_deadlines_and_lifecycle(void)
 struct public_result {
 	struct fixture *fixture;
 	bool check_semantic;
+	bool cancel_on_message;
 	struct expected_message expected[2];
 	unsigned expected_count;
 	_Atomic unsigned messages, initial, trailing, writable, terminal;
@@ -1896,6 +1900,10 @@ static void public_message(struct tr_rpc_v2_call call,
 	for (unsigned i = 0; i < message->len; ++i)
 		CHECK(message->data[i] ==
 		      pattern(result->expected[index].tag, i));
+	if (result->cancel_on_message) {
+		CHECK(tr_rpc_v2_call_cancel(call) == TR_OK);
+		CHECK(!atomic_load(&result->terminal));
+	}
 	CHECK(atomic_fetch_sub(&result->depth, 1) == 1);
 	atomic_fetch_add(&result->messages, 1);
 }
@@ -2070,10 +2078,235 @@ static void test_public_copy_and_pool(void)
 	CHECK(atomic_load(&result.terminal) == 1);
 }
 
+/* 自动发送只推进原调用：三段分别背压，响应正文先到也必须等 FINAL。 */
+static void test_public_unary_progress(unsigned size, enum tr_rpc_status status)
+{
+	struct fixture f;
+	struct public_result result = {
+	        .fixture = &f, .expected = {{size, 79}}, .expected_count = 1};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call, untouched, sentinel;
+	uint8_t source[BODY];
+	for (unsigned i = 0; i < size; ++i)
+		source[i] = pattern(79, i);
+	struct tr_rpc_bytes request = {size ? source : NULL, size};
+	public_fixture_init(&f);
+	atomic_store(&f.final_status, status);
+	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &call) == TR_OK);
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	memset(source, 0xee, sizeof(source));
+	CHECK(tr_rpc_v2_call_send(call, &request) == TR_ERR_STATE);
+	CHECK(tr_rpc_v2_call_half_close(call) == TR_ERR_STATE);
+	CHECK(!atomic_load(&accepted[TR_RPC_RECORD_OPEN]));
+	check_client_semantic(f.client, 1, 0, TR_RPC_STATUS_OK);
+	atomic_store(&block_kind, TR_RPC_RECORD_MESSAGE);
+	wait_count(&attempts[TR_RPC_RECORD_MESSAGE], 1);
+	CHECK(atomic_load(&accepted[TR_RPC_RECORD_OPEN]) == 1);
+	CHECK(!atomic_load(&accepted[TR_RPC_RECORD_MESSAGE]));
+	CHECK(!atomic_load(&result.terminal));
+	atomic_store(&block_kind, TR_RPC_RECORD_HALF_CLOSE);
+	wait_count(&attempts[TR_RPC_RECORD_HALF_CLOSE], 1);
+	wait_count(&result.messages, 1);
+	CHECK(atomic_load(&accepted[TR_RPC_RECORD_MESSAGE]) == 1);
+	CHECK(!atomic_load(&result.terminal));
+	CHECK(!atomic_load(&accepted[TR_RPC_RECORD_HALF_CLOSE]));
+	CHECK(tr_client_begin_drain(f.client) == TR_OK);
+	CHECK(tr_client_wait_drained(f.client, 0) == TR_AGAIN);
+	memset(&untouched, 0xa5, sizeof(untouched));
+	sentinel = untouched;
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &untouched) == TR_ERR_CLOSED);
+	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
+	atomic_store(&block_kind, 0);
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == status);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	CHECK(tr_client_wait_drained(f.client, WAIT_MS) == TR_OK);
+	CHECK(atomic_load(&accepted[TR_RPC_RECORD_HALF_CLOSE]) == 1);
+	CHECK(atomic_load(&f.calls) == 1);
+	CHECK(atomic_load(&f.messages) == 1);
+	CHECK(atomic_load(&f.half_closes) == 1);
+	CHECK(atomic_load(&result.trailing) == 1);
+	CHECK(!atomic_load(&result.writable));
+	CHECK(tr_rpc_v2_call_cancel(call) == TR_ERR_STALE);
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+}
+
+static void test_public_unary_callback_cancel(void)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f,
+	                               .cancel_on_message = true,
+	                               .expected = {{1, 81}},
+	                               .expected_count = 1};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t byte = pattern(81, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+	public_fixture_init(&f);
+	atomic_store(&block_kind, TR_RPC_RECORD_HALF_CLOSE);
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &call) == TR_OK);
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(atomic_load(&result.messages) == 1);
+	CHECK(!atomic_load(&result.trailing));
+	CHECK(!atomic_load(&accepted[TR_RPC_RECORD_HALF_CLOSE]));
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+}
+
+static void test_public_unary_admission(void)
+{
+	struct fixture f;
+	struct public_result result = {
+	        .fixture = &f, .expected = {{1, 80}}, .expected_count = 1};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call, untouched, sentinel;
+	uint8_t source[BODY + 1] = {0};
+	source[0] = pattern(80, 0);
+	struct tr_rpc_bytes request = {source, 1};
+	public_fixture_init(&f);
+	memset(&untouched, 0xa5, sizeof(untouched));
+	sentinel = untouched;
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, NULL, NULL, &cb,
+	                              &untouched) == TR_ERR_INVALID);
+	CHECK(tr_client_v2_unary_call(f.client, 17, 2, &request, NULL, &cb,
+	                              &untouched) == TR_ERR_UNSUPPORTED);
+	CHECK(tr_client_v2_unary_call(f.client, 17, 100, &request, NULL, &cb,
+	                              &untouched) == TR_ERR_UNSUPPORTED);
+	request.len = BODY + 1;
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &untouched) == TR_ERR_BAD_LENGTH);
+	request.len = 1;
+	request.data = NULL;
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &untouched) == TR_ERR_INVALID);
+	request.data = source;
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, NULL,
+	                              &untouched) == TR_ERR_INVALID);
+	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
+	check_client_semantic(f.client, 0, 0, TR_RPC_STATUS_OK);
+	CHECK(!atomic_load(&attempts[TR_RPC_RECORD_OPEN]));
+	CHECK(!atomic_load(&result.terminal));
+
+	/* 先走一次真实发送取得复制池，再耗尽它；失败不得打开传输流或
+	 * 改写 out，释放容量后同一请求可以重新受理，不能悄悄后台排队。 */
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &call) == TR_OK);
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == TR_RPC_STATUS_OK);
+	struct tr_buffer_pool *pool = atomic_load(&public_send_pool);
+	CHECK(pool && pool->buffer_count);
+	uint64_t end = now_ms() + WAIT_MS;
+	while (tr_buffer_pool_free_count(pool) != pool->buffer_count) {
+		CHECK(now_ms() < end);
+		pause_once();
+	}
+	struct tr_buffer **owned = calloc(pool->buffer_count, sizeof(*owned));
+	CHECK(owned);
+	for (uint32_t i = 0; i < pool->buffer_count; ++i)
+		CHECK(tr_buffer_acquire(pool, 1, &owned[i]) == TR_OK);
+	unsigned opens = atomic_load(&attempts[TR_RPC_RECORD_OPEN]);
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &untouched) == TR_AGAIN);
+	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
+	CHECK(atomic_load(&attempts[TR_RPC_RECORD_OPEN]) == opens);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_OK);
+	for (uint32_t i = 0; i < pool->buffer_count; ++i)
+		tr_buffer_release(owned[i]);
+	free(owned);
+	/* 换独立的用户参数，不能在终局后复用仍被测试观察的回调对象。 */
+	struct public_result retry = {
+	        .fixture = &f, .expected = {{1, 80}}, .expected_count = 1};
+	struct public_context retry_context = {&retry, false};
+	cb = public_callbacks(&retry_context);
+	CHECK(tr_client_v2_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                              &call) == TR_OK);
+	wait_count(&retry.terminal, 1);
+	CHECK(retry.status == TR_RPC_STATUS_OK);
+	check_client_semantic(f.client, 2, 2, TR_RPC_STATUS_OK);
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+	CHECK(atomic_load(&retry.terminal) == 1);
+}
+
+/* 保留尚未发送的请求时分别取消、到期、停止回收、断连；成功销毁同时
+ * 验证复制池及实例预算没有被本地暂存正文永久占有。 */
+static void test_public_unary_terminal(unsigned mode)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t bytes[257] = {0};
+	struct tr_rpc_bytes request = {bytes, sizeof(bytes)};
+	struct tr_rpc_call_options options = {.timeout_ms =
+	                                              mode == 1 ? 100 : 0};
+	public_fixture_init(&f);
+	atomic_store(&block_kind, mode >= 4 ? 0 : TR_RPC_RECORD_OPEN);
+	atomic_store(&inline_client_data_once, mode == 5);
+	CHECK(tr_client_v2_unary_call(f.client, 17, mode == 4 ? 99 : 1,
+	                              &request, &options, &cb, &call) == TR_OK);
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	enum tr_rpc_status status = TR_RPC_STATUS_CANCELLED;
+	enum tr_rpc_v2_delivery delivery = TR_RPC_V2_DELIVERY_LIVE;
+	if (mode == 0) {
+		CHECK(tr_rpc_v2_call_cancel(call) == TR_OK);
+	} else if (mode == 1) {
+		status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
+	} else if (mode == 2) {
+		struct tr_channel *channel = atomic_load(&client_channel);
+		CHECK(tr_reactor_call(tr_channel_reactor(channel),
+		                      disable_client_routes_on_owner,
+		                      channel) == TR_OK);
+		atomic_store(&fail_client_destroy, true);
+		CHECK(tr_client_destroy(f.client) == TR_ERR_SYS);
+		delivery = TR_RPC_V2_DELIVERY_SHUTDOWN;
+	} else if (mode == 4) {
+		status = TR_RPC_STATUS_UNIMPLEMENTED;
+	} else if (mode == 5) {
+		status = TR_RPC_STATUS_UNAVAILABLE;
+	} else {
+		uint64_t end = now_ms() + WAIT_MS;
+		int ret;
+		while ((ret = tr_server_destroy(f.server)) == TR_AGAIN) {
+			CHECK(now_ms() < end);
+			pause_once();
+		}
+		CHECK(ret == TR_OK);
+		f.server = NULL;
+		status = TR_RPC_STATUS_UNAVAILABLE;
+	}
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == status);
+	CHECK(result.delivery == delivery);
+	if (mode < 4) {
+		CHECK(!atomic_load(&accepted[TR_RPC_RECORD_OPEN]));
+		CHECK(!atomic_load(&accepted[TR_RPC_RECORD_MESSAGE]));
+	}
+	CHECK(!atomic_load(&result.messages));
+	CHECK(!atomic_load(&result.writable));
+	if (mode == 5) {
+		CHECK(atomic_load(&inline_client_data_calls) == 1);
+		CHECK(!atomic_load(&accepted[TR_RPC_RECORD_HALF_CLOSE]));
+	}
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+}
+
 struct public_early_request {
 	struct fixture *fixture;
 	struct public_result *result;
 	struct tr_rpc_v2_call call;
+	bool unary;
 };
 
 static int public_early_start_on_owner(void *arg)
@@ -2086,8 +2319,15 @@ static int public_early_start_on_owner(void *arg)
 	/* 同一 owner 事务：受理时的时钟成功，受理后首次 pump 的时钟
 	 * 失败。终局在 start 返回前释放 arg，out 则放在独立存储中。 */
 	fail_clock_after = 2;
-	int ret = tr_client_v2_call_start(request->fixture->client, 17, 2, NULL,
-	                                  &cb, &request->call);
+	uint8_t byte = 1;
+	struct tr_rpc_bytes body = {&byte, 1};
+	int ret =
+	        request->unary
+	                ? tr_client_v2_unary_call(request->fixture->client, 17,
+	                                          1, &body, NULL, &cb,
+	                                          &request->call)
+	                : tr_client_v2_call_start(request->fixture->client, 17,
+	                                          2, NULL, &cb, &request->call);
 	CHECK(!fail_clock_after);
 	CHECK(ret == TR_OK);
 	CHECK(atomic_load(&request->result->terminal) == 1);
@@ -2099,11 +2339,11 @@ static int public_early_start_on_owner(void *arg)
 	return TR_OK;
 }
 
-static void test_public_early_terminal(void)
+static void test_public_early_terminal(bool unary)
 {
 	struct fixture f;
 	struct public_result result = {.fixture = &f, .check_semantic = true};
-	struct public_early_request request = {&f, &result, {{0}}};
+	struct public_early_request request = {&f, &result, {{0}}, unary};
 	public_fixture_init(&f);
 	struct tr_reactor *owner =
 	        tr_channel_reactor(atomic_load(&client_channel));
@@ -2139,8 +2379,19 @@ int main(void)
 	puts("test_client_record: deadlines and lifecycle passed");
 	test_public_copy_and_pool();
 	puts("test_client_record: public copy and pool passed");
-	test_public_early_terminal();
+	test_public_early_terminal(false);
+	test_public_early_terminal(true);
 	puts("test_client_record: public early terminal passed");
-	puts("test_client_record: 11 groups passed");
+	test_public_unary_progress(0, TR_RPC_STATUS_OK);
+	test_public_unary_progress(BODY, TR_RPC_STATUS_OK);
+	test_public_unary_progress(257, TR_RPC_STATUS_PERMISSION_DENIED);
+	puts("test_client_record: public unary progress passed");
+	test_public_unary_callback_cancel();
+	test_public_unary_admission();
+	puts("test_client_record: public unary admission passed");
+	for (unsigned mode = 0; mode < 6; ++mode)
+		test_public_unary_terminal(mode);
+	puts("test_client_record: public unary terminal passed");
+	puts("test_client_record: 14 groups passed");
 	return 0;
 }

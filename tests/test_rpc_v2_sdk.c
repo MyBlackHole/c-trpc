@@ -886,6 +886,52 @@ static int call_start(struct call_state *c,
 	                               options, &callbacks, &c->handle);
 }
 
+/* 安装后的同一 C11/C++11 消费端验证一元自动发送；正文仍只借用
+ * 当前栈，收到响应和 FINAL 的回调沿用同一套观察与统计断言。 */
+static int unary_start(struct call_state *c,
+                       const struct tr_rpc_call_options *options)
+{
+	struct tr_rpc_v2_client_callbacks callbacks;
+	struct tr_rpc_bytes request;
+	uint8_t storage[MAX_BODY + 1U];
+	memset(&callbacks, 0, sizeof(callbacks));
+	callbacks.message = client_message;
+	callbacks.metadata = client_metadata;
+	callbacks.writable = client_writable;
+	callbacks.terminal = client_terminal;
+	callbacks.arg = c;
+	CHECK(c->request_count == 1U);
+	fill(storage, c->requests[0].size, c->requests[0].tag);
+	request.data = c->requests[0].size ? storage : NULL;
+	request.len = c->requests[0].size;
+	if (c->check_length) {
+		struct tr_rpc_v2_call untouched, sentinel;
+		struct tr_rpc_bytes oversized;
+		memset(&untouched, 0xa5, sizeof(untouched));
+		sentinel = untouched;
+		oversized.data = storage;
+		oversized.len = sizeof(storage);
+		CHECK(tr_client_v2_unary_call(c->client->handle, 23,
+		                              c->method + 1U, &oversized,
+		                              options, &callbacks,
+		                              &untouched) == TR_ERR_BAD_LENGTH);
+		CHECK(memcmp(&untouched, &sentinel, sizeof(untouched)) == 0);
+	}
+	int ret = tr_client_v2_unary_call(c->client->handle, 23, c->method + 1U,
+	                                  &request, options, &callbacks,
+	                                  &c->handle);
+	memset(storage, 0xd3, sizeof(storage));
+	if (ret == TR_OK) {
+		lock(c->fixture);
+		/* 这里记录的是整个请求被本地受理，不声称 HALF_CLOSE 已上网。 */
+		c->sent = 1;
+		c->half_closed = 1;
+		CHECK(c->writable_returns == 0U);
+		unlock(c->fixture);
+	}
+	return ret;
+}
+
 static void call_done(struct call_state *c, enum tr_rpc_status status)
 {
 	struct fixture *f = c->fixture;
@@ -948,7 +994,7 @@ static void test_shapes_and_copy(void)
 	lock(&f);
 	f.methods[0].expect_metadata = 1;
 	unlock(&f);
-	CHECK(call_start(&one, &options) == TR_OK);
+	CHECK(unary_start(&one, &options) == TR_OK);
 	memset(token_key, 'q', sizeof(token_key));
 	memset(seq_key, 'q', sizeof(seq_key));
 	memset(token, 0x55, sizeof(token));
@@ -1001,7 +1047,7 @@ static void test_shapes_and_copy(void)
 	request[0].tag = 0;
 	call_init(&zero, &f, 0, request, 1);
 	expect(&zero, 0, 0);
-	CHECK(call_start(&zero, NULL) == TR_OK);
+	CHECK(unary_start(&zero, NULL) == TR_OK);
 	call_done(&zero, TR_RPC_STATUS_OK);
 	lock(&f);
 	CHECK(f.methods[0].requests == 1U);
@@ -1022,7 +1068,7 @@ static void test_shapes_and_copy(void)
 	no_body.len = 0;
 	CHECK(tr_rpc_v2_call_send(one.handle, &no_body) == TR_ERR_STALE);
 	call_init(&rejected, &f, 0, request, 1);
-	CHECK(call_start(&rejected, NULL) == TR_ERR_CLOSED);
+	CHECK(unary_start(&rejected, NULL) == TR_ERR_CLOSED);
 	CHECK(rejected.terminals == 0U);
 	check_client_totals(&f.client, 7, 7, TR_RPC_STATUS_UNIMPLEMENTED, 1);
 	check_server_totals(&f, 6, 6, TR_RPC_STATUS_OK, 0);

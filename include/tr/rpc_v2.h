@@ -122,6 +122,28 @@ int tr_client_v2_call_start(struct tr_client *client, uint32_t service_id,
                             const struct tr_rpc_v2_client_callbacks *callbacks,
                             struct tr_rpc_v2_call *out);
 
+/* ONE→ONE 一元便捷入口：一次受理 OPEN、一条 MESSAGE（可为零字节）
+ * 和 HALF_CLOSE 的发送责任，复用 call_start 的同一调用及唯一终局内核。
+ * request 必须非 NULL；正文和 options 元数据在受理期间复制，TR_OK
+ * 返回后均可立即复用。复制池/调用槽不足返回 AGAIN，预算不足或分配失败
+ * 返回 NOMEM；所有失败不写 out，也不回调用户。失败后重试由应用负责。
+ *
+ * TR_OK 仅表示本地受理。网络背压由原调用槽保留未接受正文并继续发送，
+ * 不要求应用重试 send/half_close，也不保证每个记录合并成一个网络包。
+ * callbacks 仍要求 message/terminal；metadata 可选，writable 被忽略。
+ * 收到响应 MESSAGE 不表示成功，只有 terminal 的 FINAL 结果才是终局；
+ * 合法错误可以没有响应正文，取消、期限、断连和停机沿用原有终局规则。
+ * 返回能力仅用于 cancel；send/half_close 返回 STATE（退役后为 STALE）。
+ * ONE/MANY 等非 ONE→ONE 方法返回 UNSUPPORTED，不静默切换请求模式。
+ * 回调可能早于返回，arg/out 的寿命及回调执行域沿用 call_start 契约。
+ */
+int tr_client_v2_unary_call(struct tr_client *client, uint32_t service_id,
+                            uint32_t method_id,
+                            const struct tr_rpc_bytes *request,
+                            const struct tr_rpc_call_options *options,
+                            const struct tr_rpc_v2_client_callbacks *callbacks,
+                            struct tr_rpc_v2_call *out);
+
 /* 只在本次调用期间借用 body 及其字节；TR_OK 表示已经复制并接受一条
  * MESSAGE，返回后原字节可立即复用。失败不接受、不保留本条正文。
  * TR_AGAIN 不隐式排队，由应用保留正文并在 writable 提示后重试。

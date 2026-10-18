@@ -133,6 +133,15 @@ int tr_rpc_record_client_call_start_public_on_owner(
         uint32_t method_id, const struct tr_rpc_call_options *options,
         const struct tr_rpc_v2_client_callbacks *callbacks,
         struct tr_rpc_v2_call *out);
+/* 一元请求与流式共用原调用槽、绑定和终局。复制失败不发布调用；
+ * 已接受正文由同一进度入口依次发送 MESSAGE/HALF_CLOSE，终局归还副本。 */
+int tr_rpc_record_client_unary_public_on_owner(
+        struct tr_rpc_record_client *client, uint32_t service_id,
+        uint32_t method_id, const struct tr_rpc_bytes *request,
+        const struct tr_rpc_call_options *options,
+        const struct tr_rpc_v2_client_callbacks *callbacks,
+        struct tr_rpc_v2_call *out);
+
 int tr_rpc_record_client_send_bytes_on_owner(
         struct tr_rpc_record_client_handle handle,
         const struct tr_rpc_bytes *message);
