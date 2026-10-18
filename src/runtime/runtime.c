@@ -181,12 +181,20 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	runtime->shard_count = config->shard_count;
 
 	/*
-	 * 先初始化所有分片的 fd 哨兵值，使部分构造的运行时在任意构造点都能
-	 * 安全进入正式 destroy()；未访问分片的其他字段保持 calloc 零值。
+	 * 回滚会遍历全部分片，而不仅是已经尝试创建 Reactor 的前缀。
+	 * 在首个分片资源分配前建立身份、预算原子和 fd 哨兵，保证未访问
+	 * 分片也能进入 destroy()；不能把 calloc 零字节当作预算初始化。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
-		runtime->shards[i].listen_fd = -1;
-		runtime->shards[i].peer_event_fd = -1;
+		struct tr_runtime_shard *shard = &runtime->shards[i];
+
+		shard->shard_id = i;
+		shard->listen_fd = -1;
+		shard->peer_event_fd = -1;
+		tr_memory_budget_init(&shard->memory_budget,
+		                      config->shards[i].memory_budget_bytes);
+		atomic_init(&shard->peer_reaping_count, 0U);
+		atomic_init(&shard->peers_reaped_total, 0U);
 	}
 
 	for (i = 0; i < runtime->shard_count; ++i) {
@@ -195,10 +203,7 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 		int ret;
 
-		shard->shard_id = i;
 		shard->message_config = shard_config->messages;
-		tr_memory_budget_init(
-			&shard->memory_budget, shard_config->memory_budget_bytes);
 		shard->peer_capacity = shard_config->peer_capacity;
 		if (shard->peer_capacity != 0U) {
 			uint64_t peer_storage_bytes =
