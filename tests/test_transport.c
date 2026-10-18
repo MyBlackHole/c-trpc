@@ -1856,77 +1856,77 @@ static void test_channel_split_create_tx_exhaustion_rollback(void)
 }
 
 /* 故意让第一个 HELLO 独占唯一控制发送项。第二个延后创建的
-+ * start() 失败后，重复调用不得把尚未发出的 HELLO 误报为成功。
-+ */
-+struct channel_failed_start_probe {
-+	struct tr_conn_handle first_connection;
-+	struct tr_conn_handle second_connection;
-+	struct tr_channel *first;
-+	struct tr_channel *second;
-+	int first_ret;
-+	int second_ret;
-+	int retry_ret;
-+};
-+
-+static int channel_failed_start_on_owner(void *arg)
-+{
-+	struct channel_failed_start_probe *p = arg;
-+	struct tr_channel_config config = {0};
-+
-+	config.role = TR_CHANNEL_CLIENT;
-+	config.mode = TR_CHANNEL_SHARED_CONNECTION;
-+	config.max_streams = 4U;
-+	config.initial_window_bytes = 4096U;
-+	assert(tr_channel_create_deferred(&config, p->first_connection,
-+	                                  p->first_connection, NULL, NULL, NULL,
-+	                                  NULL, &p->first) == TR_OK);
-+	config.role = TR_CHANNEL_SERVER;
-+	assert(tr_channel_create_deferred(&config, p->second_connection,
-+	                                  p->second_connection, NULL, NULL, NULL,
-+	                                  NULL, &p->second) == TR_OK);
-+	p->first_ret = tr_channel_start(p->first);
-+	p->second_ret = tr_channel_start(p->second);
-+	p->retry_ret = tr_channel_start(p->second);
-+	return TR_OK;
-+}
-+
-+static void test_channel_failed_hello_start_is_sticky(void)
-+{
-+	struct tr_reactor_config config = {0};
-+	struct tr_reactor *reactor = NULL;
-+	struct channel_failed_start_probe probe = {0};
-+	int a[2], b[2];
-+
-+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, a) == 0);
-+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, b) == 0);
-+	config.max_connections = 4U;
-+	config.command_capacity = 2U;
-+	config.tx_item_capacity = 8U;
-+	config.control_tx_item_capacity = 1U;
-+	config.rx_buffer_count = 8U;
-+	config.rx_buffer_size = 4096U;
-+	config.max_payload_len = 4096U;
-+	config.rx_budget_bytes = 64U * 1024U;
-+	config.tx_budget_bytes = 64U * 1024U;
-+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
-+	assert(tr_reactor_start(reactor) == TR_OK);
-+	assert(tr_reactor_adopt_fd(reactor, a[0], &probe.first_connection) ==
-+	       TR_OK);
-+	assert(tr_reactor_adopt_fd(reactor, b[0], &probe.second_connection) ==
-+	       TR_OK);
-+	assert(tr_reactor_call(reactor, channel_failed_start_on_owner,
-+	                       &probe) == TR_OK);
-+	assert(probe.first_ret == TR_OK);
-+	assert(probe.second_ret == TR_AGAIN);
-+	assert(probe.retry_ret == TR_AGAIN);
-+	assert(tr_reactor_stop(reactor) == TR_OK);
-+	assert(tr_channel_destroy(probe.first) == TR_OK);
-+	assert(tr_channel_destroy(probe.second) == TR_OK);
-+	assert(tr_reactor_destroy(reactor) == TR_OK);
-+	assert(close(a[1]) == 0);
-+	assert(close(b[1]) == 0);
-+}
-+
+ * start() 失败后，重复调用不得把尚未发出的 HELLO 误报为成功。
+ */
+struct channel_failed_start_probe {
+	struct tr_conn_handle first_connection;
+	struct tr_conn_handle second_connection;
+	struct tr_channel *first;
+	struct tr_channel *second;
+	int first_ret;
+	int second_ret;
+	int retry_ret;
+};
+
+static int channel_failed_start_on_owner(void *arg)
+{
+	struct channel_failed_start_probe *p = arg;
+	struct tr_channel_config config = {0};
+
+	config.role = TR_CHANNEL_CLIENT;
+	config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	config.max_streams = 4U;
+	config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(&config, p->first_connection,
+	                                  p->first_connection, NULL, NULL, NULL,
+	                                  NULL, &p->first) == TR_OK);
+	config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create_deferred(&config, p->second_connection,
+	                                  p->second_connection, NULL, NULL, NULL,
+	                                  NULL, &p->second) == TR_OK);
+	p->first_ret = tr_channel_start(p->first);
+	p->second_ret = tr_channel_start(p->second);
+	p->retry_ret = tr_channel_start(p->second);
+	return TR_OK;
+}
+
+static void test_channel_failed_hello_start_is_sticky(void)
+{
+	struct tr_reactor_config config = {0};
+	struct tr_reactor *reactor = NULL;
+	struct channel_failed_start_probe probe = {0};
+	int a[2], b[2];
+
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, a) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, b) == 0);
+	config.max_connections = 4U;
+	config.command_capacity = 2U;
+	config.tx_item_capacity = 8U;
+	config.control_tx_item_capacity = 1U;
+	config.rx_buffer_count = 8U;
+	config.rx_buffer_size = 4096U;
+	config.max_payload_len = 4096U;
+	config.rx_budget_bytes = 64U * 1024U;
+	config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, a[0], &probe.first_connection) ==
+	       TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, b[0], &probe.second_connection) ==
+	       TR_OK);
+	assert(tr_reactor_call(reactor, channel_failed_start_on_owner,
+	                       &probe) == TR_OK);
+	assert(probe.first_ret == TR_OK);
+	assert(probe.second_ret == TR_AGAIN);
+	assert(probe.retry_ret == TR_AGAIN);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(probe.first) == TR_OK);
+	assert(tr_channel_destroy(probe.second) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(a[1]) == 0);
+	assert(close(b[1]) == 0);
+}
+
  static void test_channel_deferred_hello_gate(void)
 {
 	struct tr_reactor_config reactor_config;
