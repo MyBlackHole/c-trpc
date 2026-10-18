@@ -2889,14 +2889,14 @@ static void test_channel_graceful_drain(void)
 	destroy_channel_test_ctx(&client_ctx);
 }
 
-
 /* 在给定截止窗口等待 HELLO 真实离开发送队列；这只用于测试编排。 */
 static void wait_channel_hello_tx(struct tr_conn_handle connection)
 {
 	unsigned i;
 	for (i = 0; i < 5000U; ++i) {
 		struct tr_connection_stats stats;
-		assert(tr_reactor_get_connection_stats(connection, &stats) == TR_OK);
+		assert(tr_reactor_get_connection_stats(connection, &stats) ==
+		       TR_OK);
 		if (stats.tx_frames >= 1U)
 			return;
 		{
@@ -2985,16 +2985,16 @@ static void test_channel_drain_goaway_backpressure(void)
 	channel_config.initial_window_bytes = 4096U;
 	channel_config.window_update_threshold_bytes = 1024U;
 	assert(tr_channel_create_deferred(
-		       &channel_config, client_conn, client_conn,
-		       channel_test_on_data, channel_test_on_stream_event,
-		       channel_test_on_channel_event, &client_ctx,
-		       &client_channel) == TR_OK);
+	               &channel_config, client_conn, client_conn,
+	               channel_test_on_data, channel_test_on_stream_event,
+	               channel_test_on_channel_event, &client_ctx,
+	               &client_channel) == TR_OK);
 	channel_config.role = TR_CHANNEL_SERVER;
 	assert(tr_channel_create_deferred(
-		       &channel_config, server_conn, server_conn,
-		       channel_test_on_data, channel_test_on_stream_event,
-		       channel_test_on_channel_event, &server_ctx,
-		       &server_channel) == TR_OK);
+	               &channel_config, server_conn, server_conn,
+	               channel_test_on_data, channel_test_on_stream_event,
+	               channel_test_on_channel_event, &server_ctx,
+	               &server_channel) == TR_OK);
 	/* 双端处理函数均已发布。先完成客户端 HELLO 并释放唯一项，
 	 * 对端才重放提前到达的 HELLO 并发送自己的 HELLO 和 ACK。
 	 */
