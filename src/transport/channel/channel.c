@@ -118,6 +118,7 @@ struct tr_channel {
 	int control_ready;
 	int bulk_ready;
 	int handshake_started;
+	int handshake_start_error;
 	struct tr_channel_pending_hello pending_hello[2];
 	int local_draining;
 	int control_peer_draining;
@@ -2955,8 +2956,9 @@ int tr_channel_start(struct tr_channel *channel)
 	memset(pending, 0, sizeof(pending));
 	pthread_mutex_lock(&channel->lock);
 	if (channel->handshake_started) {
+		ret = channel->handshake_start_error;
 		pthread_mutex_unlock(&channel->lock);
-		return TR_OK;
+		return ret;
 	}
 
 	/* 延后创建的使用方调用 start() 前，上层处理函数已安装。
@@ -2964,6 +2966,8 @@ int tr_channel_start(struct tr_channel *channel)
 	 * 移入栈拥有的重放请求。
 	 */
 	channel->handshake_started = 1;
+	/* 在发送和重放完成前，同步调用者不得观察到虚假的成功。 */
+	channel->handshake_start_error = TR_AGAIN;
 	for (i = 0; i < 2; ++i) {
 		if (!channel->pending_hello[i].valid)
 			continue;
@@ -2987,24 +2991,37 @@ int tr_channel_start(struct tr_channel *channel)
 				      tr_channel_process_pending_hello_on_owner,
 				      &pending[i]);
 		if (ret != TR_OK)
-			return ret;
+			goto failed;
 	}
 
 	ret = tr_channel_send_hello(channel, control_connection);
 	ret = tr_channel_normalize_create_hello_error(
 		channel, control_connection, ret);
 	if (ret != TR_OK)
-		return ret;
+		goto failed;
 
 	if (split) {
 		ret = tr_channel_send_hello(channel, bulk_connection);
 		ret = tr_channel_normalize_create_hello_error(
 			channel, bulk_connection, ret);
 		if (ret != TR_OK)
-			return ret;
+			goto failed;
 	}
 
+	pthread_mutex_lock(&channel->lock);
+	channel->handshake_start_error = TR_OK;
+	pthread_mutex_unlock(&channel->lock);
 	return TR_OK;
+
+failed:
+	/* 部分 HELLO 可能已经获准发送，不能重新发送造成重复握手。
+	 * 因此本对象的启动错误是粘性的，调用方必须关闭并重建。
+	 * 不允许下次 start() 在握手未完成时假装成功。
+	 */
+	pthread_mutex_lock(&channel->lock);
+	channel->handshake_start_error = ret;
+	pthread_mutex_unlock(&channel->lock);
+	return ret;
 }
 
 struct tr_channel_build {
