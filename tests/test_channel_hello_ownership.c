@@ -27,6 +27,33 @@ static atomic_uint failed_ack_count;
 static atomic_int fail_hello_status;
 static atomic_int fail_first_ack;
 
+/* 只在新用例中暂停首次 HELLO；不暂停 Reactor，也不修改生产锁。 */
+static atomic_int pause_first_hello;
+static pthread_mutex_t start_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t start_cond;
+static int start_entered;
+static int start_released;
+
+static void start_wait_locked(const int *condition)
+{
+	struct timespec deadline;
+
+	assert(clock_gettime(CLOCK_MONOTONIC, &deadline) == 0);
+	deadline.tv_sec += 5;
+	while (!*condition)
+		assert(pthread_cond_timedwait(&start_cond, &start_lock,
+		                              &deadline) == 0);
+}
+
+static void pause_hello_admission(void)
+{
+	assert(pthread_mutex_lock(&start_lock) == 0);
+	start_entered = 1;
+	assert(pthread_cond_broadcast(&start_cond) == 0);
+	start_wait_locked(&start_released);
+	assert(pthread_mutex_unlock(&start_lock) == 0);
+}
+
 static pthread_mutex_t ack_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ack_cond = PTHREAD_COND_INITIALIZER;
 
@@ -74,6 +101,8 @@ int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
 		if (type == TR_FRAME_HELLO) {
 			atomic_fetch_add(&hello_count, 1U);
 			injected = atomic_exchange(&fail_hello_status, TR_OK);
+			if (atomic_exchange(&pause_first_hello, 0) != 0)
+				pause_hello_admission();
 		} else {
 			atomic_fetch_add(&ack_count, 1U);
 			if (atomic_exchange(&fail_first_ack, 0) != 0) {
@@ -259,8 +288,86 @@ static void test_hello_ack_failed_admission(void)
 	check_released(atomic_load(&hello_count), -1);
 }
 
+struct start_probe {
+	struct tr_channel *channel;
+	int result;
+};
+
+static void *channel_start_main(void *arg)
+{
+	struct start_probe *probe = arg;
+
+	probe->result = tr_channel_start(probe->channel);
+	return NULL;
+}
+
+/* 成功、暂时准入失败和永久失败共用同一受控并发窗口。
+ * start() 的成功只代表 HELLO 已接管，不代表已收到对端 ACK。
+ */
+static void test_concurrent_start_result(int final_status)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle connection;
+	struct tr_channel_config config = channel_config(TR_CHANNEL_CLIENT);
+	struct start_probe probe = {0};
+	struct tr_reactor_stats stats;
+	pthread_condattr_t attr;
+	pthread_t starter;
+	int sockets[2];
+
+	reset_tracking();
+	assert(pthread_condattr_init(&attr) == 0);
+	assert(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0);
+	assert(pthread_cond_init(&start_cond, &attr) == 0);
+	assert(pthread_condattr_destroy(&attr) == 0);
+	start_entered = 0;
+	start_released = 0;
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+	                  0, sockets) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, sockets[0], &connection) == TR_OK);
+	assert(tr_channel_create_deferred(&config, connection, connection, NULL,
+	                                  NULL, NULL, NULL, &channel) == TR_OK);
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+	probe.channel = channel;
+	probe.result = TR_ERR_STATE;
+	atomic_store(&fail_hello_status, final_status);
+	atomic_store(&pause_first_hello, 1);
+	assert(pthread_create(&starter, NULL, channel_start_main, &probe) == 0);
+
+	assert(pthread_mutex_lock(&start_lock) == 0);
+	start_wait_locked(&start_entered);
+	assert(pthread_mutex_unlock(&start_lock) == 0);
+	/* 另一个调用已发布启动状态，但尚未提交 HELLO。 */
+	assert(tr_channel_start(channel) == TR_AGAIN);
+	assert(atomic_load(&hello_count) == 1U);
+	assert(pthread_mutex_lock(&start_lock) == 0);
+	start_released = 1;
+	assert(pthread_cond_broadcast(&start_cond) == 0);
+	assert(pthread_mutex_unlock(&start_lock) == 0);
+	assert(pthread_join(starter, NULL) == 0);
+	assert(probe.result == final_status);
+	assert(tr_channel_start(channel) == final_status);
+	assert(atomic_load(&hello_count) == 1U);
+
+	/* 等全部发送/所有者退出再销毁；每个缓冲只释放一次。 */
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
+	assert(stats.control_tx_item_pool.current == 0U);
+	assert(tr_channel_destroy(channel) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(sockets[1]) == 0);
+	check_released(1U, 0);
+	assert(pthread_cond_destroy(&start_cond) == 0);
+}
+
 int main(void)
 {
+	test_concurrent_start_result(TR_OK);
+	test_concurrent_start_result(TR_AGAIN);
+	test_concurrent_start_result(TR_ERR_SYS);
 	test_hello_failed_admission(TR_ERR_SYS);
 	test_hello_failed_admission(TR_AGAIN);
 	test_successful_handshake();
