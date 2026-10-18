@@ -139,6 +139,7 @@ struct business_state {
 struct peer {
 	struct fixture *fixture;
 	struct tr_reactor *reactor;
+	struct tr_conn_handle connection;
 	struct tr_channel *channel;
 	struct tr_buffer_pool pool;
 	struct tr_memory_budget budget;
@@ -499,6 +500,7 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 	CHECK(tr_reactor_create(&rc, NULL, NULL, NULL, &p->reactor) == TR_OK);
 	CHECK(tr_reactor_start(p->reactor) == TR_OK);
 	CHECK(tr_reactor_adopt_fd(p->reactor, fd, &conn) == TR_OK);
+	p->connection = conn;
 	CHECK(tr_channel_create(&cc, conn, conn, server ? NULL : on_data,
 	                        server ? NULL : on_event, NULL, p,
 	                        &p->channel) == TR_OK);
@@ -589,6 +591,8 @@ struct client_create {
 	struct tr_stream_handle stream;
 	unsigned method;
 	bool withhold_open;
+	bool saturate_control;
+	unsigned retries;
 };
 static int client_open(void *arg)
 {
@@ -600,7 +604,41 @@ static int client_open(void *arg)
 	struct tr_rpc_record_stream_callbacks cb = {client_received,
 	                                            client_terminal, p};
 	cfg.method.method_id = 9 + r->method;
-	CHECK(tr_stream_open(p->channel, TR_LANE_BULK, &r->stream) == TR_OK);
+	if (r->saturate_control) {
+		struct tr_reactor_stats stats;
+		int ret;
+		/* 同一所有者命令内填满真实控制发送池；当前命令返回前
+		 * SEND 无法被消费。PONG 不触发对端再回包，不改变流身份。 */
+		r->saturate_control = false;
+		CHECK(tr_reactor_get_stats(p->reactor, &stats) == TR_OK);
+		for (unsigned i = 0; i < stats.control_tx_item_pool.capacity;
+		     ++i) {
+			ret = tr_reactor_send(p->connection, TR_FRAME_PONG, 0,
+			                      0, 0, NULL);
+			if (ret != TR_OK)
+				break;
+		}
+		CHECK(tr_reactor_get_stats(p->reactor, &stats) == TR_OK);
+		CHECK(stats.control_tx_item_pool.current ==
+		      stats.control_tx_item_pool.capacity);
+	}
+	struct tr_stream_handle before = r->stream;
+	int ret = tr_stream_open(p->channel, TR_LANE_BULK, &r->stream);
+	if (ret != TR_OK) {
+		/* 只允许在尚未接管网络流时重试；已接受后的记录绑定失败
+		 * 仍由原断言拒绝，不能重新 OPEN 隐藏部分成功。 */
+		CHECK(r->stream.channel == before.channel &&
+		      r->stream.slot == before.slot &&
+		      r->stream.generation == before.generation);
+		if (ret != TR_AGAIN)
+			fprintf(stderr,
+			        "STREAM_OPEN 准入失败：method=%u "
+			        "status=%d active=%u retries=%u\n",
+			        r->method, ret,
+			        tr_channel_active_streams(p->channel),
+			        r->retries);
+		return ret;
+	}
 	CHECK(tr_rpc_record_stream_create_on_owner(
 	              r->stream, &cfg, &cb, &p->budget,
 	              &p->calls[r->stream.slot]) == TR_OK);
@@ -608,15 +646,34 @@ static int client_open(void *arg)
 	p->withhold_open[r->stream.slot] = r->withhold_open;
 	return TR_OK;
 }
+static unsigned open_call_request(struct client_create *r)
+{
+	struct fixture *f = r->f;
+	unsigned opened = atomic_load(&f->client.opened);
+	uint64_t end = now_ms() + 15000;
+	int ret;
+
+	/* 必须退出所有者命令后再重试，让 SEND 前驱和释放回调推进。
+	 * 所有尝试共用原有15秒预算；其他错误立即失败，不扩大资源池。 */
+	while ((ret = tr_reactor_call(f->client.reactor, client_open, r)) ==
+	       TR_AGAIN) {
+		r->retries++;
+		CHECK(now_ms() < end);
+		sched_yield();
+	}
+	CHECK(ret == TR_OK);
+	while (atomic_load(&f->client.opened) < opened + 1) {
+		CHECK(now_ms() < end);
+		sched_yield();
+	}
+	return r->stream.slot;
+}
 static unsigned open_call_mode(struct fixture *f, unsigned method,
                                bool withhold_open)
 {
-	unsigned opened = atomic_load(&f->client.opened);
 	struct client_create r = {
 	        .f = f, .method = method, .withhold_open = withhold_open};
-	CHECK(tr_reactor_call(f->client.reactor, client_open, &r) == TR_OK);
-	wait_count(&f->client.opened, opened + 1);
-	return r.stream.slot;
+	return open_call_request(&r);
 }
 static unsigned open_call(struct fixture *f, unsigned method)
 {
@@ -1127,8 +1184,23 @@ static void test_stopped_recovery(bool fatal)
 	CHECK(tr_task_executor_destroy(&f.executor) == TR_OK);
 	fixture_destroy(&f, true);
 }
+static void test_open_tx_pressure(void)
+{
+	struct fixture f;
+	fixture_init(&f, 1024 * 1024, 8);
+	struct client_create r = {.f = &f, .saturate_control = true};
+	unsigned slot = open_call_request(&r);
+	CHECK(r.retries > 0 && !r.saturate_control);
+	CHECK(atomic_load(&f.client.opened) == 1);
+	request(&f, slot, 0, 1, 80);
+	check_final(&f, slot, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[slot].seen[TR_RPC_RECORD_OPEN]) == 1);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: bounded OPEN admission passed");
+}
 int main(void)
 {
+	test_open_tx_pressure();
 	for (unsigned partial = 0; partial < 3; ++partial)
 		test_slow_open(partial);
 	puts("rpc_record_endpoint_tcp: 3 slow OPEN cases passed");
