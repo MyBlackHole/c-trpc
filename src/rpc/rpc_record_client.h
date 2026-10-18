@@ -127,21 +127,14 @@ int tr_rpc_record_client_call_start_on_owner(
         const struct tr_rpc_record_client_callbacks *callbacks,
         struct tr_rpc_record_client_handle *out);
 
-/* 公共回调在既有固定调用槽内发布，不另建调用表或桥接堆对象。 */
+/* 公共回调在既有固定调用槽内发布，不另建调用表或桥接堆对象。
+ * unary_request 非空时，只受理 ONE→ONE 并在发布前复制单条请求；
+ * 既有进度泵自动发送正文和半关闭，失败不遗留业务终局责任。 */
 int tr_rpc_record_client_call_start_public_on_owner(
         struct tr_rpc_record_client *client, uint32_t service_id,
         uint32_t method_id, const struct tr_rpc_call_options *options,
         const struct tr_rpc_v2_client_callbacks *callbacks,
-        struct tr_rpc_v2_call *out);
-/* 一元请求与流式共用原调用槽、绑定和终局。复制失败不发布调用；
- * 已接受正文由同一进度入口依次发送 MESSAGE/HALF_CLOSE，终局归还副本。 */
-int tr_rpc_record_client_unary_public_on_owner(
-        struct tr_rpc_record_client *client, uint32_t service_id,
-        uint32_t method_id, const struct tr_rpc_bytes *request,
-        const struct tr_rpc_call_options *options,
-        const struct tr_rpc_v2_client_callbacks *callbacks,
-        struct tr_rpc_v2_call *out);
-
+        struct tr_rpc_v2_call *out, const struct tr_rpc_bytes *unary_request);
 int tr_rpc_record_client_send_bytes_on_owner(
         struct tr_rpc_record_client_handle handle,
         const struct tr_rpc_bytes *message);

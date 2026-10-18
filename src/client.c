@@ -1110,14 +1110,10 @@ struct tr_client_v2_start_request {
 static int tr_client_v2_start_on_owner(void *arg)
 {
 	struct tr_client_v2_start_request *request = arg;
-	if (request->unary_request)
-		return tr_rpc_record_client_unary_public_on_owner(
-		        request->client, request->service_id,
-		        request->method_id, request->unary_request,
-		        request->options, request->callbacks, request->out);
 	return tr_rpc_record_client_call_start_public_on_owner(
 	        request->client, request->service_id, request->method_id,
-	        request->options, request->callbacks, request->out);
+	        request->options, request->callbacks, request->out,
+	        request->unary_request);
 }
 
 static int tr_client_v2_start(

@@ -20,8 +20,11 @@ struct tr_record_client_slot {
 	const struct tr_rpc_method_desc *method;
 	struct tr_rpc_record_client_callbacks callbacks;
 	struct tr_rpc_v2_client_callbacks public_callbacks;
-	/* 一元便捷入口仅保留尚未被传输接管的一条请求，不另建调用。 */
+	/* 只记录自动发送意图，协议基数/终局仍由原 binding 决定。
+	 * NULL 正文与 MESSAGE 意图区分零字节单条请求和未待发送。 */
 	struct tr_buffer *unary_body;
+	enum tr_rpc_record_kind unary_pending;
+	bool unary_mode;
 	uint64_t generation, deadline, peer_window;
 	enum tr_rpc_status status;
 	enum tr_rpc_record_delivery delivery;
@@ -34,7 +37,6 @@ struct tr_record_client_slot {
 	bool terminal, reported, peer_final, peer_closed, dead, close_accepted;
 	bool reset_accepted;
 	bool public_mode, send_pool_waiting;
-	bool unary, unary_message_pending, unary_half_close_pending;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 };
 
@@ -61,6 +63,19 @@ struct tr_rpc_record_client {
 };
 
 static _Thread_local unsigned tr_record_client_callback_depth;
+
+static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
+                                    enum tr_rpc_record_kind kind,
+                                    struct tr_buffer **body,
+                                    const struct tr_rpc_bytes *message,
+                                    bool automatic);
+
+static void tr_record_client_clear_unary(struct tr_record_client_slot *slot)
+{
+	tr_buffer_release(slot->unary_body);
+	slot->unary_body = NULL;
+	slot->unary_pending = 0;
+}
 
 static int tr_record_client_owner(struct tr_rpc_record_client *client)
 {
@@ -226,11 +241,11 @@ static void tr_record_client_report(struct tr_record_client_slot *slot)
 {
 	struct tr_rpc_record_client *client = slot->client;
 	if (!slot->accepted || !slot->terminal || slot->reported ||
-	    client->callback_depth)
+	    client->callback_depth || slot->sending)
 		return;
-	/* 终局确定后未接管请求不再重试，先归还复制额度再进入业务回调。 */
-	tr_buffer_release(slot->unary_body);
-	slot->unary_body = NULL;
+	/* 终局回调可释放业务参数；未被 TX 接管的请求先归还原复制池。
+	 * 正在 send 的正文不能在内联传输事件中提前释放。 */
+	tr_record_client_clear_unary(slot);
 	slot->reported = true;
 	/* 终局回调内的快照已经包含本次结果；后续网络退役不再记账。 */
 	tr_rpc_record_semantic_finish(&client->semantic, slot->status);
@@ -386,55 +401,12 @@ tr_record_client_send_record(struct tr_record_client_slot *slot,
 	return ret;
 }
 
-/* OPEN 和自动请求的发送失败仍交给同一个绑定选择终局。 */
-static void tr_record_client_send_failed(struct tr_record_client_slot *slot,
-                                         int status)
-{
-	(void)tr_rpc_record_stream_abort_on_owner(
-	        slot->binding,
-	        status == TR_ERR_BAD_LENGTH ? TR_RPC_STATUS_INVALID_ARGUMENT
-	        : status == TR_ERR_NOMEM    ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
-	                                    : TR_RPC_STATUS_UNAVAILABLE);
-}
-
-static void tr_record_client_unary_progress(struct tr_record_client_slot *slot)
-{
-	int ret = TR_OK;
-	if (slot->unary_message_pending) {
-		uint32_t size = slot->unary_body ? slot->unary_body->len : 0;
-		struct tr_rpc_record_header header = {
-		        .kind = TR_RPC_RECORD_MESSAGE,
-		        .codec_id = slot->method->request_codec_id,
-		        .encoded_size = size,
-		        .decoded_size = size};
-		ret = TR_RPC_RECORD_HEADER_SIZE + (uint64_t)size >
-		                      slot->peer_window
-		              ? TR_ERR_BAD_LENGTH
-		              : tr_record_client_send_record(
-		                        slot, &header, NULL, &slot->unary_body);
-		if (ret == TR_OK)
-			slot->unary_message_pending = false;
-	}
-	if (ret == TR_OK && !slot->terminal && slot->unary_half_close_pending) {
-		struct tr_rpc_record_header header = {
-		        .kind = TR_RPC_RECORD_HALF_CLOSE};
-		ret = tr_record_client_send_record(slot, &header, NULL, NULL);
-		if (ret == TR_OK)
-			slot->unary_half_close_pending = false;
-	}
-	/* AGAIN 只保留同一槽的发送责任，由既有事件/定时器重试，不忙等，
-	 * 不重放已接受的 MESSAGE，也不把请求已发送解释成成功终局。 */
-	if (ret != TR_OK && ret != TR_AGAIN)
-		tr_record_client_send_failed(slot, ret);
-}
-
 static int tr_record_client_retire(struct tr_record_client_slot *slot)
 {
 	int ret;
 	if (slot->accepted && (!slot->terminal || !slot->reported))
 		return TR_AGAIN;
-	tr_buffer_release(slot->unary_body);
-	slot->unary_body = NULL;
+	tr_record_client_clear_unary(slot);
 	if (!slot->dead && !slot->close_accepted && !slot->reset_accepted) {
 		if (!slot->peer_final) {
 			/* RPC HALF_CLOSE 只结束请求事件，不妨碍取消整个调用。
@@ -518,11 +490,39 @@ static int tr_record_client_progress(struct tr_record_client_slot *slot)
 		} else if (ret == TR_AGAIN) {
 			return TR_AGAIN;
 		} else {
-			tr_record_client_send_failed(slot, ret);
+			(void)tr_rpc_record_stream_abort_on_owner(
+			        slot->binding,
+			        ret == TR_ERR_BAD_LENGTH
+			                ? TR_RPC_STATUS_INVALID_ARGUMENT
+			        : ret == TR_ERR_NOMEM
+			                ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
+			                : TR_RPC_STATUS_UNAVAILABLE);
 		}
 	}
-	if (slot->unary && !slot->terminal && !slot->open_pending)
-		tr_record_client_unary_progress(slot);
+	/* 单条请求仍走原发送入口：OPEN、正文和半关闭分别只在下游
+	 * 接管后推进。每次最多两步，无新增队列、线程或重试定时器。 */
+	while (slot->unary_pending && !slot->terminal && !slot->open_pending &&
+	       !client->callback_depth) {
+		enum tr_rpc_record_kind kind = slot->unary_pending;
+		ret = tr_record_client_request(tr_record_client_handle(slot),
+		                               kind, &slot->unary_body, NULL,
+		                               true);
+		if (ret != TR_OK) {
+			if (ret != TR_AGAIN && !slot->terminal)
+				(void)tr_rpc_record_stream_abort_on_owner(
+				        slot->binding,
+				        ret == TR_ERR_BAD_LENGTH
+				                ? TR_RPC_STATUS_INVALID_ARGUMENT
+				        : ret == TR_ERR_NOMEM
+				                ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
+				                : TR_RPC_STATUS_UNAVAILABLE);
+			break;
+		}
+		if (!slot->terminal)
+			slot->unary_pending = kind == TR_RPC_RECORD_MESSAGE
+			                              ? TR_RPC_RECORD_HALF_CLOSE
+			                              : 0;
+	}
 	/* 池满没有独立传输可写事件。保留原槽的重试意图，已有进度定时器
 	 * 只在复制池再次有容量后交付提示，不能先消费通知再永远等不到释放。 */
 	bool writable_callback =
@@ -530,7 +530,7 @@ static int tr_record_client_progress(struct tr_record_client_slot *slot)
 	                          : slot->callbacks.writable != NULL;
 	bool pool_ready = !slot->send_pool_waiting ||
 	                  tr_buffer_pool_free_count(client->send_pool) != 0;
-	if (!slot->unary && !slot->terminal && slot->writable &&
+	if (!slot->terminal && !slot->unary_mode && slot->writable &&
 	    writable_callback && !client->callback_depth && pool_ready) {
 		slot->writable = false;
 		slot->send_pool_waiting = false;
@@ -679,6 +679,7 @@ static int tr_record_client_call_start(
         const struct tr_rpc_bytes *unary_request)
 {
 	struct tr_record_client_slot *slot = NULL;
+	struct tr_buffer *copy = NULL;
 	const struct tr_rpc_method_desc *method = NULL;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 	uint32_t metadata_size;
@@ -711,6 +712,9 @@ static int tr_record_client_call_start(
 	if (!method)
 		return TR_ERR_UNSUPPORTED;
 	if (unary_request) {
+		if (!public_callbacks ||
+		    (unary_request->len && !unary_request->data))
+			return TR_ERR_INVALID;
 		if (method->request_cardinality != TR_RPC_ONE ||
 		    method->response_cardinality != TR_RPC_ONE)
 			return TR_ERR_UNSUPPORTED;
@@ -731,21 +735,22 @@ static int tr_record_client_call_start(
 	}
 	if (!slot)
 		return TR_AGAIN;
-	struct tr_buffer *request_copy = NULL;
+	/* 在发布调用能力和建立传输流之前完成复制；失败不承担业务终局。
+	 * 同一复制池同时限制流式 TX 和待发送一元请求，不增设正文预算。 */
 	if (unary_request && unary_request->len) {
-		/* 复制准入先于传输 OPEN；失败既不承担回调责任，也不发布
-		 * 半个一元调用。有限复制池和实例预算共同约束保留正文。 */
 		ret = tr_buffer_acquire(client->send_pool, unary_request->len,
-		                        &request_copy);
+		                        &copy);
 		if (ret != TR_OK)
 			return ret;
-		memcpy(request_copy->data, unary_request->data,
-		       unary_request->len);
-		request_copy->len = unary_request->len;
+		memcpy(copy->data, unary_request->data, unary_request->len);
+		copy->len = unary_request->len;
 	}
 	*slot = (struct tr_record_client_slot){
 	        .client = client,
 	        .method = method,
+	        .unary_mode = unary_request != NULL,
+	        .unary_body = copy,
+	        .unary_pending = unary_request ? TR_RPC_RECORD_MESSAGE : 0,
 	        .generation = ++client->generation,
 	        .deadline =
 	                options && options->timeout_ms
@@ -754,10 +759,6 @@ static int tr_record_client_call_start(
 	                                               1000000)
 	                        : 0,
 	        .metadata_size = metadata_size,
-	        .unary_body = request_copy,
-	        .unary = unary_request != NULL,
-	        .unary_message_pending = unary_request != NULL,
-	        .unary_half_close_pending = unary_request != NULL,
 	        .active = true,
 	        .open_pending = true};
 	if (metadata_size)
@@ -766,7 +767,7 @@ static int tr_record_client_call_start(
 	ret = tr_stream_open(client->channel, (enum tr_lane)method->lane,
 	                     &slot->stream);
 	if (ret != TR_OK) {
-		tr_buffer_release(slot->unary_body);
+		tr_record_client_clear_unary(slot);
 		*slot = (struct tr_record_client_slot){0};
 		--client->depth;
 		return ret;
@@ -826,33 +827,20 @@ int tr_rpc_record_client_call_start_public_on_owner(
         struct tr_rpc_record_client *client, uint32_t service_id,
         uint32_t method_id, const struct tr_rpc_call_options *options,
         const struct tr_rpc_v2_client_callbacks *callbacks,
-        struct tr_rpc_v2_call *out)
+        struct tr_rpc_v2_call *out, const struct tr_rpc_bytes *unary_request)
 {
 	if (!callbacks)
 		return TR_ERR_INVALID;
 	return tr_record_client_call_start(client, service_id, method_id,
 	                                   options, NULL, callbacks, NULL, out,
-	                                   NULL);
-}
-
-int tr_rpc_record_client_unary_public_on_owner(
-        struct tr_rpc_record_client *client, uint32_t service_id,
-        uint32_t method_id, const struct tr_rpc_bytes *request,
-        const struct tr_rpc_call_options *options,
-        const struct tr_rpc_v2_client_callbacks *callbacks,
-        struct tr_rpc_v2_call *out)
-{
-	if (!callbacks || !request || (request->len && !request->data))
-		return TR_ERR_INVALID;
-	return tr_record_client_call_start(client, service_id, method_id,
-	                                   options, NULL, callbacks, NULL, out,
-	                                   request);
+	                                   unary_request);
 }
 
 static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
                                     enum tr_rpc_record_kind kind,
                                     struct tr_buffer **body,
-                                    const struct tr_rpc_bytes *message)
+                                    const struct tr_rpc_bytes *message,
+                                    bool automatic)
 {
 	struct tr_record_client_slot *slot;
 	struct tr_rpc_record_state state;
@@ -860,9 +848,7 @@ static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
 	int ret = tr_record_client_lookup(handle, &slot);
 	if (ret != TR_OK)
 		return ret;
-	/* 一元便捷入口拥有整段请求发送；业务不能插入第二条 MESSAGE
-	 * 或抢先 HALF_CLOSE，取消仍使用原调用能力。 */
-	if (slot->sending || slot->unary)
+	if (slot->sending || (slot->unary_mode && !automatic))
 		return TR_ERR_STATE;
 	struct tr_rpc_record_client *client = slot->client;
 	if (message && (!slot->public_mode || !client->send_pool))
@@ -940,7 +926,7 @@ int tr_rpc_record_client_send_on_owner(
         struct tr_rpc_record_client_handle handle, struct tr_buffer **body)
 {
 	return tr_record_client_request(handle, TR_RPC_RECORD_MESSAGE, body,
-	                                NULL);
+	                                NULL, false);
 }
 
 int tr_rpc_record_client_send_bytes_on_owner(
@@ -950,14 +936,14 @@ int tr_rpc_record_client_send_bytes_on_owner(
 	if (!message || (message->len && !message->data))
 		return TR_ERR_INVALID;
 	return tr_record_client_request(handle, TR_RPC_RECORD_MESSAGE, NULL,
-	                                message);
+	                                message, false);
 }
 
 int tr_rpc_record_client_half_close_on_owner(
         struct tr_rpc_record_client_handle handle)
 {
 	return tr_record_client_request(handle, TR_RPC_RECORD_HALF_CLOSE, NULL,
-	                                NULL);
+	                                NULL, false);
 }
 
 int tr_rpc_record_client_cancel_on_owner(
@@ -1202,7 +1188,7 @@ int tr_rpc_record_client_reap_stopped(struct tr_rpc_record_client **pointer)
 		if (!slot->reported)
 			slot->delivery = TR_RPC_RECORD_OWNER_STOPPED;
 		tr_record_client_report(slot);
-		tr_buffer_release(slot->unary_body);
+		tr_record_client_clear_unary(slot);
 		*slot = (struct tr_record_client_slot){0};
 	}
 	--client->depth;

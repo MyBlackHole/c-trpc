@@ -917,9 +917,10 @@ static int unary_start(struct call_state *c,
 		                           &untouched) == TR_ERR_BAD_LENGTH);
 		CHECK(memcmp(&untouched, &sentinel, sizeof(untouched)) == 0);
 	}
-	int ret =
-	        tr_client_unary_call(c->client->handle, 23, c->method + 1U,
-	                             &request, options, &callbacks, &c->handle);
+	int ret = tr_client_unary_call(
+	        c->client->handle, 23,
+	        c->method < METHOD_COUNT ? c->method + 1U : 99U, &request,
+	        options, &callbacks, &c->handle);
 	memset(storage, 0xd3, sizeof(storage));
 	if (ret == TR_OK) {
 		lock(c->fixture);
@@ -1478,9 +1479,38 @@ static void test_default_factory_requires_methods(void)
 	CHECK(tr_server_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
 }
 
+/* #280 的一元远端未知方法及本地非 ONE→ONE 拒绝在安装 SDK 中保留。 */
+static void test_unary_rejections(void)
+{
+	struct fixture f;
+	struct call_state unknown, rejected;
+	struct message_spec spec;
+	struct tr_rpc_v2_call sentinel;
+	fixture_create(&f);
+	spec.size = MAX_BODY;
+	spec.tag = 91U;
+	call_init(&unknown, &f, METHOD_COUNT, &spec, 1);
+	CHECK(unary_start(&unknown, NULL) == TR_OK);
+	call_done(&unknown, TR_RPC_STATUS_UNIMPLEMENTED);
+	CHECK(unknown.writable_returns == 0U);
+	call_init(&rejected, &f, 1, &spec, 1);
+	memset(&rejected.handle, 0xa5, sizeof(rejected.handle));
+	sentinel = rejected.handle;
+	CHECK(unary_start(&rejected, NULL) == TR_ERR_UNSUPPORTED);
+	CHECK(memcmp(&rejected.handle, &sentinel, sizeof(sentinel)) == 0);
+	CHECK(rejected.terminals == 0U && rejected.writable_returns == 0U);
+	check_client_totals(&f.client, 1, 1, TR_RPC_STATUS_UNIMPLEMENTED, 1);
+	check_server_totals(&f, 0, 0, TR_RPC_STATUS_OK, 0);
+	drain(&f);
+	CHECK(tr_rpc_v2_call_cancel(unknown.handle) == TR_ERR_STALE);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=unary-common-terminal result=pass");
+}
+
 int main(void)
 {
 	test_default_factory_requires_methods();
+	test_unary_rejections();
 	test_shapes_and_copy();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);
