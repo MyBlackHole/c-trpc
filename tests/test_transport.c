@@ -1855,6 +1855,92 @@ static void test_channel_split_create_tx_exhaustion_rollback(void)
 	assert(close(bulk_fds[1]) == 0);
 }
 
+
+/* 同一所有者轮次里不会执行 I/O 分派。两个独立 Channel 若共用
+ * 唯一普通 CONTROL 发送项，第二个 HELLO 应当明确返回容量背压。
+ * 这验证构造失败的真实路径，与下面的 GOAWAY 专用保留不变量区分。
+ */
+struct channel_hello_contention_probe {
+	struct tr_conn_handle first_connection;
+	struct tr_conn_handle second_connection;
+	struct tr_channel *first;
+	struct tr_channel *second;
+	int first_ret;
+	int second_ret;
+	uint32_t pool_in_use_after_first;
+};
+
+static int channel_two_hello_on_owner(void *arg)
+{
+	struct channel_hello_contention_probe *probe = arg;
+	struct tr_channel_config config = {0};
+	struct tr_reactor_stats stats;
+
+	config.role = TR_CHANNEL_CLIENT;
+	config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	config.max_streams = 4U;
+	config.initial_window_bytes = 4096U;
+	probe->first_ret = tr_channel_create(&config, probe->first_connection,
+	                                     probe->first_connection, NULL,
+	                                     NULL, NULL, NULL, &probe->first);
+	if (probe->first_ret != TR_OK)
+		return TR_OK;
+
+	assert(tr_reactor_get_stats(probe->first_connection.reactor, &stats) ==
+	       TR_OK);
+	probe->pool_in_use_after_first = stats.control_tx_item_pool.current;
+	config.role = TR_CHANNEL_SERVER;
+	probe->second_ret = tr_channel_create(&config, probe->second_connection,
+	                                      probe->second_connection, NULL,
+	                                      NULL, NULL, NULL, &probe->second);
+	return TR_OK;
+}
+
+static void test_channel_hello_contention_is_bounded(void)
+{
+	struct tr_reactor_config config = {0};
+	struct tr_reactor *reactor = NULL;
+	struct tr_reactor_stats stats;
+	struct channel_hello_contention_probe probe = {0};
+	int first_fds[2], second_fds[2];
+
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, first_fds) ==
+	       0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0,
+	                  second_fds) == 0);
+	config.max_connections = 4U;
+	config.command_capacity = 2U;
+	config.tx_item_capacity = 8U;
+	config.control_tx_item_capacity = 1U;
+	config.rx_buffer_count = 8U;
+	config.rx_buffer_size = 4096U;
+	config.max_payload_len = 4096U;
+	config.rx_budget_bytes = 64U * 1024U;
+	config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, first_fds[0],
+	                           &probe.first_connection) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, second_fds[0],
+	                           &probe.second_connection) == TR_OK);
+
+	assert(tr_reactor_call(reactor, channel_two_hello_on_owner, &probe) ==
+	       TR_OK);
+	assert(probe.first_ret == TR_OK);
+	assert(probe.pool_in_use_after_first == 1U);
+	assert(probe.second_ret == TR_AGAIN);
+	assert(probe.second == NULL);
+
+	/* 失败时回滚的发送项只能由原命令或停止回收；不可借此泄漏。 */
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
+	assert(stats.control_tx_item_pool.current == 0U);
+	assert(tr_channel_destroy(probe.first) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(first_fds[1]) == 0);
+	assert(close(second_fds[1]) == 0);
+}
+
 static void test_channel_deferred_hello_gate(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -8442,6 +8528,7 @@ int main(void)
 	test_rpc_destroy_fails_closed_while_reactor_stopping();
 	test_reactor_rx_pool_backpressure();
 	test_channel_split_create_tx_exhaustion_rollback();
+	test_channel_hello_contention_is_bounded();
 	test_channel_deferred_hello_gate();
 	test_channel_stream_id_index_collision_delete();
 	test_channel_stream_slot_reuse();
