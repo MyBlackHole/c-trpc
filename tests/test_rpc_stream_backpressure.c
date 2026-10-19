@@ -424,6 +424,7 @@ int main(void)
 	struct tr_rpc_message pinned;
 	struct endpoint_destroy_probe destruction;
 	pthread_t destroy_thread;
+	pthread_t *thread = &destroy_thread;
 	void *(*destroy_fn)(void *) = destroy_endpoint_thread;
 	struct tr_stream_flow_state a_before;
 	struct tr_stream_flow_state b_before;
@@ -641,7 +642,7 @@ int main(void)
 	/* 销毁可以解除所有者上的回调，但不可越过尚未释放的公开消息引用。 */
 	atomic_store(&detach_target, (uintptr_t)server_channel);
 	destruction = (struct endpoint_destroy_probe){server_rpc, TR_ERR_STATE};
-	assert(pthread_create(&destroy_thread, NULL, destroy_fn, &destruction) == 0);
+	assert(pthread_create(thread, NULL, destroy_fn, &destruction) == 0);
 	wait_detach_confirmed();
 	{
 		int released = tr_rpc_message_release(&pinned);
