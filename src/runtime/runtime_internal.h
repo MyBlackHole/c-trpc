@@ -74,14 +74,16 @@ struct tr_runtime_config {
  */
 int tr_runtime_create(const struct tr_runtime_config *config,
 		      struct tr_runtime **out);
-/* start() 要么启动全部分片，要么返回错误。若回滚本身遇到生命周期屏障
- * 失败，对应分片仍标记为已启动，且拒绝新的启动，
- * 直到 stop() 收敛该部分轮次。
+/* start/stop/destroy 的跨分片控制轮次由 Runtime 原子门禁串行化，
+ * 并发控制者立即返回 TR_ERR_STATE，不接管另一控制者的线程或部分回滚。
+ * 停止失败后可再次 stop/destroy；启动失败若自身回滚也失败，
+ * 后续 start 应拒绝，直到 stop 完成部分轮次收敛。
+ *
+ * 门禁只保护这些生命周期控制操作。调用方必须在最终 destroy 释放存储
+ * 前停止其他 Runtime/Shard 弱指针访问，并保证消息操作不跨越销毁；
+ * 内部门禁并不延长悬挂指针的有效期。
  */
 int tr_runtime_start(struct tr_runtime *runtime);
-/* stop() 也会收敛启动回滚失败留下的部分分片，
- * 即使整个运行时从未发布为已启动。
- */
 int tr_runtime_stop(struct tr_runtime *runtime);
 int tr_runtime_destroy(struct tr_runtime *runtime);
 
