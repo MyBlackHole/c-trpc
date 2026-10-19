@@ -93,17 +93,18 @@ int __wrap_tr_reactor_complete(struct tr_reactor *r, complete_cb fn, void *arg)
 
 static void wait_retry_gate(void)
 {
+	pthread_mutex_t *lock = &retry_gate_lock;
+	pthread_cond_t *cond = &retry_gate_cond;
 	struct timespec deadline;
 	int ret = 0;
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
-	pthread_mutex_lock(&retry_gate_lock);
+	pthread_mutex_lock(lock);
 	while (!retry_gate_entered && ret == 0)
-		ret = pthread_cond_timedwait(&retry_gate_cond, &retry_gate_lock,
-					     &deadline);
+		ret = pthread_cond_timedwait(cond, lock, &deadline);
 	assert(retry_gate_entered);
-	pthread_mutex_unlock(&retry_gate_lock);
+	pthread_mutex_unlock(lock);
 }
 
 static void release_retry_gate(void)
