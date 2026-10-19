@@ -320,8 +320,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",
                         "-Wl,--wrap=tr_reactor_timer_unregister", {force = true})
         elseif name == "test_channel_create_transaction" then
-            -- 注入构造及握手静默屏障失败，验证所有者与外部线程差异。
+            -- 注入构造回滚的 handler/close 复合故障与握手静默屏障失败。
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",
+                        "-Wl,--wrap=tr_reactor_close_on_owner",
                         "-Wl,--wrap=tr_reactor_timer_register",
                         "-Wl,--wrap=tr_reactor_timer_unregister",
                         "-Wl,--wrap=tr_reactor_send",
