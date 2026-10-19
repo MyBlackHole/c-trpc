@@ -1323,8 +1323,7 @@ static void test_cancel_and_stop(unsigned mode)
 		return;
 	}
 	CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) == TR_ERR_STATE);
-	CHECK(tr_reactor_call(f.server.reactor, disable_peer, &f.server) ==
-	      TR_OK);
+	CHECK(tr_reactor_call(f.server.reactor, disable_peer, &f.server) == TR_OK);
 	CHECK(tr_reactor_call(f.server.reactor, disable_driver, &f) == TR_OK);
 	CHECK(tr_reactor_stop(f.server.reactor) == TR_OK);
 	CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) == TR_AGAIN);
@@ -2150,13 +2149,11 @@ static void test_accepted_final_survives_stopped_cleanup(void)
 	CHECK(slot == 0);
 	gate_wait(&f.gate, false);
 
-	/* The worker remains submitted and blocked while the producer sends a
-	 * successful response. Wait for the peer to observe the actual FINAL. */
+	/* Wait until the peer observes FINAL while the worker remains blocked. */
 	struct tr_rpc_v2_producer *p = c.producer;
 	CHECK(producer_send_body(p, 80) == TR_OK);
 	producer_writable(p);
-	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
-	      TR_OK);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) == TR_OK);
 	wait_count(&f.client.terminals[slot], 1);
 	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK);
 	CHECK(!atomic_load(&c.terminals));
