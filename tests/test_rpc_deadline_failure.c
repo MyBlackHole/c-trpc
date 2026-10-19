@@ -809,6 +809,7 @@ static void test_executor_group_stopped_admission(void)
 	struct tr_rpc_endpoint_config config = { 0 };
 	struct tr_rpc_method_desc method = { 0 };
 	struct tr_rpc_endpoint_stats stats;
+	uint64_t accepted_before_stop;
 	int ret;
 
 	fixture_init(&f);
@@ -852,6 +853,12 @@ static void test_executor_group_stopped_admission(void)
 	assert(f.status[1] == TR_RPC_STATUS_OK);
 	assert(atomic_load(&group_handler_calls) == 1U);
 	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
+	assert(stats.executor_queued_tasks == 0U);
+	assert(stats.executor_enqueued_tasks ==
+	       stats.executor_taken_tasks);
+	accepted_before_stop = stats.executor_enqueued_tasks;
+	assert(accepted_before_stop != 0U);
 
 	/* 第二次 stop 同样关闭下一次准入，而不是仅检查瞬时 stopping。 */
 	group_unary_call(&f, 2U);
@@ -859,8 +866,8 @@ static void test_executor_group_stopped_admission(void)
 	assert(atomic_load(&group_handler_calls) == 1U);
 	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
 	assert(stats.executor_queued_tasks == 0U);
-	assert(stats.executor_enqueued_tasks == 1U);
-	assert(stats.executor_taken_tasks == 1U);
+	assert(stats.executor_enqueued_tasks == accepted_before_stop);
+	assert(stats.executor_taken_tasks == accepted_before_stop);
 
 	assert(tr_rpc_endpoint_destroy(server) == TR_OK);
 	assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
