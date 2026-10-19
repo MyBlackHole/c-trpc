@@ -32,6 +32,10 @@ struct test_context {
 	pthread_cond_t cond;
 	int first_callback_entered;
 	int release_first_callback;
+	int last_callback_entered;
+	int release_last_callback;
+	int destroy_detached;
+	int destroy_done, destroy_status;
 	int cancel_handler_entered;
 	int release_cancel_handler;
 	unsigned delivered;
@@ -60,6 +64,35 @@ static atomic_int hold_retry_success_once;
 static pthread_mutex_t retry_gate_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t retry_gate_cond = PTHREAD_COND_INITIALIZER;
 static int retry_gate_entered, retry_gate_open;
+
+/* 测试专用：只观察待销毁客户端 Channel 的成功解绑屏障。 */
+static _Atomic(uintptr_t) destroy_channel_target;
+static struct test_context *destroy_context;
+int __real_tr_channel_set_handler(struct tr_channel *channel,
+                                  tr_stream_data_cb data_cb,
+                                  tr_stream_event_cb stream_cb,
+                                  tr_channel_event_cb channel_cb, void *arg);
+
+int __wrap_tr_channel_set_handler(struct tr_channel *channel,
+                                  tr_stream_data_cb data_cb,
+                                  tr_stream_event_cb stream_cb,
+                                  tr_channel_event_cb channel_cb, void *arg)
+{
+	int ret = __real_tr_channel_set_handler(
+		channel, data_cb, stream_cb, channel_cb, arg);
+
+	if (ret == TR_OK &&
+	    (uintptr_t)channel == atomic_load(&destroy_channel_target) &&
+	    !data_cb && !stream_cb && !channel_cb && !arg) {
+		struct test_context *ctx = destroy_context;
+
+		pthread_mutex_lock(&ctx->lock);
+		ctx->destroy_detached = 1;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+	}
+	return ret;
+}
 
 int __real_tr_reactor_complete(struct tr_reactor *, complete_cb, void *);
 
@@ -294,6 +327,15 @@ static void result_callback(struct tr_rpc_call_handle call, int status,
 		while (!ctx->release_first_callback)
 			pthread_cond_wait(&ctx->cond, &ctx->lock);
 	}
+	/* 单工作线程最后一条回调尚未退出时，外部析构必须等待任务引用。
+	 * 先登记已执行回调的个数，保证这是最后一个活动调用。
+	 */
+	if (ctx->delivered == CALL_COUNT - 1U) {
+		ctx->last_callback_entered = 1;
+		pthread_cond_broadcast(&ctx->cond);
+		while (!ctx->release_last_callback)
+			pthread_cond_wait(&ctx->cond, &ctx->lock);
+	}
 	assert(ctx->callback_count[cb->index] == 0U);
 	ctx->callback_count[cb->index]++;
 	ctx->statuses[cb->index] = status;
@@ -319,6 +361,19 @@ static int reject_destroy(void *arg)
 	return tr_rpc_endpoint_destroy((struct tr_rpc_endpoint *)arg);
 }
 
+static void *destroy_client_endpoint(void *arg)
+{
+	struct test_context *ctx = arg;
+	int ret = tr_rpc_endpoint_destroy(ctx->client_rpc);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->destroy_status = ret;
+	ctx->destroy_done = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return NULL;
+}
+
 int main(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -339,6 +394,7 @@ int main(void)
 	int client_fd;
 	int server_fd;
 	int destroy_status;
+	pthread_t destroy_thread;
 	unsigned i;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -489,7 +545,26 @@ int main(void)
 	assert(ctx.delivered < CALL_COUNT);
 	pthread_mutex_unlock(&ctx.lock);
 	release_retry_gate();
+	/* 待重试任务已经恢复；最后一次业务回调保持活动引用。启动外部
+	 * 析构后，精确等待 handler 静默屏障，再验证析构尚未提前完成。
+	 */
+	wait_flag(&ctx, &ctx.last_callback_entered);
+	atomic_store(&retry_target, (uintptr_t)0U);
+	destroy_context = &ctx;
+	atomic_store(&destroy_channel_target, (uintptr_t)client_channel);
+	assert(pthread_create(&destroy_thread, NULL,
+	                      destroy_client_endpoint, &ctx) == 0);
+	wait_flag(&ctx, &ctx.destroy_detached);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.delivered == CALL_COUNT - 1U);
+	assert(!ctx.destroy_done);
+	ctx.release_last_callback = 1;
+	pthread_cond_broadcast(&ctx.cond);
+	pthread_mutex_unlock(&ctx.lock);
 	wait_deliveries(&ctx, CALL_COUNT);
+	assert(pthread_join(destroy_thread, NULL) == 0);
+	assert(ctx.destroy_done && ctx.destroy_status == TR_OK);
+	atomic_store(&destroy_channel_target, (uintptr_t)0U);
 	assert(atomic_load(&retry_failures) == 1U);
 	assert(atomic_load(&retry_attempts) >= 2U);
 	assert(atomic_load(&retry_successes) >= 1U);
@@ -506,7 +581,7 @@ int main(void)
 
 	wait_pool_idle(&pool);
 	assert(tr_reactor_stop(reactor) == TR_OK);
-	assert(tr_rpc_endpoint_destroy(client_rpc) == TR_OK);
+	/* 客户端最后一份所有者引用已由外部销毁线程归还。 */
 	assert(tr_rpc_endpoint_destroy(server_rpc) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
