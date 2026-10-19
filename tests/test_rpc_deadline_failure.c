@@ -766,8 +766,111 @@ static void test_create_rollback_retains_timer_owner(int shared)
 	}
 }
 
+/* 创建组并正常启动/停止后，原 Endpoint 可以在停止的时间窗仍然存活。
+ * 不允许它在没有工作线程的情况下获得新的任务强引用和执行器节点。
+ */
+static atomic_uint group_handler_calls;
+
+static int group_unary_handler(struct tr_rpc_call_handle call,
+			       const struct tr_rpc_bytes *request,
+			       struct tr_rpc_unary_response *response, void *arg)
+{
+	static const uint8_t reply[] = "ok";
+
+	(void)call;
+	(void)arg;
+	assert(request && request->len == 4U);
+	assert(memcmp(request->data, "work", 4U) == 0);
+	atomic_fetch_add(&group_handler_calls, 1U);
+	response->status = TR_RPC_STATUS_OK;
+	response->message.data = reply;
+	response->message.len = 2U;
+	return TR_OK;
+}
+
+static void group_unary_call(struct fixture *f, unsigned index)
+{
+	const struct tr_rpc_bytes req = {
+		(const uint8_t *)"work", 4U
+	};
+	int ret;
+
+	ret = tr_rpc_unary_call(f->rpc, 1U, 1U, &req,
+				on_unary_result, &f->args[index], &f->calls[index]);
+	assert(ret == TR_OK);
+	wait_count(f, &f->terminal, index + 1U);
+}
+
+static void test_executor_group_stopped_admission(void)
+{
+	struct fixture f;
+	struct tr_rpc_executor_group *group = NULL;
+	struct tr_rpc_endpoint *server = NULL;
+	struct tr_rpc_endpoint_config config = { 0 };
+	struct tr_rpc_method_desc method = { 0 };
+	struct tr_rpc_endpoint_stats stats;
+	int ret;
+
+	fixture_init(&f);
+	atomic_store(&group_handler_calls, 0U);
+	assert(tr_rpc_executor_group_create(1U, 3U, 1U, &group) == TR_OK);
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+
+	config.role = TR_RPC_SERVER;
+	config.max_methods = 2U;
+	config.max_calls = 3U;
+	config.executor_threads = 1U;
+	config.executor_queue_capacity = 16U;
+	config.message_pool = &f.pool;
+	ret = tr_rpc_endpoint_create_with_executor_group(
+		f.server, &config, group, &server);
+	assert(ret == TR_OK);
+	method.service_id = 1U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 64U;
+	method.max_response_bytes = 64U;
+	assert(tr_rpc_register_method(server, &method, group_unary_handler,
+				     NULL) == TR_OK);
+
+	/* 停止成功后尚未重启，首任务必须被拒绝，不得遗留无法消费的节点。 */
+	group_unary_call(&f, 0U);
+	assert(f.status[0] != TR_RPC_STATUS_OK);
+	assert(atomic_load(&group_handler_calls) == 0U);
+	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
+	assert(stats.executor_queued_tasks == 0U);
+	assert(stats.executor_enqueued_tasks == 0U);
+
+	/* 新工作线程轮次建立后，同一个 Channel/Endpoint 的准入恢复。 */
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	group_unary_call(&f, 1U);
+	assert(f.status[1] == TR_RPC_STATUS_OK);
+	assert(atomic_load(&group_handler_calls) == 1U);
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+
+	/* 第二次 stop 同样关闭下一次准入，而不是仅检查瞬时 stopping。 */
+	group_unary_call(&f, 2U);
+	assert(f.status[2] != TR_RPC_STATUS_OK);
+	assert(atomic_load(&group_handler_calls) == 1U);
+	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
+	assert(stats.executor_queued_tasks == 0U);
+	assert(stats.executor_enqueued_tasks == 1U);
+	assert(stats.executor_taken_tasks == 1U);
+
+	assert(tr_rpc_endpoint_destroy(server) == TR_OK);
+	assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+	fixture_destroy(&f);
+}
+
 int main(int argc, char **argv)
 {
+	if (argc == 1 || strcmp(argv[1], "group") == 0)
+		test_executor_group_stopped_admission();
 	if (argc == 1 || strcmp(argv[1], "construct") == 0) {
 		test_create_rollback_retains_timer_owner(0);
 		test_create_rollback_retains_timer_owner(1);
