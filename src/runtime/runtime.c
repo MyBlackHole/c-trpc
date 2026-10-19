@@ -95,7 +95,8 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	}
 
 	if (shard->legacy_rpc_execution) {
-		ret = tr_runtime_legacy_rpc_execution_destroy(&shard->legacy_rpc_execution);
+		ret = tr_runtime_legacy_rpc_execution_destroy(
+		        &shard->legacy_rpc_execution);
 		if (ret != TR_OK)
 			return ret;
 	}
@@ -257,10 +258,11 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		if (ret == TR_OK &&
 		    shard_config->rpc_executor.endpoint_capacity != 0U)
 			ret = tr_runtime_legacy_rpc_execution_create(
-				shard_config->rpc_executor.endpoint_capacity,
-				shard_config->rpc_executor.max_calls_per_endpoint,
-				shard_config->rpc_executor.thread_count,
-				&shard->legacy_rpc_execution);
+			        shard_config->rpc_executor.endpoint_capacity,
+			        shard_config->rpc_executor
+			                .max_calls_per_endpoint,
+			        shard_config->rpc_executor.thread_count,
+			        &shard->legacy_rpc_execution);
 		if (ret != TR_OK)
 			return tr_runtime_create_rollback(out, runtime, ret);
 	}
@@ -323,7 +325,8 @@ static int tr_runtime_shard_stop_execution(
 	}
 
 	if (shard->legacy_rpc_execution) {
-		ret = tr_runtime_legacy_rpc_execution_stop(shard->legacy_rpc_execution);
+		ret = tr_runtime_legacy_rpc_execution_stop(
+		        shard->legacy_rpc_execution);
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
@@ -336,7 +339,8 @@ static int tr_runtime_shard_can_start(struct tr_runtime_shard *shard)
 	if (shard->started || shard->messages || !shard->reactor)
 		return TR_ERR_STATE;
 	if (shard->legacy_rpc_execution)
-		return tr_runtime_legacy_rpc_execution_can_start(shard->legacy_rpc_execution);
+		return tr_runtime_legacy_rpc_execution_can_start(
+		        shard->legacy_rpc_execution);
 	return TR_OK;
 }
 
@@ -380,7 +384,8 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		 * runtime_stop()/destroy() 可以继续收敛。
 		 */
 		if (shard->legacy_rpc_execution) {
-			ret = tr_runtime_legacy_rpc_execution_start(shard->legacy_rpc_execution);
+			ret = tr_runtime_legacy_rpc_execution_start(
+			        shard->legacy_rpc_execution);
 			if (ret != TR_OK)
 				goto rollback;
 		}
