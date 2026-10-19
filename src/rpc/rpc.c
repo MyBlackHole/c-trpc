@@ -283,8 +283,8 @@ struct tr_rpc_executor_group {
 	uint32_t join_cursor;
 	/* 已接受但尚未完成的任务数；工作线程停机前必须排空。 */
 	uint64_t outstanding_tasks;
-	/* 只有工作线程轮次真正启动后才接受新任务；成功 stop 后保持关闭，
-	 * 下一次 start 显式重新开启。该门禁与 stopping 一样由 group->lock 保护。
+	/* 必须有活跃工作线程轮次才允许接收新任务。stop 后保持
+	 * 关闭，直到下一次 start；与 stopping 同由 group->lock 保护。
 	 */
 	int accepting;
 	int stopping;
