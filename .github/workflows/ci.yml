@@ -44,6 +44,21 @@ jobs:
             xmake build --all -v
             xmake test -v -j1
           done
+      - name: 核验 RPC V1 退役引用与生产对象链接证据
+        run: |
+          set -euo pipefail
+          python3 scripts/test_rpc_v1_inventory.py
+          python3 scripts/rpc_v1_inventory.py \
+            --archive build/linux/x86_64/release/libtrcore.a \
+            --output build/audit/rpc-v1-retirement.json
+      - name: 保留 V1 引用与静态库对象清单
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpc-v1-retirement-inventory
+          path: build/audit/rpc-v1-retirement.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: 验证真实编译数据库的正负例
         run: python3 scripts/test_compile_commands.py -v
       - name: 保留 GCC 编译数据库与配置身份
