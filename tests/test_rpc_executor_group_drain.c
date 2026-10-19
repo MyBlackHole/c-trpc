@@ -44,14 +44,9 @@ struct lifecycle_gate {
 	int open;
 };
 
-static struct lifecycle_gate create_gate = {
-	.lock = PTHREAD_MUTEX_INITIALIZER,
-	.cond = PTHREAD_COND_INITIALIZER
-};
-static struct lifecycle_gate stop_gate = {
-	.lock = PTHREAD_MUTEX_INITIALIZER,
-	.cond = PTHREAD_COND_INITIALIZER
-};
+#define GATE_INIT { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0 }
+static struct lifecycle_gate create_gate = GATE_INIT;
+static struct lifecycle_gate stop_gate = GATE_INIT;
 static _Thread_local int hold_group_create;
 static _Thread_local int hold_group_join;
 static _Thread_local int inject_group_join_failure;
@@ -90,13 +85,13 @@ static void lifecycle_gate_release(struct lifecycle_gate *gate)
 	pthread_mutex_unlock(&gate->lock);
 }
 
-typedef pthread_attr_t ThreadAttr;
-typedef void *(*ThreadFn)(void *);
+typedef pthread_t Tid;
+typedef pthread_attr_t Attr;
+typedef void *(*Entry)(void *);
 
-int __real_pthread_create(pthread_t *, const ThreadAttr *, ThreadFn, void *);
+int __real_pthread_create(Tid *, const Attr *, Entry, void *);
 
-int __wrap_pthread_create(pthread_t *id, const ThreadAttr *a, ThreadFn fn,
-			  void *arg)
+int __wrap_pthread_create(Tid *id, const Attr *a, Entry fn, void *arg)
 {
 	if (hold_group_create) {
 		hold_group_create = 0;
