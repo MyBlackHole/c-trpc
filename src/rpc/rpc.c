@@ -288,6 +288,10 @@ struct tr_rpc_executor_group {
 	 */
 	int accepting;
 	int stopping;
+	/* 线程创建与 join 均在 group->lock 外执行，控制操作必须先独占
+	 * 生命周期门禁，禁止另一控制者并发改写线程计数/回收游标。
+	 */
+	int lifecycle_busy;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
@@ -3554,13 +3558,36 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	return TR_OK;
 }
 
-int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
-{
-	if (!group)
-		return TR_OK;
-	if (tr_execution_in_worker_context())
-		return TR_ERR_STATE;
 
+/* 生命周期操作与工作队列使用不同的临界区。不能在 group->lock 下 join
+ * 或 pthread_create：工作线程也需要这把锁才能退出/等待。
+ */
+static int tr_rpc_group_claim(struct tr_rpc_executor_group *group)
+{
+	int ret = TR_OK;
+
+	pthread_mutex_lock(&group->lock);
+	if (group->lifecycle_busy)
+		ret = TR_ERR_STATE;
+	else
+		group->lifecycle_busy = 1;
+	pthread_mutex_unlock(&group->lock);
+	return ret;
+}
+
+static void tr_rpc_group_unclaim(struct tr_rpc_executor_group *group)
+{
+	pthread_mutex_lock(&group->lock);
+	group->lifecycle_busy = 0;
+	pthread_mutex_unlock(&group->lock);
+}
+
+/* 仅由已独占生命周期门禁的 start/stop/destroy 调用。
+ * join 失败必须保留 stopping、started_threads 与 join_cursor，
+ * 让下一次 stop 从尚未回收的精确线程继续。
+ */
+static int tr_rpc_group_stop_owned(struct tr_rpc_executor_group *group)
+{
 	pthread_mutex_lock(&group->lock);
 	if (group->started_threads == 0U) {
 		group->accepting = 0;
@@ -3601,15 +3628,29 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 #endif
 	pthread_mutex_unlock(&group->lock);
 
-	/* 完整回收线程后结束本工作线程轮次。组存储与 pthread_t 数组保留，
-	 * 因而 Runtime 可以在后续 start() 开启一个全新的工作线程轮次。
-	 */
+	/* 工作线程轮次已经完整退出；所有控制者仍被生命周期门禁隔离。 */
 	group->started_threads = 0U;
 	group->join_cursor = 0U;
 	pthread_mutex_lock(&group->lock);
 	group->stopping = 0;
 	pthread_mutex_unlock(&group->lock);
 	return TR_OK;
+}
+
+int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
+{
+	int ret;
+
+	if (!group)
+		return TR_OK;
+	if (tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	ret = tr_rpc_group_claim(group);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_rpc_group_stop_owned(group);
+	tr_rpc_group_unclaim(group);
+	return ret;
 }
 
 int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
@@ -3622,7 +3663,7 @@ int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
-	startable = !group->stopping &&
+	startable = !group->lifecycle_busy && !group->stopping &&
 		    group->started_threads == 0U &&
 		    group->join_cursor == 0U;
 	pthread_mutex_unlock(&group->lock);
@@ -3634,16 +3675,21 @@ int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
 	uint32_t i;
 	int cause;
 	int stop_ret;
+	int ret;
 
 	if (!group || !group->threads || group->thread_count == 0U)
 		return TR_ERR_INVALID;
 	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
+	ret = tr_rpc_group_claim(group);
+	if (ret != TR_OK)
+		return ret;
 
 	pthread_mutex_lock(&group->lock);
 	if (group->stopping || group->started_threads != 0U ||
 	    group->join_cursor != 0U) {
 		pthread_mutex_unlock(&group->lock);
+		tr_rpc_group_unclaim(group);
 		return TR_ERR_STATE;
 	}
 	pthread_mutex_unlock(&group->lock);
@@ -3652,20 +3698,21 @@ int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
 		if (pthread_create(&group->threads[i], NULL,
 				   tr_rpc_executor_group_main, group) != 0) {
 			cause = TR_ERR_SYS;
-			/* Runtime 已经拥有组，因此回滚屏障可以返回失败且
-			 * 保留所有权。若线程回收失败，生命周期错误优先。
+			/* 启动持有独占门禁，必须使用同一所有者的回滚，
+			 * 而非再调用会拒绝重入的公开 stop()。
 			 */
-			stop_ret = tr_rpc_executor_group_stop(group);
+			stop_ret = tr_rpc_group_stop_owned(group);
+			tr_rpc_group_unclaim(group);
 			return stop_ret != TR_OK ? stop_ret : cause;
 		}
 		group->started_threads++;
 	}
-	/* 不允许预启动或已停止组在没有消费者时接收任务引用。
-	 * 线程已全部建立后再发布接受门禁，避免部分启动失败遗留任务。
-	 */
+
 	pthread_mutex_lock(&group->lock);
+	/* 所有线程创建完成后才允许任务被接受。 */
 	group->accepting = 1;
 	pthread_mutex_unlock(&group->lock);
+	tr_rpc_group_unclaim(group);
 	return TR_OK;
 }
 
@@ -3676,10 +3723,20 @@ int tr_rpc_executor_group_destroy_checked(
 
 	if (!group)
 		return TR_OK;
-
-	ret = tr_rpc_executor_group_stop(group);
+	if (tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	ret = tr_rpc_group_claim(group);
 	if (ret != TR_OK)
 		return ret;
+
+	/* 直到组内线程收敛与存储释放完成之前，不允许别的控制操作
+	 * 取得 lifecycle 门禁。调用方仍须保证裸指针的外部所有权。
+	 */
+	ret = tr_rpc_group_stop_owned(group);
+	if (ret != TR_OK) {
+		tr_rpc_group_unclaim(group);
+		return ret;
+	}
 
 	free(group->threads);
 	pthread_cond_destroy(&group->cond);
