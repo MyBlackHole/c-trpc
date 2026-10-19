@@ -467,6 +467,8 @@ static void tr_dispatch_settle(struct tr_dispatch_slot *s)
 	/* 原owner已选定本地取消但业务尚未退出时，通知可能一直延后到
 	 * 清理线程。交付域按实际执行位置决定，不能沿用旧owner标记。 */
 	if (d->cleanup && !s->notified) {
+		/* Accepted FINAL is authoritative; cleanup may change delivery
+		 * ownership, but must not rewrite the result already observed. */
 		s->delivery = TR_RPC_RECORD_OWNER_STOPPED;
 		if (!s->final_accepted) {
 			s->status = TR_RPC_STATUS_CANCELLED;

@@ -2139,6 +2139,56 @@ static void test_producer_cancel_or_stop(bool stopped)
 	CHECK(producer_send_body(p, 80) == TR_ERR_CLOSED);
 	tr_rpc_v2_producer_release(p);
 }
+static void test_accepted_final_survives_stopped_cleanup(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.block_open = true;
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = producer_open(&f, &c);
+	CHECK(slot == 0);
+	gate_wait(&f.gate, false);
+
+	/* The worker remains submitted and blocked while the producer sends a
+	 * successful response. Wait for the peer to observe the actual FINAL. */
+	struct tr_rpc_v2_producer *p = c.producer;
+	CHECK(producer_send_body(p, 80) == TR_OK);
+	producer_writable(p);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_OK);
+	wait_count(&f.client.terminals[slot], 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK);
+	CHECK(!atomic_load(&c.terminals));
+
+	CHECK(tr_reactor_call(f.server.reactor, disable_peer, &f.server) ==
+	      TR_OK);
+	CHECK(tr_reactor_call(f.server.reactor, disable_driver, &f) == TR_OK);
+	CHECK(tr_reactor_stop(f.server.reactor) == TR_OK);
+	CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) == TR_AGAIN);
+	CHECK(tr_task_executor_stop(f.executor, TR_TASK_CANCEL) == TR_OK);
+	CHECK(tr_task_executor_adopt_cleanup(f.executor) == TR_OK);
+	gate_open(&f.gate);
+	uint64_t until = now_ms() + 15000;
+	int ret;
+	while ((ret = tr_task_executor_join(f.executor)) == TR_AGAIN) {
+		CHECK(now_ms() < until);
+		sched_yield();
+	}
+	CHECK(ret == TR_OK);
+	size_t delivered;
+	CHECK(tr_task_executor_dispatch(f.executor, 8, &delivered) == TR_OK);
+	CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) == TR_OK);
+	CHECK(tr_task_executor_destroy(&f.executor) == TR_OK);
+
+	CHECK(atomic_load(&c.terminals) == 1);
+	CHECK(c.status == TR_RPC_STATUS_OK);
+	CHECK(c.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	CHECK(f.server.terminals[slot] == 1);
+	CHECK(f.server.status[slot] == TR_RPC_STATUS_OK);
+	CHECK(f.server.final_accepted[slot]);
+	fixture_destroy(&f, true);
+}
 static int producer_idle_on_owner(void *arg)
 {
 	struct fixture *f = arg;
@@ -2458,6 +2508,7 @@ int main(void)
 	test_producer_failure_preserves_phase();
 	test_producer_cancel_or_stop(false);
 	test_producer_cancel_or_stop(true);
+	test_accepted_final_survives_stopped_cleanup();
 	test_producer_work_terminal_race(false);
 	test_producer_work_terminal_race(true);
 	test_producer_release(false);
