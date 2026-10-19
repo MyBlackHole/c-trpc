@@ -4860,7 +4860,7 @@ struct tr_rpc_endpoint_publish_request {
 	int recovery_required;
 };
 
-static int tr_rpc_endpoint_publish_on_owner(void *arg)
+static int tr_rpc_publish_on_owner(void *arg)
 {
 	struct tr_rpc_endpoint_publish_request *request = arg;
 	struct tr_rpc_endpoint *endpoint = request->endpoint;
@@ -5008,7 +5008,7 @@ int tr_rpc_endpoint_create_with_executor_group(
 
 	req.endpoint = endpoint;
 	req.recovery_required = 0;
-	ret = tr_rpc_owner_call(endpoint, tr_rpc_endpoint_publish_on_owner, &req);
+	ret = tr_rpc_owner_call(endpoint, tr_rpc_publish_on_owner, &req);
 	if (ret != TR_OK) {
 		/* 仅异步定时器仍可能持有 Endpoint 时转移部分构造对象。
 		 * 失败本身不能改变普通未发布资源的词法清理契约。
