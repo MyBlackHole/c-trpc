@@ -57,8 +57,10 @@ tr_rpc_call_finish(call, 0);
             "tr_rpc_v2_call_start\n"
         )
         entries = parse_nm(text)
-        self.assertEqual(entries["tr_rpc_endpoint_create"],\n                         ["build/libtrcore.a:rpc.c.o"])
-        self.assertEqual(entries["tr_rpc_executor_group_start"],\n                         ["build/libtrcore.a:runtime.c.o"])
+        self.assertEqual(entries["tr_rpc_endpoint_create"],
+                         ["build/libtrcore.a:rpc.c.o"])
+        self.assertEqual(entries["tr_rpc_executor_group_start"],
+                         ["build/libtrcore.a:runtime.c.o"])
         self.assertNotIn("tr_rpc_v2_call_start", entries)
 
 
