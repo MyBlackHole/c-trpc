@@ -771,32 +771,36 @@ static void test_create_rollback_retains_timer_owner(int shared)
  */
 static atomic_uint group_handler_calls;
 
-static int group_unary_handler(struct tr_rpc_call_handle call,
-			       const struct tr_rpc_bytes *request,
-			       struct tr_rpc_unary_response *response, void *arg)
+typedef struct tr_rpc_call_handle GCall;
+typedef struct tr_rpc_bytes GBytes;
+typedef struct tr_rpc_unary_response GResponse;
+
+static int grp_unary(GCall call, const GBytes *req, GResponse *resp, void *arg)
 {
 	static const uint8_t reply[] = "ok";
 
 	(void)call;
 	(void)arg;
-	assert(request && request->len == 4U);
-	assert(memcmp(request->data, "work", 4U) == 0);
+	assert(req && req->len == 4U);
+	assert(memcmp(req->data, "work", 4U) == 0);
 	atomic_fetch_add(&group_handler_calls, 1U);
-	response->status = TR_RPC_STATUS_OK;
-	response->message.data = reply;
-	response->message.len = 2U;
+	resp->status = TR_RPC_STATUS_OK;
+	resp->message.data = reply;
+	resp->message.len = 2U;
 	return TR_OK;
 }
 
 static void group_unary_call(struct fixture *f, unsigned index)
 {
-	const struct tr_rpc_bytes req = {
-		(const uint8_t *)"work", 4U
-	};
+	struct tr_rpc_endpoint *ep = f->rpc;
+	struct callback_arg *cb = &f->args[index];
+	struct tr_rpc_call_handle *out = &f->calls[index];
+	struct tr_rpc_bytes req;
 	int ret;
 
-	ret = tr_rpc_unary_call(f->rpc, 1U, 1U, &req,
-				on_unary_result, &f->args[index], &f->calls[index]);
+	req.data = (const uint8_t *)"work";
+	req.len = 4U;
+	ret = tr_rpc_unary_call(ep, 1U, 1U, &req, on_unary_result, cb, out);
 	assert(ret == TR_OK);
 	wait_count(f, &f->terminal, index + 1U);
 }
@@ -806,13 +810,15 @@ static void test_executor_group_stopped_admission(void)
 	struct fixture f;
 	struct tr_rpc_executor_group *group = NULL;
 	struct tr_rpc_endpoint *server = NULL;
-	struct tr_rpc_endpoint_config config = { 0 };
-	struct tr_rpc_method_desc method = { 0 };
+	struct tr_rpc_endpoint_config config;
+	struct tr_rpc_method_desc method;
 	struct tr_rpc_endpoint_stats stats;
 	uint64_t accepted_before_stop;
 	int ret;
 
 	fixture_init(&f);
+	memset(&config, 0, sizeof(config));
+	memset(&method, 0, sizeof(method));
 	atomic_store(&group_handler_calls, 0U);
 	assert(tr_rpc_executor_group_create(1U, 3U, 1U, &group) == TR_OK);
 	assert(tr_rpc_executor_group_start(group) == TR_OK);
@@ -824,8 +830,7 @@ static void test_executor_group_stopped_admission(void)
 	config.executor_threads = 1U;
 	config.executor_queue_capacity = 16U;
 	config.message_pool = &f.pool;
-	ret = tr_rpc_endpoint_create_with_executor_group(
-		f.server, &config, group, &server);
+	ret = make_rpc(f.server, &config, group, &server);
 	assert(ret == TR_OK);
 	method.service_id = 1U;
 	method.method_id = 1U;
@@ -836,8 +841,8 @@ static void test_executor_group_stopped_admission(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 64U;
 	method.max_response_bytes = 64U;
-	assert(tr_rpc_register_method(server, &method, group_unary_handler,
-				     NULL) == TR_OK);
+	ret = tr_rpc_register_method(server, &method, grp_unary, NULL);
+	assert(ret == TR_OK);
 
 	/* 停止成功后尚未重启，首任务必须被拒绝，不得遗留无法消费的节点。 */
 	group_unary_call(&f, 0U);
@@ -855,8 +860,7 @@ static void test_executor_group_stopped_admission(void)
 	assert(tr_rpc_executor_group_stop(group) == TR_OK);
 	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
 	assert(stats.executor_queued_tasks == 0U);
-	assert(stats.executor_enqueued_tasks ==
-	       stats.executor_taken_tasks);
+	assert(stats.executor_enqueued_tasks == stats.executor_taken_tasks);
 	accepted_before_stop = stats.executor_enqueued_tasks;
 	assert(accepted_before_stop != 0U);
 
