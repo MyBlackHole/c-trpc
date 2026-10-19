@@ -2188,6 +2188,7 @@ static void test_accepted_final_survives_stopped_cleanup(void)
 	CHECK(f.server.status[slot] == TR_RPC_STATUS_OK);
 	CHECK(f.server.final_accepted[slot]);
 	fixture_destroy(&f, true);
+	tr_rpc_v2_producer_release(p);
 }
 static int producer_idle_on_owner(void *arg)
 {
