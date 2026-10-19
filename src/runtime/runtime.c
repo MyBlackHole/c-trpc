@@ -53,19 +53,14 @@ struct tr_runtime {
 
 static int tr_runtime_claim(struct tr_runtime *runtime)
 {
-	int expected = 0;
-
-	if (!atomic_compare_exchange_strong_explicit(
-		    &runtime->lifecycle_busy, &expected, 1,
-		    memory_order_acquire, memory_order_relaxed))
+	if (atomic_exchange(&runtime->lifecycle_busy, 1) != 0)
 		return TR_ERR_STATE;
 	return TR_OK;
 }
 
 static void tr_runtime_unclaim(struct tr_runtime *runtime)
 {
-	atomic_store_explicit(&runtime->lifecycle_busy, 0,
-			      memory_order_release);
+	atomic_store(&runtime->lifecycle_busy, 0);
 }
 
 static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
@@ -364,10 +359,13 @@ int tr_runtime_start(struct tr_runtime *runtime)
 			result = TR_ERR_STATE;
 			goto out;
 		}
-		if (shard->rpc_executor &&
-		    tr_rpc_executor_group_can_start(shard->rpc_executor) != TR_OK) {
-			result = TR_ERR_STATE;
-			goto out;
+		if (shard->rpc_executor) {
+			int ret = tr_rpc_executor_group_can_start(shard->rpc_executor);
+
+			if (ret != TR_OK) {
+				result = TR_ERR_STATE;
+				goto out;
+			}
 		}
 	}
 
