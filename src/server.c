@@ -723,12 +723,12 @@ static int tr_server_register_methods_on_peer(struct tr_server *server,
 			continue;
 		if (m->kind == TR_SERVER_METHOD_UNARY) {
 			ret = tr_rpc_register_method(state->rpc, &m->desc,
-						     m->unary_handler,
-						     m->handler_arg);
+			                             m->unary_handler,
+			                             m->handler_arg);
 		} else {
-			ret = tr_rpc_register_stream_method(state->rpc, &m->desc,
-							    &m->stream_handlers,
-							    m->handler_arg);
+			ret = tr_rpc_register_stream_method(
+			        state->rpc, &m->desc, &m->stream_handlers,
+			        m->handler_arg);
 		}
 		if (ret != TR_OK)
 			return ret;
@@ -1215,7 +1215,7 @@ static void tr_server_detach_disconnected_peers_on_owner(
 		}
 		if (snapshot.transport.channel) {
 			ret = tr_channel_detach_for_finalize(
-		        snapshot.transport.channel);
+			        snapshot.transport.channel);
 			if (ret != TR_OK)
 				continue;
 		}
@@ -1796,7 +1796,8 @@ tr_server_create_internal(const struct tr_server_config *config,
 				effective.max_peers, effective.shard_count, i);
 
 			shard_config->peer_capacity = peer_capacity;
-			shard_config->peer_stride = sizeof(struct tr_server_peer);
+			shard_config->peer_stride =
+			        sizeof(struct tr_server_peer);
 			if (record) {
 				shard_config->memory_budget_bytes =
 				        tr_server_record_budget_share(
@@ -3058,10 +3059,12 @@ int tr_server_destroy(struct tr_server *server)
 			for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 				struct tr_runtime_peer *peer =
 					tr_server_shard_peer_at(shard, i);
-				struct tr_server_peer *state = tr_server_peer_state(peer);
+				struct tr_server_peer *state =
+				        tr_server_peer_state(peer);
 
-				if (!peer || (!peer->used && !peer->channel &&
-				              !state->rpc && !state->record_rpc))
+				if (!peer ||
+				    (!peer->used && !peer->channel &&
+				     !state->rpc && !state->record_rpc))
 					continue;
 				{
 					ret = tr_server_destroy_peer(peer);
