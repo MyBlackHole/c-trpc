@@ -331,6 +331,16 @@ static int tr_runtime_shard_stop_execution(
 	return result;
 }
 
+/* 独立预检每个分片，避免多分片启动循环里重复读取未就绪的组状态。 */
+static int tr_runtime_shard_can_start(struct tr_runtime_shard *shard)
+{
+	if (shard->started || shard->messages || !shard->reactor)
+		return TR_ERR_STATE;
+	if (shard->rpc_executor)
+		return tr_rpc_executor_group_can_start(shard->rpc_executor);
+	return TR_OK;
+}
+
 int tr_runtime_start(struct tr_runtime *runtime)
 {
 	uint32_t i;
@@ -353,20 +363,11 @@ int tr_runtime_start(struct tr_runtime *runtime)
 	 * 分片会先被重新启动，重新制造部分启动的轮次。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
-		struct tr_runtime_shard *shard = &runtime->shards[i];
+		int ret = tr_runtime_shard_can_start(&runtime->shards[i]);
 
-		if (shard->started || shard->messages || !shard->reactor) {
+		if (ret != TR_OK) {
 			result = TR_ERR_STATE;
 			goto out;
-		}
-		if (shard->rpc_executor) {
-			struct tr_rpc_executor_group *group = shard->rpc_executor;
-			int ret = tr_rpc_executor_group_can_start(group);
-
-			if (ret != TR_OK) {
-				result = TR_ERR_STATE;
-				goto out;
-			}
 		}
 	}
 
