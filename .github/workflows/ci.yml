@@ -50,7 +50,10 @@ jobs:
           python3 scripts/test_rpc_v1_inventory.py
           python3 scripts/rpc_v1_inventory.py \
             --archive build/linux/x86_64/release/libtrcore.a \
-            --output build/audit/rpc-v1-retirement.json
+            --output build/audit/rpc-v1-retirement.json \
+            --deny tr_rpc_endpoint_flush \
+                   tr_rpc_endpoint_flush_on_owner \
+                   tr_rpc_endpoint_finalize_detached_with_stats
       - name: 保留 V1 引用与静态库对象清单
         if: always()
         uses: actions/upload-artifact@v4

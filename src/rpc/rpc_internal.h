@@ -126,7 +126,6 @@ int tr_rpc_call_start(struct tr_rpc_endpoint *endpoint, uint32_t service_id,
 int tr_rpc_call_send_buffer(struct tr_rpc_call_handle call,
 			    struct tr_buffer *payload);
 
-int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint);
 int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
 			      struct tr_rpc_endpoint_stats *out);
 int tr_rpc_endpoint_get_semantic_stats(
@@ -180,8 +179,6 @@ int tr_rpc_endpoint_destroy_with_stats(
 
 /* 服务端对端两阶段拆除。 */
 int tr_rpc_endpoint_detach_for_finalize(struct tr_rpc_endpoint *endpoint);
-void tr_rpc_endpoint_finalize_detached_with_stats(
-	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats);
 
 typedef void (*tr_rpc_endpoint_detached_finalizer)(
 	const struct tr_rpc_endpoint_stats *stats, void *arg);

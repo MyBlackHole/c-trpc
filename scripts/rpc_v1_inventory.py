@@ -151,10 +151,15 @@ def main():
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--deny", nargs="*", default=[],
+                        help="Reject any retired symbol still in source or archive")
     args = parser.parse_args()
     root = args.root.resolve()
     archive = args.archive.resolve() if args.archive else None
     result = audit(root, archive)
+    remaining = sorted(set(args.deny).intersection(result["symbols"]))
+    if remaining:
+        parser.error("退役符号仍存在源码或链接对象中：" + ", ".join(remaining))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)

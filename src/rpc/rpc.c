@@ -5308,28 +5308,6 @@ void tr_rpc_endpoint_release_detached_owner(struct tr_rpc_endpoint *endpoint)
 	tr_rpc_endpoint_put(endpoint);
 }
 
-void tr_rpc_endpoint_finalize_detached_with_stats(
-	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
-{
-	if (!endpoint)
-		return;
-
-#ifndef NDEBUG
-	pthread_mutex_lock(&endpoint->ref_lock);
-	assert(endpoint->teardown_detached);
-	pthread_mutex_unlock(&endpoint->ref_lock);
-#endif
-
-	tr_rpc_endpoint_wait_owner_only(endpoint);
-
-	/* 现有工作线程与任务引用现在均已消失。
-	 * 释放所有者初始强引用前先捕获最终计数器。
-	 */
-	if (stats)
-		(void)tr_rpc_endpoint_get_stats(endpoint, stats);
-	tr_rpc_endpoint_put(endpoint);
-}
-
 int tr_rpc_endpoint_destroy_with_stats(
 	struct tr_rpc_endpoint *endpoint, struct tr_rpc_endpoint_stats *stats)
 {
@@ -6520,80 +6498,6 @@ int tr_rpc_message_release(struct tr_rpc_message *message)
 	ret = tr_rpc_release_stream_payload(stream, storage);
 	tr_rpc_endpoint_put(endpoint);
 	return ret;
-}
-
-static int tr_rpc_endpoint_flush_on_owner(void *arg)
-{
-	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
-	uint32_t i;
-	int result;
-
-	result = tr_channel_flush(endpoint->channel);
-
-	pthread_mutex_lock(&endpoint->lock);
-	for (i = 0; i < endpoint->config.max_calls; ++i) {
-		struct tr_rpc_call_slot *call = &endpoint->calls[i];
-		int ret = TR_OK;
-
-		if (call->state == TR_RPC_CALL_FREE)
-			continue;
-
-		if (call->cancelled ||
-		    (!call->is_unary && call->pending_control)) {
-			struct tr_rpc_call_handle handle =
-			        tr_rpc_make_call_handle(endpoint, i, call);
-
-			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
-			call = tr_rpc_lookup_call_handle_locked(handle);
-			if (call) {
-				if (call->executor_overloaded &&
-				    call->local_closed && call->remote_closed &&
-				    call->state != TR_RPC_CALL_TERMINAL) {
-					call->state = TR_RPC_CALL_TERMINAL;
-					(void)tr_rpc_notify_terminal_locked(
-					        endpoint, i, call,
-					        call->final_status);
-				}
-				tr_rpc_maybe_free_call_locked(endpoint, call);
-			}
-		} else if (call->is_unary &&
-		           (call->pending_tx || call->need_local_close))
-			ret = tr_rpc_try_unary_send_locked(endpoint, call);
-		else if (!call->is_unary && call->need_local_close) {
-			ret = tr_stream_close(call->stream);
-			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
-				call->need_local_close = 0;
-				tr_rpc_mark_local_closed_locked(endpoint, call);
-				if (call->admission_rejected &&
-				    call->remote_closed)
-					call->state = TR_RPC_CALL_TERMINAL;
-				else if (call->executor_overloaded &&
-					 call->remote_closed) {
-					call->state = TR_RPC_CALL_TERMINAL;
-					(void)tr_rpc_notify_terminal_locked(
-						endpoint, i, call,
-						call->final_status);
-				}
-				tr_rpc_maybe_free_call_locked(endpoint, call);
-				ret = TR_OK;
-			}
-		}
-
-		if (ret != TR_OK && ret != TR_AGAIN && result == TR_OK)
-			result = ret;
-		else if (ret == TR_AGAIN && result == TR_OK)
-			result = TR_AGAIN;
-	}
-	pthread_mutex_unlock(&endpoint->lock);
-	return result;
-}
-
-int tr_rpc_endpoint_flush(struct tr_rpc_endpoint *endpoint)
-{
-	if (!endpoint)
-		return TR_ERR_INVALID;
-	return tr_rpc_owner_call(endpoint, tr_rpc_endpoint_flush_on_owner,
-				 endpoint);
 }
 
 int tr_rpc_endpoint_get_stats(struct tr_rpc_endpoint *endpoint,
