@@ -77,7 +77,7 @@
     {
       "source": "src/rpc/rpc.c",
       "file": "src/rpc/rpc.c",
-      "line": 3533,
+      "line": 3537,
       "column": 10,
       "check": "clang-analyzer-unix.Malloc",
       "message": "Potential leak of memory pointed to by 'group_mem'"
@@ -85,7 +85,7 @@
     {
       "source": "src/rpc/rpc.c",
       "file": "src/rpc/rpc.c",
-      "line": 3536,
+      "line": 3540,
       "column": 10,
       "check": "clang-analyzer-unix.Malloc",
       "message": "Potential leak of memory pointed to by 'threads'"
