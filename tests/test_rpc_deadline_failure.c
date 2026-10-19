@@ -685,11 +685,12 @@ static void test_half_close_order(int remote_first)
 	fixture_destroy(&f);
 }
 
-static void test_create_rollback_retains_timer_owner(void)
+static void test_create_rollback_retains_timer_owner(int shared)
 {
 	struct fixture f;
 	struct tr_rpc_endpoint_config ec;
 	struct tr_rpc_endpoint *partial = NULL;
+	struct tr_rpc_executor_group *group = NULL;
 	struct tr_rpc_endpoint_stats stats;
 	int ret;
 
@@ -704,6 +705,10 @@ static void test_create_rollback_retains_timer_owner(void)
 	ec.executor_threads = 1U;
 	ec.executor_queue_capacity = 16U;
 	ec.message_pool = &f.pool;
+	if (shared) {
+		assert(tr_rpc_executor_group_create(1U, 3U, 1U, &group) == TR_OK);
+		assert(tr_rpc_executor_group_start(group) == TR_OK);
+	}
 
 	atomic_store(&capture_rpc_timer, 1);
 	atomic_store(&publish_fail_channel, (uintptr_t)f.client);
@@ -712,7 +717,8 @@ static void test_create_rollback_retains_timer_owner(void)
 
 	/* handler 发布失败，定时器撤销成功：不能交付部分对象。 */
 	atomic_store(&fail_publish_once, 1);
-	ret = tr_rpc_endpoint_create(f.client, &ec, &partial);
+	ret = tr_rpc_endpoint_create_with_executor_group(f.client, &ec,
+							group, &partial);
 	assert(ret == TR_ERR_SYS);
 	assert(partial == NULL);
 	assert(atomic_load(&failed_publishes) == 1U);
@@ -722,7 +728,8 @@ static void test_create_rollback_retains_timer_owner(void)
 	 */
 	atomic_store(&fail_publish_once, 1);
 	atomic_store(&fail_unregister_once, 1);
-	ret = tr_rpc_endpoint_create(f.client, &ec, &partial);
+	ret = tr_rpc_endpoint_create_with_executor_group(f.client, &ec,
+							group, &partial);
 	atomic_store(&capture_rpc_timer, 0);
 	assert(ret == TR_ERR_SYS);
 	assert(partial != NULL);
@@ -740,14 +747,20 @@ static void test_create_rollback_retains_timer_owner(void)
 	assert(tr_rpc_endpoint_destroy(partial) == TR_OK);
 	partial = NULL;
 	atomic_store(&publish_fail_channel, (uintptr_t)0);
-	assert(tr_rpc_endpoint_create(f.client, &ec, &f.rpc) == TR_OK);
+	assert(tr_rpc_endpoint_create_with_executor_group(
+		       f.client, &ec, group, &f.rpc) == TR_OK);
 	fixture_destroy(&f);
+	if (group) {
+		assert(tr_rpc_executor_group_stop(group) == TR_OK);
+		assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+	}
 }
 
 int main(int argc, char **argv)
 {
 	if (argc == 1 || strcmp(argv[1], "construct") == 0)
-		test_create_rollback_retains_timer_owner();
+		test_create_rollback_retains_timer_owner(0);
+		test_create_rollback_retains_timer_owner(1);
 	if (argc == 1 || strcmp(argv[1], "clock") == 0)
 		test_clock_failure_and_zero();
 	if (argc == 1 || strcmp(argv[1], "admission") == 0)
