@@ -4855,9 +4855,15 @@ struct tr_rpc_endpoint_build {
 	int executor_ready;
 };
 
+struct tr_rpc_endpoint_publish_request {
+	struct tr_rpc_endpoint *endpoint;
+	int recovery_required;
+};
+
 static int tr_rpc_endpoint_publish_on_owner(void *arg)
 {
-	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
+	struct tr_rpc_endpoint_publish_request *request = arg;
+	struct tr_rpc_endpoint *endpoint = request->endpoint;
 	int rollback_ret;
 	int ret;
 
@@ -4879,6 +4885,11 @@ static int tr_rpc_endpoint_publish_on_owner(void *arg)
 		return TR_OK;
 
 	rollback_ret = tr_rpc_deadline_destroy(endpoint);
+	/* 定时器注销失败时仍可引用 Endpoint。构造所有者必须保留
+	 * 本对象，直到显式 destroy 重试成功，不能交给 TR_AUTO 释放。
+	 */
+	if (rollback_ret != TR_OK)
+		request->recovery_required = 1;
 	return rollback_ret != TR_OK ? rollback_ret : ret;
 }
 
@@ -4919,6 +4930,7 @@ int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_rpc_endpoint_build build
 		TR_AUTO(tr_rpc_endpoint_build_cleanup) = { 0 };
 	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_endpoint_publish_request request = { 0 };
 	int ret;
 
 	if (!channel || !config || !out || !config->message_pool ||
@@ -4994,10 +5006,19 @@ int tr_rpc_endpoint_create_with_executor_group(
 	if (ret != TR_OK)
 		return ret;
 
+	request.endpoint = endpoint;
 	ret = tr_rpc_owner_call(
-		endpoint, tr_rpc_endpoint_publish_on_owner, endpoint);
-	if (ret != TR_OK)
+		endpoint, tr_rpc_endpoint_publish_on_owner, &request);
+	if (ret != TR_OK) {
+		/* 仅异步定时器仍可能持有 Endpoint 时转移部分构造对象。
+		 * 失败本身不能改变普通未发布资源的词法清理契约。
+		 */
+		if (request.recovery_required) {
+			*out = endpoint;
+			build.endpoint = NULL;
+		}
 		return ret;
+	}
 
 	/* 至此 Endpoint 存储、定时器与处理函数已构造完成，所有权先交给调用方。
 	 * 独立工作线程启动发生在所有权转移之后，因此部分启动
