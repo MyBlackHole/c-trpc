@@ -49,6 +49,57 @@ static void test_runtime_single_shard_identity(void)
 	assert(tr_runtime_destroy(runtime) == TR_OK);
 }
 
+struct runtime_peer_extension {
+	struct tr_runtime_peer common;
+	uint64_t tokens[3];
+};
+
+/* 大小与对齐由创建时冻结；不同槽位的扩展字段不可互相覆盖。 */
+static void test_runtime_extended_peer_stride(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config cfg;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	struct tr_runtime_peer *first, *second;
+	struct runtime_peer_extension *a, *b;
+	struct tr_memory_budget_stats stats;
+
+	runtime_test_config_init(&config, &cfg, 1U);
+	cfg.peer_capacity = 2U;
+	cfg.peer_stride = sizeof(struct runtime_peer_extension);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	first = tr_runtime_shard_peer_at(shard, 0U);
+	second = tr_runtime_shard_peer_at(shard, 1U);
+	assert(first != NULL && second != NULL);
+	assert((uintptr_t)second - (uintptr_t)first == cfg.peer_stride);
+	a = (struct runtime_peer_extension *)first;
+	b = (struct runtime_peer_extension *)second;
+	assert(a->tokens[0] == 0U && b->tokens[0] == 0U);
+	a->tokens[0] = UINT64_C(0xdeadbeef);
+	assert(b->tokens[0] == 0U);
+	assert(tr_runtime_shard_peer_at(shard, 2U) == NULL);
+	tr_runtime_shard_memory_stats(shard, &stats);
+	assert(stats.current_bytes >=
+	       (uint64_t)cfg.peer_capacity * cfg.peer_stride);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+
+	runtime = NULL;
+	cfg.peer_stride = sizeof(struct tr_runtime_peer) - 1U;
+	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
+	assert(runtime == NULL);
+	cfg.peer_stride = sizeof(struct tr_runtime_peer) + 1U;
+	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
+	assert(runtime == NULL);
+	/* 检查先于 calloc，极端乘积无法越界分配。 */
+	cfg.peer_capacity = UINT32_MAX;
+	cfg.peer_stride = SIZE_MAX -
+	                  SIZE_MAX % _Alignof(struct tr_runtime_peer);
+	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
+	assert(runtime == NULL);
+}
+
 static void test_runtime_multi_shard_identity(void)
 {
 	struct tr_runtime_config config;
@@ -599,6 +650,7 @@ static void test_runtime_lifecycle(void)
 int main(void)
 {
 	RUN_TEST(test_runtime_single_shard_identity);
+	RUN_TEST(test_runtime_extended_peer_stride);
 	RUN_TEST(test_runtime_multi_shard_identity);
 	RUN_TEST(test_runtime_rejects_invalid_shard_config);
 	RUN_TEST(test_runtime_reuseport_listener_group);
