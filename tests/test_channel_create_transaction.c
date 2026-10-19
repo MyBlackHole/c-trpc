@@ -25,6 +25,9 @@ static atomic_uint send_attempts;
 static atomic_uint fail_handler_at;
 static atomic_uint fail_timer_register_at;
 static atomic_uint fail_send_at;
+static atomic_int send_failure_status;
+static atomic_int fail_quiesce_once;
+static atomic_uint quiesce_attempts;
 
 int __real_tr_reactor_set_handler(
 	struct tr_conn_handle connection,
@@ -40,6 +43,15 @@ int __real_tr_reactor_send(
 	struct tr_conn_handle connection, uint16_t type,
 	uint32_t flags, uint32_t stream_id, uint64_t message_id,
 	struct tr_buffer *payload);
+int __real_tr_reactor_quiesce(struct tr_reactor *reactor);
+
+int __wrap_tr_reactor_quiesce(struct tr_reactor *reactor)
+{
+	atomic_fetch_add(&quiesce_attempts, 1U);
+	if (atomic_exchange(&fail_quiesce_once, 0))
+		return TR_ERR_SYS;
+	return __real_tr_reactor_quiesce(reactor);
+}
 
 int __wrap_tr_reactor_set_handler(
 	struct tr_conn_handle connection,
@@ -83,7 +95,7 @@ int __wrap_tr_reactor_send(
 	unsigned attempt = atomic_fetch_add(&send_attempts, 1U) + 1U;
 
 	if (attempt == atomic_load(&fail_send_at))
-		return TR_ERR_SYS;
+		return atomic_load(&send_failure_status);
 	return __real_tr_reactor_send(
 		connection, type, flags, stream_id, message_id, payload);
 }
@@ -97,6 +109,9 @@ static void reset_faults(void)
 	atomic_store(&fail_handler_at, 0U);
 	atomic_store(&fail_timer_register_at, 0U);
 	atomic_store(&fail_send_at, 0U);
+	atomic_store(&send_failure_status, TR_ERR_SYS);
+	atomic_store(&fail_quiesce_once, 0);
+	atomic_store(&quiesce_attempts, 0U);
 }
 
 static void fixture_init(struct channel_create_fixture *fixture, int split)
@@ -304,8 +319,58 @@ static void test_success_commits_timer_once(void)
 	fixture_finish(&fixture, 0, 1, 0);
 }
 
+static void test_owner_stale_hello_never_waits_on_self(void)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config config = channel_config(0);
+	struct tr_channel *channel = NULL;
+
+	fixture_init(&fixture, 0);
+	atomic_store(&send_failure_status, TR_ERR_STALE);
+	atomic_store(&fail_send_at, 1U);
+
+	/* create_publish 在 Reactor owner 中执行；此时不允许等待自己。 */
+	assert(tr_channel_create(&config, fixture.control, fixture.bulk,
+	                         NULL, NULL, NULL, NULL, &channel) ==
+	       TR_ERR_STALE);
+	assert(channel == NULL);
+	assert(atomic_load(&send_attempts) == 1U);
+	assert(atomic_load(&quiesce_attempts) == 0U);
+	assert_connection_state(fixture.control, TR_CONN_FREE);
+	fixture_finish(&fixture, 0, 0, 0);
+}
+
+static void test_external_stale_hello_requires_quiesce(void)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config config = channel_config(0);
+	struct tr_channel *channel = NULL;
+
+	fixture_init(&fixture, 0);
+	assert(tr_channel_create_deferred(
+	               &config, fixture.control, fixture.bulk,
+	               NULL, NULL, NULL, NULL, &channel) == TR_OK);
+	assert(channel != NULL);
+
+	atomic_store(&send_failure_status, TR_ERR_STALE);
+	atomic_store(&fail_send_at, 1U);
+	atomic_store(&fail_quiesce_once, 1);
+	/* 跨线程无法证明回调已经静默时，不能将 STALE 判为成功。 */
+	assert(tr_channel_start(channel) == TR_ERR_SYS);
+	assert(atomic_load(&quiesce_attempts) == 1U);
+	assert(atomic_load(&fail_quiesce_once) == 0);
+	assert(tr_channel_start(channel) == TR_ERR_SYS);
+	assert(atomic_load(&send_attempts) == 1U);
+
+	assert(tr_channel_destroy(channel) == TR_OK);
+	assert_connection_state(fixture.control, TR_CONN_ACTIVE);
+	fixture_finish(&fixture, 0, 1, 0);
+}
+
 int main(void)
 {
+	test_owner_stale_hello_never_waits_on_self();
+	test_external_stale_hello_requires_quiesce();
 	test_first_handler_failure_has_no_lifecycle_publication();
 	test_second_handler_failure_rolls_back_in_owner_turn();
 	test_handshake_failure_rolls_back_before_timer_publish();
