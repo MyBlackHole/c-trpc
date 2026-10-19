@@ -55,6 +55,11 @@ static atomic_int fail_retry_once;
 static atomic_uint retry_attempts;
 static atomic_uint retry_failures;
 static atomic_uint retry_successes;
+/* 仅测试二进制：在回调持有自身强引用、尚未提交到 Reactor 时冻结工作线程。 */
+static atomic_int hold_retry_success_once;
+static pthread_mutex_t retry_gate_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t retry_gate_cond = PTHREAD_COND_INITIALIZER;
+static int retry_gate_entered, retry_gate_open;
 
 int __real_tr_reactor_complete(struct tr_reactor *, complete_cb, void *);
 
@@ -72,10 +77,42 @@ int __wrap_tr_reactor_complete(struct tr_reactor *r, complete_cb fn, void *arg)
 		return TR_ERR_SYS;
 	}
 
+	if (atomic_exchange(&hold_retry_success_once, 0)) {
+		pthread_mutex_lock(&retry_gate_lock);
+		retry_gate_entered = 1;
+		pthread_cond_broadcast(&retry_gate_cond);
+		while (!retry_gate_open)
+			pthread_cond_wait(&retry_gate_cond, &retry_gate_lock);
+		pthread_mutex_unlock(&retry_gate_lock);
+	}
 	ret = __real_tr_reactor_complete(r, fn, arg);
 	if (ret == TR_OK)
 		atomic_fetch_add(&retry_successes, 1U);
 	return ret;
+}
+
+static void wait_retry_gate(void)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&retry_gate_lock);
+	while (!retry_gate_entered && ret == 0)
+		ret = pthread_cond_timedwait(&retry_gate_cond,
+					     &retry_gate_lock, &deadline);
+	assert(retry_gate_entered);
+	pthread_mutex_unlock(&retry_gate_lock);
+}
+
+static void release_retry_gate(void)
+{
+	pthread_mutex_lock(&retry_gate_lock);
+	assert(retry_gate_entered && !retry_gate_open);
+	retry_gate_open = 1;
+	pthread_cond_broadcast(&retry_gate_cond);
+	pthread_mutex_unlock(&retry_gate_lock);
 }
 
 static void pause_1ms(void)
@@ -424,12 +461,33 @@ int main(void)
 	 */
 	atomic_store(&retry_target, (uintptr_t)client_rpc);
 	atomic_store(&fail_retry_once, 1);
+	atomic_store(&hold_retry_success_once, 1);
 
 	/* 工作线程 take() 必须重新调度两个待处理的 Call 本地终止槽位。 */
 	pthread_mutex_lock(&ctx.lock);
 	ctx.release_first_callback = 1;
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
+	wait_retry_gate();
+	/* 重试调度暂时停留在工作线程；Reactor 与统计查询仍可推进。
+	 * 此时完成项强引用仍属于尚未提交的调用者，而不是 Reactor。
+	 */
+	assert(atomic_load(&retry_failures) == 1U);
+	assert(atomic_load(&retry_successes) == 0U);
+	assert(tr_reactor_quiesce(reactor) == TR_OK);
+	/* owner 线程也不能在重试完成项尚未交接时销毁 Endpoint。 */
+	assert(tr_reactor_call(reactor, reject_destroy, client_rpc) ==
+	       TR_ERR_STATE);
+	{
+		struct tr_rpc_endpoint_stats stats;
+
+		assert(tr_rpc_endpoint_get_stats(client_rpc, &stats) == TR_OK);
+		assert(stats.executor_hard_full_events >= 2U);
+	}
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.delivered < CALL_COUNT);
+	pthread_mutex_unlock(&ctx.lock);
+	release_retry_gate();
 	wait_deliveries(&ctx, CALL_COUNT);
 	assert(atomic_load(&retry_failures) == 1U);
 	assert(atomic_load(&retry_attempts) >= 2U);
