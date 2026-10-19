@@ -322,17 +322,20 @@ static void test_success_commits_timer_once(void)
 static void test_owner_stale_hello_never_waits_on_self(void)
 {
 	struct channel_create_fixture fixture;
-	struct tr_channel_config config = channel_config(0);
+	struct tr_channel_config cfg = channel_config(0);
 	struct tr_channel *channel = NULL;
+	struct tr_channel **p = &channel;
+	struct tr_conn_handle c;
+	int ret;
 
 	fixture_init(&fixture, 0);
+	c = fixture.control;
 	atomic_store(&send_failure_status, TR_ERR_STALE);
 	atomic_store(&fail_send_at, 1U);
 
 	/* create_publish 在 Reactor owner 中执行；此时不允许等待自己。 */
-	assert(tr_channel_create(
-		       &config, fixture.control, fixture.bulk,
-		       NULL, NULL, NULL, NULL, &channel) == TR_ERR_STALE);
+	ret = tr_channel_create(&cfg, c, c, NULL, NULL, NULL, NULL, p);
+	assert(ret == TR_ERR_STALE);
 	assert(channel == NULL);
 	assert(atomic_load(&send_attempts) == 1U);
 	assert(atomic_load(&quiesce_attempts) == 0U);
@@ -343,13 +346,16 @@ static void test_owner_stale_hello_never_waits_on_self(void)
 static void test_external_stale_hello_requires_quiesce(void)
 {
 	struct channel_create_fixture fixture;
-	struct tr_channel_config config = channel_config(0);
+	struct tr_channel_config cfg = channel_config(0);
 	struct tr_channel *channel = NULL;
+	struct tr_channel **p = &channel;
+	struct tr_conn_handle c;
+	int ret;
 
 	fixture_init(&fixture, 0);
-	assert(tr_channel_create_deferred(
-		       &config, fixture.control, fixture.bulk,
-		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
+	c = fixture.control;
+	ret = tr_channel_create_deferred(&cfg, c, c, NULL, NULL, NULL, NULL, p);
+	assert(ret == TR_OK);
 	assert(channel != NULL);
 
 	atomic_store(&send_failure_status, TR_ERR_STALE);
