@@ -360,8 +360,9 @@ int tr_runtime_start(struct tr_runtime *runtime)
 			goto out;
 		}
 		if (shard->rpc_executor) {
-			int ret = tr_rpc_executor_group_can_start(shard->rpc_executor);
+			int ret;
 
+			ret = tr_rpc_executor_group_can_start(shard->rpc_executor);
 			if (ret != TR_OK) {
 				result = TR_ERR_STATE;
 				goto out;
