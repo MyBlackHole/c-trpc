@@ -73,17 +73,16 @@ int __real_tr_channel_set_handler(struct tr_channel *channel,
                                   tr_stream_event_cb stream_cb,
                                   tr_channel_event_cb channel_cb, void *arg);
 
-int __wrap_tr_channel_set_handler(struct tr_channel *channel,
-                                  tr_stream_data_cb data_cb,
-                                  tr_stream_event_cb stream_cb,
-                                  tr_channel_event_cb channel_cb, void *arg)
+int __wrap_tr_channel_set_handler(struct tr_channel *ch,
+                                  tr_stream_data_cb data,
+                                  tr_stream_event_cb stream,
+                                  tr_channel_event_cb event, void *arg)
 {
-	int ret = __real_tr_channel_set_handler(
-		channel, data_cb, stream_cb, channel_cb, arg);
+	int ret = __real_tr_channel_set_handler(ch, data, stream, event, arg);
 
 	if (ret == TR_OK &&
-	    (uintptr_t)channel == atomic_load(&destroy_channel_target) &&
-	    !data_cb && !stream_cb && !channel_cb && !arg) {
+	    (uintptr_t)ch == atomic_load(&destroy_channel_target) &&
+	    !data && !stream && !event && !arg) {
 		struct test_context *ctx = destroy_context;
 
 		pthread_mutex_lock(&ctx->lock);
@@ -361,7 +360,7 @@ static int reject_destroy(void *arg)
 	return tr_rpc_endpoint_destroy((struct tr_rpc_endpoint *)arg);
 }
 
-static void *destroy_client_endpoint(void *arg)
+static void *destroy_client(void *arg)
 {
 	struct test_context *ctx = arg;
 	int ret = tr_rpc_endpoint_destroy(ctx->client_rpc);
@@ -394,7 +393,7 @@ int main(void)
 	int client_fd;
 	int server_fd;
 	int destroy_status;
-	pthread_t destroy_thread;
+	pthread_t thread;
 	unsigned i;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -552,8 +551,7 @@ int main(void)
 	atomic_store(&retry_target, (uintptr_t)0U);
 	destroy_context = &ctx;
 	atomic_store(&destroy_channel_target, (uintptr_t)client_channel);
-	assert(pthread_create(&destroy_thread, NULL,
-	                      destroy_client_endpoint, &ctx) == 0);
+	assert(pthread_create(&thread, NULL, destroy_client, &ctx) == 0);
 	wait_flag(&ctx, &ctx.destroy_detached);
 	pthread_mutex_lock(&ctx.lock);
 	assert(ctx.delivered == CALL_COUNT - 1U);
@@ -562,7 +560,7 @@ int main(void)
 	pthread_cond_broadcast(&ctx.cond);
 	pthread_mutex_unlock(&ctx.lock);
 	wait_deliveries(&ctx, CALL_COUNT);
-	assert(pthread_join(destroy_thread, NULL) == 0);
+	assert(pthread_join(thread, NULL) == 0);
 	assert(ctx.destroy_done && ctx.destroy_status == TR_OK);
 	atomic_store(&destroy_channel_target, (uintptr_t)0U);
 	assert(atomic_load(&retry_failures) == 1U);
