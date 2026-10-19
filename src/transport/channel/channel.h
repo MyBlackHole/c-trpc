@@ -153,7 +153,12 @@ typedef void (*tr_channel_event_cb)(struct tr_channel *channel,
  * 并确保不存在并发回调或等待者；tr_channel_destroy() 内部会关闭等待者
  * 准入、清理处理函数并等待回调静止。
  *
- * 只有返回 TR_OK 才表示 Channel 存储已释放。若仍存在排空等待者或拆除
+ * 创建成功时 *out 为完整 Channel。创建失败时通常为 NULL；若构造
+ * 回滚无法确认已经解绑 Reactor 回调，则错误返回时 *out 仍可非 NULL。
+ * 这时调用方独占该部分构造对象，只能执行 tr_channel_destroy()；
+ * 销毁失败必须保留指针重试，不得提前释放 Reactor 或 callback_arg。
+ *
+ * 只有 destroy 返回 TR_OK 才表示 Channel 存储已释放。若仍存在等待者或拆除
  * 屏障无法收敛，返回错误并保持对象存活，调用方不得继续释放所属 Runtime。
  */
 int tr_channel_create(const struct tr_channel_config *config,
