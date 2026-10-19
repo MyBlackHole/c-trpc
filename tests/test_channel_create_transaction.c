@@ -23,6 +23,9 @@ static atomic_uint timer_register_attempts;
 static atomic_uint timer_unregister_attempts;
 static atomic_uint send_attempts;
 static atomic_uint fail_handler_at;
+static atomic_uint fail_handler_also_at;
+static atomic_uint close_attempts;
+static atomic_uint fail_close_at;
 static atomic_uint fail_timer_register_at;
 static atomic_uint fail_send_at;
 static atomic_int send_failure_status;
@@ -44,6 +47,16 @@ int __real_tr_reactor_send(
 	uint32_t flags, uint32_t stream_id, uint64_t message_id,
 	struct tr_buffer *payload);
 int __real_tr_reactor_quiesce(struct tr_reactor *reactor);
+int __real_tr_reactor_close_on_owner(struct tr_conn_handle connection);
+
+int __wrap_tr_reactor_close_on_owner(struct tr_conn_handle connection)
+{
+	unsigned attempt = atomic_fetch_add(&close_attempts, 1U) + 1U;
+
+	if (attempt == atomic_load(&fail_close_at))
+		return TR_ERR_SYS;
+	return __real_tr_reactor_close_on_owner(connection);
+}
 
 int __wrap_tr_reactor_quiesce(struct tr_reactor *reactor)
 {
@@ -60,7 +73,8 @@ int __wrap_tr_reactor_set_handler(
 {
 	unsigned attempt = atomic_fetch_add(&handler_attempts, 1U) + 1U;
 
-	if (attempt == atomic_load(&fail_handler_at))
+	if (attempt == atomic_load(&fail_handler_at) ||
+	    attempt == atomic_load(&fail_handler_also_at))
 		return TR_ERR_SYS;
 	return __real_tr_reactor_set_handler(
 		connection, frame_cb, event_cb, callback_arg);
@@ -107,6 +121,9 @@ static void reset_faults(void)
 	atomic_store(&timer_unregister_attempts, 0U);
 	atomic_store(&send_attempts, 0U);
 	atomic_store(&fail_handler_at, 0U);
+	atomic_store(&fail_handler_also_at, 0U);
+	atomic_store(&close_attempts, 0U);
+	atomic_store(&fail_close_at, 0U);
 	atomic_store(&fail_timer_register_at, 0U);
 	atomic_store(&fail_send_at, 0U);
 	atomic_store(&send_failure_status, TR_ERR_SYS);
@@ -373,8 +390,108 @@ static void test_external_stale_hello_requires_quiesce(void)
 	fixture_finish(&fixture, 0, 1, 0);
 }
 
+static void test_composite_rollback_preserves_partial_owner(void)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config cfg = channel_config(0);
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle c;
+	int ret;
+
+	fixture_init(&fixture, 0);
+	c = fixture.control;
+	/* HELLO 失败触发回滚；handler 解绑及关闭均拒绝。
+	 * Reactor 仍然持有 callback_arg，构造错误必须返回部分所有者。
+	 */
+	atomic_store(&fail_send_at, 1U);
+	atomic_store(&fail_handler_at, 2U);
+	atomic_store(&fail_close_at, 1U);
+	ret = tr_channel_create(&cfg, c, c, NULL, NULL, NULL, NULL, &channel);
+	assert(ret == TR_ERR_SYS);
+	assert(channel != NULL);
+	assert(atomic_load(&handler_attempts) == 2U);
+	assert(atomic_load(&close_attempts) == 1U);
+	assert_connection_state(c, TR_CONN_ACTIVE);
+
+	/* 销毁本身也可失败：必须保留原指针供第二次解除回调。
+	 * 不能把对象在第一次失败时当作已释放。
+	 */
+	atomic_store(&fail_handler_at, 3U);
+	assert(tr_channel_destroy(channel) == TR_ERR_SYS);
+	assert_connection_state(c, TR_CONN_ACTIVE);
+	assert(tr_channel_destroy(channel) == TR_OK);
+	channel = NULL;
+	assert_connection_state(c, TR_CONN_ACTIVE);
+	fixture_finish(&fixture, 0, 1, 0);
+}
+
+static void test_split_rollback_retains_only_live_callback(void)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config cfg = channel_config(1);
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle control, bulk;
+	int ret;
+
+	fixture_init(&fixture, 1);
+	control = fixture.control;
+	bulk = fixture.bulk;
+	/* 第二个 handler 安装拒绝；控制通道回滚解绑/关闭再失败。
+	 * BULK 连接可以正常关闭，但 CONTROL 仍保存 Channel 回调。
+	 */
+	atomic_store(&fail_handler_at, 2U);
+	atomic_store(&fail_handler_also_at, 3U);
+	atomic_store(&fail_close_at, 1U);
+	ret = tr_channel_create_deferred(
+	        &cfg, control, bulk, NULL, NULL, NULL, NULL, &channel);
+	assert(ret == TR_ERR_SYS);
+	assert(channel != NULL);
+	assert(atomic_load(&handler_attempts) == 3U);
+	assert(atomic_load(&close_attempts) == 2U);
+	assert_connection_state(control, TR_CONN_ACTIVE);
+	assert_connection_state(bulk, TR_CONN_FREE);
+
+	assert(tr_channel_destroy(channel) == TR_OK);
+	channel = NULL;
+	fixture_finish(&fixture, 1, 1, 0);
+}
+
+static void test_single_confirmed_barrier_allows_cleanup(void)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config cfg = channel_config(0);
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle c;
+	int ret;
+
+	fixture_init(&fixture, 0);
+	c = fixture.control;
+	/* handler 解绑失败、关闭成功：可证明不会再有未来回调。 */
+	atomic_store(&fail_send_at, 1U);
+	atomic_store(&fail_handler_at, 2U);
+	ret = tr_channel_create(&cfg, c, c, NULL, NULL, NULL, NULL, &channel);
+	assert(ret == TR_ERR_SYS);
+	assert(channel == NULL);
+	assert_connection_state(c, TR_CONN_FREE);
+	fixture_finish(&fixture, 0, 0, 0);
+
+	fixture_init(&fixture, 0);
+	c = fixture.control;
+	/* 反过来关闭失败、handler 解绑成功同样可安全释放。 */
+	atomic_store(&fail_send_at, 1U);
+	atomic_store(&fail_close_at, 1U);
+	ret = tr_channel_create(&cfg, c, c, NULL, NULL, NULL, NULL, &channel);
+	assert(ret == TR_ERR_SYS);
+	assert(channel == NULL);
+	assert_connection_state(c, TR_CONN_ACTIVE);
+	fixture_finish(&fixture, 0, 1, 0);
+}
+
 int main(void)
 {
+	test_composite_rollback_preserves_partial_owner();
+	test_split_rollback_retains_only_live_callback();
+	test_single_confirmed_barrier_allows_cleanup();
 	test_owner_stale_hello_never_waits_on_self();
 	test_external_stale_hello_requires_quiesce();
 	test_first_handler_failure_has_no_lifecycle_publication();
