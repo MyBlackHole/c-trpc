@@ -320,11 +320,12 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",
                         "-Wl,--wrap=tr_reactor_timer_unregister", {force = true})
         elseif name == "test_channel_create_transaction" then
-            -- 注入构造阶段 publication 失败，验证同一 owner turn 内收敛。
+            -- 注入构造及握手静默屏障失败，验证所有者与外部线程差异。
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",
                         "-Wl,--wrap=tr_reactor_timer_register",
                         "-Wl,--wrap=tr_reactor_timer_unregister",
-                        "-Wl,--wrap=tr_reactor_send", {force = true})
+                        "-Wl,--wrap=tr_reactor_send",
+                        "-Wl,--wrap=tr_reactor_quiesce", {force = true})
         elseif name == "test_channel_hello_ownership" then
             -- 精确观察 HELLO/ACK 缓冲释放，仅此测试注入发送拒绝。
             add_ldflags("-Wl,--wrap=tr_reactor_send",
