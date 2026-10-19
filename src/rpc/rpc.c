@@ -3662,9 +3662,15 @@ int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
-	startable = !group->lifecycle_busy && !group->stopping;
-	startable &= group->started_threads == 0U;
-	startable &= group->join_cursor == 0U;
+	/* 线程数量和 join 游标在独占控制期间可于组锁外更新。
+	 * 观察者必须先确认门禁空闲，避免在 busy 时产生无锁并发读。
+	 */
+	startable = !group->lifecycle_busy;
+	if (startable) {
+		startable = !group->stopping;
+		startable &= group->started_threads == 0U;
+		startable &= group->join_cursor == 0U;
+	}
 	pthread_mutex_unlock(&group->lock);
 	return startable ? TR_OK : TR_ERR_STATE;
 }
