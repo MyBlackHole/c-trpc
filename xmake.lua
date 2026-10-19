@@ -201,9 +201,12 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_reactor_timer_deadline" then
             add_ldflags("-Wl,--wrap=clock_gettime", "-Wl,--wrap=epoll_wait", {force = true})
         elseif name == "test_rpc_deadline_failure" then
+            -- 定向故障：构造期 callback 发布与 timer 注销复合失败。
             add_ldflags("-Wl,--wrap=clock_gettime",
                         "-Wl,--wrap=tr_reactor_timer_register",
                         "-Wl,--wrap=tr_reactor_timer_arm",
+                        "-Wl,--wrap=tr_reactor_timer_unregister",
+                        "-Wl,--wrap=tr_channel_set_handler",
                         "-Wl,--wrap=tr_rpc_wire_decode_ex", {force = true})
         elseif name == "test_connector_deadline" then
             add_ldflags("-Wl,--wrap=tr_tcp_connect_ipv4",
