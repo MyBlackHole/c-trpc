@@ -3055,12 +3055,11 @@ static int tr_channel_create_connection_active(
 	return state == TR_CONN_ACTIVE ? TR_OK : TR_ERR_STALE;
 }
 
-static int tr_channel_create_rollback_on_owner(
-	struct tr_channel_create_publish_request *request)
+static int tr_channel_rollback(struct tr_channel_create_publish_request *req)
 {
-	struct tr_channel *channel = request->channel;
-	int control_handler_installed = request->control_handler_installed;
-	int bulk_handler_installed = request->bulk_handler_installed;
+	struct tr_channel *channel = req->channel;
+	int control_handler_installed = req->control_handler_installed;
+	int bulk_handler_installed = req->bulk_handler_installed;
 	struct tr_conn_handle control = channel->control_connection;
 	struct tr_conn_handle bulk = channel->bulk_connection;
 	int split = !tr_conn_equal(control, bulk);
@@ -3106,7 +3105,7 @@ static int tr_channel_create_rollback_on_owner(
 		}
 	}
 
-	request->needs_recovery = !control_safe || !bulk_safe;
+	req->needs_recovery = !control_safe || !bulk_safe;
 	return final;
 }
 
@@ -3176,7 +3175,7 @@ static int tr_channel_create_publish_on_owner(void *arg)
 rollback:
 	request->control_handler_installed = control_handler_installed;
 	request->bulk_handler_installed = bulk_handler_installed;
-	rollback_ret = tr_channel_create_rollback_on_owner(request);
+	rollback_ret = tr_channel_rollback(request);
 	if (request->needs_recovery && rollback_ret == TR_OK)
 		return TR_ERR_STATE;
 	return rollback_ret != TR_OK ? rollback_ret : ret;
