@@ -44,9 +44,19 @@ struct lifecycle_gate {
 	int open;
 };
 
-#define GATE_INIT { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0 }
-static struct lifecycle_gate create_gate = GATE_INIT;
-static struct lifecycle_gate stop_gate = GATE_INIT;
+static struct lifecycle_gate create_gate, stop_gate;
+
+static void lifecycle_gate_init(struct lifecycle_gate *gate)
+{
+	assert(pthread_mutex_init(&gate->lock, NULL) == 0);
+	assert(pthread_cond_init(&gate->cond, NULL) == 0);
+}
+
+static void lifecycle_gate_destroy(struct lifecycle_gate *gate)
+{
+	assert(pthread_cond_destroy(&gate->cond) == 0);
+	assert(pthread_mutex_destroy(&gate->lock) == 0);
+}
 static _Thread_local int hold_group_create;
 static _Thread_local int hold_group_join;
 static _Thread_local int inject_group_join_failure;
@@ -506,6 +516,8 @@ static void test_group_lifecycle_owners_are_serialized(void)
 	struct group_operation op;
 	pthread_t controller;
 
+	lifecycle_gate_init(&create_gate);
+	lifecycle_gate_init(&stop_gate);
 	assert(tr_rpc_executor_group_create(1U, 2U, 2U, &group) == TR_OK);
 	assert(tr_rpc_executor_group_can_start(group) == TR_OK);
 	op.group = group;
@@ -533,6 +545,8 @@ static void test_group_lifecycle_owners_are_serialized(void)
 	assert(tr_rpc_executor_group_start(group) == TR_OK);
 	assert(tr_rpc_executor_group_stop(group) == TR_OK);
 	assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+	lifecycle_gate_destroy(&stop_gate);
+	lifecycle_gate_destroy(&create_gate);
 }
 
 static void test_group_join_failure_keeps_retry_owner(void)
