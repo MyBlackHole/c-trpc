@@ -28,6 +28,12 @@ static _Atomic int inject_response_clock;
 static _Atomic int response_clock_failure;
 static _Atomic uint64_t response_now;
 static _Atomic unsigned response_clock_reads;
+/* 以下注入只作用于 Endpoint 构造发布和精确定时器撤销。 */
+static _Atomic(uintptr_t) publish_fail_channel;
+static _Atomic int fail_publish_once;
+static _Atomic int fail_unregister_once;
+static _Atomic unsigned failed_publishes;
+static _Atomic unsigned failed_unregisters;
 static _Thread_local int next_clock_failure;
 static _Thread_local uint64_t next_clock_now;
 
@@ -57,6 +63,33 @@ int __real_tr_reactor_timer_register(struct tr_reactor *reactor,
 	struct tr_reactor_timer_handle *out);
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
 	uint64_t deadline_ns);
+int __real_tr_reactor_timer_unregister(struct tr_reactor_timer_handle timer);
+int __real_tr_channel_set_handler(
+	struct tr_channel *, tr_stream_data_cb, tr_stream_event_cb,
+	tr_channel_event_cb, void *);
+
+int __wrap_tr_channel_set_handler(
+	struct tr_channel *channel, tr_stream_data_cb data,
+	tr_stream_event_cb stream, tr_channel_event_cb event, void *arg)
+{
+	if (data && (uintptr_t)channel == atomic_load(&publish_fail_channel) &&
+	    atomic_exchange(&fail_publish_once, 0)) {
+		atomic_fetch_add(&failed_publishes, 1U);
+		return TR_ERR_SYS;
+	}
+	return __real_tr_channel_set_handler(
+		channel, data, stream, event, arg);
+}
+
+int __wrap_tr_reactor_timer_unregister(struct tr_reactor_timer_handle timer)
+{
+	if (timer.slot == atomic_load(&rpc_timer_slot) &&
+	    atomic_exchange(&fail_unregister_once, 0)) {
+		atomic_fetch_add(&failed_unregisters, 1U);
+		return TR_ERR_SYS;
+	}
+	return __real_tr_reactor_timer_unregister(timer);
+}
 
 int __wrap_clock_gettime(clockid_t clock_id, struct timespec *ts)
 {
@@ -652,8 +685,68 @@ static void test_half_close_order(int remote_first)
 	fixture_destroy(&f);
 }
 
+static void test_create_rollback_retains_timer_owner(void)
+{
+	struct fixture f;
+	struct tr_rpc_endpoint_config ec = { 0 };
+	struct tr_rpc_endpoint *partial = NULL;
+	struct tr_rpc_endpoint_stats stats;
+	int ret;
+
+	fixture_init(&f);
+	/* 消除默认 Endpoint 的 handler/timer 发布，保留同一可用 Channel。 */
+	assert(tr_rpc_endpoint_destroy(f.rpc) == TR_OK);
+	f.rpc = NULL;
+	ec.role = TR_RPC_CLIENT;
+	ec.max_methods = 2U;
+	ec.max_calls = 3U;
+	ec.executor_threads = 1U;
+	ec.executor_queue_capacity = 16U;
+	ec.message_pool = &f.pool;
+
+	atomic_store(&capture_rpc_timer, 1);
+	atomic_store(&publish_fail_channel, (uintptr_t)f.client);
+	atomic_store(&failed_publishes, 0U);
+	atomic_store(&failed_unregisters, 0U);
+
+	/* handler 发布失败，定时器撤销成功：不能交付部分对象。 */
+	atomic_store(&fail_publish_once, 1);
+	ret = tr_rpc_endpoint_create(f.client, &ec, &partial);
+	assert(ret == TR_ERR_SYS);
+	assert(partial == NULL);
+	assert(atomic_load(&failed_publishes) == 1U);
+
+	/* handler 发布失败，timer_unregister 也失败：
+	 * 注册表仍可能触达 Endpoint，词法自动释放会成为 UAF。
+	 */
+	atomic_store(&fail_publish_once, 1);
+	atomic_store(&fail_unregister_once, 1);
+	ret = tr_rpc_endpoint_create(f.client, &ec, &partial);
+	atomic_store(&capture_rpc_timer, 0);
+	assert(ret == TR_ERR_SYS);
+	assert(partial != NULL);
+	assert(atomic_load(&failed_publishes) == 2U);
+	assert(atomic_load(&failed_unregisters) == 1U);
+	assert(tr_rpc_endpoint_get_stats(partial, &stats) == TR_OK);
+
+	/* 第一次显式销毁的 timer 屏障再次失败，调用方仍拥有原指针；
+	 * 第二次撤销成功后才允许最终释放，并能在同一 Channel 重建。
+	 */
+	atomic_store(&fail_unregister_once, 1);
+	assert(tr_rpc_endpoint_destroy(partial) == TR_ERR_SYS);
+	assert(atomic_load(&failed_unregisters) == 2U);
+	assert(tr_rpc_endpoint_get_stats(partial, &stats) == TR_OK);
+	assert(tr_rpc_endpoint_destroy(partial) == TR_OK);
+	partial = NULL;
+	atomic_store(&publish_fail_channel, (uintptr_t)0);
+	assert(tr_rpc_endpoint_create(f.client, &ec, &f.rpc) == TR_OK);
+	fixture_destroy(&f);
+}
+
 int main(int argc, char **argv)
 {
+	if (argc == 1 || strcmp(argv[1], "construct") == 0)
+		test_create_rollback_retains_timer_owner();
 	if (argc == 1 || strcmp(argv[1], "clock") == 0)
 		test_clock_failure_and_zero();
 	if (argc == 1 || strcmp(argv[1], "admission") == 0)
