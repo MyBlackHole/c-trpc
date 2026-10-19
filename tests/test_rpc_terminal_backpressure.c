@@ -100,8 +100,8 @@ static void wait_retry_gate(void)
 	deadline.tv_sec += 15;
 	pthread_mutex_lock(&retry_gate_lock);
 	while (!retry_gate_entered && ret == 0)
-		ret = pthread_cond_timedwait(&retry_gate_cond,
-					     &retry_gate_lock, &deadline);
+		ret = pthread_cond_timedwait(&retry_gate_cond, &retry_gate_lock,
+					     &deadline);
 	assert(retry_gate_entered);
 	pthread_mutex_unlock(&retry_gate_lock);
 }
