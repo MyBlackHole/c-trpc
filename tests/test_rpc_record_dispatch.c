@@ -531,7 +531,8 @@ static void server_terminal(struct tr_rpc_dispatch_handle handle,
 		CHECK(tr_rpc_record_dispatch_retire_on_owner(handle) ==
 		      TR_ERR_STATE);
 	} else {
-		CHECK(status == TR_RPC_STATUS_CANCELLED);
+		/* 清理域不可改写已经接受的 FINAL，未接受的终局才转为取消。 */
+		CHECK(final_accepted || status == TR_RPC_STATUS_CANCELLED);
 		CHECK(tr_rpc_record_dispatch_reap_stopped(&same) ==
 		      TR_ERR_STATE);
 	}
@@ -1323,7 +1324,8 @@ static void test_cancel_and_stop(unsigned mode)
 		return;
 	}
 	CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) == TR_ERR_STATE);
-	CHECK(tr_reactor_call(f.server.reactor, disable_peer, &f.server) == TR_OK);
+	CHECK(tr_reactor_call(f.server.reactor, disable_peer, &f.server) ==
+	      TR_OK);
 	CHECK(tr_reactor_call(f.server.reactor, disable_driver, &f) == TR_OK);
 	CHECK(tr_reactor_stop(f.server.reactor) == TR_OK);
 	CHECK(tr_rpc_record_dispatch_reap_stopped(&f.dispatch) == TR_AGAIN);
@@ -2143,20 +2145,29 @@ static void test_accepted_final_survives_stopped_cleanup(void)
 	struct fixture f;
 	struct producer_case c;
 	producer_case_init(&c);
-	c.block_open = true;
+	c.block_message = true;
 	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
 	unsigned slot = producer_open(&f, &c);
 	CHECK(slot == 0);
-	gate_wait(&f.gate, false);
-
-	/* Wait until the peer observes FINAL while the worker remains blocked. */
 	struct tr_rpc_v2_producer *p = c.producer;
+	/* OPEN 的 work/done 完成交接后，producer 才能被 owner 激活。 */
+	producer_writable(p);
+	send_record(&f, slot, 3, TR_RPC_RECORD_MESSAGE, 80);
+	send_record(&f, slot, 3, TR_RPC_RECORD_HALF_CLOSE, 0);
+	/* 阻塞后续 MESSAGE worker，不阻塞最初取得 producer 的 OPEN。 */
+	gate_wait(&f.gate, false);
+	CHECK(!atomic_load(&c.seen[TR_RPC_V2_REQUEST_MESSAGE]));
+
 	CHECK(producer_send_body(p, 80) == TR_OK);
 	producer_writable(p);
-	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) == TR_OK);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
+	      TR_OK);
+	/* 真实对端先观察到 FINAL，但正在执行的工作尚未退出。 */
 	wait_count(&f.client.terminals[slot], 1);
 	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.messages[slot]) == 1);
 	CHECK(!atomic_load(&c.terminals));
+	CHECK(!atomic_load(&c.seen[TR_RPC_V2_REQUEST_MESSAGE]));
 
 	CHECK(tr_reactor_call(f.server.reactor, disable_peer, &f.server) ==
 	      TR_OK);
@@ -2179,6 +2190,7 @@ static void test_accepted_final_survives_stopped_cleanup(void)
 	CHECK(tr_task_executor_destroy(&f.executor) == TR_OK);
 
 	CHECK(atomic_load(&c.terminals) == 1);
+	CHECK(atomic_load(&c.seen[TR_RPC_V2_REQUEST_MESSAGE]) == 1);
 	CHECK(c.status == TR_RPC_STATUS_OK);
 	CHECK(c.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
 	CHECK(f.server.terminals[slot] == 1);
