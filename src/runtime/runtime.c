@@ -44,8 +44,29 @@ struct tr_runtime_shard {
 struct tr_runtime {
 	uint32_t shard_count;
 	struct tr_runtime_shard *shards;
+	/* 同一 Runtime 的多分片控制操作必须独占整个启动/停止轮次。
+	 * 仅保护控制者，不替代释放前由外部保证的裸指针存活期。
+	 */
+	_Atomic int lifecycle_busy;
 	int started;
 };
+
+static int tr_runtime_claim(struct tr_runtime *runtime)
+{
+	int expected = 0;
+
+	if (!atomic_compare_exchange_strong_explicit(
+		    &runtime->lifecycle_busy, &expected, 1,
+		    memory_order_acquire, memory_order_relaxed))
+		return TR_ERR_STATE;
+	return TR_OK;
+}
+
+static void tr_runtime_unclaim(struct tr_runtime *runtime)
+{
+	atomic_store_explicit(&runtime->lifecycle_busy, 0,
+			      memory_order_release);
+}
 
 static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 {
@@ -171,6 +192,7 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	runtime = (struct tr_runtime *)calloc(1, sizeof(*runtime));
 	if (!runtime)
 		return TR_ERR_NOMEM;
+	atomic_init(&runtime->lifecycle_busy, 0);
 
 	runtime->shards = (struct tr_runtime_shard *)calloc(
 		config->shard_count, sizeof(*runtime->shards));
@@ -317,11 +339,18 @@ static int tr_runtime_shard_stop_execution(
 int tr_runtime_start(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int result = TR_OK;
 
 	if (!runtime)
 		return TR_ERR_INVALID;
-	if (runtime->started)
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
 		return TR_ERR_STATE;
+	if (tr_runtime_claim(runtime) != TR_OK)
+		return TR_ERR_STATE;
+	if (runtime->started) {
+		result = TR_ERR_STATE;
+		goto out;
+	}
 
 	/*
 	 * 新轮次必须在任何 pthread_create 之前验证所有分片都已从上一次
@@ -331,11 +360,15 @@ int tr_runtime_start(struct tr_runtime *runtime)
 	for (i = 0; i < runtime->shard_count; ++i) {
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 
-		if (shard->started || shard->messages || !shard->reactor)
-			return TR_ERR_STATE;
+		if (shard->started || shard->messages || !shard->reactor) {
+			result = TR_ERR_STATE;
+			goto out;
+		}
 		if (shard->rpc_executor &&
-		    tr_rpc_executor_group_can_start(shard->rpc_executor) != TR_OK)
-			return TR_ERR_STATE;
+		    tr_rpc_executor_group_can_start(shard->rpc_executor) != TR_OK) {
+			result = TR_ERR_STATE;
+			goto out;
+		}
 	}
 
 	for (i = 0; i < runtime->shard_count; ++i) {
@@ -383,28 +416,24 @@ int tr_runtime_start(struct tr_runtime *runtime)
 			if (stop_ret != TR_OK && rollback_ret == TR_OK)
 				rollback_ret = stop_ret;
 		}
-		return rollback_ret != TR_OK ? rollback_ret : cause;
+		result = rollback_ret != TR_OK ? rollback_ret : cause;
+		goto out;
 	}
 	}
 
 	runtime->started = 1;
-	return TR_OK;
+out:
+	tr_runtime_unclaim(runtime);
+	return result;
 }
 
-int tr_runtime_stop(struct tr_runtime *runtime)
+/* 私有停止操作：由已独占 Runtime 生命周期的控制者调用。
+ * 公开 stop 与 destroy 均复用它，避免 destroy 对自身重入 claim。
+ */
+static int tr_runtime_stop_owned(struct tr_runtime *runtime)
 {
 	uint32_t i;
 	int result = TR_OK;
-
-	if (!runtime)
-		return TR_ERR_INVALID;
-
-	/*
-	 * 即使总状态 runtime->started 为 false，也可能存在启动失败
-	 * 留下的部分执行器轮次，因此不能只根据反应器 started 早退。
-	 */
-	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
-		return TR_ERR_STATE;
 
 	i = runtime->shard_count;
 	while (i != 0U) {
@@ -421,6 +450,21 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 	return result;
 }
 
+int tr_runtime_stop(struct tr_runtime *runtime)
+{
+	int ret;
+
+	if (!runtime)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	if (tr_runtime_claim(runtime) != TR_OK)
+		return TR_ERR_STATE;
+	ret = tr_runtime_stop_owned(runtime);
+	tr_runtime_unclaim(runtime);
+	return ret;
+}
+
 int tr_runtime_destroy(struct tr_runtime *runtime)
 {
 	uint32_t i;
@@ -429,14 +473,17 @@ int tr_runtime_destroy(struct tr_runtime *runtime)
 
 	if (!runtime)
 		return TR_OK;
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	if (tr_runtime_claim(runtime) != TR_OK)
+		return TR_ERR_STATE;
 
-	ret = tr_runtime_stop(runtime);
+	ret = tr_runtime_stop_owned(runtime);
 	if (ret != TR_OK)
-		return ret;
+		goto failed;
 
-	/* 所有分片已停止，资源域相互独立。某个输出仍持有预算，或某个
-	 * 分片解绑失败，不应使后续分片的已静默资源一直被保留。
-	 * 外壳必须整体存活供重试；严重错误不能被较早的 AGAIN 掩盖。
+	/* 所有分片已停止。遇到未收敛资源，保留 Runtime 外壳以便重试。
+	 * 不让先前的 AGAIN 隐藏后续更严重的生命周期错误。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
 		ret = tr_runtime_shard_release(&runtime->shards[i]);
@@ -444,14 +491,20 @@ int tr_runtime_destroy(struct tr_runtime *runtime)
 		                     (result == TR_AGAIN && ret != TR_AGAIN)))
 			result = ret;
 	}
-	if (result != TR_OK)
-		return result;
+	if (result != TR_OK) {
+		ret = result;
+		goto failed;
+	}
 	free(runtime->shards);
 	runtime->shards = NULL;
+	/* 最后才释放 Runtime；绝不在 free 前向另一控制线程让出门禁。 */
 	free(runtime);
 	return TR_OK;
-}
 
+failed:
+	tr_runtime_unclaim(runtime);
+	return ret;
+}
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime)
 {
