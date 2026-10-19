@@ -188,8 +188,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_reactor_abort_on_owner",
                         "-Wl,--wrap=tr_pipeline_ingress_attach_data_route_on_owner", {force = true})
         elseif name == "test_rpc_terminal_backpressure" then
-            -- 仅本测试拦截 RPC retry 的完成项提交，注入一次失败。
-            add_ldflags("-Wl,--wrap=tr_reactor_complete", {force = true})
+            -- 重试完成项与客户端 Endpoint 最后一份所有者引用销毁屏障。
+            add_ldflags("-Wl,--wrap=tr_reactor_complete",
+                        "-Wl,--wrap=tr_channel_set_handler", {force = true})
         elseif name == "test_rpc_stream_backpressure" then
             -- 仅测试目标观察 handler 静默屏障，验证留存消息延迟销毁。
             add_ldflags("-Wl,--wrap=tr_channel_set_handler", {force = true})
