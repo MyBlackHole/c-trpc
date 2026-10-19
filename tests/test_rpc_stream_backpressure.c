@@ -7,6 +7,7 @@
 #include "../src/rpc/rpc_internal.h"
 
 #include <assert.h>
+#include <stdatomic.h>
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -22,7 +23,8 @@
 #define CALL_B 1U
 #define FILLER_BASE 2U
 #define RECOVERY_CALL (FILLER_BASE + FILLER_COUNT)
-#define CALL_COUNT (RECOVERY_CALL + 1U)
+#define PIN_CALL (RECOVERY_CALL + 1U)
+#define CALL_COUNT (PIN_CALL + 1U)
 
 struct backpressure_ctx {
 	pthread_mutex_t lock;
@@ -34,6 +36,8 @@ struct backpressure_ctx {
 	unsigned b_messages;
 	unsigned filler_messages;
 	unsigned recovery_messages;
+	int pinned_ready;
+	struct tr_rpc_message pinned_message;
 	unsigned server_closed;
 	unsigned server_resource_closed;
 	int last_server_close_status;
@@ -50,6 +54,69 @@ struct client_arg {
 	struct backpressure_ctx *ctx;
 	unsigned index;
 };
+
+/* 仅测试目标拦截 Endpoint 的 Channel handler 解绑确认屏障。 */
+static _Atomic(uintptr_t) detach_target;
+static pthread_mutex_t detach_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t detach_cond = PTHREAD_COND_INITIALIZER;
+static int detach_seen, destroy_complete;
+
+int __real_tr_channel_set_handler(
+	struct tr_channel *, tr_stream_data_cb, tr_stream_event_cb,
+	tr_channel_event_cb, void *);
+
+int __wrap_tr_channel_set_handler(
+	struct tr_channel *channel, tr_stream_data_cb data_cb,
+	tr_stream_event_cb stream_cb, tr_channel_event_cb channel_cb,
+	void *arg)
+{
+	int ret = __real_tr_channel_set_handler(
+		channel, data_cb, stream_cb, channel_cb, arg);
+
+	if (ret == TR_OK && !data_cb && !stream_cb && !channel_cb && !arg &&
+	    (uintptr_t)channel == atomic_load(&detach_target)) {
+		pthread_mutex_lock(&detach_lock);
+		detach_seen = 1;
+		pthread_cond_broadcast(&detach_cond);
+		pthread_mutex_unlock(&detach_lock);
+	}
+	return ret;
+}
+
+struct endpoint_destroy_probe {
+	struct tr_rpc_endpoint *endpoint;
+	int result;
+};
+
+static void *destroy_endpoint_thread(void *arg)
+{
+	struct endpoint_destroy_probe *probe = arg;
+
+	probe->result = tr_rpc_endpoint_destroy(probe->endpoint);
+	pthread_mutex_lock(&detach_lock);
+	destroy_complete = 1;
+	pthread_cond_broadcast(&detach_cond);
+	pthread_mutex_unlock(&detach_lock);
+	return NULL;
+}
+
+static void wait_detach_confirmed(void)
+{
+	struct timespec due;
+	int waited = 0;
+	pthread_mutex_t *lock = &detach_lock;
+	pthread_cond_t *cond = &detach_cond;
+
+	assert(clock_gettime(CLOCK_REALTIME, &due) == 0);
+	due.tv_sec += 15;
+	pthread_mutex_lock(lock);
+	while (!detach_seen && waited == 0)
+		waited = pthread_cond_timedwait(cond, lock, &due);
+	assert(detach_seen);
+	/* 留存消息的强引用在释放前必须禁止完成最终析构。 */
+	assert(!destroy_complete);
+	pthread_mutex_unlock(lock);
+}
 
 static void make_nonblocking_pair(int *a, int *b)
 {
@@ -255,6 +322,11 @@ server_message(struct tr_rpc_call_handle call,
 	case 'R':
 		ctx->recovery_messages++;
 		break;
+	case 'P':
+		assert(!ctx->pinned_ready);
+		ctx->pinned_message = *message;
+		ctx->pinned_ready = 1;
+		break;
 	default:
 		assert(!"unexpected test payload");
 	}
@@ -262,9 +334,10 @@ server_message(struct tr_rpc_call_handle call,
 	pthread_mutex_unlock(&ctx->lock);
 
 	if ((data[0] == 'A' && data[1] == '3') ||
-	    data[0] == 'F' || data[0] == 'R')
+	    data[0] == 'F' || data[0] == 'R' || data[0] == 'P')
 		assert(tr_rpc_call_finish(call, TR_RPC_STATUS_OK) == TR_OK);
-	return TR_RPC_MESSAGE_RELEASE;
+	return data[0] == 'P' ? TR_RPC_MESSAGE_TAKE_OWNERSHIP
+	                      : TR_RPC_MESSAGE_RELEASE;
 }
 
 static void server_close(struct tr_rpc_call_handle call, int status, void *arg)
@@ -345,6 +418,9 @@ int main(void)
 	struct tr_rpc_call_handle calls[CALL_COUNT];
 	struct client_arg args[CALL_COUNT];
 	struct backpressure_ctx ctx;
+	struct tr_rpc_message pinned;
+	struct endpoint_destroy_probe destruction;
+	pthread_t destroy_thread;
 	struct tr_stream_flow_state a_before;
 	struct tr_stream_flow_state b_before;
 	int client_fd;
@@ -515,7 +591,7 @@ int main(void)
 
 	/* 过载后，同一 Channel/Connection 上的新 Call 成功。 */
 	start_call(client_rpc, 1U, &args[RECOVERY_CALL], &calls[RECOVERY_CALL]);
-	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT, "recovery client open");
+	wait_counter(&ctx, &ctx.client_opened, PIN_CALL, "recovery client open");
 	send_tag(calls[RECOVERY_CALL], 'R', '1');
 	wait_finished(&ctx, RECOVERY_CALL);
 	pthread_mutex_lock(&ctx.lock);
@@ -544,9 +620,39 @@ int main(void)
 	}
 	wait_executor(server_rpc, 0U, 0U);
 
+	/* 保留服务器接收的最后一条消息，让其强引用跨过工作任务退出。 */
+	start_call(client_rpc, 1U, &args[PIN_CALL], &calls[PIN_CALL]);
+	wait_counter(&ctx, &ctx.client_opened, CALL_COUNT, "pin client open");
+	send_tag(calls[PIN_CALL], 'P', '1');
+	wait_flag(&ctx, &ctx.pinned_ready);
+	wait_finished(&ctx, PIN_CALL);
+	assert(tr_rpc_call_close_send(calls[PIN_CALL]) == TR_OK);
+	wait_executor(server_rpc, 0U, 0U);
+	pthread_mutex_lock(&ctx.lock);
+	pinned = ctx.pinned_message;
+	memset(&ctx.pinned_message, 0, sizeof(ctx.pinned_message));
+	pthread_mutex_unlock(&ctx.lock);
+	assert(pinned.bytes.len == 2U && pinned.bytes.data[0] == 'P');
+
+	/* 销毁可以解除所有者上的回调，但不可越过尚未释放的公开消息引用。 */
+	atomic_store(&detach_target, (uintptr_t)server_channel);
+	destruction = (struct endpoint_destroy_probe){server_rpc, TR_ERR_STATE};
+	assert(pthread_create(&destroy_thread, NULL,
+	                     destroy_endpoint_thread, &destruction) == 0);
+	wait_detach_confirmed();
+	{
+		int released = tr_rpc_message_release(&pinned);
+		assert(released == TR_OK || released == TR_ERR_STALE);
+	}
+	assert(tr_rpc_message_release(&pinned) == TR_ERR_INVALID);
+	assert(pthread_join(destroy_thread, NULL) == 0);
+	assert(destruction.result == TR_OK);
+	atomic_store(&detach_target, (uintptr_t)0);
+	server_rpc = NULL;
+
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_rpc_endpoint_destroy(client_rpc) == TR_OK);
-	assert(tr_rpc_endpoint_destroy(server_rpc) == TR_OK);
+	assert(server_rpc == NULL);
 	tr_channel_destroy(client_channel);
 	tr_channel_destroy(server_channel);
 	tr_reactor_destroy(reactor);
