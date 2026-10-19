@@ -190,6 +190,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_rpc_terminal_backpressure" then
             -- 仅本测试拦截 RPC retry 的完成项提交，注入一次失败。
             add_ldflags("-Wl,--wrap=tr_reactor_complete", {force = true})
+        elseif name == "test_rpc_stream_backpressure" then
+            -- 仅测试目标观察 handler 静默屏障，验证留存消息延迟销毁。
+            add_ldflags("-Wl,--wrap=tr_channel_set_handler", {force = true})
         elseif name == "test_rpc_deadline_fault" then
             -- 仅测试目标注入 RPC 单调时钟失败和 timer arm 失败。
             add_ldflags("-Wl,--wrap=clock_gettime",
