@@ -64,6 +64,7 @@ static void test_runtime_extended_peer_stride(void)
 	struct tr_runtime_peer *first, *second;
 	struct runtime_peer_extension *a, *b;
 	struct tr_memory_budget_stats stats;
+	const size_t alignment = _Alignof(struct tr_runtime_peer);
 
 	runtime_test_config_init(&config, &cfg, 1U);
 	cfg.peer_capacity = 2U;
@@ -94,8 +95,7 @@ static void test_runtime_extended_peer_stride(void)
 	assert(runtime == NULL);
 	/* 检查先于 calloc，极端乘积无法越界分配。 */
 	cfg.peer_capacity = UINT32_MAX;
-	cfg.peer_stride = SIZE_MAX -
-	                  SIZE_MAX % _Alignof(struct tr_runtime_peer);
+	cfg.peer_stride = SIZE_MAX - SIZE_MAX % alignment;
 	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
 	assert(runtime == NULL);
 }

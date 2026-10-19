@@ -53,8 +53,7 @@ _Static_assert(_Alignof(struct tr_server_peer) ==
                        _Alignof(struct tr_runtime_peer),
                "Server peer extension must preserve Runtime alignment");
 
-static struct tr_server_peer *
-tr_server_peer_state(struct tr_runtime_peer *peer)
+static struct tr_server_peer *tr_server_peer_state(struct tr_runtime_peer *peer)
 {
 	return (struct tr_server_peer *)peer;
 }
@@ -714,6 +713,7 @@ static int tr_server_register_methods_on_peer(struct tr_server *server,
 					      struct tr_runtime_peer *peer)
 {
 	uint32_t i;
+	struct tr_server_peer *state = tr_server_peer_state(peer);
 
 	for (i = 0; i < server->method_count; ++i) {
 		struct tr_server_method *m = &server->methods[i];
@@ -722,11 +722,11 @@ static int tr_server_register_methods_on_peer(struct tr_server *server,
 		if (!m->used)
 			continue;
 		if (m->kind == TR_SERVER_METHOD_UNARY) {
-			ret = tr_rpc_register_method(tr_server_peer_state(peer)->rpc, &m->desc,
+			ret = tr_rpc_register_method(state->rpc, &m->desc,
 						     m->unary_handler,
 						     m->handler_arg);
 		} else {
-			ret = tr_rpc_register_stream_method(tr_server_peer_state(peer)->rpc, &m->desc,
+			ret = tr_rpc_register_stream_method(state->rpc, &m->desc,
 							    &m->stream_handlers,
 							    m->handler_arg);
 		}
@@ -770,18 +770,21 @@ tr_server_note_peer_added_owner(struct tr_server_shard *shard)
 
 static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 {
+	struct tr_server_peer *state;
+
 	if (!peer)
 		return TR_OK;
+	state = tr_server_peer_state(peer);
 	/* V2 共享执行器的完成必须先由分片整体清理，不能逐对端抢先交付。 */
 	if (tr_server_peer_state(peer)->record_rpc)
 		return TR_ERR_STATE;
 
-	if (tr_server_peer_state(peer)->rpc) {
-		int ret = tr_rpc_endpoint_destroy(tr_server_peer_state(peer)->rpc);
+	if (state->rpc) {
+		int ret = tr_rpc_endpoint_destroy(state->rpc);
 
 		if (ret != TR_OK)
 			return ret;
-		tr_server_peer_state(peer)->rpc = NULL;
+		state->rpc = NULL;
 	}
 	if (peer->channel) {
 		int ret = tr_channel_destroy(peer->channel);
@@ -884,10 +887,11 @@ static void tr_server_record_progress(bool endpoint_drained, void *arg)
 		struct tr_runtime_peer *peer =
 		        tr_server_shard_peer_at(shard, i);
 		bool quiet;
-		if (!peer || !peer->used || !tr_server_peer_state(peer)->record_rpc)
+		struct tr_server_peer *state = tr_server_peer_state(peer);
+		if (!peer || !peer->used || !state->record_rpc)
 			continue;
 		int ret = tr_rpc_record_endpoint_is_drained_on_owner(
-		        tr_server_peer_state(peer)->record_rpc, &quiet);
+		        state->record_rpc, &quiet);
 		if (ret != TR_OK) {
 			status = ret;
 			drained = 0;
@@ -913,10 +917,11 @@ static int tr_server_record_watch_drain_on_owner(void *arg)
 	for (uint32_t i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
 		        tr_server_shard_peer_at(shard, i);
-		if (!peer || !peer->used || !tr_server_peer_state(peer)->record_rpc)
+		struct tr_server_peer *state = tr_server_peer_state(peer);
+		if (!peer || !peer->used || !state->record_rpc)
 			continue;
 		int ret = tr_rpc_record_endpoint_set_progress_notify_on_owner(
-		        tr_server_peer_state(peer)->record_rpc, tr_server_record_progress, shard);
+		        state->record_rpc, tr_server_record_progress, shard);
 		if (ret != TR_OK)
 			return ret;
 	}
@@ -970,10 +975,11 @@ tr_server_record_detach_peers_on_owner(struct tr_server_shard *shard)
 		        tr_server_shard_peer_at(shard, i);
 		struct tr_channel_stats stats;
 		int ret;
+		struct tr_server_peer *state = tr_server_peer_state(peer);
 
 		if (!peer || !peer->used)
 			continue;
-		if (tr_server_peer_state(peer)->record_closing && peer->connection.reactor) {
+		if (state->record_closing && peer->connection.reactor) {
 			ret = tr_reactor_close_on_owner(peer->connection);
 			if (ret != TR_OK && ret != TR_ERR_STALE)
 				continue;
@@ -981,9 +987,9 @@ tr_server_record_detach_peers_on_owner(struct tr_server_shard *shard)
 			continue;
 		}
 		/* 工作或解绑尚未静默时保留原槽位，不能制造第二条退役队列。 */
-		if (tr_server_peer_state(peer)->record_rpc) {
+		if (state->record_rpc) {
 			ret = tr_rpc_record_endpoint_close_on_owner(
-			        &tr_server_peer_state(peer)->record_rpc);
+			        &state->record_rpc);
 			if (ret != TR_OK)
 				continue;
 		}
@@ -1092,10 +1098,11 @@ static int tr_server_record_reap_shard(struct tr_server_shard *shard)
 	for (uint32_t i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
 		        tr_server_shard_peer_at(shard, i);
+		struct tr_server_peer *state = tr_server_peer_state(peer);
 
-		if (!peer || !tr_server_peer_state(peer)->record_rpc)
+		if (!peer || !state->record_rpc)
 			continue;
-		ret = tr_rpc_record_endpoint_reap_stopped(&tr_server_peer_state(peer)->record_rpc);
+		ret = tr_rpc_record_endpoint_reap_stopped(&state->record_rpc);
 		if (ret != TR_OK && ret != TR_AGAIN && result == TR_OK)
 			result = ret;
 	}
@@ -1126,10 +1133,11 @@ static int tr_server_record_reap_shard(struct tr_server_shard *shard)
 	for (uint32_t i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
 		        tr_server_shard_peer_at(shard, i);
+		struct tr_server_peer *state = tr_server_peer_state(peer);
 
-		if (!peer || !tr_server_peer_state(peer)->record_rpc)
+		if (!peer || !state->record_rpc)
 			continue;
-		ret = tr_rpc_record_endpoint_reap_stopped(&tr_server_peer_state(peer)->record_rpc);
+		ret = tr_rpc_record_endpoint_reap_stopped(&state->record_rpc);
 		if (ret != TR_OK && (result == TR_OK ||
 		                     (result == TR_AGAIN && ret != TR_AGAIN)))
 			result = ret;
@@ -1184,8 +1192,7 @@ static void tr_server_detach_disconnected_peers_on_owner(
 		if (!tr_server_peer_disconnected(&snapshot.transport))
 			continue;
 
-		detached =
-			(struct tr_server_detached_peer *)snapshot.transport.finalize_ctx;
+		detached = snapshot.transport.finalize_ctx;
 		if (!detached)
 			continue;
 
@@ -1207,7 +1214,8 @@ static void tr_server_detach_disconnected_peers_on_owner(
 				continue;
 		}
 		if (snapshot.transport.channel) {
-			ret = tr_channel_detach_for_finalize(snapshot.transport.channel);
+			ret = tr_channel_detach_for_finalize(
+		        snapshot.transport.channel);
 			if (ret != TR_OK)
 				continue;
 		}
@@ -1437,11 +1445,13 @@ static int tr_server_adopt_peer_rollback(
 	struct tr_server_shard *shard, struct tr_runtime_peer *peer, int cause)
 {
 	int close_ret = TR_OK;
+	struct tr_server_peer *state;
 
 	if (!shard || !peer)
 		return cause;
+	state = tr_server_peer_state(peer);
 	if (shard->server->record_mode)
-		tr_server_peer_state(peer)->record_closing = 1;
+		state->record_closing = 1;
 
 	/* tr_server_adopt_peer() 只在分片反应器所有者回调中执行。
 	 * 回滚不再把 CLOSE 重新排队，而是在当前所有者处理轮次直接退役精确
@@ -1458,7 +1468,7 @@ static int tr_server_adopt_peer_rollback(
 	 * 同步销毁。先发布部分对端，延迟到后续分片生命周期处理轮次做
 	 * 解绑与收尾；连接已在上面完成同步退役。
 	 */
-	if (peer->channel || tr_server_peer_state(peer)->rpc || tr_server_peer_state(peer)->record_rpc ||
+	if (peer->channel || state->rpc || state->record_rpc ||
 	    (shard->server->record_mode && close_ret != TR_OK &&
 	     peer->connection.reactor)) {
 		peer->used = 1;
@@ -1479,6 +1489,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_runtime_peer *peer;
+	struct tr_server_peer *state;
 	uint32_t slot;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
@@ -1505,6 +1516,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	}
 
 	peer = tr_server_shard_peer_at(shard, slot);
+	state = tr_server_peer_state(peer);
 	memset(peer, 0, sizeof(struct tr_server_peer));
 	ret = tr_deadline_init_ms(&peer->handshake_deadline,
 				  server->config.handshake_timeout_ms);
@@ -1573,16 +1585,16 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		        &server->record.endpoint, tr_server_record_terminal,
 		        shard->runtime,
 		        tr_runtime_shard_memory_budget(shard->runtime),
-		        &tr_server_peer_state(peer)->record_rpc);
+		        &state->record_rpc);
 		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_bind_semantic_stats_on_owner(
-			        tr_server_peer_state(peer)->record_rpc, &shard->record_semantic);
+			        state->record_rpc, &shard->record_semantic);
 		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_bind_producers_on_owner(
-			        tr_server_peer_state(peer)->record_rpc, shard->record_producers);
+			        state->record_rpc, shard->record_producers);
 		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_start_on_owner(
-			        tr_server_peer_state(peer)->record_rpc);
+			        state->record_rpc);
 	} else {
 		memset(&rpc_config, 0, sizeof(rpc_config));
 		rpc_config.role = TR_RPC_SERVER;
@@ -1600,7 +1612,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 
 		ret = tr_rpc_endpoint_create_with_executor_group(
 		        peer->channel, &rpc_config,
-		        tr_server_shard_rpc_executor(shard), &tr_server_peer_state(peer)->rpc);
+		        tr_server_shard_rpc_executor(shard), &state->rpc);
 		if (ret == TR_OK)
 			ret = tr_server_register_methods_on_peer(server, peer);
 	}
@@ -2766,18 +2778,19 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 			tr_server_shard_peer_at(shard, i);
 		struct tr_rpc_endpoint_stats rpc_stats;
 		struct tr_channel_stats channel_stats;
+		struct tr_server_peer *state = tr_server_peer_state(peer);
 
 		if (!peer || !peer->used)
 			continue;
 
-		if (peer->ready && (tr_server_peer_state(peer)->rpc || tr_server_peer_state(peer)->record_rpc) &&
+		if (peer->ready && (state->rpc || state->record_rpc) &&
 		    peer->channel && !tr_server_peer_disconnected(peer))
 			stats->peers_ready_current++;
 
-		if (tr_server_peer_state(peer)->rpc &&
-		    tr_rpc_endpoint_get_stats(tr_server_peer_state(peer)->rpc, &rpc_stats) == TR_OK)
+		if (state->rpc &&
+		    tr_rpc_endpoint_get_stats(state->rpc, &rpc_stats) == TR_OK)
 			tr_server_merge_rpc_stats(&stats->rpc, &rpc_stats, 1);
-		if (tr_server_peer_state(peer)->record_rpc)
+		if (state->record_rpc)
 			stats->rpc.endpoints_current++;
 		if (peer->channel &&
 		    tr_channel_get_stats(peer->channel, &channel_stats) == TR_OK)
@@ -3045,9 +3058,10 @@ int tr_server_destroy(struct tr_server *server)
 			for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 				struct tr_runtime_peer *peer =
 					tr_server_shard_peer_at(shard, i);
+				struct tr_server_peer *state = tr_server_peer_state(peer);
 
 				if (!peer || (!peer->used && !peer->channel &&
-				              !tr_server_peer_state(peer)->rpc && !tr_server_peer_state(peer)->record_rpc))
+				              !state->rpc && !state->record_rpc))
 					continue;
 				{
 					ret = tr_server_destroy_peer(peer);
