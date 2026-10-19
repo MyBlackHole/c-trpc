@@ -370,8 +370,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_runtime_create",
                         "-Wl,--wrap=tr_runtime_destroy", {force = true})
         elseif name == "test_rpc_executor_group_drain" then
-            -- 通过同步门闩固定服务端停机时正在运行、已排队和多个就绪调用的交错顺序。
-            add_ldflags("-Wl,--wrap=pthread_join", {force = true})
+            -- 仅测试二进制冻结线程创建/回收，复现启动与停止的控制竞争。
+            add_ldflags("-Wl,--wrap=pthread_create",
+                        "-Wl,--wrap=pthread_join", {force = true})
         end
         if name == "test_socket_atomic_flags" or name == "test_server_stats_retiring" then
             add_includedirs("src")
