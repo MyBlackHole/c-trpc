@@ -330,9 +330,9 @@ static void test_owner_stale_hello_never_waits_on_self(void)
 	atomic_store(&fail_send_at, 1U);
 
 	/* create_publish 在 Reactor owner 中执行；此时不允许等待自己。 */
-	assert(tr_channel_create(&config, fixture.control, fixture.bulk,
-	                         NULL, NULL, NULL, NULL, &channel) ==
-	       TR_ERR_STALE);
+	assert(tr_channel_create(
+		       &config, fixture.control, fixture.bulk,
+		       NULL, NULL, NULL, NULL, &channel) == TR_ERR_STALE);
 	assert(channel == NULL);
 	assert(atomic_load(&send_attempts) == 1U);
 	assert(atomic_load(&quiesce_attempts) == 0U);
@@ -348,8 +348,8 @@ static void test_external_stale_hello_requires_quiesce(void)
 
 	fixture_init(&fixture, 0);
 	assert(tr_channel_create_deferred(
-	               &config, fixture.control, fixture.bulk,
-	               NULL, NULL, NULL, NULL, &channel) == TR_OK);
+		       &config, fixture.control, fixture.bulk,
+		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
 	assert(channel != NULL);
 
 	atomic_store(&send_failure_status, TR_ERR_STALE);
