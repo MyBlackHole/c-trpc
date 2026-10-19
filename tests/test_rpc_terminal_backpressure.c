@@ -68,21 +68,20 @@ static int retry_gate_entered, retry_gate_open;
 /* 测试专用：只观察待销毁客户端 Channel 的成功解绑屏障。 */
 static _Atomic(uintptr_t) destroy_channel_target;
 static struct test_context *destroy_context;
-int __real_tr_channel_set_handler(struct tr_channel *channel,
-                                  tr_stream_data_cb data_cb,
-                                  tr_stream_event_cb stream_cb,
-                                  tr_channel_event_cb channel_cb, void *arg);
+/* 仅用于测试包装，类型与公共回调签名严格相同。 */
+typedef struct tr_channel Chan;
+typedef tr_stream_data_cb Dcb;
+typedef tr_stream_event_cb Scb;
+typedef tr_channel_event_cb Ecb;
 
-int __wrap_tr_channel_set_handler(struct tr_channel *ch,
-                                  tr_stream_data_cb data,
-                                  tr_stream_event_cb stream,
-                                  tr_channel_event_cb event, void *arg)
+int __real_tr_channel_set_handler(Chan *, Dcb, Scb, Ecb, void *);
+
+int __wrap_tr_channel_set_handler(Chan *ch, Dcb d, Scb s, Ecb e, void *arg)
 {
-	int ret = __real_tr_channel_set_handler(ch, data, stream, event, arg);
+	int ret = __real_tr_channel_set_handler(ch, d, s, e, arg);
+	int cleared = ret == TR_OK && !d && !s && !e && !arg;
 
-	if (ret == TR_OK &&
-	    (uintptr_t)ch == atomic_load(&destroy_channel_target) &&
-	    !data && !stream && !event && !arg) {
+	if (cleared && (uintptr_t)ch == atomic_load(&destroy_channel_target)) {
 		struct test_context *ctx = destroy_context;
 
 		pthread_mutex_lock(&ctx->lock);
