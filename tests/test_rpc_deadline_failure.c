@@ -685,6 +685,17 @@ static void test_half_close_order(int remote_first)
 	fixture_destroy(&f);
 }
 
+/* 测试内的统一创建入口：生产接口与类型保持原样。 */
+typedef struct tr_channel Chan;
+typedef struct tr_rpc_endpoint_config Cfg;
+typedef struct tr_rpc_executor_group Grp;
+typedef struct tr_rpc_endpoint Ep;
+
+static int make_rpc(Chan *ch, const Cfg *cfg, Grp *group, Ep **out)
+{
+	return tr_rpc_endpoint_create_with_executor_group(ch, cfg, group, out);
+}
+
 static void test_create_rollback_retains_timer_owner(int shared)
 {
 	struct fixture f;
@@ -718,8 +729,7 @@ static void test_create_rollback_retains_timer_owner(int shared)
 
 	/* handler 发布失败，定时器撤销成功：不能交付部分对象。 */
 	atomic_store(&fail_publish_once, 1);
-	ret = tr_rpc_endpoint_create_with_executor_group(
-		f.client, &ec, group, &partial);
+	ret = make_rpc(f.client, &ec, group, &partial);
 	assert(ret == TR_ERR_SYS);
 	assert(partial == NULL);
 	assert(atomic_load(&failed_publishes) == 1U);
@@ -729,8 +739,7 @@ static void test_create_rollback_retains_timer_owner(int shared)
 	 */
 	atomic_store(&fail_publish_once, 1);
 	atomic_store(&fail_unregister_once, 1);
-	ret = tr_rpc_endpoint_create_with_executor_group(
-		f.client, &ec, group, &partial);
+	ret = make_rpc(f.client, &ec, group, &partial);
 	atomic_store(&capture_rpc_timer, 0);
 	assert(ret == TR_ERR_SYS);
 	assert(partial != NULL);
@@ -748,8 +757,7 @@ static void test_create_rollback_retains_timer_owner(int shared)
 	assert(tr_rpc_endpoint_destroy(partial) == TR_OK);
 	partial = NULL;
 	atomic_store(&publish_fail_channel, (uintptr_t)0);
-	ret = tr_rpc_endpoint_create_with_executor_group(
-		f.client, &ec, group, &f.rpc);
+	ret = make_rpc(f.client, &ec, group, &f.rpc);
 	assert(ret == TR_OK);
 	fixture_destroy(&f);
 	if (group) {
