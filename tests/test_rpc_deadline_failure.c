@@ -706,7 +706,8 @@ static void test_create_rollback_retains_timer_owner(int shared)
 	ec.executor_queue_capacity = 16U;
 	ec.message_pool = &f.pool;
 	if (shared) {
-		assert(tr_rpc_executor_group_create(1U, 3U, 1U, &group) == TR_OK);
+		ret = tr_rpc_executor_group_create(1U, 3U, 1U, &group);
+		assert(ret == TR_OK);
 		assert(tr_rpc_executor_group_start(group) == TR_OK);
 	}
 
@@ -717,8 +718,8 @@ static void test_create_rollback_retains_timer_owner(int shared)
 
 	/* handler 发布失败，定时器撤销成功：不能交付部分对象。 */
 	atomic_store(&fail_publish_once, 1);
-	ret = tr_rpc_endpoint_create_with_executor_group(f.client, &ec,
-							group, &partial);
+	ret = tr_rpc_endpoint_create_with_executor_group(
+		f.client, &ec, group, &partial);
 	assert(ret == TR_ERR_SYS);
 	assert(partial == NULL);
 	assert(atomic_load(&failed_publishes) == 1U);
@@ -728,8 +729,8 @@ static void test_create_rollback_retains_timer_owner(int shared)
 	 */
 	atomic_store(&fail_publish_once, 1);
 	atomic_store(&fail_unregister_once, 1);
-	ret = tr_rpc_endpoint_create_with_executor_group(f.client, &ec,
-							group, &partial);
+	ret = tr_rpc_endpoint_create_with_executor_group(
+		f.client, &ec, group, &partial);
 	atomic_store(&capture_rpc_timer, 0);
 	assert(ret == TR_ERR_SYS);
 	assert(partial != NULL);
@@ -747,8 +748,9 @@ static void test_create_rollback_retains_timer_owner(int shared)
 	assert(tr_rpc_endpoint_destroy(partial) == TR_OK);
 	partial = NULL;
 	atomic_store(&publish_fail_channel, (uintptr_t)0);
-	assert(tr_rpc_endpoint_create_with_executor_group(
-		       f.client, &ec, group, &f.rpc) == TR_OK);
+	ret = tr_rpc_endpoint_create_with_executor_group(
+		f.client, &ec, group, &f.rpc);
+	assert(ret == TR_OK);
 	fixture_destroy(&f);
 	if (group) {
 		assert(tr_rpc_executor_group_stop(group) == TR_OK);
@@ -758,9 +760,10 @@ static void test_create_rollback_retains_timer_owner(int shared)
 
 int main(int argc, char **argv)
 {
-	if (argc == 1 || strcmp(argv[1], "construct") == 0)
+	if (argc == 1 || strcmp(argv[1], "construct") == 0) {
 		test_create_rollback_retains_timer_owner(0);
 		test_create_rollback_retains_timer_owner(1);
+	}
 	if (argc == 1 || strcmp(argv[1], "clock") == 0)
 		test_clock_failure_and_zero();
 	if (argc == 1 || strcmp(argv[1], "admission") == 0)
