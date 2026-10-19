@@ -77,9 +77,12 @@ static inline uint64_t tr_rpc_method_hash(uint32_t service_id,
 
 /* 底层 Endpoint 引擎，仅供门面与测试使用。
  *
- * 正常规则仍是只有 TR_OK 才转移所有权。唯一例外是独立工作线程启动后
- * 回滚时的线程回收自身失败：函数返回生命周期错误，同时 *out 保留部分构造的
- * Endpoint 所有权；调用方必须继续 tr_rpc_endpoint_destroy()，不得丢弃。
+ * 正常规则只有 TR_OK 才转移所有权。两种可重试的生命周期例外：
+ * - 已发布截止时间定时器，但后续 Channel handler 安装失败且定时器注销
+ *   也失败：错误返回时 *out 保留部分构造的 Endpoint，不能提前 free；
+ * - 独立工作线程启动失败，后续停止或线程回收屏障也失败：同样保留 *out。
+ * 调用方必须先持有 Channel/Runtime，再对部分 Endpoint 反复调用
+ * tr_rpc_endpoint_destroy()，直到其返回 TR_OK 才可释放依赖资源。
  */
 int tr_rpc_endpoint_create(struct tr_channel *channel,
 			   const struct tr_rpc_endpoint_config *config,
@@ -153,8 +156,9 @@ int tr_rpc_executor_group_destroy_checked(
 	struct tr_rpc_executor_group *group);
 
 /* group!=NULL 时 Endpoint 借用分片执行器组，不启动独立工作线程。
+ * 两种构造模式都可能因异步定时器回滚失败而返回错误且 *out 非 NULL。
  * group==NULL 时 Endpoint 发布完成并先转移到 *out，随后启动独立
- * 工作线程；若工作线程启动回滚时的回收失败，返回错误但 *out 保留所有权。
+ * 工作线程；线程启动回滚时的回收失败也保留 *out 所有权。
  */
 int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_channel *channel, const struct tr_rpc_endpoint_config *config,
