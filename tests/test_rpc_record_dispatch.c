@@ -2160,8 +2160,7 @@ static void test_accepted_final_survives_stopped_cleanup(void)
 
 	CHECK(producer_send_body(p, 80) == TR_OK);
 	producer_writable(p);
-	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) ==
-	      TR_OK);
+	CHECK(tr_rpc_v2_producer_finish(p, TR_RPC_STATUS_OK, NULL, 0) == TR_OK);
 	/* 真实对端先观察到 FINAL，但正在执行的工作尚未退出。 */
 	wait_count(&f.client.terminals[slot], 1);
 	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK);
