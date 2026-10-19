@@ -58,6 +58,8 @@ uint32_t tr_channel_max_streams(struct tr_channel *channel);
 
 /* 服务端门面使用延后创建，先完成 RPC Endpoint/Method 安装，
  * 再启动 HELLO 握手，避免对端在服务层就绪前发送 RPC 数据。
+ * 构造失败可能留下必须由调用方保留并重试销毁的 *out；
+ * 和 tr_channel_create() 采用相同的部分对象所有权契约。
  */
 int tr_channel_create_deferred(
 	const struct tr_channel_config *config,
