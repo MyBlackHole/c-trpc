@@ -3558,7 +3558,6 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	return TR_OK;
 }
 
-
 /* 生命周期操作与工作队列使用不同的临界区。不能在 group->lock 下 join
  * 或 pthread_create：工作线程也需要这把锁才能退出/等待。
  */
@@ -3663,9 +3662,9 @@ int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
-	startable = !group->lifecycle_busy && !group->stopping &&
-		    group->started_threads == 0U &&
-		    group->join_cursor == 0U;
+	startable = !group->lifecycle_busy && !group->stopping;
+	startable &= group->started_threads == 0U;
+	startable &= group->join_cursor == 0U;
 	pthread_mutex_unlock(&group->lock);
 	return startable ? TR_OK : TR_ERR_STATE;
 }
