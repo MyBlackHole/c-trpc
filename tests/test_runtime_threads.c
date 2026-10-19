@@ -56,16 +56,18 @@ static void runtime_gate_enter(struct runtime_control_gate *gate)
 
 static void runtime_gate_wait(struct runtime_control_gate *gate)
 {
+	pthread_mutex_t *lock = &gate->lock;
+	pthread_cond_t *cond = &gate->cond;
 	struct timespec deadline;
 	int ret = 0;
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
-	pthread_mutex_lock(&gate->lock);
+	pthread_mutex_lock(lock);
 	while (!gate->entered && ret == 0)
-		ret = pthread_cond_timedwait(&gate->cond, &gate->lock, &deadline);
+		ret = pthread_cond_timedwait(cond, lock, &deadline);
 	assert(gate->entered);
-	pthread_mutex_unlock(&gate->lock);
+	pthread_mutex_unlock(lock);
 }
 
 static void runtime_gate_open(struct runtime_control_gate *gate)
@@ -478,6 +480,7 @@ static void test_runtime_control_lifecycle_serialized(void)
 	struct runtime_control_probe probe;
 	pthread_t controller;
 	unsigned created;
+	int ret;
 
 	memset(&config, 0, sizeof(config));
 	memset(&shard, 0, sizeof(shard));
@@ -495,7 +498,8 @@ static void test_runtime_control_lifecycle_serialized(void)
 	probe.result = TR_ERR_STATE;
 
 	/* 一条控制线程已经进入启动轮次，但尚未创建第一条工作线程。 */
-	assert(pthread_create(&controller, NULL, runtime_control_start, &probe) == 0);
+	ret = pthread_create(&controller, NULL, runtime_control_start, &probe);
+	assert(ret == 0);
 	runtime_gate_wait(&create_gate);
 	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
 	assert(tr_runtime_stop(runtime) == TR_ERR_STATE);
@@ -506,7 +510,8 @@ static void test_runtime_control_lifecycle_serialized(void)
 
 	/* 当前控制线程已进入停止轮次，真实线程仍未完成 join。 */
 	probe.result = TR_ERR_STATE;
-	assert(pthread_create(&controller, NULL, runtime_control_stop, &probe) == 0);
+	ret = pthread_create(&controller, NULL, runtime_control_stop, &probe);
+	assert(ret == 0);
 	runtime_gate_wait(&join_gate);
 	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
 	assert(tr_runtime_stop(runtime) == TR_ERR_STATE);
