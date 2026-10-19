@@ -3037,6 +3037,8 @@ struct tr_channel_build {
 struct tr_channel_create_publish_request {
 	struct tr_channel *channel;
 	int start_handshake;
+	int control_handler_installed;
+	int bulk_handler_installed;
 	/* 构造失败但仍有 Reactor 回调引用时，移交部分对象的销毁责任。 */
 	int needs_recovery;
 };
@@ -3054,9 +3056,11 @@ static int tr_channel_create_connection_active(
 }
 
 static int tr_channel_create_rollback_on_owner(
-	struct tr_channel *channel, int control_handler_installed,
-	int bulk_handler_installed, int *needs_recovery)
+	struct tr_channel_create_publish_request *request)
 {
+	struct tr_channel *channel = request->channel;
+	int control_handler_installed = request->control_handler_installed;
+	int bulk_handler_installed = request->bulk_handler_installed;
 	struct tr_conn_handle control = channel->control_connection;
 	struct tr_conn_handle bulk = channel->bulk_connection;
 	int split = !tr_conn_equal(control, bulk);
@@ -3102,7 +3106,7 @@ static int tr_channel_create_rollback_on_owner(
 		}
 	}
 
-	*needs_recovery = !control_safe || !bulk_safe;
+	request->needs_recovery = !control_safe || !bulk_safe;
 	return final;
 }
 
@@ -3170,9 +3174,9 @@ static int tr_channel_create_publish_on_owner(void *arg)
 	return TR_OK;
 
 rollback:
-	rollback_ret = tr_channel_create_rollback_on_owner(
-		channel, control_handler_installed, bulk_handler_installed,
-		&request->needs_recovery);
+	request->control_handler_installed = control_handler_installed;
+	request->bulk_handler_installed = bulk_handler_installed;
+	rollback_ret = tr_channel_create_rollback_on_owner(request);
 	if (request->needs_recovery && rollback_ret == TR_OK)
 		return TR_ERR_STATE;
 	return rollback_ret != TR_OK ? rollback_ret : ret;
