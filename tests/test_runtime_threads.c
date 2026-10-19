@@ -499,6 +499,7 @@ static void test_runtime_control_lifecycle_serialized(void)
 	pthread_t controller;
 	unsigned created;
 	int ret;
+	void *(*destroy_fn)(void *) = runtime_control_destroy;
 
 	memset(&config, 0, sizeof(config));
 	memset(&shard, 0, sizeof(shard));
@@ -544,7 +545,7 @@ static void test_runtime_control_lifecycle_serialized(void)
 	assert(tr_runtime_start(runtime) == TR_OK);
 	runtime_gate_rearm(&join_gate);
 	probe.result = TR_ERR_STATE;
-	ret = pthread_create(&controller, NULL, runtime_control_destroy, &probe);
+	ret = pthread_create(&controller, NULL, destroy_fn, &probe);
 	assert(ret == 0);
 	runtime_gate_wait(&join_gate);
 	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
