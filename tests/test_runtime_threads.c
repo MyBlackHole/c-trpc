@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -30,6 +31,65 @@ static atomic_uint join_failures;
 static atomic_uint fail_create_at;
 static atomic_uint fail_join_at;
 
+/* 仅测试目标：在 Runtime 控制操作跨过生命周期门禁后，
+ * 于真实 pthread_create/join 边界冻结调用方，验证另一个控制者拒绝。
+ */
+struct runtime_control_gate {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int entered;
+	int open;
+};
+
+static struct runtime_control_gate create_gate, join_gate;
+static _Thread_local int hold_runtime_create, hold_runtime_join;
+
+static void runtime_gate_enter(struct runtime_control_gate *gate)
+{
+	pthread_mutex_lock(&gate->lock);
+	gate->entered = 1;
+	pthread_cond_broadcast(&gate->cond);
+	while (!gate->open)
+		pthread_cond_wait(&gate->cond, &gate->lock);
+	pthread_mutex_unlock(&gate->lock);
+}
+
+static void runtime_gate_wait(struct runtime_control_gate *gate)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&gate->lock);
+	while (!gate->entered && ret == 0)
+		ret = pthread_cond_timedwait(&gate->cond, &gate->lock, &deadline);
+	assert(gate->entered);
+	pthread_mutex_unlock(&gate->lock);
+}
+
+static void runtime_gate_open(struct runtime_control_gate *gate)
+{
+	pthread_mutex_lock(&gate->lock);
+	assert(gate->entered && !gate->open);
+	gate->open = 1;
+	pthread_cond_broadcast(&gate->cond);
+	pthread_mutex_unlock(&gate->lock);
+}
+
+static void runtime_gate_init(struct runtime_control_gate *gate)
+{
+	memset(gate, 0, sizeof(*gate));
+	assert(pthread_mutex_init(&gate->lock, NULL) == 0);
+	assert(pthread_cond_init(&gate->cond, NULL) == 0);
+}
+
+static void runtime_gate_destroy(struct runtime_control_gate *gate)
+{
+	assert(pthread_cond_destroy(&gate->cond) == 0);
+	assert(pthread_mutex_destroy(&gate->lock) == 0);
+}
+
 int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 			 void *(*start)(void *), void *arg);
 int __real_pthread_join(pthread_t thread, void **result);
@@ -40,6 +100,10 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
 	unsigned attempt = atomic_fetch_add(&create_attempts, 1U) + 1U;
 	int ret;
 
+	if (hold_runtime_create) {
+		hold_runtime_create = 0;
+		runtime_gate_enter(&create_gate);
+	}
 	if (attempt == atomic_load(&fail_create_at))
 		return EAGAIN;
 	ret = __real_pthread_create(thread, attr, start, arg);
@@ -53,6 +117,10 @@ int __wrap_pthread_join(pthread_t thread, void **result)
 	unsigned attempt = atomic_fetch_add(&join_attempts, 1U) + 1U;
 	int ret;
 
+	if (hold_runtime_join) {
+		hold_runtime_join = 0;
+		runtime_gate_enter(&join_gate);
+	}
 	if (attempt == atomic_load(&fail_join_at)) {
 		atomic_fetch_add(&join_failures, 1U);
 		return EINVAL;
@@ -377,6 +445,84 @@ static void test_runtime_multi_shard_threads(void)
 	expect_threads(7U, 7U);
 	assert(tr_runtime_destroy(runtime) == TR_OK);
 	expect_threads(7U, 7U);
+}
+
+struct runtime_control_probe {
+	struct tr_runtime *runtime;
+	int result;
+};
+
+static void *runtime_control_start(void *arg)
+{
+	struct runtime_control_probe *probe = arg;
+
+	hold_runtime_create = 1;
+	probe->result = tr_runtime_start(probe->runtime);
+	return NULL;
+}
+
+static void *runtime_control_stop(void *arg)
+{
+	struct runtime_control_probe *probe = arg;
+
+	hold_runtime_join = 1;
+	probe->result = tr_runtime_stop(probe->runtime);
+	return NULL;
+}
+
+static void test_runtime_control_lifecycle_serialized(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard;
+	struct tr_runtime *runtime = NULL;
+	struct runtime_control_probe probe;
+	pthread_t controller;
+	unsigned created;
+
+	memset(&config, 0, sizeof(config));
+	memset(&shard, 0, sizeof(shard));
+	config.shard_count = 1U;
+	config.shards = &shard;
+	shard.rpc_executor.endpoint_capacity = 2U;
+	shard.rpc_executor.max_calls_per_endpoint = 2U;
+	shard.rpc_executor.thread_count = 2U;
+
+	reset_probe(0U);
+	runtime_gate_init(&create_gate);
+	runtime_gate_init(&join_gate);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	probe.runtime = runtime;
+	probe.result = TR_ERR_STATE;
+
+	/* 一条控制线程已经进入启动轮次，但尚未创建第一条工作线程。 */
+	assert(pthread_create(&controller, NULL, runtime_control_start, &probe) == 0);
+	runtime_gate_wait(&create_gate);
+	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
+	assert(tr_runtime_stop(runtime) == TR_ERR_STATE);
+	assert(tr_runtime_destroy(runtime) == TR_ERR_STATE);
+	runtime_gate_open(&create_gate);
+	assert(pthread_join(controller, NULL) == 0);
+	assert(probe.result == TR_OK);
+
+	/* 当前控制线程已进入停止轮次，真实线程仍未完成 join。 */
+	probe.result = TR_ERR_STATE;
+	assert(pthread_create(&controller, NULL, runtime_control_stop, &probe) == 0);
+	runtime_gate_wait(&join_gate);
+	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
+	assert(tr_runtime_stop(runtime) == TR_ERR_STATE);
+	assert(tr_runtime_destroy(runtime) == TR_ERR_STATE);
+	runtime_gate_open(&join_gate);
+	assert(pthread_join(controller, NULL) == 0);
+	assert(probe.result == TR_OK);
+
+	/* 控制轮次完成后，同一 Runtime 允许重新启动、停止并最终销毁。 */
+	assert(tr_runtime_start(runtime) == TR_OK);
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	runtime_gate_destroy(&join_gate);
+	runtime_gate_destroy(&create_gate);
+	created = atomic_load(&created_threads);
+	expect_threads(created, created);
 }
 
 static void test_reactor_join_failure_is_retryable(void)
@@ -755,6 +901,7 @@ int main(void)
 	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
 	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
 	RUN_TEST(test_runtime_multi_shard_threads);
+	RUN_TEST(test_runtime_control_lifecycle_serialized);
 	RUN_TEST(test_reactor_join_failure_is_retryable);
 	RUN_TEST(test_reactor_destroy_join_failure_is_retryable);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
