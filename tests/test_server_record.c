@@ -951,7 +951,8 @@ static void test_disconnected_work(void)
 	fixture_destroy(&f);
 }
 
-static void test_stopped_work(bool fatal, bool cleanup_failure)
+static void test_stopped_work(bool fatal, bool cleanup_failure,
+                              bool join_failure)
 {
 	struct fixture f;
 	struct peer peers[2];
@@ -979,6 +980,16 @@ static void test_stopped_work(bool fatal, bool cleanup_failure)
 	CHECK(tr_server_destroy(f.server) == TR_AGAIN);
 	CHECK(atomic_load(&executor_destroys) == 0);
 	gate_release(&f.gate);
+	if (join_failure) {
+		/* 两条请求已受理、Server 已停止接受；在取消工作返回后
+		 * 精确拒绝第一次真实 pthread_join，不能释放执行器/Endpoint。
+		 */
+		atomic_store(&fail_executor_join, true);
+		CHECK(destroy_until_stable(&f) == TR_ERR_SYS);
+		CHECK(f.server && atomic_load(&executor_destroys) == 0);
+		CHECK(atomic_load(&executor_join_failures) == 1);
+		CHECK(!atomic_load(&fail_executor_join));
+	}
 	CHECK(destroy_until_stable(&f) == TR_OK);
 	CHECK(atomic_load(&cleanup_dispatches) > 0);
 	for (unsigned j = 0; j < 2; ++j) {
@@ -988,6 +999,11 @@ static void test_stopped_work(bool fatal, bool cleanup_failure)
 		peer_destroy(&peers[j]);
 	}
 	CHECK(atomic_load(&f.cancelled) == 2);
+	if (join_failure) {
+		CHECK(atomic_load(&executor_join_failures) == 1);
+		CHECK(atomic_load(&workers_joined) ==
+		      atomic_load(&worker_total));
+	}
 	fixture_destroy(&f);
 }
 
@@ -1155,9 +1171,10 @@ int main(void)
 	test_shapes_and_reuse();
 	test_shared_executor();
 	test_disconnected_work();
-	test_stopped_work(false, false);
-	test_stopped_work(true, false);
-	test_stopped_work(false, true);
+	test_stopped_work(false, false, false);
+	test_stopped_work(true, false, false);
+	test_stopped_work(false, true, false);
+	test_stopped_work(false, false, true);
 	test_multishard_and_start_failure(0);
 	test_multishard_and_start_failure(2);
 	test_multishard_and_start_failure(3);
@@ -1166,6 +1183,6 @@ int main(void)
 	test_detach_retry(false);
 	test_detach_retry(true);
 	test_join_retry();
-	puts("server_record: 16 scenarios passed");
+	puts("server_record: 17 scenarios passed");
 	return 0;
 }
