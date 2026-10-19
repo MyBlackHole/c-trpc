@@ -2017,33 +2017,40 @@ tr_rpc_executor_task_is_admission(const struct tr_rpc_endpoint *endpoint,
 	       task->first_message != 0;
 }
 
-/* 执行器锁下撤销本轮刚刚追加的尾节点。保存追加前的 tail，
- * 不再在异常路径扫描调用队列；两种发布失败共享完全相同的任务、
- * 空闲节点、计数与组准入额度回滚。
+/* 执行器锁下撤销本轮刚追加的尾节点。前一 tail 由同一锁保护，
+ * 因此异常路径不必遍历队列；两条失败路径共享完整的所有权回滚。
  */
-static void tr_rpc_undo_push_locked(
-	struct tr_rpc_executor *executor, struct tr_rpc_executor_callq *callq,
-	uint32_t index, uint32_t old_tail, int group_accepted)
+struct tr_rpc_push_undo {
+	struct tr_rpc_executor *executor;
+	struct tr_rpc_executor_callq *callq;
+	uint32_t index;
+	uint32_t old_tail;
+	int group_accepted;
+};
+
+static void tr_rpc_undo_push_locked(struct tr_rpc_push_undo *undo)
 {
-	struct tr_rpc_executor_node *node = &executor->nodes[index];
+	struct tr_rpc_executor *executor = undo->executor;
+	struct tr_rpc_executor_callq *callq = undo->callq;
+	struct tr_rpc_executor_node *node = &executor->nodes[undo->index];
 
 #ifndef NDEBUG
-	assert(callq->tail == index);
+	assert(callq->tail == undo->index);
 	assert(node->next == TR_RPC_EXEC_NONE);
 	assert(callq->queued_count != 0U);
 	assert(executor->queued_count != 0U);
 #endif
-	if (old_tail == TR_RPC_EXEC_NONE)
+	if (undo->old_tail == TR_RPC_EXEC_NONE)
 		callq->head = TR_RPC_EXEC_NONE;
 	else
-		executor->nodes[old_tail].next = TR_RPC_EXEC_NONE;
-	callq->tail = old_tail;
+		executor->nodes[undo->old_tail].next = TR_RPC_EXEC_NONE;
+	callq->tail = undo->old_tail;
 	node->enqueued_ns = 0U;
 	node->next = executor->free_head;
-	executor->free_head = index;
+	executor->free_head = undo->index;
 	callq->queued_count--;
 	executor->queued_count--;
-	if (group_accepted)
+	if (undo->group_accepted)
 		tr_rpc_executor_group_task_done(executor->group);
 }
 
@@ -2054,9 +2061,8 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	struct tr_rpc_executor_callq *callq;
 	struct tr_rpc_executor_node *node;
 	uint32_t node_index;
-	uint32_t old_tail;
+	struct tr_rpc_push_undo undo;
 	int admission;
-	int group_task_accepted = 0;
 	int ret = TR_OK;
 
 	if (!task || tr_rpc_call_handle_slot(task->call) >= endpoint->config.max_calls)
@@ -2097,11 +2103,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		callq->queued_count = 0;
 		callq->cancelled = 0;
 	}
+	undo.group_accepted = 0;
 	if (executor->group) {
 		ret = tr_rpc_executor_group_task_accept(executor->group);
 		if (ret != TR_OK)
 			goto out;
-		group_task_accepted = 1;
+		undo.group_accepted = 1;
 	}
 
 	node_index = executor->free_head;
@@ -2113,9 +2120,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 			tr_rpc_now_ns() : 0;
 	node->next = TR_RPC_EXEC_NONE;
 
-	old_tail = callq->tail;
-	if (old_tail != TR_RPC_EXEC_NONE)
-		executor->nodes[old_tail].next = node_index;
+	undo.executor = executor;
+	undo.callq = callq;
+	undo.index = node_index;
+	undo.old_tail = callq->tail;
+	if (undo.old_tail != TR_RPC_EXEC_NONE)
+		executor->nodes[undo.old_tail].next = node_index;
 	else
 		callq->head = node_index;
 	callq->tail = node_index;
@@ -2126,8 +2136,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		ret = tr_rpc_executor_ready_push_locked(executor,
 							tr_rpc_call_handle_slot(task->call));
 		if (ret != TR_OK) {
-			tr_rpc_undo_push_locked(executor, callq, node_index,
-						 old_tail, group_task_accepted);
+			tr_rpc_undo_push_locked(&undo);
 			goto out;
 		}
 		callq->ready = 1;
@@ -2139,9 +2148,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 					callq->ready = 0;
 					tr_rpc_executor_ready_undo_push_locked(
 						executor, tr_rpc_call_handle_slot(task->call));
-					tr_rpc_undo_push_locked(
-						executor, callq, node_index, old_tail,
-						group_task_accepted);
+					tr_rpc_undo_push_locked(&undo);
 					goto out;
 				}
 				executor->group_enqueued = 1;
