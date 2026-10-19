@@ -434,6 +434,31 @@ static void runtime_multi_shard_config_init(
 	}
 }
 
+/* V2 / 纯传输运行时不应隐式创建 V1 执行器工作域；Reactor 生命周期
+ * 独立存在。此处用真实 Runtime 和 pthread 计数检查，不伪造执行器。
+ */
+static void test_runtime_without_legacy_execution(void)
+{
+	struct tr_runtime_shard_config shard = {0};
+	struct tr_runtime_config config = {0};
+	struct tr_runtime *runtime = NULL;
+
+	config.shard_count = 1U;
+	config.shards = &shard;
+	reset_probe(0U);
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(runtime != NULL);
+	assert(tr_runtime_shard_rpc_executor(
+	               tr_runtime_shard_at(runtime, 0U)) == NULL);
+	expect_threads(0U, 0U);
+	assert(tr_runtime_start(runtime) == TR_OK);
+	expect_threads(1U, 0U);
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	expect_threads(1U, 1U);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	expect_threads(1U, 1U);
+}
+
 static void test_runtime_multi_shard_threads(void)
 {
 	struct tr_runtime_config config;
@@ -937,6 +962,7 @@ int main(void)
 	RUN_TEST(test_server_multi_shard_threads);
 	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
 	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
+	RUN_TEST(test_runtime_without_legacy_execution);
 	RUN_TEST(test_runtime_multi_shard_threads);
 	RUN_TEST(test_runtime_control_lifecycle_serialized);
 	RUN_TEST(test_reactor_join_failure_is_retryable);
