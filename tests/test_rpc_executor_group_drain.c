@@ -9,6 +9,7 @@
 #include "tr/trpc.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -33,12 +34,86 @@ static struct drain_context *join_watch_context;
 static unsigned join_watch_count;
 static int join_watch_enabled;
 
+/* 测试内用条件变量冻结真实 pthread_create/join 边界。
+ * 不改生产线程实现，不依赖 sleep 猜测生命周期状态。
+ */
+struct lifecycle_gate {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int entered;
+	int open;
+};
+
+static struct lifecycle_gate create_gate = {
+	PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0
+};
+static struct lifecycle_gate stop_gate = {
+	PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, 0, 0
+};
+static _Thread_local int hold_group_create;
+static _Thread_local int hold_group_join;
+static _Thread_local int inject_group_join_failure;
+static _Thread_local unsigned group_join_attempts;
+
+static void lifecycle_gate_enter(struct lifecycle_gate *gate)
+{
+	pthread_mutex_lock(&gate->lock);
+	gate->entered = 1;
+	pthread_cond_broadcast(&gate->cond);
+	while (!gate->open)
+		pthread_cond_wait(&gate->cond, &gate->lock);
+	pthread_mutex_unlock(&gate->lock);
+}
+
+static void lifecycle_gate_wait(struct lifecycle_gate *gate)
+{
+	struct timespec due;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &due) == 0);
+	due.tv_sec += 15;
+	pthread_mutex_lock(&gate->lock);
+	while (!gate->entered && ret == 0)
+		ret = pthread_cond_timedwait(&gate->cond, &gate->lock, &due);
+	assert(gate->entered);
+	pthread_mutex_unlock(&gate->lock);
+}
+
+static void lifecycle_gate_release(struct lifecycle_gate *gate)
+{
+	pthread_mutex_lock(&gate->lock);
+	assert(gate->entered && !gate->open);
+	gate->open = 1;
+	pthread_cond_broadcast(&gate->cond);
+	pthread_mutex_unlock(&gate->lock);
+}
+
+typedef void *(*thread_start_fn)(void *);
+int __real_pthread_create(pthread_t *, const pthread_attr_t *,
+			  thread_start_fn, void *);
+
+int __wrap_pthread_create(pthread_t *id, const pthread_attr_t *attr,
+			 thread_start_fn start, void *arg)
+{
+	if (hold_group_create) {
+		hold_group_create = 0;
+		lifecycle_gate_enter(&create_gate);
+	}
+	return __real_pthread_create(id, attr, start, arg);
+}
+
 int __real_pthread_join(pthread_t thread, void **result);
 
 int __wrap_pthread_join(pthread_t thread, void **result)
 {
 	struct drain_context *context = NULL;
 
+	if (hold_group_join) {
+		hold_group_join = 0;
+		lifecycle_gate_enter(&stop_gate);
+	}
+	if (inject_group_join_failure && ++group_join_attempts == 2U)
+		return EINVAL;
 	pthread_mutex_lock(&join_watch_lock);
 	if (join_watch_enabled && ++join_watch_count == 2U)
 		context = join_watch_context;
@@ -393,8 +468,101 @@ static void test_generic_worker_rejects_legacy_lifecycle(void)
 	assert(tr_rpc_executor_group_destroy_checked(probe.legacy) == TR_OK);
 }
 
+/* 两个控制调用都可能在释放组锁后操作 pthread_t 数组。
+ * 必须验证另一控制线程不能并发创建、join 或释放该数组。
+ */
+struct group_operation {
+	struct tr_rpc_executor_group *group;
+	int result;
+};
+
+static void *group_start_thread(void *arg)
+{
+	struct group_operation *op = arg;
+
+	hold_group_create = 1;
+	op->result = tr_rpc_executor_group_start(op->group);
+	return NULL;
+}
+
+static void *group_stop_thread(void *arg)
+{
+	struct group_operation *op = arg;
+
+	hold_group_join = 1;
+	op->result = tr_rpc_executor_group_stop(op->group);
+	return NULL;
+}
+
+static void assert_group_busy(struct tr_rpc_executor_group *group)
+{
+	assert(tr_rpc_executor_group_can_start(group) == TR_ERR_STATE);
+	assert(tr_rpc_executor_group_start(group) == TR_ERR_STATE);
+	assert(tr_rpc_executor_group_stop(group) == TR_ERR_STATE);
+	assert(tr_rpc_executor_group_destroy_checked(group) == TR_ERR_STATE);
+}
+
+static void test_group_lifecycle_owners_are_serialized(void)
+{
+	struct tr_rpc_executor_group *group = NULL;
+	struct group_operation op;
+	pthread_t controller;
+
+	assert(tr_rpc_executor_group_create(1U, 2U, 2U, &group) == TR_OK);
+	assert(tr_rpc_executor_group_can_start(group) == TR_OK);
+	op.group = group;
+	op.result = TR_ERR_STATE;
+	assert(pthread_create(&controller, NULL, group_start_thread, &op) == 0);
+	lifecycle_gate_wait(&create_gate);
+	/* 第一条线程尚未创建，绝不允许并发启动、停止或销毁。 */
+	assert_group_busy(group);
+	lifecycle_gate_release(&create_gate);
+	assert(pthread_join(controller, NULL) == 0);
+	assert(op.result == TR_OK);
+	assert(tr_rpc_executor_group_can_start(group) == TR_ERR_STATE);
+
+	op.result = TR_ERR_STATE;
+	assert(pthread_create(&controller, NULL, group_stop_thread, &op) == 0);
+	lifecycle_gate_wait(&stop_gate);
+	/* stop 已发布停止门禁，但尚未回收 pthread_t。 */
+	assert_group_busy(group);
+	lifecycle_gate_release(&stop_gate);
+	assert(pthread_join(controller, NULL) == 0);
+	assert(op.result == TR_OK);
+	assert(tr_rpc_executor_group_can_start(group) == TR_OK);
+
+	/* 控制门禁完全解除，下一工作线程轮次仍可启动并收敛。 */
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+	assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+}
+
+static void test_group_join_failure_keeps_retry_owner(void)
+{
+	struct tr_rpc_executor_group *group = NULL;
+
+	assert(tr_rpc_executor_group_create(1U, 2U, 2U, &group) == TR_OK);
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	inject_group_join_failure = 1;
+	group_join_attempts = 0U;
+	/* 第一线程 join 成功，第二线程故意拒绝回收。 */
+	assert(tr_rpc_executor_group_stop(group) == TR_ERR_SYS);
+	assert(group_join_attempts == 2U);
+	assert(tr_rpc_executor_group_can_start(group) == TR_ERR_STATE);
+	/* 第二次从精确的未回收线程继续，不重复 join 第一条。 */
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+	assert(group_join_attempts == 3U);
+	inject_group_join_failure = 0;
+	assert(tr_rpc_executor_group_can_start(group) == TR_OK);
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+	assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+}
+
 int main(void)
 {
+	test_group_lifecycle_owners_are_serialized();
+	test_group_join_failure_keeps_retry_owner();
 	test_generic_worker_rejects_legacy_lifecycle();
 	test_server_destroy_drains_accepted_group_tasks();
 	return 0;
