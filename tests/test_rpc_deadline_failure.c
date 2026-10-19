@@ -64,21 +64,21 @@ int __real_tr_reactor_timer_register(struct tr_reactor *reactor,
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
 	uint64_t deadline_ns);
 int __real_tr_reactor_timer_unregister(struct tr_reactor_timer_handle timer);
-int __real_tr_channel_set_handler(
-	struct tr_channel *, tr_stream_data_cb, tr_stream_event_cb,
-	tr_channel_event_cb, void *);
+typedef struct tr_channel Chan;
+typedef tr_stream_data_cb Dcb;
+typedef tr_stream_event_cb Scb;
+typedef tr_channel_event_cb Ecb;
 
-int __wrap_tr_channel_set_handler(
-	struct tr_channel *channel, tr_stream_data_cb data,
-	tr_stream_event_cb stream, tr_channel_event_cb event, void *arg)
+int __real_tr_channel_set_handler(Chan *, Dcb, Scb, Ecb, void *);
+
+int __wrap_tr_channel_set_handler(Chan *ch, Dcb d, Scb s, Ecb e, void *arg)
 {
-	if (data && (uintptr_t)channel == atomic_load(&publish_fail_channel) &&
+	if (d && (uintptr_t)ch == atomic_load(&publish_fail_channel) &&
 	    atomic_exchange(&fail_publish_once, 0)) {
 		atomic_fetch_add(&failed_publishes, 1U);
 		return TR_ERR_SYS;
 	}
-	return __real_tr_channel_set_handler(
-		channel, data, stream, event, arg);
+	return __real_tr_channel_set_handler(ch, d, s, e, arg);
 }
 
 int __wrap_tr_reactor_timer_unregister(struct tr_reactor_timer_handle timer)
@@ -688,12 +688,13 @@ static void test_half_close_order(int remote_first)
 static void test_create_rollback_retains_timer_owner(void)
 {
 	struct fixture f;
-	struct tr_rpc_endpoint_config ec = { 0 };
+	struct tr_rpc_endpoint_config ec;
 	struct tr_rpc_endpoint *partial = NULL;
 	struct tr_rpc_endpoint_stats stats;
 	int ret;
 
 	fixture_init(&f);
+	memset(&ec, 0, sizeof(ec));
 	/* 消除默认 Endpoint 的 handler/timer 发布，保留同一可用 Channel。 */
 	assert(tr_rpc_endpoint_destroy(f.rpc) == TR_OK);
 	f.rpc = NULL;
