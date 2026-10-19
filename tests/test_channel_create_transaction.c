@@ -430,26 +430,26 @@ static void test_split_rollback_retains_only_live_callback(void)
 	struct channel_create_fixture fixture;
 	struct tr_channel_config cfg = channel_config(1);
 	struct tr_channel *channel = NULL;
-	struct tr_conn_handle control, bulk;
+	struct tr_conn_handle a, b;
+	struct tr_channel **p = &channel;
 	int ret;
 
 	fixture_init(&fixture, 1);
-	control = fixture.control;
-	bulk = fixture.bulk;
+	a = fixture.control;
+	b = fixture.bulk;
 	/* 第二个 handler 安装拒绝；控制通道回滚解绑/关闭再失败。
 	 * BULK 连接可以正常关闭，但 CONTROL 仍保存 Channel 回调。
 	 */
 	atomic_store(&fail_handler_at, 2U);
 	atomic_store(&fail_handler_also_at, 3U);
 	atomic_store(&fail_close_at, 1U);
-	ret = tr_channel_create_deferred(
-	        &cfg, control, bulk, NULL, NULL, NULL, NULL, &channel);
+	ret = tr_channel_create_deferred(&cfg, a, b, NULL, NULL, NULL, NULL, p);
 	assert(ret == TR_ERR_SYS);
 	assert(channel != NULL);
 	assert(atomic_load(&handler_attempts) == 3U);
 	assert(atomic_load(&close_attempts) == 2U);
-	assert_connection_state(control, TR_CONN_ACTIVE);
-	assert_connection_state(bulk, TR_CONN_FREE);
+	assert_connection_state(a, TR_CONN_ACTIVE);
+	assert_connection_state(b, TR_CONN_FREE);
 
 	assert(tr_channel_destroy(channel) == TR_OK);
 	channel = NULL;
