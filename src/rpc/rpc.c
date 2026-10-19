@@ -283,6 +283,10 @@ struct tr_rpc_executor_group {
 	uint32_t join_cursor;
 	/* 已接受但尚未完成的任务数；工作线程停机前必须排空。 */
 	uint64_t outstanding_tasks;
+	/* 只有工作线程轮次真正启动后才接受新任务；成功 stop 后保持关闭，
+	 * 下一次 start 显式重新开启。该门禁与 stopping 一样由 group->lock 保护。
+	 */
+	int accepting;
 	int stopping;
 };
 
@@ -1937,7 +1941,7 @@ static int tr_rpc_executor_group_task_accept(
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&group->lock);
-	if (group->stopping) {
+	if (!group->accepting || group->stopping) {
 		ret = TR_ERR_CLOSED;
 	} else if (group->outstanding_tasks == UINT64_MAX) {
 		ret = TR_ERR_STATE;
@@ -3559,6 +3563,7 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 
 	pthread_mutex_lock(&group->lock);
 	if (group->started_threads == 0U) {
+		group->accepting = 0;
 		if (group->ready_head || group->ready_tail ||
 		    group->ready_count != 0U ||
 		    group->outstanding_tasks != 0U) {
@@ -3570,6 +3575,7 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 		pthread_mutex_unlock(&group->lock);
 		return TR_OK;
 	}
+	group->accepting = 0;
 	group->stopping = 1;
 	pthread_cond_broadcast(&group->cond);
 	pthread_mutex_unlock(&group->lock);
@@ -3654,6 +3660,12 @@ int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
 		}
 		group->started_threads++;
 	}
+	/* 不允许预启动或已停止组在没有消费者时接收任务引用。
+	 * 线程已全部建立后再发布接受门禁，避免部分启动失败遗留任务。
+	 */
+	pthread_mutex_lock(&group->lock);
+	group->accepting = 1;
+	pthread_mutex_unlock(&group->lock);
 	return TR_OK;
 }
 
