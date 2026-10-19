@@ -727,12 +727,16 @@ tr_channel_normalize_create_hello_error(struct tr_channel *channel,
 	if (ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
 		return ret;
 
-	/* 处理函数已经安装后，对端可能在 Channel 创建返回前完成协议判定
-	 * 并关闭连接。创建的既有契约是“构造成功，随后通过通道 DOWN
-	 * 表达协商失败”。先跨过反应器静止屏障，确保可能的关闭
-	 * 回调已完成，再根据 Channel 自身状态判断是否属于该异步关闭。
+	/* Reactor 所有者回调在当前轮次内串行化，无须递归等待静默；
+	 * 外部调用则必须先确认回调静默，才能把 STALE/CLOSED
+	 * 规范化为异步连接 DOWN。静默失败不可伪装成握手成功。
 	 */
-	(void)tr_reactor_quiesce(channel->reactor);
+	if (!tr_reactor_in_owner_context_for(channel->reactor)) {
+		int fence = tr_reactor_quiesce(channel->reactor);
+
+		if (fence != TR_OK)
+			return fence;
+	}
 
 	pthread_mutex_lock(&channel->lock);
 	mask = tr_channel_connection_lane_mask_locked(channel, connection);
