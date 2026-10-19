@@ -145,6 +145,14 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 				 uint32_t max_calls_per_endpoint,
 				 uint32_t thread_count,
 				 struct tr_rpc_executor_group **out);
+
+/* start/stop/destroy 同一组时独占生命周期控制门禁。并发控制者收到
+ * TR_ERR_STATE 且不得修改线程数组、准入门禁或回收游标，调用方可随后重试。
+ * 这道门禁不持有组锁等待 pthread_create 或 pthread_join。
+ *
+ * destroy_checked() 释放组的存储，因此外部组所有者必须在销毁前禁止
+ * 新的裸指针使用者；内部忙状态不能代替对象内存的外部存活期管理。
+ */
 int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group);
 int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group);
 int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group);
