@@ -3037,6 +3037,8 @@ struct tr_channel_build {
 struct tr_channel_create_publish_request {
 	struct tr_channel *channel;
 	int start_handshake;
+	/* 构造失败但仍有 Reactor 回调引用时，移交部分对象的销毁责任。 */
+	int needs_recovery;
 };
 
 static int tr_channel_create_connection_active(
@@ -3053,45 +3055,54 @@ static int tr_channel_create_connection_active(
 
 static int tr_channel_create_rollback_on_owner(
 	struct tr_channel *channel, int control_handler_installed,
-	int bulk_handler_installed)
+	int bulk_handler_installed, int *needs_recovery)
 {
 	struct tr_conn_handle control = channel->control_connection;
 	struct tr_conn_handle bulk = channel->bulk_connection;
 	int split = !tr_conn_equal(control, bulk);
+	int control_safe = !control_handler_installed;
+	int bulk_safe = !bulk_handler_installed;
 	int ret;
 	int final = TR_OK;
 
-	/* 构造函数尚未向调用方发布 Channel。回滚时先撤销已经发布的
-	 * callback_arg，再退役曾经进入 Channel 发布事务的
-	 * 物理连接。所有者直接 set_handler 对精确活跃句柄只会成功；
-	 * 若连接已经退役则返回 TR_ERR_STALE，同样证明事件源已静默。
+	/* 先解绑 callback_arg，再尝试关闭精确连接。两条路径只要有一条
+	 * 确认成功，就不会再从该连接回调进入此 Channel。
+	 * 两个屏障均失败时，不能让词法清理释放仍被 Reactor 引用的对象。
 	 */
 	if (control_handler_installed) {
 		ret = tr_reactor_set_handler(control, NULL, NULL, NULL);
-		if (ret != TR_OK && ret != TR_ERR_STALE)
+		if (ret == TR_OK || ret == TR_ERR_STALE)
+			control_safe = 1;
+		else if (final == TR_OK)
 			final = ret;
 	}
 	if (bulk_handler_installed) {
 		ret = tr_reactor_set_handler(bulk, NULL, NULL, NULL);
-		if (ret != TR_OK && ret != TR_ERR_STALE && final == TR_OK)
+		if (ret == TR_OK || ret == TR_ERR_STALE)
+			bulk_safe = 1;
+		else if (final == TR_OK)
 			final = ret;
 	}
 
-	/* 旧构造契约在任一处理函数已发布后都会关闭本次 Channel 使用的
-	 * 连接。保持这个终止语义，同时让关闭或陈旧状态成为最终静默证明。
+	/* 即使解绑失败仍尝试关闭，且保留第一次回滚错误。
+	 * 关闭成功可替代解绑成为强静默证明；关闭失败但已解绑也安全。
 	 */
 	if (control_handler_installed || bulk_handler_installed) {
 		ret = tr_reactor_close_on_owner(control);
-		if (ret != TR_OK && ret != TR_ERR_STALE && final == TR_OK)
+		if (ret == TR_OK || ret == TR_ERR_STALE)
+			control_safe = 1;
+		else if (final == TR_OK)
 			final = ret;
 		if (split) {
 			ret = tr_reactor_close_on_owner(bulk);
-			if (ret != TR_OK && ret != TR_ERR_STALE &&
-			    final == TR_OK)
+			if (ret == TR_OK || ret == TR_ERR_STALE)
+				bulk_safe = 1;
+			else if (final == TR_OK)
 				final = ret;
 		}
 	}
 
+	*needs_recovery = !control_safe || !bulk_safe;
 	return final;
 }
 
@@ -3160,7 +3171,10 @@ static int tr_channel_create_publish_on_owner(void *arg)
 
 rollback:
 	rollback_ret = tr_channel_create_rollback_on_owner(
-		channel, control_handler_installed, bulk_handler_installed);
+		channel, control_handler_installed, bulk_handler_installed,
+		&request->needs_recovery);
+	if (request->needs_recovery && rollback_ret == TR_OK)
+		return TR_ERR_STATE;
 	return rollback_ret != TR_OK ? rollback_ret : ret;
 }
 
@@ -3332,13 +3346,22 @@ static int tr_channel_create_common(
 	{
 		struct tr_channel_create_publish_request request;
 
+		request = (struct tr_channel_create_publish_request){0};
 		request.channel = channel;
 		request.start_handshake = start_handshake;
 		ret = tr_reactor_call(
 			channel->reactor, tr_channel_create_publish_on_owner,
 			&request);
-		if (ret != TR_OK)
+		if (ret != TR_OK) {
+			/* 异步回调仍可能持有 Channel。即使创建失败，
+			 * 调用方也须通过 destroy 重试完整解绑，不得隐式 free。
+			 */
+			if (request.needs_recovery) {
+				*out = channel;
+				build.channel = NULL;
+			}
 			return ret;
+		}
 	}
 
 	*out = channel;
