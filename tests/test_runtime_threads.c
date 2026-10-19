@@ -79,6 +79,15 @@ static void runtime_gate_open(struct runtime_control_gate *gate)
 	pthread_mutex_unlock(&gate->lock);
 }
 
+static void runtime_gate_rearm(struct runtime_control_gate *gate)
+{
+	pthread_mutex_lock(&gate->lock);
+	assert(gate->entered && gate->open);
+	gate->entered = 0;
+	gate->open = 0;
+	pthread_mutex_unlock(&gate->lock);
+}
+
 static void runtime_gate_init(struct runtime_control_gate *gate)
 {
 	memset(gate, 0, sizeof(*gate));
@@ -472,6 +481,15 @@ static void *runtime_control_stop(void *arg)
 	return NULL;
 }
 
+static void *runtime_control_destroy(void *arg)
+{
+	struct runtime_control_probe *probe = arg;
+
+	hold_runtime_join = 1;
+	probe->result = tr_runtime_destroy(probe->runtime);
+	return NULL;
+}
+
 static void test_runtime_control_lifecycle_serialized(void)
 {
 	struct tr_runtime_config config;
@@ -520,10 +538,23 @@ static void test_runtime_control_lifecycle_serialized(void)
 	assert(pthread_join(controller, NULL) == 0);
 	assert(probe.result == TR_OK);
 
-	/* 控制轮次完成后，同一 Runtime 允许重新启动、停止并最终销毁。 */
+	/* stop 返回后可以重新启动，最终 destroy 必须继续持有整个
+	 * 生命周期门禁直到线程收敛与分片释放，不能让其他控制者插入。
+	 */
 	assert(tr_runtime_start(runtime) == TR_OK);
-	assert(tr_runtime_stop(runtime) == TR_OK);
-	assert(tr_runtime_destroy(runtime) == TR_OK);
+	runtime_gate_rearm(&join_gate);
+	probe.result = TR_ERR_STATE;
+	ret = pthread_create(&controller, NULL, runtime_control_destroy, &probe);
+	assert(ret == 0);
+	runtime_gate_wait(&join_gate);
+	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
+	assert(tr_runtime_stop(runtime) == TR_ERR_STATE);
+	assert(tr_runtime_destroy(runtime) == TR_ERR_STATE);
+	runtime_gate_open(&join_gate);
+	assert(pthread_join(controller, NULL) == 0);
+	assert(probe.result == TR_OK);
+	/* probe.runtime 指向的存储已由 destroy 释放，禁止再次访问。 */
+	runtime = NULL;
 	runtime_gate_destroy(&join_gate);
 	runtime_gate_destroy(&create_gate);
 	created = atomic_load(&created_threads);
