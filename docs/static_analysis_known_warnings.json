@@ -93,7 +93,7 @@
     {
       "source": "src/transport/channel/channel.c",
       "file": "src/transport/channel/channel.c",
-      "line": 3258,
+      "line": 3275,
       "column": 10,
       "check": "clang-analyzer-unix.Malloc",
       "message": "Potential leak of memory pointed to by 'build.channel'"
