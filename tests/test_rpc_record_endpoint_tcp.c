@@ -498,8 +498,7 @@ static void tcp_pair(int *a, int *b)
 }
 /* Channel 通知发生在既有 owner 上；这里只做原子观测，不改变关闭决策。 */
 static void note_event(struct tr_channel *channel,
-                               enum tr_channel_event event, int status,
-                               void *arg)
+                       enum tr_channel_event event, int status, void *arg)
 {
 	struct peer *peer = arg;
 
