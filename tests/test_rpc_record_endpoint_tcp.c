@@ -641,15 +641,14 @@ struct client_create {
 };
 /* 失败时才查询真实 Channel/传输快照，保持成功热路径和准入不变。
  * 只读接口各自锁定状态，并非同一时刻原子快照。 */
-static void diagnose_stream_open_failure(const struct client_create *r,
-                                         int result)
+static void log_open_failure(const struct client_create *r, int result)
 {
 	struct tr_channel_stats client = {0}, server = {0};
 	enum tr_connection_state conn_state = TR_CONN_FREE;
 	int client_ret = tr_channel_get_stats(r->f->client.channel, &client);
 	int server_ret = tr_channel_get_stats(r->f->server.channel, &server);
-	int state_ret = tr_reactor_get_connection_state(
-	        r->f->client.connection, &conn_state);
+	struct tr_conn_handle connection = r->f->client.connection;
+	int state_ret = tr_reactor_get_connection_state(connection, &conn_state);
 
 	fprintf(stderr,
 	        "STREAM_OPEN 失败快照：phase=%s method=%u ret=%d "
@@ -666,9 +665,9 @@ static void diagnose_stream_open_failure(const struct client_create *r,
 	        (int)client.bulk_connection.state,
 	        (unsigned long long)client.streams_opened,
 	        (unsigned long long)client.streams_closed,
-	        (unsigned long long)client.stream_errors,
-	        server_ret, (int)server.state,
-	        (int)server.control_lane_state, (int)server.bulk_lane_state,
+	        (unsigned long long)client.stream_errors, server_ret,
+	        (int)server.state, (int)server.control_lane_state,
+	        (int)server.bulk_lane_state,
 	        (int)server.control_connection.state,
 	        (int)server.bulk_connection.state,
 	        (unsigned long long)server.streams_opened,
@@ -712,7 +711,7 @@ static int client_open(void *arg)
 		      r->stream.slot == before.slot &&
 		      r->stream.generation == before.generation);
 		if (ret != TR_AGAIN)
-			diagnose_stream_open_failure(r, ret);
+			log_open_failure(r, ret);
 		return ret;
 	}
 	CHECK(tr_rpc_record_stream_create_on_owner(
@@ -744,18 +743,21 @@ static unsigned open_call_request(struct client_create *r)
 	}
 	return r->stream.slot;
 }
-static unsigned open_call_mode_phase(struct fixture *f, unsigned method,
-                                     bool withhold_open, const char *phase)
+static unsigned open_call_stage(struct fixture *f, unsigned method,
+                                bool withhold_open, const char *phase)
 {
-	struct client_create r = {
-	        .f = f, .method = method, .withhold_open = withhold_open,
-	        .phase = phase};
+	struct client_create r = {0};
+
+	r.f = f;
+	r.method = method;
+	r.withhold_open = withhold_open;
+	r.phase = phase;
 	return open_call_request(&r);
 }
 static unsigned open_call_mode(struct fixture *f, unsigned method,
                                bool withhold_open)
 {
-	return open_call_mode_phase(f, method, withhold_open, "普通调用");
+	return open_call_stage(f, method, withhold_open, "普通调用");
 }
 static unsigned open_call(struct fixture *f, unsigned method)
 {
@@ -1084,13 +1086,12 @@ static void test_slow_open(unsigned partial)
 	 * 纳秒级精确边界和不续期由派发器专测独立核验。final_wait 仍为30s。 */
 	fixture_init_open_timeout(&f, 1024 * 1024, 8, UINT64_C(2000000000));
 	uint64_t baseline = atomic_load(&f.server.budget.current_bytes);
-	unsigned healthy = open_call_mode_phase(&f, 3, false, "慢 OPEN/健康流");
+	unsigned healthy = open_call_stage(&f, 3, false, "慢 OPEN/健康流");
 	atomic_store(&f.use_gate, true);
 	request(&f, healthy, 3, 1, 80);
 	gate_wait(&f.gate, false);
 	CHECK(atomic_load(&f.business[0].active) == 1);
-	unsigned slow = open_call_mode_phase(&f, 0, true,
-	                                     "慢 OPEN/等待超时流");
+	unsigned slow = open_call_stage(&f, 0, true, "慢 OPEN/等待超时");
 	CHECK(slow != healthy);
 	wait_count(&f.server.opened, 2);
 	struct tr_stream_handle old = f.client.streams[slow];
@@ -1150,10 +1151,8 @@ static void test_slow_open(unsigned partial)
 	      TR_OK);
 	CHECK(tr_reactor_call(f.client.reactor, prepare_client_reuse, &f) ==
 	      TR_OK);
-	unsigned filler = open_call_mode_phase(&f, 0, false,
-	                                       "慢 OPEN/槽位复用第 1 次");
-	unsigned reused = open_call_mode_phase(&f, 0, false,
-	                                       "慢 OPEN/槽位复用第 2 次");
+	unsigned filler = open_call_stage(&f, 0, false, "慢 OPEN/复用1");
+	unsigned reused = open_call_stage(&f, 0, false, "慢 OPEN/复用2");
 	CHECK(filler == healthy && reused == slow &&
 	      f.client.streams[reused].generation != old.generation);
 	struct peer_reset_request stale = {old, TR_ERR_TIMEOUT};
