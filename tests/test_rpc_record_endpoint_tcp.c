@@ -553,8 +553,8 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 		atomic_store(&observed_fd, fd);
 	}
 	CHECK(tr_channel_create(&cc, conn, conn, server ? NULL : on_data,
-	                        server ? NULL : on_event,
-	                        note_channel_event, p, &p->channel) == TR_OK);
+	                        server ? NULL : on_event, note_channel_event,
+	                        p, &p->channel) == TR_OK);
 }
 static int start_server(void *arg)
 {
@@ -670,15 +670,15 @@ static void log_open_failure(const struct client_create *r, int result)
 	struct tr_conn_handle conn = r->f->client.connection;
 	int state_ret = tr_reactor_get_connection_state(conn, &conn_state);
 
+	fprintf(stderr, "慢 OPEN 变体：%u\n", r->f->slow_variant);
 	fprintf(stderr,
-	        "STREAM_OPEN 失败快照：phase=%s variant=%u method=%u ret=%d "
+	        "STREAM_OPEN 失败快照：phase=%s method=%u ret=%d "
 	        "active=%u retries=%u conn_ret=%d conn_state=%d "
 	        "client_stats=%d client_state=%d lanes=%d/%d "
 	        "client_conn=%d/%d opened=%llu closed=%llu errors=%llu "
 	        "server_stats=%d server_state=%d lanes=%d/%d "
 	        "server_conn=%d/%d opened=%llu closed=%llu errors=%llu\n",
-	        r->phase ? r->phase : "未指定", r->f->slow_variant,
-	        r->method, result,
+	        r->phase ? r->phase : "未指定", r->method, result,
 	        tr_channel_active_streams(r->f->client.channel), r->retries,
 	        state_ret, (int)conn_state, client_ret, (int)client.state,
 	        (int)client.control_lane_state, (int)client.bulk_lane_state,
