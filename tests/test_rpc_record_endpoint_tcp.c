@@ -1047,11 +1047,12 @@ static void test_close_hard_error_isolation(void)
 {
 	struct fixture f;
 	fixture_init_open_timeout(&f, 1024 * 1024, 8, UINT64_C(15000000000));
-	unsigned blocked = open_call(&f, 100);
+	unsigned blocked = open_call_mode(&f, 100, true);
 	wait_count(&f.server.opened, 1);
 	CHECK(f.server.streams[blocked].channel == f.server.channel);
 	atomic_store(&hard_close_target, f.server.streams[blocked].slot);
 	atomic_store(&hard_close_block, true);
+	send_record(&f, blocked, 100, TR_RPC_RECORD_OPEN, 0);
 	wait_count(&hard_close_attempts, 3);
 	wait_count(&f.client.terminals[blocked], 1);
 	CHECK(!atomic_load(&f.server.terminals[blocked]));
