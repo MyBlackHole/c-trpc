@@ -497,7 +497,7 @@ static void tcp_pair(int *a, int *b)
 	CHECK(close(listener) == 0);
 }
 /* Channel 通知发生在既有 owner 上；这里只做原子观测，不改变关闭决策。 */
-static void note_channel_event(struct tr_channel *channel,
+static void note_event(struct tr_channel *channel,
                                enum tr_channel_event event, int status,
                                void *arg)
 {
@@ -553,8 +553,8 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 		atomic_store(&observed_fd, fd);
 	}
 	CHECK(tr_channel_create(&cc, conn, conn, server ? NULL : on_data,
-	                        server ? NULL : on_event, note_channel_event,
-	                        p, &p->channel) == TR_OK);
+	                        server ? NULL : on_event, note_event, p,
+	                        &p->channel) == TR_OK);
 }
 static int start_server(void *arg)
 {
