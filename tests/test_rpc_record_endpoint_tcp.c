@@ -193,7 +193,10 @@ struct fixture {
 	struct method_context contexts[4];
 	struct business_state business[CAP];
 	struct gate gate;
+	struct gate credit_gate;
 	_Atomic bool use_gate;
+	_Atomic bool hold_final_credit;
+	_Atomic bool stop_credit_on_final;
 	_Atomic unsigned reject_method;
 	_Atomic bool bad_reply;
 	unsigned slow_variant;
@@ -421,6 +424,9 @@ static void client_terminal(struct tr_rpc_record_stream *call,
 {
 	struct peer *p = arg;
 	unsigned i = client_slot(p, call);
+	if (status == TR_RPC_STATUS_OK &&
+	    atomic_load(&p->fixture->stop_credit_on_final))
+		CHECK(tr_stream_stop_credit_on_owner(p->streams[i]) == TR_OK);
 	p->status[i] = status;
 	p->delivery[i] = delivery;
 	CHECK(atomic_fetch_add(&p->terminals[i], 1) == 0);
@@ -437,6 +443,10 @@ static enum tr_stream_data_disposition on_data(struct tr_stream_handle stream,
 	CHECK(stream.slot < CAP && p->calls[stream.slot]);
 	CHECK(tr_rpc_record_stream_receive_on_owner(
 	              p->calls[stream.slot], stream, b->data, b->len) == TR_OK);
+	if (atomic_load(&p->fixture->hold_final_credit) &&
+	    b->len >= TR_RPC_RECORD_HEADER_SIZE &&
+	    tr_get_le16(b->data + 6) == TR_RPC_RECORD_FINAL_STATUS)
+		gate_wait(&p->fixture->credit_gate, true);
 	atomic_fetch_add(&p->packets, 1);
 	if (p->hold) {
 		CHECK(!p->held);
@@ -591,7 +601,10 @@ static void fixture_init_full(struct fixture *f, uint64_t window,
 	                      .open_timeout_ns = open_timeout_ns,
 	                      .final_wait_ns = final_wait_ns};
 	gate_init(&f->gate);
+	gate_init(&f->credit_gate);
 	atomic_init(&f->use_gate, false);
+	atomic_init(&f->hold_final_credit, false);
+	atomic_init(&f->stop_credit_on_final, false);
 	atomic_init(&f->reject_method, 0);
 	atomic_init(&f->bad_reply, false);
 
@@ -915,6 +928,7 @@ static void fixture_destroy(struct fixture *f, bool stopped)
 	atomic_store(&client_channel, NULL);
 	atomic_store(&fatal_reactor, NULL);
 	gate_destroy(&f->gate);
+	gate_destroy(&f->credit_gate);
 }
 static void check_final(struct fixture *f, unsigned slot,
                         enum tr_rpc_status status)
@@ -1114,6 +1128,7 @@ static void test_slow_open(unsigned partial)
 	/* 真实 timer 驱动总期限；宽裕时间只避免调度抖动影响造包阶段。
 	 * 纳秒级精确边界和不续期由派发器专测独立核验。final_wait 仍为30s。 */
 	fixture_init_open_timeout(&f, 1024 * 1024, 8, UINT64_C(2000000000));
+	atomic_store(&f.stop_credit_on_final, true);
 	f.slow_variant = partial;
 	uint64_t baseline = atomic_load(&f.server.budget.current_bytes);
 	unsigned healthy = open_call_stage(&f, 3, false, "慢 OPEN/健康流");
@@ -1191,6 +1206,34 @@ static void test_slow_open(unsigned partial)
 	request(&f, filler, 0, 1, 80);
 	request(&f, reused, 0, 1, 80);
 	check_final(&f, filler, TR_RPC_STATUS_OK);
+	check_final(&f, reused, TR_RPC_STATUS_OK);
+	fixture_destroy(&f, false);
+}
+/* 终局回调可先于 Channel 消费信用返回；应用同时关闭本地半流时，
+ * 已退役的对端流不能因迟到 WINDOW_UPDATE 使整条连接中止。 */
+static void test_close_before_credit(void)
+{
+	struct fixture f;
+	unsigned slot, reused;
+
+	fixture_init(&f, 1024 * 1024, 8);
+	atomic_store(&f.stop_credit_on_final, true);
+	atomic_store(&f.hold_final_credit, true);
+	slot = open_call(&f, 0);
+	request(&f, slot, 0, 1, 80);
+	check_final(&f, slot, TR_RPC_STATUS_OK);
+	gate_wait(&f.credit_gate, false);
+	CHECK(tr_stream_close(f.client.streams[slot]) == TR_OK);
+	gate_open(&f.credit_gate);
+	wait_network_retired(&f);
+	CHECK(until_owner(&f, endpoint_quiet) == TR_OK);
+	CHECK(tr_reactor_call(f.server.reactor, prepare_server_reuse, &f) ==
+	      TR_OK);
+	CHECK(tr_reactor_call(f.client.reactor, prepare_client_reuse, &f) ==
+	      TR_OK);
+	reused = open_call_stage(&f, 0, false, "终局后信用/槽位复用");
+	CHECK(reused == slot);
+	request(&f, reused, 0, 1, 80);
 	check_final(&f, reused, TR_RPC_STATUS_OK);
 	fixture_destroy(&f, false);
 }
@@ -1439,6 +1482,7 @@ int main(void)
 	test_final_timeout();
 	test_real_slot_reuse();
 	test_open_tx_pressure();
+	test_close_before_credit();
 	for (unsigned partial = 0; partial < 3; ++partial)
 		test_slow_open(partial);
 	puts("rpc_record_endpoint_tcp: 3 slow OPEN cases passed");
