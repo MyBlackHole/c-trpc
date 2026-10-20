@@ -835,6 +835,9 @@ target("test_client_record")
     add_files("tests/test_client_record.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_rpc_record_client_call_start_public_on_owner",
+                "-Wl,--wrap=tr_rpc_record_client_start_on_owner",
+                "-Wl,--wrap=tr_reactor_timer_arm",
                 "-Wl,--wrap=tr_stream_open",
                 "-Wl,--wrap=tr_rpc_record_stream_create_on_owner",
                 "-Wl,--wrap=tr_channel_create_deferred",
