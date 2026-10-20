@@ -327,8 +327,9 @@ static enum tr_rpc_status business(struct tr_rpc_dispatch_id id,
 	      !tr_reactor_in_owner_context());
 	if (kind == TR_RPC_RECORD_MESSAGE) {
 		CHECK(view->header.decoded_size == BODY);
-		atomic_fetch_add(&f->work_entered, 1);
-		if (atomic_load(&f->block_work)) {
+		unsigned entered = atomic_fetch_add(&f->work_entered, 1) + 1;
+		/* 只暂停首条工作；第二条已受理调用仍需真实执行。 */
+		if (atomic_load(&f->block_work) && entered == 1) {
 			uint64_t end = now_ms() + WAIT_MS;
 			while (!tr_task_cancel_requested(cancel)) {
 				CHECK(now_ms() < end);
@@ -650,6 +651,52 @@ static void test_server_task_completion_and_callback(void)
 	fixture_destroy(&f);
 }
 
+static void test_queued_call_and_cancelled_work_drain(void)
+{
+	struct fixture f;
+	struct call cancelled, queued;
+	fixture_init(&f);
+	atomic_store(&f.block_work, true);
+	call_start(&cancelled, &f);
+	wait_count(&cancelled.writable, 1);
+	call_send_and_half_close(&cancelled);
+	wait_count(&f.work_entered, 1);
+	call_start(&queued, &f);
+	wait_count(&queued.writable, 1);
+	call_send_and_half_close(&queued);
+	wait_count(&f.received[TR_RPC_RECORD_MESSAGE], 2);
+	wait_count(&f.received[TR_RPC_RECORD_HALF_CLOSE], 2);
+	CHECK(tr_reactor_call(owner(&f, true), barrier, NULL) == TR_OK);
+	CHECK(atomic_load(&f.work_entered) == 1);
+	CHECK(tr_client_record_cancel(cancelled.handle) == TR_OK);
+	wait_count(&f.work_cancelled, 1);
+	wait_count(&f.work_gate.entered, 1);
+	atomic_store(&f.block_server_terminal, true);
+	struct drain_wait wait = {.fixture = &f, .server = true};
+	pthread_t thread;
+	CHECK(!pthread_create(&thread, NULL, drain_thread, &wait));
+	wait_count(&wait.rpc_waits, 1);
+	check_waiting(&wait);
+	gate_release(&f.work_gate);
+	wait_count(&f.work_exited, 1);
+	wait_count(&f.server_terminal_gate.entered, 1);
+	check_waiting(&wait);
+	gate_release(&f.server_terminal_gate);
+	wait_count(&f.work_exited, 2);
+	drain_finish(&wait, thread);
+	wait_count(&cancelled.terminals, 1);
+	wait_count(&queued.terminals, 1);
+	CHECK(cancelled.status == TR_RPC_STATUS_CANCELLED &&
+	      queued.status == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&cancelled.terminal_returns) == 1 &&
+	      atomic_load(&queued.terminal_returns) == 1);
+	CHECK(atomic_load(&f.server_terminal_returns) == 2);
+	check_reclaimed(&f, &cancelled);
+	check_reclaimed(&f, &queued);
+	fixture_destroy(&f);
+	puts("record drain queued cancel: ok");
+}
+
 static int freeze_before_pending_open(void *arg)
 {
 	struct fixture *f = arg;
@@ -739,6 +786,7 @@ static void test_pending_record_open_keeps_progress(void)
 int main(void)
 {
 	test_server_task_completion_and_callback();
+	test_queued_call_and_cancelled_work_drain();
 	puts("record drain task/completion/callback: ok");
 	test_client_opening_and_terminal();
 	puts("record drain opening/terminal: ok");
