@@ -647,8 +647,8 @@ static void log_open_failure(const struct client_create *r, int result)
 	enum tr_connection_state conn_state = TR_CONN_FREE;
 	int client_ret = tr_channel_get_stats(r->f->client.channel, &client);
 	int server_ret = tr_channel_get_stats(r->f->server.channel, &server);
-	struct tr_conn_handle connection = r->f->client.connection;
-	int state_ret = tr_reactor_get_connection_state(connection, &conn_state);
+	struct tr_conn_handle conn = r->f->client.connection;
+	int state_ret = tr_reactor_get_connection_state(conn, &conn_state);
 
 	fprintf(stderr,
 	        "STREAM_OPEN 失败快照：phase=%s method=%u ret=%d "
