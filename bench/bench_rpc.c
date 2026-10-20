@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/facade_legacy_internal.h"
+#include "../tests/rpc_v1_test_client_fixture.h"
 #include "tr/client.h"
 #include "tr/server.h"
 #include "tr/status.h"
@@ -52,7 +53,7 @@ struct slot {
 };
 
 struct client_run {
-	struct tr_client *client;
+	struct rpc_v1_test_client *client;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct slot *slots;
@@ -569,9 +570,9 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 			s->start_ns = now_ns();
 			/* Callback may run before submit returns. Never hold its mutex here. */
 			check(pthread_mutex_unlock(&run->lock), "submit unlock");
-			ret = tr_client_legacy_unary_call_ex(
-			        run->client, SERVICE, s->method, &request,
-			        &call_options, result, slot, &handle);
+			ret = tr_rpc_unary_call_ex(
+			        run->client->endpoint, SERVICE, s->method,
+			        &request, &call_options, result, slot, &handle);
 			check(pthread_mutex_lock(&run->lock), "submit lock");
 			s->submit_status = ret;
 			if (ret != TR_OK) {
@@ -599,7 +600,8 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		fprintf(stderr, "phase %s: incomplete, duplicate callback or corrupt response (%u/%u)\n",
 			name, completed, count);
 		/* Keep samples and payloads alive until all library callbacks are joined. */
-		check(tr_client_destroy(run->client), "client destroy");
+		check(rpc_v1_test_client_destroy(run->client),
+		      "client destroy");
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -818,9 +820,9 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 		/* 近似 API 入口，不是网络发送或服务端到达时间。 */
 		s->submit_ns = now_ns();
-		ret = tr_client_legacy_unary_call_ex(
-		        run->client, SERVICE, METHOD_SLOW, &request,
-		        &call_options, result, slot, &handle);
+		ret = tr_rpc_unary_call_ex(run->client->endpoint, SERVICE,
+		                           METHOD_SLOW, &request, &call_options,
+		                           result, slot, &handle);
 
 		check(pthread_mutex_lock(&run->lock), "open submit lock");
 		s->submit_status = ret;
@@ -866,7 +868,8 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 	if (failed || run->bad_callback) {
 		fputs("open phase: incomplete or duplicate callback\n", stderr);
-		check(tr_client_destroy(run->client), "client destroy");
+		check(rpc_v1_test_client_destroy(run->client),
+		      "client destroy");
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -906,14 +909,16 @@ static int run_client(const struct options *o)
 		run.slots[i].payload = malloc(o->bulk_bytes);
 		if (!run.slots[i].payload) fatal("payload allocation", errno);
 	}
-	check(tr_client_create_with_tuning(
-		      &config, &tuning, &run.client), "client create");
-	check(tr_client_connect(run.client, o->host, (uint16_t)o->port), "client connect");
-	check(tr_client_wait_ready(run.client, 5000U), "client ready");
+	check(rpc_v1_test_client_create(&config, &tuning, &run.client),
+	      "raw V1 peer create");
+	check(rpc_v1_test_client_connect(run.client, o->host,
+	                                 (uint16_t)o->port),
+	      "raw V1 peer connect");
 	for (i = 1U; i <= 3U; ++i) {
 		struct tr_rpc_method_desc m = method(i, o->bulk_bytes);
-		check(tr_client_legacy_register_method(run.client, &m),
-		      "client method");
+		check(tr_rpc_register_method(run.client->endpoint, &m, NULL,
+		                             NULL),
+		      "raw V1 method");
 	}
 	if (o->warmup) {
 		uint32_t measure_window = run.window;
@@ -979,7 +984,7 @@ static int run_client(const struct options *o)
 		}
 	}
 	/* No reconnect/recreate between pressure and recovery. Teardown joins callbacks. */
-	check(tr_client_destroy(run.client), "client destroy");
+	check(rpc_v1_test_client_destroy(run.client), "raw V1 peer destroy");
 	for (i = 0; i < run.window; ++i) free(run.slots[i].payload);
 	free(run.slots);
 	check(pthread_cond_destroy(&run.cond), "cond destroy");

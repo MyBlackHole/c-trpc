@@ -44,3 +44,13 @@
 ## 合并与发布限制
 
 本切片先完成审计自动化及无调用者的内部死代码删除。整体旧 RPC 状态机、执行器组、私有配置及旧测试仍存在，禁止声称 V1 已彻底退出生产构建。后续仍需独立代码审核、全部 CI/安装消费、源码格式、双分析器、Sanitizer 以及完整链接闭包确认；保持叠加草稿 PR，不直接合并 main。
+
+## R11 当前进展（2026-10-20）
+
+R11 已从 `tr_client` 移除旧 Endpoint 分支和 Client legacy 内部入口；V1 Server
+回归通过 `tests/rpc_v1_test_client_fixture.*` 直接接入旧 Endpoint。
+`test_rpc_message_ownership` 与 `test_rpc_executor_group_drain` 继续覆盖保留的 V1
+Server/Endpoint 和 Executor Group，通过 raw V1 fixture 移除旧 Client facade 调用；
+R10 的公开 V2 大消息所有权和多调用 drain 用例独立验证 V2 合同。其它仍验证旧
+Server/Endpoint 行为的测试继续保留，不据此删除 V1 核心。消费者迁移、源码门禁和证据见
+[`rpc-v1-client-retirement-20261020.md`](rpc-v1-client-retirement-20261020.md)。

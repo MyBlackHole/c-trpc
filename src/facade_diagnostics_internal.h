@@ -5,7 +5,6 @@
 #include "tr/client.h"
 #include "execution/reactor.h"
 #include "tr/server.h"
-#include "rpc/rpc_internal.h"
 #include "transport/group/pipeline_listener_internal.h"
 
 struct tr_server_channel_stats {
@@ -82,7 +81,4 @@ int tr_server_get_connection_group_stats_internal(
 
 int tr_client_get_channel_stats(struct tr_client *client,
 				struct tr_channel_stats *out);
-int tr_client_get_rpc_stats(struct tr_client *client,
-			    struct tr_rpc_endpoint_stats *out);
-
 #endif

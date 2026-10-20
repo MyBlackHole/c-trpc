@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include "../src/facade_legacy_internal.h"
 #include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
 #include "../src/server_record_internal.h"
@@ -1318,8 +1317,6 @@ static void test_configuration_and_rollback(void)
 	CHECK(!out);
 	f.client_config.enable_reconnect = 0;
 	fixture_create(&f);
-	CHECK(tr_client_legacy_register_method(
-	              f.client, &f.client_methods[0]) == TR_ERR_UNSUPPORTED);
 	check_client_semantic(f.client, 0, 0, TR_RPC_STATUS_OK);
 	atomic_store(&fail_client_create, true);
 	CHECK(tr_client_connect(f.client, "127.0.0.1", f.port) == TR_ERR_NOMEM);

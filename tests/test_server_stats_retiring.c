@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/facade_legacy_internal.h"
+#include "rpc_v1_test_client_fixture.h"
 #include "tr/trpc.h"
 #include "facade_diagnostics_internal.h"
 #include <assert.h>
@@ -71,7 +72,7 @@ static void test_retirement(uint32_t shard_count)
 	struct tr_server_config sc;
 	struct tr_client_config cc;
 	struct tr_server *s = NULL;
-	struct tr_client *c = NULL;
+	struct rpc_v1_test_client *c = NULL;
 	struct tr_rpc_method_desc m = {0};
 	struct tr_rpc_call_handle h;
 	struct tr_rpc_bytes req = {(const unsigned char *)"x", 1};
@@ -101,11 +102,13 @@ static void test_retirement(uint32_t shard_count)
 		g.release = 0;
 		tr_client_config_init(&cc);
 		cc.keepalive_interval_ms = 0;
-		assert(tr_client_legacy_create(&cc, &c) == TR_OK);
-		assert(tr_client_connect(c, "127.0.0.1", port) == TR_OK);
-		assert(tr_client_legacy_register_method(c, &m) == TR_OK);
-		assert(tr_client_legacy_unary_call(c, 1, 1, &req, result, NULL,
-		                                   &h) == TR_OK);
+		assert(rpc_v1_test_client_create(&cc, NULL, &c) == TR_OK);
+		assert(rpc_v1_test_client_connect(c, "127.0.0.1", port) ==
+		       TR_OK);
+		assert(tr_rpc_register_method(c->endpoint, &m, NULL, NULL) ==
+		       TR_OK);
+		assert(tr_rpc_unary_call(c->endpoint, 1, 1, &req, result, NULL,
+		                         &h) == TR_OK);
 		pthread_mutex_lock(&g.m);
 		while (!g.entered)
 			pthread_cond_wait(&g.c, &g.m);
@@ -117,7 +120,7 @@ static void test_retirement(uint32_t shard_count)
 		       (unsigned long long)st.rpc.semantic.calls_started,
 		       st.peers_reaping_current);
 		assert(st.rpc.semantic.calls_started == cycle);
-		assert(tr_client_destroy(c) == TR_OK);
+		assert(rpc_v1_test_client_destroy(c) == TR_OK);
 		for (int i = 0; i < 5000; i++) {
 			assert(tr_server_get_stats(s, &st) == TR_OK);
 			assert_cumulative(&st, &previous);

@@ -1,4 +1,5 @@
 #include "../src/facade_legacy_internal.h"
+#include "rpc_v1_test_client_fixture.h"
 #include "tr/trpc.h"
 #include "../src/execution/buffer.h"
 #include "../src/execution/buffer_internal.h"
@@ -152,7 +153,7 @@ static void test_large_facade_rpc(void)
 	struct tr_server_config sc;
 	struct tr_client_config cc;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
@@ -204,14 +205,15 @@ static void test_large_facade_rpc(void)
 	cc.connect_timeout_ms = 5000U;
 	cc.limits.max_frame_payload_bytes = FACADE_FRAME_LIMIT;
 	cc.limits.max_message_bytes = FACADE_MESSAGE_LIMIT;
-	assert(tr_client_legacy_create(&cc, &client) == TR_OK);
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(rpc_v1_test_client_create(&cc, NULL, &client) == TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
 
 	request.data = req;
 	request.len = LARGE_PAYLOAD_BYTES;
-	assert(tr_client_legacy_unary_call(client, 901U, 1U, &request,
-	                                   large_result, &ctx, &call) == TR_OK);
+	assert(tr_rpc_unary_call(client->endpoint, 901U, 1U, &request,
+	                         large_result, &ctx, &call) == TR_OK);
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 20;
 	pthread_mutex_lock(&ctx.lock);
@@ -225,15 +227,13 @@ static void test_large_facade_rpc(void)
 
 	memset(&cs, 0, sizeof(cs));
 	memset(&ss, 0, sizeof(ss));
-	assert(tr_client_get_rpc_semantic_stats(client, &cs) == TR_OK);
+	assert(tr_rpc_endpoint_get_semantic_stats(client->endpoint, &cs) ==
+	       TR_OK);
 	assert(tr_server_get_rpc_semantic_stats(server, &ss) == TR_OK);
 	assert(cs.calls_finished == 1U && ss.calls_finished == 1U);
 
-	ret = tr_client_begin_drain(client);
-	assert(ret == TR_OK || ret == TR_AGAIN);
-	assert(tr_client_wait_drained(client, 5000U) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);

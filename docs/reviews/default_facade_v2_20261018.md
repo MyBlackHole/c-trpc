@@ -40,9 +40,10 @@ Echo 两个独立程序迁移到同一默认 V2 路径。客户端在 message �
 以单调钟五秒总预算重试；其他错误或超时仍失败，CLI 桩另覆盖一次 AGAIN 后成功。
 原 gettext 文本与语言选项保持不变，语言测试桩改用新签名和两阶段结果交付。
 
-仍有价值的 V1 故障测试与 `bench_rpc` 明确使用私有
-`src/facade_legacy_internal.h` 的 legacy 名称。这个头不安装，不用宏偷换普通
-入口；这些检查不计作默认 V2 覆盖。旧基准吞吐不能为 V2 性能背书。
+R11 移除了 Client V1 门面。仍有价值的 V1 Server/Endpoint 回归与 `bench_rpc`
+通过 `tests/rpc_v1_test_client_fixture.*` 直接创建低层 V1 Endpoint；Server 旧入口
+仍使用私有 `src/facade_legacy_internal.h`。这个头不安装，也不提供 Client V1 名称。
+这些检查不计作默认 V2 覆盖；旧基准吞吐不能为 V2 性能背书。
 旧 RPC 引擎及部分公开低层类型/能力声明尚未删除，完整静态库仍可带入这些对象；
 本切片不是“V1 源码已清零”或“整个 SDK 不再链接旧对象”的证明。
 

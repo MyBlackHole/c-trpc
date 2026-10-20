@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/facade_legacy_internal.h"
 #include "../src/execution/worker_context.h"
+#include "../src/rpc/rpc_internal.h"
 #include "../src/server_record_internal.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
