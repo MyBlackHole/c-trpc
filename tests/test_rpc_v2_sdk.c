@@ -22,6 +22,7 @@
 #define METHOD_COUNT 6U
 #define ASYNC_METHOD 5U
 #define MAX_BODY 4096U
+#define LARGE_BODY (320U * 1024U)
 #define MAX_MESSAGES 3U
 #define WAIT_MS 15000U
 
@@ -77,6 +78,7 @@ struct fixture {
 	struct tr_server *server;
 	struct tr_client_config client_config;
 	uint16_t port;
+	uint32_t body_limit;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int server_destroying;
@@ -242,6 +244,13 @@ static void fill(uint8_t *bytes, unsigned size, unsigned tag)
 		bytes[i] = pattern(tag, i);
 }
 
+static void overwrite_source(uint8_t *bytes, unsigned size, uint8_t value)
+{
+	volatile uint8_t *source = bytes;
+	for (unsigned i = 0; i < size; ++i)
+		source[i] = value;
+}
+
 static void check_bytes(const struct tr_rpc_bytes *bytes, unsigned size,
                         unsigned tag)
 {
@@ -371,15 +380,16 @@ static void check_response_metadata(const struct tr_rpc_v2_metadata_view *view,
 static void append_response(struct tr_rpc_v2_reply *reply, unsigned size,
                             unsigned tag)
 {
-	uint8_t storage[MAX_BODY];
+	uint8_t *storage = (uint8_t *)malloc(size ? size : 1U);
 	struct tr_rpc_bytes body;
-	CHECK(size <= sizeof(storage));
+	CHECK(storage);
 	fill(storage, size, tag);
 	body.data = size ? storage : NULL;
 	body.len = size;
 	CHECK(tr_rpc_v2_reply_append(reply, &body) == TR_OK);
 	/* append 承诺复制；返回后立即复用原业务存储。 */
-	memset(storage, 0xe7, sizeof(storage));
+	overwrite_source(storage, size, 0xe7);
+	free(storage);
 }
 
 static void cooperate(struct method_state *m,
@@ -553,7 +563,8 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 	unlock(f);
 }
 
-static void describe_methods(struct tr_rpc_method_desc *descriptors)
+static void describe_methods(struct tr_rpc_method_desc *descriptors,
+                             uint32_t body_limit)
 {
 	memset(descriptors, 0, (METHOD_COUNT + 1U) * sizeof(*descriptors));
 	for (unsigned i = 0; i < METHOD_COUNT; ++i) {
@@ -566,8 +577,8 @@ static void describe_methods(struct tr_rpc_method_desc *descriptors)
 		descriptors[i].request_codec_id = TR_RPC_CODEC_RAW;
 		descriptors[i].response_codec_id = TR_RPC_CODEC_RAW;
 		descriptors[i].lane = TR_RPC_LANE_CONTROL;
-		descriptors[i].max_request_bytes = MAX_BODY;
-		descriptors[i].max_response_bytes = MAX_BODY;
+		descriptors[i].max_request_bytes = body_limit;
+		descriptors[i].max_response_bytes = body_limit;
 	}
 	descriptors[METHOD_COUNT] = descriptors[0];
 	descriptors[METHOD_COUNT].method_id = 99;
@@ -577,7 +588,7 @@ static void create_client(struct fixture *f, struct observed_client *client)
 {
 	struct tr_rpc_method_desc descriptors[METHOD_COUNT + 1U];
 	memset(client, 0, sizeof(*client));
-	describe_methods(descriptors);
+	describe_methods(descriptors, f->body_limit);
 	CHECK(tr_client_create(&f->client_config, descriptors,
 	                       METHOD_COUNT + 1U, &client->handle) == TR_OK);
 	memset(descriptors, 0, sizeof(descriptors));
@@ -586,13 +597,17 @@ static void create_client(struct fixture *f, struct observed_client *client)
 	CHECK(tr_client_wait_ready(client->handle, WAIT_MS) == TR_OK);
 }
 
-static void fixture_create_shards(struct fixture *f, unsigned shards)
+static void fixture_create_shards_with_limits(struct fixture *f,
+                                              unsigned shards,
+                                              uint32_t body_limit,
+                                              uint32_t frame_limit)
 {
 	struct tr_server_config server;
 	struct tr_rpc_v2_method methods[METHOD_COUNT];
 	struct tr_rpc_method_desc descriptors[METHOD_COUNT + 1U];
 	pthread_condattr_t attr;
 	memset(f, 0, sizeof(*f));
+	f->body_limit = body_limit;
 	CHECK(pthread_mutex_init(&f->lock, NULL) == 0);
 	CHECK(pthread_condattr_init(&attr) == 0);
 	CHECK(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0);
@@ -605,15 +620,15 @@ static void fixture_create_shards(struct fixture *f, unsigned shards)
 	server.limits.max_calls = 4;
 	server.limits.max_streams = 4;
 	server.limits.max_methods = METHOD_COUNT + 1U;
-	server.limits.max_message_bytes = MAX_BODY;
-	server.limits.max_frame_payload_bytes = 256;
-	server.limits.initial_window_bytes = MAX_BODY;
+	server.limits.max_message_bytes = body_limit;
+	server.limits.max_frame_payload_bytes = frame_limit;
+	server.limits.initial_window_bytes = body_limit;
 	/* 故意保留较大的公开默认阈值，由 V2 门面推导可推进的内部值。 */
 	f->client_config.limits = server.limits;
 	f->client_config.connect_timeout_ms = 2000;
 	server.handshake_timeout_ms = 2000;
 	memset(methods, 0, sizeof(methods));
-	describe_methods(descriptors);
+	describe_methods(descriptors, body_limit);
 	for (unsigned i = 0; i < METHOD_COUNT; ++i) {
 		f->methods[i].fixture = f;
 		f->methods[i].index = i;
@@ -633,6 +648,11 @@ static void fixture_create_shards(struct fixture *f, unsigned shards)
 	CHECK(f->port != 0);
 	CHECK(tr_server_start(f->server) == TR_OK);
 	create_client(f, &f->client);
+}
+
+static void fixture_create_shards(struct fixture *f, unsigned shards)
+{
+	fixture_create_shards_with_limits(f, shards, MAX_BODY, 256);
 }
 
 static void fixture_create(struct fixture *f)
@@ -893,7 +913,9 @@ static int unary_start(struct call_state *c,
 {
 	struct tr_rpc_v2_client_callbacks callbacks;
 	struct tr_rpc_bytes request;
-	uint8_t storage[MAX_BODY + 1U];
+	uint32_t capacity = c->fixture->body_limit + 1U;
+	uint8_t *storage = (uint8_t *)malloc(capacity);
+	CHECK(storage);
 	memset(&callbacks, 0, sizeof(callbacks));
 	callbacks.message = client_message;
 	callbacks.metadata = client_metadata;
@@ -910,7 +932,7 @@ static int unary_start(struct call_state *c,
 		memset(&untouched, 0xa5, sizeof(untouched));
 		sentinel = untouched;
 		oversized.data = storage;
-		oversized.len = sizeof(storage);
+		oversized.len = capacity;
 		CHECK(tr_client_unary_call(c->client->handle, 23,
 		                           c->method + 1U, &oversized, options,
 		                           &callbacks,
@@ -921,7 +943,8 @@ static int unary_start(struct call_state *c,
 	        c->client->handle, 23,
 	        c->method < METHOD_COUNT ? c->method + 1U : 99U, &request,
 	        options, &callbacks, &c->handle);
-	memset(storage, 0xd3, sizeof(storage));
+	overwrite_source(storage, capacity, 0xd3);
+	free(storage);
 	if (ret == TR_OK) {
 		lock(c->fixture);
 		/* 这里记录的是整个请求被本地受理，不声称 HALF_CLOSE 已上网。 */
@@ -1077,6 +1100,21 @@ static void test_shapes_and_copy(void)
 	CHECK(one.terminals == 1U && bidi.terminals == 1U &&
 	      unknown.terminals == 1U);
 	puts("sdk-v2: case=shapes-copy-metadata-pressure result=pass");
+}
+
+static void test_large_message_ownership(void)
+{
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {LARGE_BODY, 53};
+	fixture_create_shards_with_limits(&f, 1, LARGE_BODY, 64U * 1024U);
+	call_init(&call, &f, 0, &request, 1);
+	expect(&call, LARGE_BODY, 53);
+	CHECK(unary_start(&call, NULL) == TR_OK);
+	call_done(&call, TR_RPC_STATUS_OK);
+	drain(&f);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=large-message-ownership result=pass");
 }
 
 static void test_cancel_or_deadline(int deadline)
@@ -1512,6 +1550,7 @@ int main(void)
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_shapes_and_copy();
+	test_large_message_ownership();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);
 	test_destroy_live_terminal();
