@@ -37,9 +37,12 @@ int __real_tr_stream_sendv(struct tr_stream_handle, struct tr_buffer *const *,
                            uint32_t);
 static _Atomic(struct tr_channel *) observed_channel;
 static _Atomic unsigned blocked_kind, send_attempts[6];
+static _Atomic unsigned final_attempt_mask, final_accepted[CAP];
 static _Atomic(struct tr_channel *) client_channel;
 static _Atomic bool corrupt_open, reject_close, fail_detach, fail_timer_detach;
 static _Atomic unsigned close_attempts, premature_close, fatal_polls;
+static _Atomic unsigned hard_close_target, hard_close_attempts;
+static _Atomic bool hard_close_block;
 static _Atomic(struct tr_reactor *) fatal_reactor;
 static _Atomic bool fail_poll;
 /* 只在指定连接真正写入内核时注入 EAGAIN；上层仍须完成真实 TX 接管。 */
@@ -64,6 +67,7 @@ static struct tr_reactor_timer_handle endpoint_timer;
 int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
                            struct tr_buffer *const *buffers, uint32_t count)
 {
+	unsigned server_kind = 0;
 	if (stream.channel == atomic_load(&client_channel) && count &&
 	    buffers[0]->len > TR_RPC_RECORD_HEADER_SIZE &&
 	    tr_get_le16(buffers[0]->data + 6) == TR_RPC_RECORD_OPEN &&
@@ -77,7 +81,12 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 	    !memcmp(buffers[0]->data, "TRPC", 4)) {
 		unsigned kind = tr_get_le16(buffers[0]->data + 6);
 		CHECK(kind >= 1 && kind <= 5);
+		server_kind = kind;
 		atomic_fetch_add(&send_attempts[kind], 1);
+		if (kind == TR_RPC_RECORD_FINAL_STATUS) {
+			CHECK(stream.slot < CAP);
+			atomic_fetch_or(&final_attempt_mask, 1U << stream.slot);
+		}
 		if (kind == TR_RPC_RECORD_FINAL_STATUS &&
 		    atomic_exchange(&hold_final_transmit, false))
 			atomic_store(&blocked_fd, atomic_load(&observed_fd));
@@ -91,7 +100,10 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 			return TR_AGAIN;
 		}
 	}
-	return __real_tr_stream_sendv(stream, buffers, count);
+	int ret = __real_tr_stream_sendv(stream, buffers, count);
+	if (server_kind == TR_RPC_RECORD_FINAL_STATUS && ret == TR_OK)
+		atomic_fetch_add(&final_accepted[stream.slot], 1);
+	return ret;
 }
 struct gate {
 	pthread_mutex_t lock;
@@ -286,6 +298,11 @@ int __wrap_tr_stream_close(struct tr_stream_handle stream)
 		atomic_fetch_add(&close_attempts, 1);
 		if (atomic_load(&blocked_kind) == TR_RPC_RECORD_FINAL_STATUS)
 			atomic_fetch_add(&premature_close, 1);
+		if (stream.slot == atomic_load(&hard_close_target) &&
+		    atomic_load(&hard_close_block)) {
+			atomic_fetch_add(&hard_close_attempts, 1);
+			return TR_ERR_SYS;
+		}
 		if (atomic_load(&reject_close))
 			return TR_AGAIN;
 	}
@@ -639,6 +656,9 @@ static void fixture_init_full(struct fixture *f, uint64_t window,
 	atomic_store(&fail_detach, false);
 	atomic_store(&fail_timer_detach, false);
 	atomic_store(&close_attempts, 0);
+	atomic_store(&hard_close_target, UINT32_MAX);
+	atomic_store(&hard_close_attempts, 0);
+	atomic_store(&hard_close_block, false);
 	atomic_store(&premature_close, 0);
 	atomic_store(&fatal_polls, 0);
 	atomic_store(&fatal_reactor, f->server.reactor);
@@ -650,6 +670,9 @@ static void fixture_init_full(struct fixture *f, uint64_t window,
 	atomic_store(&abort_kind, 0);
 	for (unsigned i = 0; i < 6; ++i)
 		atomic_store(&send_attempts[i], 0);
+	atomic_store(&final_attempt_mask, 0);
+	for (unsigned i = 0; i < CAP; ++i)
+		atomic_store(&final_accepted[i], 0);
 }
 static void fixture_init_open_timeout(struct fixture *f, uint64_t window,
                                       uint32_t pending,
@@ -939,6 +962,7 @@ static void check_final(struct fixture *f, unsigned slot,
 	CHECK(f->server.status[slot] == (uint32_t)status);
 	CHECK(f->server.final_accepted[slot]);
 }
+static void wait_network_retired(struct fixture *f);
 static void test_shapes(void)
 {
 	struct fixture f;
@@ -1015,6 +1039,97 @@ static void test_final_backpressure(bool business_success)
 	check_final(&f, slot, expected);
 	CHECK(atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) ==
 	      accepted);
+	fixture_destroy(&f, false);
+}
+/* CLOSE 硬错误只属于目标流：周期推进持续重试，另一流在同一
+ * Channel 上独立完成；解除故障后原 FINAL 不得重发或双报。 */
+static void test_close_hard_error_isolation(void)
+{
+	struct fixture f;
+	fixture_init_open_timeout(&f, 1024 * 1024, 8, UINT64_C(15000000000));
+	unsigned blocked = open_call_mode(&f, 100, true);
+	wait_count(&f.server.opened, 1);
+	CHECK(f.server.streams[blocked].channel == f.server.channel);
+	atomic_store(&hard_close_target, f.server.streams[blocked].slot);
+	atomic_store(&hard_close_block, true);
+	send_record(&f, blocked, 100, TR_RPC_RECORD_OPEN, 0);
+	wait_count(&hard_close_attempts, 3);
+	wait_count(&f.client.terminals[blocked], 1);
+	CHECK(!atomic_load(&f.server.terminals[blocked]));
+	unsigned finals =
+	        atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]);
+	CHECK(finals == 1);
+
+	unsigned healthy = open_call(&f, 0);
+	request(&f, healthy, 0, 1, 80);
+	check_final(&f, healthy, TR_RPC_STATUS_OK);
+	CHECK(!atomic_load(&f.server.terminals[blocked]));
+	CHECK(f.client.status[blocked] == TR_RPC_STATUS_UNIMPLEMENTED);
+	CHECK(atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) ==
+	      finals + 1);
+	atomic_store(&hard_close_block, false);
+	check_final(&f, blocked, TR_RPC_STATUS_UNIMPLEMENTED);
+	CHECK(atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) ==
+	      finals + 1);
+	CHECK(atomic_load(&hard_close_attempts) >= 3);
+	CHECK(atomic_load(&final_accepted[blocked]) == 1 &&
+	      atomic_load(&final_accepted[healthy]) == 1);
+	CHECK(tr_stream_close(f.client.streams[blocked]) == TR_OK);
+	CHECK(tr_stream_close(f.client.streams[healthy]) == TR_OK);
+	wait_network_retired(&f);
+	fixture_destroy(&f, false);
+}
+/* 多条流的 FINAL 和 CLOSE 先后受阻；持续 CLOSE 重试按周期推进，
+ * 恢复后每条流仍只交付一次原终局。 */
+static void test_parallel_final_close_pressure(void)
+{
+	struct fixture f;
+	unsigned slots[CAP];
+	struct timespec pause = {0, 50000000};
+	fixture_init(&f, 1024 * 1024, 8);
+	atomic_store(&blocked_kind, TR_RPC_RECORD_FINAL_STATUS);
+	atomic_store(&reject_close, true);
+	for (unsigned i = 0; i < CAP; ++i)
+		slots[i] = open_call(&f, i & 1 ? 0 : 100);
+	CHECK(tr_channel_active_streams(f.client.channel) == CAP);
+	uint64_t open_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.server.channel) != CAP) {
+		CHECK(now_ms() < open_until);
+		sched_yield();
+	}
+	for (unsigned i = 1; i < CAP; i += 2)
+		request(&f, slots[i], 0, 1, 80);
+	wait_count(&final_attempt_mask, (1U << CAP) - 1);
+	CHECK(!atomic_load(&close_attempts));
+	for (unsigned i = 0; i < CAP; ++i)
+		CHECK(!atomic_load(&f.client.terminals[slots[i]]) &&
+		      !atomic_load(&f.server.terminals[slots[i]]));
+	atomic_store(&blocked_kind, 0);
+	for (unsigned i = 0; i < CAP; ++i)
+		wait_count(&f.client.terminals[slots[i]], 1);
+	wait_count(&close_attempts, 10);
+	for (unsigned i = 0; i < CAP; ++i)
+		CHECK(!atomic_load(&f.server.terminals[slots[i]]));
+	uint64_t before_ms = now_ms();
+	unsigned before_attempts = atomic_load(&close_attempts);
+	while (nanosleep(&pause, &pause) != 0)
+		CHECK(errno == EINTR);
+	uint64_t elapsed_ms = now_ms() - before_ms;
+	unsigned attempts = atomic_load(&close_attempts) - before_attempts;
+	CHECK(attempts > 0 && attempts <= CAP * (elapsed_ms + 2));
+	atomic_store(&reject_close, false);
+	for (unsigned i = 0; i < CAP; ++i)
+		check_final(&f, slots[i],
+		            i & 1 ? TR_RPC_STATUS_OK
+		                  : TR_RPC_STATUS_UNIMPLEMENTED);
+	for (unsigned i = 0; i < CAP; ++i)
+		CHECK(atomic_load(&final_accepted[i]) == 1);
+	for (unsigned i = 1; i < CAP; i += 2)
+		CHECK(atomic_load(&f.client.messages[slots[i]]) == 1 &&
+		      f.client.received_bytes[slots[i]] == 80);
+	for (unsigned i = 0; i < CAP; ++i)
+		CHECK(tr_stream_close(f.client.streams[slots[i]]) == TR_OK);
+	wait_network_retired(&f);
 	fixture_destroy(&f, false);
 }
 static int hold_client(void *arg)
@@ -1493,6 +1608,8 @@ int main(void)
 	test_business_error(true);
 	test_final_backpressure(false);
 	test_final_backpressure(true);
+	test_close_hard_error_isolation();
+	test_parallel_final_close_pressure();
 	test_real_window();
 	test_peer_reset(false);
 	test_peer_reset(true);
