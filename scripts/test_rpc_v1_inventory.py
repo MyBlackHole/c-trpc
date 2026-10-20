@@ -8,6 +8,26 @@ from rpc_v1_inventory import audit, parse_nm, remove_comments_and_literals
 
 
 class InventoryTests(unittest.TestCase):
+    def test_client_facade_headers_have_no_v1_endpoint_references(self):
+        root = Path(__file__).resolve().parents[1]
+        symbols = audit(root)["symbols"]
+        client_files = {
+            "src/client.c",
+            "src/facade_legacy_internal.h",
+            "src/facade_tuning_internal.h",
+            "src/facade_diagnostics_internal.h",
+        }
+        client_names = {
+            name for name, entry in symbols.items()
+            if (name.startswith("tr_client_legacy_") or
+                name in {"tr_client_create_with_tuning",
+                         "tr_client_get_rpc_stats"} or
+                name.startswith("tr_rpc_endpoint_"))
+            if any(use["path"] in client_files
+                   for use in entry["source_uses"])
+        }
+        self.assertEqual(client_names, set())
+
     def test_comments_literals_and_v2_are_excluded(self):
         src = """/* tr_rpc_endpoint_create() */
 const char *p = "tr_client_legacy_create";

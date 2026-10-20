@@ -16,3 +16,11 @@
 - 既有 V1 `test_rpc_executor_group_drain`、`test_rpc_deadline_failure`、`test_rpc_terminal_backpressure` 等全部保留。
 - 尚未完成严格等价迁移：V1 生命周期并发控制、所有异常队列回滚、deadline 时钟失效、终局背压控制信用、跨 Connection 资源预算等。需在后续批次补充独立证据后再评估删除旧测试与旧代码。
 - 新增场景不得降低超时、资源容量或跳过 Sanitizer；每次新提交必须取得自身完整 CI、源码格式、双静态分析、安装消费及 RPC smoke 结果。
+
+## R11 后续处置（2026-10-20）
+
+R10 的 V2 等价覆盖已进入 #288。随后 R11 删除旧 Client facade 后，
+`test_rpc_message_ownership` 和 `test_rpc_executor_group_drain` 不再以旧 Client
+入口构建；其对应的大消息复制/所有权与多调用 drain 屏障用例由 R10 的 V2 测试
+覆盖。期限、终局故障与 Server V1 生命周期测试仍按各自切片保留。R11 的消费者
+去向与验证证据见 [`rpc-v1-client-retirement-20261020.md`](rpc-v1-client-retirement-20261020.md)。

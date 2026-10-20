@@ -3,6 +3,9 @@
 ## 本轮边界
 
 这是按需启用的诊断工具，本身不会绕过或私自覆盖生产套接字策略。
+`bench_rpc` 的 RPC 调用端是测试专用 raw V1 Endpoint，服务端仍使用 V1 Server
+门面；该工具保留为旧协议的负载基线，不测公开 V2 Client/Server，也不能作为
+V2 性能结论。
 当前高层 Client/Server 门面默认对已经连接的 TCP 套接字启用 `TCP_NODELAY`，
 显式 `TR_TCP_NODELAY_DISABLED` 可以保留 Linux 默认 Nagle 行为；
 自动重连继承 Client 的同一策略。
@@ -10,8 +13,8 @@
 原有 CRC、调度、生命周期和传输/RPC 单元测试继续保留；
 本工具不替代它们。
 
-真实路径为：
-独立 Client 进程 → IPv4 TCP → Channel → RPC 工作线程 → 一元响应 → Client 结果回调。
+基准路径为：
+独立 raw V1 Endpoint 进程 → IPv4 TCP → Channel → RPC 工作线程 → 一元响应 → 结果回调。
 方法 1 是 CONTROL 通道的小型一元回显，
 方法 2 是 BULK 通道的大型一元回显；
 二者共享同一个门面 TCP 连接。

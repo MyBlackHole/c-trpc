@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "../src/facade_legacy_internal.h"
+#include "rpc_v1_test_client_fixture.h"
 #include "tr/trpc.h"
 #include "../src/execution/deadline_internal.h"
 #include "../src/execution/reactor_internal.h"
@@ -425,19 +426,29 @@ static uint64_t tick(uint64_t now)
 static void normal_client(struct fixture *f)
 {
 	struct tr_client_config config;
-	struct tr_client *client = NULL;
+	struct tr_client *transport = NULL;
+	struct rpc_v1_test_client *raw_client = NULL;
 	struct tr_connection_group_id group = {.group_id = 42U, .epoch = 1U};
 
 	tr_client_config_init(&config);
 	config.limits = f->config.limits;
 	config.keepalive_interval_ms = 0U;
-	assert(tr_client_legacy_create(&config, &client) == TR_OK);
-	if (f->group)
-		assert(tr_client_connection_group_connect(
-		               client, "127.0.0.1", f->port, &group) == TR_OK);
-	else
-		assert(tr_client_connect(client, "127.0.0.1", f->port) ==
+	if (f->group) {
+		/* Group API remains transport-only; this fixture tests Server
+		 * ingress. */
+		assert(tr_client_create_transport(&config, &transport) ==
 		       TR_OK);
+		assert(tr_client_connection_group_connect(transport,
+		                                          "127.0.0.1", f->port,
+		                                          &group) == TR_OK);
+	} else {
+		/* This test's peer is a V1 Server; bypass the retired Client
+		 * facade. */
+		assert(rpc_v1_test_client_create(&config, NULL, &raw_client) ==
+		       TR_OK);
+		assert(rpc_v1_test_client_connect(raw_client, "127.0.0.1",
+		                                  f->port) == TR_OK);
+	}
 	wait_counts(f, 1U, 1U);
 	if (!f->group) {
 		struct tr_server_stats stats;
@@ -448,7 +459,10 @@ static void normal_client(struct fixture *f)
 	/* 真正就绪后旧租约失效，迟到的定时器不得关闭新槽位或活动连接。 */
 	assert(tick(UINT64_MAX) == 0U);
 	wait_counts(f, 1U, 1U);
-	assert(tr_client_destroy(client) == TR_OK);
+	if (transport)
+		assert(tr_client_destroy(transport) == TR_OK);
+	if (raw_client)
+		assert(rpc_v1_test_client_destroy(raw_client) == TR_OK);
 	wait_counts(f, 0U, 0U);
 }
 

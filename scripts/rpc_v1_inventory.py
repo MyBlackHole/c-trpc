@@ -9,9 +9,10 @@ import subprocess
 # 不将 tr_rpc_v2_*、tr_rpc_record_* 或通用 tr_rpc_semantic_* 误当 V1。
 LEGACY = re.compile(
     r"\b(?:tr_client_legacy_[A-Za-z0-9_]*|"
+    r"tr_client_create_with_tuning|tr_client_get_rpc_stats|"
     r"tr_server_legacy_[A-Za-z0-9_]*|"
     r"tr_runtime_shard_rpc_executor|"
-    r"tr_rpc_(?:endpoint_|executor_group_|wire_|call_|message_|"
+    r"tr_rpc_(?:endpoint_|executor_group_|wire_|call_(?!options\b)|message_|"
     r"raw_|register_|unary_|in_worker_context)[A-Za-z0-9_]*)\b"
 )
 STRIP = re.compile(

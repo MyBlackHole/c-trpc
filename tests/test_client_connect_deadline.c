@@ -1,5 +1,4 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "tr/status.h"
 #include "../src/execution/reactor_internal.h"
@@ -185,13 +184,23 @@ static void run_case(struct tr_client *client, uint32_t tcp_elapsed_ms,
 int main(void)
 {
 	struct tr_client_config config;
+	struct tr_rpc_method_desc method = {0};
 	struct tr_client *client = NULL;
 
 	tr_client_config_init(&config);
 	config.connect_timeout_ms = TEST_TIMEOUT_MS;
 	config.keepalive_interval_ms = 0U;
 	config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
-	assert(tr_client_legacy_create(&config, &client) == TR_OK);
+	method.service_id = 1U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1U;
+	method.max_response_bytes = 1U;
+	assert(tr_client_create(&config, &method, 1U, &client) == TR_OK);
 	/* 同一个 Client 重复连接，证明各失败路径没有留下部分会话。 */
 	run_case(client, 80U, 0U, 0);
 	run_case(client, 80U, 3U, 0);

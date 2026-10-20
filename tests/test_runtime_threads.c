@@ -211,6 +211,22 @@ static void server_tuning_init(struct tr_facade_tuning *tuning,
 	tuning->executor_queue_capacity = 16U;
 }
 
+static struct tr_rpc_method_desc runtime_test_method(void)
+{
+	struct tr_rpc_method_desc method = {0};
+
+	method.service_id = 1U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1U;
+	method.max_response_bytes = 1U;
+	return method;
+}
+
 static void listen_loopback(struct tr_server *server)
 {
 	uint16_t port = 0;
@@ -225,6 +241,7 @@ static void test_client_create_destroy_threads(void)
 
 	for (iteration = 0; iteration < 4U; ++iteration) {
 		struct tr_client_config config;
+		struct tr_rpc_method_desc method = runtime_test_method();
 		struct tr_client *client = NULL;
 
 		tr_client_config_init(&config);
@@ -232,7 +249,8 @@ static void test_client_create_destroy_threads(void)
 		config.keepalive_interval_ms = iteration % 2U ? 10U : 0U;
 		config.keepalive_timeout_ms = 50U;
 		reset_probe(0U);
-		assert(tr_client_legacy_create(&config, &client) == TR_OK);
+		assert(tr_client_create(&config, &method, 1U, &client) ==
+		       TR_OK);
 		assert(client != NULL);
 		/* 未连接时只有反应器，没有闲置的维护线程。 */
 		expect_threads(1U, 0U);
@@ -857,24 +875,11 @@ static void test_standalone_rpc_start_rollback_keeps_owner(void)
 	assert(close(sockets[1]) == 0);
 }
 
-static void test_facade_internal_tuning_rejects_invalid_observability(void)
+static void test_server_tuning_rejects_invalid_observability(void)
 {
-	struct tr_client_config client_config;
 	struct tr_server_config server_config;
 	struct tr_facade_tuning tuning;
-	struct tr_client *client = NULL;
 	struct tr_server *server = NULL;
-
-	tr_client_config_init(&client_config);
-	small_limits(&client_config.limits);
-	tr_facade_tuning_init(&tuning);
-	tuning.observability_flags = UINT32_C(0x80000000);
-
-	reset_probe(0U);
-	assert(tr_client_create_with_tuning(
-		       &client_config, &tuning, &client) == TR_ERR_INVALID);
-	assert(client == NULL);
-	expect_threads(0U, 0U);
 
 	tr_server_config_init(&server_config);
 	small_limits(&server_config.limits);
@@ -891,12 +896,13 @@ static void test_facade_internal_tuning_rejects_invalid_observability(void)
 static void test_client_thread_start_failure(void)
 {
 	struct tr_client_config config;
+	struct tr_rpc_method_desc method = runtime_test_method();
 	struct tr_client *client = NULL;
 
 	tr_client_config_init(&config);
 	small_limits(&config.limits);
 	reset_probe(1U);
-	assert(tr_client_legacy_create(&config, &client) == TR_ERR_SYS);
+	assert(tr_client_create(&config, &method, 1U, &client) == TR_ERR_SYS);
 	assert(client == NULL);
 	assert(atomic_load(&create_attempts) == 1U);
 	expect_threads(0U, 0U);
@@ -972,7 +978,7 @@ int main(void)
 	RUN_TEST(test_runtime_executor_group_join_failure_is_retryable);
 	RUN_TEST(test_standalone_rpc_executor_join_failure_is_retryable);
 	RUN_TEST(test_standalone_rpc_start_rollback_keeps_owner);
-	RUN_TEST(test_facade_internal_tuning_rejects_invalid_observability);
+	RUN_TEST(test_server_tuning_rejects_invalid_observability);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);
 	RUN_TEST(test_server_runtime_start_failures);

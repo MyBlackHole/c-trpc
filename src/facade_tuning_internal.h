@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 
-struct tr_client;
-struct tr_client_config;
 struct tr_server;
 struct tr_server_config;
 
@@ -41,11 +39,6 @@ struct tr_facade_tuning {
 
 void tr_facade_tuning_init(struct tr_facade_tuning *tuning);
 void tr_facade_tuning_normalize(struct tr_facade_tuning *tuning);
-
-int tr_client_create_with_tuning(
-	const struct tr_client_config *config,
-	const struct tr_facade_tuning *tuning,
-	struct tr_client **out);
 
 int tr_server_create_with_tuning(
 	const struct tr_server_config *config,
