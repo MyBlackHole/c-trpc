@@ -176,6 +176,8 @@ struct peer {
 	uint32_t status[CAP];
 	size_t received_bytes[CAP];
 	enum tr_rpc_record_delivery delivery[CAP];
+	_Atomic int last_channel_event, last_channel_status;
+	_Atomic unsigned channel_down_events;
 	bool final_accepted[CAP];
 	bool server, disabled, hold;
 	bool withhold_open[CAP];
@@ -194,6 +196,7 @@ struct fixture {
 	_Atomic bool use_gate;
 	_Atomic unsigned reject_method;
 	_Atomic bool bad_reply;
+	unsigned slow_variant;
 	unsigned batch;
 	uint64_t open_timeout_ns;
 	uint64_t executor_budget;
@@ -493,6 +496,20 @@ static void tcp_pair(int *a, int *b)
 	}
 	CHECK(close(listener) == 0);
 }
+/* Channel 通知发生在既有 owner 上；这里只做原子观测，不改变关闭决策。 */
+static void note_channel_event(struct tr_channel *channel,
+                               enum tr_channel_event event, int status,
+                               void *arg)
+{
+	struct peer *peer = arg;
+
+	(void)channel;
+	atomic_store(&peer->last_channel_event, (int)event);
+	atomic_store(&peer->last_channel_status, status);
+	if (event == TR_CHANNEL_EVENT_CONTROL_DOWN ||
+	    event == TR_CHANNEL_EVENT_BULK_DOWN)
+		atomic_fetch_add(&peer->channel_down_events, 1);
+}
 static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
                       uint64_t window)
 {
@@ -515,6 +532,9 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 	*p = (struct peer){.fixture = f, .server = server};
 	atomic_init(&p->opened, 0);
 	atomic_init(&p->packets, 0);
+	atomic_init(&p->last_channel_event, 0);
+	atomic_init(&p->last_channel_status, 0);
+	atomic_init(&p->channel_down_events, 0);
 	for (unsigned i = 0; i < CAP; ++i) {
 		atomic_init(&p->terminals[i], 0);
 		atomic_init(&p->messages[i], 0);
@@ -533,8 +553,8 @@ static void peer_init(struct peer *p, struct fixture *f, int fd, bool server,
 		atomic_store(&observed_fd, fd);
 	}
 	CHECK(tr_channel_create(&cc, conn, conn, server ? NULL : on_data,
-	                        server ? NULL : on_event, NULL, p,
-	                        &p->channel) == TR_OK);
+	                        server ? NULL : on_event,
+	                        note_channel_event, p, &p->channel) == TR_OK);
 }
 static int start_server(void *arg)
 {
@@ -651,13 +671,14 @@ static void log_open_failure(const struct client_create *r, int result)
 	int state_ret = tr_reactor_get_connection_state(conn, &conn_state);
 
 	fprintf(stderr,
-	        "STREAM_OPEN 失败快照：phase=%s method=%u ret=%d "
+	        "STREAM_OPEN 失败快照：phase=%s variant=%u method=%u ret=%d "
 	        "active=%u retries=%u conn_ret=%d conn_state=%d "
 	        "client_stats=%d client_state=%d lanes=%d/%d "
 	        "client_conn=%d/%d opened=%llu closed=%llu errors=%llu "
 	        "server_stats=%d server_state=%d lanes=%d/%d "
 	        "server_conn=%d/%d opened=%llu closed=%llu errors=%llu\n",
-	        r->phase ? r->phase : "未指定", r->method, result,
+	        r->phase ? r->phase : "未指定", r->f->slow_variant,
+	        r->method, result,
 	        tr_channel_active_streams(r->f->client.channel), r->retries,
 	        state_ret, (int)conn_state, client_ret, (int)client.state,
 	        (int)client.control_lane_state, (int)client.bulk_lane_state,
@@ -673,6 +694,15 @@ static void log_open_failure(const struct client_create *r, int result)
 	        (unsigned long long)server.streams_opened,
 	        (unsigned long long)server.streams_closed,
 	        (unsigned long long)server.stream_errors);
+	fprintf(stderr,
+	        "Channel 事件：client=%d status=%d down=%u "
+	        "server=%d status=%d down=%u\n",
+	        atomic_load(&r->f->client.last_channel_event),
+	        atomic_load(&r->f->client.last_channel_status),
+	        atomic_load(&r->f->client.channel_down_events),
+	        atomic_load(&r->f->server.last_channel_event),
+	        atomic_load(&r->f->server.last_channel_status),
+	        atomic_load(&r->f->server.channel_down_events));
 }
 static int client_open(void *arg)
 {
@@ -1085,6 +1115,7 @@ static void test_slow_open(unsigned partial)
 	/* 真实 timer 驱动总期限；宽裕时间只避免调度抖动影响造包阶段。
 	 * 纳秒级精确边界和不续期由派发器专测独立核验。final_wait 仍为30s。 */
 	fixture_init_open_timeout(&f, 1024 * 1024, 8, UINT64_C(2000000000));
+	f.slow_variant = partial;
 	uint64_t baseline = atomic_load(&f.server.budget.current_bytes);
 	unsigned healthy = open_call_stage(&f, 3, false, "慢 OPEN/健康流");
 	atomic_store(&f.use_gate, true);
