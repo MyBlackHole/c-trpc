@@ -19,8 +19,9 @@
 
 ## R11 后续处置（2026-10-20）
 
-R10 的 V2 等价覆盖已进入 #288。随后 R11 删除旧 Client facade 后，
-`test_rpc_message_ownership` 和 `test_rpc_executor_group_drain` 不再以旧 Client
-入口构建；其对应的大消息复制/所有权与多调用 drain 屏障用例由 R10 的 V2 测试
-覆盖。期限、终局故障与 Server V1 生命周期测试仍按各自切片保留。R11 的消费者
-去向与验证证据见 [`rpc-v1-client-retirement-20261020.md`](rpc-v1-client-retirement-20261020.md)。
+R10 的 V2 等价覆盖已进入 #288，分别验证公开 V2 Client/Server 的大消息复制与
+多调用 drain。R11 删除旧 Client facade 后，`test_rpc_message_ownership` 和
+`test_rpc_executor_group_drain` 仍需覆盖未退役的 V1 Server/Endpoint 及 Executor
+Group，因此保留目标并改用测试专用 raw V1 Endpoint；它们不再经旧 Client facade。
+期限、终局故障与其它 Server V1 生命周期测试仍按各自切片保留。R11 的消费者去向与
+验证证据见 [`rpc-v1-client-retirement-20261020.md`](rpc-v1-client-retirement-20261020.md)。

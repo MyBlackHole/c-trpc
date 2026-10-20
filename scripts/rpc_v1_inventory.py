@@ -12,7 +12,9 @@ LEGACY = re.compile(
     r"tr_client_create_with_tuning|tr_client_get_rpc_stats|"
     r"tr_server_legacy_[A-Za-z0-9_]*|"
     r"tr_runtime_shard_rpc_executor|"
-    r"tr_rpc_(?:endpoint_|executor_group_|wire_|call_(?!options\b)|message_|"
+    r"tr_rpc_(?:endpoint(?:_|(?![A-Za-z0-9_]))|"
+    r"executor_group(?:_|(?![A-Za-z0-9_]))|wire_|"
+    r"call_(?!options\b)|message_|"
     r"raw_|register_|unary_|in_worker_context)[A-Za-z0-9_]*)\b"
 )
 STRIP = re.compile(

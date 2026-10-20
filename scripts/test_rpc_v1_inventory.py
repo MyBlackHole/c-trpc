@@ -7,26 +7,48 @@ from pathlib import Path
 from rpc_v1_inventory import audit, parse_nm, remove_comments_and_literals
 
 
+CLIENT_FACADE_FILES = {
+    "src/client.c",
+    "src/facade_legacy_internal.h",
+    "src/facade_tuning_internal.h",
+    "src/facade_diagnostics_internal.h",
+}
+
+
+def client_endpoint_references(symbols):
+    return {
+        name for name, entry in symbols.items()
+        if (name.startswith("tr_client_legacy_") or
+            name in {"tr_client_create_with_tuning",
+                     "tr_client_get_rpc_stats", "tr_rpc_endpoint"} or
+            name.startswith("tr_rpc_endpoint_"))
+        if any(use["path"] in CLIENT_FACADE_FILES
+               for use in entry["source_uses"])
+    }
+
+
 class InventoryTests(unittest.TestCase):
     def test_client_facade_headers_have_no_v1_endpoint_references(self):
         root = Path(__file__).resolve().parents[1]
         symbols = audit(root)["symbols"]
-        client_files = {
-            "src/client.c",
-            "src/facade_legacy_internal.h",
-            "src/facade_tuning_internal.h",
-            "src/facade_diagnostics_internal.h",
-        }
-        client_names = {
-            name for name, entry in symbols.items()
-            if (name.startswith("tr_client_legacy_") or
-                name in {"tr_client_create_with_tuning",
-                         "tr_client_get_rpc_stats"} or
-                name.startswith("tr_rpc_endpoint_"))
-            if any(use["path"] in client_files
-                   for use in entry["source_uses"])
-        }
-        self.assertEqual(client_names, set())
+        self.assertEqual(client_endpoint_references(symbols), set())
+
+    def test_bare_v1_endpoint_type_is_a_legacy_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/client.c").write_text(
+                "struct tr_rpc_endpoint *rpc;\n"
+                "struct tr_rpc_executor_group *group;\n",
+                encoding="utf-8",
+            )
+            (root / "xmake.lua").write_text("", encoding="utf-8")
+
+            symbols = audit(root)["symbols"]
+
+        self.assertIn("tr_rpc_endpoint",
+                      client_endpoint_references(symbols))
+        self.assertIn("tr_rpc_executor_group", symbols)
 
     def test_comments_literals_and_v2_are_excluded(self):
         src = """/* tr_rpc_endpoint_create() */
