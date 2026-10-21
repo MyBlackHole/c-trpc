@@ -909,6 +909,71 @@ static void test_shared_executor(void)
 	fixture_destroy(&f);
 }
 
+/* 单 worker 固定执行中的调用，第二个调用占据剩余任务槽。额外流
+ * 必须经真实 TCP/Endpoint 容量拒绝，不能进入业务回调。 */
+static void test_capacity_recovery(void)
+{
+	struct fixture f;
+	struct peer p;
+	unsigned accepted[2];
+	fixture_init(&f, 1, 1);
+	f.record.tasks.workers = 1;
+	f.record.tasks.capacity = 2;
+	f.record.endpoint.dispatch.capacity = 2;
+	fixture_create(&f);
+	CHECK(fixture_start(&f) == TR_OK);
+	peer_connect(&p, f.port, true);
+	accepted[0] = peer_open(&p, f.methods[0].descriptor);
+	accepted[1] = peer_open(&p, f.methods[1].descriptor);
+	wait_count(&f.calls, 2);
+	atomic_store(&f.block, true);
+	peer_send(&p, accepted[0], TR_RPC_RECORD_MESSAGE, 32);
+	gate_wait(&f.gate, 1, false);
+	peer_send(&p, accepted[1], TR_RPC_RECORD_MESSAGE, 32);
+	peer_send(&p, accepted[0], TR_RPC_RECORD_HALF_CLOSE, 0);
+	peer_send(&p, accepted[1], TR_RPC_RECORD_HALF_CLOSE, 0);
+	struct tr_task_executor *executor =
+	        atomic_load(&observations[0].executor);
+	struct tr_task_executor_stats tasks;
+	uint64_t end = now_ms() + WAIT_MS;
+	do {
+		CHECK(tr_task_executor_get_stats(executor, &tasks) == TR_OK);
+		CHECK(now_ms() < end);
+	} while (tasks.outstanding != tasks.capacity);
+	CHECK(tasks.capacity == f.record.tasks.capacity && tasks.running == 1);
+	unsigned excess = peer_open(&p, f.methods[0].descriptor);
+	peer_finish(&p, excess, TR_RPC_STATUS_RESOURCE_EXHAUSTED, 0, 0);
+	CHECK(atomic_load(&f.calls) == 2);
+	CHECK(atomic_load(&p.terminals[accepted[0]]) == 0);
+	CHECK(atomic_load(&p.terminals[accepted[1]]) == 0);
+	gate_release(&f.gate);
+	peer_finish(&p, accepted[0], TR_RPC_STATUS_OK, 1, 32);
+	peer_finish(&p, accepted[1], TR_RPC_STATUS_OK, 1, 32);
+	CHECK(atomic_load(&p.terminals[excess]) == 1);
+	struct tr_rpc_semantic_stats semantics;
+	end = now_ms() + WAIT_MS;
+	do {
+		CHECK(tr_server_get_rpc_semantic_stats(f.server, &semantics) ==
+		      TR_OK);
+		CHECK(now_ms() < end);
+	} while (semantics.calls_inflight != 0);
+	unsigned recovered = peer_open(&p, f.methods[0].descriptor);
+	peer_send(&p, recovered, TR_RPC_RECORD_MESSAGE, 24);
+	peer_send(&p, recovered, TR_RPC_RECORD_HALF_CLOSE, 0);
+	peer_finish(&p, recovered, TR_RPC_STATUS_OK, 1, 24);
+	peer_destroy(&p);
+	wait_peers(&f, 0, 1);
+	CHECK(tr_server_drain(f.server, WAIT_MS) == TR_OK);
+	struct tr_server_stats stats;
+	CHECK(tr_server_get_stats(f.server, &stats) == TR_OK);
+	CHECK(stats.rpc.endpoints_current == 0 &&
+	      stats.rpc.executor_queued_tasks_current == 0 &&
+	      stats.rpc.executor_running_tasks_current == 0 &&
+	      stats.rpc.semantic.calls_inflight == 0);
+	fixture_destroy(&f);
+	puts("server_record: V2 capacity recovery passed");
+}
+
 static void test_disconnected_work(void)
 {
 	struct fixture f;
@@ -1155,6 +1220,7 @@ int main(void)
 	test_exact_window();
 	test_shapes_and_reuse();
 	test_shared_executor();
+	test_capacity_recovery();
 	test_disconnected_work();
 	test_stopped_work(false, false, false);
 	test_stopped_work(true, false, false);
@@ -1168,6 +1234,6 @@ int main(void)
 	test_detach_retry(false);
 	test_detach_retry(true);
 	test_join_retry();
-	puts("server_record: 17 scenarios passed");
+	puts("server_record: 18 scenarios passed");
 	return 0;
 }
