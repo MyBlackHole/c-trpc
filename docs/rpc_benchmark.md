@@ -14,8 +14,12 @@ xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
 xmake build trcore bench_rpc
 PYTHONDONTWRITEBYTECODE=1 python3 bench/run_rpc_bench.py \
   --binary build/linux/x86_64/release/bench_rpc \
-  --trials 3 --requests 1000 --label gcc-release-rpc-v2 \
+  --trials 3 --requests 1000 --label gcc-release-rpc-v2-r12 \
   --output build/rpc-v2-release.jsonl
+PYTHONDONTWRITEBYTECODE=1 python3 bench/export_rpc_v2_csv.py \
+  --input build/rpc-v2-release.jsonl \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --output bench/results/rpc-v2-20261021.csv
 
 # 正确性冒烟；不是性能结论。
 PYTHONDONTWRITEBYTECODE=1 python3 bench/run_rpc_bench.py \
@@ -37,6 +41,14 @@ V1 schema、错误 generation、丢失请求、错误响应及未收敛的 Serve
 它不与 `bench/results/rpc-20260926.csv` 或 `crc32c-20260926.csv` 拼接：这两份文件
 是 V1/旧 CRC 时代的历史数据，协议实现、负载 API 与统计口径不同，不能作为 V2
 纵向性能对照。CI smoke 只验证真实请求和结果合同，不设绝对 QPS/延迟门槛。
+
+该 CSV 共 27 行，每个 trial 的 client × phase 各一行，压力场景的 measure 和
+recovery 分开记录。行内重复保存 `schema`、`api_generation`、源码 commit、二进制
+SHA-256、CPU/平台信息、场景参数、`all/small/bulk/slow` 账本与端到端延迟，并附上
+Server 退出时已有的 Reactor、资源池、reassembly、V2 task、peer 和调用统计。
+Server CPU/RSS 是包含启动、预热和排空的进程生命周期值，不是 phase-only 数据。
+`export_rpc_v2_csv.py` 会验证 schema/generation、二进制哈希、分类账本及 Server
+调用收敛后再写 CSV；对应负向覆盖在 `bench/test_rpc_csv_export.py`。
 
 ## 历史 V1 基准与诊断记录（仅供回溯）
 

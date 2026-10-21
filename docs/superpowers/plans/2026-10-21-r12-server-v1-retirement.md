@@ -89,7 +89,7 @@
 - [x] `tr_server_get_stats()` 只聚合 `record_rpc`、V2 task executor 与 semantic counters；mode 为 transport-only 时不查询未初始化 RPC/reassembly 对象，相关统计结构保持 `memset(..., 0, ...)` 的零值。
 - [x] 在 `test_connection_group_facade` 增加断言：transport-only `tr_server_listen()` 返回 `TR_ERR_UNSUPPORTED`；listener 经 `tr_server_start()` 工作；RPC task/reassembly diagnostic 为零；ConnectionGroup 统计仍可读。
 - [x] 按编译器错误逐个迁移所有移除字段的测试/基准消费者，禁止用恒为零的 V1 兼容字段恢复编译。
-- [x] 运行 `xmake build test_connection_group_facade test_server_record test_server_stats_retiring`；目标测试通过且 `rg -n 'rpc_message_pool|rpc_handler_ns|rpc_queue_wait_ns|legacy' src/facade_diagnostics_internal.h src/server.c` 不再发现 Server V1 统计路径。
+- [x] 运行 `xmake build test_connection_group_facade test_server_record test_server_stats_retiring`；目标测试通过。上述词法扫描只剩 `rpc_message_pool_count` 的共享 tuning/预算下限名，不再存在 Server message-pool 对象、统计或 V1 queue/handler 诊断路径。
 
 ### Task 4：迁移 Server facade 生命周期和构造测试
 
@@ -134,6 +134,7 @@
 - Modify: `xmake.lua` 的 `bench_rpc` 源文件依赖
 - Modify: `bench/run_rpc_bench.py`
 - Modify: `bench/test_rpc_bench.py`
+- Create: `bench/export_rpc_v2_csv.py` 与 `bench/test_rpc_csv_export.py`
 - Create: `bench/results/rpc-v2-20261021.csv`
 
 **Interfaces:** benchmark server 使用 `tr_server_create()` 和 V2 methods；客户端通过公开 V2 Client/Call API 发送真实 TCP 调用；JSON 顶层包含 `schema: 2` 与 `api_generation: "rpc_v2"`。
@@ -143,7 +144,7 @@
 - [x] 删除 `--rpc-message-pool`、V1 tuning、V1 queue/histogram/handler/message-pool 输出；保留 V2 支持的 `tr_facade_limits` 维度、peer/Channel/reassembly/task/已有 Reactor 诊断，不生成假零列。
 - [x] 把 JSON schema 升为 2，写入 `api_generation: "rpc_v2"`；在 `validate_phase()` 和 `validate_server_exit()` 中拒绝旧 schema、错误 generation、漏计账、不匹配分类和无效响应。
 - [x] 更新 `bench/test_rpc_bench.py` 的有效/负向 fixture，运行 `python3 -m unittest bench.test_rpc_bench`；所有计账恒等式和 schema 错误路径通过。
-- [ ] 用 release 构建运行一轮 CI smoke workload，把 V2 结果保存为独立 `bench/results/rpc-v2-20261021.csv`；确认文件只含 schema 2 / `rpc_v2`，README/报告不把 2026-09-26 V1 记录与之拼接。
+- [x] 用 release 构建运行一轮 CI smoke workload，把 V2 结果保存为独立 `bench/results/rpc-v2-20261021.csv`；确认文件只含 schema 2 / `rpc_v2`，README/报告不把 2026-09-26 V1 记录与之拼接。三轮真实 TCP 基准 21/21 case 通过；CSV 有 27 个 client-phase 行，均绑定源码 `2a5387311c5614b49c79056656b6ce2a994f708d` 和二进制 SHA-256 `cb837bc10100c2faf528e4ffc82a8c10bf1424939d4bc4f13e11a9169e831e25`。
 
 ### Task 7：迁移负载驱动、容量套件和版本化基线校验
 
@@ -161,7 +162,7 @@
 - [x] 更新每个 suite 的 C 可执行参数拼装，确认启动的是 Task 6 的 V2 `bench_rpc` server/client，并沿用真实请求、分类账本、压力/恢复覆盖和负载端延迟测量。
 - [x] 将所有 `test_rpc_*.py` fixture 和 schema 检查改为 `schema == 2` 及 `api_generation == "rpc_v2"`；删除 V1 pool/handler histogram 断言，不降低现有受理/完成/错误/响应一致性校验。
 - [x] 运行 `python3 -m unittest discover -s bench -p 'test_rpc_*.py'`，并依次运行 `python3 bench/run_rpc_bench.py --binary build/linux/x86_64/release/bench_rpc --smoke --output build/r12-bench-smoke.jsonl`、`python3 bench/run_rpc_capacity.py --binary build/linux/x86_64/release/bench_rpc --smoke --output build/r12-capacity-smoke.jsonl`、`python3 bench/run_rpc_scalability.py --binary build/linux/x86_64/release/bench_rpc --smoke --output build/r12-scalability-smoke.jsonl`、`python3 bench/run_rpc_headroom.py --binary build/linux/x86_64/release/bench_rpc --smoke --output build/r12-headroom-smoke.jsonl`；输出字段无 V1 pool/queue 口径，所有 scenario accounting 通过。
-- [ ] 更新并重跑 `bench/results/rpc-v2-20261021.csv`，同一文件内所有行使用相同 V2 schema 与生成器版本。
+- [x] 更新并重跑 `bench/results/rpc-v2-20261021.csv`，同一文件内所有行使用相同 V2 schema 与生成器版本；使用 `bench/export_rpc_v2_csv.py` 验证 schema、generation、源二进制哈希、分类账本与 Server calls 收敛，导出 27 行。
 
 ### Task 8：增加 facade 源码与已安装归档符号门禁
 
@@ -196,10 +197,10 @@
 
 **Files:** R12 分支全部改动；Issue #290 实施记录。
 
-- [ ] 从干净的工作树执行 `xmake f -c -y -m debug --toolchain=gcc && xmake test -v -j1`，全量测试通过。
-- [ ] 执行 `python3 -m unittest discover -s bench -p 'test_rpc_*.py'`、inventory 自测、benchmark accounting 测试和真实 V2 benchmark smoke；记录命令、返回码、schema/generation 和 CSV 路径。
-- [ ] 执行 release `xmake build trcore bench_rpc test_rpc_v2_sdk` 与既有安装 SDK C11/C++11 消费验证；确保安装归档没有 Server V1 facade 定义，低层 V1 RPC 符号依旧允许存在。
-- [ ] 执行 `git diff --check`、Server facade 词法扫描、归档符号扫描和 `git status --short`；确认除计划范围外没有生成缓存或临时文件。
+- [x] 从干净的提交工作树执行 `xmake f -c -y -m debug --toolchain=gcc` 与 `xmake test -v -j1`；全量 85/85 通过，耗时 60.305 秒。
+- [x] 执行 RPC Python suite（65/65）、inventory 自测（7/7）、源码 inventory 扫描及四组 V2 smoke；release smoke 均通过，scalability 对限速慢处理场景明确归因 `load_generator_drop`。正式基线 schema 为 2、generation 为 `rpc_v2`，CSV 为 `bench/results/rpc-v2-20261021.csv`。
+- [x] 执行 release `xmake build trcore bench_rpc test_rpc_v2_sdk test_server_record` 和安装 SDK GCC/Clang C11、G++/Clang++ C++11 四编译器消费验证；安装归档 deny 未发现 Server V1 facade，raw V1 RPC 符号仍允许存在。
+- [x] 执行 `git diff --check`、Server facade 词法扫描、归档符号扫描和 `git status --short`；输出与临时文件均在仓库 `build/`，未写入 `/tmp`。
 - [ ] 更新 R12 spec 状态和 Issue #290 实施记录，附计划、提交、测试、基准证据及剩余 R13/R14 边界；推送 `docs/rpc-v1-retirement-r12-20261021` 分支，保留 PR #288 为 Draft 且不合入 main。
 
 ## Spec 覆盖自检
