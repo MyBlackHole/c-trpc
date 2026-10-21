@@ -147,17 +147,17 @@ static void wait_for_destroy_attempt(struct drain_context *context)
 	pthread_mutex_lock(&context->lock);
 	while (!context->destroy_attempts && ret == 0)
 		ret = pthread_cond_timedwait(&context->cond, &context->lock,
-					     &deadline);
+		                             &deadline);
 	assert(ret == 0);
 	assert(context->destroy_attempts != 0U);
 	assert(context->destroy_status == TR_AGAIN);
 	pthread_mutex_unlock(&context->lock);
 }
 
-static enum tr_rpc_status server_work(
-	struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
-	const struct tr_rpc_v2_cancel *cancel, struct tr_rpc_v2_reply *reply,
-	void *arg)
+static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
+                                      const struct tr_rpc_v2_request *request,
+                                      const struct tr_rpc_v2_cancel *cancel,
+                                      struct tr_rpc_v2_reply *reply, void *arg)
 {
 	struct drain_context *context = (struct drain_context *)arg;
 	(void)call;
@@ -176,14 +176,15 @@ static enum tr_rpc_status server_work(
 	if (request->kind == TR_RPC_V2_REQUEST_HALF_CLOSE) {
 		struct tr_rpc_bytes empty = {NULL, 0U};
 		assert(tr_rpc_v2_reply_append(reply, &empty) == TR_OK);
-		assert(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) == TR_OK);
+		assert(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) ==
+		       TR_OK);
 	}
 	return TR_RPC_STATUS_OK;
 }
 
 static void server_terminal(struct tr_rpc_v2_call_id call,
-			    enum tr_rpc_status status,
-			    enum tr_rpc_v2_delivery delivery, void *arg)
+                            enum tr_rpc_status status,
+                            enum tr_rpc_v2_delivery delivery, void *arg)
 {
 	struct drain_context *context = (struct drain_context *)arg;
 	(void)call;
@@ -198,7 +199,7 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 }
 
 static void ignore_client_message(struct tr_rpc_v2_call call,
-				  const struct tr_rpc_bytes *body, void *arg)
+                                  const struct tr_rpc_bytes *body, void *arg)
 {
 	(void)call;
 	(void)body;
@@ -206,8 +207,8 @@ static void ignore_client_message(struct tr_rpc_v2_call call,
 }
 
 static void ignore_client_terminal(struct tr_rpc_v2_call call,
-				   enum tr_rpc_status status,
-				   enum tr_rpc_v2_delivery delivery, void *arg)
+                                   enum tr_rpc_status status,
+                                   enum tr_rpc_v2_delivery delivery, void *arg)
 {
 	(void)call;
 	(void)status;
@@ -300,8 +301,8 @@ static void test_v2_server_destroy_waits_for_accepted_work(void)
 	memset(&callbacks, 0, sizeof(callbacks));
 	callbacks.message = ignore_client_message;
 	callbacks.terminal = ignore_client_terminal;
-	assert(tr_client_unary_call(client, 91U, 1U, &request, NULL,
-	                            &callbacks, &call) == TR_OK);
+	assert(tr_client_unary_call(client, 91U, 1U, &request, NULL, &callbacks,
+	                            &call) == TR_OK);
 	wait_for_flag(&context, &context.work_entered);
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;

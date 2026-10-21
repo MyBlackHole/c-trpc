@@ -344,7 +344,8 @@ static void test_server_create_start_destroy_threads(void)
 			expect_threads(0U, 0U);
 			assert(tr_server_start(server) == TR_OK);
 			total = 5U;
-			/* 四个 V2 任务线程与一个反应器所有者都由 start 建立。 */
+			/* 四个 V2 任务线程与一个反应器所有者都由 start 建立。
+			 */
 			expect_threads(total, 0U);
 		}
 		destroy_server_until_complete(server);
@@ -871,7 +872,8 @@ static void test_server_worker_start_failures(void)
 			assert(start_ret == TR_ERR_SYS);
 		assert(atomic_load(&create_attempts) == fail_at);
 		/* V2 启动先创建每分片 Reactor，再创建共享任务线程；失败后的
-		 * 清理可能先返回 AGAIN，Server destroy 必须继续回收此前成功创建的线程。
+		 * 清理可能先返回 AGAIN，Server destroy
+		 * 必须继续回收此前成功创建的线程。
 		 */
 		destroy_server_until_complete(server);
 		expect_threads(fail_at - 1U, fail_at - 1U);

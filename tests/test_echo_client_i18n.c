@@ -187,7 +187,8 @@ static void check_output(int test_scenario, int argc, char **argv, int code,
 			                         : "<unset>");
 		fprintf(stderr,
 		        "scenario=%d argument=%s expected=%s actual=%s\n",
-		        test_scenario, argc > 1 ? argv[1] : "", error, actual_err);
+		        test_scenario, argc > 1 ? argv[1] : "", error,
+		        actual_err);
 	}
 	assert(strlen(actual_err) == strlen(error) &&
 	       strcmp(actual_err, error) == 0);

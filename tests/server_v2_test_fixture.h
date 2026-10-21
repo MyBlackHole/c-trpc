@@ -3,10 +3,11 @@
 
 #include "tr/rpc_v2.h"
 
-static enum tr_rpc_status tr_test_server_v2_noop_work(
-	struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
-	const struct tr_rpc_v2_cancel *cancel, struct tr_rpc_v2_reply *reply,
-	void *arg)
+static enum tr_rpc_status
+tr_test_server_v2_noop_work(struct tr_rpc_v2_call_id call,
+                            const struct tr_rpc_v2_request *request,
+                            const struct tr_rpc_v2_cancel *cancel,
+                            struct tr_rpc_v2_reply *reply, void *arg)
 {
 	(void)call;
 	(void)request;
@@ -17,7 +18,7 @@ static enum tr_rpc_status tr_test_server_v2_noop_work(
 }
 
 static int tr_test_server_v2_create(const struct tr_server_config *config,
-				    struct tr_server **out)
+                                    struct tr_server **out)
 {
 	struct tr_rpc_v2_method method = {0};
 
