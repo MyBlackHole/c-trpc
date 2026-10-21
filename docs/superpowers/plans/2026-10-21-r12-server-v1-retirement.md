@@ -201,7 +201,7 @@
 - [x] 执行 RPC Python suite（65/65）、inventory 自测（7/7）、源码 inventory 扫描及四组 V2 smoke；release smoke 均通过，scalability 对限速慢处理场景明确归因 `load_generator_drop`。正式基线 schema 为 2、generation 为 `rpc_v2`，CSV 为 `bench/results/rpc-v2-20261021.csv`。
 - [x] 执行 release `xmake build trcore bench_rpc test_rpc_v2_sdk test_server_record` 和安装 SDK GCC/Clang C11、G++/Clang++ C++11 四编译器消费验证；安装归档 deny 未发现 Server V1 facade，raw V1 RPC 符号仍允许存在。
 - [x] 执行 `git diff --check`、Server facade 词法扫描、归档符号扫描和 `git status --short`；输出与临时文件均在仓库 `build/`，未写入 `/tmp`。
-- [ ] 更新 R12 spec 状态和 Issue #290 实施记录，附计划、提交、测试、基准证据及剩余 R13/R14 边界；推送 `docs/rpc-v1-retirement-r12-20261021` 分支，保留 PR #288 为 Draft 且不合入 main。
+- [x] 更新 R12 spec 状态和 [Issue #290 实施记录](https://github.com/MyBlackHole/c-trpc/issues/290#issuecomment-6307333225)，附计划、提交、测试、基准证据及剩余 R13/R14 边界；已推送 `docs/rpc-v1-retirement-r12-20261021`，确认 PR #288 仍为 Draft 且未合入 main。GitHub Actions 未触发，因为当前 push filter 不包含 `docs/**`。
 
 ## Spec 覆盖自检
 

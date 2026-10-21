@@ -2,7 +2,7 @@
 
 ## 状态与基线
 
-- 状态：R12 架构基线已批准；实现与本地验收完成，等待 GitHub CI 验证
+- 状态：R12 架构基线已批准；实现与本地验收完成，分支已推送。当前 CI push 过滤器不含 `docs/**`，本分支未触发 GitHub Actions
 - 实现提交：`2a5387311c5614b49c79056656b6ce2a994f708d`（R12-D1 → R12-D2）
 - V2 基线：`bench/results/rpc-v2-20261021.csv`，schema 2 / `rpc_v2`，27 个 client-phase 行；源码与 release 二进制哈希见 CSV
 - 依据：本会话已批准的 R12 架构基线，以及项目总账 [Issue #290](https://github.com/MyBlackHole/c-trpc/issues/290) 中的 [Server 依赖盘点](https://github.com/MyBlackHole/c-trpc/issues/290#issuecomment-6289353664)、[旧测试迁移判定](https://github.com/MyBlackHole/c-trpc/issues/290#issuecomment-6289444491)、[基本可用验收证据](https://github.com/MyBlackHole/c-trpc/issues/290#issuecomment-6289475856)、[诊断与基准边界](https://github.com/MyBlackHole/c-trpc/issues/290#issuecomment-6289504726)、[transport-only Reactor 约束](https://github.com/MyBlackHole/c-trpc/issues/290#issuecomment-6305710858)
