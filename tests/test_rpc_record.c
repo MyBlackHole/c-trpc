@@ -137,8 +137,8 @@ static void test_golden_and_framing(void)
 static void test_bad_headers(void)
 {
 	/* 固定 V1 请求头：TRPC、小端版本 1、类型 1，其余字段为 0。 */
-	static const uint8_t legacy_v1_header[32] = {
-	        'T', 'R', 'P', 'C', 1, 0, 1, 0};
+	static const uint8_t legacy_v1_header[32] = {'T', 'R', 'P', 'C',
+	                                             1,   0,   1,   0};
 	uint8_t bytes[H + 8] = {0}, output[H];
 	struct tr_rpc_record_header message = empty_message, modified;
 	struct tr_rpc_record_limits policy = limits;

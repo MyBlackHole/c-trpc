@@ -242,9 +242,8 @@ int __wrap_clock_gettime(clockid_t clock, struct timespec *time)
 		             (uint64_t)time->tv_sec * 1000000000 +
 		                     (uint64_t)time->tv_nsec);
 	if (ret == 0 && clock == CLOCK_MONOTONIC)
-		recent_monotonic_ns =
-		        (uint64_t)time->tv_sec * 1000000000 +
-		        (uint64_t)time->tv_nsec;
+		recent_monotonic_ns = (uint64_t)time->tv_sec * 1000000000 +
+		                      (uint64_t)time->tv_nsec;
 	return ret;
 }
 
@@ -2580,7 +2579,8 @@ static void test_public_failed_earlier_deadline(void)
 	        public_callbacks(&original_context);
 	struct tr_rpc_v2_client_callbacks rejected_cb =
 	        public_callbacks(&rejected_context);
-	struct tr_rpc_v2_call original_call, untouched, sentinel, recovered_call;
+	struct tr_rpc_v2_call original_call, untouched, sentinel,
+	        recovered_call;
 	struct tr_rpc_call_options later = {.timeout_ms = 1000};
 	struct tr_rpc_call_options earlier = {.timeout_ms = 25};
 	uint8_t request_byte = pattern(80, 0);
@@ -2625,8 +2625,7 @@ static void test_public_failed_earlier_deadline(void)
 	CHECK(original.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	CHECK(original.delivery == TR_RPC_V2_DELIVERY_LIVE);
 	CHECK(atomic_load(&original.terminal) == 1);
-	check_client_semantic(f.client, 1, 1,
-	                      TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	/* terminal 先于槽位退休；owner pump 推进关闭后再复用容量。 */
 	CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
 	                      &original_call) == TR_OK);

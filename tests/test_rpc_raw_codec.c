@@ -76,8 +76,7 @@ static void test_invalid_arguments_preserve_outputs(void)
 	struct tr_rpc_bytes decoded = {&source, 99};
 	uint32_t written = 99;
 
-	CHECK(tr_rpc_raw_encode(NULL, &encoded, 1, &written) ==
-	      TR_ERR_INVALID);
+	CHECK(tr_rpc_raw_encode(NULL, &encoded, 1, &written) == TR_ERR_INVALID);
 	CHECK(written == 99 && encoded == 0xa5);
 	CHECK(tr_rpc_raw_encode(&input, &encoded, 1, NULL) == TR_ERR_INVALID);
 	CHECK(encoded == 0xa5);
@@ -86,8 +85,7 @@ static void test_invalid_arguments_preserve_outputs(void)
 	      TR_ERR_INVALID);
 	CHECK(written == 99 && encoded == 0xa5);
 	input.data = &source;
-	CHECK(tr_rpc_raw_encode(&input, NULL, 1, &written) ==
-	      TR_ERR_INVALID);
+	CHECK(tr_rpc_raw_encode(&input, NULL, 1, &written) == TR_ERR_INVALID);
 	CHECK(written == 99);
 
 	CHECK(tr_rpc_raw_decode(NULL, 1, &decoded) == TR_ERR_INVALID);
