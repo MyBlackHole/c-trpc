@@ -2627,6 +2627,9 @@ static void test_public_failed_earlier_deadline(void)
 	CHECK(atomic_load(&original.terminal) == 1);
 	check_client_semantic(f.client, 1, 1,
 	                      TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	/* terminal 先于槽位退休；owner pump 推进关闭后再复用容量。 */
+	CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
+	                      &original_call) == TR_OK);
 	atomic_store(&block_kind, 0);
 	struct public_result recovered = {
 	        .fixture = &f, .expected = {{1, 80}}, .expected_count = 1};
