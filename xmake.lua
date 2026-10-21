@@ -851,6 +851,7 @@ target("test_client_record")
                 "-Wl,--wrap=tr_channel_create_deferred",
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=tr_channel_destroy",
+                "-Wl,--wrap=tr_runtime_stop",
                 "-Wl,--wrap=tr_stream_release_payload",
                 "-Wl,--wrap=clock_gettime", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
