@@ -396,24 +396,17 @@ static void runtime_multi_shard_config_init(
 	struct tr_runtime_config *config,
 	struct tr_runtime_shard_config shards[3])
 {
-	uint32_t i;
-	static const uint32_t worker_counts[3] = { 1U, 2U, 1U };
-
 	memset(config, 0, sizeof(*config));
 	memset(shards, 0, sizeof(*shards) * 3U);
 	config->shard_count = 3U;
 	config->shards = shards;
 
-	for (i = 0; i < 3U; ++i) {
+	for (uint32_t i = 0; i < 3U; ++i)
 		shards[i].peer_capacity = 2U;
-		shards[i].rpc_executor.endpoint_capacity = 2U;
-		shards[i].rpc_executor.max_calls_per_endpoint = 2U;
-		shards[i].rpc_executor.thread_count = worker_counts[i];
-	}
 }
 
-/* V2 / 纯传输运行时不应隐式创建 V1 执行器工作域；Reactor 生命周期
- * 独立存在。此处用真实 Runtime 和 pthread 计数检查，不伪造执行器。
+/* Runtime 只管理 Reactor 与显式启用的消息服务；无消息服务时不应
+ * 创建额外工作线程。此处用真实 Runtime 和 pthread 计数检查。
  */
 static void test_runtime_without_legacy_execution(void)
 {
@@ -426,8 +419,6 @@ static void test_runtime_without_legacy_execution(void)
 	reset_probe(0U);
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
-	assert(tr_runtime_shard_rpc_executor(
-	               tr_runtime_shard_at(runtime, 0U)) == NULL);
 	expect_threads(0U, 0U);
 	assert(tr_runtime_start(runtime) == TR_OK);
 	expect_threads(1U, 0U);
@@ -446,19 +437,19 @@ static void test_runtime_multi_shard_threads(void)
 	runtime_multi_shard_config_init(&config, shards);
 	reset_probe(0U);
 
-	/* 创建只分配分片与执行器软状态。 */
+	/* 创建只分配分片与反应器软状态。 */
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
 	expect_threads(0U, 0U);
 
-	/* 运行时启动建立四个工作线程与三个反应器所有者。 */
+	/* Runtime 只为每个分片创建一个反应器所有者。 */
 	assert(tr_runtime_start(runtime) == TR_OK);
-	expect_threads(7U, 0U);
+	expect_threads(3U, 0U);
 
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	expect_threads(7U, 7U);
+	expect_threads(3U, 3U);
 	assert(tr_runtime_destroy(runtime) == TR_OK);
-	expect_threads(7U, 7U);
+	expect_threads(3U, 3U);
 }
 
 struct runtime_control_probe {
@@ -508,10 +499,6 @@ static void test_runtime_control_lifecycle_serialized(void)
 	memset(&shard, 0, sizeof(shard));
 	config.shard_count = 1U;
 	config.shards = &shard;
-	shard.rpc_executor.endpoint_capacity = 2U;
-	shard.rpc_executor.max_calls_per_endpoint = 2U;
-	shard.rpc_executor.thread_count = 2U;
-
 	reset_probe(0U);
 	runtime_gate_init(&create_gate);
 	runtime_gate_init(&join_gate);
@@ -615,21 +602,20 @@ static void test_runtime_multi_shard_start_rollback(void)
 
 	runtime_multi_shard_config_init(&config, shards);
 
-	/* 分片 0：工作线程(1)、反应器(2)；分片 1：工作线程(3,4)、反应器(5)。
-	 * 第 5 次 pthread_create 失败后，当前与此前分片的工作线程和反应器
-	 * 轮次都必须在 start() 返回前完整回滚。
+	/* 分片 0 的反应器创建成功，分片 1 的反应器创建失败；此前启动的
+	 * 分片必须在 start() 返回前完整回滚。
 	 */
-	reset_probe(5U);
+	reset_probe(2U);
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
 	expect_threads(0U, 0U);
 
 	assert(tr_runtime_start(runtime) == TR_ERR_SYS);
-	assert(atomic_load(&create_attempts) == 5U);
-	expect_threads(4U, 4U);
+	assert(atomic_load(&create_attempts) == 2U);
+	expect_threads(1U, 1U);
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
-	expect_threads(4U, 4U);
+	expect_threads(1U, 1U);
 }
 
 static void test_runtime_start_rollback_join_failure_is_retryable(void)
@@ -640,69 +626,36 @@ static void test_runtime_start_rollback_join_failure_is_retryable(void)
 
 	runtime_multi_shard_config_init(&config, shards);
 
-	/* 分片 1 反应器创建失败后开始回滚；再让分片 1 第一个工作线程回收失败。
-	 * Runtime 必须保留该组轮次，且下一次启动在创建任何新线程之前，
+	/* 分片 1 反应器创建失败后开始回滚；分片 0 的反应器回收失败。
+	 * Runtime 必须保留该轮次，且下一次启动在创建任何新线程之前，
 	 * 就因可启动性预检返回 TR_ERR_STATE。
 	 */
-	reset_probe(5U);
+	reset_probe(2U);
 	fail_join_once_at(1U);
 	assert(tr_runtime_create(&config, &runtime) == TR_OK);
 	assert(runtime != NULL);
 	expect_threads(0U, 0U);
 
 	assert(tr_runtime_start(runtime) == TR_ERR_SYS);
-	assert(atomic_load(&create_attempts) == 5U);
-	/* 分片 0 反应器与工作线程已收敛，分片 1 两个工作线程等待重试回收。 */
-	expect_threads(4U, 2U);
+	assert(atomic_load(&create_attempts) == 2U);
+	/* 分片 0 的反应器等待重试回收。 */
+	expect_threads(1U, 0U);
 
 	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
-	assert(atomic_load(&create_attempts) == 5U);
+	assert(atomic_load(&create_attempts) == 2U);
 
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	expect_threads(4U, 4U);
+	expect_threads(1U, 1U);
 
 	/* 完整收敛后允许开启全新的工作线程与反应器轮次。 */
 	reset_probe(0U);
 	assert(tr_runtime_start(runtime) == TR_OK);
-	expect_threads(7U, 0U);
+	expect_threads(3U, 0U);
 	assert(tr_runtime_stop(runtime) == TR_OK);
-	expect_threads(7U, 7U);
+	expect_threads(3U, 3U);
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
-	expect_threads(7U, 7U);
-}
-
-static void test_runtime_executor_group_join_failure_is_retryable(void)
-{
-	struct tr_runtime_config config;
-	struct tr_runtime_shard_config shard;
-	struct tr_runtime *runtime = NULL;
-
-	memset(&config, 0, sizeof(config));
-	memset(&shard, 0, sizeof(shard));
-	config.shard_count = 1U;
-	config.shards = &shard;
-	shard.rpc_executor.endpoint_capacity = 3U;
-	shard.rpc_executor.max_calls_per_endpoint = 2U;
-	shard.rpc_executor.thread_count = 3U;
-
-	reset_probe(0U);
-	assert(tr_runtime_create(&config, &runtime) == TR_OK);
-	assert(runtime != NULL);
-	expect_threads(0U, 0U);
-	assert(tr_runtime_start(runtime) == TR_OK);
-	/* 三个组工作线程与一个反应器所有者。 */
-	expect_threads(4U, 0U);
-
-	/* 销毁先回收反应器，再回收 worker[0]，随后 worker[1] 第一次回收
-	 * 被注入失败。重试必须从 worker[1] 继续，不能重复回收已收敛线程。
-	 */
-	fail_join_once_at(3U);
-	assert(tr_runtime_destroy(runtime) == TR_ERR_SYS);
-	expect_threads(4U, 2U);
-
-	assert(tr_runtime_destroy(runtime) == TR_OK);
-	expect_threads(4U, 4U);
+	expect_threads(3U, 3U);
 }
 
 static void test_standalone_rpc_executor_join_failure_is_retryable(void)
@@ -894,7 +847,6 @@ int main(void)
 	RUN_TEST(test_reactor_destroy_join_failure_is_retryable);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_runtime_start_rollback_join_failure_is_retryable);
-	RUN_TEST(test_runtime_executor_group_join_failure_is_retryable);
 	RUN_TEST(test_standalone_rpc_executor_join_failure_is_retryable);
 	RUN_TEST(test_standalone_rpc_start_rollback_keeps_owner);
 	RUN_TEST(test_client_thread_start_failure);

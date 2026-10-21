@@ -65,7 +65,16 @@ jobs:
                    tr_server_create_with_tuning \
                    tr_server_legacy_create \
                    tr_server_legacy_register_method \
-                   tr_server_legacy_register_stream_method
+                   tr_server_legacy_register_stream_method \
+                   tr_runtime_shard_rpc_executor \
+                   tr_runtime_rpc_executor_config \
+                   tr_runtime_legacy_rpc_execution_create \
+                   tr_runtime_legacy_rpc_execution_can_start \
+                   tr_runtime_legacy_rpc_execution_start \
+                   tr_runtime_legacy_rpc_execution_stop \
+                   tr_runtime_legacy_rpc_execution_destroy \
+                   tr_runtime_legacy_rpc_execution_group \
+                   tr_runtime_legacy_rpc_execution_raw
       - name: 保留 V1 引用与静态库对象清单
         if: always()
         uses: actions/upload-artifact@v4

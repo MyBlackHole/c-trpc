@@ -43,7 +43,6 @@ static void test_runtime_single_shard_identity(void)
 	assert(shard != NULL);
 	assert(tr_runtime_shard_id(shard) == 0U);
 	assert(tr_runtime_shard_reactor(shard) != NULL);
-	assert(tr_runtime_shard_rpc_executor(shard) == NULL);
 	assert(tr_runtime_shard_at(runtime, 1U) == NULL);
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
@@ -173,30 +172,6 @@ static void test_runtime_reuseport_listener_group(void)
 	assert(tr_runtime_shard_listener_fd(shard1) >= 0);
 
 	assert(tr_runtime_destroy(runtime) == TR_OK);
-}
-
-static void test_runtime_shard_rpc_executor_ownership(void)
-{
-	struct tr_runtime_config config;
-	struct tr_runtime_shard_config shard_config;
-	struct tr_runtime *runtime = NULL;
-	struct tr_runtime_shard *shard;
-
-	runtime_test_config_init(&config, &shard_config, 1U);
-	shard_config.rpc_executor.endpoint_capacity = 4U;
-	shard_config.rpc_executor.max_calls_per_endpoint = 8U;
-	shard_config.rpc_executor.thread_count = 2U;
-
-	assert(tr_runtime_create(&config, &runtime) == TR_OK);
-	shard = tr_runtime_shard_at(runtime, 0U);
-	assert(shard != NULL);
-	assert(tr_runtime_shard_rpc_executor(shard) != NULL);
-	assert(tr_runtime_destroy(runtime) == TR_OK);
-
-	runtime_test_config_init(&config, &shard_config, 1U);
-	shard_config.rpc_executor.thread_count = 1U;
-	assert(tr_runtime_create(&config, &runtime) == TR_ERR_INVALID);
-	assert(runtime == NULL);
 }
 
 static void test_runtime_shard_listener_ownership(void)
@@ -654,7 +629,6 @@ int main(void)
 	RUN_TEST(test_runtime_multi_shard_identity);
 	RUN_TEST(test_runtime_rejects_invalid_shard_config);
 	RUN_TEST(test_runtime_reuseport_listener_group);
-	RUN_TEST(test_runtime_shard_rpc_executor_ownership);
 	RUN_TEST(test_runtime_shard_listener_ownership);
 	RUN_TEST(test_runtime_shard_listener_events);
 	RUN_TEST(test_runtime_shard_peer_resources);

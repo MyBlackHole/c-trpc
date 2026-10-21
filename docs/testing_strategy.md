@@ -57,9 +57,11 @@ V2 入口，`tr_server_create()` 只构造 V2 RPC；连接组测试使用
 SDK 测试验证空方法表不会回退 V1；连接组专测使用显式传输工厂，并验证 RPC 监听
 和连接被拒绝、失败不改端口，以及配置中的 RPC 重连/拦截器不被静默忽略。
 Server 构造、peer retirement、排空、统计、构造回滚和销毁重试回归现经 V2
-或 transport-only facade 运行。`test_transport` 仍保留 `tr_rpc_endpoint_*`、
-通用 V1 Executor 与协议原语测试；这些直接低层覆盖归属 R13/R14，不代表普通
-Server facade 仍有 V1 实现。`bench_rpc` 和容量、扩展性、headroom 等负载驱动
+或 transport-only facade 运行。Runtime 不再配置或拥有旧 RPC Executor Group。
+`test_transport` 与 `test_rpc_executor_group_drain` 仍保留 raw
+`tr_rpc_endpoint_*`、旧 Executor Group 与协议原语测试；它们仍位于 `rpc.c`
+Endpoint 闭包内，归属 R14，不代表普通 Server facade 或 Runtime 仍有 V1 实现。
+`bench_rpc` 和容量、扩展性、headroom 等负载驱动
 现通过公开 V2 Client/Server 运行，V1 日期 CSV 只作为历史记录，不纳入 V2 基线。
 
 `test_rpc_v2_sdk` 只使用安装范围内的公共头与 C/POSIX 接口。真实回环 TCP

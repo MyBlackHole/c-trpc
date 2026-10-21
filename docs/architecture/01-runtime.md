@@ -155,7 +155,6 @@ struct tr_runtime {
 struct tr_runtime_shard {
     uint32_t shard_id;
     struct tr_reactor *reactor;
-    struct tr_rpc_executor_group *rpc_executor;
     int listen_fd;
     uint16_t bound_port;
 
@@ -172,7 +171,7 @@ struct tr_runtime_shard {
 
 客户端门面当前仍通过 `shard[0]` 取得 Reactor。服务端为每个运行时分片
 创建对应的 `tr_server_shard` 上下文，持有自己的 RPC 消息资源池、
-重组资源池、执行器绑定与对端事件注册状态。
+重组资源池、V2 记录任务执行器与对端事件注册状态。
 
 服务端的公开数量/容量配置保持总预算语义，份额计算为：
 
@@ -185,7 +184,7 @@ share[i] = total / shard_count + (i < total % shard_count ? 1 : 0)
 客户端暂时保留 Endpoint 本地执行器：客户端当前只有单个 Endpoint，且工作线程
 生命周期与连接/会话绑定；本阶段不会为了“形式统一”改变其线程生命周期。
 
-监听器、对端、执行器与服务端热缓冲资源所有权已经下沉；接收连接的执行
+监听器、对端、V2 记录执行器与服务端热缓冲资源所有权已经下沉；接收连接的执行
 已经进入 Reactor；对端生命周期事件源与解除关联/最终清理已经完全事件化。
 对端的预留/发布/移除/存活快照全部串行化到 Reactor 所有者。
 服务端仅保留一个小型 `finalizer_lock`，用于已解除关联清理器的退役
@@ -206,9 +205,7 @@ struct tr_runtime_shard {
 
     struct tr_command_queue commands;
     struct tr_completion_queue completions;
-    struct tr_rpc_executor_group rpc_executor;
 
-    int listen_fd;
     struct tr_runtime_peer *peers;
     struct tr_connection_table connections;
     struct tr_pipeline_table pipelines;

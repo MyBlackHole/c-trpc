@@ -334,7 +334,9 @@ static void test_v2_server_destroy_waits_for_accepted_work(void)
 	assert(pthread_mutex_destroy(&context.lock) == 0);
 }
 
-/* R13：保留通用 TaskExecutor 与旧 RPC Executor group 的底层生命周期覆盖。 */
+/* R14：随 rpc.c Endpoint 闭包保留通用 TaskExecutor 与旧 RPC Executor group
+ * 的底层生命周期覆盖。
+ */
 struct worker_probe {
 	struct tr_rpc_executor_group *legacy;
 	unsigned done;

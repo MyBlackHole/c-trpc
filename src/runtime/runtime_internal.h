@@ -11,7 +11,6 @@
 
 struct tr_runtime;
 struct tr_runtime_shard;
-struct tr_rpc_executor_group;
 struct tr_channel;
 
 struct tr_runtime_peer {
@@ -34,15 +33,6 @@ struct tr_runtime_peer_stats {
 	uint64_t capacity_rejections;
 };
 
-/* 运行时为每个分片拥有一个独立资源域。每个分片显式配置，
- * 因此启用 N 个分片绝不会隐式地将服务端总预算放大 N 倍。
- */
-struct tr_runtime_rpc_executor_config {
-	uint32_t endpoint_capacity;
-	uint32_t max_calls_per_endpoint;
-	uint32_t thread_count;
-};
-
 struct tr_runtime_shard_config {
 	struct tr_reactor_config reactor;
 	uint32_t peer_capacity;
@@ -57,7 +47,6 @@ struct tr_runtime_shard_config {
 	 */
 	uint64_t memory_budget_bytes;
 
-	struct tr_runtime_rpc_executor_config rpc_executor;
 	/* capacity==0 明确关闭消息服务，保持无消息变换时不创建额外线程。
 	 * 启用时要求非零分片硬预算；由 Runtime 创建、停止并回收。 */
 	struct tr_message_service_config messages;
@@ -127,9 +116,6 @@ struct tr_reactor *
 tr_runtime_shard_reactor(const struct tr_runtime_shard *shard);
 int tr_runtime_shard_call(struct tr_runtime_shard *shard,
 			  int (*fn)(void *arg), void *arg);
-struct tr_rpc_executor_group *
-tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard);
-
 /* 内部分片内存预算能力。使用方必须在分配预算内字节前预留，
  * 并在拆除时释放精确的预留额度。
  */
