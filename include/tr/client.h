@@ -102,7 +102,7 @@ int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
 int tr_client_begin_drain(struct tr_client *client);
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms);
 
-/* 获取该 Client 的稳定 RPC 语义生命周期快照，V1/V2 共用此入口。
+/* 获取该 Client 的稳定 RPC 语义生命周期快照，供 RPC V2 调用方读取。
  * V2 普通线程通过同步 owner 调用读取；自身 LIVE 回调可直接读取。
  * RPC 工作线程、其他 owner 及 SHUTDOWN 回调不能同步跨域读取，返回
  * TR_ERR_STATE。尚未连接时为全零；已开始 destroy 或回滚未收敛时拒绝。
