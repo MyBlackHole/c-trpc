@@ -2585,6 +2585,8 @@ static void test_public_failed_earlier_deadline(void)
 	struct tr_rpc_call_options earlier = {.timeout_ms = 25};
 	uint8_t request_byte = pattern(80, 0);
 	struct tr_rpc_bytes request = {&request_byte, 1};
+	uint64_t reuse_end;
+	int reuse_ret;
 
 	fixture_init(&f);
 	f.public_client = true;
@@ -2626,17 +2628,31 @@ static void test_public_failed_earlier_deadline(void)
 	CHECK(original.delivery == TR_RPC_V2_DELIVERY_LIVE);
 	CHECK(atomic_load(&original.terminal) == 1);
 	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_DEADLINE_EXCEEDED);
-	/* terminal 先于槽位退休；owner pump 推进关闭后再复用容量。 */
-	CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
-	                      &original_call) == TR_OK);
 	atomic_store(&block_kind, 0);
 	struct public_result recovered = {
 	        .fixture = &f, .expected = {{1, 80}}, .expected_count = 1};
 	struct public_context recovered_context = {&recovered, false};
 	struct tr_rpc_v2_client_callbacks recovered_cb =
 	        public_callbacks(&recovered_context);
-	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL,
-	                           &recovered_cb, &recovered_call) == TR_OK);
+	recovered_call = sentinel;
+	/* terminal 回调可能早于传输层 OPEN 确认。确认到达前 RESET 可返回
+	 * TR_AGAIN，槽位继续承担清理责任；推进 owner 并重试有界准入。 */
+	reuse_end = now_ms() + WAIT_MS;
+	for (;;) {
+		reuse_ret =
+		        tr_client_unary_call(f.client, 17, 1, &request, NULL,
+		                             &recovered_cb, &recovered_call);
+		if (reuse_ret != TR_AGAIN)
+			break;
+		CHECK(!memcmp(&recovered_call, &sentinel,
+		              sizeof(recovered_call)));
+		CHECK(atomic_load(&client_stream_opens) == opens);
+		CHECK(now_ms() < reuse_end);
+		CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
+		                      &original_call) == TR_OK);
+		pause_once();
+	}
+	CHECK(reuse_ret == TR_OK);
 	wait_count(&recovered.terminal, 1);
 	CHECK(recovered.status == TR_RPC_STATUS_OK);
 	struct tr_rpc_semantic_stats expected = {
