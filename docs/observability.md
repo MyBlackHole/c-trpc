@@ -156,8 +156,9 @@ Reactor 快照也暴露已有的每轮命令公平性数据：
 内部 `tr_server_get_stats()` 的 RPC 快照报告当前 V2 共享 task executor 的
 `executor_threads`、`endpoints_current`、排队/运行任务数及当前队列容量。
 它不提供 V1 Endpoint 的 ready/active 队列、准入/硬满计数、handler/queue
-直方图或每 Endpoint 队列水位。原始 `tr_rpc_endpoint_get_stats()` 仍属于
-R13/R14 退役中的低层 V1 核心诊断，不代表普通 Server facade 的实现或观测口径。
+直方图或每 Endpoint 队列水位。原始 `tr_rpc_endpoint_get_stats()` 随 R14 V1
+Endpoint 核心一并移除；当前归档不再定义该符号。普通 Server 的诊断使用本节说明的
+V2 共享 task executor 快照，不报告旧 V1 Endpoint 内部队列。
 
 ## 服务端门面聚合
 

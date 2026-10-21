@@ -216,20 +216,17 @@ Pipeline 是传输层的通用多连接能力，不是备份对象。
 
 **职责**
 
-- Service / Method；
-- Call 生命周期；
-- 一元调用 / 流式调用；
-- 截止时间 / 取消；
-- 元数据；
-- 编解码；
-- 执行器准入与回调调度。
+- V2 Service / Method 与冻结的方法描述；
+- V2 Call 生命周期、一元调用与流式调用；
+- 截止时间 / 取消、元数据和终局；
+- V2 Record 编解码、执行器准入与回调调度；
+- 独立的复制式 RAW Codec。
 
 **拥有**
 
-- RPC 协议状态；
-- Method 注册表；
-- Call 状态；
-- RPC 状态生命周期。
+- V2 Record 协议状态、冻结方法表和 Call 状态；
+- V2 状态生命周期与共享 TaskExecutor 协作；
+- RAW Codec 的字节复制实现。
 
 **不拥有**
 
@@ -241,11 +238,15 @@ Pipeline 是传输层的通用多连接能力，不是备份对象。
 **向上提供的能力**
 
 ```text
-注册方法
-开始/调用/发送/结束/取消
-接收回调
-RPC 统计
+构造时冻结方法表
+开始/发送/半关闭/取消 V2 Call
+接收 V2 Message/Metadata/Terminal 回调
+V2 RPC 语义统计
+独立 RAW 字节编解码
 ```
+
+旧 V1 raw Call、Endpoint、Executor Group 与 Wire 核心已在 R14 删除；当前 RPC API
+和记录式协议见 [`rpc-v2-sdk.md`](../rpc-v2-sdk.md)。
 
 ---
 
@@ -256,7 +257,7 @@ RPC 统计
 **职责**
 
 - 创建/启动/连接/监听/排空/销毁；
-- 方法注册；
+- 创建时复制并冻结方法表；
 - Call API；
 - 语义资源限制；
 - 服务级诊断。
@@ -665,17 +666,20 @@ add_headerfiles("include/(tr/*.h)")
 
 ```text
 include/tr/rpc.h
-  -> Method / Call / 流式调用应用契约
+  -> V2 共享元数据、状态、基数、统计和 Method 描述
 
-src/rpc/rpc_internal.h
-  -> Endpoint 配置/创建/销毁
-  -> Channel 绑定
-  -> 执行器配置/统计
-  -> 内部 Buffer 快速路径
+include/tr/rpc_v2.h
+  -> V2 Client/Server/Call/回调合同
+
+src/rpc/rpc_record*.c + src/rpc/rpc_v2.c
+  -> 当前 Record 状态机、V2 调度与门面适配
+
+src/rpc/rpc_codec.c
+  -> 独立复制式 RAW Codec
 ```
 
-`rpc.h` 不再包含 Channel/Buffer/Reactor，也不声明 Endpoint 引擎构造。
-客户端/服务端用户无需知道 Endpoint 如何绑定传输层。
+安装 SDK 不声明旧 V1 Endpoint/Call/Wire API。客户端/服务端用户无需知道
+Record Endpoint 如何绑定传输层；RAW Codec 不承担 RPC 协议职责。
 
 ---
 
@@ -683,7 +687,7 @@ src/rpc/rpc_internal.h
 
 基线对象：
 
-- `tr_rpc_call_handle`；
+- V2 `tr_rpc_v2_call`；
 - `tr_stream_handle`；
 - `tr_conn_handle`。
 
@@ -691,8 +695,9 @@ src/rpc/rpc_internal.h
 
 处理结果：
 
-- 稳定公开 `tr_rpc_call_handle` 现在只暴露固定大小 `_private` 能力；
-- Endpoint 指针、槽位、代次的编码/解析只存在于 RPC 引擎；
+- V1 `tr_rpc_call_handle` 已从安装 SDK 移除；V2 `tr_rpc_v2_call` 只暴露固定大小
+  `_private` 能力；
+- Record Endpoint 指针、槽位、代次只存在于 RPC 引擎；
 - 句柄仍按值复制，不增加分配、锁、队列或线程跳转；
 - 代次隔离和陈旧句柄检查语义保持不变。
 
@@ -808,9 +813,8 @@ Reactor/Channel/Buffer/Frame/Wire 已经退出安装 SDK。
 
 - 应用 RPC API 与 Endpoint 引擎分离；
 - 客户端/服务端用户不再看到 Channel/Endpoint 构造；
-- 保留消息使用不透明释放令牌保持零额外分配/复制；
-- `tr_rpc_call_handle` 已经不透明化，不再公开 Endpoint 指针 + 槽位/代次，
-  同时保持原有陈旧代次隔离。
+- V2 调用使用独立不透明能力，不公开 Endpoint 指针/槽位/代次；
+- 旧 V1 消息保留/释放 API 与 Call 句柄随 R14 核心一并移除。
 
 ### P3 — 传输 / 连接组公开能力 — 已完成
 
@@ -964,11 +968,15 @@ P3 公开能力至此闭环；
 
 ```text
 src/rpc/
-  rpc.c
-  rpc_internal.h
   rpc_codec.c
-  rpc_wire.c
-  rpc_wire.h
+  rpc_record.c
+  rpc_record_stream.c
+  rpc_record_router.c
+  rpc_record_dispatch.c
+  rpc_record_producer.c
+  rpc_record_endpoint.c
+  rpc_record_client.c
+  rpc_v2.c
 
 src/runtime/
   runtime.c
@@ -1109,10 +1117,9 @@ src/execution/
   `include/tr/` 物理目录与稳定安装头文件闭包完全一致，
   只包含既有 8 个 SDK 头文件，
   且不存在 `include/tr -> src/` 反向包含；
-- RPC 线协议头文件已经从 `include/tr/rpc_wire.h`
-  回收到 `src/rpc/rpc_wire.h`；
-  TRPC 请求/响应/取消/状态线协议布局与元数据分帧
-  明确属于 RPC 引擎内部契约，不进入稳定 SDK；
+- 旧 V1 RPC Wire 实现和头文件已在 R14 从源码树移除；当前 V2 Record 协议
+  实现留在 `src/rpc/rpc_record*.c`，不进入稳定 SDK；
+- `src/rpc/rpc_codec.c` 仍独立实现公开复制式 RAW Codec，不包含旧 V1 Wire/Call；
 - Reactor、命令/完成/定时器队列不会因为概念上的 Runtime 层名称
   被机械搬入 `src/runtime/`；
   它们仍然是独立执行基础设施；

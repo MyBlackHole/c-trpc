@@ -11,14 +11,6 @@
   },
   "warnings": [
     {
-      "file": "src/rpc/rpc.c",
-      "line": 2694,
-      "column": 65,
-      "check": "analyzer-use-after-free",
-      "message": "use after ‘free’ of ‘arg’ [CWE-416]",
-      "unit": "src/rpc/rpc.c"
-    },
-    {
       "file": "src/transport/channel/channel.c",
       "line": 687,
       "column": 9,

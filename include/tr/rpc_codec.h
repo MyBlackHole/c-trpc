@@ -15,10 +15,10 @@ struct tr_rpc_bytes {
 };
 
 /*
- * RAW 是 V1 基线编解码器。
- * 下面采用复制方式的辅助接口适合面向应用的小消息。
- * 内部 Transport 引擎可以使用尽量少复制的 Buffer 快速路径，但该能力
- * 不属于稳定的 RPC 应用契约。
+ * RAW 是独立的复制式字节工具，不包含 RPC Call、Method 或 Wire 封装。
+ * 下列接口在调用返回前完成输入/输出字节复制；它们不表示旧 V1 RPC 协议仍可用。
+ * 内部传输路径可以使用尽量少复制的 Buffer 快速路径，但该能力不属于稳定的
+ * RPC 应用契约。
  */
 int tr_rpc_raw_encode(const struct tr_rpc_bytes *input, uint8_t *dst,
 		      uint32_t capacity, uint32_t *written);

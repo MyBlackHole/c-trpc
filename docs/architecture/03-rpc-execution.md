@@ -1,6 +1,8 @@
-# RPC 执行模型
+# RPC 执行模型（V1 历史记录）
 
-**状态：V1 目标，任务快照 + 工作线程所有者命令已经落地**
+> 状态：历史 V1 Endpoint 的实现/设计记录。R14 已移除该 raw Call/Endpoint/Executor
+> 核心；本文中的 V1 句柄、队列和销毁路径不是当前 SDK 合同。当前 RPC 调用与执行
+> 合同见[公共 V2 SDK 文档](../rpc-v2-sdk.md)和 [`01-runtime.md`](01-runtime.md)。
 
 ## 1. 目标
 

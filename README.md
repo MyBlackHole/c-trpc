@@ -11,8 +11,10 @@
 旧调用签名，须重新编译。连接组改用 `*_create_transport()`。完整接入合同以
 [公共 SDK 文档](docs/rpc-v2-sdk.md)及两个 Echo 示例为准。
 
-低层 V1 Endpoint、协议和 Executor 核心仍由 R13/R14 逐项退役；它们不再构成
-普通 Server 门面。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
+本分支已在 R14 移除旧 V1 Call、Endpoint、Executor Group 与 Wire 核心；旧
+V1 对端不会通过默认门面协商或回退。`tr_rpc_raw_encode/decode()` 仍作为独立的
+复制式字节工具提供，不包含 RPC Call 或 Wire 协议。R14 分支仍待集成，不能据此
+声称 `main` 已更新。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
 新的真实 TCP 基准通过公开 V2 Client/Server 运行，不能与旧 CSV 合并比较。
 
 ## 架构
@@ -22,11 +24,10 @@
      |
      v
 RPC 服务/方法
-Call + 执行器
+V2 Record Call + 任务执行器
 ONE/MANY <-> ONE/MANY
      |
-RAW 控制消息
-或 RAW 分片
+V2 Record + 应用字节
      |
      v
 +--------- Channel ---------+
@@ -387,7 +388,8 @@ xmake run echo_client 127.0.0.1 9000 hello
 - 逻辑 Channel 在物理连接丢失后仍然存活；
 - `tr_channel_replace_connection()` 可以在不重建 Channel/RPC Endpoint 的情况下附着新的 Reactor 所有连接；
 - 共享模式同时替换 CONTROL+BULK；拆分模式独立替换各通道；
-- 客户端 V1 支持针对数字 IPv4 端点的可选自动重连；
+- 底层客户端 Channel 支持针对数字 IPv4 端点的可选自动重连；普通 V2 RPC Client
+  不启用该配置；
 - 有界指数退避重连，并支持配置连接超时；
 - 服务端有意使用显式替换：应用接收并认证新套接字后再完成连接替换；
 - Channel 发出 DOWN/UP/GOAWAY 事件，并暴露每通道 `DOWN / RECONNECTING / HANDSHAKING / UP` 状态；
@@ -561,234 +563,24 @@ tr_channel_replace_connection(channel, lane, new_connection);
 这样监听器、TLS/认证和服务策略都保持在 Channel 之外。
 
 
-### RPC 模型
+### RPC V2 与 RAW Codec
 
-- 方法描述符
-  - 服务/方法标识；
-  - 请求/响应基数；
-  - 请求/响应编解码器标识；
-  - CONTROL / BULK 通道；
-  - 每消息大小限制；
-- 基于代次的 `Call` 句柄，与传输层 Stream 绑定；
-- `ONE -> ONE` 一元调用兼容 API；
-- 使用同一 Call 实现的通用流式调用 API；
-- V1 可执行形态：
-  - `ONE -> ONE`；
-  - `ONE -> MANY`（服务端流式）；
-  - `MANY -> ONE`（客户端流式）；
-  - `MANY -> MANY`（双向流式）；
-- V1 请求方向的 `MANY` 表示 **1..N**，不是 0..N：第一条 `REQUEST` 同时也是方法开启消息的封装；
-- `TR_RPC_NONE` 为未来显式的方法开启消息封装保留，V1 不可执行；
-- 客户端 `close_send()` 只关闭请求方向；服务端通过 `finish(status)` 发送最终 `STATUS` 来终止流式 Call；
-- `STATUS(OK)` 对响应基数 `ONE` 要求恰好一条 `RESPONSE`；`MANY` 允许 0..N；
-- 客户端 `FINISHED` 是正常应用终止屏障：之后不会再出现 `MESSAGE/WRITABLE` 或正常 `REMOTE_CLOSED`；
-- 流式调用最终 `STATUS` 使用独立 RPC 消息封装，与普通响应消息分离；
-- Call 级截止时间使用本地单调时钟定时器；
-- 截止时间通过保留元数据中的相对值传播到服务端；
-- 使用现有 `CANCEL` RPC 消息封装实现协作式本地/远端取消；
-- 每个方向第一条消息支持有界初始元数据旁路；
-- 客户端 Call 事件：打开、可写、远端关闭、结束、错误；
-- 服务端流式回调：打开、消息、半关闭、可写、关闭；
-- 基数约束统一执行，不为每种流式形态建立独立 RPC 栈。
+普通 `tr_client_create()` / `tr_server_create()` 只构造 V2，方法表在创建时复制并
+冻结。V2 使用 `tr_rpc_v2_call` 能力和记录式调用，不协商、不回退到旧 V1。
+V2 支持 `ONE` / `MANY` 请求与响应组合；`TR_RPC_NONE` 尚不支持。工作函数、调用
+回调、取消、元数据、终局与所有权规则见[公共 V2 SDK 使用合同](docs/rpc-v2-sdk.md)。
 
-### 截止时间、取消与元数据
+R14 已从源码和静态库移除 V1 raw Call、Endpoint、Executor Group 与旧 Wire 实现，
+也删除了相应的安装声明及测试闭包。连接到只支持旧 V1 Wire 的对端不会得到兼容
+回退。当前工作树中的该次改动仍待集成。
 
-Call 创建现在提供可选扩展 API：
+`tr/rpc_codec.h` 保留独立的复制式 RAW Codec：`tr_rpc_bytes`、`TR_RPC_CODEC_RAW`、
+`tr_rpc_raw_encode()` 和 `tr_rpc_raw_decode()`。它们只处理调用方提供的字节与缓冲区，
+不创建 Call、Method、Endpoint，也不编码旧 V1 RPC 头部。RAW Codec 的存在不代表
+旧 V1 RPC 协议仍然可用。
 
-```c
-tr_rpc_unary_call_ex(..., const struct tr_rpc_call_options *options, ...);
-tr_rpc_call_start_ex(..., const struct tr_rpc_call_options *options, ...);
-```
-
-`timeout_ms` 启动本地单调时钟截止时间。客户端还会把剩余相对超时时间放入
-保留初始元数据，使服务端能够在不依赖墙上时钟同步的情况下建立自己的单调时钟截止时间。
-
-截止时间到期和显式取消共用同一条 Call 终止路径：
-
-```text
-ACTIVE
-  |
-  +-- tr_rpc_call_cancel() ------> CANCELLED
-  |
-  +-- 截止时间到期 ------------> DEADLINE_EXCEEDED
-                                      |
-                                      +-> 本地完成回调
-                                      +-> 尽力发送 CANCEL 消息封装
-                                      +-> Stream 半关闭
-```
-
-取消有意采用协作式语义。它**不会**回滚应用副作用。正在运行的处理器可以查询：
-
-```c
-tr_rpc_call_is_cancelled(call, &status);
-```
-
-RPC 截止时间使用 `CLOCK_MONOTONIC`，并扫描有界 Call 表。
-每个 RPC Endpoint 在所属 Reactor 中注册一个定时器；独立 Endpoint 和高层
-客户端/服务端 Endpoint 都使用同一条所有者本地截止时间路径。
-不会为每个 Endpoint 创建截止时间线程，调度全部位于 Reactor 本地。
-
-RPC 元数据有两个有界范围：
-
-**初始元数据**
-
-- 最大编码块：512 字节；
-- 用户键：小写 ASCII `[a-z0-9_.-]`，最大 63 字节；
-- 值：二进制字节；
-- V1 拒绝重复键；
-- 以 `:` 开头的用户键保留给协议使用；
-- 客户端初始元数据随第一条 `REQUEST` 发送；
-- 服务端初始元数据随第一条 `RESPONSE` 发送。
-
-**尾部元数据**
-
-- 最大编码块：512 字节；
-- V1 支持服务端流式调用 -> 客户端尾部元数据；
-- 尾部元数据只由最终 `STATUS` 携带；
-- 客户端可在 `FINISHED` 回调中读取尾部元数据；
-- 一元调用 V1 没有独立 `STATUS` 消息封装，因此暂不支持一元尾部元数据；
-- `STATUS` 元数据不会覆盖第一条 `RESPONSE` 的初始元数据。
-
-每个 Call 都保持有界的本地/对端初始和尾部存储；不存在动态元数据队列。
-元数据与应用 RAW 载荷保持分离。
-
-RPC 线协议头仍为 32 字节。有元数据时，消息体为：
-
-```text
-RPC 头部（32 字节）
-metadata_len（LE16）
-元数据 TLV
-应用载荷
-```
-
-`payload_len` 仍只描述应用载荷。因此发送端批量快速路径仍适合分散/聚集发送；
-第一条批量消息可以由一个小型 RPC 头部/元数据分片加原始应用缓冲区组成。
-
-公开上下文/元数据辅助 API：
-
-```c
-tr_rpc_call_get_context(...);
-
-tr_rpc_call_set_metadata(...);
-tr_rpc_call_get_peer_metadata(...);
-
-tr_rpc_call_set_trailing_metadata(...);
-tr_rpc_call_get_peer_trailing_metadata(...);
-```
-
-`tr_rpc_context` 是所有者一致的只读快照，包含 Method 标识、基数、
-相对截止时间状态与取消状态。它有意不暴露 Endpoint/Stream/Reactor/槽位标识。
-
-### RPC V1 拦截器
-
-客户端/服务端可以安装一个固定 Call 级拦截器：
-
-```c
-struct tr_rpc_interceptor {
-    tr_rpc_interceptor_fn fn;
-    void *arg;
-};
-```
-
-阶段：
-
-```text
-CLIENT_PRE_CALL
-SERVER_PRE_HANDLER
-SERVER_POST_HANDLER
-CLIENT_POST_CALL
-```
-
-钩子同步运行在所属 Reactor 上，必须短小且非阻塞。
-它可以使用 Call 上下文/元数据 API，但同一 Call 的协议修改
-（`send/close_send/finish/cancel`）在钩子活动期间会被拒绝并返回
-`TR_ERR_STATE`。
-
-`SERVER_PRE_HANDLER` 是 V1 唯一允许返回值控制 Call 的阶段：
-返回 `OK` 继续；返回合法非 `OK` RPC 状态时，在应用处理器运行前拒绝。
-其他阶段用于观测/元数据处理，建议返回 `OK`。
-
-典型用途：
-
-```text
-CLIENT_PRE_CALL
-  -> 添加链路追踪/认证初始元数据
-
-SERVER_PRE_HANDLER
-  -> 读取认证/租户/链路追踪元数据
-  -> 可选轻量 RPC 拒绝
-
-SERVER_POST_HANDLER
-  -> 添加尾部元数据 / 完成指标
-
-CLIENT_POST_CALL
-  -> 读取尾部元数据 / 结束链路追踪
-```
-
-V1 有意不提供动态拦截器链，也不提供阻塞/异步拦截器续处理。
-
-服务端处理器可以读取请求元数据，并在第一条响应编码前设置响应元数据。
-
-### RPC 执行器边界
-
-- 应用 RPC 回调绝不在网络 Reactor 线程上执行；
-- 每个 RPC Endpoint 使用有界固定容量执行器任务节点池；
-- 可选服务端续处理预留在同一节点池内进行逻辑准入分区：新的一元调用/第一条流式调用任务在 `capacity - reserve` 处停止准入，已经接受的流式消息/半关闭/可写/关闭任务可以使用完整容量；它不是第二个队列，也不改变工作线程调度；
-- 低层独立 RPC Endpoint 保留自己的可配置工作线程池；
-- 高层服务端门面创建一个有界分片本地工作线程池，由同分片对端 RPC Endpoint 共享；精确工作线程/节点数量属于内部调优，不是稳定门面 API；
-- 每个 Call 一条 FIFO 任务队列，再加一条 Endpoint 本地就绪 Call 队列；
-- 共享服务端执行器调度就绪 Endpoint，同时保持 Endpoint 内部 Call 顺序；
-- 同一个 Call 同时最多运行一个执行器任务，因此该 Call 的回调严格串行且有序；
-- 不同 Call（包括来自不同对端的 Call）可以在共享工作线程上并行执行；
-- 每次就绪 Call 调度轮次只取一个任务，在不让线程数随对端数增长的同时提供公平性；
-- 服务端一元请求到达已满执行器队列时，不调用其处理器；该 Call 以 `RESOURCE_EXHAUSTED` 结束，而 Channel 保持可用；
-- `UNAVAILABLE` 保留给连接/传输丢失，不用于本地执行器准入失败；
-- 入站 RPC 载荷所有权保持到执行器处理结束；
-- 因此应用处理未完成时自然延迟 Stream 接收额度归还；
-- 每个已排队执行器任务都持有 RPC Endpoint 的一个 C11 强引用；
-- Call 的 `task_refs` 只用于 Call 槽位复用；Endpoint 生命周期使用 `tr_refcount`。
-
-因此，执行器实现把网络推进与应用延迟分离，同时不牺牲同一 Call 内消息顺序。
-服务端工作线程数量相对于对端数量保持 O(1)，各 Endpoint 任务队列仍独立有界。
-
-### RAW 编解码与批量快速路径
-
-稳定应用 API 使用 `tr_rpc_call_send()` 和借用的
-`tr_rpc_bytes` 视图。
-
-引擎内部仍保留尽量少复制的 Buffer 快速路径：
-
-```text
-32 字节 RPC 消息封装缓冲区 ----\
-                            +--> 传输层分散/聚集
-原始应用缓冲区 ----------/          |
-                                      v
-                                  sendmsg(iovec)
-```
-
-在围绕不透明所有权 API 重新设计公开零复制抽象期间，该路径仍供内部基准测试/测试使用，
-不会发布分配器/Channel/Reactor 结构。API 边界清理本身没有增加额外复制。
-
-### RPC 保留消息所有权
-
-流式回调接收：
-
-```c
-struct tr_rpc_message {
-    struct tr_rpc_bytes bytes;
-    uintptr_t _private[TR_RPC_MESSAGE_PRIVATE_WORDS];
-};
-```
-
-应用只可见 `bytes`。`_private` 是固定大小的不透明释放能力；
-调用方保留消息时必须原样复制描述符，绝不能检查这些字段。
-
-返回 `TR_RPC_MESSAGE_RELEASE` 会在回调结束后归还 RX 缓冲区。
-
-返回 `TR_RPC_MESSAGE_TAKE_OWNERSHIP` 会把缓冲区转移给回调所有者；
-之后必须调用 `tr_rpc_message_release()`。在缓冲区真正消费前，
-接收窗口额度也会继续被占用。
-
+端到端 V2 示例位于 `examples/echo_client.c` 和 `examples/echo_server.c`；公开安装
+头文件的使用方式和错误处理以 V2 SDK 文档为准。
 
 ## 流量控制模型
 
@@ -815,8 +607,8 @@ struct tr_rpc_message {
 入口见 [`docs/architecture/README.md`](docs/architecture/README.md)。
 
 备份持久性/恢复只作为上层业务参考，不属于 c-trpc 核心契约。
-文档使用中文状态说明区分当前实现、V1 目标、未来扩展与业务参考，
-避免把业务规划误认为 RPC/传输层必须实现的能力。
+文档使用中文状态说明区分当前实现、未来扩展、已退役设计的历史记录与业务参考，
+避免把历史 V1 能力或业务规划误认为当前 RPC/传输合同。
 
 ## 重要所有权规则
 
@@ -842,7 +634,7 @@ API、类型、变量、宏、协议字段、状态值、命令及机器可解�
 - 内部 Buffer 快速路径保持相同的“仅成功时转移所有权”语义；
 - 稳定发送 API 失败时，应用字节仍由调用方拥有；
 - 命令一旦被有界命令环接受，即由命令环拥有其资源，即使后续 eventfd 唤醒系统调用失败也不回退所有权；
-- `TR_STREAM_DATA_TAKE_OWNERSHIP` 和 `TR_RPC_MESSAGE_TAKE_OWNERSHIP` 都要求之后显式释放；
+- `TR_STREAM_DATA_TAKE_OWNERSHIP` 要求之后显式释放；
 - 释放 RX 载荷时才把对应字节额度归还给 Stream 接收窗口；仅收到网络数据不会补充应用窗口。
 
 ## 当前测试覆盖
@@ -874,43 +666,20 @@ API、类型、变量、宏、协议字段、状态值、命令及机器可解�
 - `GOAWAY` 传播和优雅 `RUNNING -> DRAINING -> DRAINED` 生命周期；
 - 排空过程中已有 Stream 流量继续运行，新 Stream 打开被拒绝。
 
-RPC：
+RPC V2 与 Codec：
 
-- RPC 消息封装 + RAW 编解码；
-- 真实 TCP 一元请求 -> 执行器处理器 -> 响应 -> 半关闭；
-- 真实 TCP `ONE -> MANY` 服务端流式调用；
-- 真实 TCP `MANY -> ONE` 客户端流式调用；
-- 真实 TCP `MANY -> MANY` 双向流式调用；
-- RAW 批量 `send_buffer()` 发送端分片路径；
-- 响应最终 `STATUS` 和 Call 结束；
-- `STATUS` 的服务/方法/编解码器/状态域校验；
-- `STATUS(OK) + response ONE` 要求恰好一条 `RESPONSE`；
-- 客户端 `FINISHED` 保持最后一个正常应用事件；
-- 在存在方法开启消息的独立封装前，V1 拒绝零消息 MANY 请求半关闭；
-- 服务端拒绝 `close_send()`；响应终止必须经过最终 `STATUS`；
-- RPC 消息保留/释放路径；
-- 基数强制约束（`ONE` 拒绝第二条消息）；
-- 执行器任务生命周期 / Call 代次所有权；
-- 真实 TCP 上的初始请求/响应元数据；
-- 显式客户端取消传播到服务端；
-- 服务端处理器通过 `tr_rpc_call_is_cancelled()` 观察取消；
-- 短客户端截止时间在本地和远端产生 `DEADLINE_EXCEEDED`；
-- 对端已经半关闭时的服务端完成；
-- 多工作线程执行器：不同 Call 并发执行，同时一个流式 Call 的八条消息仍严格串行；
-- 高层服务端共享执行器：4 个对端 Call 配置 2 个工作线程时，同时运行的处理器不超过 2 个；
-- RPC Endpoint 截止时间运行在 Reactor 本地定时器上，不创建每 Endpoint 定时器线程；
-- Channel 保活运行在 Reactor 本地定时器上，不创建私有定时器线程；
-- 门面创建/启动/销毁线程记账和 7 个线程启动故障点，使用仅测试目标的 pthread 包装；
-- 大型一元 RPC 请求/响应（1500/1700 字节）在 256 字节传输帧上自动分片/重组；
-- 进行中的一元调用被连接故障打断时以 `UNAVAILABLE` 结束，不执行重放；
-- 替换 Connection 后可以在不重建 RPC Endpoint 的情况下成功执行新一元调用；
-- 高层 `tr_server` + `tr_client` 门面通过真实 TCP 完成端到端一元 RPC；
-- 独立 `examples/echo_server` 与 `examples/echo_client` 作为两个进程运行；
-- RPC/Channel 销毁期间的 Reactor 回调静默；
-- 服务端门面在 `max_peers=1` 下跨多个顺序客户端回收对端；
-- 高层客户端连接失败会回滚，并允许在同一个 Client 对象上重试；
-- C11 引用计数不变量：不允许复活、不允许下溢、不允许饱和溢出；
-- 共享 RPC 处理器仍在运行时服务端对端进入退役；任务引用耗尽前 Endpoint/Channel 生命周期保持有效。
+- `test_rpc_raw_codec` 验证独立 RAW 字节复制、零长度、容量和参数边界；
+- `test_rpc_record` 用固定 V1 字节样本确认 V2 解码器拒绝旧版本，不再链接旧 Wire；
+- `test_rpc_v2_sdk` 通过真实 TCP 覆盖四种 ONE/MANY 基数组合、元数据、取消、期限、
+  终局和排空，并作为安装 SDK 消费测试源码；
+- `test_client_record`、`test_server_record` 与 `test_rpc_record_endpoint_tcp` 覆盖
+  V2 记录、准入、期限、取消、终局、背压和跨流进展；
+- `test_rpc_v2_server_destroy_drain` 验证已受理的 V2 工作阻塞期间服务端销毁重试；
+- `test_rpc_message_ownership` 与 `test_task_executor` 保留通用所有权和执行器合同；
+- RPC inventory 自测与 release 静态归档扫描拒绝精确的旧 V1 类型/符号，确认旧对象
+  不存在，并核实 RAW Codec 仍由 `rpc_codec.c.o` 提供。
+
+这些目标不再测试 V1 私有 Call 队列、旧 Executor Group 或旧 Wire 编解码器。
 
 Xmake CI 矩阵检查：
 
@@ -928,7 +697,7 @@ Xmake CI 矩阵检查：
 - 通用 RPC 自动重试 / 透明进行中 Call 重放；
 - DNS/名称解析器以及非 IPv4 重连端点；
 - RPC/服务健康检查（传输层保活/存活检测已经实现）；
-- 如果未来有界 Endpoint 扫描成为可测瓶颈，再引入可扩展定时轮；
+- 如果未来有界 V2 调度扫描成为可测瓶颈，再按证据评估可扩展定时结构；
 - 共享连接模式下严格 CONTROL 优先调度器（拆分模式已经提供物理隔离）；
 - 多 DATA 连接资源池；
 - TLS/mTLS 传输提供者集成；
@@ -936,24 +705,20 @@ Xmake CI 矩阵检查：
 - 拆分连接客户端/服务端门面的配对/绑定协议；
 - 无锁命令队列 / io_uring / 内核零复制优化。
 
-## 当前 V1 限制
+## 当前 RPC V2 限制
 
-- 单个传输帧仍受 `max_payload_len` 限制；一个逻辑 Stream/RPC 消息可以跨多个 DATA 帧；
-- 分片接收要求配置有界 Channel `reassembly_pool`；`max_message_bytes` 必须能放入一个重组缓冲区；
-- 分片 RX 当前在 RPC 分发前重组为一个连续缓冲区；单帧 RX 仍保持零复制；
-- TX 逻辑消息大小受当前 32 位消息/重组大小策略和已配置流量控制限制约束；
-- 执行器工作线程可以并行运行不同 Call，但单个 Call 有意串行，因此可能被自身慢处理器延迟；
-- 通用流式写入不会在内部排队任意应用消息：`TR_AGAIN` 是有意的背压，调用方在 `TR_RPC_CALL_EVENT_WRITABLE` / 服务端 `on_writable` 后重试；
-- 服务端执行器在第一条流式处理器回调前饱和属于准入拒绝，并返回最终 `RESOURCE_EXHAUSTED`；回调已经开始后，每个 Call 最多允许一个续处理任务在执行器外等待并保留 RX 载荷/额度，同一 Call 第二个尚未准入任务会只终止该 Call 并返回最终 `RESOURCE_EXHAUSTED`（更早回调可能已经产生副作用）；
-- 服务端执行器支持内部续处理预留，可以为已经接受的流式续处理/生命周期工作保留有界任务节点；稳定门面不暴露节点数量调优，未来面向应用的准入策略应使用语义上限；
-- 不能从 Reactor 回调直接执行销毁；RPC/Channel 销毁现在使用 Reactor 静默屏障，正常关闭仍应先排空应用工作；
-- 重连只恢复 Channel 连通性；故障物理连接上的全部 Stream 都已终止，必须重新创建；
-- 客户端自动重连由 Reactor 拥有，不创建每 Channel 线程；退避由定时器驱动，连接完成使用非阻塞路径；
-- 服务端连接替换保持显式方式，使接收/TLS/认证策略位于通用 Channel 之外；
-- RPC Endpoint 截止时间、Channel 保活和自动重连调度都位于 Reactor 本地；
-- 高层客户端/服务端门面当前使用共享 CONTROL/BULK TCP 映射；低层 Channel API 仍提供拆分模式。
+- 方法 codec 编号由应用约定；SDK 传递原始正文，不提供 Protobuf 等类型化编解码器；
+- `TR_RPC_NONE` 尚不支持；V2 的 `ONE` / `MANY`、终局和所有权合同见
+  [公共 SDK 文档](docs/rpc-v2-sdk.md)；
+- 流式发送遇到 `TR_AGAIN` 时由调用方等待可写提示并重试；一元便利 API 另行负责
+  OPEN、正文和半关闭的自动发送；
+- 当前不提供透明 RPC 重试、进行中 Call 重放、DNS 名称解析、TLS/mTLS 或消息压缩；
+- 逻辑消息受配置的消息上限、传输窗口和重组资源约束；
+- 普通 RPC V2 Client 当前不配置自动重连。低层 Channel 重连只恢复传输连通性，
+  故障连接上已打开的 Stream/Call 已终止，应用须重新发起业务调用；
+- 高层门面使用共享 CONTROL/BULK TCP 映射，低层 Channel API 仍提供拆分连接模式。
 
-## 构建
+# 构建
 
 要求 Linux、GCC 或 Clang，以及 **Xmake 3.1.1 或更新版本**。
 项目语言基线为 ISO C11。GCC/Clang 的清理属性只通过类型化

@@ -114,7 +114,7 @@ typedef void (*tr_connection_group_transfer_ready_cb)(
  *
  * max_groups == 0 时保持禁用，且不预留额外连接槽位。
  * 启用后，所有容量都是显式的语义上限。
- * 当前 V1 门面将组监听器绑定到一个内部所有者域；
+ * 当前门面将组监听器绑定到一个内部所有者域；
  * Reactor/分片句柄不会成为公开契约的一部分。
  */
 struct tr_connection_group_server_config {
@@ -164,7 +164,7 @@ void tr_connection_group_client_config_init(
 /*
  * 客户端通用连接组生命周期。
  *
- * V1 为每个 tr_client 保留一个活动组。connect() 建立 CONTROL
+ * 每个 tr_client 保留一个活动组。connect() 建立 CONTROL
  * TCP 连接，提交内部路由标识，并将套接字所有权转移给 Client 的单一
  * 所有者域。Reactor/分片/成员代次仍属于实现细节。
  *

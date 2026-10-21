@@ -34,15 +34,20 @@ Transport/RPC 集成测试只验证跨模块契约。
 - Reactor、套接字与解析器集成；
 - Channel/Stream 生命周期；
 - 重连、保活与连接替换；
-- RPC 线协议、Call、流式调用与门面端到端语义；
+- `test_client_server_facade_nodelay_policy` 的 V2 门面传输策略；
 - 所有者发布与拆除屏障。
+
+V2 RPC 协议和调用合同由 `test_rpc_record`、`test_client_record`、
+`test_server_record`、`test_rpc_record_endpoint_tcp` 与 `test_rpc_v2_sdk` 等专用目标
+验证；`test_transport` 不再链接旧 V1 RPC Endpoint 或 Wire。
 
 专门的并发/调度测试继续独立：
 
 - `test_reactor_fairness`：命令/完成队列公平性与停止屏障；
 - `test_reactor_budget`：单轮 RX/TX/命令/完成处理预算；
 - `test_tx_priority`：CONTROL/DATA 调度顺序；
-- RPC 过载/背压/预留：执行器准入和流式背压；
+- RPC 准入/背压：由 V2 `test_server_record`、`test_client_record` 和
+  `test_rpc_record_endpoint_tcp` 验证；通用任务队列由 `test_task_executor` 验证；
 - TSan：数据竞争；
 - ASan/UBSan：生命周期、越界和未定义行为。
 
@@ -50,17 +55,19 @@ Transport/RPC 集成测试只验证跨模块契约。
 
 ### 公共 V2 SDK
 
-普通 `tr_client_create/tr_server_create` 和 `tr_client_unary_call/call_start` 现为
+普通 `tr_client_create/tr_server_create` 和 `tr_client_unary_call/call_start` 是
 V2 入口，`tr_server_create()` 只构造 V2 RPC；连接组测试使用
 `tr_server_create_transport()`。`test_rpc_v2_sdk`、`test_rpc_v2_server` 与 Echo
 示例直接使用普通门面。
 SDK 测试验证空方法表不会回退 V1；连接组专测使用显式传输工厂，并验证 RPC 监听
-和连接被拒绝、失败不改端口，以及配置中的 RPC 重连/拦截器不被静默忽略。
+和连接被拒绝、失败不改端口，以及不支持的 RPC 自动重连配置会被明确拒绝。
 Server 构造、peer retirement、排空、统计、构造回滚和销毁重试回归现经 V2
 或 transport-only facade 运行。Runtime 不再配置或拥有旧 RPC Executor Group。
-`test_transport` 与 `test_rpc_executor_group_drain` 仍保留 raw
-`tr_rpc_endpoint_*`、旧 Executor Group 与协议原语测试；它们仍位于 `rpc.c`
-Endpoint 闭包内，归属 R14，不代表普通 Server facade 或 Runtime 仍有 V1 实现。
+旧 raw V1 Call、Endpoint、Executor Group、Wire 核心及其专属测试闭包已由 R14
+移除。`test_rpc_record` 保留固定旧版本字节的拒绝检查，不链接旧 Wire；
+`test_rpc_raw_codec` 单独验证仍保留的复制式 RAW Codec。inventory 的精确符号/类型
+扫描及 release 静态库检查验证旧对象与符号已退出，同时确认 `rpc_codec.c.o` 仍提供
+RAW Codec。R14 分支仍待集成，不代表 `main` 已完成这些改动。
 `bench_rpc` 和容量、扩展性、headroom 等负载驱动
 现通过公开 V2 Client/Server 运行，V1 日期 CSV 只作为历史记录，不纳入 V2 基线。
 
