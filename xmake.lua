@@ -878,6 +878,16 @@ target("test_rpc_v2_server")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 已受理的 V2 工作阻塞时，Server 销毁可重试且终局只发布一次。
+target("test_rpc_v2_server_destroy_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_server_destroy_drain.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- 工作域只链接一个执行层对象，验证嵌套恢复和真正的线程局部隔离。
 target("test_worker_context")
     set_kind("binary")
