@@ -561,6 +561,15 @@ target("test_runtime_message_api")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- RAW Codec 独立测试真实公共编码对象，保留字节与参数边界契约。
+target("test_rpc_raw_codec")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_raw_codec.c")
+    add_deps("trcore")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- 新调用记录只链接真实记录/消息对象，防止整库补齐意外依赖。
 target("test_rpc_record")
     set_kind("binary")
@@ -574,7 +583,6 @@ target("test_rpc_record")
     on_config(function (target)
         local expected = {
             [path.absolute("src/rpc/rpc_record.c")] = 0,
-            [path.absolute("src/rpc/rpc_wire.c")] = 0,
             [path.absolute("src/message/message.c")] = 0,
             [path.absolute("src/message/transform.c")] = 0,
             [path.absolute("src/message/zstd.c")] = 0

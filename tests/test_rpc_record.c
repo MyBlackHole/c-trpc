@@ -1,5 +1,4 @@
 #include "../src/rpc/rpc_record.h"
-#include "../src/rpc/rpc_wire.h"
 #include "../src/message/transform.h"
 #include "../src/message/storage.h"
 #include "../src/memory_budget.h"
@@ -137,23 +136,20 @@ static void test_golden_and_framing(void)
 
 static void test_bad_headers(void)
 {
+	/* 固定 V1 请求头：TRPC、小端版本 1、类型 1，其余字段为 0。 */
+	static const uint8_t legacy_v1_header[32] = {
+	        'T', 'R', 'P', 'C', 1, 0, 1, 0};
 	uint8_t bytes[H + 8] = {0}, output[H];
 	struct tr_rpc_record_header message = empty_message, modified;
 	struct tr_rpc_record_limits policy = limits;
-	struct tr_rpc_wire_header legacy = {.version = TR_RPC_WIRE_VERSION,
-	                                    .type = TR_RPC_WIRE_REQUEST};
-	const uint8_t *payload;
 	uint32_t *fields[] = {&modified.service_id,    &modified.method_id,
 	                      &modified.codec_id,      &modified.compression,
 	                      &modified.encoded_size,  &modified.decoded_size,
 	                      &modified.metadata_size, &modified.status};
 
-	CHECK(tr_rpc_wire_encode(bytes, &legacy) == TR_OK);
-	reject_decode(bytes, TR_RPC_WIRE_HEADER_SIZE, &limits,
+	reject_decode(legacy_v1_header, sizeof(legacy_v1_header), &limits,
 	              TR_ERR_BAD_VERSION);
 	encode(bytes, &open_record, NULL, NULL);
-	CHECK(tr_rpc_wire_decode(bytes, H, &legacy, &payload) ==
-	      TR_ERR_BAD_VERSION);
 	bytes[0] = '?';
 	reject_decode(bytes, 4, &limits, TR_ERR_BAD_MAGIC);
 	bytes[0] = 'T';
