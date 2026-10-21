@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -38,6 +39,10 @@ static struct tr_reactor *group_connector_probe_owner;
 static tr_connector_complete_cb group_connector_probe_complete;
 static void *group_connector_probe_arg;
 static unsigned group_connector_probe_starts;
+static atomic_int block_group_data_tx;
+static pthread_mutex_t group_data_tx_probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t group_data_tx_probe_cond = PTHREAD_COND_INITIALIZER;
+static unsigned group_data_tx_blocked_attempts;
 
 int __real_tr_reactor_close_on_owner(struct tr_conn_handle connection);
 
@@ -94,6 +99,28 @@ int __wrap_tr_connector_cancel(struct tr_connector *connector)
 	if (atomic_exchange(&fail_group_connector_cancel_once, 0))
 		return TR_ERR_SYS;
 	return __real_tr_connector_cancel(connector);
+}
+
+ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
+
+ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
+{
+	struct tr_frame_header header;
+
+	if (atomic_load(&block_group_data_tx) && message &&
+	    message->msg_iovlen != 0U && message->msg_iov &&
+	    message->msg_iov[0].iov_len >= TR_WIRE_HEADER_SIZE &&
+	    tr_wire_header_decode((const uint8_t *)message->msg_iov[0].iov_base,
+	                          &header) == TR_OK &&
+	    header.type == TR_FRAME_DATA) {
+		pthread_mutex_lock(&group_data_tx_probe_lock);
+		group_data_tx_blocked_attempts++;
+		pthread_cond_broadcast(&group_data_tx_probe_cond);
+		pthread_mutex_unlock(&group_data_tx_probe_lock);
+		errno = EAGAIN;
+		return -1;
+	}
+	return __real_sendmsg(fd, message, flags);
 }
 
 struct public_group_ctx {
@@ -449,6 +476,116 @@ static void wait_data_accepts(struct tr_server *server, uint64_t target)
 		(void)nanosleep(&pause, NULL);
 	}
 	assert(!"timed out waiting for DATA attach");
+}
+
+static void wait_group_data_tx_blocked(void)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&group_data_tx_probe_lock);
+	while (group_data_tx_blocked_attempts == 0U && ret == 0)
+		ret = pthread_cond_timedwait(&group_data_tx_probe_cond,
+		                             &group_data_tx_probe_lock,
+		                             &deadline);
+	pthread_mutex_unlock(&group_data_tx_probe_lock);
+	assert(ret == 0);
+}
+
+static void
+test_public_connection_group_client_destroy_with_data_tx_inflight(void)
+{
+	static const uint32_t payload_len = 8U * 1024U * 1024U;
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_connection_group_client_stats client_stats;
+	struct tr_transport_bytes bytes;
+	uint8_t *payload;
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	server_config.limits.max_message_bytes = payload_len;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	client_config.limits.max_message_bytes = payload_len;
+	client_config.connection_groups.max_data_connections = 1U;
+	client_config.connection_groups.max_active_transfers = 1U;
+	client_config.connection_groups.on_transfer_ready =
+	        on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	ctx.client = client;
+	assert(tr_client_connection_group_connect(client, "127.0.0.1",
+	                                          group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_data_offer(server, UINT64_C(5100)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 6001U,
+	               UINT64_C(5101)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+
+	pthread_mutex_lock(&group_data_tx_probe_lock);
+	group_data_tx_blocked_attempts = 0U;
+	pthread_mutex_unlock(&group_data_tx_probe_lock);
+	atomic_store(&block_group_data_tx, 1);
+	payload = (uint8_t *)malloc(payload_len);
+	assert(payload != NULL);
+	memset(payload, 0x5a, payload_len);
+	bytes.data = payload;
+	bytes.len = payload_len;
+	assert(tr_client_connection_group_send(client, 6001U, UINT64_C(5102),
+	                                       &bytes) == TR_OK);
+	free(payload);
+
+	/* 等到 DATA 帧确实进入 Reactor 发送路径并被确定性阻塞。 */
+	wait_group_data_tx_blocked();
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(client, &client_stats) ==
+	       TR_OK);
+	assert(client_stats.send_bytes_inflight == payload_len);
+
+	/* 直接销毁，不预先 close()、begin_drain() 或 wait_drained()。
+	 * Client 所有者屏障必须同步释放 DATA TX 队列和组持有负载。 */
+	assert(tr_client_destroy(client) == TR_OK);
+	client = NULL;
+	atomic_store(&block_group_data_tx, 0);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
+
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
 }
 
 static void test_public_connection_group_server(void)
@@ -1466,6 +1603,7 @@ int main(void)
 	test_public_connection_group_client_control();
 	test_client_group_destroy_retry_preserves_control();
 	test_client_group_close_retry_preserves_control();
+	test_public_connection_group_client_destroy_with_data_tx_inflight();
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_client_connector_failure_wakes();
 	test_public_connection_group_client_drain_cancels_offer();
