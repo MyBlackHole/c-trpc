@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
@@ -130,12 +131,15 @@ static _Atomic bool fail_client_start_arm;
 static _Atomic unsigned client_start_arm_failures;
 static _Atomic unsigned client_stream_opens;
 static _Atomic bool observe_destroy_stop;
-static _Atomic unsigned destroy_stop_entries;
+static _Atomic unsigned destroy_join_busy;
+static pthread_t destroy_owner_thread;
 static _Atomic unsigned client_control_down_events;
 static _Atomic bool capture_public_start_clock;
 static _Atomic bool saturate_public_start_clock, capture_open_timeout;
+static _Atomic bool capture_open_attempt;
 static _Atomic uint64_t public_start_ns;
 static _Atomic uint64_t observed_open_timeout;
+static _Atomic uint64_t observed_open_clock_ns, observed_open_remaining_ns;
 static _Atomic unsigned response_clock_mode, response_clock_reads;
 static _Atomic unsigned clock_failures;
 static _Atomic bool clear_open_deadline;
@@ -149,6 +153,8 @@ static _Thread_local bool capture_start_clock;
 static _Thread_local bool fake_start_clock_once;
 static _Thread_local bool fail_timer_arm_once;
 static _Thread_local uint64_t fake_response_clock_ns;
+static _Thread_local uint64_t recent_monotonic_ns;
+static _Thread_local bool join_inside_destroy_stop;
 static _Atomic(struct tr_buffer_pool *) public_send_pool;
 static _Atomic bool hold_public_send, public_send_held;
 static struct tr_stream_handle public_held_stream;
@@ -159,9 +165,25 @@ int __real_clock_gettime(clockid_t, struct timespec *);
 int __real_tr_runtime_stop(struct tr_runtime *);
 int __wrap_tr_runtime_stop(struct tr_runtime *runtime)
 {
-	if (atomic_load(&observe_destroy_stop))
-		atomic_fetch_add(&destroy_stop_entries, 1);
-	return __real_tr_runtime_stop(runtime);
+	bool observe = atomic_load(&observe_destroy_stop);
+	if (observe) {
+		CHECK(!join_inside_destroy_stop);
+		join_inside_destroy_stop = true;
+	}
+	int ret = __real_tr_runtime_stop(runtime);
+	if (observe)
+		join_inside_destroy_stop = false;
+	return ret;
+}
+int __real_pthread_join(pthread_t, void **);
+int __wrap_pthread_join(pthread_t thread, void **value)
+{
+	if (join_inside_destroy_stop) {
+		CHECK(pthread_equal(thread, destroy_owner_thread));
+		CHECK(pthread_tryjoin_np(thread, NULL) == EBUSY);
+		atomic_fetch_add(&destroy_join_busy, 1);
+	}
+	return __real_pthread_join(thread, value);
 }
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle, uint64_t);
 int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
@@ -219,6 +241,10 @@ int __wrap_clock_gettime(clockid_t clock, struct timespec *time)
 		atomic_store(&public_start_ns,
 		             (uint64_t)time->tv_sec * 1000000000 +
 		                     (uint64_t)time->tv_nsec);
+	if (ret == 0 && clock == CLOCK_MONOTONIC)
+		recent_monotonic_ns =
+		        (uint64_t)time->tv_sec * 1000000000 +
+		        (uint64_t)time->tv_nsec;
 	return ret;
 }
 
@@ -305,13 +331,16 @@ static void reset_observation(void)
 	atomic_store(&client_start_arm_failures, 0);
 	atomic_store(&client_stream_opens, 0);
 	atomic_store(&observe_destroy_stop, false);
-	atomic_store(&destroy_stop_entries, 0);
+	atomic_store(&destroy_join_busy, 0);
 	atomic_store(&client_control_down_events, 0);
 	atomic_store(&capture_public_start_clock, false);
 	atomic_store(&saturate_public_start_clock, false);
 	atomic_store(&capture_open_timeout, false);
+	atomic_store(&capture_open_attempt, false);
 	atomic_store(&public_start_ns, 0);
 	atomic_store(&observed_open_timeout, 0);
+	atomic_store(&observed_open_clock_ns, 0);
+	atomic_store(&observed_open_remaining_ns, 0);
 	atomic_store(&response_clock_mode, 0);
 	atomic_store(&response_clock_reads, 0);
 	atomic_store(&clock_failures, 0);
@@ -440,6 +469,16 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 		CHECK(count == 1 &&
 		      buffers[0]->len >= TR_RPC_RECORD_HEADER_SIZE);
 		attempted_open_timeout = tr_get_le64(buffers[0]->data + 40);
+	}
+	if (kind == TR_RPC_RECORD_OPEN &&
+	    atomic_exchange(&capture_open_attempt, false)) {
+		/* progress 刚用的 owner 时钟与线上剩余期限构成绝对截止
+		 * 时间；失败的下一次公开准入不得改变这个和。 */
+		CHECK(count == 1 &&
+		      buffers[0]->len >= TR_RPC_RECORD_HEADER_SIZE);
+		atomic_store(&observed_open_clock_ns, recent_monotonic_ns);
+		atomic_store(&observed_open_remaining_ns,
+		             tr_get_le64(buffers[0]->data + 40));
 	}
 	uint64_t server_bytes = 0;
 	if (server_kind == TR_RPC_RECORD_MESSAGE)
@@ -2073,7 +2112,6 @@ struct public_result {
 	unsigned expected_count;
 	_Atomic unsigned messages, initial, trailing, writable, terminal;
 	_Atomic unsigned depth, arg_freed;
-	_Atomic uint64_t terminal_ns;
 	struct gate *terminal_gate;
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
@@ -2152,13 +2190,10 @@ static void public_terminal(struct tr_rpc_v2_call call,
 		check_client_semantic(result->fixture->client, 1, 1, status);
 	result->status = status;
 	result->delivery = delivery;
-	struct timespec terminal_time;
-	CHECK(__real_clock_gettime(CLOCK_MONOTONIC, &terminal_time) == 0);
-	atomic_store(&result->terminal_ns,
-	             (uint64_t)terminal_time.tv_sec * 1000000000 +
-	                     (uint64_t)terminal_time.tv_nsec);
-	if (result->terminal_gate)
+	if (result->terminal_gate) {
+		destroy_owner_thread = pthread_self();
 		gate_wait(result->terminal_gate, 0, true);
+	}
 	if (context->free_on_terminal) {
 		free(context);
 		atomic_store(&result->arg_freed, 1);
@@ -2576,11 +2611,19 @@ static void test_public_failed_earlier_deadline(void)
 	CHECK(atomic_load(&client_stream_opens) == opens);
 	CHECK(!atomic_load(&rejected.terminal));
 	check_client_semantic(f.client, 1, 0, TR_RPC_STATUS_OK);
+	atomic_store(&capture_open_attempt, true);
+	struct tr_reactor *owner =
+	        tr_channel_reactor(atomic_load(&client_channel));
+	CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
+	                      &original_call) == TR_OK);
+	CHECK(!atomic_load(&capture_open_attempt));
+	CHECK(atomic_load(&observed_open_clock_ns) != 0);
+	CHECK(atomic_load(&observed_open_clock_ns) +
+	              atomic_load(&observed_open_remaining_ns) ==
+	      atomic_load(&public_start_ns) + 1000000000);
 	wait_count(&original.terminal, 1);
 	CHECK(original.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
 	CHECK(original.delivery == TR_RPC_V2_DELIVERY_LIVE);
-	CHECK(atomic_load(&original.terminal_ns) >=
-	      atomic_load(&public_start_ns) + 1000000000);
 	CHECK(atomic_load(&original.terminal) == 1);
 	check_client_semantic(f.client, 1, 1,
 	                      TR_RPC_STATUS_DEADLINE_EXCEEDED);
@@ -2980,8 +3023,8 @@ static void *public_destroy_thread(void *arg)
 	return NULL;
 }
 
-/* 真实 V2 terminal 卡在 owner 回调内时，销毁已进入 Runtime stop 也不能
- * 越过回调；排队的断连不能覆盖已选定的超时终局。 */
+/* 真实 V2 terminal 卡在 owner 回调内时，销毁到达 owner pthread_join
+ * 仍不能越过回调；排队的断连不能覆盖已选定的超时终局。 */
 static void test_public_terminal_destroy_barrier(void)
 {
 	struct fixture f;
@@ -3028,20 +3071,9 @@ static void test_public_terminal_destroy_barrier(void)
 	atomic_store(&observe_destroy_stop, true);
 	CHECK(pthread_create(&destroy_thread, NULL, public_destroy_thread,
 	                     &probe) == 0);
-	wait_count(&destroy_stop_entries, 1);
-	struct timespec end;
-	CHECK(__real_clock_gettime(CLOCK_MONOTONIC, &end) == 0);
-	end.tv_nsec += 100000000;
-	if (end.tv_nsec >= 1000000000) {
-		++end.tv_sec;
-		end.tv_nsec -= 1000000000;
-	}
+	wait_count(&destroy_join_busy, 1);
 	CHECK(pthread_mutex_lock(&probe.completed.lock) == 0);
-	int wait_status = 0;
-	while (!probe.completed.entered && wait_status == 0)
-		wait_status = pthread_cond_timedwait(
-		        &probe.completed.cond, &probe.completed.lock, &end);
-	CHECK(wait_status == ETIMEDOUT && !probe.completed.entered);
+	CHECK(!probe.completed.entered);
 	CHECK(pthread_mutex_unlock(&probe.completed.lock) == 0);
 	CHECK(!atomic_load(&result.terminal));
 	gate_release(&terminal_gate);
