@@ -3608,13 +3608,13 @@ static void test_channel_keepalive_and_diagnostics(void)
 	channel_config.initial_window_bytes = 4096;
 	channel_config.window_update_threshold_bytes = 1024;
 	assert(tr_channel_create(&channel_config, client_conn, client_conn,
-				 NULL, NULL, NULL, NULL,
-				 &client_channel) == TR_OK);
+	                         NULL, NULL, NULL, NULL,
+	                         &client_channel) == TR_OK);
 
 	channel_config.role = TR_CHANNEL_SERVER;
 	assert(tr_channel_create(&channel_config, server_conn, server_conn,
-				 NULL, NULL, NULL, NULL,
-				 &server_channel) == TR_OK);
+	                         NULL, NULL, NULL, NULL,
+	                         &server_channel) == TR_OK);
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
 
@@ -3648,8 +3648,8 @@ static void test_channel_keepalive_and_diagnostics(void)
 
 	for (i = 0; i < 2000U; ++i) {
 		assert(tr_channel_get_lane_state(client_channel,
-						 TR_LANE_CONTROL,
-						 &lane_state) == TR_OK);
+		                                 TR_LANE_CONTROL,
+		                                 &lane_state) == TR_OK);
 		if (lane_state == TR_CHANNEL_LANE_DOWN)
 			break;
 		{
@@ -3735,7 +3735,8 @@ static void test_client_server_facade_nodelay_policy(void)
 
 	tr_server_config_init(&server_config);
 	server_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_test_server_v2_create(&server_config, &server) == TR_ERR_INVALID);
+	assert(tr_test_server_v2_create(&server_config, &server) ==
+	       TR_ERR_INVALID);
 	assert(server == NULL);
 }
 

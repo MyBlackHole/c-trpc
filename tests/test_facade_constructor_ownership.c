@@ -25,9 +25,10 @@ static atomic_uint server_pool_attempts;
 int __real_tr_runtime_start(struct tr_runtime *runtime);
 int __real_tr_runtime_stop(struct tr_runtime *runtime);
 int __real_tr_runtime_destroy(struct tr_runtime *runtime);
-int __real_tr_buffer_pool_init_budgeted(
-	struct tr_buffer_pool *pool, uint32_t buffer_count, uint32_t buffer_size,
-	struct tr_memory_budget *budget);
+int __real_tr_buffer_pool_init_budgeted(struct tr_buffer_pool *pool,
+                                        uint32_t buffer_count,
+                                        uint32_t buffer_size,
+                                        struct tr_memory_budget *budget);
 
 int __wrap_tr_runtime_start(struct tr_runtime *runtime)
 {
@@ -56,15 +57,16 @@ int __wrap_tr_runtime_destroy(struct tr_runtime *runtime)
 	return __real_tr_runtime_destroy(runtime);
 }
 
-int __wrap_tr_buffer_pool_init_budgeted(
-	struct tr_buffer_pool *pool, uint32_t buffer_count, uint32_t buffer_size,
-	struct tr_memory_budget *budget)
+int __wrap_tr_buffer_pool_init_budgeted(struct tr_buffer_pool *pool,
+                                        uint32_t buffer_count,
+                                        uint32_t buffer_size,
+                                        struct tr_memory_budget *budget)
 {
 	atomic_fetch_add(&server_pool_attempts, 1U);
 	if (atomic_exchange(&fail_server_reassembly_pool_once, 0))
 		return TR_ERR_NOMEM;
-	return __real_tr_buffer_pool_init_budgeted(
-		pool, buffer_count, buffer_size, budget);
+	return __real_tr_buffer_pool_init_budgeted(pool, buffer_count,
+	                                           buffer_size, budget);
 }
 
 static void reset_faults(void)
@@ -172,7 +174,8 @@ static void test_server_rollback_failure_keeps_owner(void)
 	atomic_store(&fail_runtime_destroy_once, 1);
 
 	/* 池初始化是原始构造失败；随后 Runtime 终止销毁
-	 * 再失败一次。V2 重组池初始化失败后，Server 存储不得丢失，必须留在 out。
+	 * 再失败一次。V2 重组池初始化失败后，Server 存储不得丢失，必须留在
+	 * out。
 	 */
 	assert(tr_test_server_v2_create(&config, &server) == TR_ERR_SYS);
 	assert(server != NULL);

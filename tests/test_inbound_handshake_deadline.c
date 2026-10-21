@@ -291,7 +291,8 @@ static void fixture_init_capacity(struct fixture *f, int group,
 		assert(tr_server_create_transport(&f->config, &f->server) ==
 		       TR_OK);
 	else
-		assert(tr_test_server_v2_create(&f->config, &f->server) == TR_OK);
+		assert(tr_test_server_v2_create(&f->config, &f->server) ==
+		       TR_OK);
 	if (group)
 		assert(tr_server_connection_group_listen(f->server, "127.0.0.1",
 		                                         0U, 4,
@@ -478,8 +479,10 @@ static void normal_client(struct fixture *f)
 		                                          "127.0.0.1", f->port,
 		                                          &group) == TR_OK);
 	} else {
-		assert(tr_client_create(&config, &method, 1U, &client) == TR_OK);
-		assert(tr_client_connect(client, "127.0.0.1", f->port) == TR_OK);
+		assert(tr_client_create(&config, &method, 1U, &client) ==
+		       TR_OK);
+		assert(tr_client_connect(client, "127.0.0.1", f->port) ==
+		       TR_OK);
 		assert(tr_client_wait_ready(client, 5000U) == TR_OK);
 	}
 	wait_counts(f, 1U, 1U);

@@ -28,10 +28,10 @@ int __wrap_tr_channel_destroy(struct tr_channel *channel)
 	return __real_tr_channel_destroy(channel);
 }
 
-static enum tr_rpc_status unused_work(
-	struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
-	const struct tr_rpc_v2_cancel *cancel, struct tr_rpc_v2_reply *reply,
-	void *arg)
+static enum tr_rpc_status unused_work(struct tr_rpc_v2_call_id call,
+                                      const struct tr_rpc_v2_request *request,
+                                      const struct tr_rpc_v2_cancel *cancel,
+                                      struct tr_rpc_v2_reply *reply, void *arg)
 {
 	(void)call;
 	(void)request;
