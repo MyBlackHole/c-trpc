@@ -117,6 +117,20 @@ class InventoryTests(unittest.TestCase):
         self.assertTrue(expected.issubset(symbols))
         self.assertEqual(denied_symbols(symbols, expected), sorted(expected))
 
+    def test_private_v1_method_hash_is_denied(self):
+        with self.workspace_tempdir() as temporary:
+            root = Path(temporary)
+            (root / "src/rpc").mkdir(parents=True)
+            (root / "src/rpc/legacy.c").write_text(
+                "uint64_t tr_rpc_method_hash(uint32_t service_id, "
+                "uint32_t method_id);\n",
+                encoding="utf-8",
+            )
+            (root / "xmake.lua").write_text("", encoding="utf-8")
+            symbols = audit(root)["symbols"]
+
+        self.assertIn("tr_rpc_method_hash", symbols)
+
     def test_v2_endpoint_record_and_raw_codec_names_are_allowed(self):
         with self.workspace_tempdir() as temporary:
             root = Path(temporary)
