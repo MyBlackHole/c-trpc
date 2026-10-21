@@ -35,7 +35,7 @@ static struct timespec realtime_after_ms(unsigned milliseconds)
 }
 
 static void wait_for_count(struct gate *gate, const unsigned *value,
-			   unsigned target)
+                           unsigned target)
 {
 	struct timespec due = realtime_after_ms(WAIT_MS);
 	int ret = 0;
@@ -47,10 +47,10 @@ static void wait_for_count(struct gate *gate, const unsigned *value,
 	assert(pthread_mutex_unlock(&gate->lock) == 0);
 }
 
-static enum tr_rpc_status blocked_work(
-	struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
-	const struct tr_rpc_v2_cancel *cancel, struct tr_rpc_v2_reply *reply,
-	void *arg)
+static enum tr_rpc_status blocked_work(struct tr_rpc_v2_call_id call,
+                                       const struct tr_rpc_v2_request *request,
+                                       const struct tr_rpc_v2_cancel *cancel,
+                                       struct tr_rpc_v2_reply *reply, void *arg)
 {
 	struct gate *gate = (struct gate *)arg;
 
@@ -60,7 +60,8 @@ static enum tr_rpc_status blocked_work(
 		++gate->entered;
 		assert(pthread_cond_broadcast(&gate->cond) == 0);
 		while (!gate->release)
-			assert(pthread_cond_wait(&gate->cond, &gate->lock) == 0);
+			assert(pthread_cond_wait(&gate->cond, &gate->lock) ==
+			       0);
 		assert(pthread_mutex_unlock(&gate->lock) == 0);
 		return tr_rpc_v2_cancel_requested(cancel) == 1
 		               ? TR_RPC_STATUS_CANCELLED
@@ -70,14 +71,15 @@ static enum tr_rpc_status blocked_work(
 	if (request->kind == TR_RPC_V2_REQUEST_HALF_CLOSE) {
 		struct tr_rpc_bytes empty = {NULL, 0U};
 		assert(tr_rpc_v2_reply_append(reply, &empty) == TR_OK);
-		assert(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) == TR_OK);
+		assert(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) ==
+		       TR_OK);
 	}
 	return TR_RPC_STATUS_OK;
 }
 
 static void record_terminal(struct tr_rpc_v2_call_id call,
-			    enum tr_rpc_status status,
-			    enum tr_rpc_v2_delivery delivery, void *arg)
+                            enum tr_rpc_status status,
+                            enum tr_rpc_v2_delivery delivery, void *arg)
 {
 	struct gate *gate = (struct gate *)arg;
 	(void)call;
@@ -92,7 +94,7 @@ static void record_terminal(struct tr_rpc_v2_call_id call,
 }
 
 static void ignore_client_message(struct tr_rpc_v2_call call,
-				  const struct tr_rpc_bytes *body, void *arg)
+                                  const struct tr_rpc_bytes *body, void *arg)
 {
 	(void)call;
 	(void)body;
@@ -100,8 +102,8 @@ static void ignore_client_message(struct tr_rpc_v2_call call,
 }
 
 static void ignore_client_terminal(struct tr_rpc_v2_call call,
-				   enum tr_rpc_status status,
-				   enum tr_rpc_v2_delivery delivery, void *arg)
+                                   enum tr_rpc_status status,
+                                   enum tr_rpc_v2_delivery delivery, void *arg)
 {
 	(void)call;
 	(void)status;
@@ -109,9 +111,9 @@ static void ignore_client_terminal(struct tr_rpc_v2_call call,
 	(void)arg;
 }
 
-static void assert_semantic_cumulative(
-	const struct tr_rpc_semantic_stats *now,
-	const struct tr_rpc_semantic_stats *prior)
+static void
+assert_semantic_cumulative(const struct tr_rpc_semantic_stats *now,
+                           const struct tr_rpc_semantic_stats *prior)
 {
 	assert(now->calls_started >= prior->calls_started);
 	assert(now->calls_finished >= prior->calls_finished);
@@ -121,7 +123,7 @@ static void assert_semantic_cumulative(
 }
 
 static void assert_semantic_totals(const struct tr_rpc_semantic_stats *stats,
-				   uint64_t started, uint64_t finished)
+                                   uint64_t started, uint64_t finished)
 {
 	uint64_t final_count = 0U;
 	assert(stats->calls_started == started);
@@ -149,7 +151,7 @@ static void wait_for_peer_not_ready(struct tr_server *server)
 }
 
 static void wait_for_peer_reaped(struct tr_server *server,
-				 uint64_t expected_total)
+                                 uint64_t expected_total)
 {
 	struct timespec pause = {0, 1000000L};
 	struct tr_server_stats stats;
@@ -180,8 +182,12 @@ static void destroy_server_retry(struct tr_server *server)
 
 static void test_retirement(uint32_t shard_count)
 {
-	struct gate gate = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
-			    0U, 0U, 0, {0}};
+	struct gate gate = {PTHREAD_MUTEX_INITIALIZER,
+	                    PTHREAD_COND_INITIALIZER,
+	                    0U,
+	                    0U,
+	                    0,
+	                    {0}};
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
 	struct tr_rpc_method_desc client_method;
@@ -236,15 +242,16 @@ static void test_retirement(uint32_t shard_count)
 		struct tr_rpc_semantic_stats previous = {0};
 		struct tr_server_stats server_stats;
 
-		assert(tr_client_create(&client_config, &client_method, 1U, &client) ==
-		       TR_OK);
+		assert(tr_client_create(&client_config, &client_method, 1U,
+		                        &client) == TR_OK);
 		assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 		assert(tr_client_wait_ready(client, WAIT_MS) == TR_OK);
 		assert(tr_client_unary_call(client, 1U, 1U, &request, NULL,
 		                            &callbacks, &call) == TR_OK);
 		wait_for_count(&gate, &gate.entered, (unsigned)cycle);
 
-		assert(tr_server_get_rpc_semantic_stats(server, &stats) == TR_OK);
+		assert(tr_server_get_rpc_semantic_stats(server, &stats) ==
+		       TR_OK);
 		assert_semantic_totals(&stats, cycle, cycle - 1U);
 		previous = stats;
 		assert(tr_client_destroy(client) == TR_OK);
@@ -255,8 +262,8 @@ static void test_retirement(uint32_t shard_count)
 		assert(server_stats.peers_ready_current == 0U);
 		assert(server_stats.peers_reaping_current == 0U);
 		for (unsigned sample = 0; sample < 100U; ++sample) {
-			assert(tr_server_get_rpc_semantic_stats(server, &stats) ==
-			       TR_OK);
+			assert(tr_server_get_rpc_semantic_stats(
+			               server, &stats) == TR_OK);
 			assert_semantic_cumulative(&stats, &previous);
 			assert_semantic_totals(&stats, cycle, cycle - 1U);
 			previous = stats;
@@ -269,7 +276,8 @@ static void test_retirement(uint32_t shard_count)
 		wait_for_count(&gate, &gate.terminals, (unsigned)cycle);
 		wait_for_peer_reaped(server, cycle);
 
-		assert(tr_server_get_rpc_semantic_stats(server, &stats) == TR_OK);
+		assert(tr_server_get_rpc_semantic_stats(server, &stats) ==
+		       TR_OK);
 		assert_semantic_cumulative(&stats, &previous);
 		assert_semantic_totals(&stats, cycle, cycle);
 		previous = stats;
@@ -278,8 +286,8 @@ static void test_retirement(uint32_t shard_count)
 		assert(server_stats.peers_reaping_current == 0U);
 
 		for (unsigned sample = 0; sample < 100U; ++sample) {
-			assert(tr_server_get_rpc_semantic_stats(server, &stats) ==
-			       TR_OK);
+			assert(tr_server_get_rpc_semantic_stats(
+			               server, &stats) == TR_OK);
 			assert_semantic_cumulative(&stats, &previous);
 			assert_semantic_totals(&stats, cycle, cycle);
 			previous = stats;

@@ -135,26 +135,36 @@ static uint32_t number(const char *text)
 static void usage(const char *program)
 {
 	fprintf(stderr,
-		"Usage: %s server|client [--host IPv4] [--port N]\n"
-		"  --scenario small|bulk|mixed|pressure|open --requests N --window N\n"
-		"  --warmup N --small-bytes N --bulk-bytes N --bulk-every N\n"
-		"  --timeout-ms N --slow-ms N --capacity N --start-gate 0|1\n"
-		"  --rate-rps N\n"
-		"Server binds loopback by default, prints readiness JSON, and exits on stdin EOF.\n"
-		"pressure uses the delayed method, then measures recovery on the SAME client.\n"
-		"open schedules METHOD_SLOW arrivals independently of callback completion.\n",
-		program);
+	        "Usage: %s server|client [--host IPv4] [--port N]\n"
+	        "  --scenario small|bulk|mixed|pressure|open --requests N "
+	        "--window N\n"
+	        "  --warmup N --small-bytes N --bulk-bytes N --bulk-every N\n"
+	        "  --timeout-ms N --slow-ms N --capacity N --start-gate 0|1\n"
+	        "  --rate-rps N\n"
+	        "Server binds loopback by default, prints readiness JSON, and "
+	        "exits on stdin EOF.\n"
+	        "pressure uses the delayed method, then measures recovery on "
+	        "the SAME client.\n"
+	        "open schedules METHOD_SLOW arrivals independently of callback "
+	        "completion.\n",
+	        program);
 }
 
 static struct options parse_options(int argc, char **argv)
 {
-	struct options o = {
-		.host = "127.0.0.1", .scenario = "small", .port = 0,
-		.requests = 2000, .window = 8, .warmup = 100,
-		.small_bytes = 32, .bulk_bytes = 65536, .bulk_every = 4,
-		.timeout_ms = 5000, .slow_ms = 25, .capacity = 64,
-		.rate_rps = 200
-	};
+	struct options o = {.host = "127.0.0.1",
+	                    .scenario = "small",
+	                    .port = 0,
+	                    .requests = 2000,
+	                    .window = 8,
+	                    .warmup = 100,
+	                    .small_bytes = 32,
+	                    .bulk_bytes = 65536,
+	                    .bulk_every = 4,
+	                    .timeout_ms = 5000,
+	                    .slow_ms = 25,
+	                    .capacity = 64,
+	                    .rate_rps = 200};
 	struct in_addr address;
 	int i;
 	if (argc < 2 || (strcmp(argv[1], "server") && strcmp(argv[1], "client"))) {
@@ -187,11 +197,10 @@ static struct options parse_options(int argc, char **argv)
 		fatal("unknown argument", 0);
 	}
 	if (inet_pton(AF_INET, o.host, &address) != 1 || o.port > 65535U ||
-	    (!strcmp(o.role, "client") && o.port == 0) ||
-	    o.requests == 0 || o.requests > 1000000U || o.warmup > 100000U ||
-	    o.window == 0 || o.window > 256U || o.capacity < o.window || o.capacity > 256U ||
-	    o.rate_rps == 0 || o.rate_rps > 1000000U ||
-	    o.small_bytes < 8U ||
+	    (!strcmp(o.role, "client") && o.port == 0) || o.requests == 0 ||
+	    o.requests > 1000000U || o.warmup > 100000U || o.window == 0 ||
+	    o.window > 256U || o.capacity < o.window || o.capacity > 256U ||
+	    o.rate_rps == 0 || o.rate_rps > 1000000U || o.small_bytes < 8U ||
 	    o.bulk_bytes < o.small_bytes || o.bulk_bytes > MAX_PAYLOAD ||
 	    o.bulk_every == 0 || o.timeout_ms == 0 || o.timeout_ms > 30000U ||
 	    o.slow_ms > 1000U || o.start_gate > 1U ||
@@ -231,11 +240,10 @@ static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
 	return m;
 }
 
-static enum tr_rpc_status echo_v2(
-	struct tr_rpc_v2_call_id call,
-	const struct tr_rpc_v2_request *request,
-	const struct tr_rpc_v2_cancel *cancel,
-	struct tr_rpc_v2_reply *reply, void *arg)
+static enum tr_rpc_status echo_v2(struct tr_rpc_v2_call_id call,
+                                  const struct tr_rpc_v2_request *request,
+                                  const struct tr_rpc_v2_cancel *cancel,
+                                  struct tr_rpc_v2_reply *reply, void *arg)
 {
 	const uint32_t *delay_ms = arg;
 	(void)call;
@@ -296,7 +304,8 @@ static int run_server(const struct options *o)
 		       "\"command_processed_total\":%" PRIu64 ","
 		       "\"command_max_per_turn\":%" PRIu64 ","
 		       "\"command_budget_hits\":%" PRIu64 ","
-		       "\"epoll_polls\":%" PRIu64 ",\"epoll_waits\":%" PRIu64 ","
+		       "\"epoll_polls\":%" PRIu64 ",\"epoll_waits\":%" PRIu64
+		       ","
 		       "\"command_send_enqueued\":%" PRIu64 ","
 		       "\"command_send_full\":%" PRIu64 ","
 		       "\"command_resume_rx_enqueued\":%" PRIu64 ","
@@ -328,13 +337,11 @@ static int run_server(const struct options *o)
 		       "\"peers_ready_total\":%" PRIu64 ","
 		       "\"peers_reaped_total\":%" PRIu64 "}\n",
 		       status, cpu_seconds(&usage_after), usage_after.ru_maxrss,
-		       stats.reactor.turns,
-		       stats.reactor.limits.commands,
+		       stats.reactor.turns, stats.reactor.limits.commands,
 		       stats.reactor.total.commands,
 		       stats.reactor.max_per_turn.commands,
 		       stats.reactor.budget_hits.commands,
-		       stats.reactor.epoll_polls,
-		       stats.reactor.epoll_waits,
+		       stats.reactor.epoll_polls, stats.reactor.epoll_waits,
 		       stats.reactor.command_send.enqueued,
 		       stats.reactor.command_send.full_events,
 		       stats.reactor.command_resume_rx.enqueued,
@@ -373,7 +380,7 @@ static int run_server(const struct options *o)
 }
 
 static void result_message(struct tr_rpc_v2_call call,
-			   const struct tr_rpc_bytes *response, void *arg)
+                           const struct tr_rpc_bytes *response, void *arg)
 {
 	struct slot *slot = arg;
 	struct client_run *run = slot->run;
@@ -383,17 +390,18 @@ static void result_message(struct tr_rpc_v2_call call,
 		run->bad_callback = 1;
 	} else {
 		slot->message_seen = 1;
-		slot->response_valid = response &&
-			response->len == slot->sample->bytes && response->data &&
-			!memcmp(response->data, slot->payload, response->len);
+		slot->response_valid =
+		        response && response->len == slot->sample->bytes &&
+		        response->data &&
+		        !memcmp(response->data, slot->payload, response->len);
 	}
 	check(pthread_cond_broadcast(&run->cond), "result signal");
 	check(pthread_mutex_unlock(&run->lock), "result unlock");
 }
 
 static void result_terminal(struct tr_rpc_v2_call call,
-			    enum tr_rpc_status status,
-			    enum tr_rpc_v2_delivery delivery, void *arg)
+                            enum tr_rpc_status status,
+                            enum tr_rpc_v2_delivery delivery, void *arg)
 {
 	struct slot *slot = arg;
 	struct client_run *run = slot->run;
@@ -405,22 +413,23 @@ static void result_terminal(struct tr_rpc_v2_call call,
 	} else {
 		slot->sample->end_ns = now_ns();
 		slot->sample->rpc_status = (int)status;
-		slot->sample->valid = status != TR_RPC_STATUS_OK ||
-			(slot->message_seen && slot->response_valid);
+		slot->sample->valid =
+		        status != TR_RPC_STATUS_OK ||
+		        (slot->message_seen && slot->response_valid);
 		slot->done = 1;
 	}
 	check(pthread_cond_broadcast(&run->cond), "terminal signal");
 	check(pthread_mutex_unlock(&run->lock), "terminal unlock");
-	/* The issuer may reuse this slot after the terminal callback returns. */
+	/* The issuer may reuse this slot after the terminal callback returns.
+	 */
 }
 
 static struct tr_rpc_v2_client_callbacks callbacks_for(struct slot *slot)
 {
 	struct tr_rpc_v2_client_callbacks callbacks = {
-		.message = result_message,
-		.terminal = result_terminal,
-		.arg = slot
-	};
+	        .message = result_message,
+	        .terminal = result_terminal,
+	        .arg = slot};
 	return callbacks;
 }
 
@@ -568,10 +577,13 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		printf("{\"type\":\"phase\",\"schema\":2,"
 		       "\"api_generation\":\"rpc_v2\",\"phase\":\"%s\","
 		       "\"scenario\":\"%s\","
-		       "\"pid\":%ld,\"window\":%u,\"start_ns\":%" PRIu64 ",\"end_ns\":%" PRIu64 ","
+		       "\"pid\":%ld,\"window\":%u,\"start_ns\":%" PRIu64
+		       ",\"end_ns\":%" PRIu64 ","
 		       "\"elapsed_s\":%.9f,\"client_cpu_s\":%.9f,"
-		       "\"client_peak_rss_kib\":%ld,", name, scenario, (long)getpid(), run->window, begin, end,
-		       elapsed, cpu_seconds(&after) - cpu_seconds(&before), after.ru_maxrss);
+		       "\"client_peak_rss_kib\":%ld,",
+		       name, scenario, (long)getpid(), run->window, begin, end,
+		       elapsed, cpu_seconds(&after) - cpu_seconds(&before),
+		       after.ru_maxrss);
 		report_class("all", samples, count, 0U, elapsed);
 		putchar(','); report_class("small", samples, count, METHOD_SMALL, elapsed);
 		putchar(','); report_class("bulk", samples, count, METHOD_BULK, elapsed);
@@ -883,7 +895,8 @@ static int run_client(const struct options *o)
 		uint32_t measure_window = run.window;
 
 		/*
-		 * Keep warmup bounded to a single outstanding call in open-loop mode.
+		 * Keep warmup bounded to a single outstanding call in open-loop
+		 * mode.
 		 */
 		if (!strcmp(o->scenario, "open"))
 			run.window = 1U;
@@ -895,7 +908,8 @@ static int run_client(const struct options *o)
 		int gate_kind;
 
 		printf("{\"schema\":2,\"api_generation\":\"rpc_v2\","
-		       "\"type\":\"client_ready\",\"pid\":%ld}\n", (long)getpid());
+		       "\"type\":\"client_ready\",\"pid\":%ld}\n",
+		       (long)getpid());
 		fflush(stdout);
 		gate_kind = getchar();
 		if (gate_kind == EOF) {
@@ -941,10 +955,13 @@ static int run_client(const struct options *o)
 			status = EXIT_FAILURE;
 		}
 	}
-	/* Pressure and recovery share one V2 client and one real TCP connection. */
+	/* Pressure and recovery share one V2 client and one real TCP
+	 * connection. */
 	if (run.client) {
-		check(tr_client_begin_drain(run.client), "V2 client begin drain");
-		check(tr_client_wait_drained(run.client, 5000U), "V2 client drain");
+		check(tr_client_begin_drain(run.client),
+		      "V2 client begin drain");
+		check(tr_client_wait_drained(run.client, 5000U),
+		      "V2 client drain");
 		check(tr_client_destroy(run.client), "V2 client destroy");
 	}
 	for (i = 0; i < run.window; ++i) free(run.slots[i].payload);

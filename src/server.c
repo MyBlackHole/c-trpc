@@ -1152,8 +1152,7 @@ static int tr_server_adopt_peer_rollback(
 	 */
 	if (peer->channel || state->record_rpc ||
 	    (shard->server->mode == TR_SERVER_MODE_RPC_V2 &&
-	     close_ret != TR_OK &&
-	     peer->connection.reactor)) {
+	     close_ret != TR_OK && peer->connection.reactor)) {
 		peer->used = 1;
 		tr_server_note_peer_added_owner(shard);
 		tr_server_signal_peer_cleanup(shard);
@@ -1508,7 +1507,7 @@ tr_server_create_internal(enum tr_server_mode mode,
 
 			server_shard->server = server;
 			server_shard->runtime =
-				tr_runtime_shard_at(server->runtime, i);
+			        tr_runtime_shard_at(server->runtime, i);
 			if (!server_shard->runtime)
 				return tr_server_create_rollback(
 					out, server, TR_ERR_STATE);
@@ -1523,13 +1522,15 @@ tr_server_create_internal(enum tr_server_mode mode,
 				ret = tr_buffer_pool_init_budgeted(
 				        &server_shard->reassembly_pool,
 				        tr_server_budget_share(
-				                effective_tuning.reassembly_pool_count,
+				                effective_tuning
+				                        .reassembly_pool_count,
 				                effective.shard_count, i),
 				        effective.limits.max_message_bytes,
 				        tr_runtime_shard_memory_budget(
 				                server_shard->runtime));
 				if (ret != TR_OK)
-					return tr_server_create_rollback(out, server, ret);
+					return tr_server_create_rollback(
+					        out, server, ret);
 				server_shard->reassembly_pool_ready = 1;
 			}
 		}
@@ -1609,8 +1610,7 @@ int tr_server_create_record(const struct tr_server_config *config,
 		return TR_ERR_INVALID;
 	}
 	return tr_server_create_internal(TR_SERVER_MODE_RPC_V2, config, tuning,
-	                                 record, methods,
-	                                 method_count, out);
+	                                 record, methods, method_count, out);
 }
 
 int tr_server_create_transport(const struct tr_server_config *config,
@@ -1626,7 +1626,7 @@ int tr_server_create_transport(const struct tr_server_config *config,
 	tr_facade_tuning_init(&tuning);
 	if (config)
 		tr_server_tuning_ensure_shard_minimums(&tuning,
-		                                      config->shard_count);
+		                                       config->shard_count);
 	else
 		tr_server_tuning_ensure_shard_minimums(&tuning, 1U);
 	return tr_server_create_internal(TR_SERVER_MODE_TRANSPORT_ONLY, config,
@@ -1719,8 +1719,8 @@ int tr_server_create(const struct tr_server_config *config,
 	/* create_internal 复制并记账。临时表无回调参数所有权；即使
 	 * 回滚失败把部分 Server 交还调用者，也不再借用此数组。 */
 	ret = tr_server_create_internal(TR_SERVER_MODE_RPC_V2, &effective,
-	                                &tuning, &record, frozen,
-	                                method_count, out);
+	                                &tuning, &record, frozen, method_count,
+	                                out);
 	free(frozen);
 	return ret;
 }
@@ -1938,9 +1938,8 @@ int tr_server_start(struct tr_server *server)
 		return TR_ERR_STATE;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
-	if (!server->published ||
-	    (server->mode == TR_SERVER_MODE_RPC_V2 &&
-	     server->record_start_attempted))
+	if (!server->published || (server->mode == TR_SERVER_MODE_RPC_V2 &&
+	                           server->record_start_attempted))
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
@@ -2246,15 +2245,15 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 
 	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
-			tr_server_shard_peer_at(shard, i);
+		        tr_server_shard_peer_at(shard, i);
 		struct tr_channel_stats channel_stats;
 		struct tr_server_peer *state = tr_server_peer_state(peer);
 
 		if (!peer || !peer->used)
 			continue;
 
-		if (peer->ready && state->record_rpc &&
-		    peer->channel && !tr_server_peer_disconnected(peer))
+		if (peer->ready && state->record_rpc && peer->channel &&
+		    !tr_server_peer_disconnected(peer))
 			stats->peers_ready_current++;
 
 		if (state->record_rpc)
@@ -2308,7 +2307,8 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	stats.shard_count = server->shard_count;
 
 	if (server->mode == TR_SERVER_MODE_RPC_V2)
-		stats.rpc.executor_threads = (uint32_t)server->record.tasks.workers;
+		stats.rpc.executor_threads =
+		        (uint32_t)server->record.tasks.workers;
 
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_stats_owner_request request;
@@ -2332,7 +2332,7 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 			if (ret != TR_OK)
 				return ret;
 			tr_server_merge_pool_observation(&stats.reassembly_pool,
-			                                &pool_stats);
+			                                 &pool_stats);
 		}
 
 		request.shard = shard;
@@ -2519,9 +2519,8 @@ int tr_server_destroy(struct tr_server *server)
 				struct tr_server_peer *state =
 				        tr_server_peer_state(peer);
 
-				if (!peer ||
-				    (!peer->used && !peer->channel &&
-				     !state->record_rpc))
+				if (!peer || (!peer->used && !peer->channel &&
+				              !state->record_rpc))
 					continue;
 				{
 					ret = tr_server_destroy_peer(peer);

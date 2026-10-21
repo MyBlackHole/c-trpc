@@ -107,8 +107,7 @@ static unsigned open_fd_count(void)
 	return count;
 }
 
-static void config_init(struct tr_server_config *config,
-			uint32_t shards)
+static void config_init(struct tr_server_config *config, uint32_t shards)
 {
 	tr_server_config_init(config);
 	config->shard_count = shards;

@@ -7153,7 +7153,8 @@ static void test_client_server_facade_nodelay_policy(void)
 
 	tr_server_config_init(&server_config);
 	server_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_test_server_v2_create(&server_config, &server) == TR_ERR_INVALID);
+	assert(tr_test_server_v2_create(&server_config, &server) ==
+	       TR_ERR_INVALID);
 	assert(server == NULL);
 }
 

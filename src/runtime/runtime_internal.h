@@ -114,8 +114,8 @@ struct tr_runtime_shard *tr_runtime_shard_at(struct tr_runtime *runtime,
 uint32_t tr_runtime_shard_id(const struct tr_runtime_shard *shard);
 struct tr_reactor *
 tr_runtime_shard_reactor(const struct tr_runtime_shard *shard);
-int tr_runtime_shard_call(struct tr_runtime_shard *shard,
-			  int (*fn)(void *arg), void *arg);
+int tr_runtime_shard_call(struct tr_runtime_shard *shard, int (*fn)(void *arg),
+                          void *arg);
 /* 内部分片内存预算能力。使用方必须在分配预算内字节前预留，
  * 并在拆除时释放精确的预留额度。
  */
