@@ -37,7 +37,7 @@
 
 ## 先补的 V2 确定性断言
 
-以下是补测矩阵。G1/G2 已于 Task 4 执行，测试结果见表后回填；G3–G5 仍是后续工作。选择已有 V2 目标中最接近的 fixture 扩展，避免复制整套网络脚手架。全部使用条件变量/故障包装或容量栅栏，不靠睡眠碰运气。
+以下是补测矩阵。G1/G2 已于 Task 4 执行，G3/G4 于 Task 5 执行，G5 于 Task 3 迁入独立目标；执行结果见后文。选择已有 V2 目标中最接近的 fixture 扩展，避免复制整套网络脚手架。全部使用条件变量/故障包装或容量栅栏，不靠睡眠碰运气。
 
 | 编号与目标 | 确定性故障点 | 通过判据 |
 | --- | --- | --- |
@@ -45,14 +45,23 @@
 | G2：扩展 `test_client_record` 的销毁/终局竞态场景（Task 4 已完成） | 在真实 V2 deadline terminal 回调中条件变量阻塞；外线程排队断连并调用 `tr_client_destroy`。测试专用 `pthread_join` wrapper 确认 join 目标为该 owner 且 `pthread_tryjoin_np` 返回 `EBUSY`，然后发布实际 owner join 边界标记；主线程收到标记后才放开回调。 | destroy 不越过活动回调；断连不能覆盖 `DEADLINE_EXCEEDED`；CONTROL_DOWN 恰一次、terminal 恰一次，首次注入销毁错误可重试并收敛。Buffer pool free count 全额归还；Client/Runtime budget 零由成功 `tr_runtime_destroy` 的 shard release 检查（`current_bytes == 0`）保证。该包装使用 Linux/GNU pthread 扩展，符合当前 Xmake Linux-only 与 Ubuntu CI。 |
 | G3：扩展 `test_server_record` 的 V2 容量拒绝场景 | 单 worker 的 `work` 回调在条件变量门闩停住，按固定 task/dispatch 容量填入已接纳一元与流式调用，再提交一条超额调用；放开门闩后用原连接再调用。 | 超额调用在业务回调前获得唯一合法拒绝终局（若合同规定 `RESOURCE_EXHAUSTED` 则精确断言）；此前受理工作均兑现各自终局；同连接随后成功、Server 排空且预算归零。不要求旧 16/14+2 队列阈值。 |
 | G4：扩展 `test_rpc_record_endpoint_tcp` 的同流/跨流流控场景 | 以该目标已有真实窗口/发送包装把一条 V2 流的后续 MESSAGE 压住，同时另一流继续，再释放窗口。 | 受阻流不超收、不提前终局，额度恢复后按序交付且只终局一次；另一流可独立完成；消息缓冲和 Endpoint 销毁预算归零。不观察旧 pending executor task 或 V1 `tr_rpc_message_release`。 |
-| G5：新增 `test_rpc_v2_server_destroy_drain`（计划 Task 3） | 原 `test_v2_server_destroy_waits_for_accepted_work` 的真实 TCP、条件变量阻塞已接纳 work。 | 阻塞期间首次 `tr_server_destroy` 为 `TR_AGAIN`、Server owner 未提前释放；放行后重试 `TR_OK`，server terminal 恰一次。 |
+| G5：新增 `test_rpc_v2_server_destroy_drain`（Task 3 已完成） | 原 `test_v2_server_destroy_waits_for_accepted_work` 的真实 TCP、条件变量阻塞已接纳 work。 | 阻塞期间首次 `tr_server_destroy` 为 `TR_AGAIN`、Server owner 未提前释放；放行后重试 `TR_OK`，server terminal 恰一次。 |
 
-G3/G4 的具体 V2 拒绝状态应以当前 Record/Server 合同与实际断言为准；若 V2 明确不承诺旧场景中的局部队列策略，应缩小到可观察合同，不复刻 V1 策略。RAW Codec 独立边界与固定 V1 32 字节拒绝样本按计划 Task 2 新建/修改测试，旧 Wire 代码不能成为新拒绝测试的依赖。此清点完成后才能按各任务实施删除。
+G3 按当前 Record/Server 合同断言 `TR_RPC_STATUS_RESOURCE_EXHAUSTED`（数值 8），不复刻 V1 局部队列阈值；G4 通过真实窗口和 Endpoint 发送路径验证跨流进展。RAW Codec 独立边界与固定 V1 32 字节拒绝样本已按 Task 2 新建/修改测试，旧 Wire 代码不再是新拒绝测试的依赖。
 
 ### Task 4 执行回填（2026-10-21）
 
 - 实现提交 `3a53bd48dca2b9a3614967b669006bbd056250b4`，修正提交 `553e85db6fe5bf943f8cd459979a96cb43ef92ef`；任务审查的两项重要发现（原 deadline 仅单向断言、G2 100 ms 等待可能受抢占误判）均经修正并定向复审为 ADDRESSED，无新问题。
 - `TMPDIR="$PWD/build/tmp" xmake build test_client_record` 和 `TMPDIR="$PWD/build/tmp" xmake run test_client_record` 通过；运行输出 `test_client_record: 15 groups passed`。TDD 红绿过程和完整输出见 `.superpowers/sdd/2026-10-21-r14-v1-core-retirement/task-4-report.md`。
+
+### Task 5 执行回填（2026-10-21）
+
+- 实现提交 `7cc0b1fdd2ea40c64dfa2d1ffec67a7ff35abf08`；独立任务审查批准，无 Critical/Important 发现。两条 Minor 建议（保持 `hold_client` 通用语义；将消息顺序记录上限限定到 G4 目标流）已记入 SDD ledger 并暂缓，不影响现有场景。
+- G3 在条件变量门闩下观测到 `outstanding=2/running=1`；第三流以 `RESOURCE_EXHAUSTED` 单次终局、未进入业务 OPEN，先前两流仍未终局。放行后两条已接纳流各完成一次，同一连接恢复调用 `OK` 一次；Server drain 成功且队列、运行任务、Endpoint/inflight 统计归零，peer 预算断言归零。
+- G4 释放慢流窗口前，慢流 MESSAGE/terminal 均为 0，健康流先交付一条 MESSAGE 并以单次 terminal 完成；释放后慢流按 `80,80,64,64` 顺序交付，客户端与服务端 terminal 各一次，Endpoint 与 Buffer 预算恢复。
+- 为满足“先观察目标交错，再加入断言”的计划步骤，2026-10-21 在已提交场景上进行断言关闭的临时观察回放。日志位于仓库 `build/tmp/task5-observation-*.log`；观察输出记录了超额状态 8、容量与运行数、已接纳/恢复终局及 G4 窗口释放前后状态。该回放补足过程观察，不改变初次实现时先写最终断言、后首次运行的时间顺序。
+- 回放后两个测试源码已恢复至 `7cc0b1f...`，SHA256 与 HEAD 一致，`git diff --exit-code` 通过；恢复后的 `test_server_record`（18 scenarios）和 `test_rpc_record_endpoint_tcp` 定向构建/运行均通过。实施细节和命令见 `.superpowers/sdd/2026-10-21-r14-v1-core-retirement/task-5-report.md`。
+- Task 5 Issue #290 评论 `6308671274` 已记录原实现结果；观察回放及恢复验证将追加为 follow-up。Task 5 不修改生产代码。
 - G1 故障点收窄为 V2 实际公开 clock 准入失败，因 V2 不存在逐调用 timer-arm 入点；G2 用真实 owner join 边界和 `pthread_tryjoin_np == EBUSY` 同步，不再使用固定 100 ms 等待。运行时 Client 预算零的断言依据是代码门禁：`tr_runtime_shard_release` 在 `current_bytes != 0` 时返回 `TR_AGAIN`，`tr_runtime_destroy` 仅在所有 shard release 均 `TR_OK` 后释放 Runtime。
 
 ## 证据边界
