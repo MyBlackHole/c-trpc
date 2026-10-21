@@ -110,5 +110,5 @@
 - [x] 执行 GCC release `trcore` 构建；运行 inventory 自测和完整源码/归档 inventory，输出到 `build/r13-rpc-v1-inventory.json`。
 - [x] 核对归档不含 `legacy_rpc_execution.c.o` 与 Runtime 旧 getter/适配器导出，但仍含 `rpc.c.o` 的 V1 Endpoint/Executor Group 定义。
 - [x] 运行 `git diff --check`，检查 Runtime 源码/Xmake 不再引用旧配置或适配器；检查安装 SDK 门禁入口及 CI 必需名称未变。
-- [ ] 确认 CI 的 GCC/Clang、ASan/UBSan、TSan、benchmark/schema 和安装 SDK 检查通过；未运行项如实记录。
-- [ ] 将提交、测试证据、远程 Actions 链接和仍留给 R14 的 Endpoint/Executor/Wire 闭包写入 Issue #290；推送 `refactor/**` 分支。
+- [x] 确认 GCC/Clang、ASan/UBSan、TSan、两项静态分析、CRC 与安装 SDK 的远端 CI 检查通过；`RPC benchmark smoke` 未由分支 push 触发（该工作流只响应 PR/main push），已本地通过 65 个 bench/schema 用例、7 个 RPC smoke 场景和 2 个 open-loop capacity 场景。
+- [x] 将提交、测试证据、远程 Actions 链接和仍留给 R14 的 Endpoint/Executor/Wire 闭包写入 Issue #290；推送 `refactor/**` 分支。
