@@ -4,7 +4,7 @@
 
 **Goal:** 删除旧 V1 Call、Endpoint、Executor Group、Wire 与不再实现的公共声明，同时保留 V2 RPC 合同和独立 RAW Codec。
 
-**Architecture:** R14 退役 `src/rpc/rpc.c` 与 `rpc_wire` 闭包，安装 SDK 只保留 V2 共用 RPC 元数据、方法、状态与统计类型。`rpc_codec.c` 和 `tr_rpc_bytes`/`TR_RPC_CODEC_RAW`/`tr_rpc_raw_encode()`/`tr_rpc_raw_decode()` 继续独立提供复制式字节接口。V2 调用仍由 Record、Client、Server 和 TaskExecutor 实现，旧 V1 协议继续被拒绝。
+**Architecture:** R14 退役 `src/rpc/rpc.c` 与 `rpc_wire` 闭包，安装 SDK 只保留 V2 共用 RPC 元数据、方法、状态与统计类型。`rpc_codec.c` 和 `tr_rpc_bytes`/`TR_RPC_CODEC_RAW`/`tr_rpc_raw_encode()`/`tr_rpc_raw_decode()` 继续独立提供字节接口：编码复制到调用方目标缓冲区，解码返回借用输入视图。V2 调用仍由 Record、Client、Server 和 TaskExecutor 实现，旧 V1 协议继续被拒绝。
 
 **Tech Stack:** C11、POSIX pthread、Xmake 3.1.1、Python inventory 脚本、GNU `ar`/`nm`、GCC/Clang 与现有 GitHub Actions 矩阵。
 
@@ -43,10 +43,10 @@
 - Modify: `xmake.lua`
 - Modify: `tests/test_rpc_record.c`
 
-- [ ] 新增 `test_rpc_raw_codec` 目标，先只写测试并运行 `TMPDIR="$PWD/build/tmp" xmake build test_rpc_raw_codec && TMPDIR="$PWD/build/tmp" xmake run test_rpc_raw_codec`；在已有 `rpc_codec.c` 上确认通过后再开始删除生产代码。
-- [ ] 覆盖非空字节往返、零长度往返（包括允许的 NULL 数据指针）、容量不足、非法 NULL 参数及 `written`/输出长度边界；断言既有错误码与输出写入行为，不增加 Codec 语义。
-- [ ] `test_rpc_record.c` 删除 `rpc_wire.h` 和 `tr_rpc_wire_*` 使用，保留旧协议拒绝断言；构造固定 32 字节 V1 Header（`TRPC`、little-endian version=1、type=1，其余字段为 0），断言 V2 `tr_rpc_record_decode()` 返回 `TR_ERR_BAD_VERSION`。
-- [ ] 运行 `TMPDIR="$PWD/build/tmp" xmake build test_rpc_record && TMPDIR="$PWD/build/tmp" xmake run test_rpc_record`，确认拒绝测试不再依赖旧 Wire 编解码器。
+- [x] 新增 `test_rpc_raw_codec` 目标，先只写测试并运行 `TMPDIR="$PWD/build/tmp" xmake build test_rpc_raw_codec && TMPDIR="$PWD/build/tmp" xmake run test_rpc_raw_codec`；在已有 `rpc_codec.c` 上确认通过后再开始删除生产代码。
+- [x] 覆盖编码复制、解码返回输入借用视图、零长度往返（包括允许的 NULL 数据指针）、容量不足、非法 NULL 参数及 `written`/输出长度边界；断言既有错误码与输出写入行为，不增加 Codec 语义。
+- [x] `test_rpc_record.c` 删除 `rpc_wire.h` 和 `tr_rpc_wire_*` 使用，保留旧协议拒绝断言；构造固定 32 字节 V1 Header（`TRPC`、little-endian version=1、type=1，其余字段为 0），断言 V2 `tr_rpc_record_decode()` 返回 `TR_ERR_BAD_VERSION`。
+- [x] 运行 `TMPDIR="$PWD/build/tmp" xmake build test_rpc_record && TMPDIR="$PWD/build/tmp" xmake run test_rpc_record`，确认拒绝测试不再依赖旧 Wire 编解码器。
 
 ### Task 3：将 V2 Server drain 覆盖从旧 Group 目标独立出来
 
@@ -141,7 +141,7 @@
 - [ ] 在 CI 现有 RPC inventory 检查中扩展精确 V1 deny 符号/类型清单，包括旧 Wire、Endpoint、Executor Group、Call 续处理、注册、Interceptor 与消息释放符号；不改 job/check 名称、触发规则或检查范围。
 - [ ] 扩充 inventory 自测：旧 V1 名称作为精确 deny 时失败；V2 `tr_rpc_endpoint_result`、`tr_rpc_endpoint_terminal_fn`、`tr_rpc_endpoint_progress_fn`、`tr_rpc_record_endpoint_*` 和 `tr_rpc_raw_encode/decode` 作为反例时通过。
 - [ ] 增加 archive 审计断言：release `libtrcore.a` 不含 `rpc.c.o` / `rpc_wire.c.o`，仍含 `rpc_codec.c.o`；`nm -A -g` 无旧 V1 全局定义或归档内部未解析旧符号，RAW Codec 定义来自 `rpc_codec.c.o`。
-- [ ] 更新仍作为当前使用说明的文档，准确写明默认 V2、V1 raw core/Wire 已退役、RAW Codec 仅为复制式字节工具；保留历史 review、故障结论和旧 benchmark 原文。
+- [x] 更新仍作为当前使用说明的文档，准确写明默认 V2、V1 raw core/Wire 已退役、RAW Codec 的编码复制与解码借用视图语义；保留历史 review、故障结论和旧 benchmark 原文。
 - [ ] 运行 inventory 自测、完整源码/归档扫描和 `git diff --check`，输出分别写入 `build/r14/`。
 
 ### Task 10：干净构建、SDK 消费、完整测试与远端验收
@@ -150,7 +150,7 @@
 
 - [ ] GCC debug：先执行 `mkdir -p build/tmp build/r14`，再运行 `TMPDIR="$PWD/build/tmp" xmake f -c -y -m debug --toolchain=gcc && TMPDIR="$PWD/build/tmp" xmake build --all && TMPDIR="$PWD/build/tmp" xmake test -v -j1`。
 - [ ] GCC release：干净配置并运行全量测试，构建 `trcore`，生成 inventory 与 `ar t`/`nm -A -g` 归档证据；确认 RAW Codec 保留且 V1 对象/符号清零。
-- [ ] 运行已存在的安装后 C11/C++11 公开头编译与 V2 SDK smoke 测试；在安装消费源中加入 RAW Codec 空/非空复制调用，确认只使用安装目录中的头文件和静态库。所有安装目录使用 `build/r14/` 下路径。
+- [ ] 运行已存在的安装后 C11/C++11 公开头编译与 V2 SDK smoke 测试；在安装消费源中加入 RAW 编码复制与解码借用视图的空/非空用例，确认只使用安装目录中的头文件和静态库。所有安装目录使用 `build/r14/` 下路径。
 - [ ] 执行仓库要求的 GCC/Clang、ASan/UBSan、TSan、CRC、Make/install、GCC/Clang 静态分析、源码格式与 RPC smoke 检查；若本地工具矩阵无法执行，准确列为未运行，不以文档基线 CI 替代实现提交 CI。
 - [ ] 每个修改后的精确 head 检查 GitHub Actions 必需矩阵；记录真实状态、测试名称/结果、失败与未运行项，不宣称未完成或未合并的检查通过。
 - [ ] 将实现 SHA、计划/审计链接、源码与归档结果、SDK/测试/CI 证据、剩余限制及 R15 下一步写入 Issue #290；R14 保持待集成状态，不将分支 CI 描述为已进入 PR #288 或 `main`。

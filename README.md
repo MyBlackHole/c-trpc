@@ -12,9 +12,10 @@
 [公共 SDK 文档](docs/rpc-v2-sdk.md)及两个 Echo 示例为准。
 
 本分支已在 R14 移除旧 V1 Call、Endpoint、Executor Group 与 Wire 核心；旧
-V1 对端不会通过默认门面协商或回退。`tr_rpc_raw_encode/decode()` 仍作为独立的
-复制式字节工具提供，不包含 RPC Call 或 Wire 协议。R14 分支仍待集成，不能据此
-声称 `main` 已更新。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
+V1 对端不会通过默认门面协商或回退。RAW Codec 仍作为独立字节工具提供：
+`tr_rpc_raw_encode()` 将字节复制到调用方缓冲区，`tr_rpc_raw_decode()` 返回指向输入的
+借用视图，调用方须保持输入存储有效。它不包含 RPC Call 或 Wire 协议。R14 分支仍待集成，
+不能据此声称 `main` 已更新。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
 新的真实 TCP 基准通过公开 V2 Client/Server 运行，不能与旧 CSV 合并比较。
 
 ## 架构
@@ -574,10 +575,11 @@ R14 已从源码和静态库移除 V1 raw Call、Endpoint、Executor Group 与�
 也删除了相应的安装声明及测试闭包。连接到只支持旧 V1 Wire 的对端不会得到兼容
 回退。当前工作树中的该次改动仍待集成。
 
-`tr/rpc_codec.h` 保留独立的复制式 RAW Codec：`tr_rpc_bytes`、`TR_RPC_CODEC_RAW`、
-`tr_rpc_raw_encode()` 和 `tr_rpc_raw_decode()`。它们只处理调用方提供的字节与缓冲区，
-不创建 Call、Method、Endpoint，也不编码旧 V1 RPC 头部。RAW Codec 的存在不代表
-旧 V1 RPC 协议仍然可用。
+`tr/rpc_codec.h` 保留独立 RAW Codec：`tr_rpc_bytes`、`TR_RPC_CODEC_RAW`、
+`tr_rpc_raw_encode()` 和 `tr_rpc_raw_decode()`。编码会把输入复制到调用方提供的目标
+缓冲区；解码只返回指向输入缓冲区的借用视图，不分配或复制数据，调用方须在使用该视图
+期间保持输入存储有效。它不创建 Call、Method、Endpoint，也不编码旧 V1 RPC 头部。
+RAW Codec 的存在不代表旧 V1 RPC 协议仍然可用。
 
 端到端 V2 示例位于 `examples/echo_client.c` 和 `examples/echo_server.c`；公开安装
 头文件的使用方式和错误处理以 V2 SDK 文档为准。
@@ -668,7 +670,7 @@ API、类型、变量、宏、协议字段、状态值、命令及机器可解�
 
 RPC V2 与 Codec：
 
-- `test_rpc_raw_codec` 验证独立 RAW 字节复制、零长度、容量和参数边界；
+- `test_rpc_raw_codec` 验证 RAW 编码复制、解码借用视图、零长度、容量和参数边界；
 - `test_rpc_record` 用固定 V1 字节样本确认 V2 解码器拒绝旧版本，不再链接旧 Wire；
 - `test_rpc_v2_sdk` 通过真实 TCP 覆盖四种 ONE/MANY 基数组合、元数据、取消、期限、
   终局和排空，并作为安装 SDK 消费测试源码；

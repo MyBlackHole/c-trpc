@@ -220,13 +220,13 @@ Pipeline 是传输层的通用多连接能力，不是备份对象。
 - V2 Call 生命周期、一元调用与流式调用；
 - 截止时间 / 取消、元数据和终局；
 - V2 Record 编解码、执行器准入与回调调度；
-- 独立的复制式 RAW Codec。
+- 独立的 RAW Codec：编码复制到调用方缓冲区，解码返回借用输入视图。
 
 **拥有**
 
 - V2 Record 协议状态、冻结方法表和 Call 状态；
 - V2 状态生命周期与共享 TaskExecutor 协作；
-- RAW Codec 的字节复制实现。
+- RAW Codec 的编码复制实现；解码只创建调用方输入的借用视图，不拥有数据缓冲区。
 
 **不拥有**
 
@@ -675,7 +675,7 @@ src/rpc/rpc_record*.c + src/rpc/rpc_v2.c
   -> 当前 Record 状态机、V2 调度与门面适配
 
 src/rpc/rpc_codec.c
-  -> 独立复制式 RAW Codec
+  -> 独立 RAW Codec（编码复制 / 解码借用视图）
 ```
 
 安装 SDK 不声明旧 V1 Endpoint/Call/Wire API。客户端/服务端用户无需知道
@@ -1119,7 +1119,7 @@ src/execution/
   且不存在 `include/tr -> src/` 反向包含；
 - 旧 V1 RPC Wire 实现和头文件已在 R14 从源码树移除；当前 V2 Record 协议
   实现留在 `src/rpc/rpc_record*.c`，不进入稳定 SDK；
-- `src/rpc/rpc_codec.c` 仍独立实现公开复制式 RAW Codec，不包含旧 V1 Wire/Call；
+- `src/rpc/rpc_codec.c` 仍独立实现公开 RAW Codec：编码复制、解码借用输入视图，不包含旧 V1 Wire/Call；
 - Reactor、命令/完成/定时器队列不会因为概念上的 Runtime 层名称
   被机械搬入 `src/runtime/`；
   它们仍然是独立执行基础设施；

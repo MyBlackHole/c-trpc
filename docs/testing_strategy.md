@@ -65,7 +65,8 @@ Server 构造、peer retirement、排空、统计、构造回滚和销毁重试�
 或 transport-only facade 运行。Runtime 不再配置或拥有旧 RPC Executor Group。
 旧 raw V1 Call、Endpoint、Executor Group、Wire 核心及其专属测试闭包已由 R14
 移除。`test_rpc_record` 保留固定旧版本字节的拒绝检查，不链接旧 Wire；
-`test_rpc_raw_codec` 单独验证仍保留的复制式 RAW Codec。inventory 的精确符号/类型
+`test_rpc_raw_codec` 单独验证仍保留的 RAW Codec：编码复制，解码返回借用视图。
+inventory 的精确符号/类型
 扫描及 release 静态库检查验证旧对象与符号已退出，同时确认 `rpc_codec.c.o` 仍提供
 RAW Codec。R14 分支仍待集成，不代表 `main` 已完成这些改动。
 `bench_rpc` 和容量、扩展性、headroom 等负载驱动
