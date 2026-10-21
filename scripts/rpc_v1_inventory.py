@@ -29,7 +29,8 @@ V1_CORE_DENY = frozenset({
 
     # V1 Endpoint 和 Executor Group 类型/配置。
     "tr_rpc_endpoint", "tr_rpc_role", "tr_rpc_endpoint_config",
-    "tr_rpc_endpoint_stats", "TR_RPC_CLIENT", "TR_RPC_SERVER",
+    "tr_rpc_endpoint_stats", "tr_rpc_endpoint_detached_finalizer",
+    "TR_RPC_CLIENT", "TR_RPC_SERVER",
     "tr_rpc_executor_group",
 
     # 旧 Wire 类型、字段常量和消息类型。

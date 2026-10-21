@@ -24,6 +24,7 @@ CLIENT_FACADE_FILES = {
 }
 V1_ENDPOINT_DENY = {
     "tr_rpc_endpoint", "tr_rpc_endpoint_config", "tr_rpc_endpoint_stats",
+    "tr_rpc_endpoint_detached_finalizer",
     "tr_rpc_endpoint_create", "tr_rpc_endpoint_destroy",
     "tr_rpc_endpoint_create_with_executor_group",
     "tr_rpc_endpoint_destroy_with_stats", "tr_rpc_endpoint_get_stats",
@@ -91,6 +92,7 @@ class InventoryTests(unittest.TestCase):
                 "tr_rpc_call_finish(call, TR_RPC_STATUS_OK);\n"
                 "TR_RPC_CALL_PRIVATE_WORDS private_words;\n"
                 "tr_rpc_endpoint_create(channel, config, &endpoint);\n"
+                "tr_rpc_endpoint_detached_finalizer finalizer;\n"
                 "tr_rpc_executor_group_start(group);\n"
                 "tr_rpc_register_stream_method(endpoint, method, handlers, arg);\n"
                 "tr_rpc_message_release(&message);\n",
@@ -105,6 +107,7 @@ class InventoryTests(unittest.TestCase):
             "tr_rpc_interceptor",
             "tr_rpc_call_finish",
             "tr_rpc_endpoint_create",
+            "tr_rpc_endpoint_detached_finalizer",
             "tr_rpc_executor_group_start",
             "tr_rpc_register_stream_method",
             "tr_rpc_message_release",
