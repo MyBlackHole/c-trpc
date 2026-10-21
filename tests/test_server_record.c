@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include "../src/facade_legacy_internal.h"
 #include "../src/execution/worker_context.h"
 #include "../src/rpc/rpc_internal.h"
 #include "../src/server_record_internal.h"
@@ -837,26 +836,11 @@ static void wait_peers(struct fixture *f, unsigned current, unsigned reaped)
 	}
 }
 
-static int legacy_handler(struct tr_rpc_call_handle call,
-                          const struct tr_rpc_bytes *request,
-                          struct tr_rpc_unary_response *response, void *arg)
-{
-	(void)call;
-	(void)request;
-	(void)response;
-	(void)arg;
-	CHECK(0);
-	return TR_ERR_STATE;
-}
-
 static void test_shapes_and_reuse(void)
 {
 	struct fixture f;
 	fixture_init(&f, 1, 1);
 	fixture_create(&f);
-	CHECK(tr_server_legacy_register_method(
-	              f.server, &f.methods[0].descriptor, legacy_handler,
-	              NULL) == TR_ERR_UNSUPPORTED);
 	struct tr_rpc_semantic_stats stats, sentinel;
 	memset(&stats, 0xa5, sizeof(stats));
 	memset(&sentinel, 0, sizeof(sentinel));

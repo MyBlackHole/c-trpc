@@ -4,7 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rpc_v1_inventory import audit, parse_nm, remove_comments_and_literals
+from rpc_v1_inventory import (
+    SERVER_FACADE_RETIREMENT,
+    audit,
+    denied_symbols,
+    parse_nm,
+    remove_comments_and_literals,
+)
 
 
 CLIENT_FACADE_FILES = {
@@ -28,13 +34,19 @@ def client_endpoint_references(symbols):
 
 
 class InventoryTests(unittest.TestCase):
+    @staticmethod
+    def workspace_tempdir():
+        root = Path(__file__).resolve().parents[1] / "build" / "r12-inventory-tests"
+        root.mkdir(parents=True, exist_ok=True)
+        return tempfile.TemporaryDirectory(dir=root)
+
     def test_client_facade_headers_have_no_v1_endpoint_references(self):
         root = Path(__file__).resolve().parents[1]
         symbols = audit(root)["symbols"]
         self.assertEqual(client_endpoint_references(symbols), set())
 
     def test_bare_v1_endpoint_type_is_a_legacy_reference(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with self.workspace_tempdir() as temporary:
             root = Path(temporary)
             (root / "src").mkdir()
             (root / "src/client.c").write_text(
@@ -64,7 +76,7 @@ tr_rpc_call_finish(call, 0);
         self.assertIn("tr_rpc_call_finish(call, 0)", clean)
 
     def test_scans_all_layers_and_preserves_line_numbers(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with self.workspace_tempdir() as tmp:
             root = Path(tmp)
             for folder in ("src/rpc", "src/runtime", "tests"):
                 (root / folder).mkdir(parents=True)
@@ -88,6 +100,50 @@ tr_rpc_call_finish(call, 0);
             b = result["symbols"]["tr_rpc_executor_group_start"]
             self.assertEqual(b["xmake_lines"], [1])
             self.assertEqual(b["source_uses"][0]["lines"], [2])
+
+    def test_server_facade_tuning_and_legacy_source_are_denied(self):
+        with self.workspace_tempdir() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/server.c").write_text(
+                "tr_server_create_with_tuning(config, tuning, out);\n"
+                "tr_server_legacy_create(config, out);\n"
+                "tr_server_legacy_register_method(server, method);\n",
+                encoding="utf-8",
+            )
+            (root / "xmake.lua").write_text("", encoding="utf-8")
+            symbols = audit(root)["symbols"]
+
+        expected = {
+            "tr_server_create_with_tuning",
+            "tr_server_legacy_create",
+            "tr_server_legacy_register_method",
+        }
+        self.assertTrue(expected.issubset(symbols))
+        self.assertEqual(denied_symbols(symbols, expected), sorted(expected))
+        self.assertTrue(all(SERVER_FACADE_RETIREMENT.fullmatch(name)
+                            for name in expected))
+
+    def test_archive_deny_is_narrower_than_raw_v1_endpoint_inventory(self):
+        archive = parse_nm(
+            "libtrcore.a:server.c.o:0000000000000000 T "
+            "tr_server_create_with_tuning\n"
+            "libtrcore.a:server.c.o:0000000000000000 T "
+            "tr_server_legacy_create\n"
+            "libtrcore.a:rpc.c.o:0000000000000000 T "
+            "tr_rpc_endpoint_create\n"
+        )
+        server_deny = {
+            "tr_server_create_with_tuning",
+            "tr_server_legacy_create",
+        }
+        self.assertEqual(denied_symbols(archive, server_deny),
+                         sorted(server_deny))
+        self.assertIn("tr_rpc_endpoint_create", archive)
+        self.assertTrue(SERVER_FACADE_RETIREMENT.fullmatch(
+            "tr_server_legacy_create"))
+        self.assertIsNone(SERVER_FACADE_RETIREMENT.fullmatch(
+            "tr_rpc_endpoint_create"))
 
     def test_nm_per_object_refs(self):
         text = (

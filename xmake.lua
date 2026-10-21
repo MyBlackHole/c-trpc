@@ -158,10 +158,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         set_kind("binary")
         set_default(false)
         add_files("tests/" .. name .. ".c")
-        if name == "test_transport" or name == "test_server_stats_retiring" or
-           name == "test_inbound_handshake_deadline" or
-           name == "test_rpc_executor_group_drain" or
-           name == "test_rpc_message_ownership" then
+        if name == "test_transport" then
             add_files("tests/rpc_v1_test_client_fixture.c")
         end
         add_deps("trcore")
@@ -357,7 +354,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=tr_runtime_start",
                         "-Wl,--wrap=tr_runtime_stop",
                         "-Wl,--wrap=tr_runtime_destroy",
-                        "-Wl,--wrap=tr_buffer_pool_init_dynamic_budgeted",
+                        "-Wl,--wrap=tr_buffer_pool_init_budgeted",
                         {force = true})
         elseif name == "test_server_peer_rollback" then
             -- 验证 accept rollback 在当前 owner turn 退休 connection。
@@ -426,7 +423,7 @@ target_end()
 target("bench_rpc")
     set_kind("binary")
     set_default(false)
-    add_files("bench/bench_rpc.c", "tests/rpc_v1_test_client_fixture.c")
+    add_files("bench/bench_rpc.c")
     add_deps("trcore")
 target_end()
 

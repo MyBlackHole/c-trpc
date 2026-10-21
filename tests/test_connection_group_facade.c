@@ -400,6 +400,7 @@ static void test_public_connection_group_server(void)
 	static const uint8_t payload[] = "public-group-data";
 	struct tr_server_config config;
 	struct tr_server *server = NULL;
+	struct tr_server_stats server_stats;
 	struct public_group_ctx ctx;
 	struct tr_pipeline_route_preface route;
 	struct tr_pipeline_route_preface data_route;
@@ -435,6 +436,9 @@ static void test_public_connection_group_server(void)
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
 	assert(tr_server_start(server) == TR_OK);
+	assert(tr_server_get_stats(server, &server_stats) == TR_OK);
+	assert(server_stats.rpc.executor_threads == 0U);
+	assert(server_stats.reassembly_pool.capacity == 0U);
 
 	route = control_route();
 	control = connect_loopback(group_port);

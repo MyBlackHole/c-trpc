@@ -74,9 +74,8 @@ HALF_CLOSE 的发送责任，不要求应用编写发送重试回调。`request`
 没有任何响应正文。唯一终局、回调不得重入销毁、早终局可能先于入口返回、静默
 不等于终局等规则都不改变。
 
-此便捷入口没有另一张调用表、执行器或终局状态机，不改变旧门面的默认构造路径。
-它也不承诺 OPEN/MESSAGE/HALF_CLOSE 一定合并成一个包或一次系统调用；完整默认
-门面切换和旧 V1 删除仍属于后续迁移验收。
+此便捷入口没有另一张调用表、执行器或终局状态机；它使用当前唯一的普通 V2
+门面，也不承诺 OPEN/MESSAGE/HALF_CLOSE 一定合并成一个包或一次系统调用。
 
 ## 消息、元数据与所有权
 
@@ -312,6 +311,11 @@ Server 当前每调用最多保留 16 个未收敛输入事件，包含排队、
 可写通知与有限等待、取消、期限、分层排空及调用语义统计。它尚未提供 NONE 基数、
 自动重连、连接组、网络压缩或 TLS。配置不支持的已有功能会
 明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+
+普通 `tr_server_create()` 只构造 V2 RPC Server；需要连接组或纯传输能力时使用
+`tr_server_create_transport()`。transport-only 保留 Runtime、Reactor、Channel
+和 ConnectionGroup listener，不创建 RPC 方法表、Endpoint、任务执行器或重组池；
+`tr_server_listen()` 对该模式返回 `TR_ERR_UNSUPPORTED`。
 
 验证入口是 Xmake：
 

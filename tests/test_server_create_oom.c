@@ -2,15 +2,16 @@
 #include "tr/server.h"
 #include "tr/status.h"
 
-#include "../src/facade_tuning_internal.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/runtime/runtime_internal.h"
+#include "server_v2_test_fixture.h"
 
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,7 +108,7 @@ static unsigned open_fd_count(void)
 }
 
 static void config_init(struct tr_server_config *config,
-			struct tr_facade_tuning *tuning, uint32_t shards)
+			uint32_t shards)
 {
 	tr_server_config_init(config);
 	config->shard_count = shards;
@@ -121,17 +122,6 @@ static void config_init(struct tr_server_config *config,
 	config->limits.max_message_bytes = 4096U;
 	config->limits.initial_window_bytes = 4096U;
 	config->limits.window_update_threshold_bytes = 1024U;
-
-	tr_facade_tuning_init(tuning);
-	tuning->command_capacity = shards * 4U;
-	tuning->tx_item_capacity = shards * 4U;
-	tuning->control_tx_item_capacity = shards * 4U;
-	tuning->rx_buffer_count = shards * 2U;
-	tuning->rpc_message_pool_count = shards * 2U;
-	tuning->reassembly_pool_count = shards * 2U;
-	tuning->executor_threads = shards;
-	tuning->executor_queue_capacity = 16U;
-	tuning->executor_continuation_reserve = 1U;
 }
 
 static void probe_begin(size_t fail_at, int fail_destroy)
@@ -149,21 +139,36 @@ static void expect_no_fd_change(unsigned count, int sentinel)
 	assert(open_fd_count() == count);
 }
 
+static int destroy_server_until_complete(struct tr_server *server)
+{
+	unsigned retries = 0U;
+	int ret;
+
+	do {
+		ret = tr_server_destroy(server);
+		if (ret == TR_AGAIN) {
+			if (++retries >= 10000U)
+				return TR_ERR_TIMEOUT;
+			sched_yield();
+		}
+	} while (ret == TR_AGAIN);
+	return ret;
+}
+
 static void test_failure(uint32_t shards, size_t fail_at,
 			 int fail_destroy, int sentinel)
 {
 	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	unsigned fds = open_fd_count();
 	int ret;
 
-	config_init(&config, &tuning, shards);
+	config_init(&config, shards);
 	printf("Server OOM: shards=%u allocation=%zu rollback_fault=%d\n",
 	       shards, fail_at, fail_destroy);
 	fflush(stdout);
 	probe_begin(fail_at, fail_destroy);
-	ret = tr_server_create_with_tuning(&config, &tuning, &server);
+	ret = tr_test_server_v2_create(&config, &server);
 	assert(probe.runtime_ready);
 	assert(probe.failures == 1U);
 	assert(probe.destroy_attempts == 1U);
@@ -181,7 +186,7 @@ static void test_failure(uint32_t shards, size_t fail_at,
 		assert(tr_server_get_stats(server, &stats) == TR_ERR_STATE);
 		assert(tr_server_get_rpc_semantic_stats(server, &semantic) ==
 		       TR_ERR_STATE);
-		assert(tr_server_destroy(server) == TR_OK);
+		assert(destroy_server_until_complete(server) == TR_OK);
 		assert(probe.destroy_attempts == 2U);
 	} else {
 		assert(ret == TR_ERR_NOMEM);
@@ -194,16 +199,14 @@ static void test_failure(uint32_t shards, size_t fail_at,
 static size_t test_success(uint32_t shards, int sentinel)
 {
 	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	unsigned fds = open_fd_count();
 	size_t allocations;
 	uint16_t port = 0U;
 
-	config_init(&config, &tuning, shards);
+	config_init(&config, shards);
 	probe_begin(0U, 0);
-	assert(tr_server_create_with_tuning(&config, &tuning, &server) ==
-	       TR_OK);
+	assert(tr_test_server_v2_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 	assert(probe.runtime_ready);
 	assert(probe.failures == 0U);
@@ -213,7 +216,7 @@ static size_t test_success(uint32_t shards, int sentinel)
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
-	assert(tr_server_destroy(server) == TR_OK);
+	assert(destroy_server_until_complete(server) == TR_OK);
 	expect_no_fd_change(fds, sentinel);
 	return allocations;
 }

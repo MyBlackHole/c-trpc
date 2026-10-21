@@ -1,7 +1,8 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
 #include "tr/server.h"
 #include "tr/status.h"
+
+#include "server_v2_test_fixture.h"
 
 #include "../src/execution/deadline_internal.h"
 #include "../src/facade_diagnostics_internal.h"
@@ -217,7 +218,7 @@ static void run_case(enum drain_case test_case, uint32_t timeout_ms,
 	int ret;
 
 	small_server_config(&config);
-	assert(tr_server_legacy_create(&config, &server) == TR_OK);
+	assert(tr_test_server_v2_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
@@ -237,7 +238,16 @@ static void run_case(enum drain_case test_case, uint32_t timeout_ms,
 	assert(deadline_inits == (timeout_ms != 0U ? 1U : 0U));
 
 	/* 拆除必须保留真实 Server/Channel 所有权，不能由测试跳过。 */
-	assert(tr_server_destroy(server) == TR_OK);
+	int destroy_ret;
+	unsigned destroy_retries = 0U;
+	do {
+		destroy_ret = tr_server_destroy(server);
+		if (destroy_ret == TR_AGAIN) {
+			assert(++destroy_retries < 10000U);
+			sched_yield();
+		}
+	} while (destroy_ret == TR_AGAIN);
+	assert(destroy_ret == TR_OK);
 	assert(close(peers[0]) == 0);
 	assert(close(peers[1]) == 0);
 }

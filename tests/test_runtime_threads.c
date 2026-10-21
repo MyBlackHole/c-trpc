@@ -1,4 +1,3 @@
-#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "../src/execution/reactor.h"
 #include "tr/server.h"
@@ -7,11 +6,12 @@
 #include "../src/runtime/runtime_internal.h"
 #include "../src/rpc/rpc_internal.h"
 #include "../src/execution/buffer.h"
-#include "../src/facade_tuning_internal.h"
+#include "server_v2_test_fixture.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -203,14 +203,6 @@ static void server_config_init(struct tr_server_config *config)
 	config->keepalive_timeout_ms = 50U;
 }
 
-static void server_tuning_init(struct tr_facade_tuning *tuning,
-			       unsigned workers)
-{
-	tr_facade_tuning_init(tuning);
-	tuning->executor_threads = workers;
-	tuning->executor_queue_capacity = 16U;
-}
-
 static struct tr_rpc_method_desc runtime_test_method(void)
 {
 	struct tr_rpc_method_desc method = {0};
@@ -233,6 +225,21 @@ static void listen_loopback(struct tr_server *server)
 
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(port != 0);
+}
+
+static void destroy_server_until_complete(struct tr_server *server)
+{
+	unsigned retries = 0U;
+	int ret;
+
+	do {
+		ret = tr_server_destroy(server);
+		if (ret == TR_AGAIN) {
+			assert(++retries < 10000U);
+			sched_yield();
+		}
+	} while (ret == TR_AGAIN);
+	assert(ret == TR_OK);
 }
 
 static void test_client_create_destroy_threads(void)
@@ -319,53 +326,43 @@ static void test_channel_reconnect_uses_no_extra_thread(void)
 
 static void test_server_create_start_destroy_threads(void)
 {
-	unsigned workers;
 	unsigned start;
 
-	for (workers = 1U; workers <= 3U; workers += 2U) {
-		for (start = 0U; start <= 1U; ++start) {
-			struct tr_server_config config;
-			struct tr_facade_tuning tuning;
-			struct tr_server *server = NULL;
-			unsigned total = 0U;
+	for (start = 0U; start <= 1U; ++start) {
+		struct tr_server_config config;
+		struct tr_server *server = NULL;
+		unsigned total = 0U;
 
-			server_config_init(&config);
-			server_tuning_init(&tuning, workers);
-			reset_probe(0U);
-			assert(tr_server_create_with_tuning(
-				       &config, &tuning, &server) == TR_OK);
-			assert(server != NULL);
-			/* 创建只建立执行器软状态，不启动任何 pthread。 */
+		server_config_init(&config);
+		reset_probe(0U);
+		assert(tr_test_server_v2_create(&config, &server) == TR_OK);
+		assert(server != NULL);
+		/* 构造只建立执行器软状态，不启动任何 pthread。 */
+		expect_threads(0U, 0U);
+		if (start) {
+			listen_loopback(server);
 			expect_threads(0U, 0U);
-			if (start) {
-				listen_loopback(server);
-				expect_threads(0U, 0U);
-				assert(tr_server_start(server) == TR_OK);
-				total = workers + 1U;
-				/* 工作线程轮次与唯一反应器所有者都由 start()
-				 * 建立。 */
-				expect_threads(total, 0U);
-			}
-			assert(tr_server_destroy(server) == TR_OK);
-			expect_threads(total, total);
+			assert(tr_server_start(server) == TR_OK);
+			total = 5U;
+			/* 四个 V2 任务线程与一个反应器所有者都由 start 建立。 */
+			expect_threads(total, 0U);
 		}
+		destroy_server_until_complete(server);
+		expect_threads(total, total);
 	}
 }
 
 static void test_server_multi_shard_threads(void)
 {
 	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
 	server_config_init(&config);
-	server_tuning_init(&tuning, 4U);
 	config.shard_count = 2U;
 	config.max_peers = 4U;
 
 	reset_probe(0U);
-	assert(tr_server_create_with_tuning(
-		       &config, &tuning, &server) == TR_OK);
+	assert(tr_test_server_v2_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 
 	/* 创建与监听都不启动执行器工作线程。 */
@@ -377,59 +374,22 @@ static void test_server_multi_shard_threads(void)
 	assert(tr_server_start(server) == TR_OK);
 	expect_threads(6U, 0U);
 
-	assert(tr_server_destroy(server) == TR_OK);
+	destroy_server_until_complete(server);
 	expect_threads(6U, 6U);
 }
 
-static void test_server_multi_shard_rejects_undersized_budget(void)
+static void test_server_rejects_invalid_public_limits(void)
 {
 	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 
 	server_config_init(&config);
-	server_tuning_init(&tuning, 1U);
-	config.shard_count = 2U;
-	config.max_peers = 2U;
+	config.limits.max_message_bytes = 1U;
 
 	reset_probe(0U);
-	assert(tr_server_create_with_tuning(
-		       &config, &tuning, &server) == TR_ERR_INVALID);
+	assert(tr_test_server_v2_create(&config, &server) == TR_ERR_INVALID);
 	assert(server == NULL);
 	expect_threads(0U, 0U);
-}
-
-static void test_server_internal_tuning_respects_shard_minimum(void)
-{
-	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
-	struct tr_server *server = NULL;
-
-	server_config_init(&config);
-	config.shard_count = 2U;
-	config.max_peers = 2U;
-
-	server_tuning_init(&tuning, 2U);
-	tuning.rx_buffer_count = 1U;
-
-	reset_probe(0U);
-	assert(tr_server_create_with_tuning(
-		       &config, &tuning, &server) == TR_ERR_INVALID);
-	assert(server == NULL);
-	expect_threads(0U, 0U);
-
-	/* 公开创建拥有隐藏调优默认值；对于相同的有效语义配置，
-	 * 不得暴露此实现容量失败。
-	 */
-	assert(tr_server_legacy_create(&config, &server) == TR_OK);
-	assert(server != NULL);
-	expect_threads(0U, 0U);
-	listen_loopback(server);
-	assert(tr_server_start(server) == TR_OK);
-	/* 公开隐藏默认值仍为四个工作线程与两个分片反应器所有者。 */
-	expect_threads(6U, 0U);
-	assert(tr_server_destroy(server) == TR_OK);
-	expect_threads(6U, 6U);
 }
 
 static void runtime_multi_shard_config_init(
@@ -875,24 +835,6 @@ static void test_standalone_rpc_start_rollback_keeps_owner(void)
 	assert(close(sockets[1]) == 0);
 }
 
-static void test_server_tuning_rejects_invalid_observability(void)
-{
-	struct tr_server_config server_config;
-	struct tr_facade_tuning tuning;
-	struct tr_server *server = NULL;
-
-	tr_server_config_init(&server_config);
-	small_limits(&server_config.limits);
-	tr_facade_tuning_init(&tuning);
-	tuning.observability_flags = UINT32_C(0x80000000);
-
-	reset_probe(0U);
-	assert(tr_server_create_with_tuning(
-		       &server_config, &tuning, &server) == TR_ERR_INVALID);
-	assert(server == NULL);
-	expect_threads(0U, 0U);
-}
-
 static void test_client_thread_start_failure(void)
 {
 	struct tr_client_config config;
@@ -912,50 +854,28 @@ static void test_server_worker_start_failures(void)
 {
 	unsigned fail_at;
 
-	for (fail_at = 1U; fail_at <= 3U; ++fail_at) {
+	for (fail_at = 1U; fail_at <= 5U; ++fail_at) {
 		struct tr_server_config config;
-		struct tr_facade_tuning tuning;
 		struct tr_server *server = NULL;
 
 		server_config_init(&config);
-		server_tuning_init(&tuning, 3U);
 		reset_probe(fail_at);
-		assert(tr_server_create_with_tuning(
-			       &config, &tuning, &server) == TR_OK);
+		assert(tr_test_server_v2_create(&config, &server) == TR_OK);
 		assert(server != NULL);
 		expect_threads(0U, 0U);
 		listen_loopback(server);
 
-		assert(tr_server_start(server) == TR_ERR_SYS);
+		int start_ret = tr_server_start(server);
+		assert(start_ret == TR_ERR_SYS || start_ret == TR_AGAIN);
+		if (fail_at == 1U)
+			assert(start_ret == TR_ERR_SYS);
 		assert(atomic_load(&create_attempts) == fail_at);
-		/* 第 N 个工作线程启动失败，前 N-1 个在启动回滚中完成回收。 */
-		expect_threads(fail_at - 1U, fail_at - 1U);
-		assert(tr_server_destroy(server) == TR_OK);
+		/* V2 启动先创建每分片 Reactor，再创建共享任务线程；失败后的
+		 * 清理可能先返回 AGAIN，Server destroy 必须继续回收此前成功创建的线程。
+		 */
+		destroy_server_until_complete(server);
 		expect_threads(fail_at - 1U, fail_at - 1U);
 	}
-}
-
-static void test_server_runtime_start_failures(void)
-{
-	const unsigned workers = 3U;
-	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
-	struct tr_server *server = NULL;
-
-	/* 三个工作线程成功后，第 4 次 pthread_create（反应器）失败。 */
-	server_config_init(&config);
-	server_tuning_init(&tuning, workers);
-	reset_probe(workers + 1U);
-	assert(tr_server_create_with_tuning(
-		       &config, &tuning, &server) == TR_OK);
-	expect_threads(0U, 0U);
-	listen_loopback(server);
-	assert(tr_server_start(server) == TR_ERR_SYS);
-	assert(atomic_load(&create_attempts) == workers + 1U);
-	/* 运行时启动回滚已经回收三个工作线程。 */
-	expect_threads(workers, workers);
-	assert(tr_server_destroy(server) == TR_OK);
-	expect_threads(workers, workers);
 }
 
 #define RUN_TEST(fn) do { fn(); puts(#fn ": ok"); } while (0)
@@ -966,8 +886,7 @@ int main(void)
 	RUN_TEST(test_channel_reconnect_uses_no_extra_thread);
 	RUN_TEST(test_server_create_start_destroy_threads);
 	RUN_TEST(test_server_multi_shard_threads);
-	RUN_TEST(test_server_multi_shard_rejects_undersized_budget);
-	RUN_TEST(test_server_internal_tuning_respects_shard_minimum);
+	RUN_TEST(test_server_rejects_invalid_public_limits);
 	RUN_TEST(test_runtime_without_legacy_execution);
 	RUN_TEST(test_runtime_multi_shard_threads);
 	RUN_TEST(test_runtime_control_lifecycle_serialized);
@@ -978,10 +897,8 @@ int main(void)
 	RUN_TEST(test_runtime_executor_group_join_failure_is_retryable);
 	RUN_TEST(test_standalone_rpc_executor_join_failure_is_retryable);
 	RUN_TEST(test_standalone_rpc_start_rollback_keeps_owner);
-	RUN_TEST(test_server_tuning_rejects_invalid_observability);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);
-	RUN_TEST(test_server_runtime_start_failures);
 	reset_probe(0U);
 	return 0;
 }

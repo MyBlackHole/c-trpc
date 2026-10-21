@@ -24,7 +24,8 @@ OPEN_COUNTS = ("offered", "scheduler_dropped", "attempted", "accepted",
 
 def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
                         window: int) -> None:
-    if row.get("type") != "open_phase" or row.get("schema") != 1:
+    if (row.get("type") != "open_phase" or row.get("schema") != 2 or
+            row.get("api_generation") != "rpc_v2"):
         raise ValueError("missing open-loop phase/schema")
     if row.get("phase") != "measure" or row.get("scenario") != "open":
         raise ValueError("unexpected open-loop phase")
@@ -89,49 +90,17 @@ def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
         raise ValueError("inconsistent drain interval")
 
 
-def nominal_handler_capacity_rps(workers: int, slow_ms: int) -> float | None:
-    if slow_ms == 0:
-        return None
-    return workers * 1000.0 / slow_ms
-
-
-SERVER_RESOURCE_OVERRIDES = (
-    ("rx_buffer_count", "--rx-buffers", "rx_buffers"),
-    ("rpc_message_pool_count", "--rpc-message-pool", "rpc_message_pool"),
-    ("reassembly_pool_count", "--reassembly-pool", "reassembly_pool"),
-    ("control_tx_item_count", "--control-tx-items", "control_tx_items"),
-    ("command_capacity", "--command-capacity", "command_capacity"),
-)
-
-
-def server_resource_args(case: dict[str, Any]) -> list[str]:
-    args: list[str] = []
-    for case_key, cli_flag, _ready_key in SERVER_RESOURCE_OVERRIDES:
-        value = int(case.get(case_key, 0) or 0)
-        if value:
-            args.extend([cli_flag, str(value)])
-    return args
-
-
-def validate_server_ready_resources(ready: dict[str, Any],
-                                    case: dict[str, Any]) -> None:
-    for case_key, _cli_flag, ready_key in SERVER_RESOURCE_OVERRIDES:
-        value = int(case.get(case_key, 0) or 0)
-        if value and ready.get(ready_key) != value:
-            raise ValueError(f"server did not apply {case_key}={value}")
-
-
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    server_common = ["--capacity", str(case["capacity"]), "--bulk-bytes", "65536"]
+    bulk_bytes = int(case.get("bulk_bytes", 65536))
+    server_common = ["--capacity", str(case["capacity"]),
+                     "--bulk-bytes", str(bulk_bytes)]
     generator_capacity = case.get("generator_capacity", case["capacity"])
     generator_window = case.get("generator_window", case["window"])
-    client_common = ["--capacity", str(generator_capacity), "--bulk-bytes", "65536"]
+    client_common = ["--capacity", str(generator_capacity),
+                     "--bulk-bytes", str(int(case.get("generator_bulk_bytes", bulk_bytes)))]
     server_cmd = [str(binary), "server", *server_common,
-                  "--workers", str(case["workers"]),
-                  "--slow-ms", str(case["slow_ms"]),
-                  "--executor-queue", str(case["executor_queue"]),
-                  *server_resource_args(case)]
+                  "--slow-ms", str(case["slow_ms"])]
     client_cmd: list[str] = []
     children: list[subprocess.Popen[str]] = []
     logs: list[TextIO] = []
@@ -144,14 +113,11 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
                                   stderr=server_err, text=True)
         children.append(server)
         ready = read_ready(server, "ready")
-        if (ready.get("workers") != case["workers"] or
-                ready.get("executor_queue") != case["executor_queue"] or
+        if (ready.get("capacity") != case["capacity"] or
                 ready.get("slow_ms") != case["slow_ms"]):
-            raise ValueError("server did not apply requested capacity controls")
-        validate_server_ready_resources(ready, case)
+            raise ValueError("server did not apply public RPC limits or work delay")
 
         client_cmd = [str(binary), "client", *client_common, "--port", str(ready["port"]),
-                      "--workers", str(case.get("generator_workers", 4)),
                       "--window", str(generator_window), "--scenario", "open",
                       "--requests", str(case["requests"]),
                       "--warmup", str(case["warmup"]),
@@ -188,9 +154,8 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
         exit_row = json.loads(server_stdout)
         validate_server_exit(exit_row)
 
-        return {"type": "capacity_case", "case": case,
-                "nominal_handler_capacity_rps":
-                    nominal_handler_capacity_rps(case["workers"], case["slow_ms"]),
+        return {"type": "capacity_case", "schema": 2,
+                "api_generation": "rpc_v2", "case": case,
                 "server_command": server_cmd, "client_command": client_cmd,
                 "server": ready, "server_exit": exit_row, "client": row,
                 "runner_elapsed_s": time.monotonic() - started}
@@ -204,30 +169,27 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
             log.close()
 
 
-def metadata(binary: Path, label: str, workers: int, slow_ms: int,
-             executor_queue: int, window: int) -> dict[str, Any]:
+def metadata(binary: Path, label: str, slow_ms: int,
+             window: int, capacity: int) -> dict[str, Any]:
     row = closed_loop_metadata(binary, label, load_mode="open")
     row["type"] = "capacity_metadata"
     row["load_model"] = (
         "fixed-rate scheduled arrivals; bounded in-flight slots; every missed "
         "local slot is counted as scheduler_dropped; no coordinated omission")
     row["latency"] = (
-        "actual submission to result callback; scheduler lateness is reported "
+        "actual submission to terminal callback; scheduler lateness is reported "
         "separately for every offered arrival")
-    row["workers"] = workers
     row["slow_ms"] = slow_ms
-    row["executor_queue"] = executor_queue
     row["window"] = window
-    row["nominal_handler_capacity_rps"] = nominal_handler_capacity_rps(workers, slow_ms)
-    row["nominal_capacity_note"] = (
-        "worker-count / handler-delay arithmetic only; not a measured system capacity")
+    row["capacity"] = capacity
+    row["capacity_model"] = (
+        "public max_calls/max_streams limit; offered rates are measurements, "
+        "not an inferred executor capacity")
     return row
 
 
-def default_rates(workers: int, slow_ms: int) -> list[int]:
-    nominal = workers * 1000.0 / slow_ms
-    return sorted({max(1, round(nominal * ratio))
-                   for ratio in (0.25, 0.5, 1.0, 2.0, 4.0)})
+def default_rates() -> list[int]:
+    return [250, 1000, 4000]
 
 
 def parse_rates(text: str) -> list[int]:
@@ -248,9 +210,7 @@ def main() -> int:
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--requests", type=int, default=256)
     parser.add_argument("--rates", type=parse_rates)
-    parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--slow-ms", type=int, default=10)
-    parser.add_argument("--executor-queue", type=int, default=16)
     parser.add_argument("--window", type=int, default=128)
     parser.add_argument("--capacity", type=int, default=128)
     parser.add_argument("--timeout-ms", type=int, default=1000)
@@ -263,38 +223,31 @@ def main() -> int:
         parser.error("binary is not executable")
     if not 1 <= args.trials <= 100 or not 16 <= args.requests <= 1_000_000:
         parser.error("invalid trials or request count")
-    if not 1 <= args.workers <= 32 or not 1 <= args.slow_ms <= 1000:
-        parser.error("invalid workers or slow-ms")
-    if not 16 <= args.executor_queue <= 65536:
-        parser.error("executor-queue must be in 16..65536")
+    if not 0 <= args.slow_ms <= 1000:
+        parser.error("slow-ms must be in 0..1000")
     if not 1 <= args.window <= args.capacity <= 256:
         parser.error("require 1 <= window <= capacity <= 256")
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
 
-    rates = args.rates or default_rates(args.workers, args.slow_ms)
+    rates = args.rates or default_rates()
     count = 48 if args.smoke else args.requests
     warmup = 8 if args.smoke else 32
     trials = 1 if args.smoke else args.trials
     if args.smoke:
-        nominal = args.workers * 1000.0 / args.slow_ms
-        rates = sorted({max(1, round(nominal * 0.5)),
-                        max(1, round(nominal * 4.0))})
+        rates = [100, 800]
     if count / min(rates) > 300:
         parser.error("slowest rate would make one arrival window exceed 300 seconds")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as output:
-        output.write(json.dumps(metadata(binary, args.label, args.workers,
-                                         args.slow_ms, args.executor_queue,
-                                         args.window)) + "\n")
+        output.write(json.dumps(metadata(binary, args.label, args.slow_ms,
+                                         args.window, args.capacity)) + "\n")
         output.flush()
         for trial in range(1, trials + 1):
             for index, rate in enumerate(rates):
                 case = {"trial": trial, "rate_rps": rate, "requests": count,
-                        "warmup": warmup, "workers": args.workers,
-                        "slow_ms": args.slow_ms,
-                        "executor_queue": args.executor_queue,
+                        "warmup": warmup, "slow_ms": args.slow_ms,
                         "window": args.window, "capacity": args.capacity,
                         "timeout_ms": args.timeout_ms}
                 case_dir = (args.output.parent / (args.output.stem + "-logs") /
@@ -302,7 +255,8 @@ def main() -> int:
                 try:
                     result = run_case(binary, case, case_dir)
                 except Exception as error:
-                    output.write(json.dumps({"type": "failure", "case": case,
+                    output.write(json.dumps({"type": "failure", "schema": 2,
+                                             "api_generation": "rpc_v2", "case": case,
                                              "error": str(error),
                                              "logs": str(case_dir)}) + "\n")
                     output.flush()

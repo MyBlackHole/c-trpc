@@ -29,30 +29,9 @@ struct tr_server_channel_stats {
 struct tr_server_rpc_stats {
 	uint32_t executor_threads;
 	uint32_t endpoints_current;
-
-	uint64_t opening_calls_current;
-	uint64_t active_calls_current;
-	uint64_t terminal_calls_current;
 	uint64_t executor_queued_tasks_current;
 	uint64_t executor_running_tasks_current;
 	uint64_t executor_queue_capacity_current;
-	uint64_t executor_ready_calls_current;
-
-	uint32_t executor_queue_peak_max_per_endpoint;
-	uint32_t executor_ready_calls_peak_max_per_endpoint;
-
-	uint64_t executor_enqueued_tasks;
-	uint64_t executor_taken_tasks;
-	uint64_t executor_admission_limit_hits;
-	uint64_t executor_hard_full_events;
-	struct tr_latency_histogram executor_queue_wait_ns;
-	struct tr_latency_histogram executor_handler_ns;
-
-	uint64_t calls_started;
-	uint64_t calls_completed;
-	uint64_t calls_cancelled;
-	uint64_t calls_deadline_exceeded;
-
 	struct tr_rpc_semantic_stats semantic;
 };
 
@@ -69,7 +48,6 @@ struct tr_server_stats {
 	uint64_t peer_capacity_rejections;
 
 	struct tr_reactor_stats reactor;
-	struct tr_pool_observation rpc_message_pool;
 	struct tr_pool_observation reassembly_pool;
 	struct tr_server_channel_stats channel;
 	struct tr_server_rpc_stats rpc;

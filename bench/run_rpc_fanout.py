@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure fixed-rate RPC load sensitivity to generator process fanout."""
+"""Measure fixed-rate V2 load sensitivity to generator process fanout."""
 from __future__ import annotations
 
 import argparse
@@ -82,7 +82,6 @@ def summarize_fanout(generators: int,
     client_cpu = [result["client"]["client_cpu_s"] for result in results]
     client_rss = [
         result["client"]["client_peak_rss_kib"] for result in results]
-    busy = [result["server_exit"]["reactor_busy_ratio"] for result in results]
     command_peak = [
         result["server_exit"]["command_queue_peak"] for result in results]
     control_peak = [
@@ -91,6 +90,7 @@ def summarize_fanout(generators: int,
     return {
         "type": "fanout_summary",
         "schema": 2,
+        "api_generation": "rpc_v2",
         "generators": generators,
         "trials": len(results),
         "rate_rps": rate_rps,
@@ -123,10 +123,10 @@ def summarize_fanout(generators: int,
         "scheduler_dropped_max": max(dropped),
         "client_cpu_s_median": statistics.median(client_cpu),
         "client_peak_rss_kib_median": statistics.median(client_rss),
-        "reactor_busy_median": statistics.median(busy),
-        "reactor_busy_max": max(busy),
         "command_queue_peak_max": max(command_peak),
         "control_tx_pool_peak_max": max(control_peak),
+        "rpc_executor_threads": results[0]["server_exit"]["rpc_executor_threads"],
+        "rpc_task_queue_capacity": results[0]["server_exit"]["rpc_task_queue_capacity"],
     }
 
 
@@ -153,14 +153,10 @@ def validate_args(parser: argparse.ArgumentParser,
             any(value < 2 or value > 32 or value > args.rate
                 for value in args.fanouts)):
         parser.error("fanouts must be unique values in 2..min(32, rate)")
-    if not 1 <= args.workers <= 32:
-        parser.error("workers must be in 1..32")
     if not 1 <= args.requests <= 10_000_000:
         parser.error("requests must be in 1..10000000")
     if not 10 <= args.min_arrival_ms <= 10000:
         parser.error("min-arrival-ms must be in 10..10000")
-    if not 1 <= args.generator_workers <= 8:
-        parser.error("generator-workers must be in 1..8")
     if not 1 <= args.aggregate_generator_slots <= 8192:
         parser.error("aggregate-generator-slots must be in 1..8192")
     try:
@@ -170,13 +166,6 @@ def validate_args(parser: argparse.ArgumentParser,
         parser.error(str(error))
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
-    if not 16 <= args.executor_queue <= 65536:
-        parser.error("executor-queue must be in 16..65536")
-    for value in (args.rx_buffers, args.control_tx_items):
-        if not 1 <= value <= 65536:
-            parser.error("pool headroom must be in 1..65536")
-    if not 1 <= args.command_capacity <= 65536:
-        parser.error("command-capacity must be in 1..65536")
 
 
 def main() -> int:
@@ -188,18 +177,12 @@ def main() -> int:
     parser.add_argument("--rate", type=int, default=40000)
     parser.add_argument("--fanouts", type=parse_int_list,
                         default=parse_int_list("4,8,16,32"))
-    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--requests", type=int, default=256)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
     parser.add_argument("--duration-ms", type=int)
     parser.add_argument("--max-submit-late-us", type=float, default=1000.0)
-    parser.add_argument("--generator-workers", type=int, default=1)
     parser.add_argument("--aggregate-generator-slots", type=int, default=1024)
     parser.add_argument("--timeout-ms", type=int, default=3000)
-    parser.add_argument("--rx-buffers", type=int, default=8192)
-    parser.add_argument("--executor-queue", type=int, default=1024)
-    parser.add_argument("--control-tx-items", type=int, default=8192)
-    parser.add_argument("--command-capacity", type=int, default=16384)
     args = parser.parse_args()
     args.binary = args.binary.resolve(strict=True)
     validate_args(parser, args)
@@ -212,31 +195,25 @@ def main() -> int:
     metadata.update({
         "type": "fanout_metadata",
         "schema": 2,
+        "api_generation": "rpc_v2",
         "trials": args.trials,
         "rate_rps": args.rate,
         "fanouts": args.fanouts,
         "requests": requests,
         "duration_ms": args.duration_ms,
         "max_submit_late_us": args.max_submit_late_us,
-        "workers": args.workers,
-        "generator_workers": args.generator_workers,
         "aggregate_generator_slots": args.aggregate_generator_slots,
+        "server_capacity": 128,
+        "slow_ms": 0,
         "per_fanout_generator_slots": {
             str(generators):
                 slots_per_generator(args.aggregate_generator_slots, generators)
             for generators in args.fanouts
         },
-        "server_headroom": {
-            "rx_buffer_count": args.rx_buffers,
-            "executor_queue": args.executor_queue,
-            "control_tx_item_count": args.control_tx_items,
-            "command_capacity": args.command_capacity,
-        },
         "note": (
             "Fanout order alternates by trial. Aggregate generator in-flight "
-            "slots and Server bounded resources remain fixed, so process fanout "
-            "is isolated from total Client concurrency. No production defaults "
-            "change."),
+            "slots and public V2 call limits remain fixed, so process fanout "
+            "is isolated from total Client concurrency."),
     })
 
     results_by_fanout: dict[int, list[dict[str, Any]]] = {
@@ -255,22 +232,14 @@ def main() -> int:
                     "rate_rps": args.rate,
                     "requests": requests,
                     "warmup": 32,
-                    "workers": args.workers,
                     "slow_ms": 0,
-                    "executor_queue": args.executor_queue,
                     "window": 128,
                     "capacity": 128,
                     "generator_window": generator_slots,
                     "generator_capacity": generator_slots,
                     "timeout_ms": args.timeout_ms,
                     "generators": generators,
-                    "generator_workers": args.generator_workers,
-                    "resource_profile": "generator_fanout_headroom",
-                    "rx_buffer_count": args.rx_buffers,
-                    "control_tx_item_count": args.control_tx_items,
-                    "command_capacity": args.command_capacity,
-                    "rpc_message_pool_count": 0,
-                    "reassembly_pool_count": 0,
+                    "public_profile": "generator_fanout_fixed_limits",
                 }
                 case_dir = (
                     args.output.parent / (args.output.stem + "-logs") /
@@ -279,7 +248,8 @@ def main() -> int:
                     result = run_profile_case(args.binary, case, case_dir)
                 except Exception as error:
                     output.write(json.dumps({
-                        "type": "failure",
+                        "type": "failure", "schema": 2,
+                        "api_generation": "rpc_v2",
                         "trial": trial,
                         "generators": generators,
                         "case": case,
@@ -291,6 +261,7 @@ def main() -> int:
 
                 result["type"] = "fanout_case"
                 result["schema"] = 2
+                result["api_generation"] = "rpc_v2"
                 result["wall_signals"] = exact_wall_signals(result)
                 result["load_quality"] = load_quality(result, args.max_submit_late_us)
                 results_by_fanout[generators].append(result)
@@ -305,7 +276,6 @@ def main() -> int:
                     f"ok_rps={result['client']['ok_rps']:.1f} "
                     f"late_p99_us={result['client']['scheduler_late_p99_us']:.1f} "
                     f"client_cpu_s={result['client']['client_cpu_s']:.3f} "
-                    f"busy={result['server_exit']['reactor_busy_ratio']:.3f} "
                     f"signals={','.join(result['wall_signals']) or 'none'}",
                     flush=True)
 

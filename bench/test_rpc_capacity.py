@@ -7,7 +7,8 @@ from run_rpc_capacity import validate_open_phase
 
 def row():
     return dict(
-        type="open_phase", schema=1, phase="measure", scenario="open",
+        type="open_phase", schema=2, api_generation="rpc_v2",
+        phase="measure", scenario="open",
         pid=1, window=8, rate_rps=10, start_ns=1_000_000_000,
         schedule_horizon_ns=2_000_000_000, end_ns=2_100_000_000,
         arrival_window_s=1.0, drain_elapsed_s=1.1, drain_tail_ms=100.0,
@@ -90,6 +91,16 @@ class OpenLoopAccountingTests(unittest.TestCase):
     def test_bad_arrival_window(self):
         r = row()
         r["arrival_window_s"] = 2.0
+        with self.assertRaises(ValueError):
+            validate_open_phase(r, 10, 10, 8)
+
+    def test_rejects_old_generation(self):
+        r = row()
+        r["schema"] = 1
+        with self.assertRaises(ValueError):
+            validate_open_phase(r, 10, 10, 8)
+        r = row()
+        r["api_generation"] = "rpc_v1"
         with self.assertRaises(ValueError):
             validate_open_phase(r, 10, 10, 8)
 
