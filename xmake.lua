@@ -224,6 +224,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_connection_group_facade" then
             -- CONTROL 失败与 Client Group 截止时间/condwait 测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_reactor_close_on_owner",
+                        "-Wl,--wrap=tr_connector_create",
+                        "-Wl,--wrap=tr_connector_start",
+                        "-Wl,--wrap=tr_connector_cancel",
                         "-Wl,--wrap=tr_deadline_init_ms",
                         "-Wl,--wrap=pthread_cond_timedwait", {force = true})
         elseif name == "test_channel_reconnect_teardown" then

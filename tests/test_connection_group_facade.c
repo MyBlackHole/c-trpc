@@ -5,6 +5,7 @@
 #include "../src/execution/reactor_internal.h"
 #include "../src/group/pipeline_control_wire_internal.h"
 #include "../src/group/pipeline_route_internal.h"
+#include "../src/io/connector_internal.h"
 
 #include "../src/crc32c.h"
 #include "tr/status.h"
@@ -29,6 +30,14 @@
 
 static atomic_int fail_group_control_close_once;
 static atomic_uint group_control_close_attempts;
+static atomic_int defer_group_connector_start;
+static atomic_int fail_group_connector_cancel_once;
+static pthread_mutex_t group_connector_probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t group_connector_probe_cond = PTHREAD_COND_INITIALIZER;
+static struct tr_reactor *group_connector_probe_owner;
+static tr_connector_complete_cb group_connector_probe_complete;
+static void *group_connector_probe_arg;
+static unsigned group_connector_probe_starts;
 
 int __real_tr_reactor_close_on_owner(struct tr_conn_handle connection);
 
@@ -38,6 +47,53 @@ int __wrap_tr_reactor_close_on_owner(struct tr_conn_handle connection)
 	if (atomic_exchange(&fail_group_control_close_once, 0))
 		return TR_ERR_SYS;
 	return __real_tr_reactor_close_on_owner(connection);
+}
+
+int __real_tr_connector_create(const struct tr_connector_config *config,
+                               struct tr_connector **out);
+
+int __wrap_tr_connector_create(const struct tr_connector_config *config,
+                               struct tr_connector **out)
+{
+	int ret = __real_tr_connector_create(config, out);
+
+	if (ret == TR_OK) {
+		pthread_mutex_lock(&group_connector_probe_lock);
+		group_connector_probe_owner = config->owner;
+		group_connector_probe_complete = config->complete_cb;
+		group_connector_probe_arg = config->callback_arg;
+		pthread_mutex_unlock(&group_connector_probe_lock);
+	}
+	return ret;
+}
+
+int __real_tr_connector_start(struct tr_connector *connector,
+                              const char *ipv4_address, uint16_t port,
+                              const uint8_t *preface, uint32_t preface_len);
+
+int __wrap_tr_connector_start(struct tr_connector *connector,
+                              const char *ipv4_address, uint16_t port,
+                              const uint8_t *preface, uint32_t preface_len)
+{
+	if (atomic_load(&defer_group_connector_start)) {
+		pthread_mutex_lock(&group_connector_probe_lock);
+		group_connector_probe_starts++;
+		pthread_cond_broadcast(&group_connector_probe_cond);
+		pthread_mutex_unlock(&group_connector_probe_lock);
+		/* 该目标中的假连接器接受异步尝试，测试稍后显式投递完成回调。 */
+		return TR_OK;
+	}
+	return __real_tr_connector_start(connector, ipv4_address, port, preface,
+	                                 preface_len);
+}
+
+int __real_tr_connector_cancel(struct tr_connector *connector);
+
+int __wrap_tr_connector_cancel(struct tr_connector *connector)
+{
+	if (atomic_exchange(&fail_group_connector_cancel_once, 0))
+		return TR_ERR_SYS;
+	return __real_tr_connector_cancel(connector);
 }
 
 struct public_group_ctx {
@@ -708,6 +764,7 @@ struct client_group_wait_probe {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct tr_client *client;
+	uint32_t timeout_ms;
 	int entered;
 	int done;
 	int ret;
@@ -724,7 +781,8 @@ static void *client_group_wait_main(void *arg)
 	pthread_mutex_unlock(&probe->lock);
 
 	probe->ret = tr_client_connection_group_wait_drained(
-		probe->client, 5000U);
+	        probe->client,
+	        probe->timeout_ms != 0U ? probe->timeout_ms : 5000U);
 
 	pthread_mutex_lock(&probe->lock);
 	probe->done = 1;
@@ -747,6 +805,52 @@ static void wait_client_group_probe(
 			&probe->cond, &probe->lock, &deadline);
 	assert(*field);
 	pthread_mutex_unlock(&probe->lock);
+}
+
+struct group_connector_complete_request {
+	tr_connector_complete_cb complete;
+	void *callback_arg;
+};
+
+static int group_connector_complete_failure_on_owner(void *arg)
+{
+	struct group_connector_complete_request *request =
+	        (struct group_connector_complete_request *)arg;
+
+	request->complete(TR_ERR_SYS, -1, request->callback_arg);
+	return TR_OK;
+}
+
+static void wait_group_connector_start(unsigned target)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&group_connector_probe_lock);
+	while (group_connector_probe_starts < target && ret == 0)
+		ret = pthread_cond_timedwait(&group_connector_probe_cond,
+		                             &group_connector_probe_lock,
+		                             &deadline);
+	assert(group_connector_probe_starts >= target);
+	pthread_mutex_unlock(&group_connector_probe_lock);
+}
+
+static void dispatch_group_connector_failure(void)
+{
+	struct group_connector_complete_request request;
+	struct tr_reactor *owner;
+
+	pthread_mutex_lock(&group_connector_probe_lock);
+	owner = group_connector_probe_owner;
+	request.complete = group_connector_probe_complete;
+	request.callback_arg = group_connector_probe_arg;
+	pthread_mutex_unlock(&group_connector_probe_lock);
+	assert(owner != NULL);
+	assert(request.complete != NULL);
+	assert(tr_reactor_call(owner, group_connector_complete_failure_on_owner,
+	                       &request) == TR_OK);
 }
 
 struct server_group_wait_probe {
@@ -1118,6 +1222,86 @@ static void test_public_connection_group_client_data_offer(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_client_connector_failure_wakes(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct client_group_wait_probe wait_probe;
+	pthread_t wait_thread;
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.callback_arg = &ctx;
+
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 1U;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(client, "127.0.0.1",
+	                                          group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+
+	/* 假连接器保持 DATA 槽 CONNECTING，取消先失败，再投递终结回调，
+	 * 模拟排空取消与可重试完成清理竞争的窗口。
+	 */
+	pthread_mutex_lock(&group_connector_probe_lock);
+	group_connector_probe_starts = 0U;
+	pthread_mutex_unlock(&group_connector_probe_lock);
+	atomic_store(&defer_group_connector_start, 1);
+	assert(wait_data_offer(server, UINT64_C(4501)) == TR_OK);
+	wait_group_connector_start(1U);
+	atomic_store(&fail_group_connector_cancel_once, 1);
+	assert(tr_client_connection_group_begin_drain(client) == TR_ERR_SYS);
+
+	memset(&wait_probe, 0, sizeof(wait_probe));
+	wait_probe.client = client;
+	wait_probe.timeout_ms = 1000U;
+	assert(pthread_mutex_init(&wait_probe.lock, NULL) == 0);
+	assert(pthread_cond_init(&wait_probe.cond, NULL) == 0);
+	assert(pthread_create(&wait_thread, NULL, client_group_wait_main,
+	                      &wait_probe) == 0);
+	wait_client_group_probe(&wait_probe, &wait_probe.entered);
+
+	/* 完成回调释放最后一个 CONNECTING 槽后，wait_drained 必须被唤醒。 */
+	dispatch_group_connector_failure();
+	wait_client_group_probe(&wait_probe, &wait_probe.done);
+	assert(pthread_join(wait_thread, NULL) == 0);
+	assert(wait_probe.ret == TR_OK);
+	pthread_cond_destroy(&wait_probe.cond);
+	pthread_mutex_destroy(&wait_probe.lock);
+
+	atomic_store(&defer_group_connector_start, 0);
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
 static void test_public_connection_group_client_drain_cancels_offer(void)
 {
 	struct tr_test_drain_deadline_probe deadline_probe;
@@ -1283,6 +1467,7 @@ int main(void)
 	test_client_group_destroy_retry_preserves_control();
 	test_client_group_close_retry_preserves_control();
 	test_public_connection_group_client_data_offer();
+	test_public_connection_group_client_connector_failure_wakes();
 	test_public_connection_group_client_drain_cancels_offer();
 	test_client_group_destroy_after_remote_control_close();
 	return 0;
