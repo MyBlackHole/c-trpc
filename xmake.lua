@@ -515,6 +515,22 @@ target("test_runtime_message_recovery")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 真实验证消息服务同步对象部分销毁后的跨线程接管与重试。
+target("test_message_service_partial_destroy")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_service_partial_destroy.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=eventfd",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=pthread_cond_destroy",
+                "-Wl,--wrap=pthread_mutex_destroy",
+                "-Wl,--wrap=pthread_cond_signal",
+                "-Wl,--wrap=pthread_cond_broadcast",
+                "-Wl,--wrap=pthread_cond_wait", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- 分片消息操作及执行域边界，使用真实 Runtime/Reactor/任务执行器。
 target("test_runtime_message_api")
     set_kind("binary")
