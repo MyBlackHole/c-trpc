@@ -542,6 +542,18 @@ target("test_runtime_message_api")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 覆盖分片消息取消、跨分片隔离与多分片失败回滚边界。
+target("test_runtime_message_control")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_runtime_message_control.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=pthread_create",
+                "-Wl,--wrap=ZSTD_compressStream2",
+                "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- RAW Codec 独立测试真实公共编码对象，保留字节与参数边界契约。
 target("test_rpc_raw_codec")
     set_kind("binary")
