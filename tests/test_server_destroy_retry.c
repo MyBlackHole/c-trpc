@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
+#include "tr/rpc_v2.h"
 #include "tr/server.h"
 #include "tr/status.h"
 
@@ -16,21 +16,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-static atomic_int fail_rpc_destroy_once;
 static atomic_int fail_channel_destroy_once;
-static atomic_uint rpc_destroy_attempts;
 static atomic_uint channel_destroy_attempts;
 
-int __real_tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint);
 int __real_tr_channel_destroy(struct tr_channel *channel);
-
-int __wrap_tr_rpc_endpoint_destroy(struct tr_rpc_endpoint *endpoint)
-{
-	atomic_fetch_add(&rpc_destroy_attempts, 1U);
-	if (atomic_exchange(&fail_rpc_destroy_once, 0))
-		return TR_ERR_SYS;
-	return __real_tr_rpc_endpoint_destroy(endpoint);
-}
 
 int __wrap_tr_channel_destroy(struct tr_channel *channel)
 {
@@ -38,6 +27,19 @@ int __wrap_tr_channel_destroy(struct tr_channel *channel)
 	if (atomic_exchange(&fail_channel_destroy_once, 0))
 		return TR_ERR_SYS;
 	return __real_tr_channel_destroy(channel);
+}
+
+static enum tr_rpc_status unused_work(
+	struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
+	const struct tr_rpc_v2_cancel *cancel, struct tr_rpc_v2_reply *reply,
+	void *arg)
+{
+	(void)call;
+	(void)request;
+	(void)cancel;
+	(void)reply;
+	(void)arg;
+	return TR_RPC_STATUS_OK;
 }
 
 static void small_server_config(struct tr_server_config *config)
@@ -91,6 +93,7 @@ static void wait_for_peer(struct tr_server *server)
 int main(void)
 {
 	struct tr_server_config config;
+	struct tr_rpc_v2_method method;
 	struct tr_server *server = NULL;
 	struct tr_server_stats stats;
 	struct tr_rpc_semantic_stats semantic;
@@ -98,12 +101,21 @@ int main(void)
 	int client_fd;
 
 	small_server_config(&config);
-	atomic_store(&fail_rpc_destroy_once, 0);
+	memset(&method, 0, sizeof(method));
+	method.descriptor.service_id = 1U;
+	method.descriptor.method_id = 1U;
+	method.descriptor.request_cardinality = TR_RPC_ONE;
+	method.descriptor.response_cardinality = TR_RPC_ONE;
+	method.descriptor.request_codec_id = TR_RPC_CODEC_RAW;
+	method.descriptor.response_codec_id = TR_RPC_CODEC_RAW;
+	method.descriptor.lane = TR_RPC_LANE_CONTROL;
+	method.descriptor.max_request_bytes = 16U;
+	method.descriptor.max_response_bytes = 16U;
+	method.work = unused_work;
 	atomic_store(&fail_channel_destroy_once, 0);
-	atomic_store(&rpc_destroy_attempts, 0U);
 	atomic_store(&channel_destroy_attempts, 0U);
 
-	assert(tr_server_legacy_create(&config, &server) == TR_OK);
+	assert(tr_server_create(&config, &method, 1U, &server) == TR_OK);
 	assert(server != NULL);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
@@ -112,13 +124,22 @@ int main(void)
 	client_fd = connect_loopback(port);
 	wait_for_peer(server);
 
-	/* 第一次终止销毁在 RPC 屏障处失败。旧实现调试构建会
-	 * 断言中止；新实现必须返回错误并保留 Server 与对端所有权。
+	/* 第一次终止销毁在 Channel 销毁处失败；Server 必须保留
+	 * Channel 与自身存储的所有权，供调用方重试。
 	 */
-	atomic_store(&fail_rpc_destroy_once, 1);
-	assert(tr_server_destroy(server) == TR_ERR_SYS);
-	assert(atomic_load(&rpc_destroy_attempts) == 1U);
-	assert(atomic_load(&channel_destroy_attempts) == 0U);
+	atomic_store(&fail_channel_destroy_once, 1);
+	int destroy_ret;
+	unsigned destroy_retries = 0U;
+	do {
+		destroy_ret = tr_server_destroy(server);
+		if (destroy_ret == TR_AGAIN) {
+			assert(atomic_load(&channel_destroy_attempts) == 0U);
+			assert(++destroy_retries < 10000U);
+			sched_yield();
+		}
+	} while (destroy_ret == TR_AGAIN);
+	assert(destroy_ret == TR_ERR_SYS);
+	assert(atomic_load(&channel_destroy_attempts) == 1U);
 	/* 进入终止销毁后，即使屏障失败并保留对象也不得读取
 	 * 已可能拆除部分事件源的跨分片统计。
 	 */
@@ -126,19 +147,9 @@ int main(void)
 	assert(tr_server_get_rpc_semantic_stats(server, &semantic) ==
 	       TR_ERR_STATE);
 
-	/* 第二次重试让 RPC 正常收敛，再在 Channel 销毁处失败。
-	 * peer->rpc 已清空，但 peer->channel 与 Server 存储必须继续保留。
-	 */
-	atomic_store(&fail_channel_destroy_once, 1);
-	assert(tr_server_destroy(server) == TR_ERR_SYS);
-	assert(atomic_load(&rpc_destroy_attempts) == 2U);
-	assert(atomic_load(&channel_destroy_attempts) == 1U);
-	assert(tr_server_get_stats(server, &stats) == TR_ERR_STATE);
-
-	/* 第三次从剩余 Channel 所有权继续，最终完整释放 Server。 */
+	/* 第二次从仍由 Server 持有的 Channel 继续，最终释放 Server。 */
 	assert(tr_server_destroy(server) == TR_OK);
 	server = NULL;
-	assert(atomic_load(&rpc_destroy_attempts) == 2U);
 	assert(atomic_load(&channel_destroy_attempts) == 2U);
 
 	assert(close(client_fd) == 0);

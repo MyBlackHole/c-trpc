@@ -371,9 +371,8 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_connector_create",
                         "-Wl,--wrap=tr_buffer_pool_destroy", {force = true})
         elseif name == "test_server_destroy_retry" then
-            -- 注入 RPC/Channel terminal destroy 失败，验证 Server ownership 可重试。
-            add_ldflags("-Wl,--wrap=tr_rpc_endpoint_destroy",
-                        "-Wl,--wrap=tr_channel_destroy", {force = true})
+            -- 注入 V2 Channel destroy 失败，验证 Server ownership 可重试。
+            add_ldflags("-Wl,--wrap=tr_channel_destroy", {force = true})
         elseif name == "test_server_create_oom" then
             -- 真实分配失败：覆盖分片数组、各分片资源和二次回滚失败。
             add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=malloc",
