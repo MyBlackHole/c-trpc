@@ -59,7 +59,31 @@
 - [ ] 将新目标加入 Xmake 测试目标并运行 `TMPDIR="$PWD/build/tmp" xmake build test_rpc_v2_server_destroy_drain && TMPDIR="$PWD/build/tmp" xmake run test_rpc_v2_server_destroy_drain`；验证已受理工作阻塞期间 `tr_server_destroy()` 返回 `TR_AGAIN`，释放工作后重试收敛、terminal 恰好一次。
 - [ ] 对照 `test_server_record::test_stopped_work(false, false, true)` 的既有 V2 join 失败覆盖，确认新测试只保留原旧目标中独有的 accepted-work drain 不变量，不重复声称涵盖 Group 生命周期。
 
-### Task 4：收敛安装 SDK 中的 RPC 声明与门面配置
+### Task 4：补齐 V2 Client 准入失败与终局回调销毁屏障
+
+**Files:**
+- Modify: `tests/test_client_record.c`
+- Modify: `xmake.lua` only if an existing target's fault wrapper must be extended
+
+- [ ] 先增加 G1 回归：用现有公开 Client 和确定性 clock/timer-arm 故障注入，先接受一个有期限调用，再让另一个更早期限调用的准入失败；断言失败调用不改写输出句柄、不发 OPEN、不产生幽灵终局，先前调用仍按原截止时间恰好终局一次，Client 之后可继续接纳/复用槽位。
+- [ ] 先增加 G2 回归：用条件变量卡住真实 V2 Client terminal 回调；另一线程触发连接断开并调用销毁，验证销毁不越过活动回调；释放回调后销毁重试收敛、状态不被断连覆盖、terminal 恰一次且 Client/Buffer 预算归零。
+- [ ] 每个新场景先运行对应 `test_client_record` 目标并确认断言能捕捉预期错误交错，再修正最小测试夹具；生产实现不得因旧 Endpoint 对照而改动。
+- [ ] 将 G1/G2 的最终公开合同、故障注入点及通过输出写回 `docs/reviews/rpc-v1-core-retirement-inventory-20261021.md` 与 Issue #290；若现有 V2 接口不支持审计里写明的失败点，收窄到真实公开边界并记录理由，不能模拟 V1 私有堆状态。
+
+### Task 5：补齐 V2 Server 容量恢复与同流背压隔离
+
+**Files:**
+- Modify: `tests/test_server_record.c`
+- Modify: `tests/test_rpc_record_endpoint_tcp.c`
+- Modify: `xmake.lua` only if the existing failure wrappers need extension
+
+- [ ] 先增加 G3 回归：以 V2 Server 真实 TCP fixture、单 worker 条件变量门闩和固定任务容量填入已受理的一元/流式工作，再提交超额调用；断言超额调用在业务回调前只终局一次、已受理任务仍各自终局，释放容量后同一连接恢复成功，Server drain 和预算归零。
+- [ ] G3 只断言 V2 已公开的资源拒绝状态，不复制旧 `16` 或 `14+2` Group 阈值；若 V2 合同不承诺具体状态，断言合法资源拒绝/不破坏已受理调用，并把边界写入审计记录。
+- [ ] 先增加 G4 回归：沿用 V2 Record Endpoint TCP 真实窗口/发送夹具，使一条流的后续 MESSAGE 受阻，同时另一流继续完成；恢复窗口后断言受阻流按序交付且只终局一次、额度恢复，消息缓冲和 Endpoint 预算归零。
+- [ ] G3/G4 的夹具只使用条件变量、现有 task/dispatch/send 包装或真实窗口，不通过任意 sleep 预测饱和时刻；新增测试必须先在旧/无断言状态观察到目标交错，再验证新断言通过。
+- [ ] 将 G3/G4 的最终故障点、V2 状态合同和真实测试结果补入逐测试审计及 Issue #290；保持 `test_task_executor`、`test_server_record`、`test_rpc_record_endpoint_tcp` 原有覆盖。
+
+### Task 6：收敛安装 SDK 中的 RPC 声明与门面配置
 
 **Files:**
 - Modify: `include/tr/rpc.h`
@@ -74,7 +98,7 @@
 - [ ] 将 `test_connection_group_facade::test_transport_constructor_rejects_rpc_options` 中针对 interceptor 字段的输入和断言改为只验证仍有效的配置合同。
 - [ ] 运行该目标及 `test_rpc_raw_codec`、`test_client_record`、`test_server_record` 的定向构建/测试；编译实际包含所有公开头的测试，发现仍有效的 V2 消费者时修正类型归属，不恢复无实现的 V1 API。
 
-### Task 5：移除 V1 测试闭包及其故障注入依赖
+### Task 7：移除 V1 测试闭包及其故障注入依赖
 
 **Files:**
 - Modify: `tests/test_transport.c`
@@ -93,7 +117,7 @@
 - [ ] 从 `test_complex_constructor_faults.c` 删除 V1 Group 构造失败场景；复核 `calloc/malloc/free/pthread_*` wrappers 仍被其余构造器故障用例使用。
 - [ ] 运行 `TMPDIR="$PWD/build/tmp" xmake test -v -j1 'test_transport/*' 'test_connection_group_facade/*' 'test_server_record/*' 'test_complex_constructor_faults/*' 'test_rpc_v2_server_destroy_drain/*'`，确认剩余测试目标不引用 V1 API。
 
-### Task 6：删除生产 V1 Call/Endpoint/Wire 实现与私有接口
+### Task 8：删除生产 V1 Call/Endpoint/Wire 实现与私有接口
 
 **Files:**
 - Delete: `src/rpc/rpc.c`, `src/rpc/rpc_internal.h`, `src/rpc/rpc_wire.c`, `src/rpc/rpc_wire.h`
@@ -105,7 +129,7 @@
 - [ ] GCC debug 下构建全体测试目标；按编译错误清除实际残留的 V1 类型/函数调用，不用宽泛文本替换，也不删除含 V2 `tr_rpc_endpoint_*` 名称的类型。
 - [ ] 用 `rg` 检查生产源码、测试和 Xmake 无 `tr_rpc_wire_*`、V1 Endpoint/Executor/Call/Interceptor API、旧 fixture 路径与旧源文件引用。
 
-### Task 7：精确 inventory/归档门禁与当前文档
+### Task 9：精确 inventory/归档门禁与当前文档
 
 **Files:**
 - Modify: `scripts/rpc_v1_inventory.py`
@@ -120,7 +144,7 @@
 - [ ] 更新仍作为当前使用说明的文档，准确写明默认 V2、V1 raw core/Wire 已退役、RAW Codec 仅为复制式字节工具；保留历史 review、故障结论和旧 benchmark 原文。
 - [ ] 运行 inventory 自测、完整源码/归档扫描和 `git diff --check`，输出分别写入 `build/r14/`。
 
-### Task 8：干净构建、SDK 消费、完整测试与远端验收
+### Task 10：干净构建、SDK 消费、完整测试与远端验收
 
 **Files:** 所有 R14 改动；Issue #290 R14-D2 验收记录
 
@@ -134,7 +158,7 @@
 ## 计划自审
 
 - 公共 V2 类型和 RAW Codec 都有显式保留路径及正向测试。
-- 删除前安排测试行为逐项清单和 V2 deadline/cancel、背压/关闭、资源所有权、drain 证据；V1 私有实现机制不伪称语义等价。
+- 删除前安排测试行为逐项清单；G1–G4 Client 准入/回调屏障、Server 容量恢复、同流背压/跨流隔离均在旧测试删除前补 V2 断言，G5 Server drain 迁入独立目标；V1 私有实现机制不伪称语义等价。
 - 旧协议拒绝测试不再链接待删除的 Wire 对象。
 - 清理生产、SDK、Xmake、测试、inventory、CI 和当前文档均有独立验收项；保留历史证据。
 - 构建/测试/安装/临时输出均定位至仓库 `build/`，没有 `/tmp` 路径。
