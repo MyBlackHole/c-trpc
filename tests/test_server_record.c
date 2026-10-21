@@ -38,7 +38,7 @@
  * 原实现；服务端监听、接纳、调度和回收全部由 tr_server 自己驱动。 */
 static _Atomic bool capture_start;
 static _Atomic unsigned executor_creates, executor_destroys, worker_total;
-static _Atomic unsigned task_capacity_total, legacy_creates, worker_attempts;
+static _Atomic unsigned task_capacity_total, worker_attempts;
 static _Atomic unsigned fail_worker_at, endpoint_creates, endpoint_fail_at;
 static _Atomic unsigned endpoint_start_fail_at, endpoint_starts;
 static _Atomic unsigned reactor_count, fatal_polls, detach_failures;
@@ -178,16 +178,6 @@ int __wrap_tr_task_executor_dispatch(struct tr_task_executor *e, size_t limit,
 		atomic_fetch_add(&cleanup_dispatches, 1);
 	}
 	return __real_tr_task_executor_dispatch(e, limit, delivered);
-}
-
-int __real_tr_rpc_executor_group_create(uint32_t, uint32_t, uint32_t,
-                                        struct tr_rpc_executor_group **);
-int __wrap_tr_rpc_executor_group_create(uint32_t n, uint32_t calls,
-                                        uint32_t threads,
-                                        struct tr_rpc_executor_group **out)
-{
-	atomic_fetch_add(&legacy_creates, 1);
-	return __real_tr_rpc_executor_group_create(n, calls, threads, out);
 }
 
 int __real_tr_rpc_record_endpoint_create_on_owner(
@@ -413,7 +403,6 @@ static void reset_observation(void)
 	atomic_store(&executor_destroys, 0);
 	atomic_store(&worker_total, 0);
 	atomic_store(&task_capacity_total, 0);
-	atomic_store(&legacy_creates, 0);
 	atomic_store(&worker_attempts, 0);
 	atomic_store(&fail_worker_at, 0);
 	atomic_store(&endpoint_creates, 0);
@@ -498,7 +487,6 @@ static void fixture_create(struct fixture *f)
 	CHECK(tr_server_create_record(&f->config, &f->tuning, &f->record,
 	                              copied, 2, &f->server) == TR_OK);
 	memset(copied, 0, sizeof(copied));
-	CHECK(atomic_load(&legacy_creates) == 0);
 	CHECK(tr_server_listen(f->server, "127.0.0.1", 0, &f->port) == TR_OK);
 }
 
@@ -529,7 +517,6 @@ static void fixture_destroy(struct fixture *f)
 		CHECK(destroy_until_stable(f) == TR_OK);
 	CHECK(atomic_load(&executor_creates) ==
 	      atomic_load(&executor_destroys));
-	CHECK(atomic_load(&legacy_creates) == 0);
 	for (unsigned i = 0; i < 4; ++i)
 		atomic_store(&reactors[i], NULL);
 	atomic_store(&observed_channel, NULL);
