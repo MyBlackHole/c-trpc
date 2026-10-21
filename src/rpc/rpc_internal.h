@@ -8,6 +8,127 @@
 #include "../observability.h"
 #include "tr/rpc.h"
 
+/*
+ * 临时保留 V1 引擎所需的私有类型与符号声明。
+ * 它们已从安装 SDK 公共头移除，随 rpc.c 在 R14 Task 8 一并删除。
+ */
+struct tr_rpc_call_handle {
+	uint64_t _private[2];
+};
+
+struct tr_rpc_context {
+	uint32_t service_id;
+	uint32_t method_id;
+	enum tr_rpc_cardinality request_cardinality;
+	enum tr_rpc_cardinality response_cardinality;
+	uint64_t deadline_remaining_ms;
+	int has_deadline;
+	int cancelled;
+	int cancel_status;
+};
+
+enum tr_rpc_interceptor_phase {
+	TR_RPC_INTERCEPTOR_CLIENT_PRE_CALL = 1,
+	TR_RPC_INTERCEPTOR_SERVER_PRE_HANDLER = 2,
+	TR_RPC_INTERCEPTOR_SERVER_POST_HANDLER = 3,
+	TR_RPC_INTERCEPTOR_CLIENT_POST_CALL = 4
+};
+
+typedef int (*tr_rpc_interceptor_fn)(struct tr_rpc_call_handle call,
+                                     enum tr_rpc_interceptor_phase phase,
+                                     int status, void *arg);
+
+struct tr_rpc_interceptor {
+	tr_rpc_interceptor_fn fn;
+	void *arg;
+};
+
+struct tr_rpc_unary_response {
+	int status;
+	struct tr_rpc_bytes message;
+};
+
+typedef int (*tr_rpc_unary_handler)(struct tr_rpc_call_handle call,
+                                    const struct tr_rpc_bytes *request,
+                                    struct tr_rpc_unary_response *response,
+                                    void *arg);
+typedef void (*tr_rpc_unary_result_cb)(struct tr_rpc_call_handle call,
+                                       int status,
+                                       const struct tr_rpc_bytes *response,
+                                       void *arg);
+
+struct tr_rpc_message {
+	struct tr_rpc_bytes bytes;
+	uintptr_t _private[4];
+};
+
+enum tr_rpc_message_disposition {
+	TR_RPC_MESSAGE_RELEASE = 0,
+	TR_RPC_MESSAGE_TAKE_OWNERSHIP = 1
+};
+
+enum tr_rpc_call_event {
+	TR_RPC_CALL_EVENT_OPENED = 1,
+	TR_RPC_CALL_EVENT_WRITABLE = 2,
+	TR_RPC_CALL_EVENT_REMOTE_CLOSED = 3,
+	TR_RPC_CALL_EVENT_FINISHED = 4,
+	TR_RPC_CALL_EVENT_ERROR = 5
+};
+
+typedef enum tr_rpc_message_disposition (*tr_rpc_message_cb)(
+        struct tr_rpc_call_handle call, const struct tr_rpc_message *message,
+        void *arg);
+typedef void (*tr_rpc_call_event_cb)(struct tr_rpc_call_handle call,
+                                     enum tr_rpc_call_event event, int status,
+                                     void *arg);
+
+struct tr_rpc_call_callbacks {
+	tr_rpc_message_cb on_message;
+	tr_rpc_call_event_cb on_event;
+	void *arg;
+};
+
+typedef int (*tr_rpc_stream_open_handler)(struct tr_rpc_call_handle call,
+                                          void *arg);
+typedef enum tr_rpc_message_disposition (*tr_rpc_stream_message_handler)(
+        struct tr_rpc_call_handle call, const struct tr_rpc_message *message,
+        void *arg);
+typedef void (*tr_rpc_stream_half_close_handler)(struct tr_rpc_call_handle call,
+                                                 void *arg);
+typedef void (*tr_rpc_stream_writable_handler)(struct tr_rpc_call_handle call,
+                                               void *arg);
+typedef void (*tr_rpc_stream_close_handler)(struct tr_rpc_call_handle call,
+                                            int status, void *arg);
+
+struct tr_rpc_stream_handlers {
+	tr_rpc_stream_open_handler on_open;
+	tr_rpc_stream_message_handler on_message;
+	tr_rpc_stream_half_close_handler on_half_close;
+	tr_rpc_stream_writable_handler on_writable;
+	tr_rpc_stream_close_handler on_close;
+};
+
+int tr_rpc_call_send(struct tr_rpc_call_handle call,
+                     const struct tr_rpc_bytes *message);
+int tr_rpc_call_close_send(struct tr_rpc_call_handle call);
+int tr_rpc_call_finish(struct tr_rpc_call_handle call, int status);
+int tr_rpc_call_cancel(struct tr_rpc_call_handle call);
+int tr_rpc_call_is_cancelled(struct tr_rpc_call_handle call, int *status_out);
+int tr_rpc_call_set_metadata(struct tr_rpc_call_handle call, const char *key,
+                             const void *value, uint16_t value_len);
+int tr_rpc_call_get_peer_metadata(struct tr_rpc_call_handle call,
+                                  const char *key, void *value,
+                                  uint16_t *value_len);
+int tr_rpc_call_set_trailing_metadata(struct tr_rpc_call_handle call,
+                                      const char *key, const void *value,
+                                      uint16_t value_len);
+int tr_rpc_call_get_peer_trailing_metadata(struct tr_rpc_call_handle call,
+                                           const char *key, void *value,
+                                           uint16_t *value_len);
+int tr_rpc_call_get_context(struct tr_rpc_call_handle call,
+                            struct tr_rpc_context *out);
+int tr_rpc_message_release(struct tr_rpc_message *message);
+
 struct tr_rpc_endpoint;
 
 enum tr_rpc_role { TR_RPC_CLIENT = 1, TR_RPC_SERVER = 2 };

@@ -1171,12 +1171,6 @@ static void test_configuration(void)
 	                              f.methods, 2,
 	                              &f.server) == TR_ERR_INVALID);
 	CHECK(!f.server);
-	bad_config = f.config;
-	bad_config.interceptor.arg = &f;
-	CHECK(tr_server_create_record(&bad_config, &f.tuning, &f.record,
-	                              f.methods, 2,
-	                              &f.server) == TR_ERR_UNSUPPORTED);
-	CHECK(!f.server);
 	bad = f.record;
 	bad.tasks.capacity = 1;
 	CHECK(tr_server_create_record(&f.config, &f.tuning, &bad, f.methods, 2,

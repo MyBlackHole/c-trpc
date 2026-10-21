@@ -29,10 +29,7 @@ struct tr_client_config {
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
-	/* 遗留配置位：当前公开工厂要求 fn/arg 均为 NULL，否则 UNSUPPORTED。 */
-	struct tr_rpc_interceptor interceptor;
-
-	/* 遗留配置位：当前公开工厂要求 enable_reconnect==0，不透明重放。 */
+	/* 当前公开工厂要求 enable_reconnect==0，不透明重放。 */
 	int enable_reconnect;
 	uint32_t reconnect_initial_delay_ms;
 	uint32_t reconnect_max_delay_ms;
@@ -56,7 +53,7 @@ int tr_client_create(const struct tr_client_config *config,
                      size_t method_count, struct tr_client **out);
 
 /* 仅创建连接组传输门面，不启用 RPC。使用 connection_group_* 接口，
- * tr_client_connect 返回 UNSUPPORTED；RPC 重连/拦截器配置也不适用。
+ * tr_client_connect 返回 UNSUPPORTED；RPC 重连配置也不适用。
  * 复用 config_init/destroy 的参数、执行域与失败所有权规则。
  */
 int tr_client_create_transport(const struct tr_client_config *config,
@@ -76,7 +73,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 /*
  * 同步等待连接就绪。
  * 该操作依赖 Reactor 推进，必须从外部控制线程调用；从 Reactor 所有者
- * 回调、拦截器或 RPC 工作线程回调中调用时返回 TR_ERR_STATE。
+ * 回调或 RPC 工作线程回调中调用时返回 TR_ERR_STATE。
  */
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms);
 
@@ -99,7 +96,7 @@ int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
 /*
  * begin_drain() 只发布单调的排空意图，可从回调内调用。
  * wait_drained() 会同步等待现有 Stream 收敛，必须从外部控制线程调用；
- * 从 Reactor 所有者回调、拦截器或 RPC 工作线程回调中调用时返回
+ * 从 Reactor 所有者回调或 RPC 工作线程回调中调用时返回
  * TR_ERR_STATE，避免等待当前执行上下文本身完成。
  */
 int tr_client_begin_drain(struct tr_client *client);
@@ -119,7 +116,7 @@ int tr_client_get_rpc_semantic_stats(
  * 同步执行最终所有权释放。
  *
  * 调用 destroy 前，调用方必须停止发起新的 Client API 调用。
- * 不允许从 c-trpc 回调中调用 destroy，包括 Reactor 所有者回调、拦截器、
+ * 不允许从 c-trpc 回调中调用 destroy，包括 Reactor 所有者回调、
  * RPC 处理器/结果/事件回调。此类回调必须先把关闭意图交给外部控制线程，
  * 然后从回调返回。
  *

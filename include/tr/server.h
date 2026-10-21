@@ -42,9 +42,6 @@ struct tr_server_config {
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 
-	/* 遗留配置位：当前公开工厂要求 fn/arg 均为 NULL，否则 UNSUPPORTED。 */
-	struct tr_rpc_interceptor interceptor;
-
 	/*
 	 * 入站 TCP 接受后完成 HELLO 或连接组 TRR1 前导的总期限。
 	 * 默认 10000ms；0 也采用默认值，不禁用资源回收。收到部分字节不续期。
@@ -73,7 +70,7 @@ int tr_server_create(const struct tr_server_config *config,
 
 /* 仅创建连接组传输门面。使用 connection_group_listen/start 等接口，
  * tr_server_listen 返回 UNSUPPORTED，不能借此打开旧 RPC 监听端口。
- * 不接受 RPC 拦截器；复用普通构造的执行域和失败所有权规则。
+ * 复用普通构造的执行域和失败所有权规则。
  */
 int tr_server_create_transport(const struct tr_server_config *config,
                                struct tr_server **out);
@@ -87,7 +84,7 @@ int tr_server_start(struct tr_server *server);
 /*
  * 停止接收新对端，发送 GOAWAY，并同步等待已有 Stream 结束。
  *
- * 排空是外部生命周期屏障：从 Reactor 所有者回调、拦截器或 RPC
+ * 排空是外部生命周期屏障：从 Reactor 所有者回调或 RPC
  * 处理器/结果/事件回调中调用时返回 TR_ERR_STATE，且不会先执行部分
  * 停止/排空状态修改。回调需要关闭 Server 时应通知外部控制线程。
  */
@@ -111,7 +108,7 @@ int tr_server_get_rpc_semantic_stats(
  * 同步执行最终所有权释放。
  *
  * 调用 destroy 前，调用方必须停止发起新的 Server API 调用。
- * 不允许从 c-trpc 回调中调用 destroy，包括 Reactor 所有者回调、拦截器、
+ * 不允许从 c-trpc 回调中调用 destroy，包括 Reactor 所有者回调、
  * RPC 处理器/结果/事件回调。必须先通知外部控制线程并从回调返回，
  * 再销毁 Server。
  *

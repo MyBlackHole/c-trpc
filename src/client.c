@@ -243,8 +243,7 @@ tr_client_record_config_valid(const struct tr_client_config *config,
 	if (record_limit > window)
 		record_limit = window;
 
-	if (config->enable_reconnect || config->interceptor.fn ||
-	    config->interceptor.arg || groups->max_data_connections ||
+	if (config->enable_reconnect || groups->max_data_connections ||
 	    groups->max_active_transfers || groups->on_transfer_ready ||
 	    groups->callback_arg)
 		return TR_ERR_UNSUPPORTED;
@@ -514,8 +513,7 @@ int tr_client_create_transport(const struct tr_client_config *config,
 	*out = NULL;
 	if (tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
-	if (config && (config->interceptor.fn || config->interceptor.arg ||
-	               config->enable_reconnect))
+	if (config && config->enable_reconnect)
 		return TR_ERR_UNSUPPORTED;
 	ret = tr_client_create_internal(config, NULL, NULL, NULL, 0, 0, out);
 	return ret;

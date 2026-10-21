@@ -522,8 +522,7 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 	if (record_limit > window)
 		record_limit = window;
 
-	if (config->interceptor.fn || config->interceptor.arg ||
-	    groups->max_groups || groups->max_connections ||
+	if (groups->max_groups || groups->max_connections ||
 	    groups->max_data_connections_per_group ||
 	    groups->max_streams_per_group || groups->authorize ||
 	    groups->on_message || groups->on_data_event || groups->callback_arg)
@@ -1364,9 +1363,6 @@ tr_server_create_internal(enum tr_server_mode mode,
 	if (!tuning)
 		tr_server_tuning_ensure_shard_minimums(
 			&effective_tuning, effective.shard_count);
-	if (mode == TR_SERVER_MODE_TRANSPORT_ONLY &&
-	    (effective.interceptor.fn || effective.interceptor.arg))
-		return TR_ERR_UNSUPPORTED;
 	if (mode == TR_SERVER_MODE_RPC_V2) {
 		ret = tr_server_record_config_valid(&effective, record,
 		                                    record_methods,

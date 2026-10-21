@@ -1264,30 +1264,20 @@ static void test_client_group_destroy_after_remote_control_close(void)
 	}
 }
 
-static void test_transport_constructor_rejects_rpc_options(void)
+static void test_transport_constructor_rejects_reconnect(void)
 {
 	struct tr_client_config cc;
-	struct tr_server_config sc;
 	struct tr_client *client = NULL;
-	struct tr_server *server = NULL;
 
 	tr_client_config_init(&cc);
-	tr_server_config_init(&sc);
 	cc.enable_reconnect = 1;
 	assert(tr_client_create_transport(&cc, &client) == TR_ERR_UNSUPPORTED);
 	assert(!client);
-	cc.enable_reconnect = 0;
-	cc.interceptor.arg = &cc;
-	assert(tr_client_create_transport(&cc, &client) == TR_ERR_UNSUPPORTED);
-	assert(!client);
-	sc.interceptor.arg = &sc;
-	assert(tr_server_create_transport(&sc, &server) == TR_ERR_UNSUPPORTED);
-	assert(!server);
 }
 
 int main(void)
 {
-	test_transport_constructor_rejects_rpc_options();
+	test_transport_constructor_rejects_reconnect();
 	test_public_connection_group_server();
 	test_public_connection_group_client_control();
 	test_client_group_destroy_retry_preserves_control();
