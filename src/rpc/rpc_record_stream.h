@@ -15,7 +15,7 @@ enum tr_rpc_record_delivery {
 /* V2 的每调用传输绑定。调用者先以本地方法表解析/选择 method，再创建；
  * 对端 OPEN 必须匹配该描述，不能用远端字段修改本地方法基数或消息限制。
  * 当前仅绑定 NONE；压缩需异步验证真实输出，不能在 owner 中直接解压。
- * 此接口是迁移用库内接口，尚未替换旧 tr_rpc_endpoint/V1 的默认路径。
+ * 此接口供库内 V2 调用路径使用，不属于安装 SDK 的公开入口。
  */
 struct tr_rpc_record_stream_config {
 	enum tr_rpc_record_direction send_direction;

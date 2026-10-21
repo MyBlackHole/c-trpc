@@ -116,7 +116,6 @@ target("trcore")
         "src/transport/group/pipeline_listener.c",
         "src/transport/channel/channel.c",
         "src/rpc/rpc_codec.c",
-        "src/rpc/rpc_wire.c",
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc_record_router.c",
@@ -125,7 +124,6 @@ target("trcore")
         "src/rpc/rpc_record_endpoint.c",
         "src/rpc/rpc_record_client.c",
         "src/rpc/rpc_v2.c",
-        "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
         "src/transport/group/client_group.c",
@@ -721,15 +719,57 @@ target("test_rpc_record_endpoint_tcp")
     end)
     after_link(function (target)
         -- 防止以后重新继承 trcore 后把旧 RPC 实现悄悄带回这个证明目标。
+        local v1_symbols = {
+            tr_rpc_call_cancel = true,
+            tr_rpc_call_close_send = true,
+            tr_rpc_call_finish = true,
+            tr_rpc_call_get_context = true,
+            tr_rpc_call_get_peer_metadata = true,
+            tr_rpc_call_get_peer_trailing_metadata = true,
+            tr_rpc_call_is_cancelled = true,
+            tr_rpc_call_send = true,
+            tr_rpc_call_send_buffer = true,
+            tr_rpc_call_set_metadata = true,
+            tr_rpc_call_set_trailing_metadata = true,
+            tr_rpc_call_start = true,
+            tr_rpc_call_start_ex = true,
+            tr_rpc_deadline_heap_snapshot = true,
+            tr_rpc_endpoint_arm_detached_finalizer = true,
+            tr_rpc_endpoint_create = true,
+            tr_rpc_endpoint_create_with_executor_group = true,
+            tr_rpc_endpoint_destroy = true,
+            tr_rpc_endpoint_destroy_with_stats = true,
+            tr_rpc_endpoint_detach_for_finalize = true,
+            tr_rpc_endpoint_get_semantic_stats = true,
+            tr_rpc_endpoint_get_stats = true,
+            tr_rpc_endpoint_release_detached_owner = true,
+            tr_rpc_executor_group_can_start = true,
+            tr_rpc_executor_group_create = true,
+            tr_rpc_executor_group_destroy_checked = true,
+            tr_rpc_executor_group_start = true,
+            tr_rpc_executor_group_stop = true,
+            tr_rpc_in_worker_context = true,
+            tr_rpc_message_release = true,
+            tr_rpc_message_stream_internal = true,
+            tr_rpc_register_method = true,
+            tr_rpc_register_stream_method = true,
+            tr_rpc_unary_call = true,
+            tr_rpc_unary_call_ex = true,
+            tr_rpc_wire_decode = true,
+            tr_rpc_wire_decode_ex = true,
+            tr_rpc_wire_encode = true
+        }
+        -- 这些名称是 V2 Record Endpoint 的类型/回调；不属于旧 V1
+        -- 函数符号拒绝集合。tr_rpc_record_endpoint_* 也由精确集合自然放行。
+        local v2_endpoint_names = {
+            tr_rpc_endpoint_result = true,
+            tr_rpc_endpoint_terminal_fn = true,
+            tr_rpc_endpoint_progress_fn = true
+        }
         local symbols = os.iorunv("nm", {"--defined-only", "--extern-only", target:targetfile()})
         for symbol in symbols:gmatch("[^\n]+") do
             local name = symbol:match("([%w_]+)%s*$") or ""
-            assert(not name:match("^tr_rpc_endpoint_") and
-                   not name:match("^tr_rpc_executor_group_") and
-                   not name:match("^tr_rpc_wire_") and
-                   name ~= "tr_rpc_in_worker_context" and
-                   name ~= "tr_rpc_unary_call" and
-                   name ~= "tr_rpc_call_start",
+            assert(v2_endpoint_names[name] or not v1_symbols[name],
                    "V2 独立网络验证不允许 V1 定义: " .. name)
         end
     end)

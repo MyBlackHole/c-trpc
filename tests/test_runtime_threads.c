@@ -4,8 +4,6 @@
 #include "tr/status.h"
 #include "../src/transport/channel/channel_internal.h"
 #include "../src/runtime/runtime_internal.h"
-#include "../src/rpc/rpc_internal.h"
-#include "../src/execution/buffer.h"
 #include "server_v2_test_fixture.h"
 
 #include <assert.h>
@@ -658,136 +656,6 @@ static void test_runtime_start_rollback_join_failure_is_retryable(void)
 	expect_threads(3U, 3U);
 }
 
-static void test_standalone_rpc_executor_join_failure_is_retryable(void)
-{
-	struct tr_reactor *reactor = NULL;
-	struct tr_channel_config channel_config;
-	struct tr_channel *channel = NULL;
-	struct tr_rpc_endpoint_config rpc_config;
-	struct tr_rpc_endpoint *endpoint = NULL;
-	struct tr_buffer_pool message_pool;
-	struct tr_conn_handle connection;
-	int sockets[2];
-
-	memset(&message_pool, 0, sizeof(message_pool));
-	reset_probe(0U);
-	assert(socketpair(
-		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
-	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
-	assert(tr_reactor_start(reactor) == TR_OK);
-	assert(tr_reactor_adopt_fd(reactor, sockets[0], &connection) == TR_OK);
-	assert(tr_reactor_quiesce(reactor) == TR_OK);
-
-	memset(&channel_config, 0, sizeof(channel_config));
-	channel_config.role = TR_CHANNEL_CLIENT;
-	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
-	channel_config.max_streams = 4U;
-	channel_config.initial_window_bytes = 4096U;
-	channel_config.window_update_threshold_bytes = 1024U;
-	assert(tr_channel_create_deferred(
-		       &channel_config, connection, connection,
-		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
-
-	assert(tr_buffer_pool_init(&message_pool, 8U, 1024U) == TR_OK);
-	memset(&rpc_config, 0, sizeof(rpc_config));
-	rpc_config.role = TR_RPC_CLIENT;
-	rpc_config.max_methods = 2U;
-	rpc_config.max_calls = 2U;
-	rpc_config.message_pool = &message_pool;
-	rpc_config.executor_threads = 2U;
-	rpc_config.executor_queue_capacity = 16U;
-	assert(tr_rpc_endpoint_create_with_executor_group(
-		       channel, &rpc_config, NULL, &endpoint) == TR_OK);
-	assert(endpoint != NULL);
-	/* 一个反应器所有者与两个独立 RPC 工作线程。 */
-	expect_threads(3U, 0U);
-
-	/* 第一个 RPC 工作线程回收成功，第二个回收失败。
-	 * Endpoint 必须保持所有权，重试时只回收第二个工作线程。
-	 * 不能释放互斥锁、队列或 Endpoint 存储。
-	 */
-	fail_join_once_at(2U);
-	assert(tr_rpc_endpoint_destroy(endpoint) == TR_ERR_SYS);
-	expect_threads(3U, 1U);
-
-	assert(tr_rpc_endpoint_destroy(endpoint) == TR_OK);
-	endpoint = NULL;
-	expect_threads(3U, 2U);
-
-	assert(tr_channel_destroy(channel) == TR_OK);
-	channel = NULL;
-	assert(tr_buffer_pool_destroy(&message_pool) == TR_OK);
-	assert(tr_reactor_stop(reactor) == TR_OK);
-	expect_threads(3U, 3U);
-	assert(tr_reactor_destroy(reactor) == TR_OK);
-	assert(close(sockets[1]) == 0);
-}
-
-static void test_standalone_rpc_start_rollback_keeps_owner(void)
-{
-	struct tr_reactor *reactor = NULL;
-	struct tr_channel_config channel_config;
-	struct tr_channel *channel = NULL;
-	struct tr_rpc_endpoint_config rpc_config;
-	struct tr_rpc_endpoint *endpoint = NULL;
-	struct tr_buffer_pool message_pool;
-	struct tr_conn_handle connection;
-	int sockets[2];
-
-	memset(&message_pool, 0, sizeof(message_pool));
-	reset_probe(0U);
-	assert(socketpair(
-		       AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, sockets) == 0);
-	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
-	assert(tr_reactor_start(reactor) == TR_OK);
-	assert(tr_reactor_adopt_fd(reactor, sockets[0], &connection) == TR_OK);
-	assert(tr_reactor_quiesce(reactor) == TR_OK);
-
-	memset(&channel_config, 0, sizeof(channel_config));
-	channel_config.role = TR_CHANNEL_CLIENT;
-	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
-	channel_config.max_streams = 4U;
-	channel_config.initial_window_bytes = 4096U;
-	channel_config.window_update_threshold_bytes = 1024U;
-	assert(tr_channel_create_deferred(
-		       &channel_config, connection, connection,
-		       NULL, NULL, NULL, NULL, &channel) == TR_OK);
-	assert(tr_buffer_pool_init(&message_pool, 8U, 1024U) == TR_OK);
-
-	memset(&rpc_config, 0, sizeof(rpc_config));
-	rpc_config.role = TR_RPC_CLIENT;
-	rpc_config.max_methods = 2U;
-	rpc_config.max_calls = 2U;
-	rpc_config.message_pool = &message_pool;
-	rpc_config.executor_threads = 2U;
-	rpc_config.executor_queue_capacity = 16U;
-
-	/* 反应器已占第 1 次 pthread_create。让第 2 个 RPC 工作线程（全局第 3
-	 * 次） 创建失败，再让启动回滚的第 1 次线程回收失败。
-	 *
-	 * Endpoint 发布已完成且所有权已先放进 *out，因此生命周期
-	 * 回滚失败时必须保留 endpoint != NULL，绝不能泄漏无主对象。
-	 */
-	atomic_store(&fail_create_at, 3U);
-	fail_join_once_at(1U);
-	assert(tr_rpc_endpoint_create_with_executor_group(
-		       channel, &rpc_config, NULL, &endpoint) == TR_ERR_SYS);
-	assert(endpoint != NULL);
-	expect_threads(2U, 0U);
-
-	/* 线程回收故障已消耗；调用者用保留的所有权重试即可完成收敛。 */
-	assert(tr_rpc_endpoint_destroy(endpoint) == TR_OK);
-	endpoint = NULL;
-	expect_threads(2U, 1U);
-
-	assert(tr_channel_destroy(channel) == TR_OK);
-	assert(tr_buffer_pool_destroy(&message_pool) == TR_OK);
-	assert(tr_reactor_stop(reactor) == TR_OK);
-	expect_threads(2U, 2U);
-	assert(tr_reactor_destroy(reactor) == TR_OK);
-	assert(close(sockets[1]) == 0);
-}
-
 static void test_client_thread_start_failure(void)
 {
 	struct tr_client_config config;
@@ -847,8 +715,6 @@ int main(void)
 	RUN_TEST(test_reactor_destroy_join_failure_is_retryable);
 	RUN_TEST(test_runtime_multi_shard_start_rollback);
 	RUN_TEST(test_runtime_start_rollback_join_failure_is_retryable);
-	RUN_TEST(test_standalone_rpc_executor_join_failure_is_retryable);
-	RUN_TEST(test_standalone_rpc_start_rollback_keeps_owner);
 	RUN_TEST(test_client_thread_start_failure);
 	RUN_TEST(test_server_worker_start_failures);
 	reset_probe(0U);

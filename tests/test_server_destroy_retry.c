@@ -4,7 +4,6 @@
 #include "tr/status.h"
 
 #include "../src/facade_diagnostics_internal.h"
-#include "../src/rpc/rpc_internal.h"
 #include "../src/transport/channel/channel.h"
 
 #include <arpa/inet.h>

@@ -37,7 +37,7 @@ typedef void (*tr_rpc_endpoint_terminal_fn)(
 
 typedef void (*tr_rpc_endpoint_progress_fn)(bool drained, void *arg);
 
-/* 库内 V2 服务端宿主，尚未替换旧公开 Endpoint。只能绑定专用且尚未开始
+/* 库内 V2 服务端宿主。只能绑定专用且尚未开始
  * 交付流事件的 Channel（例如 deferred Channel）。start 安装其唯一处理器，
  * 不保存/恢复未知的旧处理器。Channel、executor、预算皆借用；外层必须在
  * 本宿主关闭后再销毁它们，禁止并发替换处理器。executor 的完成所有者须为
