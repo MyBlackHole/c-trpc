@@ -5,6 +5,7 @@
 #include "../src/server_record_internal.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
+#include "../src/execution/buffer.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
@@ -48,6 +49,11 @@ static _Atomic unsigned observation_count, stopped_reaps, fail_stopped_reap_at;
 static _Atomic unsigned cleanup_dispatches;
 static _Atomic unsigned executor_join_failures, workers_joined;
 static _Atomic bool fail_poll, fail_handler_detach, fail_executor_join;
+static _Atomic bool budget_release_injection_armed;
+static _Atomic bool budget_release_injection_fired;
+static _Atomic uint64_t budget_release_method_bytes;
+static _Atomic uint64_t budget_release_current_before_injection;
+static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
 static _Atomic(struct tr_reactor *) reactors[4];
 static _Atomic(struct tr_channel *) observed_channel;
 static _Thread_local bool starting_tasks;
@@ -58,6 +64,28 @@ static struct {
 	_Atomic(struct tr_task_executor *) executor;
 	_Atomic bool cleanup_entered;
 } observations[OBSERVED_ENDPOINTS];
+
+int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
+int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
+{
+	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
+	int ret = __real_tr_buffer_pool_destroy(pool);
+
+	if (ret == TR_OK && budget &&
+	    atomic_exchange(&budget_release_injection_armed, false)) {
+		uint64_t current = atomic_load(&budget->current_bytes);
+		uint64_t method_bytes =
+		        atomic_load(&budget_release_method_bytes);
+
+		CHECK(method_bytes > 1U);
+		CHECK(current >= method_bytes);
+		atomic_store(&budget_release_current_before_injection, current);
+		atomic_store(&budget_release_injected_budget, budget);
+		atomic_store(&budget->current_bytes, method_bytes - 1U);
+		atomic_store(&budget_release_injection_fired, true);
+	}
+	return ret;
+}
 
 static unsigned observe_endpoint(struct tr_rpc_record_endpoint *endpoint)
 {
@@ -1147,6 +1175,36 @@ static void test_configuration(void)
 	fixture_destroy(&f);
 }
 
+static void test_method_budget_release_retry(void)
+{
+	struct fixture f;
+	struct tr_memory_budget *budget;
+	uint64_t current;
+	int ret;
+
+	fixture_init(&f, 1, 1);
+	fixture_create(&f);
+	CHECK(fixture_start(&f) == TR_OK);
+	atomic_store(&budget_release_method_bytes, sizeof(f.methods));
+	atomic_store(&budget_release_injection_fired, false);
+	atomic_store(&budget_release_injection_armed, true);
+
+	ret = destroy_until_stable(&f);
+	CHECK(ret != TR_OK);
+	CHECK(atomic_load(&budget_release_injection_fired));
+	budget = atomic_load(&budget_release_injected_budget);
+	CHECK(budget != NULL);
+	current = atomic_load(&budget_release_current_before_injection);
+
+	/* 恢复注入前账本；首次失败后保留的方法表额度应能在重试时归还。 */
+	atomic_store(&budget->current_bytes, current);
+	atomic_store(&budget_release_injected_budget, NULL);
+	atomic_store(&budget_release_method_bytes, 0U);
+	CHECK(tr_server_destroy(f.server) == TR_OK);
+	f.server = NULL;
+	fixture_destroy(&f);
+}
+
 static void test_exact_window(void)
 {
 	struct fixture f;
@@ -1167,6 +1225,8 @@ static void test_exact_window(void)
 
 int main(void)
 {
+	test_method_budget_release_retry();
+	puts("test_server_record: method budget release retry passed");
 	test_configuration();
 	test_exact_window();
 	test_shapes_and_reuse();

@@ -3129,13 +3129,13 @@ int tr_server_destroy(struct tr_server *server)
 			return TR_ERR_STATE;
 		budget = tr_runtime_shard_memory_budget(
 		        server->shards[0].runtime);
+		ret = tr_memory_budget_release(budget, bytes);
+		if (ret != TR_OK)
+			return ret;
 		free(server->record_methods);
 		server->record_methods = NULL;
 		server->record_method_bytes = 0;
 		server->record_method_count = 0;
-		ret = tr_memory_budget_release(budget, bytes);
-		if (ret != TR_OK)
-			return ret;
 	}
 
 	if (server->record_drain_cond_ready) {
