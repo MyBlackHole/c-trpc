@@ -16,6 +16,32 @@
 #include <stdio.h>
 #include <string.h>
 
+static struct tr_memory_budget *runtime_release_budget;
+static uint64_t runtime_release_peer_bytes;
+static uint64_t runtime_release_current_before_injection;
+static int runtime_release_injection_armed;
+static int runtime_release_injection_fired;
+
+int __real_tr_reactor_destroy(struct tr_reactor *reactor);
+int __wrap_tr_reactor_destroy(struct tr_reactor *reactor)
+{
+	int ret = __real_tr_reactor_destroy(reactor);
+
+	if (ret == TR_OK && runtime_release_injection_armed) {
+		runtime_release_injection_armed = 0;
+		assert(runtime_release_budget != NULL);
+		assert(runtime_release_peer_bytes > 1U);
+		runtime_release_current_before_injection = atomic_load_explicit(
+		        &runtime_release_budget->current_bytes,
+		        memory_order_relaxed);
+		atomic_store_explicit(&runtime_release_budget->current_bytes,
+		                      runtime_release_peer_bytes - 1U,
+		                      memory_order_relaxed);
+		runtime_release_injection_fired = 1;
+	}
+	return ret;
+}
+
 static void runtime_test_config_init(
 	struct tr_runtime_config *config,
 	struct tr_runtime_shard_config *shards, uint32_t shard_count)
@@ -553,6 +579,38 @@ static void test_runtime_shard_memory_budget(void)
 	assert(runtime == NULL);
 }
 
+static void test_runtime_destroy_retries_peer_budget_release(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shard_config;
+	struct tr_runtime *runtime = NULL;
+	struct tr_runtime_shard *shard;
+	int ret;
+
+	runtime_test_config_init(&config, &shard_config, 1U);
+	shard_config.peer_capacity = 2U;
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	shard = tr_runtime_shard_at(runtime, 0U);
+	assert(shard != NULL);
+	runtime_release_budget = tr_runtime_shard_memory_budget(shard);
+	runtime_release_peer_bytes =
+	        2U * (uint64_t)sizeof(struct tr_runtime_peer);
+	runtime_release_injection_fired = 0;
+	runtime_release_injection_armed = 1;
+
+	ret = tr_runtime_destroy(runtime);
+	assert(ret != TR_OK);
+	assert(runtime_release_injection_fired == 1);
+	assert(runtime != NULL);
+
+	atomic_store_explicit(&runtime_release_budget->current_bytes,
+	                      runtime_release_current_before_injection,
+	                      memory_order_relaxed);
+	runtime_release_budget = NULL;
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	runtime_release_peer_bytes = 0;
+}
+
 struct runtime_self_stop_probe {
 	struct tr_runtime *runtime;
 	struct tr_reactor *reactor;
@@ -661,6 +719,7 @@ int main(void)
 	RUN_TEST(test_runtime_shard_peer_event_source);
 	RUN_TEST(test_runtime_shard_peer_event_dispatch);
 	RUN_TEST(test_runtime_shard_memory_budget);
+	RUN_TEST(test_runtime_destroy_retries_peer_budget_release);
 	RUN_TEST(test_runtime_self_stop_context_guards);
 	RUN_TEST(test_runtime_lifecycle);
 	return 0;

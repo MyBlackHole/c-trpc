@@ -12,6 +12,8 @@ from rpc_v1_inventory import (
     remove_comments_and_literals,
 )
 
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / "build" / "test-tmp"
+
 
 CLIENT_FACADE_FILES = {
     "src/client.c",
@@ -36,7 +38,7 @@ def client_endpoint_references(symbols):
 class InventoryTests(unittest.TestCase):
     @staticmethod
     def workspace_tempdir():
-        root = Path(__file__).resolve().parents[1] / "build" / "r12-inventory-tests"
+        root = TEST_TMP_ROOT
         root.mkdir(parents=True, exist_ok=True)
         return tempfile.TemporaryDirectory(dir=root)
 
@@ -47,6 +49,8 @@ class InventoryTests(unittest.TestCase):
 
     def test_bare_v1_endpoint_type_is_a_legacy_reference(self):
         with self.workspace_tempdir() as temporary:
+            self.assertEqual(Path(temporary).resolve().parent,
+                             TEST_TMP_ROOT.resolve())
             root = Path(temporary)
             (root / "src").mkdir()
             (root / "src/client.c").write_text(
@@ -77,6 +81,7 @@ tr_rpc_call_finish(call, 0);
 
     def test_scans_all_layers_and_preserves_line_numbers(self):
         with self.workspace_tempdir() as tmp:
+            self.assertEqual(Path(tmp).resolve().parent, TEST_TMP_ROOT.resolve())
             root = Path(tmp)
             for folder in ("src/rpc", "src/runtime", "tests"):
                 (root / folder).mkdir(parents=True)

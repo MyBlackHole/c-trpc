@@ -102,13 +102,15 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 			return ret;
 	}
 
-	free(shard->peers);
-	shard->peers = NULL;
 	if (shard->peer_storage_bytes != 0U) {
-		(void)tr_memory_budget_release(
-			&shard->memory_budget, shard->peer_storage_bytes);
+		ret = tr_memory_budget_release(&shard->memory_budget,
+		                               shard->peer_storage_bytes);
+		if (ret != TR_OK)
+			return ret;
 		shard->peer_storage_bytes = 0U;
 	}
+	free(shard->peers);
+	shard->peers = NULL;
 	shard->peer_capacity = 0U;
 	/* 输出视图可以越过停止存活。预算仍被借用时保留 Runtime 外壳，
 	 * 防止最后 release 向已释放的预算对象写入。 */
