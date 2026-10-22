@@ -1,4 +1,5 @@
 set_project("c-trpc")
+set_version("2.0.0-dev.0")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -796,6 +797,7 @@ target("test_server_record")
                 "-Wl,--wrap=tr_rpc_record_endpoint_start_on_owner",
                 "-Wl,--wrap=tr_rpc_record_endpoint_close_on_owner",
                 "-Wl,--wrap=tr_rpc_record_endpoint_reap_stopped",
+                "-Wl,--wrap=tr_buffer_pool_destroy",
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join",
                 "-Wl,--wrap=epoll_wait",
@@ -851,6 +853,7 @@ target("test_client_record")
                 "-Wl,--wrap=tr_channel_create_deferred",
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=tr_channel_destroy",
+                "-Wl,--wrap=tr_buffer_pool_destroy",
                 "-Wl,--wrap=tr_stream_release_payload",
                 "-Wl,--wrap=clock_gettime", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
