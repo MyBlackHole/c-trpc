@@ -106,7 +106,6 @@ target("trcore")
         "src/io/connector.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
-        "src/runtime/legacy_rpc_execution.c",
         "src/runtime/message_service.c",
         "src/group/pipeline.c",
         "src/group/pipeline_route.c",

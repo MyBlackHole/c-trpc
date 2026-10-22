@@ -129,6 +129,34 @@ tr_rpc_call_finish(call, 0);
         self.assertTrue(all(SERVER_FACADE_RETIREMENT.fullmatch(name)
                             for name in expected))
 
+    def test_runtime_executor_names_are_denied_without_banning_raw_or_v2(self):
+        with self.workspace_tempdir() as temporary:
+            root = Path(temporary)
+            (root / "src/runtime").mkdir(parents=True)
+            (root / "src/runtime/runtime.c").write_text(
+                "struct tr_runtime_rpc_executor_config config;\n"
+                "tr_runtime_shard_rpc_executor(shard);\n"
+                "tr_runtime_legacy_rpc_execution_start(execution);\n"
+                "tr_rpc_executor_group_create(1, 1, 1, &group);\n"
+                "struct tr_rpc_endpoint_result result;\n",
+                encoding="utf-8",
+            )
+            (root / "xmake.lua").write_text("", encoding="utf-8")
+            symbols = audit(root)["symbols"]
+
+        runtime_deny = {
+            "tr_runtime_rpc_executor_config",
+            "tr_runtime_shard_rpc_executor",
+            "tr_runtime_legacy_rpc_execution_start",
+        }
+        self.assertTrue(runtime_deny.issubset(symbols))
+        self.assertEqual(denied_symbols(symbols, runtime_deny),
+                         sorted(runtime_deny))
+        self.assertIn("tr_rpc_executor_group_create", symbols)
+        self.assertIn("tr_rpc_endpoint_result", symbols)
+        self.assertTrue(runtime_deny.isdisjoint(
+            {"tr_rpc_executor_group_create", "tr_rpc_endpoint_result"}))
+
     def test_archive_deny_is_narrower_than_raw_v1_endpoint_inventory(self):
         archive = parse_nm(
             "libtrcore.a:server.c.o:0000000000000000 T "

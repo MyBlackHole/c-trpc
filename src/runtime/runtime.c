@@ -12,13 +12,11 @@
 #include "../io/socket.h"
 #include "tr/status.h"
 #include "../execution/reactor_internal.h"
-#include "legacy_rpc_execution.h"
 #include "../io/socket_internal.h"
 
 struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
-	struct tr_runtime_legacy_rpc_execution *legacy_rpc_execution;
 	struct tr_message_service_config message_config;
 	struct tr_message_service *messages;
 	struct tr_memory_budget memory_budget;
@@ -95,13 +93,6 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		shard->reactor = NULL;
 	}
 
-	if (shard->legacy_rpc_execution) {
-		ret = tr_runtime_legacy_rpc_execution_destroy(
-		        &shard->legacy_rpc_execution);
-		if (ret != TR_OK)
-			return ret;
-	}
-
 	if (shard->peer_storage_bytes != 0U) {
 		ret = tr_memory_budget_release(&shard->memory_budget,
 		                               shard->peer_storage_bytes);
@@ -118,17 +109,6 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 	                         memory_order_acquire) != 0)
 		return TR_AGAIN;
 	return TR_OK;
-}
-
-static int tr_runtime_rpc_executor_config_valid(
-	const struct tr_runtime_rpc_executor_config *executor)
-{
-	if (!executor)
-		return 0;
-	if (executor->endpoint_capacity == 0U)
-		return executor->max_calls_per_endpoint == 0U &&
-		       executor->thread_count == 0U;
-	return executor->max_calls_per_endpoint != 0U;
 }
 
 static int
@@ -149,8 +129,6 @@ tr_runtime_shard_config_valid(const struct tr_runtime_shard_config *config)
 		     stride > SIZE_MAX / config->peer_capacity))
 			return 0;
 	}
-	if (!tr_runtime_rpc_executor_config_valid(&config->rpc_executor))
-		return 0;
 	if (!config->messages.tasks.capacity)
 		return config->messages.tasks.workers == 0;
 	return config->memory_budget_bytes && config->messages.tasks.workers &&
@@ -275,14 +253,6 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 				&reactor_config, NULL, NULL, NULL,
 				&shard->reactor);
 		}
-		if (ret == TR_OK &&
-		    shard_config->rpc_executor.endpoint_capacity != 0U)
-			ret = tr_runtime_legacy_rpc_execution_create(
-			        shard_config->rpc_executor.endpoint_capacity,
-			        shard_config->rpc_executor
-			                .max_calls_per_endpoint,
-			        shard_config->rpc_executor.thread_count,
-			        &shard->legacy_rpc_execution);
 		if (ret != TR_OK)
 			return tr_runtime_create_rollback(out, runtime, ret);
 	}
@@ -319,10 +289,8 @@ static int tr_runtime_shard_stop_execution(
 	if (!shard)
 		return TR_OK;
 
-	/*
-	 * 保持既有顺序：先收敛反应器所有者，再等待分片执行器工作线程退出并回收。
-	 * 工作线程在反应器已停止时已有本地完成回退，不会把线程回收
-	 * 屏障变成对反应器进展的依赖。
+	/* 先由反应器 owner 取消消息服务，再停止并回收 owner；反应器退出后
+	 * 才回收消息服务，保留其输入/输出预算和终局责任的既有顺序。
 	 */
 	if (shard->started) {
 		if (shard->messages) {
@@ -344,23 +312,13 @@ static int tr_runtime_shard_stop_execution(
 			result = ret;
 	}
 
-	if (shard->legacy_rpc_execution) {
-		ret = tr_runtime_legacy_rpc_execution_stop(
-		        shard->legacy_rpc_execution);
-		if (ret != TR_OK && result == TR_OK)
-			result = ret;
-	}
 	return result;
 }
 
-/* 独立预检每个分片，避免多分片启动循环里重复读取未就绪的组状态。 */
 static int tr_runtime_shard_can_start(struct tr_runtime_shard *shard)
 {
 	if (shard->started || shard->messages || !shard->reactor)
 		return TR_ERR_STATE;
-	if (shard->legacy_rpc_execution)
-		return tr_runtime_legacy_rpc_execution_can_start(
-		        shard->legacy_rpc_execution);
 	return TR_OK;
 }
 
@@ -398,18 +356,6 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 		int ret;
 
-		/*
-		 * 工作线程轮次在运行时已经由调用方拥有之后才启动。若部分
-		 * pthread_create 或回滚时的线程回收失败，组存储留在分片中，
-		 * runtime_stop()/destroy() 可以继续收敛。
-		 */
-		if (shard->legacy_rpc_execution) {
-			ret = tr_runtime_legacy_rpc_execution_start(
-			        shard->legacy_rpc_execution);
-			if (ret != TR_OK)
-				goto rollback;
-		}
-
 		ret = tr_reactor_start(shard->reactor);
 		if (ret != TR_OK)
 			goto rollback;
@@ -428,8 +374,7 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		uint32_t j = i + 1U;
 
 		/*
-		 * 包含当前分片：组可能已经启动而反应器尚未成功。
-		 * 每个分片的停止都是幂等且可重试的。
+		 * 包含当前分片；每个分片的停止都是幂等且可重试的。
 		 */
 		while (j != 0U) {
 			int stop_ret;
@@ -560,14 +505,6 @@ int tr_runtime_shard_call(struct tr_runtime_shard *shard,
 	if (!shard || !fn)
 		return TR_ERR_INVALID;
 	return tr_reactor_call(shard->reactor, fn, arg);
-}
-
-struct tr_rpc_executor_group *
-tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
-{
-	return shard ? tr_runtime_legacy_rpc_execution_group(
-	                       shard->legacy_rpc_execution)
-	             : NULL;
 }
 
 struct tr_memory_budget *
