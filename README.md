@@ -11,11 +11,10 @@
 旧调用签名，须重新编译。连接组改用 `*_create_transport()`。完整接入合同以
 [公共 SDK 文档](docs/rpc-v2-sdk.md)及两个 Echo 示例为准。
 
-本分支已在 R14 移除旧 V1 Call、Endpoint、Executor Group 与 Wire 核心；旧
+此版本已移除旧 V1 Call、Endpoint、Executor Group 与 Wire 核心；旧
 V1 对端不会通过默认门面协商或回退。RAW Codec 仍作为独立字节工具提供：
 `tr_rpc_raw_encode()` 将字节复制到调用方缓冲区，`tr_rpc_raw_decode()` 返回指向输入的
-借用视图，调用方须保持输入存储有效。它不包含 RPC Call 或 Wire 协议。R14 分支仍待集成，
-不能据此声称 `main` 已更新。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
+借用视图，调用方须保持输入存储有效。它不包含 RPC Call 或 Wire 协议。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
 新的真实 TCP 基准通过公开 V2 Client/Server 运行，不能与旧 CSV 合并比较。
 
 ## 架构
@@ -573,7 +572,7 @@ V2 支持 `ONE` / `MANY` 请求与响应组合；`TR_RPC_NONE` 尚不支持。�
 
 R14 已从源码和静态库移除 V1 raw Call、Endpoint、Executor Group 与旧 Wire 实现，
 也删除了相应的安装声明及测试闭包。连接到只支持旧 V1 Wire 的对端不会得到兼容
-回退。当前工作树中的该次改动仍待集成。
+回退。
 
 `tr/rpc_codec.h` 保留独立 RAW Codec：`tr_rpc_bytes`、`TR_RPC_CODEC_RAW`、
 `tr_rpc_raw_encode()` 和 `tr_rpc_raw_decode()`。编码会把输入复制到调用方提供的目标

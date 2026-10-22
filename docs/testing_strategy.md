@@ -68,7 +68,7 @@ Server 构造、peer retirement、排空、统计、构造回滚和销毁重试�
 `test_rpc_raw_codec` 单独验证仍保留的 RAW Codec：编码复制，解码返回借用视图。
 inventory 的精确符号/类型
 扫描及 release 静态库检查验证旧对象与符号已退出，同时确认 `rpc_codec.c.o` 仍提供
-RAW Codec。R14 分支仍待集成，不代表 `main` 已完成这些改动。
+RAW Codec。
 `bench_rpc` 和容量、扩展性、headroom 等负载驱动
 现通过公开 V2 Client/Server 运行，V1 日期 CSV 只作为历史记录，不纳入 V2 基线。
 
