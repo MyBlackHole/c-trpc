@@ -24,6 +24,7 @@ struct tr_runtime_shard {
 	struct tr_memory_budget memory_budget;
 
 	struct tr_runtime_peer *peers;
+	size_t peer_stride;
 	uint64_t peer_storage_bytes;
 	uint32_t peer_capacity;
 	uint32_t peer_count;
@@ -135,6 +136,19 @@ tr_runtime_shard_config_valid(const struct tr_runtime_shard_config *config)
 {
 	if (!config)
 		return 0;
+	/* 预检对齐与乘法，禁止任意步长导致越界或错位的 peer。 */
+	{
+		size_t stride = config->peer_stride;
+
+		if (stride == 0U)
+			stride = sizeof(struct tr_runtime_peer);
+
+		if (stride < sizeof(struct tr_runtime_peer) ||
+		    stride % _Alignof(struct tr_runtime_peer) != 0U ||
+		    (config->peer_capacity != 0U &&
+		     stride > SIZE_MAX / config->peer_capacity))
+			return 0;
+	}
 	if (!tr_runtime_rpc_executor_config_valid(&config->rpc_executor))
 		return 0;
 	if (!config->messages.tasks.capacity)
@@ -224,18 +238,22 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 
 		shard->message_config = shard_config->messages;
 		shard->peer_capacity = shard_config->peer_capacity;
+		shard->peer_stride = shard_config->peer_stride;
+		if (shard->peer_stride == 0U)
+			shard->peer_stride = sizeof(struct tr_runtime_peer);
 		if (shard->peer_capacity != 0U) {
 			uint64_t peer_storage_bytes =
-				(uint64_t)shard->peer_capacity *
-				(uint64_t)sizeof(*shard->peers);
+			        (uint64_t)shard->peer_capacity *
+			        (uint64_t)shard->peer_stride;
 
 			ret = tr_memory_budget_reserve(
 				&shard->memory_budget, peer_storage_bytes);
 			if (ret == TR_OK) {
+				size_t count = shard->peer_capacity;
+				size_t stride = shard->peer_stride;
+
 				shard->peer_storage_bytes = peer_storage_bytes;
-				shard->peers = (struct tr_runtime_peer *)calloc(
-					shard->peer_capacity,
-					sizeof(*shard->peers));
+				shard->peers = calloc(count, stride);
 				if (!shard->peers)
 					ret = TR_ERR_NOMEM;
 			}
@@ -669,7 +687,8 @@ tr_runtime_shard_peer_at(struct tr_runtime_shard *shard, uint32_t slot)
 {
 	if (!shard || slot >= shard->peer_capacity)
 		return NULL;
-	return &shard->peers[slot];
+	return (struct tr_runtime_peer *)((uint8_t *)shard->peers +
+	                                  (size_t)slot * shard->peer_stride);
 }
 
 void tr_runtime_shard_peer_note_added(struct tr_runtime_shard *shard)

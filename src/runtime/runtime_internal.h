@@ -1,6 +1,7 @@
 #ifndef TR_RUNTIME_INTERNAL_H
 #define TR_RUNTIME_INTERNAL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "../execution/reactor.h"
@@ -12,8 +13,6 @@ struct tr_runtime;
 struct tr_runtime_shard;
 struct tr_rpc_executor_group;
 struct tr_channel;
-struct tr_rpc_endpoint;
-struct tr_rpc_record_endpoint;
 
 struct tr_runtime_peer {
 	int used;
@@ -23,10 +22,6 @@ struct tr_runtime_peer {
 	void *finalize_ctx;
 	struct tr_conn_handle connection;
 	struct tr_channel *channel;
-	struct tr_rpc_endpoint *rpc;
-	/* 显式 V2 Server 独占此分支；回滚关闭失败仍保留精确连接供重试。 */
-	struct tr_rpc_record_endpoint *record_rpc;
-	int record_closing;
 };
 
 struct tr_runtime_peer_stats {
@@ -51,6 +46,11 @@ struct tr_runtime_rpc_executor_config {
 struct tr_runtime_shard_config {
 	struct tr_reactor_config reactor;
 	uint32_t peer_capacity;
+	/* 0 使用通用 tr_runtime_peer 的大小；非零支持调用方私有扩展。
+	 * 单槽位必须从 struct tr_runtime_peer 开始并满足其对齐。
+	 * Runtime 只分配和回收原始存储，不解释额外字段。
+	 */
+	size_t peer_stride;
 
 	/* 内部第七阶段分片内存预算。在所有主要分片本地使用方参与
 	 * 此能力之前，0 表示仅记账、不设上限。
