@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "tr/server.h"
 #include "tr/status.h"
@@ -316,7 +317,9 @@ static int run_server(const struct options *o)
 		      &config, &tuning, &server), "server create");
 	for (id = 1; id <= 3; ++id) {
 		struct tr_rpc_method_desc m = method(id, o->bulk_bytes);
-		check(tr_server_register_method(server, &m, echo, &delays[id - 1U]), "server method");
+		check(tr_server_legacy_register_method(server, &m, echo,
+		                                       &delays[id - 1U]),
+		      "server method");
 	}
 	check(tr_server_listen(server, o->host, (uint16_t)o->port, &port), "listen");
 	check(tr_server_start(server), "server start");
@@ -566,8 +569,9 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 			s->start_ns = now_ns();
 			/* Callback may run before submit returns. Never hold its mutex here. */
 			check(pthread_mutex_unlock(&run->lock), "submit unlock");
-			ret = tr_client_unary_call_ex(run->client, SERVICE, s->method,
-				&request, &call_options, result, slot, &handle);
+			ret = tr_client_legacy_unary_call_ex(
+			        run->client, SERVICE, s->method, &request,
+			        &call_options, result, slot, &handle);
 			check(pthread_mutex_lock(&run->lock), "submit lock");
 			s->submit_status = ret;
 			if (ret != TR_OK) {
@@ -814,8 +818,9 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 		/* 近似 API 入口，不是网络发送或服务端到达时间。 */
 		s->submit_ns = now_ns();
-		ret = tr_client_unary_call_ex(run->client, SERVICE, METHOD_SLOW,
-			&request, &call_options, result, slot, &handle);
+		ret = tr_client_legacy_unary_call_ex(
+		        run->client, SERVICE, METHOD_SLOW, &request,
+		        &call_options, result, slot, &handle);
 
 		check(pthread_mutex_lock(&run->lock), "open submit lock");
 		s->submit_status = ret;
@@ -907,7 +912,8 @@ static int run_client(const struct options *o)
 	check(tr_client_wait_ready(run.client, 5000U), "client ready");
 	for (i = 1U; i <= 3U; ++i) {
 		struct tr_rpc_method_desc m = method(i, o->bulk_bytes);
-		check(tr_client_register_method(run.client, &m), "client method");
+		check(tr_client_legacy_register_method(run.client, &m),
+		      "client method");
 	}
 	if (o->warmup) {
 		uint32_t measure_window = run.window;

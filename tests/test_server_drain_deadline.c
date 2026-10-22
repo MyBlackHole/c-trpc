@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/server.h"
 #include "tr/status.h"
 
@@ -216,7 +217,7 @@ static void run_case(enum drain_case test_case, uint32_t timeout_ms,
 	int ret;
 
 	small_server_config(&config);
-	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(tr_server_legacy_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);

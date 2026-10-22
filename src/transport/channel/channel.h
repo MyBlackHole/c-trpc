@@ -12,9 +12,11 @@ extern "C" {
 
 struct tr_channel;
 
-#define TR_CHANNEL_PROTOCOL_VERSION 1U
+#define TR_CHANNEL_PROTOCOL_VERSION 2U
 #define TR_CHANNEL_LANE_MASK_CONTROL (1U << 0)
 #define TR_CHANNEL_LANE_MASK_BULK (1U << 1)
+/* 只有显式协商此能力的专用 Channel 才发送或接收单流 RESET。 */
+#define TR_CHANNEL_FEATURE_STREAM_RESET UINT64_C(1)
 
 struct tr_channel_capabilities {
 	uint16_t protocol_version;
@@ -84,7 +86,9 @@ enum tr_stream_event {
 	TR_STREAM_EVENT_REMOTE_CLOSED = 2,
 	TR_STREAM_EVENT_CLOSED = 3,
 	TR_STREAM_EVENT_ERROR = 4,
-	TR_STREAM_EVENT_WRITABLE = 5
+	TR_STREAM_EVENT_WRITABLE = 5,
+	/* 双向停止已选定；任务退出与网络静默分别由上层及 CLOSED 证明。 */
+	TR_STREAM_EVENT_RESET = 6
 };
 
 enum tr_stream_data_disposition {
@@ -119,10 +123,14 @@ struct tr_channel_config {
 	uint32_t max_message_bytes;
 	struct tr_buffer_pool *reassembly_pool;
 
-	/* Channel 协议能力；version 为 0 时默认只支持 V1。 */
+	/* Channel HELLO 协议只支持版本 2；0 使用此默认值。
+	 * 与帧 envelope 版本及 RPC Record 版本分别管理，不降级为旧 GOAWAY。 */
 	uint16_t min_protocol_version;
 	uint16_t max_protocol_version;
 	uint64_t feature_bits;
+	/* 必需能力必须同时被本地声明和对端协商；缺失时握手失败，
+	 * 不能先发布 READY 再在终止路径静默降级。0 保持旧 Channel 配置。 */
+	uint64_t required_feature_bits;
 };
 
 typedef enum tr_stream_data_disposition (*tr_stream_data_cb)(
@@ -145,7 +153,12 @@ typedef void (*tr_channel_event_cb)(struct tr_channel *channel,
  * 并确保不存在并发回调或等待者；tr_channel_destroy() 内部会关闭等待者
  * 准入、清理处理函数并等待回调静止。
  *
- * 只有返回 TR_OK 才表示 Channel 存储已释放。若仍存在排空等待者或拆除
+ * 创建成功时 *out 为完整 Channel。创建失败时通常为 NULL；若构造
+ * 回滚无法确认已经解绑 Reactor 回调，则错误返回时 *out 仍可非 NULL。
+ * 这时调用方独占该部分构造对象，只能执行 tr_channel_destroy()；
+ * 销毁失败必须保留指针重试，不得提前释放 Reactor 或 callback_arg。
+ *
+ * 只有 destroy 返回 TR_OK 才表示 Channel 存储已释放。若仍存在等待者或拆除
  * 屏障无法收敛，返回错误并保持对象存活，调用方不得继续释放所属 Runtime。
  */
 int tr_channel_create(const struct tr_channel_config *config,
@@ -223,24 +236,31 @@ int tr_channel_wait_ready(
 int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 				struct tr_channel_capabilities *out);
 
-/* 优雅关闭：建立单调的流准入屏障，并在就绪通道
- * 上发送 GOAWAY。屏障之后禁止新的本地流；对端在收到 GOAWAY 前已经
- * 发出、但在屏障之后才到达的 STREAM_OPEN 也会被 STREAM_CLOSE 拒绝，
- * 不再增加本地活跃流。已有流继续运行，直到自然关闭或取消。
+/* 优雅关闭：建立单调的流准入屏障，并在各就绪物理连接上发送 GOAWAY，
+ * 固定该连接最后一个已接纳且已接受初始 WINDOW_UPDATE 的对端 stream_id。
+ * 0 表示尚无准入；该边界不是 RPC Method/任务已执行的证明。屏障后禁止
+ * 新的本地流，迟到的对端 OPEN 仅验证后丢弃；对端按边界直接退役未获
+ * 准入的 OPENING 流，只通知一次 ERROR、TR_ERR_CLOSED，不回发 CLOSE。
+ * 已有流继续运行，直到自然关闭或取消。
  *
  * 因此活跃流在 begin_drain() 成功建立屏障后只能保持或减少，
  * DRAINED 不会因为延迟到达的对端 OPEN 再退回 DRAINING。
  *
  * 本操作幂等。GOAWAY 使用 Connection 内嵌的终局生命周期发送槽位，
  * 不与普通控制发送池或命令环形队列容量竞争。
+ * 接收 GOAWAY 会在同一物理连接上对称发布本方向的冻结边界；split 模式
+ * 不因此关闭另一物理连接的准入。显式 begin_drain 才排空整个 Channel。
  */
 int tr_channel_begin_drain(struct tr_channel *channel);
 
-/* 同步等待活跃流归零。等待由 Channel 状态条件变量驱动，不周期
- * 轮询活跃流；timeout_ms == 0 保持非阻塞检查语义。
+/* 同步等待本地流归零、存活物理连接完成双向 GOAWAY，且 Reactor 确认
+ * 此前命令及 TX/终止预留全部释放。等待者由条件变量驱动；既有维护
+ * 定时器负责外部最后一次关闭之后的 owner 进展。0ms 为非阻塞检查。
  *
  * 本函数是纯等待操作，不发送 GOAWAY，也不推进 Channel 协议状态。
  * GOAWAY 准入已在 begin_drain() 的所有者事务中完成。
+ * 不合作的对端保留有界状态，超时返回 AGAIN，不强制释放仍被借用的对象。
+ * 双 GOAWAY 且无流后不再生成 PING/PONG；晚 DATA/CLOSE 仍严格校验。
  *
  * 该进度依赖反应器所有者继续处理接收、发送和关闭或取消回调，因此
  * 所有者上下文调用返回 TR_ERR_STATE。
@@ -251,8 +271,9 @@ int tr_channel_begin_drain(struct tr_channel *channel);
  */
 int tr_channel_wait_drained(struct tr_channel *channel, uint32_t timeout_ms);
 
-/* DRAINED 表示本地流已全部静默。GOAWAY 准入属于 begin_drain()
- * 的终局协议边界，与该状态查询彼此独立。
+/* DRAINED 使用与 wait_drained 相同的流、双 GOAWAY 与本机 TX 谓词。
+ * 发送完成只证明字节交给内核，不证明对端应用已收到响应；RPC worker、
+ * 用户持有载荷及其他上层引用须由所属模块另外等待，不能据此销毁它们。
  */
 int tr_channel_get_state(struct tr_channel *channel,
 			 enum tr_channel_state *out);
@@ -277,6 +298,8 @@ int tr_stream_sendv(struct tr_stream_handle stream,
 		    struct tr_buffer *const *payloads, uint32_t payload_count);
 
 /* 半关闭本地发送方向。 */
+/* OPENING 尚无对端准入证明时返回 AGAIN，不发送 CLOSE，也不接管重试。
+ * 调用方须等待 OPENED 后重试，或由 GOAWAY/连接错误使句柄退役。 */
 int tr_stream_close(struct tr_stream_handle stream);
 
 /* 释放之前通过 TR_STREAM_DATA_TAKE_OWNERSHIP 保留的 payload，

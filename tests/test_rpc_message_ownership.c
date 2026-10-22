@@ -1,3 +1,4 @@
+#include "../src/facade_legacy_internal.h"
 #include "tr/trpc.h"
 #include "../src/execution/buffer.h"
 #include "../src/execution/buffer_internal.h"
@@ -180,7 +181,7 @@ static void test_large_facade_rpc(void)
 	sc.keepalive_interval_ms = 0U;
 	sc.limits.max_frame_payload_bytes = FACADE_FRAME_LIMIT;
 	sc.limits.max_message_bytes = FACADE_MESSAGE_LIMIT;
-	assert(tr_server_create(&sc, &server) == TR_OK);
+	assert(tr_server_legacy_create(&sc, &server) == TR_OK);
 
 	memset(&method, 0, sizeof(method));
 	method.service_id = 901U;
@@ -192,7 +193,8 @@ static void test_large_facade_rpc(void)
 	method.lane = TR_RPC_LANE_CONTROL;
 	method.max_request_bytes = LARGE_PAYLOAD_BYTES;
 	method.max_response_bytes = LARGE_PAYLOAD_BYTES;
-	assert(tr_server_register_method(server, &method, large_handler, &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method, large_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
@@ -202,13 +204,14 @@ static void test_large_facade_rpc(void)
 	cc.connect_timeout_ms = 5000U;
 	cc.limits.max_frame_payload_bytes = FACADE_FRAME_LIMIT;
 	cc.limits.max_message_bytes = FACADE_MESSAGE_LIMIT;
-	assert(tr_client_create(&cc, &client) == TR_OK);
+	assert(tr_client_legacy_create(&cc, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
 
 	request.data = req;
 	request.len = LARGE_PAYLOAD_BYTES;
-	assert(tr_client_unary_call(client, 901U, 1U, &request, large_result, &ctx, &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 901U, 1U, &request,
+	                                   large_result, &ctx, &call) == TR_OK);
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 20;
 	pthread_mutex_lock(&ctx.lock);

@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../execution/worker_context.h"
 #include "tr/rpc.h"
 
 #include "rpc_wire.h"
@@ -20,13 +21,6 @@
 
 _Static_assert(sizeof(uintptr_t) <= sizeof(uint64_t),
 	       "RPC Call capability requires pointers no wider than 64 bits");
-
-static _Thread_local unsigned tr_rpc_worker_depth;
-
-int tr_rpc_in_worker_context(void)
-{
-	return tr_rpc_worker_depth != 0U;
-}
 
 static inline struct tr_rpc_endpoint *
 tr_rpc_call_handle_endpoint(struct tr_rpc_call_handle handle)
@@ -289,7 +283,15 @@ struct tr_rpc_executor_group {
 	uint32_t join_cursor;
 	/* 已接受但尚未完成的任务数；工作线程停机前必须排空。 */
 	uint64_t outstanding_tasks;
+	/* 必须有活跃工作线程轮次才允许接收新任务。stop 后保持
+	 * 关闭，直到下一次 start；与 stopping 同由 group->lock 保护。
+	 */
+	int accepting;
 	int stopping;
+	/* 线程创建与 join 均在 group->lock 外执行，控制操作必须先独占
+	 * 生命周期门禁，禁止另一控制者并发改写线程计数/回收游标。
+	 */
+	int lifecycle_busy;
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_rpc_group_mem, struct tr_rpc_executor_group, free)
@@ -898,8 +900,8 @@ static int tr_rpc_deadline_rearm_locked(struct tr_rpc_endpoint *endpoint)
 	return tr_reactor_timer_arm(endpoint->deadline_timer, earliest);
 }
 
-/* 最终 STATUS 被传输层接受后，STREAM_CLOSE 是在控制发送背压下
- * 仍须履行的协议义务。由现有所有者定时器驱动，
+/* 终局控制帧以及取消后的 STREAM_CLOSE 在控制发送背压下
+ * 仍是必须履行的协议义务。由现有所有者定时器驱动，
  * 而不是由无界工作线程或客户端刷新驱动。
  */
 static int tr_rpc_schedule_final_close_retry_locked(
@@ -931,7 +933,7 @@ static int tr_rpc_schedule_final_close_retry_locked(
 		return TR_OK;
 
 fail:
-	/* STATUS 或一元调用失败已经锁存，调用者无法回滚，也不能依赖后续可写通知
+	/* STATUS、取消或一元调用失败已经锁存，调用者无法回滚，也不能依赖后续可写通知
 	 * 退役流。释放协议锁后同步中止精确通道，通过已有连接错误回调
 	 * 收敛义务。这些回调可能退役 Call；返回错误后不得继续原协议转换。
 	 */
@@ -1943,7 +1945,7 @@ static int tr_rpc_executor_group_task_accept(
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&group->lock);
-	if (group->stopping) {
+	if (!group->accepting || group->stopping) {
 		ret = TR_ERR_CLOSED;
 	} else if (group->outstanding_tasks == UINT64_MAX) {
 		ret = TR_ERR_STATE;
@@ -2015,6 +2017,43 @@ tr_rpc_executor_task_is_admission(const struct tr_rpc_endpoint *endpoint,
 	       task->first_message != 0;
 }
 
+/* 执行器锁下撤销本轮刚追加的尾节点。前一 tail 由同一锁保护，
+ * 因此异常路径不必遍历队列；两条失败路径共享完整的所有权回滚。
+ */
+struct tr_rpc_push_undo {
+	struct tr_rpc_executor *executor;
+	struct tr_rpc_executor_callq *callq;
+	uint32_t index;
+	uint32_t old_tail;
+	int group_accepted;
+};
+
+static void tr_rpc_undo_push_locked(struct tr_rpc_push_undo *undo)
+{
+	struct tr_rpc_executor *executor = undo->executor;
+	struct tr_rpc_executor_callq *callq = undo->callq;
+	struct tr_rpc_executor_node *node = &executor->nodes[undo->index];
+
+#ifndef NDEBUG
+	assert(callq->tail == undo->index);
+	assert(node->next == TR_RPC_EXEC_NONE);
+	assert(callq->queued_count != 0U);
+	assert(executor->queued_count != 0U);
+#endif
+	if (undo->old_tail == TR_RPC_EXEC_NONE)
+		callq->head = TR_RPC_EXEC_NONE;
+	else
+		executor->nodes[undo->old_tail].next = TR_RPC_EXEC_NONE;
+	callq->tail = undo->old_tail;
+	node->enqueued_ns = 0U;
+	node->next = executor->free_head;
+	executor->free_head = undo->index;
+	callq->queued_count--;
+	executor->queued_count--;
+	if (undo->group_accepted)
+		tr_rpc_executor_group_task_done(executor->group);
+}
+
 static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 				const struct tr_rpc_task *task)
 {
@@ -2022,8 +2061,8 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 	struct tr_rpc_executor_callq *callq;
 	struct tr_rpc_executor_node *node;
 	uint32_t node_index;
+	struct tr_rpc_push_undo undo;
 	int admission;
-	int group_task_accepted = 0;
 	int ret = TR_OK;
 
 	if (!task || tr_rpc_call_handle_slot(task->call) >= endpoint->config.max_calls)
@@ -2064,11 +2103,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		callq->queued_count = 0;
 		callq->cancelled = 0;
 	}
+	undo.group_accepted = 0;
 	if (executor->group) {
 		ret = tr_rpc_executor_group_task_accept(executor->group);
 		if (ret != TR_OK)
 			goto out;
-		group_task_accepted = 1;
+		undo.group_accepted = 1;
 	}
 
 	node_index = executor->free_head;
@@ -2080,8 +2120,12 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 			tr_rpc_now_ns() : 0;
 	node->next = TR_RPC_EXEC_NONE;
 
-	if (callq->tail != TR_RPC_EXEC_NONE)
-		executor->nodes[callq->tail].next = node_index;
+	undo.executor = executor;
+	undo.callq = callq;
+	undo.index = node_index;
+	undo.old_tail = callq->tail;
+	if (undo.old_tail != TR_RPC_EXEC_NONE)
+		executor->nodes[undo.old_tail].next = node_index;
 	else
 		callq->head = node_index;
 	callq->tail = node_index;
@@ -2092,28 +2136,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 		ret = tr_rpc_executor_ready_push_locked(executor,
 							tr_rpc_call_handle_slot(task->call));
 		if (ret != TR_OK) {
-			uint32_t cur = callq->head;
-			uint32_t prev = TR_RPC_EXEC_NONE;
-
-			while (cur != TR_RPC_EXEC_NONE && cur != node_index) {
-				prev = cur;
-				cur = executor->nodes[cur].next;
-			}
-			if (cur == node_index) {
-				if (prev != TR_RPC_EXEC_NONE)
-					executor->nodes[prev].next =
-						TR_RPC_EXEC_NONE;
-				else
-					callq->head = TR_RPC_EXEC_NONE;
-				callq->tail = prev;
-			}
-			node->next = executor->free_head;
-			executor->free_head = node_index;
-			if (callq->queued_count != 0)
-				callq->queued_count--;
-			executor->queued_count--;
-			if (group_task_accepted)
-				tr_rpc_executor_group_task_done(executor->group);
+			tr_rpc_undo_push_locked(&undo);
 			goto out;
 		}
 		callq->ready = 1;
@@ -2125,34 +2148,7 @@ static int tr_rpc_executor_push(struct tr_rpc_endpoint *endpoint,
 					callq->ready = 0;
 					tr_rpc_executor_ready_undo_push_locked(
 						executor, tr_rpc_call_handle_slot(task->call));
-					{
-						uint32_t cur = callq->head;
-						uint32_t prev = TR_RPC_EXEC_NONE;
-
-						while (cur != TR_RPC_EXEC_NONE &&
-						       cur != node_index) {
-							prev = cur;
-							cur = executor->nodes[cur].next;
-						}
-						if (cur == node_index) {
-							if (prev != TR_RPC_EXEC_NONE)
-								executor->nodes[prev].next =
-									TR_RPC_EXEC_NONE;
-							else
-								callq->head =
-									TR_RPC_EXEC_NONE;
-							callq->tail = prev;
-						}
-					}
-					node->next = executor->free_head;
-					executor->free_head = node_index;
-					if (callq->queued_count != 0)
-						callq->queued_count--;
-					if (executor->queued_count != 0)
-						executor->queued_count--;
-					if (group_task_accepted)
-						tr_rpc_executor_group_task_done(
-							executor->group);
+					tr_rpc_undo_push_locked(&undo);
 					goto out;
 				}
 				executor->group_enqueued = 1;
@@ -3247,7 +3243,7 @@ static void *tr_rpc_executor_main(void *arg)
 {
 	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
 
-	tr_rpc_worker_depth++;
+	struct tr_worker_context worker = tr_execution_enter_worker();
 	for (;;) {
 		struct tr_rpc_task task;
 		int ret = tr_rpc_executor_take(endpoint, &task, 1);
@@ -3275,7 +3271,7 @@ static void *tr_rpc_executor_main(void *arg)
 		}
 	}
 
-	tr_rpc_worker_depth--;
+	tr_execution_leave_worker(worker);
 	return NULL;
 }
 
@@ -3310,7 +3306,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 	struct tr_rpc_executor_group *group =
 		(struct tr_rpc_executor_group *)arg;
 
-	tr_rpc_worker_depth++;
+	struct tr_worker_context worker = tr_execution_enter_worker();
 	for (;;) {
 		struct tr_rpc_endpoint *endpoint =
 			tr_rpc_executor_group_take(group);
@@ -3340,7 +3336,7 @@ static void *tr_rpc_executor_group_main(void *arg)
 		}
 	}
 
-	tr_rpc_worker_depth--;
+	tr_execution_leave_worker(worker);
 	return NULL;
 }
 
@@ -3556,15 +3552,38 @@ int tr_rpc_executor_group_create(uint32_t endpoint_capacity,
 	return TR_OK;
 }
 
-int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
+/* 生命周期操作与工作队列使用不同的临界区。不能在 group->lock 下 join
+ * 或 pthread_create：工作线程也需要这把锁才能退出/等待。
+ */
+static int tr_rpc_group_claim(struct tr_rpc_executor_group *group)
 {
-	if (!group)
-		return TR_OK;
-	if (tr_rpc_in_worker_context())
-		return TR_ERR_STATE;
+	int ret = TR_OK;
 
 	pthread_mutex_lock(&group->lock);
+	if (group->lifecycle_busy)
+		ret = TR_ERR_STATE;
+	else
+		group->lifecycle_busy = 1;
+	pthread_mutex_unlock(&group->lock);
+	return ret;
+}
+
+static void tr_rpc_group_unclaim(struct tr_rpc_executor_group *group)
+{
+	pthread_mutex_lock(&group->lock);
+	group->lifecycle_busy = 0;
+	pthread_mutex_unlock(&group->lock);
+}
+
+/* 仅由已独占生命周期门禁的 start/stop/destroy 调用。
+ * join 失败必须保留 stopping、started_threads 与 join_cursor，
+ * 让下一次 stop 从尚未回收的精确线程继续。
+ */
+static int tr_rpc_group_stop_owned(struct tr_rpc_executor_group *group)
+{
+	pthread_mutex_lock(&group->lock);
 	if (group->started_threads == 0U) {
+		group->accepting = 0;
 		if (group->ready_head || group->ready_tail ||
 		    group->ready_count != 0U ||
 		    group->outstanding_tasks != 0U) {
@@ -3576,6 +3595,7 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 		pthread_mutex_unlock(&group->lock);
 		return TR_OK;
 	}
+	group->accepting = 0;
 	group->stopping = 1;
 	pthread_cond_broadcast(&group->cond);
 	pthread_mutex_unlock(&group->lock);
@@ -3601,9 +3621,7 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 #endif
 	pthread_mutex_unlock(&group->lock);
 
-	/* 完整回收线程后结束本工作线程轮次。组存储与 pthread_t 数组保留，
-	 * 因而 Runtime 可以在后续 start() 开启一个全新的工作线程轮次。
-	 */
+	/* 工作线程轮次已经完整退出；所有控制者仍被生命周期门禁隔离。 */
 	group->started_threads = 0U;
 	group->join_cursor = 0U;
 	pthread_mutex_lock(&group->lock);
@@ -3612,19 +3630,41 @@ int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
 	return TR_OK;
 }
 
+int tr_rpc_executor_group_stop(struct tr_rpc_executor_group *group)
+{
+	int ret;
+
+	if (!group)
+		return TR_OK;
+	if (tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	ret = tr_rpc_group_claim(group);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_rpc_group_stop_owned(group);
+	tr_rpc_group_unclaim(group);
+	return ret;
+}
+
 int tr_rpc_executor_group_can_start(struct tr_rpc_executor_group *group)
 {
 	int startable;
 
 	if (!group)
 		return TR_OK;
-	if (tr_rpc_in_worker_context())
+	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	pthread_mutex_lock(&group->lock);
-	startable = !group->stopping &&
-		    group->started_threads == 0U &&
-		    group->join_cursor == 0U;
+	/* 线程数量和 join 游标在独占控制期间可于组锁外更新。
+	 * 观察者必须先确认门禁空闲，避免在 busy 时产生无锁并发读。
+	 */
+	startable = !group->lifecycle_busy;
+	if (startable) {
+		startable = !group->stopping;
+		startable &= group->started_threads == 0U;
+		startable &= group->join_cursor == 0U;
+	}
 	pthread_mutex_unlock(&group->lock);
 	return startable ? TR_OK : TR_ERR_STATE;
 }
@@ -3634,16 +3674,21 @@ int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
 	uint32_t i;
 	int cause;
 	int stop_ret;
+	int ret;
 
 	if (!group || !group->threads || group->thread_count == 0U)
 		return TR_ERR_INVALID;
-	if (tr_rpc_in_worker_context())
+	if (tr_execution_in_worker_context())
 		return TR_ERR_STATE;
+	ret = tr_rpc_group_claim(group);
+	if (ret != TR_OK)
+		return ret;
 
 	pthread_mutex_lock(&group->lock);
 	if (group->stopping || group->started_threads != 0U ||
 	    group->join_cursor != 0U) {
 		pthread_mutex_unlock(&group->lock);
+		tr_rpc_group_unclaim(group);
 		return TR_ERR_STATE;
 	}
 	pthread_mutex_unlock(&group->lock);
@@ -3652,14 +3697,21 @@ int tr_rpc_executor_group_start(struct tr_rpc_executor_group *group)
 		if (pthread_create(&group->threads[i], NULL,
 				   tr_rpc_executor_group_main, group) != 0) {
 			cause = TR_ERR_SYS;
-			/* Runtime 已经拥有组，因此回滚屏障可以返回失败且
-			 * 保留所有权。若线程回收失败，生命周期错误优先。
+			/* 启动持有独占门禁，必须使用同一所有者的回滚，
+			 * 而非再调用会拒绝重入的公开 stop()。
 			 */
-			stop_ret = tr_rpc_executor_group_stop(group);
+			stop_ret = tr_rpc_group_stop_owned(group);
+			tr_rpc_group_unclaim(group);
 			return stop_ret != TR_OK ? stop_ret : cause;
 		}
 		group->started_threads++;
 	}
+
+	pthread_mutex_lock(&group->lock);
+	/* 所有线程创建完成后才允许任务被接受。 */
+	group->accepting = 1;
+	pthread_mutex_unlock(&group->lock);
+	tr_rpc_group_unclaim(group);
 	return TR_OK;
 }
 
@@ -3670,10 +3722,20 @@ int tr_rpc_executor_group_destroy_checked(
 
 	if (!group)
 		return TR_OK;
-
-	ret = tr_rpc_executor_group_stop(group);
+	if (tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	ret = tr_rpc_group_claim(group);
 	if (ret != TR_OK)
 		return ret;
+
+	/* 直到组内线程收敛与存储释放完成之前，不允许别的控制操作
+	 * 取得 lifecycle 门禁。调用方仍须保证裸指针的外部所有权。
+	 */
+	ret = tr_rpc_group_stop_owned(group);
+	if (ret != TR_OK) {
+		tr_rpc_group_unclaim(group);
+		return ret;
+	}
 
 	free(group->threads);
 	pthread_cond_destroy(&group->cond);
@@ -3797,7 +3859,8 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 			call->pending_control_is_final_status = 0;
 			call->need_local_close = 1;
 		} else {
-			return ret;
+			return tr_rpc_schedule_final_close_retry_locked(
+			        endpoint, call);
 		}
 	}
 
@@ -3809,7 +3872,7 @@ static int tr_rpc_try_cancel_send_locked(struct tr_rpc_endpoint *endpoint,
 			if (call->admission_rejected && call->remote_closed)
 				call->state = TR_RPC_CALL_TERMINAL;
 			ret = TR_OK;
-		} else if (ret == TR_AGAIN && call->final_status_sent) {
+		} else if (ret == TR_AGAIN) {
 			ret = tr_rpc_schedule_final_close_retry_locked(endpoint, call);
 		}
 	}
@@ -3883,7 +3946,9 @@ static int tr_rpc_cancel_on_owner(void *arg)
 
 	call->need_local_close = 1;
 	(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-	tr_rpc_maybe_free_call_locked(endpoint, call);
+	call = tr_rpc_lookup_call_handle_locked(handle);
+	if (call)
+		tr_rpc_maybe_free_call_locked(endpoint, call);
 	pthread_mutex_unlock(&endpoint->lock);
 
 	return TR_OK;
@@ -3954,9 +4019,31 @@ static uint64_t tr_rpc_deadline_timer_main(void *arg, uint64_t now_ns)
 
 			if (call->state == TR_RPC_CALL_FREE)
 				continue;
-			if (call->is_unary &&
-			    (call->unary_failure_pending || call->need_local_close) &&
-			    (call->pending_tx || call->need_local_close)) {
+			if ((call->cancelled || call->pending_control) &&
+			    (call->pending_control || call->need_local_close)) {
+				struct tr_rpc_call_handle handle =
+				        tr_rpc_make_call_handle(endpoint, i,
+				                                call);
+
+				ret = tr_rpc_try_cancel_send_locked(endpoint,
+				                                    call);
+				call = tr_rpc_lookup_call_handle_locked(handle);
+				if (!call)
+					continue;
+				if (call->executor_overloaded &&
+				    call->local_closed && call->remote_closed &&
+				    call->state != TR_RPC_CALL_TERMINAL) {
+					call->state = TR_RPC_CALL_TERMINAL;
+					(void)tr_rpc_notify_terminal_locked(
+					        endpoint, i, call,
+					        call->final_status);
+				}
+				tr_rpc_maybe_free_call_locked(endpoint, call);
+			} else if (call->is_unary &&
+			           (call->unary_failure_pending ||
+			            call->need_local_close) &&
+			           (call->pending_tx ||
+			            call->need_local_close)) {
 				struct tr_rpc_call_handle handle =
 					tr_rpc_make_call_handle(endpoint, i, call);
 
@@ -4453,6 +4540,7 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 
 	if (wire.type == TR_RPC_WIRE_CANCEL) {
 		int cancel_status = wire.status;
+		struct tr_rpc_call_handle handle;
 
 		if (!call || !call->method || metadata_len != 0 ||
 		    wire.payload_len != 0 ||
@@ -4481,9 +4569,12 @@ tr_rpc_on_data(struct tr_stream_handle stream, uint64_t message_id,
 			(void)tr_rpc_notify_terminal_locked(
 				endpoint, slot, call, cancel_status);
 		}
+		handle = tr_rpc_make_call_handle(endpoint, slot, call);
 		call->need_local_close = 1;
 		(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-		tr_rpc_maybe_free_call_locked(endpoint, call);
+		call = tr_rpc_lookup_call_handle_locked(handle);
+		if (call)
+			tr_rpc_maybe_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
 		return TR_STREAM_DATA_RELEASE;
 	}
@@ -4524,8 +4615,13 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 
 	if (event == TR_STREAM_EVENT_OPENED) {
 		if (call->cancelled || call->state == TR_RPC_CALL_TERMINAL) {
+			struct tr_rpc_call_handle handle =
+			        tr_rpc_make_call_handle(endpoint, slot, call);
+
 			(void)tr_rpc_try_cancel_send_locked(endpoint, call);
-			tr_rpc_maybe_free_call_locked(endpoint, call);
+			call = tr_rpc_lookup_call_handle_locked(handle);
+			if (call)
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
@@ -4553,12 +4649,21 @@ static void tr_rpc_on_stream_event(struct tr_stream_handle stream,
 			(void)ret;
 			return;
 		}
-		if (call->final_status_seen || call->final_status_sent) {
+		if ((call->final_status_seen || call->final_status_sent) &&
+		    !call->cancelled && !call->pending_control) {
 			pthread_mutex_unlock(&endpoint->lock);
 			return;
 		}
 		if (call->cancelled || call->pending_control) {
+			struct tr_rpc_call_handle handle =
+			        tr_rpc_make_call_handle(endpoint, slot, call);
+
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
+			call = tr_rpc_lookup_call_handle_locked(handle);
+			if (!call) {
+				pthread_mutex_unlock(&endpoint->lock);
+				return;
+			}
 			if (call->executor_overloaded && call->local_closed &&
 			    call->remote_closed &&
 			    call->state != TR_RPC_CALL_TERMINAL) {
@@ -4818,9 +4923,15 @@ struct tr_rpc_endpoint_build {
 	int executor_ready;
 };
 
-static int tr_rpc_endpoint_publish_on_owner(void *arg)
+struct tr_rpc_endpoint_publish_request {
+	struct tr_rpc_endpoint *endpoint;
+	int recovery_required;
+};
+
+static int tr_rpc_publish_on_owner(void *arg)
 {
-	struct tr_rpc_endpoint *endpoint = (struct tr_rpc_endpoint *)arg;
+	struct tr_rpc_endpoint_publish_request *request = arg;
+	struct tr_rpc_endpoint *endpoint = request->endpoint;
 	int rollback_ret;
 	int ret;
 
@@ -4842,6 +4953,11 @@ static int tr_rpc_endpoint_publish_on_owner(void *arg)
 		return TR_OK;
 
 	rollback_ret = tr_rpc_deadline_destroy(endpoint);
+	/* 定时器注销失败时仍可引用 Endpoint。构造所有者必须保留
+	 * 本对象，直到显式 destroy 重试成功，不能交给 TR_AUTO 释放。
+	 */
+	if (rollback_ret != TR_OK)
+		request->recovery_required = 1;
 	return rollback_ret != TR_OK ? rollback_ret : ret;
 }
 
@@ -4882,6 +4998,7 @@ int tr_rpc_endpoint_create_with_executor_group(
 	struct tr_rpc_endpoint_build build
 		TR_AUTO(tr_rpc_endpoint_build_cleanup) = { 0 };
 	struct tr_rpc_endpoint *endpoint;
+	struct tr_rpc_endpoint_publish_request req;
 	int ret;
 
 	if (!channel || !config || !out || !config->message_pool ||
@@ -4957,10 +5074,19 @@ int tr_rpc_endpoint_create_with_executor_group(
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_rpc_owner_call(
-		endpoint, tr_rpc_endpoint_publish_on_owner, endpoint);
-	if (ret != TR_OK)
+	req.endpoint = endpoint;
+	req.recovery_required = 0;
+	ret = tr_rpc_owner_call(endpoint, tr_rpc_publish_on_owner, &req);
+	if (ret != TR_OK) {
+		/* 仅异步定时器仍可能持有 Endpoint 时转移部分构造对象。
+		 * 失败本身不能改变普通未发布资源的词法清理契约。
+		 */
+		if (req.recovery_required) {
+			*out = endpoint;
+			build.endpoint = NULL;
+		}
 		return ret;
+	}
 
 	/* 至此 Endpoint 存储、定时器与处理函数已构造完成，所有权先交给调用方。
 	 * 独立工作线程启动发生在所有权转移之后，因此部分启动
@@ -5212,7 +5338,7 @@ int tr_rpc_endpoint_destroy_with_stats(
 	if (!endpoint)
 		return TR_OK;
 
-	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
 		return TR_ERR_STATE;
 
 	/* 每个异步事件源必须在执行器或引用拆除前同步解绑。
@@ -5482,11 +5608,14 @@ static int tr_rpc_unary_call_on_owner(void *arg)
 	}
 	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
 	if (ret != TR_OK) {
-		struct tr_stream_handle stream = call->stream;
+		enum tr_lane lane = (enum tr_lane)method->desc.lane;
 
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
-		(void)tr_stream_close(stream);
+		/* 未确认的 OPEN 无法单向关闭；绑定失败后已没有 Call 承接重试。
+		 */
+		(void)tr_channel_abort_lane_on_owner(
+		        endpoint->channel, lane, ret < 0 ? ret : TR_ERR_STATE);
 		return ret;
 	}
 
@@ -5617,11 +5746,14 @@ static int tr_rpc_call_start_on_owner(void *arg)
 	}
 	ret = tr_rpc_bind_call_stream_locked(endpoint, slot, call->stream);
 	if (ret != TR_OK) {
-		struct tr_stream_handle stream = call->stream;
+		enum tr_lane lane = (enum tr_lane)method->desc.lane;
 
 		tr_rpc_free_call_locked(endpoint, call);
 		pthread_mutex_unlock(&endpoint->lock);
-		(void)tr_stream_close(stream);
+		/* 未确认的 OPEN 无法单向关闭；绑定失败后已没有 Call 承接重试。
+		 */
+		(void)tr_channel_abort_lane_on_owner(
+		        endpoint->channel, lane, ret < 0 ? ret : TR_ERR_STATE);
 		return ret;
 	}
 
@@ -6406,20 +6538,28 @@ static int tr_rpc_endpoint_flush_on_owner(void *arg)
 		if (call->state == TR_RPC_CALL_FREE)
 			continue;
 
-		if (call->is_unary &&
-		    (call->pending_tx || call->need_local_close))
-			ret = tr_rpc_try_unary_send_locked(endpoint, call);
-		else if (!call->is_unary && call->pending_control) {
+		if (call->cancelled ||
+		    (!call->is_unary && call->pending_control)) {
+			struct tr_rpc_call_handle handle =
+			        tr_rpc_make_call_handle(endpoint, i, call);
+
 			ret = tr_rpc_try_cancel_send_locked(endpoint, call);
-			if (call->executor_overloaded && call->local_closed &&
-			    call->remote_closed &&
-			    call->state != TR_RPC_CALL_TERMINAL) {
-				call->state = TR_RPC_CALL_TERMINAL;
-				(void)tr_rpc_notify_terminal_locked(
-					endpoint, i, call, call->final_status);
+			call = tr_rpc_lookup_call_handle_locked(handle);
+			if (call) {
+				if (call->executor_overloaded &&
+				    call->local_closed && call->remote_closed &&
+				    call->state != TR_RPC_CALL_TERMINAL) {
+					call->state = TR_RPC_CALL_TERMINAL;
+					(void)tr_rpc_notify_terminal_locked(
+					        endpoint, i, call,
+					        call->final_status);
+				}
+				tr_rpc_maybe_free_call_locked(endpoint, call);
 			}
-			tr_rpc_maybe_free_call_locked(endpoint, call);
-		} else if (!call->is_unary && call->need_local_close) {
+		} else if (call->is_unary &&
+		           (call->pending_tx || call->need_local_close))
+			ret = tr_rpc_try_unary_send_locked(endpoint, call);
+		else if (!call->is_unary && call->need_local_close) {
 			ret = tr_stream_close(call->stream);
 			if (ret == TR_OK || ret == TR_ERR_CLOSED) {
 				call->need_local_close = 0;

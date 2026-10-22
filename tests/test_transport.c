@@ -1,3 +1,5 @@
+#include "../src/facade_legacy_internal.h"
+#include "../src/execution/worker_context.h"
 #include "../src/execution/buffer.h"
 #include "../src/crc32c.h"
 #include "../src/execution/command_queue.h"
@@ -1854,6 +1856,163 @@ static void test_channel_split_create_tx_exhaustion_rollback(void)
 	assert(close(bulk_fds[1]) == 0);
 }
 
+/* 故意让第一个 HELLO 独占唯一控制发送项。第二个延后创建的
+ * start() 失败后，重复调用不得把尚未发出的 HELLO 误报为成功。
+ */
+struct channel_failed_start_probe {
+	struct tr_conn_handle first_connection;
+	struct tr_conn_handle second_connection;
+	struct tr_channel *first;
+	struct tr_channel *second;
+	int first_ret;
+	int second_ret;
+	int retry_ret;
+};
+
+static int channel_failed_start_on_owner(void *arg)
+{
+	struct channel_failed_start_probe *p = arg;
+	struct tr_channel_config config = {0};
+
+	config.role = TR_CHANNEL_CLIENT;
+	config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	config.max_streams = 4U;
+	config.initial_window_bytes = 4096U;
+	assert(tr_channel_create_deferred(&config, p->first_connection,
+	                                  p->first_connection, NULL, NULL, NULL,
+	                                  NULL, &p->first) == TR_OK);
+	config.role = TR_CHANNEL_SERVER;
+	assert(tr_channel_create_deferred(&config, p->second_connection,
+	                                  p->second_connection, NULL, NULL,
+	                                  NULL, NULL, &p->second) == TR_OK);
+	p->first_ret = tr_channel_start(p->first);
+	p->second_ret = tr_channel_start(p->second);
+	p->retry_ret = tr_channel_start(p->second);
+	return TR_OK;
+}
+
+static void test_channel_failed_hello_start_is_sticky(void)
+{
+	struct tr_reactor_config config = {0};
+	struct tr_reactor *reactor = NULL;
+	struct channel_failed_start_probe probe = {0};
+	int a[2], b[2];
+
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, a) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, b) == 0);
+	config.max_connections = 4U;
+	config.command_capacity = 2U;
+	config.tx_item_capacity = 8U;
+	config.control_tx_item_capacity = 1U;
+	config.rx_buffer_count = 8U;
+	config.rx_buffer_size = 4096U;
+	config.max_payload_len = 4096U;
+	config.rx_budget_bytes = 64U * 1024U;
+	config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, a[0], &probe.first_connection) ==
+	       TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, b[0], &probe.second_connection) ==
+	       TR_OK);
+	assert(tr_reactor_call(reactor, channel_failed_start_on_owner,
+	                       &probe) == TR_OK);
+	assert(probe.first_ret == TR_OK);
+	assert(probe.second_ret == TR_AGAIN);
+	assert(probe.retry_ret == TR_AGAIN);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(probe.first) == TR_OK);
+	assert(tr_channel_destroy(probe.second) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(a[1]) == 0);
+	assert(close(b[1]) == 0);
+}
+
+/* 同一所有者轮次里不会执行 I/O 分派。两个独立 Channel 若共用
+ * 唯一普通 CONTROL 发送项，第二个 HELLO 应当明确返回容量背压。
+ * 这验证构造失败的真实路径，与下面的 GOAWAY 专用保留不变量区分。
+ */
+struct channel_hello_contention_probe {
+	struct tr_conn_handle first_connection;
+	struct tr_conn_handle second_connection;
+	struct tr_channel *first;
+	struct tr_channel *second;
+	int first_ret;
+	int second_ret;
+	uint32_t pool_in_use_after_first;
+};
+
+static int channel_two_hello_on_owner(void *arg)
+{
+	struct channel_hello_contention_probe *probe = arg;
+	struct tr_channel_config config = {0};
+	struct tr_reactor_stats stats;
+
+	config.role = TR_CHANNEL_CLIENT;
+	config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	config.max_streams = 4U;
+	config.initial_window_bytes = 4096U;
+	probe->first_ret = tr_channel_create(&config, probe->first_connection,
+	                                     probe->first_connection, NULL,
+	                                     NULL, NULL, NULL, &probe->first);
+	if (probe->first_ret != TR_OK)
+		return TR_OK;
+
+	assert(tr_reactor_get_stats(probe->first_connection.reactor, &stats) ==
+	       TR_OK);
+	probe->pool_in_use_after_first = stats.control_tx_item_pool.current;
+	config.role = TR_CHANNEL_SERVER;
+	probe->second_ret = tr_channel_create(&config, probe->second_connection,
+	                                      probe->second_connection, NULL,
+	                                      NULL, NULL, NULL, &probe->second);
+	return TR_OK;
+}
+
+static void test_channel_hello_contention_is_bounded(void)
+{
+	struct tr_reactor_config config = {0};
+	struct tr_reactor *reactor = NULL;
+	struct tr_reactor_stats stats;
+	struct channel_hello_contention_probe probe = {0};
+	int first_fds[2], second_fds[2];
+
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0, first_fds) ==
+	       0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0,
+	                  second_fds) == 0);
+	config.max_connections = 4U;
+	config.command_capacity = 2U;
+	config.tx_item_capacity = 8U;
+	config.control_tx_item_capacity = 1U;
+	config.rx_buffer_count = 8U;
+	config.rx_buffer_size = 4096U;
+	config.max_payload_len = 4096U;
+	config.rx_budget_bytes = 64U * 1024U;
+	config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&config, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, first_fds[0],
+	                           &probe.first_connection) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, second_fds[0],
+	                           &probe.second_connection) == TR_OK);
+
+	assert(tr_reactor_call(reactor, channel_two_hello_on_owner, &probe) ==
+	       TR_OK);
+	assert(probe.first_ret == TR_OK);
+	assert(probe.pool_in_use_after_first == 1U);
+	assert(probe.second_ret == TR_AGAIN);
+	assert(probe.second == NULL);
+
+	/* 失败时回滚的发送项只能由原命令或停止回收；不可借此泄漏。 */
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
+	assert(stats.control_tx_item_pool.current == 0U);
+	assert(tr_channel_destroy(probe.first) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(close(first_fds[1]) == 0);
+	assert(close(second_fds[1]) == 0);
+}
+
 static void test_channel_deferred_hello_gate(void)
 {
 	struct tr_reactor_config reactor_config;
@@ -2812,14 +2971,14 @@ static void test_channel_graceful_drain(void)
 
 	/* 在对端能观察到 GOAWAY 前，并发对端 OPEN 已被提交。
 	 * 排空中的端点必须拒绝它，不分配本地流；
-	 * 对端为其本地槽位收到普通远端关闭通知。
+	 * 对端按 GOAWAY cutoff 直接退役其 OPENING 槽位。
 	 */
-	wait_channel_counter(&server_ctx, &server_ctx.remote_closed, 1U);
+	wait_channel_counter(&server_ctx, &server_ctx.stream_errors, 1U);
 	assert(tr_channel_active_streams(client_channel) == 1U);
 	pthread_mutex_lock(&client_ctx.lock);
 	assert(client_ctx.opened == 1U);
 	pthread_mutex_unlock(&client_ctx.lock);
-	assert(tr_stream_close(race_probe.raced_stream) == TR_OK);
+	assert(tr_stream_close(race_probe.raced_stream) == TR_ERR_STALE);
 	wait_channel_active_streams(server_channel, 1U);
 
 	memset(&wait_probe, 0, sizeof(wait_probe));
@@ -2888,11 +3047,50 @@ static void test_channel_graceful_drain(void)
 	destroy_channel_test_ctx(&client_ctx);
 }
 
+/* 在给定截止窗口等待 HELLO 真实离开发送队列；这只用于测试编排。 */
+static void wait_channel_hello_tx(struct tr_conn_handle connection)
+{
+	unsigned i;
+	for (i = 0; i < 5000U; ++i) {
+		struct tr_connection_stats stats;
+		assert(tr_reactor_get_connection_stats(connection, &stats) ==
+		       TR_OK);
+		if (stats.tx_frames >= 1U)
+			return;
+		{
+			struct timespec pause = {0, 1000000L};
+			nanosleep(&pause, NULL);
+		}
+	}
+	assert(!"HELLO was not sent");
+}
+
+/* 所有者同步读取资源统计，不扩大客户端的控制发送项容量。 */
+static void wait_channel_control_pool_empty(struct tr_reactor *reactor,
+                                            uint32_t capacity)
+{
+	unsigned i;
+	for (i = 0; i < 5000U; ++i) {
+		struct tr_reactor_stats stats;
+		assert(tr_reactor_get_stats(reactor, &stats) == TR_OK);
+		assert(stats.control_tx_item_pool.capacity == capacity);
+		if (stats.control_tx_item_pool.current == 0U)
+			return;
+		{
+			struct timespec pause = {0, 1000000L};
+			nanosleep(&pause, NULL);
+		}
+	}
+	assert(!"CONTROL TX items were not reclaimed");
+}
+
 static void test_channel_drain_goaway_backpressure(void)
 {
 	struct tr_reactor_config reactor_config;
+	struct tr_reactor_config peer_config;
 	struct tr_channel_config channel_config;
 	struct tr_reactor *reactor = NULL;
+	struct tr_reactor *peer_reactor = NULL;
 	struct tr_channel *client_channel = NULL;
 	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle client_conn;
@@ -2914,8 +3112,8 @@ static void test_channel_drain_goaway_backpressure(void)
 
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4U;
-	/* 两个槽位使设置过程可以接管两个 fd。
-	 * 下方受门禁控制的阶段在排空前确定性填满两个槽位。
+	/* 被测客户端仍仅有两个命令槽位和一个 CONTROL 发送项。
+	 * 对端使用另一 Reactor，使握手阶段不耗尽被测池。
 	 */
 	reactor_config.command_capacity = 2U;
 	reactor_config.tx_item_capacity = 8U;
@@ -2927,9 +3125,16 @@ static void test_channel_drain_goaway_backpressure(void)
 	reactor_config.tx_budget_bytes = 64U * 1024U;
 	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
 	       TR_OK);
+	/* 对端的两项只用于 HELLO 重放、ACK 和发送自己的 HELLO。 */
+	peer_config = reactor_config;
+	peer_config.control_tx_item_capacity = 2U;
+	assert(tr_reactor_create(&peer_config, NULL, NULL, NULL,
+	                         &peer_reactor) == TR_OK);
 	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_start(peer_reactor) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
-	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(peer_reactor, server_fd, &server_conn) ==
+	       TR_OK);
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
@@ -2937,19 +3142,28 @@ static void test_channel_drain_goaway_backpressure(void)
 	channel_config.max_streams = 4U;
 	channel_config.initial_window_bytes = 4096U;
 	channel_config.window_update_threshold_bytes = 1024U;
-	assert(tr_channel_create(
-		       &channel_config, client_conn, client_conn,
-		       channel_test_on_data, channel_test_on_stream_event,
-		       channel_test_on_channel_event, &client_ctx,
-		       &client_channel) == TR_OK);
+	assert(tr_channel_create_deferred(
+	               &channel_config, client_conn, client_conn,
+	               channel_test_on_data, channel_test_on_stream_event,
+	               channel_test_on_channel_event, &client_ctx,
+	               &client_channel) == TR_OK);
 	channel_config.role = TR_CHANNEL_SERVER;
-	assert(tr_channel_create(
-		       &channel_config, server_conn, server_conn,
-		       channel_test_on_data, channel_test_on_stream_event,
-		       channel_test_on_channel_event, &server_ctx,
-		       &server_channel) == TR_OK);
+	assert(tr_channel_create_deferred(
+	               &channel_config, server_conn, server_conn,
+	               channel_test_on_data, channel_test_on_stream_event,
+	               channel_test_on_channel_event, &server_ctx,
+	               &server_channel) == TR_OK);
+	/* 双端处理函数均已发布。先完成客户端 HELLO 并释放唯一项，
+	 * 对端才重放提前到达的 HELLO 并发送自己的 HELLO 和 ACK。
+	 */
+	assert(tr_channel_start(client_channel) == TR_OK);
+	wait_channel_hello_tx(client_conn);
+	wait_channel_control_pool_empty(reactor, 1U);
+	assert(tr_channel_start(server_channel) == TR_OK);
 	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
 	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	wait_channel_control_pool_empty(reactor, 1U);
+	wait_channel_control_pool_empty(peer_reactor, 2U);
 
 	probe.channel = client_channel;
 	assert(pthread_create(
@@ -2995,9 +3209,11 @@ static void test_channel_drain_goaway_backpressure(void)
 	 * 由反应器强制拆除负责剩余流与连接清理。
 	 */
 	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_stop(peer_reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
+	tr_reactor_destroy(peer_reactor);
 	pthread_cond_destroy(&probe.cond);
 	pthread_mutex_destroy(&probe.lock);
 	destroy_channel_test_ctx(&server_ctx);
@@ -4576,10 +4792,11 @@ static void test_channel_version_negotiation_failure(void)
 	struct tr_channel_config channel_config;
 	struct tr_reactor *reactor = NULL;
 	struct tr_channel *client_channel = NULL;
-	struct tr_channel *server_channel = NULL;
 	struct tr_conn_handle client_conn;
 	struct tr_conn_handle server_conn;
 	struct tr_stream_handle stream;
+	struct tr_buffer_pool pool;
+	struct tr_buffer *hello;
 	int client_fd;
 	int server_fd;
 
@@ -4607,28 +4824,41 @@ static void test_channel_version_negotiation_failure(void)
 	channel_config.max_streams = 8;
 	channel_config.min_protocol_version = 1;
 	channel_config.max_protocol_version = 1;
+	/* 本地配置不再启用旧 GOAWAY 语义；版本 1 必须在发布处理函数前拒绝。 */
 	assert(tr_channel_create(&channel_config, client_conn, client_conn,
-				 NULL, NULL, NULL, NULL,
-				 &client_channel) == TR_OK);
+	                         NULL, NULL, NULL, NULL,
+	                         &client_channel) == TR_ERR_INVALID);
+	assert(client_channel == NULL);
 
-	channel_config.role = TR_CHANNEL_SERVER;
-	channel_config.min_protocol_version = 2;
-	channel_config.max_protocol_version = 2;
-	assert(tr_channel_create(&channel_config, server_conn, server_conn,
-				 NULL, NULL, NULL, NULL,
-				 &server_channel) == TR_OK);
+	channel_config.min_protocol_version = TR_CHANNEL_PROTOCOL_VERSION;
+	channel_config.max_protocol_version = TR_CHANNEL_PROTOCOL_VERSION;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+	                         NULL, NULL, NULL, NULL,
+	                         &client_channel) == TR_OK);
+
+	/* 原始对端仍用合法 envelope 1 发送 HELLO 1，协商必须失败。 */
+	assert(tr_buffer_pool_init(&pool, 1, 32) == TR_OK);
+	assert(tr_buffer_acquire(&pool, 32, &hello) == TR_OK);
+	memset(hello->data, 0, 32);
+	tr_put_le16(hello->data, 1);
+	tr_put_le16(hello->data + 2, 1);
+	tr_put_le32(hello->data + 4,
+	            TR_CHANNEL_LANE_MASK_CONTROL | TR_CHANNEL_LANE_MASK_BULK);
+	tr_put_le32(hello->data + 8, 4096);
+	tr_put_le32(hello->data + 12, 4096);
+	hello->len = 32;
+	assert(tr_reactor_send(server_conn, TR_FRAME_HELLO, 0, 0, 0, hello) ==
+	       TR_OK);
 
 	wait_channel_lane_down(client_channel, TR_LANE_CONTROL);
-	wait_channel_lane_down(server_channel, TR_LANE_CONTROL);
 	assert(tr_stream_open(client_channel, TR_LANE_CONTROL, &stream) ==
-	       TR_ERR_CLOSED);
-	assert(tr_stream_open(server_channel, TR_LANE_CONTROL, &stream) ==
 	       TR_ERR_CLOSED);
 
 	assert(tr_reactor_stop(reactor) == TR_OK);
 	assert(tr_channel_destroy(client_channel) == TR_OK);
-	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
+	assert(tr_buffer_pool_free_count(&pool) == 1);
+	tr_buffer_pool_destroy(&pool);
 }
 
 static void test_rpc_connection_replacement_semantics(void)
@@ -7017,9 +7247,9 @@ static void test_client_server_facade_unary(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 facade_test_unary_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        facade_test_unary_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
@@ -7032,17 +7262,18 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.interceptor.fn = facade_test_interceptor;
 	client_config.interceptor.arg = &ctx;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	ctx.client = client;
 	nodelay_before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tcp_nodelay_probe_read() == nodelay_before + 2U);
-	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
 
 	request.data = (const uint8_t *)"facade-ping";
 	request.len = 11U;
-	assert(tr_client_unary_call(client, 77U, 1U, &request,
-				    facade_test_result, &ctx, &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 77U, 1U, &request,
+	                                   facade_test_result, &ctx,
+	                                   &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7070,7 +7301,7 @@ static void test_client_server_facade_unary(void)
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 	ctx.client = NULL;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	ctx.client = client;
 	{
 		unsigned attempt;
@@ -7088,9 +7319,10 @@ static void test_client_server_facade_unary(void)
 		}
 		assert(ret == TR_OK);
 	}
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_unary_call(client, 77U, 1U, &request,
-				    facade_test_result, &ctx, &call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 77U, 1U, &request,
+	                                   facade_test_result, &ctx,
+	                                   &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7214,8 +7446,9 @@ static void test_server_multi_shard_reuseport_facade(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 facade_test_unary_handler, &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        facade_test_unary_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
 	assert(tr_server_start(server) == TR_OK);
@@ -7230,12 +7463,14 @@ static void test_server_multi_shard_reuseport_facade(void)
 	request.len = 11U;
 
 	for (i = 0; i < 4U; ++i) {
-		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
+		assert(tr_client_legacy_create(&client_config, &clients[i]) ==
+		       TR_OK);
 		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
-		assert(tr_client_register_method(clients[i], &method) == TR_OK);
-		assert(tr_client_unary_call(
-			       clients[i], 78U, 1U, &request,
-			       facade_test_result, &ctx, &calls[i]) == TR_OK);
+		assert(tr_client_legacy_register_method(clients[i], &method) ==
+		       TR_OK);
+		assert(tr_client_legacy_unary_call(clients[i], 78U, 1U,
+		                                   &request, facade_test_result,
+		                                   &ctx, &calls[i]) == TR_OK);
 	}
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
@@ -7294,7 +7529,7 @@ static void test_client_server_facade_nodelay_policy(void)
 	server_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
 	server_config.limits.max_frame_payload_bytes = 4096U;
 	server_config.limits.max_message_bytes = 16384U;
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_legacy_create(&server_config, &server) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7304,7 +7539,7 @@ static void test_client_server_facade_nodelay_policy(void)
 	client_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 
 	before = tcp_nodelay_probe_read();
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
@@ -7317,12 +7552,14 @@ static void test_client_server_facade_nodelay_policy(void)
 
 	tr_client_config_init(&client_config);
 	client_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_client_create(&client_config, &client) == TR_ERR_INVALID);
+	assert(tr_client_legacy_create(&client_config, &client) ==
+	       TR_ERR_INVALID);
 	assert(client == NULL);
 
 	tr_server_config_init(&server_config);
 	server_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_server_create(&server_config, &server) == TR_ERR_INVALID);
+	assert(tr_server_legacy_create(&server_config, &server) ==
+	       TR_ERR_INVALID);
 	assert(server == NULL);
 }
 
@@ -7377,7 +7614,7 @@ static int shared_executor_test_handler(struct tr_rpc_call_handle call,
 	static const uint8_t reply[] = "shared-ok";
 	(void)call;
 	(void)request;
-	assert(tr_rpc_in_worker_context());
+	assert(tr_execution_in_worker_context());
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->entered++;
@@ -7404,7 +7641,7 @@ static void shared_executor_test_result(struct tr_rpc_call_handle call,
 	struct shared_executor_test_ctx *ctx =
 		(struct shared_executor_test_ctx *)arg;
 	(void)call;
-	assert(tr_rpc_in_worker_context());
+	assert(tr_execution_in_worker_context());
 	assert(status == TR_RPC_STATUS_OK);
 	assert(response != NULL);
 	assert(response->len == 9U);
@@ -7644,9 +7881,9 @@ static void test_server_shared_rpc_executor(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 shared_executor_test_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        shared_executor_test_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7657,17 +7894,20 @@ static void test_server_shared_rpc_executor(void)
 	client_config.limits.max_message_bytes = 16384U;
 
 	for (i = 0; i < 4U; ++i) {
-		assert(tr_client_create(&client_config, &clients[i]) == TR_OK);
+		assert(tr_client_legacy_create(&client_config, &clients[i]) ==
+		       TR_OK);
 		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
-		assert(tr_client_register_method(clients[i], &method) == TR_OK);
+		assert(tr_client_legacy_register_method(clients[i], &method) ==
+		       TR_OK);
 	}
 
 	request.data = (const uint8_t *)"work";
 	request.len = 4U;
 	for (i = 0; i < 4U; ++i)
-		assert(tr_client_unary_call(clients[i], 88U, 1U, &request,
-					    shared_executor_test_result, &ctx,
-					    &calls[i]) == TR_OK);
+		assert(tr_client_legacy_unary_call(clients[i], 88U, 1U,
+		                                   &request,
+		                                   shared_executor_test_result,
+		                                   &ctx, &calls[i]) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7793,8 +8033,8 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 
 	memset(&handlers, 0, sizeof(handlers));
 	handlers.on_message = retained_rpc_server_message;
-	assert(tr_server_register_stream_method(
-		       server, &method, &handlers, &ctx) == TR_OK);
+	assert(tr_server_legacy_register_stream_method(
+	               server, &method, &handlers, &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7803,10 +8043,11 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	client_config.connect_timeout_ms = 500U;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_call_start(client, 90U, 1U, NULL, &call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_call_start(client, 90U, 1U, NULL, &call) ==
+	       TR_OK);
 
 	bytes.data = (const uint8_t *)"retain";
 	bytes.len = 6U;
@@ -7910,9 +8151,9 @@ static void test_server_reaping_budget_defers_detach(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 shared_executor_test_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        shared_executor_test_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 
@@ -7922,13 +8163,13 @@ static void test_server_reaping_budget_defers_detach(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 
-	assert(tr_client_create(&client_config, &first) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &first) == TR_OK);
 	assert(tr_client_connect(first, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(first, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(first, &method) == TR_OK);
 	request.data = (const uint8_t *)"hold";
 	request.len = 4U;
-	assert(tr_client_unary_call(
-		       first, 91U, 1U, &request, NULL, NULL, &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(first, 91U, 1U, &request, NULL, NULL,
+	                                   &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 10;
@@ -7958,9 +8199,9 @@ static void test_server_reaping_budget_defers_detach(void)
 	/* 首个 Endpoint 退役期间仍允许槽位复用。第二个断开的对端
 	 * 必须保持发布，因为分片已用掉唯一退役对象槽位。
 	 */
-	assert(tr_client_create(&client_config, &second) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &second) == TR_OK);
 	assert(tr_client_connect(second, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(second, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(second, &method) == TR_OK);
 	assert(tr_client_destroy(second) == TR_OK);
 	second = NULL;
 
@@ -8046,9 +8287,9 @@ static void test_server_peer_refcount_drain(void)
 	method.lane = TR_LANE_CONTROL;
 	method.max_request_bytes = 1024U;
 	method.max_response_bytes = 1024U;
-	assert(tr_server_register_method(server, &method,
-					 shared_executor_test_handler,
-					 &ctx) == TR_OK);
+	assert(tr_server_legacy_register_method(server, &method,
+	                                        shared_executor_test_handler,
+	                                        &ctx) == TR_OK);
 	assert(tr_server_listen(server, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
 	stats_poll.server = server;
@@ -8064,14 +8305,14 @@ static void test_server_peer_refcount_drain(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
 
 	request.data = (const uint8_t *)"hold";
 	request.len = 4U;
-	assert(tr_client_unary_call(client, 89U, 1U, &request, NULL, NULL,
-				    &call) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 89U, 1U, &request, NULL,
+	                                   NULL, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -8089,7 +8330,7 @@ static void test_server_peer_refcount_drain(void)
 	assert(tr_client_destroy(client) == TR_OK);
 	client = NULL;
 
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
 	for (attempt = 0; attempt < 100U; ++attempt) {
 		ret = tr_client_connect(client, "127.0.0.1", port);
 		if (ret == TR_OK)
@@ -8103,10 +8344,10 @@ static void test_server_peer_refcount_drain(void)
 		}
 	}
 	assert(ret == TR_OK);
-	assert(tr_client_register_method(client, &method) == TR_OK);
-	assert(tr_client_unary_call(client, 89U, 1U, &request,
-				    shared_executor_test_result, &ctx,
-				    &call) == TR_OK);
+	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_client_legacy_unary_call(client, 89U, 1U, &request,
+	                                   shared_executor_test_result, &ctx,
+	                                   &call) == TR_OK);
 
 	/* 唯一共享工作线程仍被已退役对端任务占据。 */
 	{
@@ -8370,6 +8611,8 @@ int main(void)
 	test_rpc_destroy_fails_closed_while_reactor_stopping();
 	test_reactor_rx_pool_backpressure();
 	test_channel_split_create_tx_exhaustion_rollback();
+	test_channel_failed_hello_start_is_sticky();
+	test_channel_hello_contention_is_bounded();
 	test_channel_deferred_hello_gate();
 	test_channel_stream_id_index_collision_delete();
 	test_channel_stream_slot_reuse();

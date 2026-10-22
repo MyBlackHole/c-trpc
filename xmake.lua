@@ -1,8 +1,12 @@
 set_project("c-trpc")
+set_version("2.0.0-dev.0")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
 set_defaultmode("release")
+
+-- 消息后端使用静态接口：固定版本、源码校验和静态链接，禁止系统库替代。
+add_requires("zstd 1.5.7", {system = false, configs = {shared = false, cmake = false}})
 
 option("crc32c_portable")
     set_default(false)
@@ -62,8 +66,13 @@ end
 
 target("trcore")
     set_kind("static")
+    -- Runtime 已引用消息后端；安装后的 .a 必须包含静态包，不能依赖
+    -- 消费方的 Xmake 环境或系统 libzstd。3.1.1 原生支持合并 package。
+    set_policy("build.merge_archive", true)
+    add_packages("zstd", {public = true})
     -- 源码与已安装 SDK 同时携带许可和适用署名。
     add_installfiles("LICENSE", "NOTICE", "docs/licensing.md", {prefixdir = "share/doc/c-trpc"})
+    add_installfiles("third_party/zstd/LICENSE", {prefixdir = "share/doc/c-trpc/third_party/zstd"})
     add_includedirs("include", {public = true})
     -- Stable SDK compatibility boundary. Runtime/Transport engine headers
     -- stay repository-internal; internal tests include them from the source tree.
@@ -75,14 +84,20 @@ target("trcore")
         "include/(tr/server.h)",
         "include/(tr/transport.h)",
         "include/(tr/rpc.h)",
+        "include/(tr/rpc_v2.h)",
         "include/(tr/rpc_codec.h)")
     add_files(
         "src/status.c",
         "src/crc32c.c",
+        "src/message/message.c",
+        "src/message/transform.c",
+        "src/message/zstd.c",
         "src/execution/buffer.c",
         "src/transport/protocol/wire.c",
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",
+        "src/execution/task_executor.c",
+        "src/execution/worker_context.c",
         "src/execution/command_queue.c",
         "src/execution/completion_queue.c",
         "src/execution/timer_queue.c",
@@ -91,6 +106,7 @@ target("trcore")
         "src/io/connector.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
+        "src/runtime/message_service.c",
         "src/group/pipeline.c",
         "src/group/pipeline_route.c",
         "src/group/pipeline_registry.c",
@@ -102,6 +118,14 @@ target("trcore")
         "src/transport/channel/channel.c",
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_wire.c",
+        "src/rpc/rpc_record.c",
+        "src/rpc/rpc_record_stream.c",
+        "src/rpc/rpc_record_router.c",
+        "src/rpc/rpc_record_dispatch.c",
+        "src/rpc/rpc_record_producer.c",
+        "src/rpc/rpc_record_endpoint.c",
+        "src/rpc/rpc_record_client.c",
+        "src/rpc/rpc_v2.c",
         "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
@@ -165,8 +189,12 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_reactor_abort_on_owner",
                         "-Wl,--wrap=tr_pipeline_ingress_attach_data_route_on_owner", {force = true})
         elseif name == "test_rpc_terminal_backpressure" then
-            -- 仅本测试拦截 RPC retry 的完成项提交，注入一次失败。
-            add_ldflags("-Wl,--wrap=tr_reactor_complete", {force = true})
+            -- 重试完成项与客户端 Endpoint 最后一份所有者引用销毁屏障。
+            add_ldflags("-Wl,--wrap=tr_reactor_complete",
+                        "-Wl,--wrap=tr_channel_set_handler", {force = true})
+        elseif name == "test_rpc_stream_backpressure" then
+            -- 仅测试目标观察 handler 静默屏障，验证留存消息延迟销毁。
+            add_ldflags("-Wl,--wrap=tr_channel_set_handler", {force = true})
         elseif name == "test_rpc_deadline_fault" then
             -- 仅测试目标注入 RPC 单调时钟失败和 timer arm 失败。
             add_ldflags("-Wl,--wrap=clock_gettime",
@@ -174,9 +202,12 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_reactor_timer_deadline" then
             add_ldflags("-Wl,--wrap=clock_gettime", "-Wl,--wrap=epoll_wait", {force = true})
         elseif name == "test_rpc_deadline_failure" then
+            -- 定向故障：构造期 callback 发布与 timer 注销复合失败。
             add_ldflags("-Wl,--wrap=clock_gettime",
                         "-Wl,--wrap=tr_reactor_timer_register",
                         "-Wl,--wrap=tr_reactor_timer_arm",
+                        "-Wl,--wrap=tr_reactor_timer_unregister",
+                        "-Wl,--wrap=tr_channel_set_handler",
                         "-Wl,--wrap=tr_rpc_wire_decode_ex", {force = true})
         elseif name == "test_connector_deadline" then
             add_ldflags("-Wl,--wrap=tr_tcp_connect_ipv4",
@@ -234,6 +265,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
+        elseif name == "test_runtime" then
+            -- 预算归还失败后重试 Runtime peer 存储回收，仅在本测试链接注入。
+            add_ldflags("-Wl,--wrap=tr_reactor_destroy", {force = true})
         elseif name == "test_pipeline_listener" then
             -- epoll/source 回滚和 MONOTONIC condwait 的测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
@@ -297,11 +331,13 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",
                         "-Wl,--wrap=tr_reactor_timer_unregister", {force = true})
         elseif name == "test_channel_create_transaction" then
-            -- 注入构造阶段 publication 失败，验证同一 owner turn 内收敛。
+            -- 注入构造回滚的 handler/close 复合故障与握手静默屏障失败。
             add_ldflags("-Wl,--wrap=tr_reactor_set_handler",
+                        "-Wl,--wrap=tr_reactor_close_on_owner",
                         "-Wl,--wrap=tr_reactor_timer_register",
                         "-Wl,--wrap=tr_reactor_timer_unregister",
-                        "-Wl,--wrap=tr_reactor_send", {force = true})
+                        "-Wl,--wrap=tr_reactor_send",
+                        "-Wl,--wrap=tr_reactor_quiesce", {force = true})
         elseif name == "test_channel_hello_ownership" then
             -- 精确观察 HELLO/ACK 缓冲释放，仅此测试注入发送拒绝。
             add_ldflags("-Wl,--wrap=tr_reactor_send",
@@ -327,8 +363,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=tr_reactor_create",
                         "-Wl,--wrap=tr_reactor_destroy",
                         "-Wl,--wrap=tr_connector_create",
-                        "-Wl,--wrap=tr_buffer_pool_destroy",
-                        {force = true})
+                        "-Wl,--wrap=tr_buffer_pool_destroy", {force = true})
         elseif name == "test_server_destroy_retry" then
             -- 注入 RPC/Channel terminal destroy 失败，验证 Server ownership 可重试。
             add_ldflags("-Wl,--wrap=tr_rpc_endpoint_destroy",
@@ -339,8 +374,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_runtime_create",
                         "-Wl,--wrap=tr_runtime_destroy", {force = true})
         elseif name == "test_rpc_executor_group_drain" then
-            -- 通过同步门闩固定服务端停机时正在运行、已排队和多个就绪调用的交错顺序。
-            add_ldflags("-Wl,--wrap=pthread_join", {force = true})
+            -- 仅测试二进制冻结线程创建/回收，复现启动与停止的控制竞争。
+            add_ldflags("-Wl,--wrap=pthread_create",
+                        "-Wl,--wrap=pthread_join", {force = true})
         end
         if name == "test_socket_atomic_flags" or name == "test_server_stats_retiring" then
             add_includedirs("src")
@@ -351,6 +387,31 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         add_tests("default", {run_timeout = 120000, realtime_output = true})
     target_end()
 end
+
+-- 使用生产编译对象，但不链接 trcore，避免其他模块补齐隐藏依赖。
+-- 不把相同生产源再次注册到测试目标，保持编译数据库中生产条目唯一。
+target("test_message")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=realloc", {force = true})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/message/message.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "test_message requires exactly one production message object")
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
 
 -- Opt-in microbenchmark; never a CI timing gate or a default build target.
 target("bench_crc32c")
@@ -366,4 +427,469 @@ target("bench_rpc")
     set_default(false)
     add_files("bench/bench_rpc.c")
     add_deps("trcore")
+target_end()
+
+-- 同一生产对象仅注册一次；变换测试不借完整 trcore 补齐跨模块依赖。
+target("test_message_transform")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_transform.c")
+    add_includedirs("include")
+    add_packages("zstd")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=ZSTD_compressStream2",
+                "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+    on_config(function (target)
+        local expected = {
+            [path.absolute("src/message/message.c")] = 0,
+            [path.absolute("src/message/transform.c")] = 0,
+            [path.absolute("src/message/zstd.c")] = 0
+        }
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                local key = path.absolute(source)
+                if expected[key] ~= nil then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    expected[key] = expected[key] + 1
+                end
+            end
+        end
+        for source, count in pairs(expected) do
+            assert(count == 1, "生产消息对象必须唯一: " .. source)
+        end
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 独立验证执行底座及 Message 组合，只复用真实生产对象，不链接整个库。
+for _, name in ipairs({"test_task_executor", "test_task_message"}) do
+    target(name)
+        set_kind("binary")
+        set_default(false)
+        add_files("tests/" .. name .. ".c")
+        add_includedirs("include")
+        add_deps("trcore", {inherit = false})
+        if name == "test_task_executor" then
+            add_ldflags("-Wl,--wrap=calloc",
+                        "-Wl,--wrap=pthread_mutex_init",
+                        "-Wl,--wrap=pthread_cond_init",
+                        "-Wl,--wrap=pthread_create",
+                        "-Wl,--wrap=pthread_join",
+                        "-Wl,--wrap=pthread_cond_destroy",
+                        "-Wl,--wrap=pthread_mutex_destroy", {force = true})
+        else
+            add_packages("zstd")
+        end
+        on_config(function (target)
+            local expected = {
+                [path.absolute("src/execution/task_executor.c")] = 0,
+                [path.absolute("src/execution/worker_context.c")] = 0
+            }
+            if target:name() == "test_task_message" then
+                expected[path.absolute("src/message/message.c")] = 0
+                expected[path.absolute("src/message/transform.c")] = 0
+                expected[path.absolute("src/message/zstd.c")] = 0
+            end
+            for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+                for index, source in ipairs(batch.sourcefiles) do
+                    local key = path.absolute(source)
+                    if expected[key] ~= nil then
+                        table.insert(target:objectfiles(), batch.objectfiles[index])
+                        expected[key] = expected[key] + 1
+                    end
+                end
+            end
+            for source, count in pairs(expected) do
+                assert(count == 1, "生产测试对象必须唯一: " .. source)
+            end
+        end)
+        add_tests("default", {run_timeout = 120000, realtime_output = true})
+    target_end()
+end
+
+-- 真实 Reactor 集成，不把事件循环替身作为生产接入证据。
+target("test_message_service")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_service.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=pthread_create",
+                "-Wl,--wrap=eventfd", "-Wl,--wrap=read", "-Wl,--wrap=write",
+                "-Wl,--wrap=close", "-Wl,--wrap=tr_task_executor_submit",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=tr_reactor_aux_event_register",
+                "-Wl,--wrap=tr_reactor_aux_event_unregister",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_arm",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=ZSTD_compressStream2",
+                "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- Runtime 正常/致命退出后的真实消息回收，不使用替身。
+target("test_runtime_message_recovery")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_runtime_message_recovery.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=epoll_wait", "-Wl,--wrap=write",
+                "-Wl,--wrap=tr_message_service_create_on_owner",
+                "-Wl,--wrap=tr_reactor_destroy",
+                "-Wl,--wrap=pthread_cond_destroy",
+                "-Wl,--wrap=pthread_mutex_destroy",
+                "-Wl,--wrap=pthread_cond_broadcast",
+                "-Wl,--wrap=pthread_cond_signal",
+                "-Wl,--wrap=pthread_cond_wait",
+                "-Wl,--wrap=pthread_join",
+                "-Wl,--wrap=pthread_create", "-Wl,--wrap=close",
+                "-Wl,--wrap=tr_reactor_aux_event_register",
+                "-Wl,--wrap=tr_reactor_aux_event_unregister",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=ZSTD_compressStream2", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 分片消息操作及执行域边界，使用真实 Runtime/Reactor/任务执行器。
+target("test_runtime_message_api")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_runtime_message_api.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_reactor_call",
+                "-Wl,--wrap=ZSTD_compressStream2", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 新调用记录只链接真实记录/消息对象，防止整库补齐意外依赖。
+target("test_rpc_record")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record.c")
+    add_includedirs("include")
+    add_packages("zstd")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=realloc", {force = true})
+    on_config(function (target)
+        local expected = {
+            [path.absolute("src/rpc/rpc_record.c")] = 0,
+            [path.absolute("src/rpc/rpc_wire.c")] = 0,
+            [path.absolute("src/message/message.c")] = 0,
+            [path.absolute("src/message/transform.c")] = 0,
+            [path.absolute("src/message/zstd.c")] = 0
+        }
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                local key = path.absolute(source)
+                if expected[key] ~= nil then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    expected[key] = expected[key] + 1
+                end
+            end
+        end
+        for source, count in pairs(expected) do
+            assert(count == 1, "调用记录生产对象必须唯一: " .. source)
+        end
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 发送排空必须跨过已接受命令、两种预留和部分写入，通知可重入登记。
+target("test_reactor_tx_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_reactor_tx_drain.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 分层排空：网络静默不能越过业务完成、终局回调和已受理的 OPEN。
+target("test_rpc_record_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_drain.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_rpc_record_endpoint_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_client_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_receive_on_owner",
+                "-Wl,--wrap=tr_task_executor_dispatch",
+                "-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_deadline_init_ms",
+                "-Wl,--wrap=tr_channel_wait_drained_deadline",
+                "-Wl,--wrap=pthread_cond_timedwait", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- GOAWAY 精确边界、交叉 OPEN、共享/拆分物理连接及完整网络排空。
+target("test_channel_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_channel_drain.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 单流 RESET 的真实传输：预留容量、FIFO、短写、迟到帧和错误隔离。
+target("test_stream_reset")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_stream_reset.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- V2 调用记录在真实 TCP/Channel/Stream 上的绑定与背压、增量接收。
+target("test_rpc_record_stream")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_stream.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=tr_stream_sendv", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 方法注册、完整 OPEN 准入与多流派发，使用真实 TCP/Channel/绑定。
+target("test_rpc_record_router")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_router.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=tr_reactor_recovery_acquire", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 有界业务工作派发、拥有型输入/回复及真实 TCP 终局发送。
+target("test_rpc_record_dispatch")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_dispatch.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=clock_gettime", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 宿主契约测试使用明确下层替身，只复用实际宿主对象；不能当成真实 TCP 验收。
+target("test_rpc_record_endpoint_contract")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_endpoint_contract.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=clock_gettime", {force = true})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/rpc/rpc_record_endpoint.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "端点宿主生产对象必须唯一")
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+
+-- V2 宿主真实 TCP：不由测试额外定时驱动派发器，验证自动错误和关闭。
+target("test_rpc_record_endpoint_tcp")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_endpoint_tcp.c")
+    add_deps("trcore", {inherit = false})
+    add_includedirs("include")
+    on_config(function (target)
+        local sources = {
+            "src/crc32c.c",
+            "src/execution/buffer.c",
+            "src/execution/worker_context.c",
+            "src/execution/task_executor.c",
+            "src/execution/command_queue.c",
+            "src/execution/completion_queue.c",
+            "src/execution/timer_queue.c",
+            "src/execution/deadline.c",
+            "src/execution/reactor.c",
+            "src/io/socket.c",
+            "src/io/connector.c",
+            "src/transport/protocol/wire.c",
+            "src/transport/protocol/frame.c",
+            "src/transport/protocol/parser.c",
+            "src/transport/channel/channel.c",
+            "src/rpc/rpc_record.c",
+            "src/rpc/rpc_record_stream.c",
+            "src/rpc/rpc_record_router.c",
+            "src/rpc/rpc_record_dispatch.c",
+            "src/rpc/rpc_record_producer.c",
+            "src/rpc/rpc_record_endpoint.c",
+            "src/rpc/rpc_record_client.c",
+            "src/rpc/rpc_v2.c"
+        }
+        local expected = {}
+        for _, source in ipairs(sources) do
+            expected[path.absolute(source)] = 0
+        end
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                local key = path.absolute(source)
+                if expected[key] ~= nil then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    expected[key] = expected[key] + 1
+                end
+            end
+        end
+        for source, count in pairs(expected) do
+            assert(count == 1, "V2 独立网络验证的生产对象必须唯一: " .. source)
+        end
+    end)
+    after_link(function (target)
+        -- 防止以后重新继承 trcore 后把旧 RPC 实现悄悄带回这个证明目标。
+        local symbols = os.iorunv("nm", {"--defined-only", "--extern-only", target:targetfile()})
+        for symbol in symbols:gmatch("[^\n]+") do
+            local name = symbol:match("([%w_]+)%s*$") or ""
+            assert(not name:match("^tr_rpc_endpoint_") and
+                   not name:match("^tr_rpc_executor_group_") and
+                   not name:match("^tr_rpc_wire_") and
+                   name ~= "tr_rpc_in_worker_context" and
+                   name ~= "tr_rpc_unary_call" and
+                   name ~= "tr_rpc_call_start",
+                   "V2 独立网络验证不允许 V1 定义: " .. name)
+        end
+    end)
+    add_ldflags("-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=tr_stream_close",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_reactor_timer_register",
+                "-Wl,--wrap=tr_reactor_timer_unregister",
+                "-Wl,--wrap=epoll_wait", "-Wl,--wrap=sendmsg", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_server_record")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_server_record.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_reactor_start",
+                "-Wl,--wrap=tr_reactor_timer_arm",
+                "-Wl,--wrap=tr_task_executor_create",
+                "-Wl,--wrap=tr_task_executor_start",
+                "-Wl,--wrap=tr_task_executor_join",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=tr_task_executor_cancel",
+                "-Wl,--wrap=tr_task_executor_dispatch",
+                "-Wl,--wrap=tr_rpc_executor_group_create",
+                "-Wl,--wrap=tr_rpc_record_endpoint_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_endpoint_start_on_owner",
+                "-Wl,--wrap=tr_rpc_record_endpoint_close_on_owner",
+                "-Wl,--wrap=tr_rpc_record_endpoint_reap_stopped",
+                "-Wl,--wrap=tr_buffer_pool_destroy",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join",
+                "-Wl,--wrap=epoll_wait",
+                {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 真实 V2 两端门面：服务端期限、执行器排队、迟到完成及背压回收。
+target("test_server_record_deadline")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_server_record_deadline.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=clock_gettime",
+                "-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_channel_create_deferred",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_rpc_record_dispatch_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_receive_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_pump_on_owner",
+                "-Wl,--wrap=tr_task_executor_submit",
+                "-Wl,--wrap=tr_task_executor_dispatch", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 真实 V2 两端：半关闭后取消、并行流隔离、迟到 FINAL 与安全槽位复用。
+target("test_rpc_record_cancel")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_record_cancel.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_rpc_record_client_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_create_on_owner",
+                "-Wl,--wrap=tr_rpc_record_dispatch_receive_on_owner",
+                "-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_stream_close",
+                "-Wl,--wrap=tr_stream_reset_on_owner", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 使用真实 Client 与 Server 门面，保护 V2 调用受理、背压和停止回收。
+target("test_client_record")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_client_record.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_stream_open",
+                "-Wl,--wrap=tr_rpc_record_stream_create_on_owner",
+                "-Wl,--wrap=tr_channel_create_deferred",
+                "-Wl,--wrap=tr_channel_set_handler",
+                "-Wl,--wrap=tr_channel_destroy",
+                "-Wl,--wrap=tr_buffer_pool_destroy",
+                "-Wl,--wrap=tr_stream_release_payload",
+                "-Wl,--wrap=clock_gettime", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 仅使用公开 SDK 的真实 V2 两端；同一源码还在安装目录外作为 C/C++ 消费端。
+target("test_rpc_v2_sdk")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_sdk.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 公共 V2 Server 的回调身份和故障收尾；注入仅限本测试二进制。
+target("test_rpc_v2_server")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_server.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=tr_rpc_record_stream_receive_on_owner",
+                "-Wl,--wrap=calloc", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 工作域只链接一个执行层对象，验证嵌套恢复和真正的线程局部隔离。
+target("test_worker_context")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_worker_context.c")
+    add_includedirs("include")
+    add_deps("trcore", {inherit = false})
+    on_config(function (target)
+        local count = 0
+        for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
+            for index, source in ipairs(batch.sourcefiles) do
+                if path.absolute(source) == path.absolute("src/execution/worker_context.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    count = count + 1
+                end
+            end
+        end
+        assert(count == 1, "工作域测试必须只复用一个生产工作域对象")
+    end)
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()

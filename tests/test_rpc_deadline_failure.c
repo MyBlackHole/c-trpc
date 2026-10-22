@@ -28,6 +28,12 @@ static _Atomic int inject_response_clock;
 static _Atomic int response_clock_failure;
 static _Atomic uint64_t response_now;
 static _Atomic unsigned response_clock_reads;
+/* 以下注入只作用于 Endpoint 构造发布和精确定时器撤销。 */
+static _Atomic(uintptr_t) publish_fail_channel;
+static _Atomic int fail_publish_once;
+static _Atomic int fail_unregister_once;
+static _Atomic unsigned failed_publishes;
+static _Atomic unsigned failed_unregisters;
 static _Thread_local int next_clock_failure;
 static _Thread_local uint64_t next_clock_now;
 
@@ -57,6 +63,33 @@ int __real_tr_reactor_timer_register(struct tr_reactor *reactor,
 	struct tr_reactor_timer_handle *out);
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
 	uint64_t deadline_ns);
+int __real_tr_reactor_timer_unregister(struct tr_reactor_timer_handle timer);
+typedef struct tr_channel Chan;
+typedef tr_stream_data_cb Dcb;
+typedef tr_stream_event_cb Scb;
+typedef tr_channel_event_cb Ecb;
+
+int __real_tr_channel_set_handler(Chan *, Dcb, Scb, Ecb, void *);
+
+int __wrap_tr_channel_set_handler(Chan *ch, Dcb d, Scb s, Ecb e, void *arg)
+{
+	if (d && (uintptr_t)ch == atomic_load(&publish_fail_channel) &&
+	    atomic_exchange(&fail_publish_once, 0)) {
+		atomic_fetch_add(&failed_publishes, 1U);
+		return TR_ERR_SYS;
+	}
+	return __real_tr_channel_set_handler(ch, d, s, e, arg);
+}
+
+int __wrap_tr_reactor_timer_unregister(struct tr_reactor_timer_handle timer)
+{
+	if (timer.slot == atomic_load(&rpc_timer_slot) &&
+	    atomic_exchange(&fail_unregister_once, 0)) {
+		atomic_fetch_add(&failed_unregisters, 1U);
+		return TR_ERR_SYS;
+	}
+	return __real_tr_reactor_timer_unregister(timer);
+}
 
 int __wrap_clock_gettime(clockid_t clock_id, struct timespec *ts)
 {
@@ -451,9 +484,15 @@ static int arm_many_on_owner(void *arg)
 {
 	struct fixture *f = arg;
 
-	assert(start(f, 0U, 20U) == TR_OK);
-	assert(start(f, 1U, 40U) == TR_OK);
-	assert(start(f, 2U, 60U) == TR_OK);
+	assert(start(f, 0U, 200U) == TR_OK);
+	assert(start(f, 1U, 400U) == TR_OK);
+	assert(start(f, 2U, 600U) == TR_OK);
+	return TR_OK;
+}
+
+static int fail_rearm_on_owner(void *arg)
+{
+	(void)arg;
 	atomic_store(&fail_arm, 1);
 	return TR_OK;
 }
@@ -462,7 +501,7 @@ static int cancel_root_on_owner(void *arg)
 {
 	struct fixture *f = arg;
 
-	assert(arm_many_on_owner(f) == TR_OK);
+	atomic_store(&fail_arm, 1);
 	assert(tr_rpc_call_cancel(f->calls[0]) == TR_OK);
 	return TR_OK;
 }
@@ -473,8 +512,15 @@ static void test_cleanup_and_callback_progress(int cancel_root)
 	unsigned i;
 
 	fixture_init(&f);
+	assert(tr_reactor_call(f.reactor, arm_many_on_owner, &f) == TR_OK);
+	/* 本场景保护已确认调用的堆删除/回调重排故障。先等三个 OPENED，
+	 * 隔离尚未确认 OPEN 取消所需的新关闭重试；后者的调度失败必须
+	 * 中止连接，已由 final_close_retry 的早取消故障场景单独覆盖。 */
+	wait_count(&f, &f.opened, 3U);
 	assert(tr_reactor_call(f.reactor,
-		cancel_root ? cancel_root_on_owner : arm_many_on_owner, &f) == TR_OK);
+	                       cancel_root ? cancel_root_on_owner
+	                                   : fail_rearm_on_owner,
+	                       &f) == TR_OK);
 	wait_count(&f, &f.terminal, 3U);
 	for (i = 0; i < 3U; ++i)
 		assert(f.status[i] == (cancel_root && i == 0U ?
@@ -639,8 +685,207 @@ static void test_half_close_order(int remote_first)
 	fixture_destroy(&f);
 }
 
+/* 测试内的统一创建入口：生产接口与类型保持原样。 */
+typedef struct tr_channel Chan;
+typedef struct tr_rpc_endpoint_config Cfg;
+typedef struct tr_rpc_executor_group Grp;
+typedef struct tr_rpc_endpoint Ep;
+
+static int make_rpc(Chan *ch, const Cfg *cfg, Grp *group, Ep **out)
+{
+	return tr_rpc_endpoint_create_with_executor_group(ch, cfg, group, out);
+}
+
+static void test_create_rollback_retains_timer_owner(int shared)
+{
+	struct fixture f;
+	struct tr_rpc_endpoint_config ec;
+	struct tr_rpc_endpoint *partial = NULL;
+	struct tr_rpc_executor_group *group = NULL;
+	struct tr_rpc_endpoint_stats stats;
+	int ret;
+
+	fixture_init(&f);
+	memset(&ec, 0, sizeof(ec));
+	/* 消除默认 Endpoint 的 handler/timer 发布，保留同一可用 Channel。 */
+	assert(tr_rpc_endpoint_destroy(f.rpc) == TR_OK);
+	f.rpc = NULL;
+	ec.role = TR_RPC_CLIENT;
+	ec.max_methods = 2U;
+	ec.max_calls = 3U;
+	ec.executor_threads = 1U;
+	ec.executor_queue_capacity = 16U;
+	ec.message_pool = &f.pool;
+	if (shared) {
+		ret = tr_rpc_executor_group_create(1U, 3U, 1U, &group);
+		assert(ret == TR_OK);
+		assert(tr_rpc_executor_group_start(group) == TR_OK);
+	}
+
+	atomic_store(&capture_rpc_timer, 1);
+	atomic_store(&publish_fail_channel, (uintptr_t)f.client);
+	atomic_store(&failed_publishes, 0U);
+	atomic_store(&failed_unregisters, 0U);
+
+	/* handler 发布失败，定时器撤销成功：不能交付部分对象。 */
+	atomic_store(&fail_publish_once, 1);
+	ret = make_rpc(f.client, &ec, group, &partial);
+	assert(ret == TR_ERR_SYS);
+	assert(partial == NULL);
+	assert(atomic_load(&failed_publishes) == 1U);
+
+	/* handler 发布失败，timer_unregister 也失败：
+	 * 注册表仍可能触达 Endpoint，词法自动释放会成为 UAF。
+	 */
+	atomic_store(&fail_publish_once, 1);
+	atomic_store(&fail_unregister_once, 1);
+	ret = make_rpc(f.client, &ec, group, &partial);
+	atomic_store(&capture_rpc_timer, 0);
+	assert(ret == TR_ERR_SYS);
+	assert(partial != NULL);
+	assert(atomic_load(&failed_publishes) == 2U);
+	assert(atomic_load(&failed_unregisters) == 1U);
+	assert(tr_rpc_endpoint_get_stats(partial, &stats) == TR_OK);
+
+	/* 第一次显式销毁的 timer 屏障再次失败，调用方仍拥有原指针；
+	 * 第二次撤销成功后才允许最终释放，并能在同一 Channel 重建。
+	 */
+	atomic_store(&fail_unregister_once, 1);
+	assert(tr_rpc_endpoint_destroy(partial) == TR_ERR_SYS);
+	assert(atomic_load(&failed_unregisters) == 2U);
+	assert(tr_rpc_endpoint_get_stats(partial, &stats) == TR_OK);
+	assert(tr_rpc_endpoint_destroy(partial) == TR_OK);
+	partial = NULL;
+	atomic_store(&publish_fail_channel, (uintptr_t)0);
+	ret = make_rpc(f.client, &ec, group, &f.rpc);
+	assert(ret == TR_OK);
+	fixture_destroy(&f);
+	if (group) {
+		assert(tr_rpc_executor_group_stop(group) == TR_OK);
+		assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+	}
+}
+
+/* 创建组并正常启动/停止后，原 Endpoint 可以在停止的时间窗仍然存活。
+ * 不允许它在没有工作线程的情况下获得新的任务强引用和执行器节点。
+ */
+static atomic_uint group_handler_calls;
+
+typedef struct tr_rpc_call_handle GCall;
+typedef struct tr_rpc_bytes GBytes;
+typedef struct tr_rpc_unary_response GResponse;
+
+static int grp_unary(GCall call, const GBytes *req, GResponse *resp, void *arg)
+{
+	static const uint8_t reply[] = "ok";
+
+	(void)call;
+	(void)arg;
+	assert(req && req->len == 4U);
+	assert(memcmp(req->data, "work", 4U) == 0);
+	atomic_fetch_add(&group_handler_calls, 1U);
+	resp->status = TR_RPC_STATUS_OK;
+	resp->message.data = reply;
+	resp->message.len = 2U;
+	return TR_OK;
+}
+
+static void group_unary_call(struct fixture *f, unsigned index)
+{
+	struct tr_rpc_endpoint *ep = f->rpc;
+	struct callback_arg *cb = &f->args[index];
+	struct tr_rpc_call_handle *out = &f->calls[index];
+	struct tr_rpc_bytes req;
+	int ret;
+
+	req.data = (const uint8_t *)"work";
+	req.len = 4U;
+	ret = tr_rpc_unary_call(ep, 1U, 1U, &req, on_unary_result, cb, out);
+	assert(ret == TR_OK);
+	wait_count(f, &f->terminal, index + 1U);
+}
+
+static void test_executor_group_stopped_admission(void)
+{
+	struct fixture f;
+	struct tr_rpc_executor_group *group = NULL;
+	struct tr_rpc_endpoint *server = NULL;
+	struct tr_rpc_endpoint_config config;
+	struct tr_rpc_method_desc method;
+	struct tr_rpc_endpoint_stats stats;
+	uint64_t accepted_before_stop;
+	int ret;
+
+	fixture_init(&f);
+	memset(&config, 0, sizeof(config));
+	memset(&method, 0, sizeof(method));
+	atomic_store(&group_handler_calls, 0U);
+	assert(tr_rpc_executor_group_create(1U, 3U, 1U, &group) == TR_OK);
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+
+	config.role = TR_RPC_SERVER;
+	config.max_methods = 2U;
+	config.max_calls = 3U;
+	config.executor_threads = 1U;
+	config.executor_queue_capacity = 16U;
+	config.message_pool = &f.pool;
+	ret = make_rpc(f.server, &config, group, &server);
+	assert(ret == TR_OK);
+	method.service_id = 1U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 64U;
+	method.max_response_bytes = 64U;
+	ret = tr_rpc_register_method(server, &method, grp_unary, NULL);
+	assert(ret == TR_OK);
+
+	/* 停止成功后尚未重启，首任务必须被拒绝，不得遗留无法消费的节点。 */
+	group_unary_call(&f, 0U);
+	assert(f.status[0] != TR_RPC_STATUS_OK);
+	assert(atomic_load(&group_handler_calls) == 0U);
+	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
+	assert(stats.executor_queued_tasks == 0U);
+	assert(stats.executor_enqueued_tasks == 0U);
+
+	/* 新工作线程轮次建立后，同一个 Channel/Endpoint 的准入恢复。 */
+	assert(tr_rpc_executor_group_start(group) == TR_OK);
+	group_unary_call(&f, 1U);
+	assert(f.status[1] == TR_RPC_STATUS_OK);
+	assert(atomic_load(&group_handler_calls) == 1U);
+	assert(tr_rpc_executor_group_stop(group) == TR_OK);
+	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
+	assert(stats.executor_queued_tasks == 0U);
+	assert(stats.executor_enqueued_tasks == stats.executor_taken_tasks);
+	accepted_before_stop = stats.executor_enqueued_tasks;
+	assert(accepted_before_stop != 0U);
+
+	/* 第二次 stop 同样关闭下一次准入，而不是仅检查瞬时 stopping。 */
+	group_unary_call(&f, 2U);
+	assert(f.status[2] != TR_RPC_STATUS_OK);
+	assert(atomic_load(&group_handler_calls) == 1U);
+	assert(tr_rpc_endpoint_get_stats(server, &stats) == TR_OK);
+	assert(stats.executor_queued_tasks == 0U);
+	assert(stats.executor_enqueued_tasks == accepted_before_stop);
+	assert(stats.executor_taken_tasks == accepted_before_stop);
+
+	assert(tr_rpc_endpoint_destroy(server) == TR_OK);
+	assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
+	fixture_destroy(&f);
+}
+
 int main(int argc, char **argv)
 {
+	if (argc == 1 || strcmp(argv[1], "group") == 0)
+		test_executor_group_stopped_admission();
+	if (argc == 1 || strcmp(argv[1], "construct") == 0) {
+		test_create_rollback_retains_timer_owner(0);
+		test_create_rollback_retains_timer_owner(1);
+	}
 	if (argc == 1 || strcmp(argv[1], "clock") == 0)
 		test_clock_failure_and_zero();
 	if (argc == 1 || strcmp(argv[1], "admission") == 0)

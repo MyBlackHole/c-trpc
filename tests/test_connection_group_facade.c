@@ -425,7 +425,12 @@ static void test_public_connection_group_server(void)
 	config.connection_groups.on_data_event = on_group_data_event;
 	config.connection_groups.callback_arg = &ctx;
 
-	assert(tr_server_create(&config, &server) == TR_OK);
+	assert(tr_server_create_transport(&config, &server) == TR_OK);
+	/* 传输工厂不能成为重新启用 V1 RPC 的后门，且失败不发布监听端口。 */
+	uint16_t rejected_port = 1234;
+	assert(tr_server_listen(server, "127.0.0.1", 0, &rejected_port) ==
+	       TR_ERR_UNSUPPORTED);
+	assert(rejected_port == 1234);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
@@ -523,7 +528,7 @@ static void test_public_connection_group_client_control(void)
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.callback_arg = &ctx;
 
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
@@ -531,7 +536,8 @@ static void test_public_connection_group_client_control(void)
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connect(client, "127.0.0.1", 9) == TR_ERR_UNSUPPORTED);
 	assert(tr_client_connection_group_close(client) == TR_ERR_STATE);
 
 	group.group_id = 0U;
@@ -591,7 +597,7 @@ static void test_client_group_destroy_retry_preserves_control(void)
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.callback_arg = &ctx;
 
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
@@ -599,7 +605,7 @@ static void test_client_group_destroy_retry_preserves_control(void)
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
 	group.group_id = TEST_GROUP_ID;
 	group.epoch = TEST_GROUP_EPOCH;
 	assert(tr_client_connection_group_connect(
@@ -653,7 +659,7 @@ static void test_client_group_close_retry_preserves_control(void)
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.callback_arg = &ctx;
 
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
@@ -661,7 +667,7 @@ static void test_client_group_close_retry_preserves_control(void)
 
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
 	group.group_id = TEST_GROUP_ID;
 	group.epoch = TEST_GROUP_EPOCH;
 	assert(tr_client_connection_group_connect(
@@ -817,7 +823,7 @@ static void test_public_connection_group_client_data_offer(void)
 	server_config.connection_groups.on_data_event = on_group_data_event;
 	server_config.connection_groups.callback_arg = &ctx;
 
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(group_port != 0U);
@@ -832,7 +838,7 @@ static void test_public_connection_group_client_data_offer(void)
 	client_config.connection_groups.on_transfer_ready =
 		on_client_transfer_ready;
 	client_config.connection_groups.callback_arg = &ctx;
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
 	ctx.client = client;
 
 	group.group_id = TEST_GROUP_ID;
@@ -1135,7 +1141,7 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.callback_arg = &ctx;
 
-	assert(tr_server_create(&server_config, &server) == TR_OK);
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
 	assert(tr_server_connection_group_listen(
 		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 	assert(tr_server_start(server) == TR_OK);
@@ -1145,7 +1151,7 @@ static void test_public_connection_group_client_drain_cancels_offer(void)
 	client_config.connection_groups.max_data_connections = 1U;
 	/* max_active_transfers == 0 继承现有 max_streams 默认值。 */
 	assert(client_config.connection_groups.max_active_transfers == 0U);
-	assert(tr_client_create(&client_config, &client) == TR_OK);
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
 
 	group.group_id = TEST_GROUP_ID;
 	group.epoch = TEST_GROUP_EPOCH;
@@ -1224,14 +1230,16 @@ static void test_client_group_destroy_after_remote_control_close(void)
 		server_config.connection_groups.max_streams_per_group = 1U;
 		server_config.connection_groups.authorize = authorize_group;
 		server_config.connection_groups.callback_arg = &ctx;
-		assert(tr_server_create(&server_config, &server) == TR_OK);
+		assert(tr_server_create_transport(&server_config, &server) ==
+		       TR_OK);
 		assert(tr_server_connection_group_listen(
 			       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
 		assert(tr_server_start(server) == TR_OK);
 
 		tr_client_config_init(&client_config);
 		client_config.keepalive_interval_ms = 0U;
-		assert(tr_client_create(&client_config, &client) == TR_OK);
+		assert(tr_client_create_transport(&client_config, &client) ==
+		       TR_OK);
 
 		group.group_id = TEST_GROUP_ID;
 		group.epoch = TEST_GROUP_EPOCH;
@@ -1252,8 +1260,30 @@ static void test_client_group_destroy_after_remote_control_close(void)
 	}
 }
 
+static void test_transport_constructor_rejects_rpc_options(void)
+{
+	struct tr_client_config cc;
+	struct tr_server_config sc;
+	struct tr_client *client = NULL;
+	struct tr_server *server = NULL;
+
+	tr_client_config_init(&cc);
+	tr_server_config_init(&sc);
+	cc.enable_reconnect = 1;
+	assert(tr_client_create_transport(&cc, &client) == TR_ERR_UNSUPPORTED);
+	assert(!client);
+	cc.enable_reconnect = 0;
+	cc.interceptor.arg = &cc;
+	assert(tr_client_create_transport(&cc, &client) == TR_ERR_UNSUPPORTED);
+	assert(!client);
+	sc.interceptor.arg = &sc;
+	assert(tr_server_create_transport(&sc, &server) == TR_ERR_UNSUPPORTED);
+	assert(!server);
+}
+
 int main(void)
 {
+	test_transport_constructor_rejects_rpc_options();
 	test_public_connection_group_server();
 	test_public_connection_group_client_control();
 	test_client_group_destroy_retry_preserves_control();

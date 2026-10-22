@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "tr/server.h"
 #include "tr/status.h"
@@ -102,7 +103,7 @@ static void test_client_normal_constructor_rollback_clears_out(void)
 	 * 改成失败。回滚正常收敛时仍保持传统创建契约：out == NULL。
 	 */
 	atomic_store(&force_runtime_start_error, 1);
-	assert(tr_client_create(NULL, &client) == TR_ERR_BAD_LENGTH);
+	assert(tr_client_legacy_create(NULL, &client) == TR_ERR_BAD_LENGTH);
 	assert(client == NULL);
 	assert(atomic_load(&runtime_start_attempts) == 1U);
 	assert(atomic_load(&runtime_stop_attempts) >= 1U);
@@ -119,7 +120,7 @@ static void test_client_rollback_failure_keeps_owner(void)
 	/* 原始构造原因是 BAD_LENGTH，但终止回滚的停止屏障
 	 * 再失败一次。生命周期错误必须优先，并把部分构造的 Client 留在 out 中。
 	 */
-	assert(tr_client_create(NULL, &client) == TR_ERR_SYS);
+	assert(tr_client_legacy_create(NULL, &client) == TR_ERR_SYS);
 	assert(client != NULL);
 	assert(atomic_load(&runtime_start_attempts) == 1U);
 	assert(atomic_load(&runtime_stop_attempts) == 1U);
@@ -140,7 +141,7 @@ static void test_server_normal_constructor_rollback_clears_out(void)
 	reset_faults();
 	atomic_store(&fail_server_rpc_pool_once, 1);
 
-	assert(tr_server_create(&config, &server) == TR_ERR_NOMEM);
+	assert(tr_server_legacy_create(&config, &server) == TR_ERR_NOMEM);
 	assert(server == NULL);
 	assert(atomic_load(&server_pool_attempts) == 1U);
 	assert(atomic_load(&runtime_destroy_attempts) == 1U);
@@ -159,7 +160,7 @@ static void test_server_rollback_failure_keeps_owner(void)
 	/* 池初始化是原始构造失败；随后 Runtime 终止销毁
 	 * 再失败一次。Server 存储不得由无返回值清理丢失，而必须留在 out。
 	 */
-	assert(tr_server_create(&config, &server) == TR_ERR_SYS);
+	assert(tr_server_legacy_create(&config, &server) == TR_ERR_SYS);
 	assert(server != NULL);
 	assert(atomic_load(&server_pool_attempts) == 1U);
 	assert(atomic_load(&runtime_destroy_attempts) == 1U);

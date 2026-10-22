@@ -1,3 +1,4 @@
+#include "../execution/worker_context.h"
 #include "runtime_internal.h"
 
 #include <assert.h>
@@ -18,6 +19,8 @@ struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
 	struct tr_rpc_executor_group *rpc_executor;
+	struct tr_message_service_config message_config;
+	struct tr_message_service *messages;
 	struct tr_memory_budget memory_budget;
 
 	struct tr_runtime_peer *peers;
@@ -41,8 +44,24 @@ struct tr_runtime_shard {
 struct tr_runtime {
 	uint32_t shard_count;
 	struct tr_runtime_shard *shards;
+	/* 同一 Runtime 的多分片控制操作必须独占整个启动/停止轮次。
+	 * 仅保护控制者，不替代释放前由外部保证的裸指针存活期。
+	 */
+	_Atomic int lifecycle_busy;
 	int started;
 };
+
+static int tr_runtime_claim(struct tr_runtime *runtime)
+{
+	if (atomic_exchange(&runtime->lifecycle_busy, 1) != 0)
+		return TR_ERR_STATE;
+	return TR_OK;
+}
+
+static void tr_runtime_unclaim(struct tr_runtime *runtime)
+{
+	atomic_store(&runtime->lifecycle_busy, 0);
+}
 
 static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 {
@@ -50,6 +69,8 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 
 	if (!shard)
 		return TR_OK;
+	if (shard->messages)
+		return TR_ERR_STATE;
 
 	/*
 	 * 终止准入源可以提前关闭。如果保留的接收负载使反应器继续存活，
@@ -80,14 +101,21 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		shard->rpc_executor = NULL;
 	}
 
-	free(shard->peers);
-	shard->peers = NULL;
 	if (shard->peer_storage_bytes != 0U) {
-		(void)tr_memory_budget_release(
-			&shard->memory_budget, shard->peer_storage_bytes);
+		ret = tr_memory_budget_release(&shard->memory_budget,
+		                               shard->peer_storage_bytes);
+		if (ret != TR_OK)
+			return ret;
 		shard->peer_storage_bytes = 0U;
 	}
+	free(shard->peers);
+	shard->peers = NULL;
 	shard->peer_capacity = 0U;
+	/* 输出视图可以越过停止存活。预算仍被借用时保留 Runtime 外壳，
+	 * 防止最后 release 向已释放的预算对象写入。 */
+	if (atomic_load_explicit(&shard->memory_budget.current_bytes,
+	                         memory_order_acquire) != 0)
+		return TR_AGAIN;
 	return TR_OK;
 }
 
@@ -107,7 +135,17 @@ tr_runtime_shard_config_valid(const struct tr_runtime_shard_config *config)
 {
 	if (!config)
 		return 0;
-	return tr_runtime_rpc_executor_config_valid(&config->rpc_executor);
+	if (!tr_runtime_rpc_executor_config_valid(&config->rpc_executor))
+		return 0;
+	if (!config->messages.tasks.capacity)
+		return config->messages.tasks.workers == 0;
+	return config->memory_budget_bytes && config->messages.tasks.workers &&
+	       config->messages.tasks.workers <=
+	               config->messages.tasks.capacity &&
+	       config->messages.tasks.capacity < UINT32_MAX &&
+	       config->messages.dispatch_limit &&
+	       config->messages.watchdog_ns >= 1000000 &&
+	       config->messages.watchdog_ns <= 1000000000;
 }
 
 static int tr_runtime_create_rollback(
@@ -151,6 +189,7 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	runtime = (struct tr_runtime *)calloc(1, sizeof(*runtime));
 	if (!runtime)
 		return TR_ERR_NOMEM;
+	atomic_init(&runtime->lifecycle_busy, 0);
 
 	runtime->shards = (struct tr_runtime_shard *)calloc(
 		config->shard_count, sizeof(*runtime->shards));
@@ -161,12 +200,20 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	runtime->shard_count = config->shard_count;
 
 	/*
-	 * 先初始化所有分片的 fd 哨兵值，使部分构造的运行时在任意构造点都能
-	 * 安全进入正式 destroy()；未访问分片的其他字段保持 calloc 零值。
+	 * 回滚会遍历全部分片，而不仅是已经尝试创建 Reactor 的前缀。
+	 * 在首个分片资源分配前建立身份、预算原子和 fd 哨兵，保证未访问
+	 * 分片也能进入 destroy()；不能把 calloc 零字节当作预算初始化。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
-		runtime->shards[i].listen_fd = -1;
-		runtime->shards[i].peer_event_fd = -1;
+		struct tr_runtime_shard *shard = &runtime->shards[i];
+
+		shard->shard_id = i;
+		shard->listen_fd = -1;
+		shard->peer_event_fd = -1;
+		tr_memory_budget_init(&shard->memory_budget,
+		                      config->shards[i].memory_budget_bytes);
+		atomic_init(&shard->peer_reaping_count, 0U);
+		atomic_init(&shard->peers_reaped_total, 0U);
 	}
 
 	for (i = 0; i < runtime->shard_count; ++i) {
@@ -175,9 +222,7 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		struct tr_runtime_shard *shard = &runtime->shards[i];
 		int ret;
 
-		shard->shard_id = i;
-		tr_memory_budget_init(
-			&shard->memory_budget, shard_config->memory_budget_bytes);
+		shard->message_config = shard_config->messages;
 		shard->peer_capacity = shard_config->peer_capacity;
 		if (shard->peer_capacity != 0U) {
 			uint64_t peer_storage_bytes =
@@ -227,6 +272,25 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 	return TR_OK;
 }
 
+static int tr_runtime_message_start(void *arg)
+{
+	struct tr_runtime_shard *shard = arg;
+	int ret = tr_message_service_create_on_owner(
+	        shard->reactor, &shard->message_config, &shard->memory_budget,
+	        &shard->messages);
+
+	return ret == TR_OK ? tr_message_service_start_on_owner(shard->messages)
+	                    : ret;
+}
+
+static int tr_runtime_message_cancel(void *arg)
+{
+	struct tr_runtime_shard *shard = arg;
+
+	return tr_message_service_stop_on_owner(shard->messages,
+	                                        TR_TASK_CANCEL);
+}
+
 static int tr_runtime_shard_stop_execution(
 	struct tr_runtime_shard *shard)
 {
@@ -242,10 +306,22 @@ static int tr_runtime_shard_stop_execution(
 	 * 屏障变成对反应器进展的依赖。
 	 */
 	if (shard->started) {
+		if (shard->messages) {
+			/* 可能已致命退出；调用未执行也不失去随后 stop/join 和
+			 * 停止回收责任，不能把 CLOSED 当成已释放服务。 */
+			(void)tr_reactor_call(shard->reactor,
+			                      tr_runtime_message_cancel, shard);
+		}
 		ret = tr_reactor_stop(shard->reactor);
 		if (ret == TR_OK)
 			shard->started = 0;
 		else
+			result = ret;
+	}
+
+	if (!shard->started && shard->messages) {
+		ret = tr_message_service_reap_stopped(&shard->messages);
+		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
 
@@ -257,14 +333,31 @@ static int tr_runtime_shard_stop_execution(
 	return result;
 }
 
+/* 独立预检每个分片，避免多分片启动循环里重复读取未就绪的组状态。 */
+static int tr_runtime_shard_can_start(struct tr_runtime_shard *shard)
+{
+	if (shard->started || shard->messages || !shard->reactor)
+		return TR_ERR_STATE;
+	if (shard->rpc_executor)
+		return tr_rpc_executor_group_can_start(shard->rpc_executor);
+	return TR_OK;
+}
+
 int tr_runtime_start(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int result = TR_OK;
 
 	if (!runtime)
 		return TR_ERR_INVALID;
-	if (runtime->started)
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
 		return TR_ERR_STATE;
+	if (tr_runtime_claim(runtime) != TR_OK)
+		return TR_ERR_STATE;
+	if (runtime->started) {
+		result = TR_ERR_STATE;
+		goto out;
+	}
 
 	/*
 	 * 新轮次必须在任何 pthread_create 之前验证所有分片都已从上一次
@@ -272,13 +365,12 @@ int tr_runtime_start(struct tr_runtime *runtime)
 	 * 分片会先被重新启动，重新制造部分启动的轮次。
 	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
-		struct tr_runtime_shard *shard = &runtime->shards[i];
+		int ret = tr_runtime_shard_can_start(&runtime->shards[i]);
 
-		if (shard->started)
-			return TR_ERR_STATE;
-		if (shard->rpc_executor &&
-		    tr_rpc_executor_group_can_start(shard->rpc_executor) != TR_OK)
-			return TR_ERR_STATE;
+		if (ret != TR_OK) {
+			result = TR_ERR_STATE;
+			goto out;
+		}
 	}
 
 	for (i = 0; i < runtime->shard_count; ++i) {
@@ -300,6 +392,12 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		if (ret != TR_OK)
 			goto rollback;
 		shard->started = 1;
+		if (shard->message_config.tasks.capacity) {
+			ret = tr_reactor_call(shard->reactor,
+			                      tr_runtime_message_start, shard);
+			if (ret != TR_OK)
+				goto rollback;
+		}
 		continue;
 
 	rollback: {
@@ -320,28 +418,24 @@ int tr_runtime_start(struct tr_runtime *runtime)
 			if (stop_ret != TR_OK && rollback_ret == TR_OK)
 				rollback_ret = stop_ret;
 		}
-		return rollback_ret != TR_OK ? rollback_ret : cause;
+		result = rollback_ret != TR_OK ? rollback_ret : cause;
+		goto out;
 	}
 	}
 
 	runtime->started = 1;
-	return TR_OK;
+out:
+	tr_runtime_unclaim(runtime);
+	return result;
 }
 
-int tr_runtime_stop(struct tr_runtime *runtime)
+/* 私有停止操作：由已独占 Runtime 生命周期的控制者调用。
+ * 公开 stop 与 destroy 均复用它，避免 destroy 对自身重入 claim。
+ */
+static int tr_runtime_stop_owned(struct tr_runtime *runtime)
 {
 	uint32_t i;
 	int result = TR_OK;
-
-	if (!runtime)
-		return TR_ERR_INVALID;
-
-	/*
-	 * 即使总状态 runtime->started 为 false，也可能存在启动失败
-	 * 留下的部分执行器轮次，因此不能只根据反应器 started 早退。
-	 */
-	if (tr_reactor_in_owner_context() || tr_rpc_in_worker_context())
-		return TR_ERR_STATE;
 
 	i = runtime->shard_count;
 	while (i != 0U) {
@@ -358,29 +452,61 @@ int tr_runtime_stop(struct tr_runtime *runtime)
 	return result;
 }
 
+int tr_runtime_stop(struct tr_runtime *runtime)
+{
+	int ret;
+
+	if (!runtime)
+		return TR_ERR_INVALID;
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	if (tr_runtime_claim(runtime) != TR_OK)
+		return TR_ERR_STATE;
+	ret = tr_runtime_stop_owned(runtime);
+	tr_runtime_unclaim(runtime);
+	return ret;
+}
+
 int tr_runtime_destroy(struct tr_runtime *runtime)
 {
 	uint32_t i;
+	int result = TR_OK;
 	int ret;
 
 	if (!runtime)
 		return TR_OK;
+	if (tr_reactor_in_owner_context() || tr_execution_in_worker_context())
+		return TR_ERR_STATE;
+	if (tr_runtime_claim(runtime) != TR_OK)
+		return TR_ERR_STATE;
 
-	ret = tr_runtime_stop(runtime);
+	ret = tr_runtime_stop_owned(runtime);
 	if (ret != TR_OK)
-		return ret;
+		goto failed;
 
+	/* 所有分片已停止。遇到未收敛资源，保留 Runtime 外壳以便重试。
+	 * 不让先前的 AGAIN 隐藏后续更严重的生命周期错误。
+	 */
 	for (i = 0; i < runtime->shard_count; ++i) {
 		ret = tr_runtime_shard_release(&runtime->shards[i]);
-		if (ret != TR_OK)
-			return ret;
+		if (ret != TR_OK && (result == TR_OK ||
+		                     (result == TR_AGAIN && ret != TR_AGAIN)))
+			result = ret;
+	}
+	if (result != TR_OK) {
+		ret = result;
+		goto failed;
 	}
 	free(runtime->shards);
 	runtime->shards = NULL;
+	/* 最后才释放 Runtime；绝不在 free 前向另一控制线程让出门禁。 */
 	free(runtime);
 	return TR_OK;
-}
 
+failed:
+	tr_runtime_unclaim(runtime);
+	return ret;
+}
 
 uint32_t tr_runtime_shard_count(const struct tr_runtime *runtime)
 {
@@ -712,4 +838,118 @@ void tr_runtime_shard_drain_peer_event(struct tr_runtime_shard *shard)
 			break;
 		break;
 	}
+}
+
+/* 普通调用线程可同步切到目标所有者；另一个所有者或工作线程不得
+ * 等待它，否则两个执行域可能相互等待。服务指针只在目标所有者读取，
+ * 此门禁不替代外层 start/stop/destroy 的生命周期串行化。
+ */
+static int tr_runtime_message_call(struct tr_runtime_shard *shard,
+                                   int (*fn)(void *), void *arg)
+{
+	if (!shard)
+		return TR_ERR_INVALID;
+	if (!shard->message_config.tasks.capacity)
+		return TR_ERR_UNSUPPORTED;
+	if (!shard->reactor)
+		return TR_ERR_CLOSED;
+	if (tr_execution_in_worker_context() ||
+	    (tr_reactor_in_owner_context() &&
+	     !tr_reactor_in_owner_context_for(shard->reactor)))
+		return TR_ERR_STATE;
+	return tr_reactor_call(shard->reactor, fn, arg);
+}
+
+struct tr_runtime_message_request {
+	struct tr_runtime_shard *shard;
+	struct tr_message *input;
+	const struct tr_message_transform_config *config;
+	tr_message_service_done_fn done;
+	void *arg;
+	struct tr_task_handle *handle;
+};
+
+static int tr_runtime_message_submit_on_owner(void *arg)
+{
+	struct tr_runtime_message_request *request = arg;
+	struct tr_message_service *service = request->shard->messages;
+
+	if (!service)
+		return TR_ERR_CLOSED;
+	return tr_message_service_submit_on_owner(
+	        service, request->input, request->config, request->done,
+	        request->arg, request->handle);
+}
+
+int tr_runtime_shard_message_submit(
+        struct tr_runtime_shard *shard, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle)
+{
+	struct tr_runtime_message_request request = {shard, input, config,
+	                                             done,  arg,   handle};
+
+	if (!shard || !input || !config || !done || !handle)
+		return TR_ERR_INVALID;
+	return tr_runtime_message_call(
+	        shard, tr_runtime_message_submit_on_owner, &request);
+}
+
+struct tr_runtime_message_cancel_request {
+	struct tr_runtime_shard *shard;
+	struct tr_task_handle handle;
+};
+
+static int tr_runtime_message_cancel_on_owner(void *arg)
+{
+	struct tr_runtime_message_cancel_request *request = arg;
+	struct tr_message_service *service = request->shard->messages;
+
+	if (!service)
+		return TR_ERR_CLOSED;
+	return tr_message_service_cancel(service, request->handle);
+}
+
+int tr_runtime_shard_message_cancel(struct tr_runtime_shard *shard,
+                                    struct tr_task_handle handle)
+{
+	struct tr_runtime_message_cancel_request request = {shard, handle};
+
+	return tr_runtime_message_call(
+	        shard, tr_runtime_message_cancel_on_owner, &request);
+}
+
+struct tr_runtime_message_stats_request {
+	struct tr_runtime_shard *shard;
+	struct tr_message_service_stats *out;
+};
+
+static int tr_runtime_message_stats_on_owner(void *arg)
+{
+	struct tr_runtime_message_stats_request *request = arg;
+	struct tr_message_service *service = request->shard->messages;
+	struct tr_message_service_stats snapshot = {0};
+	int ret;
+
+	if (!service)
+		return TR_ERR_CLOSED;
+	ret = tr_message_service_get_stats_on_owner(service, &snapshot);
+	/* 查询失败不发布半份快照；任务计数仍是其各自锁内的瞬时观察，
+	 * 不是跨执行域的静默证明或预算销毁授权。
+	 */
+	if (ret == TR_OK)
+		*request->out = snapshot;
+	return ret;
+}
+
+int tr_runtime_shard_message_get_stats(struct tr_runtime_shard *shard,
+                                       struct tr_message_service_stats *out)
+{
+	struct tr_runtime_message_stats_request request = {shard, out};
+
+	if (!out)
+		return TR_ERR_INVALID;
+	return tr_runtime_message_call(shard, tr_runtime_message_stats_on_owner,
+	                               &request);
 }

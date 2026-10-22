@@ -1,8 +1,18 @@
-# trpc_transport_v1
+# c-trpc
 
 面向 Linux 的 C 传输/RPC 库，重点关注有界资源、显式所有权、高吞吐批量数据流，以及通用传输/RPC 与备份业务语义之间的清晰分离。
 
-当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件与 C 链接约定。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
+当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
+
+**接口迁移状态**：普通 `tr_client_create(config, methods, count, out)` 与
+`tr_server_create(config, methods, count, out)` 现在只创建 V2；方法在创建时冻结。
+一元调用使用 `tr_client_unary_call(..., options, callbacks, out)`，正文回调与
+唯一终局分离。旧两参数构造、运行时注册和 V1 一元回调不再是公开门面；不兼容
+旧调用签名，须重新编译。连接组改用 `*_create_transport()`。完整接入合同以
+[公共 SDK 文档](docs/rpc-v2-sdk.md)及两个 Echo 示例为准。
+
+V1 引擎、部分低层类型及旧故障/基准测试尚未删除。下文标为 V1 的机制只描述
+遗留内部实现，不是普通门面的可选协议；历史审查和基准数据不视作 V2 验收。
 
 ## 架构
 
@@ -70,11 +80,13 @@ CRC32C 不能替代认证和加密，不应直接暴露到不可信网络。
 详细的 Reactor/Channel/Endpoint 快照、计时标志以及诊断直方图/队列/资源池类型，
 有意**不属于**稳定安装 SDK。仓库内基准测试和测试程序使用内部诊断接口。
 
-稳定语义观测现在包括与内部布局无关的 RPC 生命周期快照，通过
+V1/V2 稳定语义观测包括与内部布局无关的 RPC 生命周期快照，通过
 `tr_client_get_rpc_semantic_stats()` 和
 `tr_server_get_rpc_semantic_stats()` 获取，并保留现有连接组语义统计。
 RPC 快照只暴露已经开始/已经结束/进行中的 Call 和最终 RPC 状态分布；
 不会暴露工作线程、队列、资源池、Reactor、槽位或计时布局。
+V2 在调用能力受理、业务终局提交时记账；服务端累计值由分片持有，断连和
+对端回收不会清空。统计失败不改变 RPC 结果，也不返回截断或回绕的快照。
 详见 [`docs/observability.md`](docs/observability.md)。
 
 ## 高层客户端/服务端门面
@@ -100,50 +112,95 @@ Channel 构造或已接收套接字接管的应用：
                                   TCP
 ```
 
-客户端生命周期：
+客户端使用 `tr_client_config_init()` 初始化配置，并准备非空方法描述数组。
+创建时调用 `tr_client_create(&cfg, methods, method_count, &client)`，然后
+`connect()` / `wait_ready()`；`tr_client_unary_call()` 自动发送一元请求，
+流式使用 `tr_client_call_start()` 与 `tr_rpc_v2_call_*()`。两者共用同一个
+V2 调用和终局内核，不再在连接后注册旧方法。
 
-```c
-struct tr_client_config cfg;
-struct tr_client *client;
+服务端准备 `tr_rpc_v2_method` 数组，在 `tr_server_create()` 中复制冻结工作
+函数、终局函数及方法描述，然后监听、启动、排空和销毁。默认门面的完整可运行
+示例为 `examples/echo_client.c` 和 `examples/echo_server.c`，程序诊断继续使用
+原国际化机制。门面持有运行时、有限任务/调用槽及缓冲预算；内部布局不进入 SDK。
 
-tr_client_config_init(&cfg);
-tr_client_create(&cfg, &client);
-tr_client_connect(client, "127.0.0.1", 9000);
-tr_client_register_method(client, &method);
-tr_client_unary_call(client, ...);
-assert(tr_client_destroy(client) == TR_OK);
-```
+库内显式迁移入口 [`tr_server_create_record()`](src/server_record_internal.h)
+已将 V2 记录宿主接入同一 `tr_server` 的监听、接纳、排空与销毁。它冻结业务方法表，
+按全 Server 总额分摊硬预算、线程数和任务容量，每分片由所有对端共享一个通用执行器。
+该内部调优入口不安装为 SDK。普通公开构造同样只选择 V2，不提供 V1 协商；
+尚未迁移的旧测试显式使用内部 legacy 入口，其句柄不适用于默认门面。
+V2 的回复能力只在当前工作回调内有效，旧方法注册明确返回不支持；
+稳定 RPC 语义统计与 V1 共用公开读取入口。大小/窗口限制、失败回滚与实际测试范围见
+[V2 Server 入口集成记录](docs/reviews/server_record_integration_20261017.md)。
 
-服务端生命周期：
+对应的库内 [`tr_client_create_record()`](src/client_record_internal.h) 复用既有
+`tr_client` 与单分片 Reactor，冻结客户端方法表，通过有界调用宿主连接上述 V2
+Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚未发出的情况；发送
+仅在成功时接管正文，旧句柄按调用代次失效。它支持本地单调期限、有界 OPEN
+元数据和调用级取消。两端显式要求 RESET 能力，取消或超时通过单流 RESET
+通知远端任务令牌；请求 `HALF_CLOSE` 后仍可取消。Channel 接管重置责任后，
+客户端可退役调用，网络层继续以有界状态等待双向停止屏障，校验并丢弃晚到帧。
+取消不证明业务线程已经退出，不合作对端仍可占网络槽到断连或销毁。
+自动重连因连接器尚缺停止域回收而明确拒绝，旧公开调用接口不用于此显式入口。
+连接装配、对端窗口限制及实际验证范围见
+[V2 Client 入口集成记录](docs/reviews/client_record_integration_20261017.md)。
 
-```c
-struct tr_server_config cfg;
-struct tr_server *server;
-uint16_t bound_port;
+### 公共 V2 SDK
 
-tr_server_config_init(&cfg);
-tr_server_create(&cfg, &server);
-tr_server_register_method(server, &method, handler, arg);
-tr_server_listen(server, "0.0.0.0", 9000, &bound_port);
-tr_server_start(server);
-...
-tr_server_drain(server, 5000);
-assert(tr_server_destroy(server) == TR_OK);
-```
+安装后的 [`tr/rpc_v2.h`](include/tr/rpc_v2.h) 提供
+`tr_client_create()`、`tr_server_create()`，复用原有连接、监听、就绪、
+排空和销毁操作。方法表在创建时复制冻结，业务无需包含内部记录、缓冲区或任务头。
+普通接口只选择 V2，不自动协商或回退到 V1。
 
-门面拥有 Reactor、RPC 消息资源池和 Channel 重组资源池。
-稳定的 `tr_facade_limits` 描述应用可见的协议/并发语义，而不是当前
-Reactor/资源池/执行器布局。命令/TX/RX、资源池数量、工作线程数量、
-执行器节点容量和续处理预留都在内部推导；仓库基准测试/架构测试只能通过
-不安装为 SDK API 的内部调优入口覆盖它们。
+- Client 通过 `tr_client_call_start()` 取得弱调用能力，使用
+  `tr_rpc_v2_call_send()`、`half_close()`、`cancel()` 推进调用。发送仅借用正文，
+  `TR_OK` 后已经复制并接受，应用可立即复用原内存；`TR_AGAIN` 不隐式保存消息，
+  后续可写通知负责提示重试，包括复制池满后的恢复。
+- 消息和元数据是回调内的只读借用视图；元数据通过按索引或键访问，不暴露 TLV。
+  Client 终局恰好一次，尾部元数据先于终局交付。终局可能早于外部 start 返回，
+  因而回调参数必须预先准备。
+- Server 工作回调接收 OPEN、MESSAGE、HALF_CLOSE 业务事件及合作取消令牌，
+  使用有界复制式回复。事件在同一调用内顺序执行，不同调用可并行。
+  不透明业务身份跨连接和 Server 唯一；完整合法 OPEN 准入后即承担业务终局责任，
+  终局等待工作回调和完成交付真正退出。
+- ONE/MANY 支持四种组合，MANY 可为零条；零字节消息仍计一条。
+  V2 构造的正文大小和窗口上限自动补入协议开销，无需业务计算记录固定头。
+- Server 可在 work 内复制设置初始和尾部响应元数据，每阶段编码后最多 512 字节。
+  初始元数据先于正文，尾部元数据只随同批终局发送；合法业务错误也可携带元数据。
+  追加正文或设置元数据失败会锁存整批错误，不能忽略错误产生截断成功。
+- 需要回调外持续回复时，可在当前空批次中取得独立 producer，跨线程复制发送
+  初始元数据、正文和带尾部元数据的终局。单条待发送记录形成有限背压，普通线程
+  可限时等待可写；取得句柄后 HALF_CLOSE 不再自动完成回复。取消及销毁关闭入口，
+  应用持有的句柄可安全长于 Server，但外部线程和私有状态仍由应用管理。
+- 两端通过既有语义统计入口读取开始、结束、进行中调用数及最终状态分布。
+  Client 自身 LIVE 回调可读取本地快照；Server 聚合快照由外部控制线程读取。
 
-RPC 编码消息所有权使用有界内部槽位池，其缓冲区按需增长到语义
-`max_message_bytes` 上限；安装后的 SDK 不暴露编码消息存储大小。
+普通 RPC 接口尚未提供重连、压缩或 TLS；连接组是独立的传输工厂，不是 RPC 协议回退。所有权、资源限制和接入顺序见
+[V2 SDK 使用合同](docs/rpc-v2-sdk.md)。完整的可编译运行消费端见
+[`tests/test_rpc_v2_sdk.c`](tests/test_rpc_v2_sdk.c)；CI 将同一源码复制到仓库外，
+仅用安装头文件与静态库，分别以 C11/C++11 的 GCC、Clang 编译运行。
 
-`tr_server_register_method()` / `tr_server_register_stream_method()`
-在 V1 中属于启动前操作；每个已接收对端都会获得包含已注册方法表的 RPC Endpoint。
-`tr_client_call_start*()` 在不暴露 Reactor/Connection 内部结构的前提下提供流式 Call。
-返回的 Call 句柄继续使用现有 `tr_rpc_call_*()` API 完成调用级发送/取消/元数据操作。
+V2 Server 从完整有效 OPEN 中的非零剩余预算建立本机单调期限，检查接收准入、
+任务开始、完成交付和每次回复。到期后选择 `DEADLINE_EXCEEDED`，通过原任务令牌
+合作取消业务，丢弃尚未接受的迟到成功。已选本地终局可先通过 RESET 停止网络，
+正在执行的业务退出后才通知服务端终局并回收其持有资源。
+零预算仍表示无限期限。该行为不提供跨主机绝对时钟、线程抢占或错误 FINAL 必达，
+调用预算只在完整 OPEN 验证后开始。实现与验证边界见
+[V2 Server 截止时间记录](docs/reviews/server_record_deadline_20261017.md)。
+
+尚未完成的 RPC OPEN 另有本机准入期限：从传输流 `OPENED` 起固定计时，
+默认 10 秒；分段字节、可写通知或重试都不会续期。到期选择
+`DEADLINE_EXCEEDED` 并直接进入 RESET，取时失败选择 `INTERNAL`。
+该期限不借用尚未验证的 RPC 元数据，也不承诺强制回收不合作对端的网络槽。
+V2 门面排空同时等待业务任务、完成交付、终局回调、网络流和发送资源；
+所有等待共用一个本机单调绝对截止时间。合同及验收见
+[OPEN 准入与分层排空记录](docs/reviews/rpc_record_admission_drain_20261017.md)。
+
+单流终止使用双方各一次的对称 RESET，沿原发送 FIFO 形成双向停止屏障；
+每个连接独立预留 RESET 发送项，普通 DATA/控制池压力不占用该名额。流 ID、流槽和
+物理连接槽代次不回绕，有限精确退役记录只接纳保留窗口内的重复 RESET。已归属
+调用的 RPC 错误按目标流终止；尚未接受本地普通 CLOSE 的活流也能隔离消息
+语义错误和重组资源不足。无法恢复的帧、身份或信用错误仍关闭连接。完整错误
+分类和验证范围见 [V2 单流重置记录](docs/reviews/rpc_record_reset_20261017.md)。
 
 稳定 SDK 还在 `tr/transport.h` 中包含第一版通用连接组传输能力。
 该能力按需启用，默认关闭：
@@ -158,7 +215,7 @@ cfg.connection_groups.authorize = authorize_group;
 cfg.connection_groups.on_message = on_group_data;
 cfg.connection_groups.callback_arg = app;
 
-tr_server_create(&cfg, &server);
+tr_server_create_transport(&cfg, &server);
 tr_server_connection_group_listen(
     server, "0.0.0.0", 9100, 128, &group_port);
 tr_server_start(server);
@@ -177,7 +234,7 @@ tr_client_config_init(&client_cfg);
 client_cfg.connection_groups.max_data_connections = 4;
 /* 0 继承 client_cfg.limits.max_streams，保持向后兼容行为。 */
 client_cfg.connection_groups.max_active_transfers = 256;
-tr_client_create(&client_cfg, &client);
+tr_client_create_transport(&client_cfg, &client);
 tr_client_connection_group_connect(
     client, "127.0.0.1", group_port, &group);
 ...
@@ -304,7 +361,7 @@ xmake run echo_client 127.0.0.1 9000 hello
 
 - 逻辑 `Channel` 位于物理 TCP 连接之上；
 - 每个连接在通道可用前执行对称 `HELLO / HELLO_ACK` 能力握手；
-- 协议版本范围协商（V1 当前实现版本 1）；
+- Channel 握手协议版本 2；与帧封装版本 1、RPC V1/V2 分别管理；
 - 对端接收能力协商，包括帧载荷、逻辑消息大小、特性位和通道映射；
 - 通道状态区分 `DOWN / RECONNECTING / HANDSHAKING / UP`；只有 `UP` 后才允许新 Stream；
 - 协商后的帧上限由 `tr_reactor_sendv_limited()` 强制执行，因此能力不对称的对端实际按较小接收上限发送；
@@ -339,6 +396,9 @@ xmake run echo_client 127.0.0.1 9000 hello
 物理 TCP 连接不会在接管后立即被视为 Channel 可用。双方都会发送固定大小的
 `HELLO`，声明自身接收能力：
 
+当前 Channel 协议版本为 **2**，仅接受该版本，拒绝旧版无受理边界的 GOAWAY。
+它与仍为 1 的帧封装版本、RPC V1/V2 记录版本属于不同层次。
+
 ```text
 TCP 已接管
    |
@@ -366,23 +426,32 @@ tr_channel_begin_drain(channel);
 tr_channel_wait_drained(channel, timeout_ms);
 ```
 
-`begin_drain()` 是幂等操作，会禁用重连、拒绝新的本地 Stream，并在每个就绪通道上
-发送 `GOAWAY`。收到 `GOAWAY` 后禁止向该对端打开新 Stream。
-已有 Stream 可以继续完整运行，直到自然关闭/取消：
+`begin_drain()` 是幂等操作，会禁用重连、冻结新 Stream 准入，并在每条存活且已就绪
+的物理连接上接管 `GOAWAY`；尚在握手中的连接待就绪后推进。帧的 `message_id`
+携带最后受理的对端流 ID，0 表示未受理过流；
+边界在首次排空时冻结。初始 `WINDOW_UPDATE` 必须先于对应的 GOAWAY，接收方据此
+校验边界恰好等于该连接此前确认过的最高本地流 ID，重复 GOAWAY 只能保留原边界。
 
-```text
-RUNNING
-   |
-   | begin_drain + GOAWAY
-   v
-DRAINING  -- 已有 Stream 继续 -->
-   |
-   | active_streams == 0
-   v
-DRAINED
-```
+收到 GOAWAY 后，同一物理连接停止双向新建流并回复自己的 GOAWAY；拆分模式的
+另一条物理连接可继续工作，只有显式 `begin_drain()` 才冻结整个 Channel。
+边界外仍在 `OPENING` 的本地流直接以 `TR_ERR_CLOSED` 失败并退役。
+本地尚未取得初始确认的 Stream 不能发送 CLOSE，`tr_stream_close()` 返回 `TR_AGAIN`；
+调用者必须保留重试责任，直到确认、GOAWAY 拒绝或连接失败。
 
-排空过程中传输层不会强制取消应用工作；RPC/应用截止时间决定未完成操作最多存活多久。
+已经受理的 Stream 可以继续运行，直到自然关闭或取消。排空完成分为以下责任：
+
+| 层次 | 完成条件 |
+| --- | --- |
+| Channel | 已显式开始排空，活跃流为零，存活连接已接管本方 GOAWAY 并收到对方 GOAWAY |
+| Reactor 发送 | 观察前已接受的命令全部处理，普通发送项与 GOAWAY、RESET 预留项全部归还 |
+| V2 RPC 宿主 | 原业务任务已完成交付，终局回调已返回，绑定已退役或停止责任已交给 Channel |
+| V2 Client/Server 门面 | RPC 与 Channel 条件共同满足，使用同一个单调绝对截止时间等待 |
+
+Channel 的 `DRAINED` 同时要求网络和 Reactor 发送条件，单独观察流数量为零不够。
+发送排空证明本机发送资源已归还，成功发送的字节已交给内核，不证明对端应用收到或处理。
+等待超时不会撤销排空，也不延长原期限；`timeout_ms == 0` 只立即检查。
+业务工作仍使用合作取消，停止网络不代表工作线程已退出；不合作的任务或对端会使
+有限等待返回未完成，调用者可随后重试等待或按生命周期规则关闭。
 
 ### 保活/存活检测
 
@@ -911,7 +980,9 @@ xmake test -v -j1 'test_timer_queue/*'
 ## 下一里程碑
 
 高层客户端/服务端门面、能力协商、优雅排空、保活/存活检测、诊断、
-回调静默和运行时对端回收已经实现。下一阶段生产工作应重点处理：
+回调静默和运行时对端回收已经实现，V2 已提供显式公共 SDK。
+V2 已支持回调外异步生产者的引用、有限背压及取消收口。压缩后端仍须接入网络
+调用路径，不能把后端已编译等同于业务已可用。其他生产工作包括：
 
 1. 为拆分 CONTROL/BULK 门面增加连接绑定标识，使独立接收的套接字能够安全配对；
 2. 共享连接模式下，在 DATA 帧边界实现严格 CONTROL 优先级；

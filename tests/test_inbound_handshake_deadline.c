@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include "../src/facade_legacy_internal.h"
 #include "tr/trpc.h"
 #include "../src/execution/deadline_internal.h"
 #include "../src/execution/reactor_internal.h"
@@ -6,6 +7,7 @@
 #include "../src/endian.h"
 #include "../src/crc32c.h"
 #include "../src/transport/group/pipeline_ingress_internal.h"
+#include "../src/transport/channel/channel.h"
 
 #include <arpa/inet.h>
 #include <assert.h>
@@ -279,7 +281,7 @@ static void fixture_init_capacity(struct fixture *f, int group,
 		f->config.connection_groups.max_streams_per_group = 4U;
 		f->config.connection_groups.authorize = authorize_group;
 	}
-	assert(tr_server_create(&f->config, &f->server) == TR_OK);
+	assert(tr_server_legacy_create(&f->config, &f->server) == TR_OK);
 	if (group)
 		assert(tr_server_connection_group_listen(f->server, "127.0.0.1",
 		                                         0U, 4,
@@ -429,7 +431,7 @@ static void normal_client(struct fixture *f)
 	tr_client_config_init(&config);
 	config.limits = f->config.limits;
 	config.keepalive_interval_ms = 0U;
-	assert(tr_client_create(&config, &client) == TR_OK);
+	assert(tr_client_legacy_create(&config, &client) == TR_OK);
 	if (f->group)
 		assert(tr_client_connection_group_connect(
 		               client, "127.0.0.1", f->port, &group) == TR_OK);
@@ -559,8 +561,8 @@ static void send_valid_handshake(int fd, int group)
 		struct tr_frame_header header = {0};
 		uint8_t *hello = bytes + TR_WIRE_HEADER_SIZE;
 
-		tr_put_le16(hello, 1U);
-		tr_put_le16(hello + 2U, 1U);
+		tr_put_le16(hello, TR_CHANNEL_PROTOCOL_VERSION);
+		tr_put_le16(hello + 2U, TR_CHANNEL_PROTOCOL_VERSION);
 		tr_put_le32(hello + 4U, 3U);
 		tr_put_le32(hello + 8U, 1024U);
 		tr_put_le32(hello + 12U, 4096U);

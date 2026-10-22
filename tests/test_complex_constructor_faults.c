@@ -355,8 +355,8 @@ static struct tr_channel_config channel_config(void)
 	config.role = TR_CHANNEL_SERVER;
 	config.mode = TR_CHANNEL_SHARED_CONNECTION;
 	config.max_streams = 4U;
-	config.min_protocol_version = 1U;
-	config.max_protocol_version = 1U;
+	config.min_protocol_version = TR_CHANNEL_PROTOCOL_VERSION;
+	config.max_protocol_version = TR_CHANNEL_PROTOCOL_VERSION;
 	return config;
 }
 
@@ -398,7 +398,7 @@ static void test_channel_early_rollback(void)
 	channel_fixture_create(&fixture);
 
 	/* 协议版本范围非法时，已分配的 Channel 必须被自动清理。 */
-	config.min_protocol_version = 2U;
+	config.min_protocol_version = TR_CHANNEL_PROTOCOL_VERSION + 1U;
 	channel_reject(&fixture, &config, 0U, 0U, 0U, TR_ERR_INVALID);
 	config = channel_config();
 	config.role = (enum tr_channel_role)99;

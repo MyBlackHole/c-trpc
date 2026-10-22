@@ -12,7 +12,7 @@
   "warnings": [
     {
       "file": "src/rpc/rpc.c",
-      "line": 2698,
+      "line": 2694,
       "column": 65,
       "check": "analyzer-use-after-free",
       "message": "use after ‘free’ of ‘arg’ [CWE-416]",
@@ -20,7 +20,7 @@
     },
     {
       "file": "src/transport/channel/channel.c",
-      "line": 581,
+      "line": 687,
       "column": 9,
       "check": "analyzer-malloc-leak",
       "message": "leak of ‘owned’ [CWE-401]",

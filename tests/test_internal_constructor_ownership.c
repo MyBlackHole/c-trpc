@@ -122,6 +122,65 @@ static void test_runtime_constructor_rollback_keeps_owner(void)
 	assert(atomic_load(&reactor_destroy_attempts) == 2U);
 }
 
+/* 分片 1 构造失败而分片 0 回滚暂时失败时，分片 2 尚未开始构造。
+ * 正式回滚仍会遍历它，故预算和身份必须在第一处分片分配前建立。
+ * 使用已有真实 Reactor 包装，不引入生产钩子或新的构建目标。 */
+static void test_runtime_rollback_initializes_all_shards(void)
+{
+	struct tr_runtime_shard_config shards[3] = {0};
+	struct tr_runtime_config config = {0};
+	struct tr_runtime *runtime = NULL;
+
+	config.shard_count = 3U;
+	config.shards = shards;
+	for (uint32_t i = 0; i < config.shard_count; ++i)
+		shards[i].memory_budget_bytes = UINT64_C(1073741824) + i;
+	reset_faults();
+	atomic_store(&fail_reactor_create_at, 2U);
+	atomic_store(&fail_reactor_destroy_once, 1);
+
+	assert(tr_runtime_create(&config, &runtime) == TR_ERR_SYS);
+	assert(runtime != NULL);
+	assert(atomic_load(&reactor_create_attempts) == 2U);
+	assert(atomic_load(&reactor_destroy_attempts) == 1U);
+	for (uint32_t i = 0; i < config.shard_count; ++i) {
+		struct tr_runtime_shard *shard =
+		        tr_runtime_shard_at(runtime, i);
+		struct tr_memory_budget *budget;
+		struct tr_memory_budget_stats stats;
+
+		assert(shard != NULL);
+		budget = tr_runtime_shard_memory_budget(shard);
+		assert(budget != NULL);
+		/* 先检查普通字段，旧实现会在未访问分片的这一处被拒绝；
+		 * 不靠读取未初始化原子来制造对照失败。 */
+		assert(budget->limit_bytes == shards[i].memory_budget_bytes);
+		assert(tr_runtime_shard_id(shard) == i);
+		tr_runtime_shard_memory_stats(shard, &stats);
+		assert(stats.limit_bytes == shards[i].memory_budget_bytes);
+		if (i != 0U) {
+			assert(tr_runtime_shard_reactor(shard) == NULL);
+			assert(stats.current_bytes == 0U);
+			assert(stats.peak_bytes == 0U);
+			assert(stats.rejection_events == 0U);
+		}
+	}
+	assert(tr_runtime_start(runtime) == TR_ERR_STATE);
+	assert(atomic_load(&reactor_create_attempts) == 2U);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	runtime = NULL;
+	assert(atomic_load(&reactor_destroy_attempts) == 2U);
+
+	/* 清除故障后相同配置能完整构造、启动、停止和回收。 */
+	reset_faults();
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	assert(tr_runtime_start(runtime) == TR_OK);
+	assert(tr_runtime_stop(runtime) == TR_OK);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	assert(atomic_load(&reactor_create_attempts) == 3U);
+	assert(atomic_load(&reactor_destroy_attempts) == 3U);
+}
+
 static void noop_transfer_ready(
 	const struct tr_connection_group_id *group,
 	uint32_t stream_id, uint64_t message_id, void *arg)
@@ -220,6 +279,7 @@ static void test_pipeline_listener_destroy_is_retryable(void)
 int main(void)
 {
 	test_runtime_constructor_rollback_keeps_owner();
+	test_runtime_rollback_initializes_all_shards();
 	test_client_group_constructor_rollback_keeps_owner();
 	test_pipeline_listener_destroy_is_retryable();
 	return 0;

@@ -4,7 +4,8 @@
 
 项目要求 Linux、GCC 或 Clang，以及 Xmake 3.1.1 或更新版本。
 CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/guide/quick-start.html)。
-库本身不新增第三方包依赖，语言基线仍为 ISO C11，并使用 GCC/Clang
+消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩仍未接入，
+新增编译依赖不表示默认启用压缩。语言基线仍为 ISO C11，并使用 GCC/Clang
 支持的 `cleanup` 属性。编译保持 `-Wall -Wextra -Werror -pedantic`
 和 `-pthread`，链接也显式使用 `-pthread`。
 
@@ -119,9 +120,13 @@ xmake install -o /tmp/c-trpc-sdk trcore
 并在编译/链接时增加 `-pthread`。CI 将 SDK 安装到包含空格的路径，
 使用 GCC 和 Clang 分别单独编译每个已安装公开头文件，并链接、运行外部 C11 程序，
 校验门面默认配置与状态函数的公开链接；C++11 同样独立编译各头文件并链接运行此消费端。
-使用程序只引用安装后的包含目录/库目录，运行超时 10 秒；
-另有独立 Echo 服务端/客户端验证请求响应，
-运行时创建、启动、连接、请求响应和回收由测试集及独立进程 Echo 验证，不能将配置消费端本身称作完整运行时验证。
+配置消费端只引用安装后的包含目录/库目录，运行超时 10 秒。
+另将 `tests/test_rpc_v2_sdk.c` 复制到仓库外目录，分别以 GCC、Clang 的 C11 和
+C++11 编译运行真实 V2 Client/Server，单次运行超时 30 秒。该消费端仅包含公开头，
+没有链接包装或私有源码路径，链接参数仍只有安装路径、`-ltrcore -pthread`。
+它验证四种 ONE/MANY 基数、请求及响应元数据、复制发送、可写背压、取消、期限、排空
+和 V2 调用语义统计，补齐配置消费端不能证明的运行时边界；独立进程 Echo 请求响应
+检查继续保留。
 
 ## Make 兼容入口
 
@@ -179,3 +184,38 @@ Make 兼容检查还使用包含空格/单引号的工具路径、强制包含�
 
 冒烟检查的构建、安装和示例日志作为 CI 构建产物保留 7 天；
 日志截取只限制控制台输出，不改变测试退出码，完整日志仍可用于复现失败。
+
+
+## 消息变换后端的固定依赖
+
+`xmake.lua` 固定 `zstd 1.5.7`，设置 `system = false` 和 `shared = false`，
+使用官方包配方的 Xmake 源码构建路径，不自动复用系统动态库。
+本后端使用 `ZSTD_STATIC_LINKING_ONLY` 的自定义分配器及帧头接口，
+编译期检查头文件版本，运行前核对库版本；升级必须单独验证这些接口。
+版本固定不是完整的包配方/工具链供应链锁定。首次配置需要获取第三方源码，
+包校验或构建失败必须报错，不能悄悄删除后端或跳过测试。
+
+```sh
+xmake f -c -y -m release --toolchain=gcc
+xmake test -v -j1 'test_message_transform/*'
+```
+
+该目标只复用三个实际生产对象 `message.c`、`transform.c`、`zstd.c` 和静态
+Zstandard；不链接整个 `trcore`，不重复注册生产源，也不修改编译数据库覆盖规则。
+既有测试和已安装 SDK 头文件清单不变。测试故障注入只在此目标链接时启用。
+
+Runtime 已直接引用消息服务，静态链接即会带入 Zstandard 符号，不能再依赖仓库内
+Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
+`build.merge_archive` 合并固定包的静态对象；安装后的 `libtrcore.a` 自包含该后端。
+外部 C/C++ 消费端仍使用 `-L<SDK>/lib -ltrcore -pthread`，不需要系统 Zstandard
+或 Xmake 包缓存路径。构建和安装均不得静默切换到其他版本的动态库。
+
+安装与源码归档同时保留 `third_party/zstd/LICENSE` 上游原始许可；SDK 路径为
+`share/doc/c-trpc/third_party/zstd/LICENSE`。CI 不增加 `-lzstd` 来掩盖不完整 SDK，
+而是检查安装归档内确有 Zstandard 的唯一符号定义，并按原外部消费方式运行程序。
+
+合并归档不等于做了符号隔离；同时链接另一个 Zstandard 实现可能产生符号冲突或
+版本选择问题，不属于当前保证范围。升级、符号命名/隔离及依赖锁定仍须独立验证。
+当前不安装新的 Message 内部头文件，也不宣称压缩/TLS 已供 SDK 使用。
+第三方来源与 MSG-B 阶段范围见 [MSG-B 实现审查](reviews/message_transform_zstd_20261015.md)，
+实际 Runtime 接入及本次 SDK 修复见 [MSG-D 审查](reviews/runtime_message_recovery_20261015.md)。

@@ -25,6 +25,7 @@ struct tr_client {
 };
 static struct tr_client instance;
 static int scenario;
+static int destroy_attempts;
 static const char *expected_address = "127.0.0.1";
 static uint16_t expected_port = 9000U;
 
@@ -34,9 +35,12 @@ void tr_client_config_init(struct tr_client_config *config)
 }
 
 int tr_client_create(const struct tr_client_config *config,
+                     const struct tr_rpc_method_desc *methods, size_t count,
                      struct tr_client **out)
 {
 	(void)config;
+	assert(methods && count == 1);
+	assert(methods[0].request_cardinality == TR_RPC_ONE);
 	*out = &instance;
 	return TR_OK;
 }
@@ -50,32 +54,40 @@ int tr_client_connect(struct tr_client *client, const char *address,
 	return scenario == 1 || scenario == 2 ? TR_ERR_STATE : TR_OK;
 }
 
-int tr_client_register_method(struct tr_client *client,
-                              const struct tr_rpc_method_desc *method)
+int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 {
 	(void)client;
-	(void)method;
+	(void)timeout_ms;
 	return scenario == 3 ? TR_ERR_STATE : TR_OK;
 }
 
 int tr_client_unary_call(struct tr_client *client, uint32_t service,
                          uint32_t method, const struct tr_rpc_bytes *request,
-                         tr_rpc_unary_result_cb callback, void *arg,
-                         struct tr_rpc_call_handle *out)
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out)
 {
 	(void)client;
 	(void)service;
 	(void)method;
+	(void)options;
 	if (scenario == 4)
 		return TR_ERR_STATE;
 	memset(out, 0, sizeof(*out));
-	callback(*out, scenario == 5 ? 17 : TR_RPC_STATUS_OK, request, arg);
+	callbacks->message(*out, request, callbacks->arg);
+	/* 即使正文到达，错误终局也不能打印成功响应。 */
+	callbacks->terminal(
+	        *out, scenario == 5 ? (enum tr_rpc_status)17 : TR_RPC_STATUS_OK,
+	        TR_RPC_V2_DELIVERY_LIVE, callbacks->arg);
 	return TR_OK;
 }
 
 int tr_client_destroy(struct tr_client *client)
 {
 	(void)client;
+	++destroy_attempts;
+	if (scenario == 7 && destroy_attempts == 1)
+		return TR_AGAIN;
 	return scenario == 2 || scenario == 3 || scenario == 4 || scenario == 6
 	               ? TR_ERR_STATE
 	               : TR_OK;
@@ -91,8 +103,8 @@ static void reset_environment(void)
 		assert(unsetenv(names[i]) == 0);
 }
 
-static void check_output(int argc, char **argv, int code, const char *output,
-                         const char *error)
+static void check_output(int test_scenario, int argc, char **argv, int code,
+                         const char *output, const char *error)
 {
 	FILE *out = tmpfile();
 	FILE *err = tmpfile();
@@ -110,13 +122,29 @@ static void check_output(int argc, char **argv, int code, const char *output,
 
 		assert(dup2(fileno(out), STDOUT_FILENO) >= 0);
 		assert(dup2(fileno(err), STDERR_FILENO) >= 0);
+		/* 每个子进程显式选择故障并清零计数，不继承上一用例的桩状态。 */
+		scenario = test_scenario;
+		destroy_attempts = 0;
 		result = echo_client_main(argc, argv);
+		assert(destroy_attempts == (code == 2            ? 0
+		                            : test_scenario == 7 ? 2
+		                                                 : 1));
 		assert(strcmp(setlocale(LC_NUMERIC, NULL), "C") == 0);
 		assert(strcmp(setlocale(LC_CTYPE, NULL), "C") == 0);
 		assert(fflush(NULL) == 0);
 		_exit(result);
 	}
 	assert(waitpid(child, &status, 0) == child);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != code) {
+		fprintf(stderr,
+		        "Echo "
+		        "用例失败：场景=%d，子进程状态=%d，期望退出码=%d\n",
+		        test_scenario, status, code);
+		rewind(err);
+		while ((size = fread(actual, 1, sizeof(actual), err)) != 0)
+			assert(fwrite(actual, 1, size, stderr) == size);
+		assert(!ferror(err));
+	}
 	assert(WIFEXITED(status) && WEXITSTATUS(status) == code);
 	rewind(out);
 	size = fread(actual, 1, sizeof(actual) - 1U, out);
@@ -138,7 +166,7 @@ static void check_output(int argc, char **argv, int code, const char *output,
 			                         : "<unset>");
 		fprintf(stderr,
 		        "scenario=%d argument=%s expected=%s actual=%s\n",
-		        scenario, argc > 1 ? argv[1] : "", error, actual);
+		        test_scenario, argc > 1 ? argv[1] : "", error, actual);
 	}
 	assert(size == strlen(error) && strcmp(actual, error) == 0);
 	assert(fclose(out) == 0);
@@ -164,12 +192,15 @@ static void check_scenarios(const char *option, int chinese)
 	                    "RPC 失败：17\n",
 	                    "客户端销毁失败\n"};
 
-	for (scenario = 0; scenario < 7; ++scenario)
-		check_output(5, args, scenario ? 1 : 0,
-		             scenario == 0 || scenario == 6
+	size_t current;
+
+	assert(sizeof(en) / sizeof(en[0]) == sizeof(zh) / sizeof(zh[0]));
+	for (current = 0; current < sizeof(en) / sizeof(en[0]); ++current)
+		check_output((int)current, 5, args, current ? 1 : 0,
+		             current == 0 || current == 6
 		                     ? "response: xmake-smoke\n"
 		                     : "",
-		             chinese ? zh[scenario] : en[scenario]);
+		             chinese ? zh[current] : en[current]);
 }
 
 int main(void)
@@ -221,24 +252,27 @@ int main(void)
 	assert(setenv("CTRPC_LANG", "en", 1) == 0);
 	assert(setenv("LANGUAGE", "en", 1) == 0);
 	check_scenarios("--lang=zh_CN", 1);
-	check_output(2, invalid, 2, "", ECHO_USAGE);
-	check_output(2, empty, 2, "", ECHO_USAGE);
-	scenario = 1;
-	check_output(1, defaults, 1, "", "connect failed\n");
+	check_output(0, 2, invalid, 2, "", ECHO_USAGE);
+	check_output(0, 2, empty, 2, "", ECHO_USAGE);
+	check_output(1, 1, defaults, 1, "", "connect failed\n");
 	assert(setenv("CTRPC_LANG", "zh_CN", 1) == 0);
-	check_output(1, defaults, 1, "", "连接失败\n");
+	check_output(1, 1, defaults, 1, "", "连接失败\n");
 	assert(setenv("CTRPC_LANG", "unknown", 1) == 0);
-	check_output(1, defaults, 1, "", "connect failed\n");
+	check_output(1, 1, defaults, 1, "", "connect failed\n");
 	/* 注入所有非 C locale 初始化失败，验证回退而非假跳过。 */
 	missing_locale = 1;
 	check_scenarios("--lang=zh_CN", 0);
 	missing_locale = 0;
-	scenario = 0;
-	check_output(4, literal, 0, "response: --lang=zh_CN\n", "");
+	check_output(0, 4, literal, 0, "response: --lang=zh_CN\n", "");
 	expected_address = "--lang=literal";
-	check_output(5, escaped, 0, "response: 你好 %s\n", "");
+	check_output(0, 5, escaped, 0, "response: 你好 %s\n", "");
 	expected_address = "127.0.0.1";
-	check_output(1, defaults, 0, "response: hello\n", "");
+	check_output(0, 1, defaults, 0, "response: hello\n", "");
+	/* 销毁重试、参数错误、正常调用连续执行，彼此不能串用场景或计数。 */
+	check_output(7, 1, defaults, 0, "response: hello\n", "");
+	check_output(0, 2, invalid, 2, "", ECHO_USAGE);
+	check_output(0, 2, empty, 2, "", ECHO_USAGE);
+	check_output(0, 1, defaults, 0, "response: hello\n", "");
 	assert(strcmp(setlocale(LC_NUMERIC, NULL), "C") == 0);
 	assert(strcmp(setlocale(LC_CTYPE, NULL), "C") == 0);
 	puts("echo_client gettext: bilingual scenarios, precedence and "

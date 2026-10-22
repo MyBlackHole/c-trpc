@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/facade_legacy_internal.h"
 #include "tr/trpc.h"
 #include "facade_diagnostics_internal.h"
 #include <assert.h>
@@ -82,7 +83,7 @@ static void test_retirement(uint32_t shard_count)
 	sc.shard_count = shard_count;
 	sc.max_peers = shard_count;
 	sc.keepalive_interval_ms = 0;
-	assert(tr_server_create(&sc, &s) == TR_OK);
+	assert(tr_server_legacy_create(&sc, &s) == TR_OK);
 	m.service_id = 1;
 	m.method_id = 1;
 	m.request_cardinality = TR_RPC_ONE;
@@ -92,7 +93,7 @@ static void test_retirement(uint32_t shard_count)
 	m.lane = TR_RPC_LANE_CONTROL;
 	m.max_request_bytes = 16;
 	m.max_response_bytes = 16;
-	assert(tr_server_register_method(s, &m, handler, &g) == TR_OK);
+	assert(tr_server_legacy_register_method(s, &m, handler, &g) == TR_OK);
 	assert(tr_server_listen(s, "127.0.0.1", 0, &port) == TR_OK);
 	assert(tr_server_start(s) == TR_OK);
 	for (uint64_t cycle = 1; cycle <= 3; cycle++) {
@@ -100,11 +101,11 @@ static void test_retirement(uint32_t shard_count)
 		g.release = 0;
 		tr_client_config_init(&cc);
 		cc.keepalive_interval_ms = 0;
-		assert(tr_client_create(&cc, &c) == TR_OK);
+		assert(tr_client_legacy_create(&cc, &c) == TR_OK);
 		assert(tr_client_connect(c, "127.0.0.1", port) == TR_OK);
-		assert(tr_client_register_method(c, &m) == TR_OK);
-		assert(tr_client_unary_call(c, 1, 1, &req, result, NULL, &h) ==
-		       TR_OK);
+		assert(tr_client_legacy_register_method(c, &m) == TR_OK);
+		assert(tr_client_legacy_unary_call(c, 1, 1, &req, result, NULL,
+		                                   &h) == TR_OK);
 		pthread_mutex_lock(&g.m);
 		while (!g.entered)
 			pthread_cond_wait(&g.c, &g.m);
