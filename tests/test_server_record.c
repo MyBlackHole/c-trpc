@@ -4,6 +4,7 @@
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/execution/buffer.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
 #include "tr/status.h"
@@ -44,6 +45,9 @@ static _Atomic unsigned reactor_count, fatal_polls, detach_failures;
 static _Atomic unsigned cancel_requests;
 static _Atomic unsigned observation_count, stopped_reaps, fail_stopped_reap_at;
 static _Atomic unsigned cleanup_dispatches;
+static _Atomic unsigned budget_release_pool_target, budget_release_pool_seen;
+static _Atomic uint64_t budget_release_current_before_failure;
+static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
 static _Atomic unsigned executor_join_failures, workers_joined;
 static _Atomic bool fail_poll, fail_handler_detach, fail_executor_join;
 static _Atomic(struct tr_reactor *) reactors[4];
@@ -90,6 +94,29 @@ int __wrap_tr_task_executor_create(const struct tr_task_executor_config *c,
 		atomic_fetch_add(&executor_creates, 1);
 		atomic_fetch_add(&worker_total, (unsigned)c->workers);
 		atomic_fetch_add(&task_capacity_total, (unsigned)c->capacity);
+	}
+	return ret;
+}
+
+int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
+int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
+{
+	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
+	int ret = __real_tr_buffer_pool_destroy(pool);
+
+	if (ret == TR_OK && budget &&
+	    atomic_load(&budget_release_pool_target) != 0U &&
+	    atomic_fetch_add(&budget_release_pool_seen, 1U) + 1U ==
+	            atomic_load(&budget_release_pool_target)) {
+		uint64_t current = atomic_load(&budget->current_bytes);
+		uint64_t method_bytes =
+		        2U * sizeof(struct tr_rpc_dispatch_method);
+
+		CHECK(method_bytes > 1U);
+		atomic_store(&budget_release_current_before_failure, current);
+		atomic_store(&budget_release_injected_budget, budget);
+		/* 在方法表释放前制造预算低于该笔所有权的条件。 */
+		atomic_store(&budget->current_bytes, method_bytes - 1U);
 	}
 	return ret;
 }
@@ -1176,6 +1203,35 @@ static void test_configuration(void)
 	fixture_destroy(&f);
 }
 
+static void test_method_budget_release_retry(void)
+{
+	struct fixture f;
+	uint64_t current;
+	struct tr_memory_budget *budget;
+
+	fixture_init(&f, 1, 1);
+	fixture_create(&f);
+	CHECK(fixture_start(&f) == TR_OK);
+	atomic_store(&budget_release_pool_seen, 0U);
+	atomic_store(&budget_release_current_before_failure, 0U);
+	atomic_store(&budget_release_injected_budget, NULL);
+	atomic_store(&budget_release_pool_target, 1U);
+	CHECK(destroy_until_stable(&f) == TR_ERR_STATE);
+	CHECK(atomic_load(&budget_release_pool_seen) == 1U);
+	budget = atomic_load(&budget_release_injected_budget);
+	CHECK(budget != NULL);
+	current = atomic_load(&budget_release_current_before_failure);
+	CHECK(current > 2U * sizeof(struct tr_rpc_dispatch_method));
+
+	/* 修复注入造成的预算计数后，第二次 destroy 应能归还方法表额度。 */
+	atomic_store(&budget->current_bytes, current);
+	atomic_store(&budget_release_pool_target, 0U);
+	CHECK(tr_server_destroy(f.server) == TR_OK);
+	atomic_store(&budget_release_injected_budget, NULL);
+	f.server = NULL;
+	fixture_destroy(&f);
+}
+
 static void test_exact_window(void)
 {
 	struct fixture f;
@@ -1196,6 +1252,8 @@ static void test_exact_window(void)
 
 int main(void)
 {
+	test_method_budget_release_retry();
+	puts("test_server_record: method budget release retry passed");
 	test_configuration();
 	test_exact_window();
 	test_shapes_and_reuse();
@@ -1214,6 +1272,6 @@ int main(void)
 	test_detach_retry(false);
 	test_detach_retry(true);
 	test_join_retry();
-	puts("server_record: 18 scenarios passed");
+	puts("server_record: 19 scenarios passed");
 	return 0;
 }
