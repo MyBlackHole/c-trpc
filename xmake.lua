@@ -271,6 +271,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_runtime_threads" then
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
+        elseif name == "test_runtime" then
+            -- 预算归还失败后重试 Runtime peer 存储回收，仅在本测试链接注入。
+            add_ldflags("-Wl,--wrap=tr_reactor_destroy", {force = true})
         elseif name == "test_rpc_executor_group_drain" then
             -- 保留 V1 Server Executor Group 生命周期与重试覆盖；客户端通过 raw V1 测试 peer。
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})

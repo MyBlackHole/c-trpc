@@ -6,6 +6,8 @@ from pathlib import Path
 
 from rpc_v1_inventory import audit, parse_nm, remove_comments_and_literals
 
+TEST_TMP_ROOT = Path(__file__).resolve().parents[1] / "build" / "test-tmp"
+
 
 CLIENT_FACADE_FILES = {
     "src/client.c",
@@ -34,7 +36,10 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(client_endpoint_references(symbols), set())
 
     def test_bare_v1_endpoint_type_is_a_legacy_reference(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as temporary:
+            self.assertEqual(Path(temporary).resolve().parent,
+                             TEST_TMP_ROOT.resolve())
             root = Path(temporary)
             (root / "src").mkdir()
             (root / "src/client.c").write_text(
@@ -64,7 +69,9 @@ tr_rpc_call_finish(call, 0);
         self.assertIn("tr_rpc_call_finish(call, 0)", clean)
 
     def test_scans_all_layers_and_preserves_line_numbers(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_TMP_ROOT) as tmp:
+            self.assertEqual(Path(tmp).resolve().parent, TEST_TMP_ROOT.resolve())
             root = Path(tmp)
             for folder in ("src/rpc", "src/runtime", "tests"):
                 (root / folder).mkdir(parents=True)
