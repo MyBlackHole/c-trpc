@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
-#include "rpc_v1_test_client_fixture.h"
 #include "tr/trpc.h"
+
+#include "server_v2_test_fixture.h"
 #include "../src/execution/deadline_internal.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/facade_diagnostics_internal.h"
@@ -15,6 +15,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -263,6 +264,10 @@ static void fixture_init_capacity(struct fixture *f, int group,
 	memset(f, 0, sizeof(*f));
 	f->group = group;
 	reset_probe();
+	/* V2 Server start 注册重组任务的周期清理定时器；本用例要捕获
+	 * 随后由入站 peer 注册的握手租约定时器。
+	 */
+	atomic_store(&capture_timer, 0);
 	tr_server_config_init(&f->config);
 	assert(f->config.handshake_timeout_ms == 10000U);
 	f->config.handshake_timeout_ms = timeout;
@@ -282,7 +287,12 @@ static void fixture_init_capacity(struct fixture *f, int group,
 		f->config.connection_groups.max_streams_per_group = 4U;
 		f->config.connection_groups.authorize = authorize_group;
 	}
-	assert(tr_server_legacy_create(&f->config, &f->server) == TR_OK);
+	if (group)
+		assert(tr_server_create_transport(&f->config, &f->server) ==
+		       TR_OK);
+	else
+		assert(tr_test_server_v2_create(&f->config, &f->server) ==
+		       TR_OK);
 	if (group)
 		assert(tr_server_connection_group_listen(f->server, "127.0.0.1",
 		                                         0U, 4,
@@ -291,11 +301,28 @@ static void fixture_init_capacity(struct fixture *f, int group,
 		assert(tr_server_listen(f->server, "127.0.0.1", 0U, &f->port) ==
 		       TR_OK);
 	assert(tr_server_start(f->server) == TR_OK);
+	reset_probe();
 }
 
 static void fixture_init(struct fixture *f, int group, uint32_t timeout)
 {
 	fixture_init_capacity(f, group, timeout, 1U, 1U);
+}
+
+static int destroy_server_until_complete(struct tr_server *server)
+{
+	unsigned retries = 0U;
+	int ret;
+
+	do {
+		ret = tr_server_destroy(server);
+		if (ret == TR_AGAIN) {
+			if (++retries >= 10000U)
+				return TR_ERR_TIMEOUT;
+			sched_yield();
+		}
+	} while (ret == TR_AGAIN);
+	return ret;
 }
 
 static int raw_connect(uint16_t port)
@@ -427,8 +454,18 @@ static void normal_client(struct fixture *f)
 {
 	struct tr_client_config config;
 	struct tr_client *transport = NULL;
-	struct rpc_v1_test_client *raw_client = NULL;
+	struct tr_client *client = NULL;
 	struct tr_connection_group_id group = {.group_id = 42U, .epoch = 1U};
+	struct tr_rpc_method_desc method = {
+	        .service_id = 1U,
+	        .method_id = 1U,
+	        .request_cardinality = TR_RPC_ONE,
+	        .response_cardinality = TR_RPC_MANY,
+	        .request_codec_id = TR_RPC_CODEC_RAW,
+	        .response_codec_id = TR_RPC_CODEC_RAW,
+	        .lane = TR_RPC_LANE_CONTROL,
+	        .max_request_bytes = 1U,
+	        .max_response_bytes = 1U};
 
 	tr_client_config_init(&config);
 	config.limits = f->config.limits;
@@ -442,12 +479,11 @@ static void normal_client(struct fixture *f)
 		                                          "127.0.0.1", f->port,
 		                                          &group) == TR_OK);
 	} else {
-		/* This test's peer is a V1 Server; bypass the retired Client
-		 * facade. */
-		assert(rpc_v1_test_client_create(&config, NULL, &raw_client) ==
+		assert(tr_client_create(&config, &method, 1U, &client) ==
 		       TR_OK);
-		assert(rpc_v1_test_client_connect(raw_client, "127.0.0.1",
-		                                  f->port) == TR_OK);
+		assert(tr_client_connect(client, "127.0.0.1", f->port) ==
+		       TR_OK);
+		assert(tr_client_wait_ready(client, 5000U) == TR_OK);
 	}
 	wait_counts(f, 1U, 1U);
 	if (!f->group) {
@@ -461,8 +497,8 @@ static void normal_client(struct fixture *f)
 	wait_counts(f, 1U, 1U);
 	if (transport)
 		assert(tr_client_destroy(transport) == TR_OK);
-	if (raw_client)
-		assert(rpc_v1_test_client_destroy(raw_client) == TR_OK);
+	if (client)
+		assert(tr_client_destroy(client) == TR_OK);
 	wait_counts(f, 0U, 0U);
 }
 
@@ -526,7 +562,7 @@ static void test_exact_deadline(int group, int partial)
 	normal_client(&f);
 	atomic_store(&fail_unregister, 1);
 	assert(tr_server_destroy(f.server) == TR_ERR_SYS);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static void test_faults(int group)
@@ -551,7 +587,7 @@ static void test_faults(int group)
 	wait_counts(&f, 0U, 0U);
 	assert(close(fd) == 0);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static void send_valid_handshake(int fd, int group)
@@ -580,6 +616,7 @@ static void send_valid_handshake(int fd, int group)
 		tr_put_le32(hello + 4U, 3U);
 		tr_put_le32(hello + 8U, 1024U);
 		tr_put_le32(hello + 12U, 4096U);
+		tr_put_le64(hello + 16U, TR_CHANNEL_FEATURE_STREAM_RESET);
 		header.version = TR_WIRE_ENV_VERSION;
 		header.type = TR_FRAME_HELLO;
 		header.payload_len = 32U;
@@ -618,7 +655,7 @@ static void test_late_handshake(int group, int clock_error)
 	assert(atomic_load(&fail_expiry_clock) == 0);
 	assert(close(fd) == 0);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static void test_authorize_crosses_deadline(int mode)
@@ -644,7 +681,7 @@ static void test_authorize_crosses_deadline(int mode)
 	atomic_store(&expired_clock, 0U);
 	assert(close(fd) == 0);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static void test_existing_timer_arm_failure(int group)
@@ -670,7 +707,7 @@ static void test_existing_timer_arm_failure(int group)
 	assert(close(first) == 0);
 	assert(close(second) == 0);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static void test_shard_capacity(void)
@@ -695,7 +732,7 @@ static void test_shard_capacity(void)
 	assert(stats.peer_capacity_rejections != 0U);
 	assert(stats.peers_ready_total == 0U);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static int authorize_route(const struct tr_pipeline_route_preface *route,
@@ -915,7 +952,7 @@ static void test_timeout_abort_retry(int group)
 	wait_counts(&f, 0U, 0U);
 	assert(close(fd) == 0);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 static void test_real_timeout(int group)
@@ -932,7 +969,7 @@ static void test_real_timeout(int group)
 	assert(atomic_load(&timeout_aborts) == before + 1U);
 	assert(close(fd) == 0);
 	normal_client(&f);
-	assert(tr_server_destroy(f.server) == TR_OK);
+	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
 int main(void)

@@ -5,11 +5,9 @@ from run_rpc_generator_slots import slot_order, summarize_slots
 
 
 PRESSURE_KEYS = (
-    "rpc_admission_limit_hits", "rpc_hard_full_events",
     "command_queue_full_events", "completion_queue_full_events",
     "rx_pool_exhausted_events", "tx_pool_exhausted_events",
     "control_tx_pool_exhausted_events",
-    "rpc_message_pool_exhausted_events",
     "reassembly_pool_exhausted_events",
 )
 
@@ -20,10 +18,11 @@ def result(aggregate_slots=4096, accepted=9000, dropped=1000,
     per_generator_slots = aggregate_slots // generators
     server = {key: 0 for key in PRESSURE_KEYS}
     server.update(
-        reactor_busy_ratio=0.35,
         command_queue_peak=500,
         control_tx_pool_peak=480,
         command_queue_full_events=command_full,
+        rpc_executor_threads=4,
+        rpc_task_queue_capacity=256,
     )
     client = dict(
         offered=10000,
@@ -51,10 +50,11 @@ def result(aggregate_slots=4096, accepted=9000, dropped=1000,
         "case": {
             "rate_rps": 40000,
             "generators": generators,
-            "executor_queue": 1024,
             "generator_window": per_generator_slots,
             "generator_capacity": per_generator_slots,
         },
+        "schema": 2,
+        "api_generation": "rpc_v2",
         "server_exit": server,
         "client": client,
         "wall_signals": [],

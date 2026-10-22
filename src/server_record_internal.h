@@ -45,15 +45,14 @@ struct tr_server_record_config {
  * 超时。所有分片和等待层共享一个单调绝对期限，0ms 仅立即检查。
  * owner 主动发布静默状态并唤醒外部条件变量，不由等待线程轮询任务。
  *
- * 不接受 interceptor 或连接组配置；旧方法注册返回 UNSUPPORTED。
- * 稳定 RPC 语义统计由分片累计并通过公共入口读取，内部诊断同时报告
- * peer/Channel/池与共享任务资源，V1 诊断字段无 V2 含义。tuning 的 executor_* 与
- * rpc_message_pool_count 在此入口不使用。完整有效 OPEN 携带的非零
- * remaining_timeout_ns 从接收时转换为本机单调期限，覆盖任务排队、
- * 业务执行和回复背压；0 表示无限。期限到达取消原任务令牌，可先用
- * RESET 停止网络，待真实任务退出后交付终局，不抢占不合作的业务。
- * 接收对端 RESET 同样取消原任务，不停止其他调用共享的执行器。
- * 分段 OPEN 尚未完整验证
+ * 不接受 interceptor 或连接组配置。稳定 RPC 语义统计由分片累计并通过
+ * 公共入口读取，内部诊断同时报告 peer、Channel、池与共享任务资源。
+ * tuning 的 executor_* 与 rpc_message_pool_count 在此入口不使用。
+ * 完整有效 OPEN 携带的非零 remaining_timeout_ns
+ * 从接收时转换为本机单调期限，覆盖任务排队、 业务执行和回复背压；0
+ * 表示无限。期限到达取消原任务令牌，可先用 RESET
+ * 停止网络，待真实任务退出后交付终局，不抢占不合作的业务。 接收对端 RESET
+ * 同样取消原任务，不停止其他调用共享的执行器。 分段 OPEN 尚未完整验证
  * 前的等待不计入此期限，错误 FINAL 也不保证送达。
  * 当前只支持 NONE 消息变换；TLS、V1 Client 互通和公开默认切换仍未提供。
  */

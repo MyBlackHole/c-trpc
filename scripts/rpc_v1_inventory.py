@@ -10,12 +10,15 @@ import subprocess
 LEGACY = re.compile(
     r"\b(?:tr_client_legacy_[A-Za-z0-9_]*|"
     r"tr_client_create_with_tuning|tr_client_get_rpc_stats|"
-    r"tr_server_legacy_[A-Za-z0-9_]*|"
+    r"tr_server_create_with_tuning|tr_server_legacy_[A-Za-z0-9_]*|"
     r"tr_runtime_shard_rpc_executor|"
     r"tr_rpc_(?:endpoint(?:_|(?![A-Za-z0-9_]))|"
     r"executor_group(?:_|(?![A-Za-z0-9_]))|wire_|"
     r"call_(?!options\b)|message_|"
     r"raw_|register_|unary_|in_worker_context)[A-Za-z0-9_]*)\b"
+)
+SERVER_FACADE_RETIREMENT = re.compile(
+    r"^(?:tr_server_create_with_tuning|tr_server_legacy_[A-Za-z0-9_]+)$"
 )
 STRIP = re.compile(
     r"/\*[\s\S]*?\*/|//[^\n]*|"
@@ -108,6 +111,11 @@ def nm_inventory(archive):
     return result
 
 
+def denied_symbols(symbols, deny):
+    """返回显式退役列表中仍被源码或归档引用的名字。"""
+    return sorted(set(deny).intersection(symbols))
+
+
 def audit(root, archive=None):
     files, sites = collect_code(root)
     build = (root / "xmake.lua").read_text(encoding="utf-8")
@@ -160,7 +168,7 @@ def main():
     root = args.root.resolve()
     archive = args.archive.resolve() if args.archive else None
     result = audit(root, archive)
-    remaining = sorted(set(args.deny).intersection(result["symbols"]))
+    remaining = denied_symbols(result["symbols"], args.deny)
     if remaining:
         parser.error("退役符号仍存在源码或链接对象中：" + ", ".join(remaining))
     args.output.parent.mkdir(parents=True, exist_ok=True)

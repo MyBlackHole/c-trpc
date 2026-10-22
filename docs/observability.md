@@ -9,17 +9,8 @@ c-trpc 在运行时内部收集结构化快照，而不是把某个指标后端�
 低成本计数器和有界队列高水位始终采集。
 
 计时指标属于按需启用的**仓库诊断能力**，不是稳定门面配置。
-基准测试/架构测试通过内部调优入口启用：
-
-```c
-struct tr_facade_tuning tuning;
-
-tr_facade_tuning_init(&tuning);
-tuning.observability_flags = TR_OBSERVABILITY_TIMING;
-tr_server_create_with_tuning(&config, &tuning, &server);
-```
-
-该标志会在内部传播到 Reactor 和 RPC Endpoint 引擎配置。
+普通 `tr_server_create()` 不公开调优或计时开关，默认不会采集计时直方图。
+需要计时的仓库内诊断测试通过内部构造配置启用；这些入口不安装到 SDK。
 关闭计时时，调度热路径不会执行延迟直方图所需的额外单调时钟读取。
 
 `src/observability.h` 是仓库内部诊断契约。Reactor/RPC 引擎诊断使用其中固定的
@@ -55,8 +46,7 @@ tr_server_get_rpc_semantic_stats(server, &stats);
 该契约不依赖 Endpoint 槽位、执行器工作线程和传输连接：
 
 - 客户端 `calls_started`：本地已接受 Call 并发布能力，外部 API 将返回 `TR_OK`；
-- V1 服务端 `calls_started`：已注册 Method 接受第一条有效 `REQUEST`，包括随后被拦截器/准入拒绝的 Call；
-- V2 服务端 `calls_started`：完整合法 OPEN 匹配方法并通过期限准入，包含随后发生的工作对象分配失败或执行器拒绝；
+- V2 服务端 `calls_started`：完整合法 OPEN 匹配方法并通过期限准入，包含随后发生的工作对象分配失败或任务执行器拒绝；
 - `calls_finished`：一次最终应用可见 RPC 结果已经提交；
 - `calls_inflight`：快照值 `started - finished`；
 - `final_status[status]`：终止状态恰好一次分类；所有桶之和等于 `calls_finished`。
@@ -70,8 +60,8 @@ tr_server_get_rpc_semantic_stats(server, &stats);
 不会新增全局热路径原子变量。服务端跨分片快照是结构化一致而不是全局原子一致，
 因此采集期间计数仍可能继续变化；排空完成后快照稳定。
 
-V1 仅提供聚合 RPC 可观测性。未来可以使用分片本地记账增加每服务/方法语义拆分，
-但不能引入跨分片共享热计数器。
+语义快照只提供聚合 RPC 可观测性。未来可以使用分片本地记账增加每服务/方法语义
+拆分，但不能引入跨分片共享热计数器。
 
 ### V2 的提交点与执行域
 
@@ -161,35 +151,29 @@ Reactor 快照也暴露已有的每轮命令公平性数据：
 命令预算耗尽率高，说明可能受到每轮有界公平调度或突发排空行为影响；
 某个生产者类别占据大部分队列满事件，则指向特定上游压力来源。
 
-## RPC 执行器归因
+## V2 任务执行器诊断
 
-内部 `tr_rpc_endpoint_get_stats()` 快照报告：
-
-- 执行器队列 `capacity/current/peak/full_events`；
-- 当前和峰值就绪 Call 数；
-- 已接受任务总数和工作线程已取走任务总数；
-- `executor_admission_limit_hits`：新 Call 在物理节点池真正耗尽前，
-  因续处理预留而停止准入的次数；
-- `executor_hard_full_events`：物理任务节点池耗尽次数；
-- 启用计时时的队列等待和回调/任务执行直方图。
-
-准入限制命中和物理池耗尽计数有意分离。
-预留命中表示运行时正在为已经接受的流式 Call 保护容量，
-并不意味着执行器节点池已经物理耗尽。
+内部 `tr_server_get_stats()` 的 RPC 快照报告当前 V2 共享 task executor 的
+`executor_threads`、`endpoints_current`、排队/运行任务数及当前队列容量。
+它不提供 V1 Endpoint 的 ready/active 队列、准入/硬满计数、handler/queue
+直方图或每 Endpoint 队列水位。原始 `tr_rpc_endpoint_get_stats()` 仍属于
+R13/R14 退役中的低层 V1 核心诊断，不代表普通 Server facade 的实现或观测口径。
 
 ## 服务端门面聚合
 
-内部 `tr_server_get_stats()` 聚合为仓库基准测试提供一份完整引擎级视图，包括：
+内部 `tr_server_get_stats()` 为仓库基准测试提供 V2 引擎级快照，包括：
 
 - 服务端拥有的 Reactor 快照，包括 RX/TX/CONTROL TX 资源池压力；
-- RPC 消息和重组资源池 `capacity/current/peak/exhausted_events`；
-- 当前对端/Call/Stream 数量；
-- 存活对端和已经回收对端的 RPC 与 Channel 生命周期累计计数；
-- 跨对端 Endpoint 合并的执行器队列等待和处理器直方图；
-- 每 Endpoint 执行器队列/就绪 Call 最大高水位。
+- V2 RPC 重组池 `capacity/current/peak/exhausted_events`；
+- peer、Channel 与对端回收生命周期计数；
+- V2 record Endpoint 数量、共享 task executor 的线程/排队/运行/容量快照；
+- V2 RPC semantic stats。
 
-一个已经回收的对端在最终统计合并到服务端退役累计值前，
-会先完成同步静默，并确保其 RPC 执行器完全排空。
+transport-only Server 不创建 RPC task executor 或 reassembly pool；对应快照保持零值，
+ConnectionGroup 诊断仍由独立入口读取。Server facade 不再报告 V1 RPC message pool。
+
+一个已经回收的 V2 对端在最终统计合并到 Server 累计值前，
+会先完成同步静默，并确保其任务与 Channel 清理完成。
 这样可以避免断连/回收截断最后一批工作线程完成事件。
 
 跨组件服务端快照是结构化一致，而不是全局原子一致：
@@ -199,26 +183,17 @@ Reactor 快照也暴露已有的每轮命令公平性数据：
 
 ## 解释方式
 
-典型模式：
-
-- Reactor 忙碌比例高 + 执行器队列等待低：增加工作线程前先检查 Reactor 可扩展性；
-- Reactor 忙碌比例低 + 执行器队列等待高：检查工作线程数量、回调成本或执行器分片；
-- 准入限制命中高但物理池耗尽低：续处理预留正在主动保护已经接受的 Stream；
-- 物理池耗尽事件增加：有界执行器容量已经耗尽，应先与队列等待和回调时长关联分析，再决定是否修改容量。
+诊断时应结合 Reactor 资源压力、V2 task executor 的排队/运行快照、
+对端生命周期与 semantic call 账本判断瓶颈。队列快照是某个采集时刻的状态，
+不等价于到达率、等待时间或历史峰值；基于 V1 Endpoint 的队列与 handler
+指标不能套用于当前 V2 Server。
 
 可观测性计数器提供的是证据，不是自动策略。
 CI 应继续以确定性不变量作为门槛，而不是固定 QPS 或延迟阈值。
 
 ### Server peer 回收期间的累计值
 
-Server 按 shard 在 owner 上统一收集 live peer、detached peer 的最后快照及已回收累计值。
-Detached peer 的快照保持可见，直到 finalizer 在同一锁下以归档快照替换它。
-此修复保证已采集累计值在 peer-table 移除、detached 等待及归档替换期间不回退、
-不重复。归档内容来自 endpoint finalizer 提供的快照，并不保证覆盖 worker 的全部
-晚到观测。当前资源 gauge 仍只表示 live peer，`peers_reaping_current` 单独表示等待
-回收的 peer。多 shard 聚合不是全局同一时刻的快照。
-
-已复现的既存限制：开启 timing 时，unary completion 可先于 handler histogram
-发布，旧 endpoint 归档可能漏掉 handler timing 样本；该问题未在本次修复中解决，
-仍是发布阻断及待审查事项。语义 call 计数与状态分布的定向回归通过，不等于所有
-内部观测完整，也不解除该发布阻断。
+Server 按 shard 在 owner 上统一收集 live peer、正在回收的 peer 与已回收累计值。
+当前资源 gauge 表示 live peer，`peers_reaping_current` 单独表示等待回收的 peer；
+多 shard 聚合不是全局同一时刻的快照。V2 semantic stats 在 peer 退役后仍累计，
+测试 `test_server_stats_retiring` 覆盖断连、工作完成和槽位复用期间的记账稳定性。

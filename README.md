@@ -11,8 +11,9 @@
 旧调用签名，须重新编译。连接组改用 `*_create_transport()`。完整接入合同以
 [公共 SDK 文档](docs/rpc-v2-sdk.md)及两个 Echo 示例为准。
 
-V1 引擎、部分低层类型及旧故障/基准测试尚未删除。下文标为 V1 的机制只描述
-遗留内部实现，不是普通门面的可选协议；历史审查和基准数据不视作 V2 验收。
+低层 V1 Endpoint、协议和 Executor 核心仍由 R13/R14 逐项退役；它们不再构成
+普通 Server 门面。`bench/results/rpc-20260926.csv` 是独立的历史 V1 基线，
+新的真实 TCP 基准通过公开 V2 Client/Server 运行，不能与旧 CSV 合并比较。
 
 ## 架构
 
@@ -80,7 +81,7 @@ CRC32C 不能替代认证和加密，不应直接暴露到不可信网络。
 详细的 Reactor/Channel/Endpoint 快照、计时标志以及诊断直方图/队列/资源池类型，
 有意**不属于**稳定安装 SDK。仓库内基准测试和测试程序使用内部诊断接口。
 
-V1/V2 稳定语义观测包括与内部布局无关的 RPC 生命周期快照，通过
+V2 稳定语义观测包括与内部布局无关的 RPC 生命周期快照，通过
 `tr_client_get_rpc_semantic_stats()` 和
 `tr_server_get_rpc_semantic_stats()` 获取，并保留现有连接组语义统计。
 RPC 快照只暴露已经开始/已经结束/进行中的 Call 和最终 RPC 状态分布；
@@ -126,10 +127,10 @@ V2 调用和终局内核，不再在连接后注册旧方法。
 库内显式迁移入口 [`tr_server_create_record()`](src/server_record_internal.h)
 已将 V2 记录宿主接入同一 `tr_server` 的监听、接纳、排空与销毁。它冻结业务方法表，
 按全 Server 总额分摊硬预算、线程数和任务容量，每分片由所有对端共享一个通用执行器。
-该内部调优入口不安装为 SDK。普通公开构造同样只选择 V2，不提供 V1 协商；
-尚未迁移的旧测试显式使用内部 legacy 入口，其句柄不适用于默认门面。
-V2 的回复能力只在当前工作回调内有效，旧方法注册明确返回不支持；
-稳定 RPC 语义统计与 V1 共用公开读取入口。大小/窗口限制、失败回滚与实际测试范围见
+该内部入口不安装为 SDK。普通 `tr_server_create()` 只构造 V2，
+`tr_server_create_transport()` 只保留传输与连接组资源；两者都不提供 V1 协商。
+V2 的回复能力只在当前工作回调内有效；稳定 RPC 语义统计由 V2 Server 公共入口读取。
+大小/窗口限制、失败回滚与实际测试范围见
 [V2 Server 入口集成记录](docs/reviews/server_record_integration_20261017.md)。
 
 对应的库内 [`tr_client_create_record()`](src/client_record_internal.h) 复用既有
@@ -279,7 +280,8 @@ DATA 分片与 TX 调度。临时准入压力返回 `TR_AGAIN`，调用方稍后
 发送仍可完成。稳定语义统计只报告组/连接/DATA/传输以及发送字节生命周期状态；
 Reactor 槽位、路由代次、队列占用和资源池内部状态仍不属于 SDK 契约。
 
-V1 门面有意使用 `TR_CHANNEL_SHARED_CONNECTION`。客户端和服务端门面的
+普通 V2 RPC 门面有意使用 `TR_CHANNEL_SHARED_CONNECTION`；transport-only
+门面只构造传输与连接组资源，不构造 RPC Endpoint。客户端和服务端门面的
 TCP 套接字默认启用 `TCP_NODELAY`，避免小请求/响应流量受到 Nagle/延迟 ACK
 耦合影响。策略是显式的：
 `TR_TCP_NODELAY_DEFAULT` 和 `TR_TCP_NODELAY_ENABLED` 启用该行为，

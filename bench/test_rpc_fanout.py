@@ -9,11 +9,9 @@ from run_rpc_fanout import (
 
 
 PRESSURE_KEYS = (
-    "rpc_admission_limit_hits", "rpc_hard_full_events",
     "command_queue_full_events", "completion_queue_full_events",
     "rx_pool_exhausted_events", "tx_pool_exhausted_events",
     "control_tx_pool_exhausted_events",
-    "rpc_message_pool_exhausted_events",
     "reassembly_pool_exhausted_events",
 )
 
@@ -21,14 +19,15 @@ PRESSURE_KEYS = (
 def result(generators=8, offered=10000, accepted=10000,
            dropped=0, late_p99=50.0, interval=200.0,
            ok_rps=39500.0, client_cpu=0.5, client_rss=100000,
-           busy=0.3, command_peak=100, control_peak=100,
+           command_peak=100, control_peak=100,
            command_full=0):
     server = {key: 0 for key in PRESSURE_KEYS}
     server.update(
-        reactor_busy_ratio=busy,
         command_queue_peak=command_peak,
         control_tx_pool_peak=control_peak,
         command_queue_full_events=command_full,
+        rpc_executor_threads=4,
+        rpc_task_queue_capacity=256,
     )
     client = dict(
         offered=offered,
@@ -56,10 +55,11 @@ def result(generators=8, offered=10000, accepted=10000,
         "case": {
             "rate_rps": 40000,
             "generators": generators,
-            "executor_queue": 1024,
             "generator_window": 1024 // generators,
             "generator_capacity": 1024 // generators,
         },
+        "schema": 2,
+        "api_generation": "rpc_v2",
         "server_exit": server,
         "client": client,
         "wall_signals": [],
@@ -110,9 +110,8 @@ class FanoutTests(unittest.TestCase):
 
     def test_summary_retains_exact_server_pressure(self):
         rows = [
-            result(generators=32, command_full=3,
-                   command_peak=16384, busy=0.5),
-            result(generators=32, command_peak=4000, busy=0.4),
+            result(generators=32, command_full=3, command_peak=16384),
+            result(generators=32, command_peak=4000),
         ]
         summary = summarize_fanout(32, rows)
         self.assertEqual(summary["server_pressure_trials"], 1)

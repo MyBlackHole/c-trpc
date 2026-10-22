@@ -1,11 +1,9 @@
 #define _POSIX_C_SOURCE 200809L
-#include "../src/facade_legacy_internal.h"
-#include "../tests/rpc_v1_test_client_fixture.h"
 #include "tr/client.h"
+#include "tr/rpc_v2.h"
 #include "tr/server.h"
 #include "tr/status.h"
 #include "../src/facade_diagnostics_internal.h"
-#include "../src/facade_tuning_internal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -32,10 +30,8 @@ struct options {
 	const char *host;
 	const char *scenario;
 	uint32_t port, requests, window, warmup, small_bytes, bulk_bytes;
-	uint32_t bulk_every, timeout_ms, slow_ms, workers, capacity, start_gate;
-	uint32_t rate_rps, executor_queue;
-	uint32_t rx_buffers, rpc_message_pool, reassembly_pool;
-	uint32_t control_tx_items, command_capacity;
+	uint32_t bulk_every, timeout_ms, slow_ms, capacity, start_gate;
+	uint32_t rate_rps;
 };
 
 struct sample {
@@ -49,11 +45,12 @@ struct slot {
 	struct client_run *run;
 	struct sample *sample;
 	unsigned char *payload;
+	int message_seen, response_valid;
 	int busy, done;
 };
 
 struct client_run {
-	struct rpc_v1_test_client *client;
+	struct tr_client *client;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct slot *slots;
@@ -72,6 +69,25 @@ static void check(int code, const char *operation)
 {
 	if (code != 0)
 		fatal(operation, code);
+}
+
+static void destroy_server_retry(struct tr_server *server)
+{
+	struct timespec pause = {0, 1000000L};
+	unsigned attempt;
+
+	for (attempt = 0; attempt < 10000U; ++attempt) {
+		int ret = tr_server_destroy(server);
+		if (ret == TR_OK)
+			return;
+		if (ret != TR_AGAIN)
+			fatal("server destroy", ret);
+		while (nanosleep(&pause, &pause) != 0 && errno == EINTR)
+			;
+		pause.tv_sec = 0;
+		pause.tv_nsec = 1000000L;
+	}
+	fatal("server destroy retry limit", TR_AGAIN);
 }
 
 static uint64_t now_ns(void)
@@ -103,29 +119,6 @@ static double cpu_seconds(const struct rusage *usage)
 	       ((double)usage->ru_utime.tv_usec + (double)usage->ru_stime.tv_usec) / 1e6;
 }
 
-static uint64_t histogram_percentile_upper_ns(
-	const struct tr_latency_histogram *histogram, uint32_t percentile)
-{
-	uint64_t target;
-	uint64_t seen = 0;
-	uint32_t i;
-
-	if (!histogram || histogram->samples == 0 || percentile == 0 ||
-	    percentile > 100)
-		return 0;
-
-	target = (histogram->samples * percentile + 99U) / 100U;
-	for (i = 0; i < TR_LATENCY_HISTOGRAM_BUCKETS; ++i) {
-		seen += histogram->buckets[i];
-		if (seen < target)
-			continue;
-		if (i == TR_LATENCY_HISTOGRAM_BUCKETS - 1U)
-			return histogram->max_ns;
-		return (UINT64_C(1) << (i + 1U)) - 1U;
-	}
-	return histogram->max_ns;
-}
-
 static uint32_t number(const char *text)
 {
 	char *end;
@@ -142,31 +135,36 @@ static uint32_t number(const char *text)
 static void usage(const char *program)
 {
 	fprintf(stderr,
-		"Usage: %s server|client [--host IPv4] [--port N]\n"
-		"  --scenario small|bulk|mixed|pressure|open --requests N --window N\n"
-		"  --warmup N --small-bytes N --bulk-bytes N --bulk-every N\n"
-		"  --timeout-ms N --slow-ms N --workers N --capacity N --start-gate 0|1\n"
-		"  --rate-rps N --executor-queue N (0 keeps the benchmark default)\n"
-		"  --rx-buffers N --rpc-message-pool N --reassembly-pool N\n"
-		"  --control-tx-items N --command-capacity N\n"
-		"    (Server-only benchmark overrides; 0 keeps the derived defaults)\n"
-		"Server binds loopback by default, prints readiness JSON, and exits on stdin EOF.\n"
-		"pressure uses the delayed method, then measures recovery on the SAME client.\n"
-		"open schedules METHOD_SLOW arrivals independently of callback completion.\n",
-		program);
+	        "Usage: %s server|client [--host IPv4] [--port N]\n"
+	        "  --scenario small|bulk|mixed|pressure|open --requests N "
+	        "--window N\n"
+	        "  --warmup N --small-bytes N --bulk-bytes N --bulk-every N\n"
+	        "  --timeout-ms N --slow-ms N --capacity N --start-gate 0|1\n"
+	        "  --rate-rps N\n"
+	        "Server binds loopback by default, prints readiness JSON, and "
+	        "exits on stdin EOF.\n"
+	        "pressure uses the delayed method, then measures recovery on "
+	        "the SAME client.\n"
+	        "open schedules METHOD_SLOW arrivals independently of callback "
+	        "completion.\n",
+	        program);
 }
 
 static struct options parse_options(int argc, char **argv)
 {
-	struct options o = {
-		.host = "127.0.0.1", .scenario = "small", .port = 0,
-		.requests = 2000, .window = 8, .warmup = 100,
-		.small_bytes = 32, .bulk_bytes = 65536, .bulk_every = 4,
-		.timeout_ms = 5000, .slow_ms = 25, .workers = 4, .capacity = 64,
-		.rate_rps = 200, .executor_queue = 0,
-		.rx_buffers = 0, .rpc_message_pool = 0, .reassembly_pool = 0,
-		.control_tx_items = 0, .command_capacity = 0
-	};
+	struct options o = {.host = "127.0.0.1",
+	                    .scenario = "small",
+	                    .port = 0,
+	                    .requests = 2000,
+	                    .window = 8,
+	                    .warmup = 100,
+	                    .small_bytes = 32,
+	                    .bulk_bytes = 65536,
+	                    .bulk_every = 4,
+	                    .timeout_ms = 5000,
+	                    .slow_ms = 25,
+	                    .capacity = 64,
+	                    .rate_rps = 200};
 	struct in_addr address;
 	int i;
 	if (argc < 2 || (strcmp(argv[1], "server") && strcmp(argv[1], "client"))) {
@@ -191,30 +189,18 @@ static struct options parse_options(int argc, char **argv)
 		ARG("--bulk-every", bulk_every)
 		ARG("--timeout-ms", timeout_ms)
 		ARG("--slow-ms", slow_ms)
-		ARG("--workers", workers)
 		ARG("--capacity", capacity)
 		ARG("--start-gate", start_gate)
 		ARG("--rate-rps", rate_rps)
-		ARG("--executor-queue", executor_queue)
-		ARG("--rx-buffers", rx_buffers)
-		ARG("--rpc-message-pool", rpc_message_pool)
-		ARG("--reassembly-pool", reassembly_pool)
-		ARG("--control-tx-items", control_tx_items)
-		ARG("--command-capacity", command_capacity)
 #undef ARG
 		usage(argv[0]);
 		fatal("unknown argument", 0);
 	}
 	if (inet_pton(AF_INET, o.host, &address) != 1 || o.port > 65535U ||
-	    (!strcmp(o.role, "client") && o.port == 0) ||
-	    o.requests == 0 || o.requests > 1000000U || o.warmup > 100000U ||
-	    o.window == 0 || o.window > 256U || o.capacity < o.window || o.capacity > 256U ||
-	    o.rate_rps == 0 || o.rate_rps > 1000000U ||
-	    (o.executor_queue != 0 && (o.executor_queue < 16U || o.executor_queue > 65536U)) ||
-	    o.rx_buffers > 8192U || o.rpc_message_pool > 8192U ||
-	    o.reassembly_pool > 8192U || o.control_tx_items > 8192U ||
-	    o.command_capacity > 65536U ||
-	    o.workers == 0 || o.workers > 32U || o.small_bytes < 8U ||
+	    (!strcmp(o.role, "client") && o.port == 0) || o.requests == 0 ||
+	    o.requests > 1000000U || o.warmup > 100000U || o.window == 0 ||
+	    o.window > 256U || o.capacity < o.window || o.capacity > 256U ||
+	    o.rate_rps == 0 || o.rate_rps > 1000000U || o.small_bytes < 8U ||
 	    o.bulk_bytes < o.small_bytes || o.bulk_bytes > MAX_PAYLOAD ||
 	    o.bulk_every == 0 || o.timeout_ms == 0 || o.timeout_ms > 30000U ||
 	    o.slow_ms > 1000U || o.start_gate > 1U ||
@@ -242,32 +228,6 @@ static void configure_limits(
 	limits->window_update_threshold_bytes = limits->max_message_bytes;
 }
 
-static void configure_tuning(
-	struct tr_facade_tuning *tuning,
-	const struct options *o, int server)
-{
-	tr_facade_tuning_init(tuning);
-	tuning->rpc_message_pool_count =
-		server && o->rpc_message_pool ?
-			o->rpc_message_pool : 2U * o->capacity + 16U;
-	tuning->reassembly_pool_count =
-		server && o->reassembly_pool ?
-			o->reassembly_pool : o->capacity + 8U;
-	tuning->rx_buffer_count =
-		server && o->rx_buffers ?
-			o->rx_buffers : 2U * o->capacity + 16U;
-	tuning->executor_threads = o->workers;
-	tuning->executor_queue_capacity =
-		server && o->executor_queue ?
-			o->executor_queue : 4U * o->capacity;
-	if (server)
-		tuning->observability_flags = TR_OBSERVABILITY_TIMING;
-	if (server && o->control_tx_items)
-		tuning->control_tx_item_capacity = o->control_tx_items;
-	if (server && o->command_capacity)
-		tuning->command_capacity = o->command_capacity;
-}
-
 static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
 {
 	struct tr_rpc_method_desc m = {
@@ -280,63 +240,54 @@ static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
 	return m;
 }
 
-static int echo(struct tr_rpc_call_handle call, const struct tr_rpc_bytes *request,
-		struct tr_rpc_unary_response *response, void *arg)
+static enum tr_rpc_status echo_v2(struct tr_rpc_v2_call_id call,
+                                  const struct tr_rpc_v2_request *request,
+                                  const struct tr_rpc_v2_cancel *cancel,
+                                  struct tr_rpc_v2_reply *reply, void *arg)
 {
 	const uint32_t *delay_ms = arg;
 	(void)call;
-	if (*delay_ms) {
+	(void)cancel;
+	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE && *delay_ms) {
 		struct timespec delay = { (time_t)(*delay_ms / 1000U),
 			(long)(*delay_ms % 1000U) * 1000000L };
 		while (nanosleep(&delay, &delay) != 0)
 			if (errno != EINTR)
-				return TR_ERR_SYS;
+				return TR_RPC_STATUS_INTERNAL;
 	}
-	/* Unary runtime copies this borrowed request before releasing its task. */
-	response->status = TR_RPC_STATUS_OK;
-	response->message = *request;
-	return TR_OK;
+	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
+		if (tr_rpc_v2_reply_append(reply, &request->body) != TR_OK)
+			return TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+	}
+	return TR_RPC_STATUS_OK;
 }
 
 static int run_server(const struct options *o)
 {
 	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
 	struct tr_server_stats stats;
 	struct rusage usage_after;
+	struct tr_rpc_v2_method methods[3] = {0};
 	uint32_t delays[] = {0U, 0U, o->slow_ms};
 	uint16_t port;
-	uint32_t id;
 	int status;
 	tr_server_config_init(&config);
 	configure_limits(&config.limits, o);
-	configure_tuning(&tuning, o, 1);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
-	check(tr_server_create_with_tuning(
-		      &config, &tuning, &server), "server create");
-	for (id = 1; id <= 3; ++id) {
-		struct tr_rpc_method_desc m = method(id, o->bulk_bytes);
-		check(tr_server_legacy_register_method(server, &m, echo,
-		                                       &delays[id - 1U]),
-		      "server method");
+	for (uint32_t id = 1U; id <= 3U; ++id) {
+		methods[id - 1U].descriptor = method(id, o->bulk_bytes);
+		methods[id - 1U].work = echo_v2;
+		methods[id - 1U].arg = &delays[id - 1U];
 	}
+	check(tr_server_create(&config, methods, 3U, &server), "server create");
 	check(tr_server_listen(server, o->host, (uint16_t)o->port, &port), "listen");
 	check(tr_server_start(server), "server start");
-	printf("{\"type\":\"ready\",\"port\":%u,\"pid\":%ld,\"workers\":%u,"
-	       "\"capacity\":%u,\"executor_queue\":%u,\"slow_ms\":%u,"
-	       "\"rx_buffers\":%u,\"rpc_message_pool\":%u,"
-	       "\"reassembly_pool\":%u,\"control_tx_items\":%u,"
-	       "\"command_capacity\":%u}\n",
-	       port, (long)getpid(), o->workers, o->capacity,
-	       o->executor_queue ? o->executor_queue : 4U * o->capacity,
-	       o->slow_ms,
-	       tuning.rx_buffer_count,
-	       tuning.rpc_message_pool_count,
-	       tuning.reassembly_pool_count,
-	       tuning.control_tx_item_capacity,
-	       tuning.command_capacity);
+	printf("{\"schema\":2,\"api_generation\":\"rpc_v2\","
+	       "\"type\":\"ready\",\"port\":%u,\"pid\":%ld,"
+	       "\"capacity\":%u,\"slow_ms\":%u}\n",
+	       port, (long)getpid(), o->capacity, o->slow_ms);
 	fflush(stdout);
 	/* No global signal policy: the harness closes this process's stdin. */
 	while (getchar() != EOF)
@@ -345,28 +296,16 @@ static int run_server(const struct options *o)
 	check(tr_server_get_stats(server, &stats), "server stats");
 	check(getrusage(RUSAGE_SELF, &usage_after), "server getrusage");
 	{
-		uint64_t reactor_total_ns = stats.reactor.busy_ns +
-					   stats.reactor.poll_ns;
-		double reactor_busy_ratio = reactor_total_ns ?
-			(double)stats.reactor.busy_ns / (double)reactor_total_ns :
-			0.0;
-		double queue_wait_p99_us =
-			(double)histogram_percentile_upper_ns(
-				&stats.rpc.executor_queue_wait_ns, 99U) / 1000.0;
-		double handler_p99_us =
-			(double)histogram_percentile_upper_ns(
-				&stats.rpc.executor_handler_ns, 99U) / 1000.0;
-
-		printf("{\"type\":\"server_exit\",\"drain_status\":%d,"
+		printf("{\"schema\":2,\"api_generation\":\"rpc_v2\","
+		       "\"type\":\"server_exit\",\"drain_status\":%d,"
 		       "\"cpu_s\":%.9f,\"peak_rss_kib\":%ld,"
-		       "\"reactor_busy_ratio\":%.9f,"
-		       "\"reactor_busy_ns\":%" PRIu64 ",\"reactor_poll_ns\":%" PRIu64 ","
 		       "\"reactor_turns\":%" PRIu64 ","
 		       "\"command_budget_limit\":%" PRIu64 ","
 		       "\"command_processed_total\":%" PRIu64 ","
 		       "\"command_max_per_turn\":%" PRIu64 ","
 		       "\"command_budget_hits\":%" PRIu64 ","
-		       "\"epoll_polls\":%" PRIu64 ",\"epoll_waits\":%" PRIu64 ","
+		       "\"epoll_polls\":%" PRIu64 ",\"epoll_waits\":%" PRIu64
+		       ","
 		       "\"command_send_enqueued\":%" PRIu64 ","
 		       "\"command_send_full\":%" PRIu64 ","
 		       "\"command_resume_rx_enqueued\":%" PRIu64 ","
@@ -386,29 +325,23 @@ static int run_server(const struct options *o)
 		       "\"rx_pool_exhausted_events\":%" PRIu64 ","
 		       "\"tx_pool_exhausted_events\":%" PRIu64 ","
 		       "\"control_tx_pool_exhausted_events\":%" PRIu64 ","
-		       "\"rpc_queue_peak_per_peer\":%u,"
-		       "\"rpc_admission_limit_hits\":%" PRIu64 ","
-		       "\"rpc_hard_full_events\":%" PRIu64 ","
-		       "\"rpc_queue_wait_p99_us\":%.3f,"
-		       "\"rpc_handler_p99_us\":%.3f,"
-		       "\"rpc_message_pool_capacity\":%u,"
-		       "\"rpc_message_pool_peak\":%u,"
+		       "\"rpc_executor_threads\":%u,"
+		       "\"rpc_task_queue_capacity\":%" PRIu64 ","
+		       "\"rpc_tasks_queued\":%" PRIu64 ","
+		       "\"rpc_tasks_running\":%" PRIu64 ","
+		       "\"rpc_calls_started\":%" PRIu64 ","
+		       "\"rpc_calls_finished\":%" PRIu64 ","
 		       "\"reassembly_pool_capacity\":%u,"
 		       "\"reassembly_pool_peak\":%u,"
-		       "\"rpc_message_pool_exhausted_events\":%" PRIu64 ","
 		       "\"reassembly_pool_exhausted_events\":%" PRIu64 ","
 		       "\"peers_ready_total\":%" PRIu64 ","
 		       "\"peers_reaped_total\":%" PRIu64 "}\n",
 		       status, cpu_seconds(&usage_after), usage_after.ru_maxrss,
-		       reactor_busy_ratio, stats.reactor.busy_ns,
-		       stats.reactor.poll_ns,
-		       stats.reactor.turns,
-		       stats.reactor.limits.commands,
+		       stats.reactor.turns, stats.reactor.limits.commands,
 		       stats.reactor.total.commands,
 		       stats.reactor.max_per_turn.commands,
 		       stats.reactor.budget_hits.commands,
-		       stats.reactor.epoll_polls,
-		       stats.reactor.epoll_waits,
+		       stats.reactor.epoll_polls, stats.reactor.epoll_waits,
 		       stats.reactor.command_send.enqueued,
 		       stats.reactor.command_send.full_events,
 		       stats.reactor.command_resume_rx.enqueued,
@@ -431,43 +364,73 @@ static int run_server(const struct options *o)
 		       stats.reactor.rx_buffer_pool.exhausted_events,
 		       stats.reactor.tx_item_pool.exhausted_events,
 		       stats.reactor.control_tx_item_pool.exhausted_events,
-		       stats.rpc.executor_queue_peak_max_per_endpoint,
-		       stats.rpc.executor_admission_limit_hits,
-		       stats.rpc.executor_hard_full_events,
-		       queue_wait_p99_us, handler_p99_us,
-		       stats.rpc_message_pool.capacity,
-		       stats.rpc_message_pool.peak,
+		       stats.rpc.executor_threads,
+		       stats.rpc.executor_queue_capacity_current,
+		       stats.rpc.executor_queued_tasks_current,
+		       stats.rpc.executor_running_tasks_current,
+		       stats.rpc.semantic.calls_started,
+		       stats.rpc.semantic.calls_finished,
 		       stats.reassembly_pool.capacity,
 		       stats.reassembly_pool.peak,
-		       stats.rpc_message_pool.exhausted_events,
 		       stats.reassembly_pool.exhausted_events,
 		       stats.peers_ready_total, stats.peers_reaped_total);
 	}
-	check(tr_server_destroy(server), "server destroy");
+	destroy_server_retry(server);
 	return status == TR_OK ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static void result(struct tr_rpc_call_handle call, int status,
-		   const struct tr_rpc_bytes *response, void *arg)
+static void result_message(struct tr_rpc_v2_call call,
+                           const struct tr_rpc_bytes *response, void *arg)
 {
 	struct slot *slot = arg;
 	struct client_run *run = slot->run;
-	uint64_t end = now_ns();
 	(void)call;
 	check(pthread_mutex_lock(&run->lock), "result lock");
-	if (!slot->busy || slot->done) {
+	if (!slot->busy || slot->done || slot->message_seen) {
 		run->bad_callback = 1;
 	} else {
-		slot->sample->end_ns = end;
-		slot->sample->rpc_status = status;
-		slot->sample->valid = status != TR_RPC_STATUS_OK ||
-			(response && response->len == slot->sample->bytes &&
-			 response->data && !memcmp(response->data, slot->payload, response->len));
-		slot->done = 1;
+		slot->message_seen = 1;
+		slot->response_valid =
+		        response && response->len == slot->sample->bytes &&
+		        response->data &&
+		        !memcmp(response->data, slot->payload, response->len);
 	}
 	check(pthread_cond_broadcast(&run->cond), "result signal");
 	check(pthread_mutex_unlock(&run->lock), "result unlock");
-	/* No slot access after unlock: the issuer may now reuse it. */
+}
+
+static void result_terminal(struct tr_rpc_v2_call call,
+                            enum tr_rpc_status status,
+                            enum tr_rpc_v2_delivery delivery, void *arg)
+{
+	struct slot *slot = arg;
+	struct client_run *run = slot->run;
+	(void)call;
+	(void)delivery;
+	check(pthread_mutex_lock(&run->lock), "terminal lock");
+	if (!slot->busy || slot->done) {
+		run->bad_callback = 1;
+	} else {
+		slot->sample->end_ns = now_ns();
+		slot->sample->rpc_status = (int)status;
+		slot->sample->valid =
+		        status != TR_RPC_STATUS_OK ||
+		        (slot->message_seen && slot->response_valid);
+		slot->done = 1;
+	}
+	check(pthread_cond_broadcast(&run->cond), "terminal signal");
+	check(pthread_mutex_unlock(&run->lock), "terminal unlock");
+	/* The issuer may reuse this slot after the terminal callback returns.
+	 */
+}
+
+static struct tr_rpc_v2_client_callbacks callbacks_for(struct slot *slot)
+{
+	struct tr_rpc_v2_client_callbacks callbacks = {
+	        .message = result_message,
+	        .terminal = result_terminal,
+	        .arg = slot};
+	return callbacks;
 }
 
 static int compare_u64(const void *a, const void *b)
@@ -541,7 +504,8 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		for (i = 0; i < run->window; ++i) {
 			struct slot *slot = &run->slots[i];
 			struct tr_rpc_call_options call_options = { .timeout_ms = timeout_ms };
-			struct tr_rpc_call_handle handle;
+			struct tr_rpc_v2_call call;
+			struct tr_rpc_v2_client_callbacks callbacks;
 			struct tr_rpc_bytes request;
 			struct sample *s;
 			uint64_t sequence;
@@ -568,11 +532,14 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 			request.data = slot->payload;
 			request.len = s->bytes;
 			s->start_ns = now_ns();
+			slot->message_seen = 0;
+			slot->response_valid = 0;
+			callbacks = callbacks_for(slot);
 			/* Callback may run before submit returns. Never hold its mutex here. */
 			check(pthread_mutex_unlock(&run->lock), "submit unlock");
-			ret = tr_rpc_unary_call_ex(
-			        run->client->endpoint, SERVICE, s->method,
-			        &request, &call_options, result, slot, &handle);
+			ret = tr_client_unary_call(
+			        run->client, SERVICE, s->method, &request,
+			        &call_options, &callbacks, &call);
 			check(pthread_mutex_lock(&run->lock), "submit lock");
 			s->submit_status = ret;
 			if (ret != TR_OK) {
@@ -600,19 +567,23 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		fprintf(stderr, "phase %s: incomplete, duplicate callback or corrupt response (%u/%u)\n",
 			name, completed, count);
 		/* Keep samples and payloads alive until all library callbacks are joined. */
-		check(rpc_v1_test_client_destroy(run->client),
-		      "client destroy");
+		check(tr_client_destroy(run->client), "client destroy");
 		run->client = NULL;
 		free(samples);
 		return -1;
 	}
 	if (report) {
 		double elapsed = (double)(end - begin) / 1e9;
-		printf("{\"type\":\"phase\",\"schema\":1,\"phase\":\"%s\",\"scenario\":\"%s\","
-		       "\"pid\":%ld,\"window\":%u,\"start_ns\":%" PRIu64 ",\"end_ns\":%" PRIu64 ","
+		printf("{\"type\":\"phase\",\"schema\":2,"
+		       "\"api_generation\":\"rpc_v2\",\"phase\":\"%s\","
+		       "\"scenario\":\"%s\","
+		       "\"pid\":%ld,\"window\":%u,\"start_ns\":%" PRIu64
+		       ",\"end_ns\":%" PRIu64 ","
 		       "\"elapsed_s\":%.9f,\"client_cpu_s\":%.9f,"
-		       "\"client_peak_rss_kib\":%ld,", name, scenario, (long)getpid(), run->window, begin, end,
-		       elapsed, cpu_seconds(&after) - cpu_seconds(&before), after.ru_maxrss);
+		       "\"client_peak_rss_kib\":%ld,",
+		       name, scenario, (long)getpid(), run->window, begin, end,
+		       elapsed, cpu_seconds(&after) - cpu_seconds(&before),
+		       after.ru_maxrss);
 		report_class("all", samples, count, 0U, elapsed);
 		putchar(','); report_class("small", samples, count, METHOD_SMALL, elapsed);
 		putchar(','); report_class("bulk", samples, count, METHOD_BULK, elapsed);
@@ -710,7 +681,8 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	drain_elapsed = (double)(end - begin) / 1e9;
 	drain_tail_ms = end > horizon ? (double)(end - horizon) / 1e6 : 0.0;
 
-	printf("{\"type\":\"open_phase\",\"schema\":1,\"phase\":\"measure\","
+	printf("{\"type\":\"open_phase\",\"schema\":2,"
+	       "\"api_generation\":\"rpc_v2\",\"phase\":\"measure\","
 	       "\"scenario\":\"open\",\"pid\":%ld,\"window\":%u,"
 	       "\"rate_rps\":%u,\"start_ns\":%" PRIu64
 	       ",\"schedule_horizon_ns\":%" PRIu64 ","
@@ -774,7 +746,8 @@ static int open_phase(struct client_run *run, const struct options *o)
 		struct tr_rpc_call_options call_options = {
 			.timeout_ms = o->timeout_ms
 		};
-		struct tr_rpc_call_handle handle;
+		struct tr_rpc_v2_call call;
+		struct tr_rpc_v2_client_callbacks callbacks;
 		struct tr_rpc_bytes request;
 		uint64_t sequence = i;
 		uint32_t j;
@@ -813,16 +786,19 @@ static int open_phase(struct client_run *run, const struct options *o)
 		slot->sample = s;
 		slot->busy = 1;
 		slot->done = 0;
+		slot->message_seen = 0;
+		slot->response_valid = 0;
 		s->valid = 1;
 		request.data = slot->payload;
 		request.len = s->bytes;
+		callbacks = callbacks_for(slot);
 		check(pthread_mutex_unlock(&run->lock), "open submit unlock");
 
 		/* 近似 API 入口，不是网络发送或服务端到达时间。 */
 		s->submit_ns = now_ns();
-		ret = tr_rpc_unary_call_ex(run->client->endpoint, SERVICE,
-		                           METHOD_SLOW, &request, &call_options,
-		                           result, slot, &handle);
+		ret = tr_client_unary_call(run->client, SERVICE, METHOD_SLOW,
+		                           &request, &call_options, &callbacks,
+		                           &call);
 
 		check(pthread_mutex_lock(&run->lock), "open submit lock");
 		s->submit_status = ret;
@@ -868,8 +844,7 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 	if (failed || run->bad_callback) {
 		fputs("open phase: incomplete or duplicate callback\n", stderr);
-		check(rpc_v1_test_client_destroy(run->client),
-		      "client destroy");
+		check(tr_client_destroy(run->client), "client destroy");
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -886,14 +861,13 @@ static int open_phase(struct client_run *run, const struct options *o)
 static int run_client(const struct options *o)
 {
 	struct tr_client_config config;
-	struct tr_facade_tuning tuning;
+	struct tr_rpc_method_desc methods[3];
 	struct client_run run = {0};
 	pthread_condattr_t attr;
 	uint32_t i;
 	int status = EXIT_SUCCESS;
 	tr_client_config_init(&config);
 	configure_limits(&config.limits, o);
-	configure_tuning(&tuning, o, 0);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
 	check(pthread_mutex_init(&run.lock, NULL), "mutex init");
@@ -909,24 +883,20 @@ static int run_client(const struct options *o)
 		run.slots[i].payload = malloc(o->bulk_bytes);
 		if (!run.slots[i].payload) fatal("payload allocation", errno);
 	}
-	check(rpc_v1_test_client_create(&config, &tuning, &run.client),
-	      "raw V1 peer create");
-	check(rpc_v1_test_client_connect(run.client, o->host,
-	                                 (uint16_t)o->port),
-	      "raw V1 peer connect");
 	for (i = 1U; i <= 3U; ++i) {
-		struct tr_rpc_method_desc m = method(i, o->bulk_bytes);
-		check(tr_rpc_register_method(run.client->endpoint, &m, NULL,
-		                             NULL),
-		      "raw V1 method");
+		methods[i - 1U] = method(i, o->bulk_bytes);
 	}
+	check(tr_client_create(&config, methods, 3U, &run.client),
+	      "V2 client create");
+	check(tr_client_connect(run.client, o->host, (uint16_t)o->port),
+	      "V2 client connect");
+	check(tr_client_wait_ready(run.client, 5000U), "V2 client ready");
 	if (o->warmup) {
 		uint32_t measure_window = run.window;
 
 		/*
-		 * Open-loop capacity experiments intentionally shrink the Server
-		 * executor queue. Warmup must not burst at the measurement window and
-		 * accidentally become the saturation test itself.
+		 * Keep warmup bounded to a single outstanding call in open-loop
+		 * mode.
 		 */
 		if (!strcmp(o->scenario, "open"))
 			run.window = 1U;
@@ -937,7 +907,9 @@ static int run_client(const struct options *o)
 	if (status == EXIT_SUCCESS && o->start_gate) {
 		int gate_kind;
 
-		printf("{\"type\":\"client_ready\",\"pid\":%ld}\n", (long)getpid());
+		printf("{\"schema\":2,\"api_generation\":\"rpc_v2\","
+		       "\"type\":\"client_ready\",\"pid\":%ld}\n",
+		       (long)getpid());
 		fflush(stdout);
 		gate_kind = getchar();
 		if (gate_kind == EOF) {
@@ -983,8 +955,15 @@ static int run_client(const struct options *o)
 			status = EXIT_FAILURE;
 		}
 	}
-	/* No reconnect/recreate between pressure and recovery. Teardown joins callbacks. */
-	check(rpc_v1_test_client_destroy(run.client), "raw V1 peer destroy");
+	/* Pressure and recovery share one V2 client and one real TCP
+	 * connection. */
+	if (run.client) {
+		check(tr_client_begin_drain(run.client),
+		      "V2 client begin drain");
+		check(tr_client_wait_drained(run.client, 5000U),
+		      "V2 client drain");
+		check(tr_client_destroy(run.client), "V2 client destroy");
+	}
 	for (i = 0; i < run.window; ++i) free(run.slots[i].payload);
 	free(run.slots);
 	check(pthread_cond_destroy(&run.cond), "cond destroy");

@@ -3,9 +3,6 @@
 
 #include <stdint.h>
 
-struct tr_server;
-struct tr_server_config;
-
 /* 仓库内部实现调优。
  *
  * 这些容量描述当前反应器与池的实现细节，不是应用协议语义。
@@ -39,10 +36,5 @@ struct tr_facade_tuning {
 
 void tr_facade_tuning_init(struct tr_facade_tuning *tuning);
 void tr_facade_tuning_normalize(struct tr_facade_tuning *tuning);
-
-int tr_server_create_with_tuning(
-	const struct tr_server_config *config,
-	const struct tr_facade_tuning *tuning,
-	struct tr_server **out);
 
 #endif

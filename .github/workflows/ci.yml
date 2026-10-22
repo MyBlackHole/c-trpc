@@ -61,7 +61,11 @@ jobs:
                    tr_client_legacy_call_start \
                    tr_client_legacy_call_start_ex \
                    tr_client_create_with_tuning \
-                   tr_client_get_rpc_stats
+                   tr_client_get_rpc_stats \
+                   tr_server_create_with_tuning \
+                   tr_server_legacy_create \
+                   tr_server_legacy_register_method \
+                   tr_server_legacy_register_stream_method
       - name: 保留 V1 引用与静态库对象清单
         if: always()
         uses: actions/upload-artifact@v4

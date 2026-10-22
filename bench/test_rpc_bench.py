@@ -13,7 +13,8 @@ def group(n=0):
 
 
 def row():
-    return dict(type="phase", schema=1, scenario="small", elapsed_s=1.0,
+    return dict(type="phase", schema=2, api_generation="rpc_v2",
+                scenario="small", elapsed_s=1.0,
                 start_ns=1000, end_ns=1000001000, client_cpu_s=0.5,
                 client_peak_rss_kib=1024, all=group(10), small=group(10),
                 bulk=group(), slow=group())
@@ -89,11 +90,20 @@ class AccountingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_phase(r, 10, "mixed", clean=True)
 
+    def test_rejects_old_generation(self):
+        r = row()
+        r["schema"] = 1
+        with self.assertRaises(ValueError):
+            validate_phase(r, 10, "small", clean=True)
+        r = row()
+        r["api_generation"] = "rpc_v1"
+        with self.assertRaises(ValueError):
+            validate_phase(r, 10, "small", clean=True)
+
     def test_server_observability(self):
         server = dict(
-            type="server_exit", drain_status=0, cpu_s=0.1,
-            peak_rss_kib=1024, reactor_busy_ratio=0.5,
-            reactor_busy_ns=100, reactor_poll_ns=100, reactor_turns=10,
+            type="server_exit", schema=2, api_generation="rpc_v2",
+            drain_status=0, cpu_s=0.1, peak_rss_kib=1024, reactor_turns=10,
             command_budget_limit=64, command_processed_total=20,
             command_max_per_turn=4, command_budget_hits=0,
             epoll_polls=2, epoll_waits=8,
@@ -109,20 +119,19 @@ class AccountingTests(unittest.TestCase):
             control_tx_pool_capacity=8, control_tx_pool_peak=6,
             rx_pool_exhausted_events=0, tx_pool_exhausted_events=0,
             control_tx_pool_exhausted_events=0,
-            rpc_queue_peak_per_peer=7, rpc_admission_limit_hits=0,
-            rpc_hard_full_events=0, rpc_queue_wait_p99_us=10.0,
-            rpc_handler_p99_us=20.0, rpc_message_pool_capacity=32,
-            rpc_message_pool_peak=8, reassembly_pool_capacity=16,
-            reassembly_pool_peak=1, rpc_message_pool_exhausted_events=0,
+            rpc_executor_threads=4, rpc_task_queue_capacity=256,
+            rpc_tasks_queued=0, rpc_tasks_running=0,
+            rpc_calls_started=10, rpc_calls_finished=10,
+            reassembly_pool_capacity=16, reassembly_pool_peak=1,
             reassembly_pool_exhausted_events=0, peers_ready_total=1,
             peers_reaped_total=1)
         validate_server_exit(server)
         broken = copy.deepcopy(server)
-        broken["reactor_busy_ratio"] = 1.1
+        broken["schema"] = 1
         with self.assertRaises(ValueError):
             validate_server_exit(broken)
         broken = copy.deepcopy(server)
-        broken["rpc_queue_wait_p99_us"] = float("nan")
+        broken["api_generation"] = "rpc_v1"
         with self.assertRaises(ValueError):
             validate_server_exit(broken)
         broken = copy.deepcopy(server)
@@ -134,8 +143,7 @@ class AccountingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_server_exit(broken)
         broken = copy.deepcopy(server)
-        broken["reactor_busy_ns"] = 0
-        broken["reactor_poll_ns"] = 0
+        broken["rpc_calls_finished"] -= 1
         with self.assertRaises(ValueError):
             validate_server_exit(broken)
 

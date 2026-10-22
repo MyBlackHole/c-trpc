@@ -1,5 +1,4 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
 #include "tr/client.h"
 #include "tr/server.h"
 #include "tr/status.h"
@@ -7,6 +6,7 @@
 #include "../src/execution/buffer_internal.h"
 #include "../src/memory_budget.h"
 #include "../src/runtime/runtime_internal.h"
+#include "server_v2_test_fixture.h"
 
 #include <assert.h>
 #include <stdatomic.h>
@@ -15,7 +15,7 @@
 static atomic_int force_runtime_start_error;
 static atomic_int fail_runtime_stop_once;
 static atomic_int fail_runtime_destroy_once;
-static atomic_int fail_server_rpc_pool_once;
+static atomic_int fail_server_reassembly_pool_once;
 
 static atomic_uint runtime_start_attempts;
 static atomic_uint runtime_stop_attempts;
@@ -25,9 +25,10 @@ static atomic_uint server_pool_attempts;
 int __real_tr_runtime_start(struct tr_runtime *runtime);
 int __real_tr_runtime_stop(struct tr_runtime *runtime);
 int __real_tr_runtime_destroy(struct tr_runtime *runtime);
-int __real_tr_buffer_pool_init_dynamic_budgeted(
-	struct tr_buffer_pool *pool, uint32_t buffer_count,
-	uint32_t max_buffer_size, struct tr_memory_budget *budget);
+int __real_tr_buffer_pool_init_budgeted(struct tr_buffer_pool *pool,
+                                        uint32_t buffer_count,
+                                        uint32_t buffer_size,
+                                        struct tr_memory_budget *budget);
 
 int __wrap_tr_runtime_start(struct tr_runtime *runtime)
 {
@@ -56,15 +57,16 @@ int __wrap_tr_runtime_destroy(struct tr_runtime *runtime)
 	return __real_tr_runtime_destroy(runtime);
 }
 
-int __wrap_tr_buffer_pool_init_dynamic_budgeted(
-	struct tr_buffer_pool *pool, uint32_t buffer_count,
-	uint32_t max_buffer_size, struct tr_memory_budget *budget)
+int __wrap_tr_buffer_pool_init_budgeted(struct tr_buffer_pool *pool,
+                                        uint32_t buffer_count,
+                                        uint32_t buffer_size,
+                                        struct tr_memory_budget *budget)
 {
 	atomic_fetch_add(&server_pool_attempts, 1U);
-	if (atomic_exchange(&fail_server_rpc_pool_once, 0))
+	if (atomic_exchange(&fail_server_reassembly_pool_once, 0))
 		return TR_ERR_NOMEM;
-	return __real_tr_buffer_pool_init_dynamic_budgeted(
-		pool, buffer_count, max_buffer_size, budget);
+	return __real_tr_buffer_pool_init_budgeted(pool, buffer_count,
+	                                           buffer_size, budget);
 }
 
 static void reset_faults(void)
@@ -72,7 +74,7 @@ static void reset_faults(void)
 	atomic_store(&force_runtime_start_error, 0);
 	atomic_store(&fail_runtime_stop_once, 0);
 	atomic_store(&fail_runtime_destroy_once, 0);
-	atomic_store(&fail_server_rpc_pool_once, 0);
+	atomic_store(&fail_server_reassembly_pool_once, 0);
 	atomic_store(&runtime_start_attempts, 0U);
 	atomic_store(&runtime_stop_attempts, 0U);
 	atomic_store(&runtime_destroy_attempts, 0U);
@@ -153,9 +155,9 @@ static void test_server_normal_constructor_rollback_clears_out(void)
 
 	small_server_config(&config);
 	reset_faults();
-	atomic_store(&fail_server_rpc_pool_once, 1);
+	atomic_store(&fail_server_reassembly_pool_once, 1);
 
-	assert(tr_server_legacy_create(&config, &server) == TR_ERR_NOMEM);
+	assert(tr_test_server_v2_create(&config, &server) == TR_ERR_NOMEM);
 	assert(server == NULL);
 	assert(atomic_load(&server_pool_attempts) == 1U);
 	assert(atomic_load(&runtime_destroy_attempts) == 1U);
@@ -168,13 +170,14 @@ static void test_server_rollback_failure_keeps_owner(void)
 
 	small_server_config(&config);
 	reset_faults();
-	atomic_store(&fail_server_rpc_pool_once, 1);
+	atomic_store(&fail_server_reassembly_pool_once, 1);
 	atomic_store(&fail_runtime_destroy_once, 1);
 
 	/* 池初始化是原始构造失败；随后 Runtime 终止销毁
-	 * 再失败一次。Server 存储不得由无返回值清理丢失，而必须留在 out。
+	 * 再失败一次。V2 重组池初始化失败后，Server 存储不得丢失，必须留在
+	 * out。
 	 */
-	assert(tr_server_legacy_create(&config, &server) == TR_ERR_SYS);
+	assert(tr_test_server_v2_create(&config, &server) == TR_ERR_SYS);
 	assert(server != NULL);
 	assert(atomic_load(&server_pool_attempts) == 1U);
 	assert(atomic_load(&runtime_destroy_attempts) == 1U);

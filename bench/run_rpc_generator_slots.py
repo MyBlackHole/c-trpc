@@ -28,7 +28,8 @@ def summarize_slots(aggregate_slots: int, generators: int,
     if summary["aggregate_generator_slots"] != aggregate_slots:
         raise ValueError("slot summary aggregate capacity mismatch")
     summary["type"] = "generator_slot_summary"
-    summary["schema"] = 1
+    summary["schema"] = 2
+    summary["api_generation"] = "rpc_v2"
     return summary
 
 
@@ -51,23 +52,12 @@ def validate_args(parser: argparse.ArgumentParser,
             slots_per_generator(aggregate_slots, args.generators)
     except ValueError as error:
         parser.error(str(error))
-    if not 1 <= args.workers <= 32:
-        parser.error("workers must be in 1..32")
     if not 1 <= args.requests <= 10_000_000:
         parser.error("requests must be in 1..10000000")
     if not 10 <= args.min_arrival_ms <= 10000:
         parser.error("min-arrival-ms must be in 10..10000")
-    if not 1 <= args.generator_workers <= 8:
-        parser.error("generator-workers must be in 1..8")
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
-    if not 16 <= args.executor_queue <= 65536:
-        parser.error("executor-queue must be in 16..65536")
-    for value in (args.rx_buffers, args.control_tx_items):
-        if not 1 <= value <= 8192:
-            parser.error("pool headroom must be in 1..8192")
-    if not 1 <= args.command_capacity <= 65536:
-        parser.error("command-capacity must be in 1..65536")
 
 
 def main() -> int:
@@ -80,15 +70,9 @@ def main() -> int:
     parser.add_argument("--generators", type=int, default=32)
     parser.add_argument("--aggregate-generator-slots", type=parse_int_list,
                         default=parse_int_list("1024,2048,4096,8192"))
-    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--requests", type=int, default=256)
     parser.add_argument("--min-arrival-ms", type=int, default=250)
-    parser.add_argument("--generator-workers", type=int, default=1)
     parser.add_argument("--timeout-ms", type=int, default=3000)
-    parser.add_argument("--rx-buffers", type=int, default=8192)
-    parser.add_argument("--executor-queue", type=int, default=1024)
-    parser.add_argument("--control-tx-items", type=int, default=8192)
-    parser.add_argument("--command-capacity", type=int, default=16384)
     args = parser.parse_args()
     args.binary = args.binary.resolve(strict=True)
     validate_args(parser, args)
@@ -100,7 +84,8 @@ def main() -> int:
     metadata = base_metadata(args.binary, args.label, load_mode="open")
     metadata.update({
         "type": "generator_slot_metadata",
-        "schema": 1,
+        "schema": 2,
+        "api_generation": "rpc_v2",
         "trials": args.trials,
         "rate_rps": args.rate,
         "generators": args.generators,
@@ -110,16 +95,9 @@ def main() -> int:
             for value in args.aggregate_generator_slots
         },
         "requests": requests,
-        "workers": args.workers,
-        "generator_workers": args.generator_workers,
-        "server_headroom": {
-            "rx_buffer_count": args.rx_buffers,
-            "executor_queue": args.executor_queue,
-            "control_tx_item_count": args.control_tx_items,
-            "command_capacity": args.command_capacity,
-        },
+        "server_capacity": 128,
         "note": (
-            "Generator count, total offered rate and Server headroom remain "
+            "Generator count, total offered rate and Server public limits remain "
             "fixed. Only aggregate Client in-flight capacity changes. Slot "
             "order alternates by trial to reduce fixed-order runner bias."),
     })
@@ -141,22 +119,14 @@ def main() -> int:
                     "rate_rps": args.rate,
                     "requests": requests,
                     "warmup": 32,
-                    "workers": args.workers,
                     "slow_ms": 0,
-                    "executor_queue": args.executor_queue,
                     "window": 128,
                     "capacity": 128,
                     "generator_window": generator_slots,
                     "generator_capacity": generator_slots,
                     "timeout_ms": args.timeout_ms,
                     "generators": args.generators,
-                    "generator_workers": args.generator_workers,
-                    "resource_profile": "generator_slot_headroom",
-                    "rx_buffer_count": args.rx_buffers,
-                    "control_tx_item_count": args.control_tx_items,
-                    "command_capacity": args.command_capacity,
-                    "rpc_message_pool_count": 0,
-                    "reassembly_pool_count": 0,
+                    "public_profile": "generator_slot_fixed_server_limits",
                 }
                 case_dir = (
                     args.output.parent / (args.output.stem + "-logs") /
@@ -165,7 +135,8 @@ def main() -> int:
                     result = run_profile_case(args.binary, case, case_dir)
                 except Exception as error:
                     output.write(json.dumps({
-                        "type": "failure",
+                        "type": "failure", "schema": 2,
+                        "api_generation": "rpc_v2",
                         "trial": trial,
                         "aggregate_generator_slots": aggregate_slots,
                         "case": case,
@@ -176,7 +147,8 @@ def main() -> int:
                     raise
 
                 result["type"] = "generator_slot_case"
-                result["schema"] = 1
+                result["schema"] = 2
+                result["api_generation"] = "rpc_v2"
                 result["aggregate_generator_slots"] = aggregate_slots
                 result["wall_signals"] = exact_wall_signals(result)
                 results_by_slots[aggregate_slots].append(result)

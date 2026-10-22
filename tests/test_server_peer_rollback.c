@@ -1,7 +1,8 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
 #include "tr/server.h"
 #include "tr/status.h"
+
+#include "server_v2_test_fixture.h"
 
 #include "../src/execution/reactor_internal.h"
 #include "../src/facade_diagnostics_internal.h"
@@ -145,7 +146,7 @@ int main(void)
 	atomic_store(&owner_close_attempts, 0U);
 	atomic_store(&queued_close_attempts, 0U);
 
-	assert(tr_server_legacy_create(&config, &server) == TR_OK);
+	assert(tr_test_server_v2_create(&config, &server) == TR_OK);
 	assert(server != NULL);
 	assert(tr_server_listen(server, "127.0.0.1", 0U, &port) == TR_OK);
 	assert(port != 0U);
@@ -159,7 +160,10 @@ int main(void)
 	 */
 	wait_for_owner_close();
 	assert(atomic_load(&observer_attempts) == 1U);
-	assert(atomic_load(&owner_close_attempts) == 1U);
+	/* V2 清理定时器可在首次 owner close 后再次确认连接已退役；
+	 * 不允许退回普通命令队列关闭路径。
+	 */
+	assert(atomic_load(&owner_close_attempts) >= 1U);
 	assert(atomic_load(&queued_close_attempts) == 0U);
 
 	/* Channel 已经存在，因此回滚会发布部分对端，并通过分片
@@ -169,6 +173,15 @@ int main(void)
 	wait_for_peer_reap(server);
 
 	assert(close(client_fd) == 0);
-	assert(tr_server_destroy(server) == TR_OK);
+	int destroy_ret;
+	unsigned destroy_retries = 0U;
+	do {
+		destroy_ret = tr_server_destroy(server);
+		if (destroy_ret == TR_AGAIN) {
+			assert(++destroy_retries < 10000U);
+			sched_yield();
+		}
+	} while (destroy_ret == TR_AGAIN);
+	assert(destroy_ret == TR_OK);
 	return 0;
 }

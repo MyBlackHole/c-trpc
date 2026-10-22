@@ -1,6 +1,62 @@
 # TCP / RPC 混合负载与截止时间压力基准
 
-## 本轮边界
+## R12 当前基准：公开 V2 Client/Server
+
+`bench_rpc` 通过公开 `tr_server_create()` 构造 V2 Server，通过公开
+`tr_client_create()`、`tr_client_unary_call()` 发送真实 IPv4 TCP 调用。
+小消息、64 KiB 大消息、混合负载、多 Client、期限压力和压力后恢复都校验
+响应内容与终局状态。负载端测量提交到 terminal callback 的延迟；Server 侧只记录
+现有 Reactor、Channel、reassembly、V2 task executor、peer 与 semantic stats，
+不使用 V1 Endpoint 队列/handler 直方图或 message-pool 统计。
+
+```sh
+xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
+xmake build trcore bench_rpc
+PYTHONDONTWRITEBYTECODE=1 python3 bench/run_rpc_bench.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --trials 3 --requests 1000 --label gcc-release-rpc-v2-r12 \
+  --output build/rpc-v2-release.jsonl
+PYTHONDONTWRITEBYTECODE=1 python3 bench/export_rpc_v2_csv.py \
+  --input build/rpc-v2-release.jsonl \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --output bench/results/rpc-v2-20261021.csv
+
+# 正确性冒烟；不是性能结论。
+PYTHONDONTWRITEBYTECODE=1 python3 bench/run_rpc_bench.py \
+  --binary build/linux/x86_64/release/bench_rpc --smoke \
+  --output build/rpc-v2-smoke.jsonl
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+  -s bench -p 'test_rpc_*.py' -v
+```
+
+每条基准 JSON 记录顶层使用 `schema: 2` 和 `api_generation: "rpc_v2"`；校验器拒绝
+V1 schema、错误 generation、丢失请求、错误响应及未收敛的 Server 调用账本。
+固定速率 driver 的公开维度是调用容量、消息大小、处理器延迟、到达率、发生器窗口
+与发生器数量；不再暴露旧 worker、RPC queue 或 pool 调优选项。
+容量、扩展性、headroom、fanout、generator-slot 和 repeatability driver 的输出
+沿用相同 V2 generation 标识，并保留 arrival、受理、提交拒绝、完成、状态分类、
+响应验证及发生器迟到/丢弃记账。
+
+新独立结果保存在 [`bench/results/rpc-v2-20261021.csv`](../bench/results/rpc-v2-20261021.csv)。
+它不与 `bench/results/rpc-20260926.csv` 或 `crc32c-20260926.csv` 拼接：这两份文件
+是 V1/旧 CRC 时代的历史数据，协议实现、负载 API 与统计口径不同，不能作为 V2
+纵向性能对照。CI smoke 只验证真实请求和结果合同，不设绝对 QPS/延迟门槛。
+
+该 CSV 共 27 行，每个 trial 的 client × phase 各一行，压力场景的 measure 和
+recovery 分开记录。行内重复保存 `schema`、`api_generation`、源码 commit、二进制
+SHA-256、CPU/平台信息、场景参数、`all/small/bulk/slow` 账本与端到端延迟，并附上
+Server 退出时已有的 Reactor、资源池、reassembly、V2 task、peer 和调用统计。
+Server CPU/RSS 是包含启动、预热和排空的进程生命周期值，不是 phase-only 数据。
+`export_rpc_v2_csv.py` 会验证 schema/generation、二进制哈希、分类账本及 Server
+调用收敛后再写 CSV；对应负向覆盖在 `bench/test_rpc_csv_export.py`。
+
+## 历史 V1 基准与诊断记录（仅供回溯）
+
+以下内容记录旧 V1 `bench_rpc` 的命令、参数和观察结果；其中的构造入口、执行器
+调优参数、队列字段和统计实现已从当前 Server facade 退役，命令不适用于当前脚本。
+这些记录只用于解释历史 V1 数据，不构成当前 V2 的性能证据或验收条件。
+
+### 旧 V1 基准边界（归档）
 
 这是按需启用的诊断工具，本身不会绕过或私自覆盖生产套接字策略。
 `bench_rpc` 的 RPC 调用端是测试专用 raw V1 Endpoint，服务端仍使用 V1 Server

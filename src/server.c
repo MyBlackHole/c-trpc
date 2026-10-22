@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include "facade_legacy_internal.h"
 #include "execution/worker_context.h"
 #include "tr/server.h"
 
@@ -42,7 +41,6 @@
  */
 struct tr_server_peer {
 	struct tr_runtime_peer transport;
-	struct tr_rpc_endpoint *rpc;
 	struct tr_rpc_record_endpoint *record_rpc;
 	int record_closing;
 };
@@ -58,30 +56,17 @@ static struct tr_server_peer *tr_server_peer_state(struct tr_runtime_peer *peer)
 	return (struct tr_server_peer *)peer;
 }
 
-enum tr_server_method_kind {
-	TR_SERVER_METHOD_UNARY = 1,
-	TR_SERVER_METHOD_STREAM = 2
-};
-
-struct tr_server_method {
-	int used;
-	enum tr_server_method_kind kind;
-	struct tr_rpc_method_desc desc;
-	tr_rpc_unary_handler unary_handler;
-	struct tr_rpc_stream_handlers stream_handlers;
-	void *handler_arg;
+enum tr_server_mode {
+	TR_SERVER_MODE_RPC_V2 = 1,
+	TR_SERVER_MODE_TRANSPORT_ONLY = 2
 };
 
 struct tr_server;
-struct tr_server_detached_peer;
 
 struct tr_server_shard {
 	struct tr_server *server;
 	struct tr_runtime_shard *runtime;
-	struct tr_buffer_pool rpc_message_pool;
 	struct tr_buffer_pool reassembly_pool;
-	uint32_t executor_threads;
-	int rpc_pool_ready;
 	int reassembly_pool_ready;
 	int peer_events_enabled;
 	struct tr_reactor_timer_handle handshake_timer;
@@ -96,20 +81,10 @@ struct tr_server_shard {
 	/* observing 仅由 owner 修改；其余谓词在 finalizer_lock 下发布/读取。 */
 	int record_drain_observing;
 	int record_drained, record_drain_status;
-	struct tr_server_detached_peer *detached_peers;
 	struct tr_server_channel_stats retired_channel_stats;
-	struct tr_server_rpc_stats retired_rpc_stats;
 	/* 所属 owner 直接记账，寿命长于全部 peer。退役无需搬移快照；
 	 * 停止后的写入只发生在父线程 join 且统计入口关闭的清理域。 */
 	struct tr_rpc_record_semantic_counters record_semantic;
-};
-
-struct tr_server_detached_peer {
-	struct tr_server_detached_peer *next;
-	struct tr_rpc_endpoint_stats rpc_stats;
-	struct tr_channel_stats channel_stats;
-	struct tr_server_shard *shard;
-	struct tr_channel *channel;
 };
 
 static int tr_server_blocking_lifecycle_context(void)
@@ -126,29 +101,22 @@ static int tr_server_blocking_lifecycle_context(void)
 
 struct tr_server {
 	struct tr_server_config config;
-	struct tr_facade_tuning tuning;
+	enum tr_server_mode mode;
 
 	struct tr_runtime *runtime;
 	struct tr_server_shard *shards;
 	/* 已绑定 Runtime、允许销毁路径遍历的分片前缀。 */
 	uint32_t shard_count;
 
-	struct tr_server_method *methods;
-	uint32_t method_count;
 	struct tr_server_record_config record;
 	struct tr_rpc_dispatch_method *record_methods;
 	size_t record_method_count;
 	size_t record_method_bytes;
-	int record_mode;
-	int transport_only;
 	int record_start_attempted;
 
 	struct tr_pipeline_listener *connection_group_listener;
 
 	pthread_mutex_t finalizer_lock;
-	pthread_cond_t finalizer_cond;
-	int finalizer_cond_ready;
-	/* V1 finalizer_cond 使用默认时钟；V2 限时等待另用单调条件变量。 */
 	pthread_cond_t record_drain_cond;
 	int record_drain_cond_ready;
 	int started;
@@ -184,12 +152,6 @@ static struct tr_reactor *
 tr_server_shard_reactor(struct tr_server_shard *shard)
 {
 	return shard ? tr_runtime_shard_reactor(shard->runtime) : NULL;
-}
-
-static struct tr_rpc_executor_group *
-tr_server_shard_rpc_executor(struct tr_server_shard *shard)
-{
-	return shard ? tr_runtime_shard_rpc_executor(shard->runtime) : NULL;
 }
 
 static int tr_server_shard_listener_fd(struct tr_server_shard *shard)
@@ -355,68 +317,6 @@ static void tr_server_merge_channel_stats(
 	dst->keepalive_timeouts += src->keepalive_timeouts;
 }
 
-static void tr_server_merge_rpc_semantic_stats(
-	struct tr_rpc_semantic_stats *dst,
-	const struct tr_rpc_semantic_stats *src)
-{
-	uint32_t i;
-
-	if (!dst || !src)
-		return;
-
-	dst->calls_started += src->calls_started;
-	dst->calls_finished += src->calls_finished;
-	dst->calls_inflight += src->calls_inflight;
-	for (i = 0; i < TR_RPC_STATUS_COUNT; ++i)
-		dst->final_status[i] += src->final_status[i];
-}
-
-static void tr_server_merge_rpc_stats(
-	struct tr_server_rpc_stats *dst,
-	const struct tr_rpc_endpoint_stats *src, int current)
-{
-	if (!dst || !src)
-		return;
-
-	if (src->executor_threads > dst->executor_threads)
-		dst->executor_threads = src->executor_threads;
-	if (current) {
-		dst->endpoints_current++;
-		dst->opening_calls_current += src->opening_calls;
-		dst->active_calls_current += src->active_calls;
-		dst->terminal_calls_current += src->terminal_calls;
-		dst->executor_queued_tasks_current += src->executor_queued_tasks;
-		dst->executor_running_tasks_current += src->executor_running_tasks;
-		dst->executor_queue_capacity_current +=
-			src->executor_queue_capacity;
-		dst->executor_ready_calls_current += src->executor_ready_calls;
-	}
-	if (src->executor_queue.peak >
-	    dst->executor_queue_peak_max_per_endpoint)
-		dst->executor_queue_peak_max_per_endpoint =
-			src->executor_queue.peak;
-	if (src->executor_ready_calls_peak >
-	    dst->executor_ready_calls_peak_max_per_endpoint)
-		dst->executor_ready_calls_peak_max_per_endpoint =
-			src->executor_ready_calls_peak;
-
-	dst->executor_enqueued_tasks += src->executor_enqueued_tasks;
-	dst->executor_taken_tasks += src->executor_taken_tasks;
-	dst->executor_admission_limit_hits +=
-		src->executor_admission_limit_hits;
-	dst->executor_hard_full_events += src->executor_hard_full_events;
-	tr_merge_latency_histogram(&dst->executor_queue_wait_ns,
-				   &src->executor_queue_wait_ns);
-	tr_merge_latency_histogram(&dst->executor_handler_ns,
-				   &src->executor_handler_ns);
-
-	dst->calls_started += src->calls_started;
-	dst->calls_completed += src->calls_completed;
-	dst->calls_cancelled += src->calls_cancelled;
-	dst->calls_deadline_exceeded += src->calls_deadline_exceeded;
-	tr_server_merge_rpc_semantic_stats(&dst->semantic, &src->semantic);
-}
-
 static void tr_server_sum_reactor_work(struct tr_reactor_work *dst,
 				       const struct tr_reactor_work *src)
 {
@@ -579,7 +479,7 @@ static uint32_t tr_server_budget_share(uint32_t total,
 static int
 tr_server_budget_supports_shards(const struct tr_server_config *config,
                                  const struct tr_facade_tuning *tuning,
-                                 int record_mode)
+                                 enum tr_server_mode mode)
 {
 	uint32_t shards;
 
@@ -589,13 +489,12 @@ tr_server_budget_supports_shards(const struct tr_server_config *config,
 
 	return config->max_peers >= shards &&
 	       (uint32_t)config->listen_backlog >= shards &&
-	       (record_mode || tuning->executor_threads >= shards) &&
 	       tuning->command_capacity >= shards &&
 	       tuning->tx_item_capacity >= shards &&
 	       tuning->control_tx_item_capacity >= shards &&
 	       tuning->rx_buffer_count >= shards &&
-	       (record_mode || tuning->rpc_message_pool_count >= shards) &&
-	       tuning->reassembly_pool_count >= shards;
+	       (mode != TR_SERVER_MODE_RPC_V2 ||
+	        tuning->reassembly_pool_count >= shards);
 }
 
 static uint64_t tr_server_record_budget_share(uint64_t total, uint32_t shards,
@@ -705,43 +604,7 @@ static void tr_server_tuning_ensure_shard_minimums(
 	TR_TUNING_AT_LEAST_SHARDS(rx_buffer_count);
 	TR_TUNING_AT_LEAST_SHARDS(rpc_message_pool_count);
 	TR_TUNING_AT_LEAST_SHARDS(reassembly_pool_count);
-	TR_TUNING_AT_LEAST_SHARDS(executor_threads);
 #undef TR_TUNING_AT_LEAST_SHARDS
-}
-
-static int tr_server_register_methods_on_peer(struct tr_server *server,
-					      struct tr_runtime_peer *peer)
-{
-	uint32_t i;
-	struct tr_server_peer *state = tr_server_peer_state(peer);
-
-	for (i = 0; i < server->method_count; ++i) {
-		struct tr_server_method *m = &server->methods[i];
-		int ret;
-
-		if (!m->used)
-			continue;
-		if (m->kind == TR_SERVER_METHOD_UNARY) {
-			ret = tr_rpc_register_method(state->rpc, &m->desc,
-			                             m->unary_handler,
-			                             m->handler_arg);
-		} else {
-			ret = tr_rpc_register_stream_method(
-			        state->rpc, &m->desc, &m->stream_handlers,
-			        m->handler_arg);
-		}
-		if (ret != TR_OK)
-			return ret;
-	}
-	return TR_OK;
-}
-
-static int tr_server_peer_handle_equal(const struct tr_runtime_peer *a,
-				       const struct tr_runtime_peer *b)
-{
-	return a->connection.reactor == b->connection.reactor &&
-	       a->connection.slot == b->connection.slot &&
-	       a->connection.generation == b->connection.generation;
 }
 
 static int tr_server_peer_disconnected(struct tr_runtime_peer *peer)
@@ -776,16 +639,8 @@ static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 		return TR_OK;
 	state = tr_server_peer_state(peer);
 	/* V2 共享执行器的完成必须先由分片整体清理，不能逐对端抢先交付。 */
-	if (tr_server_peer_state(peer)->record_rpc)
+	if (state->record_rpc)
 		return TR_ERR_STATE;
-
-	if (state->rpc) {
-		int ret = tr_rpc_endpoint_destroy(state->rpc);
-
-		if (ret != TR_OK)
-			return ret;
-		state->rpc = NULL;
-	}
 	if (peer->channel) {
 		int ret = tr_channel_destroy(peer->channel);
 
@@ -794,68 +649,8 @@ static int tr_server_destroy_peer(struct tr_runtime_peer *peer)
 		peer->channel = NULL;
 	}
 
-	free(peer->finalize_ctx);
-	peer->finalize_ctx = NULL;
 	memset(peer, 0, sizeof(struct tr_server_peer));
 	return TR_OK;
-}
-
-static void tr_server_finish_detached_peer(
-	struct tr_server_detached_peer *detached,
-	const struct tr_rpc_endpoint_stats *rpc_stats)
-{
-	struct tr_server_shard *shard;
-	struct tr_server *server;
-	struct tr_channel_stats channel_stats;
-	struct tr_server_detached_peer **link;
-	int have_channel_stats = 0;
-
-	if (!detached)
-		return;
-	shard = detached->shard;
-	server = shard ? shard->server : NULL;
-	if (!server || !shard) {
-		free(detached);
-		return;
-	}
-
-	memset(&channel_stats, 0, sizeof(channel_stats));
-	if (detached->channel) {
-		if (tr_channel_get_stats(detached->channel, &channel_stats) == TR_OK)
-			have_channel_stats = 1;
-		tr_channel_finalize_detached(detached->channel);
-		detached->channel = NULL;
-	}
-
-	pthread_mutex_lock(&server->finalizer_lock);
-	for (link = &shard->detached_peers; *link; link = &(*link)->next) {
-		if (*link == detached) {
-			*link = detached->next;
-			break;
-		}
-	}
-	if (rpc_stats)
-		tr_server_merge_rpc_stats(&shard->retired_rpc_stats, rpc_stats,
-		                          0);
-	if (have_channel_stats)
-		tr_server_merge_channel_stats(&shard->retired_channel_stats,
-		                              &channel_stats, 0);
-	tr_runtime_shard_peer_note_reaped(shard->runtime);
-	pthread_cond_broadcast(&server->finalizer_cond);
-	pthread_mutex_unlock(&server->finalizer_lock);
-
-	/* 分片的退役 Endpoint 预算用尽时，断开的对端仍可能占据槽位。
-	 * 释放一个退役对象会重新开放解绑准入；唤醒所有者以重试这些槽位。
-	 */
-	tr_runtime_shard_signal_peer_event(shard->runtime);
-	free(detached);
-}
-
-static void tr_server_on_endpoint_finalized(
-	const struct tr_rpc_endpoint_stats *rpc_stats, void *arg)
-{
-	tr_server_finish_detached_peer(
-		(struct tr_server_detached_peer *)arg, rpc_stats);
 }
 
 static void tr_server_record_notify(void *arg)
@@ -1169,100 +964,9 @@ static int tr_server_record_reap_all(struct tr_server *server)
 static void tr_server_detach_disconnected_peers_on_owner(
 	struct tr_server_shard *shard)
 {
-	uint32_t i;
-
-	if (shard->server->record_mode) {
-		tr_server_record_detach_peers_on_owner(shard);
+	if (shard->server->mode != TR_SERVER_MODE_RPC_V2)
 		return;
-	}
-
-	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
-		struct tr_runtime_peer *peer = tr_server_shard_peer_at(shard, i);
-		struct tr_server_peer snapshot;
-		struct tr_server_detached_peer *detached;
-		int ret;
-
-		if (!peer)
-			continue;
-
-		if (!peer->used)
-			continue;
-		snapshot = *tr_server_peer_state(peer);
-
-		if (!tr_server_peer_disconnected(&snapshot.transport))
-			continue;
-
-		detached = snapshot.transport.finalize_ctx;
-		if (!detached)
-			continue;
-
-		/* 对端表槽位生命周期与退役 Endpoint
-		 * 生命周期分离，但二者都必须有界。
-		 * 所有退役槽位均在使用时，保持此已断开对端的发布状态，
-		 * 等收尾器通知分片生命周期 eventfd 后重试。
-		 */
-		if (snapshot.rpc &&
-		    tr_runtime_shard_peer_reaping_at_capacity(shard->runtime))
-			break;
-
-		/* 在 Channel DOWN 通知返回后于反应器所有者上运行。
-		 * 先移除所有所有者可见的回调与定时器源。
-		 */
-		if (snapshot.rpc) {
-			ret = tr_rpc_endpoint_detach_for_finalize(snapshot.rpc);
-			if (ret != TR_OK)
-				continue;
-		}
-		if (snapshot.transport.channel) {
-			ret = tr_channel_detach_for_finalize(
-			        snapshot.transport.channel);
-			if (ret != TR_OK)
-				continue;
-		}
-
-		if (!peer->used ||
-		    !tr_server_peer_handle_equal(peer, &snapshot.transport) ||
-		    peer->channel != snapshot.transport.channel ||
-		    tr_server_peer_state(peer)->rpc != snapshot.rpc ||
-		    peer->finalize_ctx != snapshot.transport.finalize_ctx)
-			continue;
-
-		if (snapshot.rpc) {
-			ret = tr_rpc_endpoint_arm_detached_finalizer(
-				snapshot.rpc, tr_server_on_endpoint_finalized,
-				detached);
-			if (ret != TR_OK)
-				continue;
-		}
-
-		detached->shard = shard;
-		detached->channel = snapshot.transport.channel;
-		/* 保留所有者最后快照，直到归档快照替换它。
-		 * 不在所有者引用释放后保留 Endpoint 指针。
-		 */
-		if (snapshot.rpc)
-			(void)tr_rpc_endpoint_get_stats(snapshot.rpc,
-			                                &detached->rpc_stats);
-		if (snapshot.transport.channel)
-			(void)tr_channel_get_stats(snapshot.transport.channel,
-			                           &detached->channel_stats);
-		pthread_mutex_lock(&shard->server->finalizer_lock);
-		detached->next = shard->detached_peers;
-		shard->detached_peers = detached;
-		pthread_mutex_unlock(&shard->server->finalizer_lock);
-
-		/* 槽位生命周期独立于旧 Endpoint 工作线程引用。
-		 * 一旦所有者解绑完成，就立即清空槽位，使新对端可以复用，
-		 * 即使已解绑 Endpoint 仍在排空。
-		 */
-		memset(peer, 0, sizeof(struct tr_server_peer));
-		tr_runtime_shard_peer_note_removed_for_reap(shard->runtime);
-
-		if (snapshot.rpc)
-			tr_rpc_endpoint_release_detached_owner(snapshot.rpc);
-		else
-			tr_server_finish_detached_peer(detached, NULL);
-	}
+	tr_server_record_detach_peers_on_owner(shard);
 }
 
 static void tr_server_on_peer_lifecycle_event(int fd, uint32_t events,
@@ -1278,35 +982,13 @@ static void tr_server_on_peer_lifecycle_event(int fd, uint32_t events,
 	tr_server_detach_disconnected_peers_on_owner(shard);
 }
 
-static void tr_server_wait_peer_finalizers(struct tr_server *server)
-{
-	pthread_mutex_lock(&server->finalizer_lock);
-	for (;;) {
-		uint32_t pending = 0U;
-		uint32_t i;
-
-		for (i = 0; i < server->shard_count; ++i) {
-			struct tr_runtime_peer_stats stats;
-
-			tr_runtime_shard_peer_stats(
-				server->shards[i].runtime, &stats);
-			pending += stats.reaping_current;
-		}
-		if (pending == 0U)
-			break;
-		pthread_cond_wait(&server->finalizer_cond,
-				  &server->finalizer_lock);
-	}
-	pthread_mutex_unlock(&server->finalizer_lock);
-}
-
 static int tr_server_disable_peer_events(struct tr_server_shard *shard)
 {
 	int ret;
 
 	if (!shard)
 		return TR_ERR_INVALID;
-	if (shard->server->record_mode &&
+	if (shard->server->mode == TR_SERVER_MODE_RPC_V2 &&
 	    (shard->record_cleanup_enabled ||
 	     shard->record_cleanup_timer_registered)) {
 		ret = tr_reactor_call_or_stopped(tr_server_shard_reactor(shard),
@@ -1450,7 +1132,7 @@ static int tr_server_adopt_peer_rollback(
 	if (!shard || !peer)
 		return cause;
 	state = tr_server_peer_state(peer);
-	if (shard->server->record_mode)
+	if (shard->server->mode == TR_SERVER_MODE_RPC_V2)
 		state->record_closing = 1;
 
 	/* tr_server_adopt_peer() 只在分片反应器所有者回调中执行。
@@ -1464,18 +1146,17 @@ static int tr_server_adopt_peer_rollback(
 			close_ret = TR_OK;
 	}
 
-	/* 一旦 Channel/RPC 发布已经建立，不能在当前所有者回调中
+	/* 一旦 Channel/Endpoint 发布已经建立，不能在当前所有者回调中
 	 * 同步销毁。先发布部分对端，延迟到后续分片生命周期处理轮次做
 	 * 解绑与收尾；连接已在上面完成同步退役。
 	 */
-	if (peer->channel || state->rpc || state->record_rpc ||
-	    (shard->server->record_mode && close_ret != TR_OK &&
-	     peer->connection.reactor)) {
+	if (peer->channel || state->record_rpc ||
+	    (shard->server->mode == TR_SERVER_MODE_RPC_V2 &&
+	     close_ret != TR_OK && peer->connection.reactor)) {
 		peer->used = 1;
 		tr_server_note_peer_added_owner(shard);
 		tr_server_signal_peer_cleanup(shard);
 	} else {
-		free(peer->finalize_ctx);
 		memset(peer, 0, sizeof(struct tr_server_peer));
 	}
 
@@ -1486,7 +1167,6 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 {
 	struct tr_server *server = shard->server;
 	struct tr_channel_config channel_config;
-	struct tr_rpc_endpoint_config rpc_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_runtime_peer *peer;
 	struct tr_server_peer *state;
@@ -1525,15 +1205,6 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	ret = tr_server_arm_handshake_on_owner(shard, peer);
 	if (ret != TR_OK)
 		return ret;
-	if (!server->record_mode) {
-		peer->finalize_ctx =
-		        calloc(1, sizeof(struct tr_server_detached_peer));
-		if (!peer->finalize_ctx)
-			return TR_ERR_NOMEM;
-		((struct tr_server_detached_peer *)peer->finalize_ctx)->shard =
-		        shard;
-	}
-
 	if (tr_tcp_nodelay_policy_enabled(server->config.tcp_nodelay)) {
 		ret = tr_tcp_set_nodelay(owned_fd, 1);
 		if (ret != TR_OK)
@@ -1556,8 +1227,8 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		server->config.limits.window_update_threshold_bytes;
 	channel_config.max_message_bytes =
 		server->config.limits.max_message_bytes;
-	channel_config.reassembly_pool = &shard->reassembly_pool;
-	if (server->record_mode) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
+		channel_config.reassembly_pool = &shard->reassembly_pool;
 		channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
 		channel_config.required_feature_bits =
 		        TR_CHANNEL_FEATURE_STREAM_RESET;
@@ -1578,7 +1249,7 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	if (ret != TR_OK)
 		goto rollback;
 
-	if (server->record_mode) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
 		ret = tr_rpc_record_endpoint_create_on_owner(
 		        peer->channel, shard->record_tasks,
 		        server->record_methods, server->record_method_count,
@@ -1595,26 +1266,6 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		if (ret == TR_OK)
 			ret = tr_rpc_record_endpoint_start_on_owner(
 			        state->record_rpc);
-	} else {
-		memset(&rpc_config, 0, sizeof(rpc_config));
-		rpc_config.role = TR_RPC_SERVER;
-		rpc_config.max_methods = server->config.limits.max_methods;
-		rpc_config.max_calls = server->config.limits.max_calls;
-		rpc_config.message_pool = &shard->rpc_message_pool;
-		rpc_config.executor_threads = shard->executor_threads;
-		rpc_config.executor_queue_capacity =
-		        server->tuning.executor_queue_capacity;
-		rpc_config.executor_continuation_reserve =
-		        server->tuning.executor_continuation_reserve;
-		rpc_config.observability_flags =
-		        server->tuning.observability_flags;
-		rpc_config.interceptor = server->config.interceptor;
-
-		ret = tr_rpc_endpoint_create_with_executor_group(
-		        peer->channel, &rpc_config,
-		        tr_server_shard_rpc_executor(shard), &state->rpc);
-		if (ret == TR_OK)
-			ret = tr_server_register_methods_on_peer(server, peer);
 	}
 	if (ret != TR_OK)
 		goto rollback;
@@ -1673,7 +1324,8 @@ static void tr_server_on_listener_ready(int listener, uint32_t events,
 }
 
 static int
-tr_server_create_internal(const struct tr_server_config *config,
+tr_server_create_internal(enum tr_server_mode mode,
+                          const struct tr_server_config *config,
                           const struct tr_facade_tuning *tuning,
                           const struct tr_server_record_config *record,
                           const struct tr_rpc_dispatch_method *record_methods,
@@ -1690,6 +1342,10 @@ tr_server_create_internal(const struct tr_server_config *config,
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
+	if ((mode != TR_SERVER_MODE_RPC_V2 &&
+	     mode != TR_SERVER_MODE_TRANSPORT_ONLY) ||
+	    ((mode == TR_SERVER_MODE_RPC_V2) != (record != NULL)))
+		return TR_ERR_INVALID;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 
@@ -1707,7 +1363,10 @@ tr_server_create_internal(const struct tr_server_config *config,
 	if (!tuning)
 		tr_server_tuning_ensure_shard_minimums(
 			&effective_tuning, effective.shard_count);
-	if (record) {
+	if (mode == TR_SERVER_MODE_TRANSPORT_ONLY &&
+	    (effective.interceptor.fn || effective.interceptor.arg))
+		return TR_ERR_UNSUPPORTED;
+	if (mode == TR_SERVER_MODE_RPC_V2) {
 		ret = tr_server_record_config_valid(&effective, record,
 		                                    record_methods,
 		                                    record_method_count);
@@ -1720,11 +1379,6 @@ tr_server_create_internal(const struct tr_server_config *config,
 	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
 	            effective.limits.max_frame_payload_bytes ||
-	    (!record && effective_tuning.executor_continuation_reserve != 0 &&
-	     effective_tuning.executor_continuation_reserve >=
-	             (effective_tuning.executor_queue_capacity < 16U
-	                      ? 16U
-	                      : effective_tuning.executor_queue_capacity)) ||
 	    effective.max_peers == 0 ||
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
 	    !tr_server_connection_group_config_valid(
@@ -1732,25 +1386,21 @@ tr_server_create_internal(const struct tr_server_config *config,
 	    effective.connection_groups.max_connections >
 	            UINT32_MAX - effective.max_peers - 4U ||
 	    !tr_server_budget_supports_shards(&effective, &effective_tuning,
-	                                      record != NULL))
+	                                      mode))
 		return TR_ERR_INVALID;
 
 	server_mem = (struct tr_server *)calloc(1, sizeof(*server_mem));
 	if (!server_mem)
 		return TR_ERR_NOMEM;
 	server_mem->config = effective;
-	server_mem->tuning = effective_tuning;
-	server_mem->record_mode = record != NULL;
+	server_mem->mode = mode;
 	if (record)
 		server_mem->record = *record;
 
 	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	server = tr_server_mem_take(&server_mem);
-	if (pthread_cond_init(&server->finalizer_cond, NULL) != 0)
-		return tr_server_create_rollback(out, server, TR_ERR_SYS);
-	server->finalizer_cond_ready = 1;
-	if (record) {
+	if (mode == TR_SERVER_MODE_RPC_V2) {
 		pthread_condattr_t attr;
 		if (pthread_condattr_init(&attr) != 0)
 			return tr_server_create_rollback(out, server,
@@ -1765,14 +1415,6 @@ tr_server_create_internal(const struct tr_server_config *config,
 		if (ret != 0 || cleanup_ret != 0)
 			return tr_server_create_rollback(out, server,
 			                                 TR_ERR_SYS);
-	}
-
-	if (!record) {
-		server->methods = (struct tr_server_method *)calloc(
-		        effective.limits.max_methods, sizeof(*server->methods));
-		if (!server->methods)
-			return tr_server_create_rollback(out, server,
-			                                 TR_ERR_NOMEM);
 	}
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
@@ -1798,21 +1440,11 @@ tr_server_create_internal(const struct tr_server_config *config,
 			shard_config->peer_capacity = peer_capacity;
 			shard_config->peer_stride =
 			        sizeof(struct tr_server_peer);
-			if (record) {
+			if (mode == TR_SERVER_MODE_RPC_V2) {
 				shard_config->memory_budget_bytes =
 				        tr_server_record_budget_share(
 				                record->memory_budget_bytes,
 				                effective.shard_count, i);
-			} else {
-				shard_config->rpc_executor.endpoint_capacity =
-				        peer_capacity;
-				shard_config->rpc_executor
-				        .max_calls_per_endpoint =
-				        effective.limits.max_calls;
-				shard_config->rpc_executor
-				        .thread_count = tr_server_budget_share(
-				        effective_tuning.executor_threads,
-				        effective.shard_count, i);
 			}
 
 			reactor_config->max_connections =
@@ -1875,11 +1507,7 @@ tr_server_create_internal(const struct tr_server_config *config,
 
 			server_shard->server = server;
 			server_shard->runtime =
-				tr_runtime_shard_at(server->runtime, i);
-			server_shard->executor_threads =
-				tr_server_budget_share(
-					effective_tuning.executor_threads,
-					effective.shard_count, i);
+			        tr_runtime_shard_at(server->runtime, i);
 			if (!server_shard->runtime)
 				return tr_server_create_rollback(
 					out, server, TR_ERR_STATE);
@@ -1890,12 +1518,12 @@ tr_server_create_internal(const struct tr_server_config *config,
 			 */
 			server->shard_count = i + 1U;
 
-			if (!record) {
-				ret = tr_buffer_pool_init_dynamic_budgeted(
-				        &server_shard->rpc_message_pool,
+			if (mode == TR_SERVER_MODE_RPC_V2) {
+				ret = tr_buffer_pool_init_budgeted(
+				        &server_shard->reassembly_pool,
 				        tr_server_budget_share(
 				                effective_tuning
-				                        .rpc_message_pool_count,
+				                        .reassembly_pool_count,
 				                effective.shard_count, i),
 				        effective.limits.max_message_bytes,
 				        tr_runtime_shard_memory_budget(
@@ -1903,23 +1531,11 @@ tr_server_create_internal(const struct tr_server_config *config,
 				if (ret != TR_OK)
 					return tr_server_create_rollback(
 					        out, server, ret);
-				server_shard->rpc_pool_ready = 1;
+				server_shard->reassembly_pool_ready = 1;
 			}
-
-			ret = tr_buffer_pool_init_budgeted(
-				&server_shard->reassembly_pool,
-				tr_server_budget_share(
-					effective_tuning.reassembly_pool_count,
-					effective.shard_count, i),
-				effective.limits.max_message_bytes,
-				tr_runtime_shard_memory_budget(
-					server_shard->runtime));
-			if (ret != TR_OK)
-				return tr_server_create_rollback(out, server, ret);
-			server_shard->reassembly_pool_ready = 1;
 		}
 	}
-	if (record) {
+	if (mode == TR_SERVER_MODE_RPC_V2) {
 		struct tr_memory_budget *budget =
 		        tr_runtime_shard_memory_budget(
 		                server->shards[0].runtime);
@@ -1982,13 +1598,6 @@ tr_server_create_internal(const struct tr_server_config *config,
 	return TR_OK;
 }
 
-int tr_server_create_with_tuning(const struct tr_server_config *config,
-                                 const struct tr_facade_tuning *tuning,
-                                 struct tr_server **out)
-{
-	return tr_server_create_internal(config, tuning, NULL, NULL, 0, out);
-}
-
 int tr_server_create_record(const struct tr_server_config *config,
                             const struct tr_facade_tuning *tuning,
                             const struct tr_server_record_config *record,
@@ -2000,32 +1609,28 @@ int tr_server_create_record(const struct tr_server_config *config,
 			*out = NULL;
 		return TR_ERR_INVALID;
 	}
-	return tr_server_create_internal(config, tuning, record, methods,
-	                                 method_count, out);
+	return tr_server_create_internal(TR_SERVER_MODE_RPC_V2, config, tuning,
+	                                 record, methods, method_count, out);
 }
 
 int tr_server_create_transport(const struct tr_server_config *config,
                                struct tr_server **out)
 {
-	int ret;
+	struct tr_facade_tuning tuning;
 
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
-	if (config && (config->interceptor.fn || config->interceptor.arg))
-		return TR_ERR_UNSUPPORTED;
-	ret = tr_server_create_with_tuning(config, NULL, out);
-	if (ret == TR_OK)
-		(*out)->transport_only = 1;
-	return ret;
-}
-
-int tr_server_legacy_create(const struct tr_server_config *config,
-                            struct tr_server **out)
-{
-	return tr_server_create_with_tuning(config, NULL, out);
+	tr_facade_tuning_init(&tuning);
+	if (config)
+		tr_server_tuning_ensure_shard_minimums(&tuning,
+		                                       config->shard_count);
+	else
+		tr_server_tuning_ensure_shard_minimums(&tuning, 1U);
+	return tr_server_create_internal(TR_SERVER_MODE_TRANSPORT_ONLY, config,
+	                                 &tuning, NULL, NULL, 0U, out);
 }
 
 int tr_server_create(const struct tr_server_config *config,
@@ -2113,102 +1718,11 @@ int tr_server_create(const struct tr_server_config *config,
 	}
 	/* create_internal 复制并记账。临时表无回调参数所有权；即使
 	 * 回滚失败把部分 Server 交还调用者，也不再借用此数组。 */
-	ret = tr_server_create_internal(&effective, &tuning, &record, frozen,
-	                                method_count, out);
+	ret = tr_server_create_internal(TR_SERVER_MODE_RPC_V2, &effective,
+	                                &tuning, &record, frozen, method_count,
+	                                out);
 	free(frozen);
 	return ret;
-}
-
-static int tr_server_validate_method(const struct tr_rpc_method_desc *method,
-				     int unary)
-{
-	if (!method || method->service_id == 0U || method->method_id == 0U ||
-	    (method->request_cardinality != TR_RPC_ONE &&
-	     method->request_cardinality != TR_RPC_MANY) ||
-	    (method->response_cardinality != TR_RPC_ONE &&
-	     method->response_cardinality != TR_RPC_MANY) ||
-	    method->request_codec_id != TR_RPC_CODEC_RAW ||
-	    method->response_codec_id != TR_RPC_CODEC_RAW ||
-	    (method->lane != TR_LANE_CONTROL && method->lane != TR_LANE_BULK) ||
-	    method->max_request_bytes == 0U || method->max_response_bytes == 0U)
-		return TR_ERR_INVALID;
-
-	if (unary && (method->request_cardinality != TR_RPC_ONE ||
-		      method->response_cardinality != TR_RPC_ONE))
-		return TR_ERR_INVALID;
-	return TR_OK;
-}
-
-static int tr_server_method_exists(struct tr_server *server,
-				   uint32_t service_id, uint32_t method_id)
-{
-	uint32_t i;
-
-	for (i = 0; i < server->method_count; ++i)
-		if (server->methods[i].used &&
-		    server->methods[i].desc.service_id == service_id &&
-		    server->methods[i].desc.method_id == method_id)
-			return 1;
-	return 0;
-}
-
-int tr_server_legacy_register_method(struct tr_server *server,
-                                     const struct tr_rpc_method_desc *method,
-                                     tr_rpc_unary_handler handler,
-                                     void *handler_arg)
-{
-	struct tr_server_method *entry;
-
-	if (server && (server->record_mode || server->transport_only))
-		return TR_ERR_UNSUPPORTED;
-	if (!server || !handler ||
-	    tr_server_validate_method(method, 1) != TR_OK)
-		return TR_ERR_INVALID;
-	if (server->started)
-		return TR_ERR_STATE;
-	if (server->method_count >= server->config.limits.max_methods)
-		return TR_AGAIN;
-	if (tr_server_method_exists(server, method->service_id,
-				    method->method_id))
-		return TR_ERR_STATE;
-
-	entry = &server->methods[server->method_count++];
-	memset(entry, 0, sizeof(*entry));
-	entry->used = 1;
-	entry->kind = TR_SERVER_METHOD_UNARY;
-	entry->desc = *method;
-	entry->unary_handler = handler;
-	entry->handler_arg = handler_arg;
-	return TR_OK;
-}
-
-int tr_server_legacy_register_stream_method(
-        struct tr_server *server, const struct tr_rpc_method_desc *method,
-        const struct tr_rpc_stream_handlers *handlers, void *handler_arg)
-{
-	struct tr_server_method *entry;
-
-	if (server && (server->record_mode || server->transport_only))
-		return TR_ERR_UNSUPPORTED;
-	if (!server || !handlers ||
-	    tr_server_validate_method(method, 0) != TR_OK)
-		return TR_ERR_INVALID;
-	if (server->started)
-		return TR_ERR_STATE;
-	if (server->method_count >= server->config.limits.max_methods)
-		return TR_AGAIN;
-	if (tr_server_method_exists(server, method->service_id,
-				    method->method_id))
-		return TR_ERR_STATE;
-
-	entry = &server->methods[server->method_count++];
-	memset(entry, 0, sizeof(*entry));
-	entry->used = 1;
-	entry->kind = TR_SERVER_METHOD_STREAM;
-	entry->desc = *method;
-	entry->stream_handlers = *handlers;
-	entry->handler_arg = handler_arg;
-	return TR_OK;
 }
 
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
@@ -2221,7 +1735,7 @@ int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 
 	if (!server || !ipv4_address || server->shard_count == 0U)
 		return TR_ERR_INVALID;
-	if (server->transport_only)
+	if (server->mode == TR_SERVER_MODE_TRANSPORT_ONLY)
 		return TR_ERR_UNSUPPORTED;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
@@ -2424,8 +1938,8 @@ int tr_server_start(struct tr_server *server)
 		return TR_ERR_STATE;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
-	if (!server->published ||
-	    (server->record_mode && server->record_start_attempted))
+	if (!server->published || (server->mode == TR_SERVER_MODE_RPC_V2 &&
+	                           server->record_start_attempted))
 		return TR_ERR_STATE;
 	if (server->started)
 		return TR_ERR_STATE;
@@ -2443,16 +1957,16 @@ int tr_server_start(struct tr_server *server)
 	if (rpc_listener_count == 0U && !group_listening)
 		return TR_ERR_STATE;
 
-	if (server->record_mode)
+	if (server->mode == TR_SERVER_MODE_RPC_V2)
 		server->record_start_attempted = 1;
 	ret = tr_runtime_start(server->runtime);
 	if (ret != TR_OK) {
-		if (server->record_mode)
+		if (server->mode == TR_SERVER_MODE_RPC_V2)
 			server->published = 0;
 		return ret;
 	}
 	/* 所有分片的任务所有者和重试源就绪后才开放任何 TCP 接纳源。 */
-	if (server->record_mode)
+	if (server->mode == TR_SERVER_MODE_RPC_V2)
 		for (i = 0; i < server->shard_count; ++i) {
 			ret = tr_runtime_shard_call(
 			        server->shards[i].runtime,
@@ -2486,7 +2000,7 @@ rollback_events: {
 	uint32_t j;
 	int rollback_ret = TR_OK;
 
-	if (server->record_mode) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
 		/* 某个 owner 可能已致命退出。先 stop/join，再执行允许
 		 * 已停止父对象的解绑；不能被 CLOSED 卡在 join 之前。 */
 		server->published = 0;
@@ -2510,7 +2024,7 @@ rollback_events: {
 			rollback_ret = cleanup_ret;
 	}
 
-	if (server->record_mode) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
 		int cleanup_ret = tr_server_record_reap_all(server);
 
 		if (cleanup_ret != TR_OK &&
@@ -2608,7 +2122,7 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 		}
 	}
 
-	if (server->record_mode) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
 		for (shard_index = 0; shard_index < server->shard_count;
 		     ++shard_index) {
 			struct tr_server_shard *shard =
@@ -2632,7 +2146,7 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 			return ret;
 		wait_deadline = &deadline;
 	}
-	if (server->record_mode) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
 		/* RESET 可先归还全部网络槽，原 worker、待交付完成和终局
 		 * 回调仍须真正静默。先等本层，再以同一期限等网络和 TX。 */
 		int ret = tr_server_record_wait_drained(server, wait_deadline);
@@ -2674,8 +2188,6 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 static void tr_server_collect_retired_stats(struct tr_server_shard *shard,
                                             struct tr_server_stats *stats)
 {
-	struct tr_server_detached_peer *detached;
-
 	stats->channel.streams_opened +=
 	        shard->retired_channel_stats.streams_opened;
 	stats->channel.streams_closed +=
@@ -2700,49 +2212,6 @@ static void tr_server_collect_retired_stats(struct tr_server_shard *shard,
 	        shard->retired_channel_stats.keepalive_pongs_received;
 	stats->channel.keepalive_timeouts +=
 	        shard->retired_channel_stats.keepalive_timeouts;
-	if (shard->retired_rpc_stats.executor_threads >
-	    stats->rpc.executor_threads)
-		stats->rpc.executor_threads =
-		        shard->retired_rpc_stats.executor_threads;
-	if (shard->retired_rpc_stats.executor_queue_peak_max_per_endpoint >
-	    stats->rpc.executor_queue_peak_max_per_endpoint)
-		stats->rpc.executor_queue_peak_max_per_endpoint =
-		        shard->retired_rpc_stats
-		                .executor_queue_peak_max_per_endpoint;
-	if (shard->retired_rpc_stats
-	            .executor_ready_calls_peak_max_per_endpoint >
-	    stats->rpc.executor_ready_calls_peak_max_per_endpoint)
-		stats->rpc.executor_ready_calls_peak_max_per_endpoint =
-		        shard->retired_rpc_stats
-		                .executor_ready_calls_peak_max_per_endpoint;
-	stats->rpc.executor_enqueued_tasks +=
-	        shard->retired_rpc_stats.executor_enqueued_tasks;
-	stats->rpc.executor_taken_tasks +=
-	        shard->retired_rpc_stats.executor_taken_tasks;
-	stats->rpc.executor_admission_limit_hits +=
-	        shard->retired_rpc_stats.executor_admission_limit_hits;
-	stats->rpc.executor_hard_full_events +=
-	        shard->retired_rpc_stats.executor_hard_full_events;
-	tr_merge_latency_histogram(
-	        &stats->rpc.executor_queue_wait_ns,
-	        &shard->retired_rpc_stats.executor_queue_wait_ns);
-	tr_merge_latency_histogram(
-	        &stats->rpc.executor_handler_ns,
-	        &shard->retired_rpc_stats.executor_handler_ns);
-	stats->rpc.calls_started += shard->retired_rpc_stats.calls_started;
-	stats->rpc.calls_completed += shard->retired_rpc_stats.calls_completed;
-	stats->rpc.calls_cancelled += shard->retired_rpc_stats.calls_cancelled;
-	stats->rpc.calls_deadline_exceeded +=
-	        shard->retired_rpc_stats.calls_deadline_exceeded;
-	tr_server_merge_rpc_semantic_stats(&stats->rpc.semantic,
-	                                   &shard->retired_rpc_stats.semantic);
-
-	for (detached = shard->detached_peers; detached;
-	     detached = detached->next) {
-		tr_server_merge_rpc_stats(&stats->rpc, &detached->rpc_stats, 0);
-		tr_server_merge_channel_stats(&stats->channel,
-		                              &detached->channel_stats, 0);
-	}
 }
 
 struct tr_server_stats_owner_request {
@@ -2776,21 +2245,17 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 
 	for (i = 0; i < tr_server_shard_peer_capacity(shard); ++i) {
 		struct tr_runtime_peer *peer =
-			tr_server_shard_peer_at(shard, i);
-		struct tr_rpc_endpoint_stats rpc_stats;
+		        tr_server_shard_peer_at(shard, i);
 		struct tr_channel_stats channel_stats;
 		struct tr_server_peer *state = tr_server_peer_state(peer);
 
 		if (!peer || !peer->used)
 			continue;
 
-		if (peer->ready && (state->rpc || state->record_rpc) &&
-		    peer->channel && !tr_server_peer_disconnected(peer))
+		if (peer->ready && state->record_rpc && peer->channel &&
+		    !tr_server_peer_disconnected(peer))
 			stats->peers_ready_current++;
 
-		if (state->rpc &&
-		    tr_rpc_endpoint_get_stats(state->rpc, &rpc_stats) == TR_OK)
-			tr_server_merge_rpc_stats(&stats->rpc, &rpc_stats, 1);
 		if (state->record_rpc)
 			stats->rpc.endpoints_current++;
 		if (peer->channel &&
@@ -2810,7 +2275,7 @@ static int tr_server_collect_peer_stats_on_owner(void *arg)
 		stats->rpc.executor_queued_tasks_current += tasks.queued;
 		stats->rpc.executor_running_tasks_current += tasks.running;
 	}
-	if (shard->server->record_mode) {
+	if (shard->server->mode == TR_SERVER_MODE_RPC_V2) {
 		struct tr_rpc_semantic_stats semantic;
 		int ret = tr_rpc_record_semantic_stats_read(
 		        &shard->record_semantic, &semantic);
@@ -2841,9 +2306,9 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 	memset(&stats, 0, sizeof(stats));
 	stats.shard_count = server->shard_count;
 
-	stats.rpc.executor_threads =
-	        server->record_mode ? (uint32_t)server->record.tasks.workers
-	                            : server->tuning.executor_threads;
+	if (server->mode == TR_SERVER_MODE_RPC_V2)
+		stats.rpc.executor_threads =
+		        (uint32_t)server->record.tasks.workers;
 
 	for (i = 0; i < server->shard_count; ++i) {
 		struct tr_server_stats_owner_request request;
@@ -2860,23 +2325,15 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 			return ret;
 		tr_server_merge_reactor_stats(&stats.reactor, &reactor_stats);
 
-		if (shard->rpc_pool_ready) {
+		if (shard->reassembly_pool_ready) {
 			memset(&pool_stats, 0, sizeof(pool_stats));
-			ret = tr_buffer_pool_get_stats(&shard->rpc_message_pool,
+			ret = tr_buffer_pool_get_stats(&shard->reassembly_pool,
 			                               &pool_stats);
 			if (ret != TR_OK)
 				return ret;
-			tr_server_merge_pool_observation(
-			        &stats.rpc_message_pool, &pool_stats);
+			tr_server_merge_pool_observation(&stats.reassembly_pool,
+			                                 &pool_stats);
 		}
-
-		memset(&pool_stats, 0, sizeof(pool_stats));
-		ret = tr_buffer_pool_get_stats(&shard->reassembly_pool,
-					       &pool_stats);
-		if (ret != TR_OK)
-			return ret;
-		tr_server_merge_pool_observation(&stats.reassembly_pool,
-						 &pool_stats);
 
 		request.shard = shard;
 		request.stats = &stats;
@@ -2945,7 +2402,7 @@ int tr_server_get_rpc_semantic_stats(
 
 	if (!server || !out)
 		return TR_ERR_INVALID;
-	if (server->record_mode)
+	if (server->mode == TR_SERVER_MODE_RPC_V2)
 		return tr_server_record_semantic_stats(server, out);
 
 	memset(&stats, 0, sizeof(stats));
@@ -2984,7 +2441,7 @@ int tr_server_destroy(struct tr_server *server)
 
 	/* 销毁即使稍后需要重试也不再允许读取跨分片统计。 */
 	server->published = 0;
-	if (server->record_mode && server->runtime) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2 && server->runtime) {
 		/* 终止拆除先 join 父 owner；异常退出的父循环也走同一路径。
 		 * 在此之前任何 CLOSED 都不是可以释放回调参数的静默证明。 */
 		ret = tr_runtime_stop(server->runtime);
@@ -3043,7 +2500,7 @@ int tr_server_destroy(struct tr_server *server)
 			return ret;
 		server->started = 0;
 	}
-	if (server->record_mode && server->shards) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2 && server->shards) {
 		ret = tr_server_record_reap_all(server);
 		if (ret != TR_OK)
 			return ret;
@@ -3062,9 +2519,8 @@ int tr_server_destroy(struct tr_server *server)
 				struct tr_server_peer *state =
 				        tr_server_peer_state(peer);
 
-				if (!peer ||
-				    (!peer->used && !peer->channel &&
-				     !state->rpc && !state->record_rpc))
+				if (!peer || (!peer->used && !peer->channel &&
+				              !state->record_rpc))
 					continue;
 				{
 					ret = tr_server_destroy_peer(peer);
@@ -3075,13 +2531,11 @@ int tr_server_destroy(struct tr_server *server)
 		}
 	}
 
-	tr_server_wait_peer_finalizers(server);
-
 	/* 所有 Endpoint 和传输引用已经退役。剩余 producer 只由应用
 	 * 持有，或正在结束锁外复制；先切断其预算依赖再销毁 Runtime。
 	 * 域关闭不等待应用归还句柄，晚 release 只修改独立计费存储。
 	 */
-	if (server->record_mode && server->shards) {
+	if (server->mode == TR_SERVER_MODE_RPC_V2 && server->shards) {
 		for (shard_index = 0; shard_index < server->shard_count;
 		     ++shard_index) {
 			ret = tr_rpc_record_producer_domain_close(
@@ -3106,13 +2560,6 @@ int tr_server_destroy(struct tr_server *server)
 				if (ret != TR_OK)
 					return ret;
 				shard->reassembly_pool_ready = 0;
-			}
-			if (shard->rpc_pool_ready) {
-				int ret = tr_buffer_pool_destroy(
-					&shard->rpc_message_pool);
-				if (ret != TR_OK)
-					return ret;
-				shard->rpc_pool_ready = 0;
 			}
 		}
 	}
@@ -3154,9 +2601,6 @@ int tr_server_destroy(struct tr_server *server)
 	server->shards = NULL;
 	server->shard_count = 0U;
 
-	free(server->methods);
-	if (server->finalizer_cond_ready)
-		pthread_cond_destroy(&server->finalizer_cond);
 	pthread_mutex_destroy(&server->finalizer_lock);
 	free(server);
 	return TR_OK;

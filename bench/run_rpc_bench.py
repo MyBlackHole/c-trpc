@@ -20,7 +20,7 @@ COUNTS = ("attempted", "accepted", "completed", "ok", "submit_again",
           "submit_errors", "deadlines", "rpc_errors", "invalid_responses")
 
 SERVER_OBS_INT = (
-    "reactor_busy_ns", "reactor_poll_ns", "reactor_turns",
+    "reactor_turns",
     "command_budget_limit", "command_processed_total",
     "command_max_per_turn", "command_budget_hits",
     "epoll_polls", "epoll_waits",
@@ -36,20 +36,20 @@ SERVER_OBS_INT = (
     "control_tx_pool_capacity", "control_tx_pool_peak",
     "rx_pool_exhausted_events",
     "tx_pool_exhausted_events", "control_tx_pool_exhausted_events",
-    "rpc_queue_peak_per_peer", "rpc_admission_limit_hits",
-    "rpc_hard_full_events", "rpc_message_pool_capacity",
-    "rpc_message_pool_peak", "reassembly_pool_capacity", "reassembly_pool_peak",
-    "rpc_message_pool_exhausted_events", "reassembly_pool_exhausted_events",
+    "rpc_executor_threads", "rpc_task_queue_capacity",
+    "rpc_tasks_queued", "rpc_tasks_running", "rpc_calls_started",
+    "rpc_calls_finished", "reassembly_pool_capacity", "reassembly_pool_peak",
+    "reassembly_pool_exhausted_events",
     "peers_ready_total", "peers_reaped_total",
 )
 SERVER_OBS_FLOAT = (
-    "cpu_s", "peak_rss_kib", "reactor_busy_ratio",
-    "rpc_queue_wait_p99_us", "rpc_handler_p99_us",
+    "cpu_s", "peak_rss_kib",
 )
 
 
 def validate_server_exit(row: dict[str, Any]) -> None:
-    if row.get("type") != "server_exit" or row.get("drain_status") != 0:
+    if (row.get("schema") != 2 or row.get("api_generation") != "rpc_v2" or
+            row.get("type") != "server_exit" or row.get("drain_status") != 0):
         raise ValueError("server did not drain normally")
     for key in SERVER_OBS_INT:
         if type(row.get(key)) is not int or row[key] < 0:
@@ -60,10 +60,6 @@ def validate_server_exit(row: dict[str, Any]) -> None:
             raise ValueError(f"server {key}: invalid measurement type")
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"server {key}: invalid measurement")
-    if row["reactor_busy_ratio"] > 1:
-        raise ValueError("server reactor_busy_ratio is outside 0..1")
-    if row["reactor_busy_ns"] + row["reactor_poll_ns"] == 0:
-        raise ValueError("server timing observability was not populated")
     if row["command_budget_limit"] == 0:
         raise ValueError("server command budget is zero")
     if row["command_max_per_turn"] > row["command_budget_limit"]:
@@ -74,12 +70,17 @@ def validate_server_exit(row: dict[str, Any]) -> None:
         raise ValueError("server command full attribution mismatch")
     if row["peers_ready_total"] == 0:
         raise ValueError("server observed no ready peer")
+    if row["rpc_executor_threads"] == 0 or row["rpc_task_queue_capacity"] == 0:
+        raise ValueError("V2 task executor diagnostics are missing")
+    if row["rpc_calls_started"] != row["rpc_calls_finished"]:
+        raise ValueError("server semantic call accounting did not converge")
 
 
 def validate_phase(row: dict[str, Any], expected: int, scenario: str,
                    *, clean: bool) -> None:
     """A fast run with dropped work is a failure, not a performance improvement."""
-    if row.get("type") != "phase" or row.get("schema") != 1:
+    if (row.get("type") != "phase" or row.get("schema") != 2 or
+            row.get("api_generation") != "rpc_v2"):
         raise ValueError("missing phase/schema")
     if row.get("scenario") != scenario:
         raise ValueError("unexpected scenario")
@@ -133,7 +134,8 @@ def read_ready(process: subprocess.Popen[str], kind: str, timeout: float = 15) -
         row = json.loads(line)
     except json.JSONDecodeError as error:
         raise RuntimeError(f"{kind}: invalid readiness {line!r}") from error
-    if row.get("type") != kind or row.get("pid") != process.pid:
+    if (row.get("type") != kind or row.get("pid") != process.pid or
+            row.get("schema") != 2 or row.get("api_generation") != "rpc_v2"):
         raise RuntimeError(f"{kind}: wrong readiness record")
     return row
 
@@ -152,7 +154,7 @@ def stop_owned(process: subprocess.Popen[str]) -> None:
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     common = ["--capacity", "64", "--bulk-bytes", str(case["bulk_bytes"])]
-    server_cmd = [str(binary), "server", *common, "--workers", "2", "--slow-ms", "25"]
+    server_cmd = [str(binary), "server", *common, "--slow-ms", "25"]
     children: list[subprocess.Popen[str]] = []
     logs: list[TextIO] = []
     start = time.monotonic()
@@ -219,7 +221,8 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
         validate_server_exit(exit_row)
         if exit_row["peers_ready_total"] < case["clients"]:
             raise ValueError("server peer accounting lost a benchmark client")
-        return {"type": "case", "case": case, "server_command": server_cmd,
+        return {"type": "case", "schema": 2, "api_generation": "rpc_v2",
+                "case": case, "server_command": server_cmd,
                 "client_commands": commands, "server": ready, "server_exit": exit_row,
                 "clients": results, "runner_elapsed_s": time.monotonic() - start}
     finally:
@@ -247,7 +250,8 @@ def metadata(binary: Path, label: str, *, load_mode: str = "closed") -> dict[str
     model = next((line.split(":", 1)[1].strip() for line in cpu.splitlines()
                   if line.startswith("model name")), platform.machine())
     quota = Path("/sys/fs/cgroup/cpu.max")
-    return {"type": "metadata", "schema": 1, "label": label,
+    return {"type": "metadata", "schema": 2, "api_generation": "rpc_v2",
+            "label": label,
             "git_revision": revision.stdout.strip() if revision.returncode == 0 else None,
             "binary": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
             "platform": platform.platform(), "cpu_model": model,
@@ -255,7 +259,7 @@ def metadata(binary: Path, label: str, *, load_mode: str = "closed") -> dict[str
             "cgroup_cpu_max": quota.read_text().strip() if quota.exists() else None,
             "clock": "CLOCK_MONOTONIC", "transport": "TCP IPv4 loopback",
             "load_model": load_model,
-            "latency": "before submission to result callback entry; successful and accepted separately",
+            "latency": "before submission to terminal callback entry; successful and accepted separately",
             "goodput": "verified successful request+response application bytes; excludes wire overhead",
             "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only"}
 
@@ -293,7 +297,8 @@ def main() -> int:
                 try:
                     row = run_case(binary, case, case_dir)
                 except Exception as error:
-                    output.write(json.dumps({"type": "failure", "case": case,
+                    output.write(json.dumps({"type": "failure", "schema": 2,
+                                             "api_generation": "rpc_v2", "case": case,
                                              "error": str(error), "logs": str(case_dir)}) + "\n")
                     output.flush()
                     raise

@@ -17,6 +17,7 @@ static char *test_setlocale(int category, const char *locale)
 }
 
 #include <assert.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -28,6 +29,25 @@ static int scenario;
 static int destroy_attempts;
 static const char *expected_address = "127.0.0.1";
 static uint16_t expected_port = 9000U;
+
+static size_t read_capture(int fd, char *buffer, size_t capacity)
+{
+	size_t size = 0U;
+
+	assert(capacity > 0U);
+	while (size + 1U < capacity) {
+		ssize_t count = read(fd, buffer + size, capacity - size - 1U);
+
+		if (count < 0 && errno == EINTR)
+			continue;
+		assert(count >= 0);
+		if (count == 0)
+			break;
+		size += (size_t)count;
+	}
+	buffer[size] = '\0';
+	return size;
+}
 
 void tr_client_config_init(struct tr_client_config *config)
 {
@@ -106,22 +126,26 @@ static void reset_environment(void)
 static void check_output(int test_scenario, int argc, char **argv, int code,
                          const char *output, const char *error)
 {
-	FILE *out = tmpfile();
-	FILE *err = tmpfile();
-	char actual[1024];
+	int out_pipe[2], err_pipe[2];
+	char actual_out[1024], actual_err[1024];
 	size_t size;
 	int status;
 	pid_t child;
 
-	assert(out && err);
+	assert(pipe(out_pipe) == 0);
+	assert(pipe(err_pipe) == 0);
 	assert(fflush(NULL) == 0);
 	child = fork();
 	assert(child >= 0);
 	if (child == 0) {
 		int result;
 
-		assert(dup2(fileno(out), STDOUT_FILENO) >= 0);
-		assert(dup2(fileno(err), STDERR_FILENO) >= 0);
+		close(out_pipe[0]);
+		close(err_pipe[0]);
+		assert(dup2(out_pipe[1], STDOUT_FILENO) >= 0);
+		assert(dup2(err_pipe[1], STDERR_FILENO) >= 0);
+		close(out_pipe[1]);
+		close(err_pipe[1]);
 		/* 每个子进程显式选择故障并清零计数，不继承上一用例的桩状态。 */
 		scenario = test_scenario;
 		destroy_attempts = 0;
@@ -134,28 +158,25 @@ static void check_output(int test_scenario, int argc, char **argv, int code,
 		assert(fflush(NULL) == 0);
 		_exit(result);
 	}
+	close(out_pipe[1]);
+	close(err_pipe[1]);
 	assert(waitpid(child, &status, 0) == child);
+	size = read_capture(out_pipe[0], actual_out, sizeof(actual_out));
+	close(out_pipe[0]);
+	(void)read_capture(err_pipe[0], actual_err, sizeof(actual_err));
+	close(err_pipe[0]);
 	if (!WIFEXITED(status) || WEXITSTATUS(status) != code) {
 		fprintf(stderr,
 		        "Echo "
 		        "用例失败：场景=%d，子进程状态=%d，期望退出码=%d\n",
 		        test_scenario, status, code);
-		rewind(err);
-		while ((size = fread(actual, 1, sizeof(actual), err)) != 0)
-			assert(fwrite(actual, 1, size, stderr) == size);
-		assert(!ferror(err));
+		assert(fwrite(actual_err, 1, strlen(actual_err), stderr) ==
+		       strlen(actual_err));
 	}
 	assert(WIFEXITED(status) && WEXITSTATUS(status) == code);
-	rewind(out);
-	size = fread(actual, 1, sizeof(actual) - 1U, out);
-	assert(!ferror(out));
-	actual[size] = '\0';
-	assert(size == strlen(output) && strcmp(actual, output) == 0);
-	rewind(err);
-	size = fread(actual, 1, sizeof(actual) - 1U, err);
-	assert(!ferror(err));
-	actual[size] = '\0';
-	if (size != strlen(error) || strcmp(actual, error) != 0) {
+	assert(size == strlen(output) && strcmp(actual_out, output) == 0);
+	if (strlen(actual_err) != strlen(error) ||
+	    strcmp(actual_err, error) != 0) {
 		const char *names[] = {"LC_ALL", "LC_MESSAGES", "LANG",
 		                       "LANGUAGE"};
 		size_t i;
@@ -166,11 +187,11 @@ static void check_output(int test_scenario, int argc, char **argv, int code,
 			                         : "<unset>");
 		fprintf(stderr,
 		        "scenario=%d argument=%s expected=%s actual=%s\n",
-		        test_scenario, argc > 1 ? argv[1] : "", error, actual);
+		        test_scenario, argc > 1 ? argv[1] : "", error,
+		        actual_err);
 	}
-	assert(size == strlen(error) && strcmp(actual, error) == 0);
-	assert(fclose(out) == 0);
-	assert(fclose(err) == 0);
+	assert(strlen(actual_err) == strlen(error) &&
+	       strcmp(actual_err, error) == 0);
 }
 
 static void check_scenarios(const char *option, int chinese)

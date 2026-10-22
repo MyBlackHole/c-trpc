@@ -14,8 +14,14 @@ class StopBeforeLoad(Exception):
 
 
 class MetadataTests(unittest.TestCase):
+    @staticmethod
+    def workspace_tempdir():
+        root = Path(__file__).resolve().parents[1] / "build" / "r12-python-tests"
+        root.mkdir(parents=True, exist_ok=True)
+        return tempfile.TemporaryDirectory(dir=root)
+
     def test_default_and_explicit_modes(self):
-        with tempfile.TemporaryDirectory() as directory:
+        with self.workspace_tempdir() as directory:
             binary = Path(directory) / "binary"
             binary.write_bytes(b"metadata fixture")
             default = metadata(binary, "test")
@@ -45,7 +51,7 @@ class MetadataTests(unittest.TestCase):
             ("run_rpc_fanout", "run_profile_case", "open"),
             ("run_rpc_generator_slots", "run_profile_case", "open"),
         )
-        with tempfile.TemporaryDirectory() as directory:
+        with self.workspace_tempdir() as directory:
             binary = Path(directory) / "binary"
             binary.write_text("not executed\n")
             binary.chmod(0o700)

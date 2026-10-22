@@ -51,15 +51,16 @@ Transport/RPC 集成测试只验证跨模块契约。
 ### 公共 V2 SDK
 
 普通 `tr_client_create/tr_server_create` 和 `tr_client_unary_call/call_start` 现为
-V2 入口，原 `test_rpc_v2_sdk`、`test_rpc_v2_server` 与 Echo 示例已经直接使用它们。
+V2 入口，`tr_server_create()` 只构造 V2 RPC；连接组测试使用
+`tr_server_create_transport()`。`test_rpc_v2_sdk`、`test_rpc_v2_server` 与 Echo
+示例直接使用普通门面。
 SDK 测试验证空方法表不会回退 V1；连接组专测使用显式传输工厂，并验证 RPC 监听
 和连接被拒绝、失败不改端口，以及配置中的 RPC 重连/拦截器不被静默忽略。
-旧 Server 生命周期回归和历史 V1 基准通过 `tests/rpc_v1_test_client_fixture.*`
-直接创建 Channel 与 RPC Endpoint，不再构造或调用 Client V1 门面；这些结果只证明
-V1 Server/Endpoint 路径没有回归，不能计为默认 V2 覆盖。`bench_rpc` 仍测 V1，
-不作为 V2 性能证据。Server 旧入口只在 `src/facade_legacy_internal.h` 内供旧 Server
-回归和基准使用，不安装、不以宏覆盖公开函数。其余旧内核仍须按对象依赖与剩余
-故障覆盖逐项迁移。
+Server 构造、peer retirement、排空、统计、构造回滚和销毁重试回归现经 V2
+或 transport-only facade 运行。`test_transport` 仍保留 `tr_rpc_endpoint_*`、
+通用 V1 Executor 与协议原语测试；这些直接低层覆盖归属 R13/R14，不代表普通
+Server facade 仍有 V1 实现。`bench_rpc` 和容量、扩展性、headroom 等负载驱动
+现通过公开 V2 Client/Server 运行，V1 日期 CSV 只作为历史记录，不纳入 V2 基线。
 
 `test_rpc_v2_sdk` 只使用安装范围内的公共头与 C/POSIX 接口。真实回环 TCP
 覆盖 ONE→ONE、ONE→MANY、MANY→ONE、MANY→MANY，区分零条 MANY 和零字节消息，

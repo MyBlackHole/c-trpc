@@ -1,38 +1,25 @@
-"""Tests for repeated high-rate wall classification."""
+"""Tests for repeated V2 load and exact Server wall classification."""
 import unittest
 
 from run_rpc_repeatability import PROFILE_SPECS, summarize
+from run_rpc_scalability import SERVER_PRESSURE_FIELDS
 
 
-def result(ok_rps=39000.0, busy=0.3, signals=None,
+def result(ok_rps=39000.0, signals=None,
            command_hits=0, command_peak=45):
     signal_list = list(signals or [])
-    server = dict(
-        reactor_busy_ratio=busy,
-        command_budget_hits=command_hits,
-        command_queue_peak=command_peak,
-        rpc_admission_limit_hits=0,
-        rpc_hard_full_events=0,
-        command_queue_full_events=0,
-        completion_queue_full_events=0,
-        rx_pool_exhausted_events=0,
-        tx_pool_exhausted_events=0,
-        control_tx_pool_exhausted_events=0,
-        rpc_message_pool_exhausted_events=0,
-        reassembly_pool_exhausted_events=0,
-    )
+    server = {key: 0 for key in SERVER_PRESSURE_FIELDS.values()}
+    server.update(command_budget_hits=command_hits,
+                  command_queue_peak=command_peak,
+                  rpc_executor_threads=4,
+                  rpc_task_queue_capacity=256,
+                  rpc_calls_started=10,
+                  rpc_calls_finished=10)
     client = dict(
-        scheduler_dropped=0,
-        scheduler_late_p99_us=100.0,
-        scheduler_interval_us=800.0,
-        submit_again=0,
-        submit_errors=0,
-        deadlines=0,
-        rpc_errors=0,
-        unavailable=0,
-        resource_exhausted=0,
-        invalid_responses=0,
-        ok_rps=ok_rps,
+        scheduler_dropped=0, scheduler_late_p99_us=100.0,
+        scheduler_interval_us=800.0, submit_again=0, submit_errors=0,
+        deadlines=0, rpc_errors=0, unavailable=0, resource_exhausted=0,
+        invalid_responses=0, ok_rps=ok_rps,
     )
     if "reactor_command_queue_full" in signal_list:
         server["command_queue_full_events"] = 1
@@ -41,33 +28,29 @@ def result(ok_rps=39000.0, busy=0.3, signals=None,
     if "load_generator_late" in signal_list:
         client["scheduler_late_p99_us"] = 1000.0
     return {
-        "case": {"rate_rps": 40000},
-        "server_exit": server,
-        "client": client,
-        "wall_signals": signal_list,
+        "schema": 2, "api_generation": "rpc_v2",
+        "case": {"rate_rps": 40000}, "server_exit": server,
+        "client": client, "wall_signals": signal_list,
     }
 
 
 class RepeatabilityTests(unittest.TestCase):
-    def test_command_ceiling_profile_changes_only_command_capacity(self):
-        base = PROFILE_SPECS["ceiling_headroom"]
-        ceiling = PROFILE_SPECS["command_ceiling_headroom"]
-        self.assertEqual(ceiling["rx_buffer_count"], base["rx_buffer_count"])
-        self.assertEqual(ceiling["executor_queue"], base["executor_queue"])
-        self.assertEqual(
-            ceiling["control_tx_item_count"], base["control_tx_item_count"])
-        self.assertEqual(base["command_capacity"], 4096)
-        self.assertEqual(ceiling["command_capacity"], 16384)
+    def test_profiles_compare_only_public_call_limits(self):
+        small = PROFILE_SPECS["small_call_limit"]
+        large = PROFILE_SPECS["large_call_limit"]
+        self.assertEqual(small, {"capacity": 32, "bulk_bytes": 16384})
+        self.assertEqual(large, {"capacity": 256, "bulk_bytes": 65536})
 
     def test_summary_counts_recurrent_and_transient_walls(self):
         rows = [
-            result(39500.0, 0.29),
-            result(2100.0, 0.15,
-                   ["reactor_command_queue_full", "load_generator_late"],
+            result(39500.0),
+            result(2100.0, ["reactor_command_queue_full", "load_generator_late"],
                    command_hits=50, command_peak=4096),
-            result(39200.0, 0.30),
+            result(39200.0),
         ]
-        summary = summarize("baseline", rows)
+        summary = summarize("default_call_limit", rows)
+        self.assertEqual(summary["schema"], 2)
+        self.assertEqual(summary["api_generation"], "rpc_v2")
         self.assertEqual(summary["trials"], 3)
         self.assertEqual(summary["clean_trials"], 2)
         self.assertEqual(summary["server_pressure_trials"], 1)
@@ -78,17 +61,15 @@ class RepeatabilityTests(unittest.TestCase):
                          ["reactor_command_queue_full"])
         self.assertEqual(summary["server_signal_counts"],
                          {"reactor_command_queue_full": 1})
-        self.assertEqual(
-            summary["signal_counts"]["reactor_command_queue_full"], 1)
-        self.assertEqual(
-            summary["signal_counts"]["load_generator_late"], 1)
+        self.assertEqual(summary["signal_counts"]["reactor_command_queue_full"], 1)
+        self.assertEqual(summary["signal_counts"]["load_generator_late"], 1)
         self.assertEqual(summary["ok_rps_median"], 39200.0)
         self.assertEqual(summary["command_budget_hits_max"], 50)
         self.assertEqual(summary["command_queue_peak_max"], 4096)
 
     def test_summary_clean_trials_have_no_pressure(self):
-        rows = [result(), result(39800.0, 0.31), result(39300.0, 0.28)]
-        summary = summarize("ceiling_headroom", rows)
+        rows = [result(), result(39800.0), result(39300.0)]
+        summary = summarize("large_call_limit", rows)
         self.assertEqual(summary["clean_trials"], 3)
         self.assertEqual(summary["server_pressure_trials"], 0)
         self.assertEqual(summary["classification"], "no_server_wall")
@@ -97,19 +78,15 @@ class RepeatabilityTests(unittest.TestCase):
         self.assertEqual(summary["sporadic_server_signals"], [])
         self.assertEqual(summary["signal_counts"], {})
 
-    def test_summary_marks_same_server_wall_as_reproducible(self):
+    def test_summary_marks_recurrent_server_wall(self):
         rows = [
-            result(2500.0, 0.16, ["reactor_command_queue_full"],
-                   command_hits=40, command_peak=4096),
-            result(2600.0, 0.17, ["reactor_command_queue_full"],
-                   command_hits=45, command_peak=4096),
-            result(2400.0, 0.15, ["reactor_command_queue_full"],
-                   command_hits=50, command_peak=4096),
+            result(2500.0, ["reactor_command_queue_full"], 40, 4096),
+            result(2600.0, ["reactor_command_queue_full"], 45, 4096),
+            result(2400.0, ["reactor_command_queue_full"], 50, 4096),
         ]
-        summary = summarize("command_headroom", rows)
+        summary = summarize("small_call_limit", rows)
         self.assertEqual(summary["server_pressure_trials"], 3)
-        self.assertEqual(summary["classification"],
-                         "reproducible_server_wall")
+        self.assertEqual(summary["classification"], "reproducible_server_wall")
         self.assertEqual(summary["server_signal_counts"],
                          {"reactor_command_queue_full": 3})
         self.assertEqual(summary["reproducible_server_signals"],
