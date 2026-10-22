@@ -25,7 +25,7 @@ enum tr_tcp_nodelay_policy {
  * Reactor、资源池、执行器和诊断等实现资源不会在这里暴露；
  * 门面拥有的运行时调优参数保持内部化。
  *
- * V1 门面有意只暴露共享连接模式；
+ * 普通 Client/Server 门面有意只暴露共享连接模式；
  * 更底层的 Channel API 仍支持拆分 CONTROL/BULK 连接。
  */
 struct tr_facade_limits {

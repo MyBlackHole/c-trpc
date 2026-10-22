@@ -1,9 +1,10 @@
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
-#include "../src/execution/buffer.h"
 #include "../src/server_record_internal.h"
 #include "../src/endian.h"
+#include "../src/execution/buffer.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/memory_budget.h"
 #include "../src/transport/channel/channel_internal.h"
@@ -119,34 +120,10 @@ static struct tr_stream_handle last_client_stream;
 static _Atomic(struct tr_channel *) client_channel, server_channel;
 static _Atomic bool fail_client_create, fail_client_destroy, hold_credit;
 static _Atomic unsigned held_published, client_creates, client_destroys;
-static _Atomic bool budget_release_injection_armed;
-static _Atomic bool budget_release_injection_fired;
-static _Atomic uint64_t budget_release_method_bytes;
-static _Atomic uint64_t budget_release_current_before_injection;
-static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
-
-int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
-int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
-{
-	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
-	int ret = __real_tr_buffer_pool_destroy(pool);
-
-	if (ret == TR_OK && budget &&
-	    atomic_exchange(&budget_release_injection_armed, false)) {
-		uint64_t current = atomic_load(&budget->current_bytes);
-		uint64_t method_bytes =
-		        atomic_load(&budget_release_method_bytes);
-
-		CHECK(method_bytes > 1U);
-		CHECK(current >= method_bytes);
-		atomic_store(&budget_release_current_before_injection, current);
-		atomic_store(&budget_release_injected_budget, budget);
-		atomic_store(&budget->current_bytes, method_bytes - 1U);
-		atomic_store(&budget_release_injection_fired, true);
-	}
-	return ret;
-}
 static _Atomic unsigned create_failures, destroy_failures;
+static _Atomic unsigned budget_release_pool_target, budget_release_pool_seen;
+static _Atomic uint64_t budget_release_current_before_failure;
+static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
 static _Atomic unsigned attempts[6], accepted[6], fake_again, real_again;
 static _Atomic unsigned server_messages_accepted, server_half_closes_received,
         server_resets_received;
@@ -157,10 +134,17 @@ static _Atomic bool fail_unary_half_close_clock;
 static _Atomic bool fail_public_start_clock;
 static _Atomic bool fail_client_start_arm;
 static _Atomic unsigned client_start_arm_failures;
+static _Atomic unsigned client_stream_opens;
+static _Atomic bool observe_destroy_stop;
+static _Atomic unsigned destroy_join_busy;
+static pthread_t destroy_owner_thread;
+static _Atomic unsigned client_control_down_events;
 static _Atomic bool capture_public_start_clock;
 static _Atomic bool saturate_public_start_clock, capture_open_timeout;
+static _Atomic bool capture_open_attempt;
 static _Atomic uint64_t public_start_ns;
 static _Atomic uint64_t observed_open_timeout;
+static _Atomic uint64_t observed_open_clock_ns, observed_open_remaining_ns;
 static _Atomic unsigned response_clock_mode, response_clock_reads;
 static _Atomic unsigned clock_failures;
 static _Atomic bool clear_open_deadline;
@@ -174,12 +158,38 @@ static _Thread_local bool capture_start_clock;
 static _Thread_local bool fake_start_clock_once;
 static _Thread_local bool fail_timer_arm_once;
 static _Thread_local uint64_t fake_response_clock_ns;
+static _Thread_local uint64_t recent_monotonic_ns;
+static _Thread_local bool join_inside_destroy_stop;
 static _Atomic(struct tr_buffer_pool *) public_send_pool;
 static _Atomic bool hold_public_send, public_send_held;
 static struct tr_stream_handle public_held_stream;
 static struct tr_buffer *public_held_buffers[2];
 
+struct tr_runtime;
 int __real_clock_gettime(clockid_t, struct timespec *);
+int __real_tr_runtime_stop(struct tr_runtime *);
+int __wrap_tr_runtime_stop(struct tr_runtime *runtime)
+{
+	bool observe = atomic_load(&observe_destroy_stop);
+	if (observe) {
+		CHECK(!join_inside_destroy_stop);
+		join_inside_destroy_stop = true;
+	}
+	int ret = __real_tr_runtime_stop(runtime);
+	if (observe)
+		join_inside_destroy_stop = false;
+	return ret;
+}
+int __real_pthread_join(pthread_t, void **);
+int __wrap_pthread_join(pthread_t thread, void **value)
+{
+	if (join_inside_destroy_stop) {
+		CHECK(pthread_equal(thread, destroy_owner_thread));
+		CHECK(pthread_tryjoin_np(thread, NULL) == EBUSY);
+		atomic_fetch_add(&destroy_join_busy, 1);
+	}
+	return __real_pthread_join(thread, value);
+}
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle, uint64_t);
 int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
                                 uint64_t deadline_ns)
@@ -236,6 +246,9 @@ int __wrap_clock_gettime(clockid_t clock, struct timespec *time)
 		atomic_store(&public_start_ns,
 		             (uint64_t)time->tv_sec * 1000000000 +
 		                     (uint64_t)time->tv_nsec);
+	if (ret == 0 && clock == CLOCK_MONOTONIC)
+		recent_monotonic_ns = (uint64_t)time->tv_sec * 1000000000 +
+		                      (uint64_t)time->tv_nsec;
 	return ret;
 }
 
@@ -320,11 +333,18 @@ static void reset_observation(void)
 	atomic_store(&fail_public_start_clock, false);
 	atomic_store(&fail_client_start_arm, false);
 	atomic_store(&client_start_arm_failures, 0);
+	atomic_store(&client_stream_opens, 0);
+	atomic_store(&observe_destroy_stop, false);
+	atomic_store(&destroy_join_busy, 0);
+	atomic_store(&client_control_down_events, 0);
 	atomic_store(&capture_public_start_clock, false);
 	atomic_store(&saturate_public_start_clock, false);
 	atomic_store(&capture_open_timeout, false);
+	atomic_store(&capture_open_attempt, false);
 	atomic_store(&public_start_ns, 0);
 	atomic_store(&observed_open_timeout, 0);
+	atomic_store(&observed_open_clock_ns, 0);
+	atomic_store(&observed_open_remaining_ns, 0);
 	atomic_store(&response_clock_mode, 0);
 	atomic_store(&response_clock_reads, 0);
 	atomic_store(&clock_failures, 0);
@@ -397,6 +417,28 @@ int __wrap_tr_channel_destroy(struct tr_channel *channel)
 	return ret;
 }
 
+int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
+int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
+{
+	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
+	int ret = __real_tr_buffer_pool_destroy(pool);
+
+	if (ret == TR_OK && budget &&
+	    atomic_load(&budget_release_pool_target) != 0U &&
+	    atomic_fetch_add(&budget_release_pool_seen, 1U) + 1U ==
+	            atomic_load(&budget_release_pool_target)) {
+		uint64_t current = atomic_load(&budget->current_bytes);
+		uint64_t method_bytes = 3U * sizeof(struct tr_rpc_method_desc);
+
+		CHECK(method_bytes > 1U);
+		atomic_store(&budget_release_current_before_failure, current);
+		atomic_store(&budget_release_injected_budget, budget);
+		/* 在方法表释放前制造预算低于该笔所有权的条件。 */
+		atomic_store(&budget->current_bytes, method_bytes - 1U);
+	}
+	return ret;
+}
+
 struct open_deadline_prefix {
 	struct tr_buffer buffer;
 	uint8_t bytes[];
@@ -453,6 +495,16 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 		CHECK(count == 1 &&
 		      buffers[0]->len >= TR_RPC_RECORD_HEADER_SIZE);
 		attempted_open_timeout = tr_get_le64(buffers[0]->data + 40);
+	}
+	if (kind == TR_RPC_RECORD_OPEN &&
+	    atomic_exchange(&capture_open_attempt, false)) {
+		/* progress 刚用的 owner 时钟与线上剩余期限构成绝对截止
+		 * 时间；失败的下一次公开准入不得改变这个和。 */
+		CHECK(count == 1 &&
+		      buffers[0]->len >= TR_RPC_RECORD_HEADER_SIZE);
+		atomic_store(&observed_open_clock_ns, recent_monotonic_ns);
+		atomic_store(&observed_open_remaining_ns,
+		             tr_get_le64(buffers[0]->data + 40));
 	}
 	uint64_t server_bytes = 0;
 	if (server_kind == TR_RPC_RECORD_MESSAGE)
@@ -608,6 +660,9 @@ static void observed_channel_event(struct tr_channel *channel,
                                    void *arg)
 {
 	struct channel_observation *o = arg;
+	if (channel == atomic_load(&client_channel) &&
+	    event == TR_CHANNEL_EVENT_CONTROL_DOWN)
+		atomic_fetch_add(&client_control_down_events, 1);
 	if (o->channel_event)
 		o->channel_event(channel, event, status, o->arg);
 }
@@ -659,7 +714,10 @@ int __wrap_tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 	if (channel == atomic_load(&client_channel) &&
 	    atomic_exchange(&fail_call_open, false))
 		return TR_ERR_NOMEM;
-	return __real_tr_stream_open(channel, lane, out);
+	int ret = __real_tr_stream_open(channel, lane, out);
+	if (ret == TR_OK && channel == atomic_load(&client_channel))
+		atomic_fetch_add(&client_stream_opens, 1);
+	return ret;
 }
 
 int __real_tr_rpc_record_stream_create_on_owner(
@@ -950,35 +1008,6 @@ static void test_semantic_overflow(void)
 	CHECK(tr_rpc_record_semantic_stats_merge(&total, &shard) ==
 	      TR_ERR_BAD_LENGTH);
 	CHECK(!memcmp(&total, &expected, sizeof(total)));
-}
-
-static void test_method_budget_release_retry(void)
-{
-	struct fixture f;
-	struct tr_memory_budget *budget;
-	uint64_t current;
-	int ret;
-
-	fixture_init(&f);
-	fixture_create(&f);
-	atomic_store(&budget_release_method_bytes, sizeof(f.client_methods));
-	atomic_store(&budget_release_injection_fired, false);
-	atomic_store(&budget_release_injection_armed, true);
-
-	ret = tr_client_destroy(f.client);
-	CHECK(ret != TR_OK);
-	CHECK(atomic_load(&budget_release_injection_fired));
-	budget = atomic_load(&budget_release_injected_budget);
-	CHECK(budget != NULL);
-	current = atomic_load(&budget_release_current_before_injection);
-
-	/* 恢复注入前账本；首次失败后保留的方法表额度应能在重试时归还。 */
-	atomic_store(&budget->current_bytes, current);
-	atomic_store(&budget_release_injected_budget, NULL);
-	atomic_store(&budget_release_method_bytes, 0U);
-	CHECK(tr_client_destroy(f.client) == TR_OK);
-	f.client = NULL;
-	fixture_destroy(&f);
 }
 
 struct owned_body {
@@ -2109,6 +2138,7 @@ struct public_result {
 	unsigned expected_count;
 	_Atomic unsigned messages, initial, trailing, writable, terminal;
 	_Atomic unsigned depth, arg_freed;
+	struct gate *terminal_gate;
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
 };
@@ -2186,6 +2216,10 @@ static void public_terminal(struct tr_rpc_v2_call call,
 		check_client_semantic(result->fixture->client, 1, 1, status);
 	result->status = status;
 	result->delivery = delivery;
+	if (result->terminal_gate) {
+		destroy_owner_thread = pthread_self();
+		gate_wait(result->terminal_gate, 0, true);
+	}
 	if (context->free_on_terminal) {
 		free(context);
 		atomic_store(&result->arg_freed, 1);
@@ -2210,6 +2244,33 @@ static void public_fixture_init(struct fixture *f)
 	f->client_config.limits.max_message_bytes = BODY;
 	fixture_create(f);
 	fixture_connect(f);
+}
+
+static void test_method_budget_release_retry(void)
+{
+	struct fixture f;
+	uint64_t current;
+	struct tr_memory_budget *budget;
+
+	public_fixture_init(&f);
+	atomic_store(&budget_release_pool_seen, 0U);
+	atomic_store(&budget_release_current_before_failure, 0U);
+	atomic_store(&budget_release_injected_budget, NULL);
+	atomic_store(&budget_release_pool_target, 2U);
+	CHECK(tr_client_destroy(f.client) == TR_ERR_STATE);
+	CHECK(atomic_load(&budget_release_pool_seen) == 2U);
+	budget = atomic_load(&budget_release_injected_budget);
+	CHECK(budget != NULL);
+	current = atomic_load(&budget_release_current_before_failure);
+	CHECK(current > 3U * sizeof(struct tr_rpc_method_desc));
+
+	/* 修复注入造成的预算计数后，第二次 destroy 应能归还方法表额度。 */
+	atomic_store(&budget->current_bytes, current);
+	atomic_store(&budget_release_pool_target, 0U);
+	CHECK(tr_client_destroy(f.client) == TR_OK);
+	atomic_store(&budget_release_injected_budget, NULL);
+	f.client = NULL;
+	fixture_destroy(&f);
 }
 
 static int resume_public_send_on_owner(void *arg)
@@ -2558,6 +2619,108 @@ static void test_public_start_clock_failure(void)
 	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_OK);
 	fixture_destroy(&f);
 	CHECK(!atomic_load(&failed.terminal));
+}
+
+/* 早期限准入失败不能缩短已接纳调用的截止时间。 */
+static void test_public_failed_earlier_deadline(void)
+{
+	struct fixture f;
+	struct public_result original = {.fixture = &f};
+	struct public_result rejected = {.fixture = &f};
+	struct public_context original_context = {&original, false};
+	struct public_context rejected_context = {&rejected, false};
+	struct tr_rpc_v2_client_callbacks original_cb =
+	        public_callbacks(&original_context);
+	struct tr_rpc_v2_client_callbacks rejected_cb =
+	        public_callbacks(&rejected_context);
+	struct tr_rpc_v2_call original_call, untouched, sentinel,
+	        recovered_call;
+	struct tr_rpc_call_options later = {.timeout_ms = 1000};
+	struct tr_rpc_call_options earlier = {.timeout_ms = 25};
+	uint8_t request_byte = pattern(80, 0);
+	struct tr_rpc_bytes request = {&request_byte, 1};
+	uint64_t reuse_end;
+	int reuse_ret;
+
+	fixture_init(&f);
+	f.public_client = true;
+	f.client_config.limits.max_calls = 1;
+	f.client_config.limits.max_streams = 1;
+	f.client_record.calls.capacity = 1;
+	fixture_create(&f);
+	fixture_connect(&f);
+	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
+	atomic_store(&capture_public_start_clock, true);
+	CHECK(tr_client_call_start(f.client, 17, 2, &later, &original_cb,
+	                           &original_call) == TR_OK);
+	CHECK(atomic_load(&public_start_ns));
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	unsigned opens = atomic_load(&client_stream_opens);
+	memset(&untouched, 0xa5, sizeof(untouched));
+	sentinel = untouched;
+	atomic_store(&fail_public_start_clock, true);
+	CHECK(tr_client_call_start(f.client, 17, 2, &earlier, &rejected_cb,
+	                           &untouched) == TR_ERR_SYS);
+	CHECK(!atomic_load(&fail_public_start_clock));
+	CHECK(!memcmp(&untouched, &sentinel, sizeof(untouched)));
+	CHECK(atomic_load(&clock_failures) == 1);
+	CHECK(atomic_load(&client_stream_opens) == opens);
+	CHECK(!atomic_load(&rejected.terminal));
+	check_client_semantic(f.client, 1, 0, TR_RPC_STATUS_OK);
+	atomic_store(&capture_open_attempt, true);
+	struct tr_reactor *owner =
+	        tr_channel_reactor(atomic_load(&client_channel));
+	CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
+	                      &original_call) == TR_OK);
+	CHECK(!atomic_load(&capture_open_attempt));
+	CHECK(atomic_load(&observed_open_clock_ns) != 0);
+	CHECK(atomic_load(&observed_open_clock_ns) +
+	              atomic_load(&observed_open_remaining_ns) ==
+	      atomic_load(&public_start_ns) + 1000000000);
+	wait_count(&original.terminal, 1);
+	CHECK(original.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	CHECK(original.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	CHECK(atomic_load(&original.terminal) == 1);
+	check_client_semantic(f.client, 1, 1, TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	atomic_store(&block_kind, 0);
+	struct public_result recovered = {
+	        .fixture = &f, .expected = {{1, 80}}, .expected_count = 1};
+	struct public_context recovered_context = {&recovered, false};
+	struct tr_rpc_v2_client_callbacks recovered_cb =
+	        public_callbacks(&recovered_context);
+	recovered_call = sentinel;
+	/* terminal 回调可能早于传输层 OPEN 确认。确认到达前 RESET 可返回
+	 * TR_AGAIN，槽位继续承担清理责任；推进 owner 并重试有界准入。 */
+	reuse_end = now_ms() + WAIT_MS;
+	for (;;) {
+		reuse_ret =
+		        tr_client_unary_call(f.client, 17, 1, &request, NULL,
+		                             &recovered_cb, &recovered_call);
+		if (reuse_ret != TR_AGAIN)
+			break;
+		CHECK(!memcmp(&recovered_call, &sentinel,
+		              sizeof(recovered_call)));
+		CHECK(atomic_load(&client_stream_opens) == opens);
+		CHECK(now_ms() < reuse_end);
+		CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
+		                      &original_call) == TR_OK);
+		pause_once();
+	}
+	CHECK(reuse_ret == TR_OK);
+	wait_count(&recovered.terminal, 1);
+	CHECK(recovered.status == TR_RPC_STATUS_OK);
+	struct tr_rpc_semantic_stats expected = {
+	        .calls_started = 2,
+	        .calls_finished = 2,
+	        .final_status = {[TR_RPC_STATUS_DEADLINE_EXCEEDED] = 1,
+	                         [TR_RPC_STATUS_OK] = 1}};
+	struct tr_rpc_semantic_stats actual;
+	CHECK(tr_client_get_rpc_semantic_stats(f.client, &actual) == TR_OK);
+	CHECK(!memcmp(&actual, &expected, sizeof(actual)));
+	fixture_destroy(&f);
+	CHECK(atomic_load(&original.terminal) == 1);
+	CHECK(!atomic_load(&rejected.terminal));
+	CHECK(atomic_load(&recovered.terminal) == 1);
 }
 
 /* Client 进度定时器首次 arm 失败后回滚连接；同一实例能重新连接，
@@ -2912,6 +3075,101 @@ static void test_public_unary_slots(void)
 	CHECK(!atomic_load(&results[CALLS].terminal));
 }
 
+struct public_destroy_probe {
+	struct fixture *fixture;
+	struct tr_conn_handle connection;
+	struct gate completed;
+	int close_status;
+	int status;
+};
+
+static void *public_destroy_thread(void *arg)
+{
+	struct public_destroy_probe *probe = arg;
+	probe->close_status = tr_reactor_close(probe->connection);
+	probe->status = tr_client_destroy(probe->fixture->client);
+	CHECK(pthread_mutex_lock(&probe->completed.lock) == 0);
+	++probe->completed.entered;
+	CHECK(pthread_cond_broadcast(&probe->completed.cond) == 0);
+	CHECK(pthread_mutex_unlock(&probe->completed.lock) == 0);
+	return NULL;
+}
+
+/* 真实 V2 terminal 卡在 owner 回调内时，销毁到达 owner pthread_join
+ * 仍不能越过回调；排队的断连不能覆盖已选定的超时终局。 */
+static void test_public_terminal_destroy_barrier(void)
+{
+	struct fixture f;
+	struct gate terminal_gate;
+	struct public_result result = {.fixture = &f,
+	                               .terminal_gate = &terminal_gate};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	struct tr_rpc_call_options options = {.timeout_ms = 1000};
+	uint8_t request_byte = pattern(91, 0);
+	struct tr_rpc_bytes request = {&request_byte, 1};
+	struct public_destroy_probe probe = {.fixture = &f};
+	pthread_t destroy_thread;
+
+	gate_init(&terminal_gate);
+	gate_init(&probe.completed);
+	fixture_init(&f);
+	f.public_client = true;
+	f.client_config.limits.max_message_bytes = BODY;
+	atomic_store(&f.block_work, true);
+	fixture_create(&f);
+	fixture_connect(&f);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, &options, &cb,
+	                           &call) == TR_OK);
+	gate_wait(&f.gate, 1, false);
+	gate_wait(&terminal_gate, 1, false);
+	CHECK(result.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	CHECK(!atomic_load(&result.terminal));
+	gate_release(&f.gate);
+	wait_count(&f.messages, 1);
+	struct tr_buffer_pool *pool = atomic_load(&public_send_pool);
+	CHECK(pool && tr_buffer_pool_free_count(pool) == pool->buffer_count);
+	struct tr_conn_handle connection = {0};
+	CHECK(pthread_mutex_lock(&observation_lock) == 0);
+	for (unsigned i = 0; i < observation_count; ++i)
+		if (observations[i].channel == atomic_load(&client_channel))
+			connection = observations[i].connection;
+	CHECK(pthread_mutex_unlock(&observation_lock) == 0);
+	CHECK(connection.reactor);
+	probe.connection = connection;
+	atomic_store(&fail_client_destroy, true);
+	atomic_store(&observe_destroy_stop, true);
+	CHECK(pthread_create(&destroy_thread, NULL, public_destroy_thread,
+	                     &probe) == 0);
+	wait_count(&destroy_join_busy, 1);
+	CHECK(pthread_mutex_lock(&probe.completed.lock) == 0);
+	CHECK(!probe.completed.entered);
+	CHECK(pthread_mutex_unlock(&probe.completed.lock) == 0);
+	CHECK(!atomic_load(&result.terminal));
+	gate_release(&terminal_gate);
+	gate_wait(&probe.completed, 1, false);
+	CHECK(pthread_join(destroy_thread, NULL) == 0);
+	atomic_store(&observe_destroy_stop, false);
+	CHECK(probe.close_status == TR_OK);
+	CHECK(probe.status == TR_ERR_SYS);
+	CHECK(atomic_load(&destroy_failures) == 1);
+	CHECK(atomic_load(&result.terminal) == 1);
+	CHECK(result.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	CHECK(tr_buffer_pool_free_count(pool) == pool->buffer_count);
+	CHECK(atomic_load(&client_control_down_events) == 1);
+	CHECK(tr_client_destroy(f.client) == TR_OK);
+	f.client = NULL;
+	fixture_destroy(&f);
+	CHECK(atomic_load(&result.terminal) == 1);
+	CHECK(pthread_cond_destroy(&terminal_gate.cond) == 0);
+	CHECK(pthread_mutex_destroy(&terminal_gate.lock) == 0);
+	CHECK(pthread_cond_destroy(&probe.completed.cond) == 0);
+	CHECK(pthread_mutex_destroy(&probe.completed.lock) == 0);
+}
+
 int main(void)
 {
 	CHECK(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
@@ -2947,6 +3205,7 @@ int main(void)
 	test_public_unary_callback_cancel();
 	test_public_unary_admission();
 	test_public_start_clock_failure();
+	test_public_failed_earlier_deadline();
 	test_public_start_timer_failure();
 	for (unsigned mode = 1; mode <= 4; ++mode)
 		test_public_response_deadline_boundary(mode);
@@ -2959,6 +3218,7 @@ int main(void)
 	     ending <= UNARY_HALF_CLOSE_CLOCK; ++ending)
 		test_public_unary_end(ending);
 	test_public_unary_slots();
+	test_public_terminal_destroy_barrier();
 	puts("test_client_record: unary convergence passed");
 	puts("test_client_record: 16 groups passed");
 	return 0;

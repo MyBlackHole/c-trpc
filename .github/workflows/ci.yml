@@ -51,6 +51,7 @@ jobs:
           python3 scripts/rpc_v1_inventory.py \
             --archive build/linux/x86_64/release/libtrcore.a \
             --output build/audit/rpc-v1-retirement.json \
+            --deny-v1-core \
             --deny tr_rpc_endpoint_flush \
                    tr_rpc_endpoint_flush_on_owner \
                    tr_rpc_endpoint_finalize_detached_with_stats \

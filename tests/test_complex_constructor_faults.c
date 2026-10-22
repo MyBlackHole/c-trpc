@@ -4,7 +4,6 @@
 #define _GNU_SOURCE
 #include "../src/execution/reactor.h"
 #include "../src/memory_budget.h"
-#include "../src/rpc/rpc_internal.h"
 #include "../src/transport/channel/channel_internal.h"
 #include "tr/status.h"
 
@@ -276,36 +275,6 @@ static void test_reactor_tx_pool_case(unsigned fail_alloc, unsigned fail_mutex,
 	}
 }
 
-static void test_rpc_group_case(unsigned fail_alloc, unsigned fail_mutex,
-                                unsigned fail_cond, int expected)
-{
-	struct tr_rpc_executor_group *group = NULL;
-	unsigned alloc_calls = fail_alloc ? fail_alloc : 2U;
-	unsigned mutex_calls = fail_alloc ? 0U : 1U;
-	unsigned cond_calls = (fail_alloc || fail_mutex) ? 0U : 1U;
-	int ret;
-
-	begin_fault(fail_alloc, fail_mutex, fail_cond);
-	ret = tr_rpc_executor_group_create(2U, 4U, 2U, &group);
-	assert(ret == expected);
-	if (ret == TR_OK) {
-		assert(group);
-		assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
-	} else {
-		assert(group == NULL);
-	}
-	expect_calls(alloc_calls, mutex_calls, cond_calls);
-	finish_fault();
-
-	if (ret != TR_OK) {
-		/* 失败未发布任何执行器线程或存储，可立即重建并销毁。 */
-		assert(tr_rpc_executor_group_create(2U, 4U, 2U, &group) ==
-		       TR_OK);
-		assert(tr_rpc_executor_group_can_start(group) == TR_OK);
-		assert(tr_rpc_executor_group_destroy_checked(group) == TR_OK);
-	}
-}
-
 struct channel_fixture {
 	struct tr_reactor *reactor;
 	struct tr_conn_handle connection;
@@ -437,12 +406,6 @@ int main(void)
 	test_reactor_tx_pool_case(0U, 4U, TR_ERR_INVALID);
 	test_reactor_tx_pool_case(0U, 5U, TR_ERR_INVALID);
 	test_reactor_tx_pool_case(0U, 0U, TR_OK);
-
-	test_rpc_group_case(1U, 0U, 0U, TR_ERR_NOMEM);
-	test_rpc_group_case(2U, 0U, 0U, TR_ERR_NOMEM);
-	test_rpc_group_case(0U, 1U, 0U, TR_ERR_INVALID);
-	test_rpc_group_case(0U, 0U, 1U, TR_ERR_INVALID);
-	test_rpc_group_case(0U, 0U, 0U, TR_OK);
 
 	test_channel_early_rollback();
 	puts("complex constructor fault injection: ok");

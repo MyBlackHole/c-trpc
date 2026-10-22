@@ -75,22 +75,6 @@
       "message": "Potential leak of memory pointed to by 'heap'"
     },
     {
-      "source": "src/rpc/rpc.c",
-      "file": "src/rpc/rpc.c",
-      "line": 3535,
-      "column": 10,
-      "check": "clang-analyzer-unix.Malloc",
-      "message": "Potential leak of memory pointed to by 'group_mem'"
-    },
-    {
-      "source": "src/rpc/rpc.c",
-      "file": "src/rpc/rpc.c",
-      "line": 3538,
-      "column": 10,
-      "check": "clang-analyzer-unix.Malloc",
-      "message": "Potential leak of memory pointed to by 'threads'"
-    },
-    {
       "source": "src/transport/channel/channel.c",
       "file": "src/transport/channel/channel.c",
       "line": 3275,

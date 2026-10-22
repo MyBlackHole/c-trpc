@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.0")
+set_version("2.0.0-dev.1")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -117,7 +117,6 @@ target("trcore")
         "src/transport/group/pipeline_listener.c",
         "src/transport/channel/channel.c",
         "src/rpc/rpc_codec.c",
-        "src/rpc/rpc_wire.c",
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
         "src/rpc/rpc_record_router.c",
@@ -126,7 +125,6 @@ target("trcore")
         "src/rpc/rpc_record_endpoint.c",
         "src/rpc/rpc_record_client.c",
         "src/rpc/rpc_v2.c",
-        "src/rpc/rpc.c",
         "src/facade.c",
         "src/facade_binding.c",
         "src/transport/group/client_group.c",
@@ -153,14 +151,11 @@ for _, name in ipairs({"echo_server", "echo_client"}) do
     target_end()
 end
 
-for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "test_server_stats_retiring", "test_reactor_timer_deadline", "test_rpc_deadline_failure", "test_connector_deadline", "test_inbound_handshake_deadline", "test_rpc_deadline_fault", "test_reactor_tokens", "test_channel_ready_deadline", "test_client_connect_deadline", "test_server_drain_deadline", "test_deadline", "test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_primitive_constructor_faults", "test_complex_constructor_faults", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_protocol_error", "test_channel_reconnect_teardown", "test_channel_create_transaction", "test_channel_hello_ownership", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_overload", "test_rpc_terminal_backpressure", "test_rpc_final_close_retry", "test_rpc_unary_failure", "test_rpc_stream_overload", "test_rpc_stream_backpressure", "test_rpc_executor_reserve", "test_rpc_executor_group_drain", "test_rpc_message_ownership", "test_facade_binding"}) do
+for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "test_server_stats_retiring", "test_reactor_timer_deadline", "test_connector_deadline", "test_inbound_handshake_deadline", "test_reactor_tokens", "test_channel_ready_deadline", "test_client_connect_deadline", "test_server_drain_deadline", "test_deadline", "test_transport", "test_connection_group_facade", "test_timer_queue", "test_completion_queue", "test_command_queue", "test_buffer_pool", "test_primitive_constructor_faults", "test_complex_constructor_faults", "test_connector", "test_pipeline", "test_pipeline_route", "test_pipeline_registry", "test_pipeline_ingress", "test_pipeline_control", "test_pipeline_control_wire", "test_pipeline_listener", "test_runtime", "test_runtime_threads", "test_reactor_fairness", "test_reactor_budget", "test_reactor_stats_reuse_race", "test_reactor_source_detach", "test_reactor_stop_full", "test_reactor_fatal_exit", "test_channel_detach", "test_channel_control_retry", "test_channel_protocol_error", "test_channel_reconnect_teardown", "test_channel_create_transaction", "test_channel_hello_ownership", "test_client_connect_rollback", "test_facade_constructor_ownership", "test_server_peer_rollback", "test_internal_constructor_ownership", "test_server_destroy_retry", "test_server_create_oom", "test_tx_priority", "test_crc32c", "test_rpc_message_ownership", "test_facade_binding"}) do
     target(name)
         set_kind("binary")
         set_default(false)
         add_files("tests/" .. name .. ".c")
-        if name == "test_transport" then
-            add_files("tests/rpc_v1_test_client_fixture.c")
-        end
         add_deps("trcore")
         add_undefines("NDEBUG")
         if name == "test_echo_client_i18n" then
@@ -191,27 +186,8 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_reactor_timer_unregister",
                         "-Wl,--wrap=tr_reactor_abort_on_owner",
                         "-Wl,--wrap=tr_pipeline_ingress_attach_data_route_on_owner", {force = true})
-        elseif name == "test_rpc_terminal_backpressure" then
-            -- 重试完成项与客户端 Endpoint 最后一份所有者引用销毁屏障。
-            add_ldflags("-Wl,--wrap=tr_reactor_complete",
-                        "-Wl,--wrap=tr_channel_set_handler", {force = true})
-        elseif name == "test_rpc_stream_backpressure" then
-            -- 仅测试目标观察 handler 静默屏障，验证留存消息延迟销毁。
-            add_ldflags("-Wl,--wrap=tr_channel_set_handler", {force = true})
-        elseif name == "test_rpc_deadline_fault" then
-            -- 仅测试目标注入 RPC 单调时钟失败和 timer arm 失败。
-            add_ldflags("-Wl,--wrap=clock_gettime",
-                        "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_reactor_timer_deadline" then
             add_ldflags("-Wl,--wrap=clock_gettime", "-Wl,--wrap=epoll_wait", {force = true})
-        elseif name == "test_rpc_deadline_failure" then
-            -- 定向故障：构造期 callback 发布与 timer 注销复合失败。
-            add_ldflags("-Wl,--wrap=clock_gettime",
-                        "-Wl,--wrap=tr_reactor_timer_register",
-                        "-Wl,--wrap=tr_reactor_timer_arm",
-                        "-Wl,--wrap=tr_reactor_timer_unregister",
-                        "-Wl,--wrap=tr_channel_set_handler",
-                        "-Wl,--wrap=tr_rpc_wire_decode_ex", {force = true})
         elseif name == "test_connector_deadline" then
             add_ldflags("-Wl,--wrap=tr_tcp_connect_ipv4",
                         "-Wl,--wrap=tr_tcp_finish_connect",
@@ -249,6 +225,10 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_connection_group_facade" then
             -- CONTROL 失败与 Client Group 截止时间/condwait 测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_reactor_close_on_owner",
+                        "-Wl,--wrap=tr_connector_create",
+                        "-Wl,--wrap=tr_connector_start",
+                        "-Wl,--wrap=tr_connector_cancel",
+                        "-Wl,--wrap=sendmsg",
                         "-Wl,--wrap=tr_deadline_init_ms",
                         "-Wl,--wrap=pthread_cond_timedwait", {force = true})
         elseif name == "test_channel_reconnect_teardown" then
@@ -269,11 +249,8 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             -- Test-only lifecycle accounting/fault injection, never part of the SDK.
             add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
         elseif name == "test_runtime" then
-            -- 预算归还失败后重试 Runtime peer 存储回收，仅在本测试链接注入。
+            -- 预算释放失败后重试 Runtime peer 存储回收，仅在本测试链接注入。
             add_ldflags("-Wl,--wrap=tr_reactor_destroy", {force = true})
-        elseif name == "test_rpc_executor_group_drain" then
-            -- 保留 V1 Server Executor Group 生命周期与重试覆盖；客户端通过 raw V1 测试 peer。
-            add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
         elseif name == "test_pipeline_listener" then
             -- epoll/source 回滚和 MONOTONIC condwait 的测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
@@ -314,18 +291,6 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_command_queue_pop_batch",
                         "-Wl,--wrap=pthread_join", {force = true})
 
-        elseif name == "test_rpc_unary_failure" then
-            -- OOM and pool-exhaustion injection belongs to the test binary.
-            add_ldflags("-Wl,--wrap=malloc",
-                        "-Wl,--wrap=tr_buffer_acquire",
-                        "-Wl,--wrap=tr_reactor_send",
-                        "-Wl,--wrap=clock_gettime",
-                        "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
-        elseif name == "test_rpc_final_close_retry" then
-            -- 注入服务端 STREAM_CLOSE 准入与首次重试调度失败。
-            add_ldflags("-Wl,--wrap=tr_reactor_send",
-                        "-Wl,--wrap=clock_gettime",
-                        "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_channel_protocol_error" then
             -- Observe immediate owner abort while the actual command ring is full.
             add_ldflags("-Wl,--wrap=tr_reactor_abort_on_owner", {force = true})
@@ -554,6 +519,22 @@ target("test_runtime_message_recovery")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 真实验证消息服务同步对象部分销毁后的跨线程接管与重试。
+target("test_message_service_partial_destroy")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_message_service_partial_destroy.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=eventfd",
+                "-Wl,--wrap=tr_task_executor_destroy",
+                "-Wl,--wrap=pthread_cond_destroy",
+                "-Wl,--wrap=pthread_mutex_destroy",
+                "-Wl,--wrap=pthread_cond_signal",
+                "-Wl,--wrap=pthread_cond_broadcast",
+                "-Wl,--wrap=pthread_cond_wait", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- 分片消息操作及执行域边界，使用真实 Runtime/Reactor/任务执行器。
 target("test_runtime_message_api")
     set_kind("binary")
@@ -562,6 +543,27 @@ target("test_runtime_message_api")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_reactor_call",
                 "-Wl,--wrap=ZSTD_compressStream2", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 覆盖分片消息取消、跨分片隔离与多分片失败回滚边界。
+target("test_runtime_message_control")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_runtime_message_control.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=pthread_create",
+                "-Wl,--wrap=ZSTD_compressStream2",
+                "-Wl,--wrap=ZSTD_decompressStream", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- RAW Codec 独立测试真实公共编码对象，保留字节与参数边界契约。
+target("test_rpc_raw_codec")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_raw_codec.c")
+    add_deps("trcore")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -578,7 +580,6 @@ target("test_rpc_record")
     on_config(function (target)
         local expected = {
             [path.absolute("src/rpc/rpc_record.c")] = 0,
-            [path.absolute("src/rpc/rpc_wire.c")] = 0,
             [path.absolute("src/message/message.c")] = 0,
             [path.absolute("src/message/transform.c")] = 0,
             [path.absolute("src/message/zstd.c")] = 0
@@ -754,15 +755,57 @@ target("test_rpc_record_endpoint_tcp")
     end)
     after_link(function (target)
         -- 防止以后重新继承 trcore 后把旧 RPC 实现悄悄带回这个证明目标。
+        local v1_symbols = {
+            tr_rpc_call_cancel = true,
+            tr_rpc_call_close_send = true,
+            tr_rpc_call_finish = true,
+            tr_rpc_call_get_context = true,
+            tr_rpc_call_get_peer_metadata = true,
+            tr_rpc_call_get_peer_trailing_metadata = true,
+            tr_rpc_call_is_cancelled = true,
+            tr_rpc_call_send = true,
+            tr_rpc_call_send_buffer = true,
+            tr_rpc_call_set_metadata = true,
+            tr_rpc_call_set_trailing_metadata = true,
+            tr_rpc_call_start = true,
+            tr_rpc_call_start_ex = true,
+            tr_rpc_deadline_heap_snapshot = true,
+            tr_rpc_endpoint_arm_detached_finalizer = true,
+            tr_rpc_endpoint_create = true,
+            tr_rpc_endpoint_create_with_executor_group = true,
+            tr_rpc_endpoint_destroy = true,
+            tr_rpc_endpoint_destroy_with_stats = true,
+            tr_rpc_endpoint_detach_for_finalize = true,
+            tr_rpc_endpoint_get_semantic_stats = true,
+            tr_rpc_endpoint_get_stats = true,
+            tr_rpc_endpoint_release_detached_owner = true,
+            tr_rpc_executor_group_can_start = true,
+            tr_rpc_executor_group_create = true,
+            tr_rpc_executor_group_destroy_checked = true,
+            tr_rpc_executor_group_start = true,
+            tr_rpc_executor_group_stop = true,
+            tr_rpc_in_worker_context = true,
+            tr_rpc_message_release = true,
+            tr_rpc_message_stream_internal = true,
+            tr_rpc_register_method = true,
+            tr_rpc_register_stream_method = true,
+            tr_rpc_unary_call = true,
+            tr_rpc_unary_call_ex = true,
+            tr_rpc_wire_decode = true,
+            tr_rpc_wire_decode_ex = true,
+            tr_rpc_wire_encode = true
+        }
+        -- 这些名称是 V2 Record Endpoint 的类型/回调；不属于旧 V1
+        -- 函数符号拒绝集合。tr_rpc_record_endpoint_* 也由精确集合自然放行。
+        local v2_endpoint_names = {
+            tr_rpc_endpoint_result = true,
+            tr_rpc_endpoint_terminal_fn = true,
+            tr_rpc_endpoint_progress_fn = true
+        }
         local symbols = os.iorunv("nm", {"--defined-only", "--extern-only", target:targetfile()})
         for symbol in symbols:gmatch("[^\n]+") do
             local name = symbol:match("([%w_]+)%s*$") or ""
-            assert(not name:match("^tr_rpc_endpoint_") and
-                   not name:match("^tr_rpc_executor_group_") and
-                   not name:match("^tr_rpc_wire_") and
-                   name ~= "tr_rpc_in_worker_context" and
-                   name ~= "tr_rpc_unary_call" and
-                   name ~= "tr_rpc_call_start",
+            assert(v2_endpoint_names[name] or not v1_symbols[name],
                    "V2 独立网络验证不允许 V1 定义: " .. name)
         end
     end)
@@ -787,7 +830,6 @@ target("test_server_record")
                 "-Wl,--wrap=tr_task_executor_destroy",
                 "-Wl,--wrap=tr_task_executor_cancel",
                 "-Wl,--wrap=tr_task_executor_dispatch",
-                "-Wl,--wrap=tr_rpc_executor_group_create",
                 "-Wl,--wrap=tr_rpc_record_endpoint_create_on_owner",
                 "-Wl,--wrap=tr_rpc_record_endpoint_start_on_owner",
                 "-Wl,--wrap=tr_rpc_record_endpoint_close_on_owner",
@@ -849,6 +891,8 @@ target("test_client_record")
                 "-Wl,--wrap=tr_channel_set_handler",
                 "-Wl,--wrap=tr_channel_destroy",
                 "-Wl,--wrap=tr_buffer_pool_destroy",
+                "-Wl,--wrap=tr_runtime_stop",
+                "-Wl,--wrap=pthread_join",
                 "-Wl,--wrap=tr_stream_release_payload",
                 "-Wl,--wrap=clock_gettime", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
@@ -873,6 +917,16 @@ target("test_rpc_v2_server")
     add_undefines("NDEBUG")
     add_ldflags("-Wl,--wrap=tr_rpc_record_stream_receive_on_owner",
                 "-Wl,--wrap=calloc", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 已受理的 V2 工作阻塞时，Server 销毁可重试且终局只发布一次。
+target("test_rpc_v2_server_destroy_drain")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_server_destroy_drain.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

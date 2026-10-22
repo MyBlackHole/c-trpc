@@ -25,7 +25,7 @@ struct tr_rpc_record_client_handle {
 	uint32_t slot;
 };
 
-/* 公共能力只保存不可检查的值；不能把完整代次压入旧 V1 的 32 位布局。 */
+/* 公共能力只保存不可检查的值；必须保留完整代次，避免句柄布局截断。 */
 static inline struct tr_rpc_v2_call
 tr_rpc_record_client_public_handle(struct tr_rpc_record_client_handle handle)
 {

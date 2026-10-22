@@ -16,9 +16,9 @@ c-trpc 以 ISO C11 为语言基线。作用域自动清理使用 GCC/Clang 的 `
 
 `tr_conn_handle`、`tr_stream_handle` 等句柄是能力句柄，**不是所有权**。
 
-`tr_rpc_call_handle` 同样是借用能力句柄：代次可以识别同一 Endpoint
-内部的槽位复用，但句柄本身不会固定 Endpoint 生命周期。调用方必须保证拥有它的
-Client/Server 尚未进入销毁流程，并在 Call 终止生命周期结束后停止使用旧句柄。
+`tr_rpc_v2_call` 是弱能力值：复制它不会延长 Client 生命周期。调用方必须保证
+Client 尚未进入销毁流程，并按 V2 API 合同处理过期能力；`tr_rpc_v2_call_id` 只是
+业务身份，不具备发送或延长生命周期的能力。旧 `tr_rpc_call_handle` 已从 SDK 移除。
 
 ## 2. 仅成功时转移所有权
 
@@ -91,7 +91,7 @@ struct child *child TR_AUTO(child_cleanup) = NULL;
 
 如果对象只有完成多个初始化步骤后才能调用完整析构函数，则使用构造保护对象记录哪些步骤已经成功。
 
-典型对象包括 Reactor、Channel、RPC Endpoint、执行器组。
+典型对象包括 Reactor、Channel、V2 Record/dispatch 对象和 TaskExecutor。
 
 构造保护主要解决两个问题：
 
@@ -272,203 +272,38 @@ if (ret == TR_OK)
     client = NULL;
 ```
 
-## 9. RPC Endpoint 生命周期
+## 9. RPC V2 调用与对象所有权
 
-RPC Endpoint 使用强引用计数保护跨工作线程的异步生命周期，但需要区分两种销毁模式。
+R14 已从源码与静态库移除旧 V1 raw Call、Endpoint、Executor Group 和消息保留/释放
+API。当前 RPC 生命周期由 V2 Client/Server、Record 状态机和共享 TaskExecutor 管理；
+本节只记录仍然适用的 SDK 所有权规则。完整合同见[公共 V2 SDK 文档](rpc-v2-sdk.md)。
 
-### 9.1 同步销毁
+### 调用能力与身份
 
-同步销毁是**外部终止操作**，不是回调内可重入 API。
+- `tr_rpc_v2_call` 是可复制的弱能力，不延长 Client 生命周期；Client 开始销毁后，
+  调用方不能再使用此前保存的能力；
+- `tr_rpc_v2_call_id` 是用于比较/关联业务工作的身份值，不是发送能力；
+- 调用方必须在外部生命周期所有者完成 drain/destroy 前停止发布新的 Client/Server
+  使用者，并遵守对应的同步销毁屏障。
 
-禁止在以下执行上下文直接销毁 Client/Server/Endpoint：
+### 正文、元数据与回复所有权
 
-- Reactor 所有者回调/拦截器；
-- RPC 执行器工作线程上的处理器/结果/事件回调。
+- Client 发送接口成功受理前会复制输入正文/元数据；返回背压或错误时，输入仍由调用方拥有；
+- Client 回调中的正文和元数据视图只借用到回调返回；需要长期保存时，应用自行复制；
+- Server work 收到的请求正文、OPEN 元数据和取消视图只在该 work 的借用期内有效；
+- `tr_rpc_v2_reply_append()` 和元数据 setter 成功后已复制输入；调用方可以立即复用源字节；
+- 异步 producer 使用显式引用；应用线程发布前取得引用，所有者必须恰好 release。Producer
+  可以晚于 Server terminal/destroy 存活，最终仍须归还引用。
 
-原因不是“API 风格”，而是静默依赖：销毁需要等待 Reactor 所有者或
-RPC 工作线程完成；从被等待的执行上下文内同步销毁会形成自等待、
-自等待线程退出，或者在线程等待失败后继续释放仍在执行的对象。
+### 同步生命周期屏障
 
-正确模式：
+排空和销毁不能从依赖其推进的 Reactor、Client 回调或 Server work 回调中同步等待。
+回调先发布关闭意图并返回；外部控制线程负责等待 drain/静默，然后重试销毁直到成功。
+这保证执行中的 V2 回调、Server work 和资源引用都已退出后才释放所属对象。
 
-```text
-回调 / 处理器
-    -> 发布关闭意图
-    -> 返回
-
-外部控制线程
-    -> 停止新的应用 API 入口
-    -> 排空 / 静默
-    -> 销毁
-```
-
-底层生命周期同样遵守失败即关闭原则：`tr_reactor_stop()` 在所有者上下文返回
-`TR_ERR_STATE`，而 Reactor/Runtime 销毁如果无法完成停止，不得继续释放内存。
-
-同样的约束适用于**同步生命周期等待**，不仅是销毁。任何需要等待
-Reactor/RPC 执行器继续推进才能满足的条件，都不能从对应执行上下文
-内部等待：
-
-```text
-回调 / 处理器
-    -> begin_drain / 发布关闭意图
-    -> 返回
-
-外部控制线程
-    -> wait_ready / wait_drained / server_drain
-    -> destroy
-```
-
-当前门面对 Reactor 所有者回调、拦截器和 RPC 工作线程回调
-执行阻塞等待时返回 `TR_ERR_STATE`。其中 `tr_server_drain()` 必须在
-停止监听器/对端准入之前完成该上下文检查，避免“报错但已经部分
-进入排空”的半状态。传输层 `tr_channel_wait_drained()` 也直接拒绝
-Reactor 所有者上下文，使该规则不会依赖门面调用者自觉遵守。
-
-Client/直接所有者使用同步销毁时，Endpoint 只是借用 Channel，因此函数
-返回后必须允许调用方立即安全销毁 Channel：
-
-```text
-所有者引用 = 1
-      |
-执行器任务发布前取得引用
-      v
-所有者引用 + 任务引用
-      |
-销毁：
-  由所有者串行解除 Channel 处理器关联
-  （处理器发布本身就是旧回调静默屏障）
-  注销截止时间定时器
-  关闭执行器准入
-  等待 refs == 1
-      |
-释放所有者引用
-      v
-refs == 0 -> 释放 Endpoint
-```
-
-这里允许等待，因为 API 契约明确要求“销毁函数返回即完全释放”。
-
-Endpoint 拆除是事务式生命周期屏障，不是尽力而为的清理：
-
-- Channel 处理器解除关联失败：旧 callback_arg 仍可能引用 Endpoint，禁止释放；
-- 截止时间定时器注销失败：定时器事件源仍可能引用 Endpoint，禁止释放；
-- 服务端已解除关联模式只有在处理器/定时器全部静默、执行器准入关闭后，
-  才发布 `teardown_detached=1`；
-- Endpoint 构造不再让 `TR_AUTO` 清理承担回调/定时器/工作线程拆除：
-  本地临时状态先完成，截止时间定时器 + Channel 处理器在同一 Reactor 所有者
-  事务中发布；事务失败必须在返回前自行收敛；
-- 独立工作线程只有在 Endpoint 所有权已经先转移到 `*out` 后才启动。
-  工作线程启动失败时会立即尝试终局回滚；如果回滚时等待线程退出自身失败，
-  `*out` 保留部分构造 Endpoint 的所有权，调用方继续 `destroy()` 重试，禁止形成
-  无主泄漏；
-- 分片执行器组同样只在 Runtime 已经归调用方所有之后由
-  `runtime_start()` 启动，`runtime_stop()` 负责可重试的线程退出等待屏障。
-
-客户端连接失败回滚同样使用同步所有者关闭操作。物理 Connection 只有在
-所有者确认关闭或句柄已失效后，才允许解绑 RPC/Channel 并清空 Client 句柄；
-否则保持现有所有权以便重试。
-
-客户端门面还额外保证销毁顺序：
-
-```text
-开始排空 / 停止新工作
-   -> 销毁 Connection Group
-   -> 销毁 RPC Endpoint
-   -> 销毁 Channel
-   -> 停止/销毁 Runtime Reactor
-   -> 销毁后备资源池
-```
-
-也就是说，回调源与工作线程完成事件都在 Reactor 仍存活时完成正常所有者收敛，
-不再依赖 Runtime 停止后的兜底最终清理路径。
-
-### 9.2 服务端解除关联后的最终清理
-
-服务端对端从分片表摘除时，不能让 Reactor 等待正在执行的工作线程。
-
-当前顺序：
-
-```text
-Reactor 所有者
-  -> 检查分片回收预算
-  -> 解除 RPC/Channel 回调关联
-  -> 注销截止时间/保活事件源
-  -> 关闭执行器准入
-  -> 设置已解除关联最终清理器
-  -> 立即清空对端槽位
-  -> 释放 Endpoint 所有者引用
-
-已有工作线程强引用
-  -> 自然继续
-  -> 最后一次释放引用
-  -> 已解除关联最终清理器
-       -> 采集最终统计
-       -> 最终释放已解除关联 Channel
-       -> 减少 reaping_current
-       -> 释放已解除关联上下文
-```
-
-因此：
-
-- 对端槽位生命周期与旧 Endpoint 对象生命周期分离；
-- 槽位复用不代表对象生命周期可以无界增长：每个分片最多允许与对端槽位容量
-  相同数量的已解除关联/回收中 Endpoint；预算满时，已断开对端暂留槽位；
-- 退役 Endpoint 最终清理器释放一个预算后，通过分片生命周期 eventfd 唤醒
-  Reactor 所有者，继续处理此前延迟的解除关联；
-- 工作线程强引用是生命周期隔离，不需要回收/清理线程阻塞等待；
-- 最终清理器只能做最终统计与释放，不能重新进入 Reactor 协议状态修改。
-
-Call 自己的 `task_refs` 与 Endpoint 引用计数职责不同：
-
-- `tr_refcount`：保护 Endpoint 对象生命周期；
-- Call `task_refs`：阻止 Call 槽位在任务/完成事件尚未结束时复用。
-
-### 9.2.1 保留 RPC 消息生命周期
-
-`TR_RPC_MESSAGE_TAKE_OWNERSHIP` 是跨工作线程回调的异步所有权转移，
-因此保留消息描述符不能只保存裸 `Channel *`。
-把消息暴露给应用回调之前必须先取得 Endpoint 强引用；
-返回 `TR_RPC_MESSAGE_TAKE_OWNERSHIP` 时，该引用与 RX Buffer 一起转移给描述符。
-
-```text
-工作任务引用
-    +
-消息生命周期引用
-        |
-回调返回 TAKE_OWNERSHIP
-        |
-        +--> 任务引用正常归还
-        |
-        +--> 消息引用继续保持 Endpoint/Channel 存活
-                    |
-对端断开 / 已解除关联最终清理
-                    |
-              等待消息释放
-                    |
-tr_rpc_message_release()
-    -> 归还/释放 RX 载荷
-    -> Endpoint 释放引用
-```
-
-因此保留消息可以安全跨越对端断开，但会延迟该对端的最终析构。
-描述符所有权只能释放一次；复制描述符表示所有权移动，不表示复制强引用。
-
-Endpoint 的生命周期同步现在与协议锁分离：
-
-```text
-endpoint->lock
-    -> Call / Method / 协议状态转换
-
-endpoint->ref_lock + ref_cond
-    -> 仅所有者强引用等待
-    -> 已解除关联销毁/最终清理器发布
-    -> 引用释放唤醒
-```
-
-所有强引用释放必须统一经过 `tr_rpc_endpoint_put()`。
-它在 `ref_lock` 下通知等待仅所有者状态的析构流程，因此任务完成、
-等待重试完成或未来新增引用来源都不应自行实现另一套 `ref_cond` 通知。
+V2 Server 的对端退役、任务 drain 与分片预算归还顺序见
+[`architecture/01-runtime.md`](architecture/01-runtime.md)；调用终局、回调域和 producer
+的完整合同见 [`rpc-v2-sdk.md`](rpc-v2-sdk.md)。
 
 ## 9.3 Pipeline / Listener 销毁
 
@@ -540,7 +375,7 @@ Reactor 所有者线程
 ```c
 struct tr_mutex_guard guard TR_AUTO(tr_mutex_guard_cleanup) = { 0 };
 
-if (tr_mutex_guard_acquire(&guard, &endpoint->lock) != 0)
+if (tr_mutex_guard_acquire(&guard, &shared_state->lock) != 0)
     return TR_ERR_SYS;
 
 /* 任意 return 都会自动解锁 */

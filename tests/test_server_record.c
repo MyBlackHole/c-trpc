@@ -1,11 +1,10 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/execution/worker_context.h"
-#include "../src/rpc/rpc_internal.h"
 #include "../src/server_record_internal.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
-#include "../src/execution/buffer.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/execution/buffer.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
 #include "tr/status.h"
@@ -39,20 +38,18 @@
  * 原实现；服务端监听、接纳、调度和回收全部由 tr_server 自己驱动。 */
 static _Atomic bool capture_start;
 static _Atomic unsigned executor_creates, executor_destroys, worker_total;
-static _Atomic unsigned task_capacity_total, legacy_creates, worker_attempts;
+static _Atomic unsigned task_capacity_total, worker_attempts;
 static _Atomic unsigned fail_worker_at, endpoint_creates, endpoint_fail_at;
 static _Atomic unsigned endpoint_start_fail_at, endpoint_starts;
 static _Atomic unsigned reactor_count, fatal_polls, detach_failures;
 static _Atomic unsigned cancel_requests;
 static _Atomic unsigned observation_count, stopped_reaps, fail_stopped_reap_at;
 static _Atomic unsigned cleanup_dispatches;
+static _Atomic unsigned budget_release_pool_target, budget_release_pool_seen;
+static _Atomic uint64_t budget_release_current_before_failure;
+static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
 static _Atomic unsigned executor_join_failures, workers_joined;
 static _Atomic bool fail_poll, fail_handler_detach, fail_executor_join;
-static _Atomic bool budget_release_injection_armed;
-static _Atomic bool budget_release_injection_fired;
-static _Atomic uint64_t budget_release_method_bytes;
-static _Atomic uint64_t budget_release_current_before_injection;
-static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
 static _Atomic(struct tr_reactor *) reactors[4];
 static _Atomic(struct tr_channel *) observed_channel;
 static _Thread_local bool starting_tasks;
@@ -63,28 +60,6 @@ static struct {
 	_Atomic(struct tr_task_executor *) executor;
 	_Atomic bool cleanup_entered;
 } observations[OBSERVED_ENDPOINTS];
-
-int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
-int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
-{
-	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
-	int ret = __real_tr_buffer_pool_destroy(pool);
-
-	if (ret == TR_OK && budget &&
-	    atomic_exchange(&budget_release_injection_armed, false)) {
-		uint64_t current = atomic_load(&budget->current_bytes);
-		uint64_t method_bytes =
-		        atomic_load(&budget_release_method_bytes);
-
-		CHECK(method_bytes > 1U);
-		CHECK(current >= method_bytes);
-		atomic_store(&budget_release_current_before_injection, current);
-		atomic_store(&budget_release_injected_budget, budget);
-		atomic_store(&budget->current_bytes, method_bytes - 1U);
-		atomic_store(&budget_release_injection_fired, true);
-	}
-	return ret;
-}
 
 static unsigned observe_endpoint(struct tr_rpc_record_endpoint *endpoint)
 {
@@ -119,6 +94,29 @@ int __wrap_tr_task_executor_create(const struct tr_task_executor_config *c,
 		atomic_fetch_add(&executor_creates, 1);
 		atomic_fetch_add(&worker_total, (unsigned)c->workers);
 		atomic_fetch_add(&task_capacity_total, (unsigned)c->capacity);
+	}
+	return ret;
+}
+
+int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
+int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
+{
+	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
+	int ret = __real_tr_buffer_pool_destroy(pool);
+
+	if (ret == TR_OK && budget &&
+	    atomic_load(&budget_release_pool_target) != 0U &&
+	    atomic_fetch_add(&budget_release_pool_seen, 1U) + 1U ==
+	            atomic_load(&budget_release_pool_target)) {
+		uint64_t current = atomic_load(&budget->current_bytes);
+		uint64_t method_bytes =
+		        2U * sizeof(struct tr_rpc_dispatch_method);
+
+		CHECK(method_bytes > 1U);
+		atomic_store(&budget_release_current_before_failure, current);
+		atomic_store(&budget_release_injected_budget, budget);
+		/* 在方法表释放前制造预算低于该笔所有权的条件。 */
+		atomic_store(&budget->current_bytes, method_bytes - 1U);
 	}
 	return ret;
 }
@@ -206,16 +204,6 @@ int __wrap_tr_task_executor_dispatch(struct tr_task_executor *e, size_t limit,
 		atomic_fetch_add(&cleanup_dispatches, 1);
 	}
 	return __real_tr_task_executor_dispatch(e, limit, delivered);
-}
-
-int __real_tr_rpc_executor_group_create(uint32_t, uint32_t, uint32_t,
-                                        struct tr_rpc_executor_group **);
-int __wrap_tr_rpc_executor_group_create(uint32_t n, uint32_t calls,
-                                        uint32_t threads,
-                                        struct tr_rpc_executor_group **out)
-{
-	atomic_fetch_add(&legacy_creates, 1);
-	return __real_tr_rpc_executor_group_create(n, calls, threads, out);
 }
 
 int __real_tr_rpc_record_endpoint_create_on_owner(
@@ -441,7 +429,6 @@ static void reset_observation(void)
 	atomic_store(&executor_destroys, 0);
 	atomic_store(&worker_total, 0);
 	atomic_store(&task_capacity_total, 0);
-	atomic_store(&legacy_creates, 0);
 	atomic_store(&worker_attempts, 0);
 	atomic_store(&fail_worker_at, 0);
 	atomic_store(&endpoint_creates, 0);
@@ -526,7 +513,6 @@ static void fixture_create(struct fixture *f)
 	CHECK(tr_server_create_record(&f->config, &f->tuning, &f->record,
 	                              copied, 2, &f->server) == TR_OK);
 	memset(copied, 0, sizeof(copied));
-	CHECK(atomic_load(&legacy_creates) == 0);
 	CHECK(tr_server_listen(f->server, "127.0.0.1", 0, &f->port) == TR_OK);
 }
 
@@ -557,7 +543,6 @@ static void fixture_destroy(struct fixture *f)
 		CHECK(destroy_until_stable(f) == TR_OK);
 	CHECK(atomic_load(&executor_creates) ==
 	      atomic_load(&executor_destroys));
-	CHECK(atomic_load(&legacy_creates) == 0);
 	for (unsigned i = 0; i < 4; ++i)
 		atomic_store(&reactors[i], NULL);
 	atomic_store(&observed_channel, NULL);
@@ -937,6 +922,71 @@ static void test_shared_executor(void)
 	fixture_destroy(&f);
 }
 
+/* 单 worker 固定执行中的调用，第二个调用占据剩余任务槽。额外流
+ * 必须经真实 TCP/Endpoint 容量拒绝，不能进入业务回调。 */
+static void test_capacity_recovery(void)
+{
+	struct fixture f;
+	struct peer p;
+	unsigned accepted[2];
+	fixture_init(&f, 1, 1);
+	f.record.tasks.workers = 1;
+	f.record.tasks.capacity = 2;
+	f.record.endpoint.dispatch.capacity = 2;
+	fixture_create(&f);
+	CHECK(fixture_start(&f) == TR_OK);
+	peer_connect(&p, f.port, true);
+	accepted[0] = peer_open(&p, f.methods[0].descriptor);
+	accepted[1] = peer_open(&p, f.methods[1].descriptor);
+	wait_count(&f.calls, 2);
+	atomic_store(&f.block, true);
+	peer_send(&p, accepted[0], TR_RPC_RECORD_MESSAGE, 32);
+	gate_wait(&f.gate, 1, false);
+	peer_send(&p, accepted[1], TR_RPC_RECORD_MESSAGE, 32);
+	peer_send(&p, accepted[0], TR_RPC_RECORD_HALF_CLOSE, 0);
+	peer_send(&p, accepted[1], TR_RPC_RECORD_HALF_CLOSE, 0);
+	struct tr_task_executor *executor =
+	        atomic_load(&observations[0].executor);
+	struct tr_task_executor_stats tasks;
+	uint64_t end = now_ms() + WAIT_MS;
+	do {
+		CHECK(tr_task_executor_get_stats(executor, &tasks) == TR_OK);
+		CHECK(now_ms() < end);
+	} while (tasks.outstanding != tasks.capacity);
+	CHECK(tasks.capacity == f.record.tasks.capacity && tasks.running == 1);
+	unsigned excess = peer_open(&p, f.methods[0].descriptor);
+	peer_finish(&p, excess, TR_RPC_STATUS_RESOURCE_EXHAUSTED, 0, 0);
+	CHECK(atomic_load(&f.calls) == 2);
+	CHECK(atomic_load(&p.terminals[accepted[0]]) == 0);
+	CHECK(atomic_load(&p.terminals[accepted[1]]) == 0);
+	gate_release(&f.gate);
+	peer_finish(&p, accepted[0], TR_RPC_STATUS_OK, 1, 32);
+	peer_finish(&p, accepted[1], TR_RPC_STATUS_OK, 1, 32);
+	CHECK(atomic_load(&p.terminals[excess]) == 1);
+	struct tr_rpc_semantic_stats semantics;
+	end = now_ms() + WAIT_MS;
+	do {
+		CHECK(tr_server_get_rpc_semantic_stats(f.server, &semantics) ==
+		      TR_OK);
+		CHECK(now_ms() < end);
+	} while (semantics.calls_inflight != 0);
+	unsigned recovered = peer_open(&p, f.methods[0].descriptor);
+	peer_send(&p, recovered, TR_RPC_RECORD_MESSAGE, 24);
+	peer_send(&p, recovered, TR_RPC_RECORD_HALF_CLOSE, 0);
+	peer_finish(&p, recovered, TR_RPC_STATUS_OK, 1, 24);
+	peer_destroy(&p);
+	wait_peers(&f, 0, 1);
+	CHECK(tr_server_drain(f.server, WAIT_MS) == TR_OK);
+	struct tr_server_stats stats;
+	CHECK(tr_server_get_stats(f.server, &stats) == TR_OK);
+	CHECK(stats.rpc.endpoints_current == 0 &&
+	      stats.rpc.executor_queued_tasks_current == 0 &&
+	      stats.rpc.executor_running_tasks_current == 0 &&
+	      stats.rpc.semantic.calls_inflight == 0);
+	fixture_destroy(&f);
+	puts("server_record: V2 capacity recovery passed");
+}
+
 static void test_disconnected_work(void)
 {
 	struct fixture f;
@@ -1134,12 +1184,6 @@ static void test_configuration(void)
 	                              f.methods, 2,
 	                              &f.server) == TR_ERR_INVALID);
 	CHECK(!f.server);
-	bad_config = f.config;
-	bad_config.interceptor.arg = &f;
-	CHECK(tr_server_create_record(&bad_config, &f.tuning, &f.record,
-	                              f.methods, 2,
-	                              &f.server) == TR_ERR_UNSUPPORTED);
-	CHECK(!f.server);
 	bad = f.record;
 	bad.tasks.capacity = 1;
 	CHECK(tr_server_create_record(&f.config, &f.tuning, &bad, f.methods, 2,
@@ -1162,29 +1206,28 @@ static void test_configuration(void)
 static void test_method_budget_release_retry(void)
 {
 	struct fixture f;
-	struct tr_memory_budget *budget;
 	uint64_t current;
-	int ret;
+	struct tr_memory_budget *budget;
 
 	fixture_init(&f, 1, 1);
 	fixture_create(&f);
 	CHECK(fixture_start(&f) == TR_OK);
-	atomic_store(&budget_release_method_bytes, sizeof(f.methods));
-	atomic_store(&budget_release_injection_fired, false);
-	atomic_store(&budget_release_injection_armed, true);
-
-	ret = destroy_until_stable(&f);
-	CHECK(ret != TR_OK);
-	CHECK(atomic_load(&budget_release_injection_fired));
+	atomic_store(&budget_release_pool_seen, 0U);
+	atomic_store(&budget_release_current_before_failure, 0U);
+	atomic_store(&budget_release_injected_budget, NULL);
+	atomic_store(&budget_release_pool_target, 1U);
+	CHECK(destroy_until_stable(&f) == TR_ERR_STATE);
+	CHECK(atomic_load(&budget_release_pool_seen) == 1U);
 	budget = atomic_load(&budget_release_injected_budget);
 	CHECK(budget != NULL);
-	current = atomic_load(&budget_release_current_before_injection);
+	current = atomic_load(&budget_release_current_before_failure);
+	CHECK(current > 2U * sizeof(struct tr_rpc_dispatch_method));
 
-	/* 恢复注入前账本；首次失败后保留的方法表额度应能在重试时归还。 */
+	/* 修复注入造成的预算计数后，第二次 destroy 应能归还方法表额度。 */
 	atomic_store(&budget->current_bytes, current);
-	atomic_store(&budget_release_injected_budget, NULL);
-	atomic_store(&budget_release_method_bytes, 0U);
+	atomic_store(&budget_release_pool_target, 0U);
 	CHECK(tr_server_destroy(f.server) == TR_OK);
+	atomic_store(&budget_release_injected_budget, NULL);
 	f.server = NULL;
 	fixture_destroy(&f);
 }
@@ -1215,6 +1258,7 @@ int main(void)
 	test_exact_window();
 	test_shapes_and_reuse();
 	test_shared_executor();
+	test_capacity_recovery();
 	test_disconnected_work();
 	test_stopped_work(false, false, false);
 	test_stopped_work(true, false, false);
@@ -1228,6 +1272,6 @@ int main(void)
 	test_detach_retry(false);
 	test_detach_retry(true);
 	test_join_retry();
-	puts("server_record: 17 scenarios passed");
+	puts("server_record: 19 scenarios passed");
 	return 0;
 }

@@ -570,14 +570,16 @@ static void test_runtime_destroy_retries_peer_budget_release(void)
 	runtime_release_budget = tr_runtime_shard_memory_budget(shard);
 	runtime_release_peer_bytes =
 	        2U * (uint64_t)sizeof(struct tr_runtime_peer);
+	assert(runtime_release_peer_bytes > 1U);
 	runtime_release_injection_fired = 0;
 	runtime_release_injection_armed = 1;
 
 	ret = tr_runtime_destroy(runtime);
-	assert(ret != TR_OK);
+	assert(ret == TR_ERR_STATE);
 	assert(runtime_release_injection_fired == 1);
 	assert(runtime != NULL);
 
+	/* 恢复预算账本后，保留 peer_storage_bytes 的重试标记须使销毁收敛。 */
 	atomic_store_explicit(&runtime_release_budget->current_bytes,
 	                      runtime_release_current_before_injection,
 	                      memory_order_relaxed);

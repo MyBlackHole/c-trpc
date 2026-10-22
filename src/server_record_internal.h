@@ -54,7 +54,8 @@ struct tr_server_record_config {
  * 停止网络，待真实任务退出后交付终局，不抢占不合作的业务。 接收对端 RESET
  * 同样取消原任务，不停止其他调用共享的执行器。 分段 OPEN 尚未完整验证
  * 前的等待不计入此期限，错误 FINAL 也不保证送达。
- * 当前只支持 NONE 消息变换；TLS、V1 Client 互通和公开默认切换仍未提供。
+ * 当前只支持 NONE 消息变换；TLS 与 V1 Client 互通未提供。
+ * 公开 tr_server_create() 已使用 V2，本入口仍仅供库内使用。
  */
 int tr_server_create_record(const struct tr_server_config *config,
                             const struct tr_facade_tuning *tuning,

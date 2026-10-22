@@ -1517,6 +1517,33 @@ static void test_default_factory_requires_methods(void)
 	CHECK(tr_server_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
 }
 
+/* 安装消费端验证 RAW Codec 仍由公开头和静态 SDK 独立提供。 */
+static void test_raw_codec_sdk(void)
+{
+	const uint8_t source[] = {0x00, 0x7f, 0xff, 0x42};
+	const uint8_t expected[] = {0x00, 0x7f, 0xff, 0x42};
+	uint8_t encoded[sizeof(source)] = {0};
+	struct tr_rpc_bytes input = {source, sizeof(source)};
+	struct tr_rpc_bytes decoded = {NULL, 99};
+	struct tr_rpc_bytes empty = {NULL, 0};
+	uint32_t written = 99;
+
+	CHECK(tr_rpc_raw_encode(&input, encoded, sizeof(encoded), &written) ==
+	      TR_OK);
+	CHECK(written == sizeof(expected));
+	CHECK(memcmp(encoded, expected, sizeof(expected)) == 0);
+	CHECK(tr_rpc_raw_decode(encoded, written, &decoded) == TR_OK);
+	CHECK(decoded.data == encoded && decoded.len == sizeof(expected));
+	CHECK(memcmp(decoded.data, expected, sizeof(expected)) == 0);
+
+	written = 99;
+	CHECK(tr_rpc_raw_encode(&empty, NULL, 0, &written) == TR_OK);
+	CHECK(written == 0);
+	CHECK(tr_rpc_raw_decode(NULL, 0, &decoded) == TR_OK);
+	CHECK(decoded.data == NULL && decoded.len == 0);
+	puts("sdk-v2: case=raw-codec result=pass");
+}
+
 /* #280 的一元远端未知方法及本地非 ONE→ONE 拒绝在安装 SDK 中保留。 */
 static void test_unary_rejections(void)
 {
@@ -1547,6 +1574,7 @@ static void test_unary_rejections(void)
 
 int main(void)
 {
+	test_raw_codec_sdk();
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_shapes_and_copy();

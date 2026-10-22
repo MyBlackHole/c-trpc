@@ -11,13 +11,14 @@ c-trpc 核心的范围是通用运行时、传输、连接组和 RPC。
 2. [07-layer-module-api-boundaries.md](07-layer-module-api-boundaries.md)：层职责、模块职责、公开/内部 API、当前边界审查。
 3. [01-runtime.md](01-runtime.md)：服务端/客户端运行时、Reactor 分片、监听器和线程模型。
 4. [02-ownership.md](02-ownership.md)：谁拥有状态、谁可以修改状态、哪些地方允许锁。
-5. [03-rpc-execution.md](03-rpc-execution.md)：RPC 任务 → 工作线程 → 完成事件 → 原 Reactor 所有者。
-6. [08-rpc-streaming-conformance.md](08-rpc-streaming-conformance.md)：四种 RPC 基数关系、半关闭、最终 `STATUS` 与终止回调契约。
-7. [09-rpc-context-metadata.md](09-rpc-context-metadata.md)：调用上下文、初始元数据与尾部元数据。
-8. [10-rpc-interceptor-v1.md](10-rpc-interceptor-v1.md)：固定的调用级拦截器阶段、所有者执行、拒绝与重入契约。
-9. [11-compression-tls-requirements.md](11-compression-tls-requirements.md)：未来消息压缩与 TLS 的分层、资源安全、攻击面和验收要求（目前未实现）。
-10. [04-backup-pipeline.md](04-backup-pipeline.md)：当前保留的旧文件名；其中 Pipeline/Connection Group 基础能力属于核心，备份持久化语义只作为上层映射参考。
-11. [06-evolution.md](06-evolution.md)：c-trpc 核心演进路线。
+5. [../rpc-v2-sdk.md](../rpc-v2-sdk.md)：当前 V2 方法、调用、回调、元数据和所有权合同。
+6. [03-rpc-execution.md](03-rpc-execution.md)：旧 V1 Endpoint 的任务/完成事件设计记录，已退役，不是当前实现说明。
+7. [08-rpc-streaming-conformance.md](08-rpc-streaming-conformance.md)：旧 V1 Call 的基数/终局契约记录，已由 V2 SDK 合同替代。
+8. [09-rpc-context-metadata.md](09-rpc-context-metadata.md)：旧 V1 上下文 API 记录；当前元数据合同见 V2 SDK 文档。
+9. [10-rpc-interceptor-v1.md](10-rpc-interceptor-v1.md)：已退役的 V1 拦截器设计记录，当前 SDK 不提供拦截器。
+10. [11-compression-tls-requirements.md](11-compression-tls-requirements.md)：未来消息压缩与 TLS 的分层、资源安全、攻击面和验收要求（目前未实现）。
+11. [04-backup-pipeline.md](04-backup-pipeline.md)：当前保留的旧文件名；其中 Pipeline/Connection Group 基础能力属于核心，备份持久化语义只作为上层映射参考。
+12. [06-evolution.md](06-evolution.md)：c-trpc 核心演进路线。
 
 ## 业务层参考（非核心）
 
@@ -34,6 +35,10 @@ c-trpc 核心的范围是通用运行时、传输、连接组和 RPC。
 - **V1 目标**：已经确定的核心目标设计。
 - **未来扩展**：只保留扩展边界，不作为当前实现要求。
 - **业务参考**：用于说明业务如何使用 c-trpc，不属于 c-trpc 核心契约。
+- **历史实现记录**：保留已退役 V1 的设计/验证细节，不定义当前 SDK 或源码行为。
+
+R14 从源码和静态库移除旧 V1 Call、Endpoint、Executor Group 与 Wire 核心，保留
+独立 RAW Codec（编码复制，解码借用输入视图）。该分支仍待集成；当前 V2 合同以仓库中的公开 SDK 文档为准。
 
 ## 核心原则
 

@@ -4,7 +4,6 @@
 #include "tr/status.h"
 
 #include "../src/facade_diagnostics_internal.h"
-#include "../src/rpc/rpc_internal.h"
 #include "../src/transport/channel/channel.h"
 
 #include <arpa/inet.h>
@@ -14,6 +13,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 static atomic_int fail_channel_destroy_once;
@@ -98,6 +98,7 @@ int main(void)
 	struct tr_server_stats stats;
 	struct tr_rpc_semantic_stats semantic;
 	uint16_t port = 0U;
+	struct timespec retry_deadline, now;
 	int client_fd;
 
 	small_server_config(&config);
@@ -129,12 +130,16 @@ int main(void)
 	 */
 	atomic_store(&fail_channel_destroy_once, 1);
 	int destroy_ret;
-	unsigned destroy_retries = 0U;
+	assert(clock_gettime(CLOCK_MONOTONIC, &retry_deadline) == 0);
+	retry_deadline.tv_sec += 15;
 	do {
 		destroy_ret = tr_server_destroy(server);
 		if (destroy_ret == TR_AGAIN) {
 			assert(atomic_load(&channel_destroy_attempts) == 0U);
-			assert(++destroy_retries < 10000U);
+			assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+			assert(now.tv_sec < retry_deadline.tv_sec ||
+			       (now.tv_sec == retry_deadline.tv_sec &&
+			        now.tv_nsec < retry_deadline.tv_nsec));
 			sched_yield();
 		}
 	} while (destroy_ret == TR_AGAIN);

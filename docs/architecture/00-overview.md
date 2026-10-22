@@ -1,6 +1,6 @@
 # 架构总览
 
-**状态：当前实现 + V1 目标**
+**状态：R14 V2 当前实现（分支待集成）**
 
 ## 1. 系统上下文
 
@@ -48,7 +48,7 @@ Linux
 
 ## 2. 当前核心模型
 
-当前 `main` 的核心模型：
+当前 R14 分支的核心模型：
 
 ```text
 服务端
@@ -56,9 +56,9 @@ Linux
        ├─ 分片[0..N-1]
        │    ├─ Reactor
        │    ├─ SO_REUSEPORT 监听器
-       │    ├─ RPC 执行器
+       │    ├─ V2 Record dispatch / 分片 TaskExecutor
        │    ├─ 对端槽位/计数器
-       │    ├─ 消息/重组资源
+       │    ├─ V2 Record 请求/回复与重组资源
        │    └─ 对端生命周期 eventfd
        └─ Reactor 本地定时器
 
@@ -76,7 +76,8 @@ Linux
   └─ TRP1 分帧
 
 RPC
-  └─ 任务 -> 工作线程 -> 完成事件 -> 原 Reactor 所有者
+  ├─ Client：V2 Record Call 状态由 Reactor 所有者推进
+  └─ Server：Record/dispatch -> TaskExecutor 工作线程 -> 完成事件 -> 原所有者
 
 连接组/Pipeline
   └─ 单个 Reactor 所有者
@@ -99,10 +100,10 @@ RPC
 - Reactor；
 - 监听器；
 - 对端表；
-- RPC 执行器；
+- V2 Record/dispatch 与分片 TaskExecutor；
 - 运行时队列；
 - RX/TX 资源；
-- RPC 消息/重组资源；
+- V2 Record 请求/回复及重组资源；
 - 定时器；
 - 分片本地指标。
 
@@ -115,7 +116,7 @@ RPC
 
 对端表的预留、发布、移除和存活快照都是 Reactor 单所有者操作。
 
-工作线程不直接修改 Connection/Channel/Stream/Endpoint/Call 协议状态：
+工作线程不直接修改 Connection/Channel/Stream/Record/Call 协议状态：
 
 ```text
 Reactor 所有者
@@ -125,7 +126,8 @@ Reactor 所有者
 原 Reactor 所有者
 ```
 
-旧 Endpoint/Channel 销毁流程先由所有者解除关联，再用强引用作为生命周期隔离，不需要独立回收线程。
+V2 Record/Channel 关闭先由 Reactor 所有者解除回调和定时器关联，再由门面生命周期屏障
+等待未完成任务与显式 producer 引用收敛；当前实现不包含旧 V1 Endpoint/Executor Group。
 
 ### 2.3 连接组/Pipeline
 
@@ -153,13 +155,13 @@ Stream 亲和关系，随后注销 Pipeline，最后由所有者立即关闭 DAT
 
 这些机制属于通用传输能力，不定义备份检查点/提交等业务语义。
 
-## 3. V1 目标分层模型
+## 3. 当前 V2 分层模型
 
 ```mermaid
 flowchart TB
     APP["应用/业务层"]
     PUB["稳定公开 API\n客户端/服务端/RPC/传输能力"]
-    RPC["RPC 核心\n方法/调用/编解码/截止时间"]
+    RPC["RPC V2 Record\n方法/调用/编解码/截止时间"]
     TR["传输\nChannel/Stream/连接组"]
     RT["运行时\nReactor/定时器/队列/套接字"]
     OS["Linux"]
@@ -171,7 +173,7 @@ flowchart TB
     RT --> OS
 ```
 
-目标要求：
+当前边界要求：
 
 - 稳定公开接口不暴露 Reactor；
 - 稳定公开接口不暴露槽位/代次；
@@ -179,9 +181,9 @@ flowchart TB
 - 内部模块可以直接调用下层；
 - 同一所有者执行域不因为“分层”额外增加线程切换、队列或复制。
 
-## 4. API 可见性目标
+## 4. API 可见性
 
-目标区分：
+当前边界区分：
 
 ```text
 稳定公开接口
@@ -197,7 +199,7 @@ flowchart TB
   -> Pipeline 注册表/路由/入口/控制实现
 ```
 
-当前 SDK 仍存在公开/内部接口混合，详见
+当前头文件和模块边界的逐项审查见
 [07-layer-module-api-boundaries.md](07-layer-module-api-boundaries.md#10-current-audit)。
 
 ## 5. 性能模型
