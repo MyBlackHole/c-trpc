@@ -2,9 +2,11 @@
 #include "../src/facade_legacy_internal.h"
 #include "../src/execution/worker_context.h"
 #include "../src/client_record_internal.h"
+#include "../src/execution/buffer.h"
 #include "../src/server_record_internal.h"
 #include "../src/endian.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/memory_budget.h"
 #include "../src/transport/channel/channel_internal.h"
 #include "tr/status.h"
 
@@ -118,6 +120,33 @@ static struct tr_stream_handle last_client_stream;
 static _Atomic(struct tr_channel *) client_channel, server_channel;
 static _Atomic bool fail_client_create, fail_client_destroy, hold_credit;
 static _Atomic unsigned held_published, client_creates, client_destroys;
+static _Atomic bool budget_release_injection_armed;
+static _Atomic bool budget_release_injection_fired;
+static _Atomic uint64_t budget_release_method_bytes;
+static _Atomic uint64_t budget_release_current_before_injection;
+static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
+
+int __real_tr_buffer_pool_destroy(struct tr_buffer_pool *pool);
+int __wrap_tr_buffer_pool_destroy(struct tr_buffer_pool *pool)
+{
+	struct tr_memory_budget *budget = pool ? pool->memory_budget : NULL;
+	int ret = __real_tr_buffer_pool_destroy(pool);
+
+	if (ret == TR_OK && budget &&
+	    atomic_exchange(&budget_release_injection_armed, false)) {
+		uint64_t current = atomic_load(&budget->current_bytes);
+		uint64_t method_bytes =
+		        atomic_load(&budget_release_method_bytes);
+
+		CHECK(method_bytes > 1U);
+		CHECK(current >= method_bytes);
+		atomic_store(&budget_release_current_before_injection, current);
+		atomic_store(&budget_release_injected_budget, budget);
+		atomic_store(&budget->current_bytes, method_bytes - 1U);
+		atomic_store(&budget_release_injection_fired, true);
+	}
+	return ret;
+}
 static _Atomic unsigned create_failures, destroy_failures;
 static _Atomic unsigned attempts[6], accepted[6], fake_again, real_again;
 static _Atomic unsigned server_messages_accepted, server_half_closes_received,
@@ -789,6 +818,35 @@ static void test_semantic_overflow(void)
 	CHECK(tr_rpc_record_semantic_stats_merge(&total, &shard) ==
 	      TR_ERR_BAD_LENGTH);
 	CHECK(!memcmp(&total, &expected, sizeof(total)));
+}
+
+static void test_method_budget_release_retry(void)
+{
+	struct fixture f;
+	struct tr_memory_budget *budget;
+	uint64_t current;
+	int ret;
+
+	fixture_init(&f);
+	fixture_create(&f);
+	atomic_store(&budget_release_method_bytes, sizeof(f.client_methods));
+	atomic_store(&budget_release_injection_fired, false);
+	atomic_store(&budget_release_injection_armed, true);
+
+	ret = tr_client_destroy(f.client);
+	CHECK(ret != TR_OK);
+	CHECK(atomic_load(&budget_release_injection_fired));
+	budget = atomic_load(&budget_release_injected_budget);
+	CHECK(budget != NULL);
+	current = atomic_load(&budget_release_current_before_injection);
+
+	/* 恢复注入前账本；首次失败后保留的方法表额度应能在重试时归还。 */
+	atomic_store(&budget->current_bytes, current);
+	atomic_store(&budget_release_injected_budget, NULL);
+	atomic_store(&budget_release_method_bytes, 0U);
+	CHECK(tr_client_destroy(f.client) == TR_OK);
+	f.client = NULL;
+	fixture_destroy(&f);
 }
 
 struct owned_body {
@@ -2569,6 +2627,8 @@ static void test_public_unary_slots(void)
 int main(void)
 {
 	CHECK(setvbuf(stdout, NULL, _IOLBF, 0) == 0);
+	test_method_budget_release_retry();
+	puts("test_client_record: method budget release retry passed");
 	test_semantic_overflow();
 	puts("test_client_record: semantic overflow passed");
 	test_configuration_and_rollback();
@@ -2607,6 +2667,6 @@ int main(void)
 		test_public_unary_end(ending);
 	test_public_unary_slots();
 	puts("test_client_record: unary convergence passed");
-	puts("test_client_record: 15 groups passed");
+	puts("test_client_record: 16 groups passed");
 	return 0;
 }

@@ -1482,13 +1482,13 @@ static int tr_client_destroy_internal(struct tr_client *client)
 		if (!client->runtime || !client->shard)
 			return TR_ERR_STATE;
 		budget = tr_runtime_shard_memory_budget(client->shard);
+		ret = tr_memory_budget_release(budget, bytes);
+		if (ret != TR_OK)
+			return ret;
 		free(client->record_methods);
 		client->record_methods = NULL;
 		client->record_method_bytes = 0;
 		client->record_method_count = 0;
-		ret = tr_memory_budget_release(budget, bytes);
-		if (ret != TR_OK)
-			return ret;
 	}
 
 	/* 生命周期由外部串行化；宿主和父 owner 静默后再拆通知同步原语。
