@@ -12,13 +12,13 @@
 #include "../io/socket.h"
 #include "tr/status.h"
 #include "../execution/reactor_internal.h"
-#include "../rpc/rpc_internal.h"
+#include "legacy_rpc_execution.h"
 #include "../io/socket_internal.h"
 
 struct tr_runtime_shard {
 	uint32_t shard_id;
 	struct tr_reactor *reactor;
-	struct tr_rpc_executor_group *rpc_executor;
+	struct tr_runtime_legacy_rpc_execution *legacy_rpc_execution;
 	struct tr_message_service_config message_config;
 	struct tr_message_service *messages;
 	struct tr_memory_budget memory_budget;
@@ -94,11 +94,11 @@ static int tr_runtime_shard_release(struct tr_runtime_shard *shard)
 		shard->reactor = NULL;
 	}
 
-	if (shard->rpc_executor) {
-		ret = tr_rpc_executor_group_destroy_checked(shard->rpc_executor);
+	if (shard->legacy_rpc_execution) {
+		ret = tr_runtime_legacy_rpc_execution_destroy(
+		        &shard->legacy_rpc_execution);
 		if (ret != TR_OK)
 			return ret;
-		shard->rpc_executor = NULL;
 	}
 
 	if (shard->peer_storage_bytes != 0U) {
@@ -259,11 +259,12 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		}
 		if (ret == TR_OK &&
 		    shard_config->rpc_executor.endpoint_capacity != 0U)
-			ret = tr_rpc_executor_group_create(
-				shard_config->rpc_executor.endpoint_capacity,
-				shard_config->rpc_executor.max_calls_per_endpoint,
-				shard_config->rpc_executor.thread_count,
-				&shard->rpc_executor);
+			ret = tr_runtime_legacy_rpc_execution_create(
+			        shard_config->rpc_executor.endpoint_capacity,
+			        shard_config->rpc_executor
+			                .max_calls_per_endpoint,
+			        shard_config->rpc_executor.thread_count,
+			        &shard->legacy_rpc_execution);
 		if (ret != TR_OK)
 			return tr_runtime_create_rollback(out, runtime, ret);
 	}
@@ -325,8 +326,9 @@ static int tr_runtime_shard_stop_execution(
 			result = ret;
 	}
 
-	if (shard->rpc_executor) {
-		ret = tr_rpc_executor_group_stop(shard->rpc_executor);
+	if (shard->legacy_rpc_execution) {
+		ret = tr_runtime_legacy_rpc_execution_stop(
+		        shard->legacy_rpc_execution);
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
@@ -338,8 +340,9 @@ static int tr_runtime_shard_can_start(struct tr_runtime_shard *shard)
 {
 	if (shard->started || shard->messages || !shard->reactor)
 		return TR_ERR_STATE;
-	if (shard->rpc_executor)
-		return tr_rpc_executor_group_can_start(shard->rpc_executor);
+	if (shard->legacy_rpc_execution)
+		return tr_runtime_legacy_rpc_execution_can_start(
+		        shard->legacy_rpc_execution);
 	return TR_OK;
 }
 
@@ -382,8 +385,9 @@ int tr_runtime_start(struct tr_runtime *runtime)
 		 * pthread_create 或回滚时的线程回收失败，组存储留在分片中，
 		 * runtime_stop()/destroy() 可以继续收敛。
 		 */
-		if (shard->rpc_executor) {
-			ret = tr_rpc_executor_group_start(shard->rpc_executor);
+		if (shard->legacy_rpc_execution) {
+			ret = tr_runtime_legacy_rpc_execution_start(
+			        shard->legacy_rpc_execution);
 			if (ret != TR_OK)
 				goto rollback;
 		}
@@ -543,7 +547,9 @@ int tr_runtime_shard_call(struct tr_runtime_shard *shard,
 struct tr_rpc_executor_group *
 tr_runtime_shard_rpc_executor(const struct tr_runtime_shard *shard)
 {
-	return shard ? shard->rpc_executor : NULL;
+	return shard ? tr_runtime_legacy_rpc_execution_group(
+	                       shard->legacy_rpc_execution)
+	             : NULL;
 }
 
 struct tr_memory_budget *
