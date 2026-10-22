@@ -489,6 +489,52 @@ static void test_constructor_failures(void)
 	CHECK(atomic_load(&budget.current_bytes) == 0);
 }
 
+/* V1 的部分线程启动 + 第二次 join 失败矩阵迁移到通用 V2
+ * 执行域：启动失败不发布可接受队列，已创建线程必须精确 join，
+ * 失败后保留执行器和预算；禁止隐式再次启动或提前释放。
+ */
+static void test_partial_start_join_retry(void)
+{
+	struct tr_memory_budget budget;
+	struct tr_task_executor_config config = {3, 3};
+	struct tr_task_executor *executor = NULL;
+	struct tr_task_handle unchanged = {777, 888, 999};
+	struct job rejected;
+	struct tr_task_spec spec = {work, done, &rejected};
+	size_t held;
+
+	tr_memory_budget_init(&budget, MIB);
+	CHECK(tr_task_executor_create(&config, &budget, &executor) == TR_OK);
+	job_init(&rejected, executor, 71);
+	held = atomic_load(&budget.current_bytes);
+	CHECK(held != 0U);
+	create_count = 0;
+	fail_create = 3;
+	CHECK(tr_task_executor_start(executor) == TR_ERR_SYS);
+	fail_create = 0;
+	CHECK(create_count == 3);
+	CHECK(!snapshot(executor).accepting);
+	CHECK(tr_task_executor_start(executor) == TR_ERR_STATE);
+	CHECK(tr_task_executor_submit(executor, &spec, &unchanged) ==
+	      TR_ERR_CLOSED);
+	CHECK(unchanged.instance == 777 && unchanged.generation == 888 &&
+	      unchanged.slot == 999);
+
+	join_count = join_success = 0;
+	fail_join = 2;
+	CHECK(join_until(executor) == TR_ERR_SYS);
+	CHECK(join_count == 2 && join_success == 1);
+	CHECK(tr_task_executor_destroy(&executor) == TR_ERR_STATE);
+	CHECK(executor != NULL && atomic_load(&budget.current_bytes) == held);
+	fail_join = 0;
+	CHECK(join_until(executor) == TR_OK);
+	CHECK(join_count == 3 && join_success == 2);
+	CHECK(snapshot(executor).outstanding == 0);
+	CHECK(atomic_load(&rejected.works) == 0 && rejected.dones == 0);
+	CHECK(tr_task_executor_destroy(&executor) == TR_OK);
+	CHECK(executor == NULL && atomic_load(&budget.current_bytes) == 0);
+}
+
 static void test_join_and_destroy_retry(void)
 {
 	struct tr_memory_budget budget;
@@ -704,6 +750,7 @@ int main(void)
 	test_capacity_cancel_join();
 	test_generation_and_completion_capacity();
 	test_join_and_destroy_retry();
+	test_partial_start_join_retry();
 	test_callback_barrier();
 	test_callback_frees_arg();
 	test_multi_producer();

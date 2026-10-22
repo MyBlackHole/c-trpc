@@ -54,9 +54,12 @@ Transport/RPC 集成测试只验证跨模块契约。
 V2 入口，原 `test_rpc_v2_sdk`、`test_rpc_v2_server` 与 Echo 示例已经直接使用它们。
 SDK 测试验证空方法表不会回退 V1；连接组专测使用显式传输工厂，并验证 RPC 监听
 和连接被拒绝、失败不改端口，以及配置中的 RPC 重连/拦截器不被静默忽略。
-尚未迁移的旧 Endpoint 故障与性能回归显式调用 `src/facade_legacy_internal.h`；
-这些结果只证明旧引擎没有回归，不能计为默认 V2 路径覆盖。该头不安装、不以宏
-覆盖公开函数。剩余旧内核的删除必须连同其仍有价值的故障覆盖逐项迁移。
+旧 Server 生命周期回归和历史 V1 基准通过 `tests/rpc_v1_test_client_fixture.*`
+直接创建 Channel 与 RPC Endpoint，不再构造或调用 Client V1 门面；这些结果只证明
+V1 Server/Endpoint 路径没有回归，不能计为默认 V2 覆盖。`bench_rpc` 仍测 V1，
+不作为 V2 性能证据。Server 旧入口只在 `src/facade_legacy_internal.h` 内供旧 Server
+回归和基准使用，不安装、不以宏覆盖公开函数。其余旧内核仍须按对象依赖与剩余
+故障覆盖逐项迁移。
 
 `test_rpc_v2_sdk` 只使用安装范围内的公共头与 C/POSIX 接口。真实回环 TCP
 覆盖 ONE→ONE、ONE→MANY、MANY→ONE、MANY→MANY，区分零条 MANY 和零字节消息，

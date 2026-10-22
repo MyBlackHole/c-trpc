@@ -159,6 +159,12 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         set_kind("binary")
         set_default(false)
         add_files("tests/" .. name .. ".c")
+        if name == "test_transport" or name == "test_server_stats_retiring" or
+           name == "test_inbound_handshake_deadline" or
+           name == "test_rpc_executor_group_drain" or
+           name == "test_rpc_message_ownership" then
+            add_files("tests/rpc_v1_test_client_fixture.c")
+        end
         add_deps("trcore")
         add_undefines("NDEBUG")
         if name == "test_echo_client_i18n" then
@@ -269,6 +275,9 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_runtime" then
             -- 预算归还失败后重试 Runtime peer 存储回收，仅在本测试链接注入。
             add_ldflags("-Wl,--wrap=tr_reactor_destroy", {force = true})
+        elseif name == "test_rpc_executor_group_drain" then
+            -- 保留 V1 Server Executor Group 生命周期与重试覆盖；客户端通过 raw V1 测试 peer。
+            add_ldflags("-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", {force = true})
         elseif name == "test_pipeline_listener" then
             -- epoll/source 回滚和 MONOTONIC condwait 的测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_command_queue_push",
@@ -345,7 +354,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=free", {force = true})
         elseif name == "test_client_connect_rollback" then
             -- 注入 connect 后半段失败与 rollback 失败，验证 ownership 可重试。
-            add_ldflags("-Wl,--wrap=tr_rpc_endpoint_create_with_executor_group",
+            add_ldflags("-Wl,--wrap=tr_rpc_record_client_create_on_owner",
                         "-Wl,--wrap=tr_channel_destroy", {force = true})
         elseif name == "test_facade_constructor_ownership" then
             -- 验证 Client/Server constructor rollback 失败后仍保留显式 owner。
@@ -374,10 +383,6 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
             add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=malloc",
                         "-Wl,--wrap=tr_runtime_create",
                         "-Wl,--wrap=tr_runtime_destroy", {force = true})
-        elseif name == "test_rpc_executor_group_drain" then
-            -- 仅测试二进制冻结线程创建/回收，复现启动与停止的控制竞争。
-            add_ldflags("-Wl,--wrap=pthread_create",
-                        "-Wl,--wrap=pthread_join", {force = true})
         end
         if name == "test_socket_atomic_flags" or name == "test_server_stats_retiring" then
             add_includedirs("src")
@@ -426,7 +431,7 @@ target_end()
 target("bench_rpc")
     set_kind("binary")
     set_default(false)
-    add_files("bench/bench_rpc.c")
+    add_files("bench/bench_rpc.c", "tests/rpc_v1_test_client_fixture.c")
     add_deps("trcore")
 target_end()
 
@@ -840,6 +845,9 @@ target("test_client_record")
     add_files("tests/test_client_record.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_stream_sendv",
+                "-Wl,--wrap=tr_rpc_record_client_call_start_public_on_owner",
+                "-Wl,--wrap=tr_rpc_record_client_start_on_owner",
+                "-Wl,--wrap=tr_reactor_timer_arm",
                 "-Wl,--wrap=tr_stream_open",
                 "-Wl,--wrap=tr_rpc_record_stream_create_on_owner",
                 "-Wl,--wrap=tr_channel_create_deferred",

@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include "facade_legacy_internal.h"
 #include "execution/worker_context.h"
 #include "tr/client.h"
 
@@ -18,7 +17,7 @@
 #include "execution/reactor.h"
 #include "execution/reactor_internal.h"
 #include "execution/task_executor.h"
-#include "rpc/rpc_wire.h"
+#include "rpc/rpc_record.h"
 #include "io/socket.h"
 #include "tr/status.h"
 #include "execution/buffer_internal.h"
@@ -27,7 +26,6 @@
 #include "facade_diagnostics_internal.h"
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
-#include "rpc/rpc_internal.h"
 #include "runtime/runtime_internal.h"
 #include "io/socket_internal.h"
 #include "client_record_internal.h"
@@ -53,7 +51,6 @@ struct tr_client {
 	struct tr_runtime *runtime;
 	struct tr_runtime_shard *shard;
 	struct tr_channel *channel;
-	struct tr_rpc_endpoint *rpc;
 	struct tr_conn_handle connection;
 	struct tr_rpc_record_client *record_rpc;
 	struct tr_client_record_config record_config;
@@ -357,24 +354,8 @@ tr_client_create_internal(const struct tr_client_config *config,
 		ret = tr_client_record_wait_init(client);
 		if (ret != TR_OK)
 			return tr_client_create_rollback(out, client, ret);
-	}
-
-	if (!record) {
-		ret = tr_buffer_pool_init_dynamic(
-		        &client->rpc_message_pool,
-		        effective_tuning.rpc_message_pool_count,
-		        effective.limits.max_message_bytes);
-		if (ret != TR_OK)
-			return tr_client_create_rollback(out, client, ret);
-		client->rpc_pool_ready = 1;
-
-		ret = tr_buffer_pool_init(
-		        &client->reassembly_pool,
-		        effective_tuning.reassembly_pool_count,
-		        effective.limits.max_message_bytes);
-		if (ret != TR_OK)
-			return tr_client_create_rollback(out, client, ret);
-		client->reassembly_pool_ready = 1;
+	} else {
+		client->transport_only = 1;
 	}
 
 	memset(&runtime_config, 0, sizeof(runtime_config));
@@ -458,13 +439,6 @@ tr_client_create_internal(const struct tr_client_config *config,
 	return TR_OK;
 }
 
-int tr_client_create_with_tuning(const struct tr_client_config *config,
-                                 const struct tr_facade_tuning *tuning,
-                                 struct tr_client **out)
-{
-	return tr_client_create_internal(config, tuning, NULL, NULL, 0, 0, out);
-}
-
 int tr_client_create_record(const struct tr_client_config *config,
                             const struct tr_facade_tuning *tuning,
                             const struct tr_client_record_config *record,
@@ -543,16 +517,8 @@ int tr_client_create_transport(const struct tr_client_config *config,
 	if (config && (config->interceptor.fn || config->interceptor.arg ||
 	               config->enable_reconnect))
 		return TR_ERR_UNSUPPORTED;
-	ret = tr_client_create_with_tuning(config, NULL, out);
-	if (ret == TR_OK)
-		(*out)->transport_only = 1;
+	ret = tr_client_create_internal(config, NULL, NULL, NULL, 0, 0, out);
 	return ret;
-}
-
-int tr_client_legacy_create(const struct tr_client_config *config,
-                            struct tr_client **out)
-{
-	return tr_client_create_with_tuning(config, NULL, out);
 }
 
 struct tr_client_close_connection_request {
@@ -607,13 +573,6 @@ static int tr_client_reset_session(struct tr_client *client)
 			return ret;
 	}
 
-	if (client->rpc) {
-		int ret = tr_rpc_endpoint_destroy(client->rpc);
-
-		if (ret != TR_OK)
-			return ret;
-		client->rpc = NULL;
-	}
 	if (client->channel) {
 		int ret = tr_channel_destroy(client->channel);
 
@@ -637,7 +596,7 @@ static int tr_client_connect_rollback(
 	 * 把原连接错误返回给调用方；回滚自身失败时生命周期错误优先。
 	 */
 	rollback_ret = tr_client_reset_session(client);
-	if (rollback_ret != TR_OK && client->record_mode)
+	if (rollback_ret != TR_OK)
 		client->record_connect_failed = 1;
 	return rollback_ret != TR_OK ? rollback_ret : cause;
 }
@@ -694,8 +653,6 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		      uint16_t port)
 {
 	struct tr_channel_config channel_config;
-	struct tr_rpc_endpoint_config rpc_config;
-	struct tr_channel_reconnect_config reconnect_config;
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_deadline connect_deadline;
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
@@ -705,7 +662,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 		return TR_ERR_INVALID;
 	if (client->transport_only)
 		return TR_ERR_UNSUPPORTED;
-	if (client->channel || client->rpc || client->record_rpc ||
+	if (client->channel || client->record_rpc ||
 	    client->record_connect_failed ||
 	    atomic_load_explicit(&client->record_stopping,
 	                         memory_order_acquire) ||
@@ -738,57 +695,21 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	channel_config.max_message_bytes =
 		client->config.limits.max_message_bytes;
 	channel_config.reassembly_pool = &client->reassembly_pool;
-	if (client->record_mode) {
-		channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
-		channel_config.required_feature_bits =
-		        TR_CHANNEL_FEATURE_STREAM_RESET;
-	}
+	channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
+	channel_config.required_feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
 
-	if (client->record_mode) {
+	{
 		struct tr_client_record_assemble_request request = {
 		        client, &channel_config, &fd};
 
 		ret = tr_reactor_call(tr_client_reactor(client),
 		                      tr_client_record_assemble_on_owner,
 		                      &request);
-		if (ret != TR_OK)
-			goto rollback;
-		goto wait_ready;
 	}
-
-	ret = tr_reactor_adopt_fd(tr_client_reactor(client), fd,
-	                          &client->connection);
-	if (ret != TR_OK)
-		return ret;
-	(void)tr_fd_take(&fd);
-
-	ret = tr_channel_create(&channel_config, client->connection,
-				client->connection, NULL, NULL, NULL, NULL,
-				&client->channel);
 	if (ret != TR_OK)
 		goto rollback;
 
-	memset(&rpc_config, 0, sizeof(rpc_config));
-	rpc_config.role = TR_RPC_CLIENT;
-	rpc_config.max_methods = client->config.limits.max_methods;
-	rpc_config.max_calls = client->config.limits.max_calls;
-	rpc_config.message_pool = &client->rpc_message_pool;
-	rpc_config.executor_threads = client->tuning.executor_threads;
-	rpc_config.executor_queue_capacity =
-		client->tuning.executor_queue_capacity;
-	rpc_config.observability_flags =
-		client->tuning.observability_flags;
-	rpc_config.interceptor = client->config.interceptor;
-
-	ret = tr_rpc_endpoint_create_with_executor_group(
-		client->channel, &rpc_config, NULL, &client->rpc);
-	if (ret != TR_OK)
-		goto rollback;
-
-	/* 先完成初始 HELLO 握手，再允许后续重连策略接管。
-	 * 这样连接失败时回滚不会与连接替换竞争。
-	 */
-wait_ready:
+	/* 连接与初始 HELLO 握手共享同一期限；只有完整 V2 装配就绪后才返回。 */
 	ret = tr_channel_wait_ready_deadline(
 		client->channel, TR_LANE_CONTROL, &connect_deadline);
 	if (ret != TR_OK)
@@ -801,29 +722,6 @@ wait_ready:
 			client->config.keepalive_timeout_ms;
 		ret = tr_channel_enable_keepalive(client->channel,
 						  &keepalive_config);
-		if (ret != TR_OK)
-			goto rollback;
-	}
-
-	if (client->config.enable_reconnect) {
-		ret = tr_channel_set_reconnect_tcp_nodelay(
-			client->channel,
-			tr_tcp_nodelay_policy_enabled(client->config.tcp_nodelay));
-		if (ret != TR_OK)
-			goto rollback;
-
-		memset(&reconnect_config, 0, sizeof(reconnect_config));
-		reconnect_config.ipv4_address = ipv4_address;
-		reconnect_config.control_port = port;
-		reconnect_config.bulk_port = port;
-		reconnect_config.initial_delay_ms =
-			client->config.reconnect_initial_delay_ms;
-		reconnect_config.max_delay_ms =
-			client->config.reconnect_max_delay_ms;
-		reconnect_config.connect_timeout_ms =
-			client->config.connect_timeout_ms;
-		ret = tr_channel_enable_client_reconnect(client->channel,
-							 &reconnect_config);
 		if (ret != TR_OK)
 			goto rollback;
 	}
@@ -977,67 +875,6 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 	return tr_channel_wait_ready(
 		client->channel, TR_LANE_CONTROL, timeout_ms);
 }
-int tr_client_legacy_register_method(struct tr_client *client,
-                                     const struct tr_rpc_method_desc *method)
-{
-	if (client && (client->record_mode || client->transport_only))
-		return TR_ERR_UNSUPPORTED;
-	if (!client || !client->rpc)
-		return TR_ERR_STATE;
-	return tr_rpc_register_method(client->rpc, method, NULL, NULL);
-}
-
-int tr_client_legacy_unary_call_ex(struct tr_client *client,
-                                   uint32_t service_id, uint32_t method_id,
-                                   const struct tr_rpc_bytes *request,
-                                   const struct tr_rpc_call_options *options,
-                                   tr_rpc_unary_result_cb result_cb,
-                                   void *result_arg,
-                                   struct tr_rpc_call_handle *out)
-{
-	if (client && (client->record_mode || client->transport_only))
-		return TR_ERR_UNSUPPORTED;
-	if (!client || !client->rpc)
-		return TR_ERR_STATE;
-	return tr_rpc_unary_call_ex(client->rpc, service_id, method_id, request,
-				    options, result_cb, result_arg, out);
-}
-
-int tr_client_legacy_unary_call(struct tr_client *client, uint32_t service_id,
-                                uint32_t method_id,
-                                const struct tr_rpc_bytes *request,
-                                tr_rpc_unary_result_cb result_cb,
-                                void *result_arg,
-                                struct tr_rpc_call_handle *out)
-{
-	return tr_client_legacy_unary_call_ex(client, service_id, method_id,
-	                                      request, NULL, result_cb,
-	                                      result_arg, out);
-}
-
-int tr_client_legacy_call_start_ex(
-        struct tr_client *client, uint32_t service_id, uint32_t method_id,
-        const struct tr_rpc_call_options *options,
-        const struct tr_rpc_call_callbacks *callbacks,
-        struct tr_rpc_call_handle *out)
-{
-	if (client && (client->record_mode || client->transport_only))
-		return TR_ERR_UNSUPPORTED;
-	if (!client || !client->rpc)
-		return TR_ERR_STATE;
-	return tr_rpc_call_start_ex(client->rpc, service_id, method_id, options,
-				    callbacks, out);
-}
-
-int tr_client_legacy_call_start(struct tr_client *client, uint32_t service_id,
-                                uint32_t method_id,
-                                const struct tr_rpc_call_callbacks *callbacks,
-                                struct tr_rpc_call_handle *out)
-{
-	return tr_client_legacy_call_start_ex(client, service_id, method_id,
-	                                      NULL, callbacks, out);
-}
-
 static int tr_client_record_sync(struct tr_rpc_record_client *client,
                                  int (*fn)(void *arg), void *arg)
 {
@@ -1344,16 +1181,6 @@ int tr_client_get_channel_stats(struct tr_client *client,
 	return tr_channel_get_stats(client->channel, out);
 }
 
-int tr_client_get_rpc_stats(struct tr_client *client,
-			    struct tr_rpc_endpoint_stats *out)
-{
-	if (client && (client->record_mode || client->transport_only))
-		return TR_ERR_UNSUPPORTED;
-	if (!client || !client->rpc)
-		return TR_ERR_STATE;
-	return tr_rpc_endpoint_get_stats(client->rpc, out);
-}
-
 struct tr_client_record_semantic_request {
 	struct tr_rpc_record_client *client;
 	struct tr_rpc_semantic_stats *out;
@@ -1371,31 +1198,28 @@ int tr_client_get_rpc_semantic_stats(
 {
 	if (!client || !out)
 		return TR_ERR_INVALID;
-	if (client->record_mode) {
-		struct tr_reactor *owner = tr_client_reactor(client);
-		if (atomic_load_explicit(&client->record_stopping,
-		                         memory_order_acquire) ||
-		    client->record_connect_failed || !owner)
-			return TR_ERR_STATE;
-		/* 同一 Client 的 LIVE 回调可在 owner 上直接读取；工作线程、
-		 * 停止清理域及其他 owner 不能同步等待此 owner 的进度。 */
-		if (tr_client_blocking_lifecycle_context() &&
-		    !tr_reactor_in_owner_context_for(owner))
-			return TR_ERR_STATE;
-		if (!client->record_rpc) {
-			*out = (struct tr_rpc_semantic_stats){0};
-			return TR_OK;
-		}
-		struct tr_client_record_semantic_request request = {
-		        client->record_rpc, out};
-		return tr_reactor_call(
-		        owner, tr_client_record_semantic_on_owner, &request);
-	}
-
-	memset(out, 0, sizeof(*out));
-	if (!client->rpc)
+	if (!client->record_mode) {
+		*out = (struct tr_rpc_semantic_stats){0};
 		return TR_OK;
-	return tr_rpc_endpoint_get_semantic_stats(client->rpc, out);
+	}
+	struct tr_reactor *owner = tr_client_reactor(client);
+	if (atomic_load_explicit(&client->record_stopping,
+	                         memory_order_acquire) ||
+	    client->record_connect_failed || !owner)
+		return TR_ERR_STATE;
+	/* 同一 Client 的 LIVE 回调可在 owner 上直接读取；工作线程、
+	 * 停止清理域及其他 owner 不能同步等待此 owner 的进度。 */
+	if (tr_client_blocking_lifecycle_context() &&
+	    !tr_reactor_in_owner_context_for(owner))
+		return TR_ERR_STATE;
+	if (!client->record_rpc) {
+		*out = (struct tr_rpc_semantic_stats){0};
+		return TR_OK;
+	}
+	struct tr_client_record_semantic_request request = {client->record_rpc,
+	                                                    out};
+	return tr_reactor_call(owner, tr_client_record_semantic_on_owner,
+	                       &request);
 }
 
 static int tr_client_destroy_internal(struct tr_client *client)
@@ -1423,9 +1247,6 @@ static int tr_client_destroy_internal(struct tr_client *client)
 
 	/* 销毁是纯终止拆除，不内置优雅排空策略或隐含超时。
 	 * 需要优雅排空时，调用方必须在此之前显式调用 begin_drain/wait_drained。
-	 *
-	 * V1 保留原有先解绑回调源再停止运行时的顺序；V2 已在上面
-	 * 完成父 join，随后释放依赖停止恢复租约的宿主与 Channel。
 	 */
 	if (client->connection_group) {
 		ret = tr_client_group_destroy(client->connection_group);
@@ -1434,12 +1255,6 @@ static int tr_client_destroy_internal(struct tr_client *client)
 		client->connection_group = NULL;
 	}
 
-	if (client->rpc) {
-		ret = tr_rpc_endpoint_destroy(client->rpc);
-		if (ret != TR_OK)
-			return ret;
-		client->rpc = NULL;
-	}
 	if (client->channel) {
 		ret = tr_channel_destroy(client->channel);
 		if (ret != TR_OK)

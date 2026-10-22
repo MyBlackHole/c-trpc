@@ -69,6 +69,7 @@ struct peer {
 	struct tr_rpc_record_stream *calls[CAP];
 	struct tr_rpc_route_handle routes[CAP];
 	_Atomic unsigned opened;
+	_Atomic unsigned bad_type_returns;
 	_Atomic unsigned received[CAP][6];
 	_Atomic unsigned terminals[CAP];
 	_Atomic int last_error[CAP];
@@ -244,6 +245,8 @@ on_data(struct tr_stream_handle s, uint64_t id, struct tr_buffer *b, void *arg)
 		ret = tr_rpc_record_stream_receive_on_owner(p->calls[s.slot], s,
 		                                            b->data, b->len);
 	atomic_store(&p->last_error[s.slot], ret);
+	if (p->server && ret == TR_ERR_BAD_TYPE)
+		atomic_fetch_add(&p->bad_type_returns, 1);
 	return TR_STREAM_DATA_RELEASE;
 }
 static void on_event(struct tr_stream_handle s, enum tr_stream_event event,
@@ -311,6 +314,7 @@ static void init_peer(struct peer *p, struct fixture *f, int fd, int server)
 	struct tr_conn_handle conn;
 	*p = (struct peer){.fixture = f, .server = server};
 	atomic_init(&p->opened, 0);
+	atomic_init(&p->bad_type_returns, 0);
 	for (unsigned i = 0; i < CAP; ++i) {
 		atomic_init(&p->terminals[i], 0);
 		atomic_init(&p->last_error[i], 0);
@@ -360,12 +364,17 @@ static void init_fixture(struct fixture *f, uint32_t capacity)
 		        d, method_received, &f->contexts[i]};
 	}
 }
-static void open_stream(struct fixture *f, unsigned count)
+static void open_stream_lane(struct fixture *f, unsigned count,
+                             enum tr_lane lane)
 {
 	struct tr_stream_handle h;
-	CHECK(tr_stream_open(f->client.channel, TR_LANE_BULK, &h) == TR_OK);
+	CHECK(tr_stream_open(f->client.channel, lane, &h) == TR_OK);
 	wait_count(&f->client.opened, count);
 	wait_count(&f->server.opened, count);
+}
+static void open_stream(struct fixture *f, unsigned count)
+{
+	open_stream_lane(f, count, TR_LANE_BULK);
 }
 struct operation {
 	struct fixture *f;
@@ -508,6 +517,34 @@ static void test_method_dispatch(void)
 		CHECK(atomic_load(&f.server.received[i][TR_RPC_RECORD_OPEN]) ==
 		      1);
 	}
+	cleanup(&f, 0);
+}
+
+/* 方法声明为 BULK 时，CONTROL 上的真实 OPEN 必须被所属流拒绝；
+ * 相同连接的 BULK 流随后仍能正常完成。 */
+static void test_wrong_lane_isolation(void)
+{
+	struct fixture f;
+	struct operation healthy = {&f, 1, 0, NULL, 0};
+	init_fixture(&f, CAP);
+	CHECK(tr_reactor_call(f.server.reactor, create_router, &f) == TR_OK);
+	f.auto_reply = 1;
+	open_stream_lane(&f, 1, TR_LANE_CONTROL);
+	open_bytes(&f, 0, 0, 0, NULL, 0);
+	wait_count(&f.server.terminals[0], 1);
+	wait_count(&f.server.bad_type_returns, 1);
+	CHECK(f.server.status[0] == TR_RPC_STATUS_INVALID_ARGUMENT);
+	CHECK(atomic_load(&f.server.last_error[0]) == TR_ERR_BAD_TYPE);
+	CHECK(!atomic_load(&f.server.received[0][TR_RPC_RECORD_OPEN]));
+	open_stream(&f, 2);
+	CHECK(tr_reactor_call(f.client.reactor, make_call, &healthy) == TR_OK);
+	CHECK(tr_reactor_call(f.client.reactor, send_valid_call, &healthy) ==
+	      TR_OK);
+	wait_count(&f.client.terminals[1], 1);
+	wait_count(&f.server.terminals[1], 1);
+	CHECK(f.client.status[1] == TR_RPC_STATUS_OK &&
+	      f.server.status[1] == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.server.received[1][TR_RPC_RECORD_OPEN]) == 1);
 	cleanup(&f, 0);
 }
 
@@ -801,6 +838,7 @@ int main(void)
 {
 	test_reset_partial_open();
 	test_method_dispatch();
+	test_wrong_lane_isolation();
 	test_pipelined_and_eof();
 	test_registry_and_capacity();
 	test_open_failures();

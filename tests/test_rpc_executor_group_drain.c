@@ -6,6 +6,8 @@
 #include "../src/memory_budget.h"
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/facade_tuning_internal.h"
+#include "rpc_v1_test_client_fixture.h"
+#include "../src/rpc/rpc_internal.h"
 #include "tr/trpc.h"
 
 #include <assert.h>
@@ -278,7 +280,7 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_stream_handlers handlers;
 	struct tr_rpc_call_handle first_call;
@@ -332,12 +334,13 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	tr_client_config_init(&client_config);
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connect_timeout_ms = 1000U;
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_wait_ready(client, 5000U) == TR_OK);
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
-	assert(tr_client_legacy_call_start(client, 91U, 1U, NULL,
-	                                   &first_call) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
+	assert(tr_rpc_call_start(client->endpoint, 91U, 1U, NULL,
+	                         &first_call) == TR_OK);
 	send_message(first_call, (unsigned char)'a');
 	wait_for_flag(&context, &context.first_entered);
 
@@ -348,8 +351,8 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	wait_for_cancelled_executor_state(&context, 2U, 1U, 0U);
 
 	/* 另一条调用就绪，用于覆盖端点中多个就绪调用的重调度。 */
-	assert(tr_client_legacy_call_start(client, 91U, 1U, NULL,
-	                                   &second_call) == TR_OK);
+	assert(tr_rpc_call_start(client->endpoint, 91U, 1U, NULL,
+	                         &second_call) == TR_OK);
 	send_message(second_call, (unsigned char)'c');
 	wait_for_executor_state(&context, 3U, 1U, 1U);
 
@@ -387,7 +390,7 @@ static void test_server_destroy_drains_accepted_group_tasks(void)
 	assert(pthread_join(destroy_thread, NULL) == 0);
 	server = NULL;
 	context.server = NULL;
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	client = NULL;
 	assert(tr_task_executor_is_current_owner(context.cleanup_probe));
 	assert(tr_task_executor_join(context.cleanup_probe) == TR_OK);

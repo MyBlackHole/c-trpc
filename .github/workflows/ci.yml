@@ -53,7 +53,15 @@ jobs:
             --output build/audit/rpc-v1-retirement.json \
             --deny tr_rpc_endpoint_flush \
                    tr_rpc_endpoint_flush_on_owner \
-                   tr_rpc_endpoint_finalize_detached_with_stats
+                   tr_rpc_endpoint_finalize_detached_with_stats \
+                   tr_client_legacy_create \
+                   tr_client_legacy_register_method \
+                   tr_client_legacy_unary_call \
+                   tr_client_legacy_unary_call_ex \
+                   tr_client_legacy_call_start \
+                   tr_client_legacy_call_start_ex \
+                   tr_client_create_with_tuning \
+                   tr_client_get_rpc_stats
       - name: 保留 V1 引用与静态库对象清单
         if: always()
         uses: actions/upload-artifact@v4

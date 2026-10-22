@@ -23,6 +23,7 @@
 #include "../src/facade_tuning_internal.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/rpc/rpc_internal.h"
+#include "rpc_v1_test_client_fixture.h"
 #include "../src/execution/timer_queue.h"
 
 #include <assert.h>
@@ -7096,7 +7097,7 @@ struct facade_test_ctx {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	struct tr_server *server;
-	struct tr_client *client;
+	struct rpc_v1_test_client *client;
 	int server_drain_from_worker_ret;
 	int server_destroy_from_worker_ret;
 	int client_destroy_from_callback_ret;
@@ -7151,7 +7152,7 @@ static void facade_test_result(struct tr_rpc_call_handle call, int status,
 
 	if (ctx->client)
 		ctx->client_destroy_from_callback_ret =
-			tr_client_destroy(ctx->client);
+		        rpc_v1_test_client_destroy(ctx->client);
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->client_results++;
@@ -7208,7 +7209,7 @@ static void test_client_server_facade_unary(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
@@ -7262,18 +7263,19 @@ static void test_client_server_facade_unary(void)
 	client_config.limits.max_message_bytes = 16384U;
 	client_config.interceptor.fn = facade_test_interceptor;
 	client_config.interceptor.arg = &ctx;
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
 	ctx.client = client;
 	nodelay_before = tcp_nodelay_probe_read();
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tcp_nodelay_probe_read() == nodelay_before + 2U);
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
 
 	request.data = (const uint8_t *)"facade-ping";
 	request.len = 11U;
-	assert(tr_client_legacy_unary_call(client, 77U, 1U, &request,
-	                                   facade_test_result, &ctx,
-	                                   &call) == TR_OK);
+	assert(tr_rpc_unary_call(client->endpoint, 77U, 1U, &request,
+	                         facade_test_result, &ctx, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7298,15 +7300,17 @@ static void test_client_server_facade_unary(void)
 	 * 也跨短暂连接拒绝复用同一客户端对象：
 	 * 连接尝试失败必须把全部会话状态回滚到 INIT。
 	 */
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	client = NULL;
 	ctx.client = NULL;
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
 	ctx.client = client;
 	{
 		unsigned attempt;
 		for (attempt = 0; attempt < 100U; ++attempt) {
-			ret = tr_client_connect(client, "127.0.0.1", port);
+			ret = rpc_v1_test_client_connect(client, "127.0.0.1",
+			                                 port);
 			if (ret == TR_OK)
 				break;
 			assert(ret != TR_ERR_STATE);
@@ -7319,10 +7323,10 @@ static void test_client_server_facade_unary(void)
 		}
 		assert(ret == TR_OK);
 	}
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
-	assert(tr_client_legacy_unary_call(client, 77U, 1U, &request,
-	                                   facade_test_result, &ctx,
-	                                   &call) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
+	assert(tr_rpc_unary_call(client->endpoint, 77U, 1U, &request,
+	                         facade_test_result, &ctx, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7342,10 +7346,10 @@ static void test_client_server_facade_unary(void)
 	pthread_mutex_unlock(&ctx.lock);
 
 	{
-		int drain_ret = tr_client_begin_drain(client);
+		int drain_ret = tr_channel_begin_drain(client->channel);
 		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
 	}
-	assert(tr_client_wait_drained(client, 2000U) == TR_OK);
+	assert(tr_channel_wait_drained(client->channel, 2000U) == TR_OK);
 	assert(tr_server_drain(server, 2000U) == TR_OK);
 
 	assert(tr_server_get_stats(server, &server_stats) == TR_OK);
@@ -7376,8 +7380,8 @@ static void test_client_server_facade_unary(void)
 
 	memset(&client_semantic, 0, sizeof(client_semantic));
 	memset(&server_semantic, 0, sizeof(server_semantic));
-	assert(tr_client_get_rpc_semantic_stats(
-		       client, &client_semantic) == TR_OK);
+	assert(tr_rpc_endpoint_get_semantic_stats(client->endpoint,
+	                                          &client_semantic) == TR_OK);
 	assert(tr_server_get_rpc_semantic_stats(
 		       server, &server_semantic) == TR_OK);
 	/* client 是第二个 Client 对象；Server 聚合已退役的首个对端。 */
@@ -7390,7 +7394,7 @@ static void test_client_server_facade_unary(void)
 	assert(server_semantic.calls_inflight == 0U);
 	assert(server_semantic.final_status[TR_RPC_STATUS_OK] == 2U);
 
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
@@ -7403,7 +7407,7 @@ static void test_server_multi_shard_reuseport_facade(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *clients[4] = { NULL, NULL, NULL, NULL };
+	struct rpc_v1_test_client *clients[4] = {NULL, NULL, NULL, NULL};
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle calls[4];
@@ -7463,14 +7467,15 @@ static void test_server_multi_shard_reuseport_facade(void)
 	request.len = 11U;
 
 	for (i = 0; i < 4U; ++i) {
-		assert(tr_client_legacy_create(&client_config, &clients[i]) ==
-		       TR_OK);
-		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
-		assert(tr_client_legacy_register_method(clients[i], &method) ==
-		       TR_OK);
-		assert(tr_client_legacy_unary_call(clients[i], 78U, 1U,
-		                                   &request, facade_test_result,
-		                                   &ctx, &calls[i]) == TR_OK);
+		assert(rpc_v1_test_client_create(&client_config, NULL,
+		                                 &clients[i]) == TR_OK);
+		assert(rpc_v1_test_client_connect(clients[i], "127.0.0.1",
+		                                  port) == TR_OK);
+		assert(tr_rpc_register_method(clients[i]->endpoint, &method,
+		                              NULL, NULL) == TR_OK);
+		assert(tr_rpc_unary_call(clients[i]->endpoint, 78U, 1U,
+		                         &request, facade_test_result, &ctx,
+		                         &calls[i]) == TR_OK);
 	}
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
@@ -7500,15 +7505,16 @@ static void test_server_multi_shard_reuseport_facade(void)
 	assert(stats.reactor.rx_buffer_pool.capacity == 8U);
 
 	for (i = 0; i < 4U; ++i) {
-		int drain_ret = tr_client_begin_drain(clients[i]);
+		int drain_ret = tr_channel_begin_drain(clients[i]->channel);
 
 		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
-		assert(tr_client_wait_drained(clients[i], 5000U) == TR_OK);
+		assert(tr_channel_wait_drained(clients[i]->channel, 5000U) ==
+		       TR_OK);
 	}
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
 	for (i = 0; i < 4U; ++i)
-		assert(tr_client_destroy(clients[i]) == TR_OK);
+		assert(rpc_v1_test_client_destroy(clients[i]) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
@@ -7519,7 +7525,7 @@ static void test_client_server_facade_nodelay_policy(void)
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	uint16_t port = 0;
 	unsigned before;
 
@@ -7539,20 +7545,21 @@ static void test_client_server_facade_nodelay_policy(void)
 	client_config.tcp_nodelay = TR_TCP_NODELAY_DISABLED;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
 
 	before = tcp_nodelay_probe_read();
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
 	assert(tcp_nodelay_probe_read() == before);
 
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	client = NULL;
 	assert(tr_server_destroy(server) == TR_OK);
 	server = NULL;
 
 	tr_client_config_init(&client_config);
 	client_config.tcp_nodelay = (enum tr_tcp_nodelay_policy)99;
-	assert(tr_client_legacy_create(&client_config, &client) ==
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
 	       TR_ERR_INVALID);
 	assert(client == NULL);
 
@@ -7707,7 +7714,7 @@ static void test_client_runtime_thread_bound(void)
 	struct tr_facade_tuning server_tuning;
 	struct tr_facade_tuning client_tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	uint16_t port = 0;
 	unsigned before;
 	unsigned after;
@@ -7733,15 +7740,15 @@ static void test_client_runtime_thread_bound(void)
 	tr_facade_tuning_init(&client_tuning);
 	client_tuning.executor_threads = 1U;
 
-	assert(tr_client_create_with_tuning(
-		       &client_config, &client_tuning, &client) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, &client_tuning,
+	                                 &client) == TR_OK);
 
 	/* 客户端创建只启动反应器。连接之后只允许新增一个 RPC
 	 * 执行器工作线程；截止时间与保活都是反应器本地定时器，
 	 * 不能再额外创建定时器线程。
 	 */
 	before = test_linux_thread_count();
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
 
 	{
 		struct timespec pause_time;
@@ -7753,7 +7760,7 @@ static void test_client_runtime_thread_bound(void)
 	after = test_linux_thread_count();
 	assert(after <= before + 1U);
 
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 }
 
@@ -7847,7 +7854,7 @@ static void test_server_shared_rpc_executor(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *clients[4] = { NULL, NULL, NULL, NULL };
+	struct rpc_v1_test_client *clients[4] = {NULL, NULL, NULL, NULL};
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle calls[4];
@@ -7894,20 +7901,20 @@ static void test_server_shared_rpc_executor(void)
 	client_config.limits.max_message_bytes = 16384U;
 
 	for (i = 0; i < 4U; ++i) {
-		assert(tr_client_legacy_create(&client_config, &clients[i]) ==
-		       TR_OK);
-		assert(tr_client_connect(clients[i], "127.0.0.1", port) == TR_OK);
-		assert(tr_client_legacy_register_method(clients[i], &method) ==
-		       TR_OK);
+		assert(rpc_v1_test_client_create(&client_config, NULL,
+		                                 &clients[i]) == TR_OK);
+		assert(rpc_v1_test_client_connect(clients[i], "127.0.0.1",
+		                                  port) == TR_OK);
+		assert(tr_rpc_register_method(clients[i]->endpoint, &method,
+		                              NULL, NULL) == TR_OK);
 	}
 
 	request.data = (const uint8_t *)"work";
 	request.len = 4U;
 	for (i = 0; i < 4U; ++i)
-		assert(tr_client_legacy_unary_call(clients[i], 88U, 1U,
-		                                   &request,
-		                                   shared_executor_test_result,
-		                                   &ctx, &calls[i]) == TR_OK);
+		assert(tr_rpc_unary_call(clients[i]->endpoint, 88U, 1U,
+		                         &request, shared_executor_test_result,
+		                         &ctx, &calls[i]) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -7945,14 +7952,15 @@ static void test_server_shared_rpc_executor(void)
 	pthread_mutex_unlock(&ctx.lock);
 
 	for (i = 0; i < 4U; ++i) {
-		int drain_ret = tr_client_begin_drain(clients[i]);
+		int drain_ret = tr_channel_begin_drain(clients[i]->channel);
 		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
-		assert(tr_client_wait_drained(clients[i], 5000U) == TR_OK);
+		assert(tr_channel_wait_drained(clients[i]->channel, 5000U) ==
+		       TR_OK);
 	}
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
 	for (i = 0; i < 4U; ++i)
-		assert(tr_client_destroy(clients[i]) == TR_OK);
+		assert(rpc_v1_test_client_destroy(clients[i]) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 
 	pthread_cond_destroy(&ctx.cond);
@@ -7994,7 +8002,7 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_stream_handlers handlers;
 	struct tr_rpc_call_handle call;
@@ -8043,10 +8051,12 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	client_config.connect_timeout_ms = 500U;
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
-	assert(tr_client_legacy_call_start(client, 90U, 1U, NULL, &call) ==
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
+	assert(tr_rpc_call_start(client->endpoint, 90U, 1U, NULL, &call) ==
 	       TR_OK);
 
 	bytes.data = (const uint8_t *)"retain";
@@ -8074,7 +8084,7 @@ static void test_retained_rpc_message_survives_peer_disconnect(void)
 	/* 应用所有权仍持有接收描述符时断开对端。
 	 * 退役的 Endpoint/Channel 必须仅因消息生命周期保护而保持存活。
 	 */
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	client = NULL;
 
 	memset(&stats, 0, sizeof(stats));
@@ -8114,8 +8124,8 @@ static void test_server_reaping_budget_defers_detach(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *first = NULL;
-	struct tr_client *second = NULL;
+	struct rpc_v1_test_client *first = NULL;
+	struct rpc_v1_test_client *second = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
@@ -8163,13 +8173,15 @@ static void test_server_reaping_budget_defers_detach(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 
-	assert(tr_client_legacy_create(&client_config, &first) == TR_OK);
-	assert(tr_client_connect(first, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_legacy_register_method(first, &method) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &first) ==
+	       TR_OK);
+	assert(rpc_v1_test_client_connect(first, "127.0.0.1", port) == TR_OK);
+	assert(tr_rpc_register_method(first->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
 	request.data = (const uint8_t *)"hold";
 	request.len = 4U;
-	assert(tr_client_legacy_unary_call(first, 91U, 1U, &request, NULL, NULL,
-	                                   &call) == TR_OK);
+	assert(tr_rpc_unary_call(first->endpoint, 91U, 1U, &request, NULL, NULL,
+	                         &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 10;
@@ -8180,7 +8192,7 @@ static void test_server_reaping_budget_defers_detach(void)
 	assert(ctx.active == 1U);
 	pthread_mutex_unlock(&ctx.lock);
 
-	assert(tr_client_destroy(first) == TR_OK);
+	assert(rpc_v1_test_client_destroy(first) == TR_OK);
 	first = NULL;
 
 	pause_time.tv_sec = 0;
@@ -8199,10 +8211,12 @@ static void test_server_reaping_budget_defers_detach(void)
 	/* 首个 Endpoint 退役期间仍允许槽位复用。第二个断开的对端
 	 * 必须保持发布，因为分片已用掉唯一退役对象槽位。
 	 */
-	assert(tr_client_legacy_create(&client_config, &second) == TR_OK);
-	assert(tr_client_connect(second, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_legacy_register_method(second, &method) == TR_OK);
-	assert(tr_client_destroy(second) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &second) ==
+	       TR_OK);
+	assert(rpc_v1_test_client_connect(second, "127.0.0.1", port) == TR_OK);
+	assert(tr_rpc_register_method(second->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
+	assert(rpc_v1_test_client_destroy(second) == TR_OK);
 	second = NULL;
 
 	memset(&stats, 0, sizeof(stats));
@@ -8250,7 +8264,7 @@ static void test_server_peer_refcount_drain(void)
 	struct tr_client_config client_config;
 	struct tr_facade_tuning tuning;
 	struct tr_server *server = NULL;
-	struct tr_client *client = NULL;
+	struct rpc_v1_test_client *client = NULL;
 	struct tr_rpc_method_desc method;
 	struct tr_rpc_bytes request;
 	struct tr_rpc_call_handle call;
@@ -8305,14 +8319,16 @@ static void test_server_peer_refcount_drain(void)
 	client_config.limits.max_frame_payload_bytes = 4096U;
 	client_config.limits.max_message_bytes = 16384U;
 
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
-	assert(tr_client_connect(client, "127.0.0.1", port) == TR_OK);
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
+	assert(rpc_v1_test_client_connect(client, "127.0.0.1", port) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
 
 	request.data = (const uint8_t *)"hold";
 	request.len = 4U;
-	assert(tr_client_legacy_unary_call(client, 89U, 1U, &request, NULL,
-	                                   NULL, &call) == TR_OK);
+	assert(tr_rpc_unary_call(client->endpoint, 89U, 1U, &request, NULL,
+	                         NULL, &call) == TR_OK);
 
 	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
 	deadline.tv_sec += 15;
@@ -8327,12 +8343,13 @@ static void test_server_peer_refcount_drain(void)
 	 * 反应器所有者解绑可立即退役或复用对端槽位，但最后引用收尾
 	 * 必须使已解绑 Endpoint/Channel 状态保持存活，直到此任务释放强引用。
 	 */
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	client = NULL;
 
-	assert(tr_client_legacy_create(&client_config, &client) == TR_OK);
+	assert(rpc_v1_test_client_create(&client_config, NULL, &client) ==
+	       TR_OK);
 	for (attempt = 0; attempt < 100U; ++attempt) {
-		ret = tr_client_connect(client, "127.0.0.1", port);
+		ret = rpc_v1_test_client_connect(client, "127.0.0.1", port);
 		if (ret == TR_OK)
 			break;
 		assert(ret != TR_ERR_STATE);
@@ -8344,10 +8361,11 @@ static void test_server_peer_refcount_drain(void)
 		}
 	}
 	assert(ret == TR_OK);
-	assert(tr_client_legacy_register_method(client, &method) == TR_OK);
-	assert(tr_client_legacy_unary_call(client, 89U, 1U, &request,
-	                                   shared_executor_test_result, &ctx,
-	                                   &call) == TR_OK);
+	assert(tr_rpc_register_method(client->endpoint, &method, NULL, NULL) ==
+	       TR_OK);
+	assert(tr_rpc_unary_call(client->endpoint, 89U, 1U, &request,
+	                         shared_executor_test_result, &ctx,
+	                         &call) == TR_OK);
 
 	/* 唯一共享工作线程仍被已退役对端任务占据。 */
 	{
@@ -8381,8 +8399,10 @@ static void test_server_peer_refcount_drain(void)
 		memset(&client_channel_stats, 0, sizeof(client_channel_stats));
 		memset(&client_rpc_stats, 0, sizeof(client_rpc_stats));
 		(void)tr_server_get_stats(server, &server_stats);
-		(void)tr_client_get_channel_stats(client, &client_channel_stats);
-		(void)tr_client_get_rpc_stats(client, &client_rpc_stats);
+		(void)tr_channel_get_stats(client->channel,
+		                           &client_channel_stats);
+		(void)tr_rpc_endpoint_get_stats(client->endpoint,
+		                                &client_rpc_stats);
 		fprintf(stderr,
 			"peer-refcount timeout: entered=%u results=%u active=%u "
 			"peers=%u ready=%u reaping=%u reaped=%llu "
@@ -8416,10 +8436,10 @@ static void test_server_peer_refcount_drain(void)
 	pthread_mutex_unlock(&ctx.lock);
 
 	{
-		int drain_ret = tr_client_begin_drain(client);
+		int drain_ret = tr_channel_begin_drain(client->channel);
 		assert(drain_ret == TR_OK || drain_ret == TR_AGAIN);
 	}
-	assert(tr_client_wait_drained(client, 5000U) == TR_OK);
+	assert(tr_channel_wait_drained(client->channel, 5000U) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 
 	atomic_store_explicit(&stats_poll.stop, 1, memory_order_release);
@@ -8429,7 +8449,7 @@ static void test_server_peer_refcount_drain(void)
 	assert(atomic_load_explicit(&stats_poll.failures,
 				    memory_order_relaxed) == 0U);
 
-	assert(tr_client_destroy(client) == TR_OK);
+	assert(rpc_v1_test_client_destroy(client) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);

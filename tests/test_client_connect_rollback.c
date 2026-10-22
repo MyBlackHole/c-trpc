@@ -1,8 +1,8 @@
 #define _GNU_SOURCE
-#include "../src/facade_legacy_internal.h"
+#include "../src/client_record_internal.h"
+#include "../src/memory_budget.h"
 #include "tr/client.h"
 #include "../src/io/socket.h"
-#include "../src/rpc/rpc_internal.h"
 #include "../src/transport/channel/channel.h"
 #include "tr/status.h"
 
@@ -11,32 +11,30 @@
 #include <stdint.h>
 #include <string.h>
 
-static atomic_int fail_rpc_create_once;
+static atomic_int fail_record_create_once;
 static atomic_int fail_channel_destroy_once;
-static atomic_uint rpc_create_attempts;
+static atomic_uint record_create_attempts;
 static atomic_uint channel_destroy_attempts;
 
-int __real_tr_rpc_endpoint_create_with_executor_group(
-	struct tr_channel *channel,
-	const struct tr_rpc_endpoint_config *config,
-	struct tr_rpc_executor_group *group,
-	struct tr_rpc_endpoint **out);
+int __real_tr_rpc_record_client_create_on_owner(
+        struct tr_channel *channel, const struct tr_rpc_method_desc *methods,
+        size_t method_count, const struct tr_rpc_record_client_config *config,
+        struct tr_memory_budget *budget, struct tr_rpc_record_client **out);
 int __real_tr_channel_destroy(struct tr_channel *channel);
 
-int __wrap_tr_rpc_endpoint_create_with_executor_group(
-	struct tr_channel *channel,
-	const struct tr_rpc_endpoint_config *config,
-	struct tr_rpc_executor_group *group,
-	struct tr_rpc_endpoint **out)
+int __wrap_tr_rpc_record_client_create_on_owner(
+        struct tr_channel *channel, const struct tr_rpc_method_desc *methods,
+        size_t method_count, const struct tr_rpc_record_client_config *config,
+        struct tr_memory_budget *budget, struct tr_rpc_record_client **out)
 {
-	atomic_fetch_add(&rpc_create_attempts, 1U);
-	if (atomic_exchange(&fail_rpc_create_once, 0)) {
+	atomic_fetch_add(&record_create_attempts, 1U);
+	if (atomic_exchange(&fail_record_create_once, 0)) {
 		if (out)
 			*out = NULL;
 		return TR_ERR_BAD_LENGTH;
 	}
-	return __real_tr_rpc_endpoint_create_with_executor_group(
-		channel, config, group, out);
+	return __real_tr_rpc_record_client_create_on_owner(
+	        channel, methods, method_count, config, budget, out);
 }
 
 int __wrap_tr_channel_destroy(struct tr_channel *channel)
@@ -49,9 +47,9 @@ int __wrap_tr_channel_destroy(struct tr_channel *channel)
 
 static void reset_faults(void)
 {
-	atomic_store(&fail_rpc_create_once, 0);
+	atomic_store(&fail_record_create_once, 0);
 	atomic_store(&fail_channel_destroy_once, 0);
-	atomic_store(&rpc_create_attempts, 0U);
+	atomic_store(&record_create_attempts, 0U);
 	atomic_store(&channel_destroy_attempts, 0U);
 }
 
@@ -66,12 +64,22 @@ static void create_listener(int *fd_out, uint16_t *port_out)
 static struct tr_client *create_client(void)
 {
 	struct tr_client_config config;
+	struct tr_rpc_method_desc method = {0};
 	struct tr_client *client = NULL;
 
 	tr_client_config_init(&config);
 	config.keepalive_interval_ms = 0U;
 	config.enable_reconnect = 0;
-	assert(tr_client_legacy_create(&config, &client) == TR_OK);
+	method.service_id = 1U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_LANE_CONTROL;
+	method.max_request_bytes = 1U;
+	method.max_response_bytes = 1U;
+	assert(tr_client_create(&config, &method, 1U, &client) == TR_OK);
 	assert(client != NULL);
 	return client;
 }
@@ -88,16 +96,16 @@ static void test_successful_rollback_restores_connect_state(void)
 	/* RPC 发布前注入失败。第一次连接的显式回滚必须完整
 	 * 清掉连接与 Channel，使第二次连接不会被残留会话拒绝。
 	 */
-	atomic_store(&fail_rpc_create_once, 1);
+	atomic_store(&fail_record_create_once, 1);
 	assert(tr_client_connect(client, "127.0.0.1", port) ==
 	       TR_ERR_BAD_LENGTH);
-	assert(atomic_load(&rpc_create_attempts) == 1U);
+	assert(atomic_load(&record_create_attempts) == 1U);
 	assert(atomic_load(&channel_destroy_attempts) == 1U);
 
-	atomic_store(&fail_rpc_create_once, 1);
+	atomic_store(&fail_record_create_once, 1);
 	assert(tr_client_connect(client, "127.0.0.1", port) ==
 	       TR_ERR_BAD_LENGTH);
-	assert(atomic_load(&rpc_create_attempts) == 2U);
+	assert(atomic_load(&record_create_attempts) == 2U);
 	assert(atomic_load(&channel_destroy_attempts) == 2U);
 
 	assert(tr_client_destroy(client) == TR_OK);
@@ -117,10 +125,10 @@ static void test_rollback_failure_wins_and_destroy_can_retry(void)
 	 * 失败一次。连接必须返回回滚的 TR_ERR_SYS，而不是把对象伪装
 	 * 成已经恢复到已断开状态。
 	 */
-	atomic_store(&fail_rpc_create_once, 1);
+	atomic_store(&fail_record_create_once, 1);
 	atomic_store(&fail_channel_destroy_once, 1);
 	assert(tr_client_connect(client, "127.0.0.1", port) == TR_ERR_SYS);
-	assert(atomic_load(&rpc_create_attempts) == 1U);
+	assert(atomic_load(&record_create_attempts) == 1U);
 	assert(atomic_load(&channel_destroy_attempts) == 1U);
 	assert(atomic_load(&fail_channel_destroy_once) == 0);
 
