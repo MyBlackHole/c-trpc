@@ -280,6 +280,36 @@ start 返回前发生，不能等返回后才初始化参数或把输出句柄�
 已经拥有独立引用的 producer 按上述关闭合同继续安全收敛；它不授予重新访问
 正在销毁或已经释放的 Client/Server 对象的能力。
 
+## TLS 凭证异步获取与连接组授权
+
+静态 TLS 配置仍是默认路径；provider 不配置时，既有 Client/Server 构造和连接行为不变。
+`TR_TLS_REQUIRED` 始终失败关闭，任何凭证、期限、授权或容量错误都不会回退到明文。
+异步 provider 只提供本地证书链、私钥及可选口令；Client 的服务端信任根和名称验证、
+Server 的客户端 CA 与认证策略仍来自固定 TLS 配置，provider 不能替换这些信任策略。
+
+`tr_client_tls_credentials_start()` / `tr_server_tls_credentials_start()` 显式启动一次取证或刷新。
+`fetch` 收到带单调时钟绝对期限的请求并快速返回；provider 在自己的 I/O 域完成读取后，
+调用对应的 `*_credentials_complete()`。`complete()` 在返回前复制 bundle；随后由外部控制线程
+调用 `*_credentials_poll()` 执行 PEM 校验、构造不可变 profile 并走 TLS-D1 发布屏障。
+poll 返回 `TR_AGAIN` 时结果对象不变；poll 消费终态后值句柄过期。`*_credentials_cancel()` 只发起合作式
+取消，provider 停止访问原始数据后仍须 complete 一次以确认。不能在 Reactor、RPC work 或其他
+c-trpc 回调里阻塞等待 provider、轮换或生命周期操作。
+
+bundle 的证书链、私钥和口令按字节计入单次总上限，默认 4 MiB；可由
+`tr_facade_limits.max_tls_credential_bundle_bytes` 配置。`max_pending_tls_operations` 默认 64；
+同一个 Server 上的凭证操作和连接组授权共用该有界槽位数，Client 则仅用于自己的凭证操作。
+取消确认前槽位、复制结果及所需对象引用不会回收。未确认的 provider 操作会使 destroy 返回
+`TR_AGAIN`；对象仍归调用方，只能继续等待确认并重试 destroy。
+
+连接组 `authorize_async` 用于远端 CONTROL/DATA 身份策略。可同时设置同步 `authorize` 作为
+本地快速 veto；通过后异步回调才会启动。授权请求和身份视图只借用到 provider 回调返回，
+需要异步使用时先复制。provider 可从任意线程调用
+`tr_server_connection_group_authorize_complete()` 一次提交 ALLOW、DENY 或负状态；只有 Server
+所属 Reactor owner 会重验连接代次、期限、路由预留、TLS generation 和身份，再提交 CONTROL
+会话或 DATA 路由。挂起期间连接不会进入业务层。收到 cancel 后 provider 必须停止读取原始请求，
+再以 complete 确认；迟到 ALLOW 会丢弃。连接关闭、期限到达、旧 TLS generation 撤销或 Server
+drain 都会请求取消；未确认操作会保留有界资源并要求调用方重试相应生命周期操作。
+
 ## 有界资源与大小配置
 
 V2 构造中的 `limits.max_message_bytes` 指业务正文，`initial_window_bytes` 指正文

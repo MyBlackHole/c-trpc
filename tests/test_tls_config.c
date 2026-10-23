@@ -17,6 +17,40 @@
 
 static struct tls_test_identity test_identity;
 
+static void
+test_tls_credentials_fetch(const struct tr_tls_credential_request *request,
+                           struct tr_tls_provider_operation operation,
+                           void *arg)
+{
+	(void)request;
+	(void)operation;
+	(void)arg;
+}
+
+static void
+test_tls_credentials_cancel(struct tr_tls_provider_operation operation,
+                            void *arg)
+{
+	(void)operation;
+	(void)arg;
+}
+
+static void test_connection_group_authorize_async(
+        const struct tr_connection_group_authorization *authorization,
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	(void)authorization;
+	(void)operation;
+	(void)arg;
+}
+
+static void test_connection_group_authorize_cancel(
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	(void)operation;
+	(void)arg;
+}
+
 static void cleanup_test_identity(void)
 {
 	tls_test_identity_cleanup(&test_identity);
@@ -55,15 +89,40 @@ static void test_tls_configs_default_disabled(void)
 {
 	struct tr_client_config client;
 	struct tr_server_config server;
+	struct tr_tls_credentials_provider credentials_provider = {
+	        .fetch = test_tls_credentials_fetch,
+	        .cancel = test_tls_credentials_cancel,
+	};
 
 	tr_client_config_init(&client);
 	tr_server_config_init(&server);
+	assert(client.limits.max_pending_tls_operations == 64U);
+	assert(server.limits.max_pending_tls_operations == 64U);
+	assert(client.limits.max_tls_credential_bundle_bytes ==
+	       4U * 1024U * 1024U);
+	assert(server.limits.max_tls_credential_bundle_bytes ==
+	       4U * 1024U * 1024U);
+	assert(strcmp(tr_status_str(TR_ERR_CANCELLED), "cancelled") == 0);
 	assert(client.tls.mode == TR_TLS_DISABLED);
 	assert(client.tls.ca_file == NULL);
 	assert(client.tls.expected_peer_name == NULL);
 	assert(server.tls.mode == TR_TLS_DISABLED);
 	assert(server.tls.certificate_file == NULL);
 	assert(server.tls.client_auth == TR_TLS_CLIENT_AUTH_NONE);
+	assert(client.tls_credentials_provider.fetch == NULL);
+	assert(client.tls_credentials_provider.cancel == NULL);
+	assert(server.tls_credentials_provider.fetch == NULL);
+	assert(server.tls_credentials_provider.cancel == NULL);
+	assert(credentials_provider.fetch != NULL);
+	assert(credentials_provider.cancel != NULL);
+	assert(server.connection_groups.authorize_async == NULL);
+	assert(server.connection_groups.authorize_cancel == NULL);
+	server.connection_groups.authorize_async =
+	        test_connection_group_authorize_async;
+	server.connection_groups.authorize_cancel =
+	        test_connection_group_authorize_cancel;
+	assert(server.connection_groups.authorize_async != NULL);
+	assert(server.connection_groups.authorize_cancel != NULL);
 }
 
 static void test_tls_disabled_rejects_ignored_fields(void)

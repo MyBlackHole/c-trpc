@@ -1544,6 +1544,96 @@ static void test_raw_codec_sdk(void)
 	puts("sdk-v2: case=raw-codec result=pass");
 }
 
+static void
+sdk_tls_credentials_fetch(const struct tr_tls_credential_request *request,
+                          struct tr_tls_provider_operation operation, void *arg)
+{
+	(void)request;
+	(void)operation;
+	(void)arg;
+}
+
+static void
+sdk_tls_credentials_cancel(struct tr_tls_provider_operation operation,
+                           void *arg)
+{
+	(void)operation;
+	(void)arg;
+}
+
+static void sdk_connection_group_authorize_async(
+        const struct tr_connection_group_authorization *authorization,
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	(void)authorization;
+	(void)operation;
+	(void)arg;
+}
+
+static void sdk_connection_group_authorize_cancel(
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	(void)operation;
+	(void)arg;
+}
+
+/* 安装消费端编译并链接 TLS-D2 的公开 provider 类型和全部 facade 入口。 */
+static void test_tls_d2_sdk_symbols(void)
+{
+	int (*client_start)(struct tr_client *, uint32_t,
+	                    enum tr_tls_rotation_policy,
+	                    struct tr_tls_provider_operation *) =
+	        tr_client_tls_credentials_start;
+	int (*client_complete)(struct tr_client *,
+	                       struct tr_tls_provider_operation, int,
+	                       const struct tr_tls_credential_bundle *) =
+	        tr_client_tls_credentials_complete;
+	int (*client_poll)(struct tr_client *, struct tr_tls_provider_operation,
+	                   struct tr_tls_credential_result *) =
+	        tr_client_tls_credentials_poll;
+	int (*client_cancel)(struct tr_client *,
+	                     struct tr_tls_provider_operation) =
+	        tr_client_tls_credentials_cancel;
+	int (*server_start)(struct tr_server *, uint32_t,
+	                    enum tr_tls_rotation_policy,
+	                    struct tr_tls_provider_operation *) =
+	        tr_server_tls_credentials_start;
+	int (*server_complete)(struct tr_server *,
+	                       struct tr_tls_provider_operation, int,
+	                       const struct tr_tls_credential_bundle *) =
+	        tr_server_tls_credentials_complete;
+	int (*server_poll)(struct tr_server *, struct tr_tls_provider_operation,
+	                   struct tr_tls_credential_result *) =
+	        tr_server_tls_credentials_poll;
+	int (*server_cancel)(struct tr_server *,
+	                     struct tr_tls_provider_operation) =
+	        tr_server_tls_credentials_cancel;
+	int (*authorize_complete)(
+	        struct tr_server *, struct tr_tls_provider_operation, int,
+	        enum tr_connection_group_authorization_decision) =
+	        tr_server_connection_group_authorize_complete;
+	struct tr_tls_credentials_provider credentials = {
+	        sdk_tls_credentials_fetch, sdk_tls_credentials_cancel, NULL};
+	struct tr_connection_group_server_config groups;
+	tr_connection_group_authorize_async_cb authorize =
+	        sdk_connection_group_authorize_async;
+	tr_connection_group_authorize_cancel_cb authorize_cancel =
+	        sdk_connection_group_authorize_cancel;
+
+	tr_connection_group_server_config_init(&groups);
+	groups.authorize_async = authorize;
+	groups.authorize_cancel = authorize_cancel;
+	CHECK(credentials.fetch != NULL && credentials.cancel != NULL);
+	CHECK(groups.authorize_async != NULL &&
+	      groups.authorize_cancel != NULL);
+	CHECK(client_start != NULL && client_complete != NULL &&
+	      client_poll != NULL && client_cancel != NULL);
+	CHECK(server_start != NULL && server_complete != NULL &&
+	      server_poll != NULL && server_cancel != NULL &&
+	      authorize_complete != NULL);
+	puts("sdk-v2: case=tls-d2-public-symbols result=pass");
+}
+
 /* #280 的一元远端未知方法及本地非 ONE→ONE 拒绝在安装 SDK 中保留。 */
 static void test_unary_rejections(void)
 {
@@ -1575,6 +1665,7 @@ static void test_unary_rejections(void)
 int main(void)
 {
 	test_raw_codec_sdk();
+	test_tls_d2_sdk_symbols();
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_shapes_and_copy();
