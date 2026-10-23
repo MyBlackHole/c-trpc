@@ -155,7 +155,7 @@ struct tr_connection {
 	uint64_t lifecycle_after_sequence;
 	int lifecycle_tx_busy;
 	int lifecycle_tx_enqueued;
-	/* 单流终止与 GOAWAY 各有一个固定预留，普通控制流量不能抢占。
+	/* RESET/REFUSED 与 GOAWAY 各有一个固定预留，普通控制流量不能抢占。
 	 * 两项都等待接受时固定的命令前沿；同前沿仍保留发布先后次序。 */
 	struct tr_tx_item stream_reset_tx;
 	uint64_t stream_reset_after_sequence;
@@ -3589,8 +3589,10 @@ int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle handle,
 	return TR_OK;
 }
 
-int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle handle,
-                                          uint32_t stream_id, int status)
+static int
+tr_reactor_send_stream_terminal_on_owner(struct tr_conn_handle handle,
+                                         uint16_t type, uint32_t stream_id,
+                                         int status)
 {
 	struct tr_reactor *reactor = handle.reactor;
 	struct tr_connection *connection;
@@ -3607,17 +3609,17 @@ int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle handle,
 		return TR_ERR_STALE;
 	item = &connection->stream_reset_tx;
 	if (connection->stream_reset_tx_busy)
-		return item->stream_id == stream_id &&
+		return item->type == type && item->stream_id == stream_id &&
 		                       item->message_id == (uint64_t)(-status)
 		               ? TR_OK
 		               : TR_AGAIN;
 
 	memset(item, 0, sizeof(*item));
-	item->type = TR_FRAME_STREAM_RESET;
+	item->type = type;
 	item->stream_id = stream_id;
 	item->message_id = (uint64_t)(-status);
 	item->max_frame_payload_len = reactor->config.max_payload_len;
-	/* 后续重试只观察既有项，绝不刷新此 FIFO 前沿。RESET 不进入
+	/* 后续重试只观察既有项，绝不刷新此 FIFO 前沿。终止帧不进入
 	 * 可越过 DATA 的白名单，因而对端收到它就是该方向的静默屏障。 */
 	connection->stream_reset_after_sequence =
 	        tr_command_queue_last_sequence(&reactor->commands);
@@ -3629,6 +3631,20 @@ int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle handle,
 	reactor->lifecycle_tx_pending_count++;
 	tr_connection_try_enqueue_lifecycle_tx(reactor, connection);
 	return TR_OK;
+}
+
+int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle handle,
+                                          uint32_t stream_id, int status)
+{
+	return tr_reactor_send_stream_terminal_on_owner(
+	        handle, TR_FRAME_STREAM_RESET, stream_id, status);
+}
+
+int tr_reactor_send_stream_refused_on_owner(struct tr_conn_handle handle,
+                                            uint32_t stream_id)
+{
+	return tr_reactor_send_stream_terminal_on_owner(
+	        handle, TR_FRAME_STREAM_REFUSED, stream_id, TR_ERR_NOMEM);
 }
 
 int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,

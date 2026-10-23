@@ -109,6 +109,11 @@ int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle connection,
 int tr_reactor_send_stream_reset_on_owner(struct tr_conn_handle connection,
                                           uint32_t stream_id, int status);
 
+/* 未受理 OPEN 的单向拒绝，与 RESET 共用上述固定预留和 FIFO。
+ * 不消耗流槽、普通控制池或命令容量；原因固定为资源不足。 */
+int tr_reactor_send_stream_refused_on_owner(struct tr_conn_handle connection,
+                                            uint32_t stream_id);
+
 typedef void (*tr_reactor_listener_cb)(int fd, uint32_t events, void *arg);
 typedef void (*tr_reactor_peer_event_cb)(int fd, uint32_t events, void *arg);
 

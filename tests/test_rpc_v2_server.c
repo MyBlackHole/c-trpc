@@ -2,6 +2,8 @@
 #include "tr/rpc_v2.h"
 #include "tr/status.h"
 #include "../src/rpc/rpc_record_stream.h"
+#include "../src/transport/protocol/wire.h"
+#include "../src/endian.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -12,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 
 #define CALLS 16U
@@ -23,6 +26,23 @@
 static _Atomic bool fail_open_job;
 static _Atomic unsigned failed_open_jobs;
 static _Thread_local bool receiving_open;
+static _Atomic bool hold_refusal;
+static _Atomic unsigned refusal_blocked;
+
+ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
+ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
+{
+	if (atomic_load(&hold_refusal) && message->msg_iovlen &&
+	    message->msg_iov[0].iov_len >= TR_WIRE_HEADER_SIZE &&
+	    tr_get_le16((const uint8_t *)message->msg_iov[0].iov_base +
+	                TR_WIRE_OFF_TYPE) == TR_FRAME_STREAM_REFUSED) {
+		/* 只阻止真实拒绝帧写出，保留实际流槽、预留项和收尾路径。 */
+		atomic_fetch_add(&refusal_blocked, 1);
+		errno = EAGAIN;
+		return -1;
+	}
+	return __real_sendmsg(fd, message, flags);
+}
 
 void *__real_calloc(size_t count, size_t size);
 void *__wrap_calloc(size_t count, size_t size)
@@ -547,7 +567,7 @@ static void client_terminal(struct tr_rpc_v2_call handle,
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
-static void fixture_init(struct fixture *f)
+static void fixture_init_capacity(struct fixture *f, uint32_t streams)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
@@ -567,7 +587,7 @@ static void fixture_init(struct fixture *f)
 	server_config.keepalive_interval_ms = 0;
 	server_config.limits.max_methods = METHODS;
 	server_config.limits.max_calls = 8;
-	server_config.limits.max_streams = 8;
+	server_config.limits.max_streams = streams;
 	server_config.limits.max_frame_payload_bytes = 64;
 	server_config.limits.max_message_bytes = 64;
 	server_config.limits.initial_window_bytes = 256;
@@ -596,6 +616,7 @@ static void fixture_init(struct fixture *f)
 	assert(tr_server_start(f->server) == TR_OK);
 	tr_client_config_init(&client_config);
 	client_config.limits = server_config.limits;
+	client_config.limits.max_streams = 8;
 	client_config.keepalive_interval_ms = 0;
 	for (unsigned i = 0; i < 2; ++i) {
 		assert(tr_client_create(&client_config, descriptions, METHODS,
@@ -605,6 +626,11 @@ static void fixture_init(struct fixture *f)
 		assert(tr_client_wait_ready(f->clients[i],
 		                            WAIT_SECONDS * 1000) == TR_OK);
 	}
+}
+
+static void fixture_init(struct fixture *f)
+{
+	fixture_init_capacity(f, 8);
 }
 
 static void call_start(struct fixture *f, unsigned index, unsigned client,
@@ -857,6 +883,62 @@ static void test_public_server(void)
 	assert(pthread_mutex_destroy(&f.lock) == 0);
 }
 
+static void test_capacity_refusal(void)
+{
+	struct fixture f;
+	const uint8_t bytes[] = {1, 2, 3};
+	const struct tr_rpc_bytes body = {bytes, sizeof(bytes)};
+	fixture_init_capacity(&f, 1);
+	call_start(&f, 0, 0, ECHO);
+	wait_counter(&f, &f.calls[0].opened, 1);
+	for (unsigned i = 1; i <= 4; ++i) {
+		if (i == 4)
+			atomic_store(&hold_refusal, true);
+		call_start(&f, i, 0, ECHO);
+		if (i == 4) {
+			const struct timespec pause = {0, 1000000};
+			for (unsigned spin = 0; !atomic_load(&refusal_blocked);
+			     ++spin) {
+				assert(spin < 5000);
+				(void)nanosleep(&pause, NULL);
+			}
+			assert(tr_rpc_v2_call_cancel(f.calls[i].handle) ==
+			       TR_OK);
+		}
+		wait_counter(&f, &f.calls[i].client_terminals, 1);
+		atomic_store(&hold_refusal, false);
+		assert(pthread_mutex_lock(&f.lock) == 0);
+		assert(f.calls[i].client_status ==
+		       (i == 4 ? TR_RPC_STATUS_CANCELLED
+		               : TR_RPC_STATUS_RESOURCE_EXHAUSTED));
+		assert(f.calls[i].client_terminals == 1 && !f.calls[i].opened &&
+		       !f.calls[i].terminals && !f.calls[i].initial &&
+		       !f.calls[i].trailing && !f.calls[0].client_terminals);
+		assert(pthread_mutex_unlock(&f.lock) == 0);
+	}
+	/* 真实普通 Client/Server：拒绝从未进入业务，已有调用仍完成。 */
+	send_or_half_close(&f.calls[0], &body);
+	send_or_half_close(&f.calls[0], NULL);
+	check_result(&f.calls[0], TR_RPC_STATUS_OK, 1);
+	check_server_totals(&f, 1);
+	assert(tr_client_begin_drain(f.clients[0]) == TR_OK);
+	assert(tr_client_wait_drained(f.clients[0], WAIT_SECONDS * 1000) ==
+	       TR_OK);
+	struct tr_rpc_semantic_stats stats;
+	assert(tr_client_get_rpc_semantic_stats(f.clients[0], &stats) == TR_OK);
+	assert(stats.calls_started == 5 && stats.calls_finished == 5 &&
+	       stats.calls_inflight == 0);
+	assert(stats.final_status[TR_RPC_STATUS_RESOURCE_EXHAUSTED] == 3 &&
+	       stats.final_status[TR_RPC_STATUS_CANCELLED] == 1 &&
+	       stats.final_status[TR_RPC_STATUS_OK] == 1);
+	retry_destroy(&f, false);
+	f.clients[0] = f.clients[1];
+	retry_destroy(&f, false);
+	retry_destroy(&f, true);
+	assert(pthread_cond_destroy(&f.changed) == 0);
+	assert(pthread_mutex_destroy(&f.lock) == 0);
+}
+
 static void test_configuration(void)
 {
 	struct tr_server_config config;
@@ -887,6 +969,7 @@ static void test_configuration(void)
 int main(void)
 {
 	test_configuration();
+	test_capacity_refusal();
 	test_public_server();
 	puts("test_rpc_v2_server: OK");
 	return 0;

@@ -312,7 +312,8 @@ static void tr_record_client_apply_pending(struct tr_record_client_slot *slot)
 	ret = slot->receiving
 	              ? tr_rpc_record_stream_abort_on_owner(
 	                        slot->binding,
-	                        event == TR_STREAM_EVENT_RESET
+	                        (event == TR_STREAM_EVENT_RESET ||
+	                         event == TR_STREAM_EVENT_REFUSED)
 	                                ? tr_rpc_record_status_from_reset(
 	                                          slot->pending_status)
 	                                : TR_RPC_STATUS_UNAVAILABLE)
@@ -634,7 +635,8 @@ static void tr_record_client_event(struct tr_stream_handle stream,
 	if (event == TR_STREAM_EVENT_REMOTE_CLOSED ||
 	    event == TR_STREAM_EVENT_CLOSED)
 		slot->peer_closed = true;
-	if (event == TR_STREAM_EVENT_CLOSED || event == TR_STREAM_EVENT_ERROR)
+	if (event == TR_STREAM_EVENT_CLOSED || event == TR_STREAM_EVENT_ERROR ||
+	    event == TR_STREAM_EVENT_REFUSED)
 		slot->dead = true;
 	if (event == TR_STREAM_EVENT_RESET)
 		slot->reset_accepted = true;

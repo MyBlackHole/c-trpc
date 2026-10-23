@@ -5,8 +5,8 @@
 #include "../transport/channel/channel.h"
 #include "tr/status.h"
 
-/* RESET 只携带传输原因。映射属于 RPC 适配边界，Channel 不解释业务状态；
- * 已被记录状态机接纳的 FINAL 不受随后 RESET 影响。 */
+/* RESET 和未受理拒绝只携带传输原因。映射属于 RPC 适配边界；
+ * 已被记录状态机接纳的 FINAL 不受随后传输终止影响。 */
 static inline enum tr_rpc_status tr_rpc_record_status_from_reset(int reason)
 {
 	switch (reason) {
@@ -50,7 +50,9 @@ static inline int tr_rpc_record_is_terminal_event(enum tr_stream_event event)
 {
 	return event == TR_STREAM_EVENT_REMOTE_CLOSED ||
 	       event == TR_STREAM_EVENT_CLOSED ||
-	       event == TR_STREAM_EVENT_ERROR || event == TR_STREAM_EVENT_RESET;
+	       event == TR_STREAM_EVENT_ERROR ||
+	       event == TR_STREAM_EVENT_RESET ||
+	       event == TR_STREAM_EVENT_REFUSED;
 }
 
 #endif

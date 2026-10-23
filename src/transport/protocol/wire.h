@@ -38,7 +38,8 @@ enum tr_frame_type {
 	TR_FRAME_BIND = 11,
 	TR_FRAME_BIND_ACK = 12,
 	TR_FRAME_PIPELINE_CONTROL = 13,
-	TR_FRAME_STREAM_RESET = 14
+	TR_FRAME_STREAM_RESET = 14,
+	TR_FRAME_STREAM_REFUSED = 15
 };
 
 struct tr_frame_header {
