@@ -165,7 +165,7 @@ static void test_tls_required_v2_factories_and_transport_boundary(void)
 	client.tls.ca_file = test_identity.ca_file;
 	client.tls.expected_peer_name = "server.example.test";
 	assert(tr_client_create_transport(&client, &client_out) ==
-	       TR_ERR_UNSUPPORTED);
+	       TR_ERR_INVALID);
 	assert(client_out == NULL);
 	assert(tr_client_create(&client, &descriptor, 1U, &client_out) ==
 	       TR_OK);
@@ -176,6 +176,10 @@ static void test_tls_required_v2_factories_and_transport_boundary(void)
 	        test_identity.client_certificate_file;
 	client.tls.client_private_key_file =
 	        test_identity.client_private_key_file;
+	assert(tr_client_create_transport(&client, &client_out) == TR_OK);
+	assert(client_out != NULL);
+	assert(tr_client_destroy(client_out) == TR_OK);
+	client_out = NULL;
 	assert(tr_client_create(&client, &descriptor, 1U, &client_out) ==
 	       TR_OK);
 	assert(client_out != NULL);

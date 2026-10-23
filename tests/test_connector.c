@@ -257,11 +257,13 @@ int __wrap_tr_reactor_aux_event_unregister(
 	return ret;
 }
 
-static void connector_destroy_from_completion(int status, int fd, void *arg)
+static void connector_destroy_from_completion(int status, int fd,
+                                              uint64_t deadline_ns, void *arg)
 {
 	struct connector_test_ctx *ctx =
 		(struct connector_test_ctx *)arg;
 	int destroy_ret;
+	(void)deadline_ns;
 
 	tr_socket_close(&fd);
 	destroy_ret = tr_connector_destroy(ctx->connector);
@@ -325,11 +327,13 @@ static void wait_unregister_count(
 	pthread_mutex_unlock(&ctx->lock);
 }
 
-static void connector_record_completion(int status, int fd, void *arg)
+static void connector_record_completion(int status, int fd,
+                                        uint64_t deadline_ns, void *arg)
 {
 	struct connector_test_ctx *ctx =
 		(struct connector_test_ctx *)arg;
 	int transferred_fd = fd;
+	(void)deadline_ns;
 
 	tr_socket_close(&fd);
 	pthread_mutex_lock(&ctx->lock);
@@ -423,9 +427,11 @@ static void test_completion_may_destroy_connector(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
-static void connector_noop_completion(int status, int fd, void *arg)
+static void connector_noop_completion(int status, int fd, uint64_t deadline_ns,
+                                      void *arg)
 {
 	(void)status;
+	(void)deadline_ns;
 	(void)arg;
 	tr_socket_close(&fd);
 }

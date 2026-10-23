@@ -962,7 +962,7 @@ static int group_connector_complete_failure_on_owner(void *arg)
 	struct group_connector_complete_request *request =
 	        (struct group_connector_complete_request *)arg;
 
-	request->complete(TR_ERR_SYS, -1, request->callback_arg);
+	request->complete(TR_ERR_SYS, -1, 0U, request->callback_arg);
 	return TR_OK;
 }
 

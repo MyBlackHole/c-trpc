@@ -341,8 +341,8 @@ static int tr_tls_openssl_profile_alloc(enum tr_tls_openssl_role role,
 	return TR_OK;
 }
 
-int tr_tls_openssl_client_profile_create(
-        const struct tr_tls_client_config *config,
+static int tr_tls_openssl_client_profile_create_internal(
+        const struct tr_tls_client_config *config, int peer_identity_enabled,
         struct tr_tls_openssl_profile **out)
 {
 	struct tr_tls_openssl_profile *profile = NULL;
@@ -415,12 +415,28 @@ int tr_tls_openssl_client_profile_create(
 			goto fail;
 		}
 	}
+	profile->peer_identity_enabled = peer_identity_enabled != 0;
+	profile->peer_identity_required = 0;
 	*out = profile;
 	return TR_OK;
 
 fail:
 	tr_tls_openssl_profile_release(profile);
 	return status;
+}
+
+int tr_tls_openssl_client_profile_create(
+        const struct tr_tls_client_config *config,
+        struct tr_tls_openssl_profile **out)
+{
+	return tr_tls_openssl_client_profile_create_internal(config, 0, out);
+}
+
+int tr_tls_openssl_client_profile_create_with_peer_identity(
+        const struct tr_tls_client_config *config,
+        struct tr_tls_openssl_profile **out)
+{
+	return tr_tls_openssl_client_profile_create_internal(config, 1, out);
 }
 
 int tr_tls_openssl_server_profile_create(

@@ -16,7 +16,9 @@
 #include "../../group/pipeline_route_internal.h"
 #include "../../execution/reactor_internal.h"
 #include "../../execution/deadline_internal.h"
+#include "../../io/peer_identity_internal.h"
 #include "../../io/socket_internal.h"
+#include "../../io/tls_openssl.h"
 #include "../../execution/buffer.h"
 #include "../../io/socket.h"
 #include "tr/status.h"
@@ -57,6 +59,7 @@ struct tr_client_group {
 	struct tr_client_group_config config;
 	struct tr_conn_handle control;
 	struct tr_pipeline_route_preface control_route;
+	struct tr_peer_identity_snapshot *control_peer_identity;
 	uint32_t control_generation;
 
 	char address[TR_CLIENT_GROUP_ADDRESS_CAPACITY];
@@ -115,13 +118,112 @@ static int tr_client_group_conn_equal(struct tr_conn_handle a,
 	       a.generation == b.generation;
 }
 
+static void
+tr_client_group_release_control_identity(struct tr_client_group *group)
+{
+	if (!group)
+		return;
+	tr_peer_identity_snapshot_release(group->control_peer_identity);
+	group->control_peer_identity = NULL;
+}
+
+static int
+tr_client_group_identity_equal(const struct tr_peer_identity_view *left,
+                               const struct tr_peer_identity_view *right)
+{
+	return left && right &&
+	       left->authentication == TR_PEER_IDENTITY_TLS_CERTIFICATE &&
+	       right->authentication == TR_PEER_IDENTITY_TLS_CERTIFICATE &&
+	       left->uri_san && right->uri_san && left->uri_san_len != 0U &&
+	       left->uri_san_len == right->uri_san_len &&
+	       memcmp(left->uri_san, right->uri_san, left->uri_san_len) == 0;
+}
+
+static int tr_client_group_tls_authenticated(
+        struct tr_conn_handle connection,
+        const struct tr_peer_identity_view *peer_identity, void *arg)
+{
+	struct tr_client_group *group = (struct tr_client_group *)arg;
+	struct tr_peer_identity_view control_identity;
+	uint32_t i;
+
+	if (!group || !peer_identity ||
+	    peer_identity->authentication != TR_PEER_IDENTITY_TLS_CERTIFICATE ||
+	    !peer_identity->uri_san || peer_identity->uri_san_len == 0U)
+		return TR_ERR_INVALID;
+
+	if (group->control_connecting ||
+	    tr_client_group_conn_equal(group->control, connection)) {
+		struct tr_peer_identity_snapshot *snapshot = NULL;
+		int ret;
+
+		if (group->control_peer_identity)
+			return TR_ERR_STATE;
+		ret = tr_reactor_peer_identity_snapshot_on_owner(connection,
+		                                                 &snapshot);
+		if (ret != TR_OK || !snapshot)
+			return ret != TR_OK ? ret : TR_ERR_INVALID;
+		ret = tr_peer_identity_snapshot_retain(snapshot);
+		if (ret != TR_OK)
+			return ret;
+		group->control_peer_identity = snapshot;
+		return TR_OK;
+	}
+
+	if (!group->control_peer_identity ||
+	    tr_peer_identity_snapshot_view(group->control_peer_identity,
+	                                   &control_identity) != TR_OK)
+		return TR_ERR_STATE;
+	if (!tr_client_group_identity_equal(peer_identity, &control_identity))
+		return TR_ERR_INVALID;
+
+	for (i = 0; i < group->data_capacity; ++i) {
+		struct tr_client_group_data *data = &group->data[i];
+
+		if (data->state != TR_CLIENT_GROUP_DATA_CONNECTING ||
+		    !tr_client_group_conn_equal(data->connection, connection))
+			continue;
+		return TR_OK;
+	}
+	return TR_ERR_STALE;
+}
+
+static void
+tr_client_group_publish_connected_on_owner(struct tr_client_group *group);
+
+static int tr_client_group_tls_preface_sent(struct tr_conn_handle connection,
+                                            void *arg)
+{
+	struct tr_client_group *group = (struct tr_client_group *)arg;
+	uint32_t i;
+
+	if (!group)
+		return TR_ERR_INVALID;
+	if (group->control_connecting &&
+	    tr_client_group_conn_equal(group->control, connection)) {
+		group->control_connecting = 0;
+		tr_client_group_publish_connected_on_owner(group);
+		return TR_OK;
+	}
+	for (i = 0; i < group->data_capacity; ++i) {
+		struct tr_client_group_data *data = &group->data[i];
+
+		if (data->state != TR_CLIENT_GROUP_DATA_CONNECTING ||
+		    !tr_client_group_conn_equal(data->connection, connection))
+			continue;
+		data->state = TR_CLIENT_GROUP_DATA_ACTIVE;
+		return TR_OK;
+	}
+	return TR_ERR_STALE;
+}
+
 static int
 tr_client_group_drain_complete_on_owner(const struct tr_client_group *group)
 {
 	uint32_t i;
 
-	if (!group || !group->draining || group->transfer_count != 0U ||
-	    group->send_bytes_inflight != 0U ||
+	if (!group || !group->draining || group->control_connecting ||
+	    group->transfer_count != 0U || group->send_bytes_inflight != 0U ||
 	    group->connector_slot != TR_CLIENT_GROUP_NO_SLOT)
 		return 0;
 
@@ -350,9 +452,10 @@ static void tr_client_group_data_event(
 	for (i = 0; i < group->data_capacity; ++i) {
 		int cancel_ret = TR_OK;
 
-		if (group->data[i].state != TR_CLIENT_GROUP_DATA_ACTIVE ||
-		    !tr_client_group_conn_equal(
-			    group->data[i].connection, connection))
+		if ((group->data[i].state != TR_CLIENT_GROUP_DATA_ACTIVE &&
+		     group->data[i].state != TR_CLIENT_GROUP_DATA_CONNECTING) ||
+		    !tr_client_group_conn_equal(group->data[i].connection,
+		                                connection))
 			continue;
 		if (!group->closing && group->control.reactor)
 			cancel_ret = tr_client_group_send_cancel_on_owner(
@@ -374,13 +477,14 @@ static void tr_client_group_data_event(
 		tr_client_group_start_next_on_owner(group);
 }
 
-static void tr_client_group_connector_complete(
-	int status, int fd, void *arg)
+static void tr_client_group_connector_complete(int status, int fd,
+                                               uint64_t deadline_ns, void *arg)
 {
 	struct tr_client_group *group = (struct tr_client_group *)arg;
 	struct tr_client_group_data *data;
 	struct tr_conn_handle connection;
 	struct tr_pipeline_route_preface route;
+	uint8_t preface[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint64_t message_id;
 	uint32_t slot;
 	int ret;
@@ -423,8 +527,18 @@ static void tr_client_group_connector_complete(
 	/* TR_OK 完成结果把已连接 fd 所有权转移给本回调。
 	 * 接管成功后所有权再转移给反应器；其他失败路径必须在此关闭。
 	 */
+	ret = tr_pipeline_route_preface_encode(preface, &route);
+	if (ret != TR_OK)
+		goto fail;
 	memset(&connection, 0, sizeof(connection));
-	ret = tr_reactor_adopt_fd(group->config.owner, fd, &connection);
+	if (group->config.tls_profile)
+		ret = tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner(
+		        group->config.owner, fd, group->config.tls_profile,
+		        deadline_ns, preface, sizeof(preface),
+		        tr_client_group_tls_authenticated, group,
+		        tr_client_group_tls_preface_sent, group, &connection);
+	else
+		ret = tr_reactor_adopt_fd(group->config.owner, fd, &connection);
 	if (ret != TR_OK) {
 		tr_socket_close(&fd);
 		goto fail;
@@ -440,7 +554,9 @@ static void tr_client_group_connector_complete(
 	}
 
 	data->connection = connection;
-	data->state = TR_CLIENT_GROUP_DATA_ACTIVE;
+	data->state = group->config.tls_profile
+	                      ? TR_CLIENT_GROUP_DATA_CONNECTING
+	                      : TR_CLIENT_GROUP_DATA_ACTIVE;
 	tr_client_group_start_next_on_owner(group);
 	return;
 
@@ -474,9 +590,10 @@ static int tr_client_group_begin_connector_on_owner(
 
 	group->connector_slot = slot;
 	data->state = TR_CLIENT_GROUP_DATA_CONNECTING;
-	ret = tr_connector_start(
-		group->connector, group->address, group->port,
-		preface, sizeof(preface));
+	ret = tr_connector_start(group->connector, group->address, group->port,
+	                         group->config.tls_profile ? NULL : preface,
+	                         group->config.tls_profile ? 0U
+	                                                   : sizeof(preface));
 	return ret;
 }
 
@@ -868,7 +985,8 @@ static int tr_client_group_stop_data_on_owner(struct tr_client_group *group)
 	for (i = 0; i < group->data_capacity; ++i) {
 		struct tr_conn_handle connection = group->data[i].connection;
 
-		if (group->data[i].state == TR_CLIENT_GROUP_DATA_ACTIVE &&
+		if ((group->data[i].state == TR_CLIENT_GROUP_DATA_ACTIVE ||
+		     group->data[i].state == TR_CLIENT_GROUP_DATA_CONNECTING) &&
 		    connection.reactor) {
 			ret = tr_reactor_close_on_owner(connection);
 			if (ret != TR_OK && ret != TR_ERR_STALE)
@@ -907,6 +1025,8 @@ static void tr_client_group_control_event(
 	memset(&group->control_route, 0, sizeof(group->control_route));
 	memset(group->address, 0, sizeof(group->address));
 	group->port = 0U;
+	group->control_connecting = 0;
+	tr_client_group_release_control_identity(group);
 	group->closing = was_closing;
 }
 
@@ -935,6 +1055,7 @@ static int tr_client_group_cancel_prepare_connect_on_owner(void *arg)
 		(struct tr_client_group_prepare_connect_request *)arg;
 
 	request->group->control_connecting = 0;
+	tr_client_group_release_control_identity(request->group);
 	return TR_OK;
 }
 
@@ -943,8 +1064,10 @@ struct tr_client_group_adopt_request {
 	int fd;
 	int fd_consumed;
 	int executed;
+	uint64_t handshake_deadline_ns;
 	struct tr_conn_handle connection;
 	struct tr_pipeline_route_preface route;
+	uint8_t preface[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	char address[TR_CLIENT_GROUP_ADDRESS_CAPACITY];
 	uint16_t port;
 };
@@ -962,9 +1085,18 @@ static int tr_client_group_adopt_control_on_owner(void *arg)
 		return TR_ERR_STATE;
 	}
 
-	ret = tr_reactor_adopt_fd(
-		group->config.owner, request->fd,
-		&request->connection);
+	if (group->config.tls_profile)
+		ret = tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner(
+		        group->config.owner, request->fd,
+		        group->config.tls_profile,
+		        request->handshake_deadline_ns, request->preface,
+		        sizeof(request->preface),
+		        tr_client_group_tls_authenticated, group,
+		        tr_client_group_tls_preface_sent, group,
+		        &request->connection);
+	else
+		ret = tr_reactor_adopt_fd(group->config.owner, request->fd,
+		                          &request->connection);
 	if (ret != TR_OK)
 		goto fail;
 	request->fd_consumed = 1;
@@ -986,12 +1118,15 @@ static int tr_client_group_adopt_control_on_owner(void *arg)
 	memcpy(group->address, request->address, sizeof(group->address));
 	group->port = request->port;
 	group->draining = 0;
-	group->control_connecting = 0;
-	tr_client_group_publish_connected_on_owner(group);
+	if (!group->config.tls_profile) {
+		group->control_connecting = 0;
+		tr_client_group_publish_connected_on_owner(group);
+	}
 	return TR_OK;
 
 fail:
 	group->control_connecting = 0;
+	tr_client_group_release_control_identity(group);
 	return ret;
 }
 
@@ -1031,6 +1166,7 @@ static int tr_client_group_close_on_owner(void *arg)
 		memset(group->address, 0, sizeof(group->address));
 		group->port = 0U;
 	}
+	tr_client_group_release_control_identity(group);
 	group->closing = 0;
 	return ret;
 }
@@ -1175,6 +1311,7 @@ int tr_client_group_connect(
 	struct tr_pipeline_route_preface route;
 	struct tr_deadline connect_deadline;
 	uint8_t raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
+	uint64_t handshake_deadline_ns;
 	size_t address_len;
 	int fd = -1;
 	int ret;
@@ -1223,15 +1360,24 @@ int tr_client_group_connect(
 	ret = tr_pipeline_route_preface_encode(raw, &route);
 	if (ret != TR_OK)
 		goto fail;
-	ret = tr_client_group_send_all_fd(
-		fd, raw, sizeof(raw), &connect_deadline);
-	if (ret != TR_OK)
+	if (!group->config.tls_profile) {
+		ret = tr_client_group_send_all_fd(fd, raw, sizeof(raw),
+		                                  &connect_deadline);
+		if (ret != TR_OK)
+			goto fail;
+	}
+	handshake_deadline_ns = tr_deadline_to_ns(&connect_deadline);
+	if (handshake_deadline_ns == 0U) {
+		ret = TR_ERR_SYS;
 		goto fail;
+	}
 
 	memset(&request, 0, sizeof(request));
 	request.group = group;
 	request.fd = fd;
+	request.handshake_deadline_ns = handshake_deadline_ns;
 	request.route = route;
+	memcpy(request.preface, raw, sizeof(request.preface));
 	memcpy(request.address, ipv4_address, address_len + 1U);
 	request.port = port;
 	ret = tr_reactor_call(
@@ -1317,21 +1463,37 @@ static int tr_client_group_begin_drain_on_owner(void *arg)
 
 	for (i = 0; i < group->data_capacity; ++i) {
 		struct tr_client_group_data *data = &group->data[i];
+		struct tr_pipeline_route_preface route = data->route;
+		uint64_t message_id = data->offer_message_id;
 		int ret;
 
-		if (data->state != TR_CLIENT_GROUP_DATA_QUEUED)
+		if (data->state == TR_CLIENT_GROUP_DATA_QUEUED) {
+			ret = tr_client_group_send_cancel_on_owner(
+			        group, &route, message_id);
+		} else if (data->state == TR_CLIENT_GROUP_DATA_CONNECTING &&
+		           data->connection.reactor) {
+			ret = tr_reactor_close_on_owner(data->connection);
+			if (ret == TR_ERR_STALE) {
+				ret = tr_client_group_send_cancel_on_owner(
+				        group, &route, message_id);
+			} else if (ret == TR_OK) {
+				/* 成功关闭会同步触发 DATA event，由其回调撤销
+				 * route。 */
+				continue;
+			}
+		} else {
 			continue;
-		ret = tr_client_group_send_cancel_on_owner(
-			group, &data->route, data->offer_message_id);
-		memset(data, 0, sizeof(*data));
-		data->state = TR_CLIENT_GROUP_DATA_FREE;
+		}
 		if (ret != TR_OK) {
-			(void)tr_reactor_abort_on_owner(
-				group->control,
-				ret < 0 ? ret : TR_ERR_STATE);
+			if (group->control.reactor)
+				(void)tr_reactor_abort_on_owner(
+				        group->control,
+				        ret < 0 ? ret : TR_ERR_STATE);
 			final = ret;
 			goto out;
 		}
+		memset(data, 0, sizeof(*data));
+		data->state = TR_CLIENT_GROUP_DATA_FREE;
 	}
 
 out:
@@ -1446,7 +1608,8 @@ static int tr_client_group_stats_on_owner(void *arg)
 	memset(out, 0, sizeof(*out));
 	out->group.group_id = group->control_route.pipeline_id;
 	out->group.epoch = group->control_route.epoch;
-	out->control_connected = group->control.reactor ? 1U : 0U;
+	out->control_connected =
+	        group->control.reactor && !group->control_connecting ? 1U : 0U;
 	out->draining = group->draining ? 1U : 0U;
 	out->active_transfers = group->transfer_count;
 	out->active_transfer_limit = group->transfer_limit;
@@ -1622,6 +1785,7 @@ static int tr_client_group_detach_on_owner(void *arg)
 	memset(&group->control_route, 0, sizeof(group->control_route));
 	memset(group->address, 0, sizeof(group->address));
 	group->port = 0U;
+	tr_client_group_release_control_identity(group);
 
 	/* 每个 Group 拥有的 DATA 负载在其释放回调中携带原始 group 指针。
 	 * 在此所有者屏障返回前，上方全部 DATA 连接关闭时

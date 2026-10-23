@@ -140,16 +140,20 @@ TLS OpenSSL socket BIO 的写入使用 `MSG_NOSIGNAL`，避免异常 EOF 时 Ope
 
 运行 `test_tls_config`、`test_tls_openssl`、`test_rpc_v2_tls_identity`、`test_rpc_v2_tls_reactor`、`test_pipeline_listener_tls`、`test_rpc_v2_server`、`test_rpc_v2_sdk`、`test_client_connect_rollback`、`test_pipeline_listener`、`test_pipeline_route`、`test_pipeline_registry`、`test_connection_group_facade`、`test_inbound_handshake_deadline`、`test_server_peer_rollback` 和 `test_internal_constructor_ownership`；本地 15 个目标均构建成功且二进制退出码为 0。
 
-- [ ] **Step 6: 提交 Server group 安全切片**
+- [x] **Step 6: 提交 Server group 安全切片**
 
-把版本从 `.13` bump 到 `.14`；按 `feature-commit-format` 记录行为、授权作用域、性能影响（仅 TLS 连接）、正负测试及回滚。只提交 Task 2 文件。
+版本从 `.13` bump 到 `.14`；Task 2 已按 `feature-commit-format` 提交为 `2e24c32` 并推送到 `feat/v2-tls-d-234`。Server group 正负测试、构造回滚和源码格式门禁均通过。
 
 ### Task 3: Client CONTROL/DATA mTLS 与服务器主体连续性
 
 **Files:**
 - Modify: `src/client.c`
 - Modify: `src/transport/group/client_group_internal.h`, `src/transport/group/client_group.c`
+- Modify: `src/execution/reactor_internal.h`, `src/execution/reactor.c`
+- Modify: `src/io/connector_internal.h`, `src/io/connector.c`, `src/io/tls_openssl.h`, `src/io/tls_openssl.c`
+- Modify: `src/transport/channel/channel.c`
 - Modify: `tests/test_connection_group_facade.c`
+- Modify: `tests/test_connector.c`, `tests/test_connector_deadline.c`, `tests/test_rpc_v2_tls_reactor.c`
 - Create: `tests/test_connection_group_tls.c`
 - Modify: `xmake.lua`, `README.md`, `docs/rpc-v2-sdk.md`
 
@@ -157,25 +161,25 @@ TLS OpenSSL socket BIO 的写入使用 `MSG_NOSIGNAL`，避免异常 EOF 时 Ope
 - `tr_client_create_transport` 接受 `TR_TLS_REQUIRED` 并要求成对 client certificate/private key；无证书或无 expected server name 返回配置错误。
 - Client group 保存 CONTROL 的 server URI identity；同一 group 中每条 DATA 使用同一 client TLS snapshot，并在发布 transfer READY 前要求 Server URI 与 CONTROL 完全相同。
 
-- [ ] **Step 1: 写公开 Client group 真实端到端测试**
+- [x] **Step 1: 写公开 Client group 真实端到端测试**
 
-`test_connection_group_tls` 用公开 `tr_client_create_transport`、`tr_server_create_transport`、group connect/listen 和有效双向证书完成 CONTROL/DATA 消息。负例使用同一 CA 签发但不同 URI 的 server DATA 证书；断言不触发 READY、不发送 DATA，且有效 CONTROL 仍保持准确关闭/排空。
+`test_connection_group_tls` 用公开 Client/Server transport API 和真实 loopback mTLS 完成 CONTROL/DATA 消息。TCP 转发夹具将 CONTROL 与第一条 DATA 分别送到同 CA、相同 DNS SAN、不同 URI SAN 的服务端；验证不准入 DATA、不能建立 READY、拒绝 DATA_OFFER 后只撤销该路由，并证明原 CONTROL 随后仍可建立同主体 DATA。另覆盖客户端错误 CA、错误客户端 URI、服务端先关闭和握手静默超时。
 
-- [ ] **Step 2: 运行 RED 并保留 transport-only 明文基线**
+- [x] **Step 2: 运行 RED 并保留 transport-only 明文基线**
 
-运行 `test_connection_group_tls` 与 `test_connection_group_facade`；TLS group 当前 unsupported，应失败于 Client 创建或 Control connect。旧 disabled 明文 group 测试必须通过。
+初始 `test_connection_group_tls` 在 `tr_client_create_transport()` 的 `TR_ERR_UNSUPPORTED` 断言处 RED；`test_connection_group_facade` 明文路径保持通过。随后更新 Reactor API 时，同步调整 Connector 回调携带 TCP 阶段原绝对期限。
 
-- [ ] **Step 3: TLS 握手后发送 CONTROL/DATA preface**
+- [x] **Step 3: TLS 握手后发送 CONTROL/DATA preface**
 
-Client 在每个 Control/Data fd 上使用 `tr_reactor_adopt_tls_fd_prefaced_on_owner`；preface bytes 只能在 TLS 认证完成后发送。Client group 存储 Control 服务端 URI；Data handshake 获得不同 URI 时精确关闭 Data 并撤销其 route。
+Client 在每个 CONTROL/DATA fd 上通过新的 outbound-prefaced Reactor API，在 TLS 认证回调成功后才发送加密 TRR1。Client group 保留 CONTROL 服务端 URI；DATA 必须匹配且 TRR1 写完后才成为 READY 可用状态。TCP、TLS 握手与 TRR1 使用同一单调绝对期限；握手完成后仍保留该期限直到前导写完，过期或 URI 不匹配都关闭该连接并撤销对应 route。
 
-- [ ] **Step 4: 运行双向身份和失败回滚测试**
+- [x] **Step 4: 运行双向身份和失败回滚测试**
 
-运行 `test_connection_group_tls` 覆盖错误 client CA、错误 client URI、服务端 Control/Data URI 不同、Data route 迟到/撤销、Control 先关闭和 TLS 握手超时。再运行 `test_connection_group_facade`、`test_pipeline_listener`、`test_pipeline_control`、`test_pipeline_ingress` 与 `test_rpc_v2_tls_reactor`。
+`test_connection_group_tls` 覆盖错误 client CA、错误 client URI、服务端 CONTROL/DATA URI 不同、失败 DATA route 撤销后继续复用 CONTROL、服务端先关闭连接组和客户端 TLS 握手超时。`test_connection_group_facade` 覆盖明文基线、迟到 offer/取消、CONTROL 远端关闭及销毁回滚。构建并运行连接组/TLS/RPC 重点回归目标均通过。
 
-- [ ] **Step 5: 更新 SDK 使用文档并提交 Client group 切片**
+- [x] **Step 5: 更新 SDK 使用文档并提交 Client group 切片**
 
-将版本从 `.14` bump 到 `.15`。文档说明 group TLS 强制 mTLS、每条 DATA 独立握手、主体连续性规则及 disabled 明文路径。提交只包含 Task 3 文件。
+版本从 `.14` bump 到 `.15`；README 与 SDK 合同说明 Client/Server 连接组 mTLS、每条 DATA 独立握手、主体连续性和期限语义。Client group 端到端覆盖及全量 88 项测试通过，本切片按 `feature-commit-format` 提交并推送到 `feat/v2-tls-d-234`。Task 4 的 profile 轮换尚未开始。
 
 ### Task 4: Profile 多 owner 原子发布、优雅轮换与旧代次撤销
 

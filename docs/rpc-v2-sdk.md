@@ -318,7 +318,9 @@ Server 当前每调用最多保留 16 个未收敛输入事件，包含排队、
 
 本接口覆盖 ONE/MANY 四种组合、请求与响应元数据、有界同步回复、回调外异步生产者、
 可写通知与有限等待、取消、期限、分层排空及调用语义统计。它尚未提供 NONE 基数、
-自动重连、连接组或网络压缩。普通 V2 Client/Server 可通过配置中的 `tls.mode =
+自动重连、或网络压缩。transport-only 连接组通过 `tr_client_create_transport()` /
+`tr_server_create_transport()` 提供独立于 RPC 的字节传输能力。普通 V2 Client/Server
+可通过配置中的 `tls.mode =
 TR_TLS_REQUIRED` 启用 TLS 1.3；Client 必须配置 CA 信任来源或使用系统信任库，并设置
 `expected_peer_name`。证书身份不匹配和 TLS 握手失败会关闭连接，不回退到明文。
 Client 可同时提供成对的客户端证书与私钥。Server 可设置
@@ -332,8 +334,15 @@ Server 每个 OPEN、MESSAGE 和 HALF_CLOSE 的 work 回调都收到连接级
 明文连接及没有客户端证书的 OPTIONAL TLS 连接返回 `TR_PEER_IDENTITY_NONE` 与空 URI。
 身份视图只借用至当前 work 回调返回，来源不受 RPC metadata 影响。
 
-默认 `TR_TLS_DISABLED` 仍使用明文。transport-only/连接组 TLS 与 CONTROL/DATA 身份绑定
-尚未支持。配置不支持的已有功能会明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+默认 `TR_TLS_DISABLED` 仍使用明文。transport-only Client 启用 TLS 时必须配置成对的
+客户端证书/私钥、CA 信任和 `expected_peer_name`；Server 连接组必须启用 TLS，并将
+`client_auth` 设为 `TR_TLS_CLIENT_AUTH_REQUIRED`。CONTROL 与每条 DATA 都独立完成 mTLS，
+TLS 握手成功后才发送/解析 TRR1。TCP 连接、TLS 握手和 TRR1 前导共用
+`connect_timeout_ms` 的单调绝对期限。Client 的每条 DATA 复用 CONTROL 的 TLS profile，
+并要求服务端唯一 URI SAN 与 CONTROL 主体逐字节相同；主体不匹配时该 DATA 被关闭并
+撤销对应 offer，不发布 `TRANSFER_READY`，其余 CONTROL 会话仍可工作。服务端对每条
+CONTROL/DATA 路由都运行授权回调，应用可进一步限制客户端主体。配置不支持的其他功能
+会明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
 
 完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)
 和 [TLS-D1 设计与实施计划](superpowers/specs/2026-10-23-tls-d1-mtls-group-identity-design.md)。

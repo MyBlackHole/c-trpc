@@ -16,6 +16,9 @@ struct tr_peer_identity_snapshot;
 int tr_tls_openssl_client_profile_create(
         const struct tr_tls_client_config *config,
         struct tr_tls_openssl_profile **out);
+int tr_tls_openssl_client_profile_create_with_peer_identity(
+        const struct tr_tls_client_config *config,
+        struct tr_tls_openssl_profile **out);
 int tr_tls_openssl_server_profile_create(
         const struct tr_tls_server_config *config,
         struct tr_tls_openssl_profile **out);

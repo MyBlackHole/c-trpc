@@ -6,8 +6,8 @@
 struct tr_reactor;
 struct tr_connector;
 
-typedef void (*tr_connector_complete_cb)(
-	int status, int fd, void *arg);
+typedef void (*tr_connector_complete_cb)(int status, int fd,
+                                         uint64_t deadline_ns, void *arg);
 
 struct tr_connector_config {
 	struct tr_reactor *owner;

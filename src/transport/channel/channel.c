@@ -3035,14 +3035,17 @@ static void tr_channel_reconnect_finish_attempt(
 
 static int tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
 
-static void tr_channel_reconnect_connector_complete(
-	int status, int fd, void *arg)
+static void tr_channel_reconnect_connector_complete(int status, int fd,
+                                                    uint64_t deadline_ns,
+                                                    void *arg)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	struct tr_conn_handle connection;
 	enum tr_lane lane;
 	int success = 0;
 	int ret;
+
+	(void)deadline_ns;
 
 	if (!channel) {
 		tr_socket_close(&fd);

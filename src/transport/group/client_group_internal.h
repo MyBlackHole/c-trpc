@@ -7,9 +7,11 @@
 #include "tr/transport.h"
 
 struct tr_client_group;
+struct tr_tls_openssl_profile;
 
 struct tr_client_group_config {
 	struct tr_reactor *owner;
+	struct tr_tls_openssl_profile *tls_profile;
 	uint32_t max_data_connections;
 	uint32_t max_transfers;
 	uint32_t max_message_bytes;

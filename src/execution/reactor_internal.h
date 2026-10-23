@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "reactor.h"
+#include "tr/peer_identity.h"
 
 struct tr_peer_identity_snapshot;
 
@@ -71,6 +72,22 @@ int tr_reactor_adopt_tls_fd_prefaced_on_owner(
         struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
         const struct tr_reactor_preface_handler *preface,
         struct tr_conn_handle *out);
+
+/* TLS Client 用的认证门禁：认证回调成功后，才通过 TLS 发出原始 route
+ * preface；回调拿到的身份视图只在本次调用期间借用有效。 */
+typedef int (*tr_reactor_tls_authenticated_cb)(
+        struct tr_conn_handle connection,
+        const struct tr_peer_identity_view *peer_identity, void *arg);
+typedef int (*tr_reactor_tls_preface_sent_cb)(struct tr_conn_handle connection,
+                                              void *arg);
+
+int tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
+        const uint8_t *preface, uint32_t preface_len,
+        tr_reactor_tls_authenticated_cb authenticated_cb,
+        void *authenticated_arg, tr_reactor_tls_preface_sent_cb preface_sent_cb,
+        void *preface_sent_arg, struct tr_conn_handle *out);
 
 /* 仅限所有者的立即关闭辅助函数，用于复合所有者状态转换。
  * 与公开关闭或中止 API 不同，这些函数不将命令入队：

@@ -325,9 +325,13 @@ tr_client_create_internal(const struct tr_client_config *config,
 	else
 		tr_client_config_init(&effective);
 	tr_client_normalize_config(&effective);
-	ret = tr_tls_client_config_validate(&effective.tls, record ? 1 : 0);
+	ret = tr_tls_client_config_validate(&effective.tls, 1);
 	if (ret != TR_OK)
 		return ret;
+	if (!record && effective.tls.mode == TR_TLS_REQUIRED &&
+	    (!effective.tls.client_certificate_file ||
+	     !effective.tls.client_private_key_file))
+		return TR_ERR_INVALID;
 
 	if (tuning)
 		effective_tuning = *tuning;
@@ -355,8 +359,10 @@ tr_client_create_internal(const struct tr_client_config *config,
 	client->tuning = effective_tuning;
 	atomic_init(&client->record_stopping, 0);
 	if (effective.tls.mode == TR_TLS_REQUIRED) {
-		ret = tr_tls_openssl_client_profile_create(
-		        &effective.tls, &client->tls_profile);
+		ret = record ? tr_tls_openssl_client_profile_create(
+		                       &effective.tls, &client->tls_profile)
+		             : tr_tls_openssl_client_profile_create_with_peer_identity(
+		                       &effective.tls, &client->tls_profile);
 		if (ret != TR_OK)
 			return tr_client_create_rollback(out, client, ret);
 		client->config.tls.ca_file = NULL;
@@ -775,6 +781,7 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 
 	memset(&group_config, 0, sizeof(group_config));
 	group_config.owner = tr_client_reactor(client);
+	group_config.tls_profile = client->tls_profile;
 	group_config.max_data_connections =
 		client->config.connection_groups.max_data_connections;
 	group_config.max_transfers =
