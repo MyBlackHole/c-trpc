@@ -28,6 +28,7 @@
 enum tr_stream_slot_state {
 	TR_STREAM_SLOT_FREE = 0,
 	TR_STREAM_SLOT_OPENING,
+	TR_STREAM_SLOT_ACCEPTING,
 	TR_STREAM_SLOT_OPEN,
 	TR_STREAM_SLOT_RESETTING
 };
@@ -175,6 +176,9 @@ struct tr_channel {
 	int keepalive_timer_registered;
 	int window_retry_pending;
 	int window_retry_scheduled;
+	/* 每条物理连接最多保留一个未确认 OPEN。暂停后续接收，避免
+	 * 后来的信用确认越过此流以及无界积累待处理 OPEN。 */
+	struct tr_stream_handle pending_open[2];
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 	uint64_t keepalive_next_ping_id;
@@ -473,6 +477,7 @@ tr_channel_keepalive_tick_ms_locked(const struct tr_channel *channel)
 static int tr_send_window_update_locked(struct tr_channel *channel,
 					struct tr_stream_slot *stream);
 static void tr_channel_reset_progress_on_owner(struct tr_channel *channel);
+static void tr_channel_open_progress_on_owner(struct tr_channel *channel);
 static int tr_channel_drain_progress_on_owner(struct tr_channel *channel);
 static int tr_channel_protocol_error(struct tr_channel *channel,
                                      struct tr_conn_handle connection,
@@ -490,6 +495,7 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	int retry_pending;
 
 	tr_channel_reset_progress_on_owner(channel);
+	tr_channel_open_progress_on_owner(channel);
 
 	/* 既有维护定时器同时推进信用/RESET 重试及排空。
 	 * 失败的 WINDOW_UPDATE 无需另一接收事件或应用刷新即可重试。
@@ -527,7 +533,9 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	tick_ms = enabled ? tr_channel_keepalive_tick_ms_locked(channel) : 0U;
 	retry_pending = channel->window_retry_pending ||
 	                channel->reset_retry_pending ||
-	                channel->drain_retry_pending;
+	                channel->drain_retry_pending ||
+	                channel->pending_open[0].channel ||
+	                channel->pending_open[1].channel;
 	if (retry_pending)
 		channel->window_retry_scheduled = 1;
 	pthread_mutex_unlock(&channel->lock);
@@ -1122,6 +1130,11 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 		                  : tr_lane_index(stream->lane);
 		assert(channel->drain[idx].active_streams != 0U);
 		channel->drain[idx].active_streams--;
+		if (channel->pending_open[idx].channel &&
+		    channel->pending_open[idx].slot == slot &&
+		    channel->pending_open[idx].generation == stream->generation)
+			memset(&channel->pending_open[idx], 0,
+			       sizeof(channel->pending_open[idx]));
 	}
 	generation = stream->generation;
 	(void)tr_stream_index_remove_locked(channel, stream->stream_id);
@@ -1462,6 +1475,63 @@ static int tr_channel_protocol_error(struct tr_channel *channel,
 	if (ret != TR_OK && ret != TR_ERR_STALE)
 		return ret;
 	return status;
+}
+
+static void tr_channel_open_progress_on_owner(struct tr_channel *channel)
+{
+	for (unsigned idx = 0; idx < 2; ++idx) {
+		struct tr_stream_handle handle;
+		struct tr_stream_slot *stream;
+		struct tr_conn_handle connection;
+		int notify = 0;
+		int ret = TR_OK;
+
+		pthread_mutex_lock(&channel->lock);
+		handle = channel->pending_open[idx];
+		if (!handle.channel) {
+			pthread_mutex_unlock(&channel->lock);
+			continue;
+		}
+		stream = tr_stream_lookup_handle(handle);
+		assert(stream && stream->state == TR_STREAM_SLOT_ACCEPTING);
+		connection = tr_channel_connection(channel, stream->lane);
+		if (channel->local_draining ||
+		    channel->drain[idx].local_started) {
+			/* 初始信用尚未被接受，不能推进 cutoff 或交付上层。
+			 * GOAWAY 拒绝此
+			 * OPEN；解除暂停后继续读取对端的排空屏障。 */
+			tr_stream_free_locked(channel, handle.slot);
+			channel->stat_streams_closed++;
+		} else {
+			ret = tr_reactor_send(
+			        connection, TR_FRAME_WINDOW_UPDATE, 0,
+			        stream->stream_id, stream->rx_advertised_limit,
+			        NULL);
+			if (ret == TR_OK) {
+				stream->state = TR_STREAM_SLOT_OPEN;
+				stream->opened_notified = 1;
+				channel->stat_window_updates_tx++;
+				channel->drain[idx].last_peer_admitted =
+				        stream->stream_id;
+				memset(&channel->pending_open[idx], 0,
+				       sizeof(channel->pending_open[idx]));
+				notify = 1;
+			}
+		}
+		pthread_mutex_unlock(&channel->lock);
+		if (ret == TR_AGAIN)
+			continue;
+		if (ret == TR_OK)
+			ret = tr_reactor_set_rx_hold_on_owner(connection, 0);
+		if (ret != TR_OK) {
+			(void)tr_channel_protocol_error(channel, connection,
+			                                ret);
+			continue;
+		}
+		if (notify)
+			tr_stream_notify(channel, handle,
+			                 TR_STREAM_EVENT_OPENED, TR_OK);
+	}
 }
 
 static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
@@ -2015,7 +2085,7 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 	}
 
 	ret = tr_stream_allocate_locked(channel, frame->header.stream_id, lane,
-					TR_STREAM_SLOT_OPEN, &handle);
+	                                TR_STREAM_SLOT_ACCEPTING, &handle);
 	if (ret != TR_OK) {
 		pthread_mutex_unlock(&channel->lock);
 		/* 没有槽就没有可重试的拒绝责任；不能静默遗留对端 OPENING。
@@ -2028,17 +2098,31 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 	stream = &channel->streams[handle.slot];
 	slot = handle.slot;
 	stream->tx_send_limit = frame->header.message_id;
-	stream->opened_notified = 1;
 
 	ret = tr_reactor_send(tr_channel_connection(channel, lane),
-			      TR_FRAME_WINDOW_UPDATE, 0, stream->stream_id,
-			      stream->rx_advertised_limit, NULL);
+	                      TR_FRAME_WINDOW_UPDATE, 0, stream->stream_id,
+	                      stream->rx_advertised_limit, NULL);
+	if (ret == TR_AGAIN) {
+		assert(!channel->pending_open[connection_index].channel);
+		channel->pending_open[connection_index] = handle;
+		pthread_mutex_unlock(&channel->lock);
+		/* 先取得唯一维护定时器的恢复责任，再暂停此连接。不能把
+		 * 有界池的暂时满载解释为协议错误并连带中止已受理流。 */
+		ret = tr_channel_reset_timer_on_owner(channel);
+		if (ret == TR_OK)
+			ret = tr_reactor_set_rx_hold_on_owner(connection, 1);
+		return ret == TR_OK ? TR_OK
+		                    : tr_channel_protocol_error(
+		                              channel, connection, ret);
+	}
 	if (ret != TR_OK) {
 		tr_stream_free_locked(channel, slot);
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection, ret);
 	}
 	channel->stat_window_updates_tx++;
+	stream->state = TR_STREAM_SLOT_OPEN;
+	stream->opened_notified = 1;
 	channel->drain[connection_index].last_peer_admitted = stream->stream_id;
 
 	handle = tr_stream_make_handle(channel, slot, stream);
@@ -3447,6 +3531,7 @@ static int tr_channel_detach_on_owner(void *arg)
 	 * 这个精确连接代次已经退役；其他失败都必须保留
 	 * Channel 所有权，并在收尾前重试收敛。
 	 */
+	tr_channel_open_progress_on_owner(channel);
 	ret = tr_reactor_set_handler(control, NULL, NULL, NULL);
 	if (ret != TR_OK && ret != TR_ERR_STALE)
 		return ret;
@@ -4143,12 +4228,20 @@ static int tr_channel_disarm_keepalive_on_owner(void *arg)
 	struct tr_reactor_timer_handle timer;
 	int retry_scheduled;
 	int registered;
+	int closing;
 
 	pthread_mutex_lock(&channel->lock);
+	closing = channel->state_wait_closed;
+	if (closing)
+		channel->local_draining = 1;
 	registered = channel->keepalive_timer_registered;
 	retry_scheduled = channel->window_retry_scheduled;
 	timer = channel->keepalive_timer;
 	pthread_mutex_unlock(&channel->lock);
+	/* destroy 借此所有者屏障撤销待确认 OPEN，归还借用连接的 RX。
+	 * 普通 disable_keepalive 则保留重试，不能撤销协议背压。 */
+	if (closing)
+		tr_channel_open_progress_on_owner(channel);
 	if (!registered || retry_scheduled)
 		return TR_OK;
 	return tr_reactor_timer_arm(timer, 0);
@@ -4289,6 +4382,7 @@ static int tr_channel_begin_drain_on_owner(void *arg)
 	}
 	channel->drain_retry_pending = 1;
 	pthread_mutex_unlock(&channel->lock);
+	tr_channel_open_progress_on_owner(channel);
 
 	ret = tr_channel_disable_client_reconnect_on_owner(channel);
 	progress_ret = tr_channel_drain_progress_on_owner(channel);

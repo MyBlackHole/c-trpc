@@ -3,6 +3,7 @@
 #include "../src/transport/channel/channel_internal.h"
 #include "../src/transport/protocol/wire.h"
 #include "../src/crc32c.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/endian.h"
 #include "tr/status.h"
 
@@ -48,10 +49,57 @@ struct fixture {
 static atomic_int close_fd = -1;
 static atomic_int close_blocked;
 static atomic_uint close_attempts;
+static struct tr_conn_handle pressure_connection;
+static atomic_int pressure_fd = -1;
+static atomic_int pressure_blocked;
+static atomic_int pressure_fill;
+static atomic_uint pressure_items;
+static atomic_uint pressure_failures;
+
+int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
+                           uint32_t flags, uint32_t stream_id,
+                           uint64_t message_id, struct tr_buffer *payload);
+
+int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
+                           uint32_t flags, uint32_t stream_id,
+                           uint64_t message_id, struct tr_buffer *payload)
+{
+	int ret;
+	if (atomic_load(&pressure_blocked) && type == TR_FRAME_WINDOW_UPDATE &&
+	    stream_id == 5U &&
+	    connection.reactor == pressure_connection.reactor &&
+	    connection.slot == pressure_connection.slot &&
+	    connection.generation == pressure_connection.generation) {
+		if (atomic_exchange(&pressure_fill, 0)) {
+			unsigned filled = 0;
+			/* 在真实初始信用发送前填满真实控制池；暂停的只是此 fd
+			 * 的 系统调用，池、命令顺序、解析器与恢复均走生产实现。
+			 */
+			while ((ret = __real_tr_reactor_send(
+			                connection, TR_FRAME_PING, 0, 0, 123,
+			                NULL)) == TR_OK) {
+				assert(++filled <= 16U);
+			}
+			assert(ret == TR_AGAIN && filled != 0);
+			atomic_store(&pressure_items, filled);
+		}
+		ret = __real_tr_reactor_send(connection, type, flags, stream_id,
+		                             message_id, payload);
+		if (ret == TR_AGAIN)
+			atomic_fetch_add(&pressure_failures, 1U);
+		return ret;
+	}
+	return __real_tr_reactor_send(connection, type, flags, stream_id,
+	                              message_id, payload);
+}
 
 ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
+	if (fd == atomic_load(&pressure_fd) && atomic_load(&pressure_blocked)) {
+		errno = EAGAIN;
+		return -1;
+	}
 	if (fd == atomic_load(&close_fd) && atomic_load(&close_blocked) &&
 	    message->msg_iovlen &&
 	    message->msg_iov[0].iov_len >= TR_WIRE_HEADER_SIZE) {
@@ -644,8 +692,163 @@ static void test_old_hello_is_rejected(void)
 	destroy_fixture(&f);
 }
 
+static int owner_barrier(void *arg)
+{
+	(void)arg;
+	return TR_OK;
+}
+
+static void wait_pressure(struct fixture *f, unsigned failures)
+{
+	struct timespec end, now;
+	const struct timespec pause = {0, 1000000L};
+	assert(clock_gettime(CLOCK_MONOTONIC, &end) == 0);
+	end.tv_sec += 5;
+	while (atomic_load(&pressure_failures) < failures) {
+		assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+		assert(now.tv_sec < end.tv_sec ||
+		       (now.tv_sec == end.tv_sec && now.tv_nsec < end.tv_nsec));
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(tr_reactor_call(f->reactor, owner_barrier, NULL) == TR_OK);
+}
+
+static void start_pressure(struct fixture *f)
+{
+	pressure_connection = f->connection[0];
+	atomic_store(&pressure_fd, f->adopted_fd[0]);
+	atomic_store(&pressure_items, 0);
+	atomic_store(&pressure_failures, 0);
+	atomic_store(&pressure_fill, 1);
+	atomic_store(&pressure_blocked, 1);
+	send_frame(f, 0, TR_FRAME_STREAM_OPEN, 0, 5, WINDOW, NULL, 0);
+	/* 后一个 OPEN 已在 TCP 中，但不能越过待确认的 5。 */
+	send_frame(f, 0, TR_FRAME_STREAM_OPEN, 0, 7, WINDOW, NULL, 0);
+	wait_pressure(f, 1);
+	assert(count(f, &f->down[0]) == 0);
+	struct tr_reactor_stats stats;
+	assert(tr_reactor_get_stats(f->reactor, &stats) == TR_OK);
+	assert(stats.control_tx_item_pool.exhausted_events >= 2);
+}
+
+static void release_pressure(struct fixture *f)
+{
+	atomic_store(&pressure_blocked, 0);
+	for (unsigned i = 0; i < atomic_load(&pressure_items); ++i) {
+		struct tr_frame_header h = receive_frame(f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 123);
+	}
+}
+
+static void test_open_pressure_recovers(int split)
+{
+	struct fixture f;
+	init_fixture(&f, split, 1);
+	(void)open_remote(&f, TR_LANE_CONTROL, 1);
+	unsigned opened = 1;
+	if (split) {
+		(void)open_remote(&f, TR_LANE_BULK, 3);
+		++opened;
+	}
+	start_pressure(&f);
+	assert(tr_channel_active_streams(f.channel) == opened + 1);
+	assert(count(&f, &f.opened) == opened);
+	/* 旧缓冲池 RESUME_RX 和禁用保活都不能撤销控制发送背压。 */
+	assert(tr_reactor_resume_rx(f.connection[0]) == TR_OK);
+	assert(tr_channel_disable_keepalive(f.channel) == TR_OK);
+	wait_pressure(&f, 2);
+	assert(tr_channel_active_streams(f.channel) == opened + 1);
+	if (split) {
+		send_frame(&f, 1, TR_FRAME_DATA,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3, 1, "survives",
+		           8);
+		wait_count(&f, &f.received, 1);
+		assert(count(&f, &f.down[1]) == 0);
+	}
+	release_pressure(&f);
+	for (uint32_t id = 5; id <= 7; id += 2) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_WINDOW_UPDATE && h.stream_id == id &&
+		       h.message_id == WINDOW);
+	}
+	wait_count(&f, &f.opened, opened + 2);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, "survives", 8);
+	wait_count(&f, &f.received, split ? 2U : 1U);
+	assert(count(&f, &f.errors) == 0 && count(&f, &f.down[0]) == 0);
+	close_stream(&f, 0, 7, f.streams[opened + 1]);
+	struct tr_stream_handle replacement =
+	        open_remote(&f, TR_LANE_CONTROL, 9);
+	assert(replacement.slot == f.streams[opened + 1].slot &&
+	       replacement.generation != f.streams[opened + 1].generation);
+	assert(tr_channel_begin_drain(f.channel) == TR_OK);
+	expect_goaway(&f, 0, 9);
+	if (split)
+		expect_goaway(&f, 1, 3);
+	destroy_fixture(&f);
+	atomic_store(&pressure_fd, -1);
+}
+
+static void test_drain_rejects_pending_open(int split)
+{
+	struct fixture f;
+	init_fixture(&f, split, 1);
+	struct tr_stream_handle first = open_remote(&f, TR_LANE_CONTROL, 1);
+	start_pressure(&f);
+	assert(tr_channel_begin_drain(f.channel) == TR_OK);
+	assert(tr_channel_active_streams(f.channel) == 1);
+	release_pressure(&f);
+	/* 未发初始信用的 5 与尚未解析的 7 均由 cutoff=1 拒绝。
+	 * 不得在 GOAWAY 后泄漏迟到 WINDOW_UPDATE 或上层 OPENED。 */
+	expect_goaway(&f, 0, 1);
+	if (split)
+		expect_goaway(&f, 1, 0);
+	barrier(&f, 0);
+	assert(count(&f, &f.opened) == 1 && count(&f, &f.errors) == 0);
+	send_frame(&f, 0, TR_FRAME_GOAWAY, 0, 0, 0, NULL, 0);
+	if (split)
+		send_frame(&f, 1, TR_FRAME_GOAWAY, 0, 0, 0, NULL, 0);
+	close_stream(&f, 0, 1, first);
+	assert(tr_channel_wait_drained(f.channel, 5000) == TR_OK);
+	assert(count(&f, &f.opened) == 1 && count(&f, &f.down[0]) == 0);
+	destroy_fixture(&f);
+	atomic_store(&pressure_fd, -1);
+}
+
+static void test_pending_open_teardown_releases_rx(int detach)
+{
+	struct fixture f;
+	struct tr_connection_stats stats;
+	init_fixture(&f, 0, 1);
+	(void)open_remote(&f, TR_LANE_CONTROL, 1);
+	start_pressure(&f);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	assert(stats.rx_paused);
+	if (detach) {
+		assert(tr_channel_detach_for_finalize(f.channel) == TR_OK);
+		tr_channel_finalize_detached(f.channel);
+	} else {
+		assert(tr_channel_destroy(f.channel) == TR_OK);
+	}
+	f.channel = NULL;
+	/* Channel 借用的连接仍存活；解绑后不可留下失去恢复者的接收暂停。 */
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	assert(!stats.rx_paused && stats.state == TR_CONN_ACTIVE);
+	release_pressure(&f);
+	destroy_fixture(&f);
+	atomic_store(&pressure_fd, -1);
+}
+
 int main(void)
 {
+	test_open_pressure_recovers(0);
+	test_open_pressure_recovers(1);
+	test_drain_rejects_pending_open(0);
+	test_drain_rejects_pending_open(1);
+	test_pending_open_teardown_releases_rx(0);
+	test_pending_open_teardown_releases_rx(1);
 	test_shared_crossing_open();
 	test_peer_must_confirm();
 	test_last_close_tx_completion();
@@ -655,6 +858,6 @@ int main(void)
 	test_split_boundaries();
 	test_split_wrong_connection_cutoff();
 	test_old_hello_is_rejected();
-	puts("channel drain tests passed (9 groups)");
+	puts("channel drain tests passed (15 groups)");
 	return 0;
 }

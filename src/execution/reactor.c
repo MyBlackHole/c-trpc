@@ -175,6 +175,8 @@ struct tr_connection {
 	/* 以下字段供所有者线程与统计读取线程共享，运行期统一使用原子访问。 */
 	int tx_wait_writable;
 	int rx_paused;
+	/* 协议背压独立于接收缓冲池暂停，普通 RESUME_RX 不能解除它。 */
+	int rx_held;
 	uint64_t rx_bytes;
 	uint64_t tx_bytes;
 	uint64_t rx_frames;
@@ -629,7 +631,8 @@ static uint32_t tr_connection_interest(const struct tr_connection *connection)
 {
 	uint32_t events = EPOLLRDHUP;
 
-	if (!__atomic_load_n(&connection->rx_paused, __ATOMIC_RELAXED))
+	if (!__atomic_load_n(&connection->rx_paused, __ATOMIC_RELAXED) &&
+	    !__atomic_load_n(&connection->rx_held, __ATOMIC_RELAXED))
 		events |= EPOLLIN;
 	if (__atomic_load_n(&connection->tx_wait_writable, __ATOMIC_RELAXED))
 		events |= EPOLLOUT;
@@ -718,6 +721,7 @@ static void tr_schedule_rx(struct tr_reactor *reactor,
 {
 	if (!connection || connection->state != TR_CONN_ACTIVE ||
 	    __atomic_load_n(&connection->rx_paused, __ATOMIC_RELAXED) ||
+	    __atomic_load_n(&connection->rx_held, __ATOMIC_RELAXED) ||
 	    connection->rx_scheduled)
 		return;
 
@@ -885,6 +889,7 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 
 	__atomic_store_n(&connection->tx_wait_writable, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->rx_paused, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->rx_held, 0, __ATOMIC_RELAXED);
 
 	tr_slot_set_state(reactor, connection->slot, connection->generation,
 			  TR_CONN_FREE);
@@ -897,6 +902,7 @@ static void tr_connection_stats_reset(struct tr_connection *connection,
 {
 	__atomic_store_n(&connection->tx_wait_writable, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->rx_paused, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&connection->rx_held, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->rx_bytes, 0U, __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->tx_bytes, 0U, __ATOMIC_RELAXED);
 	__atomic_store_n(&connection->rx_frames, 0U, __ATOMIC_RELAXED);
@@ -1459,7 +1465,8 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 	size_t budget = turn->left.rx_bytes < TR_IO_QUANTUM ?
 		(size_t)turn->left.rx_bytes : TR_IO_QUANTUM;
 
-	while (budget != 0 && connection->state == TR_CONN_ACTIVE) {
+	while (budget != 0 && connection->state == TR_CONN_ACTIVE &&
+	       !__atomic_load_n(&connection->rx_held, __ATOMIC_RELAXED)) {
 		struct tr_frame frame;
 
 		if (connection->preface_remaining != 0U) {
@@ -3899,10 +3906,10 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 			__atomic_load_n(&conn->tx_queued_items,
 					__ATOMIC_RELAXED);
 		out->rx_paused =
-			__atomic_load_n(&conn->rx_paused, __ATOMIC_RELAXED);
-		out->tx_wait_writable =
-			__atomic_load_n(&conn->tx_wait_writable,
-					__ATOMIC_RELAXED);
+		        __atomic_load_n(&conn->rx_paused, __ATOMIC_RELAXED) ||
+		        __atomic_load_n(&conn->rx_held, __ATOMIC_RELAXED);
+		out->tx_wait_writable = __atomic_load_n(&conn->tx_wait_writable,
+		                                        __ATOMIC_RELAXED);
 
 		/* 槽位在读取统计期间发生关闭或复用时重新读取。
 		 * 如果 generation 已变化，则旧句柄已陈旧；如果只是同一
@@ -3921,6 +3928,38 @@ int tr_reactor_get_connection_stats(struct tr_conn_handle connection,
 int tr_reactor_resume_rx(struct tr_conn_handle connection)
 {
 	return tr_reactor_simple_command(connection, TR_CMD_RESUME_RX);
+}
+
+int tr_reactor_set_rx_hold_on_owner(struct tr_conn_handle handle, int held)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+	int previous;
+	int ret;
+
+	if (!reactor || handle.slot >= reactor->config.max_connections ||
+	    (held != 0 && held != 1))
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection =
+	        tr_lookup_connection(reactor, handle.slot, handle.generation);
+	if (!connection)
+		return TR_ERR_STALE;
+	previous = __atomic_exchange_n(&connection->rx_held, held,
+	                               __ATOMIC_RELAXED);
+	ret = tr_connection_update_interest(reactor, connection);
+	if (ret != TR_OK) {
+		__atomic_store_n(&connection->rx_held, previous,
+		                 __ATOMIC_RELAXED);
+		return ret;
+	}
+	if (held && !previous)
+		(void)__atomic_fetch_add(&connection->rx_pauses_count,
+		                         UINT64_C(1), __ATOMIC_RELAXED);
+	if (!held)
+		tr_schedule_rx(reactor, connection);
+	return TR_OK;
 }
 
 int tr_reactor_close(struct tr_conn_handle connection)
