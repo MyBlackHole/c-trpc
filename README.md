@@ -6,7 +6,7 @@
 
 当前 `2.0.0-dev.4` 在流槽耗尽时单独拒绝未受理的新流，普通 V2 返回
 `RESOURCE_EXHAUSTED`，已有流继续传输。Channel 握手协议升级到 3，须同时升级两端。
-设计与验证范围见 [PERF-V2-03 设计](docs/superpowers/specs/2026-10-23-perf-v2-03-stream-refusal-design.md)；
+设计、验证与性能边界见 [PERF-V2-03 评估](docs/reviews/rpc_v2_stream_refusal_20261023.md)；
 此前控制容量通知的测量见 [PERF-V2-02 评估](docs/reviews/rpc_v2_control_ready_20261023.md)，
 整体剩余工作见 [V2 开发总账](docs/reviews/v2_remaining_work.md)。
 此前 `2.0.0-dev.1` 的交付范围与主线验收保存在
