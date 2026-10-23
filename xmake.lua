@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.8")
+set_version("2.0.0-dev.9")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -104,6 +104,7 @@ target("trcore")
         "src/execution/deadline.c",
         "src/io/socket.c",
         "src/io/connector.c",
+        "src/io/byte_endpoint.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
         "src/runtime/message_service.c",
@@ -130,6 +131,25 @@ target("trcore")
         "src/transport/group/client_group.c",
         "src/client.c",
         "src/server.c")
+target_end()
+
+-- TLS-A 原型只属于测试目标；生产库尚未接入 OpenSSL。
+target("test_tls_bio_probe")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_bio_probe.c")
+    add_syslinks("ssl", "crypto")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_byte_endpoint")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_byte_endpoint.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
 -- 已编译的 GNU gettext 目录随示例部署，普通构建不要求安装 msgfmt。

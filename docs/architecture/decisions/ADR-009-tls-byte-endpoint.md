@@ -22,12 +22,14 @@ TLS 必须保护这些字节的全部，而不能只在 RPC 载荷外包一层�
 外部应用和 RPC 不取得 `SSL *`、BIO、fd、Reactor 槽位或密钥指针。
 TLS 必需模式的任何配置、握手或验证失败都关闭该连接，不尝试明文。
 
-首版后端候选为 OpenSSL 3.x 的非阻塞 socket BIO。选择理由是现有
+首版后端暂选 OpenSSL 3.x 的非阻塞 socket BIO。选择理由是现有
 TX 项已经持有稳定的帧头与载荷，Reactor 已以 LT epoll 管理 fd，
 可在同一所有者内替换字节读写而不增加密文队列。memory BIO 是备选：
 它便于明确管理密文输入/输出，但需增加两条有界缓冲、复制、队列
-背压和关闭责任。**这个候选不是实现已验收的结论**：TLS-A 原型必须
-用相同 socketpair、分片、EAGAIN、取消和关闭矩阵比较两者。
+背压和关闭责任。**原型支持此暂选，但这不是 Reactor 集成或资源
+上界的最终验收结论**：TLS-A 原型必须
+用相同 socketpair、分片、EAGAIN 与关闭矩阵比较两者；取消和绝对
+期限由字节端点合同测试验证。
 若 socket BIO 的稳定重试或库内缓存不能满足预算与前进证明，
 改选 memory BIO 并记录新增复制及内存成本，不保留不成立的选择。
 实现只使用 OpenSSL 3.0 已提供的接口，并在目标 Ubuntu 环境链接
@@ -124,6 +126,18 @@ OpenSSL 内部分配与内核 socket 缓冲不自动纳入当前逐 Server 原�
 本 ADR 若与 [较早需求文档](../11-compression-tls-requirements.md) 中
 “压缩属于 Channel/Stream 内部算法”的描述冲突，以后续已接受的
 独立 Message 层决策为准；TLS 始终位于完整 TCP 字节流与前导之间。
+
+### 2026-10-23 TLS-A 原型记录
+
+本地 GCC release 原型在两种 BIO 上通过 TLS 1.3 握手、CA/SAN
+正负例、双向各 128 KiB 分片传输、EAGAIN、close_notify 与截断 EOF
+场景。socket BIO 在同一 `SSL_write_ex` 地址/长度上完成 WANT 重试，
+无需端点额外管理密文队列。memory BIO 试验中两端写 BIO 峰值均为
+114,864 字节，外部密文队列峰值均为 16,384 字节，每个方向发生
+121 次 socket send EAGAIN。此结果使 ADR 将 socket BIO 从“待比较
+候选”更新为“原型支持的暂选”；它不证明 OpenSSL 全部内存已纳入
+Server 预算，也不证明真实 Reactor 的事件闭环已经通过。完整场景、
+命令及限制见 [TLS-A 原型记录](../../reviews/rpc_v2_tls_a_20261023.md)。
 
 ## 依据
 

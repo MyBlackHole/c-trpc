@@ -4,7 +4,11 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.8` 将有效边界内、可定位到已打开 Stream 的非法 DATA 类型标志隔离为该流的 RESET，
+当前 `2.0.0-dev.9` 增加非公开字节端点状态驱动和 TLS-A 原型：验证 TLS 1.3 BIO、证书及非阻塞关闭合同；
+端点尚未接入 Reactor，TLS 必需模式在无 TLS 后端时明确返回 `TR_ERR_UNSUPPORTED`，因此此开发版没有启用 TLS。
+详情见 [TLS-A 原型记录](docs/reviews/rpc_v2_tls_a_20261023.md) 与
+[ADR-009](docs/architecture/decisions/ADR-009-tls-byte-endpoint.md)。
+dev.8 将有效边界内、可定位到已打开 Stream 的非法 DATA 类型标志隔离为该流的 RESET，
 同连接其他流可继续；未知流和不可证明安全的边界仍按连接错误处理。验证见
 [DATA 标志隔离评估](docs/reviews/rpc_v2_data_flag_isolation_20261023.md)。上一版让普通 V2 Server 的所有 shard 共用同一个内存硬上限，
 每个 shard 保留本地账目，不再因旧的等分额度提前拒绝。设计与验证见

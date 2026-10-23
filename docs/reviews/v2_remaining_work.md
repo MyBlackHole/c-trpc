@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-23，`8abebf3b5413a1c6ea624ec46ed61c61419d96c7`，2.0.0-dev.4。
+核对基线：2026-10-23，`7aa277fe985116dcc36279ee64739792073a5d74`，2.0.0-dev.8。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线
@@ -24,8 +24,9 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 排空竞争及完整错误矩阵仍未完成。
 
 #234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
-界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权；目前仍是
-提议中的设计，库尚无 TLS 实现。
+界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权。dev.9 的
+[TLS-A 原型](rpc_v2_tls_a_20261023.md)已完成 BIO 对照和内部端点合同；
+原型未接入 Reactor，库尚无产品 TLS 后端。TLS-B/C/D/E 与真实资源预算验收仍待完成。
 
 ## 持续开发顺序
 
