@@ -352,7 +352,7 @@ static void channel_reject(struct channel_fixture *fixture,
 	else if (fail_cond)
 		expect_calls(1U, 1U, 1U);
 	else
-		expect_calls(1U, 0U, 0U);
+		expect_calls(0U, 0U, 0U);
 	finish_fault();
 	assert_connection_active(fixture);
 }
@@ -366,7 +366,7 @@ static void test_channel_early_rollback(void)
 
 	channel_fixture_create(&fixture);
 
-	/* 协议版本范围非法时，已分配的 Channel 必须被自动清理。 */
+	/* 非法配置在预算预留及分配前拒绝，不产生回滚责任。 */
 	config.min_protocol_version = TR_CHANNEL_PROTOCOL_VERSION + 1U;
 	channel_reject(&fixture, &config, 0U, 0U, 0U, TR_ERR_INVALID);
 	config = channel_config();

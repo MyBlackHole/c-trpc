@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 struct tr_channel;
+struct tr_memory_budget;
 
 #define TR_CHANNEL_PROTOCOL_VERSION 3U
 #define TR_CHANNEL_LANE_MASK_CONTROL (1U << 0)
@@ -127,7 +128,7 @@ struct tr_channel_config {
 	uint32_t max_message_bytes;
 	struct tr_buffer_pool *reassembly_pool;
 
-	/* Channel HELLO 协议只支持版本 2；0 使用此默认值。
+	/* Channel HELLO 协议只支持版本 3；0 使用此默认值。
 	 * 与帧 envelope 版本及 RPC Record 版本分别管理，不降级为旧 GOAWAY。 */
 	uint16_t min_protocol_version;
 	uint16_t max_protocol_version;
@@ -135,6 +136,9 @@ struct tr_channel_config {
 	/* 必需能力必须同时被本地声明和对端协商；缺失时握手失败，
 	 * 不能先发布 READY 再在终止路径静默降级。0 保持旧 Channel 配置。 */
 	uint64_t required_feature_bits;
+	/* 可选：Channel 固定存储计入所属 shard 的共享预算。
+	 * 预算对象须存活到 Channel 成功销毁或完成 detached 收尾。 */
+	struct tr_memory_budget *memory_budget;
 };
 
 typedef enum tr_stream_data_disposition (*tr_stream_data_cb)(

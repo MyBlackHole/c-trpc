@@ -1226,6 +1226,8 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		server->config.limits.max_message_bytes;
 	if (server->mode == TR_SERVER_MODE_RPC_V2) {
 		channel_config.reassembly_pool = &shard->reassembly_pool;
+		channel_config.memory_budget =
+		        tr_runtime_shard_memory_budget(shard->runtime);
 		channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
 		channel_config.required_feature_bits =
 		        TR_CHANNEL_FEATURE_STREAM_RESET;

@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "../src/transport/channel/channel_internal.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/memory_budget.h"
 #include "tr/status.h"
 
 #include <assert.h>
@@ -218,6 +219,73 @@ static struct tr_channel_config channel_config(int split)
 	return config;
 }
 
+static void test_channel_fixed_storage_shares_budget(void)
+{
+	struct channel_create_fixture first, second;
+	struct tr_channel_config config = channel_config(0);
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_channel *channel = NULL;
+	struct tr_channel *other = NULL;
+
+	tr_memory_budget_init(&budget, 0U);
+	config.memory_budget = &budget;
+	fixture_init(&first, 0);
+	fixture_init(&second, 0);
+	assert(tr_channel_create_deferred(&config, first.control, first.bulk,
+	                                  NULL, NULL, NULL, NULL,
+	                                  &channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes > 0U);
+	budget.limit_bytes = stats.current_bytes;
+	assert(tr_channel_create_deferred(&config, second.control, second.bulk,
+	                                  NULL, NULL, NULL, NULL,
+	                                  &other) == TR_AGAIN);
+	assert(other == NULL);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == budget.limit_bytes);
+	assert(stats.rejection_events == 1U);
+	assert(tr_channel_destroy(channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(tr_channel_create_deferred(&config, second.control, second.bulk,
+	                                  NULL, NULL, NULL, NULL,
+	                                  &other) == TR_OK);
+	assert(tr_channel_destroy(other) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	fixture_finish(&first, 0, 1, 0);
+	fixture_finish(&second, 0, 1, 0);
+}
+
+static void test_channel_budget_survives_failed_destroy(void)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config config = channel_config(0);
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_channel *channel = NULL;
+	uint64_t charged;
+
+	tr_memory_budget_init(&budget, 0U);
+	config.memory_budget = &budget;
+	fixture_init(&fixture, 0);
+	assert(tr_channel_create_deferred(&config, fixture.control,
+	                                  fixture.bulk, NULL, NULL, NULL, NULL,
+	                                  &channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	charged = stats.current_bytes;
+	assert(charged > 0U);
+	atomic_store(&fail_handler_at, 2U);
+	assert(tr_channel_destroy(channel) == TR_ERR_SYS);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == charged);
+	assert(tr_channel_destroy(channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	fixture_finish(&fixture, 0, 1, 0);
+}
+
 static void test_first_handler_failure_has_no_lifecycle_publication(void)
 {
 	struct channel_create_fixture fixture;
@@ -291,8 +359,12 @@ static void test_timer_publish_failure_needs_no_timer_rollback(void)
 {
 	struct channel_create_fixture fixture;
 	struct tr_channel_config config = channel_config(0);
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
 	struct tr_channel *channel = NULL;
 
+	tr_memory_budget_init(&budget, 0U);
+	config.memory_budget = &budget;
 	fixture_init(&fixture, 0);
 	atomic_store(&fail_timer_register_at, 1U);
 
@@ -300,6 +372,9 @@ static void test_timer_publish_failure_needs_no_timer_rollback(void)
 		       &config, fixture.control, fixture.bulk,
 		       NULL, NULL, NULL, NULL, &channel) == TR_ERR_SYS);
 	assert(channel == NULL);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(stats.peak_bytes > 0U);
 
 	/* 定时器是事务的最后一个发布。注册自身失败时
 	 * 句柄从未发布，因此错误路径不允许调用 timer_unregister。
@@ -394,10 +469,14 @@ static void test_composite_rollback_preserves_partial_owner(void)
 {
 	struct channel_create_fixture fixture;
 	struct tr_channel_config cfg = channel_config(0);
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
 	struct tr_channel *channel = NULL;
 	struct tr_conn_handle c;
 	int ret;
 
+	tr_memory_budget_init(&budget, 0U);
+	cfg.memory_budget = &budget;
 	fixture_init(&fixture, 0);
 	c = fixture.control;
 	/* HELLO 失败触发回滚；handler 解绑及关闭均拒绝。
@@ -409,6 +488,8 @@ static void test_composite_rollback_preserves_partial_owner(void)
 	ret = tr_channel_create(&cfg, c, c, NULL, NULL, NULL, NULL, &channel);
 	assert(ret == TR_ERR_SYS);
 	assert(channel != NULL);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes > 0U);
 	assert(atomic_load(&handler_attempts) == 2U);
 	assert(atomic_load(&close_attempts) == 1U);
 	assert_connection_state(c, TR_CONN_ACTIVE);
@@ -418,8 +499,12 @@ static void test_composite_rollback_preserves_partial_owner(void)
 	 */
 	atomic_store(&fail_handler_at, 3U);
 	assert(tr_channel_destroy(channel) == TR_ERR_SYS);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes > 0U);
 	assert_connection_state(c, TR_CONN_ACTIVE);
 	assert(tr_channel_destroy(channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
 	channel = NULL;
 	assert_connection_state(c, TR_CONN_ACTIVE);
 	fixture_finish(&fixture, 0, 1, 0);
@@ -489,6 +574,8 @@ static void test_single_confirmed_barrier_allows_cleanup(void)
 
 int main(void)
 {
+	test_channel_fixed_storage_shares_budget();
+	test_channel_budget_survives_failed_destroy();
 	test_composite_rollback_preserves_partial_owner();
 	test_split_rollback_retains_only_live_callback();
 	test_single_confirmed_barrier_allows_cleanup();

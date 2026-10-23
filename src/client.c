@@ -695,6 +695,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	channel_config.reassembly_pool = &client->reassembly_pool;
 	channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
 	channel_config.required_feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
+	channel_config.memory_budget =
+	        tr_runtime_shard_memory_budget(client->shard);
 
 	{
 		struct tr_client_record_assemble_request request = {
