@@ -11,6 +11,10 @@ V1 核心退役（#290）、统一 RPC Record 2、四种基数、普通 Client/S
 共享 Channel 的双向 L/W 准入、残余信用恢复和普通服务端响应收敛。
 候选与实际主线验收以文中链接的 GitHub 登记为准。
 
+dev.6 的 [Channel 预算修复](rpc_v2_channel_budget_20261023.md) 将普通 V2
+Client/Server 的 Channel 固定对象、流槽和索引接入所属 shard 的共享内存预算。
+这只覆盖 #241 的一个固定存储缺口；分域/全局账本与组合矩阵仍在下表。
+
 ## 持续开发顺序
 
 | 范围 | 当前剩余工作 | GitHub |
