@@ -26,11 +26,10 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 #234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
 界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权。dev.9 的
 [TLS-A 原型](rpc_v2_tls_a_20261023.md)完成 BIO 对照和内部端点合同；TLS-B
-冻结公开配置并加入 OpenSSL 3 后端。TLS-C 已在本地开发分支接入普通 V2
-Client/Server Reactor，GCC Debug/Release、Clang Release、GCC ASan/UBSan 和
-GCC TSan 各 85 项全量测试通过；详细边界和本地工具版本限制见
-[TLS-C 实现记录](rpc_v2_tls_c_20261023.md)。#234 仍开放：连接组 TLS、mTLS、
-CONTROL/DATA 身份绑定、异步凭证和 TLS-E 资源/公网验收尚未完成。
+冻结公开配置并加入 OpenSSL 3 后端；TLS-C 普通 V2 Client/Server Reactor 已由
+PR #310 合入主线。TLS-D1 Task 1 已在当前开发分支本地实现普通 RPC mTLS 与 URI SAN
+身份视图；该切片尚待提交和 CI 验收。连接组 TLS、CONTROL/DATA 身份绑定和 profile
+轮换仍待 TLS-D1 后续任务；异步凭证属于 TLS-D2，资源总账和公网验收属于 TLS-E。
 
 ## 持续开发顺序
 
@@ -39,7 +38,7 @@ CONTROL/DATA 身份绑定、异步凭证和 TLS-E 资源/公网验收尚未完�
 | 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
-| TLS 与身份 | 普通 V2 单连接 TLS 1.3 已接入；连接组 TLS、mTLS、CONTROL/DATA 身份绑定、异步凭证/轮换、硬资源上界与公网验收仍待完成 | #234 |
+| TLS 与身份 | 普通 V2 单连接 TLS 1.3/mTLS 与 URI SAN RPC 身份视图已实现；连接组 TLS、CONTROL/DATA 身份绑定、凭证轮换、硬资源上界与公网验收仍待完成 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |

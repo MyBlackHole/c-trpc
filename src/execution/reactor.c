@@ -10,6 +10,7 @@
 #include "../transport/protocol/parser.h"
 #include "../io/socket.h"
 #include "../io/byte_endpoint.h"
+#include "../io/peer_identity_internal.h"
 #include "../io/tls_openssl.h"
 #include "tr/status.h"
 #include "../transport/protocol/wire.h"
@@ -145,6 +146,10 @@ struct tr_connection {
 
 	/* 仅 TLS 连接分配 endpoint；明文连接不增加端点缓冲或 TLS 对象。 */
 	struct tr_byte_endpoint *byte_endpoint;
+	struct tr_peer_identity_snapshot *peer_identity;
+	int tls_identity_resolved;
+	int tls_peer_identity_enabled;
+	int tls_peer_identity_required;
 	struct tr_reactor_timer_handle tls_timer;
 	int tls_timer_registered;
 	uint32_t byte_ready_events;
@@ -985,6 +990,9 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 		free(endpoint);
 		connection->byte_endpoint = NULL;
 	}
+	tr_peer_identity_snapshot_release(connection->peer_identity);
+	connection->peer_identity = NULL;
+	connection->tls_identity_resolved = 0;
 
 	close(connection->fd);
 	connection->fd = -1;
@@ -1180,6 +1188,40 @@ tr_connection_maybe_start_tls_shutdown(struct tr_reactor *reactor,
 	                                          : ret);
 }
 
+static int tr_connection_tls_identity_capture(struct tr_reactor *reactor,
+                                              struct tr_connection *connection)
+{
+	struct tr_peer_identity_snapshot *identity = NULL;
+	int ret;
+	if (!connection || !connection->byte_endpoint)
+		return TR_ERR_INVALID;
+	if (connection->tls_identity_resolved)
+		return TR_OK;
+	if (connection->byte_endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED)
+		return TR_AGAIN;
+	if (connection->tls_peer_identity_enabled) {
+		ret = tr_tls_openssl_session_peer_identity(
+		        connection->byte_endpoint->driver_arg,
+		        connection->tls_peer_identity_required, &identity);
+		if (ret != TR_OK)
+			return ret;
+		if (identity && reactor->config.memory_budget) {
+			ret = tr_peer_identity_snapshot_charge(
+			        identity, reactor->config.memory_budget);
+			if (ret != TR_OK) {
+				tr_peer_identity_snapshot_release(identity);
+				/* TLS
+				 * 已完成认证，预算拒绝不能冒充仍待推进的握手。
+				 */
+				return ret == TR_AGAIN ? TR_ERR_NOMEM : ret;
+			}
+		}
+	}
+	connection->peer_identity = identity;
+	connection->tls_identity_resolved = 1;
+	return TR_OK;
+}
+
 static int
 tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
                                 struct tr_tls_openssl_profile *profile,
@@ -1208,6 +1250,10 @@ tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
 		return ret;
 	}
 	connection->byte_endpoint = endpoint;
+	connection->tls_peer_identity_enabled =
+	        tr_tls_openssl_profile_peer_identity_enabled(profile);
+	connection->tls_peer_identity_required =
+	        tr_tls_openssl_profile_peer_identity_required(profile);
 	/* 事件注册成功后会立即进行第一次握手推进，再收窄到精确 WANT。 */
 	connection->epoll_events = EPOLLRDHUP | EPOLLIN | EPOLLOUT;
 	return TR_OK;
@@ -1234,6 +1280,9 @@ static void tr_connection_adopt_tls_rollback(struct tr_reactor *reactor,
 		free(endpoint);
 		connection->byte_endpoint = NULL;
 	}
+	tr_peer_identity_snapshot_release(connection->peer_identity);
+	connection->peer_identity = NULL;
+	connection->tls_identity_resolved = 0;
 	tr_parser_reset(&connection->parser);
 	connection->fd = -1;
 	connection->state = TR_CONN_ERROR;
@@ -1326,6 +1375,9 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 			ret = tr_byte_endpoint_step(endpoint, 0U, now_ns);
 		else if (ret == TR_OK)
 			ret = TR_ERR_SYS;
+		if (ret == TR_OK)
+			ret = tr_connection_tls_identity_capture(reactor,
+			                                         connection);
 		if (ret == TR_OK || ret == TR_AGAIN) {
 			int timer_ret = tr_reactor_timer_register(
 			        reactor, tr_connection_tls_deadline, connection,
@@ -1881,6 +1933,14 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
 			return;
 		}
+		if (step_ret != TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             step_ret);
+			return;
+		}
+		step_ret =
+		        tr_connection_tls_identity_capture(reactor, connection);
 		if (step_ret != TR_OK) {
 			tr_connection_close_internal(reactor, connection,
 			                             TR_CONN_EVENT_ERROR,
@@ -3943,6 +4003,33 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	out->reactor = reactor;
 	out->slot = slot;
 	out->generation = generation;
+	return TR_OK;
+}
+
+int tr_reactor_peer_identity_snapshot_on_owner(
+        struct tr_conn_handle handle, struct tr_peer_identity_snapshot **out)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (!reactor || handle.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection = &reactor->connections[handle.slot];
+	if (connection->state != TR_CONN_ACTIVE ||
+	    connection->generation != handle.generation)
+		return TR_ERR_STALE;
+	if (connection->byte_endpoint) {
+		if (connection->byte_endpoint->state !=
+		    TR_BYTE_ENDPOINT_AUTHENTICATED)
+			return TR_AGAIN;
+		if (!connection->tls_identity_resolved)
+			return TR_ERR_STATE;
+	}
+	*out = connection->peer_identity;
 	return TR_OK;
 }
 

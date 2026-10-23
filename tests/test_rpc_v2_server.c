@@ -348,6 +348,9 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 	struct call *call;
 	uint8_t copied[32];
 
+	assert(request->peer_identity.authentication == TR_PEER_IDENTITY_NONE);
+	assert(request->peer_identity.uri_san == NULL);
+	assert(request->peer_identity.uri_san_len == 0U);
 	check_lifecycle_reentry(f);
 	assert(tr_rpc_v2_cancel_requested(cancel) >= 0);
 	assert(pthread_mutex_lock(&f->lock) == 0);

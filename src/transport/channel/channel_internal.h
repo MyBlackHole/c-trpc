@@ -4,8 +4,14 @@
 #include "channel.h"
 #include "../../execution/deadline_internal.h"
 
+struct tr_peer_identity_snapshot;
+
 /* Channel 创建后所属反应器不再变化，仅供内部所有者路由使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
+
+/* 所属 owner 上取得 CONTROL 连接的借用身份；需 retain 才能跨过当前回调。 */
+int tr_channel_peer_identity_snapshot_on_owner(
+        struct tr_channel *channel, struct tr_peer_identity_snapshot **out);
 
 /* 仅供所有者处理上层生命周期失败：无需命令准入，同步退役当前通道的
  * 精确连接。回调内联执行；调用时不得持有 Channel 或上层协议锁。

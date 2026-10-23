@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include "reactor.h"
 
+struct tr_peer_identity_snapshot;
+
 /* 提交一个工作线程完成项回反应器所有者。
  *
  * fn 必须是非阻塞的短任务，禁止在回调里执行磁盘、网络、KMS 等阻塞工作。
@@ -214,6 +216,13 @@ int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle);
 
 /* 精确检查所属反应器，不能仅用“当前是某个 owner”代替。 */
 int tr_reactor_in_owner_context_for(const struct tr_reactor *reactor);
+
+/* 返回所属连接的借用身份快照；TLS 尚未完成认证时返回 TR_AGAIN。
+ * 仅可在该连接 Reactor owner 上调用，调用方须 retain 后跨越 owner 回调。
+ */
+int tr_reactor_peer_identity_snapshot_on_owner(
+        struct tr_conn_handle connection,
+        struct tr_peer_identity_snapshot **out);
 
 /* 库内停止回收租约，零初始化、不可复制。成功取得要求 stop/join 已成功，
  * 并阻止 start/destroy，直到 release。允许相同租约重试；不延长 Reactor

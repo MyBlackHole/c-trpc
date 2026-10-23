@@ -12,6 +12,7 @@
 
 #include "../../include/tr/status.h"
 #include "byte_endpoint.h"
+#include "peer_identity_internal.h"
 #include "tls_config.h"
 
 enum tr_tls_openssl_role {
@@ -22,6 +23,8 @@ enum tr_tls_openssl_role {
 struct tr_tls_openssl_profile {
 	SSL_CTX *context;
 	enum tr_tls_openssl_role role;
+	int peer_identity_enabled;
+	int peer_identity_required;
 	char *sni_name;
 };
 
@@ -173,6 +176,16 @@ int tr_tls_openssl_client_profile_create(
 		status = TR_ERR_INVALID;
 		goto fail;
 	}
+	if (config->client_certificate_file &&
+	    (SSL_CTX_use_certificate_chain_file(
+	             profile->context, config->client_certificate_file) != 1 ||
+	     SSL_CTX_use_PrivateKey_file(profile->context,
+	                                 config->client_private_key_file,
+	                                 SSL_FILETYPE_PEM) != 1 ||
+	     SSL_CTX_check_private_key(profile->context) != 1)) {
+		status = TR_ERR_INVALID;
+		goto fail;
+	}
 	SSL_CTX_set_verify(profile->context, SSL_VERIFY_PEER, NULL);
 	verify_parameters = SSL_CTX_get0_param(profile->context);
 	if (!verify_parameters ||
@@ -214,6 +227,8 @@ int tr_tls_openssl_server_profile_create(
         struct tr_tls_openssl_profile **out)
 {
 	struct tr_tls_openssl_profile *profile = NULL;
+	X509_VERIFY_PARAM *verify_parameters;
+	int verify_mode;
 	int status;
 
 	if (!out)
@@ -236,12 +251,46 @@ int tr_tls_openssl_server_profile_create(
 		status = TR_ERR_INVALID;
 		goto fail;
 	}
+	if (config->client_auth != TR_TLS_CLIENT_AUTH_NONE) {
+		if (SSL_CTX_load_verify_locations(profile->context,
+		                                  config->client_ca_file,
+		                                  NULL) != 1) {
+			status = TR_ERR_INVALID;
+			goto fail;
+		}
+		verify_parameters = SSL_CTX_get0_param(profile->context);
+		if (!verify_parameters ||
+		    X509_VERIFY_PARAM_set_purpose(
+		            verify_parameters, X509_PURPOSE_SSL_CLIENT) != 1) {
+			status = TR_ERR_INVALID;
+			goto fail;
+		}
+		verify_mode = SSL_VERIFY_PEER;
+		if (config->client_auth == TR_TLS_CLIENT_AUTH_REQUIRED)
+			verify_mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+		SSL_CTX_set_verify(profile->context, verify_mode, NULL);
+		profile->peer_identity_enabled = 1;
+		profile->peer_identity_required =
+		        config->client_auth == TR_TLS_CLIENT_AUTH_REQUIRED;
+	}
 	*out = profile;
 	return TR_OK;
 
 fail:
 	tr_tls_openssl_profile_release(profile);
 	return status;
+}
+
+int tr_tls_openssl_profile_peer_identity_enabled(
+        const struct tr_tls_openssl_profile *profile)
+{
+	return profile ? profile->peer_identity_enabled : 0;
+}
+
+int tr_tls_openssl_profile_peer_identity_required(
+        const struct tr_tls_openssl_profile *profile)
+{
+	return profile ? profile->peer_identity_required : 0;
 }
 
 void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile)
@@ -251,6 +300,61 @@ void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile)
 	SSL_CTX_free(profile->context);
 	free(profile->sni_name);
 	free(profile);
+}
+
+int tr_tls_openssl_session_peer_identity(struct tr_tls_openssl_session *session,
+                                         int require_uri,
+                                         struct tr_peer_identity_snapshot **out)
+{
+	X509 *certificate = NULL;
+	GENERAL_NAMES *names = NULL;
+	ASN1_IA5STRING *uri = NULL;
+	int uri_count = 0;
+	int status = TR_ERR_INVALID;
+
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (!session || (require_uri != 0 && require_uri != 1))
+		return TR_ERR_INVALID;
+	if (SSL_is_init_finished(session->ssl) != 1)
+		return TR_ERR_STATE;
+	certificate = SSL_get1_peer_certificate(session->ssl);
+	if (!certificate)
+		return require_uri ? TR_ERR_INVALID : TR_OK;
+	if (SSL_get_verify_result(session->ssl) != X509_V_OK)
+		goto done;
+	names = X509_get_ext_d2i(certificate, NID_subject_alt_name, NULL, NULL);
+	if (!names)
+		goto done;
+	for (int index = 0; index < sk_GENERAL_NAME_num(names); ++index) {
+		GENERAL_NAME *name = sk_GENERAL_NAME_value(names, index);
+		if (!name || name->type != GEN_URI)
+			continue;
+		++uri_count;
+		uri = name->d.uniformResourceIdentifier;
+	}
+	if (uri_count != 1 || !uri)
+		goto done;
+	{
+		int length = ASN1_STRING_length(uri);
+		const unsigned char *data = ASN1_STRING_get0_data(uri);
+		if (length <= 0) {
+			status = TR_ERR_INVALID;
+			goto done;
+		}
+		if (length > 512) {
+			status = TR_ERR_BAD_LENGTH;
+			goto done;
+		}
+		status = tr_peer_identity_snapshot_create(
+		        data, (uint32_t)length, out);
+	}
+
+done:
+	GENERAL_NAMES_free(names);
+	X509_free(certificate);
+	return status;
 }
 
 static int tr_tls_openssl_error_status(struct tr_tls_openssl_session *session,

@@ -321,11 +321,22 @@ Server 当前每调用最多保留 16 个未收敛输入事件，包含排队、
 自动重连、连接组或网络压缩。普通 V2 Client/Server 可通过配置中的 `tls.mode =
 TR_TLS_REQUIRED` 启用 TLS 1.3；Client 必须配置 CA 信任来源或使用系统信任库，并设置
 `expected_peer_name`。证书身份不匹配和 TLS 握手失败会关闭连接，不回退到明文。
-默认 `TR_TLS_DISABLED` 仍使用明文。transport-only/连接组 TLS、mTLS 和 CONTROL/DATA
-身份绑定尚未支持。配置不支持的已有功能会
-明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+Client 可同时提供成对的客户端证书与私钥。Server 可设置
+`client_auth = TR_TLS_CLIENT_AUTH_OPTIONAL` 或 `TR_TLS_CLIENT_AUTH_REQUIRED`，并提供
+`client_ca_file`；`NONE` 不请求客户端证书。OPTIONAL 允许无证书连接，但若对端提供证书，
+仍须通过证书链、clientAuth 用途和唯一 URI SAN 校验。REQUIRED 还会拒绝无客户端证书的连接。
+证书 URI SAN 必须是唯一、1–512 字节的 IA5 值。
 
-完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)。
+Server 每个 OPEN、MESSAGE 和 HALF_CLOSE 的 work 回调都收到连接级
+`request.peer_identity`。已验证证书返回 `TR_PEER_IDENTITY_TLS_CERTIFICATE` 和 URI SAN；
+明文连接及没有客户端证书的 OPTIONAL TLS 连接返回 `TR_PEER_IDENTITY_NONE` 与空 URI。
+身份视图只借用至当前 work 回调返回，来源不受 RPC metadata 影响。
+
+默认 `TR_TLS_DISABLED` 仍使用明文。transport-only/连接组 TLS 与 CONTROL/DATA 身份绑定
+尚未支持。配置不支持的已有功能会明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+
+完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)
+和 [TLS-D1 设计与实施计划](superpowers/specs/2026-10-23-tls-d1-mtls-group-identity-design.md)。
 
 普通 `tr_server_create()` 只构造 V2 RPC Server；需要连接组或纯传输能力时使用
 `tr_server_create_transport()`。transport-only 保留 Runtime、Reactor、Channel

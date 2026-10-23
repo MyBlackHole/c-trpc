@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "tr/client.h"
+#include "tr/peer_identity.h"
 #include "tr/rpc_codec.h"
 #include "tr/server.h"
 
@@ -168,6 +169,9 @@ struct tr_rpc_v2_request {
 	struct tr_rpc_bytes body;
 	/* 仅 OPEN 携带请求元数据；所有地址只借用至 work 返回。 */
 	struct tr_rpc_v2_metadata_view metadata;
+	/* 由 Server 的已认证连接提供；仅借用至 work 返回。
+	 * metadata 不能写入或覆盖该连接身份。 */
+	struct tr_peer_identity_view peer_identity;
 };
 
 struct tr_rpc_v2_cancel;

@@ -60,11 +60,12 @@ TMPDIR="$PWD/build/test-tmp" XMAKE_TMPDIR="$PWD/build/test-tmp" PYTHONDONTWRITEB
 - Create: `src/io/peer_identity_internal.h`, `src/io/peer_identity_internal.c`
 - Modify: `include/tr/rpc_v2.h`, `include/tr/tls.h`
 - Modify: `src/io/tls_config.c`, `src/io/tls_openssl.h`, `src/io/tls_openssl.c`
-- Modify: `src/execution/reactor.h`, `src/execution/reactor.c`
-- Modify: `src/rpc/rpc_record_dispatch.h`, `src/rpc/rpc_record_dispatch.c`
+- Modify: `src/execution/reactor_internal.h`, `src/execution/reactor.c`
+- Modify: `src/transport/channel/channel_internal.h`, `src/transport/channel/channel.c`
+- Modify: `src/rpc/rpc_record_dispatch.c`
 - Modify: `tests/tls_test_identity.h`, `tests/tls_test_identity.c`, `tests/test_tls_config.c`, `tests/test_tls_openssl.c`
 - Create: `tests/test_rpc_v2_tls_identity.c`
-- Modify: `xmake.lua`
+- Modify: `tests/test_rpc_v2_server.c`, `xmake.lua`, `README.md`, `docs/rpc-v2-sdk.md`, `docs/reviews/v2_remaining_work.md`
 
 **Interfaces:**
 - Public view: `struct tr_peer_identity_view { enum tr_peer_identity_authentication authentication; const uint8_t *uri_san; uint32_t uri_san_len; }`。
@@ -72,27 +73,27 @@ TMPDIR="$PWD/build/test-tmp" XMAKE_TMPDIR="$PWD/build/test-tmp" PYTHONDONTWRITEB
 - `struct tr_rpc_v2_request` 新增 `struct tr_peer_identity_view peer_identity`；Server 所有 OPEN/MESSAGE/HALF_CLOSE work event 都填入同一 Call 身份。
 - TLS OpenSSL session 在验证后提供 `tr_tls_openssl_session_peer_identity(session, require_uri, &out)`；无证书的 OPTIONAL 情况返回空身份，required 或 group 身份缺失返回错误。
 
-- [ ] **Step 1: 先写 TLS 配置和 X.509 身份正负例**
+- [x] **Step 1: 先写 TLS 配置和 X.509 身份正负例**
 
 在 `test_tls_config.c` 增加 REQUIRED/OPTIONAL/NONE 与缺失 CA、孤立证书/私钥、错误枚举组合断言。扩充 `tls_test_identity` 生成 clientAuth、wrong-client-CA、无 URI、重复 URI、空 URI、超 512 字节 URI 和换钥但相同 URI SAN 的证书。
 
-- [ ] **Step 2: 运行 RED 并记录现有 unsupported 边界**
+- [x] **Step 2: 运行 RED 并记录现有 unsupported 边界**
 
 构建并运行 `test_tls_config`、`test_tls_openssl`；新断言应因 mTLS 字段当前返回 `TR_ERR_UNSUPPORTED` 或缺少 identity API 而失败。保留既有 TLS-C 服务端认证测试的绿色行为。
 
-- [ ] **Step 3: 实现 mTLS profile 和唯一 URI SAN 提取**
+- [x] **Step 3: 实现 mTLS profile 和唯一 URI SAN 提取**
 
 服务端 `client_auth=REQUIRED/OPTIONAL` 加载 client CA 并启用 `SSL_VERIFY_PEER`；REQUIRED 再启用 `SSL_VERIFY_FAIL_IF_NO_PEER_CERT`。Client 提供 client cert/key 时加载并检查私钥匹配。握手认证后提取唯一 1–512 字节 URI SAN；clientAuth/serverAuth EKU、证书链和证书期仍由 OpenSSL 验证。没有身份的 OPTIONAL 连接发布 `TR_PEER_IDENTITY_NONE`。
 
-- [ ] **Step 4: 实现引用计数 identity 和 RPC OPEN 生命周期**
+- [x] **Step 4: 实现引用计数 identity 和 RPC OPEN 生命周期**
 
 Reactor connection 在 TLS AUTHENTICATED 后持有 identity snapshot；V2 Call 在 OPEN 准入时 retain，同一 identity view 进入所有 work event；所有 worker 和 terminal 责任静默后 release。明文与无证书 OPTIONAL 的视图为 `NONE`/空 URI。metadata 不得写入或覆盖 identity。
 
-- [ ] **Step 5: 增加真实 RPC mTLS 集成用例并运行 GREEN**
+- [x] **Step 5: 增加真实 RPC mTLS 集成用例并运行 GREEN**
 
-`test_rpc_v2_tls_identity` 使用公开 `tr_client_create`/`tr_server_create` 和真实 loopback TLS；验证双向有效证书、Server OPEN/MESSAGE/HALF_CLOSE 收到同一主体、错误 CA/缺失证书/错 EKU/无 URI 不进入 work、metadata 同名键不伪装认证身份、断开连接后仍在工作的 Call 可以安全读取 identity。运行 `test_tls_config`、`test_tls_openssl`、`test_rpc_v2_tls_identity`、`test_rpc_v2_sdk` 与 `test_client_connect_rollback`。
+`test_rpc_v2_tls_identity` 使用公开 `tr_client_create`/`tr_server_create` 和真实 loopback TLS；验证双向有效证书、Server OPEN/MESSAGE/HALF_CLOSE 收到同一主体、错误 CA/缺失证书/错 EKU/无 URI 不进入 work、metadata 同名键不伪装认证身份、断开连接后仍在工作的 Call 可以安全读取 identity、OPTIONAL 无客户端证书与普通明文路径均返回 `NONE`。`test_rpc_v2_server` 也断言明文身份为 `NONE`。运行 `test_tls_config`、`test_tls_openssl`、`test_rpc_v2_tls_identity`、`test_rpc_v2_tls_reactor`、`test_rpc_v2_server`、`test_rpc_v2_sdk` 与 `test_client_connect_rollback`。
 
-- [ ] **Step 6: 提交普通 V2 mTLS 垂直切片**
+- [x] **Step 6: 提交普通 V2 mTLS 垂直切片**
 
 将 `xmake.lua` 从 `2.0.0-dev.12` bump 到 `.13`；按 `feature-commit-format` 记录需求、背景、实现、影响、验证、性能、风险和回滚。提交只包含 Task 1 文件。
 

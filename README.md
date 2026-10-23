@@ -4,10 +4,11 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.12` 开发分支已将 OpenSSL 3 TLS 1.3 接入普通 V2 Client/Server；
-`TR_TLS_REQUIRED` 会验证服务端证书身份并在认证后传输 V2 数据，默认仍为明文 TCP。
-TLS 失败关闭连接，不回退明文。transport-only/连接组 TLS、mTLS、CONTROL/DATA
-身份绑定和完整 TLS 资源账本尚未完成，TLS-C 也不代表 #234 或 V2 整体验收完成。
+当前 `2.0.0-dev.13` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+Client/Server；`TR_TLS_REQUIRED` 会验证服务端证书，Server 可选或强制验证客户端证书，
+并将已验证的 URI SAN 主体传入 RPC work 回调。默认仍为明文 TCP，TLS 失败关闭连接，
+不回退明文。transport-only/连接组 TLS、CONTROL/DATA 身份绑定、profile 轮换和完整 TLS
+资源账本尚未完成；TLS-D1 也不代表 #234 或 V2 整体验收完成。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-C 设计与计划](docs/superpowers/specs/2026-10-23-tls-c-reactor-integration-design.md)
@@ -92,8 +93,10 @@ CONTROL 通道              BULK 通道
 传输/RPC 核心不执行常规文件系统 I/O，也不包含备份专用的提交/存储语义。
 
 **安全与可选能力现状**：普通 V2 Client/Server 可显式要求 TLS 1.3 和服务端证书身份验证；
-默认仍使用明文 TCP，消息压缩尚未接入。TLS 不覆盖 transport-only/连接组，当前不支持
-mTLS、CONTROL/DATA 身份绑定或 TLS 全部内部内存的硬预算。CRC32C 不能替代认证和加密；
+Server 可配置可选或必需的客户端证书认证，已验证的唯一 URI SAN 可作为 RPC work 的
+连接身份视图。默认仍使用明文 TCP，消息压缩尚未接入。TLS 不覆盖 transport-only/连接组，
+当前仍缺少 CONTROL/DATA 身份绑定、TLS profile 轮换和 TLS 全部内部内存的硬预算。
+CRC32C 不能替代认证和加密；
 部署到不可信网络前仍须完成 [TLS-D/E 验收](docs/architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 消息压缩要求见[压缩与 TLS 需求](docs/architecture/11-compression-tls-requirements.md)。
 
@@ -740,7 +743,7 @@ Xmake CI 矩阵检查：
   [公共 SDK 文档](docs/rpc-v2-sdk.md)；
 - 流式发送遇到 `TR_AGAIN` 时由调用方等待可写提示并重试；一元便利 API 另行负责
   OPEN、正文和半关闭的自动发送；
-- 当前不提供透明 RPC 重试、进行中 Call 重放、DNS 名称解析、mTLS、连接组 TLS 或消息压缩；普通 V2 TLS 必需模式须显式配置；
+- 当前不提供透明 RPC 重试、进行中 Call 重放、DNS 名称解析、连接组 TLS 或消息压缩；普通 V2 TLS 必需模式须显式配置；
 - 逻辑消息受配置的消息上限、传输窗口和重组资源约束；
 - 普通 RPC V2 Client 当前不配置自动重连。低层 Channel 重连只恢复传输连通性，
   故障连接上已打开的 Stream/Call 已终止，应用须重新发起业务调用；

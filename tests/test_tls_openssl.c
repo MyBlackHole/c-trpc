@@ -20,6 +20,7 @@
 
 #include "../include/tr/status.h"
 #include "../src/io/byte_endpoint.h"
+#include "../src/io/peer_identity_internal.h"
 #include "../src/io/tls_openssl.h"
 #include "tls_test_identity.h"
 
@@ -102,17 +103,25 @@ static int tls_test_poll_pair(uint32_t *client_ready, uint32_t *server_ready)
 	return TR_OK;
 }
 
-static int tls_test_pair_open(void)
+static int
+tls_test_pair_open_with_mtls(const char *client_certificate_file,
+                             const char *client_private_key_file,
+                             enum tr_tls_client_auth_policy client_auth,
+                             const char *client_ca_file)
 {
 	struct tr_tls_client_config client_config = {
 	        .mode = TR_TLS_REQUIRED,
 	        .ca_file = test_identity.ca_file,
 	        .expected_peer_name = "server.example.test",
+	        .client_certificate_file = client_certificate_file,
+	        .client_private_key_file = client_private_key_file,
 	};
 	struct tr_tls_server_config server_config = {
 	        .mode = TR_TLS_REQUIRED,
 	        .certificate_file = test_identity.server_certificate_file,
 	        .private_key_file = test_identity.server_private_key_file,
+	        .client_ca_file = client_ca_file,
+	        .client_auth = client_auth,
 	};
 	const struct tr_byte_endpoint_driver *driver = tr_tls_openssl_driver();
 	uint64_t deadline = tls_test_now_ns() + UINT64_C(5000000000);
@@ -154,6 +163,12 @@ static int tls_test_pair_open(void)
 	tr_tls_openssl_profile_release(test_pair.server_profile);
 	test_pair.server_profile = NULL;
 	return TR_OK;
+}
+
+static int tls_test_pair_open(void)
+{
+	return tls_test_pair_open_with_mtls(NULL, NULL, TR_TLS_CLIENT_AUTH_NONE,
+	                                    NULL);
 }
 
 static int tls_test_handshake_pair(void)
@@ -476,6 +491,187 @@ static void test_nonblocking_tls_pair_authenticates_and_preserves_fds(void)
 	assert(close(test_pair.server_fd) == 0);
 	test_pair.client_fd = -1;
 	test_pair.server_fd = -1;
+}
+
+static void test_required_client_auth_rejects_missing_certificate(void)
+{
+	assert(tls_test_pair_open_with_mtls(NULL, NULL,
+	                                    TR_TLS_CLIENT_AUTH_REQUIRED,
+	                                    test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() != TR_OK);
+	assert(test_pair.server_endpoint.state !=
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	tls_test_pair_cleanup();
+}
+
+static void test_required_client_auth_accepts_valid_certificate(void)
+{
+	static const uint8_t client_uri[] = "spiffe://c-trpc.example/client";
+	static const uint8_t server_uri[] = "spiffe://c-trpc.example/server";
+	struct tr_peer_identity_snapshot *identity = NULL;
+	struct tr_peer_identity_view view;
+	assert(tls_test_pair_open_with_mtls(
+	               test_identity.client_certificate_file,
+	               test_identity.client_private_key_file,
+	               TR_TLS_CLIENT_AUTH_REQUIRED,
+	               test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	assert(test_pair.client_endpoint.state ==
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	assert(test_pair.server_endpoint.state ==
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	assert(tr_tls_openssl_session_peer_identity(
+	               test_pair.server_endpoint.driver_arg, 1, &identity) ==
+	       TR_OK);
+	assert(tr_peer_identity_snapshot_view(identity, &view) == TR_OK);
+	assert(view.authentication == TR_PEER_IDENTITY_TLS_CERTIFICATE);
+	assert(view.uri_san_len == sizeof(client_uri) - 1U);
+	assert(memcmp(view.uri_san, client_uri, sizeof(client_uri) - 1U) == 0);
+	tr_peer_identity_snapshot_release(identity);
+	identity = NULL;
+	assert(tr_tls_openssl_session_peer_identity(
+	               test_pair.client_endpoint.driver_arg, 1, &identity) ==
+	       TR_OK);
+	assert(tr_peer_identity_snapshot_view(identity, &view) == TR_OK);
+	assert(view.uri_san_len == sizeof(server_uri) - 1U);
+	assert(memcmp(view.uri_san, server_uri, sizeof(server_uri) - 1U) == 0);
+	tr_peer_identity_snapshot_release(identity);
+	tls_test_pair_cleanup();
+}
+
+static void test_optional_client_auth_accepts_missing_certificate(void)
+{
+	struct tr_peer_identity_snapshot *identity =
+	        (struct tr_peer_identity_snapshot *)(uintptr_t)1U;
+	assert(tls_test_pair_open_with_mtls(NULL, NULL,
+	                                    TR_TLS_CLIENT_AUTH_OPTIONAL,
+	                                    test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	assert(test_pair.server_endpoint.state ==
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	assert(tr_tls_openssl_session_peer_identity(
+	               test_pair.server_endpoint.driver_arg, 0, &identity) ==
+	       TR_OK);
+	assert(identity == NULL);
+	tls_test_pair_cleanup();
+}
+
+static void test_optional_client_auth_validates_present_certificate(void)
+{
+	static const uint8_t client_uri[] = "spiffe://c-trpc.example/client";
+	struct tr_peer_identity_snapshot *identity = NULL;
+	struct tr_peer_identity_view view;
+	assert(tls_test_pair_open_with_mtls(
+	               test_identity.client_certificate_file,
+	               test_identity.client_private_key_file,
+	               TR_TLS_CLIENT_AUTH_OPTIONAL,
+	               test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	assert(tr_tls_openssl_session_peer_identity(
+	               test_pair.server_endpoint.driver_arg, 0, &identity) ==
+	       TR_OK);
+	assert(identity != NULL);
+	assert(tr_peer_identity_snapshot_view(identity, &view) == TR_OK);
+	assert(view.uri_san_len == sizeof(client_uri) - 1U);
+	assert(memcmp(view.uri_san, client_uri, sizeof(client_uri) - 1U) == 0);
+	tr_peer_identity_snapshot_release(identity);
+	tls_test_pair_cleanup();
+}
+
+static void test_rotated_client_key_keeps_stable_identity(void)
+{
+	static const uint8_t client_uri[] = "spiffe://c-trpc.example/client";
+	struct tr_peer_identity_snapshot *identity = NULL;
+	struct tr_peer_identity_view view;
+	assert(tls_test_pair_open_with_mtls(
+	               test_identity.rotated_client_certificate_file,
+	               test_identity.rotated_client_private_key_file,
+	               TR_TLS_CLIENT_AUTH_REQUIRED,
+	               test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	assert(tr_tls_openssl_session_peer_identity(
+	               test_pair.server_endpoint.driver_arg, 1, &identity) ==
+	       TR_OK);
+	assert(tr_peer_identity_snapshot_view(identity, &view) == TR_OK);
+	assert(view.uri_san_len == sizeof(client_uri) - 1U);
+	assert(memcmp(view.uri_san, client_uri, sizeof(client_uri) - 1U) == 0);
+	tr_peer_identity_snapshot_release(identity);
+	tls_test_pair_cleanup();
+}
+
+static void test_required_client_auth_rejects_wrong_ca(void)
+{
+	assert(tls_test_pair_open_with_mtls(
+	               test_identity.wrong_client_ca_certificate_file,
+	               test_identity.wrong_client_ca_private_key_file,
+	               TR_TLS_CLIENT_AUTH_REQUIRED,
+	               test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() != TR_OK);
+	assert(test_pair.server_endpoint.state !=
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	tls_test_pair_cleanup();
+}
+
+static void test_optional_client_auth_still_rejects_wrong_ca(void)
+{
+	assert(tls_test_pair_open_with_mtls(
+	               test_identity.wrong_client_ca_certificate_file,
+	               test_identity.wrong_client_ca_private_key_file,
+	               TR_TLS_CLIENT_AUTH_OPTIONAL,
+	               test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() != TR_OK);
+	assert(test_pair.server_endpoint.state !=
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	tls_test_pair_cleanup();
+}
+
+static void tls_test_expect_client_identity_error(const char *certificate_file,
+                                                  const char *private_key_file,
+                                                  int expected_status)
+{
+	struct tr_peer_identity_snapshot *identity =
+	        (struct tr_peer_identity_snapshot *)(uintptr_t)1U;
+	assert(tls_test_pair_open_with_mtls(certificate_file, private_key_file,
+	                                    TR_TLS_CLIENT_AUTH_REQUIRED,
+	                                    test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	assert(tr_tls_openssl_session_peer_identity(
+	               test_pair.server_endpoint.driver_arg, 1, &identity) ==
+	       expected_status);
+	assert(identity == NULL);
+	tls_test_pair_cleanup();
+}
+
+static void test_client_identity_requires_one_bounded_uri_san(void)
+{
+	tls_test_expect_client_identity_error(
+	        test_identity.client_no_uri_certificate_file,
+	        test_identity.client_private_key_file, TR_ERR_INVALID);
+	tls_test_expect_client_identity_error(
+	        test_identity.client_duplicate_uri_certificate_file,
+	        test_identity.client_private_key_file, TR_ERR_INVALID);
+	tls_test_expect_client_identity_error(
+	        test_identity.client_empty_uri_certificate_file,
+	        test_identity.client_private_key_file, TR_ERR_INVALID);
+	tls_test_expect_client_identity_error(
+	        test_identity.client_oversized_uri_certificate_file,
+	        test_identity.client_private_key_file, TR_ERR_BAD_LENGTH);
+	tls_test_expect_client_identity_error(
+	        test_identity.client_control_uri_certificate_file,
+	        test_identity.client_private_key_file, TR_ERR_INVALID);
+}
+
+static void test_client_auth_rejects_server_only_eku(void)
+{
+	assert(tls_test_pair_open_with_mtls(
+	               test_identity.client_wrong_eku_certificate_file,
+	               test_identity.client_private_key_file,
+	               TR_TLS_CLIENT_AUTH_REQUIRED,
+	               test_identity.ca_file) == TR_OK);
+	assert(tls_test_handshake_pair() != TR_OK);
+	assert(test_pair.server_endpoint.state !=
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	tls_test_pair_cleanup();
 }
 
 static void test_handshake_maps_want_write_then_want_read(void)
@@ -1581,6 +1777,15 @@ int main(int argc, char **argv)
 	assert(tls_test_identity_init(&test_identity, "tls-b-endpoint") == 0);
 	test_blocking_socket_is_rejected_without_taking_ownership();
 	test_handshake_maps_want_write_then_want_read();
+	test_required_client_auth_rejects_missing_certificate();
+	test_required_client_auth_accepts_valid_certificate();
+	test_optional_client_auth_accepts_missing_certificate();
+	test_optional_client_auth_validates_present_certificate();
+	test_rotated_client_key_keeps_stable_identity();
+	test_required_client_auth_rejects_wrong_ca();
+	test_optional_client_auth_still_rejects_wrong_ca();
+	test_client_identity_requires_one_bounded_uri_san();
+	test_client_auth_rejects_server_only_eku();
 	test_nonblocking_tls_pair_authenticates_and_preserves_fds();
 	test_unexpected_eof_is_not_close_notify();
 	test_cross_process_tls13_authentication_and_fail_closed();
