@@ -9,11 +9,11 @@ jobs:
   changed-source:
     name: 新增与修改行格式门禁
     runs-on: ubuntu-24.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 10
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -22,11 +22,11 @@ jobs:
   rpc-diagnostics:
     name: rpc-diagnostics (gcc, release)
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 30
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
         with:

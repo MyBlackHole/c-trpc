@@ -18,11 +18,11 @@ jobs:
   build-test-gcc:
     name: build-test (gcc)
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -101,11 +101,11 @@ jobs:
   build-test-clang:
     name: build-test (clang)
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -135,11 +135,11 @@ jobs:
   static-analysis-clang:
     name: static-analysis (clang-14)
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 20
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -190,11 +190,11 @@ jobs:
   static-analysis-gcc:
     name: static-analysis (gcc-11)
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 35
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -235,11 +235,11 @@ jobs:
   asan-ubsan:
     name: ASan + UBSan
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -282,11 +282,11 @@ jobs:
   tsan:
     name: ThreadSanitizer
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -328,11 +328,11 @@ jobs:
   build-smoke:
     name: Make compatibility + install
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -542,11 +542,11 @@ jobs:
   crc32c-cpu-fallback:
     name: CRC32C without SSE4.2
     runs-on: ubuntu-22.04
-    env:
-      TMPDIR: ${{ runner.temp }}
-      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
