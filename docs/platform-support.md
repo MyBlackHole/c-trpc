@@ -30,7 +30,7 @@ CRC 回退路径，不能替代跨架构测试。
 
 ## 上线前必须确认
 
-1. 安全边界：普通 V2 Client/Server 可显式启用 TLS 1.3 并验证服务端身份，默认仍为明文；CRC 仍只是损坏检测。transport-only/连接组 TLS、mTLS、CONTROL/DATA 身份绑定和 TLS 完整资源总账尚未完成，因此 TLS-C 本地通过不代表可直接公网发布。压缩要求见[压缩与 TLS 需求](architecture/11-compression-tls-requirements.md)，阶段边界见 [ADR-009](architecture/decisions/ADR-009-tls-byte-endpoint.md)。
+1. 安全边界：TLS-D1 开发分支为普通 V2 和 transport-only 连接组提供 TLS 1.3/mTLS、CONTROL/DATA 主体连续性及 profile 代次轮换；默认仍为明文，CRC 仍只是损坏检测。TLS-D1 的目标 Ubuntu/固定工具链矩阵与 GitHub 验收仍待完成；TLS-E 的 OpenSSL/内核完整资源账本、公网安全门槛和长期负载仍未完成，因此不得据此宣称可直接公网发布。压缩要求见[压缩与 TLS 需求](architecture/11-compression-tls-requirements.md)，阶段边界见 [ADR-009](architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 2. 容量与运维：基于目标硬件、载荷和连接数实测延迟分位、拒绝率、CPU/RSS、fd 上限及资源饱和后的恢复。不要把关闭负载或增大资源后取得的吞吐当作原配置保证。
 3. 故障与长稳：跨进程 TCP、断网/半开、慢读写、重连风暴、长时间运行和升级/回滚须在目标环境验证；普通 CI 与有限故障注入不证明所有故障组合。
 4. 业务语义：RPC 成功不等于数据持久化，也不提供业务幂等或自动安全重放。重试前由上层确定请求是否可能已经生效。

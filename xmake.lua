@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.16")
+set_version("2.0.0-dev.17")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -82,6 +82,7 @@ target("trcore")
         "include/(tr/status.h)",
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
+        "include/(tr/peer_identity.h)",
         "include/(tr/server.h)",
         "include/(tr/tls.h)",
         "include/(tr/transport.h)",

@@ -10,13 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-23-tls-c-reactor-integration-design.md`
 
-**状态：** TLS-C 实现已提交至 PR #310（候选版本 `2.0.0-dev.12`；TLS-C 首次交付为 `.11`）；本地验证完成。PR 的 Clang 14 静态分析曾因既有告警位置从第 330 行漂移至第 345 行而失败，现已核实 `tr_tx_pool_init()` 函数体未变化并更新精确位置基线，等待重跑 CI。PR 合并验收、TLS-D/E、公网与资源门槛仍未完成。
+**状态：** TLS-C 已随 PR #310 于 2026-10-23 合入主线，merge commit 为 `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；PR 的 GCC/Clang 构建测试、RPC smoke、格式、Clang 14/GCC 11 静态分析、ASan/UBSan、TSan、Make/install 和 CRC32C fallback 检查均通过。该切片候选版本为 `2.0.0-dev.12`，首次交付为 `.11`。TLS-D1 开发分支已实现普通 RPC mTLS、连接组身份绑定和 profile 轮换；其全矩阵、固定工具链分析和 GitHub 验收见 [TLS-D1 验证记录](../../reviews/rpc_v2_tls_d1_20261023.md)，TLS-D2/E、公网和完整资源门槛仍未完成。
 
 ## Global Constraints
 
 - 仅读写 TLS 1.3，TLS 必需模式的错误/验证失败关闭连接且不回退明文。
 - Client TLS 握手与 V2 HELLO 共用 TCP connect 开始时的 `CLOCK_MONOTONIC` 绝对期限；Server 沿用接受连接时的 `handshake_timeout_ms` 绝对期限。
-- 只让普通 V2 工厂开放 TLS；`transport-only` 连接组工厂在 TLS-D 身份绑定前，对 `TR_TLS_REQUIRED` 返回 `TR_ERR_UNSUPPORTED`。
+- TLS-C 切片只让普通 V2 工厂开放 TLS；TLS-D1 开发分支现已为 `transport-only` 连接组接入强制 mTLS 和身份绑定，默认仍为明文。
 - TLS 发送的 WANT 重试保持 TX item 代次、片段地址、片段长度；只有成功返回字节才推进 `wire_pos`。
 - 明文发送维持当前 `sendmsg()` + 多 iovec 实现和调度语义。
 - 每轮 TLS 握手/收发服从现有 Reactor IO quantum、ready dispatch 和 parser/RX 背压限制；不忙等 OpenSSL WANT。

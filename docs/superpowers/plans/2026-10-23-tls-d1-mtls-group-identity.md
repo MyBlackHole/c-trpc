@@ -229,26 +229,27 @@ Graceful update 使新 TLS 接管用新 generation，已接管 session 保持旧
 ### Task 5: TLS-D1 全矩阵、记录与 GitHub 验收
 
 **Files:**
+- Modify: `.github/workflows/ci.yml`, `xmake.lua` (SDK header installation boundary)
 - Modify: `README.md`, `docs/rpc-v2-sdk.md`, `docs/build.md`, `docs/platform-support.md`
 - Modify: `docs/superpowers/plans/2026-10-23-tls-c-reactor-integration.md`
 - Modify: `docs/reviews/rpc_v2_tls_c_20261023.md`, `docs/reviews/v2_remaining_work.md`
 - Create: `docs/reviews/rpc_v2_tls_d1_20261023.md`
 
-- [ ] **Step 1: 更新 TLS-C 已合入状态与 TLS-D1 已交付边界**
+- [x] **Step 1: 更新 TLS-C 已合入状态与 TLS-D1 已交付边界**
 
-把 TLS-C review/plan 从“PR 等待/未合并”改为 PR #310 merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a` 和已通过的 main CI；Remaing-work 表标出 TLS-C 主线状态、TLS-D2 与 TLS-E 未完成。TLS-D1 review 列出真实命令、版本、identity 约束和没有验证的 OpenSSL/RSS 预算。
+TLS-C review/plan 已记录 PR #310 merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a` 和成功的 GitHub 检查；Remaining-work、SDK/build/platform 文档已记录 TLS-D1 当前实现边界以及 TLS-D2/E 未完成。TLS-D1 review 补充本地实测命令、工具版本、identity 约束和未验证的 OpenSSL/RSS 预算。
 
-- [ ] **Step 2: 运行 GCC Debug、GCC Release、Clang Release、ASan/UBSan 与 TSan 全量矩阵**
+- [x] **Step 2: 运行 GCC Debug、GCC Release、Clang Release、ASan/UBSan 与 TSan 全量矩阵**
 
-每种配置先执行 `xmake f -c -y -m <mode> --toolchain=<gcc|clang> --crc32c_portable=n`，再执行 `xmake build --all -v` 和 `xmake test -v -j1`；每条命令都导向 `build/test-tmp`，日志保存在 `build/tls-d1/`。目标平台为 Ubuntu 22.04 / OpenSSL 3.0。
+五种配置均执行配置、`xmake build --all -v` 和 `xmake test -v -j1`，各 88/88 通过；矩阵与复测日志保存在 `build/tls-d1/`。本机为 Arch Linux、GCC 16.2.1、Clang 23.1.3、OpenSSL 3.6.5、Xmake 3.1.2；不把本机结果称为 Ubuntu 22.04 / OpenSSL 3.0 的等价验证。SDK 白名单修正后的 dev.17 又通过 GCC Release 88/88。
 
 - [ ] **Step 3: 运行源码格式、安装消费端和固定静态分析**
 
-检查修改行 clang-format、`git diff --check`、Make/install SDK 消费端、GCC 11/Clang 14 精确告警门禁与 CRC32C 隐藏 SSE4.2 路径；未覆盖的完整 OpenSSL/RSS 硬预算明确留给 TLS-E。
+本地修改行格式检查、22 项格式脚本自测、Make all/test/test-timer/clean/compiler-switch、安装头文件边界、GCC/Clang C11 与 G++/Clang++ C++11 公共头及 V2 消费端、portable CRC32C 和 QEMU 隐藏 SSE4.2 均通过。发现并修复 `peer_identity.h` 未安装问题。固定 GCC 11/Clang 14 分析器未安装在本机，需由本分支 PR CI 确认；Xmake 3.1.2 下 `test_compile_commands.py` 的临时副本 project-dir 自测失败，但当前 checkout 的 GCC/Clang 编译数据库各 47 个生产单元校验通过。完整 OpenSSL/RSS 硬预算留给 TLS-E。
 
-- [ ] **Step 4: 推送 TLS-D1 分支并等待 GitHub CI 全绿**
+- [ ] **Step 4: 创建 TLS-D1 PR 并等待 GitHub CI 全绿**
 
-推送 `feat/v2-tls-d-234`，PR 描述包含 D1 scope、版本序列、所有本地/CI 证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
+`feat/v2-tls-d-234` 已推送到 `e35cb85`；SDK header 安装修复及阶段记录提交后创建 PR。PR 描述包含 D1 scope、版本序列、所有本地/CI 证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
 
 - [ ] **Step 5: 合并、更新 #234 并清理已合入远程分支**
 

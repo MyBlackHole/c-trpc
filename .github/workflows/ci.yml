@@ -423,6 +423,7 @@ jobs:
           cat > "$RUNNER_TEMP/expected-headers.txt" <<'EOF'
           client.h
           facade.h
+          peer_identity.h
           rpc.h
           rpc_codec.h
           rpc_v2.h

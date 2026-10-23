@@ -218,9 +218,12 @@ Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
 
 合并归档不等于做了符号隔离；同时链接另一个 Zstandard 实现可能产生符号冲突或
 版本选择问题，不属于当前保证范围。升级、符号命名/隔离及依赖锁定仍须独立验证。
-当前不安装新的 Message 内部头文件。普通 V2 Client/Server 的 TLS 必需模式使用
-OpenSSL 3 TLS 1.3，并验证服务端证书身份；默认仍关闭 TLS。静态 SDK 消费端链接
-`-lssl -lcrypto`。transport-only/连接组 TLS 与 mTLS 尚未支持；当前阶段和验证限制见
-[TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)及 [ADR-009](architecture/decisions/ADR-009-tls-byte-endpoint.md)。
+当前 SDK 安装白名单包含 `peer_identity.h`，因为公开 `transport.h` 的授权回调使用
+`tr_peer_identity_view`。TLS-D1 开发分支为普通 V2 Client/Server 和 transport-only
+连接组提供 OpenSSL 3 TLS 1.3/mTLS、CONTROL/DATA 主体绑定与 profile 轮换；默认仍关闭
+TLS。静态 SDK 消费端链接 `-lssl -lcrypto`。TLS-D1 固定版本静态分析与 GitHub 验收仍待完成；
+完整资源账本和公网门槛属于 TLS-E。阶段范围见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)、
+[TLS-D1 验证记录](reviews/rpc_v2_tls_d1_20261023.md)及
+[ADR-009](architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 第三方来源与 MSG-B 阶段范围见 [MSG-B 实现审查](reviews/message_transform_zstd_20261015.md)，
 实际 Runtime 接入及本次 SDK 修复见 [MSG-D 审查](reviews/runtime_message_recovery_20261015.md)。

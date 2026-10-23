@@ -344,8 +344,17 @@ TLS 握手成功后才发送/解析 TRR1。TCP 连接、TLS 握手和 TRR1 前�
 CONTROL/DATA 路由都运行授权回调，应用可进一步限制客户端主体。配置不支持的其他功能
 会明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
 
-完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)
-和 [TLS-D1 设计与实施计划](superpowers/specs/2026-10-23-tls-d1-mtls-group-identity-design.md)。
+已启用 `TR_TLS_REQUIRED` 的 Client 和 Server 可分别调用
+`tr_client_tls_update_profile()`、`tr_server_tls_update_profile()` 更新 TLS profile。
+调用方须在外部控制线程串行化实例生命周期操作；成功时 generation 单调递增，失败时
+不修改 `out_generation`。`TR_TLS_ROTATE_GRACEFUL` 让已接管连接继续持有旧快照，新连接
+使用新快照；连接组需关闭并重连 CONTROL 才切换到新代次，Server 会拒绝旧 CONTROL 上的
+新代次 DATA。`TR_TLS_ROTATE_REVOKE_OLD` 立即关闭旧代次连接，在途 RPC 可能以连接错误结束。
+TLS 更新不能把明文实例切换为 TLS，也不能关闭 TLS 降级为明文。
+
+完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)、
+[TLS-D1 验证记录](reviews/rpc_v2_tls_d1_20261023.md)和
+[TLS-D1 设计与实施计划](superpowers/specs/2026-10-23-tls-d1-mtls-group-identity-design.md)。
 
 普通 `tr_server_create()` 只构造 V2 RPC Server；需要连接组或纯传输能力时使用
 `tr_server_create_transport()`。transport-only 保留 Runtime、Reactor、Channel
