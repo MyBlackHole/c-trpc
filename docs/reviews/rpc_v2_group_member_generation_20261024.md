@@ -4,7 +4,8 @@
 
 基线：`f73d8bb4d214fe71393eb8fa5e1cb0d8fbf01741`（main，2.0.0-dev.17）。实现提交
 [`5adc946`](https://github.com/MyBlackHole/c-trpc/commit/5adc946) 将版本升至 `.18`；后续排查
-发现并修复同一变更引入的请求字段未初始化问题，当前分支版本为 `2.0.0-dev.19`。
+发现并修复同一变更引入的请求字段未初始化问题，修复提交为
+[`2306ae1`](https://github.com/MyBlackHole/c-trpc/commit/2306ae1)，当前分支版本为 `2.0.0-dev.19`。
 关联 [#242](https://github.com/MyBlackHole/c-trpc/issues/242)，仅覆盖连接组 epoch 与迟到
 DATA 路由能力隔离。
 
@@ -42,6 +43,8 @@ Pipeline 注册表现在分配注册表生命周期内全局唯一、单调递�
   单测覆盖满容量拒绝不消耗代次。
 - 仓库正式源码格式门禁：clang-format 18.1.8 检查 9 个修改源码文件，0 失败；
   `git diff --check` 通过。
+- 首轮 GitHub CI 的 GCC Debug 与 Clang 14 门禁复现同一未初始化问题；本记录对应修复提交
+  `2306ae1`，其后续 CI 结果以 PR #313 当前 head 的检查状态为准。
 - 所有测试临时目录、Xmake 临时目录与原始日志使用仓库 `build/`；原始日志位于忽略目录
   `build/v2-group-drain-242/logs/`。
 
@@ -54,4 +57,4 @@ Pipeline 注册表现在分配注册表生命周期内全局唯一、单调递�
 
 该提交**不表示 #242 或 V2 完成**。GOAWAY 接受/未接受边界、RESET 与 DATA 的完整错误分类、
 连接组 CONTROL/DATA 全部交错故障矩阵、资源回收证明仍待后续实施与验收。完整回滚需撤销
-代次功能提交及其初始化修正；回滚也会恢复本记录描述的迟到路由复用问题。
+`2306ae1`、文档记录提交及 `5adc946`；回滚也会恢复本记录描述的迟到路由复用问题。
