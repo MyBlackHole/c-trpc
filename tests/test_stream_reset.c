@@ -786,22 +786,70 @@ static int control_pressure_owner(void *arg)
 	return TR_OK;
 }
 
-static void test_open_admission_failure(int initial_credit)
+static int control_pressure_without_retry_owner(void *arg)
+{
+	int ret = control_pressure_owner(arg);
+	fail_reset_arm = 1;
+	return ret;
+}
+
+static void test_open_admission_boundaries(int initial_credit)
 {
 	struct fixture f;
 	init_fixture(&f, 1, 0, 1, 1, 1);
 	if (initial_credit) {
 		atomic_store(&block_all_tx, 1);
-		assert(tr_reactor_call(f.reactor, control_pressure_owner, &f) ==
-		       TR_OK);
+		assert(tr_reactor_call(
+		               f.reactor,
+		               initial_credit == 2
+		                       ? control_pressure_without_retry_owner
+		                       : control_pressure_owner,
+		               &f) == TR_OK);
 	} else {
 		(void)open_remote(&f, 0, 1, 1);
 	}
-	/* 槽位耗尽和初始信用无法准入都必须终止精确连接，不能静默留下
-	 * 永远等不到 WINDOW_UPDATE 的发起方，也不能容忍未知 RESET。 */
 	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 3, WINDOW, NULL, 0);
+	if (initial_credit == 2) {
+		/* 无法取得维护定时器责任时不能留下永久暂停或未确认流。 */
+		wait_count(&f, &f.down, 2);
+		assert(f.down_status == TR_ERR_SYS);
+		assert(tr_channel_active_streams(f.channel) == 0);
+		assert(count(&f, &f.opened) == 0 && count(&f, &f.resets) == 0);
+		destroy_fixture(&f);
+		return;
+	}
+	if (initial_credit == 1) {
+		/* 控制池满时已有一个有界流槽承担重试；恢复后仍可正常 RESET，
+		 * 不能提前交付 OPENED，也不能把暂时背压升级为整连接失败。 */
+		struct tr_connection_stats stats;
+		for (unsigned i = 0;; ++i) {
+			assert(i < 5000);
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[0], &stats) == TR_OK);
+			if (stats.rx_paused)
+				break;
+			pause_ms();
+		}
+		assert(count(&f, &f.down) == 0 && count(&f, &f.opened) == 0);
+		atomic_store(&block_all_tx, 0);
+		for (unsigned i = 0; i < CONTROL; ++i) {
+			struct tr_frame_header h = receive_frame(&f, 0);
+			assert(h.type == TR_FRAME_PING &&
+			       h.message_id == 100 + i);
+		}
+		struct tr_frame_header h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_WINDOW_UPDATE && h.stream_id == 3 &&
+		       h.message_id == WINDOW);
+		wait_count(&f, &f.opened, 1);
+		assert(reset(&f, f.stream[0], TR_ERR_CLOSED) == TR_OK);
+		finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+		assert(count(&f, &f.down) == 0);
+		destroy_fixture(&f);
+		return;
+	}
+	/* 无空闲流槽就没有待办责任；保留明确的容量失败，不增加拒绝表。 */
 	wait_count(&f, &f.down, 2);
-	assert(f.down_status == (initial_credit ? TR_ERR_STATE : TR_ERR_NOMEM));
+	assert(f.down_status == TR_ERR_NOMEM);
 	assert(tr_channel_active_streams(f.channel) == 0);
 	assert(count(&f, &f.resets) == 0);
 	destroy_fixture(&f);
@@ -1067,8 +1115,9 @@ int main(void)
 	test_closed_reentrant_open_fifo();
 	test_opening_and_refusal();
 	test_opening_local_close();
-	test_open_admission_failure(0);
-	test_open_admission_failure(1);
+	test_open_admission_boundaries(0);
+	test_open_admission_boundaries(1);
+	test_open_admission_boundaries(2);
 	test_receive_isolation(0);
 	test_receive_isolation(1);
 	test_closed_receive_resource_failure();

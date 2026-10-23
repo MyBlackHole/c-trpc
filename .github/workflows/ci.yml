@@ -20,6 +20,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -100,6 +103,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -131,6 +137,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -183,6 +192,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 35
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -225,6 +237,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -269,6 +284,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -312,6 +330,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: 准备私有中文消息 locale
         run: |
@@ -523,6 +544,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
         with:

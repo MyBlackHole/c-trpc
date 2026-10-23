@@ -72,6 +72,11 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 int tr_reactor_close_on_owner(struct tr_conn_handle connection);
 int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
 
+/* 协议层对精确连接代次施加/解除接收背压，不等待命令容量。
+ * 与缓冲池 RESUME_RX 独立；释放只调度接收，不在本次调用中分派帧。
+ * 只允许该反应器所有者调用，连接退役后自动清除。 */
+int tr_reactor_set_rx_hold_on_owner(struct tr_conn_handle connection, int held);
+
 /* 仅限所有者的终止控制发送。GOAWAY 使用一个 Connection 内嵌的
  * 仅含头部发送槽位，独立于普通控制发送池或命令容量。
  */
