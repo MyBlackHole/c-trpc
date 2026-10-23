@@ -973,6 +973,7 @@ static void test_stale_data_preface_cannot_cross_pipeline_recreation(void)
 	struct tr_pipeline_listener_stats stats;
 	struct tr_pipeline_control_wire_message offer;
 	struct tr_pipeline_route_preface old_control_route;
+	struct tr_pipeline_route_preface old_attached_route;
 	struct tr_pipeline_route_preface old_data_route;
 	struct tr_pipeline_route_preface new_data_route;
 	uint8_t old_data_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
@@ -980,6 +981,7 @@ static void test_stale_data_preface_cannot_cross_pipeline_recreation(void)
 	struct data_test_ctx data_ctx;
 	uint16_t port = 0U;
 	int old_control = -1;
+	int old_attached_data = -1;
 	int new_control = -1;
 	int stale_data = -1;
 	int new_data = -1;
@@ -994,8 +996,8 @@ static void test_stale_data_preface_cannot_cross_pipeline_recreation(void)
 	config.owner = reactor;
 	config.owner_shard_id = 0U;
 	config.pipeline_capacity = 1U;
-	config.connection_capacity = 3U;
-	config.data_capacity_per_pipeline = 1U;
+	config.connection_capacity = 4U;
+	config.data_capacity_per_pipeline = 2U;
 	config.stream_affinity_capacity_per_pipeline = 2U;
 	config.control_message_count = 4U;
 	config.authorize_control = authorize_control;
@@ -1029,11 +1031,33 @@ static void test_stale_data_preface_cannot_cross_pipeline_recreation(void)
 	send_all(stale_data, old_data_raw, TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
 	wait_listener_counts(listener, 1U, 2U);
 
+	/* 同一 CONTROL 下另一个 DATA 已附着。CONTROL 丢失时它必须关闭，
+	 * pending 前导则继续由入口路由器独立校验。
+	 */
+	memset(&offer, 0, sizeof(offer));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_1, UINT64_C(7103),
+	               &old_attached_route) == TR_OK);
+	recv_control_message(old_control, UINT64_C(7103), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer.data_index == old_attached_route.member_index);
+	assert(offer.data_generation == old_attached_route.member_generation);
+	assert(old_attached_route.member_index != old_data_route.member_index);
+	old_attached_data = connect_loopback(port);
+	send_route(old_attached_data, &old_attached_route);
+	wait_listener_counts(listener, 1U, 3U);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+	assert(stats.data_accepts == 1U);
+
 	/* CONTROL 致命丢失销毁旧 Pipeline；未完成前导的 TCP 连接仍在。
 	 */
 	shutdown(old_control, SHUT_RDWR);
 	close(old_control);
 	old_control = -1;
+	wait_peer_close(old_attached_data);
+	close(old_attached_data);
+	old_attached_data = -1;
 	wait_listener_counts(listener, 0U, 1U);
 
 	/* 故意重用组 ID 与 epoch，隔离验证 DATA 成员代次不能随 Pipeline
@@ -1064,7 +1088,7 @@ static void test_stale_data_preface_cannot_cross_pipeline_recreation(void)
 
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
-	assert(stats.data_accepts == 0U);
+	assert(stats.data_accepts == 1U);
 	assert(stats.pipelines_current == 1U);
 
 	new_data = connect_loopback(port);

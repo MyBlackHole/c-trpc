@@ -537,7 +537,7 @@ static int tr_pipeline_add_data_on_owner(void *arg)
 {
 	struct tr_pipeline_data_add_request *request =
 		(struct tr_pipeline_data_add_request *)arg;
-	struct tr_pipeline_data_reserve_request reserve;
+	struct tr_pipeline_data_reserve_request reserve = {0};
 	struct tr_pipeline_data_attach_request attach;
 	int ret;
 

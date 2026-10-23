@@ -29,6 +29,7 @@
 **步骤：**
 
 - [x] 新增一个独立测试：创建 listener 和旧 CONTROL，签发 DATA_OFFER；编码前导，只向 DATA 套接字发送前 47 字节。
+- [x] 在该旧 CONTROL 下附着另一个 DATA；CONTROL 丢失时确认已附着 DATA 关闭，而 pending 前导仍保留至独立路由校验。
 - [x] 关闭旧 CONTROL，等待旧 Pipeline 计数归零，同时确认 pending DATA 连接仍占一个连接槽。
 - [x] 使用完全相同的 `pipeline_id/epoch` 建立新 CONTROL 并签发新 DATA_OFFER；断言成员索引相同而成员代次不同。
 - [x] 补齐旧 DATA 前导；等待路由拒绝计数增加，并断言 `data_accepts` 未增加、新预留仍可用。
@@ -78,7 +79,7 @@
 **步骤：**
 
 - [x] 文档说明成员 generation 在单个分片注册表生命周期内全局唯一、不回绕；组 epoch 在服务进程重启后必须更新。
-- [x] 按开发版本规则把 `xmake.lua` 从 `2.0.0-dev.17` 递增到 `2.0.0-dev.18`；若后续 TLS-D2 先合入，集成时重新基于实际 main 处理唯一版本行，不改 PR #312 的 draft 状态。
+- [x] 按开发版本规则把 `xmake.lua` 从 `2.0.0-dev.17` 递增到 `.18`；修复发现的预留请求未初始化问题后再递增至 `.19`。若后续 TLS-D2 先合入，集成时重新基于实际 main 处理唯一版本行，不改 PR #312 的 draft 状态。
 - [x] 对本次修改的 C/H 文件执行 clang-format 18.1.8 修改行检查。
 - [x] 运行连接组、Pipeline、TLS 连接组、Channel 和 RPC 目标聚焦回归，再运行 GCC release 全量测试。
 - [x] 记录精确 HEAD、RED/GREEN、测试目标、格式结果和边界；不得把本切片登记为 #242 或整体 V2 完成。

@@ -23,10 +23,11 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 已打开流的非法 DATA 类型标志收敛为单流 RESET；#242 的连接组边界、
 排空竞争及完整错误矩阵仍未完成。
 
-dev.18 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
+dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
-DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。该切片不覆盖 GOAWAY 接受
-边界、RESET/错误分类或 #242 的完整组合故障矩阵。
+DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
+入口未初始化新请求字段的问题，并覆盖一个 DATA 已附着、另一个前导仍 pending 时的
+CONTROL 丢失交错。该切片不覆盖 GOAWAY 接受边界、RESET/错误分类或 #242 的完整组合故障矩阵。
 
 #234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
 界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权。dev.9 的
