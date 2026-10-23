@@ -1,5 +1,8 @@
 # 平台、SDK 与部署契约
 
+`2.0.0-dev.1` 的当前评估见 [R17 发行边界与后续责任](reviews/rpc_v2_release_boundary_20261023.md)，
+其中区分实际主线验收、性能诊断负结果与尚未完成的专项，不构成稳定版发布批准。
+
 ## 已验证范围
 
 - 主要实现是 Linux 专用的 C11 静态库，使用 pthread、epoll、eventfd、accept4、TCP 等接口，以及 GCC/Clang 的 cleanup 属性。
