@@ -46,6 +46,8 @@ struct tr_runtime_shard_config {
 	 * 此能力之前，0 表示仅记账、不设上限。
 	 */
 	uint64_t memory_budget_bytes;
+	/* 可选共享根预算；存活期覆盖 Runtime 与其所有未释放视图。 */
+	struct tr_memory_budget *memory_budget_parent;
 
 	/* capacity==0 明确关闭消息服务，保持无消息变换时不创建额外线程。
 	 * 启用时要求非零分片硬预算；由 Runtime 创建、停止并回收。 */

@@ -1,5 +1,6 @@
 #include "../src/runtime/runtime_internal.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/execution/buffer_internal.h"
 
 #include "tr/status.h"
 #include "../src/io/socket.h"
@@ -9,6 +10,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -554,6 +556,167 @@ static void test_runtime_shard_memory_budget(void)
 	assert(runtime == NULL);
 }
 
+static void test_shared_memory_budget_admission(void)
+{
+	struct tr_memory_budget root, first, second;
+	struct tr_memory_budget_stats stats;
+
+	tr_memory_budget_init(&root, 16U);
+	assert(tr_memory_budget_init_child(&first, 16U, &root) == TR_OK);
+	assert(tr_memory_budget_init_child(&second, 16U, &root) == TR_OK);
+	assert(tr_memory_budget_init_child(&second, 16U, &first) ==
+	       TR_ERR_INVALID);
+	assert(tr_memory_budget_init_child(&root, 16U, &root) ==
+	       TR_ERR_INVALID);
+	assert(tr_memory_budget_reserve(&first, 12U) == TR_OK);
+	assert(tr_memory_budget_reserve(&second, 4U) == TR_OK);
+	assert(tr_memory_budget_reserve(&second, 1U) == TR_AGAIN);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 16U);
+	assert(stats.rejection_events == 1U);
+	assert(tr_memory_budget_release(&first, 12U) == TR_OK);
+	assert(tr_memory_budget_reserve(&second, 1U) == TR_OK);
+	assert(tr_memory_budget_release(&second, 5U) == TR_OK);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 0U);
+
+	/* 子限额拒绝须撤回父预留；另一子随后仍能取得全部空间。 */
+	tr_memory_budget_init(&root, 16U);
+	assert(tr_memory_budget_init_child(&first, 8U, &root) == TR_OK);
+	assert(tr_memory_budget_init_child(&second, 16U, &root) == TR_OK);
+	assert(tr_memory_budget_reserve(&first, 9U) == TR_AGAIN);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(tr_memory_budget_reserve(&second, 16U) == TR_OK);
+	assert(tr_memory_budget_release(&first, 1U) == TR_ERR_STATE);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 16U);
+	assert(tr_memory_budget_release(&second, 16U) == TR_OK);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 0U);
+
+	tr_memory_budget_init(&root, 0U);
+	assert(tr_memory_budget_init_child(&first, 0U, &root) == TR_OK);
+	assert(tr_memory_budget_init_child(&second, 0U, &root) == TR_OK);
+	assert(tr_memory_budget_reserve(&first, 0U) == TR_OK);
+	assert(tr_memory_budget_release(&first, 0U) == TR_OK);
+	assert(tr_memory_budget_reserve(&first, UINT64_MAX) == TR_OK);
+	assert(tr_memory_budget_reserve(&second, 1U) == TR_ERR_STATE);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == UINT64_MAX);
+	assert(tr_memory_budget_release(&first, UINT64_MAX) == TR_OK);
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 0U);
+}
+
+struct shared_budget_race {
+	struct tr_memory_budget *budget;
+	_Atomic unsigned *ready;
+	_Atomic unsigned *attempted;
+	int result;
+};
+
+static void *shared_budget_race_main(void *arg)
+{
+	struct shared_budget_race *race = arg;
+
+	atomic_fetch_add(race->ready, 1U);
+	while (atomic_load(race->ready) != 2U)
+		sched_yield();
+	race->result = tr_memory_budget_reserve(race->budget, 12U);
+	atomic_fetch_add(race->attempted, 1U);
+	while (atomic_load(race->attempted) != 2U)
+		sched_yield();
+	if (race->result == TR_OK)
+		assert(tr_memory_budget_release(race->budget, 12U) == TR_OK);
+	return NULL;
+}
+
+static void test_shared_memory_budget_concurrent_admission(void)
+{
+	struct tr_memory_budget root, children[2];
+	struct tr_memory_budget_stats stats;
+	_Atomic unsigned ready = 0U, attempted = 0U;
+	struct shared_budget_race races[2];
+	pthread_t threads[2];
+
+	tr_memory_budget_init(&root, 16U);
+	for (unsigned i = 0; i < 2U; ++i) {
+		assert(tr_memory_budget_init_child(&children[i], 16U, &root) ==
+		       TR_OK);
+		races[i] = (struct shared_budget_race){
+		        &children[i], &ready, &attempted, TR_ERR_STATE};
+		assert(pthread_create(&threads[i], NULL,
+		                      shared_budget_race_main, &races[i]) == 0);
+	}
+	for (unsigned i = 0; i < 2U; ++i)
+		assert(pthread_join(threads[i], NULL) == 0);
+	assert((races[0].result == TR_OK && races[1].result == TR_AGAIN) ||
+	       (races[1].result == TR_OK && races[0].result == TR_AGAIN));
+	tr_memory_budget_get_stats(&root, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(stats.peak_bytes == 12U);
+	assert(stats.rejection_events == 1U);
+}
+
+static void test_runtime_shards_share_memory_budget(void)
+{
+	struct tr_runtime_config config;
+	struct tr_runtime_shard_config shards[2];
+	struct tr_memory_budget root;
+	struct tr_memory_budget_stats first, second, total;
+	struct tr_buffer_pool held_pool;
+	struct tr_buffer *held = NULL;
+	struct tr_runtime *runtime = NULL;
+	struct tr_memory_budget *first_budget, *second_budget;
+
+	tr_memory_budget_init(&root, 0U);
+	runtime_test_config_init(&config, shards, 2U);
+	for (uint32_t i = 0; i < 2U; ++i) {
+		shards[i].peer_capacity = 2U;
+		shards[i].memory_budget_bytes = UINT64_MAX;
+		shards[i].memory_budget_parent = &root;
+	}
+	assert(tr_runtime_create(&config, &runtime) == TR_OK);
+	first_budget = tr_runtime_shard_memory_budget(
+	        tr_runtime_shard_at(runtime, 0U));
+	second_budget = tr_runtime_shard_memory_budget(
+	        tr_runtime_shard_at(runtime, 1U));
+	tr_memory_budget_get_stats(first_budget, &first);
+	tr_memory_budget_get_stats(second_budget, &second);
+	tr_memory_budget_get_stats(&root, &total);
+	assert(total.current_bytes ==
+	       first.current_bytes + second.current_bytes);
+	assert(total.current_bytes > 0U);
+	root.limit_bytes = total.current_bytes + 12U;
+	assert(tr_memory_budget_reserve(first_budget, 12U) == TR_OK);
+	assert(tr_memory_budget_reserve(second_budget, 1U) == TR_AGAIN);
+	assert(tr_memory_budget_release(first_budget, 12U) == TR_OK);
+	assert(tr_memory_budget_reserve(second_budget, 12U) == TR_OK);
+	assert(tr_memory_budget_release(second_budget, 12U) == TR_OK);
+	root.limit_bytes = 0U;
+	assert(tr_buffer_pool_init_budgeted(&held_pool, 1U, 64U,
+	                                    first_budget) == TR_OK);
+	assert(tr_buffer_acquire(&held_pool, 1U, &held) == TR_OK);
+	assert(tr_buffer_pool_destroy(&held_pool) == TR_ERR_STATE);
+	assert(tr_runtime_destroy(runtime) == TR_AGAIN);
+	tr_memory_budget_get_stats(&root, &total);
+	assert(total.current_bytes > 0U);
+	tr_buffer_release(held);
+	assert(tr_buffer_pool_destroy(&held_pool) == TR_OK);
+	assert(tr_runtime_destroy(runtime) == TR_OK);
+	tr_memory_budget_get_stats(&root, &total);
+	assert(total.current_bytes == 0U);
+
+	/* 第二个分片尚未创建时的根预算失败仍须撤回先前分片。 */
+	tr_memory_budget_init(&root, first.current_bytes + 1U);
+	runtime = NULL;
+	assert(tr_runtime_create(&config, &runtime) == TR_AGAIN);
+	assert(runtime == NULL);
+	tr_memory_budget_get_stats(&root, &total);
+	assert(total.current_bytes == 0U);
+}
+
 static void test_runtime_destroy_retries_peer_budget_release(void)
 {
 	struct tr_runtime_config config;
@@ -695,6 +858,9 @@ int main(void)
 	RUN_TEST(test_runtime_shard_peer_event_source);
 	RUN_TEST(test_runtime_shard_peer_event_dispatch);
 	RUN_TEST(test_runtime_shard_memory_budget);
+	RUN_TEST(test_shared_memory_budget_admission);
+	RUN_TEST(test_shared_memory_budget_concurrent_admission);
+	RUN_TEST(test_runtime_shards_share_memory_budget);
 	RUN_TEST(test_runtime_destroy_retries_peer_budget_release);
 	RUN_TEST(test_runtime_self_stop_context_guards);
 	RUN_TEST(test_runtime_lifecycle);

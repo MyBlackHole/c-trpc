@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.6")
+set_version("2.0.0-dev.7")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -834,7 +834,8 @@ target("test_server_record")
     set_default(false)
     add_files("tests/test_server_record.c")
     add_deps("trcore")
-    add_ldflags("-Wl,--wrap=tr_reactor_start",
+    add_ldflags("-Wl,--wrap=tr_runtime_create",
+                "-Wl,--wrap=tr_reactor_start",
                 "-Wl,--wrap=tr_reactor_timer_arm",
                 "-Wl,--wrap=tr_task_executor_create",
                 "-Wl,--wrap=tr_task_executor_start",

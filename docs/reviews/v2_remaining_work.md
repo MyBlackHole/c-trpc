@@ -15,6 +15,10 @@ dev.6 的 [Channel 预算修复](rpc_v2_channel_budget_20261023.md) 将普通 V2
 Client/Server 的 Channel 固定对象、流槽和索引接入所属 shard 的共享内存预算。
 这只覆盖 #241 的一个固定存储缺口；分域/全局账本与组合矩阵仍在下表。
 
+dev.7 的 [服务端共享预算](rpc_v2_shared_memory_budget_20261023.md) 将普通 V2
+Server 的 shard 本地账目连接到单个 Server 总额，避免旧等分额度过早拒绝。
+租户、跨 Server、压缩等预算域和完整资源矩阵仍未完成。
+
 ## 持续开发顺序
 
 | 范围 | 当前剩余工作 | GitHub |
