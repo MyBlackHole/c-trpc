@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.10")
+set_version("2.0.0-dev.11")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -775,6 +775,9 @@ target("test_rpc_record_endpoint_tcp")
             "src/execution/timer_queue.c",
             "src/execution/deadline.c",
             "src/execution/reactor.c",
+            "src/io/byte_endpoint.c",
+            "src/io/tls_config.c",
+            "src/io/tls_openssl.c",
             "src/io/socket.c",
             "src/io/connector.c",
             "src/transport/protocol/wire.c",
@@ -807,6 +810,7 @@ target("test_rpc_record_endpoint_tcp")
             assert(count == 1, "V2 独立网络验证的生产对象必须唯一: " .. source)
         end
     end)
+    add_syslinks("ssl", "crypto")
     after_link(function (target)
         -- 防止以后重新继承 trcore 后把旧 RPC 实现悄悄带回这个证明目标。
         local v1_symbols = {
@@ -960,6 +964,17 @@ target("test_rpc_v2_sdk")
     add_files("tests/test_rpc_v2_sdk.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 普通 V2 Reactor 的 TLS 端到端、认证顺序、分片与明文快速路径回归。
+target("test_rpc_v2_tls_reactor")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_tls_reactor.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=connect", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

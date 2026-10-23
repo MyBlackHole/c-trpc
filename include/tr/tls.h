@@ -5,10 +5,11 @@
 extern "C" {
 #endif
 
-// 备注: required 表示握手必须成功；任何失败都不能改用明文传输。
+// 备注: 普通 V2 的 required 表示 TLS 1.3
+// 握手必须成功；任何失败都不能改用明文传输。
 enum tr_tls_mode { TR_TLS_DISABLED = 0, TR_TLS_REQUIRED = 1 };
 
-// 备注: 服务端请求或强制客户端证书的策略；TLS-B 仅实现 none。
+// 备注: 服务端请求或强制客户端证书的策略；当前仅实现 none，mTLS 留至 TLS-D。
 enum tr_tls_client_auth_policy {
 	TR_TLS_CLIENT_AUTH_NONE = 0,
 	TR_TLS_CLIENT_AUTH_OPTIONAL = 1,

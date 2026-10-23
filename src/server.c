@@ -22,6 +22,7 @@
 #include "execution/reactor_internal.h"
 #include "io/socket.h"
 #include "io/tls_config.h"
+#include "io/tls_openssl.h"
 #include "tr/status.h"
 #include "runtime/runtime_internal.h"
 #include "io/socket_internal.h"
@@ -101,6 +102,7 @@ static int tr_server_blocking_lifecycle_context(void)
 struct tr_server {
 	struct tr_server_config config;
 	enum tr_server_mode mode;
+	struct tr_tls_openssl_profile *tls_profile;
 
 	struct tr_runtime *runtime;
 	struct tr_server_shard *shards;
@@ -121,6 +123,7 @@ struct tr_server {
 	pthread_cond_t record_drain_cond;
 	int record_drain_cond_ready;
 	int started;
+	int gracefully_drained;
 	/* 只有构造完成并发布后才允许读取跨分片统计；终止销毁开始后关闭。 */
 	int published;
 };
@@ -1212,8 +1215,16 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 			goto rollback;
 	}
 
-	ret = tr_reactor_adopt_fd(tr_server_shard_reactor(shard), owned_fd,
-				  &peer->connection);
+	if (server->tls_profile) {
+		ret = tr_reactor_adopt_tls_fd_on_owner(
+		        tr_server_shard_reactor(shard), owned_fd,
+		        server->tls_profile,
+		        tr_deadline_to_ns(&peer->handshake_deadline),
+		        &peer->connection);
+	} else {
+		ret = tr_reactor_adopt_fd(tr_server_shard_reactor(shard),
+		                          owned_fd, &peer->connection);
+	}
 	if (ret != TR_OK)
 		goto rollback;
 	(void)tr_fd_take(&owned_fd);
@@ -1357,9 +1368,14 @@ tr_server_create_internal(enum tr_server_mode mode,
 	else
 		tr_server_config_init(&effective);
 	tr_server_normalize_config(&effective);
-	ret = tr_tls_server_config_validate(&effective.tls, 0);
+	ret = tr_tls_server_config_validate(
+	        &effective.tls, mode == TR_SERVER_MODE_RPC_V2 ? 1 : 0);
 	if (ret != TR_OK)
 		return ret;
+	if (effective.tls.mode == TR_TLS_REQUIRED &&
+	    (mode != TR_SERVER_MODE_RPC_V2 ||
+	     effective.connection_groups.max_groups != 0U))
+		return TR_ERR_UNSUPPORTED;
 
 	if (tuning)
 		effective_tuning = *tuning;
@@ -1406,6 +1422,15 @@ tr_server_create_internal(enum tr_server_mode mode,
 	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	server = tr_server_mem_take(&server_mem);
+	if (effective.tls.mode == TR_TLS_REQUIRED) {
+		ret = tr_tls_openssl_server_profile_create(
+		        &effective.tls, &server->tls_profile);
+		if (ret != TR_OK)
+			return tr_server_create_rollback(out, server, ret);
+		server->config.tls.certificate_file = NULL;
+		server->config.tls.private_key_file = NULL;
+		server->config.tls.client_ca_file = NULL;
+	}
 	if (mode == TR_SERVER_MODE_RPC_V2) {
 		pthread_condattr_t attr;
 		if (pthread_condattr_init(&attr) != 0)
@@ -2187,6 +2212,8 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 		}
 	}
 
+	if (final == TR_OK)
+		server->gracefully_drained = 1;
 	return final;
 }
 
@@ -2447,6 +2474,36 @@ int tr_server_destroy(struct tr_server *server)
 
 	/* 销毁即使稍后需要重试也不再允许读取跨分片统计。 */
 	server->published = 0;
+	if (server->tls_profile && server->gracefully_drained &&
+	    server->runtime && server->shards) {
+		for (shard_index = 0; shard_index < server->shard_count;
+		     ++shard_index) {
+			struct tr_server_shard *shard =
+			        &server->shards[shard_index];
+			for (uint32_t i = 0;
+			     i < tr_server_shard_peer_capacity(shard); ++i) {
+				struct tr_runtime_peer *peer =
+				        tr_server_shard_peer_at(shard, i);
+				int close_ret;
+
+				if (!peer || !peer->used ||
+				    !peer->connection.reactor)
+					continue;
+				close_ret = tr_reactor_close_graceful(
+				        peer->connection);
+				/* tr_runtime_stop() may stop the owner and
+				 * still return TR_AGAIN while accepted work
+				 * drains. A destroy retry sees CLOSED because
+				 * that owner no longer accepts commands; the
+				 * close-notify barrier completed before the
+				 * first stop attempt. */
+				if (close_ret != TR_OK &&
+				    close_ret != TR_ERR_STALE &&
+				    close_ret != TR_ERR_CLOSED)
+					return close_ret;
+			}
+		}
+	}
 	if (server->mode == TR_SERVER_MODE_RPC_V2 && server->runtime) {
 		/* 终止拆除先 join 父 owner；异常退出的父循环也走同一路径。
 		 * 在此之前任何 CLOSED 都不是可以释放回调参数的静默证明。 */
@@ -2601,6 +2658,10 @@ int tr_server_destroy(struct tr_server *server)
 		if (ret != TR_OK)
 			return ret;
 		server->runtime = NULL;
+	}
+	if (server->tls_profile) {
+		tr_tls_openssl_profile_release(server->tls_profile);
+		server->tls_profile = NULL;
 	}
 	if (server->mode == TR_SERVER_MODE_RPC_V2 &&
 	    atomic_load_explicit(&server->memory_budget.current_bytes,

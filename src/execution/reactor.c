@@ -9,6 +9,8 @@
 #include "../crc32c.h"
 #include "../transport/protocol/parser.h"
 #include "../io/socket.h"
+#include "../io/byte_endpoint.h"
+#include "../io/tls_openssl.h"
 #include "tr/status.h"
 #include "../transport/protocol/wire.h"
 #include "../memory_budget.h"
@@ -38,6 +40,7 @@
 #define TR_TX_READY_BATCH 64U
 #define TR_RX_READY_BATCH 64U
 #define TR_IO_QUANTUM (64U * 1024U)
+#define TR_TLS_SHUTDOWN_TIMEOUT_NS UINT64_C(1000000000)
 #define TR_REACTOR_MAX_PREFACE_BYTES 256U
 /* 跨循环轮次限制优先级调度越过最老 DATA 帧的次数。 */
 #define TR_CONTROL_BURST 8U
@@ -139,6 +142,18 @@ struct tr_connection {
 	void *preface_arg;
 
 	struct tr_parser parser;
+
+	/* 仅 TLS 连接分配 endpoint；明文连接不增加端点缓冲或 TLS 对象。 */
+	struct tr_byte_endpoint *byte_endpoint;
+	struct tr_reactor_timer_handle tls_timer;
+	int tls_timer_registered;
+	uint32_t byte_ready_events;
+	int tls_peer_closed;
+	int tls_close_pending;
+	int tls_shutdown_started;
+	struct tr_reactor_sync *tls_close_waiter;
+	enum tr_connection_event tls_close_event;
+	int tls_close_status;
 
 	struct tr_tx_item *tx_head;
 	struct tr_tx_item *tx_tail;
@@ -647,7 +662,57 @@ static int tr_slot_reserve(struct tr_reactor *reactor, uint32_t *slot_out,
 
 static uint32_t tr_connection_interest(const struct tr_connection *connection)
 {
-	uint32_t events = EPOLLRDHUP;
+	uint32_t events = connection->tls_peer_closed ? 0U : EPOLLRDHUP;
+	const struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+	uint32_t endpoint_interest;
+
+	if (endpoint) {
+		if (endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING)
+			return events |
+			       ((tr_byte_endpoint_interest(endpoint) &
+			                         TR_BYTE_ENDPOINT_EVENT_READ
+			                 ? EPOLLIN
+			                 : 0U) |
+			        ((tr_byte_endpoint_interest(endpoint) &
+			          TR_BYTE_ENDPOINT_EVENT_WRITE)
+			                 ? EPOLLOUT
+			                 : 0U));
+		if (endpoint->state == TR_BYTE_ENDPOINT_CLOSING) {
+			endpoint_interest = tr_byte_endpoint_interest(endpoint);
+			return events |
+			       ((endpoint_interest &
+			         TR_BYTE_ENDPOINT_EVENT_READ)
+			                ? EPOLLIN
+			                : 0U) |
+			       ((endpoint_interest &
+			         TR_BYTE_ENDPOINT_EVENT_WRITE)
+			                ? EPOLLOUT
+			                : 0U);
+		}
+		if (endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED)
+			return events;
+
+		/* OpenSSL 要求 WANT_WRITE 的原操作优先原样重试。此时不让
+		 * 另一条 SSL I/O 在同一 SSL 对象上抢先运行。 */
+		if (endpoint->write_wait == TR_BYTE_ENDPOINT_EVENT_WRITE ||
+		    endpoint->read_wait == TR_BYTE_ENDPOINT_EVENT_WRITE)
+			return EPOLLOUT;
+
+		endpoint_interest = tr_byte_endpoint_interest(endpoint);
+		if (endpoint->write_wait == TR_BYTE_ENDPOINT_EVENT_READ ||
+		    endpoint->read_wait == TR_BYTE_ENDPOINT_EVENT_READ)
+			events |= EPOLLIN;
+		else if (!connection->tls_peer_closed &&
+		         !__atomic_load_n(&connection->rx_paused,
+		                          memory_order_relaxed) &&
+		         !__atomic_load_n(&connection->rx_held,
+		                          memory_order_relaxed))
+			events |= EPOLLIN;
+		if ((endpoint_interest & TR_BYTE_ENDPOINT_EVENT_WRITE) ||
+		    (connection->tx_head && endpoint->write_wait == 0U))
+			events |= EPOLLOUT;
+		return events;
+	}
 
 	if (!__atomic_load_n(&connection->rx_paused, __ATOMIC_RELAXED) &&
 	    !__atomic_load_n(&connection->rx_held, __ATOMIC_RELAXED))
@@ -689,6 +754,16 @@ static void tr_schedule_tx(struct tr_reactor *reactor,
 	if (!connection || connection->state != TR_CONN_ACTIVE ||
 	    __atomic_load_n(&connection->tx_wait_writable, __ATOMIC_RELAXED) ||
 	    connection->tx_scheduled || !connection->tx_head)
+		return;
+	if (connection->byte_endpoint &&
+	    (connection->byte_endpoint->state !=
+	             TR_BYTE_ENDPOINT_AUTHENTICATED ||
+	     connection->tls_shutdown_started ||
+	     connection->byte_endpoint->read_wait ==
+	             TR_BYTE_ENDPOINT_EVENT_WRITE ||
+	     (connection->byte_endpoint->write_wait != 0U &&
+	      (connection->byte_ready_events &
+	       connection->byte_endpoint->write_wait) == 0U)))
 		return;
 
 	connection->tx_scheduled = 1;
@@ -872,10 +947,13 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 					 enum tr_connection_event event,
 					 int status)
 {
+	struct tr_reactor_sync *tls_close_waiter;
 	TR_ASSERT_REACTOR_OWNER(reactor);
 
 	if (!connection || connection->state != TR_CONN_ACTIVE)
 		return;
+	tls_close_waiter = connection->tls_close_waiter;
+	connection->tls_close_waiter = NULL;
 
 	connection->state = (event == TR_CONN_EVENT_ERROR) ? TR_CONN_ERROR :
 							     TR_CONN_CLOSED;
@@ -886,6 +964,27 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	 * epoll 批次的旧令牌也只能被当作陈旧令牌丢弃。
 	 */
 	(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL, connection->fd, NULL);
+	if (connection->tls_timer_registered) {
+		(void)tr_reactor_timer_unregister(connection->tls_timer);
+		connection->tls_timer_registered = 0;
+	}
+	if (connection->byte_endpoint) {
+		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+		int endpoint_ret;
+		if (endpoint->state != TR_BYTE_ENDPOINT_CLOSING ||
+		    !endpoint->shutdown_done)
+			(void)tr_byte_endpoint_abort(endpoint, status);
+		if (endpoint->events_bound) {
+			endpoint_ret = tr_byte_endpoint_event_unbind(endpoint);
+			assert(endpoint_ret == TR_OK);
+		}
+		if (endpoint->state == TR_BYTE_ENDPOINT_DETACHED) {
+			endpoint_ret = tr_byte_endpoint_release(endpoint);
+			assert(endpoint_ret == TR_OK);
+		}
+		free(endpoint);
+		connection->byte_endpoint = NULL;
+	}
 
 	close(connection->fd);
 	connection->fd = -1;
@@ -939,6 +1038,8 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 			  TR_CONN_FREE);
 
 	tr_connection_notify(reactor, connection, event, status);
+	if (tls_close_waiter)
+		tr_reactor_sync_complete(tls_close_waiter, status);
 }
 
 static void tr_connection_stats_reset(struct tr_connection *connection,
@@ -1000,9 +1101,149 @@ int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status)
 	return TR_OK;
 }
 
-static int tr_connection_adopt(
-	struct tr_reactor *reactor, uint32_t slot, uint32_t generation, int fd,
-	const struct tr_reactor_preface_handler *preface)
+static uint64_t tr_connection_tls_deadline(void *arg, uint64_t now_ns)
+{
+	struct tr_connection *connection = (struct tr_connection *)arg;
+	struct tr_byte_endpoint *endpoint;
+	uint64_t deadline_ns;
+
+	if (!connection || connection->state != TR_CONN_ACTIVE ||
+	    !connection->byte_endpoint)
+		return 0U;
+	endpoint = connection->byte_endpoint;
+	if (endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING)
+		deadline_ns = endpoint->handshake_deadline_ns;
+	else if (endpoint->state == TR_BYTE_ENDPOINT_CLOSING &&
+	         !endpoint->shutdown_done)
+		deadline_ns = endpoint->shutdown_deadline_ns;
+	else
+		return 0U;
+
+	if (deadline_ns == 0U || now_ns < deadline_ns)
+		return deadline_ns;
+	tr_connection_close_internal(connection->tls_timer.reactor, connection,
+	                             TR_CONN_EVENT_ERROR, TR_ERR_TIMEOUT);
+	return 0U;
+}
+
+static void
+tr_connection_maybe_start_tls_shutdown(struct tr_reactor *reactor,
+                                       struct tr_connection *connection)
+{
+	struct tr_byte_endpoint *endpoint;
+	uint64_t now_ns;
+	uint64_t deadline_ns;
+	int ret;
+
+	if (!connection || connection->state != TR_CONN_ACTIVE ||
+	    !connection->byte_endpoint || !connection->tls_close_pending ||
+	    connection->tls_shutdown_started || connection->tx_head ||
+	    connection->lifecycle_tx_busy || connection->stream_reset_tx_busy)
+		return;
+	endpoint = connection->byte_endpoint;
+	if (endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED)
+		return;
+	now_ns = tr_reactor_now_ns();
+	if (now_ns == 0U || TR_TLS_SHUTDOWN_TIMEOUT_NS > UINT64_MAX - now_ns) {
+		tr_connection_close_internal(reactor, connection,
+		                             TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+		return;
+	}
+	deadline_ns = now_ns + TR_TLS_SHUTDOWN_TIMEOUT_NS;
+	ret = tr_byte_endpoint_begin_close(
+	        endpoint, connection->tls_close_status, deadline_ns);
+	if (ret != TR_OK) {
+		tr_connection_close_internal(reactor, connection,
+		                             TR_CONN_EVENT_ERROR, ret);
+		return;
+	}
+	connection->tls_shutdown_started = 1;
+	connection->byte_ready_events = 0U;
+	if (connection->tls_timer_registered &&
+	    tr_reactor_timer_arm(connection->tls_timer, deadline_ns) != TR_OK) {
+		tr_connection_close_internal(reactor, connection,
+		                             TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+		return;
+	}
+	ret = tr_byte_endpoint_step(endpoint, 0U, now_ns);
+	if (ret == TR_AGAIN) {
+		if (tr_connection_update_interest(reactor, connection) != TR_OK)
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_SYS);
+		return;
+	}
+	tr_connection_close_internal(reactor, connection,
+	                             ret == TR_OK ? connection->tls_close_event
+	                                          : TR_CONN_EVENT_ERROR,
+	                             ret == TR_OK ? connection->tls_close_status
+	                                          : ret);
+}
+
+static int
+tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
+                                struct tr_tls_openssl_profile *profile,
+                                uint64_t handshake_deadline_ns)
+{
+	struct tr_byte_endpoint *endpoint;
+	struct tr_tls_openssl_session *session = NULL;
+	const struct tr_byte_endpoint_driver *driver = tr_tls_openssl_driver();
+	int ret;
+
+	if (!connection || !profile || handshake_deadline_ns == 0U || !driver)
+		return TR_ERR_INVALID;
+	endpoint = (struct tr_byte_endpoint *)calloc(1, sizeof(*endpoint));
+	if (!endpoint)
+		return TR_ERR_NOMEM;
+	ret = tr_tls_openssl_session_create(profile, fd, &session);
+	if (ret != TR_OK) {
+		free(endpoint);
+		return ret;
+	}
+	ret = tr_byte_endpoint_init(endpoint, TR_BYTE_ENDPOINT_TLS_REQUIRED, fd,
+	                            handshake_deadline_ns, driver, session);
+	if (ret != TR_OK) {
+		driver->release(session);
+		free(endpoint);
+		return ret;
+	}
+	connection->byte_endpoint = endpoint;
+	/* 事件注册成功后会立即进行第一次握手推进，再收窄到精确 WANT。 */
+	connection->epoll_events = EPOLLRDHUP | EPOLLIN | EPOLLOUT;
+	return TR_OK;
+}
+
+static void tr_connection_adopt_tls_rollback(struct tr_reactor *reactor,
+                                             struct tr_connection *connection)
+{
+	if (connection->fd >= 0)
+		(void)epoll_ctl(reactor->epoll_fd, EPOLL_CTL_DEL,
+		                connection->fd, NULL);
+	if (connection->tls_timer_registered) {
+		(void)tr_reactor_timer_unregister(connection->tls_timer);
+		connection->tls_timer_registered = 0;
+	}
+	if (connection->byte_endpoint) {
+		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+		if (endpoint->state != TR_BYTE_ENDPOINT_CLOSING)
+			(void)tr_byte_endpoint_abort(endpoint, TR_ERR_SYS);
+		if (endpoint->events_bound)
+			(void)tr_byte_endpoint_event_unbind(endpoint);
+		if (endpoint->state == TR_BYTE_ENDPOINT_DETACHED)
+			(void)tr_byte_endpoint_release(endpoint);
+		free(endpoint);
+		connection->byte_endpoint = NULL;
+	}
+	tr_parser_reset(&connection->parser);
+	connection->fd = -1;
+	connection->state = TR_CONN_ERROR;
+}
+
+static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
+                               uint32_t generation, int fd,
+                               const struct tr_reactor_preface_handler *preface,
+                               struct tr_tls_openssl_profile *tls_profile,
+                               uint64_t handshake_deadline_ns)
 {
 	struct tr_connection *connection;
 
@@ -1013,6 +1254,8 @@ static int tr_connection_adopt(
 
 	if (slot >= reactor->config.max_connections)
 		return TR_ERR_STALE;
+	if (tls_profile && preface)
+		return TR_ERR_UNSUPPORTED;
 
 	connection = &reactor->connections[slot];
 	/* 统计字段可被外部线程读取，复用时只能对它们执行原子重置。 */
@@ -1045,20 +1288,72 @@ static int tr_connection_adopt(
 		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return ret;
 	}
+	if (tls_profile) {
+		ret = tr_connection_adopt_tls_prepare(
+		        connection, fd, tls_profile, handshake_deadline_ns);
+		if (ret != TR_OK) {
+			tr_parser_reset(&connection->parser);
+			connection->state = TR_CONN_ERROR;
+			tr_slot_set_state(reactor, slot, generation,
+			                  TR_CONN_FREE);
+			return ret;
+		}
+	}
 
 	memset(&event, 0, sizeof(event));
-	connection->epoll_events = tr_connection_interest(connection);
+	if (!tls_profile)
+		connection->epoll_events = tr_connection_interest(connection);
 	event.events = connection->epoll_events;
 	event.data.u64 = tr_conn_token(slot, generation);
 
 	if (epoll_ctl(reactor->epoll_fd, EPOLL_CTL_ADD, fd, &event) < 0) {
-		tr_parser_reset(&connection->parser);
-		connection->state = TR_CONN_ERROR;
+		if (tls_profile)
+			tr_connection_adopt_tls_rollback(reactor, connection);
+		else {
+			tr_parser_reset(&connection->parser);
+			connection->state = TR_CONN_ERROR;
+		}
 		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return TR_ERR_SYS;
 	}
 
 	connection->fd = fd;
+	if (tls_profile) {
+		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+		uint64_t now_ns = tr_reactor_now_ns();
+		ret = tr_byte_endpoint_event_bind(endpoint);
+		if (ret == TR_OK && now_ns != 0U)
+			ret = tr_byte_endpoint_step(endpoint, 0U, now_ns);
+		else if (ret == TR_OK)
+			ret = TR_ERR_SYS;
+		if (ret == TR_OK || ret == TR_AGAIN) {
+			int timer_ret = tr_reactor_timer_register(
+			        reactor, tr_connection_tls_deadline, connection,
+			        &connection->tls_timer);
+			if (timer_ret == TR_OK) {
+				connection->tls_timer_registered = 1;
+				timer_ret = tr_reactor_timer_arm(
+				        connection->tls_timer,
+				        endpoint->state ==
+				                        TR_BYTE_ENDPOINT_NEGOTIATING
+				                ? endpoint->handshake_deadline_ns
+				                : 0U);
+			}
+			if (timer_ret != TR_OK)
+				ret = timer_ret;
+		}
+		if (ret == TR_OK || ret == TR_AGAIN) {
+			if (tr_connection_update_interest(reactor,
+			                                  connection) != TR_OK)
+				ret = TR_ERR_SYS;
+		}
+		if (ret != TR_OK && ret != TR_AGAIN) {
+			tr_connection_adopt_tls_rollback(reactor, connection);
+			tr_slot_set_state(reactor, slot, generation,
+			                  TR_CONN_FREE);
+			return ret;
+		}
+	}
 	tr_slot_set_state(reactor, slot, generation, TR_CONN_ACTIVE);
 	return TR_OK;
 }
@@ -1330,8 +1625,67 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		memset(&message, 0, sizeof(message));
 		message.msg_iov = iov;
 		message.msg_iovlen = (size_t)iov_count;
+		if (connection->byte_endpoint) {
+			const void *write_buffer;
+			size_t write_length;
+			size_t written_bytes = 0U;
+			uint32_t wait_events = 0U;
+			int write_ret;
 
-		n = sendmsg(connection->fd, &message, MSG_NOSIGNAL);
+			if (connection->byte_endpoint->state !=
+			            TR_BYTE_ENDPOINT_AUTHENTICATED ||
+			    connection->tls_shutdown_started)
+				return;
+			if (connection->byte_endpoint->write_buffer) {
+				write_buffer =
+				        connection->byte_endpoint->write_buffer;
+				write_length =
+				        connection->byte_endpoint->write_length;
+				/* 本轮预算不够重试同一个 OpenSSL 写参数时，
+				 * 保留 endpoint 的 WANT 与缓冲区，等
+				 * level-triggered readiness
+				 * 在下一轮重新调度，避免空耗 dispatch 配额。 */
+				if (write_length > budget)
+					return;
+			} else {
+				write_buffer = iov[0].iov_base;
+				write_length = iov[0].iov_len;
+			}
+			write_ret = tr_byte_endpoint_write(
+			        connection->byte_endpoint, write_buffer,
+			        write_length, connection->byte_ready_events,
+			        &written_bytes, &wait_events);
+			if (write_ret == TR_AGAIN) {
+				connection->byte_ready_events = 0U;
+				(void)__atomic_fetch_add(
+				        &connection->send_eagain, UINT64_C(1),
+				        __ATOMIC_RELAXED);
+				if (tr_connection_update_interest(
+				            reactor, connection) != TR_OK)
+					tr_connection_close_internal(
+					        reactor, connection,
+					        TR_CONN_EVENT_ERROR,
+					        TR_ERR_SYS);
+				return;
+			}
+			if (write_ret == TR_OK &&
+			    tr_connection_update_interest(
+			            reactor, connection) != TR_OK) {
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+				return;
+			}
+			if (write_ret != TR_OK) {
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, write_ret);
+				return;
+			}
+			n = (ssize_t)written_bytes;
+		} else {
+			n = sendmsg(connection->fd, &message, MSG_NOSIGNAL);
+		}
 		if (n > 0) {
 			(void)__atomic_fetch_add(&connection->tx_bytes,
 						 (uint64_t)n, __ATOMIC_RELAXED);
@@ -1387,6 +1741,11 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		return;
 	}
 
+	if (connection->state == TR_CONN_ACTIVE && connection->byte_endpoint &&
+	    connection->tls_close_pending && !connection->tx_head) {
+		tr_connection_maybe_start_tls_shutdown(reactor, connection);
+		return;
+	}
 	if (connection->state == TR_CONN_ACTIVE && connection->tx_head)
 		tr_schedule_tx(reactor, connection);
 }
@@ -1508,6 +1867,74 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 {
 	size_t budget = turn->left.rx_bytes < TR_IO_QUANTUM ?
 		(size_t)turn->left.rx_bytes : TR_IO_QUANTUM;
+	if (connection->byte_endpoint &&
+	    connection->byte_endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING) {
+		int step_ret = tr_byte_endpoint_step(
+		        connection->byte_endpoint,
+		        connection->byte_ready_events, tr_reactor_now_ns());
+		connection->byte_ready_events = 0U;
+		if (step_ret == TR_AGAIN) {
+			if (tr_connection_update_interest(reactor,
+			                                  connection) != TR_OK)
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+			return;
+		}
+		if (step_ret != TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             step_ret);
+			return;
+		}
+		if (connection->tls_timer_registered &&
+		    tr_reactor_timer_arm(connection->tls_timer, 0U) != TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_SYS);
+			return;
+		}
+		if (tr_connection_update_interest(reactor, connection) !=
+		    TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_SYS);
+			return;
+		}
+		tr_schedule_tx(reactor, connection);
+		return;
+	}
+	if (connection->byte_endpoint &&
+	    connection->byte_endpoint->state == TR_BYTE_ENDPOINT_CLOSING) {
+		int step_ret = tr_byte_endpoint_step(
+		        connection->byte_endpoint,
+		        connection->byte_ready_events, tr_reactor_now_ns());
+		connection->byte_ready_events = 0U;
+		if (step_ret == TR_AGAIN) {
+			if (tr_connection_update_interest(reactor,
+			                                  connection) != TR_OK)
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+			return;
+		}
+		tr_connection_close_internal(
+		        reactor, connection,
+		        step_ret == TR_OK ? connection->tls_close_event
+		                          : TR_CONN_EVENT_ERROR,
+		        step_ret == TR_OK ? connection->tls_close_status
+		                          : step_ret);
+		return;
+	}
+	if (connection->byte_endpoint &&
+	    connection->byte_endpoint->state ==
+	            TR_BYTE_ENDPOINT_AUTHENTICATED &&
+	    connection->byte_endpoint->write_wait != 0U) {
+		if ((connection->byte_ready_events &
+		     connection->byte_endpoint->write_wait) != 0U)
+			tr_schedule_tx(reactor, connection);
+		return;
+	}
 
 	while (budget != 0 && connection->state == TR_CONN_ACTIVE &&
 	       !__atomic_load_n(&connection->rx_held, __ATOMIC_RELAXED)) {
@@ -1534,6 +1961,7 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 			continue;
 		}
 		size_t writable;
+		size_t tls_read_bytes = 0U;
 		void *dst;
 		ssize_t n;
 		int ret;
@@ -1565,11 +1993,75 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 						     TR_ERR_STATE);
 			return;
 		}
-
-		if (writable > budget)
+		if (connection->byte_endpoint &&
+		    connection->byte_endpoint->read_buffer) {
+			dst = connection->byte_endpoint->read_buffer;
+			writable = connection->byte_endpoint->read_capacity;
+			/* SSL_read 重试必须保留原参数；预算不足时让
+			 * level-triggered readiness 在下一轮重新安排该连接。 */
+			if (writable > budget)
+				return;
+		} else if (writable > budget) {
 			writable = budget;
+		}
 
-		n = recv(connection->fd, dst, writable, 0);
+		if (connection->byte_endpoint) {
+			uint32_t wait_events = 0U;
+			int read_ret = tr_byte_endpoint_read(
+			        connection->byte_endpoint, dst, writable,
+			        connection->byte_ready_events, &tls_read_bytes,
+			        &wait_events);
+			if (read_ret == TR_AGAIN) {
+				connection->byte_ready_events = 0U;
+				(void)__atomic_fetch_add(
+				        &connection->recv_eagain, UINT64_C(1),
+				        __ATOMIC_RELAXED);
+				if (tr_connection_update_interest(
+				            reactor, connection) != TR_OK)
+					tr_connection_close_internal(
+					        reactor, connection,
+					        TR_CONN_EVENT_ERROR,
+					        TR_ERR_SYS);
+				return;
+			}
+			if (read_ret == TR_ERR_CLOSED) {
+				connection->byte_ready_events = 0U;
+				connection->tls_peer_closed = 1;
+				connection->tls_close_pending = 1;
+				connection->tls_close_event =
+				        TR_CONN_EVENT_CLOSED;
+				connection->tls_close_status = TR_OK;
+				if (connection->tx_head)
+					tr_schedule_tx(reactor, connection);
+				else
+					tr_connection_maybe_start_tls_shutdown(
+					        reactor, connection);
+				if (connection->state == TR_CONN_ACTIVE &&
+				    tr_connection_update_interest(
+				            reactor, connection) != TR_OK)
+					tr_connection_close_internal(
+					        reactor, connection,
+					        TR_CONN_EVENT_ERROR,
+					        TR_ERR_SYS);
+				return;
+			}
+			if (read_ret != TR_OK) {
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, read_ret);
+				return;
+			}
+			if (tr_connection_update_interest(
+			            reactor, connection) != TR_OK) {
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+				return;
+			}
+			n = (ssize_t)tls_read_bytes;
+		} else {
+			n = recv(connection->fd, dst, writable, 0);
+		}
 		if (n > 0) {
 			(void)__atomic_fetch_add(&connection->rx_bytes,
 						 (uint64_t)n, __ATOMIC_RELAXED);
@@ -2033,10 +2525,10 @@ static int tr_process_commands(struct tr_reactor *reactor,
 
 		switch (command->type) {
 		case TR_CMD_ADOPT_FD:
-			if (tr_connection_adopt(reactor,
-						command->slot,
-						command->generation,
-						command->u.adopt.fd, NULL) != TR_OK)
+			if (tr_connection_adopt(reactor, command->slot,
+			                        command->generation,
+			                        command->u.adopt.fd, NULL, NULL,
+			                        0U) != TR_OK)
 				close(command->u.adopt.fd);
 			break;
 		case TR_CMD_SEND:
@@ -2098,6 +2590,54 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 	connection = tr_lookup_connection(reactor, slot, generation);
 	if (!connection)
 		return;
+	if (connection->byte_endpoint) {
+		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+		uint32_t ready = 0U;
+		if (events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+			ready |= TR_BYTE_ENDPOINT_EVENT_READ;
+		if (events & EPOLLOUT)
+			ready |= TR_BYTE_ENDPOINT_EVENT_WRITE;
+		connection->byte_ready_events |= ready;
+		if (endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING) {
+			if (endpoint->handshake_wait == 0U ||
+			    (ready & endpoint->handshake_wait) != 0U)
+				tr_schedule_rx(reactor, connection);
+		} else if (endpoint->state == TR_BYTE_ENDPOINT_CLOSING) {
+			if (endpoint->shutdown_wait == 0U ||
+			    (ready & endpoint->shutdown_wait) != 0U)
+				tr_schedule_rx(reactor, connection);
+		} else if (endpoint->state == TR_BYTE_ENDPOINT_AUTHENTICATED) {
+			if (endpoint->write_wait != 0U) {
+				if ((ready & endpoint->write_wait) != 0U)
+					tr_schedule_tx(reactor, connection);
+			} else if (endpoint->read_wait != 0U) {
+				if ((ready & endpoint->read_wait) != 0U)
+					tr_schedule_rx(reactor, connection);
+				if (connection->tx_head &&
+				    (ready & TR_BYTE_ENDPOINT_EVENT_WRITE))
+					tr_schedule_tx(reactor, connection);
+			} else {
+				if (!connection->tls_peer_closed &&
+				    (events &
+				     (EPOLLIN | EPOLLRDHUP | EPOLLHUP)))
+					tr_schedule_rx(reactor, connection);
+				if (connection->tx_head &&
+				    (ready & TR_BYTE_ENDPOINT_EVENT_WRITE))
+					tr_schedule_tx(reactor, connection);
+			}
+		}
+		if (connection->state != TR_CONN_ACTIVE)
+			return;
+		if (events & EPOLLERR) {
+			if (connection->rx_scheduled)
+				connection->rx_error_pending = 1;
+			else
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+		}
+		return;
+	}
 
 	if (events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP))
 		tr_schedule_rx(reactor, connection);
@@ -3393,12 +3933,45 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	if (ret != TR_OK)
 		return ret;
 
-	ret = tr_connection_adopt(reactor, slot, generation, fd, preface);
+	ret = tr_connection_adopt(reactor, slot, generation, fd, preface, NULL,
+	                          0U);
 	if (ret != TR_OK) {
 		(void)tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return ret;
 	}
 
+	out->reactor = reactor;
+	out->slot = slot;
+	out->generation = generation;
+	return TR_OK;
+}
+
+int tr_reactor_adopt_tls_fd_on_owner(struct tr_reactor *reactor, int fd,
+                                     struct tr_tls_openssl_profile *profile,
+                                     uint64_t handshake_deadline_ns,
+                                     struct tr_conn_handle *out)
+{
+	uint32_t slot;
+	uint32_t generation;
+	int ret;
+
+	if (!reactor || fd < 0 || !profile || handshake_deadline_ns == 0U ||
+	    !out)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return TR_ERR_CLOSED;
+	ret = tr_slot_reserve(reactor, &slot, &generation);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_connection_adopt(reactor, slot, generation, fd, NULL, profile,
+	                          handshake_deadline_ns);
+	if (ret != TR_OK) {
+		(void)tr_slot_set_state(reactor, slot, generation,
+		                        TR_CONN_FREE);
+		return ret;
+	}
 	out->reactor = reactor;
 	out->slot = slot;
 	out->generation = generation;
@@ -3425,7 +3998,8 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 		if (ret != TR_OK)
 			return ret;
 
-		ret = tr_connection_adopt(reactor, slot, generation, fd, NULL);
+		ret = tr_connection_adopt(reactor, slot, generation, fd, NULL,
+		                          NULL, 0U);
 		if (ret != TR_OK) {
 			(void)tr_slot_set_state(reactor, slot, generation,
 						TR_CONN_FREE);
@@ -4246,6 +4820,70 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 	if (ret == TR_OK)
 		ret = tr_reactor_sync_wait(&sync);
 	tr_reactor_sync_destroy(&sync);
+	return ret;
+}
+
+struct tr_reactor_graceful_close_request {
+	struct tr_conn_handle connection;
+	struct tr_reactor_sync *completion;
+};
+
+static int tr_reactor_graceful_close_on_owner(void *arg)
+{
+	struct tr_reactor_graceful_close_request *request = arg;
+	struct tr_conn_handle handle = request->connection;
+	struct tr_connection *connection;
+
+	TR_ASSERT_REACTOR_OWNER(handle.reactor);
+	connection = tr_lookup_connection(handle.reactor, handle.slot,
+	                                  handle.generation);
+	if (!connection)
+		return TR_ERR_STALE;
+	if (!connection->byte_endpoint)
+		return TR_ERR_UNSUPPORTED;
+	if (connection->tls_close_waiter)
+		return TR_ERR_STATE;
+	if (connection->byte_endpoint->state !=
+	            TR_BYTE_ENDPOINT_AUTHENTICATED &&
+	    connection->byte_endpoint->state != TR_BYTE_ENDPOINT_CLOSING)
+		return TR_ERR_STATE;
+	connection->tls_close_waiter = request->completion;
+	if (!connection->tls_close_pending) {
+		connection->tls_close_pending = 1;
+		connection->tls_close_event = TR_CONN_EVENT_CLOSED;
+		connection->tls_close_status = TR_OK;
+	}
+	if (connection->byte_endpoint->state ==
+	    TR_BYTE_ENDPOINT_AUTHENTICATED) {
+		if (connection->tx_head)
+			tr_schedule_tx(handle.reactor, connection);
+		else
+			tr_connection_maybe_start_tls_shutdown(handle.reactor,
+			                                       connection);
+	}
+	return TR_OK;
+}
+
+int tr_reactor_close_graceful(struct tr_conn_handle connection)
+{
+	struct tr_reactor_graceful_close_request request;
+	struct tr_reactor_sync completion;
+	int ret;
+
+	if (!connection.reactor)
+		return TR_ERR_INVALID;
+	if (tr_reactor_is_owner_thread(connection.reactor))
+		return TR_ERR_STATE;
+	ret = tr_reactor_sync_init(&completion);
+	if (ret != TR_OK)
+		return ret;
+	request.connection = connection;
+	request.completion = &completion;
+	ret = tr_reactor_call(connection.reactor,
+	                      tr_reactor_graceful_close_on_owner, &request);
+	if (ret == TR_OK)
+		ret = tr_reactor_sync_wait(&completion);
+	tr_reactor_sync_destroy(&completion);
 	return ret;
 }
 

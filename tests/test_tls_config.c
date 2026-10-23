@@ -145,7 +145,7 @@ static void test_tls_invalid_enums_and_empty_values(void)
 	assert(server_out == NULL);
 }
 
-static void test_tls_required_public_factories_fail_before_activation(void)
+static void test_tls_required_v2_factories_and_transport_boundary(void)
 {
 	struct tr_client_config client;
 	struct tr_server_config server;
@@ -159,24 +159,29 @@ static void test_tls_required_public_factories_fail_before_activation(void)
 
 	tr_client_config_init(&client);
 	client.tls.mode = TR_TLS_REQUIRED;
+	client.tls.ca_file = test_identity.ca_file;
 	client.tls.expected_peer_name = "server.example.test";
 	assert(tr_client_create_transport(&client, &client_out) ==
 	       TR_ERR_UNSUPPORTED);
 	assert(client_out == NULL);
 	assert(tr_client_create(&client, &descriptor, 1U, &client_out) ==
-	       TR_ERR_UNSUPPORTED);
-	assert(client_out == NULL);
+	       TR_OK);
+	assert(client_out != NULL);
+	assert(tr_client_destroy(client_out) == TR_OK);
+	client_out = NULL;
 
 	tr_server_config_init(&server);
 	server.tls.mode = TR_TLS_REQUIRED;
-	server.tls.certificate_file = "server.pem";
-	server.tls.private_key_file = "server-key.pem";
+	server.tls.certificate_file = test_identity.server_certificate_file;
+	server.tls.private_key_file = test_identity.server_private_key_file;
 	assert(tr_server_create_transport(&server, &server_out) ==
 	       TR_ERR_UNSUPPORTED);
 	assert(server_out == NULL);
 	assert(tr_server_create(&server, &server_method, 1U, &server_out) ==
-	       TR_ERR_UNSUPPORTED);
-	assert(server_out == NULL);
+	       TR_OK);
+	assert(server_out != NULL);
+	assert(tr_server_destroy(server_out) == TR_OK);
+	server_out = NULL;
 }
 
 static void test_tls_b_rejects_not_yet_supported_client_auth(void)
@@ -291,7 +296,7 @@ int main(void)
 	test_tls_disabled_rejects_ignored_fields();
 	test_tls_required_requires_identity_material();
 	test_tls_invalid_enums_and_empty_values();
-	test_tls_required_public_factories_fail_before_activation();
+	test_tls_required_v2_factories_and_transport_boundary();
 	test_tls_b_rejects_not_yet_supported_client_auth();
 	test_openssl_client_profile_loads_explicit_trust();
 	test_openssl_server_profile_checks_certificate_key_pair();

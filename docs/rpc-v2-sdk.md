@@ -318,8 +318,14 @@ Server 当前每调用最多保留 16 个未收敛输入事件，包含排队、
 
 本接口覆盖 ONE/MANY 四种组合、请求与响应元数据、有界同步回复、回调外异步生产者、
 可写通知与有限等待、取消、期限、分层排空及调用语义统计。它尚未提供 NONE 基数、
-自动重连、连接组、网络压缩或 TLS。配置不支持的已有功能会
+自动重连、连接组或网络压缩。普通 V2 Client/Server 可通过配置中的 `tls.mode =
+TR_TLS_REQUIRED` 启用 TLS 1.3；Client 必须配置 CA 信任来源或使用系统信任库，并设置
+`expected_peer_name`。证书身份不匹配和 TLS 握手失败会关闭连接，不回退到明文。
+默认 `TR_TLS_DISABLED` 仍使用明文。transport-only/连接组 TLS、mTLS 和 CONTROL/DATA
+身份绑定尚未支持。配置不支持的已有功能会
 明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+
+完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)。
 
 普通 `tr_server_create()` 只构造 V2 RPC Server；需要连接组或纯传输能力时使用
 `tr_server_create_transport()`。transport-only 保留 Runtime、Reactor、Channel

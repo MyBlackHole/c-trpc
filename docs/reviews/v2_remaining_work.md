@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-23，`7aa277fe985116dcc36279ee64739792073a5d74`，2.0.0-dev.8。
+核对基线：2026-10-23，TLS-C 开发分支基于 `75f76674b60dbe9637c12e8e3ab34d3497fb8435`（2.0.0-dev.10）。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线
@@ -25,8 +25,12 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 
 #234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
 界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权。dev.9 的
-[TLS-A 原型](rpc_v2_tls_a_20261023.md)已完成 BIO 对照和内部端点合同；
-原型未接入 Reactor，库尚无产品 TLS 后端。TLS-B/C/D/E 与真实资源预算验收仍待完成。
+[TLS-A 原型](rpc_v2_tls_a_20261023.md)完成 BIO 对照和内部端点合同；TLS-B
+冻结公开配置并加入 OpenSSL 3 后端。TLS-C 已在本地开发分支接入普通 V2
+Client/Server Reactor，GCC Debug/Release、Clang Release、GCC ASan/UBSan 和
+GCC TSan 各 85 项全量测试通过；详细边界和本地工具版本限制见
+[TLS-C 实现记录](rpc_v2_tls_c_20261023.md)。#234 仍开放：连接组 TLS、mTLS、
+CONTROL/DATA 身份绑定、异步凭证和 TLS-E 资源/公网验收尚未完成。
 
 ## 持续开发顺序
 
@@ -35,7 +39,7 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 | 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
-| TLS 与身份 | 非阻塞 TLS 1.3、身份认证、异步凭证、关闭与组授权 | #234 |
+| TLS 与身份 | 普通 V2 单连接 TLS 1.3 已接入；连接组 TLS、mTLS、CONTROL/DATA 身份绑定、异步凭证/轮换、硬资源上界与公网验收仍待完成 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
