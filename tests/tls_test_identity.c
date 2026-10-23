@@ -82,7 +82,7 @@ static int tls_test_add_uri_sans(X509 *certificate,
 	{
 		int result =
 		        X509_add1_ext_i2d(certificate, NID_subject_alt_name,
-			                  names, 0, X509V3_ADD_DEFAULT) == 1;
+		                          names, 0, X509V3_ADD_DEFAULT) == 1;
 		GENERAL_NAMES_free(names);
 		return result;
 	}
@@ -268,6 +268,7 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	X509 *expired_certificate = NULL;
 	X509 *client_only_certificate = NULL;
 	X509 *client_certificate = NULL;
+	X509 *client_alternate_uri_certificate = NULL;
 	X509 *wrong_client_ca_certificate = NULL;
 	X509 *rotated_client_certificate = NULL;
 	X509 *client_no_uri_certificate = NULL;
@@ -281,6 +282,9 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	        "spiffe://c-trpc.example/client";
 	static const unsigned char second_client_uri[] =
 	        "spiffe://c-trpc.example/other";
+	const unsigned char *alternate_client_uris[] = {second_client_uri};
+	const size_t alternate_client_uri_lengths[] = {
+	        sizeof(second_client_uri) - 1U};
 	static const unsigned char control_client_uri[] =
 	        "spiffe://c-trpc.example/client\n";
 	static const unsigned char empty_uri[] = "";
@@ -342,6 +346,10 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	    !tls_test_path(identity->client_certificate_file,
 	                   sizeof(identity->client_certificate_file),
 	                   identity->directory, "client.pem") ||
+	    !tls_test_path(
+	            identity->client_alternate_uri_certificate_file,
+	            sizeof(identity->client_alternate_uri_certificate_file),
+	            identity->directory, "client-alternate-uri.pem") ||
 	    !tls_test_path(identity->wrong_client_ca_certificate_file,
 	                   sizeof(identity->wrong_client_ca_certificate_file),
 	                   identity->directory, "wrong-client-ca.pem") ||
@@ -420,12 +428,12 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	server_certificate = tls_test_generate_certificate(
 	        server_key, ca_certificate, ca_key, "server.example.test",
 	        "DNS:server.example.test,IP:127.0.0.1,URI:spiffe://"
-		"c-trpc.example/server",
+	        "c-trpc.example/server",
 	        "serverAuth", -60, 3600, 2, 0);
 	server_alternate_uri_certificate = tls_test_generate_certificate(
 	        server_key, ca_certificate, ca_key, "server.example.test",
 	        "DNS:server.example.test,IP:127.0.0.1,URI:spiffe://"
-		"c-trpc.example/server-alt",
+	        "c-trpc.example/server-alt",
 	        "serverAuth", -60, 3600, 12, 0);
 	wrong_dns_certificate = tls_test_generate_certificate(
 	        server_key, ca_certificate, ca_key, "server.example.test",
@@ -450,6 +458,12 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	        client_key, ca_certificate, ca_key, "client.example.test",
 	        "URI:spiffe://c-trpc.example/client", "clientAuth", -60, 3600,
 	        9, 0);
+	client_alternate_uri_certificate =
+	        tls_test_generate_certificate_with_uri_sans(
+	                client_key, ca_certificate, ca_key,
+	                "client.example.test", NULL, alternate_client_uris,
+	                alternate_client_uri_lengths, 1U, "clientAuth", -60,
+	                3600, 19, 0);
 	wrong_client_ca_certificate = tls_test_generate_certificate(
 	        client_key, alternate_ca_certificate, alternate_ca_key,
 	        "client.example.test", "URI:spiffe://c-trpc.example/client",
@@ -494,8 +508,9 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	    !wrong_dns_certificate || !wrong_ip_certificate ||
 	    !common_name_only_certificate || !expired_certificate ||
 	    !client_only_certificate || !client_certificate ||
-	    !wrong_client_ca_certificate || !rotated_client_certificate ||
-	    !client_no_uri_certificate || !client_duplicate_uri_certificate ||
+	    !client_alternate_uri_certificate || !wrong_client_ca_certificate ||
+	    !rotated_client_certificate || !client_no_uri_certificate ||
+	    !client_duplicate_uri_certificate ||
 	    !client_empty_uri_certificate ||
 	    !client_oversized_uri_certificate ||
 	    !client_control_uri_certificate || !client_wrong_eku_certificate ||
@@ -520,6 +535,9 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	                                client_only_certificate) ||
 	    !tls_test_write_certificate(identity->client_certificate_file,
 	                                client_certificate) ||
+	    !tls_test_write_certificate(
+	            identity->client_alternate_uri_certificate_file,
+	            client_alternate_uri_certificate) ||
 	    !tls_test_write_certificate(
 	            identity->wrong_client_ca_certificate_file,
 	            wrong_client_ca_certificate) ||
@@ -585,6 +603,7 @@ cleanup:
 	X509_free(expired_certificate);
 	X509_free(client_only_certificate);
 	X509_free(client_certificate);
+	X509_free(client_alternate_uri_certificate);
 	X509_free(wrong_client_ca_certificate);
 	X509_free(rotated_client_certificate);
 	X509_free(client_no_uri_certificate);
@@ -612,6 +631,8 @@ void tls_test_identity_cleanup(struct tls_test_identity *identity)
 		(void)unlink(identity->server_private_key_file);
 	if (identity->client_certificate_file[0])
 		(void)unlink(identity->client_certificate_file);
+	if (identity->client_alternate_uri_certificate_file[0])
+		(void)unlink(identity->client_alternate_uri_certificate_file);
 	if (identity->wrong_client_ca_certificate_file[0])
 		(void)unlink(identity->wrong_client_ca_certificate_file);
 	if (identity->rotated_client_certificate_file[0])

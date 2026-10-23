@@ -15,6 +15,7 @@ struct tls_test_identity {
 	char expired_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char client_only_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char client_certificate_file[TR_TLS_TEST_PATH_SIZE];
+	char client_alternate_uri_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char wrong_client_ca_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char rotated_client_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char client_no_uri_certificate_file[TR_TLS_TEST_PATH_SIZE];

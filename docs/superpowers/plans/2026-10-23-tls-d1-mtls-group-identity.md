@@ -100,14 +100,18 @@ Reactor connection 在 TLS AUTHENTICATED 后持有 identity snapshot；V2 Call �
 ### Task 2: TLS 后的 Server CONTROL/DATA 路由与主体授权
 
 **Files:**
-- Modify: `include/tr/peer_identity.h`, `include/tr/transport.h`
-- Modify: `src/io/byte_endpoint.h`, `src/io/byte_endpoint.c`
-- Modify: `src/execution/reactor.h`, `src/execution/reactor.c`
+- Modify: `include/tr/transport.h`
+- Modify: `src/io/tls_openssl.c`
+- Modify: `src/execution/reactor_internal.h`, `src/execution/reactor.c`
+- Modify: `src/group/pipeline_internal.h`, `src/group/pipeline.c`
+- Modify: `src/group/pipeline_registry_internal.h`, `src/group/pipeline_registry.c`
 - Modify: `src/transport/group/pipeline_listener_internal.h`, `src/transport/group/pipeline_listener.c`
 - Modify: `src/server.c`
-- Modify: `tests/test_pipeline_listener.c`
+- Modify: `tests/test_pipeline_listener.c`, `tests/test_connection_group_facade.c`
+- Modify: `tests/test_inbound_handshake_deadline.c`, `tests/test_internal_constructor_ownership.c`
+- Existing regression: `tests/test_tls_openssl.c::test_unexpected_eof_is_not_close_notify`
 - Create: `tests/test_pipeline_listener_tls.c`
-- Modify: `xmake.lua`
+- Modify: `xmake.lua`, `README.md`
 
 **Interfaces:**
 - `enum tr_connection_group_role { TR_CONNECTION_GROUP_ROLE_CONTROL=1, TR_CONNECTION_GROUP_ROLE_DATA=2 }`。
@@ -115,25 +119,26 @@ Reactor connection 在 TLS AUTHENTICATED 后持有 identity snapshot；V2 Call �
 - `tr_connection_group_authorize_cb` 改为接收 `const struct tr_connection_group_authorization *` 与 `arg`。
 - 新 owner API `tr_reactor_adopt_tls_fd_prefaced_on_owner(reactor, fd, profile, deadline_ns, preface, out)` 在 endpoint 认证后才把明文字节交给 preface parser。
 
-- [ ] **Step 1: 写认证前 TRR1 不可见及主体绑定失败测试**
+- [x] **Step 1: 写认证前 TRR1 不可见及主体绑定失败测试**
 
 在 `test_pipeline_listener_tls.c` 使用测试 OpenSSL Client 通过回环 socket 向 TLS listener 先发未经加密的 TRR1，并断言 route/authorize/control/message callback 都为零。增加有效 CONTROL、同 CA 不同 URI 主体 DATA、错 group/epoch/member generation DATA 与同主体合法 DATA 场景。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
 运行 `test_pipeline_listener_tls`；当前 group TLS factory 仍拒绝或以明文解析，测试应在握手/主体门禁断言处失败。确认当前 `test_pipeline_listener` 的明文基线仍通过。
 
-- [ ] **Step 3: 实现 TLS-preface Reactor adopt**
+- [x] **Step 3: 实现 TLS-preface Reactor adopt**
 
 在 TLS endpoint AUTHENTICATED 后才调用 preface feed；复用同一 `handshake_deadline_ns`，不重置 TRR1 期限。preface feed 接收到的内容只来自 endpoint 解密的明文字节。TLS 错误、EOF、期限和回滚路径沿用现有 endpoint detach/rollback 屏障。
 
-- [ ] **Step 4: 实现 Server CONTROL/DATA mTLS 与 authorizer**
+- [x] **Step 4: 实现 Server CONTROL/DATA mTLS 与 authorizer**
 
 pipeline listener 仅在 server TLS REQUIRED 且 client auth REQUIRED 时允许 group listen。CONTROL TLS 身份进入 authorize 上下文并存入 session；DATA 先校验现有 route/member 代次，再比较 URI 主体与 CONTROL 并调用 DATA authorizer。失败只撤销自己的 route reservation，不修改 CONTROL 或其他 DATA。
+TLS OpenSSL socket BIO 的写入使用 `MSG_NOSIGNAL`，避免异常 EOF 时 OpenSSL 发告警触发进程级 SIGPIPE。
 
-- [ ] **Step 5: 运行 Server group GREEN 与构造回滚测试**
+- [x] **Step 5: 运行 Server group GREEN 与构造回滚测试**
 
-运行 `test_pipeline_listener_tls`、`test_pipeline_listener`、`test_pipeline_route`、`test_pipeline_registry`、`test_connection_group_facade`、`test_inbound_handshake_deadline` 和 `test_server_peer_rollback`。
+运行 `test_tls_config`、`test_tls_openssl`、`test_rpc_v2_tls_identity`、`test_rpc_v2_tls_reactor`、`test_pipeline_listener_tls`、`test_rpc_v2_server`、`test_rpc_v2_sdk`、`test_client_connect_rollback`、`test_pipeline_listener`、`test_pipeline_route`、`test_pipeline_registry`、`test_connection_group_facade`、`test_inbound_handshake_deadline`、`test_server_peer_rollback` 和 `test_internal_constructor_ownership`；本地 15 个目标均构建成功且二进制退出码为 0。
 
 - [ ] **Step 6: 提交 Server group 安全切片**
 

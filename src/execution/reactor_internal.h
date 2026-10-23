@@ -66,6 +66,11 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	struct tr_reactor *reactor, int fd,
 	const struct tr_reactor_preface_handler *preface,
 	struct tr_conn_handle *out);
+int tr_reactor_adopt_tls_fd_prefaced_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
+        const struct tr_reactor_preface_handler *preface,
+        struct tr_conn_handle *out);
 
 /* 仅限所有者的立即关闭辅助函数，用于复合所有者状态转换。
  * 与公开关闭或中止 API 不同，这些函数不将命令入队：

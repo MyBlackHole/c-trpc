@@ -192,16 +192,23 @@ static void wait_peer_close(int fd)
 	       (ret < 0 && (errno == ECONNRESET || errno == ENOTCONN)));
 }
 
-static int authorize_control(
-	const struct tr_pipeline_route_preface *route, void *arg)
+static int
+authorize_control(const struct tr_connection_group_authorization *authorization,
+                  void *arg)
 {
 	(void)arg;
-	if (!route || route->role != TR_PIPELINE_ROUTE_CONTROL ||
-	    route->owner_shard_id != 0U ||
-	    route->pipeline_id != TEST_PIPELINE_ID ||
-	    (route->epoch != TEST_EPOCH_1 &&
-	     route->epoch != TEST_EPOCH_2) ||
-	    route->member_generation != TEST_CONTROL_GENERATION)
+	if (!authorization ||
+	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
+	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA) ||
+	    authorization->group.group_id != TEST_PIPELINE_ID ||
+	    (authorization->group.epoch != TEST_EPOCH_1 &&
+	     authorization->group.epoch != TEST_EPOCH_2) ||
+	    authorization->peer_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE ||
+	    authorization->peer_identity.uri_san != NULL ||
+	    authorization->peer_identity.uri_san_len != 0U ||
+	    authorization->control_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE)
 		return TR_ERR_STALE;
 	return TR_OK;
 }
@@ -459,7 +466,7 @@ static void test_pipeline_listener_control_and_data(void)
 
 	/* 由授权接纳 CONTROL，而非只靠客户端提供的标识。 */
 	route = control_route(TEST_EPOCH_1);
-	route.member_generation++;
+	route.pipeline_id++;
 	bad_control = connect_loopback(port);
 	send_route(bad_control, &route);
 	wait_peer_close(bad_control);

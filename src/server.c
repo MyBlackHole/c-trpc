@@ -199,18 +199,17 @@ static int tr_server_connection_group_config_valid(
 }
 
 static int tr_server_connection_group_authorize(
-	const struct tr_pipeline_route_preface *route, void *arg)
+        const struct tr_connection_group_authorization *authorization,
+        void *arg)
 {
 	struct tr_server *server = (struct tr_server *)arg;
-	struct tr_connection_group_id group;
 
-	if (!server || !route || !server->config.connection_groups.authorize)
+	if (!server || !authorization ||
+	    !server->config.connection_groups.authorize)
 		return TR_ERR_INVALID;
 
-	group.group_id = route->pipeline_id;
-	group.epoch = route->epoch;
 	return server->config.connection_groups.authorize(
-		&group, server->config.connection_groups.callback_arg);
+	        authorization, server->config.connection_groups.callback_arg);
 }
 
 static enum tr_frame_disposition tr_server_connection_group_data_frame(
@@ -1369,12 +1368,21 @@ tr_server_create_internal(enum tr_server_mode mode,
 		tr_server_config_init(&effective);
 	tr_server_normalize_config(&effective);
 	ret = tr_tls_server_config_validate(
-	        &effective.tls, mode == TR_SERVER_MODE_RPC_V2 ? 1 : 0);
+	        &effective.tls,
+	        mode == TR_SERVER_MODE_RPC_V2 ||
+	                effective.connection_groups.max_groups != 0U);
 	if (ret != TR_OK)
 		return ret;
 	if (effective.tls.mode == TR_TLS_REQUIRED &&
-	    (mode != TR_SERVER_MODE_RPC_V2 ||
-	     effective.connection_groups.max_groups != 0U))
+	    effective.connection_groups.max_groups != 0U) {
+		if (mode != TR_SERVER_MODE_TRANSPORT_ONLY)
+			return TR_ERR_UNSUPPORTED;
+		if (effective.tls.client_auth != TR_TLS_CLIENT_AUTH_REQUIRED)
+			return TR_ERR_INVALID;
+	}
+	if (effective.tls.mode == TR_TLS_REQUIRED &&
+	    mode == TR_SERVER_MODE_TRANSPORT_ONLY &&
+	    effective.connection_groups.max_groups == 0U)
 		return TR_ERR_UNSUPPORTED;
 
 	if (tuning)
@@ -1608,6 +1616,7 @@ tr_server_create_internal(enum tr_server_mode mode,
 		 */
 		group_config.control_message_count =
 			effective.connection_groups.max_connections;
+		group_config.tls_profile = server->tls_profile;
 		group_config.authorize_control =
 			tr_server_connection_group_authorize;
 		group_config.authorize_arg = server;

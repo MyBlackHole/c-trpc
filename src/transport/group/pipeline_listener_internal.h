@@ -5,11 +5,13 @@
 
 #include "../../group/pipeline_route_internal.h"
 #include "../../execution/reactor.h"
+#include "tr/transport.h"
 
 struct tr_pipeline_listener;
 
 typedef int (*tr_pipeline_listener_authorize_control_cb)(
-	const struct tr_pipeline_route_preface *route, void *arg);
+        const struct tr_connection_group_authorization *authorization,
+        void *arg);
 
 typedef enum tr_frame_disposition (*tr_pipeline_listener_data_frame_cb)(
 	const struct tr_pipeline_route_preface *route,
@@ -29,6 +31,7 @@ struct tr_pipeline_listener_config {
 	uint32_t data_capacity_per_pipeline;
 	uint32_t stream_affinity_capacity_per_pipeline;
 	uint32_t control_message_count;
+	struct tr_tls_openssl_profile *tls_profile;
 	/* TRR1 的绝对总期限；0 采用 10000ms 默认值，不随字节到达续期。 */
 	uint32_t handshake_timeout_ms;
 

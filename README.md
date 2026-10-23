@@ -4,10 +4,11 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.13` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
-Client/Server；`TR_TLS_REQUIRED` 会验证服务端证书，Server 可选或强制验证客户端证书，
-并将已验证的 URI SAN 主体传入 RPC work 回调。默认仍为明文 TCP，TLS 失败关闭连接，
-不回退明文。transport-only/连接组 TLS、CONTROL/DATA 身份绑定、profile 轮换和完整 TLS
+当前 `2.0.0-dev.14` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+Client/Server，以及 transport-only 连接组 Server。连接组启用 TLS 时强制要求客户端证书；
+TLS 握手成功后才解析 CONTROL/DATA 路由，并要求 DATA 的 URI SAN 主体与活动 CONTROL
+主体一致。授权回调分别收到 CONTROL 和 DATA 角色及回调期间有效的身份视图。默认仍为
+明文 TCP，TLS 失败关闭连接，不回退明文。连接组 Client TLS、profile 轮换和完整 TLS
 资源账本尚未完成；TLS-D1 也不代表 #234 或 V2 整体验收完成。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
@@ -250,6 +251,11 @@ tr_server_connection_group_listen(
     server, "0.0.0.0", 9100, 128, &group_port);
 tr_server_start(server);
 ```
+
+授权回调对每条 CONTROL 和 DATA 路由分别调用。`struct
+tr_connection_group_authorization` 提供组、角色、TLS 对端身份，以及 DATA 对应的
+CONTROL 主体；明文连接的身份认证类型为 `TR_PEER_IDENTITY_NONE`。连接组启用 TLS 时，
+Server 必须配置 `TR_TLS_REQUIRED` 和 `TR_TLS_CLIENT_AUTH_REQUIRED`。
 
 同一个稳定传输门面现在也提供客户端 CONTROL 生命周期，并且不暴露路由内部实现：
 

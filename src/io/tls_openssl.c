@@ -2,13 +2,19 @@
 #include "tls_openssl.h"
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <openssl/bio.h>
+#include <openssl/crypto.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include "../../include/tr/status.h"
 #include "byte_endpoint.h"
@@ -36,6 +42,201 @@ struct tr_tls_openssl_session {
 	size_t pending_write_length;
 	int write_pending;
 };
+
+struct tr_tls_openssl_socket_bio_data {
+	int fd;
+	int close_fd;
+};
+
+static BIO_METHOD *tr_tls_openssl_socket_bio_method;
+static CRYPTO_ONCE tr_tls_openssl_socket_bio_once = CRYPTO_ONCE_STATIC_INIT;
+
+static int tr_tls_openssl_socket_bio_create(BIO *bio)
+{
+	struct tr_tls_openssl_socket_bio_data *data;
+
+	if (!bio)
+		return 0;
+	data = (struct tr_tls_openssl_socket_bio_data *)calloc(1,
+	                                                       sizeof(*data));
+	if (!data)
+		return 0;
+	data->fd = -1;
+	BIO_set_data(bio, data);
+	BIO_set_init(bio, 0);
+	return 1;
+}
+
+static int tr_tls_openssl_socket_bio_destroy(BIO *bio)
+{
+	struct tr_tls_openssl_socket_bio_data *data;
+
+	if (!bio)
+		return 0;
+	data = (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(bio);
+	if (data) {
+		if (BIO_get_init(bio) && data->close_fd && data->fd >= 0)
+			(void)close(data->fd);
+		free(data);
+	}
+	BIO_set_data(bio, NULL);
+	BIO_set_init(bio, 0);
+	return 1;
+}
+
+static ssize_t tr_tls_openssl_socket_bio_read(BIO *bio, char *buffer,
+                                              size_t capacity)
+{
+	struct tr_tls_openssl_socket_bio_data *data =
+	        (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(bio);
+	ssize_t result;
+
+	BIO_clear_retry_flags(bio);
+	if (!data || data->fd < 0) {
+		errno = EBADF;
+		return -1;
+	}
+	do {
+		result = recv(data->fd, buffer, capacity, MSG_DONTWAIT);
+	} while (result < 0 && errno == EINTR);
+	if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		BIO_set_retry_read(bio);
+	return result;
+}
+
+static ssize_t tr_tls_openssl_socket_bio_write(BIO *bio, const char *buffer,
+                                               size_t length)
+{
+	struct tr_tls_openssl_socket_bio_data *data =
+	        (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(bio);
+	ssize_t result;
+
+	BIO_clear_retry_flags(bio);
+	if (!data || data->fd < 0) {
+		errno = EBADF;
+		return -1;
+	}
+	do {
+		result = send(data->fd, buffer, length,
+		              MSG_DONTWAIT | MSG_NOSIGNAL);
+	} while (result < 0 && errno == EINTR);
+	if (result < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+		BIO_set_retry_write(bio);
+	return result;
+}
+
+static int tr_tls_openssl_socket_bio_read_ex(BIO *bio, char *buffer,
+                                             size_t capacity,
+                                             size_t *read_bytes)
+{
+	ssize_t result;
+
+	if (!buffer || !read_bytes)
+		return 0;
+	*read_bytes = 0U;
+	result = tr_tls_openssl_socket_bio_read(bio, buffer, capacity);
+	if (result <= 0)
+		return 0;
+	*read_bytes = (size_t)result;
+	return 1;
+}
+
+static int tr_tls_openssl_socket_bio_write_ex(BIO *bio, const char *buffer,
+                                              size_t length,
+                                              size_t *written_bytes)
+{
+	ssize_t result;
+
+	if (!buffer || !written_bytes)
+		return 0;
+	*written_bytes = 0U;
+	result = tr_tls_openssl_socket_bio_write(bio, buffer, length);
+	if (result <= 0)
+		return 0;
+	*written_bytes = (size_t)result;
+	return 1;
+}
+
+static int tr_tls_openssl_socket_bio_read_legacy(BIO *bio, char *buffer,
+                                                 int capacity)
+{
+	ssize_t result;
+	if (!buffer || capacity <= 0)
+		return 0;
+	result = tr_tls_openssl_socket_bio_read(bio, buffer, (size_t)capacity);
+	return result > INT_MAX ? INT_MAX : (int)result;
+}
+
+static int tr_tls_openssl_socket_bio_write_legacy(BIO *bio, const char *buffer,
+                                                  int length)
+{
+	ssize_t result;
+	if (!buffer || length <= 0)
+		return 0;
+	result = tr_tls_openssl_socket_bio_write(bio, buffer, (size_t)length);
+	return result > INT_MAX ? INT_MAX : (int)result;
+}
+
+static long tr_tls_openssl_socket_bio_ctrl(BIO *bio, int command, long value,
+                                           void *pointer)
+{
+	struct tr_tls_openssl_socket_bio_data *data =
+	        (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(bio);
+
+	switch (command) {
+	case BIO_C_GET_FD:
+		if (!data)
+			return -1;
+		if (pointer)
+			*(int *)pointer = data->fd;
+		return data->fd;
+	case BIO_CTRL_GET_CLOSE:
+		return data ? data->close_fd : 0;
+	case BIO_CTRL_SET_CLOSE:
+		if (!data)
+			return 0;
+		data->close_fd = value != BIO_NOCLOSE;
+		return 1;
+	case BIO_CTRL_FLUSH:
+		return 1;
+	case BIO_CTRL_PENDING:
+	case BIO_CTRL_WPENDING:
+	case BIO_CTRL_EOF:
+		return 0;
+	default:
+		return 0;
+	}
+}
+
+static void tr_tls_openssl_socket_bio_method_init(void)
+{
+	int type = BIO_get_new_index();
+	BIO_METHOD *method;
+
+	if (type < 0)
+		return;
+	method = BIO_meth_new(type | BIO_TYPE_SOURCE_SINK | BIO_TYPE_DESCRIPTOR,
+	                      "c-trpc nonblocking socket");
+	if (!method)
+		return;
+	if (BIO_meth_set_create(method, tr_tls_openssl_socket_bio_create) !=
+	            1 ||
+	    BIO_meth_set_destroy(method, tr_tls_openssl_socket_bio_destroy) !=
+	            1 ||
+	    BIO_meth_set_read(method, tr_tls_openssl_socket_bio_read_legacy) !=
+	            1 ||
+	    BIO_meth_set_write(method,
+	                       tr_tls_openssl_socket_bio_write_legacy) != 1 ||
+	    BIO_meth_set_read_ex(method, tr_tls_openssl_socket_bio_read_ex) !=
+	            1 ||
+	    BIO_meth_set_write_ex(method, tr_tls_openssl_socket_bio_write_ex) !=
+	            1 ||
+	    BIO_meth_set_ctrl(method, tr_tls_openssl_socket_bio_ctrl) != 1) {
+		BIO_meth_free(method);
+		return;
+	}
+	tr_tls_openssl_socket_bio_method = method;
+}
 
 static int tr_tls_dns_name_valid(const char *name)
 {
@@ -380,6 +581,7 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 {
 	struct tr_tls_openssl_session *session;
 	BIO *socket_bio;
+	struct tr_tls_openssl_socket_bio_data *socket_data;
 	int flags;
 	if (!out)
 		return TR_ERR_INVALID;
@@ -401,12 +603,31 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 		free(session);
 		return TR_ERR_NOMEM;
 	}
-	socket_bio = BIO_new_socket(fd, BIO_NOCLOSE);
+	if (CRYPTO_THREAD_run_once(&tr_tls_openssl_socket_bio_once,
+	                           tr_tls_openssl_socket_bio_method_init) !=
+	            1 ||
+	    !tr_tls_openssl_socket_bio_method) {
+		SSL_free(session->ssl);
+		free(session);
+		return TR_ERR_NOMEM;
+	}
+	socket_bio = BIO_new(tr_tls_openssl_socket_bio_method);
 	if (!socket_bio) {
 		SSL_free(session->ssl);
 		free(session);
 		return TR_ERR_NOMEM;
 	}
+	socket_data = (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(
+	        socket_bio);
+	if (!socket_data) {
+		BIO_free(socket_bio);
+		SSL_free(session->ssl);
+		free(session);
+		return TR_ERR_NOMEM;
+	}
+	socket_data->fd = fd;
+	socket_data->close_fd = 0;
+	BIO_set_init(socket_bio, 1);
 	SSL_set_bio(session->ssl, socket_bio, socket_bio);
 	session->role = profile->role;
 	if (session->role == TR_TLS_OPENSSL_CLIENT) {

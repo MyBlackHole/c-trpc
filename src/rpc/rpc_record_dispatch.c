@@ -754,7 +754,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 					        s,
 					        identity_status == TR_ERR_NOMEM
 					                ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
-							: TR_RPC_STATUS_INTERNAL);
+					                : TR_RPC_STATUS_INTERNAL);
 					return;
 				}
 				if (identity) {
