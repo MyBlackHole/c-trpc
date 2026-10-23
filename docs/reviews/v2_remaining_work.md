@@ -23,6 +23,11 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 已打开流的非法 DATA 类型标志收敛为单流 RESET；#242 的连接组边界、
 排空竞争及完整错误矩阵仍未完成。
 
+dev.18 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
+让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
+DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。该切片不覆盖 GOAWAY 接受
+边界、RESET/错误分类或 #242 的完整组合故障矩阵。
+
 #234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
 界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权。dev.9 的
 [TLS-A 原型](rpc_v2_tls_a_20261023.md)完成 BIO 对照和内部端点合同；TLS-B
@@ -41,7 +46,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
+| 错误隔离 | GOAWAY 接受边界、RESET/错误分类与组合故障验收；连接组迟到 DATA 代次隔离已有回归 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

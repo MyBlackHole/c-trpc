@@ -70,6 +70,10 @@ int tr_pipeline_control(struct tr_pipeline *pipeline,
  */
 int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
 			     struct tr_pipeline_data_ref *out);
+/* 仅限所属 Reactor 所有者；由注册表分配并保证不复用的代次。 */
+int tr_pipeline_reserve_data_with_generation_on_owner(
+        struct tr_pipeline *pipeline, uint32_t generation,
+        struct tr_pipeline_data_ref *out);
 int tr_pipeline_cancel_data_reservation(
 	struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
 

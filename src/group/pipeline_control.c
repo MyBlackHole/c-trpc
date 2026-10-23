@@ -109,20 +109,50 @@ fail:
 	return ret;
 }
 
-int tr_pipeline_control_reserve_data(
-	struct tr_pipeline_control *control,
-	struct tr_pipeline_data_offer *out)
+struct tr_pipeline_control_reserve_request {
+	struct tr_pipeline_control *control;
+	struct tr_pipeline_data_offer *out;
+};
+
+static int tr_pipeline_control_reserve_data_on_owner(void *arg)
 {
+	struct tr_pipeline_control_reserve_request *request =
+	        (struct tr_pipeline_control_reserve_request *)arg;
+	struct tr_pipeline_control *control = request->control;
+	struct tr_pipeline_data_offer *out = request->out;
+	struct tr_pipeline_stats stats;
 	struct tr_pipeline_data_ref data;
 	struct tr_pipeline_route_preface route;
+	uint32_t data_remaining;
+	uint32_t generation;
 	int ret;
 
-	if (!control || !control->pipeline || !out)
+	if (!control || !control->pipeline || !control->registry || !out)
 		return TR_ERR_INVALID;
 
 	memset(out, 0, sizeof(*out));
+	memset(&stats, 0, sizeof(stats));
+	ret = tr_pipeline_get_stats(control->pipeline, &stats);
+	if (ret != TR_OK)
+		return ret;
+	if (!stats.control_bound)
+		return TR_ERR_STATE;
+	if (stats.data_count > control->data_capacity)
+		return TR_ERR_STATE;
+	data_remaining = control->data_capacity - stats.data_count;
+	if (stats.data_reserved_count > data_remaining)
+		return TR_ERR_STATE;
+	if (stats.data_reserved_count == data_remaining)
+		return TR_AGAIN;
+	ret = tr_pipeline_registry_next_member_generation_on_owner(
+	        control->registry, &generation);
+	if (ret != TR_OK)
+		return ret;
+
+	memset(out, 0, sizeof(*out));
 	memset(&data, 0, sizeof(data));
-	ret = tr_pipeline_reserve_data(control->pipeline, &data);
+	ret = tr_pipeline_reserve_data_with_generation_on_owner(
+	        control->pipeline, generation, &data);
 	if (ret != TR_OK)
 		return ret;
 
@@ -139,6 +169,20 @@ int tr_pipeline_control_reserve_data(
 	out->data = data;
 	out->route = route;
 	return TR_OK;
+}
+
+int tr_pipeline_control_reserve_data(struct tr_pipeline_control *control,
+                                     struct tr_pipeline_data_offer *out)
+{
+	struct tr_pipeline_control_reserve_request request;
+
+	if (!control || !control->pipeline || !out)
+		return TR_ERR_INVALID;
+	request.control = control;
+	request.out = out;
+	return tr_reactor_call(tr_pipeline_owner(control->pipeline),
+	                       tr_pipeline_control_reserve_data_on_owner,
+	                       &request);
 }
 
 int tr_pipeline_control_cancel_data(

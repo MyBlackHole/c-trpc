@@ -225,9 +225,28 @@ static void test_registry_validation(void)
 	assert(registry == NULL);
 }
 
+static void test_member_generation_never_wraps(void)
+{
+	uint32_t generation = UINT32_C(0xa5a5a5a5);
+
+	assert(tr_pipeline_registry_member_generation_after(0U, &generation) ==
+	       TR_OK);
+	assert(generation == 1U);
+	assert(tr_pipeline_registry_member_generation_after(
+	               UINT32_MAX - 1U, &generation) == TR_OK);
+	assert(generation == UINT32_MAX);
+	generation = UINT32_C(0xa5a5a5a5);
+	assert(tr_pipeline_registry_member_generation_after(
+	               UINT32_MAX, &generation) == TR_ERR_STATE);
+	assert(generation == UINT32_C(0xa5a5a5a5));
+	assert(tr_pipeline_registry_member_generation_after(0U, NULL) ==
+	       TR_ERR_INVALID);
+}
+
 int main(void)
 {
 	test_registry_validation();
+	test_member_generation_never_wraps();
 	test_registry_and_data_route_attach();
 	puts("pipeline registry/reservation routing: ok");
 	return 0;
