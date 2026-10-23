@@ -249,7 +249,7 @@ TLS-C review/plan 已记录 PR #310 merge commit `0fa90817c15286485ee2e1cfe8372b
 
 - [ ] **Step 4: 创建 TLS-D1 PR 并等待 GitHub CI 全绿**
 
-`feat/v2-tls-d-234` 已推送到 `e35cb85`；SDK header 安装修复及阶段记录提交后创建 PR。PR 描述包含 D1 scope、版本序列、所有本地/CI 证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
+`feat/v2-tls-d-234` 已推送至 `f8ce985`，TLS-D1 PR #311 已创建并等待固定版本 CI。PR 描述包含 D1 scope、版本序列、本地证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
 
 - [ ] **Step 5: 合并、更新 #234 并清理已合入远程分支**
 
