@@ -5,6 +5,7 @@
 
 #include "tr/facade.h"
 #include "tr/rpc.h"
+#include "tr/tls.h"
 #include "tr/transport.h"
 
 #ifdef __cplusplus
@@ -48,6 +49,8 @@ struct tr_server_config {
 	 * 与仅在 Channel 就绪后运行的保活机制相互独立。
 	 */
 	uint32_t handshake_timeout_ms;
+
+	struct tr_tls_server_config tls;
 };
 
 void tr_server_config_init(struct tr_server_config *config);

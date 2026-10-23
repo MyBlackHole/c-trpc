@@ -1,6 +1,6 @@
 # ADR-009：在 Reactor 字节端点接入 TLS 1.3
 
-- 状态：提议中，须通过下述原型与安全验收后接受
+- 状态：已采纳分阶段实现基线；TLS-E 安全与资源验收仍未通过
 - 日期：2026-10-23
 - 基线：`75d91a03b249ece2e83e6aded4a8d387d27ee1cf`，`2.0.0-dev.8`
 - 对应：#234、#239、#241、#242、#243；前置需求见
@@ -138,6 +138,54 @@ OpenSSL 内部分配与内核 socket 缓冲不自动纳入当前逐 Server 原�
 候选”更新为“原型支持的暂选”；它不证明 OpenSSL 全部内存已纳入
 Server 预算，也不证明真实 Reactor 的事件闭环已经通过。完整场景、
 命令及限制见 [TLS-A 原型记录](../../reviews/rpc_v2_tls_a_20261023.md)。
+
+### 2026-10-23 TLS-B 本地实现记录
+
+TLS-B 已按本 ADR 冻结公开 TLS 配置形状、将 OpenSSL 3 后端与配置校验
+编入生产静态库，并验证安装后的 C11/C++11 SDK 消费端。普通 V2
+Client/Server 的 Reactor 收发尚未接线；`TR_TLS_REQUIRED` 仍在创建阶段
+明确返回 `TR_ERR_UNSUPPORTED`。这项记录不代表 TLS-C 或 #234 已完成。
+
+本地环境 OpenSSL 3.6.5、GCC 16.2.1 与 Clang 23.1.3 下，完整注册测试集
+分别通过 84/84；GCC ASan/UBSan 和 TSan 完整测试集也分别通过 84/84。
+真实非阻塞跨进程 TCP 用例覆盖 TLS 1.3、DNS/IP SAN、独立 SNI、信任链、
+有效期、用途、TLS 1.2、明文、截断以及 0-RTT 失败关闭；0-RTT 负例确认
+未经认证的应用标记不会交付。静态 SDK 的 C11 与 C++11 消费端均编译并
+运行通过。
+
+上述本机 OpenSSL 版本高于项目要求的 3.0；Ubuntu 22.04 CI 的 GCC/Clang、
+静态分析、安装消费端和格式门禁尚待 PR 执行结果。TLS-B 的本机证据
+不覆盖 OpenSSL 全部分配的硬上界、mTLS、真实 Reactor 接线、外部实现
+互通或 TLS-E 的公网暴露门槛。
+
+### 2026-10-23 TLS-C 本地实现记录
+
+TLS-C 已在 `feat/v2-tls-c-234` 本地开发分支完成：普通 V2 Client/Server
+可以显式选择 TLS 1.3 required；握手通过前不会进入 TRP Parser/HELLO，
+TLS WANT 由 Reactor epoll 兴趣驱动，TLS 写在成功接受明文字节前保持
+原 TX 缓冲稳定。连接握手使用已有绝对 deadline，显式排空后的客户端和
+服务端销毁验证了有界 `close_notify`。默认仍为 disabled；连接组/transport-only
+TLS 在 TLS-D 身份绑定前明确拒绝。
+
+本机 GCC 16.2.1 Debug、Release、ASan/UBSan、TSan 与 Clang 23.1.3 Release
+均完成全量构建和 85/85 测试；GCC Release 在本次格式整理后再次通过 85/85。
+Debug、Clang、ASan/UBSan 和 TSan 的矩阵早于最后一轮格式整理；该轮只更改格式，
+最终源码已通过格式整理后的 GCC Release 全量构建与测试。
+TLS Reactor 场景包括明文路径、1–7 字节透明代理分片、大消息往返、错误 CA、
+错误 SAN、TLS listener 拒绝明文、transport-only 拒绝 required，以及客户端和
+服务端发起的优雅关闭。OpenSSL 3.6.5 是本地运行库版本。
+
+格式检查使用 clang-format 18.1.8：门禁脚本自测 22/22 通过，8 个改动的
+C/C++ 文件逐行检查无格式违规。GCC 16 对 46 个生产编译单元运行了
+`-fanalyzer`；其中 `src/rpc/rpc_record_client.c:481` 有一条
+`analyzer-use-of-uninitialized-value` 诊断，该文件不在 TLS-C 改动中。GCC 16
+没有触发仓库分析器要求的泄漏负例，因此该运行不等同于固定 GCC 11 的 CI
+静态分析门禁；本地 clang-tidy 23 也不等同于 CI 固定的 clang-tidy 14。
+
+此记录只证明本地 TLS-C 阶段，不关闭 #234。mTLS、CONTROL/DATA 主体绑定、
+凭证获取/轮换、OpenSSL 与内核内存的完整硬资源上界、最低 OpenSSL 3.0 环境、
+外部 TLS 实现互通，以及 TLS-E 公网安全门槛仍未验证。详细矩阵见
+[TLS-C 本地验证记录](../../reviews/rpc_v2_tls_c_20261023.md)。
 
 ## 依据
 

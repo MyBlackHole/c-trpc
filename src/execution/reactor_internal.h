@@ -71,6 +71,9 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
  */
 int tr_reactor_close_on_owner(struct tr_conn_handle connection);
 int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
+/* 仅由显式协议排空后的外部生命周期线程调用；TLS close_notify 完成或
+ * 有界关闭失败后返回，普通非 TLS 连接不使用此辅助函数。 */
+int tr_reactor_close_graceful(struct tr_conn_handle connection);
 
 /* 协议层对精确连接代次施加/解除接收背压，不等待命令容量。
  * 与缓冲池 RESUME_RX 独立；释放只调度接收，不在本次调用中分派帧。

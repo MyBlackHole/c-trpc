@@ -19,6 +19,8 @@
 #include "execution/task_executor.h"
 #include "rpc/rpc_record.h"
 #include "io/socket.h"
+#include "io/tls_config.h"
+#include "io/tls_openssl.h"
 #include "tr/status.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
@@ -47,6 +49,7 @@ static int tr_client_blocking_lifecycle_context(void)
 struct tr_client {
 	struct tr_client_config config;
 	struct tr_facade_tuning tuning;
+	struct tr_tls_openssl_profile *tls_profile;
 
 	struct tr_runtime *runtime;
 	struct tr_runtime_shard *shard;
@@ -77,6 +80,7 @@ struct tr_client {
 	int reassembly_pool_ready;
 
 	int connected;
+	int graceful_drained;
 };
 
 static int tr_client_create_rollback(
@@ -193,6 +197,7 @@ void tr_client_config_init(struct tr_client_config *config)
 	config->enable_reconnect = 0;
 	config->reconnect_initial_delay_ms = 200U;
 	config->reconnect_max_delay_ms = 10000U;
+	config->tls.mode = TR_TLS_DISABLED;
 }
 
 static int tr_client_connect_fd(const char *address, uint16_t port,
@@ -320,6 +325,9 @@ tr_client_create_internal(const struct tr_client_config *config,
 	else
 		tr_client_config_init(&effective);
 	tr_client_normalize_config(&effective);
+	ret = tr_tls_client_config_validate(&effective.tls, record ? 1 : 0);
+	if (ret != TR_OK)
+		return ret;
 
 	if (tuning)
 		effective_tuning = *tuning;
@@ -346,6 +354,18 @@ tr_client_create_internal(const struct tr_client_config *config,
 	client->config = effective;
 	client->tuning = effective_tuning;
 	atomic_init(&client->record_stopping, 0);
+	if (effective.tls.mode == TR_TLS_REQUIRED) {
+		ret = tr_tls_openssl_client_profile_create(
+		        &effective.tls, &client->tls_profile);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->config.tls.ca_file = NULL;
+		client->config.tls.ca_directory = NULL;
+		client->config.tls.expected_peer_name = NULL;
+		client->config.tls.sni_name = NULL;
+		client->config.tls.client_certificate_file = NULL;
+		client->config.tls.client_private_key_file = NULL;
+	}
 	if (record) {
 		client->record_mode = 1;
 		client->record_sdk_mode = public_v2;
@@ -603,6 +623,7 @@ struct tr_client_record_assemble_request {
 	struct tr_client *client;
 	const struct tr_channel_config *config;
 	int *fd;
+	uint64_t handshake_deadline_ns;
 };
 
 static int tr_client_record_assemble_on_owner(void *arg)
@@ -614,8 +635,14 @@ static int tr_client_record_assemble_on_owner(void *arg)
 	/* 接管与发布不得分成两个 owner 命令：对端可能在其间关闭，
 	 * 导致后续 Channel 绑定失效连接，或向尚未安装 RPC 的层交付事件。
 	 */
-	ret = tr_reactor_adopt_fd(tr_client_reactor(client), *request->fd,
-	                          &client->connection);
+	if (client->tls_profile)
+		ret = tr_reactor_adopt_tls_fd_on_owner(
+		        tr_client_reactor(client), *request->fd,
+		        client->tls_profile, request->handshake_deadline_ns,
+		        &client->connection);
+	else
+		ret = tr_reactor_adopt_fd(tr_client_reactor(client),
+		                          *request->fd, &client->connection);
 	if (ret != TR_OK)
 		return ret;
 	(void)tr_fd_take(request->fd);
@@ -700,7 +727,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 
 	{
 		struct tr_client_record_assemble_request request = {
-		        client, &channel_config, &fd};
+		        client, &channel_config, &fd,
+		        tr_deadline_to_ns(&connect_deadline)};
 
 		ret = tr_reactor_call(tr_client_reactor(client),
 		                      tr_client_record_assemble_on_owner,
@@ -1145,6 +1173,8 @@ out:
 
 int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
 {
+	int ret;
+
 	if (!client)
 		return TR_ERR_STATE;
 	if (tr_client_blocking_lifecycle_context())
@@ -1154,7 +1184,6 @@ int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
 	if (client->record_mode) {
 		struct tr_deadline deadline;
 		const struct tr_deadline *wait_deadline = NULL;
-		int ret;
 		if (atomic_load_explicit(&client->record_stopping,
 		                         memory_order_acquire) ||
 		    client->record_connect_failed)
@@ -1166,11 +1195,15 @@ int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
 			wait_deadline = &deadline;
 		}
 		ret = tr_client_record_wait_drained(client, wait_deadline);
-		return ret == TR_OK ? tr_channel_wait_drained_deadline(
-		                              client->channel, wait_deadline)
-		                    : ret;
+		if (ret == TR_OK)
+			ret = tr_channel_wait_drained_deadline(client->channel,
+			                                       wait_deadline);
+	} else {
+		ret = tr_channel_wait_drained(client->channel, timeout_ms);
 	}
-	return tr_channel_wait_drained(client->channel, timeout_ms);
+	if (ret == TR_OK && client->tls_profile)
+		client->graceful_drained = 1;
+	return ret;
 }
 
 int tr_client_get_channel_stats(struct tr_client *client,
@@ -1225,6 +1258,16 @@ int tr_client_get_rpc_semantic_stats(
 static int tr_client_destroy_internal(struct tr_client *client)
 {
 	int ret;
+
+	/* Explicitly drained TLS sessions close after their terminal frames. An
+	 * ordinary destroy or rollback keeps the existing abortive behavior. */
+	if (client->tls_profile && client->graceful_drained &&
+	    client->connection.reactor) {
+		ret = tr_reactor_close_graceful(client->connection);
+		if (ret != TR_OK && ret != TR_ERR_STALE)
+			return ret;
+		client->graceful_drained = 0;
+	}
 
 	if (client->record_mode) {
 		atomic_store_explicit(&client->record_stopping, 1,
@@ -1324,6 +1367,10 @@ static int tr_client_destroy_internal(struct tr_client *client)
 			return ret;
 		client->runtime = NULL;
 		client->shard = NULL;
+	}
+	if (client->tls_profile) {
+		tr_tls_openssl_profile_release(client->tls_profile);
+		client->tls_profile = NULL;
 	}
 
 	free(client);

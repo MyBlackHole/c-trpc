@@ -13,6 +13,7 @@ extern "C" {
 
 struct tr_reactor;
 struct tr_memory_budget;
+struct tr_tls_openssl_profile;
 
 struct tr_reactor_limits {
 	uint32_t max_payload_len;
@@ -170,6 +171,11 @@ int tr_reactor_start(struct tr_reactor *reactor);
 /* 所有权：返回 TR_OK 后 fd 由反应器接管；失败时仍由调用方拥有。 */
 int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 			struct tr_conn_handle *out);
+/* 仅普通 V2 所有者接管内部使用。成功时接管 fd；失败仍由调用方拥有。 */
+int tr_reactor_adopt_tls_fd_on_owner(struct tr_reactor *reactor, int fd,
+                                     struct tr_tls_openssl_profile *profile,
+                                     uint64_t handshake_deadline_ns,
+                                     struct tr_conn_handle *out);
 
 /* 所有权：
  * - TR_OK：payload 所有权转移给反应器；
