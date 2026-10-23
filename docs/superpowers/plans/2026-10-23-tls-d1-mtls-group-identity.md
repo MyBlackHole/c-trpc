@@ -185,43 +185,46 @@ Client 在每个 CONTROL/DATA fd 上通过新的 outbound-prefaced Reactor API�
 
 **Files:**
 - Modify: `include/tr/tls.h`, `include/tr/client.h`, `include/tr/server.h`
-- Modify: `src/io/tls_openssl.h`, `src/io/tls_openssl.c`, `src/io/peer_identity_internal.c`
+- Modify: `src/io/tls_openssl.h`, `src/io/tls_openssl.c`
 - Modify: `src/client.c`, `src/server.c`
-- Modify: `src/execution/reactor.h`, `src/execution/reactor.c`
+- Modify: `src/execution/reactor_internal.h`, `src/execution/reactor.c`
+- Modify: `src/rpc/rpc_record_client.c`, `src/rpc/rpc_record_client.h`
 - Modify: `src/transport/group/client_group.c`, `src/transport/group/pipeline_listener.c`
-- Modify: `tests/test_rpc_v2_tls_identity.c`, `tests/test_connection_group_tls.c`
+- Modify: `tests/test_rpc_v2_tls_identity.c`, `tests/test_connection_group_tls.c`, `tests/test_tls_openssl.c`
+- Modify: `tests/tls_test_identity.c`, `tests/tls_test_identity.h`, `README.md`, `xmake.lua`
+- Modify: this plan's Task 4 evidence and status
 
 **Interfaces:**
 - `enum tr_tls_rotation_policy { TR_TLS_ROTATE_GRACEFUL=0, TR_TLS_ROTATE_REVOKE_OLD=1 }`。
 - `tr_client_tls_update_profile(client, config, policy, out_generation)` 和 `tr_server_tls_update_profile(server, config, policy, out_generation)`：只用于已启用 TLS_REQUIRED 的实例；成功才写 generation。
 
-- [ ] **Step 1: 写双 owner 轮换及失败注入测试**
+- [x] **Step 1: 写多分片 Server、单 owner Client 轮换及故障测试**
 
-为 Client/Server 配置两个 Reactor shard。验证 candidate profile 构造失败不改变现行代次；第二个 owner 安装失败时所有 owner 回滚、准入 gate 恢复且没有 candidate-generation session；强制 revoke 只关闭旧 generation，graceful 模式保留旧连接至自然排空。
+公开 Client 只有一个 Reactor owner；RPC 与连接组 Server 使用两个 shard。测试验证 candidate 构造失败不改变 generation/out 参数，Server 两 shard 的 TLS generation 一致，CONTROL/DATA generation 不一致时拒绝路由，graceful 轮换后关闭并重连的组使用新证书。安装失败注入通过正在 drain 的连接组 listener 触发：候选 profile 已安装到后续 shard，listener 拒绝安装；若恢复命令也被 listener 生命周期拒绝，实例进入 fail-closed 状态，保留资源并只允许 destroy 重试。
 
-- [ ] **Step 2: 运行 RED**
+- [x] **Step 2: 运行 RED**
 
-运行新增的 rotation case；当前无 update API 和 generation 栏位，应在 API 编译或断言处失败。确认现有两个 shard 的普通 TLS/明文测试保持通过。
+在 generation 辅助函数实现前，`test_tls_openssl` 因缺少 `tr_tls_openssl_profile_next_generation` 声明而编译失败；接入新服务端证书夹具前，连接组测试因缺少 `rotated_server_certificate_file` 字段而编译失败。补齐实现后，相关 TLS 和连接组目标转绿。
 
-- [ ] **Step 3: 让 profile 与 session 持有同一引用计数快照**
+- [x] **Step 3: 让 profile 与 session 持有同一引用计数快照**
 
-profile snapshot 拥有 SSL_CTX、信任配置、generation；每个 SSL session 和 group session retain snapshot。最后引用归还时才释放 OpenSSL profile 与身份对象。generation 达 `UINT64_MAX` 时拒绝更新，不能回绕。
+profile snapshot 持有 SSL_CTX 与 generation；Reactor TLS connection 和已接管的 Server CONTROL session retain profile。Client group 在 owner 线程切换到 pending profile。最后引用归还时释放 profile 与身份对象。generation 达 `UINT64_MAX` 或 profile 已共享时拒绝修改，不能回绕。
 
-- [ ] **Step 4: 实现更新 gate、安装屏障和 rollback 屏障**
+- [x] **Step 4: 实现更新 gate、安装屏障和 rollback 屏障**
 
-profile 在调用线程构建。每个 owner 先暂停新 TLS accept/adopt，所有 owner gate 成功后安装 candidate；所有安装成功才开放 gate。任一安装失败时在 gate 关闭期间恢复所有旧指针。若 pause/install/rollback 生命周期命令失败，保留 Client/Server 所有权、所有 snapshot 与关闭的 gate，返回生命周期错误，后续仅允许 destroy 重试。
+profile 在调用线程构建。Server 各 owner 先暂停 TLS 准入，所有 gate 成功后安装 candidate；全部安装成功才开放 gate。可恢复的安装错误在 gate 关闭期间回装旧指针；若 gate、install 或 rollback 生命周期命令失败，保留实例和 snapshots、保持 fail-closed，并仅允许 destroy 重试。Client 对单 owner 使用相同准入和恢复规则。
 
-- [ ] **Step 5: 实现 graceful 与 revoke-old 语义**
+- [x] **Step 5: 实现 graceful 与 revoke-old 语义**
 
-Graceful update 使新 TLS 接管用新 generation，已接管 session 保持旧 snapshot；Client group 固定自己的 snapshot，Server 旧 generation CONTROL 不接受新 generation DATA，必须 drain/reconnect。REVOKE_OLD 通过所有 owner 关闭被撤销 generation 的连接，等待既有 callback/quiescence 规则，不提前释放仍被 Call 引用的 identity。
+Graceful update 使新 TLS 接管用新 generation，已接管 session 保持旧 snapshot；Client group 在重连时使用新 snapshot，Server 旧 generation CONTROL 不接受新 generation DATA，需 drain/reconnect。REVOKE_OLD 通过所有 owner 关闭旧 generation 连接；连接仍持有 snapshot 直至 close callback/quiescence 后释放。
 
-- [ ] **Step 6: 运行轮换 GREEN 和生命周期故障矩阵**
+- [x] **Step 6: 运行轮换 GREEN 和生命周期回归**
 
-运行 `test_connection_group_tls` 的新旧证书同主体轮换、不同主体拒绝、构造失败、两 shard partial install rollback、revoke shutdown、destroy retry、最大代次拒绝场景；再运行 `test_client_connect_rollback`、`test_server_peer_rollback`、`test_server_destroy_retry`、`test_rpc_v2_server_destroy_drain`、`test_reactor_source_detach` 与 `test_reactor_tokens`。
+`test_connection_group_tls` 覆盖同主体新旧服务端/客户端证书轮换、旧 CONTROL 拒绝新代次 DATA、重连成功、generation 输出保持和 listener drain 安装失败；`test_rpc_v2_tls_identity` 覆盖普通 RPC graceful/revoke-old 和新连接恢复；`test_tls_openssl` 覆盖最大 generation 与共享 profile 不可变。全量 88 个测试通过，包含既有 Client/Server 回滚、destroy retry 和 Reactor 生命周期用例。未覆盖 TLS-D1 的跨工具链/消毒器矩阵，留给 Task 5。
 
-- [ ] **Step 7: 提交快照轮换交付**
+- [x] **Step 7: 提交快照轮换交付**
 
-把版本从 `.15` bump 到 `.16`；按 `feature-commit-format` 记录跨 owner 原子性、强制撤销造成的旧连接错误范围、零明文路径性能影响及完整回滚。提交只包含 Task 4 文件。
+版本从 `.15` bump 到 `.16`；本提交按 `feature-commit-format` 记录跨 owner 原子性、旧连接撤销影响、明文路径不变的性能影响及回滚方式，并推送到 `feat/v2-tls-d-234`。提交只包含 Task 4 与本计划文件，不包含其他未跟踪计划。
 
 ### Task 5: TLS-D1 全矩阵、记录与 GitHub 验收
 

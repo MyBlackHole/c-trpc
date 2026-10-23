@@ -17,6 +17,12 @@ enum tr_tls_client_auth_policy {
 	TR_TLS_CLIENT_AUTH_REQUIRED = 2
 };
 
+/* 配置轮换后，旧会话可自然排空，或立即撤销旧 profile 上的连接。 */
+enum tr_tls_rotation_policy {
+	TR_TLS_ROTATE_GRACEFUL = 0,
+	TR_TLS_ROTATE_REVOKE_OLD = 1
+};
+
 // 备注: Client 的证书信任与服务端身份配置。字符串仅借用到创建函数返回，
 // 备注: 调用方应在 TLS 必需模式下显式提供 expected_peer_name。
 struct tr_tls_client_config {

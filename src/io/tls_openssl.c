@@ -20,6 +20,7 @@
 #include "byte_endpoint.h"
 #include "peer_identity_internal.h"
 #include "tls_config.h"
+#include "../refcount.h"
 
 enum tr_tls_openssl_role {
 	TR_TLS_OPENSSL_CLIENT = 1,
@@ -27,8 +28,10 @@ enum tr_tls_openssl_role {
 };
 
 struct tr_tls_openssl_profile {
+	struct tr_refcount references;
 	SSL_CTX *context;
 	enum tr_tls_openssl_role role;
+	uint64_t generation;
 	int peer_identity_enabled;
 	int peer_identity_required;
 	char *sni_name;
@@ -337,6 +340,13 @@ static int tr_tls_openssl_profile_alloc(enum tr_tls_openssl_role role,
 	}
 	profile->context = context;
 	profile->role = role;
+	profile->generation = 1U;
+	status = tr_refcount_init(&profile->references, 1U);
+	if (status != TR_OK) {
+		SSL_CTX_free(context);
+		free(profile);
+		return status;
+	}
 	*out = profile;
 	return TR_OK;
 }
@@ -510,9 +520,52 @@ int tr_tls_openssl_profile_peer_identity_required(
 	return profile ? profile->peer_identity_required : 0;
 }
 
-void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile)
+int tr_tls_openssl_profile_retain(struct tr_tls_openssl_profile *profile)
 {
 	if (!profile)
+		return TR_ERR_INVALID;
+	return tr_refcount_get(&profile->references);
+}
+
+uint64_t
+tr_tls_openssl_profile_generation(const struct tr_tls_openssl_profile *profile)
+{
+	return profile ? profile->generation : 0U;
+}
+
+int tr_tls_openssl_profile_next_generation(
+        const struct tr_tls_openssl_profile *profile, uint64_t *out_generation)
+{
+	uint64_t generation;
+
+	if (!profile || !out_generation)
+		return TR_ERR_INVALID;
+	generation = profile->generation;
+	if (generation == 0U || generation == UINT64_MAX)
+		return TR_ERR_STATE;
+	*out_generation = generation + 1U;
+	return TR_OK;
+}
+
+int tr_tls_openssl_profile_set_generation(
+        struct tr_tls_openssl_profile *profile, uint64_t generation)
+{
+	if (!profile || generation == 0U)
+		return TR_ERR_INVALID;
+	if (tr_refcount_read(&profile->references) != 1U)
+		return TR_ERR_STATE;
+	profile->generation = generation;
+	return TR_OK;
+}
+
+void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile)
+{
+	int ret;
+
+	if (!profile)
+		return;
+	ret = tr_refcount_put(&profile->references);
+	if (ret != 1)
 		return;
 	SSL_CTX_free(profile->context);
 	free(profile->sni_name);

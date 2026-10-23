@@ -261,6 +261,7 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	X509 *ca_certificate = NULL;
 	X509 *alternate_ca_certificate = NULL;
 	X509 *server_certificate = NULL;
+	X509 *rotated_server_certificate = NULL;
 	X509 *server_alternate_uri_certificate = NULL;
 	X509 *wrong_dns_certificate = NULL;
 	X509 *wrong_ip_certificate = NULL;
@@ -331,6 +332,9 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	    !tls_test_path(identity->server_certificate_file,
 	                   sizeof(identity->server_certificate_file),
 	                   identity->directory, "server.pem") ||
+	    !tls_test_path(identity->rotated_server_certificate_file,
+	                   sizeof(identity->rotated_server_certificate_file),
+	                   identity->directory, "server-rotated.pem") ||
 	    !tls_test_path(identity->server_private_key_file,
 	                   sizeof(identity->server_private_key_file),
 	                   identity->directory, "server-key.pem") ||
@@ -430,6 +434,11 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	        "DNS:server.example.test,IP:127.0.0.1,URI:spiffe://"
 	        "c-trpc.example/server",
 	        "serverAuth", -60, 3600, 2, 0);
+	rotated_server_certificate = tls_test_generate_certificate(
+	        server_key, ca_certificate, ca_key, "server.example.test",
+	        "DNS:server.example.test,IP:127.0.0.1,URI:spiffe://"
+	        "c-trpc.example/server",
+	        "serverAuth", -60, 3600, 20, 0);
 	server_alternate_uri_certificate = tls_test_generate_certificate(
 	        server_key, ca_certificate, ca_key, "server.example.test",
 	        "DNS:server.example.test,IP:127.0.0.1,URI:spiffe://"
@@ -504,13 +513,13 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	        "URI:spiffe://c-trpc.example/client", "serverAuth", -60, 3600,
 	        18, 0);
 	if (!ca_certificate || !alternate_ca_certificate ||
-	    !server_certificate || !server_alternate_uri_certificate ||
-	    !wrong_dns_certificate || !wrong_ip_certificate ||
-	    !common_name_only_certificate || !expired_certificate ||
-	    !client_only_certificate || !client_certificate ||
-	    !client_alternate_uri_certificate || !wrong_client_ca_certificate ||
-	    !rotated_client_certificate || !client_no_uri_certificate ||
-	    !client_duplicate_uri_certificate ||
+	    !server_certificate || !rotated_server_certificate ||
+	    !server_alternate_uri_certificate || !wrong_dns_certificate ||
+	    !wrong_ip_certificate || !common_name_only_certificate ||
+	    !expired_certificate || !client_only_certificate ||
+	    !client_certificate || !client_alternate_uri_certificate ||
+	    !wrong_client_ca_certificate || !rotated_client_certificate ||
+	    !client_no_uri_certificate || !client_duplicate_uri_certificate ||
 	    !client_empty_uri_certificate ||
 	    !client_oversized_uri_certificate ||
 	    !client_control_uri_certificate || !client_wrong_eku_certificate ||
@@ -519,6 +528,9 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	                                alternate_ca_certificate) ||
 	    !tls_test_write_certificate(identity->server_certificate_file,
 	                                server_certificate) ||
+	    !tls_test_write_certificate(
+	            identity->rotated_server_certificate_file,
+	            rotated_server_certificate) ||
 	    !tls_test_write_certificate(
 	            identity->server_alternate_uri_certificate_file,
 	            server_alternate_uri_certificate) ||
@@ -596,6 +608,7 @@ cleanup:
 	X509_free(ca_certificate);
 	X509_free(alternate_ca_certificate);
 	X509_free(server_certificate);
+	X509_free(rotated_server_certificate);
 	X509_free(server_alternate_uri_certificate);
 	X509_free(wrong_dns_certificate);
 	X509_free(wrong_ip_certificate);
@@ -625,6 +638,8 @@ void tls_test_identity_cleanup(struct tls_test_identity *identity)
 		(void)unlink(identity->ca_file);
 	if (identity->server_certificate_file[0])
 		(void)unlink(identity->server_certificate_file);
+	if (identity->rotated_server_certificate_file[0])
+		(void)unlink(identity->rotated_server_certificate_file);
 	if (identity->server_alternate_uri_certificate_file[0])
 		(void)unlink(identity->server_alternate_uri_certificate_file);
 	if (identity->server_private_key_file[0])

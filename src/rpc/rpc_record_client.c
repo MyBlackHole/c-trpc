@@ -9,6 +9,7 @@
 #include "tr/status.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -49,6 +50,7 @@ struct tr_rpc_record_client {
 	struct tr_buffer_pool *send_pool;
 	struct tr_rpc_record_client_config config;
 	struct tr_rpc_record_semantic_counters semantic;
+	_Atomic bool tls_failed;
 	struct tr_reactor_timer_handle timer;
 	uint32_t *routes;
 	uint32_t route_capacity;
@@ -91,6 +93,13 @@ struct tr_reactor *
 tr_rpc_record_client_reactor(struct tr_rpc_record_client *client)
 {
 	return client ? client->reactor : NULL;
+}
+
+void tr_rpc_record_client_mark_tls_failed(struct tr_rpc_record_client *client)
+{
+	if (client)
+		atomic_store_explicit(&client->tls_failed, true,
+		                      memory_order_release);
 }
 
 int tr_rpc_record_client_in_callback(void)
@@ -699,7 +708,8 @@ static int tr_record_client_call_start(
 	           !out) {
 		return TR_ERR_INVALID;
 	}
-	if (!client->started || client->stopping || client->depth ||
+	if (atomic_load_explicit(&client->tls_failed, memory_order_acquire) ||
+	    !client->started || client->stopping || client->depth ||
 	    client->callback_depth || client->generation == UINT64_MAX)
 		return TR_ERR_STATE;
 	if (client->draining)
@@ -850,6 +860,9 @@ static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
 	int ret = tr_record_client_lookup(handle, &slot);
 	if (ret != TR_OK)
 		return ret;
+	if (atomic_load_explicit(&slot->client->tls_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (slot->sending || (slot->unary_mode && !automatic))
 		return TR_ERR_STATE;
 	struct tr_rpc_record_client *client = slot->client;
@@ -955,6 +968,9 @@ int tr_rpc_record_client_cancel_on_owner(
 	int ret = tr_record_client_lookup(handle, &slot);
 	if (ret != TR_OK)
 		return ret;
+	if (atomic_load_explicit(&slot->client->tls_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (slot->sending)
 		return TR_ERR_STATE;
 	struct tr_rpc_record_client *client = slot->client;
@@ -1008,6 +1024,7 @@ int tr_rpc_record_client_create_on_owner(
 		(void)tr_memory_budget_release(budget, bytes);
 		return TR_ERR_NOMEM;
 	}
+	atomic_init(&client->tls_failed, false);
 	client->reactor = reactor;
 	client->channel = channel;
 	client->methods = methods;

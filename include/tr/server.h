@@ -78,6 +78,17 @@ int tr_server_create(const struct tr_server_config *config,
 int tr_server_create_transport(const struct tr_server_config *config,
                                struct tr_server **out);
 
+/*
+ * 在已启用 TR_TLS_REQUIRED 的 Server 上原子替换 TLS 配置快照。
+ * 只能从外部控制线程调用，且调用方须与其他 Server 生命周期 API 串行化。
+ * 成功时所有分片统一使用新代次；GRACEFUL 保留已有连接，REVOKE_OLD
+ * 关闭旧代次连接。out_generation 可为空，只有成功时才写入。
+ */
+int tr_server_tls_update_profile(struct tr_server *server,
+                                 const struct tr_tls_server_config *config,
+                                 enum tr_tls_rotation_policy policy,
+                                 uint64_t *out_generation);
+
 /* 门面仅接受数字形式的 IPv4 地址；port=0 表示申请临时端口。 */
 int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 		     uint16_t port, uint16_t *out_bound_port);

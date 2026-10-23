@@ -57,6 +57,7 @@ struct tr_client_group_transfer {
 
 struct tr_client_group {
 	struct tr_client_group_config config;
+	struct tr_tls_openssl_profile *pending_tls_profile;
 	struct tr_conn_handle control;
 	struct tr_pipeline_route_preface control_route;
 	struct tr_peer_identity_snapshot *control_peer_identity;
@@ -1043,6 +1044,13 @@ static int tr_client_group_prepare_connect_on_owner(void *arg)
 
 	if (group->control.reactor || group->control_connecting)
 		return TR_ERR_STATE;
+	if (group->pending_tls_profile) {
+		struct tr_tls_openssl_profile *old_profile =
+		        group->config.tls_profile;
+		group->config.tls_profile = group->pending_tls_profile;
+		group->pending_tls_profile = NULL;
+		tr_tls_openssl_profile_release(old_profile);
+	}
 
 	group->control_connecting = 1;
 	request->generation = tr_client_group_next_generation(group);
@@ -1199,6 +1207,13 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 	if (!group)
 		return TR_ERR_NOMEM;
 	group->config = *config;
+	if (group->config.tls_profile) {
+		ret = tr_tls_openssl_profile_retain(group->config.tls_profile);
+		if (ret != TR_OK) {
+			free(group);
+			return ret;
+		}
+	}
 	group->data_capacity = config->max_data_connections;
 	group->transfer_limit =
 		config->max_data_connections != 0U ? config->max_transfers : 0U;
@@ -1294,6 +1309,8 @@ fail:
 	}
 	free(group->transfers);
 	free(group->data);
+	tr_tls_openssl_profile_release(group->config.tls_profile);
+	tr_tls_openssl_profile_release(group->pending_tls_profile);
 	if (drain_wait_cond_ready)
 		pthread_cond_destroy(&group->drain_wait_cond);
 	if (drain_wait_lock_ready)
@@ -1833,8 +1850,48 @@ int tr_client_group_destroy(struct tr_client_group *group)
 
 	free(group->transfers);
 	free(group->data);
+	tr_tls_openssl_profile_release(group->config.tls_profile);
+	tr_tls_openssl_profile_release(group->pending_tls_profile);
 	pthread_cond_destroy(&group->drain_wait_cond);
 	pthread_mutex_destroy(&group->drain_wait_lock);
 	free(group);
 	return TR_OK;
+}
+
+struct tr_client_group_tls_profile_request {
+	struct tr_client_group *group;
+	struct tr_tls_openssl_profile *profile;
+};
+
+static int tr_client_group_schedule_tls_profile_on_owner(void *arg)
+{
+	struct tr_client_group_tls_profile_request *request = arg;
+	struct tr_client_group *group;
+	int ret;
+
+	if (!request || !request->group || !request->profile)
+		return TR_ERR_INVALID;
+	group = request->group;
+	if (!group->config.tls_profile || group->closing || group->draining)
+		return TR_ERR_STATE;
+	ret = tr_tls_openssl_profile_retain(request->profile);
+	if (ret != TR_OK)
+		return ret;
+	tr_tls_openssl_profile_release(group->pending_tls_profile);
+	group->pending_tls_profile = request->profile;
+	return TR_OK;
+}
+
+int tr_client_group_schedule_tls_profile(struct tr_client_group *group,
+                                         struct tr_tls_openssl_profile *profile)
+{
+	struct tr_client_group_tls_profile_request request;
+
+	if (!group || !profile)
+		return TR_ERR_INVALID;
+	request.group = group;
+	request.profile = profile;
+	return tr_reactor_call_or_stopped(
+	        group->config.owner,
+	        tr_client_group_schedule_tls_profile_on_owner, &request);
 }

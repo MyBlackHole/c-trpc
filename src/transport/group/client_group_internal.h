@@ -29,6 +29,8 @@ struct tr_client_group_config {
 int tr_client_group_create(const struct tr_client_group_config *config,
 			   struct tr_client_group **out);
 int tr_client_group_destroy(struct tr_client_group *group);
+int tr_client_group_schedule_tls_profile(
+        struct tr_client_group *group, struct tr_tls_openssl_profile *profile);
 
 int tr_client_group_connect(
 	struct tr_client_group *group, const char *ipv4_address, uint16_t port,

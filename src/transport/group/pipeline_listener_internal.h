@@ -86,6 +86,9 @@ int tr_pipeline_listener_wait_drained(
  */
 int tr_pipeline_listener_stop(struct tr_pipeline_listener *listener);
 int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
+int tr_pipeline_listener_set_tls_profile_on_owner(
+        struct tr_pipeline_listener *listener,
+        struct tr_tls_openssl_profile *profile);
 
 uint16_t tr_pipeline_listener_bound_port(
 	const struct tr_pipeline_listener *listener);

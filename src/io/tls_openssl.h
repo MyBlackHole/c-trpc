@@ -26,6 +26,13 @@ int tr_tls_openssl_profile_peer_identity_enabled(
         const struct tr_tls_openssl_profile *profile);
 int tr_tls_openssl_profile_peer_identity_required(
         const struct tr_tls_openssl_profile *profile);
+int tr_tls_openssl_profile_retain(struct tr_tls_openssl_profile *profile);
+uint64_t
+tr_tls_openssl_profile_generation(const struct tr_tls_openssl_profile *profile);
+int tr_tls_openssl_profile_next_generation(
+        const struct tr_tls_openssl_profile *profile, uint64_t *out_generation);
+int tr_tls_openssl_profile_set_generation(
+        struct tr_tls_openssl_profile *profile, uint64_t generation);
 void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile);
 int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
                                   int fd, struct tr_tls_openssl_session **out);

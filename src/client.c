@@ -50,6 +50,7 @@ struct tr_client {
 	struct tr_client_config config;
 	struct tr_facade_tuning tuning;
 	struct tr_tls_openssl_profile *tls_profile;
+	struct tr_tls_openssl_profile *tls_recovery_profile;
 
 	struct tr_runtime *runtime;
 	struct tr_runtime_shard *shard;
@@ -66,6 +67,8 @@ struct tr_client {
 	int record_connect_failed;
 	_Atomic int record_stopping;
 	int destroy_active;
+	_Atomic int tls_rotation_failed;
+	_Atomic int tls_update_active;
 	/* owner 只发布谓词；外部等待不读取调用槽或回调中的可变字段。 */
 	pthread_mutex_t record_drain_lock;
 	pthread_cond_t record_drain_cond;
@@ -358,6 +361,8 @@ tr_client_create_internal(const struct tr_client_config *config,
 	client->config = effective;
 	client->tuning = effective_tuning;
 	atomic_init(&client->record_stopping, 0);
+	atomic_init(&client->tls_rotation_failed, 0);
+	atomic_init(&client->tls_update_active, 0);
 	if (effective.tls.mode == TR_TLS_REQUIRED) {
 		ret = record ? tr_tls_openssl_client_profile_create(
 		                       &effective.tls, &client->tls_profile)
@@ -542,6 +547,137 @@ int tr_client_create_transport(const struct tr_client_config *config,
 	if (config && config->enable_reconnect)
 		return TR_ERR_UNSUPPORTED;
 	ret = tr_client_create_internal(config, NULL, NULL, NULL, 0, 0, out);
+	return ret;
+}
+
+static void tr_client_tls_rotation_mark_failed(struct tr_client *client)
+{
+	atomic_store_explicit(&client->tls_rotation_failed, 1,
+	                      memory_order_release);
+	atomic_store_explicit(&client->record_stopping, 1,
+	                      memory_order_release);
+	tr_rpc_record_client_mark_tls_failed(client->record_rpc);
+}
+
+static int tr_client_tls_update_profile_impl(
+        struct tr_client *client, const struct tr_tls_client_config *config,
+        enum tr_tls_rotation_policy policy, uint64_t *out_generation)
+{
+	struct tr_tls_openssl_profile *candidate = NULL;
+	struct tr_tls_openssl_profile *old_profile;
+	struct tr_reactor *owner;
+	uint64_t candidate_generation;
+	int ret;
+	int rollback_ret;
+
+	if (!client || !config ||
+	    (policy != TR_TLS_ROTATE_GRACEFUL &&
+	     policy != TR_TLS_ROTATE_REVOKE_OLD))
+		return TR_ERR_INVALID;
+	if (tr_client_blocking_lifecycle_context() || client->destroy_active ||
+	    atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
+	if (!client->tls_profile || !client->runtime || !client->shard)
+		return TR_ERR_STATE;
+	if (config->mode != TR_TLS_REQUIRED ||
+	    (client->transport_only && (!config->client_certificate_file ||
+	                                !config->client_private_key_file)))
+		return TR_ERR_INVALID;
+	old_profile = client->tls_profile;
+	ret = tr_tls_openssl_profile_next_generation(old_profile,
+	                                             &candidate_generation);
+	if (ret != TR_OK)
+		return ret;
+	ret = client->transport_only
+	              ? tr_tls_openssl_client_profile_create_with_peer_identity(
+	                        config, &candidate)
+	              : tr_tls_openssl_client_profile_create(config,
+	                                                     &candidate);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_tls_openssl_profile_set_generation(candidate,
+	                                            candidate_generation);
+	if (ret != TR_OK)
+		goto fail_candidate;
+	owner = tr_runtime_shard_reactor(client->shard);
+	ret = tr_reactor_tls_admission_set(owner, 1);
+	if (ret != TR_OK)
+		goto fail_candidate;
+	if (client->connection_group) {
+		ret = tr_client_group_schedule_tls_profile(
+		        client->connection_group, candidate);
+		if (ret != TR_OK)
+			goto rollback_gate_only;
+	}
+
+	client->tls_profile = candidate;
+	if (policy == TR_TLS_ROTATE_REVOKE_OLD) {
+		ret = tr_reactor_tls_close_before_generation(
+		        owner, candidate_generation);
+		if (ret != TR_OK)
+			goto rollback_profile;
+	}
+	ret = tr_reactor_tls_admission_set(owner, 0);
+	if (ret == TR_OK) {
+		tr_tls_openssl_profile_release(old_profile);
+		if (out_generation)
+			*out_generation = candidate_generation;
+		return TR_OK;
+	}
+
+rollback_profile:
+	rollback_ret = tr_reactor_tls_admission_set(owner, 1);
+	if (rollback_ret == TR_OK)
+		rollback_ret = tr_reactor_tls_close_generation(
+		        owner, candidate_generation);
+	if (rollback_ret == TR_OK && client->connection_group)
+		rollback_ret = tr_client_group_schedule_tls_profile(
+		        client->connection_group, old_profile);
+	if (rollback_ret == TR_OK) {
+		client->tls_profile = old_profile;
+		rollback_ret = tr_reactor_tls_admission_set(owner, 0);
+		if (rollback_ret == TR_OK) {
+			tr_tls_openssl_profile_release(candidate);
+			return ret;
+		}
+		tr_client_tls_rotation_mark_failed(client);
+		client->tls_recovery_profile = candidate;
+		return TR_ERR_STATE;
+	}
+	tr_client_tls_rotation_mark_failed(client);
+	client->tls_recovery_profile = old_profile;
+	client->tls_profile = candidate;
+	return TR_ERR_STATE;
+
+rollback_gate_only:
+	rollback_ret = tr_reactor_tls_admission_set(owner, 0);
+	if (rollback_ret != TR_OK) {
+		tr_client_tls_rotation_mark_failed(client);
+		tr_tls_openssl_profile_release(candidate);
+		return TR_ERR_STATE;
+	}
+fail_candidate:
+	tr_tls_openssl_profile_release(candidate);
+	return ret;
+}
+
+int tr_client_tls_update_profile(struct tr_client *client,
+                                 const struct tr_tls_client_config *config,
+                                 enum tr_tls_rotation_policy policy,
+                                 uint64_t *out_generation)
+{
+	int ret;
+
+	if (!client)
+		return TR_ERR_INVALID;
+	if (atomic_exchange_explicit(&client->tls_update_active, 1,
+	                             memory_order_acquire))
+		return TR_AGAIN;
+	ret = tr_client_tls_update_profile_impl(client, config, policy,
+	                                        out_generation);
+	atomic_store_explicit(&client->tls_update_active, 0,
+	                      memory_order_release);
 	return ret;
 }
 
@@ -774,6 +910,9 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 
 	if (!client)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (client->connection_group)
@@ -812,6 +951,9 @@ int tr_client_connection_group_connect(
 	if (!client || !ipv4_address || !group || port == 0U ||
 	    group->group_id == 0U || group->epoch == 0U)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	ret = tr_client_connection_group_ensure(client);
 	if (ret != TR_OK)
 		return ret;
@@ -823,6 +965,9 @@ int tr_client_connection_group_close(struct tr_client *client)
 {
 	if (!client)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
@@ -834,6 +979,9 @@ int tr_client_connection_group_begin_drain(struct tr_client *client)
 {
 	if (!client)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
@@ -847,6 +995,9 @@ int tr_client_connection_group_get_stats(
 {
 	if (!client || !out)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
@@ -859,6 +1010,9 @@ int tr_client_connection_group_wait_drained(
 {
 	if (!client)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (tr_client_blocking_lifecycle_context())
@@ -875,6 +1029,9 @@ int tr_client_connection_group_release_transfer(
 {
 	if (!client || stream_id == 0U)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
@@ -890,6 +1047,9 @@ int tr_client_connection_group_send(
 	if (!client || stream_id == 0U || !bytes ||
 	    (bytes->len != 0U && !bytes->data))
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
@@ -901,6 +1061,9 @@ int tr_client_connection_group_send(
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 {
 	if (!client)
+		return TR_ERR_STATE;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
 		return TR_ERR_STATE;
 	if (tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
@@ -1069,7 +1232,9 @@ static int tr_client_record_operation_on_owner(void *arg)
 int tr_client_record_send(struct tr_rpc_record_client_handle handle,
                           struct tr_buffer **body)
 {
-	struct tr_client_record_operation_request request = {
+	struct tr_client_record_operation_request request;
+
+	request = (struct tr_client_record_operation_request){
 	        .handle = handle,
 	        .body = body,
 	        .operation = TR_CLIENT_RECORD_SEND};
@@ -1080,7 +1245,9 @@ int tr_client_record_send(struct tr_rpc_record_client_handle handle,
 
 int tr_client_record_half_close(struct tr_rpc_record_client_handle handle)
 {
-	struct tr_client_record_operation_request request = {
+	struct tr_client_record_operation_request request;
+
+	request = (struct tr_client_record_operation_request){
 	        .handle = handle, .operation = TR_CLIENT_RECORD_HALF_CLOSE};
 
 	return tr_client_record_sync(
@@ -1089,7 +1256,9 @@ int tr_client_record_half_close(struct tr_rpc_record_client_handle handle)
 
 int tr_client_record_cancel(struct tr_rpc_record_client_handle handle)
 {
-	struct tr_client_record_operation_request request = {
+	struct tr_client_record_operation_request request;
+
+	request = (struct tr_client_record_operation_request){
 	        .handle = handle, .operation = TR_CLIENT_RECORD_CANCEL};
 
 	return tr_client_record_sync(
@@ -1101,7 +1270,9 @@ int tr_rpc_v2_call_send(struct tr_rpc_v2_call call,
 {
 	struct tr_rpc_record_client_handle handle =
 	        tr_rpc_record_client_private_handle(call);
-	struct tr_client_record_operation_request request = {
+	struct tr_client_record_operation_request request;
+
+	request = (struct tr_client_record_operation_request){
 	        .handle = handle,
 	        .operation = TR_CLIENT_RECORD_SEND_BYTES,
 	        .message = message};
@@ -1216,6 +1387,9 @@ int tr_client_wait_drained(struct tr_client *client, uint32_t timeout_ms)
 int tr_client_get_channel_stats(struct tr_client *client,
 				struct tr_channel_stats *out)
 {
+	if (client && atomic_load_explicit(&client->tls_rotation_failed,
+	                                   memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!client || !client->channel)
 		return TR_ERR_STATE;
 	return tr_channel_get_stats(client->channel, out);
@@ -1238,6 +1412,9 @@ int tr_client_get_rpc_semantic_stats(
 {
 	if (!client || !out)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!client->record_mode) {
 		*out = (struct tr_rpc_semantic_stats){0};
 		return TR_OK;
@@ -1378,6 +1555,10 @@ static int tr_client_destroy_internal(struct tr_client *client)
 	if (client->tls_profile) {
 		tr_tls_openssl_profile_release(client->tls_profile);
 		client->tls_profile = NULL;
+	}
+	if (client->tls_recovery_profile) {
+		tr_tls_openssl_profile_release(client->tls_recovery_profile);
+		client->tls_recovery_profile = NULL;
 	}
 
 	free(client);

@@ -354,6 +354,38 @@ static void wait_for_counter(struct connection_group_tls_state *state,
 	pthread_mutex_unlock(&state->lock);
 }
 
+static void wait_for_server_group_count(struct tr_server *server,
+                                        uint32_t expected)
+{
+	struct timespec pause = {0, 1000000L};
+	for (unsigned attempt = 0U; attempt < 5000U; ++attempt) {
+		struct tr_connection_group_server_stats stats;
+		assert(tr_server_connection_group_get_stats(server, &stats) ==
+		       TR_OK);
+		if (stats.groups_current == expected)
+			return;
+		assert(nanosleep(&pause, NULL) == 0);
+	}
+	assert(!"timed out waiting for connection-group count");
+}
+
+static void wait_for_server_route_rejections(struct tr_server *server,
+                                             uint64_t expected)
+{
+	struct timespec pause = {0, 1000000L};
+	struct tr_connection_group_server_stats stats;
+
+	for (unsigned attempt = 0U; attempt < 5000U; ++attempt) {
+		assert(tr_server_connection_group_get_stats(server, &stats) ==
+		       TR_OK);
+		if (stats.route_rejections >= expected)
+			return;
+		assert(nanosleep(&pause, NULL) == 0 || errno == EINTR);
+	}
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.route_rejections >= expected);
+}
+
 static int identity_equals(const struct tr_peer_identity_view *identity,
                            const uint8_t *uri, uint32_t uri_len)
 {
@@ -653,12 +685,16 @@ static void test_public_connection_group_mtls(void)
 	struct tls_test_identity identity;
 	struct connection_group_tls_state state;
 	struct tr_server_config server_config;
+	struct tr_tls_server_config rotated_server_tls;
 	struct tr_client_config client_config;
+	struct tr_tls_client_config rotated_client_tls;
 	struct tr_server *server = NULL;
 	struct tr_client *client = NULL;
 	struct tr_connection_group_id group;
 	struct tr_transport_bytes bytes;
+	struct tr_connection_group_server_stats server_stats;
 	uint16_t port = 0U;
+	uint64_t generation = 0U;
 
 	memset(&state, 0, sizeof(state));
 	assert(pthread_mutex_init(&state.lock, NULL) == 0);
@@ -672,6 +708,7 @@ static void test_public_connection_group_mtls(void)
 	assert(tls_test_identity_init(&identity, "connection-group-tls") == 0);
 
 	tr_server_config_init(&server_config);
+	server_config.shard_count = 2U;
 	server_config.handshake_timeout_ms = 5000U;
 	server_config.keepalive_interval_ms = 0U;
 	server_config.tls.mode = TR_TLS_REQUIRED;
@@ -714,6 +751,46 @@ static void test_public_connection_group_mtls(void)
 	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
 	                                          &group) == TR_OK);
 	wait_for_counter(&state, &state.control_authorizations, 1U);
+	assert(tr_server_connection_group_get_stats(server, &server_stats) ==
+	       TR_OK);
+
+	rotated_server_tls = server_config.tls;
+	rotated_server_tls.certificate_file =
+	        identity.rotated_server_certificate_file;
+	assert(tr_server_tls_update_profile(server, &rotated_server_tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	rotated_client_tls = client_config.tls;
+	rotated_client_tls.client_certificate_file =
+	        identity.rotated_client_certificate_file;
+	rotated_client_tls.client_private_key_file =
+	        identity.rotated_client_private_key_file;
+	generation = 0U;
+	assert(tr_client_tls_update_profile(client, &rotated_client_tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	/* 活动 CONTROL 仍绑定旧 Server generation；准备好的 Client 新证书
+	 * 不得被同一 group 的 DATA 提前使用。 */
+	assert(tr_server_connection_group_send_data_offer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	               TEST_OFFER_MESSAGE_ID) == TR_OK);
+	wait_for_server_route_rejections(server,
+	                                 server_stats.route_rejections + 1U);
+	assert(atomic_load_explicit(&state.data_authorizations,
+	                            memory_order_relaxed) == 0U);
+	assert(atomic_load_explicit(&state.ready_callbacks,
+	                            memory_order_relaxed) == 0U);
+	assert(tr_server_connection_group_get_stats(server, &server_stats) ==
+	       TR_OK);
+	assert(server_stats.groups_current == 1U);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_for_server_group_count(server, 0U);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &group) == TR_OK);
+	wait_for_counter(&state, &state.control_authorizations, 2U);
 	assert(tr_server_connection_group_send_data_offer(
 	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
 	               TEST_OFFER_MESSAGE_ID) == TR_OK);
@@ -722,7 +799,6 @@ static void test_public_connection_group_mtls(void)
 	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, TEST_STREAM_ID,
 	               TEST_READY_MESSAGE_ID) == TR_OK);
 	wait_for_counter(&state, &state.ready_callbacks, 1U);
-
 	bytes.data = message_body;
 	bytes.len = (uint32_t)sizeof(message_body) - 1U;
 	assert(tr_client_connection_group_send(client, TEST_STREAM_ID,
@@ -731,6 +807,13 @@ static void test_public_connection_group_mtls(void)
 	wait_for_counter(&state, &state.messages, 1U);
 
 	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_for_server_group_count(server, 0U);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	generation = UINT64_C(0xfeedface);
+	assert(tr_server_tls_update_profile(server, &server_config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_ERR_CLOSED);
+	assert(generation == UINT64_C(0xfeedface));
 	assert(tr_client_destroy(client) == TR_OK);
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);

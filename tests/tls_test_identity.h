@@ -8,6 +8,7 @@ struct tls_test_identity {
 	char ca_file[TR_TLS_TEST_PATH_SIZE];
 	char alternate_ca_file[TR_TLS_TEST_PATH_SIZE];
 	char server_certificate_file[TR_TLS_TEST_PATH_SIZE];
+	char rotated_server_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char server_alternate_uri_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char wrong_dns_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char wrong_ip_certificate_file[TR_TLS_TEST_PATH_SIZE];

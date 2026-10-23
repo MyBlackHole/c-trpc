@@ -38,6 +38,18 @@ int tr_reactor_call_or_stopped(
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
+/* TLS 快照轮换屏障；准入门禁仅阻止新的 TLS adopt，不影响现有会话。 */
+int tr_reactor_tls_admission_set(struct tr_reactor *reactor, int paused);
+int tr_reactor_tls_close_generation(struct tr_reactor *reactor,
+                                    uint64_t generation);
+int tr_reactor_tls_close_before_generation(struct tr_reactor *reactor,
+                                           uint64_t generation);
+int tr_reactor_tls_generation_on_owner(struct tr_conn_handle connection,
+                                       uint64_t *out_generation);
+int tr_reactor_tls_profile_retain_on_owner(
+        struct tr_conn_handle connection,
+        struct tr_tls_openssl_profile **out_profile);
+
 /* 仅当当前线程在反应器所有者循环内执行时为真。
  * 生命周期停止或销毁绝不能等待或释放其自身所有者线程。
  */

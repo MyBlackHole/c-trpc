@@ -175,6 +175,54 @@ static void wait_for_terminal(struct identity_test_state *state)
 	pthread_mutex_unlock(&state->lock);
 }
 
+static void wait_for_terminal_count(struct identity_test_state *state,
+                                    unsigned expected)
+{
+	struct timespec deadline;
+	assert(clock_gettime(CLOCK_MONOTONIC, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&state->lock);
+	while (state->client_terminals < expected ||
+	       state->server_terminals < expected) {
+		int result = pthread_cond_timedwait(&state->changed,
+		                                    &state->lock, &deadline);
+		assert(result == 0);
+	}
+	pthread_mutex_unlock(&state->lock);
+}
+
+static void wait_for_client_terminal_count(struct identity_test_state *state,
+                                           unsigned expected)
+{
+	struct timespec deadline;
+	assert(clock_gettime(CLOCK_MONOTONIC, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&state->lock);
+	while (state->client_terminals < expected) {
+		int result = pthread_cond_timedwait(&state->changed,
+		                                    &state->lock, &deadline);
+		assert(result == 0);
+	}
+	pthread_mutex_unlock(&state->lock);
+}
+
+static void wait_for_terminal_counts(struct identity_test_state *state,
+                                     unsigned client_expected,
+                                     unsigned server_expected)
+{
+	struct timespec deadline;
+	assert(clock_gettime(CLOCK_MONOTONIC, &deadline) == 0);
+	deadline.tv_sec += 15;
+	pthread_mutex_lock(&state->lock);
+	while (state->client_terminals < client_expected ||
+	       state->server_terminals < server_expected) {
+		int result = pthread_cond_timedwait(&state->changed,
+		                                    &state->lock, &deadline);
+		assert(result == 0);
+	}
+	pthread_mutex_unlock(&state->lock);
+}
+
 static void wait_for_worker_entry(struct identity_test_state *state)
 {
 	struct timespec deadline;
@@ -598,6 +646,170 @@ static void test_tls_without_client_certificate_yields_none(
 	identity_test_cleanup(&state);
 }
 
+static void test_tls_profile_rotation_generation_and_failed_candidate(void)
+{
+	struct identity_test_state state;
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_client_config invalid_client_config;
+	struct tr_server_config invalid_server_config;
+	struct tr_client *second_client = NULL;
+	struct tr_rpc_method_desc descriptor = {
+	        .service_id = TEST_SERVICE_ID,
+	        .method_id = TEST_METHOD_ID,
+	        .request_cardinality = TR_RPC_ONE,
+	        .response_cardinality = TR_RPC_ONE,
+	        .request_codec_id = TR_RPC_CODEC_RAW,
+	        .response_codec_id = TR_RPC_CODEC_RAW,
+	        .lane = TR_RPC_LANE_CONTROL,
+	        .max_request_bytes = sizeof(request_data),
+	        .max_response_bytes = sizeof(request_data),
+	};
+	struct tr_rpc_v2_method method = {
+	        .descriptor = descriptor,
+	        .work = test_server_work,
+	        .terminal = test_server_terminal,
+	        .arg = &state,
+	};
+	struct tr_rpc_v2_client_callbacks callbacks = {
+	        .message = test_client_message,
+	        .terminal = test_client_terminal,
+	        .arg = &state,
+	};
+	struct tr_rpc_call_options options = {.timeout_ms = 5000U};
+	struct tr_rpc_bytes request = {
+	        .data = request_data,
+	        .len = sizeof(request_data),
+	};
+	struct tr_rpc_v2_call call;
+	uint16_t port = 0U;
+	uint64_t generation;
+	unsigned expected_client_terminals = 1U;
+	int ret;
+
+	memset(&state, 0, sizeof(state));
+	atomic_init(&state.error, 0);
+	state.expect_certificate_identity = 1;
+	assert(pthread_mutex_init(&state.lock, NULL) == 0);
+	{
+		pthread_condattr_t attributes;
+		assert(pthread_condattr_init(&attributes) == 0);
+		assert(pthread_condattr_setclock(&attributes,
+		                                 CLOCK_MONOTONIC) == 0);
+		assert(pthread_cond_init(&state.changed, &attributes) == 0);
+		assert(pthread_condattr_destroy(&attributes) == 0);
+	}
+	assert(tls_test_identity_init(&state.certificates,
+	                              "rpc-v2-tls-profile-rotation") == 0);
+	tr_server_config_init(&server_config);
+	server_config.shard_count = 2U;
+	server_config.max_peers = 4U;
+	server_config.tls.mode = TR_TLS_REQUIRED;
+	server_config.tls.certificate_file =
+	        state.certificates.server_certificate_file;
+	server_config.tls.private_key_file =
+	        state.certificates.server_private_key_file;
+	server_config.tls.client_ca_file = state.certificates.ca_file;
+	server_config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+	assert(tr_server_create(&server_config, &method, 1U, &state.server) ==
+	       TR_OK);
+	assert(tr_server_listen(state.server, "127.0.0.1", 0U, &port) == TR_OK);
+	assert(tr_server_start(state.server) == TR_OK);
+
+	invalid_server_config = server_config;
+	invalid_server_config.tls.certificate_file =
+	        "missing-rotation-cert.pem";
+	generation = UINT64_C(0xfeedface);
+	assert(tr_server_tls_update_profile(
+	               state.server, &invalid_server_config.tls,
+	               TR_TLS_ROTATE_GRACEFUL, &generation) == TR_ERR_INVALID);
+	assert(generation == UINT64_C(0xfeedface));
+
+	tr_client_config_init(&client_config);
+	client_config.connect_timeout_ms = 5000U;
+	client_config.tls.mode = TR_TLS_REQUIRED;
+	client_config.tls.ca_file = state.certificates.ca_file;
+	client_config.tls.expected_peer_name = "server.example.test";
+	client_config.tls.client_certificate_file =
+	        state.certificates.client_certificate_file;
+	client_config.tls.client_private_key_file =
+	        state.certificates.client_private_key_file;
+	assert(tr_client_create(&client_config, &descriptor, 1U,
+	                        &state.client) == TR_OK);
+	assert(tr_client_connect(state.client, "127.0.0.1", port) == TR_OK);
+	invalid_client_config = client_config;
+	invalid_client_config.tls.ca_file = "missing-rotation-ca.pem";
+	generation = UINT64_C(0xfeedface);
+	assert(tr_client_tls_update_profile(
+	               state.client, &invalid_client_config.tls,
+	               TR_TLS_ROTATE_GRACEFUL, &generation) == TR_ERR_INVALID);
+	assert(generation == UINT64_C(0xfeedface));
+	generation = 0U;
+	assert(tr_client_tls_update_profile(state.client, &client_config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	generation = 0U;
+	assert(tr_server_tls_update_profile(state.server, &server_config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	assert(tr_client_unary_call(state.client, TEST_SERVICE_ID,
+	                            TEST_METHOD_ID, &request, &options,
+	                            &callbacks, &call) == TR_OK);
+	wait_for_terminal_count(&state, 1U);
+	assert(state.client_status == TR_RPC_STATUS_OK);
+	assert(state.server_status == TR_RPC_STATUS_OK);
+	assert(atomic_load_explicit(&state.error, memory_order_relaxed) == 0);
+
+	generation = 0U;
+	assert(tr_server_tls_update_profile(state.server, &server_config.tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
+	assert(generation == 3U);
+	ret = tr_client_unary_call(state.client, TEST_SERVICE_ID,
+	                           TEST_METHOD_ID, &request, &options,
+	                           &callbacks, &call);
+	if (ret == TR_OK) {
+		wait_for_client_terminal_count(&state,
+		                               ++expected_client_terminals);
+		assert(state.client_status != TR_RPC_STATUS_OK);
+	} else
+		assert(ret == TR_ERR_STATE || ret == TR_ERR_CLOSED);
+	assert(tr_client_create(&client_config, &descriptor, 1U,
+	                        &second_client) == TR_OK);
+	assert(tr_client_connect(second_client, "127.0.0.1", port) == TR_OK);
+	generation = 0U;
+	assert(tr_client_tls_update_profile(second_client, &client_config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	assert(tr_client_unary_call(second_client, TEST_SERVICE_ID,
+	                            TEST_METHOD_ID, &request, &options,
+	                            &callbacks, &call) == TR_OK);
+	wait_for_terminal_counts(&state, ++expected_client_terminals, 2U);
+	assert(state.client_status == TR_RPC_STATUS_OK);
+	assert(state.server_status == TR_RPC_STATUS_OK);
+	assert(atomic_load_explicit(&state.error, memory_order_relaxed) == 0);
+	generation = 0U;
+	assert(tr_client_tls_update_profile(second_client, &client_config.tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
+	assert(generation == 3U);
+	ret = tr_client_unary_call(second_client, TEST_SERVICE_ID,
+	                           TEST_METHOD_ID, &request, &options,
+	                           &callbacks, &call);
+	if (ret == TR_OK) {
+		wait_for_client_terminal_count(&state,
+		                               ++expected_client_terminals);
+		assert(state.client_status != TR_RPC_STATUS_OK);
+	} else
+		assert(ret == TR_ERR_STATE || ret == TR_ERR_CLOSED);
+
+	assert(tr_client_destroy(second_client) == TR_OK);
+	identity_test_cleanup(&state);
+}
+
 int main(void)
 {
 	test_tls_rpc_work_receives_verified_connection_identity();
@@ -607,5 +819,6 @@ int main(void)
 	        TR_TLS_CLIENT_AUTH_NONE, "rpc-v2-tls-identity-none");
 	test_tls_without_client_certificate_yields_none(
 	        TR_TLS_CLIENT_AUTH_OPTIONAL, "rpc-v2-tls-identity-optional");
+	test_tls_profile_rotation_generation_and_failed_candidate();
 	return 0;
 }

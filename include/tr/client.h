@@ -63,6 +63,17 @@ int tr_client_create_transport(const struct tr_client_config *config,
                                struct tr_client **out);
 
 /*
+ * 在已启用 TR_TLS_REQUIRED 的 Client 上原子替换 TLS 配置快照。
+ * 只能从外部控制线程调用，且调用方须与其他 Client 生命周期 API 串行化。
+ * 成功时新连接使用递增代次；GRACEFUL 保留已有连接，REVOKE_OLD 关闭旧代次。
+ * out_generation 可为空，只有成功时才写入。
+ */
+int tr_client_tls_update_profile(struct tr_client *client,
+                                 const struct tr_tls_client_config *config,
+                                 enum tr_tls_rotation_policy policy,
+                                 uint64_t *out_generation);
+
+/*
  * 门面仅接受数字形式的 IPv4 地址。
  *
  * fd 被 Reactor 接管后，后续 Channel/RPC/保活/重连任一步失败都会

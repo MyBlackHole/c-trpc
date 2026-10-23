@@ -4,13 +4,13 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.15` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+当前 `2.0.0-dev.16` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
-连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。客户端复用同一 TLS profile，主体
-不匹配时拒绝 DATA、撤销对应路由且不发布 READY；CONTROL 仍可继续服务。默认仍为明文
-TCP，TLS 失败关闭连接，不回退明文。profile 轮换和完整 TLS 资源账本尚未完成；TLS-D1
-也不代表 #234 或 V2 整体验收完成。
+连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
+撤销旧代次；已接管的会话保留原 profile，旧 CONTROL 不得接受新 Server 代次的 DATA。
+默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 全平台矩阵与 GitHub 验收仍
+未完成；本版本不代表 #234 或 V2 整体验收完成。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-C 设计与计划](docs/superpowers/specs/2026-10-23-tls-c-reactor-integration-design.md)

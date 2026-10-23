@@ -721,6 +721,35 @@ static void test_blocking_socket_is_rejected_without_taking_ownership(void)
 	tr_tls_openssl_profile_release(profile);
 }
 
+static void test_profile_generation_overflow_is_rejected(void)
+{
+	struct tr_tls_client_config config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_file = test_identity.ca_file,
+	        .expected_peer_name = "server.example.test",
+	};
+	struct tr_tls_openssl_profile *profile = NULL;
+	uint64_t generation = UINT64_C(0xfeedface);
+
+	assert(tr_tls_openssl_client_profile_create(&config, &profile) ==
+	       TR_OK);
+	assert(tr_tls_openssl_profile_generation(profile) == 1U);
+	assert(tr_tls_openssl_profile_next_generation(profile, &generation) ==
+	       TR_OK);
+	assert(generation == 2U);
+	assert(tr_tls_openssl_profile_set_generation(profile, UINT64_MAX) ==
+	       TR_OK);
+	generation = UINT64_C(0xfeedface);
+	assert(tr_tls_openssl_profile_next_generation(profile, &generation) ==
+	       TR_ERR_STATE);
+	assert(generation == UINT64_C(0xfeedface));
+	assert(tr_tls_openssl_profile_retain(profile) == TR_OK);
+	assert(tr_tls_openssl_profile_set_generation(profile, 2U) ==
+	       TR_ERR_STATE);
+	tr_tls_openssl_profile_release(profile);
+	tr_tls_openssl_profile_release(profile);
+}
+
 static void test_unexpected_eof_is_not_close_notify(void)
 {
 	unsigned char received[32];
@@ -1776,6 +1805,7 @@ int main(int argc, char **argv)
 	atexit(tls_test_pair_cleanup);
 	assert(tls_test_identity_init(&test_identity, "tls-b-endpoint") == 0);
 	test_blocking_socket_is_rejected_without_taking_ownership();
+	test_profile_generation_overflow_is_rejected();
 	test_handshake_maps_want_write_then_want_read();
 	test_required_client_auth_rejects_missing_certificate();
 	test_required_client_auth_accepts_valid_certificate();
