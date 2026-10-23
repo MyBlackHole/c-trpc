@@ -84,6 +84,7 @@ struct tr_stream_slot {
 
 	uint64_t tx_sent_bytes;
 	uint64_t tx_send_limit;
+	uint64_t tx_window_bytes;
 
 	uint64_t rx_received_bytes;
 	uint64_t rx_consumed_bytes;
@@ -1173,6 +1174,7 @@ static int tr_send_window_update_locked(struct tr_channel *channel,
 {
 	struct tr_conn_handle connection;
 	uint64_t target;
+	uint64_t threshold, maximum, max_debt;
 	int ret;
 
 	if (stream->rx_credit_stopped) {
@@ -1186,8 +1188,17 @@ static int tr_send_window_update_locked(struct tr_channel *channel,
 		return TR_OK;
 	}
 
-	if (target - stream->rx_advertised_limit <
-		    channel->config.window_update_threshold_bytes &&
+	/* 未通告的消费量 d 必须让 W-d 仍容纳下一条最大合法消息。
+	 * 整消息准入下允许 d <= W-min(W,M)，不能等对端再发送来凑阈值。
+	 * 比较 threshold-1 后再加一，UINT64_MAX 窗口也不会回绕。 */
+	maximum = tr_channel_lane_max_message_locked(channel, stream->lane);
+	if (maximum > channel->config.initial_window_bytes)
+		maximum = channel->config.initial_window_bytes;
+	max_debt = channel->config.initial_window_bytes - maximum;
+	threshold = channel->config.window_update_threshold_bytes;
+	if (threshold - 1 > max_debt)
+		threshold = max_debt + 1;
+	if (target - stream->rx_advertised_limit < threshold &&
 	    stream->pending_advertised_limit == 0)
 		return TR_OK;
 
@@ -2201,6 +2212,7 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 	stream = &channel->streams[handle.slot];
 	slot = handle.slot;
 	stream->tx_send_limit = frame->header.message_id;
+	stream->tx_window_bytes = frame->header.message_id;
 
 	ret = tr_reactor_send(tr_channel_connection(channel, lane),
 	                      TR_FRAME_WINDOW_UPDATE, 0, stream->stream_id,
@@ -2315,6 +2327,7 @@ static int tr_channel_handle_window_update(struct tr_channel *channel,
 		                : TR_OK;
 	}
 	if (stream->state == TR_STREAM_SLOT_OPENING) {
+		stream->tx_window_bytes = frame->header.message_id;
 		stream->state = TR_STREAM_SLOT_OPEN;
 		if (!stream->opened_notified) {
 			stream->opened_notified = 1;
@@ -4866,8 +4879,11 @@ int tr_stream_sendv(struct tr_stream_handle handle,
 		pthread_mutex_unlock(&channel->lock);
 		return physical_alive ? TR_AGAIN : TR_ERR_CLOSED;
 	}
-	if (payload_len >
-	    tr_channel_lane_max_message_locked(channel, stream->lane)) {
+	/* 当前协议按整消息准入，窗口只在消费后恢复。单条消息超过对端
+	 * 初始窗口时没有未来信用来源，不能伪装为可重试背压。 */
+	if (payload_len > stream->tx_window_bytes ||
+	    payload_len >
+	            tr_channel_lane_max_message_locked(channel, stream->lane)) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_BAD_LENGTH;
 	}

@@ -18,7 +18,7 @@
 #include <time.h>
 
 #define CALLS 16U
-#define METHODS 14U
+#define METHODS 15U
 #define WAIT_SECONDS 15
 
 /* 故障只发生在真实 OPEN 已进入绑定接收后创建工作事件的 calloc。
@@ -89,6 +89,7 @@ enum business_mode {
 	TRAILING_OPEN,
 	DUPLICATE_KEY,
 	BUSINESS_ERROR,
+	WINDOW_REPLY,
 	ASYNC_SYNC_WRITE,
 	ASYNC_ABANDON,
 	ASYNC_WORK_ERROR,
@@ -403,6 +404,13 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 		assert(pthread_cond_broadcast(&f->changed) == 0);
 	}
 	assert(pthread_mutex_unlock(&f->lock) == 0);
+	if (method->mode == WINDOW_REPLY) {
+		uint8_t large[640] = {1};
+		const struct tr_rpc_bytes body = {large, sizeof(large)};
+		assert(tr_rpc_v2_reply_append(reply, &body) == TR_OK);
+		memset(large, 0xcc, sizeof(large));
+		return TR_RPC_STATUS_OK;
+	}
 	assert(request->body.len <= sizeof(copied));
 	memcpy(copied, request->body.data, request->body.len);
 	struct tr_rpc_bytes response = {copied, request->body.len};
@@ -567,7 +575,8 @@ static void client_terminal(struct tr_rpc_v2_call handle,
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
-static void fixture_init_capacity(struct fixture *f, uint32_t streams)
+static void fixture_init_options(struct fixture *f, uint32_t streams,
+                                 bool asymmetric)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
@@ -589,8 +598,8 @@ static void fixture_init_capacity(struct fixture *f, uint32_t streams)
 	server_config.limits.max_calls = 8;
 	server_config.limits.max_streams = streams;
 	server_config.limits.max_frame_payload_bytes = 64;
-	server_config.limits.max_message_bytes = 64;
-	server_config.limits.initial_window_bytes = 256;
+	server_config.limits.max_message_bytes = asymmetric ? 1024 : 64;
+	server_config.limits.initial_window_bytes = asymmetric ? 2048 : 256;
 	server_config.limits.window_update_threshold_bytes = 1;
 	for (unsigned i = 0; i < METHODS; ++i) {
 		f->methods[i] =
@@ -607,6 +616,8 @@ static void fixture_init_capacity(struct fixture *f, uint32_t streams)
 		                                    16};
 		methods[i] = (struct tr_rpc_v2_method){
 		        descriptions[i], work, server_terminal, &f->methods[i]};
+		if (asymmetric && (i == WINDOW_REPLY || i == ASYNC_ABANDON))
+			methods[i].descriptor.max_response_bytes = 768;
 	}
 	assert(tr_server_create(&server_config, methods, METHODS, &f->server) ==
 	       TR_OK);
@@ -617,6 +628,10 @@ static void fixture_init_capacity(struct fixture *f, uint32_t streams)
 	tr_client_config_init(&client_config);
 	client_config.limits = server_config.limits;
 	client_config.limits.max_streams = 8;
+	/* 双方配置分别合法，方法描述未协商。客户端内部窗口为 560，
+	 * 消息能力为 1072；服务端 640+48 的响应只越过对端窗口。 */
+	if (asymmetric)
+		client_config.limits.initial_window_bytes = 128;
 	client_config.keepalive_interval_ms = 0;
 	for (unsigned i = 0; i < 2; ++i) {
 		assert(tr_client_create(&client_config, descriptions, METHODS,
@@ -626,6 +641,11 @@ static void fixture_init_capacity(struct fixture *f, uint32_t streams)
 		assert(tr_client_wait_ready(f->clients[i],
 		                            WAIT_SECONDS * 1000) == TR_OK);
 	}
+}
+
+static void fixture_init_capacity(struct fixture *f, uint32_t streams)
+{
+	fixture_init_options(f, streams, false);
 }
 
 static void fixture_init(struct fixture *f)
@@ -939,6 +959,76 @@ static void test_capacity_refusal(void)
 	assert(pthread_mutex_destroy(&f.lock) == 0);
 }
 
+static void test_asymmetric_response_window(void)
+{
+	struct fixture f;
+	uint8_t bytes[640] = {1};
+	const struct tr_rpc_bytes large = {bytes, sizeof(bytes)},
+	                          small = {bytes, 4};
+	fixture_init_options(&f, 8, true);
+	call_start(&f, 0, 0, ECHO);
+	wait_counter(&f, &f.calls[0].opened, 1);
+	for (unsigned i = 1; i <= 2; ++i) {
+		struct call *call = &f.calls[i];
+		call_start(&f, i, 0, i == 1 ? WINDOW_REPLY : ASYNC_ABANDON);
+		if (i == 1) {
+			send_or_half_close(call, &small);
+		} else {
+			wait_counter(&f, &call->producer_ready, 1);
+			assert(tr_rpc_v2_producer_wait_writable(
+			               call->producer, WAIT_SECONDS * 1000) ==
+			       TR_OK);
+			assert(tr_rpc_v2_producer_send(call->producer,
+			                               &large) == TR_OK);
+		}
+		/* 未设置 deadline；不靠取消或销毁替不可能写出的回复收尾。 */
+		wait_counter(&f, &call->terminals, 1);
+		wait_counter(&f, &call->client_terminals, 1);
+		assert(pthread_mutex_lock(&f.lock) == 0);
+		if (call->status != TR_RPC_STATUS_INVALID_ARGUMENT ||
+		    call->client_status != TR_RPC_STATUS_INVALID_ARGUMENT)
+			fprintf(stderr,
+			        "response window: mode=%u server=%u "
+			        "client=%u\n",
+			        (unsigned)call->mode, (unsigned)call->status,
+			        (unsigned)call->client_status);
+		assert(call->status == TR_RPC_STATUS_INVALID_ARGUMENT &&
+		       call->client_status == TR_RPC_STATUS_INVALID_ARGUMENT);
+		assert(call->terminals == 1 && call->client_terminals == 1 &&
+		       call->received == 0 && call->initial == 1 &&
+		       !f.calls[0].terminals && !f.calls[0].client_terminals);
+		assert(pthread_mutex_unlock(&f.lock) == 0);
+		if (call->producer) {
+			assert(tr_rpc_v2_producer_is_closed(call->producer) ==
+			       1);
+			assert(tr_rpc_v2_producer_send(call->producer,
+			                               &small) ==
+			       TR_ERR_CLOSED);
+			tr_rpc_v2_producer_release(call->producer);
+			call->producer = NULL;
+		}
+	}
+	send_or_half_close(&f.calls[0], &small);
+	send_or_half_close(&f.calls[0], NULL);
+	check_result(&f.calls[0], TR_RPC_STATUS_OK, 1);
+	check_server_totals(&f, 3);
+	assert(tr_client_begin_drain(f.clients[0]) == TR_OK);
+	assert(tr_client_wait_drained(f.clients[0], WAIT_SECONDS * 1000) ==
+	       TR_OK);
+	struct tr_rpc_semantic_stats stats;
+	assert(tr_client_get_rpc_semantic_stats(f.clients[0], &stats) == TR_OK);
+	assert(stats.calls_started == 3 && stats.calls_finished == 3 &&
+	       stats.calls_inflight == 0 &&
+	       stats.final_status[TR_RPC_STATUS_INVALID_ARGUMENT] == 2 &&
+	       stats.final_status[TR_RPC_STATUS_OK] == 1);
+	retry_destroy(&f, false);
+	f.clients[0] = f.clients[1];
+	retry_destroy(&f, false);
+	retry_destroy(&f, true);
+	assert(pthread_cond_destroy(&f.changed) == 0);
+	assert(pthread_mutex_destroy(&f.lock) == 0);
+}
+
 static void test_configuration(void)
 {
 	struct tr_server_config config;
@@ -969,6 +1059,7 @@ static void test_configuration(void)
 int main(void)
 {
 	test_configuration();
+	test_asymmetric_response_window();
 	test_capacity_refusal();
 	test_public_server();
 	puts("test_rpc_v2_server: OK");

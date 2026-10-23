@@ -148,6 +148,7 @@ int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
  * MESSAGE，返回后原字节可立即复用。失败不接受、不保留本条正文。
  * TR_AGAIN 不隐式排队，由应用保留正文并在 writable 提示后重试。
  * 所有存储均受内部有限资源约束；资源压力可返回 TR_AGAIN/NOMEM。
+ * 不能适配对端初始窗口或协商消息上限的长度返回 BAD_LENGTH。
  * 发送入口也会观察已经到期/终止的调用，不承诺失败时调用仍然存活。
  */
 int tr_rpc_v2_call_send(struct tr_rpc_v2_call call,
@@ -186,6 +187,8 @@ int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel);
  * append 的任何失败都会锁存整批错误，丢弃本批正文和全部元数据；忽略
  * 错误后返回 OK 不能交付截断的成功批次。网络背压由库保留已生成批次
  * 并继续发送，不重复调用 work。已被接受的前批记录不受后批错误影响。
+ * 已复制回复若不能适配对端初始窗口或协商消息上限，以 INVALID_ARGUMENT
+ * 结束调用并释放待发送责任；producer 发送遇到该限制时遵循同一终局规则。
  * finish 选择当前批次的终局，之后不能 append；非 OK 终局丢弃本批正文。
  * 需要回调外继续回复时，在当前空批次中取得独立 producer。
  */

@@ -110,10 +110,12 @@ struct tr_channel_config {
 
 	uint32_t max_streams;
 
-	/* 每个流初始授予对端的接收容量。 */
+	/* 每个流初始授予对端的接收容量，同时限制单条整消息准入长度。
+	 * 绝对 WINDOW_UPDATE 归还消费信用，不改变这个固定窗口。 */
 	uint64_t initial_window_bytes;
 
-	/* 至少释放这么多额度后才发送新的绝对 WINDOW_UPDATE。 */
+	/* 信用更新的期望批量阈值；实际值不超过 W-min(W,M)+1，
+	 * W 为本地初始窗口，M 为协商消息上限，避免残余信用阻塞合法消息。 */
 	uint64_t window_update_threshold_bytes;
 
 	/* 可选的接收侧消息重组。
@@ -291,6 +293,8 @@ int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
  * 所有权：TR_OK 后 payload 所有权转移给反应器，直到全部分片
  * 发送完成；其他返回值下仍归调用方。
  * TR_AGAIN 表示流控或反应器背压。
+ * 已准入流上超过对端初始窗口或协商消息上限返回 BAD_LENGTH，
+ * 该长度没有信用恢复路径；失败不改变发送字节/消息计数。
  */
 int tr_stream_send(struct tr_stream_handle stream, struct tr_buffer *payload);
 
