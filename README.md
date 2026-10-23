@@ -4,6 +4,9 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
+`2.0.0-dev.1` 的交付范围、精确主线验收、性能负结果与后续任务见
+[R17 发行边界评估](docs/reviews/rpc_v2_release_boundary_20261023.md)。当前仍是开发预览，未发布稳定版。
+
 **接口迁移状态**：普通 `tr_client_create(config, methods, count, out)` 与
 `tr_server_create(config, methods, count, out)` 现在只创建 V2；方法在创建时冻结。
 一元调用使用 `tr_client_unary_call(..., options, callbacks, out)`，正文回调与
