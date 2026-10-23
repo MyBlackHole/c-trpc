@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.19")
+set_version("2.0.0-dev.20")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -192,6 +192,9 @@ target("test_rpc_v2_tls_identity")
     add_files("tests/test_rpc_v2_tls_identity.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    -- 仅在该 TLS 轮换测试链接中注入跨 shard profile retain 故障。
+    add_ldflags("-Wl,--wrap=tr_tls_openssl_profile_retain",
+                "-Wl,--wrap=tr_runtime_destroy", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -211,6 +214,8 @@ target("test_connection_group_tls")
     add_files("tests/test_connection_group_tls.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=write",
+                "-Wl,--wrap=tr_reactor_aux_event_register", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

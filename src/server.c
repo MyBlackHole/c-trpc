@@ -230,12 +230,17 @@ static int tr_server_connection_group_config_valid(
 	if (config->max_groups == 0U)
 		return config->max_connections == 0U &&
 		       config->max_data_connections_per_group == 0U &&
-		       config->max_streams_per_group == 0U;
+		       config->max_streams_per_group == 0U &&
+		       config->authorize == NULL &&
+		       config->authorize_async == NULL &&
+		       config->authorize_cancel == NULL;
 
 	return config->max_connections >= config->max_groups &&
 	       config->max_data_connections_per_group != 0U &&
 	       config->max_streams_per_group != 0U &&
-	       config->authorize != NULL;
+	       (config->authorize != NULL || config->authorize_async != NULL) &&
+	       ((config->authorize_async == NULL) ==
+	        (config->authorize_cancel == NULL));
 }
 
 static int tr_server_connection_group_authorize(
@@ -244,9 +249,10 @@ static int tr_server_connection_group_authorize(
 {
 	struct tr_server *server = (struct tr_server *)arg;
 
-	if (!server || !authorization ||
-	    !server->config.connection_groups.authorize)
+	if (!server || !authorization)
 		return TR_ERR_INVALID;
+	if (!server->config.connection_groups.authorize)
+		return TR_OK;
 
 	return server->config.connection_groups.authorize(
 	        authorization, server->config.connection_groups.callback_arg);
@@ -1716,10 +1722,26 @@ tr_server_create_internal(enum tr_server_mode mode,
 		 */
 		group_config.control_message_count =
 			effective.connection_groups.max_connections;
+		group_config.authorization_capacity =
+		        effective.limits.max_pending_tls_operations <
+		                        effective.connection_groups
+		                                .max_connections
+		                ? effective.limits.max_pending_tls_operations
+		                : effective.connection_groups.max_connections;
 		group_config.tls_profile = owner_shard->tls_profile;
+		group_config.authorization_operations =
+		        effective.connection_groups.authorize_async
+		                ? &server->tls_operations
+		                : NULL;
 		group_config.authorize_control =
 			tr_server_connection_group_authorize;
 		group_config.authorize_arg = server;
+		group_config.authorize_async =
+		        effective.connection_groups.authorize_async;
+		group_config.authorize_cancel =
+		        effective.connection_groups.authorize_cancel;
+		group_config.authorize_async_arg =
+		        effective.connection_groups.callback_arg;
 		group_config.data_frame_cb =
 			tr_server_connection_group_data_frame;
 		group_config.data_event_cb =
@@ -2649,6 +2671,19 @@ int tr_server_connection_group_stop(struct tr_server *server)
 	if (!server->connection_group_listener)
 		return TR_ERR_STATE;
 	return tr_server_connection_group_stop_internal(server);
+}
+
+int tr_server_connection_group_authorize_complete(
+        struct tr_server *server, struct tr_tls_provider_operation operation,
+        int status, enum tr_connection_group_authorization_decision decision)
+{
+	if (!server)
+		return TR_ERR_INVALID;
+	if (!server->connection_group_listener ||
+	    !server->config.connection_groups.authorize_async)
+		return TR_ERR_UNSUPPORTED;
+	return tr_pipeline_listener_authorize_complete(
+	        server->connection_group_listener, operation, status, decision);
 }
 
 int tr_server_connection_group_begin_drain(struct tr_server *server)

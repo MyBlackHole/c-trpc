@@ -103,7 +103,10 @@ int tr_server_tls_credentials_poll(struct tr_server *server,
 int tr_server_tls_credentials_cancel(
         struct tr_server *server, struct tr_tls_provider_operation operation);
 
-/* 连接组授权 provider 可从任意线程提交一次结果；成功后句柄即过期。 */
+/* 连接组授权 provider 可从任意线程提交一次结果；成功后句柄即过期。
+ * status 为 TR_OK 时 decision 必须为 ALLOW 或 DENY；负状态表示授权失败。
+ * 被取消的 operation 仍须提交一次结果以确认取消，迟到的 ALLOW 会被丢弃。
+ */
 int tr_server_connection_group_authorize_complete(
         struct tr_server *server, struct tr_tls_provider_operation operation,
         int status, enum tr_connection_group_authorization_decision decision);

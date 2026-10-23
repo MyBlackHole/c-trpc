@@ -179,8 +179,8 @@ static void test_credentials_copy_and_retire_accounting(void)
 	assert(tr_tls_provider_operation_credentials_result(
 	               &table, operation, &result_status, &output) == TR_AGAIN);
 	assert(result_status == 99);
-	assert(output.certificate_chain_pem.data ==
-	       (const uint8_t *)"sentinel");
+	assert(output.certificate_chain_pem.len == 8U &&
+	       memcmp(output.certificate_chain_pem.data, "sentinel", 8U) == 0);
 	input.certificate_chain_pem.data = certificate;
 	input.certificate_chain_pem.len = sizeof(certificate);
 	input.private_key_pem.data = private_key;

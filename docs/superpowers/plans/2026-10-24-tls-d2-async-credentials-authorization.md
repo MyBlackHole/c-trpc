@@ -251,34 +251,41 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 - `tr_pipeline_listener_accept_control/data()` 在同步授权时保持原路径；异步授权时保留 route、精确 connection generation、TLS/profile/identity 引用并返回 `TR_IN_PROGRESS`。
 - listener 借用 `tr_server` 的同一操作表；auth 和 server credential refresh 共用 `max_pending_tls_operations`，不双重预留容量。
 
-- [ ] **Step 1: 写远端 ALLOW/DENY/HOLD 测试**
+- [x] **Step 1: 写远端 ALLOW/DENY/HOLD 测试**
 
 在 `tests/test_connection_group_tls.c` 增加可控 async provider：CONTROL/DATA 分别 HOLD、ALLOW、DENY。HOLD 时发送 CONTROL/DATA 后续帧并断言业务回调未执行；ALLOW 后只交付对应帧；DENY/provider error 关闭连接且永不交付帧；HOLD 一条连接时另一条已授权连接仍能推进。
 
-- [ ] **Step 2: 写取消与 ABA 回归**
+- [x] **Step 2: 写取消与 ABA 回归**
 
 覆盖 deadline、TCP EOF、facade drain、profile revoke、DATA reservation cancel，以及 cancel-before-complete / complete-before-cancel。旧句柄不能影响复用连接槽；late ALLOW 不得创建 session、激活 route 或调用业务 callback。
 
-- [ ] **Step 3: 运行连接组专测确认红灯**
+- [x] **Step 3: 运行连接组专测确认红灯**
 
 ```sh
 TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
   xmake test -v -j1 'test_connection_group_tls/*'
 ```
 
-预期：async provider 类型或 completion API 尚不存在，新增场景编译失败。
+实测：异步 completion 声明已存在但 listener 实现尚未接通时，连接组专测在链接阶段
+因 `tr_server_connection_group_authorize_complete` 未定义失败；实现后同一专测通过。
 
-- [ ] **Step 4: 为 listener 预留操作槽与 eventfd**
+- [x] **Step 4: 为 listener 预留操作槽与 eventfd**
 
 listener create 预分配不超过 `min(max_pending_tls_operations, max_connections)` 的授权槽，创建并注册 eventfd；每槽保留 connection/route/session/profile/identity generation。complete 只写结果和 eventfd；owner 批量 drain eventfd 后消费 ready 槽。
 
-- [ ] **Step 5: defer CONTROL/DATA 前导并按 owner commit**
+- [x] **Step 5: defer CONTROL/DATA 前导并按 owner commit**
 
 同步 authorize 保留兼容逻辑；若 async provider 存在，先运行同步本地 veto，再 reserve 操作槽并调用 async start。route parser 收到 `TR_IN_PROGRESS` 后 defer Reactor 前导。owner 收到 ALLOW 后重新校验连接、deadline、group epoch、CONTROL session、TLS generation，再创建 CONTROL transport 或 attach DATA route，最后 resume preface。DENY/error/失效则取消精确 reservation 并 abort connection。
 
-- [ ] **Step 6: 验证真实 TLS 矩阵**
+- [x] **Step 6: 验证真实 TLS 矩阵**
 
 运行 `test_connection_group_tls`、`test_pipeline_listener_tls`、`test_tls_provider_operation`。预期同步授权测试全部不变；异步 HOLD 不阻塞其他连接，迟到 ALLOW 不进入应用层。
+
+实测：GCC TSan 下 `test_connection_group_tls`、`test_pipeline_listener_tls`、
+`test_reactor_timer_deadline`、`test_tls_provider_operation` 与
+`test_pipeline_control_wire` 均通过。连接组用例覆盖 CONTROL/DATA HOLD、ALLOW、DENY、
+provider error、挂起期间另一 CONTROL 进展、TCP EOF、期限、REVOKE_OLD、facade drain、
+迟到 ALLOW、DATA 槽代次复用及未确认取消后的 Server destroy 重试。
 
 ### Task 7：排空、取消与销毁重试
 
@@ -289,17 +296,27 @@ listener create 预分配不超过 `min(max_pending_tls_operations, max_connecti
 - Modify: `tests/test_tls_provider.c`
 - Modify: `tests/test_connection_group_tls.c`
 
-- [ ] **Step 1: 增加 destroy/drain 未确认 provider 测试**
+- [x] **Step 1: 增加 destroy/drain 未确认 provider 测试**
 
 让凭证与授权 provider HOLD cancel acknowledgement；验证 Client/Server/listener destroy 返回 `TR_AGAIN` 且对象、eventfd、操作参数仍有效。provider complete 后再次 destroy 成功；重复 destroy 不重复执行已成功的拆除步骤。
 
-- [ ] **Step 2: 实现取消的单次通知与 retirement 顺序**
+实测：`tests/test_tls_provider.c` 覆盖 Client/Server 凭证 cancel acknowledgement 后的 destroy
+重试；`test_connection_group_tls` 让授权 provider 延迟确认，验证 Server destroy 返回 `TR_AGAIN`，
+随后旧 operation 仍可 complete，第二次 destroy 成功。
+
+- [x] **Step 2: 实现取消的单次通知与 retirement 顺序**
 
 连接关闭、deadline、Server drain、TLS revoke-old 先把槽线性化到 cancel requested，再在锁外至多调用一次 provider cancel。provider ack 后由 owner 丢弃结果、释放精确 reservation/ref 并 retire；已取消 operation 的迟到 ALLOW 只作 ack。
 
-- [ ] **Step 3: 验证 deadline、eventfd 和 rollback 失败路径**
+- [x] **Step 3: 验证 deadline、eventfd 和 rollback 失败路径**
 
 故障注入 eventfd write 的 `EINTR`/饱和 `EAGAIN`；结果槽必须保留且可由 owner maintenance 轮次处理。凭证 rotation 的 install/rollback 故障沿用 D1 原测试，确认 generation 不提前发布且失败对象可重试销毁。
+
+实测：连接组专测通过 TSan 链接包装真实注入 eventfd `EINTR` 重试和饱和 `EAGAIN`。
+`test_rpc_v2_tls_identity` 跨两个 owner 注入候选 profile 的部分安装失败、reverse rollback
+失败和 Runtime destroy 的一次性 `TR_AGAIN`；确认失败不发布 generation、rollback 失败后更新
+fail-closed，且保留 Server 可在 destroy 重试后释放。该目标通过 GCC Release、Clang Release、
+GCC ASan/UBSan 与 GCC TSan。
 
 ### Task 8：SDK 文档和消费端
 
@@ -308,24 +325,34 @@ listener create 预分配不超过 `min(max_pending_tls_operations, max_connecti
 - Modify: `docs/rpc-v2-sdk.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: 扩展安装 SDK 消费端**
+- [x] **Step 1: 扩展安装 SDK 消费端**
 
 在 `tests/test_rpc_v2_sdk.c` 引用新增的 credentials start/complete/poll/cancel 函数地址和 async authorization callback 类型；普通静态配置运行路径不启用 provider。确保这些符号从 `trcore` 可链接。
 
-- [ ] **Step 2: 文档化生命周期与安全限制**
+实测：`test_rpc_v2_sdk` 增加全部公开凭证入口和连接组 async callback 类型的链接引用，静态配置
+运行仍不启用 provider。
+
+- [x] **Step 2: 文档化生命周期与安全限制**
 
 在 `docs/rpc-v2-sdk.md` 说明 provider callback 的非阻塞限制、bundle 长度和 4 MiB 默认值、外部控制线程 poll、合作式 cancel、句柄过期、静态 trust roots、TLS_REQUIRED 失败关闭与 SDK 链接方式。README 更新 TLS-D2 当前状态和 #234/TLS-E 未完成边界。
 
-- [ ] **Step 3: 验证公共 C/C++ 头文件边界**
+实测：SDK 文档补充 provider 生命周期、固定 trust roots、取消确认和失败关闭；README 更新到
+`2.0.0-dev.20`，明确 TLS-E、#243 与完整验收仍未完成。
+
+- [x] **Step 3: 验证公共 C/C++ 头文件边界**
 
 运行 `xmake test -v -j1 'test_rpc_v2_sdk/*'`。SDK 安装消费端没有独立本地脚本；由 `.github/workflows/ci.yml` 的 `build-smoke` job 执行安装、公开头文件边界检查及 GCC/Clang C11、G++/Clang++ C++11 链接运行验证。C11/C++11 消费端只包含已安装 `include/tr/*.h`，不得依赖 `src/` 私有头。该 job 的临时文件在 CI runner 临时目录；本地不复制该步骤到 `/tmp`。
+
+实测：本地工作区 `build/sdk-install` 安装 SDK 后，所有公开头文件通过 GCC/Clang C11 和
+G++/Clang++ C++11 语法检查；四种编译器均编译、链接并运行仓库外复制的同一消费端。
+CI 中尾置 `-x none` 在 Clang `-Werror` 下触发无效参数告警，已删除该冗余参数；检查名未变。
 
 ### Task 9：全量验证与 PR 验收
 
 **Files:**
 - Modify only files required by failures discovered in Tasks 1–8.
 
-- [ ] **Step 1: Release 全量测试**
+- [x] **Step 1: Release 全量测试**
 
 ```sh
 TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
@@ -334,7 +361,9 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
   xmake test -v -j1
 ```
 
-- [ ] **Step 2: GCC debug、Clang release、ASan/UBSan 和 TSan**
+实测：GCC Release 全量 90 个测试目标通过，0 失败，85.228 秒。
+
+- [x] **Step 2: GCC debug、Clang release、ASan/UBSan 和 TSan**
 
 每种配置均设置工作区 `TMPDIR`/`XMAKE_TMPDIR`，执行：
 
@@ -351,9 +380,18 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" xmake build --all
 TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 xmake test -v -j1
 ```
 
-- [ ] **Step 3: 格式、编译数据库与公开 SDK 验收**
+实测：GCC Debug 90/90（89.361 秒），Clang Release 90/90（84.078 秒），GCC
+ASan/UBSan 90/90（94.083 秒，`detect_leaks=1`），GCC TSan 90/90（99.083 秒）；
+ASan/UBSan 与 TSan 的 `xmake build --all` 均通过。加入 TLS profile 故障注入后，
+`test_rpc_v2_tls_identity` 又在 GCC/Clang Release、GCC ASan/UBSan 和 GCC TSan 下单独通过。
 
-运行 `python3 scripts/check_source_format.py --base origin/main --head HEAD`。对 GCC release 配置执行 `xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n`，再运行 `python3 scripts/check_compile_commands.py --output-dir build/compdb/gcc-release --mode release --toolchain gcc --crc32c-portable n --arch x86_64`；Clang release 对应使用 `build/compdb/clang-release` 与 `--toolchain clang`。随后将分支推至 PR #312，等待 `.github/workflows/ci.yml` 中原有 GCC/Clang、ASan/UBSan、TSan、SDK C11/C++11 和格式检查对实际 head SHA 全部通过；不得改动必需检查名称。
+- [x] **Step 3: 格式、编译数据库与公开 SDK 验收**
+
+运行 `python3 scripts/check_source_format.py --base origin/main --head HEAD`。GCC Release 与 Clang Release 分别配置 `--crc32c_portable=n`，并运行 `scripts/check_compile_commands.py` 校验 `build/compdb/gcc-release` 和 `build/compdb/clang-release`。公开 SDK 安装消费端已通过本地 GCC/Clang C11 与 G++/Clang++ C++11 检查及编译、链接、运行验证；CI job 名称保持不变。
+
+实测：改动行已用 clang-format-diff 格式化，`git diff --check` 通过；GCC 和 Clang
+Release 的真实编译数据库各验证 48 个生产编译单元；锁定 Clang 18.1.8 后，source-format
+checker 对实际 `HEAD` 的 30 个变更源码文件检查通过，0 失败。
 
 - [ ] **Step 4: 更新 PR #312 并检查实际 head CI**
 

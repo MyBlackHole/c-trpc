@@ -113,9 +113,16 @@ struct tr_connection_group_authorization {
 typedef int (*tr_connection_group_authorize_cb)(
         const struct tr_connection_group_authorization *authorization,
         void *arg);
+/* 异步 provider 回调运行在连接组 Reactor owner，必须快速返回且不得阻塞。
+ * authorization 与其中的身份视图仅在该回调期间借用；provider 应复制需要的
+ * 字段。每个 operation 最终必须调用 authorize_complete 一次。
+ */
 typedef void (*tr_connection_group_authorize_async_cb)(
         const struct tr_connection_group_authorization *authorization,
         struct tr_tls_provider_operation operation, void *arg);
+/* 收到取消通知后，provider 必须停止访问原始请求数据，并通过
+ * authorize_complete 确认该 operation；确认前服务端保留其有界槽位。
+ */
 typedef void (*tr_connection_group_authorize_cancel_cb)(
         struct tr_tls_provider_operation operation, void *arg);
 
