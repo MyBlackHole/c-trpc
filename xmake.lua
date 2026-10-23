@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.9")
+set_version("2.0.0-dev.10")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -70,6 +70,7 @@ target("trcore")
     -- 消费方的 Xmake 环境或系统 libzstd。3.1.1 原生支持合并 package。
     set_policy("build.merge_archive", true)
     add_packages("zstd", {public = true})
+    add_syslinks("ssl", "crypto", {public = true})
     -- 源码与已安装 SDK 同时携带许可和适用署名。
     add_installfiles("LICENSE", "NOTICE", "docs/licensing.md", {prefixdir = "share/doc/c-trpc"})
     add_installfiles("third_party/zstd/LICENSE", {prefixdir = "share/doc/c-trpc/third_party/zstd"})
@@ -82,6 +83,7 @@ target("trcore")
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
         "include/(tr/server.h)",
+        "include/(tr/tls.h)",
         "include/(tr/transport.h)",
         "include/(tr/rpc.h)",
         "include/(tr/rpc_v2.h)",
@@ -105,6 +107,8 @@ target("trcore")
         "src/io/socket.c",
         "src/io/connector.c",
         "src/io/byte_endpoint.c",
+        "src/io/tls_config.c",
+        "src/io/tls_openssl.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
         "src/runtime/message_service.c",
@@ -133,12 +137,30 @@ target("trcore")
         "src/server.c")
 target_end()
 
--- TLS-A 原型只属于测试目标；生产库尚未接入 OpenSSL。
+-- TLS-B backend 由生产归档提供；测试复用同一份已构建实现。
 target("test_tls_bio_probe")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_tls_bio_probe.c")
     add_syslinks("ssl", "crypto")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_tls_config")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_config.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_tls_openssl")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_openssl.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
     add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()

@@ -19,6 +19,7 @@
 #include "execution/task_executor.h"
 #include "rpc/rpc_record.h"
 #include "io/socket.h"
+#include "io/tls_config.h"
 #include "tr/status.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
@@ -193,6 +194,7 @@ void tr_client_config_init(struct tr_client_config *config)
 	config->enable_reconnect = 0;
 	config->reconnect_initial_delay_ms = 200U;
 	config->reconnect_max_delay_ms = 10000U;
+	config->tls.mode = TR_TLS_DISABLED;
 }
 
 static int tr_client_connect_fd(const char *address, uint16_t port,
@@ -320,6 +322,9 @@ tr_client_create_internal(const struct tr_client_config *config,
 	else
 		tr_client_config_init(&effective);
 	tr_client_normalize_config(&effective);
+	ret = tr_tls_client_config_validate(&effective.tls, 0);
+	if (ret != TR_OK)
+		return ret;
 
 	if (tuning)
 		effective_tuning = *tuning;

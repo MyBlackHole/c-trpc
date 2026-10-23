@@ -21,6 +21,7 @@
 #include "execution/reactor.h"
 #include "execution/reactor_internal.h"
 #include "io/socket.h"
+#include "io/tls_config.h"
 #include "tr/status.h"
 #include "runtime/runtime_internal.h"
 #include "io/socket_internal.h"
@@ -464,6 +465,7 @@ void tr_server_config_init(struct tr_server_config *config)
 	config->keepalive_interval_ms = 30000U;
 	config->keepalive_timeout_ms = 10000U;
 	config->handshake_timeout_ms = 10000U;
+	config->tls.mode = TR_TLS_DISABLED;
 }
 
 static uint32_t tr_server_budget_share(uint32_t total,
@@ -1355,6 +1357,9 @@ tr_server_create_internal(enum tr_server_mode mode,
 	else
 		tr_server_config_init(&effective);
 	tr_server_normalize_config(&effective);
+	ret = tr_tls_server_config_validate(&effective.tls, 0);
+	if (ret != TR_OK)
+		return ret;
 
 	if (tuning)
 		effective_tuning = *tuning;

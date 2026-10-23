@@ -1,6 +1,6 @@
 # ADR-009：在 Reactor 字节端点接入 TLS 1.3
 
-- 状态：提议中，须通过下述原型与安全验收后接受
+- 状态：已采纳分阶段实现基线；TLS-E 安全与资源验收仍未通过
 - 日期：2026-10-23
 - 基线：`75d91a03b249ece2e83e6aded4a8d387d27ee1cf`，`2.0.0-dev.8`
 - 对应：#234、#239、#241、#242、#243；前置需求见
@@ -138,6 +138,25 @@ OpenSSL 内部分配与内核 socket 缓冲不自动纳入当前逐 Server 原�
 候选”更新为“原型支持的暂选”；它不证明 OpenSSL 全部内存已纳入
 Server 预算，也不证明真实 Reactor 的事件闭环已经通过。完整场景、
 命令及限制见 [TLS-A 原型记录](../../reviews/rpc_v2_tls_a_20261023.md)。
+
+### 2026-10-23 TLS-B 本地实现记录
+
+TLS-B 已按本 ADR 冻结公开 TLS 配置形状、将 OpenSSL 3 后端与配置校验
+编入生产静态库，并验证安装后的 C11/C++11 SDK 消费端。普通 V2
+Client/Server 的 Reactor 收发尚未接线；`TR_TLS_REQUIRED` 仍在创建阶段
+明确返回 `TR_ERR_UNSUPPORTED`。这项记录不代表 TLS-C 或 #234 已完成。
+
+本地环境 OpenSSL 3.6.5、GCC 16.2.1 与 Clang 23.1.3 下，完整注册测试集
+分别通过 84/84；GCC ASan/UBSan 和 TSan 完整测试集也分别通过 84/84。
+真实非阻塞跨进程 TCP 用例覆盖 TLS 1.3、DNS/IP SAN、独立 SNI、信任链、
+有效期、用途、TLS 1.2、明文、截断以及 0-RTT 失败关闭；0-RTT 负例确认
+未经认证的应用标记不会交付。静态 SDK 的 C11 与 C++11 消费端均编译并
+运行通过。
+
+上述本机 OpenSSL 版本高于项目要求的 3.0；Ubuntu 22.04 CI 的 GCC/Clang、
+静态分析、安装消费端和格式门禁尚待 PR 执行结果。TLS-B 的本机证据
+不覆盖 OpenSSL 全部分配的硬上界、mTLS、真实 Reactor 接线、外部实现
+互通或 TLS-E 的公网暴露门槛。
 
 ## 依据
 

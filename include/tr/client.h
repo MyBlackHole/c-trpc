@@ -5,6 +5,7 @@
 
 #include "tr/facade.h"
 #include "tr/rpc.h"
+#include "tr/tls.h"
 #include "tr/transport.h"
 
 #ifdef __cplusplus
@@ -33,6 +34,8 @@ struct tr_client_config {
 	int enable_reconnect;
 	uint32_t reconnect_initial_delay_ms;
 	uint32_t reconnect_max_delay_ms;
+
+	struct tr_tls_client_config tls;
 };
 
 void tr_client_config_init(struct tr_client_config *config);

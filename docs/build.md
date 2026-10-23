@@ -2,7 +2,8 @@
 
 ## 环境与唯一构建入口
 
-项目要求 Linux、GCC 或 Clang，以及 Xmake 3.1.1 或更新版本。
+项目要求 Linux、GCC 或 Clang、OpenSSL 3.0 或更新版本的开发文件，以及
+Xmake 3.1.1 或更新版本。Ubuntu 22.04 可安装 `libssl-dev`。
 CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/guide/quick-start.html)。
 消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩仍未接入，
 新增编译依赖不表示默认启用压缩。语言基线仍为 ISO C11，并使用 GCC/Clang
@@ -116,14 +117,14 @@ xmake install -o /tmp/c-trpc-sdk trcore
 安装后保留 `include/tr/*.h` 的路径，静态库位于 `lib/libtrcore.a`。
 `LICENSE`、`NOTICE` 和 `licensing.md` 安装到 `share/doc/c-trpc/`；源码归档
 同样必须保留根目录许可文件及 `docs/licensing.md`，CI 逐字节校验两种分发。
-外部 C 程序使用 `-I/tmp/c-trpc-sdk/include -L/tmp/c-trpc-sdk/lib -ltrcore`
-并在编译/链接时增加 `-pthread`。CI 将 SDK 安装到包含空格的路径，
+外部 C/C++ 程序使用 `-I/tmp/c-trpc-sdk/include -L/tmp/c-trpc-sdk/lib`
+并在 `-ltrcore` 后显式增加 `-lssl -lcrypto -pthread`。CI 将 SDK 安装到包含空格的路径，
 使用 GCC 和 Clang 分别单独编译每个已安装公开头文件，并链接、运行外部 C11 程序，
 校验门面默认配置与状态函数的公开链接；C++11 同样独立编译各头文件并链接运行此消费端。
 配置消费端只引用安装后的包含目录/库目录，运行超时 10 秒。
 另将 `tests/test_rpc_v2_sdk.c` 复制到仓库外目录，分别以 GCC、Clang 的 C11 和
 C++11 编译运行真实 V2 Client/Server，单次运行超时 30 秒。该消费端仅包含公开头，
-没有链接包装或私有源码路径，链接参数仍只有安装路径、`-ltrcore -pthread`。
+没有链接包装或私有源码路径，链接参数使用安装路径、`-ltrcore -lssl -lcrypto -pthread`。
 它验证四种 ONE/MANY 基数、请求及响应元数据、复制发送、可写背压、取消、期限、排空
 和 V2 调用语义统计，补齐配置消费端不能证明的运行时边界；独立进程 Echo 请求响应
 检查继续保留。
@@ -207,8 +208,9 @@ Zstandard；不链接整个 `trcore`，不重复注册生产源，也不修改�
 Runtime 已直接引用消息服务，静态链接即会带入 Zstandard 符号，不能再依赖仓库内
 Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
 `build.merge_archive` 合并固定包的静态对象；安装后的 `libtrcore.a` 自包含该后端。
-外部 C/C++ 消费端仍使用 `-L<SDK>/lib -ltrcore -pthread`，不需要系统 Zstandard
-或 Xmake 包缓存路径。构建和安装均不得静默切换到其他版本的动态库。
+外部 C/C++ 消费端链接 `-L<SDK>/lib -ltrcore -lssl -lcrypto -pthread`；
+不需要系统 Zstandard 或 Xmake 包缓存路径，但需安装 OpenSSL 3 运行时库。
+构建和安装均不得静默切换到其他版本的动态库。
 
 安装与源码归档同时保留 `third_party/zstd/LICENSE` 上游原始许可；SDK 路径为
 `share/doc/c-trpc/third_party/zstd/LICENSE`。CI 不增加 `-lzstd` 来掩盖不完整 SDK，
@@ -216,6 +218,7 @@ Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
 
 合并归档不等于做了符号隔离；同时链接另一个 Zstandard 实现可能产生符号冲突或
 版本选择问题，不属于当前保证范围。升级、符号命名/隔离及依赖锁定仍须独立验证。
-当前不安装新的 Message 内部头文件，也不宣称压缩/TLS 已供 SDK 使用。
+当前不安装新的 Message 内部头文件。TLS 后端随静态库构建，但普通 V2 Client/Server
+仍未接入 TLS；TLS 必需配置会明确返回 `TR_ERR_UNSUPPORTED`，具体阶段边界见 TLS-B 设计文档。
 第三方来源与 MSG-B 阶段范围见 [MSG-B 实现审查](reviews/message_transform_zstd_20261015.md)，
 实际 Runtime 接入及本次 SDK 修复见 [MSG-D 审查](reviews/runtime_message_recovery_20261015.md)。
