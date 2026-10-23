@@ -23,6 +23,10 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 已打开流的非法 DATA 类型标志收敛为单流 RESET；#242 的连接组边界、
 排空竞争及完整错误矩阵仍未完成。
 
+#234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
+界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权；目前仍是
+提议中的设计，库尚无 TLS 实现。
+
 ## 持续开发顺序
 
 | 范围 | 当前剩余工作 | GitHub |
