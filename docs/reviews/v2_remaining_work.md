@@ -32,7 +32,8 @@ TLS-D1 Task 1–4 已在 `feat/v2-tls-d-234` 实现并推送：普通 RPC mTLS/U
 CONTROL/DATA 主体绑定、profile generation 轮换和旧连接撤销。TLS-D1 `.16` 的五种本地
 工具链/消毒器矩阵均为 88/88，SDK header 安装修复 `.17` 的 GCC Release 复测也为
 88/88；安装 SDK 的 C11/C++11 消费端和 CRC32C 无 SSE4.2 路径已验证。
-固定 GCC 11/Clang 14 分析、Ubuntu 22.04 GitHub CI 与 #234 部分交付登记仍待 Task 5；
+GCC 11 静态分析和部分 GitHub 检查已通过；Clang 14 精确告警行号因前置代码增加漂移，
+已按未变函数体证据更新位置，等待复跑。Ubuntu 22.04 完整 PR CI 与 #234 部分交付登记仍待 Task 5；
 异步凭证属于 TLS-D2，资源总账和公网验收属于 TLS-E。
 
 ## 持续开发顺序

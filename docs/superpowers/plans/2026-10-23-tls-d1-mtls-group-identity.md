@@ -245,7 +245,7 @@ TLS-C review/plan 已记录 PR #310 merge commit `0fa90817c15286485ee2e1cfe8372b
 
 - [ ] **Step 3: 运行源码格式、安装消费端和固定静态分析**
 
-本地修改行格式检查、22 项格式脚本自测、Make all/test/test-timer/clean/compiler-switch、安装头文件边界、GCC/Clang C11 与 G++/Clang++ C++11 公共头及 V2 消费端、portable CRC32C 和 QEMU 隐藏 SSE4.2 均通过。发现并修复 `peer_identity.h` 未安装问题。固定 GCC 11/Clang 14 分析器未安装在本机，需由本分支 PR CI 确认；Xmake 3.1.2 下 `test_compile_commands.py` 的临时副本 project-dir 自测失败，但当前 checkout 的 GCC/Clang 编译数据库各 47 个生产单元校验通过。完整 OpenSSL/RSS 硬预算留给 TLS-E。
+本地修改行格式检查、22 项格式脚本自测、Make all/test/test-timer/clean/compiler-switch、安装头文件边界、GCC/Clang C11 与 G++/Clang++ C++11 公共头及 V2 消费端、portable CRC32C 和 QEMU 隐藏 SSE4.2 均通过。发现并修复 `peer_identity.h` 未安装问题。PR GCC 11 静态分析门禁已通过；Clang 14 的 8 条告警总数未变，其中 `tr_tx_pool_init()` 告警仅因前置 16 行新增状态声明从 345 移到 361；函数体一致，已只更新精确位置并保留 `unverified`，等待复跑。Xmake 3.1.2 下 `test_compile_commands.py` 的临时副本 project-dir 自测失败，但当前 checkout 的 GCC/Clang 编译数据库各 47 个生产单元校验通过。完整 OpenSSL/RSS 硬预算留给 TLS-E。
 
 - [ ] **Step 4: 创建 TLS-D1 PR 并等待 GitHub CI 全绿**
 
