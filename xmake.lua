@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.2")
+set_version("2.0.0-dev.3")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -610,6 +610,17 @@ target("test_reactor_tx_drain")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+-- 控制容量恢复：跨连接公平通知、取消/复用、命令压力及跨线程归还唤醒。
+target("test_reactor_control_ready")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_reactor_control_ready.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=tr_wire_header_encode",
+                "-Wl,--wrap=epoll_wait", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 -- 分层排空：网络静默不能越过业务完成、终局回调和已受理的 OPEN。
 target("test_rpc_record_drain")
     set_kind("binary")
@@ -633,7 +644,8 @@ target("test_channel_drain")
     set_default(false)
     add_files("tests/test_channel_drain.c")
     add_deps("trcore")
-    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=tr_reactor_send", {force = true})
+    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=tr_reactor_send",
+                "-Wl,--wrap=tr_reactor_timer_arm", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

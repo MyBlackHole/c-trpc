@@ -55,6 +55,22 @@ static atomic_int pressure_blocked;
 static atomic_int pressure_fill;
 static atomic_uint pressure_items;
 static atomic_uint pressure_failures;
+static atomic_int defer_retry_timer;
+static atomic_uint deferred_timers;
+
+int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
+                                uint64_t deadline_ns);
+int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
+                                uint64_t deadline_ns)
+{
+	if (deadline_ns && atomic_load(&defer_retry_timer)) {
+		/* 保留真实定时器责任，但把兜底移到本场景等待上限之后。
+		 * 恢复必须来自容量通知，不能靠耗时阈值猜测是否抢在 25ms 前。 */
+		deadline_ns += UINT64_C(60000000000);
+		atomic_fetch_add(&deferred_timers, 1U);
+	}
+	return __real_tr_reactor_timer_arm(timer, deadline_ns);
+}
 
 int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
                            uint32_t flags, uint32_t stream_id,
@@ -740,7 +756,7 @@ static void release_pressure(struct fixture *f)
 	}
 }
 
-static void test_open_pressure_recovers(int split)
+static void test_open_pressure_recovers(int split, int without_timer)
 {
 	struct fixture f;
 	init_fixture(&f, split, 1);
@@ -750,13 +766,21 @@ static void test_open_pressure_recovers(int split)
 		(void)open_remote(&f, TR_LANE_BULK, 3);
 		++opened;
 	}
+	atomic_store(&defer_retry_timer, without_timer);
+	atomic_store(&deferred_timers, 0);
 	start_pressure(&f);
 	assert(tr_channel_active_streams(f.channel) == opened + 1);
 	assert(count(&f, &f.opened) == opened);
 	/* 旧缓冲池 RESUME_RX 和禁用保活都不能撤销控制发送背压。 */
 	assert(tr_reactor_resume_rx(f.connection[0]) == TR_OK);
 	assert(tr_channel_disable_keepalive(f.channel) == TR_OK);
-	wait_pressure(&f, 2);
+	if (without_timer) {
+		assert(atomic_load(&deferred_timers) != 0);
+		assert(tr_reactor_call(f.reactor, owner_barrier, NULL) ==
+		       TR_OK);
+	} else {
+		wait_pressure(&f, 2);
+	}
 	assert(tr_channel_active_streams(f.channel) == opened + 1);
 	if (split) {
 		send_frame(&f, 1, TR_FRAME_DATA,
@@ -787,6 +811,7 @@ static void test_open_pressure_recovers(int split)
 		expect_goaway(&f, 1, 3);
 	destroy_fixture(&f);
 	atomic_store(&pressure_fd, -1);
+	atomic_store(&defer_retry_timer, 0);
 }
 
 static void test_drain_rejects_pending_open(int split)
@@ -843,8 +868,10 @@ static void test_pending_open_teardown_releases_rx(int detach)
 
 int main(void)
 {
-	test_open_pressure_recovers(0);
-	test_open_pressure_recovers(1);
+	test_open_pressure_recovers(0, 1);
+	test_open_pressure_recovers(1, 1);
+	test_open_pressure_recovers(0, 0);
+	test_open_pressure_recovers(1, 0);
 	test_drain_rejects_pending_open(0);
 	test_drain_rejects_pending_open(1);
 	test_pending_open_teardown_releases_rx(0);
@@ -858,6 +885,6 @@ int main(void)
 	test_split_boundaries();
 	test_split_wrong_connection_cutoff();
 	test_old_hello_is_rejected();
-	puts("channel drain tests passed (15 groups)");
+	puts("channel drain tests passed (17 groups)");
 	return 0;
 }

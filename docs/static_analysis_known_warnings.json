@@ -51,12 +51,12 @@
       "message": "Potential leak of memory pointed to by 'items'"
     },
     {
-      "source": "src/execution/reactor.c",
-      "file": "src/execution/reactor.c",
-      "line": 322,
-      "column": 10,
       "check": "clang-analyzer-unix.Malloc",
-      "message": "Potential leak of memory pointed to by 'items'"
+      "column": 10,
+      "file": "src/execution/reactor.c",
+      "line": 330,
+      "message": "Potential leak of memory pointed to by 'items'",
+      "source": "src/execution/reactor.c"
     },
     {
       "source": "src/execution/timer_queue.c",
@@ -75,12 +75,12 @@
       "message": "Potential leak of memory pointed to by 'heap'"
     },
     {
-      "source": "src/transport/channel/channel.c",
-      "file": "src/transport/channel/channel.c",
-      "line": 3359,
-      "column": 10,
       "check": "clang-analyzer-unix.Malloc",
-      "message": "Potential leak of memory pointed to by 'build.channel'"
+      "column": 10,
+      "file": "src/transport/channel/channel.c",
+      "line": 3373,
+      "message": "Potential leak of memory pointed to by 'build.channel'",
+      "source": "src/transport/channel/channel.c"
     }
   ]
 }
