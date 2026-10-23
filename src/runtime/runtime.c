@@ -202,8 +202,21 @@ int tr_runtime_create(const struct tr_runtime_config *config,
 		shard->shard_id = i;
 		shard->listen_fd = -1;
 		shard->peer_event_fd = -1;
-		tr_memory_budget_init(&shard->memory_budget,
-		                      config->shards[i].memory_budget_bytes);
+		if (config->shards[i].memory_budget_parent) {
+			if (tr_memory_budget_init_child(
+			            &shard->memory_budget,
+			            config->shards[i].memory_budget_bytes,
+			            config->shards[i].memory_budget_parent) !=
+			    TR_OK) {
+				free(runtime->shards);
+				free(runtime);
+				return TR_ERR_INVALID;
+			}
+		} else {
+			tr_memory_budget_init(
+			        &shard->memory_budget,
+			        config->shards[i].memory_budget_bytes);
+		}
 		atomic_init(&shard->peer_reaping_count, 0U);
 		atomic_init(&shard->peers_reaped_total, 0U);
 	}

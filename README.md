@@ -4,7 +4,9 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.6` 将普通 V2 Channel 的固定存储计入所属 shard 的共享内存预算，
+当前 `2.0.0-dev.7` 让普通 V2 Server 的所有 shard 共用同一个内存硬上限，
+每个 shard 保留本地账目，不再因旧的等分额度提前拒绝。设计与验证见
+[共享预算评估](docs/reviews/rpc_v2_shared_memory_budget_20261023.md)。上一版将普通 V2 Channel 的固定存储计入所属 shard 的共享内存预算，
 预算不足时在分配前拒绝创建，构造失败或最终销毁时归还。实现和限制见
 [Channel 预算评估](docs/reviews/rpc_v2_channel_budget_20261023.md)。上一版明确拒绝超过对端固定窗口的整消息，并保证已消费信用不会
 因更新阈值阻塞下一条合法消息；同步回复和异步 producer 同样覆盖。

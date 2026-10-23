@@ -7,12 +7,14 @@
 
 /* 库内显式 V2 调优入口，返回既有 Server；不安装为 SDK，不协商或回退到 V1。
  * 公开 tr_server_create 在组合根推导本配置，不公开这些资源布局。
- * endpoint 是每对端的有界记录宿主配置；tasks 与 memory_budget_bytes 是
- * 全 Server 总额，按分片确定分摊，不因增加分片隐式放大。每个分片至少
+ * endpoint 是每对端的有界记录宿主配置；tasks 是全 Server 总额并按分片
+ * 确定分摊，memory_budget_bytes 是所有分片共享的全 Server 硬上限，
+ * 不因增加分片隐式放大。每个分片至少
  * 一个工作线程，所有对端共享该分片的既有 task_executor。
  *
  * 硬预算覆盖已参与 Runtime 记账的 Reactor、对端表、分片池、任务和记录
- * 存储；不等同于进程 RSS、线程栈或尚未迁移的 Channel/Server 元数据。
+ * 存储及 Channel 固定存储；不等同于进程 RSS、线程栈或其他
+ * 尚未迁移的 Server 元数据。
  * limits.max_message_bytes 是整条传输记录的上限；本阶段要求它和初始
  * 窗口至少容纳 48 字节固定头及最大控制元数据，并容纳每个方法最大
  * 正文加固定头。对端另有自身接收限制；未解决任意 L>W 的发送活性。

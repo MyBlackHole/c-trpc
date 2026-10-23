@@ -107,6 +107,8 @@ struct tr_server {
 	uint32_t shard_count;
 
 	struct tr_server_record_config record;
+	/* 普通 V2 全 Server 的共享上限；分片保留本地账目。 */
+	struct tr_memory_budget memory_budget;
 	struct tr_rpc_dispatch_method *record_methods;
 	size_t record_method_count;
 	size_t record_method_bytes;
@@ -1390,8 +1392,11 @@ tr_server_create_internal(enum tr_server_mode mode,
 		return TR_ERR_NOMEM;
 	server_mem->config = effective;
 	server_mem->mode = mode;
-	if (record)
+	if (record) {
 		server_mem->record = *record;
+		tr_memory_budget_init(&server_mem->memory_budget,
+		                      record->memory_budget_bytes);
+	}
 
 	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
@@ -1438,9 +1443,9 @@ tr_server_create_internal(enum tr_server_mode mode,
 			        sizeof(struct tr_server_peer);
 			if (mode == TR_SERVER_MODE_RPC_V2) {
 				shard_config->memory_budget_bytes =
-				        tr_server_record_budget_share(
-				                record->memory_budget_bytes,
-				                effective.shard_count, i);
+				        record->memory_budget_bytes;
+				shard_config->memory_budget_parent =
+				        &server->memory_budget;
 			}
 
 			reactor_config->max_connections =
@@ -2592,6 +2597,10 @@ int tr_server_destroy(struct tr_server *server)
 			return ret;
 		server->runtime = NULL;
 	}
+	if (server->mode == TR_SERVER_MODE_RPC_V2 &&
+	    atomic_load_explicit(&server->memory_budget.current_bytes,
+	                         memory_order_acquire) != 0U)
+		return TR_ERR_STATE;
 
 	free(server->shards);
 	server->shards = NULL;

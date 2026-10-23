@@ -7,6 +7,7 @@
 #include "../src/execution/buffer.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
+#include "../src/runtime/runtime_internal.h"
 #include "tr/status.h"
 
 #include <errno.h>
@@ -45,6 +46,7 @@ static _Atomic unsigned reactor_count, fatal_polls, detach_failures;
 static _Atomic unsigned cancel_requests;
 static _Atomic unsigned observation_count, stopped_reaps, fail_stopped_reap_at;
 static _Atomic unsigned cleanup_dispatches;
+static _Atomic unsigned shared_budget_configurations;
 static _Atomic unsigned budget_release_pool_target, budget_release_pool_seen;
 static _Atomic uint64_t budget_release_current_before_failure;
 static _Atomic(struct tr_memory_budget *) budget_release_injected_budget;
@@ -68,6 +70,23 @@ static unsigned observe_endpoint(struct tr_rpc_record_endpoint *endpoint)
 			return i;
 	CHECK(false);
 	return 0;
+}
+
+int __real_tr_runtime_create(const struct tr_runtime_config *,
+                             struct tr_runtime **);
+int __wrap_tr_runtime_create(const struct tr_runtime_config *config,
+                             struct tr_runtime **out)
+{
+	if (config && config->shard_count == 2U && config->shards &&
+	    config->shards[0].memory_budget_parent &&
+	    config->shards[0].memory_budget_parent ==
+	            config->shards[1].memory_budget_parent &&
+	    config->shards[0].memory_budget_bytes ==
+	            config->shards[0].memory_budget_parent->limit_bytes &&
+	    config->shards[1].memory_budget_bytes ==
+	            config->shards[0].memory_budget_parent->limit_bytes)
+		atomic_fetch_add(&shared_budget_configurations, 1U);
+	return __real_tr_runtime_create(config, out);
 }
 
 int __real_tr_reactor_start(struct tr_reactor *);
@@ -1073,8 +1092,10 @@ static void test_stopped_work(bool fatal, bool cleanup_failure,
 static void test_multishard_and_start_failure(unsigned fail_at)
 {
 	struct fixture f;
+	atomic_store(&shared_budget_configurations, 0U);
 	fixture_init(&f, 2, 4);
 	fixture_create(&f);
+	CHECK(atomic_load(&shared_budget_configurations) == 1U);
 	atomic_store(&fail_worker_at, fail_at);
 	int ret = fixture_start(&f);
 	if (fail_at) {
