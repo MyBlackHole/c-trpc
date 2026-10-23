@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-23-tls-c-reactor-integration-design.md`
 
-**状态：** TLS-C 本地实现与验证已完成；候选版本为 `2.0.0-dev.11`，GitHub 固定版本 CI、PR 与合并验收待完成。公网/资源门槛以及 TLS-D/E 不在本阶段完成范围内。
+**状态：** TLS-C 实现已提交至 PR #310（候选版本 `2.0.0-dev.12`；TLS-C 首次交付为 `.11`）；本地验证完成。PR 的 Clang 14 静态分析曾因既有告警位置从第 330 行漂移至第 345 行而失败，现已核实 `tr_tx_pool_init()` 函数体未变化并更新精确位置基线，等待重跑 CI。PR 合并验收、TLS-D/E、公网与资源门槛仍未完成。
 
 ## Global Constraints
 

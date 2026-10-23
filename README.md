@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.11` 开发分支已将 OpenSSL 3 TLS 1.3 接入普通 V2 Client/Server；
+当前 `2.0.0-dev.12` 开发分支已将 OpenSSL 3 TLS 1.3 接入普通 V2 Client/Server；
 `TR_TLS_REQUIRED` 会验证服务端证书身份并在认证后传输 V2 数据，默认仍为明文 TCP。
 TLS 失败关闭连接，不回退明文。transport-only/连接组 TLS、mTLS、CONTROL/DATA
 身份绑定和完整 TLS 资源账本尚未完成，TLS-C 也不代表 #234 或 V2 整体验收完成。
