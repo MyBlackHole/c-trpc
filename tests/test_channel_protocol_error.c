@@ -24,6 +24,7 @@
 enum malformed_frame {
 	BAD_WINDOW_UPDATE,
 	BAD_DATA,
+	BAD_DATA_FLAGS_UNKNOWN_STREAM,
 	BAD_HELLO,
 	BAD_HELLO_ACK
 };
@@ -222,6 +223,11 @@ static void send_bad_frame(enum malformed_frame kind,
 	case BAD_DATA:
 		type = TR_FRAME_DATA;
 		flags = TR_FRAME_F_FIRST | TR_FRAME_F_LAST;
+		break;
+	case BAD_DATA_FLAGS_UNKNOWN_STREAM:
+		type = TR_FRAME_DATA;
+		flags = TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+		        TR_FRAME_F_LANE_BULK;
 		break;
 	case BAD_HELLO:
 		type = TR_FRAME_HELLO;
@@ -429,6 +435,7 @@ int main(void)
 {
 	test_protocol_error(BAD_WINDOW_UPDATE);
 	test_protocol_error(BAD_DATA);
+	test_protocol_error(BAD_DATA_FLAGS_UNKNOWN_STREAM);
 	test_protocol_error(BAD_HELLO);
 	test_protocol_error(BAD_HELLO_ACK);
 	return 0;

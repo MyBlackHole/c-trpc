@@ -718,6 +718,51 @@ static void test_receive_isolation(int resource)
 	destroy_fixture(&f);
 }
 
+static void test_data_type_flag_isolation(void)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	(void)open_remote(&f, 0, 1, 1);
+	(void)open_remote(&f, 0, 3, 2);
+	/* LANE_BULK 是有效线帧标志，但 DATA 不允许携带；流身份已知。 */
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST | TR_FRAME_F_LANE_BULK, 1,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.resets, 1);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1);
+	assert(h.message_id == (uint64_t)-TR_ERR_STATE);
+	assert(f.reset_status[0] == TR_ERR_STATE);
+	assert(count(&f, &f.received) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1);
+	assert(count(&f, &f.down) == 0);
+	peer_reset(&f, 0, 1, TR_ERR_STATE);
+	wait_count(&f, &f.closed, 1);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void test_data_type_flag_without_reset(void)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+
+	init_fixture(&f, CAPACITY, 0, 0, 0, 1);
+	(void)open_remote(&f, 0, 1, 1);
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST | TR_FRAME_F_LANE_BULK, 1,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.down, 1);
+	assert(count(&f, &f.resets) == 0);
+	assert(f.down_status == TR_ERR_STATE);
+	destroy_fixture(&f);
+}
+
 static void test_closed_receive_resource_failure(void)
 {
 	struct fixture f;
@@ -1427,6 +1472,8 @@ int main(void)
 	test_refusal_split_progress();
 	test_receive_isolation(0);
 	test_receive_isolation(1);
+	test_data_type_flag_isolation();
+	test_data_type_flag_without_reset();
 	test_closed_receive_resource_failure();
 	test_frozen_discard_credit(0);
 	test_frozen_discard_credit(1);
