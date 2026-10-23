@@ -395,11 +395,16 @@ checker 对实际 `HEAD` 的 30 个变更源码文件检查通过，0 失败。
 
 Clang 14 的 PR 分析报告复现了 8 条已登记告警中的 7 条原位告警，唯一门禁差异是
 `reactor.c` 的既有 `items` 告警随此前字段新增从第 361 行移到第 362 行；已同步精确基线，
-不修改分配或释放行为。新 head 的 CI 仍须重新通过后才完成 Step 4。
+不修改分配或释放行为。
 
-- [ ] **Step 4: 更新 PR #312 并检查实际 head CI**
+- [x] **Step 4: 更新 PR #312 并检查实际 head CI**
 
 将计划与实现提交推到 `feat/v2-tls-d2-234`，PR #312 继续保持 draft 直到产品矩阵全部通过；记录各 CI 实际 head SHA、测试结果和未覆盖项。随后再处理 TLS-E 与 #243 剩余范围，不把 D2 PR 通过说成完整 V2 完成。
+
+实测：PR #312 保持 draft，TLS-D2 实现 head `57029d39f10f6cda33823032a2433de6e500cc60`
+的 14 项检查全部通过：GCC/Clang 全量构建、ASan/UBSan、TSan、Clang 14/GCC 11 静态分析、
+CRC32C、安装兼容、源码格式和五种 RPC smoke。TLS-E、#243 通用 Call 及完整 V2 发布验收
+仍不在本 PR 范围内。
 
 ## 自审覆盖
 
