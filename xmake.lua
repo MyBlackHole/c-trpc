@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.17")
+set_version("2.0.0-dev.18")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -109,6 +109,7 @@ target("trcore")
         "src/io/connector.c",
         "src/io/byte_endpoint.c",
         "src/io/peer_identity_internal.c",
+        "src/io/tls_provider_operation.c",
         "src/io/tls_config.c",
         "src/io/tls_openssl.c",
         "src/execution/reactor.c",
@@ -153,6 +154,24 @@ target("test_tls_config")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_tls_config.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_tls_provider_operation")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_provider_operation.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_tls_provider")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_provider.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})

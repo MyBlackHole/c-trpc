@@ -38,6 +38,9 @@ struct tr_facade_limits {
 
 	uint64_t initial_window_bytes;
 	uint64_t window_update_threshold_bytes;
+
+	uint32_t max_pending_tls_operations;
+	uint32_t max_tls_credential_bundle_bytes;
 };
 
 void tr_facade_limits_init(struct tr_facade_limits *limits);

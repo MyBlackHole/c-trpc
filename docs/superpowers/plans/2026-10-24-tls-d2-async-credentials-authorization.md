@@ -63,11 +63,11 @@
 - 连接组授权配置新增 `authorize_async(request, operation, arg)` 与 `authorize_cancel(operation, arg)`，均返回 `void`；请求含组/角色/身份视图、TLS generation 和单调时钟绝对期限。`tr_server_connection_group_authorize_complete(server, operation, status, decision)` 跨线程提交一次结果，decision 仅允许 ALLOW/DENY。同步 authorize 同时配置时先 veto，再等待异步 ALLOW。
 - `tr_facade_limits` 新增 `max_pending_tls_operations` 与 `max_tls_credential_bundle_bytes`；默认分别为 64 和 4 MiB，0 按现有 `tr_facade_limits_init()` 规则归一化为默认值。
 
-- [ ] **Step 1: 先写失败的默认值与状态字符串测试**
+- [x] **Step 1: 先写失败的默认值与状态字符串测试**
 
 在 `tests/test_tls_config.c` 增加测试：`tr_client_config_init()` 与 `tr_server_config_init()` 默认得到 64 和 4 MiB；容量显式设为 1 时保留 1；新增 `tr_status_str(TR_ERR_CANCELLED)` 返回固定标记 `cancelled`。provider/cancel 配对与连接组授权入口组合在 Task 4/6 的真实 facade 构造测试中验证。
 
-- [ ] **Step 2: 运行专测确认失败**
+- [x] **Step 2: 运行专测确认失败**
 
 运行：
 
@@ -79,11 +79,11 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 
 预期：新增字段/API 尚不存在，测试编译失败。
 
-- [ ] **Step 3: 实现公共类型与校验**
+- [x] **Step 3: 实现公共类型与校验**
 
 在 `tr_facade_limits_init()` 中增加两个默认值，在 `tr_status` 末尾新增 `TR_ERR_CANCELLED = -17` 并扩展 `tr_status_str()`。provider callback 与 cancel 必须成对；provider-only Server 仍须有固定 `client_auth` 和静态信任根。所有公开注释说明借用数据、句柄失效点、线程上下文和 `TR_OK`/失败输出行为。
 
-- [ ] **Step 4: 验证并提交本任务**
+- [x] **Step 4: 验证并提交本任务**
 
 运行上面的专测与 `git diff --check`；预期 `test_tls_config` 通过，已有配置回归不变。提交只包含本任务文件，提交说明写明新增状态/配置和验证命令。
 
@@ -96,18 +96,18 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 - Create: `tests/test_tls_provider_operation.c`
 
 **Interfaces:**
-- `tr_tls_provider_operation_table_init(table, instance, capacity, budget)` 预分配固定槽位并记账。
+- `tr_tls_provider_operation_table_init(table, capacity, budget)` 预分配固定槽位并记账，内部生成不复用的实例 ID。
 - `tr_tls_provider_operation_reserve(table, kind, result_capacity, out_handle)` 在调用 provider 前取得槽位、代次和结果容量；失败不修改输出。
 - `tr_tls_provider_operation_complete(table, handle, status, result)` 对首次有效完成线性化并写入预留槽；重复/跨实例句柄返回 `TR_ERR_STALE`。
 - `tr_tls_provider_operation_request_cancel(table, handle, reason, out_notify)` 只请求一次合作式取消；先胜者决定结果，未确认槽位不回收。
 - `tr_tls_provider_operation_retire(table, handle)` 仅在 provider 已确认且 owner/调用方已消费结果后归还槽位和 budget。
 - 每个 facade 只有一张操作表；Server 的连接组 listener 借用 Server 操作表，credential refresh 与 auth 共用总槽位上限。
 
-- [ ] **Step 1: 写状态机负例与容量测试**
+- [x] **Step 1: 写状态机负例与容量测试**
 
 在 `tests/test_tls_provider_operation.c` 覆盖容量满返回 `TR_AGAIN` 且输出 handle 不变、跨实例/旧代次句柄 `TR_ERR_STALE`、句柄代次最大值不回绕、重复 complete 只有一次成功、cancel 与 complete 两种先后顺序只保留一个终态、未确认取消无法 retire。
 
-- [ ] **Step 2: 注册专用 Xmake 测试目标并确认红灯**
+- [x] **Step 2: 注册专用 Xmake 测试目标并确认红灯**
 
 将 `src/io/tls_provider_operation.c` 加入 `trcore`，新增 `test_tls_provider_operation` 目标并仅链接 `trcore`；运行：
 
@@ -118,11 +118,11 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 
 预期：因内部接口缺失而编译失败。
 
-- [ ] **Step 3: 实现固定槽与一次性线性化**
+- [x] **Step 3: 实现固定槽与一次性线性化**
 
 槽位数组和句柄实例在初始化时建立；所有跨线程状态在同一 mutex 下更新。credential 结果槽在准入时按 bundle 上限预留并计入 budget；授权结果固定大小。完成路径不分配、不等待队列容量，取消不释放 provider 仍可能读写的 `arg` 或 payload。
 
-- [ ] **Step 4: 跑操作内核专测与 sanitizer 专测**
+- [x] **Step 4: 跑操作内核专测与 sanitizer 专测**
 
 运行目标专测，然后用 `xmake f -c -y -m tsan --toolchain=gcc` 配置并运行同一目标。预期并发竞态测试通过且 TSan 无报告；所有临时与缓存路径保持在 `build/`。
 
@@ -136,15 +136,15 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 - Modify: `tests/test_tls_openssl.c`
 
 **Interfaces:**
-- 新增 `tr_tls_openssl_client_profile_create_from_pem(config, bundle, out)`。
-- 新增 `tr_tls_openssl_server_profile_create_from_pem(config, bundle, out)`。
+- 新增 `tr_tls_openssl_client_profile_create_from_pem(config, bundle, max_bundle_bytes, out)` 与保留 peer identity 策略的对应构造器。
+- 新增 `tr_tls_openssl_server_profile_create_from_pem(config, bundle, max_bundle_bytes, out)`；最大 bundle 字节数来自门面 limits。
 - 两个构造器只替换本地身份 cert/key；Client trust store、expected peer/SNI、Server client-auth 与 client CA 完全由固定配置提供。
 
-- [ ] **Step 1: 先写内存构造测试**
+- [x] **Step 1: 先写内存构造测试**
 
 用 `tls_test_identity_init()` 在 `build/test-tmp` 生成证书，将 PEM 读入有长度的内存 buffer；验证正确链/匹配私钥生成 profile，错私钥、空链、私钥口令错误和超长 bundle 均失败且 `out == NULL`。TLS 1.3 loopback 握手分别验证 Client 与 Server profile。
 
-- [ ] **Step 2: 运行 TLS backend 专测确认红灯**
+- [x] **Step 2: 运行 TLS backend 专测确认红灯**
 
 ```sh
 TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
@@ -153,11 +153,11 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 
 预期：新构造入口不存在，新增测试未通过。
 
-- [ ] **Step 3: 用 OpenSSL BIO 解析链与私钥**
+- [x] **Step 3: 用 OpenSSL BIO 解析链与私钥**
 
 用 `BIO_new_mem_buf()` 解析证书链和私钥，拒绝空字段、尾随非法 PEM、长度超过 `max_tls_credential_bundle_bytes` 和不匹配私钥。口令回调只借用 bundle 字节；私钥/口令临时副本用 `OPENSSL_cleanse()` 清理。所有失败路径释放 BIO、X509、EVP_PKEY、SSL_CTX 和 profile。
 
-- [ ] **Step 4: 验证 file 与 memory 路径一致**
+- [x] **Step 4: 验证 file 与 memory 路径一致**
 
 运行 TLS backend、配置和既有 TLS identity 专测；对有效身份比较两种 profile 的 TLS 版本、peer identity 策略和握手结果。用 `git diff --check` 检查源码格式。
 
@@ -178,23 +178,23 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 - `tr_client_tls_credentials_poll(client, handle, out_result)` 与 Server 对应函数在外部控制线程执行 PEM profile 构造和 D1 全 owner 安装；pending 时返回 `TR_AGAIN` 且不改输出。
 - `tr_client_tls_credentials_cancel(client, handle)` 与 Server 对应函数发起单次 cancel；profile publish、cancel、deadline 的线性化点由操作表决定。
 
-- [ ] **Step 1: 测试 provider-only 创建及未就绪拒绝**
+- [x] **Step 1: 测试 provider-only 创建及未就绪拒绝**
 
 在 `tests/test_tls_provider.c` 创建缺少静态身份文件但配置 provider 的 TLS_REQUIRED Client/Server；验证 create 成功，未取到凭证前 Client connect、Server listen/start 返回 `TR_AGAIN`，输出端口/fd 状态不变。provider 配置缺 cancel 时 create 返回 `TR_ERR_INVALID`。
 
-- [ ] **Step 2: 测试异步首取、refresh、取消与结果 poll**
+- [x] **Step 2: 测试异步首取、refresh、取消与结果 poll**
 
 添加确定性 fake provider：start 只保存 request/handle；测试线程显式调用 complete。覆盖 complete 前 poll `TR_AGAIN` 且 output 不变、首取 generation 1、静态 profile refresh generation 加一、坏凭证保留旧 generation、取消终态 `TR_ERR_CANCELLED`、deadline `TR_ERR_TIMEOUT`、重复/迟到 complete `TR_ERR_STALE`、destroy 在 provider 未确认时返回 `TR_AGAIN`。
 
-- [ ] **Step 3: 实现 facade 配置复制与 provider-only 状态**
+- [x] **Step 3: 实现 facade 配置复制与 provider-only 状态**
 
 创建时深拷贝后续 profile 构造需要的固定 trust/name/client-auth 字符串。provider-only Server 不创建可接收连接的空身份 profile；未发布首代前 `listen/start` 返回 `TR_AGAIN`。Client 同样阻止 TLS_REQUIRED connect，不能将空 profile 解释为明文。
 
-- [ ] **Step 4: 实现 start/complete/poll/cancel 与 D1 发布**
+- [x] **Step 4: 实现 start/complete/poll/cancel 与 D1 发布**
 
 start 先 reserve 凭证 bundle 容量再调用 provider；complete 只复制到预留结果槽；poll 在外部控制线程构造候选并调用现有 TLS rotation 屏障。publish 成功才更新 generation；rollback 失败沿用 D1 fail-closed/destroy retry 规则。deadline 用 Reactor timer 触发 provider cancel，但不在 timer 回调解析 PEM。
 
-- [ ] **Step 5: 验证公开 API 与旧静态路径**
+- [x] **Step 5: 验证公开 API 与旧静态路径**
 
 运行 `test_tls_provider`、`test_tls_openssl`、`test_rpc_v2_tls_identity` 和 `test_connection_group_tls`。预期静态文件 TLS、不带 provider 的创建与轮换行为完全保留；provider-only 初始与更新场景通过。
 
