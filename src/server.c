@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/epoll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,6 +67,7 @@ struct tr_server;
 struct tr_server_shard {
 	struct tr_server *server;
 	struct tr_runtime_shard *runtime;
+	struct tr_tls_openssl_profile *tls_profile;
 	struct tr_buffer_pool reassembly_pool;
 	int reassembly_pool_ready;
 	int peer_events_enabled;
@@ -103,6 +105,7 @@ struct tr_server {
 	struct tr_server_config config;
 	enum tr_server_mode mode;
 	struct tr_tls_openssl_profile *tls_profile;
+	struct tr_tls_openssl_profile *tls_recovery_profile;
 
 	struct tr_runtime *runtime;
 	struct tr_server_shard *shards;
@@ -123,6 +126,8 @@ struct tr_server {
 	pthread_cond_t record_drain_cond;
 	int record_drain_cond_ready;
 	int started;
+	_Atomic int tls_rotation_failed;
+	_Atomic int tls_update_active;
 	int gracefully_drained;
 	/* 只有构造完成并发布后才允许读取跨分片统计；终止销毁开始后关闭。 */
 	int published;
@@ -199,18 +204,17 @@ static int tr_server_connection_group_config_valid(
 }
 
 static int tr_server_connection_group_authorize(
-	const struct tr_pipeline_route_preface *route, void *arg)
+        const struct tr_connection_group_authorization *authorization,
+        void *arg)
 {
 	struct tr_server *server = (struct tr_server *)arg;
-	struct tr_connection_group_id group;
 
-	if (!server || !route || !server->config.connection_groups.authorize)
+	if (!server || !authorization ||
+	    !server->config.connection_groups.authorize)
 		return TR_ERR_INVALID;
 
-	group.group_id = route->pipeline_id;
-	group.epoch = route->epoch;
 	return server->config.connection_groups.authorize(
-		&group, server->config.connection_groups.callback_arg);
+	        authorization, server->config.connection_groups.callback_arg);
 }
 
 static enum tr_frame_disposition tr_server_connection_group_data_frame(
@@ -1215,10 +1219,10 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 			goto rollback;
 	}
 
-	if (server->tls_profile) {
+	if (shard->tls_profile) {
 		ret = tr_reactor_adopt_tls_fd_on_owner(
 		        tr_server_shard_reactor(shard), owned_fd,
-		        server->tls_profile,
+		        shard->tls_profile,
 		        tr_deadline_to_ns(&peer->handshake_deadline),
 		        &peer->connection);
 	} else {
@@ -1369,12 +1373,21 @@ tr_server_create_internal(enum tr_server_mode mode,
 		tr_server_config_init(&effective);
 	tr_server_normalize_config(&effective);
 	ret = tr_tls_server_config_validate(
-	        &effective.tls, mode == TR_SERVER_MODE_RPC_V2 ? 1 : 0);
+	        &effective.tls,
+	        mode == TR_SERVER_MODE_RPC_V2 ||
+	                effective.connection_groups.max_groups != 0U);
 	if (ret != TR_OK)
 		return ret;
 	if (effective.tls.mode == TR_TLS_REQUIRED &&
-	    (mode != TR_SERVER_MODE_RPC_V2 ||
-	     effective.connection_groups.max_groups != 0U))
+	    effective.connection_groups.max_groups != 0U) {
+		if (mode != TR_SERVER_MODE_TRANSPORT_ONLY)
+			return TR_ERR_UNSUPPORTED;
+		if (effective.tls.client_auth != TR_TLS_CLIENT_AUTH_REQUIRED)
+			return TR_ERR_INVALID;
+	}
+	if (effective.tls.mode == TR_TLS_REQUIRED &&
+	    mode == TR_SERVER_MODE_TRANSPORT_ONLY &&
+	    effective.connection_groups.max_groups == 0U)
 		return TR_ERR_UNSUPPORTED;
 
 	if (tuning)
@@ -1422,6 +1435,8 @@ tr_server_create_internal(enum tr_server_mode mode,
 	if (pthread_mutex_init(&server_mem->finalizer_lock, NULL) != 0)
 		return TR_ERR_INVALID;
 	server = tr_server_mem_take(&server_mem);
+	atomic_init(&server->tls_rotation_failed, 0);
+	atomic_init(&server->tls_update_active, 0);
 	if (effective.tls.mode == TR_TLS_REQUIRED) {
 		ret = tr_tls_openssl_server_profile_create(
 		        &effective.tls, &server->tls_profile);
@@ -1548,6 +1563,14 @@ tr_server_create_internal(enum tr_server_mode mode,
 			 * 条目不进入销毁和收尾器等待路径。
 			 */
 			server->shard_count = i + 1U;
+			if (server->tls_profile) {
+				ret = tr_tls_openssl_profile_retain(
+				        server->tls_profile);
+				if (ret != TR_OK)
+					return tr_server_create_rollback(
+					        out, server, ret);
+				server_shard->tls_profile = server->tls_profile;
+			}
 
 			if (mode == TR_SERVER_MODE_RPC_V2) {
 				ret = tr_buffer_pool_init_budgeted(
@@ -1608,6 +1631,7 @@ tr_server_create_internal(enum tr_server_mode mode,
 		 */
 		group_config.control_message_count =
 			effective.connection_groups.max_connections;
+		group_config.tls_profile = owner_shard->tls_profile;
 		group_config.authorize_control =
 			tr_server_connection_group_authorize;
 		group_config.authorize_arg = server;
@@ -1662,6 +1686,257 @@ int tr_server_create_transport(const struct tr_server_config *config,
 		tr_server_tuning_ensure_shard_minimums(&tuning, 1U);
 	return tr_server_create_internal(TR_SERVER_MODE_TRANSPORT_ONLY, config,
 	                                 &tuning, NULL, NULL, 0U, out);
+}
+
+struct tr_server_tls_install_request {
+	struct tr_server *server;
+	struct tr_server_shard *shard;
+	struct tr_tls_openssl_profile *profile;
+};
+
+static int tr_server_tls_install_on_owner(void *arg)
+{
+	struct tr_server_tls_install_request *request = arg;
+	struct tr_server_shard *shard;
+	struct tr_tls_openssl_profile *old_profile;
+	int ret;
+
+	if (!request || !request->server || !request->shard ||
+	    !request->profile)
+		return TR_ERR_INVALID;
+	shard = request->shard;
+	if (shard->tls_profile == request->profile)
+		return TR_OK;
+	ret = tr_tls_openssl_profile_retain(request->profile);
+	if (ret != TR_OK)
+		return ret;
+	if (request->server->connection_group_listener &&
+	    tr_runtime_shard_id(shard->runtime) == 0U) {
+		ret = tr_pipeline_listener_set_tls_profile_on_owner(
+		        request->server->connection_group_listener,
+		        request->profile);
+		if (ret != TR_OK) {
+			tr_tls_openssl_profile_release(request->profile);
+			return ret;
+		}
+	}
+	old_profile = shard->tls_profile;
+	shard->tls_profile = request->profile;
+	tr_tls_openssl_profile_release(old_profile);
+	return TR_OK;
+}
+
+static int tr_server_tls_install_all(struct tr_server *server,
+                                     struct tr_tls_openssl_profile *profile,
+                                     int reverse)
+{
+	uint32_t offset;
+
+	for (offset = 0U; offset < server->shard_count; ++offset) {
+		uint32_t index;
+		if (reverse) {
+			index = server->shard_count - offset - 1U;
+		} else if (server->connection_group_listener &&
+		           server->shard_count > 1U) {
+			/* Listener 更新留在最后，前面 shard 的部分安装在失败时
+			 * 走真实回滚路径。 */
+			index = offset + 1U < server->shard_count ? offset + 1U
+			                                          : 0U;
+		} else {
+			index = offset;
+		}
+		struct tr_server_shard *shard = &server->shards[index];
+		struct tr_server_tls_install_request request = {server, shard,
+		                                                profile};
+		int ret = tr_reactor_call_or_stopped(
+		        tr_server_shard_reactor(shard),
+		        tr_server_tls_install_on_owner, &request);
+		if (ret != TR_OK)
+			return ret;
+	}
+	return TR_OK;
+}
+
+static int tr_server_tls_gate_all(struct tr_server *server, int paused)
+{
+	uint32_t i;
+	int result = TR_OK;
+
+	for (i = 0U; i < server->shard_count; ++i) {
+		int ret = tr_reactor_tls_admission_set(
+		        tr_server_shard_reactor(&server->shards[i]), paused);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+	return result;
+}
+
+static int tr_server_tls_close_generation_all(struct tr_server *server,
+                                              uint64_t generation)
+{
+	uint32_t i;
+	int result = TR_OK;
+
+	for (i = 0U; i < server->shard_count; ++i) {
+		int ret = tr_reactor_tls_close_generation(
+		        tr_server_shard_reactor(&server->shards[i]),
+		        generation);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+	return result;
+}
+
+static int tr_server_tls_close_before_generation_all(struct tr_server *server,
+                                                     uint64_t generation)
+{
+	uint32_t i;
+	int result = TR_OK;
+
+	for (i = 0U; i < server->shard_count; ++i) {
+		int ret = tr_reactor_tls_close_before_generation(
+		        tr_server_shard_reactor(&server->shards[i]),
+		        generation);
+		if (ret != TR_OK && result == TR_OK)
+			result = ret;
+	}
+	return result;
+}
+
+static void tr_server_tls_rotation_mark_failed(struct tr_server *server)
+{
+	atomic_store_explicit(&server->tls_rotation_failed, 1,
+	                      memory_order_release);
+	server->published = 0;
+}
+
+static int tr_server_tls_update_profile_impl(
+        struct tr_server *server, const struct tr_tls_server_config *config,
+        enum tr_tls_rotation_policy policy, uint64_t *out_generation)
+{
+	struct tr_tls_openssl_profile *candidate = NULL;
+	struct tr_tls_openssl_profile *old_profile;
+	uint64_t candidate_generation;
+	int ret;
+	int rollback_ret;
+
+	if (!server || !config ||
+	    (policy != TR_TLS_ROTATE_GRACEFUL &&
+	     policy != TR_TLS_ROTATE_REVOKE_OLD))
+		return TR_ERR_INVALID;
+	if (tr_server_blocking_lifecycle_context() ||
+	    atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
+	if (!server->tls_profile || !server->published || !server->runtime ||
+	    !server->shards || server->shard_count == 0U)
+		return TR_ERR_STATE;
+	if (config->mode != TR_TLS_REQUIRED ||
+	    (server->mode == TR_SERVER_MODE_TRANSPORT_ONLY &&
+	     server->config.connection_groups.max_groups != 0U &&
+	     config->client_auth != TR_TLS_CLIENT_AUTH_REQUIRED))
+		return TR_ERR_INVALID;
+	old_profile = server->tls_profile;
+	ret = tr_tls_openssl_profile_next_generation(old_profile,
+	                                             &candidate_generation);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_tls_openssl_server_profile_create(config, &candidate);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_tls_openssl_profile_set_generation(candidate,
+	                                            candidate_generation);
+	if (ret != TR_OK)
+		goto release_candidate;
+
+	ret = tr_server_tls_gate_all(server, 1);
+	if (ret != TR_OK) {
+		rollback_ret = tr_server_tls_gate_all(server, 0);
+		if (rollback_ret != TR_OK)
+			tr_server_tls_rotation_mark_failed(server);
+		goto release_candidate;
+	}
+
+	ret = tr_server_tls_install_all(server, candidate, 0);
+	if (ret != TR_OK) {
+		rollback_ret =
+		        tr_server_tls_install_all(server, old_profile, 1);
+		if (rollback_ret != TR_OK) {
+			tr_server_tls_rotation_mark_failed(server);
+			goto release_candidate;
+		}
+		rollback_ret = tr_server_tls_gate_all(server, 0);
+		if (rollback_ret != TR_OK)
+			tr_server_tls_rotation_mark_failed(server);
+		goto release_candidate;
+	}
+
+	/* candidate 的初始引用转给 Server；old_profile 保留在 recovery
+	 * 字段，直到所有 owner 都重新开放准入后才释放。 */
+	server->tls_profile = candidate;
+	server->tls_recovery_profile = old_profile;
+	if (policy == TR_TLS_ROTATE_REVOKE_OLD) {
+		ret = tr_server_tls_close_before_generation_all(
+		        server, candidate_generation);
+		if (ret != TR_OK) {
+			tr_server_tls_rotation_mark_failed(server);
+			return TR_ERR_STATE;
+		}
+	}
+	ret = tr_server_tls_gate_all(server, 0);
+	if (ret == TR_OK) {
+		server->tls_recovery_profile = NULL;
+		tr_tls_openssl_profile_release(old_profile);
+		if (out_generation)
+			*out_generation = candidate_generation;
+		return TR_OK;
+	}
+
+	/* 某个 owner 无法开放时，先重新关闭所有准入并销毁可能已在
+	 * 先开放分片建立的 candidate 会话，再恢复旧 profile。 */
+	rollback_ret = tr_server_tls_gate_all(server, 1);
+	if (rollback_ret == TR_OK)
+		rollback_ret = tr_server_tls_close_generation_all(
+		        server, candidate_generation);
+	if (rollback_ret == TR_OK)
+		rollback_ret =
+		        tr_server_tls_install_all(server, old_profile, 1);
+	if (rollback_ret != TR_OK) {
+		tr_server_tls_rotation_mark_failed(server);
+		return TR_ERR_STATE;
+	}
+	server->tls_profile = old_profile;
+	server->tls_recovery_profile = NULL;
+	tr_tls_openssl_profile_release(candidate);
+	rollback_ret = tr_server_tls_gate_all(server, 0);
+	if (rollback_ret != TR_OK) {
+		tr_server_tls_rotation_mark_failed(server);
+		return TR_ERR_STATE;
+	}
+	return ret;
+
+release_candidate:
+	tr_tls_openssl_profile_release(candidate);
+	return ret;
+}
+
+int tr_server_tls_update_profile(struct tr_server *server,
+                                 const struct tr_tls_server_config *config,
+                                 enum tr_tls_rotation_policy policy,
+                                 uint64_t *out_generation)
+{
+	int ret;
+
+	if (!server)
+		return TR_ERR_INVALID;
+	if (atomic_exchange_explicit(&server->tls_update_active, 1,
+	                             memory_order_acquire))
+		return TR_AGAIN;
+	ret = tr_server_tls_update_profile_impl(server, config, policy,
+	                                        out_generation);
+	atomic_store_explicit(&server->tls_update_active, 0,
+	                      memory_order_release);
+	return ret;
 }
 
 int tr_server_create(const struct tr_server_config *config,
@@ -1766,6 +2041,9 @@ int tr_server_listen(struct tr_server *server, const char *ipv4_address,
 
 	if (!server || !ipv4_address || server->shard_count == 0U)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (server->mode == TR_SERVER_MODE_TRANSPORT_ONLY)
 		return TR_ERR_UNSUPPORTED;
 	if (tr_server_blocking_lifecycle_context())
@@ -1833,6 +2111,9 @@ int tr_server_connection_group_listen(
 {
 	if (!server || !ipv4_address || backlog <= 0)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener)
 		return TR_ERR_STATE;
 	if (server->started)
@@ -1854,6 +2135,9 @@ int tr_server_connection_group_stop(struct tr_server *server)
 {
 	if (!server)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener)
 		return TR_ERR_STATE;
 	return tr_server_connection_group_stop_internal(server);
@@ -1863,6 +2147,9 @@ int tr_server_connection_group_begin_drain(struct tr_server *server)
 {
 	if (!server)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 	return tr_pipeline_listener_begin_drain(
@@ -1878,6 +2165,9 @@ int tr_server_connection_group_get_stats(
 
 	if (!server || !out)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener)
 		return TR_ERR_STATE;
 
@@ -1908,6 +2198,9 @@ int tr_server_connection_group_wait_drained(
 {
 	if (!server)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
 	if (!server->connection_group_listener || !server->started)
@@ -1923,6 +2216,9 @@ int tr_server_connection_group_send_data_offer(
 {
 	if (!server || group_id == 0U || epoch == 0U)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
@@ -1937,6 +2233,9 @@ int tr_server_connection_group_send_transfer_ready(
 {
 	if (!server || group_id == 0U || epoch == 0U || stream_id == 0U)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
@@ -1951,6 +2250,9 @@ int tr_server_connection_group_release_transfer(
 {
 	if (!server || group_id == 0U || epoch == 0U || stream_id == 0U)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	if (!server->connection_group_listener || !server->started)
 		return TR_ERR_STATE;
 
@@ -1966,6 +2268,9 @@ int tr_server_start(struct tr_server *server)
 	int ret;
 
 	if (!server || server->shard_count == 0U)
+		return TR_ERR_STATE;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
 		return TR_ERR_STATE;
 	if (tr_server_blocking_lifecycle_context())
 		return TR_ERR_STATE;
@@ -2105,6 +2410,9 @@ int tr_server_drain(struct tr_server *server, uint32_t timeout_ms)
 	int final = TR_OK;
 
 	if (!server)
+		return TR_ERR_STATE;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
 		return TR_ERR_STATE;
 
 	/* 在首次生命周期修改前拒绝。处理函数等待自己的流，
@@ -2329,6 +2637,9 @@ int tr_server_get_stats(struct tr_server *server, struct tr_server_stats *out)
 
 	if (!server || !out)
 		return TR_ERR_INVALID;
+	if (atomic_load_explicit(&server->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
 	/* 回滚失败时 *out 可能保留部分构造对象；调用方只能继续销毁，
 	 * 不允许统计遍历未发布或已经开始终止拆除的分片数组。
 	 */
@@ -2626,6 +2937,14 @@ int tr_server_destroy(struct tr_server *server)
 			}
 		}
 	}
+	if (server->shards) {
+		for (shard_index = 0; shard_index < server->shard_count;
+		     ++shard_index) {
+			tr_tls_openssl_profile_release(
+			        server->shards[shard_index].tls_profile);
+			server->shards[shard_index].tls_profile = NULL;
+		}
+	}
 
 	if (server->record_method_bytes) {
 		struct tr_memory_budget *budget;
@@ -2662,6 +2981,10 @@ int tr_server_destroy(struct tr_server *server)
 	if (server->tls_profile) {
 		tr_tls_openssl_profile_release(server->tls_profile);
 		server->tls_profile = NULL;
+	}
+	if (server->tls_recovery_profile) {
+		tr_tls_openssl_profile_release(server->tls_recovery_profile);
+		server->tls_recovery_profile = NULL;
 	}
 	if (server->mode == TR_SERVER_MODE_RPC_V2 &&
 	    atomic_load_explicit(&server->memory_budget.current_bytes,

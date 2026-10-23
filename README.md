@@ -4,12 +4,16 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.12` 开发分支已将 OpenSSL 3 TLS 1.3 接入普通 V2 Client/Server；
-`TR_TLS_REQUIRED` 会验证服务端证书身份并在认证后传输 V2 数据，默认仍为明文 TCP。
-TLS 失败关闭连接，不回退明文。transport-only/连接组 TLS、mTLS、CONTROL/DATA
-身份绑定和完整 TLS 资源账本尚未完成，TLS-C 也不代表 #234 或 V2 整体验收完成。
+当前 `2.0.0-dev.17` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
+双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
+连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
+撤销旧代次；已接管的会话保留原 profile，旧 CONTROL 不得接受新 Server 代次的 DATA。
+默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 全平台矩阵与 GitHub 验收仍
+未完成；本版本不代表 #234 或 V2 整体验收完成。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
+[TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、
 [TLS-C 设计与计划](docs/superpowers/specs/2026-10-23-tls-c-reactor-integration-design.md)
 与 [ADR-009](docs/architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 dev.8 将有效边界内、可定位到已打开 Stream 的非法 DATA 类型标志隔离为该流的 RESET，
@@ -91,9 +95,12 @@ CONTROL 通道              BULK 通道
 
 传输/RPC 核心不执行常规文件系统 I/O，也不包含备份专用的提交/存储语义。
 
-**安全与可选能力现状**：普通 V2 Client/Server 可显式要求 TLS 1.3 和服务端证书身份验证；
-默认仍使用明文 TCP，消息压缩尚未接入。TLS 不覆盖 transport-only/连接组，当前不支持
-mTLS、CONTROL/DATA 身份绑定或 TLS 全部内部内存的硬预算。CRC32C 不能替代认证和加密；
+**安全与可选能力现状**：普通 V2 Client/Server 可显式要求 TLS 1.3 和双向证书认证；
+已验证的唯一 URI SAN 可作为 RPC work 的连接身份视图。transport-only 连接组也支持 TLS
+mTLS，Server 授权 CONTROL/DATA 主体，Client 要求 DATA 服务端主体与 CONTROL 连续一致。
+默认仍使用明文 TCP，消息压缩尚未接入。TLS profile 轮换和全部 TLS 内部内存的硬预算
+仍待完成。
+CRC32C 不能替代认证和加密；
 部署到不可信网络前仍须完成 [TLS-D/E 验收](docs/architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 消息压缩要求见[压缩与 TLS 需求](docs/architecture/11-compression-tls-requirements.md)。
 
@@ -201,7 +208,7 @@ Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚�
   Client 自身 LIVE 回调可读取本地快照；Server 聚合快照由外部控制线程读取。
 
 普通 RPC 接口尚未提供重连或网络压缩；普通 V2 的 TLS 必需模式见
-[TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)。连接组是独立的传输工厂，当前不支持 TLS，也不是 RPC 协议回退。所有权、资源限制和接入顺序见
+[TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)。连接组是独立的传输工厂，也不是 RPC 协议回退。所有权、资源限制和接入顺序见
 [V2 SDK 使用合同](docs/rpc-v2-sdk.md)。完整的可编译运行消费端见
 [`tests/test_rpc_v2_sdk.c`](tests/test_rpc_v2_sdk.c)；CI 将同一源码复制到仓库外，
 仅用安装头文件与静态库，分别以 C11/C++11 的 GCC、Clang 编译运行。
@@ -248,6 +255,11 @@ tr_server_connection_group_listen(
 tr_server_start(server);
 ```
 
+授权回调对每条 CONTROL 和 DATA 路由分别调用。`struct
+tr_connection_group_authorization` 提供组、角色、TLS 对端身份，以及 DATA 对应的
+CONTROL 主体；明文连接的身份认证类型为 `TR_PEER_IDENTITY_NONE`。连接组启用 TLS 时，
+Server 必须配置 `TR_TLS_REQUIRED` 和 `TR_TLS_CLIENT_AUTH_REQUIRED`。
+
 同一个稳定传输门面现在也提供客户端 CONTROL 生命周期，并且不暴露路由内部实现：
 
 ```c
@@ -261,6 +273,13 @@ tr_client_config_init(&client_cfg);
 client_cfg.connection_groups.max_data_connections = 4;
 /* 0 继承 client_cfg.limits.max_streams，保持向后兼容行为。 */
 client_cfg.connection_groups.max_active_transfers = 256;
+/* 启用组 mTLS 时，Server 同时要求客户端证书；Client 对每条 DATA
+ * 复用此 profile，并校验服务端 URI SAN 与 CONTROL 主体一致。 */
+client_cfg.tls.mode = TR_TLS_REQUIRED;
+client_cfg.tls.ca_file = client_ca_file;
+client_cfg.tls.expected_peer_name = "server.example.test";
+client_cfg.tls.client_certificate_file = client_certificate_file;
+client_cfg.tls.client_private_key_file = client_private_key_file;
 tr_client_create_transport(&client_cfg, &client);
 tr_client_connection_group_connect(
     client, "127.0.0.1", group_port, &group);
@@ -278,7 +297,9 @@ assert(tr_client_destroy(client) == TR_OK);
 
 当 `max_data_connections > 0` 时，客户端在内部消费 `DATA_OFFER`：
 打开非阻塞 DATA 套接字，通过所属 Reactor 等待连接/前导信息推进，
-然后在同一所有者上提交精确 TRR1 DATA 路由。
+然后在同一所有者上提交精确 TRR1 DATA 路由。启用 TLS 时，每条 DATA 都独立完成
+mTLS；TCP、TLS 握手和 TRR1 前导共享一次连接绝对期限。只有服务端证书完成验证且
+URI SAN 与 CONTROL 完全相同、加密 TRR1 完整发出后，该 DATA 才可用于发布 READY。
 同一时刻只允许一个 DATA 连接建立过程进行，但可以同时保持多个已经附着的
 DATA 通道活动。不引入连接线程，也不公开 DATA 索引/代次。
 默认 `max_data_connections == 0` 时，`DATA_OFFER` 仍在内部取消。
@@ -728,7 +749,7 @@ Xmake CI 矩阵检查：
 - 如果未来有界 V2 调度扫描成为可测瓶颈，再按证据评估可扩展定时结构；
 - 共享连接模式下严格 CONTROL 优先调度器（拆分模式已经提供物理隔离）；
 - 多 DATA 连接资源池；
-- 连接组 TLS/mTLS 传输与 CONTROL/DATA 身份绑定；
+- TLS profile 原子轮换、旧代次撤销与 TLS 全部内部内存的硬预算；
 - 备份语义 / 持久提交 / 备份续传 / 存储 / 文件系统 I/O；
 - 拆分连接客户端/服务端门面的配对/绑定协议；
 - 无锁命令队列 / io_uring / 内核零复制优化。
@@ -740,7 +761,7 @@ Xmake CI 矩阵检查：
   [公共 SDK 文档](docs/rpc-v2-sdk.md)；
 - 流式发送遇到 `TR_AGAIN` 时由调用方等待可写提示并重试；一元便利 API 另行负责
   OPEN、正文和半关闭的自动发送；
-- 当前不提供透明 RPC 重试、进行中 Call 重放、DNS 名称解析、mTLS、连接组 TLS 或消息压缩；普通 V2 TLS 必需模式须显式配置；
+- 当前不提供透明 RPC 重试、进行中 Call 重放、DNS 名称解析或消息压缩；普通 V2 TLS 必需模式和连接组 mTLS 都须显式配置；
 - 逻辑消息受配置的消息上限、传输窗口和重组资源约束；
 - 普通 RPC V2 Client 当前不配置自动重连。低层 Channel 重连只恢复传输连通性，
   故障连接上已打开的 Stream/Call 已终止，应用须重新发起业务调用；
@@ -782,7 +803,7 @@ V2 已支持回调外异步生产者的引用、有限背压及取消收口。�
 1. 为拆分 CONTROL/BULK 门面增加连接绑定标识，使独立接收的套接字能够安全配对；
 2. 共享连接模式下，在 DATA 帧边界实现严格 CONTROL 优先级；
 3. 在保留 RAW 批量分片的同时增加类型化编解码器注册表，例如 Protobuf；
-4. 为连接组增加 TLS/mTLS、CONTROL/DATA 身份绑定与对应的资源验收；普通 V2 TLS 已接入，见 TLS-C 实现记录；
+4. 为 TLS profile 增加跨 owner 原子轮换、旧代次撤销和完整资源验收；普通 V2 与连接组 TLS/mTLS 已接入，分别见 TLS-C 与 TLS-D1 记录；
 5. 提供显式 RPC/服务健康检查，与传输层保活分离；
 6. 只有标记为可重试/幂等的方法才允许使用通用 RPC 重试策略；
 7. 增加模糊测试/长稳测试/基准测试套件和真实 RPC/BULK 性能分析；CRC32C 已有可移植/运行时选择加速后端（见 [CRC32C 后端](docs/crc32c.md)），可选 RX 向量消息仍由性能分析驱动。

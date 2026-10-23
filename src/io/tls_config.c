@@ -35,8 +35,9 @@ int tr_tls_client_config_validate(const struct tr_tls_client_config *config,
 		return tr_tls_client_has_extra(config) ? TR_ERR_INVALID : TR_OK;
 	if (!config->expected_peer_name)
 		return TR_ERR_INVALID;
-	if (config->client_certificate_file || config->client_private_key_file)
-		return TR_ERR_UNSUPPORTED;
+	if (!!config->client_certificate_file !=
+	    !!config->client_private_key_file)
+		return TR_ERR_INVALID;
 	return backend_enabled ? TR_OK : TR_ERR_UNSUPPORTED;
 }
 
@@ -65,9 +66,10 @@ int tr_tls_server_config_validate(const struct tr_tls_server_config *config,
 		return tr_tls_server_has_extra(config) ? TR_ERR_INVALID : TR_OK;
 	if (!config->certificate_file || !config->private_key_file)
 		return TR_ERR_INVALID;
-	if (config->client_auth != TR_TLS_CLIENT_AUTH_NONE)
-		return TR_ERR_UNSUPPORTED;
-	if (config->client_ca_file)
+	if ((config->client_auth == TR_TLS_CLIENT_AUTH_NONE &&
+	     config->client_ca_file) ||
+	    (config->client_auth != TR_TLS_CLIENT_AUTH_NONE &&
+	     !config->client_ca_file))
 		return TR_ERR_INVALID;
 	return backend_enabled ? TR_OK : TR_ERR_UNSUPPORTED;
 }

@@ -223,11 +223,14 @@ struct fixture {
 	int group;
 };
 
-static int authorize_group(const struct tr_connection_group_id *group,
-                           void *arg)
+static int
+authorize_group(const struct tr_connection_group_authorization *authorization,
+                void *arg)
 {
 	(void)arg;
-	assert(group->group_id == 42U && group->epoch == 1U);
+	assert(authorization->group.group_id == 42U &&
+	       authorization->group.epoch == 1U);
+	assert(authorization->role == TR_CONNECTION_GROUP_ROLE_CONTROL);
 	atomic_fetch_add(&authorized, 1U);
 	{
 		int mode = atomic_exchange(&expire_after_authorize, 0);
@@ -735,10 +738,11 @@ static void test_shard_capacity(void)
 	assert(destroy_server_until_complete(f.server) == TR_OK);
 }
 
-static int authorize_route(const struct tr_pipeline_route_preface *route,
-                           void *arg)
+static int
+authorize_route(const struct tr_connection_group_authorization *authorization,
+                void *arg)
 {
-	(void)route;
+	(void)authorization;
 	(void)arg;
 	return TR_OK;
 }

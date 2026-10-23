@@ -113,6 +113,7 @@ static int tr_connector_complete_on_owner(
 {
 	tr_connector_complete_cb callback;
 	void *callback_arg;
+	uint64_t deadline_ns;
 	int fd = -1;
 	int ret;
 
@@ -137,6 +138,7 @@ static int tr_connector_complete_on_owner(
 
 	callback = connector->config.complete_cb;
 	callback_arg = connector->config.callback_arg;
+	deadline_ns = connector->deadline_ns;
 	if (status == TR_OK) {
 		fd = connector->fd;
 		connector->fd = -1;
@@ -148,7 +150,7 @@ static int tr_connector_complete_on_owner(
 	/* TR_OK 时 fd 所有权从 connector 转移给回调。回调可以在
 	 * 返回前接管或关闭 fd，甚至销毁上层对象，因此之后不能再访问 connector。
 	 */
-	callback(status, fd, callback_arg);
+	callback(status, fd, deadline_ns, callback_arg);
 	return TR_OK;
 }
 

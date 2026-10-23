@@ -268,12 +268,20 @@ static void send_data_message(int fd, uint32_t stream_id,
 		send_all(fd, payload, payload_len);
 }
 
-static int authorize_group(const struct tr_connection_group_id *group, void *arg)
+static int
+authorize_group(const struct tr_connection_group_authorization *authorization,
+                void *arg)
 {
 	struct public_group_ctx *ctx = (struct public_group_ctx *)arg;
 
-	if (!group || group->group_id != TEST_GROUP_ID ||
-	    group->epoch != TEST_GROUP_EPOCH)
+	if (!authorization || authorization->group.group_id != TEST_GROUP_ID ||
+	    authorization->group.epoch != TEST_GROUP_EPOCH ||
+	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
+	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA) ||
+	    authorization->peer_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE ||
+	    authorization->control_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE)
 		return TR_ERR_STALE;
 
 	pthread_mutex_lock(&ctx->lock);
@@ -954,7 +962,7 @@ static int group_connector_complete_failure_on_owner(void *arg)
 	struct group_connector_complete_request *request =
 	        (struct group_connector_complete_request *)arg;
 
-	request->complete(TR_ERR_SYS, -1, request->callback_arg);
+	request->complete(TR_ERR_SYS, -1, 0U, request->callback_arg);
 	return TR_OK;
 }
 

@@ -180,12 +180,17 @@ int __wrap_tr_reactor_aux_event_unregister(struct tr_reactor *reactor, int fd)
 	return __real_tr_reactor_aux_event_unregister(reactor, fd);
 }
 
-static void deadline_complete(int status, int fd, void *arg)
+static void deadline_complete(int status, int fd, uint64_t deadline_ns,
+                              void *arg)
 {
 	struct deadline_probe *probe = arg;
 	int destroy_ret;
 
 	assert(active_probe == probe);
+	if (probe->fail_initial_clock)
+		assert(deadline_ns == 0U);
+	else
+		assert(deadline_ns == TEST_START_NS + TEST_DELAY_NS);
 	if (status == TR_OK)
 		assert(fd == probe->fd);
 	else

@@ -85,6 +85,9 @@ int tr_pipeline_cancel_data_offer(
 int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref data,
 			    struct tr_conn_handle connection);
+/* 验证 CONTROL 存活且路由代次仍是精确 RESERVED；不修改成员关系。 */
+int tr_pipeline_validate_data_reservation_on_owner(
+        struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data);
 
 /* 兼容辅助函数：原子地预留并附接一个 DATA 成员关系。 */
 int tr_pipeline_add_data(struct tr_pipeline *pipeline,

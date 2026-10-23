@@ -3,6 +3,7 @@
 #include "rpc_record_producer.h"
 #include "rpc_v2_internal.h"
 #include "../execution/reactor_internal.h"
+#include "../io/peer_identity_internal.h"
 #include "../transport/channel/channel_internal.h"
 #include "../memory_budget.h"
 #include "tr/status.h"
@@ -188,6 +189,8 @@ struct tr_dispatch_slot {
 	struct tr_stream_handle stream;
 	struct tr_dispatch_job *head, *tail, *submitted, *ready;
 	struct tr_rpc_v2_producer *producer;
+	struct tr_peer_identity_snapshot *peer_identity;
+	size_t peer_identity_budget_bytes;
 	struct tr_task_handle task;
 	/* 只在完整合法 OPEN 的准入和期限检查通过后设置。即使后续
 	 * job 分配失败，也已承担该方法的一次公共终局通知责任。 */
@@ -201,6 +204,7 @@ struct tr_dispatch_slot {
 	bool active, terminal, notified, headers_sent, final_accepted;
 	bool admission_failed;
 	bool semantic_started;
+	bool peer_identity_bound;
 	/* 单向切换后不因生产者关闭而恢复同步回复。公平轮转让回复背压
 	 * 与请求 work 的 FIFO 各自推进，不占用工作线程等待邮箱。 */
 	bool asynchronous, producer_turn;
@@ -210,6 +214,7 @@ struct tr_dispatch_slot {
 };
 struct tr_rpc_record_dispatch {
 	struct tr_reactor *reactor;
+	struct tr_channel *channel;
 	struct tr_task_executor *executor;
 	struct tr_rpc_record_router *router;
 	struct tr_memory_budget *budget;
@@ -269,6 +274,19 @@ static struct tr_rpc_v2_call_id tr_dispatch_v2_id(struct tr_dispatch_slot *s)
 {
 	return (struct tr_rpc_v2_call_id){
 	        {s->dispatch->instance, s->route.generation}};
+}
+static void tr_dispatch_peer_identity_release(struct tr_dispatch_slot *s)
+{
+	if (!s)
+		return;
+	tr_peer_identity_snapshot_release(s->peer_identity);
+	s->peer_identity = NULL;
+	if (s->peer_identity_budget_bytes) {
+		(void)tr_memory_budget_release(s->dispatch->budget,
+		                               s->peer_identity_budget_bytes);
+		s->peer_identity_budget_bytes = 0U;
+	}
+	s->peer_identity_bound = false;
 }
 static int tr_dispatch_lookup(struct tr_rpc_dispatch_handle h,
                               struct tr_dispatch_slot **out)
@@ -573,6 +591,18 @@ tr_dispatch_v2_work(struct tr_dispatch_job *job,
 	                                     job->view.header.decoded_size};
 	tr_rpc_v2_metadata_view_init(&request.metadata, job->view.metadata,
 	                             job->view.header.metadata_size);
+	if (job->slot->peer_identity) {
+		if (tr_peer_identity_snapshot_view(job->slot->peer_identity,
+		                                   &request.peer_identity) !=
+		    TR_OK)
+			return TR_RPC_STATUS_INTERNAL;
+	} else {
+		request.peer_identity = (struct tr_peer_identity_view){
+		        .authentication = TR_PEER_IDENTITY_NONE,
+		        .uri_san = NULL,
+		        .uri_san_len = 0U,
+		};
+	}
 	tr_v2_active_cancel = &public_cancel;
 	tr_v2_active_reply = &public_reply;
 	++tr_v2_callback_depth;
@@ -711,8 +741,60 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 			s->semantic_started = true;
 			tr_rpc_record_semantic_start(d->semantic);
 		}
-		if (m->method.v2_work)
+		if (m->method.v2_work) {
 			s->v2_method = &m->method;
+			if (!s->peer_identity_bound) {
+				struct tr_peer_identity_snapshot *identity =
+				        NULL;
+				int identity_status =
+				        tr_channel_peer_identity_snapshot_on_owner(
+				                d->channel, &identity);
+				if (identity_status != TR_OK) {
+					tr_dispatch_local_abort(
+					        s,
+					        identity_status == TR_ERR_NOMEM
+					                ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
+					                : TR_RPC_STATUS_INTERNAL);
+					return;
+				}
+				if (identity) {
+					struct tr_peer_identity_view
+					        identity_view;
+					identity_status =
+					        tr_peer_identity_snapshot_view(
+					                identity,
+					                &identity_view);
+					if (identity_status != TR_OK ||
+					    tr_memory_budget_reserve(
+					            d->budget,
+					            identity_view
+					                    .uri_san_len) !=
+					            TR_OK) {
+						tr_dispatch_local_abort(
+						        s,
+						        TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+						return;
+					}
+					identity_status =
+					        tr_peer_identity_snapshot_retain(
+					                identity);
+					if (identity_status != TR_OK) {
+						(void)tr_memory_budget_release(
+						        d->budget,
+						        identity_view
+						                .uri_san_len);
+						tr_dispatch_local_abort(
+						        s,
+						        TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+						return;
+					}
+					s->peer_identity_budget_bytes =
+					        identity_view.uri_san_len;
+				}
+				s->peer_identity = identity;
+				s->peer_identity_bound = true;
+			}
+		}
 	}
 	if (s->pending >= d->config.max_pending_per_call) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
@@ -1031,6 +1113,7 @@ int tr_rpc_record_dispatch_create_on_owner(
 		goto fail;
 	}
 	d->reactor = tr_channel_reactor(channel);
+	d->channel = channel;
 	d->executor = executor;
 	d->budget = budget;
 	d->bytes = bytes;
@@ -1127,6 +1210,7 @@ int tr_rpc_record_dispatch_admit_until_on_owner(
 		return ret;
 	d->admitted = true;
 	struct tr_dispatch_slot *s = &d->slots[route.slot];
+	tr_dispatch_peer_identity_release(s);
 	*s = (struct tr_dispatch_slot){.dispatch = d,
 	                               .route = route,
 	                               .stream = stream,
@@ -1279,8 +1363,10 @@ int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)
 	if (handle.dispatch->depth || !s->notified || s->pending || s->producer)
 		return TR_ERR_STATE;
 	ret = tr_rpc_record_router_retire_on_owner(s->route);
-	if (ret == TR_OK)
+	if (ret == TR_OK) {
+		tr_dispatch_peer_identity_release(s);
 		s->active = false;
+	}
 	return ret;
 }
 static int tr_dispatch_free(struct tr_rpc_record_dispatch **p)
@@ -1288,6 +1374,9 @@ static int tr_dispatch_free(struct tr_rpc_record_dispatch **p)
 	struct tr_rpc_record_dispatch *d = *p;
 	struct tr_memory_budget *budget = d->budget;
 	size_t bytes = d->bytes;
+	for (uint32_t i = 0; i < d->config.capacity; ++i) {
+		tr_dispatch_peer_identity_release(&d->slots[i]);
+	}
 	free(d->slots);
 	free(d->methods);
 	free(d);

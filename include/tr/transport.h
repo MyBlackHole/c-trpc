@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "tr/peer_identity.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -83,11 +85,26 @@ enum tr_connection_group_data_event {
 };
 
 /*
- * 回调在 Server 所属的 I/O 域执行。不得阻塞等待需要同一个
- * Server/Reactor 推进才能完成的工作。
+ * CONTROL 与 DATA 路由在 TLS 认证后分别调用授权回调。身份 URI 视图只在
+ * 当前回调期间借用有效；明文连接的身份认证类型为 NONE。回调在 Server
+ * 所属的 I/O 域执行，不得阻塞等待需要同一个 Server/Reactor 推进的工作。
  */
+enum tr_connection_group_role {
+	TR_CONNECTION_GROUP_ROLE_CONTROL = 1,
+	TR_CONNECTION_GROUP_ROLE_DATA = 2
+};
+
+/* CONTROL 的 control_identity 为 NONE；DATA 使用活动 CONTROL 会话身份。 */
+struct tr_connection_group_authorization {
+	struct tr_connection_group_id group;
+	enum tr_connection_group_role role;
+	struct tr_peer_identity_view peer_identity;
+	struct tr_peer_identity_view control_identity;
+};
+
 typedef int (*tr_connection_group_authorize_cb)(
-	const struct tr_connection_group_id *group, void *arg);
+        const struct tr_connection_group_authorization *authorization,
+        void *arg);
 
 typedef enum tr_connection_group_message_disposition
 (*tr_connection_group_message_cb)(

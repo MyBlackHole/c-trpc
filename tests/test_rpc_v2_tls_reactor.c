@@ -536,7 +536,7 @@ static void test_plaintext_is_rejected_by_tls_listener(void)
 	test_state_destroy(&state);
 }
 
-static void test_transport_only_tls_is_unsupported(void)
+static void test_transport_only_tls_support_boundary(void)
 {
 	struct tr_client_config client_config;
 	struct tr_server_config server_config;
@@ -549,8 +549,20 @@ static void test_transport_only_tls_is_unsupported(void)
 	client_config.tls.ca_file = identity.ca_file;
 	client_config.tls.expected_peer_name = "localhost";
 	assert(tr_client_create_transport(&client_config, &client) ==
-	       TR_ERR_UNSUPPORTED);
+	       TR_ERR_INVALID);
 	assert(client == NULL);
+	client_config.tls.client_certificate_file =
+	        identity.client_certificate_file;
+	client_config.tls.client_private_key_file =
+	        identity.client_private_key_file;
+	client_config.tls.expected_peer_name = NULL;
+	assert(tr_client_create_transport(&client_config, &client) ==
+	       TR_ERR_INVALID);
+	assert(client == NULL);
+	client_config.tls.expected_peer_name = "localhost";
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(client != NULL);
+	assert(tr_client_destroy(client) == TR_OK);
 	tr_server_config_init(&server_config);
 	server_config.tls.mode = TR_TLS_REQUIRED;
 	server_config.tls.certificate_file = identity.server_certificate_file;
@@ -616,7 +628,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	if (argc == 2 && strcmp(argv[1], "transport") == 0) {
-		test_transport_only_tls_is_unsupported();
+		test_transport_only_tls_support_boundary();
 		return 0;
 	}
 	if (argc == 2 && strcmp(argv[1], "server-close") == 0) {
@@ -624,7 +636,7 @@ int main(int argc, char **argv)
 		return 0;
 	}
 	assert(argc == 1);
-	test_transport_only_tls_is_unsupported();
+	test_transport_only_tls_support_boundary();
 	test_plaintext_is_rejected_by_tls_listener();
 	test_identity_failure(1);
 	test_identity_failure(0);

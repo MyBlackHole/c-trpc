@@ -80,6 +80,11 @@ int tr_pipeline_registry_attach_data_route_local_on_owner(
 	struct tr_pipeline_data_ref *data_out,
 	struct tr_pipeline **pipeline_out);
 
+/* 只读验证精确 route/member 代次；供身份授权先于附接执行。 */
+int tr_pipeline_registry_validate_data_route_on_owner(
+        struct tr_pipeline_registry *registry,
+        const struct tr_pipeline_route_preface *preface);
+
 /* DATA 建立失败、成员关系尚未生效时，取消一个精确的 RESERVED 路由。
  * 已 ATTACHED、陈旧或已复用的能力凭证不受影响。
  */

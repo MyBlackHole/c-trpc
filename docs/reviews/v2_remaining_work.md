@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-23，TLS-C 开发分支基于 `75f76674b60dbe9637c12e8e3ab34d3497fb8435`（2.0.0-dev.10）。
+核对基线：2026-10-24，主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 当前开发分支为 `feat/v2-tls-d-234`（2.0.0-dev.17）。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线
@@ -26,11 +26,16 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 #234 的 [TLS 接入 ADR-009](../architecture/decisions/ADR-009-tls-byte-endpoint.md)
 界定字节端点、认证先于 TRR1/TRP1、WANT 状态与关闭所有权。dev.9 的
 [TLS-A 原型](rpc_v2_tls_a_20261023.md)完成 BIO 对照和内部端点合同；TLS-B
-冻结公开配置并加入 OpenSSL 3 后端。TLS-C 已在本地开发分支接入普通 V2
-Client/Server Reactor，GCC Debug/Release、Clang Release、GCC ASan/UBSan 和
-GCC TSan 各 85 项全量测试通过；详细边界和本地工具版本限制见
-[TLS-C 实现记录](rpc_v2_tls_c_20261023.md)。#234 仍开放：连接组 TLS、mTLS、
-CONTROL/DATA 身份绑定、异步凭证和 TLS-E 资源/公网验收尚未完成。
+冻结公开配置并加入 OpenSSL 3 后端；TLS-C 普通 V2 Client/Server Reactor 已由
+PR #310 以 `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a` 合入主线，主线 CI 全绿。
+TLS-D1 Task 1–4 已在 `feat/v2-tls-d-234` 实现并推送：普通 RPC mTLS/URI SAN、连接组
+CONTROL/DATA 主体绑定、profile generation 轮换和旧连接撤销。TLS-D1 `.16` 的五种本地
+工具链/消毒器矩阵均为 88/88，SDK header 安装修复 `.17` 的 GCC Release 复测也为
+88/88；安装 SDK 的 C11/C++11 消费端和 CRC32C 无 SSE4.2 路径已验证。
+GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通过；Clang 14
+既有告警行号已按未变函数体证据校准，8 条告警及 `unverified` 状态保留。合并后的 main CI、
+#234 部分交付登记与远程分支清理仍待 Task 5；
+异步凭证属于 TLS-D2，资源总账和公网验收属于 TLS-E。
 
 ## 持续开发顺序
 
@@ -39,7 +44,7 @@ CONTROL/DATA 身份绑定、异步凭证和 TLS-E 资源/公网验收尚未完�
 | 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
-| TLS 与身份 | 普通 V2 单连接 TLS 1.3 已接入；连接组 TLS、mTLS、CONTROL/DATA 身份绑定、异步凭证/轮换、硬资源上界与公网验收仍待完成 | #234 |
+| TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |

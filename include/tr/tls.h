@@ -9,11 +9,18 @@ extern "C" {
 // 握手必须成功；任何失败都不能改用明文传输。
 enum tr_tls_mode { TR_TLS_DISABLED = 0, TR_TLS_REQUIRED = 1 };
 
-// 备注: 服务端请求或强制客户端证书的策略；当前仅实现 none，mTLS 留至 TLS-D。
+// 备注: 服务端请求或强制客户端证书的策略；optional 接受无证书连接，
+// 备注: 但提供的证书仍须通过链、用途和唯一 URI SAN 校验。
 enum tr_tls_client_auth_policy {
 	TR_TLS_CLIENT_AUTH_NONE = 0,
 	TR_TLS_CLIENT_AUTH_OPTIONAL = 1,
 	TR_TLS_CLIENT_AUTH_REQUIRED = 2
+};
+
+/* 配置轮换后，旧会话可自然排空，或立即撤销旧 profile 上的连接。 */
+enum tr_tls_rotation_policy {
+	TR_TLS_ROTATE_GRACEFUL = 0,
+	TR_TLS_ROTATE_REVOKE_OLD = 1
 };
 
 // 备注: Client 的证书信任与服务端身份配置。字符串仅借用到创建函数返回，
@@ -29,8 +36,8 @@ struct tr_tls_client_config {
 	const char *expected_peer_name;
 	// 备注: 可选 DNS SNI 名称，独立于证书验证目标；传 IP 字面量无效。
 	const char *sni_name;
-	// 备注: TLS-D 实现 mTLS 前，任一客户端证书字段都会返回
-	// TR_ERR_UNSUPPORTED。
+	// 备注: mTLS 客户端证书与私钥必须同时提供，并在 TLS 1.3 握手中
+	// 备注: 发送；证书文件和私钥匹配关系在 Client 创建时校验。
 	const char *client_certificate_file;
 	const char *client_private_key_file;
 };
@@ -40,7 +47,8 @@ struct tr_tls_server_config {
 	enum tr_tls_mode mode;
 	const char *certificate_file;
 	const char *private_key_file;
-	// 备注: client_auth 为 none 时必须为空；optional/required 留至 TLS-D。
+	// 备注: client_auth 为 none 时必须为空；optional/required 时必须指定
+	// 备注: 验证客户端证书链的 CA 文件。
 	const char *client_ca_file;
 	enum tr_tls_client_auth_policy client_auth;
 };

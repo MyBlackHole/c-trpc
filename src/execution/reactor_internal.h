@@ -3,6 +3,9 @@
 
 #include <stddef.h>
 #include "reactor.h"
+#include "tr/peer_identity.h"
+
+struct tr_peer_identity_snapshot;
 
 /* 提交一个工作线程完成项回反应器所有者。
  *
@@ -35,6 +38,18 @@ int tr_reactor_call_or_stopped(
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
+/* TLS 快照轮换屏障；准入门禁仅阻止新的 TLS adopt，不影响现有会话。 */
+int tr_reactor_tls_admission_set(struct tr_reactor *reactor, int paused);
+int tr_reactor_tls_close_generation(struct tr_reactor *reactor,
+                                    uint64_t generation);
+int tr_reactor_tls_close_before_generation(struct tr_reactor *reactor,
+                                           uint64_t generation);
+int tr_reactor_tls_generation_on_owner(struct tr_conn_handle connection,
+                                       uint64_t *out_generation);
+int tr_reactor_tls_profile_retain_on_owner(
+        struct tr_conn_handle connection,
+        struct tr_tls_openssl_profile **out_profile);
+
 /* 仅当当前线程在反应器所有者循环内执行时为真。
  * 生命周期停止或销毁绝不能等待或释放其自身所有者线程。
  */
@@ -64,6 +79,27 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	struct tr_reactor *reactor, int fd,
 	const struct tr_reactor_preface_handler *preface,
 	struct tr_conn_handle *out);
+int tr_reactor_adopt_tls_fd_prefaced_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
+        const struct tr_reactor_preface_handler *preface,
+        struct tr_conn_handle *out);
+
+/* TLS Client 用的认证门禁：认证回调成功后，才通过 TLS 发出原始 route
+ * preface；回调拿到的身份视图只在本次调用期间借用有效。 */
+typedef int (*tr_reactor_tls_authenticated_cb)(
+        struct tr_conn_handle connection,
+        const struct tr_peer_identity_view *peer_identity, void *arg);
+typedef int (*tr_reactor_tls_preface_sent_cb)(struct tr_conn_handle connection,
+                                              void *arg);
+
+int tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
+        const uint8_t *preface, uint32_t preface_len,
+        tr_reactor_tls_authenticated_cb authenticated_cb,
+        void *authenticated_arg, tr_reactor_tls_preface_sent_cb preface_sent_cb,
+        void *preface_sent_arg, struct tr_conn_handle *out);
 
 /* 仅限所有者的立即关闭辅助函数，用于复合所有者状态转换。
  * 与公开关闭或中止 API 不同，这些函数不将命令入队：
@@ -214,6 +250,13 @@ int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle);
 
 /* 精确检查所属反应器，不能仅用“当前是某个 owner”代替。 */
 int tr_reactor_in_owner_context_for(const struct tr_reactor *reactor);
+
+/* 返回所属连接的借用身份快照；TLS 尚未完成认证时返回 TR_AGAIN。
+ * 仅可在该连接 Reactor owner 上调用，调用方须 retain 后跨越 owner 回调。
+ */
+int tr_reactor_peer_identity_snapshot_on_owner(
+        struct tr_conn_handle connection,
+        struct tr_peer_identity_snapshot **out);
 
 /* 库内停止回收租约，零初始化、不可复制。成功取得要求 stop/join 已成功，
  * 并阻止 start/destroy，直到 release。允许相同租约重试；不延长 Reactor

@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.12")
+set_version("2.0.0-dev.17")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -82,6 +82,7 @@ target("trcore")
         "include/(tr/status.h)",
         "include/(tr/facade.h)",
         "include/(tr/client.h)",
+        "include/(tr/peer_identity.h)",
         "include/(tr/server.h)",
         "include/(tr/tls.h)",
         "include/(tr/transport.h)",
@@ -107,6 +108,7 @@ target("trcore")
         "src/io/socket.c",
         "src/io/connector.c",
         "src/io/byte_endpoint.c",
+        "src/io/peer_identity_internal.c",
         "src/io/tls_config.c",
         "src/io/tls_openssl.c",
         "src/execution/reactor.c",
@@ -160,6 +162,34 @@ target("test_tls_openssl")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_tls_openssl.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_rpc_v2_tls_identity")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_tls_identity.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- TLS 组监听器必须先完成 mTLS，再解析 CONTROL/DATA 路由并绑定主体。
+target("test_pipeline_listener_tls")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_pipeline_listener_tls.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_connection_group_tls")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_connection_group_tls.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
@@ -776,6 +806,7 @@ target("test_rpc_record_endpoint_tcp")
             "src/execution/deadline.c",
             "src/execution/reactor.c",
             "src/io/byte_endpoint.c",
+            "src/io/peer_identity_internal.c",
             "src/io/tls_config.c",
             "src/io/tls_openssl.c",
             "src/io/socket.c",

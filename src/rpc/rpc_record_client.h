@@ -6,8 +6,13 @@
 #include "tr/rpc_v2.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
 
 struct tr_rpc_record_client;
+
+/* 跨 facade/owner 发布不可恢复 TLS 轮换失败；新调用和句柄操作停止，
+ * close/reap 仍允许完成终止销毁。 */
+void tr_rpc_record_client_mark_tls_failed(struct tr_rpc_record_client *client);
 
 struct tr_rpc_record_client_config {
 	uint32_t capacity;

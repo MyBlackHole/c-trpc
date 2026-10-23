@@ -374,41 +374,70 @@ struct tr_pipeline_registry_attach_request {
 	struct tr_pipeline **pipeline_out;
 };
 
-static int tr_pipeline_registry_attach_data_route_on_owner(void *arg)
+static int tr_pipeline_registry_resolve_data_route_on_owner(
+        struct tr_pipeline_registry *registry,
+        const struct tr_pipeline_route_preface *preface,
+        struct tr_pipeline **pipeline_out,
+        struct tr_pipeline_data_ref *data_out)
 {
-	struct tr_pipeline_registry_attach_request *request =
-		(struct tr_pipeline_registry_attach_request *)arg;
-	struct tr_pipeline_registry *registry = request->registry;
 	struct tr_pipeline *pipeline;
-	struct tr_pipeline_data_ref data;
 	uint32_t found = UINT32_MAX;
 	int ret;
 
-	ret = tr_pipeline_route_preface_validate_fields(&request->preface);
+	ret = tr_pipeline_route_preface_validate_fields(preface);
 	if (ret != TR_OK)
 		return ret;
-	if (request->preface.role != TR_PIPELINE_ROUTE_DATA)
+	if (preface->role != TR_PIPELINE_ROUTE_DATA)
 		return TR_ERR_BAD_TYPE;
-	if (request->preface.owner_shard_id != registry->owner_shard_id)
+	if (preface->owner_shard_id != registry->owner_shard_id)
 		return TR_ERR_STALE;
-	if (request->connection.reactor != registry->owner)
-		return TR_ERR_INVALID;
-
-	if (!tr_pipeline_registry_find(registry,
-				       request->preface.pipeline_id,
-				       &found, NULL))
+	if (!tr_pipeline_registry_find(registry, preface->pipeline_id, &found,
+	                               NULL))
 		return TR_ERR_STALE;
 	pipeline = registry->entries[found].pipeline;
-	if (!pipeline)
-		return TR_ERR_STALE;
-
-	if (tr_pipeline_owner(pipeline) != registry->owner ||
+	if (!pipeline || tr_pipeline_owner(pipeline) != registry->owner ||
 	    tr_pipeline_owner_shard_id(pipeline) != registry->owner_shard_id ||
-	    tr_pipeline_epoch(pipeline) != request->preface.epoch)
+	    tr_pipeline_epoch(pipeline) != preface->epoch)
 		return TR_ERR_STALE;
 
-	data.index = request->preface.member_index;
-	data.generation = request->preface.member_generation;
+	data_out->index = preface->member_index;
+	data_out->generation = preface->member_generation;
+	ret = tr_pipeline_validate_data_reservation_on_owner(pipeline,
+	                                                     *data_out);
+	if (ret != TR_OK)
+		return ret;
+	*pipeline_out = pipeline;
+	return TR_OK;
+}
+
+int tr_pipeline_registry_validate_data_route_on_owner(
+        struct tr_pipeline_registry *registry,
+        const struct tr_pipeline_route_preface *preface)
+{
+	struct tr_pipeline_data_ref data;
+	struct tr_pipeline *pipeline = NULL;
+
+	if (!registry || !preface)
+		return TR_ERR_INVALID;
+	return tr_pipeline_registry_resolve_data_route_on_owner(
+	        registry, preface, &pipeline, &data);
+}
+
+static int tr_pipeline_registry_attach_data_route_on_owner(void *arg)
+{
+	struct tr_pipeline_registry_attach_request *request =
+	        (struct tr_pipeline_registry_attach_request *)arg;
+	struct tr_pipeline_registry *registry = request->registry;
+	struct tr_pipeline *pipeline;
+	struct tr_pipeline_data_ref data;
+	int ret;
+
+	if (request->connection.reactor != registry->owner)
+		return TR_ERR_INVALID;
+	ret = tr_pipeline_registry_resolve_data_route_on_owner(
+	        registry, &request->preface, &pipeline, &data);
+	if (ret != TR_OK)
+		return ret;
 	ret = tr_pipeline_attach_data(pipeline, data, request->connection);
 	if (ret != TR_OK)
 		return ret;

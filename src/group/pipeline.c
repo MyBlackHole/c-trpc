@@ -394,6 +394,19 @@ static int tr_pipeline_attach_data_on_owner(void *arg)
 	return TR_OK;
 }
 
+int tr_pipeline_validate_data_reservation_on_owner(
+        struct tr_pipeline *pipeline, struct tr_pipeline_data_ref data)
+{
+	if (!pipeline)
+		return TR_ERR_INVALID;
+	if (!pipeline->control_bound)
+		return TR_ERR_STATE;
+	if (!tr_pipeline_data_ref_matches(pipeline, data,
+	                                  TR_PIPELINE_DATA_RESERVED))
+		return TR_ERR_STALE;
+	return TR_OK;
+}
+
 int tr_pipeline_attach_data(struct tr_pipeline *pipeline,
 			    struct tr_pipeline_data_ref data,
 			    struct tr_conn_handle connection)

@@ -229,10 +229,11 @@ static void test_client_group_constructor_rollback_keeps_owner(void)
 	assert(tr_reactor_destroy(reactor) == TR_OK);
 }
 
-static int authorize_control(
-	const struct tr_pipeline_route_preface *route, void *arg)
+static int
+authorize_control(const struct tr_connection_group_authorization *authorization,
+                  void *arg)
 {
-	(void)route;
+	(void)authorization;
 	(void)arg;
 	return TR_OK;
 }

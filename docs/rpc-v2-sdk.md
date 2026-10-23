@@ -318,14 +318,43 @@ Server 当前每调用最多保留 16 个未收敛输入事件，包含排队、
 
 本接口覆盖 ONE/MANY 四种组合、请求与响应元数据、有界同步回复、回调外异步生产者、
 可写通知与有限等待、取消、期限、分层排空及调用语义统计。它尚未提供 NONE 基数、
-自动重连、连接组或网络压缩。普通 V2 Client/Server 可通过配置中的 `tls.mode =
+自动重连、或网络压缩。transport-only 连接组通过 `tr_client_create_transport()` /
+`tr_server_create_transport()` 提供独立于 RPC 的字节传输能力。普通 V2 Client/Server
+可通过配置中的 `tls.mode =
 TR_TLS_REQUIRED` 启用 TLS 1.3；Client 必须配置 CA 信任来源或使用系统信任库，并设置
 `expected_peer_name`。证书身份不匹配和 TLS 握手失败会关闭连接，不回退到明文。
-默认 `TR_TLS_DISABLED` 仍使用明文。transport-only/连接组 TLS、mTLS 和 CONTROL/DATA
-身份绑定尚未支持。配置不支持的已有功能会
-明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+Client 可同时提供成对的客户端证书与私钥。Server 可设置
+`client_auth = TR_TLS_CLIENT_AUTH_OPTIONAL` 或 `TR_TLS_CLIENT_AUTH_REQUIRED`，并提供
+`client_ca_file`；`NONE` 不请求客户端证书。OPTIONAL 允许无证书连接，但若对端提供证书，
+仍须通过证书链、clientAuth 用途和唯一 URI SAN 校验。REQUIRED 还会拒绝无客户端证书的连接。
+证书 URI SAN 必须是唯一、1–512 字节的 IA5 值。
 
-完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)。
+Server 每个 OPEN、MESSAGE 和 HALF_CLOSE 的 work 回调都收到连接级
+`request.peer_identity`。已验证证书返回 `TR_PEER_IDENTITY_TLS_CERTIFICATE` 和 URI SAN；
+明文连接及没有客户端证书的 OPTIONAL TLS 连接返回 `TR_PEER_IDENTITY_NONE` 与空 URI。
+身份视图只借用至当前 work 回调返回，来源不受 RPC metadata 影响。
+
+默认 `TR_TLS_DISABLED` 仍使用明文。transport-only Client 启用 TLS 时必须配置成对的
+客户端证书/私钥、CA 信任和 `expected_peer_name`；Server 连接组必须启用 TLS，并将
+`client_auth` 设为 `TR_TLS_CLIENT_AUTH_REQUIRED`。CONTROL 与每条 DATA 都独立完成 mTLS，
+TLS 握手成功后才发送/解析 TRR1。TCP 连接、TLS 握手和 TRR1 前导共用
+`connect_timeout_ms` 的单调绝对期限。Client 的每条 DATA 复用 CONTROL 的 TLS profile，
+并要求服务端唯一 URI SAN 与 CONTROL 主体逐字节相同；主体不匹配时该 DATA 被关闭并
+撤销对应 offer，不发布 `TRANSFER_READY`，其余 CONTROL 会话仍可工作。服务端对每条
+CONTROL/DATA 路由都运行授权回调，应用可进一步限制客户端主体。配置不支持的其他功能
+会明确返回 `TR_ERR_UNSUPPORTED`，不会悄悄运行另一种协议。
+
+已启用 `TR_TLS_REQUIRED` 的 Client 和 Server 可分别调用
+`tr_client_tls_update_profile()`、`tr_server_tls_update_profile()` 更新 TLS profile。
+调用方须在外部控制线程串行化实例生命周期操作；成功时 generation 单调递增，失败时
+不修改 `out_generation`。`TR_TLS_ROTATE_GRACEFUL` 让已接管连接继续持有旧快照，新连接
+使用新快照；连接组需关闭并重连 CONTROL 才切换到新代次，Server 会拒绝旧 CONTROL 上的
+新代次 DATA。`TR_TLS_ROTATE_REVOKE_OLD` 立即关闭旧代次连接，在途 RPC 可能以连接错误结束。
+TLS 更新不能把明文实例切换为 TLS，也不能关闭 TLS 降级为明文。
+
+完整阶段范围、限制和测试记录见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)、
+[TLS-D1 验证记录](reviews/rpc_v2_tls_d1_20261023.md)和
+[TLS-D1 设计与实施计划](superpowers/specs/2026-10-23-tls-d1-mtls-group-identity-design.md)。
 
 普通 `tr_server_create()` 只构造 V2 RPC Server；需要连接组或纯传输能力时使用
 `tr_server_create_transport()`。transport-only 保留 Runtime、Reactor、Channel

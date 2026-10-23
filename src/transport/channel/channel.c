@@ -3035,14 +3035,17 @@ static void tr_channel_reconnect_finish_attempt(
 
 static int tr_channel_reconnect_schedule_on_owner(struct tr_channel *channel);
 
-static void tr_channel_reconnect_connector_complete(
-	int status, int fd, void *arg)
+static void tr_channel_reconnect_connector_complete(int status, int fd,
+                                                    uint64_t deadline_ns,
+                                                    void *arg)
 {
 	struct tr_channel *channel = (struct tr_channel *)arg;
 	struct tr_conn_handle connection;
 	enum tr_lane lane;
 	int success = 0;
 	int ret;
+
+	(void)deadline_ns;
 
 	if (!channel) {
 		tr_socket_close(&fd);
@@ -3484,6 +3487,21 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel)
 {
 	return channel ? channel->reactor : NULL;
+}
+
+int tr_channel_peer_identity_snapshot_on_owner(
+        struct tr_channel *channel, struct tr_peer_identity_snapshot **out)
+{
+	struct tr_conn_handle connection;
+	if (!channel || !out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (!tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+	pthread_mutex_lock(&channel->lock);
+	connection = channel->control_connection;
+	pthread_mutex_unlock(&channel->lock);
+	return tr_reactor_peer_identity_snapshot_on_owner(connection, out);
 }
 
 int tr_channel_abort_lane_on_owner(struct tr_channel *channel,

@@ -10,6 +10,7 @@
 #include "../transport/protocol/parser.h"
 #include "../io/socket.h"
 #include "../io/byte_endpoint.h"
+#include "../io/peer_identity_internal.h"
 #include "../io/tls_openssl.h"
 #include "tr/status.h"
 #include "../transport/protocol/wire.h"
@@ -140,11 +141,25 @@ struct tr_connection {
 	tr_reactor_preface_feed_cb preface_feed;
 	tr_reactor_preface_release_cb preface_release;
 	void *preface_arg;
+	uint8_t *preface_read_buffer;
+	uint8_t *tls_preface_write_buffer;
+	uint32_t tls_preface_write_length;
+	uint32_t tls_preface_write_offset;
+	tr_reactor_tls_authenticated_cb tls_authenticated_cb;
+	void *tls_authenticated_arg;
+	tr_reactor_tls_preface_sent_cb tls_preface_sent_cb;
+	void *tls_preface_sent_arg;
 
 	struct tr_parser parser;
 
 	/* 仅 TLS 连接分配 endpoint；明文连接不增加端点缓冲或 TLS 对象。 */
 	struct tr_byte_endpoint *byte_endpoint;
+	struct tr_tls_openssl_profile *tls_profile;
+	uint64_t tls_generation;
+	struct tr_peer_identity_snapshot *peer_identity;
+	int tls_identity_resolved;
+	int tls_peer_identity_enabled;
+	int tls_peer_identity_required;
 	struct tr_reactor_timer_handle tls_timer;
 	int tls_timer_registered;
 	uint32_t byte_ready_events;
@@ -267,6 +282,7 @@ struct tr_reactor {
 	int fatal_exit;
 	/* 仅限所有者的事件循环停止标志，仅在新轮次开始时重置。 */
 	int stopping;
+	int tls_admission_paused;
 	/* 仅限所有者：已弹出的命令批次仍有 FIFO 前驱。 */
 	int command_dispatching;
 	uint64_t last_processed_command_sequence;
@@ -709,7 +725,9 @@ static uint32_t tr_connection_interest(const struct tr_connection *connection)
 		                          memory_order_relaxed))
 			events |= EPOLLIN;
 		if ((endpoint_interest & TR_BYTE_ENDPOINT_EVENT_WRITE) ||
-		    (connection->tx_head && endpoint->write_wait == 0U))
+		    ((connection->tx_head ||
+		      connection->tls_preface_write_buffer) &&
+		     endpoint->write_wait == 0U))
 			events |= EPOLLOUT;
 		return events;
 	}
@@ -753,7 +771,8 @@ static void tr_schedule_tx(struct tr_reactor *reactor,
 {
 	if (!connection || connection->state != TR_CONN_ACTIVE ||
 	    __atomic_load_n(&connection->tx_wait_writable, __ATOMIC_RELAXED) ||
-	    connection->tx_scheduled || !connection->tx_head)
+	    connection->tx_scheduled ||
+	    (!connection->tx_head && !connection->tls_preface_write_buffer))
 		return;
 	if (connection->byte_endpoint &&
 	    (connection->byte_endpoint->state !=
@@ -985,6 +1004,12 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 		free(endpoint);
 		connection->byte_endpoint = NULL;
 	}
+	tr_peer_identity_snapshot_release(connection->peer_identity);
+	connection->peer_identity = NULL;
+	connection->tls_identity_resolved = 0;
+	tr_tls_openssl_profile_release(connection->tls_profile);
+	connection->tls_profile = NULL;
+	connection->tls_generation = 0U;
 
 	close(connection->fd);
 	connection->fd = -1;
@@ -1004,6 +1029,16 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 		connection->preface_arg = NULL;
 		release(release_arg);
 	}
+	free(connection->preface_read_buffer);
+	connection->preface_read_buffer = NULL;
+	free(connection->tls_preface_write_buffer);
+	connection->tls_preface_write_buffer = NULL;
+	connection->tls_preface_write_length = 0U;
+	connection->tls_preface_write_offset = 0U;
+	connection->tls_authenticated_cb = NULL;
+	connection->tls_authenticated_arg = NULL;
+	connection->tls_preface_sent_cb = NULL;
+	connection->tls_preface_sent_arg = NULL;
 	tr_parser_reset(&connection->parser);
 	tr_release_tx_queue(reactor, connection);
 	if (connection->tx_drain_pending) {
@@ -1113,6 +1148,9 @@ static uint64_t tr_connection_tls_deadline(void *arg, uint64_t now_ns)
 	endpoint = connection->byte_endpoint;
 	if (endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING)
 		deadline_ns = endpoint->handshake_deadline_ns;
+	else if (endpoint->state == TR_BYTE_ENDPOINT_AUTHENTICATED &&
+	         connection->tls_preface_write_buffer)
+		deadline_ns = endpoint->handshake_deadline_ns;
 	else if (endpoint->state == TR_BYTE_ENDPOINT_CLOSING &&
 	         !endpoint->shutdown_done)
 		deadline_ns = endpoint->shutdown_deadline_ns;
@@ -1138,6 +1176,7 @@ tr_connection_maybe_start_tls_shutdown(struct tr_reactor *reactor,
 	if (!connection || connection->state != TR_CONN_ACTIVE ||
 	    !connection->byte_endpoint || !connection->tls_close_pending ||
 	    connection->tls_shutdown_started || connection->tx_head ||
+	    connection->tls_preface_write_buffer ||
 	    connection->lifecycle_tx_busy || connection->stream_reset_tx_busy)
 		return;
 	endpoint = connection->byte_endpoint;
@@ -1180,6 +1219,74 @@ tr_connection_maybe_start_tls_shutdown(struct tr_reactor *reactor,
 	                                          : ret);
 }
 
+static int tr_connection_tls_identity_capture(struct tr_reactor *reactor,
+                                              struct tr_connection *connection)
+{
+	struct tr_peer_identity_snapshot *identity = NULL;
+	int ret;
+	if (!connection || !connection->byte_endpoint)
+		return TR_ERR_INVALID;
+	if (connection->tls_identity_resolved)
+		return TR_OK;
+	if (connection->byte_endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED)
+		return TR_AGAIN;
+	if (connection->tls_peer_identity_enabled) {
+		ret = tr_tls_openssl_session_peer_identity(
+		        connection->byte_endpoint->driver_arg,
+		        connection->tls_peer_identity_required, &identity);
+		if (ret != TR_OK)
+			return ret;
+		if (identity && reactor->config.memory_budget) {
+			ret = tr_peer_identity_snapshot_charge(
+			        identity, reactor->config.memory_budget);
+			if (ret != TR_OK) {
+				tr_peer_identity_snapshot_release(identity);
+				/* TLS
+				 * 已完成认证，预算拒绝不能冒充仍待推进的握手。
+				 */
+				return ret == TR_AGAIN ? TR_ERR_NOMEM : ret;
+			}
+		}
+	}
+	connection->peer_identity = identity;
+	connection->tls_identity_resolved = 1;
+	return TR_OK;
+}
+
+static int
+tr_connection_tls_notify_authenticated(struct tr_reactor *reactor,
+                                       struct tr_connection *connection)
+{
+	struct tr_peer_identity_view peer_identity;
+	struct tr_conn_handle handle;
+	tr_reactor_tls_authenticated_cb callback;
+	void *callback_arg;
+	int ret;
+
+	if (!reactor || !connection || !connection->tls_identity_resolved ||
+	    !connection->byte_endpoint ||
+	    connection->byte_endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED)
+		return TR_ERR_STATE;
+	callback = connection->tls_authenticated_cb;
+	if (!callback)
+		return TR_OK;
+	callback_arg = connection->tls_authenticated_arg;
+	connection->tls_authenticated_cb = NULL;
+	connection->tls_authenticated_arg = NULL;
+	memset(&peer_identity, 0, sizeof(peer_identity));
+	peer_identity.authentication = TR_PEER_IDENTITY_NONE;
+	if (connection->peer_identity) {
+		ret = tr_peer_identity_snapshot_view(connection->peer_identity,
+		                                     &peer_identity);
+		if (ret != TR_OK)
+			return ret;
+	}
+	handle.reactor = reactor;
+	handle.slot = connection->slot;
+	handle.generation = connection->generation;
+	return callback(handle, &peer_identity, callback_arg);
+}
+
 static int
 tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
                                 struct tr_tls_openssl_profile *profile,
@@ -1192,12 +1299,18 @@ tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
 
 	if (!connection || !profile || handshake_deadline_ns == 0U || !driver)
 		return TR_ERR_INVALID;
+	ret = tr_tls_openssl_profile_retain(profile);
+	if (ret != TR_OK)
+		return ret;
 	endpoint = (struct tr_byte_endpoint *)calloc(1, sizeof(*endpoint));
-	if (!endpoint)
+	if (!endpoint) {
+		tr_tls_openssl_profile_release(profile);
 		return TR_ERR_NOMEM;
+	}
 	ret = tr_tls_openssl_session_create(profile, fd, &session);
 	if (ret != TR_OK) {
 		free(endpoint);
+		tr_tls_openssl_profile_release(profile);
 		return ret;
 	}
 	ret = tr_byte_endpoint_init(endpoint, TR_BYTE_ENDPOINT_TLS_REQUIRED, fd,
@@ -1205,9 +1318,16 @@ tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
 	if (ret != TR_OK) {
 		driver->release(session);
 		free(endpoint);
+		tr_tls_openssl_profile_release(profile);
 		return ret;
 	}
 	connection->byte_endpoint = endpoint;
+	connection->tls_profile = profile;
+	connection->tls_generation = tr_tls_openssl_profile_generation(profile);
+	connection->tls_peer_identity_enabled =
+	        tr_tls_openssl_profile_peer_identity_enabled(profile);
+	connection->tls_peer_identity_required =
+	        tr_tls_openssl_profile_peer_identity_required(profile);
 	/* 事件注册成功后会立即进行第一次握手推进，再收窄到精确 WANT。 */
 	connection->epoll_events = EPOLLRDHUP | EPOLLIN | EPOLLOUT;
 	return TR_OK;
@@ -1234,16 +1354,37 @@ static void tr_connection_adopt_tls_rollback(struct tr_reactor *reactor,
 		free(endpoint);
 		connection->byte_endpoint = NULL;
 	}
+	free(connection->preface_read_buffer);
+	connection->preface_read_buffer = NULL;
+	free(connection->tls_preface_write_buffer);
+	connection->tls_preface_write_buffer = NULL;
+	connection->tls_preface_write_length = 0U;
+	connection->tls_preface_write_offset = 0U;
+	connection->tls_authenticated_cb = NULL;
+	connection->tls_authenticated_arg = NULL;
+	connection->tls_preface_sent_cb = NULL;
+	connection->tls_preface_sent_arg = NULL;
+	tr_peer_identity_snapshot_release(connection->peer_identity);
+	connection->peer_identity = NULL;
+	connection->tls_identity_resolved = 0;
+	tr_tls_openssl_profile_release(connection->tls_profile);
+	connection->tls_profile = NULL;
+	connection->tls_generation = 0U;
 	tr_parser_reset(&connection->parser);
 	connection->fd = -1;
 	connection->state = TR_CONN_ERROR;
 }
 
-static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
-                               uint32_t generation, int fd,
-                               const struct tr_reactor_preface_handler *preface,
-                               struct tr_tls_openssl_profile *tls_profile,
-                               uint64_t handshake_deadline_ns)
+static int tr_connection_adopt(
+        struct tr_reactor *reactor, uint32_t slot, uint32_t generation, int fd,
+        const struct tr_reactor_preface_handler *preface,
+        struct tr_tls_openssl_profile *tls_profile,
+        uint64_t handshake_deadline_ns, const uint8_t *tls_preface_write,
+        uint32_t tls_preface_write_length,
+        tr_reactor_tls_authenticated_cb tls_authenticated_cb,
+        void *tls_authenticated_arg,
+        tr_reactor_tls_preface_sent_cb tls_preface_sent_cb,
+        void *tls_preface_sent_arg)
 {
 	struct tr_connection *connection;
 
@@ -1254,8 +1395,19 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 
 	if (slot >= reactor->config.max_connections)
 		return TR_ERR_STALE;
-	if (tls_profile && preface)
-		return TR_ERR_UNSUPPORTED;
+	if (tls_profile && reactor->tls_admission_paused)
+		return TR_AGAIN;
+	if ((tls_preface_write_length != 0U &&
+	     (!tls_profile || !tls_preface_write ||
+	      tls_preface_write_length > TR_REACTOR_MAX_PREFACE_BYTES ||
+	      !tls_authenticated_cb)) ||
+	    (tls_authenticated_cb && !tls_profile) ||
+	    (tls_preface_sent_cb && !tls_profile) ||
+	    (tls_preface_sent_cb && tls_preface_write_length == 0U) ||
+	    (preface && (preface->byte_count == 0U ||
+	                 preface->byte_count > TR_REACTOR_MAX_PREFACE_BYTES ||
+	                 !preface->feed)))
+		return TR_ERR_INVALID;
 
 	connection = &reactor->connections[slot];
 	/* 统计字段可被外部线程读取，复用时只能对它们执行原子重置。 */
@@ -1269,22 +1421,49 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 	connection->frame_cb = reactor->frame_cb;
 	connection->event_cb = reactor->event_cb;
 	connection->callback_arg = reactor->callback_arg;
-	if (preface) {
-		if (preface->byte_count == 0U ||
-		    preface->byte_count > TR_REACTOR_MAX_PREFACE_BYTES ||
-		    !preface->feed) {
+	connection->tls_authenticated_cb = tls_authenticated_cb;
+	connection->tls_authenticated_arg = tls_authenticated_arg;
+	connection->tls_preface_sent_cb = tls_preface_sent_cb;
+	connection->tls_preface_sent_arg = tls_preface_sent_arg;
+	if (tls_preface_write_length != 0U) {
+		connection->tls_preface_write_buffer =
+		        (uint8_t *)malloc(tls_preface_write_length);
+		if (!connection->tls_preface_write_buffer) {
 			tr_slot_set_state(reactor, slot, generation,
-					  TR_CONN_FREE);
-			return TR_ERR_INVALID;
+			                  TR_CONN_FREE);
+			return TR_ERR_NOMEM;
 		}
+		memcpy(connection->tls_preface_write_buffer, tls_preface_write,
+		       tls_preface_write_length);
+		connection->tls_preface_write_length = tls_preface_write_length;
+	}
+	if (preface) {
 		connection->preface_remaining = preface->byte_count;
 		connection->preface_feed = preface->feed;
 		connection->preface_release = preface->release;
 		connection->preface_arg = preface->arg;
+		if (tls_profile) {
+			connection->preface_read_buffer =
+			        (uint8_t *)malloc(preface->byte_count);
+			if (!connection->preface_read_buffer) {
+				tr_slot_set_state(reactor, slot, generation,
+				                  TR_CONN_FREE);
+				return TR_ERR_NOMEM;
+			}
+		}
 	}
 	limits.max_payload_len = reactor->config.max_payload_len;
 	ret = tr_parser_init(&connection->parser, &reactor->rx_pool, &limits);
 	if (ret != TR_OK) {
+		free(connection->tls_preface_write_buffer);
+		connection->tls_preface_write_buffer = NULL;
+		connection->tls_preface_write_length = 0U;
+		connection->tls_authenticated_cb = NULL;
+		connection->tls_authenticated_arg = NULL;
+		connection->tls_preface_sent_cb = NULL;
+		connection->tls_preface_sent_arg = NULL;
+		free(connection->preface_read_buffer);
+		connection->preface_read_buffer = NULL;
 		tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return ret;
 	}
@@ -1293,6 +1472,15 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 		        connection, fd, tls_profile, handshake_deadline_ns);
 		if (ret != TR_OK) {
 			tr_parser_reset(&connection->parser);
+			free(connection->tls_preface_write_buffer);
+			connection->tls_preface_write_buffer = NULL;
+			connection->tls_preface_write_length = 0U;
+			connection->tls_authenticated_cb = NULL;
+			connection->tls_authenticated_arg = NULL;
+			connection->tls_preface_sent_cb = NULL;
+			connection->tls_preface_sent_arg = NULL;
+			free(connection->preface_read_buffer);
+			connection->preface_read_buffer = NULL;
 			connection->state = TR_CONN_ERROR;
 			tr_slot_set_state(reactor, slot, generation,
 			                  TR_CONN_FREE);
@@ -1326,6 +1514,12 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 			ret = tr_byte_endpoint_step(endpoint, 0U, now_ns);
 		else if (ret == TR_OK)
 			ret = TR_ERR_SYS;
+		if (ret == TR_OK)
+			ret = tr_connection_tls_identity_capture(reactor,
+			                                         connection);
+		if (ret == TR_OK)
+			ret = tr_connection_tls_notify_authenticated(
+			        reactor, connection);
 		if (ret == TR_OK || ret == TR_AGAIN) {
 			int timer_ret = tr_reactor_timer_register(
 			        reactor, tr_connection_tls_deadline, connection,
@@ -1334,8 +1528,9 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 				connection->tls_timer_registered = 1;
 				timer_ret = tr_reactor_timer_arm(
 				        connection->tls_timer,
-				        endpoint->state ==
-				                        TR_BYTE_ENDPOINT_NEGOTIATING
+				        endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING ||
+				                        connection
+				                                ->tls_preface_write_buffer
 				                ? endpoint->handshake_deadline_ns
 				                : 0U);
 			}
@@ -1355,6 +1550,12 @@ static int tr_connection_adopt(struct tr_reactor *reactor, uint32_t slot,
 		}
 	}
 	tr_slot_set_state(reactor, slot, generation, TR_CONN_ACTIVE);
+	if (connection->byte_endpoint &&
+	    connection->byte_endpoint->state == TR_BYTE_ENDPOINT_AUTHENTICATED)
+		tr_schedule_tx(reactor, connection);
+	if (connection->byte_endpoint &&
+	    connection->byte_endpoint->state == TR_BYTE_ENDPOINT_AUTHENTICATED)
+		tr_schedule_rx(reactor, connection);
 	return TR_OK;
 }
 
@@ -1562,6 +1763,134 @@ static void tr_connection_complete_tx(struct tr_connection *connection,
 	}
 }
 
+static int tr_connection_flush_tls_preface(struct tr_reactor *reactor,
+                                           struct tr_connection *connection,
+                                           struct tr_reactor_turn *turn,
+                                           size_t *budget)
+{
+	while (connection->tls_preface_write_buffer && *budget != 0U &&
+	       connection->state == TR_CONN_ACTIVE) {
+		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+		uint64_t now_ns;
+		const void *write_buffer;
+		size_t write_length;
+		size_t written_bytes = 0U;
+		uint32_t wait_events = 0U;
+		int ret;
+
+		if (!endpoint ||
+		    endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED ||
+		    connection->tls_shutdown_started)
+			return TR_ERR_STATE;
+		now_ns = tr_reactor_now_ns();
+		if (now_ns == 0U || endpoint->handshake_deadline_ns == 0U) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_SYS);
+			return TR_ERR_SYS;
+		}
+		if (now_ns >= endpoint->handshake_deadline_ns) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_TIMEOUT);
+			return TR_ERR_TIMEOUT;
+		}
+		if (endpoint->write_buffer) {
+			write_buffer = endpoint->write_buffer;
+			write_length = endpoint->write_length;
+			if (write_length > *budget)
+				return TR_AGAIN;
+		} else {
+			write_buffer = connection->tls_preface_write_buffer +
+			               connection->tls_preface_write_offset;
+			write_length = connection->tls_preface_write_length -
+			               connection->tls_preface_write_offset;
+			if (write_length > *budget)
+				write_length = *budget;
+		}
+		ret = tr_byte_endpoint_write(endpoint, write_buffer,
+		                             write_length,
+		                             connection->byte_ready_events,
+		                             &written_bytes, &wait_events);
+		if (ret == TR_AGAIN) {
+			connection->byte_ready_events = 0U;
+			(void)__atomic_fetch_add(&connection->send_eagain,
+			                         UINT64_C(1), __ATOMIC_RELAXED);
+			if (tr_connection_update_interest(
+			            reactor, connection) != TR_OK) {
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+				return TR_ERR_SYS;
+			}
+			return TR_AGAIN;
+		}
+		if (ret != TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR, ret);
+			return ret;
+		}
+		now_ns = tr_reactor_now_ns();
+		if (now_ns == 0U || now_ns >= endpoint->handshake_deadline_ns) {
+			int status = now_ns == 0U ? TR_ERR_SYS : TR_ERR_TIMEOUT;
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             status);
+			return status;
+		}
+		if (tr_connection_update_interest(reactor, connection) !=
+		    TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_SYS);
+			return TR_ERR_SYS;
+		}
+		(void)__atomic_fetch_add(&connection->tx_bytes,
+		                         (uint64_t)written_bytes,
+		                         __ATOMIC_RELAXED);
+		__atomic_store_n(&connection->last_tx_activity_ns,
+		                 tr_reactor_now_ns(), __ATOMIC_RELAXED);
+		connection->tls_preface_write_offset += (uint32_t)written_bytes;
+		*budget -= written_bytes;
+		turn->left.tx_bytes -= (uint64_t)written_bytes;
+		if (connection->tls_preface_write_offset ==
+		    connection->tls_preface_write_length) {
+			tr_reactor_tls_preface_sent_cb sent_cb =
+			        connection->tls_preface_sent_cb;
+			void *sent_arg = connection->tls_preface_sent_arg;
+			struct tr_conn_handle handle;
+			if (connection->tls_timer_registered &&
+			    tr_reactor_timer_arm(connection->tls_timer, 0U) !=
+			            TR_OK) {
+				tr_connection_close_internal(
+				        reactor, connection,
+				        TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+				return TR_ERR_SYS;
+			}
+
+			free(connection->tls_preface_write_buffer);
+			connection->tls_preface_write_buffer = NULL;
+			connection->tls_preface_write_length = 0U;
+			connection->tls_preface_write_offset = 0U;
+			connection->tls_preface_sent_cb = NULL;
+			connection->tls_preface_sent_arg = NULL;
+			if (sent_cb) {
+				handle.reactor = reactor;
+				handle.slot = connection->slot;
+				handle.generation = connection->generation;
+				ret = sent_cb(handle, sent_arg);
+				if (ret != TR_OK) {
+					tr_connection_close_internal(
+					        reactor, connection,
+					        TR_CONN_EVENT_ERROR, ret);
+					return ret;
+				}
+			}
+		}
+	}
+	return TR_OK;
+}
+
 static void tr_connection_flush_tx(struct tr_reactor *reactor,
 				   struct tr_connection *connection,
 				   struct tr_reactor_turn *turn)
@@ -1571,6 +1900,14 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 
 	connection->tx_scheduled = 0;
 	connection->tx_ready_next = NULL;
+	if (connection->tls_preface_write_buffer) {
+		int preface_ret = tr_connection_flush_tls_preface(
+		        reactor, connection, turn, &budget);
+		if (preface_ret == TR_AGAIN)
+			tr_schedule_tx(reactor, connection);
+		if (preface_ret != TR_OK || connection->state != TR_CONN_ACTIVE)
+			return;
+	}
 
 	while (budget != 0 && connection->state == TR_CONN_ACTIVE &&
 	       connection->tx_head) {
@@ -1742,11 +2079,13 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 	}
 
 	if (connection->state == TR_CONN_ACTIVE && connection->byte_endpoint &&
-	    connection->tls_close_pending && !connection->tx_head) {
+	    connection->tls_close_pending && !connection->tx_head &&
+	    !connection->tls_preface_write_buffer) {
 		tr_connection_maybe_start_tls_shutdown(reactor, connection);
 		return;
 	}
-	if (connection->state == TR_CONN_ACTIVE && connection->tx_head)
+	if (connection->state == TR_CONN_ACTIVE &&
+	    (connection->tx_head || connection->tls_preface_write_buffer))
 		tr_schedule_tx(reactor, connection);
 }
 
@@ -1796,6 +2135,7 @@ static int tr_connection_read_preface(
 	struct tr_reactor_turn *turn, size_t *budget)
 {
 	uint8_t raw[TR_REACTOR_MAX_PREFACE_BYTES];
+	const uint8_t *data = raw;
 	struct tr_conn_handle handle;
 	size_t want;
 	ssize_t n;
@@ -1810,8 +2150,45 @@ static int tr_connection_read_preface(
 		want = *budget;
 	if (want > sizeof(raw))
 		want = sizeof(raw);
+	if (connection->byte_endpoint) {
+		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
+		size_t tls_bytes = 0U;
+		uint32_t wait_events = 0U;
 
-	n = recv(connection->fd, raw, want, 0);
+		if (endpoint->state != TR_BYTE_ENDPOINT_AUTHENTICATED ||
+		    !connection->preface_read_buffer)
+			return TR_ERR_STATE;
+		data = connection->preface_read_buffer;
+		if (endpoint->read_buffer) {
+			want = endpoint->read_capacity;
+			if (want > *budget)
+				return TR_AGAIN;
+		} else if (want > connection->preface_remaining) {
+			want = connection->preface_remaining;
+		}
+		ret = tr_byte_endpoint_read(endpoint,
+		                            connection->preface_read_buffer,
+		                            want, connection->byte_ready_events,
+		                            &tls_bytes, &wait_events);
+		if (ret == TR_AGAIN) {
+			connection->byte_ready_events = 0U;
+			(void)__atomic_fetch_add(&connection->recv_eagain,
+			                         UINT64_C(1), __ATOMIC_RELAXED);
+			if (tr_connection_update_interest(reactor,
+			                                  connection) != TR_OK)
+				return TR_ERR_SYS;
+			return TR_AGAIN;
+		}
+		if (ret != TR_OK)
+			return ret;
+		if (tr_connection_update_interest(reactor, connection) != TR_OK)
+			return TR_ERR_SYS;
+		n = (ssize_t)tls_bytes;
+	} else {
+		do {
+			n = recv(connection->fd, raw, want, 0);
+		} while (n < 0 && errno == EINTR);
+	}
 	if (n > 0) {
 		(void)__atomic_fetch_add(&connection->rx_bytes,
 					 (uint64_t)n, __ATOMIC_RELAXED);
@@ -1824,8 +2201,8 @@ static int tr_connection_read_preface(
 		handle.reactor = reactor;
 		handle.slot = connection->slot;
 		handle.generation = connection->generation;
-		ret = connection->preface_feed(
-			handle, raw, (size_t)n, &done, connection->preface_arg);
+		ret = connection->preface_feed(handle, data, (size_t)n, &done,
+		                               connection->preface_arg);
 		if (ret != TR_OK)
 			return ret;
 
@@ -1843,6 +2220,8 @@ static int tr_connection_read_preface(
 			connection->preface_arg = NULL;
 			if (release)
 				release(release_arg);
+			free(connection->preface_read_buffer);
+			connection->preface_read_buffer = NULL;
 		} else if (done) {
 			return TR_ERR_STATE;
 		}
@@ -1887,8 +2266,24 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 			                             step_ret);
 			return;
 		}
+		step_ret =
+		        tr_connection_tls_identity_capture(reactor, connection);
+		if (step_ret == TR_OK)
+			step_ret = tr_connection_tls_notify_authenticated(
+			        reactor, connection);
+		if (step_ret != TR_OK) {
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             step_ret);
+			return;
+		}
 		if (connection->tls_timer_registered &&
-		    tr_reactor_timer_arm(connection->tls_timer, 0U) != TR_OK) {
+		    tr_reactor_timer_arm(
+		            connection->tls_timer,
+		            connection->tls_preface_write_buffer
+		                    ? connection->byte_endpoint
+		                              ->handshake_deadline_ns
+		                    : 0U) != TR_OK) {
 			tr_connection_close_internal(reactor, connection,
 			                             TR_CONN_EVENT_ERROR,
 			                             TR_ERR_SYS);
@@ -1901,7 +2296,9 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 			                             TR_ERR_SYS);
 			return;
 		}
-		tr_schedule_tx(reactor, connection);
+		if (connection->tx_head || connection->tls_preface_write_buffer)
+			tr_schedule_tx(reactor, connection);
+		tr_schedule_rx(reactor, connection);
 		return;
 	}
 	if (connection->byte_endpoint &&
@@ -2031,7 +2428,8 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 				connection->tls_close_event =
 				        TR_CONN_EVENT_CLOSED;
 				connection->tls_close_status = TR_OK;
-				if (connection->tx_head)
+				if (connection->tx_head ||
+				    connection->tls_preface_write_buffer)
 					tr_schedule_tx(reactor, connection);
 				else
 					tr_connection_maybe_start_tls_shutdown(
@@ -2296,6 +2694,7 @@ static void tr_reactor_flush_tx_drained(struct tr_reactor *reactor)
 
 		if (connection->state != TR_CONN_ACTIVE ||
 		    !connection->tx_drain_pending || connection->tx_head ||
+		    connection->tls_preface_write_buffer ||
 		    connection->lifecycle_tx_busy ||
 		    connection->stream_reset_tx_busy ||
 		    !tr_command_sequence_after_eq(
@@ -2525,10 +2924,10 @@ static int tr_process_commands(struct tr_reactor *reactor,
 
 		switch (command->type) {
 		case TR_CMD_ADOPT_FD:
-			if (tr_connection_adopt(reactor, command->slot,
-			                        command->generation,
-			                        command->u.adopt.fd, NULL, NULL,
-			                        0U) != TR_OK)
+			if (tr_connection_adopt(
+			            reactor, command->slot, command->generation,
+			            command->u.adopt.fd, NULL, NULL, 0U, NULL,
+			            0U, NULL, NULL, NULL, NULL) != TR_OK)
 				close(command->u.adopt.fd);
 			break;
 		case TR_CMD_SEND:
@@ -2613,7 +3012,8 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 			} else if (endpoint->read_wait != 0U) {
 				if ((ready & endpoint->read_wait) != 0U)
 					tr_schedule_rx(reactor, connection);
-				if (connection->tx_head &&
+				if ((connection->tx_head ||
+				     connection->tls_preface_write_buffer) &&
 				    (ready & TR_BYTE_ENDPOINT_EVENT_WRITE))
 					tr_schedule_tx(reactor, connection);
 			} else {
@@ -2621,7 +3021,8 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 				    (events &
 				     (EPOLLIN | EPOLLRDHUP | EPOLLHUP)))
 					tr_schedule_rx(reactor, connection);
-				if (connection->tx_head &&
+				if ((connection->tx_head ||
+				     connection->tls_preface_write_buffer) &&
 				    (ready & TR_BYTE_ENDPOINT_EVENT_WRITE))
 					tr_schedule_tx(reactor, connection);
 			}
@@ -3934,7 +4335,7 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 		return ret;
 
 	ret = tr_connection_adopt(reactor, slot, generation, fd, preface, NULL,
-	                          0U);
+	                          0U, NULL, 0U, NULL, NULL, NULL, NULL);
 	if (ret != TR_OK) {
 		(void)tr_slot_set_state(reactor, slot, generation, TR_CONN_FREE);
 		return ret;
@@ -3943,6 +4344,250 @@ int tr_reactor_adopt_fd_prefaced_on_owner(
 	out->reactor = reactor;
 	out->slot = slot;
 	out->generation = generation;
+	return TR_OK;
+}
+
+int tr_reactor_adopt_tls_fd_prefaced_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
+        const struct tr_reactor_preface_handler *preface,
+        struct tr_conn_handle *out)
+{
+	uint32_t slot;
+	uint32_t generation;
+	int ret;
+
+	if (!reactor || fd < 0 || !profile || handshake_deadline_ns == 0U ||
+	    !preface || !out)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return TR_ERR_CLOSED;
+	ret = tr_slot_reserve(reactor, &slot, &generation);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_connection_adopt(reactor, slot, generation, fd, preface,
+	                          profile, handshake_deadline_ns, NULL, 0U,
+	                          NULL, NULL, NULL, NULL);
+	if (ret != TR_OK) {
+		(void)tr_slot_set_state(reactor, slot, generation,
+		                        TR_CONN_FREE);
+		return ret;
+	}
+	out->reactor = reactor;
+	out->slot = slot;
+	out->generation = generation;
+	return TR_OK;
+}
+
+int tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
+        const uint8_t *preface, uint32_t preface_len,
+        tr_reactor_tls_authenticated_cb authenticated_cb,
+        void *authenticated_arg, tr_reactor_tls_preface_sent_cb preface_sent_cb,
+        void *preface_sent_arg, struct tr_conn_handle *out)
+{
+	uint32_t slot;
+	uint32_t generation;
+	int ret;
+
+	if (!reactor || fd < 0 || !profile || handshake_deadline_ns == 0U ||
+	    !preface || preface_len == 0U ||
+	    preface_len > TR_REACTOR_MAX_PREFACE_BYTES || !authenticated_cb ||
+	    !out)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	if (!atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return TR_ERR_CLOSED;
+	ret = tr_slot_reserve(reactor, &slot, &generation);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_connection_adopt(reactor, slot, generation, fd, NULL, profile,
+	                          handshake_deadline_ns, preface, preface_len,
+	                          authenticated_cb, authenticated_arg,
+	                          preface_sent_cb, preface_sent_arg);
+	if (ret != TR_OK) {
+		(void)tr_slot_set_state(reactor, slot, generation,
+		                        TR_CONN_FREE);
+		return ret;
+	}
+	out->reactor = reactor;
+	out->slot = slot;
+	out->generation = generation;
+	return TR_OK;
+}
+
+struct tr_reactor_tls_admission_request {
+	struct tr_reactor *reactor;
+	int paused;
+};
+
+static int tr_reactor_tls_admission_on_owner(void *arg)
+{
+	struct tr_reactor_tls_admission_request *request = arg;
+
+	if (!request || !request->reactor ||
+	    (request->paused != 0 && request->paused != 1))
+		return TR_ERR_INVALID;
+	request->reactor->tls_admission_paused = request->paused;
+	return TR_OK;
+}
+
+int tr_reactor_tls_admission_set(struct tr_reactor *reactor, int paused)
+{
+	struct tr_reactor_tls_admission_request request;
+
+	if (!reactor || (paused != 0 && paused != 1))
+		return TR_ERR_INVALID;
+	request.reactor = reactor;
+	request.paused = paused;
+	return tr_reactor_call_or_stopped(
+	        reactor, tr_reactor_tls_admission_on_owner, &request);
+}
+
+struct tr_reactor_tls_close_generation_request {
+	struct tr_reactor *reactor;
+	uint64_t generation;
+	int before_generation;
+};
+
+static int tr_reactor_tls_close_generation_on_owner(void *arg)
+{
+	struct tr_reactor_tls_close_generation_request *request = arg;
+	struct tr_reactor *reactor;
+	uint32_t i;
+
+	if (!request || !request->reactor || request->generation == 0U)
+		return TR_ERR_INVALID;
+	reactor = request->reactor;
+	if (!tr_reactor_is_owner_thread(reactor)) {
+		/* call_or_stopped() holds ctl_lock on this path. A stopped
+		 * reactor has already closed every connection in its prior
+		 * owner epoch. */
+		return reactor->started ? TR_ERR_STATE : TR_OK;
+	}
+	for (i = 0U; i < reactor->config.max_connections; ++i) {
+		struct tr_connection *connection = &reactor->connections[i];
+
+		if (connection->state != TR_CONN_ACTIVE ||
+		    (request->before_generation
+		             ? connection->tls_generation == 0U ||
+		                       connection->tls_generation >=
+		                               request->generation
+		             : connection->tls_generation !=
+		                       request->generation))
+			continue;
+		tr_connection_close_internal(reactor, connection,
+		                             TR_CONN_EVENT_ERROR,
+		                             TR_ERR_CLOSED);
+	}
+	return TR_OK;
+}
+
+int tr_reactor_tls_close_generation(struct tr_reactor *reactor,
+                                    uint64_t generation)
+{
+	struct tr_reactor_tls_close_generation_request request;
+
+	if (!reactor || generation == 0U)
+		return TR_ERR_INVALID;
+	request.reactor = reactor;
+	request.generation = generation;
+	request.before_generation = 0;
+	return tr_reactor_call_or_stopped(
+	        reactor, tr_reactor_tls_close_generation_on_owner, &request);
+}
+
+int tr_reactor_tls_close_before_generation(struct tr_reactor *reactor,
+                                           uint64_t generation)
+{
+	struct tr_reactor_tls_close_generation_request request;
+
+	if (!reactor || generation == 0U)
+		return TR_ERR_INVALID;
+	request.reactor = reactor;
+	request.generation = generation;
+	request.before_generation = 1;
+	return tr_reactor_call_or_stopped(
+	        reactor, tr_reactor_tls_close_generation_on_owner, &request);
+}
+
+int tr_reactor_tls_generation_on_owner(struct tr_conn_handle handle,
+                                       uint64_t *out_generation)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+
+	if (!out_generation)
+		return TR_ERR_INVALID;
+	*out_generation = 0U;
+	if (!reactor || handle.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection = &reactor->connections[handle.slot];
+	if (connection->state != TR_CONN_ACTIVE ||
+	    connection->generation != handle.generation)
+		return TR_ERR_STALE;
+	*out_generation = connection->tls_generation;
+	return TR_OK;
+}
+
+int tr_reactor_tls_profile_retain_on_owner(
+        struct tr_conn_handle handle,
+        struct tr_tls_openssl_profile **out_profile)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+	int ret;
+
+	if (!out_profile)
+		return TR_ERR_INVALID;
+	*out_profile = NULL;
+	if (!reactor || handle.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection = &reactor->connections[handle.slot];
+	if (connection->state != TR_CONN_ACTIVE ||
+	    connection->generation != handle.generation)
+		return TR_ERR_STALE;
+	if (!connection->tls_profile)
+		return TR_OK;
+	ret = tr_tls_openssl_profile_retain(connection->tls_profile);
+	if (ret != TR_OK)
+		return ret;
+	*out_profile = connection->tls_profile;
+	return TR_OK;
+}
+
+int tr_reactor_peer_identity_snapshot_on_owner(
+        struct tr_conn_handle handle, struct tr_peer_identity_snapshot **out)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+	if (!out)
+		return TR_ERR_INVALID;
+	*out = NULL;
+	if (!reactor || handle.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection = &reactor->connections[handle.slot];
+	if (connection->state != TR_CONN_ACTIVE ||
+	    connection->generation != handle.generation)
+		return TR_ERR_STALE;
+	if (connection->byte_endpoint) {
+		if (connection->byte_endpoint->state !=
+		    TR_BYTE_ENDPOINT_AUTHENTICATED)
+			return TR_AGAIN;
+		if (!connection->tls_identity_resolved)
+			return TR_ERR_STATE;
+	}
+	*out = connection->peer_identity;
 	return TR_OK;
 }
 
@@ -3966,7 +4611,8 @@ int tr_reactor_adopt_tls_fd_on_owner(struct tr_reactor *reactor, int fd,
 	if (ret != TR_OK)
 		return ret;
 	ret = tr_connection_adopt(reactor, slot, generation, fd, NULL, profile,
-	                          handshake_deadline_ns);
+	                          handshake_deadline_ns, NULL, 0U, NULL, NULL,
+	                          NULL, NULL);
 	if (ret != TR_OK) {
 		(void)tr_slot_set_state(reactor, slot, generation,
 		                        TR_CONN_FREE);
@@ -3999,7 +4645,8 @@ int tr_reactor_adopt_fd(struct tr_reactor *reactor, int fd,
 			return ret;
 
 		ret = tr_connection_adopt(reactor, slot, generation, fd, NULL,
-		                          NULL, 0U);
+		                          NULL, 0U, NULL, 0U, NULL, NULL, NULL,
+		                          NULL);
 		if (ret != TR_OK) {
 			(void)tr_slot_set_state(reactor, slot, generation,
 						TR_CONN_FREE);
