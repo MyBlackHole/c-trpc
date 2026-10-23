@@ -4,9 +4,11 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.4` 在流槽耗尽时单独拒绝未受理的新流，普通 V2 返回
-`RESOURCE_EXHAUSTED`，已有流继续传输。Channel 握手协议升级到 3，须同时升级两端。
-设计、验证与性能边界见 [PERF-V2-03 评估](docs/reviews/rpc_v2_stream_refusal_20261023.md)；
+当前 `2.0.0-dev.5` 明确拒绝超过对端固定窗口的整消息，并保证已消费信用不会
+因更新阈值阻塞下一条合法消息；同步回复和异步 producer 同样覆盖。
+设计与验证见 [LIVE-V2-01 评估](docs/reviews/rpc_v2_message_window_20261023.md)。
+此前流槽耗尽时单独拒绝新流、保留已有流的实现与性能边界见
+[PERF-V2-03 评估](docs/reviews/rpc_v2_stream_refusal_20261023.md)；Channel 握手仍为 3。
 此前控制容量通知的测量见 [PERF-V2-02 评估](docs/reviews/rpc_v2_control_ready_20261023.md)，
 整体剩余工作见 [V2 开发总账](docs/reviews/v2_remaining_work.md)。
 此前 `2.0.0-dev.1` 的交付范围与主线验收保存在

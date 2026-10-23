@@ -862,7 +862,9 @@ static bool tr_dispatch_producer_step(struct tr_dispatch_slot *s)
 			tr_dispatch_drop_queued(s);
 		} else {
 			tr_dispatch_local_abort(
-			        s, ret == TR_ERR_NOMEM
+			        s, ret == TR_ERR_BAD_LENGTH
+			                   ? TR_RPC_STATUS_INVALID_ARGUMENT
+			           : ret == TR_ERR_NOMEM
 			                   ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
 			                   : TR_RPC_STATUS_UNAVAILABLE);
 		}
@@ -957,7 +959,9 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 			tr_dispatch_drop_queued(s);
 		} else {
 			tr_dispatch_local_abort(
-			        s, ret == TR_ERR_NOMEM
+			        s, ret == TR_ERR_BAD_LENGTH
+			                   ? TR_RPC_STATUS_INVALID_ARGUMENT
+			           : ret == TR_ERR_NOMEM
 			                   ? TR_RPC_STATUS_RESOURCE_EXHAUSTED
 			                   : TR_RPC_STATUS_UNAVAILABLE);
 		}

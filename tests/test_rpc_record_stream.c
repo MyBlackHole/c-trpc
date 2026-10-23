@@ -229,7 +229,8 @@ static void tcp_pair(int *client, int *server)
 }
 static void init_peer(struct peer *p, int fd, int client,
                       enum tr_rpc_cardinality req, enum tr_rpc_cardinality resp,
-                      uint64_t window)
+                      uint64_t window, uint64_t threshold, uint32_t frame,
+                      uint32_t message)
 {
 	struct tr_reactor_config rc = {.max_connections = 4,
 	                               .command_capacity = 64,
@@ -237,15 +238,15 @@ static void init_peer(struct peer *p, int fd, int client,
 	                               .control_tx_item_capacity = 64,
 	                               .rx_buffer_count = 16,
 	                               .rx_buffer_size = 256,
-	                               .max_payload_len = 256};
+	                               .max_payload_len = frame};
 	struct tr_channel_config cc = {
 	        .role = client ? TR_CHANNEL_CLIENT : TR_CHANNEL_SERVER,
 	        .mode = TR_CHANNEL_SHARED_CONNECTION,
 	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET,
 	        .max_streams = CALLS,
 	        .initial_window_bytes = window,
-	        .window_update_threshold_bytes = 1,
-	        .max_message_bytes = BODY_MAX + 1024};
+	        .window_update_threshold_bytes = threshold,
+	        .max_message_bytes = message};
 	struct tr_conn_handle conn;
 	*p = (struct peer){0};
 	atomic_init(&p->opened, 0);
@@ -270,17 +271,28 @@ static void init_peer(struct peer *p, int fd, int client,
 	CHECK(tr_channel_create(&cc, conn, conn, on_data, on_event, NULL, p,
 	                        &p->channel) == TR_OK);
 }
-static void init_fixture(struct fixture *f, enum tr_rpc_cardinality req,
-                         enum tr_rpc_cardinality resp, uint64_t window)
+static void init_fixture_windows(struct fixture *f, enum tr_rpc_cardinality req,
+                                 enum tr_rpc_cardinality resp,
+                                 uint64_t client_window, uint64_t server_window,
+                                 uint64_t threshold, uint32_t frame,
+                                 uint32_t message)
 {
 	int a, b;
 	tcp_pair(&a, &b);
-	init_peer(&f->client, a, 1, req, resp, window);
-	init_peer(&f->server, b, 0, req, resp, window);
+	init_peer(&f->client, a, 1, req, resp, client_window, threshold, frame,
+	          message);
+	init_peer(&f->server, b, 0, req, resp, server_window, threshold, frame,
+	          message);
 	CHECK(tr_channel_wait_ready(f->client.channel, TR_LANE_BULK, 10000) ==
 	      TR_OK);
 	CHECK(tr_channel_wait_ready(f->server.channel, TR_LANE_BULK, 10000) ==
 	      TR_OK);
+}
+static void init_fixture(struct fixture *f, enum tr_rpc_cardinality req,
+                         enum tr_rpc_cardinality resp, uint64_t window)
+{
+	init_fixture_windows(f, req, resp, window, window, 1, 256,
+	                     BODY_MAX + 1024);
 }
 static void open_call(struct fixture *f, unsigned count)
 {
@@ -549,6 +561,185 @@ static void test_backpressure(void)
 	wait_counter(&a->terminals, 1);
 	destroy_fixture(&f);
 	CHECK(atomic_load(&released) == 1);
+}
+
+static void test_window_size_rejection(uint32_t frame)
+{
+	struct fixture f;
+	uint8_t data[129] = {1};
+	_Atomic unsigned released = 0;
+	init_fixture_windows(&f, TR_RPC_MANY, TR_RPC_MANY, 64, 128, 1, frame,
+	                     BODY_MAX + 1024);
+	open_call(&f, 1);
+	struct call_context *peers[] = {&f.client.calls[0], &f.server.calls[0]};
+	const uint64_t windows[] = {128, 64};
+	send_kind(peers[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&peers[1]->seen[TR_RPC_RECORD_OPEN], 1);
+	send_kind(peers[1], TR_RPC_RECORD_INITIAL_METADATA);
+	wait_counter(&peers[0]->seen[TR_RPC_RECORD_INITIAL_METADATA], 1);
+	for (unsigned side = 0; side < 2; ++side) {
+		struct call_context *sender = peers[side],
+		                    *receiver = peers[1 - side];
+		unsigned messages = 0;
+		for (unsigned round = 0; round < 2; ++round) {
+			struct tr_stream_diagnostics before, after;
+			struct snapshot state = snapshot(sender);
+			struct send_request r = {
+			        .c = sender, .h = head(TR_RPC_RECORD_MESSAGE)};
+			size_t size =
+			        windows[side] + 1 - TR_RPC_RECORD_HEADER_SIZE;
+			r.h.encoded_size = r.h.decoded_size = (uint32_t)size;
+			r.body = make_buffer(data, size, &released);
+			struct tr_buffer *original = r.body;
+			unsigned releases = atomic_load(&released);
+			CHECK(tr_stream_get_diagnostics(sender->stream,
+			                                &before) == TR_OK);
+			/* 初始信用和累计绝对信用不同。第二轮已经成功发送超过
+			 * W， 同一条 W+1 消息仍必须立即拒绝，不留给重试定时器。
+			 */
+			if (round)
+				CHECK(before.flow.tx_sent_bytes >
+				      windows[side]);
+			for (unsigned retry = 0; retry < 2; ++retry) {
+				int ret = tr_reactor_call(sender->peer->reactor,
+				                          send_owner, &r);
+				if (ret != TR_ERR_BAD_LENGTH)
+					fprintf(stderr,
+					        "window=%llu record=%zu "
+					        "send=%d\n",
+					        (unsigned long long)
+					                windows[side],
+					        size + TR_RPC_RECORD_HEADER_SIZE,
+					        ret);
+				CHECK(ret == TR_ERR_BAD_LENGTH);
+			}
+			CHECK(r.body == original &&
+			      atomic_load(&released) == releases);
+			CHECK(tr_stream_get_diagnostics(sender->stream,
+			                                &after) == TR_OK);
+			CHECK(before.flow.tx_sent_bytes ==
+			              after.flow.tx_sent_bytes &&
+			      before.next_tx_message_id ==
+			              after.next_tx_message_id);
+			struct snapshot unchanged = snapshot(sender);
+			CHECK(!memcmp(&state.state, &unchanged.state,
+			              sizeof(state.state)));
+			tr_buffer_release(r.body);
+			for (unsigned delta = 1; delta <= 2; ++delta) {
+				size = windows[side] -
+				       TR_RPC_RECORD_HEADER_SIZE - (2 - delta);
+				r.h.encoded_size = r.h.decoded_size =
+				        (uint32_t)size;
+				r.body = make_buffer(data, size, NULL);
+				send_until(&r);
+				wait_counter(
+				        &receiver->seen[TR_RPC_RECORD_MESSAGE],
+				        ++messages);
+				CHECK(receiver->last_body == size &&
+				      receiver->checksum == 1);
+			}
+		}
+	}
+	send_kind(peers[0], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&peers[1]->seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	send_kind(peers[1], TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&peers[0]->terminals, 1);
+	CHECK(peers[0]->final_status == TR_RPC_STATUS_OK);
+	destroy_fixture(&f);
+	CHECK(atomic_load(&released) == 4);
+}
+
+static void test_credit_threshold(uint64_t window, uint32_t message,
+                                  uint64_t threshold, uint64_t expected,
+                                  uint64_t updates)
+{
+	struct fixture f;
+	uint8_t data[256] = {1};
+	init_fixture_windows(&f, TR_RPC_MANY, TR_RPC_MANY, window, window,
+	                     threshold, 32, message);
+	open_call(&f, 1);
+	struct call_context *a = &f.client.calls[0], *b = &f.server.calls[0];
+	send_kind(a, TR_RPC_RECORD_OPEN);
+	wait_counter(&b->seen[TR_RPC_RECORD_OPEN], 1);
+	(void)snapshot(b); /* 所有者屏障：数据回调后的消费记账已经完成。 */
+	struct tr_stream_flow_state flow;
+	CHECK(tr_stream_get_flow_state(b->stream, &flow) == TR_OK);
+	CHECK(flow.rx_received_bytes == TR_RPC_RECORD_HEADER_SIZE &&
+	      flow.rx_consumed_bytes == TR_RPC_RECORD_HEADER_SIZE);
+	uint64_t maximum = window < message ? window : message;
+	if (flow.rx_advertised_limit != expected)
+		fprintf(stderr,
+		        "window=%llu message=%u threshold=%llu consumed=%llu "
+		        "credit=%llu expected=%llu\n",
+		        (unsigned long long)window, message,
+		        (unsigned long long)threshold,
+		        (unsigned long long)flow.rx_consumed_bytes,
+		        (unsigned long long)flow.rx_advertised_limit,
+		        (unsigned long long)expected);
+	CHECK(flow.rx_advertised_limit == expected);
+	/* 最大合法记录重复发送；允许保留安全的少量债务，而非一律每帧更新。 */
+	for (unsigned i = 1; i <= 3; ++i) {
+		struct send_request r = {.c = a,
+		                         .h = head(TR_RPC_RECORD_MESSAGE)};
+		size_t size = (size_t)maximum - TR_RPC_RECORD_HEADER_SIZE;
+		r.h.encoded_size = r.h.decoded_size = (uint32_t)size;
+		r.body = make_buffer(data, size, NULL);
+		send_until(&r);
+		wait_counter(&b->seen[TR_RPC_RECORD_MESSAGE], i);
+	}
+	(void)snapshot(b);
+	struct tr_channel_stats stats;
+	CHECK(tr_channel_get_stats(f.server.channel, &stats) == TR_OK);
+	CHECK(stats.window_updates_tx == updates);
+	printf("credit threshold: window=%llu message=%u requested=%llu "
+	       "OPEN-credit=%llu updates=%llu\n",
+	       (unsigned long long)window, message,
+	       (unsigned long long)threshold, (unsigned long long)expected,
+	       (unsigned long long)stats.window_updates_tx);
+	send_kind(a, TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&b->seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	send_kind(b, TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&a->terminals, 1);
+	CHECK(a->final_status == TR_RPC_STATUS_OK);
+	destroy_fixture(&f);
+}
+
+static void test_held_window_isolation(void)
+{
+	struct fixture f;
+	init_fixture_windows(&f, TR_RPC_MANY, TR_RPC_MANY, 128, 128, 128, 32,
+	                     256);
+	open_call(&f, 1);
+	struct call_context *a = &f.client.calls[0], *b = &f.server.calls[0];
+	CHECK(tr_reactor_call(f.server.reactor, set_hold, &f.server) == TR_OK);
+	send_kind(a, TR_RPC_RECORD_OPEN);
+	send_kind(a, TR_RPC_RECORD_MESSAGE);
+	wait_counter(&b->seen[TR_RPC_RECORD_MESSAGE], 1);
+	struct send_request blocked = {.c = a,
+	                               .h = head(TR_RPC_RECORD_MESSAGE)};
+	CHECK(tr_reactor_call(f.client.reactor, send_owner, &blocked) ==
+	      TR_AGAIN);
+	CHECK(snapshot(a).state.request_messages == 1);
+	/* 第一个流保留 96/128 字节时，另一流可以走完零消息 MANY 调用。 */
+	open_call(&f, 2);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_OPEN);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&f.client.calls[1].terminals, 1);
+	CHECK(f.client.calls[1].final_status == TR_RPC_STATUS_OK);
+	CHECK(tr_reactor_call(f.client.reactor, send_owner, &blocked) ==
+	      TR_AGAIN);
+	CHECK(tr_reactor_call(f.server.reactor, release_held, &f.server) ==
+	      TR_OK);
+	send_until(&blocked);
+	send_kind(a, TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&b->seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	CHECK(atomic_load(&b->seen[TR_RPC_RECORD_MESSAGE]) == 2);
+	send_kind(b, TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&a->terminals, 1);
+	CHECK(a->final_status == TR_RPC_STATUS_OK);
+	destroy_fixture(&f);
 }
 
 struct raw_request {
@@ -989,6 +1180,12 @@ int main(void)
 			               b ? TR_RPC_MANY : TR_RPC_ONE, 0);
 	test_roundtrip(TR_RPC_ONE, TR_RPC_ONE, 65537);
 	test_backpressure();
+	test_window_size_rejection(256);
+	test_window_size_rejection(32);
+	test_credit_threshold(128, 256, 128, 176, 5);
+	test_credit_threshold(256, 128, 200, 256, 3);
+	test_credit_threshold(256, 128, 32, 304, 5);
+	test_held_window_isolation();
 	test_incremental_and_invalid();
 	for (unsigned i = 0; i < 6; ++i)
 		test_receive_faults(i);

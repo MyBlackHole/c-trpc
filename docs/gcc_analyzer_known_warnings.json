@@ -12,7 +12,7 @@
   "warnings": [
     {
       "file": "src/transport/channel/channel.c",
-      "line": 699,
+      "line": 700,
       "column": 9,
       "check": "analyzer-malloc-leak",
       "message": "leak of ‘owned’ [CWE-401]",
