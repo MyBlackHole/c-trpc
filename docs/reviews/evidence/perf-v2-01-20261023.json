@@ -519,5 +519,47 @@
     "temporary_environment": "TMPDIR=$PWD/build/test-tmp XMAKE_TMPDIR=$PWD/build/test-tmp PYTHONDONTWRITEBYTECODE=1",
     "gcc": "xmake b -P . --all -j4 && xmake test -P . -v -j1",
     "asan_ubsan": "xmake f -P . -c -y -m asan --toolchain=gcc -o build/perf-v2-01/asan; build then xmake test -P . -v test_channel_drain/* and test_stream_reset/*"
+  },
+  "static_diagnostics": {
+    "run": 39892358176,
+    "candidate_head": "cdb49280a2416e0947778fd5a4143846b702a8eb",
+    "tested_merge": "881c46b5d24bf009cf9a07f3c733043bb02a2d2d",
+    "artifacts": {
+      "gcc": 12475017585,
+      "clang": 12475855042
+    },
+    "production_units_per_analyzer": 43,
+    "gcc_warnings": 1,
+    "clang_warnings": 9,
+    "review_state": "unverified",
+    "line_moves": [
+      {
+        "file": "src/execution/reactor.c",
+        "old_line": 320,
+        "new_line": 322,
+        "check": "clang-analyzer-unix.Malloc",
+        "unchanged_statement": "return TR_ERR_INVALID;"
+      },
+      {
+        "file": "src/transport/channel/channel.c",
+        "old_line": 3275,
+        "new_line": 3359,
+        "check": "clang-analyzer-unix.Malloc",
+        "unchanged_statement": "return TR_ERR_INVALID;"
+      },
+      {
+        "file": "src/transport/channel/channel.c",
+        "old_line": 687,
+        "new_line": 695,
+        "check": "analyzer-malloc-leak",
+        "unchanged_statement": "return TR_OK;"
+      }
+    ]
+  },
+  "failed_workflow_parse": {
+    "head": "bd2b591886f22b8cea66b4897e985d9b59dab71f",
+    "run": 39892110947,
+    "reason": "job env cannot access runner context; no tests ran",
+    "correction": "cdb49280a2416e0947778fd5a4143846b702a8eb writes RUNNER_TEMP via the first step GITHUB_ENV"
   }
 }

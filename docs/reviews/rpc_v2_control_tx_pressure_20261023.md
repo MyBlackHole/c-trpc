@@ -60,6 +60,7 @@
 - `test_channel_drain` 15 组通过：共享/拆分连接、其他连接进展、旧流恢复、初始确认 FIFO、槽位复用、普通 RESUME_RX、禁用保活、排空及两种拆除路径。
 - `test_stream_reset` 保留流槽耗尽的失败断言，并验证信用恢复后正常 RESET、重试定时器失败时收尾。
 - 本地 GCC release 全套 **79/79**；上述两个压力/生命周期目标在 GCC ASan/UBSan 下通过；clang-format 18.1.8 检查 5 个修改源码文件，0 失败。
+- 候选 CI 的两个静态分析器均完整扫描 43 个生产单元，仍为 GCC 11 的 1 条、Clang 14 的 9 条未裁定诊断。实际工件确认仅三处既有位置移动：GCC Channel 687 → 695；Clang Reactor 320 → 322、Channel 3275 → 3359。核对原语句和完整诊断后更新位置，`review_state` 继续为 `unverified`，不宣称误报或修复。
 - 审查由当前主会话按 `code-review-checklist` 完成，检查状态责任、锁/回调边界、错误清理、流代次、GOAWAY 高水位、原子快照、容量和公开兼容面。**没有使用子 agent，不冒充独立审查。**
 - 候选及实际主线的 GitHub CI、benchmark smoke、诊断工件与最终状态在原 #247 登记中补充；本文件不提前声明尚未运行的远程检查。
 
