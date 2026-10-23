@@ -209,11 +209,11 @@ start 先 reserve 凭证 bundle 容量再调用 provider；complete 只复制到
 - preface feed 可在已消费全部固定前导后返回 `TR_IN_PROGRESS`，表示连接保留前导状态并暂停普通读取。
 - 新增 owner-only `tr_reactor_preface_resume_on_owner(connection, status)`；`TR_OK` 释放前导并恢复读取，错误状态关闭连接并执行既有 release。
 
-- [ ] **Step 1: 写 defer/resume 行为测试**
+- [x] **Step 1: 写 defer/resume 行为测试**
 
 扩展 TLS listener 测试，让 preface callback 在完整 TRR1 后返回 `TR_IN_PROGRESS`；客户端立即发送后续帧。断言 resume 前无 frame callback，resume 成功后恰好交付一次，resume 失败关闭连接并恰好 release 一次。
 
-- [ ] **Step 2: 运行专测确认当前实现失败**
+- [x] **Step 2: 运行专测确认当前实现失败**
 
 ```sh
 TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
@@ -222,13 +222,17 @@ TMPDIR="$PWD/build/tmp" XMAKE_TMPDIR="$PWD/build/xmake-tmp" \
 
 预期：现有 preface 路径把 `TR_IN_PROGRESS` 当作连接错误处理。
 
-- [ ] **Step 3: 增加 deferred 状态和 owner 恢复 API**
+实测：首次运行在 `poll(&ready, 1U, 100) == 0` 断言失败，确认前导返回 `TR_IN_PROGRESS` 后连接被提前关闭。
+
+- [x] **Step 3: 增加 deferred 状态和 owner 恢复 API**
 
 连接槽增加 `preface_deferred`；deferred 时只保留 ERR/HUP 事件，不再读取 socket。resume 在 Reactor owner 验证精确 connection generation，成功时释放 preface handler、清除 read pause 并更新 epoll interest；失败时通过 `tr_reactor_abort_on_owner()` 收敛。
 
-- [ ] **Step 4: 验证关闭、EOF 和槽位复用**
+- [x] **Step 4: 验证关闭、EOF 和槽位复用**
 
 补测 deferred 连接 EOF/close、错误 resume、重复 resume 和连接槽复用后的旧 handle；运行 `test_pipeline_listener_tls` 与 `test_reactor_timer_deadline`，确认旧代次句柄不能恢复新连接。
+
+实测：GCC TSan 下 `test_pipeline_listener_tls` 与 `test_reactor_timer_deadline` 均通过；覆盖 HOLD 后未交付帧、成功恢复一次交付、拒绝/EOF 单次 release、重复恢复状态错误及槽位复用后旧代次返回 `TR_ERR_STALE`。
 
 ### Task 6：CONTROL/DATA 远端异步授权
 
