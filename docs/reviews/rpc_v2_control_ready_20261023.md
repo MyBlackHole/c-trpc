@@ -55,6 +55,7 @@ AMD Ryzen 7 PRO 4750U，Linux 7.2.11、glibc 2.44，affinity 0–15，GCC releas
 - 新 `test_reactor_control_ready` 8 组：共享池跨连接公平性、重复登记、取消、处理器替换、槽位复用、跨线程唯一唤醒、无 I/O 重登记、命令队列满，以及 70 个连接跨轮次遵守 64 次分派上限。部分组覆盖多个关联不变量。
 - GCC release 全量 80/80；补充的最终 70 连接场景单独通过；Channel、控制通知和 RESET 三个目标的 GCC ASan/UBSan 3/3。clang-format 18.1.8 检查 6 个修改源码，0 失败。
 - 主会话按 `code-review-checklist` 检查正确性、锁顺序、代次/回调寿命、错误清理、容量、热路径开销、测试与范围。没有子 agent，也不冒充独立审查。
+- 候选 push CI `39900006655` 的实际工件覆盖 43 个生产单元：GCC 11 仍有 1 条、Clang 14 仍有 9 条既有诊断。Clang 仅 Reactor 322 → 330、Channel 3359 → 3373 两处位置移动；核对原语句及完整诊断后更新清单，`review_state` 保持 `unverified`，不宣称误报。原失败工件保留。
 - 候选与实际主线 CI 的最终结果、静态分析位置核对和分支清理在 [#247 登记](https://github.com/MyBlackHole/c-trpc/issues/247#issuecomment-6357116644) 补充；本地通过不代替尚未完成的远程验证。
 
 ## 证据

@@ -676,5 +676,136 @@
       "src/transport/protocol/wire.h": "2176b7cf8bcb4ae4d1887ebb412a94a53e90a7f83e1d4c641fd966936e0477c4",
       "xmake.lua": "bfd0bfff4cea6363b4bc37592ca5fe003732e3d4223b1aa0de033519640f240b"
     }
+  },
+  "static_analysis": {
+    "run_id": 39900006655,
+    "candidate_commit": "829e5488a3f4858f8cb79d645240738e32ab6b50",
+    "clang_artifact_id": 12478980467,
+    "gcc_artifact_id": 12478467284,
+    "clang_summary_sha256": "35f96347eb2aebb06f60ad78171e2743930da43f62fe83574788d85a64d82bf8",
+    "gcc_summary_sha256": "938d9613573c764739e5c249fae3047fa7cf534f56514dd481379ffebf8cccab",
+    "clang_original_gate": {
+      "analyzer_major": 14,
+      "baseline_warnings": 9,
+      "missing_baseline_warnings": [
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 322,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3359,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        }
+      ],
+      "observed_warnings": 9,
+      "policy": "exact-tracked-warning-set",
+      "production_units": 43,
+      "profile": {
+        "arch": "x86_64",
+        "crc32c_portable": false,
+        "mode": "release",
+        "plat": "linux",
+        "toolchain": "clang"
+      },
+      "review_state": "unverified",
+      "schema": 1,
+      "unreviewed_warnings": [
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 330,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3373,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        }
+      ]
+    },
+    "clang_replayed_gate": {
+      "schema": 1,
+      "policy": "exact-tracked-warning-set",
+      "analyzer_major": 14,
+      "profile": {
+        "mode": "release",
+        "toolchain": "clang",
+        "plat": "linux",
+        "arch": "x86_64",
+        "crc32c_portable": false
+      },
+      "review_state": "unverified",
+      "production_units": 43,
+      "observed_warnings": 9,
+      "baseline_warnings": 9,
+      "unreviewed_warnings": [],
+      "missing_baseline_warnings": []
+    },
+    "position_moves": [
+      {
+        "before": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 322,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        "after": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 330,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        "statement": "\t\treturn TR_ERR_INVALID;"
+      },
+      {
+        "before": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3359,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        },
+        "after": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3373,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        },
+        "statement": "\t\treturn TR_ERR_INVALID;"
+      }
+    ],
+    "gcc_gate": {
+      "schema": 1,
+      "policy": "exact-tracked-gcc-warning-set",
+      "review_state": "unverified",
+      "gcc_major": 11,
+      "production_units": 43,
+      "observed_warnings": 1,
+      "baseline_warnings": 1,
+      "unreviewed_warnings": [],
+      "missing_baseline_warnings": []
+    },
+    "review_state": "unverified",
+    "note": "只按实际工件核对两个 Clang 既有诊断位置；完整 43 单元均已扫描，未新增或删减诊断，未裁定误报。原失败工件保留，离线重放在副本进行并采用原 project_dir 归一化路径。"
   }
 }
