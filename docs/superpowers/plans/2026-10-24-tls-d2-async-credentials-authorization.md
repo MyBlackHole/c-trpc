@@ -337,7 +337,7 @@ GCC ASan/UBSan 与 GCC TSan。
 在 `docs/rpc-v2-sdk.md` 说明 provider callback 的非阻塞限制、bundle 长度和 4 MiB 默认值、外部控制线程 poll、合作式 cancel、句柄过期、静态 trust roots、TLS_REQUIRED 失败关闭与 SDK 链接方式。README 更新 TLS-D2 当前状态和 #234/TLS-E 未完成边界。
 
 实测：SDK 文档补充 provider 生命周期、固定 trust roots、取消确认和失败关闭；README 更新到
-`2.0.0-dev.20`，明确 TLS-E、#243 与完整验收仍未完成。
+`2.0.0-dev.21`，明确 TLS-E、#243 与完整验收仍未完成。
 
 - [x] **Step 3: 验证公共 C/C++ 头文件边界**
 
@@ -392,6 +392,10 @@ ASan/UBSan 与 TSan 的 `xmake build --all` 均通过。加入 TLS profile 故�
 实测：改动行已用 clang-format-diff 格式化，`git diff --check` 通过；GCC 和 Clang
 Release 的真实编译数据库各验证 48 个生产编译单元；锁定 Clang 18.1.8 后，source-format
 checker 对实际 `HEAD` 的 30 个变更源码文件检查通过，0 失败。
+
+Clang 14 的 PR 分析报告复现了 8 条已登记告警中的 7 条原位告警，唯一门禁差异是
+`reactor.c` 的既有 `items` 告警随此前字段新增从第 361 行移到第 362 行；已同步精确基线，
+不修改分配或释放行为。新 head 的 CI 仍须重新通过后才完成 Step 4。
 
 - [ ] **Step 4: 更新 PR #312 并检查实际 head CI**
 
