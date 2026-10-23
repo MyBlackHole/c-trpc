@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.3")
+set_version("2.0.0-dev.4")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -928,7 +928,7 @@ target("test_rpc_v2_server")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_ldflags("-Wl,--wrap=tr_rpc_record_stream_receive_on_owner",
-                "-Wl,--wrap=calloc", {force = true})
+                "-Wl,--wrap=calloc", "-Wl,--wrap=sendmsg", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

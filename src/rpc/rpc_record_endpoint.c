@@ -244,7 +244,8 @@ static void tr_endpoint_apply_deferred(struct tr_rpc_record_endpoint *ep,
 			        ep->dispatch, slot->stream, event, status);
 		} else if (!slot->terminal && !slot->call.dispatch) {
 			enum tr_rpc_status result = TR_RPC_STATUS_UNAVAILABLE;
-			if (event == TR_STREAM_EVENT_RESET)
+			if (event == TR_STREAM_EVENT_RESET ||
+			    event == TR_STREAM_EVENT_REFUSED)
 				result =
 				        tr_rpc_record_status_from_reset(status);
 			else if (event == TR_STREAM_EVENT_ERROR)
@@ -597,7 +598,8 @@ static void tr_endpoint_event(struct tr_stream_handle stream,
 			if (event == TR_STREAM_EVENT_REMOTE_CLOSED)
 				slot->peer_closed = true;
 			if (event == TR_STREAM_EVENT_CLOSED ||
-			    event == TR_STREAM_EVENT_ERROR)
+			    event == TR_STREAM_EVENT_ERROR ||
+			    event == TR_STREAM_EVENT_REFUSED)
 				slot->dead = true;
 			if (event == TR_STREAM_EVENT_RESET)
 				slot->reset_accepted = true;
@@ -613,7 +615,8 @@ static void tr_endpoint_event(struct tr_stream_handle stream,
 		if (event == TR_STREAM_EVENT_REMOTE_CLOSED)
 			slot->peer_closed = true;
 		if (event == TR_STREAM_EVENT_CLOSED ||
-		    event == TR_STREAM_EVENT_ERROR)
+		    event == TR_STREAM_EVENT_ERROR ||
+		    event == TR_STREAM_EVENT_REFUSED)
 			slot->dead = true;
 		if (event == TR_STREAM_EVENT_RESET)
 			slot->reset_accepted = true;

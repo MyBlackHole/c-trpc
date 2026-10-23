@@ -179,6 +179,9 @@ struct tr_channel {
 	/* 每条物理连接最多保留一个未确认 OPEN。暂停后续接收，避免
 	 * 后来的信用确认越过此流以及无界积累待处理 OPEN。 */
 	struct tr_stream_handle pending_open[2];
+	/* 每条物理连接最多一个未受理拒绝；只等待终止发送预留，不等流槽。 */
+	uint32_t pending_refused[2];
+	uint8_t refused_last[2];
 	uint32_t keepalive_interval_ms;
 	uint32_t keepalive_timeout_ms;
 	uint64_t keepalive_next_ping_id;
@@ -531,11 +534,12 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	pthread_mutex_lock(&channel->lock);
 	enabled = tr_channel_keepalive_needed_locked(channel);
 	tick_ms = enabled ? tr_channel_keepalive_tick_ms_locked(channel) : 0U;
-	retry_pending = channel->window_retry_pending ||
-	                channel->reset_retry_pending ||
-	                channel->drain_retry_pending ||
-	                channel->pending_open[0].channel ||
-	                channel->pending_open[1].channel;
+	retry_pending =
+	        channel->window_retry_pending || channel->reset_retry_pending ||
+	        channel->drain_retry_pending ||
+	        channel->pending_open[0].channel ||
+	        channel->pending_open[1].channel ||
+	        channel->pending_refused[0] || channel->pending_refused[1];
 	if (retry_pending)
 		channel->window_retry_scheduled = 1;
 	pthread_mutex_unlock(&channel->lock);
@@ -1477,8 +1481,68 @@ static int tr_channel_protocol_error(struct tr_channel *channel,
 	return status;
 }
 
+static void tr_channel_refusal_progress_on_owner(struct tr_channel *channel)
+{
+	for (unsigned idx = 0; idx < 2; ++idx) {
+		struct tr_conn_handle connection;
+		int ret = TR_OK;
+		pthread_mutex_lock(&channel->lock);
+		if (!channel->pending_refused[idx] ||
+		    channel->teardown_detached) {
+			pthread_mutex_unlock(&channel->lock);
+			continue;
+		}
+		connection = tr_channel_connection(
+		        channel, idx ? TR_LANE_BULK : TR_LANE_CONTROL);
+		/* 暂停之后没有更大的同连接 OPEN 取得信用；排空的冻结 cutoff
+		 * 因而可以接管此未提交拒绝，不会漏掉对端 OPENING。 */
+		if (!channel->local_draining &&
+		    !channel->drain[idx].local_started) {
+			/* 两类终止共享一个预留。上次若服务了拒绝，必须先让同
+			 * 连接已等待的 RESET 尝试；部分写期间新 OPEN
+			 * 仍可能到达， 仅靠调用顺序不能防止连续拒绝抢占 RESET。
+			 */
+			if (channel->refused_last[idx]) {
+				for (uint32_t slot = 0;
+				     slot < channel->config.max_streams;
+				     ++slot) {
+					struct tr_stream_slot *stream =
+					        &channel->streams[slot];
+					if (stream->state ==
+					            TR_STREAM_SLOT_RESETTING &&
+					    !stream->reset_sent &&
+					    tr_stream_connection_matches(
+					            channel, stream,
+					            connection)) {
+						ret = TR_AGAIN;
+						break;
+					}
+				}
+			}
+			if (ret == TR_OK) {
+				ret = tr_reactor_send_stream_refused_on_owner(
+				        connection,
+				        channel->pending_refused[idx]);
+				if (ret == TR_OK)
+					channel->refused_last[idx] = 1;
+			}
+		}
+		if (ret != TR_AGAIN)
+			channel->pending_refused[idx] = 0;
+		pthread_mutex_unlock(&channel->lock);
+		if (ret == TR_AGAIN)
+			continue;
+		if (ret == TR_OK)
+			ret = tr_reactor_set_rx_hold_on_owner(connection, 0);
+		if (ret != TR_OK)
+			(void)tr_channel_protocol_error(channel, connection,
+			                                ret);
+	}
+}
+
 static void tr_channel_open_progress_on_owner(struct tr_channel *channel)
 {
+	tr_channel_refusal_progress_on_owner(channel);
 	for (unsigned idx = 0; idx < 2; ++idx) {
 		struct tr_stream_handle handle;
 		struct tr_stream_slot *stream;
@@ -1554,6 +1618,9 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 	channel->reset_retry_pending = 0;
 	start = channel->reset_cursor;
 	pthread_mutex_unlock(&channel->lock);
+	/* 已暂停的拒绝先于新的 RESET 使用预留；新 OPEN 则先推进既有
+	 * RESET 再尝试拒绝，避免持续 OPEN 抢占已接受的终止责任。 */
+	tr_channel_refusal_progress_on_owner(channel);
 	for (uint32_t visited = 0; visited < channel->config.max_streams;
 	     ++visited) {
 		uint32_t slot = (uint32_t)(((uint64_t)start + visited) %
@@ -1577,6 +1644,11 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 			        stream->reset_status);
 			if (ret == TR_OK) {
 				stream->reset_sent = 1;
+				int idx =
+				        tr_channel_keepalive_index_for_connection(
+				                channel, connection);
+				assert(idx >= 0);
+				channel->refused_last[idx] = 0;
 				/* 固定预留每次只服务一条流；下一次从成功者之后
 				 * 开始，低编号流不能持续抢占确认或主动终止。 */
 				channel->reset_cursor =
@@ -2095,11 +2167,35 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 	                                TR_STREAM_SLOT_ACCEPTING, &handle);
 	if (ret != TR_OK) {
 		pthread_mutex_unlock(&channel->lock);
-		/* 没有槽就没有可重试的拒绝责任；不能静默遗留对端 OPENING。
-		 * 本阶段不增加第二个拒绝表，明确使此精确连接失败。 */
-		return tr_channel_protocol_error(channel, connection,
-		                                 ret == TR_AGAIN ? TR_ERR_NOMEM
-		                                                 : ret);
+		if (ret != TR_AGAIN)
+			return tr_channel_protocol_error(channel, connection,
+			                                 ret);
+		tr_channel_reset_progress_on_owner(channel);
+		ret = tr_reactor_send_stream_refused_on_owner(
+		        connection, frame->header.stream_id);
+		if (ret == TR_OK) {
+			pthread_mutex_lock(&channel->lock);
+			channel->refused_last[connection_index] = 1;
+			pthread_mutex_unlock(&channel->lock);
+		} else if (ret == TR_AGAIN) {
+			/* 对端没有初始信用，不能再发送该流的 DATA/CLOSE/RESET。
+			 * 仅保留一个拒绝 ID，发送预留释放即可继续，不等任何流
+			 * 回包或槽位释放，避免暂停 RX 后相互等待。 */
+			ret = tr_channel_reset_timer_on_owner(channel);
+			if (ret == TR_OK) {
+				pthread_mutex_lock(&channel->lock);
+				assert(!channel->pending_refused
+				                [connection_index]);
+				channel->pending_refused[connection_index] =
+				        frame->header.stream_id;
+				pthread_mutex_unlock(&channel->lock);
+				ret = tr_reactor_set_rx_hold_on_owner(
+				        connection, 1);
+			}
+		}
+		return ret == TR_OK ? TR_OK
+		                    : tr_channel_protocol_error(
+		                              channel, connection, ret);
 	}
 
 	stream = &channel->streams[handle.slot];
@@ -2138,6 +2234,38 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 	handle = tr_stream_make_handle(channel, slot, stream);
 	pthread_mutex_unlock(&channel->lock);
 	tr_stream_notify(channel, handle, TR_STREAM_EVENT_OPENED, TR_OK);
+	return TR_OK;
+}
+
+static int tr_channel_handle_stream_refused(struct tr_channel *channel,
+                                            struct tr_conn_handle connection,
+                                            const struct tr_frame *frame)
+{
+	struct tr_stream_slot *stream;
+	struct tr_stream_handle handle;
+	uint32_t slot;
+	if (frame->header.flags || frame->payload ||
+	    frame->header.payload_len ||
+	    frame->header.message_id != (uint64_t)-TR_ERR_NOMEM)
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_INVALID);
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
+	if (!stream || stream->state != TR_STREAM_SLOT_OPENING ||
+	    !tr_stream_id_is_local(channel, frame->header.stream_id) ||
+	    !tr_stream_connection_matches(channel, stream, connection)) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	handle = tr_stream_make_handle(channel, slot, stream);
+	tr_stream_free_locked(channel, slot);
+	channel->stat_stream_errors++;
+	channel->stat_streams_closed++;
+	pthread_mutex_unlock(&channel->lock);
+	/* 单向拒绝即完成传输责任；先失效代次，再允许上层重入打开新流。 */
+	tr_stream_notify(channel, handle, TR_STREAM_EVENT_REFUSED,
+	                 TR_ERR_NOMEM);
 	return TR_OK;
 }
 
@@ -2593,6 +2721,10 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 		ret = tr_channel_handle_stream_reset(channel, connection,
 		                                     frame);
 		break;
+	case TR_FRAME_STREAM_REFUSED:
+		ret = tr_channel_handle_stream_refused(channel, connection,
+		                                       frame);
+		break;
 	case TR_FRAME_DATA:
 		ret = tr_channel_handle_data(channel, connection, frame);
 		break;
@@ -2696,6 +2828,12 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 		bulk_down = 1;
 	}
 	if (control_down || bulk_down) {
+		int idx = tr_channel_keepalive_index_for_connection(channel,
+		                                                    connection);
+		if (idx >= 0) {
+			channel->pending_refused[idx] = 0;
+			channel->refused_last[idx] = 0;
+		}
 		int i;
 		for (i = 0; i < 2; ++i)
 			if (channel->pending_hello[i].valid &&

@@ -375,7 +375,9 @@ int tr_rpc_record_router_event_on_owner(struct tr_rpc_record_router *router,
 	route = tr_router_find(router, stream);
 	if (!route)
 		return TR_ERR_STALE;
-	if (event < TR_STREAM_EVENT_OPENED || event > TR_STREAM_EVENT_RESET)
+	if (event < TR_STREAM_EVENT_OPENED || event > TR_STREAM_EVENT_REFUSED)
+		return TR_ERR_INVALID;
+	if (event == TR_STREAM_EVENT_REFUSED && status != TR_ERR_NOMEM)
 		return TR_ERR_INVALID;
 	if (event == TR_STREAM_EVENT_RESET &&
 	    tr_rpc_record_status_from_reset(status) ==
@@ -387,7 +389,8 @@ int tr_rpc_record_router_event_on_owner(struct tr_rpc_record_router *router,
 	if (route->binding)
 		ret = tr_rpc_record_stream_event_on_owner(
 		        route->binding, stream, event, status);
-	else if (event == TR_STREAM_EVENT_RESET)
+	else if (event == TR_STREAM_EVENT_RESET ||
+	         event == TR_STREAM_EVENT_REFUSED)
 		tr_router_terminal(route,
 		                   tr_rpc_record_status_from_reset(status),
 		                   TR_RPC_RECORD_ON_OWNER);

@@ -12,7 +12,7 @@ extern "C" {
 
 struct tr_channel;
 
-#define TR_CHANNEL_PROTOCOL_VERSION 2U
+#define TR_CHANNEL_PROTOCOL_VERSION 3U
 #define TR_CHANNEL_LANE_MASK_CONTROL (1U << 0)
 #define TR_CHANNEL_LANE_MASK_BULK (1U << 1)
 /* 只有显式协商此能力的专用 Channel 才发送或接收单流 RESET。 */
@@ -88,7 +88,9 @@ enum tr_stream_event {
 	TR_STREAM_EVENT_ERROR = 4,
 	TR_STREAM_EVENT_WRITABLE = 5,
 	/* 双向停止已选定；任务退出与网络静默分别由上层及 CLOSED 证明。 */
-	TR_STREAM_EVENT_RESET = 6
+	TR_STREAM_EVENT_RESET = 6,
+	/* 对端未受理 OPEN，句柄已失效；不回发终止帧，原因是 NOMEM。 */
+	TR_STREAM_EVENT_REFUSED = 7
 };
 
 enum tr_stream_data_disposition {
@@ -279,7 +281,8 @@ int tr_channel_get_state(struct tr_channel *channel,
 			 enum tr_channel_state *out);
 uint32_t tr_channel_active_streams(struct tr_channel *channel);
 
-/* 打开一个逻辑字节流；完成状态通过 OPENED 事件上报。 */
+/* 打开一个逻辑字节流；准入成功通过 OPENED 上报。对端无流槽时上报
+ * REFUSED/NOMEM，精确句柄已退役且无需回复，连接仍可继续开流。 */
 int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 		   struct tr_stream_handle *out);
 
@@ -299,7 +302,7 @@ int tr_stream_sendv(struct tr_stream_handle stream,
 
 /* 半关闭本地发送方向。 */
 /* OPENING 尚无对端准入证明时返回 AGAIN，不发送 CLOSE，也不接管重试。
- * 调用方须等待 OPENED 后重试，或由 GOAWAY/连接错误使句柄退役。 */
+ * 调用方须等待 OPENED 后重试，或由 REFUSED/GOAWAY/连接错误退役句柄。 */
 int tr_stream_close(struct tr_stream_handle stream);
 
 /* 释放之前通过 TR_STREAM_DATA_TAKE_OWNERSHIP 保留的 payload，

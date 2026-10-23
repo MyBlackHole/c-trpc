@@ -487,7 +487,10 @@ int tr_rpc_record_stream_event_on_owner(struct tr_rpc_record_stream *call,
 	if (event == TR_STREAM_EVENT_OPENED ||
 	    event == TR_STREAM_EVENT_WRITABLE)
 		return TR_OK;
-	if (event == TR_STREAM_EVENT_RESET) {
+	if (event == TR_STREAM_EVENT_REFUSED && status != TR_ERR_NOMEM)
+		return TR_ERR_INVALID;
+	if (event == TR_STREAM_EVENT_RESET ||
+	    event == TR_STREAM_EVENT_REFUSED) {
 		enum tr_rpc_status result =
 		        tr_rpc_record_status_from_reset(status);
 		if (result == (enum tr_rpc_status)TR_RPC_STATUS_COUNT)

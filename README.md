@@ -4,8 +4,11 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.3` 按控制发送容量恢复待确认流；延迟测量、小档退化与剩余容量限制见
-[PERF-V2-02 评估](docs/reviews/rpc_v2_control_ready_20261023.md)。
+当前 `2.0.0-dev.4` 在流槽耗尽时单独拒绝未受理的新流，普通 V2 返回
+`RESOURCE_EXHAUSTED`，已有流继续传输。Channel 握手协议升级到 3，须同时升级两端。
+设计与验证范围见 [PERF-V2-03 设计](docs/superpowers/specs/2026-10-23-perf-v2-03-stream-refusal-design.md)；
+此前控制容量通知的测量见 [PERF-V2-02 评估](docs/reviews/rpc_v2_control_ready_20261023.md)，
+整体剩余工作见 [V2 开发总账](docs/reviews/v2_remaining_work.md)。
 此前 `2.0.0-dev.1` 的交付范围与主线验收保存在
 [R17 发行边界评估](docs/reviews/rpc_v2_release_boundary_20261023.md)。当前仍是开发预览，未发布稳定版。
 
@@ -369,7 +372,7 @@ xmake run echo_client 127.0.0.1 9000 hello
 
 - 逻辑 `Channel` 位于物理 TCP 连接之上；
 - 每个连接在通道可用前执行对称 `HELLO / HELLO_ACK` 能力握手；
-- Channel 握手协议版本 2；与帧封装版本 1、RPC V1/V2 分别管理；
+- Channel 握手协议版本 3；与帧封装版本 1、RPC V1/V2 分别管理；
 - 对端接收能力协商，包括帧载荷、逻辑消息大小、特性位和通道映射；
 - 通道状态区分 `DOWN / RECONNECTING / HANDSHAKING / UP`；只有 `UP` 后才允许新 Stream；
 - 协商后的帧上限由 `tr_reactor_sendv_limited()` 强制执行，因此能力不对称的对端实际按较小接收上限发送；
@@ -405,7 +408,9 @@ xmake run echo_client 127.0.0.1 9000 hello
 物理 TCP 连接不会在接管后立即被视为 Channel 可用。双方都会发送固定大小的
 `HELLO`，声明自身接收能力：
 
-当前 Channel 协议版本为 **2**，仅接受该版本，拒绝旧版无受理边界的 GOAWAY。
+当前 Channel 协议版本为 **3**，仅接受该版本。它包含带受理边界的 GOAWAY，
+以及流槽满时的单向 STREAM_REFUSED；后者不授予信用、不进入业务、不要求回包。
+旧版 Channel 在握手时被拒绝，避免误解未受理流的回收责任。
 它与仍为 1 的帧封装版本、RPC V1/V2 记录版本属于不同层次。
 
 ```text

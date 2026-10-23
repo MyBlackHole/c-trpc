@@ -692,10 +692,13 @@ static void test_split_wrong_connection_cutoff(void)
 static void test_old_hello_is_rejected(void)
 {
 	struct fixture f;
-	init_fixture(&f, 0, 0);
-	hello(&f, 0, 1, 0);
-	expect_down(&f, 0, TR_ERR_BAD_VERSION);
-	destroy_fixture(&f);
+	for (uint16_t version = 1; version < TR_CHANNEL_PROTOCOL_VERSION;
+	     ++version) {
+		init_fixture(&f, 0, 0);
+		hello(&f, 0, version, 0);
+		expect_down(&f, 0, TR_ERR_BAD_VERSION);
+		destroy_fixture(&f);
+	}
 
 	init_fixture(&f, 0, 1);
 	assert(tr_channel_begin_drain(f.channel) == TR_OK);

@@ -38,6 +38,7 @@ struct fixture {
 	unsigned opened, resets, closed, errors, received, down, writable,
 	        remote_closed;
 	unsigned reopened_count;
+	unsigned refused;
 	int down_status;
 	int error_status;
 	struct tr_stream_handle stream[32];
@@ -54,6 +55,7 @@ static _Thread_local int fail_reset_arm;
 static atomic_uint arm_failures;
 static atomic_int partial_fd = -1;
 static atomic_int partial_phase;
+static atomic_int partial_type = TR_FRAME_STREAM_RESET;
 static atomic_int block_partial;
 static atomic_uint partial_eagain;
 static atomic_int block_all_tx;
@@ -101,7 +103,7 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 		    message->msg_iov[0].iov_len >= TR_WIRE_HEADER_SIZE) {
 			const uint8_t *bytes = message->msg_iov[0].iov_base;
 			if (tr_get_le16(bytes + TR_WIRE_OFF_TYPE) ==
-			    TR_FRAME_STREAM_RESET) {
+			    atomic_load(&partial_type)) {
 				struct msghdr cut = *message;
 				struct iovec first = message->msg_iov[0];
 				first.iov_len = 7;
@@ -194,6 +196,9 @@ static void on_stream(struct tr_stream_handle stream,
 	} else if (event == TR_STREAM_EVENT_ERROR) {
 		++f->errors;
 		f->error_status = status;
+	} else if (event == TR_STREAM_EVENT_REFUSED) {
+		assert(status == TR_ERR_NOMEM);
+		++f->refused;
 	} else if (event == TR_STREAM_EVENT_WRITABLE) {
 		++f->writable;
 	} else if (event == TR_STREAM_EVENT_REMOTE_CLOSED) {
@@ -395,6 +400,8 @@ static void destroy_fixture(struct fixture *f)
 	assert(tr_reactor_stop(f->reactor) == TR_OK);
 	atomic_store(&partial_fd, -1);
 	atomic_store(&partial_phase, 0);
+	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
+	atomic_store(&partial_eagain, 0);
 	atomic_store(&block_partial, 0);
 	atomic_store(&block_all_tx, 0);
 	atomic_store(&repeat_goaway_phase, 0);
@@ -847,11 +854,297 @@ static void test_open_admission_boundaries(int initial_credit)
 		destroy_fixture(&f);
 		return;
 	}
-	/* 无空闲流槽就没有待办责任；保留明确的容量失败，不增加拒绝表。 */
-	wait_count(&f, &f.down, 2);
-	assert(f.down_status == TR_ERR_NOMEM);
+	/* 容量不足必须拒绝尚未受理的新流，保留已有流与后续准入能力。 */
+	fputs("capacity refusal: expect REFUSED, keep stream 1 alive\n",
+	      stderr);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 3 &&
+	       h.message_id == (uint64_t)-TR_ERR_NOMEM);
+	for (uint32_t id = 5; id < 21; id += 2) {
+		send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, id, WINDOW, NULL, 0);
+		h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == id &&
+		       h.message_id == (uint64_t)-TR_ERR_NOMEM);
+		assert(tr_channel_active_streams(f.channel) == 1);
+	}
+	uint8_t bytes[8] = {1};
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1);
+	assert(count(&f, &f.down) == 0 && count(&f, &f.opened) == 1);
+	assert(reset(&f, f.stream[0], TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+	(void)open_remote(&f, 0, 21, 2);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void wait_rx_hold(struct fixture *f)
+{
+	for (unsigned i = 0;; ++i) {
+		struct tr_connection_stats stats;
+		assert(i < 5000);
+		assert(tr_reactor_get_connection_stats(f->connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.rx_paused)
+			return;
+		pause_ms();
+	}
+}
+
+static void test_refusal_pressure(unsigned ending)
+{
+	struct fixture f;
+	init_fixture(&f, 1, 0, 1, 1, 1);
+	(void)open_remote(&f, 0, 1, 1);
+	atomic_store(&block_all_tx, 1);
+	assert(tr_reactor_call(f.reactor,
+	                       ending == 4
+	                               ? control_pressure_without_retry_owner
+	                               : control_pressure_owner,
+	                       &f) == TR_OK);
+	/* 首次拒绝使用真实预留，第二次遇到忙预留，不能分配第二区域。 */
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 3, WINDOW, NULL, 0);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 5, WINDOW, NULL, 0);
+	if (ending == 4) {
+		wait_count(&f, &f.down, 2);
+		assert(f.down_status == TR_ERR_SYS);
+		assert(tr_channel_active_streams(f.channel) == 0);
+		destroy_fixture(&f);
+		return;
+	}
+	uint8_t bytes[8] = {1};
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, sizeof(bytes));
+	wait_rx_hold(&f);
+	assert(tr_channel_active_streams(f.channel) == 1);
+	assert(count(&f, &f.down) == 0 && count(&f, &f.received) == 0);
+	if (ending == 2) {
+		assert(tr_channel_detach_for_finalize(f.channel) == TR_OK);
+		struct tr_connection_stats stats;
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		assert(!stats.rx_paused);
+		destroy_fixture(&f);
+		return;
+	}
+	if (ending == 3) {
+		assert(tr_reactor_stop(f.reactor) == TR_OK);
+		destroy_fixture(&f);
+		return;
+	}
+	if (ending == 1)
+		assert(tr_channel_begin_drain(f.channel) == TR_OK);
+	atomic_store(&block_all_tx, 0);
+	for (unsigned i = 0; i < CONTROL; ++i) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 100 + i);
+	}
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 3);
+	h = receive_frame(&f, 0);
+	if (ending == 1) {
+		assert(h.type == TR_FRAME_GOAWAY && h.message_id == 1);
+		send_frame(&f, 0, TR_FRAME_GOAWAY, 0, 0, 0, NULL, 0);
+	} else {
+		assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 5);
+	}
+	wait_count(&f, &f.received, 1);
+	assert(reset(&f, f.stream[0], TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+	if (ending == 1)
+		assert(tr_channel_wait_drained(f.channel, 5000) == TR_OK);
+	else
+		(void)open_remote(&f, 0, 7, 2);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void test_refusal_reset_fairness(void)
+{
+	struct fixture f;
+	init_fixture(&f, 2, 0, 1, 1, 1);
+	struct tr_stream_handle first = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle second = open_remote(&f, 0, 3, 2);
+	atomic_store(&block_all_tx, 1);
+	assert(reset(&f, first, TR_ERR_CLOSED) == TR_OK);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 5, WINDOW, NULL, 0);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 7, WINDOW, NULL, 0);
+	wait_rx_hold(&f);
+	assert(reset(&f, second, TR_ERR_CLOSED) == TR_OK);
+	atomic_store(&partial_type, TR_FRAME_STREAM_REFUSED);
+	atomic_store(&partial_phase, 1);
+	atomic_store(&block_partial, 1);
+	atomic_store(&block_all_tx, 0);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1);
+	for (unsigned i = 0; !atomic_load(&partial_eagain); ++i) {
+		assert(i < 5000);
+		pause_ms();
+	}
+	wait_rx_hold(&f);
+	atomic_store(&block_partial, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 5);
+	/* 连续的新 OPEN 不能不断抢走预留，使已接受的 RESET 永久等待。 */
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 3);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 7);
+	peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+	peer_reset(&f, 0, 3, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 2);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void test_receive_refusal(unsigned invalid)
+{
+	struct fixture f;
+	struct tr_stream_handle stream, next;
+	struct tr_stream_flow_state flow;
+	init_fixture(&f, 1, invalid == 4, 1, 1, 1);
+	enum tr_lane lane = invalid == 4 ? TR_LANE_BULK : TR_LANE_CONTROL;
+	assert(tr_stream_open(f.channel, lane, &stream) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, (unsigned)lane);
+	assert(h.type == TR_FRAME_STREAM_OPEN);
+	uint32_t id = h.stream_id;
+	assert(reset(&f, stream, TR_ERR_CLOSED) == TR_AGAIN);
+	assert(tr_reactor_call(f.reactor, close_owner, &stream) == TR_AGAIN);
+	if (invalid == 2) {
+		send_frame(&f, 0, TR_FRAME_WINDOW_UPDATE, 0, id, WINDOW, NULL,
+		           0);
+		wait_count(&f, &f.opened, 1);
+	}
+	send_frame(&f, 0, TR_FRAME_STREAM_REFUSED, 0,
+	           invalid == 1 ? id + 2 : id, (uint64_t)-TR_ERR_NOMEM, NULL,
+	           0);
+	if (invalid == 1 || invalid == 2 || invalid == 4) {
+		wait_count(&f, &f.down, 1);
+		assert(count(&f, &f.refused) == 0);
+		destroy_fixture(&f);
+		return;
+	}
+	wait_count(&f, &f.refused, 1);
+	assert(tr_stream_get_flow_state(stream, &flow) == TR_ERR_STALE);
 	assert(tr_channel_active_streams(f.channel) == 0);
-	assert(count(&f, &f.resets) == 0);
+	/* 不回 RESET/CLOSE；后续帧必须是新 OPEN。旧代次不能命中新槽。 */
+	assert(tr_stream_open(f.channel, TR_LANE_CONTROL, &next) == TR_OK);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_OPEN && h.stream_id > id);
+	assert(next.slot == stream.slot &&
+	       next.generation != stream.generation);
+	if (invalid == 3) {
+		send_frame(&f, 0, TR_FRAME_STREAM_REFUSED, 0, id,
+		           (uint64_t)-TR_ERR_NOMEM, NULL, 0);
+		wait_count(&f, &f.down, 2);
+		assert(count(&f, &f.refused) == 1);
+	} else {
+		send_frame(&f, 0, TR_FRAME_WINDOW_UPDATE, 0, h.stream_id,
+		           WINDOW, NULL, 0);
+		wait_count(&f, &f.opened, 1);
+		assert(count(&f, &f.down) == 0 && count(&f, &f.errors) == 0);
+	}
+	destroy_fixture(&f);
+}
+
+static int refusal_full_queues_owner(void *arg)
+{
+	struct fixture *f = arg;
+	assert(control_pressure_owner(f) == TR_OK);
+	/* owner 内填满真实命令环，返回前不可能被调度器消费。 */
+	for (unsigned i = 0; i < COMMANDS - CONTROL; ++i)
+		assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
+	assert(tr_reactor_resume_rx(f->connection[0]) == TR_AGAIN);
+	assert(tr_reactor_send_stream_refused_on_owner(f->connection[0], 3) ==
+	       TR_OK);
+	assert(tr_reactor_send_stream_refused_on_owner(f->connection[0], 3) ==
+	       TR_OK);
+	assert(tr_reactor_send_stream_reset_on_owner(f->connection[0], 3,
+	                                             TR_ERR_NOMEM) == TR_AGAIN);
+	assert(tr_reactor_send_stream_refused_on_owner(f->connection[0], 5) ==
+	       TR_AGAIN);
+	return TR_OK;
+}
+
+static void test_refusal_full_queues(void)
+{
+	struct fixture f;
+	init_fixture(&f, 1, 0, 0, 0, 1);
+	atomic_store(&block_all_tx, 1);
+	assert(tr_reactor_call(f.reactor, refusal_full_queues_owner, &f) ==
+	       TR_OK);
+	atomic_store(&block_all_tx, 0);
+	for (unsigned i = 0; i < CONTROL; ++i) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 100 + i);
+	}
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 3);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void test_refusal_without_reset_feature(void)
+{
+	struct fixture f;
+	init_fixture(&f, 1, 0, 0, 0, 1);
+	struct tr_stream_handle stream = open_remote(&f, 0, 1, 1);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 3, WINDOW, NULL, 0);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 3);
+	assert(tr_reactor_call(f.reactor, close_owner, &stream) == TR_OK);
+	assert(receive_frame(&f, 0).type == TR_FRAME_STREAM_CLOSE);
+	send_frame(&f, 0, TR_FRAME_STREAM_CLOSE, 0, 1, 0, NULL, 0);
+	barrier(&f, 0);
+	(void)open_remote(&f, 0, 5, 2);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void test_refusal_split_progress(void)
+{
+	struct fixture f;
+	init_fixture(&f, 2, 1, 1, 1, 1);
+	(void)open_remote(&f, 0, 3, 1);
+	(void)open_remote(&f, 1, 1, 2);
+	atomic_store(&block_all_tx, 1);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 5, WINDOW, NULL, 0);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 7, WINDOW, NULL, 0);
+	wait_rx_hold(&f);
+	/* 控制连接的拒绝暂停不能阻止另一物理连接拒绝和交付已有数据。 */
+	send_frame(&f, 1, TR_FRAME_STREAM_OPEN, TR_FRAME_F_LANE_BULK, 9, WINDOW,
+	           NULL, 0);
+	struct tr_frame_header h = receive_frame(&f, 1);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 9);
+	uint8_t bytes[8] = {1};
+	send_frame(&f, 1, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1);
+	assert(tr_channel_active_streams(f.channel) == 2);
+	atomic_store(&block_all_tx, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 5);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 7);
+	assert(count(&f, &f.down) == 0);
+	destroy_fixture(&f);
+}
+
+static void test_refusal_partial(void)
+{
+	struct fixture f;
+	init_fixture(&f, 1, 0, 1, 1, 1);
+	(void)open_remote(&f, 0, 1, 1);
+	atomic_store(&partial_type, TR_FRAME_STREAM_REFUSED);
+	atomic_store(&partial_phase, 1);
+	send_frame(&f, 0, TR_FRAME_STREAM_OPEN, 0, 3, WINDOW, NULL, 0);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_REFUSED && h.stream_id == 3);
+	assert(atomic_load(&partial_phase) == 3 &&
+	       atomic_load(&partial_eagain) == 1);
+	assert(count(&f, &f.down) == 0);
 	destroy_fixture(&f);
 }
 
@@ -1078,15 +1371,15 @@ static void test_feature_gate(void)
 	destroy_fixture(&f);
 }
 
-static void test_wire_shape(void)
+static void test_wire_shape(uint16_t type)
 {
 	struct tr_frame_header h = {.version = TR_WIRE_ENV_VERSION,
-	                            .type = TR_FRAME_STREAM_RESET,
+	                            .type = type,
 	                            .stream_id = 1,
-	                            .message_id = 13};
+	                            .message_id = (uint64_t)-TR_ERR_NOMEM};
 	uint8_t bytes[TR_WIRE_HEADER_SIZE];
 	const struct tr_wire_limits limits = {FRAME};
-	for (unsigned bad = 0; bad <= 5; ++bad) {
+	for (unsigned bad = 0; bad <= 6; ++bad) {
 		struct tr_frame_header copy = h;
 		if (bad == 1)
 			copy.flags = TR_FRAME_F_FIRST;
@@ -1098,16 +1391,21 @@ static void test_wire_shape(void)
 			copy.message_id = UINT64_MAX;
 		if (bad == 5)
 			copy.message_id = 0;
+		if (bad == 6)
+			copy.message_id = (uint64_t)-TR_ERR_SYS;
 		assert(tr_wire_header_encode(bytes, &copy) == TR_OK);
 		assert(tr_wire_header_decode(bytes, &copy) == TR_OK);
 		int ret = tr_wire_header_validate(bytes, &copy, &limits);
-		assert(bad ? ret < 0 : ret == TR_OK);
+		assert(bad && !(bad == 6 && type == TR_FRAME_STREAM_RESET)
+		               ? ret < 0
+		               : ret == TR_OK);
 	}
 }
 
 int main(void)
 {
-	test_wire_shape();
+	test_wire_shape(TR_FRAME_STREAM_RESET);
+	test_wire_shape(TR_FRAME_STREAM_REFUSED);
 	test_feature_gate();
 	test_late_and_reuse();
 	test_reservation_and_fifo();
@@ -1118,6 +1416,15 @@ int main(void)
 	test_open_admission_boundaries(0);
 	test_open_admission_boundaries(1);
 	test_open_admission_boundaries(2);
+	for (unsigned i = 0; i < 5; ++i)
+		test_refusal_pressure(i);
+	test_refusal_reset_fairness();
+	for (unsigned i = 0; i < 5; ++i)
+		test_receive_refusal(i);
+	test_refusal_partial();
+	test_refusal_full_queues();
+	test_refusal_without_reset_feature();
+	test_refusal_split_progress();
 	test_receive_isolation(0);
 	test_receive_isolation(1);
 	test_closed_receive_resource_failure();
