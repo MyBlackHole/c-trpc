@@ -243,13 +243,13 @@ TLS-C review/plan 已记录 PR #310 merge commit `0fa90817c15286485ee2e1cfe8372b
 
 五种配置均执行配置、`xmake build --all -v` 和 `xmake test -v -j1`，各 88/88 通过；矩阵与复测日志保存在 `build/tls-d1/`。本机为 Arch Linux、GCC 16.2.1、Clang 23.1.3、OpenSSL 3.6.5、Xmake 3.1.2；不把本机结果称为 Ubuntu 22.04 / OpenSSL 3.0 的等价验证。SDK 白名单修正后的 dev.17 又通过 GCC Release 88/88。
 
-- [ ] **Step 3: 运行源码格式、安装消费端和固定静态分析**
+- [x] **Step 3: 运行源码格式、安装消费端和固定静态分析**
 
-本地修改行格式检查、22 项格式脚本自测、Make all/test/test-timer/clean/compiler-switch、安装头文件边界、GCC/Clang C11 与 G++/Clang++ C++11 公共头及 V2 消费端、portable CRC32C 和 QEMU 隐藏 SSE4.2 均通过。发现并修复 `peer_identity.h` 未安装问题。PR GCC 11 静态分析门禁已通过；Clang 14 的 8 条告警总数未变，其中 `tr_tx_pool_init()` 告警仅因前置 16 行新增状态声明从 345 移到 361；函数体一致，已只更新精确位置并保留 `unverified`，等待复跑。Xmake 3.1.2 下 `test_compile_commands.py` 的临时副本 project-dir 自测失败，但当前 checkout 的 GCC/Clang 编译数据库各 47 个生产单元校验通过。完整 OpenSSL/RSS 硬预算留给 TLS-E。
+本地修改行格式检查、22 项格式脚本自测、Make all/test/test-timer/clean/compiler-switch、安装头文件边界、GCC/Clang C11 与 G++/Clang++ C++11 公共头及 V2 消费端、portable CRC32C 和 QEMU 隐藏 SSE4.2 均通过。发现并修复 `peer_identity.h` 未安装问题。PR GCC 11/Clang 14 静态分析门禁均通过；Clang 14 的 8 条告警总数未变，其中 `tr_tx_pool_init()` 告警仅因前置 16 行新增状态声明从 345 移到 361；函数体一致，已只更新精确位置并保留 `unverified`。Xmake 3.1.2 下 `test_compile_commands.py` 的临时副本 project-dir 自测失败，但当前 checkout 的 GCC/Clang 编译数据库各 47 个生产单元校验通过，固定版本 CI 通过。完整 OpenSSL/RSS 硬预算留给 TLS-E。
 
-- [ ] **Step 4: 创建 TLS-D1 PR 并等待 GitHub CI 全绿**
+- [x] **Step 4: 创建 TLS-D1 PR 并等待 GitHub CI 全绿**
 
-`feat/v2-tls-d-234` 已推送至 `f8ce985`，TLS-D1 PR #311 已创建并等待固定版本 CI。PR 描述包含 D1 scope、版本序列、本地证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
+`feat/v2-tls-d-234` 的 TLS-D1 PR #311 已创建；提交 `b713801` 的 GCC/Clang 构建、GCC 11/Clang 14 静态分析、ASan/UBSan、TSan、Make/install、CRC fallback、RPC smoke 与格式门禁全部通过。PR 描述包含 D1 scope、版本序列、本地证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
 
 - [ ] **Step 5: 合并、更新 #234 并清理已合入远程分支**
 
