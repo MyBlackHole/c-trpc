@@ -18,6 +18,9 @@ jobs:
   build-test-gcc:
     name: build-test (gcc)
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +101,9 @@ jobs:
   build-test-clang:
     name: build-test (clang)
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -129,6 +135,9 @@ jobs:
   static-analysis-clang:
     name: static-analysis (clang-14)
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -181,6 +190,9 @@ jobs:
   static-analysis-gcc:
     name: static-analysis (gcc-11)
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -223,6 +235,9 @@ jobs:
   asan-ubsan:
     name: ASan + UBSan
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -267,6 +282,9 @@ jobs:
   tsan:
     name: ThreadSanitizer
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -310,6 +328,9 @@ jobs:
   build-smoke:
     name: Make compatibility + install
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -521,6 +542,9 @@ jobs:
   crc32c-cpu-fallback:
     name: CRC32C without SSE4.2
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

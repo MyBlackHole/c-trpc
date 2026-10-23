@@ -9,6 +9,9 @@ jobs:
   changed-source:
     name: 新增与修改行格式门禁
     runs-on: ubuntu-24.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

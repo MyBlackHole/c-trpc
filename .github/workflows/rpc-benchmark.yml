@@ -28,6 +28,9 @@ jobs:
   rpc-smoke:
     name: rpc-smoke (${{ matrix.cc }}, ${{ matrix.mode }})
     runs-on: ubuntu-22.04
+    env:
+      TMPDIR: ${{ runner.temp }}
+      XMAKE_TMPDIR: ${{ runner.temp }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
