@@ -93,6 +93,13 @@ struct tr_peer_identity_view {
 };
 ```
 
+内部 `peer_identity_internal.h` 定义不可变 refcount 对象及接口：
+`tr_peer_identity_snapshot_create(uri, len, &out)`、
+`tr_peer_identity_snapshot_retain(identity)`、
+`tr_peer_identity_snapshot_release(identity)`、
+`tr_peer_identity_snapshot_view(identity, &view)`。只有 `uri` 长度 1–512 且
+内容不含 NUL/ASCII 控制字符时允许创建；retain 溢出返回 `TR_ERR_STATE`。
+
 无证书连接必须给出 `NONE` 和空 URI；经过证书链与用途校验后给出
 `TLS_CERTIFICATE` 和已解析 URI。此视图不含 OpenSSL 类型，不代表调用凭证，也不
 延长对象寿命。
@@ -132,13 +139,14 @@ TRR1 再升级 TLS。CONTROL 准入成功后，session 保存 peer identity 引�
 TLS 配置代次。DATA 认证或绑定失败只拒绝该物理 DATA 连接并撤销该 route reservation，
 不能污染已建立的 CONTROL session 或错误释放其他 member。
 
-在 `peer_identity.h` 中定义 `enum tr_connection_group_role`，取值为 CONTROL=1、
-DATA=2；以及 `struct tr_connection_group_authorization`，字段为 group、role、peer
-identity 和 control identity。CONTROL 回调中的 control identity 必须为空；DATA
-回调中的 control identity 是该活动组已经授权的主体。把公开配置中的 authorize
-回调改为 `int (*)(const struct tr_connection_group_authorization *, void *)`。回调
-成功不替代 listener 自己做的 route/member/代次校验。回调不得访问未验证的证书
-字段或阻塞等待其他 I/O 域。
+在 `transport.h` 定义 `enum tr_connection_group_role`，取值为 CONTROL=1、DATA=2；
+以及 `struct tr_connection_group_authorization`，字段为 `struct
+tr_connection_group_id group`、`role`、`peer_identity` 和 `control_identity`。
+CONTROL 回调中的 control identity 必须为空；DATA 回调中的 control identity 是
+该活动组已经授权的主体。把公开配置中的 authorize 回调改为
+`int (*)(const struct tr_connection_group_authorization *, void *)`。回调成功不替代
+listener 自己做的 route/member/代次校验。回调不得访问未验证的证书字段或阻塞
+等待其他 I/O 域。
 
 Client/Server TLS profile 更新函数只能从外部控制线程调用；owner、RPC work 或
 message/event callback 中调用返回 `TR_ERR_STATE`。另一个更新正在进行时返回
