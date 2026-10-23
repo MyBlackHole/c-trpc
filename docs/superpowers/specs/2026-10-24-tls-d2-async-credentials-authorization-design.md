@@ -1,7 +1,7 @@
 # TLS-D2：异步凭证与连接组远端授权设计
 
 日期：2026-10-24
-状态：设计稿，待用户审阅
+状态：按继续开发指令进入实施阶段
 关联：[TLS 总任务 #234](https://github.com/MyBlackHole/c-trpc/issues/234)、
 [异步操作与取消 #243](https://github.com/MyBlackHole/c-trpc/issues/243)、
 [TLS-D1 设计](2026-10-23-tls-d1-mtls-group-identity-design.md)、
@@ -17,8 +17,8 @@ profile 只从文件创建；它们适用于本地快速策略与静态部署，
 TLS-D2 为这些外部操作提供应用可实现的通用异步 provider：
 
 1. 从 Client/Server 控制流程显式启动凭证获取或刷新；初次凭证也可以由 provider 提供，
-   不要求落盘。成功材料在非 Reactor 执行域校验并构造为不可变 TLS profile，再沿用
-   D1 的全 owner 屏障发布。
+   不要求落盘。provider completion 只复制到有界槽；调用方在外部控制线程取得完成结果时
+   校验并构造不可变 TLS profile，再沿用 D1 的全 owner 屏障发布。
 2. 在连接组 CONTROL/DATA 完成 TLS 身份认证、但会话或 route 尚未提交时异步请求授权。
    未收到许可之前不得发送/接收 TRR1 后续业务、提交 CONTROL session 或激活 DATA route。
 3. 对每个异步操作提供有限槽位、代次句柄、一次性完成、合作式取消和迟到结果丢弃。
@@ -38,7 +38,8 @@ D2 不新增凭证厂商适配，不在每个 accept 上访问外部凭证服务
 - `tr_connection_group_authorize_cb` 在单个 Pipeline listener 的 Reactor owner 上同步执行；
   CONTROL/DATA 的身份视图只在回调期间借用。
 - Reactor 有跨线程唤醒与辅助事件入口，服务端现有工作执行器有有限槽位、取消令牌和
-  owner 完成交付；它只覆盖当前记录 RPC 用途，没有公开的 provider 操作能力。
+  owner 完成交付；它只覆盖当前记录 RPC 用途。Client 与 transport-only Server 没有共同的
+  后台执行器，因此 TLS profile 解析由显式的外部控制线程完成，不引入每 facade 线程池。
 - `tr_task_executor` 的取消是合作式；取消不释放仍在工作的参数，owner 静默和完成交付
   是分开的生命周期屏障。D2 必须保留这些语义，不强杀应用代码。
 - 已接受的远端操作不能依赖普通有界 command 队列里“以后再试”才得到终局；完成槽位、
@@ -57,13 +58,13 @@ D2 不新增凭证厂商适配，不在每个 accept 上访问外部凭证服务
 ### 方案 A：应用通用异步 provider + 有界操作槽（采用）
 
 provider 启动外部 I/O 后立即返回；外部线程以一个带 instance/slot/generation 的值句柄
-提交结果。库先预留 operation 与 completion 容量，再调用 provider；完成只写入该操作的
-预留结果槽并唤醒 owner，不在 provider 线程上运行 Reactor、RPC 或应用回调。凭证 profile
-构建交给 #243 的共享有限执行域，完成后通过 D1 多 owner 屏障发布。现有 `task_executor`
-作为基础能力扩展/复用，不再为 TLS 建一套线程生命周期。
+提交结果。库先预留 operation 与 completion 容量，再调用 provider；complete 只复制到
+预留结果槽并唤醒对应连接 owner，不在 provider 线程执行协议状态转换。凭证 refresh 的
+poll/finish 由外部控制线程调用，完成有界 PEM 解析和 D1 多 owner 屏障发布；不新增线程池，
+也不把磁盘/网络 I/O 放进库。连接组授权 completion 由 Reactor 辅助事件唤醒原 owner 处理。
 
 优点是支持事件循环式 secret store 和授权服务、没有外部等待占用 Reactor、凭证和授权
-共享同一取消/代次/完成模型。代价是需要把 #243 的操作完成能力补到足够支撑 Client、
+共享同一取消/代次/完成合同。代价是需要把 #243 的操作完成能力补到足够支撑 Client、
 Server 和连接组；D2 不扩展为一次性完成全部 #243。
 
 ### 方案 B：库在工作线程执行应用同步 provider
@@ -93,7 +94,7 @@ FREE -> RESERVED -> ACCEPTED -> COMPLETION_READY -> OWNER_RETIRED -> FREE
                                 \-> CANCEL_REQUESTED -> COMPLETION_READY
 ```
 
-- `reserve` 在回调前取得一个操作槽、完成记录、结果容量和 owner 唤醒责任。容量满或所需预算
+- `reserve` 在回调前取得一个操作槽、完成记录、结果容量和消费者通知责任。容量满或所需预算
   无法预留时返回 `TR_AGAIN`，不调用 provider、不借走输入、不创建半准入 session/route。
 - 操作在 provider `start` 被调用前转为 `ACCEPTED`。start 是 `void` 通知；它不能拒绝一个已接收
   的操作。若无法启动外部工作，provider 必须立刻以错误结果调用 `complete`。这样公共发起 API
@@ -102,7 +103,9 @@ FREE -> RESERVED -> ACCEPTED -> COMPLETION_READY -> OWNER_RETIRED -> FREE
   start/cancel 回调只启动/通知，不得阻塞、分配无界工作、重入同一 Client/Server 生命周期
   操作或直接修改 Reactor/OpenSSL/route。
 - `complete` 可跨线程调用；它只校验句柄、线性化一次完成、将结果复制到准入时预留并计费的
-  有界结果槽、唤醒 owner，不内联执行应用回调或协议状态转换。成功复制后 provider 的输入
+  有界结果槽。凭证操作标记结果可供显式 poll，并唤醒等待者；连接授权操作只写 listener 的
+  预留槽并唤醒其 Reactor owner。它不内联执行应用回调、profile 构造或协议状态转换。成功
+  复制后 provider 的输入
   缓冲即可由 provider 清理；对重复/过期句柄返回 `TR_ERR_STALE`。同步 complete 与 cancel
   竞争由同一操作锁/原子状态确定唯一先胜者；合法的首次 completion 不会因队列满或后置分配
   失败而丢失。
@@ -126,16 +129,20 @@ profile refresh；并发 refresh 返回 `TR_AGAIN`。凭证操作准入时按配
 provider 前返回 `TR_AGAIN`。超过 bundle 上限或结构不合法的首次 completion 被记为该操作的终态
 错误，并释放预留容量；它不能要求 provider 再猜测是否需要补发。完成写入每个已接受操作预留的
 槽位，因此普通命令队列满不丢终局；
-eventfd 唤醒失败时仍保留结果，并用既有 owner 维护/恢复路径有界重试。
+连接授权的 eventfd 唤醒失败时仍保留结果；已有握手 timer 在下一维护轮次处理完成槽，
+eventfd 饱和的 `EAGAIN` 视为已有可读通知。凭证操作不依赖 owner 唤醒，provider 调用方负责
+在自己的控制循环中 poll；完成结果保留到 poll、取消或 destroy 消费。
 
 D2 在 facade 配置中新增操作槽上限，建议默认 64；凭证 bundle 字节上限建议默认 4 MiB。两个值
-都可显式调整，但不能突破 facade memory budget；Server 授权操作的实际并发数还受连接组
-`max_connections` 限制。设操作槽上限为 0 表示不启用异步 provider，不影响既有静态 profile 和
-同步授权。
+都加入 `tr_facade_limits` 并可显式调整，但不能突破 facade memory budget；按现有
+`tr_facade_limits_init()` 约定，值为 0 时归一化为默认值。未配置 provider 才表示不启用异步
+操作；Server 授权操作的实际并发数还受连接组 `max_connections` 限制。
 
 凭证刷新是公开异步控制操作：调用方提供有限、非零 `timeout_ms` 与 D1 轮换策略，并取得
 operation handle；
-成功准入后可用对应 Client/Server 的 poll API 查询状态，也可请求取消。超时值转为单调时钟
+成功准入后可用对应 Client/Server 的 poll API 查询状态，也可请求取消。poll 只可从外部控制
+线程调用；provider 尚未 complete 时它非阻塞地返回 `TR_AGAIN`，provider complete 后首次 poll
+在该调用线程执行 PEM 校验、profile 构造和 D1 全 owner 发布，可能等待 owner 屏障。超时值转为单调时钟
 绝对 deadline，溢出时拒绝操作。未完成时 poll 返回 `TR_AGAIN` 且不改输出；完成时一次 poll
 本身返回 `TR_OK`，并在结果结构中给出终态错误码和已发布 generation，然后退休该刷新槽。终态
 取消使用新增的 `TR_ERR_CANCELLED`，超期使用 `TR_ERR_TIMEOUT`。请求取消后，poll 继续返回
@@ -179,7 +186,7 @@ bundle 总字节数受配置的有限上限约束，初始建议 4 MiB；该上�
 它必须返回 `TR_OK`，随后仍须等异步 provider 的 ALLOW；同步拒绝时不调用远端 provider。只配置
 一种授权入口时执行该入口；Server 至少须配置一种授权入口。现有 Server 校验“连接组启用时
 authorize 非空”的规则相应改为“同步 authorize 或异步 authorize provider 至少配置一个”。
-若配置异步 provider 但操作槽上限为 0，则配置校验失败。授权请求携带 group id/epoch、
+若配置异步 provider，必须同时提供合作式 cancel 回调。授权请求携带 group id/epoch、
 CONTROL/DATA role、已验证的 peer URI 身份、DATA 对应的 CONTROL 身份、TLS generation 和绝对
 deadline。身份数据只在
 provider start 回调借用有效；库自己在操作期间 retain 所需快照。
@@ -196,8 +203,9 @@ provider start 回调借用有效；库自己在操作期间 retain 所需快照
 
 1. 在预留槽后调用 fetch provider；deadline、facade 销毁或显式 cancel 都请求取消；同一 facade
    同时只允许一个刷新，因此不会接受替换/并发请求。
-2. provider completion 送入非 Reactor profile-build 域。验证材料长度、PEM/链、用途、私钥
-   匹配和配置策略；构造失败只丢弃候选，不改变当前 snapshot。
+2. provider completion 仅将 bundle 复制到预留槽。外部控制线程 poll 到结果后验证材料长度、
+   PEM/链、用途、私钥匹配和固定配置策略，再构造候选 profile；构造失败只丢弃候选，不改变
+   当前 snapshot。
 3. 候选通过 D1 全 owner pause/install/rollback 屏障。全部 owner 接受后一次性发布 generation
    并恢复准入；任一失败则在 gate 关闭期间恢复旧 profile，旧 generation 保持不变。
 4. 成功/失败对发起者可观察；输出 generation 只在全局发布成功后写入。generation 发布是
