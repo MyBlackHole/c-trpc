@@ -94,6 +94,14 @@ int tr_reactor_send_goaway_on_owner(struct tr_conn_handle connection,
  */
 int tr_reactor_notify_tx_drained_on_owner(struct tr_conn_handle connection);
 
+/* 所有者登记/取消一次控制发送容量观察。每连接固定一个等待项；池和命令
+ * 容量可用时在调度点通过既有 event_cb 发送 CONTROL_TX_READY，先摘除再
+ * 回调。通知不预留空位，竞争失败者须重新登记。重复登记幂等且不改变 FIFO。
+ * 回调共用 TX 分派预算；关闭或替换处理器自动取消，不会在本函数内回调。
+ * 使用者必须在释放回调参数之前取消观察或成功解绑处理器。 */
+int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle connection,
+                                         int enabled);
+
 /* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
  * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，
  * 相同在途项幂等，其他流返回 AGAIN。帧前保留全部已接受命令和 DATA。

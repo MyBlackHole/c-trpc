@@ -61,6 +61,7 @@ struct tr_reactor_work {
 	uint64_t rx_bytes;
 	uint64_t tx_bytes;
 	uint64_t rx_dispatches;
+	/* 包含 TX 就绪访问与显式登记的控制容量通知，共用每轮上限。 */
 	uint64_t tx_dispatches;
 };
 
@@ -116,7 +117,9 @@ enum tr_connection_event {
 	TR_CONN_EVENT_CLOSED = 1,
 	TR_CONN_EVENT_ERROR = 2,
 	/* 仅显式登记发送排空观察的内部使用者收到；连接仍然存活。 */
-	TR_CONN_EVENT_TX_DRAINED = 3
+	TR_CONN_EVENT_TX_DRAINED = 3,
+	/* 仅显式登记的内部使用者收到一次控制发送容量就绪观察。 */
+	TR_CONN_EVENT_CONTROL_TX_READY = 4
 };
 
 typedef enum tr_frame_disposition (*tr_reactor_frame_cb)(

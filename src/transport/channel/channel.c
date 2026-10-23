@@ -1519,8 +1519,15 @@ static void tr_channel_open_progress_on_owner(struct tr_channel *channel)
 			}
 		}
 		pthread_mutex_unlock(&channel->lock);
-		if (ret == TR_AGAIN)
-			continue;
+		if (ret == TR_AGAIN) {
+			ret = tr_reactor_watch_control_tx_on_owner(connection,
+			                                           1);
+			if (ret == TR_OK)
+				continue;
+		}
+		if (ret == TR_OK)
+			ret = tr_reactor_watch_control_tx_on_owner(connection,
+			                                           0);
 		if (ret == TR_OK)
 			ret = tr_reactor_set_rx_hold_on_owner(connection, 0);
 		if (ret != TR_OK) {
@@ -2106,11 +2113,14 @@ static int tr_channel_handle_stream_open(struct tr_channel *channel,
 		assert(!channel->pending_open[connection_index].channel);
 		channel->pending_open[connection_index] = handle;
 		pthread_mutex_unlock(&channel->lock);
-		/* 先取得唯一维护定时器的恢复责任，再暂停此连接。不能把
-		 * 有界池的暂时满载解释为协议错误并连带中止已受理流。 */
+		/* 先取得维护定时器的兜底责任，再暂停并登记容量通知。
+		 * 有界池暂满不能连带中止已受理流；实际重试在所有者调度点。 */
 		ret = tr_channel_reset_timer_on_owner(channel);
 		if (ret == TR_OK)
 			ret = tr_reactor_set_rx_hold_on_owner(connection, 1);
+		if (ret == TR_OK)
+			ret = tr_reactor_watch_control_tx_on_owner(connection,
+			                                           1);
 		return ret == TR_OK ? TR_OK
 		                    : tr_channel_protocol_error(
 		                              channel, connection, ret);
@@ -2648,6 +2658,10 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 	int bulk_down = 0;
 	int stream_status = status == TR_OK ? TR_ERR_CLOSED : status;
 
+	if (event == TR_CONN_EVENT_CONTROL_TX_READY) {
+		tr_channel_open_progress_on_owner(channel);
+		return;
+	}
 	pthread_mutex_lock(&channel->lock);
 	if (event == TR_CONN_EVENT_TX_DRAINED) {
 		int idx = tr_channel_keepalive_index_for_connection(channel,
