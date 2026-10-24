@@ -12,6 +12,7 @@
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define TR_AUTO(cleanup_fn) __attribute__((cleanup(cleanup_fn)))
+#define TR_CLEANUP_UNUSED __attribute__((unused))
 #else
 #error "c-trpc requires GCC/Clang cleanup attribute support"
 #endif
@@ -30,8 +31,7 @@
 			*resource = NULL;                                      \
 		}                                                              \
 	}                                                                      \
-	static inline __attribute__((unused)) type *prefix##_take(             \
-	        type **resource)                                               \
+	static inline TR_CLEANUP_UNUSED type *prefix##_take(type **resource)   \
 	{                                                                      \
 		type *value = resource ? *resource : NULL;                     \
 		if (resource)                                                  \
