@@ -54,6 +54,10 @@ jobs:
           export PYTHONDONTWRITEBYTECODE=1
           python3 scripts/test_rpc_v2_model.py -v
           python3 scripts/test_rpc_v2_component_replay.py -v
+          python3 scripts/test_rpc_v2_trace_explorer.py -v
+          python3 scripts/rpc_v2_trace_explorer.py \
+            --seed 33047 --cases 64 --max-events 48 \
+            --failure-dir build/test-tmp/rpc-v2-trace-explorer
           python3 scripts/rpc_v2_component_replay.py \
             --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
           python3 scripts/rpc_v2_component_replay.py \
@@ -65,6 +69,14 @@ jobs:
           python3 scripts/rpc_v2_component_replay.py \
             --trace tests/fixtures/rpc_v2_model/component-final-reset-after-accepted-v1.json \
             --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
+      - name: 保留 RPC V2 TEST-C1 失败轨迹
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpc-v2-test-c1-failure-replay
+          path: build/test-tmp/rpc-v2-trace-explorer/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: 核验 RPC V1 退役引用与生产对象链接证据
         run: |
           set -euo pipefail

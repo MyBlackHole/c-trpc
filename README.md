@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.32` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.33` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -48,6 +48,25 @@ dev.32 增加 TEST-B4 成功 FINAL 已接受后收到 RESET 的竞争轨迹；En
 派发调度或真实 TCP；可用 `--trace` 指向
 `tests/fixtures/rpc_v2_model/component-final-reset-after-accepted-v1.json` 执行第四条回放。
 四条回放仍运行在既有 `build-test (gcc)` job 中。
+dev.33 增加 TEST-C1 固定种子模型探索与确定性轨迹缩减：自有 xorshift32 PRNG
+生成 schema v1 事件，默认探索 64 个 seed、每条最多 48 个事件；同一模型负责生成期望
+并检查回放不变量。已知重复终局回调 mutant 只用于 Python 测试，验证失败报告和缩减器，
+不进入 CLI 默认路径、生产 C 或 Endpoint 适配器。这是 L1 工具链验证，不代表生产对象故障
+注入或 #247/V2 验收完成。运行自测与探索器：
+
+```sh
+mkdir -p build/test-tmp
+PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" \
+  python3 scripts/test_rpc_v2_trace_explorer.py -v
+PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" \
+  python3 scripts/rpc_v2_trace_explorer.py \
+  --seed 33047 --cases 64 --max-events 48 \
+  --failure-dir build/test-tmp/rpc-v2-trace-explorer
+```
+
+发现模型回放或不变量异常时，命令返回 1，在 stdout 输出包含原始与最小轨迹的 JSON，并在工作区
+保存 `original.json` 和 `minimized.json`；参数错误或工件写入失败返回 2。
+普通成功仅输出固定摘要。后续 TEST-C2 仍需把确定性故障注入接到真实 C 组件。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、

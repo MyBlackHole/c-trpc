@@ -16,7 +16,7 @@ MAX_SLOT = 1
 MAX_GENERATION = 3
 MAX_LEASE = 7
 
-TASK_IDS = frozenset({"#247/TEST-A", "#247/TEST-B"})
+TASK_IDS = frozenset({"#247/TEST-A", "#247/TEST-B", "#247/TEST-C"})
 INVARIANT_IDS = frozenset({
     "CALL-01", "CALL-02", "OWN-01", "DIR-01", "RES-01", "RES-02",
     "GEN-01",
