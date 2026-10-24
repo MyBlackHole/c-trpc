@@ -250,6 +250,11 @@ Channel 两条连接独立前沿产生相同 ID 墓碑。FIFO 覆盖时删除旧
 通过。索引期望 O(1)，碰撞最坏仍为 O(max_streams)；实际连接上的长期高负载与碰撞压力仍待验收。详见
 [RESET 墓碑查询索引记录](rpc_v2_reset_tombstone_index_20261025.md)。
 
+dev.63 补齐 `test_rpc_record_endpoint_tcp` 手动维护的生产对象闭包，使其包含 dev.62 新增的
+RESET 墓碑索引模块；GCC 精确诊断基线同步反映 `channel.c` 顶部结构搬移导致的既有告警行号变化，诊断本身未变。
+该修复只影响测试链接和诊断定位，不改运行时逻辑；完整矩阵待本次 CI 复验。详见
+[RESET 索引测试链接修复记录](rpc_v2_reset_tombstone_build_linkage_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

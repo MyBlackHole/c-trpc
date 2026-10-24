@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.62")
+set_version("2.0.0-dev.63")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -887,6 +887,7 @@ target("test_rpc_record_endpoint_tcp")
             "src/transport/protocol/parser.c",
             "src/transport/channel/channel.c",
             "src/transport/channel/channel_stream_id.c",
+            "src/transport/channel/reset_tombstone_index.c",
             "src/rpc/rpc_record.c",
             "src/rpc/rpc_record_stream.c",
             "src/rpc/rpc_record_router.c",
