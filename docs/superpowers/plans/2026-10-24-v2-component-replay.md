@@ -44,9 +44,9 @@
 ## 任务 5：验证并登记 Draft PR
 
 - [x] Python 单测、TEST-A 28 项、C Endpoint 夹具、GCC Debug/Release 全量测试与 CLI 对照通过。
-- [ ] `git diff --check`；确认没有 `/tmp`、产品源、公开头、依赖、稳定 check 名称变更。
-- [ ] 使用十项中文 feature commit 格式记录 dev.28 -> dev.29。
-- [ ] 推送 `feat/v2-test-b-deterministic-replay-247`，创建 base 为 TEST-A PR 的 Draft PR；检查通过后更新记录。
+- [x] `git diff --check`；确认没有 `/tmp`、产品源、公开头、依赖、稳定 check 名称变更。
+- [x] 使用十项中文 feature commit 格式记录 dev.28 -> dev.29。
+- [x] 推送 `feat/v2-test-b-deterministic-replay-247`，创建 base 为 TEST-A PR 的 Draft PR；PR #318 实现 SHA 首轮 14/14 检查通过并已登记。
 
 ## 计划自审
 

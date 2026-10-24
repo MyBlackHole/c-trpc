@@ -38,7 +38,9 @@ TEST-C 故障注入/缩减、TEST-D 集成与平台矩阵、TEST-E 诊断和容�
 dev.29 的 TEST-B1 在同一 TEST-A 轨迹上驱动真实 RPC Record Endpoint 测试夹具，检查取消后
 迟到工作、重复终局回调和账本归零；Reactor、Channel、Dispatch 与 Executor 仍为受控替身，
 未覆盖 TCP/真实派发调度。当前本地 GCC Debug/Release 均为 90/90，组件夹具为 35/35；
-PR 与远程 CI 验收状态见 [TEST-B1 记录](rpc_v2_component_replay_20261024.md)。
+Draft PR #318 的实现提交 `f3fc0abb2766fc24bb6c737cd9f03d0702f4343c` 已通过 14/14 GitHub
+检查，仍未合并；完整边界与本地/远端证据见
+[TEST-B1 记录](rpc_v2_component_replay_20261024.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的

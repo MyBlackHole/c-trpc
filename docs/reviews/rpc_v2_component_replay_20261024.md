@@ -47,4 +47,8 @@ Xmake 全量测试后；没有新增作业或重命名稳定 check。
 
 TEST-A 前置 Draft [PR #317](https://github.com/MyBlackHole/c-trpc/pull/317) 的 head
 `d51984ffb0435bebd75984502f3fa2af902db995` 已有 14/14 检查通过，当前仍 Open/Draft、未合并。
-TEST-B1 的 Draft PR 与 GitHub 检查结果将在推送后登记；在其检查完成前不宣称远程验收通过。
+TEST-B1 Draft [PR #318](https://github.com/MyBlackHole/c-trpc/pull/318) 的实现提交
+`f3fc0abb2766fc24bb6c737cd9f03d0702f4343c` 首轮 **14/14 GitHub 检查全部通过**，包括 GCC/Clang
+全量构建与测试、ASan/UBSan、TSan、静态分析、RPC smoke、安装/Make、CRC32C 可移植路径和
+新增/修改行格式门禁。PR 仍为 Open/Draft、尚未合并。后续只登记本验证记录的提交不改变实现；
+不得以该 PR 的局部通过结果宣称 #247 或 V2 整体验收完成。
