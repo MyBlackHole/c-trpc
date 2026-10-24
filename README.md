@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.52` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.53` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -185,6 +185,13 @@ dev.52 为 #242/ERR-A 增加路由拒绝期间的活动同伴隔离回归，覆�
 连接保持 ACTIVE，释放 gate 后同伴以 OK 唯一完成。GCC Release 与 TSan 下完整 `test_rpc_record_endpoint_tcp`
 均通过。该切片补充两类路由错误，不代表 ERR-A 完整分类矩阵或 ERR-B/C/D/E 已完成。详见
 [路由拒绝活动同伴隔离记录](docs/reviews/rpc_v2_router_rejection_active_sibling_20261025.md)。
+
+dev.53 为 #242/ERR-D 增加公开连接组双 DATA 成员 drain 回归：两个真实 DATA 帧经不同物理连接发送；Client/Server
+开始排空后拒绝新 Offer/Ready，任一传输未释放时双方仍不能完成排空。释放两个传输后 Client 可完成本地排空，
+但 Server 会继续等待两条 DATA 成员由 Client 关闭；成员全部退出后才报告 Server drain 完成，最终组/连接/传输计数归零。
+同时把 SDK Client 测试清理改为对契约允许的 `TR_AGAIN` 做有界重试，其他错误仍立即失败。GCC Release 与 TSan 下
+完整 `test_connection_group_facade`、`test_rpc_v2_sdk` 均通过。该切片不覆盖发送中/压缩中排空、连接故障和完整组合矩阵。
+详见[双 DATA 成员连接组排空记录](docs/reviews/rpc_v2_group_multi_data_drain_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

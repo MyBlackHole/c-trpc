@@ -49,6 +49,11 @@ static pthread_cond_t group_data_tx_probe_cond = PTHREAD_COND_INITIALIZER;
 static unsigned group_data_tx_blocked_attempts;
 static atomic_uint group_capability_frames_sent;
 static atomic_uint group_compressed_multiframe_submissions;
+static pthread_mutex_t group_route_probe_lock = PTHREAD_MUTEX_INITIALIZER;
+static int group_route_probe_enabled;
+static uint64_t group_route_probe_message_ids[2];
+static struct tr_conn_handle group_route_probe_connections[2];
+static unsigned group_route_probe_seen;
 static atomic_int hold_group_zstd_completion;
 static atomic_int hold_group_zstd_decompression;
 static pthread_mutex_t group_zstd_gate_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -123,6 +128,19 @@ int __wrap_tr_reactor_sendv_limited(struct tr_conn_handle connection,
 	ret = __real_tr_reactor_sendv_limited(
 	        connection, type, flags, stream_id, message_id, payloads,
 	        payload_count, max_frame_payload_len);
+	if (ret == TR_OK && type == TR_FRAME_DATA) {
+		unsigned i;
+
+		pthread_mutex_lock(&group_route_probe_lock);
+		if (group_route_probe_enabled)
+			for (i = 0U; i < 2U; ++i)
+				if (message_id ==
+			            group_route_probe_message_ids[i]) {
+					group_route_probe_connections[i] = connection;
+					group_route_probe_seen |= 1U << i;
+				}
+		pthread_mutex_unlock(&group_route_probe_lock);
+	}
 	return ret;
 }
 
@@ -254,6 +272,7 @@ struct public_group_ctx {
 	int ready_send_first_ret;
 	int ready_send_second_ret;
 	unsigned retry_messages;
+	unsigned multi_drain_messages;
 	unsigned compressed_frames;
 	unsigned compressed_first;
 	unsigned compressed_last;
@@ -467,6 +486,24 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 			return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 	}
+	if (message->message_id == UINT64_C(6201) ||
+	    message->message_id == UINT64_C(6202)) {
+		uint32_t expected_stream =
+		        message->message_id == UINT64_C(6201) ? 5001U : 5002U;
+		uint8_t expected_byte =
+		        message->message_id == UINT64_C(6201) ? 0x31U : 0x32U;
+
+		assert(message->stream_id == expected_stream);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 1U &&
+		       message->bytes.data[0] == expected_byte);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->multi_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
 
 	assert(message->stream_id == 5001U);
 	if (message->message_id == UINT64_C(4202)) {
@@ -572,6 +609,8 @@ static const char *counter_name(
 		return "messages";
 	if (counter == &ctx->retry_messages)
 		return "retry_messages";
+	if (counter == &ctx->multi_drain_messages)
+		return "multi_drain_messages";
 	if (counter == &ctx->compressed_done)
 		return "compressed_done";
 	if (counter == &ctx->transfer_ready)
@@ -1665,6 +1704,184 @@ static void test_public_connection_group_client_data_offer(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_multi_data_drain(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_connection_group_client_stats client_stats;
+	struct tr_connection_group_server_stats server_stats;
+	struct tr_conn_handle data_routes[2];
+	uint8_t first_payload = 0x31U;
+	uint8_t second_payload = 0x32U;
+	struct tr_transport_bytes first_bytes = {&first_payload, 1U};
+	struct tr_transport_bytes second_bytes = {&second_payload, 1U};
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 3U;
+	server_config.connection_groups.max_data_connections_per_group = 2U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(
+		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 2U;
+	client_config.connection_groups.max_active_transfers = 2U;
+	client_config.connection_groups.on_transfer_ready =
+		on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	ctx.client = client;
+
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(
+		       client, "127.0.0.1", group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_data_offer(server, UINT64_C(6101)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	assert(wait_data_offer(server, UINT64_C(6102)) == TR_OK);
+	wait_data_accepts(server, 2U);
+
+	/* 服务端按 DATA 成员轮转分配两个传输；客户端校验并接纳各自代次。 */
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
+		       UINT64_C(6301)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.ready_stream_id == 5001U &&
+	       ctx.ready_message_id == UINT64_C(6301));
+	pthread_mutex_unlock(&ctx.lock);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
+		       UINT64_C(6302)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 2U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.ready_stream_id == 5002U &&
+	       ctx.ready_message_id == UINT64_C(6302));
+	pthread_mutex_unlock(&ctx.lock);
+
+	/* 记录真实 DATA 帧的物理连接，确认两个传输落在不同成员。 */
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_message_ids[0] = UINT64_C(6201);
+	group_route_probe_message_ids[1] = UINT64_C(6202);
+	memset(group_route_probe_connections, 0,
+	       sizeof(group_route_probe_connections));
+	group_route_probe_seen = 0U;
+	group_route_probe_enabled = 1;
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(tr_client_connection_group_send(
+		       client, 5001U, UINT64_C(6201), &first_bytes) == TR_OK);
+	assert(tr_client_connection_group_send(
+		       client, 5002U, UINT64_C(6202), &second_bytes) == TR_OK);
+	wait_counter(&ctx, &ctx.multi_drain_messages, 2U);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_enabled = 0;
+	assert(group_route_probe_seen == 3U);
+	data_routes[0] = group_route_probe_connections[0];
+	data_routes[1] = group_route_probe_connections[1];
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(data_routes[0].reactor == data_routes[1].reactor &&
+	       (data_routes[0].slot != data_routes[1].slot ||
+	        data_routes[0].generation != data_routes[1].generation));
+
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.data_connections == 2U &&
+	       client_stats.active_transfers == 2U &&
+	       client_stats.send_bytes_inflight == 0U);
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.data_connections_current == 2U &&
+	       server_stats.active_transfers == 2U);
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_send_data_offer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+		       UINT64_C(6103)) == TR_ERR_CLOSED);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5003U,
+		       UINT64_C(6303)) == TR_ERR_CLOSED);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	/* 只释放一个 DATA 成员上的传输时，两端排空仍等待另一个传输。 */
+	assert(tr_client_connection_group_release_transfer(client, 5001U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 1U);
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.active_transfers == 1U &&
+	       server_stats.data_connections_current == 2U);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	assert(tr_client_connection_group_release_transfer(client, 5002U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U) == TR_OK);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 5000U) == TR_OK);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 0U &&
+	       client_stats.data_connections == 2U);
+
+	/* CONTROL 关闭带走两条已附着 DATA 连接后，服务端才报告完整排空。 */
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_counter(&ctx, &ctx.data_events, 2U);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 5000U) == TR_OK);
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.groups_current == 0U &&
+	       server_stats.connections_current == 0U &&
+	       server_stats.data_connections_current == 0U &&
+	       server_stats.active_transfers == 0U);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_client_destroy_after_group_close(client);
+	assert(tr_server_destroy(server) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("connection_group_facade: multi-DATA drain passed");
+}
+
 static void test_public_connection_group_client_connector_failure_wakes(void)
 {
 	struct tr_server_config server_config;
@@ -2393,6 +2610,7 @@ int main(void)
 	test_client_group_close_retry_preserves_control();
 	test_public_connection_group_client_destroy_with_data_tx_inflight();
 	test_public_connection_group_client_data_offer();
+	test_public_connection_group_multi_data_drain();
 	test_client_compression_completion_after_route_replacement();
 	test_client_compression_reactor_tx_pool_saturation();
 	test_public_connection_group_client_connector_failure_wakes();
