@@ -9,6 +9,7 @@
 #include "tr/status.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,10 @@ struct tr_record_client_slot {
 	bool reset_accepted;
 	bool public_mode, send_pool_waiting;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
+	_Atomic uint64_t held_ref_token;
+	_Atomic bool result_ready;
+	_Atomic enum tr_rpc_status result_status;
+	_Atomic enum tr_rpc_v2_delivery result_delivery;
 };
 
 struct tr_rpc_record_client {
@@ -56,7 +61,7 @@ struct tr_rpc_record_client {
 	uint32_t *routes;
 	uint32_t route_capacity;
 	size_t bytes, cursor;
-	uint64_t generation;
+	uint64_t generation, next_ref_token;
 	unsigned depth, callback_depth;
 	bool started, stopping, cleanup, handler_live, timer_live;
 	tr_rpc_record_client_progress_fn progress;
@@ -79,6 +84,51 @@ static void tr_record_client_clear_unary(struct tr_record_client_slot *slot)
 	tr_buffer_release(slot->unary_body);
 	slot->unary_body = NULL;
 	slot->unary_pending = 0;
+}
+
+static void tr_record_client_slot_reset(struct tr_record_client_slot *slot)
+{
+	/* 原子尾字段必须逐个 store；弱句柄残留副本可并发验证旧 token。 */
+	atomic_store_explicit(&slot->held_ref_token, 0, memory_order_release);
+	atomic_store_explicit(&slot->result_ready, false, memory_order_release);
+	atomic_store_explicit(&slot->result_status, TR_RPC_STATUS_OK,
+	                      memory_order_relaxed);
+	atomic_store_explicit(&slot->result_delivery, TR_RPC_V2_DELIVERY_LIVE,
+	                      memory_order_relaxed);
+	memset(slot, 0, offsetof(struct tr_record_client_slot, held_ref_token));
+}
+
+static void tr_record_client_slot_pin_result(struct tr_record_client_slot *slot)
+{
+	/* Callback 已返回且协议责任已转交；只留下固定槽身份和终局快照。
+	 * 不保留 Channel/Stream、方法表、用户 arg 或一元请求存储引用。 */
+	slot->stream = (struct tr_stream_handle){0};
+	slot->binding = NULL;
+	slot->method = NULL;
+	slot->callbacks = (struct tr_rpc_record_client_callbacks){0};
+	slot->public_callbacks = (struct tr_rpc_v2_client_callbacks){0};
+	slot->unary_mode = false;
+	slot->unary_pending = 0;
+	slot->unary_compression = TR_RPC_COMPRESSION_NONE;
+	slot->deadline = 0;
+	slot->peer_window = 0;
+	slot->pending_event = 0;
+	slot->pending_status = 0;
+	slot->metadata_size = 0;
+	slot->receiving = 0;
+	slot->sending = 0;
+	slot->routed = false;
+	slot->open_pending = false;
+	slot->writable = false;
+	slot->peer_window_known = false;
+	slot->peer_final = false;
+	slot->peer_closed = false;
+	slot->dead = true;
+	slot->close_accepted = true;
+	slot->reset_accepted = true;
+	slot->public_mode = false;
+	slot->send_pool_waiting = false;
+	memset(slot->metadata, 0, sizeof(slot->metadata));
 }
 
 static int tr_record_client_owner(struct tr_rpc_record_client *client)
@@ -260,6 +310,17 @@ static void tr_record_client_report(struct tr_record_client_slot *slot)
 	slot->reported = true;
 	/* 终局回调内的快照已经包含本次结果；后续网络退役不再记账。 */
 	tr_rpc_record_semantic_finish(&client->semantic, slot->status);
+	if (slot->public_mode) {
+		atomic_store_explicit(&slot->result_status, slot->status,
+		                      memory_order_relaxed);
+		atomic_store_explicit(&slot->result_delivery,
+		                      slot->delivery == TR_RPC_RECORD_ON_OWNER
+		                              ? TR_RPC_V2_DELIVERY_LIVE
+		                              : TR_RPC_V2_DELIVERY_SHUTDOWN,
+		                      memory_order_relaxed);
+		atomic_store_explicit(&slot->result_ready, true,
+		                      memory_order_release);
+	}
 	tr_record_client_callback_enter(client);
 	if (slot->public_mode) {
 		slot->public_callbacks.terminal(
@@ -457,7 +518,12 @@ static int tr_record_client_retire(struct tr_record_client_slot *slot)
 		if (ret != TR_OK)
 			return ret;
 	}
-	*slot = (struct tr_record_client_slot){0};
+	if (atomic_load_explicit(&slot->held_ref_token, memory_order_acquire) !=
+	    0) {
+		tr_record_client_slot_pin_result(slot);
+		return TR_AGAIN;
+	}
+	tr_record_client_slot_reset(slot);
 	return TR_OK;
 }
 
@@ -777,23 +843,22 @@ static int tr_record_client_call_start(
 		memcpy(copy->data, unary_request->data, unary_request->len);
 		copy->len = unary_request->len;
 	}
-	*slot = (struct tr_record_client_slot){
-	        .client = client,
-	        .method = method,
-	        .unary_mode = unary_request != NULL,
-	        .unary_body = copy,
-	        .unary_pending = unary_request ? TR_RPC_RECORD_MESSAGE : 0,
-	        .unary_compression = unary_compression,
-	        .generation = ++client->generation,
-	        .deadline =
-	                options && options->timeout_ms
-	                        ? tr_record_client_after(
-	                                  now, (uint64_t)options->timeout_ms *
-	                                               1000000)
-	                        : 0,
-	        .metadata_size = metadata_size,
-	        .active = true,
-	        .open_pending = true};
+	tr_record_client_slot_reset(slot);
+	slot->client = client;
+	slot->method = method;
+	slot->unary_mode = unary_request != NULL;
+	slot->unary_body = copy;
+	slot->unary_pending = unary_request ? TR_RPC_RECORD_MESSAGE : 0;
+	slot->unary_compression = unary_compression;
+	slot->generation = ++client->generation;
+	slot->deadline =
+	        options && options->timeout_ms
+	                ? tr_record_client_after(
+	                          now, (uint64_t)options->timeout_ms * 1000000)
+	                : 0;
+	slot->metadata_size = metadata_size;
+	slot->active = true;
+	slot->open_pending = true;
 	if (metadata_size)
 		memcpy(slot->metadata, metadata, metadata_size);
 	++client->depth;
@@ -801,7 +866,7 @@ static int tr_record_client_call_start(
 	                     &slot->stream);
 	if (ret != TR_OK) {
 		tr_record_client_clear_unary(slot);
-		*slot = (struct tr_record_client_slot){0};
+		tr_record_client_slot_reset(slot);
 		--client->depth;
 		return ret;
 	}
@@ -1037,6 +1102,139 @@ int tr_rpc_record_client_cancel_on_owner(
 	return ret;
 }
 
+static int
+tr_record_client_ref_resolve(struct tr_rpc_v2_call_ref ref,
+                             struct tr_rpc_record_client **client_out,
+                             struct tr_record_client_slot **slot_out)
+{
+	struct tr_rpc_record_client *client =
+	        (struct tr_rpc_record_client *)(uintptr_t)ref._private[0];
+	uint64_t generation = ref._private[1];
+	uint64_t slot_index = ref._private[2];
+	uint64_t token = ref._private[3];
+	struct tr_record_client_slot *slot;
+
+	if (!client || !generation || slot_index > UINT32_MAX || !token ||
+	    slot_index >= client->config.capacity)
+		return TR_ERR_STALE;
+	slot = &client->slots[(uint32_t)slot_index];
+	if (atomic_load_explicit(&slot->held_ref_token, memory_order_acquire) !=
+	            token ||
+	    !slot->active || !slot->accepted || slot->generation != generation)
+		return TR_ERR_STALE;
+	*client_out = client;
+	*slot_out = slot;
+	return TR_OK;
+}
+
+int tr_rpc_record_client_hold_on_owner(
+        struct tr_rpc_record_client_handle handle,
+        struct tr_rpc_v2_call_ref *out)
+{
+	struct tr_rpc_record_client *client = handle.client;
+	struct tr_record_client_slot *slot;
+	bool owner, stopped_callback;
+	uint64_t token;
+
+	if (!out)
+		return TR_ERR_INVALID;
+	if (!client)
+		return TR_ERR_STALE;
+	owner = tr_reactor_in_owner_context_for(client->reactor);
+	stopped_callback = !owner && client->cleanup &&
+	                   client->callback_depth &&
+	                   tr_record_client_callback_depth;
+	if ((!owner && !stopped_callback) || client->progress_active)
+		return TR_ERR_STATE;
+	if (!handle.generation || handle.slot >= client->config.capacity)
+		return TR_ERR_STALE;
+	slot = &client->slots[handle.slot];
+	if (!slot->active || !slot->accepted ||
+	    slot->generation != handle.generation)
+		return TR_ERR_STALE;
+	if (client->stopping && !stopped_callback)
+		return TR_ERR_STATE;
+	if (stopped_callback && (!slot->terminal || !slot->reported ||
+	                         slot->delivery != TR_RPC_RECORD_OWNER_STOPPED))
+		return TR_ERR_STATE;
+	if (atomic_load_explicit(&slot->held_ref_token, memory_order_acquire) !=
+	    0)
+		return TR_ERR_STATE;
+	token = client->next_ref_token;
+	if (!token)
+		return TR_ERR_NOMEM;
+	uint64_t expected = 0;
+	if (!atomic_compare_exchange_strong_explicit(
+	            &slot->held_ref_token, &expected, token,
+	            memory_order_release, memory_order_relaxed))
+		return TR_ERR_STATE;
+	client->next_ref_token = token == UINT64_MAX ? 0 : token + 1;
+	*out = (struct tr_rpc_v2_call_ref){
+	        ._private = {(uint64_t)(uintptr_t)client, handle.generation,
+	                     handle.slot, token}};
+	return TR_OK;
+}
+
+int tr_rpc_record_client_ref_result(struct tr_rpc_v2_call_ref ref,
+                                    struct tr_rpc_v2_call_result *out)
+{
+	struct tr_rpc_record_client *client;
+	struct tr_record_client_slot *slot;
+	int ret;
+	if (!out)
+		return TR_ERR_INVALID;
+	ret = tr_record_client_ref_resolve(ref, &client, &slot);
+	if (ret != TR_OK)
+		return ret;
+	(void)client;
+	if (!atomic_load_explicit(&slot->result_ready, memory_order_acquire))
+		return TR_AGAIN;
+	struct tr_rpc_v2_call_result result = {
+	        .status = atomic_load_explicit(&slot->result_status,
+	                                       memory_order_relaxed),
+	        .delivery = atomic_load_explicit(&slot->result_delivery,
+	                                         memory_order_relaxed)};
+	*out = result;
+	return TR_OK;
+}
+
+int tr_rpc_record_client_ref_cancel_on_owner(struct tr_rpc_v2_call_ref ref)
+{
+	struct tr_rpc_record_client *client;
+	struct tr_record_client_slot *slot;
+	int ret = tr_record_client_ref_resolve(ref, &client, &slot);
+	if (ret != TR_OK)
+		return ret;
+	if (client->stopping || client->cleanup || slot->terminal ||
+	    atomic_load_explicit(&slot->result_ready, memory_order_acquire))
+		return TR_ERR_STATE;
+	return tr_rpc_record_client_cancel_on_owner(
+	        (struct tr_rpc_record_client_handle){
+	                .client = client,
+	                .generation = slot->generation,
+	                .slot = (uint32_t)(slot - client->slots)});
+}
+
+int tr_rpc_record_client_ref_release(struct tr_rpc_v2_call_ref *ref)
+{
+	struct tr_rpc_record_client *client;
+	struct tr_record_client_slot *slot;
+	int ret;
+	if (!ref)
+		return TR_ERR_INVALID;
+	ret = tr_record_client_ref_resolve(*ref, &client, &slot);
+	if (ret != TR_OK)
+		return ret;
+	uint64_t token = ref->_private[3];
+	if (!atomic_compare_exchange_strong_explicit(
+	            &slot->held_ref_token, &token, 0, memory_order_acq_rel,
+	            memory_order_acquire))
+		return TR_ERR_STALE;
+	(void)client;
+	*ref = (struct tr_rpc_v2_call_ref){0};
+	return TR_OK;
+}
+
 int tr_rpc_record_client_create_on_owner(
         struct tr_channel *channel, const struct tr_rpc_method_desc *methods,
         size_t method_count, const struct tr_rpc_record_client_config *config,
@@ -1076,6 +1274,14 @@ int tr_rpc_record_client_create_on_owner(
 		return TR_ERR_NOMEM;
 	}
 	atomic_init(&client->tls_failed, false);
+	client->next_ref_token = 1;
+	for (uint32_t i = 0; i < config->capacity; ++i) {
+		atomic_init(&client->slots[i].held_ref_token, 0);
+		atomic_init(&client->slots[i].result_ready, false);
+		atomic_init(&client->slots[i].result_status, TR_RPC_STATUS_OK);
+		atomic_init(&client->slots[i].result_delivery,
+		            TR_RPC_V2_DELIVERY_LIVE);
+	}
 	client->reactor = reactor;
 	client->channel = channel;
 	client->methods = methods;
@@ -1216,6 +1422,7 @@ int tr_rpc_record_client_reap_stopped(struct tr_rpc_record_client **pointer)
 {
 	struct tr_reactor_recovery_guard guard = {0};
 	struct tr_rpc_record_client *client;
+	bool held_refs = false;
 	int ret;
 	if (!pointer || !*pointer)
 		return TR_ERR_INVALID;
@@ -1259,9 +1466,17 @@ int tr_rpc_record_client_reap_stopped(struct tr_rpc_record_client **pointer)
 			slot->delivery = TR_RPC_RECORD_OWNER_STOPPED;
 		tr_record_client_report(slot);
 		tr_record_client_clear_unary(slot);
-		*slot = (struct tr_record_client_slot){0};
+		if (atomic_load_explicit(&slot->held_ref_token,
+		                         memory_order_acquire)) {
+			held_refs = true;
+			tr_record_client_slot_pin_result(slot);
+			continue;
+		}
+		tr_record_client_slot_reset(slot);
 	}
 	--client->depth;
+	if (held_refs)
+		return TR_AGAIN;
 	ret = tr_reactor_recovery_acquire(client->reactor, &guard);
 	if (ret != TR_OK)
 		return ret;

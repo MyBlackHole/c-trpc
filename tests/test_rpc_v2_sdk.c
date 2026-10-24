@@ -1884,6 +1884,28 @@ static void test_tls_d2_sdk_symbols(void)
 	puts("sdk-v2: case=tls-d2-public-symbols result=pass");
 }
 
+/* 公共 CallRef 的所有新入口必须能从安装 SDK 的 C11/C++11 消费端链接。 */
+static void test_call_ref_sdk_symbols(void)
+{
+	int (*hold)(struct tr_rpc_v2_call, struct tr_rpc_v2_call_ref *) =
+	        tr_rpc_v2_call_hold;
+	int (*result)(struct tr_rpc_v2_call_ref,
+	              struct tr_rpc_v2_call_result *) =
+	        tr_rpc_v2_call_ref_result;
+	int (*cancel)(struct tr_rpc_v2_call_ref) = tr_rpc_v2_call_ref_cancel;
+	int (*release)(struct tr_rpc_v2_call_ref *) =
+	        tr_rpc_v2_call_ref_release;
+	struct tr_rpc_v2_call_ref ref = {0};
+	struct tr_rpc_v2_call_result snapshot;
+	memset(&snapshot, 0, sizeof(snapshot));
+	CHECK(hold != NULL && result != NULL && cancel != NULL &&
+	      release != NULL);
+	CHECK(sizeof(ref) == sizeof(uint64_t) * 4 &&
+	      snapshot.status == TR_RPC_STATUS_OK &&
+	      snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	puts("sdk-v2: case=call-ref-public-symbols result=pass");
+}
+
 /* #280 的一元远端未知方法及本地非 ONE→ONE 拒绝在安装 SDK 中保留。 */
 static void test_unary_rejections(void)
 {
@@ -1928,6 +1950,7 @@ int main(void)
 {
 	test_raw_codec_sdk();
 	test_tls_d2_sdk_symbols();
+	test_call_ref_sdk_symbols();
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_call_compression_rejection_preserves_next_message();

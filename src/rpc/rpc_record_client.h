@@ -168,6 +168,13 @@ int tr_rpc_record_client_half_close_on_owner(
  */
 int tr_rpc_record_client_cancel_on_owner(
         struct tr_rpc_record_client_handle handle);
+int tr_rpc_record_client_hold_on_owner(
+        struct tr_rpc_record_client_handle handle,
+        struct tr_rpc_v2_call_ref *out);
+int tr_rpc_record_client_ref_result(struct tr_rpc_v2_call_ref ref,
+                                    struct tr_rpc_v2_call_result *out);
+int tr_rpc_record_client_ref_cancel_on_owner(struct tr_rpc_v2_call_ref ref);
+int tr_rpc_record_client_ref_release(struct tr_rpc_v2_call_ref *ref);
 int tr_rpc_record_client_pump_on_owner(struct tr_rpc_record_client *client);
 
 /* close 用于仍在 owner 上的装配回滚：停止受理并取消调用；待 Channel

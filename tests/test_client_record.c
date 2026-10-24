@@ -2134,6 +2134,7 @@ struct public_result {
 	struct fixture *fixture;
 	bool check_semantic;
 	bool cancel_on_message;
+	bool hold_on_terminal;
 	struct expected_message expected[2];
 	unsigned expected_count;
 	_Atomic unsigned messages, initial, trailing, writable, terminal;
@@ -2141,6 +2142,7 @@ struct public_result {
 	struct gate *terminal_gate;
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
+	struct tr_rpc_v2_call_ref held_call;
 };
 
 struct public_context {
@@ -2214,6 +2216,8 @@ static void public_terminal(struct tr_rpc_v2_call call,
 	      TR_ERR_STATE);
 	if (result->check_semantic)
 		check_client_semantic(result->fixture->client, 1, 1, status);
+	if (result->hold_on_terminal)
+		CHECK(tr_rpc_v2_call_hold(call, &result->held_call) == TR_OK);
 	result->status = status;
 	result->delivery = delivery;
 	if (result->terminal_gate) {
@@ -2241,6 +2245,17 @@ static void public_fixture_init(struct fixture *f)
 {
 	fixture_init(f);
 	f->public_client = true;
+	f->client_config.limits.max_message_bytes = BODY;
+	fixture_create(f);
+	fixture_connect(f);
+}
+
+static void public_fixture_init_capacity(struct fixture *f, uint32_t capacity)
+{
+	fixture_init(f);
+	f->public_client = true;
+	f->client_config.limits.max_calls = capacity;
+	f->client_config.limits.max_streams = capacity;
 	f->client_config.limits.max_message_bytes = BODY;
 	fixture_create(f);
 	fixture_connect(f);
@@ -2893,6 +2908,335 @@ static void test_public_unary_terminal(unsigned mode)
 	CHECK(atomic_load(&result.terminal) == 1);
 }
 
+static void test_public_call_ref_terminal_snapshot(void)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f,
+	                               .hold_on_terminal = true,
+	                               .expected = {{1, 93}},
+	                               .expected_count = 1};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t byte = pattern(93, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+
+	public_fixture_init(&f);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == TR_RPC_STATUS_OK);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	struct tr_rpc_v2_call_result snapshot = {0};
+	CHECK(tr_rpc_v2_call_ref_result(result.held_call, &snapshot) == TR_OK);
+	CHECK(snapshot.status == result.status);
+	CHECK(snapshot.delivery == result.delivery);
+	CHECK(tr_rpc_v2_call_ref_release(&result.held_call) == TR_OK);
+	struct tr_rpc_v2_call_ref zero_ref = {0};
+	CHECK(!memcmp(&result.held_call, &zero_ref, sizeof(zero_ref)));
+	CHECK(tr_rpc_v2_call_ref_release(&result.held_call) == TR_ERR_STALE);
+	fixture_destroy(&f);
+}
+
+static void test_public_call_ref_pending_cancel(void)
+{
+	struct fixture f;
+	struct public_result result = {
+	        .fixture = &f, .expected = {{1, 94}}, .expected_count = 1};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	struct tr_rpc_v2_call_ref duplicate = {
+	        ._private = {UINT64_C(0xa5), UINT64_C(0xb6), UINT64_C(0xc7),
+	                     UINT64_C(0xd8)}};
+	struct tr_rpc_v2_call_ref untouched = duplicate;
+	uint8_t byte = pattern(94, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+
+	public_fixture_init(&f);
+	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	CHECK(tr_rpc_v2_call_hold(call, &result.held_call) == TR_OK);
+	CHECK(tr_rpc_v2_call_hold(call, &duplicate) == TR_ERR_STATE);
+	CHECK(!memcmp(&duplicate, &untouched, sizeof(duplicate)));
+	struct tr_rpc_v2_call_result snapshot = {
+	        .status = TR_RPC_STATUS_INTERNAL,
+	        .delivery = TR_RPC_V2_DELIVERY_SHUTDOWN};
+	struct tr_rpc_v2_call_result before = snapshot;
+	CHECK(tr_rpc_v2_call_ref_result(result.held_call, &snapshot) ==
+	      TR_AGAIN);
+	CHECK(!memcmp(&snapshot, &before, sizeof(snapshot)));
+	CHECK(tr_rpc_v2_call_ref_cancel(result.held_call) == TR_OK);
+	wait_count(&result.terminal, 1);
+	CHECK(result.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(tr_rpc_v2_call_ref_result(result.held_call, &snapshot) == TR_OK);
+	CHECK(snapshot.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	CHECK(tr_rpc_v2_call_ref_cancel(result.held_call) == TR_ERR_STATE);
+	atomic_store(&block_kind, 0);
+	CHECK(tr_rpc_v2_call_ref_release(&result.held_call) == TR_OK);
+	fixture_destroy(&f);
+}
+
+static void test_public_call_ref_stale_token_reuse(void)
+{
+	struct fixture f;
+	struct public_result first = {.fixture = &f,
+	                              .hold_on_terminal = true,
+	                              .expected = {{1, 95}},
+	                              .expected_count = 1};
+	struct public_context first_context = {&first, false};
+	struct tr_rpc_v2_client_callbacks first_cb =
+	        public_callbacks(&first_context);
+	struct tr_rpc_v2_call first_call;
+	uint8_t first_byte = pattern(95, 0);
+	struct tr_rpc_bytes first_request = {&first_byte, 1};
+	public_fixture_init_capacity(&f, 1);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &first_request, NULL,
+	                           &first_cb, &first_call) == TR_OK);
+	wait_count(&first.terminal, 1);
+	struct tr_rpc_v2_call_ref stale_copy = first.held_call;
+	uint64_t first_slot = first.held_call._private[2];
+	uint64_t first_token = first.held_call._private[3];
+	CHECK(tr_rpc_v2_call_ref_release(&first.held_call) == TR_OK);
+	CHECK(tr_reactor_call(tr_channel_reactor(atomic_load(&client_channel)),
+	                      pump_public_call_on_owner, &first_call) == TR_OK);
+
+	struct public_result second = {.fixture = &f,
+	                               .hold_on_terminal = true,
+	                               .expected = {{1, 96}},
+	                               .expected_count = 1};
+	struct public_context second_context = {&second, false};
+	struct tr_rpc_v2_client_callbacks second_cb =
+	        public_callbacks(&second_context);
+	struct tr_rpc_v2_call second_call;
+	uint8_t second_byte = pattern(96, 0);
+	struct tr_rpc_bytes second_request = {&second_byte, 1};
+	CHECK(tr_client_unary_call(f.client, 17, 1, &second_request, NULL,
+	                           &second_cb, &second_call) == TR_OK);
+	wait_count(&second.terminal, 1);
+	CHECK(first.held_call._private[2] == 0);
+	CHECK(first_slot == second.held_call._private[2]);
+	CHECK(stale_copy._private[3] == first_token);
+	CHECK(stale_copy._private[3] != second.held_call._private[3]);
+	CHECK(tr_rpc_v2_call_ref_release(&stale_copy) == TR_ERR_STALE);
+	struct tr_rpc_v2_call_result snapshot = {0};
+	CHECK(tr_rpc_v2_call_ref_result(second.held_call, &snapshot) == TR_OK);
+	CHECK(snapshot.status == TR_RPC_STATUS_OK);
+	CHECK(tr_rpc_v2_call_ref_release(&second.held_call) == TR_OK);
+	fixture_destroy(&f);
+}
+
+static void test_public_call_ref_capacity_and_drain(void)
+{
+	struct fixture f;
+	struct public_result held = {.fixture = &f,
+	                             .hold_on_terminal = true,
+	                             .expected = {{1, 97}},
+	                             .expected_count = 1};
+	struct public_context held_context = {&held, false};
+	struct tr_rpc_v2_client_callbacks held_cb =
+	        public_callbacks(&held_context);
+	struct tr_rpc_v2_call held_call, rejected_call, sentinel;
+	uint8_t byte = pattern(97, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+	public_fixture_init_capacity(&f, 1);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &held_cb,
+	                           &held_call) == TR_OK);
+	wait_count(&held.terminal, 1);
+	memset(&rejected_call, 0xa5, sizeof(rejected_call));
+	sentinel = rejected_call;
+	struct public_result rejected = {.fixture = &f};
+	struct public_context rejected_context = {&rejected, false};
+	struct tr_rpc_v2_client_callbacks rejected_cb =
+	        public_callbacks(&rejected_context);
+	CHECK(tr_client_call_start(f.client, 17, 2, NULL, &rejected_cb,
+	                           &rejected_call) == TR_AGAIN);
+	CHECK(!memcmp(&rejected_call, &sentinel, sizeof(sentinel)));
+	CHECK(!atomic_load(&rejected.terminal));
+	CHECK(tr_client_begin_drain(f.client) == TR_OK);
+	CHECK(tr_client_wait_drained(f.client, 0) == TR_AGAIN);
+	CHECK(tr_rpc_v2_call_ref_release(&held.held_call) == TR_OK);
+	CHECK(tr_client_wait_drained(f.client, WAIT_MS) == TR_OK);
+	fixture_destroy(&f);
+}
+
+static void test_public_call_ref_destroy_retry(void)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t byte = pattern(98, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+	public_fixture_init_capacity(&f, 1);
+	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	CHECK(tr_rpc_v2_call_hold(call, &result.held_call) == TR_OK);
+	struct tr_rpc_v2_call_result snapshot = {0};
+	CHECK(tr_rpc_v2_call_ref_result(result.held_call, &snapshot) ==
+	      TR_AGAIN);
+	struct tr_channel *channel = atomic_load(&client_channel);
+	CHECK(tr_reactor_call(tr_channel_reactor(channel),
+	                      disable_client_routes_on_owner,
+	                      channel) == TR_OK);
+	CHECK(tr_client_destroy(f.client) == TR_AGAIN);
+	CHECK(atomic_load(&result.terminal) == 1);
+	CHECK(result.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	CHECK(tr_rpc_v2_call_ref_result(result.held_call, &snapshot) == TR_OK);
+	CHECK(snapshot.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(snapshot.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	CHECK(tr_rpc_v2_call_ref_cancel(result.held_call) == TR_ERR_STATE);
+	atomic_store(&block_kind, 0);
+	CHECK(tr_rpc_v2_call_ref_release(&result.held_call) == TR_OK);
+	CHECK(tr_client_destroy(f.client) == TR_OK);
+	f.client = NULL;
+	fixture_destroy(&f);
+}
+
+static void test_public_call_ref_shutdown_callback_hold(void)
+{
+	struct fixture f;
+	struct public_result result = {.fixture = &f, .hold_on_terminal = true};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t byte = pattern(100, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+	public_fixture_init_capacity(&f, 1);
+	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	struct tr_channel *channel = atomic_load(&client_channel);
+	CHECK(tr_reactor_call(tr_channel_reactor(channel),
+	                      disable_client_routes_on_owner,
+	                      channel) == TR_OK);
+	CHECK(tr_client_destroy(f.client) == TR_AGAIN);
+	CHECK(atomic_load(&result.terminal) == 1);
+	CHECK(result.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(result.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	struct tr_rpc_v2_call_result snapshot = {0};
+	CHECK(tr_rpc_v2_call_ref_result(result.held_call, &snapshot) == TR_OK);
+	CHECK(snapshot.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(snapshot.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	CHECK(tr_rpc_v2_call_ref_cancel(result.held_call) == TR_ERR_STATE);
+	atomic_store(&block_kind, 0);
+	CHECK(tr_rpc_v2_call_ref_release(&result.held_call) == TR_OK);
+	CHECK(tr_client_destroy(f.client) == TR_OK);
+	f.client = NULL;
+	fixture_destroy(&f);
+}
+
+struct public_call_ref_reader {
+	struct tr_rpc_v2_call_ref ref;
+	struct gate *done;
+	enum tr_rpc_status status;
+	enum tr_rpc_v2_delivery delivery;
+};
+
+static void *public_call_ref_read_and_release(void *arg)
+{
+	struct public_call_ref_reader *reader = arg;
+	struct tr_rpc_v2_call_result snapshot = {
+	        .status = TR_RPC_STATUS_INTERNAL,
+	        .delivery = TR_RPC_V2_DELIVERY_SHUTDOWN};
+	for (;;) {
+		struct tr_rpc_v2_call_result before = snapshot;
+		int ret = tr_rpc_v2_call_ref_result(reader->ref, &snapshot);
+		if (ret == TR_AGAIN) {
+			CHECK(!memcmp(&snapshot, &before, sizeof(snapshot)));
+			continue;
+		}
+		CHECK(ret == TR_OK);
+		break;
+	}
+	reader->status = snapshot.status;
+	reader->delivery = snapshot.delivery;
+	CHECK(tr_rpc_v2_call_ref_release(&reader->ref) == TR_OK);
+	struct tr_rpc_v2_call_ref zero_ref = {0};
+	CHECK(!memcmp(&reader->ref, &zero_ref, sizeof(zero_ref)));
+	gate_wait(reader->done, 0, true);
+	return NULL;
+}
+
+struct public_call_cancel_worker {
+	struct tr_rpc_v2_call call;
+	int status;
+};
+
+static void *public_call_cancel(void *arg)
+{
+	struct public_call_cancel_worker *worker = arg;
+	worker->status = tr_rpc_v2_call_cancel(worker->call);
+	return NULL;
+}
+
+static void test_public_call_ref_concurrent_snapshot_release(void)
+{
+	struct fixture f;
+	struct gate terminal_gate, reader_done;
+	struct public_result result = {.fixture = &f,
+	                               .terminal_gate = &terminal_gate,
+	                               .expected = {{1, 99}},
+	                               .expected_count = 1};
+	struct public_context context = {&result, false};
+	struct tr_rpc_v2_client_callbacks cb = public_callbacks(&context);
+	struct tr_rpc_v2_call call;
+	uint8_t byte = pattern(99, 0);
+	struct tr_rpc_bytes request = {&byte, 1};
+	struct tr_rpc_v2_call_result pending = {
+	        .status = TR_RPC_STATUS_INTERNAL,
+	        .delivery = TR_RPC_V2_DELIVERY_SHUTDOWN};
+	struct tr_rpc_v2_call_result pending_before = pending;
+	struct public_call_ref_reader reader;
+	struct public_call_cancel_worker cancel = {0};
+	pthread_t reader_thread, cancel_thread;
+
+	gate_init(&terminal_gate);
+	gate_init(&reader_done);
+	public_fixture_init_capacity(&f, 1);
+	atomic_store(&block_kind, TR_RPC_RECORD_OPEN);
+	CHECK(tr_client_unary_call(f.client, 17, 1, &request, NULL, &cb,
+	                           &call) == TR_OK);
+	wait_count(&attempts[TR_RPC_RECORD_OPEN], 1);
+	struct tr_rpc_v2_call_ref held = {0};
+	CHECK(tr_rpc_v2_call_hold(call, &held) == TR_OK);
+	CHECK(tr_rpc_v2_call_ref_result(held, &pending) == TR_AGAIN);
+	CHECK(!memcmp(&pending, &pending_before, sizeof(pending)));
+	reader = (struct public_call_ref_reader){.ref = held,
+	                                         .done = &reader_done};
+	held = (struct tr_rpc_v2_call_ref){0};
+	cancel = (struct public_call_cancel_worker){.call = call};
+	CHECK(pthread_create(&cancel_thread, NULL, public_call_cancel,
+	                     &cancel) == 0);
+	gate_wait(&terminal_gate, 1, false);
+	atomic_store(&block_kind, 0);
+	CHECK(pthread_create(&reader_thread, NULL,
+	                     public_call_ref_read_and_release, &reader) == 0);
+	gate_wait(&reader_done, 1, false);
+	gate_release(&reader_done);
+	CHECK(pthread_join(reader_thread, NULL) == 0);
+	CHECK(reader.status == TR_RPC_STATUS_CANCELLED);
+	CHECK(reader.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	gate_release(&terminal_gate);
+	CHECK(pthread_join(cancel_thread, NULL) == 0);
+	CHECK(cancel.status == TR_OK);
+	CHECK(atomic_load(&result.terminal) == 1);
+	CHECK(result.status == TR_RPC_STATUS_CANCELLED);
+	fixture_destroy(&f);
+	CHECK(pthread_cond_destroy(&terminal_gate.cond) == 0);
+	CHECK(pthread_mutex_destroy(&terminal_gate.lock) == 0);
+	CHECK(pthread_cond_destroy(&reader_done.cond) == 0);
+	CHECK(pthread_mutex_destroy(&reader_done.lock) == 0);
+}
+
 struct public_early_request {
 	struct fixture *fixture;
 	struct public_result *result;
@@ -3213,6 +3557,13 @@ int main(void)
 	puts("test_client_record: public unary admission passed");
 	for (unsigned mode = 0; mode < 6; ++mode)
 		test_public_unary_terminal(mode);
+	test_public_call_ref_terminal_snapshot();
+	test_public_call_ref_pending_cancel();
+	test_public_call_ref_stale_token_reuse();
+	test_public_call_ref_capacity_and_drain();
+	test_public_call_ref_destroy_retry();
+	test_public_call_ref_shutdown_callback_hold();
+	test_public_call_ref_concurrent_snapshot_release();
 	puts("test_client_record: public unary terminal passed");
 	for (enum unary_end ending = UNARY_CANCEL;
 	     ending <= UNARY_HALF_CLOSE_CLOCK; ++ending)
