@@ -15,6 +15,7 @@ struct tr_client;
 
 struct tr_connection_group_id {
 	uint64_t group_id;
+	/* 运行期隔离代次；服务进程重启后建立新连接组时必须更新。 */
 	uint64_t epoch;
 };
 
