@@ -327,6 +327,39 @@ static void *abort_group_pair_data_route(void *arg)
 	return NULL;
 }
 
+static void abort_group_pair_data_routes_concurrently(
+	const struct tr_conn_handle connections[2])
+{
+	struct group_pair_abort_gate gate;
+	struct group_pair_abort_task tasks[2];
+	pthread_t threads[2];
+	unsigned i;
+
+	memset(&gate, 0, sizeof(gate));
+	assert(pthread_mutex_init(&gate.lock, NULL) == 0);
+	assert(pthread_cond_init(&gate.cond, NULL) == 0);
+	for (i = 0U; i < 2U; ++i) {
+		tasks[i].gate = &gate;
+		tasks[i].connection = connections[i];
+		tasks[i].result = TR_ERR_STATE;
+		assert(pthread_create(&threads[i], NULL,
+		                      abort_group_pair_data_route,
+		                      &tasks[i]) == 0);
+	}
+	pthread_mutex_lock(&gate.lock);
+	while (gate.ready != 2U)
+		pthread_cond_wait(&gate.cond, &gate.lock);
+	gate.open = 1;
+	pthread_cond_broadcast(&gate.cond);
+	pthread_mutex_unlock(&gate.lock);
+	for (i = 0U; i < 2U; ++i) {
+		assert(pthread_join(threads[i], NULL) == 0);
+		assert(tasks[i].result == TR_OK);
+	}
+	assert(pthread_cond_destroy(&gate.cond) == 0);
+	assert(pthread_mutex_destroy(&gate.lock) == 0);
+}
+
 static void send_all(int fd, const void *data, size_t len)
 {
 	const uint8_t *p = (const uint8_t *)data;
@@ -735,9 +768,13 @@ static enum tr_connection_group_message_disposition on_group_pair_message(
 			assert(message->stream_id == 7101U);
 			assert(message->bytes.len == 1U &&
 			       message->bytes.data[0] == 0x51U);
-		} else {
-			assert(message->message_id == UINT64_C(7203));
+		} else if (message->message_id == UINT64_C(7203)) {
 			assert(message->stream_id == 7102U);
+			assert(message->bytes.len == 1U &&
+			       message->bytes.data[0] == 0x53U);
+		} else {
+			assert(message->message_id == UINT64_C(7206));
+			assert(message->stream_id == 7103U);
 			assert(message->bytes.len == 1U &&
 			       message->bytes.data[0] == 0x53U);
 		}
@@ -750,9 +787,13 @@ static enum tr_connection_group_message_disposition on_group_pair_message(
 			assert(message->stream_id == 8102U);
 			assert(message->bytes.len == 1U &&
 			       message->bytes.data[0] == 0x53U);
+		} else if (message->message_id == UINT64_C(7207)) {
+			assert(message->stream_id == 8103U);
+			assert(message->bytes.len == 1U &&
+			       message->bytes.data[0] == 0x53U);
 		} else {
-			assert(message->message_id == UINT64_C(7205));
-			assert(message->stream_id == 8102U);
+			assert(message->message_id == UINT64_C(7208));
+			assert(message->stream_id == 8103U);
 			assert(message->bytes.len == 1U &&
 			       message->bytes.data[0] == 0x52U);
 		}
@@ -2373,7 +2414,8 @@ static void test_public_connection_group_member_failure_replacement(void)
 	puts("connection_group_facade: member failure replacement passed");
 }
 
-static void test_public_connection_group_multi_group_failure_isolation(void)
+static void test_public_connection_group_multi_group_repeated_failure_replacement(
+	void)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
@@ -2382,9 +2424,7 @@ static void test_public_connection_group_multi_group_failure_isolation(void)
 	struct group_pair_ctx ctx;
 	struct tr_conn_handle data_routes[2];
 	struct tr_conn_handle replacement_routes[2];
-	struct group_pair_abort_gate abort_gate;
-	struct group_pair_abort_task abort_tasks[2];
-	pthread_t abort_threads[2];
+	struct tr_conn_handle second_replacement_routes[2];
 	uint8_t payload_a = 0x51U;
 	uint8_t payload_b = 0x52U;
 	uint8_t replacement_payload = 0x53U;
@@ -2482,29 +2522,7 @@ static void test_public_connection_group_multi_group_failure_isolation(void)
 	assert(data_routes[0].reactor != data_routes[1].reactor);
 
 	/* 通过屏障并发中止两个独立 Reactor 上的 DATA 成员。 */
-	memset(&abort_gate, 0, sizeof(abort_gate));
-	assert(pthread_mutex_init(&abort_gate.lock, NULL) == 0);
-	assert(pthread_cond_init(&abort_gate.cond, NULL) == 0);
-	for (i = 0U; i < 2U; ++i) {
-		abort_tasks[i].gate = &abort_gate;
-		abort_tasks[i].connection = data_routes[i];
-		abort_tasks[i].result = TR_ERR_STATE;
-		assert(pthread_create(&abort_threads[i], NULL,
-		                      abort_group_pair_data_route,
-		                      &abort_tasks[i]) == 0);
-	}
-	pthread_mutex_lock(&abort_gate.lock);
-	while (abort_gate.ready != 2U)
-		pthread_cond_wait(&abort_gate.cond, &abort_gate.lock);
-	abort_gate.open = 1;
-	pthread_cond_broadcast(&abort_gate.cond);
-	pthread_mutex_unlock(&abort_gate.lock);
-	for (i = 0U; i < 2U; ++i) {
-		assert(pthread_join(abort_threads[i], NULL) == 0);
-		assert(abort_tasks[i].result == TR_OK);
-	}
-	pthread_cond_destroy(&abort_gate.cond);
-	pthread_mutex_destroy(&abort_gate.lock);
+	abort_group_pair_data_routes_concurrently(data_routes);
 	wait_group_pair_counter(&ctx, &ctx.data_events[0], 1U);
 	wait_group_pair_counter(&ctx, &ctx.data_events[1], 1U);
 	wait_group_pair_client_stats(clients[0], 0U, 0U);
@@ -2562,20 +2580,81 @@ static void test_public_connection_group_multi_group_failure_isolation(void)
 	}
 	wait_group_pair_server_stats(server, 2U, 2U, 2U);
 
+	/* 在第一轮替代后立即再次并发故障，检验快速重复换代。 */
+	abort_group_pair_data_routes_concurrently(replacement_routes);
+	wait_group_pair_counter(&ctx, &ctx.data_events[0], 2U);
+	wait_group_pair_counter(&ctx, &ctx.data_events[1], 2U);
+	wait_group_pair_client_stats(clients[0], 0U, 0U);
+	wait_group_pair_client_stats(clients[1], 0U, 0U);
+	wait_group_pair_server_stats(server, 2U, 0U, 0U);
+	assert(tr_client_connection_group_send(
+		       clients[0], 7102U, UINT64_C(7203), &replacement_bytes) ==
+	       TR_ERR_STALE);
+	assert(tr_client_connection_group_send(
+		       clients[1], 8102U, UINT64_C(7204), &replacement_bytes) ==
+	       TR_ERR_STALE);
+
+	assert(wait_group_pair_offer(server, group_ids[0], epochs[0],
+	                             UINT64_C(8105)) == TR_OK);
+	wait_data_accepts(server, 5U);
+	assert(wait_group_pair_offer(server, group_ids[1], epochs[1],
+	                             UINT64_C(8106)) == TR_OK);
+	wait_data_accepts(server, 6U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, group_ids[0], epochs[0], 7103U,
+		       UINT64_C(7303)) == TR_OK);
+	wait_group_pair_client_stats(clients[0], 1U, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, group_ids[1], epochs[1], 8103U,
+		       UINT64_C(8303)) == TR_OK);
+	wait_group_pair_client_stats(clients[1], 1U, 1U);
+
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_message_ids[0] = UINT64_C(7206);
+	group_route_probe_message_ids[1] = UINT64_C(7207);
+	memset(group_route_probe_connections, 0,
+	       sizeof(group_route_probe_connections));
+	group_route_probe_seen = 0U;
+	group_route_probe_enabled = 1;
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(tr_client_connection_group_send(
+		       clients[0], 7103U, UINT64_C(7206),
+		       &replacement_bytes) == TR_OK);
+	assert(tr_client_connection_group_send(
+		       clients[1], 8103U, UINT64_C(7207),
+		       &replacement_bytes) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[0], 3U);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 3U);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_enabled = 0;
+	assert(group_route_probe_seen == 3U);
+	second_replacement_routes[0] = group_route_probe_connections[0];
+	second_replacement_routes[1] = group_route_probe_connections[1];
+	pthread_mutex_unlock(&group_route_probe_lock);
+	for (i = 0U; i < 2U; ++i) {
+		assert(second_replacement_routes[i].reactor ==
+		       replacement_routes[i].reactor);
+		assert(second_replacement_routes[i].slot !=
+		               replacement_routes[i].slot ||
+		       second_replacement_routes[i].generation !=
+		               replacement_routes[i].generation);
+	}
+	wait_group_pair_server_stats(server, 2U, 2U, 2U);
+
 	/* 关闭 A 组不关闭 B 组；B 组继续发完在途工作。 */
 	assert(tr_client_connection_group_close(clients[0]) == TR_OK);
-	wait_group_pair_counter(&ctx, &ctx.data_events[0], 2U);
+	wait_group_pair_counter(&ctx, &ctx.data_events[0], 3U);
 	wait_group_pair_server_stats(server, 1U, 1U, 1U);
 	wait_group_pair_client_stats(clients[1], 1U, 1U);
 	assert(tr_client_connection_group_send(
-		       clients[1], 8102U, UINT64_C(7205), &bytes_b) == TR_OK);
-	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 3U);
+		       clients[1], 8103U, UINT64_C(7208), &bytes_b) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 4U);
 	wait_client_destroy_after_group_close(clients[0]);
 
 	assert(tr_client_connection_group_release_transfer(
-		       clients[1], 8102U) == TR_OK);
+		       clients[1], 8103U) == TR_OK);
 	assert(tr_server_connection_group_release_transfer(
-		       server, group_ids[1], epochs[1], 8102U) == TR_OK);
+		       server, group_ids[1], epochs[1], 8103U) == TR_OK);
 	assert(tr_client_connection_group_begin_drain(clients[1]) == TR_OK);
 	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
 	assert(tr_server_connection_group_send_data_offer(
@@ -2586,7 +2665,7 @@ static void test_public_connection_group_multi_group_failure_isolation(void)
 	assert(tr_server_connection_group_wait_drained(
 		       server, 1U) == TR_ERR_TIMEOUT);
 	assert(tr_client_connection_group_close(clients[1]) == TR_OK);
-	wait_group_pair_counter(&ctx, &ctx.data_events[1], 1U);
+	wait_group_pair_counter(&ctx, &ctx.data_events[1], 3U);
 	assert(tr_server_connection_group_wait_drained(
 		       server, 5000U) == TR_OK);
 	wait_group_pair_server_stats(server, 0U, 0U, 0U);
@@ -3102,7 +3181,7 @@ static void test_public_connection_group_drain_with_compression_inflight(void)
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 	wait_client_destroy_after_group_close(client);
-	assert(tr_server_destroy(server) == TR_OK);
+	wait_server_destroy_after_release(server);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 	puts("connection_group_facade: compression drain passed");
@@ -3240,7 +3319,7 @@ static void test_public_connection_group_drain_with_compressed_wire_inflight(
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 	wait_client_destroy_after_group_close(client);
-	assert(tr_server_destroy(server) == TR_OK);
+	wait_server_destroy_after_release(server);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 	puts("connection_group_facade: compressed wire drain passed");
@@ -3613,7 +3692,7 @@ int main(void)
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_multi_data_drain();
 	test_public_connection_group_member_failure_replacement();
-	test_public_connection_group_multi_group_failure_isolation();
+	test_public_connection_group_multi_group_repeated_failure_replacement();
 	test_client_compression_completion_after_route_replacement();
 	test_public_connection_group_drain_with_compression_inflight();
 	test_public_connection_group_drain_with_compressed_wire_inflight();
