@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.39` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.40` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -103,6 +103,12 @@ dev.39 增加 #242/ERR-A 错误作用域分类表与不可变 Python 参考状�
 设计参考，不证明生产 C 路径已经满足这些分类；运行
 `python3 scripts/test_rpc_v2_error_scope_model.py -v` 可执行六项边界回归。
 RESET/标识代次、信用保留、连接组排空边界与资源成本仍在后续切片中验证。
+
+dev.40 收口 #242/ERR-B 的一个标识耗尽边界：本地流 ID 到达奇数/偶数最大值后
+饱和为耗尽状态，不回绕；再次申请会尝试启动 Channel GOAWAY 排空，受理后返回 CLOSED，
+排空启动失败则保留耗尽状态并返回失败。
+新增的纯分配边界回归与既有真实 Channel 排空测试通过；尚未通过运行时注入把
+真实 Channel 的计数器推进至 32 位上限，因此 ERR-B 全路径仍未验收。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

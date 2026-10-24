@@ -115,6 +115,13 @@ dev.39 增加 #242/ERR-A 的错误分类表和不可变参考状态转换：同�
 ERR-E 有界历史与成本仍待实现和验收。详见
 [ERR-A 分类与模型记录](rpc_v2_error_scope_model_20261025.md)。
 
+dev.40 补上 #242/ERR-B 的本地流 ID 耗尽分配边界：客户端奇数与服务端偶数最后一个
+`uint32_t` ID 各只分配一次，之后保持耗尽状态、不回绕；`tr_stream_open()` 在观察到
+耗尽后释放锁并启动 Channel GOAWAY 排空。纯分配边界回归与现有 Channel 排空套件通过，
+但没有运行时测试将真实 Channel 计数器注入上限，故只登记为部分实现。RESET FIFO、
+tombstone/连接代次组合以及 ERR-B 全矩阵仍待验收。详见
+[本地流 ID 耗尽记录](rpc_v2_stream_id_exhaustion_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -139,7 +146,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现，尚未与生产 C 全路径对照；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B RESET/标识时序、ERR-C 信用与组合故障、ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现，尚未与生产 C 全路径对照；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B 本地 ID 耗尽及排空起始边界已部分实现，但真实 Channel 上限注入、RESET/FIFO/代次时序仍待验收；ERR-C 信用与组合故障、ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

@@ -516,6 +516,31 @@ static void test_late_and_reuse(void)
 	destroy_fixture(&f);
 }
 
+static void test_local_stream_id_exhaustion(void)
+{
+	uint32_t next = UINT32_MAX - 2U;
+	uint32_t stream_id = 0U;
+
+	/* Client 的最后两个奇数标识都可分配，之后必须饱和而不是回绕。 */
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) == TR_OK);
+	assert(stream_id == UINT32_MAX - 2U && next == UINT32_MAX);
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) == TR_OK);
+	assert(stream_id == UINT32_MAX && next == 0U);
+	stream_id = 17U;
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) ==
+	       TR_ERR_CLOSED);
+	assert(stream_id == 17U && next == 0U);
+
+	/* Server 的最高偶数标识同样只分配一次，并保留耗尽状态。 */
+	next = UINT32_MAX - 1U;
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) == TR_OK);
+	assert(stream_id == UINT32_MAX - 1U && next == 0U);
+	stream_id = 19U;
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) ==
+	       TR_ERR_CLOSED);
+	assert(stream_id == 19U && next == 0U);
+}
+
 static struct tr_buffer *payload(struct fixture *f, uint32_t size)
 {
 	struct tr_buffer *buffer;
@@ -1483,6 +1508,7 @@ int main(void)
 	test_wire_shape(TR_FRAME_STREAM_RESET);
 	test_wire_shape(TR_FRAME_STREAM_REFUSED);
 	test_feature_gate();
+	test_local_stream_id_exhaustion();
 	test_late_and_reuse();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
@@ -1514,7 +1540,7 @@ int main(void)
 	for (enum invalid_kind k = UNKNOWN_RESET; k <= EVICTED_RESET; ++k)
 		test_invalid(k);
 	test_split_frontier();
-	puts("stream_reset: wire, feature, FIFO, pressure, retry, retirement "
-	     "passed");
+	puts("stream_reset: wire, feature, FIFO, pressure, retry, retirement, "
+	     "ID exhaustion passed");
 	return 0;
 }

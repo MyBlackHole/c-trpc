@@ -6567,15 +6567,19 @@ int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 		return physical_alive ? TR_AGAIN : TR_ERR_CLOSED;
 	}
 
-	stream_id = channel->next_local_stream_id;
-	if (stream_id == 0) {
+	ret = tr_channel_local_stream_id_take(
+	        &channel->next_local_stream_id, &stream_id);
+	if (ret == TR_ERR_CLOSED) {
 		pthread_mutex_unlock(&channel->lock);
-		return TR_ERR_STATE;
+		ret = tr_channel_begin_drain(channel);
+		return ret == TR_OK ? TR_ERR_CLOSED : ret;
 	}
-	/* 连接上的线协议标识不回绕。失败可以留下空洞，不能重用
-	 * 曾经发布过的标识，使迟到 RESET 有机会命中新调用。 */
-	channel->next_local_stream_id =
-	        stream_id > UINT32_MAX - 2U ? 0 : stream_id + 2U;
+	if (ret != TR_OK) {
+		pthread_mutex_unlock(&channel->lock);
+		return ret;
+	}
+	/* 分配在发送前单调前进。失败可以留下空洞，不能重用曾经
+	 * 发布过的标识，使迟到 RESET 有机会命中新调用。 */
 
 	if (tr_stream_lookup_id(channel, stream_id, NULL)) {
 		pthread_mutex_unlock(&channel->lock);
