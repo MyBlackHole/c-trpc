@@ -63,6 +63,7 @@ static int group_zstd_gate_released;
 
 static void wait_group_zstd_decompression_entered(void);
 static void release_group_zstd_gate(void);
+static void wait_group_client_send_bytes_empty(struct tr_client *client);
 
 int __real_tr_reactor_close_on_owner(struct tr_conn_handle connection);
 
@@ -273,6 +274,7 @@ struct public_group_ctx {
 	int ready_send_second_ret;
 	unsigned retry_messages;
 	unsigned multi_drain_messages;
+	unsigned inflight_drain_messages;
 	unsigned compressed_frames;
 	unsigned compressed_first;
 	unsigned compressed_last;
@@ -504,6 +506,18 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 		pthread_mutex_unlock(&ctx->lock);
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 	}
+	if (message->message_id == UINT64_C(6203)) {
+		assert(message->stream_id == 5001U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 1U &&
+		       message->bytes.data[0] == 0x33U);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->inflight_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
 
 	assert(message->stream_id == 5001U);
 	if (message->message_id == UINT64_C(4202)) {
@@ -611,6 +625,8 @@ static const char *counter_name(
 		return "retry_messages";
 	if (counter == &ctx->multi_drain_messages)
 		return "multi_drain_messages";
+	if (counter == &ctx->inflight_drain_messages)
+		return "inflight_drain_messages";
 	if (counter == &ctx->compressed_done)
 		return "compressed_done";
 	if (counter == &ctx->transfer_ready)
@@ -1717,8 +1733,10 @@ static void test_public_connection_group_multi_data_drain(void)
 	struct tr_conn_handle data_routes[2];
 	uint8_t first_payload = 0x31U;
 	uint8_t second_payload = 0x32U;
+	uint8_t inflight_payload = 0x33U;
 	struct tr_transport_bytes first_bytes = {&first_payload, 1U};
 	struct tr_transport_bytes second_bytes = {&second_payload, 1U};
+	struct tr_transport_bytes inflight_bytes = {&inflight_payload, 1U};
 	uint16_t group_port = 0U;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -1815,6 +1833,21 @@ static void test_public_connection_group_multi_data_drain(void)
 	assert(server_stats.data_connections_current == 2U &&
 	       server_stats.active_transfers == 2U);
 
+	/* 已接受的 DATA 发送即使遇到 socket EAGAIN 也由 drain 等待；
+	 * 先将字节留在 Reactor TX 队列，再释放两个逻辑 transfer。 */
+	pthread_mutex_lock(&group_data_tx_probe_lock);
+	group_data_tx_blocked_attempts = 0U;
+	pthread_mutex_unlock(&group_data_tx_probe_lock);
+	atomic_store(&block_group_data_tx, 1);
+	assert(tr_client_connection_group_send(
+		       client, 5001U, UINT64_C(6203), &inflight_bytes) == TR_OK);
+	wait_group_data_tx_blocked();
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 2U &&
+	       client_stats.send_bytes_inflight == 1U);
+
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
 	assert(tr_server_connection_group_send_data_offer(
@@ -1831,8 +1864,6 @@ static void test_public_connection_group_multi_data_drain(void)
 	/* 只释放一个 DATA 成员上的传输时，两端排空仍等待另一个传输。 */
 	assert(tr_client_connection_group_release_transfer(client, 5001U) ==
 	       TR_OK);
-	assert(tr_server_connection_group_release_transfer(
-		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
 	memset(&client_stats, 0, sizeof(client_stats));
 	assert(tr_client_connection_group_get_stats(
 		       client, &client_stats) == TR_OK);
@@ -1840,19 +1871,37 @@ static void test_public_connection_group_multi_data_drain(void)
 	memset(&server_stats, 0, sizeof(server_stats));
 	assert(tr_server_connection_group_get_stats(
 		       server, &server_stats) == TR_OK);
-	assert(server_stats.active_transfers == 1U &&
+	assert(server_stats.active_transfers == 2U &&
 	       server_stats.data_connections_current == 2U);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 1U) == TR_ERR_TIMEOUT);
 	assert(tr_server_connection_group_wait_drained(
 		       server, 1U) == TR_ERR_TIMEOUT);
 
+	/* 两个 transfer 都释放后，唯一剩余的 Client drain 责任是
+	 * 仍在队列中的已接受 DATA 字节；放行 Reactor 后它才完成。 */
 	assert(tr_client_connection_group_release_transfer(client, 5002U) ==
 	       TR_OK);
-	assert(tr_server_connection_group_release_transfer(
-		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U) == TR_OK);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 0U &&
+	       client_stats.send_bytes_inflight == 1U);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+	atomic_store(&block_group_data_tx, 0);
+	wait_counter(&ctx, &ctx.inflight_drain_messages, 1U);
+	wait_group_client_send_bytes_empty(client);
 	assert(tr_client_connection_group_wait_drained(
 		       client, 5000U) == TR_OK);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U) == TR_OK);
 	assert(tr_server_connection_group_wait_drained(
 		       server, 1U) == TR_ERR_TIMEOUT);
 	memset(&client_stats, 0, sizeof(client_stats));
