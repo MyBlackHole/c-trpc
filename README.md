@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.50` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.51` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -173,6 +173,12 @@ dev.50 为 #242/ERR-A 补强重复 OPEN 语义错误隔离：让同一 TCP 连�
 下完整 `test_rpc_record_endpoint_tcp` 均通过。该用例补足 dev.47 只验证错误后新调用的时序证据，ERR-A 全分类
 矩阵及 ERR-B/C/D/E 仍待验收。详见
 [活动同伴流语义错误隔离记录](docs/reviews/rpc_v2_semantic_active_sibling_isolation_20261025.md)。
+
+dev.51 为 #242/ERR-A 增加业务拒绝期间的活动同伴隔离回归：方法 0 返回 `PERMISSION_DENIED` 时，同一 TCP
+连接上的方法 1 调用已在业务 MESSAGE 中暂停；拒绝调用唯一终结期间，同伴保持活动且连接保持 ACTIVE。释放 gate
+后，同伴以 OK 唯一终结。GCC Release 与 TSan 下完整 `test_rpc_record_endpoint_tcp` 均通过。该切片验证一项
+业务终局与同伴交错，不代表 ERR-A 全分类矩阵或 ERR-B/C/D/E 已验收。详见
+[业务拒绝活动同伴隔离记录](docs/reviews/rpc_v2_business_rejection_active_sibling_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

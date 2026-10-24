@@ -1019,6 +1019,50 @@ static void test_business_error(bool missing_response)
 	CHECK(atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) == 1);
 	fixture_destroy(&f, false);
 }
+static void test_business_rejection_preserves_active_sibling(void)
+{
+	struct fixture f;
+	enum tr_connection_state client_state, server_state;
+	fixture_init(&f, 1024 * 1024, 8);
+
+	/* 方法1同伴先进入业务处理；方法0之后才启用拒绝，避免影响同伴 OPEN。 */
+	unsigned sibling = open_call(&f, 1);
+	wait_count(&f.business[sibling].seen[TR_RPC_RECORD_OPEN], 1U);
+	atomic_store(&f.use_gate, true);
+	request(&f, sibling, 1, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+
+	atomic_store(&f.reject_method, 1U);
+	unsigned rejected = open_call(&f, 0);
+	check_final(&f, rejected, TR_RPC_STATUS_PERMISSION_DENIED);
+	CHECK(atomic_load(&f.client.terminals[rejected]) == 1U &&
+	      atomic_load(&f.server.terminals[rejected]) == 1U &&
+	      f.server.final_accepted[rejected]);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
+
+	gate_open(&f.gate);
+	check_final(&f, sibling, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[sibling].active) == 0U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 1U &&
+	      atomic_load(&f.client.terminals[sibling]) == 1U &&
+	      atomic_load(&f.server.terminals[sibling]) == 1U);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: business rejection preserves active sibling passed");
+}
 static void test_final_backpressure(bool business_success)
 {
 	struct fixture f;
@@ -1834,6 +1878,7 @@ int main(void)
 	test_rejection(true);
 	test_business_error(false);
 	test_business_error(true);
+	test_business_rejection_preserves_active_sibling();
 	test_final_backpressure(false);
 	test_final_backpressure(true);
 	test_close_hard_error_isolation();
