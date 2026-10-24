@@ -7,15 +7,15 @@
 - Makefile：保留制表符配方。Python/Lua/JSON 使用 4 空格，YAML 使用 2 空格；Markdown 保留有意义的行末空格。
 - `.clang-tidy` 的 `FormatStyle: file` 统一读取项目格式，不再在自动修复时另套 4 空格格式。
 
-## 新增和修改源码的格式门禁
+## 源码格式工具
 
-`修改源码格式检查` 工作流固定使用 clang-format **18.1.8**，独立于日志文本
-formatter 功能测试。它在普通 `pull_request`（包括 fork）和 main push 运行，只有
-`contents: read` 权限，不使用 `pull_request_target`，不保留 checkout 凭据。
+新增/修改源码行格式 CI 门禁已移除。既有 `build-test (gcc)` 作业继续运行
+翻译目录校验、工具语言测试和格式工具正反例自测；这些测试验证工具本身，
+不会阻止未格式化的改动行。`check_source_format.py` 保留为本地可选检查，固定
+使用 clang-format **18.1.8**，独立于日志文本 formatter 功能测试。
 
-- 检出 PR 的实际 head SHA，并获取完整历史；比较 `merge-base(base SHA, head SHA)`
-  到 head，不使用 GitHub 的临时 merge commit。push 使用事件的 before/head SHA。
-  缺失、全零、无共同祖先或浅历史不足均报错，不能退回 HEAD 或假称通过。
+- 本地检查使用显式 `--base/--head` 引用，并比较 `merge-base(base, head)` 到 head。
+  缺失基准、无共同祖先或浅历史不足均报错，不能退回当前 HEAD 或假称通过。
 - 覆盖 Git 已跟踪的 `.c/.h/.cc/.cpp/.cxx/.hh/.hpp/.hxx`，包括源码、头、测试、示例。
   新文件及从非 C-family 扩展名改名进入该范围的文件全检；修改文件只要求新侧
   新增/替换行符合格式。删除行、删除文件、纯改名和空 diff 无待检行，正常通过。
@@ -27,19 +27,23 @@ formatter 功能测试。它在普通 `pull_request`（包括 fork）和 main pu
   本地检查必须检出 head 且已提交修改，保证读取该版本的格式配置。新增忽略规则、
   `clang-format off` 或格式配置变更仍需人工审查，不能用来掩盖新增代码的格式问题。
 
-本地复现（先提交修改，使用当前 PR 的目标分支引用或 base SHA）：
+本地可选检查（先提交修改，使用当前 PR 的目标分支引用或 base SHA；测试临时仓库
+放在项目工作区）：
 
 ```sh
-python3 -m venv /tmp/source-format-venv
-/tmp/source-format-venv/bin/pip install 'clang-format==18.1.8'
-export PATH="/tmp/source-format-venv/bin:$PATH"
+mkdir -p build/test-tmp
+python3 -m venv build/test-tmp/source-format-venv
+build/test-tmp/source-format-venv/bin/pip install 'clang-format==18.1.8'
+export PATH="$PWD/build/test-tmp/source-format-venv/bin:$PATH"
+export TMPDIR="$PWD/build/test-tmp"
+export PYTHONDONTWRITEBYTECODE=1
 python3 scripts/test_source_format.py
 python3 scripts/check_source_format.py --base origin/main --head HEAD
 ```
 
 自测在独立临时 Git 仓库覆盖合格/违规的新文件和修改行、历史债务保留、分叉后的
 merge-base、空 diff、仅文档、删除、改名及特殊路径、UTF-8 字节偏移、无末尾换行、
-缺失基准、脏工作区、错误版本和源码符号链接。它是门禁本身的测试，不是产品测试。
+缺失基准、脏工作区、错误版本和源码符号链接。它是格式工具的回归测试，不是产品测试。
 历史排版债务应使用独立纯格式 PR 渐进处理，不能与运行时修复混成整库格式化。
 
 ## clang-tidy 的实际覆盖边界

@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.34` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.35` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -85,6 +85,19 @@ PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" \
 
 该切片已让一次确定性故障进入真实 C Endpoint 组件测试；任意故障序列、真实网络/派发、TEST-D/E、
 #248 与 V2 整体验收仍未完成。
+dev.35 再增加 TEST-C3：错误最终帧第一次发送遇到 `TR_AGAIN` 后、Endpoint 下一次重试前
+收到远端 RESET；回放验证发送不重试、无已接受最终帧、终局回调/槽退役各一次且预算归零。
+它仍是固定 Endpoint 场景，不替代通用生产 C 故障时序、真实网络/派发或 TEST-C/D/E 完整验收。
+新增/修改源码行格式门禁已移除；GCC 既有构建作业继续运行翻译目录和格式工具自测，改动行格式检查可本地执行。
+
+TEST-C3 回放：
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" \
+  python3 scripts/rpc_v2_component_replay.py \
+  --trace tests/fixtures/rpc_v2_model/component-final-send-reset-before-retry-v1.json \
+  --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
+```
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、

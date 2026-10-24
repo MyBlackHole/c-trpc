@@ -1452,12 +1452,65 @@ static int replay_final_send_backpressure(const char *event_list)
 	return replay_final_reset_after_accepted(true);
 }
 
+static int replay_final_send_reset_before_retry(const char *event_list)
+{
+	static const char expected[] =
+	        "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+	        "FINAL_STATUS,RESET,SLOT_RELEASE";
+	struct fixture f;
+	struct tr_stream_handle stream;
+	if (!event_list || strcmp(event_list, expected) != 0)
+		return 2;
+	init(&f);
+	start(&f);
+	f.send_rejects = 1;
+	stream = open_stream(&f, 0, 1);
+	CHECK(f.dispatch->calls[0].active &&
+	      f.dispatch->calls[0].stream.generation == stream.generation);
+	f.hold_work = true;
+	request(&f, stream, 1);
+	CHECK(f.receive_calls == 1 && f.dispatch->calls[0].pending);
+	tick(&f, 2);
+	CHECK(!f.done_calls && !f.reports);
+	f.hold_work = false;
+	/* 每次只推进一个 owner turn；在第一次 TR_AGAIN 返回后立刻注入远端
+	 * RESET，保证 Endpoint 没有机会进入下一次最终帧发送重试。 */
+	for (unsigned i = 0; i < 16 && !f.sends; ++i)
+		tick(&f, 1);
+	CHECK(f.sends == 1 && !f.send_rejects && !f.ntx && f.done_calls == 1 &&
+	      !f.reports && !f.retire_calls);
+	f.event(stream, TR_STREAM_EVENT_RESET, TR_ERR_SYS, f.handler_arg);
+	CHECK(f.sends == 1);
+	CHECK(!f.closes);
+	CHECK(!f.resets);
+	/* 公平游标每轮只访问有限槽；允许后续 owner turn 才推进该槽。 */
+	for (unsigned i = 0; i < 16 && !f.reports; ++i)
+		tick(&f, 1);
+	CHECK(f.reports == 1);
+	CHECK(f.last.status == TR_RPC_STATUS_UNIMPLEMENTED);
+	CHECK(!f.last.final_accepted);
+	CHECK(f.retire_calls == 1);
+	CHECK(!f.dispatch->calls[0].active);
+	tick(&f, 8);
+	CHECK(f.sends == 1 && f.reports == 1 && f.retire_calls == 1);
+	close_all(&f);
+	printf("{\"status\":\"UNIMPLEMENTED\",\"terminal_callbacks\":%u,"
+	       "\"work_completed\":true,\"final_frames\":0,"
+	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
+	       "\"quiescent\":true,\"stale_messages_ignored\":0}\n",
+	       f.reports, f.retire_calls, atomic_load(&f.budget.current_bytes));
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && strcmp(argv[1], "--replay-events") == 0)
 		return replay_component_events(argv[2]);
 	if (argc == 3 && strcmp(argv[1], "--replay-send-backpressure") == 0)
 		return replay_final_send_backpressure(argv[2]);
+	if (argc == 3 &&
+	    strcmp(argv[1], "--replay-send-reset-before-retry") == 0)
+		return replay_final_send_reset_before_retry(argv[2]);
 	if (argc != 1)
 		return 2;
 	test_open_budget_handoff();

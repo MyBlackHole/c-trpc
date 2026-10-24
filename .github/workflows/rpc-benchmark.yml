@@ -83,3 +83,6 @@ jobs:
           path: ${{ runner.temp }}/rpc-bench
           if-no-files-found: ignore
           retention-days: 7
+      - name: 记录 TSan runner 收尾前进程快照
+        if: ${{ always() && matrix.cc == 'gcc' && matrix.mode == 'tsan' }}
+        run: ps -eo user,pid,ppid,pgid,sid,stat,etimes,args --forest || true

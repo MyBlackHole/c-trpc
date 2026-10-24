@@ -43,8 +43,13 @@ Xmake target 或 CI job/check 名称。Channel、Dispatch、Reactor 与 Executor
 
 分支 `feat/v2-test-c2-endpoint-backpressure-247` 的 Draft PR
 [#323](https://github.com/MyBlackHole/c-trpc/pull/323) 以
-`feat/v2-test-c1-deterministic-shrinker-247` 为 base，PR 未合并。首次推送后 14 项 GitHub
-检查已启动；远端结果以 PR 当前 head 对应检查为准，不能据此推断全部 V2 完成。
+`feat/v2-test-c1-deterministic-shrinker-247` 为 base，PR 未合并。旧 head
+`db4070c381c87dac0af0a5440ff9d9627bf36a40` 的 14 项检查最终为 11 项成功、3 项取消：
+GCC 全量构建/测试、GCC TSan RPC smoke，以及 10 分钟零步骤的新增源码行格式工作流。前两项的
+测试和制品上传均已完成，runner 日志最后停在 `Cleaning up orphan processes` 后才超时；日志没有
+给出残留 PID，因此后代进程或 runner 清理故障的根因仍待新 head 复核。源码行门禁已按用户要求
+删除，格式工具自测迁入既有 GCC 构建作业。该 head 的其他 11 项检查通过；这些结果不代表尚未
+推送的 C3 改动，也不能据此推断全部 V2 完成。
 
 TEST-C2 仅证明一个固定 Endpoint 错误最终帧在一次 `TR_AGAIN` 后恢复；普通事件生成器尚未向真实
 C 组件驱动故障日程，TEST-D/E、真实网络/派发、#248 和 V2 整体验收仍未完成。

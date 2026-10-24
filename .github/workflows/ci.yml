@@ -39,6 +39,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gettext
           python3 scripts/compile_echo_catalog.py --check
+      - name: 校验工具翻译目录与格式工具自测
+        run: |
+          python3 -m pip install 'clang-format==18.1.8'
+          python3 scripts/compile_tool_catalog.py --check
+          python3 scripts/test_tool_i18n.py -v
+          python3 scripts/test_source_format.py -v
       - name: 构建全部目标并测试 debug 与 release 模式
         run: |
           for mode in debug release; do
@@ -71,6 +77,9 @@ jobs:
             --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
           python3 scripts/rpc_v2_component_replay.py \
             --trace tests/fixtures/rpc_v2_model/component-final-send-backpressure-v1.json \
+            --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
+          python3 scripts/rpc_v2_component_replay.py \
+            --trace tests/fixtures/rpc_v2_model/component-final-send-reset-before-retry-v1.json \
             --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
       - name: 保留 RPC V2 TEST-C1 失败轨迹
         if: failure()
@@ -130,6 +139,9 @@ jobs:
           path: build/compdb/
           if-no-files-found: ignore
           retention-days: 7
+      - name: 记录 runner 收尾前进程快照
+        if: always()
+        run: ps -eo user,pid,ppid,pgid,sid,stat,etimes,args --forest || true
 
   build-test-clang:
     name: build-test (clang)

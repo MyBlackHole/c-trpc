@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将固定 TEST-B 与 TEST-C2 轨迹映射到真实 RPC Record Endpoint 夹具。"""
+"""将固定 TEST-B 与 TEST-C 轨迹映射到真实 RPC Record Endpoint 夹具。"""
 import argparse
 import json
 import os
@@ -36,9 +36,15 @@ EVENT_SEQUENCES = {
         "OPEN", "ACCEPT", "MESSAGE", "HALF_CLOSE", "WORK_START", "WORK_DONE",
         "FINAL_STATUS", "RESET", "SLOT_RELEASE",
     ),
+    "component-final-send-reset-before-retry-v1": (
+        "OPEN", "ACCEPT", "MESSAGE", "HALF_CLOSE", "WORK_START", "WORK_DONE",
+        "FINAL_STATUS", "RESET", "SLOT_RELEASE",
+    ),
 }
 FAULT_PROFILES = {
     "component-final-send-backpressure-v1": "--replay-send-backpressure",
+    "component-final-send-reset-before-retry-v1":
+        "--replay-send-reset-before-retry",
 }
 OBSERVATION_FIELDS = frozenset({
     "status", "terminal_callbacks", "work_completed", "final_frames",
@@ -105,14 +111,18 @@ def component_event_argument(trace: Trace) -> str:
         )
     elif trace.trace_id in {
             "component-final-reset-after-accepted-v1",
-            "component-final-send-backpressure-v1"}:
-        if trace.trace_id == "component-final-send-backpressure-v1" and \
+            "component-final-send-backpressure-v1",
+            "component-final-send-reset-before-retry-v1"}:
+        if trace.trace_id in {
+                "component-final-send-backpressure-v1",
+                "component-final-send-reset-before-retry-v1"} and \
                 "#247/TEST-C" not in trace.task_ids:
-            _fail(trace, "task_ids", "TEST-C2 轨迹必须关联 TEST-C")
+            _fail(trace, "task_ids", "TEST-C 轨迹必须关联 TEST-C")
         if "DIR-01" not in trace.invariant_ids:
             _fail(trace, "invariant_ids", "终局竞争轨迹必须关联 DIR-01")
-        final_status = "ERROR" if trace.trace_id == \
-            "component-final-send-backpressure-v1" else "OK"
+        final_status = "ERROR" if trace.trace_id in {
+            "component-final-send-backpressure-v1",
+            "component-final-send-reset-before-retry-v1"} else "OK"
         expected = (
             ("OPEN", "APPLIED", {"request_mode": "MANY", "response_mode": "MANY"}, 0),
             ("ACCEPT", "APPLIED", {}, 0),
@@ -209,15 +219,22 @@ def compare_observation(trace: Trace, model_result, observation: dict) -> dict:
             _fail(trace, "calls", "固定轨迹必须产生一个 Call")
         call = model_result.calls[0]
         status = call["outcome"]
-        if trace.trace_id == "component-final-send-backpressure-v1":
+        if trace.trace_id in {
+                "component-final-send-backpressure-v1",
+                "component-final-send-reset-before-retry-v1"}:
             if status != "ERROR":
-                _fail(trace, "status", "TEST-C2 最终状态必须为 ERROR")
+                _fail(trace, "status", "TEST-C 最终状态必须为 ERROR")
             status = "UNIMPLEMENTED"
+        if trace.trace_id == "component-final-send-reset-before-retry-v1":
+            final_frames = 0
+        else:
+            final_frames = (
+                0 if model_result.event_results[6] == "REJECTED" else 1)
         expected = {
             "status": status,
             "terminal_callbacks": call["terminal_callbacks"],
             "work_completed": not call["work_active"],
-            "final_frames": 0 if model_result.event_results[6] == "REJECTED" else 1,
+            "final_frames": final_frames,
             "retire_calls": sum(
                 result == "APPLIED" and event.op == "SLOT_RELEASE"
                 for event, result in zip(trace.events, model_result.event_results)),
@@ -271,7 +288,7 @@ def serialize_result(result: dict) -> str:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="RPC V2 TEST-B/C2 Endpoint 确定性轨迹回放")
+        description="RPC V2 TEST-B/C Endpoint 确定性轨迹回放")
     parser.add_argument("--binary", required=True, type=Path,
                         help="既有 test_rpc_record_endpoint_contract 二进制")
     parser.add_argument("--trace", type=Path, default=TRACE_PATH,
