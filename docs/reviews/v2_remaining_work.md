@@ -100,6 +100,12 @@ dev.37 修正 GOAWAY 测试清理只允许 `tr_client_destroy()` 首次返回 `T
 5/5；新 head 的 GitHub 检查仍待完成。#242 的连接组接受边界、其他错误分类和组合故障未完成。
 细节见[GOAWAY 未知结果记录](rpc_v2_goaway_unknown_outcome_20261025.md)。
 
+dev.38 修正 Clang Release 暴露的 Client call 槽异步退休测试假设：弱引用释放后，旧传输流
+退休前可能暂时占满容量；stale-token 复用用例现对合法 `TR_AGAIN` 做有界 owner pump/retry，
+并验证输出句柄保持不变、旧 token 仍失效。Clang Release 下 `test_client_record` 连续 10/10；
+全量 90/90，格式化后的目标复验 1/1；GCC ASan/UBSan 下该目标 5/5。更新 head 的远端 CI
+仍待复验。该改动只影响测试夹具，V2 的连接组接受边界、其他错误分类和组合故障仍待完成。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

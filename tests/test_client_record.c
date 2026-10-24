@@ -2991,8 +2991,12 @@ static void test_public_call_ref_stale_token_reuse(void)
 	struct tr_rpc_v2_client_callbacks first_cb =
 	        public_callbacks(&first_context);
 	struct tr_rpc_v2_call first_call;
+	struct tr_reactor *owner;
 	uint8_t first_byte = pattern(95, 0);
 	struct tr_rpc_bytes first_request = {&first_byte, 1};
+	uint64_t reuse_end;
+	unsigned opens;
+	int reuse_ret;
 	public_fixture_init_capacity(&f, 1);
 	CHECK(tr_client_unary_call(f.client, 17, 1, &first_request, NULL,
 	                           &first_cb, &first_call) == TR_OK);
@@ -3001,8 +3005,9 @@ static void test_public_call_ref_stale_token_reuse(void)
 	uint64_t first_slot = first.held_call._private[2];
 	uint64_t first_token = first.held_call._private[3];
 	CHECK(tr_rpc_v2_call_ref_release(&first.held_call) == TR_OK);
-	CHECK(tr_reactor_call(tr_channel_reactor(atomic_load(&client_channel)),
-	                      pump_public_call_on_owner, &first_call) == TR_OK);
+	owner = tr_channel_reactor(atomic_load(&client_channel));
+	CHECK(tr_reactor_call(owner, pump_public_call_on_owner, &first_call) ==
+	      TR_OK);
 
 	struct public_result second = {.fixture = &f,
 	                               .hold_on_terminal = true,
@@ -3011,11 +3016,30 @@ static void test_public_call_ref_stale_token_reuse(void)
 	struct public_context second_context = {&second, false};
 	struct tr_rpc_v2_client_callbacks second_cb =
 	        public_callbacks(&second_context);
-	struct tr_rpc_v2_call second_call;
+	struct tr_rpc_v2_call second_call, second_sentinel;
 	uint8_t second_byte = pattern(96, 0);
 	struct tr_rpc_bytes second_request = {&second_byte, 1};
-	CHECK(tr_client_unary_call(f.client, 17, 1, &second_request, NULL,
-	                           &second_cb, &second_call) == TR_OK);
+	memset(&second_call, 0xa5, sizeof(second_call));
+	second_sentinel = second_call;
+	opens = atomic_load(&client_stream_opens);
+	reuse_end = now_ms() + WAIT_MS;
+	/* terminal 回调与弱引用释放可能先于传输层退休旧槽。只重试合法
+	 * TR_AGAIN，并持续推进 owner；失败返回不得改写输出句柄。 */
+	for (;;) {
+		reuse_ret =
+		        tr_client_unary_call(f.client, 17, 1, &second_request,
+		                             NULL, &second_cb, &second_call);
+		if (reuse_ret != TR_AGAIN)
+			break;
+		CHECK(!memcmp(&second_call, &second_sentinel,
+		              sizeof(second_call)));
+		CHECK(atomic_load(&client_stream_opens) == opens);
+		CHECK(now_ms() < reuse_end);
+		CHECK(tr_reactor_call(owner, pump_public_call_on_owner,
+		                      &first_call) == TR_OK);
+		pause_once();
+	}
+	CHECK(reuse_ret == TR_OK);
 	wait_count(&second.terminal, 1);
 	CHECK(first.held_call._private[2] == 0);
 	CHECK(first_slot == second.held_call._private[2]);
