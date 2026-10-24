@@ -1503,6 +1503,49 @@ static void test_close_and_held_payload(void)
 	destroy_fixture(&f);
 }
 
+static void test_reset_releases_held_payload_without_credit(void)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle live_stream = open_remote(&f, 0, 3, 2);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1, 1, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(f.held && f.held_stream.generation == reset_stream.generation);
+
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_TIMEOUT, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	/* RESET 退役后迟到的应用释放只还内存，不得为旧流补发窗口信用。 */
+	assert(tr_stream_release_payload(f.held_stream, f.held) == TR_ERR_STALE);
+	f.held = NULL;
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 1001, NULL, 0);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 1001);
+	assert(count(&f, &f.down) == 0U);
+
+	/* 迟到释放不能影响同一 Channel 上仍活动的流。 */
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3, 1, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 2U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.resets) == 2U && count(&f, &f.closed) == 2U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_timer_failure_and_partial(int stopping)
 {
 	struct fixture f;
@@ -1696,6 +1739,7 @@ int main(void)
 	test_frozen_discard_credit(0);
 	test_frozen_discard_credit(1);
 	test_close_and_held_payload();
+	test_reset_releases_held_payload_without_credit();
 	test_timer_failure_and_partial(0);
 	test_timer_failure_and_partial(1);
 	for (enum invalid_kind k = UNKNOWN_RESET; k <= EVICTED_RESET; ++k)

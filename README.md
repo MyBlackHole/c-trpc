@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.45` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.46` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -141,6 +141,12 @@ dev.45 为 #242/ERR-B 增加 split Channel 的 RESET 墓碑物理连接身份回
 仍可继续接纳并完成新流。Release 与 TSan 下 `test_stream_reset` 全目标通过。该切片只增加测试，
 不改变生产代码；ERR-B 的其他 RESET/FIFO 交错及 ERR-C 至 ERR-E 仍待完成。详见
 [split 连接 RESET 墓碑回归](docs/reviews/rpc_v2_reset_tombstone_split_connection_20261025.md)。
+
+dev.46 为 #242/ERR-C 增加 RESET 与迟到载荷释放组合回归：双向 RESET 完成后才释放旧流已交付
+载荷，测试确认不再为退役流补发 WINDOW_UPDATE；同 Channel 的另一条流仍能收发并正常终止。
+Release 与 TSan 下完整 `test_stream_reset` 均通过。该切片只增加测试，不改生产代码；ERR-C 的其他
+信用与组合场景及 ERR-A/B/D/E 仍待验收。详见
+[RESET 后迟到载荷释放与信用记录](docs/reviews/rpc_v2_reset_late_payload_credit_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
