@@ -69,6 +69,9 @@ jobs:
           python3 scripts/rpc_v2_component_replay.py \
             --trace tests/fixtures/rpc_v2_model/component-final-reset-after-accepted-v1.json \
             --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
+          python3 scripts/rpc_v2_component_replay.py \
+            --trace tests/fixtures/rpc_v2_model/component-final-send-backpressure-v1.json \
+            --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
       - name: 保留 RPC V2 TEST-C1 失败轨迹
         if: failure()
         uses: actions/upload-artifact@v4

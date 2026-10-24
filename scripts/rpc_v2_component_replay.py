@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将 TEST-B1/B2/B3/B4 固定轨迹映射到真实 RPC Record Endpoint 测试夹具。"""
+"""将固定 TEST-B 与 TEST-C2 轨迹映射到真实 RPC Record Endpoint 夹具。"""
 import argparse
 import json
 import os
@@ -32,6 +32,13 @@ EVENT_SEQUENCES = {
         "OPEN", "ACCEPT", "MESSAGE", "HALF_CLOSE", "WORK_START", "WORK_DONE",
         "FINAL_STATUS", "RESET", "SLOT_RELEASE",
     ),
+    "component-final-send-backpressure-v1": (
+        "OPEN", "ACCEPT", "MESSAGE", "HALF_CLOSE", "WORK_START", "WORK_DONE",
+        "FINAL_STATUS", "RESET", "SLOT_RELEASE",
+    ),
+}
+FAULT_PROFILES = {
+    "component-final-send-backpressure-v1": "--replay-send-backpressure",
 }
 OBSERVATION_FIELDS = frozenset({
     "status", "terminal_callbacks", "work_completed", "final_frames",
@@ -96,9 +103,16 @@ def component_event_argument(trace: Trace) -> str:
             ("FINAL_STATUS", "REJECTED", {"status": "ERROR"}, 1),
             ("SLOT_RELEASE", "APPLIED", {}, 1),
         )
-    elif trace.trace_id == "component-final-reset-after-accepted-v1":
+    elif trace.trace_id in {
+            "component-final-reset-after-accepted-v1",
+            "component-final-send-backpressure-v1"}:
+        if trace.trace_id == "component-final-send-backpressure-v1" and \
+                "#247/TEST-C" not in trace.task_ids:
+            _fail(trace, "task_ids", "TEST-C2 轨迹必须关联 TEST-C")
         if "DIR-01" not in trace.invariant_ids:
             _fail(trace, "invariant_ids", "终局竞争轨迹必须关联 DIR-01")
+        final_status = "ERROR" if trace.trace_id == \
+            "component-final-send-backpressure-v1" else "OK"
         expected = (
             ("OPEN", "APPLIED", {"request_mode": "MANY", "response_mode": "MANY"}, 0),
             ("ACCEPT", "APPLIED", {}, 0),
@@ -106,7 +120,7 @@ def component_event_argument(trace: Trace) -> str:
             ("HALF_CLOSE", "APPLIED", {"direction": "REQUEST"}, 0),
             ("WORK_START", "APPLIED", {}, 0),
             ("WORK_DONE", "APPLIED", {}, 0),
-            ("FINAL_STATUS", "APPLIED", {"status": "OK"}, 0),
+            ("FINAL_STATUS", "APPLIED", {"status": final_status}, 0),
             ("RESET", "REJECTED", {}, 0),
             ("SLOT_RELEASE", "APPLIED", {}, 0),
         )
@@ -194,8 +208,13 @@ def compare_observation(trace: Trace, model_result, observation: dict) -> dict:
         if len(model_result.calls) != 1:
             _fail(trace, "calls", "固定轨迹必须产生一个 Call")
         call = model_result.calls[0]
+        status = call["outcome"]
+        if trace.trace_id == "component-final-send-backpressure-v1":
+            if status != "ERROR":
+                _fail(trace, "status", "TEST-C2 最终状态必须为 ERROR")
+            status = "UNIMPLEMENTED"
         expected = {
-            "status": call["outcome"],
+            "status": status,
             "terminal_callbacks": call["terminal_callbacks"],
             "work_completed": not call["work_active"],
             "final_frames": 0 if model_result.event_results[6] == "REJECTED" else 1,
@@ -223,6 +242,7 @@ def compare_observation(trace: Trace, model_result, observation: dict) -> dict:
 def run_component_replay(trace: Trace, binary: Path) -> dict:
     """先执行 L1，再把严格映射的操作序列交给实际 Endpoint 测试二进制。"""
     operations = component_event_argument(trace)
+    replay_mode = FAULT_PROFILES.get(trace.trace_id, "--replay-events")
     model_result = run_trace(trace)
     test_tmp = ROOT / "build" / "test-tmp"
     test_tmp.mkdir(parents=True, exist_ok=True)
@@ -231,7 +251,7 @@ def run_component_replay(trace: Trace, binary: Path) -> dict:
     environment["TMPDIR"] = str(test_tmp)
     try:
         process = subprocess.run(
-            [str(binary), "--replay-events", operations],
+            [str(binary), replay_mode, operations],
             cwd=ROOT, env=environment, check=False,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as error:
@@ -250,11 +270,12 @@ def serialize_result(result: dict) -> str:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="RPC V2 TEST-B Endpoint 确定性轨迹回放")
+    parser = argparse.ArgumentParser(
+        description="RPC V2 TEST-B/C2 Endpoint 确定性轨迹回放")
     parser.add_argument("--binary", required=True, type=Path,
                         help="既有 test_rpc_record_endpoint_contract 二进制")
     parser.add_argument("--trace", type=Path, default=TRACE_PATH,
-                        help="TEST-B1 JSON 轨迹")
+                        help="固定 schema v1 Endpoint JSON 轨迹")
     args = parser.parse_args(argv)
     try:
         trace = parse_trace(args.trace.read_bytes())

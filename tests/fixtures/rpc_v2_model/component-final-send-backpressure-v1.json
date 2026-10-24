@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "trace_id": "component-final-send-backpressure-v1",
+  "task_ids": ["#247/TEST-A", "#247/TEST-B", "#247/TEST-C"],
+  "invariant_ids": ["CALL-01", "CALL-02", "DIR-01", "OWN-01"],
+  "seed": null,
+  "limits": {"memory_bytes": 0, "max_events": 9},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "MANY", "response_mode": "MANY", "expect": "APPLIED"},
+    {"op": "ACCEPT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "MESSAGE", "slot": 0, "generation": 0, "direction": "REQUEST", "bytes": 1, "expect": "APPLIED"},
+    {"op": "HALF_CLOSE", "slot": 0, "generation": 0, "direction": "REQUEST", "expect": "APPLIED"},
+    {"op": "WORK_START", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "WORK_DONE", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "FINAL_STATUS", "slot": 0, "generation": 0, "status": "ERROR", "expect": "APPLIED"},
+    {"op": "RESET", "slot": 0, "generation": 0, "expect": "REJECTED"},
+    {"op": "SLOT_RELEASE", "slot": 0, "generation": 0, "expect": "APPLIED"}
+  ]
+}

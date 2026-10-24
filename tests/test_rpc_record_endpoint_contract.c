@@ -1196,20 +1196,22 @@ static void test_generations_under_load(void)
 	close_all(&f);
 }
 
-/* TEST-B1/B2/B3/B4 的有限适配器：只驱动登记的固定轨迹，测试真实 Endpoint 对
+/* TEST-B1/B2/B3/B4/C2 的有限适配器：只驱动登记的固定轨迹，测试真实 Endpoint 对
  * 可控 Dispatch/时钟事件的反应；不模拟 TCP、线程或生产 Dispatch。 */
-static int replay_final_reset_after_accepted(void)
+static int replay_final_reset_after_accepted(bool inject_send_backpressure)
 {
 	struct fixture f;
 	struct tr_stream_handle stream;
 
 	init(&f);
 	start(&f);
+	if (inject_send_backpressure)
+		f.send_rejects = 1;
 	stream = open_stream(&f, 0, 1);
 	CHECK(f.dispatch->calls[0].active &&
 	      f.dispatch->calls[0].stream.generation == stream.generation);
 	f.hold_work = true;
-	request(&f, stream, 0);
+	request(&f, stream, inject_send_backpressure ? 1U : 0U);
 	CHECK(f.receive_calls == 1 && f.dispatch->calls[0].pending);
 	tick(&f, 2);
 	CHECK(!f.done_calls && !f.reports);
@@ -1219,19 +1221,35 @@ static int replay_final_reset_after_accepted(void)
 	f.hold_work = false;
 	tick(&f, 12);
 	CHECK(f.done_calls == 1 && f.reports == 1 && !f.retire_calls &&
-	      f.last.status == TR_RPC_STATUS_OK && f.last.final_accepted &&
-	      f.closes == 1 && !f.resets && f.dispatch->calls[0].active);
+	      f.last.status == (inject_send_backpressure
+	                                ? TR_RPC_STATUS_UNIMPLEMENTED
+	                                : TR_RPC_STATUS_OK) &&
+	      f.last.final_accepted && f.closes == 1 && !f.resets &&
+	      f.dispatch->calls[0].active);
+	CHECK(f.sends == (inject_send_backpressure ? 2U : 0U));
+	CHECK(!f.send_rejects);
+	CHECK(f.ntx == (inject_send_backpressure ? 1U : 0U));
+	if (inject_send_backpressure) {
+		CHECK(f.wire_status == TR_RPC_STATUS_UNIMPLEMENTED);
+		CHECK(f.last_send_sequence > 0);
+		CHECK(f.last_credit_stop_sequence > f.last_send_sequence);
+		CHECK(f.last_close_sequence > f.last_credit_stop_sequence);
+	}
 	f.event(stream, TR_STREAM_EVENT_RESET, TR_ERR_TIMEOUT, f.handler_arg);
 	tick(&f, 8);
-	CHECK(f.reports == 1 && f.last.status == TR_RPC_STATUS_OK &&
+	CHECK(f.reports == 1 &&
+	      f.last.status == (inject_send_backpressure
+	                                ? TR_RPC_STATUS_UNIMPLEMENTED
+	                                : TR_RPC_STATUS_OK) &&
 	      f.last.final_accepted && f.closes == 1 && !f.resets &&
 	      f.retire_calls == 1 && !f.dispatch->calls[0].active);
 	close_all(&f);
-	printf("{\"status\":\"OK\",\"terminal_callbacks\":%u,"
+	printf("{\"status\":\"%s\",\"terminal_callbacks\":%u,"
 	       "\"work_completed\":true,\"final_frames\":%u,"
 	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
 	       "\"quiescent\":true,\"stale_messages_ignored\":0}\n",
-	       f.reports, f.last.final_accepted ? 1U : 0U, f.retire_calls,
+	       inject_send_backpressure ? "UNIMPLEMENTED" : "OK", f.reports,
+	       f.last.final_accepted ? 1U : 0U, f.retire_calls,
 	       atomic_load(&f.budget.current_bytes));
 	return 0;
 }
@@ -1334,7 +1352,7 @@ static int replay_component_events(const char *event_list)
 	if (!event_list)
 		return 2;
 	if (strcmp(event_list, final_reset_argument) == 0)
-		return replay_final_reset_after_accepted();
+		return replay_final_reset_after_accepted(false);
 	if (strcmp(event_list,
 	           "OPEN,ACCEPT,MESSAGE,WORK_START,CANCEL,WORK_DONE,"
 	           "FINAL_STATUS,SLOT_RELEASE,OPEN,MESSAGE_STALE,ACCEPT,"
@@ -1424,10 +1442,22 @@ static int replay_component_events(const char *event_list)
 	return 0;
 }
 
+static int replay_final_send_backpressure(const char *event_list)
+{
+	static const char expected[] =
+	        "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+	        "FINAL_STATUS,RESET,SLOT_RELEASE";
+	if (!event_list || strcmp(event_list, expected) != 0)
+		return 2;
+	return replay_final_reset_after_accepted(true);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc == 3 && strcmp(argv[1], "--replay-events") == 0)
 		return replay_component_events(argv[2]);
+	if (argc == 3 && strcmp(argv[1], "--replay-send-backpressure") == 0)
+		return replay_final_send_backpressure(argv[2]);
 	if (argc != 1)
 		return 2;
 	test_open_budget_handoff();

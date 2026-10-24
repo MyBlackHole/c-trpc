@@ -41,9 +41,27 @@ RESOURCE_LIMIT 49、STALE 159。
 因为该切片没有生产 C 或构建目标改动。远端 CI 状态以此分支关联的 Draft PR 检查为准；
 本地结果不用于推断远端通过状态。
 
+## PR #322 首轮远端检查
+
+Draft PR [#322](https://github.com/MyBlackHole/c-trpc/pull/322) head 为
+`384a97a52adb7e9f22c2d20bc77f564316077b8a`，首轮 13/14 检查通过。GCC、Clang、ASan/UBSan、
+TSan、CRC32C fallback、RPC smoke、格式和静态分析通过；`Make compatibility + install` 失败。
+其 SDK 安装、头文件边界及基础 C11/C++11 consumer 均通过，随后编译第一个仓库外 V2 SDK
+consumer 时，`tests/test_rpc_v2_sdk.c:776` 的
+`tr_client_destroy(client->handle) == TR_OK` 断言失败并中止进程。该失败发生在 GCC consumer；
+由于 shell 立即退出，Clang、G++、Clang++ consumer 未执行。
+
+该 Make/install 首轮结果仍记为失败；尚未确认根因，不能归类为环境偶发，也没有用重跑覆盖首次证据。
+完整任务日志与失败步骤可在[该次 CI job](https://github.com/MyBlackHole/c-trpc/actions/runs/40110708867/job/120921641387)
+查看。[Message 压缩设计记录](../superpowers/specs/2026-10-24-message-layer-compression-design.md)
+也曾记录相同 Client 销毁断言失败、后续多次重跑通过但根因未复现。当前用 Release 安装归档和 GCC
+命令重建 consumer 后，初次及连续五次重复均通过；这仍不足以定位或排除竞态。C1 未触碰生产
+Client 源码或此 consumer 测试；原首轮失败保留为待核实证据。
+
 ## 语义边界与剩余工作
 
 期望结果和轨迹不变量共用同一个参考模型，因此 TEST-C1 不能独立证明模型语义，也不证明
 真实 Endpoint、Channel 或 Reactor 的随机故障行为。测试 mutant 只验证失败捕获和缩减链路，
-不等于生产 C 故障注入。后续 TEST-C2 仍需定义并接入真实组件故障点；TEST-B 完整操作字母表、
+不等于生产 C 故障注入。TEST-C2 后续增加的固定 Endpoint 背压案例不改变本记录的 C1 范围；
+TEST-B 完整操作字母表、
 真实网络/派发、TEST-D/E、#248 和 V2 整体验收也仍未完成。
