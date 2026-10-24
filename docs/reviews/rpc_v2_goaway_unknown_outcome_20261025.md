@@ -1,6 +1,6 @@
 # GOAWAY 期间 RPC CALL_OPEN 的未知结果边界
 
-日期：2026-10-25；关联 #242/#244；当前版本 `2.0.0-dev.36`。
+日期：2026-10-25；关联 #242/#244；当前版本 `2.0.0-dev.37`。
 
 ## 合同
 
@@ -19,6 +19,13 @@ RPC OPEN，随后启动 Server drain。此时调用已被业务层接纳，drain
 
 该目标在 GCC Release、Debug、ASan/UBSan 下均通过。新增场景后的 GCC Release 全量
 `xmake test -P . -v -j1` 为 90/90，耗时 89.009s。消毒器启用泄漏检测并在首个问题处退出。
+
+dev.37 修正该测试的销毁清理假设。GitHub Actions 曾在 `test_rpc_v2_sdk` 的一次性
+`tr_client_destroy() == TR_OK` 检查处失败；这是测试没有遵守非 `TR_OK` 时对象仍归调用方、
+需等待并重试的生命周期合同，并非 sanitizer 报告。该 GOAWAY 场景现只对 `TR_AGAIN` 在
+`WAIT_MS` 总期限内重试，最终仍要求 `TR_OK`，其他错误立即失败。仅测试夹具及版本/记录改变，
+运行时行为不变。GCC Release 全量为 90/90；ASan/UBSan 下该目标连续 5/5 通过。更新后 head
+的 GitHub Actions 尚待完成。
 
 传输层 `test_channel_graceful_drain` 已覆盖另一侧：本地排空前沿后的竞态
 STREAM_OPEN 不分配流槽，远端按 GOAWAY cutoff 退役精确 OPENING 槽。

@@ -94,6 +94,12 @@ dev.36 修复压缩 DATA 接收路径漏检 DATA 专属标志的问题，并补�
 边界和组合故障仍待完成。详见[压缩 DATA 标志隔离记录](rpc_v2_compressed_data_flag_validation_20261025.md)
 及[GOAWAY 未知结果记录](rpc_v2_goaway_unknown_outcome_20261025.md)。
 
+dev.37 修正 GOAWAY 测试清理只允许 `tr_client_destroy()` 首次返回 `TR_OK` 的错误假设：
+按公开对象所有权合同，在 `WAIT_MS` 总期限内重试 `TR_AGAIN`，其余错误仍立即失败。该变更只影响
+测试夹具，不改变运行时路径。GCC Release 全量 90/90，ASan/UBSan 下 `test_rpc_v2_sdk` 连续
+5/5；新 head 的 GitHub 检查仍待完成。#242 的连接组接受边界、其他错误分类和组合故障未完成。
+细节见[GOAWAY 未知结果记录](rpc_v2_goaway_unknown_outcome_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

@@ -779,6 +779,26 @@ static void destroy_client(struct fixture *f, struct observed_client *client)
 	unlock(f);
 }
 
+static void destroy_client_retry(struct fixture *f,
+                                 struct observed_client *client)
+{
+	struct timespec limit = deadline_after(WAIT_MS);
+	int ret;
+	lock(f);
+	client->destroying = 1;
+	unlock(f);
+	while ((ret = tr_client_destroy(client->handle)) == TR_AGAIN) {
+		struct timespec now = deadline_after(0);
+		struct timespec pause = {0, 1000000L};
+		CHECK(before(&now, &limit));
+		CHECK(nanosleep(&pause, NULL) == 0);
+	}
+	CHECK(ret == TR_OK);
+	lock(f);
+	client->handle = NULL;
+	unlock(f);
+}
+
 static void fixture_destroy(struct fixture *f)
 {
 	if (f->client.handle)
@@ -1392,7 +1412,7 @@ static void test_destroy_live_terminal(void)
 	CHECK(f.methods[0].opens == 1U && f.methods[0].terminals == 0U);
 	unlock(&f);
 	CHECK(pending.terminals == 0U);
-	destroy_client(&f, &f.client);
+	destroy_client_retry(&f, &f.client);
 	CHECK(pending.terminals == 1U);
 	/* 已发布且仍活跃的连接先由 owner 的正常停止路径关闭。其
 	 * UNAVAILABLE/LIVE 终局已经获胜，随后清理不能改成残留取消。该状态
