@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.40")
+set_version("2.0.0-dev.41")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -127,6 +127,7 @@ target("trcore")
         "src/transport/group/pipeline_ingress.c",
         "src/transport/group/pipeline_listener.c",
         "src/transport/channel/channel.c",
+        "src/transport/channel/channel_stream_id.c",
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
@@ -782,7 +783,8 @@ target("test_stream_reset")
     set_default(false)
     add_files("tests/test_stream_reset.c")
     add_deps("trcore")
-    add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg", {force = true})
+    add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg",
+                "-Wl,--wrap=tr_channel_local_stream_id_take", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

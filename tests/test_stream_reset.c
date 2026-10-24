@@ -60,6 +60,7 @@ static atomic_int block_partial;
 static atomic_uint partial_eagain;
 static atomic_int block_all_tx;
 static atomic_int repeat_goaway_phase;
+static atomic_int force_local_stream_id_exhaustion;
 static struct tr_reactor_timer_handle repeat_goaway_timer;
 
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
@@ -76,6 +77,17 @@ int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
 }
 
 ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
+int __real_tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out);
+int __wrap_tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out)
+{
+	if (atomic_exchange_explicit(&force_local_stream_id_exhaustion, 0,
+	                             memory_order_acq_rel)) {
+		assert(next);
+		*next = 0U;
+	}
+	return __real_tr_channel_local_stream_id_take(next, out);
+}
+
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
 	if (fd == atomic_load(&partial_fd)) {
@@ -539,6 +551,36 @@ static void test_local_stream_id_exhaustion(void)
 	assert(tr_channel_local_stream_id_take(&next, &stream_id) ==
 	       TR_ERR_CLOSED);
 	assert(stream_id == 19U && next == 0U);
+}
+
+static void test_local_stream_id_exhaustion_drains(void)
+{
+	struct fixture f;
+	struct tr_stream_handle stream = {
+	        .channel = NULL, .slot = 77U, .generation = 91U};
+	enum tr_channel_state state;
+	struct tr_frame_header h;
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	atomic_store_explicit(&force_local_stream_id_exhaustion, 1,
+	                      memory_order_release);
+	assert(tr_stream_open(f.channel, TR_LANE_CONTROL, &stream) ==
+	       TR_ERR_CLOSED);
+	assert(atomic_load_explicit(&force_local_stream_id_exhaustion,
+	                            memory_order_acquire) == 0);
+	assert(stream.channel == NULL && stream.slot == 77U &&
+	       stream.generation == 91U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_GOAWAY && h.stream_id == 0U &&
+	       h.message_id == 0U);
+	assert(tr_channel_get_state(f.channel, &state) == TR_OK);
+	assert(state == TR_CHANNEL_DRAINING);
+	send_frame(&f, 0, TR_FRAME_GOAWAY, 0, 0, 0, NULL, 0);
+	assert(tr_channel_wait_drained(f.channel, 5000) == TR_OK);
+	assert(tr_channel_get_state(f.channel, &state) == TR_OK);
+	assert(state == TR_CHANNEL_DRAINED);
+	destroy_fixture(&f);
 }
 
 static struct tr_buffer *payload(struct fixture *f, uint32_t size)
@@ -1509,6 +1551,7 @@ int main(void)
 	test_wire_shape(TR_FRAME_STREAM_REFUSED);
 	test_feature_gate();
 	test_local_stream_id_exhaustion();
+	test_local_stream_id_exhaustion_drains();
 	test_late_and_reuse();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
