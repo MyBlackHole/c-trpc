@@ -2751,8 +2751,8 @@ struct compressed_rx_test_ctx {
 	struct channel_test_ctx events;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
-	uint8_t payload[1024];
-	uint32_t payload_len;
+	uint8_t payloads[6][1024];
+	uint32_t payload_lens[6];
 	uint64_t message_ids[6];
 	uint32_t stream_ids[6];
 	unsigned received;
@@ -2765,18 +2765,20 @@ compressed_rx_on_data(struct tr_stream_handle stream, uint64_t message_id,
 {
 	struct compressed_rx_test_ctx *ctx = arg;
 	struct tr_stream_diagnostics diagnostics = {0};
+	unsigned received;
 	enum tr_stream_data_disposition disposition =
 	        channel_test_on_data(stream, message_id, payload, &ctx->events);
 	assert(tr_stream_get_diagnostics(stream, &diagnostics) == TR_OK);
 
 	pthread_mutex_lock(&ctx->lock);
-	assert(payload->len <= sizeof(ctx->payload));
-	memcpy(ctx->payload, payload->data, payload->len);
-	ctx->payload_len = payload->len;
-	assert(ctx->received <
+	received = ctx->received;
+	assert(received <
 	       sizeof(ctx->message_ids) / sizeof(ctx->message_ids[0]));
-	ctx->message_ids[ctx->received] = message_id;
-	ctx->stream_ids[ctx->received] = diagnostics.stream_id;
+	assert(payload->len <= sizeof(ctx->payloads[received]));
+	memcpy(ctx->payloads[received], payload->data, payload->len);
+	ctx->payload_lens[received] = payload->len;
+	ctx->message_ids[received] = message_id;
+	ctx->stream_ids[received] = diagnostics.stream_id;
 	ctx->received++;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
@@ -3367,8 +3369,10 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	pthread_mutex_lock(&fixture.server_ctx.lock);
 	assert(fixture.server_ctx.message_ids[0] == 1U);
 	assert(fixture.server_ctx.message_ids[1] == 2U);
-	assert(fixture.server_ctx.payload_len == second_source_len);
-	assert(memcmp(fixture.server_ctx.payload, second_source,
+	assert(fixture.server_ctx.payload_lens[0] == source_len);
+	assert(memcmp(fixture.server_ctx.payloads[0], source, source_len) == 0);
+	assert(fixture.server_ctx.payload_lens[1] == second_source_len);
+	assert(memcmp(fixture.server_ctx.payloads[1], second_source,
 	              second_source_len) == 0);
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
@@ -3470,8 +3474,8 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	pthread_mutex_lock(&fixture.server_ctx.lock);
 	assert(fixture.server_ctx.stream_ids[2] == fast_diagnostics.stream_id);
 	assert(fixture.server_ctx.message_ids[2] == 1U);
-	assert(fixture.server_ctx.payload_len == sizeof(fast_source));
-	assert(memcmp(fixture.server_ctx.payload, fast_source,
+	assert(fixture.server_ctx.payload_lens[2] == sizeof(fast_source));
+	assert(memcmp(fixture.server_ctx.payloads[2], fast_source,
 	              sizeof(fast_source)) == 0);
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	compressed_rx_wait_received(&fixture.server_ctx, 4U);
@@ -3486,8 +3490,8 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	assert(fixture.server_ctx.stream_ids[3] ==
 	       compressed_diagnostics.stream_id);
 	assert(fixture.server_ctx.message_ids[3] == 1U);
-	assert(fixture.server_ctx.payload_len == third_source_len);
-	assert(memcmp(fixture.server_ctx.payload, third_source,
+	assert(fixture.server_ctx.payload_lens[3] == third_source_len);
+	assert(memcmp(fixture.server_ctx.payloads[3], third_source,
 	              third_source_len) == 0);
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	{
@@ -3518,8 +3522,9 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 		assert(tx_diagnostics.next_tx_message_id == 3U);
 		pthread_mutex_lock(&fixture.server_ctx.lock);
 		assert(fixture.server_ctx.message_ids[4] == 2U);
-		assert(fixture.server_ctx.payload_len == sizeof(fourth_source));
-		assert(memcmp(fixture.server_ctx.payload, fourth_source,
+		assert(fixture.server_ctx.payload_lens[4] ==
+		       sizeof(fourth_source));
+		assert(memcmp(fixture.server_ctx.payloads[4], fourth_source,
 		              sizeof(fourth_source)) == 0);
 		pthread_mutex_unlock(&fixture.server_ctx.lock);
 	}
@@ -3560,8 +3565,8 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	                        wire_len + second_wire_len + boundary_wire_len);
 	pthread_mutex_lock(&fixture.server_ctx.lock);
 	assert(fixture.server_ctx.message_ids[5] == 3U);
-	assert(fixture.server_ctx.payload_len == sizeof(boundary_source));
-	assert(memcmp(fixture.server_ctx.payload, boundary_source,
+	assert(fixture.server_ctx.payload_lens[5] == sizeof(boundary_source));
+	assert(memcmp(fixture.server_ctx.payloads[5], boundary_source,
 	              sizeof(boundary_source)) == 0);
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	wait_for_pool_full(&payload_pool, 3U);
