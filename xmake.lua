@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.61")
+set_version("2.0.0-dev.62")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -128,6 +128,7 @@ target("trcore")
         "src/transport/group/pipeline_listener.c",
         "src/transport/channel/channel.c",
         "src/transport/channel/channel_stream_id.c",
+        "src/transport/channel/reset_tombstone_index.c",
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
@@ -785,6 +786,15 @@ target("test_stream_reset")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg",
                 "-Wl,--wrap=tr_channel_local_stream_id_take", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- RESET 墓碑固定索引的碰撞簇删除与 FIFO 槽复用边界。
+target("test_reset_tombstone_index")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_reset_tombstone_index.c")
+    add_deps("trcore")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

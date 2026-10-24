@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "channel.h"
 #include "channel_internal.h"
+#include "reset_tombstone_index.h"
 #include "../../io/connector_internal.h"
 #include "../../io/socket_internal.h"
 #include "../../execution/reactor_internal.h"
@@ -53,14 +54,6 @@ struct tr_channel_pending_hello {
 struct tr_stream_index_entry {
 	uint32_t stream_id;
 	uint32_t slot;
-};
-
-/* 仅保留有限个精确双向终止记录，吸收重复 RESET。DATA/信用没有
- * 此豁免；对端 RESET 已是其发送 FIFO 屏障，之后的数据仍是协议错误。 */
-struct tr_stream_reset_tombstone {
-	struct tr_conn_handle connection;
-	uint32_t stream_id;
-	int peer_status;
 };
 
 struct tr_channel_rx_transform {
@@ -220,6 +213,7 @@ struct tr_channel {
 	struct tr_stream_index_entry *stream_index;
 	size_t stream_index_capacity;
 	struct tr_stream_reset_tombstone *reset_tombstones;
+	uint32_t *reset_tombstone_index;
 	uint32_t reset_tombstone_cursor;
 	uint32_t reset_cursor;
 	uint32_t peer_stream_frontier[2];
@@ -2498,20 +2492,46 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 		}
 		if (stream->reset_sent && stream->reset_received &&
 		    stream->reset_notified) {
+			uint32_t tombstone_slot =
+			        channel->reset_tombstone_cursor;
 			struct tr_stream_reset_tombstone *retired =
-			        &channel->reset_tombstones
-			                 [channel->reset_tombstone_cursor];
-			*retired = (struct tr_stream_reset_tombstone){
-			        connection, stream->stream_id,
-			        stream->reset_peer_status};
-			channel->reset_tombstone_cursor++;
-			if (channel->reset_tombstone_cursor ==
-			    channel->config.max_streams)
-				channel->reset_tombstone_cursor = 0;
-			handle = tr_stream_make_handle(channel, slot, stream);
-			tr_stream_free_locked(channel, slot);
-			channel->stat_streams_closed++;
-			closed = 1;
+			        &channel->reset_tombstones[tombstone_slot];
+			if (retired->stream_id) {
+				ret = tr_reset_tombstone_index_remove(
+				        channel->reset_tombstone_index,
+				        channel->stream_index_capacity,
+				        channel->reset_tombstones,
+				        channel->config.max_streams,
+				        retired->connection, retired->stream_id, NULL);
+				if (ret != TR_OK)
+					ret = TR_ERR_STATE;
+			}
+			if (ret == TR_OK) {
+				*retired = (struct tr_stream_reset_tombstone){
+				        connection, stream->stream_id,
+				        stream->reset_peer_status};
+				ret = tr_reset_tombstone_index_insert(
+				        channel->reset_tombstone_index,
+				        channel->stream_index_capacity,
+				        channel->reset_tombstones,
+				        channel->config.max_streams,
+				        connection, retired->stream_id, tombstone_slot,
+				        NULL);
+				if (ret != TR_OK) {
+					memset(retired, 0, sizeof(*retired));
+					ret = TR_ERR_STATE;
+				}
+			}
+			if (ret == TR_OK) {
+				channel->reset_tombstone_cursor++;
+				if (channel->reset_tombstone_cursor ==
+				    channel->config.max_streams)
+					channel->reset_tombstone_cursor = 0;
+				handle = tr_stream_make_handle(channel, slot, stream);
+				tr_stream_free_locked(channel, slot);
+				channel->stat_streams_closed++;
+				closed = 1;
+			}
 		}
 		pthread_mutex_unlock(&channel->lock);
 		if (closed)
@@ -2551,11 +2571,17 @@ static int tr_channel_handle_stream_reset(struct tr_channel *channel,
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
 	if (!stream) {
-		for (uint32_t i = 0; i < channel->config.max_streams; ++i) {
+		uint32_t tombstone_slot;
+		ret = tr_reset_tombstone_index_find(
+		        channel->reset_tombstone_index,
+			        channel->stream_index_capacity,
+			        channel->reset_tombstones, channel->config.max_streams,
+			        connection, frame->header.stream_id,
+			        &tombstone_slot, NULL);
+		if (ret == TR_OK) {
 			const struct tr_stream_reset_tombstone *retired =
-			        &channel->reset_tombstones[i];
-			if (retired->stream_id == frame->header.stream_id &&
-			    retired->peer_status == status &&
+			        &channel->reset_tombstones[tombstone_slot];
+			if (retired->peer_status == status &&
 			    tr_conn_equal(retired->connection, connection)) {
 				pthread_mutex_unlock(&channel->lock);
 				return TR_OK;
@@ -4941,6 +4967,7 @@ static void tr_channel_free_fixed_storage(struct tr_channel *channel)
 	struct tr_memory_budget *budget = channel->config.memory_budget;
 	uint64_t bytes = channel->fixed_storage_bytes;
 
+	/* RESET 索引是活动流索引同一分配中的尾段视图。 */
 	free(channel->stream_index);
 	free(channel->streams);
 	free(channel);
@@ -5043,7 +5070,8 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	struct tr_channel_config effective = {0};
 	struct tr_channel *channel;
 	struct tr_reactor_limits reactor_limits;
-	size_t stream_bytes, index_bytes, index_capacity, fixed_bytes;
+	size_t stream_bytes, index_bytes, tombstone_index_bytes;
+	size_t index_capacity, fixed_bytes;
 	int ret;
 
 	if (!out || !control_connection.reactor ||
@@ -5115,7 +5143,8 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	}
 	index_capacity = tr_stream_index_capacity_for(effective.max_streams);
 	if (index_capacity == 0U ||
-	    index_capacity > SIZE_MAX / sizeof(*channel->stream_index))
+	    index_capacity > SIZE_MAX / sizeof(*channel->stream_index) ||
+	    index_capacity > SIZE_MAX / sizeof(*channel->reset_tombstone_index))
 		return TR_ERR_INVALID;
 #if SIZE_MAX <= UINT32_MAX
 	if (effective.max_streams >
@@ -5127,10 +5156,16 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	               (sizeof(*channel->streams) +
 	                sizeof(*channel->reset_tombstones));
 	index_bytes = index_capacity * sizeof(*channel->stream_index);
-	if (stream_bytes > SIZE_MAX - index_bytes ||
-	    sizeof(*channel) > SIZE_MAX - stream_bytes - index_bytes)
+	tombstone_index_bytes =
+	        index_capacity * sizeof(*channel->reset_tombstone_index);
+	if (index_bytes > SIZE_MAX - tombstone_index_bytes ||
+	    stream_bytes > SIZE_MAX - index_bytes - tombstone_index_bytes ||
+	    sizeof(*channel) >
+	            SIZE_MAX - stream_bytes - index_bytes -
+	                    tombstone_index_bytes)
 		return TR_ERR_INVALID;
-	fixed_bytes = sizeof(*channel) + stream_bytes + index_bytes;
+	fixed_bytes = sizeof(*channel) + stream_bytes + index_bytes +
+	              tombstone_index_bytes;
 	if (effective.memory_budget) {
 		ret = tr_memory_budget_reserve(effective.memory_budget,
 		                               (uint64_t)fixed_bytes);
@@ -5172,17 +5207,22 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 		pthread_condattr_destroy(&attr);
 		build.state_cond_ready = 1;
 	}
-	/* 槽与有限重复窗口同一次有界分配；后续 RESET 不分配存储。 */
+	/* 流槽与墓碑环共享分配；两张索引共享另一分配，RESET 周转不分配。 */
 	channel->streams = (struct tr_stream_slot *)calloc(
 	        channel->config.max_streams,
 	        sizeof(*channel->streams) + sizeof(*channel->reset_tombstones));
 	channel->stream_index = (struct tr_stream_index_entry *)calloc(
-		channel->stream_index_capacity, sizeof(*channel->stream_index));
+	        channel->stream_index_capacity,
+	        sizeof(*channel->stream_index) +
+	                sizeof(*channel->reset_tombstone_index));
 	if (!channel->streams || !channel->stream_index)
 		return TR_ERR_NOMEM;
 	channel->reset_tombstones =
 	        (struct tr_stream_reset_tombstone
 	                 *)(channel->streams + channel->config.max_streams);
+	channel->reset_tombstone_index =
+	        (uint32_t *)(channel->stream_index +
+	                     channel->stream_index_capacity);
 	{
 		uint32_t i;
 

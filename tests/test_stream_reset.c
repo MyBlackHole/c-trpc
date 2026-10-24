@@ -658,6 +658,31 @@ static void test_tombstone_split_connection_identity(void)
 	destroy_fixture(&f);
 }
 
+static void test_tombstone_same_id_across_split_connections(void)
+{
+	struct fixture f;
+	struct tr_stream_handle control, bulk;
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+
+	/* Split 连接各自推进 OPEN 前沿，同一个 ID 可在另一连接上重用。 */
+	control = open_remote(&f, 0, 1U, 1U);
+	assert(reset(&f, control, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1U, TR_ERR_CLOSED, TR_ERR_CLOSED, 1U);
+	bulk = open_remote(&f, 1, 1U, 2U);
+	assert(reset(&f, bulk, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 1U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+
+	/* 两个同 ID 墓碑都只吸收其所属物理连接上的同原因重复 RESET。 */
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 1, 1U, TR_ERR_CLOSED);
+	barrier(&f, 1);
+	assert(count(&f, &f.down) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_local_stream_id_exhaustion(void)
 {
 	uint32_t next = UINT32_MAX - 2U;
@@ -1758,6 +1783,7 @@ int main(void)
 	test_late_and_reuse();
 	test_tombstone_connection_generation();
 	test_tombstone_split_connection_identity();
+	test_tombstone_same_id_across_split_connections();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
 	test_closed_reentrant_open_fifo();
