@@ -1975,6 +1975,71 @@ int tr_rpc_v2_call_cancel(struct tr_rpc_v2_call call)
 	        tr_rpc_record_client_private_handle(call));
 }
 
+struct tr_client_call_ref_request {
+	struct tr_rpc_record_client_handle call;
+	struct tr_rpc_v2_call_ref ref;
+};
+
+static int tr_client_call_hold_on_owner(void *arg)
+{
+	struct tr_client_call_ref_request *request = arg;
+	return tr_rpc_record_client_hold_on_owner(request->call, &request->ref);
+}
+
+static int tr_client_call_ref_cancel_on_owner(void *arg)
+{
+	struct tr_client_call_ref_request *request = arg;
+	return tr_rpc_record_client_ref_cancel_on_owner(request->ref);
+}
+
+int tr_rpc_v2_call_hold(struct tr_rpc_v2_call call,
+                        struct tr_rpc_v2_call_ref *out)
+{
+	struct tr_rpc_record_client_handle handle =
+	        tr_rpc_record_client_private_handle(call);
+	if (!out)
+		return TR_ERR_INVALID;
+	if (!handle.client)
+		return TR_ERR_STALE;
+	struct tr_client_call_ref_request request = {.call = handle};
+	int ret;
+	/* 停止后的 OWNER_STOPPED terminal callback 在 join 线程直接交付，
+	 * 该回调可当场取得已发布的唯一结果引用。 */
+	if (tr_rpc_record_client_in_callback())
+		ret = tr_rpc_record_client_hold_on_owner(handle, &request.ref);
+	else
+		ret = tr_client_record_sync(
+		        handle.client, tr_client_call_hold_on_owner, &request);
+	if (ret == TR_ERR_CLOSED)
+		ret = TR_ERR_STATE;
+	if (ret == TR_OK)
+		*out = request.ref;
+	return ret;
+}
+
+int tr_rpc_v2_call_ref_result(struct tr_rpc_v2_call_ref ref,
+                              struct tr_rpc_v2_call_result *out)
+{
+	return tr_rpc_record_client_ref_result(ref, out);
+}
+
+int tr_rpc_v2_call_ref_cancel(struct tr_rpc_v2_call_ref ref)
+{
+	struct tr_rpc_record_client *record_client =
+	        (struct tr_rpc_record_client *)(uintptr_t)ref._private[0];
+	if (!record_client)
+		return TR_ERR_STALE;
+	struct tr_client_call_ref_request request = {.ref = ref};
+	int ret = tr_client_record_sync(
+	        record_client, tr_client_call_ref_cancel_on_owner, &request);
+	return ret == TR_ERR_CLOSED ? TR_ERR_STATE : ret;
+}
+
+int tr_rpc_v2_call_ref_release(struct tr_rpc_v2_call_ref *ref)
+{
+	return tr_rpc_record_client_ref_release(ref);
+}
+
 static int tr_client_record_begin_drain_on_owner(void *arg)
 {
 	struct tr_client *client = arg;

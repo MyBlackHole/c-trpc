@@ -77,6 +77,44 @@ HALF_CLOSE 的发送责任，不要求应用编写发送重试回调。`request`
 此便捷入口没有另一张调用表、执行器或终局状态机；它使用当前唯一的普通 V2
 门面，也不承诺 OPEN/MESSAGE/HALF_CLOSE 一定合并成一个包或一次系统调用。
 
+## 跨回调持有 Call 结果
+
+`tr_rpc_v2_call` 是可复制的弱能力，不延长固定调用槽或 Client 的寿命。
+需要跨过回调边界保存终局结果时，在调用仍活动或其 terminal callback 内调用
+`tr_rpc_v2_call_hold(call, &ref)`。每个 Call 同时最多一个 `tr_rpc_v2_call_ref`；
+它是唯一所有权值，只能由应用串行转交给另一个所有者，不能克隆或由多个线程并发
+操作。失败不会修改 `ref`。
+
+```c
+static void terminal(struct tr_rpc_v2_call call, enum tr_rpc_status status,
+                     enum tr_rpc_v2_delivery delivery, void *arg)
+{
+        struct tr_rpc_v2_call_ref ref = {0};
+        struct tr_rpc_v2_call_result result;
+        (void)status;
+        (void)delivery;
+        (void)arg;
+        if (tr_rpc_v2_call_hold(call, &ref) != TR_OK)
+                return;
+        if (tr_rpc_v2_call_ref_result(ref, &result) == TR_OK) {
+                /* 使用 result.status 和 result.delivery。 */
+        }
+        (void)tr_rpc_v2_call_ref_release(&ref);
+}
+```
+
+最终 `status` 与 `delivery` 在 terminal callback 即将运行前发布，并在引用有效期间
+保持不变。`tr_rpc_v2_call_ref_result()` 可从普通线程非阻塞读取；尚未发布时返回
+`TR_AGAIN` 且不改输出。终局回调中取得的引用可立即读到快照。
+`tr_rpc_v2_call_ref_cancel()` 只在终局前请求合作式取消，成功表示本地接受取消，
+不表示远端业务已停止。引用没有 send 或 half-close 能力，也不改变调用期限。
+
+引用会保留原有固定槽，直到 `tr_rpc_v2_call_ref_release(&ref)` 成功；成功后清零
+传入值。长期不释放会占用 Call 容量，使新调用返回 `TR_AGAIN`，并让
+`tr_client_wait_drained()` 保持未完成。若 `tr_client_destroy()` 时仍有引用，Client
+会停止运行时并报告残留终局，然后返回 `TR_AGAIN`；此时引用仍可读取结果和释放，
+释放后重试 destroy。应用必须在 destroy 成功前保留该唯一引用及 Client 生命周期。
+
 ## 消息、元数据与所有权
 
 | 对象或操作 | 应用获得的保证 |
@@ -93,6 +131,7 @@ HALF_CLOSE 的发送责任，不要求应用编写发送重试回调。`request`
 | Server 方法参数 | 指针被复制，所指对象由业务拥有并保持到 Server 销毁成功 |
 | Client 调用参数 | start 受理后借用到唯一 terminal；终局函数可释放它 |
 | Client 调用句柄 | 可复制的弱能力，保留完整调用代次，不延长 Client 寿命 |
+| Client CallRef | 每个 Call 唯一、必须 release 的拥有型引用；保留固定槽和终局快照，不提供发送能力 |
 | Server 调用身份 | 可比较的不透明值，在同一进程中跨连接与 Server 不重复，不是发送能力 |
 
 `tr_rpc_v2_metadata_count()`、`metadata_at()`、`metadata_find()` 提供按数量、索引和

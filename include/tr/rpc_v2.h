@@ -47,6 +47,12 @@ struct tr_rpc_v2_call {
 	uint64_t _private[3];
 };
 
+/* 唯一拥有型引用；不得复制成多个所有者，必须恰好 release 一次。
+ * 不提供发送或半关闭能力。 */
+struct tr_rpc_v2_call_ref {
+	uint64_t _private[4];
+};
+
 /* 业务调用身份，可按完整值比较；不是用于发送或延长对象寿命的能力。
  * 同一进程中跨连接、跨 Server 的有效身份不重复，编号耗尽会拒绝准入。
  */
@@ -60,6 +66,12 @@ struct tr_rpc_v2_call_id {
 enum tr_rpc_v2_delivery {
 	TR_RPC_V2_DELIVERY_LIVE = 0,
 	TR_RPC_V2_DELIVERY_SHUTDOWN = 1
+};
+
+/* terminal callback 即将执行前发布的不可变结果快照。 */
+struct tr_rpc_v2_call_result {
+	enum tr_rpc_status status;
+	enum tr_rpc_v2_delivery delivery;
 };
 
 /* 仅在所属回调中借用。不得修改私有字或保留其中的地址。
@@ -163,6 +175,20 @@ int tr_rpc_v2_call_send_with_compression(struct tr_rpc_v2_call call,
 int tr_rpc_v2_call_half_close(struct tr_rpc_v2_call call);
 /* 半关闭后仍可取消。取消、期限和对端终局按原有先到者选择唯一终局。 */
 int tr_rpc_v2_call_cancel(struct tr_rpc_v2_call call);
+
+/* 将活动 Call 的弱句柄转换为唯一引用；也可在该 Call 的 terminal
+ * callback 内取得引用。每个 Call 同时至多一个。引用可跨回调保存，并在
+ * 终局后读取快照；活动期间可请求取消。
+ * 持有引用会占用固定 Call 槽；release 后才允许槽复用。只有成功修改
+ * out/result；release 成功时清零传入的引用。Client destroy 遇到残留引用
+ * 会先停止并交付终局，然后返回 TR_AGAIN；释放引用后重试 destroy。
+ */
+int tr_rpc_v2_call_hold(struct tr_rpc_v2_call call,
+                        struct tr_rpc_v2_call_ref *out);
+int tr_rpc_v2_call_ref_result(struct tr_rpc_v2_call_ref ref,
+                              struct tr_rpc_v2_call_result *out);
+int tr_rpc_v2_call_ref_cancel(struct tr_rpc_v2_call_ref ref);
+int tr_rpc_v2_call_ref_release(struct tr_rpc_v2_call_ref *ref);
 
 enum tr_rpc_v2_request_kind {
 	TR_RPC_V2_REQUEST_OPEN = 0,
