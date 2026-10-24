@@ -1330,6 +1330,16 @@ static void test_semantic_record_error_isolation(void)
 	fixture_init(&f, 1024 * 1024, 8);
 	unsigned invalid = open_call(&f, 0);
 	wait_count(&f.business[invalid].seen[TR_RPC_RECORD_OPEN], 1U);
+	unsigned sibling = open_call(&f, 0);
+	wait_count(&f.business[sibling].seen[TR_RPC_RECORD_OPEN], 1U);
+
+	/* 同伴 MESSAGE 已进入业务线程，但保持未完成，覆盖活动流交错。 */
+	atomic_store(&f.use_gate, true);
+	request(&f, sibling, 0, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
 
 	/* 线帧边界可信，但同一 RPC 流重复 OPEN 是记录语义错误。 */
 	CHECK(tr_rpc_record_encode_header(duplicate, sizeof(duplicate), &header,
@@ -1342,10 +1352,28 @@ static void test_semantic_record_error_isolation(void)
 	CHECK(atomic_load(&f.business[invalid].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
 	CHECK(atomic_load(&f.client.terminals[invalid]) == 1U &&
 	      atomic_load(&f.server.terminals[invalid]) == 1U);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
 	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
 	      atomic_load(&f.server.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
 
-	/* 错误终局之后的新 RPC 仍通过同一 TCP 连接成功完成。 */
+	/* 错误流已终结后再恢复业务线程；在途同伴仍必须正常完成。 */
+	gate_open(&f.gate);
+	check_final(&f, sibling, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[sibling].active) == 0U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 1U &&
+	      atomic_load(&f.client.terminals[sibling]) == 1U &&
+	      atomic_load(&f.server.terminals[sibling]) == 1U);
+
+	/* 错误终局之后的新 RPC 也仍通过同一 TCP 连接成功完成。 */
 	unsigned healthy = open_call(&f, 0);
 	request(&f, healthy, 0, 1, 80);
 	check_final(&f, healthy, TR_RPC_STATUS_OK);

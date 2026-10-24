@@ -176,6 +176,13 @@ dev.49 为 #242/ERR-A 扩展压缩接收配额失败隔离：真实 Zstandard ME
 该切片不覆盖完整压缩/信用组合和连接组边界；ERR-A 全分类及 ERR-B/C/D/E 仍未验收。详见
 [压缩解码配额同伴隔离记录](rpc_v2_compressed_quota_peer_progress_20261025.md)。
 
+dev.50 扩展 #242/ERR-A 的重复 OPEN 语义错误隔离证据：错误发生前，同一 TCP 连接上的同伴调用已进入
+业务 MESSAGE 并暂停在 gate 中；错误流以 `INVALID_ARGUMENT` 终结期间，同伴保持未终结、连接保持 ACTIVE。
+释放 gate 后该在途同伴以 OK 完成，错误后的新调用也成功。GCC Release 与 TSan 下完整
+`test_rpc_record_endpoint_tcp` 通过。dev.47 的原验证仅覆盖错误后新开调用；本切片补齐已活动同伴时序，
+并不代表 ERR-A 全分类或 ERR-B/C/D/E 已验收。详见
+[活动同伴流语义错误隔离记录](rpc_v2_semantic_active_sibling_isolation_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
