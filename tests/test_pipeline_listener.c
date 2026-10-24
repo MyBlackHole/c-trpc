@@ -368,6 +368,28 @@ static void wait_listener_counts(
 	assert(0 && "listener counters did not converge");
 }
 
+static void
+wait_listener_route_rejections(struct tr_pipeline_listener *listener,
+                               uint64_t minimum)
+{
+	struct timespec pause;
+	unsigned i;
+
+	pause.tv_sec = 0;
+	pause.tv_nsec = 10000000L;
+	for (i = 0; i < 1000U; ++i) {
+		struct tr_pipeline_listener_stats stats;
+
+		memset(&stats, 0, sizeof(stats));
+		assert(tr_pipeline_listener_get_stats(listener, &stats) ==
+		       TR_OK);
+		if (stats.route_rejections >= minimum)
+			return;
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(0 && "stale DATA route was not rejected");
+}
+
 static void wait_data_frames(struct data_test_ctx *ctx, unsigned target)
 {
 	struct timespec deadline;
@@ -943,6 +965,154 @@ static void test_listener_publish_rollback_keeps_fd_until_drain(void)
 	assert(tr_reactor_destroy(reactor) == TR_OK);
 }
 
+static void test_stale_data_preface_cannot_cross_pipeline_recreation(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_pipeline_listener_config config;
+	struct tr_pipeline_listener *listener = NULL;
+	struct tr_pipeline_listener_stats stats;
+	struct tr_pipeline_control_wire_message offer;
+	struct tr_pipeline_route_preface old_control_route;
+	struct tr_pipeline_route_preface old_attached_route;
+	struct tr_pipeline_route_preface old_data_route;
+	struct tr_pipeline_route_preface new_data_route;
+	uint8_t old_data_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
+	uint8_t ping[TR_WIRE_HEADER_SIZE];
+	struct data_test_ctx data_ctx;
+	uint16_t port = 0U;
+	int old_control = -1;
+	int old_attached_data = -1;
+	int new_control = -1;
+	int stale_data = -1;
+	int new_data = -1;
+
+	memset(&data_ctx, 0, sizeof(data_ctx));
+	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&data_ctx.cond, NULL) == 0);
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.owner_shard_id = 0U;
+	config.pipeline_capacity = 1U;
+	config.connection_capacity = 4U;
+	config.data_capacity_per_pipeline = 2U;
+	config.stream_affinity_capacity_per_pipeline = 2U;
+	config.control_message_count = 4U;
+	config.authorize_control = authorize_control;
+	config.data_frame_cb = data_frame_cb;
+	config.data_event_cb = data_event_cb;
+	config.data_callback_arg = &data_ctx;
+	assert(tr_pipeline_listener_create(&config, &listener) == TR_OK);
+	assert(tr_pipeline_listener_listen_ipv4(listener, "127.0.0.1", 0U, 8,
+	                                        &port) == TR_OK);
+
+	old_control_route = control_route(TEST_EPOCH_1);
+	old_control = connect_loopback(port);
+	send_route(old_control, &old_control_route);
+	wait_listener_counts(listener, 1U, 1U);
+
+	memset(&offer, 0, sizeof(offer));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_1, UINT64_C(7101),
+	               &old_data_route) == TR_OK);
+	recv_control_message(old_control, UINT64_C(7101), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer.data_index == old_data_route.member_index);
+	assert(offer.data_generation == old_data_route.member_generation);
+	assert(tr_pipeline_route_preface_encode(old_data_raw,
+	                                        &old_data_route) == TR_OK);
+
+	/* 前导信息已包含完整旧身份字段，但保持最后一个字节未发送，
+	 * 使服务端连接仍处于 PENDING 而未消费 Reserved 能力。
+	 */
+	stale_data = connect_loopback(port);
+	send_all(stale_data, old_data_raw, TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	wait_listener_counts(listener, 1U, 2U);
+
+	/* 同一 CONTROL 下另一个 DATA 已附着。CONTROL 丢失时它必须关闭，
+	 * pending 前导则继续由入口路由器独立校验。
+	 */
+	memset(&offer, 0, sizeof(offer));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_1, UINT64_C(7103),
+	               &old_attached_route) == TR_OK);
+	recv_control_message(old_control, UINT64_C(7103), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer.data_index == old_attached_route.member_index);
+	assert(offer.data_generation == old_attached_route.member_generation);
+	assert(old_attached_route.member_index != old_data_route.member_index);
+	old_attached_data = connect_loopback(port);
+	send_route(old_attached_data, &old_attached_route);
+	wait_listener_counts(listener, 1U, 3U);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+	assert(stats.data_accepts == 1U);
+
+	/* CONTROL 致命丢失销毁旧 Pipeline；未完成前导的 TCP 连接仍在。
+	 */
+	shutdown(old_control, SHUT_RDWR);
+	close(old_control);
+	old_control = -1;
+	wait_peer_close(old_attached_data);
+	close(old_attached_data);
+	old_attached_data = -1;
+	wait_listener_counts(listener, 0U, 1U);
+
+	/* 故意重用组 ID 与 epoch，隔离验证 DATA 成员代次不能随 Pipeline
+	 * 对象销毁而复用。
+	 */
+	new_control = connect_loopback(port);
+	send_route(new_control, &old_control_route);
+	wait_listener_counts(listener, 1U, 2U);
+	memset(&offer, 0, sizeof(offer));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_1, UINT64_C(7102),
+	               &new_data_route) == TR_OK);
+	recv_control_message(new_control, UINT64_C(7102), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer.data_index == old_data_route.member_index);
+	assert(offer.data_generation == new_data_route.member_generation);
+	assert(new_data_route.member_generation !=
+	       old_data_route.member_generation);
+
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+	send_all(stale_data, old_data_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U,
+	         1U);
+	wait_listener_route_rejections(listener, stats.route_rejections + 1U);
+	wait_peer_close(stale_data);
+	close(stale_data);
+	stale_data = -1;
+
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+	assert(stats.data_accepts == 1U);
+	assert(stats.pipelines_current == 1U);
+
+	new_data = connect_loopback(port);
+	send_route(new_data, &new_data_route);
+	wait_listener_counts(listener, 1U, 2U);
+	build_ping(ping);
+	send_all(new_data, ping, sizeof(ping));
+	wait_data_frames(&data_ctx, 1U);
+
+	shutdown(new_control, SHUT_RDWR);
+	close(new_control);
+	new_control = -1;
+	wait_peer_close(new_data);
+	close(new_data);
+	new_data = -1;
+	wait_listener_counts(listener, 0U, 0U);
+	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	pthread_cond_destroy(&data_ctx.cond);
+	pthread_mutex_destroy(&data_ctx.lock);
+}
+
 int main(void)
 {
 	test_pipeline_listener_control_and_data();
@@ -950,6 +1120,7 @@ int main(void)
 	test_pipeline_send_failure_rolls_back_soft_state();
 	test_pipeline_listener_prestart_teardown();
 	test_listener_publish_rollback_keeps_fd_until_drain();
+	test_stale_data_preface_cannot_cross_pipeline_recreation();
 	assert(atomic_load(&fail_next_send_push) == 0);
 	puts("pipeline listener/control transport: ok");
 	return 0;

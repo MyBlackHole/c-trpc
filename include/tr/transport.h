@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "tr/peer_identity.h"
+#include "tr/tls.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ struct tr_client;
 
 struct tr_connection_group_id {
 	uint64_t group_id;
+	/* 运行期隔离代次；服务进程重启后建立新连接组时必须更新。 */
 	uint64_t epoch;
 };
 
@@ -94,17 +96,36 @@ enum tr_connection_group_role {
 	TR_CONNECTION_GROUP_ROLE_DATA = 2
 };
 
+enum tr_connection_group_authorization_decision {
+	TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW = 1,
+	TR_CONNECTION_GROUP_AUTHORIZATION_DENY = 2
+};
+
 /* CONTROL 的 control_identity 为 NONE；DATA 使用活动 CONTROL 会话身份。 */
 struct tr_connection_group_authorization {
 	struct tr_connection_group_id group;
 	enum tr_connection_group_role role;
 	struct tr_peer_identity_view peer_identity;
 	struct tr_peer_identity_view control_identity;
+	uint64_t tls_profile_generation;
+	uint64_t deadline_monotonic_ns;
 };
 
 typedef int (*tr_connection_group_authorize_cb)(
         const struct tr_connection_group_authorization *authorization,
         void *arg);
+/* 异步 provider 回调运行在连接组 Reactor owner，必须快速返回且不得阻塞。
+ * authorization 与其中的身份视图仅在该回调期间借用；provider 应复制需要的
+ * 字段。每个 operation 最终必须调用 authorize_complete 一次。
+ */
+typedef void (*tr_connection_group_authorize_async_cb)(
+        const struct tr_connection_group_authorization *authorization,
+        struct tr_tls_provider_operation operation, void *arg);
+/* 收到取消通知后，provider 必须停止访问原始请求数据，并通过
+ * authorize_complete 确认该 operation；确认前服务端保留其有界槽位。
+ */
+typedef void (*tr_connection_group_authorize_cancel_cb)(
+        struct tr_tls_provider_operation operation, void *arg);
 
 typedef enum tr_connection_group_message_disposition
 (*tr_connection_group_message_cb)(
@@ -141,6 +162,8 @@ struct tr_connection_group_server_config {
 	uint32_t max_streams_per_group;
 
 	tr_connection_group_authorize_cb authorize;
+	tr_connection_group_authorize_async_cb authorize_async;
+	tr_connection_group_authorize_cancel_cb authorize_cancel;
 	tr_connection_group_message_cb on_message;
 	tr_connection_group_data_event_cb on_data_event;
 	void *callback_arg;

@@ -19,9 +19,21 @@ int tr_tls_openssl_client_profile_create(
 int tr_tls_openssl_client_profile_create_with_peer_identity(
         const struct tr_tls_client_config *config,
         struct tr_tls_openssl_profile **out);
+int tr_tls_openssl_client_profile_create_from_pem(
+        const struct tr_tls_client_config *config,
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out);
+int tr_tls_openssl_client_profile_create_from_pem_with_peer_identity(
+        const struct tr_tls_client_config *config,
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out);
 int tr_tls_openssl_server_profile_create(
         const struct tr_tls_server_config *config,
         struct tr_tls_openssl_profile **out);
+int tr_tls_openssl_server_profile_create_from_pem(
+        const struct tr_tls_server_config *config,
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out);
 int tr_tls_openssl_profile_peer_identity_enabled(
         const struct tr_tls_openssl_profile *profile);
 int tr_tls_openssl_profile_peer_identity_required(

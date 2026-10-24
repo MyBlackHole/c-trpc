@@ -256,10 +256,65 @@ static void test_pipeline_control_validation(void)
 	assert(control == NULL);
 }
 
+static void test_data_capacity_rejection_does_not_consume_generation(void)
+{
+	struct tr_reactor *owner = NULL;
+	struct tr_pipeline_registry_config registry_config;
+	struct tr_pipeline_registry *registry = NULL;
+	struct tr_pipeline_control_config config;
+	struct tr_pipeline_control *control = NULL;
+	struct tr_pipeline_data_offer first;
+	struct tr_pipeline_data_offer rejected;
+	struct tr_pipeline_data_offer second;
+	struct tr_conn_handle connection;
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &owner) == TR_OK);
+	assert(tr_reactor_start(owner) == TR_OK);
+
+	memset(&registry_config, 0, sizeof(registry_config));
+	registry_config.owner = owner;
+	registry_config.owner_shard_id = 8U;
+	registry_config.capacity = 1U;
+	assert(tr_pipeline_registry_create(&registry_config, &registry) ==
+	       TR_OK);
+
+	memset(&config, 0, sizeof(config));
+	config.registry = registry;
+	config.pipeline_id = UINT64_C(0x8001);
+	config.epoch = UINT64_C(1);
+	config.data_capacity = 1U;
+	config.stream_affinity_capacity = 1U;
+	connection = fake_connection(owner, 40U, 1U);
+	assert(tr_pipeline_control_create(&config, connection, &control) ==
+	       TR_OK);
+
+	memset(&first, 0, sizeof(first));
+	assert(tr_pipeline_control_reserve_data(control, &first) == TR_OK);
+	assert(first.data.generation == 1U);
+
+	memset(&rejected, 0xA5, sizeof(rejected));
+	assert(tr_pipeline_control_reserve_data(control, &rejected) ==
+	       TR_AGAIN);
+	assert(tr_pipeline_control_cancel_data(control, &first) == TR_OK);
+
+	memset(&second, 0, sizeof(second));
+	assert(tr_pipeline_control_reserve_data(control, &second) == TR_OK);
+	assert(second.data.index == first.data.index);
+	assert(second.data.generation == 2U);
+	assert(second.route.member_generation == 2U);
+	assert(tr_pipeline_control_cancel_data(control, &second) == TR_OK);
+
+	assert(tr_pipeline_control_close(control, connection) == TR_OK);
+	tr_pipeline_registry_destroy(registry);
+	assert(tr_reactor_stop(owner) == TR_OK);
+	assert(tr_reactor_destroy(owner) == TR_OK);
+}
+
 int main(void)
 {
 	test_pipeline_control_validation();
 	test_pipeline_control_registry_capacity_failure_is_precommit();
+	test_data_capacity_rejection_does_not_consume_generation();
 	test_pipeline_control_session();
 	puts("pipeline control/transfer-ready: ok");
 	return 0;

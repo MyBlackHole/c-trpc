@@ -130,6 +130,11 @@ DATA:
 `member_generation` 是 Pipeline 成员能力代次，不是 Reactor 连接槽位代次。
 协议层禁止把 Reactor 槽位/代次暴露为远端路由标识。
 
+连接组的 `member_generation` 由所属分片注册表分配，在该注册表生命周期内
+全局递增且不复用；计数器耗尽时拒绝新的 DATA 预留，不回绕。此保证覆盖
+Pipeline 销毁后残留的未完成 DATA 路由前导。计数器不跨服务进程重启持久化，
+因此调用方必须在重启后为新连接组使用新的 `epoch`。
+
 `owner_shard_id` 同样是 CONTROL 控制面签发的路由目标，不是客户端可以自证的值。
 未来附着时必须同时验证：
 
