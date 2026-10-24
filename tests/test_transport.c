@@ -3078,7 +3078,7 @@ static int compressed_rpc_limits_probe_on_owner(void *arg)
 }
 
 static void test_channel_message_limits_directional_snapshot(
-	struct compressed_rx_fixture *fixture)
+        struct compressed_rx_fixture *fixture)
 {
 	struct compressed_rpc_limits_probe probe = {.fixture = fixture};
 	assert(tr_reactor_call(fixture->reactor,

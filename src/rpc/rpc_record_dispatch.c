@@ -83,13 +83,13 @@ int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel)
 int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
                            const struct tr_rpc_bytes *message)
 {
-	return tr_rpc_v2_reply_append_with_compression(
-	        reply, message, TR_RPC_COMPRESSION_NONE);
+	return tr_rpc_v2_reply_append_with_compression(reply, message,
+	                                               TR_RPC_COMPRESSION_NONE);
 }
 
-int tr_rpc_v2_reply_append_with_compression(
-	struct tr_rpc_v2_reply *reply, const struct tr_rpc_bytes *message,
-	enum tr_rpc_compression compression)
+int tr_rpc_v2_reply_append_with_compression(struct tr_rpc_v2_reply *reply,
+                                            const struct tr_rpc_bytes *message,
+                                            enum tr_rpc_compression compression)
 {
 	if (!reply)
 		return TR_ERR_INVALID;
@@ -150,8 +150,8 @@ int tr_rpc_v2_reply_acquire_producer(struct tr_rpc_v2_reply *reply,
 		return TR_ERR_UNSUPPORTED;
 	ret = tr_rpc_record_producer_create(
 	        record->producer_domain, record->max_message,
-	        record->headers_sent,
-	        record->response_compression_algorithms, &producer);
+	        record->headers_sent, record->response_compression_algorithms,
+	        &producer);
 	if (ret != TR_OK)
 		return ret;
 	record->producer = producer;
@@ -346,15 +346,15 @@ static void tr_reply_clear(struct tr_rpc_record_reply *reply)
 	tr_reply_clear_metadata(reply, &reply->trailing);
 }
 int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
-	                               size_t size)
+                               size_t size)
 {
 	return tr_rpc_record_reply_append_with_compression(
 	        r, data, size, TR_RPC_COMPRESSION_NONE);
 }
 
 int tr_rpc_record_reply_append_with_compression(
-	struct tr_rpc_record_reply *r, const void *data, size_t size,
-	enum tr_rpc_compression compression)
+        struct tr_rpc_record_reply *r, const void *data, size_t size,
+        enum tr_rpc_compression compression)
 {
 	struct tr_reply_body *b;
 	size_t bytes;
@@ -394,7 +394,7 @@ int tr_rpc_record_reply_append_with_compression(
 	                   .capacity = (uint32_t)size,
 	                   .len = (uint32_t)size,
 	                   .release_cb = tr_reply_body_release},
-		        .budget = r->budget,
+	        .budget = r->budget,
 	        .bytes = bytes,
 	        .compression = compression};
 	if (size)
@@ -1044,8 +1044,8 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 		h.compression = (uint32_t)b->compression;
 		h.decoded_size = body->len;
 		h.encoded_size = b->compression == TR_RPC_COMPRESSION_NONE
-		                          ? body->len
-		                          : 0U;
+		                         ? body->len
+		                         : 0U;
 	} else if (reply->finished) {
 		h.kind = TR_RPC_RECORD_FINAL_STATUS;
 		h.status = reply->status;

@@ -171,7 +171,7 @@ static void tr_producer_body_release(struct tr_buffer *buffer)
 
 int tr_rpc_record_producer_create(struct tr_rpc_record_producer_domain *domain,
                                   uint32_t max_message, bool headers_sent,
-				  uint32_t response_compression_algorithms,
+                                  uint32_t response_compression_algorithms,
                                   struct tr_rpc_v2_producer **out)
 {
 	struct tr_rpc_v2_producer *p;
@@ -210,8 +210,7 @@ int tr_rpc_record_producer_create(struct tr_rpc_record_producer_domain *domain,
 	p->domain = domain;
 	p->app_refs = 1;
 	p->max_message = max_message;
-	p->response_compression_algorithms =
-	        response_compression_algorithms;
+	p->response_compression_algorithms = response_compression_algorithms;
 	p->initial_closed = headers_sent;
 	*out = p;
 	return TR_OK;
@@ -296,8 +295,7 @@ static int tr_producer_begin(struct tr_rpc_v2_producer *p, bool initial)
 static int tr_producer_publish(struct tr_rpc_v2_producer *p, unsigned kind,
                                struct tr_buffer *body, const uint8_t *metadata,
                                uint32_t size, enum tr_rpc_status status,
-			       enum tr_rpc_compression compression,
-                               int result)
+                               enum tr_rpc_compression compression, int result)
 {
 	pthread_mutex_lock(&p->lock);
 	if (p->closed)
@@ -332,8 +330,8 @@ int tr_rpc_v2_producer_send(struct tr_rpc_v2_producer *p,
 }
 
 int tr_rpc_v2_producer_send_with_compression(
-	struct tr_rpc_v2_producer *p, const struct tr_rpc_bytes *message,
-	enum tr_rpc_compression compression)
+        struct tr_rpc_v2_producer *p, const struct tr_rpc_bytes *message,
+        enum tr_rpc_compression compression)
 {
 	struct tr_producer_body *body = NULL;
 	size_t bytes, size;

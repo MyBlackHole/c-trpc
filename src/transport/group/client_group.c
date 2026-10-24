@@ -231,7 +231,7 @@ static void
 tr_client_group_publish_connected_on_owner(struct tr_client_group *group);
 
 static int tr_client_group_send_message_caps_request_on_owner(
-	struct tr_client_group *group, struct tr_client_group_data *data)
+        struct tr_client_group *group, struct tr_client_group_data *data)
 {
 	struct tr_message_caps local_caps = {0U, 0U};
 	struct tr_buffer *buffer = NULL;
@@ -245,8 +245,8 @@ static int tr_client_group_send_message_caps_request_on_owner(
 	    !data->connection.reactor || data->message_caps_request_sent)
 		return TR_ERR_STATE;
 
-	ret = tr_buffer_acquire(&group->control_pool,
-	                        TR_MESSAGE_CAPS_WIRE_SIZE, &buffer);
+	ret = tr_buffer_acquire(&group->control_pool, TR_MESSAGE_CAPS_WIRE_SIZE,
+	                        &buffer);
 	if (ret != TR_OK)
 		return ret;
 	ret = tr_message_caps_encode(buffer->data, &local_caps);
@@ -285,7 +285,7 @@ static int tr_client_group_tls_preface_sent(struct tr_conn_handle connection,
 			continue;
 		data->state = TR_CLIENT_GROUP_DATA_ACTIVE;
 		return tr_client_group_send_message_caps_request_on_owner(group,
-		                                                         data);
+		                                                          data);
 	}
 	return TR_ERR_STALE;
 }
@@ -491,9 +491,10 @@ fail:
 }
 
 static void tr_client_group_start_next_on_owner(struct tr_client_group *group);
-static int tr_client_group_invalidate_data_transfers(
-	struct tr_client_group *group, uint32_t data_slot,
-	uint32_t data_generation);
+static int
+tr_client_group_invalidate_data_transfers(struct tr_client_group *group,
+                                          uint32_t data_slot,
+                                          uint32_t data_generation);
 
 static enum tr_frame_disposition tr_client_group_data_frame(
 	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
@@ -509,20 +510,25 @@ static enum tr_frame_disposition tr_client_group_data_frame(
 
 			if ((data->state != TR_CLIENT_GROUP_DATA_ACTIVE &&
 			     data->state != TR_CLIENT_GROUP_DATA_CONNECTING) ||
-			    !tr_client_group_conn_equal(data->connection, connection))
+			    !tr_client_group_conn_equal(data->connection,
+			                                connection))
 				continue;
 			if (!data->message_caps_request_sent ||
-			    data->message_caps_ready || frame->header.flags != 0U ||
+			    data->message_caps_ready ||
+			    frame->header.flags != 0U ||
 			    frame->header.stream_id != 0U ||
 			    frame->header.message_id != 0U || !frame->payload ||
 			    frame->payload->len != TR_MESSAGE_CAPS_WIRE_SIZE) {
-				(void)tr_reactor_abort_on_owner(connection, TR_ERR_BAD_TYPE);
+				(void)tr_reactor_abort_on_owner(
+				        connection, TR_ERR_BAD_TYPE);
 				return TR_FRAME_RELEASE;
 			}
 			ret = tr_message_caps_decode(frame->payload->data,
-			                            frame->payload->len, &peer_caps);
+			                             frame->payload->len,
+			                             &peer_caps);
 			if (ret != TR_OK) {
-				(void)tr_reactor_abort_on_owner(connection, ret);
+				(void)tr_reactor_abort_on_owner(connection,
+				                                ret);
 				return TR_FRAME_RELEASE;
 			}
 			data->peer_receive_algorithm_bits =
@@ -568,9 +574,9 @@ static void tr_client_group_data_event(
 				group->data[i].offer_message_id);
 		{
 			int invalidate_ret =
-				tr_client_group_invalidate_data_transfers(
-					group, i,
-					group->data[i].route.member_generation);
+			        tr_client_group_invalidate_data_transfers(
+			                group, i,
+			                group->data[i].route.member_generation);
 
 			if (cancel_ret == TR_OK)
 				cancel_ret = invalidate_ret;
@@ -895,8 +901,8 @@ static int tr_client_group_transfer_find(
 }
 
 static int tr_client_group_cancel_compression_job_on_owner(
-	struct tr_client_group *group,
-	struct tr_client_group_transfer *transfer)
+        struct tr_client_group *group,
+        struct tr_client_group_transfer *transfer)
 {
 	int ret;
 
@@ -904,12 +910,11 @@ static int tr_client_group_cancel_compression_job_on_owner(
 		return TR_OK;
 	if (!group->config.message_cancel)
 		return TR_ERR_UNSUPPORTED;
-	ret = group->config.message_cancel(
-	        group->config.message_context,
-	        transfer->compression_job->task);
+	ret = group->config.message_cancel(group->config.message_context,
+	                                   transfer->compression_job->task);
 	/* STATE means the transform's terminal result already won; STALE means
-	 * its completion has retired the service handle. Both still converge via
-	 * the accepted completion callback owned by this job.
+	 * its completion has retired the service handle. Both still converge
+	 * via the accepted completion callback owned by this job.
 	 */
 	if (ret == TR_ERR_STATE || ret == TR_ERR_STALE)
 		return TR_OK;
@@ -924,7 +929,8 @@ static int tr_client_group_clear_transfers(struct tr_client_group *group)
 	if (!group || !group->transfers)
 		return TR_OK;
 	for (i = 0; i < group->transfer_capacity; ++i) {
-		struct tr_client_group_transfer *transfer = &group->transfers[i];
+		struct tr_client_group_transfer *transfer =
+		        &group->transfers[i];
 		int ret;
 
 		if (transfer->state == TR_CLIENT_GROUP_TRANSFER_USED) {
@@ -932,8 +938,8 @@ static int tr_client_group_clear_transfers(struct tr_client_group *group)
 			if (group->transfer_count != 0U)
 				group->transfer_count--;
 		}
-		ret = tr_client_group_cancel_compression_job_on_owner(
-		        group, transfer);
+		ret = tr_client_group_cancel_compression_job_on_owner(group,
+		                                                      transfer);
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 		if (!transfer->compression_job)
@@ -943,9 +949,10 @@ static int tr_client_group_clear_transfers(struct tr_client_group *group)
 	return result;
 }
 
-static int tr_client_group_invalidate_data_transfers(
-	struct tr_client_group *group, uint32_t data_slot,
-	uint32_t data_generation)
+static int
+tr_client_group_invalidate_data_transfers(struct tr_client_group *group,
+                                          uint32_t data_slot,
+                                          uint32_t data_generation)
 {
 	uint32_t i;
 	int result = TR_OK;
@@ -964,8 +971,8 @@ static int tr_client_group_invalidate_data_transfers(
 		transfer->state = TR_CLIENT_GROUP_TRANSFER_TOMBSTONE;
 		if (group->transfer_count != 0U)
 			group->transfer_count--;
-		ret = tr_client_group_cancel_compression_job_on_owner(
-		        group, transfer);
+		ret = tr_client_group_cancel_compression_job_on_owner(group,
+		                                                      transfer);
 		if (ret != TR_OK && result == TR_OK)
 			result = ret;
 	}
@@ -991,7 +998,7 @@ static void tr_client_group_send_buffer_release(
 }
 
 static void tr_client_group_compressed_wire_release_one(
-	struct tr_client_group_compressed_wire *wire)
+        struct tr_client_group_compressed_wire *wire)
 {
 	struct tr_client_group *group;
 
@@ -1011,31 +1018,29 @@ static void tr_client_group_compressed_wire_release_one(
 			group->compressed_wires_current--;
 		tr_client_group_publish_drain_progress_on_owner(group);
 	}
-	(void)tr_memory_budget_release(wire->budget,
-	                               wire->allocation_bytes);
+	(void)tr_memory_budget_release(wire->budget, wire->allocation_bytes);
 	free(wire);
 }
 
-static void tr_client_group_compressed_envelope_release(
-	struct tr_buffer *buffer)
+static void
+tr_client_group_compressed_envelope_release(struct tr_buffer *buffer)
 {
 	struct tr_client_group_compressed_wire *wire =
-	        (struct tr_client_group_compressed_wire *)(
-	                (uint8_t *)buffer -
-	                offsetof(struct tr_client_group_compressed_wire,
-	                         envelope));
+	        (struct tr_client_group_compressed_wire
+	                 *)((uint8_t *)buffer -
+	                    offsetof(struct tr_client_group_compressed_wire,
+	                             envelope));
 
 	tr_client_group_compressed_wire_release_one(wire);
 }
 
-static void tr_client_group_compressed_encoded_release(
-	struct tr_buffer *buffer)
+static void tr_client_group_compressed_encoded_release(struct tr_buffer *buffer)
 {
 	struct tr_client_group_compressed_wire *wire =
-	        (struct tr_client_group_compressed_wire *)(
-	                (uint8_t *)buffer -
-	                offsetof(struct tr_client_group_compressed_wire,
-	                         encoded));
+	        (struct tr_client_group_compressed_wire
+	                 *)((uint8_t *)buffer -
+	                    offsetof(struct tr_client_group_compressed_wire,
+	                             encoded));
 
 	tr_client_group_compressed_wire_release_one(wire);
 }
@@ -1421,7 +1426,7 @@ int tr_client_group_create(const struct tr_client_group_config *config,
 	      !config->message_submit || !config->message_cancel ||
 	      !config->message_context || !config->message_budget)) ||
 	    config->max_data_connections >
-		    UINT32_MAX - TR_CLIENT_GROUP_CONTROL_BUFFER_BASE ||
+	            UINT32_MAX - TR_CLIENT_GROUP_CONTROL_BUFFER_BASE ||
 	    (config->max_data_connections != 0U &&
 	     (config->max_transfers == 0U ||
 	      config->max_transfers > UINT32_MAX / 2U ||
@@ -1929,8 +1934,8 @@ struct tr_client_group_send_request {
 
 static struct tr_client_group_transfer *
 tr_client_group_compression_job_transfer(
-	struct tr_client_group *group,
-	struct tr_client_group_compression_job *job)
+        struct tr_client_group *group,
+        struct tr_client_group_compression_job *job)
 {
 	uint32_t i;
 
@@ -1940,8 +1945,8 @@ tr_client_group_compression_job_transfer(
 	return NULL;
 }
 
-static int tr_client_group_transform_error(
-	enum tr_message_transform_outcome outcome)
+static int
+tr_client_group_transform_error(enum tr_message_transform_outcome outcome)
 {
 	switch (outcome) {
 	case TR_MESSAGE_TRANSFORM_CANCELLED:
@@ -1960,9 +1965,10 @@ static int tr_client_group_transform_error(
 	}
 }
 
-static void tr_client_group_compression_done(
-	void *arg, struct tr_task_handle handle,
-	struct tr_message_service_result result, struct tr_message *message)
+static void
+tr_client_group_compression_done(void *arg, struct tr_task_handle handle,
+                                 struct tr_message_service_result result,
+                                 struct tr_message *message)
 {
 	struct tr_client_group_compression_job *job = arg;
 	struct tr_client_group *group;
@@ -1989,13 +1995,14 @@ static void tr_client_group_compression_done(
 	    transfer->stream_id == job->stream_id &&
 	    job->data_slot < group->data_capacity) {
 		data = &group->data[job->data_slot];
-		current = !group->closing &&
-		          data->state == TR_CLIENT_GROUP_DATA_ACTIVE &&
-		          data->route.member_generation == job->data_generation &&
-		          data->message_caps_ready &&
-		          tr_client_group_conn_equal(data->connection,
-		                                     job->connection) &&
-		          transfer->compression_job == job;
+		current =
+		        !group->closing &&
+		        data->state == TR_CLIENT_GROUP_DATA_ACTIVE &&
+		        data->route.member_generation == job->data_generation &&
+		        data->message_caps_ready &&
+		        tr_client_group_conn_equal(data->connection,
+		                                   job->connection) &&
+		        transfer->compression_job == job;
 	}
 	if (handle.instance != job->task.instance ||
 	    handle.generation != job->task.generation)
@@ -2003,8 +2010,7 @@ static void tr_client_group_compression_done(
 
 	if (current && result.outcome == TR_MESSAGE_TRANSFORM_OK && message) {
 		struct tr_message_limits limits;
-		uint32_t local_limit =
-		        group->config.max_encoded_message_bytes;
+		uint32_t local_limit = group->config.max_encoded_message_bytes;
 
 		wire_limit = data->peer_max_encoded_message_bytes;
 		if (wire_limit > local_limit)
@@ -2018,8 +2024,10 @@ static void tr_client_group_compression_done(
 			if (ret != TR_OK || encoded_view.len == 0U ||
 			    encoded_view.len > UINT32_MAX ||
 			    encoded_view.len >
-			            wire_limit - TR_MESSAGE_ENVELOPE_WIRE_SIZE) {
-				abort_status = ret == TR_OK ? TR_ERR_BAD_LENGTH : ret;
+			            wire_limit -
+			                    TR_MESSAGE_ENVELOPE_WIRE_SIZE) {
+				abort_status =
+				        ret == TR_OK ? TR_ERR_BAD_LENGTH : ret;
 			} else {
 				ret = tr_memory_budget_reserve(
 				        group->config.message_budget,
@@ -2028,7 +2036,8 @@ static void tr_client_group_compression_done(
 					wire = calloc(1, sizeof(*wire));
 					if (!wire) {
 						(void)tr_memory_budget_release(
-						        group->config.message_budget,
+						        group->config
+						                .message_budget,
 						        wire_allocation);
 						ret = TR_ERR_NOMEM;
 					}
@@ -2039,13 +2048,12 @@ static void tr_client_group_compression_done(
 					wire->group = group;
 					wire->budget =
 					        group->config.message_budget;
-					wire->allocation_bytes = wire_allocation;
+					wire->allocation_bytes =
+					        wire_allocation;
 					wire->accounted_bytes =
 					        job->accounted_bytes;
-					limits.max_decoded_bytes =
-					        local_limit;
-					limits.max_encoded_bytes =
-					        wire_limit;
+					limits.max_decoded_bytes = local_limit;
+					limits.max_encoded_bytes = wire_limit;
 					ret = tr_message_none_move(
 					        message, &limits,
 					        &wire->encoded_message);
@@ -2054,11 +2062,13 @@ static void tr_client_group_compression_done(
 						        &wire->encoded_message,
 						        &encoded_view);
 					if (ret == TR_OK) {
-						envelope = (struct tr_message_envelope){
+						envelope = (struct
+						            tr_message_envelope){
 						        .codec_id =
 						                TR_MESSAGE_CODEC_ZSTD,
 						        .encoded_body_bytes =
-						                (uint32_t)encoded_view.len,
+						                (uint32_t)encoded_view
+						                        .len,
 						        .decoded_message_bytes =
 						                job->accounted_bytes};
 						ret = tr_message_envelope_encode(
@@ -2085,36 +2095,41 @@ static void tr_client_group_compression_done(
 						wire->envelope.release_cb =
 						        tr_client_group_compressed_envelope_release;
 						wire->encoded.data =
-						        (uint8_t *)encoded_view.data;
+						        (uint8_t *)encoded_view
+						                .data;
 						wire->encoded.capacity =
-						        (uint32_t)encoded_view.len;
+						        (uint32_t)encoded_view
+						                .len;
 						wire->encoded.len =
-						        (uint32_t)encoded_view.len;
+						        (uint32_t)encoded_view
+						                .len;
 						wire->encoded.release_cb =
 						        tr_client_group_compressed_encoded_release;
 						payloads[0] = &wire->envelope;
 						payloads[1] = &wire->encoded;
 						group->compressed_wires_current++;
 						job->accounted_bytes = 0U;
-						transfer->compression_job = NULL;
+						transfer->compression_job =
+						        NULL;
 						ret = tr_reactor_sendv_limited(
 						        job->connection,
 						        TR_FRAME_DATA,
 						        TR_FRAME_F_COMPRESSED,
 						        job->stream_id,
-						        job->message_id, payloads,
-						        2U,
+						        job->message_id,
+						        payloads, 2U,
 						        group->config
-					                .max_frame_payload_bytes);
+						                .max_frame_payload_bytes);
 						if (ret != TR_OK) {
 							tr_buffer_release(
 							        &wire->envelope);
 							tr_buffer_release(
 							        &wire->encoded);
 							wire = NULL;
-							abort_status = ret == TR_AGAIN
-							                       ? TR_ERR_STATE
-							                       : ret;
+							abort_status =
+							        ret == TR_AGAIN
+							                ? TR_ERR_STATE
+							                : ret;
 						}
 					}
 				}
@@ -2151,8 +2166,8 @@ static void tr_client_group_compression_done(
 }
 
 static int tr_client_group_send_compressed_on_owner(
-	struct tr_client_group *group, uint32_t stream_id,
-	uint64_t message_id, const struct tr_transport_bytes *bytes)
+        struct tr_client_group *group, uint32_t stream_id, uint64_t message_id,
+        const struct tr_transport_bytes *bytes)
 {
 	struct tr_client_group_transfer *transfer;
 	struct tr_client_group_data *data;
@@ -2178,8 +2193,8 @@ static int tr_client_group_send_compressed_on_owner(
 	                                   NULL))
 		return TR_ERR_STALE;
 	transfer = &group->transfers[transfer_slot];
-	ret = tr_client_group_transfer_connection_on_owner(
-	        group, stream_id, &connection);
+	ret = tr_client_group_transfer_connection_on_owner(group, stream_id,
+	                                                   &connection);
 	if (ret != TR_OK)
 		return ret;
 	if (transfer->data_slot >= group->data_capacity)
@@ -2188,8 +2203,7 @@ static int tr_client_group_send_compressed_on_owner(
 	data = &group->data[data_slot];
 	if (!data->message_caps_ready)
 		return TR_AGAIN;
-	if (!(data->peer_receive_algorithm_bits &
-	      TR_MESSAGE_ALGORITHM_ZSTD))
+	if (!(data->peer_receive_algorithm_bits & TR_MESSAGE_ALGORITHM_ZSTD))
 		return TR_ERR_UNSUPPORTED;
 	if (transfer->compression_job)
 		return TR_AGAIN;
@@ -2216,7 +2230,8 @@ static int tr_client_group_send_compressed_on_owner(
 	ret = tr_message_builder_create(group->config.message_budget,
 	                                bytes->len, &builder);
 	if (ret == TR_OK && bytes->len != 0U)
-		ret = tr_message_builder_append(builder, bytes->data, bytes->len);
+		ret = tr_message_builder_append(builder, bytes->data,
+		                                bytes->len);
 	if (ret == TR_OK)
 		ret = tr_message_builder_publish(&builder, &input);
 	if (ret != TR_OK) {
@@ -2243,8 +2258,7 @@ static int tr_client_group_send_compressed_on_owner(
 	        group->config.max_message_bytes;
 	transform_config.limits.max_encoded_bytes =
 	        encoded_limit - TR_MESSAGE_ENVELOPE_WIRE_SIZE;
-	transform_config.max_workspace_bytes =
-	        TR_GROUP_MESSAGE_WORKSPACE_BYTES;
+	transform_config.max_workspace_bytes = TR_GROUP_MESSAGE_WORKSPACE_BYTES;
 	transform_config.max_window_log = TR_GROUP_MESSAGE_WINDOW_LOG;
 	transform_config.compression_level = 3;
 	transfer->compression_job = job;
@@ -2339,9 +2353,9 @@ int tr_client_group_send(
 }
 
 int tr_client_group_send_with_compression(
-	struct tr_client_group *group, uint32_t stream_id,
-	uint64_t message_id, const struct tr_transport_bytes *bytes,
-	enum tr_connection_group_compression compression)
+        struct tr_client_group *group, uint32_t stream_id, uint64_t message_id,
+        const struct tr_transport_bytes *bytes,
+        enum tr_connection_group_compression compression)
 {
 	struct tr_client_group_send_request request;
 

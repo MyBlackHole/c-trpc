@@ -60,8 +60,8 @@ int tr_client_group_send(
 	struct tr_client_group *group, uint32_t stream_id,
 	uint64_t message_id, const struct tr_transport_bytes *bytes);
 int tr_client_group_send_with_compression(
-	struct tr_client_group *group, uint32_t stream_id,
-	uint64_t message_id, const struct tr_transport_bytes *bytes,
-	enum tr_connection_group_compression compression);
+        struct tr_client_group *group, uint32_t stream_id, uint64_t message_id,
+        const struct tr_transport_bytes *bytes,
+        enum tr_connection_group_compression compression);
 
 #endif

@@ -519,12 +519,12 @@ static int tr_record_client_progress(struct tr_record_client_slot *slot)
 	while (slot->unary_pending && !slot->terminal && !slot->open_pending &&
 	       !client->callback_depth) {
 		enum tr_rpc_record_kind kind = slot->unary_pending;
-		ret = tr_record_client_request(tr_record_client_handle(slot),
-		                               kind, &slot->unary_body, NULL,
-		                               true,
-		                               kind == TR_RPC_RECORD_MESSAGE
-			                               ? slot->unary_compression
-			                               : TR_RPC_COMPRESSION_NONE);
+		ret = tr_record_client_request(
+		        tr_record_client_handle(slot), kind, &slot->unary_body,
+		        NULL, true,
+		        kind == TR_RPC_RECORD_MESSAGE
+		                ? slot->unary_compression
+		                : TR_RPC_COMPRESSION_NONE);
 		if (ret != TR_OK) {
 			if (ret != TR_AGAIN && !slot->terminal)
 				(void)tr_rpc_record_stream_abort_on_owner(
@@ -732,12 +732,12 @@ static int tr_record_client_call_start(
 	if (!method)
 		return TR_ERR_UNSUPPORTED;
 	enum tr_rpc_compression unary_compression =
-	        options ? options->request_compression : TR_RPC_COMPRESSION_NONE;
+	        options ? options->request_compression
+	                : TR_RPC_COMPRESSION_NONE;
 	if (unary_compression != TR_RPC_COMPRESSION_NONE &&
 	    unary_compression != TR_RPC_COMPRESSION_ZSTD)
 		return TR_ERR_INVALID;
-	if (!unary_request &&
-	    unary_compression != TR_RPC_COMPRESSION_NONE)
+	if (!unary_request && unary_compression != TR_RPC_COMPRESSION_NONE)
 		return TR_ERR_INVALID;
 	if (unary_compression == TR_RPC_COMPRESSION_ZSTD &&
 	    !(method->request_compression_algorithms &
@@ -924,7 +924,7 @@ static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
 		if (kind == TR_RPC_RECORD_MESSAGE) {
 			header.codec_id = slot->method->request_codec_id;
 			header.compression = (uint32_t)compression;
-			header.decoded_size = message ? message->len
+			header.decoded_size = message  ? message->len
 			                      : buffer ? buffer->len
 			                               : 0;
 			header.encoded_size =
@@ -933,9 +933,8 @@ static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
 			                : 0U;
 		}
 		if (compression == TR_RPC_COMPRESSION_NONE &&
-		    TR_RPC_RECORD_HEADER_SIZE +
-		                    (uint64_t)header.encoded_size >
-		                    slot->peer_window)
+		    TR_RPC_RECORD_HEADER_SIZE + (uint64_t)header.encoded_size >
+		            slot->peer_window)
 			ret = TR_ERR_BAD_LENGTH;
 		if (ret == TR_OK && message) {
 			struct tr_rpc_record_header validation_header = header;
@@ -982,8 +981,7 @@ int tr_rpc_record_client_send_on_owner(
         struct tr_rpc_record_client_handle handle, struct tr_buffer **body)
 {
 	return tr_record_client_request(handle, TR_RPC_RECORD_MESSAGE, body,
-	                                NULL, false,
-	                                TR_RPC_COMPRESSION_NONE);
+	                                NULL, false, TR_RPC_COMPRESSION_NONE);
 }
 
 int tr_rpc_record_client_send_bytes_on_owner(
@@ -998,9 +996,8 @@ int tr_rpc_record_client_send_bytes_on_owner(
 }
 
 int tr_rpc_record_client_send_bytes_with_compression_on_owner(
-	struct tr_rpc_record_client_handle handle,
-	const struct tr_rpc_bytes *message,
-	enum tr_rpc_compression compression)
+        struct tr_rpc_record_client_handle handle,
+        const struct tr_rpc_bytes *message, enum tr_rpc_compression compression)
 {
 	if (!message || (message->len && !message->data))
 		return TR_ERR_INVALID;
@@ -1012,8 +1009,7 @@ int tr_rpc_record_client_half_close_on_owner(
         struct tr_rpc_record_client_handle handle)
 {
 	return tr_record_client_request(handle, TR_RPC_RECORD_HALF_CLOSE, NULL,
-	                                NULL, false,
-	                                TR_RPC_COMPRESSION_NONE);
+	                                NULL, false, TR_RPC_COMPRESSION_NONE);
 }
 
 int tr_rpc_record_client_cancel_on_owner(

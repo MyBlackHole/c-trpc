@@ -1040,7 +1040,8 @@ static void test_configuration(void)
 	struct tr_server *server = NULL;
 	struct tr_rpc_v2_method method = {
 	        .descriptor = {7, 1, TR_RPC_MANY, TR_RPC_MANY, TR_RPC_CODEC_RAW,
-	                       TR_RPC_CODEC_RAW, TR_RPC_LANE_CONTROL, 33, 33, 0, 0},
+	                       TR_RPC_CODEC_RAW, TR_RPC_LANE_CONTROL, 33, 33, 0,
+	                       0},
 	        .work = work};
 	assert(tr_rpc_v2_reply_set_metadata(NULL, TR_RPC_V2_METADATA_INITIAL,
 	                                    NULL, 0) == TR_ERR_INVALID);

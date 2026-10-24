@@ -43,7 +43,7 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
  * constructor, without reserving from a budget or creating resources.
  */
 int tr_reactor_memory_requirement(const struct tr_reactor_config *config,
-				 uint64_t *out);
+                                  uint64_t *out);
 
 /* TLS 快照轮换屏障；准入门禁仅阻止新的 TLS adopt，不影响现有会话。 */
 int tr_reactor_tls_admission_set(struct tr_reactor *reactor, int paused);

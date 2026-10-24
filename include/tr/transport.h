@@ -150,7 +150,8 @@ struct tr_connection_group_server_config {
 	uint32_t receive_compression_algorithms;
 	/* 包含 16 字节 Message envelope，至少为 17。 */
 	uint32_t max_encoded_message_bytes;
-	/* 启用 ZSTD 接收时必须大于 0；限制本 Server 同时排队/执行的解码任务数。 */
+	/* 启用 ZSTD 接收时必须大于 0；限制本 Server 同时排队/执行的解码任务数。
+	 */
 	uint32_t max_inflight_compressed_messages;
 
 	tr_connection_group_authorize_cb authorize;
@@ -263,9 +264,9 @@ int tr_client_connection_group_send(
  * 正文长度和时序，TLS 不会隐藏它们；不要将秘密与攻击者可控内容混入
  * 同一条压缩消息。 */
 int tr_client_connection_group_send_with_compression(
-	struct tr_client *client, uint32_t stream_id, uint64_t message_id,
-	const struct tr_transport_bytes *bytes,
-	enum tr_connection_group_compression compression);
+        struct tr_client *client, uint32_t stream_id, uint64_t message_id,
+        const struct tr_transport_bytes *bytes,
+        enum tr_connection_group_compression compression);
 
 /*
  * 组监听器的生命周期由 tr_server 拥有。
