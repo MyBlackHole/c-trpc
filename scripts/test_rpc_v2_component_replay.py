@@ -14,6 +14,8 @@ TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-cancel-late-work-v1.json"
 DEADLINE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-deadline-late-work-v1.json"
+STALE_MESSAGE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
+    "component-stale-message-after-reuse-v1.json"
 
 
 class ComponentMappingTests(unittest.TestCase):
@@ -51,6 +53,36 @@ class ComponentMappingTests(unittest.TestCase):
             "retire_calls": 1,
             "budget_bytes": 0,
             "quiescent": True,
+            "stale_messages_ignored": 0,
+        }
+        self.assertTrue(
+            rpc_v2_component_replay.compare_observation(
+                trace, model, observed)["matched"])
+
+    def test_stale_message_after_slot_reuse_maps_to_fixed_component_sequence(self):
+        trace = parse_trace(STALE_MESSAGE_TRACE_PATH.read_bytes())
+        model = run_trace(trace)
+
+        self.assertEqual(model.event_results[9], "STALE")
+        self.assertEqual(model.calls[0]["outcome"], "CANCELLED")
+        self.assertEqual(model.calls[1]["outcome"], "CANCELLED")
+        self.assertTrue(model.quiescent)
+        self.assertEqual(model.slots[0]["generation"], 2)
+        self.assertEqual(
+            rpc_v2_component_replay.component_event_argument(trace),
+            "OPEN,ACCEPT,MESSAGE,WORK_START,CANCEL,WORK_DONE,"
+            "FINAL_STATUS,SLOT_RELEASE,OPEN,MESSAGE_STALE,ACCEPT,MESSAGE,"
+            "WORK_START,CANCEL,WORK_DONE,FINAL_STATUS,SLOT_RELEASE")
+
+        observed = {
+            "status": "CANCELLED",
+            "terminal_callbacks": 2,
+            "work_completed": True,
+            "final_frames": 0,
+            "retire_calls": 2,
+            "budget_bytes": 0,
+            "quiescent": True,
+            "stale_messages_ignored": 1,
         }
         self.assertTrue(
             rpc_v2_component_replay.compare_observation(
@@ -78,6 +110,7 @@ class ComponentMappingTests(unittest.TestCase):
             "retire_calls": 1,
             "budget_bytes": 0,
             "quiescent": True,
+            "stale_messages_ignored": 0,
         }
 
         summary = rpc_v2_component_replay.compare_observation(
@@ -125,6 +158,7 @@ class ComponentMappingTests(unittest.TestCase):
             "retire_calls": 1,
             "budget_bytes": 0,
             "quiescent": True,
+            "stale_messages_ignored": 0,
         }
         fake_binary.write_text(
             "#!/usr/bin/env python3\n"
@@ -157,6 +191,7 @@ class ComponentOutputValidationTests(unittest.TestCase):
             "retire_calls": 1,
             "budget_bytes": 0,
             "quiescent": True,
+            "stale_messages_ignored": 0,
         }
         self.assertEqual(
             rpc_v2_component_replay.parse_component_output(

@@ -37,5 +37,7 @@ Python 测试设置 `PYTHONDONTWRITEBYTECODE=1` 并将 `TMPDIR` 指向 worktree 
 开发版本从 `2.0.0-dev.29` 升为 `2.0.0-dev.30`。CI 仍在现有 `build-test (gcc)` job 中运行，
 新增第二条回放命令；未新增 job/check，也未改变生产源码、公开头、ABI、协议或依赖。
 
-TEST-B2 Draft PR 与远程检查结果将在推送后登记。TEST-B1 的前置 Draft PR #318 仍 Open、
-未合并；本切片与 TEST-C/D/E、#248 模块依赖门禁仍须分别验收。
+Draft PR [#319](https://github.com/MyBlackHole/c-trpc/pull/319) 以 TEST-B1 分支为 base，
+实现 head `683c6eff5330b2f74bb4aa7c2fa631e075b1c39c` 的 14/14 GitHub 检查通过；PR 仍
+Open/Draft、未合并。TEST-B1 的前置 Draft PR #318 仍 Open、未合并；本切片与 TEST-C/D/E、
+#248 模块依赖门禁仍须分别验收。

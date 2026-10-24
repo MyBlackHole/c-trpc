@@ -1196,8 +1196,87 @@ static void test_generations_under_load(void)
 	close_all(&f);
 }
 
-/* TEST-B1/B2 的有限适配器：只驱动两条固定轨迹，测试真实 Endpoint 对
+/* TEST-B1/B2/B3 的有限适配器：只驱动登记的固定轨迹，测试真实 Endpoint 对
  * 可控 Dispatch/时钟事件的反应；不模拟 TCP、线程或生产 Dispatch。 */
+static int replay_stale_message_after_reuse(void)
+{
+	struct fixture f;
+	struct tr_stream_handle old_stream, new_stream;
+	struct tr_rpc_dispatch_handle old_call, new_call;
+	uint8_t stale_byte = 0;
+	struct tr_buffer stale_payload = {
+	        .data = &stale_byte, .len = 1, .capacity = 1};
+	unsigned received_before_stale;
+	unsigned stale_messages_ignored = 0;
+
+	init(&f);
+	start(&f);
+	old_stream = open_stream(&f, 0, 1);
+	CHECK(f.dispatch->calls[0].active &&
+	      f.dispatch->calls[0].stream.generation == old_stream.generation);
+	old_call = f.dispatch->calls[0].handle;
+	f.hold_work = true;
+	request(&f, old_stream, 0);
+	CHECK(f.receive_calls == 1 && f.dispatch->calls[0].pending);
+	tick(&f, 2);
+	CHECK(!f.done_calls && !f.reports);
+	CHECK(tr_rpc_record_dispatch_abort_on_owner(
+	              old_call, TR_RPC_STATUS_CANCELLED) == TR_OK);
+	tick(&f, 8);
+	CHECK(f.resets == 1 && f.reset_reason == TR_ERR_CLOSED &&
+	      !f.done_calls && !f.reports);
+	f.hold_work = false;
+	tick(&f, 12);
+	CHECK(f.done_calls == 1 && f.reports == 1 && f.retire_calls == 1 &&
+	      f.last.status == TR_RPC_STATUS_CANCELLED &&
+	      !f.last.final_accepted && !f.dispatch->calls[0].active);
+	f.dispatch->terminal(old_call, old_stream, TR_RPC_STATUS_INTERNAL,
+	                     TR_RPC_RECORD_ON_OWNER, false, f.dispatch->arg);
+	CHECK(f.reports == 1);
+
+	new_stream = open_stream(&f, 0, 2);
+	CHECK(old_stream.slot == new_stream.slot &&
+	      old_stream.generation != new_stream.generation &&
+	      f.dispatch->calls[0].active &&
+	      f.dispatch->calls[0].stream.generation == new_stream.generation);
+	new_call = f.dispatch->calls[0].handle;
+	CHECK(old_call.id.generation != new_call.id.generation);
+	received_before_stale = f.receive_calls;
+	CHECK(f.data(old_stream, 1, &stale_payload, f.handler_arg) ==
+	      TR_STREAM_DATA_RELEASE);
+	CHECK(f.receive_calls == received_before_stale &&
+	      f.dispatch->calls[0].active &&
+	      f.dispatch->calls[0].handle.id.generation ==
+	              new_call.id.generation);
+	++stale_messages_ignored;
+
+	f.hold_work = true;
+	request(&f, new_stream, 0);
+	CHECK(f.receive_calls == 2 && f.dispatch->calls[0].pending);
+	tick(&f, 2);
+	CHECK(f.done_calls == 1 && f.reports == 1);
+	CHECK(tr_rpc_record_dispatch_abort_on_owner(
+	              new_call, TR_RPC_STATUS_CANCELLED) == TR_OK);
+	tick(&f, 8);
+	CHECK(f.resets == 2 && f.reset_reason == TR_ERR_CLOSED &&
+	      f.done_calls == 1 && f.reports == 1);
+	f.hold_work = false;
+	tick(&f, 12);
+	CHECK(f.done_calls == 2 && f.reports == 2 && f.retire_calls == 2 &&
+	      f.last.status == TR_RPC_STATUS_CANCELLED &&
+	      !f.last.final_accepted && !f.dispatch->calls[0].active);
+	f.dispatch->terminal(new_call, new_stream, TR_RPC_STATUS_INTERNAL,
+	                     TR_RPC_RECORD_ON_OWNER, false, f.dispatch->arg);
+	CHECK(f.reports == 2 && stale_messages_ignored == 1);
+	close_all(&f);
+	printf("{\"status\":\"CANCELLED\",\"terminal_callbacks\":%u,"
+	       "\"work_completed\":true,\"final_frames\":%u,"
+	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
+	       "\"quiescent\":true,\"stale_messages_ignored\":%u}\n",
+	       f.reports, f.sends, f.retire_calls,
+	       atomic_load(&f.budget.current_bytes), stale_messages_ignored);
+	return 0;
+}
 static int replay_component_events(const char *event_list)
 {
 	static const char cancel_argument[] =
@@ -1213,6 +1292,13 @@ static int replay_component_events(const char *event_list)
 	const char *status_name;
 	if (!event_list)
 		return 2;
+	if (strcmp(event_list,
+	           "OPEN,ACCEPT,MESSAGE,WORK_START,CANCEL,WORK_DONE,"
+	           "FINAL_STATUS,SLOT_RELEASE,OPEN,MESSAGE_STALE,ACCEPT,"
+	           "MESSAGE,"
+	           "WORK_START,CANCEL,WORK_DONE,FINAL_STATUS,SLOT_RELEASE") ==
+	    0)
+		return replay_stale_message_after_reuse();
 	if (strcmp(event_list, cancel_argument) == 0) {
 		terminal_status = TR_RPC_STATUS_CANCELLED;
 		expected_reset_reason = TR_ERR_CLOSED;
@@ -1289,7 +1375,7 @@ static int replay_component_events(const char *event_list)
 	printf("{\"status\":\"%s\",\"terminal_callbacks\":%u,"
 	       "\"work_completed\":true,\"final_frames\":%u,"
 	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
-	       "\"quiescent\":true}\n",
+	       "\"quiescent\":true,\"stale_messages_ignored\":0}\n",
 	       status_name, f.reports, f.sends, f.retire_calls,
 	       atomic_load(&f.budget.current_bytes));
 	return 0;

@@ -59,6 +59,9 @@ jobs:
           python3 scripts/rpc_v2_component_replay.py \
             --trace tests/fixtures/rpc_v2_model/component-deadline-late-work-v1.json \
             --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
+          python3 scripts/rpc_v2_component_replay.py \
+            --trace tests/fixtures/rpc_v2_model/component-stale-message-after-reuse-v1.json \
+            --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
       - name: 核验 RPC V1 退役引用与生产对象链接证据
         run: |
           set -euo pipefail

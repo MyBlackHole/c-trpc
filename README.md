@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.30` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.31` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -37,6 +37,12 @@ dev.30 在 TEST-B1 之上增加 TEST-B2 截止终局后迟到工作轨迹：测�
 迟到完成不改写终局以及资源归还。它仍是单组件、可控下层交错，不代表真实 Dispatch 调度
 或 TCP 集成；可用同一回放命令并通过 `--trace` 指向
 `tests/fixtures/rpc_v2_model/component-deadline-late-work-v1.json` 执行第二条轨迹。
+dev.31 增加 TEST-B3 同槽复用后的旧代次迟到 DATA 轨迹：旧流代次消息必须被忽略，
+且不能进入复用该槽的新调用；旧、新调用都完成唯一终局并归还资源。仍只验证真实
+Record Endpoint 配合受控 Dispatch/Channel 回调，不覆盖生产 Reactor、真实线程或 TCP。
+可将 `--trace` 指向
+`tests/fixtures/rpc_v2_model/component-stale-message-after-reuse-v1.json` 执行第三条回放。
+它接入现有 `build-test (gcc)` job，没有新增 CI job/check。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、
