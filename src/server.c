@@ -16,6 +16,7 @@
 #include "transport/channel/channel.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
+#include "transport/protocol/message_caps.h"
 #include "facade_diagnostics_internal.h"
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
@@ -29,6 +30,7 @@
 #include "io/socket_internal.h"
 #include "observability_internal.h"
 #include "transport/group/pipeline_listener_internal.h"
+#include "transport/group/message_budget.h"
 #include "server_record_internal.h"
 #include "rpc/rpc_record_client.h"
 #include "rpc/rpc_record_stats.h"
@@ -134,6 +136,8 @@ struct tr_server {
 };
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
+TR_DEFINE_PTR_OWNERSHIP(tr_runtime_shard_configs,
+			struct tr_runtime_shard_config, free)
 
 static int tr_server_create_rollback(
 	struct tr_server **out, struct tr_server *server, int cause)
@@ -192,10 +196,22 @@ static int tr_server_connection_group_config_valid(
 {
 	if (!config)
 		return 0;
+	if (config->receive_compression_algorithms &
+	    ~TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD)
+		return 0;
+	if ((!config->receive_compression_algorithms &&
+	     (config->max_encoded_message_bytes != 0U ||
+	      config->max_inflight_compressed_messages != 0U)) ||
+	    (config->receive_compression_algorithms &&
+	     (config->max_encoded_message_bytes < 17U ||
+	      config->max_inflight_compressed_messages == 0U)))
+		return 0;
 	if (config->max_groups == 0U)
 		return config->max_connections == 0U &&
 		       config->max_data_connections_per_group == 0U &&
-		       config->max_streams_per_group == 0U;
+		       config->max_streams_per_group == 0U &&
+		       config->receive_compression_algorithms == 0U &&
+		       config->max_inflight_compressed_messages == 0U;
 
 	return config->max_connections >= config->max_groups &&
 	       config->max_data_connections_per_group != 0U &&
@@ -533,7 +549,8 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 
 	if (groups->max_groups || groups->max_connections ||
 	    groups->max_data_connections_per_group ||
-	    groups->max_streams_per_group || groups->authorize ||
+	    groups->max_streams_per_group ||
+	    groups->max_inflight_compressed_messages || groups->authorize ||
 	    groups->on_message || groups->on_data_event || groups->callback_arg)
 		return TR_ERR_UNSUPPORTED;
 	if (!methods || !method_count ||
@@ -569,6 +586,10 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 		    (methods[i].v2_terminal && !methods[i].v2_work) ||
 		    !method->request_codec_id || !method->response_codec_id ||
 		    method->lane > TR_RPC_LANE_BULK ||
+		    (method->request_compression_algorithms &
+		     ~TR_RPC_COMPRESSION_MASK_ZSTD) ||
+		    (method->response_compression_algorithms &
+		     ~TR_RPC_COMPRESSION_MASK_ZSTD) ||
 		    (uint64_t)method->max_request_bytes +
 		                    TR_RPC_RECORD_HEADER_SIZE >
 		            config->limits.max_message_bytes ||
@@ -1179,6 +1200,8 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 	struct tr_runtime_peer *peer;
 	struct tr_server_peer *state;
 	uint32_t slot;
+	int message_caps_enabled = 0;
+	int receive_zstd = 0;
 	int owned_fd TR_AUTO(tr_fd_cleanup) = fd;
 	int ret;
 
@@ -1250,6 +1273,30 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 		channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
 		channel_config.required_feature_bits =
 		        TR_CHANNEL_FEATURE_STREAM_RESET;
+		for (size_t i = 0; i < server->record_method_count; ++i) {
+			const struct tr_rpc_method_desc *method =
+			        &server->record_methods[i].descriptor;
+			if ((method->request_compression_algorithms |
+			     method->response_compression_algorithms) &
+			    TR_RPC_COMPRESSION_MASK_ZSTD)
+				message_caps_enabled = 1;
+			if (method->request_compression_algorithms &
+			    TR_RPC_COMPRESSION_MASK_ZSTD)
+				receive_zstd = 1;
+		}
+		if (message_caps_enabled) {
+			channel_config.feature_bits |=
+			        TR_CHANNEL_FEATURE_MESSAGE_CAPS;
+			channel_config.max_compression_workspace_bytes =
+			        1024U * 1024U;
+			channel_config.max_compression_window_log = 20U;
+		}
+		if (receive_zstd) {
+			channel_config.receive_compression_algorithms =
+			        TR_MESSAGE_ALGORITHM_ZSTD;
+			channel_config.max_encoded_message_bytes =
+			        server->config.limits.max_message_bytes;
+		}
 	}
 
 	/* 服务端必须先完成 RPC Endpoint/Method 安装，再启动 HELLO。
@@ -1261,6 +1308,15 @@ static int tr_server_adopt_peer(struct tr_server_shard *shard, int fd)
 					 &peer->channel);
 	if (ret != TR_OK)
 		goto rollback;
+	if (server->mode == TR_SERVER_MODE_RPC_V2) {
+		ret = tr_channel_bind_message_service_on_owner(
+		        peer->channel, tr_server_shard_reactor(shard),
+		        tr_runtime_shard_message_submit_adapter,
+		        tr_runtime_shard_message_cancel_adapter,
+		        shard->runtime);
+		if (ret != TR_OK)
+			goto rollback;
+	}
 
 	ret = tr_channel_set_lifecycle_observer(
 		peer->channel, tr_server_on_channel_lifecycle, shard);
@@ -1352,9 +1408,11 @@ tr_server_create_internal(enum tr_server_mode mode,
 	struct tr_server_config effective;
 	struct tr_facade_tuning effective_tuning;
 	struct tr_runtime_config runtime_config;
-	struct tr_runtime_shard_config *shard_configs = NULL;
+	struct tr_runtime_shard_config *shard_configs
+	        TR_AUTO(tr_runtime_shard_configs_cleanup) = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server = NULL;
+	int message_compression_enabled = 0;
 	int ret;
 
 	if (!out)
@@ -1415,6 +1473,9 @@ tr_server_create_internal(enum tr_server_mode mode,
 	    effective.max_peers > (UINT32_MAX - 4U) / 2U ||
 	    !tr_server_connection_group_config_valid(
 	            &effective.connection_groups) ||
+	    (effective.connection_groups.receive_compression_algorithms != 0U &&
+	     effective.connection_groups.max_inflight_compressed_messages >
+	             effective_tuning.executor_queue_capacity) ||
 	    effective.connection_groups.max_connections >
 	            UINT32_MAX - effective.max_peers - 4U ||
 	    !tr_server_budget_supports_shards(&effective, &effective_tuning,
@@ -1447,6 +1508,16 @@ tr_server_create_internal(enum tr_server_mode mode,
 		server->config.tls.client_ca_file = NULL;
 	}
 	if (mode == TR_SERVER_MODE_RPC_V2) {
+		for (size_t i = 0; i < record_method_count; ++i) {
+			const struct tr_rpc_method_desc *method =
+			        &record_methods[i].descriptor;
+			if ((method->request_compression_algorithms |
+			     method->response_compression_algorithms) &
+			    TR_RPC_COMPRESSION_MASK_ZSTD) {
+				message_compression_enabled = 1;
+				break;
+			}
+		}
 		pthread_condattr_t attr;
 		if (pthread_condattr_init(&attr) != 0)
 			return tr_server_create_rollback(out, server,
@@ -1491,6 +1562,18 @@ tr_server_create_internal(enum tr_server_mode mode,
 				        record->memory_budget_bytes;
 				shard_config->memory_budget_parent =
 				        &server->memory_budget;
+				if (message_compression_enabled) {
+					uint32_t capacity = tr_server_budget_share(
+					        effective_tuning.executor_queue_capacity,
+					        effective.shard_count, i);
+					if (!capacity)
+						capacity = 1U;
+					shard_config->messages.tasks.workers = 1U;
+					shard_config->messages.tasks.capacity = capacity;
+					shard_config->messages.dispatch_limit = capacity;
+					shard_config->messages.watchdog_ns =
+					        UINT64_C(10000000);
+				}
 			}
 
 			reactor_config->max_connections =
@@ -1528,6 +1611,45 @@ tr_server_create_internal(enum tr_server_mode mode,
 				reactor_config->rx_budget_bytes;
 			reactor_config->observability_flags =
 				effective_tuning.observability_flags;
+			if (i == 0U &&
+			    effective.connection_groups
+			                    .receive_compression_algorithms != 0U) {
+				uint64_t active_transfer_slots =
+				        (uint64_t)effective.connection_groups
+			                        .max_groups *
+			        effective.connection_groups
+			                        .max_streams_per_group;
+				uint64_t reactor_bytes = 0U;
+				uint64_t peer_bytes =
+				        (uint64_t)peer_capacity *
+				        sizeof(struct tr_server_peer);
+				uint64_t message_budget = 0U;
+				uint32_t message_capacity = effective.connection_groups
+				                             .max_inflight_compressed_messages;
+				if (message_capacity == 0U)
+					return tr_server_create_rollback(
+					        out, server, TR_ERR_INVALID);
+				ret = tr_reactor_memory_requirement(reactor_config,
+				                                    &reactor_bytes);
+				if (ret == TR_OK)
+					ret = tr_group_message_budget_required(
+					        effective.limits.max_message_bytes,
+					        effective.connection_groups
+					                .max_encoded_message_bytes,
+					        active_transfer_slots, message_capacity,
+					        reactor_bytes, peer_bytes,
+					        &message_budget);
+				if (ret != TR_OK)
+					return tr_server_create_rollback(
+					        out, server, ret);
+				shard_config->memory_budget_bytes = message_budget;
+				shard_config->messages.tasks.workers = 1U;
+				shard_config->messages.tasks.capacity =
+				        message_capacity;
+				shard_config->messages.dispatch_limit = message_capacity;
+				shard_config->messages.watchdog_ns =
+				        UINT64_C(10000000);
+			}
 		}
 	}
 
@@ -1625,6 +1747,30 @@ tr_server_create_internal(enum tr_server_mode mode,
 			effective.connection_groups.max_data_connections_per_group;
 		group_config.stream_affinity_capacity_per_pipeline =
 			effective.connection_groups.max_streams_per_group;
+		group_config.receive_compression_algorithms =
+			effective.connection_groups.receive_compression_algorithms;
+		group_config.max_message_bytes =
+			effective.limits.max_message_bytes;
+		group_config.max_encoded_message_bytes =
+			effective.connection_groups.max_encoded_message_bytes;
+		if (group_config.receive_compression_algorithms != 0U) {
+			uint64_t active_transfer_slots =
+			        (uint64_t)effective.connection_groups.max_groups *
+			        effective.connection_groups.max_streams_per_group;
+
+			if (active_transfer_slots > UINT32_MAX)
+				return tr_server_create_rollback(
+				        out, server, TR_ERR_BAD_LENGTH);
+			group_config.message_task_capacity = effective.connection_groups
+			                             .max_inflight_compressed_messages;
+			group_config.message_submit =
+				tr_runtime_shard_message_submit_adapter;
+			group_config.message_cancel =
+				tr_runtime_shard_message_cancel_adapter;
+			group_config.message_context = owner_shard->runtime;
+			group_config.message_budget =
+				tr_runtime_shard_memory_budget(owner_shard->runtime);
+		}
 		/* 将 CONTROL 负载缓冲调优保留在内部。组连接总预算
 		 * 为并发控制发送提供保守的有界默认值，
 		 * 无需向 SDK 添加实现调节项。

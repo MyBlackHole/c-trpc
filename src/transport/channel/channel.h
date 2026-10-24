@@ -1,10 +1,12 @@
 #ifndef TR_CHANNEL_H
 #define TR_CHANNEL_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "../../execution/buffer.h"
 #include "../../execution/reactor.h"
+#include "../protocol/message_caps.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,12 +14,14 @@ extern "C" {
 
 struct tr_channel;
 struct tr_memory_budget;
+struct tr_message;
 
 #define TR_CHANNEL_PROTOCOL_VERSION 3U
 #define TR_CHANNEL_LANE_MASK_CONTROL (1U << 0)
 #define TR_CHANNEL_LANE_MASK_BULK (1U << 1)
 /* 只有显式协商此能力的专用 Channel 才发送或接收单流 RESET。 */
 #define TR_CHANNEL_FEATURE_STREAM_RESET UINT64_C(1)
+#define TR_CHANNEL_FEATURE_MESSAGE_CAPS (UINT64_C(1) << 1)
 
 struct tr_channel_capabilities {
 	uint16_t protocol_version;
@@ -25,6 +29,10 @@ struct tr_channel_capabilities {
 	uint32_t max_frame_payload_bytes;
 	uint32_t max_message_bytes;
 	uint64_t feature_bits;
+	/* 对端接收算法能力在 HELLO 之后由 MESSAGE_CAPS 单独方向性交换。 */
+	uint32_t receive_algorithm_bits;
+	uint32_t max_encoded_wire_bytes;
+	uint8_t message_caps_ready;
 };
 
 /* 逻辑流量类别；映射到哪条物理连接由 Channel 策略决定。 */
@@ -133,6 +141,15 @@ struct tr_channel_config {
 	uint16_t min_protocol_version;
 	uint16_t max_protocol_version;
 	uint64_t feature_bits;
+	/* 本端可接收能力；仅在 MESSAGE_CAPS feature 已启用时发布。
+	 * 当前 Channel 尚无压缩 DATA 接收路径，故非零算法配置返回
+	 * TR_ERR_UNSUPPORTED；不能仅凭能力帧向对端宣告接收能力。
+	 */
+	uint32_t receive_compression_algorithms;
+	uint32_t max_encoded_message_bytes;
+	/* Zstandard 接收侧单任务工作区与解码窗口硬上限；启用接收算法时必填。 */
+	size_t max_compression_workspace_bytes;
+	unsigned max_compression_window_log;
 	/* 必需能力必须同时被本地声明和对端协商；缺失时握手失败，
 	 * 不能先发布 READY 再在终止路径静默降级。0 保持旧 Channel 配置。 */
 	uint64_t required_feature_bits;
@@ -307,6 +324,14 @@ int tr_stream_send(struct tr_stream_handle stream, struct tr_buffer *payload);
  */
 int tr_stream_sendv(struct tr_stream_handle stream,
 		    struct tr_buffer *const *payloads, uint32_t payload_count);
+
+/* 显式请求一条 Message 使用 Zstandard 后再发送。
+ * TR_OK 表示压缩任务已接受并消费 payload；其他返回值保留 payload。
+ * 编码 DATA 按当前流信用分片发送，C 可大于初始窗口；任务/发送失败
+ * 会终止该流。未显式调用时仍使用普通 none 路径。压缩会暴露正文长度和
+ * 时序，TLS 不会隐藏它们；不要将秘密与攻击者可控内容混入同一条正文。 */
+int tr_stream_send_compressed(struct tr_stream_handle stream,
+                              struct tr_message *payload);
 
 /* 半关闭本地发送方向。 */
 /* OPENING 尚无对端准入证明时返回 AGAIN，不发送 CLOSE，也不接管重试。

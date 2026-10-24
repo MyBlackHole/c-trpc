@@ -26,6 +26,7 @@ int tr_frame_type_valid(uint16_t type)
 	case TR_FRAME_PIPELINE_CONTROL:
 	case TR_FRAME_STREAM_RESET:
 	case TR_FRAME_STREAM_REFUSED:
+	case TR_FRAME_MESSAGE_CAPS:
 		return 1;
 	default:
 		return 0;
@@ -118,6 +119,9 @@ int tr_wire_header_validate(const uint8_t raw[TR_WIRE_HEADER_SIZE],
 		return TR_ERR_BAD_TYPE;
 
 	if (header->flags & ~TR_FRAME_F_KNOWN_MASK)
+		return TR_ERR_BAD_FLAGS;
+	if ((header->flags & TR_FRAME_F_COMPRESSED) &&
+	    header->type != TR_FRAME_DATA)
 		return TR_ERR_BAD_FLAGS;
 
 	if (header->reserved != 0)

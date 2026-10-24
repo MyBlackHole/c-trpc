@@ -7,6 +7,9 @@
 
 #include "tr/status.h"
 #include "../protocol/wire.h"
+#include "../protocol/message_envelope.h"
+#include "../../message/builder.h"
+#include "../../message/transform.h"
 #include "../../io/socket.h"
 #include "../../endian.h"
 #include "../../memory_budget.h"
@@ -23,6 +26,7 @@
 #define TR_CHANNEL_HELLO_WIRE_SIZE 32U
 #define TR_CHANNEL_PROTOCOL_BUFFER_SIZE 64U
 #define TR_STREAM_FREE_NONE UINT32_MAX
+#define TR_CHANNEL_COMPRESSED_TX_BUDGET 32U
 /* 合并重试，其上限独立于存活流的数量。 */
 #define TR_CHANNEL_WINDOW_RETRY_NS UINT64_C(25000000)
 
@@ -32,6 +36,12 @@ enum tr_stream_slot_state {
 	TR_STREAM_SLOT_ACCEPTING,
 	TR_STREAM_SLOT_OPEN,
 	TR_STREAM_SLOT_RESETTING
+};
+
+enum tr_stream_rx_pending_kind {
+	TR_STREAM_RX_PENDING_NONE = 0,
+	TR_STREAM_RX_PENDING_PLAIN,
+	TR_STREAM_RX_PENDING_COMPRESSED
 };
 
 struct tr_channel_pending_hello {
@@ -51,6 +61,49 @@ struct tr_stream_reset_tombstone {
 	struct tr_conn_handle connection;
 	uint32_t stream_id;
 	int peer_status;
+};
+
+struct tr_channel_rx_transform {
+	/* 作为首字段，使交付后的 tr_buffer 可直接恢复其预算化消息所有者。 */
+	struct tr_buffer output_buffer;
+	struct tr_channel *channel;
+	struct tr_memory_budget *budget;
+	struct tr_stream_handle stream;
+	struct tr_conn_handle connection;
+	uint64_t message_id;
+	struct tr_task_handle task;
+	uint32_t decoded_size;
+	struct tr_message encoded;
+	struct tr_message output;
+	int submitted;
+	int owner_stopped;
+};
+
+struct tr_channel_tx_transform {
+	struct tr_channel *channel;
+	struct tr_memory_budget *budget;
+	struct tr_stream_handle stream;
+	struct tr_conn_handle connection;
+	uint64_t message_id;
+	uint32_t decoded_size;
+	struct tr_task_handle task;
+	struct tr_channel_tx_fragment *reserved_fragment;
+	int submitted;
+	int owner_stopped;
+};
+
+struct tr_channel_tx_wire {
+	struct tr_memory_budget *budget;
+	uint64_t allocation_bytes;
+	uint32_t references;
+	uint32_t length;
+	uint8_t bytes[];
+};
+
+struct tr_channel_tx_fragment {
+	struct tr_buffer buffer;
+	struct tr_memory_budget *budget;
+	struct tr_channel_tx_wire *wire;
 };
 
 /* 每个物理连接独立记录两个方向的受理边界。已见 OPEN 与已受理 OPEN
@@ -95,6 +148,26 @@ struct tr_stream_slot {
 
 	struct tr_buffer *rx_reassembly;
 	uint64_t rx_reassembly_message_id;
+	struct tr_message_builder *rx_compressed_builder;
+	struct tr_channel_rx_transform *rx_compressed_job;
+	struct tr_channel_rx_transform *rx_transform_job;
+	struct tr_channel_rx_transform *rx_pending_transform_job;
+	struct tr_buffer *rx_pending_plain;
+	uint64_t rx_pending_message_id;
+	uint8_t rx_pending_kind;
+	struct tr_channel_tx_transform *tx_compression_job;
+	struct tr_channel_tx_wire *tx_compressed_wire;
+	struct tr_channel_tx_fragment *tx_compressed_fragment_reserve;
+	uint64_t tx_compressed_message_id;
+	uint32_t tx_compressed_offset;
+	uint32_t tx_compressed_decoded_size;
+	uint64_t rx_compressed_message_id;
+	uint32_t rx_compressed_expected_bytes;
+	uint32_t rx_compressed_received_bytes;
+	uint32_t rx_compressed_decoded_bytes;
+	int retire_pending;
+	int connection_retired;
+	int drain_count_released;
 	int reset_status;
 	int reset_peer_status;
 	int reset_sent;
@@ -114,6 +187,12 @@ struct tr_channel {
 	int state_wait_closed;
 
 	struct tr_reactor *reactor;
+	tr_channel_message_submit_fn message_submit;
+	tr_channel_message_cancel_fn message_cancel;
+	void *message_submit_context;
+	uint32_t active_message_jobs;
+	uint32_t tx_schedule_cursor;
+	int tx_retry_pending;
 	struct tr_conn_handle control_connection;
 	struct tr_conn_handle bulk_connection;
 
@@ -208,6 +287,16 @@ struct tr_channel {
 	uint64_t stat_keepalive_pongs_received;
 	uint64_t stat_keepalive_timeouts;
 };
+
+int tr_channel_message_cancel_on_owner(struct tr_channel *channel,
+					       struct tr_task_handle task);
+static void
+tr_stream_drop_compressed_send_locked(struct tr_channel *channel,
+                                      struct tr_stream_slot *stream);
+static int tr_stream_connection_matches(const struct tr_channel *channel,
+                                        const struct tr_stream_slot *stream,
+                                        struct tr_conn_handle connection);
+static int tr_channel_schedule_window_retry(struct tr_channel *channel);
 
 static int tr_conn_equal(struct tr_conn_handle a, struct tr_conn_handle b)
 {
@@ -485,6 +574,8 @@ static int tr_send_window_update_locked(struct tr_channel *channel,
 static void tr_channel_reset_progress_on_owner(struct tr_channel *channel);
 static void tr_channel_open_progress_on_owner(struct tr_channel *channel);
 static int tr_channel_drain_progress_on_owner(struct tr_channel *channel);
+static void
+tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel);
 static int tr_channel_protocol_error(struct tr_channel *channel,
                                      struct tr_conn_handle connection,
                                      int status);
@@ -499,9 +590,16 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	uint32_t i;
 	int enabled;
 	int retry_pending;
+	int tx_retry;
 
 	tr_channel_reset_progress_on_owner(channel);
 	tr_channel_open_progress_on_owner(channel);
+	pthread_mutex_lock(&channel->lock);
+	tx_retry = channel->tx_retry_pending;
+	channel->tx_retry_pending = 0;
+	pthread_mutex_unlock(&channel->lock);
+	if (tx_retry)
+		tr_channel_compressed_tx_progress_on_owner(channel);
 
 	/* 既有维护定时器同时推进信用/RESET 重试及排空。
 	 * 失败的 WINDOW_UPDATE 无需另一接收事件或应用刷新即可重试。
@@ -539,7 +637,7 @@ tr_channel_keepalive_timer_main(void *arg, uint64_t now_ns)
 	tick_ms = enabled ? tr_channel_keepalive_tick_ms_locked(channel) : 0U;
 	retry_pending =
 	        channel->window_retry_pending || channel->reset_retry_pending ||
-	        channel->drain_retry_pending ||
+	        channel->drain_retry_pending || channel->tx_retry_pending ||
 	        channel->pending_open[0].channel ||
 	        channel->pending_open[1].channel ||
 	        channel->pending_refused[0] || channel->pending_refused[1];
@@ -784,6 +882,47 @@ static int tr_channel_send_hello_ack(
 	return ret;
 }
 
+static int tr_channel_send_message_caps(struct tr_channel *channel,
+                                        struct tr_conn_handle connection)
+{
+	struct tr_message_caps caps;
+	struct tr_buffer *buffer TR_AUTO(tr_buffer_cleanup) = NULL;
+	int ret;
+
+	caps.receive_algorithm_bits =
+	        channel->config.receive_compression_algorithms;
+	caps.max_encoded_wire_bytes = channel->config.max_encoded_message_bytes;
+	ret = tr_channel_protocol_buffer_acquire(TR_MESSAGE_CAPS_WIRE_SIZE,
+	                                         &buffer);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_message_caps_encode(buffer->data, &caps);
+	if (ret != TR_OK)
+		return ret;
+	buffer->len = TR_MESSAGE_CAPS_WIRE_SIZE;
+	ret = tr_reactor_send(connection, TR_FRAME_MESSAGE_CAPS, 0U, 0U, 0U,
+	                      buffer);
+	if (ret == TR_OK)
+		(void)tr_buffer_take(&buffer);
+	return ret;
+}
+
+static int
+tr_channel_send_message_caps_if_needed(struct tr_channel *channel,
+                                       struct tr_conn_handle connection,
+                                       uint64_t feature_bits, int newly_ready)
+{
+	int ret;
+
+	if (!newly_ready ||
+	    (feature_bits & TR_CHANNEL_FEATURE_MESSAGE_CAPS) == 0U)
+		return TR_OK;
+	ret = tr_channel_send_message_caps(channel, connection);
+	if (ret != TR_OK)
+		return tr_channel_protocol_error(channel, connection, ret);
+	return TR_OK;
+}
+
 static void
 tr_channel_set_caps_locked(struct tr_channel *channel, uint32_t lane_mask,
 			   const struct tr_channel_capabilities *caps,
@@ -825,7 +964,76 @@ tr_channel_lane_max_message_locked(const struct tr_channel *channel,
 }
 
 static int tr_channel_connection_ready_locked(const struct tr_channel *channel,
-					      struct tr_conn_handle connection)
+                                              struct tr_conn_handle connection);
+
+static int tr_channel_handle_message_caps(struct tr_channel *channel,
+                                          struct tr_conn_handle connection,
+                                          const struct tr_frame *frame)
+{
+	struct tr_message_caps decoded;
+	uint32_t lane_mask;
+	int ret;
+
+	if (!frame->payload ||
+	    frame->header.payload_len != frame->payload->len ||
+	    frame->header.flags != 0U || frame->header.stream_id != 0U ||
+	    frame->header.message_id != 0U || frame->header.reserved != 0U)
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	ret = tr_message_caps_decode(frame->payload->data, frame->payload->len,
+	                             &decoded);
+	if (ret != TR_OK)
+		return tr_channel_protocol_error(channel, connection, ret);
+
+	pthread_mutex_lock(&channel->lock);
+	lane_mask = tr_channel_connection_lane_mask_locked(channel, connection);
+	if (lane_mask == 0U ||
+	    !tr_channel_connection_ready_locked(channel, connection)) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	if ((lane_mask & TR_CHANNEL_LANE_MASK_CONTROL) &&
+	    (!(channel->control_caps.feature_bits &
+	       TR_CHANNEL_FEATURE_MESSAGE_CAPS) ||
+	     channel->control_caps.message_caps_ready ||
+	     (decoded.receive_algorithm_bits != 0U &&
+	      channel->control_caps.max_frame_payload_bytes < 16U))) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	if ((lane_mask & TR_CHANNEL_LANE_MASK_BULK) &&
+	    (!(channel->bulk_caps.feature_bits &
+	       TR_CHANNEL_FEATURE_MESSAGE_CAPS) ||
+	     channel->bulk_caps.message_caps_ready ||
+	     (decoded.receive_algorithm_bits != 0U &&
+	      channel->bulk_caps.max_frame_payload_bytes < 16U))) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	if (lane_mask & TR_CHANNEL_LANE_MASK_CONTROL) {
+		channel->control_caps.receive_algorithm_bits =
+		        decoded.receive_algorithm_bits;
+		channel->control_caps.max_encoded_wire_bytes =
+		        decoded.max_encoded_wire_bytes;
+		channel->control_caps.message_caps_ready = 1U;
+	}
+	if (lane_mask & TR_CHANNEL_LANE_MASK_BULK) {
+		channel->bulk_caps.receive_algorithm_bits =
+		        decoded.receive_algorithm_bits;
+		channel->bulk_caps.max_encoded_wire_bytes =
+		        decoded.max_encoded_wire_bytes;
+		channel->bulk_caps.message_caps_ready = 1U;
+	}
+	pthread_cond_broadcast(&channel->state_cond);
+	pthread_mutex_unlock(&channel->lock);
+	return TR_OK;
+}
+
+static int tr_channel_connection_ready_locked(const struct tr_channel *channel,
+                                              struct tr_conn_handle connection)
 {
 	uint32_t mask = tr_channel_connection_lane_mask_locked(channel, connection);
 
@@ -1120,6 +1328,496 @@ tr_stream_make_handle(struct tr_channel *channel, uint32_t slot,
 	return handle;
 }
 
+static void tr_channel_rx_transform_destroy(struct tr_channel_rx_transform *job)
+{
+	struct tr_memory_budget *budget;
+	struct tr_message_view view;
+
+	if (!job)
+		return;
+	budget = job->budget;
+	if (tr_message_view(&job->encoded, &view) == TR_OK)
+		(void)tr_message_release(&job->encoded);
+	if (tr_message_view(&job->output, &view) == TR_OK)
+		(void)tr_message_release(&job->output);
+	free(job);
+	(void)tr_memory_budget_release(budget,
+	                               sizeof(struct tr_channel_rx_transform));
+}
+
+static void tr_channel_tx_fragment_release(struct tr_buffer *buffer);
+static int tr_channel_tx_fragment_allocate(struct tr_memory_budget *budget,
+                                           struct tr_channel_tx_fragment **out);
+
+static void tr_channel_tx_transform_destroy(struct tr_channel_tx_transform *job)
+{
+	struct tr_memory_budget *budget;
+
+	if (!job)
+		return;
+	budget = job->budget;
+	if (job->reserved_fragment)
+		tr_channel_tx_fragment_release(&job->reserved_fragment->buffer);
+	free(job);
+	(void)tr_memory_budget_release(budget,
+	                               sizeof(struct tr_channel_tx_transform));
+}
+
+static int tr_channel_tx_transform_create(struct tr_channel *channel,
+                                          struct tr_stream_handle stream,
+                                          struct tr_conn_handle connection,
+                                          uint64_t message_id,
+                                          uint32_t decoded_size,
+                                          struct tr_channel_tx_transform **out)
+{
+	struct tr_channel_tx_transform *job;
+	int ret;
+
+	if (!channel->config.memory_budget || !out || *out)
+		return TR_ERR_INVALID;
+	ret = tr_memory_budget_reserve(channel->config.memory_budget,
+	                               sizeof(struct tr_channel_tx_transform));
+	if (ret != TR_OK)
+		return ret;
+	job = calloc(1, sizeof(*job));
+	if (!job) {
+		(void)tr_memory_budget_release(
+		        channel->config.memory_budget,
+		        sizeof(struct tr_channel_tx_transform));
+		return TR_ERR_NOMEM;
+	}
+	job->channel = channel;
+	job->budget = channel->config.memory_budget;
+	job->stream = stream;
+	job->connection = connection;
+	job->message_id = message_id;
+	job->decoded_size = decoded_size;
+	*out = job;
+	return TR_OK;
+}
+
+static void tr_channel_tx_wire_release(struct tr_channel_tx_wire *wire)
+{
+	struct tr_memory_budget *budget;
+	uint64_t bytes;
+
+	if (!wire ||
+	    __atomic_sub_fetch(&wire->references, 1U, __ATOMIC_ACQ_REL) != 0U)
+		return;
+	budget = wire->budget;
+	bytes = wire->allocation_bytes;
+	free(wire);
+	(void)tr_memory_budget_release(budget, bytes);
+}
+
+static void tr_channel_tx_fragment_release(struct tr_buffer *buffer)
+{
+	struct tr_channel_tx_fragment *fragment =
+	        (struct tr_channel_tx_fragment *)buffer;
+	struct tr_memory_budget *budget = fragment->budget;
+
+	tr_channel_tx_wire_release(fragment->wire);
+	free(fragment);
+	(void)tr_memory_budget_release(budget,
+	                               sizeof(struct tr_channel_tx_fragment));
+}
+
+static int tr_channel_tx_fragment_allocate(struct tr_memory_budget *budget,
+                                           struct tr_channel_tx_fragment **out)
+{
+	struct tr_channel_tx_fragment *fragment;
+	int ret;
+
+	if (!budget || !out || *out)
+		return TR_ERR_INVALID;
+	ret = tr_memory_budget_reserve(budget,
+	                               sizeof(struct tr_channel_tx_fragment));
+	if (ret != TR_OK)
+		return ret;
+	fragment = calloc(1, sizeof(*fragment));
+	if (!fragment) {
+		(void)tr_memory_budget_release(
+		        budget, sizeof(struct tr_channel_tx_fragment));
+		return TR_ERR_NOMEM;
+	}
+	fragment->budget = budget;
+	fragment->buffer.release_cb = tr_channel_tx_fragment_release;
+	*out = fragment;
+	return TR_OK;
+}
+
+static int tr_channel_tx_wire_create(struct tr_memory_budget *budget,
+                                     const struct tr_message_view *encoded,
+                                     uint32_t decoded_size,
+                                     struct tr_channel_tx_wire **out)
+{
+	struct tr_channel_tx_wire *wire;
+	struct tr_message_envelope envelope;
+	size_t allocation;
+	uint32_t wire_len;
+	int ret;
+
+	if (!budget || !encoded || !out || *out || encoded->len == 0U ||
+	    encoded->len > UINT32_MAX - TR_MESSAGE_ENVELOPE_WIRE_SIZE ||
+	    encoded->len >
+	            SIZE_MAX - offsetof(struct tr_channel_tx_wire, bytes))
+		return TR_ERR_BAD_LENGTH;
+	wire_len = TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)encoded->len;
+	allocation = offsetof(struct tr_channel_tx_wire, bytes) + wire_len;
+	ret = tr_memory_budget_reserve(budget, (uint64_t)allocation);
+	if (ret != TR_OK)
+		return ret;
+	wire = calloc(1, allocation);
+	if (!wire) {
+		(void)tr_memory_budget_release(budget, (uint64_t)allocation);
+		return TR_ERR_NOMEM;
+	}
+	wire->budget = budget;
+	wire->allocation_bytes = (uint64_t)allocation;
+	wire->references = 1U;
+	wire->length = wire_len;
+	envelope = (struct tr_message_envelope){
+	        .codec_id = TR_MESSAGE_CODEC_ZSTD,
+	        .encoded_body_bytes = (uint32_t)encoded->len,
+	        .decoded_message_bytes = decoded_size,
+	};
+	ret = tr_message_envelope_encode(wire->bytes, &envelope);
+	if (ret != TR_OK) {
+		tr_channel_tx_wire_release(wire);
+		return ret;
+	}
+	memcpy(wire->bytes + TR_MESSAGE_ENVELOPE_WIRE_SIZE, encoded->data,
+	       encoded->len);
+	*out = wire;
+	return TR_OK;
+}
+
+static int
+tr_channel_tx_fragment_create(struct tr_channel_tx_wire *wire, uint32_t offset,
+                              uint32_t length, struct tr_memory_budget *budget,
+                              struct tr_channel_tx_fragment **reserved,
+                              struct tr_channel_tx_fragment **out)
+{
+	struct tr_channel_tx_fragment *fragment = NULL;
+	int ret;
+
+	if (!wire || !budget || !out || *out || length == 0U ||
+	    offset > wire->length || length > wire->length - offset)
+		return TR_ERR_INVALID;
+	if (reserved && *reserved) {
+		fragment = *reserved;
+		*reserved = NULL;
+	} else {
+		ret = tr_channel_tx_fragment_allocate(budget, &fragment);
+		if (ret != TR_OK)
+			return ret;
+	}
+	__atomic_add_fetch(&wire->references, 1U, __ATOMIC_RELAXED);
+	fragment->budget = budget;
+	fragment->wire = wire;
+	fragment->buffer.data = wire->bytes + offset;
+	fragment->buffer.capacity = length;
+	fragment->buffer.len = length;
+	fragment->buffer.release_cb = tr_channel_tx_fragment_release;
+	*out = fragment;
+	return TR_OK;
+}
+
+static void
+tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
+{
+	uint32_t attempts = 0U;
+	int retry = 0;
+
+	if (!channel || !tr_reactor_in_owner_context_for(channel->reactor))
+		return;
+	while (attempts < TR_CHANNEL_COMPRESSED_TX_BUDGET) {
+		struct tr_channel_tx_fragment *fragment = NULL;
+		struct tr_channel_tx_wire *completed_wire = NULL;
+		struct tr_stream_handle reset_stream = {0};
+		struct tr_conn_handle connection = {0};
+		struct tr_stream_slot *stream = NULL;
+		uint64_t message_id = 0U;
+		uint32_t frame_flags = 0U;
+		uint32_t frame_len = 0U;
+		uint32_t slot = 0U;
+		int reset_status = TR_OK;
+		int ret = TR_OK;
+		int selected = 0;
+
+		pthread_mutex_lock(&channel->lock);
+		for (uint32_t scanned = 0U;
+		     scanned < channel->config.max_streams; ++scanned) {
+			slot = channel->tx_schedule_cursor;
+			channel->tx_schedule_cursor =
+			        slot + 1U == channel->config.max_streams
+			                ? 0U
+			                : slot + 1U;
+			stream = &channel->streams[slot];
+			if (!stream->tx_compressed_wire)
+				continue;
+			if (stream->state != TR_STREAM_SLOT_OPEN ||
+			    !stream->local_open || channel->state_wait_closed ||
+			    channel->teardown_detached ||
+			    !tr_stream_connection_matches(
+			            channel, stream,
+			            tr_channel_connection(channel,
+			                                  stream->lane))) {
+				tr_stream_drop_compressed_send_locked(channel,
+				                                      stream);
+				continue;
+			}
+			if (stream->tx_send_limit <= stream->tx_sent_bytes)
+				continue;
+			{
+				uint32_t available = (uint32_t)0;
+				uint32_t remaining =
+				        stream->tx_compressed_wire->length -
+				        stream->tx_compressed_offset;
+				uint32_t max_frame =
+				        tr_channel_lane_max_frame_locked(
+				                channel, stream->lane);
+				uint64_t available64 = stream->tx_send_limit -
+				                       stream->tx_sent_bytes;
+
+				if (available64 > UINT32_MAX)
+					available = UINT32_MAX;
+				else
+					available = (uint32_t)available64;
+				if (max_frame == 0U || remaining == 0U ||
+				    (stream->tx_compressed_offset == 0U &&
+				     available < TR_MESSAGE_ENVELOPE_WIRE_SIZE))
+					continue;
+				frame_len = remaining < max_frame ? remaining
+				                                  : max_frame;
+				if (frame_len > available)
+					frame_len = available;
+				if (frame_len == 0U ||
+				    UINT64_MAX - stream->tx_sent_bytes <
+				            frame_len) {
+					reset_status = TR_ERR_BAD_LENGTH;
+					reset_stream = tr_stream_make_handle(
+					        channel, slot, stream);
+					connection = tr_channel_connection(
+					        channel, stream->lane);
+					tr_stream_drop_compressed_send_locked(
+					        channel, stream);
+					selected = 1;
+					break;
+				}
+			}
+			ret = tr_channel_tx_fragment_create(
+			        stream->tx_compressed_wire,
+			        stream->tx_compressed_offset, frame_len,
+			        channel->config.memory_budget,
+			        &stream->tx_compressed_fragment_reserve,
+			        &fragment);
+			if (ret != TR_OK) {
+				if (ret == TR_AGAIN) {
+					retry = 1;
+					stream = NULL;
+				} else {
+					reset_status = ret == TR_ERR_NOMEM
+					                       ? TR_ERR_NOMEM
+					                       : TR_ERR_STATE;
+					reset_stream = tr_stream_make_handle(
+					        channel, slot, stream);
+					connection = tr_channel_connection(
+					        channel, stream->lane);
+					tr_stream_drop_compressed_send_locked(
+					        channel, stream);
+					selected = 1;
+				}
+				break;
+			}
+			connection =
+			        tr_channel_connection(channel, stream->lane);
+			message_id = stream->tx_compressed_message_id;
+			frame_flags = tr_lane_flag(stream->lane) |
+			              TR_FRAME_F_COMPRESSED;
+			if (stream->tx_compressed_offset == 0U)
+				frame_flags |= TR_FRAME_F_FIRST;
+			if (stream->tx_compressed_offset + frame_len ==
+			    stream->tx_compressed_wire->length)
+				frame_flags |= TR_FRAME_F_LAST;
+			ret = tr_reactor_send_data_frame_on_owner(
+			        connection, frame_flags, stream->stream_id,
+			        message_id, &fragment->buffer);
+			if (ret == TR_OK) {
+				stream->tx_sent_bytes += frame_len;
+				stream->tx_compressed_offset += frame_len;
+				if (stream->tx_compressed_offset ==
+				    stream->tx_compressed_wire->length) {
+					completed_wire =
+					        stream->tx_compressed_wire;
+					channel->stat_messages_tx++;
+					channel->stat_bytes_tx +=
+					        stream->tx_compressed_decoded_size;
+					stream->tx_compressed_wire = NULL;
+					stream->tx_compressed_message_id = 0U;
+					stream->tx_compressed_offset = 0U;
+					stream->tx_compressed_decoded_size = 0U;
+					assert(channel->active_message_jobs !=
+					       0U);
+					channel->active_message_jobs--;
+					pthread_cond_broadcast(
+					        &channel->state_cond);
+				}
+				fragment = NULL;
+				selected = 1;
+			} else if (ret == TR_AGAIN) {
+				retry = 1;
+				selected = 1;
+			} else {
+				reset_status = ret == TR_ERR_NOMEM
+				                       ? TR_ERR_NOMEM
+				                       : TR_ERR_STATE;
+				reset_stream = tr_stream_make_handle(
+				        channel, slot, stream);
+				tr_stream_drop_compressed_send_locked(channel,
+				                                      stream);
+				selected = 1;
+			}
+			if (selected && stream)
+				channel->tx_schedule_cursor =
+				        slot + 1U == channel->config.max_streams
+				                ? 0U
+				                : slot + 1U;
+			if (selected || retry)
+				break;
+		}
+		pthread_mutex_unlock(&channel->lock);
+
+		if (fragment)
+			tr_buffer_release(&fragment->buffer);
+		if (completed_wire)
+			tr_channel_tx_wire_release(completed_wire);
+		if (reset_stream.channel) {
+			int reset_ret = tr_stream_reset_on_owner(reset_stream,
+			                                         reset_status);
+			if (reset_ret != TR_OK && reset_ret != TR_ERR_STALE &&
+			    reset_ret != TR_ERR_CLOSED)
+				(void)tr_channel_protocol_error(
+				        channel, connection, reset_status);
+		}
+		if (retry)
+			break;
+		if (!selected)
+			break;
+		attempts++;
+	}
+
+	if (retry || attempts == TR_CHANNEL_COMPRESSED_TX_BUDGET) {
+		pthread_mutex_lock(&channel->lock);
+		channel->tx_retry_pending = 1;
+		pthread_mutex_unlock(&channel->lock);
+		(void)tr_channel_schedule_window_retry(channel);
+	}
+}
+
+static void tr_channel_decoded_buffer_release(struct tr_buffer *buffer)
+{
+	tr_channel_rx_transform_destroy(
+	        (struct tr_channel_rx_transform *)buffer);
+}
+
+static int tr_channel_rx_transform_create(struct tr_channel *channel,
+                                          struct tr_stream_handle stream,
+                                          struct tr_conn_handle connection,
+                                          uint64_t message_id,
+                                          struct tr_channel_rx_transform **out)
+{
+	struct tr_channel_rx_transform *job;
+	int ret;
+
+	if (!channel->config.memory_budget || !out || *out)
+		return TR_ERR_INVALID;
+	ret = tr_memory_budget_reserve(channel->config.memory_budget,
+	                               sizeof(struct tr_channel_rx_transform));
+	if (ret != TR_OK)
+		return ret;
+	job = calloc(1, sizeof(*job));
+	if (!job) {
+		(void)tr_memory_budget_release(
+		        channel->config.memory_budget,
+		        sizeof(struct tr_channel_rx_transform));
+		return TR_ERR_NOMEM;
+	}
+	job->channel = channel;
+	job->budget = channel->config.memory_budget;
+	job->stream = stream;
+	job->connection = connection;
+	job->message_id = message_id;
+	*out = job;
+	return TR_OK;
+}
+
+static void
+tr_stream_clear_compressed_receive_locked(struct tr_stream_slot *stream)
+{
+	if (stream->rx_compressed_builder)
+		(void)tr_message_builder_cancel(&stream->rx_compressed_builder);
+	if (stream->rx_compressed_job)
+		tr_channel_rx_transform_destroy(stream->rx_compressed_job);
+	stream->rx_compressed_job = NULL;
+	stream->rx_compressed_message_id = 0U;
+	stream->rx_compressed_expected_bytes = 0U;
+	stream->rx_compressed_received_bytes = 0U;
+	stream->rx_compressed_decoded_bytes = 0U;
+}
+
+static void tr_stream_drop_compressed_send_locked(struct tr_channel *channel,
+                                                  struct tr_stream_slot *stream)
+{
+	if (stream->tx_compressed_wire) {
+		tr_channel_tx_wire_release(stream->tx_compressed_wire);
+		assert(channel->active_message_jobs != 0U);
+		channel->active_message_jobs--;
+		pthread_cond_broadcast(&channel->state_cond);
+	}
+	if (stream->tx_compressed_fragment_reserve)
+		tr_channel_tx_fragment_release(
+		        &stream->tx_compressed_fragment_reserve->buffer);
+	stream->tx_compressed_wire = NULL;
+	stream->tx_compressed_fragment_reserve = NULL;
+	stream->tx_compressed_message_id = 0U;
+	stream->tx_compressed_offset = 0U;
+	stream->tx_compressed_decoded_size = 0U;
+}
+
+static void
+tr_stream_clear_pending_receive_locked(struct tr_stream_slot *stream)
+{
+	if (stream->rx_pending_plain)
+		tr_buffer_release(tr_buffer_take(&stream->rx_pending_plain));
+	if (stream->rx_pending_transform_job)
+		tr_channel_rx_transform_destroy(
+		        stream->rx_pending_transform_job);
+	stream->rx_pending_transform_job = NULL;
+	stream->rx_pending_message_id = 0U;
+	stream->rx_pending_kind = TR_STREAM_RX_PENDING_NONE;
+}
+
+static void tr_stream_release_drain_count_locked(struct tr_channel *channel,
+                                                 uint32_t slot)
+{
+	struct tr_stream_slot *stream = &channel->streams[slot];
+	int idx = channel->config.mode == TR_CHANNEL_SHARED_CONNECTION
+	                  ? 0
+	                  : tr_lane_index(stream->lane);
+
+	if (!stream->drain_count_released) {
+		assert(channel->drain[idx].active_streams != 0U);
+		channel->drain[idx].active_streams--;
+		stream->drain_count_released = 1;
+	}
+	if (channel->pending_open[idx].channel &&
+	    channel->pending_open[idx].slot == slot &&
+	    channel->pending_open[idx].generation == stream->generation)
+		memset(&channel->pending_open[idx], 0,
+		       sizeof(channel->pending_open[idx]));
+}
+
 static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 {
 	struct tr_stream_slot *stream;
@@ -1130,21 +1828,41 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 	stream = &channel->streams[slot];
 	if (stream->state == TR_STREAM_SLOT_FREE)
 		return;
-
-	{
-		int idx = channel->config.mode == TR_CHANNEL_SHARED_CONNECTION
-		                  ? 0
-		                  : tr_lane_index(stream->lane);
-		assert(channel->drain[idx].active_streams != 0U);
-		channel->drain[idx].active_streams--;
-		if (channel->pending_open[idx].channel &&
-		    channel->pending_open[idx].slot == slot &&
-		    channel->pending_open[idx].generation == stream->generation)
-			memset(&channel->pending_open[idx], 0,
-			       sizeof(channel->pending_open[idx]));
+	if ((stream->rx_transform_job &&
+	     !stream->rx_transform_job->owner_stopped) ||
+	    (stream->tx_compression_job &&
+	     !stream->tx_compression_job->owner_stopped)) {
+		/* 异步完成仍持有精确流代次；先退役流状态并保留槽位，
+		 * 回调结束后才能复用该槽，避免迟到结果命中新流。
+		 */
+		stream->retire_pending = 1;
+		stream->state = TR_STREAM_SLOT_RESETTING;
+		stream->local_open = 0;
+		stream->remote_open = 0;
+		stream->rx_credit_stopped = 1;
+		tr_stream_clear_compressed_receive_locked(stream);
+		tr_stream_clear_pending_receive_locked(stream);
+		tr_stream_drop_compressed_send_locked(channel, stream);
+		if (stream->rx_reassembly)
+			tr_buffer_release(
+			        tr_buffer_take(&stream->rx_reassembly));
+		return;
 	}
+
+	tr_stream_release_drain_count_locked(channel, slot);
 	generation = stream->generation;
 	(void)tr_stream_index_remove_locked(channel, stream->stream_id);
+	tr_stream_clear_compressed_receive_locked(stream);
+	tr_stream_clear_pending_receive_locked(stream);
+	tr_stream_drop_compressed_send_locked(channel, stream);
+	if (stream->rx_transform_job) {
+		tr_channel_rx_transform_destroy(stream->rx_transform_job);
+		stream->rx_transform_job = NULL;
+	}
+	if (stream->tx_compression_job) {
+		tr_channel_tx_transform_destroy(stream->tx_compression_job);
+		stream->tx_compression_job = NULL;
+	}
 	if (stream->rx_reassembly)
 		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
 	memset(stream, 0, sizeof(*stream));
@@ -1234,10 +1952,11 @@ static int tr_channel_schedule_window_retry_on_owner(void *arg)
 	int ret;
 
 	pthread_mutex_lock(&channel->lock);
-	need_arm = channel->window_retry_pending &&
-		   !channel->window_retry_scheduled &&
-		   channel->keepalive_timer_registered &&
-		   !channel->teardown_detached;
+	need_arm =
+	        (channel->window_retry_pending || channel->tx_retry_pending) &&
+	        !channel->window_retry_scheduled &&
+	        channel->keepalive_timer_registered &&
+	        !channel->teardown_detached;
 	timer = channel->keepalive_timer;
 	pthread_mutex_unlock(&channel->lock);
 	if (!need_arm)
@@ -1308,14 +2027,23 @@ static void tr_stream_reset_begin_locked(struct tr_channel *channel,
                                          struct tr_stream_slot *stream,
                                          int status)
 {
+	assert(tr_wire_stream_reset_status_valid(status));
 	stream->reset_status = status;
-	stream->reset_fragmented = stream->rx_reassembly != NULL;
+	stream->reset_fragmented = stream->rx_reassembly != NULL ||
+	                           stream->rx_compressed_builder != NULL;
+	stream->reset_discard_unordered |=
+	        stream->rx_compressed_builder != NULL ||
+	        stream->rx_transform_job != NULL ||
+	        stream->rx_pending_kind != TR_STREAM_RX_PENDING_NONE;
 	stream->reset_message_bytes =
-	        stream->rx_reassembly ? stream->rx_reassembly->len : 0;
+	        stream->rx_reassembly ? stream->rx_reassembly->len : 0U;
 	if (stream->rx_reassembly) {
 		stream->rx_consumed_bytes += stream->rx_reassembly->len;
 		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
 	}
+	tr_stream_clear_compressed_receive_locked(stream);
+	tr_stream_clear_pending_receive_locked(stream);
+	tr_stream_drop_compressed_send_locked(channel, stream);
 	stream->state = TR_STREAM_SLOT_RESETTING;
 	stream->local_open = 0;
 	stream->rx_credit_stopped = 1;
@@ -1381,6 +2109,10 @@ static void tr_channel_fail_lane_streams(struct tr_channel *channel,
 
 	for (i = 0; i < channel->config.max_streams; ++i) {
 		struct tr_stream_handle handle;
+		struct tr_task_handle cancel_task = {0};
+		struct tr_task_handle cancel_tx_task = {0};
+		int cancel_transform = 0;
+		int cancel_tx_transform = 0;
 		int notify = 0;
 
 		pthread_mutex_lock(&channel->lock);
@@ -1388,12 +2120,37 @@ static void tr_channel_fail_lane_streams(struct tr_channel *channel,
 		    channel->streams[i].lane == lane) {
 			handle = tr_stream_make_handle(channel, i,
 						       &channel->streams[i]);
+			/* 死去的物理连接不再拥有 GOAWAY 活动流计数；迟到的
+			 * 变换完成仍由全局活动流/任务账本约束，不能带入新代次。
+			 */
+			tr_stream_release_drain_count_locked(channel, i);
 			tr_stream_free_locked(channel, i);
+			if (channel->streams[i].state != TR_STREAM_SLOT_FREE)
+				channel->streams[i].connection_retired = 1;
+			if (channel->streams[i].rx_transform_job &&
+			    channel->streams[i].rx_transform_job->submitted) {
+				cancel_task = channel->streams[i]
+				                      .rx_transform_job->task;
+				cancel_transform = 1;
+			}
+			if (channel->streams[i].tx_compression_job &&
+			    channel->streams[i].tx_compression_job->submitted) {
+				cancel_tx_task =
+				        channel->streams[i]
+				                .tx_compression_job->task;
+				cancel_tx_transform = 1;
+			}
 			channel->stat_stream_errors++;
 			notify = 1;
 		}
 		pthread_mutex_unlock(&channel->lock);
 
+		if (cancel_transform)
+			(void)tr_channel_message_cancel_on_owner(channel,
+			                                         cancel_task);
+		if (cancel_tx_transform)
+			(void)tr_channel_message_cancel_on_owner(
+			        channel, cancel_tx_task);
 		if (notify)
 			tr_stream_notify(channel, handle, TR_STREAM_EVENT_ERROR,
 					 status);
@@ -1650,6 +2407,30 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 			pthread_mutex_unlock(&channel->lock);
 			continue;
 		}
+		if (stream->connection_retired) {
+			int job_pending =
+			        (stream->rx_transform_job &&
+			         !stream->rx_transform_job->owner_stopped) ||
+			        (stream->tx_compression_job &&
+			         !stream->tx_compression_job->owner_stopped);
+
+			if (job_pending) {
+				pthread_mutex_unlock(&channel->lock);
+				continue;
+			}
+			handle = tr_stream_make_handle(channel, slot, stream);
+			tr_stream_free_locked(channel, slot);
+			if (channel->streams[slot].state ==
+			    TR_STREAM_SLOT_FREE) {
+				channel->stat_streams_closed++;
+				closed = 1;
+			}
+			pthread_mutex_unlock(&channel->lock);
+			if (closed)
+				tr_stream_notify(channel, handle,
+				                 TR_STREAM_EVENT_CLOSED, TR_OK);
+			continue;
+		}
 		connection = tr_channel_connection(channel, stream->lane);
 		if (!stream->reset_sent) {
 			ret = tr_reactor_send_stream_reset_on_owner(
@@ -1708,8 +2489,12 @@ static int tr_channel_handle_stream_reset(struct tr_channel *channel,
 {
 	struct tr_stream_slot *stream;
 	struct tr_stream_handle handle;
+	struct tr_task_handle cancel_task = {0};
+	struct tr_task_handle cancel_tx_task = {0};
 	uint32_t slot;
 	int notify = 0;
+	int cancel_transform = 0;
+	int cancel_tx_transform = 0;
 	int status;
 	int ret;
 
@@ -1757,6 +2542,15 @@ static int tr_channel_handle_stream_reset(struct tr_channel *channel,
 	}
 	if (stream->state != TR_STREAM_SLOT_RESETTING)
 		tr_stream_reset_begin_locked(channel, stream, status);
+	if (stream->rx_transform_job && stream->rx_transform_job->submitted) {
+		cancel_task = stream->rx_transform_job->task;
+		cancel_transform = 1;
+	}
+	if (stream->tx_compression_job &&
+	    stream->tx_compression_job->submitted) {
+		cancel_tx_task = stream->tx_compression_job->task;
+		cancel_tx_transform = 1;
+	}
 	/* 相向主动 RESET 的原因可以不同；只约束同一发送方向的重复。 */
 	stream->reset_peer_status = status;
 	stream->reset_received = 1;
@@ -1767,6 +2561,11 @@ static int tr_channel_handle_stream_reset(struct tr_channel *channel,
 	}
 	status = stream->reset_status;
 	pthread_mutex_unlock(&channel->lock);
+	if (cancel_transform)
+		(void)tr_channel_message_cancel_on_owner(channel, cancel_task);
+	if (cancel_tx_transform)
+		(void)tr_channel_message_cancel_on_owner(channel,
+		                                         cancel_tx_task);
 	if (notify)
 		tr_stream_notify(channel, handle, TR_STREAM_EVENT_RESET,
 		                 status);
@@ -1792,6 +2591,7 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	uint32_t expected_lane_mask;
 	int control_up = 0;
 	int bulk_up = 0;
+	int newly_ready;
 	int ret;
 
 	if (!frame->payload || frame->header.stream_id != 0 ||
@@ -1861,6 +2661,13 @@ static int tr_channel_handle_hello(struct tr_channel *channel,
 	ret = tr_channel_send_hello_ack(connection, &ack_caps);
 	if (ret != TR_OK)
 		return tr_channel_protocol_error(channel, connection, ret);
+	pthread_mutex_lock(&channel->lock);
+	newly_ready = !tr_channel_connection_ready_locked(channel, connection);
+	pthread_mutex_unlock(&channel->lock);
+	ret = tr_channel_send_message_caps_if_needed(
+	        channel, connection, negotiated.feature_bits, newly_ready);
+	if (ret != TR_OK)
+		return ret;
 
 	pthread_mutex_lock(&channel->lock);
 	tr_channel_set_caps_locked(channel, expected_lane_mask, &negotiated,
@@ -1962,6 +2769,7 @@ static int tr_channel_handle_hello_ack(struct tr_channel *channel,
 	uint32_t expected_lane_mask;
 	int control_up = 0;
 	int bulk_up = 0;
+	int newly_ready;
 	int ret;
 
 	if (!frame->payload || frame->header.stream_id != 0 ||
@@ -1990,6 +2798,13 @@ static int tr_channel_handle_hello_ack(struct tr_channel *channel,
 
 	if (caps.max_frame_payload_bytes > local.max_frame_payload_bytes)
 		caps.max_frame_payload_bytes = local.max_frame_payload_bytes;
+	pthread_mutex_lock(&channel->lock);
+	newly_ready = !tr_channel_connection_ready_locked(channel, connection);
+	pthread_mutex_unlock(&channel->lock);
+	ret = tr_channel_send_message_caps_if_needed(
+	        channel, connection, caps.feature_bits, newly_ready);
+	if (ret != TR_OK)
+		return ret;
 
 	pthread_mutex_lock(&channel->lock);
 	tr_channel_set_caps_locked(channel, expected_lane_mask, &caps,
@@ -2347,6 +3162,7 @@ static int tr_channel_handle_window_update(struct tr_channel *channel,
 	else if (notify_writable)
 		tr_stream_notify(channel, handle, TR_STREAM_EVENT_WRITABLE,
 				 TR_OK);
+	tr_channel_compressed_tx_progress_on_owner(channel);
 	return TR_OK;
 }
 
@@ -2402,11 +3218,19 @@ static int tr_channel_fail_stream_receive_on_owner(
         uint32_t payload_len, int status, int unordered)
 {
 	struct tr_stream_slot *stream;
+	struct tr_task_handle cancel_task = {0};
+	struct tr_task_handle cancel_tx_task = {0};
+	int cancel_transform = 0;
+	int cancel_tx_transform = 0;
 	int ret;
 
 	ret = tr_channel_reset_timer_on_owner(channel);
 	if (ret != TR_OK)
 		return tr_channel_protocol_error(channel, connection, ret);
+	if (!tr_wire_stream_reset_status_valid(status))
+		status = status == TR_ERR_NOMEM || status == TR_AGAIN
+		                 ? TR_ERR_NOMEM
+		                 : TR_ERR_STATE;
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_handle(handle);
 	if (!stream || stream->state != TR_STREAM_SLOT_OPEN ||
@@ -2416,6 +3240,15 @@ static int tr_channel_fail_stream_receive_on_owner(
 		return tr_channel_protocol_error(channel, connection, status);
 	}
 	tr_stream_reset_begin_locked(channel, stream, status);
+	if (stream->rx_transform_job && stream->rx_transform_job->submitted) {
+		cancel_task = stream->rx_transform_job->task;
+		cancel_transform = 1;
+	}
+	if (stream->tx_compression_job &&
+	    stream->tx_compression_job->submitted) {
+		cancel_tx_task = stream->tx_compression_job->task;
+		cancel_tx_transform = 1;
+	}
 	stream->reset_discard_unordered = unordered;
 	ret = tr_stream_reset_discard_locked(channel, stream, frame,
 	                                     payload_len);
@@ -2424,9 +3257,575 @@ static int tr_channel_fail_stream_receive_on_owner(
 	pthread_mutex_unlock(&channel->lock);
 	if (ret != TR_OK)
 		return tr_channel_protocol_error(channel, connection, ret);
+	if (cancel_transform)
+		(void)tr_channel_message_cancel_on_owner(channel, cancel_task);
+	if (cancel_tx_transform)
+		(void)tr_channel_message_cancel_on_owner(channel,
+		                                         cancel_tx_task);
 	tr_stream_notify(channel, handle, TR_STREAM_EVENT_RESET, status);
 	tr_channel_reset_progress_on_owner(channel);
 	return TR_OK;
+}
+
+static int
+tr_channel_transform_reset_status(enum tr_message_transform_outcome outcome)
+{
+	switch (outcome) {
+	case TR_MESSAGE_TRANSFORM_NOMEM:
+	case TR_MESSAGE_TRANSFORM_LIMIT:
+		return TR_ERR_NOMEM;
+	case TR_MESSAGE_TRANSFORM_CANCELLED:
+		return TR_ERR_CLOSED;
+	case TR_MESSAGE_TRANSFORM_BAD_DATA:
+	case TR_MESSAGE_TRANSFORM_INTERNAL:
+	default:
+		return TR_ERR_STATE;
+	}
+}
+
+static void
+tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
+                                  struct tr_message_service_result result,
+                                  struct tr_message *message);
+
+static int
+tr_channel_submit_rx_transform_on_owner(struct tr_channel *channel,
+                                        struct tr_channel_rx_transform *job)
+{
+	struct tr_message_transform_config config = {
+	        .kind = TR_MESSAGE_ZSTD_DECODE,
+	        .limits = {channel->config.max_message_bytes,
+	                   channel->config.max_encoded_message_bytes},
+	        .decoded_size = job->decoded_size,
+	        .max_workspace_bytes =
+	                channel->config.max_compression_workspace_bytes,
+	        .max_window_log = channel->config.max_compression_window_log,
+	};
+	struct tr_conn_handle connection = job->connection;
+	struct tr_stream_handle handle = job->stream;
+	int ret;
+
+	ret = tr_channel_message_submit_on_owner(
+	        channel, &job->encoded, &config,
+	        tr_channel_message_transform_done, job, &job->task);
+	if (ret == TR_OK) {
+		job->submitted = 1;
+		return TR_OK;
+	}
+
+	pthread_mutex_lock(&channel->lock);
+	struct tr_stream_slot *stream = tr_stream_lookup_handle(handle);
+	if (stream && stream->rx_transform_job == job)
+		stream->rx_transform_job = NULL;
+	assert(channel->active_message_jobs != 0U);
+	channel->active_message_jobs--;
+	pthread_cond_broadcast(&channel->state_cond);
+	pthread_mutex_unlock(&channel->lock);
+	tr_channel_rx_transform_destroy(job);
+	if (ret == TR_ERR_CLOSED)
+		return TR_OK;
+	{
+		int reset_ret = tr_stream_reset_on_owner(
+		        handle, ret == TR_AGAIN || ret == TR_ERR_NOMEM
+		                        ? TR_ERR_NOMEM
+		                        : TR_ERR_STATE);
+		return reset_ret == TR_OK || reset_ret == TR_ERR_STALE
+		               ? TR_OK
+		               : tr_channel_protocol_error(channel, connection,
+		                                           reset_ret);
+	}
+}
+
+static void
+tr_channel_promote_rx_pending_on_owner(struct tr_channel *channel,
+                                       struct tr_stream_handle handle)
+{
+	struct tr_stream_slot *stream;
+	struct tr_channel_rx_transform *job = NULL;
+	struct tr_buffer *plain = NULL;
+	tr_stream_data_cb data_cb = NULL;
+	void *callback_arg = NULL;
+	uint64_t message_id = 0U;
+	uint8_t kind;
+
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_handle(handle);
+	if (!stream || stream->state != TR_STREAM_SLOT_OPEN ||
+	    channel->state_wait_closed || channel->teardown_detached ||
+	    stream->rx_transform_job ||
+	    stream->rx_pending_kind == TR_STREAM_RX_PENDING_NONE) {
+		pthread_mutex_unlock(&channel->lock);
+		return;
+	}
+	kind = stream->rx_pending_kind;
+	message_id = stream->rx_pending_message_id;
+	stream->rx_pending_message_id = 0U;
+	stream->rx_pending_kind = TR_STREAM_RX_PENDING_NONE;
+	if (kind == TR_STREAM_RX_PENDING_COMPRESSED) {
+		job = stream->rx_pending_transform_job;
+		stream->rx_pending_transform_job = NULL;
+		if (!job) {
+			pthread_mutex_unlock(&channel->lock);
+			(void)tr_stream_reset_on_owner(handle, TR_ERR_STATE);
+			return;
+		}
+		stream->rx_transform_job = job;
+		channel->active_message_jobs++;
+	} else if (kind == TR_STREAM_RX_PENDING_PLAIN) {
+		plain = tr_buffer_take(&stream->rx_pending_plain);
+		data_cb = channel->data_cb;
+		callback_arg = channel->callback_arg;
+	} else {
+		pthread_mutex_unlock(&channel->lock);
+		(void)tr_stream_reset_on_owner(handle, TR_ERR_STATE);
+		return;
+	}
+	pthread_mutex_unlock(&channel->lock);
+
+	if (job) {
+		(void)tr_channel_submit_rx_transform_on_owner(channel, job);
+		return;
+	}
+	{
+		enum tr_stream_data_disposition disposition =
+		        data_cb ? data_cb(handle, message_id, plain,
+		                          callback_arg)
+		                : TR_STREAM_DATA_RELEASE;
+		int kick_retry = 0;
+		if (disposition != TR_STREAM_DATA_TAKE_OWNERSHIP && plain) {
+			pthread_mutex_lock(&channel->lock);
+			stream = tr_stream_lookup_handle(handle);
+			if (stream)
+				kick_retry = tr_stream_consume_locked(
+				        channel, stream, plain->len);
+			pthread_mutex_unlock(&channel->lock);
+			tr_buffer_release(plain);
+			if (kick_retry)
+				(void)tr_channel_schedule_window_retry(channel);
+		}
+	}
+}
+
+static void
+tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
+                                  struct tr_message_service_result result,
+                                  struct tr_message *message)
+{
+	struct tr_channel_rx_transform *job = arg;
+	struct tr_channel *channel = job->channel;
+	struct tr_stream_handle completed_stream = job->stream;
+	struct tr_message_view view;
+	struct tr_stream_slot *stream;
+	tr_stream_data_cb data_cb = NULL;
+	void *callback_arg = NULL;
+	int deliver = 0;
+	int request_reset = 0;
+	int reset_status = TR_ERR_STATE;
+	int output_ret = TR_ERR_STATE;
+
+	if (result.delivery == TR_MESSAGE_SERVICE_OWNER_STOPPED) {
+		/* 先归还任务静默记账，再让 owner 推进已退役流的回收。
+		 * 活动计数保证 Channel 在此回调返回前不会被销毁。
+		 */
+		pthread_mutex_lock(&channel->lock);
+		job->owner_stopped = 1;
+		if (channel->active_message_jobs != 0U)
+			channel->active_message_jobs--;
+		pthread_cond_broadcast(&channel->state_cond);
+		pthread_mutex_unlock(&channel->lock);
+		tr_channel_reset_progress_on_owner(channel);
+		return;
+	}
+
+	if (result.outcome == TR_MESSAGE_TRANSFORM_OK)
+		output_ret = tr_message_clone(message, &job->output);
+
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_handle(job->stream);
+	if (stream && stream->rx_transform_job == job) {
+		stream->rx_transform_job = NULL;
+		if (result.outcome == TR_MESSAGE_TRANSFORM_OK &&
+		    output_ret == TR_OK && !channel->state_wait_closed &&
+		    !channel->teardown_detached &&
+		    stream->state == TR_STREAM_SLOT_OPEN &&
+		    tr_stream_connection_matches(channel, stream,
+		                                 job->connection) &&
+		    tr_message_view(&job->output, &view) == TR_OK &&
+		    view.len <= UINT32_MAX) {
+			job->output_buffer.data = (uint8_t *)view.data;
+			job->output_buffer.capacity = (uint32_t)view.len;
+			job->output_buffer.len = (uint32_t)view.len;
+			job->output_buffer.release_cb =
+			        tr_channel_decoded_buffer_release;
+			channel->stat_messages_rx++;
+			channel->stat_bytes_rx += view.len;
+			data_cb = channel->data_cb;
+			callback_arg = channel->callback_arg;
+			deliver = 1;
+		} else if (!channel->state_wait_closed &&
+		           !channel->teardown_detached &&
+		           stream->state == TR_STREAM_SLOT_OPEN &&
+		           stream->local_open) {
+			request_reset = 1;
+			reset_status =
+			        result.outcome == TR_MESSAGE_TRANSFORM_OK
+			                ? TR_ERR_NOMEM
+			                : tr_channel_transform_reset_status(
+			                          result.outcome);
+		}
+		if (stream->retire_pending ||
+		    (!stream->local_open && !stream->remote_open))
+			tr_stream_free_locked(channel, job->stream.slot);
+	}
+	assert(channel->active_message_jobs != 0U);
+	channel->active_message_jobs--;
+	pthread_cond_broadcast(&channel->state_cond);
+	pthread_mutex_unlock(&channel->lock);
+
+	if (request_reset) {
+		int ret = tr_stream_reset_on_owner(job->stream, reset_status);
+		if (ret != TR_OK && ret != TR_ERR_STALE && ret != TR_ERR_CLOSED)
+			(void)tr_channel_protocol_error(
+			        channel, job->connection, reset_status);
+	}
+
+	if (deliver) {
+		enum tr_stream_data_disposition disposition =
+		        data_cb ? data_cb(completed_stream, job->message_id,
+		                          &job->output_buffer, callback_arg)
+		                : TR_STREAM_DATA_RELEASE;
+		if (disposition != TR_STREAM_DATA_TAKE_OWNERSHIP)
+			tr_buffer_release(&job->output_buffer);
+		tr_channel_promote_rx_pending_on_owner(channel,
+		                                       completed_stream);
+	} else {
+		tr_channel_rx_transform_destroy(job);
+	}
+	(void)task;
+}
+
+static void
+tr_channel_tx_transform_done(void *arg, struct tr_task_handle task,
+                             struct tr_message_service_result result,
+                             struct tr_message *message)
+{
+	struct tr_channel_tx_transform *job = arg;
+	struct tr_channel *channel = job->channel;
+	struct tr_stream_handle handle = job->stream;
+	struct tr_conn_handle connection = job->connection;
+	struct tr_channel_tx_wire *wire = NULL;
+	struct tr_message_view view;
+	struct tr_stream_slot *stream;
+	uint32_t max_wire = 0U;
+	int reset_status = TR_OK;
+	int installed = 0;
+	int request_reset = 0;
+	int ret = TR_OK;
+
+	if (result.delivery == TR_MESSAGE_SERVICE_OWNER_STOPPED) {
+		pthread_mutex_lock(&channel->lock);
+		job->owner_stopped = 1;
+		if (channel->active_message_jobs != 0U)
+			channel->active_message_jobs--;
+		pthread_cond_broadcast(&channel->state_cond);
+		pthread_mutex_unlock(&channel->lock);
+		tr_channel_reset_progress_on_owner(channel);
+		return;
+	}
+
+	if (result.outcome != TR_MESSAGE_TRANSFORM_OK) {
+		reset_status =
+		        tr_channel_transform_reset_status(result.outcome);
+	} else if (tr_message_view(message, &view) != TR_OK || view.len == 0U ||
+	           view.len > UINT32_MAX - TR_MESSAGE_ENVELOPE_WIRE_SIZE) {
+		reset_status = TR_ERR_BAD_LENGTH;
+	} else {
+		pthread_mutex_lock(&channel->lock);
+		stream = tr_stream_lookup_handle(handle);
+		if (stream && stream->tx_compression_job == job &&
+		    tr_stream_connection_matches(channel, stream, connection)) {
+			const struct tr_channel_capabilities *caps =
+			        stream->lane == TR_LANE_BULK
+			                ? &channel->bulk_caps
+			                : &channel->control_caps;
+			if (caps->message_caps_ready &&
+			    (caps->feature_bits &
+			     TR_CHANNEL_FEATURE_MESSAGE_CAPS) &&
+			    (caps->receive_algorithm_bits &
+			     TR_MESSAGE_ALGORITHM_ZSTD))
+				max_wire = caps->max_encoded_wire_bytes;
+		}
+		pthread_mutex_unlock(&channel->lock);
+		if (max_wire < TR_MESSAGE_ENVELOPE_WIRE_SIZE + 1U ||
+		    view.len + TR_MESSAGE_ENVELOPE_WIRE_SIZE > max_wire) {
+			reset_status = TR_ERR_BAD_LENGTH;
+		} else {
+			ret = tr_channel_tx_wire_create(
+			        channel->config.memory_budget, &view,
+			        job->decoded_size, &wire);
+			if (ret != TR_OK)
+				reset_status = TR_ERR_NOMEM;
+		}
+	}
+
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_handle(handle);
+	if (stream && stream->tx_compression_job == job) {
+		stream->tx_compression_job = NULL;
+		if (reset_status == TR_OK && wire &&
+		    stream->state == TR_STREAM_SLOT_OPEN &&
+		    stream->local_open && !channel->state_wait_closed &&
+		    !channel->teardown_detached &&
+		    tr_stream_connection_matches(channel, stream, connection)) {
+			stream->tx_compressed_wire = wire;
+			stream->tx_compressed_fragment_reserve =
+			        job->reserved_fragment;
+			job->reserved_fragment = NULL;
+			stream->tx_compressed_message_id = job->message_id;
+			stream->tx_compressed_offset = 0U;
+			stream->tx_compressed_decoded_size = job->decoded_size;
+			wire = NULL;
+			installed = 1;
+		} else if (!channel->state_wait_closed &&
+		           !channel->teardown_detached &&
+		           stream->state == TR_STREAM_SLOT_OPEN &&
+		           stream->local_open) {
+			request_reset = 1;
+			if (reset_status == TR_OK)
+				reset_status = TR_ERR_STATE;
+		}
+		if (stream->retire_pending ||
+		    (!stream->local_open && !stream->remote_open))
+			tr_stream_free_locked(channel, handle.slot);
+	}
+	if (!installed) {
+		assert(channel->active_message_jobs != 0U);
+		channel->active_message_jobs--;
+		pthread_cond_broadcast(&channel->state_cond);
+	}
+	pthread_mutex_unlock(&channel->lock);
+
+	if (wire)
+		tr_channel_tx_wire_release(wire);
+	tr_channel_tx_transform_destroy(job);
+	if (request_reset) {
+		int reset_ret = tr_stream_reset_on_owner(handle, reset_status);
+		if (reset_ret != TR_OK && reset_ret != TR_ERR_STALE &&
+		    reset_ret != TR_ERR_CLOSED)
+			(void)tr_channel_protocol_error(channel, connection,
+			                                reset_status);
+	} else if (installed) {
+		tr_channel_compressed_tx_progress_on_owner(channel);
+	}
+	(void)task;
+}
+
+static int tr_channel_handle_compressed_data(struct tr_channel *channel,
+                                             struct tr_conn_handle connection,
+                                             struct tr_frame *frame)
+{
+	struct tr_stream_slot *stream;
+	struct tr_stream_handle handle;
+	struct tr_channel_rx_transform *job;
+	struct tr_message_envelope envelope;
+	const struct tr_channel_capabilities *caps;
+	uint32_t slot;
+	uint32_t payload_len = frame->payload ? frame->payload->len : 0U;
+	uint32_t body_offset = 0U;
+	uint32_t body_len = payload_len;
+	uint32_t expected_bytes;
+	uint32_t received_bytes;
+	uint32_t decoded_bytes;
+	uint64_t new_received;
+	int first = (frame->header.flags & TR_FRAME_F_FIRST) != 0;
+	int last = (frame->header.flags & TR_FRAME_F_LAST) != 0;
+	int kick_retry = 0;
+	int ret = TR_OK;
+
+	if (!frame->payload || payload_len != frame->header.payload_len ||
+	    !(frame->header.flags & TR_FRAME_F_COMPRESSED) || payload_len == 0U)
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_BAD_LENGTH);
+
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
+	if (stream && stream->state == TR_STREAM_SLOT_RESETTING &&
+	    tr_stream_connection_matches(channel, stream, connection)) {
+		ret = tr_stream_reset_discard_locked(channel, stream, frame,
+		                                     payload_len);
+		pthread_mutex_unlock(&channel->lock);
+		return ret == TR_OK ? TR_OK
+		                    : tr_channel_protocol_error(
+		                              channel, connection, ret);
+	}
+	if (!stream || stream->state != TR_STREAM_SLOT_OPEN ||
+	    !stream->remote_open || channel->state_wait_closed ||
+	    !tr_stream_connection_matches(channel, stream, connection)) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	if (UINT64_MAX - stream->rx_received_bytes < payload_len) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_BAD_LENGTH);
+	}
+	new_received = stream->rx_received_bytes + payload_len;
+	if (new_received > stream->rx_advertised_limit) {
+		pthread_mutex_unlock(&channel->lock);
+		return tr_channel_protocol_error(channel, connection,
+		                                 TR_ERR_STATE);
+	}
+	if (!frame->header.message_id ||
+	    frame->header.message_id != stream->next_rx_message_id) {
+		ret = TR_ERR_STATE;
+		goto fail_stream;
+	}
+	if (first && stream->rx_pending_kind != TR_STREAM_RX_PENDING_NONE) {
+		/* 单个有界完成槽已经占用；继续接收会把同流完成顺序变成
+		 * 无界积压，因此以资源拒绝终止该流。 */
+		ret = TR_ERR_NOMEM;
+		goto fail_stream;
+	}
+	caps = stream->lane == TR_LANE_BULK ? &channel->bulk_caps
+	                                    : &channel->control_caps;
+	if (!(channel->config.receive_compression_algorithms &
+	      TR_MESSAGE_ALGORITHM_ZSTD) ||
+	    !caps->message_caps_ready ||
+	    !(caps->feature_bits & TR_CHANNEL_FEATURE_MESSAGE_CAPS)) {
+		ret = TR_ERR_STATE;
+		goto fail_stream;
+	}
+	if (first) {
+		if (stream->rx_compressed_builder ||
+		    stream->rx_compressed_job || stream->rx_reassembly ||
+		    payload_len < TR_MESSAGE_ENVELOPE_WIRE_SIZE) {
+			ret = TR_ERR_STATE;
+			goto fail_stream;
+		}
+		ret = tr_message_envelope_decode(frame->payload->data,
+		                                 TR_MESSAGE_ENVELOPE_WIRE_SIZE,
+		                                 &envelope);
+		if (ret != TR_OK ||
+		    envelope.codec_id != TR_MESSAGE_CODEC_ZSTD ||
+		    (uint64_t)envelope.encoded_body_bytes +
+		                    TR_MESSAGE_ENVELOPE_WIRE_SIZE >
+		            channel->config.max_encoded_message_bytes ||
+		    envelope.decoded_message_bytes >
+		            channel->config.max_message_bytes) {
+			ret = TR_ERR_BAD_LENGTH;
+			goto fail_stream;
+		}
+		ret = tr_channel_rx_transform_create(
+		        channel, tr_stream_make_handle(channel, slot, stream),
+		        connection, frame->header.message_id,
+		        &stream->rx_compressed_job);
+		if (ret != TR_OK) {
+			ret = ret == TR_AGAIN ? TR_ERR_NOMEM : ret;
+			goto fail_stream;
+		}
+		ret = tr_message_builder_create(channel->config.memory_budget,
+		                                envelope.encoded_body_bytes,
+		                                &stream->rx_compressed_builder);
+		if (ret != TR_OK) {
+			ret = ret == TR_AGAIN ? TR_ERR_NOMEM : ret;
+			goto fail_stream;
+		}
+		stream->rx_compressed_message_id = frame->header.message_id;
+		stream->rx_compressed_expected_bytes =
+		        envelope.encoded_body_bytes;
+		stream->rx_compressed_received_bytes = 0U;
+		stream->rx_compressed_decoded_bytes =
+		        envelope.decoded_message_bytes;
+		body_offset = TR_MESSAGE_ENVELOPE_WIRE_SIZE;
+		body_len -= body_offset;
+	} else if (!stream->rx_compressed_builder ||
+	           !stream->rx_compressed_job ||
+	           stream->rx_compressed_message_id !=
+	                   frame->header.message_id) {
+		ret = TR_ERR_STATE;
+		goto fail_stream;
+	}
+
+	expected_bytes = stream->rx_compressed_expected_bytes;
+	received_bytes = stream->rx_compressed_received_bytes;
+	decoded_bytes = stream->rx_compressed_decoded_bytes;
+	if ((body_len == 0U && (!first || last)) ||
+	    body_len > expected_bytes - received_bytes ||
+	    (last && body_len != expected_bytes - received_bytes) ||
+	    (!last && body_len == expected_bytes - received_bytes)) {
+		ret = TR_ERR_BAD_LENGTH;
+		goto fail_stream;
+	}
+	if (body_len != 0U) {
+		ret = tr_message_builder_append(
+		        stream->rx_compressed_builder,
+		        frame->payload->data + body_offset, body_len);
+		if (ret != TR_OK) {
+			ret = ret == TR_AGAIN ? TR_ERR_NOMEM : ret;
+			goto fail_stream;
+		}
+	}
+	stream->rx_compressed_received_bytes += body_len;
+	stream->rx_received_bytes = new_received;
+	kick_retry = tr_stream_consume_locked(channel, stream, payload_len);
+
+	if (!last) {
+		pthread_mutex_unlock(&channel->lock);
+		if (kick_retry)
+			(void)tr_channel_schedule_window_retry(channel);
+		return TR_OK;
+	}
+
+	job = stream->rx_compressed_job;
+	ret = tr_message_builder_publish(&stream->rx_compressed_builder,
+	                                 &job->encoded);
+	if (ret != TR_OK) {
+		/* 当前帧已复制并返还信用；异步终止不能再次记账该帧。 */
+		stream->rx_compressed_job = NULL;
+		stream->rx_compressed_message_id = 0U;
+		stream->rx_compressed_expected_bytes = 0U;
+		stream->rx_compressed_received_bytes = 0U;
+		stream->rx_compressed_decoded_bytes = 0U;
+		tr_channel_rx_transform_destroy(job);
+		stream->next_rx_message_id++;
+		pthread_mutex_unlock(&channel->lock);
+		if (kick_retry)
+			(void)tr_channel_schedule_window_retry(channel);
+		return tr_stream_reset_on_owner(
+		        tr_stream_make_handle(channel, slot, stream),
+		        TR_ERR_STATE);
+	}
+	stream->rx_compressed_job = NULL;
+	stream->rx_compressed_message_id = 0U;
+	stream->rx_compressed_expected_bytes = 0U;
+	stream->rx_compressed_received_bytes = 0U;
+	stream->rx_compressed_decoded_bytes = 0U;
+	handle = tr_stream_make_handle(channel, slot, stream);
+	job->stream = handle;
+	job->decoded_size = decoded_bytes;
+	stream->next_rx_message_id++;
+	if (stream->rx_transform_job) {
+		stream->rx_pending_transform_job = job;
+		stream->rx_pending_message_id = job->message_id;
+		stream->rx_pending_kind = TR_STREAM_RX_PENDING_COMPRESSED;
+		pthread_mutex_unlock(&channel->lock);
+		if (kick_retry)
+			(void)tr_channel_schedule_window_retry(channel);
+		return TR_OK;
+	}
+	stream->rx_transform_job = job;
+	channel->active_message_jobs++;
+	pthread_mutex_unlock(&channel->lock);
+	if (kick_retry)
+		(void)tr_channel_schedule_window_retry(channel);
+	return tr_channel_submit_rx_transform_on_owner(channel, job);
+
+fail_stream:
+	handle = tr_stream_make_handle(channel, slot, stream);
+	pthread_mutex_unlock(&channel->lock);
+	return tr_channel_fail_stream_receive_on_owner(
+	        channel, connection, handle, frame, payload_len, ret, 1);
 }
 
 static int tr_channel_handle_data(struct tr_channel *channel,
@@ -2453,6 +3852,9 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 	if (payload_len != frame->header.payload_len)
 		return tr_channel_protocol_error(channel, connection,
 		                                 TR_ERR_BAD_LENGTH);
+	if (flags & TR_FRAME_F_COMPRESSED)
+		return tr_channel_handle_compressed_data(channel, connection,
+		                                         frame);
 
 	fragmented = (flags & (TR_FRAME_F_FIRST | TR_FRAME_F_LAST)) !=
 		     (TR_FRAME_F_FIRST | TR_FRAME_F_LAST);
@@ -2462,7 +3864,8 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
 	if (stream && stream->state == TR_STREAM_SLOT_RESETTING &&
 	    tr_stream_connection_matches(channel, stream, connection)) {
-		if ((flags & ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST)) != 0) {
+		if ((flags & ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+		               TR_FRAME_F_COMPRESSED)) != 0) {
 			pthread_mutex_unlock(&channel->lock);
 			return tr_channel_protocol_error(channel, connection,
 			                                 TR_ERR_BAD_FLAGS);
@@ -2492,6 +3895,11 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection,
 						 TR_ERR_STATE);
+	}
+	if ((flags & TR_FRAME_F_FIRST) &&
+	    stream->rx_pending_kind != TR_STREAM_RX_PENDING_NONE) {
+		ret = TR_ERR_NOMEM;
+		goto fail_stream;
 	}
 	if ((flags & ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST)) != 0) {
 		/* RESET 线上原因码仅允许既有集合；可定位的类型标志错误
@@ -2585,6 +3993,22 @@ static int tr_channel_handle_data(struct tr_channel *channel,
 		stream->rx_reassembly_message_id = 0;
 		stream->next_rx_message_id++;
 	} else if (fragmented) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+
+	if (stream->rx_transform_job) {
+		if (stream->rx_pending_kind != TR_STREAM_RX_PENDING_NONE) {
+			ret = TR_ERR_NOMEM;
+			goto fail_stream;
+		}
+		if (!fragmented)
+			deliver = tr_buffer_take(&frame->payload);
+		stream->rx_pending_plain = deliver;
+		stream->rx_pending_message_id = frame->header.message_id;
+		stream->rx_pending_kind = TR_STREAM_RX_PENDING_PLAIN;
+		channel->stat_messages_rx++;
+		channel->stat_bytes_rx += logical_len;
 		pthread_mutex_unlock(&channel->lock);
 		return TR_OK;
 	}
@@ -2726,6 +4150,10 @@ tr_channel_on_frame(struct tr_conn_handle connection, struct tr_frame *frame,
 	case TR_FRAME_HELLO_ACK:
 		ret = tr_channel_handle_hello_ack(channel, connection, frame);
 		break;
+	case TR_FRAME_MESSAGE_CAPS:
+		ret = tr_channel_handle_message_caps(channel, connection,
+		                                     frame);
+		break;
 	case TR_FRAME_GOAWAY:
 		ret = tr_channel_handle_goaway(channel, connection, frame);
 		break;
@@ -2815,6 +4243,7 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 
 	if (event == TR_CONN_EVENT_CONTROL_TX_READY) {
 		tr_channel_open_progress_on_owner(channel);
+		tr_channel_compressed_tx_progress_on_owner(channel);
 		return;
 	}
 	pthread_mutex_lock(&channel->lock);
@@ -3226,6 +4655,11 @@ int tr_channel_start(struct tr_channel *channel)
 		pthread_mutex_unlock(&channel->lock);
 		return ret;
 	}
+	if (channel->config.receive_compression_algorithms != 0U &&
+	    !channel->message_submit) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STATE;
+	}
 
 	/* 延后创建的使用方调用 start() 前，上层处理函数已安装。
 	 * 在接收延后所用的同一锁下发布该就绪状态，并将已收到的 HELLO
@@ -3472,9 +4906,22 @@ static void tr_channel_build_cleanup(struct tr_channel_build *build)
 	 */
 	if (channel->streams) {
 		uint32_t i;
-		for (i = 0; i < channel->config.max_streams; ++i)
+		for (i = 0; i < channel->config.max_streams; ++i) {
 			if (channel->streams[i].rx_reassembly)
 				tr_buffer_release(channel->streams[i].rx_reassembly);
+			tr_stream_clear_compressed_receive_locked(
+			        &channel->streams[i]);
+			tr_stream_clear_pending_receive_locked(
+			        &channel->streams[i]);
+			tr_stream_drop_compressed_send_locked(
+			        channel, &channel->streams[i]);
+			if (channel->streams[i].rx_transform_job)
+				tr_channel_rx_transform_destroy(
+				        channel->streams[i].rx_transform_job);
+			if (channel->streams[i].tx_compression_job)
+				tr_channel_tx_transform_destroy(
+				        channel->streams[i].tx_compression_job);
+		}
 	}
 	if (build->state_cond_ready)
 		pthread_cond_destroy(&channel->state_cond);
@@ -3536,6 +4983,7 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	struct tr_channel_build build TR_AUTO(tr_channel_build_cleanup) = {0};
 	struct tr_channel_config effective = {0};
 	struct tr_channel *channel;
+	struct tr_reactor_limits reactor_limits;
 	size_t stream_bytes, index_bytes, index_capacity, fixed_bytes;
 	int ret;
 
@@ -3556,6 +5004,43 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	    effective.max_protocol_version != TR_CHANNEL_PROTOCOL_VERSION ||
 	    (effective.required_feature_bits & ~effective.feature_bits))
 		return TR_ERR_INVALID;
+	if (effective.receive_compression_algorithms &
+	    ~TR_MESSAGE_ALGORITHM_KNOWN_MASK)
+		return TR_ERR_UNSUPPORTED;
+	if (effective.receive_compression_algorithms == 0U) {
+		if (effective.max_encoded_message_bytes != 0U ||
+		    ((effective.max_compression_workspace_bytes == 0U) !=
+		     (effective.max_compression_window_log == 0U)) ||
+		    (effective.max_compression_workspace_bytes != 0U &&
+		     (effective.max_compression_window_log < 10U ||
+		      effective.max_compression_window_log > 31U)))
+			return TR_ERR_INVALID;
+	} else {
+		/* 立即握手构造无法在发布 HELLO 前绑定运行时变换服务。 */
+		if (start_handshake)
+			return TR_ERR_STATE;
+		if (effective.max_encoded_message_bytes < 17U ||
+		    effective.max_message_bytes == 0U ||
+		    !(effective.feature_bits &
+		      TR_CHANNEL_FEATURE_MESSAGE_CAPS) ||
+		    !effective.memory_budget ||
+		    effective.memory_budget->limit_bytes == 0U ||
+		    effective.max_compression_workspace_bytes == 0U ||
+		    effective.max_compression_window_log < 10U ||
+		    effective.max_compression_window_log > 31U)
+			return TR_ERR_INVALID;
+	}
+	if (effective.feature_bits & TR_CHANNEL_FEATURE_MESSAGE_CAPS) {
+		ret = tr_reactor_get_limits(control_connection.reactor,
+		                            &reactor_limits);
+		if (ret != TR_OK)
+			return ret;
+		if (reactor_limits.max_payload_len <
+		            TR_MESSAGE_CAPS_WIRE_SIZE ||
+		    (effective.receive_compression_algorithms != 0U &&
+		     reactor_limits.max_payload_len < 16U))
+			return TR_ERR_BAD_LENGTH;
+	}
 
 	if (effective.reassembly_pool &&
 	    (effective.max_message_bytes == 0 ||
@@ -3744,6 +5229,10 @@ static int tr_channel_detach_on_owner(void *arg)
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_STATE;
 	}
+	if (channel->active_message_jobs != 0U) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
 
 	channel->local_draining = 1;
 	channel->keepalive_enabled = 0;
@@ -3839,6 +5328,7 @@ void tr_channel_finalize_detached(struct tr_channel *channel)
 	assert(!channel->keepalive_timer_registered);
 	assert(channel->state_wait_closed);
 	assert(channel->state_waiters == 0U);
+	assert(channel->active_message_jobs == 0U);
 #endif
 
 	/* 所有可能失败的所有者与等待者屏障都已在解绑所有权转移前完成。
@@ -3847,10 +5337,23 @@ void tr_channel_finalize_detached(struct tr_channel *channel)
 	if (channel->streams) {
 		uint32_t i;
 
-		for (i = 0; i < channel->config.max_streams; ++i)
+		for (i = 0; i < channel->config.max_streams; ++i) {
 			if (channel->streams[i].rx_reassembly)
 				tr_buffer_release(
 					channel->streams[i].rx_reassembly);
+			tr_stream_clear_compressed_receive_locked(
+			        &channel->streams[i]);
+			tr_stream_clear_pending_receive_locked(
+			        &channel->streams[i]);
+			tr_stream_drop_compressed_send_locked(
+			        channel, &channel->streams[i]);
+			if (channel->streams[i].rx_transform_job)
+				tr_channel_rx_transform_destroy(
+				        channel->streams[i].rx_transform_job);
+			if (channel->streams[i].tx_compression_job)
+				tr_channel_tx_transform_destroy(
+				        channel->streams[i].tx_compression_job);
+		}
 	}
 	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
@@ -3869,6 +5372,12 @@ int tr_channel_destroy(struct tr_channel *channel)
 	ret = tr_channel_close_wait_admission(channel);
 	if (ret != TR_OK)
 		return ret;
+	pthread_mutex_lock(&channel->lock);
+	if (channel->active_message_jobs != 0U) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
+	pthread_mutex_unlock(&channel->lock);
 
 	/* 释放事件源可引用的任何存储前先拆除事件源。客户端
 	 * 拥有重连连接器与定时器状态；服务端 Channel 从不启用该
@@ -3929,10 +5438,23 @@ int tr_channel_destroy(struct tr_channel *channel)
 	if (channel->streams) {
 		uint32_t i;
 
-		for (i = 0; i < channel->config.max_streams; ++i)
+		for (i = 0; i < channel->config.max_streams; ++i) {
 			if (channel->streams[i].rx_reassembly)
 				tr_buffer_release(
 					channel->streams[i].rx_reassembly);
+			tr_stream_clear_compressed_receive_locked(
+			        &channel->streams[i]);
+			tr_stream_clear_pending_receive_locked(
+			        &channel->streams[i]);
+			tr_stream_drop_compressed_send_locked(
+			        channel, &channel->streams[i]);
+			if (channel->streams[i].rx_transform_job)
+				tr_channel_rx_transform_destroy(
+				        channel->streams[i].rx_transform_job);
+			if (channel->streams[i].tx_compression_job)
+				tr_channel_tx_transform_destroy(
+				        channel->streams[i].tx_compression_job);
+		}
 	}
 	(void)pthread_cond_destroy(&channel->state_cond);
 	pthread_mutex_destroy(&channel->lock);
@@ -3971,6 +5493,86 @@ int tr_channel_set_lifecycle_observer(struct tr_channel *channel,
 	return tr_reactor_call(
 		channel->reactor,
 		tr_channel_set_lifecycle_observer_on_owner, &request);
+}
+
+int tr_channel_bind_message_service_on_owner(
+        struct tr_channel *channel, struct tr_reactor *service_reactor,
+        tr_channel_message_submit_fn submit,
+        tr_channel_message_cancel_fn cancel, void *context)
+{
+	int ret = TR_OK;
+
+	if (!channel || !service_reactor || !submit || !cancel || !context)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+	if (service_reactor != channel->reactor)
+		return TR_ERR_INVALID;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->teardown_detached) {
+		ret = TR_ERR_CLOSED;
+	} else if (channel->handshake_started || channel->control_ready ||
+	           channel->bulk_ready || channel->message_submit ||
+	           channel->message_cancel) {
+		ret = TR_ERR_STATE;
+	} else {
+		channel->message_submit = submit;
+		channel->message_cancel = cancel;
+		channel->message_submit_context = context;
+	}
+	pthread_mutex_unlock(&channel->lock);
+	return ret;
+}
+
+int tr_channel_message_submit_on_owner(
+        struct tr_channel *channel, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle)
+{
+	tr_channel_message_submit_fn submit;
+	void *context;
+	int ret = TR_OK;
+
+	if (!channel || !input || !config || !done || !handle)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&channel->lock);
+	if (channel->teardown_detached || channel->state_wait_closed) {
+		ret = TR_ERR_CLOSED;
+		submit = NULL;
+		context = NULL;
+	} else if (!channel->message_submit) {
+		ret = TR_ERR_STATE;
+		submit = NULL;
+		context = NULL;
+	} else {
+		submit = channel->message_submit;
+		context = channel->message_submit_context;
+	}
+	pthread_mutex_unlock(&channel->lock);
+	if (ret != TR_OK)
+		return ret;
+
+	return submit(context, input, config, done, arg, handle);
+}
+
+int tr_channel_message_cancel_on_owner(struct tr_channel *channel,
+					       struct tr_task_handle task)
+{
+	tr_channel_message_cancel_fn cancel;
+	void *context;
+
+	if (!channel || !tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+	pthread_mutex_lock(&channel->lock);
+	cancel = channel->message_cancel;
+	context = channel->message_submit_context;
+	pthread_mutex_unlock(&channel->lock);
+	return cancel ? cancel(context, task) : TR_ERR_CLOSED;
 }
 
 struct tr_channel_handler_request {
@@ -4543,6 +6145,46 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 	return TR_OK;
 }
 
+int tr_channel_message_limits_on_owner(
+	struct tr_channel *channel, enum tr_lane lane,
+	struct tr_channel_message_limits *out)
+{
+	struct tr_channel_message_limits snapshot;
+	const struct tr_channel_capabilities *caps;
+	int ret;
+
+	if (!channel || !out ||
+	    (lane != TR_LANE_CONTROL && lane != TR_LANE_BULK))
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+
+	pthread_mutex_lock(&channel->lock);
+	if (!tr_channel_lane_alive(channel, lane)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
+	caps = lane == TR_LANE_BULK ? &channel->bulk_caps
+	                            : &channel->control_caps;
+	snapshot = (struct tr_channel_message_limits){
+	        .local_receive_algorithms =
+	                channel->config.receive_compression_algorithms,
+	        .local_max_encoded_wire_bytes =
+	                channel->config.max_encoded_message_bytes,
+	        .peer_receive_algorithms = caps->receive_algorithm_bits,
+	        .peer_max_encoded_wire_bytes = caps->max_encoded_wire_bytes,
+	        .max_message_bytes = channel->config.max_message_bytes,
+	        .max_compression_workspace_bytes =
+	                channel->config.max_compression_workspace_bytes,
+	        .max_compression_window_log =
+	                channel->config.max_compression_window_log,
+	        .peer_caps_ready = caps->message_caps_ready != 0U};
+	pthread_mutex_unlock(&channel->lock);
+	ret = TR_OK;
+	*out = snapshot;
+	return ret;
+}
+
 uint32_t tr_channel_active_streams(struct tr_channel *channel)
 {
 	uint32_t count;
@@ -4644,8 +6286,13 @@ int tr_channel_wait_ready_deadline(
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
-	if ((lane == TR_LANE_CONTROL && channel->control_ready) ||
-	    (lane == TR_LANE_BULK && channel->bulk_ready)) {
+	const struct tr_channel_capabilities *lane_caps =
+	        lane == TR_LANE_CONTROL ? &channel->control_caps
+	                                : &channel->bulk_caps;
+	if (((lane == TR_LANE_CONTROL && channel->control_ready) ||
+	     (lane == TR_LANE_BULK && channel->bulk_ready)) &&
+	    (!(lane_caps->feature_bits & TR_CHANNEL_FEATURE_MESSAGE_CAPS) ||
+	     lane_caps->message_caps_ready)) {
 		/* 等待锁可能耗尽期限；就绪成功必须在持锁观察时再次判定。 */
 		if (timed) {
 			result = tr_deadline_expired(deadline, &expired);
@@ -4662,8 +6309,11 @@ int tr_channel_wait_ready_deadline(
 	channel->state_waiters++;
 
 	for (;;) {
-		int ready = lane == TR_LANE_CONTROL ?
-			channel->control_ready : channel->bulk_ready;
+		int ready = (lane == TR_LANE_CONTROL ? channel->control_ready
+		                                     : channel->bulk_ready) &&
+		            (!(lane_caps->feature_bits &
+		               TR_CHANNEL_FEATURE_MESSAGE_CAPS) ||
+		             lane_caps->message_caps_ready);
 
 		/* 不能因另一阶段或已到期后的 READY 事件重新获得时间。
 		 * 同时保留关闭状态和条件变量原有的所有权屏障。
@@ -4933,6 +6583,10 @@ int tr_stream_sendv(struct tr_stream_handle handle,
 		pthread_mutex_unlock(&channel->lock);
 		return TR_AGAIN;
 	}
+	if (stream->tx_compression_job || stream->tx_compressed_wire) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
 	if (!tr_channel_lane_alive(channel, stream->lane)) {
 		int physical_alive = stream->lane == TR_LANE_BULK ?
 					     channel->bulk_alive :
@@ -4975,6 +6629,155 @@ int tr_stream_sendv(struct tr_stream_handle handle,
 	return ret;
 }
 
+struct tr_stream_send_compressed_request {
+	struct tr_stream_handle stream;
+	struct tr_message *payload;
+};
+
+static int tr_stream_send_compressed_on_owner(void *arg)
+{
+	struct tr_stream_send_compressed_request *request = arg;
+	struct tr_stream_handle handle = request->stream;
+	struct tr_channel *channel = handle.channel;
+	struct tr_message_view view;
+	struct tr_message_transform_config transform_config = {0};
+	struct tr_channel_tx_transform *job = NULL;
+	struct tr_stream_slot *stream;
+	struct tr_conn_handle connection;
+	const struct tr_channel_capabilities *caps;
+	uint32_t max_message;
+	uint32_t max_encoded_body;
+	uint64_t message_id;
+	int ret;
+
+	if (!channel || !request->payload)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(channel->reactor))
+		return TR_ERR_STATE;
+	ret = tr_message_view(request->payload, &view);
+	if (ret != TR_OK)
+		return ret;
+	if (view.len > UINT32_MAX)
+		return TR_ERR_BAD_LENGTH;
+
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_handle(handle);
+	if (!stream) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_STALE;
+	}
+	if (stream->state == TR_STREAM_SLOT_RESETTING) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_CLOSED;
+	}
+	if (stream->state != TR_STREAM_SLOT_OPEN || !stream->local_open) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
+	if (!tr_channel_lane_alive(channel, stream->lane)) {
+		int physical_alive = stream->lane == TR_LANE_BULK
+		                             ? channel->bulk_alive
+		                             : channel->control_alive;
+		pthread_mutex_unlock(&channel->lock);
+		return physical_alive ? TR_AGAIN : TR_ERR_CLOSED;
+	}
+	if (stream->tx_compression_job || stream->tx_compressed_wire) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
+	caps = stream->lane == TR_LANE_BULK ? &channel->bulk_caps
+	                                    : &channel->control_caps;
+	if (!caps->message_caps_ready ||
+	    !(caps->feature_bits & TR_CHANNEL_FEATURE_MESSAGE_CAPS)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
+	}
+	if (!(caps->receive_algorithm_bits & TR_MESSAGE_ALGORITHM_ZSTD)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_UNSUPPORTED;
+	}
+	if (!channel->config.memory_budget ||
+	    !channel->config.max_compression_workspace_bytes ||
+	    channel->config.max_compression_window_log < 10U ||
+	    channel->config.max_compression_window_log > 31U) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_UNSUPPORTED;
+	}
+	if (caps->max_encoded_wire_bytes <= TR_MESSAGE_ENVELOPE_WIRE_SIZE ||
+	    stream->tx_window_bytes < TR_MESSAGE_ENVELOPE_WIRE_SIZE) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_BAD_LENGTH;
+	}
+	max_message = tr_channel_lane_max_message_locked(channel, stream->lane);
+	if (view.len > max_message || stream->next_tx_message_id == 0U ||
+	    stream->next_tx_message_id == UINT64_MAX) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_BAD_LENGTH;
+	}
+	max_encoded_body =
+	        caps->max_encoded_wire_bytes - TR_MESSAGE_ENVELOPE_WIRE_SIZE;
+	message_id = stream->next_tx_message_id;
+	connection = tr_channel_connection(channel, stream->lane);
+	ret = tr_channel_tx_transform_create(channel, handle, connection,
+	                                     message_id, (uint32_t)view.len,
+	                                     &job);
+	if (ret == TR_OK)
+		ret = tr_channel_tx_fragment_allocate(
+		        channel->config.memory_budget, &job->reserved_fragment);
+	if (ret != TR_OK) {
+		pthread_mutex_unlock(&channel->lock);
+		tr_channel_tx_transform_destroy(job);
+		return ret == TR_AGAIN ? TR_ERR_NOMEM : ret;
+	}
+	transform_config = (struct tr_message_transform_config){
+	        .kind = TR_MESSAGE_ZSTD_ENCODE,
+	        .limits = {max_message, max_encoded_body},
+	        .max_workspace_bytes =
+	                channel->config.max_compression_workspace_bytes,
+	        .max_window_log = channel->config.max_compression_window_log,
+	        .compression_level = 3,
+	};
+	stream->tx_compression_job = job;
+	channel->active_message_jobs++;
+	pthread_mutex_unlock(&channel->lock);
+
+	ret = tr_channel_message_submit_on_owner(
+	        channel, request->payload, &transform_config,
+	        tr_channel_tx_transform_done, job, &job->task);
+	if (ret == TR_OK) {
+		job->submitted = 1;
+		pthread_mutex_lock(&channel->lock);
+		stream = tr_stream_lookup_handle(handle);
+		assert(stream && stream->tx_compression_job == job);
+		assert(stream->next_tx_message_id == message_id);
+		stream->next_tx_message_id++;
+		pthread_mutex_unlock(&channel->lock);
+		return TR_OK;
+	}
+
+	pthread_mutex_lock(&channel->lock);
+	stream = tr_stream_lookup_handle(handle);
+	if (stream && stream->tx_compression_job == job)
+		stream->tx_compression_job = NULL;
+	assert(channel->active_message_jobs != 0U);
+	channel->active_message_jobs--;
+	pthread_cond_broadcast(&channel->state_cond);
+	pthread_mutex_unlock(&channel->lock);
+	tr_channel_tx_transform_destroy(job);
+	return ret;
+}
+
+int tr_stream_send_compressed(struct tr_stream_handle stream,
+                              struct tr_message *payload)
+{
+	struct tr_stream_send_compressed_request request = {stream, payload};
+
+	if (!stream.channel || !payload)
+		return TR_ERR_INVALID;
+	return tr_reactor_call(stream.channel->reactor,
+	                       tr_stream_send_compressed_on_owner, &request);
+}
+
 int tr_stream_send(struct tr_stream_handle handle, struct tr_buffer *payload)
 {
 	struct tr_buffer *payloads[1];
@@ -5013,6 +6816,10 @@ int tr_stream_reset_on_owner(struct tr_stream_handle handle, int status)
 {
 	struct tr_channel *channel = handle.channel;
 	struct tr_stream_slot *stream;
+	struct tr_task_handle cancel_task = {0};
+	struct tr_task_handle cancel_tx_task = {0};
+	int cancel_transform = 0;
+	int cancel_tx_transform = 0;
 	int ret;
 
 	if (!channel || !tr_wire_stream_reset_status_valid(status))
@@ -5060,8 +6867,22 @@ int tr_stream_reset_on_owner(struct tr_stream_handle handle, int status)
 		return TR_ERR_CLOSED;
 	}
 	tr_stream_reset_begin_locked(channel, stream, status);
+	if (stream->rx_transform_job && stream->rx_transform_job->submitted) {
+		cancel_task = stream->rx_transform_job->task;
+		cancel_transform = 1;
+	}
+	if (stream->tx_compression_job &&
+	    stream->tx_compression_job->submitted) {
+		cancel_tx_task = stream->tx_compression_job->task;
+		cancel_tx_transform = 1;
+	}
 	stream->reset_notified = 1;
 	pthread_mutex_unlock(&channel->lock);
+	if (cancel_transform)
+		(void)tr_channel_message_cancel_on_owner(channel, cancel_task);
+	if (cancel_tx_transform)
+		(void)tr_channel_message_cancel_on_owner(channel,
+		                                         cancel_tx_task);
 	tr_stream_notify(channel, handle, TR_STREAM_EVENT_RESET, status);
 	tr_channel_reset_progress_on_owner(channel);
 	return TR_OK;
@@ -5099,6 +6920,10 @@ int tr_stream_close(struct tr_stream_handle handle)
 	if (!stream->local_open) {
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
+	}
+	if (stream->tx_compression_job || stream->tx_compressed_wire) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_AGAIN;
 	}
 
 	connection = tr_channel_connection(channel, stream->lane);

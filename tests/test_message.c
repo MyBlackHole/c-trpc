@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/message/message.h"
+#include "../src/message/builder.h"
 #include "../src/message/storage.h"
 #include "../src/memory_budget.h"
 #include "tr/status.h"
@@ -127,6 +128,67 @@ static void test_reservation(void)
 	STATUS(tr_memory_budget_release(&budget, UINT64_MAX - 1U), TR_OK);
 	STATUS(tr_message_storage_reserve(&storage, &budget, 2), TR_OK);
 	STATUS(tr_message_storage_cancel(&storage), TR_OK);
+}
+
+static void test_bounded_builder_publishes_exact_message(void)
+{
+	struct tr_memory_budget budget;
+	struct tr_message_builder *builder = NULL;
+	struct tr_message message = {0};
+	struct tr_message_view view;
+
+	tr_memory_budget_init(&budget, 256U);
+	STATUS(tr_message_builder_create(&budget, 8U, &builder), TR_OK);
+	CHECK(current_bytes(&budget) > 8U);
+	STATUS(tr_message_builder_append(builder, "abc", 3U), TR_OK);
+	STATUS(tr_message_builder_publish(&builder, &message), TR_AGAIN);
+	CHECK(builder != NULL && message._storage == NULL);
+	STATUS(tr_message_builder_append(builder, "defgh", 5U), TR_OK);
+	STATUS(tr_message_builder_append(builder, "x", 1U), TR_ERR_BAD_LENGTH);
+	STATUS(tr_message_builder_publish(&builder, &message), TR_OK);
+	CHECK(builder == NULL);
+	STATUS(tr_message_view(&message, &view), TR_OK);
+	CHECK(view.len == 8U);
+	CHECK(memcmp(view.data, "abcdefgh", 8U) == 0);
+	CHECK(current_bytes(&budget) > 8U);
+	STATUS(tr_message_release(&message), TR_OK);
+	CHECK(current_bytes(&budget) == 0U);
+}
+
+static void test_bounded_builder_cancel_and_budget_failure(void)
+{
+	struct tr_memory_budget budget;
+	struct tr_message_builder *builder = NULL;
+
+	tr_memory_budget_init(&budget, 8U);
+	STATUS(tr_message_builder_create(&budget, 8U, &builder), TR_AGAIN);
+	CHECK(builder == NULL);
+	CHECK(current_bytes(&budget) == 0U);
+
+	tr_memory_budget_init(&budget, 256U);
+	STATUS(tr_message_builder_create(&budget, 8U, &builder), TR_OK);
+	STATUS(tr_message_builder_append(builder, "abc", 3U), TR_OK);
+	STATUS(tr_message_builder_cancel(&builder), TR_OK);
+	CHECK(builder == NULL);
+	CHECK(current_bytes(&budget) == 0U);
+}
+
+static void test_bounded_builder_empty_message(void)
+{
+	struct tr_memory_budget budget;
+	struct tr_message_builder *builder = NULL;
+	struct tr_message message = {0};
+	struct tr_message_view view;
+
+	tr_memory_budget_init(&budget, 256U);
+	STATUS(tr_message_builder_create(&budget, 0U, &builder), TR_OK);
+	STATUS(tr_message_builder_append(builder, NULL, 0U), TR_OK);
+	STATUS(tr_message_builder_publish(&builder, &message), TR_OK);
+	CHECK(builder == NULL);
+	STATUS(tr_message_view(&message, &view), TR_OK);
+	CHECK(view.len == 0U);
+	STATUS(tr_message_release(&message), TR_OK);
+	CHECK(current_bytes(&budget) == 0U);
 }
 
 static void test_publish_rollback(void)
@@ -461,6 +523,9 @@ static void test_null_arguments(void)
 int main(void)
 {
 	test_reservation();
+	test_bounded_builder_publishes_exact_message();
+	test_bounded_builder_cancel_and_budget_failure();
+	test_bounded_builder_empty_message();
 	test_publish_rollback();
 	test_none_and_aliases();
 	test_empty_and_ranges();

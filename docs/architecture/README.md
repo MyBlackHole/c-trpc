@@ -16,7 +16,7 @@ c-trpc 核心的范围是通用运行时、传输、连接组和 RPC。
 7. [08-rpc-streaming-conformance.md](08-rpc-streaming-conformance.md)：旧 V1 Call 的基数/终局契约记录，已由 V2 SDK 合同替代。
 8. [09-rpc-context-metadata.md](09-rpc-context-metadata.md)：旧 V1 上下文 API 记录；当前元数据合同见 V2 SDK 文档。
 9. [10-rpc-interceptor-v1.md](10-rpc-interceptor-v1.md)：已退役的 V1 拦截器设计记录，当前 SDK 不提供拦截器。
-10. [11-compression-tls-requirements.md](11-compression-tls-requirements.md)：未来消息压缩与 TLS 的分层、资源安全、攻击面和验收要求（目前未实现）。
+10. [11-compression-tls-requirements.md](11-compression-tls-requirements.md)：消息压缩与 TLS 的分层、资源安全、攻击面和验收要求（压缩已接入，完整发布验收仍待完成；实现基线见 [ADR-008](decisions/ADR-008-message-compression-protocol.md)）。
 11. [04-backup-pipeline.md](04-backup-pipeline.md)：当前保留的旧文件名；其中 Pipeline/Connection Group 基础能力属于核心，备份持久化语义只作为上层映射参考。
 12. [06-evolution.md](06-evolution.md)：c-trpc 核心演进路线。
 

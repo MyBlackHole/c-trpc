@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.17")
+set_version("2.0.0-dev.22")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -93,10 +93,13 @@ target("trcore")
         "src/status.c",
         "src/crc32c.c",
         "src/message/message.c",
+        "src/message/builder.c",
         "src/message/transform.c",
         "src/message/zstd.c",
         "src/execution/buffer.c",
         "src/transport/protocol/wire.c",
+        "src/transport/protocol/message_caps.c",
+        "src/transport/protocol/message_envelope.c",
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",
         "src/execution/task_executor.c",
@@ -192,6 +195,7 @@ target("test_connection_group_tls")
     add_files("tests/test_connection_group_tls.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=tr_reactor_send", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -297,6 +301,11 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
         elseif name == "test_connection_group_facade" then
             -- CONTROL 失败与 Client Group 截止时间/condwait 测试链接期注入。
             add_ldflags("-Wl,--wrap=tr_reactor_close_on_owner",
+                        "-Wl,--wrap=tr_reactor_abort_on_owner",
+                        "-Wl,--wrap=tr_reactor_send",
+                        "-Wl,--wrap=tr_reactor_sendv_limited",
+                        "-Wl,--wrap=ZSTD_compressStream2",
+                        "-Wl,--wrap=ZSTD_decompressStream",
                         "-Wl,--wrap=tr_connector_create",
                         "-Wl,--wrap=tr_connector_start",
                         "-Wl,--wrap=tr_connector_cancel",
@@ -437,16 +446,23 @@ target("test_message")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
                 "-Wl,--wrap=realloc", {force = true})
     on_config(function (target)
-        local count = 0
+        local message_count = 0
+        local builder_count = 0
         for _, batch in pairs(target:dep("trcore"):sourcebatches()) do
             for index, source in ipairs(batch.sourcefiles) do
                 if path.absolute(source) == path.absolute("src/message/message.c") then
                     table.insert(target:objectfiles(), batch.objectfiles[index])
-                    count = count + 1
+                    message_count = message_count + 1
+                elseif path.absolute(source) == path.absolute("src/message/builder.c") then
+                    table.insert(target:objectfiles(), batch.objectfiles[index])
+                    builder_count = builder_count + 1
                 end
             end
         end
-        assert(count == 1, "test_message requires exactly one production message object")
+        assert(message_count == 1,
+               "test_message requires exactly one production message object")
+        assert(builder_count == 1,
+               "test_message requires exactly one production builder object")
     end)
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
@@ -465,6 +481,18 @@ target("bench_rpc")
     set_default(false)
     add_files("bench/bench_rpc.c")
     add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=realloc", {force = true})
+target_end()
+
+-- Opt-in diagnostic: public connection-group DATA with optional mTLS/Zstandard.
+target("bench_connection_group")
+    set_kind("binary")
+    set_default(false)
+    add_files("bench/bench_connection_group.c")
+    add_deps("trcore")
+    add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
+                "-Wl,--wrap=realloc", {force = true})
 target_end()
 
 -- 同一生产对象仅注册一次；变换测试不借完整 trcore 补齐跨模块依赖。
@@ -811,7 +839,11 @@ target("test_rpc_record_endpoint_tcp")
             "src/io/tls_openssl.c",
             "src/io/socket.c",
             "src/io/connector.c",
+            "src/message/message.c",
+            "src/message/builder.c",
             "src/transport/protocol/wire.c",
+            "src/transport/protocol/message_caps.c",
+            "src/transport/protocol/message_envelope.c",
             "src/transport/protocol/frame.c",
             "src/transport/protocol/parser.c",
             "src/transport/channel/channel.c",

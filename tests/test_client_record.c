@@ -870,7 +870,7 @@ static void fixture_init(struct fixture *f)
 		        .descriptor = {17, i + 1, i ? TR_RPC_MANY : TR_RPC_ONE,
 		                       i ? TR_RPC_MANY : TR_RPC_ONE,
 		                       TR_RPC_CODEC_RAW, TR_RPC_CODEC_RAW,
-		                       TR_LANE_CONTROL, BODY, BODY},
+		                       TR_LANE_CONTROL, BODY, BODY, 0, 0},
 		        .work = business,
 		        .arg = f};
 		f->client_methods[i] = f->server_methods[i].descriptor;

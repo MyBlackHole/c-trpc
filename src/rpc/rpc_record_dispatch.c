@@ -18,6 +18,7 @@ struct tr_reply_body {
 	struct tr_memory_budget *budget;
 	struct tr_reply_body *next;
 	size_t bytes;
+	enum tr_rpc_compression compression;
 	uint8_t data[];
 };
 struct tr_reply_metadata {
@@ -35,6 +36,7 @@ struct tr_rpc_record_reply {
 	struct tr_reply_metadata initial, trailing;
 	size_t used, limit;
 	uint32_t count, max_count, max_message;
+	uint32_t response_compression_algorithms;
 	enum tr_rpc_status status;
 	bool finished, failed, headers_sent, asynchronous;
 };
@@ -81,6 +83,14 @@ int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel)
 int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
                            const struct tr_rpc_bytes *message)
 {
+	return tr_rpc_v2_reply_append_with_compression(
+	        reply, message, TR_RPC_COMPRESSION_NONE);
+}
+
+int tr_rpc_v2_reply_append_with_compression(
+	struct tr_rpc_v2_reply *reply, const struct tr_rpc_bytes *message,
+	enum tr_rpc_compression compression)
+{
 	if (!reply)
 		return TR_ERR_INVALID;
 	if (reply != tr_v2_active_reply)
@@ -92,8 +102,8 @@ int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
 	if (!message)
 		return tr_reply_fail(reply->record, TR_ERR_INVALID,
 		                     TR_RPC_STATUS_INVALID_ARGUMENT);
-	return tr_rpc_record_reply_append(reply->record, message->data,
-	                                  message->len);
+	return tr_rpc_record_reply_append_with_compression(
+	        reply->record, message->data, message->len, compression);
 }
 
 int tr_rpc_v2_reply_set_metadata(struct tr_rpc_v2_reply *reply,
@@ -138,9 +148,10 @@ int tr_rpc_v2_reply_acquire_producer(struct tr_rpc_v2_reply *reply,
 		return TR_ERR_STATE;
 	if (!record->producer_domain)
 		return TR_ERR_UNSUPPORTED;
-	ret = tr_rpc_record_producer_create(record->producer_domain,
-	                                    record->max_message,
-	                                    record->headers_sent, &producer);
+	ret = tr_rpc_record_producer_create(
+	        record->producer_domain, record->max_message,
+	        record->headers_sent,
+	        record->response_compression_algorithms, &producer);
 	if (ret != TR_OK)
 		return ret;
 	record->producer = producer;
@@ -335,7 +346,15 @@ static void tr_reply_clear(struct tr_rpc_record_reply *reply)
 	tr_reply_clear_metadata(reply, &reply->trailing);
 }
 int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
-                               size_t size)
+	                               size_t size)
+{
+	return tr_rpc_record_reply_append_with_compression(
+	        r, data, size, TR_RPC_COMPRESSION_NONE);
+}
+
+int tr_rpc_record_reply_append_with_compression(
+	struct tr_rpc_record_reply *r, const void *data, size_t size,
+	enum tr_rpc_compression compression)
 {
 	struct tr_reply_body *b;
 	size_t bytes;
@@ -345,6 +364,15 @@ int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
 	if (r->asynchronous || r->finished || r->status != TR_RPC_STATUS_OK)
 		return tr_reply_fail(r, TR_ERR_STATE,
 		                     TR_RPC_STATUS_FAILED_PRECONDITION);
+	if (compression != TR_RPC_COMPRESSION_NONE &&
+	    compression != TR_RPC_COMPRESSION_ZSTD)
+		return tr_reply_fail(r, TR_ERR_INVALID,
+		                     TR_RPC_STATUS_INVALID_ARGUMENT);
+	if (compression == TR_RPC_COMPRESSION_ZSTD &&
+	    !(r->response_compression_algorithms &
+	      TR_RPC_COMPRESSION_MASK_ZSTD))
+		return tr_reply_fail(r, TR_ERR_UNSUPPORTED,
+		                     TR_RPC_STATUS_INVALID_ARGUMENT);
 	if ((!data && size) || size > r->max_message ||
 	    r->count == r->max_count || size > r->limit - r->used ||
 	    size > SIZE_MAX - sizeof(*b))
@@ -366,8 +394,9 @@ int tr_rpc_record_reply_append(struct tr_rpc_record_reply *r, const void *data,
 	                   .capacity = (uint32_t)size,
 	                   .len = (uint32_t)size,
 	                   .release_cb = tr_reply_body_release},
-	        .budget = r->budget,
-	        .bytes = bytes};
+		        .budget = r->budget,
+	        .bytes = bytes,
+	        .compression = compression};
 	if (size)
 		memcpy(b->data, data, size);
 	if (r->tail)
@@ -711,7 +740,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	struct tr_rpc_record_dispatch *d = m->dispatch;
 	struct tr_dispatch_slot *s = &d->slots[route.slot];
 	struct tr_dispatch_job *job;
-	size_t bytes, payload;
+	size_t bytes, payload, body_size;
 	if (s->terminal || s->producer_failed || d->stopping ||
 	    (s->ready && s->ready->reply.finished))
 		return;
@@ -800,13 +829,16 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 		return;
 	}
+	/* Stream 层交付的是解码后的正文；压缩记录的 encoded_size 只描述
+	 * 线上帧。V2 业务任务必须按 decoded_size 复制完整正文。 */
+	body_size = view->header.decoded_size;
 	payload = view->header.metadata_size;
-	if (view->header.encoded_size > SIZE_MAX - payload ||
-	    payload + view->header.encoded_size > SIZE_MAX - sizeof(*job)) {
+	if (body_size > SIZE_MAX - payload ||
+	    payload + body_size > SIZE_MAX - sizeof(*job)) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 		return;
 	}
-	payload += view->header.encoded_size;
+	payload += body_size;
 	bytes = sizeof(*job) + payload;
 	if (tr_memory_budget_reserve(d->budget, bytes) != TR_OK) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_RESOURCE_EXHAUSTED);
@@ -831,15 +863,17 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	        .producer_domain = d->producer_domain,
 	        .limit = d->config.max_reply_bytes,
 	        .max_count = d->config.max_replies_per_event,
-	        .max_message = m->method.descriptor.max_response_bytes};
+	        .max_message = m->method.descriptor.max_response_bytes,
+	        .response_compression_algorithms =
+	                m->method.descriptor.response_compression_algorithms};
 	job->deadline = s->deadline;
 	if (view->header.metadata_size) {
 		memcpy(job->data, view->metadata, view->header.metadata_size);
 		job->view.metadata = job->data;
 	}
-	if (view->header.encoded_size) {
+	if (body_size) {
 		uint8_t *body = job->data + view->header.metadata_size;
-		memcpy(body, view->body, view->header.encoded_size);
+		memcpy(body, view->body, body_size);
 		job->view.body = body;
 	}
 	s->response_codec = m->method.descriptor.response_codec_id;
@@ -913,8 +947,12 @@ static bool tr_dispatch_producer_step(struct tr_dispatch_slot *s)
 			body = NULL;
 		} else {
 			header.codec_id = s->response_codec;
-			header.encoded_size = header.decoded_size =
-			        body ? body->len : 0;
+			header.compression = (uint32_t)command.compression;
+			header.decoded_size = body ? body->len : 0;
+			header.encoded_size =
+			        command.compression == TR_RPC_COMPRESSION_NONE
+			                ? header.decoded_size
+			                : 0U;
 		}
 	}
 	ret = tr_rpc_record_router_send_on_owner(s->route, &header, metadata,
@@ -1003,7 +1041,11 @@ static void tr_dispatch_step(struct tr_dispatch_slot *s)
 	} else if (b) {
 		h.kind = TR_RPC_RECORD_MESSAGE;
 		h.codec_id = s->response_codec;
-		h.encoded_size = h.decoded_size = body->len;
+		h.compression = (uint32_t)b->compression;
+		h.decoded_size = body->len;
+		h.encoded_size = b->compression == TR_RPC_COMPRESSION_NONE
+		                          ? body->len
+		                          : 0U;
 	} else if (reply->finished) {
 		h.kind = TR_RPC_RECORD_FINAL_STATUS;
 		h.status = reply->status;

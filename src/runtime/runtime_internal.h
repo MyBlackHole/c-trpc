@@ -96,6 +96,14 @@ int tr_runtime_shard_message_submit(
         const struct tr_message_transform_config *config,
         tr_message_service_done_fn done, void *arg,
         struct tr_task_handle *handle);
+/* 与 Channel owner 上下文函数指针兼容的内部适配器；context 为所属分片。 */
+int tr_runtime_shard_message_submit_adapter(
+        void *context, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle);
+int tr_runtime_shard_message_cancel_adapter(void *context,
+                                            struct tr_task_handle handle);
 
 /* 只提交取消意图，不释放输入/输出/arg，也不从调用线程交付完成。
  * 终局已提交返回 STATE，过期或其他分片/实例能力返回 STALE。取消成功

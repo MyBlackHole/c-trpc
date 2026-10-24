@@ -14,8 +14,10 @@ enum tr_rpc_record_delivery {
 
 /* V2 的每调用传输绑定。调用者先以本地方法表解析/选择 method，再创建；
  * 对端 OPEN 必须匹配该描述，不能用远端字段修改本地方法基数或消息限制。
- * 当前仅绑定 NONE；压缩需异步验证真实输出，不能在 owner 中直接解压。
- * 此接口供库内 V2 调用路径使用，不属于安装 SDK 的公开入口。
+ * 接收方向可在方法许可与本地 Channel Zstandard 接收能力同时启用时，
+ * 通过 MessageService 异步解码并按记录顺序交付；发送方向只在方法许可与
+ * 对端 Channel 接收能力同时满足时接受 ZSTD。此接口供库内 V2 调用路径
+ * 使用，不属于安装 SDK 的公开入口。
  */
 struct tr_rpc_record_stream_config {
 	enum tr_rpc_record_direction send_direction;
@@ -68,6 +70,14 @@ int tr_rpc_record_stream_send_on_owner(
         struct tr_rpc_record_stream *call,
         const struct tr_rpc_record_header *header, const uint8_t *metadata,
         struct tr_buffer **body);
+/* 仅 MESSAGE 的显式 ZSTD 发送入口。header.compression 必须为 ZSTD，
+ * header.encoded_size 必须为0，decoded_size 必须等于 body 长度。成功表示
+ * MessageService 接受了变换并接管正文；随后按 Channel 当前信用分片写入
+ * RPC 固定头、元数据和编码正文。提交/变换失败不消费 body。 */
+int tr_rpc_record_stream_send_compressed_on_owner(
+	struct tr_rpc_record_stream *call,
+	const struct tr_rpc_record_header *header, const uint8_t *metadata,
+	struct tr_buffer **body);
 
 /* 借用一段有序 Stream 字节；记录可跨多次调用，也可在一次调用中串接。
  * 完整连续记录直接借用输入；只有不完整记录才有一份按声明精确预约的

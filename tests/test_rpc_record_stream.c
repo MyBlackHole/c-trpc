@@ -1,8 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../src/rpc/rpc_record_stream.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/transport/channel/channel_internal.h"
+#include "../src/message/builder.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
+#include "../src/runtime/message_service.h"
 #include "../src/endian.h"
 #include "tr/rpc_codec.h"
 #include "tr/status.h"
@@ -16,6 +19,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <zstd.h>
 
 #define CHECK(x)                                                               \
 	do {                                                                   \
@@ -26,7 +30,7 @@
 		}                                                              \
 	} while (0)
 #define BODY_MAX 131072U
-#define CALLS 4U
+#define CALLS 5U
 
 void *__real_malloc(size_t size);
 static _Thread_local int fail_malloc;
@@ -56,6 +60,13 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle s,
 }
 
 struct peer;
+struct held_transform {
+	tr_message_service_done_fn done;
+	void *arg;
+	struct tr_task_handle handle;
+	int pending;
+	int cancelled;
+};
 struct call_context {
 	struct peer *peer;
 	struct tr_stream_handle stream;
@@ -68,10 +79,26 @@ struct call_context {
 	uint64_t checksum;
 	size_t last_body;
 	unsigned direct_bodies;
+	uint8_t message_first_byte[8];
+	uint64_t message_checksums[8];
+	size_t message_sizes[8];
+	uint32_t message_compression[8];
+	uint32_t message_encoded_sizes[8];
+	uint8_t last_metadata[TR_RPC_METADATA_MAX_BYTES];
+	size_t last_metadata_size;
 };
 struct peer {
 	struct tr_reactor *reactor;
 	struct tr_channel *channel;
+	struct tr_message_service *message_service;
+	struct tr_message_service_config message_config;
+	struct held_transform held_transforms[4];
+	_Atomic unsigned held_submissions;
+	_Atomic unsigned held_cancellations;
+	int hold_message_transforms;
+	const uint8_t *expected_transform_input;
+	size_t expected_transform_input_size;
+	int check_transform_input;
 	struct tr_buffer_pool reassembly;
 	struct tr_memory_budget budget;
 	struct tr_rpc_record_stream_config config;
@@ -125,9 +152,23 @@ static void received(struct tr_rpc_record_stream *call,
 	CHECK(same == call);
 	CHECK(tr_rpc_record_stream_receive_on_owner(call, c->stream, NULL, 0) ==
 	      TR_ERR_STATE);
+	CHECK(view->header.metadata_size <= sizeof(c->last_metadata));
+	c->last_metadata_size = view->header.metadata_size;
+	if (c->last_metadata_size)
+		memcpy(c->last_metadata, view->metadata, c->last_metadata_size);
 	if (view->header.kind == TR_RPC_RECORD_MESSAGE) {
+		unsigned index = atomic_load(&c->seen[TR_RPC_RECORD_MESSAGE]);
 		c->last_body = view->header.decoded_size;
 		c->checksum = sum(view->body, c->last_body);
+		if (index < 8U) {
+			c->message_first_byte[index] =
+			        view->body && c->last_body ? view->body[0] : 0U;
+			c->message_checksums[index] = c->checksum;
+			c->message_sizes[index] = c->last_body;
+			c->message_compression[index] = view->header.compression;
+			c->message_encoded_sizes[index] =
+			        view->header.encoded_size;
+		}
 		if (view->body &&
 		    (uintptr_t)view->body >= (uintptr_t)c->peer->current_data &&
 		    (uintptr_t)view->body + c->last_body <=
@@ -227,10 +268,107 @@ static void tcp_pair(int *client, int *server)
 	}
 	CHECK(close(listener) == 0);
 }
+static int peer_message_service_start_on_owner(void *arg)
+{
+	struct peer *peer = arg;
+	int ret = tr_message_service_create_on_owner(
+	        peer->reactor, &peer->message_config, &peer->budget,
+	        &peer->message_service);
+	return ret == TR_OK
+	               ? tr_message_service_start_on_owner(
+	                         peer->message_service)
+	               : ret;
+}
+
+static int peer_message_submit_adapter(
+	void *context, struct tr_message *input,
+	const struct tr_message_transform_config *config,
+	tr_message_service_done_fn done, void *arg,
+	struct tr_task_handle *handle)
+{
+	struct peer *peer = context;
+	if (peer->check_transform_input) {
+		struct tr_message_view view;
+		CHECK(tr_message_view(input, &view) == TR_OK);
+		CHECK(view.len == peer->expected_transform_input_size);
+		CHECK(view.len == 0U ||
+		      memcmp(view.data, peer->expected_transform_input,
+		             view.len) == 0);
+	}
+	if (peer->hold_message_transforms) {
+		for (uint32_t slot = 0; slot < 4U; ++slot) {
+			struct held_transform *held =
+			        &peer->held_transforms[slot];
+			if (held->pending)
+				continue;
+			if (tr_message_release(input) != TR_OK)
+				return TR_ERR_STATE;
+			held->done = done;
+			held->arg = arg;
+			held->handle = (struct tr_task_handle){
+			        .instance = 1U,
+			        .generation = atomic_fetch_add(
+			                              &peer->held_submissions, 1) +
+			                      1U,
+			        .slot = slot};
+			held->pending = 1;
+			held->cancelled = 0;
+			*handle = held->handle;
+			return TR_OK;
+		}
+		return TR_AGAIN;
+	}
+	return peer->message_service
+	               ? tr_message_service_submit_on_owner(
+	                         peer->message_service, input, config, done, arg,
+	                         handle)
+	               : TR_ERR_CLOSED;
+}
+
+static int peer_message_cancel_adapter(void *context,
+	                               struct tr_task_handle handle)
+{
+	struct peer *peer = context;
+	if (peer->hold_message_transforms) {
+		for (size_t i = 0; i < 4; ++i) {
+			struct held_transform *held = &peer->held_transforms[i];
+			if (held->pending &&
+			    handle.instance == held->handle.instance &&
+			    handle.generation == held->handle.generation &&
+			    handle.slot == held->handle.slot) {
+				held->cancelled = 1;
+				atomic_fetch_add(&peer->held_cancellations, 1);
+				return TR_OK;
+			}
+		}
+		return TR_ERR_STALE;
+	}
+	return peer->message_service
+	               ? tr_message_service_cancel(peer->message_service, handle)
+	               : TR_ERR_CLOSED;
+}
+
+struct peer_message_bind_request {
+	struct peer *peer;
+	int ret;
+};
+
+static int peer_message_bind_on_owner(void *arg)
+{
+	struct peer_message_bind_request *request = arg;
+	request->ret = tr_channel_bind_message_service_on_owner(
+	        request->peer->channel, request->peer->reactor,
+	        peer_message_submit_adapter, peer_message_cancel_adapter,
+	        request->peer);
+	return request->ret;
+}
+
 static void init_peer(struct peer *p, int fd, int client,
                       enum tr_rpc_cardinality req, enum tr_rpc_cardinality resp,
                       uint64_t window, uint64_t threshold, uint32_t frame,
-                      uint32_t message)
+                      uint32_t message, uint32_t max_encoded_wire_bytes,
+                      bool enable_message_caps,
+                      uint32_t receive_algorithms)
 {
 	struct tr_reactor_config rc = {.max_connections = 4,
 	                               .command_capacity = 64,
@@ -242,7 +380,15 @@ static void init_peer(struct peer *p, int fd, int client,
 	struct tr_channel_config cc = {
 	        .role = client ? TR_CHANNEL_CLIENT : TR_CHANNEL_SERVER,
 	        .mode = TR_CHANNEL_SHARED_CONNECTION,
-	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET,
+	        .feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET |
+	                        (enable_message_caps
+	                                 ? TR_CHANNEL_FEATURE_MESSAGE_CAPS
+	                                 : 0U),
+	        .receive_compression_algorithms = receive_algorithms,
+	        .max_encoded_message_bytes = max_encoded_wire_bytes,
+	        .max_compression_workspace_bytes =
+	                enable_message_caps ? 1024U * 1024U : 0U,
+	        .max_compression_window_log = enable_message_caps ? 20U : 0U,
 	        .max_streams = CALLS,
 	        .initial_window_bytes = window,
 	        .window_update_threshold_bytes = threshold,
@@ -250,6 +396,8 @@ static void init_peer(struct peer *p, int fd, int client,
 	struct tr_conn_handle conn;
 	*p = (struct peer){0};
 	atomic_init(&p->opened, 0);
+	atomic_init(&p->held_submissions, 0);
+	atomic_init(&p->held_cancellations, 0);
 	for (size_t i = 0; i < CALLS; ++i) {
 		p->calls[i].peer = p;
 		for (size_t j = 0; j < 6; ++j)
@@ -261,15 +409,35 @@ static void init_peer(struct peer *p, int fd, int client,
 	        .send_direction = client ? TR_RPC_RECORD_REQUEST_DIRECTION
 	                                 : TR_RPC_RECORD_RESPONSE_DIRECTION,
 	        .method = {7, 9, req, resp, TR_RPC_CODEC_RAW, TR_RPC_CODEC_RAW,
-	                   TR_LANE_BULK, BODY_MAX, BODY_MAX}};
+	                   TR_LANE_BULK, BODY_MAX, BODY_MAX, 0, 0}};
 	tr_memory_budget_init(&p->budget, 4 * 1024 * 1024);
 	CHECK(tr_buffer_pool_init(&p->reassembly, 4, BODY_MAX + 1024) == TR_OK);
 	cc.reassembly_pool = &p->reassembly;
+	if (enable_message_caps)
+		cc.memory_budget = &p->budget;
 	CHECK(tr_reactor_create(&rc, NULL, NULL, NULL, &p->reactor) == TR_OK);
 	CHECK(tr_reactor_start(p->reactor) == TR_OK);
 	CHECK(tr_reactor_adopt_fd(p->reactor, fd, &conn) == TR_OK);
-	CHECK(tr_channel_create(&cc, conn, conn, on_data, on_event, NULL, p,
-	                        &p->channel) == TR_OK);
+	if (enable_message_caps) {
+		p->message_config = (struct tr_message_service_config){
+		        .tasks = {1U, 4U},
+		        .dispatch_limit = 4U,
+		        .watchdog_ns = UINT64_C(10000000)};
+		CHECK(tr_reactor_call(p->reactor,
+		                      peer_message_service_start_on_owner, p) ==
+		      TR_OK);
+		CHECK(tr_channel_create_deferred(
+		              &cc, conn, conn, on_data, on_event, NULL, p,
+		              &p->channel) == TR_OK);
+		struct peer_message_bind_request bind = {p, TR_ERR_STATE};
+		CHECK(tr_reactor_call(p->reactor, peer_message_bind_on_owner,
+		                      &bind) == TR_OK);
+		CHECK(bind.ret == TR_OK);
+		CHECK(tr_channel_start(p->channel) == TR_OK);
+	} else {
+		CHECK(tr_channel_create(&cc, conn, conn, on_data, on_event, NULL, p,
+		                        &p->channel) == TR_OK);
+	}
 }
 static void init_fixture_windows(struct fixture *f, enum tr_rpc_cardinality req,
                                  enum tr_rpc_cardinality resp,
@@ -280,14 +448,78 @@ static void init_fixture_windows(struct fixture *f, enum tr_rpc_cardinality req,
 	int a, b;
 	tcp_pair(&a, &b);
 	init_peer(&f->client, a, 1, req, resp, client_window, threshold, frame,
-	          message);
+	          message, 0U, false, 0U);
 	init_peer(&f->server, b, 0, req, resp, server_window, threshold, frame,
-	          message);
+	          message, 0U, false, 0U);
 	CHECK(tr_channel_wait_ready(f->client.channel, TR_LANE_BULK, 10000) ==
 	      TR_OK);
 	CHECK(tr_channel_wait_ready(f->server.channel, TR_LANE_BULK, 10000) ==
 	      TR_OK);
 }
+
+static void init_fixture_compressed_receive_limits(
+	struct fixture *f, enum tr_rpc_cardinality request,
+	enum tr_rpc_cardinality response, uint64_t window,
+	uint32_t server_encoded_wire_limit)
+{
+	int a, b;
+	tcp_pair(&a, &b);
+	init_peer(&f->client, a, 1, request, response, window, 1U, 256U,
+	          BODY_MAX + 1024U, 0U, true, 0U);
+	init_peer(&f->server, b, 0, request, response, window, 1U, 256U,
+	          BODY_MAX + 1024U, server_encoded_wire_limit, true,
+	          TR_MESSAGE_ALGORITHM_ZSTD);
+	for (size_t i = 0; i < 2; ++i) {
+		struct peer *peer = i == 0 ? &f->client : &f->server;
+		peer->config.method.request_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+		peer->config.method.response_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+	}
+	CHECK(tr_channel_wait_ready(f->client.channel, TR_LANE_BULK, 10000) ==
+	      TR_OK);
+	CHECK(tr_channel_wait_ready(f->server.channel, TR_LANE_BULK, 10000) ==
+		TR_OK);
+}
+static void init_fixture_compressed_receive_window(
+	struct fixture *f, enum tr_rpc_cardinality request,
+	enum tr_rpc_cardinality response, uint64_t window)
+{
+	init_fixture_compressed_receive_limits(
+	        f, request, response, window, BODY_MAX + 1024U);
+}
+static void init_fixture_compressed_receive(
+	struct fixture *f, enum tr_rpc_cardinality request,
+	enum tr_rpc_cardinality response)
+{
+	init_fixture_compressed_receive_window(f, request, response, 4096U);
+}
+
+static void init_fixture_compressed_response_receive(
+	struct fixture *f, enum tr_rpc_cardinality request,
+	enum tr_rpc_cardinality response)
+{
+	int a, b;
+	tcp_pair(&a, &b);
+	init_peer(&f->client, a, 1, request, response, 4096U, 1U, 256U,
+	          BODY_MAX + 1024U, BODY_MAX + 1024U, true,
+	          TR_MESSAGE_ALGORITHM_ZSTD);
+	init_peer(&f->server, b, 0, request, response, 4096U, 1U, 256U,
+	          BODY_MAX + 1024U, BODY_MAX + 1024U, true,
+	          TR_MESSAGE_ALGORITHM_ZSTD);
+	for (size_t i = 0; i < 2U; ++i) {
+		struct peer *peer = i == 0U ? &f->client : &f->server;
+		peer->config.method.request_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+		peer->config.method.response_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+	}
+	CHECK(tr_channel_wait_ready(f->client.channel, TR_LANE_BULK, 10000) ==
+	      TR_OK);
+	CHECK(tr_channel_wait_ready(f->server.channel, TR_LANE_BULK, 10000) ==
+	      TR_OK);
+}
+
 static void init_fixture(struct fixture *f, enum tr_rpc_cardinality req,
                          enum tr_rpc_cardinality resp, uint64_t window)
 {
@@ -299,6 +531,16 @@ static void open_call(struct fixture *f, unsigned count)
 	struct tr_stream_handle stream;
 	CHECK(tr_stream_open(f->client.channel, TR_LANE_BULK, &stream) ==
 	      TR_OK);
+	wait_counter(&f->client.opened, count);
+	wait_counter(&f->server.opened, count);
+}
+static void open_calls(struct fixture *f, unsigned count)
+{
+	for (unsigned i = 0; i < count; ++i) {
+		struct tr_stream_handle stream;
+		CHECK(tr_stream_open(f->client.channel, TR_LANE_BULK, &stream) ==
+		      TR_OK);
+	}
 	wait_counter(&f->client.opened, count);
 	wait_counter(&f->server.opened, count);
 }
@@ -334,6 +576,9 @@ struct send_request {
 	struct tr_rpc_record_header h;
 	const uint8_t *md;
 	struct tr_buffer *body;
+	const uint8_t *expected_transform_input;
+	size_t expected_transform_input_size;
+	int ret;
 	int reject;
 	int oom;
 };
@@ -361,6 +606,35 @@ static void send_until(struct send_request *r)
 		sched_yield();
 	}
 	CHECK(ret == TR_OK && !r->body);
+}
+
+static int send_compressed_owner(void *arg)
+{
+	struct send_request *request = arg;
+	struct peer *peer = request->c->peer;
+	peer->expected_transform_input = request->expected_transform_input;
+	peer->expected_transform_input_size =
+	        request->expected_transform_input_size;
+	peer->check_transform_input = request->expected_transform_input != NULL;
+	request->ret = tr_rpc_record_stream_send_compressed_on_owner(
+	        request->c->call, &request->h, request->md, &request->body);
+	peer->check_transform_input = 0;
+	peer->expected_transform_input = NULL;
+	peer->expected_transform_input_size = 0U;
+	return request->ret;
+}
+
+static void send_compressed_until(struct send_request *request)
+{
+	uint64_t end = monotonic_ms() + 15000;
+	int ret;
+	while ((ret = tr_reactor_call(request->c->peer->reactor,
+	                              send_compressed_owner, request)) ==
+	       TR_AGAIN) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(ret == TR_OK && !request->body);
 }
 static struct tr_rpc_record_header head(enum tr_rpc_record_kind kind)
 {
@@ -420,12 +694,33 @@ static int cleanup_owner(void *arg)
 		}
 	return TR_OK;
 }
+
+static int close_peer_message_service_on_owner(void *arg)
+{
+	struct peer *peer = arg;
+	return peer->message_service
+	               ? tr_message_service_close_on_owner(
+	                         &peer->message_service)
+	               : TR_OK;
+}
+
 static void destroy_fixture(struct fixture *f)
 {
 	struct peer *peers[] = {&f->client, &f->server};
 	for (size_t i = 0; i < 2; ++i)
 		CHECK(tr_reactor_call(peers[i]->reactor, cleanup_owner,
 		                      peers[i]) == TR_OK);
+	for (size_t i = 0; i < 2; ++i) {
+		int ret;
+		do {
+			ret = tr_reactor_call(peers[i]->reactor,
+			                      close_peer_message_service_on_owner,
+			                      peers[i]);
+			if (ret == TR_AGAIN)
+				sched_yield();
+		} while (ret == TR_AGAIN);
+		CHECK(ret == TR_OK);
+	}
 	for (size_t i = 0; i < 2; ++i)
 		CHECK(tr_reactor_stop(peers[i]->reactor) == TR_OK);
 	for (size_t i = 0; i < 2; ++i) {
@@ -782,6 +1077,1493 @@ static size_t encode(uint8_t *bytes, struct tr_rpc_record_header h,
 	return TR_RPC_RECORD_HEADER_SIZE + h.metadata_size +
 	       (body ? h.encoded_size : 0);
 }
+
+static size_t encode_zstd_message(uint8_t *wire, size_t wire_capacity,
+				  const uint8_t *source, size_t source_size,
+				  int level)
+{
+	uint8_t encoded[ZSTD_compressBound(BODY_MAX)];
+	struct tr_rpc_record_header header = head(TR_RPC_RECORD_MESSAGE);
+	size_t encoded_size = ZSTD_compress(encoded, sizeof(encoded), source,
+					    source_size, level);
+	CHECK(!ZSTD_isError(encoded_size) && encoded_size != 0U);
+	header.compression = TR_RPC_RECORD_ZSTD;
+	header.encoded_size = (uint32_t)encoded_size;
+	header.decoded_size = (uint32_t)source_size;
+	CHECK(wire_capacity >= TR_RPC_RECORD_HEADER_SIZE + encoded_size);
+	return encode(wire, header, NULL, encoded);
+}
+
+struct complete_held_transform_request {
+	struct peer *peer;
+	const uint8_t *body;
+	size_t body_size;
+	uint32_t slot;
+};
+
+struct complete_held_slot_request {
+	struct peer *peer;
+	uint32_t slot;
+};
+
+static int hold_peer_message_transforms_on_owner(void *arg);
+static int complete_held_transform_success_on_owner(void *arg);
+
+struct stream_event_request {
+	struct call_context *call;
+	enum tr_stream_event event;
+	int status;
+};
+
+struct receive_wire_request {
+	struct call_context *call;
+	const uint8_t *bytes;
+	size_t size;
+	int ret;
+};
+
+static int receive_wire_on_owner(void *arg)
+{
+	struct receive_wire_request *request = arg;
+	request->ret = tr_rpc_record_stream_receive_on_owner(
+	        request->call->call, request->call->stream, request->bytes,
+	        request->size);
+	return request->ret;
+}
+
+static int stream_event_on_owner(void *arg)
+{
+	struct stream_event_request *request = arg;
+	return tr_rpc_record_stream_event_on_owner(
+	        request->call->call, request->call->stream, request->event,
+	        request->status);
+}
+
+static void test_compressed_receive_close_waits_for_final_decode(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[4096];
+	uint8_t message_wire[TR_RPC_RECORD_HEADER_SIZE +
+	                     ZSTD_compressBound(sizeof(source))];
+	uint8_t initial_wire[TR_RPC_RECORD_HEADER_SIZE];
+	uint8_t final_wire[TR_RPC_RECORD_HEADER_SIZE];
+	uint8_t combined[sizeof(message_wire) + sizeof(final_wire)];
+	struct complete_held_transform_request complete;
+	struct stream_event_request close_event;
+	struct receive_wire_request receive;
+	size_t message_size, initial_size, final_size;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 29U);
+	init_fixture_compressed_response_receive(&f, TR_RPC_MANY, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1U);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1U);
+	send_kind(client, TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&server->seen[TR_RPC_RECORD_HALF_CLOSE], 1U);
+
+	initial_size = encode(initial_wire,
+	                      head(TR_RPC_RECORD_INITIAL_METADATA), NULL, NULL);
+	receive = (struct receive_wire_request){
+	        client, initial_wire, initial_size, TR_ERR_STATE};
+	CHECK(tr_reactor_call(f.client.reactor, receive_wire_on_owner,
+	                      &receive) == TR_OK);
+	CHECK(receive.ret == TR_OK);
+	message_size = encode_zstd_message(message_wire,
+	                                   sizeof(message_wire), source,
+	                                   sizeof(source), 3);
+	final_size = encode(final_wire, head(TR_RPC_RECORD_FINAL_STATUS), NULL,
+	                    NULL);
+	memcpy(combined, message_wire, message_size);
+	memcpy(combined + message_size, final_wire, final_size);
+	receive = (struct receive_wire_request){
+	        client, combined, message_size + final_size, TR_ERR_STATE};
+	CHECK(tr_reactor_call(f.client.reactor, receive_wire_on_owner,
+	                      &receive) == TR_OK);
+	CHECK(receive.ret == TR_OK);
+	wait_counter(&f.client.held_submissions, 1U);
+
+	/* CLOSE follows DATA on the stream, but async decode has not committed the
+	 * queued compressed MESSAGE or the FINAL that follows it. */
+	close_event = (struct stream_event_request){
+	        client, TR_STREAM_EVENT_REMOTE_CLOSED, TR_OK};
+	CHECK(tr_reactor_call(f.client.reactor, stream_event_on_owner,
+	                      &close_event) == TR_OK);
+	CHECK(atomic_load(&client->terminals) == 0U);
+	CHECK(!f.client.held_transforms[0].cancelled);
+
+	complete = (struct complete_held_transform_request){
+	        &f.client, source, sizeof(source), 0U};
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_transform_success_on_owner,
+	                      &complete) == TR_OK);
+	wait_counter(&client->terminals, 1U);
+	CHECK(client->final_status == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&client->seen[TR_RPC_RECORD_MESSAGE]) == 1U);
+	CHECK(atomic_load(&client->seen[TR_RPC_RECORD_FINAL_STATUS]) == 1U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_delivers_decoded_body(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t source[4096];
+	uint8_t encoded[ZSTD_compressBound(sizeof(source))];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + sizeof(encoded)];
+	struct tr_rpc_record_header header;
+	size_t encoded_size, wire_size;
+	uint64_t end;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 23U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	encoded_size = ZSTD_compress(encoded, sizeof(encoded), source,
+	                             sizeof(source), 3);
+	CHECK(!ZSTD_isError(encoded_size) && encoded_size != 0U);
+	header = head(TR_RPC_RECORD_MESSAGE);
+	header.compression = TR_RPC_RECORD_ZSTD;
+	header.encoded_size = (uint32_t)encoded_size;
+	header.decoded_size = sizeof(source);
+	wire_size = encode(wire, header, NULL, encoded);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) &&
+	       !atomic_load(&server->terminals)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 1U);
+	CHECK(server->last_body == sizeof(source));
+	CHECK(server->checksum == sum(source, sizeof(source)));
+	CHECK(server->direct_bodies == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_crosses_small_stream_window(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[12288];
+	_Atomic unsigned released = 0;
+	struct tr_buffer *body;
+	struct send_request send = {0};
+	uint64_t end;
+
+	uint32_t state = 0x6d2b79f5U;
+	for (size_t i = 0; i < sizeof(source); ++i) {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		source[i] = (uint8_t)state;
+	}
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	body = make_buffer(source, sizeof(source), &released);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = body;
+	send_compressed_until(&send);
+	CHECK(atomic_load(&released) == 1U);
+	end = monotonic_ms() + 10000;
+	while (!atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) &&
+	       !atomic_load(&server->terminals)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 1U);
+	CHECK(server->message_compression[0] == TR_RPC_RECORD_ZSTD);
+	CHECK(server->message_encoded_sizes[0] != sizeof(source));
+	CHECK(server->message_sizes[0] == sizeof(source));
+	CHECK(server->message_checksums[0] == sum(source, sizeof(source)));
+	CHECK(server->direct_bodies == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_policy_rejection_retains_body(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[32];
+	_Atomic unsigned released = 0;
+	struct send_request send = {0};
+	struct tr_buffer *original;
+
+	memset(source, 0x5a, sizeof(source));
+	init_fixture(&f, TR_RPC_ONE, TR_RPC_ONE, 4096U);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), &released);
+	original = send.body;
+	CHECK(tr_reactor_call(client->peer->reactor,
+	                      send_compressed_owner, &send) ==
+	      TR_ERR_UNSUPPORTED);
+	CHECK(send.body == original && atomic_load(&released) == 0U);
+
+	/* 未获准的压缩尝试不能提交 MESSAGE 状态；同一正文仍可按 NONE 发送。 */
+	send.h.compression = TR_RPC_RECORD_NONE;
+	send.h.encoded_size = sizeof(source);
+	send_until(&send);
+	wait_counter(&released, 1);
+	wait_counter(&server->seen[TR_RPC_RECORD_MESSAGE], 1);
+	CHECK(server->message_compression[0] == TR_RPC_RECORD_NONE);
+	CHECK(server->message_sizes[0] == sizeof(source));
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_encoded_limit_emits_no_partial_record(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[1024];
+	_Atomic unsigned released = 0;
+	struct send_request send = {0};
+	uint32_t state = 0x6d2b79f5U;
+
+	for (size_t i = 0; i < sizeof(source); ++i) {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		source[i] = (uint8_t)state;
+	}
+	/* 对端只允许 64 wire bytes，扣掉 envelope 后不够容纳此正文的帧。 */
+	init_fixture_compressed_receive_limits(&f, TR_RPC_ONE, TR_RPC_ONE,
+	                                      4096U, 64U);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), &released);
+	send_compressed_until(&send);
+	CHECK(atomic_load(&released) == 1U);
+	wait_counter(&client->terminals, 1);
+	CHECK(client->final_status == TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_c_less_than_window(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t source[1024];
+	struct send_request send = {0};
+
+	memset(source, 'c', sizeof(source));
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	send.c = &f.client.calls[0];
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	send_compressed_until(&send);
+	wait_counter(&server->seen[TR_RPC_RECORD_MESSAGE], 1);
+	CHECK(TR_RPC_RECORD_HEADER_SIZE + server->message_encoded_sizes[0] <
+	      4096U);
+	CHECK(server->message_sizes[0] == sizeof(source));
+	CHECK(server->message_checksums[0] == sum(source, sizeof(source)));
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_c_equals_window(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[128];
+	uint8_t encoded[ZSTD_compressBound(sizeof(source))];
+	_Atomic unsigned released = 0;
+	struct send_request send = {0};
+	struct tr_stream_diagnostics diagnostics;
+	size_t encoded_size;
+	ZSTD_CCtx *zstd;
+	uint64_t record_size, end;
+
+	memset(source, 0x6b, sizeof(source));
+	zstd = ZSTD_createCCtx();
+	CHECK(zstd != NULL);
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        zstd, ZSTD_c_compressionLevel, 3)));
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        zstd, ZSTD_c_windowLog, 20)));
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        zstd, ZSTD_c_nbWorkers, 0)));
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        zstd, ZSTD_c_checksumFlag, 1)));
+	CHECK(!ZSTD_isError(ZSTD_CCtx_setPledgedSrcSize(zstd, sizeof(source))));
+	encoded_size = ZSTD_compress2(zstd, encoded, sizeof(encoded), source,
+	                              sizeof(source));
+	CHECK(!ZSTD_isError(ZSTD_freeCCtx(zstd)));
+	CHECK(!ZSTD_isError(encoded_size) && encoded_size != 0U);
+	record_size = TR_RPC_RECORD_HEADER_SIZE + encoded_size;
+	CHECK(record_size > TR_RPC_RECORD_HEADER_SIZE && record_size < 256U);
+	init_fixture_compressed_receive_window(&f, TR_RPC_ONE, TR_RPC_ONE,
+	                                       record_size);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	end = monotonic_ms() + 5000;
+	do {
+		CHECK(tr_stream_get_diagnostics(client->stream, &diagnostics) ==
+		      TR_OK);
+		if (diagnostics.flow.tx_send_limit >=
+		    diagnostics.flow.tx_sent_bytes + record_size)
+			break;
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	} while (true);
+	CHECK(diagnostics.flow.tx_send_limit -
+	              diagnostics.flow.tx_sent_bytes == record_size);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), &released);
+	send_compressed_until(&send);
+	CHECK(atomic_load(&released) == 1U);
+	wait_counter(&server->seen[TR_RPC_RECORD_MESSAGE], 1);
+	CHECK(TR_RPC_RECORD_HEADER_SIZE + server->message_encoded_sizes[0] ==
+	      record_size);
+	CHECK(record_size == diagnostics.flow.tx_send_limit -
+	                             diagnostics.flow.tx_sent_bytes);
+	CHECK(server->message_sizes[0] == sizeof(source));
+	CHECK(server->message_checksums[0] == sum(source, sizeof(source)));
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_preserves_record_order(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t first[8192], second[8192];
+	uint8_t first_wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+						       sizeof(first))];
+	uint8_t second_wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+						        sizeof(second))];
+	uint8_t combined[sizeof(first_wire) + sizeof(second_wire)];
+	size_t first_size, second_size;
+	uint64_t end;
+
+	for (size_t i = 0; i < sizeof(first); ++i) {
+		first[i] = (uint8_t)(i % 19U);
+		second[i] = (uint8_t)(200U - (i % 17U));
+	}
+	first[0] = 0x31U;
+	second[0] = 0x92U;
+	init_fixture_compressed_receive(&f, TR_RPC_MANY, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.server) == TR_OK);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	first_size = encode_zstd_message(first_wire, sizeof(first_wire), first,
+					 sizeof(first), 3);
+	second_size = encode_zstd_message(second_wire, sizeof(second_wire),
+					  second, sizeof(second), 7);
+	memcpy(combined, first_wire, first_size);
+	memcpy(combined + first_size, second_wire, second_size);
+	raw_send(&f.client.calls[0], combined, first_size + second_size);
+	end = monotonic_ms() + 5000;
+	while (atomic_load(&f.server.held_submissions) < 2U) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	struct complete_held_transform_request complete = {
+	        &f.server, second, sizeof(second), 1U};
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      complete_held_transform_success_on_owner,
+	                      &complete) == TR_OK);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	complete = (struct complete_held_transform_request){
+	        &f.server, first, sizeof(first), 0U};
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      complete_held_transform_success_on_owner,
+	                      &complete) == TR_OK);
+	wait_counter(&server->seen[TR_RPC_RECORD_MESSAGE], 2);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 2U);
+	CHECK(server->message_first_byte[0] == first[0]);
+	CHECK(server->message_first_byte[1] == second[0]);
+	CHECK(server->message_checksums[0] == sum(first, sizeof(first)));
+	CHECK(server->message_checksums[1] == sum(second, sizeof(second)));
+	CHECK(server->message_sizes[0] == sizeof(first));
+	CHECK(server->message_sizes[1] == sizeof(second));
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_rejects_invalid_zstd(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t malformed[32];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + sizeof(malformed)];
+	struct tr_rpc_record_header header = head(TR_RPC_RECORD_MESSAGE);
+	size_t wire_size;
+	uint64_t end;
+
+	memset(malformed, 0xa5, sizeof(malformed));
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	header.compression = TR_RPC_RECORD_ZSTD;
+	header.encoded_size = sizeof(malformed);
+	header.decoded_size = 4096U;
+	wire_size = encode(wire, header, NULL, malformed);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&server->terminals)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(server->final_status == TR_RPC_STATUS_INVALID_ARGUMENT);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_rejects_trailing_and_size_mismatch(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t source[2048], encoded[ZSTD_compressBound(sizeof(source))];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + sizeof(encoded) + 1U];
+	struct tr_rpc_record_header header = head(TR_RPC_RECORD_MESSAGE);
+	size_t encoded_size, wire_size;
+	uint64_t end;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 29U);
+	encoded_size = ZSTD_compress(encoded, sizeof(encoded), source,
+	                             sizeof(source), 3);
+	CHECK(!ZSTD_isError(encoded_size));
+	encoded[encoded_size] = 0xa5U;
+	header.compression = TR_RPC_RECORD_ZSTD;
+	header.encoded_size = (uint32_t)(encoded_size + 1U);
+	header.decoded_size = sizeof(source);
+	wire_size = encode(wire, header, NULL, encoded);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&server->terminals)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(server->final_status == TR_RPC_STATUS_INVALID_ARGUMENT);
+	destroy_fixture(&f);
+
+	header.encoded_size = (uint32_t)(encoded_size - 1U);
+	header.decoded_size = sizeof(source);
+	wire_size = encode(wire, header, NULL, encoded);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&server->terminals)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(server->final_status == TR_RPC_STATUS_INVALID_ARGUMENT);
+	destroy_fixture(&f);
+
+	header.encoded_size = (uint32_t)encoded_size;
+	header.decoded_size = sizeof(source) - 1U;
+	wire_size = encode(wire, header, NULL, encoded);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&server->terminals)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(server->final_status == TR_RPC_STATUS_INVALID_ARGUMENT);
+	destroy_fixture(&f);
+}
+
+static int hold_peer_message_transforms_on_owner(void *arg)
+{
+	struct peer *peer = arg;
+	peer->hold_message_transforms = 1;
+	return TR_OK;
+}
+
+struct abort_call_request {
+	struct call_context *call;
+	enum tr_rpc_status status;
+};
+
+static int abort_call_on_owner(void *arg)
+{
+	struct abort_call_request *request = arg;
+	return tr_rpc_record_stream_abort_on_owner(request->call->call,
+	                                           request->status);
+}
+
+static int complete_held_transform_on_owner(void *arg)
+{
+	struct peer *peer = arg;
+	struct held_transform *held = &peer->held_transforms[0];
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle handle;
+	if (!held->pending || !held->cancelled)
+		return TR_ERR_STATE;
+	done = held->done;
+	done_arg = held->arg;
+	handle = held->handle;
+	held->pending = 0;
+	held->done = NULL;
+	held->arg = NULL;
+	done(done_arg, handle,
+	     (struct tr_message_service_result){
+	             TR_MESSAGE_TRANSFORM_CANCELLED,
+	             TR_MESSAGE_SERVICE_ON_OWNER},
+	     NULL);
+	return TR_OK;
+}
+
+static int complete_held_cancelled_slot_on_owner(void *arg)
+{
+	struct complete_held_slot_request *request = arg;
+	struct peer *peer = request->peer;
+	struct held_transform *held;
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle handle;
+	if (request->slot >= 4U)
+		return TR_ERR_INVALID;
+	held = &peer->held_transforms[request->slot];
+	if (!held->pending || !held->cancelled)
+		return TR_ERR_STATE;
+	done = held->done;
+	done_arg = held->arg;
+	handle = held->handle;
+	held->pending = 0;
+	held->done = NULL;
+	held->arg = NULL;
+	done(done_arg, handle,
+	     (struct tr_message_service_result){
+	             TR_MESSAGE_TRANSFORM_CANCELLED,
+	             TR_MESSAGE_SERVICE_ON_OWNER},
+	     NULL);
+	return TR_OK;
+}
+
+static int complete_held_transform_owner_stopped(void *arg)
+{
+	struct peer *peer = arg;
+	struct held_transform *held = &peer->held_transforms[0];
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle handle;
+	if (!held->pending)
+		return TR_ERR_STATE;
+	done = held->done;
+	done_arg = held->arg;
+	handle = held->handle;
+	held->pending = 0;
+	held->done = NULL;
+	held->arg = NULL;
+	done(done_arg, handle,
+	     (struct tr_message_service_result){
+	             TR_MESSAGE_TRANSFORM_CANCELLED,
+	             TR_MESSAGE_SERVICE_OWNER_STOPPED},
+	     NULL);
+	return TR_OK;
+}
+
+static int complete_held_transform_success_on_owner(void *arg)
+{
+	struct complete_held_transform_request *request = arg;
+	struct peer *peer = request->peer;
+	struct held_transform *held;
+	struct tr_message_builder *builder = NULL;
+	struct tr_message message = {0};
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle handle;
+	int ret;
+	if (request->slot >= 4U)
+		return TR_ERR_INVALID;
+	held = &peer->held_transforms[request->slot];
+	if (!held->pending || held->cancelled)
+		return TR_ERR_STATE;
+	done = held->done;
+	done_arg = held->arg;
+	handle = held->handle;
+	held->pending = 0;
+	held->done = NULL;
+	held->arg = NULL;
+	ret = tr_message_builder_create(&peer->budget, request->body_size,
+	                               &builder);
+	if (ret == TR_OK)
+		ret = tr_message_builder_append(builder, request->body,
+		                                request->body_size);
+	if (ret == TR_OK)
+		ret = tr_message_builder_publish(&builder, &message);
+	if (builder)
+		(void)tr_message_builder_cancel(&builder);
+	if (ret != TR_OK)
+		return ret;
+	done(done_arg, handle,
+	     (struct tr_message_service_result){TR_MESSAGE_TRANSFORM_OK,
+	                                        TR_MESSAGE_SERVICE_ON_OWNER},
+	     &message);
+	return tr_message_release(&message);
+}
+
+static void test_compressed_send_cancel_waits_for_completion(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[1024];
+	struct send_request send = {0};
+	struct abort_call_request abort_request;
+
+	memset(source, 0x3c, sizeof(source));
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      send_compressed_owner, &send) == TR_OK);
+	CHECK(send.body == NULL);
+	wait_counter(&f.client.held_submissions, 1);
+	abort_request = (struct abort_call_request){
+	        client, TR_RPC_STATUS_CANCELLED};
+	CHECK(tr_reactor_call(f.client.reactor, abort_call_on_owner,
+	                      &abort_request) == TR_OK);
+	CHECK(atomic_load(&f.client.held_cancellations) == 1U);
+	CHECK(atomic_load(&client->terminals) == 0U);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_transform_on_owner,
+	                      &f.client) == TR_OK);
+	wait_counter(&client->terminals, 1);
+	CHECK(client->final_status == TR_RPC_STATUS_CANCELLED);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_queue_full_preserves_independent_streams(void)
+{
+	struct fixture f;
+	uint8_t source[CALLS][1024];
+	struct send_request sends[CALLS] = {0};
+	struct abort_call_request abort_request;
+	struct complete_held_slot_request complete_request;
+	_Atomic unsigned released = 0;
+
+	for (size_t i = 0; i < CALLS; ++i)
+		for (size_t j = 0; j < sizeof(source[i]); ++j)
+			source[i][j] = (uint8_t)(i * 31U + j * 17U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	for (size_t i = 0; i < CALLS; ++i) {
+		struct tr_stream_handle stream;
+		CHECK(tr_stream_open(f.client.channel, TR_LANE_BULK, &stream) ==
+		      TR_OK);
+	}
+	wait_counter(&f.client.opened, CALLS);
+	wait_counter(&f.server.opened, CALLS);
+
+	for (size_t i = 0; i < CALLS; ++i) {
+		send_kind(&f.client.calls[i], TR_RPC_RECORD_OPEN);
+		wait_counter(&f.server.calls[i].seen[TR_RPC_RECORD_OPEN], 1U);
+		sends[i].c = &f.client.calls[i];
+		sends[i].h = head(TR_RPC_RECORD_MESSAGE);
+		sends[i].h.compression = TR_RPC_RECORD_ZSTD;
+		sends[i].h.decoded_size = sizeof(source[i]);
+		sends[i].body = make_buffer(source[i], sizeof(source[i]), &released);
+	}
+
+	/* 四个独立 Stream 各占一个变换槽；第五个提交失败必须保留正文。 */
+	for (size_t i = 0; i < 4U; ++i) {
+		CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+		                      &sends[i]) == TR_OK);
+		CHECK(sends[i].body == NULL);
+	}
+	wait_counter(&f.client.held_submissions, 4U);
+	CHECK(atomic_load(&released) == 4U);
+	struct tr_buffer *fifth_body = sends[4].body;
+	CHECK(fifth_body != NULL);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &sends[4]) == TR_AGAIN);
+	CHECK(sends[4].body == fifth_body);
+	CHECK(atomic_load(&released) == 4U);
+
+	for (size_t i = 0; i < 4U; ++i) {
+		abort_request = (struct abort_call_request){
+		        &f.client.calls[i], TR_RPC_STATUS_CANCELLED};
+		CHECK(tr_reactor_call(f.client.reactor, abort_call_on_owner,
+		                      &abort_request) == TR_OK);
+	}
+	CHECK(atomic_load(&f.client.held_cancellations) == 4U);
+	for (size_t i = 0; i < 4U; ++i) {
+		complete_request = (struct complete_held_slot_request){&f.client,
+		                                                       (uint32_t)i};
+		CHECK(tr_reactor_call(f.client.reactor,
+		                      complete_held_cancelled_slot_on_owner,
+		                      &complete_request) == TR_OK);
+		wait_counter(&f.client.calls[i].terminals, 1U);
+		CHECK(f.client.calls[i].final_status == TR_RPC_STATUS_CANCELLED);
+		CHECK(atomic_load(
+		              &f.server.calls[i].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	}
+
+	/* 队列有空位后重试同一条记录，证明失败未提交 RPC 状态。 */
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &sends[4]) == TR_OK);
+	CHECK(sends[4].body == NULL);
+	wait_counter(&f.client.held_submissions, 5U);
+	CHECK(atomic_load(&released) == 5U);
+	abort_request = (struct abort_call_request){
+	        &f.client.calls[4], TR_RPC_STATUS_CANCELLED};
+	CHECK(tr_reactor_call(f.client.reactor, abort_call_on_owner,
+	                      &abort_request) == TR_OK);
+	CHECK(atomic_load(&f.client.held_cancellations) == 5U);
+	complete_request = (struct complete_held_slot_request){&f.client, 0U};
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_cancelled_slot_on_owner,
+	                      &complete_request) == TR_OK);
+	wait_counter(&f.client.calls[4].terminals, 1U);
+	CHECK(f.client.calls[4].final_status == TR_RPC_STATUS_CANCELLED);
+	CHECK(atomic_load(&f.server.calls[4].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_independent_streams_complete_out_of_order(void)
+{
+	struct fixture f;
+	uint8_t source[4][512];
+	uint8_t encoded[4][ZSTD_compressBound(sizeof(source[0]))];
+	size_t encoded_size[4];
+	struct send_request sends[4] = {0};
+	struct complete_held_transform_request complete;
+	const unsigned completion_order[] = {2U, 0U, 3U, 1U};
+	_Atomic unsigned released = 0;
+
+	for (size_t i = 0; i < 4U; ++i) {
+		for (size_t j = 0; j < sizeof(source[i]); ++j)
+			source[i][j] = (uint8_t)(i * 37U + j % 23U);
+		encoded_size[i] = ZSTD_compress(
+		        encoded[i], sizeof(encoded[i]), source[i],
+		        sizeof(source[i]), 3);
+		CHECK(!ZSTD_isError(encoded_size[i]));
+	}
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_calls(&f, 4U);
+	for (size_t i = 0; i < 4U; ++i) {
+		send_kind(&f.client.calls[i], TR_RPC_RECORD_OPEN);
+		wait_counter(&f.server.calls[i].seen[TR_RPC_RECORD_OPEN], 1U);
+		sends[i].c = &f.client.calls[i];
+		sends[i].h = head(TR_RPC_RECORD_MESSAGE);
+		sends[i].h.compression = TR_RPC_RECORD_ZSTD;
+		sends[i].h.decoded_size = sizeof(source[i]);
+		sends[i].body = make_buffer(source[i], sizeof(source[i]), &released);
+		CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+		                      &sends[i]) == TR_OK);
+		CHECK(sends[i].body == NULL);
+	}
+	wait_counter(&f.client.held_submissions, 4U);
+	CHECK(atomic_load(&released) == 4U);
+
+	/* 独立 Stream 的完成可乱序；每条仍应只交付自己的完整正文。 */
+	for (size_t i = 0; i < 4U; ++i) {
+		unsigned slot = completion_order[i];
+		complete = (struct complete_held_transform_request){
+		        &f.client, encoded[slot], encoded_size[slot], slot};
+		CHECK(tr_reactor_call(f.client.reactor,
+		                      complete_held_transform_success_on_owner,
+		                      &complete) == TR_OK);
+		wait_counter(&f.server.calls[slot].seen[TR_RPC_RECORD_MESSAGE],
+		             1U);
+		CHECK(f.server.calls[slot].message_sizes[0] == sizeof(source[slot]));
+		CHECK(f.server.calls[slot].message_checksums[0] ==
+		      sum(source[slot], sizeof(source[slot])));
+		CHECK(f.server.calls[slot].message_compression[0] ==
+		      TR_RPC_RECORD_ZSTD);
+		CHECK(f.server.calls[slot].message_encoded_sizes[0] ==
+		      encoded_size[slot]);
+	}
+	destroy_fixture(&f);
+}
+
+static void test_compressed_transform_receives_only_body_with_auth_metadata(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t source[256];
+	uint8_t encoded[ZSTD_compressBound(sizeof(source))];
+	static const uint8_t metadata[] = {
+	        4U, 12U, 0U, 'a', 'u', 't', 'h', 'A', 'U', 'T', 'H', '-',
+	        'C', 'R', 'E', 'D', '-', '0', '1', 9U, 10U, 0U, 'x', '-',
+	        'p', 'e', 'e', 'r', '-', 'i', 'd', 'P', 'E', 'E', 'R', '-',
+	        'I',
+	        'D', '-', '4', '2'};
+	struct send_request open = {0};
+	struct send_request send = {0};
+	struct complete_held_transform_request complete;
+	size_t encoded_size;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 17U);
+	encoded_size = ZSTD_compress(encoded, sizeof(encoded), source,
+	                             sizeof(source), 3);
+	CHECK(!ZSTD_isError(encoded_size));
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1U);
+	server = &f.server.calls[0];
+	open.c = &f.client.calls[0];
+	open.h = head(TR_RPC_RECORD_OPEN);
+	open.h.metadata_size = sizeof(metadata);
+	open.md = metadata;
+	send_until(&open);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1U);
+	CHECK(server->last_metadata_size == sizeof(metadata));
+	CHECK(memcmp(server->last_metadata, metadata, sizeof(metadata)) == 0);
+	send.c = &f.client.calls[0];
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	send.expected_transform_input = source;
+	send.expected_transform_input_size = sizeof(source);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &send) == TR_OK);
+	CHECK(send.body == NULL);
+	complete = (struct complete_held_transform_request){
+	        &f.client, encoded, encoded_size, 0U};
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_transform_success_on_owner,
+	                      &complete) == TR_OK);
+	wait_counter(&server->seen[TR_RPC_RECORD_MESSAGE], 1U);
+	CHECK(server->message_sizes[0] == sizeof(source));
+	CHECK(server->message_checksums[0] == sum(source, sizeof(source)));
+	CHECK(server->last_metadata_size == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_preserves_interleaved_tx_state(void)
+{
+	struct fixture f;
+	struct call_context *server, *client;
+	uint8_t request_body[4096];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+					       sizeof(request_body))];
+	size_t wire_size;
+	struct complete_held_transform_request complete;
+	struct snapshot server_state;
+
+	for (size_t i = 0; i < sizeof(request_body); ++i)
+		request_body[i] = (uint8_t)(i % 13U);
+	init_fixture_compressed_receive(&f, TR_RPC_MANY, TR_RPC_MANY);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.server) == TR_OK);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	client = &f.client.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	wire_size = encode_zstd_message(wire, sizeof(wire), request_body,
+					 sizeof(request_body), 3);
+	raw_send(client, wire, wire_size);
+	uint64_t end = monotonic_ms() + 5000;
+	while (!atomic_load(&f.server.held_submissions)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	send_kind(server, TR_RPC_RECORD_INITIAL_METADATA);
+	wait_counter(&client->seen[TR_RPC_RECORD_INITIAL_METADATA], 1);
+	send_kind(server, TR_RPC_RECORD_MESSAGE);
+	wait_counter(&client->seen[TR_RPC_RECORD_MESSAGE], 1);
+	complete = (struct complete_held_transform_request){
+	        &f.server, request_body, sizeof(request_body), 0U};
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      complete_held_transform_success_on_owner,
+	                      &complete) == TR_OK);
+	wait_counter(&server->seen[TR_RPC_RECORD_MESSAGE], 1);
+	server_state = snapshot(server);
+	CHECK(server_state.state.request_messages == 1U);
+	CHECK(server_state.state.response_headers == 1U);
+	CHECK(server_state.state.response_messages == 1U);
+	CHECK(server->checksum == sum(request_body, sizeof(request_body)));
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_abort_waits_for_cancel_completion(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t source[4096];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+					       sizeof(source))];
+	size_t wire_size;
+	uint64_t end;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 11U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.server) == TR_OK);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	wire_size = encode_zstd_message(wire, sizeof(wire), source,
+					 sizeof(source), 3);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&f.server.held_submissions)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	struct abort_call_request abort_request = {
+	        server, TR_RPC_STATUS_CANCELLED};
+	CHECK(tr_reactor_call(f.server.reactor, abort_call_on_owner,
+	                      &abort_request) == TR_OK);
+	CHECK(atomic_load(&f.server.held_cancellations) == 1U);
+	CHECK(atomic_load(&server->terminals) == 0U);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      complete_held_transform_on_owner,
+	                      &f.server) == TR_OK);
+	wait_counter(&server->terminals, 1);
+	CHECK(server->final_status == TR_RPC_STATUS_CANCELLED);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+struct reset_stream_request {
+	struct call_context *call;
+	int status;
+};
+
+static int reset_stream_on_owner(void *arg)
+{
+	struct reset_stream_request *request = arg;
+	return tr_stream_reset_on_owner(request->call->stream, request->status);
+}
+
+static int abort_bulk_lane_on_owner(void *arg)
+{
+	struct peer *peer = arg;
+	return tr_channel_abort_lane_on_owner(peer->channel, TR_LANE_BULK,
+	                                      TR_ERR_CLOSED);
+}
+
+struct message_limits_probe {
+	struct peer *peer;
+	struct tr_channel_message_limits limits;
+	int result;
+};
+
+static int probe_message_limits_on_owner(void *arg)
+{
+	struct message_limits_probe *probe = arg;
+	probe->result = tr_channel_message_limits_on_owner(
+	        probe->peer->channel, TR_LANE_BULK, &probe->limits);
+	return TR_OK;
+}
+
+static void wait_channel_lane_down(struct peer *peer, enum tr_lane lane)
+{
+	uint64_t end = monotonic_ms() + 5000U;
+	for (;;) {
+		enum tr_channel_lane_state state;
+		CHECK(tr_channel_get_lane_state(peer->channel, lane, &state) ==
+		      TR_OK);
+		if (state == TR_CHANNEL_LANE_DOWN)
+			return;
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+}
+
+static void replace_shared_fixture_connection(struct fixture *fixture)
+{
+	int client_fd, server_fd;
+	struct tr_conn_handle client_connection, server_connection;
+	tcp_pair(&client_fd, &server_fd);
+	CHECK(tr_reactor_adopt_fd(fixture->client.reactor, client_fd,
+	                          &client_connection) == TR_OK);
+	CHECK(tr_reactor_adopt_fd(fixture->server.reactor, server_fd,
+	                          &server_connection) == TR_OK);
+	CHECK(tr_channel_replace_connection(fixture->client.channel,
+	                                    TR_LANE_CONTROL,
+	                                    client_connection) == TR_OK);
+	CHECK(tr_channel_replace_connection(fixture->server.channel,
+	                                    TR_LANE_CONTROL,
+	                                    server_connection) == TR_OK);
+	CHECK(tr_channel_wait_ready(fixture->client.channel, TR_LANE_BULK,
+	                            10000U) == TR_OK);
+	CHECK(tr_channel_wait_ready(fixture->server.channel, TR_LANE_BULK,
+	                            10000U) == TR_OK);
+}
+
+static int complete_held_transform_success_after_cancel_on_owner(void *arg)
+{
+	struct complete_held_transform_request *request = arg;
+	struct peer *peer = request->peer;
+	struct held_transform *held;
+	struct tr_message_builder *builder = NULL;
+	struct tr_message message = {0};
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle handle;
+	int ret;
+	if (request->slot >= 4U)
+		return TR_ERR_INVALID;
+	held = &peer->held_transforms[request->slot];
+	if (!held->pending || !held->cancelled)
+		return TR_ERR_STATE;
+	done = held->done;
+	done_arg = held->arg;
+	handle = held->handle;
+	held->pending = 0;
+	held->done = NULL;
+	held->arg = NULL;
+	ret = tr_message_builder_create(&peer->budget, request->body_size,
+	                               &builder);
+	if (ret == TR_OK)
+		ret = tr_message_builder_append(builder, request->body,
+		                                request->body_size);
+	if (ret == TR_OK)
+		ret = tr_message_builder_publish(&builder, &message);
+	if (builder)
+		(void)tr_message_builder_cancel(&builder);
+	if (ret != TR_OK)
+		return ret;
+	done(done_arg, handle,
+	     (struct tr_message_service_result){TR_MESSAGE_TRANSFORM_OK,
+	                                        TR_MESSAGE_SERVICE_ON_OWNER},
+	     &message);
+	return tr_message_release(&message);
+}
+
+struct destroy_call_request {
+	struct call_context *call;
+	int result;
+};
+
+static int destroy_call_on_owner(void *arg)
+{
+	struct destroy_call_request *request = arg;
+	request->result = tr_rpc_record_stream_destroy_on_owner(
+	        &request->call->call);
+	return TR_OK;
+}
+
+static int hold_peer_data_on_owner(void *arg)
+{
+	((struct peer *)arg)->hold = 1;
+	return TR_OK;
+}
+
+static void test_compressed_send_replacement_handshake_retires_old_transform(
+        void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	struct message_limits_probe probe = {0};
+	uint8_t source[4096];
+	uint8_t encoded[ZSTD_compressBound(sizeof(source))];
+	struct send_request send = {0};
+	struct complete_held_transform_request complete;
+	size_t encoded_size;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 29U);
+	encoded_size = ZSTD_compress(encoded, sizeof(encoded), source,
+	                             sizeof(source), 3);
+	CHECK(!ZSTD_isError(encoded_size));
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1U);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1U);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &send) == TR_OK);
+	CHECK(send.body == NULL);
+	wait_counter(&f.client.held_submissions, 1U);
+
+	CHECK(tr_reactor_call(f.client.reactor, abort_bulk_lane_on_owner,
+	                      &f.client) == TR_OK);
+	wait_counter(&f.client.held_cancellations, 1U);
+	wait_channel_lane_down(&f.client, TR_LANE_BULK);
+	wait_channel_lane_down(&f.server, TR_LANE_BULK);
+	probe.peer = &f.client;
+	CHECK(tr_reactor_call(f.client.reactor, probe_message_limits_on_owner,
+	                      &probe) == TR_OK);
+	CHECK(probe.result == TR_AGAIN);
+
+	replace_shared_fixture_connection(&f);
+	probe = (struct message_limits_probe){.peer = &f.client};
+	CHECK(tr_reactor_call(f.client.reactor, probe_message_limits_on_owner,
+	                      &probe) == TR_OK);
+	CHECK(probe.result == TR_OK);
+	CHECK(probe.limits.peer_caps_ready);
+	CHECK(probe.limits.peer_receive_algorithms &
+	      TR_MESSAGE_ALGORITHM_ZSTD);
+
+	complete = (struct complete_held_transform_request){
+	        &f.client, encoded, encoded_size, 0U};
+	CHECK(tr_reactor_call(
+	              f.client.reactor,
+	              complete_held_transform_success_after_cancel_on_owner,
+	              &complete) == TR_OK);
+	wait_counter(&client->terminals, 1U);
+	CHECK(client->final_status == TR_RPC_STATUS_UNAVAILABLE);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_destroy_refuses_live_transform(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[12288];
+	uint8_t encoded[ZSTD_compressBound(sizeof(source))];
+	struct send_request send = {0};
+	struct complete_held_transform_request complete;
+	struct destroy_call_request destroy = {0};
+	struct abort_call_request abort_request;
+	size_t encoded_size;
+	uint64_t bytes_before_completion;
+
+	uint32_t random = UINT32_C(0x81a5f00d);
+	for (size_t i = 0; i < sizeof(source); ++i) {
+		random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+		source[i] = (uint8_t)(random >> 24);
+	}
+	encoded_size = ZSTD_compress(encoded, sizeof(encoded), source,
+	                             sizeof(source), 3);
+	CHECK(!ZSTD_isError(encoded_size));
+	CHECK(encoded_size + TR_RPC_RECORD_HEADER_SIZE > 4096U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1U);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1U);
+	CHECK(tr_reactor_call(f.server.reactor, hold_peer_data_on_owner,
+	                      &f.server) == TR_OK);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &send) == TR_OK);
+	CHECK(send.body == NULL);
+	wait_counter(&f.client.held_submissions, 1U);
+	bytes_before_completion = atomic_load(&f.client.budget.current_bytes);
+	complete = (struct complete_held_transform_request){
+	        &f.client, encoded, encoded_size, 0U};
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_transform_success_on_owner,
+	                      &complete) == TR_OK);
+	CHECK(atomic_load(&f.client.budget.current_bytes) >
+	      bytes_before_completion);
+
+	destroy.call = client;
+	CHECK(tr_reactor_call(f.client.reactor, destroy_call_on_owner,
+	                      &destroy) == TR_OK);
+	CHECK(destroy.result == TR_ERR_STATE);
+	CHECK(client->call != NULL);
+
+	abort_request = (struct abort_call_request){
+	        client, TR_RPC_STATUS_CANCELLED};
+	CHECK(tr_reactor_call(f.client.reactor, abort_call_on_owner,
+	                      &abort_request) == TR_OK);
+	wait_counter(&client->terminals, 1U);
+	destroy.result = TR_ERR_STATE;
+	CHECK(tr_reactor_call(f.client.reactor, destroy_call_on_owner,
+	                      &destroy) == TR_OK);
+	CHECK(destroy.result == TR_OK);
+	CHECK(client->call == NULL);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_reset_retires_pending_transform(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	uint8_t source[4096];
+	struct send_request send = {0};
+	struct reset_stream_request reset;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 19U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1U);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &send) == TR_OK);
+	CHECK(send.body == NULL);
+	wait_counter(&f.client.held_submissions, 1U);
+
+	reset = (struct reset_stream_request){client, TR_ERR_CLOSED};
+	CHECK(tr_reactor_call(f.client.reactor, reset_stream_on_owner,
+	                      &reset) == TR_OK);
+	CHECK(atomic_load(&f.client.held_cancellations) == 1U);
+	CHECK(atomic_load(&client->terminals) == 0U);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_transform_on_owner,
+	                      &f.client) == TR_OK);
+	wait_counter(&client->terminals, 1U);
+	CHECK(client->final_status == TR_RPC_STATUS_CANCELLED);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_lane_loss_retires_pending_transform(void)
+{
+	struct fixture f;
+	struct call_context *client, *server;
+	struct message_limits_probe probe = {0};
+	uint8_t source[4096];
+	struct send_request send = {0};
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 23U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1);
+	client = &f.client.calls[0];
+	server = &f.server.calls[0];
+	send_kind(client, TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1U);
+	send.c = client;
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &send) == TR_OK);
+	CHECK(send.body == NULL);
+	wait_counter(&f.client.held_submissions, 1U);
+
+	CHECK(tr_reactor_call(f.client.reactor, abort_bulk_lane_on_owner,
+	                      &f.client) == TR_OK);
+	wait_counter(&f.client.held_cancellations, 1U);
+	probe.peer = &f.client;
+	CHECK(tr_reactor_call(f.client.reactor, probe_message_limits_on_owner,
+	                      &probe) == TR_OK);
+	CHECK(probe.result == TR_AGAIN);
+	CHECK(atomic_load(&client->terminals) == 0U);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      complete_held_transform_on_owner,
+	                      &f.client) == TR_OK);
+	wait_counter(&client->terminals, 1U);
+	CHECK(client->final_status == TR_RPC_STATUS_UNAVAILABLE);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_reset_retires_pending_stream(void)
+{
+	struct fixture f;
+	struct call_context *server;
+	uint8_t source[4096];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+					       sizeof(source))];
+	struct reset_stream_request reset;
+	size_t wire_size;
+	uint64_t end;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 7U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.server) == TR_OK);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+	wire_size = encode_zstd_message(wire, sizeof(wire), source,
+					 sizeof(source), 3);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	end = monotonic_ms() + 5000;
+	while (!atomic_load(&f.server.held_submissions)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	reset = (struct reset_stream_request){&f.client.calls[0], TR_ERR_CLOSED};
+	CHECK(tr_reactor_call(f.client.reactor, reset_stream_on_owner,
+	                      &reset) == TR_OK);
+	wait_counter(&f.server.held_cancellations, 1);
+	CHECK(atomic_load(&server->terminals) == 0U);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      complete_held_transform_on_owner,
+	                      &f.server) == TR_OK);
+	wait_counter(&server->terminals, 1);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(server->final_status == TR_RPC_STATUS_CANCELLED);
+	destroy_fixture(&f);
+}
+
+static int disable_peer_routes_on_owner(void *arg)
+{
+	((struct peer *)arg)->route_disabled = 1;
+	return TR_OK;
+}
+
+static void test_compressed_receive_owner_stopped_reaps_pending_task(void)
+{
+	struct fixture f;
+	struct peer *peers[] = {&f.client, &f.server};
+	uint8_t source[4096];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+					       sizeof(source))];
+	size_t wire_size;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 31U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.server) == TR_OK);
+	open_call(&f, 1);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_OPEN], 1);
+	wire_size = encode_zstd_message(wire, sizeof(wire), source,
+					 sizeof(source), 3);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	uint64_t end = monotonic_ms() + 5000;
+	while (!atomic_load(&f.server.held_submissions)) {
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	}
+	for (size_t i = 0; i < 2; ++i) {
+		int ret;
+		end = monotonic_ms() + 5000;
+		do {
+			ret = tr_reactor_call(
+			        peers[i]->reactor,
+			        close_peer_message_service_on_owner, peers[i]);
+			if (ret == TR_AGAIN)
+				sched_yield();
+			CHECK(monotonic_ms() < end);
+		} while (ret == TR_AGAIN);
+		CHECK(ret == TR_OK);
+	}
+	for (size_t i = 0; i < 2; ++i)
+		CHECK(tr_reactor_call(peers[i]->reactor,
+	                      disable_peer_routes_on_owner,
+	                      peers[i]) == TR_OK);
+	for (size_t i = 0; i < 2; ++i)
+		CHECK(tr_reactor_stop(peers[i]->reactor) == TR_OK);
+	CHECK(complete_held_transform_owner_stopped(&f.server) == TR_OK);
+	for (size_t i = 0; i < 2; ++i) {
+		CHECK(tr_rpc_record_stream_reap_stopped(
+		              &peers[i]->calls[0].call) == TR_OK);
+		CHECK(peers[i]->calls[0].delivery ==
+		      TR_RPC_RECORD_OWNER_STOPPED);
+		CHECK(atomic_load(&peers[i]->calls[0].terminals) == 1U);
+	}
+	CHECK(atomic_load(&f.server.calls[0].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	for (size_t i = 0; i < 2; ++i) {
+		CHECK(tr_channel_destroy(peers[i]->channel) == TR_OK);
+		CHECK(tr_reactor_destroy(peers[i]->reactor) == TR_OK);
+		CHECK(tr_buffer_pool_destroy(&peers[i]->reassembly) == TR_OK);
+		CHECK(atomic_load(&peers[i]->budget.current_bytes) == 0U);
+	}
+}
+
 static void test_incremental_and_invalid(void)
 {
 	struct fixture f;
@@ -881,6 +2663,41 @@ static void test_receive_quota(void)
 	      TR_RPC_STATUS_RESOURCE_EXHAUSTED);
 	CHECK(atomic_load(&f.server.calls[0].seen[TR_RPC_RECORD_OPEN]) == 0);
 	CHECK(snapshot(&f.server.calls[0]).cached == 0);
+	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_receive_workspace_exhaustion(void)
+{
+	struct fixture f;
+	struct quota quota = {0};
+	struct call_context *server;
+	uint8_t source[4096];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + ZSTD_compressBound(
+					       sizeof(source))];
+	size_t wire_size;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 23U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	server = &f.server.calls[0];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&server->seen[TR_RPC_RECORD_OPEN], 1);
+
+	quota.peer = &f.server;
+	quota.bytes = f.server.budget.limit_bytes -
+	              atomic_load(&f.server.budget.current_bytes) -
+	              512U * 1024U;
+	CHECK(quota.bytes > 0U);
+	CHECK(tr_memory_budget_reserve(&f.server.budget, quota.bytes) == TR_OK);
+	wire_size = encode_zstd_message(wire, sizeof(wire), source,
+					 sizeof(source), 3);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	wait_counter(&server->terminals, 1);
+	CHECK(server->final_status == TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	CHECK(atomic_load(&server->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(snapshot(server).state.request_messages == 0U);
 	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
 	destroy_fixture(&f);
 }
@@ -1172,8 +2989,90 @@ static void test_stopped_reaping(void)
 		CHECK(atomic_load(&peers[i]->budget.current_bytes) == 0);
 	}
 }
+
+static void test_compressed_send_owner_stopped_reaps_pending_task(void)
+{
+	struct fixture f;
+	struct peer *peers[] = {&f.client, &f.server};
+	uint8_t source[4096];
+	struct send_request send = {0};
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 29U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	CHECK(tr_reactor_call(f.client.reactor,
+	                      hold_peer_message_transforms_on_owner,
+	                      &f.client) == TR_OK);
+	open_call(&f, 1);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_OPEN], 1U);
+	send.c = &f.client.calls[0];
+	send.h = head(TR_RPC_RECORD_MESSAGE);
+	send.h.compression = TR_RPC_RECORD_ZSTD;
+	send.h.decoded_size = sizeof(source);
+	send.body = make_buffer(source, sizeof(source), NULL);
+	CHECK(tr_reactor_call(f.client.reactor, send_compressed_owner,
+	                      &send) == TR_OK);
+	CHECK(send.body == NULL);
+	wait_counter(&f.client.held_submissions, 1U);
+
+	for (size_t i = 0; i < 2U; ++i) {
+		int ret;
+		uint64_t end = monotonic_ms() + 5000U;
+		do {
+			ret = tr_reactor_call(peers[i]->reactor,
+			                      close_peer_message_service_on_owner,
+			                      peers[i]);
+			if (ret == TR_AGAIN)
+				sched_yield();
+			CHECK(monotonic_ms() < end);
+		} while (ret == TR_AGAIN);
+		CHECK(ret == TR_OK);
+	}
+	for (size_t i = 0; i < 2U; ++i)
+		CHECK(tr_reactor_call(peers[i]->reactor,
+		                      disable_peer_routes_on_owner,
+		                      peers[i]) == TR_OK);
+	for (size_t i = 0; i < 2U; ++i)
+		CHECK(tr_reactor_stop(peers[i]->reactor) == TR_OK);
+	CHECK(complete_held_transform_owner_stopped(&f.client) == TR_OK);
+	for (size_t i = 0; i < 2U; ++i) {
+		CHECK(tr_rpc_record_stream_reap_stopped(
+		              &peers[i]->calls[0].call) == TR_OK);
+		CHECK(peers[i]->calls[0].delivery ==
+		      TR_RPC_RECORD_OWNER_STOPPED);
+		CHECK(atomic_load(&peers[i]->calls[0].terminals) == 1U);
+		CHECK(tr_channel_destroy(peers[i]->channel) == TR_OK);
+		CHECK(tr_reactor_destroy(peers[i]->reactor) == TR_OK);
+		CHECK(tr_buffer_pool_destroy(&peers[i]->reassembly) == TR_OK);
+		CHECK(atomic_load(&peers[i]->budget.current_bytes) == 0U);
+	}
+}
 int main(void)
 {
+	test_compressed_receive_close_waits_for_final_decode();
+	test_compressed_receive_delivers_decoded_body();
+	test_compressed_send_crosses_small_stream_window();
+	test_compressed_send_policy_rejection_retains_body();
+	test_compressed_send_encoded_limit_emits_no_partial_record();
+	test_compressed_send_c_less_than_window();
+	test_compressed_send_c_equals_window();
+	test_compressed_receive_preserves_record_order();
+	test_compressed_receive_rejects_invalid_zstd();
+	test_compressed_receive_rejects_trailing_and_size_mismatch();
+	test_compressed_receive_abort_waits_for_cancel_completion();
+	test_compressed_receive_reset_retires_pending_stream();
+	test_compressed_receive_owner_stopped_reaps_pending_task();
+	test_compressed_send_reset_retires_pending_transform();
+	test_compressed_send_lane_loss_retires_pending_transform();
+	test_compressed_send_owner_stopped_reaps_pending_task();
+	test_compressed_receive_preserves_interleaved_tx_state();
+	test_compressed_send_cancel_waits_for_completion();
+	test_compressed_send_queue_full_preserves_independent_streams();
+	test_compressed_send_independent_streams_complete_out_of_order();
+	test_compressed_transform_receives_only_body_with_auth_metadata();
+	test_compressed_send_replacement_handshake_retires_old_transform();
+	test_compressed_send_destroy_refuses_live_transform();
 	for (unsigned a = 0; a < 2; ++a)
 		for (unsigned b = 0; b < 2; ++b)
 			test_roundtrip(a ? TR_RPC_MANY : TR_RPC_ONE,
@@ -1191,6 +3090,7 @@ int main(void)
 		test_receive_faults(i);
 	test_error_isolation();
 	test_receive_quota();
+	test_compressed_receive_workspace_exhaustion();
 	test_partial_cancel();
 	test_reset_after_half_close();
 	test_reset_partial_open();

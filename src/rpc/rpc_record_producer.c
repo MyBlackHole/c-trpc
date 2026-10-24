@@ -41,6 +41,8 @@ struct tr_rpc_v2_producer {
 	struct tr_buffer *body;
 	unsigned kind;
 	enum tr_rpc_status status;
+	enum tr_rpc_compression compression;
+	uint32_t response_compression_algorithms;
 	uint32_t metadata_size;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 	bool active, closed, finished, initial_closed, building, in_send;
@@ -169,6 +171,7 @@ static void tr_producer_body_release(struct tr_buffer *buffer)
 
 int tr_rpc_record_producer_create(struct tr_rpc_record_producer_domain *domain,
                                   uint32_t max_message, bool headers_sent,
+				  uint32_t response_compression_algorithms,
                                   struct tr_rpc_v2_producer **out)
 {
 	struct tr_rpc_v2_producer *p;
@@ -207,6 +210,8 @@ int tr_rpc_record_producer_create(struct tr_rpc_record_producer_domain *domain,
 	p->domain = domain;
 	p->app_refs = 1;
 	p->max_message = max_message;
+	p->response_compression_algorithms =
+	        response_compression_algorithms;
 	p->initial_closed = headers_sent;
 	*out = p;
 	return TR_OK;
@@ -291,6 +296,7 @@ static int tr_producer_begin(struct tr_rpc_v2_producer *p, bool initial)
 static int tr_producer_publish(struct tr_rpc_v2_producer *p, unsigned kind,
                                struct tr_buffer *body, const uint8_t *metadata,
                                uint32_t size, enum tr_rpc_status status,
+			       enum tr_rpc_compression compression,
                                int result)
 {
 	pthread_mutex_lock(&p->lock);
@@ -301,6 +307,7 @@ static int tr_producer_publish(struct tr_rpc_v2_producer *p, unsigned kind,
 		p->body = body;
 		body = NULL;
 		p->metadata_size = size;
+		p->compression = compression;
 		if (size)
 			memcpy(p->metadata, metadata, size);
 		p->status = status;
@@ -320,11 +327,26 @@ static int tr_producer_publish(struct tr_rpc_v2_producer *p, unsigned kind,
 int tr_rpc_v2_producer_send(struct tr_rpc_v2_producer *p,
                             const struct tr_rpc_bytes *message)
 {
+	return tr_rpc_v2_producer_send_with_compression(
+	        p, message, TR_RPC_COMPRESSION_NONE);
+}
+
+int tr_rpc_v2_producer_send_with_compression(
+	struct tr_rpc_v2_producer *p, const struct tr_rpc_bytes *message,
+	enum tr_rpc_compression compression)
+{
 	struct tr_producer_body *body = NULL;
 	size_t bytes, size;
 	int ret;
 	if (!p || !message || (message->len && !message->data))
 		return TR_ERR_INVALID;
+	if (compression != TR_RPC_COMPRESSION_NONE &&
+	    compression != TR_RPC_COMPRESSION_ZSTD)
+		return TR_ERR_INVALID;
+	if (compression == TR_RPC_COMPRESSION_ZSTD &&
+	    !(p->response_compression_algorithms &
+	      TR_RPC_COMPRESSION_MASK_ZSTD))
+		return TR_ERR_UNSUPPORTED;
 	size = message->len;
 	if (size > p->max_message || size > SIZE_MAX - sizeof(*body))
 		return TR_ERR_BAD_LENGTH;
@@ -352,7 +374,7 @@ int tr_rpc_v2_producer_send(struct tr_rpc_v2_producer *p,
 	}
 	return tr_producer_publish(p, TR_RPC_RECORD_MESSAGE,
 	                           body ? &body->buffer : NULL, NULL, 0,
-	                           TR_RPC_STATUS_OK, ret);
+	                           TR_RPC_STATUS_OK, compression, ret);
 }
 
 static int tr_producer_metadata(struct tr_rpc_v2_producer *p, bool initial,
@@ -373,7 +395,8 @@ static int tr_producer_metadata(struct tr_rpc_v2_producer *p, bool initial,
 	return tr_producer_publish(p,
 	                           initial ? TR_RPC_RECORD_INITIAL_METADATA
 	                                   : TR_RPC_RECORD_FINAL_STATUS,
-	                           NULL, encoded, size, status, ret);
+	                           NULL, encoded, size, status,
+	                           TR_RPC_COMPRESSION_NONE, ret);
 }
 
 int tr_rpc_v2_producer_send_initial_metadata(
@@ -465,9 +488,12 @@ int tr_rpc_record_producer_take(struct tr_rpc_v2_producer *p,
 		ret = TR_AGAIN;
 	} else {
 		*out = (struct tr_rpc_record_producer_command){
-		        p->kind, p->status, p->body,
-		        p->metadata_size ? p->metadata : NULL,
-		        p->metadata_size};
+		        .kind = p->kind,
+		        .status = p->status,
+		        .compression = p->compression,
+		        .body = p->body,
+		        .metadata = p->metadata_size ? p->metadata : NULL,
+		        .metadata_size = p->metadata_size};
 		p->in_send = true;
 		ret = TR_OK;
 	}
@@ -483,6 +509,7 @@ void tr_rpc_record_producer_complete(struct tr_rpc_v2_producer *p,
 		/* body 可以已经在 send 栈中释放，仅丢弃旧指针。 */
 		p->body = NULL;
 		p->kind = 0;
+		p->compression = TR_RPC_COMPRESSION_NONE;
 		p->metadata_size = 0;
 	}
 	p->in_send = false;
@@ -510,6 +537,7 @@ int tr_rpc_record_producer_fail(struct tr_rpc_v2_producer *p,
 		p->metadata_size = 0;
 	p->kind = TR_RPC_RECORD_FINAL_STATUS;
 	p->status = status;
+	p->compression = TR_RPC_COMPRESSION_NONE;
 	p->finished = true;
 	pthread_cond_broadcast(&p->changed);
 	pthread_mutex_unlock(&p->lock);
@@ -533,6 +561,7 @@ int tr_rpc_record_producer_close(struct tr_rpc_v2_producer *p)
 	body = p->body;
 	p->body = NULL;
 	p->kind = 0;
+	p->compression = TR_RPC_COMPRESSION_NONE;
 	p->metadata_size = 0;
 	pthread_mutex_unlock(&p->lock);
 	tr_buffer_release(body);

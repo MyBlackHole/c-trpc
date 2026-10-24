@@ -24,7 +24,9 @@
 #include "tr/status.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
+#include "transport/protocol/message_caps.h"
 #include "transport/group/client_group_internal.h"
+#include "transport/group/message_budget.h"
 #include "facade_diagnostics_internal.h"
 #include "facade_policy_internal.h"
 #include "facade_tuning_internal.h"
@@ -182,7 +184,20 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 	if (config->connection_groups.max_data_connections != 0U &&
 	    config->connection_groups.max_active_transfers == 0U)
 		config->connection_groups.max_active_transfers =
-			config->limits.max_streams;
+		config->limits.max_streams;
+}
+
+static int tr_client_group_compression_config_valid(
+	const struct tr_connection_group_client_config *config)
+{
+	if (!config ||
+	    (config->send_compression_algorithms &
+	     ~TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD))
+		return 0;
+	if (!config->send_compression_algorithms)
+		return config->max_encoded_message_bytes == 0U;
+	return config->max_data_connections != 0U &&
+	       config->max_encoded_message_bytes >= 17U;
 }
 
 void tr_client_config_init(struct tr_client_config *config)
@@ -277,6 +292,10 @@ tr_client_record_config_valid(const struct tr_client_config *config,
 
 		if (!method->request_codec_id || !method->response_codec_id ||
 		    method->lane > TR_RPC_LANE_BULK ||
+		    (method->request_compression_algorithms &
+		     ~TR_RPC_COMPRESSION_MASK_ZSTD) ||
+		    (method->response_compression_algorithms &
+		     ~TR_RPC_COMPRESSION_MASK_ZSTD) ||
 		    (uint64_t)method->max_request_bytes +
 		                    TR_RPC_RECORD_HEADER_SIZE >
 		            config->limits.max_message_bytes ||
@@ -315,6 +334,9 @@ tr_client_create_internal(const struct tr_client_config *config,
 	struct tr_runtime_shard_config shard_config;
 	struct tr_reactor_config *reactor_config;
 	struct tr_client *client = NULL;
+	uint64_t group_reactor_bytes = 0U;
+	uint64_t group_message_budget = 0U;
+	uint32_t group_message_capacity = 0U;
 	int ret;
 
 	if (!out)
@@ -346,7 +368,9 @@ tr_client_create_internal(const struct tr_client_config *config,
 	    (effective_tuning.observability_flags &
 	     ~TR_OBSERVABILITY_VALID_FLAGS) ||
 	    effective.limits.max_message_bytes <
-		    effective.limits.max_frame_payload_bytes)
+		    effective.limits.max_frame_payload_bytes ||
+	    !tr_client_group_compression_config_valid(
+	            &effective.connection_groups))
 		return TR_ERR_INVALID;
 	if (record) {
 		ret = tr_client_record_config_valid(&effective, record, methods,
@@ -392,8 +416,35 @@ tr_client_create_internal(const struct tr_client_config *config,
 	memset(&shard_config, 0, sizeof(shard_config));
 	runtime_config.shard_count = 1U;
 	runtime_config.shards = &shard_config;
-	if (record)
+	int message_compression_enabled = 0;
+	if (record) {
 		shard_config.memory_budget_bytes = record->memory_budget_bytes;
+		if (public_v2) {
+			for (size_t i = 0; i < method_count; ++i) {
+				if ((methods[i].request_compression_algorithms |
+				     methods[i].response_compression_algorithms) &
+				    TR_RPC_COMPRESSION_MASK_ZSTD) {
+					message_compression_enabled = 1;
+					break;
+				}
+			}
+		}
+	}
+	if (message_compression_enabled) {
+		uint32_t capacity = record->calls.capacity;
+		if (capacity > (UINT32_MAX - 1U) / 2U)
+			capacity = UINT32_MAX - 1U;
+		else
+			capacity *= 2U;
+		if (capacity > effective_tuning.executor_queue_capacity)
+			capacity = effective_tuning.executor_queue_capacity;
+		if (!capacity)
+			capacity = 1U;
+		shard_config.messages.tasks.workers = 1U;
+		shard_config.messages.tasks.capacity = capacity;
+		shard_config.messages.dispatch_limit = capacity;
+		shard_config.messages.watchdog_ns = UINT64_C(10000000);
+	}
 	reactor_config = &shard_config.reactor;
 	if (effective.connection_groups.max_data_connections > UINT32_MAX - 2U)
 		return tr_client_create_rollback(
@@ -418,6 +469,34 @@ tr_client_create_internal(const struct tr_client_config *config,
 	reactor_config->tx_budget_bytes = reactor_config->rx_budget_bytes;
 	reactor_config->observability_flags =
 		effective_tuning.observability_flags;
+	if (effective.connection_groups.send_compression_algorithms != 0U) {
+		group_message_capacity =
+			effective.connection_groups.max_active_transfers;
+		if (group_message_capacity >
+		    effective_tuning.executor_queue_capacity)
+			group_message_capacity =
+				effective_tuning.executor_queue_capacity;
+		if (group_message_capacity == 0U)
+			return tr_client_create_rollback(
+				out, client, TR_ERR_INVALID);
+		ret = tr_reactor_memory_requirement(reactor_config,
+		                                    &group_reactor_bytes);
+		if (ret == TR_OK)
+			ret = tr_group_message_budget_required(
+			        effective.limits.max_message_bytes,
+			        effective.connection_groups
+			                .max_encoded_message_bytes,
+			        0U, group_message_capacity,
+			        group_reactor_bytes, 0U,
+			        &group_message_budget);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		shard_config.memory_budget_bytes = group_message_budget;
+		shard_config.messages.tasks.workers = 1U;
+		shard_config.messages.tasks.capacity = group_message_capacity;
+		shard_config.messages.dispatch_limit = group_message_capacity;
+		shard_config.messages.watchdog_ns = UINT64_C(10000000);
+	}
 
 	ret = tr_runtime_create(&runtime_config, &client->runtime);
 	if (ret != TR_OK)
@@ -793,6 +872,12 @@ static int tr_client_record_assemble_on_owner(void *arg)
 	                                 NULL, &client->channel);
 	if (ret != TR_OK)
 		return ret;
+	ret = tr_channel_bind_message_service_on_owner(
+	        client->channel, tr_runtime_shard_reactor(client->shard),
+	        tr_runtime_shard_message_submit_adapter,
+	        tr_runtime_shard_message_cancel_adapter, client->shard);
+	if (ret != TR_OK)
+		return ret;
 	ret = tr_rpc_record_client_create_on_owner(
 	        client->channel, client->record_methods,
 	        client->record_method_count, &client->record_config.calls,
@@ -823,6 +908,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	struct tr_channel_keepalive_config keepalive_config;
 	struct tr_deadline connect_deadline;
 	int fd TR_AUTO(tr_fd_cleanup) = -1;
+	int message_caps_enabled = 0;
+	int receive_zstd = 0;
 	int ret;
 
 	if (!client || !ipv4_address || port == 0)
@@ -864,6 +951,30 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	channel_config.reassembly_pool = &client->reassembly_pool;
 	channel_config.feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
 	channel_config.required_feature_bits = TR_CHANNEL_FEATURE_STREAM_RESET;
+	if (client->record_sdk_mode) {
+		for (size_t i = 0; i < client->record_method_count; ++i) {
+			const struct tr_rpc_method_desc *method =
+			        &client->record_methods[i];
+			if ((method->request_compression_algorithms |
+			     method->response_compression_algorithms) &
+			    TR_RPC_COMPRESSION_MASK_ZSTD)
+				message_caps_enabled = 1;
+			if (method->response_compression_algorithms &
+			    TR_RPC_COMPRESSION_MASK_ZSTD)
+				receive_zstd = 1;
+		}
+	}
+	if (message_caps_enabled) {
+		channel_config.feature_bits |= TR_CHANNEL_FEATURE_MESSAGE_CAPS;
+		channel_config.max_compression_workspace_bytes = 1024U * 1024U;
+		channel_config.max_compression_window_log = 20U;
+	}
+	if (receive_zstd) {
+		channel_config.receive_compression_algorithms =
+		        TR_MESSAGE_ALGORITHM_ZSTD;
+		channel_config.max_encoded_message_bytes =
+		        client->config.limits.max_message_bytes;
+	}
 	channel_config.memory_budget =
 	        tr_runtime_shard_memory_budget(client->shard);
 
@@ -927,6 +1038,19 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 		client->config.connection_groups.max_active_transfers;
 	group_config.max_message_bytes =
 		client->config.limits.max_message_bytes;
+	group_config.send_compression_algorithms =
+		client->config.connection_groups.send_compression_algorithms;
+	group_config.max_encoded_message_bytes =
+		client->config.connection_groups.max_encoded_message_bytes;
+	if (group_config.send_compression_algorithms != 0U) {
+		group_config.message_submit =
+			tr_runtime_shard_message_submit_adapter;
+		group_config.message_cancel =
+			tr_runtime_shard_message_cancel_adapter;
+		group_config.message_context = client->shard;
+		group_config.message_budget =
+			tr_runtime_shard_memory_budget(client->shard);
+	}
 	group_config.max_frame_payload_bytes =
 		client->config.limits.max_frame_payload_bytes;
 	group_config.connect_timeout_ms = client->config.connect_timeout_ms;
@@ -1044,8 +1168,20 @@ int tr_client_connection_group_send(
 	struct tr_client *client, uint32_t stream_id, uint64_t message_id,
 	const struct tr_transport_bytes *bytes)
 {
+	return tr_client_connection_group_send_with_compression(
+	        client, stream_id, message_id, bytes,
+	        TR_CONNECTION_GROUP_COMPRESSION_NONE);
+}
+
+int tr_client_connection_group_send_with_compression(
+	struct tr_client *client, uint32_t stream_id, uint64_t message_id,
+	const struct tr_transport_bytes *bytes,
+	enum tr_connection_group_compression compression)
+{
 	if (!client || stream_id == 0U || !bytes ||
-	    (bytes->len != 0U && !bytes->data))
+	    (bytes->len != 0U && !bytes->data) ||
+	    (compression != TR_CONNECTION_GROUP_COMPRESSION_NONE &&
+	     compression != TR_CONNECTION_GROUP_COMPRESSION_ZSTD))
 		return TR_ERR_INVALID;
 	if (atomic_load_explicit(&client->tls_rotation_failed,
 	                         memory_order_acquire))
@@ -1054,8 +1190,9 @@ int tr_client_connection_group_send(
 		return TR_ERR_UNSUPPORTED;
 	if (!client->connection_group)
 		return TR_ERR_STATE;
-	return tr_client_group_send(
-		client->connection_group, stream_id, message_id, bytes);
+	return tr_client_group_send_with_compression(
+	        client->connection_group, stream_id, message_id, bytes,
+	        compression);
 }
 
 int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
@@ -1207,6 +1344,7 @@ struct tr_client_record_operation_request {
 	struct tr_buffer **body;
 	enum tr_client_record_operation operation;
 	const struct tr_rpc_bytes *message;
+	enum tr_rpc_compression compression;
 };
 
 static int tr_client_record_operation_on_owner(void *arg)
@@ -1218,8 +1356,9 @@ static int tr_client_record_operation_on_owner(void *arg)
 		return tr_rpc_record_client_send_on_owner(request->handle,
 		                                          request->body);
 	case TR_CLIENT_RECORD_SEND_BYTES:
-		return tr_rpc_record_client_send_bytes_on_owner(
-		        request->handle, request->message);
+		return tr_rpc_record_client_send_bytes_with_compression_on_owner(
+		        request->handle, request->message,
+		        request->compression);
 	case TR_CLIENT_RECORD_HALF_CLOSE:
 		return tr_rpc_record_client_half_close_on_owner(
 		        request->handle);
@@ -1268,6 +1407,14 @@ int tr_client_record_cancel(struct tr_rpc_record_client_handle handle)
 int tr_rpc_v2_call_send(struct tr_rpc_v2_call call,
                         const struct tr_rpc_bytes *message)
 {
+	return tr_rpc_v2_call_send_with_compression(
+	        call, message, TR_RPC_COMPRESSION_NONE);
+}
+
+int tr_rpc_v2_call_send_with_compression(
+	struct tr_rpc_v2_call call, const struct tr_rpc_bytes *message,
+	enum tr_rpc_compression compression)
+{
 	struct tr_rpc_record_client_handle handle =
 	        tr_rpc_record_client_private_handle(call);
 	struct tr_client_record_operation_request request;
@@ -1275,7 +1422,8 @@ int tr_rpc_v2_call_send(struct tr_rpc_v2_call call,
 	request = (struct tr_client_record_operation_request){
 	        .handle = handle,
 	        .operation = TR_CLIENT_RECORD_SEND_BYTES,
-	        .message = message};
+	        .message = message,
+	        .compression = compression};
 	return tr_client_record_sync(
 	        handle.client, tr_client_record_operation_on_owner, &request);
 }

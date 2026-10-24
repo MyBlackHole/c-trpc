@@ -417,7 +417,7 @@ static void fixture_init(struct fixture *f, enum work_mode mode)
 		methods[i] = (struct tr_rpc_dispatch_method){
 		        .descriptor = {17, i + 1, TR_RPC_MANY, TR_RPC_MANY,
 		                       TR_RPC_CODEC_RAW, TR_RPC_CODEC_RAW,
-		                       TR_LANE_CONTROL, BODY, BODY},
+		                       TR_LANE_CONTROL, BODY, BODY, 0, 0},
 		        .work = business,
 		        .arg = &f->methods[i]};
 		descriptors[i] = methods[i].descriptor;
