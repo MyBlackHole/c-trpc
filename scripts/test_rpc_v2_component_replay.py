@@ -16,6 +16,8 @@ DEADLINE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-deadline-late-work-v1.json"
 STALE_MESSAGE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-stale-message-after-reuse-v1.json"
+FINAL_RESET_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
+    "component-final-reset-after-accepted-v1.json"
 
 
 class ComponentMappingTests(unittest.TestCase):
@@ -83,6 +85,31 @@ class ComponentMappingTests(unittest.TestCase):
             "budget_bytes": 0,
             "quiescent": True,
             "stale_messages_ignored": 1,
+        }
+        self.assertTrue(
+            rpc_v2_component_replay.compare_observation(
+                trace, model, observed)["matched"])
+
+    def test_reset_after_accepted_final_maps_to_fixed_component_sequence(self):
+        trace = parse_trace(FINAL_RESET_TRACE_PATH.read_bytes())
+        model = run_trace(trace)
+
+        self.assertEqual(model.calls[0]["outcome"], "OK")
+        self.assertEqual(model.event_results[7], "REJECTED")
+        self.assertTrue(model.quiescent)
+        self.assertEqual(
+            rpc_v2_component_replay.component_event_argument(trace),
+            "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+            "FINAL_STATUS,RESET,SLOT_RELEASE")
+        observed = {
+            "status": "OK",
+            "terminal_callbacks": 1,
+            "work_completed": True,
+            "final_frames": 1,
+            "retire_calls": 1,
+            "budget_bytes": 0,
+            "quiescent": True,
+            "stale_messages_ignored": 0,
         }
         self.assertTrue(
             rpc_v2_component_replay.compare_observation(

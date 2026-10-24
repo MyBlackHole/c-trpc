@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将 TEST-B1/B2/B3 固定轨迹映射到真实 RPC Record Endpoint 测试夹具。"""
+"""将 TEST-B1/B2/B3/B4 固定轨迹映射到真实 RPC Record Endpoint 测试夹具。"""
 import argparse
 import json
 import os
@@ -27,6 +27,10 @@ EVENT_SEQUENCES = {
         "FINAL_STATUS", "SLOT_RELEASE", "OPEN", "MESSAGE_STALE", "ACCEPT",
         "MESSAGE", "WORK_START", "CANCEL", "WORK_DONE", "FINAL_STATUS",
         "SLOT_RELEASE",
+    ),
+    "component-final-reset-after-accepted-v1": (
+        "OPEN", "ACCEPT", "MESSAGE", "HALF_CLOSE", "WORK_START", "WORK_DONE",
+        "FINAL_STATUS", "RESET", "SLOT_RELEASE",
     ),
 }
 OBSERVATION_FIELDS = frozenset({
@@ -91,6 +95,20 @@ def component_event_argument(trace: Trace) -> str:
             ("WORK_DONE", "APPLIED", {}, 1),
             ("FINAL_STATUS", "REJECTED", {"status": "ERROR"}, 1),
             ("SLOT_RELEASE", "APPLIED", {}, 1),
+        )
+    elif trace.trace_id == "component-final-reset-after-accepted-v1":
+        if "DIR-01" not in trace.invariant_ids:
+            _fail(trace, "invariant_ids", "终局竞争轨迹必须关联 DIR-01")
+        expected = (
+            ("OPEN", "APPLIED", {"request_mode": "MANY", "response_mode": "MANY"}, 0),
+            ("ACCEPT", "APPLIED", {}, 0),
+            ("MESSAGE", "APPLIED", {"direction": "REQUEST", "bytes": 1}, 0),
+            ("HALF_CLOSE", "APPLIED", {"direction": "REQUEST"}, 0),
+            ("WORK_START", "APPLIED", {}, 0),
+            ("WORK_DONE", "APPLIED", {}, 0),
+            ("FINAL_STATUS", "APPLIED", {"status": "OK"}, 0),
+            ("RESET", "REJECTED", {}, 0),
+            ("SLOT_RELEASE", "APPLIED", {}, 0),
         )
     else:
         expected = tuple(

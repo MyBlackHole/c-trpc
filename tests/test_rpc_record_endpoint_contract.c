@@ -1196,8 +1196,46 @@ static void test_generations_under_load(void)
 	close_all(&f);
 }
 
-/* TEST-B1/B2/B3 的有限适配器：只驱动登记的固定轨迹，测试真实 Endpoint 对
+/* TEST-B1/B2/B3/B4 的有限适配器：只驱动登记的固定轨迹，测试真实 Endpoint 对
  * 可控 Dispatch/时钟事件的反应；不模拟 TCP、线程或生产 Dispatch。 */
+static int replay_final_reset_after_accepted(void)
+{
+	struct fixture f;
+	struct tr_stream_handle stream;
+
+	init(&f);
+	start(&f);
+	stream = open_stream(&f, 0, 1);
+	CHECK(f.dispatch->calls[0].active &&
+	      f.dispatch->calls[0].stream.generation == stream.generation);
+	f.hold_work = true;
+	request(&f, stream, 0);
+	CHECK(f.receive_calls == 1 && f.dispatch->calls[0].pending);
+	tick(&f, 2);
+	CHECK(!f.done_calls && !f.reports);
+	/* HALF_CLOSE 已由 L1 检查方向状态；此 Endpoint 接缝只控制实际工作终局。
+	 */
+	CHECK(f.dispatch->calls[0].pending && !f.dispatch->calls[0].terminal);
+	f.hold_work = false;
+	tick(&f, 12);
+	CHECK(f.done_calls == 1 && f.reports == 1 && !f.retire_calls &&
+	      f.last.status == TR_RPC_STATUS_OK && f.last.final_accepted &&
+	      f.closes == 1 && !f.resets && f.dispatch->calls[0].active);
+	f.event(stream, TR_STREAM_EVENT_RESET, TR_ERR_TIMEOUT, f.handler_arg);
+	tick(&f, 8);
+	CHECK(f.reports == 1 && f.last.status == TR_RPC_STATUS_OK &&
+	      f.last.final_accepted && f.closes == 1 && !f.resets &&
+	      f.retire_calls == 1 && !f.dispatch->calls[0].active);
+	close_all(&f);
+	printf("{\"status\":\"OK\",\"terminal_callbacks\":%u,"
+	       "\"work_completed\":true,\"final_frames\":%u,"
+	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
+	       "\"quiescent\":true,\"stale_messages_ignored\":0}\n",
+	       f.reports, f.last.final_accepted ? 1U : 0U, f.retire_calls,
+	       atomic_load(&f.budget.current_bytes));
+	return 0;
+}
+
 static int replay_stale_message_after_reuse(void)
 {
 	struct fixture f;
@@ -1273,7 +1311,7 @@ static int replay_stale_message_after_reuse(void)
 	       "\"work_completed\":true,\"final_frames\":%u,"
 	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
 	       "\"quiescent\":true,\"stale_messages_ignored\":%u}\n",
-	       f.reports, f.sends, f.retire_calls,
+	       f.reports, f.last.final_accepted ? 1U : 0U, f.retire_calls,
 	       atomic_load(&f.budget.current_bytes), stale_messages_ignored);
 	return 0;
 }
@@ -1285,6 +1323,9 @@ static int replay_component_events(const char *event_list)
 	static const char deadline_argument[] =
 	        "OPEN,ACCEPT,MESSAGE,WORK_START,DEADLINE,WORK_DONE,"
 	        "FINAL_STATUS,SLOT_RELEASE";
+	static const char final_reset_argument[] =
+	        "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+	        "FINAL_STATUS,RESET,SLOT_RELEASE";
 	struct fixture f;
 	struct tr_stream_handle stream = {0};
 	enum tr_rpc_status terminal_status;
@@ -1292,6 +1333,8 @@ static int replay_component_events(const char *event_list)
 	const char *status_name;
 	if (!event_list)
 		return 2;
+	if (strcmp(event_list, final_reset_argument) == 0)
+		return replay_final_reset_after_accepted();
 	if (strcmp(event_list,
 	           "OPEN,ACCEPT,MESSAGE,WORK_START,CANCEL,WORK_DONE,"
 	           "FINAL_STATUS,SLOT_RELEASE,OPEN,MESSAGE_STALE,ACCEPT,"
@@ -1376,8 +1419,8 @@ static int replay_component_events(const char *event_list)
 	       "\"work_completed\":true,\"final_frames\":%u,"
 	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
 	       "\"quiescent\":true,\"stale_messages_ignored\":0}\n",
-	       status_name, f.reports, f.sends, f.retire_calls,
-	       atomic_load(&f.budget.current_bytes));
+	       status_name, f.reports, f.last.final_accepted ? 1U : 0U,
+	       f.retire_calls, atomic_load(&f.budget.current_bytes));
 	return 0;
 }
 

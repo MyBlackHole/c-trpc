@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.31` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.32` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -43,6 +43,11 @@ Record Endpoint 配合受控 Dispatch/Channel 回调，不覆盖生产 Reactor�
 可将 `--trace` 指向
 `tests/fixtures/rpc_v2_model/component-stale-message-after-reuse-v1.json` 执行第三条回放。
 它接入现有 `build-test (gcc)` job，没有新增 CI job/check。
+dev.32 增加 TEST-B4 成功 FINAL 已接受后收到 RESET 的竞争轨迹；Endpoint 必须保留 OK
+终局与一次回调，再退役并归还资源。它与 B1/B2/B3 一样是受控组件交错，不声称覆盖生产
+派发调度或真实 TCP；可用 `--trace` 指向
+`tests/fixtures/rpc_v2_model/component-final-reset-after-accepted-v1.json` 执行第四条回放。
+四条回放仍运行在既有 `build-test (gcc)` job 中。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、

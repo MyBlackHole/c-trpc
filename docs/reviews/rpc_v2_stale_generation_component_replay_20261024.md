@@ -31,6 +31,8 @@ stream handle 的 DATA callback，断言该回调返回 RELEASE、接收计数�
 该切片验证 Endpoint 按完整 stream handle 查找槽位的行为，不验证真实 Channel 是否会产生
 迟到 DATA，不创建线程或 TCP，也不覆盖生产 Dispatch 的并发回收。当前开发版本从
 `2.0.0-dev.30` 升为 `2.0.0-dev.31`；第三条回放加入现有 `build-test (gcc)`，未新增 CI
-job/check。Draft PR 与本分支远程 CI 结果以 #320 最新 head 为准。
+job/check。Draft PR [#320](https://github.com/MyBlackHole/c-trpc/pull/320) head
+`b3bd7b8318cb5490a532a4a29c4a3e86865b0ea3` 的 14/14 GitHub 检查已通过；PR 仍
+Open/Draft、未合并。
 
 TEST-B 字母表、TEST-C/D/E、#248 模块边界和 V2 整体验收仍未完成。
