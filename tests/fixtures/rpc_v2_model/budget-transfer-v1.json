@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "trace_id": "budget-transfer-v1",
+  "task_ids": ["#247/TEST-A"],
+  "invariant_ids": ["RES-01", "RES-02", "OWN-01"],
+  "seed": null,
+  "limits": {"memory_bytes": 8, "max_events": 8},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "MANY", "response_mode": "MANY", "expect": "APPLIED"},
+    {"op": "ACCEPT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "RESERVE", "slot": 0, "generation": 0, "lease": 0, "bytes": 8, "expect": "APPLIED"},
+    {"op": "TRANSFER", "slot": 0, "generation": 0, "lease": 0, "expect": "APPLIED"},
+    {"op": "FINAL_STATUS", "slot": 0, "generation": 0, "status": "ERROR", "expect": "APPLIED"},
+    {"op": "RELEASE_STORAGE", "slot": 0, "generation": 0, "lease": 0, "expect": "APPLIED"},
+    {"op": "SLOT_RELEASE", "slot": 0, "generation": 0, "expect": "APPLIED"}
+  ]
+}

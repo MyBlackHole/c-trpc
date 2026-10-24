@@ -47,6 +47,8 @@ jobs:
             xmake build --all -v
             xmake test -v -j1
           done
+      - name: 运行 RPC V2 小状态模型自测
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_rpc_v2_model.py -v
       - name: 核验 RPC V1 退役引用与生产对象链接证据
         run: |
           set -euo pipefail

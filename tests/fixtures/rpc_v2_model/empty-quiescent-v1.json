@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "trace_id": "empty-quiescent-v1",
+  "task_ids": ["#247/TEST-A"],
+  "invariant_ids": ["CALL-01"],
+  "seed": null,
+  "limits": {
+    "memory_bytes": 0,
+    "max_events": 1
+  },
+  "finish": "QUIESCENT",
+  "events": []
+}

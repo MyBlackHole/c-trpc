@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "trace_id": "stale-generation-v1",
+  "task_ids": ["#247/TEST-A"],
+  "invariant_ids": ["GEN-01", "CALL-01"],
+  "seed": null,
+  "limits": {"memory_bytes": 0, "max_events": 6},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "MANY", "response_mode": "MANY", "expect": "APPLIED"},
+    {"op": "REJECT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "SLOT_RELEASE", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "ONE", "response_mode": "ONE", "expect": "STALE"},
+    {"op": "OPEN", "slot": 0, "generation": 1, "request_mode": "ONE", "response_mode": "ONE", "expect": "APPLIED"},
+    {"op": "REJECT", "slot": 0, "generation": 1, "expect": "APPLIED"}
+  ]
+}

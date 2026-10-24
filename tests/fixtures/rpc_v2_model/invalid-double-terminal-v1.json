@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "trace_id": "invalid-double-terminal-v1",
+  "task_ids": ["#247/TEST-A"],
+  "invariant_ids": ["CALL-01", "CALL-02"],
+  "seed": null,
+  "limits": {"memory_bytes": 0, "max_events": 3},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "MANY", "response_mode": "MANY", "expect": "APPLIED"},
+    {"op": "REJECT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "CANCEL", "slot": 0, "generation": 0, "expect": "APPLIED"}
+  ]
+}

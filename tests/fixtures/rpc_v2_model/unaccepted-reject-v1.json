@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "trace_id": "unaccepted-reject-v1",
+  "task_ids": ["#247/TEST-A"],
+  "invariant_ids": ["CALL-01", "OWN-01"],
+  "seed": null,
+  "limits": {"memory_bytes": 8, "max_events": 5},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "MANY", "response_mode": "MANY", "expect": "APPLIED"},
+    {"op": "WORK_START", "slot": 0, "generation": 0, "expect": "REJECTED"},
+    {"op": "RESERVE", "slot": 0, "generation": 0, "lease": 0, "bytes": 1, "expect": "REJECTED"},
+    {"op": "REJECT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "SLOT_RELEASE", "slot": 0, "generation": 0, "expect": "APPLIED"}
+  ]
+}

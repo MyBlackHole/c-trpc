@@ -60,7 +60,7 @@ class Trace:
     events: tuple[Event, ...]
 ```
 
-- [ ] **步骤 1：先写解析器测试。** 在测试文件中构造一个最小合法空轨迹，并断言 `schema_version`、默认预算和事件数；增加重复键、未知字段、布尔值充当整数、未知版本与事件字段多余的负例。
+- [x] **步骤 1：先写解析器测试。** 在测试文件中构造一个最小合法空轨迹，并断言 `schema_version`、默认预算和事件数；增加重复键、未知字段、布尔值充当整数、未知版本与事件字段多余的负例。
 
 测试必须先导入尚不存在的接口并验证 RED：
 
@@ -78,7 +78,7 @@ self.assertEqual(trace.events, ())
 
 最小有效输入用实际完整字段填充，不保留省略号；fixture 使用 `memory_bytes=0`、`max_events=1`、`finish=QUIESCENT` 和空事件表。
 
-- [ ] **步骤 2：确认 RED。** 运行：
+- [x] **步骤 2：确认 RED。** 运行：
 
 ```sh
 mkdir -p build/test-tmp
@@ -87,7 +87,7 @@ PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" python3 scripts/test_rpc_
 
 预期：测试因 `rpc_v2_model` 尚不存在而失败，不应触碰 `/tmp`。
 
-- [ ] **步骤 3：实现最小解析器。** 使用 `json.loads(text, object_pairs_hook=unique_object, parse_constant=reject_constant)` 检出重复键和 NaN/Infinity；拒绝超过 64 KiB 的输入、未知/缺失键、未知 task/invariant ID、超界整数、`bool`、浮点、未知操作、事件数量超限和非精确字段集合。轨迹解析失败抛出带字段路径的 `TraceFormatError`。
+- [x] **步骤 3：实现最小解析器。** 使用 `json.loads(text, object_pairs_hook=unique_object, parse_constant=reject_constant)` 检出重复键和 NaN/Infinity；拒绝超过 64 KiB 的输入、未知/缺失键、未知 task/invariant ID、超界整数、`bool`、浮点、未知操作、事件数量超限和非精确字段集合。轨迹解析失败抛出带字段路径的 `TraceFormatError`。
 
 重复键检测器须在构造字典前失败：
 
@@ -101,7 +101,7 @@ def unique_object(pairs):
     return result
 ```
 
-- [ ] **步骤 4：确认 GREEN。** 使用同一命令；预期合法轨迹通过，所有非法输入均由对应格式错误拒绝。
+- [x] **步骤 4：确认 GREEN。** 使用同一命令；预期合法轨迹通过，所有非法输入均由对应格式错误拒绝。
 
 ### 任务 2：实现 Call、方向、代次与预算状态机
 
@@ -117,11 +117,11 @@ def unique_object(pairs):
 - `ReplayMismatch(trace_id: str, event_index: int, operation: str, expected: str, actual: str)`：记录完整轨迹差异。
 - `ReplayResult`：包含 `trace_id`、事件结果元组、Call 历史元组、两个槽的终态、预算 `limit/available/reserved/held` 和 `quiescent` 布尔值。
 
-- [ ] **步骤 1：先写状态机测试。** 分别覆盖 ONE/MANY 方向、受理前请求消息、受理后响应消息、重复终局拒绝、取消后工作迟到完成、旧代次返回 `STALE`、代次耗尽后槽退役、资源满时 `RESOURCE_LIMIT`、预留转持有再释放及双重释放拒绝。每个负例比较事件前后快照。
+- [x] **步骤 1：先写状态机测试。** 分别覆盖 ONE/MANY 方向、受理前请求消息、受理后响应消息、重复终局拒绝、取消后工作迟到完成、旧代次返回 `STALE`、代次耗尽后槽退役、资源满时 `RESOURCE_LIMIT`、预留转持有再释放及双重释放拒绝。每个负例比较事件前后快照。
 
-- [ ] **步骤 2：确认 RED。** 运行同一 `python3 scripts/test_rpc_v2_model.py -v` 命令；预期新增状态机断言因 `run_trace` 未实现而失败。
+- [x] **步骤 2：确认 RED。** 运行同一 `python3 scripts/test_rpc_v2_model.py -v` 命令；预期新增状态机断言因 `run_trace` 未实现而失败。
 
-- [ ] **步骤 3：实现纯参考状态。** 用独立 Python 数据类表达两槽、Call 终局回调计数、请求/响应计数与半关闭、单个活动工作、单调不回绕的两位代次、租约状态和 `available/reserved/held`。逐事件按设计表改变状态，之后检查预算守恒、回调不超过一次、终局不复活和租约唯一归属。事件执行采用复制后提交，任何拒绝保持原状态：
+- [x] **步骤 3：实现纯参考状态。** 用独立 Python 数据类表达两槽、Call 终局回调计数、请求/响应计数与半关闭、单个活动工作、单调不回绕的两位代次、租约状态和 `available/reserved/held`。逐事件按设计表改变状态，之后检查预算守恒、回调不超过一次、终局不复活和租约唯一归属。事件执行采用复制后提交，任何拒绝保持原状态：
 
 ```python
 before = state.snapshot()
@@ -145,7 +145,7 @@ if result != event.expect:
 assert budget.available + budget.reserved + budget.held == budget.limit
 ```
 
-- [ ] **步骤 4：确认 GREEN。** 运行同一测试命令；预期所有事件转换和不变量检查通过，错误预期产生 `ReplayMismatch`。
+- [x] **步骤 4：确认 GREEN。** 运行同一测试命令；预期所有事件转换和不变量检查通过，错误预期产生 `ReplayMismatch`。
 
 ### 任务 3：加入代表性 JSON 轨迹及确定性 CLI
 
@@ -165,12 +165,13 @@ assert budget.available + budget.reserved + budget.held == budget.limit
 
 CLI 序列化使用 `json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":"))`，最后恰有一个换行；stdout 只写成功 JSON，失败原因写 stderr。
 
-- [ ] **步骤 1：先写 fixture 测试。** 让 unittest 遍历上述轨迹；比较每个 trace 的终局结果、回调次数、工作状态、槽代次、预算总账和事件结果。另断言同一轨迹重复运行得到完全相同的序列化字节。
+- [x] **步骤 1：先写 fixture 测试。** 让 unittest 遍历上述轨迹；比较每个 trace 的终局结果、回调次数、工作状态、槽代次、预算总账和事件结果。另断言同一轨迹重复运行得到完全相同的序列化字节。
 
 - [ ] **步骤 2：确认 RED。** 运行模型测试；预期因 fixture 缺失或 CLI 未实现而失败。
 
-- [ ] **步骤 3：添加手写轨迹与 CLI。** 每份 fixture 的 `task_ids`/`invariant_ids` 与测试目标对应；失败案例明确标注期望的 `REJECTED`/`STALE`。CLI 只读取指定轨迹、输出确定性 JSON，不创建临时文件。
-- [ ] **步骤 3：添加手写轨迹与 CLI。** 每份 fixture 的 `task_ids`/`invariant_ids` 与测试目标对应；失败案例明确标注期望的 `REJECTED`/`STALE`。CLI 只读取指定轨迹、输出确定性 JSON，不创建临时文件。入口按以下顺序处理：
+执行记录：fixture/CLI RED 阶段未单独保留；该组 fixture 测试是在回放器和 CLI 已实现后加入，当前完整回归通过。
+
+- [x] **步骤 3：添加手写轨迹与 CLI。** 每份 fixture 的 `task_ids`/`invariant_ids` 与测试目标对应；失败案例明确标注期望的 `REJECTED`/`STALE`。CLI 只读取指定轨迹、输出确定性 JSON，不创建临时文件。入口按以下顺序处理：
 
 ```python
 raw = args.trace.read_bytes()
@@ -179,7 +180,7 @@ result = run_trace(trace)
 sys.stdout.write(serialize_result(result) + "\n")
 ```
 
-- [ ] **步骤 4：确认 GREEN。** 运行：
+- [x] **步骤 4：确认 GREEN。** 运行：
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" python3 scripts/test_rpc_v2_model.py -v
@@ -200,26 +201,26 @@ PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" python3 scripts/rpc_v2_mo
 
 **接口：** 无生产接口。CI 在既有 `build-test (gcc)` 作业运行 Python 自测，保持所有既有 job/check 名称不变。
 
-- [ ] **步骤 1：先验证版本与 CI 放置点。** 确认当前版本为 `dev.27`，只在 GCC 功能测试作业的全部 Xmake 测试成功后增加 `python3 scripts/test_rpc_v2_model.py -v`，不要添加新 job。
+- [x] **步骤 1：先验证版本与 CI 放置点。** 确认当前版本为 `dev.27`，只在 GCC 功能测试作业的全部 Xmake 测试成功后增加 `python3 scripts/test_rpc_v2_model.py -v`，不要添加新 job。
 
 新增 CI 步骤保持既有作业名：
 
 ```yaml
 - name: 运行 RPC V2 小状态模型自测
-  run: python3 scripts/test_rpc_v2_model.py -v
+  run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_rpc_v2_model.py -v
 ```
 
 将步骤插在 GCC job 的 `xmake test -v -j1` 所在脚本成功之后、库存审计之前。
-- [ ] **步骤 2：先写文档与版本检查。** 验证开发版本唯一更新为 `2.0.0-dev.28`，README 明确这是测试能力交付，不暗示 #247 或 V2 已完成。
+- [x] **步骤 2：先写文档与版本检查。** 验证开发版本唯一更新为 `2.0.0-dev.28`，README 明确这是测试能力交付，不暗示 #247 或 V2 已完成。
 - [ ] **步骤 3：更新记录。** 评估记录列出模型覆盖、命令输出、CI SHA 和限制；剩余工作将 TEST-A 标为完成，并保留 TEST-B/C/D/E 与 #247/#241/#242 未完成状态。
-- [ ] **步骤 4：检查改动。** 运行 `git diff --check`、JSON 解析、Python 测试和两个 CLI 正反例；确认生产目录和公开头没有变化。
+- [x] **步骤 4：检查改动。** 运行 `git diff --check`、JSON 解析、Python 测试和两个 CLI 正反例；确认生产目录和公开头没有变化。
 
 ### 任务 5：完整验证、提交并登记 Draft PR
 
 **文件：** 已列出的模型、轨迹、CI、版本和文档文件。
 
-- [ ] 本地运行 `scripts/test_rpc_v2_model.py`，`git diff --check`，Python 3.10 语法执行路径；所有输出和临时目录留在 worktree `build/`。
-- [ ] 确认没有生产 C/API/ABI 变更、第三方依赖或必需检查重命名，工作树干净。
+- [x] 本地运行 `scripts/test_rpc_v2_model.py`，`git diff --check`，Python 3.10 语法执行路径；所有输出和临时目录留在 worktree `build/`。
+- [x] 确认没有生产 C/API/ABI 变更、第三方依赖或必需检查重命名，工作树干净。
 - [ ] 使用包含需求、背景、实现、影响、测试、关联需求、性能、风险、回滚和验收说明的中文提交信息，版本字段为 `2.0.0-dev.27 -> 2.0.0-dev.28`。
 
 提交正文逐项填写，测试结果必须使用实际命令输出：
