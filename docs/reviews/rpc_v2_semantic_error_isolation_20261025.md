@@ -10,8 +10,9 @@ Endpoint、Router 与 Dispatch。测试先正常建立一个请求调用并等�
 错误只在 RPC 记录顺序层出现。
 
 生产接收路径将该调用以 `INVALID_ARGUMENT` 终结，业务端只观察到最初一次 OPEN；客户端与服务端终局
-回调各一次，且双方 Channel 没有 DOWN。错误终局后再建立第二条调用，仍在同一 TCP 连接完成请求、响应
-和 `OK` 终局，证明单调用语义错误未破坏同伴前进。
+回调各一次。错误终局后再建立第二条调用，仍在同一 TCP 连接完成请求、响应和 `OK` 终局；双方 Reactor
+连接状态仍为 `ACTIVE`，证明单调用语义错误未破坏同伴前进。服务端 Endpoint 启动时接管 Channel 事件回调，
+所以服务端连接状态使用 Reactor 查询验证，不能依赖 fixture 原有 Channel 事件计数器。
 
 ## 验证
 

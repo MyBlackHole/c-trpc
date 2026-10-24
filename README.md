@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.47` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.48` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -150,9 +150,16 @@ Release 与 TSan 下完整 `test_stream_reset` 均通过。该切片只增加测
 
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：客户端在有效 OPEN 后
 发送第二条合法编码但顺序非法的 OPEN，只有该调用以 `INVALID_ARGUMENT` 终结；随后同一 TCP 连接
-上的新调用仍以 OK 完成，双方没有 Channel-down 事件。Release 与 TSan 下完整
+上的新调用仍以 OK 完成，双方 Reactor 连接仍为 ACTIVE。服务端 Endpoint 接管 Channel 事件回调，
+因此服务端连接状态直接查询验证。Release 与 TSan 下完整
 `test_rpc_record_endpoint_tcp` 均通过。此测试补强生产 C 路径的一项映射证据；完整 ERR-A 矩阵仍待
 验收。详见[真实 RPC 语义错误隔离记录](docs/reviews/rpc_v2_semantic_error_isolation_20261025.md)。
+
+dev.48 为 #242/ERR-A 增加真实 TCP 连接级错误关闭回归：两条调用已被服务端业务接收后，客户端发送
+头 CRC 错误帧；客户端与服务端的 Reactor 连接均退役，两个 Endpoint 调用各以 `UNAVAILABLE` 终结一次，
+且没有接受成功 FINAL。Release 与 TSan 下完整 `test_rpc_record_endpoint_tcp` 均通过。该用例补上一个
+不可恢复线帧错误的真实生产路径证据；其他连接错误、资源压力与组合矩阵仍待验收。详见
+[真实 RPC 连接级错误关闭记录](docs/reviews/rpc_v2_connection_error_termination_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

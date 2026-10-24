@@ -157,10 +157,18 @@ dev.46 为 #242/ERR-C 增加 RESET 与迟到载荷释放组合回归：双向 RE
 [RESET 后迟到载荷释放与信用记录](rpc_v2_reset_late_payload_credit_20261025.md)。
 
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
-重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；双方 Channel 没有 DOWN。
+重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
+服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。
 Release 与 TSan 下 `test_rpc_record_endpoint_tcp` 全目标通过。该用例证明一项 RPC 语义错误映射，
 不代表完整分类矩阵、压缩失败、资源压力及连接级错误路径均已覆盖。详见
 [真实 RPC 语义错误隔离记录](rpc_v2_semantic_error_isolation_20261025.md)。
+
+dev.48 为 #242/ERR-A 增加真实 TCP 连接级错误关闭回归：两个 OPEN 已进入业务处理后注入头 CRC 错误，
+服务端不得降级为单流处理；两端 Reactor 连接均退出活动状态，两个 Endpoint 调用各以
+`UNAVAILABLE` 唯一终结，没有成功 FINAL，活动网络流归零。Release 与 TSan 下完整
+`test_rpc_record_endpoint_tcp` 通过。本切片覆盖一个不可恢复线帧错误；其他连接失败、压缩/资源组合与
+ERR-A 全矩阵及 ERR-B/C/D/E 仍待验收。详见
+[真实 RPC 连接级错误关闭记录](rpc_v2_connection_error_termination_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
