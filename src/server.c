@@ -152,7 +152,7 @@ struct tr_server {
 
 TR_DEFINE_PTR_OWNERSHIP(tr_server_mem, struct tr_server, free)
 TR_DEFINE_PTR_OWNERSHIP(tr_runtime_shard_configs,
-			struct tr_runtime_shard_config, free)
+                        struct tr_runtime_shard_config, free)
 
 static uint64_t tr_server_tls_credentials_deadline_tick(void *arg,
                                                         uint64_t now_ns);
@@ -1451,8 +1451,8 @@ tr_server_create_internal(enum tr_server_mode mode,
 	struct tr_server_config effective;
 	struct tr_facade_tuning effective_tuning;
 	struct tr_runtime_config runtime_config;
-	struct tr_runtime_shard_config *shard_configs
-	        TR_AUTO(tr_runtime_shard_configs_cleanup) = NULL;
+	struct tr_runtime_shard_config *shard_configs TR_AUTO(
+	        tr_runtime_shard_configs_cleanup) = NULL;
 	struct tr_server *server_mem TR_AUTO(tr_server_mem_cleanup) = NULL;
 	struct tr_server *server = NULL;
 	int message_compression_enabled = 0;
@@ -1634,13 +1634,17 @@ tr_server_create_internal(enum tr_server_mode mode,
 				        &server->memory_budget;
 				if (message_compression_enabled) {
 					uint32_t capacity = tr_server_budget_share(
-					        effective_tuning.executor_queue_capacity,
+					        effective_tuning
+					                .executor_queue_capacity,
 					        effective.shard_count, i);
 					if (!capacity)
 						capacity = 1U;
-					shard_config->messages.tasks.workers = 1U;
-					shard_config->messages.tasks.capacity = capacity;
-					shard_config->messages.dispatch_limit = capacity;
+					shard_config->messages.tasks.workers =
+					        1U;
+					shard_config->messages.tasks.capacity =
+					        capacity;
+					shard_config->messages.dispatch_limit =
+					        capacity;
 					shard_config->messages.watchdog_ns =
 					        UINT64_C(10000000);
 				}
@@ -1683,40 +1687,45 @@ tr_server_create_internal(enum tr_server_mode mode,
 				effective_tuning.observability_flags;
 			if (i == 0U &&
 			    effective.connection_groups
-			                    .receive_compression_algorithms != 0U) {
+			                    .receive_compression_algorithms !=
+			            0U) {
 				uint64_t active_transfer_slots =
 				        (uint64_t)effective.connection_groups
-			                        .max_groups *
-			        effective.connection_groups
-			                        .max_streams_per_group;
+				                .max_groups *
+				        effective.connection_groups
+				                .max_streams_per_group;
 				uint64_t reactor_bytes = 0U;
 				uint64_t peer_bytes =
 				        (uint64_t)peer_capacity *
 				        sizeof(struct tr_server_peer);
 				uint64_t message_budget = 0U;
-				uint32_t message_capacity = effective.connection_groups
-				                             .max_inflight_compressed_messages;
+				uint32_t message_capacity =
+				        effective.connection_groups
+				                .max_inflight_compressed_messages;
 				if (message_capacity == 0U)
 					return tr_server_create_rollback(
 					        out, server, TR_ERR_INVALID);
-				ret = tr_reactor_memory_requirement(reactor_config,
-				                                    &reactor_bytes);
+				ret = tr_reactor_memory_requirement(
+				        reactor_config, &reactor_bytes);
 				if (ret == TR_OK)
 					ret = tr_group_message_budget_required(
-					        effective.limits.max_message_bytes,
+					        effective.limits
+					                .max_message_bytes,
 					        effective.connection_groups
 					                .max_encoded_message_bytes,
-					        active_transfer_slots, message_capacity,
-					        reactor_bytes, peer_bytes,
-					        &message_budget);
+					        active_transfer_slots,
+					        message_capacity, reactor_bytes,
+					        peer_bytes, &message_budget);
 				if (ret != TR_OK)
 					return tr_server_create_rollback(
 					        out, server, ret);
-				shard_config->memory_budget_bytes = message_budget;
+				shard_config->memory_budget_bytes =
+				        message_budget;
 				shard_config->messages.tasks.workers = 1U;
 				shard_config->messages.tasks.capacity =
 				        message_capacity;
-				shard_config->messages.dispatch_limit = message_capacity;
+				shard_config->messages.dispatch_limit =
+				        message_capacity;
 				shard_config->messages.watchdog_ns =
 				        UINT64_C(10000000);
 			}
@@ -1839,28 +1848,33 @@ tr_server_create_internal(enum tr_server_mode mode,
 		group_config.stream_affinity_capacity_per_pipeline =
 			effective.connection_groups.max_streams_per_group;
 		group_config.receive_compression_algorithms =
-			effective.connection_groups.receive_compression_algorithms;
+		        effective.connection_groups
+		                .receive_compression_algorithms;
 		group_config.max_message_bytes =
-			effective.limits.max_message_bytes;
+		        effective.limits.max_message_bytes;
 		group_config.max_encoded_message_bytes =
-			effective.connection_groups.max_encoded_message_bytes;
+		        effective.connection_groups.max_encoded_message_bytes;
 		if (group_config.receive_compression_algorithms != 0U) {
 			uint64_t active_transfer_slots =
-			        (uint64_t)effective.connection_groups.max_groups *
-			        effective.connection_groups.max_streams_per_group;
+			        (uint64_t)
+			                effective.connection_groups.max_groups *
+			        effective.connection_groups
+			                .max_streams_per_group;
 
 			if (active_transfer_slots > UINT32_MAX)
 				return tr_server_create_rollback(
 				        out, server, TR_ERR_BAD_LENGTH);
-			group_config.message_task_capacity = effective.connection_groups
-			                             .max_inflight_compressed_messages;
+			group_config.message_task_capacity =
+			        effective.connection_groups
+			                .max_inflight_compressed_messages;
 			group_config.message_submit =
-				tr_runtime_shard_message_submit_adapter;
+			        tr_runtime_shard_message_submit_adapter;
 			group_config.message_cancel =
-				tr_runtime_shard_message_cancel_adapter;
+			        tr_runtime_shard_message_cancel_adapter;
 			group_config.message_context = owner_shard->runtime;
 			group_config.message_budget =
-				tr_runtime_shard_memory_budget(owner_shard->runtime);
+			        tr_runtime_shard_memory_budget(
+			                owner_shard->runtime);
 		}
 		/* 将 CONTROL 负载缓冲调优保留在内部。组连接总预算
 		 * 为并发控制发送提供保守的有界默认值，

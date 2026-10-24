@@ -75,9 +75,9 @@ int tr_rpc_record_stream_send_on_owner(
  * MessageService 接受了变换并接管正文；随后按 Channel 当前信用分片写入
  * RPC 固定头、元数据和编码正文。提交/变换失败不消费 body。 */
 int tr_rpc_record_stream_send_compressed_on_owner(
-	struct tr_rpc_record_stream *call,
-	const struct tr_rpc_record_header *header, const uint8_t *metadata,
-	struct tr_buffer **body);
+        struct tr_rpc_record_stream *call,
+        const struct tr_rpc_record_header *header, const uint8_t *metadata,
+        struct tr_buffer **body);
 
 /* 借用一段有序 Stream 字节；记录可跨多次调用，也可在一次调用中串接。
  * 完整连续记录直接借用输入；只有不完整记录才有一份按声明精确预约的

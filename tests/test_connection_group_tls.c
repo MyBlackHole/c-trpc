@@ -156,15 +156,15 @@ static const uint8_t message_body[] = "client-group-tls-data";
 static atomic_uint group_capability_frames_sent;
 
 int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
-			   uint32_t flags, uint32_t stream_id,
-			   uint64_t message_id, struct tr_buffer *payload);
+                           uint32_t flags, uint32_t stream_id,
+                           uint64_t message_id, struct tr_buffer *payload);
 
 int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
-			   uint32_t flags, uint32_t stream_id,
-			   uint64_t message_id, struct tr_buffer *payload)
+                           uint32_t flags, uint32_t stream_id,
+                           uint64_t message_id, struct tr_buffer *payload)
 {
 	int ret = __real_tr_reactor_send(connection, type, flags, stream_id,
-					 message_id, payload);
+	                                 message_id, payload);
 
 	if (ret == TR_OK && type == TR_FRAME_MESSAGE_CAPS)
 		atomic_fetch_add_explicit(&group_capability_frames_sent, 1U,
@@ -1290,7 +1290,7 @@ static void test_public_connection_group_mtls(void)
 	server_config.connection_groups.max_data_connections_per_group = 1U;
 	server_config.connection_groups.max_streams_per_group = 4U;
 	server_config.connection_groups.receive_compression_algorithms =
-		TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
 	server_config.connection_groups.max_encoded_message_bytes = 4096U;
 	server_config.connection_groups.max_inflight_compressed_messages = 1U;
 	server_config.connection_groups.authorize = authorize_group;
@@ -1316,7 +1316,7 @@ static void test_public_connection_group_mtls(void)
 	client_config.connection_groups.max_data_connections = 1U;
 	client_config.connection_groups.max_active_transfers = 2U;
 	client_config.connection_groups.send_compression_algorithms =
-		TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
 	client_config.connection_groups.max_encoded_message_bytes = 3072U;
 	client_config.connection_groups.on_transfer_ready = on_transfer_ready;
 	client_config.connection_groups.callback_arg = &state;
@@ -1407,16 +1407,16 @@ static void test_public_connection_group_mtls(void)
 	 * stream 的压缩发送不能继续借用已撤销代次的能力或身份。
 	 */
 	generation = 0U;
-	assert(tr_server_tls_update_profile(
-	               server, &rotated_server_tls, TR_TLS_ROTATE_REVOKE_OLD,
-	               &generation) == TR_OK);
+	assert(tr_server_tls_update_profile(server, &rotated_server_tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
 	assert(generation == 3U);
 	wait_for_server_group_count(server, 0U);
 	wait_for_client_group_data_closed(client);
 	generation = 0U;
-	assert(tr_client_tls_update_profile(
-	               client, &rotated_client_tls, TR_TLS_ROTATE_REVOKE_OLD,
-	               &generation) == TR_OK);
+	assert(tr_client_tls_update_profile(client, &rotated_client_tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
 	assert(generation == 3U);
 	send_ret = tr_client_connection_group_send_with_compression(
 	        client, TEST_STREAM_ID, TEST_DATA_MESSAGE_ID, &bytes,

@@ -87,11 +87,11 @@ struct tr_pipeline_listener_decoded_buffer {
 };
 
 _Static_assert(sizeof(struct tr_pipeline_listener_rx_slot) <=
-	       TR_GROUP_MESSAGE_RX_SLOT_OVERHEAD_BYTES,
-	       "Pipeline 压缩接收槽超出固定预算");
+                       TR_GROUP_MESSAGE_RX_SLOT_OVERHEAD_BYTES,
+               "Pipeline 压缩接收槽超出固定预算");
 _Static_assert(sizeof(struct tr_pipeline_listener_message_job) <=
-	       TR_GROUP_MESSAGE_JOB_SLOT_OVERHEAD_BYTES,
-	       "Pipeline 压缩任务槽超出固定预算");
+                       TR_GROUP_MESSAGE_JOB_SLOT_OVERHEAD_BYTES,
+               "Pipeline 压缩任务槽超出固定预算");
 
 struct tr_pipeline_listener_session {
 	struct tr_pipeline_listener *listener;
@@ -351,15 +351,15 @@ tr_pipeline_listener_connection_exact(
 }
 
 static int tr_pipeline_listener_conn_equal(struct tr_conn_handle left,
-					  struct tr_conn_handle right)
+                                           struct tr_conn_handle right)
 {
 	return left.reactor == right.reactor && left.slot == right.slot &&
 	       left.generation == right.generation;
 }
 
-static int tr_pipeline_listener_route_equal(
-	const struct tr_pipeline_route_preface *left,
-	const struct tr_pipeline_route_preface *right)
+static int
+tr_pipeline_listener_route_equal(const struct tr_pipeline_route_preface *left,
+                                 const struct tr_pipeline_route_preface *right)
 {
 	return left && right && left->version == right->version &&
 	       left->role == right->role &&
@@ -370,18 +370,16 @@ static int tr_pipeline_listener_route_equal(
 	       left->member_generation == right->member_generation;
 }
 
-static struct tr_pipeline_listener_rx_slot *
-tr_pipeline_listener_rx_find(struct tr_pipeline_listener *listener,
-			     uint32_t connection_index,
-			     uint32_t connection_generation,
-			     const struct tr_pipeline_route_preface *route,
-			     uint32_t stream_id)
+static struct tr_pipeline_listener_rx_slot *tr_pipeline_listener_rx_find(
+        struct tr_pipeline_listener *listener, uint32_t connection_index,
+        uint32_t connection_generation,
+        const struct tr_pipeline_route_preface *route, uint32_t stream_id)
 {
 	uint32_t i;
 
 	for (i = 0; i < listener->rx_slot_capacity; ++i) {
 		struct tr_pipeline_listener_rx_slot *slot =
-			&listener->rx_slots[i];
+		        &listener->rx_slots[i];
 
 		if (slot->used && slot->connection_index == connection_index &&
 		    slot->connection_generation == connection_generation &&
@@ -405,16 +403,16 @@ tr_pipeline_listener_rx_free(struct tr_pipeline_listener *listener)
 
 static struct tr_pipeline_listener_message_job *
 tr_pipeline_listener_job_reserve(
-	struct tr_pipeline_listener *listener,
-	struct tr_pipeline_listener_connection *tracked,
-	uint32_t connection_index, struct tr_conn_handle connection,
-	uint32_t stream_id, uint64_t message_id, uint32_t *job_index_out)
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_connection *tracked,
+        uint32_t connection_index, struct tr_conn_handle connection,
+        uint32_t stream_id, uint64_t message_id, uint32_t *job_index_out)
 {
 	uint32_t i;
 
 	for (i = 0; i < listener->config.message_task_capacity; ++i) {
 		struct tr_pipeline_listener_message_job *job =
-			&listener->message_jobs[i];
+		        &listener->message_jobs[i];
 
 		if (job->used)
 			continue;
@@ -435,8 +433,8 @@ tr_pipeline_listener_job_reserve(
 	return NULL;
 }
 
-static void tr_pipeline_listener_job_clear(
-	struct tr_pipeline_listener_message_job *job)
+static void
+tr_pipeline_listener_job_clear(struct tr_pipeline_listener_message_job *job)
 {
 	struct tr_pipeline_listener *listener;
 
@@ -450,18 +448,19 @@ static void tr_pipeline_listener_job_clear(
 		tr_pipeline_listener_publish_drain_progress_on_owner(listener);
 }
 
-static void tr_pipeline_listener_rx_clear(
-	struct tr_pipeline_listener *listener,
-	struct tr_pipeline_listener_rx_slot *slot, int clear_job)
+static void
+tr_pipeline_listener_rx_clear(struct tr_pipeline_listener *listener,
+                              struct tr_pipeline_listener_rx_slot *slot,
+                              int clear_job)
 {
 	if (!listener || !slot || !slot->used)
 		return;
-	if (slot->builder &&
-	    tr_message_builder_cancel(&slot->builder) != TR_OK)
+	if (slot->builder && tr_message_builder_cancel(&slot->builder) != TR_OK)
 		return;
-	if (clear_job && slot->job_index < listener->config.message_task_capacity) {
+	if (clear_job &&
+	    slot->job_index < listener->config.message_task_capacity) {
 		struct tr_pipeline_listener_message_job *job =
-			&listener->message_jobs[slot->job_index];
+		        &listener->message_jobs[slot->job_index];
 		if (job->used && !job->submitted)
 			tr_pipeline_listener_job_clear(job);
 	}
@@ -472,8 +471,8 @@ static void tr_pipeline_listener_rx_clear(
 }
 
 static void tr_pipeline_listener_retire_compression_route(
-	struct tr_pipeline_listener *listener, uint32_t connection_index,
-	uint32_t connection_generation)
+        struct tr_pipeline_listener *listener, uint32_t connection_index,
+        uint32_t connection_generation)
 {
 	uint32_t i;
 
@@ -481,7 +480,7 @@ static void tr_pipeline_listener_retire_compression_route(
 		return;
 	for (i = 0; i < listener->rx_slot_capacity; ++i) {
 		struct tr_pipeline_listener_rx_slot *slot =
-			&listener->rx_slots[i];
+		        &listener->rx_slots[i];
 
 		if (slot->used && slot->connection_index == connection_index &&
 		    slot->connection_generation == connection_generation)
@@ -489,7 +488,7 @@ static void tr_pipeline_listener_retire_compression_route(
 	}
 	for (i = 0; i < listener->config.message_task_capacity; ++i) {
 		struct tr_pipeline_listener_message_job *job =
-			&listener->message_jobs[i];
+		        &listener->message_jobs[i];
 
 		if (!job->used || job->connection_index != connection_index ||
 		    job->connection_generation != connection_generation)
@@ -505,11 +504,11 @@ static void tr_pipeline_listener_retire_compression_route(
 	}
 }
 
-static void tr_pipeline_listener_decoded_buffer_release(
-	struct tr_buffer *buffer)
+static void
+tr_pipeline_listener_decoded_buffer_release(struct tr_buffer *buffer)
 {
 	struct tr_pipeline_listener_decoded_buffer *decoded =
-		(struct tr_pipeline_listener_decoded_buffer *)buffer;
+	        (struct tr_pipeline_listener_decoded_buffer *)buffer;
 	struct tr_pipeline_listener *listener = decoded->listener;
 	struct tr_memory_budget *budget = decoded->budget;
 
@@ -520,8 +519,8 @@ static void tr_pipeline_listener_decoded_buffer_release(
 	                          memory_order_acq_rel);
 }
 
-static int tr_pipeline_listener_transform_error(
-	enum tr_message_transform_outcome outcome)
+static int
+tr_pipeline_listener_transform_error(enum tr_message_transform_outcome outcome)
 {
 	switch (outcome) {
 	case TR_MESSAGE_TRANSFORM_CANCELLED:
@@ -542,7 +541,7 @@ static int tr_pipeline_listener_transform_error(
 
 static struct tr_pipeline_listener_connection *
 tr_pipeline_listener_job_connection(
-	struct tr_pipeline_listener_message_job *job)
+        struct tr_pipeline_listener_message_job *job)
 {
 	struct tr_pipeline_listener_connection *tracked;
 	struct tr_pipeline_listener *listener = job->listener;
@@ -551,18 +550,20 @@ tr_pipeline_listener_job_connection(
 	        listener, job->connection_index, job->connection_generation);
 	if (!tracked || tracked->role != TR_PIPELINE_LISTENER_CONN_DATA ||
 	    !tracked->message_caps_received || job->cancelled ||
-	    !tr_pipeline_listener_conn_equal(tracked->handle, job->connection) ||
+	    !tr_pipeline_listener_conn_equal(tracked->handle,
+	                                     job->connection) ||
 	    !tr_pipeline_listener_route_equal(&tracked->route, &job->route))
 		return NULL;
 	return tracked;
 }
 
-static void tr_pipeline_listener_message_done(
-	void *arg, struct tr_task_handle handle,
-	struct tr_message_service_result result, struct tr_message *message)
+static void
+tr_pipeline_listener_message_done(void *arg, struct tr_task_handle handle,
+                                  struct tr_message_service_result result,
+                                  struct tr_message *message)
 {
 	struct tr_pipeline_listener_message_job *job =
-		(struct tr_pipeline_listener_message_job *)arg;
+	        (struct tr_pipeline_listener_message_job *)arg;
 	struct tr_pipeline_listener *listener;
 	struct tr_pipeline_listener_connection *tracked = NULL;
 	struct tr_message decoded = {0};
@@ -586,7 +587,8 @@ static void tr_pipeline_listener_message_done(
 		return;
 	}
 	if (result.delivery == TR_MESSAGE_SERVICE_OWNER_STOPPED) {
-		/* 父 owner 已 join；这里只退休槽位，不操作连接或应用协议状态。 */
+		/* 父 owner 已 join；这里只退休槽位，不操作连接或应用协议状态。
+		 */
 		tr_pipeline_listener_job_clear(job);
 		return;
 	}
@@ -600,8 +602,8 @@ static void tr_pipeline_listener_message_done(
 		    view.len > UINT32_MAX) {
 			abort_status = ret == TR_OK ? TR_ERR_BAD_LENGTH : ret;
 		} else {
-			ret = tr_memory_budget_reserve(listener->config.message_budget,
-			                              wrapper_bytes);
+			ret = tr_memory_budget_reserve(
+			        listener->config.message_budget, wrapper_bytes);
 			if (ret == TR_OK) {
 				wrapper_reserved = 1;
 				owned = calloc(1, sizeof(*owned));
@@ -620,15 +622,17 @@ static void tr_pipeline_listener_message_done(
 				        listener->config.max_message_bytes;
 				message_limits.max_encoded_bytes =
 				        listener->config.max_message_bytes;
-				ret = tr_message_none_move(&decoded, &message_limits,
-				                          &owned->message);
+				ret = tr_message_none_move(&decoded,
+				                           &message_limits,
+				                           &owned->message);
 			}
 			if (ret == TR_OK)
 				ret = tr_message_view(&owned->message, &view);
 			if (ret != TR_OK) {
 				(void)tr_message_release(&decoded);
 				if (owned) {
-					(void)tr_message_release(&owned->message);
+					(void)tr_message_release(
+					        &owned->message);
 					(void)tr_memory_budget_release(
 					        listener->config.message_budget,
 					        wrapper_bytes);
@@ -664,8 +668,10 @@ static void tr_pipeline_listener_message_done(
 				frame.header.payload_len = (uint32_t)view.len;
 				frame.payload = &owned->buffer;
 				if (listener->config.data_frame_cb(
-				            &tracked->route, job->connection, &frame,
-				            listener->config.data_callback_arg) !=
+				            &tracked->route, job->connection,
+				            &frame,
+				            listener->config
+				                    .data_callback_arg) !=
 				    TR_FRAME_TAKE_OWNERSHIP) {
 					tr_buffer_release(&owned->buffer);
 				}
@@ -686,9 +692,9 @@ static void tr_pipeline_listener_message_done(
 	tr_pipeline_listener_job_clear(job);
 }
 
-static int tr_pipeline_listener_submit_decode(
-	struct tr_pipeline_listener *listener,
-	struct tr_pipeline_listener_rx_slot *slot)
+static int
+tr_pipeline_listener_submit_decode(struct tr_pipeline_listener *listener,
+                                   struct tr_pipeline_listener_rx_slot *slot)
 {
 	struct tr_pipeline_listener_message_job *job;
 	struct tr_message input = {0};
@@ -734,9 +740,9 @@ static int tr_pipeline_listener_submit_decode(
 }
 
 static int tr_pipeline_listener_receive_compressed(
-	struct tr_pipeline_listener *listener,
-	struct tr_pipeline_listener_connection *tracked,
-	struct tr_conn_handle connection, struct tr_frame *frame)
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_connection *tracked,
+        struct tr_conn_handle connection, struct tr_frame *frame)
 {
 	struct tr_pipeline_listener_rx_slot *slot;
 	struct tr_pipeline_listener_rx_slot *free_slot;
@@ -758,16 +764,18 @@ static int tr_pipeline_listener_receive_compressed(
 		return TR_ERR_BAD_LENGTH;
 	if (listener->rx_slot_capacity == 0U ||
 	    listener->config.message_task_capacity == 0U ||
-	    !listener->config.message_submit || !listener->config.message_cancel ||
-	    !listener->config.message_context || !listener->config.message_budget)
+	    !listener->config.message_submit ||
+	    !listener->config.message_cancel ||
+	    !listener->config.message_context ||
+	    !listener->config.message_budget)
 		return TR_ERR_UNSUPPORTED;
 	if (tracked->role != TR_PIPELINE_LISTENER_CONN_DATA ||
 	    !tracked->message_caps_received || frame->header.stream_id == 0U ||
 	    frame->header.message_id == 0U ||
 	    !(listener->config.receive_compression_algorithms &
 	      TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD) ||
-	    (frame->header.flags &
-	     ~(TR_FRAME_F_COMPRESSED | TR_FRAME_F_FIRST | TR_FRAME_F_LAST)) != 0U ||
+	    (frame->header.flags & ~(TR_FRAME_F_COMPRESSED | TR_FRAME_F_FIRST |
+	                             TR_FRAME_F_LAST)) != 0U ||
 	    !(frame->header.flags & TR_FRAME_F_COMPRESSED))
 		return TR_ERR_BAD_TYPE;
 
@@ -775,8 +783,8 @@ static int tr_pipeline_listener_receive_compressed(
 	last = (frame->header.flags & TR_FRAME_F_LAST) != 0U;
 	connection_index = (uint32_t)(tracked - listener->connections);
 	slot = tr_pipeline_listener_rx_find(
-	        listener, connection_index, tracked->generation, &tracked->route,
-	        frame->header.stream_id);
+	        listener, connection_index, tracked->generation,
+	        &tracked->route, frame->header.stream_id);
 	payload_bytes = frame->payload->len;
 
 	if (first) {
@@ -831,12 +839,11 @@ static int tr_pipeline_listener_receive_compressed(
 	}
 
 	append_bytes = payload_bytes - payload_offset;
-	if (append_bytes > slot->encoded_body_bytes -
-	                           slot->received_body_bytes)
+	if (append_bytes > slot->encoded_body_bytes - slot->received_body_bytes)
 		return TR_ERR_BAD_LENGTH;
-	ret = tr_message_builder_append(
-	        slot->builder, frame->payload->data + payload_offset,
-	        append_bytes);
+	ret = tr_message_builder_append(slot->builder,
+	                                frame->payload->data + payload_offset,
+	                                append_bytes);
 	if (ret != TR_OK)
 		return ret;
 	slot->received_body_bytes += append_bytes;
@@ -1094,12 +1101,13 @@ static enum tr_frame_disposition tr_pipeline_listener_data_frame(
 		    frame->header.message_id != 0U || !frame->payload ||
 		    frame->payload->len != TR_MESSAGE_CAPS_WIRE_SIZE ||
 		    tracked->message_caps_received) {
-			(void)tr_reactor_abort_on_owner(connection, TR_ERR_BAD_TYPE);
+			(void)tr_reactor_abort_on_owner(connection,
+			                                TR_ERR_BAD_TYPE);
 			return TR_FRAME_RELEASE;
 		}
 		memset(&peer_caps, 0, sizeof(peer_caps));
 		ret = tr_message_caps_decode(frame->payload->data,
-		                            frame->payload->len, &peer_caps);
+		                             frame->payload->len, &peer_caps);
 		if (ret != TR_OK || peer_caps.receive_algorithm_bits != 0U ||
 		    peer_caps.max_encoded_wire_bytes != 0U) {
 			if (ret == TR_OK)
@@ -1117,9 +1125,8 @@ static enum tr_frame_disposition tr_pipeline_listener_data_frame(
 			ret = tr_message_caps_encode(buffer->data, &local_caps);
 		if (ret == TR_OK) {
 			buffer->len = TR_MESSAGE_CAPS_WIRE_SIZE;
-			ret = tr_reactor_send(
-			        connection, TR_FRAME_MESSAGE_CAPS, 0U, 0U, 0U,
-			        buffer);
+			ret = tr_reactor_send(connection, TR_FRAME_MESSAGE_CAPS,
+			                      0U, 0U, 0U, buffer);
 			if (ret == TR_OK)
 				buffer = NULL;
 		}
@@ -1141,7 +1148,8 @@ static enum tr_frame_disposition tr_pipeline_listener_data_frame(
 			        listener, tracked, connection, frame);
 			if (ret != TR_OK) {
 				tr_pipeline_listener_retire_compression_route(
-				        listener, connection_index, tracked->generation);
+				        listener, connection_index,
+				        tracked->generation);
 				(void)tr_reactor_abort_on_owner(
 				        connection,
 				        ret < 0 ? ret : TR_ERR_STATE);
@@ -1152,8 +1160,10 @@ static enum tr_frame_disposition tr_pipeline_listener_data_frame(
 		            listener, connection_index, tracked->generation,
 		            &tracked->route, frame->header.stream_id)) {
 			tr_pipeline_listener_retire_compression_route(
-			        listener, connection_index, tracked->generation);
-			(void)tr_reactor_abort_on_owner(connection, TR_ERR_BAD_TYPE);
+			        listener, connection_index,
+			        tracked->generation);
+			(void)tr_reactor_abort_on_owner(connection,
+			                                TR_ERR_BAD_TYPE);
 			return TR_FRAME_RELEASE;
 		}
 	}
@@ -2225,8 +2235,7 @@ int tr_pipeline_listener_create(
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	if (!config || !config->owner ||
-	    config->owner_shard_id == UINT32_MAX ||
+	if (!config || !config->owner || config->owner_shard_id == UINT32_MAX ||
 	    (config->receive_compression_algorithms &
 	     ~TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD) ||
 	    (!config->receive_compression_algorithms &&
@@ -2243,17 +2252,16 @@ int tr_pipeline_listener_create(
 	    (config->authorize_async && (!config->authorization_operations ||
 	                                 config->authorization_capacity == 0U)))
 		return TR_ERR_INVALID;
-	message_service_configured = config->message_submit ||
-	                             config->message_cancel ||
-	                             config->message_context ||
-	                             config->message_budget ||
-	                             config->message_task_capacity;
+	message_service_configured =
+	        config->message_submit || config->message_cancel ||
+	        config->message_context || config->message_budget ||
+	        config->message_task_capacity;
 	if (message_service_configured &&
 	    (!config->receive_compression_algorithms ||
 	     config->max_message_bytes == 0U ||
-	     config->message_task_capacity == 0U ||
-	     !config->message_submit || !config->message_cancel ||
-	     !config->message_context || !config->message_budget))
+	     config->message_task_capacity == 0U || !config->message_submit ||
+	     !config->message_cancel || !config->message_context ||
+	     !config->message_budget))
 		return TR_ERR_INVALID;
 	if (config->message_task_capacity != 0U) {
 		rx_slot_capacity64 =
@@ -2265,7 +2273,8 @@ int tr_pipeline_listener_create(
 		job_allocation_bytes =
 		        (uint64_t)config->message_task_capacity *
 		        sizeof(struct tr_pipeline_listener_message_job);
-		if (rx_slot_capacity64 == 0U || rx_slot_capacity64 > UINT32_MAX ||
+		if (rx_slot_capacity64 == 0U ||
+		    rx_slot_capacity64 > UINT32_MAX ||
 		    rx_allocation_bytes > SIZE_MAX ||
 		    job_allocation_bytes > SIZE_MAX)
 			return TR_ERR_BAD_LENGTH;
@@ -2283,9 +2292,8 @@ int tr_pipeline_listener_create(
 	if (listener->config.handshake_timeout_ms == 0U)
 		listener->config.handshake_timeout_ms = 10000U;
 	if (config->message_task_capacity != 0U) {
-		uint64_t rx_overhead =
-		        rx_slot_capacity64 *
-		        TR_GROUP_MESSAGE_RX_SLOT_OVERHEAD_BYTES;
+		uint64_t rx_overhead = rx_slot_capacity64 *
+		                       TR_GROUP_MESSAGE_RX_SLOT_OVERHEAD_BYTES;
 		uint64_t job_overhead =
 		        (uint64_t)config->message_task_capacity *
 		        TR_GROUP_MESSAGE_JOB_SLOT_OVERHEAD_BYTES;
@@ -2296,17 +2304,17 @@ int tr_pipeline_listener_create(
 		}
 		uint64_t state_bytes = rx_overhead + job_overhead;
 
-		ret = tr_memory_budget_reserve(
-		        config->message_budget, state_bytes);
+		ret = tr_memory_budget_reserve(config->message_budget,
+		                               state_bytes);
 		if (ret != TR_OK)
 			goto fail;
 		listener->message_state_reserved_bytes = state_bytes;
 		listener->rx_slot_capacity = (uint32_t)rx_slot_capacity64;
 		listener->rx_slots = calloc(listener->rx_slot_capacity,
-		                           sizeof(*listener->rx_slots));
-		listener->message_jobs = calloc(
-		        config->message_task_capacity,
-		        sizeof(*listener->message_jobs));
+		                            sizeof(*listener->rx_slots));
+		listener->message_jobs =
+		        calloc(config->message_task_capacity,
+		               sizeof(*listener->message_jobs));
 		if (!listener->rx_slots || !listener->message_jobs) {
 			ret = TR_ERR_NOMEM;
 			goto fail;
@@ -2676,7 +2684,7 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 			        listener, &listener->rx_slots[i], 1);
 	for (i = 0; i < listener->config.message_task_capacity; ++i) {
 		struct tr_pipeline_listener_message_job *job =
-			&listener->message_jobs[i];
+		        &listener->message_jobs[i];
 		int ret;
 
 		if (!job->used)
@@ -2688,8 +2696,8 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 		}
 		ret = listener->config.message_cancel(
 		        listener->config.message_context, job->task);
-		if (ret != TR_OK && ret != TR_ERR_STATE && ret != TR_ERR_STALE &&
-		    result == TR_OK)
+		if (ret != TR_OK && ret != TR_ERR_STATE &&
+		    ret != TR_ERR_STALE && result == TR_OK)
 			result = ret;
 	}
 	/* close_on_owner 会同步触发 preface release 和 provider cancel。

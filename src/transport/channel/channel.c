@@ -289,7 +289,7 @@ struct tr_channel {
 };
 
 int tr_channel_message_cancel_on_owner(struct tr_channel *channel,
-					       struct tr_task_handle task);
+                                       struct tr_task_handle task);
 static void
 tr_stream_drop_compressed_send_locked(struct tr_channel *channel,
                                       struct tr_stream_slot *stream);
@@ -5561,7 +5561,7 @@ int tr_channel_message_submit_on_owner(
 }
 
 int tr_channel_message_cancel_on_owner(struct tr_channel *channel,
-					       struct tr_task_handle task)
+                                       struct tr_task_handle task)
 {
 	tr_channel_message_cancel_fn cancel;
 	void *context;
@@ -6145,9 +6145,9 @@ int tr_channel_get_capabilities(struct tr_channel *channel, enum tr_lane lane,
 	return TR_OK;
 }
 
-int tr_channel_message_limits_on_owner(
-	struct tr_channel *channel, enum tr_lane lane,
-	struct tr_channel_message_limits *out)
+int tr_channel_message_limits_on_owner(struct tr_channel *channel,
+                                       enum tr_lane lane,
+                                       struct tr_channel_message_limits *out)
 {
 	struct tr_channel_message_limits snapshot;
 	const struct tr_channel_capabilities *caps;

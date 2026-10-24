@@ -568,7 +568,8 @@ static int probe_registry(void *arg)
 	              f->server.channel, invalid, 4, CAP, terminal, f,
 	              &f->server.budget, &router) == TR_ERR_INVALID);
 	memcpy(invalid, f->methods, sizeof(invalid));
-	invalid[0].descriptor.request_compression_algorithms = UINT32_C(0x80000000);
+	invalid[0].descriptor.request_compression_algorithms =
+	        UINT32_C(0x80000000);
 	CHECK(tr_rpc_record_router_create_on_owner(
 	              f->server.channel, invalid, 4, CAP, terminal, f,
 	              &f->server.budget, &router) == TR_ERR_INVALID);

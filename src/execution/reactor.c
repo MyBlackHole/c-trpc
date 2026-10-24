@@ -3589,7 +3589,7 @@ static int tr_reactor_fixed_memory_bytes(
 }
 
 int tr_reactor_memory_requirement(const struct tr_reactor_config *config,
-				 uint64_t *out)
+                                  uint64_t *out)
 {
 	struct tr_reactor_config effective;
 
@@ -3603,7 +3603,6 @@ int tr_reactor_memory_requirement(const struct tr_reactor_config *config,
 		return TR_ERR_BAD_LENGTH;
 	return tr_reactor_fixed_memory_bytes(&effective, out);
 }
-
 
 struct tr_reactor_build {
 	struct tr_reactor *reactor;

@@ -80,8 +80,8 @@ struct tr_rpc_record_dispatch_stats {
 int tr_rpc_record_reply_append(struct tr_rpc_record_reply *reply,
                                const void *data, size_t size);
 int tr_rpc_record_reply_append_with_compression(
-	struct tr_rpc_record_reply *reply, const void *data, size_t size,
-	enum tr_rpc_compression compression);
+        struct tr_rpc_record_reply *reply, const void *data, size_t size,
+        enum tr_rpc_compression compression);
 /* 与公共 reply_set_metadata 相同的有界复制、阶段与整批错误合同。
  * INITIAL 的阶段状态在任务提交时固定；TRAILING 必须属于本次终局。
  * 每阶段最多 512 字节，单独计入共享预算；不扩大正文限额。 */

@@ -80,8 +80,7 @@ struct tr_rpc_record_tx_item {
 	unsigned ready;
 	unsigned owner_stopped;
 	unsigned reset_requested;
-	uint8_t prefix[TR_RPC_RECORD_HEADER_SIZE +
-	               TR_RPC_METADATA_MAX_BYTES];
+	uint8_t prefix[TR_RPC_RECORD_HEADER_SIZE + TR_RPC_METADATA_MAX_BYTES];
 };
 
 /* 位于独立 TX 对象中；发送接受之后不再引用 Call，最后释放可能发生在
@@ -181,7 +180,7 @@ static int tr_record_metadata_valid(const uint8_t *data, uint32_t size)
 }
 
 static int tr_record_preflight(const struct tr_rpc_record_stream *call,
-			       const struct tr_rpc_record_state *base,
+                               const struct tr_rpc_record_state *base,
                                enum tr_rpc_record_direction direction,
                                const struct tr_rpc_record_header *header,
                                struct tr_rpc_record_state *next)
@@ -210,10 +209,10 @@ static int tr_record_preflight(const struct tr_rpc_record_stream *call,
 /* 一个方向的接收变换可能尚未完成时，另一个方向仍可提交记录。合并已接受
  * 的发送事件时只复制发送方向字段，不能把排队中的接收快照提前写入真实状态。
  */
-static void tr_record_state_merge_direction(
-	struct tr_rpc_record_state *destination,
-	const struct tr_rpc_record_state *source,
-	enum tr_rpc_record_direction direction)
+static void
+tr_record_state_merge_direction(struct tr_rpc_record_state *destination,
+                                const struct tr_rpc_record_state *source,
+                                enum tr_rpc_record_direction direction)
 {
 	if (direction == TR_RPC_RECORD_REQUEST_DIRECTION) {
 		destination->request_messages = source->request_messages;
@@ -298,8 +297,7 @@ int tr_rpc_record_stream_create_on_owner(
 	                  ? config->method.max_response_bytes
 	                  : config->method.max_request_bytes;
 	rx_encoded_size = rx_size;
-	send_policy = config->send_direction ==
-	                              TR_RPC_RECORD_REQUEST_DIRECTION
+	send_policy = config->send_direction == TR_RPC_RECORD_REQUEST_DIRECTION
 	                      ? config->method.request_compression_algorithms
 	                      : config->method.response_compression_algorithms;
 	uint32_t receive_policy =
@@ -331,7 +329,8 @@ int tr_rpc_record_stream_create_on_owner(
 	call->tx_window_log = message_limits.max_compression_window_log;
 	if ((send_policy & TR_RPC_COMPRESSION_MASK_ZSTD) &&
 	    message_limits.peer_caps_ready &&
-	    (message_limits.peer_receive_algorithms & TR_MESSAGE_ALGORITHM_ZSTD) &&
+	    (message_limits.peer_receive_algorithms &
+	     TR_MESSAGE_ALGORITHM_ZSTD) &&
 	    message_limits.peer_max_encoded_wire_bytes >
 	            TR_MESSAGE_ENVELOPE_WIRE_SIZE) {
 		call->tx_encoded_body_limit =
@@ -361,7 +360,7 @@ static void tr_record_prefix_release(struct tr_buffer *buffer)
 }
 
 static void tr_record_tx_item_release(struct tr_rpc_record_stream *call,
-				      struct tr_rpc_record_tx_item *item)
+                                      struct tr_rpc_record_tx_item *item)
 {
 	if (item->encoded._storage)
 		(void)tr_message_release(&item->encoded);
@@ -373,11 +372,11 @@ static void tr_record_tx_item_release(struct tr_rpc_record_stream *call,
 }
 
 static void tr_record_tx_cancel(struct tr_rpc_record_stream *call);
-static enum tr_rpc_status tr_record_transform_status(
-	enum tr_message_transform_outcome outcome);
+static enum tr_rpc_status
+tr_record_transform_status(enum tr_message_transform_outcome outcome);
 
-static int tr_record_tx_copy(struct tr_rpc_record_tx_item *item,
-			     uint8_t *out, size_t offset, size_t size)
+static int tr_record_tx_copy(struct tr_rpc_record_tx_item *item, uint8_t *out,
+                             size_t offset, size_t size)
 {
 	struct tr_message_view encoded;
 	size_t prefix_size = item->prefix_size;
@@ -407,15 +406,14 @@ static int tr_record_tx_copy(struct tr_rpc_record_tx_item *item,
 }
 
 static int tr_record_tx_send_chunk(struct tr_rpc_record_stream *call,
-				   struct tr_rpc_record_tx_item *item,
-				   size_t offset, size_t size)
+                                   struct tr_rpc_record_tx_item *item,
+                                   size_t offset, size_t size)
 {
 	struct tr_rpc_record_prefix *chunk;
 	struct tr_stream_diagnostics diagnostics;
 	size_t allocation_size;
 	int ret;
-	if (!size || size > UINT32_MAX ||
-	    size > SIZE_MAX - sizeof(*chunk))
+	if (!size || size > UINT32_MAX || size > SIZE_MAX - sizeof(*chunk))
 		return TR_ERR_BAD_LENGTH;
 	allocation_size = sizeof(*chunk) + size;
 	ret = tr_memory_budget_reserve(call->budget, allocation_size);
@@ -428,10 +426,10 @@ static int tr_record_tx_send_chunk(struct tr_rpc_record_stream *call,
 	}
 	chunk->budget = call->budget;
 	chunk->bytes = allocation_size;
-	chunk->buffer = (struct tr_buffer){
-	        .data = chunk->data,
-	        .capacity = (uint32_t)size,
-	        .release_cb = tr_record_prefix_release};
+	chunk->buffer =
+	        (struct tr_buffer){.data = chunk->data,
+	                           .capacity = (uint32_t)size,
+	                           .release_cb = tr_record_prefix_release};
 	ret = tr_record_tx_copy(item, chunk->data, offset, size);
 	if (ret != TR_OK) {
 		tr_buffer_release(&chunk->buffer);
@@ -561,7 +559,8 @@ static void tr_record_tx_cancel(struct tr_rpc_record_stream *call)
 		        call->stream,
 		        call->state.terminal
 		                ? tr_rpc_record_reset_reason(
-		                          (enum tr_rpc_status)call->state.final_status)
+		                          (enum tr_rpc_status)
+		                                  call->state.final_status)
 		                : TR_ERR_SYS);
 	}
 	if (item->transform_active) {
@@ -572,9 +571,9 @@ static void tr_record_tx_cancel(struct tr_rpc_record_stream *call)
 	tr_record_tx_item_release(call, item);
 }
 
-static void tr_record_tx_transform_done(
-	void *arg, struct tr_task_handle handle,
-	struct tr_message_service_result result, struct tr_message *message)
+static void tr_record_tx_transform_done(void *arg, struct tr_task_handle handle,
+                                        struct tr_message_service_result result,
+                                        struct tr_message *message)
 {
 	struct tr_rpc_record_tx_item *item = arg;
 	struct tr_rpc_record_stream *call = item->call;
@@ -643,10 +642,10 @@ static void tr_record_tx_transform_done(
 	tr_record_tx_pump(call);
 }
 
-static int tr_record_tx_item_create(
-	struct tr_rpc_record_stream *call,
-	const struct tr_rpc_record_header *header, const uint8_t *metadata,
-	struct tr_rpc_record_tx_item **out)
+static int tr_record_tx_item_create(struct tr_rpc_record_stream *call,
+                                    const struct tr_rpc_record_header *header,
+                                    const uint8_t *metadata,
+                                    struct tr_rpc_record_tx_item **out)
 {
 	struct tr_rpc_record_tx_item *item;
 	int ret = tr_memory_budget_reserve(call->budget, sizeof(*item));
@@ -669,9 +668,9 @@ static int tr_record_tx_item_create(
 }
 
 int tr_rpc_record_stream_send_compressed_on_owner(
-	struct tr_rpc_record_stream *call,
-	const struct tr_rpc_record_header *header, const uint8_t *metadata,
-	struct tr_buffer **body)
+        struct tr_rpc_record_stream *call,
+        const struct tr_rpc_record_header *header, const uint8_t *metadata,
+        struct tr_buffer **body)
 {
 	struct tr_rpc_record_header intent;
 	struct tr_rpc_record_state next;
@@ -785,8 +784,8 @@ int tr_rpc_record_stream_send_on_owner(
 	if (call->rx_head && header->kind == TR_RPC_RECORD_FINAL_STATUS)
 		return TR_AGAIN;
 	base = call->rx_tail ? &call->rx_reserved_state : &call->state;
-	ret = tr_record_preflight(call, base,
-	                          call->config.send_direction, header, &next);
+	ret = tr_record_preflight(call, base, call->config.send_direction,
+	                          header, &next);
 	if (ret != TR_OK)
 		return ret;
 	wire_size = TR_RPC_RECORD_HEADER_SIZE + header->metadata_size;
@@ -843,7 +842,7 @@ int tr_rpc_record_stream_send_on_owner(
 }
 
 static void tr_record_rx_item_release(struct tr_rpc_record_stream *call,
-				      struct tr_rpc_record_rx_item *item)
+                                      struct tr_rpc_record_rx_item *item)
 {
 	if (item->decoded._storage)
 		(void)tr_message_release(&item->decoded);
@@ -859,8 +858,8 @@ static void tr_record_rx_cancel(struct tr_rpc_record_stream *call);
 
 static struct tr_rpc_record_rx_item *
 tr_record_rx_item_create(struct tr_rpc_record_stream *call,
-			 const struct tr_rpc_record_view *view,
-			 const struct tr_rpc_record_state *next)
+                         const struct tr_rpc_record_view *view,
+                         const struct tr_rpc_record_state *next)
 {
 	struct tr_rpc_record_rx_item *item;
 	if (tr_memory_budget_reserve(call->budget, sizeof(*item)) != TR_OK)
@@ -881,7 +880,7 @@ tr_record_rx_item_create(struct tr_rpc_record_stream *call,
 }
 
 static void tr_record_rx_append(struct tr_rpc_record_stream *call,
-				struct tr_rpc_record_rx_item *item)
+                                struct tr_rpc_record_rx_item *item)
 {
 	if (call->rx_tail)
 		call->rx_tail->next = item;
@@ -892,15 +891,15 @@ static void tr_record_rx_append(struct tr_rpc_record_stream *call,
 }
 
 static int tr_record_rx_copy_body(struct tr_rpc_record_stream *call,
-				  struct tr_rpc_record_rx_item *item,
-				  const uint8_t *body)
+                                  struct tr_rpc_record_rx_item *item,
+                                  const uint8_t *body)
 {
 	if (!item->header.encoded_size)
 		return TR_OK;
 	if (!body)
 		return TR_ERR_INVALID;
-	if (tr_memory_budget_reserve(call->budget,
-	                             item->header.encoded_size) != TR_OK)
+	if (tr_memory_budget_reserve(call->budget, item->header.encoded_size) !=
+	    TR_OK)
 		return TR_ERR_NOMEM;
 	item->body = malloc(item->header.encoded_size);
 	if (!item->body) {
@@ -931,7 +930,7 @@ tr_record_transform_status(enum tr_message_transform_outcome outcome)
 }
 
 static void tr_record_rx_flush(struct tr_rpc_record_stream *call,
-			       enum tr_rpc_record_delivery delivery)
+                               enum tr_rpc_record_delivery delivery)
 {
 	while (call->rx_head && call->rx_head->ready) {
 		struct tr_rpc_record_rx_item *item = call->rx_head;
@@ -965,7 +964,8 @@ static void tr_record_rx_flush(struct tr_rpc_record_stream *call,
 		        .body = item->body};
 		if (item->decoded._storage) {
 			struct tr_message_view decoded;
-			if (tr_message_view(&item->decoded, &decoded) != TR_OK) {
+			if (tr_message_view(&item->decoded, &decoded) !=
+			    TR_OK) {
 				(void)tr_rpc_record_stream_abort_on_owner(
 				        call, TR_RPC_STATUS_INTERNAL);
 				tr_record_rx_item_release(call, item);
@@ -993,15 +993,15 @@ static void tr_record_rx_flush(struct tr_rpc_record_stream *call,
 				        call, call->stream, event, status);
 		}
 	}
-	if (!call->rx_head && call->tx_pending &&
-	    call->tx_pending->ready && !call->state.terminal)
+	if (!call->rx_head && call->tx_pending && call->tx_pending->ready &&
+	    !call->state.terminal)
 		(void)tr_record_tx_pump(call);
 	tr_record_notify_terminal(call, delivery);
 }
 
-static void tr_record_rx_transform_done(
-	void *arg, struct tr_task_handle handle,
-	struct tr_message_service_result result, struct tr_message *message)
+static void tr_record_rx_transform_done(void *arg, struct tr_task_handle handle,
+                                        struct tr_message_service_result result,
+                                        struct tr_message *message)
 {
 	struct tr_rpc_record_rx_item *item = arg;
 	struct tr_rpc_record_stream *call = item->call;
@@ -1036,13 +1036,14 @@ static void tr_record_rx_transform_done(
 		return;
 	}
 	item->outcome = result.outcome;
-	if (result.outcome == TR_MESSAGE_TRANSFORM_OK && !call->state.terminal) {
-		if (!message || tr_message_clone(message, &item->decoded) != TR_OK)
+	if (result.outcome == TR_MESSAGE_TRANSFORM_OK &&
+	    !call->state.terminal) {
+		if (!message ||
+		    tr_message_clone(message, &item->decoded) != TR_OK)
 			item->outcome = TR_MESSAGE_TRANSFORM_NOMEM;
 	}
 	item->ready = 1;
-	if (item->outcome != TR_MESSAGE_TRANSFORM_OK &&
-	    !call->state.terminal) {
+	if (item->outcome != TR_MESSAGE_TRANSFORM_OK && !call->state.terminal) {
 		(void)tr_rpc_record_stream_abort_on_owner(
 		        call, tr_record_transform_status(item->outcome));
 		return;
@@ -1051,8 +1052,8 @@ static void tr_record_rx_transform_done(
 }
 
 static int tr_record_rx_enqueue(struct tr_rpc_record_stream *call,
-				const struct tr_rpc_record_view *view,
-				const struct tr_rpc_record_state *next)
+                                const struct tr_rpc_record_view *view,
+                                const struct tr_rpc_record_state *next)
 {
 	struct tr_rpc_record_rx_item *item =
 	        tr_record_rx_item_create(call, view, next);
@@ -1069,11 +1070,11 @@ static int tr_record_rx_enqueue(struct tr_rpc_record_stream *call,
 		        .decoded_size = view->header.decoded_size,
 		        .max_workspace_bytes = call->rx_workspace_bytes,
 		        .max_window_log = call->rx_window_log};
-		ret = tr_message_builder_create(call->budget,
-		                                view->header.encoded_size, &builder);
+		ret = tr_message_builder_create(
+		        call->budget, view->header.encoded_size, &builder);
 		if (ret == TR_OK)
-			ret = tr_message_builder_append(builder, view->body,
-			                                view->header.encoded_size);
+			ret = tr_message_builder_append(
+			        builder, view->body, view->header.encoded_size);
 		if (ret == TR_OK)
 			ret = tr_message_builder_publish(&builder, &input);
 		if (ret == TR_OK)
@@ -1104,7 +1105,7 @@ static int tr_record_rx_enqueue(struct tr_rpc_record_stream *call,
 }
 
 static int tr_record_accept(struct tr_rpc_record_stream *call,
-			    const uint8_t *bytes, size_t size)
+                            const uint8_t *bytes, size_t size)
 {
 	struct tr_rpc_record_view view;
 	struct tr_rpc_record_state next;
@@ -1119,8 +1120,7 @@ static int tr_record_accept(struct tr_rpc_record_stream *call,
 	                               view.header.metadata_size);
 	if (ret != TR_OK)
 		return ret;
-	ret = tr_record_preflight(call, base,
-	                          tr_record_receive_direction(call),
+	ret = tr_record_preflight(call, base, tr_record_receive_direction(call),
 	                          &view.header, &next);
 	if (ret != TR_OK)
 		return ret;
@@ -1269,13 +1269,13 @@ static void tr_record_rx_cancel(struct tr_rpc_record_stream *call)
 	for (struct tr_rpc_record_rx_item *item = call->rx_head; item;
 	     item = item->next) {
 		if (item->transform_active)
-			(void)tr_channel_message_cancel_on_owner(call->stream.channel,
-			                                         item->task);
+			(void)tr_channel_message_cancel_on_owner(
+			        call->stream.channel, item->task);
 	}
 }
 
 int tr_rpc_record_stream_abort_on_owner(struct tr_rpc_record_stream *call,
-					        enum tr_rpc_status status)
+                                        enum tr_rpc_status status)
 {
 	int ret = tr_record_owner(call);
 	if (ret != TR_OK)
@@ -1422,7 +1422,7 @@ int tr_rpc_record_stream_reap_stopped(struct tr_rpc_record_stream **pointer)
 	}
 	if (call->state.opened && !call->state.terminal)
 		(void)tr_rpc_record_state_abort(&call->state,
-						        TR_RPC_STATUS_CANCELLED);
+		                                TR_RPC_STATUS_CANCELLED);
 	tr_record_clear_partial(call);
 	while (call->rx_head) {
 		struct tr_rpc_record_rx_item *item = call->rx_head;

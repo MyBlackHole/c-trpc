@@ -31,7 +31,7 @@ int tr_rpc_record_producer_domain_close(
  */
 int tr_rpc_record_producer_create(struct tr_rpc_record_producer_domain *domain,
                                   uint32_t max_message, bool headers_sent,
-				  uint32_t response_compression_algorithms,
+                                  uint32_t response_compression_algorithms,
                                   struct tr_rpc_v2_producer **out);
 void tr_rpc_record_producer_activate(struct tr_rpc_v2_producer *producer);
 /* 仅归还库内引用，不能代替 close。最后应用引用放弃未 finish 的生产者

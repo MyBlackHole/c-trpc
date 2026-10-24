@@ -76,10 +76,7 @@ enum bench_scenario {
 	BENCH_MIXED
 };
 
-enum bench_compression {
-	BENCH_COMPRESSION_NONE,
-	BENCH_COMPRESSION_ZSTD
-};
+enum bench_compression { BENCH_COMPRESSION_NONE, BENCH_COMPRESSION_ZSTD };
 
 struct bench_options {
 	int server;
@@ -214,8 +211,7 @@ static int bench_body_is_incompressible(enum bench_scenario scenario)
 	return scenario == BENCH_BULK_INCOMPRESSIBLE;
 }
 
-static uint32_t bench_body_size(enum bench_scenario scenario,
-				uint64_t sequence)
+static uint32_t bench_body_size(enum bench_scenario scenario, uint64_t sequence)
 {
 	if (scenario == BENCH_SMALL)
 		return BENCH_SMALL_BODY;
@@ -225,7 +221,7 @@ static uint32_t bench_body_size(enum bench_scenario scenario,
 }
 
 static void bench_fill_body(uint8_t *body, enum bench_scenario scenario,
-			    uint64_t sequence, uint32_t body_size)
+                            uint64_t sequence, uint32_t body_size)
 {
 	uint32_t index;
 	uint32_t state;
@@ -246,13 +242,13 @@ static void bench_fill_body(uint8_t *body, enum bench_scenario scenario,
 		    (scenario == BENCH_MIXED && (sequence % 4U) == 0U))
 			body[index] = (uint8_t)('A' + (index % 7U));
 		else
-			body[index] = (uint8_t)(sequence * 31U + index * 17U + 9U);
+			body[index] =
+			        (uint8_t)(sequence * 31U + index * 17U + 9U);
 	}
 }
 
-static int bench_body_matches(const uint8_t *body,
-			      enum bench_scenario scenario,
-			      uint64_t sequence, uint32_t body_size)
+static int bench_body_matches(const uint8_t *body, enum bench_scenario scenario,
+                              uint64_t sequence, uint32_t body_size)
 {
 	uint32_t index;
 	uint32_t state;
@@ -294,8 +290,8 @@ static uint64_t bench_hash(const uint8_t *bytes, size_t length)
 }
 
 static uint32_t bench_build_message(uint8_t *message,
-				   enum bench_scenario scenario,
-				   uint64_t sequence, uint64_t submitted_ns)
+                                    enum bench_scenario scenario,
+                                    uint64_t sequence, uint64_t submitted_ns)
 {
 	uint32_t body_size = bench_body_size(scenario, sequence);
 	uint8_t *body = message + BENCH_HEADER_SIZE;
@@ -328,10 +324,14 @@ static int bench_scenario_parse(const char *name, enum bench_scenario *out)
 static const char *bench_scenario_name(enum bench_scenario scenario)
 {
 	switch (scenario) {
-	case BENCH_SMALL: return "small";
-	case BENCH_BULK_COMPRESSIBLE: return "bulk-compressible";
-	case BENCH_BULK_INCOMPRESSIBLE: return "bulk-incompressible";
-	case BENCH_MIXED: return "mixed";
+	case BENCH_SMALL:
+		return "small";
+	case BENCH_BULK_COMPRESSIBLE:
+		return "bulk-compressible";
+	case BENCH_BULK_INCOMPRESSIBLE:
+		return "bulk-incompressible";
+	case BENCH_MIXED:
+		return "mixed";
 	}
 	return "invalid";
 }
@@ -351,7 +351,7 @@ static int bench_parse_u32(const char *value, uint32_t *out)
 }
 
 static int bench_option_value(int argc, char **argv, int *index,
-			      const char **out)
+                              const char **out)
 {
 	if (*index + 1 >= argc)
 		return 0;
@@ -360,7 +360,7 @@ static int bench_option_value(int argc, char **argv, int *index,
 }
 
 static int bench_parse_options(int argc, char **argv,
-			       struct bench_options *options)
+                               struct bench_options *options)
 {
 	int index;
 	memset(options, 0, sizeof(*options));
@@ -431,17 +431,19 @@ static int bench_parse_options(int argc, char **argv,
 		}
 	}
 	if (!options->requests || options->requests > BENCH_MAX_REQUESTS ||
-	    options->warmup > BENCH_MAX_REQUESTS ||
-	    options->clients == 0U || options->clients > BENCH_MAX_CLIENTS ||
+	    options->warmup > BENCH_MAX_REQUESTS || options->clients == 0U ||
+	    options->clients > BENCH_MAX_CLIENTS ||
 	    (!options->server && options->index >= BENCH_MAX_CLIENTS) ||
 	    (!options->server && options->port == UINT32_MAX))
 		return 0;
 	if (options->tls) {
 		if (!options->ca_file)
 			return 0;
-		if (options->server && (!options->server_cert || !options->server_key))
+		if (options->server &&
+		    (!options->server_cert || !options->server_key))
 			return 0;
-		if (!options->server && (!options->client_cert || !options->client_key))
+		if (!options->server &&
+		    (!options->client_cert || !options->client_key))
 			return 0;
 	}
 	return 1;
@@ -460,14 +462,14 @@ static void bench_usage_snapshot(struct bench_usage *out)
 	out->cpu_s = bench_timeval_seconds(&usage.ru_utime) +
 	             bench_timeval_seconds(&usage.ru_stime);
 	out->peak_rss_kib = usage.ru_maxrss;
-	out->alloc_calls = atomic_load_explicit(&bench_alloc_calls,
-	                                       memory_order_relaxed);
+	out->alloc_calls =
+	        atomic_load_explicit(&bench_alloc_calls, memory_order_relaxed);
 	out->alloc_requested_bytes = atomic_load_explicit(
 	        &bench_alloc_requested_bytes, memory_order_relaxed);
 }
 
 static void bench_usage_delta(const struct bench_usage *start,
-			      struct bench_usage *end)
+                              struct bench_usage *end)
 {
 	bench_usage_snapshot(end);
 	end->cpu_s -= start->cpu_s;
@@ -476,7 +478,7 @@ static void bench_usage_delta(const struct bench_usage *start,
 }
 
 static uint32_t bench_group_index(const struct tr_connection_group_id *group,
-				 uint32_t clients)
+                                  uint32_t clients)
 {
 	if (!group || group->group_id < BENCH_GROUP_BASE ||
 	    group->group_id >= BENCH_GROUP_BASE + clients ||
@@ -492,8 +494,9 @@ static int bench_identity_is_tls(const struct tr_peer_identity_view *identity)
 	       identity->uri_san != NULL && identity->uri_san_len != 0U;
 }
 
-static int bench_authorize(
-	const struct tr_connection_group_authorization *authorization, void *arg)
+static int
+bench_authorize(const struct tr_connection_group_authorization *authorization,
+                void *arg)
 {
 	struct bench_server_state *state = arg;
 	uint32_t index;
@@ -517,9 +520,11 @@ static int bench_authorize(
 	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
 	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA))
 		return TR_ERR_STALE;
-	identity_ok = state->tls ? bench_identity_is_tls(&authorization->peer_identity)
-	                         : authorization->peer_identity.authentication ==
-	                                   TR_PEER_IDENTITY_NONE;
+	identity_ok =
+	        state->tls
+	                ? bench_identity_is_tls(&authorization->peer_identity)
+	                : authorization->peer_identity.authentication ==
+	                          TR_PEER_IDENTITY_NONE;
 	if (!identity_ok)
 		return TR_ERR_INVALID;
 	if (authorization->role == TR_CONNECTION_GROUP_ROLE_CONTROL) {
@@ -540,8 +545,8 @@ static int bench_authorize(
 }
 
 static void bench_record_complete_message_locked(
-	struct bench_server_state *state, uint32_t index, uint64_t message_id,
-	const uint8_t *bytes, uint32_t length, uint64_t received_ns)
+        struct bench_server_state *state, uint32_t index, uint64_t message_id,
+        const uint8_t *bytes, uint32_t length, uint64_t received_ns)
 {
 	uint32_t expected_body_size;
 	uint32_t body_size;
@@ -563,16 +568,17 @@ static void bench_record_complete_message_locked(
 		if (sequence >= (uint64_t)state->warmup + state->requests ||
 		    message_id != sequence + 1U)
 			valid = 0;
-		expected_body_size = valid
-		        ? bench_body_size(state->scenario, sequence)
-	        : 0U;
+		expected_body_size =
+		        valid ? bench_body_size(state->scenario, sequence) : 0U;
 		if (valid && body_size != expected_body_size)
 			valid = 0;
-		observed_hash = bench_hash(bytes + BENCH_HEADER_SIZE, body_size);
+		observed_hash =
+		        bench_hash(bytes + BENCH_HEADER_SIZE, body_size);
 		if (valid && observed_hash != expected_hash)
 			valid = 0;
-		if (valid && !bench_body_matches(bytes + BENCH_HEADER_SIZE,
-		                                state->scenario, sequence, body_size))
+		if (valid &&
+		    !bench_body_matches(bytes + BENCH_HEADER_SIZE,
+		                        state->scenario, sequence, body_size))
 			valid = 0;
 	}
 	if (index == UINT32_MAX) {
@@ -602,18 +608,20 @@ static void bench_record_complete_message_locked(
 				state->measure_verified++;
 		}
 		if (state->measure_started) {
-			uint32_t sample = index * state->requests +
-			                  (uint32_t)(sequence >= state->warmup
-			                             ? sequence - state->warmup
-			                             : 0U);
+			uint32_t sample =
+			        index * state->requests +
+			        (uint32_t)(sequence >= state->warmup
+			                           ? sequence - state->warmup
+			                           : 0U);
 			state->measure_received++;
-			if (sequence < state->warmup || sample >=
-			    state->clients * state->requests) {
+			if (sequence < state->warmup ||
+			    sample >= state->clients * state->requests) {
 				state->invalid++;
 			} else if (valid && submitted_ns <= received_ns &&
 			           state->latency_count <
 			                   state->clients * state->requests) {
-				state->latencies_ns[sample] = received_ns - submitted_ns;
+				state->latencies_ns[sample] =
+				        received_ns - submitted_ns;
 				state->latency_count++;
 				if (!state->first_submit_ns ||
 				    submitted_ns < state->first_submit_ns)
@@ -628,8 +636,8 @@ static void bench_record_complete_message_locked(
 	pthread_cond_broadcast(&state->changed);
 }
 
-static enum tr_connection_group_message_disposition bench_on_message(
-	const struct tr_connection_group_message *message, void *arg)
+static enum tr_connection_group_message_disposition
+bench_on_message(const struct tr_connection_group_message *message, void *arg)
 {
 	struct bench_server_state *state = arg;
 	uint32_t index;
@@ -641,7 +649,8 @@ static enum tr_connection_group_message_disposition bench_on_message(
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 	if (bench_debug_enabled())
 		fprintf(stderr,
-		        "bench_debug server message group=%llu stream=%u id=%llu "
+		        "bench_debug server message group=%llu stream=%u "
+		        "id=%llu "
 		        "flags=%u bytes=%u\n",
 		        (unsigned long long)message->group.group_id,
 		        message->stream_id,
@@ -675,14 +684,15 @@ static enum tr_connection_group_message_disposition bench_on_message(
 	if (length > BENCH_MESSAGE_LIMIT - state->partial_bytes[index])
 		goto fragment_error;
 	if (length)
-		memcpy(state->partial_message[index] + state->partial_bytes[index],
+		memcpy(state->partial_message[index] +
+		               state->partial_bytes[index],
 		       message->bytes.data, length);
 	state->partial_bytes[index] += length;
 	if (flags & TR_CONNECTION_GROUP_DATA_LAST) {
 		bench_record_complete_message_locked(
 		        state, index, message->message_id,
-		        state->partial_message[index], state->partial_bytes[index],
-		        received_ns);
+		        state->partial_message[index],
+		        state->partial_bytes[index], received_ns);
 		state->partial_active[index] = 0U;
 		state->partial_bytes[index] = 0U;
 	}
@@ -698,8 +708,8 @@ fragment_error:
 }
 
 static void bench_on_data_event(const struct tr_connection_group_id *group,
-				enum tr_connection_group_data_event event,
-				int status, void *arg)
+                                enum tr_connection_group_data_event event,
+                                int status, void *arg)
 {
 	struct bench_server_state *state = arg;
 	if (bench_debug_enabled())
@@ -719,15 +729,14 @@ static void bench_on_data_event(const struct tr_connection_group_id *group,
 }
 
 static int bench_wait_server_counter(struct bench_server_state *state,
-				     int waiting_for_warmup,
-				     uint32_t expected)
+                                     int waiting_for_warmup, uint32_t expected)
 {
 	struct timespec deadline = bench_deadline(BENCH_TIMEOUT_MS);
 	int ret = 0;
 	pthread_mutex_lock(&state->lock);
 	for (;;) {
 		uint32_t current = waiting_for_warmup ? state->warmup_received
-		                                     : state->measure_received;
+		                                      : state->measure_received;
 		if (current >= expected)
 			break;
 		if (state->failure_status) {
@@ -748,7 +757,7 @@ static int bench_wait_server_counter(struct bench_server_state *state,
 }
 
 static int bench_wait_server_ready(struct tr_server *server, uint32_t clients,
-				  uint32_t want_data)
+                                   uint32_t want_data)
 {
 	struct tr_connection_group_server_stats stats;
 	struct timespec deadline = bench_deadline(BENCH_TIMEOUT_MS);
@@ -771,11 +780,11 @@ static int bench_wait_server_ready(struct tr_server *server, uint32_t clients,
 }
 
 static int bench_send_data_offer(struct tr_server *server,
-				 struct tr_connection_group_id group,
-				 uint64_t message_id)
+                                 struct tr_connection_group_id group,
+                                 uint64_t message_id)
 {
-	uint64_t deadline = bench_now_ns() +
-	                    (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
+	uint64_t deadline =
+	        bench_now_ns() + (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
 	for (;;) {
 		int ret = tr_server_connection_group_send_data_offer(
 		        server, group.group_id, group.epoch, message_id);
@@ -788,11 +797,11 @@ static int bench_send_data_offer(struct tr_server *server,
 }
 
 static int bench_send_transfer_ready(struct tr_server *server,
-				     struct tr_connection_group_id group,
-				     uint64_t message_id)
+                                     struct tr_connection_group_id group,
+                                     uint64_t message_id)
 {
-	uint64_t deadline = bench_now_ns() +
-	                    (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
+	uint64_t deadline =
+	        bench_now_ns() + (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
 	for (;;) {
 		int ret = tr_server_connection_group_send_transfer_ready(
 		        server, group.group_id, group.epoch, BENCH_STREAM_ID,
@@ -828,11 +837,13 @@ static int bench_server_mode(const struct bench_options *options)
 	    bench_cond_init(&state.changed) != 0)
 		bench_fail("server synchronization init failed", TR_ERR_SYS);
 	for (index = 0U; index < state.clients; ++index) {
-		state.seen[index] = calloc((size_t)state.warmup + state.requests,
-		                          sizeof(*state.seen[index]));
+		state.seen[index] =
+		        calloc((size_t)state.warmup + state.requests,
+		               sizeof(*state.seen[index]));
 		state.partial_message[index] = malloc(BENCH_MESSAGE_LIMIT);
 		if (!state.seen[index] || !state.partial_message[index])
-			bench_fail("server sequence bitmap allocation failed", TR_ERR_NOMEM);
+			bench_fail("server sequence bitmap allocation failed",
+			           TR_ERR_NOMEM);
 	}
 	state.latencies_ns = calloc((size_t)state.clients * state.requests,
 	                            sizeof(*state.latencies_ns));
@@ -861,7 +872,8 @@ static int bench_server_mode(const struct bench_options *options)
 		/* 与默认 Runtime MessageService 队列容量一致，覆盖单客户端
 		 * 默认的 1000 条测量突发，同时仍受任务数和内存预算约束。
 		 */
-		config.connection_groups.max_inflight_compressed_messages = 1024U;
+		config.connection_groups.max_inflight_compressed_messages =
+		        1024U;
 	}
 	if (options->tls) {
 		config.tls.mode = TR_TLS_REQUIRED;
@@ -873,9 +885,9 @@ static int bench_server_mode(const struct bench_options *options)
 	ret = tr_server_create_transport(&config, &server);
 	if (ret != TR_OK)
 		bench_fail("tr_server_create_transport failed", ret);
-	ret = tr_server_connection_group_listen(server, "127.0.0.1",
-	                                        (uint16_t)options->port,
-	                                        (int)(state.clients * 4U), &port);
+	ret = tr_server_connection_group_listen(
+	        server, "127.0.0.1", (uint16_t)options->port,
+	        (int)(state.clients * 4U), &port);
 	if (ret != TR_OK || port == 0U)
 		bench_fail("connection-group listen failed", ret);
 	ret = tr_server_start(server);
@@ -891,8 +903,8 @@ static int bench_server_mode(const struct bench_options *options)
 	if (ret != TR_OK)
 		bench_fail("timed out waiting for CONTROL groups", ret);
 	for (index = 0U; index < state.clients; ++index) {
-		struct tr_connection_group_id group = {
-		        BENCH_GROUP_BASE + index, BENCH_GROUP_EPOCH};
+		struct tr_connection_group_id group = {BENCH_GROUP_BASE + index,
+		                                       BENCH_GROUP_EPOCH};
 		ret = bench_send_data_offer(server, group,
 		                            UINT64_C(1000) + index);
 		if (ret != TR_OK)
@@ -902,8 +914,8 @@ static int bench_server_mode(const struct bench_options *options)
 	if (ret != TR_OK)
 		bench_fail("timed out waiting for DATA routes", ret);
 	for (index = 0U; index < state.clients; ++index) {
-		struct tr_connection_group_id group = {
-		        BENCH_GROUP_BASE + index, BENCH_GROUP_EPOCH};
+		struct tr_connection_group_id group = {BENCH_GROUP_BASE + index,
+		                                       BENCH_GROUP_EPOCH};
 		ret = bench_send_transfer_ready(server, group,
 		                                BENCH_READY_MESSAGE_ID);
 		if (ret != TR_OK)
@@ -920,7 +932,8 @@ static int bench_server_mode(const struct bench_options *options)
 	pthread_mutex_unlock(&state.lock);
 	printf("{\"type\":\"server_phase_ready\",\"schema\":%u,"
 	       "\"api_generation\":\"connection_group_v2\","
-	       "\"phase\":\"warmup_done\"}\n", BENCH_SCHEMA);
+	       "\"phase\":\"warmup_done\"}\n",
+	       BENCH_SCHEMA);
 	fflush(stdout);
 	total_measure = state.clients * state.requests;
 	ret = bench_wait_server_counter(&state, 0, total_measure);
@@ -943,10 +956,12 @@ static int bench_server_mode(const struct bench_options *options)
 	 */
 	if (!state.latency_count || !state.first_submit_ns ||
 	    state.last_receive_ns <= state.first_submit_ns)
-		bench_fail("server latency sample set is incomplete", TR_ERR_STATE);
+		bench_fail("server latency sample set is incomplete",
+		           TR_ERR_STATE);
 	{
 		uint32_t p50_index = (state.latency_count + 1U) / 2U - 1U;
-		uint32_t p99_index = (state.latency_count * 99U + 99U) / 100U - 1U;
+		uint32_t p99_index =
+		        (state.latency_count * 99U + 99U) / 100U - 1U;
 		uint64_t p50_ns;
 		uint64_t p99_ns;
 		uint32_t measure_valid_count;
@@ -955,8 +970,9 @@ static int bench_server_mode(const struct bench_options *options)
 		measure_valid_count = state.measure_verified;
 		invalid_count = state.invalid;
 		pthread_mutex_unlock(&state.lock);
-		/* Insertion sort is bounded by the configured request count and avoids
-		 * an additional comparator dependency in the callback path.
+		/* Insertion sort is bounded by the configured request count and
+		 * avoids an additional comparator dependency in the callback
+		 * path.
 		 */
 		for (index = 1U; index < state.latency_count; ++index) {
 			uint64_t value = state.latencies_ns[index];
@@ -983,8 +999,8 @@ static int bench_server_mode(const struct bench_options *options)
 		       "\"server_alloc_calls\":%llu,"
 		       "\"server_alloc_requested_bytes\":%llu}\n",
 		       BENCH_SCHEMA, bench_scenario_name(options->scenario),
-		       total_measure, state.measure_received, measure_valid_count,
-		       invalid_count,
+		       total_measure, state.measure_received,
+		       measure_valid_count, invalid_count,
 		       (unsigned long long)state.first_submit_ns,
 		       (unsigned long long)state.last_receive_ns,
 		       (double)elapsed_ns / 1e9,
@@ -996,16 +1012,18 @@ static int bench_server_mode(const struct bench_options *options)
 		fflush(stdout);
 	}
 	for (index = 0U; index < state.clients; ++index) {
-		struct tr_connection_group_id group = {
-		        BENCH_GROUP_BASE + index, BENCH_GROUP_EPOCH};
+		struct tr_connection_group_id group = {BENCH_GROUP_BASE + index,
+		                                       BENCH_GROUP_EPOCH};
 		if (bench_debug_enabled())
-			fprintf(stderr, "bench_debug release transfer begin index=%u\n",
+			fprintf(stderr,
+			        "bench_debug release transfer begin index=%u\n",
 			        index);
 		ret = tr_server_connection_group_release_transfer(
 		        server, group.group_id, group.epoch, BENCH_STREAM_ID);
 		if (bench_debug_enabled())
 			fprintf(stderr,
-			        "bench_debug release transfer end index=%u status=%d\n",
+			        "bench_debug release transfer end index=%u "
+			        "status=%d\n",
 			        index, ret);
 		if (ret != TR_OK)
 			bench_fail("server transfer release failed", ret);
@@ -1033,8 +1051,9 @@ static int bench_server_mode(const struct bench_options *options)
 	printf("{\"type\":\"server_exit\",\"schema\":%u,"
 	       "\"api_generation\":\"connection_group_v2\","
 	       "\"drain_status\":0,\"received\":%u,\"verified\":%u,"
-	       "\"invalid\":%u}\n", BENCH_SCHEMA, state.warmup_received +
-	       state.measure_received, state.verified, state.invalid);
+	       "\"invalid\":%u}\n",
+	       BENCH_SCHEMA, state.warmup_received + state.measure_received,
+	       state.verified, state.invalid);
 	fflush(stdout);
 	for (index = 0U; index < state.clients; ++index) {
 		free(state.seen[index]);
@@ -1047,8 +1066,8 @@ static int bench_server_mode(const struct bench_options *options)
 }
 
 static void bench_on_transfer_ready(const struct tr_connection_group_id *group,
-				   uint32_t stream_id, uint64_t message_id,
-				   void *arg)
+                                    uint32_t stream_id, uint64_t message_id,
+                                    void *arg)
 {
 	struct bench_client_state *state = arg;
 	if (!state || !group || stream_id != BENCH_STREAM_ID ||
@@ -1079,8 +1098,8 @@ static int bench_read_gate(char expected)
 
 static int bench_wait_tx_drained(struct tr_client *client)
 {
-	uint64_t deadline = bench_now_ns() +
-	                    (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
+	uint64_t deadline =
+	        bench_now_ns() + (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
 	for (;;) {
 		struct tr_connection_group_client_stats stats;
 		int ret = tr_client_connection_group_get_stats(client, &stats);
@@ -1095,11 +1114,11 @@ static int bench_wait_tx_drained(struct tr_client *client)
 }
 
 static int bench_send_messages(struct tr_client *client,
-			       const struct bench_options *options,
-			       uint32_t start_sequence,
-			       uint32_t count, uint32_t *attempted,
-			       uint32_t *accepted, uint32_t *submit_again,
-			       uint64_t *start_ns, uint64_t *end_ns)
+                               const struct bench_options *options,
+                               uint32_t start_sequence, uint32_t count,
+                               uint32_t *attempted, uint32_t *accepted,
+                               uint32_t *submit_again, uint64_t *start_ns,
+                               uint64_t *end_ns)
 {
 	uint8_t *message = malloc(BENCH_HEADER_SIZE + BENCH_BULK_BODY);
 	uint32_t offset;
@@ -1107,8 +1126,8 @@ static int bench_send_messages(struct tr_client *client,
 		return TR_ERR_NOMEM;
 	for (offset = 0U; offset < count; ++offset) {
 		uint64_t sequence = (uint64_t)start_sequence + offset;
-		uint64_t retry_deadline = bench_now_ns() +
-		                          (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
+		uint64_t retry_deadline =
+		        bench_now_ns() + (uint64_t)BENCH_TIMEOUT_MS * 1000000U;
 		for (;;) {
 			struct tr_transport_bytes bytes;
 			uint64_t now = bench_now_ns();
@@ -1122,10 +1141,12 @@ static int bench_send_messages(struct tr_client *client,
 			bytes.len = length;
 			if (options->compression == BENCH_COMPRESSION_NONE)
 				ret = tr_client_connection_group_send(
-				        client, BENCH_STREAM_ID, sequence + 1U, &bytes);
+				        client, BENCH_STREAM_ID, sequence + 1U,
+				        &bytes);
 			else
 				ret = tr_client_connection_group_send_with_compression(
-				        client, BENCH_STREAM_ID, sequence + 1U, &bytes,
+				        client, BENCH_STREAM_ID, sequence + 1U,
+				        &bytes,
 				        TR_CONNECTION_GROUP_COMPRESSION_ZSTD);
 			if (ret == TR_OK) {
 				(*accepted)++;
@@ -1219,9 +1240,8 @@ static int bench_client_mode(const struct bench_options *options)
 	ret = tr_client_create_transport(&config, &client);
 	if (ret != TR_OK)
 		bench_fail("tr_client_create_transport failed", ret);
-	ret = tr_client_connection_group_connect(client, options->host,
-	                                         (uint16_t)options->port,
-	                                         &state.group);
+	ret = tr_client_connection_group_connect(
+	        client, options->host, (uint16_t)options->port, &state.group);
 	if (ret != TR_OK)
 		bench_fail("connection-group connect failed", ret);
 	ret = bench_wait_client_ready(&state);
@@ -1235,10 +1255,9 @@ static int bench_client_mode(const struct bench_options *options)
 	ret = bench_read_gate('W');
 	if (ret != TR_OK)
 		bench_fail("missing warmup gate", ret);
-	ret = bench_send_messages(client, options, 0U,
-	                          options->warmup, &attempted, &accepted,
-	                          &submit_again, &measure_start_ns,
-	                          &measure_end_ns);
+	ret = bench_send_messages(client, options, 0U, options->warmup,
+	                          &attempted, &accepted, &submit_again,
+	                          &measure_start_ns, &measure_end_ns);
 	if (ret != TR_OK)
 		bench_fail("sending warmup messages failed", ret);
 	ret = bench_wait_tx_drained(client);
@@ -1246,7 +1265,8 @@ static int bench_client_mode(const struct bench_options *options)
 		bench_fail("warmup TX drain failed", ret);
 	if (bench_debug_enabled())
 		fprintf(stderr,
-		        "bench_debug client warmup index=%u attempted=%u accepted=%u "
+		        "bench_debug client warmup index=%u attempted=%u "
+		        "accepted=%u "
 		        "submit_again=%u\n",
 		        options->index, attempted, accepted, submit_again);
 	printf("{\"type\":\"client_phase_ready\",\"schema\":%u,"
@@ -1264,10 +1284,9 @@ static int bench_client_mode(const struct bench_options *options)
 	measure_start_ns = 0U;
 	measure_end_ns = 0U;
 	bench_usage_snapshot(&usage_start);
-	ret = bench_send_messages(client, options,
-	                          options->warmup, options->requests,
-	                          &attempted, &accepted, &submit_again,
-	                          &measure_start_ns, &measure_end_ns);
+	ret = bench_send_messages(
+	        client, options, options->warmup, options->requests, &attempted,
+	        &accepted, &submit_again, &measure_start_ns, &measure_end_ns);
 	if (ret != TR_OK) {
 		submit_errors++;
 		bench_fail("sending measured messages failed", ret);
@@ -1279,7 +1298,8 @@ static int bench_client_mode(const struct bench_options *options)
 	bench_usage_delta(&usage_start, &usage_end);
 	elapsed_ns = measure_end_ns - measure_start_ns;
 	if (!elapsed_ns || accepted != options->requests)
-		bench_fail("client accepted count or timer is invalid", TR_ERR_STATE);
+		bench_fail("client accepted count or timer is invalid",
+		           TR_ERR_STATE);
 	printf("{\"type\":\"client_phase\",\"schema\":%u,"
 	       "\"api_generation\":\"connection_group_v2\","
 	       "\"phase\":\"measure\",\"scenario\":\"%s\","
@@ -1289,13 +1309,12 @@ static int bench_client_mode(const struct bench_options *options)
 	       "\"accepted_rps\":%.3f,\"client_cpu_s\":%.6f,"
 	       "\"client_peak_rss_kib\":%ld,\"client_alloc_calls\":%llu,"
 	       "\"client_alloc_requested_bytes\":%llu}\n",
-	       BENCH_SCHEMA, bench_scenario_name(options->scenario), options->index,
-	       attempted, accepted, submit_again, submit_errors,
+	       BENCH_SCHEMA, bench_scenario_name(options->scenario),
+	       options->index, attempted, accepted, submit_again, submit_errors,
 	       (unsigned long long)measure_start_ns,
-	       (unsigned long long)measure_end_ns,
-	       (double)elapsed_ns / 1e9,
-	       (double)accepted * 1e9 / (double)elapsed_ns,
-	       usage_end.cpu_s, usage_end.peak_rss_kib,
+	       (unsigned long long)measure_end_ns, (double)elapsed_ns / 1e9,
+	       (double)accepted * 1e9 / (double)elapsed_ns, usage_end.cpu_s,
+	       usage_end.peak_rss_kib,
 	       (unsigned long long)usage_end.alloc_calls,
 	       (unsigned long long)usage_end.alloc_requested_bytes);
 	fflush(stdout);
@@ -1324,8 +1343,10 @@ int main(int argc, char **argv)
 		fprintf(stderr,
 		        "usage: %s server|client [--port N] [--clients 1|2] "
 		        "[--index N] [--host IPv4] [--warmup N] [--requests N] "
-		        "[--scenario small|bulk-compressible|bulk-incompressible|mixed] "
-		        "[--compression none|zstd] [--tls 0|1] TLS_FILE_OPTIONS\n",
+		        "[--scenario "
+		        "small|bulk-compressible|bulk-incompressible|mixed] "
+		        "[--compression none|zstd] [--tls 0|1] "
+		        "TLS_FILE_OPTIONS\n",
 		        argv[0]);
 		return EXIT_FAILURE;
 	}

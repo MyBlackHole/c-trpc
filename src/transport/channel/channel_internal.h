@@ -33,9 +33,9 @@ struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
 
 /* 所属 Reactor owner 上读取本端变换上限与当前物理 lane 的对端接收许可。
  * 输出是副本；lane 不可用时返回 AGAIN，输出保持不变。 */
-int tr_channel_message_limits_on_owner(
-	struct tr_channel *channel, enum tr_lane lane,
-	struct tr_channel_message_limits *out);
+int tr_channel_message_limits_on_owner(struct tr_channel *channel,
+                                       enum tr_lane lane,
+                                       struct tr_channel_message_limits *out);
 
 /* 所属 owner 上取得 CONTROL 连接的借用身份；需 retain 才能跨过当前回调。 */
 int tr_channel_peer_identity_snapshot_on_owner(
@@ -124,7 +124,7 @@ int tr_channel_message_submit_on_owner(
         tr_message_service_done_fn done, void *arg,
         struct tr_task_handle *handle);
 int tr_channel_message_cancel_on_owner(struct tr_channel *channel,
-                                      struct tr_task_handle task);
+                                       struct tr_task_handle task);
 
 /* 仅供门面的套接字策略注入。通过 Channel 所属反应器所有者串行化，
  * 必须在自动重连启动前设置；否则底层 Channel 重连保留
