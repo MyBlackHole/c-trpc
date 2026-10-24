@@ -560,20 +560,17 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	} else if (request->kind == TR_RPC_V2_REQUEST_HALF_CLOSE) {
 		if (m->index == 2U && f->reject_sync_compressed_response) {
 			uint8_t response[8];
+			uint8_t expected[8];
 			struct tr_rpc_bytes body;
 			fill(response, sizeof(response), sum);
+			fill(expected, sizeof(expected), sum);
 			body.data = response;
 			body.len = sizeof(response);
 			CHECK(tr_rpc_v2_reply_append_with_compression(
 			              reply, &body, TR_RPC_COMPRESSION_ZSTD) ==
 			      TR_ERR_UNSUPPORTED);
-			CHECK(memcmp(response,
-			             (uint8_t[8]){
-			                     pattern(sum, 0), pattern(sum, 1),
-			                     pattern(sum, 2), pattern(sum, 3),
-			                     pattern(sum, 4), pattern(sum, 5),
-			                     pattern(sum, 6), pattern(sum, 7)},
-			             sizeof(response)) == 0);
+			CHECK(memcmp(response, expected, sizeof(response)) ==
+			      0);
 			reject_response_compression = 1;
 		} else if (m->index == 2U) {
 			append_response(reply, 8U, sum);
@@ -1280,8 +1277,9 @@ static void test_directional_compression_only(void)
 	struct fixture f;
 	struct call_state call;
 	struct message_spec request = {MAX_BODY, 47U};
-	struct tr_rpc_call_options options = {0};
+	struct tr_rpc_call_options options;
 
+	memset(&options, 0, sizeof(options));
 	compression_direction_override = COMPRESSION_REQUEST_ONLY;
 	fixture_create(&f);
 	call_init(&call, &f, 0U, &request, 1U);
@@ -1745,18 +1743,7 @@ static void test_default_factory_requires_methods(void)
 	struct tr_client *client = NULL;
 	struct tr_server *server = NULL;
 	struct tr_client_config config;
-	struct tr_rpc_method_desc method = {
-	        .service_id = 1,
-	        .method_id = 1,
-	        .request_cardinality = TR_RPC_ONE,
-	        .response_cardinality = TR_RPC_ONE,
-	        .request_codec_id = TR_RPC_CODEC_RAW,
-	        .response_codec_id = TR_RPC_CODEC_RAW,
-	        .lane = TR_RPC_LANE_CONTROL,
-	        .max_request_bytes = 64,
-	        .max_response_bytes = 64,
-	        .request_compression_algorithms = UINT32_C(0x80000000),
-	};
+	struct tr_rpc_method_desc method;
 
 	CHECK(tr_client_create(NULL, NULL, 0, &client) == TR_ERR_INVALID);
 	CHECK(!client);
@@ -1764,6 +1751,17 @@ static void test_default_factory_requires_methods(void)
 	CHECK(!server);
 	CHECK(tr_client_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
 	CHECK(tr_server_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
+	memset(&method, 0, sizeof(method));
+	method.service_id = 1U;
+	method.method_id = 1U;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_RPC_LANE_CONTROL;
+	method.max_request_bytes = 64U;
+	method.max_response_bytes = 64U;
+	method.request_compression_algorithms = UINT32_C(0x80000000);
 	tr_client_config_init(&config);
 	CHECK(tr_client_create(&config, &method, 1, &client) == TR_ERR_INVALID);
 	CHECK(!client);
@@ -1893,8 +1891,10 @@ static void test_unary_rejections(void)
 	struct call_state unknown, rejected, invalid_compression;
 	struct message_spec spec;
 	struct tr_rpc_v2_call sentinel;
-	struct tr_rpc_call_options invalid_options = {
-	        .request_compression = (enum tr_rpc_compression)99};
+	struct tr_rpc_call_options invalid_options;
+
+	memset(&invalid_options, 0, sizeof(invalid_options));
+	invalid_options.request_compression = (enum tr_rpc_compression)99;
 	fixture_create(&f);
 	spec.size = MAX_BODY;
 	spec.tag = 91U;
