@@ -501,7 +501,7 @@ jobs:
               cd "$consumer_dir"
               "$consumer_compiler" "${language[@]}" \
                 -Wall -Wextra -Werror -pedantic -pthread \
-                -I"$prefix/include" consumer.c -x none \
+                -I"$prefix/include" consumer.c \
                 -L"$prefix/lib" -ltrcore -lssl -lcrypto -o "consumer-$consumer_compiler"
               timeout 30s "./consumer-$consumer_compiler"
             )

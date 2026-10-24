@@ -6,8 +6,10 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/epoll.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "../../group/pipeline_control_internal.h"
 #include "pipeline_control_transport_internal.h"
@@ -34,8 +36,10 @@ struct tr_pipeline_listener_connection {
 	struct tr_conn_handle handle;
 	struct tr_pipeline_route_preface route;
 	struct tr_deadline handshake_deadline;
+	struct tr_tls_provider_operation authorization_operation;
 	uint32_t generation;
 	enum tr_pipeline_listener_connection_role role;
+	int authorization_pending;
 	int used;
 };
 
@@ -49,8 +53,30 @@ struct tr_pipeline_listener_session {
 	uint64_t tls_generation;
 	uint32_t connection_index;
 	uint32_t connection_generation;
+	uint32_t generation;
 	int used;
 	int closing;
+	int authorization_reserved;
+};
+
+struct tr_pipeline_listener_preface;
+
+struct tr_pipeline_listener_authorization {
+	struct tr_tls_provider_operation operation;
+	struct tr_conn_handle connection;
+	struct tr_pipeline_route_preface route;
+	struct tr_pipeline_listener_preface *preface;
+	struct tr_peer_identity_snapshot *peer_identity;
+	struct tr_peer_identity_snapshot *control_identity;
+	struct tr_tls_openssl_profile *tls_profile;
+	uint64_t tls_generation;
+	uint32_t connection_index;
+	uint32_t connection_generation;
+	uint32_t session_index;
+	uint32_t session_generation;
+	int used;
+	int cancelled;
+	int cancel_notified;
 };
 
 struct tr_pipeline_listener {
@@ -61,6 +87,9 @@ struct tr_pipeline_listener {
 
 	struct tr_pipeline_listener_session *sessions;
 	struct tr_pipeline_listener_connection *connections;
+	struct tr_pipeline_listener_authorization *authorizations;
+	int authorization_fd;
+	int authorization_event_registered;
 
 	int listen_fd;
 	int retained_listen_fd;
@@ -82,6 +111,7 @@ struct tr_pipeline_listener {
 	int drain_wait_closed;
 
 	uint32_t pipelines_current;
+	uint32_t authorizations_current;
 	uint32_t pipelines_peak;
 	uint32_t connections_current;
 	uint32_t connections_peak;
@@ -94,17 +124,95 @@ struct tr_pipeline_listener {
 struct tr_pipeline_listener_preface {
 	struct tr_pipeline_listener *listener;
 	struct tr_pipeline_route_parser parser;
+	struct tr_tls_provider_operation authorization_operation;
 	uint32_t connection_index;
 	uint32_t connection_generation;
+	int authorization_pending;
 	int handed_off;
 };
+
+static int
+tr_pipeline_listener_operation_equal(struct tr_tls_provider_operation left,
+                                     struct tr_tls_provider_operation right)
+{
+	return left.instance == right.instance &&
+	       left.generation == right.generation && left.slot == right.slot &&
+	       left.kind == right.kind;
+}
+
+static struct tr_pipeline_listener_authorization *
+tr_pipeline_listener_authorization_find(
+        struct tr_pipeline_listener *listener,
+        struct tr_tls_provider_operation operation)
+{
+	uint32_t i;
+
+	if (!listener)
+		return NULL;
+	for (i = 0U; i < listener->config.authorization_capacity; ++i) {
+		struct tr_pipeline_listener_authorization *authorization =
+		        &listener->authorizations[i];
+
+		if (authorization->used &&
+		    tr_pipeline_listener_operation_equal(
+		            authorization->operation, operation))
+			return authorization;
+	}
+	return NULL;
+}
+
+static void tr_pipeline_listener_authorization_release(
+        struct tr_pipeline_listener_authorization *authorization)
+{
+	if (!authorization)
+		return;
+	tr_peer_identity_snapshot_release(authorization->peer_identity);
+	tr_peer_identity_snapshot_release(authorization->control_identity);
+	tr_tls_openssl_profile_release(authorization->tls_profile);
+	authorization->peer_identity = NULL;
+	authorization->control_identity = NULL;
+	authorization->tls_profile = NULL;
+}
+
+static int tr_pipeline_listener_authorization_cancel_on_owner(
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_authorization *authorization, int reason)
+{
+	int notify = 0;
+	int ret;
+
+	if (!listener || !authorization || !authorization->used || reason >= 0)
+		return TR_ERR_INVALID;
+	authorization->cancelled = 1;
+	authorization->preface = NULL;
+	if (authorization->route.role == TR_PIPELINE_ROUTE_DATA)
+		(void)tr_pipeline_registry_cancel_data_route(
+		        listener->registry, &authorization->route);
+	ret = tr_tls_provider_operation_request_cancel(
+	        listener->config.authorization_operations,
+	        authorization->operation, reason, &notify);
+	if (ret != TR_OK)
+		return ret;
+	if (notify && !authorization->cancel_notified) {
+		authorization->cancel_notified = 1;
+		listener->config.authorize_cancel(
+		        authorization->operation,
+		        listener->config.authorize_async_arg);
+	}
+	return TR_OK;
+}
+
+static void tr_pipeline_listener_preface_release(void *arg);
+static void tr_pipeline_listener_authorization_ready(int fd, uint32_t events,
+                                                     void *arg);
 
 static int tr_pipeline_listener_drain_complete_on_owner(
 	const struct tr_pipeline_listener *listener)
 {
 	return listener && listener->draining &&
-		listener->connections_current == 0U &&
-		listener->pipelines_current == 0U;
+	       listener->connections_current == 0U &&
+	       listener->pipelines_current == 0U &&
+	       listener->authorizations_current == 0U;
 }
 
 static void tr_pipeline_listener_publish_drain_progress_on_owner(
@@ -193,6 +301,9 @@ static void tr_pipeline_listener_connection_clear(
 	listener = connection->listener;
 	memset(&connection->handle, 0, sizeof(connection->handle));
 	memset(&connection->route, 0, sizeof(connection->route));
+	memset(&connection->authorization_operation, 0,
+	       sizeof(connection->authorization_operation));
+	connection->authorization_pending = 0;
 	connection->role = TR_PIPELINE_LISTENER_CONN_PENDING;
 	connection->used = 0;
 	if (listener && listener->connections_current != 0U)
@@ -241,11 +352,28 @@ tr_pipeline_listener_session_find(
 
 	for (i = 0; i < listener->config.pipeline_capacity; ++i) {
 		struct tr_pipeline_listener_session *session =
-			&listener->sessions[i];
+		        &listener->sessions[i];
 
 		if (session->used && !session->closing &&
+		    !session->authorization_reserved &&
 		    session->pipeline_id == pipeline_id &&
 		    session->epoch == epoch)
+			return session;
+	}
+	return NULL;
+}
+
+static struct tr_pipeline_listener_session *
+tr_pipeline_listener_session_find_id(struct tr_pipeline_listener *listener,
+                                     uint64_t pipeline_id)
+{
+	uint32_t i;
+
+	for (i = 0; i < listener->config.pipeline_capacity; ++i) {
+		struct tr_pipeline_listener_session *session =
+		        &listener->sessions[i];
+
+		if (session->used && session->pipeline_id == pipeline_id)
 			return session;
 	}
 	return NULL;
@@ -262,6 +390,50 @@ tr_pipeline_listener_session_reserve(struct tr_pipeline_listener *listener)
 	}
 	listener->capacity_rejections++;
 	return NULL;
+}
+
+static int tr_pipeline_listener_session_reserve_authorization(
+        struct tr_pipeline_listener *listener,
+        const struct tr_pipeline_route_preface *route, uint32_t *out_index,
+        uint32_t *out_generation)
+{
+	struct tr_pipeline_listener_session *session;
+	uint32_t generation;
+
+	if (!listener || !route || !out_index || !out_generation)
+		return TR_ERR_INVALID;
+	if (tr_pipeline_listener_session_find_id(listener, route->pipeline_id))
+		return TR_ERR_STALE;
+	session = tr_pipeline_listener_session_reserve(listener);
+	if (!session)
+		return TR_AGAIN;
+	generation = tr_pipeline_listener_next_generation(session->generation);
+	memset(session, 0, sizeof(*session));
+	session->listener = listener;
+	session->pipeline_id = route->pipeline_id;
+	session->epoch = route->epoch;
+	session->generation = generation;
+	session->used = 1;
+	session->authorization_reserved = 1;
+	*out_index = (uint32_t)(session - listener->sessions);
+	*out_generation = generation;
+	return TR_OK;
+}
+
+static void tr_pipeline_listener_session_release_authorization(
+        struct tr_pipeline_listener *listener, uint32_t index,
+        uint32_t generation)
+{
+	struct tr_pipeline_listener_session *session;
+
+	if (!listener || index >= listener->config.pipeline_capacity)
+		return;
+	session = &listener->sessions[index];
+	if (!session->used || !session->authorization_reserved ||
+	    session->generation != generation)
+		return;
+	memset(session, 0, sizeof(*session));
+	session->generation = generation;
 }
 
 static int tr_pipeline_listener_identity_view(
@@ -324,11 +496,16 @@ static void tr_pipeline_listener_control_closed(
 		return;
 	}
 
-	tr_peer_identity_snapshot_release(session->peer_identity);
-	session->peer_identity = NULL;
-	tr_tls_openssl_profile_release(session->tls_profile);
-	session->tls_profile = NULL;
-	memset(session, 0, sizeof(*session));
+	{
+		uint32_t generation = session->generation;
+
+		tr_peer_identity_snapshot_release(session->peer_identity);
+		session->peer_identity = NULL;
+		tr_tls_openssl_profile_release(session->tls_profile);
+		session->tls_profile = NULL;
+		memset(session, 0, sizeof(*session));
+		session->generation = generation;
+	}
 	if (listener->pipelines_current != 0U)
 		listener->pipelines_current--;
 	tr_pipeline_listener_publish_drain_progress_on_owner(listener);
@@ -380,10 +557,11 @@ static void tr_pipeline_listener_data_event(
 }
 
 static int tr_pipeline_listener_accept_control(
-	struct tr_pipeline_listener *listener,
-	struct tr_pipeline_listener_connection *tracked,
-	const struct tr_pipeline_route_preface *route,
-	struct tr_conn_handle connection)
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_connection *tracked,
+        const struct tr_pipeline_route_preface *route,
+        struct tr_conn_handle connection, int run_authorize,
+        uint32_t reserved_session_index, uint32_t reserved_session_generation)
 {
 	struct tr_pipeline_listener_session *session;
 	struct tr_peer_identity_snapshot *peer_identity = NULL;
@@ -432,19 +610,39 @@ static int tr_pipeline_listener_accept_control(
 		tr_tls_openssl_profile_release(tls_profile);
 		return ret;
 	}
-	ret = listener->config.authorize_control(
-	        &authorization, listener->config.authorize_arg);
-	if (ret != TR_OK) {
-		tr_peer_identity_snapshot_release(peer_identity);
-		tr_tls_openssl_profile_release(tls_profile);
-		return ret;
+	if (run_authorize) {
+		ret = listener->config.authorize_control(
+		        &authorization, listener->config.authorize_arg);
+		if (ret != TR_OK) {
+			tr_peer_identity_snapshot_release(peer_identity);
+			tr_tls_openssl_profile_release(tls_profile);
+			return ret;
+		}
 	}
 
-	session = tr_pipeline_listener_session_reserve(listener);
-	if (!session) {
-		tr_peer_identity_snapshot_release(peer_identity);
-		tr_tls_openssl_profile_release(tls_profile);
-		return TR_AGAIN;
+	if (reserved_session_index != UINT32_MAX) {
+		if (reserved_session_index >=
+		    listener->config.pipeline_capacity) {
+			tr_peer_identity_snapshot_release(peer_identity);
+			tr_tls_openssl_profile_release(tls_profile);
+			return TR_ERR_STALE;
+		}
+		session = &listener->sessions[reserved_session_index];
+		if (!session->used || !session->authorization_reserved ||
+		    session->generation != reserved_session_generation ||
+		    session->pipeline_id != route->pipeline_id ||
+		    session->epoch != route->epoch) {
+			tr_peer_identity_snapshot_release(peer_identity);
+			tr_tls_openssl_profile_release(tls_profile);
+			return TR_ERR_STALE;
+		}
+	} else {
+		session = tr_pipeline_listener_session_reserve(listener);
+		if (!session) {
+			tr_peer_identity_snapshot_release(peer_identity);
+			tr_tls_openssl_profile_release(tls_profile);
+			return TR_AGAIN;
+		}
 	}
 
 	memset(&control_config, 0, sizeof(control_config));
@@ -463,7 +661,16 @@ static int tr_pipeline_listener_accept_control(
 		return ret;
 	}
 
-	memset(session, 0, sizeof(*session));
+	{
+		uint32_t generation =
+		        session->authorization_reserved
+		                ? session->generation
+		                : tr_pipeline_listener_next_generation(
+		                          session->generation);
+
+		memset(session, 0, sizeof(*session));
+		session->generation = generation;
+	}
 	session->listener = listener;
 	session->peer_identity = peer_identity;
 	session->tls_profile = tls_profile;
@@ -507,10 +714,10 @@ static int tr_pipeline_listener_accept_control(
 }
 
 static int tr_pipeline_listener_accept_data(
-	struct tr_pipeline_listener *listener,
-	struct tr_pipeline_listener_connection *tracked,
-	const struct tr_pipeline_route_preface *route,
-	struct tr_conn_handle connection)
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_connection *tracked,
+        const struct tr_pipeline_route_preface *route,
+        struct tr_conn_handle connection, int run_authorize)
 {
 	struct tr_pipeline_ingress_config ingress;
 	struct tr_pipeline_listener_session *session;
@@ -563,8 +770,10 @@ static int tr_pipeline_listener_accept_data(
 	authorization.role = TR_CONNECTION_GROUP_ROLE_DATA;
 	authorization.peer_identity = peer_view;
 	authorization.control_identity = control_view;
-	ret = listener->config.authorize_control(
-	        &authorization, listener->config.authorize_arg);
+	ret = run_authorize
+	              ? listener->config.authorize_control(
+	                        &authorization, listener->config.authorize_arg)
+	              : TR_OK;
 	tr_peer_identity_snapshot_release(peer_identity);
 	if (ret != TR_OK)
 		return ret;
@@ -583,6 +792,483 @@ static int tr_pipeline_listener_accept_data(
 	tracked->route = *route;
 	tracked->role = TR_PIPELINE_LISTENER_CONN_DATA;
 	return TR_OK;
+}
+
+static int tr_pipeline_listener_start_async_authorization(
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_connection *tracked,
+        struct tr_pipeline_listener_preface *preface,
+        const struct tr_pipeline_route_preface *route,
+        struct tr_conn_handle connection)
+{
+	struct tr_pipeline_listener_authorization *pending;
+	struct tr_connection_group_authorization request;
+	struct tr_peer_identity_snapshot *peer_identity = NULL;
+	struct tr_peer_identity_snapshot *control_identity = NULL;
+	struct tr_tls_openssl_profile *tls_profile = NULL;
+	struct tr_pipeline_listener_session *session = NULL;
+	struct tr_peer_identity_view peer_view;
+	struct tr_peer_identity_view control_view;
+	struct tr_tls_provider_operation operation;
+	uint64_t tls_generation = 0U;
+	uint32_t session_index = UINT32_MAX;
+	uint32_t session_generation = 0U;
+	uint32_t authorization_index;
+	int control_reservation_held = 0;
+	int ret;
+
+	if (!listener || !tracked || !preface || !route ||
+	    !listener->config.authorize_async ||
+	    !listener->config.authorize_cancel ||
+	    !listener->config.authorization_operations)
+		return TR_ERR_INVALID;
+	if (listener->draining)
+		return TR_ERR_CLOSED;
+	if (route->role == TR_PIPELINE_ROUTE_CONTROL) {
+		if (route->owner_shard_id != listener->config.owner_shard_id)
+			return TR_ERR_STALE;
+		if (tr_pipeline_listener_session_find_id(listener,
+		                                         route->pipeline_id))
+			return TR_ERR_STALE;
+	} else if (route->role == TR_PIPELINE_ROUTE_DATA) {
+		ret = tr_pipeline_registry_validate_data_route_on_owner(
+		        listener->registry, route);
+		if (ret != TR_OK)
+			return ret;
+		session = tr_pipeline_listener_session_find(
+		        listener, route->pipeline_id, route->epoch);
+		if (!session)
+			return TR_ERR_STALE;
+		session_index = (uint32_t)(session - listener->sessions);
+		session_generation = session->generation;
+	} else {
+		return TR_ERR_BAD_TYPE;
+	}
+
+	ret = tr_reactor_tls_generation_on_owner(connection, &tls_generation);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_reactor_tls_profile_retain_on_owner(connection, &tls_profile);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_reactor_peer_identity_snapshot_on_owner(connection,
+	                                                 &peer_identity);
+	if (ret != TR_OK)
+		goto fail;
+	if (peer_identity) {
+		ret = tr_peer_identity_snapshot_retain(peer_identity);
+		if (ret != TR_OK)
+			goto fail;
+	}
+	if (session) {
+		if (tls_generation != session->tls_generation) {
+			ret = TR_ERR_STALE;
+			goto fail;
+		}
+		control_identity = session->peer_identity;
+		if (control_identity) {
+			ret = tr_peer_identity_snapshot_retain(
+			        control_identity);
+			if (ret != TR_OK)
+				goto fail;
+		}
+	}
+	ret = tr_pipeline_listener_identity_view(peer_identity, &peer_view);
+	if (ret == TR_OK)
+		ret = tr_pipeline_listener_identity_view(control_identity,
+		                                         &control_view);
+	if (ret != TR_OK)
+		goto fail;
+	if (session &&
+	    !tr_pipeline_listener_identity_equal(&peer_view, &control_view)) {
+		ret = TR_ERR_INVALID;
+		goto fail;
+	}
+
+	memset(&request, 0, sizeof(request));
+	request.group.group_id = route->pipeline_id;
+	request.group.epoch = route->epoch;
+	request.role = route->role == TR_PIPELINE_ROUTE_CONTROL
+	                       ? TR_CONNECTION_GROUP_ROLE_CONTROL
+	                       : TR_CONNECTION_GROUP_ROLE_DATA;
+	request.peer_identity = peer_view;
+	request.control_identity = control_view;
+	request.tls_profile_generation = tls_generation;
+	request.deadline_monotonic_ns =
+	        tr_deadline_to_ns(&tracked->handshake_deadline);
+	ret = listener->config.authorize_control(
+	        &request, listener->config.authorize_arg);
+	if (ret != TR_OK)
+		goto fail;
+	if (route->role == TR_PIPELINE_ROUTE_CONTROL) {
+		ret = tr_pipeline_listener_session_reserve_authorization(
+		        listener, route, &session_index, &session_generation);
+		if (ret != TR_OK)
+			goto fail;
+		control_reservation_held = 1;
+	}
+
+	ret = tr_tls_provider_operation_reserve(
+	        listener->config.authorization_operations,
+	        TR_TLS_PROVIDER_OPERATION_AUTHORIZATION,
+	        (uint32_t)sizeof(
+	                enum tr_connection_group_authorization_decision),
+	        &operation);
+	if (ret != TR_OK)
+		goto fail;
+	for (authorization_index = 0U;
+	     authorization_index < listener->config.authorization_capacity;
+	     ++authorization_index)
+		if (!listener->authorizations[authorization_index].used)
+			break;
+	if (authorization_index == listener->config.authorization_capacity) {
+		int ignored = 0;
+
+		(void)tr_tls_provider_operation_request_cancel(
+		        listener->config.authorization_operations, operation,
+		        TR_ERR_CANCELLED, &ignored);
+		(void)tr_tls_provider_operation_retire(
+		        listener->config.authorization_operations, operation);
+		ret = TR_AGAIN;
+		goto fail;
+	}
+	ret = tr_tls_provider_operation_accept(
+	        listener->config.authorization_operations, operation);
+	if (ret != TR_OK) {
+		int ignored = 0;
+
+		(void)tr_tls_provider_operation_request_cancel(
+		        listener->config.authorization_operations, operation,
+		        TR_ERR_CANCELLED, &ignored);
+		(void)tr_tls_provider_operation_retire(
+		        listener->config.authorization_operations, operation);
+		goto fail;
+	}
+
+	pending = &listener->authorizations[authorization_index];
+	memset(pending, 0, sizeof(*pending));
+	pending->operation = operation;
+	pending->connection = connection;
+	pending->route = *route;
+	pending->preface = preface;
+	pending->peer_identity = peer_identity;
+	pending->control_identity = control_identity;
+	pending->tls_profile = tls_profile;
+	pending->tls_generation = tls_generation;
+	pending->connection_index = (uint32_t)(tracked - listener->connections);
+	pending->connection_generation = tracked->generation;
+	pending->session_index = session_index;
+	pending->session_generation = session_generation;
+	pending->used = 1;
+	control_reservation_held = 0;
+	listener->authorizations_current++;
+	tracked->route = *route;
+	tracked->authorization_operation = operation;
+	tracked->authorization_pending = 1;
+	preface->authorization_operation = operation;
+	preface->authorization_pending = 1;
+	listener->config.authorize_async(&request, operation,
+	                                 listener->config.authorize_async_arg);
+	return TR_IN_PROGRESS;
+
+fail:
+	if (control_reservation_held)
+		tr_pipeline_listener_session_release_authorization(
+		        listener, session_index, session_generation);
+	tr_peer_identity_snapshot_release(peer_identity);
+	tr_peer_identity_snapshot_release(control_identity);
+	tr_tls_openssl_profile_release(tls_profile);
+	return ret;
+}
+
+static int tr_pipeline_listener_authorization_revalidate(
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_authorization *authorization,
+        struct tr_pipeline_listener_connection **out_tracked)
+{
+	struct tr_pipeline_listener_connection *tracked;
+	struct tr_pipeline_listener_session *session = NULL;
+	struct tr_peer_identity_snapshot *peer_identity = NULL;
+	struct tr_tls_openssl_profile *tls_profile = NULL;
+	struct tr_peer_identity_view peer_view;
+	struct tr_peer_identity_view control_view;
+	uint64_t tls_generation = 0U;
+	int expired;
+	int ret;
+
+	if (!listener || !authorization || !authorization->used || !out_tracked)
+		return TR_ERR_INVALID;
+	*out_tracked = NULL;
+	tracked = tr_pipeline_listener_connection_exact(
+	        listener, authorization->connection_index,
+	        authorization->connection_generation);
+	if (!tracked || !tracked->authorization_pending ||
+	    !tr_pipeline_listener_operation_equal(
+	            tracked->authorization_operation,
+	            authorization->operation) ||
+	    tracked->handle.reactor != authorization->connection.reactor ||
+	    tracked->handle.slot != authorization->connection.slot ||
+	    tracked->handle.generation != authorization->connection.generation)
+		return TR_ERR_STALE;
+	ret = tr_deadline_expired(&tracked->handshake_deadline, &expired);
+	if (ret != TR_OK)
+		return ret;
+	if (expired)
+		return TR_ERR_TIMEOUT;
+	ret = tr_reactor_tls_generation_on_owner(authorization->connection,
+	                                         &tls_generation);
+	if (ret != TR_OK)
+		return ret;
+	if (tls_generation != authorization->tls_generation)
+		return TR_ERR_STALE;
+	ret = tr_reactor_tls_profile_retain_on_owner(authorization->connection,
+	                                             &tls_profile);
+	if (ret != TR_OK)
+		return ret;
+	if (tls_profile != authorization->tls_profile) {
+		tr_tls_openssl_profile_release(tls_profile);
+		return TR_ERR_STALE;
+	}
+	tr_tls_openssl_profile_release(tls_profile);
+	ret = tr_reactor_peer_identity_snapshot_on_owner(
+	        authorization->connection, &peer_identity);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_pipeline_listener_identity_view(peer_identity, &peer_view);
+	if (ret == TR_OK)
+		ret = tr_pipeline_listener_identity_view(
+		        authorization->peer_identity, &control_view);
+	if (ret == TR_OK &&
+	    !tr_pipeline_listener_identity_equal(&peer_view, &control_view))
+		ret = TR_ERR_STALE;
+	if (ret != TR_OK)
+		return ret;
+
+	if (authorization->route.role == TR_PIPELINE_ROUTE_CONTROL) {
+		if (authorization->route.owner_shard_id !=
+		            listener->config.owner_shard_id ||
+		    authorization->session_index >=
+		            listener->config.pipeline_capacity)
+			return TR_ERR_STALE;
+		session = &listener->sessions[authorization->session_index];
+		if (!session->used || !session->authorization_reserved ||
+		    session->generation != authorization->session_generation ||
+		    session->pipeline_id != authorization->route.pipeline_id ||
+		    session->epoch != authorization->route.epoch)
+			return TR_ERR_STALE;
+	} else if (authorization->route.role == TR_PIPELINE_ROUTE_DATA) {
+		ret = tr_pipeline_registry_validate_data_route_on_owner(
+		        listener->registry, &authorization->route);
+		if (ret != TR_OK)
+			return ret;
+		if (authorization->session_index >=
+		    listener->config.pipeline_capacity)
+			return TR_ERR_STALE;
+		session = &listener->sessions[authorization->session_index];
+		if (!session->used || session->closing ||
+		    session->generation != authorization->session_generation ||
+		    session->pipeline_id != authorization->route.pipeline_id ||
+		    session->epoch != authorization->route.epoch ||
+		    session->tls_generation != authorization->tls_generation)
+			return TR_ERR_STALE;
+		ret = tr_pipeline_listener_identity_view(session->peer_identity,
+		                                         &control_view);
+		if (ret != TR_OK)
+			return ret;
+		if (!tr_pipeline_listener_identity_equal(&peer_view,
+		                                         &control_view))
+			return TR_ERR_STALE;
+	} else {
+		return TR_ERR_BAD_TYPE;
+	}
+	*out_tracked = tracked;
+	return TR_OK;
+}
+
+static int tr_pipeline_listener_authorization_retire_on_owner(
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_authorization *authorization)
+{
+	int ret;
+
+	if (!listener || !authorization || !authorization->used)
+		return TR_ERR_INVALID;
+	ret = tr_tls_provider_operation_retire(
+	        listener->config.authorization_operations,
+	        authorization->operation);
+	if (ret != TR_OK)
+		return ret;
+	if (authorization->route.role == TR_PIPELINE_ROUTE_CONTROL)
+		tr_pipeline_listener_session_release_authorization(
+		        listener, authorization->session_index,
+		        authorization->session_generation);
+	tr_pipeline_listener_authorization_release(authorization);
+	memset(authorization, 0, sizeof(*authorization));
+	if (listener->authorizations_current != 0U)
+		listener->authorizations_current--;
+	tr_pipeline_listener_publish_drain_progress_on_owner(listener);
+	return TR_OK;
+}
+
+static void tr_pipeline_listener_authorization_process_on_owner(
+        struct tr_pipeline_listener *listener,
+        struct tr_pipeline_listener_authorization *authorization)
+{
+	struct tr_pipeline_listener_connection *tracked = NULL;
+	struct tr_pipeline_listener_preface *preface;
+	struct tr_conn_handle connection;
+	enum tr_connection_group_authorization_decision decision =
+	        TR_CONNECTION_GROUP_AUTHORIZATION_DENY;
+	int provider_status = TR_AGAIN;
+	size_t result_len = 0U;
+	int ret;
+
+	ret = tr_tls_provider_operation_result(
+	        listener->config.authorization_operations,
+	        authorization->operation, &provider_status, &decision,
+	        sizeof(decision), &result_len);
+	if (ret == TR_AGAIN)
+		return;
+	if (ret != TR_OK) {
+		(void)tr_pipeline_listener_authorization_cancel_on_owner(
+		        listener, authorization, TR_ERR_CANCELLED);
+		return;
+	}
+	if (authorization->cancelled) {
+		(void)tr_pipeline_listener_authorization_retire_on_owner(
+		        listener, authorization);
+		return;
+	}
+	preface = authorization->preface;
+	if (!preface || !preface->authorization_pending ||
+	    !tr_pipeline_listener_operation_equal(
+	            preface->authorization_operation,
+	            authorization->operation)) {
+		(void)tr_pipeline_listener_authorization_retire_on_owner(
+		        listener, authorization);
+		return;
+	}
+	connection = authorization->connection;
+	ret = tr_pipeline_listener_authorization_revalidate(
+	        listener, authorization, &tracked);
+	if (ret == TR_OK && provider_status == TR_OK &&
+	    result_len == sizeof(decision) &&
+	    decision == TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW) {
+		if (authorization->route.role == TR_PIPELINE_ROUTE_CONTROL)
+			ret = tr_pipeline_listener_accept_control(
+			        listener, tracked, &authorization->route,
+			        authorization->connection, 0,
+			        authorization->session_index,
+			        authorization->session_generation);
+		else
+			ret = tr_pipeline_listener_accept_data(
+			        listener, tracked, &authorization->route,
+			        authorization->connection, 0);
+	} else if (ret == TR_OK && provider_status == TR_OK &&
+	           result_len == sizeof(decision) &&
+	           decision == TR_CONNECTION_GROUP_AUTHORIZATION_DENY) {
+		ret = TR_ERR_CLOSED;
+	} else if (ret == TR_OK) {
+		ret = provider_status < 0 ? provider_status : TR_ERR_INVALID;
+	}
+	if (ret != TR_OK) {
+		listener->route_rejections++;
+		if (authorization->route.role == TR_PIPELINE_ROUTE_DATA)
+			(void)tr_pipeline_registry_cancel_data_route(
+			        listener->registry, &authorization->route);
+	}
+	if (tracked && tracked->authorization_pending &&
+	    tr_pipeline_listener_operation_equal(
+	            tracked->authorization_operation,
+	            authorization->operation)) {
+		tracked->authorization_pending = 0;
+		memset(&tracked->authorization_operation, 0,
+		       sizeof(tracked->authorization_operation));
+	}
+	preface->authorization_pending = 0;
+	memset(&preface->authorization_operation, 0,
+	       sizeof(preface->authorization_operation));
+	if (ret == TR_OK) {
+		preface->handed_off = 1;
+		if (authorization->route.role == TR_PIPELINE_ROUTE_CONTROL)
+			listener->control_accepts++;
+		else
+			listener->data_accepts++;
+	}
+	if (tr_pipeline_listener_authorization_retire_on_owner(
+	            listener, authorization) != TR_OK) {
+		if (ret == TR_OK)
+			ret = TR_ERR_STATE;
+	}
+	(void)tr_reactor_preface_resume_on_owner(connection, ret);
+}
+
+static void tr_pipeline_listener_authorization_scan_on_owner(
+        struct tr_pipeline_listener *listener)
+{
+	uint32_t i;
+
+	if (!listener || !listener->authorizations)
+		return;
+	for (i = 0U; i < listener->config.authorization_capacity; ++i) {
+		struct tr_pipeline_listener_authorization *authorization =
+		        &listener->authorizations[i];
+
+		if (authorization->used)
+			tr_pipeline_listener_authorization_process_on_owner(
+			        listener, authorization);
+	}
+}
+
+static void tr_pipeline_listener_authorization_ready(int fd, uint32_t events,
+                                                     void *arg)
+{
+	struct tr_pipeline_listener *listener =
+	        (struct tr_pipeline_listener *)arg;
+	uint64_t value;
+
+	(void)events;
+	if (!listener || fd != listener->authorization_fd)
+		return;
+	while (read(fd, &value, sizeof(value)) == (ssize_t)sizeof(value))
+		;
+	tr_pipeline_listener_authorization_scan_on_owner(listener);
+}
+
+int tr_pipeline_listener_authorize_complete(
+        struct tr_pipeline_listener *listener,
+        struct tr_tls_provider_operation operation, int status,
+        enum tr_connection_group_authorization_decision decision)
+{
+	uint64_t value = 1U;
+	const void *result = NULL;
+	size_t result_len = 0U;
+	ssize_t written;
+	int ret;
+
+	if (!listener || !listener->config.authorization_operations ||
+	    operation.kind != TR_TLS_PROVIDER_OPERATION_AUTHORIZATION ||
+	    status > TR_OK ||
+	    (decision != TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW &&
+	     decision != TR_CONNECTION_GROUP_AUTHORIZATION_DENY))
+		return TR_ERR_INVALID;
+	if (status == TR_OK) {
+		result = &decision;
+		result_len = sizeof(decision);
+	}
+	ret = tr_tls_provider_operation_complete(
+	        listener->config.authorization_operations, operation, status,
+	        result, result_len);
+	if (ret != TR_OK)
+		return ret;
+	do {
+		written = write(listener->authorization_fd, &value,
+		                sizeof(value));
+	} while (written < 0 && errno == EINTR);
+	if (written == (ssize_t)sizeof(value) ||
+	    (written < 0 && errno == EAGAIN))
+		return TR_OK;
+	return TR_ERR_SYS;
 }
 
 int tr_pipeline_listener_set_tls_profile_on_owner(
@@ -628,6 +1314,9 @@ static uint64_t tr_pipeline_listener_handshake_timer_main(void *arg,
 		if (next == 0U || deadline < next)
 			next = deadline;
 	}
+	/* 作为 eventfd 的恢复轮次：即使一次 provider completion 无法写入，
+	 * 已准备结果仍会在下一次有界握手期限扫描中被 owner 消费。 */
+	tr_pipeline_listener_authorization_scan_on_owner(listener);
 	return next;
 }
 
@@ -710,14 +1399,23 @@ static int tr_pipeline_listener_preface_feed(
 	if (!ready)
 		return TR_OK;
 
-	if (route.role == TR_PIPELINE_ROUTE_CONTROL)
-		ret = tr_pipeline_listener_accept_control(
-			listener, tracked, &route, connection);
-	else if (route.role == TR_PIPELINE_ROUTE_DATA)
-		ret = tr_pipeline_listener_accept_data(
-			listener, tracked, &route, connection);
-	else
+	if (listener->config.authorize_async) {
+		ret = tr_pipeline_listener_start_async_authorization(
+		        listener, tracked, preface, &route, connection);
+		if (ret == TR_IN_PROGRESS) {
+			*done = 1;
+			return TR_IN_PROGRESS;
+		}
+	} else if (route.role == TR_PIPELINE_ROUTE_CONTROL) {
+		ret = tr_pipeline_listener_accept_control(listener, tracked,
+		                                          &route, connection, 1,
+		                                          UINT32_MAX, 0U);
+	} else if (route.role == TR_PIPELINE_ROUTE_DATA) {
+		ret = tr_pipeline_listener_accept_data(listener, tracked,
+		                                       &route, connection, 1);
+	} else {
 		ret = TR_ERR_BAD_TYPE;
+	}
 	if (ret != TR_OK) {
 		if (route.role == TR_PIPELINE_ROUTE_DATA)
 			(void)tr_pipeline_registry_cancel_data_route(
@@ -765,6 +1463,21 @@ static void tr_pipeline_listener_preface_release(void *arg)
 		tracked = tr_pipeline_listener_connection_exact(
 			preface->listener, preface->connection_index,
 			preface->connection_generation);
+		if (tracked && preface->authorization_pending) {
+			struct tr_pipeline_listener_authorization *authorization =
+			        tr_pipeline_listener_authorization_find(
+			                preface->listener,
+			                preface->authorization_operation);
+
+			if (authorization &&
+			    authorization->connection_index ==
+			            preface->connection_index &&
+			    authorization->connection_generation ==
+			            preface->connection_generation)
+				(void)tr_pipeline_listener_authorization_cancel_on_owner(
+				        preface->listener, authorization,
+				        TR_ERR_CANCELLED);
+		}
 		if (tracked)
 			tr_pipeline_listener_connection_clear(tracked);
 	}
@@ -870,14 +1583,16 @@ int tr_pipeline_listener_create(
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	if (!config || !config->owner ||
-	    config->owner_shard_id == UINT32_MAX ||
+	if (!config || !config->owner || config->owner_shard_id == UINT32_MAX ||
 	    config->pipeline_capacity == 0U ||
 	    config->connection_capacity == 0U ||
 	    config->data_capacity_per_pipeline == 0U ||
 	    config->stream_affinity_capacity_per_pipeline == 0U ||
-	    config->control_message_count == 0U ||
-	    !config->authorize_control)
+	    config->control_message_count == 0U || !config->authorize_control ||
+	    ((config->authorize_async == NULL) !=
+	     (config->authorize_cancel == NULL)) ||
+	    (config->authorize_async && (!config->authorization_operations ||
+	                                 config->authorization_capacity == 0U)))
 		return TR_ERR_INVALID;
 
 	listener = (struct tr_pipeline_listener *)calloc(
@@ -886,6 +1601,7 @@ int tr_pipeline_listener_create(
 		return TR_ERR_NOMEM;
 	listener->listen_fd = -1;
 	listener->retained_listen_fd = -1;
+	listener->authorization_fd = -1;
 	listener->config = *config;
 	if (listener->config.handshake_timeout_ms == 0U)
 		listener->config.handshake_timeout_ms = 10000U;
@@ -922,7 +1638,13 @@ int tr_pipeline_listener_create(
 		(struct tr_pipeline_listener_connection *)calloc(
 			config->connection_capacity,
 			sizeof(*listener->connections));
-	if (!listener->sessions || !listener->connections) {
+	if (config->authorize_async)
+		listener->authorizations =
+		        (struct tr_pipeline_listener_authorization *)calloc(
+		                config->authorization_capacity,
+		                sizeof(*listener->authorizations));
+	if (!listener->sessions || !listener->connections ||
+	    (config->authorize_async && !listener->authorizations)) {
 		ret = TR_ERR_NOMEM;
 		goto fail;
 	}
@@ -942,16 +1664,37 @@ int tr_pipeline_listener_create(
 	if (ret != TR_OK)
 		goto fail;
 	listener->message_pool_ready = 1;
+	if (config->authorize_async) {
+		listener->authorization_fd =
+		        eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+		if (listener->authorization_fd < 0) {
+			ret = TR_ERR_SYS;
+			goto fail;
+		}
+		ret = tr_reactor_aux_event_register(
+		        config->owner, listener->authorization_fd, EPOLLIN,
+		        tr_pipeline_listener_authorization_ready, listener);
+		if (ret != TR_OK)
+			goto fail;
+		listener->authorization_event_registered = 1;
+	}
 
 	*out = listener;
 	return TR_OK;
 
 fail:
-	/* message_pool 初始化是构造函数最后一个可失败步骤；成功后立即提交，
-	 * 因此失败路径不可能持有就绪池，不需要可能失败的回滚。
+	/* eventfd 注册之后没有其他构造步骤；失败回滚仍按就绪标志释放池与资源。
 	 */
+	if (listener->message_pool_ready)
+		(void)tr_buffer_pool_destroy(&listener->message_pool);
 	if (listener->registry)
 		tr_pipeline_registry_destroy(listener->registry);
+	if (listener->authorization_event_registered)
+		(void)tr_reactor_aux_event_unregister(
+		        config->owner, listener->authorization_fd);
+	if (listener->authorization_fd >= 0)
+		(void)close(listener->authorization_fd);
+	free(listener->authorizations);
 	free(listener->connections);
 	free(listener->sessions);
 	if (drain_wait_cond_ready)
@@ -1214,6 +1957,9 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 		if (ret != TR_OK && ret != TR_ERR_STALE && result == TR_OK)
 			result = ret;
 	}
+	/* close_on_owner 会同步触发 preface release 和 provider cancel。
+	 * 先消费其中已经确认的结果，再判断排空是否仍有 provider 引用。 */
+	tr_pipeline_listener_authorization_scan_on_owner(listener);
 
 	/* 连接关闭回调通常会完成 CONTROL 致命拆除。若某次
 	 * 拆除在关闭屏障之后返回错误，连接槽位可能已经清空，
@@ -1232,6 +1978,8 @@ static int tr_pipeline_listener_stop_on_owner(void *arg)
 			result = ret;
 	}
 
+	if (listener->authorizations_current != 0U)
+		return result == TR_OK ? TR_AGAIN : result;
 	if (listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return result == TR_OK ? TR_ERR_STATE : result;
@@ -1247,6 +1995,9 @@ static int tr_pipeline_listener_stop_stopped(void *arg)
 	ret = tr_pipeline_listener_publish_drained_admission(listener);
 	if (ret != TR_OK)
 		return ret;
+	tr_pipeline_listener_authorization_scan_on_owner(listener);
+	if (listener->authorizations_current != 0U)
+		return TR_AGAIN;
 	if (listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return TR_ERR_STATE;
@@ -1290,6 +2041,8 @@ static int tr_pipeline_listener_verify_destroy(void *arg)
 	    listener->connections_current != 0U ||
 	    listener->pipelines_current != 0U)
 		return TR_ERR_STATE;
+	if (listener->authorizations_current != 0U)
+		return TR_AGAIN;
 
 	return tr_pipeline_listener_close_wait_admission(listener);
 }
@@ -1322,6 +2075,18 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 			return ret;
 		listener->handshake_timer_registered = 0;
 	}
+	if (listener->authorization_event_registered) {
+		ret = tr_reactor_aux_event_unregister(
+		        listener->config.owner, listener->authorization_fd);
+		if (ret != TR_OK)
+			return ret;
+		listener->authorization_event_registered = 0;
+	}
+	if (listener->authorization_fd >= 0) {
+		if (close(listener->authorization_fd) != 0)
+			return TR_ERR_SYS;
+		listener->authorization_fd = -1;
+	}
 	if (listener->message_pool_ready) {
 		ret = tr_buffer_pool_destroy(&listener->message_pool);
 		if (ret != TR_OK)
@@ -1330,6 +2095,7 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener)
 	}
 	if (listener->registry)
 		tr_pipeline_registry_destroy(listener->registry);
+	free(listener->authorizations);
 	free(listener->connections);
 	free(listener->sessions);
 	(void)pthread_cond_destroy(&listener->drain_wait_cond);

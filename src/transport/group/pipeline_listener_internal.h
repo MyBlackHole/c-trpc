@@ -5,6 +5,7 @@
 
 #include "../../group/pipeline_route_internal.h"
 #include "../../execution/reactor.h"
+#include "../../io/tls_provider_operation_internal.h"
 #include "tr/transport.h"
 
 struct tr_pipeline_listener;
@@ -31,7 +32,9 @@ struct tr_pipeline_listener_config {
 	uint32_t data_capacity_per_pipeline;
 	uint32_t stream_affinity_capacity_per_pipeline;
 	uint32_t control_message_count;
+	uint32_t authorization_capacity;
 	struct tr_tls_openssl_profile *tls_profile;
+	struct tr_tls_provider_operation_table *authorization_operations;
 	/* TRR1 的绝对总期限；0 采用 10000ms 默认值，不随字节到达续期。 */
 	uint32_t handshake_timeout_ms;
 
@@ -40,6 +43,9 @@ struct tr_pipeline_listener_config {
 	 */
 	tr_pipeline_listener_authorize_control_cb authorize_control;
 	void *authorize_arg;
+	tr_connection_group_authorize_async_cb authorize_async;
+	tr_connection_group_authorize_cancel_cb authorize_cancel;
+	void *authorize_async_arg;
 
 	tr_pipeline_listener_data_frame_cb data_frame_cb;
 	tr_pipeline_listener_data_event_cb data_event_cb;
@@ -89,6 +95,10 @@ int tr_pipeline_listener_destroy(struct tr_pipeline_listener *listener);
 int tr_pipeline_listener_set_tls_profile_on_owner(
         struct tr_pipeline_listener *listener,
         struct tr_tls_openssl_profile *profile);
+int tr_pipeline_listener_authorize_complete(
+        struct tr_pipeline_listener *listener,
+        struct tr_tls_provider_operation operation, int status,
+        enum tr_connection_group_authorization_decision decision);
 
 uint16_t tr_pipeline_listener_bound_port(
 	const struct tr_pipeline_listener *listener);

@@ -18,6 +18,68 @@
 #define TEST_SERVICE_ID 0x234U
 #define TEST_METHOD_ID 1U
 
+struct tr_tls_openssl_profile;
+struct tr_runtime;
+
+static _Atomic unsigned int tls_profile_retain_call_count;
+static _Atomic unsigned int tls_profile_retain_fail_call_a;
+static _Atomic unsigned int tls_profile_retain_fail_call_b;
+static _Atomic int tls_runtime_destroy_fail_once;
+
+int __real_tr_tls_openssl_profile_retain(
+        struct tr_tls_openssl_profile *profile);
+int __real_tr_runtime_destroy(struct tr_runtime *runtime);
+
+int __wrap_tr_tls_openssl_profile_retain(struct tr_tls_openssl_profile *profile)
+{
+	unsigned int call =
+	        atomic_fetch_add_explicit(&tls_profile_retain_call_count, 1U,
+	                                  memory_order_relaxed) +
+	        1U;
+	unsigned int fail_call_a = atomic_load_explicit(
+	        &tls_profile_retain_fail_call_a, memory_order_relaxed);
+	unsigned int fail_call_b = atomic_load_explicit(
+	        &tls_profile_retain_fail_call_b, memory_order_relaxed);
+
+	if ((fail_call_a != 0U && call == fail_call_a) ||
+	    (fail_call_b != 0U && call == fail_call_b))
+		return TR_ERR_NOMEM;
+	return __real_tr_tls_openssl_profile_retain(profile);
+}
+
+int __wrap_tr_runtime_destroy(struct tr_runtime *runtime)
+{
+	if (atomic_exchange_explicit(&tls_runtime_destroy_fail_once, 0,
+	                             memory_order_relaxed))
+		return TR_AGAIN;
+	return __real_tr_runtime_destroy(runtime);
+}
+
+static void tls_profile_retain_fault_set(unsigned int fail_call_a,
+                                         unsigned int fail_call_b)
+{
+	atomic_store_explicit(&tls_profile_retain_call_count, 0U,
+	                      memory_order_relaxed);
+	atomic_store_explicit(&tls_profile_retain_fail_call_a, fail_call_a,
+	                      memory_order_relaxed);
+	atomic_store_explicit(&tls_profile_retain_fail_call_b, fail_call_b,
+	                      memory_order_relaxed);
+}
+
+static enum tr_rpc_status
+tls_rotation_unused_work(struct tr_rpc_v2_call_id call,
+                         const struct tr_rpc_v2_request *request,
+                         const struct tr_rpc_v2_cancel *cancel,
+                         struct tr_rpc_v2_reply *reply, void *arg)
+{
+	(void)call;
+	(void)request;
+	(void)cancel;
+	(void)reply;
+	(void)arg;
+	return TR_RPC_STATUS_OK;
+}
+
 struct identity_test_state {
 	pthread_mutex_t lock;
 	pthread_cond_t changed;
@@ -810,6 +872,88 @@ static void test_tls_profile_rotation_generation_and_failed_candidate(void)
 	identity_test_cleanup(&state);
 }
 
+static void test_tls_profile_install_and_rollback_faults(void)
+{
+	struct tls_test_identity identity;
+	struct tr_server_config config;
+	struct tr_server *server = NULL;
+	struct tr_rpc_v2_method method = {
+	        .descriptor =
+	                {
+	                        .service_id = TEST_SERVICE_ID,
+	                        .method_id = TEST_METHOD_ID,
+	                        .request_cardinality = TR_RPC_ONE,
+	                        .response_cardinality = TR_RPC_ONE,
+	                        .request_codec_id = TR_RPC_CODEC_RAW,
+	                        .response_codec_id = TR_RPC_CODEC_RAW,
+	                        .lane = TR_RPC_LANE_CONTROL,
+	                        .max_request_bytes = sizeof(request_data),
+	                        .max_response_bytes = sizeof(request_data),
+	                },
+	        .work = tls_rotation_unused_work,
+	};
+	uint64_t generation;
+
+	assert(tls_test_identity_init(&identity,
+	                              "rpc-v2-tls-install-rollback") == 0);
+	tr_server_config_init(&config);
+	config.shard_count = 2U;
+	config.tls.mode = TR_TLS_REQUIRED;
+	config.tls.certificate_file = identity.server_certificate_file;
+	config.tls.private_key_file = identity.server_private_key_file;
+	assert(tr_server_create(&config, &method, 1U, &server) == TR_OK);
+
+	/* 第 0 个 shard 安装候选后，第 1 个 shard 的 retain 失败；反向回滚
+	 * 必须恢复已部分安装的 shard，且不能发布新 generation。 */
+	tls_profile_retain_fault_set(2U, 0U);
+	generation = UINT64_C(0xfeedface);
+	assert(tr_server_tls_update_profile(server, &config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_ERR_NOMEM);
+	assert(atomic_load_explicit(&tls_profile_retain_call_count,
+	                            memory_order_relaxed) == 3U);
+	assert(generation == UINT64_C(0xfeedface));
+	tls_profile_retain_fault_set(0U, 0U);
+	generation = 0U;
+	assert(tr_server_tls_update_profile(server, &config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	assert(tr_server_destroy(server) == TR_OK);
+	server = NULL;
+	tls_test_identity_cleanup(&identity);
+
+	assert(tls_test_identity_init(&identity,
+	                              "rpc-v2-tls-rollback-failure") == 0);
+	tr_server_config_init(&config);
+	config.shard_count = 2U;
+	config.tls.mode = TR_TLS_REQUIRED;
+	config.tls.certificate_file = identity.server_certificate_file;
+	config.tls.private_key_file = identity.server_private_key_file;
+	assert(tr_server_create(&config, &method, 1U, &server) == TR_OK);
+
+	/* 第 2 次 retain 令安装失败，第 3 次令 reverse rollback 失败；Server
+	 * 必须 fail-closed，generation 输出不变，并保留销毁所有权。 */
+	tls_profile_retain_fault_set(2U, 3U);
+	generation = UINT64_C(0xfeedface);
+	assert(tr_server_tls_update_profile(server, &config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_ERR_STATE);
+	assert(atomic_load_explicit(&tls_profile_retain_call_count,
+	                            memory_order_relaxed) == 3U);
+	assert(generation == UINT64_C(0xfeedface));
+	assert(tr_server_tls_update_profile(server, &config.tls,
+	                                    TR_TLS_ROTATE_GRACEFUL,
+	                                    &generation) == TR_ERR_STATE);
+	tls_profile_retain_fault_set(0U, 0U);
+	atomic_store_explicit(&tls_runtime_destroy_fail_once, 1,
+	                      memory_order_relaxed);
+	assert(tr_server_destroy(server) == TR_AGAIN);
+	assert(tr_server_destroy(server) == TR_OK);
+	server = NULL;
+	tls_test_identity_cleanup(&identity);
+}
+
 int main(void)
 {
 	test_tls_rpc_work_receives_verified_connection_identity();
@@ -820,5 +964,6 @@ int main(void)
 	test_tls_without_client_certificate_yields_none(
 	        TR_TLS_CLIENT_AUTH_OPTIONAL, "rpc-v2-tls-identity-optional");
 	test_tls_profile_rotation_generation_and_failed_candidate();
+	test_tls_profile_install_and_rollback_faults();
 	return 0;
 }

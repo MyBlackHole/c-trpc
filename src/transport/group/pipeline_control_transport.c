@@ -80,6 +80,11 @@ static enum tr_frame_disposition tr_pipeline_control_transport_frame(
 
 	ret = tr_pipeline_control_cancel_data_wire(
 		transport->control, frame->payload->data, frame->payload->len);
+	/* 旧 DATA 连接可能在槽位复用后才发送取消；精确代次检查会拒绝它，
+	 * 但该陈旧能力不能影响新预留，也不应关闭仍有效的 CONTROL。
+	 */
+	if (ret == TR_ERR_STALE)
+		return TR_FRAME_RELEASE;
 	if (ret != TR_OK) {
 		(void)tr_reactor_abort_on_owner(connection, ret);
 		return TR_FRAME_RELEASE;

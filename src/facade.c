@@ -18,7 +18,8 @@ void tr_facade_limits_init(struct tr_facade_limits *limits)
 
 	limits->initial_window_bytes = 8U * 1024U * 1024U;
 	limits->window_update_threshold_bytes = 512U * 1024U;
-
+	limits->max_pending_tls_operations = 64U;
+	limits->max_tls_credential_bundle_bytes = 4U * 1024U * 1024U;
 }
 
 

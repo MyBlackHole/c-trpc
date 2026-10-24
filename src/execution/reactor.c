@@ -138,6 +138,7 @@ struct tr_connection {
 	void *callback_arg;
 
 	uint32_t preface_remaining;
+	int preface_deferred;
 	tr_reactor_preface_feed_cb preface_feed;
 	tr_reactor_preface_release_cb preface_release;
 	void *preface_arg;
@@ -682,6 +683,10 @@ static uint32_t tr_connection_interest(const struct tr_connection *connection)
 	const struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
 	uint32_t endpoint_interest;
 
+	/* defer 期间只监听对端关闭；不读取已排队的路由后续字节。 */
+	if (connection->preface_deferred)
+		return EPOLLRDHUP;
+
 	if (endpoint) {
 		if (endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING)
 			return events |
@@ -1018,6 +1023,7 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_unschedule_rx(reactor, connection);
 	tr_control_tx_unwatch(reactor, connection);
 	connection->rx_error_pending = 0;
+	connection->preface_deferred = 0;
 	if (connection->preface_release) {
 		tr_reactor_preface_release_cb release =
 			connection->preface_release;
@@ -1133,6 +1139,50 @@ int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status)
 
 	tr_connection_close_internal(
 		reactor, conn, TR_CONN_EVENT_ERROR, status);
+	return TR_OK;
+}
+
+int tr_reactor_preface_resume_on_owner(struct tr_conn_handle connection,
+                                       int status)
+{
+	struct tr_reactor *reactor = connection.reactor;
+	struct tr_connection *conn;
+	tr_reactor_preface_release_cb release;
+	void *release_arg;
+	int ret;
+
+	if (!reactor || status > TR_OK ||
+	    connection.slot >= reactor->config.max_connections)
+		return TR_ERR_INVALID;
+	TR_ASSERT_REACTOR_OWNER(reactor);
+
+	conn = &reactor->connections[connection.slot];
+	if (conn->state != TR_CONN_ACTIVE ||
+	    conn->generation != connection.generation)
+		return TR_ERR_STALE;
+	if (!conn->preface_deferred)
+		return TR_ERR_STATE;
+	if (status != TR_OK)
+		return tr_reactor_abort_on_owner(connection, status);
+
+	conn->preface_deferred = 0;
+	ret = tr_connection_update_interest(reactor, conn);
+	if (ret != TR_OK) {
+		tr_connection_close_internal(reactor, conn, TR_CONN_EVENT_ERROR,
+		                             ret);
+		return ret;
+	}
+
+	release = conn->preface_release;
+	release_arg = conn->preface_arg;
+	conn->preface_remaining = 0U;
+	conn->preface_feed = NULL;
+	conn->preface_release = NULL;
+	conn->preface_arg = NULL;
+	free(conn->preface_read_buffer);
+	conn->preface_read_buffer = NULL;
+	if (release)
+		release(release_arg);
 	return TR_OK;
 }
 
@@ -2203,6 +2253,15 @@ static int tr_connection_read_preface(
 		handle.generation = connection->generation;
 		ret = connection->preface_feed(handle, data, (size_t)n, &done,
 		                               connection->preface_arg);
+		if (ret == TR_IN_PROGRESS) {
+			if (connection->preface_remaining != 0U || !done)
+				return TR_ERR_STATE;
+			connection->preface_deferred = 1;
+			if (tr_connection_update_interest(reactor,
+			                                  connection) != TR_OK)
+				return TR_ERR_SYS;
+			return TR_IN_PROGRESS;
+		}
 		if (ret != TR_OK)
 			return ret;
 
@@ -2246,6 +2305,8 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 {
 	size_t budget = turn->left.rx_bytes < TR_IO_QUANTUM ?
 		(size_t)turn->left.rx_bytes : TR_IO_QUANTUM;
+	if (connection->preface_deferred)
+		return;
 	if (connection->byte_endpoint &&
 	    connection->byte_endpoint->state == TR_BYTE_ENDPOINT_NEGOTIATING) {
 		int step_ret = tr_byte_endpoint_step(
@@ -2342,6 +2403,8 @@ static void tr_connection_on_readable(struct tr_reactor *reactor,
 				reactor, connection, turn, &budget);
 
 			if (preface_ret == TR_AGAIN)
+				return;
+			if (preface_ret == TR_IN_PROGRESS)
 				return;
 			if (preface_ret == TR_ERR_CLOSED) {
 				tr_connection_close_internal(
@@ -2989,6 +3052,17 @@ static void tr_handle_connection_event(struct tr_reactor *reactor,
 	connection = tr_lookup_connection(reactor, slot, generation);
 	if (!connection)
 		return;
+	if (connection->preface_deferred) {
+		if (events & EPOLLERR)
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_ERROR,
+			                             TR_ERR_SYS);
+		else if (events & (EPOLLHUP | EPOLLRDHUP))
+			tr_connection_close_internal(reactor, connection,
+			                             TR_CONN_EVENT_CLOSED,
+			                             TR_OK);
+		return;
+	}
 	if (connection->byte_endpoint) {
 		struct tr_byte_endpoint *endpoint = connection->byte_endpoint;
 		uint32_t ready = 0U;

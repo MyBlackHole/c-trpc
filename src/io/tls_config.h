@@ -14,6 +14,11 @@ int tr_tls_client_config_validate(const struct tr_tls_client_config *config,
                                   int backend_enabled);
 int tr_tls_server_config_validate(const struct tr_tls_server_config *config,
                                   int backend_enabled);
+int tr_tls_server_config_validate_for_pem(
+        const struct tr_tls_server_config *config, int backend_enabled);
+int tr_tls_credentials_provider_validate(
+        const struct tr_tls_credentials_provider *provider,
+        enum tr_tls_mode mode);
 
 #ifdef __cplusplus
 }
