@@ -59,6 +59,7 @@ jobs:
           export TMPDIR="$GITHUB_WORKSPACE/build/test-tmp"
           export PYTHONDONTWRITEBYTECODE=1
           python3 scripts/test_rpc_v2_model.py -v
+          python3 scripts/test_rpc_v2_error_scope_model.py -v
           python3 scripts/test_rpc_v2_component_replay.py -v
           python3 scripts/test_rpc_v2_trace_explorer.py -v
           python3 scripts/rpc_v2_trace_explorer.py \

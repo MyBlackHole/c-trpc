@@ -103,8 +103,17 @@ dev.37 修正 GOAWAY 测试清理只允许 `tr_client_destroy()` 首次返回 `T
 dev.38 修正 Clang Release 暴露的 Client call 槽异步退休测试假设：弱引用释放后，旧传输流
 退休前可能暂时占满容量；stale-token 复用用例现对合法 `TR_AGAIN` 做有界 owner pump/retry，
 并验证输出句柄保持不变、旧 token 仍失效。Clang Release 下 `test_client_record` 连续 10/10；
-全量 90/90，格式化后的目标复验 1/1；GCC ASan/UBSan 下该目标 5/5。更新 head 的远端 CI
-仍待复验。该改动只影响测试夹具，V2 的连接组接受边界、其他错误分类和组合故障仍待完成。
+全量 90/90，格式化后的目标复验 1/1；GCC ASan/UBSan 下该目标 5/5。Draft PR #324 的 dev.38
+head `6f60dbbeb87f5036e36447fe39b1ade9792b1f9f` 全部 GitHub 检查通过。该改动只影响测试夹具，
+V2 的连接组接受边界、其他错误分类和组合故障仍待完成。
+
+dev.39 增加 #242/ERR-A 的错误分类表和不可变参考状态转换：同一单流语义错误仅在帧边界、
+流标识及 RESET 能力都可信时重置目标流；否则关闭连接并让每个活动调用恰好终结一次。业务拒绝
+与本地资源压力分别终结目标调用，保留同连接其他流；TLS 完整性、协商、帧边界和未知私有状态损坏
+默认关闭连接。新增六项 Python 回归并接入已有 GCC 模型自测步骤；这是 L1 设计参考，不证明
+生产 C 行为符合该矩阵。ERR-B 标识/RESET 时序、ERR-C 信用与组合故障、ERR-D 多成员排空边界、
+ERR-E 有界历史与成本仍待实现和验收。详见
+[ERR-A 分类与模型记录](rpc_v2_error_scope_model_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
@@ -130,7 +139,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | 普通/压缩 DATA 类型标志已覆盖活动流与 RESET 丢弃态；单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 的未知结果/不重放行为有回归；其余 RESET/错误分类、连接组边界与组合故障验收仍待完成 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现，尚未与生产 C 全路径对照；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B RESET/标识时序、ERR-C 信用与组合故障、ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

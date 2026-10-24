@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.35` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.39` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -98,6 +98,12 @@ PYTHONDONTWRITEBYTECODE=1 TMPDIR="$PWD/build/test-tmp" \
   --trace tests/fixtures/rpc_v2_model/component-final-send-reset-before-retry-v1.json \
   --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
 ```
+dev.39 增加 #242/ERR-A 错误作用域分类表与不可变 Python 参考状态模型，覆盖
+业务终局、可信单流 RESET、本地资源拒绝、解析可信度变化及连接级失败。它是 L1
+设计参考，不证明生产 C 路径已经满足这些分类；运行
+`python3 scripts/test_rpc_v2_error_scope_model.py -v` 可执行六项边界回归。
+RESET/标识代次、信用保留、连接组排空边界与资源成本仍在后续切片中验证。
+
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、
