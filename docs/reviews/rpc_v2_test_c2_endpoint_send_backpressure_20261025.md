@@ -39,5 +39,12 @@ Xmake target 或 CI job/check 名称。Channel、Dispatch、Reactor 与 Executor
 的远端首轮 Make/install 检查失败记录在 C1 评估中。相同 Client 销毁断言此前已出现过，当前
 本地连续六次未复现，但根因仍未确定；该失败不能记作本切片通过或环境偶发。
 
+## 分支与远端检查
+
+分支 `feat/v2-test-c2-endpoint-backpressure-247` 的 Draft PR
+[#323](https://github.com/MyBlackHole/c-trpc/pull/323) 以
+`feat/v2-test-c1-deterministic-shrinker-247` 为 base，PR 未合并。首次推送后 14 项 GitHub
+检查已启动；远端结果以 PR 当前 head 对应检查为准，不能据此推断全部 V2 完成。
+
 TEST-C2 仅证明一个固定 Endpoint 错误最终帧在一次 `TR_AGAIN` 后恢复；普通事件生成器尚未向真实
 C 组件驱动故障日程，TEST-D/E、真实网络/派发、#248 和 V2 整体验收仍未完成。

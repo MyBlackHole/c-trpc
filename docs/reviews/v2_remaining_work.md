@@ -73,7 +73,8 @@ dev.34 的 TEST-C2 增加一条固定 Endpoint 最终错误状态发送背压回
 夹具 `UNIMPLEMENTED`，真实 Endpoint 的 `tr_stream_sendv` 首次返回一次 `TR_AGAIN`、第二次
 接受唯一最终帧；组件观察与 L1 在终局次数、工作完成、最终帧、槽退役及零预算上匹配。
 该测试仍使用受控 Channel/Dispatch/Executor，不覆盖 TCP、通用故障日程或 TEST-C 完整要求；
-详见 [TEST-C2 记录](rpc_v2_test_c2_endpoint_send_backpressure_20261025.md)。
+Draft PR #323 已建立并待远端 14 项检查；父 PR #322 的首次 Make/install 失败及后续本地复现状态
+单独保留。详见 [TEST-C2 记录](rpc_v2_test_c2_endpoint_send_backpressure_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
