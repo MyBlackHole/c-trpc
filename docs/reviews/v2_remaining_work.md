@@ -208,6 +208,12 @@ Client 活动传输数为零但 `send_bytes_inflight` 仍为 1，等待继续超
 `test_connection_group_facade` 通过。本切片只覆盖未压缩 DATA 发送在途，不覆盖压缩任务在途、成员故障/重连或多组竞争。
 详见[DATA 在途发送排空记录](rpc_v2_group_data_tx_drain_20261025.md)。
 
+dev.55 补充 Zstandard 压缩任务取消与 drain 交错：暂停已完成压缩、尚未交付的 worker 回调，开始双端排空并释放
+客户端 transfer；transfer 计数归零后，仍归属压缩任务的输入字节使 Client drain 保持未完成。放开 worker 后任务被
+取消收敛、不发送 DATA，字节归还后 Client drain 完成；Server 仍等待 DATA 成员关闭。GCC Release 与 TSan 下完整
+`test_connection_group_facade` 通过。本切片不覆盖压缩完成并接受发送后的 encoded wire/TX 在途排空、成员故障或多组竞争。
+详见[Zstandard 任务取消排空记录](rpc_v2_group_compression_cancel_drain_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -232,7 +238,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照和连接组接受边界仍待补齐。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接墓碑身份各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、在途未压缩 DATA 发送归还与最终成员关闭回归；压缩任务在途、成员故障/重连和多组竞争仍待验收；ERR-E 有界历史和成本仍待验收 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照和连接组接受边界仍待补齐。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接墓碑身份各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX 在途归还，以及 Zstandard worker 取消/输入字节回收与最终成员关闭回归；编码 wire 在途发送、成员故障/重连和多组竞争仍待验收；ERR-E 有界历史和成本仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

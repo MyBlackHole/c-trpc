@@ -2294,6 +2294,152 @@ static void test_client_compression_completion_after_route_replacement(void)
 	pthread_mutex_destroy(&ctx.lock);
 }
 
+static void test_public_connection_group_drain_with_compression_inflight(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group = {TEST_GROUP_ID, TEST_GROUP_EPOCH};
+	struct tr_connection_group_client_stats client_stats;
+	struct tr_connection_group_server_stats server_stats;
+	struct tr_transport_bytes bytes;
+	uint8_t source[64];
+	uint16_t group_port = 0U;
+	unsigned i;
+
+	atomic_store(&group_capability_frames_sent, 0U);
+	atomic_store(&hold_group_zstd_completion, 0);
+	pthread_mutex_lock(&group_zstd_gate_lock);
+	group_zstd_gate_entered = 0;
+	group_zstd_gate_released = 0;
+	pthread_mutex_unlock(&group_zstd_gate_lock);
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.receive_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	server_config.connection_groups.max_encoded_message_bytes = 4096U;
+	server_config.connection_groups.max_inflight_compressed_messages = 1U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 1U;
+	client_config.connection_groups.max_active_transfers = 1U;
+	client_config.connection_groups.send_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	client_config.connection_groups.max_encoded_message_bytes = 3072U;
+	client_config.connection_groups.on_transfer_ready =
+	        on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	ctx.client = client;
+	assert(tr_client_connection_group_connect(client, "127.0.0.1",
+	                                          group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_data_offer(server, UINT64_C(6401)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	wait_group_capability_frames(2U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
+		       UINT64_C(6402)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+
+	for (i = 0U; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i * 29U + 7U);
+	bytes.data = source;
+	bytes.len = sizeof(source);
+	atomic_store(&hold_group_zstd_completion, 1);
+	assert(tr_client_connection_group_send_with_compression(
+		       client, 5001U, UINT64_C(6403), &bytes,
+		       TR_CONNECTION_GROUP_COMPRESSION_ZSTD) == TR_OK);
+	wait_group_compression_worker_entered();
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 1U &&
+	       client_stats.send_bytes_inflight == sizeof(source));
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_send_data_offer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+		       UINT64_C(6404)) == TR_ERR_CLOSED);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5002U,
+		       UINT64_C(6405)) == TR_ERR_CLOSED);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	/* 释放逻辑 transfer 后，客户端仍拥有压缩任务及输入字节；完成回调
+	 * 必须收敛这些所有权，drain 才能推进。 */
+	assert(tr_client_connection_group_release_transfer(client, 5001U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 0U &&
+	       client_stats.send_bytes_inflight == sizeof(source));
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+
+	release_group_zstd_gate();
+	wait_group_client_send_bytes_empty(client);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 5000U) == TR_OK);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 0U &&
+	       client_stats.send_bytes_inflight == 0U &&
+	       client_stats.data_connections == 1U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.messages == 0U);
+	pthread_mutex_unlock(&ctx.lock);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_counter(&ctx, &ctx.data_events, 1U);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 5000U) == TR_OK);
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.groups_current == 0U &&
+	       server_stats.connections_current == 0U &&
+	       server_stats.active_transfers == 0U);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_client_destroy_after_group_close(client);
+	assert(tr_server_destroy(server) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("connection_group_facade: compression drain passed");
+}
+
 static void test_client_compression_reactor_tx_pool_saturation(void)
 {
 	struct tr_server_config server_config;
@@ -2661,6 +2807,7 @@ int main(void)
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_multi_data_drain();
 	test_client_compression_completion_after_route_replacement();
+	test_public_connection_group_drain_with_compression_inflight();
 	test_client_compression_reactor_tx_pool_saturation();
 	test_public_connection_group_client_connector_failure_wakes();
 	test_public_connection_group_client_drain_cancels_offer();
