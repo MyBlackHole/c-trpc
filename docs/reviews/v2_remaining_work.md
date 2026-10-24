@@ -128,6 +128,10 @@ Channel 的下一 ID 游标置为耗尽，不改变生产代码开关；验证 `
 `test_stream_reset` 和 `test_channel_drain` 均通过。本地流 ID 耗尽到排空的集成路径已有
 直接回归，但 ERR-B 的 RESET/FIFO/代次组合与 #242 其余验收仍未完成。
 
+dev.42 修复上述新增 helper 漏入手工列举源码的 TCP Endpoint 测试目标，避免全量 CI 在
+ThreadSanitizer/独立组件链接阶段出现未定义引用。本地 TSan 下 `test_rpc_record_endpoint_tcp`
+与 `test_stream_reset` 构建、运行通过；新 head 的全量 CI 仍待结果。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

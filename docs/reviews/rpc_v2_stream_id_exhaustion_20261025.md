@@ -21,6 +21,7 @@ RESET tombstone 的有限容量、精确代次与 FIFO 规则没有改变。
 - `test_stream_reset` Release：通过；覆盖客户端最后两个奇数 ID、服务端最后一个偶数 ID、耗尽后保持耗尽以及输出参数不变。
 - `test_stream_reset` 的真实 Channel 集成用例：测试链接 wrapper 将真实实例的下一 ID 游标置为 `0`；`tr_stream_open()` 返回 `TR_ERR_CLOSED`，真实对端收到 GOAWAY，Channel 先为 DRAINING，收到对端 GOAWAY 后变为 DRAINED；未添加生产测试开关。
 - `test_channel_drain` Release：17 组通过。
+- dev.41 CI 发现手工列举源码的 `test_rpc_record_endpoint_tcp` 缺少新 helper，导致 TSan 链接失败；dev.42 将 `channel_stream_id.c` 加入该清单。本地 TSan 下该目标和 `test_stream_reset` 均构建、运行通过，完整 CI 待新 head 复验。
 
 ## 剩余范围
 
