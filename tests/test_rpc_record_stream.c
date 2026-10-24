@@ -2668,6 +2668,84 @@ static void test_receive_quota(void)
 	destroy_fixture(&f);
 }
 
+static int reset_quota_stream_on_owner(void *arg)
+{
+	struct call_context *call = arg;
+	return tr_stream_reset_on_owner(call->stream, TR_ERR_NOMEM);
+}
+
+static void test_receive_quota_preserves_peer(void)
+{
+	struct fixture f;
+	struct quota quota = {0};
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + 32U];
+	uint8_t payload[32];
+	struct tr_rpc_record_header h = head(TR_RPC_RECORD_MESSAGE);
+	size_t wire_size;
+
+	memset(payload, 0x5a, sizeof(payload));
+	init_fixture(&f, TR_RPC_ONE, TR_RPC_ONE, 4096);
+	open_call(&f, 1);
+	open_call(&f, 2);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_OPEN], 1);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_OPEN);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_OPEN], 1);
+
+	quota.peer = &f.server;
+	quota.bytes = f.server.budget.limit_bytes -
+	              atomic_load(&f.server.budget.current_bytes);
+	CHECK(quota.bytes > 0U);
+	CHECK(tr_memory_budget_reserve(&f.server.budget, quota.bytes) == TR_OK);
+
+	/* 只送正文记录头，迫使接收端为后续正文预约缓存。 */
+	h.encoded_size = h.decoded_size = sizeof(payload);
+	wire_size = encode(wire, h, NULL, NULL);
+	CHECK(wire_size == TR_RPC_RECORD_HEADER_SIZE);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	wait_counter(&f.server.calls[0].terminals, 1);
+	CHECK(f.server.calls[0].final_status ==
+	      TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	/* 记录流只终结本地调用；由上层适配器发送 RESET 通知对端。 */
+	CHECK(tr_reactor_call(f.server.reactor, reset_quota_stream_on_owner,
+	                      &f.server.calls[0]) == TR_OK);
+	wait_counter(&f.client.calls[0].terminals, 1);
+	CHECK(f.client.calls[0].final_status ==
+	      TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	CHECK(atomic_load(&f.server.calls[0].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(snapshot(&f.server.calls[0]).cached == 0U);
+	CHECK(snapshot(&f.client.calls[0]).cached == 0U);
+	CHECK(!snapshot(&f.server.calls[1]).state.terminal);
+	CHECK(!snapshot(&f.client.calls[1]).state.terminal);
+
+	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
+
+	/* 同一 Channel 上的另一条调用继续收发并正常完成。 */
+	struct send_request request = {
+	        .c = &f.client.calls[1],
+	        .h = head(TR_RPC_RECORD_MESSAGE),
+	        .body = make_buffer(payload, sizeof(payload), NULL)};
+	request.h.encoded_size = request.h.decoded_size = sizeof(payload);
+	send_until(&request);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_MESSAGE], 1);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_INITIAL_METADATA);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_MESSAGE);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&f.server.calls[1].terminals, 1);
+	wait_counter(&f.client.calls[1].terminals, 1);
+	CHECK(f.server.calls[1].final_status == TR_RPC_STATUS_OK);
+	CHECK(f.client.calls[1].final_status == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.server.calls[0].terminals) == 1U);
+	CHECK(atomic_load(&f.client.calls[0].terminals) == 1U);
+	CHECK(atomic_load(&f.server.calls[1].terminals) == 1U);
+	CHECK(atomic_load(&f.client.calls[1].terminals) == 1U);
+	CHECK(snapshot(&f.server.calls[1]).cached == 0U);
+	CHECK(snapshot(&f.client.calls[1]).cached == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_compressed_receive_workspace_exhaustion(void)
 {
 	struct fixture f;
@@ -3091,6 +3169,7 @@ int main(void)
 		test_receive_faults(i);
 	test_error_isolation();
 	test_receive_quota();
+	test_receive_quota_preserves_peer();
 	test_compressed_receive_workspace_exhaustion();
 	test_partial_cancel();
 	test_reset_after_half_close();

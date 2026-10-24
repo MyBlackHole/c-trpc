@@ -130,7 +130,13 @@ Channel 的下一 ID 游标置为耗尽，不改变生产代码开关；验证 `
 
 dev.42 修复上述新增 helper 漏入手工列举源码的 TCP Endpoint 测试目标，避免全量 CI 在
 ThreadSanitizer/独立组件链接阶段出现未定义引用。本地 TSan 下 `test_rpc_record_endpoint_tcp`
-与 `test_stream_reset` 构建、运行通过；新 head 的全量 CI 仍待结果。
+与 `test_stream_reset` 构建、运行通过；dev.42 新 head 的 GitHub 检查全部通过。
+
+dev.43 为 #242/ERR-A 补上真实 RPC Record Stream 配额失败隔离回归：两条调用共用同一
+Channel，第一条在接收不完整 RAW MESSAGE 时因服务器硬预算不足而本地终结；测试再模拟上层
+将该 RESOURCE_EXHAUSTED 映射为 `TR_ERR_NOMEM` RESET，验证对端终局只发生一次。释放预算后，
+第二条调用仍可完成，缓存归零。Release `test_rpc_record_stream` 全目标通过。该切片没有
+覆盖压缩缓冲、信用争用及连接级组合故障；ERR-A 的完整生产路径对照和 ERR-B/C/D/E 仍待验收。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
@@ -156,7 +162,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现，尚未与生产 C 全路径对照；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B 本地 ID 耗尽及 GOAWAY 排空集成已有回归，但 RESET/FIFO/代次时序仍待验收；ERR-C 信用与组合故障、ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 已覆盖一次接收配额失败、单流 RESET 与同 Channel 同伴调用继续完成，完整分类到生产 C 路径的对照仍待补齐；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B 本地 ID 耗尽及 GOAWAY 排空集成已有回归，但 RESET/FIFO/代次时序仍待验收；ERR-C 信用与组合故障、ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
