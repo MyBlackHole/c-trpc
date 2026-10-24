@@ -154,6 +154,12 @@ int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
  */
 int tr_rpc_v2_call_send(struct tr_rpc_v2_call call,
                         const struct tr_rpc_bytes *body);
+/* 单条流式请求 MESSAGE 显式选择 NONE 或 ZSTD；失败不保留输入。
+ * 压缩会暴露正文长度和时序，TLS 不会隐藏它们。不要在同一条压缩正文中
+ * 混合秘密与攻击者可控内容；内容敏感时选择 NONE。 */
+int tr_rpc_v2_call_send_with_compression(struct tr_rpc_v2_call call,
+                                         const struct tr_rpc_bytes *body,
+                                         enum tr_rpc_compression compression);
 int tr_rpc_v2_call_half_close(struct tr_rpc_v2_call call);
 /* 半关闭后仍可取消。取消、期限和对端终局按原有先到者选择唯一终局。 */
 int tr_rpc_v2_call_cancel(struct tr_rpc_v2_call call);
@@ -198,6 +204,12 @@ int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel);
  */
 int tr_rpc_v2_reply_append(struct tr_rpc_v2_reply *reply,
                            const struct tr_rpc_bytes *body);
+/* 响应方向须同时获本地方法许可；失败锁存当前回复批次错误。
+ * 压缩会暴露正文长度和时序，TLS 不会隐藏它们。不要在同一条压缩正文中
+ * 混合秘密与攻击者可控内容；内容敏感时选择 NONE。 */
+int tr_rpc_v2_reply_append_with_compression(
+        struct tr_rpc_v2_reply *reply, const struct tr_rpc_bytes *body,
+        enum tr_rpc_compression compression);
 
 /* 设置当前批次一个阶段的元数据，每阶段最多调用一次，包括空列表。
  * 输入数组、键和值在成功返回前复制，随后可立即复用。键是以 NUL 结尾
@@ -290,6 +302,10 @@ int tr_rpc_v2_producer_send_initial_metadata(
         const struct tr_rpc_metadata *entries, size_t count);
 int tr_rpc_v2_producer_send(struct tr_rpc_v2_producer *producer,
                             const struct tr_rpc_bytes *body);
+/* 线程安全的显式响应压缩选择；不支持的选择不占用 producer 单槽。 */
+int tr_rpc_v2_producer_send_with_compression(
+        struct tr_rpc_v2_producer *producer, const struct tr_rpc_bytes *body,
+        enum tr_rpc_compression compression);
 int tr_rpc_v2_producer_finish(struct tr_rpc_v2_producer *producer,
                               enum tr_rpc_status status,
                               const struct tr_rpc_metadata *trailing,

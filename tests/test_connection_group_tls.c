@@ -18,6 +18,9 @@
 #include "tr/status.h"
 #include "tr/transport.h"
 
+#include "../src/execution/reactor_internal.h"
+#include "../src/execution/reactor.h"
+#include "../src/transport/protocol/wire.h"
 #include "tls_test_identity.h"
 
 #define TEST_GROUP_ID UINT64_C(0x7a14)
@@ -27,6 +30,69 @@
 #define TEST_READY_MESSAGE_ID UINT64_C(102)
 #define TEST_DATA_MESSAGE_ID UINT64_C(103)
 #define TEST_PROXY_CONNECTIONS 3U
+#define TEST_ASYNC_AUTHORIZATIONS 12U
+#define TEST_AUTH_WRITE_FAULT_EINTR 1
+#define TEST_AUTH_WRITE_FAULT_EAGAIN 2
+
+static _Atomic int test_authorization_event_fd = -1;
+static _Atomic int test_last_aux_event_fd = -1;
+static _Atomic int test_authorization_write_fault;
+static _Atomic unsigned test_authorization_write_fault_hits;
+
+int __real_tr_reactor_aux_event_register(struct tr_reactor *reactor, int fd,
+                                         uint32_t events,
+                                         tr_reactor_aux_event_cb callback,
+                                         void *arg);
+ssize_t __real_write(int fd, const void *buffer, size_t size);
+
+int __wrap_tr_reactor_aux_event_register(struct tr_reactor *reactor, int fd,
+                                         uint32_t events,
+                                         tr_reactor_aux_event_cb callback,
+                                         void *arg)
+{
+	int ret = __real_tr_reactor_aux_event_register(reactor, fd, events,
+	                                               callback, arg);
+	if (ret == TR_OK)
+		atomic_store_explicit(&test_last_aux_event_fd, fd,
+		                      memory_order_relaxed);
+	return ret;
+}
+
+ssize_t __wrap_write(int fd, const void *buffer, size_t size)
+{
+	if (fd == atomic_load_explicit(&test_authorization_event_fd,
+	                               memory_order_relaxed)) {
+		int fault = atomic_exchange_explicit(
+		        &test_authorization_write_fault, 0,
+		        memory_order_relaxed);
+
+		if (fault == TEST_AUTH_WRITE_FAULT_EINTR) {
+			atomic_fetch_add_explicit(
+			        &test_authorization_write_fault_hits, 1U,
+			        memory_order_relaxed);
+			errno = EINTR;
+			return -1;
+		}
+		if (fault == TEST_AUTH_WRITE_FAULT_EAGAIN) {
+			uint64_t saturated = UINT64_MAX - 1U;
+			ssize_t written;
+
+			/* eventfd 的最大可写计数加一会真实触发饱和 EAGAIN，
+			 * 同时保持可读，等价于内核中已有待处理通知。 */
+			written =
+			        __real_write(fd, &saturated, sizeof(saturated));
+			assert(written == (ssize_t)sizeof(saturated));
+			written = __real_write(fd, buffer, size);
+			assert(written < 0 && errno == EAGAIN);
+			atomic_fetch_add_explicit(
+			        &test_authorization_write_fault_hits, 1U,
+			        memory_order_relaxed);
+			errno = EAGAIN;
+			return -1;
+		}
+	}
+	return __real_write(fd, buffer, size);
+}
 
 struct connection_group_tls_state {
 	pthread_mutex_t lock;
@@ -36,6 +102,14 @@ struct connection_group_tls_state {
 	_Atomic unsigned ready_callbacks;
 	_Atomic unsigned messages;
 	_Atomic unsigned authorization_rejections;
+	_Atomic unsigned async_authorizations;
+	_Atomic unsigned async_cancellations;
+	_Atomic int defer_cancel_ack;
+	struct tr_server *server;
+	struct tr_tls_provider_operation
+	        async_operations[TEST_ASYNC_AUTHORIZATIONS];
+	enum tr_connection_group_role async_roles[TEST_ASYNC_AUTHORIZATIONS];
+	uint64_t async_group_ids[TEST_ASYNC_AUTHORIZATIONS];
 };
 
 struct tls_connection_proxy;
@@ -79,6 +153,24 @@ struct tls_stall_server {
 
 static const uint8_t client_uri[] = "spiffe://c-trpc.example/client";
 static const uint8_t message_body[] = "client-group-tls-data";
+static atomic_uint group_capability_frames_sent;
+
+int __real_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
+                           uint32_t flags, uint32_t stream_id,
+                           uint64_t message_id, struct tr_buffer *payload);
+
+int __wrap_tr_reactor_send(struct tr_conn_handle connection, uint16_t type,
+                           uint32_t flags, uint32_t stream_id,
+                           uint64_t message_id, struct tr_buffer *payload)
+{
+	int ret = __real_tr_reactor_send(connection, type, flags, stream_id,
+	                                 message_id, payload);
+
+	if (ret == TR_OK && type == TR_FRAME_MESSAGE_CAPS)
+		atomic_fetch_add_explicit(&group_capability_frames_sent, 1U,
+		                          memory_order_relaxed);
+	return ret;
+}
 
 static void signal_state_changed(struct connection_group_tls_state *state)
 {
@@ -349,6 +441,14 @@ static void wait_for_counter(struct connection_group_tls_state *state,
 	while (atomic_load_explicit(counter, memory_order_relaxed) < expected) {
 		int ret = pthread_cond_timedwait(&state->changed, &state->lock,
 		                                 &deadline);
+		if (ret != 0)
+			fprintf(stderr,
+			        "counter wait timed out: counter=%p "
+			        "expected=%u actual=%u ret=%d\n",
+			        (void *)counter, expected,
+			        atomic_load_explicit(counter,
+			                             memory_order_relaxed),
+			        ret);
 		assert(ret == 0);
 	}
 	pthread_mutex_unlock(&state->lock);
@@ -367,6 +467,22 @@ static void wait_for_server_group_count(struct tr_server *server,
 		assert(nanosleep(&pause, NULL) == 0);
 	}
 	assert(!"timed out waiting for connection-group count");
+}
+
+static void wait_for_server_data_count(struct tr_server *server,
+                                       uint32_t expected)
+{
+	struct timespec pause = {0, 1000000L};
+
+	for (unsigned attempt = 0U; attempt < 5000U; ++attempt) {
+		struct tr_connection_group_server_stats stats;
+		assert(tr_server_connection_group_get_stats(server, &stats) ==
+		       TR_OK);
+		if (stats.data_connections_current == expected)
+			return;
+		assert(nanosleep(&pause, NULL) == 0 || errno == EINTR);
+	}
+	assert(!"timed out waiting for DATA connection count");
 }
 
 static void wait_for_server_route_rejections(struct tr_server *server,
@@ -434,6 +550,68 @@ authorize_group(const struct tr_connection_group_authorization *authorization,
 	return TR_OK;
 }
 
+static void authorize_group_async(
+        const struct tr_connection_group_authorization *authorization,
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	struct connection_group_tls_state *state = arg;
+	unsigned index;
+	int auto_allow;
+
+	assert(authorization != NULL && state != NULL);
+	assert(authorization->group.group_id >= TEST_GROUP_ID &&
+	       authorization->group.group_id <= TEST_GROUP_ID + 5U);
+	assert(authorization->group.epoch == TEST_GROUP_EPOCH);
+	assert(authorization->deadline_monotonic_ns != 0U);
+	assert(identity_equals(&authorization->peer_identity, client_uri,
+	                       (uint32_t)sizeof(client_uri) - 1U));
+	if (authorization->role == TR_CONNECTION_GROUP_ROLE_CONTROL) {
+		assert(authorization->control_identity.authentication ==
+		       TR_PEER_IDENTITY_NONE);
+		assert(authorization->control_identity.uri_san == NULL);
+		assert(authorization->control_identity.uri_san_len == 0U);
+	} else {
+		assert(authorization->role == TR_CONNECTION_GROUP_ROLE_DATA);
+		assert(identity_equals(&authorization->control_identity,
+		                       client_uri,
+		                       (uint32_t)sizeof(client_uri) - 1U));
+	}
+	assert(pthread_mutex_lock(&state->lock) == 0);
+	index = atomic_fetch_add_explicit(&state->async_authorizations, 1U,
+	                                  memory_order_relaxed);
+	assert(index < TEST_ASYNC_AUTHORIZATIONS);
+	state->async_operations[index] = operation;
+	state->async_roles[index] = authorization->role;
+	state->async_group_ids[index] = authorization->group.group_id;
+	auto_allow = authorization->group.group_id == TEST_GROUP_ID + 1U;
+	pthread_cond_broadcast(&state->changed);
+	assert(pthread_mutex_unlock(&state->lock) == 0);
+	if (auto_allow)
+		assert(tr_server_connection_group_authorize_complete(
+		               state->server, operation, TR_OK,
+		               TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW) ==
+		       TR_OK);
+}
+
+static void cancel_group_async(struct tr_tls_provider_operation operation,
+                               void *arg)
+{
+	struct connection_group_tls_state *state = arg;
+	assert(state != NULL && state->server != NULL);
+	if (!atomic_load_explicit(&state->defer_cancel_ack,
+	                          memory_order_relaxed)) {
+		/* 取消后的迟到 ALLOW 只确认 provider 已停止，服务端必须丢弃它。
+		 */
+		assert(tr_server_connection_group_authorize_complete(
+		               state->server, operation, TR_OK,
+		               TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW) ==
+		       TR_OK);
+	}
+	atomic_fetch_add_explicit(&state->async_cancellations, 1U,
+	                          memory_order_relaxed);
+	signal_state_changed(state);
+}
+
 static enum tr_connection_group_message_disposition
 on_group_message(const struct tr_connection_group_message *message, void *arg)
 {
@@ -478,6 +656,9 @@ connection_group_tls_state_init(struct connection_group_tls_state *state)
 	atomic_init(&state->ready_callbacks, 0U);
 	atomic_init(&state->messages, 0U);
 	atomic_init(&state->authorization_rejections, 0U);
+	atomic_init(&state->async_authorizations, 0U);
+	atomic_init(&state->async_cancellations, 0U);
+	atomic_init(&state->defer_cancel_ack, 0);
 	assert(pthread_mutex_init(&state->lock, NULL) == 0);
 	assert(pthread_condattr_init(&attr) == 0);
 	assert(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0);
@@ -583,6 +764,23 @@ static void wait_for_client_group_data_closed(struct tr_client *client)
 	assert(stats.data_connections == 0U);
 }
 
+static void destroy_server_after_async_release(struct tr_server *server)
+{
+	struct timespec pause = {0, 1000000L};
+	unsigned attempt;
+	int ret = TR_ERR_STATE;
+
+	/* 销毁契约允许异步所有权尚未归还时重试。 */
+	for (attempt = 0U; attempt < 5000U; ++attempt) {
+		ret = tr_server_destroy(server);
+		if (ret == TR_OK)
+			return;
+		assert(ret == TR_ERR_STATE || ret == TR_AGAIN);
+		assert(nanosleep(&pause, NULL) == 0 || errno == EINTR);
+	}
+	assert(ret == TR_OK);
+}
+
 static void *tls_stall_server_main(void *arg)
 {
 	struct tls_stall_server *server = arg;
@@ -680,6 +878,374 @@ static void tls_stall_server_stop(struct tls_stall_server *server)
 	pthread_mutex_destroy(&server->lock);
 }
 
+static void test_async_connection_group_authorization(void)
+{
+	struct tls_test_identity identity;
+	struct connection_group_tls_state state;
+	struct tr_server_config server_config;
+	struct tr_tls_server_config rotated_server_tls;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct tr_client *progress_client = NULL;
+	struct tr_tls_provider_operation operation;
+	struct tr_connection_group_id group = {
+	        .group_id = TEST_GROUP_ID,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_connection_group_id progress_group = {
+	        .group_id = TEST_GROUP_ID + 1U,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_connection_group_id revoke_group = {
+	        .group_id = TEST_GROUP_ID + 2U,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_connection_group_id deadline_group = {
+	        .group_id = TEST_GROUP_ID + 3U,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_connection_group_id drain_group = {
+	        .group_id = TEST_GROUP_ID + 4U,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_connection_group_id error_group = {
+	        .group_id = TEST_GROUP_ID + 5U,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_connection_group_server_stats stats;
+	uint64_t generation = 0U;
+	uint16_t port = 0U;
+
+	connection_group_tls_state_init(&state);
+	assert(tls_test_identity_init(&identity, "connection-group-async") ==
+	       0);
+	tr_server_config_init(&server_config);
+	server_config.handshake_timeout_ms = 5000U;
+	server_config.tls.mode = TR_TLS_REQUIRED;
+	server_config.tls.certificate_file = identity.server_certificate_file;
+	server_config.tls.private_key_file = identity.server_private_key_file;
+	server_config.tls.client_ca_file = identity.ca_file;
+	server_config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+	server_config.connection_groups.max_groups = 2U;
+	server_config.connection_groups.max_connections = 4U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.authorize_async = authorize_group_async;
+	server_config.connection_groups.authorize_cancel = cancel_group_async;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.callback_arg = &state;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	atomic_store_explicit(&test_authorization_event_fd,
+	                      atomic_load_explicit(&test_last_aux_event_fd,
+	                                           memory_order_relaxed),
+	                      memory_order_relaxed);
+	state.server = server;
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16U,
+	                                         &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.connect_timeout_ms = 5000U;
+	client_config.tls.mode = TR_TLS_REQUIRED;
+	client_config.tls.ca_file = identity.ca_file;
+	client_config.tls.expected_peer_name = "server.example.test";
+	client_config.tls.sni_name = "server.example.test";
+	client_config.tls.client_certificate_file =
+	        identity.client_certificate_file;
+	client_config.tls.client_private_key_file =
+	        identity.client_private_key_file;
+	client_config.connection_groups.max_data_connections = 2U;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 1U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_roles[0] == TR_CONNECTION_GROUP_ROLE_CONTROL);
+	assert(state.async_operations[0].kind ==
+	       TR_TLS_PROVIDER_OPERATION_AUTHORIZATION);
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.groups_current == 0U);
+	assert(stats.control_accepts == 0U);
+	assert(atomic_load_explicit(&state.messages, memory_order_relaxed) ==
+	       0U);
+	assert(tr_server_connection_group_send_data_offer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	               TEST_OFFER_MESSAGE_ID) == TR_ERR_STALE);
+	assert(tr_client_create_transport(&client_config, &progress_client) ==
+	       TR_OK);
+	assert(tr_client_connection_group_connect(progress_client, "127.0.0.1",
+	                                          port,
+	                                          &progress_group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 2U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_group_ids[1] == progress_group.group_id);
+	assert(state.async_roles[1] == TR_CONNECTION_GROUP_ROLE_CONTROL);
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	wait_for_server_group_count(server, 1U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.control_accepts == 1U);
+	assert(stats.groups_current == 1U);
+	assert(tr_client_connection_group_close(progress_client) == TR_OK);
+	assert(tr_client_destroy(progress_client) == TR_OK);
+	wait_for_server_group_count(server, 0U);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_for_counter(&state, &state.async_cancellations, 1U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.groups_current == 0U);
+	assert(stats.control_accepts == 1U);
+	assert(tr_client_destroy(client) == TR_OK);
+	wait_for_server_group_count(server, 0U);
+
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 3U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	operation = state.async_operations[2];
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	atomic_store_explicit(&test_authorization_write_fault_hits, 0U,
+	                      memory_order_relaxed);
+	atomic_store_explicit(&test_authorization_write_fault,
+	                      TEST_AUTH_WRITE_FAULT_EINTR,
+	                      memory_order_relaxed);
+	assert(tr_server_connection_group_authorize_complete(
+	               server, operation, TR_OK,
+	               TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW) == TR_OK);
+	assert(atomic_load_explicit(&test_authorization_write_fault_hits,
+	                            memory_order_relaxed) == 1U);
+	wait_for_server_group_count(server, 1U);
+	assert(tr_server_connection_group_send_data_offer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	               TEST_OFFER_MESSAGE_ID) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 4U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_roles[3] == TR_CONNECTION_GROUP_ROLE_DATA);
+	operation = state.async_operations[3];
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.data_connections_current == 0U);
+	assert(stats.data_accepts == 0U);
+	assert(atomic_load_explicit(&state.ready_callbacks,
+	                            memory_order_relaxed) == 0U);
+	assert(atomic_load_explicit(&state.messages, memory_order_relaxed) ==
+	       0U);
+	{
+		uint64_t rejected_before = stats.route_rejections;
+
+		assert(tr_server_connection_group_authorize_complete(
+		               server, operation, TR_OK,
+		               TR_CONNECTION_GROUP_AUTHORIZATION_DENY) ==
+		       TR_OK);
+		wait_for_server_route_rejections(server, rejected_before + 1U);
+	}
+	assert(tr_server_connection_group_send_data_offer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	               TEST_OFFER_MESSAGE_ID + 1U) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 5U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_roles[4] == TR_CONNECTION_GROUP_ROLE_DATA);
+	operation = state.async_operations[4];
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	atomic_store_explicit(&test_authorization_write_fault_hits, 0U,
+	                      memory_order_relaxed);
+	atomic_store_explicit(&test_authorization_write_fault,
+	                      TEST_AUTH_WRITE_FAULT_EAGAIN,
+	                      memory_order_relaxed);
+	assert(tr_server_connection_group_authorize_complete(
+	               server, operation, TR_OK,
+	               TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW) == TR_OK);
+	assert(atomic_load_explicit(&test_authorization_write_fault_hits,
+	                            memory_order_relaxed) == 1U);
+	wait_for_server_data_count(server, 1U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.control_accepts == 2U);
+	assert(stats.data_accepts == 1U);
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	assert(tr_client_destroy(client) == TR_OK);
+	wait_for_server_group_count(server, 0U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	{
+		uint64_t rejected_before = stats.route_rejections;
+
+		assert(tr_client_create_transport(&client_config, &client) ==
+		       TR_OK);
+		assert(tr_client_connection_group_connect(
+		               client, "127.0.0.1", port, &group) == TR_OK);
+		wait_for_counter(&state, &state.async_authorizations, 6U);
+		assert(pthread_mutex_lock(&state.lock) == 0);
+		operation = state.async_operations[5];
+		assert(pthread_mutex_unlock(&state.lock) == 0);
+		assert(tr_server_connection_group_authorize_complete(
+		               server, operation, TR_OK,
+		               TR_CONNECTION_GROUP_AUTHORIZATION_DENY) ==
+		       TR_OK);
+		wait_for_server_route_rejections(server, rejected_before + 1U);
+	}
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.groups_current == 0U);
+	assert(stats.control_accepts == 2U);
+	assert(tr_client_destroy(client) == TR_OK);
+
+	/* Provider error 与明确 DENY 一样失败关闭，不能创建 CONTROL。 */
+	{
+		uint64_t rejected_before;
+
+		assert(tr_server_connection_group_get_stats(server, &stats) ==
+		       TR_OK);
+		rejected_before = stats.route_rejections;
+		assert(tr_client_create_transport(&client_config, &client) ==
+		       TR_OK);
+		assert(tr_client_connection_group_connect(client, "127.0.0.1",
+		                                          port, &error_group) ==
+		       TR_OK);
+		wait_for_counter(&state, &state.async_authorizations, 7U);
+		assert(pthread_mutex_lock(&state.lock) == 0);
+		operation = state.async_operations[6];
+		assert(state.async_group_ids[6] == error_group.group_id);
+		assert(pthread_mutex_unlock(&state.lock) == 0);
+		assert(tr_server_connection_group_authorize_complete(
+		               server, operation, TR_ERR_INVALID,
+		               TR_CONNECTION_GROUP_AUTHORIZATION_DENY) ==
+		       TR_OK);
+		wait_for_server_route_rejections(server, rejected_before + 1U);
+	}
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.groups_current == 0U);
+	assert(stats.control_accepts == 2U);
+	assert(tr_client_destroy(client) == TR_OK);
+
+	/* REVOKE_OLD 必须取消仍在等待授权的旧 TLS generation。 */
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &revoke_group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 8U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_group_ids[7] == revoke_group.group_id);
+	assert(state.async_roles[7] == TR_CONNECTION_GROUP_ROLE_CONTROL);
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	rotated_server_tls = server_config.tls;
+	rotated_server_tls.certificate_file =
+	        identity.rotated_server_certificate_file;
+	assert(tr_server_tls_update_profile(server, &rotated_server_tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
+	assert(generation == 2U);
+	wait_for_counter(&state, &state.async_cancellations, 2U);
+	wait_for_server_group_count(server, 0U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.groups_current == 0U);
+	assert(stats.control_accepts == 2U);
+	assert(tr_client_destroy(client) == TR_OK);
+
+	/* 握手期限也覆盖已完成 TLS、仍挂起远端授权的连接。 */
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &deadline_group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 9U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_group_ids[8] == deadline_group.group_id);
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	wait_for_counter(&state, &state.async_cancellations, 3U);
+	wait_for_server_group_count(server, 0U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.control_accepts == 2U);
+	assert(tr_client_destroy(client) == TR_OK);
+
+	/* facade drain 关闭挂起连接并消费同步返回的取消确认。 */
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &drain_group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 10U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	assert(state.async_group_ids[9] == drain_group.group_id);
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_for_counter(&state, &state.async_cancellations, 4U);
+	wait_for_server_group_count(server, 0U);
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.groups_current == 0U);
+	assert(tr_client_destroy(client) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
+	tls_test_identity_cleanup(&identity);
+	connection_group_tls_state_destroy(&state);
+}
+
+static void test_async_connection_group_destroy_retry(void)
+{
+	struct tls_test_identity identity;
+	struct connection_group_tls_state state;
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct tr_connection_group_id group = {
+	        .group_id = TEST_GROUP_ID + 5U,
+	        .epoch = TEST_GROUP_EPOCH,
+	};
+	struct tr_tls_provider_operation operation;
+	uint16_t port = 0U;
+
+	connection_group_tls_state_init(&state);
+	assert(tls_test_identity_init(&identity, "connection-group-destroy") ==
+	       0);
+	tr_server_config_init(&server_config);
+	server_config.handshake_timeout_ms = 5000U;
+	server_config.tls.mode = TR_TLS_REQUIRED;
+	server_config.tls.certificate_file = identity.server_certificate_file;
+	server_config.tls.private_key_file = identity.server_private_key_file;
+	server_config.tls.client_ca_file = identity.ca_file;
+	server_config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.authorize_async = authorize_group_async;
+	server_config.connection_groups.authorize_cancel = cancel_group_async;
+	server_config.connection_groups.callback_arg = &state;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	atomic_store_explicit(&test_authorization_event_fd,
+	                      atomic_load_explicit(&test_last_aux_event_fd,
+	                                           memory_order_relaxed),
+	                      memory_order_relaxed);
+	state.server = server;
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16U,
+	                                         &port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.connect_timeout_ms = 5000U;
+	client_config.tls.mode = TR_TLS_REQUIRED;
+	client_config.tls.ca_file = identity.ca_file;
+	client_config.tls.expected_peer_name = "server.example.test";
+	client_config.tls.sni_name = "server.example.test";
+	client_config.tls.client_certificate_file =
+	        identity.client_certificate_file;
+	client_config.tls.client_private_key_file =
+	        identity.client_private_key_file;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	assert(tr_client_connection_group_connect(client, "127.0.0.1", port,
+	                                          &group) == TR_OK);
+	wait_for_counter(&state, &state.async_authorizations, 1U);
+	assert(pthread_mutex_lock(&state.lock) == 0);
+	operation = state.async_operations[0];
+	assert(state.async_group_ids[0] == group.group_id);
+	assert(pthread_mutex_unlock(&state.lock) == 0);
+	atomic_store_explicit(&state.defer_cancel_ack, 1, memory_order_relaxed);
+	assert(tr_server_destroy(server) == TR_AGAIN);
+	wait_for_counter(&state, &state.async_cancellations, 1U);
+	/* destroy 返回可重试后，facade 与完成入口仍然有效。 */
+	assert(tr_server_connection_group_authorize_complete(
+	               server, operation, TR_OK,
+	               TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW) == TR_OK);
+	assert(tr_server_destroy(server) == TR_OK);
+	assert(tr_client_destroy(client) == TR_OK);
+	tls_test_identity_cleanup(&identity);
+	connection_group_tls_state_destroy(&state);
+}
+
 static void test_public_connection_group_mtls(void)
 {
 	struct tls_test_identity identity;
@@ -695,7 +1261,10 @@ static void test_public_connection_group_mtls(void)
 	struct tr_connection_group_server_stats server_stats;
 	uint16_t port = 0U;
 	uint64_t generation = 0U;
+	int send_ret = TR_AGAIN;
 
+	atomic_store_explicit(&group_capability_frames_sent, 0U,
+	                      memory_order_relaxed);
 	memset(&state, 0, sizeof(state));
 	assert(pthread_mutex_init(&state.lock, NULL) == 0);
 	{
@@ -720,6 +1289,10 @@ static void test_public_connection_group_mtls(void)
 	server_config.connection_groups.max_connections = 3U;
 	server_config.connection_groups.max_data_connections_per_group = 1U;
 	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.receive_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	server_config.connection_groups.max_encoded_message_bytes = 4096U;
+	server_config.connection_groups.max_inflight_compressed_messages = 1U;
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.on_message = on_group_message;
 	server_config.connection_groups.callback_arg = &state;
@@ -742,6 +1315,9 @@ static void test_public_connection_group_mtls(void)
 	        identity.client_private_key_file;
 	client_config.connection_groups.max_data_connections = 1U;
 	client_config.connection_groups.max_active_transfers = 2U;
+	client_config.connection_groups.send_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	client_config.connection_groups.max_encoded_message_bytes = 3072U;
 	client_config.connection_groups.on_transfer_ready = on_transfer_ready;
 	client_config.connection_groups.callback_arg = &state;
 	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
@@ -795,19 +1371,58 @@ static void test_public_connection_group_mtls(void)
 	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
 	               TEST_OFFER_MESSAGE_ID) == TR_OK);
 	wait_for_counter(&state, &state.data_authorizations, 1U);
+	{
+		struct timespec pause = {0, 1000000L};
+		unsigned i;
+
+		for (i = 0; i < 2000U; ++i) {
+			if (atomic_load_explicit(&group_capability_frames_sent,
+			                         memory_order_relaxed) >= 2U)
+				break;
+			(void)nanosleep(&pause, NULL);
+		}
+		assert(atomic_load_explicit(&group_capability_frames_sent,
+		                            memory_order_relaxed) >= 2U);
+	}
 	assert(tr_server_connection_group_send_transfer_ready(
 	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, TEST_STREAM_ID,
 	               TEST_READY_MESSAGE_ID) == TR_OK);
 	wait_for_counter(&state, &state.ready_callbacks, 1U);
 	bytes.data = message_body;
 	bytes.len = (uint32_t)sizeof(message_body) - 1U;
-	assert(tr_client_connection_group_send(client, TEST_STREAM_ID,
-	                                       TEST_DATA_MESSAGE_ID,
-	                                       &bytes) == TR_OK);
+	for (unsigned attempt = 0U; attempt < 2000U && send_ret == TR_AGAIN;
+	     ++attempt) {
+		struct timespec pause = {0, 1000000L};
+
+		send_ret = tr_client_connection_group_send_with_compression(
+		        client, TEST_STREAM_ID, TEST_DATA_MESSAGE_ID, &bytes,
+		        TR_CONNECTION_GROUP_COMPRESSION_ZSTD);
+		if (send_ret == TR_AGAIN)
+			(void)nanosleep(&pause, NULL);
+	}
+	assert(send_ret == TR_OK);
 	wait_for_counter(&state, &state.messages, 1U);
 
-	assert(tr_client_connection_group_close(client) == TR_OK);
+	/* 显式撤销旧 TLS 代次必须退休已获准压缩的 DATA 路由；其后同一
+	 * stream 的压缩发送不能继续借用已撤销代次的能力或身份。
+	 */
+	generation = 0U;
+	assert(tr_server_tls_update_profile(server, &rotated_server_tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
+	assert(generation == 3U);
 	wait_for_server_group_count(server, 0U);
+	wait_for_client_group_data_closed(client);
+	generation = 0U;
+	assert(tr_client_tls_update_profile(client, &rotated_client_tls,
+	                                    TR_TLS_ROTATE_REVOKE_OLD,
+	                                    &generation) == TR_OK);
+	assert(generation == 3U);
+	send_ret = tr_client_connection_group_send_with_compression(
+	        client, TEST_STREAM_ID, TEST_DATA_MESSAGE_ID, &bytes,
+	        TR_CONNECTION_GROUP_COMPRESSION_ZSTD);
+	assert(send_ret == TR_ERR_CLOSED);
+
 	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
 	generation = UINT64_C(0xfeedface);
 	assert(tr_server_tls_update_profile(server, &server_config.tls,
@@ -817,7 +1432,7 @@ static void test_public_connection_group_mtls(void)
 	assert(tr_client_destroy(client) == TR_OK);
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
-	assert(tr_server_destroy(server) == TR_OK);
+	destroy_server_after_async_release(server);
 	tls_test_identity_cleanup(&identity);
 	pthread_cond_destroy(&state.changed);
 	pthread_mutex_destroy(&state.lock);
@@ -1109,6 +1724,8 @@ static void test_client_tls_handshake_uses_connect_deadline(void)
 
 int main(void)
 {
+	test_async_connection_group_authorization();
+	test_async_connection_group_destroy_retry();
 	test_public_connection_group_mtls();
 	test_data_server_uri_mismatch_is_rejected();
 	test_client_certificate_authorization_failures();

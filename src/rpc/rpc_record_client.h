@@ -143,6 +143,10 @@ int tr_rpc_record_client_call_start_public_on_owner(
 int tr_rpc_record_client_send_bytes_on_owner(
         struct tr_rpc_record_client_handle handle,
         const struct tr_rpc_bytes *message);
+int tr_rpc_record_client_send_bytes_with_compression_on_owner(
+        struct tr_rpc_record_client_handle handle,
+        const struct tr_rpc_bytes *message,
+        enum tr_rpc_compression compression);
 
 /* 仅 TR_OK 接管并清空 *body，失败保留正文及本次发送语义。允许 NULL
  * 正文发送一条空 MESSAGE；不隐式排队。OPEN 尚未接受返回 AGAIN。

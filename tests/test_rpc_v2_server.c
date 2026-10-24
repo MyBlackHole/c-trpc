@@ -616,7 +616,9 @@ static void fixture_init_options(struct fixture *f, uint32_t streams,
 		                                    TR_RPC_CODEC_RAW,
 		                                    TR_RPC_LANE_CONTROL,
 		                                    16,
-		                                    16};
+		                                    16,
+		                                    0,
+		                                    0};
 		methods[i] = (struct tr_rpc_v2_method){
 		        descriptions[i], work, server_terminal, &f->methods[i]};
 		if (asymmetric && (i == WINDOW_REPLY || i == ASYNC_ABANDON))
@@ -1038,7 +1040,8 @@ static void test_configuration(void)
 	struct tr_server *server = NULL;
 	struct tr_rpc_v2_method method = {
 	        .descriptor = {7, 1, TR_RPC_MANY, TR_RPC_MANY, TR_RPC_CODEC_RAW,
-	                       TR_RPC_CODEC_RAW, TR_RPC_LANE_CONTROL, 33, 33},
+	                       TR_RPC_CODEC_RAW, TR_RPC_LANE_CONTROL, 33, 33, 0,
+	                       0},
 	        .work = work};
 	assert(tr_rpc_v2_reply_set_metadata(NULL, TR_RPC_V2_METADATA_INITIAL,
 	                                    NULL, 0) == TR_ERR_INVALID);

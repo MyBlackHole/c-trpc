@@ -3,11 +3,39 @@
 
 #include "channel.h"
 #include "../../execution/deadline_internal.h"
+#include "../../runtime/message_service.h"
 
 struct tr_peer_identity_snapshot;
 
+typedef int (*tr_channel_message_submit_fn)(
+        void *context, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle);
+typedef int (*tr_channel_message_cancel_fn)(void *context,
+                                            struct tr_task_handle handle);
+
+/* RPC body adapter uses a value snapshot so per-method transforms cannot
+ * retain pointers into Channel's lane-generation capability records. */
+struct tr_channel_message_limits {
+	uint32_t local_receive_algorithms;
+	uint32_t local_max_encoded_wire_bytes;
+	uint32_t peer_receive_algorithms;
+	uint32_t peer_max_encoded_wire_bytes;
+	uint32_t max_message_bytes;
+	size_t max_compression_workspace_bytes;
+	unsigned max_compression_window_log;
+	unsigned peer_caps_ready;
+};
+
 /* Channel 创建后所属反应器不再变化，仅供内部所有者路由使用。 */
 struct tr_reactor *tr_channel_reactor(struct tr_channel *channel);
+
+/* 所属 Reactor owner 上读取本端变换上限与当前物理 lane 的对端接收许可。
+ * 输出是副本；lane 不可用时返回 AGAIN，输出保持不变。 */
+int tr_channel_message_limits_on_owner(struct tr_channel *channel,
+                                       enum tr_lane lane,
+                                       struct tr_channel_message_limits *out);
 
 /* 所属 owner 上取得 CONTROL 连接的借用身份；需 retain 才能跨过当前回调。 */
 int tr_channel_peer_identity_snapshot_on_owner(
@@ -77,12 +105,33 @@ int tr_channel_create_deferred(
 	void *callback_arg,
 	struct tr_channel **out);
 
+/* Deferred Client/Server Channel 在 HELLO 前绑定其 Runtime 分片消息服务入口。
+ * 服务反应器必须与 Channel 相同；submit 在 Channel owner 上调用。context 和
+ * 服务必须长于 Channel。服务可未启用，此时任务提交返回 CLOSED；不能据此发布
+ * 非零接收能力。只能在 deferred Channel 启动握手前绑定一次。
+ */
+int tr_channel_bind_message_service_on_owner(
+        struct tr_channel *channel, struct tr_reactor *service_reactor,
+        tr_channel_message_submit_fn submit,
+        tr_channel_message_cancel_fn cancel, void *context);
+
+/* 仅 Channel 所有者可调用；参数和所有权语义原样转交给已绑定服务。
+ * 未绑定返回 STATE，开始拆除后返回 CLOSED；不持有 Channel 锁调用服务。
+ */
+int tr_channel_message_submit_on_owner(
+        struct tr_channel *channel, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle);
+int tr_channel_message_cancel_on_owner(struct tr_channel *channel,
+                                       struct tr_task_handle task);
+
 /* 仅供门面的套接字策略注入。通过 Channel 所属反应器所有者串行化，
  * 必须在自动重连启动前设置；否则底层 Channel 重连保留
  * 内核默认值。
  */
 int tr_channel_set_reconnect_tcp_nodelay(struct tr_channel *channel,
-					    int enabled);
+                                         int enabled);
 
 /* 内部生命周期观察者独立于 RPC 使用的上层 Channel 处理函数。
  * 发布与读取都在 Channel 所属反应器所有者上完成，不属于

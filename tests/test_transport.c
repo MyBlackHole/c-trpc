@@ -6,6 +6,9 @@
 #include "../src/transport/protocol/frame.h"
 #include "../src/guard.h"
 #include "../src/transport/protocol/parser.h"
+#include "../src/transport/protocol/message_caps.h"
+#include "../src/transport/protocol/message_envelope.h"
+#include "../src/message/builder.h"
 #include "../src/execution/reactor.h"
 #include "../src/refcount.h"
 #include "tr/rpc.h"
@@ -16,7 +19,9 @@
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 #include "../src/transport/channel/channel_internal.h"
+#include "../src/runtime/message_service.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/memory_budget.h"
 #include "server_v2_test_fixture.h"
 #include "../src/execution/timer_queue.h"
 
@@ -35,6 +40,7 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <zstd.h>
 
 #define TEST_POOL_COUNT 4U
 #define TEST_BUF_SIZE (1024U * 1024U)
@@ -184,6 +190,76 @@ static void test_endian(void)
 	assert(tr_get_le64(b) == UINT64_C(0x0123456789ABCDEF));
 }
 
+static void test_message_caps_roundtrip_and_rejects_invalid_payload(void)
+{
+	struct tr_message_caps input = {TR_MESSAGE_ALGORITHM_ZSTD, 4096U};
+	struct tr_message_caps output = {0};
+	uint8_t wire[TR_MESSAGE_CAPS_WIRE_SIZE];
+
+	assert(tr_message_caps_encode(wire, &input) == TR_OK);
+	assert(tr_frame_type_valid(TR_FRAME_MESSAGE_CAPS));
+	assert(wire[0] == 1U && wire[1] == 0U);
+	assert(wire[2] == 0U && wire[3] == 0U);
+	assert(tr_message_caps_decode(wire, sizeof(wire), &output) == TR_OK);
+	assert(output.receive_algorithm_bits == input.receive_algorithm_bits);
+	assert(output.max_encoded_wire_bytes == input.max_encoded_wire_bytes);
+
+	assert(tr_message_caps_decode(wire, sizeof(wire) - 1U, &output) ==
+	       TR_ERR_BAD_LENGTH);
+	wire[2] = 1U;
+	assert(tr_message_caps_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_RESERVED);
+	wire[2] = 0U;
+	tr_put_le32(wire + 4U, UINT32_C(0x80000000));
+	assert(tr_message_caps_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_UNSUPPORTED);
+	tr_put_le32(wire + 4U, 0U);
+	assert(tr_message_caps_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_INVALID);
+	tr_put_le32(wire + 4U, TR_MESSAGE_ALGORITHM_ZSTD);
+	tr_put_le32(wire + 8U, 16U);
+	assert(tr_message_caps_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_BAD_LENGTH);
+}
+
+static void test_message_envelope_roundtrip_and_rejects_invalid_payload(void)
+{
+	struct tr_message_envelope input = {TR_MESSAGE_CODEC_ZSTD, 4096U,
+	                                    8192U};
+	struct tr_message_envelope output = {0};
+	uint8_t wire[TR_MESSAGE_ENVELOPE_WIRE_SIZE];
+
+	assert(tr_message_envelope_encode(wire, &input) == TR_OK);
+	assert(wire[0] == 1U && wire[1] == 0U);
+	assert(wire[12] == 0U && wire[15] == 0U);
+	assert(tr_message_envelope_decode(wire, sizeof(wire), &output) ==
+	       TR_OK);
+	assert(output.codec_id == input.codec_id);
+	assert(output.encoded_body_bytes == input.encoded_body_bytes);
+	assert(output.decoded_message_bytes == input.decoded_message_bytes);
+
+	assert(tr_message_envelope_decode(wire, sizeof(wire) - 1U, &output) ==
+	       TR_ERR_BAD_LENGTH);
+	tr_put_le16(wire, 2U);
+	assert(tr_message_envelope_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_BAD_VERSION);
+	tr_put_le16(wire, 1U);
+	tr_put_le32(wire + 12U, 1U);
+	assert(tr_message_envelope_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_RESERVED);
+	tr_put_le32(wire + 12U, 0U);
+	tr_put_le16(wire + 2U, 2U);
+	assert(tr_message_envelope_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_UNSUPPORTED);
+	tr_put_le16(wire + 2U, TR_MESSAGE_CODEC_ZSTD);
+	tr_put_le32(wire + 4U, 0U);
+	assert(tr_message_envelope_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_BAD_LENGTH);
+	tr_put_le32(wire + 4U, UINT32_MAX);
+	assert(tr_message_envelope_decode(wire, sizeof(wire), &output) ==
+	       TR_ERR_BAD_LENGTH);
+}
+
 static void test_wire_roundtrip(void)
 {
 	struct tr_frame_header in;
@@ -218,6 +294,34 @@ static void test_wire_roundtrip(void)
 	assert(out.payload_len == in.payload_len);
 	assert(out.payload_crc32c == in.payload_crc32c);
 	assert(out.reserved == 0);
+}
+
+static void test_compressed_flag_is_data_only(void)
+{
+	struct tr_frame_header header = {0};
+	struct tr_frame_header decoded;
+	struct tr_wire_limits limits = {4096U};
+	uint8_t raw[TR_WIRE_HEADER_SIZE];
+	const uint32_t compressed_flag = TR_FRAME_F_COMPRESSED;
+
+	header.version = TR_WIRE_ENV_VERSION;
+	header.type = TR_FRAME_DATA;
+	header.flags = TR_FRAME_F_FIRST | TR_FRAME_F_LAST | compressed_flag;
+	assert(tr_wire_header_encode(raw, &header) == TR_OK);
+	assert(tr_wire_header_decode(raw, &decoded) == TR_OK);
+	assert(tr_wire_header_validate(raw, &decoded, &limits) == TR_OK);
+
+	for (uint16_t type = TR_FRAME_STREAM_OPEN;
+	     type <= TR_FRAME_MESSAGE_CAPS; ++type) {
+		if (type == TR_FRAME_DATA)
+			continue;
+		header.type = type;
+		header.flags = compressed_flag;
+		assert(tr_wire_header_encode(raw, &header) == TR_OK);
+		assert(tr_wire_header_decode(raw, &decoded) == TR_OK);
+		assert(tr_wire_header_validate(raw, &decoded, &limits) ==
+		       TR_ERR_BAD_FLAGS);
+	}
 }
 
 static void test_header_corruption(void)
@@ -758,6 +862,9 @@ static void test_reactor_tcp_roundtrip(void)
 	       TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_handle) ==
 	       TR_OK);
+	assert(tr_reactor_send(client_handle, TR_FRAME_PING,
+	                       TR_FRAME_F_COMPRESSED, 0U, 1U,
+	                       NULL) == TR_ERR_BAD_FLAGS);
 
 	assert(tr_buffer_pool_init(&tx_pool, 2, TEST_BUF_SIZE) == TR_OK);
 	assert(tr_buffer_acquire(&tx_pool, TEST_BUF_SIZE, &buffer) == TR_OK);
@@ -1244,6 +1351,8 @@ struct channel_test_ctx {
 	unsigned remote_closed;
 	unsigned closed;
 	unsigned stream_errors;
+	unsigned resets;
+	int last_reset_status;
 	unsigned channel_events;
 	unsigned channel_down;
 	unsigned channel_up;
@@ -1285,7 +1394,6 @@ static void channel_test_on_stream_event(struct tr_stream_handle stream,
 					 void *arg)
 {
 	struct channel_test_ctx *ctx = (struct channel_test_ctx *)arg;
-	(void)status;
 
 	pthread_mutex_lock(&ctx->lock);
 	if (event == TR_STREAM_EVENT_OPENED) {
@@ -1298,6 +1406,9 @@ static void channel_test_on_stream_event(struct tr_stream_handle stream,
 		ctx->closed++;
 	} else if (event == TR_STREAM_EVENT_ERROR) {
 		ctx->stream_errors++;
+	} else if (event == TR_STREAM_EVENT_RESET) {
+		ctx->resets++;
+		ctx->last_reset_status = status;
 	}
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
@@ -1346,6 +1457,10 @@ static void wait_channel_counter(struct channel_test_ctx *ctx, unsigned *value,
 	pthread_mutex_lock(&ctx->lock);
 	while (*value < target && ret == 0)
 		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	if (*value < target)
+		fprintf(stderr,
+		        "channel counter timeout: target=%u actual=%u\n",
+		        target, *value);
 	assert(*value >= target);
 	pthread_mutex_unlock(&ctx->lock);
 }
@@ -1356,6 +1471,119 @@ static void wait_channel_lane_down(struct tr_channel *channel,
 static void wait_channel_lane_up(struct tr_channel *channel, enum tr_lane lane)
 {
 	assert(tr_channel_wait_ready(channel, lane, 5000U) == TR_OK);
+}
+
+static void init_channel_test_ctx(struct channel_test_ctx *ctx);
+static void destroy_channel_test_ctx(struct channel_test_ctx *ctx);
+
+struct channel_message_caps_pair {
+	struct tr_reactor *reactor;
+	struct tr_channel *client;
+	struct tr_channel *server;
+	struct tr_conn_handle client_connection;
+	struct tr_conn_handle server_connection;
+	struct channel_test_ctx client_ctx;
+	struct channel_test_ctx server_ctx;
+};
+
+static void channel_message_caps_pair_create(
+        struct channel_message_caps_pair *pair, uint64_t client_features,
+        uint32_t client_receive_algorithms, uint32_t client_max_encoded,
+        uint64_t server_features, uint32_t server_receive_algorithms,
+        uint32_t server_max_encoded)
+{
+	struct tr_reactor_config reactor_config = {0};
+	struct tr_channel_config channel_config = {0};
+	int client_fd;
+	int server_fd;
+
+	memset(pair, 0, sizeof(*pair));
+	init_channel_test_ctx(&pair->client_ctx);
+	init_channel_test_ctx(&pair->server_ctx);
+	make_tcp_pair(&client_fd, &server_fd);
+
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
+	                         &pair->reactor) == TR_OK);
+	assert(tr_reactor_start(pair->reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(pair->reactor, client_fd,
+	                           &pair->client_connection) == TR_OK);
+	assert(tr_reactor_adopt_fd(pair->reactor, server_fd,
+	                           &pair->server_connection) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 8U;
+	channel_config.initial_window_bytes = 4096U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	channel_config.feature_bits = client_features;
+	channel_config.receive_compression_algorithms =
+	        client_receive_algorithms;
+	channel_config.max_encoded_message_bytes = client_max_encoded;
+	assert(tr_channel_create(&channel_config, pair->client_connection,
+	                         pair->client_connection, channel_test_on_data,
+	                         channel_test_on_stream_event,
+	                         channel_test_on_channel_event,
+	                         &pair->client_ctx, &pair->client) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.feature_bits = server_features;
+	channel_config.receive_compression_algorithms =
+	        server_receive_algorithms;
+	channel_config.max_encoded_message_bytes = server_max_encoded;
+	assert(tr_channel_create(&channel_config, pair->server_connection,
+	                         pair->server_connection, channel_test_on_data,
+	                         channel_test_on_stream_event,
+	                         channel_test_on_channel_event,
+	                         &pair->server_ctx, &pair->server) == TR_OK);
+
+	wait_channel_lane_up(pair->client, TR_LANE_CONTROL);
+	wait_channel_lane_up(pair->server, TR_LANE_CONTROL);
+	wait_channel_lane_up(pair->client, TR_LANE_BULK);
+	wait_channel_lane_up(pair->server, TR_LANE_BULK);
+}
+
+static void
+channel_message_caps_pair_wait_ready(struct channel_message_caps_pair *pair)
+{
+	struct tr_channel_capabilities client_caps;
+	struct tr_channel_capabilities server_caps;
+	unsigned i;
+
+	for (i = 0; i < 5000U; ++i) {
+		assert(tr_channel_get_capabilities(pair->client,
+		                                   TR_LANE_CONTROL,
+		                                   &client_caps) == TR_OK);
+		assert(tr_channel_get_capabilities(pair->server,
+		                                   TR_LANE_CONTROL,
+		                                   &server_caps) == TR_OK);
+		if (client_caps.message_caps_ready &&
+		    server_caps.message_caps_ready)
+			return;
+		{
+			struct timespec pause_time = {0, 1000000L};
+			nanosleep(&pause_time, NULL);
+		}
+	}
+	assert(client_caps.message_caps_ready &&
+	       server_caps.message_caps_ready);
+}
+
+static void
+channel_message_caps_pair_destroy(struct channel_message_caps_pair *pair)
+{
+	assert(tr_reactor_stop(pair->reactor) == TR_OK);
+	assert(tr_channel_destroy(pair->client) == TR_OK);
+	assert(tr_channel_destroy(pair->server) == TR_OK);
+	assert(tr_reactor_destroy(pair->reactor) == TR_OK);
+	destroy_channel_test_ctx(&pair->client_ctx);
+	destroy_channel_test_ctx(&pair->server_ctx);
 }
 
 static void init_channel_test_ctx(struct channel_test_ctx *ctx)
@@ -2145,6 +2373,1577 @@ static void test_channel_stream_flow_control(void)
 	tr_buffer_pool_destroy(&tx_pool);
 	destroy_channel_test_ctx(&server_ctx);
 	destroy_channel_test_ctx(&client_ctx);
+}
+
+static void test_channel_rejects_unimplemented_compression_advertisement(void)
+{
+	struct tr_reactor_config reactor_config = {0};
+	struct tr_channel_config channel_config = {0};
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle connection;
+	int local_fd;
+	int peer_fd;
+
+	make_tcp_pair(&local_fd, &peer_fd);
+	reactor_config.max_connections = 2U;
+	reactor_config.command_capacity = 16U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 8U;
+	reactor_config.rx_buffer_count = 4U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, local_fd, &connection) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 1024U;
+	channel_config.feature_bits = TR_CHANNEL_FEATURE_MESSAGE_CAPS;
+	channel_config.receive_compression_algorithms =
+	        TR_MESSAGE_ALGORITHM_ZSTD;
+	channel_config.max_encoded_message_bytes = 4096U;
+	assert(tr_channel_create(&channel_config, connection, connection, NULL,
+	                         NULL, NULL, NULL, &channel) == TR_ERR_STATE);
+	assert(channel == NULL);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+}
+
+struct channel_message_submit_context {
+	uint32_t calls;
+	uint32_t cancel_calls;
+	struct tr_message *expected_input;
+	const struct tr_message_transform_config *expected_config;
+	tr_message_service_done_fn expected_done;
+	void *expected_arg;
+	struct tr_task_handle *expected_handle;
+};
+
+static int
+test_channel_message_submit(void *context, struct tr_message *input,
+                            const struct tr_message_transform_config *config,
+                            tr_message_service_done_fn done, void *arg,
+                            struct tr_task_handle *handle)
+{
+	struct channel_message_submit_context *submit_context = context;
+
+	assert(input == submit_context->expected_input);
+	assert(config == submit_context->expected_config);
+	assert(done == submit_context->expected_done);
+	assert(arg == submit_context->expected_arg);
+	assert(handle == submit_context->expected_handle);
+	submit_context->calls++;
+	return TR_ERR_CLOSED;
+}
+
+static int test_channel_message_cancel(void *context,
+                                       struct tr_task_handle handle)
+{
+	struct channel_message_submit_context *submit_context = context;
+	(void)handle;
+	submit_context->cancel_calls++;
+	return TR_ERR_CLOSED;
+}
+
+struct channel_message_service_bind_probe {
+	struct tr_channel *channel;
+	struct tr_reactor *wrong_reactor;
+	void *context;
+	int wrong_ret;
+	int correct_ret;
+	int duplicate_ret;
+	int submit_ret;
+	struct tr_message *input;
+	const struct tr_message_transform_config *transform_config;
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle *handle;
+};
+
+static void channel_message_done_noop(void *arg, struct tr_task_handle handle,
+                                      struct tr_message_service_result result,
+                                      struct tr_message *message)
+{
+	(void)arg;
+	(void)handle;
+	(void)result;
+	(void)message;
+}
+
+static int channel_message_service_bind_on_owner(void *arg)
+{
+	struct channel_message_service_bind_probe *probe = arg;
+	struct tr_reactor *reactor = tr_channel_reactor(probe->channel);
+
+	probe->wrong_ret = tr_channel_bind_message_service_on_owner(
+	        probe->channel, probe->wrong_reactor,
+	        test_channel_message_submit, test_channel_message_cancel,
+	        probe->context);
+	probe->correct_ret = tr_channel_bind_message_service_on_owner(
+	        probe->channel, reactor, test_channel_message_submit,
+	        test_channel_message_cancel, probe->context);
+	probe->duplicate_ret = tr_channel_bind_message_service_on_owner(
+	        probe->channel, reactor, test_channel_message_submit,
+	        test_channel_message_cancel, probe->context);
+	probe->submit_ret = tr_channel_message_submit_on_owner(
+	        probe->channel, probe->input, probe->transform_config,
+	        probe->done, probe->done_arg, probe->handle);
+	return TR_OK;
+}
+
+static void test_channel_message_service_binding_owner_and_reactor(void)
+{
+	struct tr_reactor_config reactor_config = {0};
+	struct tr_channel_config channel_config = {0};
+	struct channel_message_service_bind_probe probe = {0};
+	struct tr_reactor *reactor = NULL;
+	struct tr_reactor *wrong_reactor = NULL;
+	struct tr_channel *channel = NULL;
+	struct tr_conn_handle connection;
+	int local_fd;
+	int peer_fd;
+	struct channel_message_submit_context submit_context = {0};
+	struct tr_message input = {0};
+	struct tr_message_transform_config transform_config = {0};
+	struct tr_task_handle handle = {0};
+
+	make_tcp_pair(&local_fd, &peer_fd);
+	reactor_config.max_connections = 2U;
+	reactor_config.command_capacity = 16U;
+	reactor_config.tx_item_capacity = 8U;
+	reactor_config.control_tx_item_capacity = 8U;
+	reactor_config.rx_buffer_count = 4U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
+	                         &wrong_reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, local_fd, &connection) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 1024U;
+	assert(tr_channel_create_deferred(&channel_config, connection,
+	                                  connection, NULL, NULL, NULL, NULL,
+	                                  &channel) == TR_OK);
+	tr_socket_close(&peer_fd);
+	assert(tr_channel_bind_message_service_on_owner(
+	               channel, reactor, test_channel_message_submit,
+	               test_channel_message_cancel,
+	               &submit_context) == TR_ERR_STATE);
+
+	probe.channel = channel;
+	probe.wrong_reactor = wrong_reactor;
+	probe.context = &submit_context;
+	probe.input = &input;
+	probe.transform_config = &transform_config;
+	probe.done = channel_message_done_noop;
+	probe.done_arg = &submit_context;
+	probe.handle = &handle;
+	submit_context.expected_input = &input;
+	submit_context.expected_config = &transform_config;
+	submit_context.expected_done = channel_message_done_noop;
+	submit_context.expected_arg = &submit_context;
+	submit_context.expected_handle = &handle;
+	assert(tr_reactor_call(reactor, channel_message_service_bind_on_owner,
+	                       &probe) == TR_OK);
+	assert(probe.wrong_ret == TR_ERR_INVALID);
+	assert(probe.correct_ret == TR_OK);
+	assert(probe.duplicate_ret == TR_ERR_STATE);
+	assert(probe.submit_ret == TR_ERR_CLOSED);
+	assert(submit_context.calls == 1U);
+	assert(tr_channel_message_submit_on_owner(
+	               channel, &input, &transform_config,
+	               channel_message_done_noop, &submit_context,
+	               &handle) == TR_ERR_STATE);
+	assert(submit_context.calls == 1U);
+
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(channel) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	assert(tr_reactor_destroy(wrong_reactor) == TR_OK);
+}
+
+static void test_channel_message_caps_exchange_empty_receive_limits(void)
+{
+	struct channel_message_caps_pair pair;
+	struct tr_channel_capabilities client_caps;
+	struct tr_channel_capabilities server_caps;
+
+	channel_message_caps_pair_create(
+	        &pair, TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U,
+	        TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U);
+	channel_message_caps_pair_wait_ready(&pair);
+
+	assert(tr_channel_get_capabilities(pair.client, TR_LANE_CONTROL,
+	                                   &client_caps) == TR_OK);
+	assert(tr_channel_get_capabilities(pair.server, TR_LANE_CONTROL,
+	                                   &server_caps) == TR_OK);
+	assert(client_caps.receive_algorithm_bits == 0U);
+	assert(client_caps.max_encoded_wire_bytes == 0U);
+	assert(server_caps.receive_algorithm_bits == 0U);
+	assert(server_caps.max_encoded_wire_bytes == 0U);
+	channel_message_caps_pair_destroy(&pair);
+}
+
+static void test_channel_compressed_send_rejects_unsupported_peer(void)
+{
+	struct channel_message_caps_pair pair;
+	struct tr_memory_budget budget;
+	struct tr_message_builder *builder = NULL;
+	struct tr_message message = {0};
+	struct tr_memory_budget_stats budget_stats = {0};
+	struct tr_stream_handle client_stream;
+	struct tr_stream_handle server_stream;
+	struct tr_message_view view;
+	static const uint8_t source[] = "preserve rejected payload";
+
+	channel_message_caps_pair_create(
+	        &pair, TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U,
+	        TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U);
+	channel_message_caps_pair_wait_ready(&pair);
+	assert(tr_stream_open(pair.client, TR_LANE_CONTROL, &client_stream) ==
+	       TR_OK);
+	wait_channel_counter(&pair.client_ctx, &pair.client_ctx.opened, 1U);
+	wait_channel_counter(&pair.server_ctx, &pair.server_ctx.opened, 1U);
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_message_builder_create(&budget, sizeof(source), &builder) ==
+	       TR_OK);
+	assert(tr_message_builder_append(builder, source, sizeof(source)) ==
+	       TR_OK);
+	assert(tr_message_builder_publish(&builder, &message) == TR_OK);
+	assert(tr_stream_send_compressed(client_stream, &message) ==
+	       TR_ERR_UNSUPPORTED);
+	assert(tr_message_view(&message, &view) == TR_OK);
+	assert(view.len == sizeof(source));
+	assert(memcmp(view.data, source, sizeof(source)) == 0);
+	assert(tr_message_release(&message) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &budget_stats);
+	assert(budget_stats.current_bytes == 0U);
+	pthread_mutex_lock(&pair.server_ctx.lock);
+	server_stream = pair.server_ctx.last_stream;
+	pthread_mutex_unlock(&pair.server_ctx.lock);
+	assert(tr_stream_close(client_stream) == TR_OK);
+	assert(tr_stream_close(server_stream) == TR_OK);
+	wait_channel_active_streams(pair.client, 0U);
+	wait_channel_active_streams(pair.server, 0U);
+	channel_message_caps_pair_destroy(&pair);
+}
+
+static void test_channel_message_caps_are_feature_gated(void)
+{
+	struct channel_message_caps_pair pair;
+	struct tr_channel_capabilities client_caps;
+	struct tr_channel_capabilities server_caps;
+	struct tr_stream_handle client_stream;
+	struct tr_stream_handle server_stream;
+	struct tr_buffer_pool tx_pool;
+	struct tr_buffer *payload;
+
+	channel_message_caps_pair_create(&pair, TR_CHANNEL_FEATURE_MESSAGE_CAPS,
+	                                 0U, 0U, 0U, 0U, 0U);
+	assert(tr_channel_get_capabilities(pair.client, TR_LANE_CONTROL,
+	                                   &client_caps) == TR_OK);
+	assert(tr_channel_get_capabilities(pair.server, TR_LANE_CONTROL,
+	                                   &server_caps) == TR_OK);
+	assert(!client_caps.message_caps_ready);
+	assert(!server_caps.message_caps_ready);
+
+	assert(tr_stream_open(pair.client, TR_LANE_CONTROL, &client_stream) ==
+	       TR_OK);
+	wait_channel_counter(&pair.client_ctx, &pair.client_ctx.opened, 1U);
+	wait_channel_counter(&pair.server_ctx, &pair.server_ctx.opened, 1U);
+	assert(tr_buffer_pool_init(&tx_pool, 1U, 4U) == TR_OK);
+	assert(tr_buffer_acquire(&tx_pool, 4U, &payload) == TR_OK);
+	memcpy(payload->data, "none", 4U);
+	payload->len = 4U;
+	assert(tr_stream_send(client_stream, payload) == TR_OK);
+	wait_channel_counter(&pair.server_ctx, &pair.server_ctx.received, 1U);
+	wait_for_pool_full(&tx_pool, 1U);
+	assert(tr_buffer_pool_destroy(&tx_pool) == TR_OK);
+
+	pthread_mutex_lock(&pair.server_ctx.lock);
+	server_stream = pair.server_ctx.last_stream;
+	pthread_mutex_unlock(&pair.server_ctx.lock);
+	assert(tr_stream_close(client_stream) == TR_OK);
+	assert(tr_stream_close(server_stream) == TR_OK);
+	wait_channel_active_streams(pair.client, 0U);
+	wait_channel_active_streams(pair.server, 0U);
+	channel_message_caps_pair_destroy(&pair);
+}
+
+static void test_channel_message_caps_clear_on_lane_replacement(void)
+{
+	struct channel_message_caps_pair pair;
+	struct tr_channel_capabilities caps;
+	struct tr_conn_handle client_replacement;
+	struct tr_conn_handle server_replacement;
+	int client_fd;
+	int server_fd;
+
+	channel_message_caps_pair_create(
+	        &pair, TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U,
+	        TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U);
+	channel_message_caps_pair_wait_ready(&pair);
+
+	assert(tr_reactor_close(pair.client_connection) == TR_OK);
+	wait_channel_lane_down(pair.client, TR_LANE_CONTROL);
+	wait_channel_lane_down(pair.server, TR_LANE_CONTROL);
+	assert(tr_channel_get_capabilities(pair.client, TR_LANE_CONTROL,
+	                                   &caps) == TR_AGAIN);
+	assert(tr_channel_get_capabilities(pair.server, TR_LANE_CONTROL,
+	                                   &caps) == TR_AGAIN);
+
+	make_tcp_pair(&client_fd, &server_fd);
+	assert(tr_reactor_adopt_fd(pair.reactor, client_fd,
+	                           &client_replacement) == TR_OK);
+	assert(tr_reactor_adopt_fd(pair.reactor, server_fd,
+	                           &server_replacement) == TR_OK);
+	assert(tr_channel_replace_connection(pair.client, TR_LANE_CONTROL,
+	                                     client_replacement) == TR_OK);
+	assert(tr_channel_replace_connection(pair.server, TR_LANE_CONTROL,
+	                                     server_replacement) == TR_OK);
+	wait_channel_lane_up(pair.client, TR_LANE_CONTROL);
+	wait_channel_lane_up(pair.server, TR_LANE_CONTROL);
+	channel_message_caps_pair_wait_ready(&pair);
+	assert(tr_channel_get_capabilities(pair.client, TR_LANE_CONTROL,
+	                                   &caps) == TR_OK);
+	assert(caps.message_caps_ready);
+	channel_message_caps_pair_destroy(&pair);
+}
+
+static void test_channel_message_caps_reject_malformed_frame(void)
+{
+	struct channel_message_caps_pair pair;
+	struct tr_message_caps message_caps = {0};
+	struct tr_buffer_pool payload_pool;
+	struct tr_buffer *payload;
+
+	channel_message_caps_pair_create(
+	        &pair, TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U,
+	        TR_CHANNEL_FEATURE_MESSAGE_CAPS, 0U, 0U);
+	channel_message_caps_pair_wait_ready(&pair);
+	assert(tr_buffer_pool_init(&payload_pool, 1U,
+	                           TR_MESSAGE_CAPS_WIRE_SIZE) == TR_OK);
+	assert(tr_buffer_acquire(&payload_pool, TR_MESSAGE_CAPS_WIRE_SIZE,
+	                         &payload) == TR_OK);
+	assert(tr_message_caps_encode(payload->data, &message_caps) == TR_OK);
+	payload->len = TR_MESSAGE_CAPS_WIRE_SIZE;
+	assert(tr_reactor_send(pair.client_connection, TR_FRAME_MESSAGE_CAPS,
+	                       0U, 1U, 0U, payload) == TR_OK);
+	wait_channel_lane_down(pair.server, TR_LANE_CONTROL);
+	assert(tr_channel_get_capabilities(
+	               pair.server, TR_LANE_CONTROL,
+	               &(struct tr_channel_capabilities){0}) == TR_AGAIN);
+	wait_for_pool_full(&payload_pool, 1U);
+	assert(tr_buffer_pool_destroy(&payload_pool) == TR_OK);
+	channel_message_caps_pair_destroy(&pair);
+}
+
+struct compressed_rx_test_ctx {
+	struct channel_test_ctx events;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	uint8_t payloads[6][1024];
+	uint32_t payload_lens[6];
+	uint64_t message_ids[6];
+	uint32_t stream_ids[6];
+	unsigned received;
+	int last_status;
+};
+
+static enum tr_stream_data_disposition
+compressed_rx_on_data(struct tr_stream_handle stream, uint64_t message_id,
+                      struct tr_buffer *payload, void *arg)
+{
+	struct compressed_rx_test_ctx *ctx = arg;
+	struct tr_stream_diagnostics diagnostics = {0};
+	unsigned received;
+	enum tr_stream_data_disposition disposition =
+	        channel_test_on_data(stream, message_id, payload, &ctx->events);
+	assert(tr_stream_get_diagnostics(stream, &diagnostics) == TR_OK);
+
+	pthread_mutex_lock(&ctx->lock);
+	received = ctx->received;
+	assert(received <
+	       sizeof(ctx->message_ids) / sizeof(ctx->message_ids[0]));
+	assert(payload->len <= sizeof(ctx->payloads[received]));
+	memcpy(ctx->payloads[received], payload->data, payload->len);
+	ctx->payload_lens[received] = payload->len;
+	ctx->message_ids[received] = message_id;
+	ctx->stream_ids[received] = diagnostics.stream_id;
+	ctx->received++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return disposition;
+}
+
+static void compressed_rx_on_stream_event(struct tr_stream_handle stream,
+                                          enum tr_stream_event event,
+                                          int status, void *arg)
+{
+	struct compressed_rx_test_ctx *ctx = arg;
+	channel_test_on_stream_event(stream, event, status, &ctx->events);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->last_status = status;
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+struct compressed_rx_fixture {
+	struct tr_reactor *reactor;
+	struct tr_conn_handle client_connection;
+	struct tr_conn_handle server_connection;
+	struct tr_channel *client;
+	struct tr_channel *server;
+	struct tr_message_service *service;
+	struct tr_memory_budget budget;
+	struct tr_message_service_config service_config;
+	struct compressed_rx_test_ctx server_ctx;
+	struct channel_test_ctx client_ctx;
+};
+
+static int compressed_rx_create_service_on_owner(void *arg)
+{
+	struct compressed_rx_fixture *fixture = arg;
+	int ret = tr_message_service_create_on_owner(
+	        fixture->reactor, &fixture->service_config, &fixture->budget,
+	        &fixture->service);
+
+	return ret == TR_OK
+	               ? tr_message_service_start_on_owner(fixture->service)
+	               : ret;
+}
+
+static int
+compressed_rx_submit_adapter(void *context, struct tr_message *input,
+                             const struct tr_message_transform_config *config,
+                             tr_message_service_done_fn done, void *arg,
+                             struct tr_task_handle *handle)
+{
+	return tr_message_service_submit_on_owner(context, input, config, done,
+	                                          arg, handle);
+}
+
+static int compressed_rx_cancel_adapter(void *context,
+                                        struct tr_task_handle handle)
+{
+	return tr_message_service_cancel(context, handle);
+}
+
+struct compressed_rx_bind_request {
+	struct compressed_rx_fixture *fixture;
+	struct tr_channel *channel;
+	int ret;
+};
+
+static int compressed_rx_bind_service_on_owner(void *arg)
+{
+	struct compressed_rx_bind_request *request = arg;
+	struct compressed_rx_fixture *fixture = request->fixture;
+
+	request->ret = tr_channel_bind_message_service_on_owner(
+	        request->channel, fixture->reactor,
+	        compressed_rx_submit_adapter, compressed_rx_cancel_adapter,
+	        fixture->service);
+	return request->ret;
+}
+
+static void
+compressed_rx_send_invalid_message(struct compressed_rx_fixture *fixture,
+                                   struct tr_buffer_pool *payload_pool,
+                                   struct tr_message_envelope envelope,
+                                   const uint8_t *body, uint32_t body_bytes,
+                                   unsigned open_target, unsigned reset_target,
+                                   uint32_t active_streams)
+{
+	struct tr_stream_handle client_stream;
+	struct tr_stream_diagnostics diagnostics = {0};
+	struct tr_buffer *payload = NULL;
+
+	assert(tr_stream_open(fixture->client, TR_LANE_CONTROL,
+	                      &client_stream) == TR_OK);
+	wait_channel_counter(&fixture->client_ctx, &fixture->client_ctx.opened,
+	                     open_target);
+	wait_channel_counter(&fixture->server_ctx.events,
+	                     &fixture->server_ctx.events.opened, open_target);
+	assert(tr_stream_get_diagnostics(client_stream, &diagnostics) == TR_OK);
+	assert(tr_buffer_acquire(payload_pool,
+	                         TR_MESSAGE_ENVELOPE_WIRE_SIZE + body_bytes,
+	                         &payload) == TR_OK);
+	assert(tr_message_envelope_encode(payload->data, &envelope) == TR_OK);
+	if (body_bytes != 0U)
+		memcpy(payload->data + TR_MESSAGE_ENVELOPE_WIRE_SIZE, body,
+		       body_bytes);
+	payload->len = TR_MESSAGE_ENVELOPE_WIRE_SIZE + body_bytes;
+	assert(tr_reactor_send(fixture->client_connection, TR_FRAME_DATA,
+	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                               TR_FRAME_F_COMPRESSED,
+	                       diagnostics.stream_id, 1U, payload) == TR_OK);
+	wait_channel_counter(&fixture->server_ctx.events,
+	                     &fixture->server_ctx.events.resets, reset_target);
+	wait_channel_counter(&fixture->client_ctx, &fixture->client_ctx.resets,
+	                     reset_target);
+	wait_channel_active_streams(fixture->client, active_streams);
+	wait_channel_active_streams(fixture->server, active_streams);
+	pthread_mutex_lock(&fixture->server_ctx.events.lock);
+	assert(fixture->server_ctx.events.last_reset_status == TR_ERR_STATE);
+	assert(fixture->server_ctx.events.received == 6U);
+	pthread_mutex_unlock(&fixture->server_ctx.events.lock);
+	wait_for_pool_full(payload_pool, 3U);
+}
+
+static int compressed_rx_close_service_on_owner(void *arg)
+{
+	struct compressed_rx_fixture *fixture = arg;
+	return tr_message_service_close_on_owner(&fixture->service);
+}
+
+struct compressed_rx_hold_service {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned submitted;
+	unsigned cancelled;
+	enum tr_message_transform_kind last_kind;
+	tr_message_service_done_fn done;
+	void *done_arg;
+	struct tr_task_handle handle;
+};
+
+static int
+compressed_rx_hold_submit(void *context, struct tr_message *input,
+                          const struct tr_message_transform_config *config,
+                          tr_message_service_done_fn done, void *arg,
+                          struct tr_task_handle *handle)
+{
+	struct compressed_rx_hold_service *service = context;
+
+	assert(done && arg && handle);
+	assert(tr_message_release(input) == TR_OK);
+	pthread_mutex_lock(&service->lock);
+	assert(service->done == NULL);
+	service->done = done;
+	service->done_arg = arg;
+	service->last_kind = config->kind;
+	service->handle = (struct tr_task_handle){
+	        1U, (uint64_t)service->submitted + 1U, 0U};
+	*handle = service->handle;
+	service->submitted++;
+	pthread_cond_broadcast(&service->cond);
+	pthread_mutex_unlock(&service->lock);
+	return TR_OK;
+}
+
+static int compressed_rx_hold_cancel(void *context,
+                                     struct tr_task_handle handle)
+{
+	struct compressed_rx_hold_service *service = context;
+
+	pthread_mutex_lock(&service->lock);
+	assert(handle.instance == service->handle.instance);
+	assert(handle.generation == service->handle.generation);
+	assert(handle.slot == service->handle.slot);
+	service->cancelled++;
+	pthread_cond_broadcast(&service->cond);
+	pthread_mutex_unlock(&service->lock);
+	return TR_OK;
+}
+
+struct compressed_rx_hold_bind_request {
+	struct tr_channel *channel;
+	struct compressed_rx_hold_service *service;
+};
+
+struct compressed_rx_reset_request {
+	struct tr_stream_handle stream;
+	int status;
+};
+
+struct compressed_rx_hold_request {
+	struct tr_conn_handle connection;
+	int held;
+};
+
+static int compressed_rx_reset_stream_on_owner(void *arg)
+{
+	struct compressed_rx_reset_request *request = arg;
+	return tr_stream_reset_on_owner(request->stream, request->status);
+}
+
+static int compressed_rx_set_hold_on_owner(void *arg)
+{
+	struct compressed_rx_hold_request *request = arg;
+	return tr_reactor_set_rx_hold_on_owner(request->connection,
+	                                       request->held);
+}
+
+static int compressed_rx_hold_bind_on_owner(void *arg)
+{
+	struct compressed_rx_hold_bind_request *request = arg;
+
+	return tr_channel_bind_message_service_on_owner(
+	        request->channel, tr_channel_reactor(request->channel),
+	        compressed_rx_hold_submit, compressed_rx_hold_cancel,
+	        request->service);
+}
+
+static void compressed_rx_hold_wait(unsigned *value, unsigned target,
+                                    struct compressed_rx_hold_service *service)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&service->lock);
+	while (*value < target && ret == 0)
+		ret = pthread_cond_timedwait(&service->cond, &service->lock,
+		                             &deadline);
+	assert(*value >= target);
+	pthread_mutex_unlock(&service->lock);
+}
+
+struct compressed_rx_hold_completion {
+	struct compressed_rx_hold_service *service;
+	enum tr_message_service_delivery delivery;
+};
+
+static int compressed_rx_hold_complete_on_owner(void *arg)
+{
+	struct compressed_rx_hold_completion *request = arg;
+	struct compressed_rx_hold_service *service = request->service;
+	tr_message_service_done_fn done;
+	struct tr_task_handle handle;
+	void *done_arg;
+
+	pthread_mutex_lock(&service->lock);
+	done = service->done;
+	done_arg = service->done_arg;
+	handle = service->handle;
+	service->done = NULL;
+	service->done_arg = NULL;
+	pthread_mutex_unlock(&service->lock);
+	if (!done)
+		return TR_ERR_STATE;
+	done(done_arg, handle,
+	     (struct tr_message_service_result){TR_MESSAGE_TRANSFORM_CANCELLED,
+	                                        request->delivery},
+	     NULL);
+	return TR_OK;
+}
+
+static void compressed_rx_wait_caps(struct compressed_rx_fixture *fixture)
+{
+	int client_ret = TR_AGAIN;
+	int server_ret = TR_AGAIN;
+	struct tr_channel_capabilities client_caps = {0};
+	struct tr_channel_capabilities server_caps = {0};
+
+	for (unsigned i = 0; i < 5000U; ++i) {
+		client_ret = tr_channel_get_capabilities(
+		        fixture->client, TR_LANE_CONTROL, &client_caps);
+		server_ret = tr_channel_get_capabilities(
+		        fixture->server, TR_LANE_CONTROL, &server_caps);
+		if (client_ret == TR_OK && server_ret == TR_OK &&
+		    client_caps.message_caps_ready &&
+		    server_caps.message_caps_ready)
+			return;
+		struct timespec pause_time = {0, 1000000L};
+		nanosleep(&pause_time, NULL);
+	}
+	assert(client_ret == TR_OK && server_ret == TR_OK &&
+	       client_caps.message_caps_ready &&
+	       server_caps.message_caps_ready);
+}
+
+struct compressed_rpc_limits_probe {
+	struct compressed_rx_fixture *fixture;
+	struct tr_channel_message_limits client;
+	struct tr_channel_message_limits server;
+};
+
+static int compressed_rpc_limits_probe_on_owner(void *arg)
+{
+	struct compressed_rpc_limits_probe *probe = arg;
+	int ret = tr_channel_message_limits_on_owner(
+	        probe->fixture->client, TR_LANE_CONTROL, &probe->client);
+	if (ret != TR_OK)
+		return ret;
+	return tr_channel_message_limits_on_owner(
+	        probe->fixture->server, TR_LANE_CONTROL, &probe->server);
+}
+
+static void test_channel_message_limits_directional_snapshot(
+        struct compressed_rx_fixture *fixture)
+{
+	struct compressed_rpc_limits_probe probe = {.fixture = fixture};
+	assert(tr_reactor_call(fixture->reactor,
+	                       compressed_rpc_limits_probe_on_owner,
+	                       &probe) == TR_OK);
+	assert(probe.client.peer_caps_ready && probe.server.peer_caps_ready);
+	assert(probe.client.local_receive_algorithms == 0U);
+	assert(probe.client.peer_receive_algorithms ==
+	       TR_MESSAGE_ALGORITHM_ZSTD);
+	assert(probe.server.local_receive_algorithms ==
+	       TR_MESSAGE_ALGORITHM_ZSTD);
+	assert(probe.server.peer_receive_algorithms == 0U);
+	assert(probe.client.peer_max_encoded_wire_bytes == 4096U);
+	assert(probe.server.local_max_encoded_wire_bytes == 4096U);
+	assert(probe.client.max_message_bytes == 4096U);
+	assert(probe.server.max_compression_workspace_bytes == 1024U * 1024U);
+	assert(probe.server.max_compression_window_log == 20U);
+}
+
+static void compressed_rx_wait_received(struct compressed_rx_test_ctx *ctx,
+                                        unsigned target)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx->lock);
+	while (ctx->received < target && ret == 0)
+		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	if (ctx->received < target)
+		fprintf(stderr,
+		        "compressed receive timeout: got=%u target=%u "
+		        "status=%d\n",
+		        ctx->received, target, ctx->last_status);
+	assert(ctx->received >= target);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void compressed_rx_wait_flow(struct compressed_rx_test_ctx *ctx,
+                                    struct tr_stream_handle stream,
+                                    uint64_t expected_received)
+{
+	struct tr_stream_flow_state flow = {0};
+
+	for (unsigned i = 0; i < 5000U; ++i) {
+		int ret = tr_stream_get_flow_state(stream, &flow);
+		if (ret != TR_OK) {
+			unsigned stream_errors;
+			int last_status;
+			pthread_mutex_lock(&ctx->events.lock);
+			stream_errors = ctx->events.stream_errors;
+			pthread_mutex_unlock(&ctx->events.lock);
+			pthread_mutex_lock(&ctx->lock);
+			last_status = ctx->last_status;
+			pthread_mutex_unlock(&ctx->lock);
+			fprintf(stderr,
+			        "compressed flow diagnostic: ret=%d slot=%u "
+			        "generation=%u active=%u errors=%u status=%d\n",
+			        ret, stream.slot, stream.generation,
+			        tr_channel_active_streams(stream.channel),
+			        stream_errors, last_status);
+			abort();
+		}
+		if (flow.rx_received_bytes >= expected_received)
+			break;
+		struct timespec pause_time = {0, 1000000L};
+		nanosleep(&pause_time, NULL);
+	}
+	assert(flow.rx_received_bytes == expected_received);
+	assert(flow.rx_consumed_bytes == expected_received);
+}
+
+static void test_channel_compressed_data_single_and_multi_frame_decode(void)
+{
+	struct compressed_rx_fixture fixture = {0};
+	struct tr_reactor_config reactor_config = {0};
+	struct tr_channel_config channel_config = {0};
+	struct compressed_rx_bind_request bind_request = {&fixture, NULL,
+	                                                  TR_OK};
+	struct tr_channel_capabilities client_caps = {0};
+	struct tr_stream_handle client_stream;
+	struct tr_stream_handle compressed_client_stream;
+	struct tr_stream_handle fast_client_stream;
+	struct tr_stream_handle malformed_client_stream;
+	struct tr_stream_handle oversized_client_stream;
+	struct tr_stream_handle server_stream;
+	struct tr_stream_handle compressed_server_stream;
+	struct tr_stream_handle fast_server_stream;
+	struct tr_stream_diagnostics diagnostics;
+	struct tr_stream_diagnostics compressed_diagnostics = {0};
+	struct tr_stream_diagnostics fast_diagnostics = {0};
+	struct tr_stream_diagnostics malformed_diagnostics;
+	struct tr_stream_flow_state flow;
+	struct tr_stream_flow_state fast_flow;
+	struct tr_channel_stats tx_stats = {0};
+	struct tr_message_envelope envelope = {0};
+	struct tr_message_builder *message_builder = NULL;
+	struct tr_message compressed_message = {0};
+	struct tr_message fast_message = {0};
+	struct compressed_rx_hold_request hold_request;
+	struct tr_buffer_pool payload_pool;
+	struct tr_buffer *payload = NULL;
+	struct tr_buffer *first_fragment_payload = NULL;
+	struct tr_buffer *second_payload = NULL;
+	const uint8_t source[] = "compressed channel receive";
+	const uint8_t second_source[] =
+	        "compressed body split across DATA frames";
+	const uint8_t fourth_source[] = "second compressed send";
+	const uint8_t fast_source[] = "fast stream";
+	uint8_t encoded[256];
+	uint8_t second_encoded[256];
+	uint8_t third_encoded[512];
+	uint8_t oversized_encoded[8192];
+	uint8_t third_source[300];
+	uint8_t oversized_source[4096];
+	uint8_t trailing_encoded[256];
+	uint8_t trailing_body[257];
+	uint8_t boundary_source[103];
+	static const uint8_t trailing_source[] =
+	        "reject trailing compressed data";
+	uint32_t source_len = (uint32_t)sizeof(source);
+	uint32_t second_source_len = (uint32_t)sizeof(second_source);
+	uint32_t third_source_len = (uint32_t)sizeof(third_source);
+	uint32_t wire_len;
+	uint32_t second_wire_len;
+	uint32_t first_fragment_len;
+	uint32_t boundary_wire_len;
+	size_t encoded_len;
+	size_t second_encoded_len;
+	size_t third_encoded_len;
+	size_t oversized_encoded_len;
+	size_t trailing_encoded_len;
+	size_t boundary_encoded_len;
+	size_t split_body_len;
+	int client_fd;
+	int server_fd;
+	int close_ret = TR_AGAIN;
+
+	init_channel_test_ctx(&fixture.client_ctx);
+	init_channel_test_ctx(&fixture.server_ctx.events);
+	fixture.server_ctx.events.take_first = 1;
+	assert(pthread_mutex_init(&fixture.server_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&fixture.server_ctx.cond, NULL) == 0);
+	tr_memory_budget_init(&fixture.budget, 32U * 1024U * 1024U);
+	fixture.service_config = (struct tr_message_service_config){
+	        {1U, 4U}, 4U, UINT64_C(10000000)};
+	make_tcp_pair(&client_fd, &server_fd);
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
+	                         &fixture.reactor) == TR_OK);
+	assert(tr_reactor_start(fixture.reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(fixture.reactor, client_fd,
+	                           &fixture.client_connection) == TR_OK);
+	assert(tr_reactor_adopt_fd(fixture.reactor, server_fd,
+	                           &fixture.server_connection) == TR_OK);
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_create_service_on_owner,
+	                       &fixture) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 128U;
+	channel_config.window_update_threshold_bytes = 32U;
+	channel_config.max_message_bytes = 4096U;
+	channel_config.feature_bits = TR_CHANNEL_FEATURE_MESSAGE_CAPS |
+	                              TR_CHANNEL_FEATURE_STREAM_RESET;
+	channel_config.receive_compression_algorithms =
+	        TR_MESSAGE_ALGORITHM_ZSTD;
+	channel_config.max_encoded_message_bytes = 4096U;
+	channel_config.max_compression_workspace_bytes = 1024U * 1024U;
+	channel_config.max_compression_window_log = 20U;
+	channel_config.memory_budget = &fixture.budget;
+	assert(tr_channel_create_deferred(
+	               &channel_config, fixture.server_connection,
+	               fixture.server_connection, compressed_rx_on_data,
+	               compressed_rx_on_stream_event, NULL, &fixture.server_ctx,
+	               &fixture.server) == TR_OK);
+	bind_request.channel = fixture.server;
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_bind_service_on_owner,
+	                       &bind_request) == TR_OK);
+	assert(bind_request.ret == TR_OK);
+
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.receive_compression_algorithms = 0U;
+	channel_config.max_encoded_message_bytes = 0U;
+	channel_config.max_compression_workspace_bytes = 1024U * 1024U;
+	channel_config.max_compression_window_log = 20U;
+	channel_config.memory_budget = &fixture.budget;
+	assert(tr_channel_create_deferred(
+	               &channel_config, fixture.client_connection,
+	               fixture.client_connection, channel_test_on_data,
+	               channel_test_on_stream_event, NULL, &fixture.client_ctx,
+	               &fixture.client) == TR_OK);
+	bind_request.channel = fixture.client;
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_bind_service_on_owner,
+	                       &bind_request) == TR_OK);
+	assert(bind_request.ret == TR_OK);
+	assert(tr_channel_start(fixture.client) == TR_OK);
+	assert(tr_channel_start(fixture.server) == TR_OK);
+	wait_channel_lane_up(fixture.client, TR_LANE_CONTROL);
+	wait_channel_lane_up(fixture.server, TR_LANE_CONTROL);
+	compressed_rx_wait_caps(&fixture);
+	test_channel_message_limits_directional_snapshot(&fixture);
+	assert(tr_channel_get_capabilities(fixture.client, TR_LANE_CONTROL,
+	                                   &client_caps) == TR_OK);
+	assert(client_caps.receive_algorithm_bits == TR_MESSAGE_ALGORITHM_ZSTD);
+
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     1U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 1U);
+	assert(tr_stream_get_diagnostics(client_stream, &diagnostics) == TR_OK);
+
+	encoded_len = ZSTD_compress(encoded, sizeof(encoded), source,
+	                            sizeof(source), 3);
+	assert(!ZSTD_isError(encoded_len) && encoded_len != 0U);
+	envelope.codec_id = TR_MESSAGE_CODEC_ZSTD;
+	envelope.encoded_body_bytes = (uint32_t)encoded_len;
+	envelope.decoded_message_bytes = source_len;
+	assert(tr_buffer_pool_init(&payload_pool, 3U, 512U) == TR_OK);
+	assert(tr_buffer_acquire(&payload_pool,
+	                         TR_MESSAGE_ENVELOPE_WIRE_SIZE + encoded_len,
+	                         &payload) == TR_OK);
+	assert(tr_message_envelope_encode(payload->data, &envelope) == TR_OK);
+	memcpy(payload->data + TR_MESSAGE_ENVELOPE_WIRE_SIZE, encoded,
+	       encoded_len);
+	payload->len = TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)encoded_len;
+	wire_len = payload->len;
+
+	second_encoded_len =
+	        ZSTD_compress(second_encoded, sizeof(second_encoded),
+	                      second_source, sizeof(second_source), 3);
+	assert(!ZSTD_isError(second_encoded_len) && second_encoded_len > 1U);
+	envelope.encoded_body_bytes = (uint32_t)second_encoded_len;
+	envelope.decoded_message_bytes = second_source_len;
+	/* FIRST 只含完整信封；后续帧承载全部 Zstandard body。 */
+	split_body_len = 0U;
+	first_fragment_len =
+	        TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)split_body_len;
+	second_wire_len =
+	        TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)second_encoded_len;
+	assert(tr_buffer_acquire(&payload_pool, first_fragment_len,
+	                         &first_fragment_payload) == TR_OK);
+	assert(tr_message_envelope_encode(first_fragment_payload->data,
+	                                  &envelope) == TR_OK);
+	memcpy(first_fragment_payload->data + TR_MESSAGE_ENVELOPE_WIRE_SIZE,
+	       second_encoded, split_body_len);
+	first_fragment_payload->len = first_fragment_len;
+
+	assert(tr_buffer_acquire(&payload_pool,
+	                         second_encoded_len - split_body_len,
+	                         &second_payload) == TR_OK);
+	memcpy(second_payload->data, second_encoded + split_body_len,
+	       second_encoded_len - split_body_len);
+	second_payload->len = (uint32_t)(second_encoded_len - split_body_len);
+	assert(tr_reactor_send(fixture.client_connection, TR_FRAME_DATA,
+	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                               TR_FRAME_F_COMPRESSED,
+	                       diagnostics.stream_id, 1U, payload) == TR_OK);
+	{
+		struct tr_buffer *fragments[] = {first_fragment_payload,
+		                                 second_payload};
+		assert(tr_reactor_sendv_limited(
+		               fixture.client_connection, TR_FRAME_DATA,
+		               TR_FRAME_F_COMPRESSED, diagnostics.stream_id, 2U,
+		               fragments, 2U, first_fragment_len) == TR_OK);
+	}
+	compressed_rx_wait_received(&fixture.server_ctx, 2U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	server_stream = fixture.server_ctx.events.last_stream;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	compressed_rx_wait_flow(&fixture.server_ctx, server_stream,
+	                        wire_len + second_wire_len);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.message_ids[0] == 1U);
+	assert(fixture.server_ctx.message_ids[1] == 2U);
+	assert(fixture.server_ctx.payload_lens[0] == source_len);
+	assert(memcmp(fixture.server_ctx.payloads[0], source, source_len) == 0);
+	assert(fixture.server_ctx.payload_lens[1] == second_source_len);
+	assert(memcmp(fixture.server_ctx.payloads[1], second_source,
+	              second_source_len) == 0);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	assert(fixture.server_ctx.events.held_payload != NULL);
+	server_stream = fixture.server_ctx.events.last_stream;
+	payload = fixture.server_ctx.events.held_payload;
+	fixture.server_ctx.events.held_payload = NULL;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	assert(payload->len == source_len);
+	assert(memcmp(payload->data, source, source_len) == 0);
+	assert(tr_stream_release_payload(server_stream, payload) == TR_OK);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.rx_consumed_bytes == wire_len + second_wire_len);
+	wait_for_pool_full(&payload_pool, 3U);
+
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &compressed_client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     2U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 2U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	compressed_server_stream = fixture.server_ctx.events.last_stream;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	assert(tr_stream_get_diagnostics(compressed_client_stream,
+	                                 &compressed_diagnostics) == TR_OK);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &fast_client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     3U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 3U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	fast_server_stream = fixture.server_ctx.events.last_stream;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	assert(tr_stream_get_diagnostics(fast_client_stream,
+	                                 &fast_diagnostics) == TR_OK);
+	{
+		uint32_t random_state = 0x9e3779b9U;
+		for (uint32_t i = 0; i < third_source_len; ++i) {
+			random_state ^= random_state << 13;
+			random_state ^= random_state >> 17;
+			random_state ^= random_state << 5;
+			third_source[i] = (uint8_t)random_state;
+		}
+	}
+	third_encoded_len = ZSTD_compress(third_encoded, sizeof(third_encoded),
+	                                  third_source, third_source_len, 3);
+	assert(!ZSTD_isError(third_encoded_len) && third_encoded_len > 1U);
+	assert(TR_MESSAGE_ENVELOPE_WIRE_SIZE + third_encoded_len >
+	       channel_config.initial_window_bytes);
+	hold_request = (struct compressed_rx_hold_request){
+	        fixture.server_connection, 1};
+	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
+	                       &hold_request) == TR_OK);
+	assert(tr_message_builder_create(&fixture.budget, third_source_len,
+	                                 &message_builder) == TR_OK);
+	assert(tr_message_builder_append(message_builder, third_source,
+	                                 third_source_len) == TR_OK);
+	assert(tr_message_builder_publish(&message_builder,
+	                                  &compressed_message) == TR_OK);
+	assert(tr_stream_send_compressed(compressed_client_stream,
+	                                 &compressed_message) == TR_OK);
+	assert(tr_message_view(&compressed_message,
+	                       &(struct tr_message_view){0}) == TR_ERR_STATE);
+	assert(tr_message_builder_create(&fixture.budget, sizeof(fast_source),
+	                                 &message_builder) == TR_OK);
+	assert(tr_message_builder_append(message_builder, fast_source,
+	                                 sizeof(fast_source)) == TR_OK);
+	assert(tr_message_builder_publish(&message_builder, &fast_message) ==
+	       TR_OK);
+	assert(tr_stream_send_compressed(fast_client_stream, &fast_message) ==
+	       TR_OK);
+	assert(tr_message_view(&fast_message, &(struct tr_message_view){0}) ==
+	       TR_ERR_STATE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_stream_get_flow_state(compressed_client_stream,
+		                                &flow) == TR_OK);
+		assert(tr_stream_get_flow_state(fast_client_stream,
+		                                &fast_flow) == TR_OK);
+		assert(tr_channel_get_stats(fixture.client, &tx_stats) ==
+		       TR_OK);
+		if (flow.tx_sent_bytes == channel_config.initial_window_bytes &&
+		    fast_flow.tx_sent_bytes != 0U && tx_stats.messages_tx == 1U)
+			break;
+		struct timespec pause_time = {0, 1000000L};
+		nanosleep(&pause_time, NULL);
+	}
+	assert(flow.tx_sent_bytes == channel_config.initial_window_bytes);
+	assert(fast_flow.tx_sent_bytes != 0U);
+	assert(tx_stats.messages_tx == 1U);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.received == 2U);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	hold_request.held = 0;
+	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
+	                       &hold_request) == TR_OK);
+	compressed_rx_wait_received(&fixture.server_ctx, 3U);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.stream_ids[2] == fast_diagnostics.stream_id);
+	assert(fixture.server_ctx.message_ids[2] == 1U);
+	assert(fixture.server_ctx.payload_lens[2] == sizeof(fast_source));
+	assert(memcmp(fixture.server_ctx.payloads[2], fast_source,
+	              sizeof(fast_source)) == 0);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	compressed_rx_wait_received(&fixture.server_ctx, 4U);
+	assert(tr_stream_get_flow_state(compressed_client_stream, &flow) ==
+	       TR_OK);
+	assert(flow.tx_sent_bytes > channel_config.initial_window_bytes);
+	compressed_rx_wait_flow(&fixture.server_ctx, compressed_server_stream,
+	                        flow.tx_sent_bytes);
+	compressed_rx_wait_flow(&fixture.server_ctx, fast_server_stream,
+	                        fast_flow.tx_sent_bytes);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.stream_ids[3] ==
+	       compressed_diagnostics.stream_id);
+	assert(fixture.server_ctx.message_ids[3] == 1U);
+	assert(fixture.server_ctx.payload_lens[3] == third_source_len);
+	assert(memcmp(fixture.server_ctx.payloads[3], third_source,
+	              third_source_len) == 0);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	{
+		uint64_t first_message_wire_bytes = flow.tx_sent_bytes;
+		struct tr_stream_diagnostics tx_diagnostics = {0};
+		assert(tr_message_builder_create(&fixture.budget,
+		                                 sizeof(fourth_source),
+		                                 &message_builder) == TR_OK);
+		assert(tr_message_builder_append(message_builder, fourth_source,
+		                                 sizeof(fourth_source)) ==
+		       TR_OK);
+		assert(tr_message_builder_publish(
+		               &message_builder, &compressed_message) == TR_OK);
+		assert(tr_stream_send_compressed(compressed_client_stream,
+		                                 &compressed_message) == TR_OK);
+		assert(tr_message_view(&compressed_message,
+		                       &(struct tr_message_view){0}) ==
+		       TR_ERR_STATE);
+		compressed_rx_wait_received(&fixture.server_ctx, 5U);
+		assert(tr_stream_get_flow_state(compressed_client_stream,
+		                                &flow) == TR_OK);
+		assert(flow.tx_sent_bytes > first_message_wire_bytes);
+		compressed_rx_wait_flow(&fixture.server_ctx,
+		                        compressed_server_stream,
+		                        flow.tx_sent_bytes);
+		assert(tr_stream_get_diagnostics(compressed_client_stream,
+		                                 &tx_diagnostics) == TR_OK);
+		assert(tx_diagnostics.next_tx_message_id == 3U);
+		pthread_mutex_lock(&fixture.server_ctx.lock);
+		assert(fixture.server_ctx.message_ids[4] == 2U);
+		assert(fixture.server_ctx.payload_lens[4] ==
+		       sizeof(fourth_source));
+		assert(memcmp(fixture.server_ctx.payloads[4], fourth_source,
+		              sizeof(fourth_source)) == 0);
+		pthread_mutex_unlock(&fixture.server_ctx.lock);
+	}
+	{
+		uint32_t random_state = 0x13579bdfU;
+		for (uint32_t i = 0; i < sizeof(boundary_source); ++i) {
+			random_state ^= random_state << 13;
+			random_state ^= random_state >> 17;
+			random_state ^= random_state << 5;
+			boundary_source[i] = (uint8_t)random_state;
+		}
+	}
+	boundary_encoded_len =
+	        ZSTD_compress(encoded, sizeof(encoded), boundary_source,
+	                      sizeof(boundary_source), 3);
+	assert(!ZSTD_isError(boundary_encoded_len));
+	assert(boundary_encoded_len + TR_MESSAGE_ENVELOPE_WIRE_SIZE ==
+	       channel_config.initial_window_bytes);
+	envelope.encoded_body_bytes = (uint32_t)boundary_encoded_len;
+	envelope.decoded_message_bytes = sizeof(boundary_source);
+	assert(tr_buffer_acquire(&payload_pool,
+	                         TR_MESSAGE_ENVELOPE_WIRE_SIZE +
+	                                 boundary_encoded_len,
+	                         &payload) == TR_OK);
+	assert(tr_message_envelope_encode(payload->data, &envelope) == TR_OK);
+	memcpy(payload->data + TR_MESSAGE_ENVELOPE_WIRE_SIZE, encoded,
+	       boundary_encoded_len);
+	boundary_wire_len =
+	        TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)boundary_encoded_len;
+	payload->len = boundary_wire_len;
+	assert(boundary_wire_len == channel_config.initial_window_bytes);
+	assert(tr_reactor_send(fixture.client_connection, TR_FRAME_DATA,
+	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                               TR_FRAME_F_COMPRESSED,
+	                       diagnostics.stream_id, 3U, payload) == TR_OK);
+	compressed_rx_wait_received(&fixture.server_ctx, 6U);
+	compressed_rx_wait_flow(&fixture.server_ctx, server_stream,
+	                        wire_len + second_wire_len + boundary_wire_len);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.message_ids[5] == 3U);
+	assert(fixture.server_ctx.payload_lens[5] == sizeof(boundary_source));
+	assert(memcmp(fixture.server_ctx.payloads[5], boundary_source,
+	              sizeof(boundary_source)) == 0);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	wait_for_pool_full(&payload_pool, 3U);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &malformed_client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     4U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 4U);
+	assert(tr_stream_get_diagnostics(malformed_client_stream,
+	                                 &malformed_diagnostics) == TR_OK);
+	assert(tr_buffer_acquire(&payload_pool,
+	                         TR_MESSAGE_ENVELOPE_WIRE_SIZE + 1U,
+	                         &payload) == TR_OK);
+	envelope.codec_id = TR_MESSAGE_CODEC_ZSTD;
+	envelope.encoded_body_bytes = 1U;
+	envelope.decoded_message_bytes = 1U;
+	assert(tr_message_envelope_encode(payload->data, &envelope) == TR_OK);
+	tr_put_le16(payload->data + 2U, TR_MESSAGE_CODEC_ZSTD + 1U);
+	payload->data[TR_MESSAGE_ENVELOPE_WIRE_SIZE] = 0U;
+	payload->len = TR_MESSAGE_ENVELOPE_WIRE_SIZE + 1U;
+	assert(tr_reactor_send(fixture.client_connection, TR_FRAME_DATA,
+	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                               TR_FRAME_F_COMPRESSED,
+	                       malformed_diagnostics.stream_id, 1U,
+	                       payload) == TR_OK);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.resets, 1U);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.resets,
+	                     1U);
+	wait_channel_active_streams(fixture.client, 3U);
+	wait_channel_active_streams(fixture.server, 3U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	assert(fixture.server_ctx.events.received == 6U);
+	assert(fixture.server_ctx.events.last_reset_status == TR_ERR_STATE);
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	wait_for_pool_full(&payload_pool, 3U);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &oversized_client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     5U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 5U);
+	{
+		uint32_t random_state = 0x243f6a88U;
+		for (uint32_t i = 0; i < sizeof(oversized_source); ++i) {
+			random_state ^= random_state << 13;
+			random_state ^= random_state >> 17;
+			random_state ^= random_state << 5;
+			oversized_source[i] = (uint8_t)random_state;
+		}
+	}
+	oversized_encoded_len =
+	        ZSTD_compress(oversized_encoded, sizeof(oversized_encoded),
+	                      oversized_source, sizeof(oversized_source), 3);
+	assert(!ZSTD_isError(oversized_encoded_len));
+	assert(oversized_encoded_len + TR_MESSAGE_ENVELOPE_WIRE_SIZE >
+	       channel_config.max_encoded_message_bytes);
+	assert(tr_message_builder_create(&fixture.budget,
+	                                 sizeof(oversized_source),
+	                                 &message_builder) == TR_OK);
+	assert(tr_message_builder_append(message_builder, oversized_source,
+	                                 sizeof(oversized_source)) == TR_OK);
+	assert(tr_message_builder_publish(&message_builder,
+	                                  &compressed_message) == TR_OK);
+	assert(tr_stream_send_compressed(oversized_client_stream,
+	                                 &compressed_message) == TR_OK);
+	assert(tr_message_view(&compressed_message,
+	                       &(struct tr_message_view){0}) == TR_ERR_STATE);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.resets,
+	                     2U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.resets, 2U);
+	pthread_mutex_lock(&fixture.client_ctx.lock);
+	assert(fixture.client_ctx.last_reset_status == TR_ERR_NOMEM);
+	pthread_mutex_unlock(&fixture.client_ctx.lock);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	assert(fixture.server_ctx.events.received == 6U);
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	wait_channel_active_streams(fixture.client, 3U);
+	wait_channel_active_streams(fixture.server, 3U);
+	wait_for_pool_full(&payload_pool, 3U);
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 4096U, 1U},
+	        (const uint8_t[]){0U}, 1U, 6U, 3U, 3U);
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 4097U},
+	        (const uint8_t[]){0U}, 1U, 7U, 4U, 3U);
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 1U},
+	        (const uint8_t[]){0U}, 1U, 8U, 5U, 3U);
+	trailing_encoded_len =
+	        ZSTD_compress(trailing_encoded, sizeof(trailing_encoded),
+	                      trailing_source, sizeof(trailing_source), 3);
+	assert(!ZSTD_isError(trailing_encoded_len));
+	memcpy(trailing_body, trailing_encoded, trailing_encoded_len);
+	trailing_body[trailing_encoded_len] = 0xa5U;
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+	                                     (uint32_t)trailing_encoded_len +
+	                                             1U,
+	                                     (uint32_t)sizeof(trailing_source)},
+	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 9U, 6U, 3U);
+	wait_for_pool_full(&payload_pool, 3U);
+	assert(tr_buffer_pool_destroy(&payload_pool) == TR_OK);
+
+	assert(tr_stream_close(client_stream) == TR_OK);
+	assert(tr_stream_close(server_stream) == TR_OK);
+	assert(tr_stream_close(compressed_client_stream) == TR_OK);
+	assert(tr_stream_close(compressed_server_stream) == TR_OK);
+	assert(tr_stream_close(fast_client_stream) == TR_OK);
+	assert(tr_stream_close(fast_server_stream) == TR_OK);
+	wait_channel_active_streams(fixture.client, 0U);
+	wait_channel_active_streams(fixture.server, 0U);
+
+	assert(tr_channel_destroy(fixture.client) == TR_OK);
+	assert(tr_channel_destroy(fixture.server) == TR_OK);
+	for (unsigned i = 0; i < 5000U && close_ret == TR_AGAIN; ++i) {
+		close_ret = tr_reactor_call(
+		        fixture.reactor, compressed_rx_close_service_on_owner,
+		        &fixture);
+		if (close_ret == TR_AGAIN) {
+			struct timespec pause_time = {0, 1000000L};
+			nanosleep(&pause_time, NULL);
+		}
+	}
+	assert(close_ret == TR_OK);
+	assert(fixture.service == NULL);
+	assert(tr_reactor_stop(fixture.reactor) == TR_OK);
+	assert(tr_reactor_destroy(fixture.reactor) == TR_OK);
+	assert(atomic_load(&fixture.budget.current_bytes) == 0U);
+	destroy_channel_test_ctx(&fixture.client_ctx);
+	destroy_channel_test_ctx(&fixture.server_ctx.events);
+	pthread_cond_destroy(&fixture.server_ctx.cond);
+	pthread_mutex_destroy(&fixture.server_ctx.lock);
+}
+
+static void test_channel_compressed_receive_reset_cancels_transform(void)
+{
+	struct compressed_rx_fixture fixture = {0};
+	struct compressed_rx_hold_service held_service = {0};
+	struct compressed_rx_hold_completion completion_request = {
+	        &held_service, TR_MESSAGE_SERVICE_ON_OWNER};
+	struct compressed_rx_hold_bind_request bind_request;
+	struct compressed_rx_reset_request reset_request;
+	struct tr_reactor_config reactor_config = {0};
+	struct tr_channel_config channel_config = {0};
+	struct tr_stream_handle client_stream;
+	struct tr_stream_handle tx_stream;
+	struct tr_stream_handle loss_stream;
+	struct tr_conn_handle client_replacement;
+	struct tr_conn_handle server_replacement;
+	struct tr_stream_diagnostics diagnostics = {0};
+	struct tr_message_envelope envelope = {0};
+	struct tr_message_builder *tx_builder = NULL;
+	struct tr_message tx_message = {0};
+	struct tr_buffer_pool payload_pool;
+	struct tr_buffer *payload = NULL;
+	struct tr_memory_budget_stats budget_stats = {0};
+	const uint8_t source[] = "held transform is cancelled";
+	const uint8_t tx_source[] = "cancel queued encoder";
+	uint8_t encoded[256];
+	size_t encoded_len;
+	int client_fd;
+	int server_fd;
+	int replacement_client_fd;
+	int replacement_server_fd;
+
+	init_channel_test_ctx(&fixture.client_ctx);
+	init_channel_test_ctx(&fixture.server_ctx.events);
+	assert(pthread_mutex_init(&fixture.server_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&fixture.server_ctx.cond, NULL) == 0);
+	assert(pthread_mutex_init(&held_service.lock, NULL) == 0);
+	assert(pthread_cond_init(&held_service.cond, NULL) == 0);
+	tr_memory_budget_init(&fixture.budget, 32U * 1024U * 1024U);
+	make_tcp_pair(&client_fd, &server_fd);
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
+	                         &fixture.reactor) == TR_OK);
+	assert(tr_reactor_start(fixture.reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(fixture.reactor, client_fd,
+	                           &fixture.client_connection) == TR_OK);
+	assert(tr_reactor_adopt_fd(fixture.reactor, server_fd,
+	                           &fixture.server_connection) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 4U;
+	channel_config.initial_window_bytes = 128U;
+	channel_config.window_update_threshold_bytes = 32U;
+	channel_config.max_message_bytes = 4096U;
+	channel_config.feature_bits = TR_CHANNEL_FEATURE_MESSAGE_CAPS |
+	                              TR_CHANNEL_FEATURE_STREAM_RESET;
+	channel_config.receive_compression_algorithms =
+	        TR_MESSAGE_ALGORITHM_ZSTD;
+	channel_config.max_encoded_message_bytes = 4096U;
+	channel_config.max_compression_workspace_bytes = 1024U * 1024U;
+	channel_config.max_compression_window_log = 20U;
+	channel_config.memory_budget = &fixture.budget;
+	assert(tr_channel_create_deferred(
+	               &channel_config, fixture.server_connection,
+	               fixture.server_connection, compressed_rx_on_data,
+	               compressed_rx_on_stream_event, NULL, &fixture.server_ctx,
+	               &fixture.server) == TR_OK);
+	bind_request = (struct compressed_rx_hold_bind_request){fixture.server,
+	                                                        &held_service};
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_hold_bind_on_owner,
+	                       &bind_request) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.receive_compression_algorithms = 0U;
+	channel_config.max_encoded_message_bytes = 0U;
+	assert(tr_channel_create_deferred(
+	               &channel_config, fixture.client_connection,
+	               fixture.client_connection, channel_test_on_data,
+	               channel_test_on_stream_event, NULL, &fixture.client_ctx,
+	               &fixture.client) == TR_OK);
+	bind_request.channel = fixture.client;
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_hold_bind_on_owner,
+	                       &bind_request) == TR_OK);
+	assert(tr_channel_start(fixture.client) == TR_OK);
+	assert(tr_channel_start(fixture.server) == TR_OK);
+	wait_channel_lane_up(fixture.client, TR_LANE_CONTROL);
+	wait_channel_lane_up(fixture.server, TR_LANE_CONTROL);
+	compressed_rx_wait_caps(&fixture);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     1U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 1U);
+	assert(tr_stream_get_diagnostics(client_stream, &diagnostics) == TR_OK);
+
+	encoded_len = ZSTD_compress(encoded, sizeof(encoded), source,
+	                            sizeof(source), 3);
+	assert(!ZSTD_isError(encoded_len) && encoded_len > 0U);
+	envelope = (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+	                                        (uint32_t)encoded_len,
+	                                        (uint32_t)sizeof(source)};
+	assert(tr_buffer_pool_init(&payload_pool, 1U, 512U) == TR_OK);
+	assert(tr_buffer_acquire(&payload_pool,
+	                         TR_MESSAGE_ENVELOPE_WIRE_SIZE +
+	                                 (uint32_t)encoded_len,
+	                         &payload) == TR_OK);
+	assert(tr_message_envelope_encode(payload->data, &envelope) == TR_OK);
+	memcpy(payload->data + TR_MESSAGE_ENVELOPE_WIRE_SIZE, encoded,
+	       encoded_len);
+	payload->len = TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)encoded_len;
+	assert(tr_reactor_send(fixture.client_connection, TR_FRAME_DATA,
+	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                               TR_FRAME_F_COMPRESSED,
+	                       diagnostics.stream_id, 1U, payload) == TR_OK);
+	compressed_rx_hold_wait(&held_service.submitted, 1U, &held_service);
+	pthread_mutex_lock(&held_service.lock);
+	assert(held_service.last_kind == TR_MESSAGE_ZSTD_DECODE);
+	pthread_mutex_unlock(&held_service.lock);
+	reset_request = (struct compressed_rx_reset_request){client_stream,
+	                                                     TR_ERR_CLOSED};
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_reset_stream_on_owner,
+	                       &reset_request) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.resets,
+	                     1U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.resets, 1U);
+	compressed_rx_hold_wait(&held_service.cancelled, 1U, &held_service);
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_hold_complete_on_owner,
+	                       &completion_request) == TR_OK);
+	wait_channel_active_streams(fixture.client, 0U);
+	wait_channel_active_streams(fixture.server, 0U);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.received == 0U);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL, &tx_stream) ==
+	       TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     2U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 2U);
+	assert(tr_message_builder_create(&fixture.budget, sizeof(tx_source),
+	                                 &tx_builder) == TR_OK);
+	assert(tr_message_builder_append(tx_builder, tx_source,
+	                                 sizeof(tx_source)) == TR_OK);
+	assert(tr_message_builder_publish(&tx_builder, &tx_message) == TR_OK);
+	assert(tr_stream_send_compressed(tx_stream, &tx_message) == TR_OK);
+	assert(tr_message_view(&tx_message, &(struct tr_message_view){0}) ==
+	       TR_ERR_STATE);
+	compressed_rx_hold_wait(&held_service.submitted, 2U, &held_service);
+	pthread_mutex_lock(&held_service.lock);
+	assert(held_service.last_kind == TR_MESSAGE_ZSTD_ENCODE);
+	pthread_mutex_unlock(&held_service.lock);
+	reset_request =
+	        (struct compressed_rx_reset_request){tx_stream, TR_ERR_CLOSED};
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_reset_stream_on_owner,
+	                       &reset_request) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.resets,
+	                     2U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.resets, 2U);
+	compressed_rx_hold_wait(&held_service.cancelled, 2U, &held_service);
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_hold_complete_on_owner,
+	                       &completion_request) == TR_OK);
+	wait_channel_active_streams(fixture.client, 0U);
+	wait_channel_active_streams(fixture.server, 0U);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.received == 0U);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL, &loss_stream) ==
+	       TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     3U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 3U);
+	assert(tr_message_builder_create(&fixture.budget, sizeof(tx_source),
+	                                 &tx_builder) == TR_OK);
+	assert(tr_message_builder_append(tx_builder, tx_source,
+	                                 sizeof(tx_source)) == TR_OK);
+	assert(tr_message_builder_publish(&tx_builder, &tx_message) == TR_OK);
+	assert(tr_stream_send_compressed(loss_stream, &tx_message) == TR_OK);
+	compressed_rx_hold_wait(&held_service.submitted, 3U, &held_service);
+	assert(tr_reactor_close(fixture.client_connection) == TR_OK);
+	compressed_rx_hold_wait(&held_service.cancelled, 3U, &held_service);
+	wait_channel_counter(&fixture.client_ctx,
+	                     &fixture.client_ctx.stream_errors, 1U);
+	wait_channel_lane_down(fixture.client, TR_LANE_CONTROL);
+	wait_channel_lane_down(fixture.server, TR_LANE_CONTROL);
+	make_tcp_pair(&replacement_client_fd, &replacement_server_fd);
+	assert(tr_reactor_adopt_fd(fixture.reactor, replacement_client_fd,
+	                           &client_replacement) == TR_OK);
+	assert(tr_reactor_adopt_fd(fixture.reactor, replacement_server_fd,
+	                           &server_replacement) == TR_OK);
+	assert(tr_channel_replace_connection(fixture.client, TR_LANE_CONTROL,
+	                                     client_replacement) == TR_OK);
+	assert(tr_channel_replace_connection(fixture.server, TR_LANE_CONTROL,
+	                                     server_replacement) == TR_OK);
+	wait_channel_lane_up(fixture.client, TR_LANE_CONTROL);
+	wait_channel_lane_up(fixture.server, TR_LANE_CONTROL);
+	compressed_rx_wait_caps(&fixture);
+	completion_request.delivery = TR_MESSAGE_SERVICE_OWNER_STOPPED;
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_hold_complete_on_owner,
+	                       &completion_request) == TR_OK);
+	wait_channel_active_streams(fixture.client, 0U);
+	wait_channel_active_streams(fixture.server, 0U);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.received == 0U);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+
+	assert(tr_channel_destroy(fixture.client) == TR_OK);
+	assert(tr_channel_destroy(fixture.server) == TR_OK);
+	assert(tr_reactor_stop(fixture.reactor) == TR_OK);
+	assert(tr_reactor_destroy(fixture.reactor) == TR_OK);
+	wait_for_pool_full(&payload_pool, 1U);
+	assert(tr_buffer_pool_destroy(&payload_pool) == TR_OK);
+	tr_memory_budget_get_stats(&fixture.budget, &budget_stats);
+	assert(budget_stats.current_bytes == 0U);
+	destroy_channel_test_ctx(&fixture.client_ctx);
+	destroy_channel_test_ctx(&fixture.server_ctx.events);
+	pthread_cond_destroy(&fixture.server_ctx.cond);
+	pthread_mutex_destroy(&fixture.server_ctx.lock);
+	pthread_cond_destroy(&held_service.cond);
+	pthread_mutex_destroy(&held_service.lock);
 }
 
 static void test_channel_message_fragmentation_reassembly(void)
@@ -3900,7 +5699,10 @@ int main(void)
 	test_refcount_semantics();
 	test_scope_cleanup_ownership();
 	test_endian();
+	test_message_caps_roundtrip_and_rejects_invalid_payload();
+	test_message_envelope_roundtrip_and_rejects_invalid_payload();
 	test_wire_roundtrip();
+	test_compressed_flag_is_data_only();
 	test_header_corruption();
 	test_parser_one_byte_fragments();
 	test_parser_payload_crc_failure();
@@ -3920,6 +5722,15 @@ int main(void)
 	test_channel_stream_id_index_collision_delete();
 	test_channel_stream_slot_reuse();
 	test_channel_stream_flow_control();
+	test_channel_rejects_unimplemented_compression_advertisement();
+	test_channel_message_service_binding_owner_and_reactor();
+	test_channel_compressed_data_single_and_multi_frame_decode();
+	test_channel_compressed_receive_reset_cancels_transform();
+	test_channel_message_caps_exchange_empty_receive_limits();
+	test_channel_compressed_send_rejects_unsupported_peer();
+	test_channel_message_caps_are_feature_gated();
+	test_channel_message_caps_clear_on_lane_replacement();
+	test_channel_message_caps_reject_malformed_frame();
 	test_channel_message_fragmentation_reassembly();
 	test_channel_split_lane_isolation();
 	test_channel_graceful_drain();

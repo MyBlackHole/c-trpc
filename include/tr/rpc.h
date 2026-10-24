@@ -19,6 +19,17 @@ extern "C" {
 #define TR_RPC_LANE_CONTROL 0U
 #define TR_RPC_LANE_BULK 1U
 
+/* Message 算法编号与每条 MESSAGE 选择一致；NONE 是隐式默认值，掩码只
+ * 表示显式允许的可选算法。未设置时，方法只允许未压缩消息。压缩会暴露
+ * 正文长度和时序；TLS 不隐藏这些信息。不要把秘密与攻击者可控字节放入
+ * 同一条压缩正文。 */
+enum tr_rpc_compression {
+	TR_RPC_COMPRESSION_NONE = 0,
+	TR_RPC_COMPRESSION_ZSTD = 1
+};
+
+#define TR_RPC_COMPRESSION_MASK_ZSTD (1U << TR_RPC_COMPRESSION_ZSTD)
+
 struct tr_rpc_metadata {
 	const char *key;
 	const void *value;
@@ -32,6 +43,10 @@ struct tr_rpc_call_options {
 	/* 仅附加到首条出站 RPC 消息的初始元数据。 */
 	const struct tr_rpc_metadata *metadata;
 	uint16_t metadata_count;
+
+	/* 仅用于 tr_client_unary_call 的单条请求正文；call_start 必须为 NONE。
+	 * 零初始化保留原有未压缩行为。 */
+	enum tr_rpc_compression request_compression;
 };
 
 /* 方法请求与响应的消息基数。 */
@@ -101,6 +116,11 @@ struct tr_rpc_method_desc {
 	/* 这是单条消息上限，不是整个 Stream 的累计上限。 */
 	uint32_t max_request_bytes;
 	uint32_t max_response_bytes;
+
+	/* 本地方法策略：请求、响应方向分别列出接收/发送可显式选择的算法。
+	 * NONE 隐式允许；零掩码保持旧方法的未压缩行为。 */
+	uint32_t request_compression_algorithms;
+	uint32_t response_compression_algorithms;
 };
 
 #ifdef __cplusplus

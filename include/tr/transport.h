@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "tr/peer_identity.h"
+#include "tr/tls.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,6 +15,7 @@ struct tr_client;
 
 struct tr_connection_group_id {
 	uint64_t group_id;
+	/* 运行期隔离代次；服务进程重启后建立新连接组时必须更新。 */
 	uint64_t epoch;
 };
 
@@ -56,6 +58,13 @@ struct tr_transport_bytes {
 #define TR_CONNECTION_GROUP_DATA_FIRST (1U << 0)
 #define TR_CONNECTION_GROUP_DATA_LAST (1U << 1)
 
+enum tr_connection_group_compression {
+	TR_CONNECTION_GROUP_COMPRESSION_NONE = 0,
+	TR_CONNECTION_GROUP_COMPRESSION_ZSTD = 1
+};
+
+#define TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD (1U << 0)
+
 /*
  * DATA 接收描述符。
  *
@@ -94,17 +103,36 @@ enum tr_connection_group_role {
 	TR_CONNECTION_GROUP_ROLE_DATA = 2
 };
 
+enum tr_connection_group_authorization_decision {
+	TR_CONNECTION_GROUP_AUTHORIZATION_ALLOW = 1,
+	TR_CONNECTION_GROUP_AUTHORIZATION_DENY = 2
+};
+
 /* CONTROL 的 control_identity 为 NONE；DATA 使用活动 CONTROL 会话身份。 */
 struct tr_connection_group_authorization {
 	struct tr_connection_group_id group;
 	enum tr_connection_group_role role;
 	struct tr_peer_identity_view peer_identity;
 	struct tr_peer_identity_view control_identity;
+	uint64_t tls_profile_generation;
+	uint64_t deadline_monotonic_ns;
 };
 
 typedef int (*tr_connection_group_authorize_cb)(
         const struct tr_connection_group_authorization *authorization,
         void *arg);
+/* 异步 provider 回调运行在连接组 Reactor owner，必须快速返回且不得阻塞。
+ * authorization 与其中的身份视图仅在该回调期间借用；provider 应复制需要的
+ * 字段。每个 operation 最终必须调用 authorize_complete 一次。
+ */
+typedef void (*tr_connection_group_authorize_async_cb)(
+        const struct tr_connection_group_authorization *authorization,
+        struct tr_tls_provider_operation operation, void *arg);
+/* 收到取消通知后，provider 必须停止访问原始请求数据，并通过
+ * authorize_complete 确认该 operation；确认前服务端保留其有界槽位。
+ */
+typedef void (*tr_connection_group_authorize_cancel_cb)(
+        struct tr_tls_provider_operation operation, void *arg);
 
 typedef enum tr_connection_group_message_disposition
 (*tr_connection_group_message_cb)(
@@ -139,8 +167,17 @@ struct tr_connection_group_server_config {
 	uint32_t max_connections;
 	uint32_t max_data_connections_per_group;
 	uint32_t max_streams_per_group;
+	/* 默认 0。启用 ZSTD 时，解码后仍受 facade max_message_bytes 限制。 */
+	uint32_t receive_compression_algorithms;
+	/* 包含 16 字节 Message envelope，至少为 17。 */
+	uint32_t max_encoded_message_bytes;
+	/* 启用 ZSTD 接收时必须大于 0；限制本 Server 同时排队/执行的解码任务数。
+	 */
+	uint32_t max_inflight_compressed_messages;
 
 	tr_connection_group_authorize_cb authorize;
+	tr_connection_group_authorize_async_cb authorize_async;
+	tr_connection_group_authorize_cancel_cb authorize_cancel;
 	tr_connection_group_message_cb on_message;
 	tr_connection_group_data_event_cb on_data_event;
 	void *callback_arg;
@@ -158,6 +195,10 @@ void tr_connection_group_server_config_init(
  */
 struct tr_connection_group_client_config {
 	uint32_t max_data_connections;
+	/* 默认 0；只授权后续显式选择的发送算法，不会自动压缩。 */
+	uint32_t send_compression_algorithms;
+	/* 包含 16 字节 Message envelope，至少为 17。 */
+	uint32_t max_encoded_message_bytes;
 
 	/*
 	 * 同时安装的 Stream -> DATA 传输亲和关系的数量上限。
@@ -238,6 +279,17 @@ int tr_client_connection_group_release_transfer(
 int tr_client_connection_group_send(
 	struct tr_client *client, uint32_t stream_id, uint64_t message_id,
 	const struct tr_transport_bytes *bytes);
+
+/* 显式选择一条逻辑 DATA 消息的压缩算法。NONE 与旧 send() 等价；
+ * ZSTD 仅在本地策略与该 DATA 连接对端接收能力均就绪时接纳。能力
+ * 协商未完成或有界资源暂满时返回 TR_AGAIN，调用方仍拥有 bytes，
+ * 可在后续重试。TR_OK 表示消息体已复制并由 Client 接管。压缩会暴露
+ * 正文长度和时序，TLS 不会隐藏它们；不要将秘密与攻击者可控内容混入
+ * 同一条压缩消息。 */
+int tr_client_connection_group_send_with_compression(
+        struct tr_client *client, uint32_t stream_id, uint64_t message_id,
+        const struct tr_transport_bytes *bytes,
+        enum tr_connection_group_compression compression);
 
 /*
  * 组监听器的生命周期由 tr_server 拥有。

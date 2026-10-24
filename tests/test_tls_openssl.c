@@ -3,8 +3,11 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
 #include <netinet/in.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <poll.h>
 #include <signal.h>
@@ -48,6 +51,11 @@ static struct tls_test_pair test_pair = {
         .client_fd = -1,
         .server_fd = -1,
 };
+
+static void tls_test_read_file(const char *path, uint8_t **out,
+                               size_t *out_length);
+static void tls_test_encrypt_private_key(const char *path, const char *password,
+                                         uint8_t **out, size_t *out_length);
 
 static void cleanup_test_identity(void)
 {
@@ -424,6 +432,263 @@ static void tls_test_pair_cleanup(void)
 	memset(&test_pair, 0, sizeof(test_pair));
 	test_pair.client_fd = -1;
 	test_pair.server_fd = -1;
+}
+
+static int
+tls_test_pair_open_profiles(struct tr_tls_openssl_profile *client_profile,
+                            struct tr_tls_openssl_profile *server_profile)
+{
+	const struct tr_byte_endpoint_driver *driver = tr_tls_openssl_driver();
+	uint64_t deadline = tls_test_now_ns() + UINT64_C(5000000000);
+	int fds[2];
+
+	if (!client_profile || !server_profile)
+		return TR_ERR_INVALID;
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+	               fds) != 0)
+		return TR_ERR_SYS;
+	test_pair.client_fd = fds[0];
+	test_pair.server_fd = fds[1];
+	test_pair.client_profile = client_profile;
+	test_pair.server_profile = server_profile;
+	if (tr_tls_openssl_session_create(client_profile, test_pair.client_fd,
+	                                  &test_pair.client_session) != TR_OK ||
+	    tr_tls_openssl_session_create(server_profile, test_pair.server_fd,
+	                                  &test_pair.server_session) != TR_OK)
+		return TR_ERR_SYS;
+	if (tr_byte_endpoint_init(&test_pair.client_endpoint,
+	                          TR_BYTE_ENDPOINT_TLS_REQUIRED,
+	                          test_pair.client_fd, deadline, driver,
+	                          test_pair.client_session) != TR_OK)
+		return TR_ERR_SYS;
+	test_pair.client_session = NULL;
+	if (tr_byte_endpoint_init(&test_pair.server_endpoint,
+	                          TR_BYTE_ENDPOINT_TLS_REQUIRED,
+	                          test_pair.server_fd, deadline, driver,
+	                          test_pair.server_session) != TR_OK)
+		return TR_ERR_SYS;
+	test_pair.server_session = NULL;
+	if (tr_byte_endpoint_event_bind(&test_pair.client_endpoint) != TR_OK ||
+	    tr_byte_endpoint_event_bind(&test_pair.server_endpoint) != TR_OK)
+		return TR_ERR_SYS;
+	tr_tls_openssl_profile_release(test_pair.client_profile);
+	test_pair.client_profile = NULL;
+	tr_tls_openssl_profile_release(test_pair.server_profile);
+	test_pair.server_profile = NULL;
+	return TR_OK;
+}
+
+static void test_in_memory_pem_profiles(void)
+{
+	const uint32_t bundle_limit = 4U * 1024U * 1024U;
+	struct tr_tls_client_config client_config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_file = test_identity.ca_file,
+	        .expected_peer_name = "server.example.test",
+	};
+	struct tr_tls_server_config server_config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .client_ca_file = test_identity.ca_file,
+	        .client_auth = TR_TLS_CLIENT_AUTH_REQUIRED,
+	};
+	struct tr_tls_openssl_profile *profile =
+	        (struct tr_tls_openssl_profile *)(uintptr_t)1U;
+	uint8_t *client_certificate = NULL;
+	uint8_t *client_key = NULL;
+	uint8_t *server_certificate = NULL;
+	uint8_t *server_key = NULL;
+	uint8_t *encrypted_key = NULL;
+	uint8_t *trailing_certificate = NULL;
+	struct tr_tls_credential_bundle client_bundle;
+	struct tr_tls_credential_bundle server_bundle;
+	size_t client_certificate_length;
+	size_t client_key_length;
+	size_t server_certificate_length;
+	size_t server_key_length;
+	size_t encrypted_key_length;
+
+	tls_test_read_file(test_identity.client_certificate_file,
+	                   &client_certificate, &client_certificate_length);
+	tls_test_read_file(test_identity.client_private_key_file, &client_key,
+	                   &client_key_length);
+	tls_test_read_file(test_identity.server_certificate_file,
+	                   &server_certificate, &server_certificate_length);
+	tls_test_read_file(test_identity.server_private_key_file, &server_key,
+	                   &server_key_length);
+	client_bundle = (struct tr_tls_credential_bundle){
+	        .certificate_chain_pem =
+	                {
+	                        .data = client_certificate,
+	                        .len = client_certificate_length,
+	                },
+	        .private_key_pem =
+	                {
+	                        .data = client_key,
+	                        .len = client_key_length,
+	                },
+	};
+	server_bundle = (struct tr_tls_credential_bundle){
+	        .certificate_chain_pem =
+	                {
+	                        .data = server_certificate,
+	                        .len = server_certificate_length,
+	                },
+	        .private_key_pem =
+	                {
+	                        .data = server_key,
+	                        .len = server_key_length,
+	                },
+	};
+	assert(tr_tls_openssl_client_profile_create_from_pem_with_peer_identity(
+	               &client_config, &client_bundle, bundle_limit,
+	               &profile) == TR_OK);
+	assert(profile != NULL);
+	struct tr_tls_openssl_profile *client_profile = profile;
+	profile = NULL;
+	assert(tr_tls_openssl_server_profile_create_from_pem(
+	               &server_config, &server_bundle, bundle_limit,
+	               &profile) == TR_OK);
+	assert(profile != NULL);
+	assert(tr_tls_openssl_profile_peer_identity_enabled(profile));
+	struct tr_tls_openssl_profile *server_profile = profile;
+	profile = NULL;
+	assert(tls_test_pair_open_profiles(client_profile, server_profile) ==
+	       TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	tls_test_pair_cleanup();
+
+	profile = (struct tr_tls_openssl_profile *)(uintptr_t)1U;
+	struct tr_tls_credential_bundle invalid_bundle = client_bundle;
+	invalid_bundle.certificate_chain_pem.data = NULL;
+	invalid_bundle.certificate_chain_pem.len = 0U;
+	assert(tr_tls_openssl_client_profile_create_from_pem(
+	               &client_config, &invalid_bundle, bundle_limit,
+	               &profile) < 0);
+	assert(profile == NULL);
+
+	tls_test_read_file(test_identity.mismatched_private_key_file,
+	                   &encrypted_key, &encrypted_key_length);
+	invalid_bundle = client_bundle;
+	invalid_bundle.private_key_pem.data = encrypted_key;
+	invalid_bundle.private_key_pem.len = encrypted_key_length;
+	profile = (struct tr_tls_openssl_profile *)(uintptr_t)1U;
+	assert(tr_tls_openssl_client_profile_create_from_pem(
+	               &client_config, &invalid_bundle, bundle_limit,
+	               &profile) < 0);
+	assert(profile == NULL);
+	OPENSSL_cleanse(encrypted_key, encrypted_key_length);
+	free(encrypted_key);
+	encrypted_key = NULL;
+
+	tls_test_encrypt_private_key(test_identity.client_private_key_file,
+	                             "pem-test-secret", &encrypted_key,
+	                             &encrypted_key_length);
+	invalid_bundle = client_bundle;
+	invalid_bundle.private_key_pem.data = encrypted_key;
+	invalid_bundle.private_key_pem.len = encrypted_key_length;
+	invalid_bundle.private_key_password.data = (const uint8_t *)"incorrect";
+	invalid_bundle.private_key_password.len = strlen("incorrect");
+	profile = (struct tr_tls_openssl_profile *)(uintptr_t)1U;
+	assert(tr_tls_openssl_client_profile_create_from_pem(
+	               &client_config, &invalid_bundle, bundle_limit,
+	               &profile) < 0);
+	assert(profile == NULL);
+	OPENSSL_cleanse(encrypted_key, encrypted_key_length);
+	free(encrypted_key);
+	encrypted_key = NULL;
+
+	trailing_certificate = malloc(client_certificate_length + 8U);
+	assert(trailing_certificate != NULL);
+	memcpy(trailing_certificate, client_certificate,
+	       client_certificate_length);
+	memcpy(trailing_certificate + client_certificate_length, "\ninvalid",
+	       8U);
+	invalid_bundle = client_bundle;
+	invalid_bundle.certificate_chain_pem.data = trailing_certificate;
+	invalid_bundle.certificate_chain_pem.len =
+	        client_certificate_length + 8U;
+	profile = (struct tr_tls_openssl_profile *)(uintptr_t)1U;
+	assert(tr_tls_openssl_client_profile_create_from_pem(
+	               &client_config, &invalid_bundle, bundle_limit,
+	               &profile) < 0);
+	assert(profile == NULL);
+	free(trailing_certificate);
+	trailing_certificate = NULL;
+
+	invalid_bundle = client_bundle;
+	invalid_bundle.certificate_chain_pem.len = (size_t)bundle_limit + 1U;
+	profile = (struct tr_tls_openssl_profile *)(uintptr_t)1U;
+	assert(tr_tls_openssl_client_profile_create_from_pem(
+	               &client_config, &invalid_bundle, bundle_limit,
+	               &profile) == TR_ERR_BAD_LENGTH);
+	assert(profile == NULL);
+
+	OPENSSL_cleanse(client_key, client_key_length);
+	OPENSSL_cleanse(server_key, server_key_length);
+	free(client_certificate);
+	free(client_key);
+	free(server_certificate);
+	free(server_key);
+}
+
+static void tls_test_read_file(const char *path, uint8_t **out,
+                               size_t *out_length)
+{
+	FILE *file;
+	long length;
+	uint8_t *data;
+
+	assert(path != NULL);
+	assert(out != NULL);
+	assert(out_length != NULL);
+	*out = NULL;
+	*out_length = 0U;
+	file = fopen(path, "rb");
+	assert(file != NULL);
+	assert(fseek(file, 0L, SEEK_END) == 0);
+	length = ftell(file);
+	assert(length > 0L);
+	assert(fseek(file, 0L, SEEK_SET) == 0);
+	data = malloc((size_t)length);
+	assert(data != NULL);
+	assert(fread(data, 1U, (size_t)length, file) == (size_t)length);
+	assert(fclose(file) == 0);
+	*out = data;
+	*out_length = (size_t)length;
+}
+
+static void tls_test_encrypt_private_key(const char *path, const char *password,
+                                         uint8_t **out, size_t *out_length)
+{
+	BIO *input = BIO_new_file(path, "rb");
+	BIO *output = NULL;
+	EVP_PKEY *key = NULL;
+	char *view = NULL;
+	long length;
+
+	assert(out != NULL);
+	assert(out_length != NULL);
+	*out = NULL;
+	*out_length = 0U;
+	assert(input != NULL);
+	key = PEM_read_bio_PrivateKey(input, NULL, NULL, NULL);
+	assert(key != NULL);
+	output = BIO_new(BIO_s_mem());
+	assert(output != NULL);
+	assert(PEM_write_bio_PrivateKey(output, key, EVP_aes_256_cbc(),
+	                                (unsigned char *)password,
+	                                (int)strlen(password), NULL,
+	                                NULL) == 1);
+	length = BIO_get_mem_data(output, &view);
+	assert(length > 0L);
+	*out = malloc((size_t)length);
+	assert(*out != NULL);
+	memcpy(*out, view, (size_t)length);
+	*out_length = (size_t)length;
+	OPENSSL_cleanse(view, (size_t)length);
+	BIO_free(output);
+	BIO_free(input);
+	EVP_PKEY_free(key);
 }
 
 static void test_nonblocking_tls_pair_authenticates_and_preserves_fds(void)
@@ -1804,6 +2069,7 @@ int main(int argc, char **argv)
 	atexit(cleanup_test_identity);
 	atexit(tls_test_pair_cleanup);
 	assert(tls_test_identity_init(&test_identity, "tls-b-endpoint") == 0);
+	test_in_memory_pem_profiles();
 	test_blocking_socket_is_rejected_without_taking_ownership();
 	test_profile_generation_overflow_is_rejected();
 	test_handshake_maps_want_write_then_want_read();

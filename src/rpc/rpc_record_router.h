@@ -35,7 +35,8 @@ typedef void (*tr_rpc_route_terminal_fn)(struct tr_rpc_route_handle route,
 
 /* 创建时复制全部方法描述并冻结，原数组可以随即释放或修改。arg 是借用，
  * 必须存活到销毁完成。相同 service/method 拒绝，允许不同 service 使用
- * 相同 method。当前只支持 NONE，由已有绑定验证各方法 codec/基数/上限。
+ * 相同 method。压缩受方法方向策略和 Channel 能力共同限制，由已有绑定
+ * 验证各方法 codec/基数/正文及变换上限。
  *
  * 不替换 Channel handler：集成方在 OPENED 时 admit，再按同一精确流
  * 转发 receive/event。原 RX 缓冲与信用仍由集成方释放。本模块不拥有

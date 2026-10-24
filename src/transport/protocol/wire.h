@@ -21,8 +21,10 @@
 #define TR_FRAME_F_FIRST (1U << 0)
 #define TR_FRAME_F_LAST (1U << 1)
 #define TR_FRAME_F_LANE_BULK (1U << 2)
-#define TR_FRAME_F_KNOWN_MASK \
-	(TR_FRAME_F_FIRST | TR_FRAME_F_LAST | TR_FRAME_F_LANE_BULK)
+#define TR_FRAME_F_COMPRESSED (1U << 3)
+#define TR_FRAME_F_KNOWN_MASK                                                  \
+	(TR_FRAME_F_FIRST | TR_FRAME_F_LAST | TR_FRAME_F_LANE_BULK |           \
+	 TR_FRAME_F_COMPRESSED)
 
 enum tr_frame_type {
 	TR_FRAME_DATA = 1,
@@ -39,7 +41,8 @@ enum tr_frame_type {
 	TR_FRAME_BIND_ACK = 12,
 	TR_FRAME_PIPELINE_CONTROL = 13,
 	TR_FRAME_STREAM_RESET = 14,
-	TR_FRAME_STREAM_REFUSED = 15
+	TR_FRAME_STREAM_REFUSED = 15,
+	TR_FRAME_MESSAGE_CAPS = 16
 };
 
 struct tr_frame_header {

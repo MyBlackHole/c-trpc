@@ -43,6 +43,8 @@ const char *tr_status_str(int status)
 		return "unsupported";
 	case TR_ERR_TIMEOUT:
 		return "timeout";
+	case TR_ERR_CANCELLED:
+		return "cancelled";
 	default:
 		return "unknown";
 	}

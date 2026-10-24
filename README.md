@@ -4,13 +4,15 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.17` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+当前 `2.0.0-dev.25` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
 撤销旧代次；已接管的会话保留原 profile，旧 CONTROL 不得接受新 Server 代次的 DATA。
-默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 全平台矩阵与 GitHub 验收仍
-未完成；本版本不代表 #234 或 V2 整体验收完成。
+TLS-D2 增加有界异步本地凭证获取/轮换和连接组 CONTROL/DATA 异步授权，取消须由 provider
+确认；授权在 Reactor owner 重验后才会提交路由。默认仍为明文 TCP，TLS 失败关闭连接，
+不回退明文。TLS-D1/D2 全验证矩阵与 GitHub 验收仍未完成；TLS-E 和 #243 通用 Call
+范围也未完成，本版本不代表 #234 或 V2 整体验收完成。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、
@@ -98,8 +100,9 @@ CONTROL 通道              BULK 通道
 **安全与可选能力现状**：普通 V2 Client/Server 可显式要求 TLS 1.3 和双向证书认证；
 已验证的唯一 URI SAN 可作为 RPC work 的连接身份视图。transport-only 连接组也支持 TLS
 mTLS，Server 授权 CONTROL/DATA 主体，Client 要求 DATA 服务端主体与 CONTROL 连续一致。
-默认仍使用明文 TCP，消息压缩尚未接入。TLS profile 轮换和全部 TLS 内部内存的硬预算
-仍待完成。
+默认仍使用明文 TCP。Message 层压缩已接入普通 Stream、RPC 业务正文和连接组 DATA，
+按消息显式选择且默认关闭；连接组本机矩阵已完成，真实业务负载和发布性能阈值验收仍待完成。
+TLS profile 轮换和全部 TLS 内部内存的硬预算仍待完成。
 CRC32C 不能替代认证和加密；
 部署到不可信网络前仍须完成 [TLS-D/E 验收](docs/architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 消息压缩要求见[压缩与 TLS 需求](docs/architecture/11-compression-tls-requirements.md)。
@@ -761,7 +764,8 @@ Xmake CI 矩阵检查：
   [公共 SDK 文档](docs/rpc-v2-sdk.md)；
 - 流式发送遇到 `TR_AGAIN` 时由调用方等待可写提示并重试；一元便利 API 另行负责
   OPEN、正文和半关闭的自动发送；
-- 当前不提供透明 RPC 重试、进行中 Call 重放、DNS 名称解析或消息压缩；普通 V2 TLS 必需模式和连接组 mTLS 都须显式配置；
+- 当前不提供透明 RPC 重试、进行中 Call 重放或 DNS 名称解析；消息压缩通过显式 API 选择，
+  默认关闭；普通 V2 TLS 必需模式和连接组 mTLS 都须显式配置；
 - 逻辑消息受配置的消息上限、传输窗口和重组资源约束；
 - 普通 RPC V2 Client 当前不配置自动重连。低层 Channel 重连只恢复传输连通性，
   故障连接上已打开的 Stream/Call 已终止，应用须重新发起业务调用；
@@ -797,8 +801,9 @@ xmake test -v -j1 'test_timer_queue/*'
 
 高层客户端/服务端门面、能力协商、优雅排空、保活/存活检测、诊断、
 回调静默和运行时对端回收已经实现，V2 已提供显式公共 SDK。
-V2 已支持回调外异步生产者的引用、有限背压及取消收口。压缩后端仍须接入网络
-调用路径，不能把后端已编译等同于业务已可用。其他生产工作包括：
+V2 已支持回调外异步生产者的引用、有限背压及取消收口；Message 层压缩也已接入普通
+Stream、RPC 业务正文和连接组 DATA，并保持默认关闭。真实业务负载、生产网络与发布性能阈值
+仍须验收。其他生产工作包括：
 
 1. 为拆分 CONTROL/BULK 门面增加连接绑定标识，使独立接收的套接字能够安全配对；
 2. 共享连接模式下，在 DATA 帧边界实现严格 CONTROL 优先级；

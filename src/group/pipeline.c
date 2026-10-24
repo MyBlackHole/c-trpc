@@ -314,6 +314,8 @@ int tr_pipeline_control(struct tr_pipeline *pipeline,
 struct tr_pipeline_data_reserve_request {
 	struct tr_pipeline *pipeline;
 	struct tr_pipeline_data_ref *out;
+	uint32_t generation;
+	int use_external_generation;
 };
 
 static int tr_pipeline_reserve_data_on_owner(void *arg)
@@ -323,6 +325,8 @@ static int tr_pipeline_reserve_data_on_owner(void *arg)
 	struct tr_pipeline *pipeline = request->pipeline;
 	uint32_t i;
 
+	if (request->use_external_generation && request->generation == 0U)
+		return TR_ERR_INVALID;
 	if (!pipeline->control_bound)
 		return TR_ERR_STATE;
 	if (pipeline->data_count + pipeline->data_reserved_count >=
@@ -336,7 +340,9 @@ static int tr_pipeline_reserve_data_on_owner(void *arg)
 			continue;
 
 		slot->generation =
-			tr_pipeline_next_generation(slot->generation);
+		        request->use_external_generation
+		                ? request->generation
+		                : tr_pipeline_next_generation(slot->generation);
 		memset(&slot->connection, 0, sizeof(slot->connection));
 		slot->state = TR_PIPELINE_DATA_RESERVED;
 		pipeline->data_reserved_count++;
@@ -357,8 +363,27 @@ int tr_pipeline_reserve_data(struct tr_pipeline *pipeline,
 		return TR_ERR_INVALID;
 	request.pipeline = pipeline;
 	request.out = out;
+	request.generation = 0U;
+	request.use_external_generation = 0;
 	return tr_reactor_call(pipeline->owner,
 			       tr_pipeline_reserve_data_on_owner, &request);
+}
+
+int tr_pipeline_reserve_data_with_generation_on_owner(
+        struct tr_pipeline *pipeline, uint32_t generation,
+        struct tr_pipeline_data_ref *out)
+{
+	struct tr_pipeline_data_reserve_request request;
+
+	if (!pipeline || !out || generation == 0U)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(pipeline->owner))
+		return TR_ERR_STATE;
+	request.pipeline = pipeline;
+	request.out = out;
+	request.generation = generation;
+	request.use_external_generation = 1;
+	return tr_pipeline_reserve_data_on_owner(&request);
 }
 
 struct tr_pipeline_data_attach_request {
@@ -512,7 +537,7 @@ static int tr_pipeline_add_data_on_owner(void *arg)
 {
 	struct tr_pipeline_data_add_request *request =
 		(struct tr_pipeline_data_add_request *)arg;
-	struct tr_pipeline_data_reserve_request reserve;
+	struct tr_pipeline_data_reserve_request reserve = {0};
 	struct tr_pipeline_data_attach_request attach;
 	int ret;
 

@@ -20,6 +20,10 @@ struct tr_pipeline_registry_stats {
 	uint32_t count;
 };
 
+/* 为成员代次计算下一个非零值；UINT32_MAX 后明确拒绝而不回绕。 */
+int tr_pipeline_registry_member_generation_after(uint32_t current,
+                                                 uint32_t *out);
+
 /* 注册表是有界的分片本地索引，不拥有 Pipeline 生命周期。
  * Pipeline 必须先注销再销毁；Pipeline 裸指针不得逃逸所有者域。
  * 唯一允许长期保存的内部指针能力凭证，是精确 DATA 附接后返回给
@@ -34,6 +38,10 @@ struct tr_reactor *
 tr_pipeline_registry_owner(const struct tr_pipeline_registry *registry);
 uint32_t
 tr_pipeline_registry_owner_shard_id(const struct tr_pipeline_registry *registry);
+
+/* 仅限注册表所属 Reactor 所有者；成功后代次在该注册表内不复用。 */
+int tr_pipeline_registry_next_member_generation_on_owner(
+        struct tr_pipeline_registry *registry, uint32_t *out);
 
 int tr_pipeline_registry_register(struct tr_pipeline_registry *registry,
 				  struct tr_pipeline *pipeline);

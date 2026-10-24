@@ -38,6 +38,13 @@ int tr_reactor_call_or_stopped(
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
+/* Compute the fixed owner memory charged when constructing a Reactor with
+ * this configuration. Applies the same defaults and overflow checks as the
+ * constructor, without reserving from a budget or creating resources.
+ */
+int tr_reactor_memory_requirement(const struct tr_reactor_config *config,
+                                  uint64_t *out);
+
 /* TLS 快照轮换屏障；准入门禁仅阻止新的 TLS adopt，不影响现有会话。 */
 int tr_reactor_tls_admission_set(struct tr_reactor *reactor, int paused);
 int tr_reactor_tls_close_generation(struct tr_reactor *reactor,
@@ -60,7 +67,8 @@ int tr_reactor_in_owner_context(void);
  * 绝不超读。
  *
  * feed 在所属反应器上运行，必须短小且非阻塞。在最后一个分片中，
- * 它必须在完成路由或处理函数设置后设置 *done = 1。
+ * 它必须在完成路由或处理函数设置后设置 *done = 1。最后一片可返回
+ * TR_IN_PROGRESS 暂停普通读取；之后必须在同一 owner 调用 resume。
  * 成功或连接关闭、出错时，release 恰好调用一次。
  */
 typedef int (*tr_reactor_preface_feed_cb)(
@@ -84,6 +92,10 @@ int tr_reactor_adopt_tls_fd_prefaced_on_owner(
         struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns,
         const struct tr_reactor_preface_handler *preface,
         struct tr_conn_handle *out);
+/* 仅限所属 Reactor owner。仅完整前导返回 TR_IN_PROGRESS 后可恢复；
+ * TR_OK 释放前导并恢复读取，负状态关闭精确连接并释放前导。 */
+int tr_reactor_preface_resume_on_owner(struct tr_conn_handle connection,
+                                       int status);
 
 /* TLS Client 用的认证门禁：认证回调成功后，才通过 TLS 发出原始 route
  * preface；回调拿到的身份视图只在本次调用期间借用有效。 */
@@ -140,6 +152,13 @@ int tr_reactor_notify_tx_drained_on_owner(struct tr_conn_handle connection);
  * 使用者必须在释放回调参数之前取消观察或成功解绑处理器。 */
 int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle connection,
                                          int enabled);
+
+/* Channel 压缩分帧器在所属 owner 上发送一个不可再分的 DATA 帧。
+ * FIRST/LAST 由调用方维护整个逻辑消息的边界；成功时接管 payload。 */
+int tr_reactor_send_data_frame_on_owner(struct tr_conn_handle connection,
+                                        uint32_t flags, uint32_t stream_id,
+                                        uint64_t message_id,
+                                        struct tr_buffer *payload);
 
 /* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
  * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，

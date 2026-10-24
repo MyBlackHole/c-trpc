@@ -153,7 +153,12 @@ def stop_owned(process: subprocess.Popen[str]) -> None:
 
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    common = ["--capacity", "64", "--bulk-bytes", str(case["bulk_bytes"])]
+    common = ["--capacity", "64", "--bulk-bytes", str(case["bulk_bytes"]),
+              "--compression", case["compression"], "--tls", "1" if case["tls"] else "0"]
+    if case["tls"]:
+        common.extend(["--tls-ca", str(case["tls_ca"]),
+                       "--tls-cert", str(case["tls_cert"]),
+                       "--tls-key", str(case["tls_key"])])
     server_cmd = [str(binary), "server", *common, "--slow-ms", "25"]
     children: list[subprocess.Popen[str]] = []
     logs: list[TextIO] = []
@@ -235,7 +240,8 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
             log.close()
 
 
-def metadata(binary: Path, label: str, *, load_mode: str = "closed") -> dict[str, Any]:
+def metadata(binary: Path, label: str, *, load_mode: str = "closed",
+             compression: str = "none", tls: bool = False) -> dict[str, Any]:
     if load_mode not in ("closed", "open"):
         raise ValueError("load_mode must be closed or open")
     load_model = (
@@ -258,6 +264,7 @@ def metadata(binary: Path, label: str, *, load_mode: str = "closed") -> dict[str
             "affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
             "cgroup_cpu_max": quota.read_text().strip() if quota.exists() else None,
             "clock": "CLOCK_MONOTONIC", "transport": "TCP IPv4 loopback",
+            "tls_enabled": tls, "compression": compression,
             "load_model": load_model,
             "latency": "before submission to terminal callback entry; successful and accepted separately",
             "goodput": "verified successful request+response application bytes; excludes wire overhead",
@@ -271,11 +278,21 @@ def main() -> int:
     parser.add_argument("--label", default="unspecified-build")
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--requests", type=int, default=1000)
+    parser.add_argument("--scenario", choices=("all", "small", "bulk", "mixed"),
+                        default="all", help="select closed-loop workload; excludes pressure")
+    parser.add_argument("--compression", choices=("none", "request", "response", "zstd"),
+                        default="none")
+    parser.add_argument("--tls", action="store_true", help="require TLS 1.3 on both endpoints")
+    parser.add_argument("--tls-ca", type=Path)
+    parser.add_argument("--tls-cert", type=Path)
+    parser.add_argument("--tls-key", type=Path)
     parser.add_argument("--smoke", action="store_true", help="small counts; correctness, not capacity")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     if not os.access(binary, os.X_OK) or not 1 <= args.trials <= 100 or not 32 <= args.requests <= 1000000:
         parser.error("invalid executable, trials or request count")
+    if args.tls and not (args.tls_ca and args.tls_cert and args.tls_key):
+        parser.error("--tls requires --tls-ca, --tls-cert, and --tls-key")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     count = 64 if args.smoke else args.requests
     warmup = 8 if args.smoke else 100
@@ -285,14 +302,23 @@ def main() -> int:
              ("mixed", 8, 1, 65536), ("mixed", 8, 2, 65536),
              ("pressure", 16, 1, 65536)]
     with args.output.open("w", encoding="utf-8") as output:
-        output.write(json.dumps(metadata(binary, args.label)) + "\n")
+        output.write(json.dumps(metadata(binary, args.label,
+                                        compression=args.compression,
+                                        tls=args.tls)) + "\n")
         output.flush()
         for trial in range(trials):
-            for index, (scenario, window, clients, bulk_bytes) in enumerate(cases):
+            selected_cases = [item for item in cases
+                              if args.scenario == "all" or item[0] == args.scenario]
+            for index, (scenario, window, clients, bulk_bytes) in enumerate(selected_cases):
                 case = {"scenario": scenario, "window": window, "clients": clients,
                         "bulk_bytes": bulk_bytes, "warmup": warmup,
                         "requests": min(count, 128) if scenario == "pressure" else count,
+                        "compression": args.compression, "tls": args.tls,
                         "trial": trial + 1}
+                if args.tls:
+                    case.update({"tls_ca": str(args.tls_ca.resolve(strict=True)),
+                                 "tls_cert": str(args.tls_cert.resolve(strict=True)),
+                                 "tls_key": str(args.tls_key.resolve(strict=True))})
                 case_dir = args.output.parent / (args.output.stem + "-logs") / f"{trial+1}-{index}-{scenario}"
                 try:
                     row = run_case(binary, case, case_dir)

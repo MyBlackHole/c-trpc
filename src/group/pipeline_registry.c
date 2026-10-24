@@ -25,6 +25,7 @@ struct tr_pipeline_registry {
 	struct tr_pipeline_registry_entry *entries;
 	uint32_t capacity;
 	uint32_t count;
+	uint32_t next_member_generation;
 };
 
 static uint32_t tr_pipeline_registry_hash(uint64_t pipeline_id)
@@ -139,6 +140,36 @@ uint32_t
 tr_pipeline_registry_owner_shard_id(const struct tr_pipeline_registry *registry)
 {
 	return registry ? registry->owner_shard_id : UINT32_MAX;
+}
+
+int tr_pipeline_registry_member_generation_after(uint32_t current,
+                                                 uint32_t *out)
+{
+	if (!out)
+		return TR_ERR_INVALID;
+	if (current == UINT32_MAX)
+		return TR_ERR_STATE;
+	*out = current + 1U;
+	return TR_OK;
+}
+
+int tr_pipeline_registry_next_member_generation_on_owner(
+        struct tr_pipeline_registry *registry, uint32_t *out)
+{
+	uint32_t next;
+	int ret;
+
+	if (!registry || !out)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_in_owner_context_for(registry->owner))
+		return TR_ERR_STATE;
+	ret = tr_pipeline_registry_member_generation_after(
+	        registry->next_member_generation, &next);
+	if (ret != TR_OK)
+		return ret;
+	registry->next_member_generation = next;
+	*out = next;
+	return TR_OK;
 }
 
 struct tr_pipeline_registry_pipeline_request {

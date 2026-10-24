@@ -12,6 +12,7 @@
  */
 #if defined(__GNUC__) || defined(__clang__)
 #define TR_AUTO(cleanup_fn) __attribute__((cleanup(cleanup_fn)))
+#define TR_CLEANUP_UNUSED __attribute__((unused))
 #else
 #error "c-trpc requires GCC/Clang cleanup attribute support"
 #endif
@@ -22,20 +23,20 @@
  * cleanup() 在离开作用域时执行；take() 用于显式把所有权
  * 从受 cleanup 管理的变量转移出去。
  */
-#define TR_DEFINE_PTR_OWNERSHIP(prefix, type, release_fn)               \
-	static inline void prefix##_cleanup(type **resource)              \
-	{                                                                \
-		if (resource && *resource) {                               \
-			release_fn(*resource);                              \
-			*resource = NULL;                                   \
-		}                                                        \
-	}                                                                \
-	static inline type *prefix##_take(type **resource)                \
-	{                                                                \
-		type *value = resource ? *resource : NULL;                 \
-		if (resource)                                             \
-			*resource = NULL;                                   \
-		return value;                                             \
+#define TR_DEFINE_PTR_OWNERSHIP(prefix, type, release_fn)                      \
+	static inline void prefix##_cleanup(type **resource)                   \
+	{                                                                      \
+		if (resource && *resource) {                                   \
+			release_fn(*resource);                                 \
+			*resource = NULL;                                      \
+		}                                                              \
+	}                                                                      \
+	static inline TR_CLEANUP_UNUSED type *prefix##_take(type **resource)   \
+	{                                                                      \
+		type *value = resource ? *resource : NULL;                     \
+		if (resource)                                                  \
+			*resource = NULL;                                      \
+		return value;                                                  \
 	}
 
 #endif

@@ -4,7 +4,10 @@
 #include <stdint.h>
 
 #include "../../execution/reactor.h"
+#include "../../runtime/message_service.h"
 #include "tr/transport.h"
+
+struct tr_memory_budget;
 
 struct tr_client_group;
 struct tr_tls_openssl_profile;
@@ -15,9 +18,18 @@ struct tr_client_group_config {
 	uint32_t max_data_connections;
 	uint32_t max_transfers;
 	uint32_t max_message_bytes;
+	uint32_t send_compression_algorithms;
+	uint32_t max_encoded_message_bytes;
 	uint32_t max_frame_payload_bytes;
 	uint32_t connect_timeout_ms;
 	int tcp_nodelay;
+	int (*message_submit)(void *context, struct tr_message *input,
+	                      const struct tr_message_transform_config *config,
+	                      tr_message_service_done_fn done, void *arg,
+	                      struct tr_task_handle *handle);
+	int (*message_cancel)(void *context, struct tr_task_handle handle);
+	void *message_context;
+	struct tr_memory_budget *message_budget;
 	tr_connection_group_transfer_ready_cb on_transfer_ready;
 	void *callback_arg;
 };
@@ -47,5 +59,9 @@ int tr_client_group_release_transfer(
 int tr_client_group_send(
 	struct tr_client_group *group, uint32_t stream_id,
 	uint64_t message_id, const struct tr_transport_bytes *bytes);
+int tr_client_group_send_with_compression(
+        struct tr_client_group *group, uint32_t stream_id, uint64_t message_id,
+        const struct tr_transport_bytes *bytes,
+        enum tr_connection_group_compression compression);
 
 #endif

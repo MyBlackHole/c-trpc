@@ -123,9 +123,9 @@ OpenSSL 内部分配与内核 socket 缓冲不自动纳入当前逐 Server 原�
    GCC/Clang、ASan/UBSan、TSan、静态分析及外部 TLS 实现互通。
    未通过这一门槛不关闭 #234，也不宣称可暴露于不可信公网。
 
-本 ADR 若与 [较早需求文档](../11-compression-tls-requirements.md) 中
-“压缩属于 Channel/Stream 内部算法”的描述冲突，以后续已接受的
-独立 Message 层决策为准；TLS 始终位于完整 TCP 字节流与前导之间。
+本 ADR 与 [较早需求文档](../11-compression-tls-requirements.md) 中
+压缩的模块归属无关；该需求文档已更新为独立 Message 层。ADR-008 仍是提议中，
+TLS 始终位于完整 TCP 字节流与前导之间。
 
 ### 2026-10-23 TLS-A 原型记录
 

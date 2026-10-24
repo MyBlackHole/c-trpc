@@ -358,7 +358,9 @@ static void init_fixture(struct fixture *f, uint32_t capacity)
 		                               TR_RPC_CODEC_RAW,
 		                               TR_LANE_BULK,
 		                               BODY,
-		                               BODY};
+		                               BODY,
+		                               0,
+		                               0};
 		f->contexts[i] = (struct method_context){f, d, i};
 		f->methods[i] = (struct tr_rpc_record_method){
 		        d, method_received, &f->contexts[i]};
@@ -565,6 +567,21 @@ static int probe_registry(void *arg)
 	CHECK(tr_rpc_record_router_create_on_owner(
 	              f->server.channel, invalid, 4, CAP, terminal, f,
 	              &f->server.budget, &router) == TR_ERR_INVALID);
+	memcpy(invalid, f->methods, sizeof(invalid));
+	invalid[0].descriptor.request_compression_algorithms =
+	        UINT32_C(0x80000000);
+	CHECK(tr_rpc_record_router_create_on_owner(
+	              f->server.channel, invalid, 4, CAP, terminal, f,
+	              &f->server.budget, &router) == TR_ERR_INVALID);
+	memcpy(invalid, f->methods, sizeof(invalid));
+	invalid[0].descriptor.request_compression_algorithms =
+	        TR_RPC_COMPRESSION_MASK_ZSTD;
+	CHECK(tr_rpc_record_router_create_on_owner(
+	              f->server.channel, invalid, 4, CAP, terminal, f,
+	              &f->server.budget, &router) == TR_OK);
+	CHECK(tr_rpc_record_router_destroy_on_owner(&router) == TR_OK);
+	CHECK(!router &&
+	      atomic_load(&f->server.budget.current_bytes) == before);
 	for (unsigned n = 1; n <= 3; ++n) {
 		allocation = 0;
 		fail_at = n;
