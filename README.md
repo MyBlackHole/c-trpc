@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.57` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.58` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -204,6 +204,9 @@ dev.56 修复连接组服务端 drain 与 Zstandard DATA 完成回调的冲突�
 
 dev.57 为 #242/ERR-D 增加双 DATA 成员故障与替代回归：中止其中一条真实物理连接后，旧 transfer 失效、另一成员继续发送；同一 group/epoch 上重新 Offer/Ready 后，替代成员使用新物理连接并成功交付。随后释放剩余亲和、完成 Client drain，并在所有成员关闭后完成 Server drain，最终计数归零。GCC Release 与 TSan 下完整 `test_connection_group_facade` 均通过；变异验证确认遗漏客户端 transfer 失效会触发回归断言。该切片不覆盖多个组并发故障或完整 ERR-D 竞争矩阵。详见
 [双 DATA 成员故障与重建回归](docs/reviews/rpc_v2_group_member_failure_replacement_20261025.md)。
+
+dev.58 为 #242/ERR-D 增加两个并行连接组的故障隔离回归：服务端单 shard 同时承载不同 group/epoch；A 组 DATA 成员故障并替代期间，B 组的 DATA 与活动 transfer 保持可用。关闭 A 组后，B 组仍成功发送并独立完成 drain，最终服务端组/连接/DATA/transfer 计数归零。GCC Release 与 TSan 下完整 `test_connection_group_facade` 均通过。该切片不覆盖多组同时故障与竞争压力矩阵。详见
+[双组成员故障隔离记录](docs/reviews/rpc_v2_group_multi_group_failure_isolation_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

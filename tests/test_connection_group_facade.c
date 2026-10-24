@@ -30,6 +30,10 @@
 
 #define TEST_GROUP_ID UINT64_C(0x9911)
 #define TEST_GROUP_EPOCH UINT64_C(71)
+#define TEST_GROUP_PAIR_ID_FIRST UINT64_C(0x9921)
+#define TEST_GROUP_PAIR_ID_SECOND UINT64_C(0x9922)
+#define TEST_GROUP_PAIR_EPOCH_FIRST UINT64_C(73)
+#define TEST_GROUP_PAIR_EPOCH_SECOND UINT64_C(74)
 #define TEST_CONTROL_GENERATION 23U
 
 static atomic_int fail_group_control_close_once;
@@ -286,6 +290,14 @@ struct public_group_ctx {
 	uint8_t compressed_decoded[128];
 	struct tr_connection_group_message retained;
 	struct tr_connection_group_message compressed_retained;
+};
+
+struct group_pair_ctx {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	unsigned authorized[2];
+	unsigned data_messages[2];
+	unsigned data_events[2];
 };
 
 static void send_all(int fd, const void *data, size_t len)
@@ -643,6 +655,98 @@ static void on_group_data_event(
 	pthread_mutex_unlock(&ctx->lock);
 }
 
+static int group_pair_index(const struct tr_connection_group_id *group)
+{
+	if (!group)
+		return -1;
+	if (group->group_id == TEST_GROUP_PAIR_ID_FIRST &&
+	    group->epoch == TEST_GROUP_PAIR_EPOCH_FIRST)
+		return 0;
+	if (group->group_id == TEST_GROUP_PAIR_ID_SECOND &&
+	    group->epoch == TEST_GROUP_PAIR_EPOCH_SECOND)
+		return 1;
+	return -1;
+}
+
+static int authorize_group_pair(
+	const struct tr_connection_group_authorization *authorization,
+	void *arg)
+{
+	struct group_pair_ctx *ctx = (struct group_pair_ctx *)arg;
+	int index;
+
+	if (!authorization ||
+	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
+	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA) ||
+	    authorization->peer_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE ||
+	    authorization->control_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE)
+		return TR_ERR_STALE;
+	index = group_pair_index(&authorization->group);
+	if (index < 0)
+		return TR_ERR_STALE;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->authorized[index]++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_OK;
+}
+
+static enum tr_connection_group_message_disposition on_group_pair_message(
+	const struct tr_connection_group_message *message, void *arg)
+{
+	struct group_pair_ctx *ctx = (struct group_pair_ctx *)arg;
+	int index;
+
+	assert(message != NULL);
+	index = group_pair_index(&message->group);
+	assert(index >= 0);
+	if (index == 0) {
+		if (message->message_id == UINT64_C(7201)) {
+			assert(message->stream_id == 7101U);
+			assert(message->bytes.len == 1U &&
+			       message->bytes.data[0] == 0x51U);
+		} else {
+			assert(message->message_id == UINT64_C(7203));
+			assert(message->stream_id == 7102U);
+			assert(message->bytes.len == 1U &&
+			       message->bytes.data[0] == 0x53U);
+		}
+	} else {
+		assert(message->message_id == UINT64_C(7202));
+		assert(message->stream_id == 8101U);
+		assert(message->bytes.len == 1U &&
+		       message->bytes.data[0] == 0x52U);
+	}
+	assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+	                          TR_CONNECTION_GROUP_DATA_LAST));
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->data_messages[index]++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+}
+
+static void on_group_pair_data_event(
+	const struct tr_connection_group_id *group,
+	enum tr_connection_group_data_event event, int status, void *arg)
+{
+	struct group_pair_ctx *ctx = (struct group_pair_ctx *)arg;
+	int index = group_pair_index(group);
+
+	assert(index >= 0);
+	assert(event == TR_CONNECTION_GROUP_DATA_CLOSED ||
+	       event == TR_CONNECTION_GROUP_DATA_ERROR);
+	(void)status;
+	pthread_mutex_lock(&ctx->lock);
+	ctx->data_events[index]++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
 static const char *counter_name(
 	struct public_group_ctx *ctx, const unsigned *counter)
 {
@@ -774,6 +878,88 @@ static void wait_data_accepts(struct tr_server *server, uint64_t target)
 		(void)nanosleep(&pause, NULL);
 	}
 	assert(!"timed out waiting for DATA attach");
+}
+
+static int wait_group_pair_offer(
+	struct tr_server *server, uint64_t group_id, uint64_t epoch,
+	uint64_t message_id)
+{
+	struct timespec pause = {0, 10000000L};
+	unsigned i;
+
+	for (i = 0U; i < 1000U; ++i) {
+		int ret = tr_server_connection_group_send_data_offer(
+			server, group_id, epoch, message_id);
+
+		if (ret == TR_OK)
+			return TR_OK;
+		assert(ret == TR_ERR_STALE || ret == TR_AGAIN);
+		(void)nanosleep(&pause, NULL);
+	}
+	return TR_ERR_TIMEOUT;
+}
+
+static void wait_group_pair_counter(
+	struct group_pair_ctx *ctx, unsigned *counter, unsigned target)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx->lock);
+	while (*counter < target && ret == 0)
+		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	if (ret != 0)
+		fprintf(stderr,
+		        "timeout waiting for group pair counter: current=%u target=%u\n",
+		        *counter, target);
+	assert(ret == 0);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void wait_group_pair_server_stats(
+	struct tr_server *server, uint32_t groups, uint32_t data_connections,
+	uint64_t active_transfers)
+{
+	struct timespec pause = {0, 10000000L};
+	unsigned i;
+
+	for (i = 0U; i < 1000U; ++i) {
+		struct tr_connection_group_server_stats stats;
+
+		memset(&stats, 0, sizeof(stats));
+		assert(tr_server_connection_group_get_stats(server, &stats) ==
+		       TR_OK);
+		if (stats.groups_current == groups &&
+		    stats.data_connections_current == data_connections &&
+		    stats.active_transfers == active_transfers)
+			return;
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(!"timed out waiting for group pair server stats");
+}
+
+static void wait_group_pair_client_stats(
+	struct tr_client *client, uint32_t data_connections,
+	uint32_t active_transfers)
+{
+	struct timespec pause = {0, 10000000L};
+	unsigned i;
+
+	for (i = 0U; i < 1000U; ++i) {
+		struct tr_connection_group_client_stats stats;
+
+		memset(&stats, 0, sizeof(stats));
+		assert(tr_client_connection_group_get_stats(client, &stats) ==
+		       TR_OK);
+		if (stats.control_connected == 1U &&
+		    stats.data_connections == data_connections &&
+		    stats.active_transfers == active_transfers)
+			return;
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(!"timed out waiting for group pair client stats");
 }
 
 static void wait_group_data_tx_blocked(void)
@@ -2150,6 +2336,194 @@ static void test_public_connection_group_member_failure_replacement(void)
 	puts("connection_group_facade: member failure replacement passed");
 }
 
+static void test_public_connection_group_multi_group_failure_isolation(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *clients[2] = {NULL, NULL};
+	struct group_pair_ctx ctx;
+	struct tr_conn_handle data_routes[2];
+	struct tr_conn_handle replacement_route;
+	uint8_t payload_a = 0x51U;
+	uint8_t payload_b = 0x52U;
+	uint8_t replacement_payload = 0x53U;
+	struct tr_transport_bytes bytes_a = {&payload_a, 1U};
+	struct tr_transport_bytes bytes_b = {&payload_b, 1U};
+	struct tr_transport_bytes replacement_bytes = {
+		&replacement_payload, 1U};
+	uint64_t group_ids[2] = {TEST_GROUP_PAIR_ID_FIRST,
+	                         TEST_GROUP_PAIR_ID_SECOND};
+	uint64_t epochs[2] = {TEST_GROUP_PAIR_EPOCH_FIRST,
+	                      TEST_GROUP_PAIR_EPOCH_SECOND};
+	uint16_t group_port = 0U;
+	unsigned i;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 4U;
+	server_config.shard_count = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 2U;
+	server_config.connection_groups.max_connections = 4U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.authorize = authorize_group_pair;
+	server_config.connection_groups.on_message = on_group_pair_message;
+	server_config.connection_groups.on_data_event =
+		on_group_pair_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(
+		       server, "127.0.0.1", 0U, 16, &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	for (i = 0U; i < 2U; ++i) {
+		tr_client_config_init(&client_config);
+		client_config.keepalive_interval_ms = 0U;
+		client_config.connection_groups.max_data_connections = 1U;
+		client_config.connection_groups.max_active_transfers = 2U;
+		assert(tr_client_create_transport(&client_config, &clients[i]) ==
+		       TR_OK);
+		{
+			struct tr_connection_group_id group = {
+				group_ids[i], epochs[i]};
+
+			assert(tr_client_connection_group_connect(
+				       clients[i], "127.0.0.1", group_port,
+				       &group) == TR_OK);
+		}
+	}
+	wait_group_pair_counter(&ctx, &ctx.authorized[0], 1U);
+	wait_group_pair_counter(&ctx, &ctx.authorized[1], 1U);
+	wait_group_pair_server_stats(server, 2U, 0U, 0U);
+
+	assert(wait_group_pair_offer(server, group_ids[0], epochs[0],
+	                             UINT64_C(8101)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	assert(wait_group_pair_offer(server, group_ids[1], epochs[1],
+	                             UINT64_C(8102)) == TR_OK);
+	wait_data_accepts(server, 2U);
+	wait_group_pair_client_stats(clients[0], 1U, 0U);
+	wait_group_pair_client_stats(clients[1], 1U, 0U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, group_ids[0], epochs[0], 7101U,
+		       UINT64_C(7301)) == TR_OK);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, group_ids[1], epochs[1], 8101U,
+		       UINT64_C(8301)) == TR_OK);
+	wait_group_pair_client_stats(clients[0], 1U, 1U);
+	wait_group_pair_client_stats(clients[1], 1U, 1U);
+
+	/* 两个并行 group 的 DATA 各来自独立 Client Reactor。 */
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_message_ids[0] = UINT64_C(7201);
+	group_route_probe_message_ids[1] = UINT64_C(7202);
+	memset(group_route_probe_connections, 0,
+	       sizeof(group_route_probe_connections));
+	group_route_probe_seen = 0U;
+	group_route_probe_enabled = 1;
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(tr_client_connection_group_send(
+		       clients[0], 7101U, UINT64_C(7201), &bytes_a) == TR_OK);
+	assert(tr_client_connection_group_send(
+		       clients[1], 8101U, UINT64_C(7202), &bytes_b) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[0], 1U);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 1U);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_enabled = 0;
+	assert(group_route_probe_seen == 3U);
+	data_routes[0] = group_route_probe_connections[0];
+	data_routes[1] = group_route_probe_connections[1];
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(data_routes[0].reactor != data_routes[1].reactor);
+
+	/* A 组成员故障后，B 组传输和计数保持不变。 */
+	assert(tr_reactor_abort(data_routes[0], TR_ERR_SYS) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_events[0], 1U);
+	wait_group_pair_client_stats(clients[0], 0U, 0U);
+	wait_group_pair_client_stats(clients[1], 1U, 1U);
+	wait_group_pair_server_stats(server, 2U, 1U, 1U);
+	assert(tr_client_connection_group_send(
+		       clients[0], 7101U, UINT64_C(7201), &bytes_a) ==
+	       TR_ERR_STALE);
+	assert(tr_client_connection_group_send(
+		       clients[1], 8101U, UINT64_C(7202), &bytes_b) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 2U);
+
+	/* A 组独立替代成员；B 组继续传输。 */
+	assert(wait_group_pair_offer(server, group_ids[0], epochs[0],
+	                             UINT64_C(8103)) == TR_OK);
+	wait_data_accepts(server, 3U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, group_ids[0], epochs[0], 7102U,
+		       UINT64_C(7302)) == TR_OK);
+	wait_group_pair_client_stats(clients[0], 1U, 1U);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_message_ids[0] = UINT64_C(7203);
+	group_route_probe_message_ids[1] = 0U;
+	memset(group_route_probe_connections, 0,
+	       sizeof(group_route_probe_connections));
+	group_route_probe_seen = 0U;
+	group_route_probe_enabled = 1;
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(tr_client_connection_group_send(
+		       clients[0], 7102U, UINT64_C(7203),
+		       &replacement_bytes) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[0], 2U);
+	assert(tr_client_connection_group_send(
+		       clients[1], 8101U, UINT64_C(7202), &bytes_b) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 3U);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_enabled = 0;
+	assert(group_route_probe_seen == 1U);
+	replacement_route = group_route_probe_connections[0];
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(replacement_route.reactor == data_routes[0].reactor);
+	assert(replacement_route.slot != data_routes[0].slot ||
+	       replacement_route.generation != data_routes[0].generation);
+	wait_group_pair_server_stats(server, 2U, 2U, 2U);
+
+	/* 关闭 A 组不关闭 B 组；B 组继续发完在途工作。 */
+	assert(tr_client_connection_group_close(clients[0]) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_events[0], 2U);
+	wait_group_pair_server_stats(server, 1U, 1U, 1U);
+	wait_group_pair_client_stats(clients[1], 1U, 1U);
+	assert(tr_client_connection_group_send(
+		       clients[1], 8101U, UINT64_C(7202), &bytes_b) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_messages[1], 4U);
+	wait_client_destroy_after_group_close(clients[0]);
+
+	assert(tr_client_connection_group_release_transfer(
+		       clients[1], 8101U) == TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, group_ids[1], epochs[1], 8101U) == TR_OK);
+	assert(tr_client_connection_group_begin_drain(clients[1]) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_server_connection_group_send_data_offer(
+		       server, group_ids[1], epochs[1], UINT64_C(8104)) ==
+	       TR_ERR_CLOSED);
+	assert(tr_client_connection_group_wait_drained(clients[1], 5000U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_client_connection_group_close(clients[1]) == TR_OK);
+	wait_group_pair_counter(&ctx, &ctx.data_events[1], 1U);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 5000U) == TR_OK);
+	wait_group_pair_server_stats(server, 0U, 0U, 0U);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_client_destroy_after_group_close(clients[1]);
+	assert(tr_server_destroy(server) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("connection_group_facade: multi-group failure isolation passed");
+}
+
 static void test_public_connection_group_client_connector_failure_wakes(void)
 {
 	struct tr_server_config server_config;
@@ -3164,6 +3538,7 @@ int main(void)
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_multi_data_drain();
 	test_public_connection_group_member_failure_replacement();
+	test_public_connection_group_multi_group_failure_isolation();
 	test_client_compression_completion_after_route_replacement();
 	test_public_connection_group_drain_with_compression_inflight();
 	test_public_connection_group_drain_with_compressed_wire_inflight();
