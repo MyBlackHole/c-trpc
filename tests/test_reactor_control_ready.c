@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,11 +23,17 @@ struct fixture {
 	pthread_cond_t cond;
 	unsigned ready, producer_entered, release_producer, sleeping;
 	struct tr_conn_handle observed[160];
+	enum tr_connection_event observed_event[160];
+	struct tr_buffer data_payload;
+	uint8_t data_byte;
 	atomic_int block_tx;
 	atomic_int observe_sleep;
 	unsigned rearm;
 	int send_on_ready;
 	int action;
+	int data_mode;
+	int mixed_mode;
+	enum tr_connection_event expected_ready_event;
 };
 
 static struct fixture *active;
@@ -66,7 +73,7 @@ int __wrap_tr_wire_header_encode(uint8_t out[TR_WIRE_HEADER_SIZE],
 {
 	if (hold_prepare) {
 		struct fixture *f = active;
-		/* 生产者已取得唯一控制项，尚未尝试命令准入，也未持有 ctl_lock。
+		/* 生产者已取得唯一池项，尚未尝试命令准入，也未持有 ctl_lock。
 		 * 随后使用陈旧连接失败，唯一唤醒来源就是跨线程归还池项。 */
 		pthread_mutex_lock(&f->lock);
 		f->producer_entered = 1;
@@ -100,18 +107,34 @@ static void on_event(struct tr_conn_handle connection,
 	assert(status == TR_OK);
 	if (event == TR_CONN_EVENT_CLOSED)
 		return;
-	assert(event == TR_CONN_EVENT_CONTROL_TX_READY);
+	if (f->mixed_mode)
+		assert(event == TR_CONN_EVENT_CONTROL_TX_READY ||
+		       event == TR_CONN_EVENT_DATA_TX_READY);
+	else
+		assert(event == f->expected_ready_event);
 	if (f->send_on_ready)
 		assert(tr_reactor_send(connection, TR_FRAME_PING, 0, 0, 456,
 		                       NULL) == TR_OK);
 	if (f->rearm) {
 		--f->rearm;
-		assert(tr_reactor_watch_control_tx_on_owner(connection, 1) ==
-		       TR_OK);
+		if (f->mixed_mode && event == TR_CONN_EVENT_DATA_TX_READY)
+			assert(tr_reactor_watch_data_tx_on_owner(connection,
+			                                         1) == TR_OK);
+		else if (f->mixed_mode)
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               connection, 1) == TR_OK);
+		else if (f->data_mode)
+			assert(tr_reactor_watch_data_tx_on_owner(connection,
+			                                         1) == TR_OK);
+		else
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               connection, 1) == TR_OK);
 	}
 	pthread_mutex_lock(&f->lock);
 	assert(f->ready < 160);
-	f->observed[f->ready++] = connection;
+	f->observed[f->ready] = connection;
+	f->observed_event[f->ready] = event;
+	f->ready++;
 	pthread_cond_broadcast(&f->cond);
 	pthread_mutex_unlock(&f->lock);
 }
@@ -149,7 +172,10 @@ static void init_count(struct fixture *f, unsigned connections)
 	assert(tr_reactor_start(f->reactor) == TR_OK);
 	for (unsigned i = 0; i < connections; ++i)
 		adopt(f, i);
+	f->expected_ready_event = TR_CONN_EVENT_CONTROL_TX_READY;
 	assert(tr_reactor_watch_control_tx_on_owner(f->connections[0], 1) ==
+	       TR_ERR_STATE);
+	assert(tr_reactor_watch_data_tx_on_owner(f->connections[0], 1) ==
 	       TR_ERR_STATE);
 }
 
@@ -178,21 +204,47 @@ static int barrier(void *arg)
 static int fill_and_watch(void *arg)
 {
 	struct fixture *f = arg;
-	assert(tr_reactor_send(f->connections[0], TR_FRAME_PING, 0, 0, 123,
-	                       NULL) == TR_OK);
-	assert(tr_reactor_send(f->connections[0], TR_FRAME_PING, 0, 0, 124,
-	                       NULL) == TR_AGAIN);
+	if (f->data_mode) {
+		int pool_exhausted = 0;
+		f->data_payload.data = &f->data_byte;
+		f->data_payload.capacity = 1U;
+		f->data_payload.len = 1U;
+		assert(tr_reactor_send_data_frame_on_owner(
+		               f->connections[0], 0, 1U, 123, &f->data_payload,
+		               &pool_exhausted) == TR_OK);
+		assert(pool_exhausted == 0);
+		assert(tr_reactor_send_data_frame_on_owner(
+		               f->connections[0], 0, 1U, 124, &f->data_payload,
+		               &pool_exhausted) == TR_AGAIN);
+		assert(pool_exhausted == 1);
+	} else {
+		assert(tr_reactor_send(f->connections[0], TR_FRAME_PING, 0, 0,
+		                       123, NULL) == TR_OK);
+		assert(tr_reactor_send(f->connections[0], TR_FRAME_PING, 0, 0,
+		                       124, NULL) == TR_AGAIN);
+	}
 	for (unsigned i = 1; i < 3; ++i) {
-		assert(tr_reactor_watch_control_tx_on_owner(f->connections[i],
-		                                            1) == TR_OK);
-		assert(tr_reactor_watch_control_tx_on_owner(f->connections[i],
-		                                            1) == TR_OK);
+		if (f->data_mode) {
+			assert(tr_reactor_watch_data_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+			assert(tr_reactor_watch_data_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+		} else {
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+		}
 	}
 	assert(f->ready == 0); /* 登记不得内联回调。 */
-	if (f->action == 1)
-		assert(tr_reactor_watch_control_tx_on_owner(f->connections[1],
-		                                            0) == TR_OK);
-	else if (f->action == 2)
+	if (f->action == 1) {
+		if (f->data_mode)
+			assert(tr_reactor_watch_data_tx_on_owner(
+			               f->connections[1], 0) == TR_OK);
+		else
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               f->connections[1], 0) == TR_OK);
+	} else if (f->action == 2)
 		assert(tr_reactor_set_handler(f->connections[1], NULL, on_event,
 		                              f) == TR_OK);
 	else if (f->action == 3)
@@ -200,12 +252,15 @@ static int fill_and_watch(void *arg)
 	return TR_OK;
 }
 
-static void test_shared_pool(int action)
+static void test_shared_pool(int action, int data_mode)
 {
 	struct fixture f;
 	init(&f);
 	f.action = action;
-	f.send_on_ready = 1;
+	f.data_mode = data_mode;
+	f.expected_ready_event = data_mode ? TR_CONN_EVENT_DATA_TX_READY
+	                                   : TR_CONN_EVENT_CONTROL_TX_READY;
+	f.send_on_ready = !data_mode;
 	assert(tr_reactor_call(f.reactor, fill_and_watch, &f) == TR_OK);
 	assert(tr_reactor_call(f.reactor, barrier, NULL) == TR_OK);
 	pthread_mutex_lock(&f.lock);
@@ -234,8 +289,12 @@ static void test_shared_pool(int action)
 static int watch_one(void *arg)
 {
 	struct fixture *f = arg;
-	assert(tr_reactor_watch_control_tx_on_owner(f->connections[1], 1) ==
-	       TR_OK);
+	if (f->data_mode)
+		assert(tr_reactor_watch_data_tx_on_owner(f->connections[1],
+		                                         1) == TR_OK);
+	else
+		assert(tr_reactor_watch_control_tx_on_owner(f->connections[1],
+		                                            1) == TR_OK);
 	atomic_store(&f->observe_sleep, 1);
 	return TR_OK;
 }
@@ -246,17 +305,29 @@ static void *send_stale(void *arg)
 	struct tr_conn_handle stale = f->connections[0];
 	++stale.generation;
 	hold_prepare = 1;
-	assert(tr_reactor_send(stale, TR_FRAME_PING, 0, 0, 789, NULL) ==
-	       TR_ERR_STALE);
+	if (f->data_mode) {
+		uint8_t byte = 0U;
+		struct tr_buffer payload = {
+		        .data = &byte, .capacity = 1U, .len = 1U};
+		struct tr_buffer *payloads[] = {&payload};
+		assert(tr_reactor_sendv(stale, TR_FRAME_DATA, 0, 1U, 789,
+		                        payloads, 1U) == TR_ERR_STALE);
+	} else {
+		assert(tr_reactor_send(stale, TR_FRAME_PING, 0, 0, 789, NULL) ==
+		       TR_ERR_STALE);
+	}
 	return NULL;
 }
 
-static void test_producer_release_wakes_owner(void)
+static void test_producer_release_wakes_owner(int data_mode)
 {
 	struct fixture f;
 	pthread_t producer;
 	init(&f);
-	f.send_on_ready = 1;
+	f.data_mode = data_mode;
+	f.expected_ready_event = data_mode ? TR_CONN_EVENT_DATA_TX_READY
+	                                   : TR_CONN_EVENT_CONTROL_TX_READY;
+	f.send_on_ready = !data_mode;
 	assert(pthread_create(&producer, NULL, send_stale, &f) == 0);
 	wait_count(&f, &f.producer_entered, 1);
 	assert(tr_reactor_call(f.reactor, watch_one, &f) == TR_OK);
@@ -272,11 +343,14 @@ static void test_producer_release_wakes_owner(void)
 	destroy(&f);
 }
 
-static void test_rearm_without_io(void)
+static void test_rearm_without_io(int data_mode)
 {
 	struct fixture f;
 	struct tr_reactor_stats stats;
 	init(&f);
+	f.data_mode = data_mode;
+	f.expected_ready_event = data_mode ? TR_CONN_EVENT_DATA_TX_READY
+	                                   : TR_CONN_EVENT_CONTROL_TX_READY;
 	f.rearm = 129;
 	assert(tr_reactor_call(f.reactor, watch_one, &f) == TR_OK);
 	wait_count(&f, &f.ready, 130);
@@ -290,17 +364,72 @@ static int watch_many(void *arg)
 {
 	struct fixture *f = arg;
 	for (unsigned i = 0; i < f->connection_count; ++i)
-		assert(tr_reactor_watch_control_tx_on_owner(f->connections[i],
-		                                            1) == TR_OK);
+		if (f->mixed_mode) {
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+			assert(tr_reactor_watch_data_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+		} else if (f->data_mode)
+			assert(tr_reactor_watch_data_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
+		else
+			assert(tr_reactor_watch_control_tx_on_owner(
+			               f->connections[i], 1) == TR_OK);
 	assert(f->ready == 0);
 	return TR_OK;
 }
 
-static void test_notification_budget(void)
+static int send_data_once(void *arg)
+{
+	struct fixture *f = arg;
+	int pool_exhausted = 0;
+
+	f->data_payload.data = &f->data_byte;
+	f->data_payload.capacity = 1U;
+	f->data_payload.len = 1U;
+	assert(tr_reactor_send_data_frame_on_owner(f->connections[0], 0, 1U,
+	                                           321, &f->data_payload,
+	                                           &pool_exhausted) == TR_OK);
+	assert(pool_exhausted == 0);
+	return TR_OK;
+}
+
+static void test_watch_after_pool_recovery(void)
+{
+	struct fixture f;
+	struct tr_reactor_stats stats;
+	struct pollfd peer = {0};
+	uint8_t wire[64];
+	ssize_t received;
+
+	init(&f);
+	f.data_mode = 1;
+	f.expected_ready_event = TR_CONN_EVENT_DATA_TX_READY;
+	atomic_store(&f.block_tx, 0);
+	assert(tr_reactor_call(f.reactor, send_data_once, &f) == TR_OK);
+	peer.fd = f.peer[0];
+	peer.events = POLLIN;
+	assert(poll(&peer, 1, 5000) == 1);
+	received = recv(peer.fd, wire, sizeof(wire), 0);
+	assert(received > 0);
+	assert(tr_reactor_get_stats(f.reactor, &stats) == TR_OK);
+	assert(stats.tx_item_pool.current == 0U);
+	assert(tr_reactor_call(f.reactor, watch_one, &f) == TR_OK);
+	wait_count(&f, &f.ready, 1);
+	pthread_mutex_lock(&f.lock);
+	assert(f.observed[0].slot == f.connections[1].slot);
+	pthread_mutex_unlock(&f.lock);
+	destroy(&f);
+}
+
+static void test_notification_budget(int data_mode)
 {
 	struct fixture f;
 	struct tr_reactor_stats stats;
 	init_count(&f, 70);
+	f.data_mode = data_mode;
+	f.expected_ready_event = data_mode ? TR_CONN_EVENT_DATA_TX_READY
+	                                   : TR_CONN_EVENT_CONTROL_TX_READY;
 	assert(tr_reactor_call(f.reactor, watch_many, &f) == TR_OK);
 	wait_count(&f, &f.ready, 70);
 	assert(tr_reactor_get_stats(f.reactor, &stats) == TR_OK);
@@ -309,6 +438,31 @@ static void test_notification_budget(void)
 	pthread_mutex_lock(&f.lock);
 	for (unsigned i = 0; i < 70; ++i)
 		assert(f.observed[i].slot == f.connections[i].slot);
+	pthread_mutex_unlock(&f.lock);
+	destroy(&f);
+}
+
+static void test_mixed_notification_fairness(void)
+{
+	struct fixture f;
+	struct tr_reactor_stats stats;
+
+	init_count(&f, 70);
+	f.mixed_mode = 1;
+	assert(tr_reactor_call(f.reactor, watch_many, &f) == TR_OK);
+	wait_count(&f, &f.ready, 140);
+	assert(tr_reactor_get_stats(f.reactor, &stats) == TR_OK);
+	assert(stats.budget_hits.tx_dispatches != 0U);
+	assert(stats.max_per_turn.tx_dispatches == stats.limits.tx_dispatches);
+	pthread_mutex_lock(&f.lock);
+	for (unsigned i = 0; i < 70; ++i) {
+		assert(f.observed_event[i * 2U] ==
+		       TR_CONN_EVENT_CONTROL_TX_READY);
+		assert(f.observed_event[i * 2U + 1U] ==
+		       TR_CONN_EVENT_DATA_TX_READY);
+		assert(f.observed[i * 2U].slot == f.connections[i].slot);
+		assert(f.observed[i * 2U + 1U].slot == f.connections[i].slot);
+	}
 	pthread_mutex_unlock(&f.lock);
 	destroy(&f);
 }
@@ -357,11 +511,18 @@ static void test_command_capacity(void)
 int main(void)
 {
 	for (int action = 0; action < 4; ++action)
-		test_shared_pool(action);
-	test_producer_release_wakes_owner();
-	test_rearm_without_io();
-	test_notification_budget();
+		test_shared_pool(action, 0);
+	for (int action = 0; action < 4; ++action)
+		test_shared_pool(action, 1);
+	test_producer_release_wakes_owner(0);
+	test_producer_release_wakes_owner(1);
+	test_rearm_without_io(0);
+	test_rearm_without_io(1);
+	test_watch_after_pool_recovery();
+	test_notification_budget(0);
+	test_notification_budget(1);
+	test_mixed_notification_fairness();
 	test_command_capacity();
-	puts("reactor control ready tests passed (8 groups)");
+	puts("reactor TX readiness tests passed (18 groups)");
 	return 0;
 }

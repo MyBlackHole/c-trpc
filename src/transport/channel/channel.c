@@ -193,6 +193,7 @@ struct tr_channel {
 	uint32_t active_message_jobs;
 	uint32_t tx_schedule_cursor;
 	int tx_retry_pending;
+	struct tr_conn_handle tx_waiting_connection;
 	struct tr_conn_handle control_connection;
 	struct tr_conn_handle bulk_connection;
 
@@ -1523,14 +1524,33 @@ tr_channel_tx_fragment_create(struct tr_channel_tx_wire *wire, uint32_t offset,
 	return TR_OK;
 }
 
+static void tr_channel_clear_data_tx_wait_on_owner(struct tr_channel *channel)
+{
+	struct tr_conn_handle waiting = {0};
+
+	pthread_mutex_lock(&channel->lock);
+	waiting = channel->tx_waiting_connection;
+	memset(&channel->tx_waiting_connection, 0,
+	       sizeof(channel->tx_waiting_connection));
+	channel->tx_retry_pending = 0;
+	pthread_mutex_unlock(&channel->lock);
+
+	if (waiting.reactor &&
+	    tr_reactor_in_owner_context_for(channel->reactor))
+		(void)tr_reactor_watch_data_tx_on_owner(waiting, 0);
+}
+
 static void
 tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 {
 	uint32_t attempts = 0U;
 	int retry = 0;
+	int data_pool_retry = 0;
+	struct tr_conn_handle retry_connection = {0};
 
 	if (!channel || !tr_reactor_in_owner_context_for(channel->reactor))
 		return;
+	tr_channel_clear_data_tx_wait_on_owner(channel);
 	while (attempts < TR_CHANNEL_COMPRESSED_TX_BUDGET) {
 		struct tr_channel_tx_fragment *fragment = NULL;
 		struct tr_channel_tx_wire *completed_wire = NULL;
@@ -1544,6 +1564,7 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 		int reset_status = TR_OK;
 		int ret = TR_OK;
 		int selected = 0;
+		int pool_exhausted = 0;
 
 		pthread_mutex_lock(&channel->lock);
 		for (uint32_t scanned = 0U;
@@ -1642,7 +1663,7 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 				frame_flags |= TR_FRAME_F_LAST;
 			ret = tr_reactor_send_data_frame_on_owner(
 			        connection, frame_flags, stream->stream_id,
-			        message_id, &fragment->buffer);
+			        message_id, &fragment->buffer, &pool_exhausted);
 			if (ret == TR_OK) {
 				stream->tx_sent_bytes += frame_len;
 				stream->tx_compressed_offset += frame_len;
@@ -1667,6 +1688,9 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 				selected = 1;
 			} else if (ret == TR_AGAIN) {
 				retry = 1;
+				data_pool_retry = pool_exhausted;
+				if (data_pool_retry)
+					retry_connection = connection;
 				selected = 1;
 			} else {
 				reset_status = ret == TR_ERR_NOMEM
@@ -1707,11 +1731,30 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 		attempts++;
 	}
 
+	int data_pool_watched = 0;
+	if (data_pool_retry) {
+		int watch_ret =
+		        tr_reactor_watch_data_tx_on_owner(retry_connection, 1);
+		if (watch_ret == TR_OK) {
+			pthread_mutex_lock(&channel->lock);
+			if (!channel->state_wait_closed &&
+			    !channel->teardown_detached) {
+				channel->tx_waiting_connection =
+				        retry_connection;
+				data_pool_watched = 1;
+			}
+			pthread_mutex_unlock(&channel->lock);
+			if (!data_pool_watched)
+				(void)tr_reactor_watch_data_tx_on_owner(
+				        retry_connection, 0);
+		}
+	}
 	if (retry || attempts == TR_CHANNEL_COMPRESSED_TX_BUDGET) {
 		pthread_mutex_lock(&channel->lock);
 		channel->tx_retry_pending = 1;
 		pthread_mutex_unlock(&channel->lock);
-		(void)tr_channel_schedule_window_retry(channel);
+		if (!data_pool_watched)
+			(void)tr_channel_schedule_window_retry(channel);
 	}
 }
 
@@ -4243,6 +4286,10 @@ static void tr_channel_on_connection_event(struct tr_conn_handle connection,
 
 	if (event == TR_CONN_EVENT_CONTROL_TX_READY) {
 		tr_channel_open_progress_on_owner(channel);
+		tr_channel_compressed_tx_progress_on_owner(channel);
+		return;
+	}
+	if (event == TR_CONN_EVENT_DATA_TX_READY) {
 		tr_channel_compressed_tx_progress_on_owner(channel);
 		return;
 	}

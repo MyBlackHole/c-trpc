@@ -23,6 +23,11 @@ dev.8 的 [DATA 标志隔离](rpc_v2_data_flag_isolation_20261023.md) 将可定�
 已打开流的非法 DATA 类型标志收敛为单流 RESET；#242 的连接组边界、
 排空竞争及完整错误矩阵仍未完成。
 
+dev.27 的 [DATA TX 容量恢复通知](rpc_v2_data_tx_ready_20261024.md) 为压缩 DATA 分帧
+补上 Reactor 普通发送项池恢复事件，并由 Channel 在 owner 上恢复重试；Release 90/90、
+聚焦 ASan/UBSan 与 TSan 已通过。该切片只覆盖 #247/#241 的一个活性缺口，确定性状态模型、
+故障重放、分层诊断、分域预算和压缩慢消费者矩阵仍待实现，不代表横切验证或资源验收完成。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

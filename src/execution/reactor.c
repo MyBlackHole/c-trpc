@@ -119,7 +119,7 @@ struct tr_tx_pool {
 	uint32_t free_count;
 	uint32_t peak_in_use;
 	uint64_t exhausted_events;
-	/* 由池锁保护；仅控制池有观察者时发布，供跨线程归还容量唤醒。 */
+	/* 由池锁保护；有观察者时发布，供跨线程归还容量唤醒。 */
 	struct tr_reactor *waiter_reactor;
 };
 
@@ -200,6 +200,9 @@ struct tr_connection {
 	int control_tx_pending;
 	struct tr_connection *control_tx_prev;
 	struct tr_connection *control_tx_next;
+	int data_tx_pending;
+	struct tr_connection *data_tx_prev;
+	struct tr_connection *data_tx_next;
 
 	uint32_t epoll_events;
 	int tx_scheduled;
@@ -310,6 +313,10 @@ struct tr_reactor {
 	struct tr_connection *control_tx_head;
 	struct tr_connection *control_tx_tail;
 	uint32_t control_tx_pending_count;
+	struct tr_connection *data_tx_head;
+	struct tr_connection *data_tx_tail;
+	uint32_t data_tx_pending_count;
+	int tx_capacity_next_data;
 
 	/* 由所有者写入；外部快照通过所有者调用串行化。 */
 	struct tr_reactor_stats stats;
@@ -911,6 +918,31 @@ static void tr_control_tx_unwatch(struct tr_reactor *reactor,
 	}
 }
 
+static void tr_data_tx_unwatch(struct tr_reactor *reactor,
+                               struct tr_connection *connection)
+{
+	if (!connection->data_tx_pending)
+		return;
+	if (connection->data_tx_prev)
+		connection->data_tx_prev->data_tx_next =
+		        connection->data_tx_next;
+	else
+		reactor->data_tx_head = connection->data_tx_next;
+	if (connection->data_tx_next)
+		connection->data_tx_next->data_tx_prev =
+		        connection->data_tx_prev;
+	else
+		reactor->data_tx_tail = connection->data_tx_prev;
+	connection->data_tx_prev = connection->data_tx_next = NULL;
+	connection->data_tx_pending = 0;
+	assert(reactor->data_tx_pending_count != 0U);
+	if (--reactor->data_tx_pending_count == 0U) {
+		pthread_mutex_lock(&reactor->tx_pool.lock);
+		reactor->tx_pool.waiter_reactor = NULL;
+		pthread_mutex_unlock(&reactor->tx_pool.lock);
+	}
+}
+
 static void tr_release_tx_queue(struct tr_reactor *reactor,
 				struct tr_connection *connection)
 {
@@ -1023,6 +1055,7 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 	tr_unschedule_tx(reactor, connection);
 	tr_unschedule_rx(reactor, connection);
 	tr_control_tx_unwatch(reactor, connection);
+	tr_data_tx_unwatch(reactor, connection);
 	connection->rx_error_pending = 0;
 	connection->preface_deferred = 0;
 	if (connection->preface_release) {
@@ -2804,24 +2837,83 @@ static int tr_control_tx_ready(struct tr_reactor *reactor)
 	return ready;
 }
 
-static void tr_run_control_tx_ready(struct tr_reactor *reactor,
-                                    struct tr_reactor_turn *turn)
+static int tr_data_tx_ready(struct tr_reactor *reactor)
 {
-	uint32_t remaining = reactor->control_tx_pending_count;
+	int ready;
+
+	if (!reactor->data_tx_head ||
+	    !atomic_load_explicit(&reactor->accepting, memory_order_acquire))
+		return 0;
+	pthread_mutex_lock(&reactor->tx_pool.lock);
+	ready = reactor->tx_pool.free_count != 0U;
+	pthread_mutex_unlock(&reactor->tx_pool.lock);
+	if (!ready)
+		return 0;
+	/* owner 回调也可能需要经过命令队列；队列恢复由 owner 调度自然重查。 */
+	pthread_mutex_lock(&reactor->commands.lock);
+	ready = reactor->commands.count < reactor->commands.capacity &&
+	        !reactor->commands.stop_closed;
+	pthread_mutex_unlock(&reactor->commands.lock);
+	return ready;
+}
+
+static int tr_tx_capacity_ready(struct tr_reactor *reactor)
+{
+	return tr_control_tx_ready(reactor) || tr_data_tx_ready(reactor);
+}
+
+static void tr_run_tx_capacity_ready(struct tr_reactor *reactor,
+                                     struct tr_reactor_turn *turn)
+{
+	uint32_t control_remaining = reactor->control_tx_pending_count;
+	uint32_t data_remaining = reactor->data_tx_pending_count;
 
 	TR_ASSERT_REACTOR_OWNER(reactor);
 	assert(!reactor->command_dispatching);
-	/* 回调可能重新排队，最多访问入口时的等待者数量且共用 TX 预算。
-	 * 跨线程生产者可能抢走观察到的空位，通知不等于容量预留。 */
-	while (remaining && turn->left.tx_dispatches &&
-	       tr_control_tx_ready(reactor)) {
-		struct tr_connection *connection = reactor->control_tx_head;
+	/* 两类池共享 TX 分派预算，并轮转优先级，避免一种通知持续重登记时
+	 * 饥饿另一种。入口计数限制本轮访问量，回调重登记留到后续调度点。 */
+	while ((control_remaining || data_remaining) &&
+	       turn->left.tx_dispatches) {
+		struct tr_connection *connection = NULL;
+		int prefer_data = reactor->tx_capacity_next_data;
+		int selected_data = -1;
 
-		--remaining;
-		--turn->left.tx_dispatches;
-		tr_control_tx_unwatch(reactor, connection);
+		if (prefer_data && data_remaining &&
+		    tr_data_tx_ready(reactor)) {
+			connection = reactor->data_tx_head;
+			--data_remaining;
+			tr_data_tx_unwatch(reactor, connection);
+			selected_data = 1;
+			reactor->tx_capacity_next_data = 0;
+		} else if (!prefer_data && control_remaining &&
+		           tr_control_tx_ready(reactor)) {
+			connection = reactor->control_tx_head;
+			--control_remaining;
+			tr_control_tx_unwatch(reactor, connection);
+			selected_data = 0;
+			reactor->tx_capacity_next_data = 1;
+		} else if (data_remaining && tr_data_tx_ready(reactor)) {
+			connection = reactor->data_tx_head;
+			--data_remaining;
+			tr_data_tx_unwatch(reactor, connection);
+			selected_data = 1;
+			reactor->tx_capacity_next_data = 0;
+		} else if (control_remaining && tr_control_tx_ready(reactor)) {
+			connection = reactor->control_tx_head;
+			--control_remaining;
+			tr_control_tx_unwatch(reactor, connection);
+			selected_data = 0;
+			reactor->tx_capacity_next_data = 1;
+		}
+		if (!connection || selected_data < 0)
+			break;
+
+		turn->left.tx_dispatches--;
 		tr_connection_notify(reactor, connection,
-		                     TR_CONN_EVENT_CONTROL_TX_READY, TR_OK);
+		                     selected_data
+		                             ? TR_CONN_EVENT_DATA_TX_READY
+		                             : TR_CONN_EVENT_CONTROL_TX_READY,
+		                     TR_OK);
 		/* 回调可关闭或复用此槽，之后不再读取 connection。 */
 	}
 }
@@ -2930,6 +3022,7 @@ static void tr_process_set_handler(struct tr_reactor *reactor,
 					  command->generation);
 	if (connection) {
 		tr_control_tx_unwatch(reactor, connection);
+		tr_data_tx_unwatch(reactor, connection);
 		connection->frame_cb = request->frame_cb;
 		connection->event_cb = request->event_cb;
 		connection->callback_arg = request->callback_arg;
@@ -3415,16 +3508,16 @@ static void *tr_reactor_thread_main(void *arg)
 		completions_pending = tr_process_completions(reactor,
 							     &turn.left.completions);
 		timers_pending = tr_process_timers(reactor, &turn);
-		tr_run_control_tx_ready(reactor, &turn);
+		tr_run_tx_capacity_ready(reactor, &turn);
 		tr_run_rx_ready(reactor, &turn);
 		tr_run_tx_ready(reactor, &turn);
-		tr_run_control_tx_ready(reactor, &turn);
+		tr_run_tx_capacity_ready(reactor, &turn);
 		tr_reactor_flush_tx_drained(reactor);
 
 		if (reactor->rx_ready_head || reactor->tx_ready_head ||
 		    commands_pending || completions_pending || timers_pending ||
 		    reactor->tx_drain_check_requested ||
-		    tr_control_tx_ready(reactor))
+		    tr_tx_capacity_ready(reactor))
 			turn.poll_timeout = 0;
 		else
 			turn.poll_timeout = tr_reactor_timer_timeout_ms(reactor);
@@ -3481,7 +3574,7 @@ static void *tr_reactor_thread_main(void *arg)
 		/* I/O 可能越过截止时间，但不会补充定时器或发送预算。 */
 		(void)tr_process_timers(reactor, &turn);
 		tr_run_tx_ready(reactor, &turn);
-		tr_run_control_tx_ready(reactor, &turn);
+		tr_run_tx_capacity_ready(reactor, &turn);
 		tr_reactor_flush_tx_drained(reactor);
 		tr_record_turn(reactor, &turn);
 	}
@@ -3499,6 +3592,7 @@ static void *tr_reactor_thread_main(void *arg)
 	assert(reactor->lifecycle_tx_pending_count == 0U);
 	assert(reactor->tx_drain_pending_count == 0U);
 	assert(reactor->control_tx_pending_count == 0U);
+	assert(reactor->data_tx_pending_count == 0U);
 #endif
 	tr_current_reactor_owner = NULL;
 	return NULL;
@@ -4908,6 +5002,44 @@ int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle handle,
 	return TR_OK;
 }
 
+int tr_reactor_watch_data_tx_on_owner(struct tr_conn_handle handle, int enabled)
+{
+	struct tr_reactor *reactor = handle.reactor;
+	struct tr_connection *connection;
+
+	if (!reactor || handle.slot >= reactor->config.max_connections ||
+	    (enabled != 0 && enabled != 1))
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	connection =
+	        tr_lookup_connection(reactor, handle.slot, handle.generation);
+	if (!connection)
+		return TR_ERR_STALE;
+	if (!enabled) {
+		tr_data_tx_unwatch(reactor, connection);
+		return TR_OK;
+	}
+	if (connection->data_tx_pending)
+		return TR_OK;
+	if (!connection->event_cb)
+		return TR_ERR_STATE;
+	connection->data_tx_prev = reactor->data_tx_tail;
+	connection->data_tx_next = NULL;
+	if (reactor->data_tx_tail)
+		reactor->data_tx_tail->data_tx_next = connection;
+	else
+		reactor->data_tx_head = connection;
+	reactor->data_tx_tail = connection;
+	connection->data_tx_pending = 1;
+	if (reactor->data_tx_pending_count++ == 0U) {
+		pthread_mutex_lock(&reactor->tx_pool.lock);
+		reactor->tx_pool.waiter_reactor = reactor;
+		pthread_mutex_unlock(&reactor->tx_pool.lock);
+	}
+	return TR_OK;
+}
+
 static int
 tr_reactor_send_stream_terminal_on_owner(struct tr_conn_handle handle,
                                          uint16_t type, uint32_t stream_id,
@@ -4972,7 +5104,7 @@ static int tr_reactor_sendv_internal(struct tr_conn_handle connection,
                                      struct tr_buffer *const *payloads,
                                      uint32_t payload_count,
                                      uint32_t max_frame_payload_len,
-                                     int exact_frame)
+                                     int exact_frame, int *pool_exhausted)
 {
 	struct tr_reactor *reactor = connection.reactor;
 	struct tr_tx_item *item;
@@ -4981,6 +5113,8 @@ static int tr_reactor_sendv_internal(struct tr_conn_handle connection,
 	uint32_t i;
 	int ret;
 
+	if (pool_exhausted)
+		*pool_exhausted = 0;
 	if (!reactor || !tr_frame_type_valid(type) ||
 	    (flags & ~TR_FRAME_F_KNOWN_MASK) ||
 	    payload_count > TR_REACTOR_MAX_TX_SLICES ||
@@ -5012,8 +5146,11 @@ static int tr_reactor_sendv_internal(struct tr_conn_handle connection,
 	item = tr_tx_pool_acquire(type == TR_FRAME_DATA ?
 					  &reactor->tx_pool :
 					  &reactor->control_tx_pool);
-	if (!item)
+	if (!item) {
+		if (pool_exhausted)
+			*pool_exhausted = type == TR_FRAME_DATA;
 		return TR_AGAIN;
+	}
 
 	for (i = 0; i < payload_count; ++i)
 		item->payloads[i] = payloads[i];
@@ -5104,17 +5241,20 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 {
 	return tr_reactor_sendv_internal(connection, type, flags, stream_id,
 	                                 message_id, payloads, payload_count,
-	                                 max_frame_payload_len, 0);
+	                                 max_frame_payload_len, 0, NULL);
 }
 
 int tr_reactor_send_data_frame_on_owner(struct tr_conn_handle connection,
                                         uint32_t flags, uint32_t stream_id,
                                         uint64_t message_id,
-                                        struct tr_buffer *payload)
+                                        struct tr_buffer *payload,
+                                        int *pool_exhausted)
 {
 	struct tr_reactor *reactor = connection.reactor;
 	struct tr_buffer *payloads[1];
 
+	if (pool_exhausted)
+		*pool_exhausted = 0;
 	if (!reactor || !payload)
 		return TR_ERR_INVALID;
 	if (!tr_reactor_is_owner_thread(reactor))
@@ -5122,7 +5262,8 @@ int tr_reactor_send_data_frame_on_owner(struct tr_conn_handle connection,
 	payloads[0] = payload;
 	return tr_reactor_sendv_internal(connection, TR_FRAME_DATA, flags,
 	                                 stream_id, message_id, payloads, 1U,
-	                                 reactor->config.max_payload_len, 1);
+	                                 reactor->config.max_payload_len, 1,
+	                                 pool_exhausted);
 }
 
 int tr_reactor_sendv(struct tr_conn_handle connection, uint16_t type,
@@ -5206,6 +5347,7 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 		if (!conn)
 			return TR_ERR_STALE;
 		tr_control_tx_unwatch(reactor, conn);
+		tr_data_tx_unwatch(reactor, conn);
 		conn->frame_cb = frame_cb;
 		conn->event_cb = event_cb;
 		conn->callback_arg = callback_arg;
