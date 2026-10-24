@@ -601,6 +601,49 @@ static void test_tombstone_connection_generation(void)
 	destroy_fixture(&f);
 }
 
+static void test_tombstone_split_connection_identity(void)
+{
+	struct fixture f;
+	enum tr_channel_lane_state control_state = TR_CHANNEL_LANE_UP;
+	enum tr_channel_lane_state bulk_state = TR_CHANNEL_LANE_UP;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle old = open_remote(&f, 0, 1, 1);
+	assert(reset(&f, old, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+
+	/* CONTROL 的墓碑不得跨物理连接吸收 BULK 上相同 ID/原因的 RESET。 */
+	peer_reset(&f, 1, 1, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, 1);
+	assert(f.down_status == TR_ERR_STATE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_channel_get_lane_state(f.channel, TR_LANE_BULK,
+		                                &bulk_state) == TR_OK);
+		if (bulk_state == TR_CHANNEL_LANE_DOWN)
+			break;
+		pause_ms();
+	}
+	assert(bulk_state == TR_CHANNEL_LANE_DOWN);
+	assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
+	                                &control_state) == TR_OK);
+	assert(control_state == TR_CHANNEL_LANE_UP);
+	assert(count(&f, &f.resets) == 1U && count(&f, &f.closed) == 1U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+
+	/* CONTROL 物理连接仍可继续准入、交付并正常终止另一条流。 */
+	struct tr_stream_handle live = open_remote(&f, 0, 3, 2);
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3, 1, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_local_stream_id_exhaustion(void)
 {
 	uint32_t next = UINT32_MAX - 2U;
@@ -1627,6 +1670,7 @@ int main(void)
 	test_local_stream_id_exhaustion_drains();
 	test_late_and_reuse();
 	test_tombstone_connection_generation();
+	test_tombstone_split_connection_identity();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
 	test_closed_reentrant_open_fifo();
