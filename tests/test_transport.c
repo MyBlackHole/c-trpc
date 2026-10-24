@@ -3437,6 +3437,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	struct tr_stream_handle fast_client_stream;
 	struct tr_stream_handle malformed_client_stream;
 	struct tr_stream_handle oversized_client_stream;
+	struct tr_stream_handle invalid_flags_client_stream;
 	struct tr_stream_handle server_stream;
 	struct tr_stream_handle compressed_server_stream;
 	struct tr_stream_handle fast_server_stream;
@@ -3444,6 +3445,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	struct tr_stream_diagnostics compressed_diagnostics = {0};
 	struct tr_stream_diagnostics fast_diagnostics = {0};
 	struct tr_stream_diagnostics malformed_diagnostics;
+	struct tr_stream_diagnostics invalid_flags_diagnostics;
 	struct tr_stream_flow_state flow;
 	struct tr_stream_flow_state fast_flow;
 	struct tr_channel_stats tx_stats = {0};
@@ -3485,7 +3487,10 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	size_t oversized_encoded_len;
 	size_t trailing_encoded_len;
 	size_t boundary_encoded_len;
+	size_t invalid_flags_encoded_len;
 	size_t split_body_len;
+	unsigned client_resets_before;
+	unsigned server_resets_before;
 	int client_fd;
 	int server_fd;
 	int close_ret = TR_AGAIN;
@@ -3944,6 +3949,55 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	                                             1U,
 	                                     (uint32_t)sizeof(trailing_source)},
 	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 9U, 6U, 3U);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &invalid_flags_client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     6U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened, 6U);
+	assert(tr_stream_get_diagnostics(invalid_flags_client_stream,
+	                                 &invalid_flags_diagnostics) == TR_OK);
+	invalid_flags_encoded_len = ZSTD_compress(encoded, sizeof(encoded),
+	                                          source, sizeof(source), 3);
+	assert(!ZSTD_isError(invalid_flags_encoded_len) &&
+	       invalid_flags_encoded_len != 0U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	server_resets_before = fixture.server_ctx.events.resets;
+	assert(fixture.server_ctx.events.received == 6U);
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	pthread_mutex_lock(&fixture.client_ctx.lock);
+	client_resets_before = fixture.client_ctx.resets;
+	pthread_mutex_unlock(&fixture.client_ctx.lock);
+	assert(tr_buffer_acquire(&payload_pool,
+	                         TR_MESSAGE_ENVELOPE_WIRE_SIZE +
+	                                 invalid_flags_encoded_len,
+	                         &payload) == TR_OK);
+	envelope = (struct tr_message_envelope){
+	        TR_MESSAGE_CODEC_ZSTD, (uint32_t)invalid_flags_encoded_len,
+	        source_len};
+	assert(tr_message_envelope_encode(payload->data, &envelope) == TR_OK);
+	memcpy(payload->data + TR_MESSAGE_ENVELOPE_WIRE_SIZE, encoded,
+	       invalid_flags_encoded_len);
+	payload->len = TR_MESSAGE_ENVELOPE_WIRE_SIZE +
+	               (uint32_t)invalid_flags_encoded_len;
+	/* 有效压缩体不能绕过 DATA 类型标志检查，否则会交付错误 lane 的帧。 */
+	assert(tr_reactor_send(fixture.client_connection, TR_FRAME_DATA,
+	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                               TR_FRAME_F_COMPRESSED |
+	                               TR_FRAME_F_LANE_BULK,
+	                       invalid_flags_diagnostics.stream_id, 1U,
+	                       payload) == TR_OK);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.resets,
+	                     server_resets_before + 1U);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.resets,
+	                     client_resets_before + 1U);
+	wait_channel_active_streams(fixture.client, 3U);
+	wait_channel_active_streams(fixture.server, 3U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	assert(fixture.server_ctx.events.received == 6U);
+	assert(fixture.server_ctx.events.last_reset_status == TR_ERR_STATE);
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	wait_for_pool_full(&payload_pool, 3U);
 	assert(tr_buffer_pool_destroy(&payload_pool) == TR_OK);
 

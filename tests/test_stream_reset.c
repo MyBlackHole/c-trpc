@@ -829,6 +829,36 @@ static void test_frozen_discard_credit(int unordered)
 	destroy_fixture(&f);
 }
 
+static void test_reset_rejects_compressed_data_lane_flag(void)
+{
+	struct fixture f;
+	uint8_t bytes[1] = {0};
+	init_fixture(&f, CAPACITY, 1, 1, 1, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle live_stream = open_remote(&f, 1, 3, 2);
+
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	assert(receive_frame(&f, 0).type == TR_FRAME_STREAM_RESET);
+	/* COMPRESSED DATA 在 RESET 状态仍必须遵守 DATA 类型标志合同。
+	 * 控制物理连接上的帧不能伪称来自 BULK lane。 */
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST | TR_FRAME_F_COMPRESSED |
+	                   TR_FRAME_F_LANE_BULK,
+	           1, 1, bytes, sizeof(bytes));
+	wait_count(&f, &f.down, 1);
+	assert(f.down_status == TR_ERR_BAD_FLAGS);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 该错误只关闭对应 CONTROL 物理连接，BULK 上的流仍可交付。 */
+	send_frame(&f, 1, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+	destroy_fixture(&f);
+}
+
 static int control_pressure_owner(void *arg)
 {
 	struct fixture *f = arg;
@@ -1449,6 +1479,7 @@ static void test_wire_shape(uint16_t type)
 
 int main(void)
 {
+	test_reset_rejects_compressed_data_lane_flag();
 	test_wire_shape(TR_FRAME_STREAM_RESET);
 	test_wire_shape(TR_FRAME_STREAM_REFUSED);
 	test_feature_gate();

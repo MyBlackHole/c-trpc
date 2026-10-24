@@ -3694,6 +3694,13 @@ static int tr_channel_handle_compressed_data(struct tr_channel *channel,
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
 	if (stream && stream->state == TR_STREAM_SLOT_RESETTING &&
 	    tr_stream_connection_matches(channel, stream, connection)) {
+		if ((frame->header.flags &
+		     ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+		       TR_FRAME_F_COMPRESSED)) != 0) {
+			pthread_mutex_unlock(&channel->lock);
+			return tr_channel_protocol_error(channel, connection,
+			                                 TR_ERR_BAD_FLAGS);
+		}
 		ret = tr_stream_reset_discard_locked(channel, stream, frame,
 		                                     payload_len);
 		pthread_mutex_unlock(&channel->lock);
@@ -3718,6 +3725,11 @@ static int tr_channel_handle_compressed_data(struct tr_channel *channel,
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection,
 		                                 TR_ERR_STATE);
+	}
+	if ((frame->header.flags & ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                             TR_FRAME_F_COMPRESSED)) != 0) {
+		ret = TR_ERR_STATE;
+		goto fail_stream;
 	}
 	if (!frame->header.message_id ||
 	    frame->header.message_id != stream->next_rx_message_id) {
