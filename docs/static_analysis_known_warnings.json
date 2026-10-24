@@ -54,7 +54,7 @@
       "check": "clang-analyzer-unix.Malloc",
       "column": 10,
       "file": "src/execution/reactor.c",
-      "line": 363,
+      "line": 370,
       "message": "Potential leak of memory pointed to by 'items'",
       "source": "src/execution/reactor.c"
     },

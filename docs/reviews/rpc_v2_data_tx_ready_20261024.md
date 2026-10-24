@@ -26,6 +26,18 @@ DATA 与 CONTROL 容量事件轮转并共享每轮 TX 分派预算。Channel 仅
 - 格式：`scripts/check_source_format.py` 使用 clang-format 18.1.8 检查 6 个变更源码文件，
   0 处失败；merge base 为 `fe4dc8747bcb65168247fed40fb3b32f9f86a59`。
 
+远端 GCC 11 首轮分析比基线多报告一条 `channel.c:1408` 的
+`analyzer-use-after-free`；Clang 14 的 `reactor.c` 告警内容未变，位置从 363 移至 370，
+由本切片前新增的七行源码导致。Clang 精确基线只更新该位置。
+
+GCC 报告路径假设 Stream 的预留分片与压缩任务预留分片同时引用同一 wire。代码路径中，
+任务预留分片由 `calloc` 创建；压缩结果安装时在同一 Channel 锁内移入 Stream 并清空任务
+字段；分片创建会先从预留字段取走对象，再写入 wire；同一流的压缩入口也拒绝同时存在
+压缩任务和待发 wire。以上所有权规则使报告路径在正常状态转移中不可达。该诊断未被删除
+或屏蔽，而是以精确位置和文本加入 GCC 基线，`review_state` 继续保持 `unverified`；
+因此基线仍会阻断任何新增、消失或漂移告警。现有 ASan/UBSan、TSan 与双端压力测试通过，
+但它们不构成所有权转移的完整证明，后续仍需专门的生命周期验证。
+
 Reactor 测试覆盖重复登记、取消、handler 替换、连接关闭与槽复用、跨线程唯一唤醒、
 watch 前容量恢复竞态、各队列 FIFO、混合通知轮转和共享预算。Transport 集成测试使用
 单项 DATA 池、真实双端 Channel 与压缩消息，延后 retry timer 后释放池项，验证 ready

@@ -9,5 +9,14 @@
     "arch": "x86_64",
     "crc32c_portable": false
   },
-  "warnings": []
+  "warnings": [
+    {
+      "unit": "src/transport/channel/channel.c",
+      "file": "src/transport/channel/channel.c",
+      "line": 1408,
+      "column": 16,
+      "check": "analyzer-use-after-free",
+      "message": "use after ‘free’ of ‘wire’ [CWE-416]"
+    }
+  ]
 }
