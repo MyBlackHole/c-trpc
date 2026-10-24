@@ -1196,8 +1196,98 @@ static void test_generations_under_load(void)
 	close_all(&f);
 }
 
-int main(void)
+/* TEST-B1 的有限适配器：只驱动一条固定轨迹，测试真实 Endpoint 对
+ * 可控 Dispatch/时钟事件的反应；不模拟 TCP、线程或生产 Dispatch。 */
+static int replay_component_events(const char *event_list)
 {
+	static const char *const expected[] = {
+	        "OPEN",   "ACCEPT",    "MESSAGE",      "WORK_START",
+	        "CANCEL", "WORK_DONE", "FINAL_STATUS", "SLOT_RELEASE"};
+	static const char expected_argument[] =
+	        "OPEN,ACCEPT,MESSAGE,WORK_START,CANCEL,WORK_DONE,"
+	        "FINAL_STATUS,SLOT_RELEASE";
+	struct fixture f;
+	struct tr_stream_handle stream = {0};
+	if (!event_list || strcmp(event_list, expected_argument) != 0)
+		return 2;
+	init(&f);
+	start(&f);
+	for (size_t index = 0; index < sizeof(expected) / sizeof(expected[0]);
+	     ++index) {
+		switch (index) {
+		case 0: /* OPEN：模型槽 0 / generation 0 映射到 C handle
+		           generation 1。 */
+			stream = open_stream(&f, 0, 1);
+			break;
+		case 1: /* Endpoint 收到 OPENED 并成功创建 Dispatch 句柄。 */
+			CHECK(f.dispatch->calls[0].active &&
+			      f.dispatch->calls[0].stream.slot == stream.slot &&
+			      f.dispatch->calls[0].stream.generation ==
+			              stream.generation);
+			break;
+		case 2: /* 请求进入真实 Endpoint；工作完成由后续事件门控。 */
+			f.hold_work = true;
+			request(&f, stream, 0);
+			CHECK(f.receive_calls == 1 &&
+			      f.dispatch->calls[0].pending);
+			break;
+		case 3: /* 确认工作已排队，但在显式 WORK_DONE 前不完成。 */
+			CHECK(f.hold_work && f.dispatch->calls[0].pending);
+			tick(&f, 2);
+			CHECK(!f.done_calls && !f.reports);
+			break;
+		case 4: /* Dispatch 替身报告取消；Endpoint 负责映射 RESET/终局。
+		         */
+			CHECK(tr_rpc_record_dispatch_abort_on_owner(
+			              f.dispatch->calls[0].handle,
+			              TR_RPC_STATUS_CANCELLED) == TR_OK);
+			tick(&f, 8);
+			CHECK(f.resets == 1 &&
+			      f.reset_reason == TR_ERR_CLOSED &&
+			      !f.done_calls && !f.reports);
+			break;
+		case 5: /* 取消后的迟到工作完成，只允许交付一次终局。 */
+			f.hold_work = false;
+			tick(&f, 12);
+			CHECK(f.done_calls == 1 && f.reports == 1 &&
+			      f.last.status == TR_RPC_STATUS_CANCELLED &&
+			      !f.last.final_accepted && !f.sends &&
+			      f.retire_calls == 1);
+			break;
+		case 6: /* 迟到的重复终局回调必须被真实 Endpoint 忽略。 */
+			f.dispatch->terminal(f.dispatch->calls[0].handle,
+			                     stream, TR_RPC_STATUS_INTERNAL,
+			                     TR_RPC_RECORD_ON_OWNER, true,
+			                     f.dispatch->arg);
+			CHECK(f.reports == 1 && !f.last.final_accepted &&
+			      !f.sends);
+			break;
+		case 7: /* Endpoint 已退役此调用槽；重复回调/持有资源均不允许。
+		         */
+			CHECK(f.retire_calls == 1 &&
+			      !f.dispatch->calls[0].active);
+			break;
+		default:
+			return 2;
+		}
+	}
+	close_all(&f);
+	CHECK(f.reports == 1 && !atomic_load(&f.budget.current_bytes));
+	printf("{\"status\":\"CANCELLED\",\"terminal_callbacks\":%u,"
+	       "\"work_completed\":true,\"final_frames\":%u,"
+	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
+	       "\"quiescent\":true}\n",
+	       f.reports, f.sends, f.retire_calls,
+	       atomic_load(&f.budget.current_bytes));
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	if (argc == 3 && strcmp(argv[1], "--replay-events") == 0)
+		return replay_component_events(argv[2]);
+	if (argc != 1)
+		return 2;
 	test_open_budget_handoff();
 	test_open_clock_failure_resets();
 	test_admission_failure_skips_final_wait();

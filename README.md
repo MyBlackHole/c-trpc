@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.28` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.29` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -21,6 +21,18 @@ dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行
 `python3 scripts/test_rpc_v2_model.py -v` 可执行模型自测。
+dev.29 增加 TEST-B1 确定性组件回放：用同一固定 JSON 轨迹驱动该模型和真实
+RPC Record Endpoint 测试夹具，验证取消后的迟到工作、重复终局回调和资源静默回收。
+夹具的 Reactor、Channel、Dispatch 和 Executor 是受控替身，不覆盖真实 TCP 或生产
+Dispatch 调度；运行 `python3 scripts/test_rpc_v2_component_replay.py -v` 可执行映射自测，
+构建 Release 后可执行模型与组件对照：
+
+```sh
+python3 scripts/rpc_v2_component_replay.py \
+  --binary build/linux/x86_64/release/test_rpc_record_endpoint_contract
+```
+
+该切片不代表 #247 或 V2 验收完成。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、

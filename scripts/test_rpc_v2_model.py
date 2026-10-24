@@ -412,6 +412,7 @@ class TraceFixtureAndCliTests(unittest.TestCase):
     FIXTURE_NAMES = (
         "unaccepted-reject-v1.json",
         "cancel-late-work-v1.json",
+        "component-cancel-late-work-v1.json",
         "budget-transfer-v1.json",
         "stale-generation-v1.json",
         "invalid-double-terminal-v1.json",
