@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "trace_id": "component-deadline-late-work-v1",
+  "task_ids": ["#247/TEST-A", "#247/TEST-B"],
+  "invariant_ids": ["CALL-01", "CALL-02", "OWN-01"],
+  "seed": null,
+  "limits": {"memory_bytes": 0, "max_events": 8},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "ONE", "response_mode": "ONE", "expect": "APPLIED"},
+    {"op": "ACCEPT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "MESSAGE", "slot": 0, "generation": 0, "direction": "REQUEST", "bytes": 1, "expect": "APPLIED"},
+    {"op": "WORK_START", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "DEADLINE", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "WORK_DONE", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "FINAL_STATUS", "slot": 0, "generation": 0, "status": "ERROR", "expect": "REJECTED"},
+    {"op": "SLOT_RELEASE", "slot": 0, "generation": 0, "expect": "APPLIED"}
+  ]
+}

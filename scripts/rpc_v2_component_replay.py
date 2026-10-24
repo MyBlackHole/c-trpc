@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将唯一的 TEST-B1 轨迹映射到真实 RPC Record Endpoint 测试夹具。"""
+"""将 TEST-B1/B2 固定轨迹映射到真实 RPC Record Endpoint 测试夹具。"""
 import argparse
 import json
 import os
@@ -13,10 +13,16 @@ from rpc_v2_model import Trace, TraceFormatError, parse_trace, run_trace
 ROOT = Path(__file__).resolve().parent.parent
 TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-cancel-late-work-v1.json"
-EVENT_SEQUENCE = (
-    "OPEN", "ACCEPT", "MESSAGE", "WORK_START", "CANCEL", "WORK_DONE",
-    "FINAL_STATUS", "SLOT_RELEASE",
-)
+EVENT_SEQUENCES = {
+    "component-cancel-late-work-v1": (
+        "OPEN", "ACCEPT", "MESSAGE", "WORK_START", "CANCEL", "WORK_DONE",
+        "FINAL_STATUS", "SLOT_RELEASE",
+    ),
+    "component-deadline-late-work-v1": (
+        "OPEN", "ACCEPT", "MESSAGE", "WORK_START", "DEADLINE",
+        "WORK_DONE", "FINAL_STATUS", "SLOT_RELEASE",
+    ),
+}
 OBSERVATION_FIELDS = frozenset({
     "status", "terminal_callbacks", "work_completed", "final_frames",
     "retire_calls", "budget_bytes", "quiescent",
@@ -45,8 +51,9 @@ def _event_is(event, op, expect, fields):
 
 def component_event_argument(trace: Trace) -> str:
     """只接受设计中定义的固定 Endpoint 回放轨迹。"""
-    if trace.trace_id != "component-cancel-late-work-v1":
-        _fail(trace, "trace_id", "该组件夹具只支持 component-cancel-late-work-v1")
+    operations = EVENT_SEQUENCES.get(trace.trace_id)
+    if operations is None:
+        _fail(trace, "trace_id", "该组件夹具不支持此 trace_id")
     if not {"#247/TEST-A", "#247/TEST-B"}.issubset(trace.task_ids):
         _fail(trace, "task_ids", "组件轨迹必须关联 TEST-A 和 TEST-B")
     if not {"CALL-01", "CALL-02", "OWN-01"}.issubset(trace.invariant_ids):
@@ -61,7 +68,7 @@ def component_event_argument(trace: Trace) -> str:
         ("ACCEPT", "APPLIED", {}),
         ("MESSAGE", "APPLIED", {"direction": "REQUEST", "bytes": 1}),
         ("WORK_START", "APPLIED", {}),
-        ("CANCEL", "APPLIED", {}),
+        (operations[4], "APPLIED", {}),
         ("WORK_DONE", "APPLIED", {}),
         ("FINAL_STATUS", "REJECTED", {"status": "ERROR"}),
         ("SLOT_RELEASE", "APPLIED", {}),
@@ -72,7 +79,7 @@ def component_event_argument(trace: Trace) -> str:
             zip(trace.events, expected)):
         if not _event_is(event, op, expect, fields):
             _fail(trace, f"events[{index}]", "事件字段/顺序超出组件适配范围")
-    return ",".join(EVENT_SEQUENCE)
+    return ",".join(operations)
 
 
 def _unique_object(pairs):
@@ -172,7 +179,7 @@ def serialize_result(result: dict) -> str:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="RPC V2 TEST-B1 Endpoint 确定性轨迹回放")
+    parser = argparse.ArgumentParser(description="RPC V2 TEST-B Endpoint 确定性轨迹回放")
     parser.add_argument("--binary", required=True, type=Path,
                         help="既有 test_rpc_record_endpoint_contract 二进制")
     parser.add_argument("--trace", type=Path, default=TRACE_PATH,

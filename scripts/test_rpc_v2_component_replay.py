@@ -12,6 +12,8 @@ from rpc_v2_model import parse_trace, run_trace
 ROOT = Path(__file__).resolve().parent.parent
 TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-cancel-late-work-v1.json"
+DEADLINE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
+    "component-deadline-late-work-v1.json"
 
 
 class ComponentMappingTests(unittest.TestCase):
@@ -32,6 +34,27 @@ class ComponentMappingTests(unittest.TestCase):
         self.assertEqual(self.model.budget["available"], 0)
         self.assertEqual(self.model.budget["reserved"], 0)
         self.assertEqual(self.model.budget["held"], 0)
+
+    def test_deadline_late_work_maps_to_fixed_component_event_sequence(self):
+        trace = parse_trace(DEADLINE_TRACE_PATH.read_bytes())
+        model = run_trace(trace)
+        self.assertEqual(model.calls[0]["outcome"], "DEADLINE")
+        self.assertEqual(
+            rpc_v2_component_replay.component_event_argument(trace),
+            "OPEN,ACCEPT,MESSAGE,WORK_START,DEADLINE,WORK_DONE,"
+            "FINAL_STATUS,SLOT_RELEASE")
+        observed = {
+            "status": "DEADLINE",
+            "terminal_callbacks": 1,
+            "work_completed": True,
+            "final_frames": 0,
+            "retire_calls": 1,
+            "budget_bytes": 0,
+            "quiescent": True,
+        }
+        self.assertTrue(
+            rpc_v2_component_replay.compare_observation(
+                trace, model, observed)["matched"])
 
     def test_unsupported_event_order_fails_closed(self):
         changed = replace(self.trace, events=self.trace.events[:-1])

@@ -1196,24 +1196,37 @@ static void test_generations_under_load(void)
 	close_all(&f);
 }
 
-/* TEST-B1 的有限适配器：只驱动一条固定轨迹，测试真实 Endpoint 对
+/* TEST-B1/B2 的有限适配器：只驱动两条固定轨迹，测试真实 Endpoint 对
  * 可控 Dispatch/时钟事件的反应；不模拟 TCP、线程或生产 Dispatch。 */
 static int replay_component_events(const char *event_list)
 {
-	static const char *const expected[] = {
-	        "OPEN",   "ACCEPT",    "MESSAGE",      "WORK_START",
-	        "CANCEL", "WORK_DONE", "FINAL_STATUS", "SLOT_RELEASE"};
-	static const char expected_argument[] =
+	static const char cancel_argument[] =
 	        "OPEN,ACCEPT,MESSAGE,WORK_START,CANCEL,WORK_DONE,"
+	        "FINAL_STATUS,SLOT_RELEASE";
+	static const char deadline_argument[] =
+	        "OPEN,ACCEPT,MESSAGE,WORK_START,DEADLINE,WORK_DONE,"
 	        "FINAL_STATUS,SLOT_RELEASE";
 	struct fixture f;
 	struct tr_stream_handle stream = {0};
-	if (!event_list || strcmp(event_list, expected_argument) != 0)
+	enum tr_rpc_status terminal_status;
+	int expected_reset_reason;
+	const char *status_name;
+	if (!event_list)
 		return 2;
+	if (strcmp(event_list, cancel_argument) == 0) {
+		terminal_status = TR_RPC_STATUS_CANCELLED;
+		expected_reset_reason = TR_ERR_CLOSED;
+		status_name = "CANCELLED";
+	} else if (strcmp(event_list, deadline_argument) == 0) {
+		terminal_status = TR_RPC_STATUS_DEADLINE_EXCEEDED;
+		expected_reset_reason = TR_ERR_TIMEOUT;
+		status_name = "DEADLINE";
+	} else {
+		return 2;
+	}
 	init(&f);
 	start(&f);
-	for (size_t index = 0; index < sizeof(expected) / sizeof(expected[0]);
-	     ++index) {
+	for (size_t index = 0; index < 8; ++index) {
 		switch (index) {
 		case 0: /* OPEN：模型槽 0 / generation 0 映射到 C handle
 		           generation 1。 */
@@ -1236,21 +1249,21 @@ static int replay_component_events(const char *event_list)
 			tick(&f, 2);
 			CHECK(!f.done_calls && !f.reports);
 			break;
-		case 4: /* Dispatch 替身报告取消；Endpoint 负责映射 RESET/终局。
-		         */
+		case 4: /* Dispatch 替身报告取消或截止；Endpoint 映射
+		           RESET/终局。 */
 			CHECK(tr_rpc_record_dispatch_abort_on_owner(
 			              f.dispatch->calls[0].handle,
-			              TR_RPC_STATUS_CANCELLED) == TR_OK);
+			              terminal_status) == TR_OK);
 			tick(&f, 8);
 			CHECK(f.resets == 1 &&
-			      f.reset_reason == TR_ERR_CLOSED &&
+			      f.reset_reason == expected_reset_reason &&
 			      !f.done_calls && !f.reports);
 			break;
-		case 5: /* 取消后的迟到工作完成，只允许交付一次终局。 */
+		case 5: /* 终局后的迟到工作完成，只允许交付一次终局。 */
 			f.hold_work = false;
 			tick(&f, 12);
 			CHECK(f.done_calls == 1 && f.reports == 1 &&
-			      f.last.status == TR_RPC_STATUS_CANCELLED &&
+			      f.last.status == terminal_status &&
 			      !f.last.final_accepted && !f.sends &&
 			      f.retire_calls == 1);
 			break;
@@ -1273,11 +1286,11 @@ static int replay_component_events(const char *event_list)
 	}
 	close_all(&f);
 	CHECK(f.reports == 1 && !atomic_load(&f.budget.current_bytes));
-	printf("{\"status\":\"CANCELLED\",\"terminal_callbacks\":%u,"
+	printf("{\"status\":\"%s\",\"terminal_callbacks\":%u,"
 	       "\"work_completed\":true,\"final_frames\":%u,"
 	       "\"retire_calls\":%u,\"budget_bytes\":%zu,"
 	       "\"quiescent\":true}\n",
-	       f.reports, f.sends, f.retire_calls,
+	       status_name, f.reports, f.sends, f.retire_calls,
 	       atomic_load(&f.budget.current_bytes));
 	return 0;
 }

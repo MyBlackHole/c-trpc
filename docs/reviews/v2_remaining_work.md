@@ -42,6 +42,11 @@ Draft PR #318 的实现提交 `f3fc0abb2766fc24bb6c737cd9f03d0702f4343c` 已通�
 检查，仍未合并；完整边界与本地/远端证据见
 [TEST-B1 记录](rpc_v2_component_replay_20261024.md)。
 
+dev.30 的 TEST-B2 在 TEST-B1 上增加 Deadline 终局后迟到工作的组件轨迹，验证 TIMEOUT RESET、
+唯一终局和预算归还。它仍是受控下层交错，不代表真实 Dispatch 调度或 TCP 集成。本地 GCC
+Debug/Release 全量各 90/90，模型 28/28、组件映射 9/9、Endpoint 夹具 35/35；Draft PR #319
+远程验收待运行，证据见[TEST-B2 记录](rpc_v2_deadline_component_replay_20261024.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -74,7 +79,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
 | 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
-| 横切验证 | TEST-A L1 模型已实现且 PR #317 的 14/14 检查通过，合并待办；TEST-B1 单条真实 Endpoint 组件回放完成本地验证，后续真实网络/派发、TEST-C 故障注入与缩减、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能仍待完成 | #247 |
+| 横切验证 | TEST-A PR #317 与 TEST-B1 PR #318 均已通过 14/14 GitHub 检查但待合并；TEST-B2 Deadline 组件轨迹本地验证通过、远程 CI 待验收；TEST-B 完整事件字母表、真实网络/派发、TEST-C 故障注入与缩减、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能仍待完成 | #247 |
 | 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
 
 长期治理 #249 属于持续维护职责。正式发布仍需完成上述有限范围的实现和验收；当前不得把 dev 预览称为已完成的 V2。
