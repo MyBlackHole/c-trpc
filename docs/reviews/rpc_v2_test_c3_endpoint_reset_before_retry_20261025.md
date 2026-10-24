@@ -41,10 +41,16 @@ Python 适配器拒绝未知轨迹与事件顺序，并比较固定模型和真�
 [#323](https://github.com/MyBlackHole/c-trpc/pull/323)，base 为
 `feat/v2-test-c1-deterministic-shrinker-247`；PR 未合并。旧 head
 `db4070c381c87dac0af0a5440ff9d9627bf36a40` 的 14 项 GitHub 检查为 11 项成功、3 项取消。
-GCC 全量构建/测试和 GCC TSan RPC smoke 的测试命令与制品上传均完成，随后日志停在 runner 的
-`Cleaning up orphan processes` 并超时；日志未包含残留 PID，所以具体根因尚未确定。新增/修改源码行格式工作流因
-10 分钟超时且零步骤而取消，已按用户要求移除。两个受影响的既有 job 现在会在 runner 收尾前打印进程快照，
-用于定位新 head 若再次挂起时的残留 PID。C3 新 head 的远端检查尚待推送后确认。
+旧 head 的 GCC 全量构建/测试和 GCC TSan RPC smoke 的测试命令与制品上传均完成，随后日志停在 runner 的
+`Cleaning up orphan processes` 并超时；旧日志没有残留 PID。新增/修改源码行格式工作流因 10 分钟超时且零步骤
+而取消，已按用户要求移除。
+
+C3 head `a858dd21fb5c3225cb4bf8b53aa5edc9ba0953d6` 的 Draft PR 远端检查为 13/13 成功（8 项 CI、5 项 RPC
+smoke）。GCC 远端 Debug/Release 各 90/90，格式工具自测 22/22，C3 回放 `matched=true`。GCC 全量 job 和 GCC
+TSan smoke 的收尾快照均未发现 `xmake`、测试二进制、`bench_rpc` 或 Python harness 残留；两个 job 都正常结束。
+旧超时在新 head 未复现，现有证据倾向于当时 hosted runner 的清理异常，但旧日志缺少 PID，无法据此证明具体
+历史根因。检查结果见 [CI 运行](https://github.com/MyBlackHole/c-trpc/actions/runs/40115911176) 和
+[RPC smoke 运行](https://github.com/MyBlackHole/c-trpc/actions/runs/40115911209)。
 
 本切片只验证一条固定 Endpoint 竞态窗口。通用生产 C 故障时序、TEST-B 完整事件字母表、真实网络/派发、TEST-D
 平台矩阵、TEST-E 分层诊断、40k 容量性能，以及 #248 与 #239 总体验收仍待完成；当前不能宣称 RPC V2 已完成。
