@@ -3,6 +3,8 @@
 日期：2026-10-24。基线：`feat/rpc-v2-call-ref-243`，提交
 `fe4dc8747bcb65168247fed40fb3b32f9f86a59`。本地分支：
 `fix/v2-data-tx-ready-247`。版本：`2.0.0-dev.26 -> 2.0.0-dev.27`。
+交付提交：`73beef33a3e4bb09c5ec0bfbe53071f48cc809c2`；Draft PR：
+[#316](https://github.com/MyBlackHole/c-trpc/pull/316)，base 为 CallRef 分支。
 
 ## 范围
 
