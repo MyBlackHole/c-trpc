@@ -5,6 +5,7 @@
 #include "../src/execution/reactor_internal.h"
 #include "../src/crc32c.h"
 #include "../src/endian.h"
+#include "../src/memory_budget.h"
 #include "tr/status.h"
 
 #include <assert.h>
@@ -155,6 +156,17 @@ static void wait_count(struct fixture *f, unsigned *counter, unsigned target)
 		assert(pthread_cond_timedwait(&f->cond, &f->lock, &deadline) ==
 		       0);
 	assert(pthread_mutex_unlock(&f->lock) == 0);
+}
+
+static void assert_fixed_history_budget(
+	struct tr_memory_budget *budget, uint64_t fixed_bytes)
+{
+	struct tr_memory_budget_stats stats;
+
+	tr_memory_budget_get_stats(budget, &stats);
+	assert(stats.current_bytes == fixed_bytes);
+	assert(stats.peak_bytes == fixed_bytes);
+	assert(stats.rejection_events == 0U);
 }
 
 static unsigned count(struct fixture *f, const unsigned *counter)
@@ -332,7 +344,8 @@ static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
 static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
                                        int split, uint64_t features,
                                        uint64_t required, int handshake,
-                                       uint32_t commands)
+                                       uint32_t commands,
+                                       struct tr_memory_budget *memory_budget)
 {
 	const struct tr_reactor_config rc = {.max_connections = 2,
 	                                     .command_capacity = commands,
@@ -351,7 +364,8 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	        .window_update_threshold_bytes = 128,
 	        .max_message_bytes = WINDOW,
 	        .feature_bits = features,
-	        .required_feature_bits = required};
+	        .required_feature_bits = required,
+	        .memory_budget = memory_budget};
 	memset(f, 0, sizeof(*f));
 	f->peer[0] = f->peer[1] = -1;
 	f->split = split;
@@ -400,7 +414,7 @@ static void init_fixture(struct fixture *f, uint32_t capacity, int split,
                          uint64_t features, uint64_t required, int handshake)
 {
 	init_fixture_with_commands(f, capacity, split, features, required,
-	                           handshake, COMMANDS);
+	                           handshake, COMMANDS, NULL);
 }
 
 static void destroy_fixture(struct fixture *f)
@@ -1431,7 +1445,7 @@ static int repeat_goaway_owner(void *arg)
 static void test_repeat_goaway_fifo(void)
 {
 	struct fixture f;
-	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256);
+	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256, NULL);
 	(void)open_remote(&f, 0, 1, 1);
 	assert(tr_reactor_timer_register(f.reactor, repeat_goaway, &f,
 	                                 &repeat_goaway_timer) == TR_OK);
@@ -1591,8 +1605,23 @@ enum invalid_kind {
 static void test_invalid(enum invalid_kind kind)
 {
 	struct fixture f;
+	struct tr_memory_budget budget;
+	uint64_t fixed_bytes = 0U;
 	uint8_t bytes[8] = {0};
-	init_fixture(&f, 2, 0, 1, 1, 1);
+	if (kind == EVICTED_RESET) {
+		struct tr_memory_budget_stats stats;
+
+		tr_memory_budget_init(&budget, 0U);
+		init_fixture_with_commands(&f, 2U, 0, 1U, 1U, 1, COMMANDS,
+		                           &budget);
+		tr_memory_budget_get_stats(&budget, &stats);
+		fixed_bytes = stats.current_bytes;
+		assert(fixed_bytes > 0U);
+		budget.limit_bytes = fixed_bytes;
+		assert_fixed_history_budget(&budget, fixed_bytes);
+	} else {
+		init_fixture(&f, 2, 0, 1, 1, 1);
+	}
 	struct tr_stream_handle stream = open_remote(&f, 0, 1, 1);
 	if (kind == BAD_PARTIAL || kind == EXCESS_CREDIT) {
 		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
@@ -1606,7 +1635,13 @@ static void test_invalid(enum invalid_kind kind)
 	} else {
 		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
 		finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+		if (kind == EVICTED_RESET)
+			assert_fixed_history_budget(&budget, fixed_bytes);
 		if (kind == EVICTED_RESET) {
+			/* FIFO 中仍保留的墓碑必须吸收重复 RESET。 */
+			peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+			barrier(&f, 0);
+			assert_fixed_history_budget(&budget, fixed_bytes);
 			for (unsigned i = 1; i <= 2; ++i) {
 				stream =
 				        open_remote(&f, 0, 2U * i + 1U, i + 1U);
@@ -1614,6 +1649,7 @@ static void test_invalid(enum invalid_kind kind)
 				       TR_OK);
 				finish_reset(&f, 0, 2U * i + 1U, TR_ERR_CLOSED,
 				             TR_ERR_CLOSED, i + 1U);
+				assert_fixed_history_budget(&budget, fixed_bytes);
 			}
 			peer_reset(&f, 0, 1, TR_ERR_CLOSED);
 		} else if (kind == UNKNOWN_RESET)
@@ -1631,6 +1667,14 @@ static void test_invalid(enum invalid_kind kind)
 	wait_count(&f, &f.down, 1);
 	assert(tr_channel_active_streams(f.channel) == 0);
 	destroy_fixture(&f);
+	if (kind == EVICTED_RESET) {
+		struct tr_memory_budget_stats stats;
+
+		tr_memory_budget_get_stats(&budget, &stats);
+		assert(stats.current_bytes == 0U);
+		assert(stats.peak_bytes == fixed_bytes);
+		assert(stats.rejection_events == 0U);
+	}
 }
 
 static void test_split_frontier(void)

@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.60` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.61` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -213,6 +213,13 @@ dev.59 扩展双组真实 TCP 故障回归：两个 Client Reactor 通过测试�
 
 dev.60 在 dev.59 场景中加入第二轮双组并发故障与替代：第一轮替代成员成功交付后立即再次失效，两组旧 transfer 再次变为 stale；第二代新物理成员分别恢复并交付。关闭 A 组后 B 组仍可发送，最终独立排空。完整门面测试 Release 连续 8/8 与 TSan 均通过。验证同时修正两个压缩 drain 测试把合法 `TR_AGAIN` 销毁结果当作终态的问题，改用现有有界重试辅助；不改生产代码。压力资源竞争和完整 ERR-D 矩阵仍待覆盖。详见
 [双组重复故障与快速替代记录](docs/reviews/rpc_v2_group_repeated_failure_replacement_20261025.md)。
+
+dev.61 为 #242/ERR-E 增加 RESET 墓碑固定预算回归：用带真实 `tr_memory_budget` 的容量为 2 的
+Channel 完成三条流的 RESET，使最早墓碑被 FIFO 淘汰；在墓碑仍驻留时重复 RESET 必须被吸收，
+淘汰后旧 RESET 必须按未知流错误关闭连接。整个周转过程中预算当前值和峰值保持在 Channel 创建时的
+固定值，且没有预算拒绝；销毁后当前值归零。GCC Release 与 TSan 下完整 `test_stream_reset` 均通过。
+这验证墓碑不按 RESET 数量增量占用预算，不覆盖高频 CPU 成本及更大规模资源压力矩阵。详见
+[RESET 墓碑固定预算回归记录](docs/reviews/rpc_v2_reset_tombstone_fixed_budget_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
