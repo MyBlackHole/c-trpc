@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.55` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.56` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -198,6 +198,9 @@ dev.54 在双成员场景中补上 DATA 发送在途与排空的交错：测试�
 
 dev.55 增加 Zstandard 压缩任务在途取消与 drain 交错：worker 完成压缩但暂停在结果回调前；Client/Server 开始 drain 后释放客户端 transfer，Client 仍因压缩任务持有的输入字节未归还而等待。放开 worker 后，取消结果收敛且不会向服务端发送已撤销 transfer 的消息；输入字节归还后 Client drain 完成，Server 继续等待 DATA 连接关闭。GCC Release 与 TSan 下完整 `test_connection_group_facade` 均通过。该用例不覆盖压缩完成后已编码 wire 在 Reactor TX 中的发送排空。详见
 [Zstandard 任务取消排空记录](docs/reviews/rpc_v2_group_compression_cancel_drain_20261025.md)。
+
+dev.56 修复连接组服务端 drain 与 Zstandard DATA 完成回调的冲突：现有 DATA 成员上的压缩消息在 drain 期间仍按连接/路由代次校验后交付，不再因 listener 的 drain 标志被静默丢弃。回归先暂停客户端压缩完成回调，再开始双端 drain 并阻塞压缩 wire 的 socket 发送；放开发送后服务端收到消息，Client 在 wire 归还后完成 drain，Server 继续等待连接关闭。GCC Release 与 TSan 下完整 `test_connection_group_facade` 均通过。详见
+[压缩 wire 在途排空修复记录](docs/reviews/rpc_v2_group_compressed_wire_drain_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

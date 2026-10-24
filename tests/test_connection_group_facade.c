@@ -275,6 +275,7 @@ struct public_group_ctx {
 	unsigned retry_messages;
 	unsigned multi_drain_messages;
 	unsigned inflight_drain_messages;
+	unsigned compressed_drain_messages;
 	unsigned compressed_frames;
 	unsigned compressed_first;
 	unsigned compressed_last;
@@ -518,6 +519,21 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 		pthread_mutex_unlock(&ctx->lock);
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 	}
+	if (message->message_id == UINT64_C(6503)) {
+		assert(message->stream_id == 5001U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 64U);
+		for (uint32_t i = 0U; i < message->bytes.len; ++i)
+			assert(message->bytes.data[i] ==
+			       (uint8_t)(i * 29U + 7U));
+		pthread_mutex_lock(&ctx->lock);
+		ctx->compressed_drain_messages++;
+		ctx->messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
 
 	assert(message->stream_id == 5001U);
 	if (message->message_id == UINT64_C(4202)) {
@@ -627,6 +643,8 @@ static const char *counter_name(
 		return "multi_drain_messages";
 	if (counter == &ctx->inflight_drain_messages)
 		return "inflight_drain_messages";
+	if (counter == &ctx->compressed_drain_messages)
+		return "compressed_drain_messages";
 	if (counter == &ctx->compressed_done)
 		return "compressed_done";
 	if (counter == &ctx->transfer_ready)
@@ -2440,6 +2458,144 @@ static void test_public_connection_group_drain_with_compression_inflight(void)
 	puts("connection_group_facade: compression drain passed");
 }
 
+static void test_public_connection_group_drain_with_compressed_wire_inflight(
+        void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group = {TEST_GROUP_ID, TEST_GROUP_EPOCH};
+	struct tr_connection_group_client_stats client_stats;
+	struct tr_connection_group_server_stats server_stats;
+	struct tr_transport_bytes bytes;
+	uint8_t source[64];
+	uint16_t group_port = 0U;
+	unsigned i;
+
+	atomic_store(&group_capability_frames_sent, 0U);
+	atomic_store(&block_group_data_tx, 0);
+	atomic_store(&hold_group_zstd_completion, 0);
+	pthread_mutex_lock(&group_zstd_gate_lock);
+	group_zstd_gate_entered = 0;
+	group_zstd_gate_released = 0;
+	pthread_mutex_unlock(&group_zstd_gate_lock);
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.receive_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	server_config.connection_groups.max_encoded_message_bytes = 4096U;
+	server_config.connection_groups.max_inflight_compressed_messages = 1U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 1U;
+	client_config.connection_groups.max_active_transfers = 1U;
+	client_config.connection_groups.send_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	client_config.connection_groups.max_encoded_message_bytes = 3072U;
+	client_config.connection_groups.on_transfer_ready =
+	        on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	ctx.client = client;
+	assert(tr_client_connection_group_connect(client, "127.0.0.1",
+	                                          group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_data_offer(server, UINT64_C(6501)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	wait_group_capability_frames(2U);
+	assert(tr_server_connection_group_send_transfer_ready(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U,
+		       UINT64_C(6502)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+
+	for (i = 0U; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i * 29U + 7U);
+	bytes.data = source;
+	bytes.len = sizeof(source);
+	atomic_store(&hold_group_zstd_completion, 1);
+	assert(tr_client_connection_group_send_with_compression(
+		       client, 5001U, UINT64_C(6503), &bytes,
+		       TR_CONNECTION_GROUP_COMPRESSION_ZSTD) == TR_OK);
+	wait_group_compression_worker_entered();
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	/* 编码完成后把压缩 wire 保留在 Reactor TX 队列；此时释放逻辑
+	 * transfer，排空仍必须等待被接受的 wire 真正发送并归还缓冲。 */
+	pthread_mutex_lock(&group_data_tx_probe_lock);
+	group_data_tx_blocked_attempts = 0U;
+	pthread_mutex_unlock(&group_data_tx_probe_lock);
+	atomic_store(&block_group_data_tx, 1);
+	release_group_zstd_gate();
+	wait_group_data_tx_blocked();
+	assert(tr_client_connection_group_release_transfer(client, 5001U) ==
+	       TR_OK);
+	memset(&client_stats, 0, sizeof(client_stats));
+	assert(tr_client_connection_group_get_stats(
+		       client, &client_stats) == TR_OK);
+	assert(client_stats.active_transfers == 0U &&
+	       client_stats.send_bytes_inflight == sizeof(source));
+	assert(tr_client_connection_group_wait_drained(
+		       client, 1U) == TR_ERR_TIMEOUT);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	atomic_store(&block_group_data_tx, 0);
+	wait_group_client_send_bytes_empty(client);
+	wait_counter(&ctx, &ctx.compressed_drain_messages, 1U);
+	assert(tr_client_connection_group_wait_drained(
+		       client, 5000U) == TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+		       server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5001U) == TR_OK);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 1U) == TR_ERR_TIMEOUT);
+
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_counter(&ctx, &ctx.data_events, 1U);
+	assert(tr_server_connection_group_wait_drained(
+		       server, 5000U) == TR_OK);
+	memset(&server_stats, 0, sizeof(server_stats));
+	assert(tr_server_connection_group_get_stats(
+		       server, &server_stats) == TR_OK);
+	assert(server_stats.groups_current == 0U &&
+	       server_stats.connections_current == 0U &&
+	       server_stats.data_connections_current == 0U &&
+	       server_stats.active_transfers == 0U);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_client_destroy_after_group_close(client);
+	assert(tr_server_destroy(server) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("connection_group_facade: compressed wire drain passed");
+}
+
 static void test_client_compression_reactor_tx_pool_saturation(void)
 {
 	struct tr_server_config server_config;
@@ -2808,6 +2964,7 @@ int main(void)
 	test_public_connection_group_multi_data_drain();
 	test_client_compression_completion_after_route_replacement();
 	test_public_connection_group_drain_with_compression_inflight();
+	test_public_connection_group_drain_with_compressed_wire_inflight();
 	test_client_compression_reactor_tx_pool_saturation();
 	test_public_connection_group_client_connector_failure_wakes();
 	test_public_connection_group_client_drain_cancels_offer();
