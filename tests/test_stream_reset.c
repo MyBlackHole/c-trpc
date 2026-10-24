@@ -528,6 +528,79 @@ static void test_late_and_reuse(void)
 	destroy_fixture(&f);
 }
 
+static void test_tombstone_connection_generation(void)
+{
+	struct fixture f;
+	struct tr_stream_handle old_stream;
+	struct tr_conn_handle old_connection, new_connection;
+	enum tr_connection_state connection_state;
+	enum tr_channel_lane_state lane_state = TR_CHANNEL_LANE_UP;
+	unsigned down_before;
+	int slot_free = 0;
+	int sockets[2];
+	init_fixture(&f, CAPACITY, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	old_stream = open_remote(&f, 0, 1, 1);
+	old_connection = f.connection[0];
+	assert(reset(&f, old_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+
+	/* 先让旧连接完全退役；墓碑仍留在逻辑 Channel 的有界历史里。 */
+	assert(close(f.peer[0]) == 0);
+	f.peer[0] = f.peer[1] = -1;
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
+		                                &lane_state) == TR_OK);
+		if (lane_state == TR_CHANNEL_LANE_DOWN)
+			break;
+		pause_ms();
+	}
+	assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	wait_count(&f, &f.down, 1U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		int ret = tr_reactor_get_connection_state(old_connection,
+		                                        &connection_state);
+		if (ret == TR_ERR_STALE) {
+			slot_free = 1;
+			break;
+		}
+		assert(ret == TR_OK);
+		if (connection_state == TR_CONN_FREE) {
+			slot_free = 1;
+			break;
+		}
+		pause_ms();
+	}
+	assert(slot_free);
+
+	/* 同一 Reactor 槽位重用，但新连接必须使用不同代次。 */
+	assert(socketpair(AF_UNIX,
+	                  SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+	                  sockets) == 0);
+	assert(tr_reactor_adopt_fd(f.reactor, sockets[0], &new_connection) ==
+	       TR_OK);
+	assert(new_connection.slot == old_connection.slot);
+	assert(new_connection.generation != old_connection.generation);
+	f.connection[0] = f.connection[1] = new_connection;
+	f.peer[0] = f.peer[1] = sockets[1];
+	atomic_store(&partial_fd, sockets[0]);
+	assert(tr_channel_replace_connection(f.channel, TR_LANE_CONTROL,
+	                                    new_connection) == TR_OK);
+	assert(receive_frame(&f, 0).type == TR_FRAME_HELLO);
+	hello(&f, 0, TR_CHANNEL_FEATURE_STREAM_RESET, 0);
+	assert(receive_frame(&f, 0).type == TR_FRAME_HELLO_ACK);
+	assert(tr_channel_wait_ready(f.channel, TR_LANE_CONTROL, 5000) ==
+	       TR_OK);
+
+	/* 旧连接的同 ID/原因墓碑不得吞掉新代次上的未知 RESET。 */
+	down_before = count(&f, &f.down);
+	peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, down_before + 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_local_stream_id_exhaustion(void)
 {
 	uint32_t next = UINT32_MAX - 2U;
@@ -1553,6 +1626,7 @@ int main(void)
 	test_local_stream_id_exhaustion();
 	test_local_stream_id_exhaustion_drains();
 	test_late_and_reuse();
+	test_tombstone_connection_generation();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
 	test_closed_reentrant_open_fifo();
