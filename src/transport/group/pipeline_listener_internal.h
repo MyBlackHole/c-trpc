@@ -6,7 +6,10 @@
 #include "../../group/pipeline_route_internal.h"
 #include "../../execution/reactor.h"
 #include "../../io/tls_provider_operation_internal.h"
+#include "../../runtime/message_service.h"
 #include "tr/transport.h"
+
+struct tr_memory_budget;
 
 struct tr_pipeline_listener;
 
@@ -33,6 +36,17 @@ struct tr_pipeline_listener_config {
 	uint32_t stream_affinity_capacity_per_pipeline;
 	uint32_t control_message_count;
 	uint32_t authorization_capacity;
+	uint32_t receive_compression_algorithms;
+	uint32_t max_message_bytes;
+	uint32_t max_encoded_message_bytes;
+	uint32_t message_task_capacity;
+	int (*message_submit)(void *context, struct tr_message *input,
+	                      const struct tr_message_transform_config *config,
+	                      tr_message_service_done_fn done, void *arg,
+	                      struct tr_task_handle *handle);
+	int (*message_cancel)(void *context, struct tr_task_handle handle);
+	void *message_context;
+	struct tr_memory_budget *message_budget;
 	struct tr_tls_openssl_profile *tls_profile;
 	struct tr_tls_provider_operation_table *authorization_operations;
 	/* TRR1 的绝对总期限；0 采用 10000ms 默认值，不随字节到达续期。 */

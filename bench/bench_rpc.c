@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +18,7 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
+#include <zstd.h>
 
 /* Standalone diagnostic; open-loop mode is bounded by explicit in-flight slots. */
 #define SERVICE 1U
@@ -24,15 +27,84 @@
 #define METHOD_SLOW 3U
 #define MAX_PAYLOAD (1024U * 1024U)
 #define PHASE_GUARD_NS UINT64_C(60000000000)
+#define BENCH_COMPRESS_REQUEST 1U
+#define BENCH_COMPRESS_RESPONSE 2U
 
 struct options {
 	const char *role;
 	const char *host;
 	const char *scenario;
+	const char *tls_ca_file, *tls_cert_file, *tls_key_file;
 	uint32_t port, requests, window, warmup, small_bytes, bulk_bytes;
 	uint32_t bulk_every, timeout_ms, slow_ms, capacity, start_gate;
 	uint32_t rate_rps;
+	uint32_t compression, tls;
 };
+
+struct method_context {
+	uint32_t delay_ms;
+	uint32_t compression;
+};
+
+extern void *__real_malloc(size_t size);
+extern void *__real_calloc(size_t count, size_t size);
+extern void *__real_realloc(void *pointer, size_t size);
+
+static atomic_bool allocation_tracking;
+static atomic_uint_fast64_t tracked_allocation_calls;
+static atomic_uint_fast64_t tracked_allocation_bytes;
+
+void *__wrap_malloc(size_t size)
+{
+	void *pointer = __real_malloc(size);
+	if (atomic_load_explicit(&allocation_tracking, memory_order_relaxed)) {
+		atomic_fetch_add_explicit(&tracked_allocation_calls, 1U,
+		                          memory_order_relaxed);
+		atomic_fetch_add_explicit(&tracked_allocation_bytes, size,
+		                          memory_order_relaxed);
+	}
+	return pointer;
+}
+
+void *__wrap_calloc(size_t count, size_t size)
+{
+	void *pointer = __real_calloc(count, size);
+	if (atomic_load_explicit(&allocation_tracking, memory_order_relaxed)) {
+		atomic_fetch_add_explicit(&tracked_allocation_calls, 1U,
+		                          memory_order_relaxed);
+		if (size == 0U || count <= SIZE_MAX / size)
+			atomic_fetch_add_explicit(&tracked_allocation_bytes,
+			                          (uint64_t)count * size,
+			                          memory_order_relaxed);
+	}
+	return pointer;
+}
+
+void *__wrap_realloc(void *old_pointer, size_t size)
+{
+	void *pointer = __real_realloc(old_pointer, size);
+	if (atomic_load_explicit(&allocation_tracking, memory_order_relaxed)) {
+		atomic_fetch_add_explicit(&tracked_allocation_calls, 1U,
+		                          memory_order_relaxed);
+		atomic_fetch_add_explicit(&tracked_allocation_bytes, size,
+		                          memory_order_relaxed);
+	}
+	return pointer;
+}
+
+static void allocation_tracking_begin(void)
+{
+	atomic_store_explicit(&tracked_allocation_calls, 0U, memory_order_relaxed);
+	atomic_store_explicit(&tracked_allocation_bytes, 0U, memory_order_relaxed);
+	atomic_store_explicit(&allocation_tracking, true, memory_order_relaxed);
+}
+
+static void allocation_tracking_end(uint64_t *calls, uint64_t *bytes)
+{
+	atomic_store_explicit(&allocation_tracking, false, memory_order_relaxed);
+	*calls = atomic_load_explicit(&tracked_allocation_calls, memory_order_relaxed);
+	*bytes = atomic_load_explicit(&tracked_allocation_bytes, memory_order_relaxed);
+}
 
 struct sample {
 	uint64_t scheduled_ns, start_ns, submit_ns, end_ns;
@@ -140,7 +212,8 @@ static void usage(const char *program)
 	        "--window N\n"
 	        "  --warmup N --small-bytes N --bulk-bytes N --bulk-every N\n"
 	        "  --timeout-ms N --slow-ms N --capacity N --start-gate 0|1\n"
-	        "  --rate-rps N\n"
+	        "  --rate-rps N --compression none|request|response|zstd --tls 0|1\n"
+	        "  TLS paths: --tls-ca FILE --tls-cert FILE --tls-key FILE\n"
 	        "Server binds loopback by default, prints readiness JSON, and "
 	        "exits on stdin EOF.\n"
 	        "pressure uses the delayed method, then measures recovery on "
@@ -179,6 +252,21 @@ static struct options parse_options(int argc, char **argv)
 		}
 		if (!strcmp(argv[i], "--host")) { o.host = argv[i + 1]; continue; }
 		if (!strcmp(argv[i], "--scenario")) { o.scenario = argv[i + 1]; continue; }
+		if (!strcmp(argv[i], "--tls-ca")) { o.tls_ca_file = argv[i + 1]; continue; }
+		if (!strcmp(argv[i], "--tls-cert")) { o.tls_cert_file = argv[i + 1]; continue; }
+		if (!strcmp(argv[i], "--tls-key")) { o.tls_key_file = argv[i + 1]; continue; }
+		if (!strcmp(argv[i], "--compression")) {
+			if (!strcmp(argv[i + 1], "none")) o.compression = 0U;
+			else if (!strcmp(argv[i + 1], "request"))
+				o.compression = BENCH_COMPRESS_REQUEST;
+			else if (!strcmp(argv[i + 1], "response"))
+				o.compression = BENCH_COMPRESS_RESPONSE;
+			else if (!strcmp(argv[i + 1], "zstd"))
+				o.compression = BENCH_COMPRESS_REQUEST |
+				                BENCH_COMPRESS_RESPONSE;
+			else fatal("invalid compression direction", 0);
+			continue;
+		}
 #define ARG(name, field) if (!strcmp(argv[i], name)) { o.field = number(argv[i + 1]); continue; }
 		ARG("--port", port)
 		ARG("--requests", requests)
@@ -192,6 +280,7 @@ static struct options parse_options(int argc, char **argv)
 		ARG("--capacity", capacity)
 		ARG("--start-gate", start_gate)
 		ARG("--rate-rps", rate_rps)
+		ARG("--tls", tls)
 #undef ARG
 		usage(argv[0]);
 		fatal("unknown argument", 0);
@@ -203,7 +292,8 @@ static struct options parse_options(int argc, char **argv)
 	    o.rate_rps == 0 || o.rate_rps > 1000000U || o.small_bytes < 8U ||
 	    o.bulk_bytes < o.small_bytes || o.bulk_bytes > MAX_PAYLOAD ||
 	    o.bulk_every == 0 || o.timeout_ms == 0 || o.timeout_ms > 30000U ||
-	    o.slow_ms > 1000U || o.start_gate > 1U ||
+	    o.slow_ms > 1000U || o.start_gate > 1U || o.tls > 1U ||
+	    (o.tls && (!o.tls_ca_file || !o.tls_cert_file || !o.tls_key_file)) ||
 	    (uint64_t)o.capacity * (o.bulk_bytes + 512U) > UINT64_C(67108864) ||
 	    (strcmp(o.scenario, "small") && strcmp(o.scenario, "bulk") &&
 	     strcmp(o.scenario, "mixed") && strcmp(o.scenario, "pressure") &&
@@ -240,23 +330,50 @@ static struct tr_rpc_method_desc method(uint32_t id, uint32_t max_bytes)
 	return m;
 }
 
+static void method_enable_compression(struct tr_rpc_method_desc *descriptor,
+	                              const struct options *options)
+{
+	if (!descriptor || !options || options->compression == 0U)
+		return;
+	if (options->compression & BENCH_COMPRESS_REQUEST)
+		descriptor->request_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+	if (options->compression & BENCH_COMPRESS_RESPONSE)
+		descriptor->response_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+}
+
+static const char *compression_name(uint32_t compression)
+{
+	switch (compression) {
+	case 0U: return "none";
+	case BENCH_COMPRESS_REQUEST: return "request";
+	case BENCH_COMPRESS_RESPONSE: return "response";
+	default: return "zstd";
+	}
+}
+
 static enum tr_rpc_status echo_v2(struct tr_rpc_v2_call_id call,
                                   const struct tr_rpc_v2_request *request,
                                   const struct tr_rpc_v2_cancel *cancel,
-                                  struct tr_rpc_v2_reply *reply, void *arg)
+                                 struct tr_rpc_v2_reply *reply, void *arg)
 {
-	const uint32_t *delay_ms = arg;
+	const struct method_context *context = arg;
 	(void)call;
 	(void)cancel;
-	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE && *delay_ms) {
-		struct timespec delay = { (time_t)(*delay_ms / 1000U),
-			(long)(*delay_ms % 1000U) * 1000000L };
+	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE && context->delay_ms) {
+		struct timespec delay = { (time_t)(context->delay_ms / 1000U),
+			(long)(context->delay_ms % 1000U) * 1000000L };
 		while (nanosleep(&delay, &delay) != 0)
 			if (errno != EINTR)
 				return TR_RPC_STATUS_INTERNAL;
 	}
 	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
-		if (tr_rpc_v2_reply_append(reply, &request->body) != TR_OK)
+		int ret = context->compression
+			? tr_rpc_v2_reply_append_with_compression(
+				reply, &request->body, TR_RPC_COMPRESSION_ZSTD)
+			: tr_rpc_v2_reply_append(reply, &request->body);
+		if (ret != TR_OK)
 			return TR_RPC_STATUS_RESOURCE_EXHAUSTED;
 	}
 	return TR_RPC_STATUS_OK;
@@ -269,36 +386,52 @@ static int run_server(const struct options *o)
 	struct tr_server_stats stats;
 	struct rusage usage_after;
 	struct tr_rpc_v2_method methods[3] = {0};
-	uint32_t delays[] = {0U, 0U, o->slow_ms};
+	struct method_context contexts[] = {
+		{0U, !!(o->compression & BENCH_COMPRESS_RESPONSE)},
+		{0U, !!(o->compression & BENCH_COMPRESS_RESPONSE)},
+		{o->slow_ms, !!(o->compression & BENCH_COMPRESS_RESPONSE)}};
+	uint64_t allocation_calls = 0U, allocation_bytes = 0U;
 	uint16_t port;
 	int status;
 	tr_server_config_init(&config);
 	configure_limits(&config.limits, o);
 	config.max_peers = 32U;
 	config.keepalive_interval_ms = 0;
+	if (o->tls) {
+		config.tls.mode = TR_TLS_REQUIRED;
+		config.tls.certificate_file = o->tls_cert_file;
+		config.tls.private_key_file = o->tls_key_file;
+	}
 	for (uint32_t id = 1U; id <= 3U; ++id) {
 		methods[id - 1U].descriptor = method(id, o->bulk_bytes);
+		method_enable_compression(&methods[id - 1U].descriptor, o);
 		methods[id - 1U].work = echo_v2;
-		methods[id - 1U].arg = &delays[id - 1U];
+		methods[id - 1U].arg = &contexts[id - 1U];
 	}
 	check(tr_server_create(&config, methods, 3U, &server), "server create");
 	check(tr_server_listen(server, o->host, (uint16_t)o->port, &port), "listen");
 	check(tr_server_start(server), "server start");
+	allocation_tracking_begin();
 	printf("{\"schema\":2,\"api_generation\":\"rpc_v2\","
 	       "\"type\":\"ready\",\"port\":%u,\"pid\":%ld,"
-	       "\"capacity\":%u,\"slow_ms\":%u}\n",
-	       port, (long)getpid(), o->capacity, o->slow_ms);
+	       "\"capacity\":%u,\"slow_ms\":%u,\"compression\":\"%s\","
+	       "\"tls_enabled\":%u}\n",
+	       port, (long)getpid(), o->capacity, o->slow_ms,
+	       compression_name(o->compression), o->tls);
 	fflush(stdout);
 	/* No global signal policy: the harness closes this process's stdin. */
 	while (getchar() != EOF)
 		;
 	status = tr_server_drain(server, 5000U);
+	allocation_tracking_end(&allocation_calls, &allocation_bytes);
 	check(tr_server_get_stats(server, &stats), "server stats");
 	check(getrusage(RUSAGE_SELF, &usage_after), "server getrusage");
 	{
 		printf("{\"schema\":2,\"api_generation\":\"rpc_v2\","
 		       "\"type\":\"server_exit\",\"drain_status\":%d,"
 		       "\"cpu_s\":%.9f,\"peak_rss_kib\":%ld,"
+		       "\"alloc_calls\":%" PRIu64 ","
+		       "\"alloc_requested_bytes\":%" PRIu64 ","
 		       "\"reactor_turns\":%" PRIu64 ","
 		       "\"command_budget_limit\":%" PRIu64 ","
 		       "\"command_processed_total\":%" PRIu64 ","
@@ -331,12 +464,15 @@ static int run_server(const struct options *o)
 		       "\"rpc_tasks_running\":%" PRIu64 ","
 		       "\"rpc_calls_started\":%" PRIu64 ","
 		       "\"rpc_calls_finished\":%" PRIu64 ","
+		       "\"rpc_unavailable\":%" PRIu64 ","
+		       "\"rpc_resource_exhausted\":%" PRIu64 ","
 		       "\"reassembly_pool_capacity\":%u,"
 		       "\"reassembly_pool_peak\":%u,"
 		       "\"reassembly_pool_exhausted_events\":%" PRIu64 ","
 		       "\"peers_ready_total\":%" PRIu64 ","
 		       "\"peers_reaped_total\":%" PRIu64 "}\n",
 		       status, cpu_seconds(&usage_after), usage_after.ru_maxrss,
+		       allocation_calls, allocation_bytes,
 		       stats.reactor.turns, stats.reactor.limits.commands,
 		       stats.reactor.total.commands,
 		       stats.reactor.max_per_turn.commands,
@@ -370,6 +506,8 @@ static int run_server(const struct options *o)
 		       stats.rpc.executor_running_tasks_current,
 		       stats.rpc.semantic.calls_started,
 		       stats.rpc.semantic.calls_finished,
+		       stats.rpc.semantic.final_status[TR_RPC_STATUS_UNAVAILABLE],
+		       stats.rpc.semantic.final_status[TR_RPC_STATUS_RESOURCE_EXHAUSTED],
 		       stats.reassembly_pool.capacity,
 		       stats.reassembly_pool.peak,
 		       stats.reassembly_pool.exhausted_events,
@@ -447,12 +585,47 @@ static double percentile(const uint64_t *values, uint32_t count, uint32_t p)
 	return (double)values[rank - 1U] / 1000.0;
 }
 
+static size_t zstd_reference_encoded_size(uint32_t bytes)
+{
+	ZSTD_CCtx *context;
+	uint8_t *source;
+	uint8_t *destination;
+	size_t capacity, encoded;
+	if (bytes == 0U)
+		return 0U;
+	source = malloc(bytes);
+	capacity = ZSTD_compressBound(bytes);
+	destination = malloc(capacity);
+	context = ZSTD_createCCtx();
+	if (!source || !destination || !context) {
+		free(source);
+		free(destination);
+		ZSTD_freeCCtx(context);
+		return bytes;
+	}
+	memset(source, 0x5a, bytes);
+	if (bytes >= 8U)
+		memset(source, 0, 8U);
+	if (ZSTD_isError(ZSTD_CCtx_setParameter(context, ZSTD_c_compressionLevel, 3)) ||
+	    ZSTD_isError(ZSTD_CCtx_setParameter(context, ZSTD_c_checksumFlag, 1))) {
+		free(source);
+		free(destination);
+		ZSTD_freeCCtx(context);
+		return bytes;
+	}
+	encoded = ZSTD_compress2(context, destination, capacity, source, bytes);
+	free(source);
+	free(destination);
+	ZSTD_freeCCtx(context);
+	return ZSTD_isError(encoded) ? bytes : encoded;
+}
+
 static void report_class(const char *name, const struct sample *samples,
 			 uint32_t count, uint32_t selected, double elapsed)
 {
 	uint64_t *ok_lat = malloc((size_t)count * sizeof(*ok_lat));
 	uint64_t *all_lat = malloc((size_t)count * sizeof(*all_lat));
-	uint64_t bytes = 0;
+	uint64_t bytes = 0, reference_encoded_bytes = 0;
 	uint32_t i, attempts = 0, accepted = 0, ok = 0, deadlines = 0;
 	uint32_t rpc_errors = 0, again = 0, submit_errors = 0, invalid = 0;
 	if (!ok_lat || !all_lat) fatal("latency allocation", errno);
@@ -470,6 +643,8 @@ static void report_class(const char *name, const struct sample *samples,
 		else if (s->rpc_status == TR_RPC_STATUS_OK) {
 			ok_lat[ok++] = s->end_ns - s->start_ns;
 			bytes += 2U * (uint64_t)s->bytes;
+			reference_encoded_bytes +=
+			        2U * zstd_reference_encoded_size(s->bytes);
 		} else if (s->rpc_status == TR_RPC_STATUS_DEADLINE_EXCEEDED) deadlines++;
 		else rpc_errors++;
 	}
@@ -479,10 +654,12 @@ static void report_class(const char *name, const struct sample *samples,
 	       "\"completed\":%u,\"submit_again\":%u,\"submit_errors\":%u,\"deadlines\":%u,"
 	       "\"rpc_errors\":%u,\"invalid_responses\":%u,\"ok_rps\":%.3f,"
 	       "\"payload_MiB_s\":%.6f,\"ok_p50_us\":%.3f,\"ok_p99_us\":%.3f,"
-	       "\"accepted_p99_us\":%.3f}", name, attempts, accepted, ok,
+	       "\"accepted_p99_us\":%.3f,\"reference_zstd_payload_ratio\":%.6f}",
+	       name, attempts, accepted, ok,
 	       accepted, again, submit_errors, deadlines, rpc_errors, invalid, ok / elapsed,
 	       (double)bytes / (1048576.0 * elapsed), percentile(ok_lat, ok, 50U),
-	       percentile(ok_lat, ok, 99U), percentile(all_lat, accepted, 99U));
+	       percentile(ok_lat, ok, 99U), percentile(all_lat, accepted, 99U),
+	       bytes ? (double)reference_encoded_bytes / (double)bytes : 0.0);
 	free(ok_lat);
 	free(all_lat);
 }
@@ -493,17 +670,22 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 	struct sample *samples = calloc(count, sizeof(*samples));
 	struct rusage before, after;
 	uint64_t begin, end, guard;
+	uint64_t allocation_calls = 0U, allocation_bytes = 0U;
 	uint32_t sent = 0, completed = 0, i;
 	int failed = 0;
 	if (!samples) fatal("sample allocation", errno);
 	check(getrusage(RUSAGE_SELF, &before), "client getrusage");
+	allocation_tracking_begin();
 	begin = now_ns();
 	guard = begin + PHASE_GUARD_NS;
 	check(pthread_mutex_lock(&run->lock), "phase lock");
 	while (completed < count && !failed) {
 		for (i = 0; i < run->window; ++i) {
 			struct slot *slot = &run->slots[i];
-			struct tr_rpc_call_options call_options = { .timeout_ms = timeout_ms };
+			struct tr_rpc_call_options call_options = {
+				.timeout_ms = timeout_ms,
+				.request_compression = (o->compression & BENCH_COMPRESS_REQUEST)
+					? TR_RPC_COMPRESSION_ZSTD : TR_RPC_COMPRESSION_NONE};
 			struct tr_rpc_v2_call call;
 			struct tr_rpc_v2_client_callbacks callbacks;
 			struct tr_rpc_bytes request;
@@ -562,6 +744,7 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 	}
 	check(pthread_mutex_unlock(&run->lock), "phase unlock");
 	end = now_ns();
+	allocation_tracking_end(&allocation_calls, &allocation_bytes);
 	check(getrusage(RUSAGE_SELF, &after), "client getrusage");
 	if (failed || run->bad_callback) {
 		fprintf(stderr, "phase %s: incomplete, duplicate callback or corrupt response (%u/%u)\n",
@@ -580,10 +763,13 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		       "\"pid\":%ld,\"window\":%u,\"start_ns\":%" PRIu64
 		       ",\"end_ns\":%" PRIu64 ","
 		       "\"elapsed_s\":%.9f,\"client_cpu_s\":%.9f,"
-		       "\"client_peak_rss_kib\":%ld,",
+		       "\"client_peak_rss_kib\":%ld,\"compression\":\"%s\","
+		       "\"tls_enabled\":%u,\"client_alloc_calls\":%" PRIu64
+		       ",\"client_alloc_requested_bytes\":%" PRIu64 ",",
 		       name, scenario, (long)getpid(), run->window, begin, end,
 		       elapsed, cpu_seconds(&after) - cpu_seconds(&before),
-		       after.ru_maxrss);
+		       after.ru_maxrss, compression_name(o->compression), o->tls,
+		       allocation_calls, allocation_bytes);
 		report_class("all", samples, count, 0U, elapsed);
 		putchar(','); report_class("small", samples, count, METHOD_SMALL, elapsed);
 		putchar(','); report_class("bulk", samples, count, METHOD_BULK, elapsed);
@@ -595,7 +781,10 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		for (i = 0; i < count; ++i)
 			if (samples[i].submit_status != TR_OK ||
 			    samples[i].rpc_status != TR_RPC_STATUS_OK) {
-				fprintf(stderr, "phase %s: warmup did not fully succeed\n", name);
+				fprintf(stderr,
+				        "phase %s: warmup sample %u submit=%d rpc=%d valid=%d\n",
+				        name, i, samples[i].submit_status,
+				        samples[i].rpc_status, samples[i].valid);
 				failed = 1;
 			}
 	}
@@ -608,7 +797,9 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 			      uint32_t rate_rps, uint64_t begin,
 			      uint64_t horizon, uint64_t end,
 			      double client_cpu_s, long peak_rss_kib,
-			      uint32_t window)
+			      uint32_t window, uint64_t allocation_calls,
+			      uint64_t allocation_bytes,
+			      const struct options *options)
 {
 	uint64_t *ok_lat = malloc((size_t)count * sizeof(*ok_lat));
 	uint64_t *all_lat = malloc((size_t)count * sizeof(*all_lat));
@@ -684,6 +875,9 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	printf("{\"type\":\"open_phase\",\"schema\":2,"
 	       "\"api_generation\":\"rpc_v2\",\"phase\":\"measure\","
 	       "\"scenario\":\"open\",\"pid\":%ld,\"window\":%u,"
+	       "\"compression\":\"%s\",\"tls_enabled\":%u,"
+	       "\"client_alloc_calls\":%" PRIu64
+	       ",\"client_alloc_requested_bytes\":%" PRIu64 ","
 	       "\"rate_rps\":%u,\"start_ns\":%" PRIu64
 	       ",\"schedule_horizon_ns\":%" PRIu64 ","
 	       "\"end_ns\":%" PRIu64
@@ -704,7 +898,9 @@ static void report_open_phase(const struct sample *samples, uint32_t count,
 	       "\"accepted_in_window\":%u,\"completed_in_window\":%u,\"submit_"
 	       "late_p99_us\":%.3f,"
 	       "\"submit_late_max_us\":%.3f}\n",
-	       (long)getpid(), window, rate_rps, begin, horizon, end,
+	       (long)getpid(), window,
+	       compression_name(options->compression), options->tls,
+	       allocation_calls, allocation_bytes, rate_rps, begin, horizon, end,
 	       arrival_window, drain_elapsed, drain_tail_ms, client_cpu_s,
 	       peak_rss_kib, count, dropped, attempted, accepted, accepted, ok,
 	       again, submit_errors, deadlines, rpc_errors, unavailable,
@@ -728,12 +924,14 @@ static int open_phase(struct client_run *run, const struct options *o)
 	struct sample *samples = calloc(o->requests, sizeof(*samples));
 	struct rusage before, after;
 	uint64_t begin, horizon, guard, end;
+	uint64_t allocation_calls = 0U, allocation_bytes = 0U;
 	uint32_t i;
 	int failed = 0;
 
 	if (!samples)
 		fatal("open-loop sample allocation", errno);
 	check(getrusage(RUSAGE_SELF, &before), "client getrusage");
+	allocation_tracking_begin();
 	begin = run->scheduled_begin_ns ? run->scheduled_begin_ns : now_ns();
 	horizon = begin + ((uint64_t)o->requests * UINT64_C(1000000000)) /
 			     o->rate_rps;
@@ -744,7 +942,9 @@ static int open_phase(struct client_run *run, const struct options *o)
 		struct sample *s = &samples[i];
 		struct slot *slot = NULL;
 		struct tr_rpc_call_options call_options = {
-			.timeout_ms = o->timeout_ms
+			.timeout_ms = o->timeout_ms,
+			.request_compression = (o->compression & BENCH_COMPRESS_REQUEST)
+				? TR_RPC_COMPRESSION_ZSTD : TR_RPC_COMPRESSION_NONE
 		};
 		struct tr_rpc_v2_call call;
 		struct tr_rpc_v2_client_callbacks callbacks;
@@ -840,6 +1040,7 @@ static int open_phase(struct client_run *run, const struct options *o)
 	}
 	check(pthread_mutex_unlock(&run->lock), "open drain unlock");
 	end = now_ns();
+	allocation_tracking_end(&allocation_calls, &allocation_bytes);
 	check(getrusage(RUSAGE_SELF, &after), "client getrusage");
 
 	if (failed || run->bad_callback) {
@@ -852,7 +1053,8 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 	report_open_phase(samples, o->requests, o->rate_rps, begin, horizon, end,
 			  cpu_seconds(&after) - cpu_seconds(&before),
-			  after.ru_maxrss, run->window);
+			  after.ru_maxrss, run->window, allocation_calls,
+			  allocation_bytes, o);
 	fflush(stdout);
 	free(samples);
 	return 0;
@@ -870,6 +1072,11 @@ static int run_client(const struct options *o)
 	configure_limits(&config.limits, o);
 	config.keepalive_interval_ms = 0;
 	config.enable_reconnect = 0;
+	if (o->tls) {
+		config.tls.mode = TR_TLS_REQUIRED;
+		config.tls.ca_file = o->tls_ca_file;
+		config.tls.expected_peer_name = "server.example.test";
+	}
 	check(pthread_mutex_init(&run.lock, NULL), "mutex init");
 	check(pthread_condattr_init(&attr), "cond attr");
 	check(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC), "cond clock");
@@ -885,6 +1092,7 @@ static int run_client(const struct options *o)
 	}
 	for (i = 1U; i <= 3U; ++i) {
 		methods[i - 1U] = method(i, o->bulk_bytes);
+		method_enable_compression(&methods[i - 1U], o);
 	}
 	check(tr_client_create(&config, methods, 3U, &run.client),
 	      "V2 client create");

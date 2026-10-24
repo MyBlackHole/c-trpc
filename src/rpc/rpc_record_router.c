@@ -179,6 +179,10 @@ int tr_rpc_record_router_create_on_owner(
 		const struct tr_rpc_method_desc *d = &methods[i].descriptor;
 		if (!methods[i].received || !d->request_codec_id ||
 		    !d->response_codec_id || d->lane > TR_RPC_LANE_BULK ||
+		    (d->request_compression_algorithms &
+		     ~TR_RPC_COMPRESSION_MASK_ZSTD) ||
+		    (d->response_compression_algorithms &
+		     ~TR_RPC_COMPRESSION_MASK_ZSTD) ||
 		    tr_rpc_record_state_init(&state, d->request_cardinality,
 		                             d->response_cardinality) != TR_OK)
 			return TR_ERR_INVALID;
@@ -416,8 +420,11 @@ int tr_rpc_record_router_send_on_owner(
 	if (!route->binding || route->terminal)
 		return TR_ERR_STATE;
 	++handle.router->depth;
-	ret = tr_rpc_record_stream_send_on_owner(route->binding, header,
-	                                         metadata, body);
+	ret = header->compression == TR_RPC_RECORD_ZSTD
+	              ? tr_rpc_record_stream_send_compressed_on_owner(
+	                        route->binding, header, metadata, body)
+	              : tr_rpc_record_stream_send_on_owner(
+	                        route->binding, header, metadata, body);
 	--handle.router->depth;
 	return ret;
 }

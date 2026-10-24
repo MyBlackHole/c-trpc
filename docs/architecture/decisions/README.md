@@ -9,6 +9,7 @@
 - [ADR-005：Pipeline V1 固定一个 Reactor 所有者](ADR-005-pipeline-affinity.md)
 - [ADR-006：拆分门面使用显式连接组绑定标识](ADR-006-split-facade-binding.md)
 - [ADR-007：分层/API 边界不能通过额外运行时跳转实现](ADR-007-layering-performance.md)
+- [ADR-008：独立 Message 层压缩与有界网络推进](ADR-008-message-compression-protocol.md)
 - [ADR-009：在 Reactor 字节端点接入 TLS 1.3（提议中）](ADR-009-tls-byte-endpoint.md)
 
 状态约定：

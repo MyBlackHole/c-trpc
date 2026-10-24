@@ -3,6 +3,7 @@
 #include <tr/trpc.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,9 +29,23 @@
 
 struct fixture;
 
+enum compression_direction_fixture {
+	COMPRESSION_DIRECTIONS_DEFAULT,
+	COMPRESSION_REQUEST_ONLY,
+	COMPRESSION_RESPONSE_ONLY
+};
+
+static enum compression_direction_fixture compression_direction_override;
+
 enum response_metadata { METADATA_NONE, METADATA_VALUES, METADATA_EMPTY };
 
-enum async_mode { ASYNC_COMPLETE, ASYNC_CANCEL, ASYNC_DEADLINE, ASYNC_DESTROY };
+enum async_mode {
+	ASYNC_COMPLETE,
+	ASYNC_REJECT_COMPRESSION,
+	ASYNC_CANCEL,
+	ASYNC_DEADLINE,
+	ASYNC_DESTROY
+};
 
 struct async_state {
 	struct fixture *fixture;
@@ -79,6 +94,8 @@ struct fixture {
 	struct tr_client_config client_config;
 	uint16_t port;
 	uint32_t body_limit;
+	int compress_sync_responses;
+	int reject_sync_compressed_response;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int server_destroying;
@@ -108,6 +125,7 @@ struct call_state {
 	unsigned callback_depth;
 	unsigned server_terminal_target;
 	unsigned method;
+	unsigned compress_requests;
 	int half_closed;
 	int manual;
 	int checked_context;
@@ -377,8 +395,9 @@ static void check_response_metadata(const struct tr_rpc_v2_metadata_view *view,
 	}
 }
 
-static void append_response(struct tr_rpc_v2_reply *reply, unsigned size,
-                            unsigned tag)
+static void append_response_with_compression(
+	struct tr_rpc_v2_reply *reply, unsigned size, unsigned tag,
+	enum tr_rpc_compression compression)
 {
 	uint8_t *storage = (uint8_t *)malloc(size ? size : 1U);
 	struct tr_rpc_bytes body;
@@ -386,10 +405,18 @@ static void append_response(struct tr_rpc_v2_reply *reply, unsigned size,
 	fill(storage, size, tag);
 	body.data = size ? storage : NULL;
 	body.len = size;
-	CHECK(tr_rpc_v2_reply_append(reply, &body) == TR_OK);
+	CHECK(tr_rpc_v2_reply_append_with_compression(
+	              reply, &body, compression) == TR_OK);
 	/* append 承诺复制；返回后立即复用原业务存储。 */
 	overwrite_source(storage, size, 0xe7);
 	free(storage);
+}
+
+static void append_response(struct tr_rpc_v2_reply *reply, unsigned size,
+			    unsigned tag)
+{
+	append_response_with_compression(reply, size, tag,
+	                                 TR_RPC_COMPRESSION_NONE);
 }
 
 static void cooperate(struct method_state *m,
@@ -461,6 +488,7 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	unsigned requests;
 	enum response_metadata metadata;
 	struct async_state *async;
+	int reject_response_compression = 0;
 	CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
 	check_stats_rejected(f, 1);
@@ -512,31 +540,59 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 			        reply, TR_RPC_V2_METADATA_TRAILING, metadata);
 		} else if (m->index != 2U) {
 			unsigned copies = m->index == 1U ? 3U : 1U;
-			for (unsigned i = 0; i < copies; ++i)
-				append_response(reply, request->body.len,
-				                tag + i);
+			for (unsigned i = 0; i < copies; ++i) {
+				if (f->compress_sync_responses && m->index < 2U)
+					append_response_with_compression(
+					        reply, request->body.len, tag + i,
+					        TR_RPC_COMPRESSION_ZSTD);
+				else
+					append_response(reply, request->body.len,
+					                tag + i);
+			}
 			if (requests == 1U && m->index != 1U)
 				set_response_metadata(
 				        reply, TR_RPC_V2_METADATA_INITIAL,
 				        metadata);
 		}
 	} else if (request->kind == TR_RPC_V2_REQUEST_HALF_CLOSE) {
-		if (m->index == 2U)
+		if (m->index == 2U && f->reject_sync_compressed_response) {
+			uint8_t response[8];
+			struct tr_rpc_bytes body;
+			fill(response, sizeof(response), sum);
+			body.data = response;
+			body.len = sizeof(response);
+			CHECK(tr_rpc_v2_reply_append_with_compression(
+			              reply, &body, TR_RPC_COMPRESSION_ZSTD) ==
+			      TR_ERR_UNSUPPORTED);
+			CHECK(memcmp(response,
+			             (uint8_t[8]){pattern(sum, 0), pattern(sum, 1),
+			                          pattern(sum, 2), pattern(sum, 3),
+			                          pattern(sum, 4), pattern(sum, 5),
+			                          pattern(sum, 6), pattern(sum, 7)},
+			             sizeof(response)) == 0);
+			reject_response_compression = 1;
+		} else if (m->index == 2U) {
 			append_response(reply, 8U, sum);
+		}
 		/* INITIAL 的发送次序不依赖 setter 与同批 append 的调用次序。
 		 * 空 MANY 也显式交付一个空 INITIAL，随后才交付尾部。 */
-		if (m->index == 2U || (m->index == 3U && !requests))
-			set_response_metadata(reply, TR_RPC_V2_METADATA_INITIAL,
+		if (!reject_response_compression) {
+			if (m->index == 2U || (m->index == 3U && !requests))
+				set_response_metadata(
+				        reply, TR_RPC_V2_METADATA_INITIAL, metadata);
+			set_response_metadata(reply, TR_RPC_V2_METADATA_TRAILING,
 			                      metadata);
-		set_response_metadata(reply, TR_RPC_V2_METADATA_TRAILING,
-		                      metadata);
-		CHECK(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) == TR_OK);
+			CHECK(tr_rpc_v2_reply_finish(reply, TR_RPC_STATUS_OK) ==
+			      TR_OK);
+		}
 	}
 	lock(f);
 	CHECK(m->running == 1U);
 	--m->running;
 	publish(f);
 	unlock(f);
+	if (reject_response_compression)
+		return TR_RPC_STATUS_INVALID_ARGUMENT;
 	return m->index == 4U && request->kind == TR_RPC_V2_REQUEST_MESSAGE
 	               ? TR_RPC_STATUS_CANCELLED
 	               : TR_RPC_STATUS_OK;
@@ -580,6 +636,28 @@ static void describe_methods(struct tr_rpc_method_desc *descriptors,
 		descriptors[i].max_request_bytes = body_limit;
 		descriptors[i].max_response_bytes = body_limit;
 	}
+	descriptors[0].request_compression_algorithms =
+	        TR_RPC_COMPRESSION_MASK_ZSTD;
+	descriptors[0].response_compression_algorithms =
+	        TR_RPC_COMPRESSION_MASK_ZSTD;
+	descriptors[1].response_compression_algorithms =
+	        TR_RPC_COMPRESSION_MASK_ZSTD;
+	descriptors[3].request_compression_algorithms =
+	        TR_RPC_COMPRESSION_MASK_ZSTD;
+	descriptors[ASYNC_METHOD].response_compression_algorithms =
+	        TR_RPC_COMPRESSION_MASK_ZSTD;
+	if (compression_direction_override != COMPRESSION_DIRECTIONS_DEFAULT) {
+		for (unsigned i = 0; i < METHOD_COUNT; ++i) {
+			descriptors[i].request_compression_algorithms =
+			        compression_direction_override ==
+			                        COMPRESSION_REQUEST_ONLY
+			                ? TR_RPC_COMPRESSION_MASK_ZSTD : 0U;
+			descriptors[i].response_compression_algorithms =
+			        compression_direction_override ==
+			                        COMPRESSION_RESPONSE_ONLY
+			                ? TR_RPC_COMPRESSION_MASK_ZSTD : 0U;
+		}
+	}
 	descriptors[METHOD_COUNT] = descriptors[0];
 	descriptors[METHOD_COUNT].method_id = 99;
 }
@@ -600,7 +678,8 @@ static void create_client(struct fixture *f, struct observed_client *client)
 static void fixture_create_shards_with_limits(struct fixture *f,
                                               unsigned shards,
                                               uint32_t body_limit,
-                                              uint32_t frame_limit)
+                                              uint32_t frame_limit,
+                                              int allow_async_compression)
 {
 	struct tr_server_config server;
 	struct tr_rpc_v2_method methods[METHOD_COUNT];
@@ -629,13 +708,18 @@ static void fixture_create_shards_with_limits(struct fixture *f,
 	server.handshake_timeout_ms = 2000;
 	memset(methods, 0, sizeof(methods));
 	describe_methods(descriptors, body_limit);
+	if (!allow_async_compression)
+		descriptors[ASYNC_METHOD].response_compression_algorithms = 0U;
 	for (unsigned i = 0; i < METHOD_COUNT; ++i) {
 		f->methods[i].fixture = f;
 		f->methods[i].index = i;
 		f->methods[i].response_metadata = METADATA_VALUES;
 		methods[i].descriptor = descriptors[i];
 		methods[i].work = server_work;
-		methods[i].terminal = server_terminal;
+		methods[i].terminal =
+		        compression_direction_override ==
+	                        COMPRESSION_DIRECTIONS_DEFAULT
+	                ? server_terminal : NULL;
 		methods[i].arg = &f->methods[i];
 	}
 	CHECK(tr_server_create(&server, methods, METHOD_COUNT, &f->server) ==
@@ -652,7 +736,7 @@ static void fixture_create_shards_with_limits(struct fixture *f,
 
 static void fixture_create_shards(struct fixture *f, unsigned shards)
 {
-	fixture_create_shards_with_limits(f, shards, MAX_BODY, 256);
+	fixture_create_shards_with_limits(f, shards, MAX_BODY, 256, 1);
 }
 
 static void fixture_create(struct fixture *f)
@@ -794,7 +878,11 @@ static void client_writable(struct tr_rpc_v2_call call, void *arg)
 				      TR_ERR_BAD_LENGTH);
 				c->check_length = 0;
 			}
-			int ret = tr_rpc_v2_call_send(call, &body);
+			int ret = c->compress_requests
+			                  ? tr_rpc_v2_call_send_with_compression(
+			                            call, &body,
+			                            TR_RPC_COMPRESSION_ZSTD)
+			                  : tr_rpc_v2_call_send(call, &body);
 			/* 成功必须已经复制；失败也不得保存这一临时正文。 */
 			memset(storage, 0xd3, sizeof(storage));
 			CHECK(ret == TR_OK || ret == TR_AGAIN);
@@ -964,6 +1052,23 @@ static void call_done(struct call_state *c, enum tr_rpc_status status)
 		wait_count(f, &f->methods[c->method].terminals,
 		           c->server_terminal_target);
 	lock(f);
+	if (c->terminals != 1U || c->status != status)
+	{
+		struct tr_rpc_semantic_stats server_stats;
+		int stats_ret = tr_server_get_rpc_semantic_stats(f->server,
+		                                                &server_stats);
+		fprintf(stderr,
+		        "sdk-v2: call terminal method=%u expected=%d actual=%d received=%u/%u opens=%u server_stats=%d started=%" PRIu64 " finished=%" PRIu64 " unavailable=%" PRIu64 "\n",
+		        c->method, status, c->status, c->received,
+		        c->response_count,
+		        c->method < METHOD_COUNT ? f->methods[c->method].opens : 0U,
+		        stats_ret,
+		        stats_ret == TR_OK ? server_stats.calls_started : 0U,
+		        stats_ret == TR_OK ? server_stats.calls_finished : 0U,
+		        stats_ret == TR_OK
+		                ? server_stats.final_status[TR_RPC_STATUS_UNAVAILABLE]
+		                : 0U);
+	}
 	CHECK(c->terminals == 1U && c->status == status);
 	CHECK(c->delivery == TR_RPC_V2_DELIVERY_LIVE);
 	CHECK(c->received == c->response_count);
@@ -1000,6 +1105,7 @@ static void test_shapes_and_copy(void)
 	uint8_t token[] = {0, 'x', 255, 0};
 	uint8_t sequence[] = {3};
 	fixture_create(&f);
+	f.compress_sync_responses = 1;
 
 	request[0].size = MAX_BODY;
 	request[0].tag = 11;
@@ -1015,6 +1121,7 @@ static void test_shapes_and_copy(void)
 	metadata[1].value_len = sizeof(sequence);
 	options.metadata = metadata;
 	options.metadata_count = 2;
+	options.request_compression = TR_RPC_COMPRESSION_ZSTD;
 	lock(&f);
 	f.methods[0].expect_metadata = 1;
 	unlock(&f);
@@ -1051,6 +1158,7 @@ static void test_shapes_and_copy(void)
 		request[i].tag = 41U + i;
 	}
 	call_init(&bidi, &f, 3, request, 3);
+	bidi.compress_requests = 1U;
 	for (unsigned i = 0; i < 3U; ++i)
 		expect(&bidi, MAX_BODY, 41U + i);
 	CHECK(call_start(&bidi, NULL) == TR_OK);
@@ -1102,12 +1210,98 @@ static void test_shapes_and_copy(void)
 	puts("sdk-v2: case=shapes-copy-metadata-pressure result=pass");
 }
 
+static void test_call_compression_rejection_preserves_next_message(void)
+{
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {17U, 73U};
+	uint8_t storage[17];
+	struct tr_rpc_bytes body = {storage, sizeof(storage)};
+
+	fixture_create(&f);
+	call_init(&call, &f, 2U, &request, 1U);
+	call.manual = 1;
+	expect(&call, 8U, request.tag);
+	CHECK(call_start(&call, NULL) == TR_OK);
+	wait_count(&f, &call.writable_returns, 1U);
+	wait_count(&f, &f.methods[2].opens, 1U);
+	fill(storage, sizeof(storage), request.tag);
+	CHECK(tr_rpc_v2_call_send_with_compression(
+	              call.handle, &body, TR_RPC_COMPRESSION_ZSTD) ==
+	      TR_ERR_UNSUPPORTED);
+	CHECK(body.len == sizeof(storage));
+	CHECK(tr_rpc_v2_call_send_with_compression(
+	              call.handle, &body, TR_RPC_COMPRESSION_NONE) == TR_OK);
+	CHECK(tr_rpc_v2_call_half_close(call.handle) == TR_OK);
+	lock(&f);
+	call.sent = 1U;
+	call.half_closed = 1;
+	unlock(&f);
+	call_done(&call, TR_RPC_STATUS_OK);
+	drain(&f);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=compression-selection-ownership result=pass");
+}
+
+static void test_reply_compression_policy_rejection(void)
+{
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {17U, 73U};
+	fixture_create(&f);
+	f.reject_sync_compressed_response = 1;
+	call_init(&call, &f, 2U, &request, 1U);
+	call.response_metadata = METADATA_NONE;
+	CHECK(call_start(&call, NULL) == TR_OK);
+	call_done(&call, TR_RPC_STATUS_INVALID_ARGUMENT);
+	CHECK(call.received == 0U);
+	CHECK(f.methods[2].status == TR_RPC_STATUS_INVALID_ARGUMENT);
+	check_client_totals(&f.client, 1, 1, TR_RPC_STATUS_INVALID_ARGUMENT, 1);
+	check_server_totals(&f, 1, 1, TR_RPC_STATUS_INVALID_ARGUMENT, 1);
+	drain(&f);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=reply-compression-policy result=pass");
+}
+
+static void test_directional_compression_only(void)
+{
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {MAX_BODY, 47U};
+	struct tr_rpc_call_options options = {0};
+
+	compression_direction_override = COMPRESSION_REQUEST_ONLY;
+	fixture_create(&f);
+	call_init(&call, &f, 0U, &request, 1U);
+	call.server_terminal_target = 0U;
+	expect(&call, request.size, request.tag);
+	options.request_compression = TR_RPC_COMPRESSION_ZSTD;
+	CHECK(unary_start(&call, &options) == TR_OK);
+	call_done(&call, TR_RPC_STATUS_OK);
+	drain(&f);
+	fixture_destroy(&f);
+
+	compression_direction_override = COMPRESSION_RESPONSE_ONLY;
+	fixture_create(&f);
+	f.compress_sync_responses = 1;
+	call_init(&call, &f, 0U, &request, 1U);
+	call.server_terminal_target = 0U;
+	expect(&call, request.size, request.tag);
+	CHECK(unary_start(&call, NULL) == TR_OK);
+	call_done(&call, TR_RPC_STATUS_OK);
+	drain(&f);
+	fixture_destroy(&f);
+
+	compression_direction_override = COMPRESSION_DIRECTIONS_DEFAULT;
+	puts("sdk-v2: case=directional-compression-only result=pass");
+}
+
 static void test_large_message_ownership(void)
 {
 	struct fixture f;
 	struct call_state call;
 	struct message_spec request = {LARGE_BODY, 53};
-	fixture_create_shards_with_limits(&f, 1, LARGE_BODY, 64U * 1024U);
+	fixture_create_shards_with_limits(&f, 1, LARGE_BODY, 64U * 1024U, 1);
 	call_init(&call, &f, 0, &request, 1);
 	expect(&call, LARGE_BODY, 53);
 	CHECK(unary_start(&call, NULL) == TR_OK);
@@ -1282,7 +1476,8 @@ static int producer_wait_until(struct tr_rpc_v2_producer *producer,
 }
 
 static void producer_send_copy(struct tr_rpc_v2_producer *producer,
-                               unsigned size, unsigned tag)
+                               unsigned size, unsigned tag,
+			       enum tr_rpc_compression compression)
 {
 	struct timespec limit = deadline_after(WAIT_MS);
 	uint8_t storage[MAX_BODY];
@@ -1292,7 +1487,8 @@ static void producer_send_copy(struct tr_rpc_v2_producer *producer,
 		fill(storage, size, tag);
 		body.data = size ? storage : NULL;
 		body.len = size;
-		int ret = tr_rpc_v2_producer_send(producer, &body);
+		int ret = tr_rpc_v2_producer_send_with_compression(
+		        producer, &body, compression);
 		memset(storage, 0xe7, sizeof(storage));
 		if (ret == TR_OK)
 			return;
@@ -1352,14 +1548,32 @@ static void *produce_async(void *arg)
 	++a->staged;
 	publish(f);
 	unlock(f);
-	if (a->mode == ASYNC_COMPLETE) {
+	if (a->mode == ASYNC_COMPLETE ||
+	    a->mode == ASYNC_REJECT_COMPRESSION) {
 		wait_count(f, &a->work_release, 1);
 		/* 这个成功只会出现在创建 work 返回且 done 交接之后；不用
 		 * 回调尾部标志或 sleep 冒充已经跨出借用期的证据。 */
 		CHECK(tr_rpc_v2_producer_wait_writable(producer, WAIT_MS) ==
 		      TR_OK);
-		producer_send_copy(producer, MAX_BODY, 137);
-		producer_send_copy(producer, 0, 0);
+		if (a->mode == ASYNC_REJECT_COMPRESSION) {
+			struct tr_rpc_bytes body;
+			uint8_t expected[MAX_BODY];
+			fill(rejected, sizeof(rejected), 137U);
+			memcpy(expected, rejected, sizeof(expected));
+			body.data = rejected;
+			body.len = sizeof(rejected);
+			CHECK(tr_rpc_v2_producer_send_with_compression(
+			              producer, &body, TR_RPC_COMPRESSION_ZSTD) ==
+			      TR_ERR_UNSUPPORTED);
+			CHECK(memcmp(rejected, expected, sizeof(expected)) == 0);
+			CHECK(tr_rpc_v2_producer_send(producer, &body) == TR_OK);
+			memset(rejected, 0xe7, sizeof(rejected));
+		} else {
+			producer_send_copy(producer, MAX_BODY, 137,
+			                   TR_RPC_COMPRESSION_ZSTD);
+			producer_send_copy(producer, 0, 0,
+			                   TR_RPC_COMPRESSION_NONE);
+		}
 		lock(f);
 		++a->produced;
 		publish(f);
@@ -1388,7 +1602,10 @@ static void test_async_case(enum async_mode mode)
 	struct message_spec request;
 	struct tr_rpc_call_options options;
 	pthread_t thread;
-	fixture_create(&f);
+	if (mode == ASYNC_REJECT_COMPRESSION)
+		fixture_create_shards_with_limits(&f, 1U, MAX_BODY, 256U, 0);
+	else
+		fixture_create(&f);
 	memset(&a, 0, sizeof(a));
 	a.fixture = &f;
 	a.mode = mode;
@@ -1398,9 +1615,13 @@ static void test_async_case(enum async_mode mode)
 	request.size = 17;
 	request.tag = 121;
 	call_init(&call, &f, ASYNC_METHOD, &request, 1);
-	if (mode == ASYNC_COMPLETE) {
-		expect(&call, MAX_BODY, 137);
-		expect(&call, 0, 0);
+	if (mode == ASYNC_COMPLETE || mode == ASYNC_REJECT_COMPRESSION) {
+		if (mode == ASYNC_COMPLETE) {
+			expect(&call, MAX_BODY, 137);
+			expect(&call, 0, 0);
+		} else {
+			expect(&call, MAX_BODY, 137);
+		}
 	}
 	memset(&options, 0, sizeof(options));
 	options.timeout_ms = mode == ASYNC_DEADLINE ? 2000U : 0U;
@@ -1414,13 +1635,13 @@ static void test_async_case(enum async_mode mode)
 	CHECK(!call.initial && !call.received && !call.trailing &&
 	      !call.terminals);
 	unlock(&f);
-	if (mode == ASYNC_COMPLETE) {
+	if (mode == ASYNC_COMPLETE || mode == ASYNC_REJECT_COMPRESSION) {
 		lock(&f);
 		a.work_release = 1;
 		publish(&f);
 		unlock(&f);
 		wait_count(&f, &a.produced, 1);
-		wait_count(&f, &call.received, 2);
+		wait_count(&f, &call.received, call.response_count);
 		wait_count(&f, &f.methods[ASYNC_METHOD].half_closes, 1);
 		/* HALF_CLOSE 已继续执行，但活跃 producer 尚未选择终局。 */
 		check_client_totals(&f.client, 1, 0, TR_RPC_STATUS_OK, 0);
@@ -1498,6 +1719,7 @@ static void test_async_case(enum async_mode mode)
 static void test_async_producer(void)
 {
 	test_async_case(ASYNC_COMPLETE);
+	test_async_case(ASYNC_REJECT_COMPRESSION);
 	test_async_case(ASYNC_CANCEL);
 	test_async_case(ASYNC_DEADLINE);
 	test_async_case(ASYNC_DESTROY);
@@ -1508,6 +1730,19 @@ static void test_default_factory_requires_methods(void)
 {
 	struct tr_client *client = NULL;
 	struct tr_server *server = NULL;
+	struct tr_client_config config;
+	struct tr_rpc_method_desc method = {
+	        .service_id = 1,
+	        .method_id = 1,
+	        .request_cardinality = TR_RPC_ONE,
+	        .response_cardinality = TR_RPC_ONE,
+	        .request_codec_id = TR_RPC_CODEC_RAW,
+	        .response_codec_id = TR_RPC_CODEC_RAW,
+	        .lane = TR_RPC_LANE_CONTROL,
+	        .max_request_bytes = 64,
+	        .max_response_bytes = 64,
+	        .request_compression_algorithms = UINT32_C(0x80000000),
+};
 
 	CHECK(tr_client_create(NULL, NULL, 0, &client) == TR_ERR_INVALID);
 	CHECK(!client);
@@ -1515,6 +1750,9 @@ static void test_default_factory_requires_methods(void)
 	CHECK(!server);
 	CHECK(tr_client_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
 	CHECK(tr_server_create(NULL, NULL, 0, NULL) == TR_ERR_INVALID);
+	tr_client_config_init(&config);
+	CHECK(tr_client_create(&config, &method, 1, &client) == TR_ERR_INVALID);
+	CHECK(!client);
 }
 
 /* 安装消费端验证 RAW Codec 仍由公开头和静态 SDK 独立提供。 */
@@ -1638,9 +1876,11 @@ static void test_tls_d2_sdk_symbols(void)
 static void test_unary_rejections(void)
 {
 	struct fixture f;
-	struct call_state unknown, rejected;
+	struct call_state unknown, rejected, invalid_compression;
 	struct message_spec spec;
 	struct tr_rpc_v2_call sentinel;
+	struct tr_rpc_call_options invalid_options = {
+	        .request_compression = (enum tr_rpc_compression)99};
 	fixture_create(&f);
 	spec.size = MAX_BODY;
 	spec.tag = 91U;
@@ -1654,6 +1894,14 @@ static void test_unary_rejections(void)
 	CHECK(unary_start(&rejected, NULL) == TR_ERR_UNSUPPORTED);
 	CHECK(memcmp(&rejected.handle, &sentinel, sizeof(sentinel)) == 0);
 	CHECK(rejected.terminals == 0U && rejected.writable_returns == 0U);
+	call_init(&invalid_compression, &f, 0U, &spec, 1U);
+	memset(&invalid_compression.handle, 0xa5,
+	       sizeof(invalid_compression.handle));
+	sentinel = invalid_compression.handle;
+	CHECK(unary_start(&invalid_compression, &invalid_options) ==
+	      TR_ERR_INVALID);
+	CHECK(memcmp(&invalid_compression.handle, &sentinel,
+	             sizeof(sentinel)) == 0);
 	check_client_totals(&f.client, 1, 1, TR_RPC_STATUS_UNIMPLEMENTED, 1);
 	check_server_totals(&f, 0, 0, TR_RPC_STATUS_OK, 0);
 	drain(&f);
@@ -1668,6 +1916,9 @@ int main(void)
 	test_tls_d2_sdk_symbols();
 	test_default_factory_requires_methods();
 	test_unary_rejections();
+	test_call_compression_rejection_preserves_next_message();
+	test_reply_compression_policy_rejection();
+	test_directional_compression_only();
 	test_shapes_and_copy();
 	test_large_message_ownership();
 	test_cancel_or_deadline(0);

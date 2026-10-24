@@ -641,7 +641,7 @@ static void fixture_init_full(struct fixture *f, uint64_t window,
 		                       i < 2 ? TR_RPC_ONE : TR_RPC_MANY,
 		                       (i & 1) ? TR_RPC_MANY : TR_RPC_ONE,
 		                       TR_RPC_CODEC_RAW, TR_RPC_CODEC_RAW,
-		                       TR_LANE_BULK, BODY, BODY},
+		                       TR_LANE_BULK, BODY, BODY, 0, 0},
 		        .work = handler,
 		        .arg = &f->contexts[i]};
 	}

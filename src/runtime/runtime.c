@@ -871,6 +871,24 @@ int tr_runtime_shard_message_submit(
 	        shard, tr_runtime_message_submit_on_owner, &request);
 }
 
+int tr_runtime_shard_message_submit_adapter(
+        void *context, struct tr_message *input,
+        const struct tr_message_transform_config *config,
+        tr_message_service_done_fn done, void *arg,
+        struct tr_task_handle *handle)
+{
+	return tr_runtime_shard_message_submit(
+	        (struct tr_runtime_shard *)context, input, config, done, arg,
+	        handle);
+}
+
+int tr_runtime_shard_message_cancel_adapter(void *context,
+                                            struct tr_task_handle handle)
+{
+	return tr_runtime_shard_message_cancel(
+	        (struct tr_runtime_shard *)context, handle);
+}
+
 struct tr_runtime_message_cancel_request {
 	struct tr_runtime_shard *shard;
 	struct tr_task_handle handle;

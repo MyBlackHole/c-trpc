@@ -100,6 +100,7 @@ struct tr_tx_item {
 	uint32_t payload_count;
 	uint16_t type;
 	uint32_t base_flags;
+	int exact_frame;
 	uint32_t stream_id;
 	uint64_t message_id;
 	uint64_t message_len;
@@ -1652,7 +1653,13 @@ static int tr_tx_prepare_frame(struct tr_reactor *reactor,
 		return TR_ERR_STATE;
 
 	remaining = item->message_len - item->message_pos;
-	if (remaining > item->max_frame_payload_len)
+	if (item->exact_frame &&
+	    (item->type != TR_FRAME_DATA || item->message_pos != 0U ||
+	     remaining > item->max_frame_payload_len))
+		return TR_ERR_BAD_LENGTH;
+	if (item->exact_frame)
+		frame_len = (uint32_t)remaining;
+	else if (remaining > item->max_frame_payload_len)
 		frame_len = item->max_frame_payload_len;
 	else
 		frame_len = (uint32_t)remaining;
@@ -1662,7 +1669,9 @@ static int tr_tx_prepare_frame(struct tr_reactor *reactor,
 		return TR_ERR_STATE;
 
 	flags = item->base_flags & ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST);
-	if (item->type == TR_FRAME_DATA) {
+	if (item->exact_frame) {
+		flags = item->base_flags;
+	} else if (item->type == TR_FRAME_DATA) {
 		if (item->message_pos == 0)
 			flags |= TR_FRAME_F_FIRST;
 		if (item->message_pos + frame_len == item->message_len)
@@ -3579,6 +3588,22 @@ static int tr_reactor_fixed_memory_bytes(
 	return TR_OK;
 }
 
+int tr_reactor_memory_requirement(const struct tr_reactor_config *config,
+				 uint64_t *out)
+{
+	struct tr_reactor_config effective;
+
+	if (!out)
+		return TR_ERR_INVALID;
+	memset(&effective, 0, sizeof(effective));
+	if (config)
+		effective = *config;
+	tr_default_config(&effective);
+	if (effective.max_payload_len > effective.rx_buffer_size)
+		return TR_ERR_BAD_LENGTH;
+	return tr_reactor_fixed_memory_bytes(&effective, out);
+}
+
 
 struct tr_reactor_build {
 	struct tr_reactor *reactor;
@@ -4942,12 +4967,13 @@ int tr_reactor_send_stream_refused_on_owner(struct tr_conn_handle handle,
 	        handle, TR_FRAME_STREAM_REFUSED, stream_id, TR_ERR_NOMEM);
 }
 
-int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
-			     uint32_t flags, uint32_t stream_id,
-			     uint64_t message_id,
-			     struct tr_buffer *const *payloads,
-			     uint32_t payload_count,
-			     uint32_t max_frame_payload_len)
+static int tr_reactor_sendv_internal(struct tr_conn_handle connection,
+                                     uint16_t type, uint32_t flags,
+                                     uint32_t stream_id, uint64_t message_id,
+                                     struct tr_buffer *const *payloads,
+                                     uint32_t payload_count,
+                                     uint32_t max_frame_payload_len,
+                                     int exact_frame)
 {
 	struct tr_reactor *reactor = connection.reactor;
 	struct tr_tx_item *item;
@@ -4960,8 +4986,11 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 	    (flags & ~TR_FRAME_F_KNOWN_MASK) ||
 	    payload_count > TR_REACTOR_MAX_TX_SLICES ||
 	    (payload_count != 0 && !payloads) || max_frame_payload_len == 0 ||
-	    max_frame_payload_len > reactor->config.max_payload_len)
+	    max_frame_payload_len > reactor->config.max_payload_len ||
+	    (exact_frame && (type != TR_FRAME_DATA || payload_count != 1U)))
 		return TR_ERR_INVALID;
+	if ((flags & TR_FRAME_F_COMPRESSED) && type != TR_FRAME_DATA)
+		return TR_ERR_BAD_FLAGS;
 
 	for (i = 0; i < payload_count; ++i) {
 		uint32_t j;
@@ -4976,6 +5005,8 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 			return TR_ERR_BAD_LENGTH;
 		payload_len64 += payload->len;
 	}
+	if (exact_frame && payload_len64 > max_frame_payload_len)
+		return TR_ERR_BAD_LENGTH;
 	if (type != TR_FRAME_DATA && payload_len64 > max_frame_payload_len)
 		return TR_ERR_BAD_LENGTH;
 
@@ -4990,6 +5021,7 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 	item->payload_count = payload_count;
 	item->type = type;
 	item->base_flags = flags;
+	item->exact_frame = exact_frame;
 	item->stream_id = stream_id;
 	item->message_id = message_id;
 	item->message_len = payload_len64;
@@ -5062,6 +5094,36 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
 	}
 
 	return ret;
+}
+
+int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
+                             uint32_t flags, uint32_t stream_id,
+                             uint64_t message_id,
+                             struct tr_buffer *const *payloads,
+                             uint32_t payload_count,
+                             uint32_t max_frame_payload_len)
+{
+	return tr_reactor_sendv_internal(connection, type, flags, stream_id,
+	                                 message_id, payloads, payload_count,
+	                                 max_frame_payload_len, 0);
+}
+
+int tr_reactor_send_data_frame_on_owner(struct tr_conn_handle connection,
+                                        uint32_t flags, uint32_t stream_id,
+                                        uint64_t message_id,
+                                        struct tr_buffer *payload)
+{
+	struct tr_reactor *reactor = connection.reactor;
+	struct tr_buffer *payloads[1];
+
+	if (!reactor || !payload)
+		return TR_ERR_INVALID;
+	if (!tr_reactor_is_owner_thread(reactor))
+		return TR_ERR_STATE;
+	payloads[0] = payload;
+	return tr_reactor_sendv_internal(connection, TR_FRAME_DATA, flags,
+	                                 stream_id, message_id, payloads, 1U,
+	                                 reactor->config.max_payload_len, 1);
 }
 
 int tr_reactor_sendv(struct tr_conn_handle connection, uint16_t type,

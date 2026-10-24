@@ -38,6 +38,13 @@ int tr_reactor_call_or_stopped(
 int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg);
 
+/* Compute the fixed owner memory charged when constructing a Reactor with
+ * this configuration. Applies the same defaults and overflow checks as the
+ * constructor, without reserving from a budget or creating resources.
+ */
+int tr_reactor_memory_requirement(const struct tr_reactor_config *config,
+				 uint64_t *out);
+
 /* TLS 快照轮换屏障；准入门禁仅阻止新的 TLS adopt，不影响现有会话。 */
 int tr_reactor_tls_admission_set(struct tr_reactor *reactor, int paused);
 int tr_reactor_tls_close_generation(struct tr_reactor *reactor,
@@ -145,6 +152,13 @@ int tr_reactor_notify_tx_drained_on_owner(struct tr_conn_handle connection);
  * 使用者必须在释放回调参数之前取消观察或成功解绑处理器。 */
 int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle connection,
                                          int enabled);
+
+/* Channel 压缩分帧器在所属 owner 上发送一个不可再分的 DATA 帧。
+ * FIRST/LAST 由调用方维护整个逻辑消息的边界；成功时接管 payload。 */
+int tr_reactor_send_data_frame_on_owner(struct tr_conn_handle connection,
+                                        uint32_t flags, uint32_t stream_id,
+                                        uint64_t message_id,
+                                        struct tr_buffer *payload);
 
 /* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
  * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，
