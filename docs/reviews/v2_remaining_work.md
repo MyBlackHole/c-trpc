@@ -87,11 +87,12 @@ dev.35 的 TEST-C3 在同一受控 Endpoint 夹具中覆盖相邻竞争窗口：
 详见
 [TEST-C3 记录](rpc_v2_test_c3_endpoint_reset_before_retry_20261025.md)。
 
-dev.36 修复压缩 DATA 接收路径漏检 DATA 专属标志的问题。活动流收到额外 `LANE_BULK`
-标志时只 RESET 目标流；RESET 丢弃态收到同类坏帧时关闭对应物理连接，不影响 split
-模式另一物理连接上的流。两条路径都由真实 Channel 测试覆盖；#242 的其他错误分类、
-连接组边界和组合故障仍待完成。详见
-[压缩 DATA 标志隔离记录](rpc_v2_compressed_data_flag_validation_20261025.md)。
+dev.36 修复压缩 DATA 接收路径漏检 DATA 专属标志的问题，并补充真实 Client/Server
+用例验证 GOAWAY 期间已接纳 CALL_OPEN 的 `UNAVAILABLE` 不代表“肯定未执行”、客户端不
+自动重放。活动流收到额外 `LANE_BULK` 标志时只 RESET 目标流；RESET 丢弃态收到同类坏帧
+时关闭对应物理连接，不影响 split 模式另一物理连接上的流。#242 其余错误分类、连接组
+边界和组合故障仍待完成。详见[压缩 DATA 标志隔离记录](rpc_v2_compressed_data_flag_validation_20261025.md)
+及[GOAWAY 未知结果记录](rpc_v2_goaway_unknown_outcome_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
@@ -117,7 +118,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | 普通/压缩 DATA 类型标志在活动流与 RESET 丢弃态均有隔离回归；GOAWAY 接受边界、其余 RESET/错误分类、连接组边界与组合故障验收仍待完成 | #242 |
+| 错误隔离 | 普通/压缩 DATA 类型标志已覆盖活动流与 RESET 丢弃态；单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 的未知结果/不重放行为有回归；其余 RESET/错误分类、连接组边界与组合故障验收仍待完成 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

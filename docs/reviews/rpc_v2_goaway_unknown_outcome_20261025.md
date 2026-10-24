@@ -1,0 +1,30 @@
+# GOAWAY 期间 RPC CALL_OPEN 的未知结果边界
+
+日期：2026-10-25；关联 #242/#244；当前版本 `2.0.0-dev.36`。
+
+## 合同
+
+GOAWAY 的最后受理边界只描述 Channel 物理连接上的传输流准入，不等于 RPC
+`CALL_OPEN` 的业务准入，也不表示业务副作用已经或尚未发生。客户端在收到
+`FINAL_STATUS` 前若只观察到连接/GOAWAY 相关 `UNAVAILABLE`，当前 SDK 不提供
+“肯定未执行”的结果位，也不自动重试或重放。
+
+## 回归
+
+`test_rpc_v2_sdk` 使用真实 V2 Client/Server：手动启动调用并等待服务端处理
+RPC OPEN，随后启动 Server drain。此时调用已被业务层接纳，drain 因未终结调用
+返回 `TR_AGAIN`。测试再关闭 Client；Client 收到且只收到一次
+`UNAVAILABLE/LIVE`，服务端恰好观测一次 OPEN 和一次业务终局。该结果不能被
+解释为“服务端没有执行”，也没有客户端重放。
+
+该目标在 GCC Release、Debug、ASan/UBSan 下均通过。新增场景后的 GCC Release 全量
+`xmake test -P . -v -j1` 为 90/90，耗时 89.009s。消毒器启用泄漏检测并在首个问题处退出。
+
+传输层 `test_channel_graceful_drain` 已覆盖另一侧：本地排空前沿后的竞态
+STREAM_OPEN 不分配流槽，远端按 GOAWAY cutoff 退役精确 OPENING 槽。
+两项测试分别检查传输准入边界与 RPC 结果不确定边界。
+
+## 未覆盖
+
+此测试不实现幂等键、Attempt、跨连接重试或 exactly-once；这些属于 #244。
+连接组 CONTROL/DATA 的跨成员接受记录和失败组合仍属于 #242/#243 的后续验收。

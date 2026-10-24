@@ -115,7 +115,8 @@ struct tr_rpc_v2_client_callbacks {
 	/* 必需。start 受理成功后恰好一次，且等待当前接收回调退出。
 	 * 可释放 arg；返回后不再访问它或调用本调用的其他业务回调。
 	 * terminal 不等于传输和调用槽已经退役，静默由 wait_drained/destroy
-	 * 保证。
+	 * 保证。连接或 GOAWAY 相关错误映射的 UNAVAILABLE 不证明服务端未
+	 * 接收或执行 CALL_OPEN；Client 不自动重试或重放调用。
 	 */
 	void (*terminal)(struct tr_rpc_v2_call call, enum tr_rpc_status status,
 	                 enum tr_rpc_v2_delivery delivery, void *arg);
