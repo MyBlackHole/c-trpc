@@ -1000,6 +1000,56 @@ static void test_rejection(bool metadata)
 	check_final(&f, good, TR_RPC_STATUS_OK);
 	fixture_destroy(&f, false);
 }
+static void test_router_rejection_preserves_active_sibling(bool metadata)
+{
+	struct fixture f;
+	enum tr_connection_state client_state, server_state;
+	fixture_init(&f, 1024 * 1024, 8);
+
+	/* 方法1同伴进入 worker 并暂停，随后测试路由层拒绝另一条 OPEN。 */
+	unsigned sibling = open_call(&f, 1);
+	wait_count(&f.business[sibling].seen[TR_RPC_RECORD_OPEN], 1U);
+	atomic_store(&f.use_gate, true);
+	request(&f, sibling, 1, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+
+	atomic_store(&corrupt_open, metadata);
+	unsigned rejected = open_call(&f, metadata ? 0U : 100U);
+	enum tr_rpc_status expected = metadata ? TR_RPC_STATUS_INVALID_ARGUMENT
+	                                       : TR_RPC_STATUS_UNIMPLEMENTED;
+	check_final(&f, rejected, expected);
+	CHECK(atomic_load(&f.business[rejected].seen[TR_RPC_RECORD_OPEN]) == 0U &&
+	      atomic_load(&f.business[rejected].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      atomic_load(&f.client.terminals[rejected]) == 1U &&
+	      atomic_load(&f.server.terminals[rejected]) == 1U &&
+	      f.server.final_accepted[rejected]);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
+
+	gate_open(&f.gate);
+	check_final(&f, sibling, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[sibling].active) == 0U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 1U &&
+	      atomic_load(&f.client.terminals[sibling]) == 1U &&
+	      atomic_load(&f.server.terminals[sibling]) == 1U);
+	fixture_destroy(&f, false);
+	puts(metadata
+	             ? "rpc_record_endpoint_tcp: malformed metadata preserves active sibling passed"
+	             : "rpc_record_endpoint_tcp: missing method preserves active sibling passed");
+}
 static void test_business_error(bool missing_response)
 {
 	struct fixture f;
@@ -1876,6 +1926,8 @@ int main(void)
 	test_connection_level_error_closes_all_calls();
 	test_rejection(false);
 	test_rejection(true);
+	test_router_rejection_preserves_active_sibling(false);
+	test_router_rejection_preserves_active_sibling(true);
 	test_business_error(false);
 	test_business_error(true);
 	test_business_rejection_preserves_active_sibling();
