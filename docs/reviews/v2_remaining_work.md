@@ -156,6 +156,12 @@ dev.46 为 #242/ERR-C 增加 RESET 与迟到载荷释放组合回归：双向 RE
 多流并发故障的 ERR-C 全矩阵；其他 ERR-A/B/D/E 项仍待验收。详见
 [RESET 后迟到载荷释放与信用记录](rpc_v2_reset_late_payload_credit_20261025.md)。
 
+dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
+重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；双方 Channel 没有 DOWN。
+Release 与 TSan 下 `test_rpc_record_endpoint_tcp` 全目标通过。该用例证明一项 RPC 语义错误映射，
+不代表完整分类矩阵、压缩失败、资源压力及连接级错误路径均已覆盖。详见
+[真实 RPC 语义错误隔离记录](rpc_v2_semantic_error_isolation_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -180,7 +186,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 已覆盖一次接收配额失败、单流 RESET 与同 Channel 同伴调用继续完成，完整分类到生产 C 路径的对照仍待补齐；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接墓碑身份各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 已覆盖一次接收配额失败、单流 RESET 与同 Channel 同伴调用继续完成，真实 TCP Endpoint 已验证重复 OPEN 语义错误只终结目标调用且同连接新调用继续成功；其余分类到生产 C 路径的对照仍待补齐；普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归；ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接墓碑身份各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 连接组排空边界、ERR-E 有界历史和成本仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

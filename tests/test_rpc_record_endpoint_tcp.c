@@ -1274,6 +1274,50 @@ static void send_fragment(struct fixture *f, unsigned slot, const uint8_t *data,
 	}
 	CHECK(ret == TR_OK && !r.payload);
 }
+
+static void test_semantic_record_error_isolation(void)
+{
+	struct fixture f;
+	uint8_t duplicate[TR_RPC_RECORD_HEADER_SIZE + 7U];
+	const uint8_t metadata[] = {1, 3, 0, 'k', 'a', 'b', 'c'};
+	const struct tr_rpc_record_header header = {
+	        .kind = TR_RPC_RECORD_OPEN,
+	        .service_id = 7,
+	        .method_id = 9,
+	        .metadata_size = sizeof(metadata),
+	        .remaining_timeout_ns = UINT64_MAX};
+	const struct tr_rpc_record_limits limits = {
+	        BODY, BODY, sizeof(metadata), TR_RPC_RECORD_ACCEPT_NONE};
+	fixture_init(&f, 1024 * 1024, 8);
+	unsigned invalid = open_call(&f, 0);
+	wait_count(&f.business[invalid].seen[TR_RPC_RECORD_OPEN], 1U);
+
+	/* 线帧边界可信，但同一 RPC 流重复 OPEN 是记录语义错误。 */
+	CHECK(tr_rpc_record_encode_header(duplicate, sizeof(duplicate), &header,
+	                                  &limits) == TR_OK);
+	memcpy(duplicate + TR_RPC_RECORD_HEADER_SIZE, metadata,
+	       sizeof(metadata));
+	send_fragment(&f, invalid, duplicate, sizeof(duplicate));
+	check_final(&f, invalid, TR_RPC_STATUS_INVALID_ARGUMENT);
+	CHECK(atomic_load(&f.business[invalid].seen[TR_RPC_RECORD_OPEN]) == 1U);
+	CHECK(atomic_load(&f.business[invalid].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(atomic_load(&f.client.terminals[invalid]) == 1U &&
+	      atomic_load(&f.server.terminals[invalid]) == 1U);
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+
+	/* 错误终局之后的新 RPC 仍通过同一 TCP 连接成功完成。 */
+	unsigned healthy = open_call(&f, 0);
+	request(&f, healthy, 0, 1, 80);
+	check_final(&f, healthy, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.terminals[healthy]) == 1U &&
+	      atomic_load(&f.server.terminals[healthy]) == 1U);
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: semantic error isolation passed");
+}
+
 static int endpoint_quiet(void *arg)
 {
 	struct fixture *f = arg;
@@ -1668,6 +1712,7 @@ int main(void)
 		test_slow_open(partial);
 	puts("rpc_record_endpoint_tcp: 3 slow OPEN cases passed");
 	test_shapes();
+	test_semantic_record_error_isolation();
 	test_rejection(false);
 	test_rejection(true);
 	test_business_error(false);

@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.46` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.47` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -147,6 +147,12 @@ dev.46 为 #242/ERR-C 增加 RESET 与迟到载荷释放组合回归：双向 RE
 Release 与 TSan 下完整 `test_stream_reset` 均通过。该切片只增加测试，不改生产代码；ERR-C 的其他
 信用与组合场景及 ERR-A/B/D/E 仍待验收。详见
 [RESET 后迟到载荷释放与信用记录](docs/reviews/rpc_v2_reset_late_payload_credit_20261025.md)。
+
+dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：客户端在有效 OPEN 后
+发送第二条合法编码但顺序非法的 OPEN，只有该调用以 `INVALID_ARGUMENT` 终结；随后同一 TCP 连接
+上的新调用仍以 OK 完成，双方没有 Channel-down 事件。Release 与 TSan 下完整
+`test_rpc_record_endpoint_tcp` 均通过。此测试补强生产 C 路径的一项映射证据；完整 ERR-A 矩阵仍待
+验收。详见[真实 RPC 语义错误隔离记录](docs/reviews/rpc_v2_semantic_error_isolation_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
