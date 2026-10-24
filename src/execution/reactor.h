@@ -120,7 +120,9 @@ enum tr_connection_event {
 	/* 仅显式登记发送排空观察的内部使用者收到；连接仍然存活。 */
 	TR_CONN_EVENT_TX_DRAINED = 3,
 	/* 仅显式登记的内部使用者收到一次控制发送容量就绪观察。 */
-	TR_CONN_EVENT_CONTROL_TX_READY = 4
+	TR_CONN_EVENT_CONTROL_TX_READY = 4,
+	/* 仅显式登记的内部使用者收到一次 DATA 发送项池就绪观察。 */
+	TR_CONN_EVENT_DATA_TX_READY = 5
 };
 
 typedef enum tr_frame_disposition (*tr_reactor_frame_cb)(

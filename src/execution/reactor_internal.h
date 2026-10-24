@@ -153,12 +153,21 @@ int tr_reactor_notify_tx_drained_on_owner(struct tr_conn_handle connection);
 int tr_reactor_watch_control_tx_on_owner(struct tr_conn_handle connection,
                                          int enabled);
 
+/* 所有者登记/取消一次 DATA 发送项池观察。每连接固定一个等待项；容量恢复后
+ * 在有界调度点通过原 event_cb 收到一次 DATA_TX_READY。通知先摘队列且不预留项；
+ * 与普通 TX 和控制池通知共用每轮 TX 分派预算。关闭或替换处理器自动取消。 */
+int tr_reactor_watch_data_tx_on_owner(struct tr_conn_handle connection,
+                                      int enabled);
+
 /* Channel 压缩分帧器在所属 owner 上发送一个不可再分的 DATA 帧。
- * FIRST/LAST 由调用方维护整个逻辑消息的边界；成功时接管 payload。 */
+ * FIRST/LAST 由调用方维护整个逻辑消息的边界；成功时接管 payload。
+ * pool_exhausted 可为 NULL；非 NULL 时先清零，仅在 DATA TX 项池耗尽返回
+ * TR_AGAIN 时设为 1，其余失败原因保持为 0。 */
 int tr_reactor_send_data_frame_on_owner(struct tr_conn_handle connection,
                                         uint32_t flags, uint32_t stream_id,
                                         uint64_t message_id,
-                                        struct tr_buffer *payload);
+                                        struct tr_buffer *payload,
+                                        int *pool_exhausted);
 
 /* 单流终止的专用内嵌发送槽，与 GOAWAY 和普通控制池均独立。
  * 仅所有者可调用；TR_OK 接受精确连接代次/流/原因的 FIFO 屏障，

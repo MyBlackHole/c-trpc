@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.26")
+set_version("2.0.0-dev.27")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -320,7 +320,10 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=__poll_chk", {force = true})
         elseif name == "test_transport" then
             -- Observe facade/reconnect TCP_NODELAY policy without production hooks.
-            add_ldflags("-Wl,--wrap=setsockopt", {force = true})
+            add_ldflags("-Wl,--wrap=setsockopt", "-Wl,--wrap=sendmsg",
+                        "-Wl,--wrap=tr_reactor_send_data_frame_on_owner",
+                        "-Wl,--wrap=tr_reactor_watch_data_tx_on_owner",
+                        {force = true})
             add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", {force = true})
         elseif name == "test_connection_group_facade" then
             -- CONTROL 失败与 Client Group 截止时间/condwait 测试链接期注入。
