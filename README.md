@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.98` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.99` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -370,6 +370,15 @@ Client owner 仍可能有短暂的销毁屏障待收敛；测试原先只调用�
 `TR_AGAIN` 做有界重试。GCC Debug `test_connection_group_tls/default` 修改后连续 6/6 通过。
 详见
 [连接组 TLS Client 异步销毁测试收敛](docs/reviews/connection_group_tls_client_destroy_retry_20261025.md)。
+
+dev.99 将共享 DATA TX 池恢复的压缩发送公平性回归扩展为三个存活等待流：唯一池项仍由
+BULK RAW 占用，测试先确认准备 RESET 的 BULK 压缩 Stream 自身触发池耗尽并登记共享连接的
+DATA TX 可写观察，再提交另外三条压缩消息；池恢复后，CONTROL 两条与 BULK 一条
+存活压缩流的首帧各出现一次，后续六帧按同序再轮转两轮。测试确认 RESET 流无 DATA、三条正文
+完整交付，发送池与预算最终归零。GCC Debug 定向目标 6/6、Release 全量测试 91/91 通过。
+本次仅扩展测试、记录和版本号，不改生产/API/ABI/wire。
+详见
+[Shared Channel 三存活压缩流公平轮转回归](docs/reviews/channel_compressed_data_tx_three_waiter_fairness_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
