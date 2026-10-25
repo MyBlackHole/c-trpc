@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.90` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.91` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -331,6 +331,9 @@ dev.89 增加真实 Split Channel 跨 lane 的 RPC Record Zstandard 正文发送
 
 dev.90 修复通用 Channel 的 Split Channel Zstandard DATA 跨 lane 进展：此前压缩发送器把 `LANE_BULK` 带进 DATA 标志，接收器按协议校验将 BULK 流 RESET 为 `TR_ERR_STATE`。现由 Stream 登记和连接代次确定 lane，DATA 只携带分片与压缩标志。真实 TCP 回归暂停服务端 BULK 接收，确认 300 字节 BULK 消息在 128/128 信用处停住时，CONTROL 小压缩消息仍先交付；恢复 BULK 后正文完整交付，压缩 DATA 发送推进至 330 字节。GCC Release 完整 `test_transport` 连续 5/5，GCC Debug 完整目标通过，GCC Release 全套 91/91。该修复改变生产 Channel 内部标志生成，不改变公开 API/ABI 或 wire 格式；长期公平 SLA、共享 TX 池耗尽与更广取消/预算组合仍待验收。详见
 [Split Channel 通用压缩 DATA 跨 lane 信用进展回归](docs/reviews/channel_compressed_data_split_lane_progress_20261025.md)。
+
+dev.91 扩展通用 Channel 压缩 DATA 覆盖到 Shared Channel 的逻辑 BULK Stream：慢 CONTROL 压缩流因窗口不足停住时，同一物理连接上的小 BULK 压缩流仍完整交付；随后 CONTROL 流也恢复并通过正文校验。该回归锁定 dev.90 移除 DATA lane 标志后的共享连接路由行为。GCC Release 完整 `test_transport` 连续 5/5、GCC Debug 完整目标通过、GCC Release 全套 91/91。只改测试、文档与版本号，无额外生产代码/API/ABI/wire 变更；长期公平 SLA、共享 TX 池耗尽及更广预算/取消组合仍待验收。详见
+[Shared Channel 逻辑 BULK 压缩 DATA 回归](docs/reviews/channel_compressed_data_shared_bulk_lane_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

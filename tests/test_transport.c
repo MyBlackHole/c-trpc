@@ -4001,7 +4001,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	assert(tr_stream_get_diagnostics(compressed_client_stream,
 	                                 &compressed_diagnostics) == TR_OK);
-	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	assert(tr_stream_open(fixture.client, TR_LANE_BULK,
 	                      &fast_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
 	                     3U);
@@ -4012,6 +4012,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	assert(tr_stream_get_diagnostics(fast_client_stream,
 	                                 &fast_diagnostics) == TR_OK);
+	assert(fast_diagnostics.lane == TR_LANE_BULK);
 	{
 		uint32_t random_state = 0x9e3779b9U;
 		for (uint32_t i = 0; i < third_source_len; ++i) {

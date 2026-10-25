@@ -25,6 +25,7 @@
 - GCC Release 完整 `test_transport` 连续 5/5 通过。五次均观测 BULK 停于 128/128、CONTROL 先完成、恢复后 BULK 推进至 330 字节。
 - GCC Debug 完整 `test_transport` 通过，边界和正文断言一致。
 - GCC Release 完整项目测试套件 91/91 通过，耗时 141.861 秒。
+- dev.90 推送后的 Push CI（40180144592）、PR CI（40180148209）和 RPC benchmark smoke（40180148249）均通过。
 - 新回归在修复前稳定复现接收超时；诊断显示双方 Stream RESET 状态为 `TR_ERR_STATE`，与接收器拒绝 DATA lane 标志的路径一致。
 
 ## 结论边界
