@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.87` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.88` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -322,6 +322,8 @@ dev.86 修正 dev.85 首轮 GCC Debug CI 暴露的测试容量配置：原场景
 [公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
 
 dev.87 将固定 32 条压缩负载扩展为四批、共 128 条 1 MiB Zstandard 消息；每批完成回调后才提交下一批，服务端压缩任务容量保持 32。另一 DATA 成员在全程维持最多 32 条 RAW 在途消息，测试分别断言每批首末压缩回调之间至少交付 32 条 RAW，并逐字节复核仍被应用持有的五条解码正文。GCC Release 定向目标连续 7/7，四批间 RAW 进展总和为 6,397–11,011；GCC Debug 连续 4/4，为 2,150–3,231；Clang Release、ASan/UBSan 与 TSan 定向目标通过，完整 GCC Release 套件 91/91。此切片扩展有限窗口证据，不定义公平延迟/吞吐阈值，也不证明长期持续饱和公平性。仅改测试、文档与版本号，不改生产运行时、公开 API/ABI 或 wire。详见
+[公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
+dev.88 将同一公开 Server 场景扩展到八批、共 256 条 1 MiB Zstandard 消息，RAW 在途窗口与逐批最低进展条件不变；记录每批压缩提交至全部回调完成的墙钟时间。GCC Release 定向目标六次通过，观测总阶段为 390–433 ms、每批 RAW 为 1,718–3,171 条；GCC Debug、Clang Release、ASan/UBSan（含泄漏检查）和 TSan 目标均通过，完整 GCC Release 套件 91/91（130.110 秒）。这些时间和计数只作本机诊断，不作为 SLA；八批仍是有限压力，不证明长期公平性。仅改测试、文档和版本号，不改生产运行时、公开 API/ABI 或 wire。详见
 [公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加

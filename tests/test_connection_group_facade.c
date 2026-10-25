@@ -46,7 +46,7 @@
 #define TEST_GROUP_NATURAL_BUDGET_HOLD_CAPACITY 64U
 #define TEST_GROUP_NATURAL_BUDGET_FIRST_ID UINT64_C(7000)
 #define TEST_GROUP_FAIRNESS_ZSTD_FIRST_ID UINT64_C(7400)
-#define TEST_GROUP_FAIRNESS_ZSTD_BATCHES 4U
+#define TEST_GROUP_FAIRNESS_ZSTD_BATCHES 8U
 #define TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH 32U
 #define TEST_GROUP_FAIRNESS_ZSTD_COUNT                                         \
 	(TEST_GROUP_FAIRNESS_ZSTD_BATCHES * TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH)
@@ -1231,6 +1231,15 @@ static void *fairness_raw_sender_main(void *arg)
 		(void)nanosleep(&retry_delay, NULL);
 	}
 	return NULL;
+}
+
+static uint64_t group_monotonic_now_ns(void)
+{
+	struct timespec now;
+
+	assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+	return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)now.tv_nsec;
 }
 
 static int wait_natural_budget_hold_or_data_close(struct public_group_ctx *ctx,
@@ -2872,6 +2881,9 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	uint16_t group_port = 0U;
 	unsigned raw_sent_target;
 	unsigned raw_during_zstd_total = 0U;
+	uint64_t zstd_batch_duration_ns[TEST_GROUP_FAIRNESS_ZSTD_BATCHES];
+	uint64_t zstd_started_ns;
+	uint64_t zstd_elapsed_ns;
 	pthread_t raw_thread;
 	unsigned batch;
 	unsigned i;
@@ -2962,11 +2974,13 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	assert(decoded_payload != NULL);
 	compressed_bytes.data = decoded_payload;
 	compressed_bytes.len = TEST_GROUP_LARGE_DECODED_BYTES;
+	zstd_started_ns = group_monotonic_now_ns();
 	for (batch = 0U; batch < TEST_GROUP_FAIRNESS_ZSTD_BATCHES; ++batch) {
 		unsigned batch_first =
 		        batch * TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH;
 		unsigned batch_end =
 		        batch_first + TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH;
+		uint64_t batch_started_ns = group_monotonic_now_ns();
 
 		for (i = batch_first; i < batch_end; ++i) {
 			unsigned attempt;
@@ -3025,7 +3039,12 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 		       ctx.fairness_raw_at_batch_start[batch] +
 		               TEST_GROUP_FAIRNESS_MIN_RAW_DURING_ZSTD);
 		pthread_mutex_unlock(&ctx.lock);
+		zstd_batch_duration_ns[batch] =
+		        group_monotonic_now_ns() - batch_started_ns;
+		assert(zstd_batch_duration_ns[batch] != 0U);
 	}
+	zstd_elapsed_ns = group_monotonic_now_ns() - zstd_started_ns;
+	assert(zstd_elapsed_ns != 0U);
 	free(decoded_payload);
 
 	atomic_store(&raw_sender.stop, 1);
@@ -3085,8 +3104,17 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 		printf("%u", ctx.fairness_raw_at_batch_end[batch] -
 		                     ctx.fairness_raw_at_batch_start[batch]);
 	}
-	printf("] raw_during_zstd=%u raw_total=%u\n", raw_during_zstd_total,
-	       ctx.fairness_raw_messages);
+	printf("] zstd_batch_ms=[");
+	for (batch = 0U; batch < TEST_GROUP_FAIRNESS_ZSTD_BATCHES; ++batch) {
+		if (batch != 0U)
+			putchar(',');
+		printf("%llu",
+		       (unsigned long long)(zstd_batch_duration_ns[batch] /
+		                            UINT64_C(1000000)));
+	}
+	printf("] zstd_elapsed_ms=%llu raw_during_zstd=%u raw_total=%u\n",
+	       (unsigned long long)(zstd_elapsed_ns / UINT64_C(1000000)),
+	       raw_during_zstd_total, ctx.fairness_raw_messages);
 	pthread_mutex_unlock(&ctx.lock);
 	for (i = 0U; i < TEST_GROUP_BUDGET_HOLD_COUNT; ++i)
 		assert(tr_connection_group_message_release(
