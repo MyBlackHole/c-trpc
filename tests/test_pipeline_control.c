@@ -242,6 +242,127 @@ static void test_pipeline_control_registry_capacity_failure_is_precommit(void)
 	assert(tr_reactor_destroy(owner) == TR_OK);
 }
 
+static void
+test_pipeline_control_abort_retires_attached_data_and_epoch_routes(void)
+{
+	struct tr_reactor *owner = NULL;
+	struct tr_pipeline_registry_config registry_config;
+	struct tr_pipeline_registry *registry = NULL;
+	struct tr_pipeline_registry_stats registry_stats;
+	struct tr_pipeline_control_config control_config;
+	struct tr_pipeline_control *control = NULL;
+	struct tr_pipeline_control *next_control = NULL;
+	struct tr_pipeline_stats pipeline_stats;
+	struct tr_pipeline_data_offer offers[3];
+	struct tr_pipeline_data_offer next_offer;
+	struct tr_pipeline_transfer_ready ready;
+	struct tr_pipeline_data_ref attached[2];
+	struct tr_conn_handle control_connection;
+	struct tr_conn_handle next_control_connection;
+	struct tr_conn_handle data_connections[2];
+	struct tr_conn_handle next_data_connection;
+	unsigned i;
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &owner) == TR_OK);
+	assert(tr_reactor_start(owner) == TR_OK);
+
+	memset(&registry_config, 0, sizeof(registry_config));
+	registry_config.owner = owner;
+	registry_config.owner_shard_id = 9U;
+	registry_config.capacity = 1U;
+	assert(tr_pipeline_registry_create(&registry_config, &registry) ==
+	       TR_OK);
+
+	memset(&control_config, 0, sizeof(control_config));
+	control_config.registry = registry;
+	control_config.pipeline_id = UINT64_C(0x9001);
+	control_config.epoch = UINT64_C(41);
+	control_config.data_capacity = 3U;
+	control_config.stream_affinity_capacity = 2U;
+	control_connection = fake_connection(owner, 50U, 1U);
+	assert(tr_pipeline_control_create(&control_config, control_connection,
+	                                  &control) == TR_OK);
+
+	for (i = 0U; i < 3U; ++i)
+		assert(tr_pipeline_control_reserve_data(control, &offers[i]) ==
+		       TR_OK);
+	for (i = 0U; i < 2U; ++i) {
+		data_connections[i] = fake_connection(owner, 51U + i, 1U);
+		assert(tr_pipeline_registry_attach_data_route(
+		               registry, &offers[i].route, data_connections[i],
+		               &attached[i]) == TR_OK);
+		assert(tr_pipeline_control_prepare_transfer(control, 9001U + i,
+		                                            &ready) == TR_OK);
+		assert(ready.stream_id == 9001U + i);
+		assert(ready.data.index == attached[i].index);
+		assert(ready.data.generation == attached[i].generation);
+	}
+
+	memset(&pipeline_stats, 0, sizeof(pipeline_stats));
+	assert(tr_pipeline_control_get_stats(control, &pipeline_stats) ==
+	       TR_OK);
+	assert(pipeline_stats.control_bound == 1);
+	assert(pipeline_stats.data_count == 2U);
+	assert(pipeline_stats.data_reserved_count == 1U);
+	assert(pipeline_stats.stream_affinity_count == 2U);
+
+	/* 致命 CONTROL 拆除须先清除全部 DATA 代次与亲和，再注销旧 epoch。 */
+	assert(tr_pipeline_control_abort(control, control_connection) == TR_OK);
+	control = NULL;
+	memset(&registry_stats, 0, sizeof(registry_stats));
+	assert(tr_pipeline_registry_get_stats(registry, &registry_stats) ==
+	       TR_OK);
+	assert(registry_stats.count == 0U);
+	assert(tr_pipeline_registry_attach_data_route(
+	               registry, &offers[0].route,
+	               fake_connection(owner, 54U, 1U), NULL) == TR_ERR_STALE);
+	assert(tr_pipeline_registry_attach_data_route(
+	               registry, &offers[2].route,
+	               fake_connection(owner, 58U, 1U), NULL) == TR_ERR_STALE);
+
+	/* 同一 pipeline id 进入新 epoch 后，旧 DATA 前导不得消耗新预留。 */
+	control_config.epoch = UINT64_C(42);
+	next_control_connection = fake_connection(owner, 55U, 1U);
+	assert(tr_pipeline_control_create(&control_config,
+	                                  next_control_connection,
+	                                  &next_control) == TR_OK);
+	assert(tr_pipeline_control_reserve_data(next_control, &next_offer) ==
+	       TR_OK);
+	assert(next_offer.route.epoch == UINT64_C(42));
+	assert(next_offer.route.member_generation >
+	       offers[2].route.member_generation);
+	assert(tr_pipeline_registry_attach_data_route(
+	               registry, &offers[0].route,
+	               fake_connection(owner, 56U, 1U), NULL) == TR_ERR_STALE);
+	assert(tr_pipeline_registry_attach_data_route(
+	               registry, &offers[2].route,
+	               fake_connection(owner, 59U, 1U), NULL) == TR_ERR_STALE);
+
+	memset(&pipeline_stats, 0, sizeof(pipeline_stats));
+	assert(tr_pipeline_control_get_stats(next_control, &pipeline_stats) ==
+	       TR_OK);
+	assert(pipeline_stats.data_reserved_count == 1U);
+	assert(pipeline_stats.data_count == 0U);
+	next_data_connection = fake_connection(owner, 57U, 1U);
+	assert(tr_pipeline_registry_attach_data_route(
+	               registry, &next_offer.route, next_data_connection,
+	               NULL) == TR_OK);
+	assert(tr_pipeline_registry_detach_data_route(
+	               registry, &next_offer.route, next_data_connection) ==
+	       TR_OK);
+	assert(tr_pipeline_control_close(next_control,
+	                                 next_control_connection) == TR_OK);
+	next_control = NULL;
+	memset(&registry_stats, 0, sizeof(registry_stats));
+	assert(tr_pipeline_registry_get_stats(registry, &registry_stats) ==
+	       TR_OK);
+	assert(registry_stats.count == 0U);
+
+	tr_pipeline_registry_destroy(registry);
+	assert(tr_reactor_stop(owner) == TR_OK);
+	assert(tr_reactor_destroy(owner) == TR_OK);
+}
+
 static void test_pipeline_control_validation(void)
 {
 	struct tr_pipeline_control_config config;
@@ -314,6 +435,7 @@ int main(void)
 {
 	test_pipeline_control_validation();
 	test_pipeline_control_registry_capacity_failure_is_precommit();
+	test_pipeline_control_abort_retires_attached_data_and_epoch_routes();
 	test_data_capacity_rejection_does_not_consume_generation();
 	test_pipeline_control_session();
 	puts("pipeline control/transfer-ready: ok");
