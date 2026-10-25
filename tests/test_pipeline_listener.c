@@ -867,6 +867,7 @@ static void test_pipeline_listener_control_and_data(void)
 	struct tr_pipeline_route_preface offer_route;
 	struct tr_pipeline_route_preface offer_route2;
 	struct tr_pipeline_route_preface late_data_route;
+	struct tr_pipeline_route_preface late_data_route2;
 	struct tr_pipeline_route_preface late_control_route;
 	struct tr_pipeline_control_wire_message offer;
 	struct tr_pipeline_control_wire_message offer2;
@@ -875,6 +876,7 @@ static void test_pipeline_listener_control_and_data(void)
 	struct tr_pipeline_control_wire_message cancel;
 	uint8_t ping[TR_WIRE_HEADER_SIZE];
 	uint8_t late_data_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
+	uint8_t late_data_raw2[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint8_t late_control_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint16_t port = 0U;
 	int bad_control = -1;
@@ -883,6 +885,7 @@ static void test_pipeline_listener_control_and_data(void)
 	int duplicate_data = -1;
 	int control2 = -1;
 	int late_data = -1;
+	int late_data2 = -1;
 	int late_control = -1;
 
 	memset(&data_ctx, 0, sizeof(data_ctx));
@@ -1047,6 +1050,21 @@ static void test_pipeline_listener_control_and_data(void)
 	late_data = connect_loopback(port);
 	send_all(late_data, late_data_raw,
 	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	memset(&late_data_route2, 0, sizeof(late_data_route2));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_2, UINT64_C(3002),
+	               &late_data_route2) == TR_OK);
+	memset(&offer3, 0, sizeof(offer3));
+	recv_control_message(control2, UINT64_C(3002), &offer3);
+	assert(offer3.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer3.data_index == late_data_route2.member_index);
+	assert(offer3.data_generation == late_data_route2.member_generation);
+	assert(late_data_route2.member_index != late_data_route.member_index);
+	assert(tr_pipeline_route_preface_encode(late_data_raw2,
+	                                        &late_data_route2) == TR_OK);
+	late_data2 = connect_loopback(port);
+	send_all(late_data2, late_data_raw2,
+	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
 	late_control_route = control_route(TEST_EPOCH_2);
 	late_control_route.pipeline_id++;
 	assert(tr_pipeline_route_preface_encode(late_control_raw,
@@ -1054,7 +1072,7 @@ static void test_pipeline_listener_control_and_data(void)
 	late_control = connect_loopback(port);
 	send_all(late_control, late_control_raw,
 	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
-	wait_listener_counts(listener, 1U, 3U);
+	wait_listener_counts(listener, 1U, 4U);
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
 	uint32_t data_accepts_before_drain = stats.data_accepts;
@@ -1064,24 +1082,30 @@ static void test_pipeline_listener_control_and_data(void)
 	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
 	send_all(late_data,
 	         late_data_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
+	send_all(late_data2,
+	         late_data_raw2 + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
 	send_all(late_control,
 	         late_control_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
 	for (unsigned i = 0U; i < 5000U; ++i) {
 		assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
 		if (stats.data_accepts > data_accepts_before_drain ||
 		    stats.control_accepts > control_accepts_before_drain ||
-		    stats.route_rejections >= route_rejections_before_drain + 2U)
+		    stats.route_rejections >=
+		            route_rejections_before_drain + 3U)
 			break;
 		struct timespec pause = {0, 1000000L};
 		(void)nanosleep(&pause, NULL);
 	}
 	assert(stats.data_accepts == data_accepts_before_drain);
 	assert(stats.control_accepts == control_accepts_before_drain);
-	assert(stats.route_rejections == route_rejections_before_drain + 2U);
+	assert(stats.route_rejections == route_rejections_before_drain + 3U);
 	wait_peer_close(late_data);
+	wait_peer_close(late_data2);
 	wait_peer_close(late_control);
 	close(late_data);
 	late_data = -1;
+	close(late_data2);
+	late_data2 = -1;
 	close(late_control);
 	late_control = -1;
 	wait_listener_counts(listener, 1U, 1U);

@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.72` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.73` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -278,6 +278,9 @@ dev.71 修复 #242/ERR-A 连接组 listener draining 接受边界：同步授权
 
 dev.72 扩展连接组 listener 排空接受边界回归：一个新 CONTROL route 与一个已预留 DATA route 都在 begin_drain 前只发送不完整前导；drain 后补齐时，两类连接均被拒绝，CONTROL/DATA 接受计数保持不变，route rejection 增加两次。GCC Release、TSan、ASan/UBSan 下 `test_pipeline_listener` 均通过。本切片只扩展集成测试、文档和版本号。详见
 [CONTROL/DATA pending route 排空回归](docs/reviews/rpc_v2_group_drain_pending_routes_20261025.md)。
+
+dev.73 扩展连接组跨成员 draining 回归：同一 CONTROL 下两个不同 DATA member route 和另一个有效 CONTROL route 同时保持 pending，分别在 begin_drain 前只发送 route 前导的 N-1 字节；drain 后补齐时三条 route 均被拒绝，CONTROL/DATA 接受计数不变、route rejection 增加三次，pending socket 全部关闭。GCC Release、TSan、ASan/UBSan 下 `test_pipeline_listener` 均通过。本切片只扩展集成测试、文档和版本号。详见
+[双 DATA 成员 pending route 排空回归](docs/reviews/rpc_v2_group_drain_multi_member_pending_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
