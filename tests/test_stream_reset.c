@@ -50,6 +50,7 @@ struct fixture {
 	int hold_data;
 	int queue_reset_predecessors;
 	int reopen_on_closed;
+	int circular_stream_tracking;
 	struct tr_stream_handle reopened_stream;
 };
 
@@ -207,11 +208,21 @@ static void on_stream(struct tr_stream_handle stream,
 	int reopen = 0;
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	if (event == TR_STREAM_EVENT_OPENED) {
-		assert(f->opened < TRACKED_STREAMS);
-		f->stream[f->opened++] = stream;
+		if (f->circular_stream_tracking) {
+			f->stream[f->opened % TRACKED_STREAMS] = stream;
+			++f->opened;
+		} else {
+			assert(f->opened < TRACKED_STREAMS);
+			f->stream[f->opened++] = stream;
+		}
 	} else if (event == TR_STREAM_EVENT_RESET) {
-		assert(f->resets < TRACKED_STREAMS);
-		f->reset_status[f->resets++] = status;
+		if (f->circular_stream_tracking) {
+			f->reset_status[f->resets % TRACKED_STREAMS] = status;
+			++f->resets;
+		} else {
+			assert(f->resets < TRACKED_STREAMS);
+			f->reset_status[f->resets++] = status;
+		}
 		queue_predecessors = f->queue_reset_predecessors;
 		f->queue_reset_predecessors = 0;
 	} else if (event == TR_STREAM_EVENT_CLOSED) {
@@ -452,7 +463,7 @@ static struct tr_stream_handle open_remote(struct fixture *f, unsigned lane,
 	assert(h.type == TR_FRAME_WINDOW_UPDATE && h.stream_id == id);
 	assert(h.message_id == WINDOW);
 	wait_count(f, &f->opened, count);
-	return f->stream[count - 1U];
+	return f->stream[(count - 1U) % TRACKED_STREAMS];
 }
 
 struct reset_request {
@@ -716,6 +727,53 @@ static void test_tombstone_long_fifo_turnover(void)
 	wait_count(&f, &f.down, 1U);
 	assert(f.down_status == TR_ERR_STATE);
 	assert(count(&f, &f.closed) == stream_count);
+	destroy_fixture(&f);
+}
+
+static void test_tombstone_real_channel_capacity(void)
+{
+	struct fixture f;
+	const unsigned channel_capacity =
+#if defined(__SANITIZE_THREAD__)
+	        5000U;
+#else
+	        40000U;
+#endif
+	uint32_t newest_id = 0U;
+	init_fixture(&f, channel_capacity, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	f.circular_stream_tracking = 1;
+
+	/* 真实 Channel 填满墓碑环；TSan 降低容量以守住目标运行时限。 */
+	for (unsigned i = 0U; i < channel_capacity; ++i) {
+		uint32_t stream_id = 2U * i + 1U;
+		struct tr_stream_handle stream =
+		        open_remote(&f, 0, stream_id, i + 1U);
+		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
+		finish_reset(&f, 0, stream_id, TR_ERR_CLOSED, TR_ERR_CLOSED,
+		             i + 1U);
+		newest_id = stream_id;
+	}
+
+	/* 最老和最新墓碑都仍驻留；再加入一条后最老墓碑必须淘汰。 */
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 0, newest_id, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	struct tr_stream_handle rollover =
+	        open_remote(&f, 0, newest_id + 2U, channel_capacity + 1U);
+	assert(reset(&f, rollover, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, newest_id + 2U, TR_ERR_CLOSED, TR_ERR_CLOSED,
+	             channel_capacity + 1U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	peer_reset(&f, 0, newest_id + 2U, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(count(&f, &f.closed) == channel_capacity + 1U);
+	printf("stream_reset: real Channel tombstone capacity %u passed\n",
+	       channel_capacity);
 	destroy_fixture(&f);
 }
 
@@ -1821,6 +1879,7 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
+	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
 	test_closed_reentrant_open_fifo();
