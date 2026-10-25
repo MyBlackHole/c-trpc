@@ -15,6 +15,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -730,6 +731,28 @@ static void test_tombstone_long_fifo_turnover(void)
 	destroy_fixture(&f);
 }
 
+static uint64_t timespec_ns(const struct timespec *value)
+{
+	return (uint64_t)value->tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)value->tv_nsec;
+}
+
+static int compare_u64_ns(const void *left, const void *right)
+{
+	uint64_t a = *(const uint64_t *)left;
+	uint64_t b = *(const uint64_t *)right;
+	return (a > b) - (a < b);
+}
+
+static uint64_t percentile_u64_ns(const uint64_t *sorted, unsigned count,
+                                  unsigned percentile)
+{
+	size_t rank;
+	assert(sorted && count > 0U && percentile > 0U && percentile <= 100U);
+	rank = ((size_t)count * percentile + 99U) / 100U;
+	return sorted[rank - 1U];
+}
+
 static void test_tombstone_real_channel_capacity(void)
 {
 	struct fixture f;
@@ -740,20 +763,38 @@ static void test_tombstone_real_channel_capacity(void)
 	        40000U;
 #endif
 	uint32_t newest_id = 0U;
+	uint64_t *reset_rtt_ns =
+	        calloc(channel_capacity, sizeof(*reset_rtt_ns));
+	struct timespec loop_wall_start, loop_wall_end;
+	struct timespec loop_cpu_start, loop_cpu_end;
+	uint64_t wall_ns, cpu_ns;
+	assert(reset_rtt_ns);
 	init_fixture(&f, channel_capacity, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
 	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
 	f.circular_stream_tracking = 1;
 
-	/* 真实 Channel 填满墓碑环；TSan 降低容量以守住目标运行时限。 */
+	/* TSan 降低容量以守住目标运行时限；Release/ASan 按生产最大配置运行。 */
+	assert(clock_gettime(CLOCK_MONOTONIC, &loop_wall_start) == 0);
+	assert(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &loop_cpu_start) == 0);
 	for (unsigned i = 0U; i < channel_capacity; ++i) {
 		uint32_t stream_id = 2U * i + 1U;
 		struct tr_stream_handle stream =
 		        open_remote(&f, 0, stream_id, i + 1U);
+		struct timespec reset_start, reset_end;
+		assert(clock_gettime(CLOCK_MONOTONIC, &reset_start) == 0);
 		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
 		finish_reset(&f, 0, stream_id, TR_ERR_CLOSED, TR_ERR_CLOSED,
 		             i + 1U);
+		assert(clock_gettime(CLOCK_MONOTONIC, &reset_end) == 0);
+		reset_rtt_ns[i] =
+		        timespec_ns(&reset_end) - timespec_ns(&reset_start);
 		newest_id = stream_id;
 	}
+	assert(clock_gettime(CLOCK_MONOTONIC, &loop_wall_end) == 0);
+	assert(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &loop_cpu_end) == 0);
+	wall_ns = timespec_ns(&loop_wall_end) - timespec_ns(&loop_wall_start);
+	cpu_ns = timespec_ns(&loop_cpu_end) - timespec_ns(&loop_cpu_start);
+	assert(wall_ns > 0U);
 
 	/* 最老和最新墓碑都仍驻留；再加入一条后最老墓碑必须淘汰。 */
 	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
@@ -774,6 +815,20 @@ static void test_tombstone_real_channel_capacity(void)
 	assert(count(&f, &f.closed) == channel_capacity + 1U);
 	printf("stream_reset: real Channel tombstone capacity %u passed\n",
 	       channel_capacity);
+	qsort(reset_rtt_ns, channel_capacity, sizeof(*reset_rtt_ns),
+	      compare_u64_ns);
+	printf("stream_reset: RESET round-trip us p50=%.2f p95=%.2f p99=%.2f; "
+	       "OPEN/RESET loop wall_ms=%.2f process_cpu_ms=%.2f "
+	       "open_reset/s=%.0f\n",
+	       (double)percentile_u64_ns(reset_rtt_ns, channel_capacity, 50U) /
+	               1000.0,
+	       (double)percentile_u64_ns(reset_rtt_ns, channel_capacity, 95U) /
+	               1000.0,
+	       (double)percentile_u64_ns(reset_rtt_ns, channel_capacity, 99U) /
+	               1000.0,
+	       (double)wall_ns / 1000000.0, (double)cpu_ns / 1000000.0,
+	       (double)channel_capacity * 1000000000.0 / (double)wall_ns);
+	free(reset_rtt_ns);
 	destroy_fixture(&f);
 }
 

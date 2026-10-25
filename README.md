@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.75` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.76` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -287,6 +287,9 @@ dev.74 修正 RESET 墓碑索引删除成本计量：`remove` 的测试探测计
 
 dev.75 为 #242/ERR-E 在 `max_streams=40000`、131072 槽下增加同 home 最坏输入：代数反解生成 40,000 个句柄非零且互异的复合键，验证尾部查找 40,000 次、簇首删除 80,001 次、复用槽位后的插入与命中各 40,000 次，以及旧键 stale 查询 40,001 次。Release、TSan、ASan/UBSan 下 `test_reset_tombstone_index` 均通过；push CI、PR CI 和 RPC benchmark smoke 全部通过。这是索引层合成状态，不测量真实连接的持续高频 CPU/延迟。详见
 [RESET 墓碑索引最大容量同 home 成本记录](docs/reviews/rpc_v2_reset_tombstone_same_home_max_capacity_20261025.md)。
+
+dev.76 为 #242/ERR-E 在真实 socketpair/Reactor/Channel `max_streams=40000` 周转中记录 RESET 往返 P50/P95/P99，以及包含 OPEN/RESET 的循环墙钟、进程 CPU 时间与吞吐。三次 GCC Release 运行的 RESET 延迟中位数为 P50 1151.42 µs、P95 1395.03 µs、P99 1712.33 µs；各次结果波动明显。TSan 使用 5,000 条目守住运行时限，Release 与 ASan/UBSan 使用 40,000 条目。该项是本机测试夹具观测，没有隔离生产微基准、跨机器基线或性能阈值，不构成持续高频负载验收。详见
+[真实 Channel RESET 高频成本初测](docs/reviews/rpc_v2_reset_tombstone_high_frequency_cost_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
