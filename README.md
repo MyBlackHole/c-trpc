@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.88` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.89` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -325,6 +325,9 @@ dev.87 将固定 32 条压缩负载扩展为四批、共 128 条 1 MiB Zstandard
 [公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
 dev.88 将同一公开 Server 场景扩展到八批、共 256 条 1 MiB Zstandard 消息，RAW 在途窗口与逐批最低进展条件不变；记录每批压缩提交至全部回调完成的墙钟时间。GCC Release 定向目标六次通过，观测总阶段为 390–433 ms、每批 RAW 为 1,718–3,171 条；GCC Debug、Clang Release、ASan/UBSan（含泄漏检查）和 TSan 目标均通过，完整 GCC Release 套件 91/91（130.110 秒）。这些时间和计数只作本机诊断，不作为 SLA；八批仍是有限压力，不证明长期公平性。仅改测试、文档和版本号，不改生产运行时、公开 API/ABI 或 wire。详见
 [公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
+
+dev.89 增加真实 Split Channel 跨 lane 的 RPC Record Zstandard 正文发送回归：暂停服务端 BULK 接收，使 16 KiB 压缩正文耗尽该流窗口；同一 Channel 的 CONTROL 小压缩正文仍先到达，恢复 BULK 接收后大消息完整交付。GCC Release 完整 `test_rpc_record_stream` 连续 5/5，GCC Debug 完整目标也通过；五次 Release 均观察到 BULK `4144/4144` 字节停滞、CONTROL 先完成、BULK 恢复到 16,494 字节。只增加测试、记录和版本号，不改生产运行时、公开 API/ABI 或 wire；Channel `TR_FRAME_F_COMPRESSED` 分帧、持续饱和 SLA、共享 TX 池耗尽和同 lane 多流公平仍待验收。详见
+[Split Channel 压缩窗口跨 lane 同伴进展回归](docs/reviews/rpc_v2_compressed_tx_cross_lane_progress_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
