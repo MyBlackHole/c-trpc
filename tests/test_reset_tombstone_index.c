@@ -145,7 +145,7 @@ static void test_same_stream_id_on_distinct_connections(void)
 	assert(slot == 1U);
 }
 
-static void test_average_probe_bound_for_large_history(void)
+static void test_large_history_probe_bound_and_fifo_turnover(void)
 {
 	const uint32_t count = 40000U;
 	size_t capacity = 1U;
@@ -183,6 +183,48 @@ static void test_average_probe_bound_for_large_history(void)
 
 	/* 固定 40k 历史下总探测数随条目数线性增长，而非逐项全表扫描。 */
 	assert(total_probes <= (uint64_t)count * 8U);
+
+	/* 在最大历史容量上逐槽完成一轮完整 FIFO 淘汰和复用。 */
+	{
+		uint64_t turnover_probes = 0U;
+		for (uint32_t i = 0U; i < count; ++i) {
+			uint32_t old_stream_id = 2U * i + 1U;
+			uint32_t new_stream_id = 2U * (count + i) + 1U;
+			uint32_t slot = UINT32_MAX;
+			size_t probes = 0U;
+			assert(tr_reset_tombstone_index_remove(
+			               slots, capacity, history, count, connection,
+			               old_stream_id, &probes) == TR_OK);
+			turnover_probes += probes;
+			assert(tr_reset_tombstone_index_find(
+			               slots, capacity, history, count, connection,
+			               old_stream_id, &slot, &probes) == TR_ERR_STALE);
+			turnover_probes += probes;
+
+			history[i].stream_id = new_stream_id;
+			assert(tr_reset_tombstone_index_insert(
+			               slots, capacity, history, count, connection,
+			               new_stream_id, i, &probes) == TR_OK);
+			turnover_probes += probes;
+		}
+		for (uint32_t i = 0U; i < count; ++i) {
+			uint32_t slot = UINT32_MAX;
+			size_t probes = 0U;
+			assert(tr_reset_tombstone_index_find(
+			               slots, capacity, history, count, connection,
+			               2U * (count + i) + 1U, &slot,
+			               &probes) == TR_OK);
+			assert(slot == i);
+			turnover_probes += probes;
+			assert(tr_reset_tombstone_index_find(
+			               slots, capacity, history, count, connection,
+			               2U * i + 1U, &slot,
+			               &probes) == TR_ERR_STALE);
+			turnover_probes += probes;
+		}
+		/* 包含删除、淘汰确认、重插和最终保留/淘汰查询。 */
+		assert(turnover_probes <= (uint64_t)count * 48U);
+	}
 	free(slots);
 	free(history);
 }
@@ -281,8 +323,8 @@ int main(void)
 	test_wrapped_collision_cluster_delete_and_reuse();
 	test_duplicate_insert_and_invalid_slots();
 	test_same_stream_id_on_distinct_connections();
-	test_average_probe_bound_for_large_history();
+	test_large_history_probe_bound_and_fifo_turnover();
 	test_adversarial_collision_fifo_turnover();
-	puts("reset_tombstone_index: collision FIFO turnover, split identity, deletion, reuse, 40k probes passed");
+	puts("reset_tombstone_index: adversarial collision, 40k FIFO turnover, split identity, deletion, reuse passed");
 	return 0;
 }

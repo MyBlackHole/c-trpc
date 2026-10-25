@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.65` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.66` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -241,8 +241,14 @@ socketpair/Reactor/Channel 连续完成 128 次双向 RESET，覆盖墓碑环 32
 dev.65 为 #242/ERR-E 增加墓碑索引确定性碰撞压力回归：在 512 槽索引中构造 256 个落在同一 home bucket
 的键，反复淘汰并复用 FIFO 环槽 256 次，逐项检查插入/查询探测次数、全部驻留键和已淘汰键。临时关闭大表
 向后移位的变异会在新断言处失败，恢复后测试通过。Release、TSan、ASan/UBSan 下
-`test_reset_tombstone_index` 均通过。本测试只验证 256 路合成碰撞与删除修复，不代表 40k 最大容量下的最坏 CPU 成本；不改生产行为。详见
+`test_reset_tombstone_index` 均通过，dev.65 的两组 GitHub CI 与 RPC smoke 检查 21/21 通过。本测试只验证 256 路合成碰撞与删除修复，不代表 40k 最大容量下的最坏 CPU 成本；不改生产行为。详见
 [RESET 墓碑索引碰撞压力回归记录](docs/reviews/rpc_v2_reset_tombstone_collision_stress_20261025.md)。
+
+dev.66 将墓碑索引的顺序流 ID 周转扩展到最大配置：在 `max_streams=40000` 的 131072 槽表中完成 40k 次
+删除/插入，逐项检查淘汰键不可查、重用键映射到原环槽，并把删除、重插及最终查询的总探测数限制在 1.92m。
+跳过大表簇修复的临时变异在最大容量删除断言失败；恢复后 Release、TSan、ASan/UBSan 下
+`test_reset_tombstone_index` 均通过。本测试不设时钟门槛，也不代表真实 40k 并发网络连接的 CPU 基准。详见
+[RESET 墓碑索引最大容量 FIFO 周转记录](docs/reviews/rpc_v2_reset_tombstone_max_capacity_turnover_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
