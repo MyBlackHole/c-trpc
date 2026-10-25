@@ -4676,6 +4676,11 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	uint8_t boundary_source[103];
 	static const uint8_t trailing_source[] =
 	        "reject trailing compressed data";
+	static const uint8_t skippable_frame[] = {0x50U, 0x2aU, 0x4dU, 0x18U,
+	                                          0U,    0U,    0U,    0U};
+	static const uint8_t dictionary_frame[] = {
+	        0x28U, 0xb5U, 0x2fU, 0xfdU, 0x21U,       1U,
+	        1U,    9U,    0U,    0U,    (uint8_t)'x'};
 	uint32_t source_len = (uint32_t)sizeof(source);
 	uint32_t second_source_len = (uint32_t)sizeof(second_source);
 	uint32_t third_source_len = (uint32_t)sizeof(third_source);
@@ -5402,6 +5407,22 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 		                             (uint32_t)sizeof(trailing_source)},
 	        encoded, (uint32_t)checksummed_encoded_len, 15U, 12U, 3U, 8U,
 	        TR_ERR_STATE);
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+		                             (uint32_t)sizeof(skippable_frame),
+		                             0U},
+	        skippable_frame, (uint32_t)sizeof(skippable_frame), 16U, 13U,
+	        3U, 8U, TR_ERR_STATE);
+	assert(ZSTD_getDictID_fromFrame(dictionary_frame,
+	                                sizeof(dictionary_frame)) == 1U);
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+		                             (uint32_t)sizeof(dictionary_frame),
+		                             1U},
+	        dictionary_frame, (uint32_t)sizeof(dictionary_frame), 17U, 14U,
+	        3U, 8U, TR_ERR_STATE);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
