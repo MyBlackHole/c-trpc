@@ -171,6 +171,14 @@ Release（40k tombstone）、TSan（5k）和 ASan/UBSan（40k）的完整 `test_
 ERR-C 其他信用边界及 ERR-A/B/D/E 仍待验收。详见
 [RESET 时跨消息信用债务隔离回归](rpc_v2_reset_cross_message_credit_debt_20261026.md)。
 
+dev.129 为 #242/ERR-C 增加真实 Zstandard 接收信用回归：Channel 先按压缩 DATA wire 字节计入接收与消费，
+应用持有解压正文期间目标流进入 RESETTING；应用释放正文时接收量、消费量、通告上限及
+WINDOW_UPDATE 发送计数均不得变化。测试解除 RESET 回调闸门并完成流退役后，还验证同 Channel 压缩同伴
+继续收发。Release、TSan、ASan/UBSan 的完整 `test_transport` 均通过；临时取消 RESETTING 消费字节上限的
+变异会在消费量不变量处失败。本切片仅增加测试与记录，不改生产代码、API/ABI 或 wire；ERR-C 其余信用
+边界及 ERR-A/B/D/E 仍待验收。详见
+[RESETTING 压缩解码正文信用隔离回归](rpc_v2_reset_compressed_payload_credit_20261026.md)。
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。

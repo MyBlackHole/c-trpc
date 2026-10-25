@@ -415,7 +415,7 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	struct tr_channel_config cc = {
 	        .role = TR_CHANNEL_SERVER,
 	        .mode = split ? TR_CHANNEL_SPLIT_CONNECTIONS
-		              : TR_CHANNEL_SHARED_CONNECTION,
+	                      : TR_CHANNEL_SHARED_CONNECTION,
 	        .max_streams = capacity,
 	        .initial_window_bytes = WINDOW,
 	        .window_update_threshold_bytes = 128,

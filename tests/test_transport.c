@@ -1461,6 +1461,7 @@ struct channel_test_ctx {
 	struct tr_buffer *held_payload;
 	uint64_t last_message_id;
 	int take_first;
+	int take_next;
 };
 
 static enum tr_stream_data_disposition
@@ -1474,8 +1475,10 @@ channel_test_on_data(struct tr_stream_handle stream, uint64_t message_id,
 	ctx->received++;
 	ctx->last_stream = stream;
 	ctx->last_message_id = message_id;
-	if (ctx->take_first && ctx->received == 1 && payload) {
+	if (payload &&
+	    ((ctx->take_first && ctx->received == 1) || ctx->take_next)) {
 		ctx->held_payload = payload;
+		ctx->take_next = 0;
 		disposition = TR_STREAM_DATA_TAKE_OWNERSHIP;
 	}
 	pthread_cond_broadcast(&ctx->cond);
@@ -3100,12 +3103,15 @@ struct compressed_rx_test_ctx {
 	struct channel_test_ctx events;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
-	uint8_t payloads[8][4096];
-	uint32_t payload_lens[8];
-	uint64_t message_ids[8];
-	uint32_t stream_ids[8];
+	uint8_t payloads[16][4096];
+	uint32_t payload_lens[16];
+	uint64_t message_ids[16];
+	uint32_t stream_ids[16];
 	unsigned received;
 	int last_status;
+	int block_reset_callback;
+	int reset_callback_blocked;
+	int release_reset_callback;
 };
 
 static enum tr_stream_data_disposition
@@ -3142,6 +3148,16 @@ static void compressed_rx_on_stream_event(struct tr_stream_handle stream,
 	channel_test_on_stream_event(stream, event, status, &ctx->events);
 	pthread_mutex_lock(&ctx->lock);
 	ctx->last_status = status;
+	if (event == TR_STREAM_EVENT_RESET && ctx->block_reset_callback) {
+		ctx->reset_callback_blocked = 1;
+		pthread_cond_broadcast(&ctx->cond);
+		while (!ctx->release_reset_callback)
+			pthread_cond_wait(&ctx->cond, &ctx->lock);
+		ctx->block_reset_callback = 0;
+		ctx->reset_callback_blocked = 0;
+		ctx->release_reset_callback = 0;
+		pthread_cond_broadcast(&ctx->cond);
+	}
 	pthread_mutex_unlock(&ctx->lock);
 }
 
@@ -3476,6 +3492,21 @@ static void compressed_rx_wait_received(struct compressed_rx_test_ctx *ctx,
 		        "status=%d\n",
 		        ctx->received, target, ctx->last_status);
 	assert(ctx->received >= target);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void
+compressed_rx_wait_reset_callback_blocked(struct compressed_rx_test_ctx *ctx)
+{
+	struct timespec deadline;
+	int ret = 0;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 5;
+	pthread_mutex_lock(&ctx->lock);
+	while (!ctx->reset_callback_blocked && ret == 0)
+		ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock, &deadline);
+	assert(ctx->reset_callback_blocked);
 	pthread_mutex_unlock(&ctx->lock);
 }
 
@@ -4637,33 +4668,43 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	struct tr_stream_handle malformed_client_stream;
 	struct tr_stream_handle oversized_client_stream;
 	struct tr_stream_handle invalid_flags_client_stream;
+	struct tr_stream_handle reset_target_client_stream;
 	struct tr_stream_handle server_stream;
 	struct tr_stream_handle compressed_server_stream;
 	struct tr_stream_handle fast_server_stream;
+	struct tr_stream_handle reset_target_server_stream;
 	struct tr_stream_diagnostics diagnostics;
 	struct tr_stream_diagnostics compressed_diagnostics = {0};
 	struct tr_stream_diagnostics fast_diagnostics = {0};
 	struct tr_stream_diagnostics malformed_diagnostics;
 	struct tr_stream_diagnostics invalid_flags_diagnostics;
+	struct tr_stream_diagnostics reset_target_diagnostics = {0};
 	struct tr_stream_flow_state flow;
 	struct tr_stream_flow_state fast_flow;
 	struct tr_stream_flow_state compressed_rx_flow;
+	struct tr_stream_flow_state reset_flow_before = {0};
+	struct tr_stream_flow_state reset_flow_after = {0};
 	struct tr_channel_stats tx_stats = {0};
+	struct tr_channel_stats server_stats_before = {0};
+	struct tr_channel_stats server_stats_after = {0};
 	struct tr_message_envelope envelope = {0};
 	struct tr_message_builder *message_builder = NULL;
 	struct tr_message compressed_message = {0};
 	struct tr_message fast_message = {0};
+	struct compressed_rx_reset_request reset_request = {0};
 	ZSTD_CCtx *unknown_size_encoder = NULL;
 	struct compressed_rx_hold_request hold_request;
 	struct tr_buffer_pool payload_pool;
 	struct tr_buffer *payload = NULL;
 	struct tr_buffer *first_fragment_payload = NULL;
 	struct tr_buffer *second_payload = NULL;
+	struct tr_buffer *reset_held_payload = NULL;
 	const uint8_t source[] = "compressed channel receive";
 	const uint8_t second_source[] =
 	        "compressed body split across DATA frames";
 	const uint8_t fourth_source[] = "second compressed send";
 	const uint8_t fast_source[] = "fast stream";
+	const uint8_t reset_source[] = "decoded payload released during reset";
 	uint8_t encoded[256];
 	uint8_t second_encoded[256];
 	uint8_t third_encoded[512];
@@ -4705,6 +4746,8 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	size_t split_body_len;
 	unsigned client_resets_before;
 	unsigned server_resets_before;
+	unsigned client_opened_before;
+	unsigned server_opened_before;
 	int client_fd;
 	int server_fd;
 	int close_ret = TR_AGAIN;
@@ -5192,6 +5235,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	assert(fixture.server_ctx.events.received == 8U);
 	assert(fixture.server_ctx.events.last_reset_status == TR_ERR_STATE);
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+
 	wait_for_pool_full(&payload_pool, 3U);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &oversized_client_stream) == TR_OK);
@@ -5472,6 +5516,125 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	assert(fixture.server_ctx.events.received == 8U);
 	assert(fixture.server_ctx.events.last_reset_status == TR_ERR_STATE);
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+
+	pthread_mutex_lock(&fixture.client_ctx.lock);
+	client_opened_before = fixture.client_ctx.opened;
+	pthread_mutex_unlock(&fixture.client_ctx.lock);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	server_opened_before = fixture.server_ctx.events.opened;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
+	                      &reset_target_client_stream) == TR_OK);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
+	                     client_opened_before + 1U);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.opened,
+	                     server_opened_before + 1U);
+	assert(tr_stream_get_diagnostics(reset_target_client_stream,
+	                                 &reset_target_diagnostics) == TR_OK);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	fixture.server_ctx.events.take_next = 1;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	assert(tr_message_builder_create(&fixture.budget, sizeof(reset_source),
+	                                 &message_builder) == TR_OK);
+	assert(tr_message_builder_append(message_builder, reset_source,
+	                                 sizeof(reset_source)) == TR_OK);
+	assert(tr_message_builder_publish(&message_builder,
+	                                  &compressed_message) == TR_OK);
+	assert(tr_stream_send_compressed(reset_target_client_stream,
+	                                 &compressed_message) == TR_OK);
+	compressed_rx_wait_received(&fixture.server_ctx, 9U);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	reset_target_server_stream = fixture.server_ctx.events.last_stream;
+	assert(fixture.server_ctx.events.held_payload != NULL);
+	reset_held_payload = fixture.server_ctx.events.held_payload;
+	fixture.server_ctx.events.held_payload = NULL;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	assert(tr_stream_get_diagnostics(reset_target_server_stream,
+	                                 &malformed_diagnostics) == TR_OK);
+	assert(malformed_diagnostics.stream_id ==
+	       reset_target_diagnostics.stream_id);
+	assert(reset_held_payload->len == sizeof(reset_source));
+	assert(memcmp(reset_held_payload->data, reset_source,
+	              sizeof(reset_source)) == 0);
+	assert(tr_stream_get_flow_state(reset_target_client_stream, &flow) ==
+	       TR_OK);
+	compressed_rx_wait_flow(&fixture.server_ctx, reset_target_server_stream,
+	                        flow.tx_sent_bytes);
+
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	fixture.server_ctx.block_reset_callback = 1;
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	pthread_mutex_lock(&fixture.server_ctx.events.lock);
+	server_resets_before = fixture.server_ctx.events.resets;
+	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
+	pthread_mutex_lock(&fixture.client_ctx.lock);
+	client_resets_before = fixture.client_ctx.resets;
+	pthread_mutex_unlock(&fixture.client_ctx.lock);
+	reset_request = (struct compressed_rx_reset_request){
+	        reset_target_client_stream, TR_ERR_CLOSED};
+	assert(tr_reactor_call(fixture.reactor,
+	                       compressed_rx_reset_stream_on_owner,
+	                       &reset_request) == TR_OK);
+	compressed_rx_wait_reset_callback_blocked(&fixture.server_ctx);
+	assert(tr_stream_get_flow_state(reset_target_server_stream,
+	                                &reset_flow_before) == TR_OK);
+	assert(reset_flow_before.rx_received_bytes != 0U);
+	assert(reset_flow_before.rx_consumed_bytes ==
+	       reset_flow_before.rx_received_bytes);
+	assert(tr_channel_get_stats(fixture.server, &server_stats_before) ==
+	       TR_OK);
+
+	/* 解压正文不再代表可返还的 wire 字节；RESETTING 中只释放其内存。 */
+	assert(tr_stream_release_payload(reset_target_server_stream,
+	                                 reset_held_payload) == TR_OK);
+	reset_held_payload = NULL;
+	assert(tr_stream_get_flow_state(reset_target_server_stream,
+	                                &reset_flow_after) == TR_OK);
+	assert(reset_flow_after.rx_received_bytes ==
+	       reset_flow_before.rx_received_bytes);
+	assert(reset_flow_after.rx_consumed_bytes ==
+	       reset_flow_before.rx_consumed_bytes);
+	assert(reset_flow_after.rx_advertised_limit ==
+	       reset_flow_before.rx_advertised_limit);
+	assert(tr_channel_get_stats(fixture.server, &server_stats_after) ==
+	       TR_OK);
+	assert(server_stats_after.window_updates_tx ==
+	       server_stats_before.window_updates_tx);
+
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	fixture.server_ctx.release_reset_callback = 1;
+	pthread_cond_broadcast(&fixture.server_ctx.cond);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	wait_channel_counter(&fixture.server_ctx.events,
+	                     &fixture.server_ctx.events.resets,
+	                     server_resets_before + 1U);
+	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.resets,
+	                     client_resets_before + 1U);
+	wait_channel_active_streams(fixture.client, 3U);
+	wait_channel_active_streams(fixture.server, 3U);
+
+	/* RESET 目标流退役后，同 Channel 的活动压缩同伴仍可继续收发。 */
+	assert(tr_message_builder_create(&fixture.budget, sizeof(fast_source),
+	                                 &message_builder) == TR_OK);
+	assert(tr_message_builder_append(message_builder, fast_source,
+	                                 sizeof(fast_source)) == TR_OK);
+	assert(tr_message_builder_publish(&message_builder, &fast_message) ==
+	       TR_OK);
+	assert(tr_stream_send_compressed(fast_client_stream, &fast_message) ==
+	       TR_OK);
+	compressed_rx_wait_received(&fixture.server_ctx, 10U);
+	assert(tr_stream_get_flow_state(fast_client_stream, &fast_flow) ==
+	       TR_OK);
+	compressed_rx_wait_flow(&fixture.server_ctx, fast_server_stream,
+	                        fast_flow.tx_sent_bytes);
+	pthread_mutex_lock(&fixture.server_ctx.lock);
+	assert(fixture.server_ctx.stream_ids[9] == fast_diagnostics.stream_id);
+	assert(fixture.server_ctx.message_ids[9] == 2U);
+	assert(fixture.server_ctx.payload_lens[9] == sizeof(fast_source));
+	assert(memcmp(fixture.server_ctx.payloads[9], fast_source,
+	              sizeof(fast_source)) == 0);
+	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	wait_for_pool_full(&payload_pool, 3U);
 	assert(tr_buffer_pool_destroy(&payload_pool) == TR_OK);
 
