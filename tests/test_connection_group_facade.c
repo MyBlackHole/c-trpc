@@ -35,6 +35,7 @@
 #define TEST_GROUP_PAIR_EPOCH_FIRST UINT64_C(73)
 #define TEST_GROUP_PAIR_EPOCH_SECOND UINT64_C(74)
 #define TEST_CONTROL_GENERATION 23U
+#define TEST_GROUP_LARGE_DECODED_BYTES (1024U * 1024U)
 
 static atomic_int fail_group_control_close_once;
 static atomic_uint group_control_close_attempts;
@@ -54,6 +55,8 @@ static unsigned group_data_tx_blocked_attempts;
 static atomic_uint group_capability_frames_sent;
 static atomic_uint group_compressed_multiframe_submissions;
 static atomic_uint group_multi_data_compressed_submissions;
+static atomic_uint group_large_compressed_submissions;
+static atomic_uint group_large_raw_submissions;
 static pthread_mutex_t group_route_probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static int group_route_probe_enabled;
 static uint64_t group_route_probe_message_ids[2];
@@ -138,6 +141,14 @@ int __wrap_tr_reactor_sendv_limited(struct tr_conn_handle connection,
 	    (flags & TR_FRAME_F_COMPRESSED) != 0U &&
 	    (message_id == UINT64_C(6611) || message_id == UINT64_C(6612)))
 		atomic_fetch_add(&group_multi_data_compressed_submissions, 1U);
+	if (ret == TR_OK && type == TR_FRAME_DATA &&
+	    message_id == UINT64_C(6711) &&
+	    (flags & TR_FRAME_F_COMPRESSED) != 0U)
+		atomic_fetch_add(&group_large_compressed_submissions, 1U);
+	if (ret == TR_OK && type == TR_FRAME_DATA &&
+	    message_id == UINT64_C(6712) &&
+	    (flags & TR_FRAME_F_COMPRESSED) == 0U)
+		atomic_fetch_add(&group_large_raw_submissions, 1U);
 	if (ret == TR_OK && type == TR_FRAME_DATA) {
 		unsigned i;
 
@@ -599,6 +610,32 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 		                          TR_CONNECTION_GROUP_DATA_LAST));
 		assert(message->bytes.len == 1U &&
 		       message->bytes.data[0] == 0x34U);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->multi_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
+	if (message->message_id == UINT64_C(6711)) {
+		assert(message->stream_id == 5101U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == TEST_GROUP_LARGE_DECODED_BYTES);
+		for (uint32_t i = 0U; i < message->bytes.len; ++i)
+			assert(message->bytes.data[i] == 0x5aU);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->retained = *message;
+		ctx->multi_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+	}
+	if (message->message_id == UINT64_C(6712)) {
+		assert(message->stream_id == 5102U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 1U &&
+		       message->bytes.data[0] == 0x6aU);
 		pthread_mutex_lock(&ctx->lock);
 		ctx->multi_drain_messages++;
 		pthread_cond_broadcast(&ctx->cond);
@@ -2312,6 +2349,156 @@ static void test_public_connection_group_multi_data_drain(void)
 	puts("connection_group_facade: multi-DATA drain passed");
 }
 
+static void test_public_connection_group_large_decode_hold_raw_peer(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_conn_handle data_routes[2];
+	uint8_t *decoded_payload;
+	uint8_t raw_payload = 0x6aU;
+	struct tr_transport_bytes compressed_bytes;
+	struct tr_transport_bytes raw_bytes = {&raw_payload, 1U};
+	uint16_t group_port = 0U;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	atomic_store(&group_large_compressed_submissions, 0U);
+	atomic_store(&group_large_raw_submissions, 0U);
+
+	tr_server_config_init(&server_config);
+	server_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	server_config.limits.max_message_bytes = TEST_GROUP_LARGE_DECODED_BYTES;
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 3U;
+	server_config.connection_groups.max_data_connections_per_group = 2U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.receive_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	server_config.connection_groups.max_encoded_message_bytes = 4096U;
+	server_config.connection_groups.max_inflight_compressed_messages = 1U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	client_config.limits.max_message_bytes = TEST_GROUP_LARGE_DECODED_BYTES;
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 2U;
+	client_config.connection_groups.max_active_transfers = 2U;
+	client_config.connection_groups.send_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	client_config.connection_groups.max_encoded_message_bytes = 4096U;
+	client_config.connection_groups.on_transfer_ready =
+	        on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	ctx.client = client;
+
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(client, "127.0.0.1",
+	                                          group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_data_offer(server, UINT64_C(6761)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	assert(wait_data_offer(server, UINT64_C(6762)) == TR_OK);
+	wait_data_accepts(server, 2U);
+
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5101U,
+	               UINT64_C(6771)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5102U,
+	               UINT64_C(6772)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 2U);
+
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_message_ids[0] = UINT64_C(6711);
+	group_route_probe_message_ids[1] = UINT64_C(6712);
+	memset(group_route_probe_connections, 0,
+	       sizeof(group_route_probe_connections));
+	group_route_probe_seen = 0U;
+	group_route_probe_enabled = 1;
+	pthread_mutex_unlock(&group_route_probe_lock);
+
+	decoded_payload = (uint8_t *)malloc(TEST_GROUP_LARGE_DECODED_BYTES);
+	assert(decoded_payload != NULL);
+	memset(decoded_payload, 0x5a, TEST_GROUP_LARGE_DECODED_BYTES);
+	compressed_bytes.data = decoded_payload;
+	compressed_bytes.len = TEST_GROUP_LARGE_DECODED_BYTES;
+	assert(tr_client_connection_group_send_with_compression(
+	               client, 5101U, UINT64_C(6711), &compressed_bytes,
+	               TR_CONNECTION_GROUP_COMPRESSION_ZSTD) == TR_OK);
+	free(decoded_payload);
+	wait_counter(&ctx, &ctx.multi_drain_messages, 1U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.retained.bytes.len == TEST_GROUP_LARGE_DECODED_BYTES);
+	for (uint32_t i = 0U; i < ctx.retained.bytes.len; ++i)
+		assert(ctx.retained.bytes.data[i] == 0x5aU);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/* 单个解码任务槽下仍持有最大解码正文；另一 DATA 成员的 RAW
+	 * 消息不得等待该应用持有的压缩输出释放。 */
+	assert(tr_client_connection_group_send(client, 5102U, UINT64_C(6712),
+	                                       &raw_bytes) == TR_OK);
+	wait_counter(&ctx, &ctx.multi_drain_messages, 2U);
+	assert(atomic_load(&group_large_compressed_submissions) == 1U);
+	assert(atomic_load(&group_large_raw_submissions) == 1U);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_enabled = 0;
+	assert(group_route_probe_seen == 3U);
+	data_routes[0] = group_route_probe_connections[0];
+	data_routes[1] = group_route_probe_connections[1];
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(data_routes[0].reactor == data_routes[1].reactor &&
+	       (data_routes[0].slot != data_routes[1].slot ||
+	        data_routes[0].generation != data_routes[1].generation));
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.retained.bytes.len == TEST_GROUP_LARGE_DECODED_BYTES);
+	for (uint32_t i = 0U; i < ctx.retained.bytes.len; ++i)
+		assert(ctx.retained.bytes.data[i] == 0x5aU);
+	pthread_mutex_unlock(&ctx.lock);
+	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_client_connection_group_release_transfer(client, 5101U) ==
+	       TR_OK);
+	assert(tr_client_connection_group_release_transfer(client, 5102U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5101U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5102U) ==
+	       TR_OK);
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_counter(&ctx, &ctx.data_events, 2U);
+	assert(tr_server_connection_group_wait_drained(server, 5000U) == TR_OK);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_client_destroy_after_group_close(client);
+	wait_server_destroy_after_release(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("connection_group_facade: large decode hold/raw peer passed");
+}
+
 static void test_public_connection_group_member_failure_replacement(void)
 {
 	struct tr_server_config server_config;
@@ -3775,6 +3962,7 @@ int main(void)
 	test_public_connection_group_client_destroy_with_data_tx_inflight();
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_multi_data_drain();
+	test_public_connection_group_large_decode_hold_raw_peer();
 	test_public_connection_group_member_failure_replacement();
 	test_public_connection_group_multi_group_repeated_failure_replacement();
 	test_client_compression_completion_after_route_replacement();

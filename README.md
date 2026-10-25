@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.79` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.80` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -299,6 +299,9 @@ dev.78 为 #241 扩展连接组慢消费者回归：两条不同 DATA 物理连�
 
 dev.79 继续验证 #241 的混合 DATA 路径：第一成员的 Zstandard 解压消息由应用持有期间，第二成员先完成另一条 Zstandard 消息，再交付一条 RAW 消息；两次进展之后首条缓冲仍完整。Release 连续 5/5、TSan、ASan/UBSan 下完整 `test_connection_group_facade` 通过。该用例不耗尽 Server 全局预算，预算耗尽、多个持有消息和持续饱和公平性仍待验收。详见
 [压缩持有期间 RAW 同伴进展回归](docs/reviews/rpc_v2_mixed_data_slow_consumer_20261025.md)。
+
+dev.80 将 Zstandard 变换工作区上限从每任务 1 MiB 调整为 4 MiB，并在消息预算公式中按压缩任务槽计入；旧上限会让 1 MiB 窗口配置下的大正文编码以 `TR_MESSAGE_TRANSFORM_LIMIT` 结束。新增真实 TCP 连接组回归：应用持有 1 MiB 解压正文时，只配置一个压缩解码任务槽的服务端仍可从另一 DATA 成员接收并释放 RAW 小消息，之后首缓冲仍逐字节完整。Release `test_connection_group_facade` 连续 5/5、TSan、ASan/UBSan 和完整 91 项测试通过。该用例未耗尽全局预算，也不覆盖多个持有者和持续饱和公平性。详见
+[大正文压缩持有期间 RAW 同伴进展回归](docs/reviews/rpc_v2_large_decode_slow_consumer_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

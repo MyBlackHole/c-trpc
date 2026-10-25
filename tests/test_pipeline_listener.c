@@ -1358,7 +1358,8 @@ static void test_pipeline_listener_compressed_route_retirement(void)
 	assert(pthread_cond_init(&task.cond, NULL) == 0);
 	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&data_ctx.cond, NULL) == 0);
-	tr_memory_budget_init(&message_budget, 4U * 1024U * 1024U);
+	/* 覆盖 4 MiB Zstandard 工作区、变换输出及监听器常驻预算。 */
+	tr_memory_budget_init(&message_budget, 8U * 1024U * 1024U);
 	task.budget = &message_budget;
 
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
