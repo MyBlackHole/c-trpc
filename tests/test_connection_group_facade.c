@@ -1441,6 +1441,25 @@ static void wait_data_accepts(struct tr_server *server, uint64_t target)
 	assert(!"timed out waiting for DATA attach");
 }
 
+static void wait_listener_connection_count(struct tr_server *server,
+                                           uint32_t target)
+{
+	struct timespec pause = {0, 10000000L};
+	unsigned i;
+
+	for (i = 0U; i < 1000U; ++i) {
+		struct tr_pipeline_listener_stats stats;
+
+		memset(&stats, 0, sizeof(stats));
+		assert(tr_server_get_connection_group_stats_internal(
+		               server, &stats) == TR_OK);
+		if (stats.connections_current == target)
+			return;
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(!"timed out waiting for listener connection count");
+}
+
 static int wait_group_pair_offer(
 	struct tr_server *server, uint64_t group_id, uint64_t epoch,
 	uint64_t message_id)
@@ -2327,6 +2346,120 @@ static void test_public_connection_group_control_epoch_replacement_stress(void)
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
 	assert(stats.connections_current == 0U);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_server_destroy_after_release(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
+static void
+test_public_connection_group_control_loss_rejects_pending_route(void)
+{
+	struct tr_server_config server_config;
+	struct tr_server *server = NULL;
+	struct public_group_ctx ctx;
+	struct tr_pipeline_route_preface old_control_route;
+	struct tr_pipeline_route_preface old_data_route;
+	struct tr_pipeline_route_preface new_control_route;
+	struct tr_pipeline_route_preface new_data_route;
+	struct tr_pipeline_control_wire_message message;
+	struct tr_pipeline_listener_stats listener_stats;
+	uint16_t group_port = 0U;
+	int old_control = -1;
+	int new_control = -1;
+	int pending_data = -1;
+	int new_data = -1;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 4U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 1U;
+	server_config.connection_groups.authorize =
+	        authorize_group_epoch_series;
+	server_config.connection_groups.on_data_event =
+	        on_group_data_event_epoch_series;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	old_control_route = control_route();
+	old_control = connect_loopback(group_port);
+	send_route(old_control, &old_control_route);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_group_pair_offer(server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	                             UINT64_C(1301)) == TR_OK);
+	recv_control_message(old_control, UINT64_C(1301), &message);
+	assert(message.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(tr_pipeline_control_wire_data_route(&message, &old_data_route) ==
+	       TR_OK);
+
+	/* 先让 TCP DATA 进入 listener 的 pending 槽，但暂不发送 route 前导。 */
+	pending_data = connect_loopback(group_port);
+	wait_listener_connection_count(server, 2U);
+	assert(close(old_control) == 0);
+	old_control = -1;
+	wait_group_pair_server_stats(server, 0U, 0U, 0U);
+	/* 旧组拆除后，尚未提交 route 的 socket 仍留在 listener pending 槽。 */
+	wait_listener_connection_count(server, 1U);
+
+	new_control_route = control_route();
+	new_control_route.epoch = TEST_GROUP_EPOCH + 1U;
+	new_control = connect_loopback(group_port);
+	send_route(new_control, &new_control_route);
+	wait_counter(&ctx, &ctx.authorized, 2U);
+	assert(wait_group_pair_offer(server, TEST_GROUP_ID,
+	                             TEST_GROUP_EPOCH + 1U,
+	                             UINT64_C(1302)) == TR_OK);
+	recv_control_message(new_control, UINT64_C(1302), &message);
+	assert(message.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(tr_pipeline_control_wire_data_route(&message, &new_data_route) ==
+	       TR_OK);
+	assert(new_data_route.epoch == TEST_GROUP_EPOCH + 1U);
+	wait_listener_connection_count(server, 2U);
+
+	/* 跨过 epoch 接管后才提交旧 route；它必须关闭 pending socket，
+	 * 且不能附着或消耗 epoch 72 的 DATA 预留。
+	 */
+	send_route(pending_data, &old_data_route);
+	expect_socket_closed(pending_data);
+	assert(close(pending_data) == 0);
+	pending_data = -1;
+	wait_group_pair_server_stats(server, 1U, 0U, 0U);
+	wait_listener_connection_count(server, 1U);
+	memset(&listener_stats, 0, sizeof(listener_stats));
+	assert(tr_server_get_connection_group_stats_internal(
+	               server, &listener_stats) == TR_OK);
+	assert(listener_stats.data_accepts == 0U);
+
+	new_data = connect_loopback(group_port);
+	send_route(new_data, &new_data_route);
+	wait_counter(&ctx, &ctx.authorized, 3U);
+	wait_data_accepts(server, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH + 1U, 3501U,
+	               UINT64_C(1303)) == TR_OK);
+	recv_control_message(new_control, UINT64_C(1303), &message);
+	assert(message.type == TR_PIPELINE_CONTROL_TRANSFER_READY);
+	assert(message.stream_id == 3501U);
+	wait_group_pair_server_stats(server, 1U, 1U, 1U);
+
+	assert(close(new_control) == 0);
+	new_control = -1;
+	wait_counter(&ctx, &ctx.data_events, 1U);
+	expect_socket_closed(new_data);
+	assert(close(new_data) == 0);
+	new_data = -1;
+	wait_group_pair_server_stats(server, 0U, 0U, 0U);
+	wait_listener_connection_count(server, 0U);
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 	wait_server_destroy_after_release(server);
@@ -5427,6 +5560,7 @@ int main(void)
 	test_public_connection_group_control_loss_fences_old_epoch_data();
 	test_public_connection_group_control_loss_preserves_peer_group();
 	test_public_connection_group_control_epoch_replacement_stress();
+	test_public_connection_group_control_loss_rejects_pending_route();
 	test_public_connection_group_client_control();
 	test_client_group_destroy_retry_preserves_control();
 	test_client_group_close_retry_preserves_control();
