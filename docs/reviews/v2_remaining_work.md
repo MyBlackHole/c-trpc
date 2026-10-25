@@ -332,6 +332,9 @@ dev.76 为 #242/ERR-E 增加真实 Channel 高频成本初测：测试在 40,000
 dev.77 为 #241 补充真实连接组慢消费者/多 DATA 进展回归：同一组的两个 transfer 被实际路由到不同 DATA 物理连接；第一成员上的应用消息返回 TAKE_OWNERSHIP 并继续持有接收缓冲后，第二成员仍独立进入服务端回调、验证正文并释放。路由探针确认两个物理连接不同；释放第一条消息后再继续现有的双成员 drain 场景。GCC Release 连续 5/5、TSan、ASan/UBSan 下完整 `test_connection_group_facade` 均通过。测试夹具为此使用专属消息 ID，避免与其他复用相同 callback 的 fixture 串扰所有权。本次只增加测试、报告、台账和版本号，不改运行时/API/wire；它只证明单条消息保留时另一个 DATA 成员可进展，不覆盖全局预算耗尽、Zstandard/RAW 组合和持续饱和压力。详见
 [多 DATA 成员慢消费者隔离回归](rpc_v2_group_slow_consumer_multi_data_20261025.md)。
 
+dev.78 为 #241 补充真实连接组压缩慢消费者回归：两个不同 DATA 物理连接分别提交 Zstandard DATA；第一条解压消息被应用接管并持有期间，第二条仍完成解压、正文校验、服务端交付与释放。测试以测试链接观测确认两条消息实际经压缩提交，并在第二条完成后再次校验首条解压缓冲仍有效。Release 连续 5/5、TSan、ASan/UBSan 下完整 `test_connection_group_facade` 通过；忽略这两个消息的 Zstandard 选择时，新压缩提交断言按预期失败。本次只改测试、记录与版本，不改生产代码、API/ABI 或 wire。初始将帧上限设为 32 字节导致 route 前导无法接入，已移除该无关限制；完整运行中偶发单次销毁未立即收敛，改用已有的异步销毁重试屏障后连续 5/5 稳定。仍未覆盖全局预算耗尽、RAW/Zstandard 混合、多个应用持有者和持续饱和公平性。详见
+[压缩与多 DATA 慢消费者隔离回归](rpc_v2_compressed_group_slow_consumer_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -357,7 +360,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
 | 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败、预算保留期间 CONTROL keepalive 往返和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照仍待补齐，listener draining 后拒绝未完成 CONTROL/DATA route 前导已有真实回归，当前覆盖同一 CONTROL 下两个不同 DATA member 和另一个 pending CONTROL route。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接相同 ID 双墓碑、驻留重复 RESET 与索引 FIFO 周转各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX、压缩任务/编码 wire 在途、单成员故障与同组替代、双组同 shard 先后及并发故障隔离、双组各自两轮替代及组级关闭回归；多轮高频压力竞争仍待验收；ERR-E 墓碑固定预算和复合查询索引、真实 Channel 128 次 RESET/32 轮墓碑环周转、256 路小表确定性碰撞、max_streams=40000 的顺序 FIFO 周转和满历史下 256 路同 home 碰撞簇 FIFO 周转、真实 Channel 40k 历史填满与首次淘汰，以及删除成本计数覆盖 backward-shift 的最大容量 256 路同 home 簇已有回归；40k 键同 home 索引层最坏输入及真实 Channel 高频 RESET 成本已有本地初测（dev.76）；受控基线、持续压力和更广信用/丢弃组合仍待验收 | #242 |
-| 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归；单条消息保留期间另一 DATA 成员仍可进展（dev.77）；全局预算耗尽及压缩/多成员慢消费者组合仍待验收 | #241、#235 |
+| 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归；单条 RAW 消息及 Zstandard 解压消息保留期间另一 DATA 成员仍可进展（dev.77/.78）；全局预算耗尽、RAW/Zstandard 混合、多条消息并发持有及持续饱和公平性仍待验收 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |

@@ -53,6 +53,7 @@ static pthread_cond_t group_data_tx_probe_cond = PTHREAD_COND_INITIALIZER;
 static unsigned group_data_tx_blocked_attempts;
 static atomic_uint group_capability_frames_sent;
 static atomic_uint group_compressed_multiframe_submissions;
+static atomic_uint group_multi_data_compressed_submissions;
 static pthread_mutex_t group_route_probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static int group_route_probe_enabled;
 static uint64_t group_route_probe_message_ids[2];
@@ -133,6 +134,10 @@ int __wrap_tr_reactor_sendv_limited(struct tr_conn_handle connection,
 	ret = __real_tr_reactor_sendv_limited(
 	        connection, type, flags, stream_id, message_id, payloads,
 	        payload_count, max_frame_payload_len);
+	if (ret == TR_OK && type == TR_FRAME_DATA &&
+	    (flags & TR_FRAME_F_COMPRESSED) != 0U &&
+	    (message_id == UINT64_C(6611) || message_id == UINT64_C(6612)))
+		atomic_fetch_add(&group_multi_data_compressed_submissions, 1U);
 	if (ret == TR_OK && type == TR_FRAME_DATA) {
 		unsigned i;
 
@@ -566,14 +571,18 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 	    message->message_id == UINT64_C(6612)) {
 		uint32_t expected_stream =
 		        message->message_id == UINT64_C(6611) ? 5001U : 5002U;
-		uint8_t expected_byte =
-		        message->message_id == UINT64_C(6611) ? 0x31U : 0x32U;
 
 		assert(message->stream_id == expected_stream);
 		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
 		                          TR_CONNECTION_GROUP_DATA_LAST));
-		assert(message->bytes.len == 1U &&
-		       message->bytes.data[0] == expected_byte);
+		assert(message->bytes.len == 128U);
+		for (uint32_t i = 0U; i < message->bytes.len; ++i) {
+			uint8_t expected_byte =
+			        message->message_id == UINT64_C(6611)
+			                ? (uint8_t)(i * 73U + 19U)
+			                : (uint8_t)(i * 53U + 71U);
+			assert(message->bytes.data[i] == expected_byte);
+		}
 		pthread_mutex_lock(&ctx->lock);
 		if (message->message_id == UINT64_C(6611))
 			ctx->retained = *message;
@@ -2050,17 +2059,27 @@ static void test_public_connection_group_multi_data_drain(void)
 	struct tr_connection_group_client_stats client_stats;
 	struct tr_connection_group_server_stats server_stats;
 	struct tr_conn_handle data_routes[2];
-	uint8_t first_payload = 0x31U;
-	uint8_t second_payload = 0x32U;
+	uint8_t first_payload[128];
+	uint8_t second_payload[128];
 	uint8_t inflight_payload = 0x33U;
-	struct tr_transport_bytes first_bytes = {&first_payload, 1U};
-	struct tr_transport_bytes second_bytes = {&second_payload, 1U};
+	struct tr_transport_bytes first_bytes;
+	struct tr_transport_bytes second_bytes;
 	struct tr_transport_bytes inflight_bytes = {&inflight_payload, 1U};
 	uint16_t group_port = 0U;
+	uint32_t i;
 
 	memset(&ctx, 0, sizeof(ctx));
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	for (i = 0U; i < sizeof(first_payload); ++i) {
+		first_payload[i] = (uint8_t)(i * 73U + 19U);
+		second_payload[i] = (uint8_t)(i * 53U + 71U);
+	}
+	first_bytes.data = first_payload;
+	first_bytes.len = (uint32_t)sizeof(first_payload);
+	second_bytes.data = second_payload;
+	second_bytes.len = (uint32_t)sizeof(second_payload);
+	atomic_store(&group_multi_data_compressed_submissions, 0U);
 
 	tr_server_config_init(&server_config);
 	server_config.max_peers = 1U;
@@ -2069,6 +2088,10 @@ static void test_public_connection_group_multi_data_drain(void)
 	server_config.connection_groups.max_connections = 3U;
 	server_config.connection_groups.max_data_connections_per_group = 2U;
 	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.receive_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	server_config.connection_groups.max_encoded_message_bytes = 4096U;
+	server_config.connection_groups.max_inflight_compressed_messages = 2U;
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.on_message = on_group_message;
 	server_config.connection_groups.on_data_event = on_group_data_event;
@@ -2082,6 +2105,9 @@ static void test_public_connection_group_multi_data_drain(void)
 	client_config.keepalive_interval_ms = 0U;
 	client_config.connection_groups.max_data_connections = 2U;
 	client_config.connection_groups.max_active_transfers = 2U;
+	client_config.connection_groups.send_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	client_config.connection_groups.max_encoded_message_bytes = 4096U;
 	client_config.connection_groups.on_transfer_ready =
 		on_client_transfer_ready;
 	client_config.connection_groups.callback_arg = &ctx;
@@ -2125,18 +2151,22 @@ static void test_public_connection_group_multi_data_drain(void)
 	group_route_probe_seen = 0U;
 	group_route_probe_enabled = 1;
 	pthread_mutex_unlock(&group_route_probe_lock);
-	assert(tr_client_connection_group_send(client, 5001U, UINT64_C(6611),
-	                                       &first_bytes) == TR_OK);
+	assert(tr_client_connection_group_send_with_compression(
+	               client, 5001U, UINT64_C(6611), &first_bytes,
+	               TR_CONNECTION_GROUP_COMPRESSION_ZSTD) == TR_OK);
 	/* 第一成员的应用保留正文仍持有接收缓冲时，第二 DATA 成员必须能
 	 * 独立进入真实 Server 消息回调并释放自己的正文。 */
 	wait_counter(&ctx, &ctx.multi_drain_messages, 1U);
 	pthread_mutex_lock(&ctx.lock);
-	assert(ctx.retained.bytes.len == 1U &&
-	       ctx.retained.bytes.data[0] == first_payload);
+	assert(ctx.retained.bytes.len == sizeof(first_payload) &&
+	       memcmp(ctx.retained.bytes.data, first_payload,
+	              sizeof(first_payload)) == 0);
 	pthread_mutex_unlock(&ctx.lock);
-	assert(tr_client_connection_group_send(client, 5002U, UINT64_C(6612),
-	                                       &second_bytes) == TR_OK);
+	assert(tr_client_connection_group_send_with_compression(
+	               client, 5002U, UINT64_C(6612), &second_bytes,
+	               TR_CONNECTION_GROUP_COMPRESSION_ZSTD) == TR_OK);
 	wait_counter(&ctx, &ctx.multi_drain_messages, 2U);
+	assert(atomic_load(&group_multi_data_compressed_submissions) == 2U);
 	pthread_mutex_lock(&group_route_probe_lock);
 	group_route_probe_enabled = 0;
 	assert(group_route_probe_seen == 3U);
@@ -2147,8 +2177,9 @@ static void test_public_connection_group_multi_data_drain(void)
 	       (data_routes[0].slot != data_routes[1].slot ||
 	        data_routes[0].generation != data_routes[1].generation));
 	pthread_mutex_lock(&ctx.lock);
-	assert(ctx.retained.bytes.len == 1U &&
-	       ctx.retained.bytes.data[0] == first_payload);
+	assert(ctx.retained.bytes.len == sizeof(first_payload) &&
+	       memcmp(ctx.retained.bytes.data, first_payload,
+	              sizeof(first_payload)) == 0);
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
 
@@ -2256,7 +2287,8 @@ static void test_public_connection_group_multi_data_drain(void)
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 	wait_client_destroy_after_group_close(client);
-	assert(tr_server_destroy(server) == TR_OK);
+	/* ZSTD 回调返回后仍可能有解码任务完成清理；销毁按既有重试屏障收敛。 */
+	wait_server_destroy_after_release(server);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 	puts("connection_group_facade: multi-DATA drain passed");
