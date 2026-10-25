@@ -3316,19 +3316,23 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	struct tr_message_builder *builder = NULL;
 	struct tr_message bulk_message = {0};
 	struct tr_message control_message = {0};
+	struct tr_message server_bulk_message = {0};
 	struct tr_message server_control_message = {0};
 	struct compressed_rx_hold_request hold_request;
+	struct compressed_rx_hold_request client_hold_request;
 	struct tr_memory_budget_stats budget_stats = {0};
 	struct tr_stream_flow_state server_bulk_flow = {0};
 	struct tr_channel_stats client_stats = {0};
 	struct tr_channel_stats server_stats = {0};
 	uint8_t bulk_source[300];
+	uint8_t server_bulk_source[300];
 	uint8_t control_source[] = "control lane";
 	uint8_t server_control_source[] = "server control reply";
 	uint8_t encoded[ZSTD_compressBound(sizeof(bulk_source))];
 	size_t encoded_size;
 	uint32_t random_state = 0x6d2b79f5U;
 	uint64_t stalled_limit;
+	uint64_t server_stalled_limit;
 	int close_ret = TR_AGAIN;
 
 	compressed_rx_fixture_create_split(&fixture);
@@ -3362,6 +3366,7 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 		random_state ^= random_state >> 17;
 		random_state ^= random_state << 5;
 		bulk_source[i] = (uint8_t)random_state;
+		server_bulk_source[i] = (uint8_t)(bulk_source[i] ^ 0xa5U);
 	}
 	encoded_size = ZSTD_compress(encoded, sizeof(encoded), bulk_source,
 	                             sizeof(bulk_source), 3);
@@ -3371,6 +3376,10 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	        fixture.server_bulk_connection, 1};
 	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
 	                       &hold_request) == TR_OK);
+	client_hold_request = (struct compressed_rx_hold_request){
+	        fixture.client_bulk_connection, 1};
+	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
+	                       &client_hold_request) == TR_OK);
 	assert(tr_message_builder_create(&fixture.budget, sizeof(bulk_source),
 	                                 &builder) == TR_OK);
 	assert(tr_message_builder_append(builder, bulk_source,
@@ -3396,6 +3405,33 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	assert(tr_channel_get_stats(fixture.client, &tx_stats) == TR_OK);
 	assert(tx_stats.messages_tx == 0U);
+	assert(tr_message_builder_create(&fixture.budget,
+	                                 sizeof(server_bulk_source),
+	                                 &builder) == TR_OK);
+	assert(tr_message_builder_append(builder, server_bulk_source,
+	                                 sizeof(server_bulk_source)) == TR_OK);
+	assert(tr_message_builder_publish(&builder, &server_bulk_message) ==
+	       TR_OK);
+	assert(tr_stream_send_compressed(bulk_server_stream,
+	                                 &server_bulk_message) == TR_OK);
+	assert(tr_message_view(&server_bulk_message,
+	                       &(struct tr_message_view){0}) == TR_ERR_STATE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_stream_get_flow_state(bulk_server_stream,
+		                                &server_bulk_flow) == TR_OK);
+		if (server_bulk_flow.tx_sent_bytes ==
+		    server_bulk_flow.tx_send_limit)
+			break;
+		struct timespec pause_time = {0, 1000000L};
+		nanosleep(&pause_time, NULL);
+	}
+	assert(server_bulk_flow.tx_send_limit == 128U);
+	assert(server_bulk_flow.tx_sent_bytes ==
+	       server_bulk_flow.tx_send_limit);
+	server_stalled_limit = server_bulk_flow.tx_send_limit;
+	pthread_mutex_lock(&fixture.client_rx_ctx.lock);
+	assert(fixture.client_rx_ctx.received == 0U);
+	pthread_mutex_unlock(&fixture.client_rx_ctx.lock);
 
 	assert(tr_message_builder_create(&fixture.budget,
 	                                 sizeof(control_source),
@@ -3420,6 +3456,10 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	       TR_OK);
 	assert(bulk_flow.tx_sent_bytes == stalled_limit);
 	assert(bulk_flow.tx_send_limit == stalled_limit);
+	assert(tr_stream_get_flow_state(bulk_server_stream,
+	                                &server_bulk_flow) == TR_OK);
+	assert(server_bulk_flow.tx_sent_bytes == server_stalled_limit);
+	assert(server_bulk_flow.tx_send_limit == server_stalled_limit);
 	assert(tr_channel_get_stats(fixture.client, &tx_stats) == TR_OK);
 	assert(tx_stats.messages_tx == 1U);
 	assert(tr_message_builder_create(&fixture.budget,
@@ -3444,6 +3484,12 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	assert(memcmp(fixture.client_rx_ctx.payloads[0], server_control_source,
 	              sizeof(server_control_source)) == 0);
 	pthread_mutex_unlock(&fixture.client_rx_ctx.lock);
+	assert(tr_stream_get_flow_state(bulk_client_stream, &bulk_flow) ==
+	       TR_OK);
+	assert(bulk_flow.tx_sent_bytes == stalled_limit);
+	assert(tr_stream_get_flow_state(bulk_server_stream,
+	                                &server_bulk_flow) == TR_OK);
+	assert(server_bulk_flow.tx_sent_bytes == server_stalled_limit);
 
 	hold_request.held = 0;
 	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
@@ -3458,6 +3504,10 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 		struct timespec pause_time = {0, 1000000L};
 		nanosleep(&pause_time, NULL);
 	}
+	client_hold_request.held = 0;
+	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
+	                       &client_hold_request) == TR_OK);
+	compressed_rx_wait_received(&fixture.client_rx_ctx, 2U);
 	{
 		unsigned received;
 		unsigned client_resets, server_resets;
@@ -3519,14 +3569,30 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	assert(memcmp(fixture.server_ctx.payloads[1], bulk_source,
 	              sizeof(bulk_source)) == 0);
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	pthread_mutex_lock(&fixture.client_rx_ctx.lock);
+	assert(fixture.client_rx_ctx.stream_ids[1] ==
+	       bulk_diagnostics.stream_id);
+	assert(fixture.client_rx_ctx.message_ids[1] == 1U);
+	assert(fixture.client_rx_ctx.payload_lens[1] ==
+	       sizeof(server_bulk_source));
+	assert(memcmp(fixture.client_rx_ctx.payloads[1], server_bulk_source,
+	              sizeof(server_bulk_source)) == 0);
+	pthread_mutex_unlock(&fixture.client_rx_ctx.lock);
 	assert(tr_stream_get_flow_state(bulk_client_stream, &bulk_flow) ==
 	       TR_OK);
 	assert(bulk_flow.tx_sent_bytes > stalled_limit);
+	assert(tr_stream_get_flow_state(bulk_server_stream,
+	                                &server_bulk_flow) == TR_OK);
+	assert(server_bulk_flow.tx_sent_bytes > server_stalled_limit);
 	assert(tr_channel_get_stats(fixture.client, &tx_stats) == TR_OK);
 	assert(tx_stats.messages_tx == 2U);
-	printf("compressed DATA split-lane progress: BULK stalled at 128/128 "
-	       "bytes; CONTROL completed first; BULK resumed to %llu bytes\n",
-	       (unsigned long long)bulk_flow.tx_sent_bytes);
+	assert(server_stats.messages_tx == 2U);
+	printf("compressed DATA split-lane progress: both BULK directions "
+	       "stalled "
+	       "at 128/128 bytes; CONTROL completed both ways; DATA resumed to "
+	       "%llu/%llu bytes\n",
+	       (unsigned long long)bulk_flow.tx_sent_bytes,
+	       (unsigned long long)server_bulk_flow.tx_sent_bytes);
 
 	assert(tr_stream_close(bulk_client_stream) == TR_OK);
 	assert(tr_stream_close(bulk_server_stream) == TR_OK);
