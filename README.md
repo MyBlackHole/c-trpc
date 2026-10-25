@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.81` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.82` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -305,6 +305,9 @@ dev.80 将 Zstandard 变换工作区上限从每任务 1 MiB 调整为 4 MiB，�
 
 dev.81 在真实 TCP `pipeline_listener` 测试中让一条 Zstandard 解码输出被应用持有，再用受控预算预约填满监听器消息预算；账目精确到达上限时，另一条不同 DATA 成员的 RAW 消息仍到达回调，且首条输出保持有效。释放测试预约和持有输出后，预算依次恢复并最终归零。Release 完整 91 项测试、该定向测试连续 5 次、ASan/UBSan（含泄漏检查）和 TSan 均通过。该组件测试不是 Server 自然耗尽派生全局预算的证据，也不覆盖多持有者或持续饱和公平性；本次不改生产行为、API/ABI 或 wire。详见
 [监听器消息预算满额时 RAW 同伴进展回归](docs/reviews/rpc_v2_full_budget_raw_peer_20261025.md)。
+
+dev.82 扩展公开 Server 慢消费者回归：应用同时持有六条真实 Zstandard 解码输出，正文合计约 5.06 MiB；这些缓冲都仍有效时，另一 DATA 成员上的 RAW 消息继续交付。本次不手工预约消息预算，也不改生产运行时、API/ABI 或 wire。该测试证明多条自然产生的应用持有消息下同伴可进展，但没有观察并断言 Server 全局预算精确满额，也不覆盖持续饱和公平性。Release `test_connection_group_facade` 连续 5/5、ASan/UBSan、TSan 与完整 Release 91 项测试通过。详见
+[公开 Server 多消息持有期间 RAW 同伴进展回归](docs/reviews/rpc_v2_multi_hold_raw_peer_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

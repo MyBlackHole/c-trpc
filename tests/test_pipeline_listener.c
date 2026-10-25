@@ -564,13 +564,13 @@ static void send_test_compressed_message(int fd, uint32_t stream_id,
 }
 
 static void send_valid_zstd_message(int fd, uint32_t stream_id,
-				    uint64_t message_id, uint8_t source)
+                                    uint64_t message_id, uint8_t source)
 {
 	struct tr_message_envelope envelope;
 	uint8_t encoded[128];
 	uint8_t payload[TR_MESSAGE_ENVELOPE_WIRE_SIZE + sizeof(encoded)];
 	size_t encoded_bytes = ZSTD_compress(encoded, sizeof(encoded), &source,
-					     sizeof(source), 1);
+	                                     sizeof(source), 1);
 
 	assert(!ZSTD_isError(encoded_bytes));
 	assert(encoded_bytes <= sizeof(encoded));
@@ -986,7 +986,8 @@ static void test_pipeline_listener_full_budget_raw_peer(void)
 		struct tr_message_caps peer_caps;
 
 		recv_message_caps_response(compressed_fd, &peer_caps);
-		assert(peer_caps.receive_algorithm_bits == TR_MESSAGE_ALGORITHM_ZSTD);
+		assert(peer_caps.receive_algorithm_bits ==
+		       TR_MESSAGE_ALGORITHM_ZSTD);
 	}
 
 	/* 先真实解码一条压缩消息并由应用持有输出，再等待任务槽清理完毕。 */
@@ -996,9 +997,9 @@ static void test_pipeline_listener_full_budget_raw_peer(void)
 	wait_held_message_count(&task, &task.submissions, 1U);
 	transform_completion.reactor = reactor;
 	transform_completion.task = &task;
-	assert(run_held_message_transform(
-	               &task, &transform_completion.outcome,
-	               &transform_completion.output) == TR_OK);
+	assert(run_held_message_transform(&task, &transform_completion.outcome,
+	                                  &transform_completion.output) ==
+	       TR_OK);
 	assert(transform_completion.outcome == TR_MESSAGE_TRANSFORM_OK);
 	assert(tr_reactor_call(reactor, complete_held_transform_on_owner,
 	                       &transform_completion) == TR_OK);
@@ -1014,7 +1015,8 @@ static void test_pipeline_listener_full_budget_raw_peer(void)
 	assert(held_budget_bytes < budget_stats.limit_bytes);
 	filler_bytes = budget_stats.limit_bytes - held_budget_bytes;
 	assert(filler_bytes != 0U);
-	assert(tr_memory_budget_reserve(&message_budget, filler_bytes) == TR_OK);
+	assert(tr_memory_budget_reserve(&message_budget, filler_bytes) ==
+	       TR_OK);
 	tr_memory_budget_get_stats(&message_budget, &budget_stats);
 	assert(budget_stats.current_bytes == budget_stats.limit_bytes);
 
@@ -1029,7 +1031,8 @@ static void test_pipeline_listener_full_budget_raw_peer(void)
 	assert(data_ctx.held_payload->data[0] == data_ctx.held_payload_byte);
 	pthread_mutex_unlock(&data_ctx.lock);
 
-	assert(tr_memory_budget_release(&message_budget, filler_bytes) == TR_OK);
+	assert(tr_memory_budget_release(&message_budget, filler_bytes) ==
+	       TR_OK);
 	tr_memory_budget_get_stats(&message_budget, &budget_stats);
 	assert(budget_stats.current_bytes == held_budget_bytes);
 	pthread_mutex_lock(&data_ctx.lock);

@@ -36,6 +36,8 @@
 #define TEST_GROUP_PAIR_EPOCH_SECOND UINT64_C(74)
 #define TEST_CONTROL_GENERATION 23U
 #define TEST_GROUP_LARGE_DECODED_BYTES (1024U * 1024U)
+#define TEST_GROUP_BUDGET_TAIL_BYTES (64U * 1024U)
+#define TEST_GROUP_BUDGET_HOLD_COUNT 5U
 
 static atomic_int fail_group_control_close_once;
 static atomic_uint group_control_close_attempts;
@@ -306,6 +308,9 @@ struct public_group_ctx {
 	uint8_t compressed_decoded[128];
 	struct tr_connection_group_message retained;
 	struct tr_connection_group_message compressed_retained;
+	struct tr_connection_group_message
+	        budget_retained[TEST_GROUP_BUDGET_HOLD_COUNT];
+	unsigned budget_hold_messages;
 };
 
 struct group_pair_ctx {
@@ -626,6 +631,31 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 		pthread_mutex_lock(&ctx->lock);
 		ctx->retained = *message;
 		ctx->multi_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+	}
+	if (message->message_id >= UINT64_C(6721) &&
+	    message->message_id <
+	            UINT64_C(6721) + TEST_GROUP_BUDGET_HOLD_COUNT) {
+		unsigned index =
+		        (unsigned)(message->message_id - UINT64_C(6721));
+		uint32_t expected_bytes =
+		        index + 1U == TEST_GROUP_BUDGET_HOLD_COUNT
+		                ? TEST_GROUP_BUDGET_TAIL_BYTES
+		                : TEST_GROUP_LARGE_DECODED_BYTES;
+		uint8_t expected_byte = (uint8_t)(0x61U + index);
+
+		assert(message->stream_id == 5101U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == expected_bytes);
+		for (uint32_t i = 0U; i < message->bytes.len; ++i)
+			assert(message->bytes.data[i] == expected_byte);
+		pthread_mutex_lock(&ctx->lock);
+		assert(ctx->budget_retained[index].bytes.data == NULL);
+		ctx->budget_retained[index] = *message;
+		ctx->budget_hold_messages++;
 		pthread_cond_broadcast(&ctx->cond);
 		pthread_mutex_unlock(&ctx->lock);
 		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
@@ -2363,6 +2393,7 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 	struct tr_transport_bytes compressed_bytes;
 	struct tr_transport_bytes raw_bytes = {&raw_payload, 1U};
 	uint16_t group_port = 0U;
+	unsigned i;
 
 	memset(&ctx, 0, sizeof(ctx));
 	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
@@ -2382,7 +2413,8 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 	server_config.connection_groups.receive_compression_algorithms =
 	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
 	server_config.connection_groups.max_encoded_message_bytes = 4096U;
-	server_config.connection_groups.max_inflight_compressed_messages = 1U;
+	server_config.connection_groups.max_inflight_compressed_messages =
+	        TEST_GROUP_BUDGET_HOLD_COUNT + 1U;
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.on_message = on_group_message;
 	server_config.connection_groups.on_data_event = on_group_data_event;
@@ -2452,8 +2484,30 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 		assert(ctx.retained.bytes.data[i] == 0x5aU);
 	pthread_mutex_unlock(&ctx.lock);
 
-	/* 单个解码任务槽下仍持有最大解码正文；另一 DATA 成员的 RAW
-	 * 消息不得等待该应用持有的压缩输出释放。 */
+	/* 连续持有其余真实解码输出，实际应用持有正文约 5.06 MiB；
+	 * 不通过测试夹具手工预约预算。 */
+	for (i = 0U; i < TEST_GROUP_BUDGET_HOLD_COUNT; ++i) {
+		uint32_t decoded_bytes =
+		        i + 1U == TEST_GROUP_BUDGET_HOLD_COUNT
+		                ? TEST_GROUP_BUDGET_TAIL_BYTES
+		                : TEST_GROUP_LARGE_DECODED_BYTES;
+		uint8_t expected_byte = (uint8_t)(0x61U + i);
+
+		decoded_payload = (uint8_t *)malloc(decoded_bytes);
+		assert(decoded_payload != NULL);
+		memset(decoded_payload, expected_byte, decoded_bytes);
+		compressed_bytes.data = decoded_payload;
+		compressed_bytes.len = decoded_bytes;
+		assert(tr_client_connection_group_send_with_compression(
+		               client, 5101U, UINT64_C(6721) + i,
+		               &compressed_bytes,
+		               TR_CONNECTION_GROUP_COMPRESSION_ZSTD) == TR_OK);
+		free(decoded_payload);
+		wait_counter(&ctx, &ctx.budget_hold_messages, i + 1U);
+	}
+
+	/* 多条大解码输出仍由应用持有；另一 DATA 成员的 RAW 消息不得等待
+	 * 这些应用持有缓冲释放。 */
 	assert(tr_client_connection_group_send(client, 5102U, UINT64_C(6712),
 	                                       &raw_bytes) == TR_OK);
 	wait_counter(&ctx, &ctx.multi_drain_messages, 2U);
@@ -2472,8 +2526,26 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 	assert(ctx.retained.bytes.len == TEST_GROUP_LARGE_DECODED_BYTES);
 	for (uint32_t i = 0U; i < ctx.retained.bytes.len; ++i)
 		assert(ctx.retained.bytes.data[i] == 0x5aU);
+	assert(ctx.budget_hold_messages == TEST_GROUP_BUDGET_HOLD_COUNT);
+	for (unsigned message = 0U; message < TEST_GROUP_BUDGET_HOLD_COUNT;
+	     ++message) {
+		uint32_t expected_bytes =
+		        message + 1U == TEST_GROUP_BUDGET_HOLD_COUNT
+		                ? TEST_GROUP_BUDGET_TAIL_BYTES
+		                : TEST_GROUP_LARGE_DECODED_BYTES;
+		uint8_t expected_byte = (uint8_t)(0x61U + message);
+
+		assert(ctx.budget_retained[message].bytes.len ==
+		       expected_bytes);
+		for (uint32_t byte = 0U; byte < expected_bytes; ++byte)
+			assert(ctx.budget_retained[message].bytes.data[byte] ==
+			       expected_byte);
+	}
 	pthread_mutex_unlock(&ctx.lock);
 	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
+	for (i = 0U; i < TEST_GROUP_BUDGET_HOLD_COUNT; ++i)
+		assert(tr_connection_group_message_release(
+		               &ctx.budget_retained[i]) == TR_OK);
 
 	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
 	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
@@ -2496,7 +2568,8 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 	wait_server_destroy_after_release(server);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
-	puts("connection_group_facade: large decode hold/raw peer passed");
+	puts("connection_group_facade: multi-message budget hold/raw peer "
+	     "passed");
 }
 
 static void test_public_connection_group_member_failure_replacement(void)
