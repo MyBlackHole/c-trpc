@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.83")
+set_version("2.0.0-dev.84")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -338,6 +338,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_connector_create",
                         "-Wl,--wrap=tr_connector_start",
                         "-Wl,--wrap=tr_connector_cancel",
+                        "-Wl,--wrap=tr_pipeline_listener_create",
                         "-Wl,--wrap=sendmsg",
                         "-Wl,--wrap=tr_deadline_init_ms",
                         "-Wl,--wrap=pthread_cond_timedwait", {force = true})

@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.83` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.84` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -311,6 +311,9 @@ dev.82 扩展公开 Server 慢消费者回归：应用同时持有六条真实 Z
 
 dev.83 将同一真实公开 Server 场景扩展为有界 RAW 突发：六条 Zstandard 解码输出仍由应用持有时，另一 DATA 物理连接连续交付并校验 64 条 RAW 消息；测试确认整个突发保持在第二成员的连接代次上，结束后再次检查所有已持有缓冲。该结果证明有界突发中的同伴进展，不代表持续饱和公平性或全局预算精确耗尽。Release `test_connection_group_facade` 连续 5/5、ASan/UBSan、TSan 和完整 Release 91 项测试通过；只改测试、记录和版本，不改生产运行时、API/ABI 或 wire。详见
 [公开 Server 慢消费者期间 RAW 突发回归](docs/reviews/rpc_v2_raw_burst_slow_consumer_20261025.md)。
+
+dev.84 在真实公开 Server 的派生消息预算下自然持有 36 条 1 MiB Zstandard 解码输出；下一条真实解码任务因可用字节不足被预算拒绝一次，相关压缩 DATA 连接关闭。此时 budget current 为 42,147,072、limit 为 46,908,160，剩余字节已小于下一任务所需的 1 MiB 输出加 4 MiB 工作区，测试不要求 current 数值等于 limit。压缩成员关闭后，另一 DATA 成员仍交付 64 条 RAW 消息，持有正文完整。Release 目标连续 5/5、ASan/UBSan、TSan 和完整 91 项测试通过。只改测试、记录和版本，不改生产运行时、API/ABI 或 wire；持续饱和公平性仍未验收。详见
+[公开 Server 自然预算拒绝期间 RAW 同伴进展](docs/reviews/rpc_v2_server_natural_budget_rejection_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

@@ -6,6 +6,9 @@
 #include "../src/group/pipeline_control_wire_internal.h"
 #include "../src/group/pipeline_route_internal.h"
 #include "../src/io/connector_internal.h"
+#include "../src/memory_budget.h"
+#include "../src/transport/group/message_budget.h"
+#include "../src/transport/group/pipeline_listener_internal.h"
 
 #include "../src/crc32c.h"
 #include "../src/transport/protocol/message_envelope.h"
@@ -40,6 +43,8 @@
 #define TEST_GROUP_BUDGET_HOLD_COUNT 5U
 #define TEST_GROUP_RAW_BURST_COUNT 64U
 #define TEST_GROUP_RAW_BURST_FIRST_ID UINT64_C(6800)
+#define TEST_GROUP_NATURAL_BUDGET_HOLD_CAPACITY 64U
+#define TEST_GROUP_NATURAL_BUDGET_FIRST_ID UINT64_C(7000)
 
 static atomic_int fail_group_control_close_once;
 static atomic_uint group_control_close_attempts;
@@ -61,6 +66,8 @@ static atomic_uint group_compressed_multiframe_submissions;
 static atomic_uint group_multi_data_compressed_submissions;
 static atomic_uint group_large_compressed_submissions;
 static atomic_uint group_large_raw_submissions;
+static atomic_int capture_group_message_budget;
+static struct tr_memory_budget *captured_group_message_budget;
 static pthread_mutex_t group_route_probe_lock = PTHREAD_MUTEX_INITIALIZER;
 static int group_route_probe_enabled;
 static uint64_t group_route_probe_message_ids[2];
@@ -76,6 +83,22 @@ static int group_zstd_gate_released;
 static void wait_group_zstd_decompression_entered(void);
 static void release_group_zstd_gate(void);
 static void wait_group_client_send_bytes_empty(struct tr_client *client);
+
+int __real_tr_pipeline_listener_create(
+        const struct tr_pipeline_listener_config *config,
+        struct tr_pipeline_listener **out);
+
+int __wrap_tr_pipeline_listener_create(
+        const struct tr_pipeline_listener_config *config,
+        struct tr_pipeline_listener **out)
+{
+	if (atomic_load_explicit(&capture_group_message_budget,
+	                         memory_order_acquire)) {
+		assert(config != NULL);
+		captured_group_message_budget = config->message_budget;
+	}
+	return __real_tr_pipeline_listener_create(config, out);
+}
 
 int __real_tr_reactor_close_on_owner(struct tr_conn_handle connection);
 
@@ -328,6 +351,9 @@ struct public_group_ctx {
 	struct tr_connection_group_message
 	        budget_retained[TEST_GROUP_BUDGET_HOLD_COUNT];
 	unsigned budget_hold_messages;
+	struct tr_connection_group_message natural_budget_retained
+	        [TEST_GROUP_NATURAL_BUDGET_HOLD_CAPACITY];
+	unsigned natural_budget_hold_messages;
 };
 
 struct group_pair_ctx {
@@ -677,6 +703,28 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 		pthread_mutex_unlock(&ctx->lock);
 		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
 	}
+	if (message->message_id >= TEST_GROUP_NATURAL_BUDGET_FIRST_ID &&
+	    message->message_id <
+	            TEST_GROUP_NATURAL_BUDGET_FIRST_ID +
+	                    TEST_GROUP_NATURAL_BUDGET_HOLD_CAPACITY) {
+		unsigned index = (unsigned)(message->message_id -
+		                            TEST_GROUP_NATURAL_BUDGET_FIRST_ID);
+		uint8_t expected_byte = (uint8_t)(0x31U + index);
+
+		assert(message->stream_id == 5101U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == TEST_GROUP_LARGE_DECODED_BYTES);
+		for (uint32_t i = 0U; i < message->bytes.len; ++i)
+			assert(message->bytes.data[i] == expected_byte);
+		pthread_mutex_lock(&ctx->lock);
+		assert(ctx->natural_budget_retained[index].bytes.data == NULL);
+		ctx->natural_budget_retained[index] = *message;
+		ctx->natural_budget_hold_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+	}
 	if (message->message_id >= TEST_GROUP_RAW_BURST_FIRST_ID &&
 	    message->message_id < TEST_GROUP_RAW_BURST_FIRST_ID +
 	                                  TEST_GROUP_RAW_BURST_COUNT) {
@@ -970,6 +1018,8 @@ static const char *counter_name(
 		return "retry_messages";
 	if (counter == &ctx->multi_drain_messages)
 		return "multi_drain_messages";
+	if (counter == &ctx->natural_budget_hold_messages)
+		return "natural_budget_hold_messages";
 	if (counter == &ctx->member_replacement_messages)
 		return "member_replacement_messages";
 	if (counter == &ctx->inflight_drain_messages)
@@ -1006,6 +1056,34 @@ static void wait_counter(
 		}
 	}
 	pthread_mutex_unlock(&ctx->lock);
+}
+
+static int wait_natural_budget_hold_or_data_close(struct public_group_ctx *ctx,
+                                                  unsigned hold_target)
+{
+	struct timespec deadline;
+	int received;
+
+	assert(clock_gettime(CLOCK_REALTIME, &deadline) == 0);
+	deadline.tv_sec += 10;
+	pthread_mutex_lock(&ctx->lock);
+	while (ctx->natural_budget_hold_messages < hold_target &&
+	       ctx->data_events == 0U) {
+		int ret = pthread_cond_timedwait(&ctx->cond, &ctx->lock,
+		                                 &deadline);
+
+		if (ret != 0) {
+			fprintf(stderr,
+			        "timeout waiting for natural budget result: "
+			        "holds=%u target=%u events=%u\n",
+			        ctx->natural_budget_hold_messages, hold_target,
+			        ctx->data_events);
+			assert(ret == 0);
+		}
+	}
+	received = ctx->natural_budget_hold_messages >= hold_target;
+	pthread_mutex_unlock(&ctx->lock);
+	return received;
 }
 
 static void wait_group_capability_frames(unsigned target)
@@ -2604,6 +2682,208 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 	     "passed");
 }
 
+static void test_public_connection_group_natural_budget_rejection_raw_peer(void)
+{
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_server *server = NULL;
+	struct tr_client *client = NULL;
+	struct public_group_ctx ctx;
+	struct tr_connection_group_id group;
+	struct tr_memory_budget_stats budget_before;
+	struct tr_memory_budget_stats budget_after;
+	struct tr_memory_budget *message_budget;
+	struct tr_conn_handle data_routes[2];
+	uint8_t *decoded_payload;
+	uint8_t raw_payload = 0U;
+	struct tr_transport_bytes compressed_bytes;
+	struct tr_transport_bytes raw_bytes = {&raw_payload, 1U};
+	uint16_t group_port = 0U;
+	unsigned retained = 0U;
+	unsigned i;
+	int budget_rejected = 0;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+	atomic_store(&group_large_raw_submissions, 0U);
+	captured_group_message_budget = NULL;
+	atomic_store(&capture_group_message_budget, 1);
+
+	tr_server_config_init(&server_config);
+	server_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	server_config.limits.max_message_bytes = TEST_GROUP_LARGE_DECODED_BYTES;
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 3U;
+	server_config.connection_groups.max_data_connections_per_group = 2U;
+	server_config.connection_groups.max_streams_per_group = 4U;
+	server_config.connection_groups.receive_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	server_config.connection_groups.max_encoded_message_bytes = 4096U;
+	server_config.connection_groups.max_inflight_compressed_messages = 8U;
+	server_config.connection_groups.authorize = authorize_group;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event = on_group_data_event;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	atomic_store(&capture_group_message_budget, 0);
+	message_budget = captured_group_message_budget;
+	assert(message_budget != NULL);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(group_port != 0U);
+	assert(tr_server_start(server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.limits.max_frame_payload_bytes = 64U * 1024U;
+	client_config.limits.max_message_bytes = TEST_GROUP_LARGE_DECODED_BYTES;
+	client_config.keepalive_interval_ms = 0U;
+	client_config.connection_groups.max_data_connections = 2U;
+	client_config.connection_groups.max_active_transfers = 2U;
+	client_config.connection_groups.send_compression_algorithms =
+	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
+	client_config.connection_groups.max_encoded_message_bytes = 4096U;
+	client_config.connection_groups.on_transfer_ready =
+	        on_client_transfer_ready;
+	client_config.connection_groups.callback_arg = &ctx;
+	assert(tr_client_create_transport(&client_config, &client) == TR_OK);
+	ctx.client = client;
+
+	group.group_id = TEST_GROUP_ID;
+	group.epoch = TEST_GROUP_EPOCH;
+	assert(tr_client_connection_group_connect(client, "127.0.0.1",
+	                                          group_port, &group) == TR_OK);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_data_offer(server, UINT64_C(6961)) == TR_OK);
+	wait_data_accepts(server, 1U);
+	assert(wait_data_offer(server, UINT64_C(6962)) == TR_OK);
+	wait_data_accepts(server, 2U);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5101U,
+	               UINT64_C(6971)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5102U,
+	               UINT64_C(6972)) == TR_OK);
+	wait_counter(&ctx, &ctx.transfer_ready, 2U);
+
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_message_ids[0] = TEST_GROUP_NATURAL_BUDGET_FIRST_ID;
+	group_route_probe_message_ids[1] = TEST_GROUP_RAW_BURST_FIRST_ID;
+	memset(group_route_probe_connections, 0,
+	       sizeof(group_route_probe_connections));
+	group_route_probe_seen = 0U;
+	group_route_probe_enabled = 1;
+	pthread_mutex_unlock(&group_route_probe_lock);
+
+	tr_memory_budget_get_stats(message_budget, &budget_before);
+	assert(budget_before.limit_bytes != 0U);
+	for (i = 0U; i < TEST_GROUP_NATURAL_BUDGET_HOLD_CAPACITY; ++i) {
+		uint8_t expected_byte = (uint8_t)(0x31U + i);
+		int ret;
+
+		decoded_payload =
+		        (uint8_t *)malloc(TEST_GROUP_LARGE_DECODED_BYTES);
+		assert(decoded_payload != NULL);
+		memset(decoded_payload, expected_byte,
+		       TEST_GROUP_LARGE_DECODED_BYTES);
+		compressed_bytes.data = decoded_payload;
+		compressed_bytes.len = TEST_GROUP_LARGE_DECODED_BYTES;
+		ret = tr_client_connection_group_send_with_compression(
+		        client, 5101U, TEST_GROUP_NATURAL_BUDGET_FIRST_ID + i,
+		        &compressed_bytes,
+		        TR_CONNECTION_GROUP_COMPRESSION_ZSTD);
+		free(decoded_payload);
+		if (ret != TR_OK) {
+			wait_counter(&ctx, &ctx.data_events, 1U);
+			budget_rejected = 1;
+			break;
+		}
+		if (!wait_natural_budget_hold_or_data_close(&ctx, i + 1U)) {
+			budget_rejected = 1;
+			break;
+		}
+		retained = i + 1U;
+	}
+	assert(budget_rejected);
+	assert(retained != 0U);
+	wait_counter(&ctx, &ctx.data_events, 1U);
+	tr_memory_budget_get_stats(message_budget, &budget_after);
+	assert(budget_after.rejection_events ==
+	       budget_before.rejection_events + 1U);
+	assert(budget_after.current_bytes <= budget_after.limit_bytes);
+	assert(budget_after.current_bytes > budget_before.current_bytes);
+	assert(budget_after.limit_bytes - budget_after.current_bytes <
+	       (uint64_t)TEST_GROUP_LARGE_DECODED_BYTES +
+	               TR_GROUP_MESSAGE_WORKSPACE_BYTES);
+	assert(ctx.last_data_status != TR_OK);
+	printf("natural server message budget: held=%u current=%llu limit=%llu "
+	       "rejections=%llu\n",
+	       retained, (unsigned long long)budget_after.current_bytes,
+	       (unsigned long long)budget_after.limit_bytes,
+	       (unsigned long long)budget_after.rejection_events);
+
+	/* 全局消息预算已拒绝真实压缩任务且压缩成员已关闭；另一 DATA
+	 * 成员上的 RAW 突发仍须全部交付，期间不释放任何解码持有缓冲。 */
+	for (i = 0U; i < TEST_GROUP_RAW_BURST_COUNT; ++i) {
+		raw_payload = (uint8_t)(0x6aU + i);
+		raw_bytes.data = &raw_payload;
+		assert(tr_client_connection_group_send(
+		               client, 5102U, TEST_GROUP_RAW_BURST_FIRST_ID + i,
+		               &raw_bytes) == TR_OK);
+	}
+	wait_counter(&ctx, &ctx.raw_burst_messages, TEST_GROUP_RAW_BURST_COUNT);
+	assert(atomic_load(&group_large_raw_submissions) ==
+	       TEST_GROUP_RAW_BURST_COUNT);
+	pthread_mutex_lock(&group_route_probe_lock);
+	group_route_probe_enabled = 0;
+	assert(group_route_probe_seen == 3U);
+	data_routes[0] = group_route_probe_connections[0];
+	data_routes[1] = group_route_probe_connections[1];
+	pthread_mutex_unlock(&group_route_probe_lock);
+	assert(data_routes[0].reactor == data_routes[1].reactor &&
+	       (data_routes[0].slot != data_routes[1].slot ||
+	        data_routes[0].generation != data_routes[1].generation));
+
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.natural_budget_hold_messages == retained);
+	for (unsigned message = 0U; message < retained; ++message) {
+		uint8_t expected_byte = (uint8_t)(0x31U + message);
+
+		assert(ctx.natural_budget_retained[message].bytes.len ==
+		       TEST_GROUP_LARGE_DECODED_BYTES);
+		for (uint32_t byte = 0U; byte < TEST_GROUP_LARGE_DECODED_BYTES;
+		     ++byte)
+			assert(ctx.natural_budget_retained[message]
+			               .bytes.data[byte] == expected_byte);
+	}
+	pthread_mutex_unlock(&ctx.lock);
+	for (i = 0U; i < retained; ++i)
+		assert(tr_connection_group_message_release(
+		               &ctx.natural_budget_retained[i]) == TR_OK);
+
+	assert(tr_client_connection_group_begin_drain(client) == TR_OK);
+	assert(tr_server_connection_group_begin_drain(server) == TR_OK);
+	assert(tr_client_connection_group_release_transfer(client, 5102U) ==
+	       TR_OK);
+	assert(tr_server_connection_group_release_transfer(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 5102U) ==
+	       TR_OK);
+	assert(tr_client_connection_group_close(client) == TR_OK);
+	wait_counter(&ctx, &ctx.data_events, 2U);
+	assert(tr_server_connection_group_wait_drained(server, 5000U) == TR_OK);
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_client_destroy_after_group_close(client);
+	wait_server_destroy_after_release(server);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+	puts("connection_group_facade: natural server budget rejection/raw "
+	     "peer passed");
+}
+
 static void test_public_connection_group_member_failure_replacement(void)
 {
 	struct tr_server_config server_config;
@@ -4068,6 +4348,7 @@ int main(void)
 	test_public_connection_group_client_data_offer();
 	test_public_connection_group_multi_data_drain();
 	test_public_connection_group_large_decode_hold_raw_peer();
+	test_public_connection_group_natural_budget_rejection_raw_peer();
 	test_public_connection_group_member_failure_replacement();
 	test_public_connection_group_multi_group_repeated_failure_replacement();
 	test_client_compression_completion_after_route_replacement();
