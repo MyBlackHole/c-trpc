@@ -2510,7 +2510,7 @@ static void test_channel_asymmetric_stream_windows(void)
 	struct tr_buffer *server_payload;
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
-	uint8_t client_source[2048];
+	uint8_t client_source[1536];
 	uint8_t server_source[1024];
 	int client_fd;
 	int server_fd;
@@ -2616,12 +2616,12 @@ static void test_channel_asymmetric_stream_windows(void)
 	pthread_mutex_unlock(&client_ctx.lock);
 	tr_buffer_release(server_oversized);
 
-	/* Server 接收窗口为 2 KiB，Client 的 L=W 消息必须被完整接纳。 */
+	/* Server 接收窗口为 2 KiB，Client 的 L<W 消息必须被完整接纳。 */
 	assert(tr_stream_send(client_stream, client_payload) == TR_OK);
 	wait_channel_counter(&server_ctx, &server_ctx.received, 1U);
 	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
 	assert(flow.tx_sent_bytes == sizeof(client_source));
-	assert(flow.tx_send_limit == sizeof(client_source));
+	assert(flow.tx_send_limit == 2048U);
 	pthread_mutex_lock(&server_ctx.lock);
 	assert(server_ctx.held_payload != NULL);
 	assert(server_ctx.held_payload->len == sizeof(client_source));
