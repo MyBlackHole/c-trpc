@@ -513,6 +513,27 @@ static void recv_all_timeout(int fd, void *data, size_t len)
 	}
 }
 
+static void expect_socket_closed(int fd)
+{
+	struct pollfd pfd;
+	uint8_t byte;
+	ssize_t n;
+	int ret;
+
+	memset(&pfd, 0, sizeof(pfd));
+	pfd.fd = fd;
+	pfd.events = POLLIN | POLLHUP;
+	do {
+		ret = poll(&pfd, 1, 10000);
+	} while (ret < 0 && errno == EINTR);
+	assert(ret == 1);
+	assert((pfd.revents & (POLLIN | POLLHUP | POLLERR)) != 0);
+	do {
+		n = recv(fd, &byte, sizeof(byte), 0);
+	} while (n < 0 && errno == EINTR);
+	assert(n == 0 || (n < 0 && errno == ECONNRESET));
+}
+
 static int connect_loopback(uint16_t port)
 {
 	struct sockaddr_in addr;
@@ -611,6 +632,32 @@ authorize_group(const struct tr_connection_group_authorization *authorization,
 	            TR_PEER_IDENTITY_NONE ||
 	    authorization->control_identity.authentication !=
 	            TR_PEER_IDENTITY_NONE)
+		return TR_ERR_STALE;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->authorized++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	return TR_OK;
+}
+
+static int authorize_group_dual_epoch(
+        const struct tr_connection_group_authorization *authorization,
+        void *arg)
+{
+	struct public_group_ctx *ctx = (struct public_group_ctx *)arg;
+	uint64_t epoch;
+
+	if (!authorization || authorization->group.group_id != TEST_GROUP_ID ||
+	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
+	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA) ||
+	    authorization->peer_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE ||
+	    authorization->control_identity.authentication !=
+	            TR_PEER_IDENTITY_NONE)
+		return TR_ERR_STALE;
+	epoch = authorization->group.epoch;
+	if (epoch != TEST_GROUP_EPOCH && epoch != TEST_GROUP_EPOCH + 1U)
 		return TR_ERR_STALE;
 
 	pthread_mutex_lock(&ctx->lock);
@@ -998,6 +1045,27 @@ static void on_group_data_event(
 	assert(event == TR_CONNECTION_GROUP_DATA_CLOSED ||
 	       event == TR_CONNECTION_GROUP_DATA_ERROR);
 	(void)status;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->data_events++;
+	ctx->last_data_status = status;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void
+on_group_data_event_dual_epoch(const struct tr_connection_group_id *group,
+                               enum tr_connection_group_data_event event,
+                               int status, void *arg)
+{
+	struct public_group_ctx *ctx = (struct public_group_ctx *)arg;
+
+	assert(group != NULL);
+	assert(group->group_id == TEST_GROUP_ID);
+	assert(group->epoch == TEST_GROUP_EPOCH ||
+	       group->epoch == TEST_GROUP_EPOCH + 1U);
+	assert(event == TR_CONNECTION_GROUP_DATA_CLOSED ||
+	       event == TR_CONNECTION_GROUP_DATA_ERROR);
 
 	pthread_mutex_lock(&ctx->lock);
 	ctx->data_events++;
@@ -1824,6 +1892,131 @@ static void test_public_connection_group_client_control(void)
 
 	assert(tr_client_destroy(client) == TR_OK);
 	assert(tr_server_destroy(server) == TR_OK);
+	pthread_cond_destroy(&ctx.cond);
+	pthread_mutex_destroy(&ctx.lock);
+}
+
+static void
+test_public_connection_group_control_loss_fences_old_epoch_data(void)
+{
+	static const uint8_t payload[] = "control-loss-data";
+	struct tr_server_config server_config;
+	struct tr_server *server = NULL;
+	struct public_group_ctx ctx;
+	struct tr_pipeline_route_preface old_control_route;
+	struct tr_pipeline_route_preface old_data_route;
+	struct tr_pipeline_route_preface new_control_route;
+	struct tr_pipeline_route_preface new_data_route;
+	struct tr_pipeline_control_wire_message offer;
+	struct tr_pipeline_control_wire_message ready;
+	struct tr_connection_group_server_stats stats;
+	uint16_t group_port = 0U;
+	int old_control = -1;
+	int old_data = -1;
+	int new_control = -1;
+	int stale_data = -1;
+	int new_data = -1;
+
+	memset(&ctx, 0, sizeof(ctx));
+	assert(pthread_mutex_init(&ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&ctx.cond, NULL) == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.max_peers = 1U;
+	server_config.keepalive_interval_ms = 0U;
+	server_config.connection_groups.max_groups = 1U;
+	server_config.connection_groups.max_connections = 2U;
+	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_streams_per_group = 2U;
+	server_config.connection_groups.authorize = authorize_group_dual_epoch;
+	server_config.connection_groups.on_message = on_group_message;
+	server_config.connection_groups.on_data_event =
+	        on_group_data_event_dual_epoch;
+	server_config.connection_groups.callback_arg = &ctx;
+	assert(tr_server_create_transport(&server_config, &server) == TR_OK);
+	assert(tr_server_connection_group_listen(server, "127.0.0.1", 0U, 16,
+	                                         &group_port) == TR_OK);
+	assert(tr_server_start(server) == TR_OK);
+
+	old_control_route = control_route();
+	old_control = connect_loopback(group_port);
+	send_route(old_control, &old_control_route);
+	wait_counter(&ctx, &ctx.authorized, 1U);
+	assert(wait_group_pair_offer(server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	                             UINT64_C(1001)) == TR_OK);
+	recv_control_message(old_control, UINT64_C(1001), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(tr_pipeline_control_wire_data_route(&offer, &old_data_route) ==
+	       TR_OK);
+
+	old_data = connect_loopback(group_port);
+	send_route(old_data, &old_data_route);
+	wait_counter(&ctx, &ctx.authorized, 2U);
+	wait_data_accepts(server, 1U);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 3001U,
+	               UINT64_C(1002)) == TR_OK);
+	recv_control_message(old_control, UINT64_C(1002), &ready);
+	assert(ready.type == TR_PIPELINE_CONTROL_TRANSFER_READY);
+	assert(ready.stream_id == 3001U);
+	send_data_message(old_data, 3001U, UINT64_C(2001), payload,
+	                  (uint32_t)(sizeof(payload) - 1U));
+	wait_counter(&ctx, &ctx.messages, 1U);
+	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
+	wait_group_pair_server_stats(server, 1U, 1U, 1U);
+
+	/* CONTROL 的真实 TCP 关闭必须退役活动 DATA 和 transfer affinity。 */
+	assert(close(old_control) == 0);
+	old_control = -1;
+	wait_counter(&ctx, &ctx.data_events, 1U);
+	expect_socket_closed(old_data);
+	assert(close(old_data) == 0);
+	old_data = -1;
+	wait_group_pair_server_stats(server, 0U, 0U, 0U);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
+	assert(stats.connections_current == 0U);
+
+	/* 新 epoch 接管相同 group ID 后，旧 DATA 前导仍须被拒绝。 */
+	new_control_route = control_route();
+	new_control_route.epoch = TEST_GROUP_EPOCH + 1U;
+	new_control = connect_loopback(group_port);
+	send_route(new_control, &new_control_route);
+	wait_counter(&ctx, &ctx.authorized, 3U);
+	assert(wait_group_pair_offer(server, TEST_GROUP_ID,
+	                             TEST_GROUP_EPOCH + 1U,
+	                             UINT64_C(1003)) == TR_OK);
+	recv_control_message(new_control, UINT64_C(1003), &offer);
+	assert(tr_pipeline_control_wire_data_route(&offer, &new_data_route) ==
+	       TR_OK);
+	assert(new_data_route.epoch == TEST_GROUP_EPOCH + 1U);
+	assert(new_data_route.member_generation !=
+	       old_data_route.member_generation);
+
+	stale_data = connect_loopback(group_port);
+	send_route(stale_data, &old_data_route);
+	expect_socket_closed(stale_data);
+	assert(close(stale_data) == 0);
+	stale_data = -1;
+	wait_group_pair_server_stats(server, 1U, 0U, 0U);
+
+	new_data = connect_loopback(group_port);
+	send_route(new_data, &new_data_route);
+	wait_counter(&ctx, &ctx.authorized, 4U);
+	wait_data_accepts(server, 2U);
+	wait_group_pair_server_stats(server, 1U, 1U, 0U);
+
+	assert(close(new_control) == 0);
+	new_control = -1;
+	wait_counter(&ctx, &ctx.data_events, 2U);
+	expect_socket_closed(new_data);
+	assert(close(new_data) == 0);
+	new_data = -1;
+	wait_group_pair_server_stats(server, 0U, 0U, 0U);
+
+	assert(tr_server_connection_group_stop(server) == TR_OK);
+	assert(tr_server_drain(server, 5000U) == TR_OK);
+	wait_server_destroy_after_release(server);
 	pthread_cond_destroy(&ctx.cond);
 	pthread_mutex_destroy(&ctx.lock);
 }
@@ -4918,6 +5111,7 @@ int main(void)
 	test_transport_constructor_rejects_reconnect();
 	test_connection_group_compression_policy_validation();
 	test_public_connection_group_server();
+	test_public_connection_group_control_loss_fences_old_epoch_data();
 	test_public_connection_group_client_control();
 	test_client_group_destroy_retry_preserves_control();
 	test_client_group_close_retry_preserves_control();
