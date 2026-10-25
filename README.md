@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.109` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.110` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -429,6 +429,9 @@ dev.108 将 Channel 六帧重组回归压到小资源池：唯一 DATA TX 项、
 
 dev.109 为 #241 增加真实 TCP Channel 压缩接收扩张比回归：4 KiB 的 `0x5a` 正文编码后小于 64 字节，含 envelope 的发送 wire 小于 128 字节初始窗口；服务端仍解码并逐字节交付完整 4 KiB 正文。Release transport 目标连续 3/3 通过。本次仅扩展测试、记录和开发版本，不改生产/API/ABI/wire。该用例只覆盖单消息编码体/解码体不对称，不代表大规模 RSS、全局预算或跨机器安全验收完成。详见
 [小编码体大解码正文接收回归](docs/reviews/channel_compressed_expansion_20261025.md)。
+
+dev.110 为 #241 增加真实 TCP Channel 对 Zstandard 帧头未知内容长度的接收回归：发送端显式关闭帧内 content size，断言帧头报告 `ZSTD_CONTENTSIZE_UNKNOWN`；消息 envelope 仍声明 4 KiB 解码长度，服务端通过 Channel 解码并逐字节交付完整正文。Release transport 目标连续 3/3 通过。本次仅增加测试、记录和开发版本，不改生产/API/ABI/wire。详见
+[未知帧内容长度压缩消息接收回归](docs/reviews/channel_zstd_unknown_content_size_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
