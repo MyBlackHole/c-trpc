@@ -19,6 +19,27 @@ static void colliding_stream_ids(struct tr_conn_handle connection,
 	}
 }
 
+// 备注：决策：在测试侧反解哈希输入，确定性地产生最大容量的同 home 键。
+// 备注：固定句柄按均匀分布需约 52 亿候选。
+// 备注：它少依赖内部公式，但耗时不可控。
+// 备注：测试侧反解仅需 O(40,000)，但需跟随哈希公式。
+// 备注：它不需要新增测试 API。
+// 备注：结论：采用反解法，省去耗时不可控的候选筛选。
+// 备注：抵消流 ID 哈希项后 mixer 输入恒定。
+// 备注：断言 home 相同、句柄非零且互异。
+// 备注：本合成输入只测索引探针，不代表真实连接或墙钟延迟。
+static struct tr_conn_handle same_home_connection(uint32_t stream_id,
+                                                  uint64_t preimage)
+{
+	uint64_t connection_word =
+	        preimage ^ ((uint64_t)tr_channel_stream_id_hash(stream_id) *
+		            UINT64_C(0x9e3779b97f4a7c15));
+	struct tr_conn_handle connection = {NULL,
+	                                    (uint32_t)(connection_word >> 32),
+	                                    (uint32_t)connection_word};
+	return connection;
+}
+
 static void test_wrapped_collision_cluster_delete_and_reuse(void)
 {
 	uint32_t slots[8] = {0U};
@@ -347,6 +368,7 @@ static void test_max_capacity_collision_fifo_turnover(void)
 
 	while (capacity < (size_t)max_history * 2U)
 		capacity <<= 1U;
+	assert(capacity == 131072U);
 	slots = calloc(capacity, sizeof(*slots));
 	history = calloc(max_history, sizeof(*history));
 	assert(slots && history);
@@ -458,6 +480,117 @@ static void test_max_capacity_collision_fifo_turnover(void)
 	free(history);
 }
 
+static void test_max_capacity_same_home_cost_bound(void)
+{
+	enum { max_history = 40000U };
+	const uint64_t preimage = UINT64_C(0x0123456789abcdef);
+	size_t capacity = 1U;
+	size_t home = 0U;
+	uint32_t *slots;
+	struct tr_stream_reset_tombstone *history;
+	struct tr_conn_handle old_connection;
+	struct tr_conn_handle previous_connection = {NULL, 0U, 0U};
+	struct tr_conn_handle new_connection;
+
+	while (capacity < (size_t)max_history * 2U)
+		capacity <<= 1U;
+	slots = calloc(capacity, sizeof(*slots));
+	history = calloc(max_history, sizeof(*history));
+	assert(slots && history);
+
+	// 备注：连接句柄与流 ID 组成复合键。
+	// 备注：反解 slot/generation，使每个键进入同一 home。
+	for (uint32_t i = 0U; i < max_history; ++i) {
+		uint32_t stream_id = 2U * i + 1U;
+		struct tr_conn_handle connection =
+		        same_home_connection(stream_id, preimage);
+		size_t position;
+		if (i == 0U)
+			home = tr_reset_tombstone_index_home(
+			        capacity, connection, stream_id);
+		assert(connection.slot != 0U && connection.generation != 0U);
+		assert(connection.slot != previous_connection.slot ||
+		       connection.generation != previous_connection.generation);
+		assert(tr_reset_tombstone_index_home(capacity, connection,
+		                                     stream_id) == home);
+		history[i].connection = connection;
+		history[i].stream_id = stream_id;
+		position = (home + i) & (capacity - 1U);
+		assert(slots[position] == 0U);
+		slots[position] = i + 1U;
+		previous_connection = connection;
+	}
+	old_connection = history[0].connection;
+
+	// 备注：直接建立合法线性探测布局，避免预先搜寻碰撞键的耗时污染待测查找与淘汰成本。
+	{
+		uint32_t slot = UINT32_MAX;
+		size_t probes = 0U;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history,
+		               history[max_history - 1U].connection,
+		               history[max_history - 1U].stream_id, &slot,
+		               &probes) == TR_OK);
+		assert(slot == max_history - 1U);
+		assert(probes == max_history);
+	}
+	{
+		size_t probes = 0U;
+		assert(tr_reset_tombstone_index_remove(
+		               slots, capacity, history, max_history,
+		               old_connection, 1U, &probes) == TR_OK);
+		assert(probes == (size_t)max_history * 2U + 1U);
+	}
+
+	// 备注：删除簇首后幸存键左移，再复用 FIFO 环槽把新键插入簇尾。
+	{
+		uint32_t slot = UINT32_MAX;
+		size_t probes = 0U;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history,
+		               history[1].connection, history[1].stream_id,
+		               &slot, &probes) == TR_OK);
+		assert(slot == 1U && probes == 1U);
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history,
+		               history[max_history - 1U].connection,
+		               history[max_history - 1U].stream_id, &slot,
+		               &probes) == TR_OK);
+		assert(slot == max_history - 1U);
+		assert(probes == max_history - 1U);
+	}
+	{
+		const uint32_t new_stream_id = 2U * max_history + 1U;
+		size_t probes = 0U;
+		uint32_t slot = UINT32_MAX;
+		new_connection = same_home_connection(new_stream_id, preimage);
+		assert(new_connection.slot != 0U &&
+		       new_connection.generation != 0U);
+		assert(tr_reset_tombstone_index_home(capacity, new_connection,
+		                                     new_stream_id) == home);
+		history[0].connection = new_connection;
+		history[0].stream_id = new_stream_id;
+		assert(tr_reset_tombstone_index_insert(
+		               slots, capacity, history, max_history,
+		               new_connection, new_stream_id, 0U,
+		               &probes) == TR_OK);
+		assert(probes == max_history);
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history,
+		               new_connection, new_stream_id, &slot,
+		               &probes) == TR_OK);
+		assert(slot == 0U && probes == max_history);
+		assert(tr_reset_tombstone_index_find(slots, capacity, history,
+		                                     max_history,
+		                                     old_connection, 1U, &slot,
+		                                     &probes) == TR_ERR_STALE);
+		assert(probes == (size_t)max_history + 1U);
+	}
+
+	free(slots);
+	free(history);
+}
+
 int main(void)
 {
 	test_wrapped_collision_cluster_delete_and_reuse();
@@ -466,6 +599,7 @@ int main(void)
 	test_large_history_probe_bound_and_fifo_turnover();
 	test_adversarial_collision_fifo_turnover();
 	test_max_capacity_collision_fifo_turnover();
+	test_max_capacity_same_home_cost_bound();
 	puts("reset_tombstone_index: adversarial and max-capacity collision, "
 	     "40k turnover, split identity, deletion, reuse passed");
 	return 0;

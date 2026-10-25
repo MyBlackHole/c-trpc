@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.74` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.75` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -284,6 +284,9 @@ dev.73 扩展连接组跨成员 draining 回归：同一 CONTROL 下两个不同
 
 dev.74 修正 RESET 墓碑索引删除成本计量：`remove` 的测试探测计数现包含定位、探测簇校验与 backward-shift 的全部槽位检查；3 项环绕簇删除为 7 次检查，256 路同 home 碰撞删除为 513 次。最大容量碰撞周转的总工作上界现计入删除扫描。Release、TSan、ASan/UBSan 下 `test_reset_tombstone_index` 与 `test_stream_reset` 均通过；40k 同 home 碰撞和真实高频延迟仍待独立验收。详见
 [RESET 墓碑删除成本计量记录](docs/reviews/rpc_v2_reset_tombstone_remove_cost_accounting_20261025.md)。
+
+dev.75 为 #242/ERR-E 在 `max_streams=40000`、131072 槽下增加同 home 最坏输入：代数反解生成 40,000 个句柄非零且互异的复合键，验证尾部查找 40,000 次、簇首删除 80,001 次、复用槽位后的插入与命中各 40,000 次，以及旧键 stale 查询 40,001 次。Release、TSan、ASan/UBSan 下 `test_reset_tombstone_index` 均通过；这是索引层合成状态，不测量真实连接的持续高频 CPU/延迟，远程 CI 仍待验收。详见
+[RESET 墓碑索引最大容量同 home 成本记录](docs/reviews/rpc_v2_reset_tombstone_same_home_max_capacity_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
