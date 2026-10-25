@@ -353,6 +353,9 @@ dev.83 在 dev.82 场景中加入有界 64 条 RAW 突发：六条 Zstandard 解
 dev.84 用测试链接包装 `tr_pipeline_listener_create` 捕获公开 Server 实际传给监听器的派生消息预算，不改生产钩子或预约预算。真实 Server 通过应用持有 36 条 1 MiB 解码输出消耗预算后，下一条完整 Zstandard 任务触发且仅触发一次真实预算拒绝；拒绝时 current=42,147,072、limit=46,908,160，剩余 4,761,088 字节，小于下一任务至少需要的 5 MiB 输出加工作区。压缩 DATA 成员随后关闭，另一物理 DATA 成员仍交付 64 条 RAW 消息；所有已持有缓冲在突发后仍逐字节有效。GCC Release 目标连续 5/5、ASan/UBSan（leak detection）、TSan 和完整 Release 91/91 通过。该证据证明真实预算预约自然拒绝，并不声称账面 current 数值精确等于 limit，也不证明持续饱和公平性；后者仍待验收。本次只改测试、文档与版本号，不改生产运行时/API/ABI/wire。详见
 [公开 Server 自然预算拒绝期间 RAW 同伴进展](rpc_v2_server_natural_budget_rejection_20261025.md)。
 
+dev.85 增加两个来源同时活跃的公开 Server 回归：一个 DATA 成员连续发送 32 条 1 MiB Zstandard 消息，前五条解码输出由应用持有、余下输出立即释放；另一成员由独立线程维持最多 32 条 RAW 消息在途，每收到一条即补发。计数取首条到最后一条 Zstandard 服务端回调之间的 RAW 交付，并断言至少 32 条；测试链接探针确认消息类型和两条不同物理连接，收尾再次逐字节检查五条持有正文。Release 首次运行、五次复跑及完整套件中的七次观测为 1,372–2,598 条 RAW；ASan/UBSan 为 4,514 条、TSan 为 2,579 条。Release facade 定向目标重复通过，ASan/UBSan、TSan 和完整 Release 91/91 通过。本测试证明固定 32 条压缩批次期间的并发 RAW 进展，不设公平延迟/吞吐阈值，不证明长期持续饱和公平性；后续需明确负载时长、配比、延迟边界和稳定基线。本次只改测试、文档与版本号，不改生产运行时/API/ABI/wire。详见
+[公开 Server 并发 RAW/Zstandard 进展回归](rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -378,7 +381,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
 | 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败、预算保留期间 CONTROL keepalive 往返和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照仍待补齐，listener draining 后拒绝未完成 CONTROL/DATA route 前导已有真实回归，当前覆盖同一 CONTROL 下两个不同 DATA member 和另一个 pending CONTROL route。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接相同 ID 双墓碑、驻留重复 RESET 与索引 FIFO 周转各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX、压缩任务/编码 wire 在途、单成员故障与同组替代、双组同 shard 先后及并发故障隔离、双组各自两轮替代及组级关闭回归；多轮高频压力竞争仍待验收；ERR-E 墓碑固定预算和复合查询索引、真实 Channel 128 次 RESET/32 轮墓碑环周转、256 路小表确定性碰撞、max_streams=40000 的顺序 FIFO 周转和满历史下 256 路同 home 碰撞簇 FIFO 周转、真实 Channel 40k 历史填满与首次淘汰，以及删除成本计数覆盖 backward-shift 的最大容量 256 路同 home 簇已有回归；40k 键同 home 索引层最坏输入及真实 Channel 高频 RESET 成本已有本地初测（dev.76）；受控基线、持续压力和更广信用/丢弃组合仍待验收 | #242 |
-| 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归；单条 RAW 消息、Zstandard 解压消息、Zstandard/RAW 混合、1 MiB 解压正文持有、监听器消息预算满额、公开 Server 六条真实应用持有消息及持有期间 64 条 RAW 有界突发均可跨 DATA 成员进展（dev.77/.78/.79/.80/.81/.82/.83）；普通 Server 派生全局预算下自然持有输出导致下一压缩任务真实预算拒绝，且拒绝后 RAW 同伴继续进展（dev.84）；持续饱和公平性仍待验收，测试不要求 current 数值等于 limit | #241、#235 |
+| 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归；单条 RAW 消息、Zstandard 解压消息、Zstandard/RAW 混合、1 MiB 解压正文持有、监听器消息预算满额、公开 Server 多应用持有和持有期间 64 条 RAW 有界突发均可跨 DATA 成员进展（dev.77–.83）；普通 Server 派生全局预算下自然持有输出导致下一压缩任务真实预算拒绝，且拒绝后 RAW 同伴继续进展（dev.84）；固定批次的压缩与 RAW 持续补发双来源并发进展已有公开 Server 回归（dev.85）。长期持续饱和公平性、延迟/吞吐阈值与稳定基线仍待验收；dev.84 测试不要求 current 数值等于 limit | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
