@@ -376,7 +376,9 @@ static void barrier_without_stream_window_update(struct fixture *f,
 	assert(resets == 1U);
 }
 
-static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
+static void hello_with_max_message(struct fixture *f, unsigned lane,
+                                   uint64_t features, int ack,
+                                   uint32_t max_message_bytes)
 {
 	uint8_t bytes[32] = {0};
 	tr_put_le16(bytes, TR_CHANNEL_PROTOCOL_VERSION);
@@ -384,16 +386,22 @@ static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
 		tr_put_le16(bytes + 2, TR_CHANNEL_PROTOCOL_VERSION);
 	tr_put_le32(bytes + 4, f->split ? (1U << lane) : 3U);
 	tr_put_le32(bytes + 8, FRAME);
-	tr_put_le32(bytes + 12, WINDOW);
+	tr_put_le32(bytes + 12, max_message_bytes);
 	tr_put_le64(bytes + 16, features);
 	send_frame(f, lane, ack ? TR_FRAME_HELLO_ACK : TR_FRAME_HELLO, 0, 0, 0,
 	           bytes, sizeof(bytes));
+}
+
+static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
+{
+	hello_with_max_message(f, lane, features, ack, WINDOW);
 }
 
 static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
                                        int split, uint64_t features,
                                        uint64_t required, int handshake,
                                        uint32_t commands,
+                                       uint32_t max_message_bytes,
                                        struct tr_memory_budget *memory_budget)
 {
 	const struct tr_reactor_config rc = {.max_connections = 2,
@@ -407,11 +415,11 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	struct tr_channel_config cc = {
 	        .role = TR_CHANNEL_SERVER,
 	        .mode = split ? TR_CHANNEL_SPLIT_CONNECTIONS
-	                      : TR_CHANNEL_SHARED_CONNECTION,
+		              : TR_CHANNEL_SHARED_CONNECTION,
 	        .max_streams = capacity,
 	        .initial_window_bytes = WINDOW,
 	        .window_update_threshold_bytes = 128,
-	        .max_message_bytes = WINDOW,
+	        .max_message_bytes = max_message_bytes,
 	        .feature_bits = features,
 	        .required_feature_bits = required,
 	        .memory_budget = memory_budget};
@@ -445,7 +453,8 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	for (unsigned lane = 0; lane < (split ? 2U : 1U); ++lane) {
 		assert(receive_frame(f, lane).type == TR_FRAME_HELLO);
 		if (handshake) {
-			hello(f, lane, features, 0);
+			hello_with_max_message(f, lane, features, 0,
+			                       max_message_bytes);
 			assert(receive_frame(f, lane).type ==
 			       TR_FRAME_HELLO_ACK);
 		}
@@ -463,7 +472,7 @@ static void init_fixture(struct fixture *f, uint32_t capacity, int split,
                          uint64_t features, uint64_t required, int handshake)
 {
 	init_fixture_with_commands(f, capacity, split, features, required,
-	                           handshake, COMMANDS, NULL);
+	                           handshake, COMMANDS, WINDOW, NULL);
 }
 
 static void destroy_fixture(struct fixture *f)
@@ -1661,7 +1670,7 @@ static int repeat_goaway_owner(void *arg)
 static void test_repeat_goaway_fifo(void)
 {
 	struct fixture f;
-	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256, NULL);
+	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256, WINDOW, NULL);
 	(void)open_remote(&f, 0, 1, 1);
 	assert(tr_reactor_timer_register(f.reactor, repeat_goaway, &f,
 	                                 &repeat_goaway_timer) == TR_OK);
@@ -1841,6 +1850,95 @@ static void test_reset_begun_held_payload_release_without_credit(void)
 	destroy_fixture(&f);
 }
 
+static void test_reset_release_preserves_cross_message_credit_debt(void)
+{
+	struct fixture f;
+	uint8_t bytes[128] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_buffer *held;
+	struct tr_stream_handle reset_stream;
+	struct tr_stream_handle live_stream;
+	struct tr_frame_header h;
+
+	/* 消息上限 128、窗口 256：两个 64 字节释放先累计至更新阈值。 */
+	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, COMMANDS,
+	                           2U * FRAME, NULL);
+	reset_stream = open_remote(&f, 0, 1, 1);
+	live_stream = open_remote(&f, 0, 3, 2);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, 64U);
+	wait_count(&f, &f.received, 1U);
+	/* 第一条消息留下 64 字节未通告债务，尚不能发送 WINDOW_UPDATE。 */
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 998U, NULL, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 998U);
+
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           2, bytes, 64U);
+	wait_count(&f, &f.received, 2U);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_WINDOW_UPDATE && h.stream_id == 1U);
+	assert(h.message_id == WINDOW + 128U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == 128U &&
+	       flow.rx_consumed_bytes == 128U &&
+	       flow.rx_advertised_limit == WINDOW + 128U);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST, 1, 3, bytes, FRAME);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_LAST, 1, 3, bytes + FRAME,
+	           FRAME);
+	wait_count(&f, &f.received, 3U);
+	assert(f.held && f.held_stream.generation == reset_stream.generation);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW &&
+	       flow.rx_consumed_bytes == 128U &&
+	       flow.rx_advertised_limit == WINDOW + 128U);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.block_reset_callback = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	peer_reset(&f, 0, 1, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.resets, 1U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.reset_callback_blocked);
+	held = f.held;
+	assert(held);
+	f.held = NULL;
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* 前两条消息留下的信用状态不能被 RESET 窗口中的释放覆盖。 */
+	assert(tr_stream_release_payload(reset_stream, held) == TR_OK);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW &&
+	       flow.rx_consumed_bytes == WINDOW &&
+	       flow.rx_advertised_limit == WINDOW + 128U);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_reset_callback = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	barrier_without_stream_window_update(&f, 0, 1U, TR_ERR_TIMEOUT);
+
+	/* 目标流在两种消费路径上都没有泄漏到同一 Channel 的健康流。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, 8U);
+	wait_count(&f, &f.received, 4U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_timer_failure_and_partial(int stopping)
 {
 	struct fixture f;
@@ -1894,7 +1992,7 @@ static void test_invalid(enum invalid_kind kind)
 
 		tr_memory_budget_init(&budget, 0U);
 		init_fixture_with_commands(&f, 2U, 0, 1U, 1U, 1, COMMANDS,
-		                           &budget);
+		                           WINDOW, &budget);
 		tr_memory_budget_get_stats(&budget, &stats);
 		fixed_bytes = stats.current_bytes;
 		assert(fixed_bytes > 0U);
@@ -2041,6 +2139,7 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
+	test_reset_release_preserves_cross_message_credit_debt();
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
