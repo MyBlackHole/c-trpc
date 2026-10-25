@@ -4691,6 +4691,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	size_t trailing_encoded_len;
 	size_t boundary_encoded_len;
 	size_t invalid_flags_encoded_len;
+	size_t mismatched_encoded_len;
 	size_t split_body_len;
 	unsigned client_resets_before;
 	unsigned server_resets_before;
@@ -5228,6 +5229,17 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 1U},
 	        (const uint8_t[]){0U}, 1U, 8U, 5U, 3U, 8U);
+	mismatched_encoded_len = ZSTD_compress(encoded, sizeof(encoded), source,
+	                                       sizeof(source), 3);
+	assert(!ZSTD_isError(mismatched_encoded_len));
+	assert(ZSTD_getFrameContentSize(encoded, mismatched_encoded_len) ==
+	       sizeof(source));
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+		                             (uint32_t)mismatched_encoded_len,
+		                             source_len - 1U},
+	        encoded, (uint32_t)mismatched_encoded_len, 9U, 6U, 3U, 8U);
 	trailing_encoded_len =
 	        ZSTD_compress(trailing_encoded, sizeof(trailing_encoded),
 		              trailing_source, sizeof(trailing_source), 3);
@@ -5240,7 +5252,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 		                             (uint32_t)trailing_encoded_len +
 		                                     1U,
 		                             (uint32_t)sizeof(trailing_source)},
-	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 9U, 6U, 3U,
+	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 10U, 7U, 3U,
 	        8U);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);

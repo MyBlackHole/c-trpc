@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.110` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.111` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -432,6 +432,9 @@ dev.109 为 #241 增加真实 TCP Channel 压缩接收扩张比回归：4 KiB �
 
 dev.110 为 #241 增加真实 TCP Channel 对 Zstandard 帧头未知内容长度的接收回归：发送端显式关闭帧内 content size，断言帧头报告 `ZSTD_CONTENTSIZE_UNKNOWN`；消息 envelope 仍声明 4 KiB 解码长度，服务端通过 Channel 解码并逐字节交付完整正文。Release transport 目标连续 3/3 通过。本次仅增加测试、记录和开发版本，不改生产/API/ABI/wire。详见
 [未知帧内容长度压缩消息接收回归](docs/reviews/channel_zstd_unknown_content_size_20261025.md)。
+
+dev.111 为 #241 增加真实 Channel 对虚报解码长度的隔离回归：压缩体是有效 Zstandard 帧，帧头原始长度与实际正文一致，但外层 envelope 少报 1 字节；该消息触发流级 RESET，应用接收数不增加，既有同连接流保持活动。本次仅增加测试、记录和开发版本，不改生产/API/ABI/wire。Release transport 目标连续 3/3 通过。详见
+[压缩 envelope 虚报原始长度隔离回归](docs/reviews/channel_compressed_forged_length_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
