@@ -341,7 +341,7 @@ dev.79 为 #241 增加 Zstandard/RAW 混合慢消费者回归：第一 DATA 成�
 dev.80 为 #241 增加 1 MiB Zstandard 正文持有场景：第一 DATA 成员解压后由应用持有，服务端只有一个压缩解码任务槽时，第二 DATA 成员仍交付 RAW 小消息并释放，首缓冲在同伴进展后仍完整。该用例发现原每任务 1 MiB Zstandard 工作区无法完成 1 MiB 窗口输入的编码；现将有界工作区上限提高到 4 MiB，并沿用 `tr_group_message_budget_required` 按任务槽计入预算；低层监听器手工预算夹具同步增加。Release 完整 `test_connection_group_facade` 连续 5/5、TSan、ASan/UBSan（leak detection）及项目完整 91 项 Release 测试均通过。用例不耗尽全局预算，也不覆盖多个应用持有者或持续饱和公平性。详见
 [大正文压缩持有期间 RAW 同伴进展回归](rpc_v2_large_decode_slow_consumer_20261025.md)。
 
-dev.81 在真实 TCP `pipeline_listener` 组件测试中实际执行 Zstandard 解码并由应用持有输出，再以受控预算预约填满监听器共享消息预算；精确满额期间，另一条独立 DATA 成员上的 RAW 消息仍交付，持有缓冲逐字节有效，释放预约后账目恢复，释放持有输出及销毁 listener 后归零。负向变体验证了若 RAW 路径多申请 1 字节预算，该回归会因同伴未交付而失败；变体已撤销。Release 完整 91 项测试、该定向测试连续 5 次、ASan/UBSan（含泄漏检查）和 TSan 均通过。仅测试/记录/版本变更，无生产 API、ABI、wire 或运行时改动。测试预约模拟已记账持有额度，并非实际分配；这验证监听器组件在其消息预算满额时的 RAW 路径，不等于普通 Server 派生全局预算经自然应用持有耗尽。公共 Server 全局预算耗尽、多条应用消息并发持有及持续饱和公平性仍待验收。详见
+dev.81 在真实 TCP `pipeline_listener` 组件测试中实际执行 Zstandard 解码并由应用持有输出，再以受控预算预约填满监听器共享消息预算；精确满额期间，另一条独立 DATA 成员上的 RAW 消息仍交付，持有缓冲逐字节有效，释放预约后账目恢复，释放持有输出及销毁 listener 后归零。负向变体验证了若 RAW 路径多申请 1 字节预算，该回归会因同伴未交付而失败；变体已撤销。Release 完整 91 项测试、该定向测试连续 5 次、ASan/UBSan（含泄漏检查）和 TSan 均通过。GitHub push CI、PR CI 与 RPC benchmark smoke 均通过：[`40166369925`](https://github.com/MyBlackHole/c-trpc/actions/runs/40166369925)、[`40166375224`](https://github.com/MyBlackHole/c-trpc/actions/runs/40166375224)、[`40166375029`](https://github.com/MyBlackHole/c-trpc/actions/runs/40166375029)。仅测试/记录/版本变更，无生产 API、ABI、wire 或运行时改动。测试预约模拟已记账持有额度，并非实际分配；这验证监听器组件在其消息预算满额时的 RAW 路径，不等于普通 Server 派生全局预算经自然应用持有耗尽。公共 Server 全局预算耗尽、多条应用消息并发持有及持续饱和公平性仍待验收。详见
 [监听器消息预算满额时 RAW 同伴进展回归](rpc_v2_full_budget_raw_peer_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)

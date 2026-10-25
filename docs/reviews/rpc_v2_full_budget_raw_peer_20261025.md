@@ -27,7 +27,7 @@ TMPDIR="$PWD/build/test-tmp" XMAKE_TMPDIR="$PWD/build/test-tmp" \
   xmake test -P . -v -j1 'test_pipeline_listener/*'
 ```
 
-`-P .` 显式选择当前嵌套工作树的 Xmake 项目，避免误用其父目录项目配置。GCC Release 定向测试连续 5 次通过；GCC ASan/UBSan（`detect_leaks=1`）和 TSan 定向测试各通过一次；完整 GCC Release 套件 91/91 通过，耗时 140.952 秒。其他提交检查和远程 CI 结果将在取得实际结果后补记。
+`-P .` 显式选择当前嵌套工作树的 Xmake 项目，避免误用其父目录项目配置。GCC Release 定向测试连续 5 次通过；GCC ASan/UBSan（`detect_leaks=1`）和 TSan 定向测试各通过一次；完整 GCC Release 套件 91/91 通过，耗时 140.952 秒。提交 `8f6fdb1cf47e17c3943e98087c71ed1cf0e759ea` 的 GitHub push CI、PR CI 与 RPC benchmark smoke 均通过：[`40166369925`](https://github.com/MyBlackHole/c-trpc/actions/runs/40166369925)、[`40166375224`](https://github.com/MyBlackHole/c-trpc/actions/runs/40166375224)、[`40166375029`](https://github.com/MyBlackHole/c-trpc/actions/runs/40166375029)。
 
 ## 结论边界
 
