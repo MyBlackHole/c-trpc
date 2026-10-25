@@ -2353,6 +2353,7 @@ static void test_channel_stream_flow_control(void)
 	struct tr_buffer_pool tx_pool;
 	struct tr_buffer *first;
 	struct tr_buffer *second;
+	struct tr_buffer *oversized;
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	int client_fd;
@@ -2409,15 +2410,34 @@ static void test_channel_stream_flow_control(void)
 	wait_channel_counter(&client_ctx, &client_ctx.opened, 1);
 	wait_channel_counter(&server_ctx, &server_ctx.opened, 1);
 
-	assert(tr_buffer_pool_init(&tx_pool, 2, 1024) == TR_OK);
+	assert(tr_buffer_pool_init(&tx_pool, 3, 2048) == TR_OK);
 	assert(tr_buffer_acquire(&tx_pool, 1024, &first) == TR_OK);
 	assert(tr_buffer_acquire(&tx_pool, 1024, &second) == TR_OK);
+	assert(tr_buffer_acquire(&tx_pool, 1025, &oversized) == TR_OK);
 	for (i = 0; i < 1024; ++i) {
 		first->data[i] = (uint8_t)i;
 		second->data[i] = (uint8_t)(i ^ 0x5aU);
 	}
+	memset(oversized->data, 0xa5, 1025);
 	first->len = 1024;
 	second->len = 1024;
+	oversized->len = 1025;
+
+	/* A single message larger than the peer's initial window has no credit
+	 * source that could make a TR_AGAIN retry progress. Reject it without
+	 * accounting or taking ownership of the caller's buffer.
+	 */
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == 0);
+	assert(flow.tx_send_limit == 1024);
+	assert(tr_stream_send(client_stream, oversized) == TR_ERR_BAD_LENGTH);
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == 0);
+	assert(flow.tx_send_limit == 1024);
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.received == 0);
+	pthread_mutex_unlock(&server_ctx.lock);
+	tr_buffer_release(oversized);
 
 	assert(tr_stream_send(client_stream, first) == TR_OK);
 	assert(tr_stream_send(client_stream, second) == TR_AGAIN);
@@ -2463,7 +2483,7 @@ static void test_channel_stream_flow_control(void)
 	assert(tr_channel_destroy(client_channel) == TR_OK);
 	assert(tr_channel_destroy(server_channel) == TR_OK);
 	tr_reactor_destroy(reactor);
-	wait_for_pool_full(&tx_pool, 2);
+	wait_for_pool_full(&tx_pool, 3);
 	tr_buffer_pool_destroy(&tx_pool);
 	destroy_channel_test_ctx(&server_ctx);
 	destroy_channel_test_ctx(&client_ctx);
