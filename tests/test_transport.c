@@ -4694,6 +4694,8 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	size_t boundary_encoded_len;
 	size_t invalid_flags_encoded_len;
 	size_t mismatched_encoded_len;
+	size_t concatenated_second_encoded_len;
+	size_t concatenated_body_len;
 	size_t split_body_len;
 	unsigned client_resets_before;
 	unsigned server_resets_before;
@@ -5343,6 +5345,31 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 		                             source_len},
 	        encoded, (uint32_t)unknown_encoded_len, 13U, 10U, 3U, 8U,
 	        TR_ERR_STATE);
+	concatenated_second_encoded_len = ZSTD_compress(
+	        encoded, sizeof(encoded), source, sizeof(source), 3);
+	assert(!ZSTD_isError(concatenated_second_encoded_len));
+	assert(ZSTD_decompress(oversized_source, sizeof(oversized_source),
+	                       trailing_encoded, trailing_encoded_len) ==
+	       sizeof(trailing_source));
+	assert(memcmp(oversized_source, trailing_source,
+	              sizeof(trailing_source)) == 0);
+	assert(ZSTD_decompress(oversized_source, sizeof(oversized_source),
+	                       encoded, concatenated_second_encoded_len) ==
+	       sizeof(source));
+	assert(memcmp(oversized_source, source, sizeof(source)) == 0);
+	concatenated_body_len =
+	        trailing_encoded_len + concatenated_second_encoded_len;
+	assert(concatenated_body_len < sizeof(trailing_body));
+	memcpy(trailing_body, trailing_encoded, trailing_encoded_len);
+	memcpy(trailing_body + trailing_encoded_len, encoded,
+	       concatenated_second_encoded_len);
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){
+	                TR_MESSAGE_CODEC_ZSTD, (uint32_t)concatenated_body_len,
+	                (uint32_t)(sizeof(trailing_source) + sizeof(source))},
+	        trailing_body, (uint32_t)concatenated_body_len, 14U, 11U, 3U,
+	        8U, TR_ERR_STATE);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
