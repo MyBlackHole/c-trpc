@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.124` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.125` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -17,7 +17,7 @@ dev.27 为压缩 DATA 分帧增加有界的 DATA TX 池就绪通知，池恢复�
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1/D2 全验证矩阵与 GitHub
 验收仍未完成；TLS-E 和 #243 的父子 deadline、跨 owner 环依赖等 Call 范围也未完成，
 本版本不代表 #234 或 V2 整体验收完成。
-dev.120–dev.124 为 #242/ERR-D 增加真实 TCP 双组 32 轮并发 DATA 成员故障替代回归、CONTROL 致命拆除后的活动成员清理与旧 epoch 路由隔离组件回归，以及真实 CONTROL 故障时异构 DATA/预留 route 回收、epoch 切换隔离和故障只影响所属组的跨组继续服务回归；这些切片不代表持续压力、资源争用和完整错误矩阵已验收。
+dev.120–dev.125 为 #242/ERR-D 增加真实 TCP 双组 32 轮并发 DATA 成员故障替代回归、CONTROL 致命拆除后的活动成员清理与旧 epoch 路由隔离组件回归、异构 DATA 状态回收和组间故障隔离，以及 32 轮真实 TCP CONTROL teardown/epoch 重建与早期旧 route 重放回归；这些切片不代表持续压力、资源争用和完整错误矩阵已验收。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行
