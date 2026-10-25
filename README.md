@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.97` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.98` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -363,6 +363,13 @@ DATA TX 池耗尽时调度游标越过尚未发送的等待者，导致同一 St
 池满分支保留该等待者为下次扫描起点。GCC Release 定向目标修复后连续 2/2 通过，项目全量
 测试 91/91（53.237 秒），帧记录确认 RESET 流没有残留 DATA 且 TX 池和预算归零。详见
 [Shared Channel 多帧压缩 DATA 池恢复公平轮转回归](docs/reviews/channel_compressed_data_tx_fairness_20261025.md)。
+
+dev.98 修正连接组 TLS 集成测试的异步清理时序：撤销旧 TLS 代次并确认连接统计清零后，
+Client owner 仍可能有短暂的销毁屏障待收敛；测试原先只调用一次 `tr_client_destroy`，将
+可重试状态误报为失败。现按同文件已有的 Server 销毁助手约定，对 `TR_ERR_STATE`/
+`TR_AGAIN` 做有界重试。GCC Debug `test_connection_group_tls/default` 修改后连续 6/6 通过。
+详见
+[连接组 TLS Client 异步销毁测试收敛](docs/reviews/connection_group_tls_client_destroy_retry_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

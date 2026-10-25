@@ -781,6 +781,23 @@ static void destroy_server_after_async_release(struct tr_server *server)
 	assert(ret == TR_OK);
 }
 
+static void destroy_client_after_async_release(struct tr_client *client)
+{
+	struct timespec pause = {0, 1000000L};
+	unsigned attempt;
+	int ret = TR_ERR_STATE;
+
+	/* owner 屏障尚未收敛时 Client 销毁允许短暂返回可重试状态。 */
+	for (attempt = 0U; attempt < 5000U; ++attempt) {
+		ret = tr_client_destroy(client);
+		if (ret == TR_OK)
+			return;
+		assert(ret == TR_ERR_STATE || ret == TR_AGAIN);
+		assert(nanosleep(&pause, NULL) == 0 || errno == EINTR);
+	}
+	assert(ret == TR_OK);
+}
+
 static void *tls_stall_server_main(void *arg)
 {
 	struct tls_stall_server *server = arg;
@@ -1429,7 +1446,7 @@ static void test_public_connection_group_mtls(void)
 	                                    TR_TLS_ROTATE_GRACEFUL,
 	                                    &generation) == TR_ERR_CLOSED);
 	assert(generation == UINT64_C(0xfeedface));
-	assert(tr_client_destroy(client) == TR_OK);
+	destroy_client_after_async_release(client);
 	assert(tr_server_connection_group_stop(server) == TR_OK);
 	assert(tr_server_drain(server, 5000U) == TR_OK);
 	destroy_server_after_async_release(server);
