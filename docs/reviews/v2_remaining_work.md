@@ -356,6 +356,9 @@ dev.84 用测试链接包装 `tr_pipeline_listener_create` 捕获公开 Server �
 dev.85 增加两个来源同时活跃的公开 Server 回归：一个 DATA 成员连续发送 32 条 1 MiB Zstandard 消息，前五条解码输出由应用持有、余下输出立即释放；另一成员由独立线程维持最多 32 条 RAW 消息在途，每收到一条即补发。计数取首条到最后一条 Zstandard 服务端回调之间的 RAW 交付，并断言至少 32 条；测试链接探针确认消息类型和两条不同物理连接，收尾再次逐字节检查五条持有正文。Release 首次运行、五次复跑及完整套件中的七次观测为 1,372–2,598 条 RAW；ASan/UBSan 为 4,514 条、TSan 为 2,579 条。Release facade 定向目标重复通过，ASan/UBSan、TSan 和完整 Release 91/91 通过。本测试证明固定 32 条压缩批次期间的并发 RAW 进展，不设公平延迟/吞吐阈值，不证明长期持续饱和公平性；后续需明确负载时长、配比、延迟边界和稳定基线。本次只改测试、文档与版本号，不改生产运行时/API/ABI/wire。详见
 [公开 Server 并发 RAW/Zstandard 进展回归](rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
 
+dev.86 修复 dev.85 首轮 GCC Debug CI 失败的测试容量配置。旧场景只配置 8 个服务端压缩任务槽，却在服务端尚未消费完队列时提交 32 条 Zstandard；本地 Debug 复现服务端因任务槽耗尽返回 `TR_ERR_STATE` 并关闭 DATA 成员。现将容量设为 32，与固定批次相匹配，不更改生产路径。GCC Debug/Release 完整套件均 91/91；Release 定向复跑 6/6，ASan/UBSan 和 TSan 定向目标均通过。dev.86 七次 Release 观测的并发区间 RAW 进展为 1,489–2,842 条，Debug 四次为 154–273 条。该修复消除了压力测试配置造成的假失败；它仍只证明有限批次进展，不覆盖长期饱和公平延迟/吞吐。仅测试、文档和版本变更，生产行为/API/ABI/wire 不变。详见
+[公开 Server 并发 RAW/Zstandard 进展回归](rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

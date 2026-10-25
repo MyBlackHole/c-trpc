@@ -2887,7 +2887,8 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	server_config.connection_groups.receive_compression_algorithms =
 	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
 	server_config.connection_groups.max_encoded_message_bytes = 4096U;
-	server_config.connection_groups.max_inflight_compressed_messages = 8U;
+	server_config.connection_groups.max_inflight_compressed_messages =
+	        TEST_GROUP_FAIRNESS_ZSTD_COUNT;
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.on_message = on_group_message;
 	server_config.connection_groups.on_data_event = on_group_data_event;
@@ -2971,6 +2972,30 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 
 				(void)nanosleep(&pause, NULL);
 			}
+		}
+		if (ret != TR_OK) {
+			unsigned raw_sent;
+			unsigned raw_received;
+			unsigned data_events;
+			int last_data_status;
+			int raw_sender_status;
+
+			pthread_mutex_lock(&ctx.lock);
+			raw_sent = ctx.fairness_raw_sent;
+			raw_received = ctx.fairness_raw_messages;
+			data_events = ctx.data_events;
+			last_data_status = ctx.last_data_status;
+			raw_sender_status = ctx.fairness_raw_sender_status;
+			pthread_mutex_unlock(&ctx.lock);
+			fprintf(stderr,
+			        "sustained RAW/Zstandard send failed: index=%u "
+			        "attempt=%u status=%d (%s) raw=%u/%u events=%u "
+			        "event_status=%d (%s) sender_status=%d\n",
+			        i, attempt, ret, tr_status_str(ret),
+			        raw_received, raw_sent, data_events,
+			        last_data_status,
+			        tr_status_str(last_data_status),
+			        raw_sender_status);
 		}
 		assert(ret == TR_OK);
 	}

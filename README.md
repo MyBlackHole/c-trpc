@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.85` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.86` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -316,6 +316,9 @@ dev.84 在真实公开 Server 的派生消息预算下自然持有 36 条 1 MiB 
 [公开 Server 自然预算拒绝期间 RAW 同伴进展](docs/reviews/rpc_v2_server_natural_budget_rejection_20261025.md)。
 
 dev.85 新增双 DATA 并发负载回归：一成员连续提交 32 条 1 MiB Zstandard 消息，应用保留前五条解码正文并释放后续输出；另一成员以最多 32 条 RAW 在途消息持续补发。测试记录首尾 Zstandard 回调之间的 RAW 完成数，要求至少 32 条，并验证所有持有正文及两条不同物理路由。七次 GCC Release 观测的并发区间为 1,372–2,598 条 RAW；ASan/UBSan、TSan 和完整 Release 91 项套件也通过。该固定批次验证并发来源下的有限进展，不定义公平延迟/吞吐阈值，也不证明长期持续饱和公平性。只改测试、记录与版本，不改生产运行时、API/ABI 或 wire。详见
+[公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
+
+dev.86 修正 dev.85 首轮 GCC Debug CI 暴露的测试容量配置：原场景只给服务端配置 8 个压缩任务槽，却连续发送 32 条压缩消息，慢速 Debug 下服务端按容量上限关闭 DATA 通道。现将该场景的任务容量设为 32，与固定批次相匹配；这只改变测试配置，不改生产代码。GCC Debug/Release 完整套件均 91/91；Release 定向目标连续复跑、ASan/UBSan 与 TSan 定向目标通过。七次 Release 观测中，压缩窗口内 RAW 交付为 1,489–2,842 条；Debug 四次为 154–273 条。详见
 [公开 Server 并发 RAW/Zstandard 进展回归](docs/reviews/rpc_v2_server_concurrent_raw_zstd_progress_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
