@@ -44,6 +44,7 @@ static void test_wrapped_collision_cluster_delete_and_reuse(void)
 	assert(tr_reset_tombstone_index_remove(
 		               slots, 8U, history, 4U, connection, ids[0],
 		               &probes) == TR_OK);
+	assert(probes == 7U);
 	assert(tr_reset_tombstone_index_find(
 		               slots, 8U, history, 4U, connection, ids[0], &slot,
 		               &probes) == TR_ERR_STALE);
@@ -288,7 +289,7 @@ static void test_adversarial_collision_fifo_turnover(void)
 		assert(tr_reset_tombstone_index_remove(
 		               slots, capacity, history, max_streams,
 		               connection, resident_ids[0], &probes) == TR_OK);
-		assert(probes == 1U);
+		assert(probes == (size_t)max_streams * 2U + 1U);
 		assert(tr_reset_tombstone_index_find(
 		               slots, capacity, history, max_streams,
 		               connection, resident_ids[0], &stale_slot,
@@ -451,7 +452,7 @@ static void test_max_capacity_collision_fifo_turnover(void)
 		               evicted_ids[i], &slot, &probes) == TR_ERR_STALE);
 		total_probes += probes;
 	}
-	/* 探测计数不含 backward-shift 扫描，仅约束索引公开内部 helper 的查找路径。 */
+	/* 总槽位检查计入删除时的簇校验与 backward-shift 扫描。 */
 	assert(total_probes <= (uint64_t)max_history * 64U);
 	free(slots);
 	free(history);

@@ -139,6 +139,7 @@ int tr_reset_tombstone_index_remove(
 {
 	size_t hole;
 	size_t mask;
+	size_t validation_checks = 0U;
 	int ret;
 
 	if (probes_out)
@@ -158,22 +159,34 @@ int tr_reset_tombstone_index_remove(
 	{
 		size_t scan = (hole + 1U) & mask;
 		size_t scanned = 0U;
-		while (scanned < capacity && slots[scan]) {
-			uint32_t ring_slot = slots[scan] - 1U;
+		while (scanned < capacity) {
+			uint32_t encoded_slot = slots[scan];
+			if (!encoded_slot)
+				break;
+			uint32_t ring_slot = encoded_slot - 1U;
 			if (ring_slot >= max_streams ||
-			    !history[ring_slot].stream_id)
+			    !history[ring_slot].stream_id) {
+				if (probes_out)
+					*probes_out += scanned + 1U;
 				return TR_ERR_STATE;
+			}
 			scan = (scan + 1U) & mask;
 			scanned++;
 		}
-		if (scanned == capacity)
+		if (scanned == capacity) {
+			if (probes_out)
+				*probes_out += scanned;
 			return TR_ERR_STATE;
+		}
+		validation_checks = scanned + 1U;
 	}
 
 	{
-		size_t scan = (hole + 1U) & mask;
+		size_t scan_start = (hole + 1U) & mask;
+		size_t scan = scan_start;
 		while (slots[scan]) {
-			uint32_t ring_slot = slots[scan] - 1U;
+			uint32_t encoded_slot = slots[scan];
+			uint32_t ring_slot = encoded_slot - 1U;
 			uint32_t key = history[ring_slot].stream_id;
 			size_t home = tr_reset_tombstone_index_home(
 				capacity, history[ring_slot].connection, key);
@@ -186,6 +199,9 @@ int tr_reset_tombstone_index_remove(
 			}
 			scan = (scan + 1U) & mask;
 		}
+		if (probes_out)
+			*probes_out += validation_checks +
+			               ((scan - scan_start) & mask) + 1U;
 	}
 	slots[hole] = 0U;
 	return TR_OK;

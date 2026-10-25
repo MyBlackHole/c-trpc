@@ -30,6 +30,7 @@ int tr_reset_tombstone_index_insert(
 	const struct tr_stream_reset_tombstone *history,
 	uint32_t max_streams, struct tr_conn_handle connection,
 	uint32_t stream_id, uint32_t ring_slot, size_t *probes_out);
+/* 删除操作的 probes_out 统计查找、簇校验和 backward-shift 的全部槽位检查。 */
 int tr_reset_tombstone_index_remove(
 	uint32_t *slots, size_t capacity,
 	const struct tr_stream_reset_tombstone *history,
