@@ -1905,6 +1905,8 @@ test_public_connection_group_control_loss_fences_old_epoch_data(void)
 	struct public_group_ctx ctx;
 	struct tr_pipeline_route_preface old_control_route;
 	struct tr_pipeline_route_preface old_data_route;
+	struct tr_pipeline_route_preface idle_data_route;
+	struct tr_pipeline_route_preface reserved_data_route;
 	struct tr_pipeline_route_preface new_control_route;
 	struct tr_pipeline_route_preface new_data_route;
 	struct tr_pipeline_control_wire_message offer;
@@ -1913,8 +1915,11 @@ test_public_connection_group_control_loss_fences_old_epoch_data(void)
 	uint16_t group_port = 0U;
 	int old_control = -1;
 	int old_data = -1;
+	int idle_data = -1;
 	int new_control = -1;
 	int stale_data = -1;
+	int stale_idle_data = -1;
+	int stale_reserved_data = -1;
 	int new_data = -1;
 
 	memset(&ctx, 0, sizeof(ctx));
@@ -1925,8 +1930,8 @@ test_public_connection_group_control_loss_fences_old_epoch_data(void)
 	server_config.max_peers = 1U;
 	server_config.keepalive_interval_ms = 0U;
 	server_config.connection_groups.max_groups = 1U;
-	server_config.connection_groups.max_connections = 2U;
-	server_config.connection_groups.max_data_connections_per_group = 1U;
+	server_config.connection_groups.max_connections = 4U;
+	server_config.connection_groups.max_data_connections_per_group = 3U;
 	server_config.connection_groups.max_streams_per_group = 2U;
 	server_config.connection_groups.authorize = authorize_group_dual_epoch;
 	server_config.connection_groups.on_message = on_group_message;
@@ -1965,13 +1970,37 @@ test_public_connection_group_control_loss_fences_old_epoch_data(void)
 	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
 	wait_group_pair_server_stats(server, 1U, 1U, 1U);
 
+	/* 为第二条已附着但没有 transfer 的 DATA 建立不同成员状态。 */
+	assert(wait_group_pair_offer(server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	                             UINT64_C(1003)) == TR_OK);
+	recv_control_message(old_control, UINT64_C(1003), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(tr_pipeline_control_wire_data_route(&offer, &idle_data_route) ==
+	       TR_OK);
+	idle_data = connect_loopback(group_port);
+	send_route(idle_data, &idle_data_route);
+	wait_counter(&ctx, &ctx.authorized, 3U);
+	wait_data_accepts(server, 2U);
+
+	/* 再保留第三条 DATA route，但不连接 socket。 */
+	assert(wait_group_pair_offer(server, TEST_GROUP_ID, TEST_GROUP_EPOCH,
+	                             UINT64_C(1004)) == TR_OK);
+	recv_control_message(old_control, UINT64_C(1004), &offer);
+	assert(offer.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(tr_pipeline_control_wire_data_route(
+	               &offer, &reserved_data_route) == TR_OK);
+	wait_group_pair_server_stats(server, 1U, 2U, 1U);
+
 	/* CONTROL 的真实 TCP 关闭必须退役活动 DATA 和 transfer affinity。 */
 	assert(close(old_control) == 0);
 	old_control = -1;
-	wait_counter(&ctx, &ctx.data_events, 1U);
+	wait_counter(&ctx, &ctx.data_events, 2U);
 	expect_socket_closed(old_data);
 	assert(close(old_data) == 0);
 	old_data = -1;
+	expect_socket_closed(idle_data);
+	assert(close(idle_data) == 0);
+	idle_data = -1;
 	wait_group_pair_server_stats(server, 0U, 0U, 0U);
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_server_connection_group_get_stats(server, &stats) == TR_OK);
@@ -1982,11 +2011,11 @@ test_public_connection_group_control_loss_fences_old_epoch_data(void)
 	new_control_route.epoch = TEST_GROUP_EPOCH + 1U;
 	new_control = connect_loopback(group_port);
 	send_route(new_control, &new_control_route);
-	wait_counter(&ctx, &ctx.authorized, 3U);
+	wait_counter(&ctx, &ctx.authorized, 4U);
 	assert(wait_group_pair_offer(server, TEST_GROUP_ID,
 	                             TEST_GROUP_EPOCH + 1U,
-	                             UINT64_C(1003)) == TR_OK);
-	recv_control_message(new_control, UINT64_C(1003), &offer);
+	                             UINT64_C(1005)) == TR_OK);
+	recv_control_message(new_control, UINT64_C(1005), &offer);
 	assert(tr_pipeline_control_wire_data_route(&offer, &new_data_route) ==
 	       TR_OK);
 	assert(new_data_route.epoch == TEST_GROUP_EPOCH + 1U);
@@ -1998,17 +2027,27 @@ test_public_connection_group_control_loss_fences_old_epoch_data(void)
 	expect_socket_closed(stale_data);
 	assert(close(stale_data) == 0);
 	stale_data = -1;
+	stale_idle_data = connect_loopback(group_port);
+	send_route(stale_idle_data, &idle_data_route);
+	expect_socket_closed(stale_idle_data);
+	assert(close(stale_idle_data) == 0);
+	stale_idle_data = -1;
+	stale_reserved_data = connect_loopback(group_port);
+	send_route(stale_reserved_data, &reserved_data_route);
+	expect_socket_closed(stale_reserved_data);
+	assert(close(stale_reserved_data) == 0);
+	stale_reserved_data = -1;
 	wait_group_pair_server_stats(server, 1U, 0U, 0U);
 
 	new_data = connect_loopback(group_port);
 	send_route(new_data, &new_data_route);
-	wait_counter(&ctx, &ctx.authorized, 4U);
-	wait_data_accepts(server, 2U);
+	wait_counter(&ctx, &ctx.authorized, 5U);
+	wait_data_accepts(server, 3U);
 	wait_group_pair_server_stats(server, 1U, 1U, 0U);
 
 	assert(close(new_control) == 0);
 	new_control = -1;
-	wait_counter(&ctx, &ctx.data_events, 2U);
+	wait_counter(&ctx, &ctx.data_events, 3U);
 	expect_socket_closed(new_data);
 	assert(close(new_data) == 0);
 	new_data = -1;
