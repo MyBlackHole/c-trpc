@@ -46,10 +46,13 @@
 #define TEST_GROUP_NATURAL_BUDGET_HOLD_CAPACITY 64U
 #define TEST_GROUP_NATURAL_BUDGET_FIRST_ID UINT64_C(7000)
 #define TEST_GROUP_FAIRNESS_ZSTD_FIRST_ID UINT64_C(7400)
-#define TEST_GROUP_FAIRNESS_ZSTD_COUNT 32U
+#define TEST_GROUP_FAIRNESS_ZSTD_BATCHES 4U
+#define TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH 32U
+#define TEST_GROUP_FAIRNESS_ZSTD_COUNT                                         \
+	(TEST_GROUP_FAIRNESS_ZSTD_BATCHES * TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH)
 #define TEST_GROUP_FAIRNESS_RAW_FIRST_ID UINT64_C(8000)
 #define TEST_GROUP_FAIRNESS_RAW_WINDOW 32U
-#define TEST_GROUP_FAIRNESS_RAW_MAX_MESSAGES 16384U
+#define TEST_GROUP_FAIRNESS_RAW_MAX_MESSAGES 65536U
 #define TEST_GROUP_FAIRNESS_MIN_RAW_DURING_ZSTD 32U
 
 static atomic_int fail_group_control_close_once;
@@ -351,10 +354,11 @@ struct public_group_ctx {
 	unsigned data_events;
 	int last_data_status;
 	unsigned fairness_zstd_messages;
+	unsigned fairness_zstd_batches;
 	unsigned fairness_raw_sent;
 	unsigned fairness_raw_messages;
-	unsigned fairness_raw_at_first_zstd;
-	unsigned fairness_raw_at_last_zstd;
+	unsigned fairness_raw_at_batch_start[TEST_GROUP_FAIRNESS_ZSTD_BATCHES];
+	unsigned fairness_raw_at_batch_end[TEST_GROUP_FAIRNESS_ZSTD_BATCHES];
 	unsigned fairness_zstd_held;
 	unsigned fairness_raw_sender_exhausted;
 	int fairness_raw_sender_status;
@@ -773,6 +777,7 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 	                                  TEST_GROUP_FAIRNESS_ZSTD_COUNT) {
 		unsigned index = (unsigned)(message->message_id -
 		                            TEST_GROUP_FAIRNESS_ZSTD_FIRST_ID);
+		unsigned batch = index / TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH;
 		uint8_t expected_byte = (uint8_t)(0x40U + index);
 
 		assert(message->stream_id == 5101U);
@@ -783,8 +788,8 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 			assert(message->bytes.data[i] == expected_byte);
 		pthread_mutex_lock(&ctx->lock);
 		assert(index == ctx->fairness_zstd_messages);
-		if (index == 0U)
-			ctx->fairness_raw_at_first_zstd =
+		if (index % TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH == 0U)
+			ctx->fairness_raw_at_batch_start[batch] =
 			        ctx->fairness_raw_messages;
 		if (index < TEST_GROUP_BUDGET_HOLD_COUNT) {
 			assert(ctx->fairness_retained[index].bytes.data ==
@@ -793,10 +798,11 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 			ctx->fairness_zstd_held++;
 		}
 		ctx->fairness_zstd_messages++;
-		if (ctx->fairness_zstd_messages ==
-		    TEST_GROUP_FAIRNESS_ZSTD_COUNT)
-			ctx->fairness_raw_at_last_zstd =
+		if ((index + 1U) % TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH == 0U) {
+			ctx->fairness_raw_at_batch_end[batch] =
 			        ctx->fairness_raw_messages;
+			ctx->fairness_zstd_batches++;
+		}
 		pthread_cond_broadcast(&ctx->cond);
 		pthread_mutex_unlock(&ctx->lock);
 		return index < TEST_GROUP_BUDGET_HOLD_COUNT
@@ -2865,7 +2871,9 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	uint8_t *decoded_payload;
 	uint16_t group_port = 0U;
 	unsigned raw_sent_target;
+	unsigned raw_during_zstd_total = 0U;
 	pthread_t raw_thread;
+	unsigned batch;
 	unsigned i;
 	int ret;
 
@@ -2888,7 +2896,7 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	        TR_CONNECTION_GROUP_COMPRESSION_MASK_ZSTD;
 	server_config.connection_groups.max_encoded_message_bytes = 4096U;
 	server_config.connection_groups.max_inflight_compressed_messages =
-	        TEST_GROUP_FAIRNESS_ZSTD_COUNT;
+	        TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH;
 	server_config.connection_groups.authorize = authorize_group;
 	server_config.connection_groups.on_message = on_group_message;
 	server_config.connection_groups.on_data_event = on_group_data_event;
@@ -2954,54 +2962,71 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	assert(decoded_payload != NULL);
 	compressed_bytes.data = decoded_payload;
 	compressed_bytes.len = TEST_GROUP_LARGE_DECODED_BYTES;
-	for (i = 0U; i < TEST_GROUP_FAIRNESS_ZSTD_COUNT; ++i) {
-		unsigned attempt;
+	for (batch = 0U; batch < TEST_GROUP_FAIRNESS_ZSTD_BATCHES; ++batch) {
+		unsigned batch_first =
+		        batch * TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH;
+		unsigned batch_end =
+		        batch_first + TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH;
 
-		memset(decoded_payload, (uint8_t)(0x40U + i),
-		       TEST_GROUP_LARGE_DECODED_BYTES);
-		ret = TR_AGAIN;
-		for (attempt = 0U; attempt < 5000U && ret == TR_AGAIN;
-		     ++attempt) {
-			ret = tr_client_connection_group_send_with_compression(
-			        client, 5101U,
-			        TEST_GROUP_FAIRNESS_ZSTD_FIRST_ID + i,
-			        &compressed_bytes,
-			        TR_CONNECTION_GROUP_COMPRESSION_ZSTD);
-			if (ret == TR_AGAIN) {
-				struct timespec pause = {0, 1000000L};
+		for (i = batch_first; i < batch_end; ++i) {
+			unsigned attempt;
 
-				(void)nanosleep(&pause, NULL);
+			memset(decoded_payload, (uint8_t)(0x40U + i),
+			       TEST_GROUP_LARGE_DECODED_BYTES);
+			ret = TR_AGAIN;
+			for (attempt = 0U; attempt < 5000U && ret == TR_AGAIN;
+			     ++attempt) {
+				ret = tr_client_connection_group_send_with_compression(
+				        client, 5101U,
+				        TEST_GROUP_FAIRNESS_ZSTD_FIRST_ID + i,
+				        &compressed_bytes,
+				        TR_CONNECTION_GROUP_COMPRESSION_ZSTD);
+				if (ret == TR_AGAIN) {
+					struct timespec pause = {0, 1000000L};
+
+					(void)nanosleep(&pause, NULL);
+				}
 			}
-		}
-		if (ret != TR_OK) {
-			unsigned raw_sent;
-			unsigned raw_received;
-			unsigned data_events;
-			int last_data_status;
-			int raw_sender_status;
+			if (ret != TR_OK) {
+				unsigned raw_sent;
+				unsigned raw_received;
+				unsigned data_events;
+				int last_data_status;
+				int raw_sender_status;
 
-			pthread_mutex_lock(&ctx.lock);
-			raw_sent = ctx.fairness_raw_sent;
-			raw_received = ctx.fairness_raw_messages;
-			data_events = ctx.data_events;
-			last_data_status = ctx.last_data_status;
-			raw_sender_status = ctx.fairness_raw_sender_status;
-			pthread_mutex_unlock(&ctx.lock);
-			fprintf(stderr,
-			        "sustained RAW/Zstandard send failed: index=%u "
-			        "attempt=%u status=%d (%s) raw=%u/%u events=%u "
-			        "event_status=%d (%s) sender_status=%d\n",
-			        i, attempt, ret, tr_status_str(ret),
-			        raw_received, raw_sent, data_events,
-			        last_data_status,
-			        tr_status_str(last_data_status),
-			        raw_sender_status);
+				pthread_mutex_lock(&ctx.lock);
+				raw_sent = ctx.fairness_raw_sent;
+				raw_received = ctx.fairness_raw_messages;
+				data_events = ctx.data_events;
+				last_data_status = ctx.last_data_status;
+				raw_sender_status =
+				        ctx.fairness_raw_sender_status;
+				pthread_mutex_unlock(&ctx.lock);
+				fprintf(stderr,
+				        "sustained RAW/Zstandard send failed: "
+				        "index=%u "
+				        "attempt=%u status=%d (%s) raw=%u/%u "
+				        "events=%u "
+				        "event_status=%d (%s) "
+				        "sender_status=%d\n",
+				        i, attempt, ret, tr_status_str(ret),
+				        raw_received, raw_sent, data_events,
+				        last_data_status,
+				        tr_status_str(last_data_status),
+				        raw_sender_status);
+			}
+			assert(ret == TR_OK);
 		}
-		assert(ret == TR_OK);
+		wait_counter(&ctx, &ctx.fairness_zstd_messages,
+		             (batch + 1U) * TEST_GROUP_FAIRNESS_ZSTD_PER_BATCH);
+		pthread_mutex_lock(&ctx.lock);
+		assert(ctx.fairness_zstd_batches == batch + 1U);
+		assert(ctx.fairness_raw_at_batch_end[batch] >=
+		       ctx.fairness_raw_at_batch_start[batch] +
+		               TEST_GROUP_FAIRNESS_MIN_RAW_DURING_ZSTD);
+		pthread_mutex_unlock(&ctx.lock);
 	}
 	free(decoded_payload);
-	wait_counter(&ctx, &ctx.fairness_zstd_messages,
-	             TEST_GROUP_FAIRNESS_ZSTD_COUNT);
 
 	atomic_store(&raw_sender.stop, 1);
 	pthread_mutex_lock(&ctx.lock);
@@ -3013,10 +3038,17 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 	assert(ctx.fairness_raw_sender_exhausted == 0U);
 	assert(ctx.fairness_raw_sender_status == 0);
 	assert(ctx.fairness_zstd_messages == TEST_GROUP_FAIRNESS_ZSTD_COUNT);
+	assert(ctx.fairness_zstd_batches == TEST_GROUP_FAIRNESS_ZSTD_BATCHES);
 	assert(ctx.fairness_zstd_held == TEST_GROUP_BUDGET_HOLD_COUNT);
-	assert(ctx.fairness_raw_at_last_zstd >=
-	       ctx.fairness_raw_at_first_zstd +
-	               TEST_GROUP_FAIRNESS_MIN_RAW_DURING_ZSTD);
+	for (batch = 0U; batch < TEST_GROUP_FAIRNESS_ZSTD_BATCHES; ++batch) {
+		unsigned raw_during_batch =
+		        ctx.fairness_raw_at_batch_end[batch] -
+		        ctx.fairness_raw_at_batch_start[batch];
+
+		assert(raw_during_batch >=
+		       TEST_GROUP_FAIRNESS_MIN_RAW_DURING_ZSTD);
+		raw_during_zstd_total += raw_during_batch;
+	}
 	assert(ctx.data_events == 0U);
 	pthread_mutex_unlock(&ctx.lock);
 	wait_counter(&ctx, &ctx.fairness_raw_messages, raw_sent_target);
@@ -3045,10 +3077,15 @@ static void test_public_connection_group_sustained_raw_zstd_progress(void)
 			assert(ctx.fairness_retained[i].bytes.data[byte] ==
 			       expected_byte);
 	}
-	printf("sustained RAW/Zstd progress: zstd=%u raw_during_zstd=%u "
-	       "raw_total=%u\n",
-	       ctx.fairness_zstd_messages,
-	       ctx.fairness_raw_at_last_zstd - ctx.fairness_raw_at_first_zstd,
+	printf("sustained RAW/Zstd progress: zstd=%u raw_per_batch=[",
+	       ctx.fairness_zstd_messages);
+	for (batch = 0U; batch < TEST_GROUP_FAIRNESS_ZSTD_BATCHES; ++batch) {
+		if (batch != 0U)
+			putchar(',');
+		printf("%u", ctx.fairness_raw_at_batch_end[batch] -
+		                     ctx.fairness_raw_at_batch_start[batch]);
+	}
+	printf("] raw_during_zstd=%u raw_total=%u\n", raw_during_zstd_total,
 	       ctx.fairness_raw_messages);
 	pthread_mutex_unlock(&ctx.lock);
 	for (i = 0U; i < TEST_GROUP_BUDGET_HOLD_COUNT; ++i)
