@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.113` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.114` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -441,6 +441,9 @@ dev.112 为 #241 增加压缩解码窗口超限的真实 Channel 隔离回归：
 
 dev.113 为 #241 增加未知内容长度压缩体的解码上界回归：有效 4 KiB Zstandard 帧没有帧内原始长度，envelope 却少报 1 字节；解码器在已预约容量边界用探针检测到多出的字节并返回资源限制，Channel 以 `TR_ERR_NOMEM` 复位当前流，不交付正文且缓冲池归还。本次仅增加测试、记录和开发版本，不改生产/API/ABI/wire。Release transport 目标连续 3/3 通过。详见
 [未知长度帧超出 envelope 解码容量回归](docs/reviews/channel_compressed_unknown_output_overrun_20261025.md)。
+
+dev.114 为 #241 增加未知内容长度帧的短输出隔离回归：有效 Zstandard 帧实际解码长度比 envelope 声明少 1 字节；帧结束时解码器拒绝不完整输出，Channel 以 `TR_ERR_STATE` 复位当前流，不交付正文且缓冲池归还。本次仅增加测试、记录和开发版本，不改生产/API/ABI/wire。Release transport 目标连续 3/3 通过。详见
+[未知长度帧短于 envelope 声明长度回归](docs/reviews/channel_compressed_unknown_output_underrun_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

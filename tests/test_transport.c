@@ -5309,6 +5309,29 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	                (uint32_t)sizeof(expansion_source) - 1U},
 	        encoded, (uint32_t)unknown_encoded_len, 12U, 9U, 3U, 8U,
 	        TR_ERR_NOMEM);
+	unknown_size_encoder = ZSTD_createCCtx();
+	assert(unknown_size_encoder != NULL);
+	assert(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        unknown_size_encoder, ZSTD_c_contentSizeFlag, 0)));
+	unknown_encoded_len =
+	        ZSTD_compress2(unknown_size_encoder, encoded, sizeof(encoded),
+		               source, source_len - 1U);
+	assert(!ZSTD_isError(unknown_encoded_len));
+	assert(ZSTD_getFrameContentSize(encoded, unknown_encoded_len) ==
+	       ZSTD_CONTENTSIZE_UNKNOWN);
+	assert(ZSTD_decompress(oversized_source, sizeof(oversized_source),
+	                       encoded,
+	                       unknown_encoded_len) == source_len - 1U);
+	assert(memcmp(oversized_source, source, source_len - 1U) == 0);
+	assert(!ZSTD_isError(ZSTD_freeCCtx(unknown_size_encoder)));
+	unknown_size_encoder = NULL;
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+		                             (uint32_t)unknown_encoded_len,
+		                             source_len},
+	        encoded, (uint32_t)unknown_encoded_len, 13U, 10U, 3U, 8U,
+	        TR_ERR_STATE);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
