@@ -112,7 +112,7 @@ dev.39 增加 #242/ERR-A 的错误分类表和不可变参考状态转换：同�
 与本地资源压力分别终结目标调用，保留同连接其他流；TLS 完整性、协商、帧边界和未知私有状态损坏
 默认关闭连接。新增六项 Python 回归并接入已有 GCC 模型自测步骤；这是 L1 设计参考，不证明
 生产 C 行为符合该矩阵。ERR-B 标识/RESET 时序、ERR-C 信用与组合故障、ERR-D 多成员排空边界仍待验收；
-ERR-E 已验证墓碑固定预算、真实 Channel 长周转与 FIFO 淘汰语义；更高频成本、恶意碰撞压力和更广组合矩阵仍待实现和验收。详见
+ERR-E 已验证墓碑固定预算、真实 Channel 长周转与 FIFO 淘汰语义，也有 256 路确定性碰撞簇压力回归；最大容量下的碰撞成本、更高频负载和更广组合矩阵仍待实现和验收。详见
 [ERR-A 分类与模型记录](rpc_v2_error_scope_model_20261025.md)。
 
 dev.40 补上 #242/ERR-B 的本地流 ID 耗尽分配边界：客户端奇数与服务端偶数最后一个
@@ -258,8 +258,15 @@ RESET 墓碑索引模块；GCC 精确诊断基线同步反映 `channel.c` 顶部
 dev.64 在一条真实 Channel 上完成 128 次双向 RESET，让容量为 4 的墓碑环连续周转 32 轮；重复发送当前最老
 和最新驻留墓碑均被吸收，重复发送第一条已淘汰墓碑则关闭连接并报告未知流。Release、TSan、ASan/UBSan 下
 `test_stream_reset` 通过。该回归验证长期 FIFO 周转后的保留窗口和淘汰边界，不测量吞吐/CPU，也不覆盖恶意
-碰撞压力。ERR-E 的更高频负载仍待验收。详见
+碰撞压力。dev.64 的两组 GitHub CI 与 RPC smoke 检查 21/21 通过。ERR-E 的更高频负载仍待验收。详见
 [RESET 墓碑长周转回归](rpc_v2_reset_tombstone_long_turnover_20261025.md)。
+
+dev.65 为墓碑索引加入确定性碰撞簇压力回归：256 个不同流 ID 被构造为命中同一 home bucket，表容量为 512；
+初始填充后连续淘汰最老键、复用 FIFO 环槽 256 次，检查每次删除后的探测终止位置、替换插入探测数，以及最终全部驻留键可查、
+所有淘汰键不可查。关闭大表向后移位修复的临时变异在该新断言失败，恢复后 Release、TSan、ASan/UBSan 下
+`test_reset_tombstone_index` 均通过。它覆盖 256 路合成碰撞，不测量耗时，也未推断 `max_streams=40000` 的最坏 CPU 成本；
+更高频/最大容量碰撞压力仍待验收。详见
+[RESET 墓碑索引碰撞压力回归](rpc_v2_reset_tombstone_collision_stress_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
@@ -285,7 +292,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照和连接组接受边界仍待补齐。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接相同 ID 双墓碑、驻留重复 RESET 与索引 FIFO 周转各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX、压缩任务/编码 wire 在途、单成员故障与同组替代、双组同 shard 先后及并发故障隔离、双组各自两轮替代及组级关闭回归；多轮高频压力竞争仍待验收；ERR-E 墓碑固定预算和复合查询索引、真实 Channel 128 次 RESET/32 轮墓碑环周转已有回归，40k 流 ID 的单元探测边界已覆盖，更大规模连接负载与恶意碰撞压力仍待验收 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照和连接组接受边界仍待补齐。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接相同 ID 双墓碑、驻留重复 RESET 与索引 FIFO 周转各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 后迟到载荷释放不补信用回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX、压缩任务/编码 wire 在途、单成员故障与同组替代、双组同 shard 先后及并发故障隔离、双组各自两轮替代及组级关闭回归；多轮高频压力竞争仍待验收；ERR-E 墓碑固定预算和复合查询索引、真实 Channel 128 次 RESET/32 轮墓碑环周转、256 路单元碰撞簇与重复 FIFO 槽复用已有回归；40k 流 ID 的单元平均探测边界已覆盖，最大容量恶意碰撞压力和更大规模连接负载仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
