@@ -18,6 +18,7 @@
 - GCC Release 完整 `test_transport` 连续 5/5 通过。
 - GCC Debug 完整 `test_transport` 通过。
 - GCC Release 完整项目测试套件 91/91 通过，耗时 136.559 秒。
+- dev.91 推送后的 Push CI（40180855026）、PR CI（40180851979）和 RPC benchmark smoke（40180855058）均通过。
 - 该测试只变更既有场景的快 Stream lane 与对应断言；不改生产代码、公开 API/ABI 或 wire 格式。
 
 ## 结论边界

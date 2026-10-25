@@ -2855,6 +2855,7 @@ struct compressed_rx_fixture {
 	struct tr_memory_budget budget;
 	struct tr_message_service_config service_config;
 	struct compressed_rx_test_ctx server_ctx;
+	struct compressed_rx_test_ctx client_rx_ctx;
 	struct channel_test_ctx client_ctx;
 };
 
@@ -3218,8 +3219,10 @@ compressed_rx_fixture_create_split(struct compressed_rx_fixture *fixture)
 	int client_control_fd, server_control_fd;
 	int client_bulk_fd, server_bulk_fd;
 
-	init_channel_test_ctx(&fixture->client_ctx);
+	init_channel_test_ctx(&fixture->client_rx_ctx.events);
 	init_channel_test_ctx(&fixture->server_ctx.events);
+	assert(pthread_mutex_init(&fixture->client_rx_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&fixture->client_rx_ctx.cond, NULL) == 0);
 	assert(pthread_mutex_init(&fixture->server_ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&fixture->server_ctx.cond, NULL) == 0);
 	tr_memory_budget_init(&fixture->budget, 16U * 1024U * 1024U);
@@ -3276,13 +3279,14 @@ compressed_rx_fixture_create_split(struct compressed_rx_fixture *fixture)
 	assert(bind_request.ret == TR_OK);
 
 	channel_config.role = TR_CHANNEL_CLIENT;
-	channel_config.receive_compression_algorithms = 0U;
-	channel_config.max_encoded_message_bytes = 0U;
+	channel_config.receive_compression_algorithms =
+	        TR_MESSAGE_ALGORITHM_ZSTD;
+	channel_config.max_encoded_message_bytes = 4096U;
 	assert(tr_channel_create_deferred(
 	               &channel_config, fixture->client_connection,
-	               fixture->client_bulk_connection, channel_test_on_data,
-	               channel_test_on_stream_event, NULL, &fixture->client_ctx,
-	               &fixture->client) == TR_OK);
+	               fixture->client_bulk_connection, compressed_rx_on_data,
+	               compressed_rx_on_stream_event, NULL,
+	               &fixture->client_rx_ctx, &fixture->client) == TR_OK);
 	bind_request.channel = fixture->client;
 	assert(tr_reactor_call(fixture->reactor,
 	                       compressed_rx_bind_service_on_owner,
@@ -3312,6 +3316,7 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	struct tr_message_builder *builder = NULL;
 	struct tr_message bulk_message = {0};
 	struct tr_message control_message = {0};
+	struct tr_message server_control_message = {0};
 	struct compressed_rx_hold_request hold_request;
 	struct tr_memory_budget_stats budget_stats = {0};
 	struct tr_stream_flow_state server_bulk_flow = {0};
@@ -3319,6 +3324,7 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	struct tr_channel_stats server_stats = {0};
 	uint8_t bulk_source[300];
 	uint8_t control_source[] = "control lane";
+	uint8_t server_control_source[] = "server control reply";
 	uint8_t encoded[ZSTD_compressBound(sizeof(bulk_source))];
 	size_t encoded_size;
 	uint32_t random_state = 0x6d2b79f5U;
@@ -3328,8 +3334,8 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	compressed_rx_fixture_create_split(&fixture);
 	assert(tr_stream_open(fixture.client, TR_LANE_BULK,
 	                      &bulk_client_stream) == TR_OK);
-	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
-	                     1U);
+	wait_channel_counter(&fixture.client_rx_ctx.events,
+	                     &fixture.client_rx_ctx.events.opened, 1U);
 	wait_channel_counter(&fixture.server_ctx.events,
 	                     &fixture.server_ctx.events.opened, 1U);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
@@ -3337,8 +3343,8 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &control_client_stream) == TR_OK);
-	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
-	                     2U);
+	wait_channel_counter(&fixture.client_rx_ctx.events,
+	                     &fixture.client_rx_ctx.events.opened, 2U);
 	wait_channel_counter(&fixture.server_ctx.events,
 	                     &fixture.server_ctx.events.opened, 2U);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
@@ -3416,6 +3422,28 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	assert(bulk_flow.tx_send_limit == stalled_limit);
 	assert(tr_channel_get_stats(fixture.client, &tx_stats) == TR_OK);
 	assert(tx_stats.messages_tx == 1U);
+	assert(tr_message_builder_create(&fixture.budget,
+	                                 sizeof(server_control_source),
+	                                 &builder) == TR_OK);
+	assert(tr_message_builder_append(builder, server_control_source,
+	                                 sizeof(server_control_source)) ==
+	       TR_OK);
+	assert(tr_message_builder_publish(&builder, &server_control_message) ==
+	       TR_OK);
+	assert(tr_stream_send_compressed(control_server_stream,
+	                                 &server_control_message) == TR_OK);
+	assert(tr_message_view(&server_control_message,
+	                       &(struct tr_message_view){0}) == TR_ERR_STATE);
+	compressed_rx_wait_received(&fixture.client_rx_ctx, 1U);
+	pthread_mutex_lock(&fixture.client_rx_ctx.lock);
+	assert(fixture.client_rx_ctx.stream_ids[0] ==
+	       control_diagnostics.stream_id);
+	assert(fixture.client_rx_ctx.message_ids[0] == 1U);
+	assert(fixture.client_rx_ctx.payload_lens[0] ==
+	       sizeof(server_control_source));
+	assert(memcmp(fixture.client_rx_ctx.payloads[0], server_control_source,
+	              sizeof(server_control_source)) == 0);
+	pthread_mutex_unlock(&fixture.client_rx_ctx.lock);
 
 	hold_request.held = 0;
 	assert(tr_reactor_call(fixture.reactor, compressed_rx_set_hold_on_owner,
@@ -3446,10 +3474,11 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 		       TR_OK);
 		assert(tr_channel_get_stats(fixture.server, &server_stats) ==
 		       TR_OK);
-		pthread_mutex_lock(&fixture.client_ctx.lock);
-		client_resets = fixture.client_ctx.resets;
-		client_reset_status = fixture.client_ctx.last_reset_status;
-		pthread_mutex_unlock(&fixture.client_ctx.lock);
+		pthread_mutex_lock(&fixture.client_rx_ctx.events.lock);
+		client_resets = fixture.client_rx_ctx.events.resets;
+		client_reset_status =
+		        fixture.client_rx_ctx.events.last_reset_status;
+		pthread_mutex_unlock(&fixture.client_rx_ctx.events.lock);
 		pthread_mutex_lock(&fixture.server_ctx.events.lock);
 		server_resets = fixture.server_ctx.events.resets;
 		server_reset_status =
@@ -3522,8 +3551,10 @@ static void test_channel_compressed_tx_split_lane_credit_progress(void)
 	assert(tr_reactor_destroy(fixture.reactor) == TR_OK);
 	tr_memory_budget_get_stats(&fixture.budget, &budget_stats);
 	assert(budget_stats.current_bytes == 0U);
-	destroy_channel_test_ctx(&fixture.client_ctx);
+	destroy_channel_test_ctx(&fixture.client_rx_ctx.events);
 	destroy_channel_test_ctx(&fixture.server_ctx.events);
+	assert(pthread_cond_destroy(&fixture.client_rx_ctx.cond) == 0);
+	assert(pthread_mutex_destroy(&fixture.client_rx_ctx.lock) == 0);
 	assert(pthread_cond_destroy(&fixture.server_ctx.cond) == 0);
 	assert(pthread_mutex_destroy(&fixture.server_ctx.lock) == 0);
 }
