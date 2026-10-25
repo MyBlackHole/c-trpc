@@ -562,6 +562,28 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 			return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 	}
+	if (message->message_id == UINT64_C(6611) ||
+	    message->message_id == UINT64_C(6612)) {
+		uint32_t expected_stream =
+		        message->message_id == UINT64_C(6611) ? 5001U : 5002U;
+		uint8_t expected_byte =
+		        message->message_id == UINT64_C(6611) ? 0x31U : 0x32U;
+
+		assert(message->stream_id == expected_stream);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 1U &&
+		       message->bytes.data[0] == expected_byte);
+		pthread_mutex_lock(&ctx->lock);
+		if (message->message_id == UINT64_C(6611))
+			ctx->retained = *message;
+		ctx->multi_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		if (message->message_id == UINT64_C(6611))
+			return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
 	if (message->message_id == UINT64_C(6201) ||
 	    message->message_id == UINT64_C(6202)) {
 		uint32_t expected_stream =
@@ -2096,17 +2118,24 @@ static void test_public_connection_group_multi_data_drain(void)
 
 	/* 记录真实 DATA 帧的物理连接，确认两个传输落在不同成员。 */
 	pthread_mutex_lock(&group_route_probe_lock);
-	group_route_probe_message_ids[0] = UINT64_C(6201);
-	group_route_probe_message_ids[1] = UINT64_C(6202);
+	group_route_probe_message_ids[0] = UINT64_C(6611);
+	group_route_probe_message_ids[1] = UINT64_C(6612);
 	memset(group_route_probe_connections, 0,
 	       sizeof(group_route_probe_connections));
 	group_route_probe_seen = 0U;
 	group_route_probe_enabled = 1;
 	pthread_mutex_unlock(&group_route_probe_lock);
-	assert(tr_client_connection_group_send(
-		       client, 5001U, UINT64_C(6201), &first_bytes) == TR_OK);
-	assert(tr_client_connection_group_send(
-		       client, 5002U, UINT64_C(6202), &second_bytes) == TR_OK);
+	assert(tr_client_connection_group_send(client, 5001U, UINT64_C(6611),
+	                                       &first_bytes) == TR_OK);
+	/* 第一成员的应用保留正文仍持有接收缓冲时，第二 DATA 成员必须能
+	 * 独立进入真实 Server 消息回调并释放自己的正文。 */
+	wait_counter(&ctx, &ctx.multi_drain_messages, 1U);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.retained.bytes.len == 1U &&
+	       ctx.retained.bytes.data[0] == first_payload);
+	pthread_mutex_unlock(&ctx.lock);
+	assert(tr_client_connection_group_send(client, 5002U, UINT64_C(6612),
+	                                       &second_bytes) == TR_OK);
 	wait_counter(&ctx, &ctx.multi_drain_messages, 2U);
 	pthread_mutex_lock(&group_route_probe_lock);
 	group_route_probe_enabled = 0;
@@ -2117,6 +2146,11 @@ static void test_public_connection_group_multi_data_drain(void)
 	assert(data_routes[0].reactor == data_routes[1].reactor &&
 	       (data_routes[0].slot != data_routes[1].slot ||
 	        data_routes[0].generation != data_routes[1].generation));
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.retained.bytes.len == 1U &&
+	       ctx.retained.bytes.data[0] == first_payload);
+	pthread_mutex_unlock(&ctx.lock);
+	assert(tr_connection_group_message_release(&ctx.retained) == TR_OK);
 
 	memset(&client_stats, 0, sizeof(client_stats));
 	assert(tr_client_connection_group_get_stats(
