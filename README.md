@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.107` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.108` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -423,6 +423,9 @@ Release transport 目标通过。本次仅扩展测试、记录和版本号，�
 dev.107 扩展非对称窗口场景的持有与恢复矩阵：双向消息在等待接收前均已提交，接收端分别持有
 1,536/2,048 字节与 1,024/1,024 字节正文；未释放时额外的 513 字节与 1 字节发送都返回 `TR_AGAIN`，信用及接收计数不变；释放后复用原缓冲区重试并双向交付。本地 Release transport 目标连续 3/3 通过。本次只扩展测试、记录和版本号，不改生产/API/ABI/wire。详见
 [非对称窗口应用持有与信用恢复回归](docs/reviews/channel_asymmetric_window_hold_recovery_20261025.md)。
+
+dev.108 将 Channel 六帧重组回归压到小资源池：唯一 DATA TX 项、两个 RX buffer、一个 2 KiB 重组槽和单项发送缓冲池，传输 1,500 字节正文并重组为一条消息；应用持有时重组槽可用数为零，释放后恢复为一。Release transport 目标连续 4/4 通过；既有 parser 单字节片段测试继续覆盖字节级拆分。本次只收紧测试资源配置、增加断言和记录，不改生产/API/ABI/wire。详见
+[小池预算下的多帧消息重组回归](docs/reviews/channel_fragmentation_minimal_pools_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

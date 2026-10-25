@@ -5497,9 +5497,10 @@ static void test_channel_message_fragmentation_reassembly(void)
 	memset(&reactor_config, 0, sizeof(reactor_config));
 	reactor_config.max_connections = 4;
 	reactor_config.command_capacity = 64;
-	reactor_config.tx_item_capacity = 16;
-	reactor_config.control_tx_item_capacity = 16;
-	reactor_config.rx_buffer_count = 16;
+	/* 两个端点各需一个 RX buffer；DATA TX 项与重组槽各只保留一个。 */
+	reactor_config.tx_item_capacity = 1U;
+	reactor_config.control_tx_item_capacity = 2U;
+	reactor_config.rx_buffer_count = 2U;
 	reactor_config.rx_buffer_size = 256;
 	reactor_config.max_payload_len = 256;
 	reactor_config.rx_budget_bytes = 64U * 1024U;
@@ -5511,7 +5512,7 @@ static void test_channel_message_fragmentation_reassembly(void)
 	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
 	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
 
-	assert(tr_buffer_pool_init(&reassembly_pool, 2, 2048) == TR_OK);
+	assert(tr_buffer_pool_init(&reassembly_pool, 1U, 2048U) == TR_OK);
 
 	memset(&channel_config, 0, sizeof(channel_config));
 	channel_config.role = TR_CHANNEL_CLIENT;
@@ -5582,9 +5583,9 @@ static void test_channel_message_fragmentation_reassembly(void)
 	pthread_mutex_unlock(&server_ctx.lock);
 
 	/* 六个传输分片全部重组为一个逻辑消息。 */
-	assert(tr_buffer_pool_free_count(&reassembly_pool) == 1);
+	assert(tr_buffer_pool_free_count(&reassembly_pool) == 0U);
 	assert(tr_stream_release_payload(server_stream, payload) == TR_OK);
-	assert(tr_buffer_pool_free_count(&reassembly_pool) == 2);
+	assert(tr_buffer_pool_free_count(&reassembly_pool) == 1U);
 
 	assert(tr_stream_close(client_stream) == TR_OK);
 	assert(tr_reactor_stop(reactor) == TR_OK);
