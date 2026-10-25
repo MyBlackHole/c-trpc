@@ -4696,6 +4696,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	size_t mismatched_encoded_len;
 	size_t concatenated_second_encoded_len;
 	size_t concatenated_body_len;
+	size_t checksummed_encoded_len;
 	size_t split_body_len;
 	unsigned client_resets_before;
 	unsigned server_resets_before;
@@ -5370,6 +5371,37 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	                (uint32_t)(sizeof(trailing_source) + sizeof(source))},
 	        trailing_body, (uint32_t)concatenated_body_len, 14U, 11U, 3U,
 	        8U, TR_ERR_STATE);
+	unknown_size_encoder = ZSTD_createCCtx();
+	assert(unknown_size_encoder != NULL);
+	assert(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        unknown_size_encoder, ZSTD_c_compressionLevel, 3)));
+	assert(!ZSTD_isError(ZSTD_CCtx_setParameter(unknown_size_encoder,
+	                                            ZSTD_c_checksumFlag, 1)));
+	checksummed_encoded_len =
+	        ZSTD_compress2(unknown_size_encoder, encoded, sizeof(encoded),
+		               trailing_source, sizeof(trailing_source));
+	assert(!ZSTD_isError(checksummed_encoded_len) &&
+	       checksummed_encoded_len > 4U);
+	assert(ZSTD_getFrameContentSize(encoded, checksummed_encoded_len) ==
+	       sizeof(trailing_source));
+	assert(ZSTD_decompress(oversized_source, sizeof(oversized_source),
+	                       encoded, checksummed_encoded_len) ==
+	       sizeof(trailing_source));
+	assert(memcmp(oversized_source, trailing_source,
+	              sizeof(trailing_source)) == 0);
+	encoded[checksummed_encoded_len - 1U] ^= 0x01U;
+	assert(ZSTD_isError(ZSTD_decompress(oversized_source,
+	                                    sizeof(oversized_source), encoded,
+	                                    checksummed_encoded_len)));
+	assert(!ZSTD_isError(ZSTD_freeCCtx(unknown_size_encoder)));
+	unknown_size_encoder = NULL;
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
+		                             (uint32_t)checksummed_encoded_len,
+		                             (uint32_t)sizeof(trailing_source)},
+	        encoded, (uint32_t)checksummed_encoded_len, 15U, 12U, 3U, 8U,
+	        TR_ERR_STATE);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
