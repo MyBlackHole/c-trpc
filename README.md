@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.63` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.64` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -229,8 +229,14 @@ dev.62 为 #242/ERR-E 将重复 RESET 墓碑查询从 FIFO 全表扫描改为固
 构造事务和排空目标均通过；40k 条目探测回归限制插入与查询总探测数。碰撞最坏成本仍随表容量增长，长期高负载
 及恶意碰撞压力仍待验证。详见[RESET 墓碑查询索引记录](docs/reviews/rpc_v2_reset_tombstone_index_20261025.md)。
 
-dev.63 修复 dev.62 完整 CI 构建暴露的独立 TCP Endpoint 测试链接遗漏：该测试手动枚举生产对象，现将墓碑索引对象加入对象闭包；同步移动 GCC 已知告警基线的位置，诊断类别和文本未变。该修复不改变运行时行为。详见
+dev.63 修复 dev.62 完整 CI 构建暴露的独立 TCP Endpoint 测试链接遗漏：该测试手动枚举生产对象，现将墓碑索引对象加入对象闭包；同步移动 GCC 已知告警基线的位置，诊断类别和文本未变。该修复不改变运行时行为，PR #324 的 GitHub 检查 21/21 通过。详见
 [RESET 索引测试链接修复记录](docs/reviews/rpc_v2_reset_tombstone_build_linkage_20261025.md)。
+
+dev.64 为 #242/ERR-E 增加真实 Channel 的长时间 RESET 墓碑 FIFO 周转回归：容量为 4 的同一
+socketpair/Reactor/Channel 连续完成 128 次双向 RESET，覆盖墓碑环 32 轮完整覆盖；当前最老与最新驻留墓碑
+可吸收重复 RESET，最早已淘汰墓碑的重复 RESET 则按未知流错误关闭连接。Release、TSan、ASan/UBSan 下
+`test_stream_reset` 均通过。本切片只增加集成测试，不改生产行为；恶意碰撞压力和更大规模连接负载仍待验证。详见
+[RESET 墓碑长周转回归记录](docs/reviews/rpc_v2_reset_tombstone_long_turnover_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

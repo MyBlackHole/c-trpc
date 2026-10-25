@@ -25,6 +25,7 @@
 #define CAPACITY 4U
 #define CONTROL 4U
 #define COMMANDS 8U
+#define TRACKED_STREAMS 256U
 
 struct fixture {
 	struct tr_reactor *reactor;
@@ -42,8 +43,8 @@ struct fixture {
 	unsigned refused;
 	int down_status;
 	int error_status;
-	struct tr_stream_handle stream[32];
-	int reset_status[32];
+	struct tr_stream_handle stream[TRACKED_STREAMS];
+	int reset_status[TRACKED_STREAMS];
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
 	int hold_data;
@@ -206,10 +207,10 @@ static void on_stream(struct tr_stream_handle stream,
 	int reopen = 0;
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	if (event == TR_STREAM_EVENT_OPENED) {
-		assert(f->opened < 32);
+		assert(f->opened < TRACKED_STREAMS);
 		f->stream[f->opened++] = stream;
 	} else if (event == TR_STREAM_EVENT_RESET) {
-		assert(f->resets < 32);
+		assert(f->resets < TRACKED_STREAMS);
 		f->reset_status[f->resets++] = status;
 		queue_predecessors = f->queue_reset_predecessors;
 		f->queue_reset_predecessors = 0;
@@ -680,6 +681,41 @@ static void test_tombstone_same_id_across_split_connections(void)
 	barrier(&f, 1);
 	assert(count(&f, &f.down) == 0U);
 	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_tombstone_long_fifo_turnover(void)
+{
+	struct fixture f;
+	const unsigned stream_count = CAPACITY * 32U;
+	uint32_t newest_id = 0U;
+	uint32_t oldest_resident_id =
+	        2U * (stream_count - CAPACITY) + 1U;
+	init_fixture(&f, CAPACITY, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+
+	/* 在同一真实连接上周转 32 次完整墓碑环，不重建 Channel/Reactor。 */
+	for (unsigned i = 0U; i < stream_count; ++i) {
+		uint32_t stream_id = 2U * i + 1U;
+		struct tr_stream_handle stream =
+		        open_remote(&f, 0, stream_id, i + 1U);
+		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
+		finish_reset(&f, 0, stream_id, TR_ERR_CLOSED, TR_ERR_CLOSED,
+		             i + 1U);
+		newest_id = stream_id;
+	}
+
+	/* FIFO 当前最老和最新墓碑均命中；环外最早墓碑已淘汰。 */
+	peer_reset(&f, 0, oldest_resident_id, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 0, newest_id, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(count(&f, &f.closed) == stream_count);
 	destroy_fixture(&f);
 }
 
@@ -1784,6 +1820,7 @@ int main(void)
 	test_tombstone_connection_generation();
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
+	test_tombstone_long_fifo_turnover();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
 	test_closed_reentrant_open_fifo();
@@ -1815,7 +1852,7 @@ int main(void)
 	for (enum invalid_kind k = UNKNOWN_RESET; k <= EVICTED_RESET; ++k)
 		test_invalid(k);
 	test_split_frontier();
-	puts("stream_reset: wire, feature, FIFO, pressure, retry, retirement, "
+	puts("stream_reset: wire, long FIFO turnover, feature, pressure, retry, retirement, "
 	     "ID exhaustion passed");
 	return 0;
 }
