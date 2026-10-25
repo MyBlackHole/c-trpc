@@ -229,6 +229,16 @@ static void test_large_history_probe_bound_and_fifo_turnover(void)
 	free(history);
 }
 
+static int stream_id_in_list(const uint32_t *ids, uint32_t count,
+			     uint32_t stream_id)
+{
+	for (uint32_t i = 0U; i < count; ++i) {
+		if (ids[i] == stream_id)
+			return 1;
+	}
+	return 0;
+}
+
 static void test_adversarial_collision_fifo_turnover(void)
 {
 	enum { collision_streams = 256U, collision_capacity = 512U };
@@ -318,6 +328,135 @@ static void test_adversarial_collision_fifo_turnover(void)
 	}
 }
 
+static void test_max_capacity_collision_fifo_turnover(void)
+{
+	enum { max_history = 40000U, collision_streams = 256U };
+	const uint32_t collision_id_count = collision_streams * 2U;
+	size_t capacity = 1U;
+	uint32_t ids[collision_id_count];
+	uint32_t resident_ids[collision_streams];
+	uint32_t resident_slots[collision_streams];
+	uint32_t evicted_ids[collision_streams];
+	uint32_t *slots;
+	struct tr_stream_reset_tombstone *history;
+	const struct tr_conn_handle connection = {NULL, 23U, 41U};
+	uint64_t total_probes = 0U;
+	size_t home;
+	uint32_t found = 0U;
+
+	while (capacity < (size_t)max_history * 2U)
+		capacity <<= 1U;
+	slots = calloc(capacity, sizeof(*slots));
+	history = calloc(max_history, sizeof(*history));
+	assert(slots && history);
+
+	/* 在生产最大表尺寸下构造一个 256 键同 home 碰撞簇。 */
+	home = tr_reset_tombstone_index_home(capacity, connection, 1U);
+	for (uint32_t candidate = 1U; found < collision_id_count; ++candidate) {
+		if (tr_reset_tombstone_index_home(capacity, connection,
+		                                  candidate) == home)
+			ids[found++] = candidate;
+	}
+	for (uint32_t i = 0U; i < collision_streams; ++i) {
+		size_t probes = 0U;
+		assert(tr_reset_tombstone_index_home(capacity, connection,
+		                                     ids[i]) == home);
+		history[i].connection = connection;
+		history[i].stream_id = ids[i];
+		assert(tr_reset_tombstone_index_insert(
+		               slots, capacity, history, max_history,
+		               connection, ids[i], i, &probes) == TR_OK);
+		assert(probes == (size_t)i + 1U);
+		total_probes += probes;
+		resident_ids[i] = ids[i];
+		resident_slots[i] = i;
+	}
+
+	/* 填满 max_streams 历史槽，保留碰撞簇并加入其他不同键。 */
+	{
+		uint32_t candidate = 1U;
+		for (uint32_t slot = collision_streams; slot < max_history;
+		     ++slot) {
+			size_t probes = 0U;
+			while (stream_id_in_list(ids, collision_id_count, candidate))
+				candidate++;
+			history[slot].connection = connection;
+			history[slot].stream_id = candidate++;
+			assert(tr_reset_tombstone_index_insert(
+			               slots, capacity, history, max_history,
+			               connection, history[slot].stream_id, slot,
+			               &probes) == TR_OK);
+			total_probes += probes;
+		}
+	}
+
+	/* 逐个淘汰同 home 簇首并复用其历史槽；其他 39,744 键持续驻留。 */
+	for (uint32_t turn = 0U; turn < collision_streams; ++turn) {
+		uint32_t recycled_slot = resident_slots[0];
+		uint32_t stale_slot = UINT32_MAX;
+		size_t probes = 0U;
+		evicted_ids[turn] = resident_ids[0];
+		assert(tr_reset_tombstone_index_remove(
+		               slots, capacity, history, max_history,
+		               connection, resident_ids[0], &probes) == TR_OK);
+		total_probes += probes;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history, connection,
+		               resident_ids[1], &stale_slot, &probes) == TR_OK);
+		assert(stale_slot == resident_slots[1]);
+		total_probes += probes;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history,
+		               connection, resident_ids[0], &stale_slot,
+		               &probes) == TR_ERR_STALE);
+		total_probes += probes;
+
+		history[recycled_slot].connection = connection;
+		history[recycled_slot].stream_id = ids[collision_streams + turn];
+		assert(tr_reset_tombstone_index_insert(
+		               slots, capacity, history, max_history, connection,
+		               ids[collision_streams + turn], recycled_slot,
+		               &probes) == TR_OK);
+		total_probes += probes;
+
+		for (uint32_t i = 0U; i + 1U < collision_streams; ++i) {
+			resident_ids[i] = resident_ids[i + 1U];
+			resident_slots[i] = resident_slots[i + 1U];
+		}
+		resident_ids[collision_streams - 1U] =
+		        ids[collision_streams + turn];
+		resident_slots[collision_streams - 1U] = recycled_slot;
+	}
+
+	/* 满历史下普通键与碰撞键都保留正确槽映射，所有旧键均已淘汰。 */
+	for (uint32_t i = collision_streams; i < max_history; ++i) {
+		uint32_t slot = UINT32_MAX;
+		size_t probes = 0U;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history, connection,
+		               history[i].stream_id, &slot, &probes) == TR_OK);
+		assert(slot == i);
+		total_probes += probes;
+	}
+	for (uint32_t i = 0U; i < collision_streams; ++i) {
+		uint32_t slot = UINT32_MAX;
+		size_t probes = 0U;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history, connection,
+		               resident_ids[i], &slot, &probes) == TR_OK);
+		assert(slot == resident_slots[i]);
+		total_probes += probes;
+		assert(tr_reset_tombstone_index_find(
+		               slots, capacity, history, max_history, connection,
+		               evicted_ids[i], &slot, &probes) == TR_ERR_STALE);
+		total_probes += probes;
+	}
+	/* 探测计数不含 backward-shift 扫描，仅约束索引公开内部 helper 的查找路径。 */
+	assert(total_probes <= (uint64_t)max_history * 64U);
+	free(slots);
+	free(history);
+}
+
 int main(void)
 {
 	test_wrapped_collision_cluster_delete_and_reuse();
@@ -325,6 +464,8 @@ int main(void)
 	test_same_stream_id_on_distinct_connections();
 	test_large_history_probe_bound_and_fifo_turnover();
 	test_adversarial_collision_fifo_turnover();
-	puts("reset_tombstone_index: adversarial collision, 40k FIFO turnover, split identity, deletion, reuse passed");
+	test_max_capacity_collision_fifo_turnover();
+	puts("reset_tombstone_index: adversarial and max-capacity collision, "
+	     "40k turnover, split identity, deletion, reuse passed");
 	return 0;
 }
