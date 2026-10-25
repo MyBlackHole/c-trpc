@@ -3212,7 +3212,8 @@ static void compressed_rx_send_invalid_message(
         struct tr_buffer_pool *payload_pool,
         struct tr_message_envelope envelope, const uint8_t *body,
         uint32_t body_bytes, unsigned open_target, unsigned reset_target,
-        uint32_t active_streams, unsigned expected_received)
+        uint32_t active_streams, unsigned expected_received,
+        int expected_reset_status)
 {
 	struct tr_stream_handle client_stream;
 	struct tr_stream_diagnostics diagnostics = {0};
@@ -3244,7 +3245,8 @@ static void compressed_rx_send_invalid_message(
 	wait_channel_active_streams(fixture->client, active_streams);
 	wait_channel_active_streams(fixture->server, active_streams);
 	pthread_mutex_lock(&fixture->server_ctx.events.lock);
-	assert(fixture->server_ctx.events.last_reset_status == TR_ERR_STATE);
+	assert(fixture->server_ctx.events.last_reset_status ==
+	       expected_reset_status);
 	assert(fixture->server_ctx.events.received == expected_received);
 	pthread_mutex_unlock(&fixture->server_ctx.events.lock);
 	wait_for_pool_full(payload_pool, 3U);
@@ -5220,15 +5222,15 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 4096U, 1U},
-	        (const uint8_t[]){0U}, 1U, 6U, 3U, 3U, 8U);
+	        (const uint8_t[]){0U}, 1U, 6U, 3U, 3U, 8U, TR_ERR_STATE);
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 4097U},
-	        (const uint8_t[]){0U}, 1U, 7U, 4U, 3U, 8U);
+	        (const uint8_t[]){0U}, 1U, 7U, 4U, 3U, 8U, TR_ERR_STATE);
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 1U},
-	        (const uint8_t[]){0U}, 1U, 8U, 5U, 3U, 8U);
+	        (const uint8_t[]){0U}, 1U, 8U, 5U, 3U, 8U, TR_ERR_STATE);
 	mismatched_encoded_len = ZSTD_compress(encoded, sizeof(encoded), source,
 	                                       sizeof(source), 3);
 	assert(!ZSTD_isError(mismatched_encoded_len));
@@ -5239,7 +5241,36 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
 		                             (uint32_t)mismatched_encoded_len,
 		                             source_len - 1U},
-	        encoded, (uint32_t)mismatched_encoded_len, 9U, 6U, 3U, 8U);
+	        encoded, (uint32_t)mismatched_encoded_len, 9U, 6U, 3U, 8U,
+	        TR_ERR_STATE);
+	unknown_size_encoder = ZSTD_createCCtx();
+	assert(unknown_size_encoder != NULL);
+	assert(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        unknown_size_encoder, ZSTD_c_contentSizeFlag, 0)));
+	unknown_encoded_len =
+	        ZSTD_compress2(unknown_size_encoder, encoded, sizeof(encoded),
+		               expansion_source, sizeof(expansion_source));
+	assert(!ZSTD_isError(unknown_encoded_len));
+	assert(ZSTD_getFrameContentSize(encoded, unknown_encoded_len) ==
+	       ZSTD_CONTENTSIZE_UNKNOWN);
+	assert((encoded[4] & 0x20U) == 0U);
+	/* 指数 11 对应 2 MiB Window_Size，超过 Channel 的 1 MiB 上限。 */
+	encoded[5] = (uint8_t)(11U << 3U);
+	assert(10U + (encoded[5] >> 3U) > 20U);
+	assert(ZSTD_decompress(oversized_source, sizeof(oversized_source),
+	                       encoded, unknown_encoded_len) ==
+	       sizeof(expansion_source));
+	assert(memcmp(oversized_source, expansion_source,
+	              sizeof(expansion_source)) == 0);
+	assert(!ZSTD_isError(ZSTD_freeCCtx(unknown_size_encoder)));
+	unknown_size_encoder = NULL;
+	compressed_rx_send_invalid_message(
+	        &fixture, &payload_pool,
+	        (struct tr_message_envelope){
+	                TR_MESSAGE_CODEC_ZSTD, (uint32_t)unknown_encoded_len,
+	                (uint32_t)sizeof(expansion_source)},
+	        encoded, (uint32_t)unknown_encoded_len, 10U, 7U, 3U, 8U,
+	        TR_ERR_NOMEM);
 	trailing_encoded_len =
 	        ZSTD_compress(trailing_encoded, sizeof(trailing_encoded),
 		              trailing_source, sizeof(trailing_source), 3);
@@ -5252,8 +5283,8 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 		                             (uint32_t)trailing_encoded_len +
 		                                     1U,
 		                             (uint32_t)sizeof(trailing_source)},
-	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 10U, 7U, 3U,
-	        8U);
+	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 11U, 8U, 3U,
+	        8U, TR_ERR_STATE);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
