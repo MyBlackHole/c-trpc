@@ -4809,8 +4809,9 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	assert(!ZSTD_isError(second_encoded_len) && second_encoded_len > 1U);
 	envelope.encoded_body_bytes = (uint32_t)second_encoded_len;
 	envelope.decoded_message_bytes = second_source_len;
-	/* FIRST 只含完整信封；后续帧承载全部 Zstandard body。 */
-	split_body_len = 0U;
+	/* FIRST 携带完整信封和部分 Zstandard body；后续帧承载剩余 body。 */
+	split_body_len = second_encoded_len / 2U;
+	assert(split_body_len > 0U && split_body_len < second_encoded_len);
 	first_fragment_len =
 	        TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)split_body_len;
 	second_wire_len =
