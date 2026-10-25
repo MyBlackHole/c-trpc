@@ -21,6 +21,10 @@
 - GCC Release 完整项目测试套件 91/91 通过，耗时 136.923 秒。
 - 仅扩展测试夹具以在 Client 端启用 Zstandard 接收并捕获回调正文；不改生产代码、公开 API/ABI 或 wire 格式。
 
+## GitHub 远端检查
+
+dev.92 对应 Push CI `40181681387`、PR CI `40181684904` 和 RPC benchmark smoke `40181684790` 均已成功；完整矩阵包含 GCC/Clang、ASan/UBSan、TSan、Make/install、CRC 回退、静态分析与 RPC 冒烟。
+
 ## 结论边界
 
 该回归证明一端的 BULK 压缩 DATA 等待网络信用时，反向 CONTROL 压缩 DATA 可先完成解码和交付，之后原方向继续恢复。它只覆盖一个方向窗口受阻、反方向仍可写出的确定性交错，不覆盖双向窗口同时耗尽、共享 DATA TX 池满载、长期持续公平 SLA、每条消息等待界或更广预算/取消矩阵；#241/#235 仍未完成。

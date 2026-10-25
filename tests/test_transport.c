@@ -3574,6 +3574,8 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	struct tr_stream_handle server_compressed_stream;
 	struct tr_stream_diagnostics blocker_diagnostics = {0};
 	struct tr_stream_diagnostics compressed_diagnostics = {0};
+	struct tr_stream_diagnostics server_blocker_diagnostics = {0};
+	struct tr_stream_diagnostics server_compressed_diagnostics = {0};
 	struct tr_stream_flow_state compressed_flow = {0};
 	struct tr_message_builder *builder = NULL;
 	struct tr_message compressed_message = {0};
@@ -3662,8 +3664,8 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	wait_channel_lane_up(fixture.client, TR_LANE_CONTROL);
 	wait_channel_lane_up(fixture.server, TR_LANE_CONTROL);
 	compressed_rx_wait_caps(&fixture);
-	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
-	                      &blocker_stream) == TR_OK);
+	assert(tr_stream_open(fixture.client, TR_LANE_BULK, &blocker_stream) ==
+	       TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
 	                     1U);
 	wait_channel_counter(&fixture.server_ctx.events,
@@ -3684,6 +3686,15 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	                                 &blocker_diagnostics) == TR_OK);
 	assert(tr_stream_get_diagnostics(compressed_stream,
 	                                 &compressed_diagnostics) == TR_OK);
+	assert(tr_stream_get_diagnostics(server_blocker_stream,
+	                                 &server_blocker_diagnostics) == TR_OK);
+	assert(tr_stream_get_diagnostics(server_compressed_stream,
+	                                 &server_compressed_diagnostics) ==
+	       TR_OK);
+	assert(blocker_diagnostics.lane == TR_LANE_BULK);
+	assert(compressed_diagnostics.lane == TR_LANE_CONTROL);
+	assert(server_blocker_diagnostics.lane == TR_LANE_BULK);
+	assert(server_compressed_diagnostics.lane == TR_LANE_CONTROL);
 
 	assert(tr_buffer_pool_init(&blocker_pool, 1U, sizeof(blocker)) ==
 	       TR_OK);
@@ -3725,6 +3736,8 @@ static void test_channel_compressed_send_data_pool_ready(void)
 
 	atomic_store(&compressed_data_blocked, 0);
 	compressed_rx_wait_received(&fixture.server_ctx, 2U);
+	assert(tr_reactor_get_stats(fixture.reactor, &reactor_stats) == TR_OK);
+	assert(reactor_stats.tx_item_pool.current == 0U);
 	assert(atomic_load(&compressed_data_pool_retries) == 1U);
 	assert(atomic_load(&compressed_data_watch_registrations) == 1U);
 	assert(atomic_load(&compressed_data_deferred_timers) == 0U);
