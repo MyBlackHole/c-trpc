@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.95` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.96` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -346,6 +346,16 @@ dev.94 将 Split Channel 压缩进展回归扩展为双向 BULK 窗口同时耗�
 
 dev.95 扩展 Shared Channel 的 DATA TX 池耗尽覆盖为两个跨 lane 压缩等待者：BULK RAW Stream 占住唯一 DATA TX 项时，CONTROL 和另一条 BULK Stream 都提交压缩消息并等待容量通知；释放池项后，两条消息均恢复交付。测试按 Stream ID 验证两端 lane 和全部正文，不依赖重试定时器，并确认 TX 池归零。GCC Release 完整 `test_transport` 连续 5/5 通过，完整测试套件 91/91（143.453 秒）。该项只改测试、记录和版本号，不改生产运行时/API/ABI/wire；更多等待者下的持续公平性、消息等待界、吞吐阈值及更广预算/取消组合仍待验收。详见
 [Shared Channel 多压缩等待者的 DATA TX 池恢复回归](docs/reviews/channel_compressed_data_tx_pool_multi_waiter_20261025.md)。
+
+dev.96 在 Shared Channel 的唯一 DATA TX 项仍被 BULK RAW Stream 占用时，RESET
+一个已完成压缩但仍等待 TX 项的 BULK Stream；测试确认 RESET 立即归还该流的压缩预算，
+并且没有消费或占用 RAW 所持的 DATA 池项。解除阻塞后，CONTROL 和另一个 BULK 压缩等待者
+都完成交付，被 RESET 的流只完成 RESET、不交付 DATA；RESET 两端收敛、TX 池与总消息预算
+最终归零。GCC Release 完整 `test_transport` 连续 6/6 通过，项目全量测试 91/91 通过
+（148.688 秒）。该项只改测试、记录和版本号，
+不改生产运行时/API/ABI/wire；持续饱和公平 SLA、逐消息等待界、吞吐阈值、跨机器基线和
+更广预算/取消矩阵仍待验收。详见
+[共享 DATA TX 池等待期间 RESET 压缩发送者回归](docs/reviews/channel_compressed_data_tx_pool_reset_cancel_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
