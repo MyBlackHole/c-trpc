@@ -220,7 +220,9 @@ authorize_control(const struct tr_connection_group_authorization *authorization,
 	if (!authorization ||
 	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
 	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA) ||
-	    authorization->group.group_id != TEST_PIPELINE_ID ||
+	    (authorization->group.group_id != TEST_PIPELINE_ID &&
+	     !(authorization->group.group_id == TEST_PIPELINE_ID + 1U &&
+	       authorization->group.epoch == TEST_EPOCH_2)) ||
 	    (authorization->group.epoch != TEST_EPOCH_1 &&
 	     authorization->group.epoch != TEST_EPOCH_2) ||
 	    authorization->peer_identity.authentication !=
@@ -865,6 +867,7 @@ static void test_pipeline_listener_control_and_data(void)
 	struct tr_pipeline_route_preface offer_route;
 	struct tr_pipeline_route_preface offer_route2;
 	struct tr_pipeline_route_preface late_data_route;
+	struct tr_pipeline_route_preface late_control_route;
 	struct tr_pipeline_control_wire_message offer;
 	struct tr_pipeline_control_wire_message offer2;
 	struct tr_pipeline_control_wire_message offer3;
@@ -872,6 +875,7 @@ static void test_pipeline_listener_control_and_data(void)
 	struct tr_pipeline_control_wire_message cancel;
 	uint8_t ping[TR_WIRE_HEADER_SIZE];
 	uint8_t late_data_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
+	uint8_t late_control_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint16_t port = 0U;
 	int bad_control = -1;
 	int control = -1;
@@ -879,6 +883,7 @@ static void test_pipeline_listener_control_and_data(void)
 	int duplicate_data = -1;
 	int control2 = -1;
 	int late_data = -1;
+	int late_control = -1;
 
 	memset(&data_ctx, 0, sizeof(data_ctx));
 	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
@@ -1042,28 +1047,43 @@ static void test_pipeline_listener_control_and_data(void)
 	late_data = connect_loopback(port);
 	send_all(late_data, late_data_raw,
 	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
-	wait_listener_counts(listener, 1U, 2U);
+	late_control_route = control_route(TEST_EPOCH_2);
+	late_control_route.pipeline_id++;
+	assert(tr_pipeline_route_preface_encode(late_control_raw,
+	                                        &late_control_route) == TR_OK);
+	late_control = connect_loopback(port);
+	send_all(late_control, late_control_raw,
+	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	wait_listener_counts(listener, 1U, 3U);
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
 	uint32_t data_accepts_before_drain = stats.data_accepts;
+	uint64_t control_accepts_before_drain = stats.control_accepts;
 	uint64_t route_rejections_before_drain = stats.route_rejections;
 
 	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
 	send_all(late_data,
 	         late_data_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
+	send_all(late_control,
+	         late_control_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
 	for (unsigned i = 0U; i < 5000U; ++i) {
 		assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
 		if (stats.data_accepts > data_accepts_before_drain ||
-		    stats.route_rejections > route_rejections_before_drain)
+		    stats.control_accepts > control_accepts_before_drain ||
+		    stats.route_rejections >= route_rejections_before_drain + 2U)
 			break;
 		struct timespec pause = {0, 1000000L};
 		(void)nanosleep(&pause, NULL);
 	}
 	assert(stats.data_accepts == data_accepts_before_drain);
-	assert(stats.route_rejections == route_rejections_before_drain + 1U);
+	assert(stats.control_accepts == control_accepts_before_drain);
+	assert(stats.route_rejections == route_rejections_before_drain + 2U);
 	wait_peer_close(late_data);
+	wait_peer_close(late_control);
 	close(late_data);
 	late_data = -1;
+	close(late_control);
+	late_control = -1;
 	wait_listener_counts(listener, 1U, 1U);
 
 	/* 保留真实 CONTROL 会话进入排空。限时等待必须使用公共
