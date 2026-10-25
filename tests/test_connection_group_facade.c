@@ -593,6 +593,18 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 			return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
 	}
+	if (message->message_id == UINT64_C(6613)) {
+		assert(message->stream_id == 5002U);
+		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
+		                          TR_CONNECTION_GROUP_DATA_LAST));
+		assert(message->bytes.len == 1U &&
+		       message->bytes.data[0] == 0x34U);
+		pthread_mutex_lock(&ctx->lock);
+		ctx->multi_drain_messages++;
+		pthread_cond_broadcast(&ctx->cond);
+		pthread_mutex_unlock(&ctx->lock);
+		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
+	}
 	if (message->message_id == UINT64_C(6201) ||
 	    message->message_id == UINT64_C(6202)) {
 		uint32_t expected_stream =
@@ -2061,9 +2073,11 @@ static void test_public_connection_group_multi_data_drain(void)
 	struct tr_conn_handle data_routes[2];
 	uint8_t first_payload[128];
 	uint8_t second_payload[128];
+	uint8_t raw_peer_payload = 0x34U;
 	uint8_t inflight_payload = 0x33U;
 	struct tr_transport_bytes first_bytes;
 	struct tr_transport_bytes second_bytes;
+	struct tr_transport_bytes raw_peer_bytes = {&raw_peer_payload, 1U};
 	struct tr_transport_bytes inflight_bytes = {&inflight_payload, 1U};
 	uint16_t group_port = 0U;
 	uint32_t i;
@@ -2176,6 +2190,10 @@ static void test_public_connection_group_multi_data_drain(void)
 	assert(data_routes[0].reactor == data_routes[1].reactor &&
 	       (data_routes[0].slot != data_routes[1].slot ||
 	        data_routes[0].generation != data_routes[1].generation));
+	/* 解压缓冲仍被持有时，第二成员再接收一条 RAW 消息也必须进展。 */
+	assert(tr_client_connection_group_send(client, 5002U, UINT64_C(6613),
+	                                       &raw_peer_bytes) == TR_OK);
+	wait_counter(&ctx, &ctx.multi_drain_messages, 3U);
 	pthread_mutex_lock(&ctx.lock);
 	assert(ctx.retained.bytes.len == sizeof(first_payload) &&
 	       memcmp(ctx.retained.bytes.data, first_payload,

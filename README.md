@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.78` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.79` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -296,6 +296,9 @@ dev.77 为 #241 增加真实连接组慢消费者隔离回归：两个 transfer 
 
 dev.78 为 #241 扩展连接组慢消费者回归：两条不同 DATA 物理连接都发送 Zstandard 消息；第一条解压消息被应用接管并持有时，第二条仍完成解压、正文校验、交付和释放。测试确认两次 DATA 提交均实际带压缩标志、两条路由连接代次不同，并在第二条完成后复核第一条缓冲仍有效。GCC Release 连续 5/5、TSan、ASan/UBSan 下完整 `test_connection_group_facade` 通过。本切片未耗尽全局预算，也不覆盖 RAW/Zstandard 混合、多个应用持有者或持续饱和公平性。详见
 [压缩与多 DATA 慢消费者隔离回归](docs/reviews/rpc_v2_compressed_group_slow_consumer_20261025.md)。
+
+dev.79 继续验证 #241 的混合 DATA 路径：第一成员的 Zstandard 解压消息由应用持有期间，第二成员先完成另一条 Zstandard 消息，再交付一条 RAW 消息；两次进展之后首条缓冲仍完整。Release 连续 5/5、TSan、ASan/UBSan 下完整 `test_connection_group_facade` 通过。该用例不耗尽 Server 全局预算，预算耗尽、多个持有消息和持续饱和公平性仍待验收。详见
+[压缩持有期间 RAW 同伴进展回归](docs/reviews/rpc_v2_mixed_data_slow_consumer_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
