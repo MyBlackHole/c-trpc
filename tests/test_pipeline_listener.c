@@ -864,18 +864,21 @@ static void test_pipeline_listener_control_and_data(void)
 	struct tr_pipeline_route_preface route;
 	struct tr_pipeline_route_preface offer_route;
 	struct tr_pipeline_route_preface offer_route2;
+	struct tr_pipeline_route_preface late_data_route;
 	struct tr_pipeline_control_wire_message offer;
 	struct tr_pipeline_control_wire_message offer2;
 	struct tr_pipeline_control_wire_message offer3;
 	struct tr_pipeline_control_wire_message ready;
 	struct tr_pipeline_control_wire_message cancel;
 	uint8_t ping[TR_WIRE_HEADER_SIZE];
+	uint8_t late_data_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint16_t port = 0U;
 	int bad_control = -1;
 	int control = -1;
 	int data = -1;
 	int duplicate_data = -1;
 	int control2 = -1;
+	int late_data = -1;
 
 	memset(&data_ctx, 0, sizeof(data_ctx));
 	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
@@ -1023,10 +1026,49 @@ static void test_pipeline_listener_control_and_data(void)
 	send_route(control2, &route);
 	wait_listener_counts(listener, 1U, 1U);
 
+	/* Offer 已预留，但 DATA route 前导仍未完整解析；drain 返回后补齐的
+	 * 连接属于新的 DATA 准入，必须被拒绝并精确撤销这条预留。 */
+	memset(&late_data_route, 0, sizeof(late_data_route));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_2,
+	               UINT64_C(3001), &late_data_route) == TR_OK);
+	memset(&offer3, 0, sizeof(offer3));
+	recv_control_message(control2, UINT64_C(3001), &offer3);
+	assert(offer3.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer3.data_index == late_data_route.member_index);
+	assert(offer3.data_generation == late_data_route.member_generation);
+	assert(tr_pipeline_route_preface_encode(late_data_raw,
+	                                        &late_data_route) == TR_OK);
+	late_data = connect_loopback(port);
+	send_all(late_data, late_data_raw,
+	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	wait_listener_counts(listener, 1U, 2U);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+	uint32_t data_accepts_before_drain = stats.data_accepts;
+	uint64_t route_rejections_before_drain = stats.route_rejections;
+
+	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
+	send_all(late_data,
+	         late_data_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
+	for (unsigned i = 0U; i < 5000U; ++i) {
+		assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+		if (stats.data_accepts > data_accepts_before_drain ||
+		    stats.route_rejections > route_rejections_before_drain)
+			break;
+		struct timespec pause = {0, 1000000L};
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(stats.data_accepts == data_accepts_before_drain);
+	assert(stats.route_rejections == route_rejections_before_drain + 1U);
+	wait_peer_close(late_data);
+	close(late_data);
+	late_data = -1;
+	wait_listener_counts(listener, 1U, 1U);
+
 	/* 保留真实 CONTROL 会话进入排空。限时等待必须使用公共
 	 * CLOCK_MONOTONIC 绝对期限，不得再次进行 uint64 纳秒转换。
 	 */
-	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 0);
 	assert(tr_pipeline_listener_wait_drained(listener, 10U) ==
 	       TR_ERR_TIMEOUT);

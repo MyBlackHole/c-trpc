@@ -1379,6 +1379,9 @@ static int tr_pipeline_listener_accept_data(
 	uint64_t tls_generation = 0U;
 	int ret;
 
+	if (listener->draining)
+		return TR_ERR_CLOSED;
+
 	/* Route identity and the exact reserved member generation are checked
 	 * before the DATA certificate is compared with its CONTROL session. */
 	ret = tr_pipeline_registry_validate_data_route_on_owner(
