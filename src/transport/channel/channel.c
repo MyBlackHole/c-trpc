@@ -1648,8 +1648,9 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 			connection =
 			        tr_channel_connection(channel, stream->lane);
 			message_id = stream->tx_compressed_message_id;
-			frame_flags = tr_lane_flag(stream->lane) |
-			              TR_FRAME_F_COMPRESSED;
+			/* 备注：DATA 的 lane 由 Stream 登记信息和连接代次校验；
+			 * lane 不重复编码进 DATA 标志位。 */
+			frame_flags = TR_FRAME_F_COMPRESSED;
 			if (stream->tx_compressed_offset == 0U)
 				frame_flags |= TR_FRAME_F_FIRST;
 			if (stream->tx_compressed_offset + frame_len ==

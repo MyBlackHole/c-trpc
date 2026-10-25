@@ -19,7 +19,7 @@
 - GCC Release `test_rpc_record_stream` 连续运行 5/5；五次均得到相同流控观测：BULK 停在 4144/4144 字节，CONTROL 小消息先完成，BULK 恢复后达到 16,494 字节并交付。
 - GCC Debug `test_rpc_record_stream` 完整目标通过，边界观测与 Release 一致。
 - `git diff --check` 通过；系统 clang-format 的改动行检查通过。
-- dev.88 的 Push CI、PR CI 和 RPC smoke 均已通过；dev.89 的远端检查将在更新后的 head 上重新运行。
+- dev.89 推送后的 Push CI（40178672663）、PR CI（40178670054）和 RPC benchmark smoke（40178672659）均已通过。
 
 ## 结论边界
 
