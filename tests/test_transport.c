@@ -4057,7 +4057,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 
 	atomic_store(&compressed_data_blocked, 0);
 	for (unsigned i = 0; i < 5000U; ++i) {
-		if (atomic_load(&compressed_data_frame_trace_count) >= 12U)
+		if (atomic_load(&compressed_data_frame_trace_count) >= 24U)
 			break;
 		struct timespec pause_time = {0, 1000000L};
 		nanosleep(&pause_time, NULL);
@@ -4073,7 +4073,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 		        TR_FRAME_F_FIRST | TR_FRAME_F_COMPRESSED;
 		uint32_t expected_continuation_flags = TR_FRAME_F_COMPRESSED;
 
-		assert(atomic_load(&compressed_data_frame_trace_count) >= 12U);
+		assert(atomic_load(&compressed_data_frame_trace_count) >= 24U);
 		for (unsigned i = 0U; i < 4U; ++i) {
 			uint32_t flags = atomic_load(
 			        &compressed_data_frame_trace_flags[i]);
@@ -4092,7 +4092,10 @@ static void test_channel_compressed_send_data_pool_ready(void)
 			for (unsigned previous = 0U; previous < i; ++previous)
 				assert(first_cycle[i] != first_cycle[previous]);
 		}
-		for (unsigned i = 4U; i < 12U; ++i) {
+		/* 四个已确认持续可发送的 Stream 在六轮里严格轮转；
+		 * 每条流再次发送前，另外三条都获得一次机会。
+		 */
+		for (unsigned i = 4U; i < 24U; ++i) {
 			uint32_t stream_id = atomic_load(
 			        &compressed_data_frame_trace_stream_ids[i]);
 			uint32_t flags = atomic_load(
@@ -4124,7 +4127,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	{
 		unsigned frame_count =
 		        atomic_load(&compressed_data_frame_trace_count);
-		assert(frame_count >= 12U);
+		assert(frame_count >= 24U);
 		for (unsigned i = 0U; i < frame_count &&
 		                      i < COMPRESSED_DATA_FRAME_TRACE_CAPACITY;
 		     ++i) {

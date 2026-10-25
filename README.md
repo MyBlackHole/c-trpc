@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.100` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.101` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -386,6 +386,12 @@ FIRST 帧各出现一次，随后八帧按同序继续轮转两轮；RESET 流�
 和预算归零。GCC Debug 定向目标连续 6/6 通过，Release 全量结果见回归记录。本次只改测试、记录
 和版本号，不改生产/API/ABI/wire。详见
 [Shared Channel 四存活压缩流公平轮转回归](docs/reviews/channel_compressed_data_tx_four_waiter_fairness_20261025.md)。
+
+dev.101 将四条存活压缩流的连续轮转检查扩展到 24 个成功 DATA 帧：确认四个 FIRST 帧来自不同
+Stream，之后五轮续帧严格按同一顺序轮转；RESET 流无 DATA，原有正文交付与池/预算清零断言保留。
+Release `test_transport/default` 连续 6/6 通过；临时停滞调度游标的变异按预期被新断言捕获。
+本次只改测试、记录和版本号，不改生产/API/ABI/wire；长期 SLA、消息等待上界和更大存活流数仍未验收。
+详见 [四存活压缩流六轮公平性回归](docs/reviews/channel_compressed_data_tx_six_round_fairness_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
