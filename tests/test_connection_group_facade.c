@@ -38,6 +38,8 @@
 #define TEST_GROUP_LARGE_DECODED_BYTES (1024U * 1024U)
 #define TEST_GROUP_BUDGET_TAIL_BYTES (64U * 1024U)
 #define TEST_GROUP_BUDGET_HOLD_COUNT 5U
+#define TEST_GROUP_RAW_BURST_COUNT 64U
+#define TEST_GROUP_RAW_BURST_FIRST_ID UINT64_C(6800)
 
 static atomic_int fail_group_control_close_once;
 static atomic_uint group_control_close_attempts;
@@ -148,13 +150,27 @@ int __wrap_tr_reactor_sendv_limited(struct tr_conn_handle connection,
 	    (flags & TR_FRAME_F_COMPRESSED) != 0U)
 		atomic_fetch_add(&group_large_compressed_submissions, 1U);
 	if (ret == TR_OK && type == TR_FRAME_DATA &&
-	    message_id == UINT64_C(6712) &&
+	    message_id >= TEST_GROUP_RAW_BURST_FIRST_ID &&
+	    message_id < TEST_GROUP_RAW_BURST_FIRST_ID +
+	                         TEST_GROUP_RAW_BURST_COUNT &&
 	    (flags & TR_FRAME_F_COMPRESSED) == 0U)
 		atomic_fetch_add(&group_large_raw_submissions, 1U);
 	if (ret == TR_OK && type == TR_FRAME_DATA) {
 		unsigned i;
 
 		pthread_mutex_lock(&group_route_probe_lock);
+		if (group_route_probe_enabled &&
+		    message_id > TEST_GROUP_RAW_BURST_FIRST_ID &&
+		    message_id < TEST_GROUP_RAW_BURST_FIRST_ID +
+		                         TEST_GROUP_RAW_BURST_COUNT &&
+		    (group_route_probe_seen & (1U << 1)) != 0U) {
+			assert(connection.reactor ==
+			       group_route_probe_connections[1].reactor);
+			assert(connection.slot ==
+			       group_route_probe_connections[1].slot);
+			assert(connection.generation ==
+			       group_route_probe_connections[1].generation);
+		}
 		if (group_route_probe_enabled)
 			for (i = 0U; i < 2U; ++i)
 				if (message_id ==
@@ -296,6 +312,7 @@ struct public_group_ctx {
 	int ready_send_second_ret;
 	unsigned retry_messages;
 	unsigned multi_drain_messages;
+	unsigned raw_burst_messages;
 	unsigned member_replacement_messages;
 	unsigned inflight_drain_messages;
 	unsigned compressed_drain_messages;
@@ -660,14 +677,21 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 		pthread_mutex_unlock(&ctx->lock);
 		return TR_CONNECTION_GROUP_MESSAGE_TAKE_OWNERSHIP;
 	}
-	if (message->message_id == UINT64_C(6712)) {
+	if (message->message_id >= TEST_GROUP_RAW_BURST_FIRST_ID &&
+	    message->message_id < TEST_GROUP_RAW_BURST_FIRST_ID +
+	                                  TEST_GROUP_RAW_BURST_COUNT) {
+		unsigned index = (unsigned)(message->message_id -
+		                            TEST_GROUP_RAW_BURST_FIRST_ID);
+		uint8_t expected_byte = (uint8_t)(0x6aU + index);
+
 		assert(message->stream_id == 5102U);
 		assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
 		                          TR_CONNECTION_GROUP_DATA_LAST));
 		assert(message->bytes.len == 1U &&
-		       message->bytes.data[0] == 0x6aU);
+		       message->bytes.data[0] == expected_byte);
 		pthread_mutex_lock(&ctx->lock);
 		ctx->multi_drain_messages++;
+		ctx->raw_burst_messages++;
 		pthread_cond_broadcast(&ctx->cond);
 		pthread_mutex_unlock(&ctx->lock);
 		return TR_CONNECTION_GROUP_MESSAGE_RELEASE;
@@ -2461,7 +2485,7 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 
 	pthread_mutex_lock(&group_route_probe_lock);
 	group_route_probe_message_ids[0] = UINT64_C(6711);
-	group_route_probe_message_ids[1] = UINT64_C(6712);
+	group_route_probe_message_ids[1] = TEST_GROUP_RAW_BURST_FIRST_ID;
 	memset(group_route_probe_connections, 0,
 	       sizeof(group_route_probe_connections));
 	group_route_probe_seen = 0U;
@@ -2506,13 +2530,21 @@ static void test_public_connection_group_large_decode_hold_raw_peer(void)
 		wait_counter(&ctx, &ctx.budget_hold_messages, i + 1U);
 	}
 
-	/* 多条大解码输出仍由应用持有；另一 DATA 成员的 RAW 消息不得等待
-	 * 这些应用持有缓冲释放。 */
-	assert(tr_client_connection_group_send(client, 5102U, UINT64_C(6712),
-	                                       &raw_bytes) == TR_OK);
-	wait_counter(&ctx, &ctx.multi_drain_messages, 2U);
+	/* 多条大解码输出仍由应用持有；另一 DATA 成员必须完成一个有界
+	 * RAW 突发，而不是只证明单条消息偶然穿过。 */
+	for (i = 0U; i < TEST_GROUP_RAW_BURST_COUNT; ++i) {
+		raw_payload = (uint8_t)(0x6aU + i);
+		raw_bytes.data = &raw_payload;
+		assert(tr_client_connection_group_send(
+		               client, 5102U, TEST_GROUP_RAW_BURST_FIRST_ID + i,
+		               &raw_bytes) == TR_OK);
+	}
+	wait_counter(&ctx, &ctx.raw_burst_messages, TEST_GROUP_RAW_BURST_COUNT);
+	wait_counter(&ctx, &ctx.multi_drain_messages,
+	             1U + TEST_GROUP_RAW_BURST_COUNT);
 	assert(atomic_load(&group_large_compressed_submissions) == 1U);
-	assert(atomic_load(&group_large_raw_submissions) == 1U);
+	assert(atomic_load(&group_large_raw_submissions) ==
+	       TEST_GROUP_RAW_BURST_COUNT);
 	pthread_mutex_lock(&group_route_probe_lock);
 	group_route_probe_enabled = 0;
 	assert(group_route_probe_seen == 3U);
