@@ -55,6 +55,15 @@ static atomic_uint compressed_data_pool_retries;
 static atomic_uint compressed_data_watch_registrations;
 static atomic_int compressed_data_defer_retry_timer;
 static atomic_uint compressed_data_deferred_timers;
+#define COMPRESSED_DATA_FRAME_TRACE_CAPACITY 256U
+static atomic_int compressed_data_frame_trace_enabled;
+static atomic_uint compressed_data_frame_trace_count;
+static atomic_uint compressed_data_frame_trace_stream_ids
+        [COMPRESSED_DATA_FRAME_TRACE_CAPACITY];
+static atomic_uint
+        compressed_data_frame_trace_flags[COMPRESSED_DATA_FRAME_TRACE_CAPACITY];
+static atomic_uint compressed_data_frame_trace_payload_lens
+        [COMPRESSED_DATA_FRAME_TRACE_CAPACITY];
 
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle handle,
 			       uint64_t deadline_ns);
@@ -95,11 +104,34 @@ int __wrap_tr_reactor_send_data_frame_on_owner(
         struct tr_conn_handle connection, uint32_t flags, uint32_t stream_id,
         uint64_t message_id, struct tr_buffer *payload, int *pool_exhausted)
 {
+	uint32_t payload_len = payload ? payload->len : 0U;
 	int ret = __real_tr_reactor_send_data_frame_on_owner(
 	        connection, flags, stream_id, message_id, payload,
 	        pool_exhausted);
 	if (ret == TR_AGAIN && pool_exhausted && *pool_exhausted)
 		atomic_fetch_add(&compressed_data_pool_retries, 1U);
+	if (ret == TR_OK && atomic_load(&compressed_data_frame_trace_enabled)) {
+		unsigned index =
+		        atomic_load(&compressed_data_frame_trace_count);
+
+		if (index < COMPRESSED_DATA_FRAME_TRACE_CAPACITY) {
+			atomic_store(
+			        &compressed_data_frame_trace_stream_ids[index],
+			        stream_id);
+			atomic_store(&compressed_data_frame_trace_flags[index],
+			             flags);
+			atomic_store(&compressed_data_frame_trace_payload_lens
+			                     [index],
+			             payload_len);
+			/* This wrapper runs on the reactor owner. Publish the
+			 * count only after the trace entry is fully written so
+			 * polling tests cannot observe a partially initialized
+			 * frame.
+			 */
+			atomic_store(&compressed_data_frame_trace_count,
+			             index + 1U);
+		}
+	}
 	return ret;
 }
 
@@ -3666,6 +3698,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	uint8_t source[1024];
 	uint8_t peer_source[1024];
 	uint8_t cancelled_source[1024];
+	uint32_t random_state = 0x6d2b79f5U;
 	int client_fd;
 	int server_fd;
 	int service_close_ret = TR_AGAIN;
@@ -3684,6 +3717,8 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	atomic_store(&compressed_data_watch_registrations, 0U);
 	atomic_store(&compressed_data_defer_retry_timer, 0);
 	atomic_store(&compressed_data_deferred_timers, 0U);
+	atomic_store(&compressed_data_frame_trace_enabled, 0);
+	atomic_store(&compressed_data_frame_trace_count, 0U);
 
 	reactor_config.max_connections = 2U;
 	reactor_config.command_capacity = 64U;
@@ -3691,7 +3726,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	reactor_config.control_tx_item_capacity = 16U;
 	reactor_config.rx_buffer_count = 8U;
 	reactor_config.rx_buffer_size = 4096U;
-	reactor_config.max_payload_len = 4096U;
+	reactor_config.max_payload_len = 128U;
 	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL,
 	                         &fixture.reactor) == TR_OK);
 	assert(tr_reactor_start(fixture.reactor) == TR_OK);
@@ -3824,12 +3859,24 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	assert(tr_reactor_get_stats(fixture.reactor, &reactor_stats) == TR_OK);
 	assert(reactor_stats.tx_item_pool.current == 1U);
 
-	for (uint32_t i = 0; i < sizeof(source); ++i)
-		source[i] = (uint8_t)('a' + (i % 3U));
-	for (uint32_t i = 0; i < sizeof(peer_source); ++i)
-		peer_source[i] = (uint8_t)('x' + (i % 3U));
-	for (uint32_t i = 0; i < sizeof(cancelled_source); ++i)
-		cancelled_source[i] = (uint8_t)('m' + (i % 3U));
+	for (uint32_t i = 0; i < sizeof(source); ++i) {
+		random_state ^= random_state << 13;
+		random_state ^= random_state >> 17;
+		random_state ^= random_state << 5;
+		source[i] = (uint8_t)random_state;
+	}
+	for (uint32_t i = 0; i < sizeof(peer_source); ++i) {
+		random_state ^= random_state << 13;
+		random_state ^= random_state >> 17;
+		random_state ^= random_state << 5;
+		peer_source[i] = (uint8_t)random_state;
+	}
+	for (uint32_t i = 0; i < sizeof(cancelled_source); ++i) {
+		random_state ^= random_state << 13;
+		random_state ^= random_state >> 17;
+		random_state ^= random_state << 5;
+		cancelled_source[i] = (uint8_t)random_state;
+	}
 	assert(tr_message_builder_create(&fixture.budget, sizeof(source),
 	                                 &builder) == TR_OK);
 	assert(tr_message_builder_append(builder, source, sizeof(source)) ==
@@ -3838,6 +3885,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	       TR_OK);
 	atomic_store(&compressed_data_deferred_timers, 0U);
 	atomic_store(&compressed_data_defer_retry_timer, 1);
+	atomic_store(&compressed_data_frame_trace_enabled, 1);
 	assert(tr_stream_send_compressed(compressed_stream,
 	                                 &compressed_message) == TR_OK);
 	assert(tr_message_view(&compressed_message,
@@ -3892,6 +3940,39 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	assert(reactor_stats.tx_item_pool.current == 1U);
 
 	atomic_store(&compressed_data_blocked, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&compressed_data_frame_trace_count) >= 2U)
+			break;
+		struct timespec pause_time = {0, 1000000L};
+		nanosleep(&pause_time, NULL);
+	}
+	{
+		uint32_t first_stream =
+		        atomic_load(&compressed_data_frame_trace_stream_ids[0]);
+		uint32_t second_stream =
+		        atomic_load(&compressed_data_frame_trace_stream_ids[1]);
+		uint32_t first_flags =
+		        atomic_load(&compressed_data_frame_trace_flags[0]);
+		uint32_t second_flags =
+		        atomic_load(&compressed_data_frame_trace_flags[1]);
+		uint32_t first_frame_mask = TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+		                            TR_FRAME_F_COMPRESSED;
+		uint32_t expected_first_flags =
+		        TR_FRAME_F_FIRST | TR_FRAME_F_COMPRESSED;
+
+		assert(atomic_load(&compressed_data_frame_trace_count) >= 2U);
+		assert(first_stream != second_stream);
+		assert((first_stream == compressed_diagnostics.stream_id ||
+		        first_stream ==
+		                peer_compressed_diagnostics.stream_id) &&
+		       (second_stream == compressed_diagnostics.stream_id ||
+		        second_stream ==
+		                peer_compressed_diagnostics.stream_id));
+		assert((first_flags & first_frame_mask) ==
+		       expected_first_flags);
+		assert((second_flags & first_frame_mask) ==
+		       expected_first_flags);
+	}
 	compressed_rx_wait_received(&fixture.server_ctx, 3U);
 	wait_channel_counter(&fixture.server_ctx.events,
 	                     &fixture.server_ctx.events.resets, 1U);
@@ -3901,10 +3982,26 @@ static void test_channel_compressed_send_data_pool_ready(void)
 	assert(atomic_load(&compressed_data_watch_registrations) >= 1U);
 	assert(tr_stream_get_flow_state(compressed_stream, &compressed_flow) ==
 	       TR_OK);
-	assert(compressed_flow.tx_sent_bytes != 0U);
+	assert(compressed_flow.tx_sent_bytes > 128U);
 	assert(tr_stream_get_flow_state(peer_compressed_stream,
 	                                &peer_compressed_flow) == TR_OK);
-	assert(peer_compressed_flow.tx_sent_bytes != 0U);
+	assert(peer_compressed_flow.tx_sent_bytes > 128U);
+	{
+		unsigned frame_count =
+		        atomic_load(&compressed_data_frame_trace_count);
+		assert(frame_count >= 4U);
+		for (unsigned i = 0U; i < frame_count &&
+		                      i < COMPRESSED_DATA_FRAME_TRACE_CAPACITY;
+		     ++i) {
+			uint32_t stream_id = atomic_load(
+			        &compressed_data_frame_trace_stream_ids[i]);
+			uint32_t payload_len = atomic_load(
+			        &compressed_data_frame_trace_payload_lens[i]);
+			assert(stream_id !=
+			       cancelled_compressed_diagnostics.stream_id);
+			assert(payload_len <= 128U);
+		}
+	}
 	assert(tr_channel_get_stats(fixture.client, &channel_stats) == TR_OK);
 	assert(channel_stats.messages_tx == 3U);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
@@ -3949,6 +4046,7 @@ static void test_channel_compressed_send_data_pool_ready(void)
 		assert(peer_compressed_seen == 1U);
 	}
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
+	atomic_store(&compressed_data_frame_trace_enabled, 0);
 	printf("compressed DATA shared TX pool progress: BULK RAW held the "
 	       "only "
 	       "item; a reset BULK compressed waiter released its budget while "

@@ -1697,11 +1697,20 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 				                                      stream);
 				selected = 1;
 			}
-			if (selected && stream)
-				channel->tx_schedule_cursor =
-				        slot + 1U == channel->config.max_streams
-				                ? 0U
-				                : slot + 1U;
+			if (selected && stream) {
+				/* 池满的候选尚未发送，保留为下次扫描起点，
+				 * 避免已发送流持续抢占发送机会。
+				 */
+				if (ret == TR_AGAIN && pool_exhausted) {
+					channel->tx_schedule_cursor = slot;
+				} else {
+					channel->tx_schedule_cursor =
+					        slot + 1U == channel->config
+					                                .max_streams
+					                ? 0U
+					                : slot + 1U;
+				}
+			}
 			if (selected || retry)
 				break;
 		}

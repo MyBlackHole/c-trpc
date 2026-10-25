@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.96` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.97` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -356,6 +356,13 @@ dev.96 在 Shared Channel 的唯一 DATA TX 项仍被 BULK RAW Stream 占用时�
 不改生产运行时/API/ABI/wire；持续饱和公平 SLA、逐消息等待界、吞吐阈值、跨机器基线和
 更广预算/取消矩阵仍待验收。详见
 [共享 DATA TX 池等待期间 RESET 压缩发送者回归](docs/reviews/channel_compressed_data_tx_pool_reset_cancel_20261025.md)。
+
+dev.97 将 Shared Channel 池满恢复回归扩展到多帧高熵 Zstandard 消息，验证 RESET
+一个等待者后，CONTROL 与存活 BULK 流的首个压缩 DATA 帧会先后轮转。该用例首次暴露
+DATA TX 池耗尽时调度游标越过尚未发送的等待者，导致同一 Stream 连续取得发送机会；修复后
+池满分支保留该等待者为下次扫描起点。GCC Release 定向目标修复后连续 2/2 通过，项目全量
+测试 91/91（53.237 秒），帧记录确认 RESET 流没有残留 DATA 且 TX 池和预算归零。详见
+[Shared Channel 多帧压缩 DATA 池恢复公平轮转回归](docs/reviews/channel_compressed_data_tx_fairness_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
