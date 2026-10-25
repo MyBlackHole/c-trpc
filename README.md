@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.99` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.100` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -379,6 +379,13 @@ DATA TX 可写观察，再提交另外三条压缩消息；池恢复后，CONTRO
 本次仅扩展测试、记录和版本号，不改生产/API/ABI/wire。
 详见
 [Shared Channel 三存活压缩流公平轮转回归](docs/reviews/channel_compressed_data_tx_three_waiter_fairness_20261025.md)。
+
+dev.100 将同一 Shared Channel 池恢复场景扩展到四条存活压缩流：测试先确认准备 RESET 的 BULK
+Stream 自身遇到池耗尽，再提交四条同伴（CONTROL/BULK 各两条）。池恢复后，四条存活流的
+FIRST 帧各出现一次，随后八帧按同序继续轮转两轮；RESET 流无 DATA，四条正文完整交付，发送池
+和预算归零。GCC Debug 定向目标连续 6/6 通过，Release 全量结果见回归记录。本次只改测试、记录
+和版本号，不改生产/API/ABI/wire。详见
+[Shared Channel 四存活压缩流公平轮转回归](docs/reviews/channel_compressed_data_tx_four_waiter_fairness_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
