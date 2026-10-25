@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.115` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.116` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -447,6 +447,9 @@ dev.114 为 #241 增加未知内容长度帧的短输出隔离回归：有效 Zs
 
 dev.115 修正 #241 压缩多帧接收回归的空切片：原用例将首帧 body 长度设为 0，实际只把 envelope 放在首帧；现在首帧携带完整 envelope 和一半 Zstandard body，后续 DATA 帧承载余下 body，服务端仍完整解码交付。本次仅改测试、记录和开发版本，不改生产/API/ABI/wire。Release transport 目标连续 3/3 通过。详见
 [压缩 body 跨 DATA 帧接收回归](docs/reviews/channel_compressed_body_fragmentation_20261025.md)。
+
+dev.116 将未知 content size 的有效 Zstandard 帧与压缩 body 跨 DATA 帧切分组合：帧头不提供原始长度，首帧携带完整 envelope 和部分 body，后续帧承载余量；真实 TCP Channel 仍完整解码交付，wire 计数与缓冲池归还通过验证。本次仅改测试、记录和开发版本，不改生产/API/ABI/wire。Release transport 目标连续 3/3 通过。详见
+[未知长度压缩 body 跨 DATA 帧接收回归](docs/reviews/channel_unknown_size_compressed_body_fragmentation_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、

@@ -4803,13 +4803,23 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	payload->len = TR_MESSAGE_ENVELOPE_WIRE_SIZE + (uint32_t)encoded_len;
 	wire_len = payload->len;
 
-	second_encoded_len =
-	        ZSTD_compress(second_encoded, sizeof(second_encoded),
-	                      second_source, sizeof(second_source), 3);
+	unknown_size_encoder = ZSTD_createCCtx();
+	assert(unknown_size_encoder != NULL);
+	assert(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        unknown_size_encoder, ZSTD_c_contentSizeFlag, 0)));
+	assert(!ZSTD_isError(ZSTD_CCtx_setParameter(
+	        unknown_size_encoder, ZSTD_c_compressionLevel, 3)));
+	second_encoded_len = ZSTD_compress2(
+	        unknown_size_encoder, second_encoded, sizeof(second_encoded),
+	        second_source, sizeof(second_source));
 	assert(!ZSTD_isError(second_encoded_len) && second_encoded_len > 1U);
+	assert(ZSTD_getFrameContentSize(second_encoded, second_encoded_len) ==
+	       ZSTD_CONTENTSIZE_UNKNOWN);
+	assert(!ZSTD_isError(ZSTD_freeCCtx(unknown_size_encoder)));
+	unknown_size_encoder = NULL;
 	envelope.encoded_body_bytes = (uint32_t)second_encoded_len;
 	envelope.decoded_message_bytes = second_source_len;
-	/* FIRST 携带完整信封和部分 Zstandard body；后续帧承载剩余 body。 */
+	/* 帧头不带 content size；FIRST 携带完整信封和部分 body。 */
 	split_body_len = second_encoded_len / 2U;
 	assert(split_body_len > 0U && split_body_len < second_encoded_len);
 	first_fragment_len =
