@@ -285,6 +285,11 @@ dev.68 扩展 #242/ERR-A、ERR-C 压缩工作区配额场景：目标流以 `RES
 ASan/UBSan 下完整 `test_rpc_record_stream` 均通过。本切片只加回归测试，不证明连接组的控制面错误分类或完整资源公平矩阵。详见
 [压缩配额期间控制帧进展记录](rpc_v2_compressed_quota_control_progress_20261025.md)。
 
+dev.69 将同一 CONTROL keepalive 进展断言用于 RAW 重组预算失败：预算全部预留期间，失败流仍可通过 RESET 终结，
+PONG 往返完成后释放预算，同 Channel 同伴继续成功。RAW 重组与 Zstandard 解码配额两种场景都在 GCC Release、TSan、
+ASan/UBSan 下通过。仅增加测试；持续压力下延迟上界、连接组错误矩阵与其他预算/信用组合仍待验收。详见
+[重组与解码配额控制面进展记录](rpc_v2_receive_quota_control_progress_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留

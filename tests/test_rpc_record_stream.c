@@ -2674,6 +2674,27 @@ static int reset_quota_stream_on_owner(void *arg)
 	return tr_stream_reset_on_owner(call->stream, TR_ERR_NOMEM);
 }
 
+static void expect_channel_keepalive_progress(struct tr_channel *channel)
+{
+	struct tr_channel_keepalive_config keepalive = {10U, 5000U};
+	struct tr_channel_stats stats;
+	uint64_t pongs_before;
+
+	CHECK(tr_channel_get_stats(channel, &stats) == TR_OK);
+	pongs_before = stats.keepalive_pongs_received;
+	CHECK(tr_channel_enable_keepalive(channel, &keepalive) == TR_OK);
+	for (unsigned attempt = 0U; attempt < 3000U; ++attempt) {
+		struct timespec pause = {0, 1000000L};
+		CHECK(tr_channel_get_stats(channel, &stats) == TR_OK);
+		if (stats.keepalive_pongs_received > pongs_before)
+			break;
+		(void)nanosleep(&pause, NULL);
+	}
+	CHECK(stats.keepalive_pings_sent > 0U);
+	CHECK(stats.keepalive_pongs_received > pongs_before);
+	CHECK(tr_channel_disable_keepalive(channel) == TR_OK);
+}
+
 static void test_receive_quota_preserves_peer(void)
 {
 	struct fixture f;
@@ -2717,6 +2738,7 @@ static void test_receive_quota_preserves_peer(void)
 	CHECK(snapshot(&f.client.calls[0]).cached == 0U);
 	CHECK(!snapshot(&f.server.calls[1]).state.terminal);
 	CHECK(!snapshot(&f.client.calls[1]).state.terminal);
+	expect_channel_keepalive_progress(f.client.channel);
 
 	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
 
@@ -2787,13 +2809,11 @@ static void test_compressed_workspace_exhaustion_preserves_peer(void)
 	struct quota quota = {0};
 	struct call_context *failed, *peer_server;
 	struct send_request request = {0};
-	struct tr_channel_keepalive_config keepalive = {10U, 5000U};
 	struct tr_channel_stats client_stats, server_stats;
 	uint8_t source[4096];
 	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE +
 	             ZSTD_compressBound(sizeof(source))];
 	size_t wire_size;
-	uint64_t pongs_before;
 
 	for (size_t i = 0; i < sizeof(source); ++i)
 		source[i] = (uint8_t)(i % 23U);
@@ -2813,9 +2833,6 @@ static void test_compressed_workspace_exhaustion_preserves_peer(void)
 	              512U * 1024U;
 	CHECK(quota.bytes > 0U);
 	CHECK(tr_memory_budget_reserve(&f.server.budget, quota.bytes) == TR_OK);
-	CHECK(tr_channel_get_stats(f.client.channel, &client_stats) == TR_OK);
-	pongs_before = client_stats.keepalive_pongs_received;
-	CHECK(tr_channel_enable_keepalive(f.client.channel, &keepalive) == TR_OK);
 	wire_size = encode_zstd_message(wire, sizeof(wire), source,
 	                                sizeof(source), 3);
 	raw_send(&f.client.calls[0], wire, wire_size);
@@ -2842,20 +2859,7 @@ static void test_compressed_workspace_exhaustion_preserves_peer(void)
 	      server_stats.bulk_lane_state == TR_CHANNEL_LANE_UP);
 
 	/* 配额仍保留且解码已被拒绝时，CONTROL PING/PONG 仍须完成。 */
-	for (unsigned attempt = 0U;
-	     attempt < 5000U &&
-	     client_stats.keepalive_pongs_received <= pongs_before;
-	     ++attempt) {
-		struct timespec pause = {0, 1000000L};
-		CHECK(tr_channel_get_stats(f.client.channel, &client_stats) ==
-		      TR_OK);
-		if (client_stats.keepalive_pongs_received > pongs_before)
-			break;
-		(void)nanosleep(&pause, NULL);
-	}
-	CHECK(client_stats.keepalive_pings_sent > 0U);
-	CHECK(client_stats.keepalive_pongs_received > pongs_before);
-	CHECK(tr_channel_disable_keepalive(f.client.channel) == TR_OK);
+	expect_channel_keepalive_progress(f.client.channel);
 
 	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
 	request.c = &f.client.calls[1];
