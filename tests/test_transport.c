@@ -2508,12 +2508,17 @@ static void test_channel_asymmetric_stream_windows(void)
 	struct tr_buffer *client_payload;
 	struct tr_buffer *server_oversized;
 	struct tr_buffer *server_payload;
+	struct tr_buffer *client_probe;
+	struct tr_buffer *server_probe;
+	struct tr_buffer *held_client_payload;
+	struct tr_buffer *held_server_payload;
 	struct channel_test_ctx client_ctx;
 	struct channel_test_ctx server_ctx;
 	uint8_t client_source[1536];
 	uint8_t server_source[1024];
 	int client_fd;
 	int server_fd;
+	unsigned i;
 
 	init_channel_test_ctx(&client_ctx);
 	init_channel_test_ctx(&server_ctx);
@@ -2616,9 +2621,11 @@ static void test_channel_asymmetric_stream_windows(void)
 	pthread_mutex_unlock(&client_ctx.lock);
 	tr_buffer_release(server_oversized);
 
-	/* Server 接收窗口为 2 KiB，Client 的 L<W 消息必须被完整接纳。 */
+	/* 两方向先后提交，等待任一接收回调前均已接受，形成双向在途发送。 */
 	assert(tr_stream_send(client_stream, client_payload) == TR_OK);
+	assert(tr_stream_send(server_stream, server_payload) == TR_OK);
 	wait_channel_counter(&server_ctx, &server_ctx.received, 1U);
+	wait_channel_counter(&client_ctx, &client_ctx.received, 1U);
 	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
 	assert(flow.tx_sent_bytes == sizeof(client_source));
 	assert(flow.tx_send_limit == 2048U);
@@ -2627,15 +2634,11 @@ static void test_channel_asymmetric_stream_windows(void)
 	assert(server_ctx.held_payload->len == sizeof(client_source));
 	assert(memcmp(server_ctx.held_payload->data, client_source,
 	              sizeof(client_source)) == 0);
-	client_payload = server_ctx.held_payload;
+	held_client_payload = server_ctx.held_payload;
 	server_ctx.held_payload = NULL;
 	pthread_mutex_unlock(&server_ctx.lock);
-	assert(tr_stream_release_payload(server_peer_stream, client_payload) ==
-	       TR_OK);
 
-	/* 反向 Client 窗口为 1 KiB，L=W 也必须完整交付。 */
-	assert(tr_stream_send(server_stream, server_payload) == TR_OK);
-	wait_channel_counter(&client_ctx, &client_ctx.received, 1U);
+	/* 反向 Client 窗口为 1 KiB，L=W 也必须完整交付并保持应用持有。 */
 	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
 	assert(flow.tx_sent_bytes == sizeof(server_source));
 	assert(flow.tx_send_limit == sizeof(server_source));
@@ -2644,11 +2647,68 @@ static void test_channel_asymmetric_stream_windows(void)
 	assert(client_ctx.held_payload->len == sizeof(server_source));
 	assert(memcmp(client_ctx.held_payload->data, server_source,
 	              sizeof(server_source)) == 0);
-	server_payload = client_ctx.held_payload;
+	held_server_payload = client_ctx.held_payload;
 	client_ctx.held_payload = NULL;
 	pthread_mutex_unlock(&client_ctx.lock);
-	assert(tr_stream_release_payload(client_peer_stream, server_payload) ==
+
+	/* 两条 Stream 的应用消息尚未释放；剩余窗口不足时必须返回 TR_AGAIN。 */
+	assert(tr_buffer_acquire(&client_tx_pool, 513U, &client_probe) ==
 	       TR_OK);
+	memset(client_probe->data, 0x19, 513U);
+	client_probe->len = 513U;
+	assert(tr_buffer_acquire(&server_tx_pool, 1U, &server_probe) == TR_OK);
+	server_probe->data[0] = 0x2bU;
+	server_probe->len = 1U;
+	assert(tr_stream_send(client_stream, client_probe) == TR_AGAIN);
+	assert(tr_stream_send(server_stream, server_probe) == TR_AGAIN);
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == sizeof(client_source));
+	assert(flow.tx_send_limit == 2048U);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == sizeof(server_source));
+	assert(flow.tx_send_limit == 1024U);
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.received == 1U);
+	pthread_mutex_unlock(&server_ctx.lock);
+	pthread_mutex_lock(&client_ctx.lock);
+	assert(client_ctx.received == 1U);
+	pthread_mutex_unlock(&client_ctx.lock);
+
+	assert(tr_stream_release_payload(server_peer_stream,
+	                                 held_client_payload) == TR_OK);
+	assert(tr_stream_release_payload(client_peer_stream,
+	                                 held_server_payload) == TR_OK);
+	for (i = 0U; i < 500U; ++i) {
+		int client_credit_ready =
+		        tr_stream_get_flow_state(client_stream, &flow) ==
+		                TR_OK &&
+		        flow.tx_send_limit >= sizeof(client_source) + 513U;
+		int server_credit_ready =
+		        tr_stream_get_flow_state(server_stream, &flow) ==
+		                TR_OK &&
+		        flow.tx_send_limit >= sizeof(server_source) + 1U;
+
+		if (client_credit_ready && server_credit_ready)
+			break;
+		{
+			struct timespec pause_time;
+			pause_time.tv_sec = 0;
+			pause_time.tv_nsec = 1000000L;
+			nanosleep(&pause_time, NULL);
+		}
+	}
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit >= sizeof(client_source) + 513U);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit >= sizeof(server_source) + 1U);
+	assert(tr_stream_send(client_stream, client_probe) == TR_OK);
+	assert(tr_stream_send(server_stream, server_probe) == TR_OK);
+	wait_channel_counter(&server_ctx, &server_ctx.received, 2U);
+	wait_channel_counter(&client_ctx, &client_ctx.received, 2U);
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == sizeof(client_source) + 513U);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == sizeof(server_source) + 1U);
 
 	assert(tr_stream_close(client_stream) == TR_OK);
 	assert(tr_stream_close(server_stream) == TR_OK);
