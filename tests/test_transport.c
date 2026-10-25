@@ -2489,6 +2489,181 @@ static void test_channel_stream_flow_control(void)
 	destroy_channel_test_ctx(&client_ctx);
 }
 
+static void test_channel_asymmetric_stream_windows(void)
+{
+	struct tr_reactor_config reactor_config = {0};
+	struct tr_channel_config channel_config = {0};
+	struct tr_reactor *reactor = NULL;
+	struct tr_channel *client_channel = NULL;
+	struct tr_channel *server_channel = NULL;
+	struct tr_conn_handle client_conn;
+	struct tr_conn_handle server_conn;
+	struct tr_stream_handle client_stream;
+	struct tr_stream_handle server_stream;
+	struct tr_stream_handle server_peer_stream;
+	struct tr_stream_handle client_peer_stream;
+	struct tr_stream_flow_state flow;
+	struct tr_buffer_pool client_tx_pool;
+	struct tr_buffer_pool server_tx_pool;
+	struct tr_buffer *client_payload;
+	struct tr_buffer *server_oversized;
+	struct tr_buffer *server_payload;
+	struct channel_test_ctx client_ctx;
+	struct channel_test_ctx server_ctx;
+	uint8_t client_source[2048];
+	uint8_t server_source[1024];
+	int client_fd;
+	int server_fd;
+
+	init_channel_test_ctx(&client_ctx);
+	init_channel_test_ctx(&server_ctx);
+	client_ctx.take_first = 1;
+	server_ctx.take_first = 1;
+	make_tcp_pair(&client_fd, &server_fd);
+
+	reactor_config.max_connections = 4U;
+	reactor_config.command_capacity = 64U;
+	reactor_config.tx_item_capacity = 16U;
+	reactor_config.control_tx_item_capacity = 16U;
+	reactor_config.rx_buffer_count = 8U;
+	reactor_config.rx_buffer_size = 4096U;
+	reactor_config.max_payload_len = 4096U;
+	reactor_config.rx_budget_bytes = 64U * 1024U;
+	reactor_config.tx_budget_bytes = 64U * 1024U;
+	assert(tr_reactor_create(&reactor_config, NULL, NULL, NULL, &reactor) ==
+	       TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, client_fd, &client_conn) == TR_OK);
+	assert(tr_reactor_adopt_fd(reactor, server_fd, &server_conn) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_CLIENT;
+	channel_config.mode = TR_CHANNEL_SHARED_CONNECTION;
+	channel_config.max_streams = 8U;
+	channel_config.initial_window_bytes = 1024U;
+	channel_config.window_update_threshold_bytes = 512U;
+	assert(tr_channel_create(&channel_config, client_conn, client_conn,
+	                         channel_test_on_data,
+	                         channel_test_on_stream_event,
+	                         channel_test_on_channel_event, &client_ctx,
+	                         &client_channel) == TR_OK);
+
+	channel_config.role = TR_CHANNEL_SERVER;
+	channel_config.initial_window_bytes = 2048U;
+	channel_config.window_update_threshold_bytes = 1024U;
+	assert(tr_channel_create(&channel_config, server_conn, server_conn,
+	                         channel_test_on_data,
+	                         channel_test_on_stream_event,
+	                         channel_test_on_channel_event, &server_ctx,
+	                         &server_channel) == TR_OK);
+	wait_channel_lane_up(client_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(server_channel, TR_LANE_CONTROL);
+	wait_channel_lane_up(client_channel, TR_LANE_BULK);
+	wait_channel_lane_up(server_channel, TR_LANE_BULK);
+
+	assert(tr_stream_open(client_channel, TR_LANE_BULK, &client_stream) ==
+	       TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.opened, 1U);
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 1U);
+	pthread_mutex_lock(&server_ctx.lock);
+	server_peer_stream = server_ctx.last_stream;
+	pthread_mutex_unlock(&server_ctx.lock);
+
+	assert(tr_stream_open(server_channel, TR_LANE_BULK, &server_stream) ==
+	       TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.opened, 2U);
+	wait_channel_counter(&server_ctx, &server_ctx.opened, 2U);
+	pthread_mutex_lock(&client_ctx.lock);
+	client_peer_stream = client_ctx.last_stream;
+	pthread_mutex_unlock(&client_ctx.lock);
+
+	/* 每个方向使用对端接收端各自的窗口，而不是本地配置的窗口。 */
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit == 2048U);
+	assert(tr_stream_get_flow_state(server_peer_stream, &flow) == TR_OK);
+	assert(flow.rx_advertised_limit == 2048U);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit == 1024U);
+	assert(tr_stream_get_flow_state(client_peer_stream, &flow) == TR_OK);
+	assert(flow.rx_advertised_limit == 1024U);
+
+	assert(tr_buffer_pool_init(&client_tx_pool, 1U,
+	                           sizeof(client_source)) == TR_OK);
+	assert(tr_buffer_pool_init(&server_tx_pool, 2U, 2048U) == TR_OK);
+	assert(tr_buffer_acquire(&client_tx_pool, sizeof(client_source),
+	                         &client_payload) == TR_OK);
+	assert(tr_buffer_acquire(&server_tx_pool, 1025U, &server_oversized) ==
+	       TR_OK);
+	assert(tr_buffer_acquire(&server_tx_pool, sizeof(server_source),
+	                         &server_payload) == TR_OK);
+	for (uint32_t i = 0U; i < sizeof(client_source); ++i)
+		client_source[i] = (uint8_t)(i ^ 0x6dU);
+	for (uint32_t i = 0U; i < sizeof(server_source); ++i)
+		server_source[i] = (uint8_t)(i ^ 0xa7U);
+	memcpy(client_payload->data, client_source, sizeof(client_source));
+	client_payload->len = sizeof(client_source);
+	memset(server_oversized->data, 0x3c, 1025U);
+	server_oversized->len = 1025U;
+	memcpy(server_payload->data, server_source, sizeof(server_source));
+	server_payload->len = sizeof(server_source);
+
+	assert(tr_stream_send(server_stream, server_oversized) ==
+	       TR_ERR_BAD_LENGTH);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == 0U);
+	assert(flow.tx_send_limit == 1024U);
+	pthread_mutex_lock(&client_ctx.lock);
+	assert(client_ctx.received == 0U);
+	pthread_mutex_unlock(&client_ctx.lock);
+	tr_buffer_release(server_oversized);
+
+	/* Server 接收窗口为 2 KiB，Client 的 L=W 消息必须被完整接纳。 */
+	assert(tr_stream_send(client_stream, client_payload) == TR_OK);
+	wait_channel_counter(&server_ctx, &server_ctx.received, 1U);
+	assert(tr_stream_get_flow_state(client_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == sizeof(client_source));
+	assert(flow.tx_send_limit == sizeof(client_source));
+	pthread_mutex_lock(&server_ctx.lock);
+	assert(server_ctx.held_payload != NULL);
+	assert(server_ctx.held_payload->len == sizeof(client_source));
+	assert(memcmp(server_ctx.held_payload->data, client_source,
+	              sizeof(client_source)) == 0);
+	client_payload = server_ctx.held_payload;
+	server_ctx.held_payload = NULL;
+	pthread_mutex_unlock(&server_ctx.lock);
+	assert(tr_stream_release_payload(server_peer_stream, client_payload) ==
+	       TR_OK);
+
+	/* 反向 Client 窗口为 1 KiB，L=W 也必须完整交付。 */
+	assert(tr_stream_send(server_stream, server_payload) == TR_OK);
+	wait_channel_counter(&client_ctx, &client_ctx.received, 1U);
+	assert(tr_stream_get_flow_state(server_stream, &flow) == TR_OK);
+	assert(flow.tx_sent_bytes == sizeof(server_source));
+	assert(flow.tx_send_limit == sizeof(server_source));
+	pthread_mutex_lock(&client_ctx.lock);
+	assert(client_ctx.held_payload != NULL);
+	assert(client_ctx.held_payload->len == sizeof(server_source));
+	assert(memcmp(client_ctx.held_payload->data, server_source,
+	              sizeof(server_source)) == 0);
+	server_payload = client_ctx.held_payload;
+	client_ctx.held_payload = NULL;
+	pthread_mutex_unlock(&client_ctx.lock);
+	assert(tr_stream_release_payload(client_peer_stream, server_payload) ==
+	       TR_OK);
+
+	assert(tr_stream_close(client_stream) == TR_OK);
+	assert(tr_stream_close(server_stream) == TR_OK);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_channel_destroy(client_channel) == TR_OK);
+	assert(tr_channel_destroy(server_channel) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	wait_for_pool_full(&client_tx_pool, 1U);
+	wait_for_pool_full(&server_tx_pool, 2U);
+	tr_buffer_pool_destroy(&client_tx_pool);
+	tr_buffer_pool_destroy(&server_tx_pool);
+	destroy_channel_test_ctx(&server_ctx);
+	destroy_channel_test_ctx(&client_ctx);
+}
+
 static void test_channel_rejects_unimplemented_compression_advertisement(void)
 {
 	struct tr_reactor_config reactor_config = {0};
@@ -7010,6 +7185,7 @@ int main(void)
 	test_channel_stream_id_index_collision_delete();
 	test_channel_stream_slot_reuse();
 	test_channel_stream_flow_control();
+	test_channel_asymmetric_stream_windows();
 	test_channel_rejects_unimplemented_compression_advertisement();
 	test_channel_message_service_binding_owner_and_reactor();
 	test_channel_compressed_send_data_pool_ready();
