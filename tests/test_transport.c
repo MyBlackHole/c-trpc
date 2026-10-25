@@ -3100,7 +3100,7 @@ struct compressed_rx_test_ctx {
 	struct channel_test_ctx events;
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
-	uint8_t payloads[8][2048];
+	uint8_t payloads[8][4096];
 	uint32_t payload_lens[8];
 	uint64_t message_ids[8];
 	uint32_t stream_ids[8];
@@ -3207,13 +3207,12 @@ static int compressed_rx_bind_service_on_owner(void *arg)
 	return request->ret;
 }
 
-static void
-compressed_rx_send_invalid_message(struct compressed_rx_fixture *fixture,
-                                   struct tr_buffer_pool *payload_pool,
-                                   struct tr_message_envelope envelope,
-                                   const uint8_t *body, uint32_t body_bytes,
-                                   unsigned open_target, unsigned reset_target,
-                                   uint32_t active_streams)
+static void compressed_rx_send_invalid_message(
+        struct compressed_rx_fixture *fixture,
+        struct tr_buffer_pool *payload_pool,
+        struct tr_message_envelope envelope, const uint8_t *body,
+        uint32_t body_bytes, unsigned open_target, unsigned reset_target,
+        uint32_t active_streams, unsigned expected_received)
 {
 	struct tr_stream_handle client_stream;
 	struct tr_stream_diagnostics diagnostics = {0};
@@ -3246,7 +3245,7 @@ compressed_rx_send_invalid_message(struct compressed_rx_fixture *fixture,
 	wait_channel_active_streams(fixture->server, active_streams);
 	pthread_mutex_lock(&fixture->server_ctx.events.lock);
 	assert(fixture->server_ctx.events.last_reset_status == TR_ERR_STATE);
-	assert(fixture->server_ctx.events.received == 6U);
+	assert(fixture->server_ctx.events.received == expected_received);
 	pthread_mutex_unlock(&fixture->server_ctx.events.lock);
 	wait_for_pool_full(payload_pool, 3U);
 }
@@ -4667,6 +4666,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	uint8_t oversized_encoded[8192];
 	uint8_t third_source[300];
 	uint8_t oversized_source[4096];
+	uint8_t expansion_source[4096];
 	uint8_t trailing_encoded[256];
 	uint8_t trailing_body[257];
 	uint8_t boundary_source[103];
@@ -4683,6 +4683,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	size_t second_encoded_len;
 	size_t third_encoded_len;
 	size_t oversized_encoded_len;
+	size_t expansion_encoded_len;
 	size_t trailing_encoded_len;
 	size_t boundary_encoded_len;
 	size_t invalid_flags_encoded_len;
@@ -5002,6 +5003,50 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 		              sizeof(fourth_source)) == 0);
 		pthread_mutex_unlock(&fixture.server_ctx.lock);
 	}
+	memset(expansion_source, 0x5aU, sizeof(expansion_source));
+	expansion_encoded_len =
+	        ZSTD_compress(encoded, sizeof(encoded), expansion_source,
+		              sizeof(expansion_source), 3);
+	assert(!ZSTD_isError(expansion_encoded_len));
+	assert(expansion_encoded_len < 64U);
+	assert(TR_MESSAGE_ENVELOPE_WIRE_SIZE + expansion_encoded_len <
+	       channel_config.initial_window_bytes);
+	assert(tr_stream_get_flow_state(compressed_client_stream, &flow) ==
+	       TR_OK);
+	{
+		uint64_t wire_before = flow.tx_sent_bytes;
+		assert(tr_message_builder_create(&fixture.budget,
+		                                 sizeof(expansion_source),
+		                                 &message_builder) == TR_OK);
+		assert(tr_message_builder_append(
+		               message_builder, expansion_source,
+		               sizeof(expansion_source)) == TR_OK);
+		assert(tr_message_builder_publish(
+		               &message_builder, &compressed_message) == TR_OK);
+		assert(tr_stream_send_compressed(compressed_client_stream,
+		                                 &compressed_message) == TR_OK);
+		assert(tr_message_view(&compressed_message,
+		                       &(struct tr_message_view){0}) ==
+		       TR_ERR_STATE);
+		compressed_rx_wait_received(&fixture.server_ctx, 6U);
+		assert(tr_stream_get_flow_state(compressed_client_stream,
+		                                &flow) == TR_OK);
+		assert(flow.tx_sent_bytes > wire_before);
+		assert(flow.tx_sent_bytes - wire_before <
+		       channel_config.initial_window_bytes);
+		compressed_rx_wait_flow(&fixture.server_ctx,
+		                        compressed_server_stream,
+		                        flow.tx_sent_bytes);
+		pthread_mutex_lock(&fixture.server_ctx.lock);
+		assert(fixture.server_ctx.stream_ids[5] ==
+		       compressed_diagnostics.stream_id);
+		assert(fixture.server_ctx.message_ids[5] == 3U);
+		assert(fixture.server_ctx.payload_lens[5] ==
+		       sizeof(expansion_source));
+		assert(memcmp(fixture.server_ctx.payloads[5], expansion_source,
+		              sizeof(expansion_source)) == 0);
+		pthread_mutex_unlock(&fixture.server_ctx.lock);
+	}
 	{
 		uint32_t random_state = 0x13579bdfU;
 		for (uint32_t i = 0; i < sizeof(boundary_source); ++i) {
@@ -5034,13 +5079,13 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	                       TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
 	                               TR_FRAME_F_COMPRESSED,
 	                       diagnostics.stream_id, 3U, payload) == TR_OK);
-	compressed_rx_wait_received(&fixture.server_ctx, 6U);
+	compressed_rx_wait_received(&fixture.server_ctx, 7U);
 	compressed_rx_wait_flow(&fixture.server_ctx, server_stream,
 	                        wire_len + second_wire_len + boundary_wire_len);
 	pthread_mutex_lock(&fixture.server_ctx.lock);
-	assert(fixture.server_ctx.message_ids[5] == 3U);
-	assert(fixture.server_ctx.payload_lens[5] == sizeof(boundary_source));
-	assert(memcmp(fixture.server_ctx.payloads[5], boundary_source,
+	assert(fixture.server_ctx.message_ids[6] == 3U);
+	assert(fixture.server_ctx.payload_lens[6] == sizeof(boundary_source));
+	assert(memcmp(fixture.server_ctx.payloads[6], boundary_source,
 	              sizeof(boundary_source)) == 0);
 	pthread_mutex_unlock(&fixture.server_ctx.lock);
 	wait_for_pool_full(&payload_pool, 3U);
@@ -5074,7 +5119,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	wait_channel_active_streams(fixture.client, 3U);
 	wait_channel_active_streams(fixture.server, 3U);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
-	assert(fixture.server_ctx.events.received == 6U);
+	assert(fixture.server_ctx.events.received == 7U);
 	assert(fixture.server_ctx.events.last_reset_status == TR_ERR_STATE);
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	wait_for_pool_full(&payload_pool, 3U);
@@ -5118,7 +5163,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	assert(fixture.client_ctx.last_reset_status == TR_ERR_NOMEM);
 	pthread_mutex_unlock(&fixture.client_ctx.lock);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
-	assert(fixture.server_ctx.events.received == 6U);
+	assert(fixture.server_ctx.events.received == 7U);
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	wait_channel_active_streams(fixture.client, 3U);
 	wait_channel_active_streams(fixture.server, 3U);
@@ -5126,28 +5171,29 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 4096U, 1U},
-	        (const uint8_t[]){0U}, 1U, 6U, 3U, 3U);
+	        (const uint8_t[]){0U}, 1U, 6U, 3U, 3U, 7U);
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 4097U},
-	        (const uint8_t[]){0U}, 1U, 7U, 4U, 3U);
+	        (const uint8_t[]){0U}, 1U, 7U, 4U, 3U, 7U);
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD, 1U, 1U},
-	        (const uint8_t[]){0U}, 1U, 8U, 5U, 3U);
+	        (const uint8_t[]){0U}, 1U, 8U, 5U, 3U, 7U);
 	trailing_encoded_len =
 	        ZSTD_compress(trailing_encoded, sizeof(trailing_encoded),
-	                      trailing_source, sizeof(trailing_source), 3);
+		              trailing_source, sizeof(trailing_source), 3);
 	assert(!ZSTD_isError(trailing_encoded_len));
 	memcpy(trailing_body, trailing_encoded, trailing_encoded_len);
 	trailing_body[trailing_encoded_len] = 0xa5U;
 	compressed_rx_send_invalid_message(
 	        &fixture, &payload_pool,
 	        (struct tr_message_envelope){TR_MESSAGE_CODEC_ZSTD,
-	                                     (uint32_t)trailing_encoded_len +
-	                                             1U,
-	                                     (uint32_t)sizeof(trailing_source)},
-	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 9U, 6U, 3U);
+		                             (uint32_t)trailing_encoded_len +
+		                                     1U,
+		                             (uint32_t)sizeof(trailing_source)},
+	        trailing_body, (uint32_t)trailing_encoded_len + 1U, 9U, 6U, 3U,
+	        7U);
 	assert(tr_stream_open(fixture.client, TR_LANE_CONTROL,
 	                      &invalid_flags_client_stream) == TR_OK);
 	wait_channel_counter(&fixture.client_ctx, &fixture.client_ctx.opened,
@@ -5162,7 +5208,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	       invalid_flags_encoded_len != 0U);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
 	server_resets_before = fixture.server_ctx.events.resets;
-	assert(fixture.server_ctx.events.received == 6U);
+	assert(fixture.server_ctx.events.received == 7U);
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	pthread_mutex_lock(&fixture.client_ctx.lock);
 	client_resets_before = fixture.client_ctx.resets;
@@ -5194,7 +5240,7 @@ static void test_channel_compressed_data_single_and_multi_frame_decode(void)
 	wait_channel_active_streams(fixture.client, 3U);
 	wait_channel_active_streams(fixture.server, 3U);
 	pthread_mutex_lock(&fixture.server_ctx.events.lock);
-	assert(fixture.server_ctx.events.received == 6U);
+	assert(fixture.server_ctx.events.received == 7U);
 	assert(fixture.server_ctx.events.last_reset_status == TR_ERR_STATE);
 	pthread_mutex_unlock(&fixture.server_ctx.events.lock);
 	wait_for_pool_full(&payload_pool, 3U);
