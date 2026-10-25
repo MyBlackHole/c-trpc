@@ -49,6 +49,9 @@ struct fixture {
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
 	int hold_data;
+	int block_reset_callback;
+	int reset_callback_blocked;
+	int release_reset_callback;
 	int queue_reset_predecessors;
 	int reopen_on_closed;
 	int circular_stream_tracking;
@@ -205,6 +208,7 @@ static void on_stream(struct tr_stream_handle stream,
                       enum tr_stream_event event, int status, void *arg)
 {
 	struct fixture *f = arg;
+	int block_reset_callback = 0;
 	int queue_predecessors = 0;
 	int reopen = 0;
 	assert(pthread_mutex_lock(&f->lock) == 0);
@@ -226,6 +230,10 @@ static void on_stream(struct tr_stream_handle stream,
 		}
 		queue_predecessors = f->queue_reset_predecessors;
 		f->queue_reset_predecessors = 0;
+		block_reset_callback = f->block_reset_callback;
+		f->block_reset_callback = 0;
+		if (block_reset_callback)
+			f->reset_callback_blocked = 1;
 	} else if (event == TR_STREAM_EVENT_CLOSED) {
 		++f->closed;
 		reopen = f->reopen_on_closed;
@@ -243,6 +251,12 @@ static void on_stream(struct tr_stream_handle stream,
 	}
 	assert(pthread_cond_broadcast(&f->cond) == 0);
 	assert(pthread_mutex_unlock(&f->lock) == 0);
+	if (block_reset_callback) {
+		assert(pthread_mutex_lock(&f->lock) == 0);
+		while (!f->release_reset_callback)
+			assert(pthread_cond_wait(&f->cond, &f->lock) == 0);
+		assert(pthread_mutex_unlock(&f->lock) == 0);
+	}
 	if (queue_predecessors) {
 		/* RESET 还未交给 Reactor；在真实 owner 回调中固定四条前驱。 */
 		for (unsigned i = 0; i < 4; ++i)
@@ -338,6 +352,28 @@ static void barrier(struct fixture *f, unsigned lane)
 		if (h.type == TR_FRAME_PONG && h.message_id == 999)
 			break;
 	}
+}
+
+static void barrier_without_stream_window_update(struct fixture *f,
+                                                 unsigned lane,
+                                                 uint32_t stream_id, int status)
+{
+	unsigned resets = 0U;
+	struct tr_frame_header h;
+
+	send_frame(f, lane, TR_FRAME_PING, 0, 0, 1000U, NULL, 0);
+	do {
+		h = receive_frame(f, lane);
+		if (h.type == TR_FRAME_WINDOW_UPDATE &&
+		    h.stream_id == stream_id)
+			assert(!"RESET stream received late WINDOW_UPDATE");
+		if (h.type == TR_FRAME_STREAM_RESET &&
+		    h.stream_id == stream_id) {
+			assert(h.message_id == (uint64_t)-status);
+			++resets;
+		}
+	} while (h.type != TR_FRAME_PONG || h.message_id != 1000U);
+	assert(resets == 1U);
 }
 
 static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
@@ -480,6 +516,12 @@ static int reset_owner(void *arg)
 	int ret = tr_stream_reset_on_owner(r->stream, r->status);
 	fail_reset_arm = 0;
 	return ret;
+}
+
+static int reactor_noop(void *arg)
+{
+	(void)arg;
+	return TR_OK;
 }
 
 static int reset(struct fixture *f, struct tr_stream_handle stream, int status)
@@ -1734,6 +1776,71 @@ static void test_reset_releases_held_payload_without_credit(void)
 	destroy_fixture(&f);
 }
 
+static void test_reset_begun_held_payload_release_without_credit(void)
+{
+	struct fixture f;
+	uint8_t bytes[128] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_buffer *held;
+	struct tr_stream_handle reset_stream;
+	struct tr_stream_handle live_stream;
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	reset_stream = open_remote(&f, 0, 1, 1);
+	live_stream = open_remote(&f, 0, 3, 2);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST, 1, 1, bytes, 64U);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_LAST, 1, 1, bytes + 64U,
+	           64U);
+	wait_count(&f, &f.received, 1U);
+	assert(f.held && f.held_stream.generation == reset_stream.generation);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.block_reset_callback = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* RESET 已把流置为 RESETTING，但 owner 回调尚未退役槽位。 */
+	peer_reset(&f, 0, 1, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.resets, 1U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.reset_callback_blocked);
+	held = f.held;
+	assert(held);
+	f.held = NULL;
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* 应用在线程外释放已交付正文；RESETTING 状态不得补发窗口信用。 */
+	assert(tr_stream_release_payload(reset_stream, held) == TR_OK);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == sizeof(bytes));
+	assert(flow.rx_consumed_bytes == sizeof(bytes));
+	assert(flow.rx_advertised_limit == WINDOW);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_reset_callback = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	/* 所有先前的 owner 命令完成后，再检查 wire 上没有迟到信用帧。 */
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	barrier_without_stream_window_update(&f, 0, 1U, TR_ERR_TIMEOUT);
+
+	/* 仍存活的同伴流可以交付消息并正常完成双向 RESET。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, 8U);
+	wait_count(&f, &f.received, 2U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_timer_failure_and_partial(int stopping)
 {
 	struct fixture f;
@@ -1934,6 +2041,7 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
+	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
