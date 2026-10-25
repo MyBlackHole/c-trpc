@@ -26,7 +26,7 @@
 - GCC TSan：`test_reset_tombstone_index` 构建并运行通过。
 - GCC ASan/UBSan：`test_reset_tombstone_index` 构建并运行通过。
 - `git clang-format --diff` 与 `git diff --check` 通过；测试临时目录位于仓库 `build/test-tmp`，未写入 `/tmp`。
-- dev.75 推送后的 GitHub CI 与 RPC smoke 检查尚待完成。
+- [dev.75 push CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40156017294)、[PR CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40156020823) 与 [RPC benchmark smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40156021211) 全部通过。
 
 ## 影响、性能与风险
 
@@ -40,7 +40,7 @@
 
 1. 最大配置为 40,000 个唯一、非零句柄复合键，索引容量为 131072，全部落入同一 home。
 2. 尾部查找、簇首删除、删除后查找、环槽复用、旧键 stale 查询的槽检查数与上文一致。
-3. `test_reset_tombstone_index` 在 Release、TSan、ASan/UBSan 下通过，远程 CI 与 smoke 检查通过后记录最终结果。
+3. `test_reset_tombstone_index` 在 Release、TSan、ASan/UBSan 下通过；GitHub push/PR CI 与 smoke 检查通过。
 4. 真实高频 CPU/延迟及连接组剩余 ERR-A/B/C/D/E 验收继续列为未完成项。
 
 版本变更：`xmake.lua` 与 README 从 `2.0.0-dev.74` 更新到 `2.0.0-dev.75`。

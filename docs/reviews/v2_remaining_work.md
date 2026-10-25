@@ -323,7 +323,7 @@ backward-shift。现统计完整删除槽位检查；3 项环绕簇删除断言 
 
 dev.75 为 #242/ERR-E 补上 40k 键全部同 home 的索引层确定性边界：在 131072 槽表中构造 40000 个唯一复合键，精确核对
 尾部查找 40000 次、簇首删除 80001 次、FIFO 槽复用后的插入与查找各 40000 次、旧键查询 40001 次。Release、TSan、
-ASan/UBSan 下 `test_reset_tombstone_index` 本地通过；该输入是合成索引布局，不证明真实连接的持续高频 CPU/延迟，远程 CI 待验收。
+ASan/UBSan 下 `test_reset_tombstone_index` 本地通过，push CI、PR CI 与 RPC benchmark smoke 均通过；该输入是合成索引布局，不证明真实连接的持续高频 CPU/延迟。
 详见[最大容量同 home 成本记录](rpc_v2_reset_tombstone_same_home_max_capacity_20261025.md)。
 
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)

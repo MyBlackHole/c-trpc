@@ -285,7 +285,7 @@ dev.73 扩展连接组跨成员 draining 回归：同一 CONTROL 下两个不同
 dev.74 修正 RESET 墓碑索引删除成本计量：`remove` 的测试探测计数现包含定位、探测簇校验与 backward-shift 的全部槽位检查；3 项环绕簇删除为 7 次检查，256 路同 home 碰撞删除为 513 次。最大容量碰撞周转的总工作上界现计入删除扫描。Release、TSan、ASan/UBSan 下 `test_reset_tombstone_index` 与 `test_stream_reset` 均通过；40k 同 home 碰撞和真实高频延迟仍待独立验收。详见
 [RESET 墓碑删除成本计量记录](docs/reviews/rpc_v2_reset_tombstone_remove_cost_accounting_20261025.md)。
 
-dev.75 为 #242/ERR-E 在 `max_streams=40000`、131072 槽下增加同 home 最坏输入：代数反解生成 40,000 个句柄非零且互异的复合键，验证尾部查找 40,000 次、簇首删除 80,001 次、复用槽位后的插入与命中各 40,000 次，以及旧键 stale 查询 40,001 次。Release、TSan、ASan/UBSan 下 `test_reset_tombstone_index` 均通过；这是索引层合成状态，不测量真实连接的持续高频 CPU/延迟，远程 CI 仍待验收。详见
+dev.75 为 #242/ERR-E 在 `max_streams=40000`、131072 槽下增加同 home 最坏输入：代数反解生成 40,000 个句柄非零且互异的复合键，验证尾部查找 40,000 次、簇首删除 80,001 次、复用槽位后的插入与命中各 40,000 次，以及旧键 stale 查询 40,001 次。Release、TSan、ASan/UBSan 下 `test_reset_tombstone_index` 均通过；push CI、PR CI 和 RPC benchmark smoke 全部通过。这是索引层合成状态，不测量真实连接的持续高频 CPU/延迟。详见
 [RESET 墓碑索引最大容量同 home 成本记录](docs/reviews/rpc_v2_reset_tombstone_same_home_max_capacity_20261025.md)。
 
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
