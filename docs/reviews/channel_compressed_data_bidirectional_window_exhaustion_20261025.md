@@ -8,7 +8,7 @@
 
 ## 场景与断言
 
-- Client/Server 在真实独立 CONTROL/BULK TCP 连接上建立 Shared Channel Split 模式，并在两端启用 Zstandard 接收。
+- Client/Server 在真实独立 CONTROL/BULK TCP 连接上建立 Split Channel，并在两端启用 Zstandard 接收。
 - 双方暂停各自的 BULK 接收；Client 与 Server 在同一 BULK Stream 的相反方向分别发送不同的 300 字节正文。
 - 两条 DATA 发送均停在 `tx_sent_bytes == tx_send_limit == 128`，对应接收端尚未交付消息。
 - 两条 BULK 都受阻期间，双方在 CONTROL Stream 互发 Zstandard 消息；对端均先解码交付，并按 Stream ID、消息 ID 和正文逐字节校验，同时再次确认两方向 BULK 仍停在 128/128。
