@@ -56,6 +56,7 @@ struct tr_rpc_v2_reply {
 static _Thread_local const struct tr_rpc_v2_cancel *tr_v2_active_cancel;
 static _Thread_local struct tr_rpc_v2_reply *tr_v2_active_reply;
 static _Thread_local unsigned tr_v2_callback_depth;
+static _Thread_local unsigned tr_v2_work_callback_depth;
 static _Atomic uint64_t tr_dispatch_instances;
 
 #define TR_RPC_V2_CONTEXT_RESERVED UINT64_MAX
@@ -89,6 +90,11 @@ static int tr_reply_fail(struct tr_rpc_record_reply *reply, int error,
 int tr_rpc_record_dispatch_in_callback(void)
 {
 	return tr_v2_callback_depth != 0;
+}
+
+int tr_rpc_record_dispatch_in_work_callback(void)
+{
+	return tr_v2_work_callback_depth != 0;
 }
 
 int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel)
@@ -1041,8 +1047,10 @@ tr_dispatch_v2_work(struct tr_dispatch_job *job,
 	tr_v2_active_cancel = &public_cancel;
 	tr_v2_active_reply = &public_reply;
 	++tr_v2_callback_depth;
+	++tr_v2_work_callback_depth;
 	result = job->v2_work(job->v2_id, &request, &public_cancel,
 	                      &public_reply, job->arg);
+	--tr_v2_work_callback_depth;
 	--tr_v2_callback_depth;
 	tr_v2_active_cancel = prior_cancel;
 	tr_v2_active_reply = prior_reply;

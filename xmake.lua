@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.165")
+set_version("2.0.0-dev.166")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -1087,6 +1087,16 @@ target("test_rpc_v2_sdk")
     add_undefines("NDEBUG")
     add_defines("TR_RPC_V2_TEST_FAULTS")
     add_ldflags("-Wl,--wrap=tr_stream_open", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 验证 Server V2 work worker 发起跨 Reactor 子 Call 的嵌套语义。
+target("test_rpc_v2_nested_calls")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_nested_calls.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

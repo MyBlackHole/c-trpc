@@ -59,6 +59,8 @@ struct tr_rpc_dispatch_method {
 /* 包含停止清理线程上的公共终局回调；门面须据此拒绝同步生命周期
  * 重入。查询本线程上下文，不取得任何对象的生命周期引用。 */
 int tr_rpc_record_dispatch_in_callback(void);
+/* 仅 tr_rpc_v2_work_fn 正在执行时为真；authorize 与终局/owner hook 不计入。 */
+int tr_rpc_record_dispatch_in_work_callback(void);
 struct tr_rpc_record_dispatch_config {
 	uint32_t capacity;
 	/* 含排队、已投递、已完成待发送的全部事件；超限终止该调用而非

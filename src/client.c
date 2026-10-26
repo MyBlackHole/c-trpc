@@ -1745,22 +1745,43 @@ int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
 	return tr_channel_wait_ready(
 		client->channel, TR_LANE_CONTROL, timeout_ms);
 }
-static int tr_client_record_sync(struct tr_rpc_record_client *client,
-                                 int (*fn)(void *arg), void *arg)
+static int tr_client_record_sync_impl(struct tr_rpc_record_client *client,
+                                      int (*fn)(void *arg), void *arg,
+                                      int allow_server_work_submission)
 {
 	struct tr_reactor *owner;
+	int dispatch_callback;
+	int forbidden_dispatch_callback;
 
 	if (!client)
 		return TR_ERR_INVALID;
 	owner = tr_rpc_record_client_reactor(client);
 	if (!owner)
 		return TR_ERR_STATE;
+	dispatch_callback = tr_rpc_record_dispatch_in_callback();
+	forbidden_dispatch_callback =
+	        dispatch_callback &&
+	        (!allow_server_work_submission ||
+	         !tr_rpc_record_dispatch_in_work_callback());
 	if ((tr_reactor_in_owner_context() ||
 	     tr_rpc_record_client_in_callback() ||
-	     tr_rpc_record_dispatch_in_callback()) &&
+	     forbidden_dispatch_callback) &&
 	    !tr_reactor_in_owner_context_for(owner))
 		return TR_ERR_STATE;
 	return tr_reactor_call(owner, fn, arg);
+}
+
+static int tr_client_record_sync(struct tr_rpc_record_client *client,
+                                 int (*fn)(void *arg), void *arg)
+{
+	return tr_client_record_sync_impl(client, fn, arg, 0);
+}
+
+static int
+tr_client_record_sync_call_submission(struct tr_rpc_record_client *client,
+                                      int (*fn)(void *arg), void *arg)
+{
+	return tr_client_record_sync_impl(client, fn, arg, 1);
 }
 
 struct tr_client_record_start_request {
@@ -1827,7 +1848,8 @@ static int tr_client_v2_start(
         struct tr_client *client, uint32_t service_id, uint32_t method_id,
         const struct tr_rpc_call_options *options,
         const struct tr_rpc_v2_client_callbacks *callbacks,
-        struct tr_rpc_v2_call *out, const struct tr_rpc_bytes *unary_request)
+        struct tr_rpc_v2_call *out, const struct tr_rpc_bytes *unary_request,
+        int allow_server_work_submission)
 {
 	if (!client)
 		return TR_ERR_INVALID;
@@ -1841,6 +1863,10 @@ static int tr_client_v2_start(
 	struct tr_client_v2_start_request request = {
 	        client->record_rpc, service_id, method_id,    options,
 	        callbacks,          out,        unary_request};
+	if (allow_server_work_submission)
+		return tr_client_record_sync_call_submission(
+		        client->record_rpc, tr_client_v2_start_on_owner,
+		        &request);
 	return tr_client_record_sync(client->record_rpc,
 	                             tr_client_v2_start_on_owner, &request);
 }
@@ -1852,7 +1878,7 @@ int tr_client_call_start(struct tr_client *client, uint32_t service_id,
                          struct tr_rpc_v2_call *out)
 {
 	return tr_client_v2_start(client, service_id, method_id, options,
-	                          callbacks, out, NULL);
+	                          callbacks, out, NULL, 1);
 }
 
 int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
@@ -1864,7 +1890,7 @@ int tr_client_unary_call(struct tr_client *client, uint32_t service_id,
 	if (!request || (request->len && !request->data))
 		return TR_ERR_INVALID;
 	return tr_client_v2_start(client, service_id, method_id, options,
-	                          callbacks, out, request);
+	                          callbacks, out, request, 1);
 }
 
 enum tr_client_record_operation {
