@@ -211,6 +211,6 @@ This follow-up adds an actual dispatch/TaskExecutor regression for the queue-pre
 - [x] Release the gate and verify the accepted executor tasks retire, the OPEN is retried once, and OPEN/MESSAGE/HALF_CLOSE work completes in order with one terminal result.
 - [x] Run the dispatch target in GCC Release, GCC ASan/UBSan, and GCC TSan.
 - [x] Run the complete GCC Release build and registered suite: 92/92 pass; pinned clang-format 18.1.8 checks all changed C-family lines.
-- [ ] Push dev.158 to PR #330, verify CI for the exact head, and update the GitHub progress record without merging.
+- [x] Push dev.158 to PR #330, verify CI for the exact head (13/13), and update the GitHub progress record without merging.
 
 The next #243 items remain the generic asynchronous operation kernel, explicit operation references, completion/retirement barriers, broader single-worker/queue/read-write concurrency, and shared TLS/compression scheduling.

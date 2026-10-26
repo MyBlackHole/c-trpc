@@ -73,4 +73,4 @@ authorize、业务 OPEN/MESSAGE/HALF_CLOSE FIFO 执行且终局仅一次。
 
 此证据验证队列满时的延期/恢复合同，不声称复现生产缺陷，也不覆盖完成队列满、永久执行器关闭、
 通用操作引用或多方向 TLS/压缩共享调度。完整注册测试及 clang-format 18.1.8 修改行检查已通过；
-当前 head GitHub CI 待 dev.158 推送后重新验收。所有本地测试临时路径均位于 `build/tmp`，未写入 `/tmp`。
+dev.158 精确 head `a8b0f8aa31c4569005e6a404015a81cee2c55074` 的 GitHub CI 13/13 通过。所有本地测试临时路径均位于 `build/tmp`，未写入 `/tmp`。
