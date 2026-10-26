@@ -149,6 +149,6 @@ env TMPDIR="$PWD/build/reactor-wait-graph/tmp" \
 
 更新 `README.md`、`docs/rpc-v2-sdk.md` 或内部 Reactor 文档中的 owner 等待错误语义，并根据 PR #315 及其后继 #316–#327 的 dev 版本链，确定无冲突的候选版本号；只在所有测试通过后提交。保留 #243 其他未完成条目，不将其整体关闭。
 
-- [ ] **Step 6：提交变更并推送 #328 链尾 PR**
+- [x] **Step 6：提交变更并推送 #328 链尾 PR**
 
 运行 `git diff --check`、格式检查、目标测试与 `git status --short --branch`。提交正文按功能提交格式说明需求、根因、方案、影响、测试、性能、风险与回滚，再创建基于 PR #327 的 Draft PR #328 并附上验证证据。此版本落点保留 #315–#327 的原有历史，不改写其逐次版本推进。
