@@ -58,6 +58,7 @@ struct fixture {
 	unsigned release_threads_ready;
 	int release_threads_go;
 	int queue_reset_predecessors;
+	int fill_reset_command_queue;
 	int reopen_on_closed;
 	int circular_stream_tracking;
 	struct tr_stream_handle reopened_stream;
@@ -266,6 +267,7 @@ static void on_stream(struct tr_stream_handle stream,
 	struct fixture *f = arg;
 	int block_reset_callback = 0;
 	int queue_predecessors = 0;
+	int fill_command_queue = 0;
 	int reopen = 0;
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	if (event == TR_STREAM_EVENT_OPENED) {
@@ -286,6 +288,8 @@ static void on_stream(struct tr_stream_handle stream,
 		}
 		queue_predecessors = f->queue_reset_predecessors;
 		f->queue_reset_predecessors = 0;
+		fill_command_queue = f->fill_reset_command_queue;
+		f->fill_reset_command_queue = 0;
 		block_reset_callback = f->block_reset_callback;
 		f->block_reset_callback = 0;
 		if (block_reset_callback)
@@ -317,6 +321,12 @@ static void on_stream(struct tr_stream_handle stream,
 		/* RESET 还未交给 Reactor；在真实 owner 回调中固定四条前驱。 */
 		for (unsigned i = 0; i < 4; ++i)
 			assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
+	}
+	if (fill_command_queue) {
+		/* 在 RESET 响应登记前填满真实命令环，下一项必须被拒绝。 */
+		for (unsigned i = 0; i < COMMANDS; ++i)
+			assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
+		assert(tr_reactor_resume_rx(f->connection[0]) == TR_AGAIN);
 	}
 	if (reopen) {
 		struct tr_stream_handle next;
@@ -1822,6 +1832,106 @@ static int control_pressure_owner(void *arg)
 	return TR_OK;
 }
 
+static void test_peer_reset_response_reserved_fifo_under_pressure(void)
+{
+	struct fixture f;
+	struct tr_connection_stats stats;
+	struct tr_stream_flow_state flow;
+	enum tr_channel_lane_state lane_state;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1U, 1U);
+	struct tr_stream_handle live_stream = open_remote(&f, 0, 3U, 2U);
+
+	/* 占满普通控制 TX 池；四个 PING 保持在队列中且暂不写出。 */
+	atomic_store(&block_all_tx, 1);
+	assert(tr_reactor_call(f.reactor, control_pressure_owner, &f) == TR_OK);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	assert(stats.tx_queued_items == CONTROL);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.fill_reset_command_queue = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* RESET 回调内再填满命令环；响应须用每连接终止预留等待前驱。 */
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	assert(count(&f, &f.resets) == 1U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_ERR_STALE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.tx_queued_items == CONTROL + 1U)
+			break;
+		pause_ms();
+	}
+	assert(stats.tx_queued_items == CONTROL + 1U);
+
+	/* 四个在先 PING 后，本地 RESET 响应部分写出并遇到真实 EAGAIN。 */
+	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
+	atomic_store(&partial_phase, 1);
+	atomic_store(&partial_eagain, 0U);
+	atomic_store(&block_partial, 1);
+	atomic_store(&block_all_tx, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&partial_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&partial_phase) == 2);
+	assert(atomic_load(&partial_eagain) != 0U);
+
+	/* 此时 RESET 只有 7 字节在 wire 上；同连接 PONG 必须排在它之后。 */
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	uint64_t rx_frames_before_ping = stats.rx_frames;
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 1001U, NULL, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.rx_frames > rx_frames_before_ping)
+			break;
+		pause_ms();
+	}
+	assert(stats.rx_frames > rx_frames_before_ping);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	assert(stats.tx_queued_items == 2U);
+
+	atomic_store(&block_partial, 0);
+	for (unsigned i = 0; i < CONTROL; ++i) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 100U + i);
+	}
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 1001U);
+	assert(atomic_load(&partial_phase) == 3);
+	assert(atomic_load(&partial_eagain) >= 1U);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	assert(stats.tx_queued_items == 0U);
+	assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 普通控制池与命令环压力释放后，同物理连接的健康流仍然可用。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	destroy_fixture(&f);
+}
+
 static int control_pressure_without_retry_owner(void *arg)
 {
 	int ret = control_pressure_owner(arg);
@@ -2988,6 +3098,7 @@ int main(void)
 	test_duplicate_peer_reset_with_response_backpressure(1U, 0);
 	test_duplicate_peer_reset_with_response_backpressure(0U, 1);
 	test_duplicate_peer_reset_with_response_backpressure(1U, 1);
+	test_peer_reset_response_reserved_fifo_under_pressure();
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
