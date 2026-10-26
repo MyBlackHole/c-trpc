@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.145` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.146` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -37,6 +37,7 @@ dev.142 扩展 RESET 响应背压回归，将响应仍遇到 `EAGAIN` 时的 FIF
 dev.143 将 RESET 响应背压窗口的后续帧扩展到 `STREAM_CLOSE`，与 DATA、`WINDOW_UPDATE` 一起覆盖 CONTROL、BULK 两种目标 lane 的六个组合。六个组合均只关闭目标物理 lane，另一 lane 的健康流继续交付并完成 RESET。Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
 dev.144 验证 Split Channel 对端 RESET 的响应遇到真实 `EAGAIN` 后，同原因重复 RESET 命中驻留墓碑且只返回原有响应；原因冲突的重复 RESET 以 `TR_ERR_STATE` 关闭目标 lane。CONTROL、BULK 两个方向都覆盖同原因和冲突原因，健康 lane 均继续交付 DATA 并完成 RESET。该切片仍不代表 #242 或 V2 整体验收完成。
 dev.145 验证真实对端 RESET 响应路径同时承受普通控制 TX 池和 Reactor 命令环满载：响应通过每连接固定预留排在既有 PING 之后；响应部分写出遇到 `EAGAIN` 时，再到的 PING/PONG 不会插入半帧，wire 顺序仍为完整 RESET 后接 PONG。恢复后同连接健康流仍能交付 DATA 并完成 RESET。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.146 修正 dev.145 压力回归中的异步观察时序：等待同步 owner 回调提交的 SEND 命令实际进入 TX 队列，并等待最后一帧发送记账完成后再检查排空。此前 GitHub TSan 在第一个立即队列断言失败；根因与修复详见报告。干净 Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行

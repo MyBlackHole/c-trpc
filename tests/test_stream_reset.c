@@ -1847,8 +1847,13 @@ static void test_peer_reset_response_reserved_fifo_under_pressure(void)
 	/* 占满普通控制 TX 池；四个 PING 保持在队列中且暂不写出。 */
 	atomic_store(&block_all_tx, 1);
 	assert(tr_reactor_call(f.reactor, control_pressure_owner, &f) == TR_OK);
-	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
-	       TR_OK);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.tx_queued_items == CONTROL)
+			break;
+		pause_ms();
+	}
 	assert(stats.tx_queued_items == CONTROL);
 	assert(pthread_mutex_lock(&f.lock) == 0);
 	f.fill_reset_command_queue = 1;
@@ -1912,8 +1917,13 @@ static void test_peer_reset_response_reserved_fifo_under_pressure(void)
 	assert(h.type == TR_FRAME_PONG && h.message_id == 1001U);
 	assert(atomic_load(&partial_phase) == 3);
 	assert(atomic_load(&partial_eagain) >= 1U);
-	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
-	       TR_OK);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.tx_queued_items == 0U)
+			break;
+		pause_ms();
+	}
 	assert(stats.tx_queued_items == 0U);
 	assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
 	                                 &lane_state) == TR_OK);
