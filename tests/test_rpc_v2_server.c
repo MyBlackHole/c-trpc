@@ -1079,6 +1079,41 @@ static void test_call_ref_survives_late_authorize_completion(void)
 	assert(pthread_mutex_destroy(&f.lock) == 0);
 }
 
+static void test_call_ref_blocks_destroy_after_terminal(void)
+{
+	struct fixture f;
+	struct tr_rpc_v2_call_result snapshot = {TR_RPC_STATUS_INTERNAL,
+	                                         TR_RPC_V2_DELIVERY_SHUTDOWN};
+	static const uint8_t payload[] = {0x5a, 0x00, 0xa5};
+	const struct tr_rpc_bytes body = {payload, sizeof(payload)};
+	fixture_init(&f);
+	struct call *call = &f.calls[0];
+	call_start(&f, 0, 0, ECHO);
+	assert(tr_rpc_v2_call_hold(call->handle, &call->held_ref) == TR_OK);
+	send_or_half_close(call, &body);
+	send_or_half_close(call, NULL);
+	check_result(call, TR_RPC_STATUS_OK, 1);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) == TR_OK);
+	assert(snapshot.status == TR_RPC_STATUS_OK &&
+	       snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+
+	/* destroy stops the client but must retain storage while CallRef is
+	 * held. */
+	assert(tr_client_destroy(f.clients[0]) == TR_AGAIN);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) == TR_OK);
+	assert(snapshot.status == TR_RPC_STATUS_OK &&
+	       snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	assert(tr_rpc_v2_call_ref_release(&call->held_ref) == TR_OK);
+	assert(tr_client_destroy(f.clients[0]) == TR_OK);
+	f.clients[0] = NULL;
+	f.clients[0] = f.clients[1];
+	f.clients[1] = NULL;
+	retry_destroy(&f, false);
+	retry_destroy(&f, true);
+	assert(pthread_cond_destroy(&f.changed) == 0);
+	assert(pthread_mutex_destroy(&f.lock) == 0);
+}
+
 static void test_asymmetric_response_window(void)
 {
 	struct fixture f;
@@ -1181,6 +1216,7 @@ int main(void)
 {
 	test_configuration();
 	test_call_ref_survives_late_authorize_completion();
+	test_call_ref_blocks_destroy_after_terminal();
 	test_asymmetric_response_window();
 	test_capacity_refusal();
 	test_public_server();
