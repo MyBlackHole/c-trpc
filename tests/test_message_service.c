@@ -738,16 +738,29 @@ static void test_dispatch_rearm(void)
 
 static void test_allocation_and_thread_failure(void)
 {
-	for (unsigned index = 1; index <= 4; ++index) {
+	bool reached_success = false;
+	for (unsigned index = 1; index <= 16 && !reached_success; ++index) {
 		struct fixture f;
+		int ret;
 		init_fixture(&f);
 		atomic_store(&fail_allocation_at, index);
-		CHECK(tr_reactor_call(f.reactor, create_service, &f) ==
-		      TR_ERR_NOMEM);
+		ret = tr_reactor_call(f.reactor, create_service, &f);
 		atomic_store(&fail_allocation_at, 0);
-		CHECK(!f.service && atomic_load(&f.budget.current_bytes) == 0);
+		if (ret == TR_OK) {
+			reached_success = true;
+			close_until(&f);
+		} else {
+			CHECK(ret == TR_ERR_NOMEM);
+			if (f.service)
+				close_until(&f);
+			else
+				CHECK(atomic_load(&f.budget.current_bytes) ==
+				      0);
+		}
+		CHECK(atomic_load(&f.budget.current_bytes) == 0);
 		destroy_fixture(&f);
 	}
+	CHECK(reached_success);
 	for (unsigned index = 1; index <= 2; ++index) {
 		struct fixture f;
 		init_fixture(&f);

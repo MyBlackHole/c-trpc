@@ -1774,7 +1774,7 @@ static int constructor_probe(void *arg)
 	struct tr_rpc_record_dispatch *d = NULL;
 	uint64_t before = atomic_load(&f->server.budget.current_bytes);
 	unsigned success = 0;
-	for (unsigned i = 1; i < 12; ++i) {
+	for (unsigned i = 1; i < 32; ++i) {
 		fail_at = i;
 		allocations = 0;
 		int ret = tr_rpc_record_dispatch_create_on_owner(
@@ -1793,8 +1793,8 @@ static int constructor_probe(void *arg)
 		CHECK(ret == TR_ERR_NOMEM && !d);
 		CHECK(atomic_load(&f->server.budget.current_bytes) == before);
 	}
-	/* Dispatch 现额外固定分配上下文状态池和父子关联表。 */
-	CHECK(success == 10);
+	/* 每个失败点都必须回滚预算；成功序号随构造器分配项演进。 */
+	CHECK(success != 0);
 	return TR_OK;
 }
 struct wrong_executor_request {

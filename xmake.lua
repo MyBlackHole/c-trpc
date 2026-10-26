@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.158")
+set_version("2.0.0-dev.159")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -103,6 +103,7 @@ target("trcore")
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",
         "src/execution/task_executor.c",
+        "src/execution/async_operation.c",
         "src/execution/worker_context.c",
         "src/execution/command_queue.c",
         "src/execution/completion_queue.c",
@@ -168,6 +169,15 @@ target("test_tls_provider_operation")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_tls_provider_operation.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_async_operation")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_async_operation.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
@@ -869,6 +879,7 @@ target("test_rpc_record_endpoint_tcp")
         local sources = {
             "src/crc32c.c",
             "src/execution/buffer.c",
+            "src/execution/async_operation.c",
             "src/execution/worker_context.c",
             "src/execution/task_executor.c",
             "src/execution/command_queue.c",

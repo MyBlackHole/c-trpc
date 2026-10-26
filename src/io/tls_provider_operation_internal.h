@@ -8,11 +8,13 @@
 #include "tr/tls.h"
 
 struct tr_memory_budget;
+struct tr_async_operation_pool;
 struct tr_tls_provider_operation_slot;
 
 struct tr_tls_provider_operation_table {
 	pthread_mutex_t lock;
 	struct tr_tls_provider_operation_slot *slots;
+	struct tr_async_operation_pool *operations;
 	struct tr_memory_budget *budget;
 	uint64_t instance;
 	uint64_t slot_storage_bytes;
