@@ -175,7 +175,7 @@ Run `git diff --check`; run `python3 scripts/check_source_format.py --base origi
 
 Write the review record with exact commit SHA, hook ordering, owner/worker responsibility, cancellation/late result behavior, test matrix and remaining #243/V2 gates. Do not state #243 or V2 is complete from this slice.
 
-- [ ] **Step 5: Commit and push the stacked change**
+- [x] **Step 5: Commit and push the stacked change**
 
 Commit implementation as `【F-0243】RPC: 增加类型化 V2 方法钩子, 2.0.0-dev.155 -> 2.0.0-dev.156`. Push `feat/rpc-v2-method-hooks-243`; base its PR on `feat/rpc-v2-parent-context-243` and leave it open.
 
