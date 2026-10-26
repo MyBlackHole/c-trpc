@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.127` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.153` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -19,6 +19,33 @@ dev.27 为压缩 DATA 分帧增加有界的 DATA TX 池就绪通知，池恢复�
 本版本不代表 #234 或 V2 整体验收完成。
 dev.120–dev.126 为 #242/ERR-D 增加真实 TCP 双组 32 轮并发 DATA 成员故障替代回归、CONTROL 致命拆除后的活动成员清理与旧 epoch 路由隔离组件回归、异构 DATA 状态回收和组间故障隔离、32 轮真实 TCP CONTROL teardown/epoch 重建与早期旧 route 重放回归，以及 route 前导延迟到新 epoch 后提交时的旧 route 拒绝回归；这些切片不代表持续压力、资源争用和完整错误矩阵已验收。
 dev.127 为 #242/ERR-C 增加 RESETTING 窗口中应用线程释放已交付 DATA 的信用隔离回归；Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该测试只增加竞态边界证据，不表示 ERR-C 信用与组合故障全矩阵或 V2 整体验收完成。
+dev.128 为 #242/ERR-C 增加跨消息信用债务回归：两个小消息累计到 WINDOW_UPDATE 阈值后，下一条已交付消息在 RESETTING 窗口释放，目标流不得额外获赠信用；Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.129 为 #242/ERR-C 增加真实压缩接收回归：应用持有解压后 payload 时目标流进入 RESETTING，释放只归还内存，接收/消费/通告信用与 WINDOW_UPDATE 计数不变；同 Channel 压缩同伴继续收发。Release、TSan、ASan/UBSan 的 `test_transport` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.130 为 #242/ERR-C 增加 RESETTING 窗口中的并发多载荷释放回归：同一流持有两条 64 字节消息，在两个应用线程并发释放时不增加通告信用或 WINDOW_UPDATE，同 Channel 健康同伴继续完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.131 为 #242/ERR-C 增加双 RESETTING 流并发释放回归：两条流各持有一条 128 字节消息，分别进入 RESETTING 且对端暂不确认时，由两个应用线程并发释放；每条流通告信用保持 256、无 WINDOW_UPDATE，健康同伴仍能完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.132 扩展双 RESETTING 流回归：对端确认到达前，两条流各收到一条已在途的合法 64 字节 DATA；RESET 丢弃路径只消费 wire 字节、不交付应用也不恢复信用，两个应用线程再并发释放各自持有的 128 字节正文。两条流通告上限保持 256、`window_updates_tx` 不增长，健康同伴仍能完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.133 将 RESET discard 在途 DATA 扩至填满每条流冻结窗口的剩余 128 字节；各流接收总量达到通告上限 256，消费量达到 128，仍无信用更新。并发释放此前持有的 128 字节后，消费量到 256、通告上限仍为 256，wire 无 WINDOW_UPDATE，健康同伴仍完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.134 在双 RESETTING 流窗口精确填满并并发释放后，再向其中一条流发送超限 1 字节 DATA，验证连接以 `TR_ERR_BAD_LENGTH` 关闭且不额外交付应用数据、不发送 WINDOW_UPDATE。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.135 在 Split Channel 的 CONTROL 连接上验证 RESETTING 流耗尽冻结窗口后的一字节超限仍以 `TR_ERR_BAD_LENGTH` 关闭该物理连接，而 BULK 独立连接上的健康流仍能交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.136 将 Split Channel 的冻结信用超限隔离回归扩展到两个方向：CONTROL 超限时 BULK 健康流仍完成，BULK 超限时 CONTROL 健康流仍完成；两种情况下只关闭出错物理连接。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.137 增加 RESETTING 期间的合法在途 `WINDOW_UPDATE` 回归：接收信用上限可记录递增，但不产生 WRITABLE、不恢复 `tr_stream_send`；对端 RESET 确认后，同连接健康流仍可交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.138 验证 Split Channel 的 RESET/CLOSE 顺序边界：对端 RESET 确认前的 FIFO 普通 CLOSE 只结束半侧、不提前退役流；双向 RESET 完成后的晚到 CLOSE 只关闭对应物理 lane，另一 lane 的健康流仍能交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.139 验证 Split Channel RESETTING 流在 FIFO CLOSE 后又收到 DATA 时，只关闭违反半关闭方向规则的物理 lane；CONTROL、BULK 两种方向都确认 DATA 未交付、另一 lane 的健康流仍能完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.140 验证 Split Channel RESETTING 流先收到合法 DATA、再收到 FIFO CLOSE：DATA 仅计入接收/消费账本、不交付应用或补发 WINDOW_UPDATE，CLOSE 不提前退役流；CONTROL、BULK 两种方向均能正常完成 RESET，另一 lane 的健康流仍可交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.141 验证 Split Channel 对端 RESET 后，本地 RESET 响应入队但因发送背压未写出时收到 FIFO DATA：CONTROL、BULK 两个方向均以 `TR_ERR_STATE` 关闭目标物理 lane，不交付 DATA，另一 lane 的健康流仍能交付并完成 RESET。Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.142 扩展 RESET 响应背压回归，将响应仍遇到 `EAGAIN` 时的 FIFO 后续帧覆盖到 DATA 和 `WINDOW_UPDATE`；CONTROL、BULK 两方向的四个组合均只关闭目标 lane，WU 不增加接收更新统计，健康同伴仍能交付并完成 RESET。Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.143 将 RESET 响应背压窗口的后续帧扩展到 `STREAM_CLOSE`，与 DATA、`WINDOW_UPDATE` 一起覆盖 CONTROL、BULK 两种目标 lane 的六个组合。六个组合均只关闭目标物理 lane，另一 lane 的健康流继续交付并完成 RESET。Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）的完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.144 验证 Split Channel 对端 RESET 的响应遇到真实 `EAGAIN` 后，同原因重复 RESET 命中驻留墓碑且只返回原有响应；原因冲突的重复 RESET 以 `TR_ERR_STATE` 关闭目标 lane。CONTROL、BULK 两个方向都覆盖同原因和冲突原因，健康 lane 均继续交付 DATA 并完成 RESET。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.145 验证真实对端 RESET 响应路径同时承受普通控制 TX 池和 Reactor 命令环满载：响应通过每连接固定预留排在既有 PING 之后；响应部分写出遇到 `EAGAIN` 时，再到的 PING/PONG 不会插入半帧，wire 顺序仍为完整 RESET 后接 PONG。恢复后同连接健康流仍能交付 DATA 并完成 RESET。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.146 修正 dev.145 压力回归中的异步观察时序：等待同步 owner 回调提交的 SEND 命令实际进入 TX 队列，并等待最后一帧发送记账完成后再检查排空。此前 GitHub TSan 在第一个立即队列断言失败；根因与修复详见报告。干净 Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.147 增加同一 Reactor 上双物理连接同时承受普通控制 TX 池与命令环满载的 RESET 回归：每条连接都取得独立固定预留；CONTROL RESET 半帧 EAGAIN 时，BULK 响应仍完成并继续 PONG，随后两条健康流均可交付和收敛。GCC Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.148 验证同一连接的 RESET 响应部分写出并遇到 EAGAIN 时，健康同伴流仍能向应用交付 DATA；应用暂持载荷以隔离信用更新帧，后到 PONG 仍排在完整 RESET 后。恢复后连接保持 UP，健康流完成 RESET。GCC Release、ASan/UBSan（40k 墓碑）、TSan（5k）完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
+dev.149 修正异步压缩完成的错误作用域：解码器 `INTERNAL`、未知 outcome，或 `OK` 却没有有效输出时，释放当前任务后关闭精确物理连接，不把本地内部损坏伪装成单流 `NOMEM/STATE`；合法坏压缩数据仍只终止目标流。GCC Release、TSan、ASan/UBSan 完整 `test_transport` 均通过。该修复不改变 wire、API/ABI，仍不代表 #242 或 V2 整体验收完成。
+dev.150 增加真实 TCP Endpoint 竞态回归：服务端成功 `FINAL_STATUS` 已被 Channel 接受并入 TX 队列、实际 `sendmsg` 遇到 EAGAIN 时，客户端发送 RESET；服务端保留本地已接受结果，客户端以 `DEADLINE_EXCEEDED` 终结一次，不交付迟到记录，且同连接健康调用继续成功。Release、TSan、ASan/UBSan 完整 `test_rpc_record_endpoint_tcp` 均通过。该测试补充 RESET/STATUS 交错证据，不声称 exactly-once 或 #242/V2 整体验收完成。
+dev.151 扩展真实 TCP Endpoint RESET 竞态：双向方法的响应 MESSAGE 已由 Endpoint/Channel 接受，且对应 DATA 帧的真实 `sendmsg` 已遇到 EAGAIN 时，客户端发送 RESET；服务端终局后不再接管新回复，解除背压后客户端不收到迟到消息，同连接健康调用仍完成。Release、TSan、ASan/UBSan 完整 `test_rpc_record_endpoint_tcp` 均通过。该测试补充 RESET/DATA 交错证据，不代表 #242 或 V2 整体验收完成。
+dev.152 扩展 #242/#241 压缩接收配额恢复证据：同一真实 TCP Channel 上，保留服务器预算并让一条 Zstd 消息因解码配额不足而终结，期间 CONTROL PING/PONG 仍成功；释放预算后，四条幸存压缩流由并发发送者同时恢复，均完成消息解码、半关闭、成功响应并将缓存归零。Release、TSan、ASan/UBSan `test_rpc_record_stream` 均通过。该有限场景不代表长时公平、完整预算矩阵或 #242/V2 整体验收完成，详见 [压缩配额恢复多流并发回归](docs/reviews/rpc_v2_compressed_quota_multi_peer_recovery_20261026.md)。
+dev.153 将配额恢复扩展为四轮：四条幸存压缩流每轮同时发送，等服务端每条流都完成解码且两端 owner 回调排空后才开始下一轮；四条流各完成四条消息、半关闭、成功响应和唯一终局。Release、TSan、ASan/UBSan `test_rpc_record_stream` 均通过。该有限轮次不代表长期公平或完整预算矩阵，详见 [压缩配额四轮多流恢复回归](docs/reviews/rpc_v2_quota_multi_peer_repeated_recovery_20261026.md)。
+同一 `2.0.0-dev.153` 候选在 #327 继续扩展连接级 CRC 错误回归：坏帧到达时保留一个在途业务 worker，验证它迟到返回 `OK` 也不会形成成功终局；随后 worker 退出、活动流归零且服务端预算回到基线。GCC Release、TSan、ASan/UBSan 的完整 `test_rpc_record_endpoint_tcp` 均通过。该场景只补强 #242 第 2、7 项的一个路径，不代表完整矩阵或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行

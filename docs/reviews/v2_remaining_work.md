@@ -163,6 +163,106 @@ dev.127 为 #242/ERR-C 增加 RESETTING 窗口中的已交付载荷释放回归�
 不改变生产代码、API/ABI 或线协议；ERR-C 其他信用边界及 ERR-A/B/D/E 仍待验收。详见
 [RESETTING 期间释放载荷的信用隔离回归](rpc_v2_reset_release_during_reset_20261026.md)。
 
+dev.128 为 #242/ERR-C 增加跨消息信用债务回归：将协商的消息上限设为 128 字节、窗口设为 256 字节，
+前两条 64 字节消息累积到 WINDOW_UPDATE 阈值并正确将通告上限推进至 384；随后一条 128 字节载荷在
+RESETTING 窗口由应用释放，目标流仍不得额外获得窗口信用或产生迟到 WINDOW_UPDATE，同伴流继续完成。
+Release（40k tombstone）、TSan（5k）和 ASan/UBSan（40k）的完整 `test_stream_reset` 均通过；移除
+信用停止保护的临时变异会被该新用例自身捕获。本切片仅增加测试与记录，不改生产代码、API/ABI 或 wire；
+ERR-C 其他信用边界及 ERR-A/B/D/E 仍待验收。详见
+[RESET 时跨消息信用债务隔离回归](rpc_v2_reset_cross_message_credit_debt_20261026.md)。
+
+dev.129 为 #242/ERR-C 增加真实 Zstandard 接收信用回归：Channel 先按压缩 DATA wire 字节计入接收与消费，
+应用持有解压正文期间目标流进入 RESETTING；应用释放正文时接收量、消费量、通告上限及
+WINDOW_UPDATE 发送计数均不得变化。测试解除 RESET 回调闸门并完成流退役后，还验证同 Channel 压缩同伴
+继续收发。Release、TSan、ASan/UBSan 的完整 `test_transport` 均通过；临时取消 RESETTING 消费字节上限的
+变异会在消费量不变量处失败。本切片仅增加测试与记录，不改生产代码、API/ABI 或 wire；ERR-C 其余信用
+边界及 ERR-A/B/D/E 仍待验收。详见
+[RESETTING 压缩解码正文信用隔离回归](rpc_v2_reset_compressed_payload_credit_20261026.md)。
+
+dev.130 为 #242/ERR-C 增加同一 RESETTING 流上的并发多载荷释放回归：两条 64 字节消息均由应用持有，
+远端 RESET 进入 RESETTING 且 owner 回调暂停后，两个应用线程并发释放正文。测试验证接收量与消费量最终
+均为 128、通告上限保持 256、Channel `window_updates_tx` 前后不变、wire 上没有迟到 WINDOW_UPDATE；
+恢复 owner 后健康同伴仍能交付并完成。移除生产信用停止保护的临时变异由新用例在通告上限断言捕获，
+生产源码已恢复。GCC Release/ASan/UBSan 使用 40k 墓碑、TSan 使用 5k 墓碑的完整 `test_stream_reset`
+均通过。本切片只扩展测试夹具和记录，不改生产代码、API/ABI 或 wire；不代表多流并发 RESET 或 ERR-C
+全组合验收完成。详见
+[RESETTING 并发载荷释放信用隔离回归](rpc_v2_reset_concurrent_payload_credit_20261026.md)。
+
+dev.131 为 #242/ERR-C 增加两个同时 RESETTING 的流各自释放持有正文回归：每条流先接收并持有一条
+128 字节重组消息，再分别本地 RESET；对端暂不确认，确保两个 RESETTING 槽同时保留。两个应用线程并发释放后，
+每条流接收/消费量均为 128、通告上限仍为 256，Channel `window_updates_tx` 不变，wire 屏障未观察到目标流
+WINDOW_UPDATE。两条 RESET 完成后，健康同伴仍能交付 DATA 并正常结束。GCC Release/ASan/UBSan 使用 40k 墓碑、
+TSan 使用 5k 墓碑的完整 `test_stream_reset` 均通过。本切片只增加回归测试、记录和版本号，不改生产代码、API/ABI
+或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见
+[双 RESETTING 流并发载荷信用隔离回归](rpc_v2_reset_two_stream_concurrent_payload_credit_20261026.md)。
+
+dev.132 扩展双 RESETTING 流场景为在途 DATA 与应用载荷释放组合：每条流已有 128 字节正文由应用持有，
+分别本地 RESET 且对端确认暂缓期间，再各接收一条合法的 64 字节在途 DATA。Channel 丢弃这些晚到 DATA、
+将 wire 接收与消费计数各增加 64，但不调用应用回调；随后两个应用线程并发释放原正文。每条流最终接收/消费
+均为 192、通告上限仍为 256，`window_updates_tx` 不增长，RESET 完成和 PING/PONG 屏障均无目标流
+WINDOW_UPDATE。完整 GCC Release/ASan/UBSan（40k 墓碑）及 TSan（5k）`test_stream_reset` 均通过。
+本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E
+仍未完成。详见[双 RESETTING 流在途 DATA 与并发释放回归](rpc_v2_reset_two_stream_reset_discard_credit_20261026.md)。
+
+dev.133 将双 RESETTING 流收到的在途 DATA 从 64 字节扩展到填满冻结窗口剩余 128 字节：每条流接收量正好
+到达通告上限 256，RESET discard 消费量为 128；并发释放原持有的 128 字节后消费量到 256，通告上限不变，
+`window_updates_tx` 不增长且 wire 无迟到 WINDOW_UPDATE。测试保留 0/64/128 字节三档变体，完整 GCC Release/
+ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。本切片只扩展测试、记录和版本号，不改生产代码、
+API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见[双 RESETTING 流冻结窗口边界回归]
+(rpc_v2_reset_frozen_window_two_streams_20261026.md)。
+
+dev.134 在 dev.133 的双 RESETTING 流精确填满冻结信用并并发释放后，向其中一条流再发送 1 字节 DATA，验证
+超出通告上限后连接以 `TR_ERR_BAD_LENGTH` 关闭；没有额外交付应用正文或 WINDOW_UPDATE。非超限变体仍覆盖健康
+同伴正常完成。完整 GCC Release/ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。本切片只扩展
+测试、记录和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见
+[双 RESETTING 流冻结信用超限拒绝回归](rpc_v2_reset_two_resetting_stream_credit_overflow_20261026.md)。
+
+dev.135 将冻结信用超限拒绝扩展到 Split Channel：CONTROL 物理连接上的 RESETTING 流先收到恰好填满窗口的
+256 字节 discard DATA，再收 1 字节后仅该物理连接以 `TR_ERR_BAD_LENGTH` 关闭；BULK 独立连接上的健康流仍能
+交付 DATA 并完成 RESET。完整 GCC Release/ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。
+本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。
+详见[Split Channel RESET 信用超限与物理连接隔离回归]
+(rpc_v2_reset_split_overflow_connection_isolation_20261026.md)。
+
+dev.136 将 Split Channel 冻结信用超限回归参数化为 CONTROL、BULK 两种出错方向：每次目标连接收到 256 字节
+合法 discard DATA 后再收 1 字节，只该物理连接以 `TR_ERR_BAD_LENGTH` 关闭；另一 lane 的健康流仍可交付 DATA、
+通过 PING/PONG 并完成 RESET。完整 GCC Release/ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。
+本切片只扩展测试、记录、计划和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E
+仍未完成。详见[Split Channel RESET 信用超限双向隔离回归]
+(rpc_v2_reset_split_overflow_bidirectional_20261026.md)。
+
+dev.137 为 #242/ERR-C 补上 RESETTING 阶段接收合法在途 `WINDOW_UPDATE` 的边界：远端将绝对发送上限从 256 增至 320 后，Channel 记录该合法更新，但不发出 WRITABLE 事件，`tr_stream_send()` 仍返回 `TR_ERR_CLOSED`；随后完成 RESET，并验证同连接健康流仍可交付 DATA、完成 RESET，且没有连接级错误。GCC Release、TSan、ASan/UBSan 完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其余信用与组合故障以及 ERR-A/B/D/E 仍待验收。详见[RESETTING 期间合法在途 WINDOW_UPDATE 回归](rpc_v2_reset_inflight_window_update_20261026.md)。
+
+dev.138 为 #242/ERR-B/C 补上 Split Channel RESET 与普通 CLOSE 的双边界回归：在 RESET 对端确认前收到的 FIFO CLOSE 不提前释放 RESETTING 流槽；双向 RESET 完成后的晚到 CLOSE 以 `TR_ERR_STATE` 关闭承载该流的物理连接。CONTROL、BULK 两种出错方向都验证另一 lane 继续交付 DATA 并完成 RESET。GCC Release、TSan、ASan/UBSan 完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；RESET/FIFO 其余组合及 ERR-A/B/D/E 仍待验收。详见[Split Channel RESET/CLOSE 顺序边界回归](rpc_v2_reset_split_close_order_20261026.md)。
+
+dev.139 为 #242/ERR-B/C 增加 Split Channel 半关闭后的 DATA 拒绝回归：目标流本地 RESET 后先收到 FIFO `STREAM_CLOSE`，保持 RESETTING 期间又从已关闭方向收到 DATA 时，Channel 以 `TR_ERR_STATE` 关闭对应物理 lane；CONTROL、BULK 两种方向都验证目标 DATA 未交付，另一 lane 的健康流仍可交付并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过；dev.138 head GitHub CI 为 13/13 全通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 DATA/CLOSE/RESET 交错及 ERR-A/B/C/D/E 全矩阵仍待验收。详见[Split RESET/CLOSE 后 DATA 拒绝回归](rpc_v2_reset_split_close_data_20261026.md)。
+
+dev.140 为 #242/ERR-B/C 补充 Split Channel RESETTING 中合法 DATA 与 FIFO CLOSE 的正向顺序：目标流本地 RESET 后，先收到合法完整 DATA，再收到该方向的普通 CLOSE。RESETTING 丢弃路径将 8 字节计入接收与消费账本、不交付应用、不增加通告上限或发送 WINDOW_UPDATE；后续 CLOSE 不提前退役流，收到对端 RESET 后正常收敛。CONTROL、BULK 两种方向都验证另一 lane 健康流继续交付并完成 RESET。GCC Release、TSan、ASan/UBSan 完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 DATA/CLOSE/RESET 交错及 ERR-A/B/C/D/E 全矩阵仍待验收。详见[RESETTING DATA 后 FIFO CLOSE 回归](rpc_v2_reset_split_data_close_20261026.md)。
+
+dev.141 为 #242/ERR-B 补充 RESET 响应发送背压下的 Split Channel FIFO DATA 边界：对端先发 RESET；测试确认本地 RESET 响应帧已实际遇到 `EAGAIN` 且尚未写出，再从同一连接发送 DATA。RESET 入队并退役目标流后，迟到 DATA 以 `TR_ERR_STATE` 关闭对应 lane，不交付应用；CONTROL、BULK 两个方向均验证另一 lane 健康流仍能交付并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其余 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[Split Channel RESET 响应背压期间 DATA 隔离回归](rpc_v2_reset_response_backpressure_data_20261026.md)。
+dev.142 为 #242/ERR-B/C 扩展 RESET 响应发送背压下的 Split Channel FIFO 后续帧矩阵：在本地 RESET 响应实际遇到 `EAGAIN`、目标流已退役而 lane 仍存活时，分别注入 DATA 和 `WINDOW_UPDATE`。CONTROL、BULK 两方向的四个组合都以 `TR_ERR_STATE` 关闭目标 lane；DATA 不交付，WU 不增加接收更新统计，另一 lane 的健康流仍能交付并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其余 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[Split Channel RESET 响应背压期间 DATA/WINDOW_UPDATE 隔离回归](rpc_v2_reset_response_backpressure_frames_20261026.md)。
+dev.143 为 #242/ERR-B 扩展 RESET 响应发送背压下的 Split Channel FIFO 后续帧矩阵，将后续 `STREAM_CLOSE` 与 DATA、`WINDOW_UPDATE` 一并覆盖；CONTROL、BULK 两方向共六个组合。响应遇到 `EAGAIN` 且尚未写出时收到任一后续帧，均以 `TR_ERR_STATE` 关闭目标 lane；DATA 不交付、WU 接收统计不增长、CLOSE 不结束 lane 外的健康流，另一 lane 仍能交付 DATA 并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其余 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[Split Channel RESET 响应背压期间 CLOSE 隔离回归](rpc_v2_reset_response_backpressure_close_20261026.md)。
+dev.144 为 #242/ERR-B 补充 RESET 响应发送背压窗口内的重复 RESET 回归：初始响应已在目标 Reactor fd 上真实遇到 `EAGAIN`、流已退役后，同原因重复 RESET 命中墓碑，目标 lane 保持 UP 且仅观察到一份原响应；不同原因重复 RESET 以 `TR_ERR_STATE` 关闭目标 lane。CONTROL、BULK 两方向都覆盖同原因和冲突原因，健康 lane 均继续交付 DATA 并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[Split Channel RESET 响应背压期间重复 RESET 回归](rpc_v2_reset_response_backpressure_duplicate_20261026.md)。
+dev.145 为 #242/ERR-B 补充真实对端 RESET 响应的队列容量与部分写入 FIFO 回归：四个普通 PING 占满控制 TX 池，RESET 事件回调再将 Reactor 命令环填至容量上限并确认下一项返回 `TR_AGAIN`；固定预留 RESET 仍在所有前驱后入队。响应先实际写出 7 字节，再遇到 `EAGAIN`；在途期间收到 PING 后产生的 PONG 不能插入 RESET 半帧，wire 顺序保持四个既有 PING、完整 RESET、PONG。恢复后同连接健康流仍交付 DATA 并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[RESET 响应队列满载与 PONG 抢占边界回归](rpc_v2_reset_response_backpressure_queue_preemption_20261026.md)。
+dev.146 修复 dev.145 新增压力回归的队列观察时序。CI TSan 首次触发 `stats.tx_queued_items == CONTROL` 失败：owner 同步回调中的 SEND 被排入命令环，`tr_reactor_call` 返回不代表 SEND 命令已附接到 TX 队列。另在 Release 重现了收到末尾 PONG 后立即观察到尚未完成记账的在途 TX 项。两处均改为等待可观察的队列状态再断言。干净 GCC Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。本切片只修改测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[RESET 响应队列满载回归的异步观察时序修复](rpc_v2_reset_response_backpressure_queue_sync_20261026.md)。
+
+dev.147 为 #242/ERR-B 补充同一 Reactor 多物理连接的 RESET 固定预留隔离回归：Split Channel 的 CONTROL、BULK 连接共享的普通控制 TX 池各占两项并同时收到对端 RESET，第一个 RESET 回调还填满命令环；两条连接各自的响应都进入队列。CONTROL RESET 部分写出 7 字节后遇到 EAGAIN，BULK 仍按 PING、RESET、PONG 顺序独立排空；CONTROL 恢复后也保持 RESET、PONG FIFO，两条健康流都继续交付并完成 RESET。GCC Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。本切片仅修改测试、审查记录、README 和版本号，不改生产代码、API/ABI 或 wire；ERR-A/B/C/D/E 与 #242/V2 其余验收仍未完成。详见[多连接 RESET 固定预留隔离回归](rpc_v2_reset_response_reservation_multiconnection_20261026.md)。
+
+dev.148 为 #242/ERR-B 补充同连接健康流前进回归：RESET 响应部分写出 7 字节并真实遇到 `EAGAIN` 时，仍可将 DATA 交付给同 Channel 的健康流应用；暂持载荷以避免信用更新帧改变队列观察，随后到达的 PONG 仍排在完整 RESET 之后。发送恢复后连接保持 UP，健康流完成 RESET。GCC Release、ASan/UBSan（40k 墓碑）、TSan（5k）完整 `test_stream_reset` 均通过。本切片仅修改测试、审查记录、README 和版本号，不改生产代码、API/ABI 或 wire；ERR-A/B/C/D/E 与 #242/V2 其余验收仍未完成。详见[RESET 背压期间健康同伴流前进回归](rpc_v2_reset_response_backpressure_sibling_progress_20261026.md)。
+
+dev.149 修正 #242/ERR-A 的异步压缩结果作用域：`INTERNAL`/未知 outcome，以及服务报告 `OK` 却没有有效输出的本地契约损坏，现释放任务资源并关闭承载该结果的精确物理连接；`BAD_DATA`、`LIMIT`、真实 `NOMEM` 仍按单流处理。Release、TSan、ASan/UBSan 的完整 `test_transport` 均通过，新增真实 Channel 两流回归确认不发 RESET、两流都终结且预算归零。没有改变 wire/API/ABI；#242 的 ERR-B/C/D/E、TLS 记录完整性负例、长时资源公平和全局回收矩阵仍待验收。详见[生产错误作用域对照审计](rpc_v2_error_scope_production_audit_20261026.md)。
+
+dev.150 为 #242 补上真实 TCP Endpoint 的 RESET/`FINAL_STATUS` 交错：服务端已接受成功 FINAL 并排入 TX 后，测试用实际 `sendmsg` EAGAIN 阻止抵达；客户端在此期间 RESET，看到 `DEADLINE_EXCEEDED` 且终局计数为一，服务端保留已接受的 OK 结果；释放阻塞后不多交付记录，健康同伴在同一 TCP 连接完成。完整 `test_rpc_record_endpoint_tcp` 在 Release、TSan、ASan/UBSan 均通过。本证据只覆盖结果不确定的这一时序，不声称业务 exactly-once；#242 其余错误隔离、配额公平、RESET/FIFO 完整矩阵、GOAWAY/连接组接受边界与全局回收仍待验收。详见[RESET 与已排队 FINAL_STATUS 竞态](rpc_v2_reset_final_status_race_20261026.md)。
+
+dev.151 为 #242 补上真实 TCP Endpoint 的 RESET/响应 `MESSAGE` 交错：双向方法处理完请求 MESSAGE 并由 Endpoint/Channel 接受回复后，测试确认对应 DATA 帧的真实 `sendmsg` 遇到 EAGAIN，再由客户端发出 timeout RESET。以服务端终局作为 RESET 已处理边界，确认该边界后没有新的回复被接管；释放背压后客户端未收到迟到 MESSAGE，两端目标调用各终结一次，健康同伴在同一 TCP 连接成功完成。完整 `test_rpc_record_endpoint_tcp` 在 GCC Release、TSan、ASan/UBSan（泄漏检测开启）均通过。本切片只补充 DATA 交错证据；RESET/FIFO 全矩阵、配额公平、GOAWAY/连接组接受边界和统一回收仍未完成。详见[RESET 与已排队响应 MESSAGE 竞态回归](rpc_v2_reset_queued_message_race_20261026.md)。
+
+dev.152 为 #242/#241 补充压缩接收配额耗尽后的多流恢复回归：同一 TCP Channel 上保留服务器内存预算，一条 Zstd 解码以 `RESOURCE_EXHAUSTED` 终结且缓存归零；配额仍保留时 CONTROL PING/PONG 往返成功。释放配额后，四条幸存压缩流通过屏障并发发送，均由服务端完整解码并校验正文，再完成半关闭、成功响应和唯一终局，双方缓存归零。GCC Release、TSan、ASan/UBSan 完整 `test_rpc_record_stream` 通过；ASan 目标在阶段诊断加入后连续 8 次通过。本切片只增强单 Channel 配额恢复证据，不证明长期调度公平、分域预算矩阵或 #242/#241 整体验收完成。详见[压缩配额恢复多流并发回归](rpc_v2_compressed_quota_multi_peer_recovery_20261026.md)。
+
+dev.153 将 #242/#241 配额恢复扩展至四轮进度：每轮通过屏障同时启动四条幸存 Zstd 流，并等待四条流都交付本轮消息，再通过客户端与服务端 Reactor owner 同步屏障确认变换完成，之后才启动下一轮。每条流四轮消息的压缩类型、长度和校验和均验证；四条流最终半关闭、收到 OK 响应、两端唯一终结且缓存归零。TDD 红灯以旧单次发送重现“收到 1 条、预期 4 条”的超时；修正后 GCC Release、TSan、ASan/UBSan 完整 `test_rpc_record_stream` 均通过。本切片提高有限多轮进展证据，不证明长期延迟公平、吞吐基线、完整预算矩阵或 #242/#241 整体验收完成。详见[压缩配额四轮多流恢复回归](rpc_v2_quota_multi_peer_repeated_recovery_20261026.md)。
+
+
+
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。
@@ -406,9 +506,11 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 ## 持续开发顺序
 
+ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 TCP、Channel、RPC Record 与 TLS 测试证据见[生产错误作用域对照审计](rpc_v2_error_scope_production_audit_20261026.md)。dev.153 的 #327 又扩展头 CRC 连接错误回归：错误到达时保留在途 worker，验证迟到 `OK` 不改变 `UNAVAILABLE` 终局；worker 退出后预算回到基线。GCC Release、TSan、ASan/UBSan 的完整 `test_rpc_record_endpoint_tcp` 均通过。这只增加第 2、7 项在该路径上的证据；#242 的 RESET/FIFO 完整矩阵、连接组接受边界、长期公平恢复及全量资源回收仍未完成。
+
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
-| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败、预算保留期间 CONTROL keepalive 往返和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；其余分类到生产 C 路径的对照仍待补齐，listener draining 后拒绝未完成 CONTROL/DATA route 前导已有真实回归，当前覆盖同一 CONTROL 下两个不同 DATA member 和另一个 pending CONTROL route。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接相同 ID 双墓碑、驻留重复 RESET 与索引 FIFO 周转各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 完成后及 RESETTING 窗口中释放已交付载荷均不补信用的回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX、压缩任务/编码 wire 在途、单成员故障与同组替代、双组同 shard 先后及并发故障隔离、双组各自两轮替代及组级关闭回归；dev.120 增加真实 TCP 双组 32 轮并发故障替代回归；dev.121 增加具有活动 DATA、stream affinity 和 RESERVED route 时 CONTROL abort 的清理及旧 epoch 前导隔离组件回归；dev.122 增加真实 TCP CONTROL 关闭后活动 DATA 与 transfer affinity 回收、相同 group ID epoch 71→72 接管及旧 DATA route 拒绝回归；dev.123 将真实 TCP 故障场景扩展为一条活动 DATA、一条空闲 DATA 和一条 RESERVED route，验证三类旧 route 均不能影响 epoch 72 新组（Release、TSan、ASan/UBSan 通过），详见[双组高频成员故障替代回归](rpc_v2_group_repeated_failure_stress_20261026.md)、[CONTROL 致命拆除与 epoch 路由回归](rpc_v2_group_control_abort_epoch_20261026.md)、[真实 TCP CONTROL 故障与 epoch 切换回归](rpc_v2_group_control_loss_tcp_epoch_20261026.md)和[多状态 TCP CONTROL 故障隔离回归](rpc_v2_group_control_loss_heterogeneous_epoch_20261026.md)；dev.124 增加两个独立连接组的真实 TCP CONTROL 故障隔离回归：关闭 A 组 CONTROL 后，B 组的 CONTROL/DATA 和活动 transfer 仍工作，且 B 组继续完成 DATA 收发（Release、TSan、ASan/UBSan 通过），详见[跨组 CONTROL 故障隔离回归](rpc_v2_group_control_loss_peer_isolation_20261026.md)；dev.125 增加 32 轮真实 TCP CONTROL 关闭与相同 group ID epoch 重建，逐轮检查 DATA、active transfer 和连接计数归零、成员 generation 前进，并在第 33 个 epoch 拒绝最早和最近的旧 route（Release、TSan、ASan/UBSan 通过），详见[32 轮 CONTROL epoch 轮换回归](rpc_v2_group_control_epoch_replacement_stress_20261026.md)；dev.126 增加旧 CONTROL 断开时已进入 listener、但尚未提交 route 的 DATA socket 回归：跨到 epoch 72 后提交 epoch 71 的 route 必须关闭，且不消耗新 epoch 的 DATA 预留，随后有效 route 与 TRANSFER_READY 仍成功（Release、TSan、ASan/UBSan 通过），详见[CONTROL 故障期间 pending DATA route 的 epoch 隔离回归](rpc_v2_group_control_loss_pending_preface_epoch_20261026.md)；dev.127 增加 RESETTING 窗口释放已交付 DATA 的信用隔离测试（Release、TSan、ASan/UBSan 通过），详见[RESETTING 期间释放载荷的信用隔离回归](rpc_v2_reset_release_during_reset_20261026.md)；更长压力和更广组合仍待验收；ERR-E 墓碑固定预算和复合查询索引、真实 Channel 128 次 RESET/32 轮墓碑环周转、256 路小表确定性碰撞、max_streams=40000 的顺序 FIFO 周转和满历史下 256 路同 home 碰撞簇 FIFO 周转、真实 Channel 40k 历史填满与首次淘汰，以及删除成本计数覆盖 backward-shift 的最大容量 256 路同 home 簇已有回归；40k 键同 home 索引层最坏输入及真实 Channel 高频 RESET 成本已有本地初测（dev.76）；受控基线、持续压力和更广信用/丢弃组合仍待验收 | #242 |
+| 错误隔离 | ERR-A 分类表与纯状态参考模型已实现；真实 RPC Record Stream 覆盖 RAW/压缩接收配额失败、预算保留期间 CONTROL keepalive 往返和同 Channel 同伴恢复；真实 TCP Endpoint 覆盖重复 OPEN、业务 `PERMISSION_DENIED`、未知方法、非法 OPEN 元数据期间活动同伴继续完成，以及头 CRC 错误导致全部活动调用唯一 `UNAVAILABLE` 终结；分类到生产 C 错误入口族的对照见[审计记录](rpc_v2_error_scope_production_audit_20261026.md)；该映射不代表 #242 全部验收完成，listener draining 后拒绝未完成 CONTROL/DATA route 前导已有真实回归，当前覆盖同一 CONTROL 下两个不同 DATA member 和另一个 pending CONTROL route。普通/压缩 DATA 类型标志覆盖活动流与 RESET 丢弃态，单连接 GOAWAY cutoff 和已接纳 CALL_OPEN 未知结果/不重放有回归。ERR-B 本地 ID 耗尽及 GOAWAY 排空集成、墓碑 FIFO 淘汰、Stream/物理连接代次、split 连接相同 ID 双墓碑、RESET/CLOSE 顺序隔离、驻留重复 RESET 与索引 FIFO 周转各有回归，其他 RESET/FIFO 组合仍待验收；ERR-C 信用与组合故障已有 RESET 完成后及 RESETTING 窗口释放不补信用、合法在途 WINDOW_UPDATE 不恢复发送、跨消息债务只按阈值返还一次的回归，其余信用边界待验收；ERR-D 已有双 DATA 成员 drain、逐个 transfer 释放、未压缩 DATA TX、压缩任务/编码 wire 在途、单成员故障与同组替代、双组同 shard 先后及并发故障隔离、双组各自两轮替代及组级关闭回归；dev.120 增加真实 TCP 双组 32 轮并发故障替代回归；dev.121 增加具有活动 DATA、stream affinity 和 RESERVED route 时 CONTROL abort 的清理及旧 epoch 前导隔离组件回归；dev.122 增加真实 TCP CONTROL 关闭后活动 DATA 与 transfer affinity 回收、相同 group ID epoch 71→72 接管及旧 DATA route 拒绝回归；dev.123 将真实 TCP 故障场景扩展为一条活动 DATA、一条空闲 DATA 和一条 RESERVED route，验证三类旧 route 均不能影响 epoch 72 新组（Release、TSan、ASan/UBSan 通过），详见[双组高频成员故障替代回归](rpc_v2_group_repeated_failure_stress_20261026.md)、[CONTROL 致命拆除与 epoch 路由回归](rpc_v2_group_control_abort_epoch_20261026.md)、[真实 TCP CONTROL 故障与 epoch 切换回归](rpc_v2_group_control_loss_tcp_epoch_20261026.md)和[多状态 TCP CONTROL 故障隔离回归](rpc_v2_group_control_loss_heterogeneous_epoch_20261026.md)；dev.124 增加两个独立连接组的真实 TCP CONTROL 故障隔离回归：关闭 A 组 CONTROL 后，B 组的 CONTROL/DATA 和活动 transfer 仍工作，且 B 组继续完成 DATA 收发（Release、TSan、ASan/UBSan 通过），详见[跨组 CONTROL 故障隔离回归](rpc_v2_group_control_loss_peer_isolation_20261026.md)；dev.125 增加 32 轮真实 TCP CONTROL 关闭与相同 group ID epoch 重建，逐轮检查 DATA、active transfer 和连接计数归零、成员 generation 前进，并在第 33 个 epoch 拒绝最早和最近的旧 route（Release、TSan、ASan/UBSan 通过），详见[32 轮 CONTROL epoch 轮换回归](rpc_v2_group_control_epoch_replacement_stress_20261026.md)；dev.126 增加旧 CONTROL 断开时已进入 listener、但尚未提交 route 的 DATA socket 回归：跨到 epoch 72 后提交 epoch 71 的 route 必须关闭，且不消耗新 epoch 的 DATA 预留，随后有效 route 与 TRANSFER_READY 仍成功（Release、TSan、ASan/UBSan 通过），详见[CONTROL 故障期间 pending DATA route 的 epoch 隔离回归](rpc_v2_group_control_loss_pending_preface_epoch_20261026.md)；dev.127 增加 RESETTING 窗口释放已交付 DATA 的信用隔离测试（Release、TSan、ASan/UBSan 通过），详见[RESETTING 期间释放载荷的信用隔离回归](rpc_v2_reset_release_during_reset_20261026.md)；dev.128 增加小消息跨阈值累计后在 RESETTING 窗口释放下一条消息的信用隔离测试（Release、TSan、ASan/UBSan 通过），详见[RESET 时跨消息信用债务隔离回归](rpc_v2_reset_cross_message_credit_debt_20261026.md)；更长压力和更广组合仍待验收；ERR-E 墓碑固定预算和复合查询索引、真实 Channel 128 次 RESET/32 轮墓碑环周转、256 路小表确定性碰撞、max_streams=40000 的顺序 FIFO 周转和满历史下 256 路同 home 碰撞簇 FIFO 周转、真实 Channel 40k 历史填满与首次淘汰，以及删除成本计数覆盖 backward-shift 的最大容量 256 路同 home 簇已有回归；40k 键同 home 索引层最坏输入及真实 Channel 高频 RESET 成本已有本地初测（dev.76）；受控基线、持续压力和更广信用/丢弃组合仍待验收 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归；单条 RAW 消息、Zstandard 解压消息、Zstandard/RAW 混合、1 MiB 解压正文持有、监听器消息预算满额、公开 Server 多应用持有和持有期间 64 条 RAW 有界突发均可跨 DATA 成员进展（dev.77–.83）；普通 Server 派生全局预算下自然持有输出导致下一压缩任务真实预算拒绝，且拒绝后 RAW 同伴继续进展（dev.84）；公开 Server 双来源发送回归扩展到八批共 256 条 Zstandard（dev.85–.88）；Split Channel 的 RPC Record 正文（dev.89）和通用 Channel 压缩 DATA（dev.90）均证明 BULK 大压缩消息耗尽窗口时 CONTROL 小压缩同伴仍先完成，之后 BULK 恢复；Shared Channel 逻辑 BULK 压缩流等待同一物理连接上的 CONTROL 大流而仍可先交付（dev.91）；双向压缩发送交错中，一个方向的 BULK 大流受阻时，反向 CONTROL 小流仍交付并校验（dev.92）；Shared Channel 的唯一 DATA TX 项由 BULK RAW Stream 占用时，CONTROL 压缩 Stream 登记容量就绪等待，释放后完成交付，双方 lane 与 TX 池归零经校验（dev.93）；Split Channel 两端 BULK 压缩窗口同时耗尽至 128/128 时，双向 CONTROL 压缩消息均先交付，恢复后两边正文和信用均完成校验（dev.94）；Shared Channel 唯一 DATA TX 项由 BULK RAW Stream 占用时，CONTROL 与另一条 BULK 压缩 Stream 两个等待者均在池项归还后恢复交付（dev.95）；同一池满场景中 RESET 一个 BULK 压缩等待者后预算立即释放，CONTROL 与存活 BULK 同伴恢复、双向 RESET 收敛且池归零（dev.96）；dev.99 在 RESET 一个等待者后验证三个存活压缩流首帧各一次，并按相同顺序继续轮转两轮，详见 [三存活压缩流公平轮转回归](channel_compressed_data_tx_three_waiter_fairness_20261025.md)；dev.100 在 RESET 已确认遇到池满的 BULK 候选后验证四个存活压缩流首帧各一次，并按相同顺序继续轮转两轮，详见 [四存活压缩流公平轮转回归](channel_compressed_data_tx_four_waiter_fairness_20261025.md)；dev.101 在同一场景中逐帧检查 24 个 DATA 帧，四条存活流完成六轮严格轮转，变异测试确认停滞游标会被捕获，详见 [四存活压缩流六轮公平性回归](channel_compressed_data_tx_six_round_fairness_20261025.md)；dev.102 在同一场景扩至六条存活流和 36 帧六轮轮转，六次 Release 定向测试通过，变异测试同样捕获停滞游标，详见 [六存活压缩流六轮公平性回归](channel_compressed_data_tx_six_survivor_fairness_20261025.md)；dev.103 保持六条存活流，把高熵正文扩至 2 KiB 并检查 72 帧/12 轮顺序，六次 Release 定向测试通过，详见 [六存活压缩流十二轮公平性回归](channel_compressed_data_tx_twelve_round_fairness_20261025.md)；dev.104 直接验证初始窗口 W=1024 下 L=1025 的 RAW 消息以 TR_ERR_BAD_LENGTH 终结拒绝、信用不变且调用方仍可释放缓冲区，目标 Release transport 回归及停滞窗口检查变异均已验证，详见 [Stream 单消息窗口准入回归](channel_stream_message_window_admission_20261025.md)；dev.105 在 Client/Server 接收窗口分别为 1 KiB/2 KiB 时验证双向发送上限取对端窗口、L=W 正文交付及反向 L>W 拒绝；回显对端窗口的变异会被捕获，详见 [非对称 Stream 初始窗口回归](channel_asymmetric_stream_windows_20261025.md)；dev.106 补齐三档关系：Client→Server 为 L=1536<W=2048，Server→Client 覆盖 L=W=1024 与 L=1025>W=1024 拒绝；错误使用本地窗口的变异会被超窗断言捕获，详见 [Stream 消息长度与非对称窗口三档回归](channel_stream_window_inequality_20261025.md)；dev.107 继续在两个非对称窗口方向应用持有首消息时探测剩余信用：Client 的 1,536/2,048 后追加 513 字节、Server 的 1,024/1,024 后追加 1 字节均返回 TR_AGAIN 且账目不变；两端释放后重试同一缓冲区并交付，Release 目标连续 3/3 通过，详见 [非对称窗口应用持有与信用恢复回归](channel_asymmetric_window_hold_recovery_20261025.md)；dev.108 将真实 TCP 多帧重组场景压到 DATA TX=1、RX=2、重组池=1 和单项发送缓冲池，1,500 字节正文跨六帧交付；应用持有期间唯一重组槽耗尽，释放后恢复。Release 目标连续 4/4 通过；既有 parser 单字节分片测试仍独立覆盖逐字节解析，详见 [小池预算下的多帧消息重组回归](channel_fragmentation_minimal_pools_20261025.md)；dev.109 在真实 TCP Channel 中以小于 64 字节的 Zstandard 编码体传输 4 KiB 正文，实际 wire 小于 128 字节窗口并由服务端完整解码交付，详见 [小编码体大解码正文接收回归](channel_compressed_expansion_20261025.md)；dev.110 在真实 TCP Channel 中验证 Zstandard 帧头未携带 content size、envelope 声明 4 KiB 解码长度时仍能完整交付且接收与消费 wire 计数相等，详见 [未知帧内容长度压缩消息接收回归](channel_zstd_unknown_content_size_20261025.md)；dev.111 以有效 Zstandard 帧配上少报 1 字节的 envelope 解码长度，验证真实 Channel 只 RESET 当前流、应用交付数不增且池和活动流回到基线，详见 [压缩 envelope 虚报原始长度隔离回归](channel_compressed_forged_length_20261025.md)；dev.112 以有效、未知内容长度的 4 KiB Zstandard 帧声明 2 MiB 窗口，验证其超过 Channel 的 1 MiB 限制后只 RESET 当前流且无应用交付，详见 [压缩解码窗口超限隔离回归](channel_compressed_window_limit_20261025.md)；dev.113 以未知 content size 的有效 4 KiB 帧配上少报 1 字节的 envelope 长度，验证解码容量探针阻止超长输出交付并触发流级 RESET，详见 [未知长度帧超出 envelope 解码容量回归](channel_compressed_unknown_output_overrun_20261025.md)；dev.114 以实际输出比 envelope 少 1 字节的有效未知长度帧验证 Channel 拒绝短输出、不交付正文且流和接收池回到基线，详见 [未知长度帧短于 envelope 声明长度回归](channel_compressed_unknown_output_underrun_20261025.md)；dev.115 修正压缩多帧回归的零 body 切点，使首个 DATA 帧携带完整 envelope 与部分 Zstandard body、后续帧携带剩余 body，并验证完整解码交付，详见 [压缩 body 跨 DATA 帧接收回归](channel_compressed_body_fragmentation_20261025.md)；dev.116 将未知 content size 的有效 Zstandard 帧与跨 DATA 帧 body 切分组合，首帧携带 envelope 和部分 body，后续帧承载余量；真实 Channel 完整交付，详见 [未知长度压缩 body 跨 DATA 帧接收回归](channel_unknown_size_compressed_body_fragmentation_20261025.md)；dev.117 验证两段各自有效的 Zstandard 帧串接后被真实 Channel 以流级错误拒绝，同时保留单帧后跟垃圾字节场景，详见 [串接有效 Zstandard 帧拒绝回归](channel_concatenated_zstd_frame_rejection_20261025.md)；dev.118 启用 Zstandard 内容校验和后破坏帧校验字节，独立解码器与真实 Channel 均拒绝，应用不收到正文且缓冲池归还，详见 [Zstandard 帧校验和损坏隔离回归](channel_zstd_checksum_corruption_20261025.md)；dev.119 在真实 Channel 中验证合法 skippable frame 与 dictionary ID 非零的 Zstandard 帧均只复位目标流、不交付正文，详见 [不支持的 Zstandard 帧隔离回归](channel_unsupported_zstd_frame_isolation_20261025.md)。四个及以上存活者的长期公平性、每条消息延迟界、吞吐阈值、跨机器稳定基线及更广预算/取消组合仍待验收；dev.84 测试不要求 current 数值等于 limit | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
 | TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |

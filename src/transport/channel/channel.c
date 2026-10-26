@@ -3356,9 +3356,26 @@ tr_channel_transform_reset_status(enum tr_message_transform_outcome outcome)
 	case TR_MESSAGE_TRANSFORM_CANCELLED:
 		return TR_ERR_CLOSED;
 	case TR_MESSAGE_TRANSFORM_BAD_DATA:
-	case TR_MESSAGE_TRANSFORM_INTERNAL:
 	default:
 		return TR_ERR_STATE;
+	case TR_MESSAGE_TRANSFORM_INTERNAL:
+		return TR_ERR_SYS;
+	}
+}
+
+static int tr_channel_transform_outcome_is_internal(
+        enum tr_message_transform_outcome outcome)
+{
+	switch (outcome) {
+	case TR_MESSAGE_TRANSFORM_OK:
+	case TR_MESSAGE_TRANSFORM_CANCELLED:
+	case TR_MESSAGE_TRANSFORM_LIMIT:
+	case TR_MESSAGE_TRANSFORM_NOMEM:
+	case TR_MESSAGE_TRANSFORM_BAD_DATA:
+		return 0;
+	case TR_MESSAGE_TRANSFORM_INTERNAL:
+	default:
+		return 1;
 	}
 }
 
@@ -3499,6 +3516,9 @@ tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
 	void *callback_arg = NULL;
 	int deliver = 0;
 	int request_reset = 0;
+	int output_view_ret = TR_ERR_STATE;
+	int connection_error =
+	        tr_channel_transform_outcome_is_internal(result.outcome);
 	int reset_status = TR_ERR_STATE;
 	int output_ret = TR_ERR_STATE;
 
@@ -3516,8 +3536,15 @@ tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
 		return;
 	}
 
-	if (result.outcome == TR_MESSAGE_TRANSFORM_OK)
+	if (result.outcome == TR_MESSAGE_TRANSFORM_OK) {
 		output_ret = tr_message_clone(message, &job->output);
+		if (output_ret == TR_OK)
+			output_view_ret = tr_message_view(&job->output, &view);
+		if ((output_ret != TR_OK && output_ret != TR_ERR_NOMEM) ||
+		    (output_ret == TR_OK &&
+		     (output_view_ret != TR_OK || view.len > UINT32_MAX)))
+			connection_error = 1;
+	}
 
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_handle(job->stream);
@@ -3529,8 +3556,7 @@ tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
 		    stream->state == TR_STREAM_SLOT_OPEN &&
 		    tr_stream_connection_matches(channel, stream,
 		                                 job->connection) &&
-		    tr_message_view(&job->output, &view) == TR_OK &&
-		    view.len <= UINT32_MAX) {
+		    output_view_ret == TR_OK && view.len <= UINT32_MAX) {
 			job->output_buffer.data = (uint8_t *)view.data;
 			job->output_buffer.capacity = (uint32_t)view.len;
 			job->output_buffer.len = (uint32_t)view.len;
@@ -3541,7 +3567,7 @@ tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
 			data_cb = channel->data_cb;
 			callback_arg = channel->callback_arg;
 			deliver = 1;
-		} else if (!channel->state_wait_closed &&
+		} else if (!connection_error && !channel->state_wait_closed &&
 		           !channel->teardown_detached &&
 		           stream->state == TR_STREAM_SLOT_OPEN &&
 		           stream->local_open) {
@@ -3560,6 +3586,14 @@ tr_channel_message_transform_done(void *arg, struct tr_task_handle task,
 	channel->active_message_jobs--;
 	pthread_cond_broadcast(&channel->state_cond);
 	pthread_mutex_unlock(&channel->lock);
+
+	if (connection_error) {
+		struct tr_conn_handle connection = job->connection;
+		tr_channel_rx_transform_destroy(job);
+		(void)tr_channel_protocol_error(channel, connection,
+		                                TR_ERR_SYS);
+		return;
+	}
 
 	if (request_reset) {
 		int ret = tr_stream_reset_on_owner(job->stream, reset_status);

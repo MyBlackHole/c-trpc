@@ -32,6 +32,7 @@ struct fixture {
 	struct tr_reactor *reactor;
 	struct tr_channel *channel;
 	struct tr_conn_handle connection[2];
+	int adopted_fd[2];
 	int peer[2];
 	int split;
 	struct tr_buffer_pool pool;
@@ -48,11 +49,16 @@ struct fixture {
 	int reset_status[TRACKED_STREAMS];
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
+	struct tr_buffer *held_extra;
+	struct tr_stream_handle held_extra_stream;
 	int hold_data;
 	int block_reset_callback;
 	int reset_callback_blocked;
 	int release_reset_callback;
+	unsigned release_threads_ready;
+	int release_threads_go;
 	int queue_reset_predecessors;
+	int fill_reset_command_queue;
 	int reopen_on_closed;
 	int circular_stream_tracking;
 	struct tr_stream_handle reopened_stream;
@@ -61,11 +67,14 @@ struct fixture {
 static _Thread_local int fail_reset_arm;
 static atomic_uint arm_failures;
 static atomic_int partial_fd = -1;
+static atomic_int secondary_fd = -1;
 static atomic_int partial_phase;
 static atomic_int partial_type = TR_FRAME_STREAM_RESET;
 static atomic_int block_partial;
 static atomic_uint partial_eagain;
 static atomic_int block_all_tx;
+static atomic_int block_secondary_tx;
+static atomic_uint blocked_reset_eagain;
 static atomic_int repeat_goaway_phase;
 static atomic_int force_local_stream_id_exhaustion;
 static struct tr_reactor_timer_handle repeat_goaway_timer;
@@ -97,8 +106,21 @@ int __wrap_tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out)
 
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
+	if (fd == atomic_load(&secondary_fd) &&
+	    atomic_load(&block_secondary_tx)) {
+		errno = EAGAIN;
+		return -1;
+	}
 	if (fd == atomic_load(&partial_fd)) {
 		if (atomic_load(&block_all_tx)) {
+			if (message->msg_iovlen &&
+			    message->msg_iov[0].iov_len >=
+			            TR_WIRE_HEADER_SIZE &&
+			    tr_get_le16((const uint8_t *)message->msg_iov[0]
+			                        .iov_base +
+			                TR_WIRE_OFF_TYPE) ==
+			            TR_FRAME_STREAM_RESET)
+				atomic_fetch_add(&blocked_reset_eagain, 1U);
 			errno = EAGAIN;
 			return -1;
 		}
@@ -164,6 +186,43 @@ static void wait_count(struct fixture *f, unsigned *counter, unsigned target)
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
+static void wait_flow_counters(struct tr_stream_handle stream,
+                               uint64_t received, uint64_t consumed)
+{
+	struct tr_stream_flow_state flow;
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (tr_stream_get_flow_state(stream, &flow) == TR_OK &&
+		    flow.rx_received_bytes == received &&
+		    flow.rx_consumed_bytes == consumed)
+			return;
+		pause_ms();
+	}
+	assert(!"timed out waiting for stream receive counters");
+}
+
+struct payload_release_request {
+	struct fixture *fixture;
+	struct tr_stream_handle stream;
+	struct tr_buffer *payload;
+	int result;
+};
+
+static void *release_payload_after_gate(void *arg)
+{
+	struct payload_release_request *request = arg;
+	struct fixture *f = request->fixture;
+
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	++f->release_threads_ready;
+	assert(pthread_cond_broadcast(&f->cond) == 0);
+	while (!f->release_threads_go)
+		assert(pthread_cond_wait(&f->cond, &f->lock) == 0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+	request->result =
+	        tr_stream_release_payload(request->stream, request->payload);
+	return NULL;
+}
+
 static void assert_fixed_history_budget(
 	struct tr_memory_budget *budget, uint64_t fixed_bytes)
 {
@@ -194,9 +253,14 @@ static enum tr_stream_data_disposition on_data(struct tr_stream_handle stream,
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	++f->received;
 	if (f->hold_data) {
-		assert(!f->held);
-		f->held = payload;
-		f->held_stream = stream;
+		if (!f->held) {
+			f->held = payload;
+			f->held_stream = stream;
+		} else {
+			assert(!f->held_extra);
+			f->held_extra = payload;
+			f->held_extra_stream = stream;
+		}
 	}
 	int hold = f->hold_data;
 	assert(pthread_cond_broadcast(&f->cond) == 0);
@@ -210,6 +274,7 @@ static void on_stream(struct tr_stream_handle stream,
 	struct fixture *f = arg;
 	int block_reset_callback = 0;
 	int queue_predecessors = 0;
+	int fill_command_queue = 0;
 	int reopen = 0;
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	if (event == TR_STREAM_EVENT_OPENED) {
@@ -230,6 +295,8 @@ static void on_stream(struct tr_stream_handle stream,
 		}
 		queue_predecessors = f->queue_reset_predecessors;
 		f->queue_reset_predecessors = 0;
+		fill_command_queue = f->fill_reset_command_queue;
+		f->fill_reset_command_queue = 0;
 		block_reset_callback = f->block_reset_callback;
 		f->block_reset_callback = 0;
 		if (block_reset_callback)
@@ -261,6 +328,12 @@ static void on_stream(struct tr_stream_handle stream,
 		/* RESET 还未交给 Reactor；在真实 owner 回调中固定四条前驱。 */
 		for (unsigned i = 0; i < 4; ++i)
 			assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
+	}
+	if (fill_command_queue) {
+		/* 在 RESET 响应登记前填满真实命令环，下一项必须被拒绝。 */
+		for (unsigned i = 0; i < COMMANDS; ++i)
+			assert(tr_reactor_resume_rx(f->connection[0]) == TR_OK);
+		assert(tr_reactor_resume_rx(f->connection[0]) == TR_AGAIN);
 	}
 	if (reopen) {
 		struct tr_stream_handle next;
@@ -376,7 +449,9 @@ static void barrier_without_stream_window_update(struct fixture *f,
 	assert(resets == 1U);
 }
 
-static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
+static void hello_with_max_message(struct fixture *f, unsigned lane,
+                                   uint64_t features, int ack,
+                                   uint32_t max_message_bytes)
 {
 	uint8_t bytes[32] = {0};
 	tr_put_le16(bytes, TR_CHANNEL_PROTOCOL_VERSION);
@@ -384,16 +459,22 @@ static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
 		tr_put_le16(bytes + 2, TR_CHANNEL_PROTOCOL_VERSION);
 	tr_put_le32(bytes + 4, f->split ? (1U << lane) : 3U);
 	tr_put_le32(bytes + 8, FRAME);
-	tr_put_le32(bytes + 12, WINDOW);
+	tr_put_le32(bytes + 12, max_message_bytes);
 	tr_put_le64(bytes + 16, features);
 	send_frame(f, lane, ack ? TR_FRAME_HELLO_ACK : TR_FRAME_HELLO, 0, 0, 0,
 	           bytes, sizeof(bytes));
+}
+
+static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
+{
+	hello_with_max_message(f, lane, features, ack, WINDOW);
 }
 
 static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
                                        int split, uint64_t features,
                                        uint64_t required, int handshake,
                                        uint32_t commands,
+                                       uint32_t max_message_bytes,
                                        struct tr_memory_budget *memory_budget)
 {
 	const struct tr_reactor_config rc = {.max_connections = 2,
@@ -411,12 +492,14 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	        .max_streams = capacity,
 	        .initial_window_bytes = WINDOW,
 	        .window_update_threshold_bytes = 128,
-	        .max_message_bytes = WINDOW,
+	        .max_message_bytes = max_message_bytes,
 	        .feature_bits = features,
 	        .required_feature_bits = required,
 	        .memory_budget = memory_budget};
 	memset(f, 0, sizeof(*f));
 	f->peer[0] = f->peer[1] = -1;
+	f->adopted_fd[0] = f->adopted_fd[1] = -1;
+	atomic_store(&secondary_fd, -1);
 	f->split = split;
 	assert(pthread_mutex_init(&f->lock, NULL) == 0);
 	assert(pthread_cond_init(&f->cond, NULL) == 0);
@@ -432,20 +515,26 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 		                  sockets) == 0);
 		assert(tr_reactor_adopt_fd(f->reactor, sockets[0],
 		                           &f->connection[lane]) == TR_OK);
+		f->adopted_fd[lane] = sockets[0];
 		f->peer[lane] = sockets[1];
+		if (lane == 1U)
+			atomic_store(&secondary_fd, sockets[0]);
 		/* 被测 sendmsg 只触达已交给 Reactor 的精确 fd。 */
 		if (!lane)
 			atomic_store(&partial_fd, sockets[0]);
 	}
 	if (!split)
 		f->connection[1] = f->connection[0];
+	if (!split)
+		f->adopted_fd[1] = f->adopted_fd[0];
 	assert(tr_channel_create(&cc, f->connection[0], f->connection[1],
 	                         on_data, on_stream, on_channel, f,
 	                         &f->channel) == TR_OK);
 	for (unsigned lane = 0; lane < (split ? 2U : 1U); ++lane) {
 		assert(receive_frame(f, lane).type == TR_FRAME_HELLO);
 		if (handshake) {
-			hello(f, lane, features, 0);
+			hello_with_max_message(f, lane, features, 0,
+			                       max_message_bytes);
 			assert(receive_frame(f, lane).type ==
 			       TR_FRAME_HELLO_ACK);
 		}
@@ -463,7 +552,7 @@ static void init_fixture(struct fixture *f, uint32_t capacity, int split,
                          uint64_t features, uint64_t required, int handshake)
 {
 	init_fixture_with_commands(f, capacity, split, features, required,
-	                           handshake, COMMANDS, NULL);
+	                           handshake, COMMANDS, WINDOW, NULL);
 }
 
 static void destroy_fixture(struct fixture *f)
@@ -474,11 +563,14 @@ static void destroy_fixture(struct fixture *f)
 	assert(tr_channel_destroy(f->channel) == TR_OK);
 	assert(tr_reactor_stop(f->reactor) == TR_OK);
 	atomic_store(&partial_fd, -1);
+	atomic_store(&secondary_fd, -1);
 	atomic_store(&partial_phase, 0);
 	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
 	atomic_store(&partial_eagain, 0);
 	atomic_store(&block_partial, 0);
 	atomic_store(&block_all_tx, 0);
+	atomic_store(&block_secondary_tx, 0);
+	atomic_store(&blocked_reset_eagain, 0);
 	atomic_store(&repeat_goaway_phase, 0);
 	assert(tr_reactor_destroy(f->reactor) == TR_OK);
 	for (unsigned lane = 0; lane < (f->split ? 2U : 1U); ++lane)
@@ -1242,6 +1334,477 @@ static void test_frozen_discard_credit(int unordered)
 	destroy_fixture(&f);
 }
 
+static void
+test_frozen_discard_credit_split_connection_isolation(unsigned reset_lane)
+{
+	struct fixture f;
+	uint8_t bytes[FRAME] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	unsigned healthy_lane = 1U - reset_lane;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, healthy_lane, 3U, 2U);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, reset_lane);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+	for (uint64_t message_id = 1U; message_id <= WINDOW / FRAME;
+	     ++message_id) {
+		send_frame(&f, reset_lane, TR_FRAME_DATA,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, message_id,
+		           bytes, FRAME);
+	}
+	barrier(&f, reset_lane);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW &&
+	       flow.rx_consumed_bytes == WINDOW);
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	assert(count(&f, &f.received) == 0U && count(&f, &f.down) == 0U);
+
+	/* 超限错误只关闭承载该 RESETTING 流的物理连接。 */
+	uint8_t extra = 1U;
+	send_frame(&f, reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, WINDOW / FRAME + 1U,
+	           &extra, sizeof(extra));
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_BAD_LENGTH);
+	assert(count(&f, &f.received) == 0U);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 另一条独立物理连接仍能交付并完成自己的 Stream。 */
+	send_frame(&f, healthy_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, healthy_lane);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, healthy_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 1U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_resetting_accepts_inflight_window_update(void)
+{
+	struct fixture f;
+	struct tr_channel_stats stats_before, stats_after;
+	struct tr_stream_flow_state flow;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle live_stream = open_remote(&f, 0, 3, 2);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U);
+	unsigned writable_before = count(&f, &f.writable);
+
+	/* 已在途的合法绝对信用更新可被校验和记录，但 RESETTING 不恢复发送。 */
+	send_frame(&f, 0, TR_FRAME_WINDOW_UPDATE, 0, 1U, WINDOW + FRAME, NULL,
+	           0);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0U);
+	assert(count(&f, &f.writable) == writable_before);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit == WINDOW + FRAME &&
+	       flow.tx_sent_bytes == 0U);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_rx ==
+	       stats_before.window_updates_rx + 1U);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	struct tr_buffer *body = payload(&f, sizeof(bytes));
+	assert(tr_stream_send(reset_stream, body) == TR_ERR_CLOSED);
+	tr_buffer_release(body);
+
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0U);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 0);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_close_order_around_split_reset(unsigned reset_lane)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	enum tr_lane failed_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, reset_lane);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U);
+
+	/* RESET 的对端确认尚未到达时，FIFO 中更早的普通 CLOSE 只结束半侧。 */
+	send_frame(&f, reset_lane, TR_FRAME_STREAM_CLOSE, 0, 1U, 0, NULL, 0);
+	barrier(&f, reset_lane);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.closed) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 2U);
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	barrier(&f, reset_lane);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 双向 RESET 已完成后再来的 CLOSE 越过静默边界，必须关闭本 lane。 */
+	send_frame(&f, reset_lane, TR_FRAME_STREAM_CLOSE, 0, 1U, 0, NULL, 0);
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 另一物理连接仍可交付并结束自己的 Stream。 */
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1U - reset_lane);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 1U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_data_after_close_during_split_reset(unsigned reset_lane)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	enum tr_lane failed_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, reset_lane);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U);
+
+	/* FIFO CLOSE 合法结束半侧，但随后该半侧不得继续发送 DATA。 */
+	send_frame(&f, reset_lane, TR_FRAME_STREAM_CLOSE, 0, 1U, 0, NULL, 0);
+	barrier(&f, reset_lane);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.closed) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 2U);
+	send_frame(&f, reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	wait_count(&f, &f.errors, 1U);
+	assert(f.error_status == TR_ERR_STATE && count(&f, &f.closed) == 0U);
+	assert(count(&f, &f.received) == 0U);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 目标 lane 关闭后，另一 lane 的健康流仍可交付并完成。 */
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1U - reset_lane);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 1U);
+	assert(count(&f, &f.down) == 1U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_data_before_close_during_split_reset(unsigned reset_lane)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	enum tr_lane target_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, reset_lane);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	/* FIFO DATA 早于 CLOSE：RESETTING 路径丢弃正文并记账，不向应用交付。 */
+	send_frame(&f, reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
+	           sizeof(bytes));
+	barrier(&f, reset_lane);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == sizeof(bytes) &&
+	       flow.rx_consumed_bytes == sizeof(bytes));
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	assert(count(&f, &f.received) == 0U && count(&f, &f.down) == 0U);
+
+	/* 后续 FIFO CLOSE 结束半侧，但不越过尚未完成的 RESET 屏障。 */
+	send_frame(&f, reset_lane, TR_FRAME_STREAM_CLOSE, 0, 1U, 0, NULL, 0);
+	barrier(&f, reset_lane);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.closed) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 2U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == sizeof(bytes) &&
+	       flow.rx_consumed_bytes == sizeof(bytes));
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	barrier(&f, reset_lane);
+	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_channel_get_lane_state(f.channel, target_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 完成 RESET 后，另一 lane 仍交付健康流并正常收敛。 */
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1U - reset_lane);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void
+test_frame_after_peer_reset_with_response_backpressure(unsigned reset_lane,
+                                                       uint16_t followup_type)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	enum tr_lane failed_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	/* 仅阻塞目标物理连接，并记录 RESET 响应遇到 EAGAIN。 */
+	atomic_store(&partial_fd, f.adopted_fd[reset_lane]);
+	atomic_store(&blocked_reset_eagain, 0U);
+	atomic_store(&block_all_tx, 1);
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&blocked_reset_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&blocked_reset_eagain) != 0U);
+	assert(count(&f, &f.resets) == 1U &&
+	       f.reset_status[0] == TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_ERR_STALE);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 响应仍被背压阻塞时，FIFO DATA/WINDOW_UPDATE/CLOSE 均不得越过 RESET。
+	 */
+	if (followup_type == TR_FRAME_DATA) {
+		send_frame(&f, reset_lane, followup_type,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
+		           sizeof(bytes));
+	} else if (followup_type == TR_FRAME_WINDOW_UPDATE) {
+		send_frame(&f, reset_lane, followup_type, 0, 1U, WINDOW + FRAME,
+		           NULL, 0);
+	} else {
+		assert(followup_type == TR_FRAME_STREAM_CLOSE);
+		send_frame(&f, reset_lane, followup_type, 0, 1U, 0, NULL, 0);
+	}
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(count(&f, &f.errors) == 0U && count(&f, &f.closed) == 1U);
+	assert(count(&f, &f.received) == 0U);
+	if (followup_type == TR_FRAME_WINDOW_UPDATE) {
+		assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+		assert(stats_after.window_updates_rx ==
+		       stats_before.window_updates_rx);
+	}
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 目标 lane 协议失败后，健康同伴 lane 仍可继续进展。 */
+	atomic_store(&block_all_tx, 0);
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1U - reset_lane);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 1U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void
+test_duplicate_peer_reset_with_response_backpressure(unsigned reset_lane,
+                                                     int conflicting_status)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	struct tr_stream_flow_state flow;
+	enum tr_lane failed_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	unsigned reset_responses = 0U;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+
+	/* 阻塞目标物理连接，确认对端 RESET 的本地响应真实遇到 EAGAIN。 */
+	atomic_store(&partial_fd, f.adopted_fd[reset_lane]);
+	atomic_store(&blocked_reset_eagain, 0U);
+	atomic_store(&block_all_tx, 1);
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&blocked_reset_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&blocked_reset_eagain) != 0U);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_ERR_STALE);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 响应仍在 EAGAIN 时重发 RESET：同原因应命中墓碑，不同原因应拒绝。 */
+	peer_reset(&f, reset_lane, 1U,
+	           conflicting_status ? TR_ERR_TIMEOUT : TR_ERR_CLOSED);
+	if (conflicting_status) {
+		wait_count(&f, &f.down, 1U);
+		assert(f.down_status == TR_ERR_STATE);
+		assert(count(&f, &f.errors) == 0U &&
+		       count(&f, &f.closed) == 1U);
+		assert(count(&f, &f.resets) == 1U);
+		assert(tr_channel_get_lane_state(f.channel, failed_lane,
+		                                 &lane_state) == TR_OK);
+		assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	} else {
+		/* RESET 后的 PING 是 RX 屏障；放开发送后必须只观察到原响应。 */
+		send_frame(&f, reset_lane, TR_FRAME_PING, 0, 0, 1001U, NULL, 0);
+		atomic_store(&block_all_tx, 0);
+		for (;;) {
+			struct tr_frame_header h =
+			        receive_frame(&f, reset_lane);
+			if (h.type == TR_FRAME_STREAM_RESET) {
+				assert(h.stream_id == 1U &&
+				       h.message_id ==
+				               (uint64_t)-TR_ERR_CLOSED);
+				++reset_responses;
+			} else if (h.type == TR_FRAME_PONG &&
+			           h.message_id == 1001U) {
+				break;
+			} else {
+				assert(!"unexpected frame after duplicate "
+				        "RESET");
+			}
+		}
+		assert(reset_responses == 1U);
+		assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+		assert(count(&f, &f.closed) == 1U &&
+		       count(&f, &f.resets) == 1U);
+		assert(tr_channel_get_lane_state(f.channel, failed_lane,
+		                                 &lane_state) == TR_OK);
+		assert(lane_state == TR_CHANNEL_LANE_UP);
+	}
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 目标 lane 的重复 RESET 不得影响另一物理连接上的活动流。 */
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == (conflicting_status ? 1U : 0U));
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_rejects_compressed_data_lane_flag(void)
 {
 	struct fixture f;
@@ -1279,6 +1842,292 @@ static int control_pressure_owner(void *arg)
 		assert(tr_reactor_send(f->connection[0], TR_FRAME_PING, 0, 0,
 		                       100 + i, NULL) == TR_OK);
 	return TR_OK;
+}
+
+static void test_peer_reset_response_reserved_fifo_under_pressure(void)
+{
+	struct fixture f;
+	struct tr_connection_stats stats;
+	struct tr_stream_flow_state flow;
+	enum tr_channel_lane_state lane_state;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1U, 1U);
+	struct tr_stream_handle live_stream = open_remote(&f, 0, 3U, 2U);
+
+	/* 占满普通控制 TX 池；四个 PING 保持在队列中且暂不写出。 */
+	atomic_store(&block_all_tx, 1);
+	assert(tr_reactor_call(f.reactor, control_pressure_owner, &f) == TR_OK);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.tx_queued_items == CONTROL)
+			break;
+		pause_ms();
+	}
+	assert(stats.tx_queued_items == CONTROL);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.fill_reset_command_queue = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* RESET 回调内再填满命令环；响应须用每连接终止预留等待前驱。 */
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	assert(count(&f, &f.resets) == 1U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_ERR_STALE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.tx_queued_items == CONTROL + 1U)
+			break;
+		pause_ms();
+	}
+	assert(stats.tx_queued_items == CONTROL + 1U);
+
+	/* 四个在先 PING 后，本地 RESET 响应部分写出并遇到真实 EAGAIN。 */
+	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
+	atomic_store(&partial_phase, 1);
+	atomic_store(&partial_eagain, 0U);
+	atomic_store(&block_partial, 1);
+	atomic_store(&block_all_tx, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&partial_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&partial_phase) == 2);
+	assert(atomic_load(&partial_eagain) != 0U);
+
+	/* RESET 半帧遇到 EAGAIN 时，同连接健康流仍须交付 DATA。 */
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(atomic_load(&partial_phase) == 2);
+	assert(f.held && f.held_stream.generation == live_stream.generation);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 此时 RESET 只有 7 字节在 wire 上；同连接 PONG 必须排在它之后。 */
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	uint64_t rx_frames_before_ping = stats.rx_frames;
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 1001U, NULL, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.rx_frames > rx_frames_before_ping)
+			break;
+		pause_ms();
+	}
+	assert(stats.rx_frames > rx_frames_before_ping);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
+	       TR_OK);
+	assert(stats.tx_queued_items == 2U);
+
+	atomic_store(&block_partial, 0);
+	for (unsigned i = 0; i < CONTROL; ++i) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 100U + i);
+	}
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 1001U);
+	assert(atomic_load(&partial_phase) == 3);
+	assert(atomic_load(&partial_eagain) >= 1U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats) == TR_OK);
+		if (stats.tx_queued_items == 0U)
+			break;
+		pause_ms();
+	}
+	assert(stats.tx_queued_items == 0U);
+	assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 背压恢复且 RESET/PONG 按序排空后，健康流仍可完成 RESET。 */
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	assert(tr_stream_release_payload(f.held_stream, f.held) == TR_OK);
+	f.held = NULL;
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	destroy_fixture(&f);
+}
+
+static int split_control_pressure_owner(void *arg)
+{
+	struct fixture *f = arg;
+	for (unsigned lane = 0; lane < 2U; ++lane) {
+		for (unsigned i = 0; i < CONTROL / 2U; ++i)
+			assert(tr_reactor_send(
+			               f->connection[lane], TR_FRAME_PING, 0, 0,
+			               200U + lane * 10U + i, NULL) == TR_OK);
+	}
+	return TR_OK;
+}
+
+static void test_peer_reset_reserved_fifo_isolated_across_connections(void)
+{
+	struct fixture f;
+	struct tr_connection_stats stats[2];
+	struct tr_stream_flow_state flow;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	assert(f.connection[0].slot != f.connection[1].slot);
+	struct tr_stream_handle reset_control = open_remote(&f, 0, 1U, 1U);
+	struct tr_stream_handle live_control = open_remote(&f, 0, 3U, 2U);
+	struct tr_stream_handle reset_bulk = open_remote(&f, 1, 5U, 3U);
+	struct tr_stream_handle live_bulk = open_remote(&f, 1, 7U, 4U);
+
+	/* 两条连接共享同一个 Reactor 与普通控制 TX 池，先各占一半。 */
+	atomic_store(&partial_fd, f.adopted_fd[0]);
+	atomic_store(&secondary_fd, f.adopted_fd[1]);
+	atomic_store(&block_all_tx, 1);
+	atomic_store(&block_secondary_tx, 1);
+	assert(tr_reactor_call(f.reactor, split_control_pressure_owner, &f) ==
+	       TR_OK);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		for (unsigned lane = 0; lane < 2U; ++lane)
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[lane], &stats[lane]) ==
+			       TR_OK);
+		if (stats[0].tx_queued_items == CONTROL / 2U &&
+		    stats[1].tx_queued_items == CONTROL / 2U)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].tx_queued_items == CONTROL / 2U);
+	assert(stats[1].tx_queued_items == CONTROL / 2U);
+
+	/* 控制池全满、命令环被第一个 RESET 回调占满时，两个连接都需预留。 */
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.fill_reset_command_queue = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	peer_reset(&f, 1, 5U, TR_ERR_CLOSED);
+	wait_count(&f, &f.resets, 2U);
+	wait_count(&f, &f.closed, 2U);
+	assert(tr_stream_get_flow_state(reset_control, &flow) == TR_ERR_STALE);
+	assert(tr_stream_get_flow_state(reset_bulk, &flow) == TR_ERR_STALE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		for (unsigned lane = 0; lane < 2U; ++lane)
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[lane], &stats[lane]) ==
+			       TR_OK);
+		if (stats[0].tx_queued_items == CONTROL / 2U + 1U &&
+		    stats[1].tx_queued_items == CONTROL / 2U + 1U)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].tx_queued_items == CONTROL / 2U + 1U);
+	assert(stats[1].tx_queued_items == CONTROL / 2U + 1U);
+
+	/* CONTROL RESET 半帧遇到 EAGAIN 时，BULK 仍须独立排空并前进。 */
+	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
+	atomic_store(&partial_phase, 1);
+	atomic_store(&partial_eagain, 0U);
+	atomic_store(&block_partial, 1);
+	atomic_store(&block_all_tx, 0);
+	atomic_store(&block_secondary_tx, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&partial_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&partial_phase) == 2);
+	assert(atomic_load(&partial_eagain) != 0U);
+
+	for (unsigned i = 0; i < CONTROL / 2U; ++i) {
+		struct tr_frame_header h = receive_frame(&f, 1);
+		assert(h.type == TR_FRAME_PING && h.message_id == 210U + i);
+	}
+	struct tr_frame_header h = receive_frame(&f, 1);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 5U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	send_frame(&f, 1, TR_FRAME_PING, 0, 0, 2101U, NULL, 0);
+	h = receive_frame(&f, 1);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 2101U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[1],
+		                                       &stats[1]) == TR_OK);
+		if (stats[1].tx_queued_items == 0U)
+			break;
+		pause_ms();
+	}
+	assert(stats[1].tx_queued_items == 0U);
+
+	for (unsigned i = 0; i < CONTROL / 2U; ++i) {
+		h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 200U + i);
+	}
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats[0]) ==
+	       TR_OK);
+	uint64_t rx_frames_before_ping = stats[0].rx_frames;
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 2001U, NULL, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats[0]) == TR_OK);
+		if (stats[0].rx_frames > rx_frames_before_ping)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].rx_frames > rx_frames_before_ping);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats[0]) ==
+	       TR_OK);
+	assert(stats[0].tx_queued_items == 2U);
+
+	atomic_store(&block_partial, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 2001U);
+	assert(atomic_load(&partial_phase) == 3);
+	assert(atomic_load(&partial_eagain) >= 1U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		for (unsigned lane = 0; lane < 2U; ++lane)
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[lane], &stats[lane]) ==
+			       TR_OK);
+		if (stats[0].tx_queued_items == 0U &&
+		    stats[1].tx_queued_items == 0U)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].tx_queued_items == 0U);
+	assert(stats[1].tx_queued_items == 0U);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 2U);
+
+	/* 两条物理连接的 RESET 压力解除后，各自健康流都继续交付并收敛。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	send_frame(&f, 1, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 7U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 2U);
+	assert(reset(&f, live_control, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 3U);
+	assert(reset(&f, live_bulk, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 7U, TR_ERR_CLOSED, TR_ERR_CLOSED, 4U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	destroy_fixture(&f);
 }
 
 static int control_pressure_without_retry_owner(void *arg)
@@ -1661,7 +2510,7 @@ static int repeat_goaway_owner(void *arg)
 static void test_repeat_goaway_fifo(void)
 {
 	struct fixture f;
-	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256, NULL);
+	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256, WINDOW, NULL);
 	(void)open_remote(&f, 0, 1, 1);
 	assert(tr_reactor_timer_register(f.reactor, repeat_goaway, &f,
 	                                 &repeat_goaway_timer) == TR_OK);
@@ -1841,6 +2690,379 @@ static void test_reset_begun_held_payload_release_without_credit(void)
 	destroy_fixture(&f);
 }
 
+static void
+test_reset_begun_concurrent_held_payload_releases_without_credit(void)
+{
+	struct fixture f;
+	uint8_t bytes[64] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	struct tr_stream_handle reset_stream;
+	struct tr_stream_handle live_stream;
+	struct tr_buffer *held[2];
+	struct payload_release_request release[2];
+	pthread_t release_threads[2];
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	reset_stream = open_remote(&f, 0, 1, 1);
+	live_stream = open_remote(&f, 0, 3, 2);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, sizeof(bytes));
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           2, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.held && f.held_extra);
+	assert(f.held_stream.generation == reset_stream.generation);
+	assert(f.held_extra_stream.generation == reset_stream.generation);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == 2U * sizeof(bytes));
+	assert(flow.rx_consumed_bytes == 0U);
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.block_reset_callback = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	peer_reset(&f, 0, 1, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.resets, 1U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.reset_callback_blocked);
+	held[0] = f.held;
+	held[1] = f.held_extra;
+	assert(held[0] && held[1]);
+	f.held = NULL;
+	f.held_extra = NULL;
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* 两个应用线程同时释放同一条 RESETTING 流上的独立正文。 */
+	for (unsigned i = 0; i < 2; ++i) {
+		release[i].fixture = &f;
+		release[i].stream = reset_stream;
+		release[i].payload = held[i];
+		release[i].result = TR_ERR_STATE;
+		assert(pthread_create(&release_threads[i], NULL,
+		                      release_payload_after_gate,
+		                      &release[i]) == 0);
+	}
+	wait_count(&f, &f.release_threads_ready, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_threads_go = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(pthread_join(release_threads[i], NULL) == 0);
+		assert(release[i].result == TR_OK);
+	}
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == 2U * sizeof(bytes));
+	assert(flow.rx_consumed_bytes == 2U * sizeof(bytes));
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_reset_callback = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	barrier_without_stream_window_update(&f, 0, 1U, TR_ERR_TIMEOUT);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	/* 目标流的并发释放不会妨碍同一 Channel 上的健康同伴。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 3U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
+static void
+test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+        uint32_t reset_discard_bytes, int send_over_credit_byte)
+{
+	struct fixture f;
+	uint8_t bytes[128] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	struct tr_stream_handle reset_stream[2];
+	struct tr_stream_handle live_stream;
+	struct tr_buffer *held[2];
+	struct payload_release_request release[2];
+	pthread_t release_threads[2];
+	unsigned reset_frames[2] = {0};
+	uint64_t expected_received = sizeof(bytes);
+	uint64_t expected_consumed = 0U;
+	assert(reset_discard_bytes <= sizeof(bytes));
+	assert(reset_discard_bytes % FRAME == 0U);
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	reset_stream[0] = open_remote(&f, 0, 1, 1);
+	reset_stream[1] = open_remote(&f, 0, 3, 2);
+	live_stream = open_remote(&f, 0, 5, 3);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		uint32_t id = i == 0 ? 1U : 3U;
+		send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST, id, 1, bytes,
+		           FRAME);
+		send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_LAST, id, 1,
+		           bytes + FRAME, FRAME);
+	}
+	wait_count(&f, &f.received, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.held && f.held_extra);
+	assert(f.held_stream.slot != f.held_extra_stream.slot);
+	assert((f.held_stream.slot == reset_stream[0].slot &&
+	        f.held_extra_stream.slot == reset_stream[1].slot) ||
+	       (f.held_stream.slot == reset_stream[1].slot &&
+	        f.held_extra_stream.slot == reset_stream[0].slot));
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(tr_stream_get_flow_state(reset_stream[i], &flow) ==
+		       TR_OK);
+		assert(flow.rx_received_bytes == sizeof(bytes));
+		assert(flow.rx_consumed_bytes == 0U);
+		assert(flow.rx_advertised_limit == WINDOW);
+	}
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	/* 先让两个流都本地进入 RESETTING，暂不确认任一 RESET。 */
+	assert(reset(&f, reset_stream[0], TR_ERR_TIMEOUT) == TR_OK);
+	assert(reset(&f, reset_stream[1], TR_ERR_CLOSED) == TR_OK);
+	assert(count(&f, &f.resets) == 2U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(f.reset_status[1] == TR_ERR_CLOSED);
+	if (reset_discard_bytes) {
+		/* 这些合法 DATA 已在途；RESETTING 只丢弃并消费 wire 字节，
+		 * 不交付应用，也不能恢复已停止的信用。 */
+		for (unsigned i = 0; i < 2; ++i) {
+			uint32_t id = i == 0 ? 1U : 3U;
+			for (uint32_t offset = 0; offset < reset_discard_bytes;
+			     offset += FRAME) {
+				uint16_t flags =
+				        offset == 0U ? TR_FRAME_F_FIRST : 0U;
+				if (offset + FRAME == reset_discard_bytes)
+					flags |= TR_FRAME_F_LAST;
+				send_frame(&f, 0, TR_FRAME_DATA, flags, id, 2,
+				           bytes + offset, FRAME);
+			}
+		}
+		expected_received += reset_discard_bytes;
+		expected_consumed += reset_discard_bytes;
+		for (unsigned i = 0; i < 2; ++i) {
+			wait_flow_counters(reset_stream[i], expected_received,
+			                   expected_consumed);
+		}
+		assert(count(&f, &f.received) == 2U);
+	}
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	held[0] = f.held;
+	held[1] = f.held_extra;
+	assert(held[0] && held[1]);
+	f.held = NULL;
+	f.held_extra = NULL;
+	f.hold_data = 0;
+	release[0].stream = f.held_stream;
+	release[1].stream = f.held_extra_stream;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		release[i].fixture = &f;
+		release[i].payload = held[i];
+		release[i].result = TR_ERR_STATE;
+		assert(pthread_create(&release_threads[i], NULL,
+		                      release_payload_after_gate,
+		                      &release[i]) == 0);
+	}
+	wait_count(&f, &f.release_threads_ready, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_threads_go = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(pthread_join(release_threads[i], NULL) == 0);
+		assert(release[i].result == TR_OK);
+	}
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(tr_stream_get_flow_state(reset_stream[i], &flow) ==
+		       TR_OK);
+		assert(flow.rx_received_bytes == expected_received);
+		assert(flow.rx_consumed_bytes == expected_received);
+		assert(flow.rx_advertised_limit == WINDOW);
+	}
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	if (send_over_credit_byte) {
+		uint8_t extra = 1U;
+		assert(reset_discard_bytes == sizeof(bytes));
+		/* 超出冻结通告上限一字节属于连接级信用错误。 */
+		send_frame(&f, 0, TR_FRAME_DATA,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1, 3, &extra,
+		           sizeof(extra));
+		wait_count(&f, &f.down, 1U);
+		assert(f.down_status == TR_ERR_BAD_LENGTH);
+		assert(count(&f, &f.received) == 2U);
+		assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+		assert(stats_after.window_updates_tx ==
+		       stats_before.window_updates_tx);
+		destroy_fixture(&f);
+		return;
+	}
+
+	while (reset_frames[0] == 0U || reset_frames[1] == 0U) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		if (h.type == TR_FRAME_WINDOW_UPDATE &&
+		    (h.stream_id == 1U || h.stream_id == 3U))
+			assert(!"RESETTING stream received late WINDOW_UPDATE");
+		if (h.type != TR_FRAME_STREAM_RESET)
+			continue;
+		unsigned index = h.stream_id == 1U   ? 0U
+		                 : h.stream_id == 3U ? 1U
+		                                     : 2U;
+		assert(index < 2U);
+		assert(h.message_id ==
+		       (uint64_t) -
+		               (index == 0U ? TR_ERR_TIMEOUT : TR_ERR_CLOSED));
+		assert(++reset_frames[index] == 1U);
+	}
+	/* 两个 RESET 都已实际到达对端后，逐一确认并完成退役。 */
+	peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+	peer_reset(&f, 0, 3, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.closed, 2U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 1002U, NULL, 0);
+	for (;;) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		if (h.type == TR_FRAME_WINDOW_UPDATE &&
+		    (h.stream_id == 1U || h.stream_id == 3U))
+			assert(!"RESETTING stream received late WINDOW_UPDATE");
+		if (h.type == TR_FRAME_STREAM_RESET &&
+		    (h.stream_id == 1U || h.stream_id == 3U))
+			assert(!"duplicate RESET frame after stream "
+			        "retirement");
+		if (h.type == TR_FRAME_PONG && h.message_id == 1002U)
+			break;
+	}
+	assert(reset_frames[0] == 1U && reset_frames[1] == 1U);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	/* 两条目标流分别并发释放正文，不阻塞健康同伴的交付和 RESET。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 5,
+	           1, bytes, FRAME);
+	wait_count(&f, &f.received, 3U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 5, TR_ERR_CLOSED, TR_ERR_CLOSED, 3U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_reset_release_preserves_cross_message_credit_debt(void)
+{
+	struct fixture f;
+	uint8_t bytes[128] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_buffer *held;
+	struct tr_stream_handle reset_stream;
+	struct tr_stream_handle live_stream;
+	struct tr_frame_header h;
+
+	/* 消息上限 128、窗口 256：两个 64 字节释放先累计至更新阈值。 */
+	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, COMMANDS,
+	                           2U * FRAME, NULL);
+	reset_stream = open_remote(&f, 0, 1, 1);
+	live_stream = open_remote(&f, 0, 3, 2);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, 64U);
+	wait_count(&f, &f.received, 1U);
+	/* 第一条消息留下 64 字节未通告债务，尚不能发送 WINDOW_UPDATE。 */
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 998U, NULL, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 998U);
+
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           2, bytes, 64U);
+	wait_count(&f, &f.received, 2U);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_WINDOW_UPDATE && h.stream_id == 1U);
+	assert(h.message_id == WINDOW + 128U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == 128U &&
+	       flow.rx_consumed_bytes == 128U &&
+	       flow.rx_advertised_limit == WINDOW + 128U);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST, 1, 3, bytes, FRAME);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_LAST, 1, 3, bytes + FRAME,
+	           FRAME);
+	wait_count(&f, &f.received, 3U);
+	assert(f.held && f.held_stream.generation == reset_stream.generation);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW &&
+	       flow.rx_consumed_bytes == 128U &&
+	       flow.rx_advertised_limit == WINDOW + 128U);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.block_reset_callback = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	peer_reset(&f, 0, 1, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.resets, 1U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.reset_callback_blocked);
+	held = f.held;
+	assert(held);
+	f.held = NULL;
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* 前两条消息留下的信用状态不能被 RESET 窗口中的释放覆盖。 */
+	assert(tr_stream_release_payload(reset_stream, held) == TR_OK);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW &&
+	       flow.rx_consumed_bytes == WINDOW &&
+	       flow.rx_advertised_limit == WINDOW + 128U);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_reset_callback = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	barrier_without_stream_window_update(&f, 0, 1U, TR_ERR_TIMEOUT);
+
+	/* 目标流在两种消费路径上都没有泄漏到同一 Channel 的健康流。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, 8U);
+	wait_count(&f, &f.received, 4U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_timer_failure_and_partial(int stopping)
 {
 	struct fixture f;
@@ -1894,7 +3116,7 @@ static void test_invalid(enum invalid_kind kind)
 
 		tr_memory_budget_init(&budget, 0U);
 		init_fixture_with_commands(&f, 2U, 0, 1U, 1U, 1, COMMANDS,
-		                           &budget);
+		                           WINDOW, &budget);
 		tr_memory_budget_get_stats(&budget, &stats);
 		fixed_bytes = stats.current_bytes;
 		assert(fixed_bytes > 0U);
@@ -2041,6 +3263,41 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        0U, 0);
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        FRAME, 0);
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        2U * FRAME, 0);
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        2U * FRAME, 1);
+	test_reset_begun_concurrent_held_payload_releases_without_credit();
+	test_reset_release_preserves_cross_message_credit_debt();
+	test_resetting_accepts_inflight_window_update();
+	test_close_order_around_split_reset(0U);
+	test_close_order_around_split_reset(1U);
+	test_data_after_close_during_split_reset(0U);
+	test_data_after_close_during_split_reset(1U);
+	test_data_before_close_during_split_reset(0U);
+	test_data_before_close_during_split_reset(1U);
+	test_frame_after_peer_reset_with_response_backpressure(0U,
+	                                                       TR_FRAME_DATA);
+	test_frame_after_peer_reset_with_response_backpressure(1U,
+	                                                       TR_FRAME_DATA);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        0U, TR_FRAME_WINDOW_UPDATE);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        1U, TR_FRAME_WINDOW_UPDATE);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        0U, TR_FRAME_STREAM_CLOSE);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        1U, TR_FRAME_STREAM_CLOSE);
+	test_duplicate_peer_reset_with_response_backpressure(0U, 0);
+	test_duplicate_peer_reset_with_response_backpressure(1U, 0);
+	test_duplicate_peer_reset_with_response_backpressure(0U, 1);
+	test_duplicate_peer_reset_with_response_backpressure(1U, 1);
+	test_peer_reset_response_reserved_fifo_under_pressure();
+	test_peer_reset_reserved_fifo_isolated_across_connections();
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
@@ -2067,6 +3324,8 @@ int main(void)
 	test_closed_receive_resource_failure();
 	test_frozen_discard_credit(0);
 	test_frozen_discard_credit(1);
+	test_frozen_discard_credit_split_connection_isolation(0U);
+	test_frozen_discard_credit_split_connection_isolation(1U);
 	test_close_and_held_payload();
 	test_reset_releases_held_payload_without_credit();
 	test_timer_failure_and_partial(0);
