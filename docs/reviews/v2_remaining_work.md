@@ -30,57 +30,60 @@ dev.27 的 [DATA TX 容量恢复通知](rpc_v2_data_tx_ready_20261024.md) 为压
 
 dev.28 的 [TEST-A 状态模型与轨迹回放](rpc_v2_state_model_replay_20261024.md)
 增加独立 Python 标准库参考模型、严格 JSON schema v1、手写边界轨迹和确定性 CLI，
-并接入现有 GCC 功能测试作业。Draft PR #317 的 14/14 GitHub 检查已通过，head 为
-`d51984ffb0435bebd75984502f3fa2af902db995`；PR 仍未合并。它只建立 L1 oracle；TEST-B 真实组件确定性执行、
-TEST-C 故障注入/缩减、TEST-D 集成与平台矩阵、TEST-E 诊断和容量性能仍未完成，
-#247 与整体 V2 验收继续保持未完成。
+并接入现有 GCC 功能测试作业。原 PR #317 已作为前序 PR 关闭，其实现纳入当前汇总 PR #321；
+TEST-A 与 TEST-B1–B4 的合并验收以 #321 当前 head `2abfd8fa3b37bc2c267b1a02f4ef8151cdd2cc63`
+为准，Draft、14/14 GitHub 检查通过。它只建立 L1 oracle 和有限真实 Endpoint 轨迹；TEST-B
+完整事件字母表/真实派发、TEST-C 通用生产 C 故障时序、TEST-D 集成与平台矩阵、TEST-E 诊断和
+容量性能仍未完成，#247 与整体 V2 验收继续保持未完成。
 
 dev.29 的 TEST-B1 在同一 TEST-A 轨迹上驱动真实 RPC Record Endpoint 测试夹具，检查取消后
 迟到工作、重复终局回调和账本归零；Reactor、Channel、Dispatch 与 Executor 仍为受控替身，
 未覆盖 TCP/真实派发调度。当前本地 GCC Debug/Release 均为 90/90，组件夹具为 35/35；
-Draft PR #318 的实现提交 `f3fc0abb2766fc24bb6c737cd9f03d0702f4343c` 已通过 14/14 GitHub
-检查，仍未合并；完整边界与本地/远端证据见
+原 PR #318 已收敛至当前汇总 PR #321，远端完整检查通过；完整边界与本地/远端证据见
 [TEST-B1 记录](rpc_v2_component_replay_20261024.md)。
 
 dev.30 的 TEST-B2 在 TEST-B1 上增加 Deadline 终局后迟到工作的组件轨迹，验证 TIMEOUT RESET、
 唯一终局和预算归还。它仍是受控下层交错，不代表真实 Dispatch 调度或 TCP 集成。本地 GCC
-Debug/Release 全量各 90/90，模型 28/28、组件映射 9/9、Endpoint 夹具 35/35；Draft PR #319
-实现 head `683c6eff5330b2f74bb4aa7c2fa631e075b1c39c` 的 14/14 GitHub 检查通过，PR 仍未合并；
+Debug/Release 全量各 90/90，模型 28/28、组件映射 9/9、Endpoint 夹具 35/35；
+原 PR #319 已收敛至当前汇总 PR #321，远端完整检查通过；
 证据见[TEST-B2 记录](rpc_v2_deadline_component_replay_20261024.md)。
 
 dev.31 的 TEST-B3 增加同一 Endpoint 槽复用后旧代次 DATA 迟到轨迹。真实 Endpoint 必须
 忽略旧流句柄的数据回调，不能增加新调用接收次数；新旧两次调用各自只报告一次取消终局并
 退役，账本为零。当前模型 28/28、组件映射 10/10，GCC Debug/Release 全量各 90/90，
-Endpoint 夹具 35/35，三条 Release L1/L2 回放均匹配；Draft PR #320 head
-`b3bd7b8318cb5490a532a4a29c4a3e86865b0ea3` 的 14/14 GitHub 检查通过，PR 仍未合并。证据见
+Endpoint 夹具 35/35，三条 Release L1/L2 回放均匹配；原 PR #320 已收敛至当前汇总 PR #321，
+远端完整检查通过。证据见
 [TEST-B3 记录](rpc_v2_stale_generation_component_replay_20261024.md)。
 
 dev.32 的 TEST-B4 增加成功 FINAL 已接受后收到 RESET 的组件轨迹。它检查 Endpoint 保留
 先到的 OK 终局、不增加重复回调，并在 RESET 后退役与归还预算。当前模型 28/28、组件映射
 11/11，GCC Debug/Release 全量各 90/90、Endpoint 夹具各 35/35，四条 B1–B4 回放在两种
-模式均匹配；Draft PR #321 实现提交 `93502c1` 已通过 14/14 GitHub 检查，PR 待合并。证据见
+模式均匹配；当前 Draft 汇总 PR #321 将 TEST-A 与 TEST-B1–B4 合并审查，14/14 GitHub 检查通过，
+仍待合并。证据见
 [TEST-B4 记录](rpc_v2_final_reset_component_replay_20261024.md)。
 
 dev.33 的 TEST-C1 增加固定 seed 模型探索、失败签名与确定性事件缩减，并扩展既有
 `build-test (gcc)` 检查和失败工件归档。固定 64-seed 测试集覆盖 schema v1 的 17 种操作，
 生成轨迹包含 APPLIED、STALE、REJECTED、RESOURCE_LIMIT；测试专用重复终局回调 mutant
-能缩减到 OPEN/CANCEL。它只验证 L1 模型工具链，不是生产 C 故障注入。Draft PR #322 的 GCC、
-Clang、ASan/UBSan、TSan、RPC smoke 与静态分析通过；Make/install job 在 SDK V2 消费端
-`tr_client_destroy(client->handle) == TR_OK` 断言失败，详见 CI 首轮记录，原因待单独核实。
+能缩减到 OPEN/CANCEL。它只验证 L1 模型工具链，不是生产 C 故障注入。原 PR #322 已关闭并由
+汇总 PR #323 取代。其 Make/install 首轮失败已查明是 SDK 测试把终局销毁首次调用误设为必然
+`TR_OK`；生命周期合同允许 `TR_AGAIN`，测试现使用有界重试。初始失败证据保留在 CI 记录中，
+不再作为未解释的实现失败。
 详细证据见 [TEST-C1 记录](rpc_v2_test_c1_explorer_20261025.md)。
 
 dev.34 的 TEST-C2 增加一条固定 Endpoint 最终错误状态发送背压回放：模型 `ERROR` 映射到
 夹具 `UNIMPLEMENTED`，真实 Endpoint 的 `tr_stream_sendv` 首次返回一次 `TR_AGAIN`、第二次
 接受唯一最终帧；组件观察与 L1 在终局次数、工作完成、最终帧、槽退役及零预算上匹配。
 该测试仍使用受控 Channel/Dispatch/Executor，不覆盖 TCP、通用故障日程或 TEST-C 完整要求；
-Draft PR #323 的旧 head 远端检查结果单独记录；父 PR #322 的首次 Make/install 失败及后续本地复现状态
-也单独保留。详见 [TEST-C2 记录](rpc_v2_test_c2_endpoint_send_backpressure_20261025.md)。
+当前 Draft 汇总 PR #323 收纳 TEST-C1–C3，head 为 `a8cf248a27a0c60d1df36f003d4b55fdcf5eabac`，
+13/13 GitHub 检查通过，仍待合并。父 PR #322 的首次 Make/install 失败与修复证据均保留。
+详见 [TEST-C2 记录](rpc_v2_test_c2_endpoint_send_backpressure_20261025.md)。
 
 dev.35 的 TEST-C3 在同一受控 Endpoint 夹具中覆盖相邻竞争窗口：错误最终帧首次发送返回
 `TR_AGAIN` 后、Endpoint 下一次发送重试前收到远端 RESET。组件必须不再尝试发送、不报告已接受
 最终帧，并在有界轮转后只交付一次终局、退役槽且归还全部预算。新增/修改源码行格式 CI 门禁按
 用户要求移除；格式工具和翻译目录回归并入既有 GCC 构建作业，本地改动行检查保留。
-此前 PR #323 head `db4070c381c87dac0af0a5440ff9d9627bf36a40` 的格式作业因 GitHub 10 分钟超时
+此前 PR #323 中间 head `db4070c381c87dac0af0a5440ff9d9627bf36a40` 的格式作业因 GitHub 10 分钟超时
 且零步骤执行而取消；同一 head 的本地格式检查为 1 个源码文件、0 处格式错误。该远端结果不代表
 源码格式检查失败。C3 head `a858dd21fb5c3225cb4bf8b53aa5edc9ba0953d6` 的既有 CI 与 RPC smoke 共 13/13
 通过；GCC 全量 Debug/Release 各 90/90，两个收尾进程快照均未发现项目子进程，旧 runner cleanup 超时未复现。
@@ -518,7 +521,7 @@ ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 T
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
 | 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
-| 横切验证 | TEST-A PR #317、TEST-B1 PR #318、TEST-B2 PR #319、TEST-B3 PR #320 与 TEST-B4 PR #321 的实现提交均已通过 14/14 GitHub 检查但待合并；TEST-C1 完成固定种子模型探索与 mutant 缩减，TEST-C2 验证 Endpoint `TR_AGAIN` 后恢复，TEST-C3 验证 RESET 阻止背压终局帧重试；通用生产 C 故障时序、TEST-B 完整事件字母表、真实网络/派发、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能仍待完成 | #247 |
+| 横切验证 | TEST-A 与 TEST-B1–B4 已收敛至 Draft PR #321（14/14 检查通过），TEST-C1–C3 已收敛至 Draft PR #323（13/13 检查通过）；旧 PR #317–#320、#322 已关闭，提交仍可从汇总分支追溯。仍缺通用生产 C 故障时序、TEST-B 完整事件字母表、真实网络/派发、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能 | #247 |
 | 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
 
 dev.97 修复并回归验证 Shared Channel 多帧压缩 DATA 在共享 TX 池恢复后的两流轮转：高熵压缩
