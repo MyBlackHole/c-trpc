@@ -212,6 +212,8 @@ int tr_reactor_sendv_limited(struct tr_conn_handle connection, uint16_t type,
  * 外部线程调用时，本函数同步提交 SET_HANDLER 命令，并等待反应器所有者
  * 线程应用 frame_cb/event_cb/callback_arg 这一组状态后再返回。
  * 如果已经位于反应器所有者线程，则直接修改当前连接。
+ * owner 回调同步等待另一 Reactor 时，若该等待会闭合跨 owner 等待环，
+ * 返回 TR_ERR_STATE，且不提交 SET_HANDLER。
  */
 int tr_reactor_set_handler(struct tr_conn_handle connection,
 			   tr_reactor_frame_cb frame_cb,
@@ -221,7 +223,9 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
  * 这是生命周期静止屏障：通常先禁用回调，再调用本函数，
  * 最后才允许释放回调所有者的状态。
  *
- * 禁止从反应器线程自身调用，否则会形成自等待。
+ * 禁止从反应器线程自身调用，否则会形成自等待。owner 回调同步等待另一
+ * Reactor 时，若该等待会闭合跨 owner 等待环，返回 TR_ERR_STATE，且不提交
+ * QUIESCE。
  * 如果所有者在屏障执行前因致命 epoll 错误退出，返回 TR_ERR_SYS，
  * 而不是错误地报告静止已成立；仅被队列关闭拒绝的请求返回 TR_ERR_CLOSED。
  */
@@ -257,6 +261,8 @@ int tr_reactor_abort(struct tr_conn_handle connection, int status);
  * STOP 命令一旦被接受，后续即使 pthread_join() 暂时失败，也不会重新提交
  * 第二个 STOP。对象保持调用者拥有的终止状态；再次 stop()/destroy()
  * 会重试同一所有者线程的回收屏障，直到成功后才允许开始新轮次。
+ * owner 回调同步等待另一 Reactor 时，若 stop 等待会闭合跨 owner 等待环，
+ * 返回 TR_ERR_STATE，且不关闭目标 Reactor 的准入。
  *
  * epoll_wait 发生非 EINTR 的致命错误时，所有者自行关闭两个队列的准入，
  * 让已接受但未执行的同步请求返回 TR_ERR_SYS，归还其余命令所有权，
@@ -265,6 +271,9 @@ int tr_reactor_abort(struct tr_conn_handle connection, int status);
  * 向已失去消费者的队列再次发送 STOP。完成 stop() 后仍可重新 start()。
  */
 int tr_reactor_stop(struct tr_reactor *reactor);
+/* 若 stop 后仍有已唤醒的同步 owner waiter 尚未退出等待 scope，则返回
+ * TR_AGAIN 并保留对象；waiter 返回后可重试 destroy。进入销毁终态后不得再
+ * start。跨 owner 等待环按 stop() 的 TR_ERR_STATE 语义拒绝。 */
 int tr_reactor_destroy(struct tr_reactor *reactor);
 
 #ifdef __cplusplus

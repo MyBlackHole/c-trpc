@@ -275,6 +275,12 @@ struct tr_reactor {
 
 	pthread_mutex_t ctl_lock;
 	int started;
+	/* 由 tr_reactor_wait_graph_lock 保护。同步 owner 等待时，该节点最多
+	 * 有一条出边；depth 覆盖 graceful close 这样的嵌套等待 scope。 */
+	struct tr_reactor *sync_wait_target;
+	uint32_t sync_wait_depth;
+	uint32_t sync_wait_inbound;
+	int sync_wait_destroying;
 	/* 停止后的子资源回收持有租约，清理完成前禁止重启或销毁。 */
 	struct tr_reactor_recovery_guard *recovery_guard;
 	_Atomic int accepting;
@@ -325,6 +331,109 @@ struct tr_reactor {
 	tr_reactor_event_cb event_cb;
 	void *callback_arg;
 };
+
+struct tr_reactor_wait_scope {
+	struct tr_reactor *source;
+	struct tr_reactor *target;
+	int active;
+};
+
+static pthread_mutex_t tr_reactor_wait_graph_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* 仅记录可能阻塞的 owner->other-Reactor 等待。图锁不跨越队列、条件
+ * 变量、用户函数或 join；每个 owner 的唯一出边使环检测只需沿链查找。 */
+static int tr_reactor_wait_scope_begin(struct tr_reactor *target,
+                                       struct tr_reactor_wait_scope *scope)
+{
+	struct tr_reactor *source = tr_current_reactor_owner;
+	struct tr_reactor *cursor;
+	int ret = TR_OK;
+
+	if (!target || !scope)
+		return TR_ERR_INVALID;
+	memset(scope, 0, sizeof(*scope));
+	if (!source || source == target)
+		return TR_OK;
+
+	pthread_mutex_lock(&tr_reactor_wait_graph_lock);
+	if (source->sync_wait_target == target) {
+		/* close_graceful 外层持边，内层 call 复用同一条出边。 */
+		if (source->sync_wait_depth == UINT32_MAX)
+			ret = TR_ERR_STATE;
+		else
+			source->sync_wait_depth++;
+	} else if (source->sync_wait_target) {
+		/* 一个 owner 线程无法同时阻塞在两个目标上。 */
+		ret = TR_ERR_STATE;
+	} else if (target->sync_wait_destroying) {
+		ret = TR_ERR_CLOSED;
+	} else {
+		for (cursor = target; cursor;
+		     cursor = cursor->sync_wait_target) {
+			if (cursor == source) {
+				ret = TR_ERR_STATE;
+				break;
+			}
+		}
+		if (ret == TR_OK && target->sync_wait_inbound == UINT32_MAX)
+			ret = TR_ERR_STATE;
+		if (ret == TR_OK) {
+			source->sync_wait_target = target;
+			source->sync_wait_depth = 1U;
+			target->sync_wait_inbound++;
+		}
+	}
+	if (ret == TR_OK) {
+		scope->source = source;
+		scope->target = target;
+		scope->active = 1;
+	}
+	pthread_mutex_unlock(&tr_reactor_wait_graph_lock);
+	return ret;
+}
+
+static void tr_reactor_wait_scope_end(struct tr_reactor_wait_scope *scope)
+{
+	struct tr_reactor *source;
+	struct tr_reactor *target;
+
+	if (!scope || !scope->active)
+		return;
+	source = scope->source;
+	target = scope->target;
+	pthread_mutex_lock(&tr_reactor_wait_graph_lock);
+	assert(source->sync_wait_target == target);
+	assert(source->sync_wait_depth > 0U);
+	assert(target->sync_wait_inbound > 0U);
+	source->sync_wait_depth--;
+	if (source->sync_wait_depth == 0U) {
+		source->sync_wait_target = NULL;
+		target->sync_wait_inbound--;
+	}
+	pthread_mutex_unlock(&tr_reactor_wait_graph_lock);
+	memset(scope, 0, sizeof(*scope));
+}
+
+static int tr_reactor_wait_graph_mark_destroying(struct tr_reactor *reactor)
+{
+	int ret;
+
+	pthread_mutex_lock(&tr_reactor_wait_graph_lock);
+	reactor->sync_wait_destroying = 1;
+	ret = reactor->sync_wait_inbound == 0U ? TR_OK : TR_AGAIN;
+	pthread_mutex_unlock(&tr_reactor_wait_graph_lock);
+	return ret;
+}
+
+static int tr_reactor_wait_graph_is_destroying(struct tr_reactor *reactor)
+{
+	int destroying;
+
+	pthread_mutex_lock(&tr_reactor_wait_graph_lock);
+	destroying = reactor->sync_wait_destroying;
+	pthread_mutex_unlock(&tr_reactor_wait_graph_lock);
+	return destroying;
+}
 
 static uint32_t tr_nonzero(uint32_t value, uint32_t fallback)
 {
@@ -4476,7 +4585,8 @@ int tr_reactor_start(struct tr_reactor *reactor)
 		return TR_ERR_INVALID;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
-	if (reactor->started || reactor->recovery_guard) {
+	if (reactor->started || reactor->recovery_guard ||
+	    tr_reactor_wait_graph_is_destroying(reactor)) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
 		return TR_ERR_STATE;
 	}
@@ -5331,6 +5441,7 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 {
 	struct tr_reactor *reactor = connection.reactor;
 	struct tr_reactor_handler_request request;
+	struct tr_reactor_wait_scope wait_scope = {0};
 	struct tr_command command;
 	int ret;
 
@@ -5389,13 +5500,17 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 
 		if (wait_generation == 0U)
 			ret = TR_ERR_CLOSED;
-		else
-			ret = tr_reactor_push_command_wait(
-				reactor, &command, wait_generation);
+		else {
+			ret = tr_reactor_wait_scope_begin(reactor, &wait_scope);
+			if (ret == TR_OK)
+				ret = tr_reactor_push_command_wait(
+				        reactor, &command, wait_generation);
+		}
 	}
 
 	if (ret == TR_OK)
 		ret = tr_reactor_sync_wait(&request.sync);
+	tr_reactor_wait_scope_end(&wait_scope);
 	tr_reactor_sync_destroy(&request.sync);
 	return ret;
 }
@@ -5403,6 +5518,7 @@ int tr_reactor_set_handler(struct tr_conn_handle connection,
 int tr_reactor_quiesce(struct tr_reactor *reactor)
 {
 	struct tr_reactor_sync sync;
+	struct tr_reactor_wait_scope wait_scope = {0};
 	struct tr_command command;
 	int ret;
 
@@ -5449,9 +5565,12 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 
 		if (wait_generation == 0U)
 			ret = TR_ERR_CLOSED;
-		else
-			ret = tr_reactor_push_command_wait(
-				reactor, &command, wait_generation);
+		else {
+			ret = tr_reactor_wait_scope_begin(reactor, &wait_scope);
+			if (ret == TR_OK)
+				ret = tr_reactor_push_command_wait(
+				        reactor, &command, wait_generation);
+		}
 	}
 
 	if (ret == TR_OK) {
@@ -5463,6 +5582,7 @@ int tr_reactor_quiesce(struct tr_reactor *reactor)
 		pthread_mutex_unlock(&sync.lock);
 	}
 
+	tr_reactor_wait_scope_end(&wait_scope);
 	pthread_cond_destroy(&sync.cond);
 	pthread_mutex_destroy(&sync.lock);
 	return ret;
@@ -5695,6 +5815,7 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		    void *arg)
 {
 	struct tr_reactor_sync sync;
+	struct tr_reactor_wait_scope wait_scope = {0};
 	struct tr_command command;
 	int ret;
 
@@ -5736,13 +5857,17 @@ int tr_reactor_call(struct tr_reactor *reactor, int (*fn)(void *arg),
 		 */
 		if (wait_generation == 0U)
 			ret = TR_ERR_CLOSED;
-		else
-			ret = tr_reactor_push_command_wait(
-				reactor, &command, wait_generation);
+		else {
+			ret = tr_reactor_wait_scope_begin(reactor, &wait_scope);
+			if (ret == TR_OK)
+				ret = tr_reactor_push_command_wait(
+				        reactor, &command, wait_generation);
+		}
 	}
 
 	if (ret == TR_OK)
 		ret = tr_reactor_sync_wait(&sync);
+	tr_reactor_wait_scope_end(&wait_scope);
 	tr_reactor_sync_destroy(&sync);
 	return ret;
 }
@@ -5792,6 +5917,7 @@ int tr_reactor_close_graceful(struct tr_conn_handle connection)
 {
 	struct tr_reactor_graceful_close_request request;
 	struct tr_reactor_sync completion;
+	struct tr_reactor_wait_scope wait_scope = {0};
 	int ret;
 
 	if (!connection.reactor)
@@ -5801,12 +5927,18 @@ int tr_reactor_close_graceful(struct tr_conn_handle connection)
 	ret = tr_reactor_sync_init(&completion);
 	if (ret != TR_OK)
 		return ret;
+	ret = tr_reactor_wait_scope_begin(connection.reactor, &wait_scope);
+	if (ret != TR_OK) {
+		tr_reactor_sync_destroy(&completion);
+		return ret;
+	}
 	request.connection = connection;
 	request.completion = &completion;
 	ret = tr_reactor_call(connection.reactor,
 	                      tr_reactor_graceful_close_on_owner, &request);
 	if (ret == TR_OK)
 		ret = tr_reactor_sync_wait(&completion);
+	tr_reactor_wait_scope_end(&wait_scope);
 	tr_reactor_sync_destroy(&completion);
 	return ret;
 }
@@ -6087,6 +6219,7 @@ int tr_reactor_timer_unregister(struct tr_reactor_timer_handle handle)
 
 int tr_reactor_stop(struct tr_reactor *reactor)
 {
+	struct tr_reactor_wait_scope wait_scope = {0};
 	struct tr_command command;
 	int ret = TR_OK;
 
@@ -6099,10 +6232,14 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 	 */
 	if (tr_reactor_is_owner_thread(reactor))
 		return TR_ERR_STATE;
+	ret = tr_reactor_wait_scope_begin(reactor, &wait_scope);
+	if (ret != TR_OK)
+		return ret;
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	if (!reactor->started) {
 		pthread_mutex_unlock(&reactor->ctl_lock);
+		tr_reactor_wait_scope_end(&wait_scope);
 		return TR_OK;
 	}
 
@@ -6137,17 +6274,22 @@ int tr_reactor_stop(struct tr_reactor *reactor)
 
 	pthread_mutex_unlock(&reactor->ctl_lock);
 
-	if (ret != TR_OK)
+	if (ret != TR_OK) {
+		tr_reactor_wait_scope_end(&wait_scope);
 		return ret;
+	}
 
 	ret = pthread_join(reactor->thread, NULL);
-	if (ret != 0)
+	if (ret != 0) {
+		tr_reactor_wait_scope_end(&wait_scope);
 		return TR_ERR_SYS;
+	}
 
 	pthread_mutex_lock(&reactor->ctl_lock);
 	reactor->started = 0;
 	reactor->stop_submitted = 0;
 	pthread_mutex_unlock(&reactor->ctl_lock);
+	tr_reactor_wait_scope_end(&wait_scope);
 	return TR_OK;
 }
 
@@ -6173,6 +6315,13 @@ int tr_reactor_destroy(struct tr_reactor *reactor)
 		if (ret != TR_OK)
 			return ret;
 	}
+
+	/* stop() 已使 target owner 退出。先拒绝新的等待边，再确认所有已登记
+	 * waiter 都离开图；若 waiter 尚未从同步唤醒路径返回，保留对象供重试。
+	 */
+	ret = tr_reactor_wait_graph_mark_destroying(reactor);
+	if (ret != TR_OK)
+		return ret;
 
 	/* 接收负载所有权可能通过 TR_FRAME_TAKE_OWNERSHIP 逃逸回调。
 	 * 拆除 epoll、队列与槽位前检查该终止边界；

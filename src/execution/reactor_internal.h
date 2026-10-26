@@ -32,6 +32,8 @@ int tr_reactor_call_or_stopped(
 
 /* 在反应器所有者线程执行一个短小、非阻塞的同步操作，并把 fn 的
  * 返回值传回调用方。所有者线程内调用时直接执行，避免自等待。
+ * owner 回调等待另一 Reactor 时，若该等待会闭合跨 owner 等待环，返回
+ * TR_ERR_STATE，且不把 fn 提交到目标队列。
  *
  * arg 只在本函数返回前被访问，因此调用方可以安全传递栈上请求。
  */
@@ -120,7 +122,8 @@ int tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner(
 int tr_reactor_close_on_owner(struct tr_conn_handle connection);
 int tr_reactor_abort_on_owner(struct tr_conn_handle connection, int status);
 /* 仅由显式协议排空后的外部生命周期线程调用；TLS close_notify 完成或
- * 有界关闭失败后返回，普通非 TLS 连接不使用此辅助函数。 */
+ * 有界关闭失败后返回，普通非 TLS 连接不使用此辅助函数。owner 回调调用时，
+ * 若整个关闭等待会闭合跨 owner 等待环，则在提交关闭命令前返回 TR_ERR_STATE。 */
 int tr_reactor_close_graceful(struct tr_conn_handle connection);
 
 /* 协议层对精确连接代次施加/解除接收背压，不等待命令容量。
