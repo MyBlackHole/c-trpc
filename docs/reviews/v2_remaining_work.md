@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-27，V2 当前候选为 `2.0.0-dev.158`；#243 堆叠 PR #328 → #329 → #330 均保持 OPEN。PR #330 的 dev.157 head `c7fe157c24a87bb461725539884d8f71bd982907` 有 13/13 GitHub 检查通过；dev.158 增补共享 TaskExecutor 队列满载的 dispatch 重试回归，本地 Release、ASan/UBSan、TSan 均通过，远端 CI 待新 head 验收。主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 的后续状态仍以 #234 当前记录为准。
+核对基线：2026-10-27，V2 当前候选为 `2.0.0-dev.158`；#243 堆叠 PR #328 → #329 → #330 均保持 OPEN。PR #330 的 dev.157 head `c7fe157c24a87bb461725539884d8f71bd982907` 与 dev.158 head `a8b0f8aa31c4569005e6a404015a81cee2c55074` 均有 13/13 GitHub 检查通过；dev.158 增补共享 TaskExecutor 队列满载的 dispatch 重试回归，本地 Release、ASan/UBSan、TSan 均通过。主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 的后续状态仍以 #234 当前记录为准。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线
@@ -265,7 +265,9 @@ dev.153 将 #242/#241 配额恢复扩展至四轮进度：每轮通过屏障同�
 
 dev.157 在 dev.156 方法钩子上增加公共 SDK 真实 TCP 集成回归：授权回调等到服务端取消令牌置位后才迟到返回 ALLOW，覆盖主动取消与 deadline；旧调用不进入业务 work，后续健康调用仍成功。GCC Release 全套 92/92，SDK 目标在 GCC ASan/UBSan、GCC TSan、Clang Release 均通过。PR #330 当前 dev.157 head 的 CI 13/13 通过。审查记录见[方法钩子记录](rpc_v2_method_hooks_20261027.md)。#243 仍缺通用异步操作内核与显式操作引用、完成/退役屏障、单 worker/满队列/并发契约及 TLS/压缩共享调度，保持 OPEN。
 
-dev.158 在同一 RPC Record dispatch/TaskExecutor 路径中固定单 worker 正在执行阻塞工作、其余三个容量槽全部排队；新 authorize OPEN 在满载期间不得开始认证、业务 work 或终局。解除阻塞后，认证 OPEN 被有界泵重试，后续 MESSAGE/HALF_CLOSE 仍按序执行且单次终局。该测试在 GCC Release、ASan/UBSan、TSan 通过；完整 GCC Release 构建通过、注册测试 92/92 通过，clang-format 18.1.8 修改行检查通过；远端 CI 待精确 head 验收。不改生产代码，也不证明完成队列满、永久关闭或通用操作生命周期。#243 仍待通用异步操作内核、显式操作引用、完成/退役屏障及更广并发/共享调度验收。
+dev.158 在同一 RPC Record dispatch/TaskExecutor 路径中固定单 worker 正在执行阻塞工作、其余三个容量槽全部排队；新 authorize OPEN 在满载期间不得开始认证、业务 work 或终局。解除阻塞后，认证 OPEN 被有界泵重试，后续 MESSAGE/HALF_CLOSE 仍按序执行且单次终局。该测试在 GCC Release、ASan/UBSan、TSan 通过；完整 GCC Release 构建通过、注册测试 92/92 通过，clang-format 18.1.8 修改行检查通过，PR #330 精确 head 的 GitHub CI 13/13 通过。不改生产代码，也不证明完成队列满、永久关闭或通用操作生命周期。#243 仍待通用异步操作内核、显式操作引用、完成/退役屏障及更广并发/共享调度验收。
+
+2026-10-27 已为上述缺口起草[通用异步操作内核设计](../superpowers/specs/2026-10-27-rpc-v2-operation-kernel-design.md)。这是设计草案，尚无实现或验收；其中输入与结果的所有权边界按自审意见明确为：操作池不接管工作输入，只有 `publish` 成功才接管结果。待设计评审后再形成实施计划。
 
 dev.156 为 #243 的 Server V2 方法提供固定类型 observe/admit/authorize 钩子：异步 authorize 复用分片共享 TaskExecutor，owner 完成边界复核槽位代次、调用身份、终局与 deadline；REJECT 经空错误 FINAL 返回，迟到 ALLOW 不恢复终局调用。全套 GCC Release 92/92；dispatch/SDK 在 GCC ASan/UBSan、GCC TSan、Clang Release 通过；堆叠 PR #330 的前序 head 有 13/13 GitHub 检查通过。此切片只补齐固定 Server 方法钩子及该 authorize 路径的迟到完成保护，仍缺通用异步操作内核与显式操作引用、完成/退役屏障、单 worker/满队列/并发契约及 TLS/压缩共享调度；#243 保持 OPEN。
 
