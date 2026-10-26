@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <string.h>
@@ -9,6 +10,19 @@
 #include "../include/tr/tls.h"
 #include "../src/io/tls_provider_operation_internal.h"
 #include "../src/memory_budget.h"
+
+int __real_pthread_mutex_unlock(pthread_mutex_t *mutex);
+static pthread_mutex_t *fail_unlock_mutex;
+static unsigned fail_unlock_once;
+
+int __wrap_pthread_mutex_unlock(pthread_mutex_t *mutex)
+{
+	if (mutex == fail_unlock_mutex && fail_unlock_once) {
+		--fail_unlock_once;
+		return EPERM;
+	}
+	return __real_pthread_mutex_unlock(mutex);
+}
 
 struct race_context {
 	struct tr_tls_provider_operation_table *table;
@@ -106,6 +120,40 @@ static void test_capacity_and_accounting(void)
 	assert(tr_tls_provider_operation_result(&table, stale, &result_status,
 	                                        output, sizeof(output),
 	                                        &output_len) == TR_ERR_STALE);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == table_bytes);
+	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+}
+
+static void test_reserve_unlock_failure_rolls_back(void)
+{
+	struct tr_tls_provider_operation_table table = {0};
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_tls_provider_operation operation = {
+	        .instance = 99U,
+	        .generation = 88U,
+	        .slot = 77U,
+	        .kind = TR_TLS_PROVIDER_OPERATION_AUTHORIZATION,
+	};
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_tls_provider_operation_table_init(&table, 1U, &budget) ==
+	       TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	uint64_t table_bytes = stats.current_bytes;
+	fail_unlock_mutex = &table.lock;
+	fail_unlock_once = 1U;
+	assert(tr_tls_provider_operation_reserve(
+	               &table, TR_TLS_PROVIDER_OPERATION_CREDENTIALS, 64U,
+	               &operation) == TR_ERR_SYS);
+	fail_unlock_mutex = NULL;
+	assert(operation.instance == 99U && operation.generation == 88U &&
+	       operation.slot == 77U &&
+	       operation.kind == TR_TLS_PROVIDER_OPERATION_AUTHORIZATION);
+	assert(pthread_mutex_trylock(&table.lock) == 0);
+	assert(pthread_mutex_unlock(&table.lock) == 0);
 	tr_memory_budget_get_stats(&budget, &stats);
 	assert(stats.current_bytes == table_bytes);
 	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
@@ -304,6 +352,7 @@ static void test_reserved_cancel_can_be_read_and_retired(void)
 int main(void)
 {
 	test_capacity_and_accounting();
+	test_reserve_unlock_failure_rolls_back();
 	test_generation_exhaustion_and_foreign_handles();
 	test_credentials_copy_and_retire_accounting();
 	test_cancel_and_complete_race();

@@ -299,14 +299,17 @@ int tr_tls_provider_operation_reserve(
 	        .cancel_reason = TR_OK,
 	        .active = 1,
 	};
+	/* 所有权已由 slot 接管；后续回滚只从 slot 取出并释放结果缓冲。 */
+	result = NULL;
 	if (table->instance == 0U)
 		table->instance = operation.instance;
 	else if (table->instance != operation.instance) {
-		if (result) {
-			OPENSSL_cleanse(result, result_capacity);
-			free(result);
+		if (slot->result) {
+			OPENSSL_cleanse(slot->result, result_capacity);
+			free(slot->result);
 			(void)tr_memory_budget_release(table->budget,
 			                               result_capacity);
+			slot->result = NULL;
 		}
 		memset(slot, 0, sizeof(*slot));
 		ret = TR_ERR_STATE;
@@ -318,15 +321,33 @@ int tr_tls_provider_operation_reserve(
 	        .slot = operation.slot,
 	        .kind = kind,
 	};
-	*out_operation = public_operation;
 	ret = TR_OK;
 	goto done;
 reject:
 	(void)tr_async_operation_reject(table->operations, operation,
 	                                &producer_ref);
 done:
-	if (pthread_mutex_unlock(&table->lock) != 0 && ret == TR_OK)
+	if (pthread_mutex_unlock(&table->lock) != 0) {
+		if (ret != TR_OK)
+			return ret;
+		/* reserve 尚未向调用方发布句柄。撤销底层预留并释放 slot
+		 * 资源，随后重试解锁，避免错误返回留下不可访问的操作。 */
+		if (tr_async_operation_reject(table->operations, operation,
+		                              &producer_ref) == TR_OK) {
+			if (slot->result) {
+				OPENSSL_cleanse(slot->result,
+				                slot->result_capacity);
+				free(slot->result);
+				(void)tr_memory_budget_release(
+				        table->budget, slot->result_capacity);
+			}
+			memset(slot, 0, sizeof(*slot));
+		}
+		(void)pthread_mutex_unlock(&table->lock);
 		return TR_ERR_SYS;
+	}
+	if (ret == TR_OK)
+		*out_operation = public_operation;
 	return ret;
 }
 

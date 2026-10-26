@@ -25,7 +25,9 @@
 - clang-format 18.1.8 自测 22/22；改动行无格式差异，新 C 文件格式检查通过；`git diff --check` 通过；`include/tr` 无改动。
 - 所有测试临时路径都位于 worktree 的 `build/test-tmp`。
 
-dev.159 的首轮 GitHub CI 暴露两项独立问题：GCC 11 报 `-Werror=maybe-uninitialized`，Clang 14 报 dispatch 构造失败清理分支可能泄漏 `routes`。前者因编译器不能证明 consume 错误路径不会落入局部取消状态的成功输出分支；`test_async_operation` 已有 stale completion 引用回归，验证失败时输出哨兵保持不变。dev.160 将两个局部量分别初始化为 `0` 与 `TR_OK`，输出参数仍只在消费成功后写入。后者通过在池清理前释放临时路由表，并在池销毁失败时把部分 dispatch 对象交还调用方；endpoint 也保留该对象和自身帧 arena，使 owner close / stopped reap 能继续清理。新增 dispatch 池销毁错误注入回归与 endpoint 部分构造交接回归。当前分支上的本地 Release 测试已验证这两条回归；dev.160 完整远端 CI 仍待推送后复验。
+dev.159 的首轮 GitHub CI 暴露两项独立问题：GCC 11 报 `-Werror=maybe-uninitialized`，Clang 14 报 dispatch 构造失败清理分支可能泄漏 `routes`。dev.160 初始化 consume 的局部取消状态，保持失败输出哨兵不变；并在池清理前释放临时路由表，池销毁失败时把部分 dispatch 对象交还调用方。endpoint 保留该对象和自身帧 arena，使 owner close / stopped reap 可继续清理。新增 dispatch 池销毁错误注入回归与 endpoint 部分构造交接回归。
+
+dev.160 的 GCC 11 静态分析又发现 TLS provider reserve 在表锁解锁失败时，已写出的输出句柄会随错误返回，结果缓冲及异步操作仍留在槽位。dev.161 将句柄发布移到成功解锁之后；解锁失败时撤销 reserve、清理结果缓冲与预算，并重试解锁。新增 pthread 解锁失败注入回归，验证输出哨兵、槽位预算和锁状态恢复。GCC 16 `-fanalyzer` 对 TLS provider operation 单元编译无诊断；dev.161 固定 GCC 11/Clang 14 和完整 GitHub CI 仍待新 head 复验。
 
 ## 未结项边界
 
