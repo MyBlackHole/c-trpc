@@ -248,6 +248,8 @@ dev.146 修复 dev.145 新增压力回归的队列观察时序。CI TSan 首次�
 
 dev.147 为 #242/ERR-B 补充同一 Reactor 多物理连接的 RESET 固定预留隔离回归：Split Channel 的 CONTROL、BULK 连接共享的普通控制 TX 池各占两项并同时收到对端 RESET，第一个 RESET 回调还填满命令环；两条连接各自的响应都进入队列。CONTROL RESET 部分写出 7 字节后遇到 EAGAIN，BULK 仍按 PING、RESET、PONG 顺序独立排空；CONTROL 恢复后也保持 RESET、PONG FIFO，两条健康流都继续交付并完成 RESET。GCC Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。本切片仅修改测试、审查记录、README 和版本号，不改生产代码、API/ABI 或 wire；ERR-A/B/C/D/E 与 #242/V2 其余验收仍未完成。详见[多连接 RESET 固定预留隔离回归](rpc_v2_reset_response_reservation_multiconnection_20261026.md)。
 
+dev.148 为 #242/ERR-B 补充同连接健康流前进回归：RESET 响应部分写出 7 字节并真实遇到 `EAGAIN` 时，仍可将 DATA 交付给同 Channel 的健康流应用；暂持载荷以避免信用更新帧改变队列观察，随后到达的 PONG 仍排在完整 RESET 之后。发送恢复后连接保持 UP，健康流完成 RESET。GCC Release、ASan/UBSan（40k 墓碑）、TSan（5k）完整 `test_stream_reset` 均通过。本切片仅修改测试、审查记录、README 和版本号，不改生产代码、API/ABI 或 wire；ERR-A/B/C/D/E 与 #242/V2 其余验收仍未完成。详见[RESET 背压期间健康同伴流前进回归](rpc_v2_reset_response_backpressure_sibling_progress_20261026.md)。
+
 
 
 

@@ -1899,6 +1899,18 @@ static void test_peer_reset_response_reserved_fifo_under_pressure(void)
 	assert(atomic_load(&partial_phase) == 2);
 	assert(atomic_load(&partial_eagain) != 0U);
 
+	/* RESET 半帧遇到 EAGAIN 时，同连接健康流仍须交付 DATA。 */
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(atomic_load(&partial_phase) == 2);
+	assert(f.held && f.held_stream.generation == live_stream.generation);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
 	/* 此时 RESET 只有 7 字节在 wire 上；同连接 PONG 必须排在它之后。 */
 	assert(tr_reactor_get_connection_stats(f.connection[0], &stats) ==
 	       TR_OK);
@@ -1943,10 +1955,12 @@ static void test_peer_reset_response_reserved_fifo_under_pressure(void)
 	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
 	assert(tr_channel_active_streams(f.channel) == 1U);
 
-	/* 普通控制池与命令环压力释放后，同物理连接的健康流仍然可用。 */
-	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
-	           1U, bytes, sizeof(bytes));
-	wait_count(&f, &f.received, 1U);
+	/* 背压恢复且 RESET/PONG 按序排空后，健康流仍可完成 RESET。 */
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	assert(tr_stream_release_payload(f.held_stream, f.held) == TR_OK);
+	f.held = NULL;
 	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
 	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
 	assert(tr_channel_active_streams(f.channel) == 0U);
