@@ -1357,6 +1357,53 @@ test_frozen_discard_credit_split_connection_isolation(unsigned reset_lane)
 	destroy_fixture(&f);
 }
 
+static void test_resetting_accepts_inflight_window_update(void)
+{
+	struct fixture f;
+	struct tr_channel_stats stats_before, stats_after;
+	struct tr_stream_flow_state flow;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle live_stream = open_remote(&f, 0, 3, 2);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U);
+	unsigned writable_before = count(&f, &f.writable);
+
+	/* 已在途的合法绝对信用更新可被校验和记录，但 RESETTING 不恢复发送。 */
+	send_frame(&f, 0, TR_FRAME_WINDOW_UPDATE, 0, 1U, WINDOW + FRAME, NULL,
+	           0);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0U);
+	assert(count(&f, &f.writable) == writable_before);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.tx_send_limit == WINDOW + FRAME &&
+	       flow.tx_sent_bytes == 0U);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_rx ==
+	       stats_before.window_updates_rx + 1U);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	struct tr_buffer *body = payload(&f, sizeof(bytes));
+	assert(tr_stream_send(reset_stream, body) == TR_ERR_CLOSED);
+	tr_buffer_release(body);
+
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0U);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 0);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_rejects_compressed_data_lane_flag(void)
 {
 	struct fixture f;
@@ -2539,6 +2586,7 @@ int main(void)
 	        2U * FRAME, 1);
 	test_reset_begun_concurrent_held_payload_releases_without_credit();
 	test_reset_release_preserves_cross_message_credit_debt();
+	test_resetting_accepts_inflight_window_update();
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();

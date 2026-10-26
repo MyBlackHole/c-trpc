@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.136` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.137` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -28,6 +28,7 @@ dev.133 将 RESET discard 在途 DATA 扩至填满每条流冻结窗口的剩余
 dev.134 在双 RESETTING 流窗口精确填满并并发释放后，再向其中一条流发送超限 1 字节 DATA，验证连接以 `TR_ERR_BAD_LENGTH` 关闭且不额外交付应用数据、不发送 WINDOW_UPDATE。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.135 在 Split Channel 的 CONTROL 连接上验证 RESETTING 流耗尽冻结窗口后的一字节超限仍以 `TR_ERR_BAD_LENGTH` 关闭该物理连接，而 BULK 独立连接上的健康流仍能交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.136 将 Split Channel 的冻结信用超限隔离回归扩展到两个方向：CONTROL 超限时 BULK 健康流仍完成，BULK 超限时 CONTROL 健康流仍完成；两种情况下只关闭出错物理连接。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.137 增加 RESETTING 期间的合法在途 `WINDOW_UPDATE` 回归：接收信用上限可记录递增，但不产生 WRITABLE、不恢复 `tr_stream_send`；对端 RESET 确认后，同连接健康流仍可交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行
