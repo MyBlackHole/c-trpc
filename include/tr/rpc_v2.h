@@ -27,8 +27,9 @@ extern "C" {
  * max_calls 与 max_streams 中较小者限制每个连接的并发调用。
  *
  * 方法表在构造期间复制并冻结。方法数受 max_methods 约束。
- * V2 不支持连接组、拦截器和 Client 自动重连；配置这些能力返回
- * TR_ERR_UNSUPPORTED。连接组改用 create_transport；旧方法注册不属于公开门面；
+ * V2 不支持动态/全局中间件链和 Client 自动重连；配置这些能力返回
+ * TR_ERR_UNSUPPORTED。Server V2 方法可使用下文定义的固定类型化钩子。
+ * 连接组改用 create_transport；旧方法注册不属于公开门面；
  * 语义统计复用
  * tr_client_get_rpc_semantic_stats/tr_server_get_rpc_semantic_stats。
  * 构造失败的所有权规则与 tr_client_create/tr_server_create 相同：
@@ -210,9 +211,9 @@ enum tr_rpc_v2_request_kind {
 struct tr_rpc_v2_request {
 	enum tr_rpc_v2_request_kind kind;
 	struct tr_rpc_bytes body;
-	/* 仅 OPEN 携带请求元数据；所有地址只借用至 work 返回。 */
+	/* 仅 OPEN 携带请求元数据；所有地址只借用至 work/authorize 返回。 */
 	struct tr_rpc_v2_metadata_view metadata;
-	/* 由 Server 的已认证连接提供；仅借用至 work 返回。
+	/* 由 Server 的已认证连接提供；仅借用至 work/authorize 返回。
 	 * metadata 不能写入或覆盖该连接身份。 */
 	struct tr_peer_identity_view peer_identity;
 };
@@ -221,18 +222,19 @@ struct tr_rpc_v2_cancel;
 struct tr_rpc_v2_reply;
 struct tr_rpc_v2_producer;
 
-/* 取消令牌和回复能力仅借用至当前 work 返回，不得保存、跨线程使用，
- * 或在回调外访问。取消查询正常返回 0/1；无效参数/执行域返回负错误码。
+/* cancel 仅借用至当前 work/authorize 返回；reply 仅借用至 work 返回。
+ * 不得保存、跨线程使用或在回调外访问。取消查询正常返回 0/1；无效参数
+ * 或执行域返回负错误码。
  * 取消是合作式，不能强制终止业务线程；业务仍在运行时不会交付终局或
  * 释放其输入。不得 pthread_exit、longjmp 或等待依赖所属 I/O 域的工作。
  */
 int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel);
 
-/* 仅在对应 Server V2 work 回调中取得父调用上下文。NULL 参数或非零 out 返回
- * INVALID； 成功取得的上下文可跨回调保存。无效参数返回 INVALID，回调外调用返回
- * STATE， 上下文池耗尽返回 AGAIN，父期限已过返回 TIMEOUT，父取消/其他终局返回
- * CANCELLED。 仅 TR_OK 修改 out。release 的 NULL 参数返回
- * INVALID；成功后清零句柄；无效句柄 返回 STALE。 */
+/* 仅在对应 Server V2 work/authorize 回调中取得父调用上下文。NULL 参数或非零 out
+ * 返回 INVALID； 成功取得的上下文可跨回调保存。无效参数返回
+ * INVALID，回调外调用返回 STATE， 上下文池耗尽返回 AGAIN，父期限已过返回
+ * TIMEOUT，父取消/其他终局返回 CANCELLED。 仅 TR_OK 修改 out。release 的 NULL
+ * 参数返回 INVALID；成功后清零句柄；无效句柄 返回 STALE。 */
 int tr_rpc_v2_cancel_context_hold(const struct tr_rpc_v2_cancel *cancel,
                                   struct tr_rpc_v2_call_context *out);
 int tr_rpc_v2_call_context_release(struct tr_rpc_v2_call_context *context);
@@ -399,12 +401,64 @@ typedef void (*tr_rpc_v2_server_terminal_fn)(struct tr_rpc_v2_call_id call,
                                              enum tr_rpc_v2_delivery delivery,
                                              void *arg);
 
+enum tr_rpc_v2_observation_event {
+	TR_RPC_V2_OBSERVE_OPEN = 0,
+	TR_RPC_V2_OBSERVE_TERMINAL = 1
+};
+
+/* OPEN 的 request 只借用到 observer 返回；TERMINAL 的 request 为 NULL。
+ * observer 在 Reactor owner 上短暂运行，返回类型为 void，不能改变准入或
+ * 终局。客户端观察继续使用 tr_rpc_v2_client_callbacks。 */
+struct tr_rpc_v2_observation {
+	struct tr_rpc_v2_call_id call;
+	enum tr_rpc_v2_observation_event event;
+	const struct tr_rpc_v2_request *request;
+	enum tr_rpc_status status;
+	enum tr_rpc_v2_delivery delivery;
+};
+typedef void (*tr_rpc_v2_observer_fn)(
+        const struct tr_rpc_v2_observation *observation, void *arg);
+
+enum tr_rpc_v2_admission_decision {
+	TR_RPC_V2_ADMISSION_ACCEPT = 0,
+	TR_RPC_V2_ADMISSION_REJECT = 1
+};
+struct tr_rpc_v2_admission_result {
+	enum tr_rpc_v2_admission_decision decision;
+	enum tr_rpc_status rejection_status;
+};
+/* 仅用于 owner 上短小、非阻塞的本地准入策略。ACCEPT 要求 status 为 OK；
+ * REJECT 要求合法的非 OK RPC 状态。无效组合按 INTERNAL 终结该 Call。 */
+typedef struct tr_rpc_v2_admission_result (*tr_rpc_v2_admit_fn)(
+        struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
+        void *arg);
+
+enum tr_rpc_v2_authorization_decision {
+	TR_RPC_V2_AUTHORIZATION_ALLOW = 0,
+	TR_RPC_V2_AUTHORIZATION_REJECT = 1
+};
+struct tr_rpc_v2_authorization_result {
+	enum tr_rpc_v2_authorization_decision decision;
+	enum tr_rpc_status rejection_status;
+};
+/* 在分片共享的有界 TaskExecutor 上执行。request 与 cancel 只借用到返回；
+ * 函数不得等待需要同一执行器或 Reactor owner 前进的工作。ALLOW 只在结果
+ * 回到 owner 并通过终局、代次及 deadline 复核后生效。 */
+typedef struct tr_rpc_v2_authorization_result (*tr_rpc_v2_authorize_fn)(
+        struct tr_rpc_v2_call_id call, const struct tr_rpc_v2_request *request,
+        const struct tr_rpc_v2_cancel *cancel, void *arg);
+
 struct tr_rpc_v2_method {
 	struct tr_rpc_method_desc descriptor;
 	tr_rpc_v2_work_fn work;
 	tr_rpc_v2_server_terminal_fn terminal;
 	/* 指针本身复制冻结，所指对象由业务拥有并借用至 destroy 成功。 */
 	void *arg;
+	/* 固定方法钩子；不建立动态链。observe/admit 在 owner 执行，authorize
+	 * 作为独立的可取消任务运行。全部函数指针与 arg 随方法表冻结复制。 */
+	tr_rpc_v2_observer_fn observe;
+	tr_rpc_v2_admit_fn admit;
+	tr_rpc_v2_authorize_fn authorize;
 };
 
 int tr_server_create(const struct tr_server_config *config,

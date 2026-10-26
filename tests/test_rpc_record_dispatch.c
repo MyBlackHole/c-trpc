@@ -191,15 +191,35 @@ static void gate_destroy(struct gate *g)
 	CHECK(pthread_mutex_destroy(&g->lock) == 0);
 }
 struct fixture;
+enum hook_test_mode {
+	HOOK_TEST_NONE,
+	HOOK_TEST_ADMISSION_REJECT,
+	HOOK_TEST_ADMISSION_INVALID,
+	HOOK_TEST_AUTH_ALLOW,
+	HOOK_TEST_AUTH_REJECT,
+	HOOK_TEST_AUTH_INVALID,
+	HOOK_TEST_AUTH_CANCEL
+};
 struct producer_case {
 	struct fixture *fixture;
 	struct tr_rpc_v2_producer *producer;
 	struct tr_rpc_v2_call_id id;
+	struct tr_rpc_v2_call_id hook_id;
+	struct tr_rpc_v2_admission_result admission_result;
+	struct tr_rpc_v2_authorization_result authorization_result;
 	_Atomic unsigned active, acquired, seen[3], terminals;
+	_Atomic unsigned observed_open, observed_terminal, admission_calls;
+	_Atomic unsigned authorization_calls, work_calls;
 	int acquire_status, expected_acquire;
 	enum tr_rpc_status status;
 	enum tr_rpc_status message_status;
 	enum tr_rpc_v2_delivery delivery;
+	enum hook_test_mode hook_mode;
+	unsigned executor_workers;
+	int authorization_cancelled;
+	bool hooks_enabled, block_authorization;
+	_Atomic unsigned order_count;
+	unsigned order[16];
 	bool block_open, block_message, sync_after_acquire, zero_response;
 };
 struct method_context {
@@ -323,6 +343,77 @@ static enum tr_rpc_status producer_work(struct tr_rpc_v2_call_id call,
 	atomic_fetch_add(&c->seen[request->kind], 1);
 	CHECK(atomic_fetch_sub(&c->active, 1) == 1);
 	return result;
+}
+static void hook_observe(const struct tr_rpc_v2_observation *observation,
+                         void *arg)
+{
+	struct producer_case *c = arg;
+	CHECK(tr_reactor_in_owner_context_for(c->fixture->server.reactor));
+	if (observation->event == TR_RPC_V2_OBSERVE_OPEN) {
+		CHECK(observation->request &&
+		      observation->request->kind == TR_RPC_V2_REQUEST_OPEN);
+		c->hook_id = observation->call;
+		c->id = observation->call;
+		c->order[atomic_fetch_add(&c->order_count, 1)] = 1;
+		atomic_fetch_add(&c->observed_open, 1);
+	} else {
+		CHECK(observation->event == TR_RPC_V2_OBSERVE_TERMINAL);
+		CHECK(!observation->request);
+		CHECK(!memcmp(&observation->call, &c->hook_id,
+		              sizeof(c->hook_id)));
+		c->status = observation->status;
+		c->delivery = observation->delivery;
+		c->order[atomic_fetch_add(&c->order_count, 1)] = 3;
+		atomic_fetch_add(&c->observed_terminal, 1);
+	}
+}
+static struct tr_rpc_v2_admission_result
+hook_admit(struct tr_rpc_v2_call_id call,
+           const struct tr_rpc_v2_request *request, void *arg)
+{
+	struct producer_case *c = arg;
+	CHECK(tr_reactor_in_owner_context_for(c->fixture->server.reactor));
+	CHECK(request && request->kind == TR_RPC_V2_REQUEST_OPEN);
+	CHECK(!memcmp(&call, &c->hook_id, sizeof(call)));
+	c->order[atomic_fetch_add(&c->order_count, 1)] = 2;
+	atomic_fetch_add(&c->admission_calls, 1);
+	return c->admission_result;
+}
+static struct tr_rpc_v2_authorization_result
+hook_authorize(struct tr_rpc_v2_call_id call,
+               const struct tr_rpc_v2_request *request,
+               const struct tr_rpc_v2_cancel *cancel, void *arg)
+{
+	struct producer_case *c = arg;
+	CHECK(tr_execution_in_worker_context());
+	CHECK(!tr_reactor_in_owner_context_for(c->fixture->server.reactor));
+	CHECK(tr_rpc_record_dispatch_in_callback());
+	CHECK(request && request->kind == TR_RPC_V2_REQUEST_OPEN);
+	CHECK(!memcmp(&call, &c->hook_id, sizeof(call)));
+	CHECK(tr_rpc_v2_cancel_requested(cancel) == 0);
+	c->order[atomic_fetch_add(&c->order_count, 1)] = 100;
+	atomic_fetch_add(&c->authorization_calls, 1);
+	if (c->block_authorization)
+		gate_wait(&c->fixture->gate, true);
+	c->authorization_cancelled = tr_rpc_v2_cancel_requested(cancel);
+	return c->authorization_result;
+}
+static enum tr_rpc_status hook_work(struct tr_rpc_v2_call_id call,
+                                    const struct tr_rpc_v2_request *request,
+                                    const struct tr_rpc_v2_cancel *cancel,
+                                    struct tr_rpc_v2_reply *reply, void *arg)
+{
+	struct producer_case *c = arg;
+	(void)reply;
+	CHECK(tr_execution_in_worker_context());
+	CHECK(!memcmp(&call, &c->hook_id, sizeof(call)));
+	CHECK(tr_rpc_v2_cancel_requested(cancel) == 0);
+	CHECK(request && request->kind <= TR_RPC_V2_REQUEST_HALF_CLOSE);
+	c->order[atomic_fetch_add(&c->order_count, 1)] =
+	        200U + (unsigned)request->kind;
+	atomic_fetch_add(&c->work_calls, 1);
+	atomic_fetch_add(&c->seen[request->kind], 1);
+	return TR_RPC_STATUS_OK;
 }
 static void producer_terminal(struct tr_rpc_v2_call_id call,
                               enum tr_rpc_status status,
@@ -738,7 +829,11 @@ static int create_dispatch(void *arg)
 static int start_server(void *arg)
 {
 	struct fixture *f = arg;
-	struct tr_task_executor_config cfg = {2, 4};
+	struct tr_task_executor_config cfg = {
+	        f->producer_case && f->producer_case->executor_workers
+	                ? f->producer_case->executor_workers
+	                : 2,
+	        4};
 	CHECK(tr_task_executor_create(&cfg, &f->server.budget, &f->executor) ==
 	      TR_OK);
 	CHECK(tr_task_executor_start(f->executor) == TR_OK);
@@ -783,8 +878,23 @@ static void fixture_init_mode(struct fixture *f, uint64_t window,
 		                       TR_LANE_BULK, BODY, BODY, 0, 0},
 		        .work = producer ? NULL : handler,
 		        .arg = producer ? (void *)producer : &f->contexts[i],
-		        .v2_work = producer ? producer_work : NULL,
-		        .v2_terminal = producer ? producer_terminal : NULL};
+		        .v2_work = producer ? (producer->hooks_enabled
+		                                       ? hook_work
+		                                       : producer_work)
+		                            : NULL,
+		        .v2_terminal = producer ? producer_terminal : NULL,
+		        .v2_observer = producer && producer->hooks_enabled
+		                               ? hook_observe
+		                               : NULL,
+		        .v2_admit = producer && producer->hooks_enabled
+		                            ? hook_admit
+		                            : NULL,
+		        .v2_authorize =
+		                producer && producer->hooks_enabled &&
+		                                producer->hook_mode !=
+		                                        HOOK_TEST_ADMISSION_REJECT
+		                        ? hook_authorize
+		                        : NULL};
 		if (producer && producer->zero_response)
 			f->methods[i].descriptor.max_response_bytes = 0;
 	}
@@ -1790,6 +1900,12 @@ static void producer_case_init(struct producer_case *c)
 	atomic_init(&c->active, 0);
 	atomic_init(&c->acquired, 0);
 	atomic_init(&c->terminals, 0);
+	atomic_init(&c->observed_open, 0);
+	atomic_init(&c->observed_terminal, 0);
+	atomic_init(&c->admission_calls, 0);
+	atomic_init(&c->authorization_calls, 0);
+	atomic_init(&c->work_calls, 0);
+	atomic_init(&c->order_count, 0);
 	for (unsigned i = 0; i < 3; ++i)
 		atomic_init(&c->seen[i], 0);
 }
@@ -1804,6 +1920,48 @@ static unsigned producer_open_method(struct fixture *f, struct producer_case *c,
 static unsigned producer_open(struct fixture *f, struct producer_case *c)
 {
 	return producer_open_method(f, c, 3);
+}
+static unsigned hook_open(struct fixture *f, struct producer_case *c)
+{
+	(void)c;
+	unsigned slot = open_call(f, 1);
+	send_record(f, slot, 1, TR_RPC_RECORD_OPEN, 0);
+	return slot;
+}
+struct hook_abort_request {
+	struct tr_rpc_dispatch_handle handle;
+	enum tr_rpc_status status;
+};
+static int hook_abort_on_owner(void *arg)
+{
+	struct hook_abort_request *request = arg;
+	return tr_rpc_record_dispatch_abort_on_owner(request->handle,
+	                                             request->status);
+}
+struct hook_result_request {
+	struct tr_rpc_dispatch_handle handle;
+	struct tr_rpc_dispatch_result result;
+};
+static int hook_result_on_owner(void *arg)
+{
+	struct hook_result_request *request = arg;
+	return tr_rpc_record_dispatch_result_on_owner(request->handle,
+	                                              &request->result);
+}
+static struct tr_rpc_dispatch_result hook_wait_terminal(struct fixture *f,
+                                                        unsigned slot)
+{
+	struct hook_result_request request = {.handle =
+	                                              f->server.handles[slot]};
+	uint64_t end = now_ms() + 15000;
+	for (;;) {
+		CHECK(tr_reactor_call(f->server.reactor, hook_result_on_owner,
+		                      &request) == TR_OK);
+		if (request.result.terminal)
+			return request.result;
+		CHECK(now_ms() < end);
+		sched_yield();
+	}
 }
 static void producer_writable(struct tr_rpc_v2_producer *p)
 {
@@ -1972,6 +2130,192 @@ static void test_producer_staged_and_retry(void)
 	CHECK(tr_rpc_v2_producer_retain(p) == TR_OK);
 	tr_rpc_v2_producer_release(p);
 	tr_rpc_v2_producer_release(p);
+	fixture_destroy(&f, false);
+}
+static void test_v2_admission_hook_rejects_after_observation(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_ADMISSION_REJECT;
+	c.admission_result = (struct tr_rpc_v2_admission_result){
+	        TR_RPC_V2_ADMISSION_REJECT, TR_RPC_STATUS_PERMISSION_DENIED};
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 0);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&c.terminals, 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_PERMISSION_DENIED);
+	CHECK(c.status == TR_RPC_STATUS_PERMISSION_DENIED);
+	CHECK(atomic_load(&c.observed_open) == 1 &&
+	      atomic_load(&c.admission_calls) == 1 &&
+	      !atomic_load(&c.authorization_calls) &&
+	      !atomic_load(&c.work_calls) &&
+	      atomic_load(&c.observed_terminal) == 1);
+	CHECK(atomic_load(&c.order_count) == 3 && c.order[0] == 1 &&
+	      c.order[1] == 2 && c.order[2] == 3);
+	fixture_destroy(&f, false);
+}
+static void test_v2_admission_hook_invalid_result_is_internal(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_ADMISSION_INVALID;
+	c.admission_result = (struct tr_rpc_v2_admission_result){
+	        TR_RPC_V2_ADMISSION_ACCEPT, TR_RPC_STATUS_PERMISSION_DENIED};
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 0);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&c.terminals, 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_INTERNAL &&
+	      c.status == TR_RPC_STATUS_INTERNAL);
+	CHECK(atomic_load(&c.observed_open) == 1 &&
+	      atomic_load(&c.admission_calls) == 1 &&
+	      !atomic_load(&c.authorization_calls) &&
+	      !atomic_load(&c.work_calls) &&
+	      atomic_load(&c.observed_terminal) == 1);
+	CHECK(atomic_load(&c.order_count) == 3 && c.order[0] == 1 &&
+	      c.order[1] == 2 && c.order[2] == 3);
+	fixture_destroy(&f, false);
+}
+static void test_v2_auth_hook_allows_fifo_work(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_AUTH_ALLOW;
+	c.block_authorization = true;
+	c.executor_workers = 1;
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	gate_wait(&f.gate, false);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 8);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	CHECK(!atomic_load(&c.work_calls));
+	CHECK(atomic_load(&c.order_count) == 3 && c.order[0] == 1 &&
+	      c.order[1] == 2 && c.order[2] == 100);
+	gate_open(&f.gate);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&c.terminals, 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&c.authorization_calls) == 1 &&
+	      atomic_load(&c.work_calls) == 3 &&
+	      atomic_load(&c.seen[TR_RPC_V2_REQUEST_OPEN]) == 1 &&
+	      atomic_load(&c.seen[TR_RPC_V2_REQUEST_MESSAGE]) == 1 &&
+	      atomic_load(&c.seen[TR_RPC_V2_REQUEST_HALF_CLOSE]) == 1 &&
+	      atomic_load(&c.observed_terminal) == 1);
+	CHECK(atomic_load(&c.order_count) == 7 && c.order[0] == 1 &&
+	      c.order[1] == 2 && c.order[2] == 100 && c.order[3] == 200 &&
+	      c.order[4] == 201 && c.order[5] == 202 && c.order[6] == 3);
+	fixture_destroy(&f, false);
+}
+static void test_v2_auth_hook_rejects_without_business_work(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_AUTH_REJECT;
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_REJECT, TR_RPC_STATUS_UNAUTHENTICATED};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 0);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&c.terminals, 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_UNAUTHENTICATED);
+	CHECK(atomic_load(&c.authorization_calls) == 1 &&
+	      !atomic_load(&c.work_calls) &&
+	      atomic_load(&c.observed_terminal) == 1);
+	fixture_destroy(&f, false);
+}
+static void test_v2_auth_hook_invalid_result_is_internal(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_AUTH_INVALID;
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_PERMISSION_DENIED};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 0);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	wait_count(&f.client.terminals[slot], 1);
+	wait_count(&c.terminals, 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_INTERNAL &&
+	      c.status == TR_RPC_STATUS_INTERNAL);
+	CHECK(atomic_load(&c.admission_calls) == 1 &&
+	      atomic_load(&c.authorization_calls) == 1 &&
+	      !atomic_load(&c.work_calls) &&
+	      atomic_load(&c.observed_terminal) == 1);
+	fixture_destroy(&f, false);
+}
+static void test_v2_late_auth_allow_cannot_revive_cancelled_call(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_AUTH_CANCEL;
+	c.block_authorization = true;
+	c.executor_workers = 1;
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	gate_wait(&f.gate, false);
+	struct hook_abort_request request = {f.server.handles[slot],
+	                                     TR_RPC_STATUS_CANCELLED};
+	CHECK(tr_reactor_call(f.server.reactor, hook_abort_on_owner,
+	                      &request) == TR_OK);
+	CHECK(!atomic_load(&c.terminals) && !atomic_load(&c.observed_terminal));
+	gate_open(&f.gate);
+	wait_count(&c.terminals, 1);
+	CHECK(c.status == TR_RPC_STATUS_CANCELLED &&
+	      c.authorization_cancelled == 1 && !atomic_load(&c.work_calls) &&
+	      atomic_load(&c.observed_terminal) == 1);
+	fixture_destroy(&f, false);
+}
+static void test_v2_auth_hook_respects_pending_limit(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_AUTH_CANCEL;
+	c.block_authorization = true;
+	c.executor_workers = 1;
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	fixture_init_mode(&f, 1024 * 1024, 2, &c, 1);
+	unsigned slot = hook_open(&f, &c);
+	gate_wait(&f.gate, false);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 8);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	CHECK(!atomic_load(&c.terminals) && !atomic_load(&c.work_calls));
+	struct tr_rpc_dispatch_result result = hook_wait_terminal(&f, slot);
+	CHECK(result.status == TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	gate_open(&f.gate);
+	wait_count(&c.terminals, 1);
+	CHECK(c.status == TR_RPC_STATUS_RESOURCE_EXHAUSTED &&
+	      c.authorization_cancelled == 1 && !atomic_load(&c.work_calls) &&
+	      atomic_load(&c.observed_terminal) == 1);
 	fixture_destroy(&f, false);
 }
 static void test_producer_real_window(void)
@@ -2513,6 +2857,13 @@ static void test_producer_cardinality_fallback_stops_work(void)
 
 int main(void)
 {
+	test_v2_admission_hook_rejects_after_observation();
+	test_v2_admission_hook_invalid_result_is_internal();
+	test_v2_auth_hook_allows_fifo_work();
+	test_v2_auth_hook_rejects_without_business_work();
+	test_v2_auth_hook_invalid_result_is_internal();
+	test_v2_late_auth_allow_cannot_revive_cancelled_call();
+	test_v2_auth_hook_respects_pending_limit();
 	test_producer_staged_and_retry();
 	test_producer_real_window();
 	test_producer_failure_preserves_phase();

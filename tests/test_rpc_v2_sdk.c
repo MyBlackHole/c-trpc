@@ -37,8 +37,9 @@ unsigned tr_rpc_v2_test_stream_open_failures(void);
 		}                                                              \
 	} while (0)
 
-#define METHOD_COUNT 6U
+#define METHOD_COUNT 7U
 #define ASYNC_METHOD 5U
+#define HOOK_METHOD 6U
 #define MAX_BODY 4096U
 #define LARGE_BODY (320U * 1024U)
 #define MAX_MESSAGES 3U
@@ -107,6 +108,13 @@ struct method_state {
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
 	struct tr_rpc_v2_call_id id;
+	struct tr_rpc_v2_call_id hook_id;
+	unsigned hook_observed_open;
+	unsigned hook_observed_terminal;
+	unsigned hook_admitted;
+	unsigned hook_authorized;
+	unsigned hook_order_count;
+	unsigned hook_order[8];
 	struct async_state *async;
 };
 
@@ -556,6 +564,11 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 			sum = m->sum;
 		}
 	}
+	if (m->index == HOOK_METHOD) {
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 4U;
+	}
 	requests = m->requests;
 	metadata = m->response_metadata;
 	async = m->async;
@@ -657,8 +670,91 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 	++m->terminals;
 	m->status = status;
 	m->delivery = delivery;
+	if (m->index == HOOK_METHOD) {
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 6U;
+	}
 	publish(f);
 	unlock(f);
+}
+
+static void method_hook_observe(const struct tr_rpc_v2_observation *observation,
+                                void *arg)
+{
+	struct method_state *m = (struct method_state *)arg;
+	struct fixture *f = m->fixture;
+	lock(f);
+	if (observation->event == TR_RPC_V2_OBSERVE_OPEN) {
+		CHECK(observation->request &&
+		      observation->request->kind == TR_RPC_V2_REQUEST_OPEN);
+		m->hook_id = observation->call;
+		++m->hook_observed_open;
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 1U;
+	} else {
+		CHECK(observation->event == TR_RPC_V2_OBSERVE_TERMINAL);
+		CHECK(!observation->request &&
+		      observation->status == TR_RPC_STATUS_OK &&
+		      observation->delivery == TR_RPC_V2_DELIVERY_LIVE);
+		CHECK(memcmp(&m->hook_id, &observation->call,
+		             sizeof(m->hook_id)) == 0);
+		++m->hook_observed_terminal;
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 5U;
+	}
+	CHECK(m->hook_order_count <=
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	publish(f);
+	unlock(f);
+}
+
+static struct tr_rpc_v2_admission_result
+method_hook_admit(struct tr_rpc_v2_call_id call,
+                  const struct tr_rpc_v2_request *request, void *arg)
+{
+	struct method_state *m = (struct method_state *)arg;
+	struct fixture *f = m->fixture;
+	CHECK(request && request->kind == TR_RPC_V2_REQUEST_OPEN);
+	lock(f);
+	CHECK(memcmp(&m->hook_id, &call, sizeof(call)) == 0);
+	++m->hook_admitted;
+	CHECK(m->hook_order_count <
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	m->hook_order[m->hook_order_count++] = 2U;
+	CHECK(m->hook_order_count <=
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	publish(f);
+	unlock(f);
+	struct tr_rpc_v2_admission_result result = {TR_RPC_V2_ADMISSION_ACCEPT,
+	                                            TR_RPC_STATUS_OK};
+	return result;
+}
+
+static struct tr_rpc_v2_authorization_result
+method_hook_authorize(struct tr_rpc_v2_call_id call,
+                      const struct tr_rpc_v2_request *request,
+                      const struct tr_rpc_v2_cancel *cancel, void *arg)
+{
+	struct method_state *m = (struct method_state *)arg;
+	struct fixture *f = m->fixture;
+	CHECK(request && request->kind == TR_RPC_V2_REQUEST_OPEN);
+	CHECK(tr_rpc_v2_cancel_requested(cancel) == 0);
+	lock(f);
+	CHECK(memcmp(&m->hook_id, &call, sizeof(call)) == 0);
+	++m->hook_authorized;
+	CHECK(m->hook_order_count <
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	m->hook_order[m->hook_order_count++] = 3U;
+	CHECK(m->hook_order_count <=
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	publish(f);
+	unlock(f);
+	struct tr_rpc_v2_authorization_result result = {
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	return result;
 }
 
 static void describe_methods(struct tr_rpc_method_desc *descriptors,
@@ -766,6 +862,11 @@ static void fixture_create_shards_with_limits(struct fixture *f,
 		                ? server_terminal
 		                : NULL;
 		methods[i].arg = &f->methods[i];
+		if (i == HOOK_METHOD) {
+			methods[i].observe = method_hook_observe;
+			methods[i].admit = method_hook_admit;
+			methods[i].authorize = method_hook_authorize;
+		}
 	}
 	CHECK(tr_server_create(&server, methods, METHOD_COUNT, &f->server) ==
 	      TR_OK);
@@ -1164,6 +1265,32 @@ static void drain(struct fixture *f)
 	CHECK(tr_client_begin_drain(f->client.handle) == TR_OK);
 	CHECK(tr_client_wait_drained(f->client.handle, WAIT_MS) == TR_OK);
 	CHECK(tr_server_drain(f->server, WAIT_MS) == TR_OK);
+}
+
+static void test_rpc_v2_method_hooks(void)
+{
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {17U, 73U};
+	fixture_create(&f);
+	call_init(&call, &f, HOOK_METHOD, &request, 1U);
+	expect(&call, request.size, request.tag);
+	CHECK(call_start(&call, NULL) == TR_OK);
+	call_done(&call, TR_RPC_STATUS_OK);
+	lock(&f);
+	struct method_state *method = &f.methods[HOOK_METHOD];
+	CHECK(method->hook_observed_open == 1U &&
+	      method->hook_observed_terminal == 1U &&
+	      method->hook_admitted == 1U && method->hook_authorized == 1U);
+	CHECK(method->hook_order_count == 8U);
+	CHECK(method->hook_order[0] == 1U && method->hook_order[1] == 2U &&
+	      method->hook_order[2] == 3U && method->hook_order[3] == 4U &&
+	      method->hook_order[4] == 4U && method->hook_order[5] == 4U &&
+	      method->hook_order[6] == 5U && method->hook_order[7] == 6U);
+	unlock(&f);
+	drain(&f);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=server-method-hooks result=pass");
 }
 
 static void test_shapes_and_copy(void)
@@ -2501,6 +2628,7 @@ int main(void)
 	test_tls_d2_sdk_symbols();
 	test_call_ref_sdk_symbols();
 	test_parent_context_sdk_symbols();
+	test_rpc_v2_method_hooks();
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_call_compression_rejection_preserves_next_message();

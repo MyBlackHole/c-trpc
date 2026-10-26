@@ -620,7 +620,11 @@ static void fixture_init_options(struct fixture *f, uint32_t streams,
 		                                    0,
 		                                    0};
 		methods[i] = (struct tr_rpc_v2_method){
-		        descriptions[i], work, server_terminal, &f->methods[i]};
+		        .descriptor = descriptions[i],
+		        .work = work,
+		        .terminal = server_terminal,
+		        .arg = &f->methods[i],
+		};
 		if (asymmetric && (i == WINDOW_REPLY || i == ASYNC_ABANDON))
 			methods[i].descriptor.max_response_bytes = 768;
 	}

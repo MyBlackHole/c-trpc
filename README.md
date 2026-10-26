@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.155` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.156` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -19,9 +19,13 @@ dev.154 为 Reactor 同步 owner 等待登记依赖边：无环 A→B 调用保�
 该保护覆盖 Reactor 同步入口及 TLS graceful-close 完成等待，不表示 #243 的 Call 语义范围已完成。
 dev.155 为 Server V2 work 增加可持有父 Call 上下文，子 Client Call 继承父取消与 deadline，
 子期限取父子较早者；上下文引用有界且在 dispatch 销毁前须释放。
+dev.156 为 Server V2 方法增加固定类型化 observe、快速 admit 与异步 authorize 钩子。
+认证复用分片有界 TaskExecutor；owner 复核调用代次、终局和 deadline 后才提交业务 OPEN，
+拒绝通过空错误 FINAL 返回，迟到 ALLOW 不会恢复已终局调用。该切片的独立回归通过，
+不代表 #243 的完整并发、取消和资源组合验收已完成。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1/D2 全验证矩阵与 GitHub
-验收仍未完成；TLS-E 和 #243 的鉴权/压缩迟到完成、终局/回调/资源回收屏障及
-单 worker 满队列等端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。
+验收仍未完成；TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
+跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。
 dev.120–dev.126 为 #242/ERR-D 增加真实 TCP 双组 32 轮并发 DATA 成员故障替代回归、CONTROL 致命拆除后的活动成员清理与旧 epoch 路由隔离组件回归、异构 DATA 状态回收和组间故障隔离、32 轮真实 TCP CONTROL teardown/epoch 重建与早期旧 route 重放回归，以及 route 前导延迟到新 epoch 后提交时的旧 route 拒绝回归；这些切片不代表持续压力、资源争用和完整错误矩阵已验收。
 dev.127 为 #242/ERR-C 增加 RESETTING 窗口中应用线程释放已交付 DATA 的信用隔离回归；Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该测试只增加竞态边界证据，不表示 ERR-C 信用与组合故障全矩阵或 V2 整体验收完成。
 dev.128 为 #242/ERR-C 增加跨消息信用债务回归：两个小消息累计到 WINDOW_UPDATE 阈值后，下一条已交付消息在 RESETTING 窗口释放，目标流不得额外获赠信用；Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。

@@ -49,6 +49,27 @@ static enum tr_rpc_status echo_work(
 }
 ```
 
+## Server 方法钩子
+
+`tr_rpc_v2_method` 可配置三种固定钩子，不建立动态中间件链：
+
+- `observe` 在 Reactor owner 上接收合法 OPEN 和最终终局快照。OPEN 的 request
+  只借用到 observer 返回；TERMINAL 的 request 为 NULL。它返回 `void`，不能改变调用结果。
+- `admit` 在同一 owner 上检查本地快速准入策略。它必须短小、非阻塞；返回
+  `ACCEPT/TR_RPC_STATUS_OK` 才继续，`REJECT` 要带合法的非 OK 状态。拒绝会交付
+  空错误 FINAL，且不启动认证或业务 work。
+- `authorize` 在该 Server 分片现有的有界 TaskExecutor 上作为独立任务执行，接收
+  只读 OPEN 快照和回调期有效的 cancel。它不得等待需要同一执行器或 Reactor owner
+  前进的操作。`ALLOW/TR_RPC_STATUS_OK` 回到 owner 并通过调用代次、终局和 deadline
+  复核后，业务 OPEN work 才会提交；`REJECT` 会交付空错误 FINAL。
+
+`ACCEPT`/`ALLOW` 必须携带 `TR_RPC_STATUS_OK`；`REJECT` 必须携带合法的非 OK RPC
+状态。未知 decision 或不一致状态会以 `INTERNAL` 错误 FINAL 结束调用。终局观察在
+所有已提交 work/authorize 任务退出且排队资源回收后运行，并紧邻现有 Server terminal
+回调之前。取消是合作式的：若 authorize 不返回，库不会提前释放其 OPEN 副本或交付
+Server terminal。`observe`、`admit`、`authorize` 与 `work` 共用冻结方法的 `arg`；
+指针由 Server 借用至 destroy 成功。Client 原有回调不变。
+
 这个函数可服务 ONE→ONE 和 MANY→MANY 方法。同步模式下，HALF_CLOSE 未显式选择
 终局时默认以 OK 完成，仍由记录状态机检查响应基数。ONE→MANY 或 MANY→ONE 的业务须在
 对应工作事件中按自己的业务规则生成多条或聚合后的单条响应。
