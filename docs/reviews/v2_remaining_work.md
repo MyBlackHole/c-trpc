@@ -240,6 +240,8 @@ dev.139 为 #242/ERR-B/C 增加 Split Channel 半关闭后的 DATA 拒绝回归�
 dev.140 为 #242/ERR-B/C 补充 Split Channel RESETTING 中合法 DATA 与 FIFO CLOSE 的正向顺序：目标流本地 RESET 后，先收到合法完整 DATA，再收到该方向的普通 CLOSE。RESETTING 丢弃路径将 8 字节计入接收与消费账本、不交付应用、不增加通告上限或发送 WINDOW_UPDATE；后续 CLOSE 不提前退役流，收到对端 RESET 后正常收敛。CONTROL、BULK 两种方向都验证另一 lane 健康流继续交付并完成 RESET。GCC Release、TSan、ASan/UBSan 完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 DATA/CLOSE/RESET 交错及 ERR-A/B/C/D/E 全矩阵仍待验收。详见[RESETTING DATA 后 FIFO CLOSE 回归](rpc_v2_reset_split_data_close_20261026.md)。
 
 dev.141 为 #242/ERR-B 补充 RESET 响应发送背压下的 Split Channel FIFO DATA 边界：对端先发 RESET；测试确认本地 RESET 响应帧已实际遇到 `EAGAIN` 且尚未写出，再从同一连接发送 DATA。RESET 入队并退役目标流后，迟到 DATA 以 `TR_ERR_STATE` 关闭对应 lane，不交付应用；CONTROL、BULK 两个方向均验证另一 lane 健康流仍能交付并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其余 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[Split Channel RESET 响应背压期间 DATA 隔离回归](rpc_v2_reset_response_backpressure_data_20261026.md)。
+dev.142 为 #242/ERR-B/C 扩展 RESET 响应发送背压下的 Split Channel FIFO 后续帧矩阵：在本地 RESET 响应实际遇到 `EAGAIN`、目标流已退役而 lane 仍存活时，分别注入 DATA 和 `WINDOW_UPDATE`。CONTROL、BULK 两方向的四个组合都以 `TR_ERR_STATE` 关闭目标 lane；DATA 不交付，WU 不增加接收更新统计，另一 lane 的健康流仍能交付并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其余 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[Split Channel RESET 响应背压期间 DATA/WINDOW_UPDATE 隔离回归](rpc_v2_reset_response_backpressure_frames_20261026.md)。
+
 
 
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到

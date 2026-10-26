@@ -1603,11 +1603,13 @@ static void test_data_before_close_during_split_reset(unsigned reset_lane)
 }
 
 static void
-test_data_after_peer_reset_with_response_backpressure(unsigned reset_lane)
+test_frame_after_peer_reset_with_response_backpressure(unsigned reset_lane,
+                                                       uint16_t followup_type)
 {
 	struct fixture f;
 	uint8_t bytes[8] = {1};
 	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
 	enum tr_lane failed_lane =
 	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
 	enum tr_lane healthy_lane =
@@ -1620,6 +1622,7 @@ test_data_after_peer_reset_with_response_backpressure(unsigned reset_lane)
 	        open_remote(&f, reset_lane, 1U, 1U);
 	struct tr_stream_handle live_stream =
 	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
 
 	/* 仅阻塞目标物理连接，并记录 RESET 响应遇到 EAGAIN。 */
 	atomic_store(&partial_fd, f.adopted_fd[reset_lane]);
@@ -1640,14 +1643,25 @@ test_data_after_peer_reset_with_response_backpressure(unsigned reset_lane)
 	       TR_OK);
 	assert(lane_state == TR_CHANNEL_LANE_UP);
 
-	/* 响应仍被背压阻塞时，FIFO 后续 DATA 必须关闭目标物理连接。 */
-	send_frame(&f, reset_lane, TR_FRAME_DATA,
-	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
-	           sizeof(bytes));
+	/* 响应仍被背压阻塞时，FIFO DATA/WINDOW_UPDATE 均不得越过 RESET。 */
+	if (followup_type == TR_FRAME_DATA) {
+		send_frame(&f, reset_lane, followup_type,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
+		           sizeof(bytes));
+	} else {
+		assert(followup_type == TR_FRAME_WINDOW_UPDATE);
+		send_frame(&f, reset_lane, followup_type, 0, 1U, WINDOW + FRAME,
+		           NULL, 0);
+	}
 	wait_count(&f, &f.down, 1U);
 	assert(f.down_status == TR_ERR_STATE);
 	assert(count(&f, &f.errors) == 0U && count(&f, &f.closed) == 1U);
 	assert(count(&f, &f.received) == 0U);
+	if (followup_type == TR_FRAME_WINDOW_UPDATE) {
+		assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+		assert(stats_after.window_updates_rx ==
+		       stats_before.window_updates_rx);
+	}
 	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
 	       TR_OK);
 	assert(lane_state == TR_CHANNEL_LANE_DOWN);
@@ -2860,8 +2874,14 @@ int main(void)
 	test_data_after_close_during_split_reset(1U);
 	test_data_before_close_during_split_reset(0U);
 	test_data_before_close_during_split_reset(1U);
-	test_data_after_peer_reset_with_response_backpressure(0U);
-	test_data_after_peer_reset_with_response_backpressure(1U);
+	test_frame_after_peer_reset_with_response_backpressure(0U,
+	                                                       TR_FRAME_DATA);
+	test_frame_after_peer_reset_with_response_backpressure(1U,
+	                                                       TR_FRAME_DATA);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        0U, TR_FRAME_WINDOW_UPDATE);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        1U, TR_FRAME_WINDOW_UPDATE);
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
