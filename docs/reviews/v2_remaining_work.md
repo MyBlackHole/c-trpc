@@ -211,6 +211,12 @@ ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。本切
 API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见[双 RESETTING 流冻结窗口边界回归]
 (rpc_v2_reset_frozen_window_two_streams_20261026.md)。
 
+dev.134 在 dev.133 的双 RESETTING 流精确填满冻结信用并并发释放后，向其中一条流再发送 1 字节 DATA，验证
+超出通告上限后连接以 `TR_ERR_BAD_LENGTH` 关闭；没有额外交付应用正文或 WINDOW_UPDATE。非超限变体仍覆盖健康
+同伴正常完成。完整 GCC Release/ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。本切片只扩展
+测试、记录和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见
+[双 RESETTING 流冻结信用超限拒绝回归](rpc_v2_reset_two_resetting_stream_credit_overflow_20261026.md)。
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。

@@ -1998,7 +1998,7 @@ test_reset_begun_concurrent_held_payload_releases_without_credit(void)
 
 static void
 test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-        uint32_t reset_discard_bytes)
+        uint32_t reset_discard_bytes, int send_over_credit_byte)
 {
 	struct fixture f;
 	uint8_t bytes[128] = {1};
@@ -2112,6 +2112,22 @@ test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
 	}
 	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
 	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	if (send_over_credit_byte) {
+		uint8_t extra = 1U;
+		assert(reset_discard_bytes == sizeof(bytes));
+		/* 超出冻结通告上限一字节属于连接级信用错误。 */
+		send_frame(&f, 0, TR_FRAME_DATA,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1, 3, &extra,
+		           sizeof(extra));
+		wait_count(&f, &f.down, 1U);
+		assert(f.down_status == TR_ERR_BAD_LENGTH);
+		assert(count(&f, &f.received) == 2U);
+		assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+		assert(stats_after.window_updates_tx ==
+		       stats_before.window_updates_tx);
+		destroy_fixture(&f);
+		return;
+	}
 
 	while (reset_frames[0] == 0U || reset_frames[1] == 0U) {
 		struct tr_frame_header h = receive_frame(&f, 0);
@@ -2454,11 +2470,13 @@ int main(void)
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
 	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-	        0U);
+	        0U, 0);
 	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-	        FRAME);
+	        FRAME, 0);
 	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-	        2U * FRAME);
+	        2U * FRAME, 0);
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        2U * FRAME, 1);
 	test_reset_begun_concurrent_held_payload_releases_without_credit();
 	test_reset_release_preserves_cross_message_credit_debt();
 	test_reset_begun_held_payload_release_without_credit();
