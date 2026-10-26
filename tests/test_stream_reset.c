@@ -67,11 +67,13 @@ struct fixture {
 static _Thread_local int fail_reset_arm;
 static atomic_uint arm_failures;
 static atomic_int partial_fd = -1;
+static atomic_int secondary_fd = -1;
 static atomic_int partial_phase;
 static atomic_int partial_type = TR_FRAME_STREAM_RESET;
 static atomic_int block_partial;
 static atomic_uint partial_eagain;
 static atomic_int block_all_tx;
+static atomic_int block_secondary_tx;
 static atomic_uint blocked_reset_eagain;
 static atomic_int repeat_goaway_phase;
 static atomic_int force_local_stream_id_exhaustion;
@@ -104,6 +106,11 @@ int __wrap_tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out)
 
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
+	if (fd == atomic_load(&secondary_fd) &&
+	    atomic_load(&block_secondary_tx)) {
+		errno = EAGAIN;
+		return -1;
+	}
 	if (fd == atomic_load(&partial_fd)) {
 		if (atomic_load(&block_all_tx)) {
 			if (message->msg_iovlen &&
@@ -492,6 +499,7 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	memset(f, 0, sizeof(*f));
 	f->peer[0] = f->peer[1] = -1;
 	f->adopted_fd[0] = f->adopted_fd[1] = -1;
+	atomic_store(&secondary_fd, -1);
 	f->split = split;
 	assert(pthread_mutex_init(&f->lock, NULL) == 0);
 	assert(pthread_cond_init(&f->cond, NULL) == 0);
@@ -509,6 +517,8 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 		                           &f->connection[lane]) == TR_OK);
 		f->adopted_fd[lane] = sockets[0];
 		f->peer[lane] = sockets[1];
+		if (lane == 1U)
+			atomic_store(&secondary_fd, sockets[0]);
 		/* 被测 sendmsg 只触达已交给 Reactor 的精确 fd。 */
 		if (!lane)
 			atomic_store(&partial_fd, sockets[0]);
@@ -553,11 +563,13 @@ static void destroy_fixture(struct fixture *f)
 	assert(tr_channel_destroy(f->channel) == TR_OK);
 	assert(tr_reactor_stop(f->reactor) == TR_OK);
 	atomic_store(&partial_fd, -1);
+	atomic_store(&secondary_fd, -1);
 	atomic_store(&partial_phase, 0);
 	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
 	atomic_store(&partial_eagain, 0);
 	atomic_store(&block_partial, 0);
 	atomic_store(&block_all_tx, 0);
+	atomic_store(&block_secondary_tx, 0);
 	atomic_store(&blocked_reset_eagain, 0);
 	atomic_store(&repeat_goaway_phase, 0);
 	assert(tr_reactor_destroy(f->reactor) == TR_OK);
@@ -1942,6 +1954,168 @@ static void test_peer_reset_response_reserved_fifo_under_pressure(void)
 	destroy_fixture(&f);
 }
 
+static int split_control_pressure_owner(void *arg)
+{
+	struct fixture *f = arg;
+	for (unsigned lane = 0; lane < 2U; ++lane) {
+		for (unsigned i = 0; i < CONTROL / 2U; ++i)
+			assert(tr_reactor_send(
+			               f->connection[lane], TR_FRAME_PING, 0, 0,
+			               200U + lane * 10U + i, NULL) == TR_OK);
+	}
+	return TR_OK;
+}
+
+static void test_peer_reset_reserved_fifo_isolated_across_connections(void)
+{
+	struct fixture f;
+	struct tr_connection_stats stats[2];
+	struct tr_stream_flow_state flow;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	assert(f.connection[0].slot != f.connection[1].slot);
+	struct tr_stream_handle reset_control = open_remote(&f, 0, 1U, 1U);
+	struct tr_stream_handle live_control = open_remote(&f, 0, 3U, 2U);
+	struct tr_stream_handle reset_bulk = open_remote(&f, 1, 5U, 3U);
+	struct tr_stream_handle live_bulk = open_remote(&f, 1, 7U, 4U);
+
+	/* 两条连接共享同一个 Reactor 与普通控制 TX 池，先各占一半。 */
+	atomic_store(&partial_fd, f.adopted_fd[0]);
+	atomic_store(&secondary_fd, f.adopted_fd[1]);
+	atomic_store(&block_all_tx, 1);
+	atomic_store(&block_secondary_tx, 1);
+	assert(tr_reactor_call(f.reactor, split_control_pressure_owner, &f) ==
+	       TR_OK);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		for (unsigned lane = 0; lane < 2U; ++lane)
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[lane], &stats[lane]) ==
+			       TR_OK);
+		if (stats[0].tx_queued_items == CONTROL / 2U &&
+		    stats[1].tx_queued_items == CONTROL / 2U)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].tx_queued_items == CONTROL / 2U);
+	assert(stats[1].tx_queued_items == CONTROL / 2U);
+
+	/* 控制池全满、命令环被第一个 RESET 回调占满时，两个连接都需预留。 */
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.fill_reset_command_queue = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	peer_reset(&f, 1, 5U, TR_ERR_CLOSED);
+	wait_count(&f, &f.resets, 2U);
+	wait_count(&f, &f.closed, 2U);
+	assert(tr_stream_get_flow_state(reset_control, &flow) == TR_ERR_STALE);
+	assert(tr_stream_get_flow_state(reset_bulk, &flow) == TR_ERR_STALE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		for (unsigned lane = 0; lane < 2U; ++lane)
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[lane], &stats[lane]) ==
+			       TR_OK);
+		if (stats[0].tx_queued_items == CONTROL / 2U + 1U &&
+		    stats[1].tx_queued_items == CONTROL / 2U + 1U)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].tx_queued_items == CONTROL / 2U + 1U);
+	assert(stats[1].tx_queued_items == CONTROL / 2U + 1U);
+
+	/* CONTROL RESET 半帧遇到 EAGAIN 时，BULK 仍须独立排空并前进。 */
+	atomic_store(&partial_type, TR_FRAME_STREAM_RESET);
+	atomic_store(&partial_phase, 1);
+	atomic_store(&partial_eagain, 0U);
+	atomic_store(&block_partial, 1);
+	atomic_store(&block_all_tx, 0);
+	atomic_store(&block_secondary_tx, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&partial_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&partial_phase) == 2);
+	assert(atomic_load(&partial_eagain) != 0U);
+
+	for (unsigned i = 0; i < CONTROL / 2U; ++i) {
+		struct tr_frame_header h = receive_frame(&f, 1);
+		assert(h.type == TR_FRAME_PING && h.message_id == 210U + i);
+	}
+	struct tr_frame_header h = receive_frame(&f, 1);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 5U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	send_frame(&f, 1, TR_FRAME_PING, 0, 0, 2101U, NULL, 0);
+	h = receive_frame(&f, 1);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 2101U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[1],
+		                                       &stats[1]) == TR_OK);
+		if (stats[1].tx_queued_items == 0U)
+			break;
+		pause_ms();
+	}
+	assert(stats[1].tx_queued_items == 0U);
+
+	for (unsigned i = 0; i < CONTROL / 2U; ++i) {
+		h = receive_frame(&f, 0);
+		assert(h.type == TR_FRAME_PING && h.message_id == 200U + i);
+	}
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats[0]) ==
+	       TR_OK);
+	uint64_t rx_frames_before_ping = stats[0].rx_frames;
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 2001U, NULL, 0);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_reactor_get_connection_stats(f.connection[0],
+		                                       &stats[0]) == TR_OK);
+		if (stats[0].rx_frames > rx_frames_before_ping)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].rx_frames > rx_frames_before_ping);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	assert(tr_reactor_get_connection_stats(f.connection[0], &stats[0]) ==
+	       TR_OK);
+	assert(stats[0].tx_queued_items == 2U);
+
+	atomic_store(&block_partial, 0);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 2001U);
+	assert(atomic_load(&partial_phase) == 3);
+	assert(atomic_load(&partial_eagain) >= 1U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		for (unsigned lane = 0; lane < 2U; ++lane)
+			assert(tr_reactor_get_connection_stats(
+			               f.connection[lane], &stats[lane]) ==
+			       TR_OK);
+		if (stats[0].tx_queued_items == 0U &&
+		    stats[1].tx_queued_items == 0U)
+			break;
+		pause_ms();
+	}
+	assert(stats[0].tx_queued_items == 0U);
+	assert(stats[1].tx_queued_items == 0U);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 2U);
+
+	/* 两条物理连接的 RESET 压力解除后，各自健康流都继续交付并收敛。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	send_frame(&f, 1, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 7U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 2U);
+	assert(reset(&f, live_control, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 3U);
+	assert(reset(&f, live_bulk, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 7U, TR_ERR_CLOSED, TR_ERR_CLOSED, 4U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+	destroy_fixture(&f);
+}
+
 static int control_pressure_without_retry_owner(void *arg)
 {
 	int ret = control_pressure_owner(arg);
@@ -3109,6 +3283,7 @@ int main(void)
 	test_duplicate_peer_reset_with_response_backpressure(0U, 1);
 	test_duplicate_peer_reset_with_response_backpressure(1U, 1);
 	test_peer_reset_response_reserved_fifo_under_pressure();
+	test_peer_reset_reserved_fifo_isolated_across_connections();
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();

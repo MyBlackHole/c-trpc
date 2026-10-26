@@ -246,6 +246,8 @@ dev.144 为 #242/ERR-B 补充 RESET 响应发送背压窗口内的重复 RESET �
 dev.145 为 #242/ERR-B 补充真实对端 RESET 响应的队列容量与部分写入 FIFO 回归：四个普通 PING 占满控制 TX 池，RESET 事件回调再将 Reactor 命令环填至容量上限并确认下一项返回 `TR_AGAIN`；固定预留 RESET 仍在所有前驱后入队。响应先实际写出 7 字节，再遇到 `EAGAIN`；在途期间收到 PING 后产生的 PONG 不能插入 RESET 半帧，wire 顺序保持四个既有 PING、完整 RESET、PONG。恢复后同连接健康流仍交付 DATA 并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[RESET 响应队列满载与 PONG 抢占边界回归](rpc_v2_reset_response_backpressure_queue_preemption_20261026.md)。
 dev.146 修复 dev.145 新增压力回归的队列观察时序。CI TSan 首次触发 `stats.tx_queued_items == CONTROL` 失败：owner 同步回调中的 SEND 被排入命令环，`tr_reactor_call` 返回不代表 SEND 命令已附接到 TX 队列。另在 Release 重现了收到末尾 PONG 后立即观察到尚未完成记账的在途 TX 项。两处均改为等待可观察的队列状态再断言。干净 GCC Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。本切片只修改测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 RESET/FIFO 交错及 ERR-A/B/C/D/E 完整矩阵仍待验收。详见[RESET 响应队列满载回归的异步观察时序修复](rpc_v2_reset_response_backpressure_queue_sync_20261026.md)。
 
+dev.147 为 #242/ERR-B 补充同一 Reactor 多物理连接的 RESET 固定预留隔离回归：Split Channel 的 CONTROL、BULK 连接共享的普通控制 TX 池各占两项并同时收到对端 RESET，第一个 RESET 回调还填满命令环；两条连接各自的响应都进入队列。CONTROL RESET 部分写出 7 字节后遇到 EAGAIN，BULK 仍按 PING、RESET、PONG 顺序独立排空；CONTROL 恢复后也保持 RESET、PONG FIFO，两条健康流都继续交付并完成 RESET。GCC Release（40k 墓碑）、ASan/UBSan（40k）、TSan（5k）完整 `test_stream_reset` 均通过。本切片仅修改测试、审查记录、README 和版本号，不改生产代码、API/ABI 或 wire；ERR-A/B/C/D/E 与 #242/V2 其余验收仍未完成。详见[多连接 RESET 固定预留隔离回归](rpc_v2_reset_response_reservation_multiconnection_20261026.md)。
+
 
 
 
