@@ -188,6 +188,14 @@ dev.130 为 #242/ERR-C 增加同一 RESETTING 流上的并发多载荷释放回�
 全组合验收完成。详见
 [RESETTING 并发载荷释放信用隔离回归](rpc_v2_reset_concurrent_payload_credit_20261026.md)。
 
+dev.131 为 #242/ERR-C 增加两个同时 RESETTING 的流各自释放持有正文回归：每条流先接收并持有一条
+128 字节重组消息，再分别本地 RESET；对端暂不确认，确保两个 RESETTING 槽同时保留。两个应用线程并发释放后，
+每条流接收/消费量均为 128、通告上限仍为 256，Channel `window_updates_tx` 不变，wire 屏障未观察到目标流
+WINDOW_UPDATE。两条 RESET 完成后，健康同伴仍能交付 DATA 并正常结束。GCC Release/ASan/UBSan 使用 40k 墓碑、
+TSan 使用 5k 墓碑的完整 `test_stream_reset` 均通过。本切片只增加回归测试、记录和版本号，不改生产代码、API/ABI
+或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见
+[双 RESETTING 流并发载荷信用隔离回归](rpc_v2_reset_two_stream_concurrent_payload_credit_20261026.md)。
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。

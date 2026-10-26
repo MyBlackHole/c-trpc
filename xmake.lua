@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.130")
+set_version("2.0.0-dev.131")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")

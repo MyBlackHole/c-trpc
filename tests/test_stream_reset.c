@@ -1982,6 +1982,146 @@ test_reset_begun_concurrent_held_payload_releases_without_credit(void)
 	destroy_fixture(&f);
 }
 
+static void
+test_two_resetting_streams_concurrent_held_payload_releases_without_credit(void)
+{
+	struct fixture f;
+	uint8_t bytes[128] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	struct tr_stream_handle reset_stream[2];
+	struct tr_stream_handle live_stream;
+	struct tr_buffer *held[2];
+	struct payload_release_request release[2];
+	pthread_t release_threads[2];
+	unsigned reset_frames[2] = {0};
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	reset_stream[0] = open_remote(&f, 0, 1, 1);
+	reset_stream[1] = open_remote(&f, 0, 3, 2);
+	live_stream = open_remote(&f, 0, 5, 3);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		uint32_t id = i == 0 ? 1U : 3U;
+		send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST, id, 1, bytes,
+		           FRAME);
+		send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_LAST, id, 1,
+		           bytes + FRAME, FRAME);
+	}
+	wait_count(&f, &f.received, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.held && f.held_extra);
+	assert(f.held_stream.slot != f.held_extra_stream.slot);
+	assert((f.held_stream.slot == reset_stream[0].slot &&
+	        f.held_extra_stream.slot == reset_stream[1].slot) ||
+	       (f.held_stream.slot == reset_stream[1].slot &&
+	        f.held_extra_stream.slot == reset_stream[0].slot));
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(tr_stream_get_flow_state(reset_stream[i], &flow) ==
+		       TR_OK);
+		assert(flow.rx_received_bytes == sizeof(bytes));
+		assert(flow.rx_consumed_bytes == 0U);
+		assert(flow.rx_advertised_limit == WINDOW);
+	}
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	/* 先让两个流都本地进入 RESETTING，暂不确认任一 RESET。 */
+	assert(reset(&f, reset_stream[0], TR_ERR_TIMEOUT) == TR_OK);
+	assert(reset(&f, reset_stream[1], TR_ERR_CLOSED) == TR_OK);
+	assert(count(&f, &f.resets) == 2U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(f.reset_status[1] == TR_ERR_CLOSED);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	held[0] = f.held;
+	held[1] = f.held_extra;
+	assert(held[0] && held[1]);
+	f.held = NULL;
+	f.held_extra = NULL;
+	f.hold_data = 0;
+	release[0].stream = f.held_stream;
+	release[1].stream = f.held_extra_stream;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		release[i].fixture = &f;
+		release[i].payload = held[i];
+		release[i].result = TR_ERR_STATE;
+		assert(pthread_create(&release_threads[i], NULL,
+		                      release_payload_after_gate,
+		                      &release[i]) == 0);
+	}
+	wait_count(&f, &f.release_threads_ready, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_threads_go = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(pthread_join(release_threads[i], NULL) == 0);
+		assert(release[i].result == TR_OK);
+	}
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(tr_stream_get_flow_state(reset_stream[i], &flow) ==
+		       TR_OK);
+		assert(flow.rx_received_bytes == sizeof(bytes));
+		assert(flow.rx_consumed_bytes == sizeof(bytes));
+		assert(flow.rx_advertised_limit == WINDOW);
+	}
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	while (reset_frames[0] == 0U || reset_frames[1] == 0U) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		if (h.type == TR_FRAME_WINDOW_UPDATE &&
+		    (h.stream_id == 1U || h.stream_id == 3U))
+			assert(!"RESETTING stream received late WINDOW_UPDATE");
+		if (h.type != TR_FRAME_STREAM_RESET)
+			continue;
+		unsigned index = h.stream_id == 1U   ? 0U
+		                 : h.stream_id == 3U ? 1U
+		                                     : 2U;
+		assert(index < 2U);
+		assert(h.message_id ==
+		       (uint64_t) -
+		               (index == 0U ? TR_ERR_TIMEOUT : TR_ERR_CLOSED));
+		assert(++reset_frames[index] == 1U);
+	}
+	/* 两个 RESET 都已实际到达对端后，逐一确认并完成退役。 */
+	peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+	peer_reset(&f, 0, 3, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.closed, 2U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 1002U, NULL, 0);
+	for (;;) {
+		struct tr_frame_header h = receive_frame(&f, 0);
+		if (h.type == TR_FRAME_WINDOW_UPDATE &&
+		    (h.stream_id == 1U || h.stream_id == 3U))
+			assert(!"RESETTING stream received late WINDOW_UPDATE");
+		if (h.type == TR_FRAME_STREAM_RESET &&
+		    (h.stream_id == 1U || h.stream_id == 3U))
+			assert(!"duplicate RESET frame after stream "
+			        "retirement");
+		if (h.type == TR_FRAME_PONG && h.message_id == 1002U)
+			break;
+	}
+	assert(reset_frames[0] == 1U && reset_frames[1] == 1U);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	/* 两条目标流分别并发释放正文，不阻塞健康同伴的交付和 RESET。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 5,
+	           1, bytes, FRAME);
+	wait_count(&f, &f.received, 3U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 5, TR_ERR_CLOSED, TR_ERR_CLOSED, 3U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_release_preserves_cross_message_credit_debt(void)
 {
 	struct fixture f;
@@ -2271,6 +2411,7 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit();
 	test_reset_begun_concurrent_held_payload_releases_without_credit();
 	test_reset_release_preserves_cross_message_credit_debt();
 	test_reset_begun_held_payload_release_without_credit();
