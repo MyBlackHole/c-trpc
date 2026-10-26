@@ -204,6 +204,13 @@ WINDOW_UPDATE。完整 GCC Release/ASan/UBSan（40k 墓碑）及 TSan（5k）`te
 本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E
 仍未完成。详见[双 RESETTING 流在途 DATA 与并发释放回归](rpc_v2_reset_two_stream_reset_discard_credit_20261026.md)。
 
+dev.133 将双 RESETTING 流收到的在途 DATA 从 64 字节扩展到填满冻结窗口剩余 128 字节：每条流接收量正好
+到达通告上限 256，RESET discard 消费量为 128；并发释放原持有的 128 字节后消费量到 256，通告上限不变，
+`window_updates_tx` 不增长且 wire 无迟到 WINDOW_UPDATE。测试保留 0/64/128 字节三档变体，完整 GCC Release/
+ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。本切片只扩展测试、记录和版本号，不改生产代码、
+API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E 仍未完成。详见[双 RESETTING 流冻结窗口边界回归]
+(rpc_v2_reset_frozen_window_two_streams_20261026.md)。
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。

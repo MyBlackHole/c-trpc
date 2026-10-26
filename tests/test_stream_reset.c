@@ -1998,7 +1998,7 @@ test_reset_begun_concurrent_held_payload_releases_without_credit(void)
 
 static void
 test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-        int send_reset_discard_data)
+        uint32_t reset_discard_bytes)
 {
 	struct fixture f;
 	uint8_t bytes[128] = {1};
@@ -2012,6 +2012,8 @@ test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
 	unsigned reset_frames[2] = {0};
 	uint64_t expected_received = sizeof(bytes);
 	uint64_t expected_consumed = 0U;
+	assert(reset_discard_bytes <= sizeof(bytes));
+	assert(reset_discard_bytes % FRAME == 0U);
 
 	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
 	reset_stream[0] = open_remote(&f, 0, 1, 1);
@@ -2051,17 +2053,23 @@ test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
 	assert(count(&f, &f.resets) == 2U);
 	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
 	assert(f.reset_status[1] == TR_ERR_CLOSED);
-	if (send_reset_discard_data) {
+	if (reset_discard_bytes) {
 		/* 这些合法 DATA 已在途；RESETTING 只丢弃并消费 wire 字节，
 		 * 不交付应用，也不能恢复已停止的信用。 */
 		for (unsigned i = 0; i < 2; ++i) {
 			uint32_t id = i == 0 ? 1U : 3U;
-			send_frame(&f, 0, TR_FRAME_DATA,
-			           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, id, 2,
-			           bytes, FRAME);
+			for (uint32_t offset = 0; offset < reset_discard_bytes;
+			     offset += FRAME) {
+				uint16_t flags =
+				        offset == 0U ? TR_FRAME_F_FIRST : 0U;
+				if (offset + FRAME == reset_discard_bytes)
+					flags |= TR_FRAME_F_LAST;
+				send_frame(&f, 0, TR_FRAME_DATA, flags, id, 2,
+				           bytes + offset, FRAME);
+			}
 		}
-		expected_received += FRAME;
-		expected_consumed += FRAME;
+		expected_received += reset_discard_bytes;
+		expected_consumed += reset_discard_bytes;
 		for (unsigned i = 0; i < 2; ++i) {
 			wait_flow_counters(reset_stream[i], expected_received,
 			                   expected_consumed);
@@ -2446,9 +2454,11 @@ int main(void)
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
 	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-	        0);
+	        0U);
 	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
-	        1);
+	        FRAME);
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        2U * FRAME);
 	test_reset_begun_concurrent_held_payload_releases_without_credit();
 	test_reset_release_preserves_cross_message_credit_debt();
 	test_reset_begun_held_payload_release_without_credit();
