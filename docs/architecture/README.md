@@ -50,3 +50,5 @@ R14 从源码和静态库移除旧 V1 Call、Endpoint、Executor Group 与 Wire 
 
 详细规则见 [07-layer-module-api-boundaries.md](07-layer-module-api-boundaries.md) 与
 [ADR-007](decisions/ADR-007-layering-performance.md)。
+
+- [ADR-008：独立消息层与传输层边界](decisions/ADR-008-message-layer.md)（提议，未实现）。
