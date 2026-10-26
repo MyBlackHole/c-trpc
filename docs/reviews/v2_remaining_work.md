@@ -235,6 +235,8 @@ dev.137 为 #242/ERR-C 补上 RESETTING 阶段接收合法在途 `WINDOW_UPDATE`
 
 dev.138 为 #242/ERR-B/C 补上 Split Channel RESET 与普通 CLOSE 的双边界回归：在 RESET 对端确认前收到的 FIFO CLOSE 不提前释放 RESETTING 流槽；双向 RESET 完成后的晚到 CLOSE 以 `TR_ERR_STATE` 关闭承载该流的物理连接。CONTROL、BULK 两种出错方向都验证另一 lane 继续交付 DATA 并完成 RESET。GCC Release、TSan、ASan/UBSan 完整 `test_stream_reset` 均通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；RESET/FIFO 其余组合及 ERR-A/B/D/E 仍待验收。详见[Split Channel RESET/CLOSE 顺序边界回归](rpc_v2_reset_split_close_order_20261026.md)。
 
+dev.139 为 #242/ERR-B/C 增加 Split Channel 半关闭后的 DATA 拒绝回归：目标流本地 RESET 后先收到 FIFO `STREAM_CLOSE`，保持 RESETTING 期间又从已关闭方向收到 DATA 时，Channel 以 `TR_ERR_STATE` 关闭对应物理 lane；CONTROL、BULK 两种方向都验证目标 DATA 未交付，另一 lane 的健康流仍可交付并完成 RESET。GCC Release（40k 墓碑）、TSan（5k）、ASan/UBSan（40k）完整 `test_stream_reset` 均通过；dev.138 head GitHub CI 为 13/13 全通过。本切片只增加测试、记录和版本号，不改生产代码、API/ABI 或 wire；其他 DATA/CLOSE/RESET 交错及 ERR-A/B/C/D/E 全矩阵仍待验收。详见[Split RESET/CLOSE 后 DATA 拒绝回归](rpc_v2_reset_split_close_data_20261026.md)。
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。
