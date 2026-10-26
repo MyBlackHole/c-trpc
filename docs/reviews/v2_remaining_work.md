@@ -224,6 +224,13 @@ dev.135 将冻结信用超限拒绝扩展到 Split Channel：CONTROL 物理连�
 详见[Split Channel RESET 信用超限与物理连接隔离回归]
 (rpc_v2_reset_split_overflow_connection_isolation_20261026.md)。
 
+dev.136 将 Split Channel 冻结信用超限回归参数化为 CONTROL、BULK 两种出错方向：每次目标连接收到 256 字节
+合法 discard DATA 后再收 1 字节，只该物理连接以 `TR_ERR_BAD_LENGTH` 关闭；另一 lane 的健康流仍可交付 DATA、
+通过 PING/PONG 并完成 RESET。完整 GCC Release/ASan/UBSan（40k 墓碑）与 TSan（5k）`test_stream_reset` 均通过。
+本切片只扩展测试、记录、计划和版本号，不改生产代码、API/ABI 或 wire；ERR-C 其他信用组合及 ERR-A/B/D/E
+仍未完成。详见[Split Channel RESET 信用超限双向隔离回归]
+(rpc_v2_reset_split_overflow_bidirectional_20261026.md)。
+
 dev.47 为 #242/ERR-A 增加真实 TCP/Channel/RPC Endpoint 语义错误隔离回归：已准入调用收到
 重复 OPEN 后以 `INVALID_ARGUMENT` 终结，后续调用仍在同一 TCP 连接完成；两端 Reactor 连接仍为 ACTIVE。
 服务端 Endpoint 接管 Channel 事件回调，连接状态通过 Reactor 直接查询验证。
