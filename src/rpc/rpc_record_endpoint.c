@@ -715,6 +715,13 @@ int tr_rpc_record_endpoint_create_on_owner(
 	        channel, executor, methods, method_count, &config->dispatch,
 	        tr_endpoint_dispatch_terminal, ep, budget, &ep->dispatch);
 	if (ret != TR_OK) {
+		if (ep->dispatch) {
+			/* 下层清理未完成时保留完整父对象和帧 arena，调用方可在
+			 * close 或 stopped reap 中重试并释放全部预算。 */
+			ep->stopping = true;
+			*out = ep;
+			return ret;
+		}
 		tr_endpoint_frames_put(arena);
 		free(ep);
 		(void)tr_memory_budget_release(budget, bytes);

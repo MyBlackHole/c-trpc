@@ -43,7 +43,9 @@ typedef void (*tr_rpc_endpoint_progress_fn)(bool drained, void *arg);
  * 本宿主关闭后再销毁它们，禁止并发替换处理器。executor 的完成所有者须为
  * 此 Reactor；宿主会 dispatch 共享执行器，不负责创建、停止或销毁工作池。
  *
- * create 不发布事件源，失败保持 *out 为 NULL。start 任一步失败都保留
+ * create 不发布事件源；普通失败保持 *out 为 NULL。若内部派发器的失败
+ * 清理也未完成，则 *out 接收待清理宿主，调用方须 close 或 stopped reap。
+ * start 任一步失败都保留
  * 对象及已注册定时器，须 close 重试。用户终局只在业务任务静默后通知一次；
  * final_accepted 不是网络送达证明。回调可以查询，不得重入接收/关闭。
  */

@@ -453,8 +453,8 @@ int tr_async_operation_consume(
 	struct tr_async_operation_slot *slot;
 	struct tr_async_operation_spec spec;
 	struct tr_async_operation_completion completion;
-	int cancelled;
-	int cancel_reason;
+	int cancelled = 0;
+	int cancel_reason = TR_OK;
 	int ret;
 
 	if (!pool || !completion_ref || !out_spec || !out_completion ||

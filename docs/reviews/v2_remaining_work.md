@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-27，V2 当前候选为 `2.0.0-dev.159`；#243 堆叠 PR #328 → #329 → #330 均保持 OPEN。PR #330 的 dev.157 head `c7fe157c24a87bb461725539884d8f71bd982907` 与 dev.158 head `a8b0f8aa31c4569005e6a404015a81cee2c55074` 均有 13/13 GitHub 检查通过；dev.158 增补共享 TaskExecutor 队列满载的 dispatch 重试回归。dev.159 的异步操作内核及 RPC authorize、TLS provider、MessageService 接入已在本地实现，完整远端 CI 尚待实现分支 PR。主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 的后续状态仍以 #234 当前记录为准。
+核对基线：2026-10-27，V2 当前候选为 `2.0.0-dev.160`；#243 堆叠 PR #328 → #329 → #330 均保持 OPEN，异步操作内核 Draft PR #332 依赖设计 PR #331。PR #330 的 dev.157 head `c7fe157c24a87bb461725539884d8f71bd982907` 与 dev.158 head `a8b0f8aa31c4569005e6a404015a81cee2c55074` 均有 13/13 GitHub 检查通过；dev.158 增补共享 TaskExecutor 队列满载的 dispatch 重试回归。dev.159 实现异步操作内核及 RPC authorize、TLS provider、MessageService 接入；dev.160 修复首轮远端 CI 暴露的 GCC 11 编译失败与 Clang 14 dispatch 构造清理告警，并新增 owner/reaper 重试交接回归。PR #332 当前远端检查仍对应 dev.159 head，dev.160 新 head 的远端复验待推送后完成。主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 的后续状态仍以 #234 当前记录为准。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线

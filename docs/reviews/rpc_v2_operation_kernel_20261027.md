@@ -25,7 +25,7 @@
 - clang-format 18.1.8 自测 22/22；改动行无格式差异，新 C 文件格式检查通过；`git diff --check` 通过；`include/tr` 无改动。
 - 所有测试临时路径都位于 worktree 的 `build/test-tmp`。
 
-这些是本地证据。实现分支的 GitHub CI 尚待提交并推送后验证，不能据此声称远端检查通过。
+dev.159 的首轮 GitHub CI 暴露两项独立问题：GCC 11 报 `-Werror=maybe-uninitialized`，Clang 14 报 dispatch 构造失败清理分支可能泄漏 `routes`。前者因编译器不能证明 consume 错误路径不会落入局部取消状态的成功输出分支；`test_async_operation` 已有 stale completion 引用回归，验证失败时输出哨兵保持不变。dev.160 将两个局部量分别初始化为 `0` 与 `TR_OK`，输出参数仍只在消费成功后写入。后者通过在池清理前释放临时路由表，并在池销毁失败时把部分 dispatch 对象交还调用方；endpoint 也保留该对象和自身帧 arena，使 owner close / stopped reap 能继续清理。新增 dispatch 池销毁错误注入回归与 endpoint 部分构造交接回归。当前分支上的本地 Release 测试已验证这两条回归；dev.160 完整远端 CI 仍待推送后复验。
 
 ## 未结项边界
 

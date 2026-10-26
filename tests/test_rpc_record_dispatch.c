@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include "../src/execution/async_operation_internal.h"
 #include "../src/execution/worker_context.h"
 #include "../src/rpc/rpc_record_dispatch.h"
 #include "../src/rpc/rpc_record_producer.h"
@@ -34,6 +35,7 @@
 
 void *__real_malloc(size_t);
 void *__real_calloc(size_t, size_t);
+int __real_tr_async_operation_pool_destroy(struct tr_async_operation_pool **);
 int __real_tr_stream_sendv(struct tr_stream_handle, struct tr_buffer *const *,
                            uint32_t);
 int __real_clock_gettime(clockid_t, struct timespec *);
@@ -68,6 +70,8 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *out)
 	return 0;
 }
 static _Thread_local unsigned fail_at, allocations;
+static _Thread_local unsigned fail_pool_destroy_once;
+static _Thread_local unsigned pool_destroy_failures;
 struct gate;
 static void gate_wait(struct gate *g, bool worker);
 static _Thread_local struct gate *allocation_gate;
@@ -100,6 +104,16 @@ void *__wrap_calloc(size_t n, size_t size)
 		gate_wait(gate, true);
 	}
 	return __real_calloc(n, size);
+}
+int __wrap_tr_async_operation_pool_destroy(
+        struct tr_async_operation_pool **pool)
+{
+	if (fail_pool_destroy_once) {
+		--fail_pool_destroy_once;
+		++pool_destroy_failures;
+		return TR_ERR_SYS;
+	}
+	return __real_tr_async_operation_pool_destroy(pool);
 }
 int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
                            struct tr_buffer *const *buffers, uint32_t count)
@@ -1795,6 +1809,39 @@ static int constructor_probe(void *arg)
 	}
 	/* 每个失败点都必须回滚预算；成功序号随构造器分配项演进。 */
 	CHECK(success != 0);
+	/* 模拟构造回滚中的池销毁暂时失败：构造器必须把部分对象交回
+	 * 调用方，供 owner 生命周期接口重试，而不能遗失 pool/dispatch。 */
+	for (unsigned i = 1; i < 32; ++i) {
+		fail_at = i;
+		allocations = 0;
+		fail_pool_destroy_once = 1;
+		pool_destroy_failures = 0;
+		int ret = tr_rpc_record_dispatch_create_on_owner(
+		        f->server.channel, f->executor, f->methods, 4,
+		        &f->config, server_terminal, f, &f->server.budget, &d);
+		fail_at = 0;
+		if (pool_destroy_failures) {
+			CHECK(ret == TR_ERR_SYS && d);
+			CHECK(atomic_load(&f->server.budget.current_bytes) >
+			      before);
+			CHECK(tr_rpc_record_dispatch_destroy_on_owner(&d) ==
+			      TR_OK);
+			CHECK(!d);
+			CHECK(atomic_load(&f->server.budget.current_bytes) ==
+			      before);
+			break;
+		}
+		fail_pool_destroy_once = 0;
+		if (ret == TR_OK) {
+			CHECK(d);
+			CHECK(tr_rpc_record_dispatch_destroy_on_owner(&d) ==
+			      TR_OK);
+		} else {
+			CHECK(ret == TR_ERR_NOMEM && !d);
+		}
+		CHECK(atomic_load(&f->server.budget.current_bytes) == before);
+		CHECK(i < 31);
+	}
 	return TR_OK;
 }
 struct wrong_executor_request {

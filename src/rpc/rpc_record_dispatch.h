@@ -120,6 +120,8 @@ typedef void (*tr_rpc_dispatch_terminal_fn)(
  * 任务开始、完成交付及每次发送前都重新检查；到期选择 DEADLINE_EXCEEDED，
  * 取时失败选择 INTERNAL。正常运行的已选终局保持原状态，未接受的成功回复
  * 不得越过已观察的到期；不保证实时抢占或错误 FINAL 一定送达。
+ * 若失败清理本身未能销毁内部池，*out 会接收待清理对象；调用方须使用
+ * destroy_on_owner 或 reap_stopped 重试，直到对象被置空。
  */
 int tr_rpc_record_dispatch_create_on_owner(
         struct tr_channel *channel, struct tr_task_executor *executor,

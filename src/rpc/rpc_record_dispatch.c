@@ -1932,6 +1932,9 @@ int tr_rpc_record_dispatch_create_on_owner(
 	*out = d;
 	return TR_OK;
 fail:
+	/* 临时路由表不属于 dispatcher，必须在任何可失败的池清理之前释放。 */
+	free(routes);
+	(void)tr_memory_budget_release(budget, temporary);
 	if (d->operations) {
 		uint32_t operations_reaped;
 		int operation_ret =
@@ -1945,16 +1948,20 @@ fail:
 		if (operation_ret == TR_OK)
 			operation_ret =
 			        tr_async_operation_pool_destroy(&d->operations);
-		if (operation_ret != TR_OK)
+		if (operation_ret != TR_OK) {
+			/* 关闭失败时将部分对象交回调用方。其 pool 和预算仍有
+			 * 所有者，可通过 destroy/reap_stopped
+			 * 重试，不会悬空泄漏。 */
+			*out = d;
 			return operation_ret;
+		}
 	}
-	free(routes);
 	free(d->methods);
 	free(d->context_links);
 	free(d->contexts);
 	free(d->slots);
 	free(d);
-	(void)tr_memory_budget_release(budget, bytes + temporary);
+	(void)tr_memory_budget_release(budget, bytes);
 	return ret;
 }
 int tr_rpc_record_dispatch_bind_producers_on_owner(
@@ -2250,7 +2257,8 @@ int tr_rpc_record_dispatch_destroy_on_owner(struct tr_rpc_record_dispatch **p)
 		--d->depth;
 		return TR_AGAIN;
 	}
-	ret = tr_rpc_record_router_destroy_on_owner(&d->router);
+	ret = d->router ? tr_rpc_record_router_destroy_on_owner(&d->router)
+	                : TR_OK;
 	--d->depth;
 	return ret == TR_OK ? tr_dispatch_free(p) : ret;
 }
@@ -2297,7 +2305,7 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	                         memory_order_acquire))
 		return TR_AGAIN;
 	++d->depth;
-	ret = tr_rpc_record_router_reap_stopped(&d->router);
+	ret = d->router ? tr_rpc_record_router_reap_stopped(&d->router) : TR_OK;
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
 		struct tr_dispatch_slot *s = &d->slots[i];
 		if (s->active)

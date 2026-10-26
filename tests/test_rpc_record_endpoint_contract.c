@@ -66,7 +66,7 @@ struct fixture {
 	tr_reactor_timer_cb tick;
 	void *timer_arg;
 	bool guard, hold_work, fail_detach, fail_unreg, fail_register, fail_arm,
-	        fail_install;
+	        fail_install, fail_dispatch_create_with_partial;
 	bool inline_closed, inline_data;
 	bool inline_open;
 	struct tr_stream_handle nested_open;
@@ -304,7 +304,7 @@ int tr_rpc_record_dispatch_create_on_owner(
 	d->arg = arg;
 	*out = d;
 	d->f->dispatch = d;
-	return TR_OK;
+	return d->f->fail_dispatch_create_with_partial ? TR_ERR_SYS : TR_OK;
 }
 /* 仅观察宿主向下层透传的对象和状态，不模拟真实 RPC 语义记账。 */
 int tr_rpc_record_dispatch_bind_semantic_stats_on_owner(
@@ -1086,6 +1086,14 @@ static void test_failures(void)
 		CHECK(!atomic_load(&f.budget.current_bytes));
 		++cases;
 	}
+	struct fixture partial;
+	init(&partial);
+	partial.fail_dispatch_create_with_partial = true;
+	CHECK(create(&partial) == TR_ERR_SYS && partial.ep && partial.dispatch);
+	CHECK(tr_rpc_record_endpoint_close_on_owner(&partial.ep) == TR_OK &&
+	      !partial.ep && !partial.dispatch);
+	CHECK(!atomic_load(&partial.budget.current_bytes));
+	++cases;
 	for (unsigned stage = 0; stage < 4; ++stage) {
 		struct fixture f;
 		init(&f);
