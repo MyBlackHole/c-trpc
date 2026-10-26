@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.134` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.135` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -26,6 +26,7 @@ dev.131 为 #242/ERR-C 增加双 RESETTING 流并发释放回归：两条流各�
 dev.132 扩展双 RESETTING 流回归：对端确认到达前，两条流各收到一条已在途的合法 64 字节 DATA；RESET 丢弃路径只消费 wire 字节、不交付应用也不恢复信用，两个应用线程再并发释放各自持有的 128 字节正文。两条流通告上限保持 256、`window_updates_tx` 不增长，健康同伴仍能完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.133 将 RESET discard 在途 DATA 扩至填满每条流冻结窗口的剩余 128 字节；各流接收总量达到通告上限 256，消费量达到 128，仍无信用更新。并发释放此前持有的 128 字节后，消费量到 256、通告上限仍为 256，wire 无 WINDOW_UPDATE，健康同伴仍完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.134 在双 RESETTING 流窗口精确填满并并发释放后，再向其中一条流发送超限 1 字节 DATA，验证连接以 `TR_ERR_BAD_LENGTH` 关闭且不额外交付应用数据、不发送 WINDOW_UPDATE。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.135 在 Split Channel 的 CONTROL 连接上验证 RESETTING 流耗尽冻结窗口后的一字节超限仍以 `TR_ERR_BAD_LENGTH` 关闭该物理连接，而 BULK 独立连接上的健康流仍能交付并完成。Release、TSan、ASan/UBSan 的完整 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行

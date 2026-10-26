@@ -1297,6 +1297,59 @@ static void test_frozen_discard_credit(int unordered)
 	destroy_fixture(&f);
 }
 
+static void test_frozen_discard_credit_split_connection_isolation(void)
+{
+	struct fixture f;
+	uint8_t bytes[FRAME] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1U, 1U);
+	struct tr_stream_handle live_stream = open_remote(&f, 1, 3U, 2U);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U &&
+	       h.message_id == (uint64_t)-TR_ERR_CLOSED);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+	for (uint64_t message_id = 1U; message_id <= WINDOW / FRAME;
+	     ++message_id) {
+		send_frame(&f, 0, TR_FRAME_DATA,
+		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, message_id,
+		           bytes, FRAME);
+	}
+	barrier(&f, 0);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == WINDOW &&
+	       flow.rx_consumed_bytes == WINDOW);
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	assert(count(&f, &f.received) == 0U && count(&f, &f.down) == 0U);
+
+	/* 超限错误只关闭承载该 RESETTING 流的 CONTROL 物理连接。 */
+	uint8_t extra = 1U;
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U,
+	           WINDOW / FRAME + 1U, &extra, sizeof(extra));
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_BAD_LENGTH);
+	assert(count(&f, &f.received) == 0U);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 独立 BULK 连接仍能交付并完成自己的 Stream。 */
+	send_frame(&f, 1, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U,
+	           1U, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 1U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_rejects_compressed_data_lane_flag(void)
 {
 	struct fixture f;
@@ -2505,6 +2558,7 @@ int main(void)
 	test_closed_receive_resource_failure();
 	test_frozen_discard_credit(0);
 	test_frozen_discard_credit(1);
+	test_frozen_discard_credit_split_connection_isolation();
 	test_close_and_held_payload();
 	test_reset_releases_held_payload_without_credit();
 	test_timer_failure_and_partial(0);
