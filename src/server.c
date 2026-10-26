@@ -626,7 +626,9 @@ tr_server_record_config_valid(const struct tr_server_config *config,
 
 		/* 复用记录基数校验；codec 与方法编号仍是 V2 不透明数字。 */
 		if ((methods[i].work == NULL) == (methods[i].v2_work == NULL) ||
-		    (methods[i].v2_terminal && !methods[i].v2_work) ||
+		    ((methods[i].v2_terminal || methods[i].v2_observer ||
+		      methods[i].v2_admit || methods[i].v2_authorize) &&
+		     !methods[i].v2_work) ||
 		    !method->request_codec_id || !method->response_codec_id ||
 		    method->lane > TR_RPC_LANE_BULK ||
 		    (method->request_compression_algorithms &
@@ -2707,6 +2709,9 @@ int tr_server_create(const struct tr_server_config *config,
 		frozen[i].arg = methods[i].arg;
 		frozen[i].v2_work = methods[i].work;
 		frozen[i].v2_terminal = methods[i].terminal;
+		frozen[i].v2_observer = methods[i].observe;
+		frozen[i].v2_admit = methods[i].admit;
+		frozen[i].v2_authorize = methods[i].authorize;
 	}
 	/* create_internal 复制并记账。临时表无回调参数所有权；即使
 	 * 回滚失败把部分 Server 交还调用者，也不再借用此数组。 */

@@ -195,14 +195,21 @@ static int tr_dispatch_instance(uint64_t *out)
 	}
 }
 struct tr_dispatch_slot;
+enum tr_dispatch_job_stage {
+	TR_DISPATCH_JOB_APPLICATION = 0,
+	TR_DISPATCH_JOB_AUTHORIZATION = 1
+};
 struct tr_dispatch_job {
 	struct tr_dispatch_job *next;
 	struct tr_dispatch_slot *slot;
+	enum tr_dispatch_job_stage stage;
 	struct tr_rpc_dispatch_id id;
 	struct tr_rpc_record_view view;
 	tr_rpc_record_work_fn work;
 	tr_rpc_v2_work_fn v2_work;
+	tr_rpc_v2_authorize_fn v2_authorize;
 	struct tr_rpc_v2_call_id v2_id;
+	struct tr_rpc_v2_authorization_result authorization_result;
 	void *arg;
 	struct tr_rpc_record_reply reply;
 	uint64_t deadline;
@@ -217,7 +224,7 @@ struct tr_dispatch_slot {
 	struct tr_rpc_record_dispatch *dispatch;
 	struct tr_rpc_route_handle route;
 	struct tr_stream_handle stream;
-	struct tr_dispatch_job *head, *tail, *submitted, *ready;
+	struct tr_dispatch_job *head, *tail, *submitted, *auth_job, *ready;
 	struct tr_rpc_v2_producer *producer;
 	struct tr_peer_identity_snapshot *peer_identity;
 	size_t peer_identity_budget_bytes;
@@ -235,6 +242,8 @@ struct tr_dispatch_slot {
 	bool admission_failed;
 	bool semantic_started;
 	bool peer_identity_bound;
+	bool v2_open_observed;
+	bool authorized;
 	/* 单向切换后不因生产者关闭而恢复同步回复。公平轮转让回复背压
 	 * 与请求 work 的 FIFO 各自推进，不占用工作线程等待邮箱。 */
 	bool asynchronous, producer_turn;
@@ -850,6 +859,13 @@ static bool tr_dispatch_close_producer(struct tr_dispatch_slot *s)
 	s->producer = NULL;
 	return true;
 }
+static enum tr_rpc_v2_delivery
+tr_dispatch_v2_delivery(const struct tr_dispatch_slot *s)
+{
+	return s->delivery == TR_RPC_RECORD_OWNER_STOPPED
+	               ? TR_RPC_V2_DELIVERY_SHUTDOWN
+	               : TR_RPC_V2_DELIVERY_LIVE;
+}
 /* 路由已经终局不等于工作线程已经停止。只释放未提交/已交付的对象；
  * submitted 直到原执行器的 done 返回这里后才可以释放和通知用户。 */
 static void tr_dispatch_settle(struct tr_dispatch_slot *s)
@@ -883,14 +899,24 @@ static void tr_dispatch_settle(struct tr_dispatch_slot *s)
 		if (s->semantic_started)
 			tr_rpc_record_semantic_finish(d->semantic, s->status);
 		++d->depth;
+		if (s->v2_open_observed && s->v2_method &&
+		    s->v2_method->v2_observer) {
+			struct tr_rpc_v2_observation observation = {
+			        .call = tr_dispatch_v2_id(s),
+			        .event = TR_RPC_V2_OBSERVE_TERMINAL,
+			        .request = NULL,
+			        .status = s->status,
+			        .delivery = tr_dispatch_v2_delivery(s)};
+			++tr_v2_callback_depth;
+			s->v2_method->v2_observer(&observation,
+			                          s->v2_method->arg);
+			--tr_v2_callback_depth;
+		}
 		if (s->v2_method && s->v2_method->v2_terminal) {
 			++tr_v2_callback_depth;
 			s->v2_method->v2_terminal(
 			        tr_dispatch_v2_id(s), s->status,
-			        s->delivery == TR_RPC_RECORD_OWNER_STOPPED
-			                ? TR_RPC_V2_DELIVERY_SHUTDOWN
-			                : TR_RPC_V2_DELIVERY_LIVE,
-			        s->v2_method->arg);
+			        tr_dispatch_v2_delivery(s), s->v2_method->arg);
 			--tr_v2_callback_depth;
 		}
 		d->terminal(tr_dispatch_handle(s), s->stream, s->status,
@@ -940,45 +966,56 @@ static bool tr_dispatch_live(struct tr_dispatch_slot *s)
 	return false;
 }
 static enum tr_rpc_status
-tr_dispatch_v2_work(struct tr_dispatch_job *job,
-                    const struct tr_task_cancel *cancel)
+tr_dispatch_v2_request_init(const struct tr_rpc_record_view *view,
+                            struct tr_peer_identity_snapshot *peer_identity,
+                            struct tr_rpc_v2_request *request)
 {
-	struct tr_rpc_v2_request request = {0};
-	struct tr_rpc_v2_cancel public_cancel = {cancel, job->slot};
-	struct tr_rpc_v2_reply public_reply = {&job->reply};
-	const struct tr_rpc_v2_cancel *prior_cancel = tr_v2_active_cancel;
-	struct tr_rpc_v2_reply *prior_reply = tr_v2_active_reply;
-	enum tr_rpc_status result;
-
-	switch (job->view.header.kind) {
+	*request = (struct tr_rpc_v2_request){0};
+	switch (view->header.kind) {
 	case TR_RPC_RECORD_OPEN:
-		request.kind = TR_RPC_V2_REQUEST_OPEN;
+		request->kind = TR_RPC_V2_REQUEST_OPEN;
 		break;
 	case TR_RPC_RECORD_MESSAGE:
-		request.kind = TR_RPC_V2_REQUEST_MESSAGE;
+		request->kind = TR_RPC_V2_REQUEST_MESSAGE;
 		break;
 	case TR_RPC_RECORD_HALF_CLOSE:
-		request.kind = TR_RPC_V2_REQUEST_HALF_CLOSE;
+		request->kind = TR_RPC_V2_REQUEST_HALF_CLOSE;
 		break;
 	default:
 		return TR_RPC_STATUS_INTERNAL;
 	}
-	request.body = (struct tr_rpc_bytes){job->view.body,
-	                                     job->view.header.decoded_size};
-	tr_rpc_v2_metadata_view_init(&request.metadata, job->view.metadata,
-	                             job->view.header.metadata_size);
-	if (job->slot->peer_identity) {
-		if (tr_peer_identity_snapshot_view(job->slot->peer_identity,
-		                                   &request.peer_identity) !=
-		    TR_OK)
+	request->body =
+	        (struct tr_rpc_bytes){view->body, view->header.decoded_size};
+	tr_rpc_v2_metadata_view_init(&request->metadata, view->metadata,
+	                             view->header.metadata_size);
+	if (peer_identity) {
+		if (tr_peer_identity_snapshot_view(
+		            peer_identity, &request->peer_identity) != TR_OK)
 			return TR_RPC_STATUS_INTERNAL;
 	} else {
-		request.peer_identity = (struct tr_peer_identity_view){
+		request->peer_identity = (struct tr_peer_identity_view){
 		        .authentication = TR_PEER_IDENTITY_NONE,
 		        .uri_san = NULL,
 		        .uri_san_len = 0U,
 		};
 	}
+	return TR_RPC_STATUS_OK;
+}
+
+static enum tr_rpc_status
+tr_dispatch_v2_work(struct tr_dispatch_job *job,
+                    const struct tr_task_cancel *cancel)
+{
+	struct tr_rpc_v2_request request;
+	struct tr_rpc_v2_cancel public_cancel = {cancel, job->slot};
+	struct tr_rpc_v2_reply public_reply = {&job->reply};
+	const struct tr_rpc_v2_cancel *prior_cancel = tr_v2_active_cancel;
+	struct tr_rpc_v2_reply *prior_reply = tr_v2_active_reply;
+	enum tr_rpc_status result;
+	result = tr_dispatch_v2_request_init(
+	        &job->view, job->slot->peer_identity, &request);
+	if (result != TR_RPC_STATUS_OK)
+		return result;
 	tr_v2_active_cancel = &public_cancel;
 	tr_v2_active_reply = &public_reply;
 	++tr_v2_callback_depth;
@@ -989,11 +1026,45 @@ tr_dispatch_v2_work(struct tr_dispatch_job *job,
 	tr_v2_active_reply = prior_reply;
 	return result;
 }
+
+static int tr_dispatch_v2_authorize(struct tr_dispatch_job *job,
+                                    const struct tr_task_cancel *cancel)
+{
+	struct tr_rpc_v2_request request;
+	struct tr_rpc_v2_cancel public_cancel = {cancel, job->slot};
+	const struct tr_rpc_v2_cancel *prior_cancel = tr_v2_active_cancel;
+	struct tr_rpc_v2_reply *prior_reply = tr_v2_active_reply;
+	enum tr_rpc_status status;
+
+	if (!job->v2_authorize)
+		return TR_ERR_STATE;
+	status = tr_dispatch_v2_request_init(
+	        &job->view, job->slot->peer_identity, &request);
+	if (status != TR_RPC_STATUS_OK)
+		return TR_ERR_STATE;
+	tr_v2_active_cancel = &public_cancel;
+	tr_v2_active_reply = NULL;
+	++tr_v2_callback_depth;
+	job->authorization_result = job->v2_authorize(job->v2_id, &request,
+	                                              &public_cancel, job->arg);
+	--tr_v2_callback_depth;
+	tr_v2_active_cancel = prior_cancel;
+	tr_v2_active_reply = prior_reply;
+	return TR_OK;
+}
 static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 {
 	struct tr_dispatch_job *job = arg;
 	struct tr_rpc_record_reply *reply = &job->reply;
 	enum tr_rpc_status status = TR_RPC_STATUS_CANCELLED;
+	if (job->stage == TR_DISPATCH_JOB_AUTHORIZATION) {
+		if (tr_task_cancel_requested(cancel))
+			return TR_OK;
+		int ret = tr_dispatch_deadline_check(job->deadline);
+		if (ret != TR_OK)
+			return ret;
+		return tr_dispatch_v2_authorize(job, cancel);
+	}
 	if (!tr_task_cancel_requested(cancel)) {
 		/* 任务可能在共享执行器排队到期限之后才开始。这里只读取
 		 * 提交前固定的期限并返回私有结果，绝不触碰 owner 槽位/路由。
@@ -1027,6 +1098,84 @@ static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 	}
 	return TR_OK;
 }
+static bool tr_dispatch_authorization_result_valid(
+        struct tr_rpc_v2_authorization_result result)
+{
+	if (result.decision == TR_RPC_V2_AUTHORIZATION_ALLOW)
+		return result.rejection_status == TR_RPC_STATUS_OK;
+	if (result.decision == TR_RPC_V2_AUTHORIZATION_REJECT)
+		return result.rejection_status > TR_RPC_STATUS_OK &&
+		       result.rejection_status < (int)TR_RPC_STATUS_COUNT;
+	return false;
+}
+static void tr_dispatch_authorization_done(struct tr_dispatch_job *job,
+                                           struct tr_task_result result)
+{
+	struct tr_dispatch_slot *s = job->slot;
+	struct tr_rpc_record_dispatch *d = s->dispatch;
+	struct tr_rpc_v2_authorization_result authorization =
+	        job->authorization_result;
+	struct tr_rpc_v2_call_id live_id = tr_dispatch_v2_id(s);
+	bool current = s->auth_job == job &&
+	               job->view.header.kind == TR_RPC_RECORD_OPEN &&
+	               job->id.slot == s->route.slot &&
+	               job->id.generation == s->route.generation &&
+	               memcmp(&job->v2_id, &live_id, sizeof(live_id)) == 0;
+	s->submitted = NULL;
+	if (s->auth_job == job)
+		s->auth_job = NULL;
+	if (!current) {
+		tr_dispatch_free_job(job);
+		if (!d->cleanup && !s->terminal && !d->stopping)
+			tr_dispatch_local_abort(s, TR_RPC_STATUS_INTERNAL);
+		tr_dispatch_settle(s);
+		return;
+	}
+	if (d->cleanup || s->terminal || d->stopping) {
+		tr_dispatch_free_job(job);
+		tr_dispatch_settle(s);
+		return;
+	}
+	if (!tr_dispatch_live(s)) {
+		tr_dispatch_free_job(job);
+		tr_dispatch_settle(s);
+		return;
+	}
+	if (result.cancelled || result.work_status != TR_OK) {
+		enum tr_rpc_status status =
+		        result.cancelled ? TR_RPC_STATUS_CANCELLED
+		        : result.work_status == TR_ERR_TIMEOUT
+		                ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+		        : result.work_status == TR_ERR_STATE
+		                ? TR_RPC_STATUS_INTERNAL
+		                : TR_RPC_STATUS_UNAVAILABLE;
+		tr_dispatch_free_job(job);
+		tr_dispatch_local_abort(s, status);
+		tr_dispatch_settle(s);
+		return;
+	}
+	if (!tr_dispatch_authorization_result_valid(authorization)) {
+		job->reply.finished = true;
+		job->reply.status = TR_RPC_STATUS_INTERNAL;
+		s->ready = job;
+		tr_dispatch_drop_queued(s);
+	} else if (authorization.decision == TR_RPC_V2_AUTHORIZATION_REJECT) {
+		job->reply.finished = true;
+		job->reply.status = authorization.rejection_status;
+		s->ready = job;
+		tr_dispatch_drop_queued(s);
+	} else {
+		/* 原 OPEN job 先于认证期间到达的记录重新排队；pending 容量和
+		 * 输入副本沿用原对象，不创建第二份工作或额外队列。 */
+		s->authorized = true;
+		job->stage = TR_DISPATCH_JOB_APPLICATION;
+		job->next = s->head;
+		s->head = job;
+		if (!s->tail)
+			s->tail = job;
+	}
+	tr_dispatch_settle(s);
+}
 static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
                              struct tr_task_result result)
 {
@@ -1035,6 +1184,10 @@ static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
 	struct tr_rpc_record_dispatch *d = s->dispatch;
 	bool acquired = job->reply.producer != NULL;
 	(void)handle;
+	if (job->stage == TR_DISPATCH_JOB_AUTHORIZATION) {
+		tr_dispatch_authorization_done(job, result);
+		return;
+	}
 	/* executor完成与本调用的submitted存储一一对应，路由在此之前不能退役。
 	 * 清理域须由reap先授权；外层不能先换owner交付，再追认授权。 */
 	s->submitted = NULL;
@@ -1087,6 +1240,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	struct tr_rpc_record_dispatch *d = m->dispatch;
 	struct tr_dispatch_slot *s = &d->slots[route.slot];
 	struct tr_dispatch_job *job;
+	enum tr_rpc_status hook_rejection = TR_RPC_STATUS_OK;
 	size_t bytes, payload, body_size;
 	if (s->terminal || s->producer_failed || d->stopping ||
 	    (s->ready && s->ready->reply.finished))
@@ -1170,6 +1324,53 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 				s->peer_identity = identity;
 				s->peer_identity_bound = true;
 			}
+			struct tr_rpc_v2_request request;
+			if (tr_dispatch_v2_request_init(view, s->peer_identity,
+			                                &request) !=
+			    TR_RPC_STATUS_OK) {
+				tr_dispatch_local_abort(s,
+				                        TR_RPC_STATUS_INTERNAL);
+				return;
+			}
+			if (s->v2_method->v2_observer) {
+				struct tr_rpc_v2_observation observation = {
+				        .call = tr_dispatch_v2_id(s),
+				        .event = TR_RPC_V2_OBSERVE_OPEN,
+				        .request = &request,
+				        .status = TR_RPC_STATUS_OK,
+				        .delivery = TR_RPC_V2_DELIVERY_LIVE};
+				s->v2_open_observed = true;
+				++tr_v2_callback_depth;
+				s->v2_method->v2_observer(&observation,
+				                          s->v2_method->arg);
+				--tr_v2_callback_depth;
+			}
+			if (s->v2_method->v2_admit) {
+				struct tr_rpc_v2_admission_result admission;
+				bool valid;
+				++tr_v2_callback_depth;
+				admission = s->v2_method->v2_admit(
+				        tr_dispatch_v2_id(s), &request,
+				        s->v2_method->arg);
+				--tr_v2_callback_depth;
+				valid = admission.decision ==
+				                        TR_RPC_V2_ADMISSION_ACCEPT
+				                ? admission.rejection_status ==
+				                          TR_RPC_STATUS_OK
+				        : admission.decision ==
+				                        TR_RPC_V2_ADMISSION_REJECT
+				                ? admission.rejection_status >
+				                                  TR_RPC_STATUS_OK &&
+				                          admission.rejection_status <
+				                                  (int)TR_RPC_STATUS_COUNT
+				                : false;
+				if (!valid) {
+					hook_rejection = TR_RPC_STATUS_INTERNAL;
+				} else if (admission.decision ==
+				           TR_RPC_V2_ADMISSION_REJECT)
+					hook_rejection =
+					        admission.rejection_status;
+			}
 		}
 	}
 	if (s->pending >= d->config.max_pending_per_call) {
@@ -1202,6 +1403,7 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 	job->view.header = view->header;
 	job->work = m->method.work;
 	job->v2_work = m->method.v2_work;
+	job->v2_authorize = m->method.v2_authorize;
 	job->v2_id = tr_dispatch_v2_id(s);
 	job->arg = m->method.arg;
 	job->bytes = bytes;
@@ -1224,6 +1426,15 @@ static void tr_dispatch_received(struct tr_rpc_route_handle route,
 		job->view.body = body;
 	}
 	s->response_codec = m->method.descriptor.response_codec_id;
+	if (hook_rejection != TR_RPC_STATUS_OK) {
+		/* 钩子拒绝是 RPC 级结果，沿用 OPEN job 的有界回复存储交付
+		 * FINAL；它不应被降级为仅服务端可见的本地 route abort。 */
+		job->reply.finished = true;
+		job->reply.status = hook_rejection;
+		s->ready = job;
+		++s->pending;
+		return;
+	}
 	if (s->tail)
 		s->tail->next = job;
 	else
@@ -1236,11 +1447,16 @@ static bool tr_dispatch_submit(struct tr_dispatch_slot *s)
 	struct tr_rpc_record_dispatch *d = s->dispatch;
 	struct tr_dispatch_job *job;
 	struct tr_task_spec spec;
+	bool authorize;
 	int ret;
 	if (s->terminal || s->producer_failed || s->submitted || !s->head ||
 	    d->stopping)
 		return false;
 	job = s->head;
+	authorize = job->view.header.kind == TR_RPC_RECORD_OPEN &&
+	            job->v2_authorize && !s->authorized;
+	job->stage = authorize ? TR_DISPATCH_JOB_AUTHORIZATION
+	                       : TR_DISPATCH_JOB_APPLICATION;
 	/* 排队期间前批可能已发 INITIAL 或导出生产者，只在实际提交时
 	 * 固定 worker 的快照。worker 不读取 owner 的可变槽位。 */
 	job->reply.headers_sent = s->headers_sent;
@@ -1252,6 +1468,8 @@ static bool tr_dispatch_submit(struct tr_dispatch_slot *s)
 		if (!s->head)
 			s->tail = NULL;
 		job->next = NULL;
+		if (authorize)
+			s->auth_job = job;
 		s->submitted = job;
 		return true;
 	}
@@ -1487,7 +1705,9 @@ int tr_rpc_record_dispatch_create_on_owner(
 		return TR_ERR_BAD_LENGTH;
 	for (size_t i = 0; i < method_count; ++i)
 		if ((methods[i].work == NULL) == (methods[i].v2_work == NULL) ||
-		    (methods[i].v2_terminal && !methods[i].v2_work))
+		    ((methods[i].v2_terminal || methods[i].v2_observer ||
+		      methods[i].v2_admit || methods[i].v2_authorize) &&
+		     !methods[i].v2_work))
 			return TR_ERR_INVALID;
 	/* 实例编号与路由代次共同形成公共身份。即使创建失败也不复用
 	 * 已领取编号，避免对象地址复用使不同对端的调用身份发生碰撞。 */

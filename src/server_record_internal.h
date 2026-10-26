@@ -30,8 +30,9 @@ struct tr_server_record_config {
 /* 方法描述与工作函数表在创建时复制并冻结，arg 借用至 destroy 成功。
  * 业务契约沿用 tr_rpc_record_work_fn：每调用 FIFO、跨调用可并发，reply
  * 仅在当前工作回调内有效；不提供旧 Call 弱句柄或长期异步回复能力。
- * work 与 v2_work 恰一启用；后者复用相同派发状态，并在完整有效 OPEN
- * 准入后承担可选 v2_terminal 的一次通知，通知等待已提交工作实际退出。
+ * work 与 v2_work 恰一启用；后者复用相同派发状态，可配置固定类型化
+ * observer/admit/authorize 钩子和 v2_terminal。准入/认证拒绝发送错误 FINAL；
+ * 终局观察与通知等待已提交工作及认证任务实际退出。
  *
  * 成功后使用 tr_server_listen/start/drain/destroy。创建失败的所有权沿用
  * tr_server_create；start 仅尝试一次，失败后只允许 destroy 重试。destroy
@@ -47,8 +48,9 @@ struct tr_server_record_config {
  * 超时。所有分片和等待层共享一个单调绝对期限，0ms 仅立即检查。
  * owner 主动发布静默状态并唤醒外部条件变量，不由等待线程轮询任务。
  *
- * 不接受 interceptor 或连接组配置。稳定 RPC 语义统计由分片累计并通过
- * 公共入口读取，内部诊断同时报告 peer、Channel、池与共享任务资源。
+ * RPC V2 方法支持固定类型化观察、owner 准入和有界 worker 认证钩子；不接受
+ * 动态 interceptor 链或连接组配置。稳定 RPC 语义统计由分片累计并通过公共
+ * 入口读取，内部诊断同时报告 peer、Channel、池与共享任务资源。
  * tuning 的 executor_* 与 rpc_message_pool_count 在此入口不使用。
  * 完整有效 OPEN 携带的非零 remaining_timeout_ns
  * 从接收时转换为本机单调期限，覆盖任务排队、 业务执行和回复背压；0

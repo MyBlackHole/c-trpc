@@ -51,6 +51,9 @@ struct tr_rpc_dispatch_method {
 	 * 不为每个对端或调用建立额外的业务桥接对象。 */
 	tr_rpc_v2_work_fn v2_work;
 	tr_rpc_v2_server_terminal_fn v2_terminal;
+	tr_rpc_v2_observer_fn v2_observer;
+	tr_rpc_v2_admit_fn v2_admit;
+	tr_rpc_v2_authorize_fn v2_authorize;
 };
 
 /* 包含停止清理线程上的公共终局回调；门面须据此拒绝同步生命周期

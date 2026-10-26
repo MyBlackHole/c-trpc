@@ -37,8 +37,9 @@ unsigned tr_rpc_v2_test_stream_open_failures(void);
 		}                                                              \
 	} while (0)
 
-#define METHOD_COUNT 6U
+#define METHOD_COUNT 7U
 #define ASYNC_METHOD 5U
+#define HOOK_METHOD 6U
 #define MAX_BODY 4096U
 #define LARGE_BODY (320U * 1024U)
 #define MAX_MESSAGES 3U
@@ -107,6 +108,18 @@ struct method_state {
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
 	struct tr_rpc_v2_call_id id;
+	struct tr_rpc_v2_call_id hook_id;
+	unsigned hook_observed_open;
+	unsigned hook_observed_terminal;
+	unsigned hook_admitted;
+	unsigned hook_authorized;
+	unsigned hook_authorize_entered;
+	unsigned hook_authorize_returned;
+	unsigned hook_authorize_cancel_seen;
+	unsigned hook_order_count;
+	unsigned hook_order[8];
+	int hold_hook_authorize;
+	enum tr_rpc_status hook_terminal_status;
 	struct async_state *async;
 };
 
@@ -556,6 +569,11 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 			sum = m->sum;
 		}
 	}
+	if (m->index == HOOK_METHOD) {
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 4U;
+	}
 	requests = m->requests;
 	metadata = m->response_metadata;
 	async = m->async;
@@ -652,13 +670,128 @@ static void server_terminal(struct tr_rpc_v2_call_id call,
 	check_stats_rejected(f, 1);
 	lock(f);
 	CHECK(m->running == 0U);
-	CHECK(m->terminals < m->opens);
+	CHECK(m->terminals < m->opens ||
+	      (m->index == HOOK_METHOD &&
+	       m->terminals < m->hook_observed_open));
 	CHECK(memcmp(&m->id, &call, sizeof(call)) == 0);
 	++m->terminals;
 	m->status = status;
 	m->delivery = delivery;
+	if (m->index == HOOK_METHOD) {
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 6U;
+	}
 	publish(f);
 	unlock(f);
+}
+
+static void method_hook_observe(const struct tr_rpc_v2_observation *observation,
+                                void *arg)
+{
+	struct method_state *m = (struct method_state *)arg;
+	struct fixture *f = m->fixture;
+	lock(f);
+	if (observation->event == TR_RPC_V2_OBSERVE_OPEN) {
+		CHECK(observation->request &&
+		      observation->request->kind == TR_RPC_V2_REQUEST_OPEN);
+		m->id = observation->call;
+		m->hook_id = observation->call;
+		++m->hook_observed_open;
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 1U;
+	} else {
+		CHECK(observation->event == TR_RPC_V2_OBSERVE_TERMINAL);
+		CHECK(!observation->request &&
+		      observation->status >= TR_RPC_STATUS_OK &&
+		      observation->status < TR_RPC_STATUS_COUNT &&
+		      observation->delivery == TR_RPC_V2_DELIVERY_LIVE);
+		CHECK(memcmp(&m->hook_id, &observation->call,
+		             sizeof(m->hook_id)) == 0);
+		m->hook_terminal_status = observation->status;
+		++m->hook_observed_terminal;
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 5U;
+	}
+	CHECK(m->hook_order_count <=
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	publish(f);
+	unlock(f);
+}
+
+static struct tr_rpc_v2_admission_result
+method_hook_admit(struct tr_rpc_v2_call_id call,
+                  const struct tr_rpc_v2_request *request, void *arg)
+{
+	struct method_state *m = (struct method_state *)arg;
+	struct fixture *f = m->fixture;
+	CHECK(request && request->kind == TR_RPC_V2_REQUEST_OPEN);
+	lock(f);
+	CHECK(memcmp(&m->hook_id, &call, sizeof(call)) == 0);
+	++m->hook_admitted;
+	CHECK(m->hook_order_count <
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	m->hook_order[m->hook_order_count++] = 2U;
+	CHECK(m->hook_order_count <=
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	publish(f);
+	unlock(f);
+	struct tr_rpc_v2_admission_result result = {TR_RPC_V2_ADMISSION_ACCEPT,
+	                                            TR_RPC_STATUS_OK};
+	return result;
+}
+
+static struct tr_rpc_v2_authorization_result
+method_hook_authorize(struct tr_rpc_v2_call_id call,
+                      const struct tr_rpc_v2_request *request,
+                      const struct tr_rpc_v2_cancel *cancel, void *arg)
+{
+	struct method_state *m = (struct method_state *)arg;
+	struct fixture *f = m->fixture;
+	CHECK(request && request->kind == TR_RPC_V2_REQUEST_OPEN);
+	CHECK(tr_rpc_v2_cancel_requested(cancel) == 0);
+	lock(f);
+	CHECK(memcmp(&m->hook_id, &call, sizeof(call)) == 0);
+	++m->hook_authorized;
+	CHECK(m->hook_order_count <
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	m->hook_order[m->hook_order_count++] = 3U;
+	CHECK(m->hook_order_count <=
+	      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+	if (m->hold_hook_authorize) {
+		struct timespec limit = deadline_after(WAIT_MS);
+		++m->hook_authorize_entered;
+		publish(f);
+		while (!m->hook_authorize_cancel_seen) {
+			struct timespec due = deadline_after(10U);
+			int requested = tr_rpc_v2_cancel_requested(cancel);
+			CHECK(requested == 0 || requested == 1);
+			if (requested) {
+				++m->hook_authorize_cancel_seen;
+				CHECK(m->hook_order_count <
+				      sizeof(m->hook_order) /
+				              sizeof(m->hook_order[0]));
+				m->hook_order[m->hook_order_count++] = 7U;
+				publish(f);
+				break;
+			}
+			CHECK(before(&due, &limit));
+			int ret = pthread_cond_timedwait(&f->cond, &f->lock,
+			                                 &due);
+			CHECK(ret == 0 || ret == ETIMEDOUT);
+		}
+		CHECK(m->hook_order_count <
+		      sizeof(m->hook_order) / sizeof(m->hook_order[0]));
+		m->hook_order[m->hook_order_count++] = 8U;
+	}
+	++m->hook_authorize_returned;
+	publish(f);
+	unlock(f);
+	struct tr_rpc_v2_authorization_result result = {
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	return result;
 }
 
 static void describe_methods(struct tr_rpc_method_desc *descriptors,
@@ -766,6 +899,11 @@ static void fixture_create_shards_with_limits(struct fixture *f,
 		                ? server_terminal
 		                : NULL;
 		methods[i].arg = &f->methods[i];
+		if (i == HOOK_METHOD) {
+			methods[i].observe = method_hook_observe;
+			methods[i].admit = method_hook_admit;
+			methods[i].authorize = method_hook_authorize;
+		}
 	}
 	CHECK(tr_server_create(&server, methods, METHOD_COUNT, &f->server) ==
 	      TR_OK);
@@ -1164,6 +1302,95 @@ static void drain(struct fixture *f)
 	CHECK(tr_client_begin_drain(f->client.handle) == TR_OK);
 	CHECK(tr_client_wait_drained(f->client.handle, WAIT_MS) == TR_OK);
 	CHECK(tr_server_drain(f->server, WAIT_MS) == TR_OK);
+}
+
+static void test_rpc_v2_method_hooks(void)
+{
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {17U, 73U};
+	fixture_create(&f);
+	call_init(&call, &f, HOOK_METHOD, &request, 1U);
+	expect(&call, request.size, request.tag);
+	CHECK(call_start(&call, NULL) == TR_OK);
+	call_done(&call, TR_RPC_STATUS_OK);
+	lock(&f);
+	struct method_state *method = &f.methods[HOOK_METHOD];
+	CHECK(method->hook_observed_open == 1U &&
+	      method->hook_observed_terminal == 1U &&
+	      method->hook_admitted == 1U && method->hook_authorized == 1U);
+	CHECK(method->hook_order_count == 8U);
+	CHECK(method->hook_order[0] == 1U && method->hook_order[1] == 2U &&
+	      method->hook_order[2] == 3U && method->hook_order[3] == 4U &&
+	      method->hook_order[4] == 4U && method->hook_order[5] == 4U &&
+	      method->hook_order[6] == 5U && method->hook_order[7] == 6U);
+	CHECK(method->hook_authorize_entered == 0U &&
+	      method->hook_authorize_returned == 1U &&
+	      method->hook_terminal_status == TR_RPC_STATUS_OK);
+	unlock(&f);
+	drain(&f);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=server-method-hooks result=pass");
+}
+
+static void test_method_hook_late_authorization(int deadline)
+{
+	struct fixture f;
+	struct call_state blocked, healthy;
+	struct message_spec request = {17U, 61U};
+	struct tr_rpc_call_options options;
+	enum tr_rpc_status expected = deadline ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                                       : TR_RPC_STATUS_CANCELLED;
+
+	fixture_create(&f);
+	struct method_state *method = &f.methods[HOOK_METHOD];
+	lock(&f);
+	method->hold_hook_authorize = 1;
+	unlock(&f);
+
+	call_init(&blocked, &f, HOOK_METHOD, &request, 1U);
+	memset(&options, 0, sizeof(options));
+	options.timeout_ms = deadline ? 2000U : 0U;
+	CHECK(call_start(&blocked, &options) == TR_OK);
+	wait_count(&f, &method->hook_authorize_entered, 1U);
+	if (!deadline)
+		CHECK(tr_rpc_v2_call_cancel(blocked.handle) == TR_OK);
+
+	/* 授权回调在服务端自己的取消令牌置位后才返回 ALLOW，确保这是真正
+	 * 迟于服务端取消终局的结果，而不是仅早于网络 RESET 到达。 */
+	wait_count(&f, &method->hook_authorize_returned, 1U);
+	call_done(&blocked, expected);
+	lock(&f);
+	CHECK(method->hook_authorize_cancel_seen == 1U);
+	CHECK(method->opens == 0U && method->terminals == 1U &&
+	      method->status == expected);
+	CHECK(method->hook_observed_terminal == 1U &&
+	      method->hook_terminal_status == expected);
+	CHECK(method->hook_order_count == 7U && method->hook_order[0] == 1U &&
+	      method->hook_order[1] == 2U && method->hook_order[2] == 3U &&
+	      method->hook_order[3] == 7U && method->hook_order[4] == 8U &&
+	      method->hook_order[5] == 5U && method->hook_order[6] == 6U);
+	unlock(&f);
+
+	/* 迟到 ALLOW 返回后，健康调用仍经公共 TCP Client/Server 完成，旧调用
+	 * 则不能重新进入业务 work。 */
+	request.tag = 83U;
+	call_init(&healthy, &f, 0U, &request, 1U);
+	expect(&healthy, request.size, request.tag);
+	CHECK(call_start(&healthy, NULL) == TR_OK);
+	call_done(&healthy, TR_RPC_STATUS_OK);
+	lock(&f);
+	CHECK(method->opens == 0U && method->terminals == 1U);
+	unlock(&f);
+	check_client_totals(&f.client, 2U, 2U, expected, 1U);
+	check_server_totals(&f, 2U, 2U, expected, 1U);
+	drain(&f);
+	fixture_destroy(&f);
+	CHECK(blocked.terminals == 1U && healthy.terminals == 1U);
+	puts(deadline ? "sdk-v2: case=method-hook-late-allow-after-deadline "
+	                "result=pass"
+	              : "sdk-v2: case=method-hook-late-allow-after-cancel "
+	                "result=pass");
 }
 
 static void test_shapes_and_copy(void)
@@ -2501,6 +2728,9 @@ int main(void)
 	test_tls_d2_sdk_symbols();
 	test_call_ref_sdk_symbols();
 	test_parent_context_sdk_symbols();
+	test_rpc_v2_method_hooks();
+	test_method_hook_late_authorization(0);
+	test_method_hook_late_authorization(1);
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_call_compression_rejection_preserves_next_message();
