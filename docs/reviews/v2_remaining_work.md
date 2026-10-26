@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-24，主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 当前开发分支为 `feat/v2-tls-d-234`（2.0.0-dev.17）。
+核对基线：2026-10-25，主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 当前开发分支为 `feat/v2-tls-d-234`（2.0.0-dev.17）。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线
@@ -61,6 +61,32 @@ dev.32 的 TEST-B4 增加成功 FINAL 已接受后收到 RESET 的组件轨迹�
 模式均匹配；Draft PR #321 实现提交 `93502c1` 已通过 14/14 GitHub 检查，PR 待合并。证据见
 [TEST-B4 记录](rpc_v2_final_reset_component_replay_20261024.md)。
 
+dev.33 的 TEST-C1 增加固定 seed 模型探索、失败签名与确定性事件缩减，并扩展既有
+`build-test (gcc)` 检查和失败工件归档。固定 64-seed 测试集覆盖 schema v1 的 17 种操作，
+生成轨迹包含 APPLIED、STALE、REJECTED、RESOURCE_LIMIT；测试专用重复终局回调 mutant
+能缩减到 OPEN/CANCEL。它只验证 L1 模型工具链，不是生产 C 故障注入。Draft PR #322 的 GCC、
+Clang、ASan/UBSan、TSan、RPC smoke 与静态分析通过；Make/install job 在 SDK V2 消费端
+`tr_client_destroy(client->handle) == TR_OK` 断言失败，详见 CI 首轮记录，原因待单独核实。
+详细证据见 [TEST-C1 记录](rpc_v2_test_c1_explorer_20261025.md)。
+
+dev.34 的 TEST-C2 增加一条固定 Endpoint 最终错误状态发送背压回放：模型 `ERROR` 映射到
+夹具 `UNIMPLEMENTED`，真实 Endpoint 的 `tr_stream_sendv` 首次返回一次 `TR_AGAIN`、第二次
+接受唯一最终帧；组件观察与 L1 在终局次数、工作完成、最终帧、槽退役及零预算上匹配。
+该测试仍使用受控 Channel/Dispatch/Executor，不覆盖 TCP、通用故障日程或 TEST-C 完整要求；
+Draft PR #323 的旧 head 远端检查结果单独记录；父 PR #322 的首次 Make/install 失败及后续本地复现状态
+也单独保留。详见 [TEST-C2 记录](rpc_v2_test_c2_endpoint_send_backpressure_20261025.md)。
+
+dev.35 的 TEST-C3 在同一受控 Endpoint 夹具中覆盖相邻竞争窗口：错误最终帧首次发送返回
+`TR_AGAIN` 后、Endpoint 下一次发送重试前收到远端 RESET。组件必须不再尝试发送、不报告已接受
+最终帧，并在有界轮转后只交付一次终局、退役槽且归还全部预算。新增/修改源码行格式 CI 门禁按
+用户要求移除；格式工具和翻译目录回归并入既有 GCC 构建作业，本地改动行检查保留。
+此前 PR #323 head `db4070c381c87dac0af0a5440ff9d9627bf36a40` 的格式作业因 GitHub 10 分钟超时
+且零步骤执行而取消；同一 head 的本地格式检查为 1 个源码文件、0 处格式错误。该远端结果不代表
+源码格式检查失败。C3 head `a858dd21fb5c3225cb4bf8b53aa5edc9ba0953d6` 的既有 CI 与 RPC smoke 共 13/13
+通过；GCC 全量 Debug/Release 各 90/90，两个收尾进程快照均未发现项目子进程，旧 runner cleanup 超时未复现。
+详见
+[TEST-C3 记录](rpc_v2_test_c3_endpoint_reset_before_retry_20261025.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -93,7 +119,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
 | 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
-| 横切验证 | TEST-A PR #317、TEST-B1 PR #318、TEST-B2 PR #319、TEST-B3 PR #320 与 TEST-B4 PR #321 的实现提交均已通过 14/14 GitHub 检查但待合并；TEST-B 完整事件字母表、真实网络/派发、TEST-C 故障注入与缩减、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能仍待完成 | #247 |
+| 横切验证 | TEST-A PR #317、TEST-B1 PR #318、TEST-B2 PR #319、TEST-B3 PR #320 与 TEST-B4 PR #321 的实现提交均已通过 14/14 GitHub 检查但待合并；TEST-C1 完成固定种子模型探索与 mutant 缩减，TEST-C2 验证 Endpoint `TR_AGAIN` 后恢复，TEST-C3 验证 RESET 阻止背压终局帧重试；通用生产 C 故障时序、TEST-B 完整事件字母表、真实网络/派发、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能仍待完成 | #247 |
 | 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
 
 长期治理 #249 属于持续维护职责。正式发布仍需完成上述有限范围的实现和验收；当前不得把 dev 预览称为已完成的 V2。

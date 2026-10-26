@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""TEST-B1 Python 到真实 Endpoint 测试夹具的有限映射检查。"""
+"""TEST-B 与 TEST-C 的 Python/真实 Endpoint 有限映射检查。"""
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 import rpc_v2_component_replay
 from rpc_v2_model import parse_trace, run_trace
@@ -18,6 +20,10 @@ STALE_MESSAGE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-stale-message-after-reuse-v1.json"
 FINAL_RESET_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
     "component-final-reset-after-accepted-v1.json"
+FINAL_SEND_BACKPRESSURE_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
+    "component-final-send-backpressure-v1.json"
+FINAL_SEND_RESET_BEFORE_RETRY_TRACE_PATH = ROOT / "tests" / "fixtures" / "rpc_v2_model" / \
+    "component-final-send-reset-before-retry-v1.json"
 
 
 class ComponentMappingTests(unittest.TestCase):
@@ -111,6 +117,163 @@ class ComponentMappingTests(unittest.TestCase):
             "quiescent": True,
             "stale_messages_ignored": 0,
         }
+        self.assertTrue(
+            rpc_v2_component_replay.compare_observation(
+                trace, model, observed)["matched"])
+
+    def test_final_send_backpressure_trace_maps_to_fixed_component_sequence(self):
+        trace = parse_trace(FINAL_SEND_BACKPRESSURE_TRACE_PATH.read_bytes())
+        model = run_trace(trace)
+
+        self.assertEqual(trace.task_ids,
+                         ("#247/TEST-A", "#247/TEST-B", "#247/TEST-C"))
+        self.assertEqual(model.calls[0]["outcome"], "ERROR")
+        self.assertEqual(model.calls[0]["terminal_callbacks"], 1)
+        self.assertTrue(model.quiescent)
+        self.assertEqual(
+            rpc_v2_component_replay.component_event_argument(trace),
+            "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+            "FINAL_STATUS,RESET,SLOT_RELEASE")
+
+    def test_final_send_backpressure_trace_rejects_changed_events(self):
+        trace = parse_trace(FINAL_SEND_BACKPRESSURE_TRACE_PATH.read_bytes())
+        changed = replace(trace, events=trace.events[:-1])
+
+        with self.assertRaises(
+                rpc_v2_component_replay.ComponentReplayError) as raised:
+                rpc_v2_component_replay.component_event_argument(changed)
+        self.assertEqual(raised.exception.field, "events")
+
+    def test_final_send_backpressure_trace_rejects_changed_expectation(self):
+        trace = parse_trace(FINAL_SEND_BACKPRESSURE_TRACE_PATH.read_bytes())
+        events = list(trace.events)
+        events[6] = replace(events[6], expect="REJECTED")
+        changed = replace(trace, events=tuple(events))
+
+        with self.assertRaises(
+                rpc_v2_component_replay.ComponentReplayError) as raised:
+            rpc_v2_component_replay.component_event_argument(changed)
+        self.assertEqual(raised.exception.field, "events[6]")
+
+    def test_final_send_backpressure_trace_requires_test_c(self):
+        trace = parse_trace(FINAL_SEND_BACKPRESSURE_TRACE_PATH.read_bytes())
+        changed = replace(
+            trace, task_ids=("#247/TEST-A", "#247/TEST-B"))
+
+        with self.assertRaises(
+                rpc_v2_component_replay.ComponentReplayError) as raised:
+            rpc_v2_component_replay.component_event_argument(changed)
+        self.assertEqual(raised.exception.field, "task_ids")
+
+    def test_final_send_backpressure_uses_explicit_fixture_profile(self):
+        trace = parse_trace(FINAL_SEND_BACKPRESSURE_TRACE_PATH.read_bytes())
+        test_tmp = ROOT / "build" / "test-tmp"
+        test_tmp.mkdir(parents=True, exist_ok=True)
+        invocation_path = test_tmp / "component-replay-backpressure-argv.json"
+        fake_binary = test_tmp / "component-replay-backpressure.py"
+        observation = {
+            "status": "UNIMPLEMENTED",
+            "terminal_callbacks": 1,
+            "work_completed": True,
+            "final_frames": 1,
+            "retire_calls": 1,
+            "budget_bytes": 0,
+            "quiescent": True,
+            "stale_messages_ignored": 0,
+        }
+        fake_binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['COMPONENT_REPLAY_ARGV'], 'w', "
+            "encoding='utf-8') as output:\n"
+            "    json.dump(sys.argv[1:], output)\n"
+            "print(" + repr(json.dumps(observation)) + ")\n",
+            encoding="utf-8")
+        fake_binary.chmod(0o755)
+        try:
+            with patch.dict(os.environ, {
+                    "COMPONENT_REPLAY_ARGV": str(invocation_path)}):
+                result = rpc_v2_component_replay.run_component_replay(
+                    trace, fake_binary)
+            self.assertEqual(json.loads(invocation_path.read_text()), [
+                "--replay-send-backpressure",
+                "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+                "FINAL_STATUS,RESET,SLOT_RELEASE",
+            ])
+        finally:
+            fake_binary.unlink(missing_ok=True)
+            invocation_path.unlink(missing_ok=True)
+        self.assertTrue(result["matched"])
+
+    def test_final_send_reset_before_retry_maps_to_fixed_component_sequence(self):
+        trace = parse_trace(FINAL_SEND_RESET_BEFORE_RETRY_TRACE_PATH.read_bytes())
+        model = run_trace(trace)
+
+        self.assertEqual(trace.task_ids,
+                         ("#247/TEST-A", "#247/TEST-B", "#247/TEST-C"))
+        self.assertEqual(model.calls[0]["outcome"], "ERROR")
+        self.assertEqual(model.calls[0]["terminal_callbacks"], 1)
+        self.assertEqual(model.event_results[7], "REJECTED")
+        self.assertTrue(model.quiescent)
+        self.assertEqual(
+            rpc_v2_component_replay.component_event_argument(trace),
+            "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+            "FINAL_STATUS,RESET,SLOT_RELEASE")
+
+    def test_final_send_reset_before_retry_uses_explicit_fixture_profile(self):
+        trace = parse_trace(FINAL_SEND_RESET_BEFORE_RETRY_TRACE_PATH.read_bytes())
+        test_tmp = ROOT / "build" / "test-tmp"
+        test_tmp.mkdir(parents=True, exist_ok=True)
+        invocation_path = test_tmp / "component-replay-reset-before-retry-argv.json"
+        fake_binary = test_tmp / "component-replay-reset-before-retry.py"
+        observation = {
+            "status": "UNIMPLEMENTED",
+            "terminal_callbacks": 1,
+            "work_completed": True,
+            "final_frames": 0,
+            "retire_calls": 1,
+            "budget_bytes": 0,
+            "quiescent": True,
+            "stale_messages_ignored": 0,
+        }
+        fake_binary.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "with open(os.environ['COMPONENT_REPLAY_ARGV'], 'w', "
+            "encoding='utf-8') as output:\n"
+            "    json.dump(sys.argv[1:], output)\n"
+            "print(" + repr(json.dumps(observation)) + ")\n",
+            encoding="utf-8")
+        fake_binary.chmod(0o755)
+        try:
+            with patch.dict(os.environ, {
+                    "COMPONENT_REPLAY_ARGV": str(invocation_path)}):
+                result = rpc_v2_component_replay.run_component_replay(
+                    trace, fake_binary)
+            self.assertEqual(json.loads(invocation_path.read_text()), [
+                "--replay-send-reset-before-retry",
+                "OPEN,ACCEPT,MESSAGE,HALF_CLOSE,WORK_START,WORK_DONE,"
+                "FINAL_STATUS,RESET,SLOT_RELEASE",
+            ])
+        finally:
+            fake_binary.unlink(missing_ok=True)
+            invocation_path.unlink(missing_ok=True)
+        self.assertTrue(result["matched"])
+
+    def test_final_send_reset_before_retry_observation_matches_unaccepted_error(self):
+        trace = parse_trace(FINAL_SEND_RESET_BEFORE_RETRY_TRACE_PATH.read_bytes())
+        model = run_trace(trace)
+        observed = {
+            "status": "UNIMPLEMENTED",
+            "terminal_callbacks": 1,
+            "work_completed": True,
+            "final_frames": 0,
+            "retire_calls": 1,
+            "budget_bytes": 0,
+            "quiescent": True,
+            "stale_messages_ignored": 0,
+        }
+
         self.assertTrue(
             rpc_v2_component_replay.compare_observation(
                 trace, model, observed)["matched"])
