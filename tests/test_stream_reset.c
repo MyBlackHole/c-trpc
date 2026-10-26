@@ -48,10 +48,14 @@ struct fixture {
 	int reset_status[TRACKED_STREAMS];
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
+	struct tr_buffer *held_extra;
+	struct tr_stream_handle held_extra_stream;
 	int hold_data;
 	int block_reset_callback;
 	int reset_callback_blocked;
 	int release_reset_callback;
+	unsigned release_threads_ready;
+	int release_threads_go;
 	int queue_reset_predecessors;
 	int reopen_on_closed;
 	int circular_stream_tracking;
@@ -164,6 +168,29 @@ static void wait_count(struct fixture *f, unsigned *counter, unsigned target)
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
+struct payload_release_request {
+	struct fixture *fixture;
+	struct tr_stream_handle stream;
+	struct tr_buffer *payload;
+	int result;
+};
+
+static void *release_payload_after_gate(void *arg)
+{
+	struct payload_release_request *request = arg;
+	struct fixture *f = request->fixture;
+
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	++f->release_threads_ready;
+	assert(pthread_cond_broadcast(&f->cond) == 0);
+	while (!f->release_threads_go)
+		assert(pthread_cond_wait(&f->cond, &f->lock) == 0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+	request->result =
+	        tr_stream_release_payload(request->stream, request->payload);
+	return NULL;
+}
+
 static void assert_fixed_history_budget(
 	struct tr_memory_budget *budget, uint64_t fixed_bytes)
 {
@@ -194,9 +221,14 @@ static enum tr_stream_data_disposition on_data(struct tr_stream_handle stream,
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	++f->received;
 	if (f->hold_data) {
-		assert(!f->held);
-		f->held = payload;
-		f->held_stream = stream;
+		if (!f->held) {
+			f->held = payload;
+			f->held_stream = stream;
+		} else {
+			assert(!f->held_extra);
+			f->held_extra = payload;
+			f->held_extra_stream = stream;
+		}
 	}
 	int hold = f->hold_data;
 	assert(pthread_cond_broadcast(&f->cond) == 0);
@@ -1850,6 +1882,106 @@ static void test_reset_begun_held_payload_release_without_credit(void)
 	destroy_fixture(&f);
 }
 
+static void
+test_reset_begun_concurrent_held_payload_releases_without_credit(void)
+{
+	struct fixture f;
+	uint8_t bytes[64] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	struct tr_stream_handle reset_stream;
+	struct tr_stream_handle live_stream;
+	struct tr_buffer *held[2];
+	struct payload_release_request release[2];
+	pthread_t release_threads[2];
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	reset_stream = open_remote(&f, 0, 1, 1);
+	live_stream = open_remote(&f, 0, 3, 2);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           1, bytes, sizeof(bytes));
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1,
+	           2, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.held && f.held_extra);
+	assert(f.held_stream.generation == reset_stream.generation);
+	assert(f.held_extra_stream.generation == reset_stream.generation);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == 2U * sizeof(bytes));
+	assert(flow.rx_consumed_bytes == 0U);
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.block_reset_callback = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	peer_reset(&f, 0, 1, TR_ERR_TIMEOUT);
+	wait_count(&f, &f.resets, 1U);
+	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	assert(f.reset_callback_blocked);
+	held[0] = f.held;
+	held[1] = f.held_extra;
+	assert(held[0] && held[1]);
+	f.held = NULL;
+	f.held_extra = NULL;
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+
+	/* 两个应用线程同时释放同一条 RESETTING 流上的独立正文。 */
+	for (unsigned i = 0; i < 2; ++i) {
+		release[i].fixture = &f;
+		release[i].stream = reset_stream;
+		release[i].payload = held[i];
+		release[i].result = TR_ERR_STATE;
+		assert(pthread_create(&release_threads[i], NULL,
+		                      release_payload_after_gate,
+		                      &release[i]) == 0);
+	}
+	wait_count(&f, &f.release_threads_ready, 2U);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_threads_go = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	for (unsigned i = 0; i < 2; ++i) {
+		assert(pthread_join(release_threads[i], NULL) == 0);
+		assert(release[i].result == TR_OK);
+	}
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == 2U * sizeof(bytes));
+	assert(flow.rx_consumed_bytes == 2U * sizeof(bytes));
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.release_reset_callback = 1;
+	assert(pthread_cond_broadcast(&f.cond) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_reactor_call(f.reactor, reactor_noop, NULL) == TR_OK);
+	barrier_without_stream_window_update(&f, 0, 1U, TR_ERR_TIMEOUT);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	/* 目标流的并发释放不会妨碍同一 Channel 上的健康同伴。 */
+	send_frame(&f, 0, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 3U);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_release_preserves_cross_message_credit_debt(void)
 {
 	struct fixture f;
@@ -2139,6 +2271,7 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
+	test_reset_begun_concurrent_held_payload_releases_without_credit();
 	test_reset_release_preserves_cross_message_credit_debt();
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
