@@ -251,7 +251,7 @@ int tr_tls_provider_operation_reserve(
         enum tr_tls_provider_operation_kind kind, uint32_t result_capacity,
         struct tr_tls_provider_operation *out_operation)
 {
-	struct tr_tls_provider_operation_slot *slot;
+	struct tr_tls_provider_operation_slot *slot = NULL;
 	struct tr_async_operation_spec spec;
 	struct tr_async_operation operation;
 	struct tr_async_operation_ref producer_ref;
@@ -330,6 +330,10 @@ done:
 	if (pthread_mutex_unlock(&table->lock) != 0) {
 		if (ret != TR_OK)
 			return ret;
+		if (!slot) {
+			(void)pthread_mutex_unlock(&table->lock);
+			return TR_ERR_SYS;
+		}
 		/* reserve 尚未向调用方发布句柄。撤销底层预留并释放 slot
 		 * 资源，随后重试解锁，避免错误返回留下不可访问的操作。 */
 		if (tr_async_operation_reject(table->operations, operation,
@@ -346,8 +350,18 @@ done:
 		(void)pthread_mutex_unlock(&table->lock);
 		return TR_ERR_SYS;
 	}
+	/* GCC 11 -fanalyzer does not follow the result pointer into the
+	 * table-owned slot. The buffer remains owned there until
+	 * retire/destroy. */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wanalyzer-malloc-leak"
+#endif
 	if (ret == TR_OK)
 		*out_operation = public_operation;
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 	return ret;
 }
 
