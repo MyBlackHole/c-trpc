@@ -36,3 +36,22 @@
 - 配置 authorize 的调用会多经过一个共享执行器任务阶段，认证耗时期间占用既有有界任务槽和单调用 pending 额度。取消是协作式的，不能强制中断阻塞中的用户回调。
 - 本次未运行性能基准；性能影响是基于执行路径的审查结论，不是量化测量结果。
 - 本地全套与专项验证通过不等于远端 CI 通过，也不覆盖 #243 / V2 其余未完成的验收项。
+
+## dev.157 公共 SDK 迟到授权集成补充
+
+本次只修改 `tests/test_rpc_v2_sdk.c` 与验证记录，没有修改生产代码或公共 ABI。新增用例沿公共
+V2 Client/Server 的真实 TCP 路径运行：授权回调在服务端取消令牌置位后才返回 `ALLOW`，分别
+覆盖主动取消与 deadline。测试检查原调用分别保持 `CANCELLED`/`DEADLINE_EXCEEDED` 终局，业务
+OPEN work 不会执行，观察回调与终局回调顺序正确，并在同一 Client/Server 上完成后续健康调用。
+
+| 配置 | 命令/覆盖 | 结果 |
+| --- | --- | --- |
+| GCC Release | `TMPDIR="$PWD/build/test-tmp" xmake test -P . -v -j1 'test_rpc_v2_sdk/*'` | 通过 |
+| GCC ASan/UBSan | 同一 SDK 目标，`detect_leaks=1` | 通过 |
+| GCC TSan | 同一 SDK 目标 | 通过 |
+| Clang Release | 同一 SDK 目标 | 通过 |
+| GCC Release 完整套件 | `TMPDIR="$PWD/build/test-tmp" xmake test -P . -v -j1`，产物位于项目 `build/linux/...` | 92/92 通过；包含 40k RESET 压测 |
+
+测试夹具要求二进制位于项目 `build/linux/...`，临时文件位于工作区 `build/test-tmp`；验证期间未向
+`/tmp` 写入文件、日志或构建产物。此证据只关闭方法钩子在公共 SDK TCP 路径上的迟到 ALLOW
+集成缺口，仍不覆盖通用异步操作内核、显式操作引用、队列/并发组合或跨 TLS/压缩调度。
