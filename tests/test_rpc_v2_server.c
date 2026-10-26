@@ -114,6 +114,7 @@ struct call {
 	enum tr_rpc_status status, client_status;
 	enum tr_rpc_v2_delivery delivery;
 	bool identified, entered, release, exited, cancelled;
+	bool hold_in_terminal;
 	struct tr_rpc_v2_call_ref held_ref;
 	uint8_t response[32];
 	size_t response_size;
@@ -620,8 +621,9 @@ static void client_terminal(struct tr_rpc_v2_call handle,
 {
 	struct call *call = arg;
 	struct fixture *f = call->fixture;
-	(void)handle;
 	(void)delivery;
+	if (call->hold_in_terminal)
+		assert(tr_rpc_v2_call_hold(handle, &call->held_ref) == TR_OK);
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	assert(!call->client_terminals);
 	call->client_status = status;
@@ -1088,8 +1090,8 @@ static void test_call_ref_blocks_destroy_after_terminal(void)
 	const struct tr_rpc_bytes body = {payload, sizeof(payload)};
 	fixture_init(&f);
 	struct call *call = &f.calls[0];
+	call->hold_in_terminal = true;
 	call_start(&f, 0, 0, ECHO);
-	assert(tr_rpc_v2_call_hold(call->handle, &call->held_ref) == TR_OK);
 	send_or_half_close(call, &body);
 	send_or_half_close(call, NULL);
 	check_result(call, TR_RPC_STATUS_OK, 1);

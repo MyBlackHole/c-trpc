@@ -153,7 +153,7 @@ int tr_async_operation_reap_stopped(struct tr_async_operation_pool *pool,
 
 ## 结项边界
 
-本计划的实现与本地验证已完成。dev.162 提交 `d245e0b4bf0fec52e8d4e1db69613a597e35cb89` 已推送，Draft PR #332 对应的检查为 13/13 全部通过；dev.163 的 CallRef × 异步 authorize 真实 TCP 屏障回归远端检查 13/13 通过；dev.164 再补 held CallRef 阻止 Client destroy、release 后重试销毁的回归，GCC Release 全量测试 93/93 通过，新 head 的远端检查待推送复验。#243 和 #239 仍保持 OPEN：它们的完整验收还包括跨 Reactor/嵌套调用语义、队列满载契约、更多回调与资源回收屏障及其他 V2 架构项。
+本计划的实现与本地验证已完成。dev.162 提交 `d245e0b4bf0fec52e8d4e1db69613a597e35cb89` 已推送，Draft PR #332 对应的检查为 13/13 全部通过；dev.163 的 CallRef × 异步 authorize 真实 TCP 屏障回归远端检查 13/13 通过；dev.164 的 held CallRef destroy/release 回归远端检查 13/13 通过；dev.165 补 terminal callback 内 hold 路径，GCC Release 全量测试 93/93 通过，新 head 的远端检查待推送复验。#243 和 #239 仍保持 OPEN：它们的完整验收还包括跨 Reactor/嵌套调用语义、队列满载契约、更多回调与资源回收屏障及其他 V2 架构项。
 
 ## 自审
 
