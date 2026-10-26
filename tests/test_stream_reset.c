@@ -1688,6 +1688,101 @@ test_frame_after_peer_reset_with_response_backpressure(unsigned reset_lane,
 	destroy_fixture(&f);
 }
 
+static void
+test_duplicate_peer_reset_with_response_backpressure(unsigned reset_lane,
+                                                     int conflicting_status)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	struct tr_stream_flow_state flow;
+	enum tr_lane failed_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	unsigned reset_responses = 0U;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+
+	/* 阻塞目标物理连接，确认对端 RESET 的本地响应真实遇到 EAGAIN。 */
+	atomic_store(&partial_fd, f.adopted_fd[reset_lane]);
+	atomic_store(&blocked_reset_eagain, 0U);
+	atomic_store(&block_all_tx, 1);
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&blocked_reset_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&blocked_reset_eagain) != 0U);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_ERR_STALE);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 响应仍在 EAGAIN 时重发 RESET：同原因应命中墓碑，不同原因应拒绝。 */
+	peer_reset(&f, reset_lane, 1U,
+	           conflicting_status ? TR_ERR_TIMEOUT : TR_ERR_CLOSED);
+	if (conflicting_status) {
+		wait_count(&f, &f.down, 1U);
+		assert(f.down_status == TR_ERR_STATE);
+		assert(count(&f, &f.errors) == 0U &&
+		       count(&f, &f.closed) == 1U);
+		assert(count(&f, &f.resets) == 1U);
+		assert(tr_channel_get_lane_state(f.channel, failed_lane,
+		                                 &lane_state) == TR_OK);
+		assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	} else {
+		/* RESET 后的 PING 是 RX 屏障；放开发送后必须只观察到原响应。 */
+		send_frame(&f, reset_lane, TR_FRAME_PING, 0, 0, 1001U, NULL, 0);
+		atomic_store(&block_all_tx, 0);
+		for (;;) {
+			struct tr_frame_header h =
+			        receive_frame(&f, reset_lane);
+			if (h.type == TR_FRAME_STREAM_RESET) {
+				assert(h.stream_id == 1U &&
+				       h.message_id ==
+				               (uint64_t)-TR_ERR_CLOSED);
+				++reset_responses;
+			} else if (h.type == TR_FRAME_PONG &&
+			           h.message_id == 1001U) {
+				break;
+			} else {
+				assert(!"unexpected frame after duplicate "
+				        "RESET");
+			}
+		}
+		assert(reset_responses == 1U);
+		assert(count(&f, &f.down) == 0U && count(&f, &f.errors) == 0U);
+		assert(count(&f, &f.closed) == 1U &&
+		       count(&f, &f.resets) == 1U);
+		assert(tr_channel_get_lane_state(f.channel, failed_lane,
+		                                 &lane_state) == TR_OK);
+		assert(lane_state == TR_CHANNEL_LANE_UP);
+	}
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 目标 lane 的重复 RESET 不得影响另一物理连接上的活动流。 */
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == (conflicting_status ? 1U : 0U));
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_rejects_compressed_data_lane_flag(void)
 {
 	struct fixture f;
@@ -2889,6 +2984,10 @@ int main(void)
 	        0U, TR_FRAME_STREAM_CLOSE);
 	test_frame_after_peer_reset_with_response_backpressure(
 	        1U, TR_FRAME_STREAM_CLOSE);
+	test_duplicate_peer_reset_with_response_backpressure(0U, 0);
+	test_duplicate_peer_reset_with_response_backpressure(1U, 0);
+	test_duplicate_peer_reset_with_response_backpressure(0U, 1);
+	test_duplicate_peer_reset_with_response_backpressure(1U, 1);
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
