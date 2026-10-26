@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "trace_id": "cancel-late-work-v1",
+  "task_ids": ["#247/TEST-A"],
+  "invariant_ids": ["CALL-01", "CALL-02", "GEN-01"],
+  "seed": null,
+  "limits": {"memory_bytes": 0, "max_events": 12},
+  "finish": "QUIESCENT",
+  "events": [
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "ONE", "response_mode": "ONE", "expect": "APPLIED"},
+    {"op": "MESSAGE", "slot": 0, "generation": 0, "direction": "REQUEST", "bytes": 3, "expect": "APPLIED"},
+    {"op": "ACCEPT", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "HALF_CLOSE", "slot": 0, "generation": 0, "direction": "REQUEST", "expect": "APPLIED"},
+    {"op": "WORK_START", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "CANCEL", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "WORK_DONE", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "FINAL_STATUS", "slot": 0, "generation": 0, "status": "ERROR", "expect": "REJECTED"},
+    {"op": "SLOT_RELEASE", "slot": 0, "generation": 0, "expect": "APPLIED"},
+    {"op": "OPEN", "slot": 0, "generation": 0, "request_mode": "MANY", "response_mode": "MANY", "expect": "STALE"},
+    {"op": "OPEN", "slot": 0, "generation": 1, "request_mode": "MANY", "response_mode": "MANY", "expect": "APPLIED"},
+    {"op": "REJECT", "slot": 0, "generation": 1, "expect": "APPLIED"}
+  ]
+}

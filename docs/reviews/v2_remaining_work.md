@@ -28,6 +28,39 @@ dev.27 的 [DATA TX 容量恢复通知](rpc_v2_data_tx_ready_20261024.md) 为压
 聚焦 ASan/UBSan 与 TSan 已通过。该切片只覆盖 #247/#241 的一个活性缺口，确定性状态模型、
 故障重放、分层诊断、分域预算和压缩慢消费者矩阵仍待实现，不代表横切验证或资源验收完成。
 
+dev.28 的 [TEST-A 状态模型与轨迹回放](rpc_v2_state_model_replay_20261024.md)
+增加独立 Python 标准库参考模型、严格 JSON schema v1、手写边界轨迹和确定性 CLI，
+并接入现有 GCC 功能测试作业。Draft PR #317 的 14/14 GitHub 检查已通过，head 为
+`d51984ffb0435bebd75984502f3fa2af902db995`；PR 仍未合并。它只建立 L1 oracle；TEST-B 真实组件确定性执行、
+TEST-C 故障注入/缩减、TEST-D 集成与平台矩阵、TEST-E 诊断和容量性能仍未完成，
+#247 与整体 V2 验收继续保持未完成。
+
+dev.29 的 TEST-B1 在同一 TEST-A 轨迹上驱动真实 RPC Record Endpoint 测试夹具，检查取消后
+迟到工作、重复终局回调和账本归零；Reactor、Channel、Dispatch 与 Executor 仍为受控替身，
+未覆盖 TCP/真实派发调度。当前本地 GCC Debug/Release 均为 90/90，组件夹具为 35/35；
+Draft PR #318 的实现提交 `f3fc0abb2766fc24bb6c737cd9f03d0702f4343c` 已通过 14/14 GitHub
+检查，仍未合并；完整边界与本地/远端证据见
+[TEST-B1 记录](rpc_v2_component_replay_20261024.md)。
+
+dev.30 的 TEST-B2 在 TEST-B1 上增加 Deadline 终局后迟到工作的组件轨迹，验证 TIMEOUT RESET、
+唯一终局和预算归还。它仍是受控下层交错，不代表真实 Dispatch 调度或 TCP 集成。本地 GCC
+Debug/Release 全量各 90/90，模型 28/28、组件映射 9/9、Endpoint 夹具 35/35；Draft PR #319
+实现 head `683c6eff5330b2f74bb4aa7c2fa631e075b1c39c` 的 14/14 GitHub 检查通过，PR 仍未合并；
+证据见[TEST-B2 记录](rpc_v2_deadline_component_replay_20261024.md)。
+
+dev.31 的 TEST-B3 增加同一 Endpoint 槽复用后旧代次 DATA 迟到轨迹。真实 Endpoint 必须
+忽略旧流句柄的数据回调，不能增加新调用接收次数；新旧两次调用各自只报告一次取消终局并
+退役，账本为零。当前模型 28/28、组件映射 10/10，GCC Debug/Release 全量各 90/90，
+Endpoint 夹具 35/35，三条 Release L1/L2 回放均匹配；Draft PR #320 head
+`b3bd7b8318cb5490a532a4a29c4a3e86865b0ea3` 的 14/14 GitHub 检查通过，PR 仍未合并。证据见
+[TEST-B3 记录](rpc_v2_stale_generation_component_replay_20261024.md)。
+
+dev.32 的 TEST-B4 增加成功 FINAL 已接受后收到 RESET 的组件轨迹。它检查 Endpoint 保留
+先到的 OK 终局、不增加重复回调，并在 RESET 后退役与归还预算。当前模型 28/28、组件映射
+11/11，GCC Debug/Release 全量各 90/90、Endpoint 夹具各 35/35，四条 B1–B4 回放在两种
+模式均匹配；Draft PR #321 实现提交 `93502c1` 已通过 14/14 GitHub 检查，PR 待合并。证据见
+[TEST-B4 记录](rpc_v2_final_reset_component_replay_20261024.md)。
+
 dev.18/.19 的 [连接组成员代次修复](rpc_v2_group_member_generation_20261024.md)
 让 DATA 路由代次在单个分片注册表生命周期内唯一，阻止旧 CONTROL 关闭后未完成的
 DATA 前导跨同一 `(group_id, epoch)` 的 Pipeline 重建附着。dev.19 另修正旧 Pipeline 预留
@@ -60,7 +93,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
 | 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
-| 横切验证 | 状态模型、可重放故障、分层指标、40k 容量/性能与全部资源账本 | #247 |
+| 横切验证 | TEST-A PR #317、TEST-B1 PR #318、TEST-B2 PR #319、TEST-B3 PR #320 与 TEST-B4 PR #321 的实现提交均已通过 14/14 GitHub 检查但待合并；TEST-B 完整事件字母表、真实网络/派发、TEST-C 故障注入与缩减、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能仍待完成 | #247 |
 | 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
 
 长期治理 #249 属于持续维护职责。正式发布仍需完成上述有限范围的实现和验收；当前不得把 dev 预览称为已完成的 V2。
