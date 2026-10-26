@@ -35,3 +35,9 @@ TLS 完整性错误、RPC 压缩解码/预算压力、RESET 交错或连接组 C
 2. 两端调用各仅收到一次 `UNAVAILABLE` 终局，不接受成功 FINAL。
 3. 双方 Channel 的活动网络流归零。
 4. Release 与 TSan 下完整 `test_rpc_record_endpoint_tcp` 均通过。
+
+## 2026-10-27 补充：连接关闭时仍有在途 worker
+
+dev.153 的 #327 分支扩展了同一回归：第一条调用的 MESSAGE 已进入忽略取消并最终返回 `OK` 的业务 worker，随后再注入坏 CRC 帧。连接退役后客户端不得收到迟到 MESSAGE；无论服务端终局回调在 worker 返回前还是之后发布，最终状态都必须保持 `UNAVAILABLE` 且只发布一次。打开 worker gate 后，测试等待 worker 退出、双方活动流归零，并确认服务端预算回到夹具基线。
+
+完整 `test_rpc_record_endpoint_tcp` 在 GCC Release、TSan、ASan/UBSan（泄漏检测开启）均通过。改动只增加真实 TCP 测试和记录，不修改生产逻辑、公开 API/ABI、wire 或候选版本；它补强 #242 第 2、7 项在该坏帧路径上的证据，不代表两项全矩阵或 #242/V2 整体验收完成。

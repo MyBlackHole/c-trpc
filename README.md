@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.152` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.153` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -44,6 +44,8 @@ dev.149 修正异步压缩完成的错误作用域：解码器 `INTERNAL`、未�
 dev.150 增加真实 TCP Endpoint 竞态回归：服务端成功 `FINAL_STATUS` 已被 Channel 接受并入 TX 队列、实际 `sendmsg` 遇到 EAGAIN 时，客户端发送 RESET；服务端保留本地已接受结果，客户端以 `DEADLINE_EXCEEDED` 终结一次，不交付迟到记录，且同连接健康调用继续成功。Release、TSan、ASan/UBSan 完整 `test_rpc_record_endpoint_tcp` 均通过。该测试补充 RESET/STATUS 交错证据，不声称 exactly-once 或 #242/V2 整体验收完成。
 dev.151 扩展真实 TCP Endpoint RESET 竞态：双向方法的响应 MESSAGE 已由 Endpoint/Channel 接受，且对应 DATA 帧的真实 `sendmsg` 已遇到 EAGAIN 时，客户端发送 RESET；服务端终局后不再接管新回复，解除背压后客户端不收到迟到消息，同连接健康调用仍完成。Release、TSan、ASan/UBSan 完整 `test_rpc_record_endpoint_tcp` 均通过。该测试补充 RESET/DATA 交错证据，不代表 #242 或 V2 整体验收完成。
 dev.152 扩展 #242/#241 压缩接收配额恢复证据：同一真实 TCP Channel 上，保留服务器预算并让一条 Zstd 消息因解码配额不足而终结，期间 CONTROL PING/PONG 仍成功；释放预算后，四条幸存压缩流由并发发送者同时恢复，均完成消息解码、半关闭、成功响应并将缓存归零。Release、TSan、ASan/UBSan `test_rpc_record_stream` 均通过。该有限场景不代表长时公平、完整预算矩阵或 #242/V2 整体验收完成，详见 [压缩配额恢复多流并发回归](docs/reviews/rpc_v2_compressed_quota_multi_peer_recovery_20261026.md)。
+dev.153 将配额恢复扩展为四轮：四条幸存压缩流每轮同时发送，等服务端每条流都完成解码且两端 owner 回调排空后才开始下一轮；四条流各完成四条消息、半关闭、成功响应和唯一终局。Release、TSan、ASan/UBSan `test_rpc_record_stream` 均通过。该有限轮次不代表长期公平或完整预算矩阵，详见 [压缩配额四轮多流恢复回归](docs/reviews/rpc_v2_quota_multi_peer_repeated_recovery_20261026.md)。
+同一 `2.0.0-dev.153` 候选在 #327 继续扩展连接级 CRC 错误回归：坏帧到达时保留一个在途业务 worker，验证它迟到返回 `OK` 也不会形成成功终局；随后 worker 退出、活动流归零且服务端预算回到基线。GCC Release、TSan、ASan/UBSan 的完整 `test_rpc_record_endpoint_tcp` 均通过。该场景只补强 #242 第 2、7 项的一个路径，不代表完整矩阵或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行

@@ -31,6 +31,7 @@
 	} while (0)
 #define BODY_MAX 131072U
 #define CALLS 5U
+#define QUOTA_RECOVERY_ROUNDS 4U
 static char wait_counter_context[96];
 
 void *__real_malloc(size_t size);
@@ -3007,20 +3008,33 @@ static void test_compressed_receive_workspace_exhaustion(void)
 }
 
 struct quota_recovery_send {
-	pthread_barrier_t *start;
+	pthread_barrier_t *round;
 	struct send_request request;
+	const uint8_t *source;
+	size_t source_size;
 };
+static int quota_owner_sync(void *arg)
+{
+	(void)arg;
+	return TR_OK;
+}
 static void *quota_recovery_send_peer(void *arg)
 {
 	struct quota_recovery_send *peer = arg;
-	int ret = pthread_barrier_wait(peer->start);
-	CHECK(ret == 0 || ret == PTHREAD_BARRIER_SERIAL_THREAD);
-	send_compressed_until(&peer->request);
+	for (unsigned round = 0; round < QUOTA_RECOVERY_ROUNDS; ++round) {
+		int ret = pthread_barrier_wait(peer->round);
+		CHECK(ret == 0 || ret == PTHREAD_BARRIER_SERIAL_THREAD);
+		peer->request.body =
+		        make_buffer(peer->source, peer->source_size, NULL);
+		send_compressed_until(&peer->request);
+		ret = pthread_barrier_wait(peer->round);
+		CHECK(ret == 0 || ret == PTHREAD_BARRIER_SERIAL_THREAD);
+	}
 	send_kind(peer->request.c, TR_RPC_RECORD_HALF_CLOSE);
 	return NULL;
 }
 
-static void test_compressed_workspace_exhaustion_preserves_peer(void)
+static void test_compressed_workspace_exhaustion_restores_peers(void)
 {
 	struct fixture f;
 	struct quota quota = {0};
@@ -3037,7 +3051,7 @@ static void test_compressed_workspace_exhaustion_preserves_peer(void)
 
 	for (size_t i = 0; i < sizeof(source); ++i)
 		source[i] = (uint8_t)(i % 23U);
-	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	init_fixture_compressed_receive(&f, TR_RPC_MANY, TR_RPC_ONE);
 	/* 四条 Zstd 任务各自预留最多 1 MiB 工作区，另需消息与调用记账。 */
 	f.client.budget.limit_bytes = 16U * 1024U * 1024U;
 	f.server.budget.limit_bytes = 16U * 1024U * 1024U;
@@ -3092,35 +3106,68 @@ static void test_compressed_workspace_exhaustion_preserves_peer(void)
 	expect_channel_keepalive_progress(f.client.channel);
 
 	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
-	/* 同时启动四条幸存压缩流，避免单个同伴成功掩盖恢复期饿死。 */
+	/* 每轮屏障同时启动四条存活流，且等本轮四条消息都解码后再继续。 */
 	CHECK(pthread_barrier_init(&start, NULL, CALLS) == 0);
 	for (unsigned i = 0; i < CALLS - 1U; ++i) {
-		recovery[i].start = &start;
+		recovery[i].round = &start;
+		recovery[i].source = source;
+		recovery[i].source_size = sizeof(source);
 		recovery[i].request.c = &f.client.calls[i + 1U];
 		recovery[i].request.h = head(TR_RPC_RECORD_MESSAGE);
 		recovery[i].request.h.compression = TR_RPC_RECORD_ZSTD;
 		recovery[i].request.h.decoded_size = sizeof(source);
-		recovery[i].request.body =
-		        make_buffer(source, sizeof(source), NULL);
 		CHECK(pthread_create(&workers[i], NULL,
 		                     quota_recovery_send_peer,
 		                     &recovery[i]) == 0);
 	}
-	int barrier_ret = pthread_barrier_wait(&start);
-	CHECK(barrier_ret == 0 || barrier_ret == PTHREAD_BARRIER_SERIAL_THREAD);
+	for (unsigned round = 0; round < QUOTA_RECOVERY_ROUNDS; ++round) {
+		int barrier_ret = pthread_barrier_wait(&start);
+		CHECK(barrier_ret == 0 ||
+		      barrier_ret == PTHREAD_BARRIER_SERIAL_THREAD);
+		barrier_ret = pthread_barrier_wait(&start);
+		CHECK(barrier_ret == 0 ||
+		      barrier_ret == PTHREAD_BARRIER_SERIAL_THREAD);
+		for (unsigned i = 0; i < CALLS - 1U; ++i) {
+			snprintf(wait_counter_context,
+			         sizeof(wait_counter_context),
+			         "quota recovery MESSAGE %u round %u", i + 1U,
+			         round + 1U);
+			wait_counter(
+			        &peer_server[i]->seen[TR_RPC_RECORD_MESSAGE],
+			        round + 1U);
+		}
+		CHECK(tr_reactor_call(f.client.reactor, quota_owner_sync,
+		                      NULL) == TR_OK);
+		CHECK(tr_reactor_call(f.server.reactor, quota_owner_sync,
+		                      NULL) == TR_OK);
+		for (unsigned i = 0; i < CALLS - 1U; ++i) {
+			CHECK(atomic_load(
+			              &peer_server[i]
+			                       ->seen[TR_RPC_RECORD_MESSAGE]) ==
+			      round + 1U);
+			CHECK(atomic_load(&peer_server[i]->terminals) == 0U);
+			CHECK(atomic_load(&f.client.calls[i + 1U].terminals) ==
+			      0U);
+		}
+	}
 	for (unsigned i = 0; i < CALLS - 1U; ++i)
 		CHECK(pthread_join(workers[i], NULL) == 0);
 	CHECK(pthread_barrier_destroy(&start) == 0);
 	for (unsigned i = 0; i < CALLS - 1U; ++i) {
 		struct call_context *peer = peer_server[i];
-		snprintf(wait_counter_context, sizeof(wait_counter_context),
-		         "quota recovery MESSAGE %u", i + 1U);
-		wait_counter(&peer->seen[TR_RPC_RECORD_MESSAGE], 1U);
+		wait_counter(&peer->seen[TR_RPC_RECORD_MESSAGE],
+		             QUOTA_RECOVERY_ROUNDS);
 		snprintf(wait_counter_context, sizeof(wait_counter_context),
 		         "quota recovery HALF_CLOSE %u", i + 1U);
 		wait_counter(&peer->seen[TR_RPC_RECORD_HALF_CLOSE], 1U);
-		CHECK(peer->message_compression[0] == TR_RPC_RECORD_ZSTD);
-		CHECK(peer->message_sizes[0] == sizeof(source));
+		for (unsigned round = 0; round < QUOTA_RECOVERY_ROUNDS;
+		     ++round) {
+			CHECK(peer->message_compression[round] ==
+			      TR_RPC_RECORD_ZSTD);
+			CHECK(peer->message_sizes[round] == sizeof(source));
+			CHECK(peer->message_checksums[round] ==
+			      sum(source, sizeof(source)));
+		}
 		CHECK(peer->checksum == sum(source, sizeof(source)));
 		send_kind(peer, TR_RPC_RECORD_INITIAL_METADATA);
 		send_kind(peer, TR_RPC_RECORD_MESSAGE);
@@ -3143,7 +3190,7 @@ static void test_compressed_workspace_exhaustion_preserves_peer(void)
 	wait_counter_context[0] = '\0';
 	destroy_fixture(&f);
 	puts("rpc_record_stream: compressed workspace exhaustion restores four "
-	     "peers passed");
+	     "peers for four rounds passed");
 }
 static int abort_owner(void *arg)
 {
@@ -3537,7 +3584,7 @@ int main(void)
 	test_receive_quota();
 	test_receive_quota_preserves_peer();
 	test_compressed_receive_workspace_exhaustion();
-	test_compressed_workspace_exhaustion_preserves_peer();
+	test_compressed_workspace_exhaustion_restores_peers();
 	test_partial_cancel();
 	test_reset_after_half_close();
 	test_reset_partial_open();

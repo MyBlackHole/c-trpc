@@ -1507,19 +1507,27 @@ static void test_semantic_record_error_isolation(void)
 	puts("rpc_record_endpoint_tcp: semantic error isolation passed");
 }
 
-static void test_connection_level_error_closes_all_calls(void)
+static void
+test_connection_level_error_closes_all_calls_and_drains_workers(void)
 {
 	struct fixture f;
 	uint8_t raw[TR_WIRE_HEADER_SIZE];
-	const struct tr_frame_header header = {
-	        .version = TR_WIRE_ENV_VERSION,
-	        .type = TR_FRAME_PING,
-	        .message_id = UINT64_C(0x5a5a)};
+	uint64_t server_budget;
+	const struct tr_frame_header header = {.version = TR_WIRE_ENV_VERSION,
+	                                       .type = TR_FRAME_PING,
+	                                       .message_id = UINT64_C(0x5a5a)};
 	fixture_init(&f, 1024 * 1024, 8);
+	server_budget = atomic_load(&f.server.budget.current_bytes);
 	unsigned first = open_call(&f, 0);
 	unsigned second = open_call(&f, 0);
 	wait_count(&f.business[first].seen[TR_RPC_RECORD_OPEN], 1U);
 	wait_count(&f.business[second].seen[TR_RPC_RECORD_OPEN], 1U);
+
+	/* 坏帧到达时保留一个不合作的业务任务，覆盖连接退役与迟到成功。 */
+	atomic_store(&f.use_gate, true);
+	request(&f, first, 0, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[first].active) == 1U);
 
 	/* 帧边界校验已不可恢复；不得只丢帧后继续保留活动调用。 */
 	CHECK(tr_wire_header_encode(raw, &header) == TR_OK);
@@ -1531,14 +1539,36 @@ static void test_connection_level_error_closes_all_calls(void)
 	wait_connection_retired(f.server.connection);
 	wait_count(&f.client.terminals[first], 1U);
 	wait_count(&f.client.terminals[second], 1U);
-	wait_count(&f.server.terminals[first], 1U);
-	wait_count(&f.server.terminals[second], 1U);
 
 	CHECK(f.client.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
 	      f.client.status[second] == TR_RPC_STATUS_UNAVAILABLE);
-	CHECK(f.server.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
+	CHECK(atomic_load(&f.business[first].active) == 1U &&
+	      atomic_load(&f.client.messages[first]) == 0U);
+	if (atomic_load(&f.server.terminals[first]))
+		CHECK(f.server.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
+		      !f.server.final_accepted[first]);
+	if (atomic_load(&f.server.terminals[second]))
+		CHECK(f.server.status[second] == TR_RPC_STATUS_UNAVAILABLE &&
+		      !f.server.final_accepted[second]);
+
+	/* 业务虽在断连后迟到返回 OK，Endpoint 仍须保留 UNAVAILABLE 终局。 */
+	gate_open(&f.gate);
+	wait_count(&f.server.terminals[first], 1U);
+	wait_count(&f.server.terminals[second], 1U);
+	uint64_t worker_end = now_ms() + 15000;
+	while (atomic_load(&f.business[first].active) != 0U) {
+		CHECK(now_ms() < worker_end);
+		sched_yield();
+	}
+	CHECK(f.client.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
+	      f.client.status[second] == TR_RPC_STATUS_UNAVAILABLE &&
+	      f.server.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
 	      f.server.status[second] == TR_RPC_STATUS_UNAVAILABLE);
-	CHECK(!f.server.final_accepted[first] &&
+	CHECK(atomic_load(&f.business[first].active) == 0U &&
+	      atomic_load(&f.business[first].seen[TR_RPC_RECORD_MESSAGE]) ==
+	              1U &&
+	      atomic_load(&f.client.messages[first]) == 0U &&
+	      !f.server.final_accepted[first] &&
 	      !f.server.final_accepted[second]);
 	CHECK(atomic_load(&f.client.terminals[first]) == 1U &&
 	      atomic_load(&f.client.terminals[second]) == 1U &&
@@ -1547,8 +1577,14 @@ static void test_connection_level_error_closes_all_calls(void)
 	wait_network_retired(&f);
 	CHECK(tr_channel_active_streams(f.client.channel) == 0U &&
 	      tr_channel_active_streams(f.server.channel) == 0U);
+	uint64_t budget_end = now_ms() + 15000;
+	while (atomic_load(&f.server.budget.current_bytes) != server_budget) {
+		CHECK(now_ms() < budget_end);
+		sched_yield();
+	}
 	fixture_destroy(&f, false);
-	puts("rpc_record_endpoint_tcp: connection error closes all calls passed");
+	puts("rpc_record_endpoint_tcp: connection error drains in-flight calls "
+	     "passed");
 }
 
 static int endpoint_quiet(void *arg)
@@ -2083,7 +2119,7 @@ int main(void)
 	puts("rpc_record_endpoint_tcp: 3 slow OPEN cases passed");
 	test_shapes();
 	test_semantic_record_error_isolation();
-	test_connection_level_error_closes_all_calls();
+	test_connection_level_error_closes_all_calls_and_drains_workers();
 	test_rejection(false);
 	test_rejection(true);
 	test_router_rejection_preserves_active_sibling(false);

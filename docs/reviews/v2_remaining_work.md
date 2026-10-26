@@ -258,6 +258,8 @@ dev.151 为 #242 补上真实 TCP Endpoint 的 RESET/响应 `MESSAGE` 交错：�
 
 dev.152 为 #242/#241 补充压缩接收配额耗尽后的多流恢复回归：同一 TCP Channel 上保留服务器内存预算，一条 Zstd 解码以 `RESOURCE_EXHAUSTED` 终结且缓存归零；配额仍保留时 CONTROL PING/PONG 往返成功。释放配额后，四条幸存压缩流通过屏障并发发送，均由服务端完整解码并校验正文，再完成半关闭、成功响应和唯一终局，双方缓存归零。GCC Release、TSan、ASan/UBSan 完整 `test_rpc_record_stream` 通过；ASan 目标在阶段诊断加入后连续 8 次通过。本切片只增强单 Channel 配额恢复证据，不证明长期调度公平、分域预算矩阵或 #242/#241 整体验收完成。详见[压缩配额恢复多流并发回归](rpc_v2_compressed_quota_multi_peer_recovery_20261026.md)。
 
+dev.153 将 #242/#241 配额恢复扩展至四轮进度：每轮通过屏障同时启动四条幸存 Zstd 流，并等待四条流都交付本轮消息，再通过客户端与服务端 Reactor owner 同步屏障确认变换完成，之后才启动下一轮。每条流四轮消息的压缩类型、长度和校验和均验证；四条流最终半关闭、收到 OK 响应、两端唯一终结且缓存归零。TDD 红灯以旧单次发送重现“收到 1 条、预期 4 条”的超时；修正后 GCC Release、TSan、ASan/UBSan 完整 `test_rpc_record_stream` 均通过。本切片提高有限多轮进展证据，不证明长期延迟公平、吞吐基线、完整预算矩阵或 #242/#241 整体验收完成。详见[压缩配额四轮多流恢复回归](rpc_v2_quota_multi_peer_repeated_recovery_20261026.md)。
+
 
 
 
@@ -504,7 +506,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 ## 持续开发顺序
 
-ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 TCP、Channel、RPC Record 与 TLS 测试证据见[生产错误作用域对照审计](rpc_v2_error_scope_production_audit_20261026.md)。这只补齐分类映射和证据索引；#242 的 RESET/FIFO 完整矩阵、连接组接受边界、长期公平恢复及全量资源回收仍未完成。
+ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 TCP、Channel、RPC Record 与 TLS 测试证据见[生产错误作用域对照审计](rpc_v2_error_scope_production_audit_20261026.md)。dev.153 的 #327 又扩展头 CRC 连接错误回归：错误到达时保留在途 worker，验证迟到 `OK` 不改变 `UNAVAILABLE` 终局；worker 退出后预算回到基线。GCC Release、TSan、ASan/UBSan 的完整 `test_rpc_record_endpoint_tcp` 均通过。这只增加第 2、7 项在该路径上的证据；#242 的 RESET/FIFO 完整矩阵、连接组接受边界、长期公平恢复及全量资源回收仍未完成。
 
 | 范围 | 当前剩余工作 | GitHub |
 |---|---|---|
