@@ -58,4 +58,4 @@ ASan/UBSan、TSan 和 Clang Release 使用相同命令，将 `-m debug --toolcha
 - 单 worker、队列满、嵌套与跨 Reactor 等待场景，以及读写并发契约和拦截器观察/拒绝/异步认证语义。
 - 与 #235 压缩和 #234 TLS 共用有界调度/取消基础的整体验收。
 
-PR 只提交父子上下文切片，基于 PR #328 的分支；不合并 PR、不关闭 #243，也不宣称 V2 全部完成。
+PR [#329](https://github.com/MyBlackHole/c-trpc/pull/329) 只提交父子上下文切片，base 为 PR #328 的分支；不合并 PR、不关闭 #243，也不宣称 V2 全部完成。

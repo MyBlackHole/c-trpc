@@ -92,4 +92,4 @@
 - [x] **步骤 3：ASan/UBSan 与 TSan。**分别以 GCC 配置对应模式运行全套测试；上下文跨 owner 引用重点检查 use-after-free、数据竞争、重复 release 和代次复用。
 - [x] **步骤 4：Clang Release 与 SDK 消费。**运行全套 Clang Release；安装后 C11/C++11 公共 SDK consumer 检查新字段、新符号及零初始化兼容。
 - [x] **步骤 5：记录并审查证据。**新增中文审查记录说明父/子行为、固定状态池上限、测试命令和结果；更新剩余工作台账只核销 #243 的父子上下文子项，不关闭 #243 或宣称 V2 完成；运行 `git diff --check`。
-- [ ] **步骤 6：提交并推送。**使用中文功能提交格式描述需求、背景、实现、影响范围、性能和测试；推送到基于 `feat/reactor-owner-wait-graph-243` 的新分支并在 PR 说明中明确其 stacked base。
+- [x] **步骤 6：提交并推送。**使用中文功能提交格式描述需求、背景、实现、影响范围、性能和测试；推送到基于 `feat/reactor-owner-wait-graph-243` 的新分支并在 PR 说明中明确其 stacked base。提交 `7559e86`；分支已推送，PR #329 base 为 PR #328 所在分支。
