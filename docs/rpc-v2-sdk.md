@@ -77,6 +77,21 @@ HALF_CLOSE 的发送责任，不要求应用编写发送重试回调。`request`
 此便捷入口没有另一张调用表、执行器或终局状态机；它使用当前唯一的普通 V2
 门面，也不承诺 OPEN/MESSAGE/HALF_CLOSE 一定合并成一个包或一次系统调用。
 
+## 将 Server Call 的取消和期限传给子 Call
+
+Server V2 的 `work` 回调可调用 `tr_rpc_v2_cancel_context_hold(cancel, &context)`
+取得父 Call 上下文，并在回调返回后继续使用。把 `&context` 赋给子调用的
+`tr_rpc_call_options.parent_context`。`call_start` 只有返回 `TR_OK` 才为子 Call
+固定保留上下文；调用者可在所有并发 `call_start` 已返回后释放自己的句柄。
+句柄是唯一拥有型值，不得复制成多个所有者；`release` 不得与尚未返回的
+`call_start` 并发。
+
+父取消会让尚未终结的子 Call 以 `CANCELLED` 终局；父 deadline 以
+`DEADLINE_EXCEEDED` 终局。子 `timeout_ms` 与父绝对期限取较早值，零子期限仍继承
+父期限，较短子期限只终止该子 Call。已取消或过期的父上下文在受理前拒绝调用，
+不会写输出句柄或调用业务回调。父 Server 有未释放的上下文或子调用引用时，销毁
+返回 `TR_AGAIN`；释放引用后重试销毁。
+
 ## 跨回调持有 Call 结果
 
 `tr_rpc_v2_call` 是可复制的弱能力，不延长固定调用槽或 Client 的寿命。

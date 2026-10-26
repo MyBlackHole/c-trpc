@@ -527,7 +527,7 @@ jobs:
                 -I"$prefix/include" -x c++ -fsyntax-only -
             done
             "$cxx" -std=c++11 -Wall -Wextra -Werror -pedantic -pthread \
-              -I"$prefix/include" -x c++ "$RUNNER_TEMP/consumer.c" -x none \
+              -I"$prefix/include" -x c++ "$RUNNER_TEMP/consumer.c" \
               -L"$prefix/lib" -ltrcore -lssl -lcrypto -o "$RUNNER_TEMP/consumer-$cxx"
             timeout 10s "$RUNNER_TEMP/consumer-$cxx"
             echo "$cxx: explicit SDK headers and public facade consumer passed"

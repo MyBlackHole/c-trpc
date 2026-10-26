@@ -10,6 +10,23 @@
 #include <string.h>
 #include <time.h>
 
+/* C/C++ 公共消费端会用 {0} 清零聚合对象；新 g++ 将其报为缺字段警告，
+ * 但该初始化在两种语言中都会把剩余字段明确置零。 */
+#if defined(__cplusplus) && (defined(__GNUC__) || defined(__clang__))
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+
+#ifdef TR_RPC_V2_TEST_FAULTS
+#ifdef __cplusplus
+extern "C" {
+#endif
+void tr_rpc_v2_test_fail_next_stream_open(void);
+unsigned tr_rpc_v2_test_stream_open_failures(void);
+#ifdef __cplusplus
+}
+#endif
+#endif
+
 /* 同一源码须能脱离仓库作为 C11/C++11 消费端；不引用私有头或测试替身。 */
 #define CHECK(expression)                                                      \
 	do {                                                                   \
@@ -51,6 +68,7 @@ struct async_state {
 	struct fixture *fixture;
 	struct tr_rpc_v2_producer *producer;
 	enum async_mode mode;
+	int producer_thread;
 	unsigned acquired;
 	unsigned work_release;
 	unsigned cancelled;
@@ -81,6 +99,10 @@ struct method_state {
 	unsigned exited;
 	unsigned released;
 	int expect_metadata;
+	int hold_parent_context;
+	int block_on_message;
+	int context_hold_expected;
+	struct tr_rpc_v2_call_context *context_out;
 	enum response_metadata response_metadata;
 	enum tr_rpc_status status;
 	enum tr_rpc_v2_delivery delivery;
@@ -99,6 +121,9 @@ struct fixture {
 	pthread_mutex_t lock;
 	pthread_cond_t cond;
 	int server_destroying;
+	struct tr_rpc_v2_call_context parent_context;
+	unsigned context_held;
+	unsigned context_attempted;
 	struct method_state methods[METHOD_COUNT];
 };
 
@@ -456,8 +481,9 @@ static void acquire_async(struct async_state *a,
 	CHECK(tr_rpc_v2_reply_acquire_producer(reply, &producer) == TR_OK);
 	CHECK(producer);
 	CHECK(tr_rpc_v2_producer_wait_writable(producer, 0) == TR_ERR_STATE);
-	/* 发布前各取得一份应用引用：生产线程与控制线程独立归还。 */
-	CHECK(tr_rpc_v2_producer_retain(producer) == TR_OK);
+	/* 生产线程存在时为它保留独立引用；控制线程始终持有创建引用。 */
+	if (a->producer_thread)
+		CHECK(tr_rpc_v2_producer_retain(producer) == TR_OK);
 	lock(f);
 	CHECK(!a->acquired);
 	a->producer = producer;
@@ -490,6 +516,19 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	enum response_metadata metadata;
 	struct async_state *async;
 	int reject_response_compression = 0;
+	if (request->kind == TR_RPC_V2_REQUEST_OPEN && m->hold_parent_context) {
+		struct tr_rpc_v2_call_context *context_out =
+		        m->context_out ? m->context_out : &f->parent_context;
+		int context_ret =
+		        tr_rpc_v2_cancel_context_hold(cancel, context_out);
+		CHECK(context_ret == m->context_hold_expected);
+		lock(f);
+		++f->context_attempted;
+		if (context_ret == TR_OK)
+			++f->context_held;
+		publish(f);
+		unlock(f);
+	}
 	CHECK(tr_server_drain(f->server, 0) == TR_ERR_STATE);
 	CHECK(tr_server_destroy(f->server) == TR_ERR_STATE);
 	check_stats_rejected(f, 1);
@@ -532,7 +571,7 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 		                      metadata);
 	} else if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
 		unsigned tag = request->body.len ? request->body.data[0] : 0U;
-		if (m->index == 4U) {
+		if (m->index == 4U || m->block_on_message) {
 			cooperate(m, cancel);
 			CHECK(tr_rpc_v2_cancel_requested(cancel) == 1);
 			set_response_metadata(reply, TR_RPC_V2_METADATA_INITIAL,
@@ -595,7 +634,8 @@ static enum tr_rpc_status server_work(struct tr_rpc_v2_call_id call,
 	unlock(f);
 	if (reject_response_compression)
 		return TR_RPC_STATUS_INVALID_ARGUMENT;
-	return m->index == 4U && request->kind == TR_RPC_V2_REQUEST_MESSAGE
+	return (m->index == 4U || m->block_on_message) &&
+	                       request->kind == TR_RPC_V2_REQUEST_MESSAGE
 	               ? TR_RPC_STATUS_CANCELLED
 	               : TR_RPC_STATUS_OK;
 }
@@ -1008,6 +1048,23 @@ static int call_start(struct call_state *c,
 	                            options, &callbacks, &c->handle);
 }
 
+static int call_start_retry(struct call_state *c,
+                            const struct tr_rpc_call_options *options)
+{
+	struct timespec limit = deadline_after(WAIT_MS);
+	for (;;) {
+		int ret = call_start(c, options);
+		if (ret != TR_AGAIN)
+			return ret;
+		struct timespec now = deadline_after(0);
+		struct timespec pause = {0, 1000000L};
+		if (!before(&now, &limit))
+			return TR_ERR_TIMEOUT;
+		if (nanosleep(&pause, NULL) != 0)
+			return TR_ERR_SYS;
+	}
+}
+
 /* 安装后的同一 C11/C++11 消费端验证一元自动发送；正文仍只借用
  * 当前栈，收到响应和 FINAL 的回调沿用同一套观察与统计断言。 */
 static int unary_start(struct call_state *c,
@@ -1383,6 +1440,453 @@ static void test_cancel_or_deadline(int deadline)
 	              : "sdk-v2: case=cancel-isolation-drain result=pass");
 }
 
+static void test_parent_context_lifetime(void)
+{
+	struct fixture f;
+	struct call_state parent, rejected;
+	struct tr_rpc_call_options options = {0};
+	struct tr_rpc_v2_call sentinel;
+	struct timespec limit = deadline_after(WAIT_MS);
+	int ret;
+
+	fixture_create(&f);
+	f.methods[3].hold_parent_context = 1;
+	call_init(&parent, &f, 3U, NULL, 0U);
+	CHECK(call_start(&parent, NULL) == TR_OK);
+	wait_count(&f, &f.context_held, 1U);
+	call_done(&parent, TR_RPC_STATUS_OK);
+	options.parent_context = &f.parent_context;
+	call_init(&rejected, &f, 0U, NULL, 0U);
+	memset(&rejected.handle, 0xa5, sizeof(rejected.handle));
+	sentinel = rejected.handle;
+	CHECK(call_start(&rejected, &options) == TR_ERR_CANCELLED);
+	CHECK(memcmp(&rejected.handle, &sentinel, sizeof(sentinel)) == 0);
+	CHECK(rejected.terminals == 0U && rejected.writable_returns == 0U);
+	drain(&f);
+	destroy_client(&f, &f.client);
+	lock(&f);
+	f.server_destroying = 1;
+	unlock(&f);
+	CHECK(tr_server_destroy(f.server) == TR_AGAIN);
+	CHECK(tr_rpc_v2_call_context_release(&f.parent_context) == TR_OK);
+	CHECK(f.parent_context._private[0] == 0U &&
+	      f.parent_context._private[1] == 0U);
+	while ((ret = tr_server_destroy(f.server)) == TR_AGAIN) {
+		struct timespec now = deadline_after(0);
+		struct timespec pause = {0, 1000000L};
+		CHECK(before(&now, &limit));
+		CHECK(nanosleep(&pause, NULL) == 0);
+	}
+	CHECK(ret == TR_OK);
+	f.server = NULL;
+	CHECK(pthread_cond_destroy(&f.cond) == 0);
+	CHECK(pthread_mutex_destroy(&f.lock) == 0);
+	CHECK(parent.terminals == 1U && rejected.terminals == 0U);
+	puts("sdk-v2: case=parent-context-lifetime result=pass");
+}
+
+static void test_parent_context_pool_exhaustion(void)
+{
+	struct fixture f;
+	struct tr_rpc_v2_call_context contexts[5];
+	struct tr_rpc_v2_call_context stale_context;
+	struct call_state calls[5];
+	struct message_spec requests[4] = {
+	        {17U, 31U}, {19U, 41U}, {23U, 53U}, {0U, 0U}};
+	struct timespec limit = deadline_after(WAIT_MS);
+	int ret;
+
+	fixture_create(&f);
+	memset(contexts, 0, sizeof(contexts));
+	for (unsigned i = 0; i < 4U; ++i) {
+		f.methods[i].hold_parent_context = 1;
+		f.methods[i].context_out = &contexts[i];
+		call_init(&calls[i], &f, i, i < 3U ? &requests[i] : NULL,
+		          i < 3U ? 1U : 0U);
+		if (i == 0U)
+			expect(&calls[i], requests[i].size, requests[i].tag);
+		else if (i == 1U) {
+			for (unsigned n = 0; n < 3U; ++n)
+				expect(&calls[i], requests[i].size,
+				       requests[i].tag + n);
+		} else if (i == 2U) {
+			expect(&calls[i], 8U, requests[i].tag);
+		}
+		CHECK(call_start_retry(&calls[i], NULL) == TR_OK);
+		wait_count(&f, &f.context_held, i + 1U);
+		call_done(&calls[i], TR_RPC_STATUS_OK);
+	}
+	f.methods[3].context_out = &contexts[4];
+	f.methods[3].context_hold_expected = TR_AGAIN;
+	call_init(&calls[4], &f, 3U, NULL, 0U);
+	CHECK(call_start_retry(&calls[4], NULL) == TR_OK);
+	wait_count(&f, &f.context_attempted, 5U);
+	CHECK(contexts[4]._private[0] == 0U && contexts[4]._private[1] == 0U);
+	call_done(&calls[4], TR_RPC_STATUS_OK);
+	/* 只保留释放后失效的 token 字节用于代次校验，不再把它当所有者。 */
+	stale_context = contexts[0];
+	CHECK(tr_rpc_v2_call_context_release(&contexts[0]) == TR_OK);
+	f.methods[3].context_hold_expected = TR_OK;
+	call_init(&calls[4], &f, 3U, NULL, 0U);
+	CHECK(call_start_retry(&calls[4], NULL) == TR_OK);
+	wait_count(&f, &f.context_held, 5U);
+	call_done(&calls[4], TR_RPC_STATUS_OK);
+	CHECK(stale_context._private[0] == contexts[4]._private[0]);
+	CHECK(stale_context._private[1] != contexts[4]._private[1]);
+	struct tr_rpc_call_options stale_options = {0};
+	struct call_state stale_call;
+	struct tr_rpc_v2_call sentinel;
+	stale_options.parent_context = &stale_context;
+	call_init(&stale_call, &f, 0U, NULL, 0U);
+	memset(&stale_call.handle, 0xa5, sizeof(stale_call.handle));
+	sentinel = stale_call.handle;
+	CHECK(call_start(&stale_call, &stale_options) == TR_ERR_STALE);
+	CHECK(memcmp(&stale_call.handle, &sentinel, sizeof(sentinel)) == 0);
+	CHECK(stale_call.terminals == 0U && stale_call.writable_returns == 0U);
+	drain(&f);
+	destroy_client(&f, &f.client);
+	lock(&f);
+	f.server_destroying = 1;
+	unlock(&f);
+	CHECK(tr_server_destroy(f.server) == TR_AGAIN);
+	for (unsigned i = 1U; i < 4U; ++i)
+		CHECK(tr_rpc_v2_call_context_release(&contexts[i]) == TR_OK);
+	CHECK(tr_rpc_v2_call_context_release(&contexts[4]) == TR_OK);
+	while ((ret = tr_server_destroy(f.server)) == TR_AGAIN) {
+		struct timespec now = deadline_after(0);
+		struct timespec pause = {0, 1000000L};
+		CHECK(before(&now, &limit));
+		CHECK(nanosleep(&pause, NULL) == 0);
+	}
+	CHECK(ret == TR_OK);
+	f.server = NULL;
+	CHECK(pthread_cond_destroy(&f.cond) == 0);
+	CHECK(pthread_mutex_destroy(&f.lock) == 0);
+	puts("sdk-v2: case=parent-context-pool-exhaustion result=pass");
+}
+
+static void test_parent_context_propagation(int deadline,
+                                            uint32_t child_timeout_ms)
+{
+	struct fixture f;
+	struct async_state async = {0};
+	struct call_state parent, child, sibling;
+	struct message_spec request = {23U, 71U};
+	struct message_spec sibling_request = {19U, 83U};
+	struct tr_rpc_call_options parent_options = {0};
+	struct tr_rpc_call_options child_options = {0};
+	uint8_t storage[23];
+	struct tr_rpc_bytes body = {storage, sizeof(storage)};
+	uint8_t sibling_storage[19];
+	struct tr_rpc_bytes sibling_body = {sibling_storage,
+	                                    sizeof(sibling_storage)};
+	enum tr_rpc_status expected = deadline ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                                       : TR_RPC_STATUS_CANCELLED;
+
+	fixture_create(&f);
+	async.fixture = &f;
+	async.mode = deadline ? ASYNC_DEADLINE : ASYNC_CANCEL;
+	lock(&f);
+	f.methods[ASYNC_METHOD].async = &async;
+	f.methods[ASYNC_METHOD].hold_parent_context = 1;
+	f.methods[3].block_on_message = 1;
+	unlock(&f);
+	parent_options.timeout_ms = deadline ? 1000U : 0U;
+	call_init(&parent, &f, ASYNC_METHOD, NULL, 0U);
+	CHECK(call_start(&parent, &parent_options) == TR_OK);
+	wait_count(&f, &f.context_held, 1U);
+	wait_count(&f, &async.acquired, 1U);
+	child_options.parent_context = &f.parent_context;
+	child_options.timeout_ms = child_timeout_ms;
+	call_init(&child, &f, 4U, &request, 1U);
+	child.manual = 1;
+	CHECK(call_start(&child, &child_options) == TR_OK);
+	wait_count(&f, &child.writable_returns, 1U);
+	fill(storage, sizeof(storage), request.tag);
+	CHECK(tr_rpc_v2_call_send(child.handle, &body) == TR_OK);
+	CHECK(tr_rpc_v2_call_half_close(child.handle) == TR_OK);
+	lock(&f);
+	child.sent = 1U;
+	child.half_closed = 1;
+	publish(&f);
+	unlock(&f);
+	wait_count(&f, &f.methods[4].entered, 1U);
+	call_init(&sibling, &f, 3U, &sibling_request, 1U);
+	sibling.manual = 1;
+	CHECK(call_start(&sibling, &child_options) == TR_OK);
+	wait_count(&f, &sibling.writable_returns, 1U);
+	fill(sibling_storage, sizeof(sibling_storage), sibling_request.tag);
+	CHECK(tr_rpc_v2_call_send(sibling.handle, &sibling_body) == TR_OK);
+	CHECK(tr_rpc_v2_call_half_close(sibling.handle) == TR_OK);
+	lock(&f);
+	sibling.sent = 1U;
+	sibling.half_closed = 1;
+	publish(&f);
+	unlock(&f);
+	wait_count(&f, &f.methods[3].entered, 1U);
+	if (!deadline)
+		CHECK(tr_rpc_v2_call_context_release(&f.parent_context) ==
+		      TR_OK);
+	if (!deadline)
+		CHECK(tr_rpc_v2_call_cancel(parent.handle) == TR_OK);
+	wait_count(&f, &parent.terminals, 1U);
+	wait_count(&f, &child.terminals, 1U);
+	wait_count(&f, &sibling.terminals, 1U);
+	wait_count(&f, &async.cancelled, 1U);
+	wait_count(&f, &f.methods[4].cancelled, 1U);
+	wait_count(&f, &f.methods[3].cancelled, 1U);
+	lock(&f);
+	CHECK(parent.status == expected && child.status == expected &&
+	      sibling.status == expected);
+	CHECK(child.received == 0U && child.initial == 0U &&
+	      child.trailing == 0U);
+	CHECK(sibling.received == 0U && sibling.initial == 0U &&
+	      sibling.trailing == 0U);
+	CHECK(f.methods[ASYNC_METHOD].terminals == 0U &&
+	      f.methods[4].terminals == 0U && f.methods[3].terminals == 0U);
+	async.work_release = 1U;
+	f.methods[4].released = 1U;
+	f.methods[3].released = 1U;
+	publish(&f);
+	unlock(&f);
+	call_done(&parent, expected);
+	call_done(&child, expected);
+	call_done(&sibling, expected);
+	if (deadline) {
+		struct call_state rejected;
+		struct tr_rpc_v2_call sentinel;
+		struct tr_rpc_call_options rejected_options = {0};
+		rejected_options.parent_context = &f.parent_context;
+		call_init(&rejected, &f, 0U, NULL, 0U);
+		memset(&rejected.handle, 0xa5, sizeof(rejected.handle));
+		sentinel = rejected.handle;
+		CHECK(call_start(&rejected, &rejected_options) ==
+		      TR_ERR_TIMEOUT);
+		CHECK(memcmp(&rejected.handle, &sentinel, sizeof(sentinel)) ==
+		      0);
+		CHECK(rejected.terminals == 0U &&
+		      rejected.writable_returns == 0U);
+		CHECK(tr_rpc_v2_call_context_release(&f.parent_context) ==
+		      TR_OK);
+	}
+	tr_rpc_v2_producer_release(async.producer);
+	check_client_totals(&f.client, 3U, 3U, expected, 3U);
+	check_server_totals(&f, 3U, 3U, expected, 3U);
+	drain(&f);
+	fixture_destroy(&f);
+	if (deadline && !child_timeout_ms)
+		puts("sdk-v2: case=parent-context-deadline-zero-child-timeout "
+		     "result=pass");
+	else
+		puts(deadline ? "sdk-v2: case=parent-context-deadline "
+		                "result=pass"
+		              : "sdk-v2: case=parent-context-cancel "
+		                "result=pass");
+}
+
+static void test_child_deadline_isolation(void)
+{
+	struct fixture f;
+	struct async_state async = {0};
+	struct call_state parent, child;
+	struct message_spec request = {23U, 91U};
+	struct tr_rpc_call_options parent_options = {0};
+	struct tr_rpc_call_options child_options = {0};
+	uint8_t storage[23];
+	struct tr_rpc_bytes body = {storage, sizeof(storage)};
+	struct tr_rpc_semantic_stats client_stats, server_stats;
+
+	fixture_create(&f);
+	async.fixture = &f;
+	async.mode = ASYNC_CANCEL;
+	lock(&f);
+	f.methods[ASYNC_METHOD].async = &async;
+	f.methods[ASYNC_METHOD].hold_parent_context = 1;
+	unlock(&f);
+	call_init(&parent, &f, ASYNC_METHOD, NULL, 0U);
+	CHECK(call_start(&parent, &parent_options) == TR_OK);
+	wait_count(&f, &f.context_held, 1U);
+	wait_count(&f, &async.acquired, 1U);
+	child_options.parent_context = &f.parent_context;
+	child_options.timeout_ms = 100U;
+	call_init(&child, &f, 4U, &request, 1U);
+	child.manual = 1;
+	CHECK(call_start(&child, &child_options) == TR_OK);
+	wait_count(&f, &child.writable_returns, 1U);
+	fill(storage, sizeof(storage), request.tag);
+	CHECK(tr_rpc_v2_call_send(child.handle, &body) == TR_OK);
+	CHECK(tr_rpc_v2_call_half_close(child.handle) == TR_OK);
+	lock(&f);
+	child.sent = 1U;
+	child.half_closed = 1;
+	publish(&f);
+	unlock(&f);
+	wait_count(&f, &f.methods[4].entered, 1U);
+	wait_count(&f, &child.terminals, 1U);
+	wait_count(&f, &f.methods[4].cancelled, 1U);
+	lock(&f);
+	CHECK(child.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	CHECK(parent.terminals == 0U && async.cancelled == 0U);
+	unlock(&f);
+	CHECK(tr_rpc_v2_call_cancel(parent.handle) == TR_OK);
+	wait_count(&f, &async.cancelled, 1U);
+	lock(&f);
+	async.work_release = 1U;
+	f.methods[4].released = 1U;
+	publish(&f);
+	unlock(&f);
+	call_done(&parent, TR_RPC_STATUS_CANCELLED);
+	call_done(&child, TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	tr_rpc_v2_producer_release(async.producer);
+	CHECK(tr_client_get_rpc_semantic_stats(f.client.handle,
+	                                       &client_stats) == TR_OK);
+	CHECK(tr_server_get_rpc_semantic_stats(f.server, &server_stats) ==
+	      TR_OK);
+	check_stats_invariants(&client_stats);
+	check_stats_invariants(&server_stats);
+	CHECK(client_stats.calls_started == 2U &&
+	      client_stats.calls_finished == 2U);
+	CHECK(server_stats.calls_started == 2U &&
+	      server_stats.calls_finished == 2U);
+	CHECK(client_stats.final_status[TR_RPC_STATUS_CANCELLED] == 1U &&
+	      client_stats.final_status[TR_RPC_STATUS_DEADLINE_EXCEEDED] == 1U);
+	CHECK(server_stats.final_status[TR_RPC_STATUS_CANCELLED] == 1U &&
+	      server_stats.final_status[TR_RPC_STATUS_DEADLINE_EXCEEDED] == 1U);
+	drain(&f);
+	CHECK(tr_rpc_v2_call_context_release(&f.parent_context) == TR_OK);
+	fixture_destroy(&f);
+	puts("sdk-v2: case=child-deadline-isolation result=pass");
+}
+
+/* 已选定的父期限终局不能被停止清理重复发布的取消覆盖。 */
+static void *produce_async(void *arg);
+
+static void test_parent_deadline_survives_stopped_reap(void)
+{
+	struct fixture f;
+	struct async_state async = {0};
+	struct call_state parent, rejected;
+	struct tr_rpc_call_options parent_options = {0};
+	struct tr_rpc_call_options child_options = {0};
+	struct tr_rpc_v2_call sentinel;
+	struct timespec limit = deadline_after(WAIT_MS);
+	pthread_t thread;
+	struct timespec pause = {0, 1000000L};
+	int ret;
+
+	fixture_create(&f);
+	async.fixture = &f;
+	async.mode = ASYNC_DEADLINE;
+	async.producer_thread = 1;
+	lock(&f);
+	f.methods[ASYNC_METHOD].async = &async;
+	f.methods[ASYNC_METHOD].hold_parent_context = 1;
+	unlock(&f);
+	parent_options.timeout_ms = 100U;
+	call_init(&parent, &f, ASYNC_METHOD, NULL, 0U);
+	CHECK(pthread_create(&thread, NULL, produce_async, &async) == 0);
+	CHECK(call_start(&parent, &parent_options) == TR_OK);
+	wait_count(&f, &f.context_held, 1U);
+	wait_count(&f, &async.staged, 1U);
+	wait_count(&f, &parent.terminals, 1U);
+	wait_count(&f, &async.cancelled, 1U);
+	CHECK(parent.status == TR_RPC_STATUS_DEADLINE_EXCEEDED);
+
+	lock(&f);
+	f.server_destroying = 1;
+	unlock(&f);
+	/* 这次销毁调用会切到 stopped reaper；应用 work 仍在门闩上。 */
+	CHECK(tr_server_destroy(f.server) == TR_AGAIN);
+	child_options.parent_context = &f.parent_context;
+	call_init(&rejected, &f, 0U, NULL, 0U);
+	memset(&rejected.handle, 0xa5, sizeof(rejected.handle));
+	sentinel = rejected.handle;
+	CHECK(call_start(&rejected, &child_options) == TR_ERR_TIMEOUT);
+	CHECK(memcmp(&rejected.handle, &sentinel, sizeof(sentinel)) == 0);
+	CHECK(rejected.terminals == 0U && rejected.writable_returns == 0U);
+
+	lock(&f);
+	async.work_release = 1U;
+	publish(&f);
+	unlock(&f);
+	while (!tr_rpc_v2_producer_is_closed(async.producer)) {
+		struct timespec now = deadline_after(0);
+		CHECK(before(&now, &limit));
+		ret = tr_server_destroy(f.server);
+		CHECK(ret == TR_AGAIN);
+		CHECK(nanosleep(&pause, NULL) == 0);
+	}
+	wait_count(&f, &async.thread_done, 1U);
+	CHECK(pthread_join(thread, NULL) == 0);
+	call_done(&parent, TR_RPC_STATUS_DEADLINE_EXCEEDED);
+	tr_rpc_v2_producer_release(async.producer);
+	destroy_client(&f, &f.client);
+	CHECK(tr_rpc_v2_call_context_release(&f.parent_context) == TR_OK);
+	destroy_server(&f);
+	CHECK(f.methods[ASYNC_METHOD].terminals == 1U);
+	CHECK(pthread_cond_destroy(&f.cond) == 0);
+	CHECK(pthread_mutex_destroy(&f.lock) == 0);
+	puts("sdk-v2: case=parent-deadline-survives-stopped-reap result=pass");
+}
+
+#ifdef TR_RPC_V2_TEST_FAULTS
+/* 准入后开流失败必须归还此前借用的父上下文引用。 */
+static void test_parent_context_open_failure_releases_reference(void)
+{
+	struct fixture f;
+	struct async_state async = {0};
+	struct call_state parent, rejected;
+	struct tr_rpc_call_options options = {0};
+	struct tr_rpc_v2_call sentinel;
+	pthread_t thread;
+	unsigned failures = tr_rpc_v2_test_stream_open_failures();
+
+	fixture_create(&f);
+	async.fixture = &f;
+	async.mode = ASYNC_CANCEL;
+	async.producer_thread = 1;
+	lock(&f);
+	f.methods[ASYNC_METHOD].async = &async;
+	f.methods[ASYNC_METHOD].hold_parent_context = 1;
+	unlock(&f);
+	call_init(&parent, &f, ASYNC_METHOD, NULL, 0U);
+	CHECK(pthread_create(&thread, NULL, produce_async, &async) == 0);
+	CHECK(call_start(&parent, NULL) == TR_OK);
+	wait_count(&f, &f.context_held, 1U);
+	wait_count(&f, &async.acquired, 1U);
+	wait_count(&f, &async.staged, 1U);
+
+	options.parent_context = &f.parent_context;
+	call_init(&rejected, &f, 0U, NULL, 0U);
+	memset(&rejected.handle, 0xa5, sizeof(rejected.handle));
+	sentinel = rejected.handle;
+	tr_rpc_v2_test_fail_next_stream_open();
+	CHECK(call_start(&rejected, &options) == TR_ERR_NOMEM);
+	CHECK(tr_rpc_v2_test_stream_open_failures() == failures + 1U);
+	CHECK(memcmp(&rejected.handle, &sentinel, sizeof(sentinel)) == 0);
+	CHECK(rejected.terminals == 0U && rejected.writable_returns == 0U);
+
+	CHECK(tr_rpc_v2_call_cancel(parent.handle) == TR_OK);
+	wait_count(&f, &parent.terminals, 1U);
+	wait_count(&f, &async.cancelled, 1U);
+	lock(&f);
+	async.work_release = 1U;
+	publish(&f);
+	unlock(&f);
+	wait_count(&f, &async.thread_done, 1U);
+	CHECK(pthread_join(thread, NULL) == 0);
+	call_done(&parent, TR_RPC_STATUS_CANCELLED);
+	tr_rpc_v2_producer_release(async.producer);
+	drain(&f);
+	destroy_client(&f, &f.client);
+	CHECK(tr_rpc_v2_call_context_release(&f.parent_context) == TR_OK);
+	destroy_server(&f);
+	CHECK(pthread_cond_destroy(&f.cond) == 0);
+	CHECK(pthread_mutex_destroy(&f.lock) == 0);
+	puts("sdk-v2: case=parent-context-open-failure-release result=pass");
+}
+#endif
+
 static void test_destroy_live_terminal(void)
 {
 	struct fixture f;
@@ -1643,6 +2147,7 @@ static void test_async_case(enum async_mode mode)
 	memset(&a, 0, sizeof(a));
 	a.fixture = &f;
 	a.mode = mode;
+	a.producer_thread = 1;
 	lock(&f);
 	f.methods[ASYNC_METHOD].async = &a;
 	unlock(&f);
@@ -1928,6 +2433,28 @@ static void test_call_ref_sdk_symbols(void)
 	puts("sdk-v2: case=call-ref-public-symbols result=pass");
 }
 
+/* 父子上下文接口也必须从安装 SDK 的 C11/C++11 消费端可见。 */
+static void test_parent_context_sdk_symbols(void)
+{
+	int (*hold)(const struct tr_rpc_v2_cancel *,
+	            struct tr_rpc_v2_call_context *) =
+	        tr_rpc_v2_cancel_context_hold;
+	int (*release)(struct tr_rpc_v2_call_context *) =
+	        tr_rpc_v2_call_context_release;
+	struct tr_rpc_v2_call_context context = {0};
+	struct tr_rpc_call_options options = {0};
+	const struct tr_rpc_v2_cancel *invalid_cancel =
+	        (const struct tr_rpc_v2_cancel *)(uintptr_t)1;
+
+	CHECK(hold != NULL && release != NULL);
+	CHECK(options.parent_context == NULL);
+	CHECK(tr_rpc_v2_cancel_context_hold(NULL, &context) == TR_ERR_INVALID);
+	CHECK(tr_rpc_v2_cancel_context_hold(invalid_cancel, NULL) ==
+	      TR_ERR_INVALID);
+	CHECK(tr_rpc_v2_call_context_release(&context) == TR_ERR_STALE);
+	puts("sdk-v2: case=parent-context-public-symbols result=pass");
+}
+
 /* #280 的一元远端未知方法及本地非 ONE→ONE 拒绝在安装 SDK 中保留。 */
 static void test_unary_rejections(void)
 {
@@ -1973,6 +2500,7 @@ int main(void)
 	test_raw_codec_sdk();
 	test_tls_d2_sdk_symbols();
 	test_call_ref_sdk_symbols();
+	test_parent_context_sdk_symbols();
 	test_default_factory_requires_methods();
 	test_unary_rejections();
 	test_call_compression_rejection_preserves_next_message();
@@ -1982,6 +2510,16 @@ int main(void)
 	test_large_message_ownership();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);
+	test_parent_context_lifetime();
+	test_parent_context_pool_exhaustion();
+	test_parent_context_propagation(0, 5000U);
+	test_parent_context_propagation(1, 5000U);
+	test_parent_context_propagation(1, 0U);
+	test_child_deadline_isolation();
+	test_parent_deadline_survives_stopped_reap();
+#ifdef TR_RPC_V2_TEST_FAULTS
+	test_parent_context_open_failure_releases_reference();
+#endif
 	test_destroy_live_terminal();
 	test_stats_peer_retirement();
 	test_async_producer();

@@ -19,6 +19,7 @@ struct tr_record_client_slot {
 	struct tr_rpc_record_client *client;
 	struct tr_stream_handle stream;
 	struct tr_rpc_record_stream *binding;
+	struct tr_rpc_v2_context_state *parent_context;
 	const struct tr_rpc_method_desc *method;
 	struct tr_rpc_record_client_callbacks callbacks;
 	struct tr_rpc_v2_client_callbacks public_callbacks;
@@ -84,6 +85,14 @@ static void tr_record_client_clear_unary(struct tr_record_client_slot *slot)
 	tr_buffer_release(slot->unary_body);
 	slot->unary_body = NULL;
 	slot->unary_pending = 0;
+}
+
+static void
+tr_record_client_release_parent_context(struct tr_record_client_slot *slot)
+{
+	struct tr_rpc_v2_context_state *context = slot->parent_context;
+	slot->parent_context = NULL;
+	tr_rpc_v2_context_release_internal(context);
 }
 
 static void tr_record_client_slot_reset(struct tr_record_client_slot *slot)
@@ -405,6 +414,24 @@ static void tr_record_client_expire(struct tr_record_client_slot *slot,
 		        slot->binding, TR_RPC_STATUS_DEADLINE_EXCEEDED);
 }
 
+static bool
+tr_record_client_abort_parent_context(struct tr_record_client_slot *slot)
+{
+	int parent_status;
+	if (!slot->parent_context || !slot->binding || slot->terminal)
+		return false;
+	if (tr_rpc_v2_context_status_internal(slot->parent_context,
+	                                      &parent_status) != TR_OK)
+		parent_status = TR_RPC_STATUS_CANCELLED;
+	if (parent_status == TR_RPC_V2_CONTEXT_ACTIVE)
+		return false;
+	(void)tr_rpc_record_stream_abort_on_owner(
+	        slot->binding, parent_status == TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                               ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                               : TR_RPC_STATUS_CANCELLED);
+	return true;
+}
+
 static int tr_record_client_time(struct tr_record_client_slot *slot,
                                  uint64_t *now)
 {
@@ -422,12 +449,25 @@ static void tr_record_client_received(struct tr_rpc_record_stream *binding,
 {
 	struct tr_record_client_slot *slot = arg;
 	struct tr_rpc_record_client *client = slot->client;
+	bool final_status = view->header.kind == TR_RPC_RECORD_FINAL_STATUS;
 	if (slot->binding != binding || !slot->accepted)
 		return;
+	if (final_status)
+		slot->peer_final = true;
+	/* Stream preflight 已先接纳 FINAL；它先于尚未处理的父取消/本地期限。 */
+	if (!final_status && tr_record_client_abort_parent_context(slot))
+		return;
+	if (!final_status && slot->deadline) {
+		uint64_t now;
+		if (tr_record_client_time(slot, &now) != TR_OK)
+			return;
+		if (now >= slot->deadline) {
+			tr_record_client_expire(slot, now);
+			return;
+		}
+	}
 	/* 只记录唯一绑定已经接纳的 FINAL 事实，包括合法的 OPEN 前拒绝。
 	 * 本地先终局后不再解析晚到记录，不能靠状态码猜测终局来源。 */
-	if (view->header.kind == TR_RPC_RECORD_FINAL_STATUS)
-		slot->peer_final = true;
 	if (slot->reported || client->stopping)
 		return;
 	tr_record_client_callback_enter(client);
@@ -523,6 +563,7 @@ static int tr_record_client_retire(struct tr_record_client_slot *slot)
 		tr_record_client_slot_pin_result(slot);
 		return TR_AGAIN;
 	}
+	tr_record_client_release_parent_context(slot);
 	tr_record_client_slot_reset(slot);
 	return TR_OK;
 }
@@ -534,6 +575,7 @@ static int tr_record_client_progress(struct tr_record_client_slot *slot)
 	int ret;
 	if (!slot->active)
 		return TR_OK;
+	(void)tr_record_client_abort_parent_context(slot);
 	tr_record_client_apply_pending(slot);
 	/* 前一槽的应用回调可能消耗时间，OPEN 不复用整个 pump 的旧时刻。 */
 	ret = TR_OK;
@@ -615,7 +657,8 @@ static int tr_record_client_progress(struct tr_record_client_slot *slot)
 	bool pool_ready = !slot->send_pool_waiting ||
 	                  tr_buffer_pool_free_count(client->send_pool) != 0;
 	if (!slot->terminal && !slot->unary_mode && slot->writable &&
-	    writable_callback && !client->callback_depth && pool_ready) {
+	    writable_callback && !client->callback_depth && pool_ready &&
+	    !tr_record_client_abort_parent_context(slot)) {
 		slot->writable = false;
 		slot->send_pool_waiting = false;
 		tr_record_client_callback_enter(client);
@@ -764,11 +807,12 @@ static int tr_record_client_call_start(
         const struct tr_rpc_bytes *unary_request)
 {
 	struct tr_record_client_slot *slot = NULL;
+	struct tr_rpc_v2_context_state *parent_context = NULL;
 	struct tr_buffer *copy = NULL;
 	const struct tr_rpc_method_desc *method = NULL;
 	uint8_t metadata[TR_RPC_METADATA_MAX_BYTES];
 	uint32_t metadata_size;
-	uint64_t now;
+	uint64_t now, parent_deadline = 0;
 	int ret = tr_record_client_owner(client);
 	if (ret != TR_OK)
 		return ret;
@@ -833,29 +877,42 @@ static int tr_record_client_call_start(
 	}
 	if (!slot)
 		return TR_AGAIN;
+	if (options && options->parent_context) {
+		ret = tr_rpc_v2_context_acquire_internal(
+		        options->parent_context, &parent_context,
+		        &parent_deadline);
+		if (ret != TR_OK)
+			return ret;
+	}
 	/* 在发布调用能力和建立传输流之前完成复制；失败不承担业务终局。
 	 * 同一复制池同时限制流式 TX 和待发送一元请求，不增设正文预算。 */
 	if (unary_request && unary_request->len) {
 		ret = tr_buffer_acquire(client->send_pool, unary_request->len,
 		                        &copy);
-		if (ret != TR_OK)
+		if (ret != TR_OK) {
+			tr_rpc_v2_context_release_internal(parent_context);
 			return ret;
+		}
 		memcpy(copy->data, unary_request->data, unary_request->len);
 		copy->len = unary_request->len;
 	}
 	tr_record_client_slot_reset(slot);
 	slot->client = client;
 	slot->method = method;
+	slot->parent_context = parent_context;
 	slot->unary_mode = unary_request != NULL;
 	slot->unary_body = copy;
 	slot->unary_pending = unary_request ? TR_RPC_RECORD_MESSAGE : 0;
 	slot->unary_compression = unary_compression;
 	slot->generation = ++client->generation;
-	slot->deadline =
-	        options && options->timeout_ms
-	                ? tr_record_client_after(
-	                          now, (uint64_t)options->timeout_ms * 1000000)
-	                : 0;
+	slot->deadline = options && options->timeout_ms
+	                         ? tr_record_client_after(
+	                                   now, (uint64_t)options->timeout_ms *
+	                                                UINT64_C(1000000))
+	                         : 0;
+	if (parent_deadline &&
+	    (!slot->deadline || parent_deadline < slot->deadline))
+		slot->deadline = parent_deadline;
 	slot->metadata_size = metadata_size;
 	slot->active = true;
 	slot->open_pending = true;
@@ -866,6 +923,7 @@ static int tr_record_client_call_start(
 	                     &slot->stream);
 	if (ret != TR_OK) {
 		tr_record_client_clear_unary(slot);
+		tr_record_client_release_parent_context(slot);
 		tr_record_client_slot_reset(slot);
 		--client->depth;
 		return ret;
@@ -966,8 +1024,12 @@ static int tr_record_client_request(struct tr_rpc_record_client_handle handle,
 	if (message && (!slot->public_mode || !client->send_pool))
 		return TR_ERR_UNSUPPORTED;
 	++client->depth;
-	tr_record_client_apply_pending(slot);
-	ret = tr_record_client_time(slot, &now);
+	if (tr_record_client_abort_parent_context(slot)) {
+		ret = TR_ERR_CANCELLED;
+	} else {
+		tr_record_client_apply_pending(slot);
+		ret = tr_record_client_time(slot, &now);
+	}
 	if (ret == TR_OK)
 		tr_record_client_expire(slot, now);
 	if (ret == TR_OK) {
@@ -1472,6 +1534,7 @@ int tr_rpc_record_client_reap_stopped(struct tr_rpc_record_client **pointer)
 			tr_record_client_slot_pin_result(slot);
 			continue;
 		}
+		tr_record_client_release_parent_context(slot);
 		tr_record_client_slot_reset(slot);
 	}
 	--client->depth;

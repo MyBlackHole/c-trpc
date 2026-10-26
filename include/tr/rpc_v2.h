@@ -53,6 +53,12 @@ struct tr_rpc_v2_call_ref {
 	uint64_t _private[4];
 };
 
+/* 唯一拥有型父调用上下文。不得复制成多个所有者，必须恰好 release 一次；
+ * 可在持有期间只读地传给多个并发 call_start。 */
+struct tr_rpc_v2_call_context {
+	uint64_t _private[2];
+};
+
 /* 业务调用身份，可按完整值比较；不是用于发送或延长对象寿命的能力。
  * 同一进程中跨连接、跨 Server 的有效身份不重复，编号耗尽会拒绝准入。
  */
@@ -126,7 +132,11 @@ struct tr_rpc_v2_client_callbacks {
 /* 普通线程可调用；内部同步提交短操作，不承诺硬实时或信号安全。
  * 仅 TR_OK 写 out 并承担一次终局责任。回调可能先于 start 返回，arg 必须
  * 预先准备，out 的存储不能依赖可在早终局中释放的 arg。
- * options 的元数据在受理期间复制；timeout_ms==0 表示无调用期限。
+ * options 的元数据在受理期间复制；timeout_ms==0 表示无本地调用期限。
+ * parent_context 非 NULL 时，只有 TR_OK 会让子 Call 固定持有上下文引用；
+ * 已取消/过期的上下文分别以 CANCELLED/TIMEOUT 在受理前拒绝，不写 out、不回调，
+ * 也不接管一元请求正文。可在持有上下文期间并发传给多个 call_start；release
+ * 不得与尚未返回的 call_start 并发。
  *
  * Client 回调可发送、半关闭、取消及 begin_drain；禁止递归 start、阻塞
  * wait 或 destroy，也不能同步跨到另一 I/O 所有者。生命周期由外部串行化。
@@ -217,6 +227,15 @@ struct tr_rpc_v2_producer;
  * 释放其输入。不得 pthread_exit、longjmp 或等待依赖所属 I/O 域的工作。
  */
 int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel);
+
+/* 仅在对应 Server V2 work 回调中取得父调用上下文。NULL 参数或非零 out 返回
+ * INVALID； 成功取得的上下文可跨回调保存。无效参数返回 INVALID，回调外调用返回
+ * STATE， 上下文池耗尽返回 AGAIN，父期限已过返回 TIMEOUT，父取消/其他终局返回
+ * CANCELLED。 仅 TR_OK 修改 out。release 的 NULL 参数返回
+ * INVALID；成功后清零句柄；无效句柄 返回 STALE。 */
+int tr_rpc_v2_cancel_context_hold(const struct tr_rpc_v2_cancel *cancel,
+                                  struct tr_rpc_v2_call_context *out);
+int tr_rpc_v2_call_context_release(struct tr_rpc_v2_call_context *context);
 
 /* append 在回调内预约有界存储并复制正文，成功后可立即复用源字节。
  * 一个事件当前最多生成 16 条回复，正文总额最多为该 Server 的最大方法
