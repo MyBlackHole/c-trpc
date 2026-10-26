@@ -256,6 +256,8 @@ dev.150 为 #242 补上真实 TCP Endpoint 的 RESET/`FINAL_STATUS` 交错：服
 
 dev.151 为 #242 补上真实 TCP Endpoint 的 RESET/响应 `MESSAGE` 交错：双向方法处理完请求 MESSAGE 并由 Endpoint/Channel 接受回复后，测试确认对应 DATA 帧的真实 `sendmsg` 遇到 EAGAIN，再由客户端发出 timeout RESET。以服务端终局作为 RESET 已处理边界，确认该边界后没有新的回复被接管；释放背压后客户端未收到迟到 MESSAGE，两端目标调用各终结一次，健康同伴在同一 TCP 连接成功完成。完整 `test_rpc_record_endpoint_tcp` 在 GCC Release、TSan、ASan/UBSan（泄漏检测开启）均通过。本切片只补充 DATA 交错证据；RESET/FIFO 全矩阵、配额公平、GOAWAY/连接组接受边界和统一回收仍未完成。详见[RESET 与已排队响应 MESSAGE 竞态回归](rpc_v2_reset_queued_message_race_20261026.md)。
 
+dev.152 为 #242/#241 补充压缩接收配额耗尽后的多流恢复回归：同一 TCP Channel 上保留服务器内存预算，一条 Zstd 解码以 `RESOURCE_EXHAUSTED` 终结且缓存归零；配额仍保留时 CONTROL PING/PONG 往返成功。释放配额后，四条幸存压缩流通过屏障并发发送，均由服务端完整解码并校验正文，再完成半关闭、成功响应和唯一终局，双方缓存归零。GCC Release、TSan、ASan/UBSan 完整 `test_rpc_record_stream` 通过；ASan 目标在阶段诊断加入后连续 8 次通过。本切片只增强单 Channel 配额恢复证据，不证明长期调度公平、分域预算矩阵或 #242/#241 整体验收完成。详见[压缩配额恢复多流并发回归](rpc_v2_compressed_quota_multi_peer_recovery_20261026.md)。
+
 
 
 
