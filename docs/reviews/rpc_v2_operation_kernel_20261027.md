@@ -27,8 +27,10 @@
 
 dev.159 的首轮 GitHub CI 暴露两项独立问题：GCC 11 报 `-Werror=maybe-uninitialized`，Clang 14 报 dispatch 构造失败清理分支可能泄漏 `routes`。dev.160 初始化 consume 的局部取消状态，保持失败输出哨兵不变；并在池清理前释放临时路由表，池销毁失败时把部分 dispatch 对象交还调用方。endpoint 保留该对象和自身帧 arena，使 owner close / stopped reap 可继续清理。新增 dispatch 池销毁错误注入回归与 endpoint 部分构造交接回归。
 
-dev.160 的 GCC 11 静态分析发现 TLS provider reserve 在表锁解锁失败时，已写出的输出句柄会随错误返回，结果缓冲及异步操作仍留在槽位。dev.161 将句柄发布移到成功解锁之后；解锁失败时撤销 reserve、清理结果缓冲与预算，并重试解锁。新增 pthread 解锁失败注入回归，验证输出哨兵、槽位预算和锁状态恢复。之后 GCC 11 TSan 构建暴露同一路径的 `slot may be used uninitialized`，dev.162 显式初始化该局部指针并检查非空；GCC 11 analyzer 对成功路径的 `result` 告警是 table-owned 槽位缓冲的所有权转移误报，因此仅对成功句柄发布行局部抑制 `-Wanalyzer-malloc-leak`。GCC 16 的 `-O1 -fsanitize=thread -Werror` 与 `-fanalyzer` 单元编译均无诊断。dev.162 固定 GCC 11、Clang 14 和完整 GitHub CI 仍待新 head 复验。
+dev.160 的 GCC 11 静态分析发现 TLS provider reserve 在表锁解锁失败时，已写出的输出句柄会随错误返回，结果缓冲及异步操作仍留在槽位。dev.161 将句柄发布移到成功解锁之后；解锁失败时撤销 reserve、清理结果缓冲与预算，并重试解锁。新增 pthread 解锁失败注入回归，验证输出哨兵、槽位预算和锁状态恢复。之后 GCC 11 TSan 构建暴露同一路径的 `slot may be used uninitialized`，dev.162 显式初始化该局部指针并检查非空；GCC 11 analyzer 对成功路径的 `result` 告警是 table-owned 槽位缓冲的所有权转移误报，因此仅对成功句柄发布行局部抑制 `-Wanalyzer-malloc-leak`。GCC 16 的 `-O1 -fsanitize=thread -Werror` 与 `-fanalyzer` 单元编译均无诊断。dev.162 已推送；PR #332 精确 head `d245e0b4bf0fec52e8d4e1db69613a597e35cb89` 的 13/13 GitHub 检查全部通过。
 
 ## 未结项边界
 
-此实现完成 #243 中“通用异步操作内核及显式操作引用”的一段，并接入三个异步调用方；它不完成整个 #243 或 V2。仍需验证统一可持有 Call 能力与此操作池的衔接、跨 Reactor/嵌套调用、command/completion 队列压力、用户回调与资源回收屏障，以及 TLS/压缩共享调度和跨能力组合。#243 与总审查 #239 均保持 OPEN。
+dev.163 的真实 TCP V2 Client/Server 回归覆盖了 CallRef 与 Server 异步 authorize 操作的生命周期交错：服务端 worker 确认看到取消后再迟到返回 ALLOW，Client 只发布一次 CANCELLED/LIVE 终局且服务端业务 work 未运行；服务端终局后操作已退役并可销毁，Client CallRef 仍能读取原快照、阻止 drain，release 后 drain 收敛。`test_rpc_v2_server/default` 在 GCC Release、TSan、ASan/UBSan 均通过；GCC Release 全量测试为 93/93。该测试只证明这一条跨域交错，不表示所有 CallRef、异步操作或资源屏障均已通过。
+
+此实现完成 #243 中“通用异步操作内核及显式操作引用”的一段，并接入三个异步调用方；dev.163 另补一个 CallRef 交互切片。它不完成整个 #243 或 V2。仍需验证跨 Reactor/嵌套调用、command/completion 队列压力、更多用户回调与资源回收屏障，以及 TLS/压缩共享调度和跨能力组合。#243 与总审查 #239 均保持 OPEN。
