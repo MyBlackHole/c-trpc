@@ -36,6 +36,8 @@ struct tr_rpc_metadata {
 	uint16_t value_len;
 };
 
+struct tr_rpc_v2_call_context;
+
 struct tr_rpc_call_options {
 	/* 从 Call 创建时刻开始计算的相对截止时间；0 表示禁用截止时间。 */
 	uint32_t timeout_ms;
@@ -47,6 +49,9 @@ struct tr_rpc_call_options {
 	/* 仅用于 tr_client_unary_call 的单条请求正文；call_start 必须为 NONE。
 	 * 零初始化保留原有未压缩行为。 */
 	enum tr_rpc_compression request_compression;
+
+	/* 可选父 Call 上下文；仅在 call_start 同步受理期间借用。 */
+	const struct tr_rpc_v2_call_context *parent_context;
 };
 
 /* 方法请求与响应的消息基数。 */

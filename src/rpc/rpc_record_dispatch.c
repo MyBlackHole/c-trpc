@@ -40,8 +40,10 @@ struct tr_rpc_record_reply {
 	enum tr_rpc_status status;
 	bool finished, failed, headers_sent, asynchronous;
 };
+struct tr_dispatch_slot;
 struct tr_rpc_v2_cancel {
 	const struct tr_task_cancel *task;
+	struct tr_dispatch_slot *slot;
 };
 struct tr_rpc_v2_reply {
 	struct tr_rpc_record_reply *record;
@@ -54,6 +56,23 @@ static _Thread_local const struct tr_rpc_v2_cancel *tr_v2_active_cancel;
 static _Thread_local struct tr_rpc_v2_reply *tr_v2_active_reply;
 static _Thread_local unsigned tr_v2_callback_depth;
 static _Atomic uint64_t tr_dispatch_instances;
+
+#define TR_RPC_V2_CONTEXT_RESERVED UINT64_MAX
+
+struct tr_rpc_v2_context_state {
+	struct tr_rpc_record_dispatch *dispatch;
+	_Atomic uint64_t references;
+	_Atomic uint64_t generation;
+	_Atomic int status;
+	uint64_t deadline;
+};
+
+struct tr_dispatch_context_link {
+	_Atomic bool locked;
+	struct tr_rpc_v2_context_state *state;
+	uint64_t route_generation;
+	int parent_status;
+};
 
 /* API 失败锁存整批；业务显式选择的非 OK 则仍可携带有效元数据。
  * 保留第一个错误，后续返回 OK 或另一个业务状态都不能解除失败。 */
@@ -231,6 +250,8 @@ struct tr_rpc_record_dispatch {
 	struct tr_memory_budget *budget;
 	struct tr_rpc_record_producer_domain *producer_domain;
 	struct tr_dispatch_slot *slots;
+	struct tr_rpc_v2_context_state *contexts;
+	struct tr_dispatch_context_link *context_links;
 	struct tr_dispatch_method *methods;
 	struct tr_rpc_record_dispatch_config config;
 	struct tr_rpc_record_semantic_counters local_semantic;
@@ -240,6 +261,7 @@ struct tr_rpc_record_dispatch {
 	size_t bytes;
 	uint64_t instance;
 	uint32_t cursor;
+	_Atomic uint64_t external_context_refs;
 	unsigned depth;
 	bool stopping, cleanup, admitted;
 };
@@ -264,6 +286,330 @@ static int tr_dispatch_now(uint64_t *out)
 	       (uint64_t)now.tv_nsec;
 	return TR_OK;
 }
+
+static void tr_dispatch_context_lock(struct tr_dispatch_context_link *link)
+{
+	while (atomic_exchange_explicit(&link->locked, true,
+	                                memory_order_acquire)) {
+	}
+}
+
+static void tr_dispatch_context_unlock(struct tr_dispatch_context_link *link)
+{
+	atomic_store_explicit(&link->locked, false, memory_order_release);
+}
+
+static int
+tr_dispatch_context_external_retain(struct tr_rpc_record_dispatch *dispatch)
+{
+	uint64_t references = atomic_load_explicit(
+	        &dispatch->external_context_refs, memory_order_relaxed);
+	for (;;) {
+		if (references == UINT64_MAX)
+			return TR_ERR_STATE;
+		if (atomic_compare_exchange_weak_explicit(
+		            &dispatch->external_context_refs, &references,
+		            references + 1, memory_order_acq_rel,
+		            memory_order_relaxed))
+			return TR_OK;
+	}
+}
+
+static int
+tr_dispatch_context_reference_retain(struct tr_rpc_v2_context_state *state)
+{
+	uint64_t references =
+	        atomic_load_explicit(&state->references, memory_order_acquire);
+	for (;;) {
+		if (!references)
+			return TR_ERR_STALE;
+		if (references == TR_RPC_V2_CONTEXT_RESERVED)
+			return TR_ERR_STALE;
+		if (references == UINT64_MAX - 1U)
+			return TR_ERR_STATE;
+		if (atomic_compare_exchange_weak_explicit(
+		            &state->references, &references, references + 1,
+		            memory_order_acq_rel, memory_order_acquire))
+			return TR_OK;
+	}
+}
+
+static void
+tr_dispatch_context_reference_drop(struct tr_rpc_v2_context_state *state)
+{
+	(void)atomic_fetch_sub_explicit(&state->references, 1,
+	                                memory_order_acq_rel);
+}
+
+static int tr_dispatch_context_reject_status(int status)
+{
+	return status == TR_RPC_STATUS_DEADLINE_EXCEEDED ? TR_ERR_TIMEOUT
+	                                                 : TR_ERR_CANCELLED;
+}
+
+static void tr_dispatch_context_publish_terminal(struct tr_dispatch_slot *slot,
+                                                 enum tr_rpc_status status)
+{
+	struct tr_rpc_record_dispatch *dispatch = slot->dispatch;
+	struct tr_dispatch_context_link *link =
+	        &dispatch->context_links[slot->route.slot];
+	int published = status == TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                        ? TR_RPC_STATUS_DEADLINE_EXCEEDED
+	                        : TR_RPC_STATUS_CANCELLED;
+	tr_dispatch_context_lock(link);
+	if (link->route_generation == slot->route.generation &&
+	    link->parent_status == TR_RPC_V2_CONTEXT_ACTIVE) {
+		link->parent_status = published;
+		if (link->state)
+			atomic_store_explicit(&link->state->status, published,
+			                      memory_order_release);
+	}
+	tr_dispatch_context_unlock(link);
+}
+
+static void tr_dispatch_context_detach(struct tr_dispatch_slot *slot)
+{
+	struct tr_rpc_record_dispatch *dispatch = slot->dispatch;
+	struct tr_dispatch_context_link *link;
+	struct tr_rpc_v2_context_state *state = NULL;
+	if (!dispatch->context_links ||
+	    slot->route.slot >= dispatch->config.capacity)
+		return;
+	link = &dispatch->context_links[slot->route.slot];
+	tr_dispatch_context_lock(link);
+	if (link->route_generation == slot->route.generation) {
+		state = link->state;
+		link->state = NULL;
+		if (link->parent_status == TR_RPC_V2_CONTEXT_ACTIVE) {
+			link->parent_status = TR_RPC_STATUS_CANCELLED;
+			if (state)
+				atomic_store_explicit(&state->status,
+				                      TR_RPC_STATUS_CANCELLED,
+				                      memory_order_release);
+		}
+	}
+	tr_dispatch_context_unlock(link);
+	if (state)
+		tr_dispatch_context_reference_drop(state); /* link 的基准引用 */
+}
+
+static int tr_dispatch_context_deadline_status(uint64_t deadline)
+{
+	uint64_t now;
+	int ret;
+	if (!deadline)
+		return TR_OK;
+	ret = tr_dispatch_now(&now);
+	if (ret != TR_OK)
+		return ret;
+	return now >= deadline ? TR_ERR_TIMEOUT : TR_OK;
+}
+
+int tr_rpc_v2_cancel_context_hold(const struct tr_rpc_v2_cancel *cancel,
+                                  struct tr_rpc_v2_call_context *out)
+{
+	struct tr_dispatch_slot *slot;
+	struct tr_rpc_record_dispatch *dispatch;
+	struct tr_dispatch_context_link *link;
+	struct tr_rpc_v2_context_state *state = NULL;
+	uint64_t generation;
+	bool new_state = false;
+	int ret;
+	if (!cancel || !out)
+		return TR_ERR_INVALID;
+	if (out->_private[0] || out->_private[1])
+		return TR_ERR_INVALID;
+	if (cancel != tr_v2_active_cancel || !cancel->task || !cancel->slot)
+		return TR_ERR_STATE;
+	slot = cancel->slot;
+	dispatch = slot->dispatch;
+	link = &dispatch->context_links[slot->route.slot];
+	if (tr_task_cancel_requested(cancel->task))
+		return TR_ERR_CANCELLED;
+	ret = tr_dispatch_context_deadline_status(slot->deadline);
+	if (ret != TR_OK)
+		return ret;
+	tr_dispatch_context_lock(link);
+	if (link->route_generation != slot->route.generation) {
+		ret = TR_ERR_STALE;
+		goto done;
+	}
+	if (link->parent_status != TR_RPC_V2_CONTEXT_ACTIVE) {
+		ret = tr_dispatch_context_reject_status(link->parent_status);
+		goto done;
+	}
+	if (tr_task_cancel_requested(cancel->task)) {
+		ret = TR_ERR_CANCELLED;
+		goto done;
+	}
+	ret = tr_dispatch_context_deadline_status(slot->deadline);
+	if (ret != TR_OK)
+		goto done;
+	state = link->state;
+	if (!state) {
+		for (uint32_t i = 0; i < dispatch->config.capacity; ++i) {
+			struct tr_rpc_v2_context_state *candidate =
+			        &dispatch->contexts[i];
+			uint64_t expected = 0;
+			if (!atomic_compare_exchange_strong_explicit(
+			            &candidate->references, &expected,
+			            TR_RPC_V2_CONTEXT_RESERVED,
+			            memory_order_acq_rel, memory_order_acquire))
+				continue;
+			generation = atomic_load_explicit(
+			        &candidate->generation, memory_order_relaxed);
+			if (generation == UINT64_MAX) {
+				atomic_store_explicit(&candidate->references, 0,
+				                      memory_order_release);
+				ret = TR_ERR_STATE;
+				goto done;
+			}
+			++generation;
+			atomic_store_explicit(&candidate->generation,
+			                      generation, memory_order_relaxed);
+			candidate->deadline = slot->deadline;
+			atomic_store_explicit(&candidate->status,
+			                      TR_RPC_V2_CONTEXT_ACTIVE,
+			                      memory_order_release);
+			atomic_store_explicit(&candidate->references, 1,
+			                      memory_order_release);
+			state = candidate;
+			link->state = state;
+			new_state = true;
+			break;
+		}
+		if (!state) {
+			ret = TR_AGAIN;
+			goto done;
+		}
+	}
+	ret = tr_dispatch_context_reference_retain(state);
+	if (ret != TR_OK) {
+		if (new_state) {
+			link->state = NULL;
+			tr_dispatch_context_reference_drop(state);
+		}
+		goto done;
+	}
+	ret = tr_dispatch_context_external_retain(dispatch);
+	if (ret != TR_OK) {
+		tr_dispatch_context_reference_drop(state);
+		if (new_state) {
+			link->state = NULL;
+			tr_dispatch_context_reference_drop(state);
+		}
+		goto done;
+	}
+	generation =
+	        atomic_load_explicit(&state->generation, memory_order_acquire);
+	out->_private[0] = (uint64_t)(uintptr_t)state;
+	out->_private[1] = generation;
+	ret = TR_OK;
+done:
+	tr_dispatch_context_unlock(link);
+	return ret;
+}
+
+static void
+tr_dispatch_context_drop_external(struct tr_rpc_v2_context_state *state)
+{
+	struct tr_rpc_record_dispatch *dispatch = state->dispatch;
+	tr_dispatch_context_reference_drop(state);
+	/* 此计数减至零后不再访问 Dispatch；销毁侧以 acquire 读取。 */
+	(void)atomic_fetch_sub_explicit(&dispatch->external_context_refs, 1,
+	                                memory_order_release);
+}
+
+int tr_rpc_v2_call_context_release(struct tr_rpc_v2_call_context *context)
+{
+	struct tr_rpc_v2_context_state *state;
+	uint64_t generation;
+	int ret;
+	if (!context)
+		return TR_ERR_INVALID;
+	if (!context->_private[0] || !context->_private[1])
+		return TR_ERR_STALE;
+	state = (struct tr_rpc_v2_context_state *)(uintptr_t)
+	                context->_private[0];
+	ret = tr_dispatch_context_reference_retain(state);
+	if (ret != TR_OK)
+		return ret == TR_ERR_STATE ? ret : TR_ERR_STALE;
+	generation =
+	        atomic_load_explicit(&state->generation, memory_order_acquire);
+	if (generation != context->_private[1]) {
+		tr_dispatch_context_reference_drop(state);
+		return TR_ERR_STALE;
+	}
+	*context = (struct tr_rpc_v2_call_context){0};
+	tr_dispatch_context_reference_drop(state);
+	tr_dispatch_context_drop_external(state);
+	return TR_OK;
+}
+
+int tr_rpc_v2_context_acquire_internal(
+        const struct tr_rpc_v2_call_context *context,
+        struct tr_rpc_v2_context_state **out, uint64_t *deadline)
+{
+	struct tr_rpc_v2_context_state *state;
+	uint64_t generation, now;
+	int status, ret;
+	if (!context || !out || !deadline)
+		return TR_ERR_INVALID;
+	if (!context->_private[0] || !context->_private[1])
+		return TR_ERR_STALE;
+	state = (struct tr_rpc_v2_context_state *)(uintptr_t)
+	                context->_private[0];
+	ret = tr_dispatch_context_reference_retain(state);
+	if (ret != TR_OK)
+		return ret;
+	generation =
+	        atomic_load_explicit(&state->generation, memory_order_acquire);
+	if (generation != context->_private[1]) {
+		tr_dispatch_context_reference_drop(state);
+		return TR_ERR_STALE;
+	}
+	status = atomic_load_explicit(&state->status, memory_order_acquire);
+	if (status != TR_RPC_V2_CONTEXT_ACTIVE) {
+		tr_dispatch_context_reference_drop(state);
+		return tr_dispatch_context_reject_status(status);
+	}
+	if (state->deadline) {
+		ret = tr_dispatch_now(&now);
+		if (ret != TR_OK || now >= state->deadline) {
+			tr_dispatch_context_reference_drop(state);
+			return ret == TR_OK ? TR_ERR_TIMEOUT : ret;
+		}
+	}
+	ret = tr_dispatch_context_external_retain(state->dispatch);
+	if (ret != TR_OK) {
+		tr_dispatch_context_reference_drop(state);
+		return ret;
+	}
+	status = atomic_load_explicit(&state->status, memory_order_acquire);
+	if (status != TR_RPC_V2_CONTEXT_ACTIVE) {
+		tr_dispatch_context_drop_external(state);
+		return tr_dispatch_context_reject_status(status);
+	}
+	*out = state;
+	*deadline = state->deadline;
+	return TR_OK;
+}
+
+void tr_rpc_v2_context_release_internal(struct tr_rpc_v2_context_state *context)
+{
+	if (context)
+		tr_dispatch_context_drop_external(context);
+}
+
+int tr_rpc_v2_context_status_internal(struct tr_rpc_v2_context_state *context,
+                                      int *status)
+{
+	if (!context || !status)
+		return TR_ERR_INVALID;
+	*status = atomic_load_explicit(&context->status, memory_order_acquire);
+	return TR_OK;
+}
+
 static int tr_dispatch_deadline_check(uint64_t deadline)
 {
 	uint64_t now;
@@ -564,6 +910,7 @@ static void tr_dispatch_route_terminal(struct tr_rpc_route_handle route,
 	s->terminal = true;
 	s->status = status;
 	s->delivery = delivery;
+	tr_dispatch_context_publish_terminal(s, status);
 	/* 不在下层发送栈内释放 ready，也不在下层路由深度内通知/退役。 */
 	if (s->submitted)
 		(void)tr_task_executor_cancel(d->executor, s->task);
@@ -597,7 +944,7 @@ tr_dispatch_v2_work(struct tr_dispatch_job *job,
                     const struct tr_task_cancel *cancel)
 {
 	struct tr_rpc_v2_request request = {0};
-	struct tr_rpc_v2_cancel public_cancel = {cancel};
+	struct tr_rpc_v2_cancel public_cancel = {cancel, job->slot};
 	struct tr_rpc_v2_reply public_reply = {&job->reply};
 	const struct tr_rpc_v2_cancel *prior_cancel = tr_v2_active_cancel;
 	struct tr_rpc_v2_reply *prior_reply = tr_v2_active_reply;
@@ -1120,6 +1467,14 @@ int tr_rpc_record_dispatch_create_on_owner(
 	    (SIZE_MAX - sizeof(*d)) / config->capacity)
 		return TR_ERR_BAD_LENGTH;
 	bytes = sizeof(*d) + config->capacity * sizeof(struct tr_dispatch_slot);
+	if (config->capacity >
+	    (SIZE_MAX - bytes) / sizeof(struct tr_rpc_v2_context_state))
+		return TR_ERR_BAD_LENGTH;
+	bytes += config->capacity * sizeof(struct tr_rpc_v2_context_state);
+	if (config->capacity >
+	    (SIZE_MAX - bytes) / sizeof(struct tr_dispatch_context_link))
+		return TR_ERR_BAD_LENGTH;
+	bytes += config->capacity * sizeof(struct tr_dispatch_context_link);
 	if (method_count >
 	    (SIZE_MAX - bytes) / sizeof(struct tr_dispatch_method))
 		return TR_ERR_BAD_LENGTH;
@@ -1128,6 +1483,8 @@ int tr_rpc_record_dispatch_create_on_owner(
 	if (method_count > (SIZE_MAX - bytes) / sizeof(*routes))
 		return TR_ERR_BAD_LENGTH;
 	temporary = method_count * sizeof(*routes);
+	if (temporary > SIZE_MAX - bytes)
+		return TR_ERR_BAD_LENGTH;
 	for (size_t i = 0; i < method_count; ++i)
 		if ((methods[i].work == NULL) == (methods[i].v2_work == NULL) ||
 		    (methods[i].v2_terminal && !methods[i].v2_work))
@@ -1149,8 +1506,10 @@ int tr_rpc_record_dispatch_create_on_owner(
 		return TR_ERR_NOMEM;
 	}
 	d->slots = calloc(config->capacity, sizeof(*d->slots));
+	d->contexts = calloc(config->capacity, sizeof(*d->contexts));
+	d->context_links = calloc(config->capacity, sizeof(*d->context_links));
 	d->methods = malloc(method_bytes);
-	if (!d->slots || !d->methods) {
+	if (!d->slots || !d->contexts || !d->context_links || !d->methods) {
 		ret = TR_ERR_NOMEM;
 		goto fail;
 	}
@@ -1164,14 +1523,22 @@ int tr_rpc_record_dispatch_create_on_owner(
 	d->semantic = &d->local_semantic;
 	d->terminal = terminal;
 	d->arg = arg;
+	atomic_init(&d->external_context_refs, 0);
 	for (size_t i = 0; i < method_count; ++i) {
 		d->methods[i] = (struct tr_dispatch_method){d, methods[i]};
 		routes[i] = (struct tr_rpc_record_method){methods[i].descriptor,
 		                                          tr_dispatch_received,
 		                                          &d->methods[i]};
 	}
-	for (uint32_t i = 0; i < config->capacity; ++i)
+	for (uint32_t i = 0; i < config->capacity; ++i) {
 		d->slots[i].dispatch = d;
+		d->contexts[i].dispatch = d;
+		atomic_init(&d->contexts[i].references, 0);
+		atomic_init(&d->contexts[i].generation, 0);
+		atomic_init(&d->contexts[i].status, TR_RPC_V2_CONTEXT_ACTIVE);
+		atomic_init(&d->context_links[i].locked, false);
+		d->context_links[i].parent_status = TR_RPC_V2_CONTEXT_ACTIVE;
+	}
 	ret = tr_rpc_record_router_create_on_owner(
 	        channel, routes, method_count, config->capacity,
 	        tr_dispatch_route_terminal, d, budget, &d->router);
@@ -1184,6 +1551,8 @@ int tr_rpc_record_dispatch_create_on_owner(
 fail:
 	free(routes);
 	free(d->methods);
+	free(d->context_links);
+	free(d->contexts);
 	free(d->slots);
 	free(d);
 	(void)tr_memory_budget_release(budget, bytes + temporary);
@@ -1252,6 +1621,12 @@ int tr_rpc_record_dispatch_admit_until_on_owner(
 		return ret;
 	d->admitted = true;
 	struct tr_dispatch_slot *s = &d->slots[route.slot];
+	struct tr_dispatch_context_link *link = &d->context_links[route.slot];
+	tr_dispatch_context_lock(link);
+	link->state = NULL;
+	link->route_generation = route.generation;
+	link->parent_status = TR_RPC_V2_CONTEXT_ACTIVE;
+	tr_dispatch_context_unlock(link);
 	tr_dispatch_peer_identity_release(s);
 	*s = (struct tr_dispatch_slot){.dispatch = d,
 	                               .route = route,
@@ -1406,6 +1781,7 @@ int tr_rpc_record_dispatch_retire_on_owner(struct tr_rpc_dispatch_handle handle)
 		return TR_ERR_STATE;
 	ret = tr_rpc_record_router_retire_on_owner(s->route);
 	if (ret == TR_OK) {
+		tr_dispatch_context_detach(s);
 		tr_dispatch_peer_identity_release(s);
 		s->active = false;
 	}
@@ -1416,9 +1792,16 @@ static int tr_dispatch_free(struct tr_rpc_record_dispatch **p)
 	struct tr_rpc_record_dispatch *d = *p;
 	struct tr_memory_budget *budget = d->budget;
 	size_t bytes = d->bytes;
+	if (atomic_load_explicit(&d->external_context_refs,
+	                         memory_order_acquire))
+		return TR_AGAIN;
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
+		if (d->slots[i].route.generation)
+			tr_dispatch_context_detach(&d->slots[i]);
 		tr_dispatch_peer_identity_release(&d->slots[i]);
 	}
+	free(d->context_links);
+	free(d->contexts);
 	free(d->slots);
 	free(d->methods);
 	free(d);
@@ -1448,6 +1831,8 @@ int tr_rpc_record_dispatch_destroy_on_owner(struct tr_rpc_record_dispatch **p)
 		tr_dispatch_settle(s);
 		busy |= s->pending != 0 || s->producer != NULL;
 	}
+	busy |= atomic_load_explicit(&d->external_context_refs,
+	                             memory_order_acquire) != 0;
 	if (busy) {
 		--d->depth;
 		return TR_AGAIN;
@@ -1475,6 +1860,9 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	d->cleanup = d->stopping = true;
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
 		struct tr_dispatch_slot *s = &d->slots[i];
+		if (s->active)
+			tr_dispatch_context_publish_terminal(
+			        s, TR_RPC_STATUS_CANCELLED);
 		/* 已激活胶囊立即关闭，不等原任务退出。尚在 work 内创建的
 		 * STAGED 对象仍只由 job 持有，交接前不能跨线程读取。 */
 		if (!tr_dispatch_close_producer(s))
@@ -1492,6 +1880,9 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	ret = tr_reactor_recovery_release(&guard);
 	if (ret != TR_OK || busy)
 		return ret != TR_OK ? ret : TR_AGAIN;
+	if (atomic_load_explicit(&d->external_context_refs,
+	                         memory_order_acquire))
+		return TR_AGAIN;
 	++d->depth;
 	ret = tr_rpc_record_router_reap_stopped(&d->router);
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
@@ -1503,5 +1894,8 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	--d->depth;
 	if (ret != TR_OK || busy)
 		return ret != TR_OK ? ret : TR_AGAIN;
+	if (atomic_load_explicit(&d->external_context_refs,
+	                         memory_order_acquire))
+		return TR_AGAIN;
 	return tr_dispatch_free(p);
 }

@@ -1683,7 +1683,8 @@ static int constructor_probe(void *arg)
 		CHECK(ret == TR_ERR_NOMEM && !d);
 		CHECK(atomic_load(&f->server.budget.current_bytes) == before);
 	}
-	CHECK(success == 8);
+	/* Dispatch 现额外固定分配上下文状态池和父子关联表。 */
+	CHECK(success == 10);
 	return TR_OK;
 }
 struct wrong_executor_request {
