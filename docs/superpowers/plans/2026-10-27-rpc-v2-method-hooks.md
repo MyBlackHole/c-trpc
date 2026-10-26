@@ -171,7 +171,7 @@ Run focused dispatch and SDK targets in GCC Release, ASan/UBSan, TSan, and Clang
 
 Run `git diff --check`; run `python3 scripts/check_source_format.py --base origin/feat/rpc-v2-parent-context-243 --head HEAD`; verify `xmake.lua` and README candidate versions match and inspect exact changed files.
 
-- [ ] **Step 4: Record implementation review**
+- [x] **Step 4: Record implementation review**
 
 Write the review record with exact commit SHA, hook ordering, owner/worker responsibility, cancellation/late result behavior, test matrix and remaining #243/V2 gates. Do not state #243 or V2 is complete from this slice.
 
