@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.131` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.132` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -23,6 +23,7 @@ dev.128 为 #242/ERR-C 增加跨消息信用债务回归：两个小消息累计
 dev.129 为 #242/ERR-C 增加真实压缩接收回归：应用持有解压后 payload 时目标流进入 RESETTING，释放只归还内存，接收/消费/通告信用与 WINDOW_UPDATE 计数不变；同 Channel 压缩同伴继续收发。Release、TSan、ASan/UBSan 的 `test_transport` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.130 为 #242/ERR-C 增加 RESETTING 窗口中的并发多载荷释放回归：同一流持有两条 64 字节消息，在两个应用线程并发释放时不增加通告信用或 WINDOW_UPDATE，同 Channel 健康同伴继续完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.131 为 #242/ERR-C 增加双 RESETTING 流并发释放回归：两条流各持有一条 128 字节消息，分别进入 RESETTING 且对端暂不确认时，由两个应用线程并发释放；每条流通告信用保持 256、无 WINDOW_UPDATE，健康同伴仍能完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
+dev.132 扩展双 RESETTING 流回归：对端确认到达前，两条流各收到一条已在途的合法 64 字节 DATA；RESET 丢弃路径只消费 wire 字节、不交付应用也不恢复信用，两个应用线程再并发释放各自持有的 128 字节正文。两条流通告上限保持 256、`window_updates_tx` 不增长，健康同伴仍能完成。Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该切片仍不代表 ERR-C 全矩阵或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行

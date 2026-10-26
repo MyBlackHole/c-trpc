@@ -168,6 +168,20 @@ static void wait_count(struct fixture *f, unsigned *counter, unsigned target)
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
+static void wait_flow_counters(struct tr_stream_handle stream,
+                               uint64_t received, uint64_t consumed)
+{
+	struct tr_stream_flow_state flow;
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (tr_stream_get_flow_state(stream, &flow) == TR_OK &&
+		    flow.rx_received_bytes == received &&
+		    flow.rx_consumed_bytes == consumed)
+			return;
+		pause_ms();
+	}
+	assert(!"timed out waiting for stream receive counters");
+}
+
 struct payload_release_request {
 	struct fixture *fixture;
 	struct tr_stream_handle stream;
@@ -1983,7 +1997,8 @@ test_reset_begun_concurrent_held_payload_releases_without_credit(void)
 }
 
 static void
-test_two_resetting_streams_concurrent_held_payload_releases_without_credit(void)
+test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+        int send_reset_discard_data)
 {
 	struct fixture f;
 	uint8_t bytes[128] = {1};
@@ -1995,6 +2010,8 @@ test_two_resetting_streams_concurrent_held_payload_releases_without_credit(void)
 	struct payload_release_request release[2];
 	pthread_t release_threads[2];
 	unsigned reset_frames[2] = {0};
+	uint64_t expected_received = sizeof(bytes);
+	uint64_t expected_consumed = 0U;
 
 	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
 	reset_stream[0] = open_remote(&f, 0, 1, 1);
@@ -2034,6 +2051,23 @@ test_two_resetting_streams_concurrent_held_payload_releases_without_credit(void)
 	assert(count(&f, &f.resets) == 2U);
 	assert(f.reset_status[0] == TR_ERR_TIMEOUT);
 	assert(f.reset_status[1] == TR_ERR_CLOSED);
+	if (send_reset_discard_data) {
+		/* 这些合法 DATA 已在途；RESETTING 只丢弃并消费 wire 字节，
+		 * 不交付应用，也不能恢复已停止的信用。 */
+		for (unsigned i = 0; i < 2; ++i) {
+			uint32_t id = i == 0 ? 1U : 3U;
+			send_frame(&f, 0, TR_FRAME_DATA,
+			           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, id, 2,
+			           bytes, FRAME);
+		}
+		expected_received += FRAME;
+		expected_consumed += FRAME;
+		for (unsigned i = 0; i < 2; ++i) {
+			wait_flow_counters(reset_stream[i], expected_received,
+			                   expected_consumed);
+		}
+		assert(count(&f, &f.received) == 2U);
+	}
 	assert(pthread_mutex_lock(&f.lock) == 0);
 	held[0] = f.held;
 	held[1] = f.held_extra;
@@ -2064,8 +2098,8 @@ test_two_resetting_streams_concurrent_held_payload_releases_without_credit(void)
 	for (unsigned i = 0; i < 2; ++i) {
 		assert(tr_stream_get_flow_state(reset_stream[i], &flow) ==
 		       TR_OK);
-		assert(flow.rx_received_bytes == sizeof(bytes));
-		assert(flow.rx_consumed_bytes == sizeof(bytes));
+		assert(flow.rx_received_bytes == expected_received);
+		assert(flow.rx_consumed_bytes == expected_received);
 		assert(flow.rx_advertised_limit == WINDOW);
 	}
 	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
@@ -2411,7 +2445,10 @@ int main(void)
 	test_tombstone_split_connection_identity();
 	test_tombstone_same_id_across_split_connections();
 	test_tombstone_long_fifo_turnover();
-	test_two_resetting_streams_concurrent_held_payload_releases_without_credit();
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        0);
+	test_two_resetting_streams_concurrent_held_payload_releases_without_credit(
+	        1);
 	test_reset_begun_concurrent_held_payload_releases_without_credit();
 	test_reset_release_preserves_cross_message_credit_debt();
 	test_reset_begun_held_payload_release_without_credit();
