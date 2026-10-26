@@ -1643,15 +1643,18 @@ test_frame_after_peer_reset_with_response_backpressure(unsigned reset_lane,
 	       TR_OK);
 	assert(lane_state == TR_CHANNEL_LANE_UP);
 
-	/* 响应仍被背压阻塞时，FIFO DATA/WINDOW_UPDATE 均不得越过 RESET。 */
+	/* 响应仍被背压阻塞时，FIFO DATA/WINDOW_UPDATE/CLOSE 均不得越过 RESET。
+	 */
 	if (followup_type == TR_FRAME_DATA) {
 		send_frame(&f, reset_lane, followup_type,
 		           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
 		           sizeof(bytes));
-	} else {
-		assert(followup_type == TR_FRAME_WINDOW_UPDATE);
+	} else if (followup_type == TR_FRAME_WINDOW_UPDATE) {
 		send_frame(&f, reset_lane, followup_type, 0, 1U, WINDOW + FRAME,
 		           NULL, 0);
+	} else {
+		assert(followup_type == TR_FRAME_STREAM_CLOSE);
+		send_frame(&f, reset_lane, followup_type, 0, 1U, 0, NULL, 0);
 	}
 	wait_count(&f, &f.down, 1U);
 	assert(f.down_status == TR_ERR_STATE);
@@ -2882,6 +2885,10 @@ int main(void)
 	        0U, TR_FRAME_WINDOW_UPDATE);
 	test_frame_after_peer_reset_with_response_backpressure(
 	        1U, TR_FRAME_WINDOW_UPDATE);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        0U, TR_FRAME_STREAM_CLOSE);
+	test_frame_after_peer_reset_with_response_backpressure(
+	        1U, TR_FRAME_STREAM_CLOSE);
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
