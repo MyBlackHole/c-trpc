@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.150` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.151` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -42,6 +42,7 @@ dev.147 增加同一 Reactor 上双物理连接同时承受普通控制 TX 池�
 dev.148 验证同一连接的 RESET 响应部分写出并遇到 EAGAIN 时，健康同伴流仍能向应用交付 DATA；应用暂持载荷以隔离信用更新帧，后到 PONG 仍排在完整 RESET 后。恢复后连接保持 UP，健康流完成 RESET。GCC Release、ASan/UBSan（40k 墓碑）、TSan（5k）完整 `test_stream_reset` 均通过。该切片仍不代表 #242 或 V2 整体验收完成。
 dev.149 修正异步压缩完成的错误作用域：解码器 `INTERNAL`、未知 outcome，或 `OK` 却没有有效输出时，释放当前任务后关闭精确物理连接，不把本地内部损坏伪装成单流 `NOMEM/STATE`；合法坏压缩数据仍只终止目标流。GCC Release、TSan、ASan/UBSan 完整 `test_transport` 均通过。该修复不改变 wire、API/ABI，仍不代表 #242 或 V2 整体验收完成。
 dev.150 增加真实 TCP Endpoint 竞态回归：服务端成功 `FINAL_STATUS` 已被 Channel 接受并入 TX 队列、实际 `sendmsg` 遇到 EAGAIN 时，客户端发送 RESET；服务端保留本地已接受结果，客户端以 `DEADLINE_EXCEEDED` 终结一次，不交付迟到记录，且同连接健康调用继续成功。Release、TSan、ASan/UBSan 完整 `test_rpc_record_endpoint_tcp` 均通过。该测试补充 RESET/STATUS 交错证据，不声称 exactly-once 或 #242/V2 整体验收完成。
+dev.151 扩展真实 TCP Endpoint RESET 竞态：双向方法的响应 MESSAGE 已由 Endpoint/Channel 接受，且对应 DATA 帧的真实 `sendmsg` 已遇到 EAGAIN 时，客户端发送 RESET；服务端终局后不再接管新回复，解除背压后客户端不收到迟到消息，同连接健康调用仍完成。Release、TSan、ASan/UBSan 完整 `test_rpc_record_endpoint_tcp` 均通过。该测试补充 RESET/DATA 交错证据，不代表 #242 或 V2 整体验收完成。
 dev.28 增加只供测试使用的 RPC V2 有限状态参考模型与严格 JSON 轨迹回放，覆盖
 Call 终局、方向消息基数、迟到工作、槽代次和抽象预算租约。它为 #247 后续真实组件
 测试提供语义 oracle，不直接测试生产并发代码，也不代表 #247 或 V2 验收完成；运行

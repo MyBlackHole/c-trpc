@@ -38,6 +38,7 @@ int __real_tr_stream_sendv(struct tr_stream_handle, struct tr_buffer *const *,
                            uint32_t);
 static _Atomic(struct tr_channel *) observed_channel;
 static _Atomic unsigned blocked_kind, send_attempts[6];
+static _Atomic unsigned message_accepted[CAP];
 static _Atomic unsigned final_attempt_mask, final_accepted[CAP];
 static _Atomic(struct tr_channel *) client_channel;
 static _Atomic bool corrupt_open, reject_close, fail_detach, fail_timer_detach;
@@ -48,7 +49,8 @@ static _Atomic(struct tr_reactor *) fatal_reactor;
 static _Atomic bool fail_poll;
 /* 只在指定连接真正写入内核时注入 EAGAIN；上层仍须完成真实 TX 接管。 */
 static _Atomic int blocked_fd = -1, observed_fd = -1;
-static _Atomic unsigned blocked_writes, abort_kind;
+static _Atomic int blocked_data_fd = -1;
+static _Atomic unsigned blocked_writes, blocked_data_writes, abort_kind;
 static struct tr_conn_handle observed_connection;
 static _Atomic bool hold_final_transmit;
 ssize_t __real_sendmsg(int, const struct msghdr *, int);
@@ -56,6 +58,21 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *msg, int flags)
 {
 	if (fd == atomic_load(&blocked_fd)) {
 		atomic_fetch_add(&blocked_writes, 1);
+		if (msg->msg_iovlen > 0U &&
+		    msg->msg_iov[0].iov_len >= TR_WIRE_HEADER_SIZE &&
+		    !memcmp(msg->msg_iov[0].iov_base, "TRP1", 4) &&
+		    tr_get_le16((const uint8_t *)msg->msg_iov[0].iov_base +
+		                TR_WIRE_OFF_TYPE) == TR_FRAME_DATA)
+			atomic_fetch_add(&blocked_data_writes, 1);
+		errno = EAGAIN;
+		return -1;
+	}
+	if (fd == atomic_load(&blocked_data_fd) && msg->msg_iovlen > 0U &&
+	    msg->msg_iov[0].iov_len >= TR_WIRE_HEADER_SIZE &&
+	    !memcmp(msg->msg_iov[0].iov_base, "TRP1", 4) &&
+	    tr_get_le16((const uint8_t *)msg->msg_iov[0].iov_base +
+	                TR_WIRE_OFF_TYPE) == TR_FRAME_DATA) {
+		atomic_fetch_add(&blocked_data_writes, 1);
 		errno = EAGAIN;
 		return -1;
 	}
@@ -104,6 +121,8 @@ int __wrap_tr_stream_sendv(struct tr_stream_handle stream,
 	int ret = __real_tr_stream_sendv(stream, buffers, count);
 	if (server_kind == TR_RPC_RECORD_FINAL_STATUS && ret == TR_OK)
 		atomic_fetch_add(&final_accepted[stream.slot], 1);
+	if (server_kind == TR_RPC_RECORD_MESSAGE && ret == TR_OK)
+		atomic_fetch_add(&message_accepted[stream.slot], 1);
 	return ret;
 }
 struct gate {
@@ -672,12 +691,16 @@ static void fixture_init_full(struct fixture *f, uint64_t window,
 	atomic_store(&fail_poll, false);
 	atomic_store(&blocked_kind, 0);
 	atomic_store(&blocked_fd, -1);
+	atomic_store(&blocked_data_fd, -1);
 	atomic_store(&blocked_writes, 0);
+	atomic_store(&blocked_data_writes, 0);
 	atomic_store(&hold_final_transmit, false);
 	atomic_store(&abort_kind, 0);
 	for (unsigned i = 0; i < 6; ++i)
 		atomic_store(&send_attempts[i], 0);
 	atomic_store(&final_attempt_mask, 0);
+	for (unsigned i = 0; i < CAP; ++i)
+		atomic_store(&message_accepted[i], 0);
 	for (unsigned i = 0; i < CAP; ++i)
 		atomic_store(&final_accepted[i], 0);
 }
@@ -1784,6 +1807,79 @@ static void test_peer_reset_while_final_is_queued(void)
 	puts("rpc_record_endpoint_tcp: RESET during queued FINAL_STATUS "
 	     "passed");
 }
+static void test_peer_reset_while_message_is_queued(void)
+{
+	struct fixture f;
+	fixture_init(&f, 1024 * 1024, 8);
+	unsigned healthy = open_call(&f, 0);
+	unsigned interrupted = open_call(&f, 3);
+	CHECK(healthy != interrupted);
+	uint64_t open_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.server.channel) != 2) {
+		CHECK(now_ms() < open_until);
+		sched_yield();
+	}
+	wait_count(&f.business[interrupted].seen[TR_RPC_RECORD_OPEN], 1U);
+
+	/* 只阻塞 Server 的 DATA 帧；控制帧仍正常排空，且不半关闭调用。 */
+	atomic_store(&blocked_data_fd, atomic_load(&observed_fd));
+	send_record(&f, interrupted, 3, TR_RPC_RECORD_MESSAGE, 80);
+	wait_count(&f.business[interrupted].seen[TR_RPC_RECORD_MESSAGE], 1U);
+	wait_count(&message_accepted[interrupted], 1U);
+	wait_count(&blocked_data_writes, 1U);
+	CHECK(!atomic_load(&f.client.terminals[interrupted]) &&
+	      !atomic_load(&f.server.terminals[interrupted]) &&
+	      atomic_load(&f.client.messages[interrupted]) == 0U);
+	CHECK(atomic_load(&f.server.channel_down_events) == 0U &&
+	      atomic_load(&f.client.channel_down_events) == 0U);
+
+	/* MESSAGE 已接受但未到达客户端；RESET 必须终止该流并阻止迟到交付。 */
+	struct peer_reset_request reset = {f.client.streams[interrupted],
+	                                   TR_ERR_TIMEOUT};
+	CHECK(tr_reactor_call(f.client.reactor, reset_peer_on_owner, &reset) ==
+	      TR_OK);
+	wait_count(&f.client.terminals[interrupted], 1U);
+	wait_count(&f.server.terminals[interrupted], 1U);
+	uint64_t reset_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.server.channel) != 1U) {
+		CHECK(now_ms() < reset_until);
+		sched_yield();
+	}
+	unsigned message_accepted_at_server_terminal =
+	        atomic_load(&message_accepted[interrupted]);
+	CHECK(message_accepted_at_server_terminal > 0U);
+	CHECK(f.client.status[interrupted] == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      f.server.status[interrupted] == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      atomic_load(&f.client.terminals[interrupted]) == 1U &&
+	      atomic_load(&f.server.terminals[interrupted]) == 1U &&
+	      atomic_load(&f.client.messages[interrupted]) == 0U &&
+	      !f.server.final_accepted[interrupted]);
+
+	atomic_store(&blocked_data_fd, -1);
+	reset_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.client.channel) != 1U) {
+		CHECK(now_ms() < reset_until);
+		sched_yield();
+	}
+	CHECK(atomic_load(&message_accepted[interrupted]) ==
+	      message_accepted_at_server_terminal);
+	CHECK(atomic_load(&f.client.messages[interrupted]) == 0U);
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+
+	/* 背压解除后，未受 RESET 影响的同连接调用仍须完整成功。 */
+	request(&f, healthy, 0, 1, 80);
+	check_final(&f, healthy, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.terminals[healthy]) == 1U &&
+	      atomic_load(&f.server.terminals[healthy]) == 1U &&
+	      atomic_load(&f.client.messages[interrupted]) == 0U &&
+	      atomic_load(&f.client.terminals[interrupted]) == 1U &&
+	      atomic_load(&f.server.terminals[interrupted]) == 1U);
+	CHECK(atomic_load(&message_accepted[interrupted]) ==
+	      message_accepted_at_server_terminal);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: RESET during queued MESSAGE passed");
+}
 static void test_shutdown_failure(unsigned stage, bool withhold_open)
 {
 	struct fixture f;
@@ -2004,6 +2100,7 @@ int main(void)
 	test_peer_reset(false);
 	test_peer_reset(true);
 	test_peer_reset_while_final_is_queued();
+	test_peer_reset_while_message_is_queued();
 	test_shutdown_failure(0, false);
 	test_shutdown_failure(0, true);
 	test_shutdown_failure(1, false);
