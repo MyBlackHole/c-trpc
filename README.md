@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.157` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.158` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -26,6 +26,7 @@ dev.156 为 Server V2 方法增加固定类型化 observe、快速 admit 与异�
 dev.157 增加公共 TCP Client/Server 集成回归：服务端授权回调等到取消令牌置位后再迟到返回
 ALLOW，分别覆盖主动取消和 deadline；已终局调用不进入业务 work，后续健康调用仍可完成。
 这次只增加测试与验收记录，没有修改生产行为；#243 和 V2 整体验收仍未完成。
+dev.158 增加真实 RPC Record dispatch 队列饱和回归：单 worker 正在执行阻塞任务且其余执行器容量已排满时，带 authorize 的 OPEN 保留在有界重试路径；释放槽位后认证与业务 OPEN/MESSAGE/HALF_CLOSE 按序完成且唯一终结。该切片只补充共享执行器满载证据，不修改生产行为；#243 和 V2 整体验收仍未完成。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1/D2 全验证矩阵与 GitHub
 验收仍未完成；TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。

@@ -55,3 +55,22 @@ OPEN work 不会执行，观察回调与终局回调顺序正确，并在同一 
 测试夹具要求二进制位于项目 `build/linux/...`，临时文件位于工作区 `build/test-tmp`；验证期间未向
 `/tmp` 写入文件、日志或构建产物。此证据只关闭方法钩子在公共 SDK TCP 路径上的迟到 ALLOW
 集成缺口，仍不覆盖通用异步操作内核、显式操作引用、队列/并发组合或跨 TLS/压缩调度。
+
+## dev.158 共享执行器满载重试回归
+
+本次仅增加 `tests/test_rpc_record_dispatch.c` 集成测试与验收记录，没有修改生产代码、公共 ABI
+或 wire。测试在真实 RPC Record dispatch 所用的 TaskExecutor 上固定一个运行中的阻塞任务，
+再排满其余三个容量槽；带 authorize 的 OPEN 进入 dispatch 后，在持续满载期间不得开始认证、
+业务 work 或终局。释放阻塞任务后，之前已接受的四个任务均完成交付，OPEN 经有界 pump 重试，
+authorize、业务 OPEN/MESSAGE/HALF_CLOSE FIFO 执行且终局仅一次。
+
+| 配置 | 命令/覆盖 | 结果 |
+| --- | --- | --- |
+| GCC Release | `TMPDIR="$PWD/build/tmp" xmake test -P . -v -j1 'test_rpc_record_dispatch/*'` | 通过 |
+| GCC ASan/UBSan | `-m asan`，泄漏检查开启，同一 dispatch 目标 | 通过 |
+| GCC TSan | `-m tsan`，`halt_on_error=1:second_deadlock_stack=1`，同一目标 | 通过 |
+| GCC Release 全量 | `TMPDIR="$PWD/build/tmp" xmake build -P . --all -v`；`TMPDIR="$PWD/build/tmp" xmake test -P . -v -j1` | 构建通过；92/92 测试通过 |
+
+此证据验证队列满时的延期/恢复合同，不声称复现生产缺陷，也不覆盖完成队列满、永久执行器关闭、
+通用操作引用或多方向 TLS/压缩共享调度。完整注册测试及 clang-format 18.1.8 修改行检查已通过；
+当前 head GitHub CI 待 dev.158 推送后重新验收。所有本地测试临时路径均位于 `build/tmp`，未写入 `/tmp`。

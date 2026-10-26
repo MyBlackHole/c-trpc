@@ -2318,6 +2318,127 @@ static void test_v2_auth_hook_respects_pending_limit(void)
 	      atomic_load(&c.observed_terminal) == 1);
 	fixture_destroy(&f, false);
 }
+
+struct auth_queue_pressure;
+struct auth_queue_pressure_task {
+	struct auth_queue_pressure *pressure;
+	bool block;
+};
+struct auth_queue_pressure {
+	struct gate gate;
+	_Atomic unsigned done;
+	struct auth_queue_pressure_task tasks[4];
+};
+struct auth_queue_pressure_request {
+	struct fixture *fixture;
+	struct auth_queue_pressure *pressure;
+	struct tr_task_executor_stats stats;
+};
+
+static int auth_queue_pressure_work(void *arg,
+                                    const struct tr_task_cancel *cancel)
+{
+	struct auth_queue_pressure_task *task = arg;
+	(void)cancel;
+	if (task->block)
+		gate_wait(&task->pressure->gate, true);
+	return TR_OK;
+}
+
+static void auth_queue_pressure_done(void *arg, struct tr_task_handle handle,
+                                     struct tr_task_result result)
+{
+	struct auth_queue_pressure_task *task = arg;
+	(void)handle;
+	CHECK(result.work_status == TR_OK && !result.cancelled);
+	atomic_fetch_add(&task->pressure->done, 1);
+}
+
+static int auth_queue_pressure_fill_on_owner(void *arg)
+{
+	struct auth_queue_pressure_request *request = arg;
+	for (unsigned i = 0; i < 4; ++i) {
+		struct tr_task_spec spec = {auth_queue_pressure_work,
+		                            auth_queue_pressure_done,
+		                            &request->pressure->tasks[i]};
+		struct tr_task_handle handle;
+		int ret = tr_task_executor_submit(request->fixture->executor,
+		                                  &spec, &handle);
+		if (ret != TR_OK)
+			return ret;
+	}
+	return TR_OK;
+}
+
+static int auth_queue_pressure_snapshot_on_owner(void *arg)
+{
+	struct auth_queue_pressure_request *request = arg;
+	return tr_task_executor_get_stats(request->fixture->executor,
+	                                  &request->stats);
+}
+
+static void test_v2_auth_hook_retries_when_executor_is_full(void)
+{
+	struct fixture f;
+	struct producer_case c;
+	struct auth_queue_pressure pressure = {0};
+	struct auth_queue_pressure_request request = {
+	        .fixture = &f,
+	        .pressure = &pressure,
+	};
+	producer_case_init(&c);
+	c.hooks_enabled = true;
+	c.hook_mode = HOOK_TEST_AUTH_ALLOW;
+	c.executor_workers = 1;
+	c.authorization_result = (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+	fixture_init_mode(&f, 1024 * 1024, 8, &c, 1);
+	gate_init(&pressure.gate);
+	atomic_init(&pressure.done, 0);
+	for (unsigned i = 0; i < 4; ++i)
+		pressure.tasks[i] =
+		        (struct auth_queue_pressure_task){&pressure, i == 0};
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      auth_queue_pressure_fill_on_owner,
+	                      &request) == TR_OK);
+	gate_wait(&pressure.gate, false);
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      auth_queue_pressure_snapshot_on_owner,
+	                      &request) == TR_OK);
+	CHECK(request.stats.capacity == 4 &&
+	      request.stats.outstanding == request.stats.capacity &&
+	      request.stats.queued == 3 && request.stats.running == 1);
+
+	unsigned slot = hook_open(&f, &c);
+	wait_count(&c.observed_open, 1);
+	send_record(&f, slot, 1, TR_RPC_RECORD_MESSAGE, 8);
+	send_record(&f, slot, 1, TR_RPC_RECORD_HALF_CLOSE, 0);
+	unsigned drive_turn = atomic_load(&f.drive_turns);
+	wait_count(&f.drive_turns, drive_turn + 10);
+	CHECK(atomic_load(&c.authorization_calls) == 0 &&
+	      atomic_load(&c.work_calls) == 0 && !atomic_load(&c.terminals));
+	CHECK(tr_reactor_call(f.server.reactor,
+	                      auth_queue_pressure_snapshot_on_owner,
+	                      &request) == TR_OK);
+	CHECK(request.stats.outstanding == request.stats.capacity &&
+	      request.stats.queued == 3 && request.stats.running == 1);
+
+	gate_open(&pressure.gate);
+	wait_count(&pressure.done, 4);
+	wait_count(&c.authorization_calls, 1);
+	wait_count(&c.terminals, 1);
+	wait_count(&f.client.terminals[slot], 1);
+	CHECK(f.client.status[slot] == TR_RPC_STATUS_OK &&
+	      c.status == TR_RPC_STATUS_OK &&
+	      atomic_load(&c.authorization_calls) == 1 &&
+	      atomic_load(&c.work_calls) == 3 &&
+	      atomic_load(&c.order_count) == 7 && c.order[0] == 1 &&
+	      c.order[1] == 2 && c.order[2] == 100 && c.order[3] == 200 &&
+	      c.order[4] == 201 && c.order[5] == 202 && c.order[6] == 3);
+	fixture_destroy(&f, false);
+	gate_destroy(&pressure.gate);
+}
+
 static void test_producer_real_window(void)
 {
 	struct fixture f;
@@ -2864,6 +2985,7 @@ int main(void)
 	test_v2_auth_hook_invalid_result_is_internal();
 	test_v2_late_auth_allow_cannot_revive_cancelled_call();
 	test_v2_auth_hook_respects_pending_limit();
+	test_v2_auth_hook_retries_when_executor_is_full();
 	test_producer_staged_and_retry();
 	test_producer_real_window();
 	test_producer_failure_preserves_phase();

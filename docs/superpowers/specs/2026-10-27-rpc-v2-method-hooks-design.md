@@ -120,5 +120,6 @@ Tests must run against the actual `TaskExecutor` and RPC Record dispatch path. R
 6. Pending events during authentication remain bounded; full per-call queue rejects the call without starting application work.
 7. Invalid admission/auth result structures map to INTERNAL.
 8. Public SDK header compiles as C11 and C++11; install consumer exercises method hook layout.
+9. With one worker blocked and all remaining executor slots occupied, an authorize OPEN remains pending without invoking authorization/business work; once capacity returns, authorization and OPEN/MESSAGE/HALF_CLOSE finish in order exactly once.
 
 Xmake tests and all generated test output must remain under the worktree `build/` tree. Run Xmake with `TMPDIR="$PWD/build/tmp"` and `-P .`; do not create test artifacts under `/tmp`.

@@ -198,6 +198,19 @@ This follow-up adds production-path evidence for the already implemented owner l
 - [x] Verify a subsequent healthy call on the same Client/Server completes and both calls report one terminal.
 - [x] Run the SDK target in GCC Release, GCC ASan/UBSan, GCC TSan and Clang Release.
 - [x] Run the full GCC Release suite with the project `build/linux/...` binary layout and worktree `build/test-tmp`; 92/92 pass, including 40k RESET turnover.
-- [ ] Push the versioned dev.157 follow-up to PR #330, confirm CI for the exact head, and update the GitHub progress ledger without merging the PR.
+- [x] Push the versioned dev.157 follow-up to PR #330, confirm CI for the exact head, and update the GitHub progress ledger without merging the PR.
 
 The rest of issue #243 remains open: generic async operation kernel and explicit operation references, completion/retirement barriers, single-worker/full-queue/read-write concurrency contracts, and shared TLS/compression scheduler acceptance.
+
+## Follow-up: authorization retry under executor saturation (dev.158)
+
+This follow-up adds an actual dispatch/TaskExecutor regression for the queue-pressure behavior already required by the method-hook contract. It does not change production behavior.
+
+- [x] Run a single worker task behind a gate and fill the remaining three slots in the shared executor.
+- [x] Submit an authorize OPEN plus MESSAGE and HALF_CLOSE; verify repeated owner pumps do not start authorization, business work, or a terminal callback while capacity is full.
+- [x] Release the gate and verify the accepted executor tasks retire, the OPEN is retried once, and OPEN/MESSAGE/HALF_CLOSE work completes in order with one terminal result.
+- [x] Run the dispatch target in GCC Release, GCC ASan/UBSan, and GCC TSan.
+- [x] Run the complete GCC Release build and registered suite: 92/92 pass; pinned clang-format 18.1.8 checks all changed C-family lines.
+- [ ] Push dev.158 to PR #330, verify CI for the exact head, and update the GitHub progress record without merging.
+
+The next #243 items remain the generic asynchronous operation kernel, explicit operation references, completion/retirement barriers, broader single-worker/queue/read-write concurrency, and shared TLS/compression scheduling.
