@@ -32,6 +32,7 @@ struct fixture {
 	struct tr_reactor *reactor;
 	struct tr_channel *channel;
 	struct tr_conn_handle connection[2];
+	int adopted_fd[2];
 	int peer[2];
 	int split;
 	struct tr_buffer_pool pool;
@@ -70,6 +71,7 @@ static atomic_int partial_type = TR_FRAME_STREAM_RESET;
 static atomic_int block_partial;
 static atomic_uint partial_eagain;
 static atomic_int block_all_tx;
+static atomic_uint blocked_reset_eagain;
 static atomic_int repeat_goaway_phase;
 static atomic_int force_local_stream_id_exhaustion;
 static struct tr_reactor_timer_handle repeat_goaway_timer;
@@ -103,6 +105,14 @@ ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
 	if (fd == atomic_load(&partial_fd)) {
 		if (atomic_load(&block_all_tx)) {
+			if (message->msg_iovlen &&
+			    message->msg_iov[0].iov_len >=
+			            TR_WIRE_HEADER_SIZE &&
+			    tr_get_le16((const uint8_t *)message->msg_iov[0]
+			                        .iov_base +
+			                TR_WIRE_OFF_TYPE) ==
+			            TR_FRAME_STREAM_RESET)
+				atomic_fetch_add(&blocked_reset_eagain, 1U);
 			errno = EAGAIN;
 			return -1;
 		}
@@ -471,6 +481,7 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	        .memory_budget = memory_budget};
 	memset(f, 0, sizeof(*f));
 	f->peer[0] = f->peer[1] = -1;
+	f->adopted_fd[0] = f->adopted_fd[1] = -1;
 	f->split = split;
 	assert(pthread_mutex_init(&f->lock, NULL) == 0);
 	assert(pthread_cond_init(&f->cond, NULL) == 0);
@@ -486,6 +497,7 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 		                  sockets) == 0);
 		assert(tr_reactor_adopt_fd(f->reactor, sockets[0],
 		                           &f->connection[lane]) == TR_OK);
+		f->adopted_fd[lane] = sockets[0];
 		f->peer[lane] = sockets[1];
 		/* 被测 sendmsg 只触达已交给 Reactor 的精确 fd。 */
 		if (!lane)
@@ -493,6 +505,8 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	}
 	if (!split)
 		f->connection[1] = f->connection[0];
+	if (!split)
+		f->adopted_fd[1] = f->adopted_fd[0];
 	assert(tr_channel_create(&cc, f->connection[0], f->connection[1],
 	                         on_data, on_stream, on_channel, f,
 	                         &f->channel) == TR_OK);
@@ -534,6 +548,7 @@ static void destroy_fixture(struct fixture *f)
 	atomic_store(&partial_eagain, 0);
 	atomic_store(&block_partial, 0);
 	atomic_store(&block_all_tx, 0);
+	atomic_store(&blocked_reset_eagain, 0);
 	atomic_store(&repeat_goaway_phase, 0);
 	assert(tr_reactor_destroy(f->reactor) == TR_OK);
 	for (unsigned lane = 0; lane < (f->split ? 2U : 1U); ++lane)
@@ -1583,6 +1598,75 @@ static void test_data_before_close_during_split_reset(unsigned reset_lane)
 	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
 	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
 	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void
+test_data_after_peer_reset_with_response_backpressure(unsigned reset_lane)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	struct tr_stream_flow_state flow;
+	enum tr_lane failed_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+
+	/* 仅阻塞目标物理连接，并记录 RESET 响应遇到 EAGAIN。 */
+	atomic_store(&partial_fd, f.adopted_fd[reset_lane]);
+	atomic_store(&blocked_reset_eagain, 0U);
+	atomic_store(&block_all_tx, 1);
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		if (atomic_load(&blocked_reset_eagain) != 0U)
+			break;
+		pause_ms();
+	}
+	assert(atomic_load(&blocked_reset_eagain) != 0U);
+	assert(count(&f, &f.resets) == 1U &&
+	       f.reset_status[0] == TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_ERR_STALE);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 响应仍被背压阻塞时，FIFO 后续 DATA 必须关闭目标物理连接。 */
+	send_frame(&f, reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(count(&f, &f.errors) == 0U && count(&f, &f.closed) == 1U);
+	assert(count(&f, &f.received) == 0U);
+	assert(tr_channel_get_lane_state(f.channel, failed_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 目标 lane 协议失败后，健康同伴 lane 仍可继续进展。 */
+	atomic_store(&block_all_tx, 0);
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1U - reset_lane);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 1U &&
 	       tr_channel_active_streams(f.channel) == 0U);
 	destroy_fixture(&f);
 }
@@ -2776,6 +2860,8 @@ int main(void)
 	test_data_after_close_during_split_reset(1U);
 	test_data_before_close_during_split_reset(0U);
 	test_data_before_close_during_split_reset(1U);
+	test_data_after_peer_reset_with_response_backpressure(0U);
+	test_data_after_peer_reset_with_response_backpressure(1U);
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
