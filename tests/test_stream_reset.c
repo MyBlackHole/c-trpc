@@ -1514,6 +1514,79 @@ static void test_data_after_close_during_split_reset(unsigned reset_lane)
 	destroy_fixture(&f);
 }
 
+static void test_data_before_close_during_split_reset(unsigned reset_lane)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	struct tr_stream_flow_state flow;
+	struct tr_channel_stats stats_before, stats_after;
+	enum tr_lane target_lane =
+	        reset_lane == 0U ? TR_LANE_CONTROL : TR_LANE_BULK;
+	enum tr_lane healthy_lane =
+	        reset_lane == 0U ? TR_LANE_BULK : TR_LANE_CONTROL;
+	enum tr_channel_lane_state lane_state;
+	assert(reset_lane < 2U);
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle reset_stream =
+	        open_remote(&f, reset_lane, 1U, 1U);
+	struct tr_stream_handle live_stream =
+	        open_remote(&f, 1U - reset_lane, 3U, 2U);
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	struct tr_frame_header h = receive_frame(&f, reset_lane);
+	assert(h.type == TR_FRAME_STREAM_RESET && h.stream_id == 1U);
+	assert(tr_channel_get_stats(f.channel, &stats_before) == TR_OK);
+
+	/* FIFO DATA 早于 CLOSE：RESETTING 路径丢弃正文并记账，不向应用交付。 */
+	send_frame(&f, reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1U, 1U, bytes,
+	           sizeof(bytes));
+	barrier(&f, reset_lane);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == sizeof(bytes) &&
+	       flow.rx_consumed_bytes == sizeof(bytes));
+	assert(flow.rx_advertised_limit == WINDOW);
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+	assert(count(&f, &f.received) == 0U && count(&f, &f.down) == 0U);
+
+	/* 后续 FIFO CLOSE 结束半侧，但不越过尚未完成的 RESET 屏障。 */
+	send_frame(&f, reset_lane, TR_FRAME_STREAM_CLOSE, 0, 1U, 0, NULL, 0);
+	barrier(&f, reset_lane);
+	assert(count(&f, &f.down) == 0U && count(&f, &f.closed) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 2U);
+	assert(tr_stream_get_flow_state(reset_stream, &flow) == TR_OK);
+	assert(flow.rx_received_bytes == sizeof(bytes) &&
+	       flow.rx_consumed_bytes == sizeof(bytes));
+	assert(tr_channel_get_stats(f.channel, &stats_after) == TR_OK);
+	assert(stats_after.window_updates_tx == stats_before.window_updates_tx);
+
+	peer_reset(&f, reset_lane, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.closed, 1U);
+	barrier(&f, reset_lane);
+	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 1U);
+	assert(tr_channel_get_lane_state(f.channel, target_lane, &lane_state) ==
+	       TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+	assert(tr_channel_get_lane_state(f.channel, healthy_lane,
+	                                 &lane_state) == TR_OK);
+	assert(lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 完成 RESET 后，另一 lane 仍交付健康流并正常收敛。 */
+	send_frame(&f, 1U - reset_lane, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3U, 1U, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	barrier(&f, 1U - reset_lane);
+	assert(count(&f, &f.down) == 0U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1U - reset_lane, 3U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(count(&f, &f.down) == 0U &&
+	       tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_reset_rejects_compressed_data_lane_flag(void)
 {
 	struct fixture f;
@@ -2701,6 +2774,8 @@ int main(void)
 	test_close_order_around_split_reset(1U);
 	test_data_after_close_during_split_reset(0U);
 	test_data_after_close_during_split_reset(1U);
+	test_data_before_close_during_split_reset(0U);
+	test_data_before_close_during_split_reset(1U);
 	test_reset_begun_held_payload_release_without_credit();
 	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
