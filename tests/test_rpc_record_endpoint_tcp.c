@@ -1720,6 +1720,70 @@ static void test_peer_reset(bool after_final)
 	      atomic_load(&f.server.terminals[slot]) == 1);
 	fixture_destroy(&f, false);
 }
+static void test_peer_reset_while_final_is_queued(void)
+{
+	struct fixture f;
+	fixture_init(&f, 1024 * 1024, 8);
+	unsigned healthy = open_call(&f, 0);
+	unsigned uncertain = open_call(&f, 0);
+	CHECK(healthy != uncertain);
+	uint64_t open_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.server.channel) != 2) {
+		CHECK(now_ms() < open_until);
+		sched_yield();
+	}
+	atomic_store(&hold_final_transmit, true);
+	request(&f, uncertain, 0, 1, 80);
+	wait_count(&f.server.terminals[uncertain], 1);
+	wait_count(&blocked_writes, 1);
+	CHECK(f.server.status[uncertain] == TR_RPC_STATUS_OK &&
+	      f.server.final_accepted[uncertain] &&
+	      atomic_load(&final_accepted[uncertain]) == 1);
+	CHECK(!atomic_load(&f.client.terminals[uncertain]));
+	unsigned messages_before_reset =
+	        atomic_load(&f.client.messages[uncertain]);
+
+	/* FINAL_STATUS 已由 Server 接受并排入真实 Channel TX，但 sendmsg
+	 * 因 EAGAIN 尚未抵达 Client。此时 Client RESET，结果对 Client 未知。 */
+	struct peer_reset_request reset = {f.client.streams[uncertain],
+	                                   TR_ERR_TIMEOUT};
+	CHECK(tr_reactor_call(f.client.reactor, reset_peer_on_owner, &reset) ==
+	      TR_OK);
+	wait_count(&f.client.terminals[uncertain], 1);
+	uint64_t reset_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.server.channel) != 1) {
+		CHECK(now_ms() < reset_until);
+		sched_yield();
+	}
+	CHECK(f.client.status[uncertain] == TR_RPC_STATUS_DEADLINE_EXCEEDED &&
+	      atomic_load(&f.client.terminals[uncertain]) == 1);
+	CHECK(f.server.status[uncertain] == TR_RPC_STATUS_OK &&
+	      atomic_load(&f.server.terminals[uncertain]) == 1 &&
+	      f.server.final_accepted[uncertain] &&
+	      atomic_load(&final_accepted[uncertain]) == 1);
+
+	atomic_store(&blocked_fd, -1);
+	uint64_t reset_ack_until = now_ms() + 15000;
+	while (tr_channel_active_streams(f.client.channel) != 1) {
+		CHECK(now_ms() < reset_ack_until);
+		sched_yield();
+	}
+	CHECK(atomic_load(&f.client.messages[uncertain]) ==
+	      messages_before_reset);
+	CHECK(atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) == 1);
+	CHECK(!atomic_load(&f.client.channel_down_events) &&
+	      !atomic_load(&f.server.channel_down_events));
+
+	/* 不确定的旧调用不污染同连接后续调用。 */
+	request(&f, healthy, 0, 1, 80);
+	check_final(&f, healthy, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.terminals[healthy]) == 1 &&
+	      atomic_load(&f.server.terminals[healthy]) == 1 &&
+	      atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) == 2);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: RESET during queued FINAL_STATUS "
+	     "passed");
+}
 static void test_shutdown_failure(unsigned stage, bool withhold_open)
 {
 	struct fixture f;
@@ -1939,6 +2003,7 @@ int main(void)
 	test_window_stream_isolation();
 	test_peer_reset(false);
 	test_peer_reset(true);
+	test_peer_reset_while_final_is_queued();
 	test_shutdown_failure(0, false);
 	test_shutdown_failure(0, true);
 	test_shutdown_failure(1, false);

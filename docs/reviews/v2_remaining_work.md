@@ -252,6 +252,8 @@ dev.148 为 #242/ERR-B 补充同连接健康流前进回归：RESET 响应部分
 
 dev.149 修正 #242/ERR-A 的异步压缩结果作用域：`INTERNAL`/未知 outcome，以及服务报告 `OK` 却没有有效输出的本地契约损坏，现释放任务资源并关闭承载该结果的精确物理连接；`BAD_DATA`、`LIMIT`、真实 `NOMEM` 仍按单流处理。Release、TSan、ASan/UBSan 的完整 `test_transport` 均通过，新增真实 Channel 两流回归确认不发 RESET、两流都终结且预算归零。没有改变 wire/API/ABI；#242 的 ERR-B/C/D/E、TLS 记录完整性负例、长时资源公平和全局回收矩阵仍待验收。详见[生产错误作用域对照审计](rpc_v2_error_scope_production_audit_20261026.md)。
 
+dev.150 为 #242 补上真实 TCP Endpoint 的 RESET/`FINAL_STATUS` 交错：服务端已接受成功 FINAL 并排入 TX 后，测试用实际 `sendmsg` EAGAIN 阻止抵达；客户端在此期间 RESET，看到 `DEADLINE_EXCEEDED` 且终局计数为一，服务端保留已接受的 OK 结果；释放阻塞后不多交付记录，健康同伴在同一 TCP 连接完成。完整 `test_rpc_record_endpoint_tcp` 在 Release、TSan、ASan/UBSan 均通过。本证据只覆盖结果不确定的这一时序，不声称业务 exactly-once；#242 其余错误隔离、配额公平、RESET/FIFO 完整矩阵、GOAWAY/连接组接受边界与全局回收仍待验收。详见[RESET 与已排队 FINAL_STATUS 竞态](rpc_v2_reset_final_status_race_20261026.md)。
+
 
 
 
