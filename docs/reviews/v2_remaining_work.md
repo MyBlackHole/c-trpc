@@ -16,7 +16,7 @@ dev.169：为 Server TLS 凭证 API 补同一 fetch/cancel 返回屏障：fetch 
 
 dev.170：提交 `0633ff97703e8a3b85e48801b11c984c7800016e` 为开环重复性运行器加入 TLS/压缩开关，并在 bench 清理时重试公开契约允许的 Client `TR_AGAIN`。GCC Release `bench_rpc` 构建通过；RPC benchmark 单测 71/71、源码格式门禁自测 22/22 通过，新增 C helper 的 clang-format 18.1.8 changed-line 检查通过。真实 TLS 1.3 + Zstd 低负载 3000 RPS 三个公开 profile 均为 1/1 干净；每条 Server/Client 命令均记录并使用 `--tls 1 --compression zstd`。该输出记录源码提交 `0633ff9`、二进制 SHA-256 `5e6012e582e38c937f9e499e26694e009eb6e0f0506cc298a2aeeb3f96ea2170`。
 
-同一源码提交、二进制、AMD Ryzen 7 PRO 4750U 主机和 CPU 0–3 亲和性下，40k 开环时间表分别运行明文/无压缩与 TLS+Zstd，每种配置 3 trials × 3 profiles。所有 profile 都是 0/3 干净；CONTROL TX 池耗尽、发生器丢弃和调度迟到在每种配置的 9/9 样本复现。下表中的成功 `ok_rps` 只是受压本机观察值，不是稳定吞吐量；由于发生器丢弃和迟到，两组不能据此解释为 TLS/Zstd 的性能开销或发布容量结论。
+同一源码提交、二进制、AMD Ryzen 7 PRO 4750U 主机和 CPU 0–3 亲和性下，40k 开环时间表分别运行明文/无压缩与 TLS+Zstd，每种配置 3 trials × 3 profiles。该 affinity 是 4 个逻辑线程、仅覆盖 2 个物理核。所有 profile 都是 0/3 干净；CONTROL TX 池耗尽、发生器丢弃和调度迟到在每种配置的 9/9 样本复现。下表中的成功 `ok_rps` 只是受压本机观察值，不是稳定吞吐量；由于发生器丢弃和迟到，两组不能据此解释为 TLS/Zstd 的性能开销或发布容量结论。
 
 | 传输配置 | profile | 中位成功 RPC/s | 中位发生器丢弃 | 调度迟到 P99 中位数 |
 |---|---|---:|---:|---:|
@@ -26,6 +26,26 @@ dev.170：提交 `0633ff97703e8a3b85e48801b11c984c7800016e` 为开环重复性�
 | TLS / Zstd | small | 1,166.7 | 8,967 | 79.4 ms |
 | TLS / Zstd | default | 1,518.8 | 8,953 | 105.1 ms |
 | TLS / Zstd | large | 1,355.6 | 8,974 | 130.1 ms |
+
+为区分传输配置和本机发生器/服务压力，在相同主机、源码 head `6354f0a`、dev.170 二进制 SHA-256、CPU 0–3 亲和性（2 个物理核）下，再对 3k/5k/10k RPS、250 ms 时间窗运行明文/none 与 TLS/Zstd，每个配置均为 3 trials × 3 profiles。逐条核对 JSONL 中 Server 和每个 Client 命令的 `--tls`、`--compression` 参数，9 组输出均与 metadata 一致。结果如下；“clean”按运行器的全部发生器/RPC/Server 信号判定：
+
+| 速率 | 明文 / none clean | TLS / Zstd clean | Server 压力 | 发生器信号 |
+|---:|---:|---:|---|---|
+| 3k | 9/9 | 5/9 | 两配置均 0/9 | 明文 0/9；TLS/Zstd 4/9 迟到，无丢弃 |
+| 5k | 2/9 | 0/9 | 两配置均 0/9 | 明文 7/9 迟到；TLS/Zstd 9/9 丢弃且迟到 |
+| 10k | 0/9 | 0/9 | 两配置均 9/9 CONTROL TX 池耗尽 | 两配置均 9/9 丢弃且迟到 |
+
+3k 时两种配置的成功速率中位数接近；5k 的 TLS/Zstd 小型 profile 另有 3/3 次 RPC `RESOURCE_EXHAUSTED`。这些 5k/10k 数据已受到发生器信号影响，10k 还同时触发 Server 压力，故不据此计算 TLS/Zstd 开销或宣布容量。当前主机只证明低负载 TLS/Zstd 参数能端到端传递且 Server 无压力；TEST-E 的固定验收硬件、预算线和性能结论仍待补齐。2 物理核结果的原始 JSONL（`3k-250ms-plain-v170.jsonl`、`3k-250ms-tls-zstd-v170.jsonl`、`5k-250ms-plain-v170.jsonl`、`5k-250ms-tls-zstd-v170.jsonl`、`10k-250ms-plain-v170.jsonl`、`10k-250ms-tls-zstd-v170.jsonl`）和临时凭证留在忽略目录 `build/rpc-bench-test/`、`build/test-tmp/`，不进入版本库。
+
+发现 CPU 0–3 只覆盖 2 个物理核后，在同一主机上又以 `0,2,4,6,8,10,12,14`（每个物理核一个 SMT 线程）运行 TLS/Zstd，仍使用 250 ms 时间窗和 3 trials × 3 profiles：
+
+| 速率 | clean | Server 压力 | 发生器/RPC 信号 |
+|---:|---:|---:|---|
+| 3k | 6/9 | 0/9 | 3/9 调度迟到，无丢弃 |
+| 5k | 0/9 | 0/9 | 8/9 丢弃、9/9 迟到；small profile 3/3 `RESOURCE_EXHAUSTED` |
+| 10k | 0/9 | 9/9 CONTROL TX 池耗尽 | 9/9 丢弃且迟到 |
+
+相比 2 物理核，8 物理核的 10k 成功速率更高，但未消除发生器和 Server 信号。该扩核数据没有明文对照，也仍是短窗口诊断；不构成性能对比或 TEST-E 容量验收。相关原始 JSONL（`3k-250ms-tls-zstd-8physical-v170.jsonl`、`5k-250ms-tls-zstd-8physical-v170.jsonl`、`10k-250ms-tls-zstd-8physical-v170.jsonl`）及凭证均留在忽略目录，未纳入提交。
 
 原始 JSONL 仅保存在本机忽略目录 `build/rpc-bench-test/40k-none-v170.jsonl`、`build/rpc-bench-test/40k-tls-zstd-v170.jsonl` 和 `build/rpc-bench-test/3k-tls-zstd-v170.jsonl`；临时 CA 与私钥留在 `build/test-tmp/`，均未加入仓库。本切片只增加诊断运行器能力，不改 RPC 运行时、公开 API/ABI 或 wire；TEST-E 仍需按固定基准机、预算和平台矩阵验收。
 
