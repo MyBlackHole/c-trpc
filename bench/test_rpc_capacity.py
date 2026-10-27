@@ -2,6 +2,7 @@
 import copy
 import unittest
 
+import run_rpc_capacity
 from run_rpc_capacity import validate_open_phase
 
 
@@ -24,6 +25,36 @@ def row():
 
 
 class OpenLoopAccountingTests(unittest.TestCase):
+    def test_transport_arguments_explicitly_select_none_by_default(self):
+        builder = getattr(run_rpc_capacity, "transport_cli_args", None)
+        self.assertIsNotNone(builder, "capacity runner needs shared transport args")
+        if builder is None:
+            return
+        self.assertEqual(builder({}), ["--compression", "none", "--tls", "0"])
+
+    def test_transport_arguments_apply_tls_and_compression_to_each_process(self):
+        builder = getattr(run_rpc_capacity, "transport_cli_args", None)
+        self.assertIsNotNone(builder, "capacity runner needs shared transport args")
+        if builder is None:
+            return
+        self.assertEqual(
+            builder({
+                "compression": "zstd", "tls": True,
+                "tls_ca": "ca.pem", "tls_cert": "server.pem",
+                "tls_key": "server.key",
+            }),
+            ["--compression", "zstd", "--tls", "1", "--tls-ca", "ca.pem",
+             "--tls-cert", "server.pem", "--tls-key", "server.key"],
+        )
+
+    def test_transport_arguments_reject_tls_without_credentials(self):
+        builder = getattr(run_rpc_capacity, "transport_cli_args", None)
+        self.assertIsNotNone(builder, "capacity runner needs shared transport args")
+        if builder is None:
+            return
+        with self.assertRaisesRegex(ValueError, "TLS credentials"):
+            builder({"tls": True})
+
     def test_valid(self):
         validate_open_phase(row(), 10, 10, 8)
 

@@ -230,6 +230,34 @@ python3 bench/run_rpc_capacity.py \
   --output /tmp/rpc-bench/open-loop-custom.jsonl
 ```
 
+### TLS 与压缩重复性测试
+
+`run_rpc_repeatability.py` 可在相同的固定速率时间表上启用 TLS 1.3 和四种压缩模式，
+便于分别记录传输设置对发生器、Client、Server 和资源信号的影响：
+
+- `--compression none|request|response|zstd`，默认显式使用 `none`；
+- `--tls` 启用 TLS，需同时提供 `--tls-ca`、`--tls-cert` 和 `--tls-key`；
+- 同一组 TLS/压缩参数会传给 Server 和所有 Client 发生器；
+- metadata、每个 case 和 summary 都保留实际配置，JSON schema 仍为 2。
+
+示例假设 CA、服务端证书和私钥已准备好，且证书身份适用于回环地址：
+
+```sh
+python3 bench/run_rpc_repeatability.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --trials 3 --rate 40000 --requests 10000 \
+  --label local-gcc-release-40k-tls-zstd \
+  --compression zstd --tls \
+  --tls-ca build/test-tls/ca.pem \
+  --tls-cert build/test-tls/server.pem \
+  --tls-key build/test-tls/server.key \
+  --output build/rpc-bench/40k-tls-zstd.jsonl
+```
+
+对照运行应使用同一二进制、机器、CPU 亲和性、速率和试验次数，并分别指定配置与输出文件。
+`clean_trials`、发生器丢弃/迟到、RPC 拒绝、延迟和资源记录用于解释结果；该运行器不设置
+QPS 或 P99 通过线。TLS 需要有效的 CA、服务端证书及私钥；证书路径会在启动 Server 前检查。
+
 Server 执行器队列耗尽时，
 只要请求仍处于**首个业务任务尚未进入执行器**的准入阶段，
 就会显式返回容量拒绝，而不是伪装成连接故障：

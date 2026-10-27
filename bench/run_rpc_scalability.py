@@ -19,6 +19,7 @@ from run_rpc_bench import (
     validate_server_exit,
 )
 from run_rpc_capacity import run_case as run_capacity_case
+from run_rpc_capacity import transport_cli_args
 from run_rpc_capacity import validate_open_phase
 
 
@@ -118,6 +119,9 @@ def aggregate_client_rows(rows: list[dict[str, Any]],
 
 def run_multisource_case(binary: Path, case: dict[str, Any],
                          output_dir: Path) -> dict[str, Any]:
+    case = {**case, "compression": case.get("compression", "none"),
+            "tls": case.get("tls", False)}
+    transport_args = transport_cli_args(case)
     output_dir.mkdir(parents=True, exist_ok=True)
     bulk_bytes = int(case.get("bulk_bytes", 65536))
     server_common = ["--capacity", str(case["capacity"]),
@@ -127,7 +131,7 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
     client_common = ["--capacity", str(generator_capacity),
                      "--bulk-bytes", str(int(case.get("generator_bulk_bytes", bulk_bytes)))]
     server_cmd = [str(binary), "server", *server_common,
-                  "--slow-ms", str(case["slow_ms"])]
+                  *transport_args, "--slow-ms", str(case["slow_ms"])]
     rates = split_rates(case["rate_rps"], case["generators"])
     requests = split_weighted_total(case["requests"], rates)
     warmups = split_weighted_total(max(case["generators"], case["warmup"]), rates)
@@ -151,6 +155,7 @@ def run_multisource_case(binary: Path, case: dict[str, Any],
         for index, (rate, request_count, warmup_count) in enumerate(
                 zip(rates, requests, warmups)):
             command = [str(binary), "client", *client_common,
+                       *transport_args,
                        "--port", str(ready["port"]),
                        "--window", str(generator_window),
                        "--scenario", "open",
@@ -302,6 +307,7 @@ def metadata(binary: Path, label: str, capacities: list[int],
         "slow_ms": handlers, "offered_rates_rps": rates,
         "window": window, "max_generators": max_generators,
         "target_rate_per_generator": target_rate_per_generator,
+        "tls_enabled": False, "compression": "none",
         "load_model": "fixed-rate V2 unary arrivals; bounded public call limits; "
                        "scheduler drops and terminal latency are reported",
         "attribution": "client accounting and existing V2 Reactor/pool signals; "
