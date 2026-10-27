@@ -1,10 +1,12 @@
 #define _GNU_SOURCE
 #include "../src/execution/command_queue.h"
+#include "../src/execution/async_operation_internal.h"
 #include "../src/execution/reactor.h"
 #include "tr/status.h"
 #include "../src/transport/protocol/wire.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/execution/completion_queue.h"
+#include "../src/memory_budget.h"
 
 #include <assert.h>
 #include <errno.h>
@@ -44,7 +46,9 @@ enum scenario {
 	STOP_DRAIN,
 	FULL_STOP,
 	COMPLETION_FULL_WAIT,
-	COMPLETION_FULL_STOP
+	COMPLETION_FULL_STOP,
+	OPERATION_COMPLETION_FULL_WAIT,
+	OPERATION_COMPLETION_FULL_STOP
 };
 
 struct test_ctx {
@@ -53,6 +57,11 @@ struct test_ctx {
 	struct tr_reactor *reactor;
 	struct tr_conn_handle connection;
 	struct tr_reactor_timer_handle timer;
+	struct tr_memory_budget operation_budget;
+	struct tr_async_operation_pool *operation_pool;
+	struct tr_async_operation operation;
+	struct tr_async_operation_ref operation_producer_ref;
+	struct tr_async_operation_ref operation_completion_ref;
 	enum scenario scenario;
 	int peer_fd;
 	int gate_entered;
@@ -73,6 +82,11 @@ struct test_ctx {
 	unsigned polls;
 	unsigned completions;
 	unsigned completions_after_stop;
+	unsigned operation_callbacks;
+	unsigned operation_payload_destroys;
+	int operation_callback_done;
+	int operation_submit_done;
+	int operation_submit_ret;
 };
 
 /* 启动反应器前发布，仅在线程回收后清除。 */
@@ -165,9 +179,10 @@ int __wrap_tr_completion_queue_push_wait(
 	/* 仅供测试的观测：所有者被门禁阻塞期间 count 不会下降，因此在调用
 	 * 真实阻塞 API 前观察满队列，等价于证明生产者即将进入容量等待。
 	 */
-	if (ctx &&
-	    (ctx->scenario == COMPLETION_FULL_WAIT ||
-	     ctx->scenario == COMPLETION_FULL_STOP)) {
+	if (ctx && (ctx->scenario == COMPLETION_FULL_WAIT ||
+	            ctx->scenario == COMPLETION_FULL_STOP ||
+	            ctx->scenario == OPERATION_COMPLETION_FULL_WAIT ||
+	            ctx->scenario == OPERATION_COMPLETION_FULL_STOP)) {
 		pthread_mutex_lock(&queue->lock);
 		full = queue->accepting && queue->count == queue->capacity;
 		pthread_mutex_unlock(&queue->lock);
@@ -268,6 +283,143 @@ static void completion_callback(void *arg)
 	if (ctx->stop_popped)
 		ctx->completions_after_stop++;
 	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void operation_payload_destroy(void *arg)
+{
+	struct test_ctx *ctx = arg;
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->operation_payload_destroys++;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+}
+
+static void operation_completion_callback(void *arg)
+{
+	struct test_ctx *ctx = arg;
+	struct tr_async_operation_spec spec = {0};
+	struct tr_async_operation_completion completion = {0};
+	int cancelled = 0;
+	int cancel_reason = TR_OK;
+
+	assert(tr_async_operation_consume(ctx->operation_pool,
+	                                  &ctx->operation_completion_ref, &spec,
+	                                  &completion, &cancelled,
+	                                  &cancel_reason) == TR_OK);
+	assert(spec.kind == TR_ASYNC_OPERATION_KIND_RPC_AUTHORIZATION);
+	assert(completion.status == TR_OK);
+	assert(completion.value == UINT64_C(0x1020304050607080));
+	assert(completion.payload == ctx);
+	assert(completion.destroy == operation_payload_destroy);
+	assert(!cancelled && cancel_reason == TR_OK);
+	completion.destroy(completion.payload);
+	assert(tr_async_operation_retire(ctx->operation_pool,
+	                                 &ctx->operation_completion_ref) ==
+	       TR_OK);
+
+	pthread_mutex_lock(&ctx->lock);
+	ctx->operation_callbacks++;
+	ctx->operation_callback_done = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	completion_callback(ctx);
+}
+
+static int prepare_operation_on_owner(void *arg)
+{
+	struct test_ctx *ctx = arg;
+	struct tr_async_operation_spec spec = {
+	        .kind = TR_ASYNC_OPERATION_KIND_RPC_AUTHORIZATION,
+	        .domain_generation = 1U,
+	        .object_generation = 2U,
+	};
+	int ready = -1;
+	int ret;
+
+	ret = tr_async_operation_reserve(ctx->operation_pool, &spec,
+	                                 &ctx->operation,
+	                                 &ctx->operation_producer_ref);
+	if (ret != TR_OK)
+		return ret;
+	ret = tr_async_operation_accept(ctx->operation_pool, ctx->operation,
+	                                &ctx->operation_completion_ref, &ready);
+	if (ret != TR_OK)
+		return ret;
+	assert(ready == 0);
+	return TR_OK;
+}
+
+static int bind_operation_pool_on_owner(void *arg)
+{
+	struct test_ctx *ctx = arg;
+
+	return tr_async_operation_pool_bind_owner(ctx->operation_pool);
+}
+
+static void operation_pool_create(struct test_ctx *ctx)
+{
+	tr_memory_budget_init(&ctx->operation_budget, 65536U);
+	assert(tr_async_operation_pool_create(1U, &ctx->operation_budget,
+	                                      &ctx->operation_pool) == TR_OK);
+	assert(tr_reactor_call(ctx->reactor, bind_operation_pool_on_owner,
+	                       ctx) == TR_OK);
+	assert(tr_reactor_call(ctx->reactor, prepare_operation_on_owner, ctx) ==
+	       TR_OK);
+}
+
+static void *operation_completion_submit_thread(void *arg)
+{
+	struct test_ctx *ctx = arg;
+	struct tr_async_operation_completion completion = {
+	        .status = TR_OK,
+	        .value = UINT64_C(0x1020304050607080),
+	        .payload = ctx,
+	        .destroy = operation_payload_destroy,
+	};
+	int ready = 0;
+	int ret;
+
+	assert(tr_async_operation_publish(
+	               ctx->operation_pool, &ctx->operation_producer_ref,
+	               completion, &ctx->operation_completion_ref,
+	               &ready) == TR_OK);
+	assert(ready == 1);
+	ret = tr_reactor_complete(ctx->reactor, operation_completion_callback,
+	                          ctx);
+	pthread_mutex_lock(&ctx->lock);
+	ctx->operation_submit_ret = ret;
+	ctx->operation_submit_done = 1;
+	pthread_cond_broadcast(&ctx->cond);
+	pthread_mutex_unlock(&ctx->lock);
+	assert(ret == (ctx->scenario == OPERATION_COMPLETION_FULL_STOP
+	                       ? TR_ERR_CLOSED
+	                       : TR_OK));
+	return NULL;
+}
+
+static int operation_pool_close_destroy_on_owner(void *arg)
+{
+	struct test_ctx *ctx = arg;
+	int ret = tr_async_operation_pool_close(ctx->operation_pool);
+	if (ret != TR_OK)
+		return ret;
+	return tr_async_operation_pool_destroy(&ctx->operation_pool);
+}
+
+static void operation_pool_reap_after_stop(struct test_ctx *ctx)
+{
+	struct tr_memory_budget_stats stats;
+	uint32_t reaped = 0U;
+
+	assert(tr_async_operation_reap_stopped(ctx->operation_pool, 1,
+	                                       &reaped) == TR_OK);
+	assert(reaped == 1U);
+	memset(&ctx->operation_completion_ref, 0,
+	       sizeof(ctx->operation_completion_ref));
+	assert(tr_async_operation_pool_destroy(&ctx->operation_pool) == TR_OK);
+	tr_memory_budget_get_stats(&ctx->operation_budget, &stats);
+	assert(stats.current_bytes == 0U);
 }
 
 static enum tr_frame_disposition frame_callback(struct tr_conn_handle connection,
@@ -584,6 +736,97 @@ static void test_completion_full_stop(void)
 	puts("completion-full/stop/admission-close: ok");
 }
 
+static void test_operation_completion_full_wait_resume(void)
+{
+	struct test_ctx ctx;
+	pthread_t gate;
+	pthread_t producer;
+	unsigned i;
+
+	setup(&ctx, OPERATION_COMPLETION_FULL_WAIT);
+	operation_pool_create(&ctx);
+	assert(pthread_create(&gate, NULL, gate_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.gate_entered);
+
+	for (i = 0; i < CAPACITY; ++i)
+		assert(tr_reactor_complete(ctx.reactor, completion_callback,
+		                           &ctx) == TR_OK);
+
+	assert(pthread_create(&producer, NULL,
+	                      operation_completion_submit_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.completion_full);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.operation_payload_destroys == 0U);
+	assert(ctx.operation_callbacks == 0U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/* 完成项受阻期间操作仍保持已发布状态；队列恢复后必须只交付和退役一次。
+	 */
+	release_gate(&ctx);
+	assert(pthread_join(gate, NULL) == 0);
+	wait_flag(&ctx, &ctx.operation_callback_done);
+	assert(pthread_join(producer, NULL) == 0);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.operation_submit_ret == TR_OK);
+	assert(ctx.operation_callbacks == 1U);
+	assert(ctx.operation_payload_destroys == 1U);
+	assert(ctx.completions == CAPACITY + 1U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	assert(tr_reactor_call(ctx.reactor,
+	                       operation_pool_close_destroy_on_owner,
+	                       &ctx) == TR_OK);
+	assert(ctx.operation_pool == NULL);
+	teardown(&ctx);
+	puts("accepted-operation/completion-full/wait-retire-once: ok");
+}
+
+static void test_operation_completion_full_stop_reaps_once(void)
+{
+	struct test_ctx ctx;
+	pthread_t gate;
+	pthread_t producer;
+	pthread_t stopper;
+	unsigned i;
+
+	setup(&ctx, OPERATION_COMPLETION_FULL_STOP);
+	operation_pool_create(&ctx);
+	assert(pthread_create(&gate, NULL, gate_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.gate_entered);
+
+	for (i = 0; i < CAPACITY; ++i)
+		assert(tr_reactor_complete(ctx.reactor, completion_callback,
+		                           &ctx) == TR_OK);
+
+	assert(pthread_create(&producer, NULL,
+	                      operation_completion_submit_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.completion_full);
+	assert(pthread_create(&stopper, NULL, stop_thread, &ctx) == 0);
+	wait_flag(&ctx, &ctx.stop_accepted);
+	assert(pthread_join(producer, NULL) == 0);
+	wait_flag(&ctx, &ctx.operation_submit_done);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.operation_submit_ret == TR_ERR_CLOSED);
+	assert(ctx.operation_callbacks == 0U);
+	assert(ctx.operation_payload_destroys == 0U);
+	pthread_mutex_unlock(&ctx.lock);
+
+	/* 队列关闭会拒绝交接但不消费结果；producer 与 owner 都停止后，
+	 * 外部清理者才可接管并丢弃该结果。
+	 */
+	release_gate(&ctx);
+	assert(pthread_join(gate, NULL) == 0);
+	assert(pthread_join(stopper, NULL) == 0);
+	operation_pool_reap_after_stop(&ctx);
+	pthread_mutex_lock(&ctx.lock);
+	assert(ctx.operation_callbacks == 0U);
+	assert(ctx.operation_payload_destroys == 1U);
+	assert(ctx.completions == CAPACITY);
+	pthread_mutex_unlock(&ctx.lock);
+	teardown(&ctx);
+	puts("accepted-operation/completion-full/stop-reap-once: ok");
+}
+
 int main(void)
 {
 	alarm(60); /* 也覆盖线程回收；失败绝不会让 CI 永久阻塞。 */
@@ -594,6 +837,8 @@ int main(void)
 	test_stop_drain();
 	test_completion_full_wait_resume();
 	test_completion_full_stop();
+	test_operation_completion_full_wait_resume();
+	test_operation_completion_full_stop_reaps_once();
 	alarm(0);
 	return 0;
 }
