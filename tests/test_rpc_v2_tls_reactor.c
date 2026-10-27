@@ -25,6 +25,8 @@
 #define TEST_TLS_HANDSHAKE_TIMEOUT_MS 1500U
 #define TEST_TLS_FLOOD_MAX_PEERS 16U
 #define TEST_TLS_FLOOD_EXCESS_PEERS 48U
+#define TEST_TLS_DESTROY_PEERS 4U
+#define TEST_TLS_DESTROY_HANDSHAKE_TIMEOUT_MS 5000U
 
 struct test_state {
 	pthread_mutex_t lock;
@@ -601,6 +603,60 @@ static void wait_socket_closed(int fd)
 	}
 }
 
+static void test_tls_pending_handshakes_close_on_server_destroy(void)
+{
+	static const uint8_t partial_tls_record[] = {
+	        0x16U, 0x03U, 0x03U, 0x00U, 0x40U,
+	};
+	struct test_state state;
+	int peers[TEST_TLS_DESTROY_PEERS];
+	uint64_t start_ms;
+	uint64_t elapsed_ms;
+	unsigned i;
+
+	for (i = 0U; i < TEST_TLS_DESTROY_PEERS; ++i)
+		peers[i] = -1;
+	test_state_init(&state);
+	assert(test_server_start_with_limits(
+	               &state, 1, TEST_TLS_DESTROY_PEERS,
+	               TEST_TLS_DESTROY_HANDSHAKE_TIMEOUT_MS) == TR_OK);
+	for (i = 0U; i < TEST_TLS_DESTROY_PEERS; ++i) {
+		peers[i] = socket_connect_ipv4("127.0.0.1", state.server_port);
+		assert(peers[i] >= 0);
+		assert(send(peers[i], partial_tls_record,
+		            sizeof(partial_tls_record), MSG_NOSIGNAL) ==
+		       (ssize_t)sizeof(partial_tls_record));
+	}
+	wait_server_peer_counts(state.server, TEST_TLS_DESTROY_PEERS, 0U);
+
+	start_ms = test_monotonic_ms();
+	{
+		uint64_t deadline = start_ms + TEST_WAIT_MS;
+		int ret;
+
+		for (;;) {
+			struct timespec pause = {0, 1000000L};
+
+			ret = tr_server_destroy(state.server);
+			if (ret != TR_AGAIN)
+				break;
+			assert(test_monotonic_ms() < deadline);
+			assert(nanosleep(&pause, NULL) == 0);
+		}
+		assert(ret == TR_OK);
+	}
+	state.server = NULL;
+	for (i = 0U; i < TEST_TLS_DESTROY_PEERS; ++i) {
+		wait_socket_closed(peers[i]);
+		assert(close(peers[i]) == 0);
+		peers[i] = -1;
+	}
+	elapsed_ms = test_monotonic_ms() - start_ms;
+	assert(elapsed_ms < TEST_TLS_DESTROY_HANDSHAKE_TIMEOUT_MS / 2U);
+	test_state_destroy(&state);
+	puts("tls-reactor: server destroy closed pending TLS handshakes");
+}
+
 static void test_tls_peer_capacity_burst_is_bounded(void)
 {
 	static const uint8_t partial_tls_record[] = {
@@ -765,9 +821,14 @@ int main(int argc, char **argv)
 		test_server_initiated_tls_close();
 		return 0;
 	}
+	if (argc == 2 && strcmp(argv[1], "pending-destroy") == 0) {
+		test_tls_pending_handshakes_close_on_server_destroy();
+		return 0;
+	}
 	assert(argc == 1);
 	test_transport_only_tls_support_boundary();
 	test_plaintext_is_rejected_by_tls_listener();
+	test_tls_pending_handshakes_close_on_server_destroy();
 	test_tls_peer_capacity_burst_is_bounded();
 	test_identity_failure(1);
 	test_identity_failure(0);
