@@ -4644,6 +4644,12 @@ int tr_channel_wait_ready_deadline(
 		pthread_mutex_unlock(&channel->lock);
 		return TR_ERR_CLOSED;
 	}
+	if (!channel->reconnect_enabled &&
+	    !(lane == TR_LANE_CONTROL ? channel->control_alive
+	                              : channel->bulk_alive)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_CLOSED;
+	}
 	if ((lane == TR_LANE_CONTROL && channel->control_ready) ||
 	    (lane == TR_LANE_BULK && channel->bulk_ready)) {
 		/* 等待锁可能耗尽期限；就绪成功必须在持锁观察时再次判定。 */
@@ -4682,6 +4688,15 @@ int tr_channel_wait_ready_deadline(
 		if (ready)
 			break;
 		if (channel->state_wait_closed) {
+			result = TR_ERR_CLOSED;
+			break;
+		}
+		/* 禁用重连时，物理连接关闭就是就绪等待的终态。
+		 * 否则错误握手会唤醒等待者，却被误等到原始期限耗尽。
+		 */
+		if (!channel->reconnect_enabled &&
+		    !(lane == TR_LANE_CONTROL ? channel->control_alive
+		                              : channel->bulk_alive)) {
 			result = TR_ERR_CLOSED;
 			break;
 		}

@@ -106,6 +106,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 
 /*
  * 同步等待连接就绪。
+ * HELLO 前连接关闭且没有重连任务时返回 TR_ERR_CLOSED。
  * 该操作依赖 Reactor 推进，必须从外部控制线程调用；从 Reactor 所有者
  * 回调或 RPC 工作线程回调中调用时返回 TR_ERR_STATE。
  */

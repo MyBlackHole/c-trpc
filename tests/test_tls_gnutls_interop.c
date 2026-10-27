@@ -1,15 +1,24 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <tr/client.h>
+#include <tr/rpc_codec.h>
+#include <tr/rpc_v2.h>
 #include <tr/trpc.h>
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <gnutls/gnutls.h>
+#include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -19,6 +28,7 @@
 extern char **environ;
 
 #define TEST_WAIT_MS 12000U
+#define TEST_CONNECT_TIMEOUT_MS 3000U
 #define TEST_SERVICE_ID 0x234U
 #define TEST_METHOD_ID 1U
 
@@ -177,6 +187,250 @@ static int run_gnutls_client(const struct test_state *state,
 	return WEXITSTATUS(status);
 }
 
+#define TEST_WIRE_HEADER_SIZE 40U
+#define TEST_HELLO_PAYLOAD_SIZE 32U
+#define TEST_HELLO_FRAME_SIZE (TEST_WIRE_HEADER_SIZE + TEST_HELLO_PAYLOAD_SIZE)
+
+struct test_gnutls_server {
+	const struct test_state *test;
+	int listener_fd;
+	uint16_t port;
+	int result;
+	int handshake_complete;
+	int handshake_error;
+	int client_certificate_verified;
+	int hello_received;
+	atomic_int hello_ack_received;
+};
+
+static uint32_t test_wire_get_le32(const uint8_t *data)
+{
+	return (uint32_t)data[0] | ((uint32_t)data[1] << 8U) |
+	       ((uint32_t)data[2] << 16U) | ((uint32_t)data[3] << 24U);
+}
+
+static int test_gnutls_recv_exact(gnutls_session_t session, uint8_t *buffer,
+                                  size_t length)
+{
+	size_t received = 0U;
+	while (received < length) {
+		ssize_t amount = gnutls_record_recv(session, buffer + received,
+		                                    length - received);
+		if (amount <= 0)
+			return -1;
+		received += (size_t)amount;
+	}
+	return 0;
+}
+
+static int test_gnutls_send_exact(gnutls_session_t session,
+                                  const uint8_t *buffer, size_t length)
+{
+	size_t sent = 0U;
+	while (sent < length) {
+		ssize_t amount = gnutls_record_send(session, buffer + sent,
+		                                    length - sent);
+		if (amount <= 0)
+			return -1;
+		sent += (size_t)amount;
+	}
+	return 0;
+}
+
+static int test_gnutls_frame_type(const uint8_t *frame, uint8_t type)
+{
+	return memcmp(frame, "TRP1", 4U) == 0 && frame[4] == 1U &&
+	       frame[5] == 0U && frame[6] == type && frame[7] == 0U &&
+	       test_wire_get_le32(frame + 24U) == TEST_HELLO_PAYLOAD_SIZE;
+}
+
+static void *test_gnutls_server_thread(void *arg)
+{
+	struct test_gnutls_server *server = arg;
+	gnutls_certificate_credentials_t credentials = NULL;
+	gnutls_session_t session = NULL;
+	struct timeval timeout = {TEST_WAIT_MS / 1000U,
+	                          (TEST_WAIT_MS % 1000U) * 1000U};
+	struct sockaddr_in peer_address;
+	socklen_t peer_length = sizeof(peer_address);
+	uint8_t frame[TEST_HELLO_FRAME_SIZE];
+	unsigned int verification_status = 0U;
+	int connection_fd = -1;
+	int result = TR_ERR_SYS;
+
+	connection_fd = accept(server->listener_fd,
+	                       (struct sockaddr *)&peer_address, &peer_length);
+	(void)close(server->listener_fd);
+	server->listener_fd = -1;
+	if (connection_fd < 0)
+		goto done;
+	(void)setsockopt(connection_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+	                 sizeof(timeout));
+	(void)setsockopt(connection_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+	                 sizeof(timeout));
+	if (gnutls_certificate_allocate_credentials(&credentials) < 0 ||
+	    gnutls_certificate_set_x509_key_file(
+	            credentials, server->test->identity.server_certificate_file,
+	            server->test->identity.server_private_key_file,
+	            GNUTLS_X509_FMT_PEM) < 0 ||
+	    gnutls_certificate_set_x509_trust_file(
+	            credentials, server->test->identity.ca_file,
+	            GNUTLS_X509_FMT_PEM) <= 0 ||
+	    gnutls_init(&session, GNUTLS_SERVER) < 0 ||
+	    gnutls_priority_set_direct(session, "NORMAL:-VERS-ALL:+VERS-TLS1.3",
+	                               NULL) < 0 ||
+	    gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE,
+	                           credentials) < 0)
+		goto done;
+	gnutls_certificate_server_set_request(session, GNUTLS_CERT_REQUIRE);
+	gnutls_transport_set_int(session, connection_fd);
+	server->handshake_error = gnutls_handshake(session);
+	if (server->handshake_error < 0)
+		goto done;
+	server->handshake_complete = 1;
+	if (gnutls_certificate_verify_peers3(session, NULL,
+	                                     &verification_status) < 0 ||
+	    verification_status != 0U)
+		goto done;
+	server->client_certificate_verified = 1;
+	if (test_gnutls_recv_exact(session, frame, sizeof(frame)) != 0 ||
+	    !test_gnutls_frame_type(frame, 8U))
+		goto done;
+	server->hello_received = 1;
+	if (test_gnutls_send_exact(session, frame, sizeof(frame)) != 0 ||
+	    test_gnutls_recv_exact(session, frame, sizeof(frame)) != 0 ||
+	    !test_gnutls_frame_type(frame, 9U))
+		goto done;
+	atomic_store_explicit(&server->hello_ack_received, 1,
+	                      memory_order_release);
+	result = TR_OK;
+	(void)gnutls_bye(session, GNUTLS_SHUT_WR);
+
+done:
+	server->result = result;
+	if (session)
+		gnutls_deinit(session);
+	if (credentials)
+		gnutls_certificate_free_credentials(credentials);
+	if (connection_fd >= 0)
+		(void)close(connection_fd);
+	return NULL;
+}
+
+static int test_gnutls_server_listen(struct test_gnutls_server *server,
+                                     const struct test_state *test)
+{
+	struct sockaddr_in address;
+	socklen_t address_length = sizeof(address);
+	server->listener_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (server->listener_fd < 0)
+		return -1;
+	memset(&address, 0, sizeof(address));
+	address.sin_family = AF_INET;
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	address.sin_port = 0;
+	if (bind(server->listener_fd, (struct sockaddr *)&address,
+	         sizeof(address)) != 0 ||
+	    listen(server->listener_fd, 1) != 0 ||
+	    getsockname(server->listener_fd, (struct sockaddr *)&address,
+	                &address_length) != 0) {
+		(void)close(server->listener_fd);
+		server->listener_fd = -1;
+		return -1;
+	}
+	server->test = test;
+	server->port = ntohs(address.sin_port);
+	server->result = TR_ERR_STATE;
+	atomic_init(&server->hello_ack_received, 0);
+	return server->port != 0U ? 0 : -1;
+}
+
+static int test_tr_client_to_gnutls_server(const struct test_state *state,
+                                           const char *expected_peer_name,
+                                           int include_client_cert)
+{
+	struct test_gnutls_server server;
+	struct tr_client_config config;
+	struct tr_rpc_method_desc method;
+	struct tr_client *client = NULL;
+	pthread_t thread;
+	int result;
+	unsigned attempt;
+
+	memset(&method, 0, sizeof(method));
+	method.service_id = TEST_SERVICE_ID;
+	method.method_id = TEST_METHOD_ID;
+	method.request_cardinality = TR_RPC_ONE;
+	method.response_cardinality = TR_RPC_ONE;
+	method.request_codec_id = TR_RPC_CODEC_RAW;
+	method.response_codec_id = TR_RPC_CODEC_RAW;
+	method.lane = TR_RPC_LANE_CONTROL;
+	method.max_request_bytes = 1U;
+	method.max_response_bytes = 1U;
+	tr_client_config_init(&config);
+	config.connect_timeout_ms = TEST_CONNECT_TIMEOUT_MS;
+	config.tls.mode = TR_TLS_REQUIRED;
+	config.tls.ca_file = state->identity.ca_file;
+	config.tls.expected_peer_name = expected_peer_name;
+	config.tls.sni_name = "server.example.test";
+	if (include_client_cert) {
+		config.tls.client_certificate_file =
+		        state->identity.client_certificate_file;
+		config.tls.client_private_key_file =
+		        state->identity.client_private_key_file;
+	}
+	assert(tr_client_create(&config, &method, 1U, &client) == TR_OK);
+	memset(&server, 0, sizeof(server));
+	assert(test_gnutls_server_listen(&server, state) == 0);
+	assert(pthread_create(&thread, NULL, test_gnutls_server_thread,
+	                      &server) == 0);
+	result = tr_client_connect(client, "127.0.0.1", server.port);
+	if (result == TR_OK) {
+		for (attempt = 0U; attempt < TEST_WAIT_MS; ++attempt) {
+			const struct timespec pause = {0, 1000000L};
+			if (atomic_load_explicit(&server.hello_ack_received,
+			                         memory_order_acquire))
+				break;
+			assert(nanosleep(&pause, NULL) == 0);
+		}
+		if (attempt == TEST_WAIT_MS)
+			result = TR_ERR_TIMEOUT;
+	}
+	{
+		int destroy_result = TR_AGAIN;
+		for (attempt = 0U;
+		     attempt < TEST_WAIT_MS && (destroy_result == TR_AGAIN ||
+		                                destroy_result == TR_ERR_STATE);
+		     ++attempt) {
+			const struct timespec pause = {0, 1000000L};
+			destroy_result = tr_client_destroy(client);
+			if (destroy_result == TR_AGAIN ||
+			    destroy_result == TR_ERR_STATE)
+				assert(nanosleep(&pause, NULL) == 0);
+		}
+		assert(destroy_result == TR_OK);
+	}
+	assert(pthread_join(thread, NULL) == 0);
+	if (server.listener_fd >= 0)
+		(void)close(server.listener_fd);
+	if (result == TR_OK) {
+		assert(server.result == TR_OK);
+		assert(server.handshake_complete);
+		assert(server.client_certificate_verified);
+		assert(server.hello_received);
+		assert(atomic_load_explicit(&server.hello_ack_received,
+		                            memory_order_acquire));
+	} else {
+		assert(!server.handshake_complete);
+		assert(!server.hello_received);
+		assert(server.handshake_error < 0);
+		if (!include_client_cert)
+			assert(server.handshake_error ==
+			       GNUTLS_E_CERTIFICATE_REQUIRED);
+	}
+	return result;
+}
+
 static void test_server_destroy(struct test_state *state)
 {
 	unsigned attempt;
@@ -197,6 +451,7 @@ int main(void)
 {
 	struct test_state state;
 	int result;
+	assert(gnutls_global_init() == 0);
 	test_state_init(&state);
 
 	result = run_gnutls_client(
@@ -218,6 +473,35 @@ int main(void)
 	assert(result > 0);
 	puts("tls-gnutls: wrong server hostname rejected");
 
+	result = test_tr_client_to_gnutls_server(&state, "server.example.test",
+	                                         1);
+	if (result != TR_OK)
+		fprintf(stderr,
+		        "tls-gnutls: c-trpc client to GnuTLS server failed: "
+		        "%d\n",
+		        result);
+	assert(result == TR_OK);
+	puts("tls-gnutls: c-trpc client established TLS 1.3 mTLS with GnuTLS "
+	     "server");
+
+	result = test_tr_client_to_gnutls_server(&state, "wrong.example.test",
+	                                         1);
+	if (result != TR_ERR_CLOSED)
+		fprintf(stderr, "tls-gnutls: wrong hostname returned %d\n",
+		        result);
+	assert(result == TR_ERR_CLOSED);
+	puts("tls-gnutls: c-trpc client rejected wrong GnuTLS server hostname");
+
+	result = test_tr_client_to_gnutls_server(&state, "server.example.test",
+	                                         0);
+	if (result != TR_ERR_CLOSED)
+		fprintf(stderr, "tls-gnutls: missing client cert returned %d\n",
+		        result);
+	assert(result == TR_ERR_CLOSED);
+	puts("tls-gnutls: GnuTLS server rejected c-trpc client without "
+	     "certificate");
+
 	test_server_destroy(&state);
+	gnutls_global_deinit();
 	return 0;
 }
