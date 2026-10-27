@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <gnutls/gnutls.h>
 #include <pthread.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdint.h>
@@ -31,11 +32,21 @@ extern char **environ;
 #define TEST_CONNECT_TIMEOUT_MS 3000U
 #define TEST_SERVICE_ID 0x234U
 #define TEST_METHOD_ID 1U
+static const uint8_t test_rpc_payload[] = {0x43U, 0x54U, 0x52U, 0x50U};
 
 struct test_state {
 	struct tr_server *server;
+	struct tr_server *rpc_server;
 	struct tls_test_identity identity;
 	uint16_t port;
+	uint16_t rpc_port;
+};
+
+struct test_rpc_result {
+	atomic_int message_count;
+	atomic_int response_matches;
+	atomic_int terminal;
+	atomic_int status;
 };
 
 static enum tr_rpc_status test_work(struct tr_rpc_v2_call_id call,
@@ -51,11 +62,56 @@ static enum tr_rpc_status test_work(struct tr_rpc_v2_call_id call,
 	return TR_RPC_STATUS_OK;
 }
 
+static enum tr_rpc_status test_rpc_work(struct tr_rpc_v2_call_id call,
+                                        const struct tr_rpc_v2_request *request,
+                                        const struct tr_rpc_v2_cancel *cancel,
+                                        struct tr_rpc_v2_reply *reply,
+                                        void *arg)
+{
+	(void)call;
+	(void)cancel;
+	(void)arg;
+	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE &&
+	    tr_rpc_v2_reply_append(reply, &request->body) != TR_OK)
+		return TR_RPC_STATUS_RESOURCE_EXHAUSTED;
+	return TR_RPC_STATUS_OK;
+}
+
+static void test_rpc_client_message(struct tr_rpc_v2_call call,
+                                    const struct tr_rpc_bytes *body, void *arg)
+{
+	struct test_rpc_result *result = arg;
+	(void)call;
+	atomic_store_explicit(&result->response_matches,
+	                      body && body->data &&
+	                              body->len == sizeof(test_rpc_payload) &&
+	                              memcmp(body->data, test_rpc_payload,
+	                                     sizeof(test_rpc_payload)) == 0,
+	                      memory_order_relaxed);
+	atomic_fetch_add_explicit(&result->message_count, 1,
+	                          memory_order_relaxed);
+}
+
+static void test_rpc_client_terminal(struct tr_rpc_v2_call call,
+                                     enum tr_rpc_status status,
+                                     enum tr_rpc_v2_delivery delivery,
+                                     void *arg)
+{
+	struct test_rpc_result *result = arg;
+	(void)call;
+	(void)delivery;
+	atomic_store_explicit(&result->status, (int)status,
+	                      memory_order_relaxed);
+	atomic_store_explicit(&result->terminal, 1, memory_order_release);
+}
+
 static void test_state_init(struct test_state *state)
 {
 	struct tr_rpc_v2_method method;
 	struct tr_rpc_method_desc descriptor;
 	struct tr_server_config config;
+	struct tr_rpc_v2_method rpc_method;
+	struct tr_rpc_method_desc rpc_descriptor;
 
 	memset(state, 0, sizeof(*state));
 	assert(tls_test_identity_init(&state->identity, "tls-gnutls-interop") ==
@@ -86,6 +142,27 @@ static void test_state_init(struct test_state *state)
 	assert(tr_server_listen(state->server, "127.0.0.1", 0, &state->port) ==
 	       TR_OK);
 	assert(tr_server_start(state->server) == TR_OK);
+
+	memset(&rpc_method, 0, sizeof(rpc_method));
+	memset(&rpc_descriptor, 0, sizeof(rpc_descriptor));
+	rpc_descriptor.service_id = TEST_SERVICE_ID;
+	rpc_descriptor.method_id = TEST_METHOD_ID;
+	rpc_descriptor.request_cardinality = TR_RPC_ONE;
+	rpc_descriptor.response_cardinality = TR_RPC_ONE;
+	rpc_descriptor.request_codec_id = TR_RPC_CODEC_RAW;
+	rpc_descriptor.response_codec_id = TR_RPC_CODEC_RAW;
+	rpc_descriptor.lane = TR_RPC_LANE_CONTROL;
+	rpc_descriptor.max_request_bytes = sizeof(test_rpc_payload);
+	rpc_descriptor.max_response_bytes = sizeof(test_rpc_payload);
+	rpc_method.descriptor = rpc_descriptor;
+	rpc_method.work = test_rpc_work;
+	tr_server_config_init(&config);
+	config.max_peers = 4U;
+	assert(tr_server_create(&config, &rpc_method, 1U, &state->rpc_server) ==
+	       TR_OK);
+	assert(tr_server_listen(state->rpc_server, "127.0.0.1", 0,
+	                        &state->rpc_port) == TR_OK);
+	assert(tr_server_start(state->rpc_server) == TR_OK);
 }
 
 static int child_wait(pid_t child, int *out_status)
@@ -187,41 +264,18 @@ static int run_gnutls_client(const struct test_state *state,
 	return WEXITSTATUS(status);
 }
 
-#define TEST_WIRE_HEADER_SIZE 40U
-#define TEST_HELLO_PAYLOAD_SIZE 32U
-#define TEST_HELLO_FRAME_SIZE (TEST_WIRE_HEADER_SIZE + TEST_HELLO_PAYLOAD_SIZE)
-
 struct test_gnutls_server {
 	const struct test_state *test;
 	int listener_fd;
 	uint16_t port;
+	uint16_t backend_port;
 	int result;
 	int handshake_complete;
 	int handshake_error;
 	int client_certificate_verified;
-	int hello_received;
-	atomic_int hello_ack_received;
+	size_t client_plaintext_bytes;
+	size_t backend_plaintext_bytes;
 };
-
-static uint32_t test_wire_get_le32(const uint8_t *data)
-{
-	return (uint32_t)data[0] | ((uint32_t)data[1] << 8U) |
-	       ((uint32_t)data[2] << 16U) | ((uint32_t)data[3] << 24U);
-}
-
-static int test_gnutls_recv_exact(gnutls_session_t session, uint8_t *buffer,
-                                  size_t length)
-{
-	size_t received = 0U;
-	while (received < length) {
-		ssize_t amount = gnutls_record_recv(session, buffer + received,
-		                                    length - received);
-		if (amount <= 0)
-			return -1;
-		received += (size_t)amount;
-	}
-	return 0;
-}
 
 static int test_gnutls_send_exact(gnutls_session_t session,
                                   const uint8_t *buffer, size_t length)
@@ -237,11 +291,82 @@ static int test_gnutls_send_exact(gnutls_session_t session,
 	return 0;
 }
 
-static int test_gnutls_frame_type(const uint8_t *frame, uint8_t type)
+static int test_socket_send_exact(int fd, const uint8_t *buffer, size_t length)
 {
-	return memcmp(frame, "TRP1", 4U) == 0 && frame[4] == 1U &&
-	       frame[5] == 0U && frame[6] == type && frame[7] == 0U &&
-	       test_wire_get_le32(frame + 24U) == TEST_HELLO_PAYLOAD_SIZE;
+	size_t sent = 0U;
+	while (sent < length) {
+		ssize_t amount =
+		        send(fd, buffer + sent, length - sent, MSG_NOSIGNAL);
+		if (amount < 0 && errno == EINTR)
+			continue;
+		if (amount <= 0)
+			return -1;
+		sent += (size_t)amount;
+	}
+	return 0;
+}
+
+static int test_gnutls_relay(struct test_gnutls_server *server,
+                             gnutls_session_t session, int connection_fd,
+                             int backend_fd)
+{
+	struct pollfd descriptors[2] = {
+	        {.fd = connection_fd, .events = POLLIN},
+	        {.fd = backend_fd, .events = POLLIN},
+	};
+	uint8_t buffer[16384];
+	int client_eof = 0;
+	int backend_eof = 0;
+
+	while (!client_eof || !backend_eof) {
+		int poll_result;
+		descriptors[0].fd = client_eof ? -1 : connection_fd;
+		descriptors[1].fd = backend_eof ? -1 : backend_fd;
+		poll_result = poll(descriptors, 2U, (int)TEST_WAIT_MS);
+		if (poll_result < 0 && errno == EINTR)
+			continue;
+		if (poll_result <= 0)
+			return -1;
+
+		if (!client_eof &&
+		    (descriptors[0].revents & (POLLIN | POLLHUP | POLLERR))) {
+			ssize_t amount = gnutls_record_recv(session, buffer,
+			                                    sizeof(buffer));
+			if (amount > 0) {
+				server->client_plaintext_bytes +=
+				        (size_t)amount;
+				if (test_socket_send_exact(backend_fd, buffer,
+				                           (size_t)amount) != 0)
+					return -1;
+			} else if (amount == 0 ||
+			           amount == GNUTLS_E_PREMATURE_TERMINATION) {
+				client_eof = 1;
+				(void)shutdown(backend_fd, SHUT_WR);
+			} else if (amount != GNUTLS_E_AGAIN &&
+			           amount != GNUTLS_E_INTERRUPTED) {
+				return -1;
+			}
+		}
+
+		if (!backend_eof &&
+		    (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR))) {
+			ssize_t amount =
+			        recv(backend_fd, buffer, sizeof(buffer), 0);
+			if (amount > 0) {
+				server->backend_plaintext_bytes +=
+				        (size_t)amount;
+				if (test_gnutls_send_exact(session, buffer,
+				                           (size_t)amount) != 0)
+					return -1;
+			} else if (amount == 0) {
+				backend_eof = 1;
+				(void)gnutls_bye(session, GNUTLS_SHUT_WR);
+			} else if (errno != EINTR) {
+				return -1;
+			}
+		}
+	}
+	return 0;
 }
 
 static void *test_gnutls_server_thread(void *arg)
@@ -253,9 +378,9 @@ static void *test_gnutls_server_thread(void *arg)
 	                          (TEST_WAIT_MS % 1000U) * 1000U};
 	struct sockaddr_in peer_address;
 	socklen_t peer_length = sizeof(peer_address);
-	uint8_t frame[TEST_HELLO_FRAME_SIZE];
 	unsigned int verification_status = 0U;
 	int connection_fd = -1;
+	int backend_fd = -1;
 	int result = TR_ERR_SYS;
 
 	connection_fd = accept(server->listener_fd,
@@ -293,18 +418,24 @@ static void *test_gnutls_server_thread(void *arg)
 	    verification_status != 0U)
 		goto done;
 	server->client_certificate_verified = 1;
-	if (test_gnutls_recv_exact(session, frame, sizeof(frame)) != 0 ||
-	    !test_gnutls_frame_type(frame, 8U))
+	backend_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (backend_fd < 0)
 		goto done;
-	server->hello_received = 1;
-	if (test_gnutls_send_exact(session, frame, sizeof(frame)) != 0 ||
-	    test_gnutls_recv_exact(session, frame, sizeof(frame)) != 0 ||
-	    !test_gnutls_frame_type(frame, 9U))
+	(void)setsockopt(backend_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+	                 sizeof(timeout));
+	(void)setsockopt(backend_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+	                 sizeof(timeout));
+	memset(&peer_address, 0, sizeof(peer_address));
+	peer_address.sin_family = AF_INET;
+	peer_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	peer_address.sin_port = htons(server->backend_port);
+	if (connect(backend_fd, (struct sockaddr *)&peer_address,
+	            sizeof(peer_address)) != 0)
 		goto done;
-	atomic_store_explicit(&server->hello_ack_received, 1,
-	                      memory_order_release);
-	result = TR_OK;
-	(void)gnutls_bye(session, GNUTLS_SHUT_WR);
+	result = test_gnutls_relay(server, session, connection_fd,
+	                           backend_fd) == 0
+	                 ? TR_OK
+	                 : TR_ERR_SYS;
 
 done:
 	server->result = result;
@@ -314,6 +445,8 @@ done:
 		gnutls_certificate_free_credentials(credentials);
 	if (connection_fd >= 0)
 		(void)close(connection_fd);
+	if (backend_fd >= 0)
+		(void)close(backend_fd);
 	return NULL;
 }
 
@@ -340,8 +473,8 @@ static int test_gnutls_server_listen(struct test_gnutls_server *server,
 	}
 	server->test = test;
 	server->port = ntohs(address.sin_port);
+	server->backend_port = test->rpc_port;
 	server->result = TR_ERR_STATE;
-	atomic_init(&server->hello_ack_received, 0);
 	return server->port != 0U ? 0 : -1;
 }
 
@@ -352,9 +485,15 @@ static int test_tr_client_to_gnutls_server(const struct test_state *state,
 	struct test_gnutls_server server;
 	struct tr_client_config config;
 	struct tr_rpc_method_desc method;
+	struct tr_rpc_v2_client_callbacks callbacks;
+	struct tr_rpc_call_options options;
+	struct tr_rpc_bytes request;
+	struct tr_rpc_v2_call call;
+	struct test_rpc_result rpc_result;
 	struct tr_client *client = NULL;
 	pthread_t thread;
 	int result;
+	int rpc_completed = 0;
 	unsigned attempt;
 
 	memset(&method, 0, sizeof(method));
@@ -365,8 +504,20 @@ static int test_tr_client_to_gnutls_server(const struct test_state *state,
 	method.request_codec_id = TR_RPC_CODEC_RAW;
 	method.response_codec_id = TR_RPC_CODEC_RAW;
 	method.lane = TR_RPC_LANE_CONTROL;
-	method.max_request_bytes = 1U;
-	method.max_response_bytes = 1U;
+	method.max_request_bytes = sizeof(test_rpc_payload);
+	method.max_response_bytes = sizeof(test_rpc_payload);
+	memset(&callbacks, 0, sizeof(callbacks));
+	callbacks.message = test_rpc_client_message;
+	callbacks.terminal = test_rpc_client_terminal;
+	callbacks.arg = &rpc_result;
+	memset(&options, 0, sizeof(options));
+	options.timeout_ms = TEST_CONNECT_TIMEOUT_MS;
+	request.data = test_rpc_payload;
+	request.len = sizeof(test_rpc_payload);
+	atomic_init(&rpc_result.message_count, 0);
+	atomic_init(&rpc_result.response_matches, 0);
+	atomic_init(&rpc_result.terminal, 0);
+	atomic_init(&rpc_result.status, -1);
 	tr_client_config_init(&config);
 	config.connect_timeout_ms = TEST_CONNECT_TIMEOUT_MS;
 	config.tls.mode = TR_TLS_REQUIRED;
@@ -386,15 +537,26 @@ static int test_tr_client_to_gnutls_server(const struct test_state *state,
 	                      &server) == 0);
 	result = tr_client_connect(client, "127.0.0.1", server.port);
 	if (result == TR_OK) {
-		for (attempt = 0U; attempt < TEST_WAIT_MS; ++attempt) {
-			const struct timespec pause = {0, 1000000L};
-			if (atomic_load_explicit(&server.hello_ack_received,
-			                         memory_order_acquire))
-				break;
-			assert(nanosleep(&pause, NULL) == 0);
+		if (tr_client_unary_call(client, TEST_SERVICE_ID,
+		                         TEST_METHOD_ID, &request, &options,
+		                         &callbacks, &call) == TR_OK) {
+			for (attempt = 0U; attempt < TEST_WAIT_MS; ++attempt) {
+				const struct timespec pause = {0, 1000000L};
+				if (atomic_load_explicit(&rpc_result.terminal,
+				                         memory_order_acquire))
+					break;
+				assert(nanosleep(&pause, NULL) == 0);
+			}
+			if (attempt < TEST_WAIT_MS &&
+			    atomic_load_explicit(&rpc_result.status,
+			                         memory_order_relaxed) ==
+			            TR_RPC_STATUS_OK &&
+			    atomic_load_explicit(&rpc_result.message_count,
+			                         memory_order_relaxed) == 1 &&
+			    atomic_load_explicit(&rpc_result.response_matches,
+			                         memory_order_relaxed))
+				rpc_completed = 1;
 		}
-		if (attempt == TEST_WAIT_MS)
-			result = TR_ERR_TIMEOUT;
 	}
 	{
 		int destroy_result = TR_AGAIN;
@@ -417,17 +579,19 @@ static int test_tr_client_to_gnutls_server(const struct test_state *state,
 		assert(server.result == TR_OK);
 		assert(server.handshake_complete);
 		assert(server.client_certificate_verified);
-		assert(server.hello_received);
-		assert(atomic_load_explicit(&server.hello_ack_received,
-		                            memory_order_acquire));
+		assert(server.client_plaintext_bytes > 0U);
+		assert(server.backend_plaintext_bytes > 0U);
 	} else {
 		assert(!server.handshake_complete);
-		assert(!server.hello_received);
+		assert(server.client_plaintext_bytes == 0U);
+		assert(server.backend_plaintext_bytes == 0U);
 		assert(server.handshake_error < 0);
 		if (!include_client_cert)
 			assert(server.handshake_error ==
 			       GNUTLS_E_CERTIFICATE_REQUIRED);
 	}
+	if (result == TR_OK && !rpc_completed)
+		result = TR_ERR_SYS;
 	return result;
 }
 
@@ -435,6 +599,17 @@ static void test_server_destroy(struct test_state *state)
 {
 	unsigned attempt;
 	int result = TR_AGAIN;
+	for (attempt = 0U; attempt < TEST_WAIT_MS &&
+	                   (result == TR_AGAIN || result == TR_ERR_STATE);
+	     ++attempt) {
+		const struct timespec pause = {0, 1000000L};
+		result = tr_server_destroy(state->rpc_server);
+		if (result == TR_AGAIN || result == TR_ERR_STATE)
+			assert(nanosleep(&pause, NULL) == 0);
+	}
+	assert(result == TR_OK);
+	state->rpc_server = NULL;
+	result = TR_AGAIN;
 	for (attempt = 0U; attempt < TEST_WAIT_MS && result == TR_AGAIN;
 	     ++attempt) {
 		const struct timespec pause = {0, 1000000L};
@@ -481,8 +656,8 @@ int main(void)
 		        "%d\n",
 		        result);
 	assert(result == TR_OK);
-	puts("tls-gnutls: c-trpc client established TLS 1.3 mTLS with GnuTLS "
-	     "server");
+	puts("tls-gnutls: c-trpc unary echo passed through GnuTLS TLS 1.3 "
+	     "mTLS");
 
 	result = test_tr_client_to_gnutls_server(&state, "wrong.example.test",
 	                                         1);

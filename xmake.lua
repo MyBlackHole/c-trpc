@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.27")
+set_version("2.0.0-dev.28")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -1033,7 +1033,7 @@ target("test_rpc_v2_tls_reactor")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
--- 以独立 GnuTLS 客户端及 GnuTLS Server 后端验证 TLS 1.3/mTLS 双向互通。
+-- 独立 GnuTLS 客户端与 GnuTLS TLS 终止/后端桥接验证双向 TLS 和 V2 RPC 正文。
 target("test_tls_gnutls_interop")
     set_kind("binary")
     set_default(false)
