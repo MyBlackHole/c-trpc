@@ -41,6 +41,12 @@ struct credentials_start_thread {
 	int status;
 };
 
+struct server_credentials_start_thread {
+	struct tr_server *server;
+	struct tr_tls_provider_operation operation;
+	int status;
+};
+
 static void provider_fetch(const struct tr_tls_credential_request *request,
                            struct tr_tls_provider_operation operation,
                            void *arg)
@@ -99,6 +105,15 @@ static void *credentials_start_runner(void *arg)
 {
 	struct credentials_start_thread *start = arg;
 	start->status = tr_client_tls_credentials_start(start->client, 5000U,
+	                                                TR_TLS_ROTATE_GRACEFUL,
+	                                                &start->operation);
+	return NULL;
+}
+
+static void *server_credentials_start_runner(void *arg)
+{
+	struct server_credentials_start_thread *start = arg;
+	start->status = tr_server_tls_credentials_start(start->server, 5000U,
 	                                                TR_TLS_ROTATE_GRACEFUL,
 	                                                &start->operation);
 	return NULL;
@@ -529,6 +544,76 @@ static void test_server_async_credentials_install_before_listen(void)
 	tls_test_identity_cleanup(&identity);
 }
 
+static void test_server_cancel_waits_for_fetch_return(void)
+{
+	struct tls_test_identity identity;
+	struct blocked_fetch_provider provider = {0};
+	struct tr_server_config config;
+	struct tr_server *server = NULL;
+	struct server_credentials_start_thread start = {0};
+	struct tr_tls_credential_result result = {77, 99U};
+	pthread_t starter;
+
+	assert(tls_test_identity_init(
+	               &identity, "tls-provider-server-fetch-cancel-barrier") ==
+	       0);
+	assert(pthread_mutex_init(&provider.lock, NULL) == 0);
+	assert(pthread_cond_init(&provider.condition, NULL) == 0);
+	tr_server_config_init(&config);
+	config.tls.mode = TR_TLS_REQUIRED;
+	config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+	config.tls.client_ca_file = identity.ca_file;
+	config.connection_groups.max_groups = 1U;
+	config.connection_groups.max_connections = 1U;
+	config.connection_groups.max_data_connections_per_group = 1U;
+	config.connection_groups.max_streams_per_group = 1U;
+	config.connection_groups.authorize = authorize;
+	config.tls_credentials_provider.fetch = blocked_provider_fetch;
+	config.tls_credentials_provider.cancel = blocked_provider_cancel;
+	config.tls_credentials_provider.arg = &provider;
+	assert(tr_server_create_transport(&config, &server) == TR_OK);
+	start.server = server;
+	assert(pthread_create(&starter, NULL, server_credentials_start_runner,
+	                      &start) == 0);
+	wait_for_fetch_entered(&provider);
+	assert(tr_server_tls_credentials_poll(server, provider.operation,
+	                                      &result) == TR_AGAIN);
+	assert(result.status == 77 && result.profile_generation == 99U);
+
+	/* fetch 仍执行时只记录取消，不能重入 Server provider。 */
+	assert(tr_server_tls_credentials_cancel(server, provider.operation) ==
+	       TR_OK);
+	assert(pthread_mutex_lock(&provider.lock) == 0);
+	assert(provider.fetch_active);
+	assert(provider.cancel_count == 0U);
+	provider.release_fetch = 1;
+	assert(pthread_cond_broadcast(&provider.condition) == 0);
+	assert(pthread_mutex_unlock(&provider.lock) == 0);
+
+	assert(pthread_join(starter, NULL) == 0);
+	assert(start.status == TR_OK);
+	assert(start.operation.instance == provider.operation.instance);
+	assert(start.operation.generation == provider.operation.generation);
+	assert(start.operation.slot == provider.operation.slot);
+	assert(pthread_mutex_lock(&provider.lock) == 0);
+	assert(provider.fetch_returned);
+	assert(!provider.fetch_active);
+	assert(provider.cancel_count == 1U);
+	assert(provider.cancel_while_fetch_active == 0U);
+	assert(pthread_mutex_unlock(&provider.lock) == 0);
+
+	assert(tr_server_tls_credentials_complete(server, start.operation,
+	                                          TR_OK, NULL) == TR_OK);
+	assert(tr_server_tls_credentials_poll(server, start.operation,
+	                                      &result) == TR_OK);
+	assert(result.status == TR_ERR_CANCELLED &&
+	       result.profile_generation == 0U);
+	assert(tr_server_destroy(server) == TR_OK);
+	assert(pthread_cond_destroy(&provider.condition) == 0);
+	assert(pthread_mutex_destroy(&provider.lock) == 0);
+	tls_test_identity_cleanup(&identity);
+}
+
 int main(void)
 {
 	alarm(30);
@@ -538,6 +623,7 @@ int main(void)
 	test_client_async_credentials_and_cancel();
 	test_client_cancel_waits_for_fetch_return();
 	test_server_async_credentials_install_before_listen();
+	test_server_cancel_waits_for_fetch_return();
 	alarm(0);
 	return 0;
 }

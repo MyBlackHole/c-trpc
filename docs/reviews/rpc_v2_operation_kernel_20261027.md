@@ -35,4 +35,6 @@ dev.163 的真实 TCP V2 Client/Server 回归覆盖了 CallRef 与 Server 异步
 
 dev.168 在真实 TLS Client 凭证 API 路径验证 fetch/cancel 交错：fetch 尚未返回时外部 cancel 只锁存请求，poll 保持 TR_AGAIN 且不改结果；fetch 退出后 provider cancel 恰好通知一次，迟到完成仍以 CANCELLED 终结，退役后 Client 可销毁。GCC Release 全量测试 94/94、定向目标 Release 25/25、TSan、ASan/UBSan 通过；变异测试捕获了提前通知。详细证据见[TLS provider fetch/cancel 回调屏障回归](rpc_v2_tls_provider_fetch_cancel_barrier_20261027.md)。
 
+dev.169 将同一生命周期不变量补到 Server 凭证 API：`tr_server_tls_credentials_start()` 正在 provider `fetch` 时，外部 cancel 不会提前触发 provider `cancel`；poll 返回 TR_AGAIN 且保留输出，fetch 退出后只通知一次，迟到成功不能覆盖 CANCELLED，退役后 Server 可销毁。GCC Release 全量测试 94/94，定向目标 Release 25/25、TSan 与 ASan/UBSan 通过；临时反转 `start_active` 屏障的变异在 provider 通知顺序断言处失败。详见[Server TLS provider fetch/cancel 回调屏障回归](rpc_v2_server_tls_provider_fetch_cancel_barrier_20261027.md)。
+
 此实现完成 #243 中“通用异步操作内核及显式操作引用”的一段，并接入三个异步调用方；dev.163 另补一个 CallRef 交互切片。它不完成整个 #243 或 V2。仍需验证跨 Reactor/嵌套调用、command/completion 队列压力、更多用户回调与资源回收屏障，以及 TLS/压缩共享调度和跨能力组合。#243 与总审查 #239 均保持 OPEN。
