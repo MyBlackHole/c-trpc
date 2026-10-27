@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.26` 候选已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+当前 `2.0.0-dev.27` 候选已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -14,7 +14,7 @@ TLS-D2 增加有界异步本地凭证获取/轮换和连接组 CONTROL/DATA 异�
 实现保留在未合并的 PR #312。dev.22/23 加入独立 GnuTLS 客户端到 c-trpc Server 的互通，
 并补齐 Make 兼容门禁依赖；dev.24 扩展 c-trpc Client 到 GnuTLS Server 的 TLS 1.3/mTLS
 互通，完成真实 V2 HELLO/ACK 往返与证书失败关闭回归，同时修复 TLS 握手失败后 Client
-等待到期限才返回的问题。dev.24/25 的 ASan/UBSan 都报告 52 字节的 `argz_add_sep` 分配；dev.25 的慢速回溯定位到 `newlocale` → `libp11-kit.so.0` 动态库初始化器。dev.26 在保留泄漏检测的前提下，为该系统库栈添加窄 LSan suppression；具体状态见 [PR #312](https://github.com/MyBlackHole/c-trpc/pull/312)。
+等待到期限才返回的问题。dev.24/25 的 ASan/UBSan 都报告 52 字节的 `argz_add_sep` 分配；dev.25 的慢速回溯定位到 `newlocale` → `libp11-kit.so.0` 动态库初始化器。dev.26 加入窄 LSan suppression 后，CI 暴露了相对路径被 Xmake 解析到目标工作目录、导致 suppression 文件无法打开的问题；dev.27 将路径改为 GitHub workspace 绝对路径。当前验证状态见 [PR #312](https://github.com/MyBlackHole/c-trpc/pull/312)。
 这些测试不覆盖 TLS-E 的资源总账、握手洪峰、长稳或目标平台验收。默认仍为明文
 TCP，TLS 失败关闭连接，不回退明文。本版本不代表 #234 或 V2 整体验收完成。
 本次外部 GnuTLS 互通覆盖和限制见 [TLS-E 阶段评估](docs/reviews/rpc_v2_tls_e_20261027.md)。
