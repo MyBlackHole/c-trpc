@@ -54,4 +54,6 @@
 - [x] 从 TEST-C1 分支切出独立 TEST-C2 分支，保留 PR #322 的提交不变。
 - [x] 按 feature commit 规范提交 dev.33→dev.34，正文完整记录需求、背景、实现、影响、验证、关联、性能、风险、回滚和验收。
 - [x] 推送分支并以 TEST-C1 分支为 base 建 Draft PR；不合并 PR。
-- [ ] 记录 PR 首轮每项 CI 结果；不覆盖失败证据，逐项调查新增失败或已有失败。
+- [x] 记录 PR 首轮每项 CI 结果；不覆盖失败证据，逐项调查新增失败或已有失败。
+
+PR #323 当前 head `a8cf248a27a0c60d1df36f003d4b55fdcf5eabac` 的 13 项检查全部通过：CI run [40116541851](https://github.com/MyBlackHole/c-trpc/actions/runs/40116541851)（GCC/Clang build-test、ASan/UBSan、TSan、GCC 11/Clang 14 静态分析、Make/install、CRC32C portable）和 RPC smoke run [40116541856](https://github.com/MyBlackHole/c-trpc/actions/runs/40116541856)（GCC Debug/Release/ASan/TSan、Clang Release）。同分支较早 head `db4070c381c87dac0af0a5440ff9d9627bf36a40` 的 CI、RPC smoke 与格式 run 均因后续 head 更新而取消；当前 head 没有失败检查，历史取消记录未覆盖。
