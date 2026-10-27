@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.35")
+set_version("2.0.0-dev.119")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -127,6 +127,8 @@ target("trcore")
         "src/transport/group/pipeline_ingress.c",
         "src/transport/group/pipeline_listener.c",
         "src/transport/channel/channel.c",
+        "src/transport/channel/channel_stream_id.c",
+        "src/transport/channel/reset_tombstone_index.c",
         "src/rpc/rpc_codec.c",
         "src/rpc/rpc_record.c",
         "src/rpc/rpc_record_stream.c",
@@ -336,6 +338,7 @@ for _, name in ipairs({"test_echo_client_i18n", "test_socket_atomic_flags", "tes
                         "-Wl,--wrap=tr_connector_create",
                         "-Wl,--wrap=tr_connector_start",
                         "-Wl,--wrap=tr_connector_cancel",
+                        "-Wl,--wrap=tr_pipeline_listener_create",
                         "-Wl,--wrap=sendmsg",
                         "-Wl,--wrap=tr_deadline_init_ms",
                         "-Wl,--wrap=pthread_cond_timedwait", {force = true})
@@ -782,7 +785,17 @@ target("test_stream_reset")
     set_default(false)
     add_files("tests/test_stream_reset.c")
     add_deps("trcore")
-    add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg", {force = true})
+    add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg",
+                "-Wl,--wrap=tr_channel_local_stream_id_take", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- RESET 墓碑固定索引的碰撞簇删除与 FIFO 槽复用边界。
+target("test_reset_tombstone_index")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_reset_tombstone_index.c")
+    add_deps("trcore")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -874,6 +887,8 @@ target("test_rpc_record_endpoint_tcp")
             "src/transport/protocol/frame.c",
             "src/transport/protocol/parser.c",
             "src/transport/channel/channel.c",
+            "src/transport/channel/channel_stream_id.c",
+            "src/transport/channel/reset_tombstone_index.c",
             "src/rpc/rpc_record.c",
             "src/rpc/rpc_record_stream.c",
             "src/rpc/rpc_record_router.c",

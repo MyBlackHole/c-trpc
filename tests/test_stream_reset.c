@@ -5,6 +5,7 @@
 #include "../src/execution/reactor_internal.h"
 #include "../src/crc32c.h"
 #include "../src/endian.h"
+#include "../src/memory_budget.h"
 #include "tr/status.h"
 
 #include <assert.h>
@@ -14,6 +15,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -24,6 +26,7 @@
 #define CAPACITY 4U
 #define CONTROL 4U
 #define COMMANDS 8U
+#define TRACKED_STREAMS 256U
 
 struct fixture {
 	struct tr_reactor *reactor;
@@ -41,13 +44,14 @@ struct fixture {
 	unsigned refused;
 	int down_status;
 	int error_status;
-	struct tr_stream_handle stream[32];
-	int reset_status[32];
+	struct tr_stream_handle stream[TRACKED_STREAMS];
+	int reset_status[TRACKED_STREAMS];
 	struct tr_buffer *held;
 	struct tr_stream_handle held_stream;
 	int hold_data;
 	int queue_reset_predecessors;
 	int reopen_on_closed;
+	int circular_stream_tracking;
 	struct tr_stream_handle reopened_stream;
 };
 
@@ -60,6 +64,7 @@ static atomic_int block_partial;
 static atomic_uint partial_eagain;
 static atomic_int block_all_tx;
 static atomic_int repeat_goaway_phase;
+static atomic_int force_local_stream_id_exhaustion;
 static struct tr_reactor_timer_handle repeat_goaway_timer;
 
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
@@ -76,6 +81,17 @@ int __wrap_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
 }
 
 ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
+int __real_tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out);
+int __wrap_tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out)
+{
+	if (atomic_exchange_explicit(&force_local_stream_id_exhaustion, 0,
+	                             memory_order_acq_rel)) {
+		assert(next);
+		*next = 0U;
+	}
+	return __real_tr_channel_local_stream_id_take(next, out);
+}
+
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
 	if (fd == atomic_load(&partial_fd)) {
@@ -145,6 +161,17 @@ static void wait_count(struct fixture *f, unsigned *counter, unsigned target)
 	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
+static void assert_fixed_history_budget(
+	struct tr_memory_budget *budget, uint64_t fixed_bytes)
+{
+	struct tr_memory_budget_stats stats;
+
+	tr_memory_budget_get_stats(budget, &stats);
+	assert(stats.current_bytes == fixed_bytes);
+	assert(stats.peak_bytes == fixed_bytes);
+	assert(stats.rejection_events == 0U);
+}
+
 static unsigned count(struct fixture *f, const unsigned *counter)
 {
 	unsigned value;
@@ -182,11 +209,21 @@ static void on_stream(struct tr_stream_handle stream,
 	int reopen = 0;
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	if (event == TR_STREAM_EVENT_OPENED) {
-		assert(f->opened < 32);
-		f->stream[f->opened++] = stream;
+		if (f->circular_stream_tracking) {
+			f->stream[f->opened % TRACKED_STREAMS] = stream;
+			++f->opened;
+		} else {
+			assert(f->opened < TRACKED_STREAMS);
+			f->stream[f->opened++] = stream;
+		}
 	} else if (event == TR_STREAM_EVENT_RESET) {
-		assert(f->resets < 32);
-		f->reset_status[f->resets++] = status;
+		if (f->circular_stream_tracking) {
+			f->reset_status[f->resets % TRACKED_STREAMS] = status;
+			++f->resets;
+		} else {
+			assert(f->resets < TRACKED_STREAMS);
+			f->reset_status[f->resets++] = status;
+		}
 		queue_predecessors = f->queue_reset_predecessors;
 		f->queue_reset_predecessors = 0;
 	} else if (event == TR_STREAM_EVENT_CLOSED) {
@@ -320,7 +357,8 @@ static void hello(struct fixture *f, unsigned lane, uint64_t features, int ack)
 static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
                                        int split, uint64_t features,
                                        uint64_t required, int handshake,
-                                       uint32_t commands)
+                                       uint32_t commands,
+                                       struct tr_memory_budget *memory_budget)
 {
 	const struct tr_reactor_config rc = {.max_connections = 2,
 	                                     .command_capacity = commands,
@@ -339,7 +377,8 @@ static void init_fixture_with_commands(struct fixture *f, uint32_t capacity,
 	        .window_update_threshold_bytes = 128,
 	        .max_message_bytes = WINDOW,
 	        .feature_bits = features,
-	        .required_feature_bits = required};
+	        .required_feature_bits = required,
+	        .memory_budget = memory_budget};
 	memset(f, 0, sizeof(*f));
 	f->peer[0] = f->peer[1] = -1;
 	f->split = split;
@@ -388,7 +427,7 @@ static void init_fixture(struct fixture *f, uint32_t capacity, int split,
                          uint64_t features, uint64_t required, int handshake)
 {
 	init_fixture_with_commands(f, capacity, split, features, required,
-	                           handshake, COMMANDS);
+	                           handshake, COMMANDS, NULL);
 }
 
 static void destroy_fixture(struct fixture *f)
@@ -425,7 +464,7 @@ static struct tr_stream_handle open_remote(struct fixture *f, unsigned lane,
 	assert(h.type == TR_FRAME_WINDOW_UPDATE && h.stream_id == id);
 	assert(h.message_id == WINDOW);
 	wait_count(f, &f->opened, count);
-	return f->stream[count - 1U];
+	return f->stream[(count - 1U) % TRACKED_STREAMS];
 }
 
 struct reset_request {
@@ -513,6 +552,338 @@ static void test_late_and_reuse(void)
 	wait_count(&f, &f.received, 1);
 	assert(reset(&f, fresh, TR_ERR_CLOSED) == TR_OK);
 	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2);
+	destroy_fixture(&f);
+}
+
+static void test_tombstone_connection_generation(void)
+{
+	struct fixture f;
+	struct tr_stream_handle old_stream;
+	struct tr_conn_handle old_connection, new_connection;
+	enum tr_connection_state connection_state;
+	enum tr_channel_lane_state lane_state = TR_CHANNEL_LANE_UP;
+	unsigned down_before;
+	int slot_free = 0;
+	int sockets[2];
+	init_fixture(&f, CAPACITY, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	old_stream = open_remote(&f, 0, 1, 1);
+	old_connection = f.connection[0];
+	assert(reset(&f, old_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+
+	/* 先让旧连接完全退役；墓碑仍留在逻辑 Channel 的有界历史里。 */
+	assert(close(f.peer[0]) == 0);
+	f.peer[0] = f.peer[1] = -1;
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
+		                                &lane_state) == TR_OK);
+		if (lane_state == TR_CHANNEL_LANE_DOWN)
+			break;
+		pause_ms();
+	}
+	assert(lane_state == TR_CHANNEL_LANE_DOWN);
+	wait_count(&f, &f.down, 1U);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		int ret = tr_reactor_get_connection_state(old_connection,
+		                                        &connection_state);
+		if (ret == TR_ERR_STALE) {
+			slot_free = 1;
+			break;
+		}
+		assert(ret == TR_OK);
+		if (connection_state == TR_CONN_FREE) {
+			slot_free = 1;
+			break;
+		}
+		pause_ms();
+	}
+	assert(slot_free);
+
+	/* 同一 Reactor 槽位重用，但新连接必须使用不同代次。 */
+	assert(socketpair(AF_UNIX,
+	                  SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0,
+	                  sockets) == 0);
+	assert(tr_reactor_adopt_fd(f.reactor, sockets[0], &new_connection) ==
+	       TR_OK);
+	assert(new_connection.slot == old_connection.slot);
+	assert(new_connection.generation != old_connection.generation);
+	f.connection[0] = f.connection[1] = new_connection;
+	f.peer[0] = f.peer[1] = sockets[1];
+	atomic_store(&partial_fd, sockets[0]);
+	assert(tr_channel_replace_connection(f.channel, TR_LANE_CONTROL,
+	                                    new_connection) == TR_OK);
+	assert(receive_frame(&f, 0).type == TR_FRAME_HELLO);
+	hello(&f, 0, TR_CHANNEL_FEATURE_STREAM_RESET, 0);
+	assert(receive_frame(&f, 0).type == TR_FRAME_HELLO_ACK);
+	assert(tr_channel_wait_ready(f.channel, TR_LANE_CONTROL, 5000) ==
+	       TR_OK);
+
+	/* 旧连接的同 ID/原因墓碑不得吞掉新代次上的未知 RESET。 */
+	down_before = count(&f, &f.down);
+	peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, down_before + 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_tombstone_split_connection_identity(void)
+{
+	struct fixture f;
+	enum tr_channel_lane_state control_state = TR_CHANNEL_LANE_UP;
+	enum tr_channel_lane_state bulk_state = TR_CHANNEL_LANE_UP;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	struct tr_stream_handle old = open_remote(&f, 0, 1, 1);
+	assert(reset(&f, old, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+
+	/* CONTROL 的墓碑不得跨物理连接吸收 BULK 上相同 ID/原因的 RESET。 */
+	peer_reset(&f, 1, 1, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, 1);
+	assert(f.down_status == TR_ERR_STATE);
+	for (unsigned i = 0; i < 5000U; ++i) {
+		assert(tr_channel_get_lane_state(f.channel, TR_LANE_BULK,
+		                                &bulk_state) == TR_OK);
+		if (bulk_state == TR_CHANNEL_LANE_DOWN)
+			break;
+		pause_ms();
+	}
+	assert(bulk_state == TR_CHANNEL_LANE_DOWN);
+	assert(tr_channel_get_lane_state(f.channel, TR_LANE_CONTROL,
+	                                &control_state) == TR_OK);
+	assert(control_state == TR_CHANNEL_LANE_UP);
+	assert(count(&f, &f.resets) == 1U && count(&f, &f.closed) == 1U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+
+	/* CONTROL 物理连接仍可继续准入、交付并正常终止另一条流。 */
+	struct tr_stream_handle live = open_remote(&f, 0, 3, 2);
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3, 1, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_tombstone_same_id_across_split_connections(void)
+{
+	struct fixture f;
+	struct tr_stream_handle control, bulk;
+	init_fixture(&f, CAPACITY, 1, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+
+	/* Split 连接各自推进 OPEN 前沿，同一个 ID 可在另一连接上重用。 */
+	control = open_remote(&f, 0, 1U, 1U);
+	assert(reset(&f, control, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1U, TR_ERR_CLOSED, TR_ERR_CLOSED, 1U);
+	bulk = open_remote(&f, 1, 1U, 2U);
+	assert(reset(&f, bulk, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 1U, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+
+	/* 两个同 ID 墓碑都只吸收其所属物理连接上的同原因重复 RESET。 */
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 1, 1U, TR_ERR_CLOSED);
+	barrier(&f, 1);
+	assert(count(&f, &f.down) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_tombstone_long_fifo_turnover(void)
+{
+	struct fixture f;
+	const unsigned stream_count = CAPACITY * 32U;
+	uint32_t newest_id = 0U;
+	uint32_t oldest_resident_id =
+	        2U * (stream_count - CAPACITY) + 1U;
+	init_fixture(&f, CAPACITY, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+
+	/* 在同一真实连接上周转 32 次完整墓碑环，不重建 Channel/Reactor。 */
+	for (unsigned i = 0U; i < stream_count; ++i) {
+		uint32_t stream_id = 2U * i + 1U;
+		struct tr_stream_handle stream =
+		        open_remote(&f, 0, stream_id, i + 1U);
+		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
+		finish_reset(&f, 0, stream_id, TR_ERR_CLOSED, TR_ERR_CLOSED,
+		             i + 1U);
+		newest_id = stream_id;
+	}
+
+	/* FIFO 当前最老和最新墓碑均命中；环外最早墓碑已淘汰。 */
+	peer_reset(&f, 0, oldest_resident_id, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 0, newest_id, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	assert(count(&f, &f.down) == 0U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(count(&f, &f.closed) == stream_count);
+	destroy_fixture(&f);
+}
+
+static uint64_t timespec_ns(const struct timespec *value)
+{
+	return (uint64_t)value->tv_sec * UINT64_C(1000000000) +
+	       (uint64_t)value->tv_nsec;
+}
+
+static int compare_u64_ns(const void *left, const void *right)
+{
+	uint64_t a = *(const uint64_t *)left;
+	uint64_t b = *(const uint64_t *)right;
+	return (a > b) - (a < b);
+}
+
+static uint64_t percentile_u64_ns(const uint64_t *sorted, unsigned count,
+                                  unsigned percentile)
+{
+	size_t rank;
+	assert(sorted && count > 0U && percentile > 0U && percentile <= 100U);
+	rank = ((size_t)count * percentile + 99U) / 100U;
+	return sorted[rank - 1U];
+}
+
+static void test_tombstone_real_channel_capacity(void)
+{
+	struct fixture f;
+	const unsigned channel_capacity =
+#if defined(__SANITIZE_THREAD__)
+	        5000U;
+#else
+	        40000U;
+#endif
+	uint32_t newest_id = 0U;
+	uint64_t *reset_rtt_ns =
+	        calloc(channel_capacity, sizeof(*reset_rtt_ns));
+	struct timespec loop_wall_start, loop_wall_end;
+	struct timespec loop_cpu_start, loop_cpu_end;
+	uint64_t wall_ns, cpu_ns;
+	assert(reset_rtt_ns);
+	init_fixture(&f, channel_capacity, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	f.circular_stream_tracking = 1;
+
+	/* TSan 降低容量以守住目标运行时限；Release/ASan 按生产最大配置运行。 */
+	assert(clock_gettime(CLOCK_MONOTONIC, &loop_wall_start) == 0);
+	assert(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &loop_cpu_start) == 0);
+	for (unsigned i = 0U; i < channel_capacity; ++i) {
+		uint32_t stream_id = 2U * i + 1U;
+		struct tr_stream_handle stream =
+		        open_remote(&f, 0, stream_id, i + 1U);
+		struct timespec reset_start, reset_end;
+		assert(clock_gettime(CLOCK_MONOTONIC, &reset_start) == 0);
+		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
+		finish_reset(&f, 0, stream_id, TR_ERR_CLOSED, TR_ERR_CLOSED,
+		             i + 1U);
+		assert(clock_gettime(CLOCK_MONOTONIC, &reset_end) == 0);
+		reset_rtt_ns[i] =
+		        timespec_ns(&reset_end) - timespec_ns(&reset_start);
+		newest_id = stream_id;
+	}
+	assert(clock_gettime(CLOCK_MONOTONIC, &loop_wall_end) == 0);
+	assert(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &loop_cpu_end) == 0);
+	wall_ns = timespec_ns(&loop_wall_end) - timespec_ns(&loop_wall_start);
+	cpu_ns = timespec_ns(&loop_cpu_end) - timespec_ns(&loop_cpu_start);
+	assert(wall_ns > 0U);
+
+	/* 最老和最新墓碑都仍驻留；再加入一条后最老墓碑必须淘汰。 */
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 0, newest_id, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	struct tr_stream_handle rollover =
+	        open_remote(&f, 0, newest_id + 2U, channel_capacity + 1U);
+	assert(reset(&f, rollover, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, newest_id + 2U, TR_ERR_CLOSED, TR_ERR_CLOSED,
+	             channel_capacity + 1U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	peer_reset(&f, 0, newest_id + 2U, TR_ERR_CLOSED);
+	barrier(&f, 0);
+	peer_reset(&f, 0, 1U, TR_ERR_CLOSED);
+	wait_count(&f, &f.down, 1U);
+	assert(f.down_status == TR_ERR_STATE);
+	assert(count(&f, &f.closed) == channel_capacity + 1U);
+	printf("stream_reset: real Channel tombstone capacity %u passed\n",
+	       channel_capacity);
+	qsort(reset_rtt_ns, channel_capacity, sizeof(*reset_rtt_ns),
+	      compare_u64_ns);
+	printf("stream_reset: RESET round-trip us p50=%.2f p95=%.2f p99=%.2f; "
+	       "OPEN/RESET loop wall_ms=%.2f process_cpu_ms=%.2f "
+	       "open_reset/s=%.0f\n",
+	       (double)percentile_u64_ns(reset_rtt_ns, channel_capacity, 50U) /
+	               1000.0,
+	       (double)percentile_u64_ns(reset_rtt_ns, channel_capacity, 95U) /
+	               1000.0,
+	       (double)percentile_u64_ns(reset_rtt_ns, channel_capacity, 99U) /
+	               1000.0,
+	       (double)wall_ns / 1000000.0, (double)cpu_ns / 1000000.0,
+	       (double)channel_capacity * 1000000000.0 / (double)wall_ns);
+	free(reset_rtt_ns);
+	destroy_fixture(&f);
+}
+
+static void test_local_stream_id_exhaustion(void)
+{
+	uint32_t next = UINT32_MAX - 2U;
+	uint32_t stream_id = 0U;
+
+	/* Client 的最后两个奇数标识都可分配，之后必须饱和而不是回绕。 */
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) == TR_OK);
+	assert(stream_id == UINT32_MAX - 2U && next == UINT32_MAX);
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) == TR_OK);
+	assert(stream_id == UINT32_MAX && next == 0U);
+	stream_id = 17U;
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) ==
+	       TR_ERR_CLOSED);
+	assert(stream_id == 17U && next == 0U);
+
+	/* Server 的最高偶数标识同样只分配一次，并保留耗尽状态。 */
+	next = UINT32_MAX - 1U;
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) == TR_OK);
+	assert(stream_id == UINT32_MAX - 1U && next == 0U);
+	stream_id = 19U;
+	assert(tr_channel_local_stream_id_take(&next, &stream_id) ==
+	       TR_ERR_CLOSED);
+	assert(stream_id == 19U && next == 0U);
+}
+
+static void test_local_stream_id_exhaustion_drains(void)
+{
+	struct fixture f;
+	struct tr_stream_handle stream = {
+	        .channel = NULL, .slot = 77U, .generation = 91U};
+	enum tr_channel_state state;
+	struct tr_frame_header h;
+
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	atomic_store_explicit(&force_local_stream_id_exhaustion, 1,
+	                      memory_order_release);
+	assert(tr_stream_open(f.channel, TR_LANE_CONTROL, &stream) ==
+	       TR_ERR_CLOSED);
+	assert(atomic_load_explicit(&force_local_stream_id_exhaustion,
+	                            memory_order_acquire) == 0);
+	assert(stream.channel == NULL && stream.slot == 77U &&
+	       stream.generation == 91U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_GOAWAY && h.stream_id == 0U &&
+	       h.message_id == 0U);
+	assert(tr_channel_get_state(f.channel, &state) == TR_OK);
+	assert(state == TR_CHANNEL_DRAINING);
+	send_frame(&f, 0, TR_FRAME_GOAWAY, 0, 0, 0, NULL, 0);
+	assert(tr_channel_wait_drained(f.channel, 5000) == TR_OK);
+	assert(tr_channel_get_state(f.channel, &state) == TR_OK);
+	assert(state == TR_CHANNEL_DRAINED);
 	destroy_fixture(&f);
 }
 
@@ -826,6 +1197,36 @@ static void test_frozen_discard_credit(int unordered)
 	wait_count(&f, &f.down, 2);
 	assert(f.down_status == TR_ERR_BAD_LENGTH);
 	assert(count(&f, &f.resets) == 1);
+	destroy_fixture(&f);
+}
+
+static void test_reset_rejects_compressed_data_lane_flag(void)
+{
+	struct fixture f;
+	uint8_t bytes[1] = {0};
+	init_fixture(&f, CAPACITY, 1, 1, 1, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle live_stream = open_remote(&f, 1, 3, 2);
+
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	assert(receive_frame(&f, 0).type == TR_FRAME_STREAM_RESET);
+	/* COMPRESSED DATA 在 RESET 状态仍必须遵守 DATA 类型标志合同。
+	 * 控制物理连接上的帧不能伪称来自 BULK lane。 */
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST | TR_FRAME_F_COMPRESSED |
+	                   TR_FRAME_F_LANE_BULK,
+	           1, 1, bytes, sizeof(bytes));
+	wait_count(&f, &f.down, 1);
+	assert(f.down_status == TR_ERR_BAD_FLAGS);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+
+	/* 该错误只关闭对应 CONTROL 物理连接，BULK 上的流仍可交付。 */
+	send_frame(&f, 1, TR_FRAME_DATA, TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3,
+	           1, bytes, sizeof(bytes));
+	wait_count(&f, &f.received, 1);
+	assert(count(&f, &f.down) == 1U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 1, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
 	destroy_fixture(&f);
 }
 
@@ -1218,7 +1619,7 @@ static int repeat_goaway_owner(void *arg)
 static void test_repeat_goaway_fifo(void)
 {
 	struct fixture f;
-	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256);
+	init_fixture_with_commands(&f, CAPACITY, 0, 1, 1, 1, 256, NULL);
 	(void)open_remote(&f, 0, 1, 1);
 	assert(tr_reactor_timer_register(f.reactor, repeat_goaway, &f,
 	                                 &repeat_goaway_timer) == TR_OK);
@@ -1290,6 +1691,49 @@ static void test_close_and_held_payload(void)
 	destroy_fixture(&f);
 }
 
+static void test_reset_releases_held_payload_without_credit(void)
+{
+	struct fixture f;
+	uint8_t bytes[8] = {1};
+	init_fixture(&f, CAPACITY, 0, 1, 1, 1);
+	struct tr_stream_handle reset_stream = open_remote(&f, 0, 1, 1);
+	struct tr_stream_handle live_stream = open_remote(&f, 0, 3, 2);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 1;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 1, 1, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 1U);
+	assert(f.held && f.held_stream.generation == reset_stream.generation);
+
+	assert(reset(&f, reset_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_TIMEOUT, 1U);
+	assert(tr_channel_active_streams(f.channel) == 1U);
+	/* RESET 退役后迟到的应用释放只还内存，不得为旧流补发窗口信用。 */
+	assert(tr_stream_release_payload(f.held_stream, f.held) == TR_ERR_STALE);
+	f.held = NULL;
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.hold_data = 0;
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	send_frame(&f, 0, TR_FRAME_PING, 0, 0, 1001, NULL, 0);
+	struct tr_frame_header h = receive_frame(&f, 0);
+	assert(h.type == TR_FRAME_PONG && h.message_id == 1001);
+	assert(count(&f, &f.down) == 0U);
+
+	/* 迟到释放不能影响同一 Channel 上仍活动的流。 */
+	send_frame(&f, 0, TR_FRAME_DATA,
+	           TR_FRAME_F_FIRST | TR_FRAME_F_LAST, 3, 1, bytes,
+	           sizeof(bytes));
+	wait_count(&f, &f.received, 2U);
+	assert(reset(&f, live_stream, TR_ERR_CLOSED) == TR_OK);
+	finish_reset(&f, 0, 3, TR_ERR_CLOSED, TR_ERR_CLOSED, 2U);
+	assert(tr_channel_active_streams(f.channel) == 0U);
+	assert(count(&f, &f.resets) == 2U && count(&f, &f.closed) == 2U);
+	assert(count(&f, &f.down) == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_timer_failure_and_partial(int stopping)
 {
 	struct fixture f;
@@ -1335,8 +1779,23 @@ enum invalid_kind {
 static void test_invalid(enum invalid_kind kind)
 {
 	struct fixture f;
+	struct tr_memory_budget budget;
+	uint64_t fixed_bytes = 0U;
 	uint8_t bytes[8] = {0};
-	init_fixture(&f, 2, 0, 1, 1, 1);
+	if (kind == EVICTED_RESET) {
+		struct tr_memory_budget_stats stats;
+
+		tr_memory_budget_init(&budget, 0U);
+		init_fixture_with_commands(&f, 2U, 0, 1U, 1U, 1, COMMANDS,
+		                           &budget);
+		tr_memory_budget_get_stats(&budget, &stats);
+		fixed_bytes = stats.current_bytes;
+		assert(fixed_bytes > 0U);
+		budget.limit_bytes = fixed_bytes;
+		assert_fixed_history_budget(&budget, fixed_bytes);
+	} else {
+		init_fixture(&f, 2, 0, 1, 1, 1);
+	}
 	struct tr_stream_handle stream = open_remote(&f, 0, 1, 1);
 	if (kind == BAD_PARTIAL || kind == EXCESS_CREDIT) {
 		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
@@ -1350,7 +1809,13 @@ static void test_invalid(enum invalid_kind kind)
 	} else {
 		assert(reset(&f, stream, TR_ERR_CLOSED) == TR_OK);
 		finish_reset(&f, 0, 1, TR_ERR_CLOSED, TR_ERR_CLOSED, 1);
+		if (kind == EVICTED_RESET)
+			assert_fixed_history_budget(&budget, fixed_bytes);
 		if (kind == EVICTED_RESET) {
+			/* FIFO 中仍保留的墓碑必须吸收重复 RESET。 */
+			peer_reset(&f, 0, 1, TR_ERR_CLOSED);
+			barrier(&f, 0);
+			assert_fixed_history_budget(&budget, fixed_bytes);
 			for (unsigned i = 1; i <= 2; ++i) {
 				stream =
 				        open_remote(&f, 0, 2U * i + 1U, i + 1U);
@@ -1358,6 +1823,7 @@ static void test_invalid(enum invalid_kind kind)
 				       TR_OK);
 				finish_reset(&f, 0, 2U * i + 1U, TR_ERR_CLOSED,
 				             TR_ERR_CLOSED, i + 1U);
+				assert_fixed_history_budget(&budget, fixed_bytes);
 			}
 			peer_reset(&f, 0, 1, TR_ERR_CLOSED);
 		} else if (kind == UNKNOWN_RESET)
@@ -1375,6 +1841,14 @@ static void test_invalid(enum invalid_kind kind)
 	wait_count(&f, &f.down, 1);
 	assert(tr_channel_active_streams(f.channel) == 0);
 	destroy_fixture(&f);
+	if (kind == EVICTED_RESET) {
+		struct tr_memory_budget_stats stats;
+
+		tr_memory_budget_get_stats(&budget, &stats);
+		assert(stats.current_bytes == 0U);
+		assert(stats.peak_bytes == fixed_bytes);
+		assert(stats.rejection_events == 0U);
+	}
 }
 
 static void test_split_frontier(void)
@@ -1449,10 +1923,18 @@ static void test_wire_shape(uint16_t type)
 
 int main(void)
 {
+	test_reset_rejects_compressed_data_lane_flag();
 	test_wire_shape(TR_FRAME_STREAM_RESET);
 	test_wire_shape(TR_FRAME_STREAM_REFUSED);
 	test_feature_gate();
+	test_local_stream_id_exhaustion();
+	test_local_stream_id_exhaustion_drains();
 	test_late_and_reuse();
+	test_tombstone_connection_generation();
+	test_tombstone_split_connection_identity();
+	test_tombstone_same_id_across_split_connections();
+	test_tombstone_long_fifo_turnover();
+	test_tombstone_real_channel_capacity();
 	test_reservation_and_fifo();
 	test_repeat_goaway_fifo();
 	test_closed_reentrant_open_fifo();
@@ -1478,12 +1960,13 @@ int main(void)
 	test_frozen_discard_credit(0);
 	test_frozen_discard_credit(1);
 	test_close_and_held_payload();
+	test_reset_releases_held_payload_without_credit();
 	test_timer_failure_and_partial(0);
 	test_timer_failure_and_partial(1);
 	for (enum invalid_kind k = UNKNOWN_RESET; k <= EVICTED_RESET; ++k)
 		test_invalid(k);
 	test_split_frontier();
-	puts("stream_reset: wire, feature, FIFO, pressure, retry, retirement "
-	     "passed");
+	puts("stream_reset: wire, long FIFO turnover, feature, pressure, retry, retirement, "
+	     "ID exhaustion passed");
 	return 0;
 }

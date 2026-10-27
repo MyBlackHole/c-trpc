@@ -2,10 +2,18 @@
 #define TR_CHANNEL_INTERNAL_H
 
 #include "channel.h"
+#include "tr/status.h"
 #include "../../execution/deadline_internal.h"
 #include "../../runtime/message_service.h"
 
+#include <stdint.h>
+
 struct tr_peer_identity_snapshot;
+
+/* 分配本地单调流标识。到达 uint32_t 边界后将 next 饱和为 0，
+ * 绝不回绕或复用已发布的标识；耗尽后返回 CLOSED 且不修改 out。
+ */
+int tr_channel_local_stream_id_take(uint32_t *next, uint32_t *out);
 
 typedef int (*tr_channel_message_submit_fn)(
         void *context, struct tr_message *input,

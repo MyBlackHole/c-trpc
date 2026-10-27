@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "channel.h"
 #include "channel_internal.h"
+#include "reset_tombstone_index.h"
 #include "../../io/connector_internal.h"
 #include "../../io/socket_internal.h"
 #include "../../execution/reactor_internal.h"
@@ -53,14 +54,6 @@ struct tr_channel_pending_hello {
 struct tr_stream_index_entry {
 	uint32_t stream_id;
 	uint32_t slot;
-};
-
-/* 仅保留有限个精确双向终止记录，吸收重复 RESET。DATA/信用没有
- * 此豁免；对端 RESET 已是其发送 FIFO 屏障，之后的数据仍是协议错误。 */
-struct tr_stream_reset_tombstone {
-	struct tr_conn_handle connection;
-	uint32_t stream_id;
-	int peer_status;
 };
 
 struct tr_channel_rx_transform {
@@ -220,6 +213,7 @@ struct tr_channel {
 	struct tr_stream_index_entry *stream_index;
 	size_t stream_index_capacity;
 	struct tr_stream_reset_tombstone *reset_tombstones;
+	uint32_t *reset_tombstone_index;
 	uint32_t reset_tombstone_cursor;
 	uint32_t reset_cursor;
 	uint32_t peer_stream_frontier[2];
@@ -1654,8 +1648,9 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 			connection =
 			        tr_channel_connection(channel, stream->lane);
 			message_id = stream->tx_compressed_message_id;
-			frame_flags = tr_lane_flag(stream->lane) |
-			              TR_FRAME_F_COMPRESSED;
+			/* 备注：DATA 的 lane 由 Stream 登记信息和连接代次校验；
+			 * lane 不重复编码进 DATA 标志位。 */
+			frame_flags = TR_FRAME_F_COMPRESSED;
 			if (stream->tx_compressed_offset == 0U)
 				frame_flags |= TR_FRAME_F_FIRST;
 			if (stream->tx_compressed_offset + frame_len ==
@@ -1702,11 +1697,20 @@ tr_channel_compressed_tx_progress_on_owner(struct tr_channel *channel)
 				                                      stream);
 				selected = 1;
 			}
-			if (selected && stream)
-				channel->tx_schedule_cursor =
-				        slot + 1U == channel->config.max_streams
-				                ? 0U
-				                : slot + 1U;
+			if (selected && stream) {
+				/* 池满的候选尚未发送，保留为下次扫描起点，
+				 * 避免已发送流持续抢占发送机会。
+				 */
+				if (ret == TR_AGAIN && pool_exhausted) {
+					channel->tx_schedule_cursor = slot;
+				} else {
+					channel->tx_schedule_cursor =
+					        slot + 1U == channel->config
+					                                .max_streams
+					                ? 0U
+					                : slot + 1U;
+				}
+			}
 			if (selected || retry)
 				break;
 		}
@@ -2498,20 +2502,46 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 		}
 		if (stream->reset_sent && stream->reset_received &&
 		    stream->reset_notified) {
+			uint32_t tombstone_slot =
+			        channel->reset_tombstone_cursor;
 			struct tr_stream_reset_tombstone *retired =
-			        &channel->reset_tombstones
-			                 [channel->reset_tombstone_cursor];
-			*retired = (struct tr_stream_reset_tombstone){
-			        connection, stream->stream_id,
-			        stream->reset_peer_status};
-			channel->reset_tombstone_cursor++;
-			if (channel->reset_tombstone_cursor ==
-			    channel->config.max_streams)
-				channel->reset_tombstone_cursor = 0;
-			handle = tr_stream_make_handle(channel, slot, stream);
-			tr_stream_free_locked(channel, slot);
-			channel->stat_streams_closed++;
-			closed = 1;
+			        &channel->reset_tombstones[tombstone_slot];
+			if (retired->stream_id) {
+				ret = tr_reset_tombstone_index_remove(
+				        channel->reset_tombstone_index,
+				        channel->stream_index_capacity,
+				        channel->reset_tombstones,
+				        channel->config.max_streams,
+				        retired->connection, retired->stream_id, NULL);
+				if (ret != TR_OK)
+					ret = TR_ERR_STATE;
+			}
+			if (ret == TR_OK) {
+				*retired = (struct tr_stream_reset_tombstone){
+				        connection, stream->stream_id,
+				        stream->reset_peer_status};
+				ret = tr_reset_tombstone_index_insert(
+				        channel->reset_tombstone_index,
+				        channel->stream_index_capacity,
+				        channel->reset_tombstones,
+				        channel->config.max_streams,
+				        connection, retired->stream_id, tombstone_slot,
+				        NULL);
+				if (ret != TR_OK) {
+					memset(retired, 0, sizeof(*retired));
+					ret = TR_ERR_STATE;
+				}
+			}
+			if (ret == TR_OK) {
+				channel->reset_tombstone_cursor++;
+				if (channel->reset_tombstone_cursor ==
+				    channel->config.max_streams)
+					channel->reset_tombstone_cursor = 0;
+				handle = tr_stream_make_handle(channel, slot, stream);
+				tr_stream_free_locked(channel, slot);
+				channel->stat_streams_closed++;
+				closed = 1;
+			}
 		}
 		pthread_mutex_unlock(&channel->lock);
 		if (closed)
@@ -2551,11 +2581,17 @@ static int tr_channel_handle_stream_reset(struct tr_channel *channel,
 	pthread_mutex_lock(&channel->lock);
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
 	if (!stream) {
-		for (uint32_t i = 0; i < channel->config.max_streams; ++i) {
+		uint32_t tombstone_slot;
+		ret = tr_reset_tombstone_index_find(
+		        channel->reset_tombstone_index,
+			        channel->stream_index_capacity,
+			        channel->reset_tombstones, channel->config.max_streams,
+			        connection, frame->header.stream_id,
+			        &tombstone_slot, NULL);
+		if (ret == TR_OK) {
 			const struct tr_stream_reset_tombstone *retired =
-			        &channel->reset_tombstones[i];
-			if (retired->stream_id == frame->header.stream_id &&
-			    retired->peer_status == status &&
+			        &channel->reset_tombstones[tombstone_slot];
+			if (retired->peer_status == status &&
 			    tr_conn_equal(retired->connection, connection)) {
 				pthread_mutex_unlock(&channel->lock);
 				return TR_OK;
@@ -3694,6 +3730,13 @@ static int tr_channel_handle_compressed_data(struct tr_channel *channel,
 	stream = tr_stream_lookup_id(channel, frame->header.stream_id, &slot);
 	if (stream && stream->state == TR_STREAM_SLOT_RESETTING &&
 	    tr_stream_connection_matches(channel, stream, connection)) {
+		if ((frame->header.flags &
+		     ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+		       TR_FRAME_F_COMPRESSED)) != 0) {
+			pthread_mutex_unlock(&channel->lock);
+			return tr_channel_protocol_error(channel, connection,
+			                                 TR_ERR_BAD_FLAGS);
+		}
 		ret = tr_stream_reset_discard_locked(channel, stream, frame,
 		                                     payload_len);
 		pthread_mutex_unlock(&channel->lock);
@@ -3718,6 +3761,11 @@ static int tr_channel_handle_compressed_data(struct tr_channel *channel,
 		pthread_mutex_unlock(&channel->lock);
 		return tr_channel_protocol_error(channel, connection,
 		                                 TR_ERR_STATE);
+	}
+	if ((frame->header.flags & ~(TR_FRAME_F_FIRST | TR_FRAME_F_LAST |
+	                             TR_FRAME_F_COMPRESSED)) != 0) {
+		ret = TR_ERR_STATE;
+		goto fail_stream;
 	}
 	if (!frame->header.message_id ||
 	    frame->header.message_id != stream->next_rx_message_id) {
@@ -4929,6 +4977,7 @@ static void tr_channel_free_fixed_storage(struct tr_channel *channel)
 	struct tr_memory_budget *budget = channel->config.memory_budget;
 	uint64_t bytes = channel->fixed_storage_bytes;
 
+	/* RESET 索引是活动流索引同一分配中的尾段视图。 */
 	free(channel->stream_index);
 	free(channel->streams);
 	free(channel);
@@ -5031,7 +5080,8 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	struct tr_channel_config effective = {0};
 	struct tr_channel *channel;
 	struct tr_reactor_limits reactor_limits;
-	size_t stream_bytes, index_bytes, index_capacity, fixed_bytes;
+	size_t stream_bytes, index_bytes, tombstone_index_bytes;
+	size_t index_capacity, fixed_bytes;
 	int ret;
 
 	if (!out || !control_connection.reactor ||
@@ -5103,7 +5153,8 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	}
 	index_capacity = tr_stream_index_capacity_for(effective.max_streams);
 	if (index_capacity == 0U ||
-	    index_capacity > SIZE_MAX / sizeof(*channel->stream_index))
+	    index_capacity > SIZE_MAX / sizeof(*channel->stream_index) ||
+	    index_capacity > SIZE_MAX / sizeof(*channel->reset_tombstone_index))
 		return TR_ERR_INVALID;
 #if SIZE_MAX <= UINT32_MAX
 	if (effective.max_streams >
@@ -5115,10 +5166,16 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	               (sizeof(*channel->streams) +
 	                sizeof(*channel->reset_tombstones));
 	index_bytes = index_capacity * sizeof(*channel->stream_index);
-	if (stream_bytes > SIZE_MAX - index_bytes ||
-	    sizeof(*channel) > SIZE_MAX - stream_bytes - index_bytes)
+	tombstone_index_bytes =
+	        index_capacity * sizeof(*channel->reset_tombstone_index);
+	if (index_bytes > SIZE_MAX - tombstone_index_bytes ||
+	    stream_bytes > SIZE_MAX - index_bytes - tombstone_index_bytes ||
+	    sizeof(*channel) >
+	            SIZE_MAX - stream_bytes - index_bytes -
+	                    tombstone_index_bytes)
 		return TR_ERR_INVALID;
-	fixed_bytes = sizeof(*channel) + stream_bytes + index_bytes;
+	fixed_bytes = sizeof(*channel) + stream_bytes + index_bytes +
+	              tombstone_index_bytes;
 	if (effective.memory_budget) {
 		ret = tr_memory_budget_reserve(effective.memory_budget,
 		                               (uint64_t)fixed_bytes);
@@ -5160,17 +5217,22 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 		pthread_condattr_destroy(&attr);
 		build.state_cond_ready = 1;
 	}
-	/* 槽与有限重复窗口同一次有界分配；后续 RESET 不分配存储。 */
+	/* 流槽与墓碑环共享分配；两张索引共享另一分配，RESET 周转不分配。 */
 	channel->streams = (struct tr_stream_slot *)calloc(
 	        channel->config.max_streams,
 	        sizeof(*channel->streams) + sizeof(*channel->reset_tombstones));
 	channel->stream_index = (struct tr_stream_index_entry *)calloc(
-		channel->stream_index_capacity, sizeof(*channel->stream_index));
+	        channel->stream_index_capacity,
+	        sizeof(*channel->stream_index) +
+	                sizeof(*channel->reset_tombstone_index));
 	if (!channel->streams || !channel->stream_index)
 		return TR_ERR_NOMEM;
 	channel->reset_tombstones =
 	        (struct tr_stream_reset_tombstone
 	                 *)(channel->streams + channel->config.max_streams);
+	channel->reset_tombstone_index =
+	        (uint32_t *)(channel->stream_index +
+	                     channel->stream_index_capacity);
 	{
 		uint32_t i;
 
@@ -6555,15 +6617,19 @@ int tr_stream_open(struct tr_channel *channel, enum tr_lane lane,
 		return physical_alive ? TR_AGAIN : TR_ERR_CLOSED;
 	}
 
-	stream_id = channel->next_local_stream_id;
-	if (stream_id == 0) {
+	ret = tr_channel_local_stream_id_take(
+	        &channel->next_local_stream_id, &stream_id);
+	if (ret == TR_ERR_CLOSED) {
 		pthread_mutex_unlock(&channel->lock);
-		return TR_ERR_STATE;
+		ret = tr_channel_begin_drain(channel);
+		return ret == TR_OK ? TR_ERR_CLOSED : ret;
 	}
-	/* 连接上的线协议标识不回绕。失败可以留下空洞，不能重用
-	 * 曾经发布过的标识，使迟到 RESET 有机会命中新调用。 */
-	channel->next_local_stream_id =
-	        stream_id > UINT32_MAX - 2U ? 0 : stream_id + 2U;
+	if (ret != TR_OK) {
+		pthread_mutex_unlock(&channel->lock);
+		return ret;
+	}
+	/* 分配在发送前单调前进。失败可以留下空洞，不能重用曾经
+	 * 发布过的标识，使迟到 RESET 有机会命中新调用。 */
 
 	if (tr_stream_lookup_id(channel, stream_id, NULL)) {
 		pthread_mutex_unlock(&channel->lock);

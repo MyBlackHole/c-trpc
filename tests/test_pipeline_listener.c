@@ -42,6 +42,11 @@ struct data_test_ctx {
 	unsigned frames;
 	unsigned events;
 	uint16_t last_type;
+	uint64_t hold_message_id;
+	uint64_t raw_message_id;
+	uint8_t held_payload_byte;
+	uint8_t raw_payload_byte;
+	struct tr_buffer *held_payload;
 };
 
 struct held_message_task {
@@ -220,7 +225,9 @@ authorize_control(const struct tr_connection_group_authorization *authorization,
 	if (!authorization ||
 	    (authorization->role != TR_CONNECTION_GROUP_ROLE_CONTROL &&
 	     authorization->role != TR_CONNECTION_GROUP_ROLE_DATA) ||
-	    authorization->group.group_id != TEST_PIPELINE_ID ||
+	    (authorization->group.group_id != TEST_PIPELINE_ID &&
+	     !(authorization->group.group_id == TEST_PIPELINE_ID + 1U &&
+	       authorization->group.epoch == TEST_EPOCH_2)) ||
 	    (authorization->group.epoch != TEST_EPOCH_1 &&
 	     authorization->group.epoch != TEST_EPOCH_2) ||
 	    authorization->peer_identity.authentication !=
@@ -238,16 +245,32 @@ static enum tr_frame_disposition data_frame_cb(
 	struct tr_conn_handle connection, struct tr_frame *frame, void *arg)
 {
 	struct data_test_ctx *ctx = (struct data_test_ctx *)arg;
+	enum tr_frame_disposition disposition = TR_FRAME_RELEASE;
 
 	assert(route != NULL);
 	assert(route->pipeline_id == TEST_PIPELINE_ID);
 	(void)connection;
 	pthread_mutex_lock(&ctx->lock);
+	if (frame->header.message_id == ctx->hold_message_id &&
+	    ctx->hold_message_id != 0U) {
+		assert(frame->payload != NULL);
+		assert(frame->payload->len == 1U);
+		assert(frame->payload->data[0] == ctx->held_payload_byte);
+		assert(ctx->held_payload == NULL);
+		ctx->held_payload = frame->payload;
+		disposition = TR_FRAME_TAKE_OWNERSHIP;
+	}
+	if (frame->header.message_id == ctx->raw_message_id &&
+	    ctx->raw_message_id != 0U) {
+		assert(frame->payload != NULL);
+		assert(frame->payload->len == 1U);
+		assert(frame->payload->data[0] == ctx->raw_payload_byte);
+	}
 	ctx->frames++;
 	ctx->last_type = frame->header.type;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
-	return TR_FRAME_RELEASE;
+	return disposition;
 }
 
 static void data_event_cb(
@@ -538,6 +561,29 @@ static void send_test_compressed_message(int fd, uint32_t stream_id,
 	send_data_frame(
 	        fd, TR_FRAME_F_COMPRESSED | TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
 	        stream_id, message_id, payload, sizeof(payload));
+}
+
+static void send_valid_zstd_message(int fd, uint32_t stream_id,
+                                    uint64_t message_id, uint8_t source)
+{
+	struct tr_message_envelope envelope;
+	uint8_t encoded[128];
+	uint8_t payload[TR_MESSAGE_ENVELOPE_WIRE_SIZE + sizeof(encoded)];
+	size_t encoded_bytes = ZSTD_compress(encoded, sizeof(encoded), &source,
+	                                     sizeof(source), 1);
+
+	assert(!ZSTD_isError(encoded_bytes));
+	assert(encoded_bytes <= sizeof(encoded));
+	memset(&envelope, 0, sizeof(envelope));
+	envelope.codec_id = TR_MESSAGE_CODEC_ZSTD;
+	envelope.encoded_body_bytes = (uint32_t)encoded_bytes;
+	envelope.decoded_message_bytes = sizeof(source);
+	assert(tr_message_envelope_encode(payload, &envelope) == TR_OK);
+	memcpy(payload + TR_MESSAGE_ENVELOPE_WIRE_SIZE, encoded, encoded_bytes);
+	send_data_frame(
+	        fd, TR_FRAME_F_COMPRESSED | TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
+	        stream_id, message_id, payload,
+	        (uint32_t)(TR_MESSAGE_ENVELOPE_WIRE_SIZE + encoded_bytes));
 }
 
 static void send_compressed_first_fragment(int fd, uint32_t stream_id,
@@ -831,6 +877,197 @@ static int open_ready_data_connection(struct tr_pipeline_listener *listener,
 	return data;
 }
 
+static void test_pipeline_listener_full_budget_raw_peer(void)
+{
+	struct tr_reactor *reactor = NULL;
+	struct tr_pipeline_listener_config config;
+	struct tr_pipeline_listener *listener = NULL;
+	struct tr_memory_budget message_budget;
+	struct tr_memory_budget_stats budget_stats;
+	struct held_message_task task = {0};
+	struct held_transform_completion_request transform_completion = {0};
+	struct data_test_ctx data_ctx = {0};
+	struct tr_pipeline_route_preface route;
+	struct tr_pipeline_route_preface data_routes[2];
+	struct tr_pipeline_control_wire_message offers[2];
+	struct tr_pipeline_control_wire_message ready[2];
+	uint32_t stream_ids[2] = {7501U, 7502U};
+	uint64_t offer_ids[2] = {7401U, 7402U};
+	uint64_t ready_ids[2] = {7411U, 7412U};
+	int data_fds[2] = {-1, -1};
+	int compressed_fd = -1;
+	int raw_fd = -1;
+	uint8_t raw_byte = 0x7cU;
+	uint64_t listener_budget_bytes;
+	uint64_t filler_bytes;
+	uint64_t held_budget_bytes;
+	uint16_t port = 0U;
+	int control = -1;
+	unsigned i;
+
+	assert(pthread_mutex_init(&task.lock, NULL) == 0);
+	assert(pthread_cond_init(&task.cond, NULL) == 0);
+	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
+	assert(pthread_cond_init(&data_ctx.cond, NULL) == 0);
+	data_ctx.hold_message_id = UINT64_C(7601);
+	data_ctx.raw_message_id = UINT64_C(7602);
+	data_ctx.held_payload_byte = 0x5aU;
+	data_ctx.raw_payload_byte = raw_byte;
+	tr_memory_budget_init(&message_budget, 8U * 1024U * 1024U);
+	task.budget = &message_budget;
+
+	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	memset(&config, 0, sizeof(config));
+	config.owner = reactor;
+	config.owner_shard_id = 0U;
+	config.pipeline_capacity = 1U;
+	config.connection_capacity = 3U;
+	config.data_capacity_per_pipeline = 2U;
+	config.stream_affinity_capacity_per_pipeline = 2U;
+	config.control_message_count = 4U;
+	config.receive_compression_algorithms = TR_MESSAGE_ALGORITHM_ZSTD;
+	config.max_message_bytes = 128U;
+	config.max_encoded_message_bytes = 128U;
+	config.message_task_capacity = 1U;
+	config.message_submit = hold_message_submit;
+	config.message_cancel = hold_message_cancel;
+	config.message_context = &task;
+	config.message_budget = &message_budget;
+	config.authorize_control = authorize_control;
+	config.data_frame_cb = data_frame_cb;
+	config.data_event_cb = data_event_cb;
+	config.data_callback_arg = &data_ctx;
+	assert(tr_pipeline_listener_create(&config, &listener) == TR_OK);
+	tr_memory_budget_get_stats(&message_budget, &budget_stats);
+	listener_budget_bytes = budget_stats.current_bytes;
+	assert(listener_budget_bytes != 0U);
+	assert(tr_pipeline_listener_listen_ipv4(listener, "127.0.0.1", 0U, 8,
+	                                        &port) == TR_OK);
+
+	route = control_route(TEST_EPOCH_1);
+	control = connect_loopback(port);
+	send_route(control, &route);
+	wait_listener_counts(listener, 1U, 1U);
+	for (i = 0U; i < 2U; ++i) {
+		assert(tr_pipeline_listener_send_data_offer(
+		               listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		               offer_ids[i], &data_routes[i]) == TR_OK);
+		memset(&offers[i], 0, sizeof(offers[i]));
+		recv_control_message(control, offer_ids[i], &offers[i]);
+		data_fds[i] = connect_loopback(port);
+		send_route(data_fds[i], &data_routes[i]);
+		wait_listener_counts(listener, 1U, 2U + i);
+		assert(data_routes[i].member_index == offers[i].data_index);
+		assert(data_routes[i].member_generation ==
+		       offers[i].data_generation);
+	}
+	assert(offers[0].data_index != offers[1].data_index);
+	for (i = 0U; i < 2U; ++i) {
+		assert(tr_pipeline_listener_send_transfer_ready(
+		               listener, TEST_PIPELINE_ID, TEST_EPOCH_1,
+		               stream_ids[i], ready_ids[i]) == TR_OK);
+		memset(&ready[i], 0, sizeof(ready[i]));
+		recv_control_message(control, ready_ids[i], &ready[i]);
+		assert(ready[i].stream_id == stream_ids[i]);
+	}
+	assert(ready[0].data_index != ready[1].data_index);
+	for (i = 0U; i < 2U; ++i) {
+		assert(ready[i].data_index == offers[i].data_index);
+		assert(ready[i].data_generation == offers[i].data_generation);
+		if (ready[i].stream_id == stream_ids[0])
+			compressed_fd = data_fds[i];
+		else
+			raw_fd = data_fds[i];
+	}
+	assert(compressed_fd >= 0 && raw_fd >= 0 && compressed_fd != raw_fd);
+	send_message_caps_request(compressed_fd);
+	{
+		struct tr_message_caps peer_caps;
+
+		recv_message_caps_response(compressed_fd, &peer_caps);
+		assert(peer_caps.receive_algorithm_bits ==
+		       TR_MESSAGE_ALGORITHM_ZSTD);
+	}
+
+	/* 先真实解码一条压缩消息并由应用持有输出，再等待任务槽清理完毕。 */
+	send_valid_zstd_message(compressed_fd, stream_ids[0],
+	                        data_ctx.hold_message_id,
+	                        data_ctx.held_payload_byte);
+	wait_held_message_count(&task, &task.submissions, 1U);
+	transform_completion.reactor = reactor;
+	transform_completion.task = &task;
+	assert(run_held_message_transform(&task, &transform_completion.outcome,
+	                                  &transform_completion.output) ==
+	       TR_OK);
+	assert(transform_completion.outcome == TR_MESSAGE_TRANSFORM_OK);
+	assert(tr_reactor_call(reactor, complete_held_transform_on_owner,
+	                       &transform_completion) == TR_OK);
+	wait_held_message_count(&task, &task.completions, 1U);
+	wait_data_frames(&data_ctx, 1U);
+	pthread_mutex_lock(&data_ctx.lock);
+	assert(data_ctx.held_payload != NULL);
+	assert(data_ctx.held_payload->len == 1U);
+	assert(data_ctx.held_payload->data[0] == data_ctx.held_payload_byte);
+	pthread_mutex_unlock(&data_ctx.lock);
+	tr_memory_budget_get_stats(&message_budget, &budget_stats);
+	held_budget_bytes = budget_stats.current_bytes;
+	assert(held_budget_bytes < budget_stats.limit_bytes);
+	filler_bytes = budget_stats.limit_bytes - held_budget_bytes;
+	assert(filler_bytes != 0U);
+	assert(tr_memory_budget_reserve(&message_budget, filler_bytes) ==
+	       TR_OK);
+	tr_memory_budget_get_stats(&message_budget, &budget_stats);
+	assert(budget_stats.current_bytes == budget_stats.limit_bytes);
+
+	/* 预算已经精确满额，另一物理 DATA 成员仍须交付 RAW 帧。 */
+	send_data_frame(raw_fd, TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
+	                stream_ids[1], data_ctx.raw_message_id, &raw_byte, 1U);
+	wait_data_frames(&data_ctx, 2U);
+	tr_memory_budget_get_stats(&message_budget, &budget_stats);
+	assert(budget_stats.current_bytes == budget_stats.limit_bytes);
+	pthread_mutex_lock(&data_ctx.lock);
+	assert(data_ctx.held_payload != NULL);
+	assert(data_ctx.held_payload->data[0] == data_ctx.held_payload_byte);
+	pthread_mutex_unlock(&data_ctx.lock);
+
+	assert(tr_memory_budget_release(&message_budget, filler_bytes) ==
+	       TR_OK);
+	tr_memory_budget_get_stats(&message_budget, &budget_stats);
+	assert(budget_stats.current_bytes == held_budget_bytes);
+	pthread_mutex_lock(&data_ctx.lock);
+	{
+		struct tr_buffer *held_payload = data_ctx.held_payload;
+
+		data_ctx.held_payload = NULL;
+		pthread_mutex_unlock(&data_ctx.lock);
+		tr_buffer_release(held_payload);
+	}
+	tr_memory_budget_get_stats(&message_budget, &budget_stats);
+	assert(budget_stats.current_bytes == listener_budget_bytes);
+
+	for (i = 0U; i < 2U; ++i) {
+		assert(shutdown(data_fds[i], SHUT_RDWR) == 0);
+		close(data_fds[i]);
+		data_fds[i] = -1;
+	}
+	wait_data_events(&data_ctx, 2U);
+	wait_listener_counts(listener, 1U, 1U);
+	assert(shutdown(control, SHUT_RDWR) == 0);
+	close(control);
+	control = -1;
+	wait_listener_counts(listener, 0U, 0U);
+	assert(tr_pipeline_listener_stop(listener) == TR_OK);
+	assert(tr_pipeline_listener_destroy(listener) == TR_OK);
+	assert(atomic_load(&message_budget.current_bytes) == 0U);
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	pthread_cond_destroy(&data_ctx.cond);
+	pthread_mutex_destroy(&data_ctx.lock);
+	pthread_cond_destroy(&task.cond);
+	pthread_mutex_destroy(&task.lock);
+}
+
 static int wait_offer_retry(
 	struct tr_pipeline_listener *listener, uint64_t message_id,
 	struct tr_pipeline_route_preface *route)
@@ -864,18 +1101,27 @@ static void test_pipeline_listener_control_and_data(void)
 	struct tr_pipeline_route_preface route;
 	struct tr_pipeline_route_preface offer_route;
 	struct tr_pipeline_route_preface offer_route2;
+	struct tr_pipeline_route_preface late_data_route;
+	struct tr_pipeline_route_preface late_data_route2;
+	struct tr_pipeline_route_preface late_control_route;
 	struct tr_pipeline_control_wire_message offer;
 	struct tr_pipeline_control_wire_message offer2;
 	struct tr_pipeline_control_wire_message offer3;
 	struct tr_pipeline_control_wire_message ready;
 	struct tr_pipeline_control_wire_message cancel;
 	uint8_t ping[TR_WIRE_HEADER_SIZE];
+	uint8_t late_data_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
+	uint8_t late_data_raw2[TR_PIPELINE_ROUTE_PREFACE_SIZE];
+	uint8_t late_control_raw[TR_PIPELINE_ROUTE_PREFACE_SIZE];
 	uint16_t port = 0U;
 	int bad_control = -1;
 	int control = -1;
 	int data = -1;
 	int duplicate_data = -1;
 	int control2 = -1;
+	int late_data = -1;
+	int late_data2 = -1;
+	int late_control = -1;
 
 	memset(&data_ctx, 0, sizeof(data_ctx));
 	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
@@ -1023,10 +1269,85 @@ static void test_pipeline_listener_control_and_data(void)
 	send_route(control2, &route);
 	wait_listener_counts(listener, 1U, 1U);
 
+	/* Offer 已预留，但 DATA route 前导仍未完整解析；drain 返回后补齐的
+	 * 连接属于新的 DATA 准入，必须被拒绝并精确撤销这条预留。 */
+	memset(&late_data_route, 0, sizeof(late_data_route));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_2,
+	               UINT64_C(3001), &late_data_route) == TR_OK);
+	memset(&offer3, 0, sizeof(offer3));
+	recv_control_message(control2, UINT64_C(3001), &offer3);
+	assert(offer3.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer3.data_index == late_data_route.member_index);
+	assert(offer3.data_generation == late_data_route.member_generation);
+	assert(tr_pipeline_route_preface_encode(late_data_raw,
+	                                        &late_data_route) == TR_OK);
+	late_data = connect_loopback(port);
+	send_all(late_data, late_data_raw,
+	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	memset(&late_data_route2, 0, sizeof(late_data_route2));
+	assert(tr_pipeline_listener_send_data_offer(
+	               listener, TEST_PIPELINE_ID, TEST_EPOCH_2, UINT64_C(3002),
+	               &late_data_route2) == TR_OK);
+	memset(&offer3, 0, sizeof(offer3));
+	recv_control_message(control2, UINT64_C(3002), &offer3);
+	assert(offer3.type == TR_PIPELINE_CONTROL_DATA_OFFER);
+	assert(offer3.data_index == late_data_route2.member_index);
+	assert(offer3.data_generation == late_data_route2.member_generation);
+	assert(late_data_route2.member_index != late_data_route.member_index);
+	assert(tr_pipeline_route_preface_encode(late_data_raw2,
+	                                        &late_data_route2) == TR_OK);
+	late_data2 = connect_loopback(port);
+	send_all(late_data2, late_data_raw2,
+	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	late_control_route = control_route(TEST_EPOCH_2);
+	late_control_route.pipeline_id++;
+	assert(tr_pipeline_route_preface_encode(late_control_raw,
+	                                        &late_control_route) == TR_OK);
+	late_control = connect_loopback(port);
+	send_all(late_control, late_control_raw,
+	         TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U);
+	wait_listener_counts(listener, 1U, 4U);
+	memset(&stats, 0, sizeof(stats));
+	assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+	uint32_t data_accepts_before_drain = stats.data_accepts;
+	uint64_t control_accepts_before_drain = stats.control_accepts;
+	uint64_t route_rejections_before_drain = stats.route_rejections;
+
+	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
+	send_all(late_data,
+	         late_data_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
+	send_all(late_data2,
+	         late_data_raw2 + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
+	send_all(late_control,
+	         late_control_raw + TR_PIPELINE_ROUTE_PREFACE_SIZE - 1U, 1U);
+	for (unsigned i = 0U; i < 5000U; ++i) {
+		assert(tr_pipeline_listener_get_stats(listener, &stats) == TR_OK);
+		if (stats.data_accepts > data_accepts_before_drain ||
+		    stats.control_accepts > control_accepts_before_drain ||
+		    stats.route_rejections >=
+		            route_rejections_before_drain + 3U)
+			break;
+		struct timespec pause = {0, 1000000L};
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(stats.data_accepts == data_accepts_before_drain);
+	assert(stats.control_accepts == control_accepts_before_drain);
+	assert(stats.route_rejections == route_rejections_before_drain + 3U);
+	wait_peer_close(late_data);
+	wait_peer_close(late_data2);
+	wait_peer_close(late_control);
+	close(late_data);
+	late_data = -1;
+	close(late_data2);
+	late_data2 = -1;
+	close(late_control);
+	late_control = -1;
+	wait_listener_counts(listener, 1U, 1U);
+
 	/* 保留真实 CONTROL 会话进入排空。限时等待必须使用公共
 	 * CLOCK_MONOTONIC 绝对期限，不得再次进行 uint64 纳秒转换。
 	 */
-	assert(tr_pipeline_listener_begin_drain(listener) == TR_OK);
 	tr_test_drain_deadline_probe_begin(&deadline_probe, 10U, 0);
 	assert(tr_pipeline_listener_wait_drained(listener, 10U) ==
 	       TR_ERR_TIMEOUT);
@@ -1272,7 +1593,8 @@ static void test_pipeline_listener_compressed_route_retirement(void)
 	assert(pthread_cond_init(&task.cond, NULL) == 0);
 	assert(pthread_mutex_init(&data_ctx.lock, NULL) == 0);
 	assert(pthread_cond_init(&data_ctx.cond, NULL) == 0);
-	tr_memory_budget_init(&message_budget, 4U * 1024U * 1024U);
+	/* 覆盖 4 MiB Zstandard 工作区、变换输出及监听器常驻预算。 */
+	tr_memory_budget_init(&message_budget, 8U * 1024U * 1024U);
 	task.budget = &message_budget;
 
 	assert(tr_reactor_create(NULL, NULL, NULL, NULL, &reactor) == TR_OK);
@@ -1898,6 +2220,7 @@ int main(void)
 {
 	test_pipeline_listener_control_and_data();
 	test_pipeline_listener_ready_ingress_barrier();
+	test_pipeline_listener_full_budget_raw_peer();
 	test_pipeline_listener_compressed_route_retirement();
 	test_pipeline_send_failure_rolls_back_soft_state();
 	test_pipeline_listener_prestart_teardown();

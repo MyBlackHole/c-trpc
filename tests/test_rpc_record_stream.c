@@ -90,6 +90,8 @@ struct call_context {
 struct peer {
 	struct tr_reactor *reactor;
 	struct tr_channel *channel;
+	struct tr_conn_handle control_connection;
+	struct tr_conn_handle bulk_connection;
 	struct tr_message_service *message_service;
 	struct tr_message_service_config message_config;
 	struct held_transform held_transforms[4];
@@ -233,11 +235,15 @@ static void on_event(struct tr_stream_handle s, enum tr_stream_event e,
 	if (e == TR_STREAM_EVENT_OPENED) {
 		struct tr_rpc_record_stream_callbacks callbacks = {received,
 		                                                   terminal, c};
+		struct tr_rpc_record_stream_config config = p->config;
+		struct tr_stream_diagnostics diagnostics;
 		CHECK(!c->call);
 		c->stream = s;
+		CHECK(tr_stream_get_diagnostics(s, &diagnostics) == TR_OK);
+		config.method.lane = diagnostics.lane;
 		CHECK(tr_rpc_record_stream_create_on_owner(
-		              s, &p->config, &callbacks, &p->budget,
-		              &c->call) == TR_OK);
+		              s, &config, &callbacks, &p->budget, &c->call) ==
+		      TR_OK);
 		atomic_fetch_add(&p->opened, 1);
 	} else if (c->call) {
 		CHECK(tr_rpc_record_stream_event_on_owner(c->call, s, e,
@@ -363,11 +369,12 @@ static int peer_message_bind_on_owner(void *arg)
 	return request->ret;
 }
 
-static void init_peer(struct peer *p, int fd, int client,
-                      enum tr_rpc_cardinality req, enum tr_rpc_cardinality resp,
-                      uint64_t window, uint64_t threshold, uint32_t frame,
-                      uint32_t message, uint32_t max_encoded_wire_bytes,
-                      bool enable_message_caps, uint32_t receive_algorithms)
+static void init_peer_fds(struct peer *p, int control_fd, int bulk_fd,
+                          int client, enum tr_rpc_cardinality req,
+                          enum tr_rpc_cardinality resp, uint64_t window,
+                          uint64_t threshold, uint32_t frame, uint32_t message,
+                          uint32_t max_encoded_wire_bytes,
+                          bool enable_message_caps, uint32_t receive_algorithms)
 {
 	struct tr_reactor_config rc = {.max_connections = 4,
 	                               .command_capacity = 64,
@@ -378,11 +385,12 @@ static void init_peer(struct peer *p, int fd, int client,
 	                               .max_payload_len = frame};
 	struct tr_channel_config cc = {
 	        .role = client ? TR_CHANNEL_CLIENT : TR_CHANNEL_SERVER,
-	        .mode = TR_CHANNEL_SHARED_CONNECTION,
+	        .mode = bulk_fd < 0 ? TR_CHANNEL_SHARED_CONNECTION
+		                    : TR_CHANNEL_SPLIT_CONNECTIONS,
 	        .feature_bits =
 	                TR_CHANNEL_FEATURE_STREAM_RESET |
 	                (enable_message_caps ? TR_CHANNEL_FEATURE_MESSAGE_CAPS
-	                                     : 0U),
+			                     : 0U),
 	        .receive_compression_algorithms = receive_algorithms,
 	        .max_encoded_message_bytes = max_encoded_wire_bytes,
 	        .max_compression_workspace_bytes =
@@ -392,7 +400,8 @@ static void init_peer(struct peer *p, int fd, int client,
 	        .initial_window_bytes = window,
 	        .window_update_threshold_bytes = threshold,
 	        .max_message_bytes = message};
-	struct tr_conn_handle conn;
+	struct tr_conn_handle control_conn, bulk_conn;
+	int channel_ret;
 	*p = (struct peer){0};
 	atomic_init(&p->opened, 0);
 	atomic_init(&p->held_submissions, 0);
@@ -416,7 +425,15 @@ static void init_peer(struct peer *p, int fd, int client,
 		cc.memory_budget = &p->budget;
 	CHECK(tr_reactor_create(&rc, NULL, NULL, NULL, &p->reactor) == TR_OK);
 	CHECK(tr_reactor_start(p->reactor) == TR_OK);
-	CHECK(tr_reactor_adopt_fd(p->reactor, fd, &conn) == TR_OK);
+	CHECK(tr_reactor_adopt_fd(p->reactor, control_fd, &control_conn) ==
+	      TR_OK);
+	if (bulk_fd < 0)
+		bulk_conn = control_conn;
+	else
+		CHECK(tr_reactor_adopt_fd(p->reactor, bulk_fd, &bulk_conn) ==
+		      TR_OK);
+	p->control_connection = control_conn;
+	p->bulk_connection = bulk_conn;
 	if (enable_message_caps) {
 		p->message_config = (struct tr_message_service_config){
 		        .tasks = {1U, 4U},
@@ -425,18 +442,34 @@ static void init_peer(struct peer *p, int fd, int client,
 		CHECK(tr_reactor_call(p->reactor,
 		                      peer_message_service_start_on_owner,
 		                      p) == TR_OK);
-		CHECK(tr_channel_create_deferred(&cc, conn, conn, on_data,
-		                                 on_event, NULL, p,
-		                                 &p->channel) == TR_OK);
+		channel_ret = tr_channel_create_deferred(
+		        &cc, control_conn, bulk_conn, on_data, on_event, NULL,
+		        p, &p->channel);
+		if (channel_ret != TR_OK)
+			fprintf(stderr, "deferred Channel create returned %d\n",
+			        channel_ret);
+		CHECK(channel_ret == TR_OK);
 		struct peer_message_bind_request bind = {p, TR_ERR_STATE};
 		CHECK(tr_reactor_call(p->reactor, peer_message_bind_on_owner,
 		                      &bind) == TR_OK);
 		CHECK(bind.ret == TR_OK);
 		CHECK(tr_channel_start(p->channel) == TR_OK);
 	} else {
-		CHECK(tr_channel_create(&cc, conn, conn, on_data, on_event,
-		                        NULL, p, &p->channel) == TR_OK);
+		CHECK(tr_channel_create(&cc, control_conn, bulk_conn, on_data,
+		                        on_event, NULL, p,
+		                        &p->channel) == TR_OK);
 	}
+}
+
+static void init_peer(struct peer *p, int fd, int client,
+                      enum tr_rpc_cardinality req, enum tr_rpc_cardinality resp,
+                      uint64_t window, uint64_t threshold, uint32_t frame,
+                      uint32_t message, uint32_t max_encoded_wire_bytes,
+                      bool enable_message_caps, uint32_t receive_algorithms)
+{
+	init_peer_fds(p, fd, -1, client, req, resp, window, threshold, frame,
+	              message, max_encoded_wire_bytes, enable_message_caps,
+	              receive_algorithms);
 }
 static void init_fixture_windows(struct fixture *f, enum tr_rpc_cardinality req,
                                  enum tr_rpc_cardinality resp,
@@ -494,6 +527,37 @@ static void init_fixture_compressed_receive(struct fixture *f,
 	init_fixture_compressed_receive_window(f, request, response, 4096U);
 }
 
+static void init_fixture_compressed_receive_split(
+        struct fixture *f, enum tr_rpc_cardinality request,
+        enum tr_rpc_cardinality response, uint64_t window)
+{
+	int client_control, server_control, client_bulk, server_bulk;
+	struct peer *peers[2];
+
+	tcp_pair(&client_control, &server_control);
+	tcp_pair(&client_bulk, &server_bulk);
+	init_peer_fds(&f->client, client_control, client_bulk, 1, request,
+	              response, window, window, 256U, BODY_MAX + 1024U, 0U,
+	              true, 0U);
+	init_peer_fds(&f->server, server_control, server_bulk, 0, request,
+	              response, window, window, 256U, BODY_MAX + 1024U,
+	              BODY_MAX + 1024U, true, TR_MESSAGE_ALGORITHM_ZSTD);
+	peers[0] = &f->client;
+	peers[1] = &f->server;
+	for (size_t i = 0; i < 2U; ++i) {
+		peers[i]->config.method.request_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+		peers[i]->config.method.response_compression_algorithms =
+		        TR_RPC_COMPRESSION_MASK_ZSTD;
+	}
+	for (size_t i = 0; i < 2U; ++i) {
+		CHECK(tr_channel_wait_ready(peers[i]->channel, TR_LANE_CONTROL,
+		                            10000U) == TR_OK);
+		CHECK(tr_channel_wait_ready(peers[i]->channel, TR_LANE_BULK,
+		                            10000U) == TR_OK);
+	}
+}
+
 static void
 init_fixture_compressed_response_receive(struct fixture *f,
                                          enum tr_rpc_cardinality request,
@@ -543,6 +607,39 @@ static void open_calls(struct fixture *f, unsigned count)
 	}
 	wait_counter(&f->client.opened, count);
 	wait_counter(&f->server.opened, count);
+}
+
+static void open_mixed_lane_calls(struct fixture *f)
+{
+	struct tr_stream_handle stream;
+	struct tr_stream_diagnostics diagnostics;
+
+	CHECK(tr_stream_open(f->client.channel, TR_LANE_BULK, &stream) ==
+	      TR_OK);
+	wait_counter(&f->client.opened, 1U);
+	wait_counter(&f->server.opened, 1U);
+	CHECK(tr_stream_open(f->client.channel, TR_LANE_CONTROL, &stream) ==
+	      TR_OK);
+	wait_counter(&f->client.opened, 2U);
+	wait_counter(&f->server.opened, 2U);
+	CHECK(tr_stream_get_diagnostics(f->client.calls[0].stream,
+	                                &diagnostics) == TR_OK);
+	CHECK(diagnostics.lane == TR_LANE_BULK);
+	CHECK(tr_stream_get_diagnostics(f->client.calls[1].stream,
+	                                &diagnostics) == TR_OK);
+	CHECK(diagnostics.lane == TR_LANE_CONTROL);
+}
+
+struct rx_hold_request {
+	struct tr_conn_handle connection;
+	int held;
+};
+
+static int set_rx_hold_on_owner(void *arg)
+{
+	struct rx_hold_request *request = arg;
+	return tr_reactor_set_rx_hold_on_owner(request->connection,
+	                                       request->held);
 }
 struct owned {
 	struct tr_buffer buffer;
@@ -1291,6 +1388,105 @@ static void test_compressed_send_crosses_small_stream_window(void)
 	CHECK(server->message_sizes[0] == sizeof(source));
 	CHECK(server->message_checksums[0] == sum(source, sizeof(source)));
 	CHECK(server->direct_bodies == 0U);
+	destroy_fixture(&f);
+}
+
+static void test_compressed_send_window_stall_does_not_block_other_lane(void)
+{
+	struct fixture f;
+	uint8_t large_source[16384];
+	uint8_t small_source[128];
+	_Atomic unsigned large_released = 0U;
+	_Atomic unsigned small_released = 0U;
+	struct send_request large_send = {0};
+	struct send_request small_send = {0};
+	struct tr_stream_diagnostics diagnostics;
+	struct rx_hold_request rx_hold;
+	uint32_t state = 0x91e10da5U;
+	uint64_t stalled_tx_bytes, stalled_tx_limit;
+	uint64_t end;
+
+	for (size_t i = 0; i < sizeof(large_source); ++i) {
+		state ^= state << 13;
+		state ^= state >> 17;
+		state ^= state << 5;
+		large_source[i] = (uint8_t)state;
+	}
+	memset(small_source, 0x5a, sizeof(small_source));
+	init_fixture_compressed_receive_split(&f, TR_RPC_ONE, TR_RPC_ONE,
+	                                      4096U);
+	open_mixed_lane_calls(&f);
+	for (size_t i = 0; i < 2U; ++i) {
+		send_kind(&f.client.calls[i], TR_RPC_RECORD_OPEN);
+		wait_counter(&f.server.calls[i].seen[TR_RPC_RECORD_OPEN], 1U);
+	}
+
+	/* 暂停 BULK 接收，使大压缩流稳定耗尽自己的网络窗口。 */
+	rx_hold = (struct rx_hold_request){f.server.bulk_connection, 1};
+	CHECK(tr_reactor_call(f.server.reactor, set_rx_hold_on_owner,
+	                      &rx_hold) == TR_OK);
+	large_send.c = &f.client.calls[0];
+	large_send.h = head(TR_RPC_RECORD_MESSAGE);
+	large_send.h.compression = TR_RPC_RECORD_ZSTD;
+	large_send.h.decoded_size = sizeof(large_source);
+	large_send.body = make_buffer(large_source, sizeof(large_source),
+	                              &large_released);
+	send_compressed_until(&large_send);
+	end = monotonic_ms() + 15000U;
+	do {
+		CHECK(tr_stream_get_diagnostics(f.client.calls[0].stream,
+		                                &diagnostics) == TR_OK);
+		if (diagnostics.flow.tx_sent_bytes ==
+		    diagnostics.flow.tx_send_limit)
+			break;
+		CHECK(monotonic_ms() < end);
+		sched_yield();
+	} while (true);
+	CHECK(diagnostics.flow.tx_send_limit >= 4096U);
+	stalled_tx_bytes = diagnostics.flow.tx_sent_bytes;
+	stalled_tx_limit = diagnostics.flow.tx_send_limit;
+	CHECK(stalled_tx_bytes == stalled_tx_limit);
+	CHECK(atomic_load(&f.server.calls[0].seen[TR_RPC_RECORD_MESSAGE]) ==
+	      0U);
+
+	/* BULK 的大压缩消息仍等信用时，CONTROL 小消息必须先完成。 */
+	small_send.c = &f.client.calls[1];
+	small_send.h = head(TR_RPC_RECORD_MESSAGE);
+	small_send.h.compression = TR_RPC_RECORD_ZSTD;
+	small_send.h.decoded_size = sizeof(small_source);
+	small_send.body = make_buffer(small_source, sizeof(small_source),
+	                              &small_released);
+	send_compressed_until(&small_send);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_MESSAGE], 1U);
+	CHECK(atomic_load(&f.server.calls[0].seen[TR_RPC_RECORD_MESSAGE]) ==
+	      0U);
+	CHECK(f.server.calls[1].message_sizes[0] == sizeof(small_source));
+	CHECK(f.server.calls[1].message_checksums[0] ==
+	      sum(small_source, sizeof(small_source)));
+	CHECK(f.server.calls[1].message_compression[0] == TR_RPC_RECORD_ZSTD);
+	CHECK(tr_stream_get_diagnostics(f.client.calls[0].stream,
+	                                &diagnostics) == TR_OK);
+	CHECK(diagnostics.flow.tx_sent_bytes == stalled_tx_bytes);
+	CHECK(diagnostics.flow.tx_send_limit == stalled_tx_limit);
+	CHECK(atomic_load(&large_released) == 1U);
+	CHECK(atomic_load(&small_released) == 1U);
+
+	rx_hold = (struct rx_hold_request){f.server.bulk_connection, 0};
+	CHECK(tr_reactor_call(f.server.reactor, set_rx_hold_on_owner,
+	                      &rx_hold) == TR_OK);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_MESSAGE], 1U);
+	CHECK(f.server.calls[0].message_sizes[0] == sizeof(large_source));
+	CHECK(f.server.calls[0].message_checksums[0] ==
+	      sum(large_source, sizeof(large_source)));
+	CHECK(f.server.calls[0].message_compression[0] == TR_RPC_RECORD_ZSTD);
+	CHECK(tr_stream_get_diagnostics(f.client.calls[0].stream,
+	                                &diagnostics) == TR_OK);
+	CHECK(diagnostics.flow.tx_sent_bytes > stalled_tx_bytes);
+	printf("compressed TX lane progress: BULK stalled at %llu/%llu bytes; "
+	       "CONTROL completed first; BULK resumed to %llu bytes\n",
+	       (unsigned long long)stalled_tx_bytes,
+	       (unsigned long long)stalled_tx_limit,
+	       (unsigned long long)diagnostics.flow.tx_sent_bytes);
 	destroy_fixture(&f);
 }
 
@@ -2668,6 +2864,106 @@ static void test_receive_quota(void)
 	destroy_fixture(&f);
 }
 
+static int reset_quota_stream_on_owner(void *arg)
+{
+	struct call_context *call = arg;
+	return tr_stream_reset_on_owner(call->stream, TR_ERR_NOMEM);
+}
+
+static void expect_channel_keepalive_progress(struct tr_channel *channel)
+{
+	struct tr_channel_keepalive_config keepalive = {10U, 5000U};
+	struct tr_channel_stats stats;
+	uint64_t pongs_before;
+
+	CHECK(tr_channel_get_stats(channel, &stats) == TR_OK);
+	pongs_before = stats.keepalive_pongs_received;
+	CHECK(tr_channel_enable_keepalive(channel, &keepalive) == TR_OK);
+	for (unsigned attempt = 0U; attempt < 3000U; ++attempt) {
+		struct timespec pause = {0, 1000000L};
+		CHECK(tr_channel_get_stats(channel, &stats) == TR_OK);
+		if (stats.keepalive_pongs_received > pongs_before)
+			break;
+		(void)nanosleep(&pause, NULL);
+	}
+	CHECK(stats.keepalive_pings_sent > 0U);
+	CHECK(stats.keepalive_pongs_received > pongs_before);
+	CHECK(tr_channel_disable_keepalive(channel) == TR_OK);
+}
+
+static void test_receive_quota_preserves_peer(void)
+{
+	struct fixture f;
+	struct quota quota = {0};
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE + 32U];
+	uint8_t payload[32];
+	struct tr_rpc_record_header h = head(TR_RPC_RECORD_MESSAGE);
+	size_t wire_size;
+
+	memset(payload, 0x5a, sizeof(payload));
+	init_fixture(&f, TR_RPC_ONE, TR_RPC_ONE, 4096);
+	open_call(&f, 1);
+	open_call(&f, 2);
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&f.server.calls[0].seen[TR_RPC_RECORD_OPEN], 1);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_OPEN);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_OPEN], 1);
+
+	quota.peer = &f.server;
+	quota.bytes = f.server.budget.limit_bytes -
+	              atomic_load(&f.server.budget.current_bytes);
+	CHECK(quota.bytes > 0U);
+	CHECK(tr_memory_budget_reserve(&f.server.budget, quota.bytes) == TR_OK);
+
+	/* 只送正文记录头，迫使接收端为后续正文预约缓存。 */
+	h.encoded_size = h.decoded_size = sizeof(payload);
+	wire_size = encode(wire, h, NULL, NULL);
+	CHECK(wire_size == TR_RPC_RECORD_HEADER_SIZE);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	wait_counter(&f.server.calls[0].terminals, 1);
+	CHECK(f.server.calls[0].final_status ==
+	      TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	/* 记录流只终结本地调用；由上层适配器发送 RESET 通知对端。 */
+	CHECK(tr_reactor_call(f.server.reactor, reset_quota_stream_on_owner,
+	                      &f.server.calls[0]) == TR_OK);
+	wait_counter(&f.client.calls[0].terminals, 1);
+	CHECK(f.client.calls[0].final_status ==
+	      TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	CHECK(atomic_load(&f.server.calls[0].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(snapshot(&f.server.calls[0]).cached == 0U);
+	CHECK(snapshot(&f.client.calls[0]).cached == 0U);
+	CHECK(!snapshot(&f.server.calls[1]).state.terminal);
+	CHECK(!snapshot(&f.client.calls[1]).state.terminal);
+	expect_channel_keepalive_progress(f.client.channel);
+
+	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
+
+	/* 同一 Channel 上的另一条调用继续收发并正常完成。 */
+	struct send_request request = {
+	        .c = &f.client.calls[1],
+	        .h = head(TR_RPC_RECORD_MESSAGE),
+	        .body = make_buffer(payload, sizeof(payload), NULL)};
+	request.h.encoded_size = request.h.decoded_size = sizeof(payload);
+	send_until(&request);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_MESSAGE], 1);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&f.server.calls[1].seen[TR_RPC_RECORD_HALF_CLOSE], 1);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_INITIAL_METADATA);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_MESSAGE);
+	send_kind(&f.server.calls[1], TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&f.server.calls[1].terminals, 1);
+	wait_counter(&f.client.calls[1].terminals, 1);
+	CHECK(f.server.calls[1].final_status == TR_RPC_STATUS_OK);
+	CHECK(f.client.calls[1].final_status == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.server.calls[0].terminals) == 1U);
+	CHECK(atomic_load(&f.client.calls[0].terminals) == 1U);
+	CHECK(atomic_load(&f.server.calls[1].terminals) == 1U);
+	CHECK(atomic_load(&f.client.calls[1].terminals) == 1U);
+	CHECK(snapshot(&f.server.calls[1]).cached == 0U);
+	CHECK(snapshot(&f.client.calls[1]).cached == 0U);
+	destroy_fixture(&f);
+}
+
 static void test_compressed_receive_workspace_exhaustion(void)
 {
 	struct fixture f;
@@ -2701,6 +2997,95 @@ static void test_compressed_receive_workspace_exhaustion(void)
 	CHECK(snapshot(server).state.request_messages == 0U);
 	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
 	destroy_fixture(&f);
+}
+
+static void test_compressed_workspace_exhaustion_preserves_peer(void)
+{
+	struct fixture f;
+	struct quota quota = {0};
+	struct call_context *failed, *peer_server;
+	struct send_request request = {0};
+	struct tr_channel_stats client_stats, server_stats;
+	uint8_t source[4096];
+	uint8_t wire[TR_RPC_RECORD_HEADER_SIZE +
+	             ZSTD_compressBound(sizeof(source))];
+	size_t wire_size;
+
+	for (size_t i = 0; i < sizeof(source); ++i)
+		source[i] = (uint8_t)(i % 23U);
+	init_fixture_compressed_receive(&f, TR_RPC_ONE, TR_RPC_ONE);
+	open_call(&f, 1);
+	open_call(&f, 1);
+	failed = &f.server.calls[0];
+	peer_server = &f.server.calls[1];
+	send_kind(&f.client.calls[0], TR_RPC_RECORD_OPEN);
+	wait_counter(&failed->seen[TR_RPC_RECORD_OPEN], 1U);
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_OPEN);
+	wait_counter(&peer_server->seen[TR_RPC_RECORD_OPEN], 1U);
+
+	quota.peer = &f.server;
+	quota.bytes = f.server.budget.limit_bytes -
+	              atomic_load(&f.server.budget.current_bytes) -
+	              512U * 1024U;
+	CHECK(quota.bytes > 0U);
+	CHECK(tr_memory_budget_reserve(&f.server.budget, quota.bytes) == TR_OK);
+	wire_size = encode_zstd_message(wire, sizeof(wire), source,
+	                                sizeof(source), 3);
+	raw_send(&f.client.calls[0], wire, wire_size);
+	wait_counter(&failed->terminals, 1U);
+	CHECK(failed->final_status == TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	CHECK(atomic_load(&failed->seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(snapshot(failed).state.request_messages == 0U);
+	CHECK(snapshot(failed).cached == 0U);
+
+	/* Record Stream 负责本地终局；上层用 RESET 将配额失败告知对端。 */
+	CHECK(tr_reactor_call(f.server.reactor, reset_quota_stream_on_owner,
+	                      failed) == TR_OK);
+	wait_counter(&f.client.calls[0].terminals, 1U);
+	CHECK(f.client.calls[0].final_status ==
+	      TR_RPC_STATUS_RESOURCE_EXHAUSTED);
+	CHECK(atomic_load(&peer_server->terminals) == 0U);
+	CHECK(atomic_load(&f.client.calls[1].terminals) == 0U);
+	CHECK(snapshot(&f.client.calls[0]).cached == 0U);
+	CHECK(tr_channel_get_stats(f.client.channel, &client_stats) == TR_OK);
+	CHECK(tr_channel_get_stats(f.server.channel, &server_stats) == TR_OK);
+	CHECK(client_stats.control_lane_state == TR_CHANNEL_LANE_UP &&
+	      client_stats.bulk_lane_state == TR_CHANNEL_LANE_UP);
+	CHECK(server_stats.control_lane_state == TR_CHANNEL_LANE_UP &&
+	      server_stats.bulk_lane_state == TR_CHANNEL_LANE_UP);
+
+	/* 配额仍保留且解码已被拒绝时，CONTROL PING/PONG 仍须完成。 */
+	expect_channel_keepalive_progress(f.client.channel);
+
+	CHECK(tr_memory_budget_release(&f.server.budget, quota.bytes) == TR_OK);
+	request.c = &f.client.calls[1];
+	request.h = head(TR_RPC_RECORD_MESSAGE);
+	request.h.compression = TR_RPC_RECORD_ZSTD;
+	request.h.decoded_size = sizeof(source);
+	request.body = make_buffer(source, sizeof(source), NULL);
+	send_compressed_until(&request);
+	wait_counter(&peer_server->seen[TR_RPC_RECORD_MESSAGE], 1U);
+	CHECK(peer_server->message_compression[0] == TR_RPC_RECORD_ZSTD);
+	CHECK(peer_server->message_sizes[0] == sizeof(source));
+	CHECK(peer_server->checksum == sum(source, sizeof(source)));
+	send_kind(&f.client.calls[1], TR_RPC_RECORD_HALF_CLOSE);
+	wait_counter(&peer_server->seen[TR_RPC_RECORD_HALF_CLOSE], 1U);
+	send_kind(peer_server, TR_RPC_RECORD_INITIAL_METADATA);
+	send_kind(peer_server, TR_RPC_RECORD_MESSAGE);
+	send_kind(peer_server, TR_RPC_RECORD_FINAL_STATUS);
+	wait_counter(&peer_server->terminals, 1U);
+	wait_counter(&f.client.calls[1].terminals, 1U);
+	CHECK(peer_server->final_status == TR_RPC_STATUS_OK);
+	CHECK(f.client.calls[1].final_status == TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&failed->terminals) == 1U &&
+	      atomic_load(&f.client.calls[0].terminals) == 1U &&
+	      atomic_load(&peer_server->terminals) == 1U &&
+	      atomic_load(&f.client.calls[1].terminals) == 1U);
+	CHECK(snapshot(peer_server).cached == 0U);
+	CHECK(snapshot(&f.client.calls[1]).cached == 0U);
+	destroy_fixture(&f);
+	puts("rpc_record_stream: compressed workspace exhaustion preserves peer "
+	     "passed");
 }
 static int abort_owner(void *arg)
 {
@@ -3054,6 +3439,7 @@ int main(void)
 	test_compressed_receive_close_waits_for_final_decode();
 	test_compressed_receive_delivers_decoded_body();
 	test_compressed_send_crosses_small_stream_window();
+	test_compressed_send_window_stall_does_not_block_other_lane();
 	test_compressed_send_policy_rejection_retains_body();
 	test_compressed_send_encoded_limit_emits_no_partial_record();
 	test_compressed_send_c_less_than_window();
@@ -3091,7 +3477,9 @@ int main(void)
 		test_receive_faults(i);
 	test_error_isolation();
 	test_receive_quota();
+	test_receive_quota_preserves_peer();
 	test_compressed_receive_workspace_exhaustion();
+	test_compressed_workspace_exhaustion_preserves_peer();
 	test_partial_cancel();
 	test_reset_after_half_close();
 	test_reset_partial_open();

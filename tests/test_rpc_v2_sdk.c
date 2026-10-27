@@ -770,10 +770,18 @@ static void destroy_server(struct fixture *f)
 
 static void destroy_client(struct fixture *f, struct observed_client *client)
 {
+	struct timespec limit = deadline_after(WAIT_MS);
+	int ret;
 	lock(f);
 	client->destroying = 1;
 	unlock(f);
-	CHECK(tr_client_destroy(client->handle) == TR_OK);
+	while ((ret = tr_client_destroy(client->handle)) == TR_AGAIN) {
+		struct timespec now = deadline_after(0);
+		struct timespec pause = {0, 1000000L};
+		CHECK(before(&now, &limit));
+		CHECK(nanosleep(&pause, NULL) == 0);
+	}
+	CHECK(ret == TR_OK);
 	lock(f);
 	client->handle = NULL;
 	unlock(f);
@@ -1385,17 +1393,31 @@ static void test_destroy_live_terminal(void)
 	CHECK(call_start(&pending, NULL) == TR_OK);
 	wait_count(&f, &pending.writable_returns, 1);
 	wait_count(&f, &f.methods[0].opens, 1);
+	/* 服务端已接受 RPC OPEN 并进入一次业务调用。GOAWAY 只关闭新流准入，
+	 * 不会把此调用改判为未执行；因为它还没有 FINAL，排空仍需等待它。 */
+	CHECK(tr_server_drain(f.server, 0) == TR_AGAIN);
+	lock(&f);
+	CHECK(f.methods[0].opens == 1U && f.methods[0].terminals == 0U);
+	unlock(&f);
+	CHECK(pending.terminals == 0U);
 	destroy_client(&f, &f.client);
 	CHECK(pending.terminals == 1U);
 	/* 已发布且仍活跃的连接先由 owner 的正常停止路径关闭。其
-	 * UNAVAILABLE/LIVE 终局已经获胜，随后清理不能改成残留取消。
+	 * UNAVAILABLE/LIVE 终局已经获胜，随后清理不能改成残留取消。该状态
+	 * 不能证明对端未执行；库不自动重试或重放不确定结果。
 	 * SHUTDOWN 残留的精确交付域由内部故障专测独立验证。 */
 	CHECK(pending.status == TR_RPC_STATUS_UNAVAILABLE);
 	CHECK(pending.delivery == TR_RPC_V2_DELIVERY_LIVE);
 	CHECK(pending.received == 0U);
+	wait_count(&f, &f.methods[0].terminals, 1U);
+	CHECK(tr_server_drain(f.server, WAIT_MS) == TR_OK);
+	lock(&f);
+	CHECK(f.methods[0].opens == 1U);
+	CHECK(f.methods[0].terminals == 1U);
+	unlock(&f);
 	fixture_destroy(&f);
 	CHECK(pending.terminals == 1U);
-	puts("sdk-v2: case=destroy-live-terminal result=pass");
+	puts("sdk-v2: case=goaway-unknown-outcome-no-replay result=pass");
 }
 
 static void test_stats_peer_retirement(void)

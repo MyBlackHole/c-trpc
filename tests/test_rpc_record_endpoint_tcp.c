@@ -3,6 +3,7 @@
 #include "../src/rpc/rpc_record_endpoint.h"
 #include "../src/execution/reactor_internal.h"
 #include "../src/transport/channel/channel_internal.h"
+#include "../src/transport/protocol/wire.h"
 #include "../src/io/socket.h"
 #include "../src/memory_budget.h"
 #include "../src/endian.h"
@@ -200,6 +201,7 @@ struct peer {
 };
 struct fixture {
 	struct peer client, server;
+	int client_fd;
 	struct tr_task_executor *executor;
 	struct tr_rpc_record_endpoint *endpoint;
 	struct tr_rpc_record_dispatch_config config;
@@ -646,6 +648,7 @@ static void fixture_init_full(struct fixture *f, uint64_t window,
 		        .arg = &f->contexts[i]};
 	}
 	tcp_pair(&a, &b);
+	f->client_fd = a;
 	peer_init(&f->client, f, a, false, window);
 	peer_init(&f->server, f, b, true, window);
 	CHECK(tr_channel_wait_ready(f->client.channel, TR_LANE_BULK, 10000) ==
@@ -997,6 +1000,56 @@ static void test_rejection(bool metadata)
 	check_final(&f, good, TR_RPC_STATUS_OK);
 	fixture_destroy(&f, false);
 }
+static void test_router_rejection_preserves_active_sibling(bool metadata)
+{
+	struct fixture f;
+	enum tr_connection_state client_state, server_state;
+	fixture_init(&f, 1024 * 1024, 8);
+
+	/* 方法1同伴进入 worker 并暂停，随后测试路由层拒绝另一条 OPEN。 */
+	unsigned sibling = open_call(&f, 1);
+	wait_count(&f.business[sibling].seen[TR_RPC_RECORD_OPEN], 1U);
+	atomic_store(&f.use_gate, true);
+	request(&f, sibling, 1, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+
+	atomic_store(&corrupt_open, metadata);
+	unsigned rejected = open_call(&f, metadata ? 0U : 100U);
+	enum tr_rpc_status expected = metadata ? TR_RPC_STATUS_INVALID_ARGUMENT
+	                                       : TR_RPC_STATUS_UNIMPLEMENTED;
+	check_final(&f, rejected, expected);
+	CHECK(atomic_load(&f.business[rejected].seen[TR_RPC_RECORD_OPEN]) == 0U &&
+	      atomic_load(&f.business[rejected].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      atomic_load(&f.client.terminals[rejected]) == 1U &&
+	      atomic_load(&f.server.terminals[rejected]) == 1U &&
+	      f.server.final_accepted[rejected]);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
+
+	gate_open(&f.gate);
+	check_final(&f, sibling, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[sibling].active) == 0U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 1U &&
+	      atomic_load(&f.client.terminals[sibling]) == 1U &&
+	      atomic_load(&f.server.terminals[sibling]) == 1U);
+	fixture_destroy(&f, false);
+	puts(metadata
+	             ? "rpc_record_endpoint_tcp: malformed metadata preserves active sibling passed"
+	             : "rpc_record_endpoint_tcp: missing method preserves active sibling passed");
+}
 static void test_business_error(bool missing_response)
 {
 	struct fixture f;
@@ -1015,6 +1068,50 @@ static void test_business_error(bool missing_response)
 	 * 派发器只发送一条合法错误 FINAL，宿主不能再重复终局。 */
 	CHECK(atomic_load(&send_attempts[TR_RPC_RECORD_FINAL_STATUS]) == 1);
 	fixture_destroy(&f, false);
+}
+static void test_business_rejection_preserves_active_sibling(void)
+{
+	struct fixture f;
+	enum tr_connection_state client_state, server_state;
+	fixture_init(&f, 1024 * 1024, 8);
+
+	/* 方法1同伴先进入业务处理；方法0之后才启用拒绝，避免影响同伴 OPEN。 */
+	unsigned sibling = open_call(&f, 1);
+	wait_count(&f.business[sibling].seen[TR_RPC_RECORD_OPEN], 1U);
+	atomic_store(&f.use_gate, true);
+	request(&f, sibling, 1, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+
+	atomic_store(&f.reject_method, 1U);
+	unsigned rejected = open_call(&f, 0);
+	check_final(&f, rejected, TR_RPC_STATUS_PERMISSION_DENIED);
+	CHECK(atomic_load(&f.client.terminals[rejected]) == 1U &&
+	      atomic_load(&f.server.terminals[rejected]) == 1U &&
+	      f.server.final_accepted[rejected]);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
+
+	gate_open(&f.gate);
+	check_final(&f, sibling, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[sibling].active) == 0U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 1U &&
+	      atomic_load(&f.client.terminals[sibling]) == 1U &&
+	      atomic_load(&f.server.terminals[sibling]) == 1U);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: business rejection preserves active sibling passed");
 }
 static void test_final_backpressure(bool business_success)
 {
@@ -1248,6 +1345,23 @@ static void wait_network_retired(struct fixture *f)
 		sched_yield();
 	}
 }
+static void wait_connection_retired(struct tr_conn_handle connection)
+{
+	uint64_t end = now_ms() + 15000;
+	enum tr_connection_state state;
+	int ret;
+	for (;;) {
+		ret = tr_reactor_get_connection_state(connection, &state);
+		if (ret == TR_ERR_STALE)
+			return;
+		CHECK(ret == TR_OK);
+		if (state == TR_CONN_FREE || state == TR_CONN_CLOSED ||
+		    state == TR_CONN_ERROR)
+			return;
+		CHECK(now_ms() < end);
+		sched_yield();
+	}
+}
 struct fragment_request {
 	struct tr_stream_handle stream;
 	struct tr_buffer *payload;
@@ -1274,6 +1388,146 @@ static void send_fragment(struct fixture *f, unsigned slot, const uint8_t *data,
 	}
 	CHECK(ret == TR_OK && !r.payload);
 }
+
+static void send_raw_exact(int fd, const uint8_t *data, size_t size)
+{
+	uint64_t end = now_ms() + 15000U;
+	while (size) {
+		ssize_t sent = send(fd, data, size, MSG_NOSIGNAL);
+		if (sent < 0 && errno == EINTR)
+			continue;
+		if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			struct pollfd writable = {fd, POLLOUT, 0};
+			CHECK(now_ms() < end && poll(&writable, 1, 100) >= 0);
+			continue;
+		}
+		CHECK(sent > 0 && now_ms() < end);
+		data += (size_t)sent;
+		size -= (size_t)sent;
+	}
+}
+
+static void test_semantic_record_error_isolation(void)
+{
+	struct fixture f;
+	enum tr_connection_state client_state, server_state;
+	uint8_t duplicate[TR_RPC_RECORD_HEADER_SIZE + 7U];
+	const uint8_t metadata[] = {1, 3, 0, 'k', 'a', 'b', 'c'};
+	const struct tr_rpc_record_header header = {
+	        .kind = TR_RPC_RECORD_OPEN,
+	        .service_id = 7,
+	        .method_id = 9,
+	        .metadata_size = sizeof(metadata),
+	        .remaining_timeout_ns = UINT64_MAX};
+	const struct tr_rpc_record_limits limits = {
+	        BODY, BODY, sizeof(metadata), TR_RPC_RECORD_ACCEPT_NONE};
+	fixture_init(&f, 1024 * 1024, 8);
+	unsigned invalid = open_call(&f, 0);
+	wait_count(&f.business[invalid].seen[TR_RPC_RECORD_OPEN], 1U);
+	unsigned sibling = open_call(&f, 0);
+	wait_count(&f.business[sibling].seen[TR_RPC_RECORD_OPEN], 1U);
+
+	/* 同伴 MESSAGE 已进入业务线程，但保持未完成，覆盖活动流交错。 */
+	atomic_store(&f.use_gate, true);
+	request(&f, sibling, 0, 1, 80);
+	gate_wait(&f.gate, false);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+
+	/* 线帧边界可信，但同一 RPC 流重复 OPEN 是记录语义错误。 */
+	CHECK(tr_rpc_record_encode_header(duplicate, sizeof(duplicate), &header,
+	                                  &limits) == TR_OK);
+	memcpy(duplicate + TR_RPC_RECORD_HEADER_SIZE, metadata,
+	       sizeof(metadata));
+	send_fragment(&f, invalid, duplicate, sizeof(duplicate));
+	check_final(&f, invalid, TR_RPC_STATUS_INVALID_ARGUMENT);
+	CHECK(atomic_load(&f.business[invalid].seen[TR_RPC_RECORD_OPEN]) == 1U);
+	CHECK(atomic_load(&f.business[invalid].seen[TR_RPC_RECORD_MESSAGE]) == 0U);
+	CHECK(atomic_load(&f.client.terminals[invalid]) == 1U &&
+	      atomic_load(&f.server.terminals[invalid]) == 1U);
+	CHECK(atomic_load(&f.business[sibling].active) == 1U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 0U &&
+	      !atomic_load(&f.client.terminals[sibling]) &&
+	      !atomic_load(&f.server.terminals[sibling]));
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U &&
+	      atomic_load(&f.server.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
+
+	/* 错误流已终结后再恢复业务线程；在途同伴仍必须正常完成。 */
+	gate_open(&f.gate);
+	check_final(&f, sibling, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.business[sibling].active) == 0U &&
+	      atomic_load(&f.business[sibling].seen[TR_RPC_RECORD_MESSAGE]) == 1U &&
+	      atomic_load(&f.client.terminals[sibling]) == 1U &&
+	      atomic_load(&f.server.terminals[sibling]) == 1U);
+
+	/* 错误终局之后的新 RPC 也仍通过同一 TCP 连接成功完成。 */
+	unsigned healthy = open_call(&f, 0);
+	request(&f, healthy, 0, 1, 80);
+	check_final(&f, healthy, TR_RPC_STATUS_OK);
+	CHECK(atomic_load(&f.client.terminals[healthy]) == 1U &&
+	      atomic_load(&f.server.terminals[healthy]) == 1U);
+	CHECK(atomic_load(&f.client.channel_down_events) == 0U);
+	CHECK(tr_reactor_get_connection_state(f.client.connection,
+	                                     &client_state) == TR_OK &&
+	      client_state == TR_CONN_ACTIVE);
+	CHECK(tr_reactor_get_connection_state(f.server.connection,
+	                                     &server_state) == TR_OK &&
+	      server_state == TR_CONN_ACTIVE);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: semantic error isolation passed");
+}
+
+static void test_connection_level_error_closes_all_calls(void)
+{
+	struct fixture f;
+	uint8_t raw[TR_WIRE_HEADER_SIZE];
+	const struct tr_frame_header header = {
+	        .version = TR_WIRE_ENV_VERSION,
+	        .type = TR_FRAME_PING,
+	        .message_id = UINT64_C(0x5a5a)};
+	fixture_init(&f, 1024 * 1024, 8);
+	unsigned first = open_call(&f, 0);
+	unsigned second = open_call(&f, 0);
+	wait_count(&f.business[first].seen[TR_RPC_RECORD_OPEN], 1U);
+	wait_count(&f.business[second].seen[TR_RPC_RECORD_OPEN], 1U);
+
+	/* 帧边界校验已不可恢复；不得只丢帧后继续保留活动调用。 */
+	CHECK(tr_wire_header_encode(raw, &header) == TR_OK);
+	raw[TR_WIRE_OFF_HEADER_CRC] ^= 1U;
+	send_raw_exact(f.client_fd, raw, sizeof(raw));
+	wait_count(&f.client.channel_down_events, 1U);
+	/* 服务端 Endpoint 接管了 Channel 回调；查询连接代次状态观察退役。 */
+	wait_connection_retired(f.client.connection);
+	wait_connection_retired(f.server.connection);
+	wait_count(&f.client.terminals[first], 1U);
+	wait_count(&f.client.terminals[second], 1U);
+	wait_count(&f.server.terminals[first], 1U);
+	wait_count(&f.server.terminals[second], 1U);
+
+	CHECK(f.client.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
+	      f.client.status[second] == TR_RPC_STATUS_UNAVAILABLE);
+	CHECK(f.server.status[first] == TR_RPC_STATUS_UNAVAILABLE &&
+	      f.server.status[second] == TR_RPC_STATUS_UNAVAILABLE);
+	CHECK(!f.server.final_accepted[first] &&
+	      !f.server.final_accepted[second]);
+	CHECK(atomic_load(&f.client.terminals[first]) == 1U &&
+	      atomic_load(&f.client.terminals[second]) == 1U &&
+	      atomic_load(&f.server.terminals[first]) == 1U &&
+	      atomic_load(&f.server.terminals[second]) == 1U);
+	wait_network_retired(&f);
+	CHECK(tr_channel_active_streams(f.client.channel) == 0U &&
+	      tr_channel_active_streams(f.server.channel) == 0U);
+	fixture_destroy(&f, false);
+	puts("rpc_record_endpoint_tcp: connection error closes all calls passed");
+}
+
 static int endpoint_quiet(void *arg)
 {
 	struct fixture *f = arg;
@@ -1668,10 +1922,15 @@ int main(void)
 		test_slow_open(partial);
 	puts("rpc_record_endpoint_tcp: 3 slow OPEN cases passed");
 	test_shapes();
+	test_semantic_record_error_isolation();
+	test_connection_level_error_closes_all_calls();
 	test_rejection(false);
 	test_rejection(true);
+	test_router_rejection_preserves_active_sibling(false);
+	test_router_rejection_preserves_active_sibling(true);
 	test_business_error(false);
 	test_business_error(true);
+	test_business_rejection_preserves_active_sibling();
 	test_final_backpressure(false);
 	test_final_backpressure(true);
 	test_close_hard_error_isolation();

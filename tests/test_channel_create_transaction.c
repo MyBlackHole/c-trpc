@@ -219,6 +219,45 @@ static struct tr_channel_config channel_config(int split)
 	return config;
 }
 
+static uint64_t channel_fixed_bytes_for(uint32_t max_streams)
+{
+	struct channel_create_fixture fixture;
+	struct tr_channel_config config = channel_config(0);
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_channel *channel = NULL;
+	uint64_t charged;
+
+	config.max_streams = max_streams;
+	config.memory_budget = &budget;
+	tr_memory_budget_init(&budget, 0U);
+	fixture_init(&fixture, 0);
+	assert(tr_channel_create_deferred(&config, fixture.control,
+	                                  fixture.bulk, NULL, NULL, NULL, NULL,
+	                                  &channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	charged = stats.current_bytes;
+	assert(charged > 0U);
+	assert(tr_channel_destroy(channel) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	fixture_finish(&fixture, 0, 1, 0);
+	return charged;
+}
+
+static void test_tombstone_index_bytes_are_budgeted(void)
+{
+	uint64_t one_stream = channel_fixed_bytes_for(1U);
+	uint64_t two_streams = channel_fixed_bytes_for(2U);
+	uint64_t three_streams = channel_fixed_bytes_for(3U);
+	uint64_t first_delta = two_streams - one_stream;
+	uint64_t second_delta = three_streams - two_streams;
+
+	/* capacities 2, 4, 8 add 12 fixed bytes per index bucket. */
+	assert(second_delta > first_delta);
+	assert(second_delta - first_delta == 24U);
+}
+
 static void test_channel_fixed_storage_shares_budget(void)
 {
 	struct channel_create_fixture first, second;
@@ -574,6 +613,7 @@ static void test_single_confirmed_barrier_allows_cleanup(void)
 
 int main(void)
 {
+	test_tombstone_index_bytes_are_budgeted();
 	test_channel_fixed_storage_shares_budget();
 	test_channel_budget_survives_failed_destroy();
 	test_composite_rollback_preserves_partial_owner();

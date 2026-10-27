@@ -594,7 +594,10 @@ tr_pipeline_listener_message_done(void *arg, struct tr_task_handle handle,
 	}
 
 	tracked = tr_pipeline_listener_job_connection(job);
-	current = tracked != NULL && !listener->draining;
+	/* 排空只关闭新准入。已接收的 DATA 压缩任务仍由精确连接/路由代次
+	 * 决定是否交付，不能因为 listener 已进入 draining 而静默丢弃。
+	 */
+	current = tracked != NULL;
 	if (current && result.outcome == TR_MESSAGE_TRANSFORM_OK && message) {
 		ret = tr_message_view(message, &view);
 		if (ret != TR_OK || view.len != job->decoded_message_bytes ||
@@ -1375,6 +1378,9 @@ static int tr_pipeline_listener_accept_data(
 	struct tr_peer_identity_view control_view;
 	uint64_t tls_generation = 0U;
 	int ret;
+
+	if (listener->draining)
+		return TR_ERR_CLOSED;
 
 	/* Route identity and the exact reserved member generation are checked
 	 * before the DATA certificate is compared with its CONTROL session. */
