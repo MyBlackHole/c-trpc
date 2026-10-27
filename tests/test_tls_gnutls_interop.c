@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <gnutls/gnutls.h>
+#include <gnutls/pkcs11.h>
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
@@ -452,6 +453,8 @@ int main(void)
 	struct test_state state;
 	int result;
 	assert(gnutls_global_init() == 0);
+	/* PEM-only fixture: do not load host PKCS#11 modules. */
+	assert(gnutls_pkcs11_init(GNUTLS_PKCS11_FLAG_MANUAL, NULL) == 0);
 	test_state_init(&state);
 
 	result = run_gnutls_client(
