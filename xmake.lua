@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.171")
+set_version("2.0.0-dev.172")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -1087,7 +1087,9 @@ target("test_rpc_v2_sdk")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_defines("TR_RPC_V2_TEST_FAULTS")
-    add_ldflags("-Wl,--wrap=tr_stream_open", {force = true})
+    add_ldflags("-Wl,--wrap=tr_stream_open",
+                "-Wl,--wrap=tr_message_transform_run_checked",
+                {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

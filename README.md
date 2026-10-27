@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.171` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.172` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -38,6 +38,7 @@ dev.167 增加异步操作与真实 Reactor completion 队列满载的组合回�
 dev.168 增加真实 TLS Client 凭证路径的回调屏障回归：外部 cancel 与 provider fetch 重叠时不重入 provider cancel；fetch 返回后才通知一次，随后完成仍以 CANCELLED 终结并可销毁 Client。GCC Release 全量测试 94/94、定向目标 Release 连续 25/25、TSan、ASan/UBSan 均通过；只改测试、版本号和进度文档，生产行为与公开 API/ABI 未改，#243 和 V2 总体验收仍未完成。
 dev.169 为 Server TLS 凭证 provider 增加同类真实 API 屏障回归：fetch 活动期间 poll 保留输出并返回 TR_AGAIN，外部 cancel 不提前进入 provider；fetch 返回后只通知一次，迟到成功仍以 CANCELLED 终结，Server 退役后可销毁。只扩展测试、记录与版本号，未改运行时、公开 API/ABI 或 wire；#243 和 V2 总体验收仍未完成。
 dev.170 为 40k 开环重复性运行器增加 TLS 与请求/响应/zstd 压缩选择，并将参数传给 Server 和全部 Client 发生器；metadata、case、summary 保留配置。基准销毁路径按公开契约重试 `TR_AGAIN`。这只修改诊断工具，不修改 RPC 运行时、公开 API/ABI 或 wire。
+dev.172 为 #243 增加真实 TCP 压缩请求取消与 Client destroy 屏障回归：挂起已受理的 Zstd 变换任务，确认 CallRef 取消先选定 `CANCELLED`，引用释放后 destroy 仍返回 `TR_AGAIN`；任务解除后重试销毁，终态只交付一次且交付域为 `SHUTDOWN`。GCC Release 全量测试 94/94、ASan/UBSan（含泄漏检查）、TSan 定向目标与 C11/C++11 SDK 消费编译通过。只增加测试、报告和开发版本号，不改运行时、公开 API/ABI 或 wire；#243 和 V2 整体验收仍未完成。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1/D2 全验证矩阵与 GitHub
 验收仍未完成；TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。
