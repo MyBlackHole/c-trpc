@@ -338,6 +338,9 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	    !tls_test_path(identity->server_private_key_file,
 	                   sizeof(identity->server_private_key_file),
 	                   identity->directory, "server-key.pem") ||
+	    !tls_test_path(identity->ca_private_key_file,
+	                   sizeof(identity->ca_private_key_file),
+	                   identity->directory, "ca-key.pem") ||
 	    !tls_test_path(identity->client_private_key_file,
 	                   sizeof(identity->client_private_key_file),
 	                   identity->directory, "client-key.pem") ||
@@ -524,6 +527,7 @@ int tls_test_identity_init(struct tls_test_identity *identity,
 	    !client_oversized_uri_certificate ||
 	    !client_control_uri_certificate || !client_wrong_eku_certificate ||
 	    !tls_test_write_certificate(identity->ca_file, ca_certificate) ||
+	    !tls_test_write_key(identity->ca_private_key_file, ca_key) ||
 	    !tls_test_write_certificate(identity->alternate_ca_file,
 	                                alternate_ca_certificate) ||
 	    !tls_test_write_certificate(identity->server_certificate_file,
@@ -636,6 +640,8 @@ void tls_test_identity_cleanup(struct tls_test_identity *identity)
 		return;
 	if (identity->ca_file[0])
 		(void)unlink(identity->ca_file);
+	if (identity->ca_private_key_file[0])
+		(void)unlink(identity->ca_private_key_file);
 	if (identity->server_certificate_file[0])
 		(void)unlink(identity->server_certificate_file);
 	if (identity->rotated_server_certificate_file[0])

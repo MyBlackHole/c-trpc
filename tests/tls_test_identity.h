@@ -25,6 +25,7 @@ struct tls_test_identity {
 	char client_oversized_uri_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char client_control_uri_certificate_file[TR_TLS_TEST_PATH_SIZE];
 	char client_wrong_eku_certificate_file[TR_TLS_TEST_PATH_SIZE];
+	char ca_private_key_file[TR_TLS_TEST_PATH_SIZE];
 	char server_private_key_file[TR_TLS_TEST_PATH_SIZE];
 	char client_private_key_file[TR_TLS_TEST_PATH_SIZE];
 	char wrong_client_ca_private_key_file[TR_TLS_TEST_PATH_SIZE];

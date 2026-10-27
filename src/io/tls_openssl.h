@@ -4,6 +4,8 @@
 #include "../../include/tr/tls.h"
 #include <openssl/ssl.h>
 
+#define TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES (100L * 1024L)
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -318,6 +318,9 @@ static int tr_tls_openssl_context_create(SSL_CTX **out)
 		SSL_CTX_free(context);
 		return TR_ERR_INVALID;
 	}
+	/* OpenSSL 默认允许 100 KiB；固定策略，避免依赖后端隐式默认值。 */
+	(void)SSL_CTX_set_max_cert_list(
+	        context, TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
 	*out = context;
 	return TR_OK;
 }
