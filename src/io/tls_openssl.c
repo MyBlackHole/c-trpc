@@ -21,6 +21,7 @@
 #include "byte_endpoint.h"
 #include "peer_identity_internal.h"
 #include "tls_config.h"
+#include "../memory_budget.h"
 #include "../refcount.h"
 
 enum tr_tls_openssl_role {
@@ -45,6 +46,8 @@ struct tr_tls_openssl_session {
 	const void *pending_write_buffer;
 	size_t pending_write_length;
 	int write_pending;
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
 };
 
 struct tr_tls_openssl_socket_bio_data {
@@ -54,6 +57,23 @@ struct tr_tls_openssl_socket_bio_data {
 
 static BIO_METHOD *tr_tls_openssl_socket_bio_method;
 static CRYPTO_ONCE tr_tls_openssl_socket_bio_once = CRYPTO_ONCE_STATIC_INIT;
+
+static void
+tr_tls_openssl_session_destroy(struct tr_tls_openssl_session *session)
+{
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
+	if (!session)
+		return;
+	memory_budget = session->memory_budget;
+	memory_bytes = session->memory_bytes;
+	if (session->ssl)
+		SSL_free(session->ssl);
+	session->ssl = NULL;
+	free(session);
+	if (memory_budget && memory_bytes != 0U)
+		(void)tr_memory_budget_release(memory_budget, memory_bytes);
+}
 
 static int tr_tls_openssl_socket_bio_create(BIO *bio)
 {
@@ -318,6 +338,9 @@ static int tr_tls_openssl_context_create(SSL_CTX **out)
 		SSL_CTX_free(context);
 		return TR_ERR_INVALID;
 	}
+	/* OpenSSL 默认允许 100 KiB；固定策略，避免依赖后端隐式默认值。 */
+	(void)SSL_CTX_set_max_cert_list(
+	        context, TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
 	*out = context;
 	return TR_OK;
 }
@@ -979,12 +1002,18 @@ static int tr_tls_openssl_error_status(struct tr_tls_openssl_session *session,
 }
 
 int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
-                                  int fd, struct tr_tls_openssl_session **out)
+                                  int fd,
+                                  struct tr_memory_budget *memory_budget,
+                                  struct tr_tls_openssl_session **out)
 {
-	struct tr_tls_openssl_session *session;
-	BIO *socket_bio;
+	struct tr_tls_openssl_session *session = NULL;
+	BIO *socket_bio = NULL;
 	struct tr_tls_openssl_socket_bio_data *socket_data;
+	uint64_t memory_bytes =
+	        (uint64_t)sizeof(*session) +
+	        (uint64_t)sizeof(struct tr_tls_openssl_socket_bio_data);
 	int flags;
+	int ret = TR_ERR_NOMEM;
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
@@ -997,48 +1026,49 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 		return TR_ERR_SYS;
 	if ((flags & O_NONBLOCK) == 0)
 		return TR_ERR_INVALID;
+	if (memory_budget) {
+		/* BIO 用户数据在 BIO_new 内部分配；与 session 一起预留，
+		 * 但 OpenSSL 自身的 SSL/BIO 对象分配不在本账目内。
+		 */
+		ret = tr_memory_budget_reserve(memory_budget, memory_bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
 	session = (struct tr_tls_openssl_session *)calloc(1, sizeof(*session));
 	if (!session)
-		return TR_ERR_NOMEM;
+		goto fail;
+	session->memory_budget = memory_budget;
+	session->memory_bytes = memory_budget ? memory_bytes : 0U;
 	session->ssl = SSL_new(profile->context);
-	if (!session->ssl) {
-		free(session);
-		return TR_ERR_NOMEM;
-	}
+	if (!session->ssl)
+		goto fail;
 	if (CRYPTO_THREAD_run_once(&tr_tls_openssl_socket_bio_once,
 	                           tr_tls_openssl_socket_bio_method_init) !=
 	            1 ||
-	    !tr_tls_openssl_socket_bio_method) {
-		SSL_free(session->ssl);
-		free(session);
-		return TR_ERR_NOMEM;
-	}
+	    !tr_tls_openssl_socket_bio_method)
+		goto fail;
 	socket_bio = BIO_new(tr_tls_openssl_socket_bio_method);
-	if (!socket_bio) {
-		SSL_free(session->ssl);
-		free(session);
-		return TR_ERR_NOMEM;
-	}
+	if (!socket_bio)
+		goto fail;
 	socket_data = (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(
 	        socket_bio);
 	if (!socket_data) {
 		BIO_free(socket_bio);
-		SSL_free(session->ssl);
-		free(session);
-		return TR_ERR_NOMEM;
+		socket_bio = NULL;
+		goto fail;
 	}
 	socket_data->fd = fd;
 	socket_data->close_fd = 0;
 	BIO_set_init(socket_bio, 1);
 	SSL_set_bio(session->ssl, socket_bio, socket_bio);
+	socket_bio = NULL;
 	session->role = profile->role;
 	if (session->role == TR_TLS_OPENSSL_CLIENT) {
 		if (profile->sni_name &&
 		    SSL_set_tlsext_host_name(session->ssl, profile->sni_name) !=
 		            1) {
-			SSL_free(session->ssl);
-			free(session);
-			return TR_ERR_INVALID;
+			ret = TR_ERR_INVALID;
+			goto fail;
 		}
 		SSL_set_connect_state(session->ssl);
 	} else {
@@ -1046,6 +1076,15 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 	}
 	*out = session;
 	return TR_OK;
+
+fail:
+	if (socket_bio)
+		BIO_free(socket_bio);
+	if (session)
+		tr_tls_openssl_session_destroy(session);
+	else if (memory_budget)
+		(void)tr_memory_budget_release(memory_budget, memory_bytes);
+	return ret;
 }
 
 static int tr_tls_openssl_handshake(void *arg, uint32_t *wait_events)
@@ -1172,11 +1211,7 @@ static void tr_tls_openssl_session_release(void *arg)
 {
 	struct tr_tls_openssl_session *session =
 	        (struct tr_tls_openssl_session *)arg;
-	if (!session)
-		return;
-	SSL_free(session->ssl);
-	session->ssl = NULL;
-	free(session);
+	tr_tls_openssl_session_destroy(session);
 }
 
 static const struct tr_byte_endpoint_driver tr_tls_openssl_byte_driver = {

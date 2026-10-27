@@ -4,6 +4,8 @@
 #include "../../include/tr/tls.h"
 #include <openssl/ssl.h>
 
+#define TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES (100L * 1024L)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -12,6 +14,7 @@ struct tr_tls_openssl_profile;
 struct tr_tls_openssl_session;
 struct tr_byte_endpoint_driver;
 struct tr_peer_identity_snapshot;
+struct tr_memory_budget;
 
 int tr_tls_openssl_client_profile_create(
         const struct tr_tls_client_config *config,
@@ -46,8 +49,14 @@ int tr_tls_openssl_profile_next_generation(
 int tr_tls_openssl_profile_set_generation(
         struct tr_tls_openssl_profile *profile, uint64_t generation);
 void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile);
+/*
+ * memory_budget 是借用指针，必须长于 session。记账只覆盖本库创建的
+ * session 与 socket BIO 用户数据；OpenSSL 内部对象不计入该预算。
+ */
 int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
-                                  int fd, struct tr_tls_openssl_session **out);
+                                  int fd,
+                                  struct tr_memory_budget *memory_budget,
+                                  struct tr_tls_openssl_session **out);
 /* 仅在 TLS 握手成功后调用。无证书且 require_uri 为 0 时返回 TR_OK
  * 并把 out 置空；证书存在时必须含一个有效 URI SAN。 */
 int tr_tls_openssl_session_peer_identity(

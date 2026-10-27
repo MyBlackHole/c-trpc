@@ -12,6 +12,10 @@ Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 
 TLS-D2 增加有界异步本地凭证获取/轮换和连接组 CONTROL/DATA 异步授权，取消须由 provider
 确认；授权在 Reactor owner 重验后才会提交路由。dev.26 为普通 V2 Client 增加唯一
 CallRef，可跨回调读取终局快照、活动期请求取消，并在持有期间固定占用有界调用槽。
+dev.33 将 Reactor TLS endpoint、OpenSSL session 包装及自定义 socket BIO 用户数据的
+c-trpc 自有请求字节计入 Reactor memory budget；预算不足时保留调用方 fd 所有权并回滚
+预留。该预算不包括 OpenSSL 内部对象、分配器元数据和内核 socket 缓冲，不能视为 TLS
+总 RSS 硬上限；完整资源总账、持续握手负载和目标平台矩阵仍待验收。
 dev.27 为压缩 DATA 分帧增加有界的 DATA TX 池就绪通知，池恢复后由 Reactor owner
 推进重试；其他资源预算与信用不足仍沿用既有维护和协议事件。
 dev.154 为 Reactor 同步 owner 等待登记依赖边：无环 A→B 调用保持可用，闭合环的最后一条

@@ -6432,6 +6432,12 @@ int tr_channel_wait_ready_deadline(
 	const struct tr_channel_capabilities *lane_caps =
 	        lane == TR_LANE_CONTROL ? &channel->control_caps
 	                                : &channel->bulk_caps;
+	if (!channel->reconnect_enabled &&
+	    !(lane == TR_LANE_CONTROL ? channel->control_alive
+	                              : channel->bulk_alive)) {
+		pthread_mutex_unlock(&channel->lock);
+		return TR_ERR_CLOSED;
+	}
 	if (((lane == TR_LANE_CONTROL && channel->control_ready) ||
 	     (lane == TR_LANE_BULK && channel->bulk_ready)) &&
 	    (!(lane_caps->feature_bits & TR_CHANNEL_FEATURE_MESSAGE_CAPS) ||
@@ -6475,6 +6481,15 @@ int tr_channel_wait_ready_deadline(
 		if (ready)
 			break;
 		if (channel->state_wait_closed) {
+			result = TR_ERR_CLOSED;
+			break;
+		}
+		/* 禁用重连时，物理连接关闭就是就绪等待的终态。
+		 * 否则错误握手会唤醒等待者，却被误等到原始期限耗尽。
+		 */
+		if (!channel->reconnect_enabled &&
+		    !(lane == TR_LANE_CONTROL ? channel->control_alive
+		                              : channel->bulk_alive)) {
 			result = TR_ERR_CLOSED;
 			break;
 		}

@@ -1108,6 +1108,24 @@ static void tr_connection_notify(struct tr_reactor *reactor,
 	connection->event_cb(handle, event, status, connection->callback_arg);
 }
 
+static void tr_reactor_tls_endpoint_budget_release(struct tr_reactor *reactor)
+{
+	int ret;
+	if (!reactor->config.memory_budget)
+		return;
+	ret = tr_memory_budget_release(reactor->config.memory_budget,
+	                               sizeof(struct tr_byte_endpoint));
+	assert(ret == TR_OK);
+	(void)ret;
+}
+
+static void tr_reactor_tls_endpoint_free(struct tr_reactor *reactor,
+                                         struct tr_byte_endpoint *endpoint)
+{
+	free(endpoint);
+	tr_reactor_tls_endpoint_budget_release(reactor);
+}
+
 static void tr_connection_close_internal(struct tr_reactor *reactor,
 					 struct tr_connection *connection,
 					 enum tr_connection_event event,
@@ -1148,7 +1166,7 @@ static void tr_connection_close_internal(struct tr_reactor *reactor,
 			endpoint_ret = tr_byte_endpoint_release(endpoint);
 			assert(endpoint_ret == TR_OK);
 		}
-		free(endpoint);
+		tr_reactor_tls_endpoint_free(reactor, endpoint);
 		connection->byte_endpoint = NULL;
 	}
 	tr_peer_identity_snapshot_release(connection->peer_identity);
@@ -1480,29 +1498,40 @@ tr_connection_tls_notify_authenticated(struct tr_reactor *reactor,
 	return callback(handle, &peer_identity, callback_arg);
 }
 
-static int
-tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
-                                struct tr_tls_openssl_profile *profile,
-                                uint64_t handshake_deadline_ns)
+static int tr_connection_adopt_tls_prepare(
+        struct tr_reactor *reactor, struct tr_connection *connection, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t handshake_deadline_ns)
 {
 	struct tr_byte_endpoint *endpoint;
 	struct tr_tls_openssl_session *session = NULL;
 	const struct tr_byte_endpoint_driver *driver = tr_tls_openssl_driver();
 	int ret;
 
-	if (!connection || !profile || handshake_deadline_ns == 0U || !driver)
+	if (!reactor || !connection || !profile ||
+	    handshake_deadline_ns == 0U || !driver)
 		return TR_ERR_INVALID;
 	ret = tr_tls_openssl_profile_retain(profile);
 	if (ret != TR_OK)
 		return ret;
+	if (reactor->config.memory_budget) {
+		/* endpoint 是固定连接槽之外的独立对象，先预留再分配。 */
+		ret = tr_memory_budget_reserve(reactor->config.memory_budget,
+		                               sizeof(*endpoint));
+		if (ret != TR_OK) {
+			tr_tls_openssl_profile_release(profile);
+			return ret;
+		}
+	}
 	endpoint = (struct tr_byte_endpoint *)calloc(1, sizeof(*endpoint));
 	if (!endpoint) {
+		tr_reactor_tls_endpoint_budget_release(reactor);
 		tr_tls_openssl_profile_release(profile);
 		return TR_ERR_NOMEM;
 	}
-	ret = tr_tls_openssl_session_create(profile, fd, &session);
+	ret = tr_tls_openssl_session_create(
+	        profile, fd, reactor->config.memory_budget, &session);
 	if (ret != TR_OK) {
-		free(endpoint);
+		tr_reactor_tls_endpoint_free(reactor, endpoint);
 		tr_tls_openssl_profile_release(profile);
 		return ret;
 	}
@@ -1510,7 +1539,7 @@ tr_connection_adopt_tls_prepare(struct tr_connection *connection, int fd,
 	                            handshake_deadline_ns, driver, session);
 	if (ret != TR_OK) {
 		driver->release(session);
-		free(endpoint);
+		tr_reactor_tls_endpoint_free(reactor, endpoint);
 		tr_tls_openssl_profile_release(profile);
 		return ret;
 	}
@@ -1544,7 +1573,7 @@ static void tr_connection_adopt_tls_rollback(struct tr_reactor *reactor,
 			(void)tr_byte_endpoint_event_unbind(endpoint);
 		if (endpoint->state == TR_BYTE_ENDPOINT_DETACHED)
 			(void)tr_byte_endpoint_release(endpoint);
-		free(endpoint);
+		tr_reactor_tls_endpoint_free(reactor, endpoint);
 		connection->byte_endpoint = NULL;
 	}
 	free(connection->preface_read_buffer);
@@ -1661,8 +1690,9 @@ static int tr_connection_adopt(
 		return ret;
 	}
 	if (tls_profile) {
-		ret = tr_connection_adopt_tls_prepare(
-		        connection, fd, tls_profile, handshake_deadline_ns);
+		ret = tr_connection_adopt_tls_prepare(reactor, connection, fd,
+		                                      tls_profile,
+		                                      handshake_deadline_ns);
 		if (ret != TR_OK) {
 			tr_parser_reset(&connection->parser);
 			free(connection->tls_preface_write_buffer);

@@ -199,6 +199,7 @@ target("test_tls_openssl")
     add_files("tests/test_tls_openssl.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=SSL_CTX_ctrl", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
