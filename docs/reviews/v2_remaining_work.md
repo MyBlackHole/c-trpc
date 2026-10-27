@@ -14,6 +14,21 @@ dev.168：真实 TLS Client 凭证回归覆盖 start-active 期间外部 cancel 
 
 dev.169：为 Server TLS 凭证 API 补同一 fetch/cancel 返回屏障：fetch 活动期间 poll 返回 TR_AGAIN 且保留输出，外部 cancel 不触发 provider 回调；释放 fetch 后 provider cancel 恰好一次，迟到成功仍被 CANCELLED 吸收，Server 退役后可销毁。GCC Release 全量测试 94/94，目标 Release 连续 25/25、TSan、ASan/UBSan 均通过；临时反转生产 `start_active` 屏障的变异在新断言处失败，生产文件未改。详细证据见[Server TLS provider fetch/cancel 回调屏障回归](rpc_v2_server_tls_provider_fetch_cancel_barrier_20261027.md)。dev.169 精确 head 的远端检查待本次推送复验；listener 侧握手/凭证替换以及 #243/V2 总体验收仍未完成。
 
+dev.170：提交 `0633ff97703e8a3b85e48801b11c984c7800016e` 为开环重复性运行器加入 TLS/压缩开关，并在 bench 清理时重试公开契约允许的 Client `TR_AGAIN`。GCC Release `bench_rpc` 构建通过；RPC benchmark 单测 71/71、源码格式门禁自测 22/22 通过，新增 C helper 的 clang-format 18.1.8 changed-line 检查通过。真实 TLS 1.3 + Zstd 低负载 3000 RPS 三个公开 profile 均为 1/1 干净；每条 Server/Client 命令均记录并使用 `--tls 1 --compression zstd`。该输出记录源码提交 `0633ff9`、二进制 SHA-256 `5e6012e582e38c937f9e499e26694e009eb6e0f0506cc298a2aeeb3f96ea2170`。
+
+同一源码提交、二进制、AMD Ryzen 7 PRO 4750U 主机和 CPU 0–3 亲和性下，40k 开环时间表分别运行明文/无压缩与 TLS+Zstd，每种配置 3 trials × 3 profiles。所有 profile 都是 0/3 干净；CONTROL TX 池耗尽、发生器丢弃和调度迟到在每种配置的 9/9 样本复现。下表中的成功 `ok_rps` 只是受压本机观察值，不是稳定吞吐量；由于发生器丢弃和迟到，两组不能据此解释为 TLS/Zstd 的性能开销或发布容量结论。
+
+| 传输配置 | profile | 中位成功 RPC/s | 中位发生器丢弃 | 调度迟到 P99 中位数 |
+|---|---|---:|---:|---:|
+| 明文 / none | small | 5,255.8 | 7,829 | 8.6 ms |
+| 明文 / none | default | 6,678.9 | 7,817 | 6.7 ms |
+| 明文 / none | large | 6,619.2 | 7,793 | 5.8 ms |
+| TLS / Zstd | small | 1,166.7 | 8,967 | 79.4 ms |
+| TLS / Zstd | default | 1,518.8 | 8,953 | 105.1 ms |
+| TLS / Zstd | large | 1,355.6 | 8,974 | 130.1 ms |
+
+原始 JSONL 仅保存在本机忽略目录 `build/rpc-bench-test/40k-none-v170.jsonl`、`build/rpc-bench-test/40k-tls-zstd-v170.jsonl` 和 `build/rpc-bench-test/3k-tls-zstd-v170.jsonl`；临时 CA 与私钥留在 `build/test-tmp/`，均未加入仓库。本切片只增加诊断运行器能力，不改 RPC 运行时、公开 API/ABI 或 wire；TEST-E 仍需按固定基准机、预算和平台矩阵验收。
+
 ## 已落地主线
 
 V1 核心退役（#290）、统一 RPC Record 2、四种基数、普通 Client/Server、元数据、取消/截止、异步 producer、RESET 与单连接排空边界。#301 修复初始信用等待控制池容量时的唤醒；#302 在流槽耗尽时独立拒绝新流，详见 [PERF-V2-03](rpc_v2_stream_refusal_20261023.md)。完整可用边界见 [R17](rpc_v2_release_boundary_20261023.md)。
