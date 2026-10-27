@@ -10,6 +10,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -49,6 +51,17 @@ struct tls_peer {
 	int fd;
 	SSL_CTX *context;
 	SSL *ssl;
+};
+
+struct test_tls_credentials_provider {
+	struct tr_tls_provider_operation operation;
+	unsigned fetch_count;
+	unsigned cancel_count;
+};
+
+struct test_pem_bytes {
+	uint8_t *data;
+	size_t length;
 };
 
 struct preface_defer_test_state {
@@ -537,8 +550,8 @@ on_group_message(const struct tr_connection_group_message *message, void *arg)
 	assert(message != NULL);
 	assert(message->group.group_id == TEST_GROUP_ID);
 	assert(message->group.epoch == TEST_GROUP_EPOCH);
-	assert(message->stream_id == 31U);
-	assert(message->message_id == 81U);
+	assert((message->stream_id == 31U && message->message_id == 81U) ||
+	       (message->stream_id == 32U && message->message_id == 82U));
 	assert(message->flags == (TR_CONNECTION_GROUP_DATA_FIRST |
 	                          TR_CONNECTION_GROUP_DATA_LAST));
 	assert(message->bytes.len == sizeof(message_body) - 1U);
@@ -583,6 +596,77 @@ static void wait_counter(struct group_tls_state *state,
 	pthread_mutex_unlock(&state->lock);
 }
 
+static void capture_server_tls_credentials_fetch(
+        const struct tr_tls_credential_request *request,
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	struct test_tls_credentials_provider *provider = arg;
+	assert(request != NULL);
+	assert(request->deadline_monotonic_ns != 0U);
+	provider->operation = operation;
+	provider->fetch_count++;
+}
+
+static void
+count_server_tls_credentials_cancel(struct tr_tls_provider_operation operation,
+                                    void *arg)
+{
+	struct test_tls_credentials_provider *provider = arg;
+	assert(operation.instance == provider->operation.instance);
+	assert(operation.generation == provider->operation.generation);
+	assert(operation.slot == provider->operation.slot);
+	provider->cancel_count++;
+}
+
+static struct test_pem_bytes read_test_pem(const char *path)
+{
+	struct test_pem_bytes result = {0};
+	FILE *file = fopen(path, "rb");
+	long length;
+	assert(file != NULL);
+	assert(fseek(file, 0L, SEEK_END) == 0);
+	length = ftell(file);
+	assert(length > 0L);
+	assert(fseek(file, 0L, SEEK_SET) == 0);
+	result.data = malloc((size_t)length);
+	assert(result.data != NULL);
+	result.length = (size_t)length;
+	assert(fread(result.data, 1U, result.length, file) == result.length);
+	assert(fclose(file) == 0);
+	return result;
+}
+
+static void install_server_tls_credentials(
+        struct tr_server *server,
+        struct test_tls_credentials_provider *provider,
+        const char *certificate_path, const char *private_key_path,
+        unsigned expected_fetch_count, uint64_t expected_generation)
+{
+	struct test_pem_bytes certificate = read_test_pem(certificate_path);
+	struct test_pem_bytes private_key = read_test_pem(private_key_path);
+	struct tr_tls_credential_bundle bundle = {
+	        .certificate_chain_pem = {certificate.data, certificate.length},
+	        .private_key_pem = {private_key.data, private_key.length},
+	};
+	struct tr_tls_provider_operation operation = {0};
+	struct tr_tls_credential_result result = {0};
+	assert(tr_server_tls_credentials_start(server, 5000U,
+	                                       TR_TLS_ROTATE_GRACEFUL,
+	                                       &operation) == TR_OK);
+	assert(provider->fetch_count == expected_fetch_count);
+	assert(operation.instance == provider->operation.instance);
+	assert(operation.generation == provider->operation.generation);
+	assert(operation.slot == provider->operation.slot);
+	assert(tr_server_tls_credentials_complete(server, operation, TR_OK,
+	                                          &bundle) == TR_OK);
+	assert(tr_server_tls_credentials_poll(server, operation, &result) ==
+	       TR_OK);
+	assert(result.status == TR_OK);
+	assert(result.profile_generation == expected_generation);
+	free(private_key.data);
+	free(certificate.data);
+}
+
 static int connect_loopback(uint16_t port)
 {
 	struct sockaddr_in address;
@@ -601,9 +685,10 @@ static int connect_loopback(uint16_t port)
 	return fd;
 }
 
-static int tls_peer_open(struct tls_peer *peer, uint16_t port,
-                         const struct tls_test_identity *identity,
-                         const char *certificate_file)
+static int tls_peer_open_with_credentials(struct tls_peer *peer, uint16_t port,
+                                          const char *ca_file,
+                                          const char *certificate_file,
+                                          const char *private_key_file)
 {
 	X509_VERIFY_PARAM *parameters;
 	memset(peer, 0, sizeof(*peer));
@@ -613,8 +698,7 @@ static int tls_peer_open(struct tls_peer *peer, uint16_t port,
 	if (!peer->context ||
 	    SSL_CTX_set_min_proto_version(peer->context, TLS1_3_VERSION) != 1 ||
 	    SSL_CTX_set_max_proto_version(peer->context, TLS1_3_VERSION) != 1 ||
-	    SSL_CTX_load_verify_locations(peer->context, identity->ca_file,
-	                                  NULL) != 1)
+	    SSL_CTX_load_verify_locations(peer->context, ca_file, NULL) != 1)
 		return 0;
 	parameters = SSL_CTX_get0_param(peer->context);
 	if (!parameters ||
@@ -627,8 +711,7 @@ static int tls_peer_open(struct tls_peer *peer, uint16_t port,
 	if (certificate_file &&
 	    (SSL_CTX_use_certificate_chain_file(peer->context,
 	                                        certificate_file) != 1 ||
-	     SSL_CTX_use_PrivateKey_file(peer->context,
-	                                 identity->client_private_key_file,
+	     SSL_CTX_use_PrivateKey_file(peer->context, private_key_file,
 	                                 SSL_FILETYPE_PEM) != 1 ||
 	     SSL_CTX_check_private_key(peer->context) != 1))
 		return 0;
@@ -637,6 +720,15 @@ static int tls_peer_open(struct tls_peer *peer, uint16_t port,
 	    SSL_set_tlsext_host_name(peer->ssl, "server.example.test") != 1)
 		return 0;
 	return SSL_connect(peer->ssl) == 1;
+}
+
+static int tls_peer_open(struct tls_peer *peer, uint16_t port,
+                         const struct tls_test_identity *identity,
+                         const char *certificate_file)
+{
+	return tls_peer_open_with_credentials(
+	        peer, port, identity->ca_file, certificate_file,
+	        certificate_file ? identity->client_private_key_file : NULL);
 }
 
 static void tls_peer_close(struct tls_peer *peer)
@@ -766,14 +858,47 @@ static void recv_control_offer(struct tls_peer *control,
 	assert(tr_pipeline_control_wire_data_route(&message, route) == TR_OK);
 }
 
-static void send_data_frame(struct tls_peer *data)
+static void
+recv_control_transfer_ready(struct tls_peer *control,
+                            uint64_t expected_message_id,
+                            uint32_t expected_stream_id,
+                            const struct tr_pipeline_route_preface *route)
+{
+	struct tr_frame_header header;
+	struct tr_wire_limits limits = {.max_payload_len =
+	                                        TR_PIPELINE_CONTROL_WIRE_SIZE};
+	struct tr_pipeline_control_wire_message message;
+	uint8_t raw_header[TR_WIRE_HEADER_SIZE];
+	uint8_t payload[TR_PIPELINE_CONTROL_WIRE_SIZE];
+	ssl_read_all_timeout(control->ssl, control->fd, raw_header,
+	                     sizeof(raw_header));
+	assert(tr_wire_header_decode(raw_header, &header) == TR_OK);
+	assert(tr_wire_header_validate(raw_header, &header, &limits) == TR_OK);
+	assert(header.type == TR_FRAME_PIPELINE_CONTROL);
+	assert(header.message_id == expected_message_id);
+	assert(header.payload_len == sizeof(payload));
+	ssl_read_all_timeout(control->ssl, control->fd, payload,
+	                     sizeof(payload));
+	assert(tr_crc32c(payload, sizeof(payload)) == header.payload_crc32c);
+	assert(tr_pipeline_control_wire_decode(payload, sizeof(payload),
+	                                       &message) == TR_OK);
+	assert(message.type == TR_PIPELINE_CONTROL_TRANSFER_READY);
+	assert(message.pipeline_id == route->pipeline_id);
+	assert(message.epoch == route->epoch);
+	assert(message.stream_id == expected_stream_id);
+	assert(message.data_index == route->member_index);
+	assert(message.data_generation == route->member_generation);
+}
+
+static void send_data_frame(struct tls_peer *data, uint32_t stream_id,
+                            uint64_t message_id)
 {
 	struct tr_frame_header header = {
 	        .version = TR_WIRE_ENV_VERSION,
 	        .type = TR_FRAME_DATA,
 	        .flags = TR_FRAME_F_FIRST | TR_FRAME_F_LAST,
-	        .stream_id = 31U,
-	        .message_id = 81U,
+	        .stream_id = stream_id,
+	        .message_id = message_id,
 	        .payload_len = sizeof(message_body) - 1U,
 	        .payload_crc32c = 0U,
 	};
@@ -788,6 +913,8 @@ static void send_data_frame(struct tls_peer *data)
 static void test_tls_group_routes_only_after_authentication(void)
 {
 	struct tls_test_identity identity;
+	struct tls_test_identity rotated_identity;
+	struct test_tls_credentials_provider provider = {0};
 	struct group_tls_state state;
 	struct tr_server_config config;
 	struct tr_server_config invalid_config;
@@ -796,6 +923,7 @@ static void test_tls_group_routes_only_after_authentication(void)
 	struct tr_pipeline_route_preface route;
 	struct tls_peer control = {.fd = -1};
 	struct tls_peer data = {.fd = -1};
+	struct tls_peer rotated_peer = {.fd = -1};
 	uint16_t port = 0U;
 	int raw_fd = -1;
 
@@ -809,14 +937,19 @@ static void test_tls_group_routes_only_after_authentication(void)
 		assert(pthread_condattr_destroy(&attr) == 0);
 	}
 	assert(tls_test_identity_init(&identity, "pipeline-listener-tls") == 0);
+	assert(tls_test_identity_init(&rotated_identity,
+	                              "pipeline-listener-tls-rotated") == 0);
 
 	tr_server_config_init(&config);
 	config.handshake_timeout_ms = 5000U;
 	config.tls.mode = TR_TLS_REQUIRED;
-	config.tls.certificate_file = identity.server_certificate_file;
-	config.tls.private_key_file = identity.server_private_key_file;
 	config.tls.client_ca_file = identity.ca_file;
 	config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+	config.tls_credentials_provider.fetch =
+	        capture_server_tls_credentials_fetch;
+	config.tls_credentials_provider.cancel =
+	        count_server_tls_credentials_cancel;
+	config.tls_credentials_provider.arg = &provider;
 	config.connection_groups.max_groups = 1U;
 	config.connection_groups.max_connections = 3U;
 	config.connection_groups.max_data_connections_per_group = 2U;
@@ -831,6 +964,13 @@ static void test_tls_group_routes_only_after_authentication(void)
 	       TR_ERR_INVALID);
 	assert(rejected_server == NULL);
 	assert(tr_server_create_transport(&config, &state.server) == TR_OK);
+	port = 99U;
+	assert(tr_server_connection_group_listen(state.server, "127.0.0.1", 0U,
+	                                         16, &port) == TR_AGAIN);
+	assert(port == 99U);
+	install_server_tls_credentials(
+	        state.server, &provider, identity.server_certificate_file,
+	        identity.server_private_key_file, 1U, 1U);
 	assert(tr_server_connection_group_listen(state.server, "127.0.0.1", 0U,
 	                                         16, &port) == TR_OK);
 	assert(tr_server_start(state.server) == TR_OK);
@@ -926,8 +1066,28 @@ static void test_tls_group_routes_only_after_authentication(void)
 	assert(tr_server_connection_group_send_transfer_ready(
 	               state.server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 31U,
 	               UINT64_C(9101)) == TR_OK);
-	send_data_frame(&data);
+	recv_control_transfer_ready(&control, UINT64_C(9101), 31U, &route);
+	send_data_frame(&data, 31U, 81U);
 	wait_counter(&state, &state.messages, 1U);
+
+	/* 新 CA 的握手使用轮换后的 listener profile；已接纳的旧代连接在
+	 * graceful 策略下继续工作，不能把新代 DATA 并入旧代 CONTROL。 */
+	install_server_tls_credentials(state.server, &provider,
+	                               rotated_identity.server_certificate_file,
+	                               rotated_identity.server_private_key_file,
+	                               2U, 2U);
+	assert(provider.cancel_count == 0U);
+	assert(tls_peer_open_with_credentials(
+	        &rotated_peer, port, rotated_identity.ca_file,
+	        identity.client_certificate_file,
+	        identity.client_private_key_file));
+	tls_peer_close(&rotated_peer);
+	assert(tr_server_connection_group_send_transfer_ready(
+	               state.server, TEST_GROUP_ID, TEST_GROUP_EPOCH, 32U,
+	               UINT64_C(9102)) == TR_OK);
+	recv_control_transfer_ready(&control, UINT64_C(9102), 32U, &route);
+	send_data_frame(&data, 32U, 82U);
+	wait_counter(&state, &state.messages, 2U);
 
 	memset(&stats, 0, sizeof(stats));
 	assert(tr_server_connection_group_get_stats(state.server, &stats) ==
@@ -940,6 +1100,9 @@ static void test_tls_group_routes_only_after_authentication(void)
 	tls_peer_close(&control);
 	assert(tr_server_connection_group_stop(state.server) == TR_OK);
 	assert(tr_server_destroy(state.server) == TR_OK);
+	assert(provider.fetch_count == 2U);
+	assert(provider.cancel_count == 0U);
+	tls_test_identity_cleanup(&rotated_identity);
 	tls_test_identity_cleanup(&identity);
 	pthread_cond_destroy(&state.changed);
 	pthread_mutex_destroy(&state.lock);

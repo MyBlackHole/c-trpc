@@ -9,6 +9,8 @@
 #include <assert.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
@@ -99,6 +101,17 @@ struct identity_test_state {
 	int expect_certificate_identity;
 	int expect_fake_metadata_identity;
 	_Atomic int error;
+};
+
+struct test_tls_credentials_provider {
+	struct tr_tls_provider_operation operation;
+	unsigned fetch_count;
+	unsigned cancel_count;
+};
+
+struct test_pem_bytes {
+	uint8_t *data;
+	size_t length;
 };
 
 static const uint8_t expected_client_uri[] = "spiffe://c-trpc.example/client";
@@ -305,6 +318,77 @@ static void release_blocked_worker(struct identity_test_state *state)
 	state->release_worker = 1;
 	pthread_cond_broadcast(&state->changed);
 	pthread_mutex_unlock(&state->lock);
+}
+
+static void capture_server_tls_credentials_fetch(
+        const struct tr_tls_credential_request *request,
+        struct tr_tls_provider_operation operation, void *arg)
+{
+	struct test_tls_credentials_provider *provider = arg;
+	assert(request != NULL);
+	assert(request->deadline_monotonic_ns != 0U);
+	provider->operation = operation;
+	provider->fetch_count++;
+}
+
+static void
+count_server_tls_credentials_cancel(struct tr_tls_provider_operation operation,
+                                    void *arg)
+{
+	struct test_tls_credentials_provider *provider = arg;
+	assert(operation.instance == provider->operation.instance);
+	assert(operation.generation == provider->operation.generation);
+	assert(operation.slot == provider->operation.slot);
+	provider->cancel_count++;
+}
+
+static struct test_pem_bytes read_test_pem(const char *path)
+{
+	struct test_pem_bytes result = {0};
+	FILE *file = fopen(path, "rb");
+	long length;
+	assert(file != NULL);
+	assert(fseek(file, 0L, SEEK_END) == 0);
+	length = ftell(file);
+	assert(length > 0L);
+	assert(fseek(file, 0L, SEEK_SET) == 0);
+	result.data = malloc((size_t)length);
+	assert(result.data != NULL);
+	result.length = (size_t)length;
+	assert(fread(result.data, 1U, result.length, file) == result.length);
+	assert(fclose(file) == 0);
+	return result;
+}
+
+static void install_server_tls_credentials(
+        struct tr_server *server,
+        struct test_tls_credentials_provider *provider,
+        const char *certificate_path, const char *private_key_path,
+        unsigned expected_fetch_count, uint64_t expected_generation)
+{
+	struct test_pem_bytes certificate = read_test_pem(certificate_path);
+	struct test_pem_bytes private_key = read_test_pem(private_key_path);
+	struct tr_tls_credential_bundle bundle = {
+	        .certificate_chain_pem = {certificate.data, certificate.length},
+	        .private_key_pem = {private_key.data, private_key.length},
+	};
+	struct tr_tls_provider_operation operation = {0};
+	struct tr_tls_credential_result result = {0};
+	assert(tr_server_tls_credentials_start(server, 5000U,
+	                                       TR_TLS_ROTATE_GRACEFUL,
+	                                       &operation) == TR_OK);
+	assert(provider->fetch_count == expected_fetch_count);
+	assert(operation.instance == provider->operation.instance);
+	assert(operation.generation == provider->operation.generation);
+	assert(operation.slot == provider->operation.slot);
+	assert(tr_server_tls_credentials_complete(server, operation, TR_OK,
+	                                          &bundle) == TR_OK);
+	assert(tr_server_tls_credentials_poll(server, operation, &result) ==
+	       TR_OK);
+	assert(result.status == TR_OK);
+	assert(result.profile_generation == expected_generation);
+	free(private_key.data);
+	free(certificate.data);
 }
 
 static void identity_test_cleanup(struct identity_test_state *state)
@@ -708,6 +792,144 @@ static void test_tls_without_client_certificate_yields_none(
 	identity_test_cleanup(&state);
 }
 
+static void test_server_provider_rotation_updates_tls_listener(void)
+{
+	struct identity_test_state state;
+	struct tls_test_identity rotated_certificates;
+	struct test_tls_credentials_provider provider = {0};
+	struct tr_rpc_method_desc descriptor = {
+	        .service_id = TEST_SERVICE_ID,
+	        .method_id = TEST_METHOD_ID,
+	        .request_cardinality = TR_RPC_ONE,
+	        .response_cardinality = TR_RPC_ONE,
+	        .request_codec_id = TR_RPC_CODEC_RAW,
+	        .response_codec_id = TR_RPC_CODEC_RAW,
+	        .lane = TR_RPC_LANE_CONTROL,
+	        .max_request_bytes = sizeof(request_data),
+	        .max_response_bytes = sizeof(request_data),
+	};
+	struct tr_rpc_v2_method method = {
+	        .descriptor = descriptor,
+	        .work = test_server_work,
+	        .terminal = test_server_terminal,
+	        .arg = &state,
+	};
+	struct tr_rpc_v2_client_callbacks callbacks = {
+	        .message = test_client_message,
+	        .terminal = test_client_terminal,
+	        .arg = &state,
+	};
+	struct tr_rpc_call_options options = {.timeout_ms = 5000U};
+	struct tr_rpc_bytes request = {
+	        .data = request_data,
+	        .len = sizeof(request_data),
+	};
+	struct tr_rpc_v2_call call;
+	struct tr_server_config server_config;
+	struct tr_client_config client_config;
+	struct tr_client_config rotated_client_config;
+	struct tr_client *rotated_client = NULL;
+	unsigned expected_calls = 0U;
+
+	memset(&state, 0, sizeof(state));
+	atomic_init(&state.error, 0);
+	state.expect_certificate_identity = 1;
+	assert(pthread_mutex_init(&state.lock, NULL) == 0);
+	{
+		pthread_condattr_t attributes;
+		assert(pthread_condattr_init(&attributes) == 0);
+		assert(pthread_condattr_setclock(&attributes,
+		                                 CLOCK_MONOTONIC) == 0);
+		assert(pthread_cond_init(&state.changed, &attributes) == 0);
+		assert(pthread_condattr_destroy(&attributes) == 0);
+	}
+	assert(tls_test_identity_init(&state.certificates,
+	                              "rpc-v2-tls-provider-listener-old") == 0);
+	assert(tls_test_identity_init(&rotated_certificates,
+	                              "rpc-v2-tls-provider-listener-new") == 0);
+
+	tr_server_config_init(&server_config);
+	server_config.shard_count = 2U;
+	server_config.max_peers = 4U;
+	server_config.tls.mode = TR_TLS_REQUIRED;
+	server_config.tls.client_ca_file = state.certificates.ca_file;
+	server_config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+	server_config.tls_credentials_provider.fetch =
+	        capture_server_tls_credentials_fetch;
+	server_config.tls_credentials_provider.cancel =
+	        count_server_tls_credentials_cancel;
+	server_config.tls_credentials_provider.arg = &provider;
+	assert(tr_server_create(&server_config, &method, 1U, &state.server) ==
+	       TR_OK);
+	install_server_tls_credentials(
+	        state.server, &provider,
+	        state.certificates.server_certificate_file,
+	        state.certificates.server_private_key_file, 1U, 1U);
+	assert(tr_server_listen(state.server, "127.0.0.1", 0U, &state.port) ==
+	       TR_OK);
+	assert(tr_server_start(state.server) == TR_OK);
+
+	tr_client_config_init(&client_config);
+	client_config.connect_timeout_ms = 5000U;
+	client_config.tls.mode = TR_TLS_REQUIRED;
+	client_config.tls.ca_file = state.certificates.ca_file;
+	client_config.tls.expected_peer_name = "server.example.test";
+	client_config.tls.client_certificate_file =
+	        state.certificates.client_certificate_file;
+	client_config.tls.client_private_key_file =
+	        state.certificates.client_private_key_file;
+	assert(tr_client_create(&client_config, &descriptor, 1U,
+	                        &state.client) == TR_OK);
+	assert(tr_client_connect(state.client, "127.0.0.1", state.port) ==
+	       TR_OK);
+	assert(tr_client_unary_call(state.client, TEST_SERVICE_ID,
+	                            TEST_METHOD_ID, &request, &options,
+	                            &callbacks, &call) == TR_OK);
+	expected_calls++;
+	wait_for_terminal_counts(&state, expected_calls, expected_calls);
+	assert(state.client_status == TR_RPC_STATUS_OK);
+	assert(state.server_status == TR_RPC_STATUS_OK);
+
+	/* 新 CA 签发的凭证只能用于新 listener handshake；旧连接仍可排空。 */
+	install_server_tls_credentials(
+	        state.server, &provider,
+	        rotated_certificates.server_certificate_file,
+	        rotated_certificates.server_private_key_file, 2U, 2U);
+	assert(tr_client_unary_call(state.client, TEST_SERVICE_ID,
+	                            TEST_METHOD_ID, &request, &options,
+	                            &callbacks, &call) == TR_OK);
+	expected_calls++;
+	wait_for_terminal_counts(&state, expected_calls, expected_calls);
+	assert(state.client_status == TR_RPC_STATUS_OK);
+	assert(state.server_status == TR_RPC_STATUS_OK);
+
+	rotated_client_config = client_config;
+	rotated_client_config.tls.ca_file = rotated_certificates.ca_file;
+	assert(tr_client_create(&rotated_client_config, &descriptor, 1U,
+	                        &rotated_client) == TR_OK);
+	assert(tr_client_connect(rotated_client, "127.0.0.1", state.port) ==
+	       TR_OK);
+	assert(tr_client_unary_call(rotated_client, TEST_SERVICE_ID,
+	                            TEST_METHOD_ID, &request, &options,
+	                            &callbacks, &call) == TR_OK);
+	expected_calls++;
+	wait_for_terminal_counts(&state, expected_calls, expected_calls);
+	assert(state.client_status == TR_RPC_STATUS_OK);
+	assert(state.server_status == TR_RPC_STATUS_OK);
+	assert(state.client_messages == expected_calls);
+	assert(state.work_count[TR_RPC_V2_REQUEST_OPEN] == expected_calls);
+	assert(state.work_count[TR_RPC_V2_REQUEST_MESSAGE] == expected_calls);
+	assert(state.work_count[TR_RPC_V2_REQUEST_HALF_CLOSE] ==
+	       expected_calls);
+	assert(atomic_load_explicit(&state.error, memory_order_relaxed) == 0);
+	assert(provider.fetch_count == 2U);
+	assert(provider.cancel_count == 0U);
+
+	assert(tr_client_destroy(rotated_client) == TR_OK);
+	identity_test_cleanup(&state);
+	tls_test_identity_cleanup(&rotated_certificates);
+}
+
 static void test_tls_profile_rotation_generation_and_failed_candidate(void)
 {
 	struct identity_test_state state;
@@ -963,6 +1185,7 @@ int main(void)
 	        TR_TLS_CLIENT_AUTH_NONE, "rpc-v2-tls-identity-none");
 	test_tls_without_client_certificate_yields_none(
 	        TR_TLS_CLIENT_AUTH_OPTIONAL, "rpc-v2-tls-identity-optional");
+	test_server_provider_rotation_updates_tls_listener();
 	test_tls_profile_rotation_generation_and_failed_candidate();
 	test_tls_profile_install_and_rollback_faults();
 	return 0;
