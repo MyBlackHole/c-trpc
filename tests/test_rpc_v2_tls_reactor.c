@@ -23,6 +23,8 @@
 #define TEST_BODY_SIZE (64U * 1024U)
 #define TEST_WAIT_MS 15000U
 #define TEST_TLS_HANDSHAKE_TIMEOUT_MS 1500U
+#define TEST_TLS_FLOOD_MAX_PEERS 16U
+#define TEST_TLS_FLOOD_EXCESS_PEERS 48U
 
 struct test_state {
 	pthread_mutex_t lock;
@@ -599,37 +601,49 @@ static void wait_socket_closed(int fd)
 	}
 }
 
-static void test_incomplete_tls_handshake_flood_is_bounded(void)
+static void test_tls_peer_capacity_burst_is_bounded(void)
 {
-	static const uint8_t partial_client_hello[] = {
+	static const uint8_t partial_tls_record[] = {
 	        0x16U, 0x03U, 0x03U, 0x00U, 0x40U,
 	};
 	struct test_state state;
 	struct tr_server_stats stats;
-	int slow_peers[4] = {-1, -1, -1, -1};
-	int excess_peer = -1;
+	int slow_peers[TEST_TLS_FLOOD_MAX_PEERS];
+	int excess_peers[TEST_TLS_FLOOD_EXCESS_PEERS];
 	uint64_t start_ms;
 	uint64_t elapsed_ms;
 	unsigned i;
 
+	for (i = 0U; i < TEST_TLS_FLOOD_MAX_PEERS; ++i)
+		slow_peers[i] = -1;
+	for (i = 0U; i < TEST_TLS_FLOOD_EXCESS_PEERS; ++i)
+		excess_peers[i] = -1;
 	test_state_init(&state);
 	assert(test_server_start_with_limits(
-	               &state, 1, 4U, TEST_TLS_HANDSHAKE_TIMEOUT_MS) == TR_OK);
+	               &state, 1, TEST_TLS_FLOOD_MAX_PEERS,
+	               TEST_TLS_HANDSHAKE_TIMEOUT_MS) == TR_OK);
 	start_ms = test_monotonic_ms();
-	for (i = 0U; i < 4U; ++i) {
+	for (i = 0U; i < TEST_TLS_FLOOD_MAX_PEERS; ++i) {
 		slow_peers[i] =
 		        socket_connect_ipv4("127.0.0.1", state.server_port);
 		assert(slow_peers[i] >= 0);
-		assert(send(slow_peers[i], partial_client_hello,
-		            sizeof(partial_client_hello), MSG_NOSIGNAL) ==
-		       (ssize_t)sizeof(partial_client_hello));
+		assert(send(slow_peers[i], partial_tls_record,
+		            sizeof(partial_tls_record), MSG_NOSIGNAL) ==
+		       (ssize_t)sizeof(partial_tls_record));
 	}
-	wait_server_peer_counts(state.server, 4U, 0U);
-	excess_peer = socket_connect_ipv4("127.0.0.1", state.server_port);
-	assert(excess_peer >= 0);
-	wait_socket_closed(excess_peer);
-	assert(close(excess_peer) == 0);
-	for (i = 0U; i < 4U; ++i) {
+	wait_server_peer_counts(state.server, TEST_TLS_FLOOD_MAX_PEERS, 0U);
+	for (i = 0U; i < TEST_TLS_FLOOD_EXCESS_PEERS; ++i) {
+		excess_peers[i] =
+		        socket_connect_ipv4("127.0.0.1", state.server_port);
+		assert(excess_peers[i] >= 0);
+	}
+	for (i = 0U; i < TEST_TLS_FLOOD_EXCESS_PEERS; ++i) {
+		wait_socket_closed(excess_peers[i]);
+		assert(close(excess_peers[i]) == 0);
+		excess_peers[i] = -1;
+	}
+	wait_server_peer_counts(state.server, TEST_TLS_FLOOD_MAX_PEERS, 0U);
+	for (i = 0U; i < TEST_TLS_FLOOD_MAX_PEERS; ++i) {
 		wait_socket_closed(slow_peers[i]);
 		assert(close(slow_peers[i]) == 0);
 		slow_peers[i] = -1;
@@ -638,9 +652,9 @@ static void test_incomplete_tls_handshake_flood_is_bounded(void)
 	assert(elapsed_ms >= TEST_TLS_HANDSHAKE_TIMEOUT_MS / 2U);
 	wait_server_peer_counts(state.server, 0U, 0U);
 	assert(tr_server_get_stats(state.server, &stats) == TR_OK);
-	assert(stats.peers_peak <= 4U);
-	assert(stats.peer_capacity_rejections >= 1U);
-	assert(stats.peers_reaped_total >= 4U);
+	assert(stats.peers_peak <= TEST_TLS_FLOOD_MAX_PEERS);
+	assert(stats.peer_capacity_rejections >= TEST_TLS_FLOOD_EXCESS_PEERS);
+	assert(stats.peers_reaped_total >= TEST_TLS_FLOOD_MAX_PEERS);
 
 	assert(test_client_create(&state, 1, state.identity.ca_file,
 	                          "127.0.0.1") == TR_OK);
@@ -648,8 +662,8 @@ static void test_incomplete_tls_handshake_flood_is_bounded(void)
 	                         state.server_port) == TR_OK);
 	wait_server_peer_counts(state.server, 1U, 1U);
 	test_state_destroy(&state);
-	puts("tls-reactor: incomplete TLS handshakes timed out within bounded "
-	     "peer capacity");
+	puts("tls-reactor: TLS-required connection burst stayed within the "
+	     "16-peer capacity and recovered");
 }
 
 static void test_transport_only_tls_support_boundary(void)
@@ -754,7 +768,7 @@ int main(int argc, char **argv)
 	assert(argc == 1);
 	test_transport_only_tls_support_boundary();
 	test_plaintext_is_rejected_by_tls_listener();
-	test_incomplete_tls_handshake_flood_is_bounded();
+	test_tls_peer_capacity_burst_is_bounded();
 	test_identity_failure(1);
 	test_identity_failure(0);
 	test_roundtrip(0, NULL, 0);
