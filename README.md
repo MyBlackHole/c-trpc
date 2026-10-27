@@ -4,15 +4,16 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.22` 候选已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+当前 `2.0.0-dev.23` 候选已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
 撤销旧代次；已接管的会话保留原 profile，旧 CONTROL 不得接受新 Server 代次的 DATA。
 TLS-D2 增加有界异步本地凭证获取/轮换和连接组 CONTROL/DATA 异步授权，取消须由 provider
 确认；授权在 Reactor owner 重验后才会提交路由。TLS-D1 已随 PR #311 合入主线；TLS-D2
-实现 PR #312 的既有 head 曾通过 14/14 检查但仍未合入。dev.22 增加独立 GnuTLS 客户端
-与 TLS-required/mTLS Server 的互通回归，覆盖有效证书、缺失客户端证书与错误服务器名；
+实现 PR #312 的旧 head 曾通过 14/14 检查但仍未合入。dev.22 增加独立 GnuTLS 客户端
+与 TLS-required/mTLS Server 的互通回归，覆盖有效证书、缺失客户端证书与错误服务器名；dev.23
+补齐会运行完整测试集的 Make 兼容门禁中的 `gnutls-bin` 依赖；新 head 的 GitHub 验收待完成。
 此测试不覆盖 TLS-E 的资源总账、握手洪峰、长稳、目标平台或双向实现互通。默认仍为明文
 TCP，TLS 失败关闭连接，不回退明文。本版本不代表 #234 或 V2 整体验收完成。
 本次外部 GnuTLS 互通覆盖和限制见 [TLS-E 阶段评估](docs/reviews/rpc_v2_tls_e_20261027.md)。

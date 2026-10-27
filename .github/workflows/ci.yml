@@ -341,7 +341,7 @@ jobs:
       - name: 准备私有中文消息 locale
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales libssl-dev
+          sudo apt-get install -y locales libssl-dev gnutls-bin
           mkdir -p "$RUNNER_TEMP/echo-locale"
           localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
           echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
