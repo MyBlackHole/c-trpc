@@ -15,12 +15,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../src/facade_diagnostics_internal.h"
 #include "tls_test_identity.h"
 
 #define TEST_SERVICE_ID 0x234U
 #define TEST_METHOD_ID 1U
 #define TEST_BODY_SIZE (64U * 1024U)
 #define TEST_WAIT_MS 15000U
+#define TEST_TLS_HANDSHAKE_TIMEOUT_MS 1500U
 
 struct test_state {
 	pthread_mutex_t lock;
@@ -207,7 +209,9 @@ static void test_client_terminal(struct tr_rpc_v2_call call,
 	pthread_mutex_unlock(&state->lock);
 }
 
-static int test_server_start(struct test_state *state, int tls_required)
+static int test_server_start_with_limits(struct test_state *state,
+                                         int tls_required, uint32_t max_peers,
+                                         uint32_t handshake_timeout_ms)
 {
 	struct tr_rpc_v2_method method;
 	struct tr_rpc_method_desc descriptor;
@@ -217,8 +221,8 @@ static int test_server_start(struct test_state *state, int tls_required)
 	method.work = test_server_work;
 	method.terminal = test_server_terminal;
 	tr_server_config_init(&config);
-	config.max_peers = 4U;
-	config.handshake_timeout_ms = 5000U;
+	config.max_peers = max_peers;
+	config.handshake_timeout_ms = handshake_timeout_ms;
 	config.limits.max_message_bytes = TEST_BODY_SIZE;
 	config.limits.max_frame_payload_bytes = 4096U;
 	config.limits.initial_window_bytes = TEST_BODY_SIZE;
@@ -237,6 +241,11 @@ static int test_server_start(struct test_state *state, int tls_required)
 	if (result != TR_OK)
 		return result;
 	return tr_server_start(state->server);
+}
+
+static int test_server_start(struct test_state *state, int tls_required)
+{
+	return test_server_start_with_limits(state, tls_required, 4U, 5000U);
 }
 
 static int test_client_create(struct test_state *state, int tls_required,
@@ -536,6 +545,113 @@ static void test_plaintext_is_rejected_by_tls_listener(void)
 	test_state_destroy(&state);
 }
 
+static uint64_t test_monotonic_ms(void)
+{
+	struct timespec now;
+	assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
+	return (uint64_t)now.tv_sec * 1000U + (uint64_t)now.tv_nsec / 1000000U;
+}
+
+static void wait_server_peer_counts(struct tr_server *server, uint32_t current,
+                                    uint32_t ready)
+{
+	struct timespec pause = {0, 1000000L};
+	struct tr_server_stats stats;
+	unsigned attempt;
+
+	for (attempt = 0U; attempt < TEST_WAIT_MS; ++attempt) {
+		assert(tr_server_get_stats(server, &stats) == TR_OK);
+		if (stats.peers_current == current &&
+		    stats.peers_ready_current == ready)
+			return;
+		assert(nanosleep(&pause, NULL) == 0);
+	}
+	assert(tr_server_get_stats(server, &stats) == TR_OK);
+	assert(stats.peers_current == current);
+	assert(stats.peers_ready_current == ready);
+}
+
+static void wait_socket_closed(int fd)
+{
+	uint64_t deadline = test_monotonic_ms() + TEST_WAIT_MS;
+	uint8_t buffer[256];
+
+	for (;;) {
+		struct pollfd descriptor = {
+		        .fd = fd,
+		        .events = POLLIN | POLLHUP | POLLERR,
+		};
+		uint64_t now = test_monotonic_ms();
+		int timeout;
+		int result;
+		ssize_t amount;
+
+		assert(now < deadline);
+		timeout = (int)(deadline - now);
+		result = poll(&descriptor, 1U, timeout);
+		if (result < 0 && errno == EINTR)
+			continue;
+		assert(result > 0);
+		amount = recv(fd, buffer, sizeof(buffer), 0);
+		if (amount == 0 || (amount < 0 && errno == ECONNRESET))
+			return;
+		assert(amount > 0 || errno == EINTR);
+	}
+}
+
+static void test_incomplete_tls_handshake_flood_is_bounded(void)
+{
+	static const uint8_t partial_client_hello[] = {
+	        0x16U, 0x03U, 0x03U, 0x00U, 0x40U,
+	};
+	struct test_state state;
+	struct tr_server_stats stats;
+	int slow_peers[4] = {-1, -1, -1, -1};
+	int excess_peer = -1;
+	uint64_t start_ms;
+	uint64_t elapsed_ms;
+	unsigned i;
+
+	test_state_init(&state);
+	assert(test_server_start_with_limits(
+	               &state, 1, 4U, TEST_TLS_HANDSHAKE_TIMEOUT_MS) == TR_OK);
+	start_ms = test_monotonic_ms();
+	for (i = 0U; i < 4U; ++i) {
+		slow_peers[i] =
+		        socket_connect_ipv4("127.0.0.1", state.server_port);
+		assert(slow_peers[i] >= 0);
+		assert(send(slow_peers[i], partial_client_hello,
+		            sizeof(partial_client_hello), MSG_NOSIGNAL) ==
+		       (ssize_t)sizeof(partial_client_hello));
+	}
+	wait_server_peer_counts(state.server, 4U, 0U);
+	excess_peer = socket_connect_ipv4("127.0.0.1", state.server_port);
+	assert(excess_peer >= 0);
+	wait_socket_closed(excess_peer);
+	assert(close(excess_peer) == 0);
+	for (i = 0U; i < 4U; ++i) {
+		wait_socket_closed(slow_peers[i]);
+		assert(close(slow_peers[i]) == 0);
+		slow_peers[i] = -1;
+	}
+	elapsed_ms = test_monotonic_ms() - start_ms;
+	assert(elapsed_ms >= TEST_TLS_HANDSHAKE_TIMEOUT_MS / 2U);
+	wait_server_peer_counts(state.server, 0U, 0U);
+	assert(tr_server_get_stats(state.server, &stats) == TR_OK);
+	assert(stats.peers_peak <= 4U);
+	assert(stats.peer_capacity_rejections >= 1U);
+	assert(stats.peers_reaped_total >= 4U);
+
+	assert(test_client_create(&state, 1, state.identity.ca_file,
+	                          "127.0.0.1") == TR_OK);
+	assert(tr_client_connect(state.client, "127.0.0.1",
+	                         state.server_port) == TR_OK);
+	wait_server_peer_counts(state.server, 1U, 1U);
+	test_state_destroy(&state);
+	puts("tls-reactor: incomplete TLS handshakes timed out within bounded "
+	     "peer capacity");
+}
+
 static void test_transport_only_tls_support_boundary(void)
 {
 	struct tr_client_config client_config;
@@ -638,6 +754,7 @@ int main(int argc, char **argv)
 	assert(argc == 1);
 	test_transport_only_tls_support_boundary();
 	test_plaintext_is_rejected_by_tls_listener();
+	test_incomplete_tls_handshake_flood_is_bounded();
 	test_identity_failure(1);
 	test_identity_failure(0);
 	test_roundtrip(0, NULL, 0);
