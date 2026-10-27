@@ -33,4 +33,6 @@ dev.160 的 GCC 11 静态分析发现 TLS provider reserve 在表锁解锁失败
 
 dev.163 的真实 TCP V2 Client/Server 回归覆盖了 CallRef 与 Server 异步 authorize 操作的生命周期交错：服务端 worker 确认看到取消后再迟到返回 ALLOW，Client 只发布一次 CANCELLED/LIVE 终局且服务端业务 work 未运行；服务端终局后操作已退役并可销毁，Client CallRef 仍能读取原快照、阻止 drain，release 后 drain 收敛。dev.164 又验证终局 CallRef 阻止 `tr_client_destroy()` 释放 Client；首次 destroy 返回 `TR_AGAIN` 时引用仍能读取快照，release 后重试销毁成功。dev.165 将该测试改为在 terminal callback 中调用 hold，验证公共 API 明确允许的回调内持有路径。`test_rpc_v2_server/default` 的 GCC Release、TSan、ASan/UBSan 定向目标均通过；GCC Release 全量测试为 93/93。它们只证明这些 CallRef 生命周期场景，不表示所有 CallRef、异步操作或资源屏障均已通过。
 
+dev.168 在真实 TLS Client 凭证 API 路径验证 fetch/cancel 交错：fetch 尚未返回时外部 cancel 只锁存请求，poll 保持 TR_AGAIN 且不改结果；fetch 退出后 provider cancel 恰好通知一次，迟到完成仍以 CANCELLED 终结，退役后 Client 可销毁。GCC Release 全量测试 94/94、定向目标 Release 25/25、TSan、ASan/UBSan 通过；变异测试捕获了提前通知。详细证据见[TLS provider fetch/cancel 回调屏障回归](rpc_v2_tls_provider_fetch_cancel_barrier_20261027.md)。
+
 此实现完成 #243 中“通用异步操作内核及显式操作引用”的一段，并接入三个异步调用方；dev.163 另补一个 CallRef 交互切片。它不完成整个 #243 或 V2。仍需验证跨 Reactor/嵌套调用、command/completion 队列压力、更多用户回调与资源回收屏障，以及 TLS/压缩共享调度和跨能力组合。#243 与总审查 #239 均保持 OPEN。
