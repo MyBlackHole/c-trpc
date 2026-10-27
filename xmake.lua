@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.17")
+set_version("2.0.0-dev.33")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -109,6 +109,7 @@ target("trcore")
         "src/io/connector.c",
         "src/io/byte_endpoint.c",
         "src/io/peer_identity_internal.c",
+        "src/io/tls_provider_operation.c",
         "src/io/tls_config.c",
         "src/io/tls_openssl.c",
         "src/execution/reactor.c",
@@ -158,12 +159,31 @@ target("test_tls_config")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
+target("test_tls_provider_operation")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_provider_operation.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_tls_provider")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_provider.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
 target("test_tls_openssl")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_tls_openssl.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=SSL_CTX_ctrl", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -173,6 +193,9 @@ target("test_rpc_v2_tls_identity")
     add_files("tests/test_rpc_v2_tls_identity.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    -- 仅在该 TLS 轮换测试链接中注入跨 shard profile retain 故障。
+    add_ldflags("-Wl,--wrap=tr_tls_openssl_profile_retain",
+                "-Wl,--wrap=tr_runtime_destroy", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -192,6 +215,8 @@ target("test_connection_group_tls")
     add_files("tests/test_connection_group_tls.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=write",
+                "-Wl,--wrap=tr_reactor_aux_event_register", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -1007,6 +1032,17 @@ target("test_rpc_v2_tls_reactor")
     add_undefines("NDEBUG")
     add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=connect", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 独立 GnuTLS 客户端与 GnuTLS TLS 终止/后端桥接验证双向 TLS 和 V2 RPC 正文。
+target("test_tls_gnutls_interop")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_gnutls_interop.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_links("gnutls")
+    add_undefines("NDEBUG")
+    add_tests("default", {run_timeout = 30000, realtime_output = true})
 target_end()
 
 -- 公共 V2 Server 的回调身份和故障收尾；注入仅限本测试二进制。

@@ -1,7 +1,13 @@
 # V2 开发剩余项
 
-核对基线：2026-10-24，主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 当前开发分支为 `feat/v2-tls-d-234`（2.0.0-dev.17）。
-GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
+核对基线：2026-10-27，主线 TLS-D1 merge commit `f73d8bb4d214fe71393eb8fa5e1cb0d8fbf01741`（`2.0.0-dev.17`）；TLS-D2/E 候选为 `feat/v2-tls-d2-234`，HEAD `f298b420e4a7ab949537b678702d7ca98269bd37`（`2.0.0-dev.33`）。
+GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。本文件记录当前证据与整体验收缺口；单个 PR 的 CI 通过不代表整体验收通过。
+
+## 当前集成状态（2026-10-27）
+
+- 主线仍为 dev.17。TLS 候选 PR [#312](https://github.com/MyBlackHole/c-trpc/pull/312) 为 OPEN、非 Draft，直接以主线为 base；HEAD `f298b42` / dev.33，本地 GCC/Clang Release、ASan/UBSan、TSan 定向目标和 clang-format 变更行门禁通过，精确 head 的 GitHub 检查 14/14 全部通过（[主 CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40453472442)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40453472439)、[格式门禁](https://github.com/MyBlackHole/c-trpc/actions/runs/40453472458)）。PR 尚未合入。
+- V2 相关实现分布在 16 个 OPEN PR（#312–#332 的非连续编号）。除 #312、#313、#314 外，多项工作建立在其他功能分支之上；异步操作内核 PR #332 仍是 Draft，HEAD 为 dev.169。单独的分支 CI 没有形成一个可发布、覆盖全部已规划功能的共同候选。
+- 因此现在缺少的是**跨分支集成候选与统一验收记录**：需要在用户要求不合并 PR 的约束下，先在集成工作副本中按依赖顺序组合候选、跑整体矩阵、逐项对照 #239；正式合并/发布仍按既有约束处理。
 
 ## 已落地主线
 
@@ -44,12 +50,12 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
-| TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
+| TLS 与身份 | TLS-C/D1 已合入；TLS-D2 异步凭证和授权、TLS-E 的互通与部分资源边界已在 PR #312 实现。dev.33 HEAD `f298b42` 增加 TLS endpoint、OpenSSL session 包装和 socket BIO 用户数据的共享预算记账；预算不足拒绝接入并保留 fd 所有权。GCC/Clang Release、GCC ASan/UBSan（泄漏检查开启）、GCC TSan 定向目标均 2/2 通过，clang-format 18.1.8 变更行门禁 0 失败；PR #312 精确 head 的 GitHub 检查 14/14 通过。PR #312 仍 OPEN、未合入。仍缺 OpenSSL/内核完整资源账本、并发洪峰与取消、长期负载、性能回归、目标平台矩阵和独立 RPC 实现互通；TLS-E 与 #234 未完成 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
 | 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
 | 横切验证 | 状态模型、可重放故障、分层指标、40k 容量/性能与全部资源账本 | #247 |
-| 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
+| 集成与最终核对 | 当前没有共同集成候选；需按依赖顺序组合开放分支，在一个集成工作副本执行全量正确性/压力/兼容性矩阵，再把已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
 
 长期治理 #249 属于持续维护职责。正式发布仍需完成上述有限范围的实现和验收；当前不得把 dev 预览称为已完成的 V2。

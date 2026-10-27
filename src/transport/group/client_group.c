@@ -656,7 +656,10 @@ static int tr_client_group_offer_duplicate(
 
 		if (group->data[i].state == TR_CLIENT_GROUP_DATA_FREE)
 			continue;
-		if (existing->member_index == route->member_index)
+		/* 服务端可撤销待定预留并递增代次复用槽位；旧套接字可能仍在关闭。
+		 */
+		if (existing->member_index == route->member_index &&
+		    existing->member_generation == route->member_generation)
 			return 1;
 	}
 	return 0;

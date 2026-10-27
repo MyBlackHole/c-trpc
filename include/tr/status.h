@@ -26,7 +26,8 @@ enum tr_status {
 	TR_ERR_CLOSED = -13,
 	TR_ERR_STALE = -14,
 	TR_ERR_UNSUPPORTED = -15,
-	TR_ERR_TIMEOUT = -16
+	TR_ERR_TIMEOUT = -16,
+	TR_ERR_CANCELLED = -17
 };
 
 const char *tr_status_str(int status);

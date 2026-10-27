@@ -21,6 +21,8 @@
 #include "io/socket.h"
 #include "io/tls_config.h"
 #include "io/tls_openssl.h"
+#include "io/tls_provider_operation_internal.h"
+#include "memory_budget.h"
 #include "tr/status.h"
 #include "execution/buffer_internal.h"
 #include "transport/channel/channel_internal.h"
@@ -46,11 +48,43 @@ static int tr_client_blocking_lifecycle_context(void)
 	       tr_rpc_record_dispatch_in_callback();
 }
 
+static char *tr_client_copy_optional_string(const char *value)
+{
+	size_t length;
+	char *copy;
+
+	if (!value)
+		return NULL;
+	length = strlen(value);
+	if (length == SIZE_MAX)
+		return NULL;
+	copy = malloc(length + 1U);
+	if (copy)
+		memcpy(copy, value, length + 1U);
+	return copy;
+}
+
 struct tr_client {
 	struct tr_client_config config;
 	struct tr_facade_tuning tuning;
 	struct tr_tls_openssl_profile *tls_profile;
 	struct tr_tls_openssl_profile *tls_recovery_profile;
+	char *tls_ca_file_copy;
+	char *tls_ca_directory_copy;
+	char *tls_expected_peer_name_copy;
+	char *tls_sni_name_copy;
+	struct tr_tls_provider_operation_table tls_operations;
+	pthread_mutex_t tls_provider_lock;
+	struct tr_tls_provider_operation tls_credentials_operation;
+	struct tr_reactor_timer_handle tls_credentials_timer;
+	uint64_t tls_credentials_deadline_ns;
+	enum tr_tls_rotation_policy tls_credentials_policy;
+	int tls_operations_ready;
+	int tls_provider_lock_ready;
+	int tls_credentials_active;
+	int tls_credentials_start_active;
+	int tls_credentials_cancel_notified;
+	int tls_credentials_timer_registered;
 
 	struct tr_runtime *runtime;
 	struct tr_runtime_shard *shard;
@@ -85,6 +119,10 @@ struct tr_client {
 	int connected;
 	int graceful_drained;
 };
+
+static uint64_t tr_client_tls_credentials_deadline_tick(void *arg,
+                                                        uint64_t now_ns);
+static int tr_client_monotonic_now_ns(uint64_t *out_now_ns);
 
 static int tr_client_create_rollback(
 	struct tr_client **out, struct tr_client *client, int cause)
@@ -172,6 +210,8 @@ static void tr_client_normalize_config(struct tr_client_config *config)
 		TR_LIMIT_DEFAULT(max_message_bytes);
 		TR_LIMIT_DEFAULT(initial_window_bytes);
 		TR_LIMIT_DEFAULT(window_update_threshold_bytes);
+		TR_LIMIT_DEFAULT(max_pending_tls_operations);
+		TR_LIMIT_DEFAULT(max_tls_credential_bundle_bytes);
 #undef TR_LIMIT_DEFAULT
 	}
 
@@ -316,6 +356,7 @@ tr_client_create_internal(const struct tr_client_config *config,
 	struct tr_reactor_config *reactor_config;
 	struct tr_client *client = NULL;
 	int ret;
+	int credentials_provider_enabled;
 
 	if (!out)
 		return TR_ERR_INVALID;
@@ -328,10 +369,17 @@ tr_client_create_internal(const struct tr_client_config *config,
 	else
 		tr_client_config_init(&effective);
 	tr_client_normalize_config(&effective);
+	ret = tr_tls_credentials_provider_validate(
+	        &effective.tls_credentials_provider, effective.tls.mode);
+	if (ret != TR_OK)
+		return ret;
+	credentials_provider_enabled =
+	        effective.tls_credentials_provider.fetch != NULL;
 	ret = tr_tls_client_config_validate(&effective.tls, 1);
 	if (ret != TR_OK)
 		return ret;
-	if (!record && effective.tls.mode == TR_TLS_REQUIRED &&
+	if (!record && !credentials_provider_enabled &&
+	    effective.tls.mode == TR_TLS_REQUIRED &&
 	    (!effective.tls.client_certificate_file ||
 	     !effective.tls.client_private_key_file))
 		return TR_ERR_INVALID;
@@ -360,23 +408,47 @@ tr_client_create_internal(const struct tr_client_config *config,
 		return TR_ERR_NOMEM;
 	client->config = effective;
 	client->tuning = effective_tuning;
+	client->tls_ca_file_copy =
+	        tr_client_copy_optional_string(effective.tls.ca_file);
+	client->tls_ca_directory_copy =
+	        tr_client_copy_optional_string(effective.tls.ca_directory);
+	client->tls_expected_peer_name_copy = tr_client_copy_optional_string(
+	        effective.tls.expected_peer_name);
+	client->tls_sni_name_copy =
+	        tr_client_copy_optional_string(effective.tls.sni_name);
+	if ((effective.tls.ca_file && !client->tls_ca_file_copy) ||
+	    (effective.tls.ca_directory && !client->tls_ca_directory_copy) ||
+	    (effective.tls.expected_peer_name &&
+	     !client->tls_expected_peer_name_copy) ||
+	    (effective.tls.sni_name && !client->tls_sni_name_copy))
+		return tr_client_create_rollback(out, client, TR_ERR_NOMEM);
+	client->config.tls.ca_file = client->tls_ca_file_copy;
+	client->config.tls.ca_directory = client->tls_ca_directory_copy;
+	client->config.tls.expected_peer_name =
+	        client->tls_expected_peer_name_copy;
+	client->config.tls.sni_name = client->tls_sni_name_copy;
+	if (credentials_provider_enabled) {
+		if (pthread_mutex_init(&client->tls_provider_lock, NULL) != 0)
+			return tr_client_create_rollback(out, client,
+			                                 TR_ERR_SYS);
+		client->tls_provider_lock_ready = 1;
+	}
 	atomic_init(&client->record_stopping, 0);
 	atomic_init(&client->tls_rotation_failed, 0);
 	atomic_init(&client->tls_update_active, 0);
-	if (effective.tls.mode == TR_TLS_REQUIRED) {
+	if (effective.tls.mode == TR_TLS_REQUIRED &&
+	    (!credentials_provider_enabled ||
+	     effective.tls.client_certificate_file ||
+	     effective.tls.client_private_key_file)) {
 		ret = record ? tr_tls_openssl_client_profile_create(
 		                       &effective.tls, &client->tls_profile)
 		             : tr_tls_openssl_client_profile_create_with_peer_identity(
 		                       &effective.tls, &client->tls_profile);
 		if (ret != TR_OK)
 			return tr_client_create_rollback(out, client, ret);
-		client->config.tls.ca_file = NULL;
-		client->config.tls.ca_directory = NULL;
-		client->config.tls.expected_peer_name = NULL;
-		client->config.tls.sni_name = NULL;
-		client->config.tls.client_certificate_file = NULL;
-		client->config.tls.client_private_key_file = NULL;
 	}
+	client->config.tls.client_certificate_file = NULL;
+	client->config.tls.client_private_key_file = NULL;
 	if (record) {
 		client->record_mode = 1;
 		client->record_sdk_mode = public_v2;
@@ -425,6 +497,22 @@ tr_client_create_internal(const struct tr_client_config *config,
 	client->shard = tr_runtime_shard_at(client->runtime, 0U);
 	if (!client->shard)
 		return tr_client_create_rollback(out, client, TR_ERR_STATE);
+	if (credentials_provider_enabled) {
+		ret = tr_tls_provider_operation_table_init(
+		        &client->tls_operations,
+		        effective.limits.max_pending_tls_operations,
+		        tr_runtime_shard_memory_budget(client->shard));
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->tls_operations_ready = 1;
+		ret = tr_reactor_timer_register(
+		        tr_client_reactor(client),
+		        tr_client_tls_credentials_deadline_tick, client,
+		        &client->tls_credentials_timer);
+		if (ret != TR_OK)
+			return tr_client_create_rollback(out, client, ret);
+		client->tls_credentials_timer_registered = 1;
+	}
 	if (record) {
 		struct tr_memory_budget *budget =
 		        tr_runtime_shard_memory_budget(client->shard);
@@ -559,56 +647,68 @@ static void tr_client_tls_rotation_mark_failed(struct tr_client *client)
 	tr_rpc_record_client_mark_tls_failed(client->record_rpc);
 }
 
-static int tr_client_tls_update_profile_impl(
-        struct tr_client *client, const struct tr_tls_client_config *config,
-        enum tr_tls_rotation_policy policy, uint64_t *out_generation)
+/* 调用方把 candidate 的引用所有权交给本函数。成功后 Client 持有它；
+ * 可回滚失败时 Client 保留 candidate 与 recovery 引用供终止收敛。
+ */
+static int tr_client_tls_publish_candidate_impl(
+        struct tr_client *client, struct tr_tls_openssl_profile *candidate,
+        enum tr_tls_rotation_policy policy, uint64_t deadline_ns,
+        uint64_t *out_generation)
 {
-	struct tr_tls_openssl_profile *candidate = NULL;
 	struct tr_tls_openssl_profile *old_profile;
 	struct tr_reactor *owner;
-	uint64_t candidate_generation;
+	uint64_t candidate_generation = 1U;
 	int ret;
 	int rollback_ret;
 
-	if (!client || !config ||
+	if (!client || !candidate ||
 	    (policy != TR_TLS_ROTATE_GRACEFUL &&
-	     policy != TR_TLS_ROTATE_REVOKE_OLD))
+	     policy != TR_TLS_ROTATE_REVOKE_OLD)) {
+		tr_tls_openssl_profile_release(candidate);
 		return TR_ERR_INVALID;
+	}
 	if (tr_client_blocking_lifecycle_context() || client->destroy_active ||
 	    atomic_load_explicit(&client->tls_rotation_failed,
-	                         memory_order_acquire))
+	                         memory_order_acquire) ||
+	    !client->runtime || !client->shard) {
+		tr_tls_openssl_profile_release(candidate);
 		return TR_ERR_STATE;
-	if (!client->tls_profile || !client->runtime || !client->shard)
-		return TR_ERR_STATE;
-	if (config->mode != TR_TLS_REQUIRED ||
-	    (client->transport_only && (!config->client_certificate_file ||
-	                                !config->client_private_key_file)))
-		return TR_ERR_INVALID;
+	}
 	old_profile = client->tls_profile;
-	ret = tr_tls_openssl_profile_next_generation(old_profile,
-	                                             &candidate_generation);
-	if (ret != TR_OK)
-		return ret;
-	ret = client->transport_only
-	              ? tr_tls_openssl_client_profile_create_with_peer_identity(
-	                        config, &candidate)
-	              : tr_tls_openssl_client_profile_create(config,
-	                                                     &candidate);
-	if (ret != TR_OK)
-		return ret;
+	if (old_profile) {
+		ret = tr_tls_openssl_profile_next_generation(
+		        old_profile, &candidate_generation);
+		if (ret != TR_OK) {
+			tr_tls_openssl_profile_release(candidate);
+			return ret;
+		}
+	}
 	ret = tr_tls_openssl_profile_set_generation(candidate,
 	                                            candidate_generation);
-	if (ret != TR_OK)
-		goto fail_candidate;
+	if (ret != TR_OK) {
+		tr_tls_openssl_profile_release(candidate);
+		return ret;
+	}
 	owner = tr_runtime_shard_reactor(client->shard);
 	ret = tr_reactor_tls_admission_set(owner, 1);
-	if (ret != TR_OK)
-		goto fail_candidate;
+	if (ret != TR_OK) {
+		tr_tls_openssl_profile_release(candidate);
+		return ret;
+	}
 	if (client->connection_group) {
 		ret = tr_client_group_schedule_tls_profile(
 		        client->connection_group, candidate);
 		if (ret != TR_OK)
 			goto rollback_gate_only;
+	}
+	if (deadline_ns != 0U) {
+		uint64_t now_ns;
+		ret = tr_client_monotonic_now_ns(&now_ns);
+		if (ret != TR_OK || now_ns >= deadline_ns) {
+			if (ret == TR_OK)
+				ret = TR_ERR_TIMEOUT;
+			goto rollback_group_candidate;
+		}
 	}
 
 	client->tls_profile = candidate;
@@ -657,9 +757,60 @@ rollback_gate_only:
 		tr_tls_openssl_profile_release(candidate);
 		return TR_ERR_STATE;
 	}
-fail_candidate:
 	tr_tls_openssl_profile_release(candidate);
 	return ret;
+
+rollback_group_candidate:
+	if (client->connection_group && old_profile) {
+		rollback_ret = tr_client_group_schedule_tls_profile(
+		        client->connection_group, old_profile);
+		if (rollback_ret != TR_OK) {
+			tr_client_tls_rotation_mark_failed(client);
+			client->tls_recovery_profile = old_profile;
+			client->tls_profile = candidate;
+			return TR_ERR_STATE;
+		}
+	}
+	rollback_ret = tr_reactor_tls_admission_set(owner, 0);
+	if (rollback_ret != TR_OK) {
+		tr_client_tls_rotation_mark_failed(client);
+		tr_tls_openssl_profile_release(candidate);
+		return TR_ERR_STATE;
+	}
+	tr_tls_openssl_profile_release(candidate);
+	return ret;
+}
+
+static int tr_client_tls_update_profile_impl(
+        struct tr_client *client, const struct tr_tls_client_config *config,
+        enum tr_tls_rotation_policy policy, uint64_t *out_generation)
+{
+	struct tr_tls_openssl_profile *candidate = NULL;
+	int ret;
+
+	if (!client || !config ||
+	    (policy != TR_TLS_ROTATE_GRACEFUL &&
+	     policy != TR_TLS_ROTATE_REVOKE_OLD))
+		return TR_ERR_INVALID;
+	if (tr_client_blocking_lifecycle_context() || client->destroy_active ||
+	    atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
+	if (!client->tls_profile || !client->runtime || !client->shard)
+		return TR_ERR_STATE;
+	if (config->mode != TR_TLS_REQUIRED ||
+	    (client->transport_only && (!config->client_certificate_file ||
+	                                !config->client_private_key_file)))
+		return TR_ERR_INVALID;
+	ret = client->transport_only
+	              ? tr_tls_openssl_client_profile_create_with_peer_identity(
+	                        config, &candidate)
+	              : tr_tls_openssl_client_profile_create(config,
+	                                                     &candidate);
+	if (ret != TR_OK)
+		return ret;
+	return tr_client_tls_publish_candidate_impl(client, candidate, policy,
+	                                            0U, out_generation);
 }
 
 int tr_client_tls_update_profile(struct tr_client *client,
@@ -676,6 +827,387 @@ int tr_client_tls_update_profile(struct tr_client *client,
 		return TR_AGAIN;
 	ret = tr_client_tls_update_profile_impl(client, config, policy,
 	                                        out_generation);
+	atomic_store_explicit(&client->tls_update_active, 0,
+	                      memory_order_release);
+	return ret;
+}
+
+static int tr_client_tls_operation_equal(struct tr_tls_provider_operation left,
+                                         struct tr_tls_provider_operation right)
+{
+	return left.instance == right.instance &&
+	       left.generation == right.generation && left.slot == right.slot &&
+	       left.kind == right.kind;
+}
+
+static int tr_client_monotonic_now_ns(uint64_t *out_now_ns)
+{
+	struct timespec now;
+	uint64_t seconds;
+
+	if (!out_now_ns || clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+	    now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000L)
+		return TR_ERR_SYS;
+	seconds = (uint64_t)now.tv_sec;
+	if (seconds > UINT64_MAX / UINT64_C(1000000000))
+		return TR_ERR_STATE;
+	seconds *= UINT64_C(1000000000);
+	if ((uint64_t)now.tv_nsec > UINT64_MAX - seconds)
+		return TR_ERR_STATE;
+	*out_now_ns = seconds + (uint64_t)now.tv_nsec;
+	return TR_OK;
+}
+
+static uint64_t tr_client_tls_credentials_deadline_tick(void *arg,
+                                                        uint64_t now_ns)
+{
+	struct tr_client *client = arg;
+	struct tr_tls_provider_operation operation = {0};
+	tr_tls_credentials_cancel_cb cancel_cb = NULL;
+	void *provider_arg = NULL;
+	int notify = 0;
+
+	if (!client || !client->tls_provider_lock_ready)
+		return 0U;
+	if (pthread_mutex_lock(&client->tls_provider_lock) != 0)
+		return now_ns == UINT64_MAX ? now_ns : now_ns + 1U;
+	if (client->tls_credentials_active &&
+	    now_ns >= client->tls_credentials_deadline_ns) {
+		operation = client->tls_credentials_operation;
+		if (tr_tls_provider_operation_request_cancel(
+		            &client->tls_operations, operation, TR_ERR_TIMEOUT,
+		            &notify) == TR_OK &&
+		    notify) {
+			if (client->tls_credentials_start_active) {
+				client->tls_credentials_cancel_notified = 2;
+			} else if (!client->tls_credentials_cancel_notified) {
+				client->tls_credentials_cancel_notified = 1;
+				cancel_cb =
+				        client->config.tls_credentials_provider
+				                .cancel;
+				provider_arg =
+				        client->config.tls_credentials_provider
+				                .arg;
+			}
+		}
+	}
+	(void)pthread_mutex_unlock(&client->tls_provider_lock);
+	if (cancel_cb)
+		cancel_cb(operation, provider_arg);
+	return 0U;
+}
+
+static int
+tr_client_tls_credentials_retire(struct tr_client *client,
+                                 struct tr_tls_provider_operation operation)
+{
+	int ret;
+
+	ret = tr_tls_provider_operation_retire(&client->tls_operations,
+	                                       operation);
+	if (ret != TR_OK)
+		return ret;
+	if (pthread_mutex_lock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	if (client->tls_credentials_active &&
+	    tr_client_tls_operation_equal(client->tls_credentials_operation,
+	                                  operation)) {
+		client->tls_credentials_active = 0;
+		client->tls_credentials_start_active = 0;
+		client->tls_credentials_cancel_notified = 0;
+		client->tls_credentials_deadline_ns = 0U;
+	}
+	if (pthread_mutex_unlock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	return TR_OK;
+}
+
+int tr_client_tls_credentials_start(
+        struct tr_client *client, uint32_t timeout_ms,
+        enum tr_tls_rotation_policy policy,
+        struct tr_tls_provider_operation *out_operation)
+{
+	struct tr_tls_credential_request request;
+	struct tr_tls_provider_operation operation;
+	tr_tls_credentials_fetch_cb fetch_cb;
+	tr_tls_credentials_cancel_cb cancel_cb = NULL;
+	void *provider_arg;
+	int notify_cancel = 0;
+	int reserved = 0;
+	int ret;
+
+	if (!client || !out_operation || timeout_ms == 0U ||
+	    (policy != TR_TLS_ROTATE_GRACEFUL &&
+	     policy != TR_TLS_ROTATE_REVOKE_OLD))
+		return TR_ERR_INVALID;
+	if (!client->config.tls_credentials_provider.fetch ||
+	    !client->tls_operations_ready || !client->tls_provider_lock_ready)
+		return TR_ERR_UNSUPPORTED;
+	if (client->destroy_active ||
+	    atomic_load_explicit(&client->tls_rotation_failed,
+	                         memory_order_acquire))
+		return TR_ERR_STATE;
+	if (atomic_load_explicit(&client->tls_update_active,
+	                         memory_order_acquire))
+		return TR_AGAIN;
+	{
+		struct tr_deadline deadline;
+		ret = tr_deadline_init_ms(&deadline, timeout_ms);
+		if (ret != TR_OK)
+			return ret;
+		request.deadline_monotonic_ns = tr_deadline_to_ns(&deadline);
+	}
+	request.rotation_policy = policy;
+	if (pthread_mutex_lock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	if (client->tls_credentials_active) {
+		(void)pthread_mutex_unlock(&client->tls_provider_lock);
+		return TR_AGAIN;
+	}
+	ret = tr_tls_provider_operation_reserve(
+	        &client->tls_operations, TR_TLS_PROVIDER_OPERATION_CREDENTIALS,
+	        client->config.limits.max_tls_credential_bundle_bytes,
+	        &operation);
+	if (ret == TR_OK) {
+		reserved = 1;
+		ret = tr_tls_provider_operation_accept(&client->tls_operations,
+		                                       operation);
+	}
+	if (ret != TR_OK) {
+		(void)pthread_mutex_unlock(&client->tls_provider_lock);
+		if (reserved) {
+			int ignored_notify = 0;
+			(void)tr_tls_provider_operation_request_cancel(
+			        &client->tls_operations, operation,
+			        TR_ERR_CANCELLED, &ignored_notify);
+			(void)tr_tls_provider_operation_retire(
+			        &client->tls_operations, operation);
+		}
+		return ret;
+	}
+	client->tls_credentials_operation = operation;
+	client->tls_credentials_deadline_ns = request.deadline_monotonic_ns;
+	client->tls_credentials_policy = policy;
+	client->tls_credentials_active = 1;
+	client->tls_credentials_start_active = 1;
+	client->tls_credentials_cancel_notified = 0;
+	fetch_cb = client->config.tls_credentials_provider.fetch;
+	provider_arg = client->config.tls_credentials_provider.arg;
+	if (pthread_mutex_unlock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	ret = tr_reactor_timer_arm(client->tls_credentials_timer,
+	                           request.deadline_monotonic_ns);
+	if (ret != TR_OK) {
+		(void)tr_tls_provider_operation_complete(
+		        &client->tls_operations, operation, ret, NULL, 0U);
+		(void)tr_client_tls_credentials_retire(client, operation);
+		return ret;
+	}
+	fetch_cb(&request, operation, provider_arg);
+
+	if (pthread_mutex_lock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	client->tls_credentials_start_active = 0;
+	if (client->tls_credentials_active &&
+	    tr_client_tls_operation_equal(client->tls_credentials_operation,
+	                                  operation) &&
+	    client->tls_credentials_cancel_notified == 2) {
+		client->tls_credentials_cancel_notified = 1;
+		cancel_cb = client->config.tls_credentials_provider.cancel;
+		notify_cancel = 1;
+	}
+	if (pthread_mutex_unlock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	*out_operation = operation;
+	if (notify_cancel)
+		cancel_cb(operation, provider_arg);
+	return TR_OK;
+}
+
+int tr_client_tls_credentials_complete(
+        struct tr_client *client, struct tr_tls_provider_operation operation,
+        int status, const struct tr_tls_credential_bundle *bundle)
+{
+	if (!client || !client->tls_operations_ready)
+		return TR_ERR_INVALID;
+	return tr_tls_provider_operation_complete_credentials(
+	        &client->tls_operations, operation, status, bundle);
+}
+
+static int tr_client_tls_credentials_request_cancel(
+        struct tr_client *client, struct tr_tls_provider_operation operation,
+        int reason)
+{
+	tr_tls_credentials_cancel_cb cancel_cb = NULL;
+	void *provider_arg = NULL;
+	int notify = 0;
+	int ret;
+
+	if (pthread_mutex_lock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	if (!client->tls_credentials_active ||
+	    !tr_client_tls_operation_equal(client->tls_credentials_operation,
+	                                   operation)) {
+		(void)pthread_mutex_unlock(&client->tls_provider_lock);
+		return TR_ERR_STALE;
+	}
+	ret = tr_tls_provider_operation_request_cancel(
+	        &client->tls_operations, operation, reason, &notify);
+	if (ret == TR_OK && notify) {
+		if (client->tls_credentials_start_active) {
+			client->tls_credentials_cancel_notified = 2;
+		} else if (!client->tls_credentials_cancel_notified) {
+			client->tls_credentials_cancel_notified = 1;
+			cancel_cb =
+			        client->config.tls_credentials_provider.cancel;
+			provider_arg =
+			        client->config.tls_credentials_provider.arg;
+		}
+	}
+	if (pthread_mutex_unlock(&client->tls_provider_lock) != 0)
+		return TR_ERR_SYS;
+	if (cancel_cb)
+		cancel_cb(operation, provider_arg);
+	return ret;
+}
+
+static int tr_client_tls_credentials_expire_if_due(
+        struct tr_client *client, struct tr_tls_provider_operation operation,
+        uint64_t deadline_ns)
+{
+	uint64_t now_ns;
+	int ret = tr_client_monotonic_now_ns(&now_ns);
+
+	if (ret != TR_OK || now_ns < deadline_ns)
+		return ret;
+	return tr_client_tls_credentials_request_cancel(client, operation,
+	                                                TR_ERR_TIMEOUT);
+}
+
+int tr_client_tls_credentials_cancel(struct tr_client *client,
+                                     struct tr_tls_provider_operation operation)
+{
+	if (!client)
+		return TR_ERR_INVALID;
+	if (!client->config.tls_credentials_provider.fetch)
+		return TR_ERR_UNSUPPORTED;
+	return tr_client_tls_credentials_request_cancel(client, operation,
+	                                                TR_ERR_CANCELLED);
+}
+
+int tr_client_tls_credentials_poll(struct tr_client *client,
+                                   struct tr_tls_provider_operation operation,
+                                   struct tr_tls_credential_result *out_result)
+{
+	struct tr_tls_credential_bundle bundle = {0};
+	struct tr_tls_credential_result result = {0};
+	struct tr_tls_openssl_profile *candidate = NULL;
+	struct tr_tls_client_config profile_config;
+	uint64_t deadline_ns;
+	uint64_t now_ns;
+	int provider_status;
+	int ret;
+
+	if (!client || !out_result)
+		return TR_ERR_INVALID;
+	if (!client->config.tls_credentials_provider.fetch)
+		return TR_ERR_UNSUPPORTED;
+	if (tr_client_blocking_lifecycle_context())
+		return TR_ERR_STATE;
+	if (atomic_exchange_explicit(&client->tls_update_active, 1,
+	                             memory_order_acquire))
+		return TR_AGAIN;
+	if (pthread_mutex_lock(&client->tls_provider_lock) != 0) {
+		atomic_store_explicit(&client->tls_update_active, 0,
+		                      memory_order_release);
+		return TR_ERR_SYS;
+	}
+	if (!client->tls_credentials_active ||
+	    !tr_client_tls_operation_equal(client->tls_credentials_operation,
+	                                   operation)) {
+		(void)pthread_mutex_unlock(&client->tls_provider_lock);
+		atomic_store_explicit(&client->tls_update_active, 0,
+		                      memory_order_release);
+		return TR_ERR_STALE;
+	}
+	if (client->tls_credentials_start_active) {
+		(void)pthread_mutex_unlock(&client->tls_provider_lock);
+		atomic_store_explicit(&client->tls_update_active, 0,
+		                      memory_order_release);
+		return TR_AGAIN;
+	}
+	deadline_ns = client->tls_credentials_deadline_ns;
+	(void)pthread_mutex_unlock(&client->tls_provider_lock);
+	ret = tr_client_tls_credentials_expire_if_due(client, operation,
+	                                              deadline_ns);
+	if (ret != TR_OK && ret != TR_ERR_STALE) {
+		atomic_store_explicit(&client->tls_update_active, 0,
+		                      memory_order_release);
+		return ret;
+	}
+	ret = tr_tls_provider_operation_credentials_result(
+	        &client->tls_operations, operation, &provider_status, &bundle);
+	if (ret != TR_OK) {
+		if (ret == TR_AGAIN) {
+			int expire_ret =
+			        tr_client_tls_credentials_expire_if_due(
+			                client, operation, deadline_ns);
+			if (expire_ret != TR_OK && expire_ret != TR_ERR_STALE)
+				ret = expire_ret;
+		}
+		atomic_store_explicit(&client->tls_update_active, 0,
+		                      memory_order_release);
+		return ret;
+	}
+	result.status = provider_status;
+	if (provider_status == TR_OK) {
+		ret = tr_client_monotonic_now_ns(&now_ns);
+		if (ret != TR_OK) {
+			result.status = ret;
+		} else if (now_ns >= deadline_ns) {
+			result.status = TR_ERR_TIMEOUT;
+		} else {
+			profile_config = client->config.tls;
+			profile_config.client_certificate_file = NULL;
+			profile_config.client_private_key_file = NULL;
+			ret = client->transport_only
+			              ? tr_tls_openssl_client_profile_create_from_pem_with_peer_identity(
+			                        &profile_config, &bundle,
+			                        client->config.limits
+			                                .max_tls_credential_bundle_bytes,
+			                        &candidate)
+			              : tr_tls_openssl_client_profile_create_from_pem(
+			                        &profile_config, &bundle,
+			                        client->config.limits
+			                                .max_tls_credential_bundle_bytes,
+			                        &candidate);
+			if (ret != TR_OK) {
+				result.status = ret;
+			} else {
+				ret = tr_client_monotonic_now_ns(&now_ns);
+				if (ret != TR_OK || now_ns >= deadline_ns) {
+					tr_tls_openssl_profile_release(
+					        candidate);
+					candidate = NULL;
+					result.status =
+					        ret != TR_OK ? ret
+					                     : TR_ERR_TIMEOUT;
+				} else {
+					result.status = tr_client_tls_publish_candidate_impl(
+					        client, candidate,
+					        client->tls_credentials_policy,
+					        deadline_ns,
+					        &result.profile_generation);
+					candidate = NULL;
+				}
+			}
+		}
+	}
+	ret = tr_client_tls_credentials_retire(client, operation);
+	if (ret == TR_OK) {
+		*out_result = result;
+		ret = TR_OK;
+	}
 	atomic_store_explicit(&client->tls_update_active, 0,
 	                      memory_order_release);
 	return ret;
@@ -835,6 +1367,8 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 	                         memory_order_acquire) ||
 	    tr_client_blocking_lifecycle_context())
 		return TR_ERR_STATE;
+	if (client->config.tls.mode == TR_TLS_REQUIRED && !client->tls_profile)
+		return TR_AGAIN;
 
 	/* TCP 连接和 HELLO 握手共享同一个绝对截止时间。 */
 	ret = tr_deadline_init_ms(&connect_deadline,
@@ -913,6 +1447,8 @@ static int tr_client_connection_group_ensure(struct tr_client *client)
 	if (atomic_load_explicit(&client->tls_rotation_failed,
 	                         memory_order_acquire))
 		return TR_ERR_STATE;
+	if (client->config.tls.mode == TR_TLS_REQUIRED && !client->tls_profile)
+		return TR_AGAIN;
 	if (client->record_mode)
 		return TR_ERR_UNSUPPORTED;
 	if (client->connection_group)
@@ -1439,9 +1975,60 @@ int tr_client_get_rpc_semantic_stats(
 	                       &request);
 }
 
+static int tr_client_tls_credentials_drain_for_destroy(struct tr_client *client)
+{
+	struct tr_tls_provider_operation operation;
+	struct tr_tls_credential_bundle bundle = {0};
+	int provider_status;
+	int active;
+	int start_active;
+	int ret;
+
+	if (client->tls_provider_lock_ready) {
+		if (pthread_mutex_lock(&client->tls_provider_lock) != 0)
+			return TR_ERR_SYS;
+		active = client->tls_credentials_active;
+		start_active = client->tls_credentials_start_active;
+		operation = client->tls_credentials_operation;
+		if (pthread_mutex_unlock(&client->tls_provider_lock) != 0)
+			return TR_ERR_SYS;
+		if (active) {
+			ret = tr_client_tls_credentials_request_cancel(
+			        client, operation, TR_ERR_CANCELLED);
+			if (ret != TR_OK && ret != TR_ERR_STALE)
+				return ret;
+			if (start_active)
+				return TR_AGAIN;
+			ret = tr_tls_provider_operation_credentials_result(
+			        &client->tls_operations, operation,
+			        &provider_status, &bundle);
+			if (ret == TR_AGAIN)
+				return TR_AGAIN;
+			if (ret != TR_OK)
+				return ret;
+			ret = tr_client_tls_credentials_retire(client,
+			                                       operation);
+			if (ret != TR_OK)
+				return ret;
+		}
+	}
+	if (client->tls_credentials_timer_registered) {
+		ret = tr_reactor_timer_unregister(
+		        client->tls_credentials_timer);
+		if (ret != TR_OK)
+			return ret;
+		client->tls_credentials_timer_registered = 0;
+	}
+	return TR_OK;
+}
+
 static int tr_client_destroy_internal(struct tr_client *client)
 {
 	int ret;
+
+	ret = tr_client_tls_credentials_drain_for_destroy(client);
+	if (ret != TR_OK)
+		return ret;
 
 	/* Explicitly drained TLS sessions close after their terminal frames. An
 	 * ordinary destroy or rollback keeps the existing abortive behavior. */
@@ -1532,6 +2119,13 @@ static int tr_client_destroy_internal(struct tr_client *client)
 		client->record_method_bytes = 0;
 		client->record_method_count = 0;
 	}
+	if (client->tls_operations_ready) {
+		ret = tr_tls_provider_operation_table_destroy(
+		        &client->tls_operations);
+		if (ret != TR_OK)
+			return ret;
+		client->tls_operations_ready = 0;
+	}
 
 	/* 生命周期由外部串行化；宿主和父 owner 静默后再拆通知同步原语。
 	 * 失败保留剩余原语和 Client，销毁重试不会再次销毁已完成的部分。 */
@@ -1560,6 +2154,15 @@ static int tr_client_destroy_internal(struct tr_client *client)
 		tr_tls_openssl_profile_release(client->tls_recovery_profile);
 		client->tls_recovery_profile = NULL;
 	}
+	if (client->tls_provider_lock_ready) {
+		if (pthread_mutex_destroy(&client->tls_provider_lock) != 0)
+			return TR_ERR_SYS;
+		client->tls_provider_lock_ready = 0;
+	}
+	free(client->tls_ca_file_copy);
+	free(client->tls_ca_directory_copy);
+	free(client->tls_expected_peer_name_copy);
+	free(client->tls_sni_name_copy);
 
 	free(client);
 	return TR_OK;

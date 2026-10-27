@@ -11,6 +11,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -20,6 +21,7 @@
 #include "byte_endpoint.h"
 #include "peer_identity_internal.h"
 #include "tls_config.h"
+#include "../memory_budget.h"
 #include "../refcount.h"
 
 enum tr_tls_openssl_role {
@@ -44,6 +46,8 @@ struct tr_tls_openssl_session {
 	const void *pending_write_buffer;
 	size_t pending_write_length;
 	int write_pending;
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
 };
 
 struct tr_tls_openssl_socket_bio_data {
@@ -53,6 +57,23 @@ struct tr_tls_openssl_socket_bio_data {
 
 static BIO_METHOD *tr_tls_openssl_socket_bio_method;
 static CRYPTO_ONCE tr_tls_openssl_socket_bio_once = CRYPTO_ONCE_STATIC_INIT;
+
+static void
+tr_tls_openssl_session_destroy(struct tr_tls_openssl_session *session)
+{
+	struct tr_memory_budget *memory_budget;
+	uint64_t memory_bytes;
+	if (!session)
+		return;
+	memory_budget = session->memory_budget;
+	memory_bytes = session->memory_bytes;
+	if (session->ssl)
+		SSL_free(session->ssl);
+	session->ssl = NULL;
+	free(session);
+	if (memory_budget && memory_bytes != 0U)
+		(void)tr_memory_budget_release(memory_budget, memory_bytes);
+}
 
 static int tr_tls_openssl_socket_bio_create(BIO *bio)
 {
@@ -317,6 +338,9 @@ static int tr_tls_openssl_context_create(SSL_CTX **out)
 		SSL_CTX_free(context);
 		return TR_ERR_INVALID;
 	}
+	/* OpenSSL 默认允许 100 KiB；固定策略，避免依赖后端隐式默认值。 */
+	(void)SSL_CTX_set_max_cert_list(
+	        context, TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
 	*out = context;
 	return TR_OK;
 }
@@ -351,18 +375,300 @@ static int tr_tls_openssl_profile_alloc(enum tr_tls_openssl_role role,
 	return TR_OK;
 }
 
+static int tr_tls_openssl_pem_space(uint8_t byte)
+{
+	return byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n' ||
+	       byte == '\f' || byte == '\v';
+}
+
+static size_t tr_tls_openssl_pem_skip_space(const uint8_t *data, size_t length,
+                                            size_t offset)
+{
+	while (offset < length && tr_tls_openssl_pem_space(data[offset]))
+		++offset;
+	return offset;
+}
+
+static size_t tr_tls_openssl_pem_find(const uint8_t *data, size_t length,
+                                      size_t offset, const char *marker)
+{
+	size_t marker_length = strlen(marker);
+	size_t index;
+
+	if (marker_length > length || offset > length - marker_length)
+		return SIZE_MAX;
+	for (index = offset; index <= length - marker_length; ++index) {
+		if (memcmp(data + index, marker, marker_length) == 0)
+			return index;
+	}
+	return SIZE_MAX;
+}
+
+static int
+tr_tls_openssl_bundle_validate(const struct tr_tls_credential_bundle *bundle,
+                               uint32_t max_bundle_bytes)
+{
+	size_t total = 0U;
+	const struct tr_tls_bytes *fields[3];
+	size_t index;
+
+	if (!bundle || max_bundle_bytes == 0U ||
+	    !bundle->certificate_chain_pem.data ||
+	    bundle->certificate_chain_pem.len == 0U ||
+	    !bundle->private_key_pem.data ||
+	    bundle->private_key_pem.len == 0U ||
+	    (bundle->private_key_password.len != 0U &&
+	     !bundle->private_key_password.data))
+		return TR_ERR_INVALID;
+	fields[0] = &bundle->certificate_chain_pem;
+	fields[1] = &bundle->private_key_pem;
+	fields[2] = &bundle->private_key_password;
+	for (index = 0U; index < 3U; ++index) {
+		if (fields[index]->len > (size_t)INT_MAX ||
+		    fields[index]->len > (size_t)max_bundle_bytes - total)
+			return TR_ERR_BAD_LENGTH;
+		total += fields[index]->len;
+	}
+	return total == 0U ? TR_ERR_INVALID : TR_OK;
+}
+
+static int
+tr_tls_openssl_pem_certificate_chain_install(SSL_CTX *context,
+                                             const struct tr_tls_bytes *chain)
+{
+	static const char begin_marker[] = "-----BEGIN CERTIFICATE-----";
+	static const char end_marker[] = "-----END CERTIFICATE-----";
+	size_t offset = 0U;
+	unsigned int certificate_count = 0U;
+
+	while ((offset = tr_tls_openssl_pem_skip_space(chain->data, chain->len,
+	                                               offset)) < chain->len) {
+		BIO *bio = NULL;
+		X509 *certificate = NULL;
+		size_t end;
+		size_t block_length;
+		int status = TR_ERR_INVALID;
+
+		if (chain->len - offset < sizeof(begin_marker) - 1U ||
+		    memcmp(chain->data + offset, begin_marker,
+		           sizeof(begin_marker) - 1U) != 0)
+			return TR_ERR_INVALID;
+		end = tr_tls_openssl_pem_find(
+		        chain->data, chain->len,
+		        offset + sizeof(begin_marker) - 1U, end_marker);
+		if (end == SIZE_MAX)
+			return TR_ERR_INVALID;
+		block_length = end + sizeof(end_marker) - 1U - offset;
+		if (block_length > (size_t)INT_MAX)
+			return TR_ERR_BAD_LENGTH;
+		bio = BIO_new_mem_buf(chain->data + offset, (int)block_length);
+		if (!bio)
+			return TR_ERR_NOMEM;
+		certificate = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+		if (!certificate || BIO_ctrl_pending(bio) != 0L)
+			goto certificate_done;
+		if (certificate_count == 0U) {
+			if (SSL_CTX_use_certificate(context, certificate) != 1)
+				goto certificate_done;
+		} else if (SSL_CTX_add1_chain_cert(context, certificate) != 1) {
+			goto certificate_done;
+		}
+		++certificate_count;
+		status = TR_OK;
+
+	certificate_done:
+		X509_free(certificate);
+		BIO_free(bio);
+		if (status != TR_OK)
+			return status;
+		offset = end + sizeof(end_marker) - 1U;
+	}
+	return certificate_count == 0U ? TR_ERR_INVALID : TR_OK;
+}
+
+static int
+tr_tls_openssl_pem_private_key_bounds(const struct tr_tls_bytes *private_key,
+                                      size_t *out_offset, size_t *out_length)
+{
+	static const char begin_prefix[] = "-----BEGIN ";
+	size_t offset;
+	size_t label_start;
+	size_t label_end;
+	size_t marker_start;
+	size_t marker_end;
+	size_t block_end;
+	char end_marker[128];
+	int written;
+
+	if (!private_key || !out_offset || !out_length)
+		return TR_ERR_INVALID;
+	offset = tr_tls_openssl_pem_skip_space(private_key->data,
+	                                       private_key->len, 0U);
+	if (private_key->len - offset < sizeof(begin_prefix) - 1U ||
+	    memcmp(private_key->data + offset, begin_prefix,
+	           sizeof(begin_prefix) - 1U) != 0)
+		return TR_ERR_INVALID;
+	label_start = offset + sizeof(begin_prefix) - 1U;
+	label_end = tr_tls_openssl_pem_find(private_key->data, private_key->len,
+	                                    label_start, "-----");
+	if (label_end == SIZE_MAX || label_end == label_start ||
+	    label_end - label_start > 64U)
+		return TR_ERR_INVALID;
+	for (size_t index = label_start; index < label_end; ++index) {
+		uint8_t character = private_key->data[index];
+		if (!((character >= 'A' && character <= 'Z') ||
+		      (character >= '0' && character <= '9') ||
+		      character == ' '))
+			return TR_ERR_INVALID;
+	}
+	written = snprintf(end_marker, sizeof(end_marker), "-----END %.*s-----",
+	                   (int)(label_end - label_start),
+	                   (const char *)private_key->data + label_start);
+	if (written <= 0 || (size_t)written >= sizeof(end_marker))
+		return TR_ERR_INVALID;
+	marker_start = label_end + 5U;
+	marker_end = tr_tls_openssl_pem_find(
+	        private_key->data, private_key->len, marker_start, end_marker);
+	if (marker_end == SIZE_MAX)
+		return TR_ERR_INVALID;
+	block_end = marker_end + (size_t)written;
+	if (tr_tls_openssl_pem_skip_space(private_key->data, private_key->len,
+	                                  block_end) != private_key->len)
+		return TR_ERR_INVALID;
+	*out_offset = offset;
+	*out_length = block_end - offset;
+	return TR_OK;
+}
+
+struct tr_tls_openssl_password_view {
+	const uint8_t *data;
+	size_t length;
+};
+
+static int tr_tls_openssl_password_copy(char *buffer, int capacity, int writing,
+                                        void *arg)
+{
+	const struct tr_tls_openssl_password_view *password = arg;
+	(void)writing;
+	if (!password || capacity < 0 || password->length > (size_t)capacity ||
+	    password->length > (size_t)INT_MAX)
+		return 0;
+	if (password->length != 0U)
+		memcpy(buffer, password->data, password->length);
+	return (int)password->length;
+}
+
+static int tr_tls_openssl_pem_private_key_read(
+        const struct tr_tls_credential_bundle *bundle, EVP_PKEY **out_key)
+{
+	struct tr_tls_openssl_password_view password;
+	BIO *bio = NULL;
+	EVP_PKEY *key = NULL;
+	uint8_t *private_key_copy = NULL;
+	uint8_t *password_copy = NULL;
+	size_t key_offset;
+	size_t key_length;
+	int status;
+
+	if (!out_key)
+		return TR_ERR_INVALID;
+	*out_key = NULL;
+	status = tr_tls_openssl_pem_private_key_bounds(
+	        &bundle->private_key_pem, &key_offset, &key_length);
+	if (status != TR_OK)
+		return status;
+	private_key_copy = malloc(key_length);
+	if (!private_key_copy)
+		return TR_ERR_NOMEM;
+	memcpy(private_key_copy, bundle->private_key_pem.data + key_offset,
+	       key_length);
+	if (bundle->private_key_password.len != 0U) {
+		password_copy = malloc(bundle->private_key_password.len);
+		if (!password_copy) {
+			status = TR_ERR_NOMEM;
+			goto done;
+		}
+		memcpy(password_copy, bundle->private_key_password.data,
+		       bundle->private_key_password.len);
+	}
+	password.data = password_copy;
+	password.length = bundle->private_key_password.len;
+	bio = BIO_new_mem_buf(private_key_copy, (int)key_length);
+	if (!bio) {
+		status = TR_ERR_NOMEM;
+		goto done;
+	}
+	key = PEM_read_bio_PrivateKey(bio, NULL, tr_tls_openssl_password_copy,
+	                              &password);
+	if (!key || BIO_ctrl_pending(bio) != 0L) {
+		status = TR_ERR_INVALID;
+		goto done;
+	}
+	*out_key = key;
+	key = NULL;
+	status = TR_OK;
+
+done:
+	EVP_PKEY_free(key);
+	BIO_free(bio);
+	if (private_key_copy) {
+		OPENSSL_cleanse(private_key_copy, key_length);
+		free(private_key_copy);
+	}
+	if (password_copy) {
+		OPENSSL_cleanse(password_copy,
+		                bundle->private_key_password.len);
+		free(password_copy);
+	}
+	return status;
+}
+
+static int tr_tls_openssl_pem_identity_install(
+        SSL_CTX *context, const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes)
+{
+	EVP_PKEY *private_key = NULL;
+	int status = tr_tls_openssl_bundle_validate(bundle, max_bundle_bytes);
+	if (status != TR_OK)
+		return status;
+	status = tr_tls_openssl_pem_certificate_chain_install(
+	        context, &bundle->certificate_chain_pem);
+	if (status != TR_OK)
+		return status;
+	status = tr_tls_openssl_pem_private_key_read(bundle, &private_key);
+	if (status != TR_OK)
+		return status;
+	if (SSL_CTX_use_PrivateKey(context, private_key) != 1 ||
+	    SSL_CTX_check_private_key(context) != 1)
+		status = TR_ERR_INVALID;
+	EVP_PKEY_free(private_key);
+	return status;
+}
+
 static int tr_tls_openssl_client_profile_create_internal(
         const struct tr_tls_client_config *config, int peer_identity_enabled,
-        struct tr_tls_openssl_profile **out)
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out)
 {
 	struct tr_tls_openssl_profile *profile = NULL;
+	struct tr_tls_client_config policy_config;
 	X509_VERIFY_PARAM *verify_parameters;
 	int status;
 
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	status = tr_tls_client_config_validate(config, 1);
+	if (!config)
+		return TR_ERR_INVALID;
+	policy_config = *config;
+	if (bundle) {
+		if (!!config->client_certificate_file !=
+		    !!config->client_private_key_file)
+			return TR_ERR_INVALID;
+		policy_config.client_certificate_file = NULL;
+		policy_config.client_private_key_file = NULL;
+	}
+	status = tr_tls_client_config_validate(&policy_config, 1);
 	if (status != TR_OK)
 		return status;
 	if (config->mode != TR_TLS_REQUIRED ||
@@ -387,13 +693,19 @@ static int tr_tls_openssl_client_profile_create_internal(
 		status = TR_ERR_INVALID;
 		goto fail;
 	}
-	if (config->client_certificate_file &&
-	    (SSL_CTX_use_certificate_chain_file(
-	             profile->context, config->client_certificate_file) != 1 ||
-	     SSL_CTX_use_PrivateKey_file(profile->context,
-	                                 config->client_private_key_file,
-	                                 SSL_FILETYPE_PEM) != 1 ||
-	     SSL_CTX_check_private_key(profile->context) != 1)) {
+	if (bundle) {
+		status = tr_tls_openssl_pem_identity_install(
+		        profile->context, bundle, max_bundle_bytes);
+		if (status != TR_OK)
+			goto fail;
+	} else if (config->client_certificate_file &&
+	           (SSL_CTX_use_certificate_chain_file(
+	                    profile->context,
+	                    config->client_certificate_file) != 1 ||
+	            SSL_CTX_use_PrivateKey_file(profile->context,
+	                                        config->client_private_key_file,
+	                                        SSL_FILETYPE_PEM) != 1 ||
+	            SSL_CTX_check_private_key(profile->context) != 1)) {
 		status = TR_ERR_INVALID;
 		goto fail;
 	}
@@ -439,19 +751,40 @@ int tr_tls_openssl_client_profile_create(
         const struct tr_tls_client_config *config,
         struct tr_tls_openssl_profile **out)
 {
-	return tr_tls_openssl_client_profile_create_internal(config, 0, out);
+	return tr_tls_openssl_client_profile_create_internal(config, 0, NULL,
+	                                                     0U, out);
 }
 
 int tr_tls_openssl_client_profile_create_with_peer_identity(
         const struct tr_tls_client_config *config,
         struct tr_tls_openssl_profile **out)
 {
-	return tr_tls_openssl_client_profile_create_internal(config, 1, out);
+	return tr_tls_openssl_client_profile_create_internal(config, 1, NULL,
+	                                                     0U, out);
 }
 
-int tr_tls_openssl_server_profile_create(
+int tr_tls_openssl_client_profile_create_from_pem(
+        const struct tr_tls_client_config *config,
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out)
+{
+	return tr_tls_openssl_client_profile_create_internal(
+	        config, 0, bundle, max_bundle_bytes, out);
+}
+
+int tr_tls_openssl_client_profile_create_from_pem_with_peer_identity(
+        const struct tr_tls_client_config *config,
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out)
+{
+	return tr_tls_openssl_client_profile_create_internal(
+	        config, 1, bundle, max_bundle_bytes, out);
+}
+
+static int tr_tls_openssl_server_profile_create_internal(
         const struct tr_tls_server_config *config,
-        struct tr_tls_openssl_profile **out)
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out)
 {
 	struct tr_tls_openssl_profile *profile = NULL;
 	X509_VERIFY_PARAM *verify_parameters;
@@ -461,7 +794,8 @@ int tr_tls_openssl_server_profile_create(
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	status = tr_tls_server_config_validate(config, 1);
+	status = bundle ? tr_tls_server_config_validate_for_pem(config, 1)
+	                : tr_tls_server_config_validate(config, 1);
 	if (status != TR_OK)
 		return status;
 	if (config->mode != TR_TLS_REQUIRED)
@@ -469,12 +803,17 @@ int tr_tls_openssl_server_profile_create(
 	status = tr_tls_openssl_profile_alloc(TR_TLS_OPENSSL_SERVER, &profile);
 	if (status != TR_OK)
 		return status;
-	if (SSL_CTX_use_certificate_chain_file(profile->context,
-	                                       config->certificate_file) != 1 ||
-	    SSL_CTX_use_PrivateKey_file(profile->context,
-	                                config->private_key_file,
-	                                SSL_FILETYPE_PEM) != 1 ||
-	    SSL_CTX_check_private_key(profile->context) != 1) {
+	if (bundle) {
+		status = tr_tls_openssl_pem_identity_install(
+		        profile->context, bundle, max_bundle_bytes);
+		if (status != TR_OK)
+			goto fail;
+	} else if (SSL_CTX_use_certificate_chain_file(
+	                   profile->context, config->certificate_file) != 1 ||
+	           SSL_CTX_use_PrivateKey_file(profile->context,
+	                                       config->private_key_file,
+	                                       SSL_FILETYPE_PEM) != 1 ||
+	           SSL_CTX_check_private_key(profile->context) != 1) {
 		status = TR_ERR_INVALID;
 		goto fail;
 	}
@@ -506,6 +845,23 @@ int tr_tls_openssl_server_profile_create(
 fail:
 	tr_tls_openssl_profile_release(profile);
 	return status;
+}
+
+int tr_tls_openssl_server_profile_create(
+        const struct tr_tls_server_config *config,
+        struct tr_tls_openssl_profile **out)
+{
+	return tr_tls_openssl_server_profile_create_internal(config, NULL, 0U,
+	                                                     out);
+}
+
+int tr_tls_openssl_server_profile_create_from_pem(
+        const struct tr_tls_server_config *config,
+        const struct tr_tls_credential_bundle *bundle,
+        uint32_t max_bundle_bytes, struct tr_tls_openssl_profile **out)
+{
+	return tr_tls_openssl_server_profile_create_internal(
+	        config, bundle, max_bundle_bytes, out);
 }
 
 int tr_tls_openssl_profile_peer_identity_enabled(
@@ -646,12 +1002,18 @@ static int tr_tls_openssl_error_status(struct tr_tls_openssl_session *session,
 }
 
 int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
-                                  int fd, struct tr_tls_openssl_session **out)
+                                  int fd,
+                                  struct tr_memory_budget *memory_budget,
+                                  struct tr_tls_openssl_session **out)
 {
-	struct tr_tls_openssl_session *session;
-	BIO *socket_bio;
+	struct tr_tls_openssl_session *session = NULL;
+	BIO *socket_bio = NULL;
 	struct tr_tls_openssl_socket_bio_data *socket_data;
+	uint64_t memory_bytes =
+	        (uint64_t)sizeof(*session) +
+	        (uint64_t)sizeof(struct tr_tls_openssl_socket_bio_data);
 	int flags;
+	int ret = TR_ERR_NOMEM;
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
@@ -664,48 +1026,49 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 		return TR_ERR_SYS;
 	if ((flags & O_NONBLOCK) == 0)
 		return TR_ERR_INVALID;
+	if (memory_budget) {
+		/* BIO 用户数据在 BIO_new 内部分配；与 session 一起预留，
+		 * 但 OpenSSL 自身的 SSL/BIO 对象分配不在本账目内。
+		 */
+		ret = tr_memory_budget_reserve(memory_budget, memory_bytes);
+		if (ret != TR_OK)
+			return ret;
+	}
 	session = (struct tr_tls_openssl_session *)calloc(1, sizeof(*session));
 	if (!session)
-		return TR_ERR_NOMEM;
+		goto fail;
+	session->memory_budget = memory_budget;
+	session->memory_bytes = memory_budget ? memory_bytes : 0U;
 	session->ssl = SSL_new(profile->context);
-	if (!session->ssl) {
-		free(session);
-		return TR_ERR_NOMEM;
-	}
+	if (!session->ssl)
+		goto fail;
 	if (CRYPTO_THREAD_run_once(&tr_tls_openssl_socket_bio_once,
 	                           tr_tls_openssl_socket_bio_method_init) !=
 	            1 ||
-	    !tr_tls_openssl_socket_bio_method) {
-		SSL_free(session->ssl);
-		free(session);
-		return TR_ERR_NOMEM;
-	}
+	    !tr_tls_openssl_socket_bio_method)
+		goto fail;
 	socket_bio = BIO_new(tr_tls_openssl_socket_bio_method);
-	if (!socket_bio) {
-		SSL_free(session->ssl);
-		free(session);
-		return TR_ERR_NOMEM;
-	}
+	if (!socket_bio)
+		goto fail;
 	socket_data = (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(
 	        socket_bio);
 	if (!socket_data) {
 		BIO_free(socket_bio);
-		SSL_free(session->ssl);
-		free(session);
-		return TR_ERR_NOMEM;
+		socket_bio = NULL;
+		goto fail;
 	}
 	socket_data->fd = fd;
 	socket_data->close_fd = 0;
 	BIO_set_init(socket_bio, 1);
 	SSL_set_bio(session->ssl, socket_bio, socket_bio);
+	socket_bio = NULL;
 	session->role = profile->role;
 	if (session->role == TR_TLS_OPENSSL_CLIENT) {
 		if (profile->sni_name &&
 		    SSL_set_tlsext_host_name(session->ssl, profile->sni_name) !=
 		            1) {
-			SSL_free(session->ssl);
-			free(session);
-			return TR_ERR_INVALID;
+			ret = TR_ERR_INVALID;
+			goto fail;
 		}
 		SSL_set_connect_state(session->ssl);
 	} else {
@@ -713,6 +1076,15 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 	}
 	*out = session;
 	return TR_OK;
+
+fail:
+	if (socket_bio)
+		BIO_free(socket_bio);
+	if (session)
+		tr_tls_openssl_session_destroy(session);
+	else if (memory_budget)
+		(void)tr_memory_budget_release(memory_budget, memory_bytes);
+	return ret;
 }
 
 static int tr_tls_openssl_handshake(void *arg, uint32_t *wait_events)
@@ -839,11 +1211,7 @@ static void tr_tls_openssl_session_release(void *arg)
 {
 	struct tr_tls_openssl_session *session =
 	        (struct tr_tls_openssl_session *)arg;
-	if (!session)
-		return;
-	SSL_free(session->ssl);
-	session->ssl = NULL;
-	free(session);
+	tr_tls_openssl_session_destroy(session);
 }
 
 static const struct tr_byte_endpoint_driver tr_tls_openssl_byte_driver = {

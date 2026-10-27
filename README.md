@@ -4,13 +4,20 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.17` 开发分支已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
+当前 `2.0.0-dev.33` 候选已将 OpenSSL 3 TLS 1.3 和 mTLS 接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
 撤销旧代次；已接管的会话保留原 profile，旧 CONTROL 不得接受新 Server 代次的 DATA。
-默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 全平台矩阵与 GitHub 验收仍
-未完成；本版本不代表 #234 或 V2 整体验收完成。
+TLS-D2 增加有界异步本地凭证获取/轮换和连接组 CONTROL/DATA 异步授权，取消须由 provider
+确认；授权在 Reactor owner 重验后才会提交路由。TLS-D1 已随 PR #311 合入主线；TLS-D2
+实现保留在未合并的 PR #312。dev.22/23 加入独立 GnuTLS 客户端到 c-trpc Server 的互通，
+并补齐 Make 兼容门禁依赖；dev.24 扩展 c-trpc Client 到 GnuTLS Server 的 TLS 1.3/mTLS
+互通，完成真实 V2 HELLO/ACK 往返与证书失败关闭回归，同时修复 TLS 握手失败后 Client
+等待到期限才返回的问题。dev.24/25 的 ASan/UBSan 都报告 52 字节的 `argz_add_sep` 分配；dev.25 的慢速回溯定位到 `newlocale` → `libp11-kit.so.0` 动态库初始化器。dev.26 加入窄 LSan suppression 后，CI 暴露了相对路径被 Xmake 解析到目标工作目录、导致 suppression 文件无法打开的问题；dev.27 将路径改为 GitHub workspace 绝对路径。dev.28 扩展反向 GnuTLS 测试：V2 Client 的真实 unary 正文经 GnuTLS TLS 端点转发到本地明文 V2 Server，再核对回显正文和终局。GnuTLS 端点只负责 TLS 并透明转发，不实现第二套 TRP/RPC 协议栈。dev.29 增加慢握手期限回归；dev.30 验证 64 个连接快速突发接入：16 个仅发送不完整 TLS record 的 peer 占满上限，48 个超额 TCP 连接被拒绝；期限后慢握手 peer 全部回收，合法 TLS Client 随后恢复就绪。dev.31 增加 Server 主动销毁期间的握手生命周期回归：4 个 TLS 握手未完成的 peer 在 5 秒握手期限前全部关闭。dev.32 显式固定 OpenSSL 对端证书链上限为 100 KiB，并通过真实超限证书握手验证 `SSL_R_EXCESSIVE_MESSAGE_SIZE` 拒绝。dev.33 将 Reactor TLS endpoint、OpenSSL session 包装及 socket BIO 用户数据计入共享 memory budget；OpenSSL 自身分配和内核 socket 缓冲仍不在该预算内。当前验证状态见 [PR #312](https://github.com/MyBlackHole/c-trpc/pull/312)。
+这些测试不覆盖 TLS-E 的完整 OpenSSL/内核资源总账、更大规模持续握手洪峰与取消、长稳、目标平台验收，也不证明独立外部 RPC 实现的协议互通。默认仍为明文
+TCP，TLS 失败关闭连接，不回退明文。本版本不代表 #234 或 V2 整体验收完成。
+本次外部 GnuTLS 互通覆盖和限制见 [TLS-E 阶段评估](docs/reviews/rpc_v2_tls_e_20261027.md)。
 构建需要 OpenSSL 3 开发包，手动链接静态 SDK 时在 `-ltrcore` 后增加
 `-lssl -lcrypto`。阶段证据见 [TLS-C 实现记录](docs/reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](docs/reviews/rpc_v2_tls_d1_20261023.md)、

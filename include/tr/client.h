@@ -36,6 +36,7 @@ struct tr_client_config {
 	uint32_t reconnect_max_delay_ms;
 
 	struct tr_tls_client_config tls;
+	struct tr_tls_credentials_provider tls_credentials_provider;
 };
 
 void tr_client_config_init(struct tr_client_config *config);
@@ -74,6 +75,25 @@ int tr_client_tls_update_profile(struct tr_client *client,
                                  uint64_t *out_generation);
 
 /*
+ * 显式获取或刷新本地身份凭证。provider 未配置时返回 TR_ERR_UNSUPPORTED；
+ * 只有 TR_OK 才写入 out_operation。fetch 在调用线程短暂执行，随后由 provider
+ * 自行异步工作。complete 可跨线程调用并在返回前复制 bundle。poll 只能从外部
+ * 控制线程调用；待完成时返回 TR_AGAIN 且不改 out_result，终态通过结果结构返回。
+ */
+int tr_client_tls_credentials_start(
+        struct tr_client *client, uint32_t timeout_ms,
+        enum tr_tls_rotation_policy policy,
+        struct tr_tls_provider_operation *out_operation);
+int tr_client_tls_credentials_complete(
+        struct tr_client *client, struct tr_tls_provider_operation operation,
+        int status, const struct tr_tls_credential_bundle *bundle);
+int tr_client_tls_credentials_poll(struct tr_client *client,
+                                   struct tr_tls_provider_operation operation,
+                                   struct tr_tls_credential_result *out_result);
+int tr_client_tls_credentials_cancel(
+        struct tr_client *client, struct tr_tls_provider_operation operation);
+
+/*
  * 门面仅接受数字形式的 IPv4 地址。
  *
  * fd 被 Reactor 接管后，后续 Channel/RPC/保活/重连任一步失败都会
@@ -86,6 +106,7 @@ int tr_client_connect(struct tr_client *client, const char *ipv4_address,
 
 /*
  * 同步等待连接就绪。
+ * HELLO 前连接关闭且没有重连任务时返回 TR_ERR_CLOSED。
  * 该操作依赖 Reactor 推进，必须从外部控制线程调用；从 Reactor 所有者
  * 回调或 RPC 工作线程回调中调用时返回 TR_ERR_STATE。
  */
