@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-核对基线：2026-10-24，主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 当前开发分支为 `feat/v2-tls-d-234`（2.0.0-dev.17）。
+核对基线：2026-10-27，主线 TLS-D1 merge commit `f73d8bb4d214fe71393eb8fa5e1cb0d8fbf01741`；TLS-D2 开发候选为 `feat/v2-tls-d2-234`（2.0.0-dev.22）。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
 ## 已落地主线
@@ -44,7 +44,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
-| TLS 与身份 | TLS-C 已合入；TLS-D1 当前分支已实现普通 RPC/连接组 mTLS、主体连续性与 profile 轮换，本地五矩阵 88/88；固定版分析、GitHub 验收与 #234 更新待完成；TLS-D2 和 TLS-E 仍待开发 | #234 |
+| TLS 与身份 | TLS-C/D1 已合入；TLS-D2 凭证获取/授权已实现，PR #312 的前一 head 14/14 检查通过但未合入；dev.22 增加 GnuTLS 客户端到 c-trpc TLS 1.3/mTLS Server 互通负例/正例，本地 Release、ASan/UBSan、TSan 通过。TLS-E 完整资源账本、洪峰/长稳、目标平台及客户端/服务端双向外部互通仍待验收 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |
