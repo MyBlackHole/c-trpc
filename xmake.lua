@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.158")
+set_version("2.0.0-dev.169")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -103,6 +103,7 @@ target("trcore")
         "src/transport/protocol/frame.c",
         "src/transport/protocol/parser.c",
         "src/execution/task_executor.c",
+        "src/execution/async_operation.c",
         "src/execution/worker_context.c",
         "src/execution/command_queue.c",
         "src/execution/completion_queue.c",
@@ -168,6 +169,16 @@ target("test_tls_provider_operation")
     set_kind("binary")
     set_default(false)
     add_files("tests/test_tls_provider_operation.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=pthread_mutex_unlock", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+target("test_async_operation")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_async_operation.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
@@ -830,7 +841,8 @@ target("test_rpc_record_dispatch")
     add_files("tests/test_rpc_record_dispatch.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=malloc", "-Wl,--wrap=calloc",
-                "-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=clock_gettime", {force = true})
+                "-Wl,--wrap=tr_stream_sendv", "-Wl,--wrap=clock_gettime",
+                "-Wl,--wrap=tr_async_operation_pool_destroy", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -869,6 +881,7 @@ target("test_rpc_record_endpoint_tcp")
         local sources = {
             "src/crc32c.c",
             "src/execution/buffer.c",
+            "src/execution/async_operation.c",
             "src/execution/worker_context.c",
             "src/execution/task_executor.c",
             "src/execution/command_queue.c",
@@ -1074,6 +1087,16 @@ target("test_rpc_v2_sdk")
     add_undefines("NDEBUG")
     add_defines("TR_RPC_V2_TEST_FAULTS")
     add_ldflags("-Wl,--wrap=tr_stream_open", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 验证 Server V2 work worker 发起跨 Reactor 子 Call 的嵌套语义。
+target("test_rpc_v2_nested_calls")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_rpc_v2_nested_calls.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

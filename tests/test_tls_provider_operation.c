@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <assert.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <string.h>
@@ -9,6 +10,19 @@
 #include "../include/tr/tls.h"
 #include "../src/io/tls_provider_operation_internal.h"
 #include "../src/memory_budget.h"
+
+int __real_pthread_mutex_unlock(pthread_mutex_t *mutex);
+static pthread_mutex_t *fail_unlock_mutex;
+static unsigned fail_unlock_once;
+
+int __wrap_pthread_mutex_unlock(pthread_mutex_t *mutex)
+{
+	if (mutex == fail_unlock_mutex && fail_unlock_once) {
+		--fail_unlock_once;
+		return EPERM;
+	}
+	return __real_pthread_mutex_unlock(mutex);
+}
 
 struct race_context {
 	struct tr_tls_provider_operation_table *table;
@@ -55,6 +69,7 @@ static void test_capacity_and_accounting(void)
 	        .kind = TR_TLS_PROVIDER_OPERATION_AUTHORIZATION,
 	};
 	struct tr_tls_provider_operation stale;
+	uint64_t table_bytes;
 	const uint8_t result[] = {1U, 2U, 3U, 4U};
 	uint8_t output[sizeof(result)] = {0};
 	size_t output_len = 99U;
@@ -63,6 +78,8 @@ static void test_capacity_and_accounting(void)
 	tr_memory_budget_init(&budget, 1024U * 1024U);
 	assert(tr_tls_provider_operation_table_init(&table, 1U, &budget) ==
 	       TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	table_bytes = stats.current_bytes;
 	assert(tr_tls_provider_operation_reserve(
 	               &table, TR_TLS_PROVIDER_OPERATION_CREDENTIALS, 64U,
 	               &operation) == TR_OK);
@@ -77,7 +94,7 @@ static void test_capacity_and_accounting(void)
 	assert(operation.generation == stale.generation);
 	assert(operation.slot == stale.slot);
 	tr_memory_budget_get_stats(&budget, &stats);
-	assert(stats.current_bytes == table.slot_storage_bytes + 64U);
+	assert(stats.current_bytes == table_bytes + 64U);
 	assert(tr_tls_provider_operation_accept(&table, stale) == TR_OK);
 	assert(tr_tls_provider_operation_result(&table, stale, &result_status,
 	                                        output, sizeof(output),
@@ -104,7 +121,41 @@ static void test_capacity_and_accounting(void)
 	                                        output, sizeof(output),
 	                                        &output_len) == TR_ERR_STALE);
 	tr_memory_budget_get_stats(&budget, &stats);
-	assert(stats.current_bytes == table.slot_storage_bytes);
+	assert(stats.current_bytes == table_bytes);
+	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+}
+
+static void test_reserve_unlock_failure_rolls_back(void)
+{
+	struct tr_tls_provider_operation_table table = {0};
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_tls_provider_operation operation = {
+	        .instance = 99U,
+	        .generation = 88U,
+	        .slot = 77U,
+	        .kind = TR_TLS_PROVIDER_OPERATION_AUTHORIZATION,
+	};
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_tls_provider_operation_table_init(&table, 1U, &budget) ==
+	       TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	uint64_t table_bytes = stats.current_bytes;
+	fail_unlock_mutex = &table.lock;
+	fail_unlock_once = 1U;
+	assert(tr_tls_provider_operation_reserve(
+	               &table, TR_TLS_PROVIDER_OPERATION_CREDENTIALS, 64U,
+	               &operation) == TR_ERR_SYS);
+	fail_unlock_mutex = NULL;
+	assert(operation.instance == 99U && operation.generation == 88U &&
+	       operation.slot == 77U &&
+	       operation.kind == TR_TLS_PROVIDER_OPERATION_AUTHORIZATION);
+	assert(pthread_mutex_trylock(&table.lock) == 0);
+	assert(pthread_mutex_unlock(&table.lock) == 0);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == table_bytes);
 	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
 	tr_memory_budget_get_stats(&budget, &stats);
 	assert(stats.current_bytes == 0U);
@@ -166,10 +217,13 @@ static void test_credentials_copy_and_retire_accounting(void)
 	uint8_t private_key[] = {'k', 'e', 'y'};
 	uint8_t password[] = {'p', 'w'};
 	int result_status = 99;
+	uint64_t table_bytes;
 
 	tr_memory_budget_init(&budget, 1024U * 1024U);
 	assert(tr_tls_provider_operation_table_init(&table, 1U, &budget) ==
 	       TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	table_bytes = stats.current_bytes;
 	assert(tr_tls_provider_operation_reserve(
 	               &table, TR_TLS_PROVIDER_OPERATION_CREDENTIALS, 9U,
 	               &operation) == TR_OK);
@@ -203,7 +257,7 @@ static void test_credentials_copy_and_retire_accounting(void)
 	assert(memcmp(output.private_key_password.data, "pw", 2U) == 0);
 	assert(tr_tls_provider_operation_retire(&table, operation) == TR_OK);
 	tr_memory_budget_get_stats(&budget, &stats);
-	assert(stats.current_bytes == table.slot_storage_bytes);
+	assert(stats.current_bytes == table_bytes);
 	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
 	tr_memory_budget_get_stats(&budget, &stats);
 	assert(stats.current_bytes == 0U);
@@ -267,11 +321,41 @@ static void test_cancel_and_complete_race(void)
 	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
 }
 
+static void test_reserved_cancel_can_be_read_and_retired(void)
+{
+	struct tr_tls_provider_operation_table table = {0};
+	struct tr_memory_budget budget;
+	struct tr_tls_provider_operation operation;
+	uint8_t output = 0U;
+	size_t output_len = 99U;
+	int status = 99;
+	int notify = 99;
+
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_tls_provider_operation_table_init(&table, 1U, &budget) ==
+	       TR_OK);
+	assert(tr_tls_provider_operation_reserve(
+	               &table, TR_TLS_PROVIDER_OPERATION_AUTHORIZATION, 1U,
+	               &operation) == TR_OK);
+	assert(tr_tls_provider_operation_request_cancel(
+	               &table, operation, TR_ERR_CANCELLED, &notify) == TR_OK);
+	assert(notify == 0);
+	assert(tr_tls_provider_operation_result(&table, operation, &status,
+	                                        &output, sizeof(output),
+	                                        &output_len) == TR_OK);
+	assert(status == TR_ERR_CANCELLED && output_len == 0U);
+	assert(tr_tls_provider_operation_retire(&table, operation) == TR_OK);
+	assert(tr_tls_provider_operation_table_destroy(&table) == TR_OK);
+	assert(atomic_load(&budget.current_bytes) == 0U);
+}
+
 int main(void)
 {
 	test_capacity_and_accounting();
+	test_reserve_unlock_failure_rolls_back();
 	test_generation_exhaustion_and_foreign_handles();
 	test_credentials_copy_and_retire_accounting();
 	test_cancel_and_complete_race();
+	test_reserved_cancel_can_be_read_and_retired();
 	return 0;
 }

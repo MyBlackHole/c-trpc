@@ -2,6 +2,7 @@
 #include "rpc_record_dispatch.h"
 #include "rpc_record_producer.h"
 #include "rpc_v2_internal.h"
+#include "../execution/async_operation_internal.h"
 #include "../execution/reactor_internal.h"
 #include "../io/peer_identity_internal.h"
 #include "../transport/channel/channel_internal.h"
@@ -55,6 +56,7 @@ struct tr_rpc_v2_reply {
 static _Thread_local const struct tr_rpc_v2_cancel *tr_v2_active_cancel;
 static _Thread_local struct tr_rpc_v2_reply *tr_v2_active_reply;
 static _Thread_local unsigned tr_v2_callback_depth;
+static _Thread_local unsigned tr_v2_work_callback_depth;
 static _Atomic uint64_t tr_dispatch_instances;
 
 #define TR_RPC_V2_CONTEXT_RESERVED UINT64_MAX
@@ -88,6 +90,11 @@ static int tr_reply_fail(struct tr_rpc_record_reply *reply, int error,
 int tr_rpc_record_dispatch_in_callback(void)
 {
 	return tr_v2_callback_depth != 0;
+}
+
+int tr_rpc_record_dispatch_in_work_callback(void)
+{
+	return tr_v2_work_callback_depth != 0;
 }
 
 int tr_rpc_v2_cancel_requested(const struct tr_rpc_v2_cancel *cancel)
@@ -210,10 +217,14 @@ struct tr_dispatch_job {
 	tr_rpc_v2_authorize_fn v2_authorize;
 	struct tr_rpc_v2_call_id v2_id;
 	struct tr_rpc_v2_authorization_result authorization_result;
+	struct tr_async_operation authorization_operation;
+	struct tr_async_operation_ref authorization_producer_ref;
+	struct tr_async_operation_ref authorization_completion_ref;
 	void *arg;
 	struct tr_rpc_record_reply reply;
 	uint64_t deadline;
 	size_t bytes;
+	bool authorization_accepted;
 	uint8_t data[];
 };
 struct tr_dispatch_method {
@@ -255,6 +266,7 @@ struct tr_rpc_record_dispatch {
 	struct tr_reactor *reactor;
 	struct tr_channel *channel;
 	struct tr_task_executor *executor;
+	struct tr_async_operation_pool *operations;
 	struct tr_rpc_record_router *router;
 	struct tr_memory_budget *budget;
 	struct tr_rpc_record_producer_domain *producer_domain;
@@ -847,6 +859,22 @@ static void tr_dispatch_drop_queued(struct tr_dispatch_slot *s)
 	s->tail = NULL;
 }
 
+static void tr_dispatch_cancel_submitted(struct tr_dispatch_slot *s)
+{
+	struct tr_dispatch_job *job = s->submitted;
+	struct tr_rpc_record_dispatch *d = s->dispatch;
+	if (!job)
+		return;
+	if (job->stage == TR_DISPATCH_JOB_AUTHORIZATION &&
+	    job->authorization_accepted) {
+		int notify;
+		(void)tr_async_operation_request_cancel(
+		        d->operations, job->authorization_operation,
+		        TR_ERR_CANCELLED, &notify);
+	}
+	(void)tr_task_executor_cancel(d->executor, s->task);
+}
+
 static bool tr_dispatch_close_producer(struct tr_dispatch_slot *s)
 {
 	if (!s->producer)
@@ -889,7 +917,7 @@ static void tr_dispatch_settle(struct tr_dispatch_slot *s)
 		s->ready = NULL;
 	}
 	if (s->submitted) {
-		(void)tr_task_executor_cancel(d->executor, s->task);
+		tr_dispatch_cancel_submitted(s);
 		return;
 	}
 	if (!s->notified) {
@@ -939,7 +967,7 @@ static void tr_dispatch_route_terminal(struct tr_rpc_route_handle route,
 	tr_dispatch_context_publish_terminal(s, status);
 	/* 不在下层发送栈内释放 ready，也不在下层路由深度内通知/退役。 */
 	if (s->submitted)
-		(void)tr_task_executor_cancel(d->executor, s->task);
+		tr_dispatch_cancel_submitted(s);
 }
 static void tr_dispatch_local_abort(struct tr_dispatch_slot *s,
                                     enum tr_rpc_status status)
@@ -1019,8 +1047,10 @@ tr_dispatch_v2_work(struct tr_dispatch_job *job,
 	tr_v2_active_cancel = &public_cancel;
 	tr_v2_active_reply = &public_reply;
 	++tr_v2_callback_depth;
+	++tr_v2_work_callback_depth;
 	result = job->v2_work(job->v2_id, &request, &public_cancel,
 	                      &public_reply, job->arg);
+	--tr_v2_work_callback_depth;
 	--tr_v2_callback_depth;
 	tr_v2_active_cancel = prior_cancel;
 	tr_v2_active_reply = prior_reply;
@@ -1052,18 +1082,57 @@ static int tr_dispatch_v2_authorize(struct tr_dispatch_job *job,
 	tr_v2_active_reply = prior_reply;
 	return TR_OK;
 }
+
+static uint64_t
+tr_dispatch_authorization_encode(struct tr_rpc_v2_authorization_result result)
+{
+	return ((uint64_t)(uint32_t)result.decision << 32U) |
+	       (uint32_t)result.rejection_status;
+}
+
+static struct tr_rpc_v2_authorization_result
+tr_dispatch_authorization_decode(uint64_t value)
+{
+	return (struct tr_rpc_v2_authorization_result){
+	        .decision = (enum tr_rpc_v2_authorization_decision)(
+	                uint32_t)(value >> 32U),
+	        .rejection_status = (int)(uint32_t)value,
+	};
+}
+
 static int tr_dispatch_work(void *arg, const struct tr_task_cancel *cancel)
 {
 	struct tr_dispatch_job *job = arg;
 	struct tr_rpc_record_reply *reply = &job->reply;
 	enum tr_rpc_status status = TR_RPC_STATUS_CANCELLED;
 	if (job->stage == TR_DISPATCH_JOB_AUTHORIZATION) {
-		if (tr_task_cancel_requested(cancel))
-			return TR_OK;
-		int ret = tr_dispatch_deadline_check(job->deadline);
-		if (ret != TR_OK)
-			return ret;
-		return tr_dispatch_v2_authorize(job, cancel);
+		struct tr_async_operation_ref completion_ref = {0};
+		int completion_ready = 0;
+		int ret = TR_OK;
+		job->authorization_result =
+		        (struct tr_rpc_v2_authorization_result){
+		                .decision = TR_RPC_V2_AUTHORIZATION_REJECT,
+		                .rejection_status = TR_RPC_STATUS_INTERNAL,
+		        };
+		if (!tr_task_cancel_requested(cancel)) {
+			ret = tr_dispatch_deadline_check(job->deadline);
+			if (ret == TR_OK)
+				ret = tr_dispatch_v2_authorize(job, cancel);
+		}
+		int publish_ret = tr_async_operation_publish(
+		        job->slot->dispatch->operations,
+		        &job->authorization_producer_ref,
+		        (struct tr_async_operation_completion){
+		                .status = ret,
+		                .value = tr_dispatch_authorization_encode(
+		                        job->authorization_result),
+		        },
+		        &completion_ref, &completion_ready);
+		if (publish_ret != TR_OK)
+			return publish_ret;
+		if (completion_ready)
+			job->authorization_completion_ref = completion_ref;
+		return ret;
 	}
 	if (!tr_task_cancel_requested(cancel)) {
 		/* 任务可能在共享执行器排队到期限之后才开始。这里只读取
@@ -1113,14 +1182,57 @@ static void tr_dispatch_authorization_done(struct tr_dispatch_job *job,
 {
 	struct tr_dispatch_slot *s = job->slot;
 	struct tr_rpc_record_dispatch *d = s->dispatch;
-	struct tr_rpc_v2_authorization_result authorization =
-	        job->authorization_result;
+	struct tr_async_operation_spec operation_spec = {0};
+	struct tr_async_operation_completion operation_completion = {0};
+	struct tr_rpc_v2_authorization_result authorization = {
+	        .decision = TR_RPC_V2_AUTHORIZATION_REJECT,
+	        .rejection_status = TR_RPC_STATUS_INTERNAL,
+	};
 	struct tr_rpc_v2_call_id live_id = tr_dispatch_v2_id(s);
+	int operation_cancelled = 0;
+	int operation_cancel_reason = TR_OK;
+	int operation_ready = 0;
+	int operation_ret;
+	bool operation_valid;
+	if (!job->authorization_accepted) {
+		operation_ret = tr_async_operation_accept(
+		        d->operations, job->authorization_operation,
+		        &job->authorization_completion_ref, &operation_ready);
+		if (operation_ret == TR_OK && operation_ready)
+			job->authorization_accepted = true;
+	} else {
+		operation_ret = TR_OK;
+	}
+	if (operation_ret == TR_OK && job->authorization_accepted)
+		operation_ret = tr_async_operation_consume(
+		        d->operations, &job->authorization_completion_ref,
+		        &operation_spec, &operation_completion,
+		        &operation_cancelled, &operation_cancel_reason);
+	operation_valid =
+	        operation_ret == TR_OK &&
+	        operation_spec.kind ==
+	                TR_ASYNC_OPERATION_KIND_RPC_AUTHORIZATION &&
+	        operation_spec.domain_generation == d->instance &&
+	        operation_spec.object_generation == job->id.generation &&
+	        operation_spec.deadline_ns == job->deadline &&
+	        operation_completion.payload == NULL &&
+	        operation_completion.destroy == NULL &&
+	        operation_completion.status == result.work_status;
+	if (operation_valid) {
+		job->authorization_result = tr_dispatch_authorization_decode(
+		        operation_completion.value);
+		operation_ret = tr_async_operation_retire(
+		        d->operations, &job->authorization_completion_ref);
+		operation_valid = operation_ret == TR_OK;
+	}
+	if (operation_valid)
+		authorization = job->authorization_result;
 	bool current = s->auth_job == job &&
 	               job->view.header.kind == TR_RPC_RECORD_OPEN &&
 	               job->id.slot == s->route.slot &&
 	               job->id.generation == s->route.generation &&
-	               memcmp(&job->v2_id, &live_id, sizeof(live_id)) == 0;
+	               memcmp(&job->v2_id, &live_id, sizeof(live_id)) == 0 &&
+	               operation_valid;
 	s->submitted = NULL;
 	if (s->auth_job == job)
 		s->auth_job = NULL;
@@ -1141,9 +1253,11 @@ static void tr_dispatch_authorization_done(struct tr_dispatch_job *job,
 		tr_dispatch_settle(s);
 		return;
 	}
-	if (result.cancelled || result.work_status != TR_OK) {
+	if (result.cancelled || operation_cancelled ||
+	    result.work_status != TR_OK) {
 		enum tr_rpc_status status =
-		        result.cancelled ? TR_RPC_STATUS_CANCELLED
+		        (result.cancelled || operation_cancelled)
+		                ? TR_RPC_STATUS_CANCELLED
 		        : result.work_status == TR_ERR_TIMEOUT
 		                ? TR_RPC_STATUS_DEADLINE_EXCEEDED
 		        : result.work_status == TR_ERR_STATE
@@ -1185,6 +1299,14 @@ static void tr_dispatch_done(void *arg, struct tr_task_handle handle,
 	bool acquired = job->reply.producer != NULL;
 	(void)handle;
 	if (job->stage == TR_DISPATCH_JOB_AUTHORIZATION) {
+		if (d->cleanup) {
+			s->submitted = NULL;
+			if (s->auth_job == job)
+				s->auth_job = NULL;
+			tr_dispatch_free_job(job);
+			tr_dispatch_settle(s);
+			return;
+		}
 		tr_dispatch_authorization_done(job, result);
 		return;
 	}
@@ -1447,7 +1569,9 @@ static bool tr_dispatch_submit(struct tr_dispatch_slot *s)
 	struct tr_rpc_record_dispatch *d = s->dispatch;
 	struct tr_dispatch_job *job;
 	struct tr_task_spec spec;
+	struct tr_async_operation_spec operation_spec;
 	bool authorize;
+	int operation_ready = 0;
 	int ret;
 	if (s->terminal || s->producer_failed || s->submitted || !s->head ||
 	    d->stopping)
@@ -1461,6 +1585,26 @@ static bool tr_dispatch_submit(struct tr_dispatch_slot *s)
 	 * 固定 worker 的快照。worker 不读取 owner 的可变槽位。 */
 	job->reply.headers_sent = s->headers_sent;
 	job->reply.asynchronous = s->asynchronous;
+	if (authorize) {
+		operation_spec = (struct tr_async_operation_spec){
+		        .kind = TR_ASYNC_OPERATION_KIND_RPC_AUTHORIZATION,
+		        .domain_generation = d->instance,
+		        .object_generation = job->id.generation,
+		        .deadline_ns = job->deadline,
+		};
+		ret = tr_async_operation_reserve(
+		        d->operations, &operation_spec,
+		        &job->authorization_operation,
+		        &job->authorization_producer_ref);
+		if (ret == TR_AGAIN)
+			return false;
+		if (ret != TR_OK) {
+			tr_dispatch_local_abort(s, TR_RPC_STATUS_UNAVAILABLE);
+			tr_dispatch_settle(s);
+			return true;
+		}
+		job->authorization_accepted = false;
+	}
 	spec = (struct tr_task_spec){tr_dispatch_work, tr_dispatch_done, job};
 	ret = tr_task_executor_submit(d->executor, &spec, &s->task);
 	if (ret == TR_OK) {
@@ -1471,7 +1615,25 @@ static bool tr_dispatch_submit(struct tr_dispatch_slot *s)
 		if (authorize)
 			s->auth_job = job;
 		s->submitted = job;
+		if (authorize) {
+			int accept_ret = tr_async_operation_accept(
+			        d->operations, job->authorization_operation,
+			        &job->authorization_completion_ref,
+			        &operation_ready);
+			if (accept_ret == TR_OK)
+				job->authorization_accepted = true;
+		}
 		return true;
+	}
+	if (authorize) {
+		int reject_ret = tr_async_operation_reject(
+		        d->operations, job->authorization_operation,
+		        &job->authorization_producer_ref);
+		if (reject_ret != TR_OK) {
+			tr_dispatch_local_abort(s, TR_RPC_STATUS_INTERNAL);
+			tr_dispatch_settle(s);
+			return true;
+		}
 	}
 	if (ret != TR_AGAIN) {
 		tr_dispatch_local_abort(s, TR_RPC_STATUS_UNAVAILABLE);
@@ -1744,6 +1906,15 @@ int tr_rpc_record_dispatch_create_on_owner(
 	d->terminal = terminal;
 	d->arg = arg;
 	atomic_init(&d->external_context_refs, 0);
+	ret = tr_async_operation_pool_create(config->capacity, budget,
+	                                     &d->operations);
+	if (ret != TR_OK)
+		goto fail;
+	ret = tr_async_operation_pool_bind_owner(d->operations);
+	if (ret != TR_OK) {
+		d->cleanup = true;
+		goto fail;
+	}
 	for (size_t i = 0; i < method_count; ++i) {
 		d->methods[i] = (struct tr_dispatch_method){d, methods[i]};
 		routes[i] = (struct tr_rpc_record_method){methods[i].descriptor,
@@ -1769,13 +1940,36 @@ int tr_rpc_record_dispatch_create_on_owner(
 	*out = d;
 	return TR_OK;
 fail:
+	/* 临时路由表不属于 dispatcher，必须在任何可失败的池清理之前释放。 */
 	free(routes);
+	(void)tr_memory_budget_release(budget, temporary);
+	if (d->operations) {
+		uint32_t operations_reaped;
+		int operation_ret =
+		        d->cleanup
+		                ? tr_async_operation_reap_stopped(
+		                          d->operations, 1, &operations_reaped)
+		                : tr_async_operation_pool_close(d->operations);
+		if (operation_ret != TR_OK)
+			operation_ret = tr_async_operation_reap_stopped(
+			        d->operations, 1, &operations_reaped);
+		if (operation_ret == TR_OK)
+			operation_ret =
+			        tr_async_operation_pool_destroy(&d->operations);
+		if (operation_ret != TR_OK) {
+			/* 关闭失败时将部分对象交回调用方。其 pool 和预算仍有
+			 * 所有者，可通过 destroy/reap_stopped
+			 * 重试，不会悬空泄漏。 */
+			*out = d;
+			return operation_ret;
+		}
+	}
 	free(d->methods);
 	free(d->context_links);
 	free(d->contexts);
 	free(d->slots);
 	free(d);
-	(void)tr_memory_budget_release(budget, bytes + temporary);
+	(void)tr_memory_budget_release(budget, bytes);
 	return ret;
 }
 int tr_rpc_record_dispatch_bind_producers_on_owner(
@@ -2012,9 +2206,23 @@ static int tr_dispatch_free(struct tr_rpc_record_dispatch **p)
 	struct tr_rpc_record_dispatch *d = *p;
 	struct tr_memory_budget *budget = d->budget;
 	size_t bytes = d->bytes;
+	uint32_t operations_reaped;
+	int ret;
 	if (atomic_load_explicit(&d->external_context_refs,
 	                         memory_order_acquire))
 		return TR_AGAIN;
+	if (d->operations) {
+		if (d->cleanup)
+			ret = tr_async_operation_reap_stopped(
+			        d->operations, 1, &operations_reaped);
+		else
+			ret = tr_async_operation_pool_close(d->operations);
+		if (ret != TR_OK)
+			return ret;
+		ret = tr_async_operation_pool_destroy(&d->operations);
+		if (ret != TR_OK)
+			return ret;
+	}
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
 		if (d->slots[i].route.generation)
 			tr_dispatch_context_detach(&d->slots[i]);
@@ -2057,7 +2265,8 @@ int tr_rpc_record_dispatch_destroy_on_owner(struct tr_rpc_record_dispatch **p)
 		--d->depth;
 		return TR_AGAIN;
 	}
-	ret = tr_rpc_record_router_destroy_on_owner(&d->router);
+	ret = d->router ? tr_rpc_record_router_destroy_on_owner(&d->router)
+	                : TR_OK;
 	--d->depth;
 	return ret == TR_OK ? tr_dispatch_free(p) : ret;
 }
@@ -2093,7 +2302,7 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 			s->ready = NULL;
 		}
 		if (s->submitted) {
-			(void)tr_task_executor_cancel(d->executor, s->task);
+			tr_dispatch_cancel_submitted(s);
 			busy = true;
 		}
 	}
@@ -2104,7 +2313,7 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	                         memory_order_acquire))
 		return TR_AGAIN;
 	++d->depth;
-	ret = tr_rpc_record_router_reap_stopped(&d->router);
+	ret = d->router ? tr_rpc_record_router_reap_stopped(&d->router) : TR_OK;
 	for (uint32_t i = 0; i < d->config.capacity; ++i) {
 		struct tr_dispatch_slot *s = &d->slots[i];
 		if (s->active)
@@ -2117,5 +2326,12 @@ int tr_rpc_record_dispatch_reap_stopped(struct tr_rpc_record_dispatch **p)
 	if (atomic_load_explicit(&d->external_context_refs,
 	                         memory_order_acquire))
 		return TR_AGAIN;
+	if (d->operations) {
+		uint32_t operations_reaped;
+		ret = tr_async_operation_reap_stopped(d->operations, 1,
+		                                      &operations_reaped);
+		if (ret != TR_OK)
+			return ret;
+	}
 	return tr_dispatch_free(p);
 }

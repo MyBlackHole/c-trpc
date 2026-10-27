@@ -18,7 +18,7 @@
 #include <time.h>
 
 #define CALLS 16U
-#define METHODS 15U
+#define METHODS 16U
 #define WAIT_SECONDS 15
 
 /* 故障只发生在真实 OPEN 已进入绑定接收后创建工作事件的 calloc。
@@ -93,7 +93,8 @@ enum business_mode {
 	ASYNC_SYNC_WRITE,
 	ASYNC_ABANDON,
 	ASYNC_WORK_ERROR,
-	ASYNC_SEALED
+	ASYNC_SEALED,
+	ASYNC_AUTH_LATE_ALLOW
 };
 struct fixture;
 struct method_context {
@@ -113,6 +114,8 @@ struct call {
 	enum tr_rpc_status status, client_status;
 	enum tr_rpc_v2_delivery delivery;
 	bool identified, entered, release, exited, cancelled;
+	bool hold_in_terminal;
+	struct tr_rpc_v2_call_ref held_ref;
 	uint8_t response[32];
 	size_t response_size;
 };
@@ -123,6 +126,8 @@ struct fixture {
 	pthread_cond_t changed;
 	struct method_context methods[METHODS];
 	struct call calls[CALLS];
+	unsigned auth_entered, auth_cancelled, auth_work_calls;
+	bool auth_release;
 };
 
 static struct timespec wait_deadline(void)
@@ -198,6 +203,17 @@ static void wait_worker_cancel(struct fixture *f,
 		int ret = pthread_cond_timedwait(&f->changed, &f->lock, &wake);
 		assert(ret == 0 || ret == ETIMEDOUT);
 	}
+}
+
+static void wait_auth_state(struct fixture *f, unsigned *state,
+                            unsigned expected)
+{
+	struct timespec end = wait_deadline();
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	while (*state < expected)
+		assert(pthread_cond_timedwait(&f->changed, &f->lock, &end) ==
+		       0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
 }
 
 static bool same_id(struct tr_rpc_v2_call_id a, struct tr_rpc_v2_call_id b)
@@ -347,6 +363,13 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 	struct fixture *f = method->fixture;
 	struct call *call;
 	uint8_t copied[32];
+	if (method->mode == ASYNC_AUTH_LATE_ALLOW) {
+		assert(pthread_mutex_lock(&f->lock) == 0);
+		++f->auth_work_calls;
+		assert(pthread_cond_broadcast(&f->changed) == 0);
+		assert(pthread_mutex_unlock(&f->lock) == 0);
+		return TR_RPC_STATUS_OK;
+	}
 
 	assert(request->peer_identity.authentication == TR_PEER_IDENTITY_NONE);
 	assert(request->peer_identity.uri_san == NULL);
@@ -471,6 +494,36 @@ static enum tr_rpc_status work(struct tr_rpc_v2_call_id id,
 	return TR_RPC_STATUS_OK;
 }
 
+static struct tr_rpc_v2_authorization_result
+authorize_late_allow(struct tr_rpc_v2_call_id id,
+                     const struct tr_rpc_v2_request *request,
+                     const struct tr_rpc_v2_cancel *cancel, void *arg)
+{
+	struct method_context *method = arg;
+	struct fixture *f = method->fixture;
+	struct tr_rpc_bytes tag;
+	struct call *call;
+	assert(method->mode == ASYNC_AUTH_LATE_ALLOW);
+	assert(tr_rpc_v2_metadata_find(&request->metadata, "tag", &tag) ==
+	       TR_OK);
+	assert(tag.len == 1 && tag.data[0] < CALLS);
+	assert(pthread_mutex_lock(&f->lock) == 0);
+	call = &f->calls[tag.data[0]];
+	assert(call->mode == ASYNC_AUTH_LATE_ALLOW && !call->identified);
+	call->identity = id;
+	call->identified = true;
+	++f->auth_entered;
+	assert(pthread_cond_broadcast(&f->changed) == 0);
+	wait_worker_cancel(f, cancel);
+	++f->auth_cancelled;
+	assert(pthread_cond_broadcast(&f->changed) == 0);
+	while (!f->auth_release)
+		assert(pthread_cond_wait(&f->changed, &f->lock) == 0);
+	assert(pthread_mutex_unlock(&f->lock) == 0);
+	return (struct tr_rpc_v2_authorization_result){
+	        TR_RPC_V2_AUTHORIZATION_ALLOW, TR_RPC_STATUS_OK};
+}
+
 static void server_terminal(struct tr_rpc_v2_call_id id,
                             enum tr_rpc_status status,
                             enum tr_rpc_v2_delivery delivery, void *arg)
@@ -568,8 +621,9 @@ static void client_terminal(struct tr_rpc_v2_call handle,
 {
 	struct call *call = arg;
 	struct fixture *f = call->fixture;
-	(void)handle;
 	(void)delivery;
+	if (call->hold_in_terminal)
+		assert(tr_rpc_v2_call_hold(handle, &call->held_ref) == TR_OK);
 	assert(pthread_mutex_lock(&f->lock) == 0);
 	assert(!call->client_terminals);
 	call->client_status = status;
@@ -579,7 +633,7 @@ static void client_terminal(struct tr_rpc_v2_call handle,
 }
 
 static void fixture_init_options(struct fixture *f, uint32_t streams,
-                                 bool asymmetric)
+                                 bool asymmetric, bool late_authorize)
 {
 	struct tr_server_config server_config;
 	struct tr_client_config client_config;
@@ -625,6 +679,8 @@ static void fixture_init_options(struct fixture *f, uint32_t streams,
 		        .terminal = server_terminal,
 		        .arg = &f->methods[i],
 		};
+		if (late_authorize && i == ASYNC_AUTH_LATE_ALLOW)
+			methods[i].authorize = authorize_late_allow;
 		if (asymmetric && (i == WINDOW_REPLY || i == ASYNC_ABANDON))
 			methods[i].descriptor.max_response_bytes = 768;
 	}
@@ -654,7 +710,7 @@ static void fixture_init_options(struct fixture *f, uint32_t streams,
 
 static void fixture_init_capacity(struct fixture *f, uint32_t streams)
 {
-	fixture_init_options(f, streams, false);
+	fixture_init_options(f, streams, false, false);
 }
 
 static void fixture_init(struct fixture *f)
@@ -854,6 +910,7 @@ static void test_public_server(void)
 				assert(pthread_mutex_unlock(&f.lock) == 0);
 			}
 		}
+
 		check_result(call, async_cases[i].status, 0);
 		assert(call->opened == 1 && !call->messages && !call->halves);
 		if (call->producer) {
@@ -968,13 +1025,104 @@ static void test_capacity_refusal(void)
 	assert(pthread_mutex_destroy(&f.lock) == 0);
 }
 
+static void test_call_ref_survives_late_authorize_completion(void)
+{
+	struct fixture f;
+	struct tr_rpc_v2_call_result snapshot = {TR_RPC_STATUS_INTERNAL,
+	                                         TR_RPC_V2_DELIVERY_SHUTDOWN};
+	const struct tr_rpc_v2_call_result untouched = snapshot;
+	fixture_init_options(&f, 8, false, true);
+	struct call *call = &f.calls[0];
+	call_start(&f, 0, 0, ASYNC_AUTH_LATE_ALLOW);
+	wait_auth_state(&f, &f.auth_entered, 1);
+
+	assert(tr_rpc_v2_call_hold(call->handle, &call->held_ref) == TR_OK);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) ==
+	       TR_AGAIN);
+	assert(!memcmp(&snapshot, &untouched, sizeof(snapshot)));
+	assert(tr_rpc_v2_call_ref_cancel(call->held_ref) == TR_OK);
+	wait_counter(&f, &call->client_terminals, 1);
+	assert(call->client_status == TR_RPC_STATUS_CANCELLED);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) == TR_OK);
+	assert(snapshot.status == TR_RPC_STATUS_CANCELLED &&
+	       snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+
+	/* 只有在服务端 worker 实际看见取消后才允许它迟到返回 ALLOW。 */
+	wait_auth_state(&f, &f.auth_cancelled, 1);
+	assert(pthread_mutex_lock(&f.lock) == 0);
+	f.auth_release = true;
+	assert(pthread_cond_broadcast(&f.changed) == 0);
+	assert(pthread_mutex_unlock(&f.lock) == 0);
+	wait_counter(&f, &call->terminals, 1);
+	assert(call->status == TR_RPC_STATUS_CANCELLED &&
+	       call->terminals == 1 && f.auth_work_calls == 0);
+	check_server_totals(&f, 1);
+
+	/* 服务端操作已完成并退役，客户端结果引用仍独立保持有效。 */
+	retry_destroy(&f, true);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) == TR_OK);
+	assert(snapshot.status == TR_RPC_STATUS_CANCELLED &&
+	       snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	assert(tr_client_begin_drain(f.clients[0]) == TR_OK);
+	assert(tr_client_wait_drained(f.clients[0], 0) == TR_AGAIN);
+	assert(tr_rpc_v2_call_ref_release(&call->held_ref) == TR_OK);
+	assert(tr_client_wait_drained(f.clients[0], WAIT_SECONDS * 1000) ==
+	       TR_OK);
+	struct tr_rpc_semantic_stats stats;
+	assert(tr_client_get_rpc_semantic_stats(f.clients[0], &stats) == TR_OK);
+	assert(stats.calls_started == 1 && stats.calls_finished == 1 &&
+	       stats.calls_inflight == 0 &&
+	       stats.final_status[TR_RPC_STATUS_CANCELLED] == 1);
+	retry_destroy(&f, false);
+	f.clients[0] = f.clients[1];
+	f.clients[1] = NULL;
+	retry_destroy(&f, false);
+	assert(pthread_cond_destroy(&f.changed) == 0);
+	assert(pthread_mutex_destroy(&f.lock) == 0);
+}
+
+static void test_call_ref_blocks_destroy_after_terminal(void)
+{
+	struct fixture f;
+	struct tr_rpc_v2_call_result snapshot = {TR_RPC_STATUS_INTERNAL,
+	                                         TR_RPC_V2_DELIVERY_SHUTDOWN};
+	static const uint8_t payload[] = {0x5a, 0x00, 0xa5};
+	const struct tr_rpc_bytes body = {payload, sizeof(payload)};
+	fixture_init(&f);
+	struct call *call = &f.calls[0];
+	call->hold_in_terminal = true;
+	call_start(&f, 0, 0, ECHO);
+	send_or_half_close(call, &body);
+	send_or_half_close(call, NULL);
+	check_result(call, TR_RPC_STATUS_OK, 1);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) == TR_OK);
+	assert(snapshot.status == TR_RPC_STATUS_OK &&
+	       snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+
+	/* destroy stops the client but must retain storage while CallRef is
+	 * held. */
+	assert(tr_client_destroy(f.clients[0]) == TR_AGAIN);
+	assert(tr_rpc_v2_call_ref_result(call->held_ref, &snapshot) == TR_OK);
+	assert(snapshot.status == TR_RPC_STATUS_OK &&
+	       snapshot.delivery == TR_RPC_V2_DELIVERY_LIVE);
+	assert(tr_rpc_v2_call_ref_release(&call->held_ref) == TR_OK);
+	assert(tr_client_destroy(f.clients[0]) == TR_OK);
+	f.clients[0] = NULL;
+	f.clients[0] = f.clients[1];
+	f.clients[1] = NULL;
+	retry_destroy(&f, false);
+	retry_destroy(&f, true);
+	assert(pthread_cond_destroy(&f.changed) == 0);
+	assert(pthread_mutex_destroy(&f.lock) == 0);
+}
+
 static void test_asymmetric_response_window(void)
 {
 	struct fixture f;
 	uint8_t bytes[640] = {1};
 	const struct tr_rpc_bytes large = {bytes, sizeof(bytes)},
 	                          small = {bytes, 4};
-	fixture_init_options(&f, 8, true);
+	fixture_init_options(&f, 8, true, false);
 	call_start(&f, 0, 0, ECHO);
 	wait_counter(&f, &f.calls[0].opened, 1);
 	for (unsigned i = 1; i <= 2; ++i) {
@@ -1069,6 +1217,8 @@ static void test_configuration(void)
 int main(void)
 {
 	test_configuration();
+	test_call_ref_survives_late_authorize_completion();
+	test_call_ref_blocks_destroy_after_terminal();
 	test_asymmetric_response_window();
 	test_capacity_refusal();
 	test_public_server();

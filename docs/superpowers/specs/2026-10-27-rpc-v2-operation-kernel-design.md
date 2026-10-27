@@ -1,6 +1,6 @@
 # RPC V2 通用异步操作内核设计
 
-**状态：** 设计草案，待用户审阅。
+**状态：** 第一阶段核心实现与真实调用方迁移已完成；PR #332 的 dev.164 head 检查 13/13 通过。dev.165 增补 terminal callback 内 hold CallRef、跨回调读取结果并阻止 Client destroy 的真实 TCP 回归，GCC Release 全量测试 93/93 通过；dev.165 新 head 的远端检查待复验。后续跨能力与全量验收仍未完成。
 
 **关联：** #239 ARCH-07、#243；依赖现有 TaskExecutor、CompletionQueue、CallRef、父子上下文与 TLS-D2 操作契约。
 

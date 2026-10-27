@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "../execution/worker_context.h"
+#include "../execution/async_operation_internal.h"
 #include "message_service.h"
 #include "../execution/reactor_internal.h"
 #include "../memory_budget.h"
@@ -18,19 +19,28 @@ struct tr_message_service_job {
 	struct tr_message_service *service;
 	struct tr_message_service_job *next;
 	struct tr_message_transform *operation;
+	struct tr_async_operation async_operation;
+	struct tr_async_operation_ref producer_ref;
+	struct tr_async_operation_ref completion_ref;
+	struct tr_task_handle handle;
+	uint64_t generation;
 	tr_message_service_done_fn done;
 	void *arg;
+	bool used;
+	bool accepted;
 };
 
 struct tr_message_service {
 	struct tr_reactor *reactor;
 	struct tr_task_executor *executor;
+	struct tr_async_operation_pool *operations;
 	struct tr_memory_budget *budget;
 	struct tr_message_service_config config;
 	struct tr_reactor_timer_handle timer;
 	pthread_t owner;
 	int fd;
 	_Atomic int notification_error;
+	pthread_mutex_t jobs_lock;
 	size_t bytes;
 	size_t held_jobs;
 	size_t depth;
@@ -40,6 +50,8 @@ struct tr_message_service {
 	bool timer_attached;
 	bool executor_retiring;
 	bool recovering;
+	bool jobs_lock_ready;
+	bool operations_reaped;
 	struct tr_reactor_recovery_guard recovery_guard;
 	struct tr_message_service_job *free_jobs;
 	struct tr_message_service_job jobs[];
@@ -121,9 +133,81 @@ static int tr_service_work(void *arg, const struct tr_task_cancel *cancel)
 {
 	struct tr_message_service_job *job = arg;
 	struct tr_service_cancel context = {cancel};
-
-	return tr_message_transform_run_checked(
+	struct tr_async_operation_ref completion_ref = {0};
+	int ready = 0;
+	int ret = tr_message_transform_run_checked(
 	        job->operation, tr_service_cancel_check, &context);
+	int publish_ret = tr_async_operation_publish(
+	        job->service->operations, &job->producer_ref,
+	        (struct tr_async_operation_completion){.status = ret},
+	        &completion_ref, &ready);
+	if (publish_ret != TR_OK)
+		return publish_ret;
+	if (ready)
+		job->completion_ref = completion_ref;
+	return ret;
+}
+
+static int tr_service_operation_consume(struct tr_message_service_job *job,
+                                        struct tr_task_result result,
+                                        int *out_cancelled)
+{
+	struct tr_message_service *service = job->service;
+	struct tr_async_operation_ref completion_ref = {0};
+	struct tr_async_operation_spec spec = {0};
+	struct tr_async_operation_completion completion = {0};
+	int ready = 0;
+	int cancelled = 0;
+	int cancel_reason = TR_OK;
+	int ret;
+	if (!job->accepted) {
+		ret = tr_async_operation_accept(service->operations,
+		                                job->async_operation,
+		                                &completion_ref, &ready);
+		if (ret != TR_OK)
+			return ret;
+		job->accepted = true;
+		if (ready)
+			job->completion_ref = completion_ref;
+	}
+	ret = tr_async_operation_consume(
+	        service->operations, &job->completion_ref, &spec, &completion,
+	        &cancelled, &cancel_reason);
+	if (ret != TR_OK)
+		return ret;
+	if (spec.kind != TR_ASYNC_OPERATION_KIND_MESSAGE_TRANSFORM ||
+	    spec.domain_generation != 1U ||
+	    spec.object_generation != job->generation ||
+	    completion.status != result.work_status ||
+	    completion.payload != NULL || completion.destroy != NULL)
+		return TR_ERR_STATE;
+	*out_cancelled = cancelled;
+	return TR_OK;
+}
+
+static void tr_service_cancel_all(struct tr_message_service *service,
+                                  int reason)
+{
+	for (size_t index = 0; index < service->config.tasks.capacity;
+	     ++index) {
+		struct tr_async_operation operation = {0};
+		if (pthread_mutex_lock(&service->jobs_lock) != 0) {
+			tr_service_fault(service, EIO);
+			return;
+		}
+		if (service->jobs[index].used)
+			operation = service->jobs[index].async_operation;
+		if (pthread_mutex_unlock(&service->jobs_lock) != 0) {
+			tr_service_fault(service, EIO);
+			return;
+		}
+		if (operation.generation != 0U) {
+			int notify;
+			(void)tr_async_operation_request_cancel(
+			        service->operations, operation, reason,
+			        &notify);
+		}
+	}
 }
 
 static void tr_service_done(void *arg, struct tr_task_handle handle,
@@ -135,15 +219,33 @@ static void tr_service_done(void *arg, struct tr_task_handle handle,
 	struct tr_message_view view;
 	enum tr_message_transform_outcome outcome =
 	        TR_MESSAGE_TRANSFORM_INTERNAL;
-	int ret =
-	        tr_message_transform_finish(&job->operation, &outcome, &output);
+	int operation_cancelled = 0;
+	int operation_valid = 0;
+	int operation_ret = TR_OK;
+	int ret;
+	if (!service->recovering) {
+		operation_ret = tr_service_operation_consume(
+		        job, result, &operation_cancelled);
+		if (operation_ret == TR_OK &&
+		    (handle.instance != job->handle.instance ||
+		     handle.generation != job->handle.generation ||
+		     handle.slot != job->handle.slot))
+			operation_ret = TR_ERR_STALE;
+		if (operation_ret == TR_OK)
+			operation_valid = 1;
+		else
+			tr_service_fault(service, EIO);
+	}
+	ret = tr_message_transform_finish(&job->operation, &outcome, &output);
 
 	if (ret != TR_OK || result.work_status != TR_OK) {
 		tr_service_fault(service, EIO);
 		outcome = TR_MESSAGE_TRANSFORM_INTERNAL;
 	}
+	if (!service->recovering && !operation_valid)
+		outcome = TR_MESSAGE_TRANSFORM_INTERNAL;
 	/* 即使后端最终检查之后才取消，也不能越过执行器的终局提交点。 */
-	if (result.cancelled || service->recovering)
+	if (result.cancelled || operation_cancelled || service->recovering)
 		outcome = TR_MESSAGE_TRANSFORM_CANCELLED;
 	if (outcome != TR_MESSAGE_TRANSFORM_OK &&
 	    tr_message_view(&output, &view) == TR_OK)
@@ -158,8 +260,30 @@ static void tr_service_done(void *arg, struct tr_task_handle handle,
 		(void)tr_message_release(&output);
 	job->done = NULL;
 	job->arg = NULL;
+	if (!service->recovering) {
+		ret = tr_async_operation_retire(service->operations,
+		                                &job->completion_ref);
+		if (ret != TR_OK) {
+			tr_service_fault(service, EIO);
+			return;
+		}
+	}
 	/* 非法内部状态下不遗失仍被持有的操作；close 明确拒绝假回收。 */
-	if (job->operation) {
+	if (job->operation || (!service->recovering && !operation_valid)) {
+		tr_service_fault(service, EIO);
+		return;
+	}
+	if (pthread_mutex_lock(&service->jobs_lock) != 0) {
+		tr_service_fault(service, EIO);
+		return;
+	}
+	job->used = false;
+	job->accepted = false;
+	job->async_operation = (struct tr_async_operation){0};
+	job->producer_ref = (struct tr_async_operation_ref){0};
+	job->completion_ref = (struct tr_async_operation_ref){0};
+	job->handle = (struct tr_task_handle){0};
+	if (pthread_mutex_unlock(&service->jobs_lock) != 0) {
 		tr_service_fault(service, EIO);
 		return;
 	}
@@ -184,6 +308,7 @@ static int tr_service_pump(struct tr_message_service *service)
 	if (atomic_load_explicit(&service->notification_error,
 	                         memory_order_acquire) != 0) {
 		service->accepting = false;
+		tr_service_cancel_all(service, TR_ERR_CANCELLED);
 		(void)tr_task_executor_stop(service->executor, TR_TASK_CANCEL);
 	}
 	ret = tr_task_executor_dispatch(
@@ -234,6 +359,8 @@ int tr_message_service_create_on_owner(
 	    !config->dispatch_limit || config->watchdog_ns < 1000000 ||
 	    config->watchdog_ns > 1000000000 || !config->tasks.capacity)
 		return TR_ERR_INVALID;
+	if (config->tasks.capacity > UINT32_MAX)
+		return TR_ERR_BAD_LENGTH;
 	if (*out || !tr_reactor_in_owner_context_for(reactor))
 		return TR_ERR_STATE;
 	if (config->tasks.capacity >
@@ -252,15 +379,10 @@ int tr_message_service_create_on_owner(
 		(void)tr_memory_budget_release(budget, bytes);
 		return TR_ERR_NOMEM;
 	}
+	service->fd = -1;
 	service->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (service->fd < 0) {
 		ret = TR_ERR_SYS;
-		goto fail;
-	}
-	ret = tr_task_executor_create(&config->tasks, budget,
-	                              &service->executor);
-	if (ret != TR_OK) {
-		(void)close(service->fd);
 		goto fail;
 	}
 	service->reactor = reactor;
@@ -269,6 +391,22 @@ int tr_message_service_create_on_owner(
 	service->config = *config;
 	service->bytes = bytes;
 	atomic_init(&service->notification_error, 0);
+	if (pthread_mutex_init(&service->jobs_lock, NULL) != 0) {
+		ret = TR_ERR_SYS;
+		goto fail;
+	}
+	service->jobs_lock_ready = true;
+	ret = tr_task_executor_create(&config->tasks, budget,
+	                              &service->executor);
+	if (ret != TR_OK)
+		goto fail;
+	ret = tr_async_operation_pool_create((uint32_t)config->tasks.capacity,
+	                                     budget, &service->operations);
+	if (ret != TR_OK)
+		goto fail;
+	ret = tr_async_operation_pool_bind_owner(service->operations);
+	if (ret != TR_OK)
+		goto fail;
 	for (size_t i = 0; i < config->tasks.capacity; ++i) {
 		service->jobs[i].service = service;
 		service->jobs[i].next = service->free_jobs;
@@ -277,6 +415,23 @@ int tr_message_service_create_on_owner(
 	*out = service;
 	return TR_OK;
 fail:
+	if (service->operations) {
+		uint32_t reaped;
+		int close_ret =
+		        tr_async_operation_pool_close(service->operations);
+		if (close_ret != TR_OK)
+			close_ret = tr_async_operation_reap_stopped(
+			        service->operations, 1, &reaped);
+		if (close_ret == TR_OK)
+			(void)tr_async_operation_pool_destroy(
+			        &service->operations);
+	}
+	if (service->executor)
+		(void)tr_task_executor_destroy(&service->executor);
+	if (service->fd >= 0)
+		(void)close(service->fd);
+	if (service->jobs_lock_ready)
+		(void)pthread_mutex_destroy(&service->jobs_lock);
 	free(service);
 	(void)tr_memory_budget_release(budget, bytes);
 	return ret;
@@ -336,6 +491,9 @@ int tr_message_service_submit_on_owner(
 	struct tr_message_service_job *job;
 	struct tr_message copy = {0};
 	struct tr_task_spec spec;
+	struct tr_async_operation_spec operation_spec;
+	uint64_t generation;
+	int operation_ready = 0;
 	int ret = tr_service_owner(service);
 
 	if (ret != TR_OK)
@@ -349,6 +507,9 @@ int tr_message_service_submit_on_owner(
 	job = service->free_jobs;
 	if (!job)
 		return TR_AGAIN;
+	if (job->generation == UINT64_MAX)
+		return TR_ERR_STATE;
+	generation = job->generation + 1U;
 	++service->depth;
 	ret = tr_message_clone(input, &copy);
 	if (ret != TR_OK)
@@ -359,6 +520,22 @@ int tr_message_service_submit_on_owner(
 		(void)tr_message_release(&copy);
 		goto finish;
 	}
+	operation_spec = (struct tr_async_operation_spec){
+	        .kind = TR_ASYNC_OPERATION_KIND_MESSAGE_TRANSFORM,
+	        .domain_generation = 1U,
+	        .object_generation = generation,
+	};
+	ret = tr_async_operation_reserve(service->operations, &operation_spec,
+	                                 &job->async_operation,
+	                                 &job->producer_ref);
+	if (ret != TR_OK) {
+		enum tr_message_transform_outcome outcome;
+		(void)tr_message_transform_cancel(job->operation);
+		(void)tr_message_transform_run(job->operation);
+		(void)tr_message_transform_finish(&job->operation, &outcome,
+		                                  &copy);
+		goto finish;
+	}
 	job->done = done;
 	job->arg = arg;
 	spec = (struct tr_task_spec){tr_service_work, tr_service_done, job};
@@ -366,6 +543,12 @@ int tr_message_service_submit_on_owner(
 	if (ret != TR_OK) {
 		enum tr_message_transform_outcome outcome;
 
+		if (tr_async_operation_reject(service->operations,
+		                              job->async_operation,
+		                              &job->producer_ref) != TR_OK)
+			tr_service_fault(service, EIO);
+		job->async_operation = (struct tr_async_operation){0};
+		job->completion_ref = (struct tr_async_operation_ref){0};
 		/* 原 input 仍持有引用，回滚仅归还未发布克隆，不在 owner
 		 * 上运行算法。 */
 		(void)tr_message_transform_cancel(job->operation);
@@ -377,7 +560,29 @@ int tr_message_service_submit_on_owner(
 		goto finish;
 	}
 	service->free_jobs = job->next;
+	job->generation = generation;
+	if (pthread_mutex_lock(&service->jobs_lock) != 0) {
+		tr_service_fault(service, EIO);
+		job->handle = *handle;
+		job->used = true;
+		job->accepted = false;
+	} else {
+		job->handle = *handle;
+		job->used = true;
+		job->accepted = false;
+		if (pthread_mutex_unlock(&service->jobs_lock) != 0)
+			tr_service_fault(service, EIO);
+	}
 	++service->held_jobs;
+	{
+		int accept_ret = tr_async_operation_accept(
+		        service->operations, job->async_operation,
+		        &job->completion_ref, &operation_ready);
+		if (accept_ret == TR_OK)
+			job->accepted = true;
+		else
+			tr_service_fault(service, EIO);
+	}
 	/* 同一 owner turn 尚不可能交付 done；接受成功后才消费原句柄。 */
 	if (tr_message_release(input) != TR_OK)
 		tr_service_fault(service, EIO);
@@ -389,8 +594,33 @@ finish:
 int tr_message_service_cancel(struct tr_message_service *service,
                               struct tr_task_handle handle)
 {
+	struct tr_async_operation operation = {0};
+	int operation_ret = TR_ERR_STALE;
 	if (!service || !service->executor)
 		return TR_ERR_INVALID;
+	if (pthread_mutex_lock(&service->jobs_lock) != 0)
+		return TR_ERR_SYS;
+	for (size_t index = 0; index < service->config.tasks.capacity;
+	     ++index) {
+		struct tr_message_service_job *job = &service->jobs[index];
+		if (job->used && job->handle.instance == handle.instance &&
+		    job->handle.generation == handle.generation &&
+		    job->handle.slot == handle.slot) {
+			operation = job->async_operation;
+			break;
+		}
+	}
+	if (pthread_mutex_unlock(&service->jobs_lock) != 0)
+		return TR_ERR_SYS;
+	if (operation.generation != 0U) {
+		int notify;
+		operation_ret = tr_async_operation_request_cancel(
+		        service->operations, operation, TR_ERR_CANCELLED,
+		        &notify);
+		if (operation_ret != TR_OK && operation_ret != TR_ERR_STATE &&
+		    operation_ret != TR_ERR_STALE)
+			return operation_ret;
+	}
 	return tr_task_executor_cancel(service->executor, handle);
 }
 
@@ -403,6 +633,8 @@ int tr_message_service_stop_on_owner(struct tr_message_service *service,
 		return ret;
 	if (service->executor_retiring)
 		return TR_ERR_STATE;
+	if (mode == TR_TASK_CANCEL)
+		tr_service_cancel_all(service, TR_ERR_CANCELLED);
 	ret = tr_task_executor_stop(service->executor, mode);
 	if (ret == TR_OK)
 		service->accepting = false;
@@ -483,9 +715,29 @@ static int tr_service_close(struct tr_message_service **pointer)
 			return ret;
 		service->executor_retiring = true;
 	}
-	ret = tr_task_executor_destroy(&service->executor);
-	if (service->executor)
-		return ret;
+	if (service->executor) {
+		ret = tr_task_executor_destroy(&service->executor);
+		if (service->executor)
+			return ret;
+	} else {
+		ret = TR_OK;
+	}
+	if (service->operations) {
+		if (!service->operations_reaped) {
+			ret = tr_async_operation_pool_close(
+			        service->operations);
+			if (ret != TR_OK)
+				return ret;
+		}
+		ret = tr_async_operation_pool_destroy(&service->operations);
+		if (ret != TR_OK)
+			return ret;
+	}
+	if (service->jobs_lock_ready) {
+		if (pthread_mutex_destroy(&service->jobs_lock) != 0)
+			return TR_ERR_SYS;
+		service->jobs_lock_ready = false;
+	}
 	/* 两个事件源已跨过解绑屏障，工作线程已 join，不再有 fd/arg 使用者。
 	 * Linux close 的错误不能通过重试相同数字解决，避免误关被复用的 fd。
 	 */
@@ -534,12 +786,29 @@ int tr_message_service_reap_stopped(struct tr_message_service **pointer)
 		return ret;
 	service->recovering = true;
 	service->accepting = false;
-	if (!service->executor_retiring)
+	if (!service->executor_retiring) {
+		tr_service_cancel_all(service, TR_ERR_CANCELLED);
 		(void)tr_task_executor_stop(service->executor, TR_TASK_CANCEL);
+	}
 	/* 租约先证明旧 owner 已 join，才能将完成清理移交当前线程。
 	 * 不持 Reactor 的 ctl_lock 调用用户完成，避免回调重入死锁。 */
-	ret = tr_task_executor_adopt_cleanup(service->executor);
-	if (ret != TR_OK)
-		return ret;
+	if (service->executor) {
+		ret = tr_task_executor_adopt_cleanup(service->executor);
+		if (ret != TR_OK)
+			return ret;
+	}
+	if (service->operations && !service->operations_reaped) {
+		uint32_t reaped;
+		ret = tr_async_operation_reap_stopped(service->operations, 1,
+		                                      &reaped);
+		if (ret != TR_OK)
+			return ret;
+		service->operations_reaped = true;
+	} else if (service->operations && service->operations_reaped) {
+		ret = tr_async_operation_pool_handoff_owner(service->operations,
+		                                            1);
+		if (ret != TR_OK)
+			return ret;
+	}
 	return tr_service_close(pointer);
 }

@@ -203,8 +203,10 @@ static void test_partial_destroy(bool switch_reaper)
 	CHECK(tr_reactor_start(f.reactor) == TR_ERR_STATE);
 	CHECK(tr_reactor_destroy(f.reactor) == TR_ERR_STATE);
 	/* 租约跨失败保持；新的串行回收线程只能继续尚未完成的互斥锁销毁。 */
-	CHECK(tr_message_service_reap_stopped(&f.service) == TR_OK &&
-	      !f.service);
+	ret = tr_message_service_reap_stopped(&f.service);
+	if (ret != TR_OK)
+		fprintf(stderr, "final service reap returned %d\n", ret);
+	CHECK(ret == TR_OK && !f.service);
 	CHECK(atomic_load(&condition_destroys) == 1 &&
 	      atomic_load(&mutex_destroys) == 1);
 	CHECK(atomic_load(&f.budget.current_bytes) == 0);

@@ -71,8 +71,9 @@ Dispatch 实例编号及路由器全局代次组成，避免跨槽、连接或 S
 终局交付域描述实际执行位置：LIVE 位于 I/O 所有者；SHUTDOWN 仅用于父执行域
 停止后由外部销毁线程交付的残留终局。destroy 仍可能先在未退出的 I/O 域关闭
 连接并交付 LIVE，不能要求所有销毁结果都是 CANCELLED/SHUTDOWN。先到的有效
-终局不会被残留清理覆盖。Server 工作和两种终局回调均不能同步调用 Client V2
-业务入口或阻塞生命周期操作，避免跨执行域等待。
+终局不会被残留清理覆盖。Server V2 work 可用 start/unary 短暂提交子 Client Call，但必须立即返回，不能等
+子终局或依赖当前执行器；work 与两种终局回调仍不能同步调用 Client V2 的
+send/half_close/cancel 或阻塞生命周期操作，终局回调也不能 start，避免跨执行域等待。
 
 Client terminal 不等于调用网络槽或 TX 已退役；网络 RESET 已接受也不等于
 Server 工作已退出。完整静默仍使用前阶段的 RPC、任务、回调、Channel、发送

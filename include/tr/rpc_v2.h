@@ -141,6 +141,11 @@ struct tr_rpc_v2_client_callbacks {
  *
  * Client 回调可发送、半关闭、取消及 begin_drain；禁止递归 start、阻塞
  * wait 或 destroy，也不能同步跨到另一 I/O 所有者。生命周期由外部串行化。
+ * Server V2 work 回调可从工作线程调用 tr_client_call_start() 或
+ * tr_client_unary_call() 提交子 Call；该调用只等待目标 Client owner 接受
+ * 短操作。work 必须立即返回，不能等待子 Call 的 terminal，也不能等待
+ * 依赖当前工作线程池的任务；异步完成父回复时使用 parent_context 和
+ * reply producer。其他同步 send/half_close/cancel 与阻塞生命周期操作仍禁止。
  */
 int tr_client_call_start(struct tr_client *client, uint32_t service_id,
                          uint32_t method_id,
@@ -378,8 +383,9 @@ int tr_rpc_v2_producer_is_closed(struct tr_rpc_v2_producer *producer);
  * 才执行下一事件；异步模式的单槽背压不阻塞后续请求事件。
  * 不同调用可并发使用同一 arg，业务负责同步。OPEN/MESSAGE/HALF_CLOSE
  * 各事件最多执行一次；已取消但尚未运行的事件可被跳过。
- * 工作和终局回调中不能同步调用 Client V2 的 start/send/half_close/cancel
- * 或阻塞生命周期接口；跨 I/O 执行域的同步调用会返回 TR_ERR_STATE。
+ * work 仅可用 Client V2 start/unary 提交异步子 Call，不得等待其 terminal；
+ * work 与终局回调都不能同步调用 Client V2 send/half_close/cancel 或阻塞
+ * 生命周期接口。终局回调也不能 start；这些跨 I/O 执行域调用返回 TR_ERR_STATE。
  * 非 OK 返回丢弃当前事件的全部正文，并选择错误终局；HALF_CLOSE 在未
  * 显式 finish 且未取得 producer 时默认选择 OK，仍须满足方法的 ONE/MANY
  * 基数合同。异步 FINAL 可先于仍在执行的后续 work 被接受并请求取消，

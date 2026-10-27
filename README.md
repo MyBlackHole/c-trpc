@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.158` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.169` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -27,6 +27,12 @@ dev.157 增加公共 TCP Client/Server 集成回归：服务端授权回调等�
 ALLOW，分别覆盖主动取消和 deadline；已终局调用不进入业务 work，后续健康调用仍可完成。
 这次只增加测试与验收记录，没有修改生产行为；#243 和 V2 整体验收仍未完成。
 dev.158 增加真实 RPC Record dispatch 队列饱和回归：单 worker 正在执行阻塞任务且其余执行器容量已排满时，带 authorize 的 OPEN 保留在有界重试路径；释放槽位后认证与业务 OPEN/MESSAGE/HALF_CLOSE 按序完成且唯一终结。该切片只补充共享执行器满载证据，不修改生产行为；#243 和 V2 整体验收仍未完成。
+dev.159 增加固定容量异步操作内核，并接入 RPC authorize、TLS provider 和 MessageService；统一 reserve/accept/publish/consume/retire、代次引用、取消与停机回收边界，业务缓冲与调度预算仍由各调用方持有。GCC Release、Clang Release、ASan/UBSan、TSan 全量测试均为 93/93；该切片仍未覆盖可持有 Call 的统一接入、跨 Reactor/嵌套完整语义及 V2 总体验收。
+dev.160 修复首轮远端 CI 暴露的 GCC 11 `-Werror=maybe-uninitialized`，并修复 Clang 14 静态分析发现的 dispatch 构造失败清理泄漏：销毁池失败时保留部分对象供调用方重试，endpoint 同步保留其清理所有权。新增池销毁失败及 endpoint 交接回归。dev.161 修复 TLS provider reserve 在表锁解锁失败时未撤销操作和结果缓冲的问题。dev.162 显式初始化该回滚路径的槽位指针，并针对 GCC 11 analyzer 不跟踪 table-owned 缓冲转移的误报做局部抑制；PR #332 的 dev.162 head 检查 13/13 全部通过。dev.163 增加真实 TCP Client/Server 交错：CallRef 持有取消终局时，服务端迟到 ALLOW 必须被丢弃，服务端操作先退役，客户端引用仍可读取；release 后 drain 和终局计数收敛。dev.163 精确 head 的远端检查 13/13 通过。dev.164 增加 held CallRef 阻止 `tr_client_destroy()`、release 后重试销毁的真实 Client/Server 验收；GCC Release 全量测试 93/93，PR #332 精确 head 的 GitHub 检查 13/13 通过。dev.165 将 destroy 回归改为在终局 callback 内调用 hold，验证回调返回后读取结果并完成 release/destroy 屏障；GCC Release 全量测试 93/93，Release、TSan、ASan/UBSan 定向目标及新增代码格式检查通过，新 head 的远端检查待推送复验。
+dev.166 允许 Server V2 `work` worker 通过 `tr_client_call_start()` 提交子 Call，并以真实 TCP A→B→A 链验证父上下文、reply producer、唯一终局和 drain/destroy 回收；Client callback、Server authorize 和 owner callback 的跨 owner 同步限制仍有效。嵌套目标 Release 连续 25 次、ASan/UBSan、TSan 均通过，GCC Release 全量测试 94/94，C11/C++11 公开头编译通过。提交 `d7c7d3cd60d5c89cad2255809e08191171461d00` 的 PR #332 GitHub 检查 13/13 通过（[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40422545513)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40422545567)）。此切片只证明嵌套提交和异步父回复，不代表 #243 或 V2 总体验收完成。
+dev.167 增加异步操作与真实 Reactor completion 队列满载的组合回归：已受理操作在队列满时保留 completion 所有权，队列恢复后只消费/退役一次；stop 关闭准入后交接返回 CLOSED，owner 与 producer 停止后由 stopped-reap 恰好析构一次。Release、TSan、ASan/UBSan 定向目标通过；该切片只补队列与操作生命周期组合证据，#243 和 V2 总体验收仍未完成。
+dev.168 增加真实 TLS Client 凭证路径的回调屏障回归：外部 cancel 与 provider fetch 重叠时不重入 provider cancel；fetch 返回后才通知一次，随后完成仍以 CANCELLED 终结并可销毁 Client。GCC Release 全量测试 94/94、定向目标 Release 连续 25/25、TSan、ASan/UBSan 均通过；只改测试、版本号和进度文档，生产行为与公开 API/ABI 未改，#243 和 V2 总体验收仍未完成。
+dev.169 为 Server TLS 凭证 provider 增加同类真实 API 屏障回归：fetch 活动期间 poll 保留输出并返回 TR_AGAIN，外部 cancel 不提前进入 provider；fetch 返回后只通知一次，迟到成功仍以 CANCELLED 终结，Server 退役后可销毁。只扩展测试、记录与版本号，未改运行时、公开 API/ABI 或 wire；#243 和 V2 总体验收仍未完成。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1/D2 全验证矩阵与 GitHub
 验收仍未完成；TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。
@@ -690,6 +696,10 @@ Server。调用受理后即承担一次终局责任，包括 OPEN 因背压尚�
   使用有界复制式回复。事件在同一调用内顺序执行，不同调用可并行。
   不透明业务身份跨连接和 Server 唯一；完整合法 OPEN 准入后即承担业务终局责任，
   终局等待工作回调和完成交付真正退出。
+- Server V2 `work` 可用 `tr_client_call_start()` 或 `tr_client_unary_call()`
+  短暂提交子 Call，然后立即返回；不得等待子终局或依赖当前 worker 池的任务。
+  用 parent context 继承取消/deadline，并用 reply producer 在子终局后完成父回复。
+  Client callback、Server authorize、owner hook 和终局 callback 仍不得同步跨 owner。
 - ONE/MANY 支持四种组合，MANY 可为零条；零字节消息仍计一条。
   V2 构造的正文大小和窗口上限自动补入协议开销，无需业务计算记录固定头。
 - Server 可在 work 内复制设置初始和尾部响应元数据，每阶段编码后最多 512 字节。
