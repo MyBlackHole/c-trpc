@@ -44,7 +44,7 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 | 错误隔离 | 连接组边界与组合故障验收；已有流槽耗尽独立拒绝 | #242 |
 | 资源与活性 | 分域/全局预算账本、压缩、多 DATA 与慢消费者组合矩阵；共享 Channel 的 L/W 与持有释放已有回归 | #241、#235 |
 | 运行模型 | 操作持有/取消上下文、父子 deadline、跨 owner 依赖和回收证明 | #243 |
-| TLS 与身份 | TLS-C/D1 已合入；TLS-D2 凭证获取/授权已实现，PR #312 的 dev.22 head 因 Make 兼容门禁未安装 GnuTLS CLI 而失败；dev.23 补齐该依赖，等待新 head CI。GnuTLS 客户端到 c-trpc TLS 1.3/mTLS Server 互通正负例本地通过，全量 Release 91/91。TLS-E 完整资源账本、洪峰/长稳、目标平台及客户端/服务端双向外部互通仍待验收 | #234 |
+| TLS 与身份 | TLS-C/D1 已合入；TLS-D2 凭证获取/授权已实现。PR #312 dev.22 head 曾因 Make 兼容门禁漏装 GnuTLS CLI 而失败；dev.23 补齐后精确 head `1d48e1d` 的 14/14 GitHub 检查通过。本地 GCC/Clang、ASan/UBSan、TSan、Make 兼容入口全量测试通过；Ubuntu 22.04 的 GnuTLS 3.7.3 互通回归通过。TLS-E 完整资源账本、洪峰/长稳、目标平台及客户端/服务端双向外部互通仍待验收 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | codec、描述符指纹、C/Rust 生成桩和有界解码 | #245 |

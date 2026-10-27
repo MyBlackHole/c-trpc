@@ -13,7 +13,8 @@ TLS-D2 增加有界异步本地凭证获取/轮换和连接组 CONTROL/DATA 异�
 确认；授权在 Reactor owner 重验后才会提交路由。TLS-D1 已随 PR #311 合入主线；TLS-D2
 实现 PR #312 的旧 head 曾通过 14/14 检查但仍未合入。dev.22 增加独立 GnuTLS 客户端
 与 TLS-required/mTLS Server 的互通回归，覆盖有效证书、缺失客户端证书与错误服务器名；dev.23
-补齐会运行完整测试集的 Make 兼容门禁中的 `gnutls-bin` 依赖；新 head 的 GitHub 验收待完成。
+补齐会运行完整测试集的 Make 兼容门禁中的 `gnutls-bin` 依赖；新 head `1d48e1d` 的 GitHub
+CI、RPC smoke 与格式检查共 14/14 通过。
 此测试不覆盖 TLS-E 的资源总账、握手洪峰、长稳、目标平台或双向实现互通。默认仍为明文
 TCP，TLS 失败关闭连接，不回退明文。本版本不代表 #234 或 V2 整体验收完成。
 本次外部 GnuTLS 互通覆盖和限制见 [TLS-E 阶段评估](docs/reviews/rpc_v2_tls_e_20261027.md)。
