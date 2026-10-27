@@ -162,10 +162,10 @@ tls_test_pair_open_with_mtls(const char *client_certificate_file,
 	    tr_tls_openssl_server_profile_create(
 	            &server_config, &test_pair.server_profile) != TR_OK ||
 	    tr_tls_openssl_session_create(test_pair.client_profile,
-	                                  test_pair.client_fd,
+	                                  test_pair.client_fd, NULL,
 	                                  &test_pair.client_session) != TR_OK ||
 	    tr_tls_openssl_session_create(test_pair.server_profile,
-	                                  test_pair.server_fd,
+	                                  test_pair.server_fd, NULL,
 	                                  &test_pair.server_session) != TR_OK)
 		return TR_ERR_SYS;
 	if (tr_byte_endpoint_init(&test_pair.client_endpoint,
@@ -469,8 +469,10 @@ tls_test_pair_open_profiles(struct tr_tls_openssl_profile *client_profile,
 	test_pair.client_profile = client_profile;
 	test_pair.server_profile = server_profile;
 	if (tr_tls_openssl_session_create(client_profile, test_pair.client_fd,
+	                                  NULL,
 	                                  &test_pair.client_session) != TR_OK ||
 	    tr_tls_openssl_session_create(server_profile, test_pair.server_fd,
+	                                  NULL,
 	                                  &test_pair.server_session) != TR_OK)
 		return TR_ERR_SYS;
 	if (tr_byte_endpoint_init(&test_pair.client_endpoint,
@@ -994,7 +996,7 @@ static void test_blocking_socket_is_rejected_without_taking_ownership(void)
 	assert(tr_tls_openssl_client_profile_create(&config, &profile) ==
 	       TR_OK);
 	assert((fcntl(fds[0], F_GETFL) & O_NONBLOCK) == 0);
-	assert(tr_tls_openssl_session_create(profile, fds[0], &session) ==
+	assert(tr_tls_openssl_session_create(profile, fds[0], NULL, &session) ==
 	       TR_ERR_INVALID);
 	assert(session == NULL);
 	assert(fcntl(fds[0], F_GETFD) >= 0);
@@ -1371,7 +1373,8 @@ static int tls_test_peer_open(struct tls_test_peer *peer, const char *role,
 		owns_profile = 1;
 		peer->profile = profile;
 	}
-	status = tr_tls_openssl_session_create(profile, fd, &peer->session);
+	status = tr_tls_openssl_session_create(profile, fd, NULL,
+	                                       &peer->session);
 	if (status != TR_OK)
 		return status;
 	status = tr_byte_endpoint_init(

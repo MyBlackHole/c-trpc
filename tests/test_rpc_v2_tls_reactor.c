@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -16,6 +17,9 @@
 #include <unistd.h>
 
 #include "../src/facade_diagnostics_internal.h"
+#include "../src/execution/reactor.h"
+#include "../src/io/tls_openssl.h"
+#include "../src/memory_budget.h"
 #include "tls_test_identity.h"
 
 #define TEST_SERVICE_ID 0x234U
@@ -56,6 +60,26 @@ struct test_proxy {
 	pthread_t thread;
 	int thread_started;
 	int result;
+};
+
+struct tls_budget_test_context {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	struct tr_reactor *reactor;
+	struct tr_tls_openssl_profile *profile;
+	struct tr_conn_handle trigger_connection;
+	struct tr_conn_handle tls_connection;
+	int tls_fd;
+	int attempt_started;
+	int attempt_done;
+	int adopt_status;
+};
+
+struct tls_budget_test_result {
+	uint64_t baseline_bytes;
+	uint64_t tls_bytes;
+	uint64_t rejection_events;
+	int adopt_status;
 };
 
 static _Atomic uint64_t wrapped_sendmsg_calls;
@@ -603,6 +627,213 @@ static void wait_socket_closed(int fd)
 	}
 }
 
+static enum tr_frame_disposition
+tls_budget_frame_cb(struct tr_conn_handle connection, struct tr_frame *frame,
+                    void *arg)
+{
+	(void)connection;
+	(void)frame;
+	(void)arg;
+	return TR_FRAME_RELEASE;
+}
+
+static void tls_budget_event_cb(struct tr_conn_handle connection,
+                                enum tr_connection_event event, int status,
+                                void *arg)
+{
+	struct tls_budget_test_context *context =
+	        (struct tls_budget_test_context *)arg;
+	struct tr_conn_handle tls_connection = {0};
+	int should_adopt = 0;
+	int adopt_status;
+	(void)status;
+
+	if (event != TR_CONN_EVENT_CLOSED && event != TR_CONN_EVENT_ERROR)
+		return;
+	pthread_mutex_lock(&context->lock);
+	if (!context->attempt_started &&
+	    connection.reactor == context->trigger_connection.reactor &&
+	    connection.slot == context->trigger_connection.slot &&
+	    connection.generation == context->trigger_connection.generation) {
+		context->attempt_started = 1;
+		should_adopt = 1;
+	}
+	pthread_mutex_unlock(&context->lock);
+	if (!should_adopt)
+		return;
+	adopt_status = tr_reactor_adopt_tls_fd_on_owner(
+	        context->reactor, context->tls_fd, context->profile,
+	        (test_monotonic_ms() + TEST_TLS_HANDSHAKE_TIMEOUT_MS) *
+	                UINT64_C(1000000),
+	        &tls_connection);
+	pthread_mutex_lock(&context->lock);
+	context->adopt_status = adopt_status;
+	if (adopt_status == TR_OK) {
+		context->tls_connection = tls_connection;
+		context->tls_fd = -1;
+	}
+	context->attempt_done = 1;
+	pthread_cond_broadcast(&context->cond);
+	pthread_mutex_unlock(&context->lock);
+}
+
+static void set_nonblocking(int fd)
+{
+	int flags = fcntl(fd, F_GETFL);
+	assert(flags >= 0);
+	assert(fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0);
+}
+
+static void wait_tls_budget_attempt(struct tls_budget_test_context *context)
+{
+	struct timespec deadline = test_deadline(TEST_WAIT_MS);
+	int ret = 0;
+	pthread_mutex_lock(&context->lock);
+	while (!context->attempt_done && ret == 0)
+		ret = pthread_cond_timedwait(&context->cond, &context->lock,
+		                             &deadline);
+	assert(context->attempt_done);
+	assert(ret == 0);
+	pthread_mutex_unlock(&context->lock);
+}
+
+static void wait_memory_budget_current(struct tr_memory_budget *budget,
+                                       uint64_t expected_bytes)
+{
+	uint64_t deadline = test_monotonic_ms() + TEST_WAIT_MS;
+	struct timespec pause = {0, 1000000L};
+	struct tr_memory_budget_stats stats;
+	do {
+		tr_memory_budget_get_stats(budget, &stats);
+		if (stats.current_bytes == expected_bytes)
+			return;
+		assert(test_monotonic_ms() < deadline);
+		assert(nanosleep(&pause, NULL) == 0);
+	} while (1);
+}
+
+static void run_tls_memory_budget_case(struct tr_tls_openssl_profile *profile,
+                                       uint64_t budget_limit,
+                                       int expected_status,
+                                       struct tls_budget_test_result *out)
+{
+	struct tls_budget_test_context context;
+	struct tr_reactor_config config = {0};
+	struct tr_memory_budget budget;
+	struct tr_memory_budget_stats stats;
+	struct tr_reactor *reactor = NULL;
+	struct tr_conn_handle trigger_connection = {0};
+	int trigger_pair[2] = {-1, -1};
+	int tls_pair[2] = {-1, -1};
+	int trigger_fd = -1;
+	int trigger_peer_fd = -1;
+	int tls_fd = -1;
+	int tls_peer_fd = -1;
+
+	memset(&context, 0, sizeof(context));
+	memset(out, 0, sizeof(*out));
+	context.profile = profile;
+	context.tls_fd = -1;
+	context.adopt_status = TR_ERR_STATE;
+	assert(pthread_mutex_init(&context.lock, NULL) == 0);
+	{
+		pthread_condattr_t attributes;
+		assert(pthread_condattr_init(&attributes) == 0);
+		assert(pthread_condattr_setclock(&attributes,
+		                                 CLOCK_MONOTONIC) == 0);
+		assert(pthread_cond_init(&context.cond, &attributes) == 0);
+		assert(pthread_condattr_destroy(&attributes) == 0);
+	}
+	tr_memory_budget_init(&budget, budget_limit);
+	config.memory_budget = &budget;
+	assert(tr_reactor_create(&config, tls_budget_frame_cb,
+	                         tls_budget_event_cb, &context,
+	                         &reactor) == TR_OK);
+	context.reactor = reactor;
+	tr_memory_budget_get_stats(&budget, &stats);
+	out->baseline_bytes = stats.current_bytes;
+	assert(out->baseline_bytes > 0U);
+	assert(tr_reactor_start(reactor) == TR_OK);
+	assert(socketpair(AF_UNIX, SOCK_STREAM, 0, trigger_pair) == 0);
+	assert(socketpair(AF_UNIX, SOCK_STREAM, 0, tls_pair) == 0);
+	set_nonblocking(trigger_pair[0]);
+	set_nonblocking(trigger_pair[1]);
+	set_nonblocking(tls_pair[0]);
+	set_nonblocking(tls_pair[1]);
+	trigger_fd = trigger_pair[0];
+	trigger_peer_fd = trigger_pair[1];
+	tls_fd = tls_pair[0];
+	tls_peer_fd = tls_pair[1];
+	assert(tr_reactor_adopt_fd(reactor, trigger_fd, &trigger_connection) ==
+	       TR_OK);
+	trigger_fd = -1;
+	pthread_mutex_lock(&context.lock);
+	context.tls_fd = tls_fd;
+	context.trigger_connection = trigger_connection;
+	pthread_mutex_unlock(&context.lock);
+	assert(close(trigger_peer_fd) == 0);
+	trigger_peer_fd = -1;
+	wait_tls_budget_attempt(&context);
+	out->adopt_status = context.adopt_status;
+	assert(out->adopt_status == expected_status);
+	if (out->adopt_status == TR_OK) {
+		context.tls_fd = -1;
+		tr_memory_budget_get_stats(&budget, &stats);
+		assert(stats.current_bytes > out->baseline_bytes);
+		out->tls_bytes = stats.current_bytes - out->baseline_bytes;
+		assert(tr_reactor_close(context.tls_connection) == TR_OK);
+		wait_memory_budget_current(&budget, out->baseline_bytes);
+	} else {
+		assert(out->adopt_status == TR_AGAIN);
+		assert(fcntl(tls_fd, F_GETFD) >= 0);
+		assert(close(tls_fd) == 0);
+		tls_fd = -1;
+		context.tls_fd = -1;
+		tr_memory_budget_get_stats(&budget, &stats);
+		assert(stats.current_bytes == out->baseline_bytes);
+		assert(stats.rejection_events > 0U);
+	}
+	out->rejection_events = stats.rejection_events;
+	assert(close(tls_peer_fd) == 0);
+	tls_peer_fd = -1;
+	assert(tr_reactor_stop(reactor) == TR_OK);
+	assert(tr_reactor_destroy(reactor) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &stats);
+	assert(stats.current_bytes == 0U);
+	assert(pthread_cond_destroy(&context.cond) == 0);
+	assert(pthread_mutex_destroy(&context.lock) == 0);
+	return;
+}
+
+static void test_tls_reactor_memory_budget(void)
+{
+	struct tls_test_identity identity;
+	struct tr_tls_server_config tls_config = {0};
+	struct tr_tls_openssl_profile *profile = NULL;
+	struct tls_budget_test_result measured;
+	struct tls_budget_test_result limited;
+	uint64_t limited_budget;
+
+	assert(tls_test_identity_init(&identity, "tls-budget") == 0);
+	tls_config.mode = TR_TLS_REQUIRED;
+	tls_config.certificate_file = identity.server_certificate_file;
+	tls_config.private_key_file = identity.server_private_key_file;
+	assert(tr_tls_openssl_server_profile_create(&tls_config, &profile) ==
+	       TR_OK);
+	run_tls_memory_budget_case(profile, 0U, TR_OK, &measured);
+	assert(measured.tls_bytes > 0U);
+	assert(measured.rejection_events == 0U);
+	assert(measured.tls_bytes < UINT64_MAX - measured.baseline_bytes);
+	limited_budget = measured.baseline_bytes + measured.tls_bytes - 1U;
+	run_tls_memory_budget_case(profile, limited_budget, TR_AGAIN, &limited);
+	assert(limited.baseline_bytes == measured.baseline_bytes);
+	assert(limited.tls_bytes == 0U);
+	assert(limited.rejection_events > 0U);
+	tr_tls_openssl_profile_release(profile);
+	tls_test_identity_cleanup(&identity);
+	puts("tls-reactor: TLS wrappers follow the Reactor memory budget");
+}
+
 static void test_tls_pending_handshakes_close_on_server_destroy(void)
 {
 	static const uint8_t partial_tls_record[] = {
@@ -825,7 +1056,12 @@ int main(int argc, char **argv)
 		test_tls_pending_handshakes_close_on_server_destroy();
 		return 0;
 	}
+	if (argc == 2 && strcmp(argv[1], "tls-budget") == 0) {
+		test_tls_reactor_memory_budget();
+		return 0;
+	}
 	assert(argc == 1);
+	test_tls_reactor_memory_budget();
 	test_transport_only_tls_support_boundary();
 	test_plaintext_is_rejected_by_tls_listener();
 	test_tls_pending_handshakes_close_on_server_destroy();
