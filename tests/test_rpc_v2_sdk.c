@@ -1793,6 +1793,8 @@ static void test_cancel_compressed_call_destroy_barrier(void)
 	compression_gate_release(&gate);
 	destroy_client(&f, &f.client);
 
+	/* 本地销毁不是对端回调屏障；等待服务端独立观察断连。 */
+	wait_count(&f, &f.methods[0].terminals, 1U);
 	lock(&f);
 	CHECK(call.sent == 1U && !call.half_closed && call.terminals == 1U);
 	CHECK(call.status == TR_RPC_STATUS_CANCELLED &&
