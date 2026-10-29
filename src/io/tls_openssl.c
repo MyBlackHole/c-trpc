@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tls_openssl.h"
+#include "tls_trust_snapshot.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -702,17 +703,9 @@ static int tr_tls_openssl_client_profile_create_internal(
 	status = tr_tls_openssl_profile_alloc(TR_TLS_OPENSSL_CLIENT, &profile);
 	if (status != TR_OK)
 		return status;
-	if (config->ca_file || config->ca_directory) {
-		if (SSL_CTX_load_verify_locations(profile->context,
-		                                  config->ca_file,
-		                                  config->ca_directory) != 1) {
-			status = TR_ERR_INVALID;
-			goto fail;
-		}
-	} else if (SSL_CTX_set_default_verify_paths(profile->context) != 1) {
-		status = TR_ERR_INVALID;
+	status = tr_tls_openssl_trust_snapshot(profile->context, config);
+	if (status != TR_OK)
 		goto fail;
-	}
 	if (bundle) {
 		status = tr_tls_openssl_pem_identity_install(
 		        profile->context, bundle, max_bundle_bytes);

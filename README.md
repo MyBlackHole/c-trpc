@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.177` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.178` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -44,6 +44,7 @@ dev.174 修复带预算 TLS session 构造分配失败时误报成功，以及 s
 dev.175 修复 Reactor 完成队列回归自身的同步竞态：先完成观察计数，再发布完成标记；生产路径不变。相同的广播后调度间隙在修复前触发计数断言、修复后通过，最终测试不保留延时探针，详见[完成标记验证记录](docs/reviews/rpc_v2_completion_marker_20261029.md)。
 dev.176 修复压缩取消/销毁回归的远端终局等待：Client 本地销毁成功后，独立等待 Server terminal 再检查原计数、状态和统计；没有放宽断言或修改生产路径。相同服务端延时在修复前复现 terminals=0、修复后通过，详见[SDK 对端终局屏障记录](docs/reviews/rpc_v2_sdk_remote_terminal_barrier_20261029.md)。
 dev.177 增加同一对 mTLS profile 下的 34 轮连接周转，交错握手各阶段中止与双向传输，逐轮检查存活块数和包装预算，并在 profile 释放后核对全局预热基线。RSA 盲化缓存的合法延迟扩容单独记录，遗漏一次 SSL 释放的变异被捕获。这不替代 TLS-E 的长稳、恶意输入和平台矩阵，详见[连接周转资源记录](docs/reviews/rpc_v2_tls_resource_waves_20261029.md)。
+dev.178 将 Client 的显式和默认信任来源在 profile 构造时读入内存，修复哈希目录按需加载使旧 profile 随文件增删改变信任的问题。目录列表、符号链接、连续索引和 CRL 保留，握手不再读取这些信任路径；创建后的来源变更须通过新 profile 生效。构造失败回滚与验证范围见[信任快照记录](docs/reviews/rpc_v2_tls_trust_snapshot_20261029.md)。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 已合入主线且合并后 CI 通过；
 TLS-D2 与后续集成候选仍在未合并 PR 中。TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。

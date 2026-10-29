@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.177")
+set_version("2.0.0-dev.178")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -116,6 +116,7 @@ target("trcore")
         "src/io/tls_provider_operation.c",
         "src/io/tls_config.c",
         "src/io/tls_openssl.c",
+        "src/io/tls_trust_snapshot.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
         "src/runtime/message_service.c",
@@ -199,7 +200,9 @@ target("test_tls_openssl")
     add_files("tests/test_tls_openssl.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
-    add_ldflags("-Wl,--wrap=SSL_CTX_ctrl", {force = true})
+    add_ldflags("-Wl,--wrap=SSL_CTX_ctrl", "-Wl,--wrap=BIO_new_fd", "-Wl,--wrap=BIO_new",
+                "-Wl,--wrap=X509_STORE_add_cert", "-Wl,--wrap=X509_STORE_add_crl",
+                "-Wl,--wrap=malloc", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -905,6 +908,7 @@ target("test_rpc_record_endpoint_tcp")
             "src/io/peer_identity_internal.c",
             "src/io/tls_config.c",
             "src/io/tls_openssl.c",
+            "src/io/tls_trust_snapshot.c",
             "src/io/socket.c",
             "src/io/connector.c",
             "src/message/message.c",
