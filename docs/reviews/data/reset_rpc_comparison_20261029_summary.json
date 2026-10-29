@@ -1,0 +1,586 @@
+{
+  "runtime_sources": {
+    "baseline": {
+      "binary": "/home/black/Documents/c-trpc/build/performance-20261029/reset-rpc-ab-v182/bin/baseline/bench_rpc",
+      "sha256": "522b0ee0754f486aac4cb024ff32215fd02026f98a1e04d3b1b8627e835c478f",
+      "runtime_source": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+      "checkout": "/home/black/.codex/worktrees/0feb/c-trpc"
+    },
+    "candidate": {
+      "binary": "/home/black/Documents/c-trpc/build/performance-20261029/reset-rpc-ab-v182/bin/candidate/bench_rpc",
+      "sha256": "55d1c4b990f1878f7999017960c2c6cf5443fdf998be9ece389c5fa946bd137e",
+      "runtime_source": "0d81342e85739bcd8ff0253bdbcd894c602696c0",
+      "checkout": "/home/black/Documents/c-trpc",
+      "metadata_source": "33f630056ef59db58a4e09e40ed01777084d8544"
+    }
+  },
+  "harness_and_profiles": {
+    "affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "loadavg_before": [
+      1.21337890625,
+      1.5849609375,
+      1.96240234375
+    ],
+    "rate_rps": 40000,
+    "min_arrival_ms": 250,
+    "offered_per_case": 10000,
+    "trials": 3,
+    "profiles": [
+      "small_call_limit",
+      "default_call_limit",
+      "large_call_limit"
+    ],
+    "transports": [
+      "plain",
+      "tls-zstd"
+    ],
+    "paired_order": [
+      [
+        "baseline",
+        "candidate"
+      ],
+      [
+        "candidate",
+        "baseline"
+      ],
+      [
+        "baseline",
+        "candidate"
+      ]
+    ],
+    "production_diff": [
+      "src/transport/channel/channel.c"
+    ],
+    "benchmark_harness_unchanged": true,
+    "compilation_profiles_equivalent": true,
+    "production_units": 55,
+    "compared_commands": 55,
+    "compiler_versions": {
+      "/usr/bin/gcc": "gcc (GCC) 16.2.1 20260810"
+    },
+    "config": {
+      "arch": "x86_64",
+      "builddir": "build",
+      "ccache": true,
+      "clean": true,
+      "crc32c_portable": false,
+      "host": "linux",
+      "kind": "static",
+      "make_cflags": "",
+      "make_ldflags": "",
+      "mode": "release",
+      "ndk_stdcxx": true,
+      "plat": "linux",
+      "toolchain": "gcc"
+    },
+    "profile_comparison_scope": "55 trcore production commands; benchmark source/definition unchanged, compiled by same native configuration"
+  },
+  "closed_smoke_cases": 12,
+  "open_cases": 36,
+  "totals": {
+    "offered": 360000,
+    "scheduler_dropped": 293968,
+    "attempted": 66032,
+    "accepted": 65970,
+    "completed": 65970,
+    "ok": 65518,
+    "submit_again": 62,
+    "submit_errors": 0,
+    "deadlines": 225,
+    "rpc_errors": 227,
+    "resource_exhausted": 227,
+    "invalid_responses": 0
+  },
+  "all_cases_control_tx_pressure": true,
+  "summaries": [
+    {
+      "kind": "baseline",
+      "mode": "plain",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "small_call_limit",
+        "tls_enabled": false,
+        "compression": "none",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3,
+          "rpc_resource_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [
+          "tx_pool_exhausted"
+        ],
+        "ok_rps_min": 4698.369901117645,
+        "ok_rps_median": 4701.890166237746,
+        "ok_rps_max": 5106.092401957144,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 7870,
+      "median_scheduler_late_p99_us": 1383.104
+    },
+    {
+      "kind": "baseline",
+      "mode": "plain",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "default_call_limit",
+        "tls_enabled": false,
+        "compression": "none",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 5726.853759596362,
+        "ok_rps_median": 5884.494956380757,
+        "ok_rps_max": 6038.494814736764,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 7737,
+      "median_scheduler_late_p99_us": 1994.714
+    },
+    {
+      "kind": "baseline",
+      "mode": "plain",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "large_call_limit",
+        "tls_enabled": false,
+        "compression": "none",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 4409.073144052749,
+        "ok_rps_median": 5255.151692852828,
+        "ok_rps_max": 5711.708621222839,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 7988,
+      "median_scheduler_late_p99_us": 2317.05
+    },
+    {
+      "kind": "candidate",
+      "mode": "plain",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "small_call_limit",
+        "tls_enabled": false,
+        "compression": "none",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3,
+          "rpc_resource_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [
+          "tx_pool_exhausted"
+        ],
+        "ok_rps_min": 4230.55566756381,
+        "ok_rps_median": 4625.224698188962,
+        "ok_rps_max": 4641.963147114268,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 7918,
+      "median_scheduler_late_p99_us": 2676.608
+    },
+    {
+      "kind": "candidate",
+      "mode": "plain",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "default_call_limit",
+        "tls_enabled": false,
+        "compression": "none",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "client_submit_again": 1,
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 5804.719452518763,
+        "ok_rps_median": 5993.654340588579,
+        "ok_rps_max": 6371.896957223565,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 7668,
+      "median_scheduler_late_p99_us": 1691.714
+    },
+    {
+      "kind": "candidate",
+      "mode": "plain",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "large_call_limit",
+        "tls_enabled": false,
+        "compression": "none",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 5542.164710208967,
+        "ok_rps_median": 5863.385892865742,
+        "ok_rps_max": 6101.2677219508105,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 7814,
+      "median_scheduler_late_p99_us": 1244.011
+    },
+    {
+      "kind": "baseline",
+      "mode": "tls-zstd",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "small_call_limit",
+        "tls_enabled": true,
+        "compression": "zstd",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3,
+          "rpc_deadline": 1,
+          "rpc_resource_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [
+          "tx_pool_exhausted"
+        ],
+        "ok_rps_min": 498.23014034333266,
+        "ok_rps_median": 3386.2639016238063,
+        "ok_rps_max": 3432.96626408085,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 8444,
+      "median_scheduler_late_p99_us": 1131.522
+    },
+    {
+      "kind": "baseline",
+      "mode": "tls-zstd",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "default_call_limit",
+        "tls_enabled": true,
+        "compression": "zstd",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3,
+          "rpc_deadline": 1,
+          "tx_pool_exhausted": 1
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "tx_pool_exhausted": 1
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [
+          "tx_pool_exhausted"
+        ],
+        "ok_rps_min": 444.0319934923094,
+        "ok_rps_median": 3948.1759821779933,
+        "ok_rps_max": 4267.722093405791,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 8448,
+      "median_scheduler_late_p99_us": 2691.963
+    },
+    {
+      "kind": "baseline",
+      "mode": "tls-zstd",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "large_call_limit",
+        "tls_enabled": true,
+        "compression": "zstd",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 3703.0622623359045,
+        "ok_rps_median": 3757.6064842303267,
+        "ok_rps_max": 4048.1287622623922,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 8534,
+      "median_scheduler_late_p99_us": 2540.736
+    },
+    {
+      "kind": "candidate",
+      "mode": "tls-zstd",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "small_call_limit",
+        "tls_enabled": true,
+        "compression": "zstd",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3,
+          "rpc_resource_exhausted": 3,
+          "tx_pool_exhausted": 2
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "tx_pool_exhausted": 2
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [
+          "tx_pool_exhausted"
+        ],
+        "ok_rps_min": 3297.10678289816,
+        "ok_rps_median": 3476.012185694927,
+        "ok_rps_max": 3751.886031447776,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 8460,
+      "median_scheduler_late_p99_us": 1816.687
+    },
+    {
+      "kind": "candidate",
+      "mode": "tls-zstd",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "default_call_limit",
+        "tls_enabled": true,
+        "compression": "zstd",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 3771.0791891460085,
+        "ok_rps_median": 4097.896038219451,
+        "ok_rps_max": 4097.988736879752,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 8516,
+      "median_scheduler_late_p99_us": 3679.464
+    },
+    {
+      "kind": "candidate",
+      "mode": "tls-zstd",
+      "summary": {
+        "type": "repeatability_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "profile": "large_call_limit",
+        "tls_enabled": true,
+        "compression": "zstd",
+        "trials": 3,
+        "clean_trials": 0,
+        "server_pressure_trials": 3,
+        "classification": "reproducible_server_wall",
+        "signal_counts": {
+          "control_tx_pool_exhausted": 3,
+          "load_generator_drop": 3,
+          "load_generator_late": 3
+        },
+        "server_signal_counts": {
+          "control_tx_pool_exhausted": 3
+        },
+        "reproducible_server_signals": [
+          "control_tx_pool_exhausted"
+        ],
+        "sporadic_server_signals": [],
+        "ok_rps_min": 3721.708658593372,
+        "ok_rps_median": 3827.7198967784516,
+        "ok_rps_max": 3867.2217467455866,
+        "command_budget_hits_median": 0,
+        "command_budget_hits_max": 0,
+        "command_queue_peak_max": 1
+      },
+      "median_scheduler_dropped": 8528,
+      "median_scheduler_late_p99_us": 3614.631
+    }
+  ],
+  "csv_sha256": "2387aff3aa82eab28000661a2e2473b326f518379d8083080ecfb5fac737fa76",
+  "raw_archive": {
+    "file": "reset_rpc_comparison_20261029_raw.zip",
+    "sha256": "53101295a4cd543aa30d0134e437f2b8a261ef1e1c5566ba027e20119c99252b",
+    "raw_members": 1313,
+    "compressed_bytes": 984829
+  },
+  "limitations": [
+    "shared developer machine, loopback and 250ms window",
+    "all 36 offered-load samples dirty; no capacity/latency/overhead conclusion",
+    "different accepted arrivals; no normalized per-RPC cost claim",
+    "not mTLS or platform acceptance"
+  ]
+}
