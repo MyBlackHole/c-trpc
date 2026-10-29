@@ -1,0 +1,64 @@
+{
+  "source_commit": "33292b6ce51b66f03f6a32e86122e1f43ea99075",
+  "phases": [
+    {
+      "label": "baseline-initial",
+      "mutation": null,
+      "format": null,
+      "exit_code": 0,
+      "log_sha256": "3e3e564d8c8863f86ed3670002ecd3049c5f0830be5dd73e1684278cfcdf2ef5"
+    },
+    {
+      "label": "control-drop_root-compact",
+      "mutation": "drop_root",
+      "format": "compact",
+      "exit_code": 255,
+      "log_sha256": "169924c8500ee68b0ad3222246765bcae906bec00c2641a2b2f413d859a0a0a7"
+    },
+    {
+      "label": "control-drop_root-block",
+      "mutation": "drop_root",
+      "format": "block",
+      "exit_code": 255,
+      "log_sha256": "cbb87b86185034e62043af0fdc65440ea67d4d3d0599633c2069f0da3326bb8e"
+    },
+    {
+      "label": "control-drop_nested-compact",
+      "mutation": "drop_nested",
+      "format": "compact",
+      "exit_code": 255,
+      "log_sha256": "7d0c13f91a215b3cf3cd20b7eecfdb9e2e8becaa5f2de9f7e7f5e0872e761a89"
+    },
+    {
+      "label": "control-drop_nested-block",
+      "mutation": "drop_nested",
+      "format": "block",
+      "exit_code": 255,
+      "log_sha256": "446b4582e783867346e79e108b014952f0af7d541162b5441c7f3a5026e72acc"
+    },
+    {
+      "label": "control-reset_budget-compact",
+      "mutation": "reset_budget",
+      "format": "compact",
+      "exit_code": 255,
+      "log_sha256": "2ede6ef1987391aab0974989562e670b4b9c9276a64daf5198d3760e2d0f716d"
+    },
+    {
+      "label": "control-reset_budget-block",
+      "mutation": "reset_budget",
+      "format": "block",
+      "exit_code": 255,
+      "log_sha256": "3900e72aef8aa426b49d64df29f45a665a0b977919b58bc6eeb9b5428a25fd9e"
+    },
+    {
+      "label": "baseline-final",
+      "mutation": null,
+      "format": null,
+      "exit_code": 0,
+      "log_sha256": "3e3e564d8c8863f86ed3670002ecd3049c5f0830be5dd73e1684278cfcdf2ef5"
+    }
+  ],
+  "baseline_passes": 2,
+  "controls_caught": 6,
+  "result_sha256": "6a6969ba3e34592f8973d2244db3c6fba5b04e17a0c8bba3835eb4dd04f83ce1"
+}
