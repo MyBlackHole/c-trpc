@@ -1,0 +1,2553 @@
+{
+  "ambiguous_provider_symbols": {},
+  "basis": {
+    "compile_database_sha256": "cce6abef1906f6d49d59a0fb09fd1d74da837c3cee53a7b97268bf49a4fbee20",
+    "compiler_versions": {
+      "/usr/bin/gcc": "gcc (GCC) 16.2.1 20260810"
+    },
+    "config": {
+      "arch": "x86_64",
+      "builddir": "build",
+      "ccache": true,
+      "clean": true,
+      "crc32c_portable": false,
+      "host": "linux",
+      "kind": "static",
+      "make_cflags": "",
+      "make_ldflags": "",
+      "mode": "release",
+      "ndk_stdcxx": true,
+      "plat": "linux",
+      "toolchain": "gcc"
+    },
+    "git_commit": "4bc86551101c0e62704b9bd9608fcbceac9a0fce",
+    "nm_version": "GNU nm (GNU Binutils) 2.47",
+    "production_objects": 55,
+    "target": "trcore",
+    "xmake_version": "3.1.2+20261016"
+  },
+  "directory_area_object_edge_counts": [
+    {
+      "from_area": "src-root",
+      "object_edges": 2,
+      "to_area": "src-root"
+    },
+    {
+      "from_area": "src-root",
+      "object_edges": 9,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src-root",
+      "object_edges": 8,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src-root",
+      "object_edges": 10,
+      "to_area": "src/rpc"
+    },
+    {
+      "from_area": "src-root",
+      "object_edges": 2,
+      "to_area": "src/runtime"
+    },
+    {
+      "from_area": "src-root",
+      "object_edges": 2,
+      "to_area": "src/transport/channel"
+    },
+    {
+      "from_area": "src-root",
+      "object_edges": 2,
+      "to_area": "src/transport/group"
+    },
+    {
+      "from_area": "src/execution",
+      "object_edges": 1,
+      "to_area": "src-root"
+    },
+    {
+      "from_area": "src/execution",
+      "object_edges": 5,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/execution",
+      "object_edges": 3,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src/execution",
+      "object_edges": 3,
+      "to_area": "src/transport/protocol"
+    },
+    {
+      "from_area": "src/group",
+      "object_edges": 1,
+      "to_area": "src-root"
+    },
+    {
+      "from_area": "src/group",
+      "object_edges": 3,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/group",
+      "object_edges": 6,
+      "to_area": "src/group"
+    },
+    {
+      "from_area": "src/io",
+      "object_edges": 2,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/io",
+      "object_edges": 4,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src/message",
+      "object_edges": 3,
+      "to_area": "src/message"
+    },
+    {
+      "from_area": "src/rpc",
+      "object_edges": 15,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/rpc",
+      "object_edges": 1,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src/rpc",
+      "object_edges": 2,
+      "to_area": "src/message"
+    },
+    {
+      "from_area": "src/rpc",
+      "object_edges": 15,
+      "to_area": "src/rpc"
+    },
+    {
+      "from_area": "src/rpc",
+      "object_edges": 5,
+      "to_area": "src/transport/channel"
+    },
+    {
+      "from_area": "src/runtime",
+      "object_edges": 6,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/runtime",
+      "object_edges": 1,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src/runtime",
+      "object_edges": 2,
+      "to_area": "src/message"
+    },
+    {
+      "from_area": "src/runtime",
+      "object_edges": 1,
+      "to_area": "src/runtime"
+    },
+    {
+      "from_area": "src/transport/channel",
+      "object_edges": 3,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/transport/channel",
+      "object_edges": 2,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src/transport/channel",
+      "object_edges": 2,
+      "to_area": "src/message"
+    },
+    {
+      "from_area": "src/transport/channel",
+      "object_edges": 2,
+      "to_area": "src/transport/channel"
+    },
+    {
+      "from_area": "src/transport/channel",
+      "object_edges": 3,
+      "to_area": "src/transport/protocol"
+    },
+    {
+      "from_area": "src/transport/group",
+      "object_edges": 9,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/transport/group",
+      "object_edges": 11,
+      "to_area": "src/group"
+    },
+    {
+      "from_area": "src/transport/group",
+      "object_edges": 8,
+      "to_area": "src/io"
+    },
+    {
+      "from_area": "src/transport/group",
+      "object_edges": 4,
+      "to_area": "src/message"
+    },
+    {
+      "from_area": "src/transport/group",
+      "object_edges": 2,
+      "to_area": "src/transport/group"
+    },
+    {
+      "from_area": "src/transport/group",
+      "object_edges": 4,
+      "to_area": "src/transport/protocol"
+    },
+    {
+      "from_area": "src/transport/protocol",
+      "object_edges": 2,
+      "to_area": "src-root"
+    },
+    {
+      "from_area": "src/transport/protocol",
+      "object_edges": 2,
+      "to_area": "src/execution"
+    },
+    {
+      "from_area": "src/transport/protocol",
+      "object_edges": 2,
+      "to_area": "src/transport/protocol"
+    }
+  ],
+  "matched_undefined_object_symbol_pairs": 786,
+  "object_reference_edges": [
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_buffer_pool_destroy",
+        "tr_buffer_pool_init_budgeted",
+        "tr_buffer_pool_init_dynamic_budgeted"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/deadline.c.o",
+      "provider_source": "src/execution/deadline.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_deadline_init_ms",
+        "tr_deadline_poll_fd"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 14,
+      "symbols": [
+        "tr_reactor_adopt_fd",
+        "tr_reactor_adopt_tls_fd_on_owner",
+        "tr_reactor_call",
+        "tr_reactor_close_graceful",
+        "tr_reactor_close_on_owner",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_memory_requirement",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister",
+        "tr_reactor_tls_admission_set",
+        "tr_reactor_tls_close_before_generation",
+        "tr_reactor_tls_close_generation"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/worker_context.c.o",
+      "provider_source": "src/execution/worker_context.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_execution_in_worker_context"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/facade.c.o",
+      "provider_source": "src/facade.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_facade_limits_init",
+        "tr_facade_tuning_init",
+        "tr_facade_tuning_normalize"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_socket_close",
+        "tr_tcp_connect_ipv4",
+        "tr_tcp_finish_connect",
+        "tr_tcp_set_nodelay"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_config.c.o",
+      "provider_source": "src/io/tls_config.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_tls_client_config_validate",
+        "tr_tls_credentials_provider_validate"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "provider_source": "src/io/tls_openssl.c",
+      "symbol_count": 7,
+      "symbols": [
+        "tr_tls_openssl_client_profile_create",
+        "tr_tls_openssl_client_profile_create_from_pem",
+        "tr_tls_openssl_client_profile_create_from_pem_with_peer_identity",
+        "tr_tls_openssl_client_profile_create_with_peer_identity",
+        "tr_tls_openssl_profile_next_generation",
+        "tr_tls_openssl_profile_release",
+        "tr_tls_openssl_profile_set_generation"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_provider_operation.c.o",
+      "provider_source": "src/io/tls_provider_operation.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_tls_provider_operation_accept",
+        "tr_tls_provider_operation_complete",
+        "tr_tls_provider_operation_complete_credentials",
+        "tr_tls_provider_operation_credentials_result",
+        "tr_tls_provider_operation_request_cancel",
+        "tr_tls_provider_operation_reserve",
+        "tr_tls_provider_operation_retire",
+        "tr_tls_provider_operation_table_destroy",
+        "tr_tls_provider_operation_table_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record.c.o",
+      "provider_source": "src/rpc/rpc_record.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_state_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "provider_source": "src/rpc/rpc_record_client.c",
+      "symbol_count": 21,
+      "symbols": [
+        "tr_rpc_record_client_begin_drain_on_owner",
+        "tr_rpc_record_client_call_start_on_owner",
+        "tr_rpc_record_client_call_start_public_on_owner",
+        "tr_rpc_record_client_cancel_on_owner",
+        "tr_rpc_record_client_close_on_owner",
+        "tr_rpc_record_client_create_on_owner",
+        "tr_rpc_record_client_get_semantic_stats_on_owner",
+        "tr_rpc_record_client_half_close_on_owner",
+        "tr_rpc_record_client_hold_on_owner",
+        "tr_rpc_record_client_in_callback",
+        "tr_rpc_record_client_mark_tls_failed",
+        "tr_rpc_record_client_reactor",
+        "tr_rpc_record_client_reap_stopped",
+        "tr_rpc_record_client_ref_cancel_on_owner",
+        "tr_rpc_record_client_ref_release",
+        "tr_rpc_record_client_ref_result",
+        "tr_rpc_record_client_send_bytes_with_compression_on_owner",
+        "tr_rpc_record_client_send_on_owner",
+        "tr_rpc_record_client_set_progress_notify_on_owner",
+        "tr_rpc_record_client_set_send_pool_on_owner",
+        "tr_rpc_record_client_start_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "provider_source": "src/rpc/rpc_record_dispatch.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_record_dispatch_in_callback",
+        "tr_rpc_record_dispatch_in_work_callback"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_v2.c.o",
+      "provider_source": "src/rpc/rpc_v2.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_v2_memory_limit",
+        "tr_rpc_v2_prepare_limits"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/runtime.c.o",
+      "provider_source": "src/runtime/runtime.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_runtime_create",
+        "tr_runtime_destroy",
+        "tr_runtime_shard_at",
+        "tr_runtime_shard_memory_budget",
+        "tr_runtime_shard_message_cancel_adapter",
+        "tr_runtime_shard_message_submit_adapter",
+        "tr_runtime_shard_reactor",
+        "tr_runtime_start",
+        "tr_runtime_stop"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 11,
+      "symbols": [
+        "tr_channel_begin_drain",
+        "tr_channel_bind_message_service_on_owner",
+        "tr_channel_create_deferred",
+        "tr_channel_destroy",
+        "tr_channel_enable_keepalive",
+        "tr_channel_get_stats",
+        "tr_channel_start",
+        "tr_channel_wait_drained",
+        "tr_channel_wait_drained_deadline",
+        "tr_channel_wait_ready",
+        "tr_channel_wait_ready_deadline"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/client.c.o",
+      "consumer_source": "src/client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "provider_source": "src/transport/group/client_group.c",
+      "symbol_count": 11,
+      "symbols": [
+        "tr_client_group_begin_drain",
+        "tr_client_group_close",
+        "tr_client_group_connect",
+        "tr_client_group_create",
+        "tr_client_group_destroy",
+        "tr_client_group_get_stats",
+        "tr_client_group_release_transfer",
+        "tr_client_group_schedule_tls_profile",
+        "tr_client_group_send_with_compression",
+        "tr_client_group_wait_drained",
+        "tr_connection_group_client_config_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/crc32c.c.o",
+      "provider_source": "src/crc32c.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_crc32c_begin",
+        "tr_crc32c_finish",
+        "tr_crc32c_update"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_buffer_pool_destroy",
+        "tr_buffer_pool_get_stats",
+        "tr_buffer_pool_init",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/command_queue.c.o",
+      "provider_source": "src/execution/command_queue.c",
+      "symbol_count": 11,
+      "symbols": [
+        "tr_command_queue_destroy",
+        "tr_command_queue_init",
+        "tr_command_queue_is_empty",
+        "tr_command_queue_last_sequence",
+        "tr_command_queue_pop_batch",
+        "tr_command_queue_push",
+        "tr_command_queue_push_wait",
+        "tr_command_queue_push_wait_force",
+        "tr_command_queue_wait_close",
+        "tr_command_queue_wait_generation",
+        "tr_command_queue_wait_open"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/completion_queue.c.o",
+      "provider_source": "src/execution/completion_queue.c",
+      "symbol_count": 7,
+      "symbols": [
+        "tr_completion_queue_admission_generation",
+        "tr_completion_queue_close",
+        "tr_completion_queue_destroy",
+        "tr_completion_queue_init",
+        "tr_completion_queue_open",
+        "tr_completion_queue_pop_batch",
+        "tr_completion_queue_push_wait"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/timer_queue.c.o",
+      "provider_source": "src/execution/timer_queue.c",
+      "symbol_count": 7,
+      "symbols": [
+        "tr_timer_queue_arm",
+        "tr_timer_queue_destroy",
+        "tr_timer_queue_init",
+        "tr_timer_queue_next_deadline",
+        "tr_timer_queue_register",
+        "tr_timer_queue_run_due",
+        "tr_timer_queue_unregister"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/byte_endpoint.c.o",
+      "provider_source": "src/io/byte_endpoint.c",
+      "symbol_count": 10,
+      "symbols": [
+        "tr_byte_endpoint_abort",
+        "tr_byte_endpoint_begin_close",
+        "tr_byte_endpoint_event_bind",
+        "tr_byte_endpoint_event_unbind",
+        "tr_byte_endpoint_init",
+        "tr_byte_endpoint_interest",
+        "tr_byte_endpoint_read",
+        "tr_byte_endpoint_release",
+        "tr_byte_endpoint_step",
+        "tr_byte_endpoint_write"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/peer_identity_internal.c.o",
+      "provider_source": "src/io/peer_identity_internal.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_peer_identity_snapshot_charge",
+        "tr_peer_identity_snapshot_release",
+        "tr_peer_identity_snapshot_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "provider_source": "src/io/tls_openssl.c",
+      "symbol_count": 8,
+      "symbols": [
+        "tr_tls_openssl_driver",
+        "tr_tls_openssl_profile_generation",
+        "tr_tls_openssl_profile_peer_identity_enabled",
+        "tr_tls_openssl_profile_peer_identity_required",
+        "tr_tls_openssl_profile_release",
+        "tr_tls_openssl_profile_retain",
+        "tr_tls_openssl_session_create",
+        "tr_tls_openssl_session_peer_identity"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/frame.c.o",
+      "provider_source": "src/transport/protocol/frame.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_frame_init",
+        "tr_frame_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/parser.c.o",
+      "provider_source": "src/transport/protocol/parser.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_parser_init",
+        "tr_parser_prepare",
+        "tr_parser_produce",
+        "tr_parser_reset",
+        "tr_parser_write_len",
+        "tr_parser_write_ptr"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "consumer_source": "src/execution/reactor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/wire.c.o",
+      "provider_source": "src/transport/protocol/wire.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_frame_type_valid",
+        "tr_wire_header_encode",
+        "tr_wire_stream_reset_status_valid"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/execution/task_executor.c.o",
+      "consumer_source": "src/execution/task_executor.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/worker_context.c.o",
+      "provider_source": "src/execution/worker_context.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_execution_enter_worker",
+        "tr_execution_in_worker_context",
+        "tr_execution_leave_worker"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline.c.o",
+      "consumer_source": "src/group/pipeline.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_reactor_call",
+        "tr_reactor_in_owner_context_for"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "consumer_source": "src/group/pipeline_control.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_reactor_call",
+        "tr_reactor_close_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "consumer_source": "src/group/pipeline_control.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline.c.o",
+      "provider_source": "src/group/pipeline.c",
+      "symbol_count": 13,
+      "symbols": [
+        "tr_pipeline_attached_data_snapshot",
+        "tr_pipeline_cancel_data_offer",
+        "tr_pipeline_create",
+        "tr_pipeline_destroy",
+        "tr_pipeline_epoch",
+        "tr_pipeline_get_stats",
+        "tr_pipeline_id",
+        "tr_pipeline_owner",
+        "tr_pipeline_owner_shard_id",
+        "tr_pipeline_prepare_transfer",
+        "tr_pipeline_remove_data",
+        "tr_pipeline_reserve_data_with_generation_on_owner",
+        "tr_pipeline_unbind_stream"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "consumer_source": "src/group/pipeline_control.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control_wire.c.o",
+      "provider_source": "src/group/pipeline_control_wire.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_pipeline_control_wire_decode",
+        "tr_pipeline_control_wire_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "consumer_source": "src/group/pipeline_control.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_registry.c.o",
+      "provider_source": "src/group/pipeline_registry.c",
+      "symbol_count": 5,
+      "symbols": [
+        "tr_pipeline_registry_close_control",
+        "tr_pipeline_registry_next_member_generation_on_owner",
+        "tr_pipeline_registry_owner",
+        "tr_pipeline_registry_owner_shard_id",
+        "tr_pipeline_registry_register_control"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "consumer_source": "src/group/pipeline_control.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "provider_source": "src/group/pipeline_route.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_route_preface_validate_fields"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_registry.c.o",
+      "consumer_source": "src/group/pipeline_registry.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_reactor_call",
+        "tr_reactor_in_owner_context_for"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_registry.c.o",
+      "consumer_source": "src/group/pipeline_registry.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline.c.o",
+      "provider_source": "src/group/pipeline.c",
+      "symbol_count": 12,
+      "symbols": [
+        "tr_pipeline_attach_data",
+        "tr_pipeline_cancel_data_reservation",
+        "tr_pipeline_clear_control",
+        "tr_pipeline_data_connection",
+        "tr_pipeline_epoch",
+        "tr_pipeline_get_stats",
+        "tr_pipeline_id",
+        "tr_pipeline_owner",
+        "tr_pipeline_owner_shard_id",
+        "tr_pipeline_remove_data",
+        "tr_pipeline_set_control",
+        "tr_pipeline_validate_data_reservation_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_registry.c.o",
+      "consumer_source": "src/group/pipeline_registry.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "provider_source": "src/group/pipeline_route.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_route_preface_validate_fields"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "consumer_source": "src/group/pipeline_route.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/crc32c.c.o",
+      "provider_source": "src/crc32c.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_crc32c"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/io/connector.c.o",
+      "consumer_source": "src/io/connector.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_reactor_aux_event_register",
+        "tr_reactor_aux_event_unregister",
+        "tr_reactor_call",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/io/connector.c.o",
+      "consumer_source": "src/io/connector.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_socket_close",
+        "tr_tcp_connect_ipv4",
+        "tr_tcp_finish_connect",
+        "tr_tcp_set_nodelay"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "consumer_source": "src/io/tls_openssl.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/peer_identity_internal.c.o",
+      "provider_source": "src/io/peer_identity_internal.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_peer_identity_snapshot_create"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "consumer_source": "src/io/tls_openssl.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_config.c.o",
+      "provider_source": "src/io/tls_config.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_tls_client_config_validate",
+        "tr_tls_server_config_validate",
+        "tr_tls_server_config_validate_for_pem"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "consumer_source": "src/io/tls_openssl.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_trust_snapshot.c.o",
+      "provider_source": "src/io/tls_trust_snapshot.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_tls_openssl_trust_snapshot"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_provider_operation.c.o",
+      "consumer_source": "src/io/tls_provider_operation.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/async_operation.c.o",
+      "provider_source": "src/execution/async_operation.c",
+      "symbol_count": 12,
+      "symbols": [
+        "tr_async_operation_accept",
+        "tr_async_operation_consume",
+        "tr_async_operation_pool_close",
+        "tr_async_operation_pool_create",
+        "tr_async_operation_pool_destroy",
+        "tr_async_operation_pool_handoff_owner",
+        "tr_async_operation_publish",
+        "tr_async_operation_reject",
+        "tr_async_operation_request_cancel",
+        "tr_async_operation_reserve",
+        "tr_async_operation_retire",
+        "tr_async_operation_test_set_generation"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/message/builder.c.o",
+      "consumer_source": "src/message/builder.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_message_storage_cancel",
+        "tr_message_storage_publish",
+        "tr_message_storage_reserve"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/message/transform.c.o",
+      "consumer_source": "src/message/transform.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_message_none_move",
+        "tr_message_release",
+        "tr_message_storage_cancel",
+        "tr_message_storage_publish",
+        "tr_message_storage_reserve",
+        "tr_message_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/message/transform.c.o",
+      "consumer_source": "src/message/transform.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/zstd.c.o",
+      "provider_source": "src/message/zstd.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_message_zstd_plan",
+        "tr_message_zstd_run"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_buffer_acquire",
+        "tr_buffer_pool_free_count",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_recovery_acquire",
+        "tr_reactor_recovery_release",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record.c.o",
+      "provider_source": "src/rpc/rpc_record.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_state_apply"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "provider_source": "src/rpc/rpc_record_dispatch.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_rpc_v2_context_acquire_internal",
+        "tr_rpc_v2_context_release_internal",
+        "tr_rpc_v2_context_status_internal"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "provider_source": "src/rpc/rpc_record_stream.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_rpc_record_stream_abort_on_owner",
+        "tr_rpc_record_stream_create_on_owner",
+        "tr_rpc_record_stream_destroy_on_owner",
+        "tr_rpc_record_stream_event_on_owner",
+        "tr_rpc_record_stream_reap_stopped",
+        "tr_rpc_record_stream_receive_on_owner",
+        "tr_rpc_record_stream_send_compressed_on_owner",
+        "tr_rpc_record_stream_send_on_owner",
+        "tr_rpc_record_stream_snapshot_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_v2.c.o",
+      "provider_source": "src/rpc/rpc_v2.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_v2_metadata_encode",
+        "tr_rpc_v2_metadata_view_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "consumer_source": "src/rpc/rpc_record_client.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 8,
+      "symbols": [
+        "tr_channel_max_streams",
+        "tr_channel_reactor",
+        "tr_channel_set_handler",
+        "tr_stream_close",
+        "tr_stream_get_flow_state",
+        "tr_stream_open",
+        "tr_stream_reset_on_owner",
+        "tr_stream_stop_credit_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/async_operation.c.o",
+      "provider_source": "src/execution/async_operation.c",
+      "symbol_count": 12,
+      "symbols": [
+        "tr_async_operation_accept",
+        "tr_async_operation_consume",
+        "tr_async_operation_pool_bind_owner",
+        "tr_async_operation_pool_close",
+        "tr_async_operation_pool_create",
+        "tr_async_operation_pool_destroy",
+        "tr_async_operation_publish",
+        "tr_async_operation_reap_stopped",
+        "tr_async_operation_reject",
+        "tr_async_operation_request_cancel",
+        "tr_async_operation_reserve",
+        "tr_async_operation_retire"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_recovery_acquire",
+        "tr_reactor_recovery_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/task_executor.c.o",
+      "provider_source": "src/execution/task_executor.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_task_cancel_requested",
+        "tr_task_executor_cancel",
+        "tr_task_executor_is_current_owner",
+        "tr_task_executor_submit"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/peer_identity_internal.c.o",
+      "provider_source": "src/io/peer_identity_internal.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_peer_identity_snapshot_release",
+        "tr_peer_identity_snapshot_retain",
+        "tr_peer_identity_snapshot_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "provider_source": "src/rpc/rpc_record_producer.c",
+      "symbol_count": 8,
+      "symbols": [
+        "tr_rpc_record_producer_abandoned",
+        "tr_rpc_record_producer_activate",
+        "tr_rpc_record_producer_close",
+        "tr_rpc_record_producer_complete",
+        "tr_rpc_record_producer_create",
+        "tr_rpc_record_producer_fail",
+        "tr_rpc_record_producer_put",
+        "tr_rpc_record_producer_take"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_router.c.o",
+      "provider_source": "src/rpc/rpc_record_router.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_rpc_record_router_abort_on_owner",
+        "tr_rpc_record_router_admit_on_owner",
+        "tr_rpc_record_router_create_on_owner",
+        "tr_rpc_record_router_destroy_on_owner",
+        "tr_rpc_record_router_event_on_owner",
+        "tr_rpc_record_router_reap_stopped",
+        "tr_rpc_record_router_receive_on_owner",
+        "tr_rpc_record_router_retire_on_owner",
+        "tr_rpc_record_router_send_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_v2.c.o",
+      "provider_source": "src/rpc/rpc_v2.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_v2_metadata_encode",
+        "tr_rpc_v2_metadata_view_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "consumer_source": "src/rpc/rpc_record_dispatch.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_channel_max_streams",
+        "tr_channel_peer_identity_snapshot_on_owner",
+        "tr_channel_reactor"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_endpoint.c.o",
+      "consumer_source": "src/rpc/rpc_record_endpoint.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_recovery_acquire",
+        "tr_reactor_recovery_release",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_endpoint.c.o",
+      "consumer_source": "src/rpc/rpc_record_endpoint.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/task_executor.c.o",
+      "provider_source": "src/execution/task_executor.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_task_executor_dispatch"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_endpoint.c.o",
+      "consumer_source": "src/rpc/rpc_record_endpoint.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record.c.o",
+      "provider_source": "src/rpc/rpc_record.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_encode_header"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_endpoint.c.o",
+      "consumer_source": "src/rpc/rpc_record_endpoint.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "provider_source": "src/rpc/rpc_record_dispatch.c",
+      "symbol_count": 12,
+      "symbols": [
+        "tr_rpc_record_dispatch_abort_on_owner",
+        "tr_rpc_record_dispatch_admit_until_on_owner",
+        "tr_rpc_record_dispatch_bind_producers_on_owner",
+        "tr_rpc_record_dispatch_bind_semantic_stats_on_owner",
+        "tr_rpc_record_dispatch_create_on_owner",
+        "tr_rpc_record_dispatch_destroy_on_owner",
+        "tr_rpc_record_dispatch_event_on_owner",
+        "tr_rpc_record_dispatch_pump_on_owner",
+        "tr_rpc_record_dispatch_reap_stopped",
+        "tr_rpc_record_dispatch_receive_on_owner",
+        "tr_rpc_record_dispatch_result_on_owner",
+        "tr_rpc_record_dispatch_retire_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_endpoint.c.o",
+      "consumer_source": "src/rpc/rpc_record_endpoint.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 7,
+      "symbols": [
+        "tr_channel_max_streams",
+        "tr_channel_reactor",
+        "tr_channel_set_handler",
+        "tr_stream_close",
+        "tr_stream_reset_on_owner",
+        "tr_stream_sendv",
+        "tr_stream_stop_credit_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/deadline.c.o",
+      "provider_source": "src/execution/deadline.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_deadline_init_ms"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_reactor_in_owner_context"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/worker_context.c.o",
+      "provider_source": "src/execution/worker_context.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_execution_in_worker_context"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "provider_source": "src/rpc/rpc_record_client.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_client_in_callback"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "provider_source": "src/rpc/rpc_record_dispatch.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_dispatch_in_callback"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "consumer_source": "src/rpc/rpc_record_producer.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_v2.c.o",
+      "provider_source": "src/rpc/rpc_v2.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_v2_metadata_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_router.c.o",
+      "consumer_source": "src/rpc/rpc_record_router.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_recovery_acquire",
+        "tr_reactor_recovery_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_router.c.o",
+      "consumer_source": "src/rpc/rpc_record_router.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record.c.o",
+      "provider_source": "src/rpc/rpc_record.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_record_decode_header",
+        "tr_rpc_record_state_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_router.c.o",
+      "consumer_source": "src/rpc/rpc_record_router.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "provider_source": "src/rpc/rpc_record_stream.c",
+      "symbol_count": 8,
+      "symbols": [
+        "tr_rpc_record_stream_abort_on_owner",
+        "tr_rpc_record_stream_create_on_owner",
+        "tr_rpc_record_stream_destroy_on_owner",
+        "tr_rpc_record_stream_event_on_owner",
+        "tr_rpc_record_stream_reap_stopped",
+        "tr_rpc_record_stream_receive_on_owner",
+        "tr_rpc_record_stream_send_compressed_on_owner",
+        "tr_rpc_record_stream_send_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_router.c.o",
+      "consumer_source": "src/rpc/rpc_record_router.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_channel_max_streams",
+        "tr_channel_reactor",
+        "tr_stream_get_diagnostics"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "consumer_source": "src/rpc/rpc_record_stream.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "consumer_source": "src/rpc/rpc_record_stream.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_recovery_acquire",
+        "tr_reactor_recovery_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "consumer_source": "src/rpc/rpc_record_stream.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/builder.c.o",
+      "provider_source": "src/message/builder.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_message_builder_append",
+        "tr_message_builder_cancel",
+        "tr_message_builder_create",
+        "tr_message_builder_publish"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "consumer_source": "src/rpc/rpc_record_stream.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_message_clone",
+        "tr_message_release",
+        "tr_message_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "consumer_source": "src/rpc/rpc_record_stream.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record.c.o",
+      "provider_source": "src/rpc/rpc_record.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_rpc_record_decode",
+        "tr_rpc_record_decode_header",
+        "tr_rpc_record_encode_header",
+        "tr_rpc_record_state_abort",
+        "tr_rpc_record_state_apply",
+        "tr_rpc_record_state_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_stream.c.o",
+      "consumer_source": "src/rpc/rpc_record_stream.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 8,
+      "symbols": [
+        "tr_channel_message_cancel_on_owner",
+        "tr_channel_message_limits_on_owner",
+        "tr_channel_message_submit_on_owner",
+        "tr_channel_reactor",
+        "tr_stream_get_diagnostics",
+        "tr_stream_reset_on_owner",
+        "tr_stream_send",
+        "tr_stream_sendv"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "consumer_source": "src/runtime/message_service.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/async_operation.c.o",
+      "provider_source": "src/execution/async_operation.c",
+      "symbol_count": 13,
+      "symbols": [
+        "tr_async_operation_accept",
+        "tr_async_operation_consume",
+        "tr_async_operation_pool_bind_owner",
+        "tr_async_operation_pool_close",
+        "tr_async_operation_pool_create",
+        "tr_async_operation_pool_destroy",
+        "tr_async_operation_pool_handoff_owner",
+        "tr_async_operation_publish",
+        "tr_async_operation_reap_stopped",
+        "tr_async_operation_reject",
+        "tr_async_operation_request_cancel",
+        "tr_async_operation_reserve",
+        "tr_async_operation_retire"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "consumer_source": "src/runtime/message_service.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_reactor_aux_event_register",
+        "tr_reactor_aux_event_unregister",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_recovery_acquire",
+        "tr_reactor_recovery_release",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "consumer_source": "src/runtime/message_service.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/task_executor.c.o",
+      "provider_source": "src/execution/task_executor.c",
+      "symbol_count": 12,
+      "symbols": [
+        "tr_task_cancel_requested",
+        "tr_task_executor_adopt_cleanup",
+        "tr_task_executor_cancel",
+        "tr_task_executor_create",
+        "tr_task_executor_destroy",
+        "tr_task_executor_dispatch",
+        "tr_task_executor_get_stats",
+        "tr_task_executor_join",
+        "tr_task_executor_set_notify",
+        "tr_task_executor_start",
+        "tr_task_executor_stop",
+        "tr_task_executor_submit"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "consumer_source": "src/runtime/message_service.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/worker_context.c.o",
+      "provider_source": "src/execution/worker_context.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_execution_in_worker_context"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "consumer_source": "src/runtime/message_service.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_message_clone",
+        "tr_message_release",
+        "tr_message_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "consumer_source": "src/runtime/message_service.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/transform.c.o",
+      "provider_source": "src/message/transform.c",
+      "symbol_count": 5,
+      "symbols": [
+        "tr_message_transform_cancel",
+        "tr_message_transform_finish",
+        "tr_message_transform_prepare",
+        "tr_message_transform_run",
+        "tr_message_transform_run_checked"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/runtime.c.o",
+      "consumer_source": "src/runtime/runtime.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 11,
+      "symbols": [
+        "tr_reactor_call",
+        "tr_reactor_create",
+        "tr_reactor_destroy",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_listener_register",
+        "tr_reactor_listener_unregister",
+        "tr_reactor_peer_event_register",
+        "tr_reactor_peer_event_unregister",
+        "tr_reactor_start",
+        "tr_reactor_stop"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/runtime.c.o",
+      "consumer_source": "src/runtime/runtime.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/worker_context.c.o",
+      "provider_source": "src/execution/worker_context.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_execution_in_worker_context"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/runtime.c.o",
+      "consumer_source": "src/runtime/runtime.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_socket_close",
+        "tr_tcp_listen_ipv4_ex"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/runtime.c.o",
+      "consumer_source": "src/runtime/runtime.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/message_service.c.o",
+      "provider_source": "src/runtime/message_service.c",
+      "symbol_count": 7,
+      "symbols": [
+        "tr_message_service_cancel",
+        "tr_message_service_create_on_owner",
+        "tr_message_service_get_stats_on_owner",
+        "tr_message_service_reap_stopped",
+        "tr_message_service_start_on_owner",
+        "tr_message_service_stop_on_owner",
+        "tr_message_service_submit_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_buffer_pool_destroy",
+        "tr_buffer_pool_get_stats",
+        "tr_buffer_pool_init_budgeted",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/deadline.c.o",
+      "provider_source": "src/execution/deadline.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_deadline_expired",
+        "tr_deadline_init_ms"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 17,
+      "symbols": [
+        "tr_reactor_abort_on_owner",
+        "tr_reactor_adopt_fd",
+        "tr_reactor_adopt_tls_fd_on_owner",
+        "tr_reactor_call",
+        "tr_reactor_call_or_stopped",
+        "tr_reactor_close_graceful",
+        "tr_reactor_close_on_owner",
+        "tr_reactor_get_connection_state",
+        "tr_reactor_get_stats",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_memory_requirement",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister",
+        "tr_reactor_tls_admission_set",
+        "tr_reactor_tls_close_before_generation",
+        "tr_reactor_tls_close_generation"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/task_executor.c.o",
+      "provider_source": "src/execution/task_executor.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_task_executor_adopt_cleanup",
+        "tr_task_executor_create",
+        "tr_task_executor_destroy",
+        "tr_task_executor_dispatch",
+        "tr_task_executor_get_stats",
+        "tr_task_executor_join",
+        "tr_task_executor_set_notify",
+        "tr_task_executor_start",
+        "tr_task_executor_stop"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/worker_context.c.o",
+      "provider_source": "src/execution/worker_context.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_execution_in_worker_context"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/facade.c.o",
+      "provider_source": "src/facade.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_facade_limits_init",
+        "tr_facade_tuning_init",
+        "tr_facade_tuning_normalize"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_socket_close",
+        "tr_tcp_accept",
+        "tr_tcp_set_nodelay"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_config.c.o",
+      "provider_source": "src/io/tls_config.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_tls_credentials_provider_validate",
+        "tr_tls_server_config_validate",
+        "tr_tls_server_config_validate_for_pem"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "provider_source": "src/io/tls_openssl.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_tls_openssl_profile_next_generation",
+        "tr_tls_openssl_profile_release",
+        "tr_tls_openssl_profile_retain",
+        "tr_tls_openssl_profile_set_generation",
+        "tr_tls_openssl_server_profile_create",
+        "tr_tls_openssl_server_profile_create_from_pem"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_provider_operation.c.o",
+      "provider_source": "src/io/tls_provider_operation.c",
+      "symbol_count": 9,
+      "symbols": [
+        "tr_tls_provider_operation_accept",
+        "tr_tls_provider_operation_complete",
+        "tr_tls_provider_operation_complete_credentials",
+        "tr_tls_provider_operation_credentials_result",
+        "tr_tls_provider_operation_request_cancel",
+        "tr_tls_provider_operation_reserve",
+        "tr_tls_provider_operation_retire",
+        "tr_tls_provider_operation_table_destroy",
+        "tr_tls_provider_operation_table_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record.c.o",
+      "provider_source": "src/rpc/rpc_record.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_state_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_client.c.o",
+      "provider_source": "src/rpc/rpc_record_client.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_client_in_callback"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_dispatch.c.o",
+      "provider_source": "src/rpc/rpc_record_dispatch.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_rpc_record_dispatch_in_callback"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_endpoint.c.o",
+      "provider_source": "src/rpc/rpc_record_endpoint.c",
+      "symbol_count": 8,
+      "symbols": [
+        "tr_rpc_record_endpoint_bind_producers_on_owner",
+        "tr_rpc_record_endpoint_bind_semantic_stats_on_owner",
+        "tr_rpc_record_endpoint_close_on_owner",
+        "tr_rpc_record_endpoint_create_on_owner",
+        "tr_rpc_record_endpoint_is_drained_on_owner",
+        "tr_rpc_record_endpoint_reap_stopped",
+        "tr_rpc_record_endpoint_set_progress_notify_on_owner",
+        "tr_rpc_record_endpoint_start_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_record_producer.c.o",
+      "provider_source": "src/rpc/rpc_record_producer.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_record_producer_domain_close",
+        "tr_rpc_record_producer_domain_create"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/rpc/rpc_v2.c.o",
+      "provider_source": "src/rpc/rpc_v2.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_rpc_v2_memory_limit",
+        "tr_rpc_v2_prepare_limits"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/runtime/runtime.c.o",
+      "provider_source": "src/runtime/runtime.c",
+      "symbol_count": 29,
+      "symbols": [
+        "tr_runtime_create",
+        "tr_runtime_destroy",
+        "tr_runtime_shard_at",
+        "tr_runtime_shard_call",
+        "tr_runtime_shard_close_listener",
+        "tr_runtime_shard_count",
+        "tr_runtime_shard_disable_listener_events",
+        "tr_runtime_shard_disable_peer_events",
+        "tr_runtime_shard_drain_peer_event",
+        "tr_runtime_shard_enable_listener_events",
+        "tr_runtime_shard_enable_peer_events",
+        "tr_runtime_shard_id",
+        "tr_runtime_shard_listen_ipv4_ex",
+        "tr_runtime_shard_listener_fd",
+        "tr_runtime_shard_memory_budget",
+        "tr_runtime_shard_message_cancel_adapter",
+        "tr_runtime_shard_message_submit_adapter",
+        "tr_runtime_shard_peer_at",
+        "tr_runtime_shard_peer_capacity",
+        "tr_runtime_shard_peer_note_added",
+        "tr_runtime_shard_peer_note_capacity_rejection",
+        "tr_runtime_shard_peer_note_ready",
+        "tr_runtime_shard_peer_note_reaped",
+        "tr_runtime_shard_peer_note_removed_for_reap",
+        "tr_runtime_shard_peer_stats",
+        "tr_runtime_shard_reactor",
+        "tr_runtime_shard_signal_peer_event",
+        "tr_runtime_start",
+        "tr_runtime_stop"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "provider_source": "src/transport/channel/channel.c",
+      "symbol_count": 11,
+      "symbols": [
+        "tr_channel_begin_drain",
+        "tr_channel_bind_message_service_on_owner",
+        "tr_channel_create_deferred",
+        "tr_channel_destroy",
+        "tr_channel_detach_for_finalize",
+        "tr_channel_enable_keepalive",
+        "tr_channel_finalize_detached",
+        "tr_channel_get_stats",
+        "tr_channel_set_lifecycle_observer",
+        "tr_channel_start",
+        "tr_channel_wait_drained_deadline"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/server.c.o",
+      "consumer_source": "src/server.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "provider_source": "src/transport/group/pipeline_listener.c",
+      "symbol_count": 13,
+      "symbols": [
+        "tr_pipeline_listener_authorize_complete",
+        "tr_pipeline_listener_begin_drain",
+        "tr_pipeline_listener_bound_port",
+        "tr_pipeline_listener_create",
+        "tr_pipeline_listener_destroy",
+        "tr_pipeline_listener_get_stats",
+        "tr_pipeline_listener_listen_ipv4",
+        "tr_pipeline_listener_release_transfer",
+        "tr_pipeline_listener_send_data_offer",
+        "tr_pipeline_listener_send_transfer_ready",
+        "tr_pipeline_listener_set_tls_profile_on_owner",
+        "tr_pipeline_listener_stop",
+        "tr_pipeline_listener_wait_drained"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_buffer_acquire",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/deadline.c.o",
+      "provider_source": "src/execution/deadline.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_deadline_expired",
+        "tr_deadline_init_infinite",
+        "tr_deadline_init_ms"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 28,
+      "symbols": [
+        "tr_reactor_abort",
+        "tr_reactor_abort_on_owner",
+        "tr_reactor_adopt_fd",
+        "tr_reactor_call",
+        "tr_reactor_call_or_stopped",
+        "tr_reactor_close",
+        "tr_reactor_close_on_owner",
+        "tr_reactor_get_connection_state",
+        "tr_reactor_get_connection_stats",
+        "tr_reactor_get_limits",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_in_owner_context_for",
+        "tr_reactor_notify_tx_drained_on_owner",
+        "tr_reactor_peer_identity_snapshot_on_owner",
+        "tr_reactor_quiesce",
+        "tr_reactor_send",
+        "tr_reactor_send_data_frame_on_owner",
+        "tr_reactor_send_goaway_on_owner",
+        "tr_reactor_send_stream_refused_on_owner",
+        "tr_reactor_send_stream_reset_on_owner",
+        "tr_reactor_sendv_limited",
+        "tr_reactor_set_handler",
+        "tr_reactor_set_rx_hold_on_owner",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister",
+        "tr_reactor_watch_control_tx_on_owner",
+        "tr_reactor_watch_data_tx_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/connector.c.o",
+      "provider_source": "src/io/connector.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_connector_create",
+        "tr_connector_destroy",
+        "tr_connector_start"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_socket_close"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/builder.c.o",
+      "provider_source": "src/message/builder.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_message_builder_append",
+        "tr_message_builder_cancel",
+        "tr_message_builder_create",
+        "tr_message_builder_publish"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_message_clone",
+        "tr_message_release",
+        "tr_message_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel_stream_id.c.o",
+      "provider_source": "src/transport/channel/channel_stream_id.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_channel_local_stream_id_take"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/reset_tombstone_index.c.o",
+      "provider_source": "src/transport/channel/reset_tombstone_index.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_reset_tombstone_index_find",
+        "tr_reset_tombstone_index_insert",
+        "tr_reset_tombstone_index_remove"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/message_caps.c.o",
+      "provider_source": "src/transport/protocol/message_caps.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_message_caps_decode",
+        "tr_message_caps_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/message_envelope.c.o",
+      "provider_source": "src/transport/protocol/message_envelope.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_message_envelope_decode",
+        "tr_message_envelope_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/channel/channel.c.o",
+      "consumer_source": "src/transport/channel/channel.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/wire.c.o",
+      "provider_source": "src/transport/protocol/wire.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_wire_stream_reset_status_valid"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_buffer_acquire",
+        "tr_buffer_pool_destroy",
+        "tr_buffer_pool_init",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/deadline.c.o",
+      "provider_source": "src/execution/deadline.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_deadline_expired",
+        "tr_deadline_init_ms",
+        "tr_deadline_poll_fd"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 11,
+      "symbols": [
+        "tr_reactor_abort_on_owner",
+        "tr_reactor_adopt_fd",
+        "tr_reactor_adopt_tls_fd_outbound_prefaced_on_owner",
+        "tr_reactor_call",
+        "tr_reactor_call_or_stopped",
+        "tr_reactor_close_on_owner",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_peer_identity_snapshot_on_owner",
+        "tr_reactor_send",
+        "tr_reactor_sendv_limited",
+        "tr_reactor_set_handler"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control_wire.c.o",
+      "provider_source": "src/group/pipeline_control_wire.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_pipeline_control_wire_data_route",
+        "tr_pipeline_control_wire_decode",
+        "tr_pipeline_control_wire_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "provider_source": "src/group/pipeline_route.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_route_preface_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/connector.c.o",
+      "provider_source": "src/io/connector.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_connector_cancel",
+        "tr_connector_create",
+        "tr_connector_destroy",
+        "tr_connector_start"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/peer_identity_internal.c.o",
+      "provider_source": "src/io/peer_identity_internal.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_peer_identity_snapshot_release",
+        "tr_peer_identity_snapshot_retain",
+        "tr_peer_identity_snapshot_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_socket_close",
+        "tr_tcp_connect_ipv4",
+        "tr_tcp_finish_connect",
+        "tr_tcp_set_nodelay"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "provider_source": "src/io/tls_openssl.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_tls_openssl_profile_release",
+        "tr_tls_openssl_profile_retain"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/builder.c.o",
+      "provider_source": "src/message/builder.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_message_builder_append",
+        "tr_message_builder_cancel",
+        "tr_message_builder_create",
+        "tr_message_builder_publish"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_message_none_move",
+        "tr_message_release",
+        "tr_message_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/message_caps.c.o",
+      "provider_source": "src/transport/protocol/message_caps.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_message_caps_decode",
+        "tr_message_caps_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/client_group.c.o",
+      "consumer_source": "src/transport/group/client_group.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/message_envelope.c.o",
+      "provider_source": "src/transport/protocol/message_envelope.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_message_envelope_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_control_transport.c.o",
+      "consumer_source": "src/transport/group/pipeline_control_transport.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_buffer_acquire",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_control_transport.c.o",
+      "consumer_source": "src/transport/group/pipeline_control_transport.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_reactor_abort_on_owner",
+        "tr_reactor_call",
+        "tr_reactor_send",
+        "tr_reactor_set_handler"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_control_transport.c.o",
+      "consumer_source": "src/transport/group/pipeline_control_transport.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "provider_source": "src/group/pipeline_control.c",
+      "symbol_count": 7,
+      "symbols": [
+        "tr_pipeline_control_abort",
+        "tr_pipeline_control_cancel_data",
+        "tr_pipeline_control_cancel_data_wire",
+        "tr_pipeline_control_get_stats",
+        "tr_pipeline_control_prepare_transfer_wire",
+        "tr_pipeline_control_release_transfer",
+        "tr_pipeline_control_reserve_data_wire_ex"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_control_transport.c.o",
+      "consumer_source": "src/transport/group/pipeline_control_transport.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control_wire.c.o",
+      "provider_source": "src/group/pipeline_control_wire.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_control_wire_decode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_control_transport.c.o",
+      "consumer_source": "src/transport/group/pipeline_control_transport.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "provider_source": "src/group/pipeline_route.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_route_preface_validate_fields"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_ingress.c.o",
+      "consumer_source": "src/transport/group/pipeline_ingress.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_reactor_abort_on_owner",
+        "tr_reactor_adopt_fd_prefaced_on_owner",
+        "tr_reactor_set_handler"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_ingress.c.o",
+      "consumer_source": "src/transport/group/pipeline_ingress.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline.c.o",
+      "provider_source": "src/group/pipeline.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_stream_data"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_ingress.c.o",
+      "consumer_source": "src/transport/group/pipeline_ingress.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_registry.c.o",
+      "provider_source": "src/group/pipeline_registry.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_pipeline_registry_attach_data_route_local_on_owner",
+        "tr_pipeline_registry_detach_data_route",
+        "tr_pipeline_registry_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_ingress.c.o",
+      "consumer_source": "src/transport/group/pipeline_ingress.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "provider_source": "src/group/pipeline_route.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_pipeline_route_parser_feed",
+        "tr_pipeline_route_parser_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_buffer_acquire",
+        "tr_buffer_pool_destroy",
+        "tr_buffer_pool_init",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/deadline.c.o",
+      "provider_source": "src/execution/deadline.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_deadline_expired",
+        "tr_deadline_init_ms"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/reactor.c.o",
+      "provider_source": "src/execution/reactor.c",
+      "symbol_count": 19,
+      "symbols": [
+        "tr_reactor_abort_on_owner",
+        "tr_reactor_adopt_fd_prefaced_on_owner",
+        "tr_reactor_adopt_tls_fd_prefaced_on_owner",
+        "tr_reactor_aux_event_register",
+        "tr_reactor_aux_event_unregister",
+        "tr_reactor_call",
+        "tr_reactor_call_or_stopped",
+        "tr_reactor_close_on_owner",
+        "tr_reactor_in_owner_context",
+        "tr_reactor_listener_register_publish",
+        "tr_reactor_listener_unregister_call",
+        "tr_reactor_peer_identity_snapshot_on_owner",
+        "tr_reactor_preface_resume_on_owner",
+        "tr_reactor_send",
+        "tr_reactor_timer_arm",
+        "tr_reactor_timer_register",
+        "tr_reactor_timer_unregister",
+        "tr_reactor_tls_generation_on_owner",
+        "tr_reactor_tls_profile_retain_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_control.c.o",
+      "provider_source": "src/group/pipeline_control.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_pipeline_control_close",
+        "tr_pipeline_control_create"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_registry.c.o",
+      "provider_source": "src/group/pipeline_registry.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_pipeline_registry_cancel_data_route",
+        "tr_pipeline_registry_create",
+        "tr_pipeline_registry_destroy",
+        "tr_pipeline_registry_validate_data_route_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/group/pipeline_route.c.o",
+      "provider_source": "src/group/pipeline_route.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_pipeline_route_parser_feed",
+        "tr_pipeline_route_parser_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/peer_identity_internal.c.o",
+      "provider_source": "src/io/peer_identity_internal.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_peer_identity_snapshot_release",
+        "tr_peer_identity_snapshot_retain",
+        "tr_peer_identity_snapshot_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/socket.c.o",
+      "provider_source": "src/io/socket.c",
+      "symbol_count": 3,
+      "symbols": [
+        "tr_socket_close",
+        "tr_tcp_accept",
+        "tr_tcp_listen_ipv4"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_openssl.c.o",
+      "provider_source": "src/io/tls_openssl.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_tls_openssl_profile_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/io/tls_provider_operation.c.o",
+      "provider_source": "src/io/tls_provider_operation.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_tls_provider_operation_accept",
+        "tr_tls_provider_operation_complete",
+        "tr_tls_provider_operation_request_cancel",
+        "tr_tls_provider_operation_reserve",
+        "tr_tls_provider_operation_result",
+        "tr_tls_provider_operation_retire"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/builder.c.o",
+      "provider_source": "src/message/builder.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_message_builder_append",
+        "tr_message_builder_cancel",
+        "tr_message_builder_create",
+        "tr_message_builder_publish"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/message/message.c.o",
+      "provider_source": "src/message/message.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_message_clone",
+        "tr_message_none_move",
+        "tr_message_release",
+        "tr_message_view"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_control_transport.c.o",
+      "provider_source": "src/transport/group/pipeline_control_transport.c",
+      "symbol_count": 6,
+      "symbols": [
+        "tr_pipeline_control_transport_abort",
+        "tr_pipeline_control_transport_create",
+        "tr_pipeline_control_transport_get_stats",
+        "tr_pipeline_control_transport_release_transfer",
+        "tr_pipeline_control_transport_send_data_offer",
+        "tr_pipeline_control_transport_send_transfer_ready"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_ingress.c.o",
+      "provider_source": "src/transport/group/pipeline_ingress.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_pipeline_ingress_attach_data_route_on_owner"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/message_caps.c.o",
+      "provider_source": "src/transport/protocol/message_caps.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_message_caps_decode",
+        "tr_message_caps_encode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/group/pipeline_listener.c.o",
+      "consumer_source": "src/transport/group/pipeline_listener.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/message_envelope.c.o",
+      "provider_source": "src/transport/protocol/message_envelope.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_message_envelope_decode"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/frame.c.o",
+      "consumer_source": "src/transport/protocol/frame.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/parser.c.o",
+      "consumer_source": "src/transport/protocol/parser.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/crc32c.c.o",
+      "provider_source": "src/crc32c.c",
+      "symbol_count": 4,
+      "symbols": [
+        "tr_crc32c",
+        "tr_crc32c_begin",
+        "tr_crc32c_finish",
+        "tr_crc32c_update"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/parser.c.o",
+      "consumer_source": "src/transport/protocol/parser.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/execution/buffer.c.o",
+      "provider_source": "src/execution/buffer.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_buffer_acquire",
+        "tr_buffer_release"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/parser.c.o",
+      "consumer_source": "src/transport/protocol/parser.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/frame.c.o",
+      "provider_source": "src/transport/protocol/frame.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_frame_init"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/parser.c.o",
+      "consumer_source": "src/transport/protocol/parser.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/wire.c.o",
+      "provider_source": "src/transport/protocol/wire.c",
+      "symbol_count": 2,
+      "symbols": [
+        "tr_wire_header_decode",
+        "tr_wire_header_validate"
+      ]
+    },
+    {
+      "consumer_object": "build/.objs/trcore/linux/x86_64/release/src/transport/protocol/wire.c.o",
+      "consumer_source": "src/transport/protocol/wire.c",
+      "provider_object": "build/.objs/trcore/linux/x86_64/release/src/crc32c.c.o",
+      "provider_source": "src/crc32c.c",
+      "symbol_count": 1,
+      "symbols": [
+        "tr_crc32c"
+      ]
+    }
+  ],
+  "purpose": "当前生产 trcore 对象间可由全局符号解析出的引用快照；不是运行时调用图或批准依赖策略。",
+  "schema": 1,
+  "unique_object_reference_edges": 170
+}

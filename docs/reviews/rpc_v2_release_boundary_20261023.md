@@ -271,5 +271,7 @@ TLS 洪峰/取消、内核 socket 实际驻留、40k clean 负载或完整发行
 仓库内直接 include 边，其中 249 条跨现有目录分组。`src/execution/reactor.c` 直接包含 TRP
 parser/wire，`reactor.h` 直接包含 frame；目录分组不等于逻辑模块，也不把边数视为违规数。
 完整身份、逐翻译单元边和边界限制见 [依赖快照](module_dependency_inventory_20261030.md)。
-它补齐 #248 的当前 GCC 配置 include 现状证据，未补齐允许依赖策略、符号/布局调用图、其他
+同一 55 个生产对象的 `nm` 分析另得到 170 条对象间引用边，其中 128 条跨目录分组；Reactor
+对象引用 protocol frame/parser/wire 对象符号，详见[符号图](data/module_object_symbol_inventory_20261030.json)。
+这些快照补齐当前 GCC 配置的 include 与对象符号现状证据，未补齐允许依赖策略、数据布局/回调图、其他
 平台条件或负向门禁；#248 仍开放。
