@@ -796,6 +796,15 @@ int tr_message_service_reap_stopped(struct tr_message_service **pointer)
 		ret = tr_task_executor_adopt_cleanup(service->executor);
 		if (ret != TR_OK)
 			return ret;
+		/* 旧 owner 已停止不代表 producer 已停止；保留其操作槽直到
+		 * worker 退出并成功 join，迟到完成仍须经过真实发布交接。
+		 * 部分销毁重试时执行器已越过此屏障，不再访问其退休状态。
+		 */
+		if (!service->executor_retiring) {
+			ret = tr_task_executor_join(service->executor);
+			if (ret != TR_OK)
+				return ret;
+		}
 	}
 	if (service->operations && !service->operations_reaped) {
 		uint32_t reaped;

@@ -4,7 +4,7 @@
 
 当前持续验证范围为 Ubuntu 22.04 / x86_64 的 C11 SDK；C++11 消费端校验公开头文件、C 链接约定和真实 V2 客户端／服务端调用。其他内核、架构与工具链须单独验证。部署安全、许可及兼容边界见 [平台与发布契约](docs/platform-support.md)。
 
-当前 `2.0.0-dev.179` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
+当前 `2.0.0-dev.180` 候选基于 OpenSSL 3 TLS 1.3 和 mTLS 已接入普通 V2
 Client/Server，以及 transport-only 连接组 Client/Server。连接组启用 TLS 时强制要求
 双向客户端证书认证；CONTROL/DATA 都在 TLS 认证后发送或解析路由，并要求每条 DATA
 连接的服务端 URI SAN 主体与活动 CONTROL 主体一致。TLS profile 支持 graceful 轮换和
@@ -49,6 +49,10 @@ dev.179 修复 TLS 最后一条发送记录排空后残留 EPOLLOUT 使空闲 I/
 发送队列结算后按实际队列与 TLS WANT 状态重新计算兴趣，保留读监听与写背压重试。
 既有 TLS Reactor 回归同时检查两端空闲连接的实际 epoll 注册，不使用 CPU 阈值判定。
 根因、先红后绿及固定输入对照见[空闲写兴趣修复记录](docs/reviews/rpc_v2_tls_idle_interest_20261029.md)。
+dev.180 修复 MessageService 停止后接管时抢先回收异步操作槽的问题：先确认压缩 worker
+已退出并成功 join，再回收操作池；等待与 join 失败期间保留 producer 完成交接能力。
+真实 Runtime 压缩回归检查运行中与排队任务都能发布完成，再唯一取消回调并归还预算，
+详见[停止回收 producer 屏障记录](docs/reviews/rpc_v2_message_reap_producer_barrier_20261029.md)。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 已合入主线且合并后 CI 通过；
 TLS-D2 与后续集成候选仍在未合并 PR 中。TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。

@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.179")
+set_version("2.0.0-dev.180")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -660,6 +660,7 @@ target("test_runtime_message_recovery")
     add_files("tests/test_runtime_message_recovery.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=epoll_wait", "-Wl,--wrap=write",
+                "-Wl,--wrap=tr_async_operation_publish",
                 "-Wl,--wrap=tr_message_service_create_on_owner",
                 "-Wl,--wrap=tr_reactor_destroy",
                 "-Wl,--wrap=pthread_cond_destroy",
