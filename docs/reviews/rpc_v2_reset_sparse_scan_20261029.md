@@ -71,3 +71,25 @@ Clang Release、GCC ASan/UBSan（含泄漏检查）、TSan、最终恢复的 GCC
 索引布局与回调重入的扫描顺序。32 位/其他架构的运行证据未取得。CTM1 共同描述
 协商仍待设计审阅，服务目标/Attempt、生成工具与桩、后端等价比较、TLS-E 与
 #239/#154 最终发布核对仍未完成。
+
+## 后续 GCC 11 位置复核
+
+实现提交 `0d81342` 的远端检查为 12 成功、1 失败，唯一失败为
+[GCC 11 静态分析](https://github.com/MyBlackHole/c-trpc/actions/runs/40895327796/job/123522744118)。
+55 个生产单元均完成，清理正对照与泄漏负对照通过；仍只有原来一条
+analyzer-use-after-free、相同文件/列/消息，但位置从 1402 移到 1404，精确门禁
+以 added=1/removed=1 正确阻断。原因是 Channel 内部增加指针及注释两行。
+
+对比 dev.181 与 dev.182：告警涉及的 wire release、fragment release、transform
+销毁与丢弃发送四个函数逐字节一致；两份 GCC 11 原始诊断只规范化源码坐标后
+全文一致。另经 GitHub commit tree 核对，两次 CI 的 PR 合并快照分别与所关联
+PR head 的完整树完全相同，未把不同生产树的日志当成当前分析证据。
+[复核清单](data/reset_sparse_scan_gcc11_location_20261029.json)及
+[旧原始诊断](data/reset_sparse_scan_gcc11_dev181_20261029.json)、
+[新原始诊断](data/reset_sparse_scan_gcc11_dev182_20261029.json)保留这些证据；JSON 的 log 字段逐字节保留原 UTF-8 输出与标记空白。
+
+只将基线 line 改为 1404，其余字段、数量和 unverified 原样保留；不关闭检查、
+不放宽匹配，也不将该告警改判为误报或根因修复。复制真实 CI 产物后重放原门禁
+先失败，位置校正后通过 55 单元/1 条跟踪告警；执行器与门禁自测各 12/12。
+本机未重新执行 GCC 11 生产分析，后续提交须再由 CI 实际完成；生产源码与原
+四组完整 95/95 的输入摘要相同，不因纯账目位置更新重复运行 C 测试。
