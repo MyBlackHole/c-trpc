@@ -52,6 +52,8 @@ void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile);
 /*
  * memory_budget 是借用指针，必须长于 session。记账只覆盖本库创建的
  * session 与 socket BIO 用户数据；OpenSSL 内部对象不计入该预算。
+ * session 持有 profile 强引用，直到 SSL/BIO 全部释放后才归还；调用方
+ * 可以在创建成功后释放自己的 profile 引用。
  */
 int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
                                   int fd,

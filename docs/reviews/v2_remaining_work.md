@@ -1,6 +1,8 @@
 # V2 开发剩余项
 
-当前接续候选：2026-10-29，`codex/release-readiness-20261029` 从原本地集成提交 `02c78a50ecfe38852e9ddb327f2cf49c4a460936` 恢复，版本为 `2.0.0-dev.173`，已推送到 [Draft PR #333](https://github.com/MyBlackHole/c-trpc/pull/333)，base 为 #332 实现分支。dev.173 为 A→B→A 增加八个真实 mTLS/压缩/子调用时机组合；GCC Debug/Release、Clang Release、ASan/UBSan、TSan 全量各 94/94，身份丢失变异验证通过。实现提交 `dfddf763b83d94742afa8d63816c321a7b5bac0d` 的 GitHub 检查 13/13 全部成功；文档接续提交另行核对精确 head。详细证据见[组合记录](rpc_v2_nested_tls_compression_20261029.md)。这些是组合候选证据，不是完整 TEST-D/E 或发布验收；下面保留历史分支与阶段记录，不把旧 head 的绿色检查当作当前整体验收。
+当前本地候选：2026-10-29，`2.0.0-dev.174`。独立 OpenSSL 分配账本复现并修复带预算 session 分配失败误报成功、socket BIO 方法表无释放域两项问题；方法表由 profile 拥有，会话强引用保护完整寿命，类型编号只申请一次。GCC Release 串行全量 95/95；Clang Release、ASan/UBSan（泄漏检查）、TSan 各八个 TLS 目标通过，均包含十二个独立资源场景。远端精确 head 待推送核对，不能借用前次绿色检查。证据与剩余资源边界见[TLS 分配账本记录](rpc_v2_tls_resource_ledger_20261029.md)。先前并行入口另发现完成标记测试竞态，将单独修复；TLS-E、服务目标/类型契约/后端决策及发布总验收仍未完成。
+
+前次接续候选：2026-10-29，`codex/release-readiness-20261029` 从原本地集成提交 `02c78a50ecfe38852e9ddb327f2cf49c4a460936` 恢复，版本为 `2.0.0-dev.173`，已推送到 [Draft PR #333](https://github.com/MyBlackHole/c-trpc/pull/333)，base 为 #332 实现分支。dev.173 为 A→B→A 增加八个真实 mTLS/压缩/子调用时机组合；GCC Debug/Release、Clang Release、ASan/UBSan、TSan 全量各 94/94，身份丢失变异验证通过。实现提交 `dfddf763b83d94742afa8d63816c321a7b5bac0d` 的 GitHub 检查 13/13 全部成功；文档接续提交另行核对精确 head。详细证据见[组合记录](rpc_v2_nested_tls_compression_20261029.md)。这些是组合候选证据，不是完整 TEST-D/E 或发布验收；下面保留历史分支与阶段记录，不把旧 head 的绿色检查当作当前整体验收。
 
 历史阶段记录（以下保留当时的 head 与验收状态）：
 

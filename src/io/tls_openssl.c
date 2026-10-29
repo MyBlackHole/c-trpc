@@ -32,6 +32,7 @@ enum tr_tls_openssl_role {
 struct tr_tls_openssl_profile {
 	struct tr_refcount references;
 	SSL_CTX *context;
+	BIO_METHOD *socket_bio_method;
 	enum tr_tls_openssl_role role;
 	uint64_t generation;
 	int peer_identity_enabled;
@@ -41,6 +42,7 @@ struct tr_tls_openssl_profile {
 
 struct tr_tls_openssl_session {
 	SSL *ssl;
+	struct tr_tls_openssl_profile *profile;
 	enum tr_tls_openssl_role role;
 	int early_data_read_finished;
 	const void *pending_write_buffer;
@@ -55,8 +57,15 @@ struct tr_tls_openssl_socket_bio_data {
 	int close_fd;
 };
 
-static BIO_METHOD *tr_tls_openssl_socket_bio_method;
-static CRYPTO_ONCE tr_tls_openssl_socket_bio_once = CRYPTO_ONCE_STATIC_INIT;
+static CRYPTO_ONCE tr_tls_openssl_socket_bio_type_once =
+        CRYPTO_ONCE_STATIC_INIT;
+static int tr_tls_openssl_socket_bio_type = -1;
+
+static void tr_tls_openssl_socket_bio_type_init(void)
+{
+	/* 类型编号只申请一次；profile 轮换仅重建同一类型的方法表。 */
+	tr_tls_openssl_socket_bio_type = BIO_get_new_index();
+}
 
 static void
 tr_tls_openssl_session_destroy(struct tr_tls_openssl_session *session)
@@ -70,6 +79,7 @@ tr_tls_openssl_session_destroy(struct tr_tls_openssl_session *session)
 	if (session->ssl)
 		SSL_free(session->ssl);
 	session->ssl = NULL;
+	tr_tls_openssl_profile_release(session->profile);
 	free(session);
 	if (memory_budget && memory_bytes != 0U)
 		(void)tr_memory_budget_release(memory_budget, memory_bytes);
@@ -232,17 +242,20 @@ static long tr_tls_openssl_socket_bio_ctrl(BIO *bio, int command, long value,
 	}
 }
 
-static void tr_tls_openssl_socket_bio_method_init(void)
+static BIO_METHOD *tr_tls_openssl_socket_bio_method_create(void)
 {
-	int type = BIO_get_new_index();
 	BIO_METHOD *method;
 
-	if (type < 0)
-		return;
-	method = BIO_meth_new(type | BIO_TYPE_SOURCE_SINK | BIO_TYPE_DESCRIPTOR,
-	                      "c-trpc nonblocking socket");
+	if (CRYPTO_THREAD_run_once(&tr_tls_openssl_socket_bio_type_once,
+	                           tr_tls_openssl_socket_bio_type_init) != 1 ||
+	    tr_tls_openssl_socket_bio_type < 0)
+		return NULL;
+	method =
+	        BIO_meth_new(tr_tls_openssl_socket_bio_type |
+	                             BIO_TYPE_SOURCE_SINK | BIO_TYPE_DESCRIPTOR,
+	                     "c-trpc nonblocking socket");
 	if (!method)
-		return;
+		return NULL;
 	if (BIO_meth_set_create(method, tr_tls_openssl_socket_bio_create) !=
 	            1 ||
 	    BIO_meth_set_destroy(method, tr_tls_openssl_socket_bio_destroy) !=
@@ -257,9 +270,9 @@ static void tr_tls_openssl_socket_bio_method_init(void)
 	            1 ||
 	    BIO_meth_set_ctrl(method, tr_tls_openssl_socket_bio_ctrl) != 1) {
 		BIO_meth_free(method);
-		return;
+		return NULL;
 	}
-	tr_tls_openssl_socket_bio_method = method;
+	return method;
 }
 
 static int tr_tls_dns_name_valid(const char *name)
@@ -370,6 +383,13 @@ static int tr_tls_openssl_profile_alloc(enum tr_tls_openssl_role role,
 		SSL_CTX_free(context);
 		free(profile);
 		return status;
+	}
+	/* 方法表属于不可变 profile，会话强引用保护它长于所有 BIO。
+	 * 不留进程级堆单例，也不向 OpenSSL 全局退出链注册库代码回调。 */
+	profile->socket_bio_method = tr_tls_openssl_socket_bio_method_create();
+	if (!profile->socket_bio_method) {
+		tr_tls_openssl_profile_release(profile);
+		return TR_ERR_NOMEM;
 	}
 	*out = profile;
 	return TR_OK;
@@ -924,6 +944,8 @@ void tr_tls_openssl_profile_release(struct tr_tls_openssl_profile *profile)
 	if (ret != 1)
 		return;
 	SSL_CTX_free(profile->context);
+	if (profile->socket_bio_method)
+		BIO_meth_free(profile->socket_bio_method);
 	free(profile->sni_name);
 	free(profile);
 }
@@ -1017,7 +1039,8 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 	if (!out)
 		return TR_ERR_INVALID;
 	*out = NULL;
-	if (!profile || !profile->context || fd < 0 ||
+	if (!profile || !profile->context || !profile->socket_bio_method ||
+	    fd < 0 ||
 	    (profile->role != TR_TLS_OPENSSL_CLIENT &&
 	     profile->role != TR_TLS_OPENSSL_SERVER))
 		return TR_ERR_INVALID;
@@ -1034,20 +1057,23 @@ int tr_tls_openssl_session_create(struct tr_tls_openssl_profile *profile,
 		if (ret != TR_OK)
 			return ret;
 	}
+	/* 预算预留成功不是会话构造成功；后续分配失败须保持 NOMEM。 */
+	ret = TR_ERR_NOMEM;
 	session = (struct tr_tls_openssl_session *)calloc(1, sizeof(*session));
 	if (!session)
 		goto fail;
 	session->memory_budget = memory_budget;
 	session->memory_bytes = memory_budget ? memory_bytes : 0U;
+	int retain_ret = tr_tls_openssl_profile_retain(profile);
+	if (retain_ret != TR_OK) {
+		ret = retain_ret;
+		goto fail;
+	}
+	session->profile = profile;
 	session->ssl = SSL_new(profile->context);
 	if (!session->ssl)
 		goto fail;
-	if (CRYPTO_THREAD_run_once(&tr_tls_openssl_socket_bio_once,
-	                           tr_tls_openssl_socket_bio_method_init) !=
-	            1 ||
-	    !tr_tls_openssl_socket_bio_method)
-		goto fail;
-	socket_bio = BIO_new(tr_tls_openssl_socket_bio_method);
+	socket_bio = BIO_new(profile->socket_bio_method);
 	if (!socket_bio)
 		goto fail;
 	socket_data = (struct tr_tls_openssl_socket_bio_data *)BIO_get_data(
