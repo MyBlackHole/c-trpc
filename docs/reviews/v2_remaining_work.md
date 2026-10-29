@@ -1,6 +1,8 @@
 # V2 开发剩余项
 
-当前候选：2026-10-29，`2.0.0-dev.180`。真实 Runtime Zstd 停止回收回归复现 worker 完成发布返回 STALE：旧 Reactor 已退出但 producer 尚在运行，MessageService 提前清空了异步操作槽。现改为先等待 worker 退出并成功 join，再回收操作池；等待、join 失败与部分销毁重试保持原资源所有权。新增真实发布计数和 join 失败回调屏障检查，Clang Release、ASan/UBSan（含泄漏检查）、TSan 各 9/9，最终 GCC Release 全量 95/95、回收目标连续 25/25 通过；实际提交的远端检查待推送后精确核对。范围与证据见[producer 回收屏障记录](rpc_v2_message_reap_producer_barrier_20261029.md)。本切片不等于 #243、#241 或 V2 发布总体验收完成。
+当前候选：2026-10-29，`2.0.0-dev.181`。同池双预留反例复现异步撤销缺少 operation/producer 引用关联：两项各自有效时，旧实现可清空一项的槽并消费另一项的引用。现于原 mutex 下确认实际槽一致，错配返回 STALE 且双方状态/引用不变；新回归核对双向拒绝、正确回滚及最终预算为零。最小红/绿回归完成，Clang Release、ASan/UBSan（含泄漏检查）、TSan 各 11/11。首次 GCC Release 全量 94/95（RESET 目标在 120 秒超时），同一二进制定向 1/1 后完整复验 95/95；保留失败和主机负载观测，不据此认定耗时波动根因或容量达标。当前提交远端检查待推送后核对；dev.180 基线精确 CI 已 13/13 成功。详见[操作引用关联校验记录](rpc_v2_operation_reject_identity_20261029.md)。当前真实调用点未发现混用，未据此宣称线上事故；#243 与 V2 发布仍未总体验收。
+
+前次候选：2026-10-29，`2.0.0-dev.180`。真实 Runtime Zstd 停止回收回归复现 worker 完成发布返回 STALE：旧 Reactor 已退出但 producer 尚在运行，MessageService 提前清空了异步操作槽。现改为先等待 worker 退出并成功 join，再回收操作池；等待、join 失败与部分销毁重试保持原资源所有权。新增真实发布计数和 join 失败回调屏障检查，Clang Release、ASan/UBSan（含泄漏检查）、TSan 各 9/9，最终 GCC Release 全量 95/95、回收目标连续 25/25 通过；实际提交的远端检查待推送后精确核对。范围与证据见[producer 回收屏障记录](rpc_v2_message_reap_producer_barrier_20261029.md)。本切片不等于 #243、#241 或 V2 发布总体验收完成。
 
 前次候选：2026-10-29，`2.0.0-dev.179`。前一 dev.178 切片的真实握手红测复现 Client 信任目录延迟加载违背构造期快照合同：创建后新增 CA 被旧 profile 接受，删除原来源则丢失信任。新内部模块在构造返回前读取文件/目录 X509 与 CRL，不注册延迟查找器；新增 18 个快照、错误输入及分配回滚场景。GCC Release 全目标及全量 95/95、Clang Release/ASan/UBSan/TSan 各八个 TLS 目标、四编译器安装 SDK 消费端、55 单元真实编译数据库、clang-format 18.1.8 五个变更源文件检查通过，见[信任快照修复记录](rpc_v2_tls_trust_snapshot_20261029.md)。实现提交 `8f49481845dcd1411ac7b79b097287bf7f3fe470` 已推送，精确 head 远端 CI 13/13 成功；后续文档提交单独核对。旧提交 dev.177 的 250 RPS 小消息 TLS/Zstd 小时诊断完成 900000/900000，原 clean=true，Server 含预热 900032 次全部排空；361 个资源采样及严格范围见[小时诊断记录](rpc_v2_tls_zstd_soak_20261029.md)。TLS-E 恶意输入、持续握手、内核驻留、平台及完整发布验收仍未完成。
 
