@@ -264,3 +264,12 @@ control TX 发送项池耗尽相符。10%–26% 的 OPEN hold 经过两次 pendi
 本机结果不替代 Clang、ASan/UBSan、TSan、固定 CI 工具链和目标平台矩阵，也不覆盖持续
 TLS 洪峰/取消、内核 socket 实际驻留、40k clean 负载或完整发行验收。PR #312 未合并，
 #234、#241–#243、#247、#248 仍开放。
+
+## 12. 2026-10-30 #248 编译依赖快照
+
+沿用当前 Xmake `trcore` GCC Release 编译参数，55 个生产翻译单元在启用条件下产生 389 条
+仓库内直接 include 边，其中 249 条跨现有目录分组。`src/execution/reactor.c` 直接包含 TRP
+parser/wire，`reactor.h` 直接包含 frame；目录分组不等于逻辑模块，也不把边数视为违规数。
+完整身份、逐翻译单元边和边界限制见 [依赖快照](module_dependency_inventory_20261030.md)。
+它补齐 #248 的当前 GCC 配置 include 现状证据，未补齐允许依赖策略、符号/布局调用图、其他
+平台条件或负向门禁；#248 仍开放。
