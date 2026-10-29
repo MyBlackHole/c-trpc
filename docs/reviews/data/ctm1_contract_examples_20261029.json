@@ -1,0 +1,133 @@
+{
+  "status": "design_arithmetic_not_implementation_conformance",
+  "catalog_example": {
+    "local_revision": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "entry_count": 2,
+    "wire_hex": "43544d4301000000edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f0302000000c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1deedc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "bytes": 108,
+    "compatibility_status": "expected_pair_pending_offline_tool"
+  },
+  "schema_file": "ctm_schema_1_example_20261029.json",
+  "projection_file": "ctm_method_1_projection_example_20261029.json",
+  "artifact_canonical_jcs": "{\"family\":\"e207821aa5e849b49c8d8d62da0a0245\",\"format\":\"ctm-schema-1\",\"namespace\":\"demo\",\"profiles\":[{\"max_access_work\":262144,\"max_depth\":16,\"max_elements\":4096,\"max_encode_work\":262144,\"max_fields\":512,\"max_output_bytes\":65536,\"max_scratch_bytes\":65536,\"max_unknown_bytes\":4096,\"max_verify_work\":262144,\"max_wire_bytes\":65536,\"name\":\"bounded\"}],\"reserved_service_ids\":[],\"reserved_service_names\":[],\"reserved_type_ids\":[],\"reserved_type_names\":[],\"services\":[{\"id\":0,\"methods\":[{\"id\":0,\"name\":\"put\",\"policy\":{\"lane\":\"control\",\"max_peer_revisions\":16,\"request_compression\":[\"none\"],\"request_profile\":\"bounded\",\"response_compression\":[\"none\"],\"response_profile\":\"bounded\"},\"replay\":\"never\",\"request\":{\"cardinality\":\"one\",\"required\":[1,2],\"type\":1},\"response\":{\"cardinality\":\"one\",\"required\":[1],\"type\":2},\"semantic_revision\":1}],\"name\":\"store\",\"reserved_method_ids\":[],\"reserved_method_names\":[]}],\"types\":[{\"fields\":[{\"deprecated\":false,\"id\":1,\"name\":\"offset\",\"type\":\"u64\"},{\"deprecated\":false,\"id\":2,\"name\":\"payload\",\"type\":\"bytes\"}],\"id\":1,\"kind\":\"message\",\"name\":\"request\",\"reserved_ids\":[],\"reserved_names\":[],\"semantic_revision\":1},{\"fields\":[{\"deprecated\":false,\"id\":1,\"name\":\"accepted\",\"type\":\"bool\"},{\"deprecated\":false,\"id\":2,\"name\":\"status\",\"type\":{\"ref\":3}}],\"id\":2,\"kind\":\"message\",\"name\":\"response\",\"reserved_ids\":[],\"reserved_names\":[],\"semantic_revision\":1},{\"id\":3,\"kind\":\"enum\",\"name\":\"status\",\"reserved_names\":[],\"reserved_values\":[],\"semantic_revision\":1,\"values\":[{\"name\":\"ok\",\"number\":0},{\"name\":\"busy\",\"number\":1}]}]}",
+  "artifact_sha256": "53ddda197f6c7c4d53e48bbc39a6a84ca897c8712e8af99babefb2e0e2298f41",
+  "method_canonical_jcs": "{\"family\":\"e207821aa5e849b49c8d8d62da0a0245\",\"method_id\":0,\"replay\":\"never\",\"request\":{\"cardinality\":\"one\",\"codec_id\":2,\"required\":[1,2],\"type\":1},\"response\":{\"cardinality\":\"one\",\"codec_id\":2,\"required\":[1],\"type\":2},\"semantic_revision\":1,\"service_id\":0,\"types\":[{\"fields\":[{\"id\":1,\"type\":\"u64\"},{\"id\":2,\"type\":\"bytes\"}],\"id\":1,\"kind\":\"message\",\"reserved_ids\":[],\"semantic_revision\":1},{\"fields\":[{\"id\":1,\"type\":\"bool\"},{\"id\":2,\"type\":{\"ref\":3}}],\"id\":2,\"kind\":\"message\",\"reserved_ids\":[],\"semantic_revision\":1},{\"id\":3,\"kind\":\"enum\",\"reserved_values\":[],\"semantic_revision\":1,\"values\":[0,1]}],\"wire_major\":1}",
+  "method_revision_sha256": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+  "metadata": {
+    "key": "ctm-contract",
+    "value_hex": "43544d31edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "entry_hex": "0c240063746d2d636f6e747261637443544d31edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "entry_bytes": 51,
+    "remaining_bytes": 461
+  },
+  "variants": [
+    {
+      "change": "api_rename",
+      "method_revision_sha256": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+      "expected_compatibility": "same_wire_semantic_revision"
+    },
+    {
+      "change": "policy_raise",
+      "method_revision_sha256": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+      "expected_compatibility": "same_wire_semantic_revision"
+    },
+    {
+      "change": "optional_addition",
+      "method_revision_sha256": "c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1de",
+      "expected_compatibility": "requires_offline_pair_review"
+    },
+    {
+      "change": "incompatible_type_change",
+      "method_revision_sha256": "1753769e266f0a6212cb9cc1ff0fcd23e719a5e2b1ee25a218567aad4a4e82a1",
+      "expected_compatibility": "reject"
+    }
+  ],
+  "wire_cases": [
+    {
+      "name": "empty_message",
+      "wire_hex": "",
+      "body_bytes": 0
+    },
+    {
+      "name": "u64_explicit_zero",
+      "wire_hex": "25080000000000000000",
+      "body_bytes": 10
+    },
+    {
+      "name": "u64_and_bytes",
+      "wire_hex": "250807000000000000004c03616263",
+      "body_bytes": 15
+    },
+    {
+      "name": "bytes_explicit_empty",
+      "wire_hex": "4c00",
+      "body_bytes": 2
+    },
+    {
+      "name": "string_chinese",
+      "wire_hex": "6d06e4b8ade69687",
+      "body_bytes": 8
+    },
+    {
+      "name": "enum_unknown_minus_one",
+      "wire_hex": "870104ffffffff",
+      "body_bytes": 7
+    },
+    {
+      "name": "packed_u32_zero_and_max",
+      "wire_hex": "ae010800000000ffffffff",
+      "body_bytes": 11
+    },
+    {
+      "name": "list_explicit_empty",
+      "wire_hex": "ae0100",
+      "body_bytes": 3
+    },
+    {
+      "name": "nested_message",
+      "wire_hex": "cf010f250807000000000000004c03616263",
+      "body_bytes": 18
+    },
+    {
+      "name": "nested_explicit_empty",
+      "wire_hex": "cf0100",
+      "body_bytes": 3
+    },
+    {
+      "name": "bool_true",
+      "wire_hex": "e0010101",
+      "body_bytes": 4
+    },
+    {
+      "name": "list_string_empty_and_chinese",
+      "wire_hex": "8e02050003e4b8ad",
+      "body_bytes": 8
+    },
+    {
+      "name": "f32_negative_zero_bits",
+      "wire_hex": "a8020400000080",
+      "body_bytes": 7
+    },
+    {
+      "name": "f64_nan_payload_bits",
+      "wire_hex": "c90208420000000000f87f",
+      "body_bytes": 11
+    }
+  ],
+  "known_string_invalid_utf8_hex": [
+    "c080",
+    "eda080",
+    "f4908080",
+    "e4b8",
+    "80",
+    "f5808080"
+  ],
+  "limitations": [
+    "trusted_example_only",
+    "not_schema_validator",
+    "not_compatibility_tool",
+    "not_c_or_rust_conformance",
+    "not_rpc_execution",
+    "not_runtime_budget_test"
+  ]
+}

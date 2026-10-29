@@ -1,0 +1,88 @@
+{
+  "format": "ctm-schema-1",
+  "family": "e207821aa5e849b49c8d8d62da0a0245",
+  "namespace": "demo",
+  "reserved_type_ids": [],
+  "reserved_type_names": [],
+  "reserved_service_ids": [],
+  "reserved_service_names": [],
+  "types": [
+    {
+      "id": 1,
+      "name": "request",
+      "kind": "message",
+      "semantic_revision": 1,
+      "fields": [
+        {"id": 1, "name": "offset", "type": "u64"},
+        {"id": 2, "name": "payload", "type": "bytes"}
+      ],
+      "reserved_ids": [],
+      "reserved_names": []
+    },
+    {
+      "id": 2,
+      "name": "response",
+      "kind": "message",
+      "semantic_revision": 1,
+      "fields": [
+        {"id": 1, "name": "accepted", "type": "bool"},
+        {"id": 2, "name": "status", "type": {"ref": 3}}
+      ],
+      "reserved_ids": [],
+      "reserved_names": []
+    },
+    {
+      "id": 3,
+      "name": "status",
+      "kind": "enum",
+      "semantic_revision": 1,
+      "values": [
+        {"name": "ok", "number": 0},
+        {"name": "busy", "number": 1}
+      ],
+      "reserved_values": [],
+      "reserved_names": []
+    }
+  ],
+  "services": [
+    {
+      "id": 0,
+      "name": "store",
+      "reserved_method_ids": [],
+      "reserved_method_names": [],
+      "methods": [
+        {
+          "id": 0,
+          "name": "put",
+          "request": {"type": 1, "cardinality": "one", "required": [1, 2]},
+          "response": {"type": 2, "cardinality": "one", "required": [1]},
+          "semantic_revision": 1,
+          "replay": "never",
+          "policy": {
+            "request_profile": "bounded",
+            "response_profile": "bounded",
+            "max_peer_revisions": 16,
+            "lane": "control",
+            "request_compression": ["none"],
+            "response_compression": ["none"]
+          }
+        }
+      ]
+    }
+  ],
+  "profiles": [
+    {
+      "name": "bounded",
+      "max_wire_bytes": 65536,
+      "max_fields": 512,
+      "max_elements": 4096,
+      "max_depth": 16,
+      "max_unknown_bytes": 4096,
+      "max_verify_work": 262144,
+      "max_access_work": 262144,
+      "max_encode_work": 262144,
+      "max_scratch_bytes": 65536,
+      "max_output_bytes": 65536
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "family": "e207821aa5e849b49c8d8d62da0a0245",
+  "service_id": 0,
+  "method_id": 0,
+  "wire_major": 1,
+  "semantic_revision": 1,
+  "replay": "never",
+  "request": {"type": 1, "cardinality": "one", "codec_id": 2, "required": [1, 2]},
+  "response": {"type": 2, "cardinality": "one", "codec_id": 2, "required": [1]},
+  "types": [
+    {
+      "id": 1,
+      "kind": "message",
+      "semantic_revision": 1,
+      "fields": [
+        {"id": 1, "type": "u64"},
+        {"id": 2, "type": "bytes"}
+      ],
+      "reserved_ids": []
+    },
+    {
+      "id": 2,
+      "kind": "message",
+      "semantic_revision": 1,
+      "fields": [
+        {"id": 1, "type": "bool"},
+        {"id": 2, "type": {"ref": 3}}
+      ],
+      "reserved_ids": []
+    },
+    {
+      "id": 3,
+      "kind": "enum",
+      "semantic_revision": 1,
+      "values": [0, 1],
+      "reserved_values": []
+    }
+  ]
+}
