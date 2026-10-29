@@ -587,7 +587,7 @@ ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 T
 | TLS 与身份 | TLS-C、TLS-D1 已合入主线（PR #311）；TLS-D2 与 TLS-E 包装对象预算切片在 PR #312，当前 head `d9c73b2758fc9dca8e0b5ce82a23a204100516a8` 的 GitHub 检查 14/14 通过，仍 OPEN 且未合入。预算只覆盖 c-trpc 自有包装对象；OpenSSL 内部分配、内核 socket 缓冲、持续握手洪峰/长期负载、目标平台和独立 RPC 互通矩阵仍待验收 | #234 |
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
-| 类型契约 | 用户已选择自定义传输与自定义业务格式；[CTM1 草案](../superpowers/specs/2026-10-29-custom-message-codec-design.md)已补可选字段双向演进、冻结配额、兼容基线及滚动升级规则，待审阅，尚未实施；codec、OPEN 方法契约、C/Rust 生成桩和完整有界解码仍待交付 | #245 |
+| 类型契约 | 用户选择自定义传输与业务格式，要求兼容演进及学习开源优点；[开源对照](custom_message_open_source_lessons_20261029.md)覆盖 Protobuf、FlatBuffers、Cap’n Proto、Thrift、SBE、Nanopb。[CTM1 草案](../superpowers/specs/2026-10-29-custom-message-codec-design.md)已撤回未测 wire 定稿及全盘冻结运行策略，区分 wire/API/业务/资源兼容并进入候选对照；生产实现未获批准、尚未开始，codec、OPEN 方法契约和 C/Rust 桩仍待交付 | #245 |
 | 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
 | 横切验证 | TEST-A 与 TEST-B1–B4 已收敛至 Draft PR #321（14/14 检查通过），TEST-C1–C3 已收敛至 Draft PR #323（13/13 检查通过）；旧 PR #317–#320、#322 已关闭，提交仍可从汇总分支追溯。仍缺通用生产 C 故障时序、TEST-B 完整事件字母表、真实网络/派发、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能 | #247 |
 | 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
