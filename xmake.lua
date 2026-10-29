@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.181")
+set_version("2.0.0-dev.182")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -816,6 +816,7 @@ target("test_stream_reset")
     add_files("tests/test_stream_reset.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg",
+                "-Wl,--wrap=pthread_mutex_lock",
                 "-Wl,--wrap=tr_channel_local_stream_id_take", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()

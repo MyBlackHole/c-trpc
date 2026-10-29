@@ -214,6 +214,8 @@ struct tr_channel {
 	size_t stream_index_capacity;
 	struct tr_stream_reset_tombstone *reset_tombstones;
 	uint32_t *reset_tombstone_index;
+	/* 与两张索引共用预算化分配，仅 RESETTING 槽位置位。 */
+	uint32_t *reset_pending;
 	uint32_t reset_tombstone_cursor;
 	uint32_t reset_cursor;
 	uint32_t peer_stream_frontier[2];
@@ -1865,6 +1867,43 @@ static void tr_stream_release_drain_count_locked(struct tr_channel *channel,
 		       sizeof(channel->pending_open[idx]));
 }
 
+static void tr_stream_mark_resetting_locked(struct tr_channel *channel,
+                                            struct tr_stream_slot *stream)
+{
+	uint32_t slot = (uint32_t)(stream - channel->streams);
+
+	assert(slot < channel->config.max_streams);
+	channel->reset_pending[slot / 32U] |= UINT32_C(1) << (slot % 32U);
+	stream->state = TR_STREAM_SLOT_RESETTING;
+}
+
+/* 返回半开区间中的首个待处理槽，不访问无关流对象；位移始终小于 32。 */
+static uint32_t tr_channel_reset_next_locked(struct tr_channel *channel,
+                                             uint32_t begin, uint32_t end)
+{
+	uint32_t first, last;
+
+	if (begin == end)
+		return TR_STREAM_FREE_NONE;
+	assert(begin < end && end <= channel->config.max_streams);
+	first = begin / 32U;
+	last = (end - 1U) / 32U;
+	for (uint32_t word = first;; ++word) {
+		uint32_t bits = channel->reset_pending[word];
+
+		if (word == first)
+			bits &= UINT32_MAX << (begin % 32U);
+		if (word == last && end % 32U != 0U)
+			bits &= (UINT32_C(1) << (end % 32U)) - 1U;
+		if (bits)
+			return word * 32U +
+			       (uint32_t)__builtin_ctz((unsigned)bits);
+		if (word == last)
+			break;
+	}
+	return TR_STREAM_FREE_NONE;
+}
+
 static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 {
 	struct tr_stream_slot *stream;
@@ -1883,7 +1922,7 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 		 * 回调结束后才能复用该槽，避免迟到结果命中新流。
 		 */
 		stream->retire_pending = 1;
-		stream->state = TR_STREAM_SLOT_RESETTING;
+		tr_stream_mark_resetting_locked(channel, stream);
 		stream->local_open = 0;
 		stream->remote_open = 0;
 		stream->rx_credit_stopped = 1;
@@ -1912,6 +1951,7 @@ static void tr_stream_free_locked(struct tr_channel *channel, uint32_t slot)
 	}
 	if (stream->rx_reassembly)
 		tr_buffer_release(tr_buffer_take(&stream->rx_reassembly));
+	channel->reset_pending[slot / 32U] &= ~(UINT32_C(1) << (slot % 32U));
 	memset(stream, 0, sizeof(*stream));
 	stream->generation = generation;
 	/* 旧句柄永远不能在第 2^32 次复用后重新有效。耗尽代次的槽
@@ -2091,7 +2131,7 @@ static void tr_stream_reset_begin_locked(struct tr_channel *channel,
 	tr_stream_clear_compressed_receive_locked(stream);
 	tr_stream_clear_pending_receive_locked(stream);
 	tr_stream_drop_compressed_send_locked(channel, stream);
-	stream->state = TR_STREAM_SLOT_RESETTING;
+	tr_stream_mark_resetting_locked(channel, stream);
 	stream->local_open = 0;
 	stream->rx_credit_stopped = 1;
 	stream->pending_advertised_limit = 0;
@@ -2424,7 +2464,7 @@ static void tr_channel_open_progress_on_owner(struct tr_channel *channel)
 
 static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 {
-	uint32_t start;
+	uint32_t scan_cursor, remaining;
 
 	pthread_mutex_lock(&channel->lock);
 	if (channel->reset_progressing || channel->teardown_detached) {
@@ -2433,15 +2473,14 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 	}
 	channel->reset_progressing = 1;
 	channel->reset_retry_pending = 0;
-	start = channel->reset_cursor;
+	scan_cursor = channel->reset_cursor;
+	remaining = channel->config.max_streams;
 	pthread_mutex_unlock(&channel->lock);
 	/* 已暂停的拒绝先于新的 RESET 使用预留；新 OPEN 则先推进既有
 	 * RESET 再尝试拒绝，避免持续 OPEN 抢占已接受的终止责任。 */
 	tr_channel_refusal_progress_on_owner(channel);
-	for (uint32_t visited = 0; visited < channel->config.max_streams;
-	     ++visited) {
-		uint32_t slot = (uint32_t)(((uint64_t)start + visited) %
-		                           channel->config.max_streams);
+	while (remaining != 0U) {
+		uint32_t slot, segment, skipped;
 		struct tr_stream_slot *stream;
 		struct tr_stream_handle handle = {0};
 		struct tr_conn_handle connection = {0};
@@ -2449,11 +2488,31 @@ static void tr_channel_reset_progress_on_owner(struct tr_channel *channel)
 		int ret = TR_OK;
 
 		pthread_mutex_lock(&channel->lock);
-		stream = &channel->streams[slot];
-		if (stream->state != TR_STREAM_SLOT_RESETTING) {
+		/* 保留原游标的环形顺序；一次只检查尚未走过的槽位区间，
+		 * 回调中新进入已走过区间的 RESET 留给下一次进度调用。
+		 */
+		segment = channel->config.max_streams - scan_cursor;
+		if (segment > remaining)
+			segment = remaining;
+		slot = tr_channel_reset_next_locked(channel, scan_cursor,
+		                                    scan_cursor + segment);
+		if (slot == TR_STREAM_FREE_NONE && remaining > segment)
+			slot = tr_channel_reset_next_locked(
+			        channel, 0U, remaining - segment);
+		if (slot == TR_STREAM_FREE_NONE) {
 			pthread_mutex_unlock(&channel->lock);
-			continue;
+			break;
 		}
+		skipped = slot >= scan_cursor ? slot - scan_cursor
+		                              : channel->config.max_streams -
+		                                        scan_cursor + slot;
+		assert(skipped < remaining);
+		remaining -= skipped + 1U;
+		scan_cursor = slot + 1U == channel->config.max_streams
+		                      ? 0U
+		                      : slot + 1U;
+		stream = &channel->streams[slot];
+		assert(stream->state == TR_STREAM_SLOT_RESETTING);
 		if (stream->connection_retired) {
 			int job_pending =
 			        (stream->rx_transform_job &&
@@ -5011,7 +5070,7 @@ static void tr_channel_free_fixed_storage(struct tr_channel *channel)
 	struct tr_memory_budget *budget = channel->config.memory_budget;
 	uint64_t bytes = channel->fixed_storage_bytes;
 
-	/* RESET 索引是活动流索引同一分配中的尾段视图。 */
+	/* RESET 索引与待处理位图都是活动流索引分配中的尾段视图。 */
 	free(channel->stream_index);
 	free(channel->streams);
 	free(channel);
@@ -5115,6 +5174,7 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	struct tr_channel *channel;
 	struct tr_reactor_limits reactor_limits;
 	size_t stream_bytes, index_bytes, tombstone_index_bytes;
+	size_t reset_words, reset_bytes, index_storage_bytes;
 	size_t index_capacity, fixed_bytes;
 	int ret;
 
@@ -5202,14 +5262,20 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	index_bytes = index_capacity * sizeof(*channel->stream_index);
 	tombstone_index_bytes =
 	        index_capacity * sizeof(*channel->reset_tombstone_index);
-	if (index_bytes > SIZE_MAX - tombstone_index_bytes ||
-	    stream_bytes > SIZE_MAX - index_bytes - tombstone_index_bytes ||
-	    sizeof(*channel) >
-	            SIZE_MAX - stream_bytes - index_bytes -
-	                    tombstone_index_bytes)
+	reset_words = effective.max_streams / 32U +
+	              (effective.max_streams % 32U != 0U);
+	if (reset_words > SIZE_MAX / sizeof(*channel->reset_pending) ||
+	    index_bytes > SIZE_MAX - tombstone_index_bytes)
 		return TR_ERR_INVALID;
-	fixed_bytes = sizeof(*channel) + stream_bytes + index_bytes +
-	              tombstone_index_bytes;
+	reset_bytes = reset_words * sizeof(*channel->reset_pending);
+	index_storage_bytes = index_bytes + tombstone_index_bytes;
+	if (reset_bytes > SIZE_MAX - index_storage_bytes)
+		return TR_ERR_INVALID;
+	index_storage_bytes += reset_bytes;
+	if (stream_bytes > SIZE_MAX - index_storage_bytes ||
+	    sizeof(*channel) > SIZE_MAX - stream_bytes - index_storage_bytes)
+		return TR_ERR_INVALID;
+	fixed_bytes = sizeof(*channel) + stream_bytes + index_storage_bytes;
 	if (effective.memory_budget) {
 		ret = tr_memory_budget_reserve(effective.memory_budget,
 		                               (uint64_t)fixed_bytes);
@@ -5251,14 +5317,12 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 		pthread_condattr_destroy(&attr);
 		build.state_cond_ready = 1;
 	}
-	/* 流槽与墓碑环共享分配；两张索引共享另一分配，RESET 周转不分配。 */
+	/* 流槽与墓碑环共享分配；两张索引及位图共享另一分配，周转不分配。 */
 	channel->streams = (struct tr_stream_slot *)calloc(
 	        channel->config.max_streams,
 	        sizeof(*channel->streams) + sizeof(*channel->reset_tombstones));
-	channel->stream_index = (struct tr_stream_index_entry *)calloc(
-	        channel->stream_index_capacity,
-	        sizeof(*channel->stream_index) +
-	                sizeof(*channel->reset_tombstone_index));
+	channel->stream_index =
+	        (struct tr_stream_index_entry *)calloc(1U, index_storage_bytes);
 	if (!channel->streams || !channel->stream_index)
 		return TR_ERR_NOMEM;
 	channel->reset_tombstones =
@@ -5267,6 +5331,8 @@ static int tr_channel_create_common(const struct tr_channel_config *config,
 	channel->reset_tombstone_index =
 	        (uint32_t *)(channel->stream_index +
 	                     channel->stream_index_capacity);
+	channel->reset_pending =
+	        channel->reset_tombstone_index + index_capacity;
 	{
 		uint32_t i;
 

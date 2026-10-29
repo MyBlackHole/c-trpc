@@ -1,0 +1,365 @@
+{
+  "base_commit": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+  "version": "2.0.0-dev.182",
+  "sha256": {
+    "src/transport/channel/channel.c": "f65fe7ca5c9236d2c01d1b3673668207a1a450a35fe67223b7d96012edfd6196",
+    "tests/test_stream_reset.c": "9655a3c4166ff43341967c7439300355ed2afcc8dca89aa4c3fa0b6adb4ff111",
+    "xmake.lua": "f2f8d567834174a8e94e84e31c272afbed1b53d6143d754a10d62c9932fe7bde"
+  },
+  "scope": "Bounded sparse RESET lookup, not 40k RPC/s acceptance",
+  "matrix": [
+    {
+      "label": "clang-release",
+      "build_seconds": 11.868,
+      "test_seconds": 106.966,
+      "tests_passed": 95,
+      "sparse_lock_cases": 6,
+      "tombstone_capacity": 40000,
+      "lock_cases": [
+        {
+          "slot": 4096,
+          "owner_locks": 35
+        },
+        {
+          "slot": 31,
+          "owner_locks": 35
+        },
+        {
+          "slot": 32,
+          "owner_locks": 35
+        },
+        {
+          "slot": 63,
+          "owner_locks": 35
+        },
+        {
+          "slot": 64,
+          "owner_locks": 35
+        },
+        {
+          "slot": 0,
+          "owner_locks": 35
+        }
+      ],
+      "reset_loop": {
+        "p50_us": 45.68,
+        "p95_us": 65.37,
+        "p99_us": 82.62,
+        "wall_ms": 3063.65,
+        "process_cpu_ms": 3812.28,
+        "open_reset_per_s": 13056.0
+      }
+    },
+    {
+      "label": "gcc-asan",
+      "build_seconds": 17.2,
+      "test_seconds": 131.123,
+      "tests_passed": 95,
+      "sparse_lock_cases": 6,
+      "tombstone_capacity": 40000,
+      "lock_cases": [
+        {
+          "slot": 4096,
+          "owner_locks": 35
+        },
+        {
+          "slot": 31,
+          "owner_locks": 35
+        },
+        {
+          "slot": 32,
+          "owner_locks": 35
+        },
+        {
+          "slot": 63,
+          "owner_locks": 35
+        },
+        {
+          "slot": 64,
+          "owner_locks": 35
+        },
+        {
+          "slot": 0,
+          "owner_locks": 35
+        }
+      ],
+      "reset_loop": {
+        "p50_us": 66.77,
+        "p95_us": 87.16,
+        "p99_us": 108.05,
+        "wall_ms": 4257.46,
+        "process_cpu_ms": 5243.41,
+        "open_reset_per_s": 9395.0
+      }
+    },
+    {
+      "label": "gcc-tsan",
+      "build_seconds": 10.604,
+      "test_seconds": 143.644,
+      "tests_passed": 95,
+      "sparse_lock_cases": 6,
+      "tombstone_capacity": 5000,
+      "lock_cases": [
+        {
+          "slot": 4096,
+          "owner_locks": 35
+        },
+        {
+          "slot": 31,
+          "owner_locks": 35
+        },
+        {
+          "slot": 32,
+          "owner_locks": 35
+        },
+        {
+          "slot": 63,
+          "owner_locks": 35
+        },
+        {
+          "slot": 64,
+          "owner_locks": 35
+        },
+        {
+          "slot": 0,
+          "owner_locks": 35
+        }
+      ],
+      "reset_loop": {
+        "p50_us": 106.65,
+        "p95_us": 151.42,
+        "p99_us": 252.83,
+        "wall_ms": 879.13,
+        "process_cpu_ms": 1126.49,
+        "open_reset_per_s": 5687.0
+      }
+    },
+    {
+      "label": "gcc-release-final",
+      "build_seconds": 13.418,
+      "test_seconds": 108.26,
+      "tests_passed": 95,
+      "sparse_lock_cases": 6,
+      "tombstone_capacity": 40000,
+      "lock_cases": [
+        {
+          "slot": 4096,
+          "owner_locks": 35
+        },
+        {
+          "slot": 31,
+          "owner_locks": 35
+        },
+        {
+          "slot": 32,
+          "owner_locks": 35
+        },
+        {
+          "slot": 63,
+          "owner_locks": 35
+        },
+        {
+          "slot": 64,
+          "owner_locks": 35
+        },
+        {
+          "slot": 0,
+          "owner_locks": 35
+        }
+      ],
+      "reset_loop": {
+        "p50_us": 41.07,
+        "p95_us": 60.97,
+        "p99_us": 75.29,
+        "wall_ms": 2766.39,
+        "process_cpu_ms": 3545.98,
+        "open_reset_per_s": 14459.0
+      }
+    }
+  ],
+  "red": {
+    "target": "test_stream_reset/default",
+    "exit_code": 255,
+    "test_seconds": 0.31,
+    "slot": 4096,
+    "owner_locks": 8227,
+    "capacity": 4097,
+    "failure": "owner_locks < capacity"
+  },
+  "bitmap": {
+    "word_bits": 32,
+    "capacity_40000_bytes": 5000,
+    "capacity_4097_bytes": 516,
+    "shares_existing_index_allocation": true,
+    "charged_before_allocation": true
+  },
+  "baseline_probe": {
+    "source_commit": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+    "baseline_binary_sha256": "cc69e5d143ba4b70b61e82926b8abdf66585bab18ff72e8efc571ccd11c236f3",
+    "original_sha256": {
+      "src/transport/channel/channel.c": "8fa16f932cbbc7755bd4704d9fa447687c762a9ddc82129669f66e7cbe5b39e7",
+      "tests/test_stream_reset.c": "a9a99880840d16f15600e2ba0e2a4b6d80bf181876385dce4d294f0dbe40d9f4"
+    },
+    "calls": 82836,
+    "slot_visits": 3313440000,
+    "resetting_matches": 81322,
+    "inclusive_thread_cpu_ns": 66653984770,
+    "loop_process_cpu_ms": 74980.83,
+    "loop_wall_ms": 74650.02,
+    "test_seconds": 74.936,
+    "perf_status": "denied; no samples",
+    "patch_sha256": "5087cbc9f54a8911e8c24748c65090ac16e84686a04e946925f46893e17fc30e",
+    "original_sources_restored": true,
+    "log_sha256": "3c9080e278387ed40b22317b608e921625099f6da76552f365cc1a4b3550cee0",
+    "instrumented_source_sha256": {
+      "src/transport/channel/channel.c": "1a3cbaab42bd82ab88325d41509b01cce303efd78e25281b49f20e2cb476a876",
+      "tests/test_stream_reset.c": "604f8b19a144f814bd065585586516e6e3a2b11694ec3529ecb88d894738ca4b"
+    }
+  },
+  "baseline_without_probe": {
+    "source_commit": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+    "binary_sha256": "cc69e5d143ba4b70b61e82926b8abdf66585bab18ff72e8efc571ccd11c236f3",
+    "loop_wall_ms": 81658.39,
+    "loop_process_cpu_ms": 82432.32
+  },
+  "candidate_binary_sha256": "be38137bc79f5297a13764609f3fd259c1e46c97eaa8a3ca5326891a9cb035e4",
+  "probe_patch_replay_verified": true,
+  "probe_symbol_absent": true,
+  "raw_logs": [
+    {
+      "path": "build/performance-20261029/dev182-clang-release-build.log",
+      "sha256": "bf1d0a51dbd5e2067479cd650043a7c90a0049a627a4f9640f0f323dbd31d02b",
+      "bytes": 36768
+    },
+    {
+      "path": "build/performance-20261029/dev182-clang-release-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev182-clang-release-test.log",
+      "sha256": "0a73d03446f4b2c4d245998466829bfdea953055b8b69d7d28da65d86158f63f",
+      "bytes": 41513
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-asan-build.log",
+      "sha256": "15e9e2512660bfccd6e3e424b7e1fa31c830728999d783127d03dc2e263ec685",
+      "bytes": 14445
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-asan-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-asan-test.log",
+      "sha256": "44dd3285b230042356867e8b861b93cc0babaed2fed2099f205fa88d03553fa5",
+      "bytes": 41522
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-release-final-build.log",
+      "sha256": "79ff1e8860e4e290402f4a844412c60ad40045d55265d025ebf30e995503bfb7",
+      "bytes": 36768
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-release-final-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-release-final-test.log",
+      "sha256": "d31dfdfae8adbb3f51e212158dd9f48a9e7f0adc2575d40416fdf6049d833253",
+      "bytes": 41513
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-tsan-build.log",
+      "sha256": "8a50b2f54da0fdaedbe360525e85e28b91ec4ad73c777a720fcd8108d760bd58",
+      "bytes": 14445
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-tsan-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-tsan-test.log",
+      "sha256": "e11ae4c1f9df4a20fec7fad6c1d9b8c97bb780843cd0fe3fe9988a5b9ca20703",
+      "bytes": 41523
+    },
+    {
+      "path": "build/performance-20261029/dev182-matrix-driver.log",
+      "sha256": "7abaf0dc05153f6a59bc946bf0ee847ebcba32996b22dd1486b07ca4e2ff13b1",
+      "bytes": 507
+    },
+    {
+      "path": "build/performance-20261029/reset-baseline-perf.log",
+      "sha256": "b3d9cebdb40a6102cdb69a73e6a358ee5c84e8f44ec8572e6b6821ffc2eb367a",
+      "bytes": 987
+    },
+    {
+      "path": "build/performance-20261029/reset-sparse-lock-red.log",
+      "sha256": "3bf06adcdd6e31092fae1d24ddcf23065e34dce4a67e852dadbf0864ff4e99fe",
+      "bytes": 7385
+    },
+    {
+      "path": "build/performance-20261029/reset-sparse-lock-red-counted.log",
+      "sha256": "ece1779b41d8368f7ca0026bd0053b499dc73101b828759ffb56e516d014b311",
+      "bytes": 1712
+    },
+    {
+      "path": "build/performance-20261029/reset-sparse-lock-green.log",
+      "sha256": "e8f6413a9ab5823873b4aecf42b7decad58d77c3a303771afde7c596e01b70bf",
+      "bytes": 6068
+    },
+    {
+      "path": "build/performance-20261029/reset-scan-probe/result.log",
+      "sha256": "3c9080e278387ed40b22317b608e921625099f6da76552f365cc1a4b3550cee0",
+      "bytes": 6284
+    },
+    {
+      "path": "build/performance-20261029/reset-scan-probe/inputs.json",
+      "sha256": "7831bdddd6c681a2c4ae144e4ef5765a8654376052238ff5e5730408d4043ed4",
+      "bytes": 397
+    },
+    {
+      "path": "build/performance-20261029/reset-scan-probe/probe.patch",
+      "sha256": "5087cbc9f54a8911e8c24748c65090ac16e84686a04e946925f46893e17fc30e",
+      "bytes": 3048
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-release-recheck-test.log",
+      "sha256": "e9561d7a3bc61294b7d172cd1e1b6d762673a05bd8974d0b514c256eff3440c4",
+      "bytes": 41255
+    }
+  ],
+  "commands": {
+    "configure": [
+      "xmake",
+      "f",
+      "-c",
+      "-y",
+      "-m",
+      "MODE",
+      "--toolchain=COMPILER",
+      "--crc32c_portable=n"
+    ],
+    "build": [
+      "xmake",
+      "build",
+      "--all"
+    ],
+    "test": [
+      "xmake",
+      "test",
+      "-v",
+      "-j1"
+    ]
+  },
+  "limitations": [
+    "shared host and differing warmup/test wrapper, not a strict performance pair",
+    "prior timeout not fully attributed",
+    "not RPC capacity acceptance",
+    "not global memory or platform acceptance",
+    "not CTM1 implementation"
+  ]
+}
