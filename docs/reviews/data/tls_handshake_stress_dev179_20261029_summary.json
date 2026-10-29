@@ -1,0 +1,494 @@
+{
+  "status": "diagnostic_completed",
+  "source_commit": "631e918798a435c2810bb2c3da8ac789fec12fb6",
+  "duration_s": 600,
+  "healthy_rpc_ok": 60000,
+  "recovery_rpc_ok": 64,
+  "attack_sockets_peak": 33,
+  "attack_offers_skipped": 0,
+  "attack_counts": {
+    "silent": {
+      "attempted": 9600,
+      "connected": 9600,
+      "connect_errors": 0,
+      "remote_closed": 9590,
+      "local_closed": 10,
+      "bytes_sent": 0,
+      "drip_writes": 0,
+      "remote_age_observation": {
+        "count": 9590,
+        "minimum_s": 0.0001879440387710929,
+        "maximum_s": 10.011874606949277,
+        "at_least_5s": 724
+      }
+    },
+    "partial_drip": {
+      "attempted": 9600,
+      "connected": 9600,
+      "connect_errors": 0,
+      "remote_closed": 9580,
+      "local_closed": 20,
+      "bytes_sent": 41005,
+      "drip_writes": 9915,
+      "remote_age_observation": {
+        "count": 9580,
+        "minimum_s": 0.0001850089756771922,
+        "maximum_s": 10.002430055988953,
+        "at_least_5s": 1092
+      }
+    },
+    "clienthello_abort": {
+      "attempted": 9600,
+      "connected": 9600,
+      "connect_errors": 0,
+      "remote_closed": 5690,
+      "local_closed": 3910,
+      "bytes_sent": 11402544,
+      "drip_writes": 0,
+      "remote_age_observation": {
+        "count": 5690,
+        "minimum_s": 0.00018794299103319645,
+        "maximum_s": 0.0018688170239329338,
+        "at_least_5s": 0
+      }
+    },
+    "plaintext": {
+      "attempted": 9600,
+      "connected": 9600,
+      "connect_errors": 0,
+      "remote_closed": 9600,
+      "local_closed": 0,
+      "bytes_sent": 108126,
+      "drip_writes": 0,
+      "remote_age_observation": {
+        "count": 9600,
+        "minimum_s": 0.00019366992637515068,
+        "maximum_s": 0.0025761700235307217,
+        "at_least_5s": 0
+      }
+    }
+  },
+  "client": {
+    "type": "open_phase",
+    "schema": 2,
+    "api_generation": "rpc_v2",
+    "phase": "measure",
+    "scenario": "open",
+    "pid": 3364331,
+    "window": 64,
+    "compression": "zstd",
+    "tls_enabled": 1,
+    "client_alloc_calls": 1140000,
+    "client_alloc_requested_bytes": 12825779488,
+    "rate_rps": 100,
+    "start_ns": 715712505953865,
+    "schedule_horizon_ns": 716312505953865,
+    "end_ns": 716312533786893,
+    "arrival_window_s": 600.0,
+    "drain_elapsed_s": 600.027833028,
+    "drain_tail_ms": 27.833028,
+    "client_cpu_s": 69.897157,
+    "client_peak_rss_kib": 28080,
+    "offered": 60000,
+    "scheduler_dropped": 0,
+    "attempted": 60000,
+    "accepted": 60000,
+    "completed": 60000,
+    "ok": 60000,
+    "submit_again": 0,
+    "submit_errors": 0,
+    "deadlines": 0,
+    "rpc_errors": 0,
+    "unavailable": 0,
+    "resource_exhausted": 0,
+    "invalid_responses": 0,
+    "ok_ratio": 1.0,
+    "ok_rps": 99.995,
+    "payload_MiB_s": 0.781214,
+    "ok_p50_us": 34290.673,
+    "ok_p99_us": 40289.016,
+    "accepted_p99_us": 40289.016,
+    "scheduler_late_p50_us": 106.179,
+    "scheduler_late_p99_us": 153.717,
+    "scheduler_late_max_us": 2906.556,
+    "submission_schema": 1,
+    "first_submit_ns": 715712506039631,
+    "last_submit_ns": 716312496053237,
+    "submitted_in_window": 60000,
+    "accepted_in_window": 60000,
+    "completed_in_window": 59997,
+    "submit_late_p99_us": 162.751,
+    "submit_late_max_us": 2914.309
+  },
+  "server_exit": {
+    "schema": 2,
+    "api_generation": "rpc_v2",
+    "type": "server_exit",
+    "drain_status": 0,
+    "cpu_s": 161.58206,
+    "peak_rss_kib": 27952,
+    "alloc_calls": 1502184,
+    "alloc_requested_bytes": 15304863040,
+    "reactor_turns": 844527,
+    "command_budget_limit": 64,
+    "command_processed_total": 9,
+    "command_max_per_turn": 1,
+    "command_budget_hits": 0,
+    "epoll_polls": 1032,
+    "epoll_waits": 843495,
+    "command_send_enqueued": 0,
+    "command_send_full": 0,
+    "command_resume_rx_enqueued": 0,
+    "command_resume_rx_full": 0,
+    "command_call_enqueued": 10,
+    "command_call_full": 0,
+    "command_other_enqueued": 0,
+    "command_other_full": 0,
+    "command_queue_capacity": 1024,
+    "command_queue_peak": 1,
+    "completion_queue_peak": 0,
+    "command_queue_full_events": 0,
+    "completion_queue_full_events": 0,
+    "rx_pool_capacity": 64,
+    "rx_pool_peak": 1,
+    "tx_pool_capacity": 512,
+    "tx_pool_peak": 5,
+    "control_tx_pool_capacity": 128,
+    "control_tx_pool_peak": 34,
+    "rx_pool_exhausted_events": 0,
+    "tx_pool_exhausted_events": 0,
+    "control_tx_pool_exhausted_events": 0,
+    "rpc_executor_threads": 4,
+    "rpc_task_queue_capacity": 256,
+    "rpc_tasks_queued": 0,
+    "rpc_tasks_running": 0,
+    "rpc_calls_started": 60096,
+    "rpc_calls_finished": 60096,
+    "rpc_unavailable": 0,
+    "rpc_resource_exhausted": 0,
+    "reassembly_pool_capacity": 8,
+    "reassembly_pool_peak": 0,
+    "reassembly_pool_exhausted_events": 0,
+    "peers_ready_total": 2,
+    "peers_reaped_total": 5865
+  },
+  "resource_samples": 617,
+  "server_resource_ranges": {
+    "VmRSS": [
+      11824,
+      23904
+    ],
+    "VmHWM": [
+      11824,
+      23904
+    ],
+    "RssAnon": [
+      2656,
+      14700
+    ],
+    "VmData": [
+      53444,
+      65472
+    ],
+    "Threads": [
+      7,
+      7
+    ],
+    "Pss": [
+      5154,
+      17233
+    ],
+    "Private_Clean": [
+      32,
+      1036
+    ],
+    "Private_Dirty": [
+      2656,
+      14700
+    ],
+    "fd_count": [
+      8,
+      40
+    ]
+  },
+  "limitations": [
+    "not_total_tls_hard_cap",
+    "not_allocator_live_ledger",
+    "not_capacity_acceptance",
+    "not_mtls",
+    "not_per_socket_kernel_residency"
+  ],
+  "metadata": {
+    "type": "tls_handshake_stress_metadata",
+    "schema": 2,
+    "api_generation": "rpc_v2",
+    "label": "dev179-tls-handshake-600s",
+    "git_revision": "631e918798a435c2810bb2c3da8ac789fec12fb6",
+    "binary": "/home/black/Documents/c-trpc/build/performance-20261029/dev179-tls-handshake-600s/bench_rpc",
+    "binary_sha256": "19471c5a5fff52d58edf81bf1dd7ee773f492fe87b4a8d7ee7849eec6a64df28",
+    "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+    "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+    "affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cgroup_cpu_max": null,
+    "clock": "CLOCK_MONOTONIC",
+    "transport": "TCP IPv4 loopback",
+    "tls_enabled": true,
+    "compression": "zstd",
+    "load_model": "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; scheduler drops and submission lateness are reported separately",
+    "latency": "before submission to terminal callback entry; successful and accepted separately",
+    "goodput": "verified successful request+response application bytes; excludes wire overhead",
+    "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only",
+    "source_commit": "631e918798a435c2810bb2c3da8ac789fec12fb6",
+    "duration_s": 600,
+    "harness_sha256": "8f2e1c8fabfd383f891fd46c24f83b599cfa51d0b3406181ea95c23811b1f8b4",
+    "rpc_rate_rps": 100,
+    "attack_rate_per_s": 64,
+    "max_attack_sockets": 64,
+    "server_max_peers": 32,
+    "server_handshake_timeout_ms": 10000,
+    "attack_kinds": [
+      "silent",
+      "partial_drip",
+      "clienthello_abort",
+      "plaintext"
+    ],
+    "tls_client_auth": false,
+    "server_command": [
+      "/home/black/Documents/c-trpc/build/performance-20261029/dev179-tls-handshake-600s/bench_rpc",
+      "server",
+      "--capacity",
+      "128",
+      "--bulk-bytes",
+      "65536",
+      "--small-bytes",
+      "4096",
+      "--tls",
+      "1",
+      "--tls-ca",
+      "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+      "--tls-cert",
+      "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+      "--tls-key",
+      "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+      "--compression",
+      "zstd",
+      "--slow-ms",
+      "0"
+    ],
+    "scope": "loopback long-lived server; observed RSS/PSS/fd/thread; not hard memory cap or capacity acceptance",
+    "client_command": [
+      "/home/black/Documents/c-trpc/build/performance-20261029/dev179-tls-handshake-600s/bench_rpc",
+      "client",
+      "--capacity",
+      "128",
+      "--bulk-bytes",
+      "65536",
+      "--small-bytes",
+      "4096",
+      "--tls",
+      "1",
+      "--tls-ca",
+      "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+      "--tls-cert",
+      "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+      "--tls-key",
+      "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+      "--compression",
+      "zstd",
+      "--port",
+      "36443",
+      "--scenario",
+      "open",
+      "--requests",
+      "60000",
+      "--rate-rps",
+      "100",
+      "--window",
+      "64",
+      "--warmup",
+      "32",
+      "--timeout-ms",
+      "3000",
+      "--start-gate",
+      "1"
+    ]
+  },
+  "raw_evidence_sha256": {
+    "summary.json": "612991cd3a82cf03cfb9feab80ffec70144fe51975329827085077c3242bb763",
+    "metadata.json": "c4738332cc561d396736958c1bc8367e5d57cce1a56c57d300b186cf1e890f6c",
+    "resources.jsonl": "b65735dd97ce4256978a6b972bf5ba03832dfb052dac40d8ecc33baff6adc34f",
+    "client.jsonl": "e7726531b3da2237a5593495e6bc20bc703e11071674b4b2f703df3871547501",
+    "server.jsonl": "4666460c5aa8db41450e48ec6cdcce6ec46e27d9a6a0c7e1a7acf61051dbccac"
+  },
+  "resource_phase_ranges": {
+    "baseline": {
+      "VmRSS": [
+        11824,
+        12044
+      ],
+      "VmHWM": [
+        11824,
+        12044
+      ],
+      "RssAnon": [
+        2656,
+        2656
+      ],
+      "VmData": [
+        53444,
+        53444
+      ],
+      "Threads": [
+        7,
+        7
+      ],
+      "Pss": [
+        5154,
+        5303
+      ],
+      "Private_Clean": [
+        180,
+        236
+      ],
+      "Private_Dirty": [
+        2656,
+        2656
+      ],
+      "fd_count": [
+        9,
+        9
+      ]
+    },
+    "attack": {
+      "VmRSS": [
+        11872,
+        23904
+      ],
+      "VmHWM": [
+        11872,
+        23904
+      ],
+      "RssAnon": [
+        2768,
+        14700
+      ],
+      "VmData": [
+        53564,
+        65472
+      ],
+      "Threads": [
+        7,
+        7
+      ],
+      "Pss": [
+        5452,
+        17233
+      ],
+      "Private_Clean": [
+        32,
+        208
+      ],
+      "Private_Dirty": [
+        2936,
+        14700
+      ],
+      "fd_count": [
+        10,
+        40
+      ]
+    },
+    "post_attack_idle": {
+      "VmRSS": [
+        18588,
+        18588
+      ],
+      "VmHWM": [
+        23400,
+        23400
+      ],
+      "RssAnon": [
+        12152,
+        12152
+      ],
+      "VmData": [
+        65472,
+        65472
+      ],
+      "Threads": [
+        7,
+        7
+      ],
+      "Pss": [
+        14077,
+        14099
+      ],
+      "Private_Clean": [
+        960,
+        984
+      ],
+      "Private_Dirty": [
+        12152,
+        12152
+      ],
+      "fd_count": [
+        8,
+        8
+      ]
+    },
+    "post_recovery": {
+      "VmRSS": [
+        18684,
+        18684
+      ],
+      "VmHWM": [
+        23400,
+        23400
+      ],
+      "RssAnon": [
+        12196,
+        12196
+      ],
+      "VmData": [
+        65472,
+        65472
+      ],
+      "Threads": [
+        7,
+        7
+      ],
+      "Pss": [
+        14195,
+        14195
+      ],
+      "Private_Clean": [
+        1036,
+        1036
+      ],
+      "Private_Dirty": [
+        12196,
+        12196
+      ],
+      "fd_count": [
+        8,
+        8
+      ]
+    }
+  }
+}
