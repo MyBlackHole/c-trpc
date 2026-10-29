@@ -249,3 +249,18 @@ control TX 发送项池耗尽相符。10%–26% 的 OPEN hold 经过两次 pendi
 [摘要](data/rpc_ingress_pending_cause_20261030_summary.json)与
 [复算器](experiments/rpc_progress_trace_20261030/analyze_rpc_pending_cause.py)保存此次证据。
 它继续归属 #247/#241；TLS、压缩、40k 清洁度及其余发行门槛仍未通过。
+
+## 11. 2026-10-30 当前工作树本地验证
+
+在 `codex/release-readiness-20261029` 的精确 HEAD
+`ffea494bdae93b8c80a32ed88f2e1f3c1663dc58` 上，使用 Linux x86_64、Xmake
+3.1.2、GCC Release 运行项目规定的 `xmake test -v -j1`，自动构建后 95/95
+通过，测试阶段耗时 103.684 秒。`TMPDIR`、`TMP`、`TEMP`、`XMAKE_TMPDIR` 均指向
+工作区 `build/test-tmp`。该 HEAD 相对 PR #333 远端 head `006af2a` 只有文档、分析脚本
+和诊断归档差异，没有产品源码差异。
+
+同一工作区另单独复跑 `test_tls_resource_ledger/default`（1/1，2.757 秒）与
+`test_rpc_v2_tls_reactor/default`（1/1，5.456 秒）；两目标也包含在上述完整套件中。
+本机结果不替代 Clang、ASan/UBSan、TSan、固定 CI 工具链和目标平台矩阵，也不覆盖持续
+TLS 洪峰/取消、内核 socket 实际驻留、40k clean 负载或完整发行验收。PR #312 未合并，
+#234、#241–#243、#247、#248 仍开放。
