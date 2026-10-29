@@ -53,6 +53,9 @@ WINDOW_UPDATE，RPC 结束后还需普通 CLOSE；多个连接的读帧先累积
 | TLS/Zstd | 128 | 1502 / 2873 | 1025 / 0 |
 | TLS/Zstd | 256 | 1365 / 67 | 1319 / 0 |
 
+2026-10-30 校注：本表 call limit 栏实际为基准 --capacity 参数；configure_limits
+设置的 max_calls/max_streams 为其两倍。原字段与结果保留，见[后续追踪的输入说明](rpc_v2_rpc_progress_trace_20261030.md#输入与身份)。
+
 候选三场不再触发控制池耗尽，但六场仍全有发生器丢弃/迟到，实际准入也下降；
 TLS small 场景还有 371 次 DATA 池耗尽及 91 次 deadline。单次共享主机运行不能
 证明这些新增现象由候选引起，同样不能把更小的控制池计数当作性能改进。
@@ -100,7 +103,9 @@ ZIP 有 643 个原始成员及 INDEX.json，逐项摘要/字节数与 CRC 已核
 
 基线 `a3077c3` 已核对 13/13 关联检查成功：
 [CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40904890923)、
-[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40904890915)。本归档 head
-的检查单独跟踪。下一步沿 OPEN、初始信用、请求发送、工作排队/执行、响应与终局
+[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40904890915)。本归档 `3ca47d1`
+后续也已精确核对 13/13 成功：[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40910160626)、
+[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40910160548)。下一步沿 OPEN、初始信用、请求发送、工作排队/执行、响应与终局
 建立时间线，继续分离约百毫秒占槽等待；40k、平台、全局/分域预算、服务目标/Attempt、
 CTM1 与后端等价网络比较均未完成。
+新增分层证据、Callgrind 及撤回的帧配额候选见[RPC 进度追踪](rpc_v2_rpc_progress_trace_20261030.md)。

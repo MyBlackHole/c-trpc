@@ -1,0 +1,59 @@
+{
+  "archive_sha256": "94dc765a77cf32c1c4d5ccf9752bebbf86cf216841fe14ec72200e5f6ca30809",
+  "raw_members": 596,
+  "crc_verified": true,
+  "patch_replays": [
+    {
+      "stage": "progress_cpu",
+      "files": 2,
+      "replayed": true
+    },
+    {
+      "stage": "unary_stages",
+      "files": 1,
+      "replayed": true
+    },
+    {
+      "stage": "client_credit",
+      "files": 2,
+      "replayed": true
+    },
+    {
+      "stage": "frame_path",
+      "files": 3,
+      "replayed": true
+    },
+    {
+      "stage": "rx_frame_candidate",
+      "files": 3,
+      "replayed": true
+    }
+  ],
+  "frozen_data_replays": [
+    {
+      "script": "analyze_rpc_unary_stages.py",
+      "summary_sha256": "77db764cfd2a1b83d2b98e42c443d57b437215842a55fad505c37ea00dad0677",
+      "recomputed": true
+    },
+    {
+      "script": "analyze_rpc_client_credit.py",
+      "summary_sha256": "d62cfa14e182b8cde5e7a7a25cb557b23e715ce0981b3d8ff7a0ce42326d291b",
+      "recomputed": true
+    },
+    {
+      "script": "analyze_rpc_frame_path.py",
+      "summary_sha256": "16ff1f8e506ff70369322f75596b37e094313d61c1483ff10aada483ef59520a",
+      "recomputed": true
+    },
+    {
+      "script": "analyze_rpc_rx_frame_budget.py",
+      "summary_sha256": "2a0785be0ef6a35c168e0316b6214156d3c8dc1cfbcee45f2b72aa6a2cce3abf",
+      "recomputed": true
+    }
+  ],
+  "callgrind_server_drained": 288,
+  "relative_links": 186,
+  "production_unchanged": true,
+  "benchmark_sha256": "55d1c4b990f1878f7999017960c2c6cf5443fdf998be9ece389c5fa946bd137e",
+  "progress_histograms_recomputed": 3
+}
