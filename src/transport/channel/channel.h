@@ -142,8 +142,9 @@ struct tr_channel_config {
 	uint16_t max_protocol_version;
 	uint64_t feature_bits;
 	/* 本端可接收能力；仅在 MESSAGE_CAPS feature 已启用时发布。
-	 * 当前 Channel 尚无压缩 DATA 接收路径，故非零算法配置返回
-	 * TR_ERR_UNSUPPORTED；不能仅凭能力帧向对端宣告接收能力。
+	 * 非零接收算法须延后创建，在启动握手前绑定消息变换服务，并配置
+	 * 有限的消息、工作区、解码窗口及内存额度；未知算法返回
+	 * TR_ERR_UNSUPPORTED。不能只通告能力而缺少实际接收路径。
 	 */
 	uint32_t receive_compression_algorithms;
 	uint32_t max_encoded_message_bytes;

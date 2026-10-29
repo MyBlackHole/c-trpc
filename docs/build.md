@@ -5,8 +5,9 @@
 项目要求 Linux、GCC 或 Clang、OpenSSL 3.0 或更新版本的开发文件，以及
 Xmake 3.1.1 或更新版本。Ubuntu 22.04 可安装 `libssl-dev`。
 CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/guide/quick-start.html)。
-消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩仍未接入，
-新增编译依赖不表示默认启用压缩。语言基线仍为 ISO C11，并使用 GCC/Clang
+消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩已接入 Channel、
+普通 V2 RPC 和连接组 DATA，默认关闭。发送仍须满足方法/入口授权及对端接收能力，
+不能将编译依赖存在当作已协商或默认启用。语言基线仍为 ISO C11，并使用 GCC/Clang
 支持的 `cleanup` 属性。编译保持 `-Wall -Wextra -Werror -pedantic`
 和 `-pthread`，链接也显式使用 `-pthread`。
 
