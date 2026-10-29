@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.178")
+set_version("2.0.0-dev.179")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -1125,7 +1125,9 @@ target("test_rpc_v2_tls_reactor")
     add_files("tests/test_rpc_v2_tls_reactor.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
-    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=connect", {force = true})
+    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=connect",
+                "-Wl,--wrap=epoll_ctl",
+                "-Wl,--wrap=tr_reactor_adopt_tls_fd_on_owner", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

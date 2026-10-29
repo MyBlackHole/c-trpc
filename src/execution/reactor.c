@@ -2309,6 +2309,14 @@ static void tr_connection_flush_tx(struct tr_reactor *reactor,
 		return;
 	}
 
+	/* TLS 写成功时 TX 项尚未出队；必须在结算后再次收窄兴趣，避免
+	 * 最后一项已释放却仍监听持续可写的 fd，使空闲连接占满 owner。 */
+	if (connection->state == TR_CONN_ACTIVE && connection->byte_endpoint &&
+	    tr_connection_update_interest(reactor, connection) != TR_OK) {
+		tr_connection_close_internal(reactor, connection,
+		                             TR_CONN_EVENT_ERROR, TR_ERR_SYS);
+		return;
+	}
 	if (connection->state == TR_CONN_ACTIVE && connection->byte_endpoint &&
 	    connection->tls_close_pending && !connection->tx_head &&
 	    !connection->tls_preface_write_buffer) {

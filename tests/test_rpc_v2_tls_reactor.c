@@ -12,12 +12,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
 #include "../src/facade_diagnostics_internal.h"
 #include "../src/execution/reactor.h"
+#include "../src/execution/reactor_internal.h"
 #include "../src/io/tls_openssl.h"
 #include "../src/memory_budget.h"
 #include "tls_test_identity.h"
@@ -31,6 +33,7 @@
 #define TEST_TLS_FLOOD_EXCESS_PEERS 48U
 #define TEST_TLS_DESTROY_PEERS 4U
 #define TEST_TLS_DESTROY_HANDSHAKE_TIMEOUT_MS 5000U
+#define TEST_EPOLL_INTEREST_CAPACITY 128U
 
 struct test_state {
 	pthread_mutex_t lock;
@@ -84,8 +87,139 @@ struct tls_budget_test_result {
 
 static _Atomic uint64_t wrapped_sendmsg_calls;
 
+struct test_epoll_interest {
+	int epoll_fd;
+	int fd;
+	uint32_t events;
+	int used;
+};
+
+struct test_tls_connection {
+	struct tr_conn_handle handle;
+	int fd;
+};
+
+static pthread_mutex_t interest_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct test_epoll_interest interests[TEST_EPOLL_INTEREST_CAPACITY];
+static struct test_tls_connection observed_connections[2];
+static unsigned observed_connection_count;
+static _Atomic int observe_tls_interest;
+
 ssize_t __real_sendmsg(int fd, const struct msghdr *message, int flags);
 int __real_connect(int fd, const struct sockaddr *address, socklen_t length);
+int __real_epoll_ctl(int epoll_fd, int operation, int fd,
+                     struct epoll_event *event);
+int __real_tr_reactor_adopt_tls_fd_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t deadline,
+        struct tr_conn_handle *out);
+
+int __wrap_epoll_ctl(int epoll_fd, int operation, int fd,
+                     struct epoll_event *event)
+{
+	int ret = __real_epoll_ctl(epoll_fd, operation, fd, event);
+	if (ret != 0 || !atomic_load(&observe_tls_interest))
+		return ret;
+	assert(pthread_mutex_lock(&interest_lock) == 0);
+	struct test_epoll_interest *entry = NULL;
+	for (unsigned i = 0U; i < TEST_EPOLL_INTEREST_CAPACITY; ++i) {
+		if (interests[i].used && interests[i].epoll_fd == epoll_fd &&
+		    interests[i].fd == fd) {
+			entry = &interests[i];
+			break;
+		}
+	}
+	if (operation == EPOLL_CTL_DEL) {
+		assert(entry);
+		entry->used = 0;
+	} else {
+		if (!entry) {
+			for (unsigned i = 0U; i < TEST_EPOLL_INTEREST_CAPACITY;
+			     ++i) {
+				if (!interests[i].used) {
+					entry = &interests[i];
+					break;
+				}
+			}
+		}
+		assert(entry && event);
+		*entry = (struct test_epoll_interest){epoll_fd, fd,
+		                                      event->events, 1};
+	}
+	assert(pthread_mutex_unlock(&interest_lock) == 0);
+	return ret;
+}
+
+int __wrap_tr_reactor_adopt_tls_fd_on_owner(
+        struct tr_reactor *reactor, int fd,
+        struct tr_tls_openssl_profile *profile, uint64_t deadline,
+        struct tr_conn_handle *out)
+{
+	int ret = __real_tr_reactor_adopt_tls_fd_on_owner(reactor, fd, profile,
+	                                                  deadline, out);
+	if (ret == TR_OK && atomic_load(&observe_tls_interest)) {
+		assert(pthread_mutex_lock(&interest_lock) == 0);
+		assert(observed_connection_count < 2U);
+		observed_connections[observed_connection_count++] =
+		        (struct test_tls_connection){*out, fd};
+		assert(pthread_mutex_unlock(&interest_lock) == 0);
+	}
+	return ret;
+}
+
+static int check_idle_tls_interest_on_owner(void *arg)
+{
+	struct test_tls_connection *connection = arg;
+	struct tr_connection_stats stats;
+	uint32_t events = 0U;
+	unsigned found = 0U;
+	assert(tr_reactor_get_connection_stats(connection->handle, &stats) ==
+	       TR_OK);
+	assert(stats.state == TR_CONN_ACTIVE);
+	if (stats.tx_queued_items != 0U)
+		return TR_AGAIN;
+	assert(pthread_mutex_lock(&interest_lock) == 0);
+	for (unsigned i = 0U; i < TEST_EPOLL_INTEREST_CAPACITY; ++i) {
+		if (interests[i].used && interests[i].fd == connection->fd) {
+			events = interests[i].events;
+			++found;
+		}
+	}
+	assert(pthread_mutex_unlock(&interest_lock) == 0);
+	assert(found == 1U);
+	/* 同一 owner 已确认发送队列为空；普通已认证连接没有前导或关闭
+	 * 写入。核对真实 epoll_ctl 成功后的注册值，不用 CPU/轮转阈值猜测。 */
+	if (events & EPOLLOUT)
+		fprintf(stderr, "tls-reactor: idle_fd=%d events=%x queued=%u\n",
+		        connection->fd, events, stats.tx_queued_items);
+	assert((events & EPOLLOUT) == 0U);
+	assert((events & EPOLLIN) != 0U);
+	return TR_OK;
+}
+
+static void check_idle_tls_interests(void)
+{
+	struct test_tls_connection connections[2];
+	struct timespec pause = {0, 1000000L};
+	assert(pthread_mutex_lock(&interest_lock) == 0);
+	assert(observed_connection_count == 2U);
+	memcpy(connections, observed_connections, sizeof(connections));
+	assert(pthread_mutex_unlock(&interest_lock) == 0);
+	for (unsigned i = 0U; i < 2U; ++i) {
+		unsigned attempt;
+		for (attempt = 0U; attempt < TEST_WAIT_MS; ++attempt) {
+			int ret = tr_reactor_call(
+			        connections[i].handle.reactor,
+			        check_idle_tls_interest_on_owner,
+			        &connections[i]);
+			if (ret == TR_OK)
+				break;
+			assert(ret == TR_AGAIN);
+			assert(nanosleep(&pause, NULL) == 0);
+		}
+		assert(attempt < TEST_WAIT_MS);
+	}
+}
 
 ssize_t __wrap_sendmsg(int fd, const struct msghdr *message, int flags)
 {
@@ -465,6 +599,14 @@ static void test_roundtrip(int tls_required, const char *peer_name,
 	uint8_t request_data[TEST_BODY_SIZE];
 	uint16_t destination_port;
 	int result;
+
+	if (tls_required) {
+		assert(pthread_mutex_lock(&interest_lock) == 0);
+		memset(interests, 0, sizeof(interests));
+		observed_connection_count = 0U;
+		assert(pthread_mutex_unlock(&interest_lock) == 0);
+		atomic_store(&observe_tls_interest, 1);
+	}
 	test_state_init(&state);
 	memset(&proxy, 0, sizeof(proxy));
 	proxy.listener = -1;
@@ -507,6 +649,8 @@ static void test_roundtrip(int tls_required, const char *peer_name,
 	assert(state.work_order < state.server_terminal_order);
 	assert(state.client_message_order < state.client_terminal_order);
 	pthread_mutex_unlock(&state.lock);
+	if (tls_required)
+		check_idle_tls_interests();
 	assert(tr_client_begin_drain(state.client) == TR_OK);
 	assert(tr_client_wait_drained(state.client, TEST_WAIT_MS) == TR_OK);
 	if (tls_required)
@@ -520,6 +664,7 @@ static void test_roundtrip(int tls_required, const char *peer_name,
 	if (use_proxy)
 		test_proxy_stop(&proxy);
 	test_state_destroy(&state);
+	atomic_store(&observe_tls_interest, 0);
 	printf("tls-reactor: roundtrip mode=%s proxy=%d passed\n",
 	       tls_required ? "required" : "disabled", use_proxy);
 }

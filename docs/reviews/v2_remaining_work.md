@@ -1,6 +1,6 @@
 # V2 开发剩余项
 
-当前候选：2026-10-29，`2.0.0-dev.178`。真实握手红测复现 Client 信任目录延迟加载违背构造期快照合同：创建后新增 CA 被旧 profile 接受，删除原来源则丢失信任。新内部模块在构造返回前读取文件/目录 X509 与 CRL，不注册延迟查找器；新增 18 个快照、错误输入及分配回滚场景。GCC Release 全目标及全量 95/95、Clang Release/ASan/UBSan/TSan 各八个 TLS 目标、四编译器安装 SDK 消费端、55 单元真实编译数据库、clang-format 18.1.8 五个变更源文件检查通过，见[信任快照修复记录](rpc_v2_tls_trust_snapshot_20261029.md)。实现提交 `8f49481845dcd1411ac7b79b097287bf7f3fe470` 已推送，精确 head 远端 CI 13/13 成功；后续文档提交单独核对。旧提交 dev.177 的 250 RPS 小消息 TLS/Zstd 小时诊断完成 900000/900000，原 clean=true，Server 含预热 900032 次全部排空；361 个资源采样及严格范围见[小时诊断记录](rpc_v2_tls_zstd_soak_20261029.md)。TLS-E 恶意输入、持续握手、内核驻留、平台及完整发布验收仍未完成。
+当前候选：2026-10-29，`2.0.0-dev.179`。前一 dev.178 切片的真实握手红测复现 Client 信任目录延迟加载违背构造期快照合同：创建后新增 CA 被旧 profile 接受，删除原来源则丢失信任。新内部模块在构造返回前读取文件/目录 X509 与 CRL，不注册延迟查找器；新增 18 个快照、错误输入及分配回滚场景。GCC Release 全目标及全量 95/95、Clang Release/ASan/UBSan/TSan 各八个 TLS 目标、四编译器安装 SDK 消费端、55 单元真实编译数据库、clang-format 18.1.8 五个变更源文件检查通过，见[信任快照修复记录](rpc_v2_tls_trust_snapshot_20261029.md)。实现提交 `8f49481845dcd1411ac7b79b097287bf7f3fe470` 已推送，精确 head 远端 CI 13/13 成功；后续文档提交单独核对。旧提交 dev.177 的 250 RPS 小消息 TLS/Zstd 小时诊断完成 900000/900000，原 clean=true，Server 含预热 900032 次全部排空；361 个资源采样及严格范围见[小时诊断记录](rpc_v2_tls_zstd_soak_20261029.md)。TLS-E 恶意输入、持续握手、内核驻留、平台及完整发布验收仍未完成。
 
 前次候选：2026-10-29，`2.0.0-dev.177`，同 profile 34 轮 TLS 周转已提交并推送为 `97e106c6b43c4c0b8134dde2c328436009fb30ea`，远端 13/13 全部成功。旧的逐轮精确字节平台假设被不同证书重复实验否定，根因定位为 RSA 盲化缓存合法扩容；最终设计逐轮核对块数，profile 释放后、全局 cleanup 前精确回到预热字节/块基线。最终设计连续 20/20，包含两次该缓存扩容，Clang Release、ASan/UBSan、TSan 各八个 TLS 目标通过；遗漏 SSL 释放的变异被捕获并恢复生产源码。全量中发现的独立 SDK 对端终局等待已作为 dev.176 提交 `dc39c5c`，四种本地配置的 SDK 目标通过，见[SDK 屏障记录](rpc_v2_sdk_remote_terminal_barrier_20261029.md)。dev.177 组合 GCC Release 构建和串行全量 95/95 通过，见[TLS 周转记录](rpc_v2_tls_resource_waves_20261029.md)。此前 dev.174/175 精确提交 `f1c0b0f8d8a394bebaf0a0885ff3657b4ccbc2ba` 远端 13/13 成功；后续文档 head `99d108ba993e423a9053e7ccd67e7afb5e73799b` 也已核对 13/13 成功。TLS-E 与完整发布验收仍未完成。
 
@@ -576,6 +576,14 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 异步凭证属于 TLS-D2，资源总账和公网验收属于 TLS-E。
 
 ## 持续开发顺序
+
+dev.179 修复 [TLS 发送排空后残留写兴趣](rpc_v2_tls_idle_interest_20261029.md)：正常响应后
+发送队列为空却仍监听 EPOLLOUT，空闲连接持续占用 I/O owner。新真实 TCP 回归先在
+queued=0/events=2005 处失败；队列结算后重新计算兴趣后通过，读监听保留。GCC
+Release 全量 95/95、Clang Release/ASan/UBSan/TSan 各十二目标通过。固定输入的
+15 秒空闲 Server CPU 为旧 14.99 秒、修复后 0.59 秒；100 RPS 的 30 秒对照为
+18.12/4.72 秒，双方 3000/3000 成功。只据此闭合该忙转缺陷，不宣布容量、尾延迟
+或整个资源/生命周期矩阵完成。新提交的 CI 须另行核对，旧诊断数据不改写为新版本。
 
 2026-10-29 的[持续 TLS 握手压力诊断](rpc_v2_tls_handshake_stress_20261029.md)在同一
 dev.178 Server 上完成 600 秒、38400 次静默/滴灌/ClientHello 中止/明文 TCP 连接，
