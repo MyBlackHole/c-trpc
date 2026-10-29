@@ -84,7 +84,10 @@ Clang Release、ASan/UBSan（泄漏检查）、TSan 各八个 TLS 目标全部�
 记为 dev.177。原始日志保留早期未提交候选的 dev176 前缀，不重命名实验历史。
 最终组合 GCC Release 构建通过，串行全量 95/95，测试命令墙钟 181.566 秒，见
 `build/performance-20261029/dev177-final-full.json` 与对应日志。
-远端精确 head 推送后另行登记。
+精确提交 `97e106c6b43c4c0b8134dde2c328436009fb30ea` 已推送，GitHub 检查
+13/13 全部成功：[固定工具链 CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40825127918)
+8/8、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40825127993) 5/5。
+固定 GCC 11/Clang 14 分析、安装与完整功能模式均通过；这不替代尚未完成的 TLS-E。
 
 内联审查覆盖会话组构造/释放、fd 归属、预算回滚、实际握手写入与未认证状态、
 profile 强引用，以及缓存更新后字节核对的生命周期边界。原 OOM、轮换、提前释放

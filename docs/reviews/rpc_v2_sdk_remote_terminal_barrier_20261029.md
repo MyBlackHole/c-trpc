@@ -38,6 +38,9 @@ GCC Release 四种配置均通过，配置/构建/测试命令墙钟分别为
 13.547、15.978、13.493、12.237 秒；均包含压缩取消/销毁场景。
 汇总与日志见 `build/performance-20261029/sdk-remote-barrier-matrix*`。
 本修复与后续 dev.177 TLS 周转测试的最终组合 GCC Release 全量 95/95 通过。
+包含本修复的精确提交 `97e106c6b43c4c0b8134dde2c328436009fb30ea` 远端检查
+13/13 全部成功：[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40825127918) 8/8、
+[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40825127993) 5/5。
 内联审查确认条件变量使用原锁、等待者释放锁后回调才能更新并广播，所有原断言
 保留；修改只增加远端完成观察，不改变销毁、取消或统计合同。
 完整发布要求仍未完成；本修复只修正测试对远端回调完成时机的观察。
