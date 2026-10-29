@@ -219,9 +219,9 @@ Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
 合并归档不等于做了符号隔离；同时链接另一个 Zstandard 实现可能产生符号冲突或
 版本选择问题，不属于当前保证范围。升级、符号命名/隔离及依赖锁定仍须独立验证。
 当前 SDK 安装白名单包含 `peer_identity.h`，因为公开 `transport.h` 的授权回调使用
-`tr_peer_identity_view`。TLS-D1 开发分支为普通 V2 Client/Server 和 transport-only
+`tr_peer_identity_view`。已合入主线的 TLS-D1 为普通 V2 Client/Server 和 transport-only
 连接组提供 OpenSSL 3 TLS 1.3/mTLS、CONTROL/DATA 主体绑定与 profile 轮换；默认仍关闭
-TLS。静态 SDK 消费端链接 `-lssl -lcrypto`。TLS-D1 固定版本静态分析与 GitHub 验收仍待完成；
+TLS。静态 SDK 消费端链接 `-lssl -lcrypto`。TLS-D1 的固定版本静态分析及合并后主线 CI 已通过；
 完整资源账本和公网门槛属于 TLS-E。阶段范围见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](reviews/rpc_v2_tls_d1_20261023.md)及
 [ADR-009](architecture/decisions/ADR-009-tls-byte-endpoint.md)。

@@ -1,13 +1,13 @@
 # V2 开发剩余项
 
-当前接续候选：2026-10-29，`codex/release-readiness-20261029` 从原本地集成提交 `02c78a50ecfe38852e9ddb327f2cf49c4a460936` 恢复，版本为 `2.0.0-dev.173`。dev.173 为 A→B→A 增加八个真实 mTLS/压缩/子调用时机组合；GCC Debug 全量 94/94、Release 定向八场景与身份丢失变异验证通过，其余全量矩阵和精确 head 远端验收正在进行。详细证据见[组合记录](rpc_v2_nested_tls_compression_20261029.md)。下面保留截至 2026-10-27 的分支与阶段证据，不把旧 head 的绿色检查当作当前集成候选已验收。
+当前接续候选：2026-10-29，`codex/release-readiness-20261029` 从原本地集成提交 `02c78a50ecfe38852e9ddb327f2cf49c4a460936` 恢复，版本为 `2.0.0-dev.173`，已推送到 [Draft PR #333](https://github.com/MyBlackHole/c-trpc/pull/333)，base 为 #332 实现分支。dev.173 为 A→B→A 增加八个真实 mTLS/压缩/子调用时机组合；GCC Debug/Release、Clang Release、ASan/UBSan、TSan 全量各 94/94，身份丢失变异验证通过。实现提交 `dfddf763b83d94742afa8d63816c321a7b5bac0d` 的 GitHub 检查 13/13 全部成功；文档接续提交另行核对精确 head。详细证据见[组合记录](rpc_v2_nested_tls_compression_20261029.md)。这些是组合候选证据，不是完整 TEST-D/E 或发布验收；下面保留历史分支与阶段记录，不把旧 head 的绿色检查当作当前整体验收。
 
 历史阶段记录（以下保留当时的 head 与验收状态）：
 
 核对基线：2026-10-27，V2 当前本地候选为 `2.0.0-dev.172`；#243 堆叠 PR #328 → #329 → #330 均保持 OPEN，异步操作内核 Draft PR #332 依赖设计 PR #331。PR #330 的 dev.157 head `c7fe157c24a87bb461725539884d8f71bd982907` 与 dev.158 head `a8b0f8aa31c4569005e6a404015a81cee2c55074` 均有 13/13 GitHub 检查通过；dev.158 增补共享 TaskExecutor 队列满载的 dispatch 重试回归。dev.159 实现异步操作内核及 RPC authorize、TLS provider、MessageService 接入；dev.160 修复 GCC 11 构建告警与 Clang 14 dispatch 构造清理泄漏；dev.161 修复 TLS provider reserve 解锁失败回滚；dev.162 修复 GCC 11 TSan 编译告警并局部标注 analyzer 的 table-owned 结果缓冲误报，其 PR #332 head `d245e0b4bf0fec52e8d4e1db69613a597e35cb89` 检查 13/13 通过。dev.163 CallRef × 异步 authorize 真实 TCP 回归的远端检查 13/13 通过；dev.164 增加 destroy/release 屏障并在 PR #332 精确 head `6c0a3808722ea0cc8da7d2c1e9d73878327aedce` 上通过 13/13 检查；dev.165 增补 terminal callback 内 hold 的回归，本地 GCC Release 全量测试 93/93 且定向 sanitizer 通过，GitHub 精确 head 检查 13/13 通过；dev.166 增加 A→B→A 异步嵌套调用，本地 GCC Release 全量测试 94/94、TSan/ASan/UBSan 与 clang-format 18.1.8 通过；PR #332 精确 head `d7c7d3cd60d5c89cad2255809e08191171461d00` 的 GitHub CI 与 RPC smoke 检查 13/13 全部通过（[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40422545513)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40422545567)）。dev.168 的 TLS Client 凭证屏障 PR head `f1bc6b4e2d139c1d079863afe22aa5ecdca47c53` 也已通过 13/13 检查（[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40426497557)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40426497621)）。主线 TLS-C merge commit `0fa90817c15286485ee2e1cfe8372bb8ab8a8e5a`；TLS-D1 的后续状态仍以 #234 当前记录为准。
 GitHub 总账：[架构总审查 #239](https://github.com/MyBlackHole/c-trpc/issues/239)。这里记录开发顺序与证据入口，不以单个 PR 或旧 Issue 勾选框代替整体验收。
 
-## 本地集成候选（未推送）
+## 2026-10-27 本地集成候选（当时未推送）
 
 `codex/integration-v2-test-d-20261027` 在本地组合 PR #332 head `19007d696adb9626acabbb4ceeffb3973d6050c6`、PR #323 最新 head `42684b77637dcdd476e3fb87897d7d6529fbafdd` 与 PR #312 head `d9c73b2758fc9dca8e0b5ce82a23a204100516a8`；集成提交为 `6e2f8bf` 与 `5445f26`。候选未推送，也未改动任何远程分支或 PR；版本为 `2.0.0-dev.172`。dev.170 基线曾在 GCC Release、GCC Debug、Clang Release、GCC ASan/UBSan、GCC TSan 下完成全量测试 94/94；dev.171 新增监听器轮换回归后，GCC Release 全量 94/94，新增两目标的 ASan/UBSan（含泄漏检查）和 TSan 通过。TEST-A/错误分类模型、组件回放与固定 64-seed trace explorer、V1 退役 inventory、工具目录、格式工具自测及变更源码格式检查通过；Linux x86_64 的 GCC/Clang 编译数据库各核验 54 个生产源文件。该历史矩阵证明 dev.170 组合基线在当前 Linux x86_64 环境通过这些配置，但没有验证 dev.171 的组合提交远端 CI，也不构成 TEST-D 所要求的完整真实集成/平台矩阵。40k 墓碑容量回归通过，但它不是 TEST-E 性能验收；开环重复性工具现在支持 TLS/压缩并保留发生器、Client、Server 账本与资源记录。本机同一二进制的明文和 TLS+Zstd 40k 对照均为 0/9 干净样本，CONTROL TX 池压力、发生器丢弃和迟到均在九个样本中复现；这些是本地诊断数据，不是通过的容量结论。TEST-E 仍需在约定基准机、固定预算和平台矩阵下完成分层归因与验收。#243 的调用方屏障与监听器凭证轮换已有 dev.171 本地回归，但其余调用方生命周期、共享调度边界以及 #234 的 TLS 总资源、持续负载和互通边界也未全部验收。故此候选仍是本地集成诊断候选，不能视为 V2 发布候选或总体验收完成。
 
@@ -565,8 +565,8 @@ CONTROL/DATA 主体绑定、profile generation 轮换和旧连接撤销。TLS-D1
 工具链/消毒器矩阵均为 88/88，SDK header 安装修复 `.17` 的 GCC Release 复测也为
 88/88；安装 SDK 的 C11/C++11 消费端和 CRC32C 无 SSE4.2 路径已验证。
 GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通过；Clang 14
-既有告警行号已按未变函数体证据校准，8 条告警及 `unverified` 状态保留。合并后的 main CI、
-#234 部分交付登记与远程分支清理仍待 Task 5；
+既有告警行号已按未变函数体证据校准，8 条告警及 `unverified` 状态保留。2026-10-29 接续核对确认
+合并后 main CI、#234 部分交付登记与远程分支清理均已完成，Task 5 已据实勾选；
 异步凭证属于 TLS-D2，资源总账和公网验收属于 TLS-E。
 
 ## 持续开发顺序

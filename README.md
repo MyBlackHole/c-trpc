@@ -39,9 +39,9 @@ dev.168 增加真实 TLS Client 凭证路径的回调屏障回归：外部 cance
 dev.169 为 Server TLS 凭证 provider 增加同类真实 API 屏障回归：fetch 活动期间 poll 保留输出并返回 TR_AGAIN，外部 cancel 不提前进入 provider；fetch 返回后只通知一次，迟到成功仍以 CANCELLED 终结，Server 退役后可销毁。只扩展测试、记录与版本号，未改运行时、公开 API/ABI 或 wire；#243 和 V2 总体验收仍未完成。
 dev.170 为 40k 开环重复性运行器增加 TLS 与请求/响应/zstd 压缩选择，并将参数传给 Server 和全部 Client 发生器；metadata、case、summary 保留配置。基准销毁路径按公开契约重试 `TR_AGAIN`。这只修改诊断工具，不修改 RPC 运行时、公开 API/ABI 或 wire。
 dev.172 为 #243 增加真实 TCP 压缩请求取消与 Client destroy 屏障回归：挂起已受理的 Zstd 变换任务，确认 CallRef 取消先选定 `CANCELLED`，引用释放后 destroy 仍返回 `TR_AGAIN`；任务解除后重试销毁，终态只交付一次且交付域为 `SHUTDOWN`。GCC Release 全量测试 94/94、ASan/UBSan（含泄漏检查）、TSan 定向目标与 C11/C++11 SDK 消费编译通过。只增加测试、报告和开发版本号，不改运行时、公开 API/ABI 或 wire；#243 和 V2 整体验收仍未完成。
-dev.173 将真实 A→B→A 嵌套调用扩展到明文/mTLS 与原文/Zstd 组合，分别在 OPEN 和 HALF_CLOSE work 中提交子调用；八个场景检查身份、正文、唯一终局及引用/排空回收，并处理压缩半关闭背压。身份丢失变异被断言捕获，GCC Debug 全量 94/94 与 Release 定向八场景通过；其余集成矩阵与远端验收仍在进行。范围与证据见[嵌套调用 TLS/压缩组合记录](docs/reviews/rpc_v2_nested_tls_compression_20261029.md)。
-默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1/D2 全验证矩阵与 GitHub
-验收仍未完成；TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
+dev.173 将真实 A→B→A 嵌套调用扩展到明文/mTLS 与原文/Zstd 组合，分别在 OPEN 和 HALF_CLOSE work 中提交子调用；八个场景检查身份、正文、唯一终局及引用/排空回收，并处理压缩半关闭背压。身份丢失变异被断言捕获；GCC Debug/Release、Clang Release、ASan/UBSan、TSan 全量均为 94/94，Draft PR #333 实现提交 `dfddf76` 的远端检查 13/13 通过。范围与证据见[嵌套调用 TLS/压缩组合记录](docs/reviews/rpc_v2_nested_tls_compression_20261029.md)。
+默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 已合入主线且合并后 CI 通过；
+TLS-D2 与后续集成候选仍在未合并 PR 中。TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。
 dev.120–dev.126 为 #242/ERR-D 增加真实 TCP 双组 32 轮并发 DATA 成员故障替代回归、CONTROL 致命拆除后的活动成员清理与旧 epoch 路由隔离组件回归、异构 DATA 状态回收和组间故障隔离、32 轮真实 TCP CONTROL teardown/epoch 重建与早期旧 route 重放回归，以及 route 前导延迟到新 epoch 后提交时的旧 route 拒绝回归；这些切片不代表持续压力、资源争用和完整错误矩阵已验收。
 dev.127 为 #242/ERR-C 增加 RESETTING 窗口中应用线程释放已交付 DATA 的信用隔离回归；Release、TSan、ASan/UBSan 的 `test_stream_reset` 均通过。该测试只增加竞态边界证据，不表示 ERR-C 信用与组合故障全矩阵或 V2 整体验收完成。
@@ -604,7 +604,7 @@ CONTROL 通道              BULK 通道
 mTLS，Server 授权 CONTROL/DATA 主体，Client 要求 DATA 服务端主体与 CONTROL 连续一致。
 默认仍使用明文 TCP。Message 层压缩已接入普通 Stream、RPC 业务正文和连接组 DATA，
 按消息显式选择且默认关闭；连接组本机矩阵已完成，真实业务负载和发布性能阈值验收仍待完成。
-TLS profile 轮换和全部 TLS 内部内存的硬预算仍待完成。
+TLS profile 轮换与旧代次撤销已实现；全部 TLS 内部内存与内核资源的完整预算验收仍待完成。
 CRC32C 不能替代认证和加密；
 部署到不可信网络前仍须完成 [TLS-D/E 验收](docs/architecture/decisions/ADR-009-tls-byte-endpoint.md)。
 消息压缩要求见[压缩与 TLS 需求](docs/architecture/11-compression-tls-requirements.md)。
@@ -1261,7 +1261,7 @@ Xmake CI 矩阵检查：
 - 如果未来有界 V2 调度扫描成为可测瓶颈，再按证据评估可扩展定时结构；
 - 共享连接模式下严格 CONTROL 优先调度器（拆分模式已经提供物理隔离）；
 - 多 DATA 连接资源池；
-- TLS profile 原子轮换、旧代次撤销与 TLS 全部内部内存的硬预算；
+- TLS 全部内部内存及内核 socket 资源的完整预算验收；
 - 备份语义 / 持久提交 / 备份续传 / 存储 / 文件系统 I/O；
 - 拆分连接客户端/服务端门面的配对/绑定协议；
 - 无锁命令队列 / io_uring / 内核零复制优化。
@@ -1317,7 +1317,7 @@ Stream、RPC 业务正文和连接组 DATA，并保持默认关闭。真实业�
 1. 为拆分 CONTROL/BULK 门面增加连接绑定标识，使独立接收的套接字能够安全配对；
 2. 共享连接模式下，在 DATA 帧边界实现严格 CONTROL 优先级；
 3. 在保留 RAW 批量分片的同时增加类型化编解码器注册表，例如 Protobuf；
-4. 为 TLS profile 增加跨 owner 原子轮换、旧代次撤销和完整资源验收；普通 V2 与连接组 TLS/mTLS 已接入，分别见 TLS-C 与 TLS-D1 记录；
+4. 完成 TLS provider、profile 轮换和旧代次撤销的资源、长稳与目标平台验收；普通 V2 与连接组 TLS/mTLS 已接入，分别见 TLS-C 与 TLS-D1 记录；
 5. 提供显式 RPC/服务健康检查，与传输层保活分离；
 6. 只有标记为可重试/幂等的方法才允许使用通用 RPC 重试策略；
 7. 增加模糊测试/长稳测试/基准测试套件和真实 RPC/BULK 性能分析；CRC32C 已有可移植/运行时选择加速后端（见 [CRC32C 后端](docs/crc32c.md)），可选 RX 向量消息仍由性能分析驱动。

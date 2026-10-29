@@ -251,9 +251,15 @@ TLS-C review/plan 已记录 PR #310 merge commit `0fa90817c15286485ee2e1cfe8372b
 
 `feat/v2-tls-d-234` 的 TLS-D1 PR #311 已创建；提交 `b713801` 的 GCC/Clang 构建、GCC 11/Clang 14 静态分析、ASan/UBSan、TSan、Make/install、CRC fallback、RPC smoke 与格式门禁全部通过。PR 描述包含 D1 scope、版本序列、本地证据及 TLS-D2/E 未完成项。任何新静态告警必须解释并保持精确 baseline，不得无依据删除或把 `unverified` 改成已审。
 
-- [ ] **Step 5: 合并、更新 #234 并清理已合入远程分支**
+- [x] **Step 5: 合并、更新 #234 并清理已合入远程分支**
 
 仅在 PR 全部必需检查通过后按仓库 merge commit 方式合并；验证合并提交的 main CI，再更新 #234 说明 TLS-D1 部分交付，保持 #234 开放，并删除仅供本 PR 使用的远程分支。
+
+2026-10-29 接续核对：PR #311 已于 2026-10-23T19:04:41Z 合并，merge commit 为
+`f73d8bb4d214fe71393eb8fa5e1cb0d8fbf01741`。该提交的 CI、RPC smoke、性能诊断和格式
+工作流全部成功；#234 当前明确记录 TLS-D1 已合入且保持 OPEN；
+`git ls-remote --heads origin feat/v2-tls-d-234` 无匹配。详细运行链接见
+[TLS-D1 验证记录的接续核对](../../reviews/rpc_v2_tls_d1_20261023.md#2026-10-29-接续核对)。
 
 ## 自审覆盖
 

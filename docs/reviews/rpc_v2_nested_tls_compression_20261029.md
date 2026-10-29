@@ -37,14 +37,51 @@ Xmake 只为既有目标补入已有 `tls_test_identity.c`，不增改测试目�
 置空，真实测试在 `request->peer_identity.authentication` 断言失败；在 `finally` 中
 逐字节恢复原生产源码后，八场景全部通过。生产源码没有遗留变异。
 
-GCC Debug 全量构建与 94/94 注册测试通过，用时 192.652 秒。
-其余全量矩阵正在执行，最终结果尚待补充；不得把这条记录当作完整矩阵通过证明。
+实现提交为 `dfddf763b83d94742afa8d63816c321a7b5bac0d`，最终测试源码与 Xmake
+配置的 SHA-256 分别为
+`d9819a21d9c9d9f54e13b6923b6bd5d50085c11217303852cf36fef2c3569991` 与
+`60cef94da45c89c884292e24dfef471ceb5240331ec3b7c647b13f92bcb99d91`。
+五种配置均重新配置、构建全部目标并执行 `xmake test -v -j1`，结果如下。
+用时为整个测试命令的墙钟时间，包含 Xmake 启动；每种配置均观察到八个嵌套场景通过。
+
+| 配置 | 全量构建 | 注册测试 | 测试命令用时（秒） |
+|---|---|---|---:|
+| GCC Debug | 通过 | 94/94 | 194.001 |
+| Clang Release | 通过 | 94/94 | 177.243 |
+| GCC ASan/UBSan | 通过 | 94/94 | 196.516 |
+| GCC TSan | 通过 | 94/94 | 168.421 |
+| GCC Release（最终复测） | 通过 | 94/94 | 171.432 |
+
+ASan 使用 `detect_leaks=1:halt_on_error=1`；UBSan 使用
+`halt_on_error=1:print_stacktrace=1`；TSan 使用
+`halt_on_error=1:second_deadlock_stack=1`。沿用 CI 已有的绝对路径
+`tests/lsan.supp`，只抑制既有 `libp11-kit.so.0` DSO 初始化泄漏；没有新增 suppression。
+
+[Draft 集成 PR #333](https://github.com/MyBlackHole/c-trpc/pull/333) 基于 #332 的实现分支，
+组合原本地候选和 TLS-D2 后续切片。实现提交 `dfddf76` 的 GitHub 检查 13/13 全部成功：
+[主 CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40815339745) 8/8，
+[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40815339766) 5/5。
+覆盖固定 GCC 11/Clang 14 分析、两编译器构建、ASan/UBSan、TSan、Make/install 和 CRC fallback。
+PR 保持 Draft、未合并；后续仅记录证据的文档提交与该实现提交分开核对。
+
 状态模型、错误分类、组件回放、轨迹探索脚本分别为 28/28、6/6、19/19、15/15 通过。
 命令均采用 CI 规定的 `python3 scripts/test_*.py -v` 直接脚本入口。
 
 本机为 Arch Linux、Linux 7.2.11 x86_64、GCC 16.2.1、Clang 23.1.4、
 OpenSSL 3.6.5 和 Xmake 3.1.2。它不能替代 Ubuntu 22.04、OpenSSL 3.0 与固定 CI 工具链。
 完整 configure/build/test、变异验证和模型日志位于忽略目录 `build/release-readiness/`。
+本次修改源码的 clang-format 18.1.8 门禁检查 1 个文件、0 失败，
+`git diff --check` 通过；生产源码和公开头文件与原集成基线保持一致。
+最终 GCC Release 的真实 Xmake 编译数据库核验 54 个生产编译单元；
+本批修改文档中的 277 个本地链接目标全部存在。
+
+最终 GCC Release SDK 安装到工作区包含空格的独立路径后，11 个公开头文件分别经
+GCC/Clang C11 与 G++/Clang++ C++11 单独语法检查；复制到独立消费目录的
+`test_rpc_v2_sdk.c` 在四个编译器下编译、链接并运行真实 TCP 回归，单次超时 30 秒。
+消费端只引用安装后的头文件与 `-ltrcore -lssl -lcrypto -pthread`，没有源码包含路径、
+测试故障宏或额外 `-lzstd`。安装库的 `ZSTD_versionNumber` 恰有一个定义，
+LICENSE、NOTICE、licensing.md 与 Zstandard LICENSE 在安装包、源码归档和当前源码中
+逐字节一致。该消费目录位于工作区忽略的 `build/`，不是仓库外路径。
 
 ## 范围与后续发布条件
 
