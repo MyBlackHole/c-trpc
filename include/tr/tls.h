@@ -87,6 +87,9 @@ struct tr_tls_client_config {
 	enum tr_tls_mode mode;
 	// 备注: ca_file/ca_directory
 	// 均为空时使用系统信任库；指定后只信任显式来源。
+	/* 信任文件/哈希目录在创建时读入快照；后续来源变更须重建或轮换 profile。
+	 * 目录支持冒号列表和符号链接，按 hash.N/hash.rN 的连续编号加载单个 PEM
+	 * 证书/CRL；忽略不匹配索引，损坏数据在构造时拒绝，握手不再读取路径。 */
 	const char *ca_file;
 	const char *ca_directory;
 	// 备注: DNS 只匹配 dNSName SAN，IP 只匹配 iPAddress SAN，不回退到

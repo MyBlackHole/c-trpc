@@ -69,6 +69,7 @@ int tr_async_operation_reserve(struct tr_async_operation_pool *pool,
                                const struct tr_async_operation_spec *spec,
                                struct tr_async_operation *out_operation,
                                struct tr_async_operation_ref *out_producer_ref);
+/* 仅撤销与 producer_ref 对应的预留；错配返回 STALE，双方状态和引用不变。 */
 int tr_async_operation_reject(struct tr_async_operation_pool *pool,
                               struct tr_async_operation operation,
                               struct tr_async_operation_ref *producer_ref);

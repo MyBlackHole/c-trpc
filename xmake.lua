@@ -1,5 +1,5 @@
 set_project("c-trpc")
-set_version("2.0.0-dev.169")
+set_version("2.0.0-dev.182")
 set_xmakever("3.1.1")
 set_allowedplats("linux")
 set_allowedmodes("debug", "release", "asan", "tsan")
@@ -116,6 +116,7 @@ target("trcore")
         "src/io/tls_provider_operation.c",
         "src/io/tls_config.c",
         "src/io/tls_openssl.c",
+        "src/io/tls_trust_snapshot.c",
         "src/execution/reactor.c",
         "src/runtime/runtime.c",
         "src/runtime/message_service.c",
@@ -199,6 +200,20 @@ target("test_tls_openssl")
     add_files("tests/test_tls_openssl.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=SSL_CTX_ctrl", "-Wl,--wrap=BIO_new_fd", "-Wl,--wrap=BIO_new",
+                "-Wl,--wrap=X509_STORE_add_cert", "-Wl,--wrap=X509_STORE_add_crl",
+                "-Wl,--wrap=malloc", {force = true})
+    add_tests("default", {run_timeout = 120000, realtime_output = true})
+target_end()
+
+-- 独立进程核对 OpenSSL 分配账本；全局分配钩子不进入库或其他测试。
+target("test_tls_resource_ledger")
+    set_kind("binary")
+    set_default(false)
+    add_files("tests/test_tls_resource_ledger.c", "tests/tls_test_identity.c")
+    add_deps("trcore")
+    add_undefines("NDEBUG")
+    add_ldflags("-Wl,--wrap=calloc", "-Wl,--wrap=BIO_meth_new", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -645,6 +660,7 @@ target("test_runtime_message_recovery")
     add_files("tests/test_runtime_message_recovery.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=epoll_wait", "-Wl,--wrap=write",
+                "-Wl,--wrap=tr_async_operation_publish",
                 "-Wl,--wrap=tr_message_service_create_on_owner",
                 "-Wl,--wrap=tr_reactor_destroy",
                 "-Wl,--wrap=pthread_cond_destroy",
@@ -800,6 +816,7 @@ target("test_stream_reset")
     add_files("tests/test_stream_reset.c")
     add_deps("trcore")
     add_ldflags("-Wl,--wrap=tr_reactor_timer_arm", "-Wl,--wrap=sendmsg",
+                "-Wl,--wrap=pthread_mutex_lock",
                 "-Wl,--wrap=tr_channel_local_stream_id_take", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
@@ -893,6 +910,7 @@ target("test_rpc_record_endpoint_tcp")
             "src/io/peer_identity_internal.c",
             "src/io/tls_config.c",
             "src/io/tls_openssl.c",
+            "src/io/tls_trust_snapshot.c",
             "src/io/socket.c",
             "src/io/connector.c",
             "src/message/message.c",
@@ -1086,7 +1104,9 @@ target("test_rpc_v2_sdk")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_defines("TR_RPC_V2_TEST_FAULTS")
-    add_ldflags("-Wl,--wrap=tr_stream_open", {force = true})
+    add_ldflags("-Wl,--wrap=tr_stream_open",
+                "-Wl,--wrap=tr_message_transform_run_checked",
+                {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 
@@ -1094,7 +1114,7 @@ target_end()
 target("test_rpc_v2_nested_calls")
     set_kind("binary")
     set_default(false)
-    add_files("tests/test_rpc_v2_nested_calls.c")
+    add_files("tests/test_rpc_v2_nested_calls.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
     add_tests("default", {run_timeout = 120000, realtime_output = true})
@@ -1107,7 +1127,9 @@ target("test_rpc_v2_tls_reactor")
     add_files("tests/test_rpc_v2_tls_reactor.c", "tests/tls_test_identity.c")
     add_deps("trcore")
     add_undefines("NDEBUG")
-    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=connect", {force = true})
+    add_ldflags("-Wl,--wrap=sendmsg", "-Wl,--wrap=connect",
+                "-Wl,--wrap=epoll_ctl",
+                "-Wl,--wrap=tr_reactor_adopt_tls_fd_on_owner", {force = true})
     add_tests("default", {run_timeout = 120000, realtime_output = true})
 target_end()
 

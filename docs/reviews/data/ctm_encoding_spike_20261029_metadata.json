@@ -1,0 +1,38 @@
+{
+  "source_commit": "f670b773a18db3c679dc60cc7418e93e199459c6",
+  "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+  "compiler": "gcc (GCC) 16.2.1 20260810",
+  "clang": "clang version 23.1.4",
+  "xmake": "\u001b[0m\u001b[1mxmake v3.1.2+20261016, A cross-platform build utility based on Lua\u001b[0m\u001b[0m",
+  "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+  "binary_sha256": "8a841d5509d8260a55317f3bc8a8129367ffedf17dfd33a57a8d9d53b3acf4ae",
+  "affinity": [
+    0
+  ],
+  "trials": 9,
+  "warmup_trials": [
+    0,
+    1
+  ],
+  "source_sha256": {
+    "codec.c": "71f6285d9b529379ad4670e13420502555b9d5d358706fcea66dc754ffd32faf",
+    "codec.h": "6787cd77dfe756f32e479480d1aa57b9ebc09bf0a3cd81ece63d898dfb0cac70",
+    "measure.c": "3a341e883cd09c86d67681fdf965ca91f480659aedc7cd8647c680af199739f6",
+    "xmake.lua": "e1feede58c8dbe5d1ba8e03a5556b47dcc428bc4afd76c75a547549aa14f1988",
+    "run_probe.py": "d72c2e7c8a27c1d2a464c1527157f96569fb51a8dd36a97b863643b5019f993d"
+  },
+  "scope": [
+    "disposable_candidate",
+    "u64_bytes_optional_ascii_label",
+    "shared_host",
+    "hot_buffers",
+    "batch_cpu_means",
+    "not_rpc_tail_latency",
+    "not_upstream_implementation",
+    "no_arrays",
+    "no_nested_structures",
+    "no_full_utf8",
+    "no_rust",
+    "fixed_width_offset_edit_only"
+  ]
+}

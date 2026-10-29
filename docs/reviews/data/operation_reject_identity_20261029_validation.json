@@ -1,0 +1,424 @@
+{
+  "base_commit": "5fc327a9d058540b6901c0ffe5ea25d755094966",
+  "version": "2.0.0-dev.181",
+  "sha256": {
+    "src/execution/async_operation.c": "6dd27f344dcb8497da7dbba982e26e939cbb0a2805c4c0572ff94907909df182",
+    "src/execution/async_operation_internal.h": "97fb6f562ff8771af0c50347580c5ddaee22a0fff399527322f9042d877bdc57",
+    "tests/test_async_operation.c": "0c2b0734676e163c08eea66ef9193a373d3be1980540aa561ddc293abec8e4c0",
+    "xmake.lua": "a598eb6734b07c198e7aaad56d2cca5b9ef31d81d396c62a9377297dc962b4b0"
+  },
+  "scope": "Operation/producer identity matching on reject; not full V2 acceptance",
+  "red": {
+    "exit_code": 255,
+    "failed_tests": 1,
+    "target": "test_async_operation/default",
+    "test_elapsed_seconds": 0.185,
+    "failure": "first cross-slot reject did not return STALE"
+  },
+  "focused_matrix": [
+    {
+      "label": "clang-release",
+      "build_seconds": 11.225,
+      "test_seconds": 17.725,
+      "tests_passed": 11,
+      "reject_identity_checked": true
+    },
+    {
+      "label": "gcc-asan",
+      "build_seconds": 15.252,
+      "test_seconds": 19.877,
+      "tests_passed": 11,
+      "reject_identity_checked": true
+    },
+    {
+      "label": "gcc-tsan",
+      "build_seconds": 10.4,
+      "test_seconds": 20.578,
+      "tests_passed": 11,
+      "reject_identity_checked": true
+    }
+  ],
+  "focused_targets": [
+    "test_async_operation",
+    "test_tls_provider_operation",
+    "test_tls_provider",
+    "test_message_service",
+    "test_runtime_message_recovery",
+    "test_message_service_partial_destroy",
+    "test_rpc_v2_server",
+    "test_rpc_record_dispatch",
+    "test_rpc_v2_nested_calls",
+    "test_rpc_v2_sdk",
+    "test_rpc_v2_server_destroy_drain"
+  ],
+  "initial_full_suite": {
+    "passed": 94,
+    "failed": 1,
+    "timeout_target": "test_stream_reset/default",
+    "target_seconds": 120.119,
+    "test_seconds": 234.018,
+    "command_seconds": 235.421
+  },
+  "diagnostic": {
+    "exit_code": 0,
+    "elapsed_s": 90.715,
+    "binary_sha256": "cc69e5d143ba4b70b61e82926b8abdf66585bab18ff72e8efc571ccd11c236f3",
+    "unchanged_binary": true,
+    "ticks_per_second": 100,
+    "samples": [
+      {
+        "elapsed_s": 0.042,
+        "loadavg": "9.64 10.75 7.74 5/1849 3440190",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1
+      },
+      {
+        "elapsed_s": 5.088,
+        "loadavg": "9.19 10.64 7.72 5/1841 3440275",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 401,
+          "system_ticks": 42
+        }
+      },
+      {
+        "elapsed_s": 10.132,
+        "loadavg": "8.77 10.53 7.70 5/1835 3440300",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 874,
+          "system_ticks": 81
+        }
+      },
+      {
+        "elapsed_s": 15.173,
+        "loadavg": "8.39 10.42 7.68 9/1845 3440442",
+        "compiler_processes": [
+          "3440432",
+          "3440435",
+          "3440440"
+        ],
+        "compiler_probe_exit": 0,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 1346,
+          "system_ticks": 120
+        }
+      },
+      {
+        "elapsed_s": 20.218,
+        "loadavg": "8.28 10.36 7.68 9/1852 3440800",
+        "compiler_processes": [
+          "3440787",
+          "3440789",
+          "3440797",
+          "3440799"
+        ],
+        "compiler_probe_exit": 0,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 1822,
+          "system_ticks": 154
+        }
+      },
+      {
+        "elapsed_s": 25.261,
+        "loadavg": "8.18 10.31 7.67 7/1855 3441046",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 2299,
+          "system_ticks": 187
+        }
+      },
+      {
+        "elapsed_s": 30.295,
+        "loadavg": "7.92 10.22 7.66 4/1839 3441276",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 2771,
+          "system_ticks": 223
+        }
+      },
+      {
+        "elapsed_s": 35.333,
+        "loadavg": "7.53 10.10 7.63 4/1833 3441320",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 3238,
+          "system_ticks": 261
+        }
+      },
+      {
+        "elapsed_s": 40.369,
+        "loadavg": "7.00 9.95 7.60 6/1832 3441380",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 3706,
+          "system_ticks": 300
+        }
+      },
+      {
+        "elapsed_s": 45.4,
+        "loadavg": "6.68 9.83 7.57 5/1830 3441384",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 4170,
+          "system_ticks": 340
+        }
+      },
+      {
+        "elapsed_s": 50.426,
+        "loadavg": "6.47 9.73 7.55 4/1839 3441414",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 4637,
+          "system_ticks": 377
+        }
+      },
+      {
+        "elapsed_s": 55.465,
+        "loadavg": "6.19 9.62 7.53 6/1848 3441477",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 5106,
+          "system_ticks": 416
+        }
+      },
+      {
+        "elapsed_s": 60.524,
+        "loadavg": "6.10 9.55 7.51 8/1842 3441480",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 5576,
+          "system_ticks": 456
+        }
+      },
+      {
+        "elapsed_s": 65.552,
+        "loadavg": "6.33 9.54 7.52 7/1835 3441530",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 6046,
+          "system_ticks": 494
+        }
+      },
+      {
+        "elapsed_s": 70.588,
+        "loadavg": "6.22 9.46 7.51 6/1833 3441532",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 6511,
+          "system_ticks": 536
+        }
+      },
+      {
+        "elapsed_s": 75.628,
+        "loadavg": "5.88 9.34 7.48 4/1833 3441543",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 6979,
+          "system_ticks": 576
+        }
+      },
+      {
+        "elapsed_s": 80.663,
+        "loadavg": "5.73 9.25 7.46 6/1840 3441552",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 7448,
+          "system_ticks": 616
+        }
+      },
+      {
+        "elapsed_s": 85.697,
+        "loadavg": "5.67 9.18 7.44 6/1840 3441605",
+        "compiler_processes": [],
+        "compiler_probe_exit": 1,
+        "test": {
+          "pid": 3440195,
+          "user_ticks": 7915,
+          "system_ticks": 659
+        }
+      }
+    ]
+  },
+  "invalid_diagnostic": {
+    "path": "build/performance-20261029/dev181-stream-reset-diagnostic.log",
+    "outcome": "observer_failed_no_test_verdict",
+    "reason": "ps -C cc1 exit 1 on no matches was treated as an exception"
+  },
+  "final_full_suite": {
+    "passed": 95,
+    "failed": 0,
+    "test_seconds": 185.701,
+    "stream_reset_seconds": 81.936
+  },
+  "commands": {
+    "focused": [
+      "xmake",
+      "test",
+      "-v",
+      "-j1",
+      "test_async_operation/*",
+      "test_tls_provider_operation/*",
+      "test_tls_provider/*",
+      "test_message_service/*",
+      "test_runtime_message_recovery/*",
+      "test_message_service_partial_destroy/*",
+      "test_rpc_v2_server/*",
+      "test_rpc_record_dispatch/*",
+      "test_rpc_v2_nested_calls/*",
+      "test_rpc_v2_sdk/*",
+      "test_rpc_v2_server_destroy_drain/*"
+    ],
+    "full": [
+      "xmake",
+      "test",
+      "-v",
+      "-j1"
+    ],
+    "diagnostic": [
+      "xmake",
+      "test",
+      "-v",
+      "-j1",
+      "test_stream_reset/*"
+    ]
+  },
+  "raw_logs": [
+    {
+      "path": "build/performance-20261029/dev181-clang-release-build.log",
+      "sha256": "7a193642d8aff6b970bc516466468b9a3d191708dbac06733dd1870a5de03412",
+      "bytes": 36768
+    },
+    {
+      "path": "build/performance-20261029/dev181-clang-release-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev181-clang-release-test.log",
+      "sha256": "3bc5022e042c4c248d454efc75685033bf1aae536d1b3383ca6e6acf706397c1",
+      "bytes": 4590
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-asan-build.log",
+      "sha256": "62be80d55881fcbceeee83b9abb4d5d08d5e0a6e4b9dbc85ed2f811dcf69ba55",
+      "bytes": 15240
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-asan-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-asan-test.log",
+      "sha256": "df6bb21e0c4c0db5a61b5203e9c55fbe84a32383bec1228146ef82d3f77c0f14",
+      "bytes": 4590
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-release-final-build.log",
+      "sha256": "4f41ca446c0a28d1040f4814c43bd33418e6f551acb491bae5cf9236f082ff40",
+      "bytes": 36768
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-release-final-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-release-final-test.log",
+      "sha256": "1672e83be0867e413c1299e451b8fa999f0c45b491e653d821fb3fb46a65f5f8",
+      "bytes": 41147
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-release-recheck-test.log",
+      "sha256": "e9561d7a3bc61294b7d172cd1e1b6d762673a05bd8974d0b514c256eff3440c4",
+      "bytes": 41255
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-tsan-build.log",
+      "sha256": "eedc8e74d2318b81241204f96db3b50238cc781c41387a5ebe6dcc4164bae3e2",
+      "bytes": 15239
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-tsan-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev181-gcc-tsan-test.log",
+      "sha256": "3e6164d8ef3c68c3c1758d2b786c8d7e43a55fbccbc53f9946b0357cfcc79bfe",
+      "bytes": 4590
+    },
+    {
+      "path": "build/performance-20261029/dev181-matrix-driver.log",
+      "sha256": "68d0fe46e2054dd5654aebd966963e8cc9068aac30dd4f98f7996975cc634d1b",
+      "bytes": 6994
+    },
+    {
+      "path": "build/performance-20261029/dev181-stream-reset-diagnostic.log",
+      "sha256": "0631f68c01714ed505ef60e1180230b2a437f2b308f60f046f08c47ce2b1b49f",
+      "bytes": 98
+    },
+    {
+      "path": "build/performance-20261029/dev181-stream-reset-diagnostic2.log",
+      "sha256": "79a6aa8c8672d3c4d5a5c796b1e761ad9d4594dd899417cfc1b65af860511b52",
+      "bytes": 704
+    },
+    {
+      "path": "build/performance-20261029/operation-reject-identity-red.log",
+      "sha256": "be07dd3170c382b41d56906d726ad4ad96a2029882fce2a61e8461313d02157c",
+      "bytes": 1657
+    },
+    {
+      "path": "build/performance-20261029/operation-reject-identity-green.log",
+      "sha256": "19cc626335af664351d7abcd35f10ad83e4c6432d7ae8b8c2da0ed82f1ae1210",
+      "bytes": 10366
+    },
+    {
+      "path": "build/performance-20261029/dev181-stream-reset-diagnostic2.json",
+      "sha256": "51b620e9925b5f1cfadcef87822b351fd5cc1c6ac2a06f0bc569ebfc6efc304e",
+      "bytes": 4889
+    },
+    {
+      "path": "build/performance-20261029/dev181-stream-reset-diagnostic2-resources.jsonl",
+      "sha256": "99e44de105333394e1342c920001e13adf7ca7573f63b14481fb82215c5a22d3",
+      "bytes": 3336
+    }
+  ],
+  "limitations": [
+    "RESET timing root cause unproven",
+    "not global resource acceptance",
+    "not CTM1 implementation",
+    "not capacity or platform acceptance"
+  ]
+}

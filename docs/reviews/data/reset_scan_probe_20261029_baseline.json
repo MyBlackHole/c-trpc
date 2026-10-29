@@ -1,0 +1,23 @@
+{
+  "source_commit": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+  "baseline_binary_sha256": "cc69e5d143ba4b70b61e82926b8abdf66585bab18ff72e8efc571ccd11c236f3",
+  "original_sha256": {
+    "src/transport/channel/channel.c": "8fa16f932cbbc7755bd4704d9fa447687c762a9ddc82129669f66e7cbe5b39e7",
+    "tests/test_stream_reset.c": "a9a99880840d16f15600e2ba0e2a4b6d80bf181876385dce4d294f0dbe40d9f4"
+  },
+  "calls": 82836,
+  "slot_visits": 3313440000,
+  "resetting_matches": 81322,
+  "inclusive_thread_cpu_ns": 66653984770,
+  "loop_process_cpu_ms": 74980.83,
+  "loop_wall_ms": 74650.02,
+  "test_seconds": 74.936,
+  "perf_status": "denied; no samples",
+  "patch_sha256": "5087cbc9f54a8911e8c24748c65090ac16e84686a04e946925f46893e17fc30e",
+  "original_sources_restored": true,
+  "log_sha256": "3c9080e278387ed40b22317b608e921625099f6da76552f365cc1a4b3550cee0",
+  "instrumented_source_sha256": {
+    "src/transport/channel/channel.c": "1a3cbaab42bd82ab88325d41509b01cce303efd78e25281b49f20e2cb476a876",
+    "tests/test_stream_reset.c": "604f8b19a144f814bd065585586516e6e3a2b11694ec3529ecb88d894738ca4b"
+  }
+}

@@ -1,12 +1,15 @@
 """Tests for repeated V2 load and exact Server wall classification."""
 import unittest
+from pathlib import Path
+import subprocess
+import sys
 
 from run_rpc_repeatability import PROFILE_SPECS, summarize
 from run_rpc_scalability import SERVER_PRESSURE_FIELDS
 
 
 def result(ok_rps=39000.0, signals=None,
-           command_hits=0, command_peak=45):
+           command_hits=0, command_peak=45, tls=False, compression="none"):
     signal_list = list(signals or [])
     server = {key: 0 for key in SERVER_PRESSURE_FIELDS.values()}
     server.update(command_budget_hits=command_hits,
@@ -29,12 +32,38 @@ def result(ok_rps=39000.0, signals=None,
         client["scheduler_late_p99_us"] = 1000.0
     return {
         "schema": 2, "api_generation": "rpc_v2",
-        "case": {"rate_rps": 40000}, "server_exit": server,
+        "case": {"rate_rps": 40000, "tls": tls,
+                 "compression": compression}, "server_exit": server,
         "client": client, "wall_signals": signal_list,
     }
 
 
 class RepeatabilityTests(unittest.TestCase):
+    def test_cli_exposes_tls_and_compression_modes(self):
+        script = Path(__file__).with_name("run_rpc_repeatability.py")
+        completed = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            check=False, capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("--compression", completed.stdout)
+        self.assertIn("--tls-ca", completed.stdout)
+        self.assertIn("--tls-cert", completed.stdout)
+        self.assertIn("--tls-key", completed.stdout)
+
+    def test_cli_rejects_tls_without_all_credentials(self):
+        script = Path(__file__).with_name("run_rpc_repeatability.py")
+        output = (Path(__file__).resolve().parents[1] / "build" / "test-tmp" /
+                  "repeatability-invalid-tls.jsonl")
+        output.unlink(missing_ok=True)
+        completed = subprocess.run(
+            [sys.executable, str(script), "--binary", sys.executable,
+             "--output", str(output), "--tls"],
+            check=False, capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("--tls requires --tls-ca, --tls-cert, and --tls-key",
+                      completed.stderr)
+        self.assertFalse(output.exists())
+
     def test_profiles_compare_only_public_call_limits(self):
         small = PROFILE_SPECS["small_call_limit"]
         large = PROFILE_SPECS["large_call_limit"]
@@ -77,6 +106,12 @@ class RepeatabilityTests(unittest.TestCase):
         self.assertEqual(summary["reproducible_server_signals"], [])
         self.assertEqual(summary["sporadic_server_signals"], [])
         self.assertEqual(summary["signal_counts"], {})
+
+    def test_summary_preserves_tls_and_compression_configuration(self):
+        summary = summarize("default_call_limit", [
+            result(tls=True, compression="zstd")])
+        self.assertTrue(summary.get("tls_enabled", False))
+        self.assertEqual(summary.get("compression"), "zstd")
 
     def test_summary_marks_recurrent_server_wall(self):
         rows = [

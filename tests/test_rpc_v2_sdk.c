@@ -10,6 +10,11 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef TR_RPC_V2_TEST_FAULTS
+#include <stdbool.h>
+#include <stdatomic.h>
+#endif
+
 /* C/C++ 公共消费端会用 {0} 清零聚合对象；新 g++ 将其报为缺字段警告，
  * 但该初始化在两种语言中都会把剩余字段明确置零。 */
 #if defined(__cplusplus) && (defined(__GNUC__) || defined(__clang__))
@@ -36,6 +41,40 @@ unsigned tr_rpc_v2_test_stream_open_failures(void);
 			abort();                                               \
 		}                                                              \
 	} while (0)
+
+#ifdef TR_RPC_V2_TEST_FAULTS
+struct compression_gate {
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int entered;
+	int open;
+};
+
+static _Atomic(struct compression_gate *) next_compression_gate;
+
+struct tr_message_transform;
+typedef bool (*compression_cancel_check_fn)(void *arg);
+int __real_tr_message_transform_run_checked(
+        struct tr_message_transform *operation,
+        compression_cancel_check_fn check, void *arg);
+
+int __wrap_tr_message_transform_run_checked(
+        struct tr_message_transform *operation,
+        compression_cancel_check_fn check, void *arg)
+{
+	struct compression_gate *gate = atomic_exchange_explicit(
+	        &next_compression_gate, NULL, memory_order_acq_rel);
+	if (gate) {
+		CHECK(pthread_mutex_lock(&gate->lock) == 0);
+		gate->entered = 1;
+		CHECK(pthread_cond_broadcast(&gate->cond) == 0);
+		while (!gate->open)
+			CHECK(pthread_cond_wait(&gate->cond, &gate->lock) == 0);
+		CHECK(pthread_mutex_unlock(&gate->lock) == 0);
+	}
+	return __real_tr_message_transform_run_checked(operation, check, arg);
+}
+#endif
 
 #define METHOD_COUNT 7U
 #define ASYNC_METHOD 5U
@@ -195,6 +234,43 @@ static struct timespec deadline_after(unsigned milliseconds)
 	}
 	return due;
 }
+
+#ifdef TR_RPC_V2_TEST_FAULTS
+static void compression_gate_init(struct compression_gate *gate)
+{
+	pthread_condattr_t attr;
+	memset(gate, 0, sizeof(*gate));
+	CHECK(pthread_mutex_init(&gate->lock, NULL) == 0);
+	CHECK(pthread_condattr_init(&attr) == 0);
+	CHECK(pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) == 0);
+	CHECK(pthread_cond_init(&gate->cond, &attr) == 0);
+	CHECK(pthread_condattr_destroy(&attr) == 0);
+}
+
+static void compression_gate_wait_entered(struct compression_gate *gate)
+{
+	struct timespec due = deadline_after(WAIT_MS);
+	CHECK(pthread_mutex_lock(&gate->lock) == 0);
+	while (!gate->entered)
+		CHECK(pthread_cond_timedwait(&gate->cond, &gate->lock, &due) ==
+		      0);
+	CHECK(pthread_mutex_unlock(&gate->lock) == 0);
+}
+
+static void compression_gate_release(struct compression_gate *gate)
+{
+	CHECK(pthread_mutex_lock(&gate->lock) == 0);
+	gate->open = 1;
+	CHECK(pthread_cond_broadcast(&gate->cond) == 0);
+	CHECK(pthread_mutex_unlock(&gate->lock) == 0);
+}
+
+static void compression_gate_destroy(struct compression_gate *gate)
+{
+	CHECK(pthread_cond_destroy(&gate->cond) == 0);
+	CHECK(pthread_mutex_destroy(&gate->lock) == 0);
+}
+#endif
 
 static int before(const struct timespec *a, const struct timespec *b)
 {
@@ -1667,6 +1743,75 @@ static void test_cancel_or_deadline(int deadline)
 	              : "sdk-v2: case=cancel-isolation-drain result=pass");
 }
 
+#ifdef TR_RPC_V2_TEST_FAULTS
+static void test_cancel_compressed_call_destroy_barrier(void)
+{
+	struct compression_gate gate;
+	struct fixture f;
+	struct call_state call;
+	struct message_spec request = {MAX_BODY, 117U};
+	uint8_t storage[MAX_BODY];
+	struct tr_rpc_bytes body;
+	struct tr_rpc_v2_call_ref ref = {0};
+	struct tr_rpc_v2_call_result result = {TR_RPC_STATUS_INTERNAL,
+	                                       TR_RPC_V2_DELIVERY_SHUTDOWN};
+
+	fixture_create_shards_with_limits(&f, 1, MAX_BODY, 1024U, 1);
+	call_init(&call, &f, 0, &request, 1U);
+	call.manual = 1;
+	compression_gate_init(&gate);
+	atomic_store_explicit(&next_compression_gate, &gate,
+	                      memory_order_release);
+	CHECK(call_start(&call, NULL) == TR_OK);
+	wait_count(&f, &call.writable_returns, 1U);
+	wait_count(&f, &f.methods[0].opens, 1U);
+	fill(storage, sizeof(storage), request.tag);
+	body.data = storage;
+	body.len = sizeof(storage);
+	CHECK(tr_rpc_v2_call_send_with_compression(
+	              call.handle, &body, TR_RPC_COMPRESSION_ZSTD) == TR_OK);
+	overwrite_source(storage, sizeof(storage), 0xd3);
+	lock(&f);
+	call.sent = 1U;
+	unlock(&f);
+	compression_gate_wait_entered(&gate);
+
+	/* 压缩任务已进入 worker 执行入口并挂起，此时公开引用取消调用。 */
+	CHECK(tr_rpc_v2_call_hold(call.handle, &ref) == TR_OK);
+	CHECK(tr_rpc_v2_call_ref_cancel(ref) == TR_OK);
+	CHECK(tr_rpc_v2_call_ref_result(ref, &result) == TR_AGAIN);
+	CHECK(result.status == TR_RPC_STATUS_INTERNAL &&
+	      result.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	CHECK(tr_rpc_v2_call_ref_release(&ref) == TR_OK);
+	lock(&f);
+	CHECK(call.terminals == 0U);
+	unlock(&f);
+
+	/* 引用已释放，销毁仍须等待被取消但尚未退役的压缩任务。 */
+	CHECK(tr_client_destroy(f.client.handle) == TR_AGAIN);
+	CHECK(f.client.handle != NULL);
+	compression_gate_release(&gate);
+	destroy_client(&f, &f.client);
+
+	/* 本地销毁不是对端回调屏障；等待服务端独立观察断连。 */
+	wait_count(&f, &f.methods[0].terminals, 1U);
+	lock(&f);
+	CHECK(call.sent == 1U && !call.half_closed && call.terminals == 1U);
+	CHECK(call.status == TR_RPC_STATUS_CANCELLED &&
+	      call.delivery == TR_RPC_V2_DELIVERY_SHUTDOWN);
+	CHECK(f.methods[0].opens == 1U && f.methods[0].requests == 0U &&
+	      f.methods[0].terminals == 1U &&
+	      f.methods[0].status == TR_RPC_STATUS_UNAVAILABLE);
+	unlock(&f);
+	check_server_totals(&f, 1U, 1U, TR_RPC_STATUS_UNAVAILABLE, 1U);
+	destroy_server(&f);
+	CHECK(pthread_cond_destroy(&f.cond) == 0);
+	CHECK(pthread_mutex_destroy(&f.lock) == 0);
+	compression_gate_destroy(&gate);
+	puts("sdk-v2: case=cancel-compressed-destroy-barrier result=pass");
+}
+#endif
+
 static void test_parent_context_lifetime(void)
 {
 	struct fixture f;
@@ -2740,6 +2885,9 @@ int main(void)
 	test_large_message_ownership();
 	test_cancel_or_deadline(0);
 	test_cancel_or_deadline(1);
+#ifdef TR_RPC_V2_TEST_FAULTS
+	test_cancel_compressed_call_destroy_barrier();
+#endif
 	test_parent_context_lifetime();
 	test_parent_context_pool_exhaustion();
 	test_parent_context_propagation(0, 5000U);

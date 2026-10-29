@@ -59,6 +59,8 @@ def summarize(profile: str, results: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "type": "repeatability_summary", "schema": 2,
         "api_generation": "rpc_v2", "profile": profile,
+        "tls_enabled": bool(results[0]["case"].get("tls", False)),
+        "compression": results[0]["case"].get("compression", "none"),
         "trials": trials,
         "clean_trials": sum(clean_result(result) for result in results),
         "server_pressure_trials": pressure_trials,
@@ -94,6 +96,19 @@ def validate_args(parser: argparse.ArgumentParser,
         parser.error("invalid min-arrival-ms")
     if not 1 <= args.timeout_ms <= 30000:
         parser.error("invalid timeout")
+    if args.tls:
+        paths = ("tls_ca", "tls_cert", "tls_key")
+        if any(getattr(args, name) is None for name in paths):
+            parser.error("--tls requires --tls-ca, --tls-cert, and --tls-key")
+        for name in paths:
+            path = getattr(args, name)
+            try:
+                path = path.resolve(strict=True)
+            except OSError as error:
+                parser.error(f"{getattr(args, name)}: {error}")
+            if not path.is_file():
+                parser.error(f"{path}: TLS credential must be a file")
+            setattr(args, name, path)
 
 
 def main() -> int:
@@ -110,6 +125,13 @@ def main() -> int:
     parser.add_argument("--generator-window", type=int, default=64)
     parser.add_argument("--generator-capacity", type=int, default=64)
     parser.add_argument("--timeout-ms", type=int, default=3000)
+    parser.add_argument("--compression", choices=("none", "request", "response", "zstd"),
+                        default="none")
+    parser.add_argument("--tls", action="store_true",
+                        help="require TLS 1.3 on both endpoints")
+    parser.add_argument("--tls-ca", type=Path)
+    parser.add_argument("--tls-cert", type=Path)
+    parser.add_argument("--tls-key", type=Path)
     args = parser.parse_args()
     args.binary = args.binary.resolve(strict=True)
     validate_args(parser, args)
@@ -119,7 +141,8 @@ def main() -> int:
     requests = max(args.requests,
                    math.ceil(args.rate * args.min_arrival_ms / 1000.0))
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    metadata = base_metadata(args.binary, args.label, load_mode="open")
+    metadata = base_metadata(args.binary, args.label, load_mode="open",
+                             compression=args.compression, tls=args.tls)
     metadata.update({
         "type": "repeatability_metadata", "schema": 2,
         "api_generation": "rpc_v2", "trials": args.trials,
@@ -144,9 +167,16 @@ def main() -> int:
                     "bulk_bytes": spec["bulk_bytes"],
                     "generator_window": args.generator_window,
                     "generator_capacity": args.generator_capacity,
+                    "compression": args.compression, "tls": args.tls,
                     "timeout_ms": args.timeout_ms, "generators": generators,
                     "public_profile": name,
                 }
+                if args.tls:
+                    case.update({
+                        "tls_ca": str(args.tls_ca),
+                        "tls_cert": str(args.tls_cert),
+                        "tls_key": str(args.tls_key),
+                    })
                 case_dir = (args.output.parent / (args.output.stem + "-logs") /
                             f"t{trial}-{name}-{args.rate}rps")
                 try:

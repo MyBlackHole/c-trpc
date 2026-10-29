@@ -2,6 +2,7 @@
 #include "../src/runtime/runtime_internal.h"
 #include "../src/message/storage.h"
 #include "../src/execution/reactor_internal.h"
+#include "../src/execution/async_operation_internal.h"
 #include "tr/status.h"
 
 #include <zstd.h>
@@ -92,8 +93,31 @@ static _Atomic bool fail_message_thread;
 static _Atomic unsigned successful_owner_joins;
 static _Atomic bool suppress_timer;
 static _Atomic unsigned completion_signals;
+static _Atomic unsigned message_publications, publication_failures;
 static tr_reactor_timer_cb timer_callback;
 static void *timer_argument;
+
+/* 保留真实发布路径，核对停止回收没有抢先作废仍由 worker 持有的能力。 */
+int __real_tr_async_operation_publish(struct tr_async_operation_pool *,
+                                      struct tr_async_operation_ref *,
+                                      struct tr_async_operation_completion,
+                                      struct tr_async_operation_ref *, int *);
+
+int __wrap_tr_async_operation_publish(
+        struct tr_async_operation_pool *pool,
+        struct tr_async_operation_ref *producer,
+        struct tr_async_operation_completion completion,
+        struct tr_async_operation_ref *published, int *ready)
+{
+	int ret = __real_tr_async_operation_publish(pool, producer, completion,
+	                                            published, ready);
+	atomic_fetch_add(&message_publications, 1);
+	if (ret != TR_OK) {
+		atomic_fetch_add(&publication_failures, 1);
+		fprintf(stderr, "message_publication_failure=%d\n", ret);
+	}
+	return ret;
+}
 
 /* 只在目标执行器真实销毁调用内定位同步对象，不读取私有结构布局。 */
 static struct tr_message_service *captured_service;
@@ -393,6 +417,8 @@ static void init_fixture(struct fixture *f, bool messages)
 	atomic_store(&poll_failures, 0);
 	atomic_store(&algorithm_calls, 0);
 	atomic_store(&message_closes, 0);
+	atomic_store(&message_publications, 0);
+	atomic_store(&publication_failures, 0);
 	atomic_store(&successful_owner_joins, 0);
 	atomic_store(&message_fd, -1);
 	CHECK(tr_runtime_create(&config, &f->runtime) == TR_OK);
@@ -526,6 +552,8 @@ static void test_recovery(bool fatal, unsigned failure)
 	CHECK(tr_runtime_start(f.runtime) == TR_ERR_STATE);
 	CHECK(atomic_load(&a.releases) == 0);
 	CHECK(atomic_load(&callback_count) == 0);
+	CHECK(atomic_load(&message_publications) == 0);
+	CHECK(atomic_load(&publication_failures) == 0);
 	fd = atomic_load(&message_fd);
 	CHECK(fcntl(fd, F_GETFD) >= 0);
 	if (failure == 1)
@@ -543,8 +571,15 @@ static void test_recovery(bool fatal, unsigned failure)
 		CHECK(atomic_load(&message_closes) == 0);
 		CHECK(tr_reactor_start(f.reactor) == TR_ERR_STATE);
 		CHECK(tr_reactor_destroy(f.reactor) == TR_ERR_STATE);
+		if (failure == 3) {
+			CHECK(atomic_load(&message_publications) == 2);
+			CHECK(atomic_load(&publication_failures) == 0);
+			CHECK(atomic_load(&callback_count) == 0);
+		}
 	}
 	CHECK(stop_until(&f) == TR_OK);
+	CHECK(atomic_load(&message_publications) == 2);
+	CHECK(atomic_load(&publication_failures) == 0);
 	CHECK(atomic_load(&a.completions) == 1 &&
 	      atomic_load(&b.completions) == 1);
 	CHECK(atomic_load(&a.releases) == 1 && atomic_load(&b.releases) == 1);
@@ -953,6 +988,8 @@ static void test_mixed_result_domains(void)
 	CHECK(memcmp(decoded, initial, sizeof(initial)) == 0);
 	gate_open(&worker_gate);
 	CHECK(stop_until(&f) == TR_OK);
+	CHECK(atomic_load(&message_publications) == 4);
+	CHECK(atomic_load(&publication_failures) == 0);
 	CHECK(atomic_load(&retained.completions) == 1);
 	CHECK(atomic_load(&completed.completions) == 1 &&
 	      atomic_load(&running.completions) == 1 &&

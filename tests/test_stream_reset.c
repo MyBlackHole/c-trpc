@@ -78,6 +78,32 @@ static atomic_uint blocked_reset_eagain;
 static atomic_int repeat_goaway_phase;
 static atomic_int force_local_stream_id_exhaustion;
 static struct tr_reactor_timer_handle repeat_goaway_timer;
+static _Atomic(struct tr_reactor *) counted_reset_reactor;
+static _Thread_local uint64_t reset_owner_lock_calls;
+
+int __real_pthread_mutex_lock(pthread_mutex_t *mutex);
+int __wrap_pthread_mutex_lock(pthread_mutex_t *mutex)
+{
+	struct tr_reactor *reactor = atomic_load_explicit(
+	        &counted_reset_reactor, memory_order_relaxed);
+	if (reactor && tr_reactor_in_owner_context_for(reactor))
+		++reset_owner_lock_calls;
+	return __real_pthread_mutex_lock(mutex);
+}
+
+static int begin_reset_lock_count(void *arg)
+{
+	reset_owner_lock_calls = 0U;
+	atomic_store(&counted_reset_reactor, arg);
+	return TR_OK;
+}
+
+static int end_reset_lock_count(void *arg)
+{
+	atomic_store(&counted_reset_reactor, NULL);
+	*(uint64_t *)arg = reset_owner_lock_calls;
+	return TR_OK;
+}
 
 int __real_tr_reactor_timer_arm(struct tr_reactor_timer_handle timer,
                                 uint64_t deadline_ns);
@@ -963,6 +989,46 @@ static void test_tombstone_real_channel_capacity(void)
 	       (double)wall_ns / 1000000.0, (double)cpu_ns / 1000000.0,
 	       (double)channel_capacity * 1000000000.0 / (double)wall_ns);
 	free(reset_rtt_ns);
+	destroy_fixture(&f);
+}
+
+/* 空槽不能各取一次锁；同时覆盖跨字、尾部不足一字和游标回绕。 */
+static void test_sparse_reset_lock_bound(void)
+{
+	const uint32_t capacity = 4097U;
+	const uint32_t slots[] = {4096U, 31U, 32U, 63U, 64U, 0U};
+	struct tr_stream_handle selected[sizeof(slots) / sizeof(slots[0])] = {
+	        0};
+	struct fixture f;
+	uint64_t locks;
+
+	init_fixture(&f, capacity, 0, TR_CHANNEL_FEATURE_STREAM_RESET,
+	             TR_CHANNEL_FEATURE_STREAM_RESET, 1);
+	f.circular_stream_tracking = 1;
+	for (uint32_t i = 0U; i < capacity; ++i) {
+		struct tr_stream_handle stream =
+		        open_remote(&f, 0U, 2U * i + 1U, i + 1U);
+		for (size_t j = 0U; j < sizeof(slots) / sizeof(slots[0]); ++j)
+			if (i == slots[j]) {
+				assert(stream.slot == i);
+				selected[j] = stream;
+			}
+	}
+	for (size_t i = 0U; i < sizeof(slots) / sizeof(slots[0]); ++i) {
+		assert(tr_reactor_call(f.reactor, begin_reset_lock_count,
+		                       f.reactor) == TR_OK);
+		assert(reset(&f, selected[i], TR_ERR_CLOSED) == TR_OK);
+		finish_reset(&f, 0U, 2U * slots[i] + 1U, TR_ERR_CLOSED,
+		             TR_ERR_CLOSED, (unsigned)i + 1U);
+		assert(tr_reactor_call(f.reactor, end_reset_lock_count,
+		                       &locks) == TR_OK);
+		fprintf(stderr,
+		        "stream_reset: sparse slot=%u owner_locks=%llu\n",
+		        slots[i], (unsigned long long)locks);
+		assert(locks < capacity);
+	}
+	assert(tr_channel_active_streams(f.channel) ==
+	       capacity - sizeof(slots) / sizeof(slots[0]));
 	destroy_fixture(&f);
 }
 
@@ -3252,6 +3318,7 @@ static void test_wire_shape(uint16_t type)
 
 int main(void)
 {
+	test_sparse_reset_lock_bound();
 	test_reset_rejects_compressed_data_lane_flag();
 	test_wire_shape(TR_FRAME_STREAM_RESET);
 	test_wire_shape(TR_FRAME_STREAM_REFUSED);

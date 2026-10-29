@@ -176,6 +176,53 @@ static void test_capacity_reject_and_reuse(void)
 	assert(budget_stats.current_bytes == 0U);
 }
 
+/* 两项都有效、代次和 token 相同，也不能把一项的能力用于撤销另一项。 */
+static void test_reject_requires_matching_producer(void)
+{
+	struct tr_async_operation_pool *pool = NULL;
+	struct tr_memory_budget budget;
+	struct tr_async_operation_spec spec = {.kind = 1U};
+	struct tr_async_operation first = {0}, second = {0};
+	struct tr_async_operation_ref first_ref = {0}, second_ref = {0};
+	struct tr_async_operation_ref saved_first, saved_second;
+	struct tr_async_operation_stats stats;
+	struct tr_memory_budget_stats budget_stats;
+
+	tr_memory_budget_init(&budget, 1024U * 1024U);
+	assert(tr_async_operation_pool_create(2U, &budget, &pool) == TR_OK);
+	assert(tr_async_operation_pool_bind_owner(pool) == TR_OK);
+	assert(tr_async_operation_reserve(pool, &spec, &first, &first_ref) ==
+	       TR_OK);
+	assert(tr_async_operation_reserve(pool, &spec, &second, &second_ref) ==
+	       TR_OK);
+	assert(first.slot != second.slot &&
+	       first_ref.generation == second_ref.generation &&
+	       first_ref.token == second_ref.token);
+	saved_first = first_ref;
+	saved_second = second_ref;
+	assert(tr_async_operation_reject(pool, first, &second_ref) ==
+	       TR_ERR_STALE);
+	assert(tr_async_operation_reject(pool, second, &first_ref) ==
+	       TR_ERR_STALE);
+	assert(first_ref.instance == saved_first.instance &&
+	       first_ref.generation == saved_first.generation &&
+	       first_ref.token == saved_first.token &&
+	       first_ref.slot == saved_first.slot);
+	assert(second_ref.instance == saved_second.instance &&
+	       second_ref.generation == saved_second.generation &&
+	       second_ref.token == saved_second.token &&
+	       second_ref.slot == saved_second.slot);
+	assert(tr_async_operation_get_stats(pool, &stats) == TR_OK);
+	assert(stats.reserved == 2U && stats.accepted == 0U &&
+	       stats.published == 0U && stats.consumed == 0U);
+	assert(tr_async_operation_reject(pool, first, &first_ref) == TR_OK);
+	assert(tr_async_operation_reject(pool, second, &second_ref) == TR_OK);
+	assert(tr_async_operation_pool_close(pool) == TR_OK);
+	assert(tr_async_operation_pool_destroy(&pool) == TR_OK);
+	tr_memory_budget_get_stats(&budget, &budget_stats);
+	assert(budget_stats.current_bytes == 0U);
+}
+
 static void test_accept_publish_consume_retire(void)
 {
 	struct tr_async_operation_pool *pool = NULL;
@@ -529,6 +576,7 @@ static void test_serialized_owner_handoff(void)
 int main(void)
 {
 	test_capacity_reject_and_reuse();
+	test_reject_requires_matching_producer();
 	test_accept_publish_consume_retire();
 	test_publish_before_accept_is_retained();
 	test_cancel_and_publish_race();

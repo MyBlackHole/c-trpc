@@ -22,6 +22,25 @@ OPEN_COUNTS = ("offered", "scheduler_dropped", "attempted", "accepted",
                "resource_exhausted", "invalid_responses")
 
 
+def transport_cli_args(case: dict[str, Any]) -> list[str]:
+    """Return explicit transport settings for each bench_rpc process."""
+    compression = case.get("compression", "none")
+    if compression not in ("none", "request", "response", "zstd"):
+        raise ValueError("invalid benchmark compression mode")
+    tls = case.get("tls", False)
+    if type(tls) is not bool:
+        raise ValueError("TLS mode must be boolean")
+
+    args = ["--compression", compression, "--tls", "1" if tls else "0"]
+    if tls:
+        names = ("tls_ca", "tls_cert", "tls_key")
+        if any(not case.get(name) for name in names):
+            raise ValueError("TLS credentials are required when TLS is enabled")
+        for name, flag in zip(names, ("--tls-ca", "--tls-cert", "--tls-key")):
+            args.extend((flag, str(case[name])))
+    return args
+
+
 def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
                         window: int) -> None:
     if (row.get("type") != "open_phase" or row.get("schema") != 2 or
@@ -91,6 +110,9 @@ def validate_open_phase(row: dict[str, Any], expected: int, rate_rps: int,
 
 
 def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, Any]:
+    case = {**case, "compression": case.get("compression", "none"),
+            "tls": case.get("tls", False)}
+    transport_args = transport_cli_args(case)
     output_dir.mkdir(parents=True, exist_ok=True)
     bulk_bytes = int(case.get("bulk_bytes", 65536))
     server_common = ["--capacity", str(case["capacity"]),
@@ -100,7 +122,7 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
     client_common = ["--capacity", str(generator_capacity),
                      "--bulk-bytes", str(int(case.get("generator_bulk_bytes", bulk_bytes)))]
     server_cmd = [str(binary), "server", *server_common,
-                  "--slow-ms", str(case["slow_ms"])]
+                  *transport_args, "--slow-ms", str(case["slow_ms"])]
     client_cmd: list[str] = []
     children: list[subprocess.Popen[str]] = []
     logs: list[TextIO] = []
@@ -118,6 +140,7 @@ def run_case(binary: Path, case: dict[str, Any], output_dir: Path) -> dict[str, 
             raise ValueError("server did not apply public RPC limits or work delay")
 
         client_cmd = [str(binary), "client", *client_common, "--port", str(ready["port"]),
+                      *transport_args,
                       "--window", str(generator_window), "--scenario", "open",
                       "--requests", str(case["requests"]),
                       "--warmup", str(case["warmup"]),
@@ -182,6 +205,8 @@ def metadata(binary: Path, label: str, slow_ms: int,
     row["slow_ms"] = slow_ms
     row["window"] = window
     row["capacity"] = capacity
+    row["tls_enabled"] = False
+    row["compression"] = "none"
     row["capacity_model"] = (
         "public max_calls/max_streams limit; offered rates are measurements, "
         "not an inferred executor capacity")

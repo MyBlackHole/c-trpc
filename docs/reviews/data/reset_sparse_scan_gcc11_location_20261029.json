@@ -1,0 +1,139 @@
+{
+  "source_before": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+  "source_after": "0d81342e85739bcd8ff0253bdbcd894c602696c0",
+  "unchanged_functions": {
+    "tr_channel_tx_wire_release": "e17ec0146ad134b39b839e91aecd8d13d6dfb7d067d3a5e9c9571de51690edf8",
+    "tr_channel_tx_fragment_release": "366343222262cf0127a0cfbc666601b8da36886317824c21e32658b0d06dd9c4",
+    "tr_channel_tx_transform_destroy": "2bbdb2359a51c625bff08d51e9254928e198e0c2adee09ed165fc26078c7b21c",
+    "tr_stream_drop_compressed_send_locked": "1432f43cd0aa18b31f7c452941e8f5fa90c713e6106526d478036a8f3c733231"
+  },
+  "primary_before": {
+    "unit": "src/transport/channel/channel.c",
+    "file": "src/transport/channel/channel.c",
+    "line": 1402,
+    "column": 16,
+    "check": "analyzer-use-after-free",
+    "message": "use after ‘free’ of ‘wire’ [CWE-416]"
+  },
+  "primary_after": {
+    "unit": "src/transport/channel/channel.c",
+    "file": "src/transport/channel/channel.c",
+    "line": 1404,
+    "column": 16,
+    "check": "analyzer-use-after-free",
+    "message": "use after ‘free’ of ‘wire’ [CWE-416]"
+  },
+  "trace_equal_without_locations": true,
+  "old_log_sha256": "128995eb8a630625976d08e649d88400e666ad809223489e00dcf1d0b02d9d37",
+  "new_log_sha256": "3ffe9caebba3e89a8d6f0a14b9c84cf0a275f0c0b4d77d6135bc06150ded8b02",
+  "ci_tree_proof": [
+    {
+      "pr_head": "1f33cddcfa27359ac860986f0535d3ca568278a2",
+      "ci_checkout": "204094c5e6b3cd0a0718c19436a7a70a14533cca",
+      "identical_tree": "72c22a9abbcd2ccdd1fffc66ea83546fee0d4c58",
+      "parents": [
+        "19007d696adb9626acabbb4ceeffb3973d6050c6",
+        "1f33cddcfa27359ac860986f0535d3ca568278a2"
+      ]
+    },
+    {
+      "pr_head": "0d81342e85739bcd8ff0253bdbcd894c602696c0",
+      "ci_checkout": "116e55a3fa583d54c67d8352867725a9b77d0a5e",
+      "identical_tree": "62f2f16955ce725decc7da073cce26f5fa8115e8",
+      "parents": [
+        "19007d696adb9626acabbb4ceeffb3973d6050c6",
+        "0d81342e85739bcd8ff0253bdbcd894c602696c0"
+      ]
+    }
+  ],
+  "gcc_version": "11.4.0",
+  "production_units": 55,
+  "control_results": {
+    "cleanup": {
+      "exit_code": 0,
+      "analyzer_diagnostics": 0
+    },
+    "leak": {
+      "exit_code": 1,
+      "analyzer_diagnostics": 1
+    }
+  },
+  "original_gate": {
+    "schema": 1,
+    "policy": "exact-tracked-gcc-warning-set",
+    "review_state": "unverified",
+    "gcc_major": 11,
+    "production_units": 55,
+    "observed_warnings": 1,
+    "baseline_warnings": 1,
+    "unreviewed_warnings": [
+      {
+        "unit": "src/transport/channel/channel.c",
+        "file": "src/transport/channel/channel.c",
+        "line": 1404,
+        "column": 16,
+        "check": "analyzer-use-after-free",
+        "message": "use after ‘free’ of ‘wire’ [CWE-416]"
+      }
+    ],
+    "missing_baseline_warnings": [
+      {
+        "unit": "src/transport/channel/channel.c",
+        "file": "src/transport/channel/channel.c",
+        "line": 1402,
+        "column": 16,
+        "check": "analyzer-use-after-free",
+        "message": "use after ‘free’ of ‘wire’ [CWE-416]"
+      }
+    ]
+  },
+  "corrected_gate": {
+    "schema": 1,
+    "policy": "exact-tracked-gcc-warning-set",
+    "review_state": "unverified",
+    "gcc_major": 11,
+    "production_units": 55,
+    "observed_warnings": 1,
+    "baseline_warnings": 1,
+    "unreviewed_warnings": [],
+    "missing_baseline_warnings": []
+  },
+  "selftests": {
+    "executor": 12,
+    "baseline": 12
+  },
+  "review_state": "unverified",
+  "runtime_changes": false,
+  "local_gcc11_analysis_rerun": false,
+  "local_action": "replay exact gate on copied CI artifacts; original artifact retained",
+  "evidence": [
+    {
+      "path": "build/performance-20261029/dev182-gcc11-artifact/gcc-static-analysis/release/summary.json",
+      "sha256": "8fa48447632960b930ca0b52e78147cf4c321085a84dd0751d29150e6d869b08"
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc11-artifact/gcc-static-analysis/release/warning-gate.json",
+      "sha256": "f7d05ae64ac4e1f1583bf8c6aea6e3b952f74be1fc240bcc7afa5e8165ee3305"
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc11-gate-replay/warning-gate.json",
+      "sha256": "e5da3e13ddc24760c82e1a4f59a580806a26002416f03ca80b2556cb822cbf63"
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc11-gate-red.log",
+      "sha256": "6e72e6263cf735344ea234ce9079837dc6abab4bba5da2226165851e7285edec"
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc11-gate-green.log",
+      "sha256": "a30bc6c56ce552f5a264102f3c8db4e6f741f7b5e33ae065c7a2974dd602e902"
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-analyzer-selftest.log",
+      "sha256": "3e9c85567368f9035c5f3fedc46958e18f442848e5c9737efb8d9ad5cc9de4f5"
+    },
+    {
+      "path": "build/performance-20261029/dev182-gcc-baseline-selftest.log",
+      "sha256": "de11fdf44893e809ece295228e4d798983ee3e17d01df41a157d3ac9e4a1a1d1"
+    }
+  ]
+}

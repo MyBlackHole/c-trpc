@@ -27,7 +27,7 @@ jobs:
       - name: 准备私有中文消息 locale
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales libssl-dev
+          sudo apt-get install -y locales libssl-dev gnutls-bin libgnutls28-dev
           mkdir -p "$RUNNER_TEMP/echo-locale"
           localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
           echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
@@ -156,7 +156,7 @@ jobs:
       - name: 准备私有中文消息 locale
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales libssl-dev
+          sudo apt-get install -y locales libssl-dev gnutls-bin libgnutls28-dev
           mkdir -p "$RUNNER_TEMP/echo-locale"
           localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
           echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
@@ -294,7 +294,7 @@ jobs:
       - name: 准备私有中文消息 locale
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales libssl-dev
+          sudo apt-get install -y locales libssl-dev gnutls-bin libgnutls28-dev
           mkdir -p "$RUNNER_TEMP/echo-locale"
           localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
           echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
@@ -303,7 +303,8 @@ jobs:
           xmake-version: ${{ env.XMAKE_VERSION }}
       - name: 构建全部目标并运行测试
         env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:fast_unwind_on_malloc=0
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan.supp
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           set -euo pipefail
@@ -341,7 +342,7 @@ jobs:
       - name: 准备私有中文消息 locale
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales libssl-dev
+          sudo apt-get install -y locales libssl-dev gnutls-bin libgnutls28-dev
           mkdir -p "$RUNNER_TEMP/echo-locale"
           localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
           echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"
@@ -387,7 +388,7 @@ jobs:
       - name: 准备私有中文消息 locale
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales libssl-dev
+          sudo apt-get install -y locales libssl-dev gnutls-bin libgnutls28-dev
           mkdir -p "$RUNNER_TEMP/echo-locale"
           localedef --no-archive -i zh_CN -f UTF-8 "$RUNNER_TEMP/echo-locale/zh_CN.UTF-8"
           echo "LOCPATH=$RUNNER_TEMP/echo-locale" >> "$GITHUB_ENV"

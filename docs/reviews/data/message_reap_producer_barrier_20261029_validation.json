@@ -1,0 +1,471 @@
+{
+  "base_commit": "3823743a5f4aeb7bf469a0d15bf6f62f88cb2329",
+  "version": "2.0.0-dev.180",
+  "sha256": {
+    "src/runtime/message_service.c": "2584af2711fb1951c072405ba4a9f94a161a4ce0f825b0ba86615964b0ab5c83",
+    "tests/test_runtime_message_recovery.c": "d3fbb13c47967251dcdf28fe017c4c2f8bd37423da0c2080a93e79ed35654f68",
+    "xmake.lua": "ee46a327caa898ef98f61e051be8e5663c6de3664881bb0cc77514192035ddc0"
+  },
+  "scope": "MessageService stopped-reap producer join barrier; not complete V2 release acceptance",
+  "red": {
+    "candidate": "initial publish-count regression before added mixed/join assertions",
+    "exit_code": 255,
+    "failed_tests": 1,
+    "publication_failures": 4,
+    "publication_status": -14,
+    "test_elapsed_seconds": 0.237
+  },
+  "matrix": [
+    {
+      "label": "clang-release",
+      "build_seconds": 21.284,
+      "test_seconds": 17.049,
+      "tests_passed": 9,
+      "producer_barrier_checked": true
+    },
+    {
+      "label": "gcc-asan",
+      "build_seconds": 35.979,
+      "test_seconds": 19.581,
+      "tests_passed": 9,
+      "producer_barrier_checked": true
+    },
+    {
+      "label": "gcc-tsan",
+      "build_seconds": 18.729,
+      "test_seconds": 18.78,
+      "tests_passed": 9,
+      "producer_barrier_checked": true
+    },
+    {
+      "label": "gcc-release-final",
+      "build_seconds": 20.477,
+      "test_seconds": 202.745,
+      "tests_passed": 95,
+      "producer_barrier_checked": true
+    }
+  ],
+  "focused_targets": [
+    "test_runtime_message_recovery",
+    "test_message_service",
+    "test_message_service_partial_destroy",
+    "test_async_operation",
+    "test_task_executor",
+    "test_runtime_threads",
+    "test_rpc_v2_sdk",
+    "test_rpc_record_stream",
+    "test_rpc_v2_nested_calls"
+  ],
+  "full_suite_tests": 95,
+  "release_repeats": [
+    {
+      "iteration": 1,
+      "elapsed_seconds": 0.768,
+      "log": "build/performance-20261029/dev180-recovery-repeat-01.log",
+      "sha256": "0042d2f7b167082e947cdb9eb53d002a6fec5796d0d9bbdfc4b72ac869081831"
+    },
+    {
+      "iteration": 2,
+      "elapsed_seconds": 0.77,
+      "log": "build/performance-20261029/dev180-recovery-repeat-02.log",
+      "sha256": "1eea323f741eed5a418cfd6b6caa22902eda7d2b928938a4b0233aa8b87594f6"
+    },
+    {
+      "iteration": 3,
+      "elapsed_seconds": 0.719,
+      "log": "build/performance-20261029/dev180-recovery-repeat-03.log",
+      "sha256": "ed2af4f47828a8d7e8dc8fe7d099232293d11fee2a802cb1b30285b3daae5c88"
+    },
+    {
+      "iteration": 4,
+      "elapsed_seconds": 0.718,
+      "log": "build/performance-20261029/dev180-recovery-repeat-04.log",
+      "sha256": "3eb72f991d277dc09a38b669281472eff77932af529f374736b320cf98cba4bf"
+    },
+    {
+      "iteration": 5,
+      "elapsed_seconds": 0.617,
+      "log": "build/performance-20261029/dev180-recovery-repeat-05.log",
+      "sha256": "ef372ad0593654186ea7cbab50e445c6a62040477f221059048ae990b6bfacf8"
+    },
+    {
+      "iteration": 6,
+      "elapsed_seconds": 0.617,
+      "log": "build/performance-20261029/dev180-recovery-repeat-06.log",
+      "sha256": "9226ef51519393e2f9e13b92c30b15ef90272cfdb301e8b453db1801dd072b95"
+    },
+    {
+      "iteration": 7,
+      "elapsed_seconds": 0.667,
+      "log": "build/performance-20261029/dev180-recovery-repeat-07.log",
+      "sha256": "1bd0dae59b128ef04facbb6e1f2e95d9be6e9b0b604317e548023aeee36535a8"
+    },
+    {
+      "iteration": 8,
+      "elapsed_seconds": 0.668,
+      "log": "build/performance-20261029/dev180-recovery-repeat-08.log",
+      "sha256": "30eff3ed86f59bcfb54f78f9c4412f969cfa0852215074da7d1e5fe08f85cfab"
+    },
+    {
+      "iteration": 9,
+      "elapsed_seconds": 0.718,
+      "log": "build/performance-20261029/dev180-recovery-repeat-09.log",
+      "sha256": "5250e9e2a2a519f94b92744b590696e152f6a1d8296bc02b648045cd1b9855eb"
+    },
+    {
+      "iteration": 10,
+      "elapsed_seconds": 0.667,
+      "log": "build/performance-20261029/dev180-recovery-repeat-10.log",
+      "sha256": "c5921db2edc3fb5f375c2a2ed3312573cfcca651494424ae2cb90af00222d21a"
+    },
+    {
+      "iteration": 11,
+      "elapsed_seconds": 0.667,
+      "log": "build/performance-20261029/dev180-recovery-repeat-11.log",
+      "sha256": "2a25d19c3a74a4e604ad40f05ae01d210f656956d007ad12f090ada2b4e55a93"
+    },
+    {
+      "iteration": 12,
+      "elapsed_seconds": 0.667,
+      "log": "build/performance-20261029/dev180-recovery-repeat-12.log",
+      "sha256": "222a929a00ad944bfb1443c138c6030aae1d28cb48ce11a39b09b575c5752989"
+    },
+    {
+      "iteration": 13,
+      "elapsed_seconds": 0.668,
+      "log": "build/performance-20261029/dev180-recovery-repeat-13.log",
+      "sha256": "0210b9f5bbb19d1d6ac6841ac1e24164cb945fa9651502d50b0122aba6434b21"
+    },
+    {
+      "iteration": 14,
+      "elapsed_seconds": 0.67,
+      "log": "build/performance-20261029/dev180-recovery-repeat-14.log",
+      "sha256": "1bd0dae59b128ef04facbb6e1f2e95d9be6e9b0b604317e548023aeee36535a8"
+    },
+    {
+      "iteration": 15,
+      "elapsed_seconds": 0.669,
+      "log": "build/performance-20261029/dev180-recovery-repeat-15.log",
+      "sha256": "7a8f317fad0ba5a4c17b76c273156e33c5d57ecaea85cf1d34ab0d145f75232a"
+    },
+    {
+      "iteration": 16,
+      "elapsed_seconds": 0.618,
+      "log": "build/performance-20261029/dev180-recovery-repeat-16.log",
+      "sha256": "7a8f317fad0ba5a4c17b76c273156e33c5d57ecaea85cf1d34ab0d145f75232a"
+    },
+    {
+      "iteration": 17,
+      "elapsed_seconds": 0.668,
+      "log": "build/performance-20261029/dev180-recovery-repeat-17.log",
+      "sha256": "3c03e4d50604e8f65e113771421eb2bc4375ec2ffa98559d89bc27d72646ccae"
+    },
+    {
+      "iteration": 18,
+      "elapsed_seconds": 0.617,
+      "log": "build/performance-20261029/dev180-recovery-repeat-18.log",
+      "sha256": "ad3568bd5fbed18582518421a3b56ccba61dfef1ba3170737aa70a619b84ff4f"
+    },
+    {
+      "iteration": 19,
+      "elapsed_seconds": 0.769,
+      "log": "build/performance-20261029/dev180-recovery-repeat-19.log",
+      "sha256": "3db4f14520ae9120ec28cf92e4620980947460e187e48a0622934e85b6df4e99"
+    },
+    {
+      "iteration": 20,
+      "elapsed_seconds": 1.072,
+      "log": "build/performance-20261029/dev180-recovery-repeat-20.log",
+      "sha256": "60fd6c760bac152bc94ffee85556347f79e7089ceab35c2161585c6b66ccb8d8"
+    },
+    {
+      "iteration": 21,
+      "elapsed_seconds": 2.343,
+      "log": "build/performance-20261029/dev180-recovery-repeat-21.log",
+      "sha256": "540d0269c1e31c47e5f0a044044cd722d8c2be490e0380ba9f921942bdd37ecc"
+    },
+    {
+      "iteration": 22,
+      "elapsed_seconds": 1.985,
+      "log": "build/performance-20261029/dev180-recovery-repeat-22.log",
+      "sha256": "43a3345323e682b5b47bf915f9575d97bd1428dc0463fa392784e46c48d0f6e0"
+    },
+    {
+      "iteration": 23,
+      "elapsed_seconds": 1.171,
+      "log": "build/performance-20261029/dev180-recovery-repeat-23.log",
+      "sha256": "973d6105142dbd2ac2ca5aa57a4fc55cbe384c1db0274425c947d470f0f7fc9f"
+    },
+    {
+      "iteration": 24,
+      "elapsed_seconds": 1.07,
+      "log": "build/performance-20261029/dev180-recovery-repeat-24.log",
+      "sha256": "2038f3239b86b8387fe82ec20a412fabc1806803df0e8e2e6181fecfe3c5f22d"
+    },
+    {
+      "iteration": 25,
+      "elapsed_seconds": 0.821,
+      "log": "build/performance-20261029/dev180-recovery-repeat-25.log",
+      "sha256": "a1aee7e46fb725c6498c8ab832342807057dbdae3da46945880a1a803e036700"
+    }
+  ],
+  "commands": {
+    "configure": [
+      "xmake",
+      "f",
+      "-c",
+      "-y",
+      "-m",
+      "MODE",
+      "--toolchain=COMPILER",
+      "--crc32c_portable=n"
+    ],
+    "build": [
+      "xmake",
+      "build",
+      "--all"
+    ],
+    "focused": [
+      "xmake",
+      "test",
+      "-v",
+      "-j1",
+      "test_runtime_message_recovery/*",
+      "test_message_service/*",
+      "test_message_service_partial_destroy/*",
+      "test_async_operation/*",
+      "test_task_executor/*",
+      "test_runtime_threads/*",
+      "test_rpc_v2_sdk/*",
+      "test_rpc_record_stream/*",
+      "test_rpc_v2_nested_calls/*"
+    ],
+    "full": [
+      "xmake",
+      "test",
+      "-v",
+      "-j1"
+    ]
+  },
+  "sanitizer_options": {
+    "ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1",
+    "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1",
+    "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1",
+    "LSAN_OPTIONS": "suppressions=tests/lsan.supp"
+  },
+  "tools": {
+    "gcc": "gcc (GCC) 16.2.1 20260810",
+    "clang": "clang version 23.1.4",
+    "xmake": "\u001b[0m\u001b[1mxmake v3.1.2+20261016, A cross-platform build utility based on Lua\u001b[0m\u001b[0m"
+  },
+  "raw_logs": [
+    {
+      "path": "build/performance-20261029/dev180-clang-release-build.log",
+      "sha256": "3206a40475ded6b683dfac3f8213517bc10e94e8cebbe85247cdbdd64d01cbca",
+      "bytes": 36768
+    },
+    {
+      "path": "build/performance-20261029/dev180-clang-release-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev180-clang-release-test.log",
+      "sha256": "db859212de29f8f61b7bc17a003115208eb25a2ddbb27f4db0c2d8534e2c89ee",
+      "bytes": 5207
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-asan-build.log",
+      "sha256": "79214ec9ba25c5484e9915ae2dc950e4eaa44ad9b0dd76b9ee67fbe2d1201f02",
+      "bytes": 20844
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-asan-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-asan-test.log",
+      "sha256": "81fc646a5c7fe415fb182cb5f761190ae128e6b768ab2a04dd57adaf251a4aa3",
+      "bytes": 5207
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-release-final-build.log",
+      "sha256": "ab3c36521d9841b1f0713c45d8867a73f3c583cdcee233cb3e1a83f3d3668486",
+      "bytes": 36768
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-release-final-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-release-final-test.log",
+      "sha256": "8ac75dad17a203f3b6ed6a49c59f1dbbab544f60da9df0929d09b454c65f937d",
+      "bytes": 41261
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-tsan-build.log",
+      "sha256": "22f91aabee653b1f3271501c22ed677a506522778c085a18ac72503cfe5ab6e9",
+      "bytes": 20844
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-tsan-configure.log",
+      "sha256": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+      "bytes": 66
+    },
+    {
+      "path": "build/performance-20261029/dev180-gcc-tsan-test.log",
+      "sha256": "4f03579de694b2483bd7d0965867634b1d59ca17b830dea7564d999a75635da1",
+      "bytes": 5207
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-01.log",
+      "sha256": "0042d2f7b167082e947cdb9eb53d002a6fec5796d0d9bbdfc4b72ac869081831",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-02.log",
+      "sha256": "1eea323f741eed5a418cfd6b6caa22902eda7d2b928938a4b0233aa8b87594f6",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-03.log",
+      "sha256": "ed2af4f47828a8d7e8dc8fe7d099232293d11fee2a802cb1b30285b3daae5c88",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-04.log",
+      "sha256": "3eb72f991d277dc09a38b669281472eff77932af529f374736b320cf98cba4bf",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-05.log",
+      "sha256": "ef372ad0593654186ea7cbab50e445c6a62040477f221059048ae990b6bfacf8",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-06.log",
+      "sha256": "9226ef51519393e2f9e13b92c30b15ef90272cfdb301e8b453db1801dd072b95",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-07.log",
+      "sha256": "1bd0dae59b128ef04facbb6e1f2e95d9be6e9b0b604317e548023aeee36535a8",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-08.log",
+      "sha256": "30eff3ed86f59bcfb54f78f9c4412f969cfa0852215074da7d1e5fe08f85cfab",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-09.log",
+      "sha256": "5250e9e2a2a519f94b92744b590696e152f6a1d8296bc02b648045cd1b9855eb",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-10.log",
+      "sha256": "c5921db2edc3fb5f375c2a2ed3312573cfcca651494424ae2cb90af00222d21a",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-11.log",
+      "sha256": "2a25d19c3a74a4e604ad40f05ae01d210f656956d007ad12f090ada2b4e55a93",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-12.log",
+      "sha256": "222a929a00ad944bfb1443c138c6030aae1d28cb48ce11a39b09b575c5752989",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-13.log",
+      "sha256": "0210b9f5bbb19d1d6ac6841ac1e24164cb945fa9651502d50b0122aba6434b21",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-14.log",
+      "sha256": "1bd0dae59b128ef04facbb6e1f2e95d9be6e9b0b604317e548023aeee36535a8",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-15.log",
+      "sha256": "7a8f317fad0ba5a4c17b76c273156e33c5d57ecaea85cf1d34ab0d145f75232a",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-16.log",
+      "sha256": "7a8f317fad0ba5a4c17b76c273156e33c5d57ecaea85cf1d34ab0d145f75232a",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-17.log",
+      "sha256": "3c03e4d50604e8f65e113771421eb2bc4375ec2ffa98559d89bc27d72646ccae",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-18.log",
+      "sha256": "ad3568bd5fbed18582518421a3b56ccba61dfef1ba3170737aa70a619b84ff4f",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-19.log",
+      "sha256": "3db4f14520ae9120ec28cf92e4620980947460e187e48a0622934e85b6df4e99",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-20.log",
+      "sha256": "60fd6c760bac152bc94ffee85556347f79e7089ceab35c2161585c6b66ccb8d8",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-21.log",
+      "sha256": "540d0269c1e31c47e5f0a044044cd722d8c2be490e0380ba9f921942bdd37ecc",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-22.log",
+      "sha256": "43a3345323e682b5b47bf915f9575d97bd1428dc0463fa392784e46c48d0f6e0",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-23.log",
+      "sha256": "973d6105142dbd2ac2ca5aa57a4fc55cbe384c1db0274425c947d470f0f7fc9f",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-24.log",
+      "sha256": "2038f3239b86b8387fe82ec20a412fabc1806803df0e8e2e6181fecfe3c5f22d",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/dev180-recovery-repeat-25.log",
+      "sha256": "a1aee7e46fb725c6498c8ab832342807057dbdae3da46945880a1a803e036700",
+      "bytes": 398
+    },
+    {
+      "path": "build/performance-20261029/message-recovery-publish-red.log",
+      "sha256": "c480715785c56b15f8ed529cebe6f383175049a8c8e9825c6a29e090ed80d524",
+      "bytes": 817
+    },
+    {
+      "path": "build/performance-20261029/message-recovery-publish-red-build.log",
+      "sha256": "3606947a5d01b31c78072968f196aa61bfdae8774863879b16b635a68f104c32",
+      "bytes": 388
+    },
+    {
+      "path": "build/performance-20261029/message-recovery-publish-green-final.log",
+      "sha256": "08f70479e5ff7b48e4db68dcd0c3e62baf5f9dc1492f83deab103cdc5c3e0725",
+      "bytes": 2736
+    }
+  ],
+  "validation_driver_sha256": "13ba5f161df4b2baf7abba1d7dd0c314d092599db4027fd820d74a34ac99d29b",
+  "limitations": [
+    "not_all_async_callers",
+    "not_global_memory_budget",
+    "not_CTM1_implementation",
+    "not_capacity_acceptance",
+    "not_platform_matrix"
+  ]
+}

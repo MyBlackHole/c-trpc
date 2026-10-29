@@ -5,8 +5,9 @@
 项目要求 Linux、GCC 或 Clang、OpenSSL 3.0 或更新版本的开发文件，以及
 Xmake 3.1.1 或更新版本。Ubuntu 22.04 可安装 `libssl-dev`。
 CI 固定使用 3.1.1；安装方式见 [Xmake 官方文档](https://xmake.io/guide/quick-start.html)。
-消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩仍未接入，
-新增编译依赖不表示默认启用压缩。语言基线仍为 ISO C11，并使用 GCC/Clang
+消息变换后端通过 Xmake 引入静态 Zstandard 1.5.7；网络压缩已接入 Channel、
+普通 V2 RPC 和连接组 DATA，默认关闭。发送仍须满足方法/入口授权及对端接收能力，
+不能将编译依赖存在当作已协商或默认启用。语言基线仍为 ISO C11，并使用 GCC/Clang
 支持的 `cleanup` 属性。编译保持 `-Wall -Wextra -Werror -pedantic`
 和 `-pthread`，链接也显式使用 `-pthread`。
 
@@ -219,9 +220,9 @@ Xmake 对消费目标传递 `-lzstd`。`trcore` 使用 Xmake 3.1.1 原生
 合并归档不等于做了符号隔离；同时链接另一个 Zstandard 实现可能产生符号冲突或
 版本选择问题，不属于当前保证范围。升级、符号命名/隔离及依赖锁定仍须独立验证。
 当前 SDK 安装白名单包含 `peer_identity.h`，因为公开 `transport.h` 的授权回调使用
-`tr_peer_identity_view`。TLS-D1 开发分支为普通 V2 Client/Server 和 transport-only
+`tr_peer_identity_view`。已合入主线的 TLS-D1 为普通 V2 Client/Server 和 transport-only
 连接组提供 OpenSSL 3 TLS 1.3/mTLS、CONTROL/DATA 主体绑定与 profile 轮换；默认仍关闭
-TLS。静态 SDK 消费端链接 `-lssl -lcrypto`。TLS-D1 固定版本静态分析与 GitHub 验收仍待完成；
+TLS。静态 SDK 消费端链接 `-lssl -lcrypto`。TLS-D1 的固定版本静态分析及合并后主线 CI 已通过；
 完整资源账本和公网门槛属于 TLS-E。阶段范围见 [TLS-C 实现记录](reviews/rpc_v2_tls_c_20261023.md)、
 [TLS-D1 验证记录](reviews/rpc_v2_tls_d1_20261023.md)及
 [ADR-009](architecture/decisions/ADR-009-tls-byte-endpoint.md)。

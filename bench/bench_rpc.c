@@ -167,6 +167,25 @@ static void destroy_server_retry(struct tr_server *server)
 	fatal("server destroy retry limit", TR_AGAIN);
 }
 
+static void destroy_client_retry(struct tr_client *client)
+{
+	struct timespec pause = {0, 1000000L};
+	unsigned attempt;
+
+	for (attempt = 0; attempt < 10000U; ++attempt) {
+		int ret = tr_client_destroy(client);
+		if (ret == TR_OK)
+			return;
+		if (ret != TR_AGAIN)
+			fatal("client destroy", ret);
+		while (nanosleep(&pause, &pause) != 0 && errno == EINTR)
+			;
+		pause.tv_sec = 0;
+		pause.tv_nsec = 1000000L;
+	}
+	fatal("client destroy retry limit", TR_AGAIN);
+}
+
 static uint64_t now_ns(void)
 {
 	struct timespec ts;
@@ -785,7 +804,7 @@ static int phase(struct client_run *run, const struct options *o, const char *na
 		fprintf(stderr, "phase %s: incomplete, duplicate callback or corrupt response (%u/%u)\n",
 			name, completed, count);
 		/* Keep samples and payloads alive until all library callbacks are joined. */
-		check(tr_client_destroy(run->client), "client destroy");
+		destroy_client_retry(run->client);
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -1082,7 +1101,7 @@ static int open_phase(struct client_run *run, const struct options *o)
 
 	if (failed || run->bad_callback) {
 		fputs("open phase: incomplete or duplicate callback\n", stderr);
-		check(tr_client_destroy(run->client), "client destroy");
+		destroy_client_retry(run->client);
 		run->client = NULL;
 		free(samples);
 		return -1;
@@ -1207,7 +1226,7 @@ static int run_client(const struct options *o)
 		      "V2 client begin drain");
 		check(tr_client_wait_drained(run.client, 5000U),
 		      "V2 client drain");
-		check(tr_client_destroy(run.client), "V2 client destroy");
+		destroy_client_retry(run.client);
 	}
 	for (i = 0; i < run.window; ++i) free(run.slots[i].payload);
 	free(run.slots);

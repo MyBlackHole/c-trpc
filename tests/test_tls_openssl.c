@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <openssl/crypto.h>
@@ -9,6 +10,7 @@
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -26,6 +28,88 @@
 #include "../src/io/peer_identity_internal.h"
 #include "../src/io/tls_openssl.h"
 #include "tls_test_identity.h"
+
+static unsigned int tls_test_cert_list_limit_set_count;
+static long tls_test_cert_list_limit_last_value;
+
+enum trust_fault {
+	TRUST_FAULT_NONE,
+	TRUST_FAULT_BIO,
+	TRUST_FAULT_CERT,
+	TRUST_FAULT_DIRECTORY_COPY,
+	TRUST_FAULT_CRL,
+	TRUST_FAULT_BUFFER
+};
+static enum trust_fault next_trust_fault;
+static unsigned trust_fault_hits;
+BIO *__real_BIO_new_fd(int fd, int close_flag);
+BIO *__real_BIO_new(const BIO_METHOD *method);
+int __real_X509_STORE_add_cert(X509_STORE *store, X509 *certificate);
+int __real_X509_STORE_add_crl(X509_STORE *store, X509_CRL *crl);
+void *__real_malloc(size_t bytes);
+
+static int tls_test_take_trust_fault(enum trust_fault fault)
+{
+	if (next_trust_fault != fault)
+		return 0;
+	next_trust_fault = TRUST_FAULT_NONE;
+	++trust_fault_hits;
+	return 1;
+}
+
+BIO *__wrap_BIO_new_fd(int fd, int close_flag)
+{
+	return tls_test_take_trust_fault(TRUST_FAULT_BIO)
+	               ? NULL
+	               : __real_BIO_new_fd(fd, close_flag);
+}
+
+BIO *__wrap_BIO_new(const BIO_METHOD *method)
+{
+	return tls_test_take_trust_fault(TRUST_FAULT_BUFFER)
+	               ? NULL
+	               : __real_BIO_new(method);
+}
+
+int __wrap_X509_STORE_add_cert(X509_STORE *store, X509 *certificate)
+{
+	if (tls_test_take_trust_fault(TRUST_FAULT_CERT)) {
+		ERR_raise(ERR_LIB_X509, ERR_R_MALLOC_FAILURE);
+		return 0;
+	}
+	return __real_X509_STORE_add_cert(store, certificate);
+}
+
+int __wrap_X509_STORE_add_crl(X509_STORE *store, X509_CRL *crl)
+{
+	if (tls_test_take_trust_fault(TRUST_FAULT_CRL)) {
+		ERR_raise(ERR_LIB_X509, ERR_R_MALLOC_FAILURE);
+		return 0;
+	}
+	return __real_X509_STORE_add_crl(store, crl);
+}
+
+void *__wrap_malloc(size_t bytes)
+{
+	if (tls_test_take_trust_fault(TRUST_FAULT_DIRECTORY_COPY)) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	return __real_malloc(bytes);
+}
+
+long __real_SSL_CTX_ctrl(SSL_CTX *context, int command, long value,
+                         void *pointer);
+
+long __wrap_SSL_CTX_ctrl(SSL_CTX *context, int command, long value,
+                         void *pointer)
+{
+	if (command == SSL_CTRL_SET_MAX_CERT_LIST) {
+		tls_test_cert_list_limit_set_count++;
+		tls_test_cert_list_limit_last_value = value;
+	}
+	return __real_SSL_CTX_ctrl(context, command, value, pointer);
+}
 
 struct tls_test_pair {
 	int client_fd;
@@ -145,10 +229,10 @@ tls_test_pair_open_with_mtls(const char *client_certificate_file,
 	    tr_tls_openssl_server_profile_create(
 	            &server_config, &test_pair.server_profile) != TR_OK ||
 	    tr_tls_openssl_session_create(test_pair.client_profile,
-	                                  test_pair.client_fd,
+	                                  test_pair.client_fd, NULL,
 	                                  &test_pair.client_session) != TR_OK ||
 	    tr_tls_openssl_session_create(test_pair.server_profile,
-	                                  test_pair.server_fd,
+	                                  test_pair.server_fd, NULL,
 	                                  &test_pair.server_session) != TR_OK)
 		return TR_ERR_SYS;
 	if (tr_byte_endpoint_init(&test_pair.client_endpoint,
@@ -452,8 +536,10 @@ tls_test_pair_open_profiles(struct tr_tls_openssl_profile *client_profile,
 	test_pair.client_profile = client_profile;
 	test_pair.server_profile = server_profile;
 	if (tr_tls_openssl_session_create(client_profile, test_pair.client_fd,
+	                                  NULL,
 	                                  &test_pair.client_session) != TR_OK ||
 	    tr_tls_openssl_session_create(server_profile, test_pair.server_fd,
+	                                  NULL,
 	                                  &test_pair.server_session) != TR_OK)
 		return TR_ERR_SYS;
 	if (tr_byte_endpoint_init(&test_pair.client_endpoint,
@@ -977,13 +1063,507 @@ static void test_blocking_socket_is_rejected_without_taking_ownership(void)
 	assert(tr_tls_openssl_client_profile_create(&config, &profile) ==
 	       TR_OK);
 	assert((fcntl(fds[0], F_GETFL) & O_NONBLOCK) == 0);
-	assert(tr_tls_openssl_session_create(profile, fds[0], &session) ==
+	assert(tr_tls_openssl_session_create(profile, fds[0], NULL, &session) ==
 	       TR_ERR_INVALID);
 	assert(session == NULL);
 	assert(fcntl(fds[0], F_GETFD) >= 0);
 	assert(close(fds[0]) == 0);
 	assert(close(fds[1]) == 0);
 	tr_tls_openssl_profile_release(profile);
+}
+
+static void tls_test_copy_hashed_ca(const char *source, const char *directory,
+                                    char *destination, size_t capacity)
+{
+	BIO *input = BIO_new_file(source, "rb");
+	assert(input);
+	X509 *certificate = PEM_read_bio_X509(input, NULL, NULL, NULL);
+	assert(certificate);
+	int hash_ok = 0;
+	unsigned long hash = X509_NAME_hash_ex(
+	        X509_get_subject_name(certificate), NULL, NULL, &hash_ok);
+	assert(hash_ok);
+	for (unsigned suffix = 0;; ++suffix) {
+		assert(suffix < 2U);
+		int length = snprintf(destination, capacity, "%s/%08lx.%u",
+		                      directory, hash, suffix);
+		assert(length > 0 && (size_t)length < capacity);
+		if (access(destination, F_OK) != 0) {
+			assert(errno == ENOENT);
+			break;
+		}
+	}
+	BIO *output = BIO_new_file(destination, "wb");
+	assert(output && PEM_write_bio_X509(output, certificate) == 1);
+	assert(BIO_free(output) == 1 && BIO_free(input) == 1);
+	X509_free(certificate);
+}
+
+static void tls_test_restore_environment(const char *name, char *saved)
+{
+	assert((saved ? setenv(name, saved, 1) : unsetenv(name)) == 0);
+	free(saved);
+}
+
+static void test_client_trust_directory_snapshot(int remove_original,
+                                                 int default_sources)
+{
+	char directory[TR_TLS_TEST_PATH_SIZE];
+	char original[TR_TLS_TEST_PATH_SIZE], added[TR_TLS_TEST_PATH_SIZE];
+	struct tr_tls_client_config cc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_directory = default_sources ? NULL : directory,
+	        .expected_peer_name = "server.example.test"};
+	struct tr_tls_server_config sc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .certificate_file = test_identity.server_certificate_file,
+	        .private_key_file = test_identity.server_private_key_file};
+	struct tr_tls_openssl_profile *client = NULL, *server = NULL;
+	int length =
+	        snprintf(directory, sizeof(directory),
+	                 "%s/ca-snapshot-%ld-%d-%d", test_identity.directory,
+	                 (long)getpid(), remove_original, default_sources);
+	assert(length > 0 && (size_t)length < sizeof(directory));
+	assert(mkdir(directory, 0700) == 0);
+	tls_test_copy_hashed_ca(remove_original
+	                                ? test_identity.ca_file
+	                                : test_identity.alternate_ca_file,
+	                        directory, original, sizeof(original));
+	const char *file_env = X509_get_default_cert_file_env();
+	const char *directory_env = X509_get_default_cert_dir_env();
+	char *old_file = getenv(file_env) ? strdup(getenv(file_env)) : NULL;
+	char *old_directory =
+	        getenv(directory_env) ? strdup(getenv(directory_env)) : NULL;
+	assert(!getenv(file_env) || old_file);
+	assert(!getenv(directory_env) || old_directory);
+	if (default_sources) {
+		/* 空默认文件关闭该来源，目录仍须在构造时快照。 */
+		assert(setenv(file_env, "", 1) == 0);
+		assert(setenv(directory_env, directory, 1) == 0);
+	}
+	int create_status = tr_tls_openssl_client_profile_create(&cc, &client);
+	tls_test_restore_environment(file_env, old_file);
+	tls_test_restore_environment(directory_env, old_directory);
+	assert(create_status == TR_OK);
+	assert(tr_tls_openssl_server_profile_create(&sc, &server) == TR_OK);
+	/* 创建后的信任源变化不能进入旧 profile，也不能触发首次握手读文件。 */
+	if (remove_original) {
+		assert(unlink(original) == 0 && rmdir(directory) == 0);
+	} else
+		tls_test_copy_hashed_ca(test_identity.ca_file, directory, added,
+		                        sizeof(added));
+	assert(tls_test_pair_open_profiles(client, server) == TR_OK);
+	int status = tls_test_handshake_pair();
+	fprintf(stderr,
+	        "tls-trust-snapshot: remove_original=%d defaults=%d "
+	        "handshake_status=%d\n",
+	        remove_original, default_sources, status);
+	assert(remove_original ? status == TR_OK : status != TR_OK);
+	tls_test_pair_cleanup();
+	if (!remove_original)
+		assert(unlink(original) == 0 && unlink(added) == 0 &&
+		       rmdir(directory) == 0);
+}
+
+static void test_client_trust_directory_combinations(unsigned mode)
+{
+	char first[TR_TLS_TEST_PATH_SIZE], second[TR_TLS_TEST_PATH_SIZE];
+	char first_ca[TR_TLS_TEST_PATH_SIZE], second_ca[TR_TLS_TEST_PATH_SIZE];
+	char sources[2U * TR_TLS_TEST_PATH_SIZE];
+	char alias[TR_TLS_TEST_PATH_SIZE] = {0};
+	int length = snprintf(first, sizeof(first), "%s/ca-first-%ld-%u",
+	                      test_identity.directory, (long)getpid(), mode);
+	assert(length > 0 && (size_t)length < sizeof(first));
+	length = snprintf(second, sizeof(second), "%s/ca-second-%ld-%u",
+	                  test_identity.directory, (long)getpid(), mode);
+	assert(length > 0 && (size_t)length < sizeof(second));
+	assert(mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0);
+	tls_test_copy_hashed_ca(test_identity.alternate_ca_file, first,
+	                        first_ca, sizeof(first_ca));
+	tls_test_copy_hashed_ca(test_identity.ca_file, second, second_ca,
+	                        sizeof(second_ca));
+	if (mode == 2U) {
+		char *resolved = realpath(test_identity.ca_file, NULL);
+		assert(resolved);
+		assert(unlink(second_ca) == 0 &&
+		       symlink(resolved, second_ca) == 0);
+		free(resolved);
+	}
+	if (mode == 3U) {
+		char copied[TR_TLS_TEST_PATH_SIZE];
+		tls_test_copy_hashed_ca(test_identity.ca_file, second, copied,
+		                        sizeof(copied));
+		memcpy(alias, copied, strlen(copied) + 1U);
+		char *base = strrchr(alias, '/') + 1;
+		base[0] = base[0] == '0' ? '1' : '0';
+		alias[strlen(alias) - 1U] = '0';
+		assert(rename(copied, alias) == 0);
+	}
+	length = snprintf(sources, sizeof(sources), "%s:%s", first, second);
+	assert(length > 0 && (size_t)length < sizeof(sources));
+	struct tr_tls_client_config cc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_file = mode == 1U ? test_identity.ca_file : NULL,
+	        .ca_directory = sources,
+	        .expected_peer_name = "server.example.test"};
+	struct tr_tls_server_config sc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .certificate_file = test_identity.server_certificate_file,
+	        .private_key_file = test_identity.server_private_key_file};
+	struct tr_tls_openssl_profile *client = NULL, *server = NULL;
+	assert(tr_tls_openssl_client_profile_create(&cc, &client) == TR_OK);
+	assert(tr_tls_openssl_server_profile_create(&sc, &server) == TR_OK);
+	assert(unlink(first_ca) == 0 && unlink(second_ca) == 0);
+	if (mode == 3U)
+		assert(unlink(alias) == 0);
+	assert(rmdir(first) == 0 && rmdir(second) == 0);
+	assert(tls_test_pair_open_profiles(client, server) == TR_OK);
+	assert(tls_test_handshake_pair() == TR_OK);
+	tls_test_pair_cleanup();
+	fprintf(stderr, "tls-trust-snapshot: combination=%u passed\n", mode);
+}
+
+static unsigned tls_test_open_fd_count(void)
+{
+	DIR *directory = opendir("/proc/self/fd");
+	assert(directory);
+	unsigned count = 0U;
+	struct dirent *entry;
+	while ((entry = readdir(directory)) != NULL)
+		if (entry->d_name[0] != '.')
+			++count;
+	assert(closedir(directory) == 0);
+	return count;
+}
+
+static void
+test_client_trust_snapshot_constructor_failure(enum trust_fault fault)
+{
+	char directory[TR_TLS_TEST_PATH_SIZE], entry[TR_TLS_TEST_PATH_SIZE];
+	int directory_source = fault == TRUST_FAULT_DIRECTORY_COPY;
+	int length = snprintf(directory, sizeof(directory), "%s/ca-oom-%ld-%u",
+	                      test_identity.directory, (long)getpid(),
+	                      (unsigned)fault);
+	assert(length > 0 && (size_t)length < sizeof(directory));
+	if (directory_source) {
+		assert(mkdir(directory, 0700) == 0);
+		tls_test_copy_hashed_ca(test_identity.ca_file, directory, entry,
+		                        sizeof(entry));
+	}
+	struct tr_tls_client_config cc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_file = directory_source ? NULL : test_identity.ca_file,
+	        .ca_directory = directory_source ? directory : NULL,
+	        .expected_peer_name = "server.example.test"};
+	struct tr_tls_openssl_profile *profile = NULL;
+	unsigned descriptors = tls_test_open_fd_count();
+	trust_fault_hits = 0U;
+	next_trust_fault = fault;
+	assert(tr_tls_openssl_client_profile_create(&cc, &profile) ==
+	       TR_ERR_NOMEM);
+	assert(!profile && trust_fault_hits == 1U &&
+	       next_trust_fault == TRUST_FAULT_NONE);
+	assert(tls_test_open_fd_count() == descriptors);
+	assert(tr_tls_openssl_client_profile_create(&cc, &profile) == TR_OK);
+	tr_tls_openssl_profile_release(profile);
+	assert(tls_test_open_fd_count() == descriptors);
+	if (directory_source)
+		assert(unlink(entry) == 0 && rmdir(directory) == 0);
+	fprintf(stderr,
+	        "tls-trust-snapshot: allocation-fault=%u rollback/retry "
+	        "passed\n",
+	        (unsigned)fault);
+}
+
+static void test_client_trust_directory_crl_snapshot(void)
+{
+	char directory[TR_TLS_TEST_PATH_SIZE], path[TR_TLS_TEST_PATH_SIZE];
+	int length = snprintf(directory, sizeof(directory), "%s/ca-crl-%ld",
+	                      test_identity.directory, (long)getpid());
+	assert(length > 0 && (size_t)length < sizeof(directory));
+	assert(mkdir(directory, 0700) == 0);
+	BIO *input = BIO_new_file(test_identity.ca_file, "rb");
+	assert(input);
+	X509 *issuer = PEM_read_bio_X509(input, NULL, NULL, NULL);
+	assert(issuer && BIO_free(input) == 1);
+	input = BIO_new_file(test_identity.ca_private_key_file, "rb");
+	assert(input);
+	EVP_PKEY *key = PEM_read_bio_PrivateKey(input, NULL, NULL, NULL);
+	assert(key && BIO_free(input) == 1);
+	X509_CRL *crl = X509_CRL_new();
+	ASN1_TIME *last = ASN1_TIME_set(NULL, time(NULL) - 60);
+	ASN1_TIME *next = ASN1_TIME_set(NULL, time(NULL) + 3600);
+	assert(crl && last && next);
+	assert(X509_CRL_set_version(crl, 1L) == 1);
+	assert(X509_CRL_set_issuer_name(crl, X509_get_subject_name(issuer)) ==
+	       1);
+	assert(X509_CRL_set1_lastUpdate(crl, last) == 1 &&
+	       X509_CRL_set1_nextUpdate(crl, next) == 1);
+	assert(X509_CRL_sign(crl, key, EVP_sha256()) > 0);
+	int hash_ok = 0;
+	unsigned long hash = X509_NAME_hash_ex(X509_get_subject_name(issuer),
+	                                       NULL, NULL, &hash_ok);
+	assert(hash_ok);
+	length = snprintf(path, sizeof(path), "%s/%08lx.r0", directory, hash);
+	assert(length > 0 && (size_t)length < sizeof(path));
+	BIO *output = BIO_new_file(path, "wb");
+	assert(output && PEM_write_bio_X509_CRL(output, crl) == 1 &&
+	       BIO_free(output) == 1);
+	ASN1_TIME_free(last);
+	ASN1_TIME_free(next);
+	X509_CRL_free(crl);
+	EVP_PKEY_free(key);
+	X509_free(issuer);
+
+	struct tr_tls_client_config cc = {.mode = TR_TLS_REQUIRED,
+	                                  .ca_file = test_identity.ca_file,
+	                                  .ca_directory = directory,
+	                                  .expected_peer_name =
+	                                          "server.example.test"};
+	struct tr_tls_server_config sc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .certificate_file = test_identity.server_certificate_file,
+	        .private_key_file = test_identity.server_private_key_file};
+	struct tr_tls_openssl_profile *client = NULL, *server = NULL;
+	unsigned descriptors = tls_test_open_fd_count();
+	trust_fault_hits = 0U;
+	next_trust_fault = TRUST_FAULT_CRL;
+	assert(tr_tls_openssl_client_profile_create(&cc, &client) ==
+	       TR_ERR_NOMEM);
+	assert(!client && trust_fault_hits == 1U &&
+	       tls_test_open_fd_count() == descriptors);
+	assert(tr_tls_openssl_client_profile_create(&cc, &client) == TR_OK);
+	assert(tr_tls_openssl_server_profile_create(&sc, &server) == TR_OK);
+	assert(unlink(path) == 0 && rmdir(directory) == 0);
+	assert(tls_test_pair_open_profiles(client, server) == TR_OK);
+	SSL *ssl = tr_tls_openssl_session_ssl_for_test(
+	        test_pair.client_endpoint.driver_arg);
+	assert(X509_VERIFY_PARAM_set_flags(SSL_get0_param(ssl),
+	                                   X509_V_FLAG_CRL_CHECK) == 1);
+	assert(tls_test_handshake_pair() == TR_OK);
+	tls_test_pair_cleanup();
+	puts("tls-trust-snapshot: CRL rollback and deleted-source verification "
+	     "passed");
+}
+
+static void test_client_trust_directory_rejects_invalid(unsigned mode)
+{
+	char directory[TR_TLS_TEST_PATH_SIZE], entry[TR_TLS_TEST_PATH_SIZE];
+	int length =
+	        snprintf(directory, sizeof(directory), "%s/ca-invalid-%ld-%u",
+	                 test_identity.directory, (long)getpid(), mode);
+	assert(length > 0 && (size_t)length < sizeof(directory));
+	assert(mkdir(directory, 0700) == 0);
+	tls_test_copy_hashed_ca(test_identity.ca_file, directory, entry,
+	                        sizeof(entry));
+	if (mode == 0U) {
+		char changed[TR_TLS_TEST_PATH_SIZE];
+		memcpy(changed, entry, strlen(entry) + 1U);
+		char *base = strrchr(changed, '/') + 1;
+		base[0] = base[0] == '0' ? '1' : '0';
+		assert(rename(entry, changed) == 0);
+		memcpy(entry, changed, strlen(changed) + 1U);
+	} else if (mode == 1U) {
+		assert(unlink(entry) == 0 && mkfifo(entry, 0600) == 0);
+	} else if (mode == 2U) {
+		FILE *output = fopen(entry, "wb");
+		assert(output && fputs("invalid certificate\n", output) >= 0);
+		assert(fclose(output) == 0);
+	} else {
+		BIO *input = BIO_new_file(test_identity.ca_file, "rb");
+		assert(input);
+		X509 *certificate = PEM_read_bio_X509(input, NULL, NULL, NULL);
+		assert(certificate && BIO_free(input) == 1);
+		BIO *output = BIO_new_file(entry, "ab");
+		assert(output && PEM_write_bio_X509(output, certificate) == 1);
+		assert(BIO_free(output) == 1);
+		X509_free(certificate);
+	}
+	struct tr_tls_client_config cc = {.mode = TR_TLS_REQUIRED,
+	                                  .ca_directory = directory,
+	                                  .expected_peer_name =
+	                                          "server.example.test"};
+	struct tr_tls_openssl_profile *profile = NULL;
+	unsigned descriptors = tls_test_open_fd_count();
+	int status = tr_tls_openssl_client_profile_create(&cc, &profile);
+	if (mode == 0U) {
+		struct tr_tls_server_config sc = {
+		        .mode = TR_TLS_REQUIRED,
+		        .certificate_file =
+		                test_identity.server_certificate_file,
+		        .private_key_file =
+		                test_identity.server_private_key_file};
+		struct tr_tls_openssl_profile *server = NULL;
+		assert(status == TR_OK && profile);
+		assert(tr_tls_openssl_server_profile_create(&sc, &server) ==
+		       TR_OK);
+		assert(tls_test_pair_open_profiles(profile, server) == TR_OK);
+		assert(tls_test_handshake_pair() != TR_OK);
+		tls_test_pair_cleanup();
+	} else
+		assert(status == TR_ERR_INVALID && !profile);
+	assert(tls_test_open_fd_count() == descriptors);
+	assert(unlink(entry) == 0 && rmdir(directory) == 0);
+	fprintf(stderr, "tls-trust-snapshot: invalid=%u fd-rollback passed\n",
+	        mode);
+}
+
+static void test_client_trust_directory_does_not_skip_gap(void)
+{
+	char directory[TR_TLS_TEST_PATH_SIZE], entry[TR_TLS_TEST_PATH_SIZE];
+	char after_gap[TR_TLS_TEST_PATH_SIZE];
+	int length = snprintf(directory, sizeof(directory), "%s/ca-gap-%ld",
+	                      test_identity.directory, (long)getpid());
+	assert(length > 0 && (size_t)length < sizeof(directory));
+	assert(mkdir(directory, 0700) == 0);
+	tls_test_copy_hashed_ca(test_identity.ca_file, directory, entry,
+	                        sizeof(entry));
+	memcpy(after_gap, entry, strlen(entry) + 1U);
+	after_gap[strlen(after_gap) - 1U] = '1';
+	assert(rename(entry, after_gap) == 0);
+	struct tr_tls_client_config cc = {.mode = TR_TLS_REQUIRED,
+	                                  .ca_directory = directory,
+	                                  .expected_peer_name =
+	                                          "server.example.test"};
+	struct tr_tls_server_config sc = {
+	        .mode = TR_TLS_REQUIRED,
+	        .certificate_file = test_identity.server_certificate_file,
+	        .private_key_file = test_identity.server_private_key_file};
+	struct tr_tls_openssl_profile *client = NULL, *server = NULL;
+	assert(tr_tls_openssl_client_profile_create(&cc, &client) == TR_OK);
+	assert(tr_tls_openssl_server_profile_create(&sc, &server) == TR_OK);
+	assert(tls_test_pair_open_profiles(client, server) == TR_OK);
+	assert(tls_test_handshake_pair() != TR_OK);
+	tls_test_pair_cleanup();
+	assert(unlink(after_gap) == 0 && rmdir(directory) == 0);
+	puts("tls-trust-snapshot: hash sequence gap stayed untrusted");
+}
+
+static void test_profiles_pin_peer_certificate_chain_limit(void)
+{
+	struct tr_tls_client_config client_config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_file = test_identity.ca_file,
+	        .expected_peer_name = "server.example.test",
+	};
+	struct tr_tls_server_config server_config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .certificate_file = test_identity.server_certificate_file,
+	        .private_key_file = test_identity.server_private_key_file,
+	};
+	struct tr_tls_openssl_profile *client_profile = NULL;
+	struct tr_tls_openssl_profile *server_profile = NULL;
+	unsigned int before = tls_test_cert_list_limit_set_count;
+
+	assert(tr_tls_openssl_client_profile_create(&client_config,
+	                                            &client_profile) == TR_OK);
+	assert(tr_tls_openssl_server_profile_create(&server_config,
+	                                            &server_profile) == TR_OK);
+	assert(tls_test_cert_list_limit_set_count == before + 2U);
+	assert(tls_test_cert_list_limit_last_value ==
+	       TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
+	tr_tls_openssl_profile_release(client_profile);
+	tr_tls_openssl_profile_release(server_profile);
+}
+
+static X509 *tls_test_large_server_certificate(void)
+{
+	static const long extension_bytes =
+	        TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES + 4096L;
+	BIO *certificate_file =
+	        BIO_new_file(test_identity.server_certificate_file, "rb");
+	BIO *key_file = BIO_new_file(test_identity.ca_private_key_file, "rb");
+	X509 *source = NULL;
+	X509 *certificate = NULL;
+	EVP_PKEY *ca_key = NULL;
+	ASN1_OBJECT *object = NULL;
+	ASN1_OCTET_STRING *value = NULL;
+	X509_EXTENSION *extension = NULL;
+	unsigned char *extension_data = NULL;
+	int encoded_bytes;
+
+	assert(certificate_file != NULL && key_file != NULL);
+	source = PEM_read_bio_X509(certificate_file, NULL, NULL, NULL);
+	ca_key = PEM_read_bio_PrivateKey(key_file, NULL, NULL, NULL);
+	assert(source != NULL && ca_key != NULL);
+	certificate = X509_dup(source);
+	assert(certificate != NULL);
+	object = OBJ_txt2obj("1.3.6.1.4.1.55555.1", 1);
+	value = ASN1_OCTET_STRING_new();
+	extension_data = OPENSSL_malloc((size_t)extension_bytes);
+	assert(object != NULL && value != NULL && extension_data != NULL);
+	memset(extension_data, 0x5a, (size_t)extension_bytes);
+	assert(ASN1_OCTET_STRING_set(value, extension_data,
+	                             (int)extension_bytes) == 1);
+	extension = X509_EXTENSION_create_by_OBJ(NULL, object, 0, value);
+	assert(extension != NULL &&
+	       X509_add_ext(certificate, extension, -1) == 1);
+	assert(X509_sign(certificate, ca_key, EVP_sha256()) > 0);
+	encoded_bytes = i2d_X509(certificate, NULL);
+	assert(encoded_bytes > TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
+	OPENSSL_cleanse(extension_data, (size_t)extension_bytes);
+	OPENSSL_free(extension_data);
+	X509_EXTENSION_free(extension);
+	ASN1_OCTET_STRING_free(value);
+	ASN1_OBJECT_free(object);
+	EVP_PKEY_free(ca_key);
+	X509_free(source);
+	BIO_free(key_file);
+	BIO_free(certificate_file);
+	return certificate;
+}
+
+static void test_oversized_peer_certificate_chain_is_rejected(void)
+{
+	char certificate_path[TR_TLS_TEST_PATH_SIZE];
+	struct tr_tls_client_config client_config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .ca_file = test_identity.ca_file,
+	        .expected_peer_name = "server.example.test",
+	};
+	struct tr_tls_server_config server_config = {
+	        .mode = TR_TLS_REQUIRED,
+	        .private_key_file = test_identity.server_private_key_file,
+	};
+	struct tr_tls_openssl_profile *client_profile = NULL;
+	struct tr_tls_openssl_profile *server_profile = NULL;
+	X509 *certificate;
+	BIO *output;
+	int written;
+
+	written = snprintf(certificate_path, sizeof(certificate_path), "%s/%s",
+	                   test_identity.directory, "oversized-server.pem");
+	assert(written > 0 && (size_t)written < sizeof(certificate_path));
+	certificate = tls_test_large_server_certificate();
+	output = BIO_new_file(certificate_path, "wb");
+	assert(output != NULL && PEM_write_bio_X509(output, certificate) == 1);
+	BIO_free(output);
+	X509_free(certificate);
+	server_config.certificate_file = certificate_path;
+
+	assert(tr_tls_openssl_client_profile_create(&client_config,
+	                                            &client_profile) == TR_OK);
+	assert(tr_tls_openssl_server_profile_create(&server_config,
+	                                            &server_profile) == TR_OK);
+	assert(tls_test_pair_open_profiles(client_profile, server_profile) ==
+	       TR_OK);
+	assert(SSL_get_max_cert_list(tr_tls_openssl_session_ssl_for_test(
+	               test_pair.client_endpoint.driver_arg)) ==
+	       TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
+	assert(SSL_get_max_cert_list(tr_tls_openssl_session_ssl_for_test(
+	               test_pair.server_endpoint.driver_arg)) ==
+	       TR_TLS_OPENSSL_MAX_PEER_CERT_LIST_BYTES);
+	ERR_clear_error();
+	assert(tls_test_handshake_pair() != TR_OK);
+	{
+		unsigned long error = ERR_peek_last_error();
+		assert(error != 0UL && ERR_GET_LIB(error) == ERR_LIB_SSL &&
+		       ERR_GET_REASON(error) == SSL_R_EXCESSIVE_MESSAGE_SIZE);
+	}
+	assert(test_pair.client_endpoint.state !=
+	       TR_BYTE_ENDPOINT_AUTHENTICATED);
+	tls_test_pair_cleanup();
+	assert(unlink(certificate_path) == 0);
 }
 
 static void test_profile_generation_overflow_is_rejected(void)
@@ -1227,7 +1807,8 @@ static int tls_test_peer_open(struct tls_test_peer *peer, const char *role,
 		owns_profile = 1;
 		peer->profile = profile;
 	}
-	status = tr_tls_openssl_session_create(profile, fd, &peer->session);
+	status = tr_tls_openssl_session_create(profile, fd, NULL,
+	                                       &peer->session);
 	if (status != TR_OK)
 		return status;
 	status = tr_byte_endpoint_init(
@@ -2070,7 +2651,24 @@ int main(int argc, char **argv)
 	atexit(tls_test_pair_cleanup);
 	assert(tls_test_identity_init(&test_identity, "tls-b-endpoint") == 0);
 	test_in_memory_pem_profiles();
+	test_client_trust_directory_snapshot(0, 0);
+	test_client_trust_directory_snapshot(1, 0);
+	test_client_trust_directory_snapshot(0, 1);
+	test_client_trust_directory_snapshot(1, 1);
+	for (unsigned mode = 0; mode < 4U; ++mode)
+		test_client_trust_directory_combinations(mode);
+	for (unsigned mode = 0; mode < 4U; ++mode)
+		test_client_trust_directory_rejects_invalid(mode);
+	test_client_trust_directory_does_not_skip_gap();
+	test_client_trust_snapshot_constructor_failure(TRUST_FAULT_BIO);
+	test_client_trust_snapshot_constructor_failure(TRUST_FAULT_BUFFER);
+	test_client_trust_snapshot_constructor_failure(TRUST_FAULT_CERT);
+	test_client_trust_snapshot_constructor_failure(
+	        TRUST_FAULT_DIRECTORY_COPY);
+	test_client_trust_directory_crl_snapshot();
 	test_blocking_socket_is_rejected_without_taking_ownership();
+	test_profiles_pin_peer_certificate_chain_limit();
+	test_oversized_peer_certificate_chain_is_rejected();
 	test_profile_generation_overflow_is_rejected();
 	test_handshake_maps_want_write_then_want_read();
 	test_required_client_auth_rejects_missing_certificate();

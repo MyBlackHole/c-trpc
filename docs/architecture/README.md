@@ -28,6 +28,9 @@ c-trpc 核心的范围是通用运行时、传输、连接组和 RPC。
 后续建议在 API 边界稳定后把这些业务参考迁移到独立业务文档目录，避免旧文件名继续误导核心设计。
 
 架构决策记录见 [decisions/](decisions/)。
+其中 [ADR-010](decisions/ADR-010-transport-backend-contract.md) 与
+[后端契约](../superpowers/specs/2026-10-29-transport-backend-contract-design.md)仍为提案，
+TRP/HTTP/2 等价比较尚未完成，不属于当前已实现接口。
 
 ## 文档状态约定
 

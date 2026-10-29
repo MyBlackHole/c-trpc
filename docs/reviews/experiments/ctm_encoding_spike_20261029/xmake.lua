@@ -1,0 +1,17 @@
+set_project("ctm-encoding-spike")
+set_version("0.0.1")
+set_languages("c11")
+set_allowedmodes("release", "asan")
+set_optimize("faster")
+set_symbols("debug")
+add_cflags("-Wall", "-Wextra", "-Werror", "-pedantic")
+add_undefines("NDEBUG")
+if is_mode("asan") then
+    add_cflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer")
+    add_ldflags("-fsanitize=address,undefined")
+end
+target("codec_spike")
+    set_kind("binary")
+    add_files("codec.c", "measure.c")
+    add_tests("default", {runargs = {"--check"}, run_timeout = 120000})
+target_end()

@@ -1,0 +1,1138 @@
+{
+  "status": "single_host_diagnostic_not_capacity_acceptance",
+  "baseline_commit": "60630875a2e1fe0c36d66e5d459b8e8040c0f69e",
+  "candidate_base_commit": "358abee9623d6c9183313321d3afa91a83726919",
+  "candidate_source_files_sha256": {
+    "src/execution/reactor.c": "9c39993db48856d7fb187f32e8462ebfce49d359757ce3e3172816e935dc7c71",
+    "xmake.lua": "c5e952ef2f75c22049789c45af6a608a90057f779501242c4a9657c68c46d511"
+  },
+  "cases": [
+    {
+      "mode": "tls-zstd",
+      "seconds": 30,
+      "binary_sha256": "7cd245121138a344bd80d9d19a9f47137d8ebf9c6c1ca0761c9a9c3dc39a117a",
+      "binary_source_commit": "60630875a2e1fe0c36d66e5d459b8e8040c0f69e",
+      "observer_source_commit": "358abee9623d6c9183313321d3afa91a83726919",
+      "clock_ticks_per_s": 100,
+      "server_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-handshake-stress-600s/bench_rpc",
+        "server",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--slow-ms",
+        "0"
+      ],
+      "client_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-handshake-stress-600s/bench_rpc",
+        "client",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--port",
+        "44591",
+        "--scenario",
+        "open",
+        "--requests",
+        "3000",
+        "--rate-rps",
+        "100",
+        "--window",
+        "64",
+        "--warmup",
+        "32",
+        "--timeout-ms",
+        "3000",
+        "--start-gate",
+        "1"
+      ],
+      "before": {
+        "at_ns": 713321023741368,
+        "process": {
+          "user": 7,
+          "system": 80
+        },
+        "threads": {
+          "3334897": {
+            "user": 0,
+            "system": 0
+          },
+          "3334898": {
+            "user": 6,
+            "system": 79
+          },
+          "3334899": {
+            "user": 0,
+            "system": 0
+          },
+          "3334900": {
+            "user": 0,
+            "system": 0
+          },
+          "3334901": {
+            "user": 0,
+            "system": 0
+          },
+          "3334902": {
+            "user": 0,
+            "system": 0
+          },
+          "3334903": {
+            "user": 0,
+            "system": 0
+          }
+        }
+      },
+      "after": {
+        "at_ns": 713351075905837,
+        "process": {
+          "user": 200,
+          "system": 1699
+        },
+        "threads": {
+          "3334897": {
+            "user": 0,
+            "system": 0
+          },
+          "3334898": {
+            "user": 180,
+            "system": 1649
+          },
+          "3334899": {
+            "user": 27,
+            "system": 7
+          },
+          "3334900": {
+            "user": 1,
+            "system": 7
+          },
+          "3334901": {
+            "user": 1,
+            "system": 6
+          },
+          "3334902": {
+            "user": 2,
+            "system": 6
+          },
+          "3334903": {
+            "user": 1,
+            "system": 6
+          }
+        }
+      },
+      "measurement_elapsed_s": 30.052164469,
+      "measurement_cpu_s": 18.12,
+      "thread_cpu_s": {
+        "3334897": 0.0,
+        "3334898": 17.44,
+        "3334899": 0.34,
+        "3334900": 0.08,
+        "3334901": 0.07,
+        "3334902": 0.08,
+        "3334903": 0.07
+      },
+      "client": {
+        "type": "open_phase",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "phase": "measure",
+        "scenario": "open",
+        "pid": 3334904,
+        "window": 64,
+        "compression": "zstd",
+        "tls_enabled": 1,
+        "client_alloc_calls": 57000,
+        "client_alloc_requested_bytes": 641288488,
+        "rate_rps": 100,
+        "start_ns": 713321024942996,
+        "schedule_horizon_ns": 713351024942996,
+        "end_ns": 713351043464387,
+        "arrival_window_s": 30.0,
+        "drain_elapsed_s": 30.018521391,
+        "drain_tail_ms": 18.521391,
+        "client_cpu_s": 15.182593,
+        "client_peak_rss_kib": 24252,
+        "offered": 3000,
+        "scheduler_dropped": 0,
+        "attempted": 3000,
+        "accepted": 3000,
+        "completed": 3000,
+        "ok": 3000,
+        "submit_again": 0,
+        "submit_errors": 0,
+        "deadlines": 0,
+        "rpc_errors": 0,
+        "unavailable": 0,
+        "resource_exhausted": 0,
+        "invalid_responses": 0,
+        "ok_ratio": 1.0,
+        "ok_rps": 99.938,
+        "payload_MiB_s": 0.780768,
+        "ok_p50_us": 29383.918,
+        "ok_p99_us": 32256.163,
+        "accepted_p99_us": 32256.163,
+        "scheduler_late_p50_us": 101.452,
+        "scheduler_late_p99_us": 142.955,
+        "scheduler_late_max_us": 483.56,
+        "submission_schema": 1,
+        "first_submit_ns": 713321024953752,
+        "last_submit_ns": 713351015047920,
+        "submitted_in_window": 3000,
+        "accepted_in_window": 3000,
+        "completed_in_window": 2998,
+        "submit_late_p99_us": 149.66,
+        "submit_late_max_us": 487.402
+      },
+      "server_exit": {
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "type": "server_exit",
+        "drain_status": 0,
+        "cpu_s": 18.998425,
+        "peak_rss_kib": 24252,
+        "alloc_calls": 69796,
+        "alloc_requested_bytes": 677052448,
+        "reactor_turns": 2425933,
+        "command_budget_limit": 64,
+        "command_processed_total": 9,
+        "command_max_per_turn": 1,
+        "command_budget_hits": 0,
+        "epoll_polls": 3649,
+        "epoll_waits": 2422284,
+        "command_send_enqueued": 0,
+        "command_send_full": 0,
+        "command_resume_rx_enqueued": 0,
+        "command_resume_rx_full": 0,
+        "command_call_enqueued": 10,
+        "command_call_full": 0,
+        "command_other_enqueued": 0,
+        "command_other_full": 0,
+        "command_queue_capacity": 1024,
+        "command_queue_peak": 1,
+        "completion_queue_peak": 0,
+        "command_queue_full_events": 0,
+        "completion_queue_full_events": 0,
+        "rx_pool_capacity": 64,
+        "rx_pool_peak": 1,
+        "tx_pool_capacity": 512,
+        "tx_pool_peak": 2,
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 3,
+        "rx_pool_exhausted_events": 0,
+        "tx_pool_exhausted_events": 0,
+        "control_tx_pool_exhausted_events": 0,
+        "rpc_executor_threads": 4,
+        "rpc_task_queue_capacity": 256,
+        "rpc_tasks_queued": 0,
+        "rpc_tasks_running": 0,
+        "rpc_calls_started": 3032,
+        "rpc_calls_finished": 3032,
+        "rpc_unavailable": 0,
+        "rpc_resource_exhausted": 0,
+        "reassembly_pool_capacity": 8,
+        "reassembly_pool_peak": 0,
+        "reassembly_pool_exhausted_events": 0,
+        "peers_ready_total": 1,
+        "peers_reaped_total": 1
+      },
+      "case_label": "cpu-baseline-tls-zstd-30s",
+      "result_file_sha256": "bc27b9297cdf5a78d7b58bd519047333f616eede4197b2a0e06090667c026b24",
+      "server_raw_sha256": "e88bf0248f207ee1f0912d8c971d684af9d48c20800fef275c0206e208a415ad",
+      "client_raw_sha256": "b9cdd641b4189d8f1d04b3140ef2e65923eb022c383552ee7ec07d6940aed7a4"
+    },
+    {
+      "mode": "tls-idle",
+      "seconds": 15,
+      "binary_sha256": "7cd245121138a344bd80d9d19a9f47137d8ebf9c6c1ca0761c9a9c3dc39a117a",
+      "binary_source_commit": "60630875a2e1fe0c36d66e5d459b8e8040c0f69e",
+      "observer_source_commit": "358abee9623d6c9183313321d3afa91a83726919",
+      "clock_ticks_per_s": 100,
+      "server_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-handshake-stress-600s/bench_rpc",
+        "server",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--slow-ms",
+        "0"
+      ],
+      "client_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-handshake-stress-600s/bench_rpc",
+        "client",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--port",
+        "34151",
+        "--scenario",
+        "open",
+        "--requests",
+        "64",
+        "--rate-rps",
+        "100",
+        "--window",
+        "64",
+        "--warmup",
+        "32",
+        "--timeout-ms",
+        "3000",
+        "--start-gate",
+        "1"
+      ],
+      "before": {
+        "at_ns": 713407752813863,
+        "process": {
+          "user": 9,
+          "system": 78
+        },
+        "threads": {
+          "3338033": {
+            "user": 0,
+            "system": 0
+          },
+          "3338034": {
+            "user": 8,
+            "system": 78
+          },
+          "3338035": {
+            "user": 0,
+            "system": 0
+          },
+          "3338036": {
+            "user": 0,
+            "system": 0
+          },
+          "3338037": {
+            "user": 0,
+            "system": 0
+          },
+          "3338038": {
+            "user": 0,
+            "system": 0
+          },
+          "3338039": {
+            "user": 0,
+            "system": 0
+          }
+        },
+        "epoll_fdinfo": {
+          "4": "pos:\t0\nflags:\t02000002\nmnt_id:\t19\nino:\t121\ntfd:        8 events:     201d data:        100000000  pos:0 ino:3297a58 sdev:a\ntfd:        6 events:       19 data: fffffffffffffffe  pos:0 ino:3297e5f sdev:a\ntfd:        5 events:       19 data: ffffffffffffffff  pos:0 ino:79 sdev:11\ntfd:        7 events:       19 data: ffff000000010000  pos:0 ino:79 sdev:11\ntfd:        3 events:       19 data: fffffffffffffffd  pos:0 ino:79 sdev:11\n"
+        }
+      },
+      "after": {
+        "at_ns": 713422753665773,
+        "process": {
+          "user": 107,
+          "system": 1479
+        },
+        "threads": {
+          "3338033": {
+            "user": 0,
+            "system": 0
+          },
+          "3338034": {
+            "user": 106,
+            "system": 1479
+          },
+          "3338035": {
+            "user": 0,
+            "system": 0
+          },
+          "3338036": {
+            "user": 0,
+            "system": 0
+          },
+          "3338037": {
+            "user": 0,
+            "system": 0
+          },
+          "3338038": {
+            "user": 0,
+            "system": 0
+          },
+          "3338039": {
+            "user": 0,
+            "system": 0
+          }
+        },
+        "epoll_fdinfo": {
+          "4": "pos:\t0\nflags:\t02000002\nmnt_id:\t19\nino:\t121\ntfd:        8 events:     201d data:        100000000  pos:0 ino:3297a58 sdev:a\ntfd:        6 events:       19 data: fffffffffffffffe  pos:0 ino:3297e5f sdev:a\ntfd:        5 events:       19 data: ffffffffffffffff  pos:0 ino:79 sdev:11\ntfd:        7 events:       19 data: ffff000000010000  pos:0 ino:79 sdev:11\ntfd:        3 events:       19 data: fffffffffffffffd  pos:0 ino:79 sdev:11\n"
+        }
+      },
+      "measurement_elapsed_s": 15.00085191,
+      "measurement_cpu_s": 14.99,
+      "thread_cpu_s": {
+        "3338033": 0.0,
+        "3338034": 14.99,
+        "3338035": 0.0,
+        "3338036": 0.0,
+        "3338037": 0.0,
+        "3338038": 0.0,
+        "3338039": 0.0
+      },
+      "client": {
+        "type": "open_phase",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "phase": "measure",
+        "scenario": "open",
+        "pid": 3338040,
+        "window": 64,
+        "compression": "zstd",
+        "tls_enabled": 1,
+        "client_alloc_calls": 1216,
+        "client_alloc_requested_bytes": 13680704,
+        "rate_rps": 100,
+        "start_ns": 713422755139295,
+        "schedule_horizon_ns": 713423395139295,
+        "end_ns": 713423415314942,
+        "arrival_window_s": 0.64,
+        "drain_elapsed_s": 0.660175647,
+        "drain_tail_ms": 20.175647,
+        "client_cpu_s": 0.348538,
+        "client_peak_rss_kib": 24960,
+        "offered": 64,
+        "scheduler_dropped": 0,
+        "attempted": 64,
+        "accepted": 64,
+        "completed": 64,
+        "ok": 64,
+        "submit_again": 0,
+        "submit_errors": 0,
+        "deadlines": 0,
+        "rpc_errors": 0,
+        "unavailable": 0,
+        "resource_exhausted": 0,
+        "invalid_responses": 0,
+        "ok_ratio": 1.0,
+        "ok_rps": 96.944,
+        "payload_MiB_s": 0.757374,
+        "ok_p50_us": 29660.201,
+        "ok_p99_us": 32454.5,
+        "accepted_p99_us": 32454.5,
+        "scheduler_late_p50_us": 99.221,
+        "scheduler_late_p99_us": 161.734,
+        "scheduler_late_max_us": 161.734,
+        "submission_schema": 1,
+        "first_submit_ns": 713422755158502,
+        "last_submit_ns": 713423385247564,
+        "submitted_in_window": 64,
+        "accepted_in_window": 64,
+        "completed_in_window": 61,
+        "submit_late_p99_us": 176.96,
+        "submit_late_max_us": 176.96
+      },
+      "server_exit": {
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "type": "server_exit",
+        "drain_status": 0,
+        "cpu_s": 16.29066,
+        "peak_rss_kib": 24960,
+        "alloc_calls": 2232,
+        "alloc_requested_bytes": 21749880,
+        "reactor_turns": 2496527,
+        "command_budget_limit": 64,
+        "command_processed_total": 9,
+        "command_max_per_turn": 1,
+        "command_budget_hits": 0,
+        "epoll_polls": 3615,
+        "epoll_waits": 2492912,
+        "command_send_enqueued": 0,
+        "command_send_full": 0,
+        "command_resume_rx_enqueued": 0,
+        "command_resume_rx_full": 0,
+        "command_call_enqueued": 10,
+        "command_call_full": 0,
+        "command_other_enqueued": 0,
+        "command_other_full": 0,
+        "command_queue_capacity": 1024,
+        "command_queue_peak": 1,
+        "completion_queue_peak": 0,
+        "command_queue_full_events": 0,
+        "completion_queue_full_events": 0,
+        "rx_pool_capacity": 64,
+        "rx_pool_peak": 1,
+        "tx_pool_capacity": 512,
+        "tx_pool_peak": 2,
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 3,
+        "rx_pool_exhausted_events": 0,
+        "tx_pool_exhausted_events": 0,
+        "control_tx_pool_exhausted_events": 0,
+        "rpc_executor_threads": 4,
+        "rpc_task_queue_capacity": 256,
+        "rpc_tasks_queued": 0,
+        "rpc_tasks_running": 0,
+        "rpc_calls_started": 96,
+        "rpc_calls_finished": 96,
+        "rpc_unavailable": 0,
+        "rpc_resource_exhausted": 0,
+        "reassembly_pool_capacity": 8,
+        "reassembly_pool_peak": 0,
+        "reassembly_pool_exhausted_events": 0,
+        "peers_ready_total": 1,
+        "peers_reaped_total": 1
+      },
+      "case_label": "cpu-idle-tls-15s",
+      "result_file_sha256": "898d06d404ac214d509e13c519e4f06ff08a5c77ce9638419762e4dda03c7549",
+      "server_raw_sha256": "e97c2f29e6b07c6c37c70d477863130fc695ab01e54366126822c93ce07e6783",
+      "client_raw_sha256": "7f1a02d3b6a472baa46e87b4eeb455b2dfcebc09f4191286eae5c71e1f63f7cb"
+    },
+    {
+      "mode": "tls-zstd",
+      "seconds": 30,
+      "binary_sha256": "19471c5a5fff52d58edf81bf1dd7ee773f492fe87b4a8d7ee7849eec6a64df28",
+      "binary_source_commit": "worktree_based_on_358abee9623d6c9183313321d3afa91a83726919",
+      "source_diff_sha256": "5c850c82db9ad42f3698f3ba20061447b59cd9e6523ef2972015f035f837a97a",
+      "source_files_sha256": {
+        "src/execution/reactor.c": "9c39993db48856d7fb187f32e8462ebfce49d359757ce3e3172816e935dc7c71",
+        "xmake.lua": "c5e952ef2f75c22049789c45af6a608a90057f779501242c4a9657c68c46d511"
+      },
+      "observer_source_commit": "358abee9623d6c9183313321d3afa91a83726919",
+      "clock_ticks_per_s": 100,
+      "server_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/dev179-fixed/bench_rpc",
+        "server",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--slow-ms",
+        "0"
+      ],
+      "client_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/dev179-fixed/bench_rpc",
+        "client",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--port",
+        "32891",
+        "--scenario",
+        "open",
+        "--requests",
+        "3000",
+        "--rate-rps",
+        "100",
+        "--window",
+        "64",
+        "--warmup",
+        "32",
+        "--timeout-ms",
+        "3000",
+        "--start-gate",
+        "1"
+      ],
+      "before": {
+        "at_ns": 714121299072029,
+        "process": {
+          "user": 4,
+          "system": 7
+        },
+        "threads": {
+          "3349731": {
+            "user": 0,
+            "system": 0
+          },
+          "3349732": {
+            "user": 3,
+            "system": 6
+          },
+          "3349733": {
+            "user": 0,
+            "system": 0
+          },
+          "3349734": {
+            "user": 0,
+            "system": 0
+          },
+          "3349735": {
+            "user": 0,
+            "system": 0
+          },
+          "3349736": {
+            "user": 0,
+            "system": 0
+          },
+          "3349737": {
+            "user": 0,
+            "system": 0
+          }
+        },
+        "epoll_fdinfo": {
+          "4": "pos:\t0\nflags:\t02000002\nmnt_id:\t19\nino:\t121\ntfd:        7 events:       19 data: ffff000000010000  pos:0 ino:79 sdev:11\ntfd:        6 events:       19 data: fffffffffffffffe  pos:0 ino:32a8b7d sdev:a\ntfd:        5 events:       19 data: ffffffffffffffff  pos:0 ino:79 sdev:11\ntfd:        3 events:       19 data: fffffffffffffffd  pos:0 ino:79 sdev:11\ntfd:        8 events:     2019 data:        100000000  pos:0 ino:32aa401 sdev:a\n"
+        }
+      },
+      "after": {
+        "at_ns": 714151361103698,
+        "process": {
+          "user": 182,
+          "system": 301
+        },
+        "threads": {
+          "3349731": {
+            "user": 0,
+            "system": 0
+          },
+          "3349732": {
+            "user": 141,
+            "system": 257
+          },
+          "3349733": {
+            "user": 28,
+            "system": 15
+          },
+          "3349734": {
+            "user": 3,
+            "system": 6
+          },
+          "3349735": {
+            "user": 3,
+            "system": 6
+          },
+          "3349736": {
+            "user": 3,
+            "system": 6
+          },
+          "3349737": {
+            "user": 3,
+            "system": 6
+          }
+        },
+        "epoll_fdinfo": {
+          "4": "pos:\t0\nflags:\t02000002\nmnt_id:\t19\nino:\t121\ntfd:        7 events:       19 data: ffff000000010000  pos:0 ino:79 sdev:11\ntfd:        6 events:       19 data: fffffffffffffffe  pos:0 ino:32a8b7d sdev:a\ntfd:        5 events:       19 data: ffffffffffffffff  pos:0 ino:79 sdev:11\ntfd:        3 events:       19 data: fffffffffffffffd  pos:0 ino:79 sdev:11\n"
+        }
+      },
+      "measurement_elapsed_s": 30.062031669,
+      "measurement_cpu_s": 4.72,
+      "thread_cpu_s": {
+        "3349731": 0.0,
+        "3349732": 3.89,
+        "3349733": 0.43,
+        "3349734": 0.09,
+        "3349735": 0.09,
+        "3349736": 0.09,
+        "3349737": 0.09
+      },
+      "client": {
+        "type": "open_phase",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "phase": "measure",
+        "scenario": "open",
+        "pid": 3349738,
+        "window": 64,
+        "compression": "zstd",
+        "tls_enabled": 1,
+        "client_alloc_calls": 57000,
+        "client_alloc_requested_bytes": 641288488,
+        "rate_rps": 100,
+        "start_ns": 714121300442533,
+        "schedule_horizon_ns": 714151300442533,
+        "end_ns": 714151322482999,
+        "arrival_window_s": 30.0,
+        "drain_elapsed_s": 30.022040466,
+        "drain_tail_ms": 22.040466,
+        "client_cpu_s": 4.259556,
+        "client_peak_rss_kib": 24772,
+        "offered": 3000,
+        "scheduler_dropped": 0,
+        "attempted": 3000,
+        "accepted": 3000,
+        "completed": 3000,
+        "ok": 3000,
+        "submit_again": 0,
+        "submit_errors": 0,
+        "deadlines": 0,
+        "rpc_errors": 0,
+        "unavailable": 0,
+        "resource_exhausted": 0,
+        "invalid_responses": 0,
+        "ok_ratio": 1.0,
+        "ok_rps": 99.927,
+        "payload_MiB_s": 0.780676,
+        "ok_p50_us": 30621.313,
+        "ok_p99_us": 33569.541,
+        "accepted_p99_us": 33569.541,
+        "scheduler_late_p50_us": 100.933,
+        "scheduler_late_p99_us": 146.47,
+        "scheduler_late_max_us": 464.069,
+        "submission_schema": 1,
+        "first_submit_ns": 714121300461110,
+        "last_submit_ns": 714151290541398,
+        "submitted_in_window": 3000,
+        "accepted_in_window": 3000,
+        "completed_in_window": 2997,
+        "submit_late_p99_us": 156.313,
+        "submit_late_max_us": 475.943
+      },
+      "server_exit": {
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "type": "server_exit",
+        "drain_status": 0,
+        "cpu_s": 4.844464,
+        "peak_rss_kib": 24772,
+        "alloc_calls": 69802,
+        "alloc_requested_bytes": 677056768,
+        "reactor_turns": 45650,
+        "command_budget_limit": 64,
+        "command_processed_total": 9,
+        "command_max_per_turn": 1,
+        "command_budget_hits": 0,
+        "epoll_polls": 36,
+        "epoll_waits": 45614,
+        "command_send_enqueued": 0,
+        "command_send_full": 0,
+        "command_resume_rx_enqueued": 0,
+        "command_resume_rx_full": 0,
+        "command_call_enqueued": 10,
+        "command_call_full": 0,
+        "command_other_enqueued": 0,
+        "command_other_full": 0,
+        "command_queue_capacity": 1024,
+        "command_queue_peak": 1,
+        "completion_queue_peak": 0,
+        "command_queue_full_events": 0,
+        "completion_queue_full_events": 0,
+        "rx_pool_capacity": 64,
+        "rx_pool_peak": 1,
+        "tx_pool_capacity": 512,
+        "tx_pool_peak": 2,
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 3,
+        "rx_pool_exhausted_events": 0,
+        "tx_pool_exhausted_events": 0,
+        "control_tx_pool_exhausted_events": 0,
+        "rpc_executor_threads": 4,
+        "rpc_task_queue_capacity": 256,
+        "rpc_tasks_queued": 0,
+        "rpc_tasks_running": 0,
+        "rpc_calls_started": 3032,
+        "rpc_calls_finished": 3032,
+        "rpc_unavailable": 0,
+        "rpc_resource_exhausted": 0,
+        "reassembly_pool_capacity": 8,
+        "reassembly_pool_peak": 0,
+        "reassembly_pool_exhausted_events": 0,
+        "peers_ready_total": 1,
+        "peers_reaped_total": 1
+      },
+      "case_label": "cpu-baseline-tls-zstd-fixed-30s",
+      "result_file_sha256": "ebbfde5c3150fbcbabda7da5b0f9ce16e2c2060ba8dd9cecfe650af8a5a677ac",
+      "server_raw_sha256": "944b44501d63115ee58162a163cad731e577d2b33113a5d3a629e25e0fb3816c",
+      "client_raw_sha256": "07203579429c6e3196fe387f5e864219da74a9c289e0c151e47568e1faacf303"
+    },
+    {
+      "mode": "tls-idle",
+      "seconds": 15,
+      "binary_sha256": "19471c5a5fff52d58edf81bf1dd7ee773f492fe87b4a8d7ee7849eec6a64df28",
+      "binary_source_commit": "worktree_based_on_358abee9623d6c9183313321d3afa91a83726919",
+      "source_diff_sha256": "5c850c82db9ad42f3698f3ba20061447b59cd9e6523ef2972015f035f837a97a",
+      "source_files_sha256": {
+        "src/execution/reactor.c": "9c39993db48856d7fb187f32e8462ebfce49d359757ce3e3172816e935dc7c71",
+        "xmake.lua": "c5e952ef2f75c22049789c45af6a608a90057f779501242c4a9657c68c46d511"
+      },
+      "observer_source_commit": "358abee9623d6c9183313321d3afa91a83726919",
+      "clock_ticks_per_s": 100,
+      "server_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/dev179-fixed/bench_rpc",
+        "server",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--slow-ms",
+        "0"
+      ],
+      "client_command": [
+        "/home/black/Documents/c-trpc/build/performance-20261029/dev179-fixed/bench_rpc",
+        "client",
+        "--capacity",
+        "128",
+        "--bulk-bytes",
+        "65536",
+        "--small-bytes",
+        "4096",
+        "--compression",
+        "zstd",
+        "--tls",
+        "1",
+        "--tls-ca",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/ca.pem",
+        "--tls-cert",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.pem",
+        "--tls-key",
+        "/home/black/Documents/c-trpc/build/performance-20261029/tls-zstd-hour-3600s/server.key",
+        "--port",
+        "33169",
+        "--scenario",
+        "open",
+        "--requests",
+        "64",
+        "--rate-rps",
+        "100",
+        "--window",
+        "64",
+        "--warmup",
+        "32",
+        "--timeout-ms",
+        "3000",
+        "--start-gate",
+        "1"
+      ],
+      "before": {
+        "at_ns": 714057410754352,
+        "process": {
+          "user": 4,
+          "system": 7
+        },
+        "threads": {
+          "3349218": {
+            "user": 0,
+            "system": 0
+          },
+          "3349219": {
+            "user": 3,
+            "system": 6
+          },
+          "3349220": {
+            "user": 0,
+            "system": 0
+          },
+          "3349221": {
+            "user": 0,
+            "system": 0
+          },
+          "3349222": {
+            "user": 0,
+            "system": 0
+          },
+          "3349223": {
+            "user": 0,
+            "system": 0
+          },
+          "3349224": {
+            "user": 0,
+            "system": 0
+          }
+        },
+        "epoll_fdinfo": {
+          "4": "pos:\t0\nflags:\t02000002\nmnt_id:\t19\nino:\t121\ntfd:        3 events:       19 data: fffffffffffffffd  pos:0 ino:79 sdev:11\ntfd:        5 events:       19 data: ffffffffffffffff  pos:0 ino:79 sdev:11\ntfd:        6 events:       19 data: fffffffffffffffe  pos:0 ino:32a86cf sdev:a\ntfd:        8 events:     2019 data:        100000000  pos:0 ino:32a6170 sdev:a\ntfd:        7 events:       19 data: ffff000000010000  pos:0 ino:79 sdev:11\n"
+        }
+      },
+      "after": {
+        "at_ns": 714072412460920,
+        "process": {
+          "user": 28,
+          "system": 42
+        },
+        "threads": {
+          "3349218": {
+            "user": 0,
+            "system": 0
+          },
+          "3349219": {
+            "user": 27,
+            "system": 41
+          },
+          "3349220": {
+            "user": 0,
+            "system": 0
+          },
+          "3349221": {
+            "user": 0,
+            "system": 0
+          },
+          "3349222": {
+            "user": 0,
+            "system": 0
+          },
+          "3349223": {
+            "user": 0,
+            "system": 0
+          },
+          "3349224": {
+            "user": 0,
+            "system": 0
+          }
+        },
+        "epoll_fdinfo": {
+          "4": "pos:\t0\nflags:\t02000002\nmnt_id:\t19\nino:\t121\ntfd:        3 events:       19 data: fffffffffffffffd  pos:0 ino:79 sdev:11\ntfd:        5 events:       19 data: ffffffffffffffff  pos:0 ino:79 sdev:11\ntfd:        6 events:       19 data: fffffffffffffffe  pos:0 ino:32a86cf sdev:a\ntfd:        8 events:     2019 data:        100000000  pos:0 ino:32a6170 sdev:a\ntfd:        7 events:       19 data: ffff000000010000  pos:0 ino:79 sdev:11\n"
+        }
+      },
+      "measurement_elapsed_s": 15.001706568,
+      "measurement_cpu_s": 0.59,
+      "thread_cpu_s": {
+        "3349218": 0.0,
+        "3349219": 0.59,
+        "3349220": 0.0,
+        "3349221": 0.0,
+        "3349222": 0.0,
+        "3349223": 0.0,
+        "3349224": 0.0
+      },
+      "client": {
+        "type": "open_phase",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "phase": "measure",
+        "scenario": "open",
+        "pid": 3349225,
+        "window": 64,
+        "compression": "zstd",
+        "tls_enabled": 1,
+        "client_alloc_calls": 1216,
+        "client_alloc_requested_bytes": 13680704,
+        "rate_rps": 100,
+        "start_ns": 714072413847417,
+        "schedule_horizon_ns": 714073053847417,
+        "end_ns": 714073075768091,
+        "arrival_window_s": 0.64,
+        "drain_elapsed_s": 0.661920674,
+        "drain_tail_ms": 21.920674,
+        "client_cpu_s": 0.094425,
+        "client_peak_rss_kib": 24544,
+        "offered": 64,
+        "scheduler_dropped": 0,
+        "attempted": 64,
+        "accepted": 64,
+        "completed": 64,
+        "ok": 64,
+        "submit_again": 0,
+        "submit_errors": 0,
+        "deadlines": 0,
+        "rpc_errors": 0,
+        "unavailable": 0,
+        "resource_exhausted": 0,
+        "invalid_responses": 0,
+        "ok_ratio": 1.0,
+        "ok_rps": 96.688,
+        "payload_MiB_s": 0.755378,
+        "ok_p50_us": 30630.884,
+        "ok_p99_us": 38078.172,
+        "accepted_p99_us": 38078.172,
+        "scheduler_late_p50_us": 87.025,
+        "scheduler_late_p99_us": 132.919,
+        "scheduler_late_max_us": 132.919,
+        "submission_schema": 1,
+        "first_submit_ns": 714072413861804,
+        "last_submit_ns": 714073043960654,
+        "submitted_in_window": 64,
+        "accepted_in_window": 64,
+        "completed_in_window": 61,
+        "submit_late_p99_us": 189.345,
+        "submit_late_max_us": 189.345
+      },
+      "server_exit": {
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "type": "server_exit",
+        "drain_status": 0,
+        "cpu_s": 0.814574,
+        "peak_rss_kib": 24544,
+        "alloc_calls": 2233,
+        "alloc_requested_bytes": 21750600,
+        "reactor_turns": 15819,
+        "command_budget_limit": 64,
+        "command_processed_total": 9,
+        "command_max_per_turn": 1,
+        "command_budget_hits": 0,
+        "epoll_polls": 6,
+        "epoll_waits": 15813,
+        "command_send_enqueued": 0,
+        "command_send_full": 0,
+        "command_resume_rx_enqueued": 0,
+        "command_resume_rx_full": 0,
+        "command_call_enqueued": 10,
+        "command_call_full": 0,
+        "command_other_enqueued": 0,
+        "command_other_full": 0,
+        "command_queue_capacity": 1024,
+        "command_queue_peak": 1,
+        "completion_queue_peak": 0,
+        "command_queue_full_events": 0,
+        "completion_queue_full_events": 0,
+        "rx_pool_capacity": 64,
+        "rx_pool_peak": 1,
+        "tx_pool_capacity": 512,
+        "tx_pool_peak": 2,
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 3,
+        "rx_pool_exhausted_events": 0,
+        "tx_pool_exhausted_events": 0,
+        "control_tx_pool_exhausted_events": 0,
+        "rpc_executor_threads": 4,
+        "rpc_task_queue_capacity": 256,
+        "rpc_tasks_queued": 0,
+        "rpc_tasks_running": 0,
+        "rpc_calls_started": 96,
+        "rpc_calls_finished": 96,
+        "rpc_unavailable": 0,
+        "rpc_resource_exhausted": 0,
+        "reassembly_pool_capacity": 8,
+        "reassembly_pool_peak": 0,
+        "reassembly_pool_exhausted_events": 0,
+        "peers_ready_total": 1,
+        "peers_reaped_total": 1
+      },
+      "case_label": "cpu-idle-tls-fixed-15s",
+      "result_file_sha256": "02add78b82964ea64ea31df59771935aab7f3ad1e438e429acd7a1b0147608f9",
+      "server_raw_sha256": "d0c1e3e6cf4996e8707efaa7d00fc7407e928e8d6bf8bbfea73bfbecef0c49f6",
+      "client_raw_sha256": "5ee418e2f12b8f745710aa1bee6c46b3ef3862fd7334a48f1504530cb9ed9921"
+    }
+  ],
+  "limitations": [
+    "shared_host",
+    "one_before_after_case_each",
+    "cpu_window_uses_proc_clock_ticks",
+    "reactor_counts_are_process_lifetime",
+    "not_40k_capacity_proof",
+    "not_general_latency_improvement"
+  ],
+  "verification_matrix": [
+    {
+      "label": "clang-release",
+      "build_seconds": 11.415,
+      "test_seconds": 37.336,
+      "tests_passed": 12,
+      "ledger_scenarios": 13,
+      "tls_idle_interest_checked": true
+    },
+    {
+      "label": "gcc-asan",
+      "build_seconds": 16.242,
+      "test_seconds": 43.855,
+      "tests_passed": 12,
+      "ledger_scenarios": 13,
+      "tls_idle_interest_checked": true
+    },
+    {
+      "label": "gcc-tsan",
+      "build_seconds": 10.454,
+      "test_seconds": 47.368,
+      "tests_passed": 12,
+      "ledger_scenarios": 13,
+      "tls_idle_interest_checked": true
+    },
+    {
+      "label": "gcc-release-final",
+      "build_seconds": 9.51,
+      "test_seconds": 185.901,
+      "tests_passed": 95,
+      "ledger_scenarios": 13,
+      "tls_idle_interest_checked": true
+    }
+  ],
+  "verification_logs_sha256": {
+    "tls-idle-interest-red-test.log": "a18dd0b98571a2c92f4e8bc888079d9dad658d0eb7ff371591b0be0d4ba0de7d",
+    "tls-idle-interest-green-test.log": "6348aea1e567e28520b639db6a2172d02e1b2c47d7c0219cd6448723260d234f",
+    "dev179-clang-release-configure.log": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+    "dev179-clang-release-build.log": "d1a97480cd191b04619d35d53aa2f3f58e197a2dceb9ceb5e547332dcc74a5dd",
+    "dev179-clang-release-test.log": "f5472fb8a0b501494c19cbf88fddb72e78e8ec40d49009332c20e235d906d9b1",
+    "dev179-gcc-asan-configure.log": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+    "dev179-gcc-asan-build.log": "111691a9b0fe5db0a9f5107d46e3651a7bd9c195f0a4d40f15d259814429c19d",
+    "dev179-gcc-asan-test.log": "e61818c0cece410be642185fa78c1f4bd07f9fe98a332ecd84d0cf9650f756fe",
+    "dev179-gcc-tsan-configure.log": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+    "dev179-gcc-tsan-build.log": "5aaa63f2a1e2b613ecab233c96046d071953145dc0e6c9fef98626f29dc51013",
+    "dev179-gcc-tsan-test.log": "a33b73287d0aa0fa609b294b9f8829a9db44be48a70f2f590ed0c314ca22deff",
+    "dev179-gcc-release-final-configure.log": "da33b1d98dc73c877e09939e177798b96c41445f6f35a6d1e84f1204a3996213",
+    "dev179-gcc-release-final-build.log": "4f6eeb311f6aaca049ad9bdab9f03333fcc15516fc14b0ec255dae9e23b0d46d",
+    "dev179-gcc-release-final-test.log": "36b4596ef634042490134dab284763a314c50e6a90a96e8071d1a68bca2fc4de"
+  },
+  "final_source_files_sha256": {
+    "src/execution/reactor.c": "9c39993db48856d7fb187f32e8462ebfce49d359757ce3e3172816e935dc7c71",
+    "tests/test_rpc_v2_tls_reactor.c": "3ddb2b536507434398c606f6094f7a7062ab4a8f8778bc6144214dd2039880f3",
+    "xmake.lua": "c5e952ef2f75c22049789c45af6a608a90057f779501242c4a9657c68c46d511"
+  }
+}

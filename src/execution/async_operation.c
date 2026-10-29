@@ -300,6 +300,7 @@ int tr_async_operation_reject(struct tr_async_operation_pool *pool,
                               struct tr_async_operation_ref *producer_ref)
 {
 	struct tr_async_operation_slot *slot;
+	struct tr_async_operation_slot *producer_slot = NULL;
 	int ret;
 
 	if (!pool || !producer_ref)
@@ -317,7 +318,9 @@ int tr_async_operation_reject(struct tr_async_operation_pool *pool,
 		ret = TR_ERR_STATE;
 	if (ret == TR_OK)
 		ret = tr_async_operation_ref_lookup_locked(pool, producer_ref,
-		                                           NULL);
+		                                           &producer_slot);
+	if (ret == TR_OK && slot != producer_slot)
+		ret = TR_ERR_STALE;
 	if (ret == TR_OK) {
 		uint64_t generation = slot->generation;
 		memset(slot, 0, sizeof(*slot));
