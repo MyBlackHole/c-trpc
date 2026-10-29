@@ -12,9 +12,11 @@
 #include "../include/tr/rpc_v2.h"
 #include "../include/tr/server.h"
 #include "../include/tr/status.h"
+#include "tls_test_identity.h"
 
 #define TEST_TIMEOUT_MS 10000U
 #define NESTED_CALLS 3U
+#define NESTED_BODY_BYTES 256U
 
 #define CHECK(condition)                                                       \
 	do {                                                                   \
@@ -42,12 +44,16 @@ struct nested_client_call {
 	unsigned index;
 	unsigned client_side;
 	unsigned request_sent;
+	unsigned half_closed;
 	unsigned messages;
 	unsigned terminals;
 	enum tr_rpc_status status;
 };
 
 struct nested_test {
+	const struct tls_test_identity *identity;
+	enum tr_rpc_compression compression;
+	enum tr_rpc_v2_request_kind nested_start;
 	pthread_mutex_t lock;
 	pthread_cond_t changed;
 	struct nested_peer peers[2];
@@ -55,6 +61,7 @@ struct nested_test {
 	struct tr_rpc_v2_call_id server_calls[3];
 	unsigned server_call_present[3];
 	unsigned server_open_count[2];
+	unsigned server_message_count[3];
 	unsigned server_terminal_count[2];
 	enum tr_rpc_status server_status[3];
 	int child_start_status[2];
@@ -163,8 +170,10 @@ static void nested_client_message(struct tr_rpc_v2_call call,
 	struct nested_client_call *client_call = arg;
 	struct nested_test *test = client_call->test;
 	(void)call;
-	CHECK(body != NULL && body->len == 1U && body->data != NULL &&
-	      body->data[0] == (uint8_t)'R');
+	CHECK(body != NULL && body->len == NESTED_BODY_BYTES &&
+	      body->data != NULL);
+	for (unsigned i = 0U; i < NESTED_BODY_BYTES; ++i)
+		CHECK(body->data[i] == (uint8_t)'R');
 	CHECK(pthread_mutex_lock(&test->lock) == 0);
 	++client_call->messages;
 	CHECK(pthread_cond_broadcast(&test->changed) == 0);
@@ -188,15 +197,26 @@ static void nested_client_writable(struct tr_rpc_v2_call call, void *arg)
 	if (probe_callback)
 		nested_probe_cross_client_start(test, client_call->client_side);
 
-	if (client_call->request_sent)
+	if (client_call->half_closed)
 		return;
-	{
-		const uint8_t value = (uint8_t)'Q';
-		const struct tr_rpc_bytes body = {&value, sizeof(value)};
-		CHECK(tr_rpc_v2_call_send(call, &body) == TR_OK);
-		CHECK(tr_rpc_v2_call_half_close(call) == TR_OK);
+	if (!client_call->request_sent) {
+		uint8_t bytes[NESTED_BODY_BYTES];
+		const struct tr_rpc_bytes body = {bytes, sizeof(bytes)};
+		int ret;
+		memset(bytes, 'Q', sizeof(bytes));
+		ret = tr_rpc_v2_call_send_with_compression(call, &body,
+		                                           test->compression);
+		if (ret == TR_AGAIN)
+			return;
+		CHECK(ret == TR_OK);
+		client_call->request_sent = 1U;
 	}
-	client_call->request_sent = 1U;
+	/* 压缩尚未提交到网络时半关闭会背压；后续 WRITABLE 只重试半关闭。 */
+	int ret = tr_rpc_v2_call_half_close(call);
+	if (ret == TR_AGAIN)
+		return;
+	CHECK(ret == TR_OK);
+	client_call->half_closed = 1U;
 }
 
 static void nested_client_terminal(struct tr_rpc_v2_call call,
@@ -276,8 +296,33 @@ nested_server_work(struct tr_rpc_v2_call_id call,
 	struct nested_test *test = peer->test;
 	int stage = nested_stage_for_call(
 	        peer, call, request->kind == TR_RPC_V2_REQUEST_OPEN);
+	/* 每个 work 事件均保留连接身份，不能因授权或嵌套提交丢失。 */
+	if (test->identity) {
+		static const char expected[] = "spiffe://c-trpc.example/client";
+		CHECK(request->peer_identity.authentication ==
+		      TR_PEER_IDENTITY_TLS_CERTIFICATE);
+		CHECK(request->peer_identity.uri_san != NULL &&
+		      request->peer_identity.uri_san_len ==
+		              sizeof(expected) - 1U);
+		CHECK(memcmp(request->peer_identity.uri_san, expected,
+		             sizeof(expected) - 1U) == 0);
+	} else {
+		CHECK(request->peer_identity.authentication ==
+		      TR_PEER_IDENTITY_NONE);
+		CHECK(request->peer_identity.uri_san == NULL &&
+		      request->peer_identity.uri_san_len == 0U);
+	}
+	if (request->kind == TR_RPC_V2_REQUEST_MESSAGE) {
+		CHECK(request->body.len == NESTED_BODY_BYTES &&
+		      request->body.data != NULL);
+		for (unsigned i = 0U; i < NESTED_BODY_BYTES; ++i)
+			CHECK(request->body.data[i] == (uint8_t)'Q');
+		CHECK(pthread_mutex_lock(&test->lock) == 0);
+		++test->server_message_count[stage];
+		CHECK(pthread_mutex_unlock(&test->lock) == 0);
+	}
 
-	if ((unsigned)stage < 2U && request->kind == TR_RPC_V2_REQUEST_OPEN) {
+	if ((unsigned)stage < 2U && request->kind == test->nested_start) {
 		struct tr_rpc_v2_client_callbacks callbacks;
 		struct tr_rpc_call_options options = {0};
 		struct nested_client_call *child =
@@ -334,9 +379,11 @@ nested_server_work(struct tr_rpc_v2_call_id call,
 
 	if ((unsigned)stage == 2U &&
 	    request->kind == TR_RPC_V2_REQUEST_HALF_CLOSE) {
-		const uint8_t value = (uint8_t)'R';
-		const struct tr_rpc_bytes body = {&value, sizeof(value)};
-		CHECK(tr_rpc_v2_reply_append(reply, &body) == TR_OK);
+		uint8_t bytes[NESTED_BODY_BYTES];
+		const struct tr_rpc_bytes body = {bytes, sizeof(bytes)};
+		memset(bytes, 'R', sizeof(bytes));
+		CHECK(tr_rpc_v2_reply_append_with_compression(
+		              reply, &body, test->compression) == TR_OK);
 	}
 	return TR_RPC_STATUS_OK;
 }
@@ -359,7 +406,8 @@ static void nested_server_terminal(struct tr_rpc_v2_call_id call,
 		nested_probe_cross_client_start(test, peer->side);
 }
 
-static struct tr_rpc_method_desc nested_method_descriptor(void)
+static struct tr_rpc_method_desc
+nested_method_descriptor(enum tr_rpc_compression compression)
 {
 	return (struct tr_rpc_method_desc){
 	        .service_id = 1U,
@@ -369,15 +417,24 @@ static struct tr_rpc_method_desc nested_method_descriptor(void)
 	        .request_codec_id = TR_RPC_CODEC_RAW,
 	        .response_codec_id = TR_RPC_CODEC_RAW,
 	        .lane = TR_RPC_LANE_CONTROL,
-	        .max_request_bytes = 16U,
-	        .max_response_bytes = 16U,
+	        .max_request_bytes = NESTED_BODY_BYTES,
+	        .max_response_bytes = NESTED_BODY_BYTES,
+	        .request_compression_algorithms =
+	                compression == TR_RPC_COMPRESSION_ZSTD
+	                        ? TR_RPC_COMPRESSION_MASK_ZSTD
+	                        : 0U,
+	        .response_compression_algorithms =
+	                compression == TR_RPC_COMPRESSION_ZSTD
+	                        ? TR_RPC_COMPRESSION_MASK_ZSTD
+	                        : 0U,
 	};
 }
 
 static void nested_peer_create(struct nested_test *test,
                                struct nested_peer *peer, unsigned side)
 {
-	struct tr_rpc_method_desc descriptor = nested_method_descriptor();
+	struct tr_rpc_method_desc descriptor =
+	        nested_method_descriptor(test->compression);
 	struct tr_rpc_v2_method method = {
 	        .descriptor = descriptor,
 	        .work = nested_server_work,
@@ -398,8 +455,8 @@ static void nested_peer_create(struct nested_test *test,
 	limits.max_methods = 1U;
 	limits.max_calls = 8U;
 	limits.max_frame_payload_bytes = 256U;
-	limits.max_message_bytes = 256U;
-	limits.initial_window_bytes = 256U;
+	limits.max_message_bytes = 512U;
+	limits.initial_window_bytes = 512U;
 	tr_server_config_init(&server_config);
 	server_config.limits = limits;
 	server_config.max_peers = 4U;
@@ -407,6 +464,23 @@ static void nested_peer_create(struct nested_test *test,
 	tr_client_config_init(&client_config);
 	client_config.limits = limits;
 	client_config.connect_timeout_ms = 3000U;
+	if (test->identity) {
+		const struct tls_test_identity *identity = test->identity;
+		server_config.tls.mode = TR_TLS_REQUIRED;
+		server_config.tls.certificate_file =
+		        identity->server_certificate_file;
+		server_config.tls.private_key_file =
+		        identity->server_private_key_file;
+		server_config.tls.client_ca_file = identity->ca_file;
+		server_config.tls.client_auth = TR_TLS_CLIENT_AUTH_REQUIRED;
+		client_config.tls.mode = TR_TLS_REQUIRED;
+		client_config.tls.ca_file = identity->ca_file;
+		client_config.tls.expected_peer_name = "server.example.test";
+		client_config.tls.client_certificate_file =
+		        identity->client_certificate_file;
+		client_config.tls.client_private_key_file =
+		        identity->client_private_key_file;
+	}
 	CHECK(tr_server_create(&server_config, &method, 1U, &peer->server) ==
 	      TR_OK);
 	CHECK(tr_server_listen(peer->server, "127.0.0.1", 0U, &peer->port) ==
@@ -486,13 +560,18 @@ static void nested_peer_drain_destroy(struct nested_peer *peer)
 	CHECK(tr_server_drain(peer->server, TEST_TIMEOUT_MS) == TR_OK);
 }
 
-static void run_nested_call_case(void)
+static void run_nested_call_case(const struct tls_test_identity *identity,
+                                 enum tr_rpc_compression compression,
+                                 enum tr_rpc_v2_request_kind nested_start)
 {
 	struct nested_test test;
 	struct tr_rpc_v2_client_callbacks callbacks;
 	struct tr_rpc_call_options options = {0};
 
 	memset(&test, 0, sizeof(test));
+	test.identity = identity;
+	test.compression = compression;
+	test.nested_start = nested_start;
 	for (unsigned i = 0U; i < 3U; ++i)
 		test.server_status[i] = TR_RPC_STATUS_COUNT;
 	for (unsigned i = 0U; i < 2U; ++i)
@@ -560,17 +639,40 @@ static void run_nested_call_case(void)
 	CHECK(client_messages[0] == 0U && client_messages[1] == 0U &&
 	      client_messages[2] == 1U);
 	CHECK(server_terminals[0] == 2U && server_terminals[1] == 1U);
+	CHECK(test.server_message_count[0] <= 1U &&
+	      test.server_message_count[1] <= 1U &&
+	      test.server_message_count[2] == 1U);
+	/* OPEN 上的异步子调用可先于父请求正文完成；HALF_CLOSE 场景须收齐正文。
+	 */
+	if (nested_start == TR_RPC_V2_REQUEST_HALF_CLOSE)
+		CHECK(test.server_message_count[0] == 1U &&
+		      test.server_message_count[1] == 1U);
 	CHECK(server_status[0] == TR_RPC_STATUS_OK &&
 	      server_status[1] == TR_RPC_STATUS_OK &&
 	      server_status[2] == TR_RPC_STATUS_OK);
 	CHECK(context_releases == 2U && producer_releases == 2U);
 	CHECK(observer_probes == 1U && authorize_probes == 1U &&
 	      terminal_probes == 1U && test.client_callback_probe_done == 1U);
-	puts("rpc-v2-nested: A->B->A result=pass");
+	printf("rpc-v2-nested: A->B->A tls=%u compression=%u start=%u "
+	       "result=pass\n",
+	       (unsigned)(identity != NULL), (unsigned)compression,
+	       (unsigned)nested_start);
 }
 
 int main(void)
 {
-	run_nested_call_case();
+	struct tls_test_identity identity;
+	CHECK(tls_test_identity_init(&identity, "rpc-v2-nested-mtls") == 0);
+	const enum tr_rpc_v2_request_kind starts[] = {
+	        TR_RPC_V2_REQUEST_OPEN, TR_RPC_V2_REQUEST_HALF_CLOSE};
+	for (unsigned i = 0U; i < sizeof(starts) / sizeof(starts[0]); ++i) {
+		run_nested_call_case(NULL, TR_RPC_COMPRESSION_NONE, starts[i]);
+		run_nested_call_case(NULL, TR_RPC_COMPRESSION_ZSTD, starts[i]);
+		run_nested_call_case(&identity, TR_RPC_COMPRESSION_NONE,
+		                     starts[i]);
+		run_nested_call_case(&identity, TR_RPC_COMPRESSION_ZSTD,
+		                     starts[i]);
+	}
+	tls_test_identity_cleanup(&identity);
 	return 0;
 }
