@@ -35,7 +35,10 @@ dev.174 之前未指定 `-j1` 的并行全量结果为 94/95：
 完成队列目标和 dev.174 的 TLS 资源账本目标，均为 2/2，命令墙钟分别为
 3.532、3.727 秒。对应日志、逐轮日志和汇总位于工作区忽略目录
 `build/performance-20261029/dev175-*`。最终 GCC Release 构建通过，串行全量
-95/95，命令墙钟 169.723 秒；远端精确 head 推送后另行核对。
+95/95，命令墙钟 169.723 秒。精确提交
+`f1c0b0f8d8a394bebaf0a0885ff3657b4ccbc2ba` 的 GitHub 检查 13/13 全部成功：
+[固定工具链 CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40821469302) 8/8、
+[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40821469239) 5/5。
 
 内联审查检查了标记的 happens-before、原有锁顺序、payload 析构与操作退役，
 确认计数仍只发生一次、原计数断言及停止回收场景仍保留；生产源码 diff 为空。

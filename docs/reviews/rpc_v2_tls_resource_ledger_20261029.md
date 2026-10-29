@@ -65,19 +65,25 @@ malloc/realloc/free 三种回调。对齐头保存请求大小，mutex 保护计
 
 ## 当前本机观察值
 
-Linux x86_64，GCC 16.2.1、OpenSSL 3.6.5；固定版本远端精确 head 待推送核对。
+Linux x86_64，GCC 16.2.1、OpenSSL 3.6.5。
 
 Clang 23.1.4 Release、GCC ASan/UBSan（开启泄漏检查）、GCC TSan 各运行八个
 TLS 目标并通过，Xmake 测试命令墙钟分别为 23.948、28.407、29.108 秒。
 每种配置均包含全部 12 个独立资源场景。最终 GCC Release 构建通过、串行全量
 测试 95/95，测试命令墙钟 156.464 秒。原始矩阵保存在
 `build/performance-20261029/dev174-matrix.json` 及对应日志。
-安装 SDK 及远端精确 head 结果另行登记，不借用 dev.173 的检查结果。
+安装 SDK 与远端精确 head 证据如下，不借用 dev.173 的检查结果。
 
 安装 SDK 恰有 11 个公开头；GCC/Clang C11、G++/Clang++ C++11 各自逐头检查
 并编译、运行安装目录外的真实 TCP SDK 消费端，四者全部通过。静态 Zstd 唯一定义、
 安装与源码归档的许可逐字节校验通过。日志见
 `build/performance-20261029/dev174-sdk-driver.log` 和 `build/release-readiness/sdk-validation.log`。
+
+包含本修复与 dev.175 测试同步修复的精确提交
+`f1c0b0f8d8a394bebaf0a0885ff3657b4ccbc2ba` 已推送至 Draft PR #333，
+GitHub 检查 13/13 全部成功：[固定工具链 CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40821469302)
+8/8、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40821469239) 5/5。
+包括 GCC 11 与 Clang 14 静态分析；该证据只适用于该精确 head，不覆盖后续未验收修改。
 
 先前误用未指定 `-j1` 的并行全量入口得到 94/95，暴露既有
 `test_reactor_fairness` 的完成标记先于计数发布的测试竞态。

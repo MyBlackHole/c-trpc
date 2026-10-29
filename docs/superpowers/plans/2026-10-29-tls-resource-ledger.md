@@ -36,7 +36,7 @@ peak、block 数与分配失败。使用 max_align_t 头部并在 realloc 失败
 - [x] 自审补充 160 次 profile 轮换，先复现类型编号耗尽，再改为无堆 once 编号。
 - [x] GCC Release 全量 95/95，Clang Release、ASan/UBSan、TSan 各 8/8 定向。
 - [x] 固定版本格式整理、安装 SDK 四编译器、性能边界说明；记录请求峰值和剩余风险。
-- [ ] 已提交源码的固定版本格式检查与远端固定 CI 全矩阵，记录精确 head。
-- [ ] 以 dev.174 按 bug 提交格式提交并推送；#234/#241/#247 与发布目标保持开放。
+- [x] 已提交源码的 clang-format 18.1.8 检查通过；包含本修复的 dev.175 精确 head `f1c0b0f8d8a394bebaf0a0885ff3657b4ccbc2ba` 远端 13/13 成功。
+- [x] dev.174 按 bug 提交格式提交为 `cd62a89d2c1f7946b6e6e91c560c3c739af16c53` 并推送至 Draft PR #333；#234/#241/#247 与发布目标保持开放。
 
 全部临时文件、证书和日志使用工作区 build/；不在 /tmp 写入。

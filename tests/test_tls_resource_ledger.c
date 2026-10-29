@@ -43,6 +43,7 @@ union ledger_header {
 #define FAULT_SESSION_WRAPPER (UINT32_MAX - 1U)
 #define FAULT_BIO_USERDATA (UINT32_MAX - 2U)
 #define PROFILE_CHURN (UINT32_MAX - 3U)
+#define SESSION_WAVES (UINT32_MAX - 4U)
 
 /* 备注：只有独立 exec 子进程安装钩子。头部保证 malloc 对齐，账本只计
  * OpenSSL 请求字节；头部、libc 元数据、RSS 和内核缓冲分别处理。 */
@@ -285,6 +286,104 @@ static void transfer(struct connection *connections, unsigned count)
 		}
 	}
 }
+static size_t connections_open(struct connection *connections, unsigned pairs,
+                               struct tr_tls_openssl_profile *client,
+                               struct tr_tls_openssl_profile *server,
+                               struct tr_memory_budget *budget)
+{
+	size_t socket_bytes = 0U;
+	for (unsigned i = 0; i < pairs; ++i) {
+		int fds[2];
+		tcp_pair(fds);
+		for (unsigned j = 0; j < 2U; ++j) {
+			struct connection *c = &connections[2U * i + j];
+			int size = 4096;
+			c->fd = fds[j];
+			assert(setsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &size,
+			                  sizeof(size)) == 0);
+			assert(tr_tls_openssl_session_create(
+			               j ? server : client, c->fd, budget,
+			               &c->session) == TR_OK);
+			socket_bytes += socket_capacity(c->fd);
+		}
+	}
+	return socket_bytes;
+}
+static void connections_release(struct connection *connections, unsigned count,
+                                struct tr_memory_budget *budget)
+{
+	const struct tr_byte_endpoint_driver *driver = tr_tls_openssl_driver();
+	for (unsigned i = 0; i < count; ++i) {
+		driver->release(connections[i].session);
+		assert(fcntl(connections[i].fd, F_GETFD) >= 0 &&
+		       close(connections[i].fd) == 0);
+	}
+	assert(atomic_load(&budget->current_bytes) == 0U);
+}
+static size_t session_waves(unsigned pairs,
+                            struct tr_tls_openssl_profile *client,
+                            struct tr_tls_openssl_profile *server,
+                            struct tr_memory_budget *budget)
+{
+	const struct tr_byte_endpoint_driver *driver = tr_tls_openssl_driver();
+	size_t steady_blocks = 0U, socket_bytes = 0U;
+	size_t minimum_bytes = SIZE_MAX, maximum_bytes = 0U;
+	/* 两轮完整握手预热全局算法缓存；之后交错四种回收位置。 */
+	for (unsigned wave = 0; wave < 34U; ++wave) {
+		struct connection connections[2U * PAIRS_MAX] = {0};
+		socket_bytes = connections_open(connections, pairs, client,
+		                                server, budget);
+		unsigned stage = wave < 2U ? 3U : (wave - 2U) % 4U;
+		if (stage == 3U)
+			transfer(connections, 2U * pairs);
+		else {
+			for (unsigned step = 0; step < stage; ++step) {
+				for (unsigned i = step ? 1U : 0U;
+				     i < 2U * pairs; i += 2U) {
+					uint32_t wait = 0U;
+					int ret = driver->handshake(
+					        connections[i].session, &wait);
+					assert(ret == TR_OK || ret == TR_AGAIN);
+					if (step) {
+						ret = driver->handshake(
+						        connections[i].session,
+						        &wait);
+						assert(ret == TR_AGAIN);
+					}
+					SSL *ssl =
+					        tr_tls_openssl_session_ssl_for_test(
+					                connections[i].session);
+					assert(!SSL_is_init_finished(ssl));
+					assert(BIO_number_written(
+					               SSL_get_wbio(ssl)) > 0U);
+				}
+			}
+		}
+		connections_release(connections, 2U * pairs, budget);
+		ERR_clear_error();
+		printf("tls-ledger: phase=session-waves wave=%u stage=%u "
+		       "live_bytes=%zu live_blocks=%zu peak_bytes=%zu\n",
+		       wave, stage, ledger.live_bytes, ledger.live_blocks,
+		       ledger.peak_bytes);
+		fflush(stdout);
+		/* RSA 盲化缓存可能延迟扩容；逐轮固定块数，字节在 profile
+		 * 释放后核对。
+		 */
+		if (wave == 5U) {
+			steady_blocks = ledger.live_blocks;
+		} else if (wave > 5U) {
+			assert(ledger.live_blocks == steady_blocks);
+			if (ledger.live_bytes < minimum_bytes)
+				minimum_bytes = ledger.live_bytes;
+			if (ledger.live_bytes > maximum_bytes)
+				maximum_bytes = ledger.live_bytes;
+		}
+	}
+	printf("tls-ledger: phase=session-waves-summary live_min_bytes=%zu "
+	       "live_max_bytes=%zu live_blocks=%zu\n",
+	       minimum_bytes, maximum_bytes, steady_blocks);
+	return socket_bytes;
+}
 static int make_client_profile(char **argv,
                                struct tr_tls_openssl_profile **client)
 {
@@ -351,7 +450,25 @@ static int run_child(unsigned pairs, unsigned fail_at, char **argv)
 	size_t profile_bytes = ledger.live_bytes;
 	ledger.peak_bytes = profile_bytes;
 	size_t socket_bytes = 0U;
-	if (fail_at) {
+	size_t global_bytes = 0U, global_blocks = 0U;
+	if (fail_at == SESSION_WAVES) {
+		/* 先预热全局算法缓存并释放凭证；RSA 密钥缓存属于 profile 寿命。
+		 */
+		struct connection warmup[2] = {0};
+		(void)connections_open(warmup, 1U, client, server, &budget);
+		transfer(warmup, 2U);
+		connections_release(warmup, 2U, &budget);
+		tr_tls_openssl_profile_release(client);
+		tr_tls_openssl_profile_release(server);
+		client = server = NULL;
+		ERR_clear_error();
+		global_bytes = ledger.live_bytes;
+		global_blocks = ledger.live_blocks;
+		make_profiles(argv, &client, &server);
+		profile_bytes = ledger.live_bytes;
+		ledger.peak_bytes = profile_bytes;
+		socket_bytes = session_waves(pairs, client, server, &budget);
+	} else if (fail_at) {
 		int fds[2];
 		struct tr_tls_openssl_session *session = NULL;
 		tcp_pair(fds);
@@ -383,50 +500,44 @@ static int run_child(unsigned pairs, unsigned fail_at, char **argv)
 		assert(close(fds[0]) == 0 && close(fds[1]) == 0);
 	} else {
 		struct connection connections[2U * PAIRS_MAX] = {0};
-		for (unsigned i = 0; i < pairs; ++i) {
-			int fds[2];
-			tcp_pair(fds);
-			for (unsigned j = 0; j < 2U; ++j) {
-				struct connection *c = &connections[2U * i + j];
-				int size = 4096;
-				c->fd = fds[j];
-				assert(setsockopt(c->fd, SOL_SOCKET, SO_SNDBUF,
-				                  &size, sizeof(size)) == 0);
-				assert(tr_tls_openssl_session_create(
-				               j ? server : client, c->fd,
-				               &budget, &c->session) == TR_OK);
-				socket_bytes += socket_capacity(c->fd);
-			}
-		}
+		socket_bytes = connections_open(connections, pairs, client,
+		                                server, &budget);
 		/* 备注：先归还调用方的 profile 引用，活动 SSL/BIO 仍须有效。 */
 		tr_tls_openssl_profile_release(client);
 		tr_tls_openssl_profile_release(server);
 		client = server = NULL;
 		transfer(connections, 2U * pairs);
-		for (unsigned i = 0; i < 2U * pairs; ++i) {
-			driver->release(connections[i].session);
-			assert(fcntl(connections[i].fd, F_GETFD) >= 0 &&
-			       close(connections[i].fd) == 0);
-		}
+		connections_release(connections, 2U * pairs, &budget);
 	}
 	assert(atomic_load(&budget.current_bytes) == 0U);
 	size_t peak_bytes = ledger.peak_bytes;
 	tr_tls_openssl_profile_release(client);
 	tr_tls_openssl_profile_release(server);
 	ERR_clear_error();
+	if (fail_at == SESSION_WAVES) {
+		printf("tls-ledger: phase=profiles-released live_bytes=%zu "
+		       "baseline_bytes=%zu live_blocks=%zu "
+		       "baseline_blocks=%zu\n",
+		       ledger.live_bytes, global_bytes, ledger.live_blocks,
+		       global_blocks);
+		fflush(stdout);
+		assert(ledger.live_bytes == global_bytes);
+		assert(ledger.live_blocks == global_blocks);
+	}
 	OPENSSL_cleanup();
 	const char *fault_case =
-	        fail_at == FAULT_SESSION_WRAPPER ? "session_wrapper"
-	        : fail_at == FAULT_BIO_USERDATA  ? "bio_userdata"
-	        : fail_at                        ? "openssl_allocation"
-	                                         : "none";
+	        fail_at == SESSION_WAVES           ? "session_waves"
+	        : fail_at == FAULT_SESSION_WRAPPER ? "session_wrapper"
+	        : fail_at == FAULT_BIO_USERDATA    ? "bio_userdata"
+	        : fail_at                          ? "openssl_allocation"
+	                                           : "none";
 	printf("tls-ledger: pairs=%u fault_case=%s fail_at=%u "
 	       "profile_bytes=%zu "
 	       "peak_bytes=%zu retained_bytes=%zu "
 	       "retained_blocks=%zu socket_capacity_bytes=%zu "
 	       "managed_peak_bytes=%" PRIu64 " alloc_attempts=%" PRIu64
 	       " failures=%" PRIu64 " library_failures=%u\n",
-	       pairs, fault_case, fail_at >= FAULT_BIO_USERDATA ? 0U : fail_at,
+	       pairs, fault_case, fail_at >= SESSION_WAVES ? 0U : fail_at,
 	       profile_bytes, peak_bytes, ledger.live_bytes, ledger.live_blocks,
 	       socket_bytes, atomic_load(&budget.peak_bytes), ledger.attempts,
 	       ledger.failures, library_failures);
@@ -453,7 +564,8 @@ int main(int argc, char **argv)
 	                                 {1, FAULT_SESSION_WRAPPER},
 	                                 {1, FAULT_BIO_USERDATA},
 	                                 {1, FAULT_PROFILE_METHOD},
-	                                 {1, PROFILE_CHURN}};
+	                                 {1, PROFILE_CHURN},
+	                                 {16, SESSION_WAVES}};
 	int failed = 0;
 	for (unsigned i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]);
 	     ++i) {
