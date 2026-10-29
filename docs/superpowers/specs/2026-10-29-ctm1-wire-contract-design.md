@@ -1,6 +1,6 @@
 # CTM1 具体提案：字段格式、共同描述版本协商与有界视图
 
-日期：2026-10-29。状态：待用户审阅的具体方案，未批准生产实现。
+日期：2026-10-29；修订：2026-10-30。状态：待用户审阅的具体方案，未批准生产实现。
 承接[总体设计](2026-10-29-custom-message-codec-design.md)及
 [形状对照](../../reviews/custom_message_shape_comparison_20261029.md)。
 本文中的“要求”是拟采纳规则，不是当前 SDK 已实现的能力。旧探针不是本规范的
@@ -173,7 +173,7 @@ enum、方法、业务必需项和 profile 的全部输入键；[预期字节/�
 CTM1 不照搬连续数值区间，因为描述摘要没有大小顺序、历史分支可能有空洞；改用 Client
 显式排序的精确摘要集合，由 Server 选第一个共同项，并在该 Call 的请求和响应中固定
 使用它。未知标签可能被旧端忽略、却不符合发送方意图；因此本提案把“能够解析”与
-“能够无损适配”分开。[Kafka 官方协议说明](https://kafka.apache.org/41/design/protocol/)
+“能够无损适配”分开。[Kafka 4.4 官方协议说明](https://kafka.apache.org/44/design/protocol/)
 
 另参考 Apache Avro RPC 握手：成功确认后，有状态连接可在其生命周期内省略重复握手。
 CTM1 当前选择逐 Call SELECT，换取每个 Call 都能独立校验 offer、选择与取消/终局顺序；
@@ -208,6 +208,28 @@ CTM1 当前选择逐 Call SELECT，换取每个 Call 都能独立校验 offer、
 Client/Server 构造时冻结本地有序表、适配绑定和当前资源策略。历史 schema 的策略
 不覆盖当前运行额度；所有版本共用当前配置的逐方向 profile、lane 和压缩策略。
 类型描述静态只读，Call 独立持有适用快照，producer 独立持有所需描述/编码策略。
+
+#### 发布兼容检查与运行期选择分开
+
+借鉴 Protobuf/FlatBuffers 的稳定身份和构建期一致性检查，生成工具须把固定发布基线、
+候选 schema 与每份支持中的历史 schema 一起检查。报告按方向区分旧写新读、新写旧读，
+并将结果拆为 wire、生成 API、业务语义、运行策略四项；不能只返回一个兼容布尔值。
+字段/类型/方法编号复用、既有字段 wire 类型变化、引用目标变化及保留集冲突属于
+自动拒绝项。缺席表示、C/Rust 生成接口和借用/释放变化单独列出；业务默认值、必需
+含义、枚举处置与幂等含义须由变更说明和维护者审阅，不能靠摘要相同或解析成功推断。
+策略变化报告其对接收范围及资源预算的影响，不因此伪造新的 wire 身份。
+
+增加 optional 字段只有在旧编号不复用、缺席含义已定义且未引入新的必需业务含义时，
+才可作为可演进变更。它会产生新的 method revision；滚动期间新构建仍须携带旧描述、
+旧 codec 和可用处理入口。与只支持旧描述的实例通信时，选择旧 revision 并按旧描述
+编码，因此旧端不会收到新字段；双方都支持新 revision 时才可按新描述传输该字段。
+若缺席不能满足旧业务语义，或不能无损投影，则用新类型/方法并行升级。未知字段可
+按本规范有界跳过/携带，但不能替代发布基线检查或共同 revision 选择。
+
+构建检查验证描述的结构规则和生成漂移；它不能证明任意业务代码语义等价。运行时
+offer/SELECT 只在本次 Call 选择双方真实持有的同一描述，不补做发布审查，也不把
+不同 revision 的“看起来可解析”当成兼容证据。上述检查和差异报告是拟要求的生成
+工具能力，尚未实现或通过 CI 验收。
 
 ### 4.2 OPEN offer、选择记录与额度
 
@@ -251,6 +273,10 @@ INITIAL、传输封装和 TLS 开销。没有当前实现或延迟测量支持�
 实现该控制流程；不承诺与没有 CTM1 协商的历史开发版互通，不以它们为 schema
 滚动升级中的“旧版”。RAW/应用自定义 codec 不发送 offer/SELECT，保持自身路径；
 在非 CTM1 Call 收到 SELECT 或保留合同项明确拒绝，不能被自动升级为 typed 方法。
+发送 kind 6 前还必须确认实际承载该 Call 的 lane 对端支持 CTM1 运行时控制记录；该能力
+先在对应 lane 的 Channel HELLO 协商，见 4.5。拟用 `TR_CHANNEL_FEATURE_CTM1_CONTRACT`，值为
+`UINT64_C(1) << 2`；method revision offer/SELECT 是其后的逐 Call schema 协商，二者
+不能互相替代。
 现状依据：[记录格式/状态机](../../../src/rpc/rpc_record.c)、
 [元数据编码](../../../src/rpc/rpc_v2.c)、[公开额度](../../../include/tr/rpc.h)。
 
@@ -355,16 +381,52 @@ owner 串行维护 offer/SELECT 状态，其他线程的取消与发送通过既
 承诺无限历史窗口。独立分支 {B,A}/{C,A} 选 A，禁止把 B/C 独立新增的相同字段 ID
 按各自当前型互相解释；后续合并仍须历史检查解决编号冲突。
 
-这里的“旧实例”特指已实现 CTM1 OPEN offer 与 `CONTRACT_SELECT` 的运行时、但仅
-支持旧描述 A；它不包括当前只接受 Record kind 1..5 的历史运行时。两种兼容维度
-分两段发布，不能混为“新旧 schema 自动互通”：
+共同描述协商本身就是 schema 兼容机制：每次 typed Call 都在 OPEN offer 精确
+method revision，Server 选择本地也持有的共同项，双方随后固定使用该描述对应的
+codec 与业务入口；不需要预先向实例分发 schema 兼容目录。
 
-1. **先滚动运行时能力，暂不发 typed Call。** 部署包含 Record kind 6、CTM1 offer/
-   SELECT 状态机及拒绝路径的版本；期间只开放既有 RAW/应用 codec。只有在调用方
-   已具备 CTM1 client，且服务发现/路由确认所有可能接收 CTM1 的实例都支持此运行
-   时能力后，才启用 typed 流量。
-   旧运行时可能把保留元数据当普通应用数据或拒绝新 Record kind，因此不得向它发送
-   typed OPEN，也不能把其错误响应当作“没有共同描述”的正常协商结果。
+这里的“旧实例”特指已实现 CTM1 OPEN offer 与 `CONTRACT_SELECT` 的运行时、但仅
+支持旧描述 A；它不包括当前只接受 Record kind 1..5 的历史运行时。为避免旧运行时
+误收新控制记录，启用 typed Call 前仍须先部署并协商 kind 6 运行时能力；这个准备
+步骤只启用协议能力、期间不发 typed Call，不预装或分发 schema 目录。之后的 schema
+滚动由每次 Call 的共同 revision 协商处理，不能混为“新旧 schema 自动互通”：
+
+1. **先滚动运行时能力，暂不发 typed Call。** 为现有 Channel HELLO 的 64 位
+   `feature_bits` 分配 `TR_CHANNEL_FEATURE_CTM1_CONTRACT`（`UINT64_C(1) << 2`）；
+   仅在本端确实安装 kind 6、CTM1 offer/SELECT 状态机及拒绝路径后才通告。当前
+   HELLO 已交换 feature 位并返回双方交集，新增位不改变 HELLO 负载布局。现有解码器
+   将 feature 位作为 64 位掩码读取，只校验后续保留字节；Server 对收到的位与本地
+   声明求交后写入 HELLO_ACK。因此新 Client 对旧 Server 通告新位时，旧 Server 应
+   返回不含该位的交集；新端只把它解释为“不支持 typed”，仍可沿既有 RAW/应用
+   codec 路径工作。反向由旧 Client 接入新 Server 时，交集同样不含新位。此结论目前
+   仅由代码路径支持，实施前须用固定历史二进制与新二进制做双向真实 Channel 握手及
+   RAW 调用；不能只用同版本配置位组合替代混版验证。能力检查
+   必须针对实际承载该方法的 lane：客户端只在 `method.lane` 的已协商能力包含该位时
+   才允许发送 typed OPEN；服务端在接纳 RPC OPEN 前，从该 stream 的诊断信息取得 lane，
+   并验证同一 lane 已协商该位。split Channel 中 CONTROL 的能力不能代表 BULK，反之亦然。
+   客户端缺少该位须在发送 typed OPEN 前明确失败，不能试发 kind 6 来探测；服务端即使
+   收到未协商该位的 typed OPEN，也必须在 RPC 派发及业务钩子前拒绝当前 Call。
+   该位由 RPC runtime 按已安装的 Record handler 内部设置，不能由普通应用配置伪造；
+   未安装对应处理路径却要求通告该位时，构造必须失败。此位不得加入通用 Channel
+   的 `required_feature_bits`：否则旧运行时连握手及既有 RAW/应用 codec 路径也会被拒绝，
+   破坏第一阶段“先部署运行时、暂不开 typed Call”的兼容性。
+   期间只开放既有 RAW/应用 codec。旧运行时不会协商出该能力，因此不会收到 typed
+   OPEN；它可能把保留元数据当普通应用数据或拒绝新 Record kind，不能把其错误响应
+   当作“没有共同描述”的正常协商结果。每次重连/后端替换都须以实际承载 lane 的新
+   Channel HELLO 重新确认，不能沿用旧连接代次的结果；这也遵守 Kafka API 版本信息
+   仅对获取它的连接有效、断开后重新获取的边界。经代理或网关时，只能在其准确代表
+   最终 RPC 对端能力时使用该结果。[Kafka 4.4 官方协议说明](https://kafka.apache.org/44/design/protocol/)
+   当前 `tr_channel_get_capabilities()` 返回的能力快照不含连接代次。CTM1 调用端必须
+   在同一 Reactor owner 操作中检查 lane 能力并立即调用 `tr_stream_open()`，中间不得
+   让出 owner；服务端也须在 owner 上、进入 RPC 派发/业务钩子前检查收到 stream 所属
+   lane 的能力。当前 Channel 的 HELLO、连接替换、流准入及 RPC 回调均在同一 Reactor
+   owner 串行处理，且物理连接替换会终结其已有流，因此该检查不能被新连接代次插入。
+   若 #246 后端不能提供这项串行与失效保证，就必须提供连接代次绑定的能力令牌或原子
+   “校验能力并开流”接口；单独缓存 `feature_bits` 或在任意线程先查再开流不合格。
+   该能力位只证明 Record 控制实现可用，不证明某 method revision、资源策略或业务
+   入口受支持，也不提供认证或防降级保证。当前实现依据：[Channel 能力字段](../../../src/transport/channel/channel.h)、
+   [HELLO 协商与交集](../../../src/transport/channel/channel.c)。若 64 位能力空间已
+   被其他改动占用，实现前须重新分配未冲突位并同步更新本提案。
 2. **再滚动 schema 描述。** 首个可用版本支持 `{A}`；后续版本加入 B 时必须继续
    打包 A 的描述、codec 与业务处理/适配入口，形成 `{B,A}`。调用方 offer `{B,A}`，
    与只支持 A 的 CTM1 实例协商为 A；双方支持 B 时优先 B。回滚前先停用只支持 B
@@ -373,7 +435,9 @@ owner 串行维护 offer/SELECT 状态，其他线程的取消与发送通过既
 
 这项先后关系不要求发布外置兼容目录；历史描述和真实处理入口随程序构建产物发布。
 运行时能力准备与 schema 版本扩展是两种部署闸门，发布清单应分别记录已覆盖实例、
-启用状态与可回滚版本，避免只凭 schema 哈希交集推断 Record 层可互通。
+启用状态与可回滚版本；Channel HELLO 能力交集只解开第一道闸门，method revision
+交集再解开第二道闸门。若 #246 的传输后端契约不保留现有 HELLO feature 语义，须由
+后端提供等价的、发生于 RPC OPEN 之前的对端能力判断，并重新审阅回滚/替换语义。
 
 选择不协商或证明对端逐方法资源配额、lane 或压缩。滚动发布仍须保证实际发送
 域和支持窗口接收 profile 的条件；未满足时明确 RESOURCE_EXHAUSTED/原策略错误，
@@ -392,6 +456,9 @@ owner 串行维护 offer/SELECT 状态，其他线程的取消与发送通过既
 | ONE/ONE：OPEN→SELECT→请求 MESSAGE/半关闭→业务 INITIAL/响应 MESSAGE/OK FINAL | 双向按选择描述，on_selected 在业务响应事件前，唯一成功终局 |
 | MANY/MANY：OPEN→SELECT→请求半关闭→OK FINAL | 双向零条有效，不补 MESSAGE，也不必补业务 INITIAL |
 | OPEN→非 OK FINAL，没有 SELECT | 合法拒绝，无 on_selected、无 typed body |
+| 固定历史二进制与新运行时双向混版，只有一端声明 CTM1 位 | Channel 握手及 RAW 调用继续成功；交集无 CTM1，typed OPEN 不发送/不进入业务 |
+| 旧运行时未协商 CTM1 Channel 能力位，或承载 lane 替换后能力位消失 | 不发送/不接受 kind 6 typed OPEN；不能复用旧连接代次的能力结果 |
+| split Channel 仅 CONTROL 协商 CTM1 能力、typed 方法路由到 BULK | 客户端不得在 BULK 发送 typed OPEN；服务端也不得把 CONTROL 能力当作 BULK 已协商 |
 | offer 的 N=0/9、重复项、截断、尾部或保留键冲突 | 格式拒绝，不进业务钩子，不按远端计数分配 |
 | {B,A}/{A}、{A}/{B,A}、{B,A}/{B,A}、有空洞、独立分支 | 分别按 Client 首个共同项，选后不得切换 |
 | 无交集、返回未 offer 项、重复/错向 SELECT、确认前正文/成功终局 | 拒绝该 Call，同连接健康调用不受合同错误牵连 |
@@ -507,4 +574,5 @@ P50/P99 与字节开销；任何连接缓存方案还须覆盖并发首次协商
 条目偏移及 99 字节长度、三个 offer 大小边界和七个有序交集算例；原 14 个正文
 字节向量与六个非法 UTF-8 向量未改变。策略键变化只改变 artifact 摘要，样例
 method revision 不变。十二个本地引用目标存在，git diff 空白检查通过。这些是
-设计记账检查，未运行生产协商、适配、C/Rust codec 或资源/取消状态机测试。
+设计记账检查；另核对现有 HELLO feature 位 0/1 的分配、位 2 空闲以及双方交集行为，
+但未实现或运行 CTM1 能力位。未运行生产协商、适配、C/Rust codec 或资源/取消状态机测试。

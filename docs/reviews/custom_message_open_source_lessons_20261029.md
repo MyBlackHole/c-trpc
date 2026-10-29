@@ -60,13 +60,16 @@ Nanopb 支持独立的生成选项文件及静态/指针/回调等存储选择�
 Kafka 每个 API 声明最小/最大支持版本，客户端选择共同版本并在每个请求中携带，
 服务端按该版本编码响应；其服务器先部署、客户端逐渐启用新版本的路径适合滚动升级。
 CTM1 借用“选择结果约束请求与响应”和显式滚动顺序，但用精确摘要有序表替代数值区间：
-摘要无先后关系，真实支持集也不保证连续。[Kafka 协议](https://kafka.apache.org/41/design/protocol/)
+摘要无先后关系，真实支持集也不保证连续。[Kafka 4.4 协议](https://kafka.apache.org/44/design/protocol/)
 
 Avro RPC 进一步用协议缓存摊销握手：有状态连接成功握手后，可在该连接生命周期内
 省略后续握手。CTM1 的逐 Call SELECT 不具备此收益，故必须测量同连接首个与后续 Call 及重连成本。
 是否采用连接代次内按方法缓存，要先证明连接固定绑定同一协商对端，并处理并发首次
-协商、容量、故障切换和失效；不得把某连接/实例的成功结果全局复用。
-[Avro RPC 握手规范](https://avro.apache.org/docs/1.12.0/specification/#handshake)
+协商、容量、故障切换和失效；不得把某连接/实例的成功结果全局复用。Kafka 4.4 也明确
+其 API 版本支持信息只对获取它的连接有效，断开后需要重新获取；CTM1 因而按实际承载
+lane 的新 HELLO 重新确认运行时能力，不跨连接复用旧结果。
+[Avro RPC 握手规范](https://avro.apache.org/docs/1.12.0/specification/#handshake)、
+[Kafka 4.4 协议](https://kafka.apache.org/44/design/protocol/)
 
 ## 对上一版草案的具体修正
 
