@@ -1,24 +1,130 @@
 {
   "status": "design_arithmetic_not_implementation_conformance",
-  "catalog_example": {
-    "local_revision": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
-    "entry_count": 2,
-    "wire_hex": "43544d4301000000edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f0302000000c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1deedc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
-    "bytes": 108,
-    "compatibility_status": "expected_pair_pending_offline_tool"
-  },
   "schema_file": "ctm_schema_1_example_20261029.json",
   "projection_file": "ctm_method_1_projection_example_20261029.json",
-  "artifact_canonical_jcs": "{\"family\":\"e207821aa5e849b49c8d8d62da0a0245\",\"format\":\"ctm-schema-1\",\"namespace\":\"demo\",\"profiles\":[{\"max_access_work\":262144,\"max_depth\":16,\"max_elements\":4096,\"max_encode_work\":262144,\"max_fields\":512,\"max_output_bytes\":65536,\"max_scratch_bytes\":65536,\"max_unknown_bytes\":4096,\"max_verify_work\":262144,\"max_wire_bytes\":65536,\"name\":\"bounded\"}],\"reserved_service_ids\":[],\"reserved_service_names\":[],\"reserved_type_ids\":[],\"reserved_type_names\":[],\"services\":[{\"id\":0,\"methods\":[{\"id\":0,\"name\":\"put\",\"policy\":{\"lane\":\"control\",\"max_peer_revisions\":16,\"request_compression\":[\"none\"],\"request_profile\":\"bounded\",\"response_compression\":[\"none\"],\"response_profile\":\"bounded\"},\"replay\":\"never\",\"request\":{\"cardinality\":\"one\",\"required\":[1,2],\"type\":1},\"response\":{\"cardinality\":\"one\",\"required\":[1],\"type\":2},\"semantic_revision\":1}],\"name\":\"store\",\"reserved_method_ids\":[],\"reserved_method_names\":[]}],\"types\":[{\"fields\":[{\"deprecated\":false,\"id\":1,\"name\":\"offset\",\"type\":\"u64\"},{\"deprecated\":false,\"id\":2,\"name\":\"payload\",\"type\":\"bytes\"}],\"id\":1,\"kind\":\"message\",\"name\":\"request\",\"reserved_ids\":[],\"reserved_names\":[],\"semantic_revision\":1},{\"fields\":[{\"deprecated\":false,\"id\":1,\"name\":\"accepted\",\"type\":\"bool\"},{\"deprecated\":false,\"id\":2,\"name\":\"status\",\"type\":{\"ref\":3}}],\"id\":2,\"kind\":\"message\",\"name\":\"response\",\"reserved_ids\":[],\"reserved_names\":[],\"semantic_revision\":1},{\"id\":3,\"kind\":\"enum\",\"name\":\"status\",\"reserved_names\":[],\"reserved_values\":[],\"semantic_revision\":1,\"values\":[{\"name\":\"ok\",\"number\":0},{\"name\":\"busy\",\"number\":1}]}]}",
-  "artifact_sha256": "53ddda197f6c7c4d53e48bbc39a6a84ca897c8712e8af99babefb2e0e2298f41",
+  "artifact_canonical_jcs": "{\"family\":\"e207821aa5e849b49c8d8d62da0a0245\",\"format\":\"ctm-schema-1\",\"namespace\":\"demo\",\"profiles\":[{\"max_access_work\":262144,\"max_depth\":16,\"max_elements\":4096,\"max_encode_work\":262144,\"max_fields\":512,\"max_output_bytes\":65536,\"max_scratch_bytes\":65536,\"max_unknown_bytes\":4096,\"max_verify_work\":262144,\"max_wire_bytes\":65536,\"name\":\"bounded\"}],\"reserved_service_ids\":[],\"reserved_service_names\":[],\"reserved_type_ids\":[],\"reserved_type_names\":[],\"services\":[{\"id\":0,\"methods\":[{\"id\":0,\"name\":\"put\",\"policy\":{\"lane\":\"control\",\"max_supported_revisions\":8,\"negotiation_timeout_ms\":5000,\"request_compression\":[\"none\"],\"request_profile\":\"bounded\",\"response_compression\":[\"none\"],\"response_profile\":\"bounded\"},\"replay\":\"never\",\"request\":{\"cardinality\":\"one\",\"required\":[1,2],\"type\":1},\"response\":{\"cardinality\":\"one\",\"required\":[1],\"type\":2},\"semantic_revision\":1}],\"name\":\"store\",\"reserved_method_ids\":[],\"reserved_method_names\":[]}],\"types\":[{\"fields\":[{\"deprecated\":false,\"id\":1,\"name\":\"offset\",\"type\":\"u64\"},{\"deprecated\":false,\"id\":2,\"name\":\"payload\",\"type\":\"bytes\"}],\"id\":1,\"kind\":\"message\",\"name\":\"request\",\"reserved_ids\":[],\"reserved_names\":[],\"semantic_revision\":1},{\"fields\":[{\"deprecated\":false,\"id\":1,\"name\":\"accepted\",\"type\":\"bool\"},{\"deprecated\":false,\"id\":2,\"name\":\"status\",\"type\":{\"ref\":3}}],\"id\":2,\"kind\":\"message\",\"name\":\"response\",\"reserved_ids\":[],\"reserved_names\":[],\"semantic_revision\":1},{\"id\":3,\"kind\":\"enum\",\"name\":\"status\",\"reserved_names\":[],\"reserved_values\":[],\"semantic_revision\":1,\"values\":[{\"name\":\"ok\",\"number\":0},{\"name\":\"busy\",\"number\":1}]}]}",
+  "artifact_sha256": "940f22f1783bc9bcad131ec2c8aaaf9232578254f4988f08db6f046550861958",
   "method_canonical_jcs": "{\"family\":\"e207821aa5e849b49c8d8d62da0a0245\",\"method_id\":0,\"replay\":\"never\",\"request\":{\"cardinality\":\"one\",\"codec_id\":2,\"required\":[1,2],\"type\":1},\"response\":{\"cardinality\":\"one\",\"codec_id\":2,\"required\":[1],\"type\":2},\"semantic_revision\":1,\"service_id\":0,\"types\":[{\"fields\":[{\"id\":1,\"type\":\"u64\"},{\"id\":2,\"type\":\"bytes\"}],\"id\":1,\"kind\":\"message\",\"reserved_ids\":[],\"semantic_revision\":1},{\"fields\":[{\"id\":1,\"type\":\"bool\"},{\"id\":2,\"type\":{\"ref\":3}}],\"id\":2,\"kind\":\"message\",\"reserved_ids\":[],\"semantic_revision\":1},{\"id\":3,\"kind\":\"enum\",\"reserved_values\":[],\"semantic_revision\":1,\"values\":[0,1]}],\"wire_major\":1}",
   "method_revision_sha256": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
-  "metadata": {
+  "negotiation": {
     "key": "ctm-contract",
-    "value_hex": "43544d31edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
-    "entry_hex": "0c240063746d2d636f6e747261637443544d31edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
-    "entry_bytes": 51,
-    "remaining_bytes": 461
+    "offer_revision_order": [
+      "c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1de",
+      "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03"
+    ],
+    "offer_value_hex": "43544f3102c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1deedc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "offer_entry_hex": "0c450063746d2d636f6e747261637443544f3102c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1deedc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "offer_entry_bytes": 84,
+    "offer_remaining_application_bytes": 428,
+    "selected_revision": "edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "select_value_hex": "43545331edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "select_entry_hex": "0c240063746d2d636f6e747261637443545331edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "select_entry_bytes": 51,
+    "select_header_hex": "545250430200060000000000000000000000000000000000000000000000000033000000000000000000000000000000",
+    "select_record_hex": "5452504302000600000000000000000000000000000000000000000000000000330000000000000000000000000000000c240063746d2d636f6e747261637443545331edc459803c61e48681c78e0f3e79fca73b9ff580564ed81b7b8961e1f4806f03",
+    "select_record_bytes": 99,
+    "total_added_bytes": 183,
+    "application_initial_metadata_limit_unchanged": 512,
+    "offer_size_boundaries": [
+      {
+        "offer_count": 1,
+        "entry_bytes": 52,
+        "remaining_application_bytes": 460
+      },
+      {
+        "offer_count": 2,
+        "entry_bytes": 84,
+        "remaining_application_bytes": 428
+      },
+      {
+        "offer_count": 8,
+        "entry_bytes": 276,
+        "remaining_application_bytes": 236
+      }
+    ],
+    "selection_arithmetic": [
+      {
+        "name": "new_to_old",
+        "offered": [
+          "B",
+          "A"
+        ],
+        "supported": [
+          "A"
+        ],
+        "selected": "A"
+      },
+      {
+        "name": "old_to_new",
+        "offered": [
+          "A"
+        ],
+        "supported": [
+          "B",
+          "A"
+        ],
+        "selected": "A"
+      },
+      {
+        "name": "new_to_new",
+        "offered": [
+          "B",
+          "A"
+        ],
+        "supported": [
+          "A",
+          "B"
+        ],
+        "selected": "B"
+      },
+      {
+        "name": "client_preference",
+        "offered": [
+          "A",
+          "B"
+        ],
+        "supported": [
+          "B",
+          "A"
+        ],
+        "selected": "A"
+      },
+      {
+        "name": "independent_branches",
+        "offered": [
+          "B",
+          "A"
+        ],
+        "supported": [
+          "C",
+          "A"
+        ],
+        "selected": "A"
+      },
+      {
+        "name": "support_hole",
+        "offered": [
+          "D",
+          "B",
+          "A"
+        ],
+        "supported": [
+          "C",
+          "B"
+        ],
+        "selected": "B"
+      },
+      {
+        "name": "no_intersection",
+        "offered": [
+          "B"
+        ],
+        "supported": [
+          "A"
+        ],
+        "selected": null
+      }
+    ]
   },
   "variants": [
     {
@@ -34,7 +140,7 @@
     {
       "change": "optional_addition",
       "method_revision_sha256": "c2e946cb716187b9a927192b3c63235f117cea96a187be3a32f13a31a99ca1de",
-      "expected_compatibility": "requires_offline_pair_review"
+      "expected_compatibility": "requires_supported_descriptor_and_lossless_adapter"
     },
     {
       "change": "incompatible_type_change",
@@ -128,6 +234,8 @@
     "not_compatibility_tool",
     "not_c_or_rust_conformance",
     "not_rpc_execution",
-    "not_runtime_budget_test"
+    "not_runtime_budget_test",
+    "not_adaptation_implementation",
+    "not_negotiation_state_machine"
   ]
 }

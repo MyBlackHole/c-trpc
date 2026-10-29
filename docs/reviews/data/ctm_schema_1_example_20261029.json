@@ -61,7 +61,8 @@
           "policy": {
             "request_profile": "bounded",
             "response_profile": "bounded",
-            "max_peer_revisions": 16,
+            "max_supported_revisions": 8,
+            "negotiation_timeout_ms": 5000,
             "lane": "control",
             "request_compression": ["none"],
             "response_compression": ["none"]
