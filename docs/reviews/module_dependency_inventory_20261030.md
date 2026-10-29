@@ -51,3 +51,26 @@
 相互印证。该图只覆盖编译为全局符号的对象间引用，不记录引用点/调用次数，不是运行时调用图；
 静态函数、函数指针/回调、共享结构字段、条件未启用的实现及链接后的可达性仍需其他检查。
 目录计数仍不是违规分类，也没有替代 #248 所需的模块策略和负向门禁。
+
+## M3 Reactor/TRP 状态与回归测试映射
+
+只读审计 `src/execution/reactor.h`、`reactor_internal.h` 与 `reactor.c` 后，确认 TRP 耦合不止是头文件边：
+
+- `reactor.h` 公开内部 `tr_frame` 回调、TRP type/flags/stream/message 参数、frame 计数、最大 payload 限制，以及 RX/TX buffer 与 TX item pool 配置；`reactor_internal.h` 还包含 GOAWAY、RESET、REFUSED、DATA 帧发送及协议接收 hold 操作。
+- `reactor.c` 的每连接状态直接持有 `tr_parser`、协议帧 callback、TX 消息/帧游标、控制优先队列、生命周期与 RESET 内嵌发送槽。RX 负责 parser prepare/produce 和 frame dispatch；TX 负责 wire header/CRC、分片、部分写入延续、控制帧越过 DATA 的限制及发送项回收。
+- `src/io/byte_endpoint.h` 已提供 TLS 握手、read/write、WANT 方向及 close_notify 能力；其契约要求 `TR_AGAIN` 重试期间保持同一缓冲区和长度。它可作为协议层的字节 I/O 基础，但当前仍由 Reactor 执行和保存 endpoint 状态。
+
+M3 抽离时至少要保持以下已测试行为。这里是测试映射，不表示本节重新运行了这些测试：
+
+| 不变量 | 现有回归目标 |
+|---|---|
+| 跨连接共享的每轮 RX/TX 字节及 dispatch 限额；极小预算下超过一个 epoll 批次仍轮转进展；EAGAIN 后允许等待 | `test_reactor_budget`、`test_reactor_fairness` |
+| 一旦帧已部分写出，必须先完成该帧；未开始的合规控制帧可按规则越过 DATA；旧控制 FIFO 与跨轮 DATA 进展有上限 | `test_tx_priority` |
+| 普通控制/DATA 池恢复通知有界、一次性，并与 TX 分派共享公平预算 | `test_reactor_control_ready` |
+| TX_DRAINED 固定命令前沿，且等待普通队列及 GOAWAY/RESET 预留发送完成；关闭与槽位复用不误通知 | `test_reactor_tx_drain`、`test_stream_reset` |
+| 停止或 fatal owner 退出时，已接受 payload/命令各释放一次；失败连接不留下排队帧或池占用 | `test_reactor_stop_full`、`test_reactor_fatal_exit`、`test_reactor_budget` |
+| TLS 的 read/write WANT、稳定重试参数、排空与关闭仍按 ByteEndpoint 生命周期处理 | `test_rpc_v2_tls_reactor`、`test_tls_resource_ledger` |
+
+上述映射说明 M3 不能只把 `parser.c` 或 TX helper 改放目录。协议后端需要成为帧解析、TX 队列、优先级/终止预留及帧级诊断的唯一状态所有者；Reactor 需经窄的 owner-scoped 字节进度接口提供 fd/TLS、每轮 I/O 配额、ready/timer/取消和连接生命周期。接口还必须定义异步发送命令的所有权转移、命令顺序前沿、关闭回调静默及 TX 容量恢复，否则现有无额外线程的快速路径、TX_DRAINED、部分写入和资源回收无法证明保留。
+
+这仍是审计结论，不是已批准的 API 设计。没有更改产品代码，也没有重新运行上述测试；实现前须审阅具体接口、逐项迁移调用方，并用受限链接证明不含 TRP 的 Reactor 对象可独立验证。
