@@ -318,12 +318,14 @@ static void operation_completion_callback(void *arg)
 	                                 &ctx->operation_completion_ref) ==
 	       TR_OK);
 
+	/* 先完成全部观察计数，再发布 done，避免等待线程看到半成品。 */
+	completion_callback(ctx);
+
 	pthread_mutex_lock(&ctx->lock);
 	ctx->operation_callbacks++;
 	ctx->operation_callback_done = 1;
 	pthread_cond_broadcast(&ctx->cond);
 	pthread_mutex_unlock(&ctx->lock);
-	completion_callback(ctx);
 }
 
 static int prepare_operation_on_owner(void *arg)
