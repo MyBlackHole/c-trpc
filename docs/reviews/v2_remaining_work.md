@@ -607,7 +607,7 @@ ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 T
 | 网络压缩 | 将已有独立 none/Zstd 原语接入普通 V2；方向协商和安全预算 | #235 |
 | 服务目标 | 解析快照、选路、健康、等待就绪、有界 Attempt/重放 | #244 |
 | 类型契约 | 用户选择自定义传输与业务格式，要求兼容演进及学习开源优点；[开源对照](custom_message_open_source_lessons_20261029.md)覆盖六个项目，[形状实验](custom_message_shape_comparison_20261029.md)的 224 个新旧组合与六个负对照通过。[具体 CTM1 提案](../superpowers/specs/2026-10-29-ctm1-wire-contract-design.md)按最新选择撤回外置兼容目录，改为 OPEN 提供有序支持集、独立 SELECT 确认共同描述版本，首条正文等待确认，无法无损降级时明确失败；新端须保留历史 codec/入口。修订待审阅，生产实现未获批准、尚未开始，codec、历史兼容/生成工具、协商状态机和 C/Rust 桩仍待交付 | #245 |
-| 后端决策 | 明确字节/流/消息/RPC 契约，形成 TRP 与 HTTP/2 等价评估证据 | #246 |
+| 后端决策 | 已写出[后端语义契约提案](../superpowers/specs/2026-10-29-transport-backend-contract-design.md)和 [ADR-010 提案](../architecture/decisions/ADR-010-transport-backend-contract.md)，明确 Call/Attempt/流、接受/退休、双域信用、错误及等价比较门槛；用户自定义传输方向保留。只完成官方资料/本地头文件核对，通用绑定、HTTP/2 网络适配与同功能/同资源对照尚未实现，不能据此作性能选择或关闭任务 | #246 |
 | 横切验证 | TEST-A 与 TEST-B1–B4 已收敛至 Draft PR #321（14/14 检查通过），TEST-C1–C3 已收敛至 Draft PR #323（13/13 检查通过）；旧 PR #317–#320、#322 已关闭，提交仍可从汇总分支追溯。仍缺通用生产 C 故障时序、TEST-B 完整事件字母表、真实网络/派发、TEST-D 集成平台矩阵、TEST-E 分层诊断与 40k 容量性能 | #247 |
 | 最终核对 | 将已实现能力逐项映射到验收，收口阶段性架构与模块任务 | #239、#240、#248、#154 |
 

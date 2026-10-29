@@ -1,0 +1,26 @@
+{
+  "status": "read_only_inventory_not_backend_validation",
+  "date": "2026-10-29",
+  "runtime_source_commit": "631e918798a435c2810bb2c3da8ac789fec12fb6",
+  "pkg_config_package": "libnghttp2",
+  "pkg_config_version": "1.70.0",
+  "header_path": "/usr/include/nghttp2/nghttp2.h",
+  "header_sha256": "0bd0ee37b1b08fa38f9b773de201fe431846fda2bd0bed44f642c6c332e2e342",
+  "declarations_seen": {
+    "nghttp2_session_mem_recv2": true,
+    "nghttp2_session_mem_send2": true,
+    "nghttp2_session_client_new3": true,
+    "nghttp2_session_server_new3": true,
+    "nghttp2_option_set_no_auto_window_update": true,
+    "nghttp2_session_consume": true,
+    "nghttp2_option_set_max_continuations": true,
+    "nghttp2_option_set_max_outbound_ack": true,
+    "nghttp2_option_set_max_send_header_block_length": true
+  },
+  "compile_test_performed": false,
+  "link_test_performed": false,
+  "rpc_adapter_implemented": false,
+  "network_comparison_performed": false,
+  "production_dependency_added": false,
+  "online_docs_version_observed": "1.71.0-DEV"
+}
