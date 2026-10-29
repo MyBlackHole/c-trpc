@@ -84,7 +84,14 @@ TCP 专测独立源对象闭包遗漏新单元，补齐 Xmake 第二处显式列
 TCP 消费端通过；静态 Zstd 符号唯一定义、安装包及源码归档许可逐字节一致。
 真实 Xmake GCC Release 编译数据库核验 55 个生产命令，包含新单元。
 日志为 `build/release-readiness/sdk-validation.log`、`dev178-compdb.log`。
-`git diff --check` 通过；固定 clang-format 18.1.8 与精确 head CI 在提交后登记。
+`git diff --check` 通过；固定 clang-format 18.1.8 检查五个变更源文件，0 失败。
+
+实现提交 `8f49481845dcd1411ac7b79b097287bf7f3fe470` 已推送到 Draft PR #333，
+精确 head 的远端检查 **13/13 全部成功**：
+[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40832468616) 8/8、
+[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40832468602) 5/5，
+包含 GCC 11 和 Clang 14 静态分析、新单元编译数据库覆盖、完整功能矩阵及安装消费端。
+后续文档提交的检查单独核对，不借用本实现提交结果。
 
 小时级 TLS/Zstd 诊断单独按旧提交 97e106c 记录，不能当作本次修复的精确提交结果。
 
