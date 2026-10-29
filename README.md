@@ -60,6 +60,8 @@ dev.182 为 RESETTING 槽位建立预算化位图，避免每次进度调用逐�
 锁次数回归与临时计数证据见[RESET 稀疏扫描记录](docs/reviews/rpc_v2_reset_sparse_scan_20261029.md)。
 固定 40k RPC 计划速率的旧/新对照仍全部触发发生器与 CONTROL TX 压力，
 未据局部改进宣布容量通过，详见[RPC 开环对照](docs/reviews/rpc_v2_reset_rpc_comparison_20261029.md)。
+后续 18 场临时诊断观察到可运行 TX 的控制队列积压和未终局调用占满发生器槽位；
+调度候选已撤回，40k 仍未通过，见[CONTROL TX 与准入记录](docs/reviews/rpc_v2_control_tx_admission_20261030.md)。
 默认仍为明文 TCP，TLS 失败关闭连接，不回退明文。TLS-D1 已合入主线且合并后 CI 通过；
 TLS-D2 与后续集成候选仍在未合并 PR 中。TLS-E 和 #243 其余终局/回调/资源回收屏障、单 worker 满队列及
 跨能力端到端组合验收仍未完成。本版本不代表 #234 或 V2 整体验收完成。

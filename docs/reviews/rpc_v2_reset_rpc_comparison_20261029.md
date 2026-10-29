@@ -76,8 +76,10 @@ ZIP 收录 1313 份原始记录、stderr、命令、编译配置和执行脚本�
 证书/私钥和 ELF 未纳入 ZIP，原始数据与构建/测试临时目录均位于工作区。
 
 账目校正 head `33f6300` 的关联检查已精确核对 13/13 成功；见
-[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40899525420)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40899525562)。本归档提交的检查单独跟踪。
+[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40899525420)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40899525562)。本归档提交 `a3077c3` 后续也已精确核对 13/13 成功：
+[CI](https://github.com/MyBlackHole/c-trpc/actions/runs/40904890923)、[RPC smoke](https://github.com/MyBlackHole/c-trpc/actions/runs/40904890915)。
 该绿色记录不构成 40k 容量通过。下一步需分离发生器实际提交、Server CONTROL
 进度与资源恢复的成本；当前混有过载、丢弃和迟到，无法做严格性能比例或 SLO
 结论。固定验收主机/平台、预算总账、服务目标/Attempt、CTM1 生成工具/桩和后端
 等价网络比较仍未完成；CTM1 共同描述设计仍待审阅。
+后续定位结果与撤回的调度候选见[CONTROL TX 与准入诊断](rpc_v2_control_tx_admission_20261030.md)。
