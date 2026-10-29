@@ -577,6 +577,14 @@ GCC 11/Clang 14 静态分析和 PR #311 全部 GitHub 检查已在 `b713801` 通
 
 ## 持续开发顺序
 
+2026-10-29 的[持续 TLS 握手压力诊断](rpc_v2_tls_handshake_stress_20261029.md)在同一
+dev.178 Server 上完成 600 秒、38400 次静默/滴灌/ClientHello 中止/明文 TCP 连接，
+期间先建连接的 60000 次 TLS/Zstd RPC 及压力后新连接的 64 次恢复均成功，Server
+含预热 60096/60096 收敛。617 次采样线程始终 7、fd 为 8–40，RSS 未呈现按连接
+数持续增长；退出峰值高于定时采样，不能把采样最大值当硬上限。原始元数据标签
+错误已单独更正并保留原记录，修正驱动的 30 秒复核通过。本项不证明满 peer 时
+新连接准入、OpenSSL/内核总硬预算、最坏输入、mTLS 或容量，相关任务继续开放。
+
 ERR-A 分类表到生产 C 错误入口族的对照已审计，代表性真实 TCP、Channel、RPC Record 与 TLS 测试证据见[生产错误作用域对照审计](rpc_v2_error_scope_production_audit_20261026.md)。dev.153 的 #327 又扩展头 CRC 连接错误回归：错误到达时保留在途 worker，验证迟到 `OK` 不改变 `UNAVAILABLE` 终局；worker 退出后预算回到基线。GCC Release、TSan、ASan/UBSan 的完整 `test_rpc_record_endpoint_tcp` 均通过。这只增加第 2、7 项在该路径上的证据；#242 的 RESET/FIFO 完整矩阵、连接组接受边界、长期公平恢复及全量资源回收仍未完成。
 
 | 范围 | 当前剩余工作 | GitHub |
