@@ -18,6 +18,7 @@ CTM1 实现验收。
 | Apache Thrift | IDL 同源生成；optional/isset；Compact 减少字段开销 | 传输可解析与业务必需分别验证；比较紧凑字段编码 | 不采用隐式 requiredness，不把不同语言默认值行为视为统一保证 |
 | SBE | 顺序游标、直接缓冲读写、无分配 flyweight、版本/块边界 | codec 沿已有 Message 顺序访问，不增加线程跳转或中间复制；保留固定块候选作对照 | 其块尾追加规则不等于任意字段删除/任意布局均兼容 |
 | Nanopb | 可配置 max_size/max_count；生成期选择存储策略 | C11 生成码显式有界；存储选项与 wire 身份区分 | 不把静态大数组作为唯一输出表示，也不启用无上限回调/动态分配 |
+| Apache Avro RPC | 用协议摘要识别双方协议；有状态连接在握手成功后可停止重复发送握手，维护近期协议缓存 | CTM1 可先用逐 Call SELECT 保持状态简单；若每次调用的额外往返不可接受，再按连接代次缓存已选择的方法描述，并为缓存失效/并发首次协商定义状态机 | 不照搬完整协议文本交换、MD5 身份摘要或全协议缓存；CTM1 的 SHA-256 方法摘要只标识本地已有描述，不是认证 |
 
 Protobuf 官方说明字段号不能复用、删除应 reserved；显式 presence 能区分缺席与
 显式默认值。二进制解析后保留未知字段并不代表任何转换都保留：转 JSON 或逐字段
@@ -55,6 +56,13 @@ Nanopb 支持独立的生成选项文件及静态/指针/回调等存储选择�
 存储策略可以分开。项目可借鉴受限生成思路，同时维持 C/Rust 的借用与额度合同。
 [概念](https://github.com/nanopb/nanopb/blob/master/docs/concepts.md)、
 [生成选项](https://github.com/nanopb/nanopb/blob/master/docs/reference.md)
+
+Avro RPC 的官方握手通过协议哈希确认双方已知的协议；实现可以缓存近期协议，并在
+有状态连接完成成功握手后，不再为该连接的后续调用附带握手。CTM1 采用每 Call
+独立 SELECT，状态隔离更直接，但会让每次 typed Call 都多等一次网络往返；它不具备
+Avro 有状态连接握手的摊销特性。若性能验收不能接受此成本，应另行设计连接代次内
+按方法缓存的首次协商/并发合并/重连失效，不可仅凭本地曾成功过就跳过远端确认。
+[Avro RPC 握手规范](https://avro.apache.org/docs/1.12.0/specification/#handshake)
 
 ## 对上一版草案的具体修正
 
