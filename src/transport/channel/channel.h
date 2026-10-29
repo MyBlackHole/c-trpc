@@ -154,8 +154,10 @@ struct tr_channel_config {
 	/* 必需能力必须同时被本地声明和对端协商；缺失时握手失败，
 	 * 不能先发布 READY 再在终止路径静默降级。0 保持旧 Channel 配置。 */
 	uint64_t required_feature_bits;
-	/* 可选：Channel 固定存储计入所属 shard 的共享预算。
-	 * 预算对象须存活到 Channel 成功销毁或完成 detached 收尾。 */
+	/* 可选：Channel 固定存储与发送资源计入此预算。
+	 * 预算对象须存活到 Channel 收尾及 Reactor
+	 * 释放所有已接管 TX fragment 的回调完成。
+	 */
 	struct tr_memory_budget *memory_budget;
 };
 
