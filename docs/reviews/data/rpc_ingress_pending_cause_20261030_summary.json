@@ -1,0 +1,233 @@
+{
+  "type": "rpc_pending_cause_summary",
+  "schema": 1,
+  "git_revision": "006af2aec502d59a4fbcdf7c0f9e212795548618",
+  "binary_sha256": "7cde692eb5fca3561e3a1b0abeeaa6e319309128b11182ddd0301a02332b33c7",
+  "environment": {
+    "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+    "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+    "affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "transport": "TCP IPv4 loopback",
+    "tls_enabled": false,
+    "compression": "none"
+  },
+  "workload": {
+    "trials": 1,
+    "rate_rps": 40000,
+    "requests": 10000,
+    "generators": 16,
+    "min_arrival_ms": 250,
+    "generator_window": 64,
+    "generator_capacity": 64
+  },
+  "profiles": [
+    {
+      "profile": "default_call_limit",
+      "repeatability": {
+        "wall_signals": [
+          "load_generator_drop",
+          "load_generator_late",
+          "control_tx_pool_exhausted"
+        ],
+        "clean": false,
+        "ok_rps": 6310.078832906199,
+        "ok": 2307,
+        "offered": 10000
+      },
+      "server": {
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 128,
+        "control_tx_pool_exhausted_events": 1532,
+        "command_queue_peak": 1,
+        "command_queue_full_events": 0,
+        "rpc_calls_started": 2339,
+        "rpc_calls_finished": 2339
+      },
+      "probe": {
+        "type": "channel_pending_probe_summary",
+        "reserved": 289,
+        "completed": 289,
+        "unpublished": 0,
+        "overflow": 0,
+        "overlap": 0,
+        "events": 289,
+        "groups": [
+          {
+            "kind": "open",
+            "trigger": "control_tx_ready",
+            "end_reason": "rx_released",
+            "send_accepted": 1,
+            "count": 289,
+            "duration_ms_nearest_rank": {
+              "p50": 5.108987,
+              "p90": 7.289094,
+              "p99": 9.322254,
+              "max": 10.682421
+            },
+            "progress_calls_histogram": {
+              "1": 243,
+              "2": 46
+            },
+            "send_attempts_histogram": {
+              "2": 243,
+              "3": 46
+            }
+          }
+        ]
+      }
+    },
+    {
+      "profile": "large_call_limit",
+      "repeatability": {
+        "wall_signals": [
+          "load_generator_drop",
+          "load_generator_late",
+          "control_tx_pool_exhausted"
+        ],
+        "clean": false,
+        "ok_rps": 6128.150422552994,
+        "ok": 2268,
+        "offered": 10000
+      },
+      "server": {
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 128,
+        "control_tx_pool_exhausted_events": 704,
+        "command_queue_peak": 1,
+        "command_queue_full_events": 0,
+        "rpc_calls_started": 2300,
+        "rpc_calls_finished": 2300
+      },
+      "probe": {
+        "type": "channel_pending_probe_summary",
+        "reserved": 100,
+        "completed": 100,
+        "unpublished": 0,
+        "overflow": 0,
+        "overlap": 0,
+        "events": 100,
+        "groups": [
+          {
+            "kind": "open",
+            "trigger": "control_tx_ready",
+            "end_reason": "rx_released",
+            "send_accepted": 1,
+            "count": 100,
+            "duration_ms_nearest_rank": {
+              "p50": 2.872169,
+              "p90": 5.113457,
+              "p99": 5.774927,
+              "max": 5.820743
+            },
+            "progress_calls_histogram": {
+              "1": 90,
+              "2": 10
+            },
+            "send_attempts_histogram": {
+              "2": 90,
+              "3": 10
+            }
+          }
+        ]
+      }
+    },
+    {
+      "profile": "small_call_limit",
+      "repeatability": {
+        "wall_signals": [
+          "load_generator_drop",
+          "load_generator_late",
+          "rpc_resource_exhausted",
+          "tx_pool_exhausted",
+          "control_tx_pool_exhausted"
+        ],
+        "clean": false,
+        "ok_rps": 4744.795220269683,
+        "ok": 2039,
+        "offered": 10000
+      },
+      "server": {
+        "control_tx_pool_capacity": 128,
+        "control_tx_pool_peak": 128,
+        "control_tx_pool_exhausted_events": 6770,
+        "command_queue_peak": 1,
+        "command_queue_full_events": 0,
+        "rpc_calls_started": 2071,
+        "rpc_calls_finished": 2071
+      },
+      "probe": {
+        "type": "channel_pending_probe_summary",
+        "reserved": 295,
+        "completed": 295,
+        "unpublished": 0,
+        "overflow": 0,
+        "overlap": 0,
+        "events": 295,
+        "groups": [
+          {
+            "kind": "open",
+            "trigger": "control_tx_ready",
+            "end_reason": "rx_released",
+            "send_accepted": 1,
+            "count": 294,
+            "duration_ms_nearest_rank": {
+              "p50": 5.884159,
+              "p90": 11.781309,
+              "p99": 18.155547,
+              "max": 18.289433
+            },
+            "progress_calls_histogram": {
+              "1": 219,
+              "2": 75
+            },
+            "send_attempts_histogram": {
+              "2": 219,
+              "3": 75
+            }
+          },
+          {
+            "kind": "refused",
+            "trigger": "timer",
+            "end_reason": "rx_released",
+            "send_accepted": 1,
+            "count": 1,
+            "duration_ms_nearest_rank": {
+              "p50": 19.375542,
+              "p90": 19.375542,
+              "p99": 19.375542,
+              "max": 19.375542
+            },
+            "progress_calls_histogram": {
+              "1": 1
+            },
+            "send_attempts_histogram": {
+              "2": 1
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "单次诊断运行，且三个 profile 均未达到 clean 判定。",
+    "本探针记录 pending 状态及解除来源，不采样 FIONREAD。",
+    "hold 是部分请求等待的子集因素；本结果不证明其为整体长尾的唯一根因。"
+  ]
+}

@@ -1,0 +1,422 @@
+{
+  "binary_sha256": "3f44b06b9e752d30943679f0517a30fe2043dbf2679831b24bcd352182bdb037",
+  "run_count": 1,
+  "percentile_method": "nearest-rank",
+  "fresh_definition": "仅保留 Reactor epoll_wait 返回时间不早于关联客户端 TX begin 的成功帧；该条件不能证明对应 socket 字节在 poll 返回前已完整可读。",
+  "profiles": [
+    {
+      "profile": "small_call_limit",
+      "matched_ok": 1534,
+      "accepted": 1546,
+      "scheduler_dropped": 8454,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "rpc_resource_exhausted",
+        "tx_pool_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "kinds": {
+        "open": {
+          "matched_ok": 1534,
+          "fresh_poll_return_count": 1288,
+          "fresh_poll_return_fraction": 0.8396349413298566,
+          "send_begin_to_poll_return": {
+            "count": 1288,
+            "p50_ns": 46480085,
+            "p99_ns": 259223809,
+            "mean_ns": 74917290,
+            "min_ns": 0,
+            "max_ns": 265179578
+          },
+          "poll_return_to_event_ready": {
+            "count": 1288,
+            "p50_ns": 17600,
+            "p99_ns": 36737,
+            "mean_ns": 17324,
+            "min_ns": 978,
+            "max_ns": 53428
+          },
+          "poll_return_to_owner_begin": {
+            "count": 1288,
+            "p50_ns": 10374476,
+            "p99_ns": 45076420,
+            "mean_ns": 13483252,
+            "min_ns": 24724,
+            "max_ns": 47617588
+          },
+          "schedule_to_owner_begin": {
+            "count": 1288,
+            "p50_ns": 5109365,
+            "p99_ns": 23361776,
+            "mean_ns": 6898890,
+            "min_ns": 44349,
+            "max_ns": 27088706
+          },
+          "owner_begin_to_recv_begin": {
+            "count": 1288,
+            "p50_ns": 856391,
+            "p99_ns": 5410380,
+            "mean_ns": 1335374,
+            "min_ns": 908,
+            "max_ns": 6105787
+          },
+          "event_index": {
+            "count": 1288,
+            "p50_ns": 8,
+            "p99_ns": 14,
+            "mean_ns": 6,
+            "min_ns": 0,
+            "max_ns": 16
+          },
+          "event_count": {
+            "count": 1288,
+            "p50_ns": 16,
+            "p99_ns": 17,
+            "mean_ns": 15,
+            "min_ns": 10,
+            "max_ns": 17
+          },
+          "schedule_precedes_tx_count": 22
+        },
+        "request": {
+          "matched_ok": 1534,
+          "fresh_poll_return_count": 1274,
+          "fresh_poll_return_fraction": 0.8305084745762712,
+          "send_begin_to_poll_return": {
+            "count": 1274,
+            "p50_ns": 12042629,
+            "p99_ns": 261264286,
+            "mean_ns": 39166989,
+            "min_ns": 0,
+            "max_ns": 261992170
+          },
+          "poll_return_to_event_ready": {
+            "count": 1274,
+            "p50_ns": 14318,
+            "p99_ns": 34711,
+            "mean_ns": 15062,
+            "min_ns": 978,
+            "max_ns": 73054
+          },
+          "poll_return_to_owner_begin": {
+            "count": 1274,
+            "p50_ns": 11987176,
+            "p99_ns": 40352229,
+            "mean_ns": 13398385,
+            "min_ns": 24724,
+            "max_ns": 45076420
+          },
+          "schedule_to_owner_begin": {
+            "count": 1274,
+            "p50_ns": 11733234,
+            "p99_ns": 30991286,
+            "mean_ns": 11967173,
+            "min_ns": 52940,
+            "max_ns": 33018215
+          },
+          "owner_begin_to_recv_begin": {
+            "count": 1274,
+            "p50_ns": 1394726,
+            "p99_ns": 4585487,
+            "mean_ns": 1690245,
+            "min_ns": 978,
+            "max_ns": 5157835
+          },
+          "event_index": {
+            "count": 1274,
+            "p50_ns": 6,
+            "p99_ns": 16,
+            "mean_ns": 6,
+            "min_ns": 0,
+            "max_ns": 16
+          },
+          "event_count": {
+            "count": 1274,
+            "p50_ns": 15,
+            "p99_ns": 17,
+            "mean_ns": 14,
+            "min_ns": 7,
+            "max_ns": 17
+          },
+          "schedule_precedes_tx_count": 23
+        }
+      }
+    },
+    {
+      "profile": "default_call_limit",
+      "matched_ok": 2052,
+      "accepted": 2052,
+      "scheduler_dropped": 7948,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "control_tx_pool_exhausted"
+      ],
+      "kinds": {
+        "open": {
+          "matched_ok": 2052,
+          "fresh_poll_return_count": 1739,
+          "fresh_poll_return_fraction": 0.8474658869395711,
+          "send_begin_to_poll_return": {
+            "count": 1739,
+            "p50_ns": 47983906,
+            "p99_ns": 140481383,
+            "mean_ns": 50817048,
+            "min_ns": 1885,
+            "max_ns": 223592636
+          },
+          "poll_return_to_event_ready": {
+            "count": 1739,
+            "p50_ns": 16413,
+            "p99_ns": 41206,
+            "mean_ns": 15781,
+            "min_ns": 908,
+            "max_ns": 47981
+          },
+          "poll_return_to_owner_begin": {
+            "count": 1739,
+            "p50_ns": 3942460,
+            "p99_ns": 27822317,
+            "mean_ns": 7642263,
+            "min_ns": 6286,
+            "max_ns": 27822317
+          },
+          "schedule_to_owner_begin": {
+            "count": 1739,
+            "p50_ns": 2973066,
+            "p99_ns": 29850294,
+            "mean_ns": 4879814,
+            "min_ns": 3911,
+            "max_ns": 31509159
+          },
+          "owner_begin_to_recv_begin": {
+            "count": 1739,
+            "p50_ns": 524786,
+            "p99_ns": 2913981,
+            "mean_ns": 742132,
+            "min_ns": 908,
+            "max_ns": 3389319
+          },
+          "event_index": {
+            "count": 1739,
+            "p50_ns": 6,
+            "p99_ns": 15,
+            "mean_ns": 6,
+            "min_ns": 0,
+            "max_ns": 16
+          },
+          "event_count": {
+            "count": 1739,
+            "p50_ns": 16,
+            "p99_ns": 17,
+            "mean_ns": 15,
+            "min_ns": 2,
+            "max_ns": 17
+          },
+          "schedule_precedes_tx_count": 4
+        },
+        "request": {
+          "matched_ok": 2052,
+          "fresh_poll_return_count": 1618,
+          "fresh_poll_return_fraction": 0.7884990253411306,
+          "send_begin_to_poll_return": {
+            "count": 1618,
+            "p50_ns": 9914433,
+            "p99_ns": 96246407,
+            "mean_ns": 19446817,
+            "min_ns": 4331,
+            "max_ns": 192056378
+          },
+          "poll_return_to_event_ready": {
+            "count": 1618,
+            "p50_ns": 14108,
+            "p99_ns": 29053,
+            "mean_ns": 13866,
+            "min_ns": 1396,
+            "max_ns": 47981
+          },
+          "poll_return_to_owner_begin": {
+            "count": 1618,
+            "p50_ns": 6380194,
+            "p99_ns": 27822317,
+            "mean_ns": 8701244,
+            "min_ns": 24305,
+            "max_ns": 30170166
+          },
+          "schedule_to_owner_begin": {
+            "count": 1618,
+            "p50_ns": 5508437,
+            "p99_ns": 22950482,
+            "mean_ns": 6971620,
+            "min_ns": 40368,
+            "max_ns": 29850294
+          },
+          "owner_begin_to_recv_begin": {
+            "count": 1618,
+            "p50_ns": 746881,
+            "p99_ns": 3137471,
+            "mean_ns": 973863,
+            "min_ns": 1466,
+            "max_ns": 3806549
+          },
+          "event_index": {
+            "count": 1618,
+            "p50_ns": 6,
+            "p99_ns": 15,
+            "mean_ns": 6,
+            "min_ns": 0,
+            "max_ns": 15
+          },
+          "event_count": {
+            "count": 1618,
+            "p50_ns": 16,
+            "p99_ns": 17,
+            "mean_ns": 15,
+            "min_ns": 6,
+            "max_ns": 17
+          },
+          "schedule_precedes_tx_count": 15
+        }
+      }
+    },
+    {
+      "profile": "large_call_limit",
+      "matched_ok": 1421,
+      "accepted": 1421,
+      "scheduler_dropped": 8579,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "tx_pool_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "kinds": {
+        "open": {
+          "matched_ok": 1421,
+          "fresh_poll_return_count": 999,
+          "fresh_poll_return_fraction": 0.7030260380014075,
+          "send_begin_to_poll_return": {
+            "count": 999,
+            "p50_ns": 11789317,
+            "p99_ns": 77213247,
+            "mean_ns": 20760816,
+            "min_ns": 3422,
+            "max_ns": 91143893
+          },
+          "poll_return_to_event_ready": {
+            "count": 999,
+            "p50_ns": 15854,
+            "p99_ns": 59085,
+            "mean_ns": 20018,
+            "min_ns": 1397,
+            "max_ns": 59085
+          },
+          "poll_return_to_owner_begin": {
+            "count": 999,
+            "p50_ns": 4786420,
+            "p99_ns": 31307042,
+            "mean_ns": 7289900,
+            "min_ns": 4680,
+            "max_ns": 31563498
+          },
+          "schedule_to_owner_begin": {
+            "count": 999,
+            "p50_ns": 3135097,
+            "p99_ns": 20986482,
+            "mean_ns": 5521986,
+            "min_ns": 1397,
+            "max_ns": 30184485
+          },
+          "owner_begin_to_recv_begin": {
+            "count": 999,
+            "p50_ns": 704906,
+            "p99_ns": 3361732,
+            "mean_ns": 924427,
+            "min_ns": 908,
+            "max_ns": 4036256
+          },
+          "event_index": {
+            "count": 999,
+            "p50_ns": 5,
+            "p99_ns": 15,
+            "mean_ns": 5,
+            "min_ns": 0,
+            "max_ns": 15
+          },
+          "event_count": {
+            "count": 999,
+            "p50_ns": 16,
+            "p99_ns": 17,
+            "mean_ns": 13,
+            "min_ns": 1,
+            "max_ns": 17
+          },
+          "schedule_precedes_tx_count": 5
+        },
+        "request": {
+          "matched_ok": 1421,
+          "fresh_poll_return_count": 1252,
+          "fresh_poll_return_fraction": 0.8810696692470091,
+          "send_begin_to_poll_return": {
+            "count": 1252,
+            "p50_ns": 12351399,
+            "p99_ns": 77028587,
+            "mean_ns": 18153869,
+            "min_ns": 0,
+            "max_ns": 79981399
+          },
+          "poll_return_to_event_ready": {
+            "count": 1252,
+            "p50_ns": 16343,
+            "p99_ns": 48819,
+            "mean_ns": 17549,
+            "min_ns": 1397,
+            "max_ns": 56641
+          },
+          "poll_return_to_owner_begin": {
+            "count": 1252,
+            "p50_ns": 6131140,
+            "p99_ns": 29421262,
+            "mean_ns": 7633673,
+            "min_ns": 10965,
+            "max_ns": 29421262
+          },
+          "schedule_to_owner_begin": {
+            "count": 1252,
+            "p50_ns": 8849636,
+            "p99_ns": 31463415,
+            "mean_ns": 10706574,
+            "min_ns": 1467,
+            "max_ns": 32395025
+          },
+          "owner_begin_to_recv_begin": {
+            "count": 1252,
+            "p50_ns": 760640,
+            "p99_ns": 2987522,
+            "mean_ns": 959020,
+            "min_ns": 8660,
+            "max_ns": 3417115
+          },
+          "event_index": {
+            "count": 1252,
+            "p50_ns": 4,
+            "p99_ns": 15,
+            "mean_ns": 5,
+            "min_ns": 0,
+            "max_ns": 15
+          },
+          "event_count": {
+            "count": 1252,
+            "p50_ns": 13,
+            "p99_ns": 17,
+            "mean_ns": 11,
+            "min_ns": 2,
+            "max_ns": 17
+          },
+          "schedule_precedes_tx_count": 78
+        }
+      }
+    }
+  ]
+}

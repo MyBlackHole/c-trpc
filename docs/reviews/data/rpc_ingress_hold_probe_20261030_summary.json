@@ -1,0 +1,235 @@
+{
+  "v3_binary_sha256": "3f44b06b9e752d30943679f0517a30fe2043dbf2679831b24bcd352182bdb037",
+  "v4_binary_sha256": "bd1b27e30dfd0373a428f3aa5e0c2719a1cb8679c2923aff0c18d0f3b9766844",
+  "run_count_per_version": 1,
+  "percentile_method": "nearest-rank",
+  "hold_overlap_definition": "仅使用 RX 事件保存的该连接最近一个已完成 rx_held 区间，与 [客户端 TX begin, 服务端 recv begin] 求交；不代表该区间内全部 hold。",
+  "profiles": [
+    {
+      "profile": "small_call_limit",
+      "matched_ok": 1742,
+      "accepted": 1751,
+      "scheduler_dropped": 8249,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "rpc_resource_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "kinds": {
+        "open": {
+          "matched_ok": 1742,
+          "send_begin_to_recv_begin": {
+            "count": 1742,
+            "p50_ns": 83188017,
+            "p99_ns": 292319101,
+            "mean_ns": 102308181,
+            "min_ns": 19765,
+            "max_ns": 295884432
+          },
+          "last_recorded_hold_overlap": {
+            "samples_with_overlap": 1391,
+            "fraction": 0.7985074626865671,
+            "overlap_ns": {
+              "count": 1742,
+              "p50_ns": 4555401,
+              "p99_ns": 16890219,
+              "mean_ns": 5231327,
+              "min_ns": 0,
+              "max_ns": 18791440
+            },
+            "wait_covered_fraction_p50": 0.042176693524113594,
+            "wait_covered_fraction_p99": 0.4823274003700948,
+            "samples_covering_at_least_50_percent": 15,
+            "samples_covering_at_least_90_percent": 0
+          },
+          "pool_pause_overlap_samples": 0,
+          "hold_count_nonzero_samples": 1544,
+          "max_hold_count": 20,
+          "max_pool_pause_count": 0
+        },
+        "request": {
+          "matched_ok": 1742,
+          "send_begin_to_recv_begin": {
+            "count": 1742,
+            "p50_ns": 29123628,
+            "p99_ns": 259224225,
+            "mean_ns": 49692469,
+            "min_ns": 115378,
+            "max_ns": 265373754
+          },
+          "last_recorded_hold_overlap": {
+            "samples_with_overlap": 711,
+            "fraction": 0.4081515499425947,
+            "overlap_ns": {
+              "count": 1742,
+              "p50_ns": 0,
+              "p99_ns": 15530059,
+              "mean_ns": 2125305,
+              "min_ns": 0,
+              "max_ns": 18091350
+            },
+            "wait_covered_fraction_p50": 0.0,
+            "wait_covered_fraction_p99": 0.4370470298357852,
+            "samples_covering_at_least_50_percent": 4,
+            "samples_covering_at_least_90_percent": 0
+          },
+          "pool_pause_overlap_samples": 0,
+          "hold_count_nonzero_samples": 1709,
+          "max_hold_count": 20,
+          "max_pool_pause_count": 0
+        }
+      }
+    },
+    {
+      "profile": "default_call_limit",
+      "matched_ok": 2007,
+      "accepted": 2007,
+      "scheduler_dropped": 7993,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "control_tx_pool_exhausted"
+      ],
+      "kinds": {
+        "open": {
+          "matched_ok": 2007,
+          "send_begin_to_recv_begin": {
+            "count": 2007,
+            "p50_ns": 42064390,
+            "p99_ns": 147601218,
+            "mean_ns": 49385691,
+            "min_ns": 24934,
+            "max_ns": 149768116
+          },
+          "last_recorded_hold_overlap": {
+            "samples_with_overlap": 1535,
+            "fraction": 0.7648231190832088,
+            "overlap_ns": {
+              "count": 2007,
+              "p50_ns": 4340918,
+              "p99_ns": 15161786,
+              "mean_ns": 5264761,
+              "min_ns": 0,
+              "max_ns": 15252161
+            },
+            "wait_covered_fraction_p50": 0.08807259463661916,
+            "wait_covered_fraction_p99": 0.6612615743189988,
+            "samples_covering_at_least_50_percent": 44,
+            "samples_covering_at_least_90_percent": 0
+          },
+          "pool_pause_overlap_samples": 0,
+          "hold_count_nonzero_samples": 1767,
+          "max_hold_count": 17,
+          "max_pool_pause_count": 0
+        },
+        "request": {
+          "matched_ok": 2007,
+          "send_begin_to_recv_begin": {
+            "count": 2007,
+            "p50_ns": 17030810,
+            "p99_ns": 148978211,
+            "mean_ns": 27053723,
+            "min_ns": 193461,
+            "max_ns": 149486516
+          },
+          "last_recorded_hold_overlap": {
+            "samples_with_overlap": 674,
+            "fraction": 0.3358246138515197,
+            "overlap_ns": {
+              "count": 2007,
+              "p50_ns": 0,
+              "p99_ns": 14517430,
+              "mean_ns": 1947318,
+              "min_ns": 0,
+              "max_ns": 15161786
+            },
+            "wait_covered_fraction_p50": 0.0,
+            "wait_covered_fraction_p99": 0.6948918553068262,
+            "samples_covering_at_least_50_percent": 101,
+            "samples_covering_at_least_90_percent": 0
+          },
+          "pool_pause_overlap_samples": 0,
+          "hold_count_nonzero_samples": 1966,
+          "max_hold_count": 17,
+          "max_pool_pause_count": 0
+        }
+      }
+    },
+    {
+      "profile": "large_call_limit",
+      "matched_ok": 1481,
+      "accepted": 1481,
+      "scheduler_dropped": 8519,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "control_tx_pool_exhausted"
+      ],
+      "kinds": {
+        "open": {
+          "matched_ok": 1481,
+          "send_begin_to_recv_begin": {
+            "count": 1481,
+            "p50_ns": 13783817,
+            "p99_ns": 88627265,
+            "mean_ns": 22828830,
+            "min_ns": 22000,
+            "max_ns": 92279058
+          },
+          "last_recorded_hold_overlap": {
+            "samples_with_overlap": 839,
+            "fraction": 0.5665091154625254,
+            "overlap_ns": {
+              "count": 1481,
+              "p50_ns": 2090701,
+              "p99_ns": 10970399,
+              "mean_ns": 2465459,
+              "min_ns": 0,
+              "max_ns": 11104355
+            },
+            "wait_covered_fraction_p50": 0.0586098898610592,
+            "wait_covered_fraction_p99": 0.6606248213517274,
+            "samples_covering_at_least_50_percent": 35,
+            "samples_covering_at_least_90_percent": 3
+          },
+          "pool_pause_overlap_samples": 0,
+          "hold_count_nonzero_samples": 1301,
+          "max_hold_count": 6,
+          "max_pool_pause_count": 0
+        },
+        "request": {
+          "matched_ok": 1481,
+          "send_begin_to_recv_begin": {
+            "count": 1481,
+            "p50_ns": 17237401,
+            "p99_ns": 67425668,
+            "mean_ns": 24195833,
+            "min_ns": 178654,
+            "max_ns": 92353719
+          },
+          "last_recorded_hold_overlap": {
+            "samples_with_overlap": 271,
+            "fraction": 0.18298446995273465,
+            "overlap_ns": {
+              "count": 1481,
+              "p50_ns": 0,
+              "p99_ns": 10930728,
+              "mean_ns": 730087,
+              "min_ns": 0,
+              "max_ns": 10970399
+            },
+            "wait_covered_fraction_p50": 0.0,
+            "wait_covered_fraction_p99": 0.2117940831309459,
+            "samples_covering_at_least_50_percent": 0,
+            "samples_covering_at_least_90_percent": 0
+          },
+          "pool_pause_overlap_samples": 0,
+          "hold_count_nonzero_samples": 1451,
+          "max_hold_count": 6,
+          "max_pool_pause_count": 0
+        }
+      }
+    }
+  ]
+}

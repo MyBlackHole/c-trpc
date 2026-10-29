@@ -42,8 +42,20 @@ analyze_rpc_unary_stages.py、analyze_rpc_client_credit.py、analyze_rpc_frame_p
 与 analyze_rpc_rx_frame_budget.py 从原始记录关联每个成功调用，检查单调顺序与
 阶段总和。仅对已关联 OK 样本计算 nearest-rank；错误/缺少消息另计，不能删除
 其原始 RPC 结果。原帧分析器和 summary.first.json 保留，索引化复算字节一致。
+仓库内 analyze_rpc_tx_return_gap.py 直接读取此 ZIP，不解压临时日志；它核对关联
+成功数，并将发送调用区间、TX 记录至对端 RX 的有符号间隔写入
+../../data/rpc_progress_trace_20261030_send_return_gap.json。
 64 帧候选仅更改原 turn 的完整帧处理上限，前后 RX 调度点共享，原字节/dispatch
 预算不变；候选未采用，不能沿用它作为下一版生产基线。
+
+延伸的 v3/v4 ingress 插桩和复算见[原始归档](../../data/rpc_ingress_poll_hold_probe_20261030_raw.zip)。
+两个分析器直接读取归档：analyze_rpc_rx_poll.py 关联 epoll_wait 返回、目标连接事件、
+RX schedule 与 owner recv；analyze_rpc_rx_hold.py 只计算每帧附带的最近一个已完成
+`rx_held` 区间与客户端发送至服务端 recv 的重叠，不能外推为窗口内全部 hold。复算结果
+分别保留在[epoll 结果](../../data/rpc_ingress_poll_probe_20261030_summary.json)与
+[hold 结果](../../data/rpc_ingress_hold_probe_20261030_summary.json)。v3 从 v4 诊断源中移除 hold/pause
+字段后重建并编译，ELF SHA-256 与当时 v3 metadata 完全一致；两个版本仍为单次 dirty
+诊断，没有改变 40k 验收判定。
 
 Callgrind 使用原无探针 ELF，单 Client/64 窗口/256 请求加 32 预热/30000ms 期限，
 不属于原 40k 矩阵。仅 Server 使用 --collect-atstart=no、
@@ -52,3 +64,77 @@ Callgrind 使用原无探针 ELF，单 Client/64 窗口/256 请求加 32 预热/
 --enable-debuginfod=no，TMPDIR 等同样指向工作区。原始 profile、flat/tree 注释和
 精确命令均保留。第一次驱动校验参数错误的目录保留；只使用新 verified 目录的
 两端退出零与 288 项排空结论。
+
+v5 将 RX hold 从“每连接最近一次完整区间”扩展到全部完整区间，并在成功解除 hold 后
+调用 FIONREAD 只读采样；连接关闭时保留未闭合区间标志及解析器进度。每反应器最多 131072
+条，超额计数后继续；没有溢出。额外的内存、时间戳和 ioctl 使该 ELF 仅用于诊断。
+
+[v5 原始归档](../../data/rpc_ingress_rx_hold_v5_20261030_raw.zip)含完整补丁、三档所有
+server/client 原始日志、repeatability JSONL、执行元数据、分析器、汇总和 INDEX.json；
+[汇总](../../data/rpc_ingress_rx_hold_v5_20261030_summary.json)可直接查看结果。
+分析器以服务端正文 PID/序号和客户端 stream_map 将每条成功业务 MESSAGE 关联到客户端
+request MESSAGE 帧，之后以反向端口、stream_id、message_id 2 配对完整 hold 时间线。它也
+会分别统计窗口内 hold 重叠、FIONREAD 正值解除、发送 syscall 返回早于解除的样本，以及
+全体请求的 hold 覆盖比例；同一解除区间可能被多个相邻请求窗口覆盖。FIONREAD 不是按
+stream 计数，不能把连接内的待收字节标成某条具体 RPC 的字节。
+
+复算时先将归档解压到工作区 build 子目录；将 TMPDIR、TMP、TEMP、XMAKE_TMPDIR 指向项目
+`build/test-tmp`，设置 PYTHONDONTWRITEBYTECODE=1，再运行：
+
+```sh
+python3 docs/reviews/experiments/rpc_progress_trace_20261030/analyze_rpc_rx_hold_intervals.py \
+  --logs-dir build/rpc-ingress-hold-v5-replay/logs \
+  --output build/rpc-ingress-hold-v5-replay/analysis.json
+```
+
+本次基线为 `006af2aec502d59a4fbcdf7c0f9e212795548618` / dev.182。v5 补丁在隔离树通过
+`git apply --check`，重放所得 diff 与归档补丁逐字节相同。探针编译和单轮明文 40k 三档
+运行完成，但每档仍有发生器迟到/丢弃和 `control_tx_pool_exhausted`，不得把 dirty 样本
+转换成性能通过。运行后受跟踪源文件恢复为基线；Xmake GCC Release 重建产物 SHA 为
+`57f1e6ca…2466ec`，随后恢复的冻结 ELF SHA 为 `55d1c4b9…bd137e`，与源码重建产物不同，
+不声称二者逐字节等价。
+
+
+## v6：pending hold 原因与解除来源
+
+v5 证明部分 RX hold 期间 socket 仍有待读数据，但没有记录是哪条 pending 路径造成 hold、
+以及由哪个进度事件解除。v6 临时插桩记录 pending OPEN/REFUSED、进度调用数、发送尝试数、
+解除触发源及连接代次；只在成功解除 RX hold 后记录终点，连接退役则单独结束。事件表有界，
+带原子发布标记；没有溢出、重叠或未发布事件。本探针不采样 FIONREAD，也不改运行行为。
+
+独立复跑时使用干净的 dev.182 工作副本，并选择新的输出目录：
+
+```sh
+mkdir -p build/test-tmp
+export TMPDIR="$PWD/build/test-tmp"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
+export XMAKE_TMPDIR="$TMPDIR"
+export PYTHONDONTWRITEBYTECODE=1
+xmake f -c -y -m release --toolchain=gcc --crc32c_portable=n
+xmake build bench_rpc
+python3 bench/run_rpc_repeatability.py \
+  --binary build/linux/x86_64/release/bench_rpc \
+  --output build/rpc-pending-cause-probe-20261030/repeatability.jsonl \
+  --label rx-pending-cause-20261030 --trials 1 --rate 40000 \
+  --min-arrival-ms 250 --max-generators 16 \
+  --target-rate-per-generator 2500 --generator-window 64 \
+  --generator-capacity 64 --compression none
+```
+
+运行前须将 [原始归档](../../data/rpc_ingress_pending_cause_20261030_raw.zip)解到工作区内，
+并只在本地独立副本重放 `diagnostic.patch`：
+
+```sh
+mkdir -p build/rpc-pending-cause-replay
+unzip docs/reviews/data/rpc_ingress_pending_cause_20261030_raw.zip \
+  -d build/rpc-pending-cause-replay
+# 先确认源码与基线匹配，再重放该归档中的临时诊断补丁。
+git apply --check build/rpc-pending-cause-replay/diagnostic.patch
+git apply build/rpc-pending-cause-replay/diagnostic.patch
+```
+
+归档含完整 benchmark 日志、精确 patch、执行身份、复算器及 `INDEX.json`。本轮摘要见
+[summary](../../data/rpc_ingress_pending_cause_20261030_summary.json)。三个 profile 均 dirty；
+这些观测用于定位 hold 路径，不用于 40k 性能结论。运行后须恢复仅由本探针修改的三个
+跟踪源码，并用 Xmake 重建基线 bench；不要删除其他未跟踪文件。

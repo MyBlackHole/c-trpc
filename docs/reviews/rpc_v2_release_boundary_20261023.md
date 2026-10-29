@@ -193,3 +193,59 @@ R16 删除了 34 条无开放 PR 引用的远端分支，剩余 main 与上述 P
 R17 的完成条件是本记录及当前文档校正进入 main、文档精确提交的适用检查通过、
 #290 与原专项回链完成。届时可以关闭范围明确的 RPC 清退台账 #290；
 其关闭不关闭 #154/#234/#235/#239–#249，也不代表稳定版发布获批。
+
+## 9. 2026-10-30 #247/#241 续验
+
+本补充保留 R17 原评估的基线与结论，只更新 #247 控制压力归因及 #241 活性证据。
+基于 `006af2aec502d59a4fbcdf7c0f9e212795548618` / dev.182 的明文 40k 三档诊断，
+以独立临时探针关联客户端发送、服务端 epoll/RX owner/recv 和连接级 RX hold；临时
+插桩源码已恢复，产品行为没有修改。所有三档仍为 dirty：发生器丢弃/迟到持续出现，
+并再次记录 `control_tx_pool_exhausted`，不能作为容量通过或性能对照结论。
+
+v3 的 poll 返回不早于关联客户端 TX begin 的成功帧中，TX begin 至 epoll_wait 返回
+P50 为 9.91–47.98ms；poll 返回至连接可读事件处理 P50 为 14–18us；RX schedule 至
+owner 开始 P50 为 2.97–11.73ms。该结果把等待定位到 poll 返回之前及 RX ready 入队后，
+但 poll 可能由同批其他 fd 唤醒，不能将前段直接归因为目标 socket 或内核。
+
+v4 保存每连接最近一个已完成 `rx_held` 区间。OPEN 的区间重叠比例为 56.7%–79.9%，
+但该区间覆盖 `[客户端 TX begin, 服务端 recv begin]` 的长度 P50 仅 4.2%–8.8%；
+REQUEST 重叠比例为 18.3%–40.8%，覆盖长度 P50 为 0。没有观察到 `rx_paused` 区间重叠。
+这证明 RX hold 是部分样本的一项等待因素，但最近一次区间不能代表整个等待窗口，且
+当前数据不足以把长尾归因于 RX hold 或据此改变控制池/调度策略。
+
+v5 在同一三档负载上记录所有完整 hold 区间，并于解除 hold 后只读采样 FIONREAD 与解析器
+进度。三档分别关联 1889/1962/1767 个成功 MESSAGE；其中 832/683/391 个请求窗口（44.0%、
+34.8%、22.1%）与 hold 重叠，且均在对应窗口内见到正 FIONREAD。所有正采样都处于干净
+parser HEADER 边界；解除 hold 时 99.0%–100% 的完整区间有待收字节。全体请求窗口的 hold
+覆盖 P50 仍为 0%，因此能确认 hold 期间 socket 有排队输入，并解释一部分等待，仍不足以
+认定它是整体长尾的唯一根因。运行保持 dirty，未形成 40k 性能通过或池/调度变更依据。
+
+完整方法、限制和分位数见[RPC 进度追踪](rpc_v2_rpc_progress_trace_20261030.md)；
+[210 项原始归档](data/rpc_ingress_poll_hold_probe_20261030_raw.zip)、
+[epoll 复算](data/rpc_ingress_poll_probe_20261030_summary.json)与
+[hold 复算](data/rpc_ingress_hold_probe_20261030_summary.json)保留两版补丁、执行身份、
+逐 stream 成功调用关联及 INDEX 摘要；[v5 结果](data/rpc_ingress_rx_hold_v5_20261030_summary.json)、
+[v5 原始归档](data/rpc_ingress_rx_hold_v5_20261030_raw.zip)保留新增区间、FIONREAD 记录与复算器。
+该证据继续归属 #247/#241，不关闭任一验收项；
+后续需要先获得能区分 poll 前等待、RX hold 和控制 TX 恢复关系的受控证据，再决定
+是否有运行时缺陷与最小修复。40k、固定目标平台、全局/分域资源总账、TLS/压缩组合、
+#243 终局组合、#245 生成工具/协商及 #246 后端对等比较仍不是已通过的发行门槛。
+
+## 10. 2026-10-30 pending RX hold 来源探针
+
+沿 #247/#241 对 v5 完整 hold 记录追加一次原因/唤醒归因。三个 profile 共 684 个完整区间，
+683 个来自初始 WINDOW_UPDATE 的 pending OPEN，均由 CONTROL_TX_READY 路径最终解除；
+仅 1 个 STREAM_REFUSED pending 由维护定时器解除。三档 control TX pool 均达到 128/128，
+耗尽计数为 6770/1532/704，command queue full 均为 0；代码路径表明主要 hold 与普通
+control TX 发送项池耗尽相符。10%–26% 的 OPEN hold 经过两次 pending 进度后才成功受理，
+通知不会为特定等待者预留池项；竞争者身份未记录，因此这部分只作调度交错推断。
+
+结果把主要 RX hold 触发路径定位到 control TX pool 背压，并否定“多数 hold 是 REFUSED
+维护定时器等待”的假设。它没有证明池容量 128 不合适，也没有解释整体 40k 长尾；三档
+发生器迟到/丢弃和 `control_tx_pool_exhausted` 持续存在，全部 dirty。本轮没有 FIONREAD，
+不与 v5 逐请求覆盖数据合并，也没有更改容量、运行时行为或发布结论。
+
+[684 项完整归档](data/rpc_ingress_pending_cause_20261030_raw.zip)、
+[摘要](data/rpc_ingress_pending_cause_20261030_summary.json)与
+[复算器](experiments/rpc_progress_trace_20261030/analyze_rpc_pending_cause.py)保存此次证据。
+它继续归属 #247/#241；TLS、压缩、40k 清洁度及其余发行门槛仍未通过。

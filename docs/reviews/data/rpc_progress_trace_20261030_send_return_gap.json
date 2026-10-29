@@ -1,0 +1,182 @@
+[
+  {
+    "profile": "small_call_limit",
+    "matched_ok": 1946,
+    "nearest_rank": true,
+    "stages": {
+      "open_send_span_ns": {
+        "count": 1946,
+        "p50_ns": 16273,
+        "p99_ns": 68584,
+        "mean_ns": 18469,
+        "min_ns": 4191,
+        "max_ns": 244586
+      },
+      "open_sender_end_to_server_rx_ns": {
+        "count": 1946,
+        "p50_ns": 67180566,
+        "p99_ns": 233409749,
+        "mean_ns": 87693309,
+        "min_ns": 5657,
+        "max_ns": 247156505
+      },
+      "request_send_span_ns": {
+        "count": 1946,
+        "p50_ns": 12920,
+        "p99_ns": 36248,
+        "mean_ns": 13744,
+        "min_ns": 4191,
+        "max_ns": 162731
+      },
+      "request_sender_end_to_server_rx_ns": {
+        "count": 1946,
+        "p50_ns": 20791071,
+        "p99_ns": 204599511,
+        "mean_ns": 41734386,
+        "min_ns": 111328,
+        "max_ns": 226605829
+      },
+      "credit_send_span_ns": {
+        "count": 1946,
+        "p50_ns": 12222,
+        "p99_ns": 42952,
+        "mean_ns": 14240,
+        "min_ns": 4190,
+        "max_ns": 241932
+      },
+      "credit_sender_end_to_client_rx_ns": {
+        "count": 1946,
+        "p50_ns": 143385,
+        "p99_ns": 1002580,
+        "mean_ns": 230762,
+        "min_ns": -149321,
+        "max_ns": 1491821
+      }
+    },
+    "receiver_before_sender_record_count": {
+      "open": 0,
+      "request": 0,
+      "credit": 6
+    }
+  },
+  {
+    "profile": "default_call_limit",
+    "matched_ok": 2110,
+    "nearest_rank": true,
+    "stages": {
+      "open_send_span_ns": {
+        "count": 2110,
+        "p50_ns": 16552,
+        "p99_ns": 73543,
+        "mean_ns": 19292,
+        "min_ns": 3771,
+        "max_ns": 379521
+      },
+      "open_sender_end_to_server_rx_ns": {
+        "count": 2110,
+        "p50_ns": 30554888,
+        "p99_ns": 214677197,
+        "mean_ns": 44310257,
+        "min_ns": -179353,
+        "max_ns": 218382444
+      },
+      "request_send_span_ns": {
+        "count": 2110,
+        "p50_ns": 12362,
+        "p99_ns": 31010,
+        "mean_ns": 13215,
+        "min_ns": 3771,
+        "max_ns": 283907
+      },
+      "request_sender_end_to_server_rx_ns": {
+        "count": 2110,
+        "p50_ns": 18061863,
+        "p99_ns": 144152395,
+        "mean_ns": 29645160,
+        "min_ns": 41765,
+        "max_ns": 196882618
+      },
+      "credit_send_span_ns": {
+        "count": 2110,
+        "p50_ns": 11594,
+        "p99_ns": 35620,
+        "mean_ns": 13483,
+        "min_ns": 3841,
+        "max_ns": 400054
+      },
+      "credit_sender_end_to_client_rx_ns": {
+        "count": 2110,
+        "p50_ns": 103366,
+        "p99_ns": 969125,
+        "mean_ns": 169636,
+        "min_ns": -26331,
+        "max_ns": 1546367
+      }
+    },
+    "receiver_before_sender_record_count": {
+      "open": 5,
+      "request": 0,
+      "credit": 3
+    }
+  },
+  {
+    "profile": "large_call_limit",
+    "matched_ok": 1866,
+    "nearest_rank": true,
+    "stages": {
+      "open_send_span_ns": {
+        "count": 1866,
+        "p50_ns": 16343,
+        "p99_ns": 55803,
+        "mean_ns": 18724,
+        "min_ns": 3702,
+        "max_ns": 256878
+      },
+      "open_sender_end_to_server_rx_ns": {
+        "count": 1866,
+        "p50_ns": 10403148,
+        "p99_ns": 53860753,
+        "mean_ns": 14734570,
+        "min_ns": 1467,
+        "max_ns": 56268270
+      },
+      "request_send_span_ns": {
+        "count": 1866,
+        "p50_ns": 12293,
+        "p99_ns": 30102,
+        "mean_ns": 13107,
+        "min_ns": 3771,
+        "max_ns": 62438
+      },
+      "request_sender_end_to_server_rx_ns": {
+        "count": 1866,
+        "p50_ns": 11317168,
+        "p99_ns": 55062241,
+        "mean_ns": 16389675,
+        "min_ns": 15365,
+        "max_ns": 55163512
+      },
+      "credit_send_span_ns": {
+        "count": 1866,
+        "p50_ns": 12083,
+        "p99_ns": 35270,
+        "mean_ns": 13525,
+        "min_ns": 3842,
+        "max_ns": 450270
+      },
+      "credit_sender_end_to_client_rx_ns": {
+        "count": 1866,
+        "p50_ns": 104973,
+        "p99_ns": 823715,
+        "mean_ns": 160358,
+        "min_ns": -414092,
+        "max_ns": 1316658
+      }
+    },
+    "receiver_before_sender_record_count": {
+      "open": 0,
+      "request": 0,
+      "credit": 5
+    }
+  }
+]

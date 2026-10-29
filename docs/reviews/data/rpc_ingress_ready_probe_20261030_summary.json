@@ -1,0 +1,350 @@
+{
+  "binary_sha256": "7cd1707543946668ecd9b99b332c06de0890aee90f4aaf93eedbafc61ba35f53",
+  "run_count": 1,
+  "profiles": [
+    {
+      "profile": "small_call_limit",
+      "matched_ok": 1928,
+      "accepted": 1944,
+      "dropped": 8056,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "rpc_resource_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "connection_ready_anchor_precedes_frame_send": {
+        "open": 343,
+        "request": 424
+      },
+      "nearest_rank": true,
+      "stages": {
+        "open_send_record_span_ns": {
+          "count": 1928,
+          "p50_ns": 14806,
+          "p99_ns": 67328,
+          "mean_ns": 17489,
+          "min_ns": 3842,
+          "max_ns": 181729
+        },
+        "open_send_begin_to_recv_begin_ns": {
+          "count": 1928,
+          "p50_ns": 81538081,
+          "p99_ns": 246140992,
+          "mean_ns": 95966614,
+          "min_ns": 46654,
+          "max_ns": 251457998
+        },
+        "open_recv_call_ns": {
+          "count": 1928,
+          "p50_ns": 2375,
+          "p99_ns": 40857,
+          "mean_ns": 3804,
+          "min_ns": 908,
+          "max_ns": 100502
+        },
+        "open_recv_end_to_frame_dispatch_ns": {
+          "count": 1928,
+          "p50_ns": 2864,
+          "p99_ns": 12571,
+          "mean_ns": 3261,
+          "min_ns": 1816,
+          "max_ns": 29055
+        },
+        "request_send_record_span_ns": {
+          "count": 1928,
+          "p50_ns": 11943,
+          "p99_ns": 31918,
+          "mean_ns": 12603,
+          "min_ns": 3352,
+          "max_ns": 54407
+        },
+        "request_send_begin_to_recv_begin_ns": {
+          "count": 1928,
+          "p50_ns": 22723880,
+          "p99_ns": 220227216,
+          "mean_ns": 39627065,
+          "min_ns": 201844,
+          "max_ns": 230701429
+        },
+        "request_recv_call_ns": {
+          "count": 1928,
+          "p50_ns": 1886,
+          "p99_ns": 3911,
+          "mean_ns": 2083,
+          "min_ns": 908,
+          "max_ns": 35410
+        },
+        "request_recv_end_to_frame_dispatch_ns": {
+          "count": 1928,
+          "p50_ns": 2864,
+          "p99_ns": 9219,
+          "mean_ns": 3097,
+          "min_ns": 1816,
+          "max_ns": 28076
+        },
+        "credit_send_record_span_ns": {
+          "count": 1928,
+          "p50_ns": 11874,
+          "p99_ns": 41975,
+          "mean_ns": 14021,
+          "min_ns": 4191,
+          "max_ns": 115379
+        },
+        "credit_send_begin_to_recv_begin_ns": {
+          "count": 1928,
+          "p50_ns": 192205,
+          "p99_ns": 960398,
+          "mean_ns": 269506,
+          "min_ns": 18159,
+          "max_ns": 1776293
+        },
+        "credit_recv_call_ns": {
+          "count": 1928,
+          "p50_ns": 2933,
+          "p99_ns": 40159,
+          "mean_ns": 4831,
+          "min_ns": 908,
+          "max_ns": 102458
+        },
+        "credit_recv_end_to_frame_dispatch_ns": {
+          "count": 1928,
+          "p50_ns": 3283,
+          "p99_ns": 15784,
+          "mean_ns": 3760,
+          "min_ns": 1885,
+          "max_ns": 344461
+        }
+      }
+    },
+    {
+      "profile": "default_call_limit",
+      "matched_ok": 2084,
+      "accepted": 2084,
+      "dropped": 7916,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "control_tx_pool_exhausted"
+      ],
+      "connection_ready_anchor_precedes_frame_send": {
+        "open": 326,
+        "request": 337
+      },
+      "nearest_rank": true,
+      "stages": {
+        "open_send_record_span_ns": {
+          "count": 2084,
+          "p50_ns": 16623,
+          "p99_ns": 64185,
+          "mean_ns": 19359,
+          "min_ns": 4260,
+          "max_ns": 280975
+        },
+        "open_send_begin_to_recv_begin_ns": {
+          "count": 2084,
+          "p50_ns": 39246694,
+          "p99_ns": 161233798,
+          "mean_ns": 51583490,
+          "min_ns": 22419,
+          "max_ns": 168096618
+        },
+        "open_recv_call_ns": {
+          "count": 2084,
+          "p50_ns": 2375,
+          "p99_ns": 37016,
+          "mean_ns": 3608,
+          "min_ns": 907,
+          "max_ns": 83461
+        },
+        "open_recv_end_to_frame_dispatch_ns": {
+          "count": 2084,
+          "p50_ns": 2933,
+          "p99_ns": 11733,
+          "mean_ns": 3275,
+          "min_ns": 1885,
+          "max_ns": 54476
+        },
+        "request_send_record_span_ns": {
+          "count": 2084,
+          "p50_ns": 12292,
+          "p99_ns": 38134,
+          "mean_ns": 13612,
+          "min_ns": 4191,
+          "max_ns": 104344
+        },
+        "request_send_begin_to_recv_begin_ns": {
+          "count": 2084,
+          "p50_ns": 17346111,
+          "p99_ns": 117913777,
+          "mean_ns": 30274395,
+          "min_ns": 186129,
+          "max_ns": 152488246
+        },
+        "request_recv_call_ns": {
+          "count": 2084,
+          "p50_ns": 1886,
+          "p99_ns": 3353,
+          "mean_ns": 1987,
+          "min_ns": 908,
+          "max_ns": 22978
+        },
+        "request_recv_end_to_frame_dispatch_ns": {
+          "count": 2084,
+          "p50_ns": 2864,
+          "p99_ns": 9638,
+          "mean_ns": 3124,
+          "min_ns": 1885,
+          "max_ns": 31010
+        },
+        "credit_send_record_span_ns": {
+          "count": 2084,
+          "p50_ns": 11524,
+          "p99_ns": 35549,
+          "mean_ns": 13233,
+          "min_ns": 4330,
+          "max_ns": 141151
+        },
+        "credit_send_begin_to_recv_begin_ns": {
+          "count": 2084,
+          "p50_ns": 176211,
+          "p99_ns": 1133467,
+          "mean_ns": 272993,
+          "min_ns": 11943,
+          "max_ns": 1389996
+        },
+        "credit_recv_call_ns": {
+          "count": 2084,
+          "p50_ns": 3283,
+          "p99_ns": 47772,
+          "mean_ns": 5660,
+          "min_ns": 908,
+          "max_ns": 122573
+        },
+        "credit_recv_end_to_frame_dispatch_ns": {
+          "count": 2084,
+          "p50_ns": 3283,
+          "p99_ns": 13969,
+          "mean_ns": 3870,
+          "min_ns": 1955,
+          "max_ns": 525631
+        }
+      }
+    },
+    {
+      "profile": "large_call_limit",
+      "matched_ok": 1629,
+      "accepted": 1629,
+      "dropped": 8371,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "tx_pool_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "connection_ready_anchor_precedes_frame_send": {
+        "open": 495,
+        "request": 264
+      },
+      "nearest_rank": true,
+      "stages": {
+        "open_send_record_span_ns": {
+          "count": 1629,
+          "p50_ns": 15784,
+          "p99_ns": 62020,
+          "mean_ns": 18516,
+          "min_ns": 4191,
+          "max_ns": 229501
+        },
+        "open_send_begin_to_recv_begin_ns": {
+          "count": 1629,
+          "p50_ns": 11257281,
+          "p99_ns": 77580690,
+          "mean_ns": 17572871,
+          "min_ns": 11593,
+          "max_ns": 78722118
+        },
+        "open_recv_call_ns": {
+          "count": 1629,
+          "p50_ns": 2375,
+          "p99_ns": 43721,
+          "mean_ns": 3812,
+          "min_ns": 908,
+          "max_ns": 69144
+        },
+        "open_recv_end_to_frame_dispatch_ns": {
+          "count": 1629,
+          "p50_ns": 3213,
+          "p99_ns": 8032,
+          "mean_ns": 3295,
+          "min_ns": 1885,
+          "max_ns": 49169
+        },
+        "request_send_record_span_ns": {
+          "count": 1629,
+          "p50_ns": 12851,
+          "p99_ns": 40020,
+          "mean_ns": 13817,
+          "min_ns": 3772,
+          "max_ns": 61042
+        },
+        "request_send_begin_to_recv_begin_ns": {
+          "count": 1629,
+          "p50_ns": 12040281,
+          "p99_ns": 78493176,
+          "mean_ns": 21847723,
+          "min_ns": 50845,
+          "max_ns": 78727287
+        },
+        "request_recv_call_ns": {
+          "count": 1629,
+          "p50_ns": 1886,
+          "p99_ns": 3841,
+          "mean_ns": 2057,
+          "min_ns": 908,
+          "max_ns": 28146
+        },
+        "request_recv_end_to_frame_dispatch_ns": {
+          "count": 1629,
+          "p50_ns": 2933,
+          "p99_ns": 7613,
+          "mean_ns": 3214,
+          "min_ns": 1886,
+          "max_ns": 22909
+        },
+        "credit_send_record_span_ns": {
+          "count": 1629,
+          "p50_ns": 11943,
+          "p99_ns": 31918,
+          "mean_ns": 13200,
+          "min_ns": 3911,
+          "max_ns": 115240
+        },
+        "credit_send_begin_to_recv_begin_ns": {
+          "count": 1629,
+          "p50_ns": 189621,
+          "p99_ns": 1031777,
+          "mean_ns": 269153,
+          "min_ns": 11384,
+          "max_ns": 1196953
+        },
+        "credit_recv_call_ns": {
+          "count": 1629,
+          "p50_ns": 3352,
+          "p99_ns": 53220,
+          "mean_ns": 6699,
+          "min_ns": 908,
+          "max_ns": 133957
+        },
+        "credit_recv_end_to_frame_dispatch_ns": {
+          "count": 1629,
+          "p50_ns": 3352,
+          "p99_ns": 17531,
+          "mean_ns": 3789,
+          "min_ns": 2304,
+          "max_ns": 54896
+        }
+      }
+    }
+  ]
+}

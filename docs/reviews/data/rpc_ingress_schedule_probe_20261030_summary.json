@@ -1,0 +1,618 @@
+{
+  "binary_sha256": "bbcc8687594043f06971a98a9769a7100c6acb1c69caa49ae2590685baf60da2",
+  "run_count": 1,
+  "percentile_method": "nearest-rank",
+  "profiles": [
+    {
+      "profile": "small_call_limit",
+      "matched_ok": 1822,
+      "accepted": 1830,
+      "dropped": 8170,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "rpc_resource_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "connection_anchor_audit": {
+        "open": {
+          "event_ready_before_send": 269,
+          "rx_schedule_before_send": 173,
+          "both_anchors_after_send": 1546,
+          "count": 1822
+        },
+        "request": {
+          "event_ready_before_send": 402,
+          "rx_schedule_before_send": 211,
+          "both_anchors_after_send": 1366,
+          "count": 1822
+        }
+      },
+      "all_matched_samples": {
+        "open": {
+          "send_record_span": {
+            "count": 1822,
+            "p50_ns": 15854,
+            "p99_ns": 64392,
+            "mean_ns": 18825,
+            "min_ns": 3422,
+            "max_ns": 199534
+          },
+          "send_begin_to_recv_begin": {
+            "count": 1822,
+            "p50_ns": 84434451,
+            "p99_ns": 244547477,
+            "mean_ns": 99305720,
+            "min_ns": 9708,
+            "max_ns": 248596956
+          },
+          "rx_schedule_to_owner": {
+            "count": 1822,
+            "p50_ns": 4259209,
+            "p99_ns": 13196949,
+            "mean_ns": 4538925,
+            "min_ns": 1467,
+            "max_ns": 15373102
+          },
+          "owner_entry_to_recv_begin": {
+            "count": 1822,
+            "p50_ns": 932577,
+            "p99_ns": 4899505,
+            "mean_ns": 1345428,
+            "min_ns": 908,
+            "max_ns": 5876571
+          },
+          "recv_call": {
+            "count": 1822,
+            "p50_ns": 2794,
+            "p99_ns": 36666,
+            "mean_ns": 3879,
+            "min_ns": 908,
+            "max_ns": 89186
+          },
+          "recv_end_to_frame_dispatch": {
+            "count": 1822,
+            "p50_ns": 2933,
+            "p99_ns": 4680,
+            "mean_ns": 3164,
+            "min_ns": 1885,
+            "max_ns": 22768
+          }
+        },
+        "request": {
+          "send_record_span": {
+            "count": 1822,
+            "p50_ns": 12432,
+            "p99_ns": 34780,
+            "mean_ns": 13132,
+            "min_ns": 3771,
+            "max_ns": 53567
+          },
+          "send_begin_to_recv_begin": {
+            "count": 1822,
+            "p50_ns": 23225035,
+            "p99_ns": 239844363,
+            "mean_ns": 42134057,
+            "min_ns": 245489,
+            "max_ns": 240351613
+          },
+          "rx_schedule_to_owner": {
+            "count": 1822,
+            "p50_ns": 5484627,
+            "p99_ns": 18565362,
+            "mean_ns": 6517475,
+            "min_ns": 46025,
+            "max_ns": 24870681
+          },
+          "owner_entry_to_recv_begin": {
+            "count": 1822,
+            "p50_ns": 1698935,
+            "p99_ns": 4922203,
+            "mean_ns": 1854452,
+            "min_ns": 1397,
+            "max_ns": 5332165
+          },
+          "recv_call": {
+            "count": 1822,
+            "p50_ns": 1955,
+            "p99_ns": 3842,
+            "mean_ns": 2118,
+            "min_ns": 908,
+            "max_ns": 6775
+          },
+          "recv_end_to_frame_dispatch": {
+            "count": 1822,
+            "p50_ns": 2933,
+            "p99_ns": 4330,
+            "mean_ns": 3110,
+            "min_ns": 1816,
+            "max_ns": 34291
+          }
+        }
+      },
+      "both_readiness_and_queue_anchors_after_send": {
+        "open": {
+          "count": 1546,
+          "stages": {
+            "send_record_span": {
+              "count": 1546,
+              "p50_ns": 15714,
+              "p99_ns": 64392,
+              "mean_ns": 18394,
+              "min_ns": 3422,
+              "max_ns": 199534
+            },
+            "send_begin_to_recv_begin": {
+              "count": 1546,
+              "p50_ns": 120313077,
+              "p99_ns": 244871815,
+              "mean_ns": 116039983,
+              "min_ns": 106925,
+              "max_ns": 248596956
+            },
+            "rx_schedule_to_owner": {
+              "count": 1546,
+              "p50_ns": 4633623,
+              "p99_ns": 13200022,
+              "mean_ns": 4879803,
+              "min_ns": 1467,
+              "max_ns": 13720193
+            },
+            "owner_entry_to_recv_begin": {
+              "count": 1546,
+              "p50_ns": 844229,
+              "p99_ns": 4501066,
+              "mean_ns": 1251262,
+              "min_ns": 908,
+              "max_ns": 5654827
+            }
+          }
+        },
+        "request": {
+          "count": 1366,
+          "stages": {
+            "send_record_span": {
+              "count": 1366,
+              "p50_ns": 12432,
+              "p99_ns": 34362,
+              "mean_ns": 13180,
+              "min_ns": 3771,
+              "max_ns": 53567
+            },
+            "send_begin_to_recv_begin": {
+              "count": 1366,
+              "p50_ns": 27296653,
+              "p99_ns": 239890946,
+              "mean_ns": 53930353,
+              "min_ns": 245489,
+              "max_ns": 240351613
+            },
+            "rx_schedule_to_owner": {
+              "count": 1366,
+              "p50_ns": 7153041,
+              "p99_ns": 18565362,
+              "mean_ns": 7726076,
+              "min_ns": 46025,
+              "max_ns": 24870681
+            },
+            "owner_entry_to_recv_begin": {
+              "count": 1366,
+              "p50_ns": 1310064,
+              "p99_ns": 4830992,
+              "mean_ns": 1545327,
+              "min_ns": 1397,
+              "max_ns": 5265538
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "default_call_limit",
+      "matched_ok": 1925,
+      "accepted": 1925,
+      "dropped": 8075,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "tx_pool_exhausted",
+        "control_tx_pool_exhausted"
+      ],
+      "connection_anchor_audit": {
+        "open": {
+          "event_ready_before_send": 351,
+          "rx_schedule_before_send": 256,
+          "both_anchors_after_send": 1562,
+          "count": 1925
+        },
+        "request": {
+          "event_ready_before_send": 250,
+          "rx_schedule_before_send": 202,
+          "both_anchors_after_send": 1636,
+          "count": 1925
+        }
+      },
+      "all_matched_samples": {
+        "open": {
+          "send_record_span": {
+            "count": 1925,
+            "p50_ns": 16273,
+            "p99_ns": 79548,
+            "mean_ns": 19449,
+            "min_ns": 3771,
+            "max_ns": 314142
+          },
+          "send_begin_to_recv_begin": {
+            "count": 1925,
+            "p50_ns": 35388211,
+            "p99_ns": 163526691,
+            "mean_ns": 40715278,
+            "min_ns": 45745,
+            "max_ns": 171726151
+          },
+          "rx_schedule_to_owner": {
+            "count": 1925,
+            "p50_ns": 2868899,
+            "p99_ns": 32556397,
+            "mean_ns": 5012558,
+            "min_ns": 18019,
+            "max_ns": 35898813
+          },
+          "owner_entry_to_recv_begin": {
+            "count": 1925,
+            "p50_ns": 648397,
+            "p99_ns": 3591467,
+            "mean_ns": 911155,
+            "min_ns": 908,
+            "max_ns": 4189649
+          },
+          "recv_call": {
+            "count": 1925,
+            "p50_ns": 2793,
+            "p99_ns": 41555,
+            "mean_ns": 3990,
+            "min_ns": 907,
+            "max_ns": 107624
+          },
+          "recv_end_to_frame_dispatch": {
+            "count": 1925,
+            "p50_ns": 2933,
+            "p99_ns": 4889,
+            "mean_ns": 3200,
+            "min_ns": 1886,
+            "max_ns": 27587
+          }
+        },
+        "request": {
+          "send_record_span": {
+            "count": 1925,
+            "p50_ns": 12362,
+            "p99_ns": 35689,
+            "mean_ns": 13480,
+            "min_ns": 3771,
+            "max_ns": 62577
+          },
+          "send_begin_to_recv_begin": {
+            "count": 1925,
+            "p50_ns": 16059354,
+            "p99_ns": 94096860,
+            "mean_ns": 27978835,
+            "min_ns": 180537,
+            "max_ns": 149370974
+          },
+          "rx_schedule_to_owner": {
+            "count": 1925,
+            "p50_ns": 5209876,
+            "p99_ns": 32556397,
+            "mean_ns": 8764971,
+            "min_ns": 46373,
+            "max_ns": 35898813
+          },
+          "owner_entry_to_recv_begin": {
+            "count": 1925,
+            "p50_ns": 914558,
+            "p99_ns": 3320486,
+            "mean_ns": 1102326,
+            "min_ns": 908,
+            "max_ns": 3817051
+          },
+          "recv_call": {
+            "count": 1925,
+            "p50_ns": 1886,
+            "p99_ns": 4330,
+            "mean_ns": 2060,
+            "min_ns": 907,
+            "max_ns": 17530
+          },
+          "recv_end_to_frame_dispatch": {
+            "count": 1925,
+            "p50_ns": 2864,
+            "p99_ns": 4190,
+            "mean_ns": 2981,
+            "min_ns": 1816,
+            "max_ns": 20812
+          }
+        }
+      },
+      "both_readiness_and_queue_anchors_after_send": {
+        "open": {
+          "count": 1562,
+          "stages": {
+            "send_record_span": {
+              "count": 1562,
+              "p50_ns": 16133,
+              "p99_ns": 80526,
+              "mean_ns": 18834,
+              "min_ns": 3841,
+              "max_ns": 176766
+            },
+            "send_begin_to_recv_begin": {
+              "count": 1562,
+              "p50_ns": 44764897,
+              "p99_ns": 166337344,
+              "mean_ns": 48732298,
+              "min_ns": 149318,
+              "max_ns": 171726151
+            },
+            "rx_schedule_to_owner": {
+              "count": 1562,
+              "p50_ns": 2930428,
+              "p99_ns": 32556397,
+              "mean_ns": 5256985,
+              "min_ns": 18019,
+              "max_ns": 35898813
+            },
+            "owner_entry_to_recv_begin": {
+              "count": 1562,
+              "p50_ns": 528971,
+              "p99_ns": 3019405,
+              "mean_ns": 785780,
+              "min_ns": 908,
+              "max_ns": 3485170
+            }
+          }
+        },
+        "request": {
+          "count": 1636,
+          "stages": {
+            "send_record_span": {
+              "count": 1636,
+              "p50_ns": 12432,
+              "p99_ns": 34292,
+              "mean_ns": 13521,
+              "min_ns": 3772,
+              "max_ns": 62577
+            },
+            "send_begin_to_recv_begin": {
+              "count": 1636,
+              "p50_ns": 18985173,
+              "p99_ns": 94131571,
+              "mean_ns": 32075227,
+              "min_ns": 183122,
+              "max_ns": 149370974
+            },
+            "rx_schedule_to_owner": {
+              "count": 1636,
+              "p50_ns": 6495007,
+              "p99_ns": 32556397,
+              "mean_ns": 9725952,
+              "min_ns": 46373,
+              "max_ns": 35898813
+            },
+            "owner_entry_to_recv_begin": {
+              "count": 1636,
+              "p50_ns": 787030,
+              "p99_ns": 3167956,
+              "mean_ns": 991907,
+              "min_ns": 23955,
+              "max_ns": 3459468
+            }
+          }
+        }
+      }
+    },
+    {
+      "profile": "large_call_limit",
+      "matched_ok": 1842,
+      "accepted": 1842,
+      "dropped": 8158,
+      "wall_signals": [
+        "load_generator_drop",
+        "load_generator_late",
+        "control_tx_pool_exhausted"
+      ],
+      "connection_anchor_audit": {
+        "open": {
+          "event_ready_before_send": 419,
+          "rx_schedule_before_send": 302,
+          "both_anchors_after_send": 1411,
+          "count": 1842
+        },
+        "request": {
+          "event_ready_before_send": 268,
+          "rx_schedule_before_send": 248,
+          "both_anchors_after_send": 1546,
+          "count": 1842
+        }
+      },
+      "all_matched_samples": {
+        "open": {
+          "send_record_span": {
+            "count": 1842,
+            "p50_ns": 16762,
+            "p99_ns": 59155,
+            "mean_ns": 19063,
+            "min_ns": 3772,
+            "max_ns": 181864
+          },
+          "send_begin_to_recv_begin": {
+            "count": 1842,
+            "p50_ns": 13249541,
+            "p99_ns": 82788404,
+            "mean_ns": 18272645,
+            "min_ns": 24234,
+            "max_ns": 87105092
+          },
+          "rx_schedule_to_owner": {
+            "count": 1842,
+            "p50_ns": 1964397,
+            "p99_ns": 23320512,
+            "mean_ns": 3143048,
+            "min_ns": 7613,
+            "max_ns": 25124207
+          },
+          "owner_entry_to_recv_begin": {
+            "count": 1842,
+            "p50_ns": 625420,
+            "p99_ns": 2445109,
+            "mean_ns": 717584,
+            "min_ns": 908,
+            "max_ns": 2778666
+          },
+          "recv_call": {
+            "count": 1842,
+            "p50_ns": 2374,
+            "p99_ns": 37505,
+            "mean_ns": 3731,
+            "min_ns": 907,
+            "max_ns": 92119
+          },
+          "recv_end_to_frame_dispatch": {
+            "count": 1842,
+            "p50_ns": 2933,
+            "p99_ns": 4261,
+            "mean_ns": 3104,
+            "min_ns": 1886,
+            "max_ns": 19485
+          }
+        },
+        "request": {
+          "send_record_span": {
+            "count": 1842,
+            "p50_ns": 12781,
+            "p99_ns": 33663,
+            "mean_ns": 13840,
+            "min_ns": 3702,
+            "max_ns": 81434
+          },
+          "send_begin_to_recv_begin": {
+            "count": 1842,
+            "p50_ns": 16803924,
+            "p99_ns": 87058230,
+            "mean_ns": 22387516,
+            "min_ns": 50215,
+            "max_ns": 87223123
+          },
+          "rx_schedule_to_owner": {
+            "count": 1842,
+            "p50_ns": 4413906,
+            "p99_ns": 25124207,
+            "mean_ns": 6971581,
+            "min_ns": 7613,
+            "max_ns": 25124207
+          },
+          "owner_entry_to_recv_begin": {
+            "count": 1842,
+            "p50_ns": 627794,
+            "p99_ns": 2398735,
+            "mean_ns": 791803,
+            "min_ns": 1397,
+            "max_ns": 2865477
+          },
+          "recv_call": {
+            "count": 1842,
+            "p50_ns": 1886,
+            "p99_ns": 3353,
+            "mean_ns": 1930,
+            "min_ns": 907,
+            "max_ns": 20952
+          },
+          "recv_end_to_frame_dispatch": {
+            "count": 1842,
+            "p50_ns": 2864,
+            "p99_ns": 4260,
+            "mean_ns": 3055,
+            "min_ns": 1816,
+            "max_ns": 20533
+          }
+        }
+      },
+      "both_readiness_and_queue_anchors_after_send": {
+        "open": {
+          "count": 1411,
+          "stages": {
+            "send_record_span": {
+              "count": 1411,
+              "p50_ns": 16692,
+              "p99_ns": 60901,
+              "mean_ns": 18869,
+              "min_ns": 3772,
+              "max_ns": 181864
+            },
+            "send_begin_to_recv_begin": {
+              "count": 1411,
+              "p50_ns": 20621813,
+              "p99_ns": 84358274,
+              "mean_ns": 22857020,
+              "min_ns": 72843,
+              "max_ns": 87105092
+            },
+            "rx_schedule_to_owner": {
+              "count": 1411,
+              "p50_ns": 2233074,
+              "p99_ns": 23320512,
+              "mean_ns": 3389916,
+              "min_ns": 7613,
+              "max_ns": 25124207
+            },
+            "owner_entry_to_recv_begin": {
+              "count": 1411,
+              "p50_ns": 553694,
+              "p99_ns": 2451185,
+              "mean_ns": 686952,
+              "min_ns": 908,
+              "max_ns": 2778666
+            }
+          }
+        },
+        "request": {
+          "count": 1546,
+          "stages": {
+            "send_record_span": {
+              "count": 1546,
+              "p50_ns": 12642,
+              "p99_ns": 31498,
+              "mean_ns": 13638,
+              "min_ns": 3702,
+              "max_ns": 81434
+            },
+            "send_begin_to_recv_begin": {
+              "count": 1546,
+              "p50_ns": 20719171,
+              "p99_ns": 87084350,
+              "mean_ns": 25589428,
+              "min_ns": 91421,
+              "max_ns": 87223123
+            },
+            "rx_schedule_to_owner": {
+              "count": 1546,
+              "p50_ns": 5636111,
+              "p99_ns": 25124207,
+              "mean_ns": 7387868,
+              "min_ns": 7613,
+              "max_ns": 25124207
+            },
+            "owner_entry_to_recv_begin": {
+              "count": 1546,
+              "p50_ns": 558722,
+              "p99_ns": 2398735,
+              "mean_ns": 742367,
+              "min_ns": 1397,
+              "max_ns": 2755759
+            }
+          }
+        }
+      }
+    }
+  ]
+}
