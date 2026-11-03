@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Measure fixed-rate V2 load sensitivity to generator process fanout."""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+from pathlib import Path
+import statistics
+import subprocess
+import sys
+from typing import Any
+
+from rpc_load_quality import load_quality
+from run_rpc_bench import metadata as base_metadata
+from run_rpc_headroom import run_profile_case, server_pressure
+from run_rpc_scalability import (
+    SERVER_PRESSURE_FIELDS,
+    clean_result,
+    exact_wall_signals,
+    parse_int_list,
+    scheduler_late_one_interval,
+    split_rates,
+)
+
+
+def trial_order(fanouts: list[int], trial: int) -> list[int]:
+    ordered = sorted(set(fanouts))
+    return ordered if trial % 2 else list(reversed(ordered))
+
+
+def slots_per_generator(aggregate_slots: int, generators: int) -> int:
+    if aggregate_slots < 1 or generators < 1:
+        raise ValueError("aggregate slots and generators must be positive")
+    if aggregate_slots % generators:
+        raise ValueError("aggregate generator slots must divide every fanout")
+    slots = aggregate_slots // generators
+    if not 1 <= slots <= 256:
+        raise ValueError("per-generator slots must be in 1..256")
+    return slots
+
+
+def summarize_fanout(generators: int,
+                     results: list[dict[str, Any]]) -> dict[str, Any]:
+    if not results:
+        raise ValueError("fanout summary requires results")
+    if any(result["case"]["generators"] != generators for result in results):
+        raise ValueError("fanout summary mixed generator counts")
+
+    rate_rps = results[0]["case"]["rate_rps"]
+    if any(result["case"]["rate_rps"] != rate_rps for result in results):
+        raise ValueError("fanout summary mixed offered rates")
+
+    per_generator_slots = results[0]["case"]["generator_capacity"]
+    if any(result["case"]["generator_capacity"] != per_generator_slots or
+           result["case"]["generator_window"] != per_generator_slots
+           for result in results):
+        raise ValueError("fanout summary mixed generator slot controls")
+    aggregate_generator_slots = per_generator_slots * generators
+
+    signal_counts: dict[str, int] = {}
+    server_signal_counts: dict[str, int] = {}
+    for result in results:
+        for signal in exact_wall_signals(result):
+            signal_counts[signal] = signal_counts.get(signal, 0) + 1
+        server = result["server_exit"]
+        for signal, key in SERVER_PRESSURE_FIELDS.items():
+            if server[key]:
+                server_signal_counts[signal] = (
+                    server_signal_counts.get(signal, 0) + 1)
+
+    accepted_fraction = [
+        result["client"]["accepted"] / result["client"]["offered"]
+        if result["client"]["offered"] else 0.0
+        for result in results
+    ]
+    ok_rps = [result["client"]["ok_rps"] for result in results]
+    late_p99 = [
+        result["client"]["scheduler_late_p99_us"] for result in results]
+    dropped = [result["client"]["scheduler_dropped"] for result in results]
+    client_cpu = [result["client"]["client_cpu_s"] for result in results]
+    client_rss = [
+        result["client"]["client_peak_rss_kib"] for result in results]
+    command_peak = [
+        result["server_exit"]["command_queue_peak"] for result in results]
+    control_peak = [
+        result["server_exit"]["control_tx_pool_peak"] for result in results]
+
+    return {
+        "type": "fanout_summary",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "generators": generators,
+        "trials": len(results),
+        "rate_rps": rate_rps,
+        "per_generator_rates_rps": split_rates(rate_rps, generators),
+        "per_generator_slots": per_generator_slots,
+        "aggregate_generator_slots": aggregate_generator_slots,
+        "clean_trials": sum(clean_result(result) for result in results),
+        "load_quality_trials": {
+            status: sum(result.get("load_quality", {}).get("status", "unknown") == status
+                        for result in results)
+            for status in ("pass", "fail", "unknown")
+        },
+        "generator_drop_trials": sum(
+            result["client"]["scheduler_dropped"] > 0 for result in results),
+        "generator_late_trials": sum(
+            scheduler_late_one_interval(result) for result in results),
+        "server_pressure_trials": sum(
+            server_pressure(result) for result in results),
+        "signal_counts": dict(sorted(signal_counts.items())),
+        "server_signal_counts": dict(sorted(server_signal_counts.items())),
+        "accepted_fraction_min": min(accepted_fraction),
+        "accepted_fraction_median": statistics.median(accepted_fraction),
+        "accepted_fraction_max": max(accepted_fraction),
+        "ok_rps_min": min(ok_rps),
+        "ok_rps_median": statistics.median(ok_rps),
+        "ok_rps_max": max(ok_rps),
+        "scheduler_late_p99_us_median": statistics.median(late_p99),
+        "scheduler_late_p99_us_max": max(late_p99),
+        "scheduler_dropped_median": statistics.median(dropped),
+        "scheduler_dropped_max": max(dropped),
+        "client_cpu_s_median": statistics.median(client_cpu),
+        "client_peak_rss_kib_median": statistics.median(client_rss),
+        "command_queue_peak_max": max(command_peak),
+        "control_tx_pool_peak_max": max(control_peak),
+        "rpc_executor_threads": results[0]["server_exit"]["rpc_executor_threads"],
+        "rpc_task_queue_capacity": results[0]["server_exit"]["rpc_task_queue_capacity"],
+    }
+
+
+def request_budget(rate: int, requests: int, min_arrival_ms: int,
+                   duration_ms: int | None) -> int:
+    # 显式时长优先，避免请求数下限把有限时长悄悄延长。
+    return (math.ceil(rate * duration_ms / 1000) if duration_ms is not None
+            else max(requests, math.ceil(rate * min_arrival_ms / 1000)))
+
+
+def validate_args(parser: argparse.ArgumentParser,
+                  args: argparse.Namespace) -> None:
+    if args.duration_ms is not None and not 10 <= args.duration_ms <= 10000:
+        parser.error("duration-ms must be in 10..10000")
+    if not math.isfinite(args.max_submit_late_us) or args.max_submit_late_us < 0:
+        parser.error("max-submit-late-us must be finite and non-negative")
+    if not os.access(args.binary, os.X_OK):
+        parser.error("binary is not executable")
+    if not 1 <= args.trials <= 5:
+        parser.error("trials must be in 1..5")
+    if not 1 <= args.rate <= 1_000_000:
+        parser.error("rate must be in 1..1000000")
+    if (not args.fanouts or len(set(args.fanouts)) != len(args.fanouts) or
+            any(value < 2 or value > 32 or value > args.rate
+                for value in args.fanouts)):
+        parser.error("fanouts must be unique values in 2..min(32, rate)")
+    if not 1 <= args.requests <= 10_000_000:
+        parser.error("requests must be in 1..10000000")
+    if not 10 <= args.min_arrival_ms <= 10000:
+        parser.error("min-arrival-ms must be in 10..10000")
+    if not 1 <= args.aggregate_generator_slots <= 8192:
+        parser.error("aggregate-generator-slots must be in 1..8192")
+    try:
+        for generators in args.fanouts:
+            slots_per_generator(args.aggregate_generator_slots, generators)
+    except ValueError as error:
+        parser.error(str(error))
+    if not 1 <= args.timeout_ms <= 30000:
+        parser.error("invalid timeout")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--label", default="generator-fanout-sensitivity")
+    parser.add_argument("--trials", type=int, default=2)
+    parser.add_argument("--rate", type=int, default=40000)
+    parser.add_argument("--fanouts", type=parse_int_list,
+                        default=parse_int_list("4,8,16,32"))
+    parser.add_argument("--requests", type=int, default=256)
+    parser.add_argument("--min-arrival-ms", type=int, default=250)
+    parser.add_argument("--duration-ms", type=int)
+    parser.add_argument("--max-submit-late-us", type=float, default=1000.0)
+    parser.add_argument("--aggregate-generator-slots", type=int, default=1024)
+    parser.add_argument("--timeout-ms", type=int, default=3000)
+    args = parser.parse_args()
+    args.binary = args.binary.resolve(strict=True)
+    validate_args(parser, args)
+
+    requests = request_budget(args.rate, args.requests, args.min_arrival_ms,
+                              args.duration_ms)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    metadata = base_metadata(args.binary, args.label, load_mode="open")
+    metadata.update({
+        "type": "fanout_metadata",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "trials": args.trials,
+        "rate_rps": args.rate,
+        "fanouts": args.fanouts,
+        "requests": requests,
+        "duration_ms": args.duration_ms,
+        "max_submit_late_us": args.max_submit_late_us,
+        "aggregate_generator_slots": args.aggregate_generator_slots,
+        "server_capacity": 128,
+        "slow_ms": 0,
+        "per_fanout_generator_slots": {
+            str(generators):
+                slots_per_generator(args.aggregate_generator_slots, generators)
+            for generators in args.fanouts
+        },
+        "note": (
+            "Fanout order alternates by trial. Aggregate generator in-flight "
+            "slots and public V2 call limits remain fixed, so process fanout "
+            "is isolated from total Client concurrency."),
+    })
+
+    results_by_fanout: dict[int, list[dict[str, Any]]] = {
+        value: [] for value in args.fanouts}
+
+    with args.output.open("w", encoding="utf-8") as output:
+        output.write(json.dumps(metadata, allow_nan=False) + "\n")
+        output.flush()
+
+        for trial in range(1, args.trials + 1):
+            for generators in trial_order(args.fanouts, trial):
+                generator_slots = slots_per_generator(
+                    args.aggregate_generator_slots, generators)
+                case = {
+                    "trial": trial,
+                    "rate_rps": args.rate,
+                    "requests": requests,
+                    "warmup": 32,
+                    "slow_ms": 0,
+                    "window": 128,
+                    "capacity": 128,
+                    "generator_window": generator_slots,
+                    "generator_capacity": generator_slots,
+                    "timeout_ms": args.timeout_ms,
+                    "generators": generators,
+                    "public_profile": "generator_fanout_fixed_limits",
+                }
+                case_dir = (
+                    args.output.parent / (args.output.stem + "-logs") /
+                    f"t{trial}-g{generators}-{args.rate}rps")
+                try:
+                    result = run_profile_case(args.binary, case, case_dir)
+                except Exception as error:
+                    output.write(json.dumps({
+                        "type": "failure", "schema": 2,
+                        "api_generation": "rpc_v2",
+                        "trial": trial,
+                        "generators": generators,
+                        "case": case,
+                        "error": str(error),
+                        "logs": str(case_dir),
+                    }) + "\n")
+                    output.flush()
+                    raise
+
+                result["type"] = "fanout_case"
+                result["schema"] = 2
+                result["api_generation"] = "rpc_v2"
+                result["wall_signals"] = exact_wall_signals(result)
+                result["load_quality"] = load_quality(result, args.max_submit_late_us)
+                results_by_fanout[generators].append(result)
+                output.write(json.dumps(result, allow_nan=False) + "\n")
+                output.flush()
+                print(
+                    f"trial={trial} generators={generators} "
+                    f"load_quality={result['load_quality']['status']} "
+                    f"slots={generator_slots}x{generators} "
+                    f"accepted={result['client']['accepted']}/"
+                    f"{result['client']['offered']} "
+                    f"ok_rps={result['client']['ok_rps']:.1f} "
+                    f"late_p99_us={result['client']['scheduler_late_p99_us']:.1f} "
+                    f"client_cpu_s={result['client']['client_cpu_s']:.3f} "
+                    f"signals={','.join(result['wall_signals']) or 'none'}",
+                    flush=True)
+
+        for generators in sorted(results_by_fanout):
+            summary = summarize_fanout(
+                generators, results_by_fanout[generators])
+            output.write(json.dumps(summary, allow_nan=False) + "\n")
+            output.flush()
+            print(
+                f"fanout={generators} "
+                f"load_quality={summary['load_quality_trials']} "
+                f"clean={summary['clean_trials']}/{summary['trials']} "
+                f"accepted_median={summary['accepted_fraction_median']:.3f} "
+                f"ok_rps_median={summary['ok_rps_median']:.1f} "
+                f"generator_pressure="
+                f"{summary['generator_drop_trials']}/"
+                f"{summary['generator_late_trials']} "
+                f"server_pressure={summary['server_pressure_trials']}",
+                flush=True)
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError, TimeoutError,
+            subprocess.TimeoutExpired) as error:
+        print(f"fanout benchmark failed: {error}", file=sys.stderr)
+        raise SystemExit(1)

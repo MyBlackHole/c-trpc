@@ -1,0 +1,301 @@
+#include "../src/execution/completion_queue.h"
+
+#include "tr/status.h"
+
+#include <assert.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+
+static void noop(void *arg)
+{
+	(void)arg;
+}
+
+struct push_wait_ctx {
+	struct tr_completion_queue *queue;
+	struct tr_completion completion;
+	uint64_t expected_generation;
+	int ret;
+	int need_wake;
+};
+
+static void *push_wait_main(void *arg)
+{
+	struct push_wait_ctx *ctx = (struct push_wait_ctx *)arg;
+
+	ctx->need_wake = -1;
+	ctx->ret = tr_completion_queue_push_wait(
+		ctx->queue, &ctx->completion, ctx->expected_generation,
+		&ctx->need_wake);
+	return NULL;
+}
+
+static void wait_for_waiters(
+	struct tr_completion_queue *queue, uint32_t target)
+{
+	struct timespec pause = { 0, 1000000L };
+	unsigned i;
+
+	for (i = 0; i < 5000U; ++i) {
+		uint32_t waiters;
+
+		pthread_mutex_lock(&queue->lock);
+		waiters = queue->waiters;
+		pthread_mutex_unlock(&queue->lock);
+		if (waiters == target)
+			return;
+		(void)nanosleep(&pause, NULL);
+	}
+	assert(!"timed out waiting for completion queue waiter");
+}
+
+static void test_completion_capacity_wait_and_close(void)
+{
+	struct tr_completion_queue queue;
+	struct tr_completion first = { noop, (void *)(uintptr_t)1U };
+	struct tr_completion out[2];
+	struct push_wait_ctx producer;
+	pthread_t thread;
+	int need_wake = 0;
+	int has_more = 0;
+	size_t count;
+
+	memset(&producer, 0, sizeof(producer));
+	assert(tr_completion_queue_init(&queue, 1U) == TR_OK);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	producer.expected_generation =
+		tr_completion_queue_admission_generation(&queue);
+	assert(producer.expected_generation != 0U);
+
+	assert(tr_completion_queue_push(&queue, &first, &need_wake) == TR_OK);
+	assert(need_wake == 1);
+
+	producer.queue = &queue;
+	producer.completion.fn = noop;
+	producer.completion.arg = (void *)(uintptr_t)2U;
+	assert(pthread_create(&thread, NULL, push_wait_main, &producer) == 0);
+	wait_for_waiters(&queue, 1U);
+
+	memset(out, 0, sizeof(out));
+	count = tr_completion_queue_pop_batch(&queue, out, 1U, &has_more);
+	assert(count == 1U);
+	assert(has_more == 0);
+	assert(out[0].arg == (void *)(uintptr_t)1U);
+	assert(pthread_join(thread, NULL) == 0);
+	assert(producer.ret == TR_OK);
+	/* 弹出清空了旧唤醒轮次，被阻塞的生产者必须重新请求唤醒。 */
+	assert(producer.need_wake == 1);
+	wait_for_waiters(&queue, 0U);
+
+	/* 队列再次满时，关闭必须直接唤醒等待者返回 CLOSED；生产者
+	 * 所有权未转移，已有完成项仍可由消费者排空。
+	 */
+	producer.completion.arg = (void *)(uintptr_t)3U;
+	producer.ret = TR_OK;
+	producer.need_wake = -1;
+	assert(pthread_create(&thread, NULL, push_wait_main, &producer) == 0);
+	wait_for_waiters(&queue, 1U);
+	tr_completion_queue_close(&queue);
+	{
+		uint64_t closed_generation;
+
+		pthread_mutex_lock(&queue.lock);
+		closed_generation = queue.admission_generation;
+		pthread_mutex_unlock(&queue.lock);
+
+		/* 故意在旧等待线程回收前重开。旧 generation 无论何时重新取得
+		 * 队列锁，都不能把上一运行期的完成项投入新轮次。
+		 */
+		assert(tr_completion_queue_open(&queue) == TR_OK);
+		pthread_mutex_lock(&queue.lock);
+		assert(queue.admission_generation != closed_generation);
+		pthread_mutex_unlock(&queue.lock);
+	}
+	assert(pthread_join(thread, NULL) == 0);
+	assert(producer.ret == TR_ERR_CLOSED);
+	assert(producer.need_wake == -1);
+	wait_for_waiters(&queue, 0U);
+
+	memset(out, 0, sizeof(out));
+	count = tr_completion_queue_pop_batch(&queue, out, 1U, &has_more);
+	assert(count == 1U);
+	assert(out[0].arg == (void *)(uintptr_t)2U);
+	assert(has_more == 0);
+
+	pthread_mutex_lock(&queue.lock);
+	assert(queue.full_events == 2U);
+	assert(queue.waiters == 0U);
+	pthread_mutex_unlock(&queue.lock);
+	tr_completion_queue_close(&queue);
+	tr_completion_queue_destroy(&queue);
+}
+
+static void test_completion_batch_wakes_all_capacity_waiters(void)
+{
+	struct tr_completion_queue queue;
+	struct tr_completion seed = { noop, NULL };
+	struct tr_completion out[2];
+	struct push_wait_ctx producers[2];
+	pthread_t threads[2];
+	int has_more = 0;
+	size_t count;
+	unsigned i;
+
+	memset(producers, 0, sizeof(producers));
+	assert(tr_completion_queue_init(&queue, 2U) == TR_OK);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	{
+		uint64_t generation =
+			tr_completion_queue_admission_generation(&queue);
+
+		assert(generation != 0U);
+		for (i = 0; i < 2U; ++i)
+			producers[i].expected_generation = generation;
+	}
+	assert(tr_completion_queue_push(&queue, &seed, NULL) == TR_OK);
+	assert(tr_completion_queue_push(&queue, &seed, NULL) == TR_OK);
+
+	for (i = 0; i < 2U; ++i) {
+		producers[i].queue = &queue;
+		producers[i].completion.fn = noop;
+		producers[i].completion.arg =
+			(void *)(uintptr_t)(10U + i);
+		assert(pthread_create(
+			       &threads[i], NULL, push_wait_main,
+			       &producers[i]) == 0);
+	}
+	wait_for_waiters(&queue, 2U);
+
+	count = tr_completion_queue_pop_batch(
+		&queue, out, 2U, &has_more);
+	assert(count == 2U);
+	assert(has_more == 0);
+
+	for (i = 0; i < 2U; ++i) {
+		assert(pthread_join(threads[i], NULL) == 0);
+		assert(producers[i].ret == TR_OK);
+	}
+	wait_for_waiters(&queue, 0U);
+
+	pthread_mutex_lock(&queue.lock);
+	assert(queue.count == 2U);
+	assert(queue.full_events == 2U);
+	pthread_mutex_unlock(&queue.lock);
+
+	tr_completion_queue_close(&queue);
+	count = tr_completion_queue_pop_batch(
+		&queue, out, 2U, &has_more);
+	assert(count == 2U);
+	assert(has_more == 0);
+	tr_completion_queue_destroy(&queue);
+}
+
+static void test_completion_admission_and_wake_coalescing(void)
+{
+	struct tr_completion_queue queue;
+	struct tr_completion completion = { noop, NULL };
+	struct tr_completion out[2];
+	int need_wake;
+	int has_more;
+	size_t count;
+
+	assert(tr_completion_queue_init(&queue, 2U) == TR_OK);
+
+	need_wake = -1;
+	assert(tr_completion_queue_push(&queue, &completion, &need_wake) ==
+	       TR_ERR_CLOSED);
+
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+
+	need_wake = 0;
+	assert(tr_completion_queue_push(&queue, &completion, &need_wake) == TR_OK);
+	assert(need_wake == 1);
+
+	need_wake = 1;
+	assert(tr_completion_queue_push(&queue, &completion, &need_wake) == TR_OK);
+	assert(need_wake == 0);
+
+	assert(tr_completion_queue_push(&queue, &completion, NULL) == TR_AGAIN);
+
+	memset(out, 0, sizeof(out));
+	has_more = 0;
+	count = tr_completion_queue_pop_batch(&queue, out, 1U, &has_more);
+	assert(count == 1U);
+	assert(has_more == 1);
+
+	/* 准入关闭独立于剩余排队完成项。 */
+	tr_completion_queue_close(&queue);
+	assert(tr_completion_queue_push(&queue, &completion, NULL) ==
+	       TR_ERR_CLOSED);
+
+	has_more = 1;
+	count = tr_completion_queue_pop_batch(&queue, out, 2U, &has_more);
+	assert(count == 1U);
+	assert(has_more == 0);
+
+	/* 空队列排空清除唤醒合并；重开启动新唤醒轮次。 */
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	need_wake = 0;
+	assert(tr_completion_queue_push(&queue, &completion, &need_wake) == TR_OK);
+	assert(need_wake == 1);
+	tr_completion_queue_close(&queue);
+
+	has_more = 1;
+	count = tr_completion_queue_pop_batch(&queue, out, 2U, &has_more);
+	assert(count == 1U);
+	assert(has_more == 0);
+
+	tr_completion_queue_destroy(&queue);
+}
+
+static void test_completion_delayed_old_epoch_rejected(void)
+{
+	struct tr_completion_queue queue;
+	struct tr_completion completion = { noop, NULL };
+	struct tr_completion out;
+	uint64_t old_generation;
+	uint64_t new_generation;
+	int need_wake = -1;
+	int has_more = 0;
+
+	assert(tr_completion_queue_init(&queue, 1U) == TR_OK);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	old_generation = tr_completion_queue_admission_generation(&queue);
+	assert(old_generation != 0U);
+
+	/* 模拟生产者已经开始旧轮次交接并保存令牌，
+	 * 但在真正取得队列锁前被长时间调度出去。
+	 */
+	tr_completion_queue_close(&queue);
+	assert(tr_completion_queue_open(&queue) == TR_OK);
+	new_generation = tr_completion_queue_admission_generation(&queue);
+	assert(new_generation != 0U && new_generation != old_generation);
+
+	assert(tr_completion_queue_push_wait(
+		       &queue, &completion, old_generation, &need_wake) ==
+	       TR_ERR_CLOSED);
+	assert(need_wake == -1);
+
+	assert(tr_completion_queue_push_wait(
+		       &queue, &completion, new_generation, &need_wake) == TR_OK);
+	assert(need_wake == 1);
+	memset(&out, 0, sizeof(out));
+	assert(tr_completion_queue_pop_batch(
+		       &queue, &out, 1U, &has_more) == 1U);
+	assert(out.fn == noop && has_more == 0);
+
+	tr_completion_queue_close(&queue);
+	tr_completion_queue_destroy(&queue);
+}
+
+int main(void)
+{
+	test_completion_admission_and_wake_coalescing();
+	test_completion_capacity_wait_and_close();
+	test_completion_batch_wakes_all_capacity_waiters();
+	test_completion_delayed_old_epoch_rejected();
+	puts("completion admission/wake coalescing/capacity wait: ok");
+	return 0;
+}

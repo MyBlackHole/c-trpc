@@ -1,0 +1,85 @@
+name: RPC benchmark smoke
+
+on:
+  pull_request:
+    paths:
+      - 'bench/**'
+      - 'src/**'
+      - 'include/**'
+      - 'xmake.lua'
+      - '.github/workflows/rpc-benchmark.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bench/**'
+      - 'src/**'
+      - 'include/**'
+      - 'xmake.lua'
+      - '.github/workflows/rpc-benchmark.yml'
+
+permissions:
+  contents: read
+
+env:
+  XMAKE_VERSION: '3.1.1'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  rpc-smoke:
+    name: rpc-smoke (${{ matrix.cc }}, ${{ matrix.mode }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {cc: gcc, mode: debug, workload: false}
+          - {cc: gcc, mode: release, workload: true}
+          - {cc: clang, mode: release, workload: false}
+          - {cc: gcc, mode: asan, workload: true}
+          - {cc: gcc, mode: tsan, workload: true}
+    steps:
+      - name: 设置构建与测试临时目录
+        run: |
+          printf 'TMPDIR=%s\nXMAKE_TMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: ${{ env.XMAKE_VERSION }}
+      - name: 验证计数一致性并运行真实 RPC 场景
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/rpc-bench"
+          mkdir -p "$results"
+          exec 3>&1
+          trap 'status=$?; tail -n 100 "$results/build-and-test.log" >&3; exit "$status"' EXIT
+          exec >"$results/build-and-test.log" 2>&1
+          git rev-parse HEAD > "$results/source-commit.txt"
+          git archive --format=tar -o "$results/source.tar" HEAD
+          if [ "${{ matrix.mode }}" = release ]; then
+            python3 -m unittest discover -s bench -p 'test_rpc_*.py' -v
+          fi
+          xmake f -c -y -m ${{ matrix.mode }} --toolchain=${{ matrix.cc }} --crc32c_portable=n
+          xmake build -v bench_rpc
+          if [ "${{ matrix.workload }}" = true ]; then
+            python3 bench/run_rpc_bench.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
+              --output "$results/smoke.jsonl"
+            python3 bench/run_rpc_capacity.py \
+              --binary build/linux/x86_64/${{ matrix.mode }}/bench_rpc \
+              --smoke --label "${{ matrix.cc }}-${{ matrix.mode }}" \
+              --output "$results/open-smoke.jsonl"
+          fi
+      - name: 保留精确源码快照与冒烟测试诊断
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpc-bench-${{ matrix.cc }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/rpc-bench
+          if-no-files-found: ignore
+          retention-days: 7

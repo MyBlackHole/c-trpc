@@ -1,0 +1,175 @@
+{
+    "schema": 1,
+    "recorded_on": "2026-10-23",
+    "product_commit": "dd3332ee5f8229a5f0ef4f76531f08ae257a0562",
+    "product_version": "2.0.0-dev.1",
+    "diagnostics_run": 39764939066,
+    "artifact_id": 12420160612,
+    "artifact_name": "rpc-bench-diagnostics-gcc-release",
+    "source_files_sha256": {
+        "capacity-curve.jsonl": "aff0d5610a6b0c526ab05d9fd267bf4f771bab5bbaa039443dfb9f02531afa7d",
+        "generator-fanout-40k.jsonl": "3c1204229b931e284fb59b6f594dfaea7098cd40dd3ab3f9d699f881311ae67b",
+        "generator-slots-40k.jsonl": "342467204423efc866a86191fbc931e5ece8eaf3f74f6e9d0bab645e2468115a",
+        "repeatability-40k.jsonl": "9fadaa41198144211906f850173ab7765742bca8ceb16b94c9ebc169552c19a2",
+        "resource-headroom.jsonl": "c719317864c2c40c768447d6a7a86dc9ad74ed6e52e208879c665d5cd4bfcfd9",
+        "scalability-matrix.jsonl": "040e1e37141b6bb7b4c4e0d81a147c8c0316c0aec8287604d10f31218df4c7eb"
+    },
+    "repeatability_metadata": {
+        "type": "repeatability_metadata",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "label": "gcc-release-40k-repeatability",
+        "git_revision": "dd3332ee5f8229a5f0ef4f76531f08ae257a0562",
+        "binary": "/home/runner/work/c-trpc/c-trpc/build/linux/x86_64/release/bench_rpc",
+        "binary_sha256": "5c6f1bf0f768cc268a3953168d3797edbd6a3f2985092eb0c4fed2c9b869af57",
+        "platform": "Linux-6.8.0-1070-azure-x86_64-with-glibc2.35",
+        "cpu_model": "AMD EPYC 7763 64-Core Processor",
+        "affinity": [
+            0,
+            1,
+            2,
+            3
+        ],
+        "cgroup_cpu_max": null,
+        "clock": "CLOCK_MONOTONIC",
+        "transport": "TCP IPv4 loopback",
+        "load_model": "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; scheduler drops and submission lateness are reported separately",
+        "latency": "before submission to terminal callback entry; successful and accepted separately",
+        "goodput": "verified successful request+response application bytes; excludes wire overhead",
+        "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only",
+        "trials": 3,
+        "rate_rps": 40000,
+        "generators": 16,
+        "requests": 10000,
+        "generator_window": 64,
+        "generator_capacity": 64,
+        "public_profiles": {
+            "small_call_limit": {
+                "capacity": 32,
+                "bulk_bytes": 16384
+            },
+            "default_call_limit": {
+                "capacity": 128,
+                "bulk_bytes": 65536
+            },
+            "large_call_limit": {
+                "capacity": 256,
+                "bulk_bytes": 65536
+            }
+        },
+        "note": "Repeated public V2 call-limit profiles classify exact Server wall signals; no performance threshold is applied."
+    },
+    "repeatability_summaries": [
+        {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "small_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+                "client_submit_error": 3,
+                "control_tx_pool_exhausted": 3,
+                "load_generator_drop": 3,
+                "load_generator_late": 3,
+                "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+                "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+                "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 4895.837406721863,
+            "ok_rps_median": 4980.5371525908,
+            "ok_rps_max": 4982.371914870078,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+        },
+        {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "default_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+                "client_submit_error": 3,
+                "control_tx_pool_exhausted": 3,
+                "load_generator_drop": 3,
+                "load_generator_late": 3,
+                "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+                "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+                "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 4475.530088603027,
+            "ok_rps_median": 6520.97826857107,
+            "ok_rps_max": 6653.900765786979,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+        },
+        {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "large_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+                "client_submit_error": 3,
+                "control_tx_pool_exhausted": 3,
+                "load_generator_drop": 3,
+                "load_generator_late": 3,
+                "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+                "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+                "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 5209.852523754004,
+            "ok_rps_median": 6069.878341360962,
+            "ok_rps_max": 6250.296795885677,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+        }
+    ],
+    "repeatability_totals": {
+        "offered": 90000,
+        "scheduler_dropped": 1054,
+        "attempted": 88946,
+        "accepted": 19035,
+        "completed": 19035,
+        "ok": 13895,
+        "submit_again": 0,
+        "submit_errors": 69911,
+        "deadlines": 0,
+        "rpc_errors": 5140,
+        "unavailable": 5140,
+        "resource_exhausted": 0,
+        "invalid_responses": 0
+    },
+    "limitations": [
+        "这是已运行 CI 工件的摘录，不是 R17 新运行的性能实验。",
+        "40k 表示计划到达率；实际成功率、丢弃、迟到与提交失败必须一起读取。",
+        "不据压力信号直接断定根因，不将共享 runner 的回环结果推广为部署 SLA。",
+        "原始工件保留期为 7 天；本摘录与摘要保留引用事实，不替代完整原始日志。"
+    ]
+}

@@ -1,0 +1,251 @@
+# 测试与 CI 覆盖策略
+
+## 目标
+
+测试矩阵按“不变量证据”组织，不按编译器、优化级别、CRC 后端和内存/线程检查器
+做机械笛卡尔积。
+
+每个测试/任务必须能回答一个独立问题：
+
+- 功能语义是否正确；
+- 生命周期/所有权是否收敛；
+- 并发访问是否存在数据竞争或自等待；
+- 内存/未定义行为是否安全；
+- 编译器/公开 SDK 边界是否可移植；
+- CPU 特性回退是否正确；
+- 真实 RPC 负载下是否仍满足上述不变量。
+
+## 功能测试分层
+
+<a id="primitive-单元测试"></a>
+
+### 基础原语单元测试
+
+命令队列、完成队列、定时器队列、CRC32C 等基础原语由各自
+`test_*.c` 独立验证。
+
+不要在 `test_transport.c` 再复制基础 FIFO、最小堆或测试向量验证。
+Transport/RPC 集成测试只验证跨模块契约。
+
+### 集成测试
+
+`test_transport.c` 关注：
+
+- Reactor、套接字与解析器集成；
+- Channel/Stream 生命周期；
+- 重连、保活与连接替换；
+- `test_client_server_facade_nodelay_policy` 的 V2 门面传输策略；
+- 所有者发布与拆除屏障。
+
+V2 RPC 协议和调用合同由 `test_rpc_record`、`test_client_record`、
+`test_server_record`、`test_rpc_record_endpoint_tcp` 与 `test_rpc_v2_sdk` 等专用目标
+验证；`test_transport` 不再链接旧 V1 RPC Endpoint 或 Wire。
+
+专门的并发/调度测试继续独立：
+
+- `test_reactor_fairness`：命令/完成队列公平性与停止屏障；
+- `test_reactor_budget`：单轮 RX/TX/命令/完成处理预算；
+- `test_tx_priority`：CONTROL/DATA 调度顺序；
+- RPC 准入/背压：由 V2 `test_server_record`、`test_client_record` 和
+  `test_rpc_record_endpoint_tcp` 验证；通用任务队列由 `test_task_executor` 验证；
+- TSan：数据竞争；
+- ASan/UBSan：生命周期、越界和未定义行为。
+
+这些测试即使触达同一模块，也不是重复覆盖。
+
+### 公共 V2 SDK
+
+普通 `tr_client_create/tr_server_create` 和 `tr_client_unary_call/call_start` 是
+V2 入口，`tr_server_create()` 只构造 V2 RPC；连接组测试使用
+`tr_server_create_transport()`。`test_rpc_v2_sdk`、`test_rpc_v2_server` 与 Echo
+示例直接使用普通门面。
+SDK 测试验证空方法表不会回退 V1；连接组专测使用显式传输工厂，并验证 RPC 监听
+和连接被拒绝、失败不改端口，以及不支持的 RPC 自动重连配置会被明确拒绝。
+Server 构造、peer retirement、排空、统计、构造回滚和销毁重试回归现经 V2
+或 transport-only facade 运行。Runtime 不再配置或拥有旧 RPC Executor Group。
+旧 raw V1 Call、Endpoint、Executor Group、Wire 核心及其专属测试闭包已由 R14
+移除。`test_rpc_record` 保留固定旧版本字节的拒绝检查，不链接旧 Wire；
+`test_rpc_raw_codec` 单独验证仍保留的 RAW Codec：编码复制，解码返回借用视图。
+inventory 的精确符号/类型
+扫描及 release 静态库检查验证旧对象与符号已退出，同时确认 `rpc_codec.c.o` 仍提供
+RAW Codec。
+`bench_rpc` 和容量、扩展性、headroom 等负载驱动
+现通过公开 V2 Client/Server 运行，V1 日期 CSV 只作为历史记录，不纳入 V2 基线。
+
+`test_rpc_v2_sdk` 只使用安装范围内的公共头与 C/POSIX 接口。真实回环 TCP
+覆盖 ONE→ONE、ONE→MANY、MANY→ONE、MANY→MANY，区分零条 MANY 和零字节消息，
+并验证请求与响应元数据、成功复制后的源内存复用、真实发送背压、取消、期限和排空。
+响应元数据验证初始/正文/尾部/终局顺序、二进制值、工作批次内复制，以及错误锁存
+和合法错误终局；V2 语义统计验证受理/拒绝、终局回调、仍在运行的取消任务、
+断连与多对端累计，以及失败不改输出。内部记账专测覆盖累计与聚合的溢出边界。
+同一源码在 Make 安装检查中被复制到仓库外，以四个 C/C++ 编译器独立编译运行，
+不能使用 `src` 包含路径、链接包装或额外 `-lzstd` 补齐 SDK 缺口。
+
+一元自动发送在现有 `test_client_record` 中验证 OPEN、MESSAGE、HALF_CLOSE
+分别背压，零字节和最大正文、复制准入失败不发布调用、消息后错误 FINAL、
+回调内取消、早终局释放用户参数，以及待发送请求在期限、断连、停止域重试中
+归还。它复用原测试目标与超时，不建立另一套 CI 作业。公开 SDK 消费端的
+ONE→ONE 最大正文、元数据和零字节场景使用 `tr_client_unary_call`，从而在
+原安装后 C11/C++11 四编译器检查中覆盖新符号与自动发送路径。
+
+`test_rpc_v2_server` 独立验证服务端业务身份、冻结方法表、终局责任与回调生命周期。
+它只在测试目标中对完整合法 OPEN 的工作对象分配进行故障注入，证明工作尚未
+开始时的资源失败仍兑现终局；该内部观察不进入上述安装消费端。
+客户端复制池满后的可写恢复、早终局及完整代次由既有 `test_client_record`
+扩展验证，保留原测试身份。新增测试自然进入原有五种完整功能模式，不增改 CI
+必需作业名称或把配置编译通过当成网络运行通过。
+
+## CI 矩阵
+
+保留完整功能测试集：
+
+```text
+GCC debug
+GCC release
+Clang release
+ASan + UBSan
+TSan
+```
+
+原因：
+
+- GCC 的 `debug` 模式验证低优化/调试构建；
+- GCC 的 `release` 模式验证生产优化路径；
+- Clang 的 `release` 模式提供独立编译器证据；
+- ASan/UBSan 与 TSan 验证不同错误类别。
+
+不再为 `crc32c_portable={n,y}` 重复整个测试集。
+
+CRC 后端单独验证：
+
+```text
+强制使用可移植后端运行 test_crc32c
+自动选择后端 + QEMU 隐藏 SSE4.2
+```
+
+这样直接验证后端选择，而不是把无关 RPC/Channel 测试翻倍。
+
+## Echo 独立进程冒烟测试
+
+安装与构建检查保留原有的服务端就绪探测、客户端 20 秒超时及响应内容断言。
+请求成功后，正常路径显式发送 `SIGTERM`，最多等待 10 秒，并检查服务端退出状态
+必须为 0；退出失败或超时均使该步骤失败并输出服务端日志。`EXIT` trap 仅在失败
+路径强制清理剩余服务端，不再承担正常退出验证。
+
+`scripts/echo_smoke_shutdown.sh` 使用 Ubuntu 既有的 Bash、GNU `timeout` 与
+`tail --pid`，最后由父 shell 的 `wait` 取得真实退出状态。
+`python3 scripts/test_echo_smoke_shutdown.py` 通过独立替身进程验证正常退出、
+非零退出和忽略 `SIGTERM` 的挂起，检查失败能传递给调用 shell，且不会遗留替身。
+这项自测只覆盖 CI 判定逻辑，不替代库的功能测试。
+
+<a id="rpc-benchmark-smoke"></a>
+
+## RPC 基准冒烟测试
+
+基准测试负载不是第二套完整 CI。
+
+保留三种有独立证据价值的运行：
+
+```text
+GCC release  -> 正常负载 / 基准测试脚本
+ASan         -> 负载内存安全
+TSan         -> 负载并发安全
+```
+
+Clang 与 `debug` 基准任务仍保留原检查标识，但只做对应的
+`bench_rpc` 构建；真实冒烟负载只在 `release`/ASan/TSan 三种有独立
+证据价值的模式执行。CRC 可移植/回退路径由 CRC 专测覆盖，不在基准测试
+中重复。
+
+PR 必需的冒烟检查不承担容量曲线、扩展性矩阵、资源余量、40k 重复性、
+扇出和生成器槽位扫描。这些属于架构/性能诊断，运行时间和波动来源都明显
+高于正确性冒烟测试，放入独立的 `RPC benchmark diagnostics` 工作流：
+
+```text
+拉取请求
+    -> RPC benchmark smoke（RPC 基准冒烟测试）
+       -> 构建 / 计数核算单元测试
+       -> release 冒烟测试
+       -> ASan 负载
+       -> TSan 负载
+
+main 推送 / workflow_dispatch
+    -> RPC benchmark diagnostics（RPC 基准诊断）
+       -> 容量曲线
+       -> 扩展性矩阵
+       -> 资源余量
+       -> 重复性
+       -> 扇出
+       -> 生成器槽位扫描
+```
+
+这样 PR 门禁只回答“这次改动是否破坏真实 RPC 正确性/生命周期负载”，
+重型性能诊断仍保留证据，但不再增加每个生命周期修复的合并延迟。
+
+<a id="ci-check-identity"></a>
+
+## Clang 静态分析预运行
+
+新增 `static-analysis (clang-14)` 独立 CI 作业，不更名既有检查。
+它重新验证真实 Xmake 生产编译数据库，逐一运行 Clang 14 的核心、Unix 和安全
+分析检查，并存档报告。缺失源文件、工具/配置错误、非零退出或单文件超时会使
+作业失败。`2.0.0-dev.1` / `dd3332ee` 的实际工件覆盖 43 个生产单元，
+Clang 基线保留 9 条 `unverified` 告警；新增、漂移或消失
+的告警已通过独立对照脚本阻断 CI；解析失败、诊断统计不一致同样失败。
+Clang 自动清理模型差异另由实际编译运行与分析器最小对照验证。
+这不是零告警门禁，不能代替运行时检查器、跨架构验证或生命周期人工审查，
+尚不等于 issue #154 的 D1 完成。
+具体命令与告警升级条件见[工具配置](tooling-policy.md#生产静态分析预运行诊断收集阶段)。
+
+## GCC 生产静态分析交叉验证
+
+新增独立 `static-analysis (gcc-11)` 作业，不更名旧的 GCC/Clang/内存
+安全、线程安全与格式检查。它只使用经 Xmake 源码、编译参数和配置身份校验后的
+全部生产翻译单元；`dd3332ee` 工件为 43 个。保留真实 GCC `-c` 编译并加 `-fanalyzer`。
+不可使用 `-fsyntax-only` 冒充分析成功；缺少生成对象或未命中
+真实泄漏反例，即使命令返回 0 也视为分析能力验证失败。
+
+保持正常生产构建的 `-Werror`；GCC 专用分析对已出现的三个
+分析器诊断类别仅取消“警告升错误”，不关闭任何检查项。
+独立脚本对当前 GCC 基线的 1 条 `unverified` 告警执行严格的位置/类型/全文多重集合校验，
+新增或漂移必须失败，不把历史告警自动视作安全问题已解决。
+执行器具有独立正反例、配置不符、生产单元不完整、超时及输出缺失的自测；
+独立基线门禁另有新增、失配和故障传播的负向回归，结果与逐单元诊断归档 7 天。
+
+GCC 与 Clang 的告警集不必相同，也不能由一个分析器的零警告
+替另一个分析器的跟踪告警背书。R14 整体删除旧 `rpc.c` 后，其 GCC 1 条、
+Clang 2 条诊断随生产单元退出，使 R16 前段的 2/11 变为当前 1/9；
+没有将历史诊断改判为误报或根因修复。当前计数与发行限制见
+[R17 评估](reviews/rpc_v2_release_boundary_20261023.md)，完整文本以两份
+`*_known_warnings.json` 为准。后续仍须核实所有权、并发与目标平台的运行时故障路径。
+
+## CI 检查标识
+
+GitHub 必需检查/合并队列可能按任务展示名称绑定。优化矩阵时，
+原有稳定检查名称视为外部自动化 ABI：
+
+- `build-test (gcc)`
+- `build-test (clang)`
+- 既有 `rpc-smoke (...)` 名称
+- 内存/线程检查器、安装与 CRC 检查名称
+
+在无法读取分支保护配置时，默认保持这些名字不变。可以减少任务内
+重复负载，但不能通过随意改名让必需检查永远无法满足。
+
+## 新增测试的门槛
+
+新增回归测试前先写出它保护的不变量。如果现有测试已经覆盖同一判定条件、
+同一故障注入点和同一生命周期边界，应增强现有专测，而不是再复制一份场景。
+
+优先测试：
+
+1. 状态机非法转移；
+2. 准入/拆除的线性化；
+3. 释放后仍发生回调；
+4. 取消与完成的竞争；
+5. 队列已满、分配失败或陈旧代次；
+6. 停止/重启代次；
+7. 所有者回调/工作线程回调自等待；
+8. 故障回滚与资源归还。
+
+不以“代码行覆盖率更高”为理由保留重复测试。

@@ -1,0 +1,811 @@
+{
+  "schema": 1,
+  "recorded_on": "2026-10-23",
+  "task": "PERF-V2-02",
+  "issues": [
+    247,
+    241
+  ],
+  "baseline_commit": "36dadcc298a3606c87a36f1b430e0a94107e52a2",
+  "product_commit": "bd3855b901891cd4f0091a31b33bc0f98b3fa37d",
+  "version": "2.0.0-dev.3",
+  "reviewer": "当前主会话；未使用子 agent，不构成独立审查",
+  "runs": {
+    "baseline": {
+      "raw_file": "perf-v2-02-baseline-40k-20261023.jsonl.gz",
+      "raw_uncompressed_sha256": "921f853cef534d5da4fa0706017b801191ab6864d2818edc59d5a33e52960fe0",
+      "gzip_sha256": "8b7d49f8d46df85a8ee530f07162c2d2103da07d0b585f0f1fae20831c2da2dc",
+      "metadata": {
+        "type": "repeatability_metadata",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "label": "perf-v2-02-baseline-36dadcc",
+        "git_revision": "36dadcc298a3606c87a36f1b430e0a94107e52a2",
+        "binary": "/home/black/Documents/c-trpc-r14-version-sync/build/perf-v2-02/bench_rpc-baseline",
+        "binary_sha256": "c9b52980625a48097f37259b1f02af475fcda4e772560f69c8af74eceaaba809",
+        "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+        "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "cgroup_cpu_max": null,
+        "clock": "CLOCK_MONOTONIC",
+        "transport": "TCP IPv4 loopback",
+        "load_model": "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; scheduler drops and submission lateness are reported separately",
+        "latency": "before submission to terminal callback entry; successful and accepted separately",
+        "goodput": "verified successful request+response application bytes; excludes wire overhead",
+        "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only",
+        "trials": 3,
+        "rate_rps": 40000,
+        "generators": 16,
+        "requests": 10000,
+        "generator_window": 64,
+        "generator_capacity": 64,
+        "public_profiles": {
+          "small_call_limit": {
+            "capacity": 32,
+            "bulk_bytes": 16384
+          },
+          "default_call_limit": {
+            "capacity": 128,
+            "bulk_bytes": 65536
+          },
+          "large_call_limit": {
+            "capacity": 256,
+            "bulk_bytes": 65536
+          }
+        },
+        "note": "Repeated public V2 call-limit profiles classify exact Server wall signals; no performance threshold is applied."
+      },
+      "profiles": {
+        "small_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 9686,
+            "scheduler_dropped": 20314,
+            "submit_errors": 2780,
+            "submit_again": 0,
+            "accepted": 6906,
+            "completed": 6906,
+            "ok": 6011,
+            "unavailable": 895,
+            "deadlines": 0,
+            "rpc_errors": 895,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 5393.995977402982,
+            "client_cpu_s": 0.931396,
+            "client_peak_rss_kib": 435392,
+            "server_cpu_s": 0.467296,
+            "server_peak_rss_kib": 27212,
+            "max_generator_ok_p99_us": 358100.975
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "small_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "client_submit_error": 3,
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 5265.791724479363,
+            "ok_rps_median": 5393.995977402982,
+            "ok_rps_max": 5604.47463160466,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "default_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 8363,
+            "scheduler_dropped": 21637,
+            "submit_errors": 0,
+            "submit_again": 0,
+            "accepted": 8363,
+            "completed": 8363,
+            "ok": 8363,
+            "unavailable": 0,
+            "deadlines": 0,
+            "rpc_errors": 0,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 7044.908893728743,
+            "client_cpu_s": 1.05061,
+            "client_peak_rss_kib": 435392,
+            "server_cpu_s": 0.553249,
+            "server_peak_rss_kib": 27212,
+            "max_generator_ok_p99_us": 332922.942
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "default_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 6850.054966384373,
+            "ok_rps_median": 7044.908893728743,
+            "ok_rps_max": 7956.194816888093,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "large_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 7770,
+            "scheduler_dropped": 22230,
+            "submit_errors": 0,
+            "submit_again": 0,
+            "accepted": 7770,
+            "completed": 7770,
+            "ok": 7770,
+            "unavailable": 0,
+            "deadlines": 0,
+            "rpc_errors": 0,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 7420.140665632835,
+            "client_cpu_s": 1.051144,
+            "client_peak_rss_kib": 435392,
+            "server_cpu_s": 0.581794,
+            "server_peak_rss_kib": 27212,
+            "max_generator_ok_p99_us": 282799.932
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "large_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 6560.433602704256,
+            "ok_rps_median": 7420.140665632835,
+            "ok_rps_max": 7746.410162737273,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        }
+      },
+      "accounting": "9 cases: arrival/submission/terminal/server-task/peer ledgers checked"
+    },
+    "final": {
+      "raw_file": "perf-v2-02-final-40k-20261023.jsonl.gz",
+      "raw_uncompressed_sha256": "b94c07997dd0a5ed2c7bd9a99fea120b9d062d4c34c7884025dec0aabd0764fa",
+      "gzip_sha256": "006fe5224107111601cb6cb8c0e33f3c878b6dcc772aacff8f62b2d628305c43",
+      "metadata": {
+        "type": "repeatability_metadata",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "label": "perf-v2-02-control-ready-dev3",
+        "git_revision": "36dadcc298a3606c87a36f1b430e0a94107e52a2",
+        "binary": "/home/black/Documents/c-trpc-r14-version-sync/build/perf-v2-02/gcc/linux/x86_64/release/bench_rpc",
+        "binary_sha256": "0b0d8b0c70ff223d3a21507bab32efd5ce9139ced43bc8a8891482c0006bf1fa",
+        "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+        "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "cgroup_cpu_max": null,
+        "clock": "CLOCK_MONOTONIC",
+        "transport": "TCP IPv4 loopback",
+        "load_model": "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; scheduler drops and submission lateness are reported separately",
+        "latency": "before submission to terminal callback entry; successful and accepted separately",
+        "goodput": "verified successful request+response application bytes; excludes wire overhead",
+        "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only",
+        "trials": 3,
+        "rate_rps": 40000,
+        "generators": 16,
+        "requests": 10000,
+        "generator_window": 64,
+        "generator_capacity": 64,
+        "public_profiles": {
+          "small_call_limit": {
+            "capacity": 32,
+            "bulk_bytes": 16384
+          },
+          "default_call_limit": {
+            "capacity": 128,
+            "bulk_bytes": 65536
+          },
+          "large_call_limit": {
+            "capacity": 256,
+            "bulk_bytes": 65536
+          }
+        },
+        "note": "Repeated public V2 call-limit profiles classify exact Server wall signals; no performance threshold is applied."
+      },
+      "profiles": {
+        "small_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 13496,
+            "scheduler_dropped": 16504,
+            "submit_errors": 7339,
+            "submit_again": 0,
+            "accepted": 6157,
+            "completed": 6157,
+            "ok": 4001,
+            "unavailable": 2156,
+            "deadlines": 0,
+            "rpc_errors": 2156,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 4797.8984285347615,
+            "client_cpu_s": 0.891318,
+            "client_peak_rss_kib": 434880,
+            "server_cpu_s": 0.397232,
+            "server_peak_rss_kib": 27180,
+            "max_generator_ok_p99_us": 221208.507
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "small_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "client_submit_error": 3,
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 4562.657773356233,
+            "ok_rps_median": 4797.8984285347615,
+            "ok_rps_max": 5010.433786875122,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "default_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 7592,
+            "scheduler_dropped": 22408,
+            "submit_errors": 0,
+            "submit_again": 0,
+            "accepted": 7592,
+            "completed": 7592,
+            "ok": 7592,
+            "unavailable": 0,
+            "deadlines": 0,
+            "rpc_errors": 0,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 7855.265209995808,
+            "client_cpu_s": 1.054834,
+            "client_peak_rss_kib": 434880,
+            "server_cpu_s": 0.52436,
+            "server_peak_rss_kib": 27180,
+            "max_generator_ok_p99_us": 220796.945
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "default_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "tx_pool_exhausted": 1
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "tx_pool_exhausted": 1
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [
+              "tx_pool_exhausted"
+            ],
+            "ok_rps_min": 7387.537684685892,
+            "ok_rps_median": 7855.265209995808,
+            "ok_rps_max": 7985.088882441269,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "large_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 7841,
+            "scheduler_dropped": 22159,
+            "submit_errors": 0,
+            "submit_again": 0,
+            "accepted": 7841,
+            "completed": 7841,
+            "ok": 7841,
+            "unavailable": 0,
+            "deadlines": 0,
+            "rpc_errors": 0,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 7784.390611912253,
+            "client_cpu_s": 1.08579,
+            "client_peak_rss_kib": 434880,
+            "server_cpu_s": 0.587407,
+            "server_peak_rss_kib": 27180,
+            "max_generator_ok_p99_us": 233705.454
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "large_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "tx_pool_exhausted": 1
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "tx_pool_exhausted": 1
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [
+              "tx_pool_exhausted"
+            ],
+            "ok_rps_min": 7319.148062337178,
+            "ok_rps_median": 7784.390611912253,
+            "ok_rps_max": 7810.011377812283,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        }
+      },
+      "accounting": "9 cases: arrival/submission/terminal/server-task/peer ledgers checked"
+    }
+  },
+  "validation": {
+    "red": {
+      "sha256": "580816bac90f5657473b9381312a79bc96e42e399024950dd8af18aaae668c72",
+      "excerpt": "running tests ...\n[  0%]: running.test test_channel_drain/default\ntest_channel_drain: tests/test_channel_drain.c:244: transfer: Assertion `ready > 0' failed.\n\nreport of tests:\n[100%]: test_channel_drain/default  failed 5.098s\nerrors: run test_channel_drain/default failed, exit code: -1\n\nDetailed summary:\nFailed tests:\n - test_channel_drain/default\n\n0% tests passed, 1 test(s) failed out of 1, spent 5.098s\nerror: <no error object>\n"
+    },
+    "focused": {
+      "sha256": "089dda7816631ea25edf298e10ec812a4aa5e29b29482ab132258a0ac5b858fc",
+      "excerpt": "running tests ...\n[  0%]: running.test test_channel_drain/default\nchannel drain tests passed (17 groups)\n[ 20%]: running.test test_reactor_budget/default\nmixed/completion/timer/RX/TX budget=1 connections=2: ok\nmixed/completion/timer/RX/TX budget=17 connections=2: ok\nmixed/completion/timer/RX/TX budget=4096 connections=2: ok\nmixed/completion/timer/RX/TX budget=1 connections=70: ok\nowner SEND/direct/external queued: ok\nTX/EAGAIN/wait/resume: ok\nRX/queued-close/same-slot-reuse: ok\nmultiple auxiliary reactor sources: ok\nreactor stop/restart epoch: ok\ncompletion/zero-budget/pending: ok\n[ 40%]: running.test test_reactor_control_ready/default\nreactor control ready tests passed (7 groups)\n[ 60%]: running.test test_reactor_tx_drain/default\n反应器发送排空：命令前沿、独立预留、短写、重入通知与代次回收通过\n[ 80%]: running.test test_stream_reset/default\nstream_reset: wire, feature, FIFO, pressure, retry, retirement passed\n\nreport of tests:\n[ 20%]: test_channel_drain/default ........ passed 0.220s\n[ 40%]: test_reactor_budget/default ....... passed 0.339s\n[ 60%]: test_reactor_control_ready/default  passed 0.007s\n[ 80%]: test_reactor_tx_drain/default ..... passed 0.007s\n[100%]: test_stream_reset/default ......... passed 0.050s\n\n100% tests passed, 0 test(s) failed out of 5, spent 0.625s\n"
+    },
+    "test-gcc": {
+      "sha256": "33668d9f54a63536f579ff51c36aa750997358bd77c76f9bef82b0919acdcd1f",
+      "excerpt": "[ 93%]: test_task_executor/default .................. passed 0.009s\n[ 95%]: test_task_message/default ................... passed 0.005s\n[ 96%]: test_timer_queue/default .................... passed 0.021s\n[ 97%]: test_transport/default ...................... passed 1.336s\n[ 98%]: test_tx_priority/default .................... passed 0.059s\n[100%]: test_worker_context/default ................. passed 0.055s\n\n100% tests passed, 0 test(s) failed out of 80, spent 53.292s"
+    },
+    "test-budget": {
+      "sha256": "206a4e3447241bd30ac9b55fe167987714359ad5ed85510c197faac1b8a95f5d",
+      "excerpt": "running tests ...\n[  0%]: running.test test_reactor_control_ready/default\nreactor control ready tests passed (8 groups)\n\nreport of tests:\n[100%]: test_reactor_control_ready/default  passed 0.024s\n\n100% tests passed, 0 test(s) failed out of 1, spent 0.025s\n"
+    },
+    "test-asan": {
+      "sha256": "1b04682bf57b735bd8b5787049af0069a3145c4228596956e5caf8df44385f79",
+      "excerpt": "running tests ...\n[  0%]: running.test test_channel_drain/default\nchannel drain tests passed (17 groups)\n[ 33%]: running.test test_reactor_control_ready/default\nreactor control ready tests passed (8 groups)\n[ 66%]: running.test test_stream_reset/default\nstream_reset: wire, feature, FIFO, pressure, retry, retirement passed\n\nreport of tests:\n[ 33%]: test_channel_drain/default ........ passed 0.294s\n[ 66%]: test_reactor_control_ready/default  passed 0.078s\n[100%]: test_stream_reset/default ......... passed 0.155s\n\n100% tests passed, 0 test(s) failed out of 3, spent 0.531s\n"
+    },
+    "format": {
+      "sha256": "7b979a1889b38fc6bffcdb1eff1c502eba90ec9e7f15227f10590c179fdc00d1",
+      "excerpt": "clang-format 18.1.8: checked 6 changed source files, 0 failed; merge base 36dadcc298a3606c87a36f1b430e0a94107e52a2\n"
+    },
+    "sizeof-baseline": {
+      "sha256": "16727cc6b5c61600fd81266ad68bd3345ae3eb57289034ab6659070b15f7db0f",
+      "excerpt": "$1 = 760\n$2 = 2544\n$3 = 1016\n"
+    },
+    "sizeof-final": {
+      "sha256": "c4e70efb55f3389b7a747e54b8d19783fdb28663575cfe58556a22e9b3d415ca",
+      "excerpt": "$1 = 776\n$2 = 2584\n$3 = 1016\n"
+    }
+  },
+  "traces": {
+    "final_small": {
+      "sha256": "b86354072e9a405328d6fa4c59b595c06e4d3b9d0575370787f4799879a977aa",
+      "excerpt": "FIRST_AFTER_PROTOCOL_ERROR status=-2 slot=7 generation=1\n$1 = 64\n$2 = 64\n$3 = 128\n$4 = 8\n$5 = 131\n#0  tr_channel_protocol_error (connection=..., status=-2, channel=0x7ffff006c5e0) at src/transport/channel/channel.c:1473\n#1  0x000055555557a2ba in tr_channel_handle_stream_open (channel=0x7ffff006c5e0, connection=..., frame=<optimized out>) at src/transport/channel/channel.c:2125\n#2  tr_channel_on_frame (connection=..., frame=<optimized out>, arg=0x7ffff006c5e0) at src/transport/channel/channel.c:2582\n#3  0x0000555555588687 in tr_dispatch_frame (reactor=0x555555672df0, connection=<optimized out>, frame=0x7ffff76fcc60) at src/execution/reactor.c:1428\n#4  tr_connection_on_readable (reactor=<optimized out>, connection=0x555555674e78, turn=0x7ffff76fce30) at src/execution/reactor.c:1585\n#5  tr_run_rx_ready (reactor=reactor@entry=0x555555672df0, turn=turn@entry=0x7ffff76fce30) at src/execution/reactor.c:1651\n#6  0x0000555555589b39 in tr_reactor_thread_main (arg=0x555555672df0) at src/execution/reactor.c:2456\n#7  0x00007ffff7898042 in ?? () from /usr/lib/libc.so.6\n#8  0x00007ffff792072c in ?? () from /usr/lib/libc.so.6",
+      "excluded_from_performance_samples": true
+    }
+  },
+  "fixed_state_bytes_x86_64": {
+    "connection": {
+      "before": 760,
+      "after": 776
+    },
+    "reactor": {
+      "before": 2544,
+      "after": 2584
+    },
+    "channel": {
+      "before": 1016,
+      "after": 1016
+    }
+  },
+  "commands": {
+    "benchmark": "python3 bench/run_rpc_repeatability.py --binary <release-binary> --output <workspace-output> --label <label> --trials 3 --requests 10000",
+    "temporary_environment": "TMPDIR=$PWD/build/test-tmp XMAKE_TMPDIR=$PWD/build/test-tmp PYTHONDONTWRITEBYTECODE=1",
+    "gcc": "xmake b -P . --all -j4; xmake test -P . -v -j1",
+    "asan_ubsan": "xmake f -P . -c -y -m asan --toolchain=gcc -o build/perf-v2-02/asan; build and xmake test -P . -v -j1 test_channel_drain/* test_reactor_control_ready/* test_stream_reset/*"
+  },
+  "product_identity": {
+    "commit": "bd3855b901891cd4f0091a31b33bc0f98b3fa37d",
+    "verified_binary_sha256_after_committed_rebuild": "0b0d8b0c70ff223d3a21507bab32efd5ce9139ced43bc8a8891482c0006bf1fa",
+    "note": "修复版测量在产品提交前执行，原始 metadata.git_revision 保留当时 HEAD=36dadcc。产品提交 bd3855b 后以同一 GCC release 配置强制重建，二进制 SHA-256 完全相同。原始数据不改写。",
+    "source_files_sha256": {
+      "bench/bench_crc32c.c": "44c72b1a03d02fbcbc76259e9f74addcebafbc3241fff0255561c824a835ecd6",
+      "bench/bench_rpc.c": "ababe3dc2f874b1cf9cec8b6a16cc10d4eef63e0c4b8fc13d38efe02ed4017ae",
+      "bench/export_rpc_v2_csv.py": "974b63d905c469ef91deded5e8a8a8c8e68f959dc5f0b50eed454d143b8c2ad2",
+      "bench/results/crc32c-20260926.csv": "9101160790eef870e932428fd5a9fe098ad134d2fa569922b3564d6de386f915",
+      "bench/results/rpc-20260926.csv": "34b414d356ba106f59d9c46cb27bcb54d74e7cfe8e9feb3fe7905714bf23c62a",
+      "bench/results/rpc-v2-20261021.csv": "d7c04e2c85077c3b56e1e6bddb60eca89cd528f184233400a2738e4566465533",
+      "bench/rpc_load_quality.py": "15d94bd3075c64129390a9f698a0c25c7ac2dd6b4b43016d585f1eb3827dd1c9",
+      "bench/run_rpc_bench.py": "f1972b6e482a09a4e3ba702f75c91bab340d89576a82d6606c87e25cf9624d23",
+      "bench/run_rpc_capacity.py": "6d2a71f69c540446118473c7859454e33a4dba4cc7aa4b52f67d5f9477ba0043",
+      "bench/run_rpc_fanout.py": "8418b1b65c65e5f2fdb44c8479c1a028deb0920e9650afaccaae889ef60199b2",
+      "bench/run_rpc_generator_slots.py": "e26b6e381bf073f480024e20b10b4e4d725cfa350dde248ca0749dfb26e1ea58",
+      "bench/run_rpc_headroom.py": "6b55323b8c7d3580c472557955e9f887cf1e1d4a83a66f66ca1b7cbdd897c47c",
+      "bench/run_rpc_repeatability.py": "29d436d0e16feab7a1a2c77a133ad0b423a172c76106cc34a311bcdc56838a0d",
+      "bench/run_rpc_scalability.py": "d641f71c847b0c8324ab43d07d0daa2ceca9e566363701d4718951e546591498",
+      "bench/test_rpc_bench.py": "4b27fd9961e10039ab7426992ce7f5a39ddbb59616c60ac6a078838efe9bb3ed",
+      "bench/test_rpc_capacity.py": "9d0275f1c7f45e0ab76ff979253890774197177c68f3ef22e1f1ec68bdb220b0",
+      "bench/test_rpc_csv_export.py": "270b54d3fb2d82ef08f87eb2a916bf5e49ed6435c6e96c6ba8daad92dea4de89",
+      "bench/test_rpc_fanout.py": "fc02c3ed5b49ef9f7db253c806f82089f74dca54dcbf149098c0112e76f3bd5d",
+      "bench/test_rpc_generator_slots.py": "74474d9ba61b97581bbd95c9f244c3140b66a57bb221df49e56db8e7d6492d53",
+      "bench/test_rpc_headroom.py": "79a30bd4aa65d6a6e23b4395e9cbd85ae7dd59c207276342b582f2cdd7d8ebb9",
+      "bench/test_rpc_load_quality.py": "ae06092fa0d809163f30aba3426f49ca8ee5e5305e2ea49d2e8ea759dbce582f",
+      "bench/test_rpc_metadata.py": "926f7bd7ef30a0ceba0aeb724f291cc0e2762dda111d200914988808ebab4192",
+      "bench/test_rpc_repeatability.py": "b42d83f2ce5dab95559d305026c586d45ed93aa354d953d20833155fad36b4cd",
+      "bench/test_rpc_scalability.py": "4a6a9961d5a2a5a11f43e8a89a64fce5a8f881c757b1f752469e01762c7a94b1",
+      "include/tr/client.h": "1d8c27ff11522b40721298fafb28105c76cc512af0d1db85dc13afc5a525c4cd",
+      "include/tr/facade.h": "dc3b932380b4f92a0da97dc9dec6e07bc82ce447f95736358491401a06618d09",
+      "include/tr/rpc.h": "397d0501f960f2d8d93f8c202ce95789c48ae18e6437c1639b4985d4e051f435",
+      "include/tr/rpc_codec.h": "0a73b4933e41e226bf01c0a5ba7c3bff63c3d5e77925435a860bf2787a0d552d",
+      "include/tr/rpc_v2.h": "a517632cfc82108fd61a75fc9970abc5fd9c781b62b59014befe4472d4cd402a",
+      "include/tr/server.h": "3f0c537d74908179b37e441da3544e51fa9feadb048184ecc07b4898568a9e1d",
+      "include/tr/status.h": "75de27a222f9c217e7f9fffacff3238d3006d62b3e319e17f5964df16eebb9f7",
+      "include/tr/transport.h": "a047568ec284ec443a43831353d7e3746722c3a687f65235505b1156390f6433",
+      "include/tr/trpc.h": "5ffa83b3e7cc3747345323409e3f3fc0eb9ae943191ba691ac07ddf243aefe1e",
+      "src/cleanup.h": "9f9f1c55864fa3743b209c227839e96fcc302d9a01276759b04b07f503719545",
+      "src/client.c": "9229860fef53c5c77bd15d7526f5166844eb433c52354e8f04c8680d0fd43e3b",
+      "src/client_record_internal.h": "df449296841854d524deb3f4bb038c502d20d3e8aa97dbb28aa5e0481bbf6abd",
+      "src/crc32c.c": "c236d12cdea65adf6b37e87eefe2fb3b670182ca070494044a1a44effbae44af",
+      "src/crc32c.h": "473b633c762c985bc87866a15b12aa20a1c4c6a82cdf588b2d26b16c3a095b4c",
+      "src/crc32c_internal.h": "604688f9e59c9a92111ba5a279f8f60a945d0ea5ef0da8c3580529e785829b9e",
+      "src/endian.h": "2b6f25b3e6de85a0ec8ce3494097a9e33be8abcb5f905f09fe47df68204a1e20",
+      "src/execution/buffer.c": "59ca9e77098e52abe914f040ba379ecf2290d304504dd002701f4d95a8448e04",
+      "src/execution/buffer.h": "51751f08539d488d828520bdbe1628ea04e5976905d9b568ef8c51b3114683fa",
+      "src/execution/buffer_internal.h": "171e3a09567610ebae36a754d136c3e4182f91ca328adf466d38d96721bb4805",
+      "src/execution/command_queue.c": "621362c944f95d499b7ced5edb07be9e5ecad3dca035e44592ee901cf5d6e38e",
+      "src/execution/command_queue.h": "7fca4d465d3832ec6e681d68b18212422f2c2b087f61fd4ed50cdfe4ccdacf84",
+      "src/execution/completion_queue.c": "664028227846fa5ef7b903b11f0cdb12587057bd062799ad1fb328d8ff9583fd",
+      "src/execution/completion_queue.h": "a1b11a72918b776a36fd0fddd7bdae8858a1ce822e41f79555337a3350868897",
+      "src/execution/deadline.c": "030266c9459ecb337b03219a5af79ca82c65d9c31a87440beca13a5568b2cb52",
+      "src/execution/deadline_internal.h": "b85466eff13a46a36b0d5a81e6a053da4437d0fdd90fcba624713b626f2bc1cf",
+      "src/execution/reactor.c": "56feb53d729af289495beba5ac8bba3ba18c159f7820b15a61c8d8cdee2d4963",
+      "src/execution/reactor.h": "57b6cdc486339e2800badd9dfe20ac48c3241f252f7fcdf4ec47b5da2e394ef8",
+      "src/execution/reactor_internal.h": "9afa9d1bbef04da9d3498fe80b87d306631fe219d18d2a70c8c4e0a794d5af3f",
+      "src/execution/reactor_token_internal.h": "b4208e3464a0b709d2f4c6c54a54e0d7f6ac459cb8d558046881654bfaf4cf77",
+      "src/execution/task_executor.c": "84ab3c77edf687b43a7dbc0f049f4a914eec054bfa6a8e65f19c32b3e4053be5",
+      "src/execution/task_executor.h": "25bff36d8fece8b085ddc6f8f6d573f89573eb9d7408cd543262337120effc67",
+      "src/execution/task_executor_internal.h": "c5bfbc702f7f953633ede4e2565513238acbc25653104446ba57cb0419992da2",
+      "src/execution/timer_queue.c": "67387d563a398fa97a988f69e7968ad3c834ccb257629d10de87d75bd5cc8d86",
+      "src/execution/timer_queue.h": "ceeb85223119bb50bfc3f49608b5b5c01092bb72db33622b5d6f5c1e5693759b",
+      "src/execution/worker_context.c": "52a92db545970152b4423e088d0edc2c02a2185150b38599635b2acaee1f0781",
+      "src/execution/worker_context.h": "6f7d3b2773159804fe1734f5a6f5b96351171387b66767060b68c7e3ba146427",
+      "src/facade.c": "c792442bdda12cb13dcc039bf43c0ba8311dc6b7499e9238e2f78d4cf688aca5",
+      "src/facade_binding.c": "bf9d2a97eb84c55c4e27109bbe31a5ab1e729d9d49f06580136c30b41f754919",
+      "src/facade_binding.h": "28b7d81feaa90abd50d371bb03ee0e7a74c2ab71b3fd4b9accd29c1b9f9db8cc",
+      "src/facade_diagnostics_internal.h": "67b399ebca073e303bab8e30359ee88a88f4ed6d3e41cc3df2c0680ccae30d52",
+      "src/facade_policy_internal.h": "96d56f4abf53864b34ff93c00bc14ed22d7aa08a2b66b9649f4de37527fcd2f0",
+      "src/facade_tuning_internal.h": "1f590c39a30d2bc5ed79a07fcaa7f033397fefca6211107230f18c40df38ae14",
+      "src/group/pipeline.c": "13ce1c645ace12ad6ad447b66c7faf642c955c813edb92fc8dcc07705cb5fd2a",
+      "src/group/pipeline_control.c": "8cde7e13446b062f2b6e9582aab3e51a793203804e18a5d3a4b73e8284f94571",
+      "src/group/pipeline_control_internal.h": "e5d5bdab9f9122d9823d5521ad382806160347b53aac3ef2b054023e82b588f0",
+      "src/group/pipeline_control_wire.c": "ff0b3a3325fe1982fb8eeb08ebc9018f780ae36c9359140dcc380367f96d2d79",
+      "src/group/pipeline_control_wire_internal.h": "17f8fb40d239f0c8c3c7c9b50e4c628bf7038e621d6885d07ba372ae776600c7",
+      "src/group/pipeline_internal.h": "2a47edb60e1b5041bd0ba1cc2775aace615e4975544d7125743d93b96bda8168",
+      "src/group/pipeline_registry.c": "c529a223eacbdfd5a4609caa482c31e6b4d3969bd2e682c65f37f3a866b789fc",
+      "src/group/pipeline_registry_internal.h": "ca817aa4d708c4982a3a781b2187e4dd06ca216e30c9c2df5dd3da71ae54c3d0",
+      "src/group/pipeline_route.c": "5691b0da93b94b05d8fb3774915ea1f444097344c491e2c36fd16b19ad83c7fc",
+      "src/group/pipeline_route_internal.h": "3ce309f1939aca1be652d8ad3533a5acba5ab3fccd9030f2bbf6c885a0b70998",
+      "src/guard.h": "13c1b46918ee0429de21ace69de45eb106774878d6c68140c5acd7bcc3509d93",
+      "src/io/connector.c": "b4fd61fb27b8f5e7eb3b1ced8fd13dea584e5ddeccc5f879b40170576bdab9d0",
+      "src/io/connector_internal.h": "8663caf825c2b32e1de01dce5b1ce9adce7b31dcfc686c67e0d78a2ab503590a",
+      "src/io/socket.c": "ce9c5c0418c38ed8415993e5bf81a95e025b93458c98527170dac5ed10a1496a",
+      "src/io/socket.h": "d879c8e22bfe6101ef1d0dec302ee7780ffc0e32331f83c97d9c042366540b10",
+      "src/io/socket_internal.h": "afb3f6bb1d2dca1d9807f45d4a8abf2ec378f3844d2cc2e07395e1f2315a4131",
+      "src/memory_budget.h": "e418099bf1637f18d1159611f7cad266d58a8a35484c8166b4871681237f02cd",
+      "src/message/message.c": "cd38d4d008c287758dfafcc319545b0bdba40fe51bf184677664d2b8b29dc60f",
+      "src/message/message.h": "382141e109915168bb6b3020e545934141f9764ea1aa93e3fd9c92727db2d81f",
+      "src/message/storage.h": "8936ca530b9e804ee96a79997fc131313d40817dba7f53f81f61ce235ddd1102",
+      "src/message/transform.c": "7051c43ddfe7d3ca1e1ea55cd810c6ef72359290dae58d3ac2df44fae7464959",
+      "src/message/transform.h": "bb3e6ccf4a74ca25327241f2e6664b91738267085c060db771db8aef0bc0bee5",
+      "src/message/transform_internal.h": "543e3c19fed7c43a2f438d681e755b2bbdb5795f8e62b085de421cf781020cca",
+      "src/message/zstd.c": "c5c831b1f3ec40cc6582d7abbc7c6aec304915f69f48d7d02827f75cd2b5caca",
+      "src/observability.h": "2fd64635fd02e69ed1d2703d5b807784ed159f92fccc83652666d13d2a10f23f",
+      "src/observability_internal.h": "bd923ab167ba2597c180b8ebbfabd88d021880a09ad4700923b30deeccf0bdb8",
+      "src/refcount.h": "98751b5b48dd4b49bc7c32b3d1cc87abdb035c994feee97d04ba34e975af72a2",
+      "src/rpc/rpc_codec.c": "dc6ff0143f9475b5a25be0a5aa918e58ca486d1933c6d52c3fbf872dfaa09a12",
+      "src/rpc/rpc_record.c": "49bfa02b353add209b705dcf46884b33c485a912e6799e3727f80b5ef26dcc5e",
+      "src/rpc/rpc_record.h": "7c50127f4da71fdca316710ed5d4b2054d12758863a91e41e297e569f7674863",
+      "src/rpc/rpc_record_client.c": "c93bc096f2323b17c9358c12d762512361ffc569a856b1ceee553f7a315c2b37",
+      "src/rpc/rpc_record_client.h": "7940fc0328f50129a97ff7cd2e3b01636e8e398ace31b8e776773a59ca5503ed",
+      "src/rpc/rpc_record_dispatch.c": "5516d32d49293fea300a5a920c4dcd8d9f6b3f8571348727985a3fdf51409e3a",
+      "src/rpc/rpc_record_dispatch.h": "1c4c624cfd1ed087fa2f4806a02ccdf2e9afe3e33ea776a31336be7686f96bc4",
+      "src/rpc/rpc_record_endpoint.c": "7772c71d9b626a0869e4d6647ae596ad6738474ff92973bbad40a37fdbbc6299",
+      "src/rpc/rpc_record_endpoint.h": "7a10c6e2d2671512cfb94563a6008a1200926cc60f230e59850201cda8b918a9",
+      "src/rpc/rpc_record_producer.c": "696070c6ebc889e884ad72be0916a576f1f831291848d4c53768166a688975c8",
+      "src/rpc/rpc_record_producer.h": "b4e47be226d40d15e71d3014110eb483c2b2da4f6bef325bb285fecc54347822",
+      "src/rpc/rpc_record_router.c": "fd17f2c1d528ea7b75fe72c26e853b95f516d0a784d2bba0975c34903d73bc75",
+      "src/rpc/rpc_record_router.h": "0c75274853d71cc402000efe624c640a78f7117bfa121566b1a9f732363619e3",
+      "src/rpc/rpc_record_stats.h": "7cb74d49a9b4b370d6a89ba384aff026b09094f874deec2dfb75de570b7bc781",
+      "src/rpc/rpc_record_stream.c": "324c659e787ab3d81f0a776111eaeaa1befaa4adf55e09166b325266df43a2dd",
+      "src/rpc/rpc_record_stream.h": "d89aad1da7037e125523d50d89722ffb20e68457d36a7fcb4bf34076d5ab121a",
+      "src/rpc/rpc_record_transport_internal.h": "b3f08666ad7fac3edbca1b2a95b0d8ffddb49e261a778a7d0c2392b552f6a9e9",
+      "src/rpc/rpc_v2.c": "85a8c7f79751b4c9709d2f57f429fb4e79b74a44689416eb9a320c4ae068b4a8",
+      "src/rpc/rpc_v2_internal.h": "0351e5c9abe2067c247bc9ed702629f6b4ce91ee9be15cf164cc54dd597e1be3",
+      "src/runtime/message_service.c": "f4b8f55a7953506dca94eb9b6a23a0ea3e8d31ca841cf8e9bb35fd5c01f73674",
+      "src/runtime/message_service.h": "287e066efdc11dca209ed1dc36b94405e37613c71c1f98097bd14691cc2a1d2b",
+      "src/runtime/runtime.c": "be4b7eb7306b501307675d233ea4e935fef6d0e60a1b798d1e2262fe70f4715a",
+      "src/runtime/runtime_internal.h": "0f59479ac2d7511d9cbf5c8a24029ae83e161f0a95798efe8d3e7eb3256c6499",
+      "src/server.c": "a58a42ce79935f22de302acd0c4caa0b79f30de8902fa8c4d23278f82fdf8be8",
+      "src/server_record_internal.h": "6a65f8fc6bb02a0518f7e239b9e10ee617393900c12af9c299f4ad2ee41c17c9",
+      "src/status.c": "82075436cb06c48d1923b5f263c63a5f3ce14d28f9ed4938a0fede56da9ac126",
+      "src/transport/channel/channel.c": "2fe4cdcdce2931bcb78b0006788b7cd8a3e7899bd0016d1a1d592bccdfa68a55",
+      "src/transport/channel/channel.h": "5ca5c4cbb3aaddfe42bc330b5832a798c6419a7a413ae702675ad309b1f942f3",
+      "src/transport/channel/channel_internal.h": "7fb2360417a9f9186335525850ba520f10567979183841555d9926a805085fbc",
+      "src/transport/group/client_group.c": "4e00cfe4f448634868aaaa13621dfbae95ce99a3bfae965a1a01167e5a9d3a9a",
+      "src/transport/group/client_group_internal.h": "75418003968aba1c416bc8ee930d70c85f4d79909ad12f01528ed49bf92e0c5e",
+      "src/transport/group/pipeline_control_transport.c": "428d6b71245d0fa117b42a3e8558c8ec88f805c6ab7f65dd58cb9ebd15d05cdc",
+      "src/transport/group/pipeline_control_transport_internal.h": "004cba9536583600ae86b005506403b21a1e128e05976c18af47dc189f1d3494",
+      "src/transport/group/pipeline_ingress.c": "8edcb37c56cbe988c468b64521e34425337f8bd5c57aef60e800f707e01f303a",
+      "src/transport/group/pipeline_ingress_internal.h": "a003bdde258dbf1849e75576ef2a1f515c5dc9d37124f4141a8cddee1b838f44",
+      "src/transport/group/pipeline_listener.c": "556ecb242682acfee3433944d7989c9edbcfeb82b60fdfde03da73fc8285de52",
+      "src/transport/group/pipeline_listener_internal.h": "2cd356b5c3c03a91a4f1824b3319b4be3ce71dd83a1f64445a916875f2041032",
+      "src/transport/protocol/frame.c": "2283873bdadeb9e5161eb08141c6c76d616e94f92fce3cb454e86e50eb7d7c9a",
+      "src/transport/protocol/frame.h": "dfde3851219a035ecf19058003ec1e8d359f25282792665bd62e20820c4c8651",
+      "src/transport/protocol/parser.c": "4d3fe01688f02d773fb76d28331371743aa2b54c4e25fe7e62cb95f523da7d62",
+      "src/transport/protocol/parser.h": "521b13541ac8eb00e78863794abaa212402ca1b392c78a53a1bd47132983c563",
+      "src/transport/protocol/wire.c": "c8c86299b80ef2961e9bf700e6adbb2d113f418c7e684b04e6033155b102de1d",
+      "src/transport/protocol/wire.h": "2176b7cf8bcb4ae4d1887ebb412a94a53e90a7f83e1d4c641fd966936e0477c4",
+      "xmake.lua": "bfd0bfff4cea6363b4bc37592ca5fe003732e3d4223b1aa0de033519640f240b"
+    }
+  },
+  "static_analysis": {
+    "run_id": 39900006655,
+    "candidate_commit": "829e5488a3f4858f8cb79d645240738e32ab6b50",
+    "clang_artifact_id": 12478980467,
+    "gcc_artifact_id": 12478467284,
+    "clang_summary_sha256": "35f96347eb2aebb06f60ad78171e2743930da43f62fe83574788d85a64d82bf8",
+    "gcc_summary_sha256": "938d9613573c764739e5c249fae3047fa7cf534f56514dd481379ffebf8cccab",
+    "clang_original_gate": {
+      "analyzer_major": 14,
+      "baseline_warnings": 9,
+      "missing_baseline_warnings": [
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 322,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3359,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        }
+      ],
+      "observed_warnings": 9,
+      "policy": "exact-tracked-warning-set",
+      "production_units": 43,
+      "profile": {
+        "arch": "x86_64",
+        "crc32c_portable": false,
+        "mode": "release",
+        "plat": "linux",
+        "toolchain": "clang"
+      },
+      "review_state": "unverified",
+      "schema": 1,
+      "unreviewed_warnings": [
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 330,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3373,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        }
+      ]
+    },
+    "clang_replayed_gate": {
+      "schema": 1,
+      "policy": "exact-tracked-warning-set",
+      "analyzer_major": 14,
+      "profile": {
+        "mode": "release",
+        "toolchain": "clang",
+        "plat": "linux",
+        "arch": "x86_64",
+        "crc32c_portable": false
+      },
+      "review_state": "unverified",
+      "production_units": 43,
+      "observed_warnings": 9,
+      "baseline_warnings": 9,
+      "unreviewed_warnings": [],
+      "missing_baseline_warnings": []
+    },
+    "position_moves": [
+      {
+        "before": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 322,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        "after": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/execution/reactor.c",
+          "line": 330,
+          "message": "Potential leak of memory pointed to by 'items'",
+          "source": "src/execution/reactor.c"
+        },
+        "statement": "\t\treturn TR_ERR_INVALID;"
+      },
+      {
+        "before": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3359,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        },
+        "after": {
+          "check": "clang-analyzer-unix.Malloc",
+          "column": 10,
+          "file": "src/transport/channel/channel.c",
+          "line": 3373,
+          "message": "Potential leak of memory pointed to by 'build.channel'",
+          "source": "src/transport/channel/channel.c"
+        },
+        "statement": "\t\treturn TR_ERR_INVALID;"
+      }
+    ],
+    "gcc_gate": {
+      "schema": 1,
+      "policy": "exact-tracked-gcc-warning-set",
+      "review_state": "unverified",
+      "gcc_major": 11,
+      "production_units": 43,
+      "observed_warnings": 1,
+      "baseline_warnings": 1,
+      "unreviewed_warnings": [],
+      "missing_baseline_warnings": []
+    },
+    "review_state": "unverified",
+    "note": "只按实际工件核对两个 Clang 既有诊断位置；完整 43 单元均已扫描，未新增或删减诊断，未裁定误报。原失败工件保留，离线重放在副本进行并采用原 project_dir 归一化路径。"
+  }
+}

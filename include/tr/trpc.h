@@ -1,0 +1,12 @@
+#ifndef TR_TRPC_H
+#define TR_TRPC_H
+
+#include "tr/status.h"
+#include "tr/rpc.h"
+#include "tr/rpc_v2.h"
+#include "tr/facade.h"
+#include "tr/client.h"
+#include "tr/server.h"
+#include "tr/transport.h"
+
+#endif

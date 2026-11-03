@@ -1,0 +1,148 @@
+# 项目工具简体中文翻译。
+msgid ""
+msgstr ""
+"Project-Id-Version: tools 1\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"POT-Creation-Date: 2026-10-11 00:00+0000\n"
+"PO-Revision-Date: 2026-10-11 00:00+0000\n"
+"Last-Translator: Project maintainers\n"
+"Language-Team: Simplified Chinese\n"
+
+msgid "Check changed C-family lines in committed Git snapshots without modifying files."
+msgstr "检查已提交 Git 快照中的 C 系列修改行，不写回文件。"
+
+msgid "Check out the --head commit first to use its .clang-format"
+msgstr "请先检出 --head 指定的提交，确保使用该版本的 .clang-format"
+
+msgid "Commit to check (default: HEAD)"
+msgstr "待检查的提交，默认为 HEAD"
+
+#, python-brace-format
+msgid "Formatting is incomplete: {path!r}"
+msgstr "格式解析未完成：{path!r}"
+
+msgid "Human-readable output language (default: auto)"
+msgstr "人读输出语言（默认：auto）"
+
+#, python-brace-format
+msgid "Invalid --lang value: {value}; expected auto, en or zh_CN"
+msgstr "无效的 --lang 值：{value}；应为 auto、en 或 zh_CN"
+
+msgid "PR target branch SHA/ref; compare from the merge base"
+msgstr "PR 目标分支 SHA/引用；从共同祖先开始比较"
+
+msgid "Path to the clang-format executable"
+msgstr "clang-format 可执行文件路径"
+
+#, python-brace-format
+msgid "Source format check failed: {error}"
+msgstr "源码格式检查失败：{error}"
+
+#, python-brace-format
+msgid "Source must be a regular file: {path!r}"
+msgstr "源码必须是普通文件：{path!r}"
+
+msgid "Tracked files must be clean; commit changes before checking"
+msgstr "已跟踪文件必须保持干净；请先提交修改再检查"
+
+#, python-brace-format
+msgid "clang-format {required} is required; found {actual}"
+msgstr "要求 clang-format {required}，实际为 {actual}"
+
+#, python-brace-format
+msgid "clang-format {version}: checked {checked} changed source files, {failures} failed; merge base {base}"
+msgstr "clang-format {version}：检查 {checked} 个修改源码文件，{failures} 个不合格；共同祖先 {base}"
+
+#, python-brace-format
+msgid "{path!r}: changed lines need formatting: {lines}"
+msgstr "{path!r}：以下修改行需要调整格式：{lines}"
+
+msgid "Validate and reproducibly compile tool translations."
+msgstr "校验并可重复生成工具翻译目录。"
+
+msgid "Check that committed MO files are reproducible"
+msgstr "检查已提交 MO 是否可重复生成"
+
+msgid "Translation catalog is stale; run scripts/compile_tool_catalog.py"
+msgstr "翻译目录已过期；请运行 scripts/compile_tool_catalog.py"
+
+#, python-brace-format
+msgid "Could not compile translation catalog: {error}"
+msgstr "无法编译翻译目录：{error}"
+
+msgid "Translation placeholders differ"
+msgstr "译文占位符与原文不一致"
+
+#, python-brace-format
+msgid "Configuration mismatch: {key}: expected {expected!r}, found {actual!r}"
+msgstr "配置不一致：{key}：预期 {expected!r}，实际 {actual!r}"
+
+msgid "Xmake project directory does not match this checkout"
+msgstr "Xmake 项目目录与当前检出不一致"
+
+#, python-brace-format
+msgid "Current Linux production sources differ from the Xmake trcore target: {files}"
+msgstr "当前 Linux 生产源码与 Xmake trcore 目标不一致：{files}"
+
+msgid "Compilation database must be a nonempty JSON array"
+msgstr "编译数据库必须是非空 JSON 数组"
+
+msgid "Invalid Xmake compilation database entry"
+msgstr "Xmake 编译数据库条目无效"
+
+#, python-brace-format
+msgid "Unexpected production entry: {file}"
+msgstr "出现额外生产条目：{file}"
+
+#, python-brace-format
+msgid "Duplicate production entry: {file}"
+msgstr "生产条目重复：{file}"
+
+#, python-brace-format
+msgid "Wrong working directory: {file}"
+msgstr "编译工作目录错误：{file}"
+
+#, python-brace-format
+msgid "Arguments differ from the current Xmake build: {file}"
+msgstr "参数与当前 Xmake 构建不一致：{file}"
+
+#, python-brace-format
+msgid "Production C11, include, macro or warning contract failed: {file}"
+msgstr "生产 C11、包含路径、宏或警告约定不满足：{file}"
+
+#, python-brace-format
+msgid "Missing production entries: {files}"
+msgstr "缺少生产条目：{files}"
+
+msgid "Compilation database configuration is stale; export it again"
+msgstr "编译数据库配置已过期；请重新导出"
+
+msgid "Compilation database digest does not match its configuration"
+msgstr "编译数据库摘要与配置记录不一致"
+
+msgid "Xmake configuration changed during export"
+msgstr "导出期间 Xmake 配置发生变化"
+
+#, python-brace-format
+msgid "Verified {count} production compilation commands: {directory}"
+msgstr "已验证 {count} 个生产编译命令：{directory}"
+
+msgid "Export and verify the real Xmake production compilation database without running analyzers."
+msgstr "导出并校验真实 Xmake 生产编译数据库，不运行分析器。"
+
+msgid "Path to the Xmake executable"
+msgstr "Xmake 可执行文件路径"
+
+msgid "Directory for the database and configuration identity"
+msgstr "数据库与配置身份的保存目录"
+
+msgid "Verify an existing export against the current Xmake configuration"
+msgstr "对照当前 Xmake 配置验证已有导出"
+
+#, python-brace-format
+msgid "Compilation database check failed: {error}"
+msgstr "编译数据库检查失败：{error}"

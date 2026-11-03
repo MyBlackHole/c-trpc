@@ -1,0 +1,6 @@
+---
+# C 静态分析已在 CI 预运行；诊断告警仍非阻断门禁，详见 tooling-policy。
+Checks: '-*,clang-diagnostic-*,clang-analyzer-core.*,clang-analyzer-unix.*,clang-analyzer-security.*,-clang-analyzer-security.insecureAPI.*'
+WarningsAsErrors: ''
+HeaderFilterRegex: '(^|/)(include|src)/.*\.h$'
+FormatStyle: file

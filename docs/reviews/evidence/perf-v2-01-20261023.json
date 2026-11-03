@@ -1,0 +1,565 @@
+{
+  "schema": 1,
+  "recorded_on": "2026-10-23",
+  "task": "PERF-V2-01",
+  "issues": [
+    247,
+    241
+  ],
+  "baseline_commit": "49bd7e8a857275f64c462ace44085e5a4fe9b9cb",
+  "product_commit": "b961701a0ed14b7677f13f8cc366ce21080eaba3",
+  "version": "2.0.0-dev.2",
+  "reviewer": "当前主会话；未使用子 agent，不构成独立审查",
+  "runs": {
+    "baseline": {
+      "raw_file": "perf-v2-01-baseline-40k-20261023.jsonl.gz",
+      "raw_uncompressed_sha256": "58359509a109b5dcfd7c5f123ab7e2cc8f78663e4ac1a5efdd0a54e85710b7bd",
+      "gzip_sha256": "d72d994c14bd3f56fcdfee7f1e96eb344d1197ce3960ba7526c5b866501011a8",
+      "metadata": {
+        "type": "repeatability_metadata",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "label": "perf-v2-01-baseline",
+        "git_revision": "49bd7e8a857275f64c462ace44085e5a4fe9b9cb",
+        "binary": "/home/black/Documents/c-trpc-r14-version-sync/build/perf-v2-01/bench_rpc-baseline",
+        "binary_sha256": "fe6e6e18cdb213c5af65bf1c8c2bc4a6ac81a414dcf0d4ffee7162456d10c379",
+        "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+        "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "cgroup_cpu_max": null,
+        "clock": "CLOCK_MONOTONIC",
+        "transport": "TCP IPv4 loopback",
+        "load_model": "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; scheduler drops and submission lateness are reported separately",
+        "latency": "before submission to terminal callback entry; successful and accepted separately",
+        "goodput": "verified successful request+response application bytes; excludes wire overhead",
+        "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only",
+        "trials": 3,
+        "rate_rps": 40000,
+        "generators": 16,
+        "requests": 10000,
+        "generator_window": 64,
+        "generator_capacity": 64,
+        "public_profiles": {
+          "small_call_limit": {
+            "capacity": 32,
+            "bulk_bytes": 16384
+          },
+          "default_call_limit": {
+            "capacity": 128,
+            "bulk_bytes": 65536
+          },
+          "large_call_limit": {
+            "capacity": 256,
+            "bulk_bytes": 65536
+          }
+        },
+        "note": "Repeated public V2 call-limit profiles classify exact Server wall signals; no performance threshold is applied."
+      },
+      "profiles": {
+        "small_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 29439,
+            "scheduler_dropped": 561,
+            "submit_errors": 23934,
+            "submit_again": 0,
+            "accepted": 5505,
+            "completed": 5505,
+            "ok": 3524,
+            "unavailable": 1981,
+            "deadlines": 0,
+            "rpc_errors": 1981,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 4675.787858477809,
+            "client_cpu_s": 0.9504400000000001,
+            "client_peak_rss_kib": 435008,
+            "server_cpu_s": 0.357505,
+            "server_peak_rss_kib": 27188,
+            "max_generator_ok_p99_us": 39749.56
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "small_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "client_submit_error": 3,
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 4344.385431623139,
+            "ok_rps_median": 4675.787858477809,
+            "ok_rps_max": 4682.894287514523,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "default_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 29175,
+            "scheduler_dropped": 825,
+            "submit_errors": 22949,
+            "submit_again": 0,
+            "accepted": 6226,
+            "completed": 6226,
+            "ok": 4387,
+            "unavailable": 1839,
+            "deadlines": 0,
+            "rpc_errors": 1839,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 5862.969615655428,
+            "client_cpu_s": 0.9970140000000001,
+            "client_peak_rss_kib": 435008,
+            "server_cpu_s": 0.453877,
+            "server_peak_rss_kib": 27188,
+            "max_generator_ok_p99_us": 57584.513
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "default_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "client_submit_error": 3,
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 3668.660084945702,
+            "ok_rps_median": 5862.969615655428,
+            "ok_rps_max": 6346.461600294289,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "large_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 28620,
+            "scheduler_dropped": 1380,
+            "submit_errors": 22453,
+            "submit_again": 0,
+            "accepted": 6167,
+            "completed": 6167,
+            "ok": 4386,
+            "unavailable": 1781,
+            "deadlines": 0,
+            "rpc_errors": 1781,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 5072.796791108797,
+            "client_cpu_s": 0.9978199999999999,
+            "client_peak_rss_kib": 435008,
+            "server_cpu_s": 0.544354,
+            "server_peak_rss_kib": 27188,
+            "max_generator_ok_p99_us": 83278.74
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "large_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "client_submit_error": 3,
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 4636.547040257627,
+            "ok_rps_median": 5072.796791108797,
+            "ok_rps_max": 5291.666351546536,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        }
+      },
+      "accounting": "9 cases: arrival/submission/terminal/server-task/peer ledgers checked"
+    },
+    "final": {
+      "raw_file": "perf-v2-01-final-40k-20261023.jsonl.gz",
+      "raw_uncompressed_sha256": "cd4cfbb44cb98a9cbb227b342a187eb51119f2c13424c4f69af4ef7a54866c08",
+      "gzip_sha256": "0a58fa84fac19a367a837c2e53d396b3e063c019f01c9c2ed226c8b15db655d0",
+      "metadata": {
+        "type": "repeatability_metadata",
+        "schema": 2,
+        "api_generation": "rpc_v2",
+        "label": "perf-v2-01-final",
+        "git_revision": "b961701a0ed14b7677f13f8cc366ce21080eaba3",
+        "binary": "/home/black/Documents/c-trpc-r14-version-sync/build/perf-v2-01/gcc/linux/x86_64/release/bench_rpc",
+        "binary_sha256": "c9b52980625a48097f37259b1f02af475fcda4e772560f69c8af74eceaaba809",
+        "platform": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+        "cpu_model": "AMD Ryzen 7 PRO 4750U with Radeon Graphics",
+        "affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "cgroup_cpu_max": null,
+        "clock": "CLOCK_MONOTONIC",
+        "transport": "TCP IPv4 loopback",
+        "load_model": "open-loop fixed-rate scheduled arrivals; bounded in-flight slots; scheduler drops and submission lateness are reported separately",
+        "latency": "before submission to terminal callback entry; successful and accepted separately",
+        "goodput": "verified successful request+response application bytes; excludes wire overhead",
+        "server_resources": "lifetime CPU/RSS including startup/warmup/drain; not phase-only",
+        "trials": 3,
+        "rate_rps": 40000,
+        "generators": 16,
+        "requests": 10000,
+        "generator_window": 64,
+        "generator_capacity": 64,
+        "public_profiles": {
+          "small_call_limit": {
+            "capacity": 32,
+            "bulk_bytes": 16384
+          },
+          "default_call_limit": {
+            "capacity": 128,
+            "bulk_bytes": 65536
+          },
+          "large_call_limit": {
+            "capacity": 256,
+            "bulk_bytes": 65536
+          }
+        },
+        "note": "Repeated public V2 call-limit profiles classify exact Server wall signals; no performance threshold is applied."
+      },
+      "profiles": {
+        "small_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 8542,
+            "scheduler_dropped": 21458,
+            "submit_errors": 2106,
+            "submit_again": 0,
+            "accepted": 6436,
+            "completed": 6436,
+            "ok": 5566,
+            "unavailable": 870,
+            "deadlines": 0,
+            "rpc_errors": 870,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 5123.958796658962,
+            "client_cpu_s": 0.990739,
+            "client_peak_rss_kib": 435392,
+            "server_cpu_s": 0.467297,
+            "server_peak_rss_kib": 27212,
+            "max_generator_ok_p99_us": 345844.781
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "small_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "client_submit_error": 3,
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3,
+              "rpc_unavailable": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 4556.496430627629,
+            "ok_rps_median": 5123.958796658962,
+            "ok_rps_max": 5419.324770198049,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "default_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 7682,
+            "scheduler_dropped": 22318,
+            "submit_errors": 0,
+            "submit_again": 0,
+            "accepted": 7682,
+            "completed": 7682,
+            "ok": 7682,
+            "unavailable": 0,
+            "deadlines": 0,
+            "rpc_errors": 0,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 6745.976904249142,
+            "client_cpu_s": 1.146065,
+            "client_peak_rss_kib": 435392,
+            "server_cpu_s": 0.560162,
+            "server_peak_rss_kib": 27212,
+            "max_generator_ok_p99_us": 370327.328
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "default_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 6654.947787371589,
+            "ok_rps_median": 6745.976904249142,
+            "ok_rps_max": 6774.004569713008,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        },
+        "large_call_limit": {
+          "totals": {
+            "offered": 30000,
+            "attempted": 7209,
+            "scheduler_dropped": 22791,
+            "submit_errors": 0,
+            "submit_again": 0,
+            "accepted": 7209,
+            "completed": 7209,
+            "ok": 7209,
+            "unavailable": 0,
+            "deadlines": 0,
+            "rpc_errors": 0,
+            "resource_exhausted": 0,
+            "invalid_responses": 0
+          },
+          "medians": {
+            "ok_rps": 6640.993953773995,
+            "client_cpu_s": 1.114309,
+            "client_peak_rss_kib": 435392,
+            "server_cpu_s": 0.593338,
+            "server_peak_rss_kib": 27212,
+            "max_generator_ok_p99_us": 292709.709
+          },
+          "raw_summary": {
+            "type": "repeatability_summary",
+            "schema": 2,
+            "api_generation": "rpc_v2",
+            "profile": "large_call_limit",
+            "trials": 3,
+            "clean_trials": 0,
+            "server_pressure_trials": 3,
+            "classification": "reproducible_server_wall",
+            "signal_counts": {
+              "control_tx_pool_exhausted": 3,
+              "load_generator_drop": 3,
+              "load_generator_late": 3
+            },
+            "server_signal_counts": {
+              "control_tx_pool_exhausted": 3
+            },
+            "reproducible_server_signals": [
+              "control_tx_pool_exhausted"
+            ],
+            "sporadic_server_signals": [],
+            "ok_rps_min": 6310.78614411056,
+            "ok_rps_median": 6640.993953773995,
+            "ok_rps_max": 7283.313091864793,
+            "command_budget_hits_median": 0,
+            "command_budget_hits_max": 0,
+            "command_queue_peak_max": 1
+          }
+        }
+      },
+      "accounting": "9 cases: arrival/submission/terminal/server-task/peer ledgers checked"
+    }
+  },
+  "validation": {
+    "red-executed": {
+      "sha256": "5d050ad44be3d104291aa482771917deaab0196ed2e43395e3cfee6a8b3b5aa4",
+      "excerpt": "running tests ...\n[  0%]: running.test test_channel_drain/default\ntest_channel_drain: tests/test_channel_drain.c:726: start_pressure: Assertion `count(f, &f->down[0]) == 0' failed.\n\nreport of tests:\n[100%]: test_channel_drain/default  failed 0.098s\nerrors: run test_channel_drain/default failed, exit code: -1\n\nDetailed summary:\nFailed tests:\n - test_channel_drain/default\n\n0% tests passed, 1 test(s) failed out of 1, spent 0.100s\nerror: <no error object>\n"
+    },
+    "teardown-red": {
+      "sha256": "1d3d41f26904bc35a609051701f35c72e28e10eb0a42516f28b04b2a0f1d3e7b",
+      "excerpt": "running tests ...\n[  0%]: running.test test_channel_drain/default\ntest_channel_drain: tests/test_channel_drain.c:836: test_pending_open_teardown_releases_rx: Assertion `!stats.rx_paused && stats.state == TR_CONN_ACTIVE' failed.\n\nreport of tests:\n[100%]: test_channel_drain/default  failed 0.209s\nerrors: run test_channel_drain/default failed, exit code: -1\n\nDetailed summary:\nFailed tests:\n - test_channel_drain/default\n\n0% tests passed, 1 test(s) failed out of 1, spent 0.209s\nerror: <no error object>\n"
+    },
+    "test-gcc-final": {
+      "sha256": "9f72d2110267a736288519305a54b5d65f29161d7b01ac80fc28bb0c187f965d",
+      "excerpt": "[ 93%]: test_task_executor/default .................. passed 0.007s\n[ 94%]: test_task_message/default ................... passed 0.003s\n[ 96%]: test_timer_queue/default .................... passed 0.010s\n[ 97%]: test_transport/default ...................... passed 1.343s\n[ 98%]: test_tx_priority/default .................... passed 0.057s\n[100%]: test_worker_context/default ................. passed 0.058s\n\n100% tests passed, 0 test(s) failed out of 79, spent 53.078s"
+    },
+    "test-asan": {
+      "sha256": "80beffaf1ae2a3d70d2255c06d1047636adad53b2d5a6c1f42d5baae3613eaad",
+      "excerpt": "running tests ...\n[  0%]: running.test test_channel_drain/default\nchannel drain tests passed (15 groups)\n\nreport of tests:\n[100%]: test_channel_drain/default  passed 0.372s\n\n100% tests passed, 0 test(s) failed out of 1, spent 0.372s\nrunning tests ...\n[  0%]: running.test test_stream_reset/default\nstream_reset: wire, feature, FIFO, pressure, retry, retirement passed\n\nreport of tests:\n[100%]: test_stream_reset/default  passed 0.175s\n\n100% tests passed, 0 test(s) failed out of 1, spent 0.175s\n"
+    },
+    "format": {
+      "sha256": "8cf40276a2bf441b0dca1376e6aa1bc9d27822b889add7c789db3a56a39b8dbe",
+      "excerpt": "clang-format 18.1.8: checked 5 changed source files, 0 failed; merge base 49bd7e8a857275f64c462ace44085e5a4fe9b9cb\n"
+    }
+  },
+  "traces": {
+    "baseline_server": {
+      "sha256": "3e6c93a61cc1976855db936cbb1ed449848104acf27dd3d6ebcc7f4c135731ff",
+      "excerpt": "FIRST_AGAIN_PROTOCOL_ERROR status=1 slot=12 generation=1\n$1 = 128\n$2 = 0\n$3 = 1\n#0  tr_channel_protocol_error (connection=..., status=status@entry=1, channel=0x7ffff02b7270) at src/transport/channel/channel.c:1460\n#1  0x0000555555579ecb in tr_channel_handle_stream_open (channel=0x7ffff02b7270, connection=..., frame=<optimized out>) at src/transport/channel/channel.c:2039\n#2  tr_channel_on_frame (connection=..., frame=<optimized out>, arg=0x7ffff02b7270) at src/transport/channel/channel.c:2488\n#3  0x0000555555587dd7 in tr_dispatch_frame (reactor=0x555555670df0, connection=<optimized out>, frame=0x7ffff76fcc60) at src/execution/reactor.c:1378\n#4  tr_connection_on_readable (reactor=<optimized out>, connection=0x555555673c60, turn=0x7ffff76fce30) at src/execution/reactor.c:1534\n#5  tr_run_rx_ready (reactor=reactor@entry=0x555555670df0, turn=turn@entry=0x7ffff76fce30) at src/execution/reactor.c:1600\n#6  0x0000555555589255 in tr_reactor_thread_main (arg=0x555555670df0) at src/execution/reactor.c:2359\n#7  0x00007ffff7898042 in ?? () from /usr/lib/libc.so.6\n#8  0x00007ffff792072c in ?? () from /usr/lib/libc.so.6"
+    },
+    "baseline_client": {
+      "sha256": "f72f036eed54bccd7dca9fa1773fa103756dec2bbf5cd07500a2ef90996be225",
+      "excerpt": "FIRST_CLIENT_SUBMIT_ERROR status=-13\n#0  open_phase (run=0x7fffffffd3c0, o=0x7fffffffd150) at bench/bench_rpc.c:805\n#1  run_client (o=0x7fffffffd150) at bench/bench_rpc.c:949\n#2  main (argc=<optimized out>, argv=0x7fffffffd618) at bench/bench_rpc.c:977"
+    },
+    "final_small_server": {
+      "sha256": "2cd66ccbbe72ba2d99af6f9d42ddc632ea2bed3063e3ba533d2e53fb8f0b7ef0",
+      "excerpt": "FIRST_AFTER_PROTOCOL_ERROR status=-2 slot=10 generation=1\n$1 = 64\n$2 = 64\n$3 = 128\n$4 = 5\n$5 = 399\n#0  tr_channel_protocol_error (connection=..., status=-2, channel=0x7ffff0098a70) at src/transport/channel/channel.c:1473\n#1  0x000055555557a231 in tr_channel_handle_stream_open (channel=0x7ffff0098a70, connection=..., frame=<optimized out>) at src/transport/channel/channel.c:2115\n#2  tr_channel_on_frame (connection=..., frame=<optimized out>, arg=0x7ffff0098a70) at src/transport/channel/channel.c:2572\n#3  0x0000555555588327 in tr_dispatch_frame (reactor=0x555555671df0, connection=<optimized out>, frame=0x7ffff76fcc60) at src/execution/reactor.c:1384\n#4  tr_connection_on_readable (reactor=<optimized out>, connection=0x5555556746d0, turn=0x7ffff76fce30) at src/execution/reactor.c:1541\n#5  tr_run_rx_ready (reactor=reactor@entry=0x555555671df0, turn=turn@entry=0x7ffff76fce30) at src/execution/reactor.c:1607\n#6  0x00005555555892b9 in tr_reactor_thread_main (arg=0x555555671df0) at src/execution/reactor.c:2307\n#7  0x00007ffff7898042 in ?? () from /usr/lib/libc.so.6\n#8  0x00007ffff792072c in ?? () from /usr/lib/libc.so.6"
+    }
+  },
+  "fixed_state_bytes_x86_64": {
+    "connection": {
+      "before": 752,
+      "after": 760
+    },
+    "channel": {
+      "before": 984,
+      "after": 1016
+    }
+  },
+  "commands": {
+    "benchmark": "python3 bench/run_rpc_repeatability.py --binary <release-binary> --output <workspace-output> --label <label> --trials 3 --rate 40000",
+    "temporary_environment": "TMPDIR=$PWD/build/test-tmp XMAKE_TMPDIR=$PWD/build/test-tmp PYTHONDONTWRITEBYTECODE=1",
+    "gcc": "xmake b -P . --all -j4 && xmake test -P . -v -j1",
+    "asan_ubsan": "xmake f -P . -c -y -m asan --toolchain=gcc -o build/perf-v2-01/asan; build then xmake test -P . -v test_channel_drain/* and test_stream_reset/*"
+  },
+  "static_diagnostics": {
+    "run": 39892358176,
+    "candidate_head": "cdb49280a2416e0947778fd5a4143846b702a8eb",
+    "tested_merge": "881c46b5d24bf009cf9a07f3c733043bb02a2d2d",
+    "artifacts": {
+      "gcc": 12475017585,
+      "clang": 12475855042
+    },
+    "production_units_per_analyzer": 43,
+    "gcc_warnings": 1,
+    "clang_warnings": 9,
+    "review_state": "unverified",
+    "line_moves": [
+      {
+        "file": "src/execution/reactor.c",
+        "old_line": 320,
+        "new_line": 322,
+        "check": "clang-analyzer-unix.Malloc",
+        "unchanged_statement": "return TR_ERR_INVALID;"
+      },
+      {
+        "file": "src/transport/channel/channel.c",
+        "old_line": 3275,
+        "new_line": 3359,
+        "check": "clang-analyzer-unix.Malloc",
+        "unchanged_statement": "return TR_ERR_INVALID;"
+      },
+      {
+        "file": "src/transport/channel/channel.c",
+        "old_line": 687,
+        "new_line": 695,
+        "check": "analyzer-malloc-leak",
+        "unchanged_statement": "return TR_OK;"
+      }
+    ]
+  },
+  "failed_workflow_parse": {
+    "head": "bd2b591886f22b8cea66b4897e985d9b59dab71f",
+    "run": 39892110947,
+    "reason": "job env cannot access runner context; no tests ran",
+    "correction": "cdb49280a2416e0947778fd5a4143846b702a8eb writes RUNNER_TEMP via the first step GITHUB_ENV"
+  }
+}

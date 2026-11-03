@@ -1,0 +1,302 @@
+#define _POSIX_C_SOURCE 200809L
+/* 仅测试示例入口：桩不进入 trcore，也不安装到 SDK。 */
+#include <locale.h>
+static int missing_locale;
+static char *test_setlocale(int category, const char *locale);
+#define setlocale test_setlocale
+#define main echo_client_main
+#include "../examples/echo_client.c"
+#undef main
+#undef setlocale
+
+static char *test_setlocale(int category, const char *locale)
+{
+	if (missing_locale && locale && strcmp(locale, "C") != 0)
+		return NULL;
+	return setlocale(category, locale);
+}
+
+#include <assert.h>
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+struct tr_client {
+	int unused;
+};
+static struct tr_client instance;
+static int scenario;
+static int destroy_attempts;
+static const char *expected_address = "127.0.0.1";
+static uint16_t expected_port = 9000U;
+
+static size_t read_capture(int fd, char *buffer, size_t capacity)
+{
+	size_t size = 0U;
+
+	assert(capacity > 0U);
+	while (size + 1U < capacity) {
+		ssize_t count = read(fd, buffer + size, capacity - size - 1U);
+
+		if (count < 0 && errno == EINTR)
+			continue;
+		assert(count >= 0);
+		if (count == 0)
+			break;
+		size += (size_t)count;
+	}
+	buffer[size] = '\0';
+	return size;
+}
+
+void tr_client_config_init(struct tr_client_config *config)
+{
+	memset(config, 0, sizeof(*config));
+}
+
+int tr_client_create(const struct tr_client_config *config,
+                     const struct tr_rpc_method_desc *methods, size_t count,
+                     struct tr_client **out)
+{
+	(void)config;
+	assert(methods && count == 1);
+	assert(methods[0].request_cardinality == TR_RPC_ONE);
+	*out = &instance;
+	return TR_OK;
+}
+
+int tr_client_connect(struct tr_client *client, const char *address,
+                      uint16_t port)
+{
+	(void)client;
+	assert(strcmp(address, expected_address) == 0);
+	assert(port == expected_port);
+	return scenario == 1 || scenario == 2 ? TR_ERR_STATE : TR_OK;
+}
+
+int tr_client_wait_ready(struct tr_client *client, uint32_t timeout_ms)
+{
+	(void)client;
+	(void)timeout_ms;
+	return scenario == 3 ? TR_ERR_STATE : TR_OK;
+}
+
+int tr_client_unary_call(struct tr_client *client, uint32_t service,
+                         uint32_t method, const struct tr_rpc_bytes *request,
+                         const struct tr_rpc_call_options *options,
+                         const struct tr_rpc_v2_client_callbacks *callbacks,
+                         struct tr_rpc_v2_call *out)
+{
+	(void)client;
+	(void)service;
+	(void)method;
+	(void)options;
+	if (scenario == 4)
+		return TR_ERR_STATE;
+	memset(out, 0, sizeof(*out));
+	callbacks->message(*out, request, callbacks->arg);
+	/* 即使正文到达，错误终局也不能打印成功响应。 */
+	callbacks->terminal(
+	        *out, scenario == 5 ? (enum tr_rpc_status)17 : TR_RPC_STATUS_OK,
+	        TR_RPC_V2_DELIVERY_LIVE, callbacks->arg);
+	return TR_OK;
+}
+
+int tr_client_destroy(struct tr_client *client)
+{
+	(void)client;
+	++destroy_attempts;
+	if (scenario == 7 && destroy_attempts == 1)
+		return TR_AGAIN;
+	return scenario == 2 || scenario == 3 || scenario == 4 || scenario == 6
+	               ? TR_ERR_STATE
+	               : TR_OK;
+}
+
+static void reset_environment(void)
+{
+	const char *names[] = {"CTRPC_LANG", "LC_ALL", "LC_MESSAGES", "LANG",
+	                       "LANGUAGE"};
+	size_t i;
+
+	for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+		assert(unsetenv(names[i]) == 0);
+}
+
+static void check_output(int test_scenario, int argc, char **argv, int code,
+                         const char *output, const char *error)
+{
+	int out_pipe[2], err_pipe[2];
+	char actual_out[1024], actual_err[1024];
+	size_t size;
+	int status;
+	pid_t child;
+
+	assert(pipe(out_pipe) == 0);
+	assert(pipe(err_pipe) == 0);
+	assert(fflush(NULL) == 0);
+	child = fork();
+	assert(child >= 0);
+	if (child == 0) {
+		int result;
+
+		close(out_pipe[0]);
+		close(err_pipe[0]);
+		assert(dup2(out_pipe[1], STDOUT_FILENO) >= 0);
+		assert(dup2(err_pipe[1], STDERR_FILENO) >= 0);
+		close(out_pipe[1]);
+		close(err_pipe[1]);
+		/* 每个子进程显式选择故障并清零计数，不继承上一用例的桩状态。 */
+		scenario = test_scenario;
+		destroy_attempts = 0;
+		result = echo_client_main(argc, argv);
+		assert(destroy_attempts == (code == 2            ? 0
+		                            : test_scenario == 7 ? 2
+		                                                 : 1));
+		assert(strcmp(setlocale(LC_NUMERIC, NULL), "C") == 0);
+		assert(strcmp(setlocale(LC_CTYPE, NULL), "C") == 0);
+		assert(fflush(NULL) == 0);
+		_exit(result);
+	}
+	close(out_pipe[1]);
+	close(err_pipe[1]);
+	assert(waitpid(child, &status, 0) == child);
+	size = read_capture(out_pipe[0], actual_out, sizeof(actual_out));
+	close(out_pipe[0]);
+	(void)read_capture(err_pipe[0], actual_err, sizeof(actual_err));
+	close(err_pipe[0]);
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != code) {
+		fprintf(stderr,
+		        "Echo "
+		        "用例失败：场景=%d，子进程状态=%d，期望退出码=%d\n",
+		        test_scenario, status, code);
+		assert(fwrite(actual_err, 1, strlen(actual_err), stderr) ==
+		       strlen(actual_err));
+	}
+	assert(WIFEXITED(status) && WEXITSTATUS(status) == code);
+	assert(size == strlen(output) && strcmp(actual_out, output) == 0);
+	if (strlen(actual_err) != strlen(error) ||
+	    strcmp(actual_err, error) != 0) {
+		const char *names[] = {"LC_ALL", "LC_MESSAGES", "LANG",
+		                       "LANGUAGE"};
+		size_t i;
+
+		for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+			fprintf(stderr, "%s=%s\n", names[i],
+			        getenv(names[i]) ? getenv(names[i])
+			                         : "<unset>");
+		fprintf(stderr,
+		        "scenario=%d argument=%s expected=%s actual=%s\n",
+		        test_scenario, argc > 1 ? argv[1] : "", error,
+		        actual_err);
+	}
+	assert(strlen(actual_err) == strlen(error) &&
+	       strcmp(actual_err, error) == 0);
+}
+
+static void check_scenarios(const char *option, int chinese)
+{
+	char *args[] = {"echo_client", (char *)option, "127.0.0.1",
+	                "9000",        "xmake-smoke",  NULL};
+	const char *en[] = {"",
+	                    "connect failed\n",
+	                    "connect failed\nclient destroy failed\n",
+	                    "client destroy failed\n",
+	                    "client destroy failed\n",
+	                    "RPC failed: 17\n",
+	                    "client destroy failed\n"};
+	const char *zh[] = {"",
+	                    "连接失败\n",
+	                    "连接失败\n客户端销毁失败\n",
+	                    "客户端销毁失败\n",
+	                    "客户端销毁失败\n",
+	                    "RPC 失败：17\n",
+	                    "客户端销毁失败\n"};
+
+	size_t current;
+
+	assert(sizeof(en) / sizeof(en[0]) == sizeof(zh) / sizeof(zh[0]));
+	for (current = 0; current < sizeof(en) / sizeof(en[0]); ++current)
+		check_output((int)current, 5, args, current ? 1 : 0,
+		             current == 0 || current == 6
+		                     ? "response: xmake-smoke\n"
+		                     : "",
+		             chinese ? zh[current] : en[current]);
+}
+
+int main(void)
+{
+	char *invalid[] = {"echo_client", "--lang=invalid", NULL};
+	char *literal[] = {"echo_client", "127.0.0.1", "9000", "--lang=zh_CN",
+	                   NULL};
+	char *escaped[] = {"echo_client", "--",      "--lang=literal",
+	                   "9000",        "你好 %s", NULL};
+	char *defaults[] = {"echo_client", NULL};
+	char *empty[] = {"echo_client", "--lang=", NULL};
+	const char *c_locales[] = {"C", "POSIX", "C.UTF-8", "C.utf8",
+	                           "xx_YY.UTF-8"};
+	size_t i;
+
+	reset_environment();
+	/* 中文路径必须真实执行；CI 在私有 LOCPATH 生成消息 locale。 */
+	assert(setlocale(LC_MESSAGES, "zh_CN.UTF-8"));
+	assert(setlocale(LC_MESSAGES, "C"));
+	check_scenarios("--lang=auto", 0);
+	check_scenarios("--lang=en", 0);
+	check_scenarios("--lang=zh_CN", 1);
+	for (i = 0; i < sizeof(c_locales) / sizeof(c_locales[0]); ++i) {
+		reset_environment();
+		assert(setenv("LC_ALL", c_locales[i], 1) == 0);
+		assert(setenv("LANGUAGE", "zh_CN", 1) == 0);
+		check_scenarios("--lang=auto", 0);
+	}
+	reset_environment();
+	assert(setenv("LANG", "zh_CN.UTF-8", 1) == 0);
+	check_scenarios("--lang=auto", 1);
+	assert(setenv("LC_MESSAGES", "C", 1) == 0);
+	check_scenarios("--lang=auto", 0);
+	assert(setenv("LC_ALL", "zh_CN.UTF-8", 1) == 0);
+	check_scenarios("--lang=auto", 1);
+	assert(setenv("LANGUAGE", "en", 1) == 0);
+	check_scenarios("--lang=auto", 0);
+	assert(setenv("LANGUAGE", "en:zh_CN", 1) == 0);
+	check_scenarios("--lang=auto", 1);
+	assert(setenv("LANGUAGE", "fr:zh_CN:en", 1) == 0);
+	check_scenarios("--lang=auto", 1);
+	assert(setenv("LANGUAGE", "zh_TW:en", 1) == 0);
+	check_scenarios("--lang=auto", 0);
+	assert(setenv("LANGUAGE", "zh_Hant:en", 1) == 0);
+	check_scenarios("--lang=auto", 0);
+	assert(setenv("CTRPC_LANG", "zh_CN", 1) == 0);
+	assert(setenv("LANGUAGE", "zh_CN", 1) == 0);
+	check_scenarios("--lang=en", 0);
+	assert(setenv("CTRPC_LANG", "en", 1) == 0);
+	assert(setenv("LANGUAGE", "en", 1) == 0);
+	check_scenarios("--lang=zh_CN", 1);
+	check_output(0, 2, invalid, 2, "", ECHO_USAGE);
+	check_output(0, 2, empty, 2, "", ECHO_USAGE);
+	check_output(1, 1, defaults, 1, "", "connect failed\n");
+	assert(setenv("CTRPC_LANG", "zh_CN", 1) == 0);
+	check_output(1, 1, defaults, 1, "", "连接失败\n");
+	assert(setenv("CTRPC_LANG", "unknown", 1) == 0);
+	check_output(1, 1, defaults, 1, "", "connect failed\n");
+	/* 注入所有非 C locale 初始化失败，验证回退而非假跳过。 */
+	missing_locale = 1;
+	check_scenarios("--lang=zh_CN", 0);
+	missing_locale = 0;
+	check_output(0, 4, literal, 0, "response: --lang=zh_CN\n", "");
+	expected_address = "--lang=literal";
+	check_output(0, 5, escaped, 0, "response: 你好 %s\n", "");
+	expected_address = "127.0.0.1";
+	check_output(0, 1, defaults, 0, "response: hello\n", "");
+	/* 销毁重试、参数错误、正常调用连续执行，彼此不能串用场景或计数。 */
+	check_output(7, 1, defaults, 0, "response: hello\n", "");
+	check_output(0, 2, invalid, 2, "", ECHO_USAGE);
+	check_output(0, 2, empty, 2, "", ECHO_USAGE);
+	check_output(0, 1, defaults, 0, "response: hello\n", "");
+	assert(strcmp(setlocale(LC_NUMERIC, NULL), "C") == 0);
+	assert(strcmp(setlocale(LC_CTYPE, NULL), "C") == 0);
+	puts("echo_client gettext: bilingual scenarios, precedence and "
+	     "fallback passed");
+	return 0;
+}

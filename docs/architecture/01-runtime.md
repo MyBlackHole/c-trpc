@@ -1,0 +1,319 @@
+# 运行时与 Reactor 分片
+
+**状态：R14 时期的运行时实现快照；相关实现已合入 `main`，本文未覆盖之后的全部演进。**
+
+## 1. 服务端运行时
+
+当前服务端门面已经进入第 4 阶段的多 Reactor 架构：`tr_server_config.shard_count`
+可以创建 N 个独立的服务端/运行时分片，每个分片拥有独立的 Reactor、监听器、
+执行器、对端表与热路径缓冲区资源池。
+
+```text
+tr_server
+  └─ tr_runtime
+       └─ 分片[0..N-1]
+            ├─ Reactor
+            ├─ SO_REUSEPORT 监听器
+            ├─ V2 Record dispatch / TaskExecutor
+            ├─ 对端表/计数器
+            └─ Reactor 所有者执行 accept
+```
+
+`tr_runtime` 现在负责 Reactor 生命周期；服务端不再直接拥有 Reactor。
+服务端监听器已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`，并直接注册到
+该分片的 Reactor epoll。监听、关闭和最终清理由分片负责；监听器就绪与 `accept`
+由 Reactor 所有者执行，不再创建中央接收线程。
+
+该变化不会增加线程。对端槽位存储、容量/高水位、回收中/就绪/拒绝
+计数也已经从 `tr_server` 下沉到 `tr_runtime_shard[0]`。分片额外拥有
+对端生命周期 eventfd。Channel DOWN 的 Reactor 回调只负责通知该 eventfd；
+eventfd 本身注册在同一个 Reactor epoll 中，因此断开连接的对端清理会在后续
+所有者轮次执行，不需要额外线程。
+
+对端断开后，Reactor 所有者依次关闭 V2 Record Endpoint/dispatch、解除 Channel
+回调和定时器关联，再执行 Channel 解除关联终局屏障。只要业务任务、终局回调或
+传输关闭仍未静默，`close_on_owner()` 就返回未完成状态并保留原对端槽位；分片
+清理定时器会在后续所有者轮次重试。完成后收集 Channel 统计、释放 Channel，
+清空对端槽位并记录移除/回收。该流程不使用已删除的 V1 Endpoint owner-ref 清理器，
+也不创建第二条退役队列。
+
+运行时配置已经改为显式的每分片配置数组：
+
+```c
+struct tr_runtime_config {
+    uint32_t shard_count;
+    const struct tr_runtime_shard_config *shards;
+};
+```
+
+每个数组项独立描述 Reactor、对端容量、RPC 执行器，以及第 7 阶段
+内部的分片内存预算能力。运行时不会把一份资源配置机械复制 N 次；
+服务端先把公开的总预算确定性拆分，再将每份配额交给运行时。
+客户端门面仍只传入一个分片配置。
+
+第 7 阶段的内存预算目前是**内部记账基础能力**，尚未成为稳定门面的配置项。
+RuntimeShard 是预算所有者，跨模块原语位于
+`src/memory_budget.h`，避免执行层反向依赖运行时模块。
+`limit_bytes == 0` 表示迁移期间只记账、不执行上限；使用方必须先预留，
+成功后才能分配，销毁时再精确归还字节数。
+
+当前已接入：
+
+- 运行时对端表；
+- Reactor 生命周期固定堆内存：Reactor 对象、槽位/连接表、
+  命令/完成环、定时器项/堆、TX/CONTROL-TX 数组、RX 资源池
+  描述符/存储；
+- 服务端分片 V2 Record 请求/回复消息资源 + 按需保留容量；
+- Client/Server V2 Record 重组固定描述符/存储。
+
+预算统计的是 c-trpc 主动请求的用户态堆内存字节数，不包含分配器元数据、
+pthread 实现内部内存，也不包含 fd/epoll 等内核内存。Client 和 Server 的 V2
+Record/重组资源会向所属分片预算预留并归还；该内部预算不是安装 SDK 中可独立
+调节的资源池配置，不能据此声称覆盖分配器或内核资源的全部内存。
+
+当前多分片服务端使用单进程多 Reactor：
+
+```mermaid
+flowchart TB
+    NET["网络"]
+    subgraph PROC["服务端进程"]
+        direction LR
+        R0["Reactor 0\nlisten_fd 0"]
+        R1["Reactor 1\nlisten_fd 1"]
+        R2["Reactor 2\nlisten_fd 2"]
+        W0["工作线程池 0"]
+        W1["工作线程池 1"]
+        W2["工作线程池 2"]
+    end
+
+    NET --> R0
+    NET --> R1
+    NET --> R2
+
+    R0 --> W0
+    R1 --> W1
+    R2 --> W2
+    W0 --> R0
+    W1 --> R1
+    W2 --> R2
+```
+
+### 已退役的线程模型
+
+- 每个对端独立的定时器线程；
+- V1 Endpoint/Executor Group 专属工作线程和终局清理引用。
+
+连接错误、对端回收和协议进展由 Reactor/TaskExecutor 协作完成；接收连接已由
+分片监听器与 Reactor 所有者处理。
+
+## 2. 每 Reactor 监听器
+
+Linux >= 3.10 允许将 `SO_REUSEPORT` 作为基础能力。
+
+每个分片：
+
+```text
+socket()
+  -> SO_REUSEADDR
+  -> SO_REUSEPORT
+  -> bind(相同地址)
+  -> listen()
+  -> 加入 epoll
+```
+
+目标是：
+
+```text
+接收连接的执行者
+    =
+fd 初始所有者
+    =
+协议状态初始所有者
+```
+
+避免所有连接先经过中央线程再转交。
+
+## 3. Reactor 分片
+
+当前已经落地最小内部形状：
+
+```c
+struct tr_runtime {
+    uint32_t shard_count;          /* 服务端：N；客户端当前：1 */
+    struct tr_runtime_shard *shards;
+};
+
+struct tr_runtime_shard {
+    uint32_t shard_id;
+    struct tr_reactor *reactor;
+    int listen_fd;
+    uint16_t bound_port;
+
+    struct tr_memory_budget memory_budget;
+
+    struct tr_runtime_peer *peers;
+    uint64_t peer_storage_bytes;
+    uint32_t peer_capacity;
+    uint32_t peer_count;
+    uint32_t peer_reaping_count;
+    int peer_event_fd;
+};
+```
+
+客户端门面当前仍通过 `shard[0]` 取得 Reactor。服务端为每个运行时分片
+创建对应的 `tr_server_shard` 上下文，持有自己的重组资源池、
+V2 Record TaskExecutor 与对端事件注册状态。Client 的 V2 消息复制池归 Client 门面所有。
+
+服务端的公开数量/容量配置保持总预算语义，份额计算为：
+
+```text
+share[i] = total / shard_count + (i < total % shard_count ? 1 : 0)
+```
+
+因此开启更多分片不会把工作线程或内存池容量乘以 N。
+
+普通 V2 Client 不创建旧 V1 Endpoint 本地执行器或 RPC 工作线程；V2 客户端调用由
+所属 Reactor 与 Record 状态机推进。服务端 V2 业务 work 使用分片共享 TaskExecutor。
+
+监听器、对端、V2 Record TaskExecutor 与服务端热缓冲资源所有权已经下沉；接收连接的执行
+已经进入 Reactor；对端生命周期事件源与解除关联/最终清理已经完全事件化。
+对端的预留/发布/移除/存活快照全部串行化到 Reactor 所有者。
+服务端仅保留一个小型 `finalizer_lock`，用于已解除关联清理器的退役
+统计合并与关闭条件；它不保护对端表或缓冲资源池。
+
+服务端销毁时，在所有对端/最终清理器静默后先销毁分片缓冲资源池，
+让它们把预留归还给 RuntimeShard 预算；最后才销毁运行时。
+因此预算所有者严格晚于所有预算使用方销毁。
+
+目标逻辑结构：
+
+```c
+struct tr_runtime_shard {
+    uint32_t shard_id;
+
+    struct tr_reactor reactor;
+    int listen_fd;
+
+    struct tr_command_queue commands;
+    struct tr_completion_queue completions;
+
+    struct tr_runtime_peer *peers;
+    struct tr_connection_table connections;
+    struct tr_pipeline_table pipelines;
+
+    struct tr_timer_queue timers;
+    struct tr_shard_stats stats;
+};
+```
+
+这只是架构形状，不要求一次性引入所有字段。
+
+## 4. 跨分片操作
+
+禁止非所有者线程直接修改分片本地协议状态。
+
+统一模式：
+
+```text
+非所有者线程
+    |
+    | 命令
+    v
+所有者 Reactor
+    |
+    | 修改本地状态
+    v
+完成
+```
+
+对于 DATA 套接字亲和关系，如果套接字被错误分片接收：
+
+```text
+R7 accept(fd)
+  -> 读取固定路由前导信息
+  -> 解析所有者 = R3
+  -> 向 R3 提交 ADOPT_ROUTED_FD(fd)
+  -> 所有权成功转移
+```
+
+同一进程内不需要 `SCM_RIGHTS`。
+
+## 5. 客户端运行时
+
+客户端当前模型：
+
+```text
+应用进程
+  └─ c-trpc 客户端
+       └─ 内部 tr_runtime
+            └─ 分片[0]
+                 └─ 1 个 Reactor
+```
+
+客户端的外部 API 和线程行为未改变；运行时目前是内部所有权层。
+
+未来才允许配置 N 个 Reactor。
+
+客户端库必须保持良好的嵌入性：
+
+- 不 `fork`；
+- 不守护进程化；
+- 不改变宿主进程全局信号策略；
+- 不假设自己拥有整个进程；
+- 不默认设置全局 CPU 亲和性。
+
+## 6. 定时器
+
+当前：RPC 截止时间、Channel 保活与客户端自动重连退避
+都已经迁移到 Reactor 本地定时器。Channel 重连与 Connection Group DATA
+建立共享 Reactor 所有的非阻塞连接器；连接完成通过有界
+辅助 fd 事件源回到原所有者，不再创建每 Channel 重连线程。
+
+Reactor 本地定时器基础设施已经落地：
+
+- 每个 Reactor 一个有界定时器队列；
+- 代次句柄防止陈旧定时器操作；
+- 最小堆维护最近的绝对 `CLOCK_MONOTONIC` 截止时间；
+- 最近截止时间直接驱动 `epoll_wait(timeout)`；
+- 单轮定时器回调有固定预算，避免定时器风暴长时间饿死 I/O；
+- 回调只允许执行短小、非阻塞的所有者侧状态推进。
+
+目标：
+
+```text
+Reactor 分片
+  ├─ RPC 截止时间
+  ├─ 保活
+  ├─ 重连/退避
+  ├─ Pipeline 超时
+  ├─ ACK 批量超时
+  └─ 检查点定时器
+```
+
+V2 Record Client 和 Server Record Endpoint 各使用所属 Reactor 的本地进展定时器，
+按有界批次推进调用与终局；Client 在进展轮次检查调用期限。它们不为每个 Call
+创建线程。Channel 保活与
+重连退避分别使用 Reactor 本地定时器；实际 TCP 连接超时由共享连接器自己的定时器
+管理。这些定时器回调只推进短小的所有者侧状态，不执行阻塞的连接操作。
+
+## 7. 当前创建阶段线程预算与回收
+
+以下是库自身的线程增量，不包含应用、测试工具或运行时检测工具的后台线程：
+
+| 操作 | 新增线程 |
+|---|---|
+| `tr_client_create()` | 启动运行时 `shard[0]` 的 1 个 Reactor；尚未创建 RPC 工作线程 |
+| `tr_server_create()` | 创建 N 分片运行时（Reactor 尚未启动）；内部工作线程总预算拆分到 N 个分片本地工作线程池，精确线程数不属于稳定门面配置 |
+| `tr_server_listen()` | 0 |
+| `tr_server_start()` | N 个：每个分片启动 1 个 Reactor；连接接收/对端清理都在各自所有者 Reactor 上执行 |
+
+V2 Client 不创建 RPC 工作线程。底层 Channel 启用自动重连只增加
+Reactor 所有的定时器/连接器状态，不新增 pthread。期限、保活和
+重连推进都不创建独立维护线程。
+
+`tests/test_runtime_threads.c` 使用测试目标独有的 pthread 线程创建/等待退出包装，
+检查创建前后的精确增量、正常销毁、未启动服务端的销毁和部分启动失败回收。
+它补充原有连接后线程上限测试，避免把创建阶段的额外线程计入基线后漏检。
+故障注入覆盖客户端 Reactor、三个分片本地工作线程，以及服务端启动阶段
+只剩 Reactor 一个 pthread 启动点；每个成功创建的线程必须成功等待退出，
+失败回滚不允许遗留线程或重复等待退出。

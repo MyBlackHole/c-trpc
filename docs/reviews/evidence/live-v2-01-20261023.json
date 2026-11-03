@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "slice": "LIVE-V2-01",
+  "baseline_commit": "8abebf3b5413a1c6ea624ec46ed61c61419d96c7",
+  "version": "2.0.0-dev.5",
+  "registration": "https://github.com/MyBlackHole/c-trpc/issues/241#issuecomment-6359182874",
+  "tested_files_sha256": {
+    "include/tr/rpc_v2.h": "2866138e09bafa954c1979de8dfe269add8710cf71ceee8c0a2f6a9eaedd0b43",
+    "src/rpc/rpc_record_dispatch.c": "a2bf92ab30a8dff55111abb641ebe69b4ed6b178aef9c048e22ceb711ad15b94",
+    "src/transport/channel/channel.c": "e08282d9201ae41eef9f7934cd424767563f329f3245018c9d0d9798b7808e7d",
+    "src/transport/channel/channel.h": "75bc8169d97cb3ad5e70f67d1b9e520dc1d63e17a0c4cd98f124a20390b37a89",
+    "tests/test_rpc_record_stream.c": "7b3118cac7f477e48c374c0f0a55fcf8295ad2b6a50a8f5075a07f8239e35724",
+    "tests/test_rpc_v2_server.c": "82cb2be3de5835fc2122cf51cf7eef526ed66ab238e2b632a9485d73e3835285",
+    "xmake.lua": "51f95eb0bff12e61ef47d2fdc0d305626f53a93a7f3be3d6c8d3eb12b868ab75"
+  },
+  "local_results": {
+    "gcc_release": {
+      "passed": 80,
+      "failed": 0
+    },
+    "asan_ubsan_leaks": {
+      "targets": [
+        "test_rpc_record_stream",
+        "test_rpc_v2_server",
+        "test_channel_control_retry"
+      ],
+      "passed": 3,
+      "failed": 0
+    },
+    "focused": {
+      "passed": 3,
+      "failed": 0
+    }
+  },
+  "regressions": [
+    {
+      "log": "red-size-detail.log",
+      "observed": "window=128 record=129 send=1 (TR_AGAIN)",
+      "expected": "TR_ERR_BAD_LENGTH"
+    },
+    {
+      "log": "red-threshold.log",
+      "observed": "window=128 message=256 threshold=128 consumed=48 credit=128",
+      "expected": "credit=176"
+    },
+    {
+      "log": "red-server.log",
+      "observed": "after transport guard: server=14 client=14 (UNAVAILABLE)",
+      "expected": "INVALID_ARGUMENT"
+    }
+  ],
+  "test_author_errors": [
+    {
+      "log": "build-red-server.log",
+      "description": "First test incorrectly treated void producer_release as returning status; corrected before executing regression."
+    }
+  ],
+  "sizeof_x86_64": {
+    "stream_slot": [
+      160,
+      168
+    ],
+    "channel": [
+      1032,
+      1032
+    ],
+    "connection": [
+      776,
+      776
+    ],
+    "reactor": [
+      2584,
+      2584
+    ]
+  },
+  "credit_update_cases": [
+    {
+      "window": 128,
+      "message_limit": 256,
+      "configured_threshold": 128,
+      "credit_after_open": 176,
+      "updates_including_open_admission": 5
+    },
+    {
+      "window": 256,
+      "message_limit": 128,
+      "configured_threshold": 200,
+      "credit_after_open": 256,
+      "updates_including_open_admission": 3
+    },
+    {
+      "window": 256,
+      "message_limit": 128,
+      "configured_threshold": 32,
+      "credit_after_open": 304,
+      "updates_including_open_admission": 5
+    }
+  ],
+  "static_warning_line_mapping": [
+    {
+      "catalog": "docs/static_analysis_known_warnings.json",
+      "source": "src/transport/channel/channel.c",
+      "old_line": 3511,
+      "new_line": 3524,
+      "column": 10,
+      "check": "clang-analyzer-unix.Malloc",
+      "old_statement": "\t\treturn TR_ERR_INVALID;",
+      "new_statement": "\t\treturn TR_ERR_INVALID;",
+      "review_state": "unverified"
+    },
+    {
+      "catalog": "docs/gcc_analyzer_known_warnings.json",
+      "source": "src/transport/channel/channel.c",
+      "old_line": 699,
+      "new_line": 700,
+      "column": 9,
+      "check": "analyzer-malloc-leak",
+      "old_statement": "\treturn TR_OK;",
+      "new_statement": "\treturn TR_OK;",
+      "review_state": "unverified"
+    }
+  ],
+  "static_analysis_state": "unverified; only existing statement locations mapped, exact new analysis remains a CI check",
+  "log_archive": {
+    "path": "docs/reviews/evidence/live-v2-01-local-tests-20261023.log.gz",
+    "sha256": "4822623296011a88f725eb8819397618986d1ee7041d71e4fddd66e8ecd5c846",
+    "individual_sha256": {
+      "asan-build.log": "1b5b1d88a0e729683f4d2d00b9b82225b911d97edfc2aef0951f3cfb073aa612",
+      "asan-configure.log": "e74782439d4f5d366ffeda218720cb30e53ea08697a7663b43b7f7a95813d15a",
+      "asan-tests.log": "b770336282851aa9d3bb057c59e121aa31d4cfd2ee736ec69c04563f6d744b8d",
+      "build-red-server-fixed-test.log": "53ecd892bb92a74f5151e11fb4dad6f790e0d830bdb0b553f48f2eba42b0f22c",
+      "build-red-server.log": "5f138b5ffbf20ecb0f49578820fab74081569270381b3247e3a9d9038b423f05",
+      "build-red-size-detail.log": "288863bebcbc04dca4f0807d7209375b259bbcb05e5373835d83bbccbc58c82f",
+      "build-red-size.log": "c9335da37ccbe6a1534607dd0f91527e2cd93f44eabdabd6d3e235917a0870ed",
+      "build-red-threshold.log": "9a1589924add60558beb6c8547741dd67f00be85f51b9c0003b3eb409c27b607",
+      "build-size.log": "ec55bc89eedfeefe406a6853ac3618436222fdfe37dae8aa3e3b256bcbb5c4ea",
+      "build-threshold.log": "9bbc2189bc96a7320f713f254328dff5a8617db9675c589dd4aa595fe92830fa",
+      "configure.log": "e74782439d4f5d366ffeda218720cb30e53ea08697a7663b43b7f7a95813d15a",
+      "focused-tests.log": "2c66b052fd2f4a80af7da7911bef78f7a459f9dedbf6933764d475b5f2a3aa4c",
+      "gcc-build.log": "3af0ad4e1605c121b8c85413d4481718c6381c5f5bad21ed3b549abf73f82236",
+      "gcc-final-build.log": "1fd0a55ed2b333fe7644b8dc32491743679b2f28cd461ff867b80f12d68872ae",
+      "gcc-tests.log": "e3301e3edbe5d85afa8b93ffcc21e5a26b169ce69d5779c99f11e4bcffd34a23",
+      "red-server.log": "52f8ec0c83899dc14796bc81924057af30d20102c821d869aa7b0da4719480e8",
+      "red-size-detail.log": "8c71cea1172d1e73dc11387cce65ecbbd66deb91cc47db509b9274ef51caefd4",
+      "red-size.log": "608e780d11d58299af20cbe27e5995baa4721bd7c19c9cd17d188dbbea7c02ac",
+      "red-threshold.log": "5a0835380bbc9794ef07d8748ccdbe9383b2980c8f8ba01d1b48140f65a740a5",
+      "size-tests.log": "937b3df7a03ca57522a09ae4dbcfe454da47c47695489d1ea73b1e7034e656d5",
+      "sizeof-baseline.log": "f98cc6bca57dff93e5b982ebf55b46abe8e5349e02a7b20c026b87f323821a2e",
+      "sizeof-final.log": "b9549983f0b19d0d08593942bcf14532b341de5ac276a2ce1f01fe1c172a3191",
+      "threshold-tests.log": "a2bdff4b08d35cc9368f41774b4f71376c818e803c976675f6d364a4a0ffaf14"
+    }
+  },
+  "limits": [
+    "Not full issue 241 completion",
+    "No new throughput benchmark or 40k achievement claim",
+    "No network compression, TLS, group multi-DATA acceptance or full resource-domain proof"
+  ]
+}
